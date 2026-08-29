@@ -11,7 +11,7 @@
 #
 # Запуск:  mop deploy homelab
 
-- name: Прокси и сертификат для API Nomad
+- name: Сертификат для шины и сторож диска
   hosts: mop_server
   become: no
   gather_facts: no
@@ -21,14 +21,14 @@
     nomad_home: "{{ MOP_NOMAD_DATA | dirname }}"
 
   tasks:
-    # HTTP API Nomad слушает loopback, наружу его отдаёт nginx, встроенный в
-    # GitLab, — тот же, что обслуживает остальные vhost'ы в ~/nginx/vhosts.conf.
-    # Сертификат тем же заходом достаётся шине: она берёт существующий файл, а
-    # отдельное имя стоило бы записи в DNS и второго certbot'а ради того же
-    # хоста.
+    # Сертификат нужен ШИНЕ (deploy/nats-server.conf.j2), и только ей: API
+    # Nomad с 2026-08-29 слушает 4646 напрямую, прокси перед ним больше нет.
+    # Имя берётся то же самое — отдельное стоило бы записи в DNS и второго
+    # certbot'а ради того же хоста.
     #
-    # Блок :80 держит webroot ACME для всех имён домена, и certbot не выпишет
-    # сертификат, пока имя не попало в его server_name.
+    # Выпуск идёт ВХОДЯЩИМ на 443, а не в локалку: nginx, встроенный в GitLab,
+    # отдаёт webroot ACME для всех имён домена. Но certbot не выпишет
+    # сертификат, пока имя не попало в server_name блока :80.
     - name: Add the Nomad name to the port-80 server_name
       ansible.builtin.replace:
         path: "{{ MOP_HOME }}/nginx/vhosts.conf"
@@ -51,18 +51,6 @@
         -d {{ MOP_TLS_HOST }} --non-interactive
       args:
         creates: "/etc/letsencrypt/live/{{ MOP_TLS_HOST }}/fullchain.pem"
-
-    - name: Deploy the Nomad vhost
-      ansible.builtin.blockinfile:
-        path: "{{ MOP_HOME }}/nginx/vhosts.conf"
-        marker: "# {mark} ANSIBLE MANAGED: nomad.ermak.dev"
-        block: "{{ lookup('template', 'vhost.conf.j2') }}"
-      register: vhost
-
-    - name: Reload nginx for the vhost
-      become: yes
-      ansible.builtin.command: gitlab-ctl hup nginx
-      when: vhost.changed
 
     # --- ночной сторож диска (см. sl-cleanup.nomad.hcl) -------------------
     # template, а не copy: спека несёт значения установки (датацентр, пользователь,
