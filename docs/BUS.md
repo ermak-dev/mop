@@ -1,7 +1,7 @@
 # Шина пула
 
 Как мастер разговаривает с узлами и почему именно так. Развёртывание —
-[nats/setup.yml](nats/setup.yml), агент — `mop/agent.py`, клиент — `mop/bus.py`.
+[nats/setup.yml](../nats/setup.yml), агент — `mop/agent.py`, клиент — `mop/bus.py`.
 
 Протокол разговора с самой сессией claude — отдельный слой,
 [CHANNEL.md](CHANNEL.md); шина довозит байты до узла, а дальше начинается он.
