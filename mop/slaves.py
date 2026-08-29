@@ -191,6 +191,17 @@ if [ -n "$SL_LLM_KEY_VAR" ]; then
     llm_env+=(-e "$SL_LLM_AUTH_VAR=$key")
 fi
 
+# Креды ШАРДА, а не узла. Без этого слейв ходил бы на шину под кредом агента и
+# мог бы написать в чужой проект: агент видит, КОГО спрашивают, но не видит,
+# КТО спрашивает, и такую подмену не поймал бы. Файл раскатывает nats/setup.yml
+# по одному на шард; если его нет -- валимся ГРОМКО, потому что слейв без шины
+# читается мастером как живой, но молчащий.
+shard_creds="$HOME/.config/mop/bus-$SL_SHARD.json"
+if [ ! -f "$shard_creds" ]; then
+    echo "нет кредов шарда $SL_SHARD в $shard_creds -- заведи шард: mop deploy nats" >&2
+    exit 1
+fi
+
 # a dedicated tmux SERVER per slave (-L): with the default server every
 # session on the node lives in the cgroup of whichever wrapper started the
 # server first, and one task budget OOM-kills all slaves at once
@@ -202,11 +213,35 @@ tmux -L "$SL_NAME" new-session -d -s "$SL_NAME" -c "$d" \
     -e CARGO_TARGET_DIR="$HOME/.cache/target-$SL_NAME" \
     -e CARGO_BUILD_JOBS=1 \
     -e PATH="$d/bin:$PATH" \
+    -e MOP_SHARD="$SL_SHARD" \
+    -e MOP_BUS_CONFIG="$shard_creds" \
     "$${llm_env[@]}" \
     "$HOME/.local/bin/claude --dangerously-skip-permissions"
 trap 'tmux -L "$SL_NAME" kill-session -t "$SL_NAME" 2>/dev/null; exit 0' TERM INT
 while tmux -L "$SL_NAME" has-session -t "$SL_NAME" 2>/dev/null; do sleep 10 & wait $!; done
 """
+
+
+def shard_of(origin):
+    """Шард (он же проект) по origin репозитория.
+
+    Basename без .git, и это ЕДИНСТВЕННОЕ определение проекта в системе.
+    Соблазн взять хеш от полного origin есть — тогда два `rugent.git` на разных
+    хостах не слились бы в один шард. Но имена слейвов уже строятся отсюда же
+    (`sl-<проект>-<n>`), и завести рядом второе, более точное понятие «проект»
+    значит получить два места, по-разному отвечающих на вопрос «чей это слейв».
+    Цена честная и названа: одинаковые basename делят шард ровно так же, как
+    уже делят имена. Понадобится развести — сюда добавляется суффикс от
+    sha256(origin), и больше никуда."""
+    return os.path.basename(origin).removesuffix(".git")
+
+
+def shard_of_name(name):
+    """Шард по имени слейва: sl-<проект>-<n>. Откат для случая, когда клона
+    ещё нет, — origin спросить не у кого, а имя уже есть."""
+    if not name.startswith(JOB_PREFIX):
+        return ""
+    return name[len(JOB_PREFIX):].rsplit("-", 1)[0]
 
 
 def clone_dir(name):
@@ -241,6 +276,7 @@ def job_spec(name, origin, llm=DEFAULT_LLM):
                     "SL_NAME": name,
                     "SL_ORIGIN": origin,
                     "SL_PROJECT": project,
+                    "SL_SHARD": shard_of(origin),
                     "HOME": HOME,
                     "PATH": f"/usr/local/bin:/usr/bin:/bin:{HOME}/.local/bin:{HOME}/.cargo/bin:{HOME}/.nvm/versions/node/v22.12.0/bin",
                     # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
@@ -256,11 +292,19 @@ def job_spec(name, origin, llm=DEFAULT_LLM):
     }}
 
 
-def jobs():
+def jobs(shard=None):
     """Джобы слейвов. Префикс sl- ловит и sl-cleanup с его периодическими
-    детьми; слейвы — те, что врапер пометил origin'ом."""
+    детьми; слейвы — те, что врапер пометил origin'ом.
+
+    shard=None -> срез ЭТОГО процесса: `mop master` ставит MOP_SHARD, и мастер
+    проекта перестаёт видеть чужих слейвов уже здесь, в ростере. Псевдошард
+    admin (оператор вне мастер-шелла) видит всё."""
     listing = nomad.client().jobs.get_jobs(prefix=JOB_PREFIX, meta=True)
-    return [j for j in listing if "origin" in (j.get("Meta") or {})]
+    out = [j for j in listing if "origin" in (j.get("Meta") or {})]
+    shard = shard or bus.SHARD
+    if shard == bus.ADMIN:
+        return out
+    return [j for j in out if shard_of(j["Meta"]["origin"]) == shard]
 
 
 def next_name(project):

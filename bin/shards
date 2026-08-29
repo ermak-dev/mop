@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""шарды пула: mop shards [origin|шард ...]
+
+Шард — это проект: один репозиторий, один срез пула, один мастер. Список
+складывается из трёх источников и всегда объединением, никогда заменой:
+
+  * ростер Nomad — у кого есть живой джоб;
+  * память в ~/.config/mop/shards — у кого он БЫЛ;
+  * аргументы — новый проект, для которого слейва ещё нет.
+
+Память нужна ровно из-за второго пункта: удалив последнего слейва проекта, без
+неё мы на следующем deploy молча выкинули бы его пользователя из конфига NATS,
+и работающий мастер перестал бы подключаться.
+"""
+import os
+
+import lib
+from mop import bus, nomad, slaves
+
+FILE = os.path.expanduser("~/.config/mop/shards")
+
+
+def remembered():
+    try:
+        with open(FILE) as f:
+            return {l.strip() for l in f if l.strip()}
+    except OSError:
+        return set()
+
+
+def collect(extra=()):
+    """Все шарды, какие система знает. -> отсортированный список."""
+    known = remembered()
+    for arg in extra:
+        known.add(slaves.shard_of(arg) if "/" in arg or ":" in arg else arg)
+    try:
+        known |= {slaves.shard_of(j["Meta"]["origin"])
+                  for j in slaves.jobs(shard=bus.ADMIN)}
+    except Exception as e:
+        # Ростер недоступен — работаем по памяти, но говорим об этом: молча
+        # сузить список значит выписать шард из конфига NATS.
+        print(f"ростер Nomad недоступен ({nomad.describe_error(e)}), "
+              f"беру только запомненные", flush=True)
+    return sorted(known)
+
+
+def remember(shards):
+    os.makedirs(os.path.dirname(FILE), exist_ok=True)
+    with open(FILE, "w") as f:
+        f.write("".join(f"{s}\n" for s in shards))
+
+
+def main(argv):
+    shards = collect(argv)
+    remember(shards)
+    for s in shards:
+        print(s)
+
+
+lib.run(main)

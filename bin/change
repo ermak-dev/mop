@@ -13,6 +13,7 @@ def main(argv):
     if len(args) != 2:
         lib.usage(__doc__)
     name, origin = args
+    lib.guard(name)
     meta = lib.require_job(name).get("Meta") or {}
     old, old_llm = meta.get("origin", "?"), meta.get("llm", slaves.DEFAULT_LLM)
     llm = llm or (old_llm if old_llm in slaves.LLM_PROFILES else slaves.DEFAULT_LLM)

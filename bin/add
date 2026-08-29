@@ -4,6 +4,7 @@
 Без origin берётся origin текущей рабочей копии. Имя выбирается само:
 <проект>-<номер>. Размещение решает Nomad — слейв бронирует 8 ГБ из пула.
 """
+import os
 import time
 
 import lib
@@ -16,7 +17,13 @@ def main(argv):
         lib.usage(__doc__)
     llm = llm or slaves.DEFAULT_LLM
     origin = args[0] if args else lib.cwd_origin()
-    name = slaves.next_name(lib.project_of(origin))
+    shard = slaves.shard_of(origin)
+    # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS, и
+    # слейв поднимется, но к шине не подключится — прочитается как «АГЕНТ
+    # МОЛЧИТ» на пустом месте. Лучше отказать здесь, чем разбираться там.
+    if not os.path.exists(lib.shard_creds(shard)):
+        lib.usage(f"шарда {shard} ещё нет на шине.\nЗаведи его: mop deploy nats")
+    name = slaves.next_name(shard)
     lib.push_llm_keys(llm)
     nomad.register(slaves.job_spec(name, origin, llm))
     print(f"{name}: {origin} [{llm}]")

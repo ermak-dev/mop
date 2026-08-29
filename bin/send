@@ -90,8 +90,10 @@ def main(argv):
     body = sys.stdin.read().rstrip("\n") if a.message == "-" else a.message
     if not body.strip():
         sys.exit("пустое сообщение отправлять нечего")
-    return to_slave(a, body) if a.target.startswith(slaves.JOB_PREFIX) \
-        else to_session(a, body)
+    if not a.target.startswith(slaves.JOB_PREFIX):
+        return to_session(a, body)
+    lib.guard(a.target)
+    return to_slave(a, body)
 
 
 lib.run(main)

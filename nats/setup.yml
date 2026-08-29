@@ -64,6 +64,10 @@
     # certbot'а ради того же самого хоста; порт различает службы не хуже имени.
     nats_cert_host: nomad.ermak.dev
     nats_nodes: "{{ groups['nomad_clients'] | map('extract', hostvars, 'mop_node') | list }}"
+    # Шарды считает `mop deploy` из ростера Nomad и своей памяти (см. bin/deploy)
+    # и передаёт сюда --extra-vars. Пустой список -- законное состояние пустого
+    # пула: сервер поднимется, мастеров просто ещё нет.
+    shards: "{{ mop_shards | default([]) }}"
 
   tasks:
     - name: Unpack nats-server {{ nats_version }}
@@ -137,6 +141,7 @@
     nats_cert_host: nomad.ermak.dev
     nats_user: "node-{{ mop_node }}"
     nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + mop_node + '.pass length=32 chars=ascii_letters,digits') }}"
+    shards: "{{ mop_shards | default([]) }}"
 
   tasks:
     - name: Python client for the bus
@@ -162,12 +167,26 @@
         state: directory
         mode: "0700"
 
-    - name: Bus credentials
+    - name: Bus credentials for the agent
       ansible.builtin.template:
         src: bus.json.j2
         dest: /home/ermak/.config/mop/bus.json
         mode: "0600"
       notify: restart mop-agent
+
+    # Креды на КАЖДЫЙ шард, а не одни на узел. Врапер подсовывает их сессии
+    # слейва через MOP_BUS_CONFIG, и без этого слейв ходил бы под кредом агента
+    # -- то есть мог бы написать в чужой проект, а агент бы этого не поймал:
+    # он видит, кого спрашивают, но не видит, кто спрашивает.
+    - name: Bus credentials for the slaves, one per shard
+      ansible.builtin.template:
+        src: bus.json.j2
+        dest: "/home/ermak/.config/mop/bus-{{ item }}.json"
+        mode: "0600"
+      loop: "{{ shards }}"
+      vars:
+        nats_user: "slave-{{ item }}"
+        nats_password: "{{ lookup('password', secrets_dir + '/nats-slave-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
 
     # Токен Nomad возили на узлы, чтобы узловой mop mcp дотягивался до соседей
     # и до инбокса мастера, и цена была названа прямо: слейв, добравшийся до
@@ -227,8 +246,9 @@
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_addr: "{{ nats_lan }}"
     nats_cert_host: nomad.ermak.dev
-    nats_user: master
-    nats_password: "{{ lookup('password', secrets_dir + '/nats-master.pass length=32 chars=ascii_letters,digits') }}"
+    nats_user: admin
+    nats_password: "{{ lookup('password', secrets_dir + '/nats-admin.pass length=32 chars=ascii_letters,digits') }}"
+    shards: "{{ mop_shards | default([]) }}"
 
   tasks:
     - name: Python client for the bus
@@ -243,8 +263,20 @@
         state: directory
         mode: "0700"
 
-    - name: Bus credentials
+    - name: Operator credentials
       ansible.builtin.template:
         src: bus.json.j2
         dest: /home/ermak/.config/mop/bus.json
         mode: "0600"
+
+    # По креденшлу на шард: их подхватывает `mop master`, и именно они делают
+    # мастера слепым к чужим проектам.
+    - name: Master credentials, one per shard
+      ansible.builtin.template:
+        src: bus.json.j2
+        dest: "/home/ermak/.config/mop/bus-{{ item }}.json"
+        mode: "0600"
+      loop: "{{ shards }}"
+      vars:
+        nats_user: "master-{{ item }}"
+        nats_password: "{{ lookup('password', secrets_dir + '/nats-master-' + item + '.pass length=32 chars=ascii_letters,digits') }}"

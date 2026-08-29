@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""запустить claude в режиме мастера шарда: mop master [git-origin]
+
+Без аргумента берётся origin текущей рабочей копии. Один проект — один шард:
+мастер видит и достаёт только своих слейвов, чужие для него не существуют.
+
+Мастеров можно держать сколько угодно, в том числе несколько на один проект:
+инбокс адресуется мастером, а не шардом, и вести не путаются.
+
+Всё, что делает команда, — считает шард, находит его креды и уходит в claude.
+Дальше срез наследуется: mop mcp, запущенный этой сессией как потомок, увидит
+MOP_SHARD и MOP_BUS_CONFIG и подпишется на инбокс своего шарда.
+"""
+import os
+
+import lib
+from mop import slaves
+
+
+def main(argv):
+    if len(argv) > 1:
+        lib.usage(__doc__)
+    origin = argv[0] if argv else lib.cwd_origin()
+    shard = slaves.shard_of(origin)
+    creds = lib.shard_creds(shard)
+    if not os.path.exists(creds):
+        # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS,
+        # и слейв к шине не подключится. Говорим прямо, а не запускаем ansible
+        # за спиной оператора: на узел ведёт одна дорога, и это deploy.
+        lib.usage(f"нет кредов шарда {shard} ({creds}).\n"
+                  f"Заведи шард: mop deploy nats")
+
+    env = dict(os.environ, MOP_SHARD=shard, MOP_BUS_CONFIG=creds)
+    print(f"мастер шарда {shard} ({origin})")
+    os.execvpe("claude", ["claude"] + argv[1:], env)
+
+
+lib.run(main)

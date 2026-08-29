@@ -11,6 +11,7 @@ def main(argv):
     if len(argv) != 1:
         lib.usage(__doc__)
     name = argv[0]
+    lib.guard(name)
     a = lib.running_alloc(name)
     print(f"перезапускаю {name} на {a['NodeName']}...")
     try:

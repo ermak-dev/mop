@@ -10,10 +10,24 @@
 туда. Маска и scatter-gather не нужны, и заодно не отвечает узел, на котором
 остался протухший клон переехавшего слейва.
 
-Два субъекта на узел — это граница прав, а не удобство:
+ШАРД — ПЕРВЫЙ ТОКЕН СУБЪЕКТА. Один проект — один срез пула, и мастера разных
+проектов не видят слейвов друг друга:
 
-    mop.node.<узел>.rpc   полный набор глаголов, публикует ТОЛЬКО мастер
-    mop.node.<узел>.msg   send/state/states/tail, публикует любой в пуле
+    mop.admin.node.<узел>.rpc      всё и везде: узловые глаголы, все шарды
+    mop.<шард>.node.<узел>.rpc     мастер шарда: state/states/tail/type/send
+    mop.<шард>.node.<узел>.msg     слейв шарда: state/states/tail/send
+    mop.<шард>.all.msg             всем агентам сразу
+    mop.<шард>.master.<id>.inbox   агент -> КОНКРЕТНЫЙ мастер
+    mop.<шард>.events              журнал шарда
+
+`admin` — не шард, а его отсутствие: так ходит оператор из обычного шелла.
+Узловые операции (раздача кредов) живут только там. Отдать их мастерам значило
+бы позволить мастеру проекта A перезаписать креды, которыми живёт проект B, —
+файл-то узловой.
+
+Инбокс адресуется МАСТЕРОМ, а не шардом: два терминала, открытые в одном
+проекте, иначе получали бы вести друг друга. Свой адрес мастер передаёт агенту
+полем `reply_to`.
 
 Разделение живёт в правах NATS-сервера (`nats/nats-server.conf.j2`), агент лишь
 повторяет его у себя: право, проверенное в одном месте, однажды окажется
@@ -34,9 +48,11 @@ except ImportError:
 CONFIG = os.environ.get("MOP_BUS_CONFIG") or os.path.expanduser("~/.config/mop/bus.json")
 TIMEOUT = 20             # обычный запрос к агенту
 MAX_PAYLOAD = 900_000    # под max_payload сервера (1 МБ) с запасом на конверт
-INBOX = "mop.master.inbox"
-EVENTS = "mop.events"
-BROADCAST = "mop.all.msg"   # все агенты разом; ответов столько, сколько узлов
+ADMIN = "admin"          # псевдошард оператора: все шарды плюс узловые глаголы
+
+# Чей срез пула виден этому процессу. Ставит `mop master`, наследуют его
+# потомки — в том числе mop mcp, запущенный сессией мастера.
+SHARD = os.environ.get("MOP_SHARD") or ADMIN
 
 _lock = threading.Lock()
 _loop = None
@@ -141,9 +157,26 @@ def close():
         _conn = None
 
 
+# ─── субъекты ────────────────────────────────────────────────────────────
+def subject(node, channel="rpc", shard=None):
+    return f"mop.{shard or SHARD}.node.{node}.{channel}"
+
+
+def broadcast(shard=None):
+    """Все агенты разом. Нужен там, где спрашивающий не знает состава пула."""
+    return f"mop.{shard or SHARD}.all.msg"
+
+
+def inbox(master_id, shard=None):
+    """Адрес конкретного мастера для вестей от агентов."""
+    return f"mop.{shard or SHARD}.master.{master_id}.inbox"
+
+
+def events(shard=None):
+    return f"mop.{shard or SHARD}.events"
+
+
 # ─── запросы ─────────────────────────────────────────────────────────────
-def subject(node, channel="rpc"):
-    return f"mop.node.{node}.{channel}"
 
 
 def _silence(node, timeout):
@@ -154,8 +187,12 @@ def _silence(node, timeout):
     return f"агент узла {node} молчит {timeout}с"
 
 
-def request(node, verb, timeout=TIMEOUT, channel="rpc", **fields):
+def request(node, verb, timeout=TIMEOUT, channel="rpc", shard=None, **fields):
     """Глагол агенту узла. -> разобранный ответ (dict).
+
+    `shard` — явный параметр, а не поле запроса: адрес живёт в СУБЪЕКТЕ, и
+    попади он в тело, права NATS его бы не увидели. Обычно не нужен: процесс
+    ходит своим шардом, который ему поставил `mop master`.
 
     Ошибка агента приезжает полем `error` внутри ответа и НЕ поднимает
     исключение: это ответ, а не отказ шины. Исключение — только когда до
@@ -166,8 +203,8 @@ def request(node, verb, timeout=TIMEOUT, channel="rpc", **fields):
                        f"({len(payload)} > {MAX_PAYLOAD} байт)")
     nc = connect()
     try:
-        msg = _call(nc.request(subject(node, channel), payload, timeout=timeout),
-                    timeout)
+        msg = _call(nc.request(subject(node, channel, shard), payload,
+                               timeout=timeout), timeout)
     except NoRespondersError:
         raise BusError(f"агент узла {node} не подписан — юнит mop-agent не работает")
     except asyncio.TimeoutError:
@@ -180,7 +217,7 @@ def request(node, verb, timeout=TIMEOUT, channel="rpc", **fields):
         raise BusError(f"агент узла {node} ответил не JSON: {msg.data[:120]!r}")
 
 
-def request_many(requests, timeout=TIMEOUT, channel="rpc"):
+def request_many(requests, timeout=TIMEOUT, channel="rpc", shard=None):
     """Разные запросы разным узлам, параллельно по одному соединению.
 
     Ради этого всё и затевалось: раньше состояние пула стоило по четыре
@@ -197,7 +234,7 @@ def request_many(requests, timeout=TIMEOUT, channel="rpc"):
     async def one(node, req):
         try:
             msg = await nc.request(
-                subject(node, channel),
+                subject(node, channel, shard),
                 json.dumps(req, ensure_ascii=False).encode(), timeout=timeout)
             return json.loads(msg.data.decode())
         except NoRespondersError:
@@ -215,7 +252,7 @@ def request_many(requests, timeout=TIMEOUT, channel="rpc"):
     return dict(zip(nodes, _call(all_of(), timeout)))
 
 
-def gather(verb, timeout=5, subj=BROADCAST, **fields):
+def gather(verb, timeout=5, subj=None, **fields):
     """Разослать глагол ВСЕМ агентам и собрать, кто отзовётся. -> [ответ].
 
     Нужен там, где спрашивающий не знает списка узлов: узловой mop mcp живёт
@@ -224,6 +261,7 @@ def gather(verb, timeout=5, subj=BROADCAST, **fields):
 
     Ответов ждём до таймаута, а не до заранее известного числа: сколько в пуле
     узлов, здесь неизвестно принципиально — в этом и смысл вызова."""
+    subj = subj or broadcast()
     nc = connect()
     payload = json.dumps({"verb": verb, **fields}, ensure_ascii=False).encode()
 

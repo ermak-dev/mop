@@ -11,7 +11,7 @@ def main(argv):
     if len(argv) != 1:
         lib.usage(__doc__)
     name = argv[0]
-    lib.require_job(name)
+    lib.guard(name)
     nomad.deregister(name)
     print(f"удалён {name} (клон остался в {slaves.clone_dir(name)} на узле)")
 

@@ -46,7 +46,14 @@ def main(argv):
                                 r["state"], r["llm"], r["origin"]) for r in rows])))
     else:
         print("слейвов нет")
-    tip = hint(rows, lib.cwd_origin(required=False))
+    origin = lib.cwd_origin(required=False)
+    # В мастер-шелле подсказка — про ШАРД, а не про каталог, в котором стоишь.
+    # Иначе `mop list` из ~/mop в мастере rugent советовал бы завести слейва
+    # для mop, которого этот мастер всё равно не увидит.
+    shard = lib.in_shard()
+    if shard and origin and lib.project_of(origin) != shard:
+        origin = None
+    tip = hint(rows, origin)
     if tip:
         print(tip)
     print("pool:")

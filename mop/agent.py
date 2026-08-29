@@ -15,9 +15,15 @@
 произвольная команда в чужой TUI и произвольная запись в $HOME — это два разных
 способа получить исполнение кода на узле.
 
+ШАРД АГЕНТ ПЕРЕСЕКАЕТ СОЗНАТЕЛЬНО: он и есть то, что шарды разделяет, и
+обслуживает всех жильцов узла. Прав NATS для этого мало — мастер шарда A
+законно пишет в свой субъект, но может подставить в поле `name` слейва из B.
+Поэтому на каждый глагол, называющий слейв, сверяем шард из СУБЪЕКТА с
+настоящим origin его клона.
+
 Права проверяются ДВАЖДЫ: на сервере NATS (кто в какой субъект пишет) и здесь
-(какой глагол пришёл каким субъектом). Право, проверенное в одном месте,
-однажды окажется проверенным ни в одном.
+(какой глагол, каким субъектом и про чьего слейва). Право, проверенное в одном
+месте, однажды окажется проверенным ни в одном.
 """
 import asyncio
 import base64
@@ -39,6 +45,11 @@ CLONES = f"{HOME}/slaves"
 # Глаголы, доступные не-мастеру. Слейв имеет право написать соседу и посмотреть,
 # кто чем занят; печатать в чужой TUI и писать файлы — не имеет.
 PUBLIC_VERBS = ("ping", "local", "state", "states", "send", "tail")
+
+# Глаголы УЗЛА, а не проекта. Раздача кредов пишет файлы, общие для всех
+# жильцов хоста, поэтому мастеру проекта её отдавать нельзя: он перезаписал бы
+# креды, которыми живёт соседний проект.
+ADMIN_VERBS = ("write",)
 
 # Слэш-команды, которые разрешено печатать в пейн. Тот же список, что у
 # фронтенда, — но проверка здесь настоящая, а там подсказка пользователю.
@@ -69,6 +80,19 @@ def node_name():
 
 def clone_dir(name):
     return f"{CLONES}/{name}"
+
+
+async def slave_shard(name):
+    """Чей это слейв. Origin клона — авторитет: врапер сносит клон, если origin
+    разошёлся с SL_ORIGIN, так что клон и спека не расходятся никогда.
+
+    Пока клона нет (слейв грузится) — откат на имя, которое по построению
+    согласовано с origin: next_name строит его из того же basename."""
+    out, _ = await sh(f"git -C {clone_dir(name)} remote get-url origin 2>/dev/null")
+    origin = out.strip().splitlines()[-1] if out.strip() else ""
+    if origin:
+        return os.path.basename(origin).removesuffix(".git")
+    return name[len(PREFIX):].rsplit("-", 1)[0] if name.startswith(PREFIX) else ""
 
 
 # ─── локальные пробы ─────────────────────────────────────────────────────
@@ -120,6 +144,7 @@ async def clone_facts(name):
         f'cd {d} 2>/dev/null || exit 0; '
         f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
         f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
+        f'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
         f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
         f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"')
     kv = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
@@ -131,6 +156,7 @@ async def clone_facts(name):
         return None
     return {"cur": kv.get("cur") or "(detached)",
             "def": (kv.get("def") or "").rsplit("/", 1)[-1] or None,
+            "origin": kv.get("origin") or None,
             "dirty": dirty, "ahead": ahead}
 
 
@@ -161,13 +187,17 @@ async def v_state(req):
 
 async def v_states(req):
     """Пачкой: у узла обычно несколько слейвов, и спрашивают о них всегда
-    вместе. Одна поездка вместо N."""
-    names = req.get("names") or []
+    вместе. Одна поездка вместо N.
+
+    Чужих молча выбрасываем, а не отвечаем отказом: мастер спрашивает по своему
+    ростеру, и если в списке оказался чужой — это ошибка спрашивающего, из-за
+    которой не должна пропасть картина по своим."""
+    names = [n for n in (req.get("names") or []) if await _mine(req, n)]
     got = await asyncio.gather(*(facts(n) for n in names))
     return {"slaves": dict(zip(names, got))}
 
 
-async def v_local(_req):
+async def v_local(req):
     """Слейва, живущие на ЭТОМ узле, — по сокетам tmux-серверов.
 
     Ростер без Nomad. Нужен узловому `mop mcp`: токена у него больше нет, и
@@ -177,7 +207,7 @@ async def v_local(_req):
         names = sorted(n for n in os.listdir(TMUX_DIR) if n.startswith(PREFIX))
     except OSError:
         names = []
-    alive = [n for n in names if await tmux_alive(n)]
+    alive = [n for n in names if await tmux_alive(n) and await _mine(req, n)]
     got = await asyncio.gather(*(facts(n) for n in alive))
     return {"node": node_name(), "slaves": dict(zip(alive, got))}
 
@@ -205,7 +235,13 @@ async def v_send(req):
         return {"error": str(e)}
     out = {"msg_id": r["msg_id"], "idle": (r["idle"] or {}).get("state")}
     if req.get("notify") and not wait:
-        asyncio.create_task(_watch_idle(name, sock))
+        # Куда отвечать, говорит сам мастер: инбокс адресуется мастером, а не
+        # шардом, иначе два терминала в одном проекте получали бы вести друг
+        # друга. Без reply_to ждать бессмысленно — некому сказать.
+        if req.get("reply_to"):
+            asyncio.create_task(_watch_idle(name, sock, req["reply_to"]))
+        else:
+            out["notify"] = "не указан reply_to — уведомлять некуда"
     return out
 
 
@@ -227,21 +263,21 @@ def _await_idle(name, sock, timeout):
         inbox.close()
 
 
-async def _watch_idle(name, sock):
-    """Дождаться простоя и сказать мастеру."""
+async def _watch_idle(name, sock, reply_to):
+    """Дождаться простоя и сказать мастеру, который об этом попросил."""
     try:
         state = await asyncio.to_thread(_await_idle, name, sock, IDLE_WAIT)
     except Exception as e:
-        return await _tell_master(f"mop: не дождался простоя {name}: {e}")
-    await _tell_master(f"mop: слейв {name} — {state}" if state
+        return await _tell_master(reply_to, f"mop: не дождался простоя {name}: {e}")
+    await _tell_master(reply_to, f"mop: слейв {name} — {state}" if state
                        else f"mop: {name} не отчитался о простое за {IDLE_WAIT}с")
 
 
-async def _tell_master(text):
+async def _tell_master(reply_to, text):
     if _conn is None:
         return
     try:
-        await _conn.publish(bus.INBOX, json.dumps(
+        await _conn.publish(reply_to, json.dumps(
             {"node": node_name(), "text": text}, ensure_ascii=False).encode())
     except Exception:
         pass
@@ -305,17 +341,34 @@ VERBS = {"ping": v_ping, "local": v_local, "state": v_state,
          "states": v_states, "send": v_send, "tail": v_tail, "type": v_type,
          "write": v_write}
 
+# Глаголы, которые называют конкретного слейва: у них шард запроса обязан
+# сойтись с настоящим шардом слейва.
+NAMED_VERBS = ("state", "send", "tail", "type")
+
+
+async def _mine(req, name):
+    """Принадлежит ли слейв шарду, из чьего субъекта пришёл запрос."""
+    return req.get("_shard") == bus.ADMIN or await slave_shard(name) == req.get("_shard")
+
 
 # ─── петля ───────────────────────────────────────────────────────────────
 _conn = None
 
 
 async def handle(msg, public):
+    """Разбор и три проверки: глагол существует, субъект его допускает, слейв
+    принадлежит спрашивающему шарду.
+
+    Шард берём ИЗ СУБЪЕКТА (`mop.<шард>.node.<узел>.<канал>`), а не из тела
+    запроса: тело пишет отправитель, субъект — права NATS."""
     try:
         req = json.loads(msg.data.decode())
     except ValueError:
         return await msg.respond(
             json.dumps({"error": "запрос не JSON"}, ensure_ascii=False).encode())
+    parts = msg.subject.split(".")
+    req["_shard"] = parts[1] if len(parts) > 1 else ""
+
     verb = req.get("verb")
     fn = VERBS.get(verb)
     if fn is None:
@@ -323,6 +376,12 @@ async def handle(msg, public):
     elif public and verb not in PUBLIC_VERBS:
         # Не «нет прав», а прямо: глагол существует, но не в этом субъекте.
         out = {"error": f"глагол {verb} доступен только мастеру"}
+    elif verb in ADMIN_VERBS and req["_shard"] != bus.ADMIN:
+        out = {"error": f"глагол {verb} — узловой, шарду {req['_shard']} не отдаётся"}
+    elif verb in NAMED_VERBS and not await _mine(req, req.get("name") or ""):
+        # Главная проверка шардирования. Прав NATS тут мало: мастер шарда A
+        # законно пишет в свой субъект, но может назвать слейва из B.
+        out = {"error": f"слейв {req.get('name')} не в шарде {req['_shard']}"}
     else:
         try:
             out = await fn(req)
@@ -351,12 +410,14 @@ async def serve():
     async def on_msg(msg):
         asyncio.create_task(handle(msg, public=True))
 
-    await _conn.subscribe(bus.subject(node, "rpc"), cb=on_rpc)
-    await _conn.subscribe(bus.subject(node, "msg"), cb=on_msg)
+    # Маска по шарду: агент обслуживает всех жильцов узла, а кто из какого
+    # шарда — решает уже проверка в handle.
+    await _conn.subscribe(f"mop.*.node.{node}.rpc", cb=on_rpc)
+    await _conn.subscribe(f"mop.*.node.{node}.msg", cb=on_msg)
     # Общий субъект: сюда спрашивают те, кто не знает состава пула.
-    await _conn.subscribe(bus.BROADCAST, cb=on_msg)
-    print(f"mop-agent: узел {node}, подписан на {bus.subject(node, 'rpc')} "
-          f"и {bus.subject(node, 'msg')}", flush=True)
+    await _conn.subscribe("mop.*.all.msg", cb=on_msg)
+    print(f"mop-agent: узел {node}, подписан на mop.*.node.{node}.rpc|msg "
+          f"и mop.*.all.msg", flush=True)
     await asyncio.Event().wait()
 
 
@@ -375,7 +436,7 @@ async def check():
                             name="mop-agent/check",
                             allow_reconnect=False, connect_timeout=5)
     try:
-        msg = await nc.request(bus.subject(node_name(), "msg"),
+        msg = await nc.request(bus.subject(node_name(), "msg", shard=bus.ADMIN),
                                json.dumps({"verb": "ping"}).encode(), timeout=5)
         print(f"подписан: {msg.data.decode()}")
     finally:

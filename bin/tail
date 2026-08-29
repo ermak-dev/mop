@@ -46,6 +46,7 @@ def parse(argv):
 
 def main(argv):
     name, lines, follow = parse(argv)
+    lib.guard(name)
     node = lib.running_node(name)
     buf = slaves.pane_lines(node, name)
     for line in buf[-lines:]:

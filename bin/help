@@ -6,6 +6,7 @@ echo
 echo "  mop <подкоманда> [аргументы]"
 echo
 for f in "$BIN_DIR"/*; do
+    [[ -f "$f" ]] || continue          # __pycache__ и прочий сор — не подкоманды
     name="$(basename "$f")"
     for s in "${skip[@]}"; do [[ "$name" == "$s" ]] && continue 2; done
     # Первая строка после shebang и есть однострочное описание командлета.

@@ -1,8 +1,8 @@
 # Шина пула mop. Разворачивается nats/setup.yml, субъекты описаны в docs/BUS.md.
 #
-# TLS берёт СУЩЕСТВУЮЩИЙ сертификат nomad.ermak.dev, и клиенты ходят на
-# nomad.ermak.dev:4222. Отдельное имя потребовало бы записи в DNS и второго
-# certbot'а ради того же самого хоста; порт различает службы не хуже имени.
+# TLS берёт СУЩЕСТВУЮЩИЙ сертификат nomad.ermak.dev. Клиенты при этом ходят на
+# LAN-адрес: публичное имя резолвится в адрес роутера, а хайрпин на 4222 он не
+# делает. Отсюда разделение url и tls_hostname в bus.json.
 listen = "0.0.0.0:4222"
 server_name = "mop"
 max_payload = 1MB
@@ -12,34 +12,64 @@ tls {
   key_file  = "/etc/letsencrypt/live/{{ nats_cert_host }}/privkey.pem"
 }
 
-# Права по субъектам — то, ради чего шину и заводили: раньше на узлы ехал
+# Права по субъектам -- то, ради чего шину и заводили: раньше на узлы ехал
 # management-токен Nomad, и слейв мог снести чужие джобы.
 #
-# Пользователь на КАЖДЫЙ узел, а не один общий на всех. С общим любой узел мог
-# бы подписаться на mop.node.<чужой>.rpc и перехватить запрос мастера, ответив
-# первым, — подписка в NATS не эксклюзивна.
+# ЧЕТЫРЕ РОДА ПОЛЬЗОВАТЕЛЕЙ, и делятся они по двум осям сразу -- шард (проект) и
+# роль. Первый токен субъекта -- шард, поэтому право «только свой проект»
+# выражается одним префиксом.
 #
-# _INBOX.> обязателен обеим сторонам: без него request-reply молча не работает.
+# _INBOX.> обязателен всем, кто задаёт вопросы: без него request-reply молча не
+# работает. Это первое, обо что спотыкаются.
 authorization {
   users = [
+    # Оператор вне мастер-шелла. Псевдошард admin -- это отсутствие шарда:
+    # все проекты плюс узловые глаголы (раздача кредов). Живёт только на
+    # управляющей машине.
     {
-      user: "master", password: "{{ lookup('password', secrets_dir + '/nats-master.pass length=32 chars=ascii_letters,digits') }}"
+      user: "admin", password: "{{ lookup('password', secrets_dir + '/nats-admin.pass length=32 chars=ascii_letters,digits') }}"
       permissions: {
         publish:   { allow: ["mop.>", "_INBOX.>"] }
         subscribe: { allow: ["mop.>", "_INBOX.>"] }
       }
     }
+{% for shard in shards %}
+
+    # Мастер проекта {{ shard }}: весь свой шард и ничего сверх него.
+    {
+      user: "master-{{ shard }}", password: "{{ lookup('password', secrets_dir + '/nats-master-' + shard + '.pass length=32 chars=ascii_letters,digits') }}"
+      permissions: {
+        publish:   { allow: ["mop.{{ shard }}.>", "_INBOX.>"] }
+        subscribe: { allow: ["mop.{{ shard }}.>", "_INBOX.>"] }
+      }
+    }
+
+    # Слейвы проекта {{ shard }}. Врапер подсовывает эти креды сессии через
+    # MOP_BUS_CONFIG, поэтому `mop mcp` внутри слейва достаёт только своих
+    # соседей и своего мастера. Управляющий субъект .rpc сюда не входит:
+    # печать в чужой TUI и запись файлов остаются за мастером.
+    {
+      user: "slave-{{ shard }}", password: "{{ lookup('password', secrets_dir + '/nats-slave-' + shard + '.pass length=32 chars=ascii_letters,digits') }}"
+      permissions: {
+        publish: { allow: ["mop.{{ shard }}.node.*.msg", "mop.{{ shard }}.all.msg",
+                           "mop.{{ shard }}.master.>", "mop.{{ shard }}.events",
+                           "_INBOX.>"] }
+        subscribe: { allow: ["_INBOX.>"] }
+      }
+    }
+{% endfor %}
 {% for node in nats_nodes %}
+
+    # Агент узла {{ node }}. Шарды он пересекает СОЗНАТЕЛЬНО: он и есть то, что
+    # их разделяет, и обслуживает всех жильцов хоста. Разделение здесь -- по
+    # узлу: подписка только на свой, иначе агент мог бы перехватить запрос
+    # мастера к соседнему узлу, ответив первым (подписка в NATS не эксклюзивна).
     {
       user: "node-{{ node }}", password: "{{ lookup('password', secrets_dir + '/nats-node-' + node + '.pass length=32 chars=ascii_letters,digits') }}"
       permissions: {
-        # Писать — соседям и мастеру. Управляющий субъект .rpc сюда не входит:
-        # печать в чужой TUI и запись файлов остаются за мастером.
-        publish: { allow: ["mop.node.*.msg", "mop.all.msg",
-                           "mop.master.inbox", "mop.events", "_INBOX.>"] }
-        # Слушать — только своё. И общий mop.all.msg, чтобы отзываться на
-        # опрос пула от тех, у кого нет ростера.
-        subscribe: { allow: ["mop.node.{{ node }}.>", "mop.all.msg",
+        publish: { allow: ["mop.*.master.>", "mop.*.events",
+                           "mop.*.node.{{ node }}.msg", "_INBOX.>"] }
+        subscribe: { allow: ["mop.*.node.{{ node }}.>", "mop.*.all.msg",
                              "_INBOX.>"] }
       }
     }

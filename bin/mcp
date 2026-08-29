@@ -5,10 +5,15 @@
 
 Транспорт stdio, запускается дочерним процессом сессии — мастера или слейва.
 
-ДВА ПРОФИЛЯ, и решает их наличие кредов, а не флаг. На управляющей машине есть
-токен Nomad, и сервер отдаёт весь набор: канал плюс управление джобами. На узле
-токена нет — там остаётся один канал. Так узел физически не может позвать то,
-чего ему не положено, вместо того чтобы не звать по уговору.
+ТРИ ПРОФИЛЯ, и решают их факты, а не флаги:
+
+  * токен Nomad + MOP_SHARD -> мастер шарда: канал и управление джобами, но
+    только своим срезом пула (`mop master` ставит обе переменные);
+  * токен без шарда -> оператор: то же самое, но по всему пулу;
+  * без токена -> узел: один канал, ростер собирается опросом самой шины.
+
+Так узел физически не может позвать то, чего ему не положено, вместо того
+чтобы не звать по уговору.
 
 Почему не встроенный SendMessage: он видит только этот хост плюс облачные и
 bridge-сессии, а слейва пула живут на других узлах. Здесь доставка идёт через
@@ -61,6 +66,10 @@ def has_nomad_token():
 
 
 MASTER = has_nomad_token()
+# Свой адрес для вестей от агентов. Уникален на процесс: два терминала,
+# открытые в одном проекте, иначе разбирали бы вести друг друга.
+MASTER_ID = f"{os.uname().nodename}-{os.getpid()}"
+MY_INBOX = bus.inbox(MASTER_ID)
 
 
 def master_tool(**kw):
@@ -216,7 +225,7 @@ def _send_to_slave(name, message, priority, notify_when_idle, wait_seconds):
         result = bus.request(slave_node(name), "send", name=name, message=message,
                              priority=priority, wait=wait,
                              notify=bool(notify_when_idle and not wait),
-                             timeout=wait + bus.TIMEOUT)
+                             reply_to=MY_INBOX, timeout=wait + bus.TIMEOUT)
     except bus.BusError as e:
         return f"{name}: НЕ ДОСТАВЛЕНО — {e}"
     if "error" in result:
@@ -386,7 +395,7 @@ def watch_inbox():
     if not MASTER or not master_socket():
         return
     try:
-        bus.subscribe(bus.INBOX, lambda m: notify_master(m.get("text") or ""))
+        bus.subscribe(MY_INBOX, lambda m: notify_master(m.get("text") or ""))
     except bus.BusError:
         # Без шины сервер всё равно поднимется: доставка отобьётся понятной
         # ошибкой на первом же send, а молчащая подписка не соврёт успехом.
@@ -400,9 +409,12 @@ def main():
             where = bus.config()["url"]
         except bus.BusError as e:
             where = f"НЕТ ({e})"
-        print(f"mop mcp: профиль {'мастер' if MASTER else 'узел'}, "
+        who = ("узел" if not MASTER
+               else "оператор" if bus.SHARD == bus.ADMIN
+               else f"мастер шарда {bus.SHARD}")
+        print(f"mop mcp: профиль {who}, "
               f"{len(app._tool_manager.list_tools())} инструментов, шина {where}, "
-              f"инбокс мастера: {master_socket() or 'не найден'}")
+              f"инбокс {MY_INBOX}, сессия: {master_socket() or 'не найдена'}")
         return 0
     watch_inbox()
     app.run("stdio")

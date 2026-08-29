@@ -1,5 +1,5 @@
 #!/bin/bash -e
-# развернуть кластер: mop deploy [nomad|claude|nats|all]
+# развернуть кластер: mop deploy [nomad|claude|nats|all] [origin|шард ...]
 #
 # Порядок игр не произволен и не переставляется:
 #
@@ -14,6 +14,7 @@
 # и по этой же причине deploy не имеет права ничего занимать у самого mop.
 
 WHAT="${1:-all}"
+shift || true      # остаток -- шарды, которых в пуле ещё нет
 
 # Плейбуки находятся по одному лишь соглашению о пути: `net setup <имя>`
 # разворачивается в ~/etc/<имя>/setup.yml, таблицы имён нигде нет. Симлинки и
@@ -28,9 +29,21 @@ link() {
 }
 
 play() {
-    local book="$1"
+    local book="$1"; shift
     section "ansible: $book"
-    ansible-playbook -i "$INVENTORY" "$PROJECT_HOME/$book"
+    ansible-playbook -i "$INVENTORY" "$PROJECT_HOME/$book" "$@"
+}
+
+# Шарды считает `mop shards`: ростер Nomad плюс память плюс то, что назвали в
+# аргументах. Плейбук заводит по пользователю NATS на каждый и раскатывает
+# креды -- мастеру и слейвам. Пустой список законен: пустой пул, мастеров ещё
+# нет.
+# Отдаём ОБЪЕКТОМ, а не парой ключ=значение: `--extra-vars mop_shards=[...]`
+# ansible принимает как строку, и цикл в шаблоне честно проходится по её
+# символам, порождая пользователей `master-[`, `master-"` и так далее.
+shards_json() {
+    "$BIN_DIR/mop" shards "$@" \
+        | python3 -c "import json,sys; print(json.dumps({'mop_shards': [l.strip() for l in sys.stdin if l.strip()]}))"
 }
 
 if [[ ! -f "$INVENTORY" ]]; then
@@ -44,14 +57,14 @@ link nats
 case "$WHAT" in
     nomad)  play nomad/setup.yml ;;
     claude) play nomad/claude.yml ;;
-    nats)   play nats/setup.yml ;;
+    nats)   play nats/setup.yml --extra-vars "$(shards_json "$@")" ;;
     all)
         play nomad/setup.yml
         play nomad/claude.yml
-        play nats/setup.yml
+        play nats/setup.yml --extra-vars "$(shards_json "$@")"
         ;;
     *)
-        fail "mop deploy [nomad|claude|nats|all]"
+        fail "mop deploy [nomad|claude|nats|all] [origin|шард ...]"
         exit 1
         ;;
 esac

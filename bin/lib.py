@@ -53,7 +53,32 @@ def cwd_origin(required=True):
 
 
 def project_of(origin):
-    return os.path.basename(origin).removesuffix(".git")
+    """Проект он же шард. Определение одно на всю систему — в slaves."""
+    return slaves.shard_of(origin)
+
+
+def shard_creds(shard):
+    return os.path.expanduser(f"~/.config/mop/bus-{shard}.json")
+
+
+def in_shard():
+    """Шард этого шелла, либо None у оператора вне `mop master`."""
+    return None if bus.SHARD == bus.ADMIN else bus.SHARD
+
+
+def guard(name):
+    """Перила мастер-шелла: не трогать чужого слейва.
+
+    Это НЕ граница — MOP_SHARD оператор может и снять. Настоящая живёт в кредах
+    NATS и в проверке агента. Здесь мы лишь не даём промахнуться вслепую."""
+    shard = in_shard()
+    if shard is None:
+        return
+    meta = require_job(name).get("Meta") or {}
+    owner = slaves.shard_of(meta.get("origin", ""))
+    if owner != shard:
+        sys.exit(f"{name} — шард {owner}, а этот мастер ведёт {shard}. "
+                 f"Выйди из мастер-шелла или запусти mop master для {owner}.")
 
 
 def parse_llm(args):
