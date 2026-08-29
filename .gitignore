@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# креды, см. CLAUDE.md
+.env
