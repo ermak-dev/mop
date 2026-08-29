@@ -152,7 +152,13 @@ if [ -n "$WK_LLM_KEY_VAR" ]; then
     keyfile="$HOME/.config/orchestra/llm-keys.env"
     key=""
     # sed, а не source: файл с ключами не исполняем
-    [ -f "$keyfile" ] && key=$(sed -n "s/^${WK_LLM_KEY_VAR}=//p" "$keyfile" | tail -1)
+    # Двойной доллар — экранирование интерполяции Nomad: спеку задачи он
+    # прогоняет через hcl2 и всякую фигурную подстановку пытается вычислить
+    # сам. Неэкранированная подстановка имени переменной ниже, и особенно
+    # раскрытие массива llm_env, валят РЕГИСТРАЦИЮ джоба на "Invalid
+    # expression" ещё до запуска: [@] для HCL не выражение. Осторожно, это
+    # правило действует и на комментарии — Nomad разбирает всю строку.
+    [ -f "$keyfile" ] && key=$(sed -n "s/^$${WK_LLM_KEY_VAR}=//p" "$keyfile" | tail -1)
     if [ -z "$key" ]; then
         # Валимся громко: без ключа claude поднимется и будет отбивать каждый
         # ход 401-й, а сиденье будет читаться как живое и свободное.
@@ -173,7 +179,7 @@ tmux -L "$WK_NAME" new-session -d -s "$WK_NAME" -c "$d" \
     -e CARGO_TARGET_DIR="$HOME/.cache/target-$WK_NAME" \
     -e CARGO_BUILD_JOBS=1 \
     -e PATH="$d/bin:$PATH" \
-    "${llm_env[@]}" \
+    "$${llm_env[@]}" \
     "$HOME/.local/bin/claude --dangerously-skip-permissions"
 trap 'tmux -L "$WK_NAME" kill-session -t "$WK_NAME" 2>/dev/null; exit 0' TERM INT
 while tmux -L "$WK_NAME" has-session -t "$WK_NAME" 2>/dev/null; do sleep 10 & wait $!; done
