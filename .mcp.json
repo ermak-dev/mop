@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "orchestra": {
+      "type": "stdio",
+      "command": "/home/ermak/orchestra/bin/orchestra-mcp"
+    }
+  }
+}

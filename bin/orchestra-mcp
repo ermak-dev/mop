@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""orchestra-mcp — MCP-сервер пула: канал сообщений и управление сиденьями.
+
+Транспорт stdio, запускается дочерним процессом сессии-заказчика (обычно PM).
+Порта не слушает намеренно: сервер держит management-токен Nomad.
+
+Почему не встроенный SendMessage: он видит только этот хост плюс облачные и
+bridge-сессии, а сиденья пула живут на других узлах — сегодня PM достаёт их
+через мост claude.ai, который умирает ровно тогда, когда протухает логин.
+Здесь доставка идёт через Nomad и протухший логин переживает.
+
+Сокет сессии host-local, поэтому отправитель уезжает ВНУТРЬ аллокации
+(orchestra/session.py в base64) и исполняется там. Подробности в CHANNEL.md
+и MCP.md.
+"""
+import os
+import subprocess
+import sys
+import threading
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+from mcp.server.mcpserver import MCPServer                     # noqa: E402
+from mcp.types import ToolAnnotations                          # noqa: E402
+
+from orchestra import keys, nomad, remote, seats, session       # noqa: E402
+from orchestra.render import table                              # noqa: E402
+
+app = MCPServer(
+    "orchestra",
+    instructions=(
+        "Пул claude-воркеров поверх Nomad. `agents` — кто есть и в каком "
+        "состоянии, `send` — сообщение сиденью, `tail` — что у него на экране. "
+        "Перед диспатчем всегда сверяйся с `agents`: «свободен» там означает, "
+        "что в клоне нет несохранённой работы, а не просто что сессия молчит."
+    ),
+)
+
+READ_ONLY = ToolAnnotations(readOnlyHint=True)
+DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
+SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status")
+MAX_WAIT = 600
+
+
+# ─── адресация ───────────────────────────────────────────────────────────
+def seat_alloc(name):
+    """Живая аллокация сиденья. Путь к сокету НИКОГДА не кэшируем: после
+    рестарта сиденья меняется pid, а с ним и имя сокета."""
+    alloc = nomad.latest_alloc(name)
+    if not alloc:
+        raise LookupError(f"{name}: нет аллокации — сиденье не размещено")
+    if alloc["ClientStatus"] != "running":
+        raise LookupError(f"{name}: аллокация {alloc['ClientStatus']}, не running")
+    return alloc
+
+
+def caller_socket():
+    """Инбокс сессии, которая нас запустила, — для асинхронных уведомлений.
+
+    Основной путь — переменная окружения, которую claude кладёт потомкам.
+    Запасной нужен, если окружение вычистили: идём вверх по цепочке
+    родителей и ищем pid, у которого есть файл сессии."""
+    sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+    if sock:
+        return sock
+    by_pid = {str(d.get("pid")): d for d in session.sessions()}
+    pid = os.getpid()
+    for _ in range(24):
+        try:
+            with open(f"/proc/{pid}/status") as f:
+                ppid = next(l.split()[1] for l in f if l.startswith("PPid:"))
+        except (OSError, StopIteration):
+            return None
+        if ppid in by_pid:
+            return by_pid[ppid]["messagingSocketPath"]
+        pid = int(ppid)
+        if pid <= 1:
+            return None
+    return None
+
+
+def notify_caller(text):
+    """Положить сообщение в инбокс заказчика. Так фоновое ожидание превращается
+    в настоящий push: MCP сам ничего в ход модели вбросить не может."""
+    sock = caller_socket()
+    if not sock:
+        return
+    try:
+        session.send(sock, text, priority="later", from_name="orchestra")
+    except Exception:
+        pass
+
+
+# ─── инструменты: канал ──────────────────────────────────────────────────
+@app.tool(annotations=READ_ONLY, description=(
+    "Кому можно писать: сиденья пула по узлам и сессии claude на этой машине. "
+    "Для сиденья показывает достоверное состояние (свободен/занят/завис/нет "
+    "квоты/несохранённая работа в клоне), ветку, LLM-профиль и репозиторий."))
+def agents(project: str = "") -> str:
+    rows = [("СИДЕНЬЕ", "УЗЕЛ", "АЛЛОК", "СОСТОЯНИЕ", "LLM", "РЕПОЗИТОРИЙ")]
+    for r in seats.seat_rows():
+        if project and project not in r["origin"]:
+            continue
+        rows.append((r["name"], r["node"], r["alloc_status"], r["state"],
+                     r["llm"], r["origin"]))
+    out = ["сиденья пула:", *table(rows)] if len(rows) > 1 else ["сиденья пула: нет"]
+
+    local = [(d.get("name") or "-", str(d.get("pid")), d.get("status") or "-",
+              d.get("cwd") or "-")
+             for d in session.sessions()
+             if session.socket_alive(d["messagingSocketPath"])]
+    if local:
+        out += ["", "сессии на этой машине:",
+                *table([("СЕССИЯ", "PID", "СТАТУС", "КАТАЛОГ"), *local])]
+    return "\n".join(out)
+
+
+@app.tool(description=(
+    "Послать сообщение сиденью пула или локальной сессии. Возвращает вердикт "
+    "доставки, а не факт отправки. notify_when_idle=true не блокирует: когда "
+    "адресат освободится, уведомление придёт отдельным сообщением."))
+def send(to: str, message: str, priority: str = "next",
+         notify_when_idle: bool = False, wait_seconds: int = 0) -> str:
+    if priority not in session.PRIORITIES:
+        return f"priority должен быть одним из {', '.join(session.PRIORITIES)}"
+    if not message.strip():
+        return "пустое сообщение отправлять нечего"
+
+    if to.startswith(seats.JOB_PREFIX):
+        return _send_to_seat(to, message, priority, notify_when_idle, wait_seconds)
+    return _send_locally(to, message, priority, wait_seconds)
+
+
+def _send_to_seat(name, message, priority, notify_when_idle, wait_seconds):
+    alloc = seat_alloc(name)
+    wait = min(max(wait_seconds, 0), MAX_WAIT)
+    result = remote.send(alloc, seats.clone_dir(name), message, priority,
+                         wait=wait)
+    if "error" in result:
+        return f"{name}: НЕ ДОСТАВЛЕНО — {result['error']}"
+
+    verdict = f"{name}: доставлено (msg_id={result['msg_id']})"
+    if wait:
+        verdict += f", простой: {result.get('idle') or 'не дождался за ' + str(wait) + 'с'}"
+    if notify_when_idle and not wait:
+        threading.Thread(target=_watch_idle, args=(name,), daemon=True).start()
+        verdict += "; уведомлю, когда освободится"
+    return verdict
+
+
+def _watch_idle(name):
+    """Фоновое ожидание простоя. Результат кладём в инбокс заказчика."""
+    try:
+        result = remote.send(seat_alloc(name), seats.clone_dir(name), "",
+                             wait=MAX_WAIT)
+    except Exception as e:
+        notify_caller(f"orchestra: не смог дождаться простоя {name}: {e}")
+        return
+    state = result.get("idle")
+    notify_caller(f"orchestra: сиденье {name} — {state}" if state
+                  else f"orchestra: {name} не отчиталось о простое за {MAX_WAIT}с")
+
+
+def _send_locally(target, message, priority, wait_seconds):
+    sess = session.find(target)
+    sock = sess["messagingSocketPath"]
+    if not session.socket_alive(sock):
+        return f"{target}: инбокс не слушает — сессия мертва"
+    r = session.send(sock, message, priority=priority, from_name="orchestra",
+                     wait_idle=min(max(wait_seconds, 0), MAX_WAIT))
+    verdict = f"{sess.get('name')}: доставлено (msg_id={r['msg_id']})"
+    if wait_seconds:
+        verdict += f", простой: {(r['idle'] or {}).get('state') or 'не дождался'}"
+    return verdict
+
+
+@app.tool(annotations=READ_ONLY, description=(
+    "Хвост tmux-буфера сиденья — единственный способ увидеть то, чего нет в "
+    "состоянии: held-диалог чужого сообщения, промпт логина, жалобу на квоту."))
+def tail(name: str, lines: int = 40, grep: str = "") -> str:
+    buf = seats.pane_lines(seat_alloc(name), name)
+    if grep:
+        buf = [l for l in buf if grep.lower() in l.lower()]
+    return "\n".join(buf[-max(1, lines):]) or "(пусто)"
+
+
+# ─── инструменты: управление ─────────────────────────────────────────────
+@app.tool(annotations=READ_ONLY, description=(
+    "Ёмкость пула: узлы, свободная память и сколько ещё сидений туда влезет."))
+def pool() -> str:
+    rows = [("УЗЕЛ", "СТАТУС", "СВОБОДНО", "СЛОТОВ")]
+    for n in seats.pool():
+        if n["status"] != "ready":
+            rows.append((n["name"], n["status"], "-", "-"))
+        elif "error" in n:
+            rows.append((n["name"], "ready", n["error"], "-"))
+        else:
+            rows.append((n["name"], "ready",
+                         f"{n['free_mb'] / 1024:.0f}/{n['total_mb'] / 1024:.0f} ГБ",
+                         str(n["slots"])))
+    return "\n".join(table(rows))
+
+
+@app.tool(annotations=DESTRUCTIVE, description=(
+    "Управление сиденьями: add (создать), remove (удалить), restart "
+    "(перезапустить залипшее), retarget (сменить репозиторий или LLM). "
+    "Клон при remove остаётся на узле и переиспользуется."))
+def seat(action: str, name: str = "", origin: str = "", llm: str = "") -> str:
+    if action == "add":
+        return _seat_add(origin, llm)
+    if not name:
+        return f"{action}: нужно имя сиденья"
+    if action == "remove":
+        nomad.get_job(name)
+        nomad.deregister(name)
+        return f"удалён {name} (клон остался в {seats.clone_dir(name)})"
+    if action == "restart":
+        nomad.alloc_restart(seat_alloc(name)["ID"])
+        return f"{name}: перезапускается"
+    if action == "retarget":
+        return _seat_retarget(name, origin, llm)
+    return "action: add | remove | restart | retarget"
+
+
+def _seat_add(origin, llm):
+    if not origin:
+        return "add: нужен origin репозитория"
+    llm = llm or seats.DEFAULT_LLM
+    if llm not in seats.LLM_PROFILES:
+        return f"нет LLM-профиля {llm}; есть: {', '.join(seats.LLM_PROFILES)}"
+    keys.push_llm_keys(llm)
+    name = seats.next_name(os.path.basename(origin).removesuffix(".git"))
+    nomad.register(seats.job_spec(name, origin, llm))
+    return f"{name}: {origin} [{llm}] — размещается, состояние смотри в agents"
+
+
+def _seat_retarget(name, origin, llm):
+    meta = nomad.get_job(name).get("Meta") or {}
+    origin = origin or meta.get("origin")
+    # профиль без явного llm сохраняется: смена репозитория не должна молча
+    # ронять сиденье обратно на claude
+    llm = llm or meta.get("llm", seats.DEFAULT_LLM)
+    if llm not in seats.LLM_PROFILES:
+        return f"нет LLM-профиля {llm}; есть: {', '.join(seats.LLM_PROFILES)}"
+    keys.push_llm_keys(llm)
+    nomad.register(seats.job_spec(name, origin, llm))
+    return f"{name} -> {origin} [{llm}], перезапускается"
+
+
+@app.tool(annotations=DESTRUCTIVE, description=(
+    "Диагностика пула: залипания, протухший логин, restart-backoff, "
+    "исчерпанная квота модели. С fix=true лечит то, что лечится."))
+def doctor(fix: bool = False) -> str:
+    issues = seats.diagnose()
+    if not issues:
+        return "пул здоров: залипаний нет"
+    rows = [(i["name"], i["alloc"]["NodeName"] if i["alloc"] else "-",
+             i["diagnosis"], i["action"] or "лечения нет") for i in issues]
+    out = table([("СИДЕНЬЕ", "УЗЕЛ", "ДИАГНОЗ", "ЛЕЧЕНИЕ"), *rows])
+    if not fix:
+        return "\n".join(out)
+
+    if any(i["action"] == "login+restart" for i in issues):
+        if not keys.credentials_fresh():
+            return "\n".join(out + ["", "локальные креды протухли — залогинься в "
+                                    "claude на управляющей машине, потом doctor(fix=true)"])
+        keys.push_login()
+    done = [f"  {i['name']}: {_treat(i)}" for i in issues if i["action"]]
+    return "\n".join(out + ["", *done])
+
+
+def _treat(issue):
+    action, alloc, name = issue["action"], issue["alloc"], issue["name"]
+    try:
+        if action == "stop":
+            nomad.alloc_stop(alloc["ID"])
+            return "alloc stop — Nomad пересоздаст без backoff"
+        if action == "model":
+            seats.switch_model(alloc, name, seats.FALLBACK_MODEL)
+            return f"/model {seats.FALLBACK_MODEL}"
+        nomad.alloc_restart(alloc["ID"])
+        return "restart"
+    except Exception as e:
+        return f"{action} не вышел: {str(e)[:80]}"
+
+
+@app.tool(annotations=DESTRUCTIVE, description=(
+    "Слэш-команда в TUI сиденья. Нужна отдельно, потому что каналом слэш-"
+    "команды не проходят: сообщение кладётся в очередь с skipSlashCommands. "
+    f"Разрешены: {', '.join(SLASH_ALLOWED)}."))
+def slash(name: str, command: str) -> str:
+    if not command.split()[0:1] or command.split()[0] not in SLASH_ALLOWED:
+        return f"разрешены только: {', '.join(SLASH_ALLOWED)}"
+    alloc = seat_alloc(name)
+    if command.startswith("/model "):
+        seats.switch_model(alloc, name, command.split(None, 1)[1])
+        return f"{name}: {command}"
+    return f"{name}: {command}\n{seats.type_command(alloc, name, command)[-1500:]}"
+
+
+@app.tool(annotations=DESTRUCTIVE, description=(
+    "Раздать на узлы пула креды claude.ai и ключи LLM-провайдеров. Лечит "
+    "сиденья, упёршиеся в протухший логин."))
+def login() -> str:
+    results, what, note = keys.push_login()
+    out = [("везу: " + " + ".join(what))] + ([note] if note else [])
+    return "\n".join(out + table([(n, results[n]) for n in sorted(results)]))
+
+
+def main():
+    # attach остаётся вне MCP: живой терминал инструментом не отдать.
+    if "--check" in sys.argv:
+        print(f"orchestra-mcp: {len(app._tool_manager.list_tools())} инструментов, "
+              f"инбокс заказчика: {caller_socket() or 'не найден'}")
+        return 0
+    app.run("stdio")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

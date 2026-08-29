@@ -4,11 +4,23 @@
 с сиденьями разговаривать.
 
 ```
-bin/worker     CLI пула: создать/удалить/перезапустить сиденье, list, doctor, login
-bin/cc-send    послать сообщение в живую сессию claude code (см. CHANNEL.md)
-nomad/         ansible-плейбуки и конфиги: сам Nomad, узлы, уборка диска
-CHANNEL.md     протокол канала сообщений claude code
+orchestra/         библиотека: всё знание о пуле, возвращает данные и не печатает
+  nomad.py           связь с Nomad, exec внутрь аллокации
+  seats.py           спека job'а, LLM-профили, состояние сиденья, диагностика
+  session.py         файлы сессий claude и протокол канала (standalone: ездит на узлы)
+  remote.py          запуск session.py внутри аллокации
+  keys.py            раздача кредов и ключей провайдеров на узлы
+  render.py          таблицы
+bin/worker         CLI пула: add/list/delete/change/restart/attach/tail/doctor/login/llm
+bin/cc-send        послать сообщение в живую сессию claude code
+bin/orchestra-mcp  MCP-сервер: тот же пул как инструменты для claude
+nomad/             ansible-плейбуки и конфиги: сам Nomad, узлы, уборка диска
+CHANNEL.md         протокол канала сообщений claude code
+MCP.md             архитектура MCP-сервера и его инструменты
 ```
+
+Печатают только фронтенды в `bin/`. Библиотека возвращает данные — иначе
+MCP-сервер начал бы разбирать текст, свёрстанный для терминала.
 
 ## Как это связано
 
