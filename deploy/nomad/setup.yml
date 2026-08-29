@@ -86,7 +86,7 @@
     # 403 — тоже ответ: ACL включён, значит сервер жив и отвечает.
     - name: Wait for the HTTP API
       ansible.builtin.uri:
-        url: http://127.0.0.1:4646/v1/agent/self
+        url: http://127.0.0.1:{{ MOP_NOMAD_PORT }}/v1/agent/self
         status_code: [200, 403]
       register: api
       until: api.status in [200, 403]
@@ -105,7 +105,7 @@
       args:
         creates: "{{ nomad_home }}/bootstrap.json"
       environment:
-        NOMAD_ADDR: http://127.0.0.1:4646
+        NOMAD_ADDR: http://127.0.0.1:{{ MOP_NOMAD_PORT }}
 
     - name: Fetch the management token to the control machine
       ansible.builtin.fetch:

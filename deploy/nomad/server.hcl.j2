@@ -14,6 +14,11 @@ datacenter = "{{ MOP_POOL_DC }}"
 data_dir   = "{{ MOP_NOMAD_DATA }}"
 bind_addr  = "0.0.0.0"
 
+ports {
+  http = {{ MOP_NOMAD_PORT }}
+  rpc  = {{ MOP_NOMAD_RPC_PORT }}
+}
+
 advertise {
   http = "{{ MOP_SERVER_LAN }}"
   rpc  = "{{ MOP_SERVER_LAN }}"

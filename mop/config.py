@@ -2,11 +2,15 @@
 
 'Настройки делятся на три рода, и деление это не косметическое:
 
-  ОБЯЗАТЕЛЬНЫЕ  осмысленного дефолта не имеют — адрес чужого кластера угадать
+  ОБЯЗАТЕЛЬНЫЕ  осмысленного дефолта не имеют — адрес чужой локалки угадать
                 нельзя. Нет в .env — mop отказывается работать и говорит,
-                чего не хватает. Молча целиться в чужую локалку хуже отказа.
+                чего не хватает. Молча целиться в чужую сеть хуже отказа.
   С ДЕФОЛТОМ    порты, версии, датацентры: значение по умолчанию верно для
                 любой установки, и переопределяют его редко.
+  ПРОИЗВОДНЫЕ   дефолт СЧИТАЕТСЯ из других настроек. Задать руками можно, но
+                обычно незачем: адрес API Nomad — это адрес сервера и порт
+                API, и записывать его вторым местом значит завести источник
+                правды, который однажды разойдётся с первым.
   НЕОБЯЗАТЕЛЬНЫЕ  пусто значит «такой функциональности нет»: MCP рабочего
                 стола, ssh-алиасы, резерв памяти.
 
@@ -34,10 +38,13 @@ ENV_FILE = os.path.join(PROJECT, ".env")
 # узлах .env вообще нет.
 
 # Без этого mop не работает нигде, кроме той машины, где его писали.
+#
+# Она ОДНА, и это не случайно: всё остальное про кластер выводится из неё.
+# Каждая настройка, которую можно вычислить, но которую заставляют вписать,
+# — это ещё одно место, где установка расходится сама с собой.
 REQUIRED = {
-    "NOMAD_ADDR": "адрес API Nomad, например https://nomad.example.com",
-    "MOP_SERVER_LAN": "адрес сервера в локальной сети: туда узлы дозваниваются "
-                      "за RPC Nomad и за шиной",
+    "MOP_SERVER_LAN": "адрес сервера в локальной сети: туда ходят и узлы (RPC "
+                      "Nomad, шина), и мастер (API Nomad)",
 }
 
 # Дефолт верен для любой установки; переопределяют редко.
@@ -54,6 +61,8 @@ DEFAULTS = {
     # значение установки, а не литерал продукта.
     "MOP_NOMAD_MIRROR": "https://releases.hashicorp.com",
     "MOP_NATS_PORT": "4222",
+    "MOP_NOMAD_PORT": "4646",       # HTTP API: туда ходит мастер
+    "MOP_NOMAD_RPC_PORT": "4647",   # RPC: туда дозваниваются клиенты Nomad
     "MOP_NATS_VERSION": "2.14.6",
     "MOP_SLAVE_MEM_MB": "8192",
     "MOP_FALLBACK_MODEL": "opus",
@@ -73,7 +82,17 @@ OPTIONAL = {
     "MAC_MCP_HOST": "",
 }
 
-SETTINGS = {**{k: "" for k in REQUIRED}, **DEFAULTS, **OPTIONAL}
+# Дефолт СЧИТАЕТСЯ, а не лежит литералом: он зависит от .env, которого на
+# момент импорта ещё не читали. Значение из окружения или .env старше — разовое
+# `NOMAD_ADDR=… mop list` обязано продолжать работать, и на внешний кластер
+# нацеливаются им же.
+DERIVED = {
+    "NOMAD_ADDR": lambda: "http://{}:{}".format(get("MOP_SERVER_LAN"),
+                                                get("MOP_NOMAD_PORT")),
+}
+
+SETTINGS = {**{k: "" for k in REQUIRED}, **{k: "" for k in DERIVED},
+            **DEFAULTS, **OPTIONAL}
 
 
 class Missing(RuntimeError):
@@ -123,7 +142,10 @@ def get(name, default=None):
     Настройка описана в одном месте или ни в одном."""
     if default is None:
         default = SETTINGS.get(name, "")
-    return os.environ.get(name) or _load().get(name) or default
+    value = os.environ.get(name) or _load().get(name)
+    if value:
+        return value
+    return DERIVED[name]() if not default and name in DERIVED else default
 
 
 def effective():
@@ -134,6 +156,8 @@ def effective():
             out[name] = (os.environ[name], "окружение")
         elif _load().get(name):
             out[name] = (_load()[name], ".env")
+        elif name in DERIVED:
+            out[name] = (DERIVED[name](), "вычислено")
         else:
             out[name] = (default, "дефолт")
     return out
