@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """mop-mcp — MCP-сервер пула: канал сообщений и управление слейвами.
 
-Транспорт stdio, запускается дочерним процессом сессии мастера (обычно мастер).
-Порта не слушает намеренно: сервер держит management-токен Nomad.
+Транспорт stdio, запускается дочерним процессом сессии — мастера или слейва.
+
+ДВА ПРОФИЛЯ, и решает их наличие кредов, а не флаг. На управляющей машине есть
+токен Nomad, и сервер отдаёт весь набор: канал плюс управление джобами. На узле
+токена нет — там остаётся один канал. Так узел физически не может позвать то,
+чего ему не положено, вместо того чтобы не звать по уговору.
 
 Почему не встроенный SendMessage: он видит только этот хост плюс облачные и
-bridge-сессии, а слейва пула живут на других узлах — сегодня мастер достаёт их
-через мост claude.ai, который умирает ровно тогда, когда протухает логин.
-Здесь доставка идёт через Nomad и протухший логин переживает.
+bridge-сессии, а слейва пула живут на других узлах. Здесь доставка идёт через
+шину, и хост значения не имеет.
 
-Сокет сессии host-local, поэтому отправитель уезжает ВНУТРЬ аллокации
-(mop/session.py в base64) и исполняется там. Подробности в CHANNEL.md
-и MCP.md.
+Сокет сессии host-local, поэтому до него дотягивается агент, который на том же
+узле и живёт (mop/agent.py). Протокол канала — CHANNEL.md, субъекты шины —
+BUS.md, устройство сервера — MCP.md.
 """
 import os
 import subprocess
 import sys
-import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mcp.server.mcpserver import MCPServer                     # noqa: E402
 from mcp.types import ToolAnnotations                          # noqa: E402
 
-from mop import keys, nomad, remote, session, slaves       # noqa: E402
+from mop import bus, keys, nomad, session, slaves         # noqa: E402
 from mop.render import table                              # noqa: E402
 
 app = MCPServer(
@@ -43,6 +45,30 @@ app = MCPServer(
     ),
 )
 
+def has_nomad_token():
+    """Есть ли у нас право управлять кластером.
+
+    Это факт, а не флаг: на узле файла с токеном просто нет — его перестали
+    туда возить, когда канал переехал на шину. Профиль сервера выводится
+    отсюда, поэтому узел не может позвать управление джобами даже по ошибке."""
+    try:
+        nomad.token()
+        return True
+    except Exception:
+        return False
+
+
+MASTER = has_nomad_token()
+
+
+def master_tool(**kw):
+    """Инструмент, который есть только у мастера. На узле функция остаётся
+    обычной питоновской и просто не попадает в список инструментов."""
+    def deco(fn):
+        return app.tool(**kw)(fn) if MASTER else fn
+    return deco
+
+
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
 SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status")
@@ -55,10 +81,23 @@ def slave_alloc(name):
     рестарта слейва меняется pid, а с ним и имя сокета."""
     alloc = nomad.latest_alloc(name)
     if not alloc:
-        raise LookupError(f"{name}: нет аллокации — слейв не размещено")
+        raise LookupError(f"{name}: нет аллокации — слейв не размещён")
     if alloc["ClientStatus"] != "running":
         raise LookupError(f"{name}: аллокация {alloc['ClientStatus']}, не running")
     return alloc
+
+
+def slave_node(name):
+    """Узел слейва — адрес на шине.
+
+    У мастера узел берётся из ростера Nomad. На узле ростера нет, и мы
+    спрашиваем сам пул: чей агент признаёт этот слейв своим."""
+    if MASTER:
+        return slave_alloc(name)["NodeName"]
+    for answer in bus.gather("local"):
+        if name in (answer.get("slaves") or {}):
+            return answer["node"]
+    raise LookupError(f"{name}: ни один агент пула не признаёт этот слейв своим")
 
 
 def master_socket():
@@ -105,22 +144,45 @@ def notify_master(text):
     "Для слейва показывает достоверное состояние (свободен/занят/завис/нет "
     "квоты/несохранённая работа в клоне), LLM-профиль и репозиторий."))
 def agents(project: str = "") -> str:
-    rows = [("СИДЕНЬЕ", "УЗЕЛ", "АЛЛОК", "СОСТОЯНИЕ", "LLM", "РЕПОЗИТОРИЙ")]
+    out = _roster(project) if MASTER else _roster_from_bus()
+
+    here = [(d.get("name") or "-", str(d.get("pid")), d.get("status") or "-",
+              d.get("cwd") or "-")
+             for d in session.sessions()
+             if session.socket_alive(d["messagingSocketPath"])]
+    if here:
+        out += ["", "сессии на этой машине:",
+                *table([("СЕССИЯ", "PID", "СТАТУС", "КАТАЛОГ"), *here])]
+    return "\n".join(out)
+
+
+def _roster(project):
+    """Ростер мастера: Nomad знает про слейва то, чего не знает узел, —
+    состояние аллокации, профиль LLM, репозиторий."""
+    rows = [("СЛЕЙВ", "УЗЕЛ", "АЛЛОК", "СОСТОЯНИЕ", "LLM", "РЕПОЗИТОРИЙ")]
     for r in slaves.slave_rows():
         if project and project not in r["origin"]:
             continue
         rows.append((r["name"], r["node"], r["alloc_status"], r["state"],
                      r["llm"], r["origin"]))
-    out = ["слейва пула:", *table(rows)] if len(rows) > 1 else ["слейва пула: нет"]
+    return ["слейва пула:", *table(rows)] if len(rows) > 1 else ["слейва пула: нет"]
 
-    local = [(d.get("name") or "-", str(d.get("pid")), d.get("status") or "-",
-              d.get("cwd") or "-")
-             for d in session.sessions()
-             if session.socket_alive(d["messagingSocketPath"])]
-    if local:
-        out += ["", "сессии на этой машине:",
-                *table([("СЕССИЯ", "PID", "СТАТУС", "КАТАЛОГ"), *local])]
-    return "\n".join(out)
+
+def _roster_from_bus():
+    """Ростер узла: у него нет токена Nomad, поэтому пул опрашивается сам.
+
+    Колонок меньше, и это честно: аллокацию и репозиторий узлу взять неоткуда.
+    Для того, ради чего слейв смотрит в agents — кому написать и кто свободен, —
+    хватает имени, узла и состояния."""
+    rows = [("СЛЕЙВ", "УЗЕЛ", "СОСТОЯНИЕ")]
+    try:
+        answers = bus.gather("local")
+    except bus.BusError as e:
+        return [f"шина недоступна: {e}"]
+    for answer in sorted(answers, key=lambda a: a.get("node") or ""):
+        for name, facts in sorted((answer.get("slaves") or {}).items()):
+            rows.append((name, answer.get("node") or "?", slaves.slave_state(facts)))
+    return ["слейва пула:", *table(rows)] if len(rows) > 1 else ["слейва пула: нет"]
 
 
 @app.tool(description=(
@@ -142,10 +204,19 @@ def send(to: str, message: str, priority: str = "next",
 
 
 def _send_to_slave(name, message, priority, notify_when_idle, wait_seconds):
-    alloc = slave_alloc(name)
+    """Доставка через агента узла.
+
+    Ожидание простоя целиком уехало на узел: подписку держит агент рядом с
+    сокетом и, дождавшись, публикует в инбокс мастера. Здесь больше нет
+    фонового потока — он ждал внутри аллокации и умирал вместе с ней."""
     wait = min(max(wait_seconds, 0), MAX_WAIT)
-    result = remote.send(alloc, slaves.clone_dir(name), message, priority,
-                         wait=wait)
+    try:
+        result = bus.request(slave_node(name), "send", name=name, message=message,
+                             priority=priority, wait=wait,
+                             notify=bool(notify_when_idle and not wait),
+                             timeout=wait + bus.TIMEOUT)
+    except bus.BusError as e:
+        return f"{name}: НЕ ДОСТАВЛЕНО — {e}"
     if "error" in result:
         return f"{name}: НЕ ДОСТАВЛЕНО — {result['error']}"
 
@@ -153,22 +224,8 @@ def _send_to_slave(name, message, priority, notify_when_idle, wait_seconds):
     if wait:
         verdict += f", простой: {result.get('idle') or 'не дождался за ' + str(wait) + 'с'}"
     if notify_when_idle and not wait:
-        threading.Thread(target=_watch_idle, args=(name,), daemon=True).start()
         verdict += "; уведомлю, когда освободится"
     return verdict
-
-
-def _watch_idle(name):
-    """Фоновое ожидание простоя. Результат кладём в инбокс мастера."""
-    try:
-        result = remote.send(slave_alloc(name), slaves.clone_dir(name), "",
-                             wait=MAX_WAIT)
-    except Exception as e:
-        notify_master(f"mop: не смог дождаться простоя {name}: {e}")
-        return
-    state = result.get("idle")
-    notify_master(f"mop: слейв {name} — {state}" if state
-                  else f"mop: {name} не отчиталось о простое за {MAX_WAIT}с")
 
 
 def _send_locally(target, message, priority, wait_seconds):
@@ -188,14 +245,14 @@ def _send_locally(target, message, priority, wait_seconds):
     "Хвост tmux-буфера слейва — единственный способ увидеть то, чего нет в "
     "состоянии: held-диалог чужого сообщения, промпт логина, жалобу на квоту."))
 def tail(name: str, lines: int = 40, grep: str = "") -> str:
-    buf = slaves.pane_lines(slave_alloc(name), name)
+    buf = slaves.pane_lines(slave_node(name), name)
     if grep:
         buf = [l for l in buf if grep.lower() in l.lower()]
     return "\n".join(buf[-max(1, lines):]) or "(пусто)"
 
 
 # ─── инструменты: управление ─────────────────────────────────────────────
-@app.tool(annotations=READ_ONLY, description=(
+@master_tool(annotations=READ_ONLY, description=(
     "Ёмкость пула: узлы, свободная память и сколько ещё слейвов туда влезет."))
 def pool() -> str:
     rows = [("УЗЕЛ", "СТАТУС", "СВОБОДНО", "СЛОТОВ")]
@@ -211,7 +268,7 @@ def pool() -> str:
     return "\n".join(table(rows))
 
 
-@app.tool(annotations=DESTRUCTIVE, description=(
+@master_tool(annotations=DESTRUCTIVE, description=(
     "Управление слейвами: add (создать), remove (удалить), restart "
     "(перезапустить залипшее), retarget (сменить репозиторий или LLM). "
     "Клон при remove остаётся на узле и переиспользуется."))
@@ -257,7 +314,7 @@ def _slave_retarget(name, origin, llm):
     return f"{name} -> {origin} [{llm}], перезапускается"
 
 
-@app.tool(annotations=DESTRUCTIVE, description=(
+@master_tool(annotations=DESTRUCTIVE, description=(
     "Диагностика пула: залипания, протухший логин, restart-backoff, "
     "исчерпанная квота модели. С fix=true лечит то, что лечится."))
 def doctor(fix: bool = False) -> str:
@@ -286,7 +343,7 @@ def _treat(issue):
             nomad.alloc_stop(alloc["ID"])
             return "alloc stop — Nomad пересоздаст без backoff"
         if action == "model":
-            slaves.switch_model(alloc, name, slaves.FALLBACK_MODEL)
+            slaves.switch_model(alloc["NodeName"], name, slaves.FALLBACK_MODEL)
             return f"/model {slaves.FALLBACK_MODEL}"
         nomad.alloc_restart(alloc["ID"])
         return "restart"
@@ -294,21 +351,21 @@ def _treat(issue):
         return f"{action} не вышел: {str(e)[:80]}"
 
 
-@app.tool(annotations=DESTRUCTIVE, description=(
+@master_tool(annotations=DESTRUCTIVE, description=(
     "Слэш-команда в TUI слейва. Нужна отдельно, потому что каналом слэш-"
     "команды не проходят: сообщение кладётся в очередь с skipSlashCommands. "
     f"Разрешены: {', '.join(SLASH_ALLOWED)}."))
 def slash(name: str, command: str) -> str:
     if not command.split()[0:1] or command.split()[0] not in SLASH_ALLOWED:
         return f"разрешены только: {', '.join(SLASH_ALLOWED)}"
-    alloc = slave_alloc(name)
+    node = slave_node(name)
     if command.startswith("/model "):
-        slaves.switch_model(alloc, name, command.split(None, 1)[1])
+        slaves.switch_model(node, name, command.split(None, 1)[1])
         return f"{name}: {command}"
-    return f"{name}: {command}\n{slaves.type_command(alloc, name, command)[-1500:]}"
+    return f"{name}: {command}\n{slaves.type_command(node, name, command)[-1500:]}"
 
 
-@app.tool(annotations=DESTRUCTIVE, description=(
+@master_tool(annotations=DESTRUCTIVE, description=(
     "Раздать на узлы пула креды claude.ai и ключи LLM-провайдеров. Лечит "
     "слейва, упёршиеся в протухший логин."))
 def login() -> str:
@@ -317,12 +374,35 @@ def login() -> str:
     return "\n".join(out + table([(n, results[n]) for n in sorted(results)]))
 
 
+def watch_inbox():
+    """Подписка на инбокс мастера: асинхронные вести с узлов.
+
+    MCP умеет только «запрос-ответ» — вбросить что-то в ход модели сервер не
+    может. Но он дочерний процесс сессии и знает её сокет, поэтому кладёт
+    туда. Раньше на этом месте был поток, ждавший простоя внутри аллокации;
+    теперь ждёт агент рядом с сокетом слейва, а сюда приезжает готовая весть."""
+    if not MASTER or not master_socket():
+        return
+    try:
+        bus.subscribe(bus.INBOX, lambda m: notify_master(m.get("text") or ""))
+    except bus.BusError:
+        # Без шины сервер всё равно поднимется: доставка отобьётся понятной
+        # ошибкой на первом же send, а молчащая подписка не соврёт успехом.
+        pass
+
+
 def main():
     # attach остаётся вне MCP: живой терминал инструментом не отдать.
     if "--check" in sys.argv:
-        print(f"mop-mcp: {len(app._tool_manager.list_tools())} инструментов, "
+        try:
+            where = bus.config()["url"]
+        except bus.BusError as e:
+            where = f"НЕТ ({e})"
+        print(f"mop-mcp: профиль {'мастер' if MASTER else 'узел'}, "
+              f"{len(app._tool_manager.list_tools())} инструментов, шина {where}, "
               f"инбокс мастера: {master_socket() or 'не найден'}")
         return 0
+    watch_inbox()
     app.run("stdio")
     return 0
 

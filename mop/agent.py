@@ -1,0 +1,371 @@
+"""Агент узла: отвечает на запросы шины про слейвов, которые живут ЗДЕСЬ.
+
+Заменил собой `alloc exec`. Раньше мастер гонял шелл внутрь аллокации и платил
+рукопожатием за каждую пробу; теперь на узле сидит подписчик, а мастер шлёт
+ему глагол.
+
+ОДИН НА УЗЕЛ, НЕ НА СЛЕЙВА. Переживает рестарт слейва — а спрашивают о слейве
+чаще всего именно тогда, когда он перезапускается. И живёт ВНЕ спеки джоба:
+правка спеки не доезжает до работающего слейва рестартом аллокации, ей нужна
+перерегистрация, а правка агента доезжает одним прогоном плейбука.
+
+НАБОР ГЛАГОЛОВ ЗАКРЫТ. Через шину нельзя попросить «выполни шелл»: это был бы
+тот же management-токен Nomad, только по другой трубе, — а ради того, чтобы его
+с узлов убрать, всё и затевалось. Отсюда же белые списки на `type` и `write`:
+произвольная команда в чужой TUI и произвольная запись в $HOME — это два разных
+способа получить исполнение кода на узле.
+
+Права проверяются ДВАЖДЫ: на сервере NATS (кто в какой субъект пишет) и здесь
+(какой глагол пришёл каким субъектом). Право, проверенное в одном месте,
+однажды окажется проверенным ни в одном.
+"""
+import asyncio
+import base64
+import json
+import os
+import socket
+import sys
+
+try:
+    import nats
+except ImportError:
+    sys.exit("нужна библиотека шины: pip install --user --break-system-packages nats-py")
+
+from . import bus, session
+
+HOME = os.path.expanduser("~")
+CLONES = f"{HOME}/slaves"
+
+# Глаголы, доступные не-мастеру. Слейв имеет право написать соседу и посмотреть,
+# кто чем занят; печатать в чужой TUI и писать файлы — не имеет.
+PUBLIC_VERBS = ("ping", "local", "state", "states", "send", "tail")
+
+# Слэш-команды, которые разрешено печатать в пейн. Тот же список, что у
+# фронтенда, — но проверка здесь настоящая, а там подсказка пользователю.
+SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status")
+
+# Куда `write` имеет право писать. Токена Nomad в списке нет и не будет: узлы
+# лишились его вместе с переездом на шину.
+WRITABLE = (
+    f"{HOME}/.claude/.credentials.json",
+    f"{HOME}/.config/mop/llm-keys.env",
+)
+
+# Префикс имён джобов-слейвов; он же префикс tmux-серверов и каталогов клонов.
+# Дубль slaves.JOB_PREFIX намеренный: тянуть сюда slaves значит тянуть на узел
+# python-nomad, а агенту Nomad не нужен вовсе — в этом половина смысла переезда.
+PREFIX = "sl-"
+TMUX_DIR = os.environ.get("TMUX_TMPDIR") or f"/tmp/tmux-{os.getuid()}"
+
+SCREEN_LINES = 10        # столько непустых строк пейна едет в состоянии
+IDLE_WAIT = 600          # потолок ожидания простоя для notify
+
+
+def node_name():
+    """Имя узла в Nomad. Оно же в субъекте, поэтому берётся из окружения, а не
+    угадывается: у gamer имя узла и hostname расходятся."""
+    return os.environ.get("MOP_NODE") or socket.gethostname()
+
+
+def clone_dir(name):
+    return f"{CLONES}/{name}"
+
+
+# ─── локальные пробы ─────────────────────────────────────────────────────
+async def sh(script, timeout=20):
+    """Шелл на своём же узле. -> (вывод, код). Единственное место, где агент
+    вообще запускает шелл, и скрипт всегда наш, никогда не из запроса."""
+    proc = await asyncio.create_subprocess_shell(
+        script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return "", None
+    return out.decode(errors="replace"), proc.returncode
+
+
+async def tmux_alive(name):
+    _, code = await sh(f"tmux -L {name} has-session -t {name} 2>/dev/null")
+    return code == 0
+
+
+async def screen(name, lines=SCREEN_LINES):
+    out, _ = await sh(f"tmux -L {name} capture-pane -t {name} -p -S - "
+                      f"| grep -v '^$' | tail -{lines}")
+    return out
+
+
+async def pane_lines(name):
+    """Весь буфер пейна без хвостовых пустых строк, которыми tmux добивает
+    видимую часть."""
+    out, code = await sh(f"tmux -L {name} capture-pane -p -t {name} -S -")
+    if code not in (0, None):
+        raise RuntimeError(f"tmux в {name}: {out.strip() or f'exit {code}'}")
+    lines = out.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+async def clone_facts(name):
+    """Что клон держит: ветка, несохранённое, неотправленное.
+
+    Пробы переехали с `alloc exec` СЛОВО В СЛОВО, и `--not --remotes` здесь не
+    случайность: upstream рабочей ветки бывает прибит к origin/master, и тогда
+    `@{u}..` считает влитое неотправленным. На этих числах стоит решение
+    мастера о диспатче, переписывать их вместе с транспортом нельзя."""
+    d = clone_dir(name)
+    out, _ = await sh(
+        f'cd {d} 2>/dev/null || exit 0; '
+        f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
+        f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
+        f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
+        f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"')
+    kv = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+    if "dirty" not in kv:
+        return None
+    try:
+        dirty, ahead = int(kv.get("dirty") or 0), int(kv.get("ahead") or 0)
+    except ValueError:
+        return None
+    return {"cur": kv.get("cur") or "(detached)",
+            "def": (kv.get("def") or "").rsplit("/", 1)[-1] or None,
+            "dirty": dirty, "ahead": ahead}
+
+
+async def facts(name):
+    """Всё, что узел знает о слейве, одним ответом.
+
+    Агент отдаёт ФАКТЫ, а не вердикт: собирает состояние мастер. Так логика
+    «свободен/занят/завис» остаётся в одном месте и, главное, становится
+    чистой функцией — её можно проверить без пула, чего про неё не скажешь
+    с тех пор, как она жила поверх exec."""
+    if not await tmux_alive(name):
+        return {"present": False}
+    scr, sess, clone = await asyncio.gather(
+        screen(name),
+        asyncio.to_thread(session.probe, clone_dir(name)),
+        clone_facts(name))
+    return {"present": True, "screen": scr, "session": sess, "clone": clone}
+
+
+# ─── глаголы ─────────────────────────────────────────────────────────────
+async def v_ping(_req):
+    return {"node": node_name()}
+
+
+async def v_state(req):
+    return await facts(req["name"])
+
+
+async def v_states(req):
+    """Пачкой: у узла обычно несколько слейвов, и спрашивают о них всегда
+    вместе. Одна поездка вместо N."""
+    names = req.get("names") or []
+    got = await asyncio.gather(*(facts(n) for n in names))
+    return {"slaves": dict(zip(names, got))}
+
+
+async def v_local(_req):
+    """Слейва, живущие на ЭТОМ узле, — по сокетам tmux-серверов.
+
+    Ростер без Nomad. Нужен узловому mop-mcp: токена у него больше нет, и
+    список джобов взять неоткуда. Мастер этим глаголом не пользуется — у него
+    ростер богаче: аллокации, профиль LLM, репозиторий."""
+    try:
+        names = sorted(n for n in os.listdir(TMUX_DIR) if n.startswith(PREFIX))
+    except OSError:
+        names = []
+    alive = [n for n in names if await tmux_alive(n)]
+    got = await asyncio.gather(*(facts(n) for n in alive))
+    return {"node": node_name(), "slaves": dict(zip(alive, got))}
+
+
+async def v_send(req):
+    """Сообщение в сессию слейва. -> {msg_id} либо {error}.
+
+    `notify=true` не блокирует ответ: подписку на простой держит фоновая
+    задача здесь, на узле, рядом с сокетом, и, дождавшись, публикует в инбокс
+    мастера. Отсюда push без опроса — и без потока внутри MCP-сервера, который
+    раньше ждал простоя, сидя в аллокации."""
+    name = req["name"]
+    try:
+        sock = session.resolve(clone_dir(name))["messagingSocketPath"]
+    except Exception as e:
+        return {"error": str(e)}
+    wait = min(max(int(req.get("wait") or 0), 0), IDLE_WAIT)
+    try:
+        r = await asyncio.to_thread(
+            session.send, sock, req["message"],
+            priority=req.get("priority", "next"),
+            from_name=req.get("from_name", "mop"),
+            wait_idle=wait)
+    except Exception as e:
+        return {"error": str(e)}
+    out = {"msg_id": r["msg_id"], "idle": (r["idle"] or {}).get("state")}
+    if req.get("notify") and not wait:
+        asyncio.create_task(_watch_idle(name, sock))
+    return out
+
+
+def _await_idle(name, sock, timeout):
+    """Подписка на простой БЕЗ сообщения слейву.
+
+    `session.send` всегда пишет пользовательский кадр первым, и прежний
+    watch_idle этим и пользовался: слейв получал пустое тело с одной лишь
+    подсказкой. Здесь нужен только control-кадр — спрашивать «ты освободился?»,
+    занимая ход, значит мешать ровно тому, чего ждёшь."""
+    inbox = session.Inbox(os.path.dirname(sock), tag=name[-8:])
+    try:
+        sub = session.control_frame(
+            "notify_when_idle", **{"from": inbox.address, "from_mode": "bypass"})
+        session.write_frames(sock, [sub], session.peer_token(sock))
+        return (inbox.wait_for("peer_idle_notice", sub["msg_id"], timeout)
+                or {}).get("state")
+    finally:
+        inbox.close()
+
+
+async def _watch_idle(name, sock):
+    """Дождаться простоя и сказать мастеру."""
+    try:
+        state = await asyncio.to_thread(_await_idle, name, sock, IDLE_WAIT)
+    except Exception as e:
+        return await _tell_master(f"mop: не дождался простоя {name}: {e}")
+    await _tell_master(f"mop: слейв {name} — {state}" if state
+                       else f"mop: {name} не отчитался о простое за {IDLE_WAIT}с")
+
+
+async def _tell_master(text):
+    if _conn is None:
+        return
+    try:
+        await _conn.publish(bus.INBOX, json.dumps(
+            {"node": node_name(), "text": text}, ensure_ascii=False).encode())
+    except Exception:
+        pass
+
+
+async def v_tail(req):
+    return {"lines": await pane_lines(req["name"])}
+
+
+async def v_type(req):
+    """Напечатать слэш-команду в пейн и вернуть экран после неё.
+
+    Печатью, а не сообщением по каналу: слэш-команды через канал не проходят
+    (сообщение кладётся в очередь с skipSlashCommands), а у слейва с
+    исчерпанной квотой любой ход падает, не начавшись, — слэш-команду же
+    исполняет сам TUI, ход на неё не тратится.
+
+    Перед вводом чистим строку (C-u): в пейне мог остаться недобитый текст,
+    и тогда команда склеилась бы с ним в мусор."""
+    name, command = req["name"], (req.get("command") or "").strip()
+    if command.split()[0:1] and command.split()[0] not in SLASH_ALLOWED:
+        return {"error": f"разрешены только: {', '.join(SLASH_ALLOWED)}"}
+    if "'" in command:
+        return {"error": "кавычка в команде: команда едет в шелл одной строкой"}
+    keys = ""
+    if command:
+        keys = (f"tmux -L {name} send-keys -t {name} C-u; sleep 0.3; "
+                f"tmux -L {name} send-keys -t {name} '{command}'; sleep 0.3; ")
+    out, code = await sh(keys + f"tmux -L {name} send-keys -t {name} Enter; "
+                                f"sleep 2; tmux -L {name} capture-pane -p -t {name}")
+    if code not in (0, None):
+        return {"error": out.strip() or f"tmux exit {code}"}
+    return {"screen": out}
+
+
+async def v_write(req):
+    """Атомарная запись файла из белого списка, 600.
+
+    Заменяет ту ветку раздачи кредов, что ездила шеллом в аллокацию. Список
+    закрыт: без него это была бы произвольная запись в $HOME, то есть
+    исполнение кода через ~/.bashrc."""
+    written = []
+    for path, b64 in req.get("files") or []:
+        if path not in WRITABLE:
+            return {"error": f"писать в {path} агенту не разрешено"}
+        try:
+            data = base64.b64decode(b64)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
+                      "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except Exception as e:
+            return {"error": f"{path}: {e}"}
+        written.append(path)
+    return {"written": written}
+
+
+VERBS = {"ping": v_ping, "local": v_local, "state": v_state,
+         "states": v_states, "send": v_send, "tail": v_tail, "type": v_type,
+         "write": v_write}
+
+
+# ─── петля ───────────────────────────────────────────────────────────────
+_conn = None
+
+
+async def handle(msg, public):
+    try:
+        req = json.loads(msg.data.decode())
+    except ValueError:
+        return await msg.respond(
+            json.dumps({"error": "запрос не JSON"}, ensure_ascii=False).encode())
+    verb = req.get("verb")
+    fn = VERBS.get(verb)
+    if fn is None:
+        out = {"error": f"нет глагола {verb}; есть: {', '.join(sorted(VERBS))}"}
+    elif public and verb not in PUBLIC_VERBS:
+        # Не «нет прав», а прямо: глагол существует, но не в этом субъекте.
+        out = {"error": f"глагол {verb} доступен только мастеру"}
+    else:
+        try:
+            out = await fn(req)
+        except Exception as e:
+            out = {"error": f"{verb}: {e}"}
+    try:
+        await msg.respond(json.dumps(out, ensure_ascii=False).encode())
+    except Exception:
+        pass
+
+
+async def serve():
+    global _conn
+    c = bus.config()
+    node = node_name()
+    _conn = await nats.connect(
+        servers=[c["url"]], user=c.get("user"), password=c.get("password"),
+        name=f"mop-agent/{node}",
+        allow_reconnect=True, max_reconnect_attempts=-1, reconnect_time_wait=2)
+    await _conn.subscribe(bus.subject(node, "rpc"),
+                          cb=lambda m: asyncio.create_task(handle(m, public=False)))
+    await _conn.subscribe(bus.subject(node, "msg"),
+                          cb=lambda m: asyncio.create_task(handle(m, public=True)))
+    # Общий субъект: сюда спрашивают те, кто не знает состава пула.
+    await _conn.subscribe(bus.BROADCAST,
+                          cb=lambda m: asyncio.create_task(handle(m, public=True)))
+    print(f"mop-agent: узел {node}, подписан на {bus.subject(node, 'rpc')} "
+          f"и {bus.subject(node, 'msg')}", flush=True)
+    await asyncio.Event().wait()
+
+
+def main(argv):
+    if "--check" in argv:
+        c = bus.config()
+        print(f"mop-agent: узел {node_name()}, шина {c['url']}, "
+              f"глаголов {len(VERBS)} (публичных {len(PUBLIC_VERBS)})")
+        return 0
+    try:
+        asyncio.run(serve())
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

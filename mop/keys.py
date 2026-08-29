@@ -1,15 +1,20 @@
 """Раздача файлов на узлы пула: креды claude.ai и ключи LLM-провайдеров.
 
-Узлы с живым слейвом обычно забиты памятью под завязку и sysbatch туда не
-сядет (DimensionExhausted: memory) — там файл пишется через exec в
-существующую аллокацию. Sysbatch достаётся только пустым узлам.
+Основной путь — глагол `write` агенту узла: он есть на каждом узле независимо
+от того, живёт там слейв или нет, и не требует свободной памяти. Раньше на его
+месте был exec в аллокацию живого слейва — узлы пула забиты памятью под завязку
+и sysbatch туда не садится (DimensionExhausted: memory).
+
+Sysbatch остался запасным путём для узла, чей агент молчит. Он не exec, и
+именно поэтому пережил переезд: раздача кредов не имеет права зависеть от
+шины — на первый узел она везёт креды самой шины.
 """
 import base64
 import json
 import os
 import time
 
-from . import nomad, slaves
+from . import bus, nomad, slaves
 
 LOGIN_JOB = "sl-login"
 
@@ -61,29 +66,29 @@ def distribute(files):
         raise RuntimeError("в пуле нет ready-узлов")
 
     results = {}
-    _push_via_slaves(script, results)
+    _push_via_agents(files, sorted(nodes), results)
     _push_via_sysbatch(script, sorted(nodes - set(results)), results)
     for node in nodes:
         results.setdefault(node, "НЕ ДОСТАЛСЯ — ни слейва, ни места под sysbatch")
     return results
 
 
-def _push_via_slaves(script, results):
-    """Узлы с живым слейвом — через exec в его аллокацию."""
+def _push_via_agents(files, nodes, results):
+    """Всем узлам разом — глаголом `write` их агентам.
+
+    Агент пишет только в свой белый список путей; попытка привезти что-то ещё
+    вернётся отказом, а не тихо запишется. Молчащий агент здесь не ошибка —
+    узел просто уходит в запасной путь."""
     try:
-        jobs = slaves.jobs()
-    except Exception:
+        answers = bus.request_many(
+            {n: {"verb": "write", "files": [list(f) for f in files]} for n in nodes})
+    except bus.BusError:
         return
-    for j in jobs:
-        a = nomad.latest_alloc(j["ID"])
-        if not a or a["ClientStatus"] != "running" or a["NodeName"] in results:
+    for node, answer in answers.items():
+        if isinstance(answer, Exception):
             continue
-        try:
-            out, code = nomad.sh(a, script)
-            results[a["NodeName"]] = (
-                "OK" if code == 0 else f"FAILED: {(out.strip() or f'exit {code}')[:80]}")
-        except Exception as e:
-            results[a["NodeName"]] = f"FAILED: {str(e)[:80]}"
+        results[node] = ("OK" if not answer.get("error")
+                         else f"FAILED: {str(answer['error'])[:80]}")
 
 
 def _push_via_sysbatch(script, nodes, results):
@@ -187,34 +192,17 @@ def credentials_fresh():
         return False
 
 
-NOMAD_TOKEN_FILE = f"{slaves.HOME}/.config/nomad/bootstrap.json"
-
-
-def push_nomad_token():
-    """Токен Nomad на узлы пула.
-
-    Решение оператора 2026-08-29: узлы имеют право управлять друг другом, то
-    есть на них едет тот же management-токен, что у управляющей машины. Цена
-    решения названа прямо: слейв, дотянувшееся до этого файла, может всё,
-    включая снос чужих джобов. Без токена узловой mop-mcp видит только
-    свой хост -- ни соседний узел, ни инбокс мастера ему недоступны."""
-    src = os.path.expanduser("~/.config/nomad/bootstrap.json")
-    with open(src, "rb") as f:
-        raw = f.read()
-    json.loads(raw)
-    return distribute([_as_file(NOMAD_TOKEN_FILE, raw)])
-
-
 def push_login():
-    """Раздать креды claude.ai и ключи LLM. -> (результаты, что везли, замечание)"""
+    """Раздать креды claude.ai и ключи LLM. -> (результаты, что везли, замечание)
+
+    Токен Nomad отсюда убран, и это не забывчивость. Его возили на узлы, чтобы
+    узловой mop-mcp дотягивался до соседей и до инбокса мастера, — и цена была
+    названа прямо: слейв, добравшийся до файла, мог снести чужие джобы. Шина
+    даёт ту же связь правами по субъектам, поэтому полномочия узлам больше не
+    нужны. Старую копию файла с узлов сносит плейбук nats: перестать раздавать
+    значит оставить лежать."""
     files = [_as_file(f"{slaves.HOME}/.claude/.credentials.json", credentials())]
     what = ["креды claude.ai"]
-    try:
-        with open(os.path.expanduser("~/.config/nomad/bootstrap.json"), "rb") as f:
-            files.append(_as_file(NOMAD_TOKEN_FILE, f.read()))
-        what.append("токен Nomad")
-    except OSError:
-        pass
     blob, note = llm_keys_blob()
     if blob:
         files.append(_as_file(slaves.LLM_KEYS_FILE, blob))

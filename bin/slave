@@ -70,6 +70,12 @@ def running_alloc(name):
     return a
 
 
+def running_node(name):
+    """Узел слейва — адрес для шины. Аллокация адресом быть перестала вместе
+    с alloc exec; агент подписан на субъект узла."""
+    return running_alloc(name)["NodeName"]
+
+
 def require_job(name):
     try:
         return nomad.get_job(name)
@@ -280,7 +286,7 @@ def treat(issue):
             nomad.alloc_stop(alloc["ID"])
             return "alloc stop — Nomad пересоздаст без backoff"
         if action == "model":
-            slaves.switch_model(alloc, name, slaves.FALLBACK_MODEL)
+            slaves.switch_model(alloc["NodeName"], name, slaves.FALLBACK_MODEL)
             return f"/model {slaves.FALLBACK_MODEL}"
         nomad.alloc_restart(alloc["ID"])
         return "restart"
@@ -329,8 +335,8 @@ def parse_tail(args):
 
 def cmd_tail(args):
     name, lines, follow = parse_tail(args)
-    a = running_alloc(name)
-    buf = slaves.pane_lines(a, name)
+    node = running_node(name)
+    buf = slaves.pane_lines(node, name)
     for line in buf[-lines:]:
         print(line, flush=True)
     if not follow:
@@ -339,10 +345,10 @@ def cmd_tail(args):
         while True:
             time.sleep(2)
             try:
-                cur = slaves.pane_lines(a, name)
+                cur = slaves.pane_lines(node, name)
             except Exception:
                 # слейв мог перезапуститься/переехать — перецепляемся
-                a = running_alloc(name)
+                node = running_node(name)
                 continue
             for line in appended_since(buf, cur):
                 print(line, flush=True)

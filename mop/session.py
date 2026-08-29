@@ -238,8 +238,13 @@ class Inbox:
     том же каталоге сокетов и назван как <pid>.sock — иначе он отказывается
     писать в чужое пространство имён и молча роняет ответ."""
 
-    def __init__(self, sockets_dir):
-        self.path = os.path.join(sockets_dir, f"{os.getpid()}.sock")
+    def __init__(self, sockets_dir, tag=None):
+        # tag нужен, когда один процесс ждёт простоя сразу нескольких сессий:
+        # агент узла обслуживает всех слейвов хоста, и без метки второй инбокс
+        # отобрал бы путь <pid>.sock у первого. Форма <pid>-<hex>.sock приёмнику
+        # тоже годится — других он молча не отвечает.
+        leaf = f"{os.getpid()}-{tag}.sock" if tag else f"{os.getpid()}.sock"
+        self.path = os.path.join(sockets_dir, leaf)
         self.frames = []
         self._event = threading.Event()
         try:

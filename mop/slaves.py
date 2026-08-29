@@ -8,7 +8,7 @@ import base64
 import os
 import re
 
-from . import nomad, remote
+from . import bus, nomad
 
 MEM = 8192                          # бюджет слейва, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
 HOME = "/home/ermak"                # $HOME на узлах пула
@@ -271,86 +271,11 @@ def next_name(project):
     return f"{JOB_PREFIX}{project}-{n}"
 
 
-# ─── пробы клона ─────────────────────────────────────────────────────────
-def _kv(out):
-    """Ответ вида k=v построчно -> словарь. Форма ответа у всех проб одна."""
-    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
-
-
-def clone_branch(alloc, name):
-    """Ветки клона: (текущая, дефолтная); (None, <причина>) если недоступно."""
-    d = clone_dir(name)
-    try:
-        out, _ = nomad.sh(alloc,
-            f'echo "cur=$(git -C {d} branch --show-current 2>/dev/null)"; '
-            f'echo "def=$(git -C {d} rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"')
-    except Exception:
-        return None, "exec недоступен"
-    kv = _kv(out)
-    if "def" not in kv:
-        return None, "exec недоступен"
-    if not kv["def"]:
-        return None, "клона ещё нет"
-    return kv["cur"] or "(detached)", kv["def"].rsplit("/", 1)[-1]
-
-
-def clone_holds_work(alloc, name):
-    """Есть ли в клоне что терять: ((не закоммичено, не отправлено), ветка)
-    или (None, причина).
-
-    Занятость места — это НЕ имя ветки. Имя врёт в обе стороны: у cloudpub
-    origin/HEAD = dev, а работают на beta3.0, и чистое запушенное слейв
-    читалось как «занят: beta3.0»; наоборот, место с умершим мид-таском
-    агентом сидит на bug/NNNN, и если решать по одной лишь активности сессии,
-    оно читается свободным (rugent-4 на bug/1063 попал в list как
-    «свободен» — мастер, восстановившийся по одному только list, задиспатчил бы
-    поверх чужого дерева).
-
-    Единственный вопрос, который на самом деле задаёт мастер перед диспатчем:
-    пропадёт ли что-нибудь, если занять это место. Пропадает только то, чего
-    нет ни на одной удалённой ветке.
-
-    Считаем через `--not --remotes`, а НЕ через `@{u}..`: upstream у рабочей
-    ветки бывает прибит к origin/master, и тогда всё, что ещё не влито, врёт
-    как «не отправлено». Так и вышло на rugent-7: коммит 0eaeae15 лежал на
-    origin/bug/1048 и был влит в master мержем 4b663ce1, а `@{u}..` показывал
-    единицу и место читалось занятым.
-
-    Оговорка: remote-tracking ref'ы в клоне могут быть протухшими (на том же
-    rugent-7 последний fetch отставал на двое суток). Fetch тут не делаем —
-    это сетевая операция на каждое место в каждом list; в сомнительном случае
-    смотреть глазами через tail.
-
-    Возвращаем ДВА числа раздельно, а не сумму: «не закоммичено» и «не
-    отправлено» — разные состояния и разный разговор с агентом. Сложив их в
-    одно «только локально: 3», мастер сказал переродившемуся месту «у тебя было
-    3 локальных коммита», тогда как там лежали 3 НЕсохранённых файла и ноль
-    коммитов.
-    """
-    d = clone_dir(name)
-    try:
-        out, _ = nomad.sh(alloc,
-            f'cd {d} 2>/dev/null || exit 0; '
-            f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
-            f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
-            f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"')
-    except Exception:
-        return None, "exec недоступен"
-    kv = _kv(out)
-    if "dirty" not in kv:
-        return None, "exec недоступен"
-    try:
-        dirty, ahead = int(kv.get("dirty") or 0), int(kv.get("ahead") or 0)
-    except ValueError:
-        return None, "нечитаемый ответ git"
-    return (dirty, ahead), kv.get("cur") or "(detached)"
-
-
-# ─── состояние сессии ────────────────────────────────────────────────────
-# КАК УЗНАТЬ РЕАЛЬНОЕ СОСТОЯНИЕ СИДЕНЬЯ (файл сессии + сокет)
+# ─── состояние слейва ────────────────────────────────────────────────────
+# КАК УЗНАТЬ РЕАЛЬНОЕ СОСТОЯНИЕ СЛЕЙВА
 #
-# Слейв само ведёт две вещи, которые и есть источник правды о его состоянии
-# (обе появляются независимо от моста claude.ai):
+# Узел присылает ФАКТЫ, вердикт собираем здесь. Слейв сам ведёт две вещи, и
+# они и есть источник правды (обе появляются независимо от моста claude.ai):
 #
 # 1) ФАЙЛ АКТИВНОСТИ ~/.claude/sessions/<pid>.json: cwd (по нему матчим — он
 #    стабилен, в отличие от name), status (idle|busy|requires_action|waiting|
@@ -366,51 +291,36 @@ def clone_holds_work(alloc, name):
 #   коннект есть + busy ............ занят
 #   коннект есть + requires_action . требует действия
 #   коннект есть + waiting ......... ждёт ввода
-# Нет файла (старый claude / нет python3) -> None, и вызывающий откатывается
-# на прежнюю tmux-эвристику. Детект протухшего логина остаётся на tmux — в
-# файле он не виден.
+# Нет файла (старый claude / нет python3) -> None, и мы откатываемся на
+# прежнюю tmux-эвристику. Детект протухшего логина остаётся на tmux — в файле
+# он не виден.
 #
-# Пробник и знание о формате файла живут в mop/session.py и уезжают на
-# узел исходником: сокет слейва host-local, снаружи к нему не подключиться.
+# Пробник живёт в mop/session.py и исполняется агентом НА УЗЛЕ: сокет слейва
+# host-local, снаружи к нему не подключиться.
+#
+# Всё, что ниже, — ЧИСТЫЕ функции над этими фактами. Так вышло не случайно:
+# пока состояние собиралось поверх exec, проверить его без живого пула было
+# нельзя, и регрессия однажды спряталась именно здесь.
 SESSION_STATES = ("idle", "busy", "requires_action", "waiting", "offline")
 
 
-def session_status(alloc, name):
-    """idle|busy|requires_action|waiting|offline|hung, либо None если файла
-    сессии нет."""
-    try:
-        line = remote.probe(alloc, clone_dir(name))
-    except Exception:
-        return None
+def facts(node, name):
+    """Факты об одном слейве с его узла."""
+    return bus.request(node, "state", name=name)
+
+
+def _session_state(line):
+    """Ответ пробника "<status> <alive> <listen>" -> состояние сессии, либо
+    None, если файла сессии нет."""
     if not line or line == "none":
         return None
     parts = line.split()
     if len(parts) < 3:
         return None
     status, alive, listen = parts[0], parts[1] == "1", parts[2] == "1"
-    if not listen and not alive:
-        return "offline"
-    if not listen and alive:
-        return "hung"
+    if not listen:
+        return "hung" if alive else "offline"
     return status if status in SESSION_STATES else None
-
-
-def _responds(alloc):
-    """Отвечает ли аллокация вообще. -> причина зависания или None."""
-    try:
-        out, code = nomad.sh(alloc, "timeout 3s echo 'test' 2>/dev/null")
-    except Exception as e:
-        return f"ЗАВИС ({str(e)[:30]})"
-    if code != 0 or not out.strip():
-        return "ЗАВИС (не отвечает)"
-    return None
-
-
-def screen(alloc, name, lines=10):
-    """Последние непустые строки tmux-пейна слейва."""
-    out, _ = nomad.sh(alloc,
-        f"tmux -L {name} capture-pane -t {name} -p -S - | grep -v '^$' | tail -{lines}")
-    return out
 
 
 def _screen_complaint(activity):
@@ -444,35 +354,6 @@ def _screen_complaint(activity):
     return None
 
 
-def _state_from_session(alloc, name, st):
-    """Состояние места по достоверному статусу сессии.
-
-    Файл сессии авторитетен про АКТИВНОСТЬ, но не про ЗАНЯТОСТЬ МЕСТА: клон
-    переживает смерть сессии. Поэтому у idle спрашиваем клон — пропадёт ли
-    что-нибудь, если занять место."""
-    if st == "requires_action":
-        return "требует действия"
-    if st == "waiting":
-        return "ждёт ввода"
-    if st in ("offline", "hung"):
-        return "ЗАВИС (не отвечает)"
-    if st == "busy":
-        cur, default = clone_branch(alloc, name)
-        return f"занят: {cur}" if (cur and cur != default) else "занят"
-
-    held, cur = clone_holds_work(alloc, name)
-    if held is None:
-        return "свободен"
-    dirty, ahead = held
-    if dirty or ahead:
-        what = ", ".join(p for p in (f"не закоммичено: {dirty}" if dirty else "",
-                                     f"не отправлено: {ahead}" if ahead else "") if p)
-        return f"занят: {cur} ({what})"
-    # Чисто и всё на origin — терять нечего, место переиспользуемо. Ветку
-    # показываем справочно: диспатч всё равно обязан начать с переключения на
-    # интеграционную ветку, иначе новая ветка тикета уедет от оставшейся здесь.
-    return f"свободен ({cur})" if cur else "свободен"
-
 
 def _tmux_guess(activity):
     """Древний скоринг по словам в буфере. Работает только там, где файла
@@ -489,65 +370,157 @@ def _tmux_guess(activity):
     return None
 
 
-def _state_from_branch(alloc, name):
+
+def _work_branch(clone):
+    """Ветка слейва, если она не дефолтная, — иначе None.
+
+    Занятость места — это НЕ имя ветки, и здесь оно нужно только чтобы
+    показать человеку, где слейв сидит."""
+    if not clone:
+        return None
+    cur, default = clone.get("cur"), clone.get("def")
+    return cur if cur and cur != default else None
+
+
+def _state_from_session(st, clone):
+    """Состояние места по достоверному статусу сессии.
+
+    Файл сессии авторитетен про АКТИВНОСТЬ, но не про ЗАНЯТОСТЬ МЕСТА: клон
+    переживает смерть сессии. Поэтому у idle спрашиваем клон — пропадёт ли
+    что-нибудь, если занять место.
+
+    Пропадает только то, чего нет ни на одной удалённой ветке. Числа считает
+    агент через `--not --remotes`, а НЕ через `@{u}..`: upstream рабочей ветки
+    бывает прибит к origin/master, и тогда всё невлитое врёт как «не
+    отправлено» (так и вышло на rugent-7).
+
+    «Не закоммичено» и «не отправлено» показываем РАЗДЕЛЬНО: это разные
+    состояния и разный разговор с агентом. Сложив их в одно «только локально:
+    3», мастер однажды сказал переродившемуся месту «у тебя было 3 локальных
+    коммита», тогда как там лежали 3 несохранённых файла и ноль коммитов."""
+    if st == "requires_action":
+        return "требует действия"
+    if st == "waiting":
+        return "ждёт ввода"
+    if st in ("offline", "hung"):
+        return "ЗАВИС (не отвечает)"
+    if st == "busy":
+        branch = _work_branch(clone)
+        return f"занят: {branch}" if branch else "занят"
+
+    if not clone:
+        return "свободен"
+    dirty, ahead = clone.get("dirty") or 0, clone.get("ahead") or 0
+    if dirty or ahead:
+        what = ", ".join(p for p in (f"не закоммичено: {dirty}" if dirty else "",
+                                     f"не отправлено: {ahead}" if ahead else "") if p)
+        return f"занят: {clone.get('cur')} ({what})"
+    # Чисто и всё на origin — терять нечего, место переиспользуемо. Ветку
+    # показываем справочно: диспатч всё равно обязан начать с переключения на
+    # интеграционную ветку, иначе новая ветка тикета уедет от оставшейся здесь.
+    cur = clone.get("cur")
+    return f"свободен ({cur})" if cur else "свободен"
+
+
+def _state_from_clone(clone):
     """Последний откат: одна лишь ветка клона."""
-    cur, default = clone_branch(alloc, name)
-    if cur is None:
-        return default
-    return "свободен" if cur == default else f"занят: {cur}"
+    if not clone:
+        return "клона ещё нет"
+    branch = _work_branch(clone)
+    return f"занят: {branch}" if branch else "свободен"
 
 
-def slave_state(alloc, name):
-    """Занятость места: реальное состояние сессии, с откатами на tmux и ветку."""
-    dead = _responds(alloc)
-    if dead:
-        return dead
+def slave_state(f):
+    """Занятость места по фактам с узла. ЧИСТАЯ функция: см. блок выше.
 
-    try:
-        activity = screen(alloc, name)
-        if not activity.strip():
-            return "свободен"
+    «Свободен» означает, что в клоне нет несохранённой работы, а не что сессия
+    молчит. На этом стоит решение мастера о диспатче, и ломать условие нельзя.
+    """
+    if not f or f.get("error"):
+        return f"ЗАВИС ({(f or {}).get('error', 'нет ответа')[:40]})"
+    if not f.get("present"):
+        return "ЗАВИС (нет tmux-сессии)"
 
-        complaint = _screen_complaint(activity)
-        if complaint:
-            kind, text = complaint
-            if kind != "login":
-                return text
-            cur, default = clone_branch(alloc, name)
-            return f"{text}: {cur}" if cur and cur != default else text
+    activity = f.get("screen") or ""
+    if not activity.strip():
+        return "свободен"
 
-        st = session_status(alloc, name)
-        if st is not None:
-            return _state_from_session(alloc, name, st)
+    complaint = _screen_complaint(activity)
+    if complaint:
+        kind, text = complaint
+        if kind != "login":
+            return text
+        branch = _work_branch(f.get("clone"))
+        return f"{text}: {branch}" if branch else text
 
-        guess = _tmux_guess(activity)
-        if guess:
-            return guess
-    except Exception:
-        pass  # любой сбой проб -> откат на ветку
+    st = _session_state(f.get("session"))
+    if st is not None:
+        return _state_from_session(st, f.get("clone"))
 
-    return _state_from_branch(alloc, name)
+    guess = _tmux_guess(activity)
+    if guess:
+        return guess
+
+    return _state_from_clone(f.get("clone"))
 
 
 # ─── сводки для фронтендов ───────────────────────────────────────────────
-def slave_rows():
-    """Слейвы как ДАННЫЕ: [{name, node, alloc_status, state, llm, origin}]."""
-    rows = []
-    for j in jobs():
-        meta = j.get("Meta") or {}
-        row = {"name": j["ID"], "node": "-", "alloc_status": j.get("Status", "?"),
-               "state": "-", "llm": meta.get("llm", DEFAULT_LLM),
-               "origin": meta.get("origin", "?")}
+def _collect():
+    """Ростер Nomad плюс состояние с узлов, ОДНИМ заходом.
+
+    Общая часть list и doctor. Раньше каждый ходил на узлы сам и платил по
+    четыре рукопожатия exec'а за слейва — на десяти слейвах это сорок
+    последовательных подключений, и столько же ещё раз, если следом звали
+    doctor. Теперь: один запрос в Nomad за ростером и по одному запросу на
+    УЗЕЛ за всеми его слейвами, параллельно по одному соединению.
+
+    -> [{job, alloc, state}]; state=None там, где спрашивать некого.
+    """
+    items, by_node = [], {}
+    for j in sorted(jobs(), key=lambda j: j["ID"]):
+        alloc, err = None, None
         try:
-            a = nomad.latest_alloc(j["ID"])
-            if a:
-                row["node"] = a["NodeName"]
-                row["alloc_status"] = a["ClientStatus"]
-                if a["ClientStatus"] == "running":
-                    row["state"] = slave_state(a, j["ID"])
+            alloc = nomad.latest_alloc(j["ID"])
         except Exception as e:
-            row["alloc_status"] = nomad.describe_error(e)
-        rows.append(row)
+            err = nomad.describe_error(e)
+        item = {"job": j, "alloc": alloc, "state": None, "error": err}
+        if alloc and alloc["ClientStatus"] == "running":
+            by_node.setdefault(alloc["NodeName"], []).append(item)
+        items.append(item)
+
+    answers = bus.request_many({
+        node: {"verb": "states", "names": [i["job"]["ID"] for i in its]}
+        for node, its in by_node.items()})
+
+    for node, its in by_node.items():
+        answer = answers.get(node)
+        # Молчащий агент — ОТДЕЛЬНАЯ болезнь, не "слейв завис": слейв при этом
+        # может прекрасно работать, и рестартить его нельзя.
+        if isinstance(answer, Exception):
+            for i in its:
+                i["state"] = f"АГЕНТ МОЛЧИТ ({answer})"
+            continue
+        got = (answer or {}).get("slaves") or {}
+        for i in its:
+            i["state"] = slave_state(got.get(i["job"]["ID"]))
+    return items
+
+
+def slave_rows():
+    """Слейва как ДАННЫЕ: [{name, node, alloc_status, state, llm, origin}]."""
+    rows = []
+    for item in _collect():
+        job, alloc = item["job"], item["alloc"]
+        meta = job.get("Meta") or {}
+        rows.append({
+            "name": job["ID"],
+            "node": alloc["NodeName"] if alloc else "-",
+            "alloc_status": (item["error"] or (alloc["ClientStatus"] if alloc
+                                               else job.get("Status", "?"))),
+            "state": item["state"] or "-",
+            "llm": meta.get("llm", DEFAULT_LLM),
+            "origin": meta.get("origin", "?"),
+        })
     return rows
 
 
@@ -576,19 +549,20 @@ def pool():
 #                             restart-backoff (до 30 мин)
 #   нет квоты модели       -> печать /model в пейн; рестарт квоту не вернёт
 #   queued без аллокации   -> мест в пуле нет, лечится не отсюда
+#   агент узла молчит      -> отсюда никак: лечится юнитом на самом узле
 def diagnose():
     """Проблемы пула как ДАННЫЕ: [{name, alloc, diagnosis, action}]."""
     issues = []
-    for j in sorted(jobs(), key=lambda j: j["ID"]):
-        a = nomad.latest_alloc(j["ID"])
-        if not a or a["ClientStatus"] in ("lost", "unknown", "failed", "pending"):
-            issues.append(_placement_issue(j, a))
+    for item in _collect():
+        job, alloc = item["job"], item["alloc"]
+        if not alloc or alloc["ClientStatus"] in ("lost", "unknown", "failed",
+                                                  "pending"):
+            issues.append(_placement_issue(job, alloc))
             continue
-        state = slave_state(a, j["ID"])
-        action = _action_for(state)
+        action = _action_for(item["state"])
         if action is not False:
-            issues.append({"name": j["ID"], "alloc": a, "diagnosis": state,
-                           "action": action})
+            issues.append({"name": job["ID"], "alloc": alloc,
+                           "diagnosis": item["state"], "action": action})
     return issues
 
 
@@ -609,6 +583,11 @@ def _placement_issue(job, alloc):
 
 def _action_for(state):
     """Лечение для состояния. False — состояние здоровое, проблемы нет."""
+    # Молчит АГЕНТ, а не слейв. Рестарт слейва тут ничего не лечит и вполне
+    # может убить живую работу в клоне: про сам слейв мы в этот момент не
+    # знаем ничего. Показать — да, трогать — нет.
+    if state.startswith("АГЕНТ МОЛЧИТ"):
+        return None
     if state.startswith("ЗАВИС"):
         return "restart"
     # Сессия жива, но упёрлась в запрос действия и сама не сдвинется.
@@ -623,61 +602,46 @@ def _action_for(state):
     return False
 
 
-def type_command(alloc, name, command):
-    """Напечатать команду в tmux-пейн слейва и вернуть экран после неё.
+# ─── ввод в TUI слейва ───────────────────────────────────────────────────
+# Всё здесь адресуется УЗЛОМ, а не аллокацией: alloc exec умер вместе со своей
+# адресацией, и агент подписан на субъект узла.
+def type_command(node, name, command):
+    """Напечатать слэш-команду в tmux-пейн слейва и вернуть экран после неё.
 
     Печатью, а не сообщением по каналу: слэш-команды через канал не проходят
     (сообщение кладётся в очередь с skipSlashCommands), а у слейва с
     исчерпанной квотой любой ход падает, не начавшись — слэш-команду же
     исполняет сам TUI, ход на неё не тратится.
 
-    Перед вводом чистим строку (C-u): в пейне мог остаться недобитый текст,
-    и тогда команда склеилась бы с ним в мусор."""
-    return _tmux(alloc, name,
-        f"tmux -L {name} send-keys -t {name} C-u; sleep 0.3; "
-        f"tmux -L {name} send-keys -t {name} '{command}'; sleep 0.3; "
-        f"tmux -L {name} send-keys -t {name} Enter; sleep 2; ")
+    Белый список команд проверяет АГЕНТ: проверка на этой стороне осталась бы
+    подсказкой пользователю, а не правом."""
+    r = bus.request(node, "type", name=name, command=command, timeout=45)
+    if "error" in r:
+        raise RuntimeError(r["error"])
+    return r.get("screen") or ""
 
 
-def press_enter(alloc, name):
+def press_enter(node, name):
     """Подтвердить диалог. Только увидев его: слепой Enter на слейв без
     диалога отправил бы пустой ход."""
-    return _tmux(alloc, name, f"tmux -L {name} send-keys -t {name} Enter; sleep 2; ")
+    return type_command(node, name, "")
 
 
-def _tmux(alloc, name, script):
-    out, code = nomad.sh(alloc, script + f"tmux -L {name} capture-pane -p -t {name}")
-    if code not in (0, None):
-        raise RuntimeError(out.strip() or f"tmux exit {code}")
-    return out
-
-
-def switch_model(alloc, name, model):
+def switch_model(node, name, model):
     """Перевести слейв на другую модель, напечатав /model в его tmux-пейн.
 
-    Именно печатью, а не сообщением по каналу: обработка входящего сообщения —
-    это ход, а ход у слейва с исчерпанной квотой падает, не начавшись. Слэш-
-    команда же исполняется самим TUI, ход на неё не тратится.
-
-    Перед вводом чистим строку (C-u): в пейне мог остаться недобитый текст.
-
     `/model` не переключает молча — он спрашивает «Switch model?» с уже
-    выделенным «Yes». Подтверждаем вторым Enter, но ТОЛЬКО увидев диалог:
-    слепой Enter на слейв без диалога отправил бы пустой ход."""
-    out = type_command(alloc, name, f"/model {model}")
+    выделенным «Yes». Подтверждаем вторым Enter, но ТОЛЬКО увидев диалог."""
+    out = type_command(node, name, f"/model {model}")
     if "switch model?" in out.lower():
-        out = press_enter(alloc, name)
+        out = press_enter(node, name)
     if "switch model?" in out.lower():
         raise RuntimeError("диалог смены модели не закрылся")
 
 
-def pane_lines(alloc, name):
-    """Весь буфер tmux-пейна (история + экран), без хвостовых пустых строк,
-    которыми tmux добивает видимую часть."""
-    out, code = nomad.sh(alloc, f"tmux -L {name} capture-pane -p -t {name} -S -")
-    if code not in (0, None):
-        raise RuntimeError(f"tmux в {name}: {out.strip() or f'exit {code}'}")
-    lines = out.splitlines()
-    while lines and not lines[-1].strip():
-        lines.pop()
-    return lines
+def pane_lines(node, name):
+    """Весь буфер tmux-пейна слейва (история + экран)."""
+    r = bus.request(node, "tail", name=name)
+    if "error" in r:
+        raise RuntimeError(f"tmux в {name}: {r['error']}")
+    return r.get("lines") or []

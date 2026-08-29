@@ -1,32 +1,38 @@
-"""Связь с Nomad: клиент, exec внутрь аллокации, поиск аллокаций.
+"""Связь с Nomad: клиент, джобы, аллокации.
 
-Всё, кроме attach, ходит через API (REST — python-nomad, команды внутри
-аллокаций — exec-websocket). ssh нужен только attach, ради живого терминала.
+Только REST (python-nomad). Внутрь узла Nomad больше не ходит: команды там
+исполняет агент через шину (mop/bus.py, mop/agent.py), а ssh нужен лишь для
+attach, ради живого терминала.
+
+Раньше здесь жил `alloc exec` по websocket, и он был единственной дорогой на
+узел. Команда ехала в query-строке URL, nginx перед Nomad резал URI на 8 КБ —
+отсюда были и лимит на длину сообщения, и двухфазная установка session.py на
+узел. Шина сняла и то и другое: ничего из этого в коде больше нет.
 """
-import base64
 import json
 import os
 import sys
-from urllib.parse import quote
 
 try:
     import nomad as _nomad
     import nomad.api.exceptions
-    import websocket
 except ImportError:
     sys.exit("нужны библиотеки API: pip install --user --break-system-packages "
-             "python-nomad websocket-client")
+             "python-nomad")
 
 ADDR = os.environ.get("NOMAD_ADDR", "https://nomad.ermak.dev")
 TASK = "claude"          # имя задачи внутри группы слейва
-# Два датацентра, и это не формальность. В `home` живут рабочие узлы, туда
-# планировщик ставит слейвов. В `control` — одна лишь управляющая машина: она
-# в кластере ради того, чтобы на ней МОГЛА существовать аллокация (alloc exec
-# ходит только внутрь аллокаций, а инбокс мастера живёт именно тут). Джобы слейвов
-# объявляют home, поэтому на рабочую станцию оператора слейв не сядет.
+# Два датацентра. В `home` живут рабочие узлы, туда планировщик ставит слейвов;
+# джобы слейвов объявляют home, поэтому на рабочую станцию оператора слейв не
+# сядет. В `control` — одна лишь управляющая машина, и делит их теперь только
+# раздача: креды и ключи едут на пул, а не на их источник.
+#
+# Изначально управляющую машину вводили в кластер по другой причине: `alloc
+# exec` ходит только внутрь аллокаций, и без своей аллокации мастер был для
+# слейва недосягаем. С переездом на шину эта причина отпала — слейв пишет в
+# mop.master.inbox, и членство мастера в кластере ему больше ни к чему.
 POOL_DC = "home"
 CONTROL_DC = "control"
-MAX_EXEC_URL = 7800      # nginx перед Nomad режет URI на 8 КБ
 NotFound = _nomad.api.exceptions.URLNotFoundNomadException
 ApiError = _nomad.api.exceptions.BaseNomadException
 
@@ -54,50 +60,6 @@ def client():
 def describe_error(e):
     """Человеческая причина отказа Nomad — одинаково во всех вызывающих."""
     return f"ошибка API Nomad: {e}" if isinstance(e, ApiError) else f"ошибка связи с Nomad: {e}"
-
-
-def alloc_exec(alloc_id, argv, task=TASK, timeout=30):
-    """nomad alloc exec: argv исполняется внутри аллокации через
-    exec-websocket API, возвращает (stdout+stderr, exit_code)."""
-    url = (ADDR.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
-           + f"/v1/client/allocation/{alloc_id}/exec"
-           + f"?task={quote(task)}&tty=false&command={quote(json.dumps(argv))}")
-    # Команда едет в query-строке, а nginx перед Nomad режет URI примерно на
-    # 8 КБ и отвечает 414 ещё до Nomad. Без этой проверки длинное сообщение
-    # падало бы невнятным WebSocketBadStatusException.
-    if len(url) > MAX_EXEC_URL:
-        raise ValueError(
-            f"команда для alloc exec длиннее лимита URL ({len(url)} > {MAX_EXEC_URL} байт) — "
-            f"сократи сообщение или передай его файлом")
-    ws = websocket.create_connection(
-        url, header={"X-Nomad-Token": token()}, timeout=timeout)
-    # без закрытия stdin сервер шлёт только data-кадры и никогда — exited
-    ws.send(json.dumps({"stdin": {"close": True}}))
-    out, code = [], None
-    try:
-        while True:
-            try:
-                frame = ws.recv()
-            except websocket.WebSocketConnectionClosedException:
-                break
-            if not frame:
-                break
-            msg = json.loads(frame)
-            for stream in ("stdout", "stderr"):
-                data = (msg.get(stream) or {}).get("data")
-                if data:
-                    out.append(base64.b64decode(data).decode(errors="replace"))
-            if msg.get("exited"):
-                code = (msg.get("result") or {}).get("exit_code", 0)
-                break
-    finally:
-        ws.close()
-    return "".join(out), code
-
-
-def sh(alloc, script, timeout=30):
-    """Шелл внутри аллокации — обвязка, которая иначе повторяется в каждом вызове."""
-    return alloc_exec(alloc["ID"], ["/bin/bash", "-c", script], timeout=timeout)
 
 
 def alloc_restart(alloc_id):
