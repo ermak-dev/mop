@@ -411,7 +411,7 @@ async def serve():
     node = node_name()
     _conn = await nats.connect(
         servers=[c["url"]], user=c.get("user"), password=c.get("password"),
-        tls_hostname=c.get("tls_hostname"), name=f"mop-agent/{node}",
+        name=f"mop-agent/{node}",
         allow_reconnect=True, max_reconnect_attempts=-1, reconnect_time_wait=2)
     # cb ОБЯЗАН быть корутиной — nats-py отвергает обычную функцию. И каждый
     # запрос уходит в свою задачу: последовательная обработка означала бы, что
@@ -444,7 +444,6 @@ async def check():
           f"глаголов {len(VERBS)} (публичных {len(PUBLIC_VERBS)})")
     nc = await nats.connect(servers=[c["url"]], user=c.get("user"),
                             password=c.get("password"),
-                            tls_hostname=c.get("tls_hostname"),
                             name="mop-agent/check",
                             allow_reconnect=False, connect_timeout=5)
     try:

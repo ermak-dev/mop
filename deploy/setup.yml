@@ -38,17 +38,14 @@
                                    | map('split', '=')
                                    | map('reverse')) }}"
 
-    # КУДА подключаться и ЧЕЙ сертификат ждать -- разные вещи, и здесь это не
-    # тонкость. Узлы пула сидят в одной локалке с сервером шины, но публичное
-    # публичное имя резолвится в адрес роутера, а хайрпин на порт шины он не
-    # делает: первый же прогон дал connection refused на 79.141.65.134:4222 с
-    # обоих узлов. Ходим на LAN-адрес -- тот же, на который Nomad-клиент ходит
-    # за RPC, -- а сертификат проверяем по имени, на которое он выписан
-    # (nats_cert_host в bus.json). Без этого пришлось бы либо выключать
-    # проверку, либо открывать 4222 наружу.
+    # На LAN-адрес -- тот же, на который Nomad-клиент ходит за RPC. Публичное
+    # имя тут не годится в принципе: оно резолвится в адрес роутера, а хайрпин
+    # на порт шины он не делает -- первый же прогон дал connection refused на
+    # <публичный адрес>:4222 с обоих узлов. Порт наружу не проброшен и
+    # проброшен быть не должен.
     - name: Bus address on the LAN
       ansible.builtin.set_fact:
-        nats_lan: "tls://{{ MOP_SERVER_LAN }}:{{ MOP_NATS_PORT }}"
+        nats_lan: "nats://{{ MOP_SERVER_LAN }}:{{ MOP_NATS_PORT }}"
 
 
 - name: NATS server for the mop bus
@@ -61,9 +58,6 @@
     # заводит файл при первом обращении и возвращает то же значение дальше.
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_tgz: "https://github.com/nats-io/nats-server/releases/download/v{{ MOP_NATS_VERSION }}/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64.tar.gz"
-    # Сертификат берём существующий, от vhost'а Nomad, и клиенты ходят на
-    # том же имени. Отдельное имя стоило бы записи в DNS и второго
-    # certbot'а ради того же самого хоста; порт различает службы не хуже имени.
     nats_nodes: "{{ groups['nomad_clients'] | map('extract', hostvars, 'mop_node') | list }}"
     # Шарды считает `mop deploy` из ростера Nomad и своей памяти (см. bin/deploy)
     # и передаёт сюда --extra-vars. Пустой список -- законное состояние пустого
@@ -128,9 +122,9 @@
 # Дубль осознанный: игра, которая запускает агента, обязана привезти его код
 # сама. Пока она этого не делала, `mop deploy nats` после правки agent.py
 # поднимал на узлах СТАРЫЙ агент -- и первый же прогон это показал: креды в
-# bus.json уже несли tls_hostname, а агент рядом о нём не знал и падал на
-# проверке сертификата. Аварийный путь, зависящий от соседнего плейбука, --
-# не аварийный путь.
+# bus.json уже несли новое поле, а агент рядом о нём не знал и падал на
+# соединении. Аварийный путь, зависящий от соседнего плейбука, -- не аварийный
+# путь.
 - name: mop-agent on the pool nodes
   hosts: nomad_clients
   gather_facts: no
@@ -139,7 +133,6 @@
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     mop_home: "{{ MOP_HOME }}/mop"
     nats_addr: "{{ nats_lan }}"
-    nats_cert_host: "{{ MOP_TLS_HOST }}"
     nats_user: "node-{{ mop_node }}"
     nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + mop_node + '.pass length=32 chars=ascii_letters,digits') }}"
     shards: "{{ mop_shards | default([]) }}"
@@ -259,7 +252,6 @@
   vars:
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_addr: "{{ nats_lan }}"
-    nats_cert_host: "{{ MOP_TLS_HOST }}"
     nats_user: admin
     nats_password: "{{ lookup('password', secrets_dir + '/nats-admin.pass length=32 chars=ascii_letters,digits') }}"
     shards: "{{ mop_shards | default([]) }}"

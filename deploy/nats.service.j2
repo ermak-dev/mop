@@ -4,7 +4,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# Под root ради ключа letsencrypt: сертификат тут общий с vhost'ом Nomad.
+# Под root ради /etc/nats/nats-server.conf: внутри пароли всех шардов, и файл
+# читается только root'ом. (Раньше причиной был ключ letsencrypt; TLS снят,
+# причина осталась другая.)
 ExecStart=/usr/local/bin/nats-server -c /etc/nats/nats-server.conf
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always

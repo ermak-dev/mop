@@ -11,48 +11,16 @@
 #
 # Запуск:  mop deploy homelab
 
-- name: Сертификат для шины и сторож диска
+- name: Ночной сторож диска
   hosts: mop_server
   become: no
   gather_facts: no
 
   vars:
-    acme_webroot: "{{ MOP_ACME_WEBROOT }}"
     nomad_home: "{{ MOP_NOMAD_DATA | dirname }}"
 
   tasks:
-    # Сертификат нужен ШИНЕ (deploy/nats-server.conf.j2), и только ей: API
-    # Nomad с 2026-08-29 слушает 4646 напрямую, прокси перед ним больше нет.
-    # Имя берётся то же самое — отдельное стоило бы записи в DNS и второго
-    # certbot'а ради того же хоста.
-    #
-    # Выпуск идёт ВХОДЯЩИМ на 443, а не в локалку: nginx, встроенный в GitLab,
-    # отдаёт webroot ACME для всех имён домена. Но certbot не выпишет
-    # сертификат, пока имя не попало в server_name блока :80.
-    - name: Add the Nomad name to the port-80 server_name
-      ansible.builtin.replace:
-        path: "{{ MOP_HOME }}/nginx/vhosts.conf"
-        # www.ermak.dev pins the match to the port-80 catch-all block; the
-        # https `server_name ermak.dev;` one-liner must NOT gain the name (a
-        # second 443 block with it would win over ours and shadow the vhost).
-        regexp: '^(\s*server_name ermak\.dev www\.ermak\.dev(?:(?!nomad\.ermak\.dev).)*);$'
-        replace: '\1 nomad.ermak.dev;'
-      register: http_name
-
-    - name: Reload nginx for the ACME name
-      become: yes
-      ansible.builtin.command: gitlab-ctl hup nginx
-      when: http_name.changed
-
-    - name: Issue the certificate
-      become: yes
-      ansible.builtin.command: >
-        certbot certonly --webroot -w {{ acme_webroot }}
-        -d {{ MOP_TLS_HOST }} --non-interactive
-      args:
-        creates: "/etc/letsencrypt/live/{{ MOP_TLS_HOST }}/fullchain.pem"
-
-    # --- ночной сторож диска (см. sl-cleanup.nomad.hcl) -------------------
+    # см. sl-cleanup.nomad.hcl.
     # template, а не copy: спека несёт значения установки (датацентр, пользователь,
     # $HOME). ${...} для этого не годится -- это интерполяция HCL, Nomad стал бы
     # разрешать её сам и не нашёл бы переменной.
