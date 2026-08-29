@@ -156,6 +156,24 @@ def probe(cwd):
 
 
 # ─── протокол канала ─────────────────────────────────────────────────────
+# Подсказка едет в теле КАЖДОГО сообщения, а не в системном промпте, потому
+# что системную инструкцию съедает компактация, а тело — нет. Чинит ровно тот
+# случай, на котором мы споткнулись: glm-сиденье получило сообщение от
+# "orchestra", попыталось ответить встроенным SendMessage, получило "No agent
+# named 'orchestra' is reachable" и отдало ответ случайному соседу по хосту.
+#
+# Про адрес отправителя намеренно молчим: наш отправитель живёт внутри
+# alloc exec и умирает сразу после доставки — обещать обратный адрес значило
+# бы посылать ответ в мёртвый сокет.
+REPLY_HINT = (
+    "[канал orchestra] Доставлено сокет-каналом пула. Отправитель ответа не ждёт "
+    "и уже завершился. Если нужно с кем-то связаться — используй "
+    "mcp__orchestra__send (сиденья видно через mcp__orchestra__agents). "
+    "Встроенный SendMessage для этого не годится: он дотягивается только до "
+    "сессий этого же хоста и про остальной пул не знает."
+)
+
+
 def envelope(body, from_addr=None, from_name=None, mode="bypass"):
     """Конверт заявки о режиме прав.
 
@@ -281,7 +299,7 @@ class Inbox:
 
 
 def send(sock_path, body, priority="next", mode="bypass", from_name="orchestra",
-         wait_idle=0):
+         wait_idle=0, hint=True):
     """Отправить сообщение сессии. -> {"msg_id":…, "idle":<кадр|None>}
 
     wait_idle > 0 поднимает свой инбокс, подписывается на notify_when_idle и
@@ -290,7 +308,8 @@ def send(sock_path, body, priority="next", mode="bypass", from_name="orchestra",
     inbox = Inbox(os.path.dirname(sock_path)) if wait_idle else None
     try:
         from_addr = inbox.address if inbox else None
-        frame = user_frame(envelope(body, from_addr, from_name, mode), priority, from_addr)
+        text = f"{body}\n\n{REPLY_HINT}" if hint else body
+        frame = user_frame(envelope(text, from_addr, from_name, mode), priority, from_addr)
         write_frames(sock_path, [frame], token)
         if not inbox:
             return {"msg_id": frame["msg_id"], "idle": None}

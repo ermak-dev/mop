@@ -130,6 +130,19 @@ npx -y playwright install chromium >/dev/null 2>&1 || true
 # prompt came back and every seat stopped on it.
 [ -f "$HOME/.claude/settings.json" ] || echo '{}' > "$HOME/.claude/settings.json"
 edit_json "$HOME/.claude/settings.json" '.skipDangerousModePermissionPrompt = true'
+# Встроенный обмен сообщениями убираем совсем. Не «запрещаем на вызове»:
+# deny-правила фильтруют САМ СПИСОК инструментов (filterToolsByDenyRules в
+# бинаре claude), так что SendMessage и ListAgents до модели не доезжают и
+# выбирать между ними и каналом пула ей не приходится. На режим прав фильтр не
+# смотрит, поэтому работает и под --dangerously-skip-permissions.
+#
+# Почему вообще: встроенный механизм находит только сессии ЭТОГО хоста. Пока
+# два плеера стояли на одном узле, он работал и выглядел исправным; на разных
+# узлах он молча не найдёт никого, а тихий отказ в петле PM хуже громкого.
+#
+# Слияние, а не присваивание: чужие deny-правила на узле сносить незачем.
+edit_json "$HOME/.claude/settings.json" '.permissions.deny =
+    ((.permissions.deny // []) + ["SendMessage", "ListAgents"] | unique)'
 # CARGO_TARGET_DIR grows without bound - 22 to 49 GB per seat in practice, and
 # five of them filled the gamer node's disk on 2026-08-26, which killed the WSL
 # VM and stranded every allocation on it. Boot is the only safe moment to drop
