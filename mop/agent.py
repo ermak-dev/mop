@@ -51,9 +51,15 @@ PUBLIC_VERBS = ("ping", "local", "state", "states", "send", "tail")
 # креды, которыми живёт соседний проект.
 ADMIN_VERBS = ("write",)
 
-# Слэш-команды, которые разрешено печатать в пейн. Тот же список, что у
-# фронтенда, — но проверка здесь настоящая, а там подсказка пользователю.
+# Что разрешено отправлять в пейн. Тот же список, что у фронтенда, — но
+# проверка здесь настоящая, а там подсказка пользователю.
+#
+# Escape в списке не ради симметрии: слейв, залипший на диалоге, невидим для
+# ростера (он показывается занятым или свободным, а сообщения копятся в очереди
+# непрочитанными), и единственное лечение — СНЯТЬ диалог, а не ответить на него.
+# Ответить значит выбрать из списка, которого не видишь целиком.
 SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status")
+KEYS_ALLOWED = ("Escape",)
 
 # Куда `write` имеет право писать. Токена Nomad в списке нет и не будет: узлы
 # лишились его вместе с переездом на шину.
@@ -298,8 +304,14 @@ async def v_type(req):
     Перед вводом чистим строку (C-u): в пейне мог остаться недобитый текст,
     и тогда команда склеилась бы с ним в мусор."""
     name, command = req["name"], (req.get("command") or "").strip()
+    if command in KEYS_ALLOWED:
+        # Голая клавиша: ни очистки строки, ни Enter следом — Escape снимает
+        # диалог, а Enter после него отправил бы пустой ход.
+        out, code = await sh(f"tmux -L {name} send-keys -t {name} {command}; "
+                             f"sleep 1; tmux -L {name} capture-pane -p -t {name}")
+        return {"screen": out} if code in (0, None) else {"error": out.strip()}
     if command.split()[0:1] and command.split()[0] not in SLASH_ALLOWED:
-        return {"error": f"разрешены только: {', '.join(SLASH_ALLOWED)}"}
+        return {"error": f"разрешены только: {', '.join(SLASH_ALLOWED + KEYS_ALLOWED)}"}
     if "'" in command:
         return {"error": "кавычка в команде: команда едет в шелл одной строкой"}
     keys = ""

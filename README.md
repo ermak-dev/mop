@@ -20,6 +20,7 @@ bin/add …          по командлету на подкоманду: add/li
 nomad/             ansible: сам Nomad, узлы, уборка диска
 nats/              ansible: шина и агент на узлах
 tests/state.py     матрица состояний слейва, проверяется без пула
+skills/pm/         скилл мастера: петля управления пулом (симлинк из ~/.claude)
 docs/BUS.md        субъекты шины, глаголы агента, права
 docs/CHANNEL.md    протокол канала сообщений claude code
 docs/MCP.md        архитектура MCP-сервера и его инструменты
@@ -61,10 +62,14 @@ claude живёт в tmux» и держится, пока жива tmux-сесс
 это интерфейсы: три пути наружу.
 
 ```
-~/bin/mop       -> ../mop/bin/mop
-~/etc/nomad     -> ../mop/nomad
-~/etc/nats      -> ../mop/nats
+~/bin/mop              -> ../mop/bin/mop
+~/etc/nomad            -> ../mop/nomad
+~/etc/nats             -> ../mop/nats
+~/.claude/skills/pm    -> /home/ermak/mop/skills/pm
 ```
+
+`~/.claude/skills/pm` абсолютен намеренно: тот же путь обязан разрешаться и на
+узлах пула, куда `claude.yml` раскатывает скиллы — правда, уже разыменованными.
 
 `~/etc/nomad` и `~/etc/nats` обязательны: `net setup <имя>` разворачивается в
 `~/etc/<имя>/setup.yml` по одному только соглашению о пути, и `~/etc/site.yml`

@@ -82,7 +82,7 @@ def master_tool(**kw):
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
-SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status")
+SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status", "Escape")
 MAX_WAIT = 600
 
 
@@ -365,6 +365,8 @@ def _treat(issue):
 @master_tool(annotations=DESTRUCTIVE, description=(
     "Слэш-команда в TUI слейва. Нужна отдельно, потому что каналом слэш-"
     "команды не проходят: сообщение кладётся в очередь с skipSlashCommands. "
+    "Escape СНИМАЕТ залипший диалог, не отвечая на него: залипший слейв "
+    "невидим для ростера, а сообщения копятся в очереди непрочитанными. "
     f"Разрешены: {', '.join(SLASH_ALLOWED)}."))
 def slash(name: str, command: str) -> str:
     if not command.split()[0:1] or command.split()[0] not in SLASH_ALLOWED:

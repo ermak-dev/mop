@@ -46,12 +46,18 @@
         state: directory
         mode: "0755"
 
+    # copy_links: скилл pm лежит в репозитории (skills/pm) и виден на
+    # управляющей машине симлинком из ~/.claude/skills. Без разыменования на
+    # узел уехал бы сам симлинк, и он бы там висел в пустоту ровно до
+    # следующей задачи, которая синкает пакет mop, -- то есть на первом же
+    # прогоне на свежем узле.
     - name: Sync ~/.claude/skills from the control machine
       ansible.posix.synchronize:
         src: "{{ lookup('env', 'HOME') }}/.claude/skills/"
         dest: .claude/skills/
         delete: yes
         recursive: yes
+        copy_links: yes
 
     # mop mcp: тот же пул как инструменты для слейва. Узел ходит ТОЛЬКО через
     # шину -- токена Nomad там больше нет (его снимает nats/setup.yml), и
