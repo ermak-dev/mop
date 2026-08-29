@@ -488,9 +488,15 @@ def _collect():
             by_node.setdefault(alloc["NodeName"], []).append(item)
         items.append(item)
 
-    answers = bus.request_many({
-        node: {"verb": "states", "names": [i["job"]["ID"] for i in its]}
-        for node, its in by_node.items()})
+    # Шина легла целиком — ростер всё равно показываем. Он приходит из Nomad и
+    # к шине отношения не имеет; уронить `list` вместе с ней значит оставить
+    # мастера без единственной картины пула ровно тогда, когда что-то сломалось.
+    try:
+        answers = bus.request_many({
+            node: {"verb": "states", "names": [i["job"]["ID"] for i in its]}
+            for node, its in by_node.items()})
+    except bus.BusError as e:
+        answers = {node: bus.BusError(str(e)) for node in by_node}
 
     for node, its in by_node.items():
         answer = answers.get(node)
