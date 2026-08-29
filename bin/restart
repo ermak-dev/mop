@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""перезапустить зависшего слейва: mop restart <имя>
+
+Клон и ветка переживают рестарт — врапер поднимается на том же каталоге.
+"""
+import lib
+from mop import nomad
+
+
+def main(argv):
+    if len(argv) != 1:
+        lib.usage(__doc__)
+    name = argv[0]
+    a = lib.running_alloc(name)
+    print(f"перезапускаю {name} на {a['NodeName']}...")
+    try:
+        nomad.alloc_restart(a["ID"])
+        print("слейв перезапускается")
+    except Exception as e:
+        print(f"ошибка перезапуска: {e}")
+        print(f"Альтернатива: mop delete {name} && mop add <origin>")
+
+
+lib.run(main)

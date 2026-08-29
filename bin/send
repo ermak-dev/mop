@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""послать сообщение слейву пула или сессии на этой машине
+
+  mop send <цель> <текст>            отправить
+  mop send <цель> -                  текст со stdin
+  mop send <цель> <текст> --wait[=N] отправить и ждать, пока адресат освободится
+  mop send --list                    живые сессии на этой машине
+
+<цель> — имя слейва (sl-rugent-1), имя сессии, pid, каталог или путь к сокету.
+Слейв узнаётся по префиксу sl- и достаётся через шину; всё остальное — местная
+сессия через её uds-инбокс напрямую.
+
+  --priority now|next|later   куда в очередь адресата (по умолчанию next)
+  --mode bypass|prompting     каким режимом прав представиться (bypass)
+  --quiet                     молча, только код возврата
+
+Протокол канала — CHANNEL.md, субъекты шины — BUS.md.
+"""
+import argparse
+import sys
+
+import lib
+from mop import bus, session, slaves
+from mop.render import table
+
+MAX_WAIT = 600
+
+
+def show_sessions():
+    rows = [(d.get("name") or "-", str(d.get("pid")),
+             "жива" if session.socket_alive(d["messagingSocketPath"]) else "мертва",
+             d.get("status") or "-", d.get("cwd") or "-")
+            for d in session.sessions()]
+    print("\n".join(table(rows)) if rows else "живых сессий нет")
+
+
+def to_slave(a, body):
+    """Через шину: сокет слейва host-local, до него дотягивается агент узла."""
+    wait = min(a.wait or 0, MAX_WAIT)
+    r = bus.request(lib.running_node(a.target), "send", name=a.target, message=body,
+                    priority=a.priority, wait=wait, timeout=wait + bus.TIMEOUT)
+    if "error" in r:
+        sys.exit(f"{a.target}: НЕ ДОСТАВЛЕНО — {r['error']}")
+    if a.quiet:
+        return 0 if (a.wait is None or r.get("idle")) else 2
+    print(f"-> {a.target} msg_id={r['msg_id']}")
+    if a.wait is None:
+        return 0
+    if not r.get("idle"):
+        print(f"ждал {wait}s — слейв не сообщил, что освободился")
+        return 2
+    print(f"<- {r['idle']}")
+    return 0
+
+
+def to_session(a, body):
+    sess = session.find(a.target)
+    sock = sess["messagingSocketPath"]
+    if not session.socket_alive(sock):
+        sys.exit(f"{sess.get('name')}: инбокс не слушает — сессия мертва")
+    r = session.send(sock, body, priority=a.priority, mode=a.mode,
+                     from_name="mop", wait_idle=min(a.wait or 0, MAX_WAIT))
+    if a.quiet:
+        return 0 if (a.wait is None or r["idle"]) else 2
+    print(f"-> {sess.get('name')} [{sess.get('pid')}] msg_id={r['msg_id']}")
+    if a.wait is None:
+        return 0
+    if r["idle"] is None:
+        print(f"ждал {a.wait}s — сессия не сообщила, что освободилась")
+        return 2
+    detail = r["idle"].get("detail")
+    print(f"<- {r['idle'].get('state', '?')}" + (f": {detail}" if detail else ""))
+    return 0
+
+
+def main(argv):
+    if argv and argv[0] in ("--list", "list"):
+        return show_sessions()
+    if len(argv) < 2:
+        lib.usage(__doc__)
+    p = argparse.ArgumentParser(add_help=False, usage=__doc__)
+    p.add_argument("target")
+    p.add_argument("message")
+    p.add_argument("--priority", choices=session.PRIORITIES, default="next")
+    p.add_argument("--mode", choices=session.MODES, default="bypass")
+    p.add_argument("--quiet", action="store_true")
+    p.add_argument("--wait", nargs="?", type=int, const=MAX_WAIT, default=None)
+    a = p.parse_args(argv)
+
+    body = sys.stdin.read().rstrip("\n") if a.message == "-" else a.message
+    if not body.strip():
+        sys.exit("пустое сообщение отправлять нечего")
+    return to_slave(a, body) if a.target.startswith(slaves.JOB_PREFIX) \
+        else to_session(a, body)
+
+
+lib.run(main)

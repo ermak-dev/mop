@@ -108,7 +108,7 @@ async def _aconnect():
 
 def connect():
     """Соединение процесса. Ленивое: фронтенды, которым шина не нужна
-    (`slave add`, `slave delete`), не должны падать от её недоступности."""
+    (`mop add`, `mop delete`), не должны падать от её недоступности."""
     global _conn
     with _lock:
         if _conn is not None and not _conn.is_closed:
@@ -210,7 +210,7 @@ def request_many(requests, timeout=TIMEOUT, channel="rpc"):
 def gather(verb, timeout=5, subj=BROADCAST, **fields):
     """Разослать глагол ВСЕМ агентам и собрать, кто отзовётся. -> [ответ].
 
-    Нужен там, где спрашивающий не знает списка узлов: узловой mop-mcp живёт
+    Нужен там, где спрашивающий не знает списка узлов: узловой mop mcp живёт
     без токена Nomad, а значит и без ростера. Мастеру это не нужно — у него
     ростер богаче (аллокации, llm, origin), и он адресует узлы поимённо.
 

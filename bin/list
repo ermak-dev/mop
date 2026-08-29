@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""слейвы пула: кто где, занят или свободен, чем поднят
+
+«Свободен» означает, что в клоне нет несохранённой работы, а не что сессия
+молчит: на этом стоит решение о диспатче.
+"""
+import lib
+from mop import slaves
+from mop.render import table
+
+
+def hint(rows, origin):
+    """Одна подсказка под таблицей: чего именно не хватает прямо сейчас."""
+    if not rows:
+        return (f"Создайте первый слейв для {lib.project_of(origin)}: mop add {origin}"
+                if origin else "Создайте слейва: mop add <git-origin>")
+    if not any(r["state"] == "свободен" for r in rows):
+        return (f"\nНет свободных слейвов для {lib.project_of(origin)}. "
+                f"Создайте: mop add {origin}" if origin
+                else "\nНет свободных слейвов. Создайте: mop add <git-origin>")
+    if not origin:
+        return None
+    project = lib.project_of(origin)
+    mine = [r for r in rows if project in r["origin"]]
+    if not mine:
+        return f"\nНет слейвов для {project}. Создайте: mop add {origin}"
+    if not any(r["state"] == "свободен" for r in mine):
+        return f"\nВсе слейвы для {project} заняты. Создайте ещё: mop add {origin}"
+    return None
+
+
+def main(argv):
+    if argv:
+        lib.usage(__doc__)
+    rows = slaves.slave_rows()
+    if rows:
+        print("\n".join(table([(r["name"], r["node"], r["alloc_status"],
+                                r["state"], r["llm"], r["origin"]) for r in rows])))
+    else:
+        print("слейвов нет")
+    tip = hint(rows, lib.cwd_origin(required=False))
+    if tip:
+        print(tip)
+    print("pool:")
+    print("\n".join(lib.pool_lines()))
+
+
+lib.run(main)

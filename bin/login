@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""раздать креды claude.ai и ключи LLM на узлы пула: mop login
+
+Едет глаголом `write` агенту узла, с откатом на sysbatch-джоб для узла, чей
+агент молчит. Токена Nomad здесь нет и не будет: узлы лишились его вместе с
+переездом на шину.
+"""
+import lib
+from mop import keys
+
+
+def main(argv):
+    if argv:
+        lib.usage(__doc__)
+    results, what, note = keys.push_login()
+    if note:
+        print(f"ключи LLM: {note}")
+    print("раздаю " + " + ".join(what) + " на узлы пула")
+    for node in sorted(results):
+        print(f"  {node}: {results[node]}")
+
+
+lib.run(main)

@@ -1,0 +1,35 @@
+#!/bin/bash -e
+# mop — единая точка входа в пул. Всё остальное в bin/ — командлеты, по одному
+# на подкоманду; `mop` их только находит и запускает.
+#
+# Симлинк резолвим до конца: наружу торчит ~/bin/mop, а дерево проекта надо
+# найти относительно НАСТОЯЩЕГО файла, а не относительно ссылки.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+BIN_DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+source "$BIN_DIR/common"
+
+SUB="$1"
+if [[ -z "$SUB" ]]; then
+    exec "$BIN_DIR/help"
+fi
+
+CMD="$BIN_DIR/$SUB"
+if [[ ! -f "$CMD" || "$SUB" == "common" || "$SUB" == "mop" || "$SUB" == lib.py ]]; then
+    echo "mop: нет подкоманды «$SUB»" >&2
+    "$BIN_DIR/help" >&2
+    exit 1
+fi
+
+shift
+# Питоновские командлеты запускаем процессом, а не source: `mop mcp` говорит
+# по stdio, и ему нужен чистый обмен, без наследования нашего шелла.
+if head -1 "$CMD" | grep -q python3; then
+    exec python3 "$CMD" "$@"
+fi
+# Шелловые — через source, чтобы им достались функции из common.
+source "$CMD"

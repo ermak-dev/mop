@@ -1,0 +1,16 @@
+#!/bin/bash
+# Список подкоманд. Он же — ответ на `mop` без аргументов.
+skip=("common" "help" "mop" "lib.py")
+echo "mop — пул claude-слейвов поверх Nomad, шина сообщений поверх NATS"
+echo
+echo "  mop <подкоманда> [аргументы]"
+echo
+for f in "$BIN_DIR"/*; do
+    name="$(basename "$f")"
+    for s in "${skip[@]}"; do [[ "$name" == "$s" ]] && continue 2; done
+    # Первая строка после shebang и есть однострочное описание командлета.
+    desc="$(sed -n '2,4p' "$f" | grep -m1 -oP '(?<=^# ).*|(?<=^""")[^"]*' || true)"
+    printf "    %-9s %s\n" "$name" "$desc"
+done
+echo
+echo "  mop help          этот список"

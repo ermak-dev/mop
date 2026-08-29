@@ -12,9 +12,11 @@ mop/               библиотека: всё знание о пуле, воз
   session.py         файлы сессий claude и протокол канала (standalone)
   keys.py            раздача кредов и ключей провайдеров на узлы
   render.py          таблицы
-bin/slave          CLI пула: add/list/delete/change/restart/attach/tail/doctor/login/llm
-bin/cc-send        послать сообщение в живую сессию claude code
-bin/mop-mcp        MCP-сервер: тот же пул как инструменты для claude
+bin/mop            диспетчер: mop <подкоманда>; наружу торчит ~/bin/mop
+bin/common         общее окружение командлетов (молчит: mcp говорит по stdio)
+bin/lib.py         общая часть питоновских командлетов — единственное, что печатает
+bin/add …          по командлету на подкоманду: add/list/delete/change/restart/
+                   attach/tail/llm/login/doctor/send/mcp/deploy/help
 nomad/             ansible: сам Nomad, узлы, уборка диска
 nats/              ansible: шина и агент на узлах
 tests/state.py     матрица состояний слейва, проверяется без пула
@@ -41,7 +43,7 @@ MCP-сервер начал бы разбирать текст, свёрстан
 `alloc exec` удалён: он резал сообщения по 8 КБ и стоил websocket-рукопожатия
 за каждую пробу. Аварийный путь теперь — ansible, `nats/setup.yml`.
 
-ssh остаётся только для `slave attach`, ради живого терминала.
+ssh остаётся только для `mop attach`, ради живого терминала.
 
 Каждый слейв — это job Nomad, чей врапер доводит узел до состояния «клон есть,
 claude живёт в tmux» и держится, пока жива tmux-сессия. Смерть врапера =
@@ -50,12 +52,11 @@ claude живёт в tmux» и держится, пока жива tmux-сесс
 
 ## Симлинки наружу
 
-Проект живёт отдельным репозиторием, но два пути снаружи на него ссылаются —
-это интерфейсы, которые нельзя переименовать:
+Проект живёт отдельным репозиторием, но снаружи на него ссылаются —
+это интерфейсы: три пути наружу.
 
 ```
-~/bin/slave     -> ../mop/bin/slave
-~/bin/cc-send   -> ../mop/bin/cc-send
+~/bin/mop       -> ../mop/bin/mop
 ~/etc/nomad     -> ../mop/nomad
 ~/etc/nats      -> ../mop/nats
 ```
@@ -72,7 +73,7 @@ claude живёт в tmux» и держится, пока жива tmux-сесс
   (живёт в репозитории backup, сюда не переезжает).
 * `~/.ssh/ai-provider-keys.env` — ключи LLM-провайдеров; `slave` вывозит на
   узлы только те, что называет хоть один профиль в `LLM_PROFILES`.
-* `~/.claude/.credentials.json` — логин claude.ai, который `slave login`
+* `~/.claude/.credentials.json` — логин claude.ai, который `mop login`
   раздаёт на узлы пула.
 
 ## Запуск плейбуков

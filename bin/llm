@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""LLM-профили: чем можно поднимать слейва и есть ли ключ
+
+Профиль меняет ровно одно — куда слейв ходит за токенами. Всё остальное
+(tmux, состояние, детект залипаний) для любого профиля одинаково.
+"""
+import lib
+from mop import keys, slaves
+
+
+def main(argv):
+    if argv:
+        lib.usage(__doc__)
+    blob, note = keys.llm_keys_blob()
+    have = {l.split("=", 1)[0] for l in (blob or "").splitlines() if "=" in l}
+    for name, prof in slaves.LLM_PROFILES.items():
+        key = prof.get("key")
+        if not key:
+            state = "логин claude.ai (mop login)"
+        elif key in have:
+            state = f"ключ {key}: есть"
+        else:
+            state = f"ключ {key}: НЕТ в {slaves.LOCAL_KEYS_FILE}"
+        base = prof["env"].get("ANTHROPIC_BASE_URL", "api.anthropic.com (по умолчанию)")
+        print(f"  {name:8}  {base:38}  {state}")
+    if note:
+        print(f"\n{note}")
+    print("\nmop add --llm <профиль> [origin]   |   mop login раздаёт ключи на узлы")
+
+
+lib.run(main)

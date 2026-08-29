@@ -1,9 +1,9 @@
-# mop-mcp
+# mop mcp
 
 MCP-сервер пула: канал сообщений слейвам и управление их job'ами. Замена
 встроенному `SendMessage`/`ListAgents` там, где встроенный не достаёт.
 
-Реализация — `bin/mop-mcp`, протокол канала — [CHANNEL.md](CHANNEL.md).
+Реализация — `bin/mcp`, запуск — `mop mcp`, протокол канала — [CHANNEL.md](CHANNEL.md).
 
 ## Зачем, если есть встроенный SendMessage
 
@@ -24,7 +24,7 @@ MCP-сервер пула: канал сообщений слейвам и уп�
 
 ```
 сессия мастера (управляющая машина)
-   └─ stdio ─> mop-mcp ──REST──> Nomad        джобы, размещение, память
+   └─ stdio ─> mop mcp ──REST──> Nomad        джобы, размещение, память
                   │
                   ├──── NATS ──> mop-agent    узел: слейв sl-*
                   │                   ↓        cc-socks/<pid>.sock
@@ -104,14 +104,14 @@ management-токен Nomad — то есть право снести любой
 (мастер работает в `~/rugent`, `~/cloudpub`):
 
 ```
-claude mcp add --scope user mop /home/ermak/mop/bin/mop-mcp
+claude mcp add --scope user mop /home/ermak/mop/bin/mop mcp
 ```
 
 Проверка без claude — сервер печатает число инструментов и найденный инбокс
 мастера:
 
 ```
-mop-mcp --check
+mop mcp --check
 ```
 
 ## Зависимости

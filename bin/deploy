@@ -1,0 +1,62 @@
+#!/bin/bash -e
+# развернуть кластер: mop deploy [nomad|claude|nats|all]
+#
+# Порядок игр не произволен и не переставляется:
+#
+#   nomad   агент Nomad на узлах и сервер -- без него нет ни джобов, ни ростера;
+#   claude  ~/.claude, скиллы и rsync пакета mop на узлы -- ИМЕННО ОН привозит
+#           туда mop/agent.py, и до него юнит агента запускать не с чего;
+#   nats    сервер шины и юнит агента; он же сносит с узлов старую копию
+#           management-токена Nomad.
+#
+# Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
+# больше нет, поэтому упавшего агента и битые креды чинят только отсюда --
+# и по этой же причине deploy не имеет права ничего занимать у самого mop.
+
+WHAT="${1:-all}"
+
+# Плейбуки находятся по одному лишь соглашению о пути: `net setup <имя>`
+# разворачивается в ~/etc/<имя>/setup.yml, таблицы имён нигде нет. Симлинки и
+# есть эта таблица, поэтому deploy их заводит сам, а не требует от оператора.
+link() {
+    local name="$1"
+    if [[ ! -e "$HOME/etc/$name" ]]; then
+        mkdir -p "$HOME/etc"
+        ln -s "$PROJECT_HOME/$name" "$HOME/etc/$name"
+        ok "  завёл симлинк ~/etc/$name -> $PROJECT_HOME/$name"
+    fi
+}
+
+play() {
+    local book="$1"
+    section "ansible: $book"
+    ansible-playbook -i "$INVENTORY" "$PROJECT_HOME/$book"
+}
+
+if [[ ! -f "$INVENTORY" ]]; then
+    fail "нет инвентаря $INVENTORY -- он общий с остальными плейбуками и живёт вне этого репозитория"
+    exit 1
+fi
+
+link nomad
+link nats
+
+case "$WHAT" in
+    nomad)  play nomad/setup.yml ;;
+    claude) play nomad/claude.yml ;;
+    nats)   play nats/setup.yml ;;
+    all)
+        play nomad/setup.yml
+        play nomad/claude.yml
+        play nats/setup.yml
+        ;;
+    *)
+        fail "mop deploy [nomad|claude|nats|all]"
+        exit 1
+        ;;
+esac
+
+section "проверка"
+# Прогон без неё не отличает «плейбук зелёный» от «пул отвечает»: агент,
+# упавший в бесконечный реконнект, systemd вполне устраивает.
+"$BIN_DIR/mop" list

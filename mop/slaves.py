@@ -1,7 +1,7 @@
 """Слейвы пула: спека job'а, LLM-профили и достоверное состояние места.
 
 Модуль ВОЗВРАЩАЕТ ДАННЫЕ и ничего не печатает. Форматирование живёт во
-фронтендах (bin/slave печатает таблицы, bin/mop-mcp отдаёт то же самое
+фронтендах (командлеты в bin/ печатают таблицы, mop mcp отдаёт то же самое
 модели) — иначе второй фронтенд неизбежно начал бы разбирать чужой текст.
 """
 import base64
@@ -31,7 +31,7 @@ JOB_PREFIX = "sl-"
 # ~/.config/mop/llm-keys.env (только с теми ключами, которые называет хоть
 # один профиль), а врапер уже на узле подставляет нужный в сессию.
 LLM_PROFILES = {
-    # штатный Claude: авторизация — логин claude.ai (slave login), env пустой
+    # штатный Claude: авторизация — логин claude.ai (mop login), env пустой
     "claude": {"key": None, "env": {}},
     # z.ai GLM coding plan, https://docs.z.ai/devpack/tool/claude
     "glm": {
@@ -87,7 +87,7 @@ edit_json() {  # <file> <jq-program> [jq-args...]
     # `jq empty` is NOT a validity check: a zero-byte file is an empty jq input
     # stream, so it exits 0, every filter over it yields nothing, and the 0-byte
     # config got written straight back (gamer, 2026-08-28 — all six slaves parked
-    # on the config prompt while `slave list` showed only "ЗАВИС"). Demand an
+    # on the config prompt while `mop list` showed only "ЗАВИС"). Demand an
     # actual object, and never install an empty result.
     jq -e 'type == "object"' "$file" >/dev/null 2>&1 || echo '{}' > "$file"
     if jq "$@" "$program" "$file" > "$tmp" && [ -s "$tmp" ]; then
@@ -120,7 +120,7 @@ fi
 edit_json "$HOME/.claude.json" '.mcpServers["windows-mcp"] = {"type":"http","url":$winurl,"headers":{"Authorization":"Bearer kCgqRS33Yxv4lrSlqV5w6b3qNz0shjj9u4HTInk2DW0"}}
   | .mcpServers["mac-mcp"] = {"type":"http","url":"http://mac:8000/mcp","headers":{"Authorization":"Bearer FeRM5I-lQr_3mJbq1PWG6KzErm-666SA8b2vVwlBj8U"}}
   | .mcpServers["playwright"] = {"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--browser","chromium"]}
-  | .mcpServers["mop"] = {"type":"stdio","command":"/home/ermak/mop/bin/mop-mcp"}' \
+  | .mcpServers["mop"] = {"type":"stdio","command":"/home/ermak/mop/bin/mop","args":["mcp"]}' \
     --arg winurl "$WINURL"
 # playwright-mcp needs a browser on the node; install is idempotent and cached
 # in ~/.cache/ms-playwright, so every slave boot just confirms it is there.
@@ -185,7 +185,7 @@ if [ -n "$SL_LLM_KEY_VAR" ]; then
     if [ -z "$key" ]; then
         # Валимся громко: без ключа claude поднимется и будет отбивать каждый
         # ход 401-й, а слейв будет читаться как живое и свободное.
-        echo "LLM-профиль $SL_LLM: на узле нет ключа $SL_LLM_KEY_VAR в $keyfile — раздай: slave login" >&2
+        echo "LLM-профиль $SL_LLM: на узле нет ключа $SL_LLM_KEY_VAR в $keyfile — раздай: mop login" >&2
         exit 1
     fi
     llm_env+=(-e "$SL_LLM_AUTH_VAR=$key")

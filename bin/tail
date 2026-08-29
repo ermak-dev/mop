@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""хвост tmux-буфера слейва: mop tail <имя> [-n N] [-f]
+
+  -n N   сколько строк (по умолчанию 10)
+  -f     следить дальше, пока не Ctrl-C
+"""
+import time
+
+import lib
+from mop import slaves
+
+
+def appended_since(prev, cur):
+    """Строки cur, добавившиеся после prev: ищем самый длинный суффикс prev,
+    целиком встречающийся в cur, — всё правее него новое. TUI перерисовывает
+    низ экрана, поэтому точки совпадения ищем от длинных к коротким."""
+    cur_s = "\n".join(cur)
+    for k in (300, 100, 30, 10, 3, 1):
+        if k > len(prev):
+            continue
+        suffix = "\n".join(prev[-k:])
+        i = cur_s.rfind(suffix)
+        if i >= 0:
+            rest = cur_s[i + len(suffix):].split("\n")
+            return [l for l in rest if l.strip()]
+    return [l for l in cur if l.strip()]
+
+
+def parse(argv):
+    name, lines, follow, it = None, 10, False, iter(argv)
+    for a in it:
+        if a == "-f":
+            follow = True
+        elif a == "-n":
+            lines = int(next(it, "10"))
+        elif a.startswith("-n"):
+            lines = int(a[2:])
+        elif name is None:
+            name = a
+        else:
+            lib.usage(__doc__)
+    if name is None:
+        lib.usage(__doc__)
+    return name, lines, follow
+
+
+def main(argv):
+    name, lines, follow = parse(argv)
+    node = lib.running_node(name)
+    buf = slaves.pane_lines(node, name)
+    for line in buf[-lines:]:
+        print(line, flush=True)
+    if not follow:
+        return
+    while True:
+        time.sleep(2)
+        try:
+            cur = slaves.pane_lines(node, name)
+        except Exception:
+            # слейв мог перезапуститься или переехать — перецепляемся
+            node = lib.running_node(name)
+            continue
+        for line in appended_since(buf, cur):
+            print(line, flush=True)
+        buf = cur
+
+
+lib.run(main)

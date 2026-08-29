@@ -4,13 +4,13 @@
 # Three tiers, cheapest first, mirroring the classes in ~/bin/cleanup:
 #
 #   orphans     — a live slave == a live tmux session named after its job: the
-#                 wrapper in ~/bin/slave dies with its tmux session, and a
+#                 wrapper in ~/командлеты bin/ dies with its tmux session, and a
 #                 stopped/moved job takes the session down with it. So any
 #                 ~/wk/<name> or ~/.cache/target-<name> without an
 #                 exactly-matching tmux session is an orphan: a deleted slave's
-#                 leftovers (slave delete keeps them on purpose) or the trail of
+#                 leftovers (mop delete keeps them on purpose) or the trail of
 #                 one that moved to another node. Cheap to re-create, so the rare
-#                 race with a slave restarting at sweep time costs a re-clone.
+#                 race with a mop restarting at sweep time costs a re-clone.
 #                 Swept unconditionally.
 #   stale       — paths nothing references any more, age-gated. These are what a
 #                 glob-driven sweep misses: $HOME/cache is rugent's pre-#627

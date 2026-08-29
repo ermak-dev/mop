@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""подключиться к tmux-сессии слейва: mop attach <имя>
+
+Единственная подкоманда, которая ходит по ssh, а не через шину: живой
+терминал глаголом не отдать.
+"""
+import os
+
+import lib
+from mop import slaves
+
+
+def main(argv):
+    if len(argv) != 1:
+        lib.usage(__doc__)
+    name = argv[0]
+    a = lib.running_alloc(name)
+    host = slaves.SSH_ALIAS.get(a["NodeName"], a["NodeName"])
+    os.execvp("ssh", ["ssh", "-t", host, "tmux", "-L", name, "attach", "-t", name])
+
+
+lib.run(main)

@@ -1,0 +1,18 @@
+#!/bin/bash
+# Общее окружение командлетов.
+#
+# МОЛЧИТ, и это требование, а не стиль: `mop mcp` разговаривает по stdio, и
+# любая строка, напечатанная отсюда, порвала бы протокол MCP на первом же кадре.
+export BIN_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+export PROJECT_HOME="$(dirname "$BIN_DIR")"
+export PYTHONPATH="$PROJECT_HOME${PYTHONPATH:+:$PYTHONPATH}"
+
+# Инвентарь общий с остальными плейбуками, живёт вне этого репозитория.
+export INVENTORY="${INVENTORY:-$HOME/etc/inventory.ini}"
+
+RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; BOLD=$'\033[1m'; NC=$'\033[0m'
+export RED GREEN BOLD NC
+
+section() { echo -e "\n${BOLD}$*${NC}"; }
+fail()    { echo -e "${RED}$*${NC}" >&2; }
+ok()      { echo -e "${GREEN}$*${NC}"; }
