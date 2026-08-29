@@ -3,21 +3,26 @@
 # Вынесено из setup.yml, потому что нужно двум играм: рабочим узлам пула и
 # управляющей машине. У них общий агент и РАЗНЫЕ датацентры -- см. заголовок
 # игры про управляющую машину.
+- name: Ensure unzip is present
+  ansible.builtin.apt:
+    name: unzip
+    state: present
+
 - name: Download nomad {{ nomad_version }}
-  get_url:
+  ansible.builtin.get_url:
     url: "{{ nomad_zip }}"
     dest: "/tmp/nomad_{{ nomad_version }}.zip"
     mode: '0644'
 
 - name: Install nomad binary
-  unarchive:
+  ansible.builtin.unarchive:
     src: "/tmp/nomad_{{ nomad_version }}.zip"
     dest: /usr/local/bin
     remote_src: yes
     mode: '0755'
 
 - name: Create config and data dirs
-  file:
+  ansible.builtin.file:
     path: "{{ item }}"
     state: directory
     mode: '0755'
@@ -25,23 +30,15 @@
     - /etc/nomad
     - /opt/nomad/data
 
-- name: Deploy the sl-sweep script (run nightly by the sl-cleanup job)
-  copy:
-    src: sl-sweep.sh
-    dest: /usr/local/bin/sl-sweep
-    mode: '0755'
-  # На управляющей машине клонов слейвов нет, подметать нечего.
-  when: nomad_datacenter | default('home') == 'home'
-
 - name: Deploy client config
-  template:
+  ansible.builtin.template:
     src: client.hcl.j2
     dest: /etc/nomad/client.hcl
     mode: '0644'
   register: client_config
 
 - name: Install systemd unit
-  template:
+  ansible.builtin.template:
     src: nomad.service.j2
     dest: /etc/systemd/system/nomad.service
     mode: '0644'
@@ -51,7 +48,7 @@
   register: client_unit
 
 - name: Start nomad client
-  systemd:
+  ansible.builtin.systemd:
     name: nomad
     state: "{{ (client_config.changed or client_unit.changed) | ternary('restarted', 'started') }}"
     enabled: yes

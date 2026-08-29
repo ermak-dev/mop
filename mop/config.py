@@ -50,6 +50,10 @@ DEFAULTS = {
     "MOP_CONTROL_DC": "control",
     "MOP_NOMAD_DATA": os.path.expanduser("~/nomad/data"),
     "MOP_NOMAD_VERSION": "1.10.5",
+    # Откуда качать бинарь Nomad. Дефолт — официальные релизы; установке в
+    # стране, откуда releases.hashicorp.com недоступен, нужно зеркало, и это
+    # значение установки, а не литерал продукта.
+    "MOP_NOMAD_MIRROR": "https://releases.hashicorp.com",
     "MOP_NATS_PORT": "4222",
     "MOP_NATS_VERSION": "2.14.6",
     "MOP_SLAVE_MEM_MB": "8192",

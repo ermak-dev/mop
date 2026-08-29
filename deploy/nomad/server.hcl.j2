@@ -1,0 +1,31 @@
+# Сервер Nomad. HTTP API слушает только loopback -- снаружи с ним говорят
+# через обратный прокси установки; клиенты ходят на RPC 4647 по LAN-адресу
+# напрямую, минуя его.
+datacenter = "{{ MOP_POOL_DC }}"
+data_dir   = "{{ MOP_NOMAD_DATA }}"
+bind_addr  = "0.0.0.0"
+
+addresses {
+  http = "127.0.0.1"
+}
+
+advertise {
+  # http объявляется только ради метаданных кластера; сам слушатель остаётся
+  # на loopback за прокси.
+  http = "{{ MOP_SERVER_LAN }}"
+  rpc  = "{{ MOP_SERVER_LAN }}"
+  serf = "{{ MOP_SERVER_LAN }}"
+}
+
+server {
+  enabled          = true
+  bootstrap_expect = 1
+}
+
+acl {
+  enabled = true
+}
+
+ui {
+  enabled = true
+}

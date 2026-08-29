@@ -1,0 +1,38 @@
+# Клиент Nomad: дозванивается до сервера ИСХОДЯЩИМ соединением (4647) и сам
+# его никогда не слушает -- отсюда безразличие к CGNAT и к NAT внутри WSL.
+# Агент под root, чтобы задачи опускались до пользователя пула; единственный
+# включённый драйвер -- raw_exec: слейву нужен настоящий $HOME (клоны,
+# ~/.claude, ключи), а не chroot.
+datacenter = "{{ nomad_datacenter | default(MOP_POOL_DC) }}"
+data_dir   = "/opt/nomad/data"
+bind_addr  = "127.0.0.1"
+
+advertise {
+  # A non-loopback advertise is mandatory for all three even with a loopback
+  # listener; the go-sockaddr template is evaluated by nomad itself, hence the
+  # raw block.
+  {% raw -%}
+  http = "{{ GetPrivateIP }}"
+  rpc  = "{{ GetPrivateIP }}"
+  serf = "{{ GetPrivateIP }}"
+  {%- endraw %}
+}
+
+client {
+  enabled = true
+  servers = ["{{ MOP_SERVER_LAN }}:4647"]
+{% if (nomad_reserved_mb | default({})).get(inventory_hostname, 0) %}
+  # Память, отрезанная под чужих жильцов хоста: планировщик считает её
+  # неразмещаемой, и пул слейвов упирается в «сколько намерил Nomad минус
+  # это». Задаётся настройкой MOP_RESERVED_MB.
+  reserved {
+    memory = {{ nomad_reserved_mb[inventory_hostname] }}
+  }
+{% endif %}
+}
+
+plugin "raw_exec" {
+  config {
+    enabled = true
+  }
+}

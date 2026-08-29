@@ -52,7 +52,7 @@
 
 
 - name: NATS server for the mop bus
-  hosts: git
+  hosts: mop_server
   become: yes
   gather_facts: no
 

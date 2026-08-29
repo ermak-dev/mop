@@ -1,0 +1,153 @@
+---
+# Кластер Nomad: сервер и клиенты. То, ГДЕ стоит слейв.
+#
+# Второй слой пула и полностью независимый от первого: Nomad решает
+# размещение, память и рестарты, шина (deploy/setup.yml) — разговор. Путать их
+# нельзя, и разворачиваются они порознь.
+#
+# Один сервер на машине, которая включена всегда, клиенты на всех, где живут
+# слейвы. Клиент дозванивается до сервера на RPC ИСХОДЯЩИМ соединением, поэтому
+# ни CGNAT, ни NAT внутри WSL значения не имеют — сервер к клиенту не стучится
+# никогда.
+#
+# ACL включён: без токена API отвечает 403. Bootstrap-токен выпускается ОДИН
+# раз, лежит рядом с data_dir на сервере и забирается на управляющую машину в
+# ~/.config/nomad/bootstrap.json. На узлы пула он не едет — см. docs/SECURITY.md.
+#
+# Запуск:  mop deploy nomad
+#
+# Симлинк ~/etc/nomad обязателен, как и ~/etc/nats: `net setup <имя>` и
+# ~/etc/site.yml находят плейбук по одному лишь пути ~/etc/<имя>/setup.yml,
+# таблицы имён нигде нет. Симлинк и есть эта таблица; заводит его `mop deploy`.
+
+- name: Nomad server
+  hosts: mop_server
+  become: no
+  gather_facts: no
+
+  vars:
+    nomad_version: "{{ MOP_NOMAD_VERSION }}"
+    nomad_zip: "{{ MOP_NOMAD_MIRROR }}/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
+    nomad_home: "{{ MOP_NOMAD_DATA | dirname }}"
+
+  tasks:
+    - name: Ensure unzip is present
+      become: yes
+      ansible.builtin.apt:
+        name: unzip
+        state: present
+
+    - name: Download nomad {{ nomad_version }}
+      ansible.builtin.get_url:
+        url: "{{ nomad_zip }}"
+        dest: "/tmp/nomad_{{ nomad_version }}.zip"
+        mode: '0644'
+
+    - name: Install nomad binary
+      become: yes
+      ansible.builtin.unarchive:
+        src: "/tmp/nomad_{{ nomad_version }}.zip"
+        dest: /usr/local/bin
+        remote_src: yes
+        mode: '0755'
+
+    - name: Create nomad data dir
+      ansible.builtin.file:
+        path: "{{ nomad_home }}/data"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy server config
+      ansible.builtin.template:
+        src: server.hcl.j2
+        dest: "{{ nomad_home }}/server.hcl"
+        mode: '0644'
+      register: server_config
+
+    - name: Install systemd unit
+      become: yes
+      ansible.builtin.template:
+        src: nomad.service.j2
+        dest: /etc/systemd/system/nomad.service
+        mode: '0644'
+      vars:
+        nomad_user: "{{ MOP_USER }}"
+        nomad_config: "{{ nomad_home }}/server.hcl"
+      register: server_unit
+
+    - name: Start nomad server
+      become: yes
+      ansible.builtin.systemd:
+        name: nomad
+        state: "{{ (server_config.changed or server_unit.changed) | ternary('restarted', 'started') }}"
+        enabled: yes
+        daemon_reload: yes
+
+    # 403 — тоже ответ: ACL включён, значит сервер жив и отвечает.
+    - name: Wait for the HTTP API
+      ansible.builtin.uri:
+        url: http://127.0.0.1:4646/v1/agent/self
+        status_code: [200, 403]
+      register: api
+      until: api.status in [200, 403]
+      retries: 15
+      delay: 2
+
+    # --- ACL bootstrap: один раз, рядом с data_dir ------------------------
+    # `creates` — это и есть «один раз»: повторный bootstrap Nomad отвергает,
+    # а файл с токеном перетереть пустым выводом значит потерять доступ к
+    # кластеру безвозвратно.
+    - name: Bootstrap ACL (first run only)
+      ansible.builtin.shell: >
+        /usr/local/bin/nomad acl bootstrap -json
+        > {{ nomad_home }}/bootstrap.json
+        && chmod 600 {{ nomad_home }}/bootstrap.json
+      args:
+        creates: "{{ nomad_home }}/bootstrap.json"
+      environment:
+        NOMAD_ADDR: http://127.0.0.1:4646
+
+    - name: Fetch the management token to the control machine
+      ansible.builtin.fetch:
+        src: "{{ nomad_home }}/bootstrap.json"
+        dest: "{{ lookup('env', 'HOME') }}/.config/nomad/bootstrap.json"
+        flat: yes
+
+
+- name: Nomad clients on the pool nodes
+  hosts: nomad_clients
+  become: yes
+  gather_facts: no
+
+  vars:
+    nomad_version: "{{ MOP_NOMAD_VERSION }}"
+    nomad_zip: "{{ MOP_NOMAD_MIRROR }}/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
+    # Память узлов, отрезанная под чужих жильцов хоста; из MOP_RESERVED_MB.
+    nomad_reserved_mb: "{{ dict(MOP_RESERVED_MB.split(',') | map('split','=')) }}"
+
+  tasks:
+    - name: Nomad agent
+      ansible.builtin.include_tasks: client-agent.yml
+
+
+# Управляющая машина в кластере.
+#
+# Она НЕ рабочий узел: датацентр здесь `control`, а джобы слейвов объявляют
+# `home`, так что планировщик слейва сюда не поставит. Членство нужно было ради
+# `alloc exec` — он ходит только внутрь аллокаций, и без своей аллокации мастер
+# был для слейва недосягаем. С переездом на шину эта причина отпала, но
+# членство оставлено: ростер кластера — единственное место, где мастер видит
+# ёмкость узлов, и считать её проще, будучи внутри.
+- name: Nomad client on the control machine
+  hosts: nomad_control
+  become: yes
+  gather_facts: no
+
+  vars:
+    nomad_version: "{{ MOP_NOMAD_VERSION }}"
+    nomad_zip: "{{ MOP_NOMAD_MIRROR }}/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
+    nomad_datacenter: "{{ MOP_CONTROL_DC }}"
+
+  tasks:
+    - name: Nomad agent
+      ansible.builtin.include_tasks: client-agent.yml
