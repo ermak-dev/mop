@@ -35,6 +35,18 @@
         nomad_node_names:
           gamer-wsl: gamer
 
+    # КУДА подключаться и ЧЕЙ сертификат ждать -- разные вещи, и здесь это не
+    # тонкость. Узлы пула сидят в одной локалке с сервером шины, но публичное
+    # имя nomad.ermak.dev резолвится в адрес роутера, а хайрпин на 4222 он не
+    # делает: первый же прогон дал connection refused на 79.141.65.134:4222 с
+    # обоих узлов. Ходим на LAN-адрес -- тот же, на который Nomad-клиент ходит
+    # за RPC, -- а сертификат проверяем по имени, на которое он выписан
+    # (nats_cert_host в bus.json). Без этого пришлось бы либо выключать
+    # проверку, либо открывать 4222 наружу.
+    - name: Bus address on the LAN
+      ansible.builtin.set_fact:
+        nats_lan: "tls://192.168.1.66:4222"
+
 
 - name: NATS server for the mop bus
   hosts: git
@@ -105,8 +117,15 @@
         daemon_reload: yes
 
 
-# Агент на рабочих узлах. Пакет mop туда уже приезжает из nomad/claude.yml
-# (rsync с управляющей машины), поэтому здесь только зависимость, креды и юнит.
+# Агент на рабочих узлах.
+#
+# Пакет mop возим ЗДЕСЬ, хотя его же возит nomad/claude.yml для MCP-сервера.
+# Дубль осознанный: игра, которая запускает агента, обязана привезти его код
+# сама. Пока она этого не делала, `mop deploy nats` после правки agent.py
+# поднимал на узлах СТАРЫЙ агент -- и первый же прогон это показал: креды в
+# bus.json уже несли tls_hostname, а агент рядом о нём не знал и падал на
+# проверке сертификата. Аварийный путь, зависящий от соседнего плейбука, --
+# не аварийный путь.
 - name: mop-agent on the pool nodes
   hosts: nomad_clients
   gather_facts: no
@@ -114,7 +133,8 @@
   vars:
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     mop_home: /home/ermak/mop
-    nats_url: "tls://nomad.ermak.dev:4222"
+    nats_addr: "{{ nats_lan }}"
+    nats_cert_host: nomad.ermak.dev
     nats_user: "node-{{ mop_node }}"
     nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + mop_node + '.pass length=32 chars=ascii_letters,digits') }}"
 
@@ -124,6 +144,17 @@
         name: nats-py
         extra_args: --user --break-system-packages
         state: present
+
+    - name: Sync the mop package from the control machine
+      ansible.posix.synchronize:
+        src: "{{ lookup('env', 'HOME') }}/mop/"
+        dest: "{{ mop_home }}/"
+        delete: yes
+        recursive: yes
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=__pycache__"
+      notify: restart mop-agent
 
     - name: Credentials dir
       ansible.builtin.file:
@@ -194,7 +225,8 @@
 
   vars:
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
-    nats_url: "tls://nomad.ermak.dev:4222"
+    nats_addr: "{{ nats_lan }}"
+    nats_cert_host: nomad.ermak.dev
     nats_user: master
     nats_password: "{{ lookup('password', secrets_dir + '/nats-master.pass length=32 chars=ascii_letters,digits') }}"
 

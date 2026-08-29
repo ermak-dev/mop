@@ -340,7 +340,7 @@ async def serve():
     node = node_name()
     _conn = await nats.connect(
         servers=[c["url"]], user=c.get("user"), password=c.get("password"),
-        name=f"mop-agent/{node}",
+        tls_hostname=c.get("tls_hostname"), name=f"mop-agent/{node}",
         allow_reconnect=True, max_reconnect_attempts=-1, reconnect_time_wait=2)
     # cb ОБЯЗАН быть корутиной — nats-py отвергает обычную функцию. И каждый
     # запрос уходит в свою задачу: последовательная обработка означала бы, что
@@ -363,15 +363,19 @@ async def serve():
 async def check():
     """Проверка прогоном, а не чтением конфига: юнит, упавший в бесконечный
     реконнект, systemd вполне устраивает, и «запущен» не значит «подписан».
-    Спрашиваем сам пул через свой же субъект — отвечает работающий агент."""
+    Спрашиваем через ПУБЛИЧНЫЙ субъект узла, а не через .rpc: туда узлу писать
+    и не положено — это и есть та граница прав, ради которой шину заводили.
+    Первый прогон проверки уткнулся ровно в неё, и был неправ он, а не права."""
     c = bus.config()
     print(f"mop-agent: узел {node_name()}, шина {c['url']}, "
           f"глаголов {len(VERBS)} (публичных {len(PUBLIC_VERBS)})")
     nc = await nats.connect(servers=[c["url"]], user=c.get("user"),
-                            password=c.get("password"), name="mop-agent/check",
+                            password=c.get("password"),
+                            tls_hostname=c.get("tls_hostname"),
+                            name="mop-agent/check",
                             allow_reconnect=False, connect_timeout=5)
     try:
-        msg = await nc.request(bus.subject(node_name(), "rpc"),
+        msg = await nc.request(bus.subject(node_name(), "msg"),
                                json.dumps({"verb": "ping"}).encode(), timeout=5)
         print(f"подписан: {msg.data.decode()}")
     finally:

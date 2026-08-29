@@ -9,12 +9,20 @@ from mop import slaves
 from mop.render import table
 
 
+def free(row):
+    """Свободен ли слейв. По ПРЕФИКСУ: у свободного места состояние обычно
+    несёт ещё и ветку — «свободен (master)». Точное сравнение врало и до
+    переезда на шину: таблица показывала свободные места, а подсказка под ней
+    уверяла, что свободных нет."""
+    return row["state"].startswith("свободен")
+
+
 def hint(rows, origin):
     """Одна подсказка под таблицей: чего именно не хватает прямо сейчас."""
     if not rows:
         return (f"Создайте первый слейв для {lib.project_of(origin)}: mop add {origin}"
                 if origin else "Создайте слейва: mop add <git-origin>")
-    if not any(r["state"] == "свободен" for r in rows):
+    if not any(free(r) for r in rows):
         return (f"\nНет свободных слейвов для {lib.project_of(origin)}. "
                 f"Создайте: mop add {origin}" if origin
                 else "\nНет свободных слейвов. Создайте: mop add <git-origin>")
@@ -24,7 +32,7 @@ def hint(rows, origin):
     mine = [r for r in rows if project in r["origin"]]
     if not mine:
         return f"\nНет слейвов для {project}. Создайте: mop add {origin}"
-    if not any(r["state"] == "свободен" for r in mine):
+    if not any(free(r) for r in mine):
         return f"\nВсе слейвы для {project} заняты. Создайте ещё: mop add {origin}"
     return None
 
