@@ -52,16 +52,16 @@
 # C: is what actually stopped this node.
 #
 # Env knobs (set in the nomad job spec):
-#   WK_SWEEP_FREE_MIN_GB  escalate to tier 3 below this much free   (default 60)
-#   WK_SWEEP_MAX_TARGET   per-target-dir cap for cargo-sweep      (default 15GB)
-#   WK_SWEEP_STALE_DAYS   age gate for tier 2                      (default 14)
-#   WK_SWEEP_DRY          set to 1 to report without deleting
+#   MOP_SWEEP_FREE_MIN_GB escalate to tier 3 below this much free   (default 60)
+#   MOP_SWEEP_MAX_TARGET  per-target-dir cap for cargo-sweep      (default 15GB)
+#   MOP_SWEEP_STALE_DAYS   age gate for tier 2                      (default 14)
+#   MOP_SWEEP_DRY          set to 1 to report without deleting
 set -u
 
-FREE_MIN_GB=${WK_SWEEP_FREE_MIN_GB:-60}
-MAX_TARGET=${WK_SWEEP_MAX_TARGET:-15GB}
-STALE_DAYS=${WK_SWEEP_STALE_DAYS:-14}
-DRY=${WK_SWEEP_DRY:-}
+FREE_MIN_GB=${MOP_SWEEP_FREE_MIN_GB:-${WK_SWEEP_FREE_MIN_GB:-60}}
+MAX_TARGET=${MOP_SWEEP_MAX_TARGET:-${WK_SWEEP_MAX_TARGET:-15GB}}
+STALE_DAYS=${MOP_SWEEP_STALE_DAYS:-${WK_SWEEP_STALE_DAYS:-14}}
+DRY=${MOP_SWEEP_DRY:-}
 
 # cargo and cargo-sweep live in ~/.cargo/bin, added by the login shell's rc
 # file. raw_exec does not source that, so this task sees a PATH without them.

@@ -32,8 +32,11 @@
       ansible.builtin.set_fact:
         mop_node: "{{ nomad_node_names[inventory_hostname] | default(inventory_hostname) }}"
       vars:
-        nomad_node_names:
-          gamer-wsl: gamer
+        # Обратное к MOP_SSH_ALIAS (узел nomad -> ssh-алиас): здесь нужен
+        # ssh-алиас -> узел. Второй список имён завёл бы расхождение.
+        nomad_node_names: "{{ dict(MOP_SSH_ALIAS.split(',')
+                                   | map('split', '=')
+                                   | map('reverse')) }}"
 
     # КУДА подключаться и ЧЕЙ сертификат ждать -- разные вещи, и здесь это не
     # тонкость. Узлы пула сидят в одной локалке с сервером шины, но публичное
@@ -45,7 +48,7 @@
     # проверку, либо открывать 4222 наружу.
     - name: Bus address on the LAN
       ansible.builtin.set_fact:
-        nats_lan: "tls://192.168.1.66:4222"
+        nats_lan: "tls://{{ MOP_SERVER_LAN }}:{{ MOP_NATS_PORT }}"
 
 
 - name: NATS server for the mop bus
@@ -57,12 +60,10 @@
     # Пароли лежат ЗДЕСЬ, на управляющей машине, а не в репозитории; lookup
     # заводит файл при первом обращении и возвращает то же значение дальше.
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
-    nats_version: "2.14.6"
-    nats_tgz: "https://github.com/nats-io/nats-server/releases/download/v{{ nats_version }}/nats-server-v{{ nats_version }}-linux-amd64.tar.gz"
+    nats_tgz: "https://github.com/nats-io/nats-server/releases/download/v{{ MOP_NATS_VERSION }}/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64.tar.gz"
     # Сертификат берём существующий, от vhost'а Nomad, и клиенты ходят на
     # nomad.ermak.dev:4222. Отдельное имя стоило бы записи в DNS и второго
     # certbot'а ради того же самого хоста; порт различает службы не хуже имени.
-    nats_cert_host: nomad.ermak.dev
     nats_nodes: "{{ groups['nomad_clients'] | map('extract', hostvars, 'mop_node') | list }}"
     # Шарды считает `mop deploy` из ростера Nomad и своей памяти (см. bin/deploy)
     # и передаёт сюда --extra-vars. Пустой список -- законное состояние пустого
@@ -70,16 +71,16 @@
     shards: "{{ mop_shards | default([]) }}"
 
   tasks:
-    - name: Unpack nats-server {{ nats_version }}
+    - name: Unpack nats-server {{ MOP_NATS_VERSION }}
       ansible.builtin.unarchive:
         src: "{{ nats_tgz }}"
         dest: /tmp
         remote_src: yes
-        creates: "/tmp/nats-server-v{{ nats_version }}-linux-amd64/nats-server"
+        creates: "/tmp/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64/nats-server"
 
     - name: Install nats-server
       ansible.builtin.copy:
-        src: "/tmp/nats-server-v{{ nats_version }}-linux-amd64/nats-server"
+        src: "/tmp/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64/nats-server"
         dest: /usr/local/bin/nats-server
         remote_src: yes
         mode: "0755"
@@ -136,9 +137,9 @@
 
   vars:
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
-    mop_home: /home/ermak/mop
+    mop_home: "{{ MOP_HOME }}/mop"
     nats_addr: "{{ nats_lan }}"
-    nats_cert_host: nomad.ermak.dev
+    nats_cert_host: "{{ MOP_TLS_HOST }}"
     nats_user: "node-{{ mop_node }}"
     nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + mop_node + '.pass length=32 chars=ascii_letters,digits') }}"
     shards: "{{ mop_shards | default([]) }}"
@@ -159,18 +160,23 @@
         rsync_opts:
           - "--exclude=.git"
           - "--exclude=__pycache__"
+          # .env НИКОГДА не уезжает на узлы. keys.distribute возит туда только
+          # названное явно (secrets.env), и общий rsync, тащащий весь файл с
+          # кредами GitLab, сводил бы эту фильтрацию к нулю. На узле пойман
+          # 2026-08-29: лежал целиком, 0600, со всеми секретами проекта.
+          - "--exclude=.env"
       notify: restart mop-agent
 
     - name: Credentials dir
       ansible.builtin.file:
-        path: /home/ermak/.config/mop
+        path: "{{ MOP_HOME }}/.config/mop"
         state: directory
         mode: "0700"
 
     - name: Bus credentials for the agent
       ansible.builtin.template:
         src: bus.json.j2
-        dest: /home/ermak/.config/mop/bus.json
+        dest: "{{ MOP_HOME }}/.config/mop/bus.json"
         mode: "0600"
       notify: restart mop-agent
 
@@ -181,7 +187,7 @@
     - name: Bus credentials for the slaves, one per shard
       ansible.builtin.template:
         src: bus.json.j2
-        dest: "/home/ermak/.config/mop/bus-{{ item }}.json"
+        dest: "{{ MOP_HOME }}/.config/mop/bus-{{ item }}.json"
         mode: "0600"
       loop: "{{ shards }}"
       vars:
@@ -195,7 +201,7 @@
     # старая копия так и лежала бы.
     - name: Drop the Nomad management token from the pool
       ansible.builtin.file:
-        path: /home/ermak/.config/nomad/bootstrap.json
+        path: "{{ MOP_HOME }}/.config/nomad/bootstrap.json"
         state: absent
 
     - name: Agent unit
@@ -245,7 +251,7 @@
   vars:
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_addr: "{{ nats_lan }}"
-    nats_cert_host: nomad.ermak.dev
+    nats_cert_host: "{{ MOP_TLS_HOST }}"
     nats_user: admin
     nats_password: "{{ lookup('password', secrets_dir + '/nats-admin.pass length=32 chars=ascii_letters,digits') }}"
     shards: "{{ mop_shards | default([]) }}"
@@ -259,14 +265,14 @@
 
     - name: Credentials dir
       ansible.builtin.file:
-        path: /home/ermak/.config/mop
+        path: "{{ MOP_HOME }}/.config/mop"
         state: directory
         mode: "0700"
 
     - name: Operator credentials
       ansible.builtin.template:
         src: bus.json.j2
-        dest: /home/ermak/.config/mop/bus.json
+        dest: "{{ MOP_HOME }}/.config/mop/bus.json"
         mode: "0600"
 
     # По креденшлу на шард: их подхватывает `mop master`, и именно они делают
@@ -274,7 +280,7 @@
     - name: Master credentials, one per shard
       ansible.builtin.template:
         src: bus.json.j2
-        dest: "/home/ermak/.config/mop/bus-{{ item }}.json"
+        dest: "{{ MOP_HOME }}/.config/mop/bus-{{ item }}.json"
         mode: "0600"
       loop: "{{ shards }}"
       vars:

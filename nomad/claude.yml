@@ -43,9 +43,12 @@
     project_env: "{{ lookup('env', 'HOME') }}/mop/.env"
     windows_mcp_token: "{{ lookup('ini', 'WINDOWS_MCP_TOKEN type=properties file=' + project_env) }}"
     mac_mcp_token: "{{ lookup('ini', 'MAC_MCP_TOKEN type=properties file=' + project_env) }}"
+    # Хост, ВНУТРИ которого живёт этот узел, достаётся только через loopback:
+    # там mirrored networking, и Windows-файрвол роняет хайрпин на LAN-адрес.
+    win_inside: "{{ MOP_SSH_ALIAS.split(',') | map('split','=') | map('last') | list }}"
     windows_mcp_url: >-
-      {{ 'http://127.0.0.1:8000/mcp' if inventory_hostname == 'gamer-wsl'
-         else 'http://gamer.corp.ermak.dev:8000/mcp' }}
+      {{ 'http://127.0.0.1:' ~ MCP_PORT ~ '/mcp' if inventory_hostname in win_inside
+         else 'http://' ~ WINDOWS_MCP_FQDN ~ ':' ~ MCP_PORT ~ '/mcp' }}
 
   tasks:
     - name: Ensure ~/.claude exists
@@ -95,6 +98,11 @@
         rsync_opts:
           - "--exclude=.git"
           - "--exclude=__pycache__"
+          # .env НИКОГДА не уезжает на узлы. keys.distribute возит туда только
+          # названное явно (secrets.env), и общий rsync, тащащий весь файл с
+          # кредами GitLab, сводил бы эту фильтрацию к нулю. На узле пойман
+          # 2026-08-29: лежал целиком, 0600, со всеми секретами проекта.
+          - "--exclude=.env"
 
     - name: Deliver the declared MCP server set
       ansible.builtin.template:

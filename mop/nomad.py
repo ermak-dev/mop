@@ -20,7 +20,9 @@ except ImportError:
     sys.exit("нужны библиотеки API: pip install --user --break-system-packages "
              "python-nomad")
 
-ADDR = os.environ.get("NOMAD_ADDR", "https://nomad.ermak.dev")
+from . import config  # noqa: E402
+
+ADDR = config.get("NOMAD_ADDR", "https://nomad.ermak.dev")
 TASK = "claude"          # имя задачи внутри группы слейва
 # Два датацентра. В `home` живут рабочие узлы, туда планировщик ставит слейвов;
 # джобы слейвов объявляют home, поэтому на рабочую станцию оператора слейв не
@@ -31,8 +33,8 @@ TASK = "claude"          # имя задачи внутри группы сле�
 # exec` ходит только внутрь аллокаций, и без своей аллокации мастер был для
 # слейва недосягаем. С переездом на шину эта причина отпала — слейв пишет в
 # mop.master.inbox, и членство мастера в кластере ему больше ни к чему.
-POOL_DC = "home"
-CONTROL_DC = "control"
+POOL_DC = config.get("MOP_POOL_DC", "home")
+CONTROL_DC = config.get("MOP_CONTROL_DC", "control")
 NotFound = _nomad.api.exceptions.URLNotFoundNomadException
 ApiError = _nomad.api.exceptions.BaseNomadException
 

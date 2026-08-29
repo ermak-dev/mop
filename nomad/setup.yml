@@ -23,10 +23,10 @@
   gather_facts: no
 
   vars:
-    nomad_version: 1.10.5
+    nomad_version: "{{ MOP_NOMAD_VERSION }}"
     nomad_zip: "https://hashicorp-releases.yandexcloud.net/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
-    nomad_home: /home/ermak/nomad
-    acme_webroot: /home/ermak/ermak.dev
+    nomad_home: "{{ MOP_NOMAD_DATA | dirname }}"
+    acme_webroot: "{{ MOP_ACME_WEBROOT }}"
 
   tasks:
     - name: Ensure unzip is present
@@ -112,7 +112,7 @@
     # certbot needs nomad.ermak.dev in its server_name before issuance.
     - name: Add nomad.ermak.dev to the port-80 server_name
       replace:
-        path: /home/ermak/nginx/vhosts.conf
+        path: "{{ MOP_HOME }}/nginx/vhosts.conf"
         # www.ermak.dev pins the match to the port-80 catch-all block; the
         # https `server_name ermak.dev;` one-liner must NOT gain the name (a
         # second 443 block with it would win over ours and shadow the vhost).
@@ -129,13 +129,13 @@
       become: yes
       command: >
         certbot certonly --webroot -w {{ acme_webroot }}
-        -d nomad.ermak.dev --non-interactive
+        -d {{ MOP_TLS_HOST }} --non-interactive
       args:
-        creates: /etc/letsencrypt/live/nomad.ermak.dev/fullchain.pem
+        creates: "/etc/letsencrypt/live/{{ MOP_TLS_HOST }}/fullchain.pem"
 
     - name: Deploy the nomad.ermak.dev vhost
       blockinfile:
-        path: /home/ermak/nginx/vhosts.conf
+        path: "{{ MOP_HOME }}/nginx/vhosts.conf"
         marker: "# {mark} ANSIBLE MANAGED: nomad.ermak.dev"
         block: "{{ lookup('template', 'vhost.conf.j2') }}"
       register: vhost
@@ -146,9 +146,12 @@
       when: vhost.changed
 
     # --- the nightly disk sweep job (see sl-cleanup.nomad.hcl) ------------
+    # template, а не copy: спека несёт значения установки (датацентр, пользователь,
+    # $HOME). ${...} для этого не годится -- это интерполяция HCL, Nomad стал бы
+    # разрешать её сам и не нашёл бы переменной.
     - name: Deploy the sl-cleanup job spec
-      copy:
-        src: sl-cleanup.nomad.hcl
+      template:
+        src: sl-cleanup.nomad.hcl.j2
         dest: "{{ nomad_home }}/sl-cleanup.nomad.hcl"
         mode: '0644'
       register: cleanup_spec
@@ -176,7 +179,7 @@
   gather_facts: no
 
   vars:
-    nomad_version: 1.10.5
+    nomad_version: "{{ MOP_NOMAD_VERSION }}"
     nomad_zip: "https://hashicorp-releases.yandexcloud.net/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
     nextest_version: 0.9.98
     # Per-host memory reserved for non-pool tenants. mirror fingerprints
@@ -191,8 +194,8 @@
     # 2026-08-28 the 26 Aug sweep was still pending and the 27th and 28th had
     # never launched. Anything below one slave's 8 GiB cannot cost the pool a
     # slave; it can only cost it the sweep.
-    nomad_reserved_mb:
-      mirror: 33602
+    # Память узлов, отрезанная под чужих жильцов; из MOP_RESERVED_MB.
+    nomad_reserved_mb: "{{ dict(MOP_RESERVED_MB.split(',') | map('split','=')) }}"
     # Project env files a fresh clone cannot invent: the slave wrapper copies
     # these from ~/slave-env/<project>/ into every clone it creates, the same way
     # ~/bin/code seeds worktrees on mate. Sources live on the control machine.
@@ -383,9 +386,9 @@
   gather_facts: no
 
   vars:
-    nomad_version: 1.10.5
+    nomad_version: "{{ MOP_NOMAD_VERSION }}"
     nomad_zip: "https://hashicorp-releases.yandexcloud.net/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
-    nomad_datacenter: control
+    nomad_datacenter: "{{ MOP_CONTROL_DC }}"
 
   tasks:
     - name: Ensure unzip

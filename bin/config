@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""настройки этой установки: mop config [--json]
+
+Показывает, чем система живёт сейчас и откуда каждое значение взялось:
+переменная окружения важнее .env, .env важнее дефолта в коде.
+
+Дефолты равны сегодняшним значениям кластера намеренно: .env лежит в
+.gitignore, и свежий клон без него обязан подниматься как есть. Обязательными
+в .env остаются одни секреты.
+"""
+import json
+
+import lib
+from mop import config
+from mop.render import table
+
+
+def main(argv):
+    eff = config.effective()
+    if argv == ["--json"]:
+        # Так это уезжает в плейбуки: `mop deploy` отдаёт их --extra-vars.
+        print(json.dumps({k: v for k, (v, _) in eff.items()}, ensure_ascii=False))
+        return
+    if argv:
+        lib.usage(__doc__)
+    print("\n".join(table([("НАСТРОЙКА", "ЗНАЧЕНИЕ", "ОТКУДА")]
+                          + [(k, v, src) for k, (v, src) in eff.items()])))
+    print(f"\nфайл: {config.ENV_FILE}")
+
+
+lib.run(main)

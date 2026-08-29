@@ -28,10 +28,17 @@ link() {
     fi
 }
 
+# Настройки установки едут в плейбуки тем же путём, что и список шардов, --
+# --extra-vars. Плейбуки .env не читают САМИ: на узлах его нет (rsync
+# исключает -- там креды GitLab), а два способа добраться до одних значений
+# однажды разойдутся.
+SETTINGS="$("$BIN_DIR/mop" config --json)"
+
 play() {
     local book="$1"; shift
     section "ansible: $book"
-    ansible-playbook -i "$INVENTORY" "$PROJECT_HOME/$book" "$@"
+    ansible-playbook -i "$INVENTORY" "$PROJECT_HOME/$book" \
+        --extra-vars "$SETTINGS" "$@"
 }
 
 # Шарды считает `mop shards`: ростер Nomad плюс память плюс то, что назвали в

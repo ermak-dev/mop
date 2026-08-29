@@ -49,7 +49,7 @@ def push_spec(name, script, node_names):
             "Tasks": [{
                 "Name": "login",
                 "Driver": "raw_exec",
-                "User": "ermak",
+                "User": slaves.USER,
                 "Config": {"command": "/bin/bash", "args": ["-c", script]},
                 "Env": {"HOME": slaves.HOME},
                 "Resources": {"CPU": 100, "MemoryMB": 64},

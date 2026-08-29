@@ -3,13 +3,13 @@
 # TLS берёт СУЩЕСТВУЮЩИЙ сертификат nomad.ermak.dev. Клиенты при этом ходят на
 # LAN-адрес: публичное имя резолвится в адрес роутера, а хайрпин на 4222 он не
 # делает. Отсюда разделение url и tls_hostname в bus.json.
-listen = "0.0.0.0:4222"
+listen = "0.0.0.0:{{ MOP_NATS_PORT }}"
 server_name = "mop"
 max_payload = 1MB
 
 tls {
-  cert_file = "/etc/letsencrypt/live/{{ nats_cert_host }}/fullchain.pem"
-  key_file  = "/etc/letsencrypt/live/{{ nats_cert_host }}/privkey.pem"
+  cert_file = "/etc/letsencrypt/live/{{ MOP_TLS_HOST }}/fullchain.pem"
+  key_file  = "/etc/letsencrypt/live/{{ MOP_TLS_HOST }}/privkey.pem"
 }
 
 # Права по субъектам -- то, ради чего шину и заводили: раньше на узлы ехал

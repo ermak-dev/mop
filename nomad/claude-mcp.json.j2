@@ -1,7 +1,7 @@
 {
   "mop": {
     "type": "stdio",
-    "command": "/home/ermak/mop/bin/mop",
+    "command": "{{ MOP_HOME }}/mop/bin/mop",
     "args": ["mcp"]
   },
   "playwright": {
@@ -25,7 +25,7 @@
   },
   "mac-mcp": {
     "type": "http",
-    "url": "http://mac:8000/mcp",
+    "url": "http://{{ MAC_MCP_HOST }}:{{ MCP_PORT }}/mcp",
     "headers": {
       "Authorization": "Bearer {{ mac_mcp_token }}"
     }

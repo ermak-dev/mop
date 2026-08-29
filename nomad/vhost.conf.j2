@@ -1,8 +1,8 @@
 server {
     listen 443 ssl;
-    server_name nomad.ermak.dev;
-    ssl_certificate /etc/letsencrypt/live/nomad.ermak.dev/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/nomad.ermak.dev/privkey.pem;
+    server_name {{ MOP_TLS_HOST }};
+    ssl_certificate /etc/letsencrypt/live/{{ MOP_TLS_HOST }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ MOP_TLS_HOST }}/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:4646;

@@ -16,7 +16,7 @@
 # mirror being swept too. Placement headroom is therefore part of the design --
 # see nomad_reserved_mb in setup.yml.
 job "sl-cleanup" {
-  datacenters = ["home"]
+  datacenters = ["{{ MOP_POOL_DC }}"]
   type        = "sysbatch"
 
   periodic {
@@ -28,14 +28,14 @@ job "sl-cleanup" {
   group "cleanup" {
     task "sweep" {
       driver = "raw_exec"
-      user   = "ermak"
+      user   = "{{ MOP_USER }}"
 
       config {
         command = "/usr/local/bin/sl-sweep"
       }
 
       env {
-        HOME = "/home/ermak"
+        HOME = "{{ MOP_HOME }}"
 
         # Escalate to capping live workers' target dirs below this much free on
         # the tightest watched filesystem. 60 GB is roughly a day of headroom at

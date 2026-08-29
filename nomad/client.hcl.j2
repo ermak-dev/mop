@@ -2,7 +2,7 @@
 # The agent runs as root so tasks can drop to the ermak user; raw_exec is the
 # only enabled driver -- workers need the real $HOME (clones, ~/.claude, keys),
 # not a chroot.
-datacenter = "{{ nomad_datacenter | default('home') }}"
+datacenter = "{{ nomad_datacenter | default(MOP_POOL_DC) }}"
 data_dir   = "/opt/nomad/data"
 bind_addr  = "127.0.0.1"
 
@@ -19,7 +19,7 @@ advertise {
 
 client {
   enabled = true
-  servers = ["192.168.1.66:4647"]
+  servers = ["{{ MOP_SERVER_LAN }}:4647"]
 {% if (nomad_reserved_mb | default({})).get(inventory_hostname, 0) %}
   # Memory carved out for the host's other tenants (gitlab runners on mirror):
   # the scheduler treats it as non-allocatable, capping the slave pool at

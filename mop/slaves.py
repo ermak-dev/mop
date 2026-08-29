@@ -8,17 +8,28 @@ import base64
 import os
 import re
 
-from . import bus, nomad
+from . import bus, config, nomad
 
-PROJECT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+PROJECT = config.PROJECT
 
-MEM = 8192                          # бюджет слейва, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
-HOME = "/home/ermak"                # $HOME на узлах пула
-SSH_ALIAS = {"gamer": "gamer-wsl"}  # имя узла nomad -> ssh-алиас
+# Значения этой установки — .env поверх дефолтов; см. mop/config.py.
+MEM = config.num("MOP_SLAVE_MEM_MB", 8192)   # бюджет слейва, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
+HOME = config.get("MOP_HOME", "/home/ermak")  # $HOME на узлах пула
+USER = config.get("MOP_USER", "ermak")        # под кем идут задачи
+SSH_ALIAS = config.pairs("MOP_SSH_ALIAS", "gamer=gamer-wsl")  # узел nomad -> ssh-алиас
 # Куда переводить слейв, у которого кончилась квота текущей модели
 # (решение оператора 27.08: Fable → Opus).
-FALLBACK_MODEL = "opus"
+FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL", "opus")
+# Префикс НЕ настраивается: на нём стоят глобы сторожа диска (включая
+# переходные ~/wk/wk-*), shard_of_name и имена tmux-серверов. Сделать его
+# переменной, пока сторож знает оба префикса буквально, — значит развести
+# половины одного соглашения.
 JOB_PREFIX = "sl-"
+
+# MCP автоматизации рабочего стола: адреса чужих хостов, не наших узлов.
+MCP_PORT = config.get("MCP_PORT", "8000")
+WINDOWS_MCP_HOST = config.get("WINDOWS_MCP_HOST", "192.168.1.151")
+MAC_MCP_HOST = config.get("MAC_MCP_HOST", "mac")
 
 # ─── LLM-профили ─────────────────────────────────────────────────────────
 # Слейв — всегда claude code; профиль меняет ровно одно: КУДА он ходит за
@@ -120,10 +131,10 @@ edit_json "$HOME/.claude.json" '.projects[$d].hasTrustDialogAccepted = true
 # slaves reach it by the host's LAN IP; a slave running IN the gamer host's own
 # mirrored-mode WSL shares that LAN IP, where the Windows bind is only reachable
 # via loopback - so it must use 127.0.0.1 instead.
-if ip -4 -o addr show 2>/dev/null | grep -q '192.168.1.151'; then
-    WINURL="http://127.0.0.1:8000/mcp"
+if ip -4 -o addr show 2>/dev/null | grep -q "$SL_WIN_HOST"; then
+    WINURL="http://127.0.0.1:$SL_MCP_PORT/mcp"
 else
-    WINURL="http://192.168.1.151:8000/mcp"
+    WINURL="http://$SL_WIN_HOST:$SL_MCP_PORT/mcp"
 fi
 # Токены НЕ в спеке: она видна в UI Nomad и остаётся в его состоянии. Едут
 # тем же файлом, что и ключи провайдеров, и достаются отсюда так же -- sed'ом,
@@ -132,10 +143,11 @@ secrets="$HOME/.config/mop/secrets.env"
 wintok=$(sed -n "s/^WINDOWS_MCP_TOKEN=//p" "$secrets" 2>/dev/null | tail -1)
 mactok=$(sed -n "s/^MAC_MCP_TOKEN=//p" "$secrets" 2>/dev/null | tail -1)
 edit_json "$HOME/.claude.json" '.mcpServers["windows-mcp"] = {"type":"http","url":$winurl,"headers":{"Authorization":("Bearer " + $wintok)}}
-  | .mcpServers["mac-mcp"] = {"type":"http","url":"http://mac:8000/mcp","headers":{"Authorization":("Bearer " + $mactok)}}
+  | .mcpServers["mac-mcp"] = {"type":"http","url":$macurl,"headers":{"Authorization":("Bearer " + $mactok)}}
   | .mcpServers["playwright"] = {"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--browser","chromium"]}
-  | .mcpServers["mop"] = {"type":"stdio","command":"/home/ermak/mop/bin/mop","args":["mcp"]}' \
-    --arg winurl "$WINURL" --arg wintok "$wintok" --arg mactok "$mactok"
+  | .mcpServers["mop"] = {"type":"stdio","command":$mop,"args":["mcp"]}' \
+    --arg winurl "$WINURL" --arg macurl "http://$SL_MAC_HOST:$SL_MCP_PORT/mcp" \
+    --arg mop "$HOME/mop/bin/mop" --arg wintok "$wintok" --arg mactok "$mactok"
 # playwright-mcp needs a browser on the node; install is idempotent and cached
 # in ~/.cache/ms-playwright, so every slave boot just confirms it is there.
 npx -y playwright install chromium >/dev/null 2>&1 || true
@@ -284,13 +296,16 @@ def job_spec(name, origin, llm=DEFAULT_LLM):
             "Tasks": [{
                 "Name": nomad.TASK,
                 "Driver": "raw_exec",
-                "User": "ermak",
+                "User": USER,
                 "Config": {"command": "/bin/bash", "args": ["-c", WRAPPER]},
                 "Env": {
                     "SL_NAME": name,
                     "SL_ORIGIN": origin,
                     "SL_PROJECT": project,
                     "SL_SHARD": shard_of(origin),
+                    "SL_MCP_PORT": MCP_PORT,
+                    "SL_WIN_HOST": WINDOWS_MCP_HOST,
+                    "SL_MAC_HOST": MAC_MCP_HOST,
                     "HOME": HOME,
                     "PATH": f"/usr/local/bin:/usr/bin:/bin:{HOME}/.local/bin:{HOME}/.cargo/bin:{HOME}/.nvm/versions/node/v22.12.0/bin",
                     # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
