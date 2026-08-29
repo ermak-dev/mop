@@ -1,0 +1,419 @@
+---
+# Nomad: the worker-pool dispatcher.
+#
+# One server on the git box (always-on, reachable from everywhere), clients on
+# every machine that hosts claude workers. Clients dial the server on RPC 4647
+# -- outbound only, so CGNAT and WSL NAT never matter. The HTTP API (4646)
+# binds to loopback on git and is published through the GitLab embedded nginx
+# as https://nomad.ermak.dev, same as the other vhosts in ~/nginx/vhosts.conf.
+#
+# ACL is on: the API refuses anonymous calls. The bootstrap (management) token
+# is minted once, kept in /home/ermak/nomad/bootstrap.json on git, and fetched
+# to ~/.config/nomad/bootstrap.json on the control machine for the worker CLI.
+#
+# The binary comes from the Yandex Cloud mirror of releases.hashicorp.com,
+# which is unreachable from RU addresses.
+#
+# Run:  ansible-playbook -i ~/etc/inventory.ini ~/etc/nomad/setup.yml
+# (or:  net setup nomad_clients git)
+
+- name: Nomad server on git
+  hosts: git
+  become: no
+  gather_facts: no
+
+  vars:
+    nomad_version: 1.10.5
+    nomad_zip: "https://hashicorp-releases.yandexcloud.net/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
+    nomad_home: /home/ermak/nomad
+    acme_webroot: /home/ermak/ermak.dev
+
+  tasks:
+    - name: Ensure unzip is present
+      become: yes
+      apt:
+        name: unzip
+        state: present
+
+    - name: Download nomad {{ nomad_version }}
+      get_url:
+        url: "{{ nomad_zip }}"
+        dest: "/tmp/nomad_{{ nomad_version }}.zip"
+        mode: '0644'
+
+    - name: Install nomad binary
+      become: yes
+      unarchive:
+        src: "/tmp/nomad_{{ nomad_version }}.zip"
+        dest: /usr/local/bin
+        remote_src: yes
+        mode: '0755'
+
+    - name: Create nomad data dir
+      file:
+        path: "{{ nomad_home }}/data"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy server config
+      template:
+        src: server.hcl.j2
+        dest: "{{ nomad_home }}/server.hcl"
+        mode: '0644'
+      register: server_config
+
+    - name: Install systemd unit
+      become: yes
+      template:
+        src: nomad.service.j2
+        dest: /etc/systemd/system/nomad.service
+        mode: '0644'
+      vars:
+        nomad_user: ermak
+        nomad_config: "{{ nomad_home }}/server.hcl"
+      register: server_unit
+
+    - name: Start nomad server
+      become: yes
+      systemd:
+        name: nomad
+        state: "{{ (server_config.changed or server_unit.changed) | ternary('restarted', 'started') }}"
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Wait for the HTTP API
+      uri:
+        url: http://127.0.0.1:4646/v1/agent/self
+        status_code: [200, 403]
+      register: api
+      until: api.status in [200, 403]
+      retries: 15
+      delay: 2
+
+    # --- ACL bootstrap: once, kept next to the data dir -------------------
+    - name: Bootstrap ACL (first run only)
+      shell: >
+        /usr/local/bin/nomad acl bootstrap -json
+        > {{ nomad_home }}/bootstrap.json
+        && chmod 600 {{ nomad_home }}/bootstrap.json
+      args:
+        creates: "{{ nomad_home }}/bootstrap.json"
+      environment:
+        NOMAD_ADDR: http://127.0.0.1:4646
+
+    - name: Fetch the management token to the control machine
+      fetch:
+        src: "{{ nomad_home }}/bootstrap.json"
+        dest: "{{ lookup('env', 'HOME') }}/.config/nomad/bootstrap.json"
+        flat: yes
+
+    # --- the vhost: nomad.ermak.dev through the GitLab embedded nginx -----
+    # The :80 server block owns the ACME webroot for every ermak.dev name;
+    # certbot needs nomad.ermak.dev in its server_name before issuance.
+    - name: Add nomad.ermak.dev to the port-80 server_name
+      replace:
+        path: /home/ermak/nginx/vhosts.conf
+        # www.ermak.dev pins the match to the port-80 catch-all block; the
+        # https `server_name ermak.dev;` one-liner must NOT gain the name (a
+        # second 443 block with it would win over ours and shadow the vhost).
+        regexp: '^(\s*server_name ermak\.dev www\.ermak\.dev(?:(?!nomad\.ermak\.dev).)*);$'
+        replace: '\1 nomad.ermak.dev;'
+      register: http_name
+
+    - name: Reload nginx for the ACME name
+      become: yes
+      command: gitlab-ctl hup nginx
+      when: http_name.changed
+
+    - name: Issue the certificate
+      become: yes
+      command: >
+        certbot certonly --webroot -w {{ acme_webroot }}
+        -d nomad.ermak.dev --non-interactive
+      args:
+        creates: /etc/letsencrypt/live/nomad.ermak.dev/fullchain.pem
+
+    - name: Deploy the nomad.ermak.dev vhost
+      blockinfile:
+        path: /home/ermak/nginx/vhosts.conf
+        marker: "# {mark} ANSIBLE MANAGED: nomad.ermak.dev"
+        block: "{{ lookup('template', 'vhost.conf.j2') }}"
+      register: vhost
+
+    - name: Reload nginx for the vhost
+      become: yes
+      command: gitlab-ctl hup nginx
+      when: vhost.changed
+
+    # --- the nightly disk sweep job (see wk-cleanup.nomad.hcl) ------------
+    - name: Deploy the wk-cleanup job spec
+      copy:
+        src: wk-cleanup.nomad.hcl
+        dest: "{{ nomad_home }}/wk-cleanup.nomad.hcl"
+        mode: '0644'
+      register: cleanup_spec
+
+    - name: Check the wk-cleanup job is registered
+      shell: >
+        NOMAD_ADDR=http://127.0.0.1:4646
+        NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
+        /usr/local/bin/nomad job status wk-cleanup
+      register: cleanup_status
+      failed_when: false
+      changed_when: false
+
+    - name: Register the wk-cleanup job
+      shell: >
+        NOMAD_ADDR=http://127.0.0.1:4646
+        NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
+        /usr/local/bin/nomad job run {{ nomad_home }}/wk-cleanup.nomad.hcl
+      when: cleanup_spec.changed or cleanup_status.rc != 0
+
+
+- name: Nomad clients on the worker machines
+  hosts: nomad_clients
+  become: yes
+  gather_facts: no
+
+  vars:
+    nomad_version: 1.10.5
+    nomad_zip: "https://hashicorp-releases.yandexcloud.net/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
+    nextest_version: 0.9.98
+    # Per-host memory reserved for non-pool tenants. mirror fingerprints
+    # 66626 MB and also runs the gitlab runners: 66626 - 33602 caps the
+    # worker pool at 32 GB plus 256 MB of placement headroom.
+    #
+    # The headroom is not slack, it is what keeps the schedule unwedged. This
+    # was 33858 -- exactly 32 GB for the pool -- and four 8 GiB workers filled
+    # it to the byte, so the 128 MB wk-cleanup task could not place on mirror at
+    # all. A sysbatch child stays `pending` until it places on EVERY eligible
+    # node, and prohibit_overlap blocks each following run behind it, so on
+    # 2026-08-28 the 26 Aug sweep was still pending and the 27th and 28th had
+    # never launched. Anything below one worker's 8 GiB cannot cost the pool a
+    # worker; it can only cost it the sweep.
+    nomad_reserved_mb:
+      mirror: 33602
+    # Project env files a fresh clone cannot invent: the worker wrapper copies
+    # these from ~/wk-env/<project>/ into every clone it creates, the same way
+    # ~/bin/code seeds worktrees on mate. Sources live on the control machine.
+    wk_env_files:
+      - {project: rugent, file: ~/rugent/.env}
+      - {project: rugent, file: ~/rugent/.env-prod}
+      - {project: rugent, file: ~/rugent/.providers}
+      - {project: cloudpub, file: ~/cloudpub/.env}
+
+  tasks:
+    # postgresql: rug test creates a per-run database via `sudo -u postgres`;
+    # cmake: cloudpub's libz-ng-sys builds zlib-ng with it; the gtk/webkit dev
+    # set: cloudpub's workspace includes a Tauri gui crate, and `clo test
+    # --rust` builds the whole graph.
+    - name: Ensure worker toolchain packages
+      apt:
+        name:
+          - unzip
+          - postgresql
+          - cmake
+          - pkg-config
+          - libglib2.0-dev
+          - libgtk-3-dev
+          - libwebkit2gtk-4.1-dev
+          - librsvg2-dev
+          - libsoup-3.0-dev
+          # the rest of cloudpub's own build image (Dockerfile), minus the
+          # cross-compilers its release builds use
+          - protobuf-compiler
+          - file
+          - libcap2-bin
+          - libxml2
+          - media-types
+        state: present
+
+    - name: Ensure postgres is running
+      systemd:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    - name: Ensure ~/.cargo/bin exists
+      file:
+        path: /home/ermak/.cargo/bin
+        state: directory
+        owner: ermak
+        group: ermak
+        mode: '0755'
+
+    - name: Install cargo-nextest {{ nextest_version }}
+      unarchive:
+        src: "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-{{ nextest_version }}/cargo-nextest-{{ nextest_version }}-x86_64-unknown-linux-gnu.tar.gz"
+        dest: /home/ermak/.cargo/bin
+        remote_src: yes
+        owner: ermak
+        group: ermak
+        mode: '0755'
+        creates: /home/ermak/.cargo/bin/cargo-nextest
+
+    # cargo-sweep: the size cap wk-sweep applies to a LIVE worker's target dir.
+    # An age gate cannot stand in for it -- cargo rewrites fingerprints on every
+    # build, so an actively built target dir never looks old (0 of 34,509 files
+    # older than 3 days in a 48 GB dir; see ~/bin/cleanup). Built from source
+    # rather than pinned to a release tarball: cargo-sweep ships no linux-gnu
+    # binary in its releases, and it compiles in about half a minute.
+    - name: Install cargo-sweep (size cap for wk-sweep tier 3)
+      command: /home/ermak/.cargo/bin/cargo install cargo-sweep --locked
+      become_user: ermak
+      args:
+        creates: /home/ermak/.cargo/bin/cargo-sweep
+
+    # --- cloudpub integration-test environment ---------------------------
+    # The subset of cloudpub's bin/docker-test that the rust integration
+    # suite needs: trusted local postgres with a cloudpub superuser role, a
+    # ru_RU test database, pg_trgm inherited via template1, redis, and
+    # cloudpub.local resolving to loopback. (rug test needs none of this: it
+    # provisions its own role and per-run database via `sudo -u postgres`.)
+    - name: Ensure redis is present
+      apt:
+        name: redis-server
+        state: present
+
+    - name: Ensure redis is running
+      systemd:
+        name: redis-server
+        state: started
+        enabled: yes
+
+    - name: Ensure ru_RU.UTF-8 locale exists (test database locale)
+      command: locale-gen ru_RU.UTF-8
+      register: locale_gen
+      changed_when: "'done' in locale_gen.stdout"
+
+    - name: Trust local postgres auth (clo tooling connects as -U cloudpub)
+      replace:
+        # Ubuntu 24.04 => postgresql 16 on every node
+        path: /etc/postgresql/16/main/pg_hba.conf
+        regexp: '^(local\s+all\s+all\s+)peer$'
+        replace: '\1trust'
+      register: pg_hba
+
+    - name: Reload postgres auth config
+      systemd:
+        name: postgresql
+        state: reloaded
+      when: pg_hba.changed
+
+    - name: Create cloudpub role (superuser -- the test framework drops and creates databases)
+      shell: >
+        [ -n "$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='cloudpub'")" ]
+        || { sudo -u postgres psql -c "CREATE ROLE cloudpub SUPERUSER LOGIN PASSWORD 'cloudpub'"; echo CREATED; }
+      register: pg_role
+      changed_when: "'CREATED' in pg_role.stdout"
+
+    - name: Create pg_trgm in template1 (inherited by every test-created database)
+      command: sudo -u postgres psql -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+      changed_when: false
+
+    - name: Create test_cloudpub database
+      shell: >
+        [ -n "$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='test_cloudpub'")" ]
+        || { sudo -u postgres createdb -O cloudpub --template=template0
+        --encoding=UTF8 --locale=ru_RU.UTF-8 test_cloudpub; echo CREATED; }
+      register: pg_db
+      changed_when: "'CREATED' in pg_db.stdout"
+
+    - name: Resolve cloudpub.local to loopback
+      lineinfile:
+        path: /etc/hosts
+        line: "127.0.0.1 cloudpub.local"
+        regexp: 'cloudpub\.local'
+
+    # node for cloudpub's frontend/e2e test sets, per BUILD.md: nvm + 22.12.0 (BUILD.md says 22.11.0, but server/Dockerfile pins
+    # NODE_VERSION=22.12.0 and vite refuses anything older).
+    # Per-user install under ermak -- the same account the workers run as.
+    - name: Install nvm for ermak
+      become_user: ermak
+      shell: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+      args:
+        creates: /home/ermak/.nvm/nvm.sh
+
+    - name: Install node 22.12.0
+      become_user: ermak
+      shell: . ~/.nvm/nvm.sh && nvm install 22.12.0 && nvm alias default 22.12.0
+      args:
+        creates: /home/ermak/.nvm/versions/node/v22.12.0
+        executable: /bin/bash
+
+    - name: Install yarn
+      become_user: ermak
+      shell: . ~/.nvm/nvm.sh && npm install -g yarn
+      args:
+        creates: /home/ermak/.nvm/versions/node/v22.12.0/bin/yarn
+        executable: /bin/bash
+
+    - name: Create wk-env project dirs
+      file:
+        path: "/home/ermak/wk-env/{{ item }}"
+        state: directory
+        owner: ermak
+        group: ermak
+        mode: '0700'
+      loop: "{{ wk_env_files | map(attribute='project') | unique }}"
+
+    - name: Distribute project env files
+      copy:
+        src: "{{ item.file }}"
+        dest: "/home/ermak/wk-env/{{ item.project }}/"
+        owner: ermak
+        group: ermak
+        mode: '0600'
+      loop: "{{ wk_env_files }}"
+
+    - name: Download nomad {{ nomad_version }}
+      get_url:
+        url: "{{ nomad_zip }}"
+        dest: "/tmp/nomad_{{ nomad_version }}.zip"
+        mode: '0644'
+
+    - name: Install nomad binary
+      unarchive:
+        src: "/tmp/nomad_{{ nomad_version }}.zip"
+        dest: /usr/local/bin
+        remote_src: yes
+        mode: '0755'
+
+    - name: Create config and data dirs
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /etc/nomad
+        - /opt/nomad/data
+
+    - name: Deploy the wk-sweep script (run nightly by the wk-cleanup job)
+      copy:
+        src: wk-sweep.sh
+        dest: /usr/local/bin/wk-sweep
+        mode: '0755'
+
+    - name: Deploy client config
+      template:
+        src: client.hcl.j2
+        dest: /etc/nomad/client.hcl
+        mode: '0644'
+      register: client_config
+
+    - name: Install systemd unit
+      template:
+        src: nomad.service.j2
+        dest: /etc/systemd/system/nomad.service
+        mode: '0644'
+      vars:
+        nomad_user: root
+        nomad_config: /etc/nomad/client.hcl
+      register: client_unit
+
+    - name: Start nomad client
+      systemd:
+        name: nomad
+        state: "{{ (client_config.changed or client_unit.changed) | ternary('restarted', 'started') }}"
+        enabled: yes
+        daemon_reload: yes

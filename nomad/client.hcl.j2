@@ -1,0 +1,37 @@
+# Nomad client: dials the server outbound (4647), never listens for it.
+# The agent runs as root so tasks can drop to the ermak user; raw_exec is the
+# only enabled driver -- workers need the real $HOME (clones, ~/.claude, keys),
+# not a chroot.
+datacenter = "home"
+data_dir   = "/opt/nomad/data"
+bind_addr  = "127.0.0.1"
+
+advertise {
+  # A non-loopback advertise is mandatory for all three even with a loopback
+  # listener; the go-sockaddr template is evaluated by nomad itself, hence the
+  # raw block.
+  {% raw -%}
+  http = "{{ GetPrivateIP }}"
+  rpc  = "{{ GetPrivateIP }}"
+  serf = "{{ GetPrivateIP }}"
+  {%- endraw %}
+}
+
+client {
+  enabled = true
+  servers = ["192.168.1.66:4647"]
+{% if nomad_reserved_mb.get(inventory_hostname, 0) %}
+  # Memory carved out for the host's other tenants (gitlab runners on mirror):
+  # the scheduler treats it as non-allocatable, capping the worker pool at
+  # fingerprinted total minus this value.
+  reserved {
+    memory = {{ nomad_reserved_mb[inventory_hostname] }}
+  }
+{% endif %}
+}
+
+plugin "raw_exec" {
+  config {
+    enabled = true
+  }
+}

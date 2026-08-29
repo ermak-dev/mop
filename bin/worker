@@ -1,0 +1,1279 @@
+#!/usr/bin/env python3
+"""worker — claude-воркеры поверх Nomad (https://nomad.ermak.dev).
+
+worker add [--llm P] [origin]    создать воркера; без origin — взять из git текущего каталога
+worker list                      воркеры (занят/свободен), их LLM, ветки и свободные слоты пула
+worker delete <name>             остановить и удалить воркера
+worker change <name> <origin> [--llm P]  перенацелить воркера на другой репозиторий/LLM
+worker restart <name>            перезапустить зависшего воркера
+worker attach <name>             подключиться к tmux-сессии воркера на её узле
+worker tail <name> [-n N] [-f]   хвост tmux-буфера воркера (по умолчанию 10 строк)
+worker llm                       LLM-профили: чем можно поднимать сиденья и есть ли ключ
+worker login                     раздать креды claude и ключи LLM-провайдеров на узлы пула
+worker doctor [--fix]            диагностика пула: залипания, протухший логин, backoff; --fix лечит
+
+Размещение решает Nomad: каждый воркер бронирует 8 ГБ из пула узлов
+(на Linux-узлах cgroups делают лимит жёстким). Клон живёт в ~/wk/<имя> на узле
+и при delete остаётся лежать — переиспользуется, если воркера поднять снова.
+Токен: $NOMAD_TOKEN или ~/.config/nomad/bootstrap.json.
+
+Всё, кроме attach, ходит через API Nomad (REST — python-nomad, команды внутри
+аллокаций — exec-websocket); ssh нужен только attach ради живого терминала.
+"""
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from urllib.parse import quote
+
+try:
+    import nomad
+    import nomad.api.exceptions
+    import websocket
+except ImportError:
+    sys.exit("нужны библиотеки API: pip install --user --break-system-packages "
+             "python-nomad websocket-client")
+
+ADDR = os.environ.get("NOMAD_ADDR", "https://nomad.ermak.dev")
+MEM = 8192                          # бюджет воркера, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ: сборки в 4 ГБ не влезают)
+HOME = "/home/ermak"                # $HOME на узлах пула
+SSH_ALIAS = {"gamer": "gamer-wsl"}  # имя узла nomad -> ssh-алиас
+# Куда переводить сиденье, у которого кончилась квота текущей модели
+# (решение оператора 27.08: Fable → Opus).
+FALLBACK_MODEL = "opus"
+
+# ─── LLM-профили ─────────────────────────────────────────────────────────
+# Сиденье — всегда claude code; профиль меняет ровно одно: КУДА он ходит за
+# токенами. Anthropic-совместимый эндпоинт провайдера (ANTHROPIC_BASE_URL),
+# ключ (ANTHROPIC_AUTH_TOKEN) и карта имён моделей opus/sonnet/haiku в модели
+# провайдера — больше в сиденье ничего не меняется, поэтому tmux, tail, doctor
+# и детект залипаний работают одинаково для любого профиля.
+#
+# "key" — ИМЯ переменной в ~/.ssh/ai-provider-keys.env (локальный источник
+# правды по ключам). Сам ключ в спеку джоба НЕ кладём: она видна в UI Nomad и
+# остаётся в его состоянии. Вместо этого worker раздаёт на узлы файл
+# ~/.config/worker/llm-keys.env (только с теми ключами, которые называет хоть
+# один профиль), а врапер уже на узле подставляет нужный в сессию.
+LLM_PROFILES = {
+    # штатный Claude: авторизация — логин claude.ai (worker login), env пустой
+    "claude": {"key": None, "env": {}},
+    # z.ai GLM coding plan, https://docs.z.ai/devpack/tool/claude
+    "glm": {
+        "key": "Z_AI_KEY",
+        "auth_var": "ANTHROPIC_AUTH_TOKEN",
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            # [1m] — окно контекста модели, claude срезает суффикс перед
+            # запросом (проверено на z.ai). Без него claude считает незнакомую
+            # модель 200-килотокенной и жмёт auto-compact вчетверо раньше,
+            # чем нужно: у glm-5.3 контекст 1M.
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3[1m]",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3[1m]",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3-flash",
+            # длинные ходы у GLM легко перебивают дефолтный таймаут клиента
+            "API_TIMEOUT_MS": "3000000",
+        },
+    },
+}
+DEFAULT_LLM = "claude"
+LOCAL_KEYS_FILE = "~/.ssh/ai-provider-keys.env"   # источник ключей на этой машине
+LLM_KEYS_FILE = f"{HOME}/.config/worker/llm-keys.env"  # копия на узле пула
+
+# Врапер — собственно задача Nomad: довести узел до "клон есть, claude в
+# tmux" и жить, пока жива tmux-сессия. Смерть врапера = рестарт/переезд
+# воркера силами Nomad; на новом узле врапер сам разворачивает всё заново.
+WRAPPER = r"""
+set -e
+d="$HOME/wk/$WK_NAME"
+if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" != "$WK_ORIGIN" ]; then
+    rm -rf "$d"
+fi
+if [ ! -d "$d/.git" ]; then
+    mkdir -p "$HOME/wk"
+    git clone -q "$WK_ORIGIN" "$d"
+fi
+for f in "$HOME/wk-env/$WK_PROJECT"/.env* "$HOME/wk-env/$WK_PROJECT"/.providers; do
+    [ -e "$f" ] && cp -a "$f" "$d/" || true
+done
+mkdir -p "$HOME/.claude"
+# ~/.claude.json and ~/.claude/settings.json are NODE-level: every seat on the
+# host edits the same two files, and seats boot together after a node restart.
+# Read-modify-write from N processes through one shared temp path truncated the
+# config to 0 bytes three times (2026-08-26/27/28), which parks every claude on
+# the "invalid JSON" prompt and reads as a hung pool. So: one lock for the whole
+# edit, a temp file per seat, and a repair pass for whatever a previous race
+# (or a hard VM kill) left behind.
+edit_json() {  # <file> <jq-program> [jq-args...]
+    local file="$1" program="$2"; shift 2
+    local tmp="$file.$WK_NAME.tmp"
+    exec 9>"$file.lock"
+    flock 9
+    # `jq empty` is NOT a validity check: a zero-byte file is an empty jq input
+    # stream, so it exits 0, every filter over it yields nothing, and the 0-byte
+    # config got written straight back (gamer, 2026-08-28 — all six seats parked
+    # on the config prompt while `worker list` showed only "ЗАВИС"). Demand an
+    # actual object, and never install an empty result.
+    jq -e 'type == "object"' "$file" >/dev/null 2>&1 || echo '{}' > "$file"
+    if jq "$@" "$program" "$file" > "$tmp" && [ -s "$tmp" ]; then
+        mv "$tmp" "$file"
+    else
+        rm -f "$tmp"
+    fi
+    flock -u 9
+    exec 9>&-
+}
+[ -f "$HOME/.claude.json" ] || echo '{}' > "$HOME/.claude.json"
+# A seat has no human to answer the first-run wizard: without these keys every
+# claude sits on the theme prompt, which also reads as a hung seat.
+edit_json "$HOME/.claude.json" '.projects[$d].hasTrustDialogAccepted = true
+    | .hasCompletedOnboarding = true
+    | .theme = (.theme // "dark")' --arg d "$d"
+# Desktop-automation MCP servers: win-mcp (Windows host pwate) and mac-mcp (mac
+# host), so a seat can drive and verify the GUI clients. HTTP transport, so any
+# node that can resolve/reach the hosts gets them; a node that cannot just sees
+# the server fail to connect.
+# windows-mcp runs on the Windows host (gamer) bound to 0.0.0.0:8000. Off-host
+# seats reach it by the host's LAN IP; a seat running IN the gamer host's own
+# mirrored-mode WSL shares that LAN IP, where the Windows bind is only reachable
+# via loopback - so it must use 127.0.0.1 instead.
+if ip -4 -o addr show 2>/dev/null | grep -q '192.168.1.151'; then
+    WINURL="http://127.0.0.1:8000/mcp"
+else
+    WINURL="http://192.168.1.151:8000/mcp"
+fi
+edit_json "$HOME/.claude.json" '.mcpServers["windows-mcp"] = {"type":"http","url":$winurl,"headers":{"Authorization":"Bearer kCgqRS33Yxv4lrSlqV5w6b3qNz0shjj9u4HTInk2DW0"}}
+  | .mcpServers["mac-mcp"] = {"type":"http","url":"http://mac:8000/mcp","headers":{"Authorization":"Bearer FeRM5I-lQr_3mJbq1PWG6KzErm-666SA8b2vVwlBj8U"}}
+  | .mcpServers["playwright"] = {"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--browser","chromium"]}' \
+    --arg winurl "$WINURL"
+# playwright-mcp needs a browser on the node; install is idempotent and cached
+# in ~/.cache/ms-playwright, so every seat boot just confirms it is there.
+npx -y playwright install chromium >/dev/null 2>&1 || true
+# Same repair as above, and for the same reason: an existing-but-unreadable
+# file (0 bytes after a torn write) made jq fail silently, so the bypass-mode
+# prompt came back and every seat stopped on it.
+[ -f "$HOME/.claude/settings.json" ] || echo '{}' > "$HOME/.claude/settings.json"
+edit_json "$HOME/.claude/settings.json" '.skipDangerousModePermissionPrompt = true'
+# CARGO_TARGET_DIR grows without bound - 22 to 49 GB per seat in practice, and
+# five of them filled the gamer node's disk on 2026-08-26, which killed the WSL
+# VM and stranded every allocation on it. Boot is the only safe moment to drop
+# one: nothing is building yet, and the cache is pure derived data.
+TARGET_DIR="$HOME/.cache/target-$WK_NAME"
+if [ -d "$TARGET_DIR" ] \
+    && [ "$(du -sm "$TARGET_DIR" 2>/dev/null | cut -f1 || echo 0)" -gt 30000 ]; then
+    rm -rf "$TARGET_DIR"
+fi
+# LLM-профиль сиденья: набор переменных для tmux -e. Статическая часть
+# (эндпоинт и карта моделей) приезжает в WK_LLM_ENV из спеки джоба, а КЛЮЧ —
+# только с узла: в спеке джоба секретам не место (её видно в UI Nomad).
+llm_env=()
+if [ -n "$WK_LLM_ENV" ]; then
+    while IFS= read -r kv; do
+        [ -n "$kv" ] && llm_env+=(-e "$kv")
+    done <<< "$(printf '%s' "$WK_LLM_ENV" | base64 -d)"
+fi
+if [ -n "$WK_LLM_KEY_VAR" ]; then
+    keyfile="$HOME/.config/worker/llm-keys.env"
+    key=""
+    # sed, а не source: файл с ключами не исполняем
+    [ -f "$keyfile" ] && key=$(sed -n "s/^${WK_LLM_KEY_VAR}=//p" "$keyfile" | tail -1)
+    if [ -z "$key" ]; then
+        # Валимся громко: без ключа claude поднимется и будет отбивать каждый
+        # ход 401-й, а сиденье будет читаться как живое и свободное.
+        echo "LLM-профиль $WK_LLM: на узле нет ключа $WK_LLM_KEY_VAR в $keyfile — раздай: worker login" >&2
+        exit 1
+    fi
+    llm_env+=(-e "$WK_LLM_AUTH_VAR=$key")
+fi
+
+# a dedicated tmux SERVER per worker (-L): with the default server every
+# session on the node lives in the cgroup of whichever wrapper started the
+# server first, and one task budget OOM-kills all workers at once
+tmux -L "$WK_NAME" kill-session -t "$WK_NAME" 2>/dev/null || true
+# env must go through -e: a plain env prefix only reaches the tmux SERVER when
+# this wrapper happens to start it, and every later session inherits the first
+# wrapper's variables (all workers ended up sharing one CARGO_TARGET_DIR)
+tmux -L "$WK_NAME" new-session -d -s "$WK_NAME" -c "$d" \
+    -e CARGO_TARGET_DIR="$HOME/.cache/target-$WK_NAME" \
+    -e CARGO_BUILD_JOBS=1 \
+    -e PATH="$d/bin:$PATH" \
+    "${llm_env[@]}" \
+    "$HOME/.local/bin/claude --dangerously-skip-permissions --remote-control"
+trap 'tmux -L "$WK_NAME" kill-session -t "$WK_NAME" 2>/dev/null; exit 0' TERM INT
+while tmux -L "$WK_NAME" has-session -t "$WK_NAME" 2>/dev/null; do sleep 10 & wait $!; done
+"""
+
+_client = None
+
+
+def token():
+    t = os.environ.get("NOMAD_TOKEN")
+    if t:
+        return t
+    with open(os.path.expanduser("~/.config/nomad/bootstrap.json")) as f:
+        return json.load(f)["SecretID"]
+
+
+def nc():
+    global _client
+    if _client is None:
+        try:
+            _client = nomad.Nomad(address=ADDR, token=token(), timeout=30, verify=True)
+        except Exception as e:
+            sys.exit(f"nomad: нет связи с {ADDR}: {e}")
+    return _client
+
+
+def alloc_exec(alloc_id, task, argv, timeout=30):
+    """nomad alloc exec: argv исполняется внутри аллокации через
+    exec-websocket API, возвращает (stdout+stderr, exit_code)."""
+    url = (ADDR.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+           + f"/v1/client/allocation/{alloc_id}/exec"
+           + f"?task={quote(task)}&tty=false&command={quote(json.dumps(argv))}")
+    ws = websocket.create_connection(
+        url, header={"X-Nomad-Token": token()}, timeout=timeout)
+    # без закрытия stdin сервер шлёт только data-кадры и никогда — exited
+    ws.send(json.dumps({"stdin": {"close": True}}))
+    out, code = [], None
+    try:
+        while True:
+            try:
+                frame = ws.recv()
+            except websocket.WebSocketConnectionClosedException:
+                break
+            if not frame:
+                break
+            msg = json.loads(frame)
+            for stream in ("stdout", "stderr"):
+                data = (msg.get(stream) or {}).get("data")
+                if data:
+                    out.append(base64.b64decode(data).decode(errors="replace"))
+            if msg.get("exited"):
+                code = (msg.get("result") or {}).get("exit_code", 0)
+                break
+    finally:
+        ws.close()
+    return "".join(out), code
+
+
+def alloc_restart(alloc_id):
+    """POST /v1/client/allocation/:id/restart — в python-nomad такого нет."""
+    import requests
+    r = requests.post(f"{ADDR}/v1/client/allocation/{alloc_id}/restart",
+                      headers={"X-Nomad-Token": token()}, json={}, timeout=30)
+    r.raise_for_status()
+
+
+def job_spec(name, origin, llm=DEFAULT_LLM):
+    project = os.path.basename(origin).removesuffix(".git")
+    prof = LLM_PROFILES[llm]
+    llm_env = "".join(f"{k}={v}\n" for k, v in prof["env"].items())
+    return {"Job": {
+        "ID": name,
+        "Name": name,
+        "Datacenters": ["home"],
+        "Type": "service",
+        "Meta": {"origin": origin, "llm": llm},
+        "TaskGroups": [{
+            "Name": "wk",
+            "Count": 1,
+            "RestartPolicy": {
+                "Attempts": 3,
+                "Interval": 1800 * 10**9,
+                "Delay": 15 * 10**9,
+                "Mode": "delay",
+            },
+            "Tasks": [{
+                "Name": "claude",
+                "Driver": "raw_exec",
+                "User": "ermak",
+                "Config": {"command": "/bin/bash", "args": ["-c", WRAPPER]},
+                "Env": {
+                    "WK_NAME": name,
+                    "WK_ORIGIN": origin,
+                    "WK_PROJECT": project,
+                    "HOME": HOME,
+                    "PATH": f"/usr/local/bin:/usr/bin:/bin:{HOME}/.local/bin:{HOME}/.cargo/bin:{HOME}/.nvm/versions/node/v22.12.0/bin",
+                    # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
+                    "WK_LLM": llm,
+                    "WK_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
+                    "WK_LLM_KEY_VAR": prof.get("key") or "",
+                    "WK_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
+                },
+                "Resources": {"CPU": 1000, "MemoryMB": MEM},
+                "KillTimeout": 15 * 10**9,
+            }],
+        }],
+    }}
+
+
+# Раздача файлов на узлы пула (креды claude.ai + ключи LLM-провайдеров).
+# Узлы с живым воркером обычно забиты памятью под завязку и sysbatch туда не
+# сядет (DimensionExhausted: memory) — там файл пишется через exec в
+# существующую аллокацию. Sysbatch достаётся только пустым узлам.
+def push_script(files):
+    """files: [(абсолютный путь, base64 содержимого)] — атомарная запись, 600.
+
+    b64-алфавит безопасен внутри одинарных кавычек, поэтому содержимое
+    подставляется в скрипт как есть."""
+    parts = ["set -e", "umask 077"]
+    for path, b64 in files:
+        parts.append(f'mkdir -p "{os.path.dirname(path)}"')
+        parts.append(f"printf '%s' '{b64}' | base64 -d > \"{path}.tmp\"")
+        parts.append(f'mv "{path}.tmp" "{path}"')
+    return "; ".join(parts)
+
+
+def push_spec(name, script, node_names):
+    return {"Job": {
+        "ID": name,
+        "Name": name,
+        "Datacenters": ["home"],
+        "Type": "sysbatch",
+        "Constraints": [{
+            "LTarget": "${node.unique.name}",
+            "Operand": "regexp",
+            "RTarget": "^(" + "|".join(node_names) + ")$",
+        }],
+        "TaskGroups": [{
+            "Name": "login",
+            "Count": 1,
+            "Tasks": [{
+                "Name": "login",
+                "Driver": "raw_exec",
+                "User": "ermak",
+                "Config": {"command": "/bin/bash", "args": ["-c", script]},
+                "Env": {"HOME": HOME},
+                "Resources": {"CPU": 100, "MemoryMB": 64},
+            }],
+        }],
+    }}
+
+
+def distribute(files):
+    """Разложить [(путь, b64)] по всем ready-узлам пула -> {узел: результат}."""
+    script = push_script(files)
+    try:
+        nodes = {n["Name"] for n in nc().nodes.get_nodes()
+                 if n["Status"] == "ready"
+                 and n.get("SchedulingEligibility") != "ineligible"}
+    except Exception as e:
+        sys.exit(f"nomad: узлы недоступны: {e}")
+    if not nodes:
+        sys.exit("в пуле нет ready-узлов")
+
+    results = {}
+
+    # 1) узлы с живым воркером — через exec в его аллокацию
+    try:
+        jobs = nc().jobs.get_jobs(prefix="wk-", meta=True)
+    except Exception:
+        jobs = []
+    for j in jobs:
+        if "origin" not in (j.get("Meta") or {}):
+            continue
+        a = latest_alloc(j["ID"])
+        if not a or a["ClientStatus"] != "running" or a["NodeName"] in results:
+            continue
+        try:
+            out, code = alloc_exec(a["ID"], "claude", ["/bin/bash", "-c", script])
+            results[a["NodeName"]] = (
+                "OK" if code == 0
+                else f"FAILED: {(out.strip() or f'exit {code}')[:80]}")
+        except Exception as e:
+            results[a["NodeName"]] = f"FAILED: {str(e)[:80]}"
+
+    # 2) пустые узлы — коротким sysbatch-джобом, после — purge, чтобы секреты
+    # не оставались в состоянии Nomad
+    rest = sorted(nodes - set(results))
+    if rest:
+        name = "wk-login"
+        try:
+            nc().job.deregister_job(name, purge=True)
+        except Exception:
+            pass
+        nc().jobs.register_job(push_spec(name, script, rest))
+        try:
+            for _ in range(60):
+                time.sleep(1)
+                try:
+                    allocs = nc().job.get_allocations(name)
+                except nomad.api.exceptions.URLNotFoundNomadException:
+                    continue
+                pending = False
+                for a in allocs:
+                    if a["ClientStatus"] in ("complete", "failed"):
+                        results[a["NodeName"]] = (
+                            "OK" if a["ClientStatus"] == "complete"
+                            else "FAILED (sysbatch, смотри nomad UI)")
+                    else:
+                        pending = True
+                if allocs and not pending:
+                    break
+        finally:
+            try:
+                nc().job.deregister_job(name, purge=True)
+            except Exception:
+                pass
+
+    for node in nodes:
+        results.setdefault(node, "НЕ ДОСТАЛСЯ — ни воркера, ни места под sysbatch")
+    return results
+
+
+def llm_keys_blob():
+    """Что везти на узлы в ~/.config/worker/llm-keys.env: ТОЛЬКО те ключи из
+    ~/.ssh/ai-provider-keys.env, которые называет хоть один LLM-профиль.
+    Остальным секретам из того файла (юкасса, телеграм, прочие провайдеры) на
+    узлах пула делать нечего. -> (содержимое|None, замечание|None)"""
+    wanted = {p["key"] for p in LLM_PROFILES.values() if p.get("key")}
+    if not wanted:
+        return None, None
+    found = {}
+    try:
+        with open(os.path.expanduser(LOCAL_KEYS_FILE)) as f:
+            for line in f:
+                k, sep, v = line.partition("=")
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if sep and k in wanted and v:
+                    found[k] = v
+    except OSError:
+        return None, f"нет {LOCAL_KEYS_FILE} — профили с ключом не поднимутся"
+    missing = sorted(wanted - set(found))
+    note = (f"в {LOCAL_KEYS_FILE} нет: {', '.join(missing)}") if missing else None
+    if not found:
+        return None, note
+    return "".join(f"{k}={v}\n" for k, v in sorted(found.items())), note
+
+
+def ensure_llm_keys(llm):
+    """Ключ профиля обязан лежать на узле РАНЬШЕ воркера: без него врапер
+    валится, а Nomad уводит сиденье в restart-backoff. Узел заранее неизвестен
+    (место выбирает планировщик), поэтому раздаём на весь пул."""
+    if not LLM_PROFILES[llm].get("key"):
+        return
+    blob, note = llm_keys_blob()
+    if not blob:
+        sys.exit(f"профиль {llm}: {note}")
+    if LLM_PROFILES[llm]["key"] not in blob:
+        sys.exit(f"профиль {llm}: {note}")
+    print(f"раздаю ключи LLM на узлы пула ({LLM_KEYS_FILE})...")
+    results = distribute([(LLM_KEYS_FILE, base64.b64encode(blob.encode()).decode())])
+    bad = [f"{n}: {r}" for n, r in sorted(results.items()) if r != "OK"]
+    if bad:
+        print("  не всем узлам: " + "; ".join(bad))
+
+
+def cmd_login(_args):
+    src = os.path.expanduser("~/.claude/.credentials.json")
+    try:
+        with open(src, "rb") as f:
+            raw = f.read()
+        json.loads(raw)
+    except FileNotFoundError:
+        sys.exit(f"нет {src} — сначала залогиньтесь в claude на этой машине")
+    except ValueError:
+        sys.exit(f"{src}: не валидный JSON, раздавать нечего")
+
+    files = [(f"{HOME}/.claude/.credentials.json", base64.b64encode(raw).decode())]
+    what = ["креды claude.ai"]
+    blob, note = llm_keys_blob()
+    if blob:
+        files.append((LLM_KEYS_FILE, base64.b64encode(blob.encode()).decode()))
+        what.append("ключи LLM (" + ", ".join(
+            k.split("=")[0] for k in blob.splitlines()) + ")")
+    if note:
+        print(f"ключи LLM: {note}")
+    print("раздаю " + " + ".join(what) + " на узлы пула")
+
+    results = distribute(files)
+    for node in sorted(results):
+        print(f"  {node}: {results[node]}")
+
+
+def cmd_llm(_args):
+    """Профили и их готовность: ключ на этой машине либо есть, либо нет."""
+    blob, note = llm_keys_blob()
+    have = {l.split("=", 1)[0] for l in (blob or "").splitlines() if "=" in l}
+    for name, prof in LLM_PROFILES.items():
+        key = prof.get("key")
+        if not key:
+            state = "логин claude.ai (worker login)"
+        elif key in have:
+            state = f"ключ {key}: есть"
+        else:
+            state = f"ключ {key}: НЕТ в {LOCAL_KEYS_FILE}"
+        base = prof["env"].get("ANTHROPIC_BASE_URL", "api.anthropic.com (по умолчанию)")
+        print(f"  {name:8}  {base:38}  {state}")
+    if note:
+        print(f"\n{note}")
+    print("\nworker add --llm <профиль> [origin]   |   worker login раздаёт ключи на узлы")
+
+
+def latest_alloc(name):
+    try:
+        allocs = nc().job.get_allocations(name)
+    except nomad.api.exceptions.URLNotFoundNomadException:
+        return None
+    run = [a for a in allocs if a["DesiredStatus"] == "run"] or allocs
+    return max(run, key=lambda a: a["CreateIndex"]) if run else None
+
+
+def running_alloc(name):
+    a = latest_alloc(name)
+    if not a or a["ClientStatus"] != "running":
+        sys.exit(f"{name} не running")
+    return a
+
+
+def cwd_origin():
+    try:
+        return subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        sys.exit("не рабочая копия git и origin не указан: worker add <git-origin>")
+
+
+def parse_llm(args):
+    """Выкусить --llm PROFILE (или --llm=PROFILE) откуда угодно в аргументах.
+    -> (профиль | None, остальные аргументы)."""
+    llm, rest, it = None, [], iter(args)
+    for a in it:
+        if a == "--llm":
+            llm = next(it, "")
+        elif a.startswith("--llm="):
+            llm = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+    if llm is not None and llm not in LLM_PROFILES:
+        sys.exit(f"нет LLM-профиля {llm or '(пусто)'}; есть: "
+                 f"{', '.join(LLM_PROFILES)} (worker llm)")
+    return llm, rest
+
+
+def cmd_add(args):
+    llm, args = parse_llm(args)
+    llm = llm or DEFAULT_LLM
+    origin = args[0] if args else cwd_origin()
+    project = os.path.basename(origin).removesuffix(".git")
+    taken = {j["ID"] for j in nc().jobs.get_jobs(prefix=f"wk-{project}-")}
+    n = 1
+    while f"wk-{project}-{n}" in taken:
+        n += 1
+    name = f"wk-{project}-{n}"
+    ensure_llm_keys(llm)
+    nc().jobs.register_job(job_spec(name, origin, llm))
+    print(f"{name}: {origin} [{llm}]")
+
+    node = None
+    for _ in range(120):
+        a = latest_alloc(name)
+        if a:
+            if node is None:
+                node = a["NodeName"]
+                print(f"  → {node}")
+            if a["ClientStatus"] == "running":
+                print("  → running")
+                return
+            if a["ClientStatus"] == "failed":
+                print("  → FAILED, смотри: worker list / nomad UI")
+                return
+        time.sleep(1)
+    print(f"  → пока {'pending — свободных слотов нет?' if node is None else 'не running'}, "
+          f"смотри worker list")
+
+
+def pool_lines():
+    out = []
+    try:
+        nodes = nc().nodes.get_nodes()
+    except nomad.api.exceptions.BaseNomadException as e:
+        return [f"  ошибка API узлов: {e}"]
+    except Exception as e:
+        return [f"  ошибка связи с узлами: {e}"]
+
+    for n in nodes:
+        if n["Status"] != "ready":
+            out.append(f"  {n['Name']}: {n['Status']}")
+            continue
+        try:
+            node = nc().node.get_node(n["ID"])
+            total = node["NodeResources"]["Memory"]["MemoryMB"]
+            # reserved = memory carved out for the host's other tenants
+            total -= ((node.get("ReservedResources") or {}).get("Memory") or {}).get("MemoryMB") or 0
+            used = sum(
+                a["Resources"]["MemoryMB"]
+                for a in nc().node.get_allocations(n["ID"])
+                if a["ClientStatus"] == "running"
+            )
+            free = total - used
+            out.append(f"  {n['Name']}: свободно {free / 1024:.0f}/{total / 1024:.0f} ГБ "
+                       f"({free // MEM} слотов)")
+        except nomad.api.exceptions.BaseNomadException as e:
+            out.append(f"  {n['Name']}: ошибка API: {e}")
+        except Exception as e:
+            out.append(f"  {n['Name']}: ошибка: {e}")
+    return out
+
+
+def clone_branch(alloc, d):
+    """Ветки клона: (текущая, дефолтная); (None, <причина>) если недоступно."""
+    try:
+        out, _ = alloc_exec(alloc["ID"], "claude", ["/bin/bash", "-c",
+            f'echo "cur=$(git -C {d} branch --show-current 2>/dev/null)"; '
+            f'echo "def=$(git -C {d} rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"'])
+    except Exception:
+        return None, "exec недоступен"
+    kv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    if "def" not in kv:
+        return None, "exec недоступен"
+    if not kv["def"]:
+        return None, "клона ещё нет"
+    return kv["cur"] or "(detached)", kv["def"].rsplit("/", 1)[-1]
+
+
+def clone_holds_work(alloc, d):
+    """Есть ли в клоне что терять: (сколько несохранённого, ветка) или (None, _).
+
+    Занятость места — это НЕ имя ветки. Имя врёт в обе стороны: у cloudpub
+    origin/HEAD = dev, а работают на beta3.0, и чистое запушенное сиденье
+    читалось как «занят: beta3.0»; наоборот, место с умершим мид-таском
+    агентом сидит на bug/NNNN, и если решать по одной лишь активности сессии,
+    оно читается свободным (wk-rugent-4 на bug/1063 попал в list как
+    «свободен» — PM, восстановившийся по одному только list, задиспатчил бы
+    поверх чужого дерева).
+
+    Единственный вопрос, который на самом деле задаёт PM перед диспатчем:
+    пропадёт ли что-нибудь, если занять это место. Пропадает только то, чего
+    нет ни на одной удалённой ветке.
+
+    Считаем через `--not --remotes`, а НЕ через `@{u}..`: upstream у рабочей
+    ветки бывает прибит к origin/master, и тогда всё, что ещё не влито, врёт
+    как «не отправлено». Так и вышло на wk-rugent-7: коммит 0eaeae15 лежал на
+    origin/bug/1048 и был влит в master мержем 4b663ce1, а `@{u}..` показывал
+    единицу и место читалось занятым.
+
+    Оговорка: remote-tracking ref'ы в клоне могут быть протухшими (на том же
+    wk-rugent-7 последний fetch отставал на двое суток). Fetch тут не делаем —
+    это сетевая операция на каждое место в каждом `list`; в сомнительном случае
+    смотреть глазами через `worker tail`.
+    """
+    try:
+        out, _ = alloc_exec(alloc["ID"], "claude", ["/bin/bash", "-c",
+            f'cd {d} 2>/dev/null || exit 0; '
+            f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
+            f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
+            f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"'])
+    except Exception:
+        return None, "exec недоступен"
+    kv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    if "dirty" not in kv:
+        return None, "exec недоступен"
+    # Возвращаем ДВА числа раздельно, а не сумму: «не закоммичено» и «не
+    # отправлено» — разные состояния и разный разговор с агентом. Сложив их в
+    # одно «только локально: 3», PM сказал переродившемуся месту «у тебя было
+    # 3 локальных коммита», тогда как там лежали 3 НЕсохранённых файла и ноль
+    # коммитов. Место это поймало и поправило; цифра была верна, слово — нет.
+    try:
+        dirty, ahead = int(kv.get("dirty") or 0), int(kv.get("ahead") or 0)
+    except ValueError:
+        return None, "нечитаемый ответ git"
+    return (dirty, ahead), kv.get("cur") or "(detached)"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# КАК УЗНАТЬ РЕАЛЬНОЕ СОСТОЯНИЕ СИДЕНЬЯ (session-file + socket)
+#
+# Точка входа сиденья — `claude --remote-control` (см. ~/bin/code). Такой
+# процесс сам ведёт две вещи, которые и есть источник правды о его состоянии;
+# обе доступны локально на узле, поэтому worker читает их через alloc_exec, а
+# НЕ скрейпит tmux (скрейпинг врал: idle-сиденье на beta3.0 выглядело как
+# "занят: beta3.0", а requires_action читался как "занят").
+#
+# 1) ФАЙЛ АКТИВНОСТИ: ~/.claude/sessions/<pid>.json — по файлу на живую
+#    сессию. Ключевые поля:
+#      cwd                  рабочий каталог (у сиденья == ~/wk/<name>) — по нему
+#                           матчим, он стабилен (не меняется при смене ветки,
+#                           в отличие от name, который меняется при рестарте)
+#      status               idle | busy | requires_action | waiting | offline
+#                           (перечень вытащен из бинаря claude; это ЕДИНственный
+#                           источник "чем занят" — сокет активность НЕ отдаёт)
+#      statusUpdatedAt      ms; обновляется на СМЕНЕ статуса, не постоянно —
+#                           поэтому по нему НЕЛЬЗЯ ловить "завис": busy-сиденье
+#                           на 40-мин сборке легитимно не трогает статус, порог
+#                           дал бы ложные срабатывания
+#      pid, messagingSocketPath   для пробы живости ниже
+#    Слабость файла: если процесс умер грязно, файл остаётся с протухшим
+#    status (напр. "busy") — верить ему в одиночку нельзя.
+#
+# 2) СОКЕТ ЖИВОСТИ: процесс держит unix-сокет на LISTEN по пути из
+#    messagingSocketPath == /run/user/<uid>/cc-socks/<pid>.sock. Это messaging-
+#    канал Remote Control. Нам от него нужен ОДИН факт: успешный connect ->
+#    процесс жив и слушает; ENOENT/refused -> мёртв (и файл, если ещё лежит,
+#    протух — игнорируем его status). Сокет строже файла: мгновенно ловит
+#    смерть без всяких таймстампов.
+#    Протокол (реверс из бинаря, на будущее): JSON, кадрируется и Content-Length
+#    (LSP-стиль), и newline; есть {"type":"ping"}->{"type":"pong"} и
+#    {"type":"get_status"}->{"type":"status_response", native_host_version}
+#    (внимание: get_status отдаёт ВЕРСИЮ, а не idle/busy — активность только в
+#    файле). МЫ НАМЕРЕННО НИЧЕГО НЕ ШЛЁМ в сокет живой сессии: факта connect
+#    хватает для живости, а запись сырых кадров в чужой messaging-канал рискует
+#    рассинхроном парсера. Апгрейд на потом: активный ping->pong с таймаутом
+#    ловил бы "жив, но event-loop замер" (сокет слушает, а turn не крутится) —
+#    ровно случай "сообщение доставлено, а сиденье не обрабатывает".
+#
+# ИТОГ (собирает session_status): сокет = живость, файл = активность.
+#   connect нет + pid мёртв ......... offline (файл протух, не верим)
+#   connect нет + pid жив ........... hung    (сессия рушится/подвисла)
+#   connect есть + status=idle ...... свободен  (чинит ложное "занят: beta3.0")
+#   connect есть + status=busy ...... занят: <ветка>
+#   connect есть + requires_action .. требует действия  (упёрлась в промпт)
+#   connect есть + status=waiting ... ждёт ввода
+# Нет файла (старый claude / нет python3 на узле) -> session_status вернёт None,
+# и seat_state откатывается на прежнюю tmux-эвристику. Детект протухшего логина
+# остаётся на tmux — в файле он не виден.
+#
+# Пробу гоняем прямо в сиденье через alloc_exec (base64, чтобы не воевать с
+# кавычками); имя сиденья передаём аргументом, а не подстановкой — без инъекции.
+# ─────────────────────────────────────────────────────────────────────────
+_SESSION_PROBE = (
+    "import json,glob,os,socket,sys\n"
+    "name=sys.argv[1]; home=os.path.expanduser('~')\n"
+    "target=os.path.realpath(os.path.join(home,'wk',name)); best=None\n"
+    "for f in glob.glob(os.path.join(home,'.claude/sessions/*.json')):\n"
+    "    try: d=json.load(open(f))\n"
+    "    except Exception: continue\n"
+    "    if os.path.realpath(d.get('cwd','')) != target: continue\n"
+    "    if best is None or d.get('statusUpdatedAt',0)>best.get('statusUpdatedAt',0): best=d\n"
+    "if best is None: print('none'); sys.exit(0)\n"
+    "status=best.get('status','?'); pid=best.get('pid'); sock=best.get('messagingSocketPath','')\n"
+    "alive=False\n"
+    "try: os.kill(int(pid),0); alive=True\n"
+    "except Exception: alive=False\n"
+    "listen=False\n"
+    "if sock:\n"
+    "    try:\n"
+    "        s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.settimeout(1.0); s.connect(sock); listen=True; s.close()\n"
+    "    except Exception: listen=False\n"
+    "print('%s %d %d' % (status,int(alive),int(listen)))\n"
+)
+
+
+def session_status(alloc, name):
+    """Достоверное состояние claude-сессии сиденья: idle|busy|requires_action|
+    waiting|offline|hung, либо None — если файла сессии нет (старый claude,
+    нет python3, не наша сессия), тогда вызывающий откатывается на tmux."""
+    b64 = base64.b64encode(_SESSION_PROBE.encode()).decode()
+    try:
+        out, _ = alloc_exec(alloc["ID"], "claude", ["/bin/bash", "-c",
+            f"echo {b64} | base64 -d | python3 - {name} 2>/dev/null"])
+    except Exception:
+        return None
+    line = out.strip().splitlines()[-1] if out.strip() else ""
+    if not line or line == "none":
+        return None
+    parts = line.split()
+    if len(parts) < 3:
+        return None
+    status, alive, listen = parts[0], parts[1] == "1", parts[2] == "1"
+    # Сокет — авторитет живости. Нет коннекта и pid мёртв -> процесс умер,
+    # файл протух: игнорируем его статус.
+    if not listen and not alive:
+        return "offline"
+    # pid жив, но сокет не слушает -> сессия рушится/подвисла.
+    if not listen and alive:
+        return "hung"
+    # Сокет отвечает -> статус из файла достоверен.
+    if status in ("idle", "busy", "requires_action", "waiting", "offline"):
+        return status
+    return None
+
+
+def seat_state(alloc, name):
+    """Занятость — реальное состояние сессии (файл + сокет), с откатом на tmux."""
+    d = f"{HOME}/wk/{name}"
+
+    # Проверяем живость воркера
+    try:
+        health_check, code = alloc_exec(alloc["ID"], "claude", ["/bin/bash", "-c",
+            "timeout 3s echo 'test' 2>/dev/null"])
+        if code != 0 or not health_check.strip():
+            return "ЗАВИС (не отвечает)"
+    except Exception as e:
+        return f"ЗАВИС ({str(e)[:30]})"
+
+    # Проверяем реальную активность через tmux буфер
+    try:
+        activity, _ = alloc_exec(alloc["ID"], "claude", ["/bin/bash", "-c",
+            f"tmux -L {name} capture-pane -t {name} -p -S - | grep -v '^$' | tail -10"])
+        if not activity.strip():
+            return "свободен"
+
+        # Сессия упёрлась в логин — не работает, что бы ни говорили ветка и
+        # ключевые слова. Варианты экрана: "Not logged in · Run /login",
+        # "Login expired · Please run /login", "Remote Control disconnected —
+        # Claude.ai login expired" + "/rc failed" (сессия жива, но PM до неё
+        # не достучится). Проверять до скоринга: у залипшего мид-таск в
+        # буфере полно рабочих слов.
+        low = activity.lower()
+        if ("not logged in" in low or "login expired" in low
+                or "/rc failed" in low or "remote control disconnected" in low):
+            status = ("не залогинен" if "not logged in" in low else "логин протух")
+            cur, default = clone_branch(alloc, d)
+            return f"{status}: {cur}" if cur and cur != default else status
+
+        # Кончилась квота модели. Тот же класс, что протухший логин — сессия
+        # жива, на мосту, отвечает на ping'и, но НИ ОДНОГО хода выдать не может:
+        # каждое входящее сообщение мгновенно возвращает "You're out of usage
+        # credits. Run /usage-credits to keep using <модель> or /model to switch
+        # models." и сессия падает обратно в idle. Для PM это неотличимо от
+        # молчания: wk-rugent-1 и wk-rugent-7 приняли по два хендшейка (21:40,
+        # 21:44), оба отбились об эту строку, а list показывал их свободными.
+        # Рестарт НЕ лечит — нужен либо другой /model, либо пополнение, поэтому
+        # doctor это только показывает (action=None), а не чинит.
+        # Жалоба живёт в скроллбэке и после лечения, поэтому она считается
+        # актуальной только если ПОСЛЕ неё модель не переключали: иначе
+        # вылеченное сиденье вечно читалось бы как больное.
+        if "out of usage credits" in low \
+                and low.rfind("out of usage credits") > low.rfind("set model to"):
+            m = re.search(r"keep using ([^\s]+(?: [0-9.]+)?)", activity, re.I)
+            return f"нет квоты модели: {m.group(1)}" if m else "нет квоты модели"
+
+        # Достоверное состояние из файла сессии + пробы сокета claude —
+        # авторитетнее tmux-скоринга ниже. requires_action/waiting -> видимое
+        # залипание, offline/hung -> под рестарт. На скоринг откатываемся лишь
+        # если файла сессии нет (старый claude / нет python3).
+        #
+        # Файл сессии авторитетен про АКТИВНОСТЬ, но не про ЗАНЯТОСТЬ МЕСТА:
+        # клон переживает смерть сессии. idle раньше возвращал "свободен" не
+        # глядя на клон вовсе — и место с брошенной мид-таском работой читалось
+        # как свободное (см. clone_holds_work). Спрашиваем у клона то
+        # единственное, что решает: пропадёт ли что-нибудь, если занять место.
+        st = session_status(alloc, name)
+        if st is not None:
+            if st == "idle":
+                held, cur = clone_holds_work(alloc, d)
+                if held is None:
+                    return "свободен"
+                if held != (0, 0):
+                    dirty, ahead = held
+                    what = ", ".join(
+                        p for p in (f"не закоммичено: {dirty}" if dirty else "",
+                                    f"не отправлено: {ahead}" if ahead else "") if p)
+                    return f"занят: {cur} ({what})"
+                # Чисто и всё на origin — терять нечего, место переиспользуемо.
+                # Ветку показываем справочно: диспатч всё равно обязан начать с
+                # переключения на интеграционную ветку, иначе новая ветка
+                # тикета уедет от оставшейся здесь.
+                return f"свободен ({cur})" if cur else "свободен"
+            if st == "requires_action":
+                return "требует действия"
+            if st == "waiting":
+                return "ждёт ввода"
+            if st in ("offline", "hung"):
+                return "ЗАВИС (не отвечает)"
+            cur, default = clone_branch(alloc, d)  # st == "busy"
+            return f"занят: {cur}" if (cur and cur != default) else "занят"
+
+        # Явные индикаторы работы
+        activity_lower = activity.lower()
+        work_indicators = ["working", "herding", "garnishing", "finding", "checking", "running"]
+        idle_indicators = ["резерв", "reserve", "waiting", "idle", "свободен", "await"]
+
+        work_score = sum(1 for x in work_indicators if x in activity_lower)
+        idle_score = sum(1 for x in idle_indicators if x in activity_lower)
+
+        if work_score > idle_score:
+            return "занят"
+        elif idle_score > work_score:
+            return "свободен"
+        else:
+            # Default to git branch if unclear
+            pass
+    except Exception:
+        pass  # Fallback to git branch
+
+    # Fallback: git branch для статуса
+    cur, default = clone_branch(alloc, d)
+    if cur is None:
+        return default
+    return "свободен" if cur == default else f"занят: {cur}"
+
+
+def cmd_list(_args):
+    # meta=True кладёт Meta прямо в листинг — без отдельного GET на каждый job
+    try:
+        jobs = nc().jobs.get_jobs(prefix="wk-", meta=True)
+    except nomad.api.exceptions.BaseNomadException as e:
+        sys.exit(f"ошибка API Nomad: {e}")
+    except Exception as e:
+        sys.exit(f"ошибка связи с Nomad: {e}")
+
+    # the wk- prefix also catches the wk-cleanup sysbatch job and its periodic
+    # children; workers are the jobs the wrapper stamped with an origin
+    jobs = [j for j in jobs if "origin" in (j.get("Meta") or {})]
+
+    # Текущий проект из git origin
+    try:
+        current_origin = cwd_origin()
+        current_project = os.path.basename(current_origin).removesuffix(".git")
+    except:
+        current_origin = None
+        current_project = None
+
+    if jobs:
+        rows = []
+        free_workers = 0
+        for j in jobs:
+            try:
+                a = latest_alloc(j["ID"])
+                running = a is not None and a["ClientStatus"] == "running"
+                state = seat_state(a, j["ID"]) if running else "-"
+                if running and state == "свободен":
+                    free_workers += 1
+                rows.append((
+                    j["ID"],
+                    a["NodeName"] if a else "-",
+                    a["ClientStatus"] if a else j["Status"],
+                    state,
+                    (j.get("Meta") or {}).get("llm", DEFAULT_LLM),
+                    (j.get("Meta") or {}).get("origin", "?"),
+                ))
+            except nomad.api.exceptions.BaseNomadException as e:
+                rows.append((
+                    j["ID"],
+                    "-",
+                    f"API error: {e}",
+                    "-",
+                    (j.get("Meta") or {}).get("llm", DEFAULT_LLM),
+                    (j.get("Meta") or {}).get("origin", "?"),
+                ))
+            except Exception as e:
+                rows.append((
+                    j["ID"],
+                    "-",
+                    f"ошибка: {e}",
+                    "-",
+                    (j.get("Meta") or {}).get("llm", DEFAULT_LLM),
+                    (j.get("Meta") or {}).get("origin", "?"),
+                ))
+        w = [max(len(r[i]) for r in rows) for i in range(5)]
+        for r in rows:
+            print(f"{r[0]:{w[0]}}  {r[1]:{w[1]}}  {r[2]:{w[2]}}  "
+                  f"{r[3]:{w[3]}}  {r[4]:{w[4]}}  {r[5]}")
+
+        # Явная подсказка если нет свободных воркеров
+        if free_workers == 0:
+            if current_origin:
+                print(f"\nНет свободных воркеров для {current_project}. Создайте: worker add {current_origin}")
+            else:
+                print("\nНет свободных воркеров. Создайте: worker add <git-origin>")
+        elif current_project:
+            project_workers = sum(1 for r in rows if current_project in r[5])
+            project_free = sum(1 for r in rows if current_project in r[5] and r[3] == "свободен")
+            if project_workers == 0:
+                print(f"\nНет воркеров для {current_project}. Создайте: worker add {current_origin}")
+            elif project_free == 0:
+                print(f"\nВсе воркеры для {current_project} заняты. Создайте ещё: worker add {current_origin}")
+    else:
+        print("воркеров нет")
+        if current_origin:
+            print(f"Создайте первый воркер для {current_project}: worker add {current_origin}")
+        else:
+            print("Создайте воркера: worker add <git-origin>")
+    print("pool:")
+    try:
+        print("\n".join(pool_lines()))
+    except nomad.api.exceptions.BaseNomadException as e:
+        print(f"  ошибка API: {e}")
+    except Exception as e:
+        print(f"  ошибка связи: {e}")
+
+
+def get_job(name):
+    try:
+        return nc().job.get_job(name)
+    except nomad.api.exceptions.URLNotFoundNomadException:
+        sys.exit(f"нет такого воркера: {name}")
+
+
+def cmd_delete(args):
+    name = args[0]
+    get_job(name)
+    nc().job.deregister_job(name, purge=True)
+    print(f"удалён {name} (клон остался в {HOME}/wk/{name} на узле)")
+
+
+def cmd_change(args):
+    llm, args = parse_llm(args)
+    if len(args) != 2:
+        sys.exit(__doc__.strip())
+    name, origin = args[0], args[1]
+    meta = get_job(name).get("Meta") or {}
+    old, old_llm = meta.get("origin", "?"), meta.get("llm", DEFAULT_LLM)
+    # профиль без --llm сохраняется: смена репозитория не должна молча
+    # ронять сиденье обратно на claude
+    llm = llm or (old_llm if old_llm in LLM_PROFILES else DEFAULT_LLM)
+    ensure_llm_keys(llm)
+    nc().jobs.register_job(job_spec(name, origin, llm))
+    print(f"{name}: {old} [{old_llm}] → {origin} [{llm}]")
+    print("воркер перезапускается с новым репозиторием (клон пересоздаётся врапером)")
+
+
+def cmd_restart(args):
+    name = args[0]
+    a = running_alloc(name)
+    print(f"перезапускаю {name} на {a['NodeName']}...")
+    try:
+        alloc_restart(a["ID"])
+        print("✓ воркер перезапускается")
+    except Exception as e:
+        print(f"ошибка перезапуска: {e}")
+        print(f"Альтернатива: worker delete {name} && worker add <origin>")
+
+
+def creds_fresh():
+    """Локальные креды пригодны к раздаче: валидный JSON, expiresAt в будущем."""
+    try:
+        with open(os.path.expanduser("~/.claude/.credentials.json")) as f:
+            c = json.load(f)
+        return ((c.get("claudeAiOauth") or {}).get("expiresAt") or 0) / 1000 > time.time()
+    except Exception:
+        return False
+
+
+# Диагностика пула. Категории и лечение (см. протокол восстановления):
+#   залип/не отвечает      -> restart аллокации (клон и ветка переживают)
+#   не залогинен/протух    -> worker login на весь пул, затем restart сиденья
+#   pending/failed/lost    -> alloc stop: Nomad пересоздаёт сразу, минуя
+#                             restart-backoff (до 30 мин)
+#   queued без аллокации   -> мест в пуле нет, лечится не отсюда
+def cmd_doctor(args):
+    fix = "--fix" in args
+    try:
+        jobs = [j for j in nc().jobs.get_jobs(prefix="wk-", meta=True)
+                if "origin" in (j.get("Meta") or {})]
+    except Exception as e:
+        sys.exit(f"ошибка связи с Nomad: {e}")
+
+    issues = []  # (имя, alloc|None, диагноз, действие|None)
+    for j in sorted(jobs, key=lambda j: j["ID"]):
+        a = latest_alloc(j["ID"])
+        if not a or a["ClientStatus"] in ("lost", "unknown", "failed", "pending"):
+            queued = (j["JobSummary"]["Summary"].get("wk") or {}).get("Queued", 0) \
+                if "JobSummary" in j else 0
+            if a and a["ClientStatus"] in ("pending", "failed"):
+                issues.append((j["ID"], a,
+                               f"аллок {a['ClientStatus']} (restart-backoff?)", "stop"))
+            elif queued:
+                issues.append((j["ID"], None, "queued — нет свободных слотов в пуле", None))
+            elif a:
+                issues.append((j["ID"], a, f"аллок {a['ClientStatus']}", "stop"))
+            else:
+                issues.append((j["ID"], None, "нет аллокации", None))
+            continue
+        state = seat_state(a, j["ID"])
+        if state.startswith("ЗАВИС"):
+            issues.append((j["ID"], a, state, "restart"))
+        elif state == "требует действия":
+            # Сессия жива, но упёрлась в запрос действия/промпт и сама не
+            # сдвинется — рестарт (клон и ветка переживают). Раньше пряталось
+            # под "занят". "ждёт ввода" (waiting) НЕ трогаем: это бывает и
+            # нормальным межходовым состоянием, автолечить его опасно — только
+            # показываем в list, решение за оператором.
+            issues.append((j["ID"], a, state, "restart"))
+        elif state.startswith(("не залогинен", "логин протух")):
+            issues.append((j["ID"], a, state, "login+restart"))
+        elif state.startswith("нет квоты модели"):
+            # Рестарт квоту не вернёт — лечится сменой модели на ту, у которой
+            # квота есть (решение оператора 27.08: Fable → Opus). Печатаем
+            # /model прямо в tmux-пейн: входящее сообщение тут не поможет, его
+            # обработка и есть тот ход, который упирается в исчерпанную квоту.
+            issues.append((j["ID"], a, state, "model"))
+
+    if not issues:
+        print("пул здоров: залипаний нет")
+        return
+    w = max(len(i[0]) for i in issues)
+    for name, a, diag, action in issues:
+        node = a["NodeName"] if a else "-"
+        print(f"  {name:{w}}  {node:8}  {diag}"
+              + (f"  [{action}]" if action and not fix else ""))
+    if not fix:
+        # Подсказку печатаем только если --fix действительно что-то сделает.
+        # Иначе она врёт: у «нет квоты модели» и «queued» лечения здесь нет,
+        # и оператор жмёт --fix впустую.
+        if any(i[3] for i in issues):
+            print("\nлечение: worker doctor --fix")
+        else:
+            print("\nавтолечения нет — решение оператора")
+        return
+
+    print()
+    if any(i[3] == "login+restart" for i in issues):
+        if not creds_fresh():
+            sys.exit("локальные креды протухли или битые — сначала залогинься "
+                     "в claude на этой машине, потом worker doctor --fix")
+        cmd_login([])
+        print()
+    for name, a, _diag, action in issues:
+        if action is None:
+            continue
+        try:
+            if action == "stop":
+                nc().allocation.stop_allocation(a["ID"])
+                print(f"  {name}: alloc stop — Nomad пересоздаст без backoff")
+            elif action == "model":
+                switch_model(a, name, FALLBACK_MODEL)
+                print(f"  {name}: /model {FALLBACK_MODEL}")
+            else:
+                alloc_restart(a["ID"])
+                print(f"  {name}: restart")
+        except Exception as e:
+            print(f"  {name}: {action} не вышел: {str(e)[:80]}")
+    print("\nконтроль: worker list (и worker tail <name> для бывших залипших)")
+
+
+def cmd_attach(args):
+    name = args[0]
+    a = running_alloc(name)
+    host = SSH_ALIAS.get(a["NodeName"], a["NodeName"])
+    os.execvp("ssh", ["ssh", "-t", host, "tmux", "-L", name, "attach", "-t", name])
+
+
+def switch_model(alloc, name, model):
+    """Перевести сиденье на другую модель, напечатав /model в его tmux-пейн.
+
+    Именно печатью, а не сообщением по мосту: обработка входящего сообщения —
+    это ход, а ход у сиденья с исчерпанной квотой падает, не начавшись. Слэш-
+    команда же исполняется самим TUI, ход на неё не тратится.
+
+    Перед вводом чистим строку (C-u): в пейне мог остаться недобитый текст,
+    и тогда команда склеилась бы с ним в мусор.
+
+    `/model` не переключает молча — он спрашивает «Switch model?» с уже
+    выделенным «Yes». Поэтому подтверждаем вторым Enter, но ТОЛЬКО увидев
+    диалог: слепой Enter на сиденье без диалога отправил бы пустой ход.
+    """
+    out, code = alloc_exec(alloc["ID"], "claude", ["/bin/bash", "-c",
+        f"tmux -L {name} send-keys -t {name} C-u; sleep 0.3; "
+        f"tmux -L {name} send-keys -t {name} '/model {model}'; sleep 0.3; "
+        f"tmux -L {name} send-keys -t {name} Enter; sleep 2; "
+        f"tmux -L {name} capture-pane -p -t {name}"])
+    if code not in (0, None):
+        raise RuntimeError(out.strip() or f"tmux exit {code}")
+    if "switch model?" in out.lower():
+        out, code = alloc_exec(alloc["ID"], "claude", ["/bin/bash", "-c",
+            f"tmux -L {name} send-keys -t {name} Enter; sleep 2; "
+            f"tmux -L {name} capture-pane -p -t {name}"])
+        if code not in (0, None):
+            raise RuntimeError(out.strip() or f"tmux exit {code}")
+    if "switch model?" in out.lower():
+        raise RuntimeError("диалог смены модели не закрылся")
+
+
+def pane_lines(alloc, name):
+    """Весь буфер tmux-пейна воркера (история + экран), без хвостовых пустых
+    строк, которыми tmux добивает видимую часть."""
+    out, code = alloc_exec(alloc["ID"], "claude", ["/bin/bash", "-c",
+        f"tmux -L {name} capture-pane -p -t {name} -S -"])
+    if code not in (0, None):
+        sys.exit(f"tmux в {name}: {out.strip() or f'exit {code}'}")
+    lines = out.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+def appended_since(prev, cur):
+    """Строки cur, добавившиеся после prev: ищем самый длинный суффикс prev,
+    целиком встречающийся в cur, — всё правее него новое. TUI перерисовывает
+    низ экрана, поэтому точки совпадения ищем от длинных к коротким."""
+    cur_s = "\n".join(cur)
+    for k in (300, 100, 30, 10, 3, 1):
+        if k > len(prev):
+            continue
+        suffix = "\n".join(prev[-k:])
+        i = cur_s.rfind(suffix)
+        if i >= 0:
+            rest = cur_s[i + len(suffix):]
+            rest = rest[1:] if rest.startswith("\n") else rest
+            return rest.split("\n") if rest else []
+    return cur
+
+
+def cmd_tail(args):
+    name, lines, follow = None, 10, False
+    it = iter(args)
+    for a in it:
+        if a == "-n":
+            v = next(it, None)
+            if v is None or not v.lstrip("-").isdigit():
+                sys.exit("tail: -n требует число")
+            lines = int(v)
+        elif a.startswith("-n") and a[2:].isdigit():
+            lines = int(a[2:])
+        elif a == "-f":
+            follow = True
+        elif name is None:
+            name = a
+        else:
+            sys.exit(__doc__.strip())
+    if name is None:
+        sys.exit(__doc__.strip())
+
+    a = running_alloc(name)
+    buf = pane_lines(a, name)
+    for line in buf[-lines:]:
+        print(line, flush=True)
+    if not follow:
+        return
+    try:
+        while True:
+            time.sleep(2)
+            try:
+                cur = pane_lines(a, name)
+            except SystemExit:
+                raise
+            except Exception:
+                # воркер мог перезапуститься/переехать — перецепляемся
+                a = running_alloc(name)
+                continue
+            for line in appended_since(buf, cur):
+                print(line, flush=True)
+            buf = cur
+    except KeyboardInterrupt:
+        pass
+
+
+COMMANDS = {
+    "add": (cmd_add, 0, 3),
+    "list": (cmd_list, 0, 0),
+    "delete": (cmd_delete, 1, 1),
+    "change": (cmd_change, 2, 4),
+    "restart": (cmd_restart, 1, 1),
+    "attach": (cmd_attach, 1, 1),
+    "tail": (cmd_tail, 1, 4),
+    "login": (cmd_login, 0, 0),
+    "llm": (cmd_llm, 0, 0),
+    "doctor": (cmd_doctor, 0, 1),
+}
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in COMMANDS:
+        sys.exit(__doc__.strip())
+    fn, lo, hi = COMMANDS[argv[0]]
+    args = argv[1:]
+    if not lo <= len(args) <= hi:
+        sys.exit(__doc__.strip())
+    fn(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,28 @@
+{
+  "playwright": {
+    "type": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@playwright/mcp@latest",
+      "--headless",
+      "--isolated",
+      "--browser",
+      "chromium"
+    ]
+  },
+  "windows-mcp": {
+    "type": "http",
+    "url": "{{ windows_mcp_url }}",
+    "headers": {
+      "Authorization": "Bearer kCgqRS33Yxv4lrSlqV5w6b3qNz0shjj9u4HTInk2DW0"
+    }
+  },
+  "mac-mcp": {
+    "type": "http",
+    "url": "http://mac:8000/mcp",
+    "headers": {
+      "Authorization": "Bearer FeRM5I-lQr_3mJbq1PWG6KzErm-666SA8b2vVwlBj8U"
+    }
+  }
+}

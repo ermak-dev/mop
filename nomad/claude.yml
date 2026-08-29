@@ -1,0 +1,86 @@
+# Claude worker-node configuration: user-level skills + MCP servers.
+#
+# Worker sessions on the pool run under the same user as the control machine
+# and read ~/.claude the same way. Two pieces are managed here, both
+# authoritative (drift found 2026-08-26: mirror held stale skills and two
+# dead ssh-based MCP entries whose host aliases do not exist there;
+# gamer-wsl held no skills at all):
+#
+#  - ~/.claude/skills: rsync --delete from the control machine's copy, so a
+#    skill retired here disappears from the pool too.
+#  - mcpServers in ~/.claude.json: set to the rendered claude-mcp.json.j2
+#    (playwright headless, windows-mcp, mac-mcp -- the set every pool node
+#    can actually run: stdio playwright needs only the cached browsers, the
+#    http servers resolve from the pool; ssh-based servers from the control
+#    machine's own config are deliberately NOT rolled out, the pool nodes
+#    lack those ssh host aliases). The rest of ~/.claude.json is per-machine
+#    live state and is left untouched; the merge is an atomic tmp+rename. A
+#    concurrently running Claude session may rewrite the file over the merge
+#    -- the next playbook run reconverges.
+#
+# windows-mcp lives on the gamer box (moved off pwate 2026-08-26; the token
+# is gamer's ~/.windows-mcp/config.toml auth_key). Its URL is per-host:
+# gamer-wsl runs INSIDE that box with mirrored networking, where the Windows
+# firewall drops the hairpin to the LAN address and only 127.0.0.1 reaches
+# the host -- every other node uses the FQDN.
+#
+# claude-mcp.json carries the http bearer tokens in the clear, same exposure
+# as the copies already sitting in ~/.claude.json on every machine.
+#
+# Run:  ansible-playbook -i ~/etc/inventory.ini ~/etc/nomad/claude.yml
+
+- name: Claude skills and MCP servers on nomad worker nodes
+  hosts: nomad_clients
+  become: no
+  gather_facts: no
+
+  vars:
+    windows_mcp_url: >-
+      {{ 'http://127.0.0.1:8000/mcp' if inventory_hostname == 'gamer-wsl'
+         else 'http://gamer.corp.ermak.dev:8000/mcp' }}
+
+  tasks:
+    - name: Ensure ~/.claude exists
+      ansible.builtin.file:
+        path: .claude
+        state: directory
+        mode: "0755"
+
+    - name: Sync ~/.claude/skills from the control machine
+      ansible.posix.synchronize:
+        src: "{{ lookup('env', 'HOME') }}/.claude/skills/"
+        dest: .claude/skills/
+        delete: yes
+        recursive: yes
+
+    - name: Deliver the declared MCP server set
+      ansible.builtin.template:
+        src: claude-mcp.json.j2
+        dest: .claude/mcp-servers.declared.json
+        mode: "0600"
+
+    - name: Merge mcpServers into ~/.claude.json
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json, os, tempfile
+            home = os.path.expanduser("~")
+            cfg_path = os.path.join(home, ".claude.json")
+            declared = json.load(open(os.path.join(home, ".claude", "mcp-servers.declared.json")))
+            try:
+                cfg = json.load(open(cfg_path))
+            except FileNotFoundError:
+                cfg = {}
+            if cfg.get("mcpServers") == declared:
+                print("unchanged"); raise SystemExit
+            cfg["mcpServers"] = declared
+            fd, tmp = tempfile.mkstemp(dir=home, prefix=".claude.json.")
+            with os.fdopen(fd, "w") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, cfg_path)
+            print("changed")
+      register: mcp_merge
+      changed_when: mcp_merge.stdout == "changed"

@@ -1,0 +1,31 @@
+# Nomad server on git. HTTP API on loopback only -- the world talks to it
+# through the nginx vhost https://nomad.ermak.dev; clients dial RPC 4647 on
+# the LAN address directly (VPN overlay for future out-of-LAN nodes).
+datacenter = "home"
+data_dir   = "/home/ermak/nomad/data"
+bind_addr  = "0.0.0.0"
+
+addresses {
+  http = "127.0.0.1"
+}
+
+advertise {
+  # http is advertised for cluster metadata only; the listener stays on
+  # loopback behind the nginx vhost.
+  http = "192.168.1.66"
+  rpc  = "192.168.1.66"
+  serf = "192.168.1.66"
+}
+
+server {
+  enabled          = true
+  bootstrap_expect = 1
+}
+
+acl {
+  enabled = true
+}
+
+ui {
+  enabled = true
+}

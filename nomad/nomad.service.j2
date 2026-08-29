@@ -1,0 +1,14 @@
+[Unit]
+Description=Nomad agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User={{ nomad_user }}
+ExecStart=/usr/local/bin/nomad agent -config={{ nomad_config }}
+KillMode=process
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
