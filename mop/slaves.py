@@ -13,13 +13,13 @@ from . import bus, config, nomad
 PROJECT = config.PROJECT
 
 # Значения этой установки — .env поверх дефолтов; см. mop/config.py.
-MEM = config.num("MOP_SLAVE_MEM_MB", 8192)   # бюджет слейва, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
-HOME = config.get("MOP_HOME", "/home/ermak")  # $HOME на узлах пула
-USER = config.get("MOP_USER", "ermak")        # под кем идут задачи
-SSH_ALIAS = config.pairs("MOP_SSH_ALIAS", "gamer=gamer-wsl")  # узел nomad -> ssh-алиас
+MEM = config.num("MOP_SLAVE_MEM_MB")   # бюджет слейва, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
+HOME = config.get("MOP_HOME")             # $HOME на узлах пула
+USER = config.get("MOP_USER")               # под кем идут задачи
+SSH_ALIAS = config.pairs("MOP_SSH_ALIAS")  # узел nomad -> ssh-алиас
 # Куда переводить слейв, у которого кончилась квота текущей модели
 # (решение оператора 27.08: Fable → Opus).
-FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL", "opus")
+FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL")
 # Префикс НЕ настраивается: на нём стоят глобы сторожа диска (включая
 # переходные ~/wk/wk-*), shard_of_name и имена tmux-серверов. Сделать его
 # переменной, пока сторож знает оба префикса буквально, — значит развести
@@ -27,9 +27,9 @@ FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL", "opus")
 JOB_PREFIX = "sl-"
 
 # MCP автоматизации рабочего стола: адреса чужих хостов, не наших узлов.
-MCP_PORT = config.get("MCP_PORT", "8000")
-WINDOWS_MCP_HOST = config.get("WINDOWS_MCP_HOST", "192.168.1.151")
-MAC_MCP_HOST = config.get("MAC_MCP_HOST", "mac")
+MCP_PORT = config.get("MCP_PORT")
+WINDOWS_MCP_HOST = config.get("WINDOWS_MCP_HOST")
+MAC_MCP_HOST = config.get("MAC_MCP_HOST")
 
 # ─── LLM-профили ─────────────────────────────────────────────────────────
 # Слейв — всегда claude code; профиль меняет ровно одно: КУДА он ходит за

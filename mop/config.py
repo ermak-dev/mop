@@ -111,7 +111,16 @@ def _load():
     return _env
 
 
-def get(name, default):
+def get(name, default=None):
+    """Значение настройки: окружение > .env > дефолт из SETTINGS.
+
+    Дефолт НЕ передаётся вызывающим. Пока передавался, каждая точка вызова
+    несла свою копию — и копии пережили превращение SETTINGS в источник
+    правды: `config.get("NOMAD_ADDR", "https://nomad.ermak.dev")` продолжал
+    отдавать адрес автора там, где REQUIRED уже требовал заполнить его руками.
+    Настройка описана в одном месте или ни в одном."""
+    if default is None:
+        default = SETTINGS.get(name, "")
     return os.environ.get(name) or _load().get(name) or default
 
 
@@ -128,14 +137,14 @@ def effective():
     return out
 
 
-def num(name, default):
+def num(name, default=None):
     try:
         return int(get(name, default))
     except ValueError:
-        return int(default)
+        return int(default if default is not None else SETTINGS[name])
 
 
-def pairs(name, default):
+def pairs(name, default=None):
     """`a=b,c=d` -> {"a": "b", "c": "d"}.
 
     Отображения (узел -> ssh-алиас, узел -> резерв памяти) в .env иначе не
