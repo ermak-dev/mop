@@ -1,0 +1,21 @@
+[Unit]
+Description=mop-agent (шина пула: глаголы про слейвов этого узла)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ermak
+WorkingDirectory={{ mop_home }}
+# Имя узла в NOMAD, а не hostname: субъект шины строится по нему, а у gamer
+# они расходятся. Угадывать нельзя — агент молча подпишется не на тот субъект.
+Environment=MOP_NODE={{ mop_node }}
+# Без неё session.py не найдёт каталог сокетов сессий и уйдёт на запасной
+# путь, где никого нет: слейва читались бы как мёртвые при живых сессиях.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m mop.agent
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

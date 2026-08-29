@@ -342,23 +342,49 @@ async def serve():
         servers=[c["url"]], user=c.get("user"), password=c.get("password"),
         name=f"mop-agent/{node}",
         allow_reconnect=True, max_reconnect_attempts=-1, reconnect_time_wait=2)
-    await _conn.subscribe(bus.subject(node, "rpc"),
-                          cb=lambda m: asyncio.create_task(handle(m, public=False)))
-    await _conn.subscribe(bus.subject(node, "msg"),
-                          cb=lambda m: asyncio.create_task(handle(m, public=True)))
+    # cb ОБЯЗАН быть корутиной — nats-py отвергает обычную функцию. И каждый
+    # запрос уходит в свою задачу: последовательная обработка означала бы, что
+    # одно долгое ожидание простоя запирает весь узел.
+    async def on_rpc(msg):
+        asyncio.create_task(handle(msg, public=False))
+
+    async def on_msg(msg):
+        asyncio.create_task(handle(msg, public=True))
+
+    await _conn.subscribe(bus.subject(node, "rpc"), cb=on_rpc)
+    await _conn.subscribe(bus.subject(node, "msg"), cb=on_msg)
     # Общий субъект: сюда спрашивают те, кто не знает состава пула.
-    await _conn.subscribe(bus.BROADCAST,
-                          cb=lambda m: asyncio.create_task(handle(m, public=True)))
+    await _conn.subscribe(bus.BROADCAST, cb=on_msg)
     print(f"mop-agent: узел {node}, подписан на {bus.subject(node, 'rpc')} "
           f"и {bus.subject(node, 'msg')}", flush=True)
     await asyncio.Event().wait()
 
 
+async def check():
+    """Проверка прогоном, а не чтением конфига: юнит, упавший в бесконечный
+    реконнект, systemd вполне устраивает, и «запущен» не значит «подписан».
+    Спрашиваем сам пул через свой же субъект — отвечает работающий агент."""
+    c = bus.config()
+    print(f"mop-agent: узел {node_name()}, шина {c['url']}, "
+          f"глаголов {len(VERBS)} (публичных {len(PUBLIC_VERBS)})")
+    nc = await nats.connect(servers=[c["url"]], user=c.get("user"),
+                            password=c.get("password"), name="mop-agent/check",
+                            allow_reconnect=False, connect_timeout=5)
+    try:
+        msg = await nc.request(bus.subject(node_name(), "rpc"),
+                               json.dumps({"verb": "ping"}).encode(), timeout=5)
+        print(f"подписан: {msg.data.decode()}")
+    finally:
+        await nc.close()
+
+
 def main(argv):
     if "--check" in argv:
-        c = bus.config()
-        print(f"mop-agent: узел {node_name()}, шина {c['url']}, "
-              f"глаголов {len(VERBS)} (публичных {len(PUBLIC_VERBS)})")
+        try:
+            asyncio.run(check())
+        except Exception as e:
+            print(f"агент НЕ отвечает на своём субъекте: {e}", file=sys.stderr)
+            return 1
         return 0
     try:
         asyncio.run(serve())

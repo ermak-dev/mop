@@ -1,0 +1,218 @@
+# Шина пула mop: сервер NATS и агент на каждом узле.
+#
+# Заменила собой `alloc exec`. Раньше мастер гонял шелл внутрь аллокации и
+# платил websocket-рукопожатием за каждую пробу, а команда ехала в query-строке
+# URL и упиралась в 8 КБ, которыми nginx режет URI. Теперь на узле сидит
+# подписчик с закрытым набором глаголов (mop/agent.py, субъекты — BUS.md).
+#
+# ЭТОТ ПЛЕЙБУК -- АВАРИЙНЫЙ ПУТЬ ПУЛА. Дороги на узел мимо шины больше нет, и
+# единственное, чем поднимают упавшего агента или чинят креды, -- это он.
+# Поэтому он обязан работать на голом ssh и ничего не занимать у самого mop.
+#
+# Пароли не лежат в репозитории и не задаются руками: lookup('password') заводит
+# файл на управляющей машине при первом прогоне и переиспользует дальше.
+# Потерять их не страшно -- новый прогон раздаст новые сразу и серверу, и узлам.
+#
+# Запуск:  net setup nats                        # или:
+#          ansible-playbook -i ~/etc/inventory.ini ~/etc/nats/setup.yml
+#
+# Симлинк ~/etc/nats обязателен, как и ~/etc/nomad: таблицы «имя -> плейбук»
+# нигде нет, путь и есть таблица.
+
+# Имя узла в NOMAD и имя хоста в ИНВЕНТАРЕ расходятся: gamer живёт в WSL, и
+# ssh-алиас у него свой. Субъект шины строится по имени узла, поэтому оно
+# считается один раз здесь и дальше живёт в hostvars -- иначе агент молча
+# подпишется не на тот субъект, и узел будет выглядеть выключенным.
+- name: Resolve Nomad node names
+  hosts: nomad_clients:nomad_control
+  gather_facts: no
+
+  tasks:
+    - name: Nomad node name for this host
+      ansible.builtin.set_fact:
+        mop_node: "{{ nomad_node_names[inventory_hostname] | default(inventory_hostname) }}"
+      vars:
+        nomad_node_names:
+          gamer-wsl: gamer
+
+
+- name: NATS server for the mop bus
+  hosts: git
+  become: yes
+  gather_facts: no
+
+  vars:
+    # Пароли лежат ЗДЕСЬ, на управляющей машине, а не в репозитории; lookup
+    # заводит файл при первом обращении и возвращает то же значение дальше.
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
+    nats_version: "2.14.6"
+    nats_tgz: "https://github.com/nats-io/nats-server/releases/download/v{{ nats_version }}/nats-server-v{{ nats_version }}-linux-amd64.tar.gz"
+    # Сертификат берём существующий, от vhost'а Nomad, и клиенты ходят на
+    # nomad.ermak.dev:4222. Отдельное имя стоило бы записи в DNS и второго
+    # certbot'а ради того же самого хоста; порт различает службы не хуже имени.
+    nats_cert_host: nomad.ermak.dev
+    nats_nodes: "{{ groups['nomad_clients'] | map('extract', hostvars, 'mop_node') | list }}"
+
+  tasks:
+    - name: Unpack nats-server {{ nats_version }}
+      ansible.builtin.unarchive:
+        src: "{{ nats_tgz }}"
+        dest: /tmp
+        remote_src: yes
+        creates: "/tmp/nats-server-v{{ nats_version }}-linux-amd64/nats-server"
+
+    - name: Install nats-server
+      ansible.builtin.copy:
+        src: "/tmp/nats-server-v{{ nats_version }}-linux-amd64/nats-server"
+        dest: /usr/local/bin/nats-server
+        remote_src: yes
+        mode: "0755"
+      notify: restart nats
+
+    - name: Config dir
+      ansible.builtin.file:
+        path: /etc/nats
+        state: directory
+        mode: "0755"
+
+    - name: Server config
+      ansible.builtin.template:
+        src: nats-server.conf.j2
+        dest: /etc/nats/nats-server.conf
+        # Пароли внутри: читает только root, под которым служба и ходит.
+        mode: "0600"
+      notify: restart nats
+
+    - name: Systemd unit
+      ansible.builtin.template:
+        src: nats.service.j2
+        dest: /etc/systemd/system/nats.service
+        mode: "0644"
+      notify: restart nats
+
+    - name: Enable and start
+      ansible.builtin.systemd:
+        name: nats
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart nats
+      ansible.builtin.systemd:
+        name: nats
+        state: restarted
+        daemon_reload: yes
+
+
+# Агент на рабочих узлах. Пакет mop туда уже приезжает из nomad/claude.yml
+# (rsync с управляющей машины), поэтому здесь только зависимость, креды и юнит.
+- name: mop-agent on the pool nodes
+  hosts: nomad_clients
+  gather_facts: no
+
+  vars:
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
+    mop_home: /home/ermak/mop
+    nats_url: "tls://nomad.ermak.dev:4222"
+    nats_user: "node-{{ mop_node }}"
+    nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + mop_node + '.pass length=32 chars=ascii_letters,digits') }}"
+
+  tasks:
+    - name: Python client for the bus
+      ansible.builtin.pip:
+        name: nats-py
+        extra_args: --user --break-system-packages
+        state: present
+
+    - name: Credentials dir
+      ansible.builtin.file:
+        path: /home/ermak/.config/mop
+        state: directory
+        mode: "0700"
+
+    - name: Bus credentials
+      ansible.builtin.template:
+        src: bus.json.j2
+        dest: /home/ermak/.config/mop/bus.json
+        mode: "0600"
+      notify: restart mop-agent
+
+    # Токен Nomad возили на узлы, чтобы узловой mop-mcp дотягивался до соседей
+    # и до инбокса мастера, и цена была названа прямо: слейв, добравшийся до
+    # файла, мог снести чужие джобы. Шина даёт ту же связь правами по субъектам,
+    # поэтому полномочия узлам больше не нужны. Перестать раздавать мало --
+    # старая копия так и лежала бы.
+    - name: Drop the Nomad management token from the pool
+      ansible.builtin.file:
+        path: /home/ermak/.config/nomad/bootstrap.json
+        state: absent
+
+    - name: Agent unit
+      become: yes
+      ansible.builtin.template:
+        src: mop-agent.service.j2
+        dest: /etc/systemd/system/mop-agent.service
+        mode: "0644"
+      notify: restart mop-agent
+
+    - name: Enable and start the agent
+      become: yes
+      ansible.builtin.systemd:
+        name: mop-agent
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Flush handlers before checking
+      ansible.builtin.meta: flush_handlers
+
+    # Прогон плейбука без этой проверки не отличает «юнит запущен» от «агент
+    # подписался»: systemd доволен процессом, который упал в реконнект.
+    - name: Confirm the agent is connected
+      ansible.builtin.command: /usr/bin/python3 -m mop.agent --check
+      args:
+        chdir: "{{ mop_home }}"
+      environment:
+        MOP_NODE: "{{ mop_node }}"
+      changed_when: false
+
+  handlers:
+    - name: restart mop-agent
+      become: yes
+      ansible.builtin.systemd:
+        name: mop-agent
+        state: restarted
+        daemon_reload: yes
+
+
+# Управляющая машина: только креды. Агента здесь нет и не нужно -- слейвов на
+# ней не живёт, а инбокс мастера слушает сам mop-mcp.
+- name: Bus credentials on the control machine
+  hosts: nomad_control
+  gather_facts: no
+
+  vars:
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
+    nats_url: "tls://nomad.ermak.dev:4222"
+    nats_user: master
+    nats_password: "{{ lookup('password', secrets_dir + '/nats-master.pass length=32 chars=ascii_letters,digits') }}"
+
+  tasks:
+    - name: Python client for the bus
+      ansible.builtin.pip:
+        name: nats-py
+        extra_args: --user --break-system-packages
+        state: present
+
+    - name: Credentials dir
+      ansible.builtin.file:
+        path: /home/ermak/.config/mop
+        state: directory
+        mode: "0700"
+
+    - name: Bus credentials
+      ansible.builtin.template:
+        src: bus.json.j2
+        dest: /home/ermak/.config/mop/bus.json
+        mode: "0600"

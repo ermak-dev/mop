@@ -1,0 +1,15 @@
+[Unit]
+Description=NATS server (шина пула mop)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Под root ради ключа letsencrypt: сертификат тут общий с vhost'ом Nomad.
+ExecStart=/usr/local/bin/nats-server -c /etc/nats/nats-server.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

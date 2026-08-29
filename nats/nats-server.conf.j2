@@ -1,0 +1,48 @@
+# Шина пула mop. Разворачивается nats/setup.yml, субъекты описаны в BUS.md.
+#
+# TLS берёт СУЩЕСТВУЮЩИЙ сертификат nomad.ermak.dev, и клиенты ходят на
+# nomad.ermak.dev:4222. Отдельное имя потребовало бы записи в DNS и второго
+# certbot'а ради того же самого хоста; порт различает службы не хуже имени.
+listen = "0.0.0.0:4222"
+server_name = "mop"
+max_payload = 1MB
+
+tls {
+  cert_file = "/etc/letsencrypt/live/{{ nats_cert_host }}/fullchain.pem"
+  key_file  = "/etc/letsencrypt/live/{{ nats_cert_host }}/privkey.pem"
+}
+
+# Права по субъектам — то, ради чего шину и заводили: раньше на узлы ехал
+# management-токен Nomad, и слейв мог снести чужие джобы.
+#
+# Пользователь на КАЖДЫЙ узел, а не один общий на всех. С общим любой узел мог
+# бы подписаться на mop.node.<чужой>.rpc и перехватить запрос мастера, ответив
+# первым, — подписка в NATS не эксклюзивна.
+#
+# _INBOX.> обязателен обеим сторонам: без него request-reply молча не работает.
+authorization {
+  users = [
+    {
+      user: "master", password: "{{ lookup('password', secrets_dir + '/nats-master.pass length=32 chars=ascii_letters,digits') }}"
+      permissions: {
+        publish:   { allow: ["mop.>", "_INBOX.>"] }
+        subscribe: { allow: ["mop.>", "_INBOX.>"] }
+      }
+    }
+{% for node in nats_nodes %}
+    {
+      user: "node-{{ node }}", password: "{{ lookup('password', secrets_dir + '/nats-node-' + node + '.pass length=32 chars=ascii_letters,digits') }}"
+      permissions: {
+        # Писать — соседям и мастеру. Управляющий субъект .rpc сюда не входит:
+        # печать в чужой TUI и запись файлов остаются за мастером.
+        publish: { allow: ["mop.node.*.msg", "mop.all.msg",
+                           "mop.master.inbox", "mop.events", "_INBOX.>"] }
+        # Слушать — только своё. И общий mop.all.msg, чтобы отзываться на
+        # опрос пула от тех, у кого нет ростера.
+        subscribe: { allow: ["mop.node.{{ node }}.>", "mop.all.msg",
+                             "_INBOX.>"] }
+      }
+    }
+{% endfor %}
+  ]
+}

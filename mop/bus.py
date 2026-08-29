@@ -31,7 +31,7 @@ try:
 except ImportError:
     sys.exit("нужна библиотека шины: pip install --user --break-system-packages nats-py")
 
-CONFIG = os.path.expanduser("~/.config/mop/bus.json")
+CONFIG = os.environ.get("MOP_BUS_CONFIG") or os.path.expanduser("~/.config/mop/bus.json")
 TIMEOUT = 20             # обычный запрос к агенту
 MAX_PAYLOAD = 900_000    # под max_payload сервера (1 МБ) с запасом на конверт
 INBOX = "mop.master.inbox"
@@ -41,6 +41,7 @@ BROADCAST = "mop.all.msg"   # все агенты разом; ответов с�
 _lock = threading.Lock()
 _loop = None
 _conn = None
+_last_error = None
 
 
 class BusError(RuntimeError):
@@ -83,12 +84,21 @@ def _call(coro, timeout):
     return asyncio.run_coroutine_threadsafe(coro, _ensure_loop()).result(timeout + 5)
 
 
+async def _on_error(e):
+    """Отказ прав NATS приезжает СЮДА, а не в ответ на запрос: сервер молча
+    не доставляет публикацию, и запрос честно висит до таймаута. Без этого
+    «нет права писать в mop.node.X.rpc» читалось бы как «агент молчит 20с» —
+    диагноз, ведущий чинить работающий узел."""
+    global _last_error
+    _last_error = str(e)
+
+
 async def _aconnect():
     c = config()
     return await nats.connect(
         servers=[c["url"]],
         user=c.get("user"), password=c.get("password"),
-        name="mop",
+        name="mop", error_cb=_on_error,
         # Молча копить неотправленное в ожидании сервера — худший вид отказа:
         # вызывающий получит успех, которого не было.
         allow_reconnect=True, max_reconnect_attempts=-1,
@@ -128,6 +138,14 @@ def subject(node, channel="rpc"):
     return f"mop.node.{node}.{channel}"
 
 
+def _silence(node, timeout):
+    """Почему тихо. Отличать «нет прав» от «агент лёг» обязательно: лечение
+    у них разное и противоположное по стоимости ошибки."""
+    if _last_error and "permissions violation" in _last_error.lower():
+        return f"шина не пропустила запрос к {node}: {_last_error}"
+    return f"агент узла {node} молчит {timeout}с"
+
+
 def request(node, verb, timeout=TIMEOUT, channel="rpc", **fields):
     """Глагол агенту узла. -> разобранный ответ (dict).
 
@@ -145,7 +163,7 @@ def request(node, verb, timeout=TIMEOUT, channel="rpc", **fields):
     except NoRespondersError:
         raise BusError(f"агент узла {node} не подписан — юнит mop-agent не работает")
     except asyncio.TimeoutError:
-        raise BusError(f"агент узла {node} молчит {timeout}с")
+        raise BusError(_silence(node, timeout))
     except Exception as e:
         raise BusError(f"{node}: {e}")
     try:
@@ -177,7 +195,7 @@ def request_many(requests, timeout=TIMEOUT, channel="rpc"):
         except NoRespondersError:
             return BusError(f"агент узла {node} не подписан")
         except asyncio.TimeoutError:
-            return BusError(f"агент узла {node} молчит {timeout}с")
+            return BusError(_silence(node, timeout))
         except Exception as e:
             return BusError(f"{node}: {e}")
 
@@ -236,6 +254,7 @@ def subscribe(subj, handler):
     он обязан быть быстрым и не бросать: некому ловить."""
     nc = connect()
 
+    # Корутина, а не функция: nats-py обычный callback не принимает.
     async def cb(msg):
         try:
             handler(json.loads(msg.data.decode()))
