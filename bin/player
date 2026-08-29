@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""worker — claude-воркеры поверх Nomad (https://nomad.ermak.dev).
+"""player — claude-плееры поверх Nomad (https://nomad.ermak.dev).
 
-worker add [--llm P] [origin]    создать воркера; без origin — взять из git текущего каталога
-worker list                      воркеры (занят/свободен), их LLM, ветки и свободные слоты пула
-worker delete <name>             остановить и удалить воркера
-worker change <name> <origin> [--llm P]  перенацелить воркера на другой репозиторий/LLM
-worker restart <name>            перезапустить зависшего воркера
-worker attach <name>             подключиться к tmux-сессии воркера на её узле
-worker tail <name> [-n N] [-f]   хвост tmux-буфера воркера (по умолчанию 10 строк)
-worker llm                       LLM-профили: чем можно поднимать сиденья и есть ли ключ
-worker login                     раздать креды claude и ключи LLM-провайдеров на узлы пула
-worker doctor [--fix]            диагностика пула: залипания, протухший логин, backoff; --fix лечит
+player add [--llm P] [origin]    создать плеера; без origin — взять из git текущего каталога
+player list                      плееры (занят/свободен), их LLM, ветки и свободные слоты пула
+player delete <name>             остановить и удалить плеера
+player change <name> <origin> [--llm P]  перенацелить плеера на другой репозиторий/LLM
+player restart <name>            перезапустить зависшего плеера
+player attach <name>             подключиться к tmux-сессии плеера на её узле
+player tail <name> [-n N] [-f]   хвост tmux-буфера плеера (по умолчанию 10 строк)
+player llm                       LLM-профили: чем можно поднимать сиденья и есть ли ключ
+player login                     раздать креды claude и ключи LLM-провайдеров на узлы пула
+player doctor [--fix]            диагностика пула: залипания, протухший логин, backoff; --fix лечит
 
-Размещение решает Nomad: каждый воркер бронирует 8 ГБ из пула узлов
+Размещение решает Nomad: каждый плеер бронирует 8 ГБ из пула узлов
 (на Linux-узлах cgroups делают лимит жёстким). Клон живёт в ~/wk/<имя> на узле
-и при delete остаётся лежать — переиспользуется, если воркера поднять снова.
+и при delete остаётся лежать — переиспользуется, если плеера поднять снова.
 Токен: $NOMAD_TOKEN или ~/.config/nomad/bootstrap.json.
 
 Всё, кроме attach, ходит через API Nomad; ssh нужен только attach ради живого
@@ -39,7 +39,7 @@ def cwd_origin():
             capture_output=True, text=True, check=True,
         ).stdout.strip()
     except subprocess.CalledProcessError:
-        sys.exit("не рабочая копия git и origin не указан: worker add <git-origin>")
+        sys.exit("не рабочая копия git и origin не указан: player add <git-origin>")
 
 
 def project_of(origin):
@@ -59,7 +59,7 @@ def parse_llm(args):
             rest.append(a)
     if llm is not None and llm not in seats.LLM_PROFILES:
         sys.exit(f"нет LLM-профиля {llm or '(пусто)'}; есть: "
-                 f"{', '.join(seats.LLM_PROFILES)} (worker llm)")
+                 f"{', '.join(seats.LLM_PROFILES)} (player llm)")
     return llm, rest
 
 
@@ -74,7 +74,7 @@ def require_job(name):
     try:
         return nomad.get_job(name)
     except nomad.NotFound:
-        sys.exit(f"нет такого воркера: {name}")
+        sys.exit(f"нет такого плеера: {name}")
 
 
 def push_llm_keys(llm):
@@ -110,30 +110,30 @@ def cmd_add(args):
                 print("  → running")
                 return
             if a["ClientStatus"] == "failed":
-                print("  → FAILED, смотри: worker list / nomad UI")
+                print("  → FAILED, смотри: player list / nomad UI")
                 return
         time.sleep(1)
     print(f"  → пока {'pending — свободных слотов нет?' if node is None else 'не running'}, "
-          f"смотри worker list")
+          f"смотри player list")
 
 
 def list_hint(rows, origin):
     """Одна подсказка под таблицей: чего именно не хватает прямо сейчас."""
     if not rows:
-        return (f"Создайте первый воркер для {project_of(origin)}: worker add {origin}"
-                if origin else "Создайте воркера: worker add <git-origin>")
+        return (f"Создайте первый плеер для {project_of(origin)}: player add {origin}"
+                if origin else "Создайте плеера: player add <git-origin>")
     if not any(r["state"] == "свободен" for r in rows):
-        return (f"\nНет свободных воркеров для {project_of(origin)}. "
-                f"Создайте: worker add {origin}" if origin
-                else "\nНет свободных воркеров. Создайте: worker add <git-origin>")
+        return (f"\nНет свободных плееров для {project_of(origin)}. "
+                f"Создайте: player add {origin}" if origin
+                else "\nНет свободных плееров. Создайте: player add <git-origin>")
     if not origin:
         return None
     project = project_of(origin)
     mine = [r for r in rows if project in r["origin"]]
     if not mine:
-        return f"\nНет воркеров для {project}. Создайте: worker add {origin}"
+        return f"\nНет плееров для {project}. Создайте: player add {origin}"
     if not any(r["state"] == "свободен" for r in mine):
-        return f"\nВсе воркеры для {project} заняты. Создайте ещё: worker add {origin}"
+        return f"\nВсе плееры для {project} заняты. Создайте ещё: player add {origin}"
     return None
 
 
@@ -164,7 +164,7 @@ def cmd_list(_args):
         print("\n".join(table([(r["name"], r["node"], r["alloc_status"],
                                 r["state"], r["llm"], r["origin"]) for r in rows])))
     else:
-        print("воркеров нет")
+        print("плееров нет")
     hint = list_hint(rows, origin)
     if hint:
         print(hint)
@@ -192,7 +192,7 @@ def cmd_change(args):
     push_llm_keys(llm)
     nomad.register(seats.job_spec(name, origin, llm))
     print(f"{name}: {old} [{old_llm}] → {origin} [{llm}]")
-    print("воркер перезапускается с новым репозиторием (клон пересоздаётся врапером)")
+    print("плеер перезапускается с новым репозиторием (клон пересоздаётся врапером)")
 
 
 def cmd_restart(args):
@@ -201,10 +201,10 @@ def cmd_restart(args):
     print(f"перезапускаю {name} на {a['NodeName']}...")
     try:
         nomad.alloc_restart(a["ID"])
-        print("✓ воркер перезапускается")
+        print("✓ плеер перезапускается")
     except Exception as e:
         print(f"ошибка перезапуска: {e}")
-        print(f"Альтернатива: worker delete {name} && worker add <origin>")
+        print(f"Альтернатива: player delete {name} && player add <origin>")
 
 
 def cmd_attach(args):
@@ -220,7 +220,7 @@ def cmd_llm(_args):
     for name, prof in seats.LLM_PROFILES.items():
         key = prof.get("key")
         if not key:
-            state = "логин claude.ai (worker login)"
+            state = "логин claude.ai (player login)"
         elif key in have:
             state = f"ключ {key}: есть"
         else:
@@ -229,7 +229,7 @@ def cmd_llm(_args):
         print(f"  {name:8}  {base:38}  {state}")
     if note:
         print(f"\n{note}")
-    print("\nworker add --llm <профиль> [origin]   |   worker login раздаёт ключи на узлы")
+    print("\nplayer add --llm <профиль> [origin]   |   player login раздаёт ключи на узлы")
 
 
 def cmd_login(_args):
@@ -255,7 +255,7 @@ def cmd_doctor(args):
     if not fix:
         # Подсказку печатаем только если --fix действительно что-то сделает.
         # Иначе она врёт: у «нет квоты модели» и «queued» лечения здесь нет.
-        print("\nлечение: worker doctor --fix" if any(i["action"] for i in issues)
+        print("\nлечение: player doctor --fix" if any(i["action"] for i in issues)
               else "\nавтолечения нет — решение оператора")
         return
 
@@ -263,13 +263,13 @@ def cmd_doctor(args):
     if any(i["action"] == "login+restart" for i in issues):
         if not keys.credentials_fresh():
             sys.exit("локальные креды протухли или битые — сначала залогинься "
-                     "в claude на этой машине, потом worker doctor --fix")
+                     "в claude на этой машине, потом player doctor --fix")
         cmd_login([])
         print()
     for issue in issues:
         if issue["action"]:
             print(f"  {issue['name']}: {treat(issue)}")
-    print("\nконтроль: worker list (и worker tail <name> для бывших залипших)")
+    print("\nконтроль: player list (и player tail <name> для бывших залипших)")
 
 
 def treat(issue):
@@ -341,7 +341,7 @@ def cmd_tail(args):
             try:
                 cur = seats.pane_lines(a, name)
             except Exception:
-                # воркер мог перезапуститься/переехать — перецепляемся
+                # плеер мог перезапуститься/переехать — перецепляемся
                 a = running_alloc(name)
                 continue
             for line in appended_since(buf, cur):

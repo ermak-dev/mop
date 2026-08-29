@@ -53,6 +53,32 @@
         delete: yes
         recursive: yes
 
+    # orchestra-mcp: тот же пул как инструменты для сиденья. Узел говорит с
+    # Nomad сам (токен раздан туда же, решение оператора 2026-08-29), поэтому
+    # сиденье видит соседей на других узлах и достаёт инбокс PM через
+    # аллокацию в датацентре control.
+    - name: Ensure python3-pip for the orchestra MCP server
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+      become: yes
+
+    - name: Install the orchestra MCP server's python dependencies
+      ansible.builtin.pip:
+        name: [mcp, python-nomad, websocket-client, requests]
+        extra_args: --user --break-system-packages
+        state: present
+
+    - name: Sync the orchestra package from the control machine
+      ansible.posix.synchronize:
+        src: "{{ lookup('env', 'HOME') }}/orchestra/"
+        dest: orchestra/
+        delete: yes
+        recursive: yes
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=__pycache__"
+
     - name: Deliver the declared MCP server set
       ansible.builtin.template:
         src: claude-mcp.json.j2

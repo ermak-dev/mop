@@ -1,5 +1,5 @@
-"""orchestra — пул claude-воркеров поверх Nomad.
+"""orchestra — пул claude-плееров поверх Nomad.
 
-Библиотека возвращает данные; печатают фронтенды (bin/worker, bin/cc-send,
+Библиотека возвращает данные; печатают фронтенды (bin/player, bin/cc-send,
 bin/orchestra-mcp).
 """

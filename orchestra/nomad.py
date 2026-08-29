@@ -18,7 +18,14 @@ except ImportError:
              "python-nomad websocket-client")
 
 ADDR = os.environ.get("NOMAD_ADDR", "https://nomad.ermak.dev")
-TASK = "claude"          # имя задачи внутри группы воркера
+TASK = "claude"          # имя задачи внутри группы плеера
+# Два датацентра, и это не формальность. В `home` живут рабочие узлы, туда
+# планировщик ставит плееров. В `control` — одна лишь управляющая машина: она
+# в кластере ради того, чтобы на ней МОГЛА существовать аллокация (alloc exec
+# ходит только внутрь аллокаций, а инбокс PM живёт именно тут). Джобы плееров
+# объявляют home, поэтому на рабочую станцию оператора сиденье не сядет.
+POOL_DC = "home"
+CONTROL_DC = "control"
 MAX_EXEC_URL = 7800      # nginx перед Nomad режет URI на 8 КБ
 NotFound = _nomad.api.exceptions.URLNotFoundNomadException
 ApiError = _nomad.api.exceptions.BaseNomadException
@@ -114,10 +121,15 @@ def latest_alloc(job_id):
     return max(run, key=lambda a: a["CreateIndex"]) if run else None
 
 
-def ready_nodes():
-    """Имена узлов, на которые Nomad вообще станет что-то ставить."""
+def ready_nodes(datacenter=POOL_DC):
+    """Имена узлов, на которые Nomad вообще станет что-то ставить.
+
+    По умолчанию только рабочий пул: раздавать креды и ключи на управляющую
+    машину не надо — она их источник."""
     return {n["Name"] for n in client().nodes.get_nodes()
-            if n["Status"] == "ready" and n.get("SchedulingEligibility") != "ineligible"}
+            if n["Status"] == "ready"
+            and n.get("SchedulingEligibility") != "ineligible"
+            and (datacenter is None or n.get("Datacenter") == datacenter)}
 
 
 def node_capacity(node_summary):

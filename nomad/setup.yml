@@ -366,54 +366,32 @@
         mode: '0600'
       loop: "{{ wk_env_files }}"
 
-    - name: Download nomad {{ nomad_version }}
-      get_url:
-        url: "{{ nomad_zip }}"
-        dest: "/tmp/nomad_{{ nomad_version }}.zip"
-        mode: '0644'
+    - name: Nomad agent
+      ansible.builtin.include_tasks: client-agent.yml
 
-    - name: Install nomad binary
-      unarchive:
-        src: "/tmp/nomad_{{ nomad_version }}.zip"
-        dest: /usr/local/bin
-        remote_src: yes
-        mode: '0755'
+# Управляющая машина в кластере.
+#
+# mate вывели из пула 2026-08-25 как рабочий узел -- и рабочим узлом она не
+# становится обратно: датацентр здесь `control`, а джобы плееров объявляют
+# `home`, так что планировщик их сюда не поставит. Толк от членства другой:
+# `alloc exec` работает только внутрь аллокаций, и пока на управляющей машине
+# не было ни одной, сиденье не могло дотянуться до инбокса PM -- он живёт
+# именно тут. Теперь может, через аллокацию в датацентре control.
+- name: Nomad client on the control machine
+  hosts: nomad_control
+  become: yes
+  gather_facts: no
 
-    - name: Create config and data dirs
-      file:
-        path: "{{ item }}"
-        state: directory
-        mode: '0755'
-      loop:
-        - /etc/nomad
-        - /opt/nomad/data
+  vars:
+    nomad_version: 1.10.5
+    nomad_zip: "https://hashicorp-releases.yandexcloud.net/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
+    nomad_datacenter: control
 
-    - name: Deploy the wk-sweep script (run nightly by the wk-cleanup job)
-      copy:
-        src: wk-sweep.sh
-        dest: /usr/local/bin/wk-sweep
-        mode: '0755'
+  tasks:
+    - name: Ensure unzip
+      apt:
+        name: unzip
+        state: present
 
-    - name: Deploy client config
-      template:
-        src: client.hcl.j2
-        dest: /etc/nomad/client.hcl
-        mode: '0644'
-      register: client_config
-
-    - name: Install systemd unit
-      template:
-        src: nomad.service.j2
-        dest: /etc/systemd/system/nomad.service
-        mode: '0644'
-      vars:
-        nomad_user: root
-        nomad_config: /etc/nomad/client.hcl
-      register: client_unit
-
-    - name: Start nomad client
-      systemd:
-        name: nomad
-        state: "{{ (client_config.changed or client_unit.changed) | ternary('restarted', 'started') }}"
-        enabled: yes
-        daemon_reload: yes
+    - name: Nomad agent
+      ansible.builtin.include_tasks: client-agent.yml

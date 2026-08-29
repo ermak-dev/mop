@@ -1,6 +1,6 @@
 """Раздача файлов на узлы пула: креды claude.ai и ключи LLM-провайдеров.
 
-Узлы с живым воркером обычно забиты памятью под завязку и sysbatch туда не
+Узлы с живым плеером обычно забиты памятью под завязку и sysbatch туда не
 сядет (DimensionExhausted: memory) — там файл пишется через exec в
 существующую аллокацию. Sysbatch достаётся только пустым узлам.
 """
@@ -31,7 +31,7 @@ def push_spec(name, script, node_names):
     return {"Job": {
         "ID": name,
         "Name": name,
-        "Datacenters": ["home"],
+        "Datacenters": [nomad.POOL_DC],
         "Type": "sysbatch",
         "Constraints": [{
             "LTarget": "${node.unique.name}",
@@ -61,15 +61,15 @@ def distribute(files):
         raise RuntimeError("в пуле нет ready-узлов")
 
     results = {}
-    _push_via_workers(script, results)
+    _push_via_players(script, results)
     _push_via_sysbatch(script, sorted(nodes - set(results)), results)
     for node in nodes:
-        results.setdefault(node, "НЕ ДОСТАЛСЯ — ни воркера, ни места под sysbatch")
+        results.setdefault(node, "НЕ ДОСТАЛСЯ — ни плеера, ни места под sysbatch")
     return results
 
 
-def _push_via_workers(script, results):
-    """Узлы с живым воркером — через exec в его аллокацию."""
+def _push_via_players(script, results):
+    """Узлы с живым плеером — через exec в его аллокацию."""
     try:
         jobs = seats.jobs()
     except Exception:
@@ -150,7 +150,7 @@ def _as_file(path, text_or_bytes):
 
 
 def push_llm_keys(llm):
-    """Ключ профиля обязан лежать на узле РАНЬШЕ воркера: без него врапер
+    """Ключ профиля обязан лежать на узле РАНЬШЕ плеера: без него врапер
     валится, а Nomad уводит сиденье в restart-backoff. Узел заранее неизвестен
     (место выбирает планировщик), поэтому раздаём на весь пул.
     -> {узел: результат} либо None, если профилю ключ не нужен."""
@@ -187,10 +187,34 @@ def credentials_fresh():
         return False
 
 
+NOMAD_TOKEN_FILE = f"{seats.HOME}/.config/nomad/bootstrap.json"
+
+
+def push_nomad_token():
+    """Токен Nomad на узлы пула.
+
+    Решение оператора 2026-08-29: узлы имеют право управлять друг другом, то
+    есть на них едет тот же management-токен, что у управляющей машины. Цена
+    решения названа прямо: сиденье, дотянувшееся до этого файла, может всё,
+    включая снос чужих джобов. Без токена узловой orchestra-mcp видит только
+    свой хост -- ни соседний узел, ни инбокс PM ему недоступны."""
+    src = os.path.expanduser("~/.config/nomad/bootstrap.json")
+    with open(src, "rb") as f:
+        raw = f.read()
+    json.loads(raw)
+    return distribute([_as_file(NOMAD_TOKEN_FILE, raw)])
+
+
 def push_login():
     """Раздать креды claude.ai и ключи LLM. -> (результаты, что везли, замечание)"""
     files = [_as_file(f"{seats.HOME}/.claude/.credentials.json", credentials())]
     what = ["креды claude.ai"]
+    try:
+        with open(os.path.expanduser("~/.config/nomad/bootstrap.json"), "rb") as f:
+            files.append(_as_file(NOMAD_TOKEN_FILE, f.read()))
+        what.append("токен Nomad")
+    except OSError:
+        pass
     blob, note = llm_keys_blob()
     if blob:
         files.append(_as_file(seats.LLM_KEYS_FILE, blob))

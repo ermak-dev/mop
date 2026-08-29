@@ -1,6 +1,6 @@
 # orchestra
 
-Пул claude-воркеров поверх Nomad: как он разворачивается, чем управляется и как
+Пул claude-плееров поверх Nomad: как он разворачивается, чем управляется и как
 с сиденьями разговаривать.
 
 ```
@@ -11,7 +11,7 @@ orchestra/         библиотека: всё знание о пуле, воз
   remote.py          запуск session.py внутри аллокации
   keys.py            раздача кредов и ключей провайдеров на узлы
   render.py          таблицы
-bin/worker         CLI пула: add/list/delete/change/restart/attach/tail/doctor/login/llm
+bin/player         CLI пула: add/list/delete/change/restart/attach/tail/doctor/login/llm
 bin/cc-send        послать сообщение в живую сессию claude code
 bin/orchestra-mcp  MCP-сервер: тот же пул как инструменты для claude
 nomad/             ansible-плейбуки и конфиги: сам Nomad, узлы, уборка диска
@@ -24,8 +24,8 @@ MCP-сервер начал бы разбирать текст, свёрстан
 
 ## Как это связано
 
-`worker` ходит в Nomad по REST (`https://nomad.ermak.dev`), а команды внутри
-аллокаций гоняет через exec-websocket; ssh нужен только для `worker attach`,
+`player` ходит в Nomad по REST (`https://nomad.ermak.dev`), а команды внутри
+аллокаций гоняет через exec-websocket; ssh нужен только для `player attach`,
 ради живого терминала. Токен берётся из `$NOMAD_TOKEN` или
 `~/.config/nomad/bootstrap.json`.
 
@@ -39,7 +39,7 @@ MCP-сервер начал бы разбирать текст, свёрстан
 это интерфейсы, которые нельзя переименовать:
 
 ```
-~/bin/worker    -> ../orchestra/bin/worker
+~/bin/player    -> ../orchestra/bin/player
 ~/bin/cc-send   -> ../orchestra/bin/cc-send
 ~/etc/nomad     -> ../orchestra/nomad
 ```
@@ -53,9 +53,9 @@ MCP-сервер начал бы разбирать текст, свёрстан
 
 * `~/etc/inventory.ini` — инвентарь ansible, общий с остальными плейбуками
   (живёт в репозитории backup, сюда не переезжает).
-* `~/.ssh/ai-provider-keys.env` — ключи LLM-провайдеров; `worker` вывозит на
+* `~/.ssh/ai-provider-keys.env` — ключи LLM-провайдеров; `player` вывозит на
   узлы только те, что называет хоть один профиль в `LLM_PROFILES`.
-* `~/.claude/.credentials.json` — логин claude.ai, который `worker login`
+* `~/.claude/.credentials.json` — логин claude.ai, который `player login`
   раздаёт на узлы пула.
 
 ## Запуск плейбуков

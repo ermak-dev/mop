@@ -1,7 +1,7 @@
 """Сиденья пула: спека job'а, LLM-профили и достоверное состояние места.
 
 Модуль ВОЗВРАЩАЕТ ДАННЫЕ и ничего не печатает. Форматирование живёт во
-фронтендах (bin/worker печатает таблицы, bin/orchestra-mcp отдаёт то же самое
+фронтендах (bin/player печатает таблицы, bin/orchestra-mcp отдаёт то же самое
 модели) — иначе второй фронтенд неизбежно начал бы разбирать чужой текст.
 """
 import base64
@@ -10,7 +10,7 @@ import re
 
 from . import nomad, remote
 
-MEM = 8192                          # бюджет воркера, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
+MEM = 8192                          # бюджет плеера, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
 HOME = "/home/ermak"                # $HOME на узлах пула
 SSH_ALIAS = {"gamer": "gamer-wsl"}  # имя узла nomad -> ssh-алиас
 # Куда переводить сиденье, у которого кончилась квота текущей модели
@@ -28,10 +28,10 @@ JOB_PREFIX = "wk-"
 # "key" — ИМЯ переменной в ~/.ssh/ai-provider-keys.env (локальный источник
 # правды по ключам). Сам ключ в спеку джоба НЕ кладём: она видна в UI Nomad и
 # остаётся в его состоянии. Вместо этого раздаём на узлы файл
-# ~/.config/worker/llm-keys.env (только с теми ключами, которые называет хоть
+# ~/.config/orchestra/llm-keys.env (только с теми ключами, которые называет хоть
 # один профиль), а врапер уже на узле подставляет нужный в сессию.
 LLM_PROFILES = {
-    # штатный Claude: авторизация — логин claude.ai (worker login), env пустой
+    # штатный Claude: авторизация — логин claude.ai (player login), env пустой
     "claude": {"key": None, "env": {}},
     # z.ai GLM coding plan, https://docs.z.ai/devpack/tool/claude
     "glm": {
@@ -53,11 +53,11 @@ LLM_PROFILES = {
 }
 DEFAULT_LLM = "claude"
 LOCAL_KEYS_FILE = "~/.ssh/ai-provider-keys.env"        # источник ключей на этой машине
-LLM_KEYS_FILE = f"{HOME}/.config/worker/llm-keys.env"  # копия на узле пула
+LLM_KEYS_FILE = f"{HOME}/.config/orchestra/llm-keys.env"  # копия на узле пула
 
 # Врапер — собственно задача Nomad: довести узел до "клон есть, claude в
 # tmux" и жить, пока жива tmux-сессия. Смерть врапера = рестарт/переезд
-# воркера силами Nomad; на новом узле врапер сам разворачивает всё заново.
+# плеера силами Nomad; на новом узле врапер сам разворачивает всё заново.
 WRAPPER = r"""
 set -e
 d="$HOME/wk/$WK_NAME"
@@ -87,7 +87,7 @@ edit_json() {  # <file> <jq-program> [jq-args...]
     # `jq empty` is NOT a validity check: a zero-byte file is an empty jq input
     # stream, so it exits 0, every filter over it yields nothing, and the 0-byte
     # config got written straight back (gamer, 2026-08-28 — all six seats parked
-    # on the config prompt while `worker list` showed only "ЗАВИС"). Demand an
+    # on the config prompt while `player list` showed only "ЗАВИС"). Demand an
     # actual object, and never install an empty result.
     jq -e 'type == "object"' "$file" >/dev/null 2>&1 || echo '{}' > "$file"
     if jq "$@" "$program" "$file" > "$tmp" && [ -s "$tmp" ]; then
@@ -119,7 +119,8 @@ else
 fi
 edit_json "$HOME/.claude.json" '.mcpServers["windows-mcp"] = {"type":"http","url":$winurl,"headers":{"Authorization":"Bearer kCgqRS33Yxv4lrSlqV5w6b3qNz0shjj9u4HTInk2DW0"}}
   | .mcpServers["mac-mcp"] = {"type":"http","url":"http://mac:8000/mcp","headers":{"Authorization":"Bearer FeRM5I-lQr_3mJbq1PWG6KzErm-666SA8b2vVwlBj8U"}}
-  | .mcpServers["playwright"] = {"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--browser","chromium"]}' \
+  | .mcpServers["playwright"] = {"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--browser","chromium"]}
+  | .mcpServers["orchestra"] = {"type":"stdio","command":"/home/ermak/orchestra/bin/orchestra-mcp"}' \
     --arg winurl "$WINURL"
 # playwright-mcp needs a browser on the node; install is idempotent and cached
 # in ~/.cache/ms-playwright, so every seat boot just confirms it is there.
@@ -148,14 +149,14 @@ if [ -n "$WK_LLM_ENV" ]; then
     done <<< "$(printf '%s' "$WK_LLM_ENV" | base64 -d)"
 fi
 if [ -n "$WK_LLM_KEY_VAR" ]; then
-    keyfile="$HOME/.config/worker/llm-keys.env"
+    keyfile="$HOME/.config/orchestra/llm-keys.env"
     key=""
     # sed, а не source: файл с ключами не исполняем
     [ -f "$keyfile" ] && key=$(sed -n "s/^${WK_LLM_KEY_VAR}=//p" "$keyfile" | tail -1)
     if [ -z "$key" ]; then
         # Валимся громко: без ключа claude поднимется и будет отбивать каждый
         # ход 401-й, а сиденье будет читаться как живое и свободное.
-        echo "LLM-профиль $WK_LLM: на узле нет ключа $WK_LLM_KEY_VAR в $keyfile — раздай: worker login" >&2
+        echo "LLM-профиль $WK_LLM: на узле нет ключа $WK_LLM_KEY_VAR в $keyfile — раздай: player login" >&2
         exit 1
     fi
     llm_env+=(-e "$WK_LLM_AUTH_VAR=$key")
@@ -173,7 +174,7 @@ tmux -L "$WK_NAME" new-session -d -s "$WK_NAME" -c "$d" \
     -e CARGO_BUILD_JOBS=1 \
     -e PATH="$d/bin:$PATH" \
     "${llm_env[@]}" \
-    "$HOME/.local/bin/claude --dangerously-skip-permissions --remote-control"
+    "$HOME/.local/bin/claude --dangerously-skip-permissions"
 trap 'tmux -L "$WK_NAME" kill-session -t "$WK_NAME" 2>/dev/null; exit 0' TERM INT
 while tmux -L "$WK_NAME" has-session -t "$WK_NAME" 2>/dev/null; do sleep 10 & wait $!; done
 """
@@ -190,7 +191,7 @@ def job_spec(name, origin, llm=DEFAULT_LLM):
     return {"Job": {
         "ID": name,
         "Name": name,
-        "Datacenters": ["home"],
+        "Datacenters": [nomad.POOL_DC],
         "Type": "service",
         "Meta": {"origin": origin, "llm": llm},
         "TaskGroups": [{
@@ -227,8 +228,8 @@ def job_spec(name, origin, llm=DEFAULT_LLM):
 
 
 def jobs():
-    """Джобы воркеров. Префикс wk- ловит и wk-cleanup с его периодическими
-    детьми; воркеры — те, что врапер пометил origin'ом."""
+    """Джобы плееров. Префикс wk- ловит и wk-cleanup с его периодическими
+    детьми; плееры — те, что врапер пометил origin'ом."""
     listing = nomad.client().jobs.get_jobs(prefix=JOB_PREFIX, meta=True)
     return [j for j in listing if "origin" in (j.get("Meta") or {})]
 
@@ -319,8 +320,8 @@ def clone_holds_work(alloc, name):
 # ─── состояние сессии ────────────────────────────────────────────────────
 # КАК УЗНАТЬ РЕАЛЬНОЕ СОСТОЯНИЕ СИДЕНЬЯ (файл сессии + сокет)
 #
-# Точка входа сиденья — `claude --remote-control`. Такой процесс сам ведёт две
-# вещи, которые и есть источник правды о его состоянии:
+# Сиденье само ведёт две вещи, которые и есть источник правды о его состоянии
+# (обе появляются независимо от моста claude.ai):
 #
 # 1) ФАЙЛ АКТИВНОСТИ ~/.claude/sessions/<pid>.json: cwd (по нему матчим — он
 #    стабилен, в отличие от name), status (idle|busy|requires_action|waiting|
@@ -391,11 +392,14 @@ def _screen_complaint(activity):
     """
     low = activity.lower()
     # Логин. Варианты экрана: "Not logged in · Run /login", "Login expired ·
-    # Please run /login", "Remote Control disconnected — Claude.ai login
-    # expired" + "/rc failed" (сессия жива, но PM до неё не достучится).
-    # Проверять до скоринга: у залипшего мид-таск в буфере полно рабочих слов.
-    if ("not logged in" in low or "login expired" in low
-            or "/rc failed" in low or "remote control disconnected" in low):
+    # Please run /login". Проверять до скоринга: у залипшего мид-таск в буфере
+    # полно рабочих слов.
+    #
+    # Строки про Remote Control отсюда убраны вместе с самим --remote-control:
+    # сиденья больше не ходят на мост claude.ai, и "/rc failed" на их экране
+    # означало бы что угодно, только не болезнь. Для профилей с ключом
+    # провайдера (glm) логин claude.ai вообще не при делах.
+    if "not logged in" in low or "login expired" in low:
         return "login", ("не залогинен" if "not logged in" in low else "логин протух")
     # Квота модели: каждое входящее сообщение мгновенно возвращает "You're out
     # of usage credits…" и сессия падает обратно в idle. Рестарт НЕ лечит —
