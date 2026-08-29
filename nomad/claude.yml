@@ -1,6 +1,6 @@
-# Claude worker-node configuration: user-level skills + MCP servers.
+# Claude slave-node configuration: user-level skills + MCP servers.
 #
-# Worker sessions on the pool run under the same user as the control machine
+# Slave sessions on the pool run under the same user as the control machine
 # and read ~/.claude the same way. Two pieces are managed here, both
 # authoritative (drift found 2026-08-26: mirror held stale skills and two
 # dead ssh-based MCP entries whose host aliases do not exist there;
@@ -29,7 +29,7 @@
 #
 # Run:  ansible-playbook -i ~/etc/inventory.ini ~/etc/nomad/claude.yml
 
-- name: Claude skills and MCP servers on nomad worker nodes
+- name: Claude skills and MCP servers on nomad slave nodes
   hosts: nomad_clients
   become: no
   gather_facts: no
@@ -53,9 +53,9 @@
         delete: yes
         recursive: yes
 
-    # orchestra-mcp: тот же пул как инструменты для сиденья. Узел говорит с
+    # orchestra-mcp: тот же пул как инструменты для слейва. Узел говорит с
     # Nomad сам (токен раздан туда же, решение оператора 2026-08-29), поэтому
-    # сиденье видит соседей на других узлах и достаёт инбокс PM через
+    # слейв видит соседей на других узлах и достаёт инбокс мастера через
     # аллокацию в датацентре control.
     - name: Ensure python3-pip for the orchestra MCP server
       ansible.builtin.apt:

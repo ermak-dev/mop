@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""orchestra-mcp — MCP-сервер пула: канал сообщений и управление сиденьями.
+"""orchestra-mcp — MCP-сервер пула: канал сообщений и управление слейвами.
 
-Транспорт stdio, запускается дочерним процессом сессии-заказчика (обычно PM).
+Транспорт stdio, запускается дочерним процессом сессии мастера (обычно мастер).
 Порта не слушает намеренно: сервер держит management-токен Nomad.
 
 Почему не встроенный SendMessage: он видит только этот хост плюс облачные и
-bridge-сессии, а сиденья пула живут на других узлах — сегодня PM достаёт их
+bridge-сессии, а слейва пула живут на других узлах — сегодня мастер достаёт их
 через мост claude.ai, который умирает ровно тогда, когда протухает логин.
 Здесь доставка идёт через Nomad и протухший логин переживает.
 
@@ -23,20 +23,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mcp.server.mcpserver import MCPServer                     # noqa: E402
 from mcp.types import ToolAnnotations                          # noqa: E402
 
-from orchestra import keys, nomad, remote, seats, session       # noqa: E402
+from orchestra import keys, nomad, remote, session, slaves       # noqa: E402
 from orchestra.render import table                              # noqa: E402
 
 app = MCPServer(
     "orchestra",
     instructions=(
-        "Пул claude-плееров поверх Nomad.\n\n"
-        "ЭТО ЕДИНСТВЕННЫЙ КАНАЛ СВЯЗИ С ПУЛОМ. Чтобы написать плееру или узнать, "
+        "Пул claude-слейвов поверх Nomad.\n\n"
+        "ЭТО ЕДИНСТВЕННЫЙ КАНАЛ СВЯЗИ С ПУЛОМ. Чтобы написать слейву или узнать, "
         "кто свободен, бери `send` и `agents` отсюда. Встроенные "
         "SendMessage/ListAgents для этого не годятся: они видят только сессии "
-        "ЭТОГО ЖЕ хоста, а плееры живут на разных узлах — на соседнем узле "
+        "ЭТОГО ЖЕ хоста, а слейвы живут на разных узлах — на соседнем узле "
         "встроенный поиск молча никого не найдёт. Здесь доставка идёт через "
         "Nomad, и хост значения не имеет.\n\n"
-        "`agents` — кто есть и в каком состоянии, `send` — сообщение плееру, "
+        "`agents` — кто есть и в каком состоянии, `send` — сообщение слейву, "
         "`tail` — что у него на экране. Перед диспатчем всегда сверяйся с "
         "`agents`: «свободен» там означает, что в клоне нет несохранённой "
         "работы, а не просто что сессия молчит."
@@ -50,18 +50,18 @@ MAX_WAIT = 600
 
 
 # ─── адресация ───────────────────────────────────────────────────────────
-def seat_alloc(name):
-    """Живая аллокация сиденья. Путь к сокету НИКОГДА не кэшируем: после
-    рестарта сиденья меняется pid, а с ним и имя сокета."""
+def slave_alloc(name):
+    """Живая аллокация слейва. Путь к сокету НИКОГДА не кэшируем: после
+    рестарта слейва меняется pid, а с ним и имя сокета."""
     alloc = nomad.latest_alloc(name)
     if not alloc:
-        raise LookupError(f"{name}: нет аллокации — сиденье не размещено")
+        raise LookupError(f"{name}: нет аллокации — слейв не размещено")
     if alloc["ClientStatus"] != "running":
         raise LookupError(f"{name}: аллокация {alloc['ClientStatus']}, не running")
     return alloc
 
 
-def caller_socket():
+def master_socket():
     """Инбокс сессии, которая нас запустила, — для асинхронных уведомлений.
 
     Основной путь — переменная окружения, которую claude кладёт потомкам.
@@ -86,10 +86,10 @@ def caller_socket():
     return None
 
 
-def notify_caller(text):
-    """Положить сообщение в инбокс заказчика. Так фоновое ожидание превращается
+def notify_master(text):
+    """Положить сообщение в инбокс мастера. Так фоновое ожидание превращается
     в настоящий push: MCP сам ничего в ход модели вбросить не может."""
-    sock = caller_socket()
+    sock = master_socket()
     if not sock:
         return
     try:
@@ -100,18 +100,18 @@ def notify_caller(text):
 
 # ─── инструменты: канал ──────────────────────────────────────────────────
 @app.tool(annotations=READ_ONLY, description=(
-    "Кому можно писать: плееры пула по ВСЕМ узлам и сессии claude на этой "
+    "Кому можно писать: слейвы пула по ВСЕМ узлам и сессии claude на этой "
     "машине. Полнее встроенного ListAgents, который видит только этот хост. "
-    "Для плеера показывает достоверное состояние (свободен/занят/завис/нет "
+    "Для слейва показывает достоверное состояние (свободен/занят/завис/нет "
     "квоты/несохранённая работа в клоне), LLM-профиль и репозиторий."))
 def agents(project: str = "") -> str:
     rows = [("СИДЕНЬЕ", "УЗЕЛ", "АЛЛОК", "СОСТОЯНИЕ", "LLM", "РЕПОЗИТОРИЙ")]
-    for r in seats.seat_rows():
+    for r in slaves.slave_rows():
         if project and project not in r["origin"]:
             continue
         rows.append((r["name"], r["node"], r["alloc_status"], r["state"],
                      r["llm"], r["origin"]))
-    out = ["сиденья пула:", *table(rows)] if len(rows) > 1 else ["сиденья пула: нет"]
+    out = ["слейва пула:", *table(rows)] if len(rows) > 1 else ["слейва пула: нет"]
 
     local = [(d.get("name") or "-", str(d.get("pid")), d.get("status") or "-",
               d.get("cwd") or "-")
@@ -124,8 +124,8 @@ def agents(project: str = "") -> str:
 
 
 @app.tool(description=(
-    "Послать сообщение плееру пула или локальной сессии. ЕДИНСТВЕННЫЙ рабочий "
-    "способ достучаться до плеера: встроенный SendMessage дотягивается только до "
+    "Послать сообщение слейву пула или локальной сессии. ЕДИНСТВЕННЫЙ рабочий "
+    "способ достучаться до слейва: встроенный SendMessage дотягивается только до "
     "сессий этого же хоста и на соседнем узле молча никого не найдёт. Возвращает "
     "вердикт доставки, а не факт отправки. notify_when_idle=true не блокирует: "
     "когда адресат освободится, уведомление придёт отдельным сообщением."))
@@ -136,15 +136,15 @@ def send(to: str, message: str, priority: str = "next",
     if not message.strip():
         return "пустое сообщение отправлять нечего"
 
-    if to.startswith(seats.JOB_PREFIX):
-        return _send_to_seat(to, message, priority, notify_when_idle, wait_seconds)
+    if to.startswith(slaves.JOB_PREFIX):
+        return _send_to_slave(to, message, priority, notify_when_idle, wait_seconds)
     return _send_locally(to, message, priority, wait_seconds)
 
 
-def _send_to_seat(name, message, priority, notify_when_idle, wait_seconds):
-    alloc = seat_alloc(name)
+def _send_to_slave(name, message, priority, notify_when_idle, wait_seconds):
+    alloc = slave_alloc(name)
     wait = min(max(wait_seconds, 0), MAX_WAIT)
-    result = remote.send(alloc, seats.clone_dir(name), message, priority,
+    result = remote.send(alloc, slaves.clone_dir(name), message, priority,
                          wait=wait)
     if "error" in result:
         return f"{name}: НЕ ДОСТАВЛЕНО — {result['error']}"
@@ -159,15 +159,15 @@ def _send_to_seat(name, message, priority, notify_when_idle, wait_seconds):
 
 
 def _watch_idle(name):
-    """Фоновое ожидание простоя. Результат кладём в инбокс заказчика."""
+    """Фоновое ожидание простоя. Результат кладём в инбокс мастера."""
     try:
-        result = remote.send(seat_alloc(name), seats.clone_dir(name), "",
+        result = remote.send(slave_alloc(name), slaves.clone_dir(name), "",
                              wait=MAX_WAIT)
     except Exception as e:
-        notify_caller(f"orchestra: не смог дождаться простоя {name}: {e}")
+        notify_master(f"orchestra: не смог дождаться простоя {name}: {e}")
         return
     state = result.get("idle")
-    notify_caller(f"orchestra: сиденье {name} — {state}" if state
+    notify_master(f"orchestra: слейв {name} — {state}" if state
                   else f"orchestra: {name} не отчиталось о простое за {MAX_WAIT}с")
 
 
@@ -185,10 +185,10 @@ def _send_locally(target, message, priority, wait_seconds):
 
 
 @app.tool(annotations=READ_ONLY, description=(
-    "Хвост tmux-буфера сиденья — единственный способ увидеть то, чего нет в "
+    "Хвост tmux-буфера слейва — единственный способ увидеть то, чего нет в "
     "состоянии: held-диалог чужого сообщения, промпт логина, жалобу на квоту."))
 def tail(name: str, lines: int = 40, grep: str = "") -> str:
-    buf = seats.pane_lines(seat_alloc(name), name)
+    buf = slaves.pane_lines(slave_alloc(name), name)
     if grep:
         buf = [l for l in buf if grep.lower() in l.lower()]
     return "\n".join(buf[-max(1, lines):]) or "(пусто)"
@@ -196,10 +196,10 @@ def tail(name: str, lines: int = 40, grep: str = "") -> str:
 
 # ─── инструменты: управление ─────────────────────────────────────────────
 @app.tool(annotations=READ_ONLY, description=(
-    "Ёмкость пула: узлы, свободная память и сколько ещё сидений туда влезет."))
+    "Ёмкость пула: узлы, свободная память и сколько ещё слейвов туда влезет."))
 def pool() -> str:
     rows = [("УЗЕЛ", "СТАТУС", "СВОБОДНО", "СЛОТОВ")]
-    for n in seats.pool():
+    for n in slaves.pool():
         if n["status"] != "ready":
             rows.append((n["name"], n["status"], "-", "-"))
         elif "error" in n:
@@ -212,48 +212,48 @@ def pool() -> str:
 
 
 @app.tool(annotations=DESTRUCTIVE, description=(
-    "Управление сиденьями: add (создать), remove (удалить), restart "
+    "Управление слейвами: add (создать), remove (удалить), restart "
     "(перезапустить залипшее), retarget (сменить репозиторий или LLM). "
     "Клон при remove остаётся на узле и переиспользуется."))
-def seat(action: str, name: str = "", origin: str = "", llm: str = "") -> str:
+def slave(action: str, name: str = "", origin: str = "", llm: str = "") -> str:
     if action == "add":
-        return _seat_add(origin, llm)
+        return _slave_add(origin, llm)
     if not name:
-        return f"{action}: нужно имя сиденья"
+        return f"{action}: нужно имя слейва"
     if action == "remove":
         nomad.get_job(name)
         nomad.deregister(name)
-        return f"удалён {name} (клон остался в {seats.clone_dir(name)})"
+        return f"удалён {name} (клон остался в {slaves.clone_dir(name)})"
     if action == "restart":
-        nomad.alloc_restart(seat_alloc(name)["ID"])
+        nomad.alloc_restart(slave_alloc(name)["ID"])
         return f"{name}: перезапускается"
     if action == "retarget":
-        return _seat_retarget(name, origin, llm)
+        return _slave_retarget(name, origin, llm)
     return "action: add | remove | restart | retarget"
 
 
-def _seat_add(origin, llm):
+def _slave_add(origin, llm):
     if not origin:
         return "add: нужен origin репозитория"
-    llm = llm or seats.DEFAULT_LLM
-    if llm not in seats.LLM_PROFILES:
-        return f"нет LLM-профиля {llm}; есть: {', '.join(seats.LLM_PROFILES)}"
+    llm = llm or slaves.DEFAULT_LLM
+    if llm not in slaves.LLM_PROFILES:
+        return f"нет LLM-профиля {llm}; есть: {', '.join(slaves.LLM_PROFILES)}"
     keys.push_llm_keys(llm)
-    name = seats.next_name(os.path.basename(origin).removesuffix(".git"))
-    nomad.register(seats.job_spec(name, origin, llm))
+    name = slaves.next_name(os.path.basename(origin).removesuffix(".git"))
+    nomad.register(slaves.job_spec(name, origin, llm))
     return f"{name}: {origin} [{llm}] — размещается, состояние смотри в agents"
 
 
-def _seat_retarget(name, origin, llm):
+def _slave_retarget(name, origin, llm):
     meta = nomad.get_job(name).get("Meta") or {}
     origin = origin or meta.get("origin")
     # профиль без явного llm сохраняется: смена репозитория не должна молча
-    # ронять сиденье обратно на claude
-    llm = llm or meta.get("llm", seats.DEFAULT_LLM)
-    if llm not in seats.LLM_PROFILES:
-        return f"нет LLM-профиля {llm}; есть: {', '.join(seats.LLM_PROFILES)}"
+    # ронять слейв обратно на claude
+    llm = llm or meta.get("llm", slaves.DEFAULT_LLM)
+    if llm not in slaves.LLM_PROFILES:
+        return f"нет LLM-профиля {llm}; есть: {', '.join(slaves.LLM_PROFILES)}"
     keys.push_llm_keys(llm)
-    nomad.register(seats.job_spec(name, origin, llm))
+    nomad.register(slaves.job_spec(name, origin, llm))
     return f"{name} -> {origin} [{llm}], перезапускается"
 
 
@@ -261,7 +261,7 @@ def _seat_retarget(name, origin, llm):
     "Диагностика пула: залипания, протухший логин, restart-backoff, "
     "исчерпанная квота модели. С fix=true лечит то, что лечится."))
 def doctor(fix: bool = False) -> str:
-    issues = seats.diagnose()
+    issues = slaves.diagnose()
     if not issues:
         return "пул здоров: залипаний нет"
     rows = [(i["name"], i["alloc"]["NodeName"] if i["alloc"] else "-",
@@ -286,8 +286,8 @@ def _treat(issue):
             nomad.alloc_stop(alloc["ID"])
             return "alloc stop — Nomad пересоздаст без backoff"
         if action == "model":
-            seats.switch_model(alloc, name, seats.FALLBACK_MODEL)
-            return f"/model {seats.FALLBACK_MODEL}"
+            slaves.switch_model(alloc, name, slaves.FALLBACK_MODEL)
+            return f"/model {slaves.FALLBACK_MODEL}"
         nomad.alloc_restart(alloc["ID"])
         return "restart"
     except Exception as e:
@@ -295,22 +295,22 @@ def _treat(issue):
 
 
 @app.tool(annotations=DESTRUCTIVE, description=(
-    "Слэш-команда в TUI сиденья. Нужна отдельно, потому что каналом слэш-"
+    "Слэш-команда в TUI слейва. Нужна отдельно, потому что каналом слэш-"
     "команды не проходят: сообщение кладётся в очередь с skipSlashCommands. "
     f"Разрешены: {', '.join(SLASH_ALLOWED)}."))
 def slash(name: str, command: str) -> str:
     if not command.split()[0:1] or command.split()[0] not in SLASH_ALLOWED:
         return f"разрешены только: {', '.join(SLASH_ALLOWED)}"
-    alloc = seat_alloc(name)
+    alloc = slave_alloc(name)
     if command.startswith("/model "):
-        seats.switch_model(alloc, name, command.split(None, 1)[1])
+        slaves.switch_model(alloc, name, command.split(None, 1)[1])
         return f"{name}: {command}"
-    return f"{name}: {command}\n{seats.type_command(alloc, name, command)[-1500:]}"
+    return f"{name}: {command}\n{slaves.type_command(alloc, name, command)[-1500:]}"
 
 
 @app.tool(annotations=DESTRUCTIVE, description=(
     "Раздать на узлы пула креды claude.ai и ключи LLM-провайдеров. Лечит "
-    "сиденья, упёршиеся в протухший логин."))
+    "слейва, упёршиеся в протухший логин."))
 def login() -> str:
     results, what, note = keys.push_login()
     out = [("везу: " + " + ".join(what))] + ([note] if note else [])
@@ -321,7 +321,7 @@ def main():
     # attach остаётся вне MCP: живой терминал инструментом не отдать.
     if "--check" in sys.argv:
         print(f"orchestra-mcp: {len(app._tool_manager.list_tools())} инструментов, "
-              f"инбокс заказчика: {caller_socket() or 'не найден'}")
+              f"инбокс мастера: {master_socket() or 'не найден'}")
         return 0
     app.run("stdio")
     return 0

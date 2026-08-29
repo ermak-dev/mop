@@ -1,23 +1,23 @@
 #!/bin/bash
-# Worker-pool disk sweep (nomad job wk-cleanup, sysbatch+periodic).
+# Slave-pool disk sweep (nomad job sl-cleanup, sysbatch+periodic).
 #
 # Three tiers, cheapest first, mirroring the classes in ~/bin/cleanup:
 #
-#   orphans     — a live worker == a live tmux session named after its job: the
-#                 wrapper in ~/bin/worker dies with its tmux session, and a
+#   orphans     — a live slave == a live tmux session named after its job: the
+#                 wrapper in ~/bin/slave dies with its tmux session, and a
 #                 stopped/moved job takes the session down with it. So any
 #                 ~/wk/<name> or ~/.cache/target-<name> without an
-#                 exactly-matching tmux session is an orphan: a deleted worker's
-#                 leftovers (worker delete keeps them on purpose) or the trail of
+#                 exactly-matching tmux session is an orphan: a deleted slave's
+#                 leftovers (slave delete keeps them on purpose) or the trail of
 #                 one that moved to another node. Cheap to re-create, so the rare
-#                 race with a worker restarting at sweep time costs a re-clone.
+#                 race with a slave restarting at sweep time costs a re-clone.
 #                 Swept unconditionally.
 #   stale       — paths nothing references any more, age-gated. These are what a
 #                 glob-driven sweep misses: $HOME/cache is rugent's pre-#627
 #                 CARGO_TARGET_DIR, retired 2026-08-20, and matches neither
-#                 ~/wk/wk-* nor ~/.cache/target-wk-*. It still held 59 GB on
+#                 ~/slaves/sl-* nor ~/.cache/target-sl-*. It still held 59 GB on
 #                 gamer on 2026-08-28, four days after the last write.
-#   size-capped — LIVE workers' target dirs, trimmed by cargo-sweep, and only
+#   size-capped — LIVE slaves' target dirs, trimmed by cargo-sweep, and only
 #                 under space pressure. Not age-gated: cargo rewrites
 #                 fingerprints on every build, so an active target dir never
 #                 looks old (see the measurement in ~/bin/cleanup). Swept while
@@ -48,7 +48,7 @@
 # --set-sparse true` for the existing one, `[experimental] sparseVhd=true` in
 # .wslconfig for any new one -- both of which need the distro stopped. Until
 # that is done, this sweep buys room inside the guest (which is what stops a
-# worker's build failing) but the guest's footprint on C: only ratchets up, and
+# slave's build failing) but the guest's footprint on C: only ratchets up, and
 # C: is what actually stopped this node.
 #
 # Env knobs (set in the nomad job spec):
@@ -81,9 +81,9 @@ note() { printf '  %-46s %10s\n' "$1" "$2"; }
 
 freed_kb=0
 
-# A live worker == a live session on ITS OWN tmux server: each worker runs
+# A live slave == a live session on ITS OWN tmux server: each slave runs
 # `tmux -L <job>` since the shared-server cgroup OOM incident.
-live_worker() { tmux -L "$1" has-session -t "=$1" 2>/dev/null; }
+live_player() { tmux -L "$1" has-session -t "=$1" 2>/dev/null; }
 
 # Free GB on the filesystem holding $1. Both ext4 and the 9p /mnt/c answer this.
 free_gb() { df -BG --output=avail "$1" 2>/dev/null | awk 'NR==2{print $1+0}'; }
@@ -122,7 +122,7 @@ rm_path() {
     note "$label" "$(hr "$kb")"
     freed_kb=$((freed_kb + kb))
     [ -n "$DRY" ] && return 0
-    # Worker clones are ermak's, but anything a container wrote into a cache is
+    # Slave clones are ermak's, but anything a container wrote into a cache is
     # root's; ermak cannot unlink those. `sudo -n` never prompts, and where it
     # is not permitted this fails exactly as it did before.
     rm -rf "$path" 2>/dev/null || sudo -n rm -rf "$path" 2>/dev/null
@@ -142,37 +142,45 @@ report_space
 echo
 
 # --------------------------------------------------------------------------
-# Tier 1 -- orphaned worker clones and target dirs. Always.
+# Tier 1 -- orphaned slave clones and target dirs. Always.
 # --------------------------------------------------------------------------
 # Two sanity gates before anything is deleted. Both exist because "no live tmux
 # session" is only evidence of an orphan when tmux could have answered at all --
 # and on 2026-08-28 mirror spent nine minutes in a state where it could not:
 # the box was hard-reset, /home/ermak is ecryptfs and comes back UNMOUNTED, and
-# the workers only start once someone logs in with a password. A sweep landing
+# the slaves only start once someone logs in with a password. A sweep landing
 # in that window would have seen every clone with no session and deleted the lot.
 # Nightly, that window was a rounding error; hourly it is a real exposure.
 #
 # Gate 1: an unmounted ecryptfs home is not an empty home. It presents a
 # placeholder (Access-Your-Private-Data.desktop / README.txt) instead of the
-# real tree, so ~/wk is simply absent and every glob below silently matches
+# real tree, so ~/slaves is simply absent and every glob below silently matches
 # nothing. Harmless today, but bail loudly rather than report a clean sweep of
 # a filesystem we never actually looked at.
-if [ -e "$HOME/Access-Your-Private-Data.desktop" ] || [ ! -d "$HOME/wk" ]; then
-    echo "  ! \$HOME has no wk/ (unmounted ecryptfs?) -- refusing to sweep" >&2
+# Два корня клонов и два корня target-ов. Второй в каждой паре -- наследство
+# переименования slave -> slave (2026-08-29): в ~/wk остались клоны прежнего
+# пула, часть из них с НЕсохранённой работой, и сторож обязан продолжать их
+# видеть. Убрать legacy-глоб можно будет, когда ~/wk опустеет.
+CLONE_GLOBS=("$HOME"/slaves/sl-* "$HOME"/wk/wk-*)
+TARGET_GLOBS=("$HOME"/.cache/target-sl-* "$HOME"/.cache/target-wk-*)
+
+if [ -e "$HOME/Access-Your-Private-Data.desktop" ] \
+    || { [ ! -d "$HOME/slaves" ] && [ ! -d "$HOME/wk" ]; }; then
+    echo "  ! \$HOME has no slaves/ (unmounted ecryptfs?) -- refusing to sweep" >&2
     report_space
     exit 0
 fi
 
 # Gate 2: clones exist but NOT ONE has a live tmux server. On a node that hosts
-# seats that is not a pile of orphans, it is tmux being unreachable -- the node
+# slaves that is not a pile of orphans, it is tmux being unreachable -- the node
 # just booted, or this task cannot see /tmp/tmux-$(id -u). Deleting every clone
 # on the node is never the right answer to that, and a genuine all-orphans node
 # is rare enough to do by hand.
 clones=0; live=0
-for d in "$HOME"/wk/wk-*; do
+for d in "${CLONE_GLOBS[@]}"; do
     [ -d "$d" ] || continue
     clones=$((clones + 1))
-    live_worker "$(basename "$d")" && live=$((live + 1))
+    live_player "$(basename "$d")" && live=$((live + 1))
 done
 if [ "$clones" -gt 0 ] && [ "$live" -eq 0 ]; then
     echo "  ! $clones clone(s), 0 live tmux servers -- tmux unreachable, not $clones orphans" >&2
@@ -180,20 +188,20 @@ if [ "$clones" -gt 0 ] && [ "$live" -eq 0 ]; then
     SKIP_TIER1=1
 fi
 
-echo "tier 1: orphaned worker dirs ($live/$clones seats live)"
+echo "tier 1: orphaned slave dirs ($live/$clones slaves live)"
 [ -n "${SKIP_TIER1:-}" ] && echo "  skipped (see warning above)"
-for d in "$HOME"/wk/wk-*; do
+for d in "${CLONE_GLOBS[@]}"; do
     [ -n "${SKIP_TIER1:-}" ] && break
     [ -d "$d" ] || continue
     n=$(basename "$d")
-    live_worker "$n" && continue
+    live_player "$n" && continue
     rm_path "$d" "orphaned clone $n"
 done
-for t in "$HOME"/.cache/target-wk-*; do
+for t in "${TARGET_GLOBS[@]}"; do
     [ -n "${SKIP_TIER1:-}" ] && break
     [ -d "$t" ] || continue
     n=${t##*/target-}
-    live_worker "$n" && continue
+    live_player "$n" && continue
     rm_path "$t" "orphaned target $n"
 done
 
@@ -202,7 +210,7 @@ done
 # --------------------------------------------------------------------------
 echo "tier 2: retired paths idle > ${STALE_DAYS}d"
 # $HOME/cache: rugent's CARGO_TARGET_DIR before #627 moved it to
-# ~/.cache/target-<worker>. Left behind on every node that built there.
+# ~/.cache/target-<slave>. Left behind on every node that built there.
 for stale in "$HOME/cache"; do
     [ -d "$stale" ] || continue
     if has_recent "$stale" "$STALE_DAYS"; then
@@ -213,7 +221,7 @@ for stale in "$HOME/cache"; do
 done
 
 # --------------------------------------------------------------------------
-# Tier 3 -- size-cap LIVE workers' target dirs, only under pressure.
+# Tier 3 -- size-cap LIVE slaves' target dirs, only under pressure.
 # --------------------------------------------------------------------------
 avail=$(pressure_gb)
 if [ "$avail" -ge "$FREE_MIN_GB" ]; then
@@ -221,7 +229,7 @@ if [ "$avail" -ge "$FREE_MIN_GB" ]; then
 else
     echo "tier 3: ${avail} GB free < ${FREE_MIN_GB} GB -- capping live target dirs at ${MAX_TARGET}"
     live_targets=()
-    for t in "$HOME"/.cache/target-wk-*; do
+    for t in "${TARGET_GLOBS[@]}"; do
         [ -d "$t" ] || continue
         live_targets+=("$t")
     done
@@ -288,7 +296,7 @@ while os.getppid() != 1:
             # incremental/ first: cargo-sweep weighs only the artifacts
             # `cargo metadata` knows about, so it walks straight past this one
             # -- on mirror it held 62 GB that a 304 GiB sweep left sitting
-            # there, and on gamer 46 GB across three live workers on
+            # there, and on gamer 46 GB across three live slaves on
             # 2026-08-28. Regenerable at any age: every run builds a different
             # commit and cargo never reuses a byte of it.
             for inc in "$t"/*/incremental; do

@@ -22,7 +22,7 @@ client {
   servers = ["192.168.1.66:4647"]
 {% if (nomad_reserved_mb | default({})).get(inventory_hostname, 0) %}
   # Memory carved out for the host's other tenants (gitlab runners on mirror):
-  # the scheduler treats it as non-allocatable, capping the worker pool at
+  # the scheduler treats it as non-allocatable, capping the slave pool at
   # fingerprinted total minus this value.
   reserved {
     memory = {{ nomad_reserved_mb[inventory_hostname] }}

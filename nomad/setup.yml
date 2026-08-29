@@ -1,15 +1,15 @@
 ---
-# Nomad: the worker-pool dispatcher.
+# Nomad: the slave-pool dispatcher.
 #
 # One server on the git box (always-on, reachable from everywhere), clients on
-# every machine that hosts claude workers. Clients dial the server on RPC 4647
+# every machine that hosts claude slaves. Clients dial the server on RPC 4647
 # -- outbound only, so CGNAT and WSL NAT never matter. The HTTP API (4646)
 # binds to loopback on git and is published through the GitLab embedded nginx
 # as https://nomad.ermak.dev, same as the other vhosts in ~/nginx/vhosts.conf.
 #
 # ACL is on: the API refuses anonymous calls. The bootstrap (management) token
 # is minted once, kept in /home/ermak/nomad/bootstrap.json on git, and fetched
-# to ~/.config/nomad/bootstrap.json on the control machine for the worker CLI.
+# to ~/.config/nomad/bootstrap.json on the control machine for the slave CLI.
 #
 # The binary comes from the Yandex Cloud mirror of releases.hashicorp.com,
 # which is unreachable from RU addresses.
@@ -145,32 +145,32 @@
       command: gitlab-ctl hup nginx
       when: vhost.changed
 
-    # --- the nightly disk sweep job (see wk-cleanup.nomad.hcl) ------------
-    - name: Deploy the wk-cleanup job spec
+    # --- the nightly disk sweep job (see sl-cleanup.nomad.hcl) ------------
+    - name: Deploy the sl-cleanup job spec
       copy:
-        src: wk-cleanup.nomad.hcl
-        dest: "{{ nomad_home }}/wk-cleanup.nomad.hcl"
+        src: sl-cleanup.nomad.hcl
+        dest: "{{ nomad_home }}/sl-cleanup.nomad.hcl"
         mode: '0644'
       register: cleanup_spec
 
-    - name: Check the wk-cleanup job is registered
+    - name: Check the sl-cleanup job is registered
       shell: >
         NOMAD_ADDR=http://127.0.0.1:4646
         NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
-        /usr/local/bin/nomad job status wk-cleanup
+        /usr/local/bin/nomad job status sl-cleanup
       register: cleanup_status
       failed_when: false
       changed_when: false
 
-    - name: Register the wk-cleanup job
+    - name: Register the sl-cleanup job
       shell: >
         NOMAD_ADDR=http://127.0.0.1:4646
         NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
-        /usr/local/bin/nomad job run {{ nomad_home }}/wk-cleanup.nomad.hcl
+        /usr/local/bin/nomad job run {{ nomad_home }}/sl-cleanup.nomad.hcl
       when: cleanup_spec.changed or cleanup_status.rc != 0
 
 
-- name: Nomad clients on the worker machines
+- name: Nomad clients on the slave machines
   hosts: nomad_clients
   become: yes
   gather_facts: no
@@ -181,22 +181,22 @@
     nextest_version: 0.9.98
     # Per-host memory reserved for non-pool tenants. mirror fingerprints
     # 66626 MB and also runs the gitlab runners: 66626 - 33602 caps the
-    # worker pool at 32 GB plus 256 MB of placement headroom.
+    # slave pool at 32 GB plus 256 MB of placement headroom.
     #
     # The headroom is not slack, it is what keeps the schedule unwedged. This
-    # was 33858 -- exactly 32 GB for the pool -- and four 8 GiB workers filled
-    # it to the byte, so the 128 MB wk-cleanup task could not place on mirror at
+    # was 33858 -- exactly 32 GB for the pool -- and four 8 GiB slaves filled
+    # it to the byte, so the 128 MB sl-cleanup task could not place on mirror at
     # all. A sysbatch child stays `pending` until it places on EVERY eligible
     # node, and prohibit_overlap blocks each following run behind it, so on
     # 2026-08-28 the 26 Aug sweep was still pending and the 27th and 28th had
-    # never launched. Anything below one worker's 8 GiB cannot cost the pool a
-    # worker; it can only cost it the sweep.
+    # never launched. Anything below one slave's 8 GiB cannot cost the pool a
+    # slave; it can only cost it the sweep.
     nomad_reserved_mb:
       mirror: 33602
-    # Project env files a fresh clone cannot invent: the worker wrapper copies
-    # these from ~/wk-env/<project>/ into every clone it creates, the same way
+    # Project env files a fresh clone cannot invent: the slave wrapper copies
+    # these from ~/slave-env/<project>/ into every clone it creates, the same way
     # ~/bin/code seeds worktrees on mate. Sources live on the control machine.
-    wk_env_files:
+    slave_env_files:
       - {project: rugent, file: ~/rugent/.env}
       - {project: rugent, file: ~/rugent/.env-prod}
       - {project: rugent, file: ~/rugent/.providers}
@@ -207,7 +207,7 @@
     # cmake: cloudpub's libz-ng-sys builds zlib-ng with it; the gtk/webkit dev
     # set: cloudpub's workspace includes a Tauri gui crate, and `clo test
     # --rust` builds the whole graph.
-    - name: Ensure worker toolchain packages
+    - name: Ensure slave toolchain packages
       apt:
         name:
           - unzip
@@ -252,13 +252,13 @@
         mode: '0755'
         creates: /home/ermak/.cargo/bin/cargo-nextest
 
-    # cargo-sweep: the size cap wk-sweep applies to a LIVE worker's target dir.
+    # cargo-sweep: the size cap sl-sweep applies to a LIVE slave's target dir.
     # An age gate cannot stand in for it -- cargo rewrites fingerprints on every
     # build, so an actively built target dir never looks old (0 of 34,509 files
     # older than 3 days in a 48 GB dir; see ~/bin/cleanup). Built from source
     # rather than pinned to a release tarball: cargo-sweep ships no linux-gnu
     # binary in its releases, and it compiles in about half a minute.
-    - name: Install cargo-sweep (size cap for wk-sweep tier 3)
+    - name: Install cargo-sweep (size cap for sl-sweep tier 3)
       command: /home/ermak/.cargo/bin/cargo install cargo-sweep --locked
       become_user: ermak
       args:
@@ -327,7 +327,7 @@
 
     # node for cloudpub's frontend/e2e test sets, per BUILD.md: nvm + 22.12.0 (BUILD.md says 22.11.0, but server/Dockerfile pins
     # NODE_VERSION=22.12.0 and vite refuses anything older).
-    # Per-user install under ermak -- the same account the workers run as.
+    # Per-user install under ermak -- the same account the slaves run as.
     - name: Install nvm for ermak
       become_user: ermak
       shell: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
@@ -348,23 +348,23 @@
         creates: /home/ermak/.nvm/versions/node/v22.12.0/bin/yarn
         executable: /bin/bash
 
-    - name: Create wk-env project dirs
+    - name: Create slave-env project dirs
       file:
-        path: "/home/ermak/wk-env/{{ item }}"
+        path: "/home/ermak/slave-env/{{ item }}"
         state: directory
         owner: ermak
         group: ermak
         mode: '0700'
-      loop: "{{ wk_env_files | map(attribute='project') | unique }}"
+      loop: "{{ slave_env_files | map(attribute='project') | unique }}"
 
     - name: Distribute project env files
       copy:
         src: "{{ item.file }}"
-        dest: "/home/ermak/wk-env/{{ item.project }}/"
+        dest: "/home/ermak/slave-env/{{ item.project }}/"
         owner: ermak
         group: ermak
         mode: '0600'
-      loop: "{{ wk_env_files }}"
+      loop: "{{ slave_env_files }}"
 
     - name: Nomad agent
       ansible.builtin.include_tasks: client-agent.yml
@@ -372,10 +372,10 @@
 # Управляющая машина в кластере.
 #
 # mate вывели из пула 2026-08-25 как рабочий узел -- и рабочим узлом она не
-# становится обратно: датацентр здесь `control`, а джобы плееров объявляют
+# становится обратно: датацентр здесь `control`, а джобы слейвов объявляют
 # `home`, так что планировщик их сюда не поставит. Толк от членства другой:
 # `alloc exec` работает только внутрь аллокаций, и пока на управляющей машине
-# не было ни одной, сиденье не могло дотянуться до инбокса PM -- он живёт
+# не было ни одной, слейв не мог дотянуться до инбокса мастера -- он живёт
 # именно тут. Теперь может, через аллокацию в датацентре control.
 - name: Nomad client on the control machine
   hosts: nomad_control

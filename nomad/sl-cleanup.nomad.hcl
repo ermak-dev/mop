@@ -1,7 +1,7 @@
 # Disk watchdog on every pool node: sysbatch puts one instance on each eligible
 # client, periodic runs it by cron. New nodes join the schedule the moment they
 # join the cluster. The script itself is distributed by ansible (nomad/setup.yml)
-# to /usr/local/bin/wk-sweep.
+# to /usr/local/bin/sl-sweep.
 #
 # Hourly, not nightly. It was nightly until 2026-08-28, when gamer filled its
 # Windows C: drive between two runs, WSL stopped booting
@@ -15,7 +15,7 @@
 # prohibit_overlap then blocks each following run. One unreachable node stopped
 # mirror being swept too. Placement headroom is therefore part of the design --
 # see nomad_reserved_mb in setup.yml.
-job "wk-cleanup" {
+job "sl-cleanup" {
   datacenters = ["home"]
   type        = "sysbatch"
 
@@ -31,7 +31,7 @@ job "wk-cleanup" {
       user   = "ermak"
 
       config {
-        command = "/usr/local/bin/wk-sweep"
+        command = "/usr/local/bin/sl-sweep"
       }
 
       env {

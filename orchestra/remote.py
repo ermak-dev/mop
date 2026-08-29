@@ -1,6 +1,6 @@
 """Исполнение orchestra/session.py внутри аллокации Nomad.
 
-Сокет сессии host-local: с управляющей машины к сиденью не подключиться, так
+Сокет сессии host-local: с управляющей машины к слейву не подключиться, так
 что и пробник, и отправитель должны работать НА УЗЛЕ.
 
 Почему модуль ставится на узел, а не возится в каждой команде: команда exec
@@ -82,7 +82,7 @@ def probe(alloc, cwd):
 
 
 def send(alloc, cwd, message, priority="next", from_name="orchestra", wait=0):
-    """Сообщение сессии сиденья. -> ответ отправителя (msg_id/idle либо error)."""
+    """Сообщение сессии слейва. -> ответ отправителя (msg_id/idle либо error)."""
     argv = ["send", cwd, message, "--priority", priority,
             "--from-name", from_name, "--wait", str(wait)]
     out, _ = run(alloc, argv, timeout=wait + 30 if wait else 30)

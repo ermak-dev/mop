@@ -1,17 +1,17 @@
 # orchestra
 
-Пул claude-плееров поверх Nomad: как он разворачивается, чем управляется и как
-с сиденьями разговаривать.
+Пул claude-слейвов поверх Nomad: как он разворачивается, чем управляется и как
+с слейвами разговаривать.
 
 ```
 orchestra/         библиотека: всё знание о пуле, возвращает данные и не печатает
   nomad.py           связь с Nomad, exec внутрь аллокации
-  seats.py           спека job'а, LLM-профили, состояние сиденья, диагностика
+  slaves.py           спека job'а, LLM-профили, состояние слейва, диагностика
   session.py         файлы сессий claude и протокол канала (standalone: ездит на узлы)
   remote.py          запуск session.py внутри аллокации
   keys.py            раздача кредов и ключей провайдеров на узлы
   render.py          таблицы
-bin/player         CLI пула: add/list/delete/change/restart/attach/tail/doctor/login/llm
+bin/slave         CLI пула: add/list/delete/change/restart/attach/tail/doctor/login/llm
 bin/cc-send        послать сообщение в живую сессию claude code
 bin/orchestra-mcp  MCP-сервер: тот же пул как инструменты для claude
 nomad/             ansible-плейбуки и конфиги: сам Nomad, узлы, уборка диска
@@ -24,14 +24,14 @@ MCP-сервер начал бы разбирать текст, свёрстан
 
 ## Как это связано
 
-`player` ходит в Nomad по REST (`https://nomad.ermak.dev`), а команды внутри
-аллокаций гоняет через exec-websocket; ssh нужен только для `player attach`,
+`slave` ходит в Nomad по REST (`https://nomad.ermak.dev`), а команды внутри
+аллокаций гоняет через exec-websocket; ssh нужен только для `slave attach`,
 ради живого терминала. Токен берётся из `$NOMAD_TOKEN` или
 `~/.config/nomad/bootstrap.json`.
 
-Каждое сиденье — это job Nomad, чей врапер доводит узел до состояния «клон
+Каждое слейв — это job Nomad, чей врапер доводит узел до состояния «клон
 есть, claude живёт в tmux» и держится, пока жива tmux-сессия. Смерть врапера =
-рестарт или переезд сиденья силами Nomad.
+рестарт или переезд слейва силами Nomad.
 
 ## Симлинки наружу
 
@@ -39,7 +39,7 @@ MCP-сервер начал бы разбирать текст, свёрстан
 это интерфейсы, которые нельзя переименовать:
 
 ```
-~/bin/player    -> ../orchestra/bin/player
+~/bin/slave    -> ../orchestra/bin/slave
 ~/bin/cc-send   -> ../orchestra/bin/cc-send
 ~/etc/nomad     -> ../orchestra/nomad
 ```
@@ -53,9 +53,9 @@ MCP-сервер начал бы разбирать текст, свёрстан
 
 * `~/etc/inventory.ini` — инвентарь ansible, общий с остальными плейбуками
   (живёт в репозитории backup, сюда не переезжает).
-* `~/.ssh/ai-provider-keys.env` — ключи LLM-провайдеров; `player` вывозит на
+* `~/.ssh/ai-provider-keys.env` — ключи LLM-провайдеров; `slave` вывозит на
   узлы только те, что называет хоть один профиль в `LLM_PROFILES`.
-* `~/.claude/.credentials.json` — логин claude.ai, который `player login`
+* `~/.claude/.credentials.json` — логин claude.ai, который `slave login`
   раздаёт на узлы пула.
 
 ## Запуск плейбуков

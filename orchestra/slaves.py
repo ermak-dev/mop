@@ -1,7 +1,7 @@
-"""Сиденья пула: спека job'а, LLM-профили и достоверное состояние места.
+"""Слейвы пула: спека job'а, LLM-профили и достоверное состояние места.
 
 Модуль ВОЗВРАЩАЕТ ДАННЫЕ и ничего не печатает. Форматирование живёт во
-фронтендах (bin/player печатает таблицы, bin/orchestra-mcp отдаёт то же самое
+фронтендах (bin/slave печатает таблицы, bin/orchestra-mcp отдаёт то же самое
 модели) — иначе второй фронтенд неизбежно начал бы разбирать чужой текст.
 """
 import base64
@@ -10,19 +10,19 @@ import re
 
 from . import nomad, remote
 
-MEM = 8192                          # бюджет плеера, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
+MEM = 8192                          # бюджет слейва, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
 HOME = "/home/ermak"                # $HOME на узлах пула
 SSH_ALIAS = {"gamer": "gamer-wsl"}  # имя узла nomad -> ssh-алиас
-# Куда переводить сиденье, у которого кончилась квота текущей модели
+# Куда переводить слейв, у которого кончилась квота текущей модели
 # (решение оператора 27.08: Fable → Opus).
 FALLBACK_MODEL = "opus"
-JOB_PREFIX = "wk-"
+JOB_PREFIX = "sl-"
 
 # ─── LLM-профили ─────────────────────────────────────────────────────────
-# Сиденье — всегда claude code; профиль меняет ровно одно: КУДА он ходит за
+# Слейв — всегда claude code; профиль меняет ровно одно: КУДА он ходит за
 # токенами. Anthropic-совместимый эндпоинт провайдера (ANTHROPIC_BASE_URL),
 # ключ (ANTHROPIC_AUTH_TOKEN) и карта имён моделей opus/sonnet/haiku в модели
-# провайдера — больше в сиденье ничего не меняется, поэтому tmux, tail, doctor
+# провайдера — больше в слейв ничего не меняется, поэтому tmux, tail, doctor
 # и детект залипаний работают одинаково для любого профиля.
 #
 # "key" — ИМЯ переменной в ~/.ssh/ai-provider-keys.env (локальный источник
@@ -31,7 +31,7 @@ JOB_PREFIX = "wk-"
 # ~/.config/orchestra/llm-keys.env (только с теми ключами, которые называет хоть
 # один профиль), а врапер уже на узле подставляет нужный в сессию.
 LLM_PROFILES = {
-    # штатный Claude: авторизация — логин claude.ai (player login), env пустой
+    # штатный Claude: авторизация — логин claude.ai (slave login), env пустой
     "claude": {"key": None, "env": {}},
     # z.ai GLM coding plan, https://docs.z.ai/devpack/tool/claude
     "glm": {
@@ -57,37 +57,37 @@ LLM_KEYS_FILE = f"{HOME}/.config/orchestra/llm-keys.env"  # копия на уз
 
 # Врапер — собственно задача Nomad: довести узел до "клон есть, claude в
 # tmux" и жить, пока жива tmux-сессия. Смерть врапера = рестарт/переезд
-# плеера силами Nomad; на новом узле врапер сам разворачивает всё заново.
+# слейва силами Nomad; на новом узле врапер сам разворачивает всё заново.
 WRAPPER = r"""
 set -e
-d="$HOME/wk/$WK_NAME"
-if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" != "$WK_ORIGIN" ]; then
+d="$HOME/slaves/$SL_NAME"
+if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" != "$SL_ORIGIN" ]; then
     rm -rf "$d"
 fi
 if [ ! -d "$d/.git" ]; then
-    mkdir -p "$HOME/wk"
-    git clone -q "$WK_ORIGIN" "$d"
+    mkdir -p "$HOME/slaves"
+    git clone -q "$SL_ORIGIN" "$d"
 fi
-for f in "$HOME/wk-env/$WK_PROJECT"/.env* "$HOME/wk-env/$WK_PROJECT"/.providers; do
+for f in "$HOME/slave-env/$SL_PROJECT"/.env* "$HOME/slave-env/$SL_PROJECT"/.providers; do
     [ -e "$f" ] && cp -a "$f" "$d/" || true
 done
 mkdir -p "$HOME/.claude"
-# ~/.claude.json and ~/.claude/settings.json are NODE-level: every seat on the
-# host edits the same two files, and seats boot together after a node restart.
+# ~/.claude.json and ~/.claude/settings.json are NODE-level: every slave on the
+# host edits the same two files, and slaves boot together after a node restart.
 # Read-modify-write from N processes through one shared temp path truncated the
 # config to 0 bytes three times (2026-08-26/27/28), which parks every claude on
 # the "invalid JSON" prompt and reads as a hung pool. So: one lock for the whole
-# edit, a temp file per seat, and a repair pass for whatever a previous race
+# edit, a temp file per slave, and a repair pass for whatever a previous race
 # (or a hard VM kill) left behind.
 edit_json() {  # <file> <jq-program> [jq-args...]
     local file="$1" program="$2"; shift 2
-    local tmp="$file.$WK_NAME.tmp"
+    local tmp="$file.$SL_NAME.tmp"
     exec 9>"$file.lock"
     flock 9
     # `jq empty` is NOT a validity check: a zero-byte file is an empty jq input
     # stream, so it exits 0, every filter over it yields nothing, and the 0-byte
-    # config got written straight back (gamer, 2026-08-28 — all six seats parked
-    # on the config prompt while `player list` showed only "ЗАВИС"). Demand an
+    # config got written straight back (gamer, 2026-08-28 — all six slaves parked
+    # on the config prompt while `slave list` showed only "ЗАВИС"). Demand an
     # actual object, and never install an empty result.
     jq -e 'type == "object"' "$file" >/dev/null 2>&1 || echo '{}' > "$file"
     if jq "$@" "$program" "$file" > "$tmp" && [ -s "$tmp" ]; then
@@ -99,17 +99,17 @@ edit_json() {  # <file> <jq-program> [jq-args...]
     exec 9>&-
 }
 [ -f "$HOME/.claude.json" ] || echo '{}' > "$HOME/.claude.json"
-# A seat has no human to answer the first-run wizard: without these keys every
-# claude sits on the theme prompt, which also reads as a hung seat.
+# A slave has no human to answer the first-run wizard: without these keys every
+# claude sits on the theme prompt, which also reads as a hung slave.
 edit_json "$HOME/.claude.json" '.projects[$d].hasTrustDialogAccepted = true
     | .hasCompletedOnboarding = true
     | .theme = (.theme // "dark")' --arg d "$d"
 # Desktop-automation MCP servers: win-mcp (Windows host pwate) and mac-mcp (mac
-# host), so a seat can drive and verify the GUI clients. HTTP transport, so any
+# host), so a slave can drive and verify the GUI clients. HTTP transport, so any
 # node that can resolve/reach the hosts gets them; a node that cannot just sees
 # the server fail to connect.
 # windows-mcp runs on the Windows host (gamer) bound to 0.0.0.0:8000. Off-host
-# seats reach it by the host's LAN IP; a seat running IN the gamer host's own
+# slaves reach it by the host's LAN IP; a slave running IN the gamer host's own
 # mirrored-mode WSL shares that LAN IP, where the Windows bind is only reachable
 # via loopback - so it must use 127.0.0.1 instead.
 if ip -4 -o addr show 2>/dev/null | grep -q '192.168.1.151'; then
@@ -123,11 +123,11 @@ edit_json "$HOME/.claude.json" '.mcpServers["windows-mcp"] = {"type":"http","url
   | .mcpServers["orchestra"] = {"type":"stdio","command":"/home/ermak/orchestra/bin/orchestra-mcp"}' \
     --arg winurl "$WINURL"
 # playwright-mcp needs a browser on the node; install is idempotent and cached
-# in ~/.cache/ms-playwright, so every seat boot just confirms it is there.
+# in ~/.cache/ms-playwright, so every slave boot just confirms it is there.
 npx -y playwright install chromium >/dev/null 2>&1 || true
 # Same repair as above, and for the same reason: an existing-but-unreadable
 # file (0 bytes after a torn write) made jq fail silently, so the bypass-mode
-# prompt came back and every seat stopped on it.
+# prompt came back and every slave stopped on it.
 [ -f "$HOME/.claude/settings.json" ] || echo '{}' > "$HOME/.claude/settings.json"
 edit_json "$HOME/.claude/settings.json" '.skipDangerousModePermissionPrompt = true'
 # Встроенный обмен сообщениями убираем совсем. Не «запрещаем на вызове»:
@@ -137,31 +137,41 @@ edit_json "$HOME/.claude/settings.json" '.skipDangerousModePermissionPrompt = tr
 # смотрит, поэтому работает и под --dangerously-skip-permissions.
 #
 # Почему вообще: встроенный механизм находит только сессии ЭТОГО хоста. Пока
-# два плеера стояли на одном узле, он работал и выглядел исправным; на разных
-# узлах он молча не найдёт никого, а тихий отказ в петле PM хуже громкого.
+# два слейва стояли на одном узле, он работал и выглядел исправным; на разных
+# узлах он молча не найдёт никого, а тихий отказ в петле мастера хуже громкого.
 #
 # Слияние, а не присваивание: чужие deny-правила на узле сносить незачем.
+#
+# AskUserQuestion: у слейва нет человека за терминалом. Вызов паркует сессию
+# намертво -- это ровно то состояние "требует действия", которое doctor лечит
+# рестартом. Без инструмента модель решает сама и идёт дальше.
+#
+# EnterWorktree/ExitWorktree: тихо ломают модель состояния. clone_holds_work
+# смотрит в клон слейва; ушедший в worktree оставит клон чистым, list покажет
+# "свободен", и мастер задиспатчит поверх живой работы. Отказ молчаливый, а
+# цена -- потерянная работа.
 edit_json "$HOME/.claude/settings.json" '.permissions.deny =
-    ((.permissions.deny // []) + ["SendMessage", "ListAgents"] | unique)'
-# CARGO_TARGET_DIR grows without bound - 22 to 49 GB per seat in practice, and
+    ((.permissions.deny // []) + ["SendMessage", "ListAgents",
+      "AskUserQuestion", "EnterWorktree", "ExitWorktree"] | unique)'
+# CARGO_TARGET_DIR grows without bound - 22 to 49 GB per slave in practice, and
 # five of them filled the gamer node's disk on 2026-08-26, which killed the WSL
 # VM and stranded every allocation on it. Boot is the only safe moment to drop
 # one: nothing is building yet, and the cache is pure derived data.
-TARGET_DIR="$HOME/.cache/target-$WK_NAME"
+TARGET_DIR="$HOME/.cache/target-$SL_NAME"
 if [ -d "$TARGET_DIR" ] \
     && [ "$(du -sm "$TARGET_DIR" 2>/dev/null | cut -f1 || echo 0)" -gt 30000 ]; then
     rm -rf "$TARGET_DIR"
 fi
-# LLM-профиль сиденья: набор переменных для tmux -e. Статическая часть
-# (эндпоинт и карта моделей) приезжает в WK_LLM_ENV из спеки джоба, а КЛЮЧ —
+# LLM-профиль слейва: набор переменных для tmux -e. Статическая часть
+# (эндпоинт и карта моделей) приезжает в SL_LLM_ENV из спеки джоба, а КЛЮЧ —
 # только с узла: в спеке джоба секретам не место (её видно в UI Nomad).
 llm_env=()
-if [ -n "$WK_LLM_ENV" ]; then
+if [ -n "$SL_LLM_ENV" ]; then
     while IFS= read -r kv; do
         [ -n "$kv" ] && llm_env+=(-e "$kv")
-    done <<< "$(printf '%s' "$WK_LLM_ENV" | base64 -d)"
+    done <<< "$(printf '%s' "$SL_LLM_ENV" | base64 -d)"
 fi
-if [ -n "$WK_LLM_KEY_VAR" ]; then
+if [ -n "$SL_LLM_KEY_VAR" ]; then
     keyfile="$HOME/.config/orchestra/llm-keys.env"
     key=""
     # sed, а не source: файл с ключами не исполняем
@@ -171,36 +181,36 @@ if [ -n "$WK_LLM_KEY_VAR" ]; then
     # раскрытие массива llm_env, валят РЕГИСТРАЦИЮ джоба на "Invalid
     # expression" ещё до запуска: [@] для HCL не выражение. Осторожно, это
     # правило действует и на комментарии — Nomad разбирает всю строку.
-    [ -f "$keyfile" ] && key=$(sed -n "s/^$${WK_LLM_KEY_VAR}=//p" "$keyfile" | tail -1)
+    [ -f "$keyfile" ] && key=$(sed -n "s/^$${SL_LLM_KEY_VAR}=//p" "$keyfile" | tail -1)
     if [ -z "$key" ]; then
         # Валимся громко: без ключа claude поднимется и будет отбивать каждый
-        # ход 401-й, а сиденье будет читаться как живое и свободное.
-        echo "LLM-профиль $WK_LLM: на узле нет ключа $WK_LLM_KEY_VAR в $keyfile — раздай: player login" >&2
+        # ход 401-й, а слейв будет читаться как живое и свободное.
+        echo "LLM-профиль $SL_LLM: на узле нет ключа $SL_LLM_KEY_VAR в $keyfile — раздай: slave login" >&2
         exit 1
     fi
-    llm_env+=(-e "$WK_LLM_AUTH_VAR=$key")
+    llm_env+=(-e "$SL_LLM_AUTH_VAR=$key")
 fi
 
-# a dedicated tmux SERVER per worker (-L): with the default server every
+# a dedicated tmux SERVER per slave (-L): with the default server every
 # session on the node lives in the cgroup of whichever wrapper started the
-# server first, and one task budget OOM-kills all workers at once
-tmux -L "$WK_NAME" kill-session -t "$WK_NAME" 2>/dev/null || true
+# server first, and one task budget OOM-kills all slaves at once
+tmux -L "$SL_NAME" kill-session -t "$SL_NAME" 2>/dev/null || true
 # env must go through -e: a plain env prefix only reaches the tmux SERVER when
 # this wrapper happens to start it, and every later session inherits the first
-# wrapper's variables (all workers ended up sharing one CARGO_TARGET_DIR)
-tmux -L "$WK_NAME" new-session -d -s "$WK_NAME" -c "$d" \
-    -e CARGO_TARGET_DIR="$HOME/.cache/target-$WK_NAME" \
+# wrapper's variables (all slaves ended up sharing one CARGO_TARGET_DIR)
+tmux -L "$SL_NAME" new-session -d -s "$SL_NAME" -c "$d" \
+    -e CARGO_TARGET_DIR="$HOME/.cache/target-$SL_NAME" \
     -e CARGO_BUILD_JOBS=1 \
     -e PATH="$d/bin:$PATH" \
     "$${llm_env[@]}" \
     "$HOME/.local/bin/claude --dangerously-skip-permissions"
-trap 'tmux -L "$WK_NAME" kill-session -t "$WK_NAME" 2>/dev/null; exit 0' TERM INT
-while tmux -L "$WK_NAME" has-session -t "$WK_NAME" 2>/dev/null; do sleep 10 & wait $!; done
+trap 'tmux -L "$SL_NAME" kill-session -t "$SL_NAME" 2>/dev/null; exit 0' TERM INT
+while tmux -L "$SL_NAME" has-session -t "$SL_NAME" 2>/dev/null; do sleep 10 & wait $!; done
 """
 
 
 def clone_dir(name):
-    return f"{HOME}/wk/{name}"
+    return f"{HOME}/slaves/{name}"
 
 
 def job_spec(name, origin, llm=DEFAULT_LLM):
@@ -214,7 +224,7 @@ def job_spec(name, origin, llm=DEFAULT_LLM):
         "Type": "service",
         "Meta": {"origin": origin, "llm": llm},
         "TaskGroups": [{
-            "Name": "wk",
+            "Name": "slaves",
             "Count": 1,
             "RestartPolicy": {
                 "Attempts": 3,
@@ -228,16 +238,16 @@ def job_spec(name, origin, llm=DEFAULT_LLM):
                 "User": "ermak",
                 "Config": {"command": "/bin/bash", "args": ["-c", WRAPPER]},
                 "Env": {
-                    "WK_NAME": name,
-                    "WK_ORIGIN": origin,
-                    "WK_PROJECT": project,
+                    "SL_NAME": name,
+                    "SL_ORIGIN": origin,
+                    "SL_PROJECT": project,
                     "HOME": HOME,
                     "PATH": f"/usr/local/bin:/usr/bin:/bin:{HOME}/.local/bin:{HOME}/.cargo/bin:{HOME}/.nvm/versions/node/v22.12.0/bin",
                     # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
-                    "WK_LLM": llm,
-                    "WK_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
-                    "WK_LLM_KEY_VAR": prof.get("key") or "",
-                    "WK_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
+                    "SL_LLM": llm,
+                    "SL_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
+                    "SL_LLM_KEY_VAR": prof.get("key") or "",
+                    "SL_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
                 },
                 "Resources": {"CPU": 1000, "MemoryMB": MEM},
                 "KillTimeout": 15 * 10**9,
@@ -247,8 +257,8 @@ def job_spec(name, origin, llm=DEFAULT_LLM):
 
 
 def jobs():
-    """Джобы плееров. Префикс wk- ловит и wk-cleanup с его периодическими
-    детьми; плееры — те, что врапер пометил origin'ом."""
+    """Джобы слейвов. Префикс sl- ловит и sl-cleanup с его периодическими
+    детьми; слейвы — те, что врапер пометил origin'ом."""
     listing = nomad.client().jobs.get_jobs(prefix=JOB_PREFIX, meta=True)
     return [j for j in listing if "origin" in (j.get("Meta") or {})]
 
@@ -289,31 +299,31 @@ def clone_holds_work(alloc, name):
     или (None, причина).
 
     Занятость места — это НЕ имя ветки. Имя врёт в обе стороны: у cloudpub
-    origin/HEAD = dev, а работают на beta3.0, и чистое запушенное сиденье
+    origin/HEAD = dev, а работают на beta3.0, и чистое запушенное слейв
     читалось как «занят: beta3.0»; наоборот, место с умершим мид-таском
     агентом сидит на bug/NNNN, и если решать по одной лишь активности сессии,
-    оно читается свободным (wk-rugent-4 на bug/1063 попал в list как
-    «свободен» — PM, восстановившийся по одному только list, задиспатчил бы
+    оно читается свободным (rugent-4 на bug/1063 попал в list как
+    «свободен» — мастер, восстановившийся по одному только list, задиспатчил бы
     поверх чужого дерева).
 
-    Единственный вопрос, который на самом деле задаёт PM перед диспатчем:
+    Единственный вопрос, который на самом деле задаёт мастер перед диспатчем:
     пропадёт ли что-нибудь, если занять это место. Пропадает только то, чего
     нет ни на одной удалённой ветке.
 
     Считаем через `--not --remotes`, а НЕ через `@{u}..`: upstream у рабочей
     ветки бывает прибит к origin/master, и тогда всё, что ещё не влито, врёт
-    как «не отправлено». Так и вышло на wk-rugent-7: коммит 0eaeae15 лежал на
+    как «не отправлено». Так и вышло на rugent-7: коммит 0eaeae15 лежал на
     origin/bug/1048 и был влит в master мержем 4b663ce1, а `@{u}..` показывал
     единицу и место читалось занятым.
 
     Оговорка: remote-tracking ref'ы в клоне могут быть протухшими (на том же
-    wk-rugent-7 последний fetch отставал на двое суток). Fetch тут не делаем —
+    rugent-7 последний fetch отставал на двое суток). Fetch тут не делаем —
     это сетевая операция на каждое место в каждом list; в сомнительном случае
     смотреть глазами через tail.
 
     Возвращаем ДВА числа раздельно, а не сумму: «не закоммичено» и «не
     отправлено» — разные состояния и разный разговор с агентом. Сложив их в
-    одно «только локально: 3», PM сказал переродившемуся месту «у тебя было
+    одно «только локально: 3», мастер сказал переродившемуся месту «у тебя было
     3 локальных коммита», тогда как там лежали 3 НЕсохранённых файла и ноль
     коммитов.
     """
@@ -339,7 +349,7 @@ def clone_holds_work(alloc, name):
 # ─── состояние сессии ────────────────────────────────────────────────────
 # КАК УЗНАТЬ РЕАЛЬНОЕ СОСТОЯНИЕ СИДЕНЬЯ (файл сессии + сокет)
 #
-# Сиденье само ведёт две вещи, которые и есть источник правды о его состоянии
+# Слейв само ведёт две вещи, которые и есть источник правды о его состоянии
 # (обе появляются независимо от моста claude.ai):
 #
 # 1) ФАЙЛ АКТИВНОСТИ ~/.claude/sessions/<pid>.json: cwd (по нему матчим — он
@@ -361,7 +371,7 @@ def clone_holds_work(alloc, name):
 # файле он не виден.
 #
 # Пробник и знание о формате файла живут в orchestra/session.py и уезжают на
-# узел исходником: сокет сиденья host-local, снаружи к нему не подключиться.
+# узел исходником: сокет слейва host-local, снаружи к нему не подключиться.
 SESSION_STATES = ("idle", "busy", "requires_action", "waiting", "offline")
 
 
@@ -397,7 +407,7 @@ def _responds(alloc):
 
 
 def screen(alloc, name, lines=10):
-    """Последние непустые строки tmux-пейна сиденья."""
+    """Последние непустые строки tmux-пейна слейва."""
     out, _ = nomad.sh(alloc,
         f"tmux -L {name} capture-pane -t {name} -p -S - | grep -v '^$' | tail -{lines}")
     return out
@@ -407,7 +417,7 @@ def _screen_complaint(activity):
     """Жалоба, видимая только на экране. -> (вид, текст) или None.
 
     Оба случая — один класс: сессия жива, отвечает на ping'и, но ни одного хода
-    выдать не может. Для PM это неотличимо от молчания.
+    выдать не может. Для мастер это неотличимо от молчания.
     """
     low = activity.lower()
     # Логин. Варианты экрана: "Not logged in · Run /login", "Login expired ·
@@ -415,7 +425,7 @@ def _screen_complaint(activity):
     # полно рабочих слов.
     #
     # Строки про Remote Control отсюда убраны вместе с самим --remote-control:
-    # сиденья больше не ходят на мост claude.ai, и "/rc failed" на их экране
+    # слейва больше не ходят на мост claude.ai, и "/rc failed" на их экране
     # означало бы что угодно, только не болезнь. Для профилей с ключом
     # провайдера (glm) логин claude.ai вообще не при делах.
     if "not logged in" in low or "login expired" in low:
@@ -425,7 +435,7 @@ def _screen_complaint(activity):
     # нужен либо другой /model, либо пополнение.
     #
     # Жалоба живёт в скроллбэке и после лечения, поэтому считается актуальной
-    # только если ПОСЛЕ неё модель не переключали: иначе вылеченное сиденье
+    # только если ПОСЛЕ неё модель не переключали: иначе вылеченное слейв
     # вечно читалось бы как больное.
     if ("out of usage credits" in low
             and low.rfind("out of usage credits") > low.rfind("set model to")):
@@ -487,7 +497,7 @@ def _state_from_branch(alloc, name):
     return "свободен" if cur == default else f"занят: {cur}"
 
 
-def seat_state(alloc, name):
+def slave_state(alloc, name):
     """Занятость места: реальное состояние сессии, с откатами на tmux и ветку."""
     dead = _responds(alloc)
     if dead:
@@ -520,8 +530,8 @@ def seat_state(alloc, name):
 
 
 # ─── сводки для фронтендов ───────────────────────────────────────────────
-def seat_rows():
-    """Сиденья как ДАННЫЕ: [{name, node, alloc_status, state, llm, origin}]."""
+def slave_rows():
+    """Слейвы как ДАННЫЕ: [{name, node, alloc_status, state, llm, origin}]."""
     rows = []
     for j in jobs():
         meta = j.get("Meta") or {}
@@ -534,7 +544,7 @@ def seat_rows():
                 row["node"] = a["NodeName"]
                 row["alloc_status"] = a["ClientStatus"]
                 if a["ClientStatus"] == "running":
-                    row["state"] = seat_state(a, j["ID"])
+                    row["state"] = slave_state(a, j["ID"])
         except Exception as e:
             row["alloc_status"] = nomad.describe_error(e)
         rows.append(row)
@@ -561,7 +571,7 @@ def pool():
 # ─── диагностика ─────────────────────────────────────────────────────────
 # Категории и лечение:
 #   залип/не отвечает      -> restart аллокации (клон и ветка переживают)
-#   не залогинен/протух    -> раздать креды на пул, затем restart сиденья
+#   не залогинен/протух    -> раздать креды на пул, затем restart слейва
 #   pending/failed/lost    -> alloc stop: Nomad пересоздаёт сразу, минуя
 #                             restart-backoff (до 30 мин)
 #   нет квоты модели       -> печать /model в пейн; рестарт квоту не вернёт
@@ -574,7 +584,7 @@ def diagnose():
         if not a or a["ClientStatus"] in ("lost", "unknown", "failed", "pending"):
             issues.append(_placement_issue(j, a))
             continue
-        state = seat_state(a, j["ID"])
+        state = slave_state(a, j["ID"])
         action = _action_for(state)
         if action is not False:
             issues.append({"name": j["ID"], "alloc": a, "diagnosis": state,
@@ -590,7 +600,7 @@ def _placement_issue(job, alloc):
     if alloc:
         return {"name": name, "alloc": alloc, "action": "stop",
                 "diagnosis": f"аллок {alloc['ClientStatus']}"}
-    queued = (job.get("JobSummary", {}).get("Summary", {}).get("wk") or {}).get("Queued", 0)
+    queued = (job.get("JobSummary", {}).get("Summary", {}).get("slaves") or {}).get("Queued", 0)
     if queued:
         return {"name": name, "alloc": None, "action": None,
                 "diagnosis": "queued — нет свободных слотов в пуле"}
@@ -614,10 +624,10 @@ def _action_for(state):
 
 
 def type_command(alloc, name, command):
-    """Напечатать команду в tmux-пейн сиденья и вернуть экран после неё.
+    """Напечатать команду в tmux-пейн слейва и вернуть экран после неё.
 
     Печатью, а не сообщением по каналу: слэш-команды через канал не проходят
-    (сообщение кладётся в очередь с skipSlashCommands), а у сиденья с
+    (сообщение кладётся в очередь с skipSlashCommands), а у слейва с
     исчерпанной квотой любой ход падает, не начавшись — слэш-команду же
     исполняет сам TUI, ход на неё не тратится.
 
@@ -630,7 +640,7 @@ def type_command(alloc, name, command):
 
 
 def press_enter(alloc, name):
-    """Подтвердить диалог. Только увидев его: слепой Enter на сиденье без
+    """Подтвердить диалог. Только увидев его: слепой Enter на слейв без
     диалога отправил бы пустой ход."""
     return _tmux(alloc, name, f"tmux -L {name} send-keys -t {name} Enter; sleep 2; ")
 
@@ -643,17 +653,17 @@ def _tmux(alloc, name, script):
 
 
 def switch_model(alloc, name, model):
-    """Перевести сиденье на другую модель, напечатав /model в его tmux-пейн.
+    """Перевести слейв на другую модель, напечатав /model в его tmux-пейн.
 
     Именно печатью, а не сообщением по каналу: обработка входящего сообщения —
-    это ход, а ход у сиденья с исчерпанной квотой падает, не начавшись. Слэш-
+    это ход, а ход у слейва с исчерпанной квотой падает, не начавшись. Слэш-
     команда же исполняется самим TUI, ход на неё не тратится.
 
     Перед вводом чистим строку (C-u): в пейне мог остаться недобитый текст.
 
     `/model` не переключает молча — он спрашивает «Switch model?» с уже
     выделенным «Yes». Подтверждаем вторым Enter, но ТОЛЬКО увидев диалог:
-    слепой Enter на сиденье без диалога отправил бы пустой ход."""
+    слепой Enter на слейв без диалога отправил бы пустой ход."""
     out = type_command(alloc, name, f"/model {model}")
     if "switch model?" in out.lower():
         out = press_enter(alloc, name)
