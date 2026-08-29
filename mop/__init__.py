@@ -1,5 +1,5 @@
-"""orchestra — пул claude-слейвов поверх Nomad.
+"""mop — пул claude-слейвов поверх Nomad.
 
 Библиотека возвращает данные; печатают фронтенды (bin/slave, bin/cc-send,
-bin/orchestra-mcp).
+bin/mop-mcp).
 """

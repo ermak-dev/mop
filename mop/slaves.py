@@ -1,7 +1,7 @@
 """Слейвы пула: спека job'а, LLM-профили и достоверное состояние места.
 
 Модуль ВОЗВРАЩАЕТ ДАННЫЕ и ничего не печатает. Форматирование живёт во
-фронтендах (bin/slave печатает таблицы, bin/orchestra-mcp отдаёт то же самое
+фронтендах (bin/slave печатает таблицы, bin/mop-mcp отдаёт то же самое
 модели) — иначе второй фронтенд неизбежно начал бы разбирать чужой текст.
 """
 import base64
@@ -28,7 +28,7 @@ JOB_PREFIX = "sl-"
 # "key" — ИМЯ переменной в ~/.ssh/ai-provider-keys.env (локальный источник
 # правды по ключам). Сам ключ в спеку джоба НЕ кладём: она видна в UI Nomad и
 # остаётся в его состоянии. Вместо этого раздаём на узлы файл
-# ~/.config/orchestra/llm-keys.env (только с теми ключами, которые называет хоть
+# ~/.config/mop/llm-keys.env (только с теми ключами, которые называет хоть
 # один профиль), а врапер уже на узле подставляет нужный в сессию.
 LLM_PROFILES = {
     # штатный Claude: авторизация — логин claude.ai (slave login), env пустой
@@ -53,7 +53,7 @@ LLM_PROFILES = {
 }
 DEFAULT_LLM = "claude"
 LOCAL_KEYS_FILE = "~/.ssh/ai-provider-keys.env"        # источник ключей на этой машине
-LLM_KEYS_FILE = f"{HOME}/.config/orchestra/llm-keys.env"  # копия на узле пула
+LLM_KEYS_FILE = f"{HOME}/.config/mop/llm-keys.env"  # копия на узле пула
 
 # Врапер — собственно задача Nomad: довести узел до "клон есть, claude в
 # tmux" и жить, пока жива tmux-сессия. Смерть врапера = рестарт/переезд
@@ -120,7 +120,7 @@ fi
 edit_json "$HOME/.claude.json" '.mcpServers["windows-mcp"] = {"type":"http","url":$winurl,"headers":{"Authorization":"Bearer kCgqRS33Yxv4lrSlqV5w6b3qNz0shjj9u4HTInk2DW0"}}
   | .mcpServers["mac-mcp"] = {"type":"http","url":"http://mac:8000/mcp","headers":{"Authorization":"Bearer FeRM5I-lQr_3mJbq1PWG6KzErm-666SA8b2vVwlBj8U"}}
   | .mcpServers["playwright"] = {"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--browser","chromium"]}
-  | .mcpServers["orchestra"] = {"type":"stdio","command":"/home/ermak/orchestra/bin/orchestra-mcp"}' \
+  | .mcpServers["mop"] = {"type":"stdio","command":"/home/ermak/mop/bin/mop-mcp"}' \
     --arg winurl "$WINURL"
 # playwright-mcp needs a browser on the node; install is idempotent and cached
 # in ~/.cache/ms-playwright, so every slave boot just confirms it is there.
@@ -172,7 +172,7 @@ if [ -n "$SL_LLM_ENV" ]; then
     done <<< "$(printf '%s' "$SL_LLM_ENV" | base64 -d)"
 fi
 if [ -n "$SL_LLM_KEY_VAR" ]; then
-    keyfile="$HOME/.config/orchestra/llm-keys.env"
+    keyfile="$HOME/.config/mop/llm-keys.env"
     key=""
     # sed, а не source: файл с ключами не исполняем
     # Двойной доллар — экранирование интерполяции Nomad: спеку задачи он
@@ -370,7 +370,7 @@ def clone_holds_work(alloc, name):
 # на прежнюю tmux-эвристику. Детект протухшего логина остаётся на tmux — в
 # файле он не виден.
 #
-# Пробник и знание о формате файла живут в orchestra/session.py и уезжают на
+# Пробник и знание о формате файла живут в mop/session.py и уезжают на
 # узел исходником: сокет слейва host-local, снаружи к нему не подключиться.
 SESSION_STATES = ("idle", "busy", "requires_action", "waiting", "offline")
 

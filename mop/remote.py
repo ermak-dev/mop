@@ -1,4 +1,4 @@
-"""Исполнение orchestra/session.py внутри аллокации Nomad.
+"""Исполнение mop/session.py внутри аллокации Nomad.
 
 Сокет сессии host-local: с управляющей машины к слейву не подключиться, так
 что и пробник, и отправитель должны работать НА УЗЛЕ.
@@ -25,7 +25,7 @@ import shlex
 
 from . import nomad, session
 
-CACHE_DIR = "$HOME/.cache/orchestra"
+CACHE_DIR = "$HOME/.cache/mop"
 NOT_INSTALLED = 97
 _packed = None
 
@@ -81,7 +81,7 @@ def probe(alloc, cwd):
     return out.strip().splitlines()[-1] if out.strip() else ""
 
 
-def send(alloc, cwd, message, priority="next", from_name="orchestra", wait=0):
+def send(alloc, cwd, message, priority="next", from_name="mop", wait=0):
     """Сообщение сессии слейва. -> ответ отправителя (msg_id/idle либо error)."""
     argv = ["send", cwd, message, "--priority", priority,
             "--from-name", from_name, "--wait", str(wait)]

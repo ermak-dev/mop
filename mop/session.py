@@ -5,7 +5,7 @@
 её сокет и как в этот сокет говорить.
 
 ВАЖНО: модуль намеренно standalone — только стандартная библиотека и ни одного
-импорта из пакета orchestra. Он работает в двух режимах:
+импорта из пакета mop. Он работает в двух режимах:
 
   * импортом на управляющей машине (cc-send, MCP-сервер);
   * исходником, уехавшим внутрь аллокации Nomad: сокет слейва host-local, с
@@ -159,16 +159,16 @@ def probe(cwd):
 # Подсказка едет в теле КАЖДОГО сообщения, а не в системном промпте, потому
 # что системную инструкцию съедает компактация, а тело — нет. Чинит ровно тот
 # случай, на котором мы споткнулись: glm-слейв получило сообщение от
-# "orchestra", попыталось ответить встроенным SendMessage, получило "No agent
-# named 'orchestra' is reachable" и отдало ответ случайному соседу по хосту.
+# "mop", попыталось ответить встроенным SendMessage, получило "No agent
+# named 'mop' is reachable" и отдало ответ случайному соседу по хосту.
 #
 # Про адрес отправителя намеренно молчим: наш отправитель живёт внутри
 # alloc exec и умирает сразу после доставки — обещать обратный адрес значило
 # бы посылать ответ в мёртвый сокет.
 REPLY_HINT = (
-    "[канал orchestra] Доставлено сокет-каналом пула. Отправитель ответа не ждёт "
+    "[канал mop] Доставлено сокет-каналом пула. Отправитель ответа не ждёт "
     "и уже завершился. Если нужно с кем-то связаться — используй "
-    "mcp__orchestra__send (слейва видно через mcp__orchestra__agents). "
+    "mcp__mop__send (слейва видно через mcp__mop__agents). "
     "Встроенный SendMessage для этого не годится: он дотягивается только до "
     "сессий этого же хоста и про остальной пул не знает."
 )
@@ -298,7 +298,7 @@ class Inbox:
                 pass
 
 
-def send(sock_path, body, priority="next", mode="bypass", from_name="orchestra",
+def send(sock_path, body, priority="next", mode="bypass", from_name="mop",
          wait_idle=0, hint=True):
     """Отправить сообщение сессии. -> {"msg_id":…, "idle":<кадр|None>}
 
@@ -339,7 +339,7 @@ def main(argv):
             r = send(sock, body,
                      priority=opts.get("--priority", "next"),
                      mode=opts.get("--mode", "bypass"),
-                     from_name=opts.get("--from-name", "orchestra"),
+                     from_name=opts.get("--from-name", "mop"),
                      wait_idle=int(opts.get("--wait", 0)))
             out = {"msg_id": r["msg_id"], "idle": (r["idle"] or {}).get("state")}
         except Exception as e:

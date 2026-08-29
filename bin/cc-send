@@ -12,7 +12,7 @@ cc-send <цель> <текст> --wait[=N]   отправить и ждать, �
   --mode bypass|prompting     каким режимом прав представиться (по умолчанию bypass)
   --quiet                     молча, только код возврата
 
-Протокол описан в CHANNEL.md, реализация — в orchestra/session.py. Здесь
+Протокол описан в CHANNEL.md, реализация — в mop/session.py. Здесь
 только разбор аргументов и печать.
 """
 import argparse
@@ -21,8 +21,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from orchestra import session                                  # noqa: E402
-from orchestra.render import table                             # noqa: E402
+from mop import session                                  # noqa: E402
+from mop.render import table                             # noqa: E402
 
 
 def cmd_list():

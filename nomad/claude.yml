@@ -53,26 +53,26 @@
         delete: yes
         recursive: yes
 
-    # orchestra-mcp: тот же пул как инструменты для слейва. Узел говорит с
+    # mop-mcp: тот же пул как инструменты для слейва. Узел говорит с
     # Nomad сам (токен раздан туда же, решение оператора 2026-08-29), поэтому
     # слейв видит соседей на других узлах и достаёт инбокс мастера через
     # аллокацию в датацентре control.
-    - name: Ensure python3-pip for the orchestra MCP server
+    - name: Ensure python3-pip for the mop MCP server
       ansible.builtin.apt:
         name: python3-pip
         state: present
       become: yes
 
-    - name: Install the orchestra MCP server's python dependencies
+    - name: Install the mop MCP server's python dependencies
       ansible.builtin.pip:
         name: [mcp, python-nomad, websocket-client, requests]
         extra_args: --user --break-system-packages
         state: present
 
-    - name: Sync the orchestra package from the control machine
+    - name: Sync the mop package from the control machine
       ansible.posix.synchronize:
-        src: "{{ lookup('env', 'HOME') }}/orchestra/"
-        dest: orchestra/
+        src: "{{ lookup('env', 'HOME') }}/mop/"
+        dest: mop/
         delete: yes
         recursive: yes
         rsync_opts:

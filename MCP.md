@@ -1,9 +1,9 @@
-# orchestra-mcp
+# mop-mcp
 
 MCP-сервер пула: канал сообщений слейвам и управление их job'ами. Замена
 встроенному `SendMessage`/`ListAgents` там, где встроенный не достаёт.
 
-Реализация — `bin/orchestra-mcp`, протокол канала — [CHANNEL.md](CHANNEL.md).
+Реализация — `bin/mop-mcp`, протокол канала — [CHANNEL.md](CHANNEL.md).
 
 ## Зачем, если есть встроенный SendMessage
 
@@ -24,7 +24,7 @@ MCP-сервер пула: канал сообщений слейвам и уп�
 
 ```
 сессия мастера (управляющая машина)
-   └─ stdio ─> orchestra-mcp ──REST/websocket──> Nomad
+   └─ stdio ─> mop-mcp ──REST/websocket──> Nomad
                     │                              │
                     │                        alloc exec
                     │                              ↓
@@ -39,8 +39,8 @@ MCP-сервер пула: канал сообщений слейвам и уп�
 управления job'ами, его пока нет.
 
 **Доставка через `alloc exec`.** Сокет сессии — unix-сокет, host-local. Поэтому
-отправитель едет НА УЗЕЛ: `orchestra/session.py` ставится в
-`~/.cache/orchestra/session-<hash>.py` и запускается там. Хэш в имени сам
+отправитель едет НА УЗЕЛ: `mop/session.py` ставится в
+`~/.cache/mop/session-<hash>.py` и запускается там. Хэш в имени сам
 инвалидирует кэш при правке модуля, узлу ничего доставлять руками не нужно.
 
 **Асинхронные уведомления через инбокс мастера.** MCP умеет только
@@ -92,18 +92,18 @@ Nomad режет URI примерно на 8 КБ и отвечает 414 ещё
 ## Подключение
 
 Проектный `.mcp.json` уже лежит в репозитории — сессия, запущенная в
-`~/orchestra`, подхватит сервер сама. Чтобы он был доступен из любого каталога
+`~/mop`, подхватит сервер сама. Чтобы он был доступен из любого каталога
 (мастер работает в `~/rugent`, `~/cloudpub`):
 
 ```
-claude mcp add --scope user orchestra /home/ermak/orchestra/bin/orchestra-mcp
+claude mcp add --scope user mop /home/ermak/mop/bin/mop-mcp
 ```
 
 Проверка без claude — сервер печатает число инструментов и найденный инбокс
 мастера:
 
 ```
-orchestra-mcp --check
+mop-mcp --check
 ```
 
 ## Зависимость

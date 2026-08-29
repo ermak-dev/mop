@@ -1,10 +1,10 @@
-# orchestra
+# mop
 
 Пул claude-слейвов поверх Nomad: как он разворачивается, чем управляется и как
 с слейвами разговаривать.
 
 ```
-orchestra/         библиотека: всё знание о пуле, возвращает данные и не печатает
+mop/         библиотека: всё знание о пуле, возвращает данные и не печатает
   nomad.py           связь с Nomad, exec внутрь аллокации
   slaves.py           спека job'а, LLM-профили, состояние слейва, диагностика
   session.py         файлы сессий claude и протокол канала (standalone: ездит на узлы)
@@ -13,7 +13,7 @@ orchestra/         библиотека: всё знание о пуле, воз
   render.py          таблицы
 bin/slave         CLI пула: add/list/delete/change/restart/attach/tail/doctor/login/llm
 bin/cc-send        послать сообщение в живую сессию claude code
-bin/orchestra-mcp  MCP-сервер: тот же пул как инструменты для claude
+bin/mop-mcp  MCP-сервер: тот же пул как инструменты для claude
 nomad/             ansible-плейбуки и конфиги: сам Nomad, узлы, уборка диска
 CHANNEL.md         протокол канала сообщений claude code
 MCP.md             архитектура MCP-сервера и его инструменты
@@ -39,9 +39,9 @@ MCP-сервер начал бы разбирать текст, свёрстан
 это интерфейсы, которые нельзя переименовать:
 
 ```
-~/bin/slave    -> ../orchestra/bin/slave
-~/bin/cc-send   -> ../orchestra/bin/cc-send
-~/etc/nomad     -> ../orchestra/nomad
+~/bin/slave    -> ../mop/bin/slave
+~/bin/cc-send   -> ../mop/bin/cc-send
+~/etc/nomad     -> ../mop/nomad
 ```
 
 `~/etc/nomad` обязателен: `net setup nomad` разворачивается в

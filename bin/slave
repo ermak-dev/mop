@@ -18,7 +18,7 @@ slave doctor [--fix]            диагностика пула: залипан�
 Токен: $NOMAD_TOKEN или ~/.config/nomad/bootstrap.json.
 
 Всё, кроме attach, ходит через API Nomad; ssh нужен только attach ради живого
-терминала. Логика живёт в пакете orchestra/ — здесь только разбор аргументов
+терминала. Логика живёт в пакете mop/ — здесь только разбор аргументов
 и печать.
 """
 import os
@@ -28,8 +28,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from orchestra import keys, nomad, slaves                       # noqa: E402
-from orchestra.render import table                             # noqa: E402
+from mop import keys, nomad, slaves                       # noqa: E402
+from mop.render import table                             # noqa: E402
 
 
 def cwd_origin():
