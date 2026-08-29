@@ -10,11 +10,29 @@
 Всё, что делает команда, — считает шард, находит его креды и уходит в claude.
 Дальше срез наследуется: mop mcp, запущенный этой сессией как потомок, увидит
 MOP_SHARD и MOP_BUS_CONFIG и подпишется на инбокс своего шарда.
+
+Сервер пула приезжает АРГУМЕНТОМ, а не из конфига каталога. Мастер стоит в
+рабочей копии СВОЕГО проекта, а `.mcp.json` с сервером лежит в репозитории
+mop — то есть где угодно, только не там, где мастера запускают. Первый же
+запуск в чужом каталоге поднял сессию вообще без mcp__mop__*, и она не смогла
+ни увидеть ростер, ни написать слейву. Прописать сервер глобально можно, но
+~/.claude.json — живое состояние, которое переписывают работающие сессии;
+аргумент ничего не трогает и действует ровно на эту сессию.
 """
+import json
 import os
 
 import lib
 from mop import slaves
+
+# --strict-mcp-config НЕ добавляем: у оператора есть свои серверы, и мастер-шелл
+# не повод их отбирать.
+def mcp_config():
+    return json.dumps({"mcpServers": {"mop": {
+        "type": "stdio",
+        "command": os.path.join(os.path.dirname(os.path.realpath(__file__)), "mop"),
+        "args": ["mcp"],
+    }}})
 
 
 def main(argv):
@@ -32,7 +50,7 @@ def main(argv):
 
     env = dict(os.environ, MOP_SHARD=shard, MOP_BUS_CONFIG=creds)
     print(f"мастер шарда {shard} ({origin})")
-    os.execvpe("claude", ["claude"] + argv[1:], env)
+    os.execvpe("claude", ["claude", "--mcp-config", mcp_config()] + argv[1:], env)
 
 
 lib.run(main)
