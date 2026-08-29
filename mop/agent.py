@@ -65,7 +65,7 @@ KEYS_ALLOWED = ("Escape",)
 # лишились его вместе с переездом на шину.
 WRITABLE = (
     f"{HOME}/.claude/.credentials.json",
-    f"{HOME}/.config/mop/llm-keys.env",
+    f"{HOME}/.config/mop/secrets.env",
 )
 
 # Префикс имён джобов-слейвов; он же префикс tmux-серверов и каталогов клонов.

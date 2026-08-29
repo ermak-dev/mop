@@ -125,14 +125,15 @@ def _push_via_sysbatch(script, nodes, results):
 
 
 def llm_keys_blob():
-    """Что везти на узлы в llm-keys.env: ТОЛЬКО те ключи из локального файла,
-    которые называет хоть один LLM-профиль.
+    """Что везти на узлы в secrets.env: ТОЛЬКО названное явно — ключи, которые
+    просит хоть один LLM-профиль, и секреты, которые нужны самому врапёру.
 
-    Фильтр здесь не гигиена, а условие, на котором источником вообще может быть
-    ~/.env: там лежат три десятка секретов — юкасса, smtp, телеграм, gitlab, —
-    и на узлах пула им делать нечего. Едет ровно то, что назвал профиль.
+    Фильтр здесь не гигиена, а условие, на котором источником может быть общий
+    .env проекта: там же лежат креды GitLab, и на узлах пула им делать нечего.
+    Едет ровно перечисленное.
     -> (содержимое|None, замечание|None)"""
     wanted = {p["key"] for p in slaves.LLM_PROFILES.values() if p.get("key")}
+    wanted |= set(slaves.NODE_SECRETS)
     if not wanted:
         return None, None
     found = {}
@@ -168,7 +169,7 @@ def push_llm_keys(llm):
     blob, note = llm_keys_blob()
     if not blob or key not in blob:
         raise RuntimeError(f"профиль {llm}: {note}")
-    return distribute([_as_file(slaves.LLM_KEYS_FILE, blob)])
+    return distribute([_as_file(slaves.SECRETS_FILE, blob)])
 
 
 def credentials():
@@ -208,7 +209,7 @@ def push_login():
     what = ["креды claude.ai"]
     blob, note = llm_keys_blob()
     if blob:
-        files.append(_as_file(slaves.LLM_KEYS_FILE, blob))
-        what.append("ключи LLM (" + ", ".join(
+        files.append(_as_file(slaves.SECRETS_FILE, blob))
+        what.append("секреты узла (" + ", ".join(
             l.split("=")[0] for l in blob.splitlines()) + ")")
     return distribute(files), what, note

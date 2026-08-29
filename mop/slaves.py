@@ -10,6 +10,8 @@ import re
 
 from . import bus, nomad
 
+PROJECT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
 MEM = 8192                          # бюджет слейва, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
 HOME = "/home/ermak"                # $HOME на узлах пула
 SSH_ALIAS = {"gamer": "gamer-wsl"}  # имя узла nomad -> ssh-алиас
@@ -25,11 +27,11 @@ JOB_PREFIX = "sl-"
 # провайдера — больше в слейв ничего не меняется, поэтому tmux, tail, doctor
 # и детект залипаний работают одинаково для любого профиля.
 #
-# "key" — ИМЯ переменной в ~/.env (локальный источник правды по ключам). Сам
-# ключ в спеку джоба НЕ кладём: она видна в UI Nomad и остаётся в его
+# "key" — ИМЯ переменной в .env проекта (локальный источник правды по ключам).
+# Сам ключ в спеку джоба НЕ кладём: она видна в UI Nomad и остаётся в его
 # состоянии. Вместо этого раздаём на узлы файл
-# ~/.config/mop/llm-keys.env (только с теми ключами, которые называет хоть
-# один профиль), а врапер уже на узле подставляет нужный в сессию.
+# ~/.config/mop/secrets.env (только с тем, что названо явно), а врапер уже на
+# узле подставляет нужное в сессию.
 LLM_PROFILES = {
     # штатный Claude: авторизация — логин claude.ai (mop login), env пустой
     "claude": {"key": None, "env": {}},
@@ -52,8 +54,14 @@ LLM_PROFILES = {
     },
 }
 DEFAULT_LLM = "claude"
-LOCAL_KEYS_FILE = "~/.env"                          # источник ключей на этой машине
-LLM_KEYS_FILE = f"{HOME}/.config/mop/llm-keys.env"  # копия на узле пула
+# Источник правды по секретам проекта — .env рядом с кодом. Всё, что задаёт
+# человек, лежит там; порождаемое само (пароли NATS, токен Nomad, логин
+# claude.ai) — не там и туда не попадает.
+LOCAL_KEYS_FILE = os.path.join(PROJECT, ".env")
+# Подмножество, которое уезжает на узлы: ключи, названные профилями, плюс то,
+# что нужно самому врапёру.
+NODE_SECRETS = ("WINDOWS_MCP_TOKEN", "MAC_MCP_TOKEN")
+SECRETS_FILE = f"{HOME}/.config/mop/secrets.env"    # копия на узле пула
 
 # Врапер — собственно задача Nomad: довести узел до "клон есть, claude в
 # tmux" и жить, пока жива tmux-сессия. Смерть врапера = рестарт/переезд
@@ -117,11 +125,17 @@ if ip -4 -o addr show 2>/dev/null | grep -q '192.168.1.151'; then
 else
     WINURL="http://192.168.1.151:8000/mcp"
 fi
-edit_json "$HOME/.claude.json" '.mcpServers["windows-mcp"] = {"type":"http","url":$winurl,"headers":{"Authorization":"Bearer kCgqRS33Yxv4lrSlqV5w6b3qNz0shjj9u4HTInk2DW0"}}
-  | .mcpServers["mac-mcp"] = {"type":"http","url":"http://mac:8000/mcp","headers":{"Authorization":"Bearer FeRM5I-lQr_3mJbq1PWG6KzErm-666SA8b2vVwlBj8U"}}
+# Токены НЕ в спеке: она видна в UI Nomad и остаётся в его состоянии. Едут
+# тем же файлом, что и ключи провайдеров, и достаются отсюда так же -- sed'ом,
+# а не source: файл с секретами не исполняем.
+secrets="$HOME/.config/mop/secrets.env"
+wintok=$(sed -n "s/^WINDOWS_MCP_TOKEN=//p" "$secrets" 2>/dev/null | tail -1)
+mactok=$(sed -n "s/^MAC_MCP_TOKEN=//p" "$secrets" 2>/dev/null | tail -1)
+edit_json "$HOME/.claude.json" '.mcpServers["windows-mcp"] = {"type":"http","url":$winurl,"headers":{"Authorization":("Bearer " + $wintok)}}
+  | .mcpServers["mac-mcp"] = {"type":"http","url":"http://mac:8000/mcp","headers":{"Authorization":("Bearer " + $mactok)}}
   | .mcpServers["playwright"] = {"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--browser","chromium"]}
   | .mcpServers["mop"] = {"type":"stdio","command":"/home/ermak/mop/bin/mop","args":["mcp"]}' \
-    --arg winurl "$WINURL"
+    --arg winurl "$WINURL" --arg wintok "$wintok" --arg mactok "$mactok"
 # playwright-mcp needs a browser on the node; install is idempotent and cached
 # in ~/.cache/ms-playwright, so every slave boot just confirms it is there.
 npx -y playwright install chromium >/dev/null 2>&1 || true
@@ -172,7 +186,7 @@ if [ -n "$SL_LLM_ENV" ]; then
     done <<< "$(printf '%s' "$SL_LLM_ENV" | base64 -d)"
 fi
 if [ -n "$SL_LLM_KEY_VAR" ]; then
-    keyfile="$HOME/.config/mop/llm-keys.env"
+    keyfile="$HOME/.config/mop/secrets.env"
     key=""
     # sed, а не source: файл с ключами не исполняем
     # Двойной доллар — экранирование интерполяции Nomad: спеку задачи он

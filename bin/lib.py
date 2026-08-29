@@ -123,7 +123,7 @@ def push_llm_keys(llm):
     results = keys.push_llm_keys(llm)
     if results is None:
         return
-    print(f"раздаю ключи LLM на узлы пула ({slaves.LLM_KEYS_FILE})...")
+    print(f"раздаю секреты на узлы пула ({slaves.SECRETS_FILE})...")
     bad = [f"{n}: {r}" for n, r in sorted(results.items()) if r != "OK"]
     if bad:
         print("  не всем узлам: " + "; ".join(bad))

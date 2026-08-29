@@ -24,8 +24,11 @@
 # firewall drops the hairpin to the LAN address and only 127.0.0.1 reaches
 # the host -- every other node uses the FQDN.
 #
-# claude-mcp.json carries the http bearer tokens in the clear, same exposure
-# as the copies already sitting in ~/.claude.json on every machine.
+# The http bearer tokens come from the project's .env, not from this template:
+# the same two used to sit in the clear here AND inside the Nomad job spec,
+# which is visible in the UI and persists in cluster state. Rendered they are
+# still in the clear in ~/.claude.json on every node -- same exposure as before
+# -- but the repository no longer carries them.
 #
 # Run:  ansible-playbook -i ~/etc/inventory.ini ~/etc/nomad/claude.yml
 
@@ -35,6 +38,11 @@
   gather_facts: no
 
   vars:
+    # Читаем .env проекта как properties: секции в нём нет, а type=properties
+    # ровно про файлы вида KEY=value.
+    project_env: "{{ lookup('env', 'HOME') }}/mop/.env"
+    windows_mcp_token: "{{ lookup('ini', 'WINDOWS_MCP_TOKEN type=properties file=' + project_env) }}"
+    mac_mcp_token: "{{ lookup('ini', 'MAC_MCP_TOKEN type=properties file=' + project_env) }}"
     windows_mcp_url: >-
       {{ 'http://127.0.0.1:8000/mcp' if inventory_hostname == 'gamer-wsl'
          else 'http://gamer.corp.ermak.dev:8000/mcp' }}
