@@ -60,4 +60,4 @@ def main(argv):
     print("\n".join(lib.pool_lines()))
 
 
-lib.run(main)
+lib.run(lib.cluster(main))

@@ -124,7 +124,7 @@
 
 # Агент на рабочих узлах.
 #
-# Пакет mop возим ЗДЕСЬ, хотя его же возит nomad/claude.yml для MCP-сервера.
+# Пакет mop возим ЗДЕСЬ, хотя его же возит examples/homelab/claude.yml для MCP-сервера.
 # Дубль осознанный: игра, которая запускает агента, обязана привезти его код
 # сама. Пока она этого не делала, `mop deploy nats` после правки agent.py
 # поднимал на узлах СТАРЫЙ агент -- и первый же прогон это показал: креды в
@@ -145,9 +145,17 @@
     shards: "{{ mop_shards | default([]) }}"
 
   tasks:
-    - name: Python client for the bus
+    - name: Ensure python3-pip
+      become: yes
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+
+    # Всё, что нужно самому mop на узле: клиент шины, MCP-сервер узлового
+    # профиля и то, что он импортирует.
+    - name: Python dependencies of mop
       ansible.builtin.pip:
-        name: nats-py
+        name: [nats-py, mcp, python-nomad, requests]
         extra_args: --user --break-system-packages
         state: present
 

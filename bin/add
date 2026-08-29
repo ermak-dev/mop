@@ -46,4 +46,4 @@ def main(argv):
           f"смотри mop list")
 
 
-lib.run(main)
+lib.run(lib.cluster(main))

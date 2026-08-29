@@ -71,4 +71,4 @@ def main(argv):
     print("\nконтроль: mop list (и mop tail <имя> для бывших залипших)")
 
 
-lib.run(main)
+lib.run(lib.cluster(main))

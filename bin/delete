@@ -16,4 +16,4 @@ def main(argv):
     print(f"удалён {name} (клон остался в {slaves.clone_dir(name)} на узле)")
 
 
-lib.run(main)
+lib.run(lib.cluster(main))

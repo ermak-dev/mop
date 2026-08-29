@@ -1,13 +1,17 @@
 #!/bin/bash -e
-# развернуть кластер: mop deploy [nomad|claude|nats|all] [origin|шард ...]
+# развернуть: mop deploy [pool|nomad|claude|all] [origin|шард ...]
 #
-# Порядок игр не произволен и не переставляется:
+#   pool    ЭТО САМ MOP: сервер шины, пакет и агент на узлы, креды. Всё, без
+#           чего пул не работает, и единственное, что переносимо между
+#           установками.
+#   nomad   кластер Nomad -- ПРИМЕР установки автора (examples/homelab). У вас
+#           Nomad, скорее всего, уже есть или ставится иначе; mop требует лишь
+#           кластер с драйвером raw_exec.
+#   claude  узловая обвязка автора: личные скиллы и MCP рабочего стола. Тоже
+#           пример; пулу это не нужно.
 #
-#   nomad   агент Nomad на узлах и сервер -- без него нет ни джобов, ни ростера;
-#   claude  ~/.claude, скиллы и rsync пакета mop на узлы -- ИМЕННО ОН привозит
-#           туда mop/agent.py, и до него юнит агента запускать не с чего;
-#   nats    сервер шины и юнит агента; он же сносит с узлов старую копию
-#           management-токена Nomad.
+# Порядок: nomad -> claude -> pool. Пакет mop на узлы привозит pool, и юнит
+# агента он же запускает -- до него запускать нечего.
 #
 # Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
 # больше нет, поэтому упавшего агента и битые креды чинят только отсюда --
@@ -20,11 +24,12 @@ shift || true      # остаток -- шарды, которых в пуле е
 # разворачивается в ~/etc/<имя>/setup.yml, таблицы имён нигде нет. Симлинки и
 # есть эта таблица, поэтому deploy их заводит сам, а не требует от оператора.
 link() {
-    local name="$1"
-    if [[ ! -e "$HOME/etc/$name" ]]; then
+    local name="$1" target="$2"
+    local want="$PROJECT_HOME/$target"
+    if [[ "$(readlink -f "$HOME/etc/$name" 2>/dev/null)" != "$want" ]]; then
         mkdir -p "$HOME/etc"
-        ln -s "$PROJECT_HOME/$name" "$HOME/etc/$name"
-        ok "  завёл симлинк ~/etc/$name -> $PROJECT_HOME/$name"
+        ln -sfn "$want" "$HOME/etc/$name"
+        ok "  симлинк ~/etc/$name -> $want"
     fi
 }
 
@@ -58,20 +63,24 @@ if [[ ! -f "$INVENTORY" ]]; then
     exit 1
 fi
 
-link nomad
-link nats
+# Плейбуки находятся по имени каталога в ~/etc, поэтому цель симлинка может
+# меняться, а имя -- нет: ~/etc/nomad/setup.yml импортирует ~/etc/site.yml.
+link nomad examples/homelab
+link nats   deploy
 
 case "$WHAT" in
-    nomad)  play nomad/setup.yml ;;
-    claude) play nomad/claude.yml ;;
-    nats)   play nats/setup.yml --extra-vars "$(shards_json "$@")" ;;
+    pool)          play deploy/setup.yml --extra-vars "$(shards_json "$@")" ;;
+    nomad)         play examples/homelab/setup.yml ;;
+    claude)        play examples/homelab/claude.yml ;;
+    nats)          # прежнее имя pool; оставлено, чтобы не ломать привычку
+                   play deploy/setup.yml --extra-vars "$(shards_json "$@")" ;;
     all)
-        play nomad/setup.yml
-        play nomad/claude.yml
-        play nats/setup.yml --extra-vars "$(shards_json "$@")"
+        play examples/homelab/setup.yml
+        play examples/homelab/claude.yml
+        play deploy/setup.yml --extra-vars "$(shards_json "$@")"
         ;;
     *)
-        fail "mop deploy [nomad|claude|nats|all] [origin|шард ...]"
+        fail "mop deploy [pool|nomad|claude|all] [origin|шард ...]"
         exit 1
         ;;
 esac

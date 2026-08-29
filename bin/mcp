@@ -19,10 +19,17 @@
 bridge-сессии, а слейва пула живут на других узлах. Здесь доставка идёт через
 шину, и хост значения не имеет.
 
+КАНАЛ ДВУСТОРОННИЙ. У `send` три адреса, а не два: слейв пула, сессия этого
+хоста и МАСТЕР — по его инбоксу на шине. Третьего не было, и петля мастера
+стояла на песке: слейв отчитывался, `session.find` не находил мастера на своём
+хосте, исключение приезжало модели строкой «Error executing tool send», а
+мастер читал молчание и шёл смотреть чужой экран глазами.
+
 Сокет сессии host-local, поэтому до него дотягивается агент, который на том же
 узле и живёт (mop/agent.py). Протокол канала — CHANNEL.md, субъекты шины —
 BUS.md, устройство сервера — MCP.md.
 """
+import functools
 import os
 import subprocess
 import sys
@@ -72,11 +79,35 @@ MASTER_ID = f"{os.uname().nodename}-{os.getpid()}"
 MY_INBOX = bus.inbox(MASTER_ID)
 
 
+def loud(fn):
+    """Причина отказа — в ответ, а не в исключение.
+
+    Исключение из инструмента приезжает модели строкой «Error executing tool
+    send» БЕЗ причины, и это худший вид отказа: слейв, у которого не было
+    маршрута до мастера, увидел ровно её — три попытки, три разных адреса,
+    один и тот же глухой текст и никакой возможности понять, что дело в
+    адресе. Инструмент обязан называть себя и причину."""
+    @functools.wraps(fn)
+    def wrap(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        except Exception as e:
+            return f"{fn.__name__}: {e or type(e).__name__}"
+    return wrap
+
+
+def tool(**kw):
+    """Инструмент сервера. Тело всегда под loud."""
+    def deco(fn):
+        return app.tool(**kw)(loud(fn))
+    return deco
+
+
 def master_tool(**kw):
     """Инструмент, который есть только у мастера. На узле функция остаётся
     обычной питоновской и просто не попадает в список инструментов."""
     def deco(fn):
-        return app.tool(**kw)(fn) if MASTER else fn
+        return tool(**kw)(fn) if MASTER else fn
     return deco
 
 
@@ -84,6 +115,10 @@ READ_ONLY = ToolAnnotations(readOnlyHint=True)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
 SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status", "Escape")
 MAX_WAIT = 600
+# Опрос мастеров короче обычного запроса: мастер отвечает из памяти, а ждёт
+# его КАЖДЫЙ вызов agents — gather не знает, сколько ответов ему ждать, и
+# честно досиживает до таймаута.
+MASTERS_WAIT = 2
 
 
 # ─── адресация ───────────────────────────────────────────────────────────
@@ -136,26 +171,70 @@ def master_socket():
     return None
 
 
-def notify_master(text):
-    """Положить сообщение в инбокс мастера. Так фоновое ожидание превращается
-    в настоящий push: MCP сам ничего в ход модели вбросить не может."""
+def my_session():
+    """Файл сессии, которая нас запустила: имя, каталог, pid."""
     sock = master_socket()
     if not sock:
-        return
-    try:
-        session.send(sock, text, priority="later", from_name="mop")
-    except Exception:
-        pass
+        return None
+    for d in session.sessions():
+        if d.get("messagingSocketPath") == sock:
+            return d
+    return None
+
+
+def my_name():
+    """Как я представляюсь адресату — и каким именем он мне ответит.
+
+    У мастера это его инбокс на шине (`MASTER_ID`): имя сессии claude адресом
+    быть не может — оно выводится из каталога, не уникально и шине неизвестно.
+    Оператор, спрашивавший «пингани их, пусть ответят», назвал слейвам именно
+    имя сессии, и ответить по нему было некуда.
+
+    У слейва это имя его джоба: оно же имя клона, им же слейв адресуется в
+    send. Берём из каталога СЕССИИ, а не из cwd процесса: сервер запускают
+    откуда угодно, а сессия слейва всегда стоит в своём клоне."""
+    if MASTER:
+        return MASTER_ID
+    cwd = (my_session() or {}).get("cwd") or os.getcwd()
+    base = os.path.basename(os.path.realpath(cwd))
+    return base if base.startswith(slaves.JOB_PREFIX) else MASTER_ID
+
+
+def on_inbox(m):
+    """Что приехало в инбокс мастера: вести агентов и ОТЧЁТЫ СЛЕЙВОВ.
+
+    Возвращённое становится ответом на запрос — так у слейва появляется вердикт
+    доставки вместо факта отправки. Агент вести публикует и ответа не ждёт:
+    для него не меняется ничего.
+
+    `who` — единственный глагол, который не кладут в сессию: им спрашивают
+    общий инбокс шарда, «кто из мастеров жив»."""
+    if m.get("verb") == "who":
+        d = my_session() or {}
+        return {"master": MASTER_ID, "shard": bus.SHARD,
+                "session": d.get("name"), "cwd": d.get("cwd")}
+    sock = master_socket()
+    if not sock:
+        return {"error": f"у мастера {MASTER_ID} нет сессии — весть класть некуда"}
+    # priority по умолчанию later: так кладёт вести агент, и перебивать ход
+    # мастера уведомлением о простое незачем. Слейв со своим отчётом просит
+    # громче — и имеет право, отчёта мастер ждёт.
+    r = session.send(sock, m.get("text") or "",
+                     priority=m.get("priority") or "later",
+                     from_name=m.get("from") or m.get("node") or "mop")
+    return {"msg_id": r["msg_id"]}
 
 
 # ─── инструменты: канал ──────────────────────────────────────────────────
-@app.tool(annotations=READ_ONLY, description=(
-    "Кому можно писать: слейвы пула по ВСЕМ узлам и сессии claude на этой "
-    "машине. Полнее встроенного ListAgents, который видит только этот хост. "
-    "Для слейва показывает достоверное состояние (свободен/занят/завис/нет "
-    "квоты/несохранённая работа в клоне), LLM-профиль и репозиторий."))
+@tool(annotations=READ_ONLY, description=(
+    "Кому можно писать: слейвы пула по ВСЕМ узлам, мастера своего шарда и "
+    "сессии claude на этой машине. Полнее встроенного ListAgents, который "
+    "видит только этот хост. Для слейва показывает достоверное состояние "
+    "(свободен/занят/завис/нет квоты/несохранённая работа в клоне), "
+    "LLM-профиль и репозиторий; для мастера — адрес, которым ему отвечают."))
 def agents(project: str = "") -> str:
     out = _roster(project) if MASTER else _roster_from_bus()
+    out += _masters()
 
     here = [(d.get("name") or "-", str(d.get("pid")), d.get("status") or "-",
               d.get("cwd") or "-")
@@ -196,12 +275,40 @@ def _roster_from_bus():
     return ["слейва пула:", *table(rows)] if len(rows) > 1 else ["слейва пула: нет"]
 
 
-@app.tool(description=(
-    "Послать сообщение слейву пула или локальной сессии. ЕДИНСТВЕННЫЙ рабочий "
-    "способ достучаться до слейва: встроенный SendMessage дотягивается только до "
-    "сессий этого же хоста и на соседнем узле молча никого не найдёт. Возвращает "
-    "вердикт доставки, а не факт отправки. notify_when_idle=true не блокирует: "
-    "когда адресат освободится, уведомление придёт отдельным сообщением."))
+def _masters():
+    """Мастера шарда: кому отсюда можно ОТВЕТИТЬ.
+
+    Реестра нет намеренно — спрашиваем общий инбокс шарда, и живой мастер это
+    тот, кто отозвался. Слейву эта строка нужна как воздух: без неё адрес
+    мастера негде взять, кроме конверта уже полученного письма.
+
+    Мастеру она показывает соседа. Мастеров на проект можно держать сколько
+    угодно, но раздавать задачи вдвоём, не зная друг о друге, нельзя: два пинга
+    одному слейву в один вечер как раз этим и кончились."""
+    try:
+        found = bus.gather("who", timeout=MASTERS_WAIT,
+                           subj=bus.inbox(bus.ALL_MASTERS))
+    except bus.BusError as e:
+        return ["", f"мастера шарда {bus.SHARD}: шина недоступна ({e})"]
+    if not found:
+        return ["", f"мастеров шарда {bus.SHARD} на шине нет"]
+    rows = [("МАСТЕР (адрес для send)", "СЕССИЯ", "КАТАЛОГ")]
+    for d in sorted(found, key=lambda d: str(d.get("master"))):
+        mine = " (это я)" if d.get("master") == MASTER_ID else ""
+        rows.append((str(d.get("master")), (d.get("session") or "-") + mine,
+                     d.get("cwd") or "-"))
+    return ["", "мастера шарда:", *table(rows)]
+
+
+@tool(description=(
+    "Послать сообщение слейву пула, мастеру шарда или сессии на этой машине. "
+    "ЕДИНСТВЕННЫЙ рабочий способ достучаться и до слейва, и до мастера: "
+    "встроенный SendMessage дотягивается только до сессий этого же хоста и на "
+    "соседнем узле молча никого не найдёт. `to`: имя слейва (sl-<проект>-<n>), "
+    "адрес мастера из agents или из конверта полученного сообщения "
+    "(from-name), имя/pid локальной сессии. Возвращает вердикт доставки, а не "
+    "факт отправки. notify_when_idle=true не блокирует: когда адресат "
+    "освободится, уведомление придёт отдельным сообщением."))
 def send(to: str, message: str, priority: str = "next",
          notify_when_idle: bool = False, wait_seconds: int = 0) -> str:
     if priority not in session.PRIORITIES:
@@ -209,9 +316,50 @@ def send(to: str, message: str, priority: str = "next",
     if not message.strip():
         return "пустое сообщение отправлять нечего"
 
+    # Три адреса, и порядок разбора не произвольный. Слейв узнаётся префиксом
+    # джоба — это единственное имя, которое строит сам пул. Дальше пробуем свой
+    # хост: сессия рядом дешевле и не занимает шину. Всё остальное — мастер,
+    # потому что больше адресов не бывает, и «не нашёл здесь» обязано вести к
+    # нему, а не в LookupError: ровно этим отчёты слейвов и терялись.
     if to.startswith(slaves.JOB_PREFIX):
         return _send_to_slave(to, message, priority, notify_when_idle, wait_seconds)
-    return _send_locally(to, message, priority, wait_seconds)
+    here = _local_session(to)
+    if here:
+        return _send_locally(here, message, priority, wait_seconds)
+    return _send_to_master(to, message, priority)
+
+
+def _local_session(target):
+    """Сессия на ЭТОЙ машине или None, если её здесь нет.
+
+    `Ambiguous` не глушим и наверх пускаем: «здесь такой нет» разрешает искать
+    адресата дальше, на шине, а «их тут несколько» обязано остановить —
+    молча взять первую значит однажды написать не тому."""
+    try:
+        return session.find(target)
+    except session.Ambiguous:
+        raise
+    except LookupError:
+        return None
+
+
+def _send_to_master(name, message, priority):
+    """Обратный канал: слейв -> мастер, в его инбокс на шине.
+
+    Адрес мастера слейв не придумывает: он приезжает в конверте каждого
+    сообщения (from-name) и лежит в ростере. Ответа ждём — вердикт доставки
+    здесь важнее, чем где-либо ещё: отчёт слейва и есть главный сигнал петли,
+    и «отправлено» вместо «доставлено» означало бы ровно то молчание, из-за
+    которого мастер идёт читать чужой экран глазами."""
+    try:
+        # from — поле, а не имя параметра: в питоне это ключевое слово.
+        r = bus.ask(name, "message", text=message, priority=priority,
+                    **{"from": my_name()})
+    except bus.BusError as e:
+        return f"{name}: НЕ ДОСТАВЛЕНО — {e}"
+    if "error" in r:
+        return f"{name}: НЕ ДОСТАВЛЕНО — {r['error']}"
+    return f"{name}: доставлено (msg_id={r.get('msg_id')})"
 
 
 def _send_to_slave(name, message, priority, notify_when_idle, wait_seconds):
@@ -225,6 +373,11 @@ def _send_to_slave(name, message, priority, notify_when_idle, wait_seconds):
         result = bus.request(slave_node(name), "send", name=name, message=message,
                              priority=priority, wait=wait,
                              notify=bool(notify_when_idle and not wait),
+                             # Кто пишет. Едет в конверт полем from-name, и
+                             # подсказка канала называет его слейву как адрес
+                             # для ответа: без этого «ответь мне» указывает в
+                             # никуда, а слейв узнаёт об этом уже отказом.
+                             from_name=my_name(),
                              reply_to=MY_INBOX, timeout=wait + bus.TIMEOUT)
     except bus.BusError as e:
         return f"{name}: НЕ ДОСТАВЛЕНО — {e}"
@@ -239,12 +392,11 @@ def _send_to_slave(name, message, priority, notify_when_idle, wait_seconds):
     return verdict
 
 
-def _send_locally(target, message, priority, wait_seconds):
-    sess = session.find(target)
+def _send_locally(sess, message, priority, wait_seconds):
     sock = sess["messagingSocketPath"]
     if not session.socket_alive(sock):
-        return f"{target}: инбокс не слушает — сессия мертва"
-    r = session.send(sock, message, priority=priority, from_name="mop",
+        return f"{sess.get('name')}: инбокс не слушает — сессия мертва"
+    r = session.send(sock, message, priority=priority, from_name=my_name(),
                      wait_idle=min(max(wait_seconds, 0), MAX_WAIT))
     verdict = f"{sess.get('name')}: доставлено (msg_id={r['msg_id']})"
     if wait_seconds:
@@ -252,7 +404,7 @@ def _send_locally(target, message, priority, wait_seconds):
     return verdict
 
 
-@app.tool(annotations=READ_ONLY, description=(
+@tool(annotations=READ_ONLY, description=(
     "Хвост tmux-буфера слейва — единственный способ увидеть то, чего нет в "
     "состоянии: held-диалог чужого сообщения, промпт логина, жалобу на квоту."))
 def tail(name: str, lines: int = 40, grep: str = "") -> str:
@@ -388,16 +540,27 @@ def login() -> str:
 
 
 def watch_inbox():
-    """Подписка на инбокс мастера: асинхронные вести с узлов.
+    """Подписки мастера: свой инбокс и общий инбокс шарда.
 
     MCP умеет только «запрос-ответ» — вбросить что-то в ход модели сервер не
     может. Но он дочерний процесс сессии и знает её сокет, поэтому кладёт
     туда. Раньше на этом месте был поток, ждавший простоя внутри аллокации;
-    теперь ждёт агент рядом с сокетом слейва, а сюда приезжает готовая весть."""
+    теперь ждёт агент рядом с сокетом слейва, а сюда приезжает готовая весть.
+    Этим же субъектом слейв отвечает мастеру — обратная сторона канала.
+
+    Вторая подписка (`master.all.inbox`) — это весь механизм обнаружения:
+    слейв спрашивает её глаголом `who` и узнаёт, кому он может ответить.
+    Реестра мастеров нет и не нужно: мастер живёт ровно столько, сколько живёт
+    его сессия, а любой реестр пережил бы её и врал.
+
+    Молчим, если сессии нет: мастер, которому некуда положить весть, не имеет
+    права называться живым адресом — слейв получит честное «нет на шине»
+    вместо доставленного в никуда."""
     if not MASTER or not master_socket():
         return
     try:
-        bus.subscribe(MY_INBOX, lambda m: notify_master(m.get("text") or ""))
+        bus.subscribe(MY_INBOX, on_inbox)
+        bus.subscribe(bus.inbox(bus.ALL_MASTERS), on_inbox)
     except bus.BusError:
         # Без шины сервер всё равно поднимется: доставка отобьётся понятной
         # ошибкой на первом же send, а молчащая подписка не соврёт успехом.
@@ -416,7 +579,8 @@ def main():
                else f"мастер шарда {bus.SHARD}")
         print(f"mop mcp: профиль {who}, "
               f"{len(app._tool_manager.list_tools())} инструментов, шина {where}, "
-              f"инбокс {MY_INBOX}, сессия: {master_socket() or 'не найдена'}")
+              f"адрес {my_name()}, инбокс {MY_INBOX if MASTER else '(не мастер)'}, "
+              f"сессия: {master_socket() or 'не найдена'}")
         return 0
     watch_inbox()
     app.run("stdio")

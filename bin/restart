@@ -22,4 +22,4 @@ def main(argv):
         print(f"Альтернатива: mop delete {name} && mop add <origin>")
 
 
-lib.run(main)
+lib.run(lib.cluster(main))

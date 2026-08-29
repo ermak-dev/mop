@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import bus, keys, nomad, slaves  # noqa: E402
+from mop import bus, config, keys, nomad, slaves  # noqa: E402
 
 
 def run(fn, argv=None):
@@ -30,10 +30,24 @@ def run(fn, argv=None):
     теряется единственное, что оператору нужно знать."""
     try:
         sys.exit(fn(sys.argv[1:] if argv is None else argv) or 0)
+    except config.Missing as e:
+        # Не трассировка и не «нет связи»: на новой машине это первое, обо что
+        # спотыкаются, и отказ обязан читаться как инструкция.
+        sys.exit(str(e))
     except (ConnectionError, RuntimeError, LookupError, bus.BusError) as e:
         sys.exit(str(e))
     except KeyboardInterrupt:
         sys.exit(130)
+
+
+def cluster(fn):
+    """Командлет, которому нужен настроенный кластер. Проверка обязательных
+    настроек — до первого сетевого вызова, чтобы отказ был про настройки, а не
+    про таймаут к чужому адресу."""
+    def wrap(argv):
+        config.require()
+        return fn(argv)
+    return wrap
 
 
 def usage(doc):

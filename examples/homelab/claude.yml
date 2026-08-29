@@ -1,3 +1,8 @@
+# ПРИМЕР, НЕ ЧАСТЬ ПРОДУКТА. Узловая обвязка автора: его личные скиллы и
+# MCP-серверы автоматизации рабочего стола. Пулу mop ничего из этого не нужно —
+# пакет, зависимости и агент ставит deploy/setup.yml, а свой MCP-сервер слейву
+# прописывает врапер при каждой загрузке.
+#
 # Claude slave-node configuration: user-level skills + MCP servers.
 #
 # Slave sessions on the pool run under the same user as the control machine
@@ -71,39 +76,12 @@
         copy_links: yes
 
     # mop mcp: тот же пул как инструменты для слейва. Узел ходит ТОЛЬКО через
-    # шину -- токена Nomad там больше нет (его снимает nats/setup.yml), и
+    # шину -- токена Nomad там больше нет (его снимает deploy/setup.yml), и
     # сервер поднимается в узловом профиле: канал есть, управления джобами нет.
     # Ростер он собирает опросом самой шины, а не списком джобов.
     #
     # Порядок важен: этот плейбук привозит на узел mop/agent.py, и без него
-    # юнит из nats/setup.yml не с чего запускать. Сначала claude.yml, потом nats.
-    - name: Ensure python3-pip for the mop MCP server
-      ansible.builtin.apt:
-        name: python3-pip
-        state: present
-      become: yes
-
-    - name: Install the mop MCP server's python dependencies
-      ansible.builtin.pip:
-        name: [mcp, nats-py, python-nomad, requests]
-        extra_args: --user --break-system-packages
-        state: present
-
-    - name: Sync the mop package from the control machine
-      ansible.posix.synchronize:
-        src: "{{ lookup('env', 'HOME') }}/mop/"
-        dest: mop/
-        delete: yes
-        recursive: yes
-        rsync_opts:
-          - "--exclude=.git"
-          - "--exclude=__pycache__"
-          # .env НИКОГДА не уезжает на узлы. keys.distribute возит туда только
-          # названное явно (secrets.env), и общий rsync, тащащий весь файл с
-          # кредами GitLab, сводил бы эту фильтрацию к нулю. На узле пойман
-          # 2026-08-29: лежал целиком, 0600, со всеми секретами проекта.
-          - "--exclude=.env"
-
+    # юнит из deploy/setup.yml не с чего запускать. Сначала claude.yml, потом nats.
     - name: Deliver the declared MCP server set
       ansible.builtin.template:
         src: claude-mcp.json.j2

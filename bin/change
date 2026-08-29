@@ -23,4 +23,4 @@ def main(argv):
     print("слейв перезапускается с новым репозиторием (клон пересоздаётся врапером)")
 
 
-lib.run(main)
+lib.run(lib.cluster(main))

@@ -20,4 +20,4 @@ def main(argv):
     os.execvp("ssh", ["ssh", "-t", host, "tmux", "-L", name, "attach", "-t", name])
 
 
-lib.run(main)
+lib.run(lib.cluster(main))

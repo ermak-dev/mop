@@ -20,4 +20,4 @@ def main(argv):
         print(f"  {node}: {results[node]}")
 
 
-lib.run(main)
+lib.run(lib.cluster(main))

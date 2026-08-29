@@ -2,7 +2,7 @@
   "mcpServers": {
     "mop": {
       "type": "stdio",
-      "command": "/home/ermak/mop/bin/mop",
+      "command": "./bin/mop",
       "args": ["mcp"]
     }
   }

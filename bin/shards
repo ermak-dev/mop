@@ -57,4 +57,4 @@ def main(argv):
         print(s)
 
 
-lib.run(main)
+lib.run(lib.cluster(main))

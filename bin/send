@@ -96,4 +96,4 @@ def main(argv):
     return to_slave(a, body)
 
 
-lib.run(main)
+lib.run(lib.cluster(main))

@@ -28,4 +28,4 @@ def main(argv):
     print("\nmop add --llm <профиль> [origin]   |   mop login раздаёт ключи на узлы")
 
 
-lib.run(main)
+lib.run(lib.cluster(main))
