@@ -300,4 +300,4 @@ echo "=== disk after ==="
 report_space
 
 # Leave a machine-readable line for `nomad alloc logs` and any future scrape.
-echo "wk_sweep_freed_kb=$freed_kb wk_sweep_free_gb=$(free_gb "$HOME")"
+echo "pu_sweep_freed_kb=$freed_kb pu_sweep_free_gb=$(free_gb "$HOME")"
