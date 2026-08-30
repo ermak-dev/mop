@@ -7,7 +7,6 @@
 import os
 
 import lib
-from mop import slaves
 
 
 def main(argv):
@@ -16,8 +15,11 @@ def main(argv):
     name = argv[0]
     lib.guard(name)
     a = lib.running_alloc(name)
-    host = slaves.SSH_ALIAS.get(a["NodeName"], a["NodeName"])
-    os.execvp("ssh", ["ssh", "-t", host, "tmux", "-L", name, "attach", "-t", name])
+    # Имя узла в Nomad и есть ssh-алиас: клиент объявляется под именем из
+    # инвентаря, а инвентарь берёт способ дозвона из ~/.ssh/config по тому же
+    # имени. Таблицы имён между ними нет и не нужно.
+    os.execvp("ssh", ["ssh", "-t", a["NodeName"],
+                      "tmux", "-L", name, "attach", "-t", name])
 
 
 lib.run(lib.cluster(main))

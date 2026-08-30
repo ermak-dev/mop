@@ -19,25 +19,15 @@
 # Симлинк ~/etc/nats обязателен, как и ~/etc/nomad: таблицы «имя -> плейбук»
 # нигде нет, путь и есть таблица.
 
-# Имя узла в NOMAD и имя хоста в ИНВЕНТАРЕ расходятся: gamer живёт в WSL, и
-# ssh-алиас у него свой. Субъект шины строится по имени узла, поэтому оно
-# считается один раз здесь и дальше живёт в hostvars -- иначе агент молча
-# подпишется не на тот субъект, и узел будет выглядеть выключенным.
-- name: Resolve Nomad node names
+# Имя узла в Nomad, имя в инвентаре и ssh-алиас — одно и то же имя: клиент
+# Nomad объявляется как `name = inventory_hostname` (deploy/nomad/client.hcl.j2).
+# Раньше они расходились у gamer, и mop нёс ради этого настройку с таблицей
+# имён; агент, подписавшийся не на тот субъект, выглядел как выключенный узел.
+- name: Bus address on the LAN
   hosts: nomad_clients:nomad_control
   gather_facts: no
 
   tasks:
-    - name: Nomad node name for this host
-      ansible.builtin.set_fact:
-        mop_node: "{{ nomad_node_names[inventory_hostname] | default(inventory_hostname) }}"
-      vars:
-        # Обратное к MOP_SSH_ALIAS (узел nomad -> ssh-алиас): здесь нужен
-        # ssh-алиас -> узел. Второй список имён завёл бы расхождение.
-        nomad_node_names: "{{ dict(MOP_SSH_ALIAS.split(',')
-                                   | map('split', '=')
-                                   | map('reverse')) }}"
-
     # На LAN-адрес -- тот же, на который Nomad-клиент ходит за RPC. Публичное
     # имя тут не годится в принципе: оно резолвится в адрес роутера, а хайрпин
     # на порт шины он не делает -- первый же прогон дал connection refused на
@@ -58,7 +48,7 @@
     # заводит файл при первом обращении и возвращает то же значение дальше.
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_tgz: "https://github.com/nats-io/nats-server/releases/download/v{{ MOP_NATS_VERSION }}/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64.tar.gz"
-    nats_nodes: "{{ groups['nomad_clients'] | map('extract', hostvars, 'mop_node') | list }}"
+    nats_nodes: "{{ groups['nomad_clients'] }}"
     # Шарды считает `mop deploy` из ростера Nomad и своей памяти (см. bin/deploy)
     # и передаёт сюда --extra-vars. Пустой список -- законное состояние пустого
     # пула: сервер поднимется, мастеров просто ещё нет.
@@ -139,8 +129,8 @@
     # сокетов, а живые слейва читались бы мёртвыми.
     mop_uid: "{{ getent_passwd[MOP_USER][1] }}"
     nats_addr: "{{ nats_lan }}"
-    nats_user: "node-{{ mop_node }}"
-    nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + mop_node + '.pass length=32 chars=ascii_letters,digits') }}"
+    nats_user: "node-{{ inventory_hostname }}"
+    nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + inventory_hostname + '.pass length=32 chars=ascii_letters,digits') }}"
     shards: "{{ mop_shards | default([]) }}"
 
   tasks:
@@ -242,7 +232,7 @@
       args:
         chdir: "{{ mop_home }}"
       environment:
-        MOP_NODE: "{{ mop_node }}"
+        MOP_NODE: "{{ inventory_hostname }}"
       changed_when: false
 
   handlers:

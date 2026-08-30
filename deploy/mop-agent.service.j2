@@ -6,9 +6,10 @@ Wants=network-online.target
 [Service]
 User={{ MOP_USER }}
 WorkingDirectory={{ mop_home }}
-# Имя узла в NOMAD, а не hostname: субъект шины строится по нему, а у gamer
-# они расходятся. Угадывать нельзя — агент молча подпишется не на тот субъект.
-Environment=MOP_NODE={{ mop_node }}
+# Имя узла в NOMAD. Оно же — имя в инвентаре и ssh-алиас: клиент Nomad
+# объявляется как `name = inventory_hostname`. Угадывать по hostname нельзя,
+# агент молча подписался бы не на тот субъект.
+Environment=MOP_NODE={{ inventory_hostname }}
 # Без неё session.py не найдёт каталог сокетов сессий и уйдёт на запасной
 # путь, где никого нет: слейва читались бы как мёртвые при живых сессиях.
 # UID спрошен у САМОГО УЗЛА (getent), а не задан настройкой на весь пул.

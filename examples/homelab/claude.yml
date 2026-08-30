@@ -27,7 +27,7 @@
 # is gamer's ~/.windows-mcp/config.toml auth_key). Its URL is per-host:
 # gamer-wsl runs INSIDE that box with mirrored networking, where the Windows
 # firewall drops the hairpin to the LAN address and only 127.0.0.1 reaches
-# the host -- every other node uses the FQDN.
+# the host -- every other node uses its LAN address.
 #
 # The http bearer tokens come from the project's .env, not from this template:
 # the same two used to sit in the clear here AND inside the Nomad job spec,
@@ -48,14 +48,28 @@
     project_env: "{{ lookup('env', 'HOME') }}/mop/.env"
     windows_mcp_token: "{{ lookup('ini', 'WINDOWS_MCP_TOKEN type=properties file=' + project_env) }}"
     mac_mcp_token: "{{ lookup('ini', 'MAC_MCP_TOKEN type=properties file=' + project_env) }}"
-    # Хост, ВНУТРИ которого живёт этот узел, достаётся только через loopback:
-    # там mirrored networking, и Windows-файрвол роняет хайрпин на LAN-адрес.
-    win_inside: "{{ MOP_SSH_ALIAS.split(',') | map('split','=') | map('last') | list }}"
-    windows_mcp_url: >-
-      {{ 'http://127.0.0.1:' ~ MCP_PORT ~ '/mcp' if inventory_hostname in win_inside
-         else 'http://' ~ WINDOWS_MCP_HOST ~ ':' ~ MCP_PORT ~ '/mcp' }}
 
   tasks:
+    # Узел, живущий ВНУТРИ windows-хоста, достаёт до него только по loopback:
+    # там mirrored networking, и Windows-файрвол роняет хайрпин на LAN-адрес.
+    #
+    # Критерий тот же, что у врапера слейва: адрес windows-хоста среди адресов
+    # собственных интерфейсов. Раньше здесь стоял список ssh-алиасов из
+    # MOP_SSH_ALIAS — он давал верный ответ по совпадению, а не по смыслу:
+    # «узел, у которого есть алиас» и «узел внутри windows» — разные вещи,
+    # совпавшие в этой установке на одном хосте.
+    - name: Own IPv4 addresses of this node
+      ansible.builtin.command: ip -4 -o addr show
+      register: node_addrs
+      changed_when: false
+
+    - name: URL of windows-mcp as seen from this node
+      ansible.builtin.set_fact:
+        windows_mcp_url: >-
+          {{ 'http://127.0.0.1:' ~ MCP_PORT ~ '/mcp'
+             if WINDOWS_MCP_HOST and WINDOWS_MCP_HOST in node_addrs.stdout
+             else 'http://' ~ WINDOWS_MCP_HOST ~ ':' ~ MCP_PORT ~ '/mcp' }}
+
     - name: Ensure ~/.claude exists
       ansible.builtin.file:
         path: .claude

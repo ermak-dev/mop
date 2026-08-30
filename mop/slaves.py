@@ -16,7 +16,6 @@ PROJECT = config.PROJECT
 MEM = config.num("MOP_SLAVE_MEM_MB")   # бюджет слейва, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
 HOME = config.get("MOP_HOME")             # $HOME на узлах пула
 USER = config.get("MOP_USER")               # под кем идут задачи
-SSH_ALIAS = config.pairs("MOP_SSH_ALIAS")  # узел nomad -> ssh-алиас
 # Куда переводить слейв, у которого кончилась квота текущей модели
 # (решение оператора 27.08: Fable → Opus).
 FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL")
