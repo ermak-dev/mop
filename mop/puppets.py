@@ -58,8 +58,10 @@ if [ ! -d "$d/.git" ]; then
     mkdir -p "$HOME/puppets"
     git clone -q "$PU_ORIGIN" "$d"
 fi
-for f in "$HOME/puppet-env/$PU_PROJECT"/.env* "$HOME/puppet-env/$PU_PROJECT"/.providers; do
-    [ -e "$f" ] && cp -a "$f" "$d/" || true
+for pat in $${PU_SEED//,/ }; do
+    for f in "$HOME/puppet-env/$PU_PROJECT"/$pat; do
+        [ -e "$f" ] && cp -a "$f" "$d/" || true
+    done
 done
 mkdir -p "$HOME/.claude"
 # ~/.claude.json and ~/.claude/settings.json are NODE-level: every puppet on the
@@ -262,6 +264,7 @@ def job_spec(name, origin, profile=None):
                     "PU_ORIGIN": origin,
                     "PU_PROJECT": project,
                     "PU_SHARD": shard_of(origin),
+                    "PU_SEED": config.get("MOP_PUPPET_SEED"),
                     "HOME": HOME,
                     "PATH": config.get("MOP_PUPPET_PATH").replace("{HOME}", HOME),
                     # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
@@ -694,10 +697,10 @@ def _wait_stopped(name):
 def recycle(name):
     """Пересоздать папета на чистой рабочей копии. -> {node}.
 
-    Клон НЕ переклонируется: несохранённое сносится восстановлением из git
-    (глагол wipe: `git add -A && git reset --hard HEAD` — убирает и untracked,
-    но не трогает игнорируемые, так что .env, привезённый врапером, живёт),
-    target-каталог удаляется целиком — он и есть почти весь объём. Первая
+    Клон НЕ переклонируется: сбрасывается на месте глаголом wipe (reset
+    отслеживаемого + clean -xdff, который выметает и игнорируемое, но
+    щадит подсеянное врапером: .env*, .providers), target-каталог
+    удаляется целиком — он и есть почти весь объём. Первая
     сборка после рецикла долгая, поэтому это крайняя мера, а не гигиена.
 
     Порядок ОБЯЗАТЕЛЕН: остановить джоб → дождаться терминала → wipe →

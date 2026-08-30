@@ -37,7 +37,7 @@ try:
 except ImportError:
     sys.exit("нужна библиотека шины: pip install --user --break-system-packages nats-py")
 
-from . import bus, session
+from . import bus, config, session
 
 HOME = os.path.expanduser("~")
 CLONES = f"{HOME}/puppets"
@@ -343,10 +343,12 @@ async def v_wipe(req):
     """Снести рабочую копию папета и восстановить её из git; target — целиком.
 
     Это половина рецикла (вторая — перерегистрация джоба у мастера). Клон не
-    переклонируется — дорого и незачем: `git add -A && git reset --hard HEAD`
-    убирает и несохранённое, и untracked, но не трогает игнорируемые — .env,
-    привезённый врапером, переживает. target-каталог — чисто производные
-    данные, он удаляется rm -rf и тем самым снимается почти весь объём.
+    переклонируется — дорого и незачем: reset откатывает отслеживаемое,
+    `clean -xdff` выметает и untracked, и игнорируемое (внутриклоновые
+    кэши, node_modules), но `-e` защищает подсеянное врапером — список
+    живёт в MOP_PUPPET_SEED и у врапера, и здесь один. target-каталог —
+    чисто производные данные, он удаляется rm -rf и тем самым снимается
+    почти весь объём.
 
     Предохранитель: живая tmux-сессия — отказ. Агент не судит, свободен ли
     папет, но «сессия жива» — факт, и снос под живой сессией недопустим
@@ -356,10 +358,16 @@ async def v_wipe(req):
         return {"error": f"имя {name!r} не похоже на {PREFIX}<проект>-<n>"}
     if await tmux_alive(name):
         return {"error": f"{name}: tmux-сессия жива — сначала останови джоб"}
+    d = clone_dir(name)
+    # Исключения чистки — из НАСТРОЙКИ, той же, что сеет врапер (PU_SEED в
+    # спеке). Список в двух местах — здесь и в врапере — расползается ровно
+    # к «посеяли одно, снесли другое».
+    excl = " ".join(f"-e '{p}'" for p in
+                     (s.strip() for s in config.get("MOP_PUPPET_SEED").split(",")) if p)
     out, code = await sh(
-        f"git -C {clone_dir(name)} add -A && git -C {clone_dir(name)} reset --hard HEAD")
+        f"git -C {d} reset --hard HEAD && git -C {d} clean -xdff {excl}")
     if code not in (0, None):
-        return {"error": f"git в {clone_dir(name)}: {out.strip() or f'exit {code}'}"}
+        return {"error": f"git в {d}: {out.strip() or f'exit {code}'}"}
     target = f"{HOME}/.cache/target-{name}"
     # Долго: сотни тысяч inode. Таймаут шире офисного — и обычный вызов шела
     # сюда не годится, он бы убил rm на полпути.

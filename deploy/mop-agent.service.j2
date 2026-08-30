@@ -14,6 +14,10 @@ Environment=MOP_NODE={{ inventory_hostname }}
 # путь, где никого нет: папета читались бы как мёртвые при живых сессиях.
 # UID спрошен у САМОГО УЗЛА (getent), а не задан настройкой на весь пул.
 Environment=XDG_RUNTIME_DIR=/run/user/{{ mop_uid }}
+# Что wipe щадит при чистке клона: те же gitignore-шаблоны, которыми врапер
+# сеет в клон .env* и .providers из ~/puppet-env. Список у врапера и агента
+# один (MOP_PUPPET_SEED), и сюда он едет --extra-vars от mop deploy.
+Environment=MOP_PUPPET_SEED={{ MOP_PUPPET_SEED }}
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -m mop.agent
 Restart=always
