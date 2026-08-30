@@ -51,7 +51,6 @@ REQUIRED = {
 DEFAULTS = {
     "MOP_HOME": os.path.expanduser("~"),
     "MOP_USER": os.environ.get("USER") or "ermak",
-    "MOP_UID": str(os.getuid()),
     "MOP_POOL_DC": "home",
     "MOP_CONTROL_DC": "control",
     "MOP_NOMAD_DATA": os.path.expanduser("~/nomad/data"),

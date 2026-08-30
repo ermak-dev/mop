@@ -132,12 +132,23 @@
   vars:
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     mop_home: "{{ MOP_HOME }}/mop"
+    # UID спрашиваем У УЗЛА, а не берём настройкой. Настройка была одна на
+    # весь пул и по факту утверждала, что UID пользователя всюду одинаков; на
+    # узле с другим UID юнит агента уехал бы с чужим XDG_RUNTIME_DIR, и это
+    # ровно тот отказ, который не видно: session.py не нашёл бы каталог
+    # сокетов, а живые слейва читались бы мёртвыми.
+    mop_uid: "{{ getent_passwd[MOP_USER][1] }}"
     nats_addr: "{{ nats_lan }}"
     nats_user: "node-{{ mop_node }}"
     nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + mop_node + '.pass length=32 chars=ascii_letters,digits') }}"
     shards: "{{ mop_shards | default([]) }}"
 
   tasks:
+    - name: UID of the pool user on this node
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ MOP_USER }}"
+
     - name: Ensure python3-pip
       become: yes
       ansible.builtin.apt:

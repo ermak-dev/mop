@@ -11,7 +11,8 @@ WorkingDirectory={{ mop_home }}
 Environment=MOP_NODE={{ mop_node }}
 # Без неё session.py не найдёт каталог сокетов сессий и уйдёт на запасной
 # путь, где никого нет: слейва читались бы как мёртвые при живых сессиях.
-Environment=XDG_RUNTIME_DIR=/run/user/{{ MOP_UID }}
+# UID спрошен у САМОГО УЗЛА (getent), а не задан настройкой на весь пул.
+Environment=XDG_RUNTIME_DIR=/run/user/{{ mop_uid }}
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -m mop.agent
 Restart=always
