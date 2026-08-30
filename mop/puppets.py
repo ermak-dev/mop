@@ -1,4 +1,4 @@
-"""Слейвы пула: спека job'а и достоверное состояние места.
+"""Папеты пула: спека job'а и достоверное состояние места.
 
 Модуль ВОЗВРАЩАЕТ ДАННЫЕ и ничего не печатает. Форматирование живёт во
 фронтендах (командлеты в bin/ печатают таблицы, mop mcp отдаёт то же самое
@@ -14,23 +14,23 @@ from . import bus, config, llm, nomad
 PROJECT = config.PROJECT
 
 # Значения этой установки — .env поверх дефолтов; см. mop/config.py.
-MEM = config.num("MOP_SLAVE_MEM_MB")   # бюджет слейва, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
+MEM = config.num("MOP_PUPPET_MEM_MB")   # бюджет папета, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
 HOME = config.get("MOP_HOME")             # $HOME на узлах пула
 USER = config.get("MOP_USER")               # под кем идут задачи
-# Куда переводить слейв, у которого кончилась квота текущей модели
+# Куда переводить папет, у которого кончилась квота текущей модели
 # (решение оператора 27.08: Fable → Opus).
 FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL")
 # Префикс НЕ настраивается: на нём стоят глобы сторожа диска (включая
 # переходные ~/wk/wk-*), shard_of_name и имена tmux-серверов. Сделать его
 # переменной, пока сторож знает оба префикса буквально, — значит развести
 # половины одного соглашения.
-JOB_PREFIX = "sl-"
+JOB_PREFIX = "pu-"
 
 # ─── LLM-профили ─────────────────────────────────────────────────────────
-# Слейв — всегда claude code; профиль меняет ровно одно: КУДА он ходит за
+# Папет — всегда claude code; профиль меняет ровно одно: КУДА он ходит за
 # токенами. Anthropic-совместимый эндпоинт провайдера (ANTHROPIC_BASE_URL),
 # ключ (ANTHROPIC_AUTH_TOKEN) и карта имён моделей opus/sonnet/haiku в модели
-# провайдера — больше в слейв ничего не меняется, поэтому tmux, tail, doctor
+# провайдера — больше в папет ничего не меняется, поэтому tmux, tail, doctor
 # и детект залипаний работают одинаково для любого профиля.
 #
 # Сами профили — плагины в mop/llm/ (один файл = один профиль, имя файла =
@@ -47,36 +47,36 @@ SECRETS_FILE = f"{HOME}/.config/mop/secrets.env"    # копия на узле �
 
 # Врапер — собственно задача Nomad: довести узел до "клон есть, claude в
 # tmux" и жить, пока жива tmux-сессия. Смерть врапера = рестарт/переезд
-# слейва силами Nomad; на новом узле врапер сам разворачивает всё заново.
+# папета силами Nomad; на новом узле врапер сам разворачивает всё заново.
 WRAPPER = r"""
 set -e
-d="$HOME/slaves/$SL_NAME"
-if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" != "$SL_ORIGIN" ]; then
+d="$HOME/puppets/$PU_NAME"
+if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" != "$PU_ORIGIN" ]; then
     rm -rf "$d"
 fi
 if [ ! -d "$d/.git" ]; then
-    mkdir -p "$HOME/slaves"
-    git clone -q "$SL_ORIGIN" "$d"
+    mkdir -p "$HOME/puppets"
+    git clone -q "$PU_ORIGIN" "$d"
 fi
-for f in "$HOME/slave-env/$SL_PROJECT"/.env* "$HOME/slave-env/$SL_PROJECT"/.providers; do
+for f in "$HOME/puppet-env/$PU_PROJECT"/.env* "$HOME/puppet-env/$PU_PROJECT"/.providers; do
     [ -e "$f" ] && cp -a "$f" "$d/" || true
 done
 mkdir -p "$HOME/.claude"
-# ~/.claude.json and ~/.claude/settings.json are NODE-level: every slave on the
-# host edits the same two files, and slaves boot together after a node restart.
+# ~/.claude.json and ~/.claude/settings.json are NODE-level: every puppet on the
+# host edits the same two files, and puppets boot together after a node restart.
 # Read-modify-write from N processes through one shared temp path truncated the
 # config to 0 bytes three times (2026-08-26/27/28), which parks every claude on
 # the "invalid JSON" prompt and reads as a hung pool. So: one lock for the whole
-# edit, a temp file per slave, and a repair pass for whatever a previous race
+# edit, a temp file per puppet, and a repair pass for whatever a previous race
 # (or a hard VM kill) left behind.
 edit_json() {  # <file> <jq-program> [jq-args...]
     local file="$1" program="$2"; shift 2
-    local tmp="$file.$SL_NAME.tmp"
+    local tmp="$file.$PU_NAME.tmp"
     exec 9>"$file.lock"
     flock 9
     # `jq empty` is NOT a validity check: a zero-byte file is an empty jq input
     # stream, so it exits 0, every filter over it yields nothing, and the 0-byte
-    # config got written straight back (gamer, 2026-08-28 — all six slaves parked
+    # config got written straight back (gamer, 2026-08-28 — all six puppets parked
     # on the config prompt while `mop list` showed only "ЗАВИС"). Demand an
     # actual object, and never install an empty result.
     jq -e 'type == "object"' "$file" >/dev/null 2>&1 || echo '{}' > "$file"
@@ -89,8 +89,8 @@ edit_json() {  # <file> <jq-program> [jq-args...]
     exec 9>&-
 }
 [ -f "$HOME/.claude.json" ] || echo '{}' > "$HOME/.claude.json"
-# A slave has no human to answer the first-run wizard: without these keys every
-# claude sits on the theme prompt, which also reads as a hung slave.
+# A puppet has no human to answer the first-run wizard: without these keys every
+# claude sits on the theme prompt, which also reads as a hung puppet.
 edit_json "$HOME/.claude.json" '.projects[$d].hasTrustDialogAccepted = true
     | .hasCompletedOnboarding = true
     | .theme = (.theme // "dark")' --arg d "$d"
@@ -101,11 +101,11 @@ edit_json "$HOME/.claude.json" '.projects[$d].hasTrustDialogAccepted = true
 # установки (examples/homelab/claude.yml), врапер о них не знает.
 claude mcp add --scope user mop -- "$HOME/mop/bin/mop" mcp >/dev/null 2>&1 || true
 # playwright-mcp needs a browser on the node; install is idempotent and cached
-# in ~/.cache/ms-playwright, so every slave boot just confirms it is there.
+# in ~/.cache/ms-playwright, so every puppet boot just confirms it is there.
 npx -y playwright install chromium >/dev/null 2>&1 || true
 # Same repair as above, and for the same reason: an existing-but-unreadable
 # file (0 bytes after a torn write) made jq fail silently, so the bypass-mode
-# prompt came back and every slave stopped on it.
+# prompt came back and every puppet stopped on it.
 [ -f "$HOME/.claude/settings.json" ] || echo '{}' > "$HOME/.claude/settings.json"
 edit_json "$HOME/.claude/settings.json" '.skipDangerousModePermissionPrompt = true'
 # Встроенный обмен сообщениями убираем совсем. Не «запрещаем на вызове»:
@@ -115,41 +115,41 @@ edit_json "$HOME/.claude/settings.json" '.skipDangerousModePermissionPrompt = tr
 # смотрит, поэтому работает и под --dangerously-skip-permissions.
 #
 # Почему вообще: встроенный механизм находит только сессии ЭТОГО хоста. Пока
-# два слейва стояли на одном узле, он работал и выглядел исправным; на разных
+# два папета стояли на одном узле, он работал и выглядел исправным; на разных
 # узлах он молча не найдёт никого, а тихий отказ в петле мастера хуже громкого.
 #
 # Слияние, а не присваивание: чужие deny-правила на узле сносить незачем.
 #
-# AskUserQuestion: у слейва нет человека за терминалом. Вызов паркует сессию
+# AskUserQuestion: у папета нет человека за терминалом. Вызов паркует сессию
 # намертво -- это ровно то состояние "требует действия", которое doctor лечит
 # рестартом. Без инструмента модель решает сама и идёт дальше.
 #
 # EnterWorktree/ExitWorktree: тихо ломают модель состояния. clone_holds_work
-# смотрит в клон слейва; ушедший в worktree оставит клон чистым, list покажет
+# смотрит в клон папета; ушедший в worktree оставит клон чистым, list покажет
 # "свободен", и мастер задиспатчит поверх живой работы. Отказ молчаливый, а
 # цена -- потерянная работа.
 edit_json "$HOME/.claude/settings.json" '.permissions.deny =
     ((.permissions.deny // []) + ["SendMessage", "ListAgents",
       "AskUserQuestion", "EnterWorktree", "ExitWorktree"] | unique)'
-# CARGO_TARGET_DIR grows without bound - 22 to 49 GB per slave in practice, and
+# CARGO_TARGET_DIR grows without bound - 22 to 49 GB per puppet in practice, and
 # five of them filled the gamer node's disk on 2026-08-26, which killed the WSL
 # VM and stranded every allocation on it. Boot is the only safe moment to drop
 # one: nothing is building yet, and the cache is pure derived data.
-TARGET_DIR="$HOME/.cache/target-$SL_NAME"
+TARGET_DIR="$HOME/.cache/target-$PU_NAME"
 if [ -d "$TARGET_DIR" ] \
     && [ "$(du -sm "$TARGET_DIR" 2>/dev/null | cut -f1 || echo 0)" -gt 30000 ]; then
     rm -rf "$TARGET_DIR"
 fi
-# LLM-профиль слейва: набор переменных для tmux -e. Статическая часть
-# (эндпоинт и карта моделей) приезжает в SL_LLM_ENV из спеки джоба, а КЛЮЧ —
+# LLM-профиль папета: набор переменных для tmux -e. Статическая часть
+# (эндпоинт и карта моделей) приезжает в PU_LLM_ENV из спеки джоба, а КЛЮЧ —
 # только с узла: в спеке джоба секретам не место (её видно в UI Nomad).
 llm_env=()
-if [ -n "$SL_LLM_ENV" ]; then
+if [ -n "$PU_LLM_ENV" ]; then
     while IFS= read -r kv; do
         [ -n "$kv" ] && llm_env+=(-e "$kv")
-    done <<< "$(printf '%s' "$SL_LLM_ENV" | base64 -d)"
+    done <<< "$(printf '%s' "$PU_LLM_ENV" | base64 -d)"
 fi
-if [ -n "$SL_LLM_KEY_VAR" ]; then
+if [ -n "$PU_LLM_KEY_VAR" ]; then
     keyfile="$HOME/.config/mop/secrets.env"
     key=""
     # sed, а не source: файл с ключами не исполняем
@@ -159,44 +159,44 @@ if [ -n "$SL_LLM_KEY_VAR" ]; then
     # раскрытие массива llm_env, валят РЕГИСТРАЦИЮ джоба на "Invalid
     # expression" ещё до запуска: [@] для HCL не выражение. Осторожно, это
     # правило действует и на комментарии — Nomad разбирает всю строку.
-    [ -f "$keyfile" ] && key=$(sed -n "s/^$${SL_LLM_KEY_VAR}=//p" "$keyfile" | tail -1)
+    [ -f "$keyfile" ] && key=$(sed -n "s/^$${PU_LLM_KEY_VAR}=//p" "$keyfile" | tail -1)
     if [ -z "$key" ]; then
         # Валимся громко: без ключа claude поднимется и будет отбивать каждый
-        # ход 401-й, а слейв будет читаться как живое и свободное.
-        echo "LLM-профиль $SL_LLM: на узле нет ключа $SL_LLM_KEY_VAR в $keyfile — раздай: mop login" >&2
+        # ход 401-й, а папет будет читаться как живое и свободное.
+        echo "LLM-профиль $PU_LLM: на узле нет ключа $PU_LLM_KEY_VAR в $keyfile — раздай: mop login" >&2
         exit 1
     fi
-    llm_env+=(-e "$SL_LLM_AUTH_VAR=$key")
+    llm_env+=(-e "$PU_LLM_AUTH_VAR=$key")
 fi
 
-# Креды ШАРДА, а не узла. Без этого слейв ходил бы на шину под кредом агента и
+# Креды ШАРДА, а не узла. Без этого папет ходил бы на шину под кредом агента и
 # мог бы написать в чужой проект: агент видит, КОГО спрашивают, но не видит,
 # КТО спрашивает, и такую подмену не поймал бы. Файл раскатывает deploy/setup.yml
-# по одному на шард; если его нет -- валимся ГРОМКО, потому что слейв без шины
+# по одному на шард; если его нет -- валимся ГРОМКО, потому что папет без шины
 # читается мастером как живой, но молчащий.
-shard_creds="$HOME/.config/mop/bus-$SL_SHARD.json"
+shard_creds="$HOME/.config/mop/bus-$PU_SHARD.json"
 if [ ! -f "$shard_creds" ]; then
-    echo "нет кредов шарда $SL_SHARD в $shard_creds -- заведи шард: mop deploy $SL_ORIGIN" >&2
+    echo "нет кредов шарда $PU_SHARD в $shard_creds -- заведи шард: mop deploy $PU_ORIGIN" >&2
     exit 1
 fi
 
-# a dedicated tmux SERVER per slave (-L): with the default server every
+# a dedicated tmux SERVER per puppet (-L): with the default server every
 # session on the node lives in the cgroup of whichever wrapper started the
-# server first, and one task budget OOM-kills all slaves at once
-tmux -L "$SL_NAME" kill-session -t "$SL_NAME" 2>/dev/null || true
+# server first, and one task budget OOM-kills all puppets at once
+tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null || true
 # env must go through -e: a plain env prefix only reaches the tmux SERVER when
 # this wrapper happens to start it, and every later session inherits the first
-# wrapper's variables (all slaves ended up sharing one CARGO_TARGET_DIR)
-tmux -L "$SL_NAME" new-session -d -s "$SL_NAME" -c "$d" \
-    -e CARGO_TARGET_DIR="$HOME/.cache/target-$SL_NAME" \
+# wrapper's variables (all puppets ended up sharing one CARGO_TARGET_DIR)
+tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
+    -e CARGO_TARGET_DIR="$HOME/.cache/target-$PU_NAME" \
     -e CARGO_BUILD_JOBS=1 \
     -e PATH="$d/bin:$PATH" \
-    -e MOP_SHARD="$SL_SHARD" \
+    -e MOP_SHARD="$PU_SHARD" \
     -e MOP_BUS_CONFIG="$shard_creds" \
     "$${llm_env[@]}" \
     "$HOME/.local/bin/claude --dangerously-skip-permissions"
-trap 'tmux -L "$SL_NAME" kill-session -t "$SL_NAME" 2>/dev/null; exit 0' TERM INT
-while tmux -L "$SL_NAME" has-session -t "$SL_NAME" 2>/dev/null; do sleep 10 & wait $!; done
+trap 'tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null; exit 0' TERM INT
+while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wait $!; done
 """
 
 
@@ -205,9 +205,9 @@ def shard_of(origin):
 
     Basename без .git, и это ЕДИНСТВЕННОЕ определение проекта в системе.
     Соблазн взять хеш от полного origin есть — тогда два `rugent.git` на разных
-    хостах не слились бы в один шард. Но имена слейвов уже строятся отсюда же
-    (`sl-<проект>-<n>`), и завести рядом второе, более точное понятие «проект»
-    значит получить два места, по-разному отвечающих на вопрос «чей это слейв».
+    хостах не слились бы в один шард. Но имена папетов уже строятся отсюда же
+    (`pu-<проект>-<n>`), и завести рядом второе, более точное понятие «проект»
+    значит получить два места, по-разному отвечающих на вопрос «чей это папет».
     Цена честная и названа: одинаковые basename делят шард ровно так же, как
     уже делят имена. Понадобится развести — сюда добавляется суффикс от
     sha256(origin), и больше никуда."""
@@ -215,7 +215,7 @@ def shard_of(origin):
 
 
 def shard_of_name(name):
-    """Шард по имени слейва: sl-<проект>-<n>. Откат для случая, когда клона
+    """Шард по имени папета: pu-<проект>-<n>. Откат для случая, когда клона
     ещё нет, — origin спросить не у кого, а имя уже есть."""
     if not name.startswith(JOB_PREFIX):
         return ""
@@ -223,7 +223,7 @@ def shard_of_name(name):
 
 
 def clone_dir(name):
-    return f"{HOME}/slaves/{name}"
+    return f"{HOME}/puppets/{name}"
 
 
 def job_spec(name, origin, profile=None):
@@ -232,7 +232,7 @@ def job_spec(name, origin, profile=None):
     prof = llm.get(profile)
     if prof is None:
         # Протухший Meta.llm у работающего джоба: профиль удалили из реестра,
-        # а джоб жив. Отказ обязан звать слейва по имени — иначе искать, кто
+        # а джоб жив. Отказ обязан звать папета по имени — иначе искать, кто
         # именно не перерегистрируется, придётся по трассе.
         raise RuntimeError(f"{name}: нет LLM-профиля {profile}; есть: "
                            f"{', '.join(llm.profiles())} (mop llm)")
@@ -244,7 +244,7 @@ def job_spec(name, origin, profile=None):
         "Type": "service",
         "Meta": {"origin": origin, "llm": profile},
         "TaskGroups": [{
-            "Name": "slaves",
+            "Name": "puppets",
             "Count": 1,
             "RestartPolicy": {
                 "Attempts": 3,
@@ -258,17 +258,17 @@ def job_spec(name, origin, profile=None):
                 "User": USER,
                 "Config": {"command": "/bin/bash", "args": ["-c", WRAPPER]},
                 "Env": {
-                    "SL_NAME": name,
-                    "SL_ORIGIN": origin,
-                    "SL_PROJECT": project,
-                    "SL_SHARD": shard_of(origin),
+                    "PU_NAME": name,
+                    "PU_ORIGIN": origin,
+                    "PU_PROJECT": project,
+                    "PU_SHARD": shard_of(origin),
                     "HOME": HOME,
-                    "PATH": config.get("MOP_SLAVE_PATH").replace("{HOME}", HOME),
+                    "PATH": config.get("MOP_PUPPET_PATH").replace("{HOME}", HOME),
                     # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
-                    "SL_LLM": profile,
-                    "SL_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
-                    "SL_LLM_KEY_VAR": prof.get("key") or "",
-                    "SL_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
+                    "PU_LLM": profile,
+                    "PU_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
+                    "PU_LLM_KEY_VAR": prof.get("key") or "",
+                    "PU_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
                 },
                 "Resources": {"CPU": 1000, "MemoryMB": MEM},
                 "KillTimeout": 15 * 10**9,
@@ -278,11 +278,11 @@ def job_spec(name, origin, profile=None):
 
 
 def jobs(shard=None):
-    """Джобы слейвов. Префикс sl- ловит и sl-cleanup с его периодическими
-    детьми; слейвы — те, что врапер пометил origin'ом.
+    """Джобы папетов. Префикс pu- ловит и pu-cleanup с его периодическими
+    детьми; папеты — те, что врапер пометил origin'ом.
 
     shard=None -> срез ЭТОГО процесса: `mop master` ставит MOP_SHARD, и мастер
-    проекта перестаёт видеть чужих слейвов уже здесь, в ростере. Псевдошард
+    проекта перестаёт видеть чужих папетов уже здесь, в ростере. Псевдошард
     admin (оператор вне мастер-шелла) видит всё."""
     listing = nomad.client().jobs.get_jobs(prefix=JOB_PREFIX, meta=True)
     out = [j for j in listing if "origin" in (j.get("Meta") or {})]
@@ -300,10 +300,10 @@ def next_name(project):
     return f"{JOB_PREFIX}{project}-{n}"
 
 
-# ─── состояние слейва ────────────────────────────────────────────────────
-# КАК УЗНАТЬ РЕАЛЬНОЕ СОСТОЯНИЕ СЛЕЙВА
+# ─── состояние папета ────────────────────────────────────────────────────
+# КАК УЗНАТЬ РЕАЛЬНОЕ СОСТОЯНИЕ ПАПЕТА
 #
-# Узел присылает ФАКТЫ, вердикт собираем здесь. Слейв сам ведёт две вещи, и
+# Узел присылает ФАКТЫ, вердикт собираем здесь. Папет сам ведёт две вещи, и
 # они и есть источник правды (обе появляются независимо от моста claude.ai):
 #
 # 1) ФАЙЛ АКТИВНОСТИ ~/.claude/sessions/<pid>.json: cwd (по нему матчим — он
@@ -324,7 +324,7 @@ def next_name(project):
 # прежнюю tmux-эвристику. Детект протухшего логина остаётся на tmux — в файле
 # он не виден.
 #
-# Пробник живёт в mop/session.py и исполняется агентом НА УЗЛЕ: сокет слейва
+# Пробник живёт в mop/session.py и исполняется агентом НА УЗЛЕ: сокет папета
 # host-local, снаружи к нему не подключиться.
 #
 # Всё, что ниже, — ЧИСТЫЕ функции над этими фактами. Так вышло не случайно:
@@ -334,7 +334,7 @@ SESSION_STATES = ("idle", "busy", "requires_action", "waiting", "offline")
 
 
 def facts(node, name):
-    """Факты об одном слейве с его узла."""
+    """Факты об одном папете с его узла."""
     return bus.request(node, "state", name=name)
 
 
@@ -364,7 +364,7 @@ def _screen_complaint(activity):
     # полно рабочих слов.
     #
     # Строки про Remote Control отсюда убраны вместе с самим --remote-control:
-    # слейва больше не ходят на мост claude.ai, и "/rc failed" на их экране
+    # папета больше не ходят на мост claude.ai, и "/rc failed" на их экране
     # означало бы что угодно, только не болезнь. Для профилей с ключом
     # провайдера (glm) логин claude.ai вообще не при делах.
     if "not logged in" in low or "login expired" in low:
@@ -374,7 +374,7 @@ def _screen_complaint(activity):
     # нужен либо другой /model, либо пополнение.
     #
     # Жалоба живёт в скроллбэке и после лечения, поэтому считается актуальной
-    # только если ПОСЛЕ неё модель не переключали: иначе вылеченное слейв
+    # только если ПОСЛЕ неё модель не переключали: иначе вылеченное папет
     # вечно читалось бы как больное.
     if ("out of usage credits" in low
             and low.rfind("out of usage credits") > low.rfind("set model to")):
@@ -401,10 +401,10 @@ def _tmux_guess(activity):
 
 
 def _work_branch(clone):
-    """Ветка слейва, если она не дефолтная, — иначе None.
+    """Ветка папета, если она не дефолтная, — иначе None.
 
     Занятость места — это НЕ имя ветки, и здесь оно нужно только чтобы
-    показать человеку, где слейв сидит."""
+    показать человеку, где папет сидит."""
     if not clone:
         return None
     cur, default = clone.get("cur"), clone.get("def")
@@ -459,7 +459,7 @@ def _state_from_clone(clone):
     return f"занят: {branch}" if branch else "свободен"
 
 
-def slave_state(f):
+def puppet_state(f):
     """Занятость места по фактам с узла. ЧИСТАЯ функция: см. блок выше.
 
     «Свободен» означает, что в клоне нет несохранённой работы, а не что сессия
@@ -494,7 +494,7 @@ def slave_state(f):
 
 
 def is_free(state):
-    """Свободен ли слейв по строке состояния из slave_state.
+    """Свободен ли папет по строке состояния из puppet_state.
 
     По ПРЕФИКСУ: у свободного места состояние обычно несёт ещё и ветку —
     «свободен (master)». Точное сравнение врало и до переезда на шину:
@@ -509,10 +509,10 @@ def _collect():
     """Ростер Nomad плюс состояние с узлов, ОДНИМ заходом.
 
     Общая часть list и doctor. Раньше каждый ходил на узлы сам и платил по
-    четыре рукопожатия exec'а за слейва — на десяти слейвах это сорок
+    четыре рукопожатия exec'а за папета — на десяти папетах это сорок
     последовательных подключений, и столько же ещё раз, если следом звали
     doctor. Теперь: один запрос в Nomad за ростером и по одному запросу на
-    УЗЕЛ за всеми его слейвами, параллельно по одному соединению.
+    УЗЕЛ за всеми его папетами, параллельно по одному соединению.
 
     -> [{job, alloc, state}]; state=None там, где спрашивать некого.
     """
@@ -538,7 +538,7 @@ def _collect():
     except bus.BusError as e:
         answers = {node: bus.BusError(str(e)) for node in by_node}
 
-    # Место слейвов — ОТДЕЛЬНЫЙ поезд с щедрым таймаутом: du небыстрый, и
+    # Место папетов — ОТДЕЛЬНЫЙ поезд с щедрым таймаутом: du небыстрый, и
     # вплавить его в states значило бы читать медленный обмер как «агент
     # молчит». Не доехало — в колонке прочерк, список состояний цел.
     try:
@@ -550,24 +550,24 @@ def _collect():
 
     for node, its in by_node.items():
         answer = answers.get(node)
-        # Молчащий агент — ОТДЕЛЬНАЯ болезнь, не "слейв завис": слейв при этом
+        # Молчащий агент — ОТДЕЛЬНАЯ болезнь, не "папет завис": папет при этом
         # может прекрасно работать, и рестартить его нельзя.
         if isinstance(answer, Exception):
             for i in its:
                 i["state"] = f"АГЕНТ МОЛЧИТ ({answer})"
             continue
-        got = (answer or {}).get("slaves") or {}
+        got = (answer or {}).get("puppets") or {}
         sanswer = sizes.get(node)
         sgot = ({} if isinstance(sanswer, Exception)
                 else ((sanswer or {}).get("sizes") or {}))
         for i in its:
-            i["state"] = slave_state(got.get(i["job"]["ID"]))
+            i["state"] = puppet_state(got.get(i["job"]["ID"]))
             i["disk_kb"] = sgot.get(i["job"]["ID"])
     return items
 
 
-def slave_rows():
-    """Слейва как ДАННЫЕ: [{name, node, alloc_status, state, llm, origin,
+def puppet_rows():
+    """Папета как ДАННЫЕ: [{name, node, alloc_status, state, llm, origin,
     disk_kb}]. disk_kb — клон плюс target, обмеряется спросом; None — du не
     доехал, это прочерк, а не ноль."""
     rows = []
@@ -607,7 +607,7 @@ def pool():
 # ─── диагностика ─────────────────────────────────────────────────────────
 # Категории и лечение:
 #   залип/не отвечает      -> restart аллокации (клон и ветка переживают)
-#   не залогинен/протух    -> раздать креды на пул, затем restart слейва
+#   не залогинен/протух    -> раздать креды на пул, затем restart папета
 #   pending/failed/lost    -> alloc stop: Nomad пересоздаёт сразу, минуя
 #                             restart-backoff (до 30 мин)
 #   нет квоты модели       -> печать /model в пейн; рестарт квоту не вернёт
@@ -637,7 +637,7 @@ def _placement_issue(job, alloc):
     if alloc:
         return {"name": name, "alloc": alloc, "action": "stop",
                 "diagnosis": f"аллок {alloc['ClientStatus']}"}
-    queued = (job.get("JobSummary", {}).get("Summary", {}).get("slaves") or {}).get("Queued", 0)
+    queued = (job.get("JobSummary", {}).get("Summary", {}).get("puppets") or {}).get("Queued", 0)
     if queued:
         return {"name": name, "alloc": None, "action": None,
                 "diagnosis": "queued — нет свободных слотов в пуле"}
@@ -646,8 +646,8 @@ def _placement_issue(job, alloc):
 
 def _action_for(state):
     """Лечение для состояния. False — состояние здоровое, проблемы нет."""
-    # Молчит АГЕНТ, а не слейв. Рестарт слейва тут ничего не лечит и вполне
-    # может убить живую работу в клоне: про сам слейв мы в этот момент не
+    # Молчит АГЕНТ, а не папет. Рестарт папета тут ничего не лечит и вполне
+    # может убить живую работу в клоне: про сам папет мы в этот момент не
     # знаем ничего. Показать — да, трогать — нет.
     if state.startswith("АГЕНТ МОЛЧИТ"):
         return None
@@ -668,7 +668,7 @@ def _action_for(state):
 # ─── рецикл ───────────────────────────────────────────────────────────────
 def wipe(node, name):
     """Глагол wipe напрямую, без остановки джоба. Агент сам откажет, если
-    tmux-сессия жива: голый wipe — для уже остановленного слейва, полный
+    tmux-сессия жива: голый wipe — для уже остановленного папета, полный
     цикл (стоп → снос → подъём) — recycle."""
     r = bus.request(node, "wipe", name=name, timeout=600)
     if "error" in r:
@@ -692,7 +692,7 @@ def _wait_stopped(name):
 
 
 def recycle(name):
-    """Пересоздать слейва на чистой рабочей копии. -> {node}.
+    """Пересоздать папета на чистой рабочей копии. -> {node}.
 
     Клон НЕ переклонируется: несохранённое сносится восстановлением из git
     (глагол wipe: `git add -A && git reset --hard HEAD` — убирает и untracked,
@@ -701,7 +701,7 @@ def recycle(name):
     сборка после рецикла долгая, поэтому это крайняя мера, а не гигиена.
 
     Порядок ОБЯЗАТЕЛЕН: остановить джоб → дождаться терминала → wipe →
-    перерегистрировать спеку. Между решением «свободен» и сносом слейву
+    перерегистрировать спеку. Между решением «свободен» и сносом папету
     успевает прилететь задача (mop send идёт мимо мастера, у пула несколько
     мастеров), и остановленный джоб — единственное состояние, в котором
     сессии гарантированно нет. Перерегистрация, а не alloc_restart: врапер
@@ -710,7 +710,7 @@ def recycle(name):
     meta = job.get("Meta") or {}
     origin = meta.get("origin")
     if not origin:
-        raise RuntimeError(f"у {name} нет origin в Meta — это не слейв?")
+        raise RuntimeError(f"у {name} нет origin в Meta — это не папет?")
     llm = meta.get("llm", config.get("MOP_DEFAULT_LLM"))
     alloc = nomad.latest_alloc(name)
     node = alloc["NodeName"] if alloc else None
@@ -728,14 +728,14 @@ def recycle(name):
     return {"node": node}
 
 
-# ─── ввод в TUI слейва ───────────────────────────────────────────────────
+# ─── ввод в TUI папета ───────────────────────────────────────────────────
 # Всё здесь адресуется УЗЛОМ, а не аллокацией: alloc exec умер вместе со своей
 # адресацией, и агент подписан на субъект узла.
 def type_command(node, name, command):
-    """Напечатать слэш-команду в tmux-пейн слейва и вернуть экран после неё.
+    """Напечатать слэш-команду в tmux-пейн папета и вернуть экран после неё.
 
     Печатью, а не сообщением по каналу: слэш-команды через канал не проходят
-    (сообщение кладётся в очередь с skipSlashCommands), а у слейва с
+    (сообщение кладётся в очередь с skipSlashCommands), а у папета с
     исчерпанной квотой любой ход падает, не начавшись — слэш-команду же
     исполняет сам TUI, ход на неё не тратится.
 
@@ -748,13 +748,13 @@ def type_command(node, name, command):
 
 
 def press_enter(node, name):
-    """Подтвердить диалог. Только увидев его: слепой Enter на слейв без
+    """Подтвердить диалог. Только увидев его: слепой Enter на папет без
     диалога отправил бы пустой ход."""
     return type_command(node, name, "")
 
 
 def switch_model(node, name, model):
-    """Перевести слейв на другую модель, напечатав /model в его tmux-пейн.
+    """Перевести папет на другую модель, напечатав /model в его tmux-пейн.
 
     `/model` не переключает молча — он спрашивает «Switch model?» с уже
     выделенным «Yes». Подтверждаем вторым Enter, но ТОЛЬКО увидев диалог."""
@@ -766,7 +766,7 @@ def switch_model(node, name, model):
 
 
 def pane_lines(node, name):
-    """Весь буфер tmux-пейна слейва (история + экран)."""
+    """Весь буфер tmux-пейна папета (история + экран)."""
     r = bus.request(node, "tail", name=name)
     if "error" in r:
         raise RuntimeError(f"tmux в {name}: {r['error']}")

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Список подкоманд. Он же — ответ на `mop` без аргументов.
 skip=("common" "help" "mop" "lib.py")
-echo "mop — пул claude-слейвов поверх Nomad, шина сообщений поверх NATS"
+echo "mop — пул claude-папетов поверх Nomad, шина сообщений поверх NATS"
 echo
 echo "  mop <подкоманда> [аргументы]"
 echo

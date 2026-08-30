@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""LLM-профили: чем можно поднимать слейва и есть ли ключ
+"""LLM-профили: чем можно поднимать папета и есть ли ключ
 
-Профиль меняет ровно одно — куда слейв ходит за токенами. Всё остальное
+Профиль меняет ровно одно — куда папет ходит за токенами. Всё остальное
 (tmux, состояние, детект залипаний) для любого профиля одинаково.
 """
 import lib
-from mop import keys, llm, slaves
+from mop import keys, llm, puppets
 
 
 def main(argv):
@@ -20,7 +20,7 @@ def main(argv):
         elif key in have:
             state = f"ключ {key}: есть"
         else:
-            state = f"ключ {key}: НЕТ в {slaves.LOCAL_KEYS_FILE}"
+            state = f"ключ {key}: НЕТ в {puppets.LOCAL_KEYS_FILE}"
         base = prof["env"].get("ANTHROPIC_BASE_URL", "api.anthropic.com (по умолчанию)")
         print(f"  {name:8}  {base:38}  {state}")
     if note:

@@ -3,7 +3,7 @@
 
 Запускается как `mop mcp`, транспорт stdio.
 
-Транспорт stdio, запускается дочерним процессом сессии — мастера или слейва.
+Транспорт stdio, запускается дочерним процессом сессии — мастера или папета.
 
 ТРИ ПРОФИЛЯ, и решают их факты, а не флаги:
 
@@ -16,12 +16,12 @@
 чтобы не звать по уговору.
 
 Почему не встроенный SendMessage: он видит только этот хост плюс облачные и
-bridge-сессии, а слейва пула живут на других узлах. Здесь доставка идёт через
+bridge-сессии, а папета пула живут на других узлах. Здесь доставка идёт через
 шину, и хост значения не имеет.
 
-КАНАЛ ДВУСТОРОННИЙ. У `send` три адреса, а не два: слейв пула, сессия этого
+КАНАЛ ДВУСТОРОННИЙ. У `send` три адреса, а не два: папет пула, сессия этого
 хоста и МАСТЕР — по его инбоксу на шине. Третьего не было, и петля мастера
-стояла на песке: слейв отчитывался, `session.find` не находил мастера на своём
+стояла на песке: папет отчитывался, `session.find` не находил мастера на своём
 хосте, исключение приезжало модели строкой «Error executing tool send», а
 мастер читал молчание и шёл смотреть чужой экран глазами.
 
@@ -39,21 +39,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mcp.server.mcpserver import MCPServer                     # noqa: E402
 from mcp.types import ToolAnnotations                          # noqa: E402
 
-from mop import bus, config, keys, nomad, session, slaves         # noqa: E402
+from mop import bus, config, keys, nomad, session, puppets         # noqa: E402
 from mop.llm import profiles as llm_profiles              # noqa: E402
 from mop.render import table                              # noqa: E402
 
 app = MCPServer(
     "mop",
     instructions=(
-        "Пул claude-слейвов поверх Nomad.\n\n"
-        "ЭТО ЕДИНСТВЕННЫЙ КАНАЛ СВЯЗИ С ПУЛОМ. Чтобы написать слейву или узнать, "
+        "Пул claude-папетов поверх Nomad.\n\n"
+        "ЭТО ЕДИНСТВЕННЫЙ КАНАЛ СВЯЗИ С ПУЛОМ. Чтобы написать папету или узнать, "
         "кто свободен, бери `send` и `agents` отсюда. Встроенные "
         "SendMessage/ListAgents для этого не годятся: они видят только сессии "
-        "ЭТОГО ЖЕ хоста, а слейвы живут на разных узлах — на соседнем узле "
+        "ЭТОГО ЖЕ хоста, а папеты живут на разных узлах — на соседнем узле "
         "встроенный поиск молча никого не найдёт. Здесь доставка идёт через "
         "Nomad, и хост значения не имеет.\n\n"
-        "`agents` — кто есть и в каком состоянии, `send` — сообщение слейву, "
+        "`agents` — кто есть и в каком состоянии, `send` — сообщение папету, "
         "`tail` — что у него на экране. Перед диспатчем всегда сверяйся с "
         "`agents`: «свободен» там означает, что в клоне нет несохранённой "
         "работы, а не просто что сессия молчит."
@@ -84,7 +84,7 @@ def loud(fn):
     """Причина отказа — в ответ, а не в исключение.
 
     Исключение из инструмента приезжает модели строкой «Error executing tool
-    send» БЕЗ причины, и это худший вид отказа: слейв, у которого не было
+    send» БЕЗ причины, и это худший вид отказа: папет, у которого не было
     маршрута до мастера, увидел ровно её — три попытки, три разных адреса,
     один и тот же глухой текст и никакой возможности понять, что дело в
     адресе. Инструмент обязан называть себя и причину."""
@@ -123,28 +123,28 @@ MASTERS_WAIT = 2
 
 
 # ─── адресация ───────────────────────────────────────────────────────────
-def slave_alloc(name):
-    """Живая аллокация слейва. Путь к сокету НИКОГДА не кэшируем: после
-    рестарта слейва меняется pid, а с ним и имя сокета."""
+def puppet_alloc(name):
+    """Живая аллокация папета. Путь к сокету НИКОГДА не кэшируем: после
+    рестарта папета меняется pid, а с ним и имя сокета."""
     alloc = nomad.latest_alloc(name)
     if not alloc:
-        raise LookupError(f"{name}: нет аллокации — слейв не размещён")
+        raise LookupError(f"{name}: нет аллокации — папет не размещён")
     if alloc["ClientStatus"] != "running":
         raise LookupError(f"{name}: аллокация {alloc['ClientStatus']}, не running")
     return alloc
 
 
-def slave_node(name):
-    """Узел слейва — адрес на шине.
+def puppet_node(name):
+    """Узел папета — адрес на шине.
 
     У мастера узел берётся из ростера Nomad. На узле ростера нет, и мы
-    спрашиваем сам пул: чей агент признаёт этот слейв своим."""
+    спрашиваем сам пул: чей агент признаёт этот папет своим."""
     if MASTER:
-        return slave_alloc(name)["NodeName"]
+        return puppet_alloc(name)["NodeName"]
     for answer in bus.gather("local"):
-        if name in (answer.get("slaves") or {}):
+        if name in (answer.get("puppets") or {}):
             return answer["node"]
-    raise LookupError(f"{name}: ни один агент пула не признаёт этот слейв своим")
+    raise LookupError(f"{name}: ни один агент пула не признаёт этот папет своим")
 
 
 def master_socket():
@@ -188,23 +188,23 @@ def my_name():
 
     У мастера это его инбокс на шине (`MASTER_ID`): имя сессии claude адресом
     быть не может — оно выводится из каталога, не уникально и шине неизвестно.
-    Оператор, спрашивавший «пингани их, пусть ответят», назвал слейвам именно
+    Оператор, спрашивавший «пингани их, пусть ответят», назвал папетам именно
     имя сессии, и ответить по нему было некуда.
 
-    У слейва это имя его джоба: оно же имя клона, им же слейв адресуется в
+    У папета это имя его джоба: оно же имя клона, им же папет адресуется в
     send. Берём из каталога СЕССИИ, а не из cwd процесса: сервер запускают
-    откуда угодно, а сессия слейва всегда стоит в своём клоне."""
+    откуда угодно, а сессия папета всегда стоит в своём клоне."""
     if MASTER:
         return MASTER_ID
     cwd = (my_session() or {}).get("cwd") or os.getcwd()
     base = os.path.basename(os.path.realpath(cwd))
-    return base if base.startswith(slaves.JOB_PREFIX) else MASTER_ID
+    return base if base.startswith(puppets.JOB_PREFIX) else MASTER_ID
 
 
 def on_inbox(m):
-    """Что приехало в инбокс мастера: вести агентов и ОТЧЁТЫ СЛЕЙВОВ.
+    """Что приехало в инбокс мастера: вести агентов и ОТЧЁТЫ ПАПЕТОВ.
 
-    Возвращённое становится ответом на запрос — так у слейва появляется вердикт
+    Возвращённое становится ответом на запрос — так у папета появляется вердикт
     доставки вместо факта отправки. Агент вести публикует и ответа не ждёт:
     для него не меняется ничего.
 
@@ -218,7 +218,7 @@ def on_inbox(m):
     if not sock:
         return {"error": f"у мастера {MASTER_ID} нет сессии — весть класть некуда"}
     # priority по умолчанию later: так кладёт вести агент, и перебивать ход
-    # мастера уведомлением о простое незачем. Слейв со своим отчётом просит
+    # мастера уведомлением о простое незачем. Папет со своим отчётом просит
     # громче — и имеет право, отчёта мастер ждёт.
     r = session.send(sock, m.get("text") or "",
                      priority=m.get("priority") or "later",
@@ -228,9 +228,9 @@ def on_inbox(m):
 
 # ─── инструменты: канал ──────────────────────────────────────────────────
 @tool(annotations=READ_ONLY, description=(
-    "Кому можно писать: слейвы пула по ВСЕМ узлам, мастера своего шарда и "
+    "Кому можно писать: папеты пула по ВСЕМ узлам, мастера своего шарда и "
     "сессии claude на этой машине. Полнее встроенного ListAgents, который "
-    "видит только этот хост. Для слейва показывает достоверное состояние "
+    "видит только этот хост. Для папета показывает достоверное состояние "
     "(свободен/занят/завис/нет квоты/несохранённая работа в клоне), "
     "LLM-профиль и репозиторий; для мастера — адрес, которым ему отвечают."))
 def agents(project: str = "") -> str:
@@ -248,44 +248,44 @@ def agents(project: str = "") -> str:
 
 
 def _roster(project):
-    """Ростер мастера: Nomad знает про слейва то, чего не знает узел, —
+    """Ростер мастера: Nomad знает про папета то, чего не знает узел, —
     состояние аллокации, профиль LLM, репозиторий."""
-    rows = [("СЛЕЙВ", "УЗЕЛ", "АЛЛОК", "СОСТОЯНИЕ", "LLM", "РЕПОЗИТОРИЙ")]
-    for r in slaves.slave_rows():
+    rows = [("ПАПЕТ", "УЗЕЛ", "АЛЛОК", "СОСТОЯНИЕ", "LLM", "РЕПОЗИТОРИЙ")]
+    for r in puppets.puppet_rows():
         if project and project not in r["origin"]:
             continue
         rows.append((r["name"], r["node"], r["alloc_status"], r["state"],
                      r["llm"], r["origin"]))
-    return ["слейва пула:", *table(rows)] if len(rows) > 1 else ["слейва пула: нет"]
+    return ["папета пула:", *table(rows)] if len(rows) > 1 else ["папета пула: нет"]
 
 
 def _roster_from_bus():
     """Ростер узла: у него нет токена Nomad, поэтому пул опрашивается сам.
 
     Колонок меньше, и это честно: аллокацию и репозиторий узлу взять неоткуда.
-    Для того, ради чего слейв смотрит в agents — кому написать и кто свободен, —
+    Для того, ради чего папет смотрит в agents — кому написать и кто свободен, —
     хватает имени, узла и состояния."""
-    rows = [("СЛЕЙВ", "УЗЕЛ", "СОСТОЯНИЕ")]
+    rows = [("ПАПЕТ", "УЗЕЛ", "СОСТОЯНИЕ")]
     try:
         answers = bus.gather("local")
     except bus.BusError as e:
         return [f"шина недоступна: {e}"]
     for answer in sorted(answers, key=lambda a: a.get("node") or ""):
-        for name, facts in sorted((answer.get("slaves") or {}).items()):
-            rows.append((name, answer.get("node") or "?", slaves.slave_state(facts)))
-    return ["слейва пула:", *table(rows)] if len(rows) > 1 else ["слейва пула: нет"]
+        for name, facts in sorted((answer.get("puppets") or {}).items()):
+            rows.append((name, answer.get("node") or "?", puppets.puppet_state(facts)))
+    return ["папета пула:", *table(rows)] if len(rows) > 1 else ["папета пула: нет"]
 
 
 def _masters():
     """Мастера шарда: кому отсюда можно ОТВЕТИТЬ.
 
     Реестра нет намеренно — спрашиваем общий инбокс шарда, и живой мастер это
-    тот, кто отозвался. Слейву эта строка нужна как воздух: без неё адрес
+    тот, кто отозвался. Папету эта строка нужна как воздух: без неё адрес
     мастера негде взять, кроме конверта уже полученного письма.
 
     Мастеру она показывает соседа. Мастеров на проект можно держать сколько
     угодно, но раздавать задачи вдвоём, не зная друг о друге, нельзя: два пинга
-    одному слейву в один вечер как раз этим и кончились."""
+    одному папету в один вечер как раз этим и кончились."""
     try:
         found = bus.gather("who", timeout=MASTERS_WAIT,
                            subj=bus.inbox(bus.ALL_MASTERS))
@@ -302,10 +302,10 @@ def _masters():
 
 
 @tool(description=(
-    "Послать сообщение слейву пула, мастеру шарда или сессии на этой машине. "
-    "ЕДИНСТВЕННЫЙ рабочий способ достучаться и до слейва, и до мастера: "
+    "Послать сообщение папету пула, мастеру шарда или сессии на этой машине. "
+    "ЕДИНСТВЕННЫЙ рабочий способ достучаться и до папета, и до мастера: "
     "встроенный SendMessage дотягивается только до сессий этого же хоста и на "
-    "соседнем узле молча никого не найдёт. `to`: имя слейва (sl-<проект>-<n>), "
+    "соседнем узле молча никого не найдёт. `to`: имя папета (pu-<проект>-<n>), "
     "адрес мастера из agents или из конверта полученного сообщения "
     "(from-name), имя/pid локальной сессии. Возвращает вердикт доставки, а не "
     "факт отправки. notify_when_idle=true не блокирует: когда адресат "
@@ -317,13 +317,13 @@ def send(to: str, message: str, priority: str = "next",
     if not message.strip():
         return "пустое сообщение отправлять нечего"
 
-    # Три адреса, и порядок разбора не произвольный. Слейв узнаётся префиксом
+    # Три адреса, и порядок разбора не произвольный. Папет узнаётся префиксом
     # джоба — это единственное имя, которое строит сам пул. Дальше пробуем свой
     # хост: сессия рядом дешевле и не занимает шину. Всё остальное — мастер,
     # потому что больше адресов не бывает, и «не нашёл здесь» обязано вести к
-    # нему, а не в LookupError: ровно этим отчёты слейвов и терялись.
-    if to.startswith(slaves.JOB_PREFIX):
-        return _send_to_slave(to, message, priority, notify_when_idle, wait_seconds)
+    # нему, а не в LookupError: ровно этим отчёты папетов и терялись.
+    if to.startswith(puppets.JOB_PREFIX):
+        return _send_to_puppet(to, message, priority, notify_when_idle, wait_seconds)
     here = _local_session(to)
     if here:
         return _send_locally(here, message, priority, wait_seconds)
@@ -345,11 +345,11 @@ def _local_session(target):
 
 
 def _send_to_master(name, message, priority):
-    """Обратный канал: слейв -> мастер, в его инбокс на шине.
+    """Обратный канал: папет -> мастер, в его инбокс на шине.
 
-    Адрес мастера слейв не придумывает: он приезжает в конверте каждого
+    Адрес мастера папет не придумывает: он приезжает в конверте каждого
     сообщения (from-name) и лежит в ростере. Ответа ждём — вердикт доставки
-    здесь важнее, чем где-либо ещё: отчёт слейва и есть главный сигнал петли,
+    здесь важнее, чем где-либо ещё: отчёт папета и есть главный сигнал петли,
     и «отправлено» вместо «доставлено» означало бы ровно то молчание, из-за
     которого мастер идёт читать чужой экран глазами."""
     try:
@@ -363,7 +363,7 @@ def _send_to_master(name, message, priority):
     return f"{name}: доставлено (msg_id={r.get('msg_id')})"
 
 
-def _send_to_slave(name, message, priority, notify_when_idle, wait_seconds):
+def _send_to_puppet(name, message, priority, notify_when_idle, wait_seconds):
     """Доставка через агента узла.
 
     Ожидание простоя целиком уехало на узел: подписку держит агент рядом с
@@ -371,13 +371,13 @@ def _send_to_slave(name, message, priority, notify_when_idle, wait_seconds):
     фонового потока — он ждал внутри аллокации и умирал вместе с ней."""
     wait = min(max(wait_seconds, 0), MAX_WAIT)
     try:
-        result = bus.request(slave_node(name), "send", name=name, message=message,
+        result = bus.request(puppet_node(name), "send", name=name, message=message,
                              priority=priority, wait=wait,
                              notify=bool(notify_when_idle and not wait),
                              # Кто пишет. Едет в конверт полем from-name, и
-                             # подсказка канала называет его слейву как адрес
+                             # подсказка канала называет его папету как адрес
                              # для ответа: без этого «ответь мне» указывает в
-                             # никуда, а слейв узнаёт об этом уже отказом.
+                             # никуда, а папет узнаёт об этом уже отказом.
                              from_name=my_name(),
                              reply_to=MY_INBOX, timeout=wait + bus.TIMEOUT)
     except bus.BusError as e:
@@ -406,10 +406,10 @@ def _send_locally(sess, message, priority, wait_seconds):
 
 
 @tool(annotations=READ_ONLY, description=(
-    "Хвост tmux-буфера слейва — единственный способ увидеть то, чего нет в "
+    "Хвост tmux-буфера папета — единственный способ увидеть то, чего нет в "
     "состоянии: held-диалог чужого сообщения, промпт логина, жалобу на квоту."))
 def tail(name: str, lines: int = 40, grep: str = "") -> str:
-    buf = slaves.pane_lines(slave_node(name), name)
+    buf = puppets.pane_lines(puppet_node(name), name)
     if grep:
         buf = [l for l in buf if grep.lower() in l.lower()]
     return "\n".join(buf[-max(1, lines):]) or "(пусто)"
@@ -417,10 +417,10 @@ def tail(name: str, lines: int = 40, grep: str = "") -> str:
 
 # ─── инструменты: управление ─────────────────────────────────────────────
 @master_tool(annotations=READ_ONLY, description=(
-    "Ёмкость пула: узлы, свободная память и сколько ещё слейвов туда влезет."))
+    "Ёмкость пула: узлы, свободная память и сколько ещё папетов туда влезет."))
 def pool() -> str:
     rows = [("УЗЕЛ", "СТАТУС", "СВОБОДНО", "СЛОТОВ")]
-    for n in slaves.pool():
+    for n in puppets.pool():
         if n["status"] != "ready":
             rows.append((n["name"], n["status"], "-", "-"))
         elif "error" in n:
@@ -433,48 +433,48 @@ def pool() -> str:
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(
-    "Управление слейвами: add (создать), remove (удалить), restart "
+    "Управление папетами: add (создать), remove (удалить), restart "
     "(перезапустить залипшее), retarget (сменить репозиторий или LLM). "
     "Клон при remove остаётся на узле и переиспользуется."))
-def slave(action: str, name: str = "", origin: str = "", llm: str = "") -> str:
+def puppet(action: str, name: str = "", origin: str = "", llm: str = "") -> str:
     if action == "add":
-        return _slave_add(origin, llm)
+        return _puppet_add(origin, llm)
     if not name:
-        return f"{action}: нужно имя слейва"
+        return f"{action}: нужно имя папета"
     if action == "remove":
         nomad.get_job(name)
         nomad.deregister(name)
-        return f"удалён {name} (клон остался в {slaves.clone_dir(name)})"
+        return f"удалён {name} (клон остался в {puppets.clone_dir(name)})"
     if action == "restart":
-        nomad.alloc_restart(slave_alloc(name)["ID"])
+        nomad.alloc_restart(puppet_alloc(name)["ID"])
         return f"{name}: перезапускается"
     if action == "retarget":
-        return _slave_retarget(name, origin, llm)
+        return _puppet_retarget(name, origin, llm)
     return "action: add | remove | restart | retarget"
 
 
-def _slave_add(origin, llm):
+def _puppet_add(origin, llm):
     if not origin:
         return "add: нужен origin репозитория"
     llm = llm or config.get("MOP_DEFAULT_LLM")
     if llm not in llm_profiles():
         return f"нет LLM-профиля {llm}; есть: {', '.join(llm_profiles())}"
     keys.push_llm_keys(llm)
-    name = slaves.next_name(os.path.basename(origin).removesuffix(".git"))
-    nomad.register(slaves.job_spec(name, origin, llm))
+    name = puppets.next_name(os.path.basename(origin).removesuffix(".git"))
+    nomad.register(puppets.job_spec(name, origin, llm))
     return f"{name}: {origin} [{llm}] — размещается, состояние смотри в agents"
 
 
-def _slave_retarget(name, origin, llm):
+def _puppet_retarget(name, origin, llm):
     meta = nomad.get_job(name).get("Meta") or {}
     origin = origin or meta.get("origin")
     # профиль без явного llm сохраняется: смена репозитория не должна молча
-    # ронять слейв обратно на claude
+    # ронять папет обратно на claude
     llm = llm or meta.get("llm", config.get("MOP_DEFAULT_LLM"))
     if llm not in llm_profiles():
         return f"нет LLM-профиля {llm}; есть: {', '.join(llm_profiles())}"
     keys.push_llm_keys(llm)
-    nomad.register(slaves.job_spec(name, origin, llm))
+    nomad.register(puppets.job_spec(name, origin, llm))
     return f"{name} -> {origin} [{llm}], перезапускается"
 
 
@@ -482,7 +482,7 @@ def _slave_retarget(name, origin, llm):
     "Диагностика пула: залипания, протухший логин, restart-backoff, "
     "исчерпанная квота модели. С fix=true лечит то, что лечится."))
 def doctor(fix: bool = False) -> str:
-    issues = slaves.diagnose()
+    issues = puppets.diagnose()
     if not issues:
         return "пул здоров: залипаний нет"
     rows = [(i["name"], i["alloc"]["NodeName"] if i["alloc"] else "-",
@@ -507,8 +507,8 @@ def _treat(issue):
             nomad.alloc_stop(alloc["ID"])
             return "alloc stop — Nomad пересоздаст без backoff"
         if action == "model":
-            slaves.switch_model(alloc["NodeName"], name, slaves.FALLBACK_MODEL)
-            return f"/model {slaves.FALLBACK_MODEL}"
+            puppets.switch_model(alloc["NodeName"], name, puppets.FALLBACK_MODEL)
+            return f"/model {puppets.FALLBACK_MODEL}"
         nomad.alloc_restart(alloc["ID"])
         return "restart"
     except Exception as e:
@@ -516,24 +516,24 @@ def _treat(issue):
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(
-    "Слэш-команда в TUI слейва. Нужна отдельно, потому что каналом слэш-"
+    "Слэш-команда в TUI папета. Нужна отдельно, потому что каналом слэш-"
     "команды не проходят: сообщение кладётся в очередь с skipSlashCommands. "
-    "Escape СНИМАЕТ залипший диалог, не отвечая на него: залипший слейв "
+    "Escape СНИМАЕТ залипший диалог, не отвечая на него: залипший папет "
     "невидим для ростера, а сообщения копятся в очереди непрочитанными. "
     f"Разрешены: {', '.join(SLASH_ALLOWED)}."))
 def slash(name: str, command: str) -> str:
     if not command.split()[0:1] or command.split()[0] not in SLASH_ALLOWED:
         return f"разрешены только: {', '.join(SLASH_ALLOWED)}"
-    node = slave_node(name)
+    node = puppet_node(name)
     if command.startswith("/model "):
-        slaves.switch_model(node, name, command.split(None, 1)[1])
+        puppets.switch_model(node, name, command.split(None, 1)[1])
         return f"{name}: {command}"
-    return f"{name}: {command}\n{slaves.type_command(node, name, command)[-1500:]}"
+    return f"{name}: {command}\n{puppets.type_command(node, name, command)[-1500:]}"
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(
     "Раздать на узлы пула креды claude.ai и ключи LLM-провайдеров. Лечит "
-    "слейва, упёршиеся в протухший логин."))
+    "папета, упёршиеся в протухший логин."))
 def login() -> str:
     results, what, note = keys.push_login()
     out = [("везу: " + " + ".join(what))] + ([note] if note else [])
@@ -546,16 +546,16 @@ def watch_inbox():
     MCP умеет только «запрос-ответ» — вбросить что-то в ход модели сервер не
     может. Но он дочерний процесс сессии и знает её сокет, поэтому кладёт
     туда. Раньше на этом месте был поток, ждавший простоя внутри аллокации;
-    теперь ждёт агент рядом с сокетом слейва, а сюда приезжает готовая весть.
-    Этим же субъектом слейв отвечает мастеру — обратная сторона канала.
+    теперь ждёт агент рядом с сокетом папета, а сюда приезжает готовая весть.
+    Этим же субъектом папет отвечает мастеру — обратная сторона канала.
 
     Вторая подписка (`master.all.inbox`) — это весь механизм обнаружения:
-    слейв спрашивает её глаголом `who` и узнаёт, кому он может ответить.
+    папет спрашивает её глаголом `who` и узнаёт, кому он может ответить.
     Реестра мастеров нет и не нужно: мастер живёт ровно столько, сколько живёт
     его сессия, а любой реестр пережил бы её и врал.
 
     Молчим, если сессии нет: мастер, которому некуда положить весть, не имеет
-    права называться живым адресом — слейв получит честное «нет на шине»
+    права называться живым адресом — папет получит честное «нет на шине»
     вместо доставленного в никуда."""
     if not MASTER or not master_socket():
         return

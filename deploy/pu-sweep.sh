@@ -1,13 +1,13 @@
 #!/bin/bash
-# Slave-pool disk sweep (nomad job sl-cleanup, sysbatch+periodic).
+# Puppet-pool disk sweep (nomad job pu-cleanup, sysbatch+periodic).
 #
 # Three tiers, cheapest first, mirroring the classes in ~/bin/cleanup:
 #
-#   orphans     — a live slave == a live tmux session named after its job: the
+#   orphans     — a live puppet == a live tmux session named after its job: the
 #                 wrapper dies with its tmux session, and a stopped/moved job
-#                 takes the session down with it. So any ~/slaves/<name> or
+#                 takes the session down with it. So any ~/puppets/<name> or
 #                 ~/.cache/target-<name> without an exactly-matching tmux
-#                 session is an orphan: a deleted slave's leftovers (mop delete
+#                 session is an orphan: a deleted puppet's leftovers (mop delete
 #                 keeps them on purpose) or the trail of one that moved to
 #                 another node. Cheap to re-create, so the rare race with a mop
 #                 restarting at sweep time costs a re-clone. Swept
@@ -15,9 +15,9 @@
 #   stale       — paths nothing references any more, age-gated. These are what a
 #                 glob-driven sweep misses: $HOME/cache is rugent's pre-#627
 #                 CARGO_TARGET_DIR, retired 2026-08-20, and matches neither
-#                 ~/slaves/sl-* nor ~/.cache/target-sl-*. It still held 59 GB
+#                 ~/puppets/pu-* nor ~/.cache/target-pu-*. It still held 59 GB
 #                 2026-08-28, four days after the last write.
-#   size-capped — LIVE slaves' target dirs, trimmed by cargo-sweep, and only
+#   size-capped — LIVE puppets' target dirs, trimmed by cargo-sweep, and only
 #                 under space pressure. Not age-gated: cargo rewrites
 #                 fingerprints on every build, so an active target dir never
 #                 looks old (see the measurement in ~/bin/cleanup). Swept while
@@ -56,11 +56,11 @@ note() { printf '  %-46s %10s\n' "$1" "$2"; }
 
 freed_kb=0
 
-# A live slave == a live session on ITS OWN tmux server: each slave runs
+# A live puppet == a live session on ITS OWN tmux server: each puppet runs
 # `tmux -L <job>` since the shared-server cgroup OOM incident.
 live_player() { tmux -L "$1" has-session -t "=$1" 2>/dev/null; }
 
-# Free GB on the filesystem holding the slaves' clones and target dirs.
+# Free GB on the filesystem holding the puppets' clones and target dirs.
 free_gb() { df -BG --output=avail "$HOME" 2>/dev/null | awk 'NR==2{print $1+0}'; }
 
 report_space() {
@@ -77,7 +77,7 @@ rm_path() {
     note "$label" "$(hr "$kb")"
     freed_kb=$((freed_kb + kb))
     [ -n "$DRY" ] && return 0
-    # Slave clones are the user's, but anything a container wrote into a cache
+    # Puppet clones are the user's, but anything a container wrote into a cache
     # is root's; the user cannot unlink those. `sudo -n` never prompts, and
     # where it is not permitted this fails exactly as it did before.
     rm -rf "$path" 2>/dev/null || sudo -n rm -rf "$path" 2>/dev/null
@@ -97,37 +97,38 @@ report_space
 echo
 
 # --------------------------------------------------------------------------
-# Tier 1 -- orphaned slave clones and target dirs. Always.
+# Tier 1 -- orphaned puppet clones and target dirs. Always.
 # --------------------------------------------------------------------------
 # Two sanity gates before anything is deleted. Both exist because "no live tmux
 # session" is only evidence of an orphan when tmux could have answered at all --
 # and on 2026-08-28 mirror spent nine minutes in a state where it could not:
 # the box was hard-reset, /home/<user> is ecryptfs and comes back UNMOUNTED, and
-# the slaves only start once someone logs in with a password. A sweep landing
+# the puppets only start once someone logs in with a password. A sweep landing
 # in that window would have seen every clone with no session and deleted the lot.
 # Nightly, that window was a rounding error; hourly it is a real exposure.
 #
 # Gate 1: an unmounted ecryptfs home is not an empty home. It presents a
 # placeholder (Access-Your-Private-Data.desktop / README.txt) instead of the
-# real tree, so ~/slaves is simply absent and every glob below silently matches
+# real tree, so ~/puppets is simply absent and every glob below silently matches
 # nothing. Harmless today, but bail loudly rather than report a clean sweep of
 # a filesystem we never actually looked at.
-# Два корня клонов и два корня target-ов. Второй в каждой паре -- наследство
-# переименования slave -> slave (2026-08-29): в ~/wk остались клоны прежнего
-# пула, часть из них с НЕсохранённой работой, и сторож обязан продолжать их
-# видеть. Убрать legacy-глоб можно будет, когда ~/wk опустеет.
-CLONE_GLOBS=("$HOME"/slaves/sl-* "$HOME"/wk/wk-*)
-TARGET_GLOBS=("$HOME"/.cache/target-sl-* "$HOME"/.cache/target-wk-*)
+# Три корня клонов и три корня target-ов. Вторые в каждой паре -- наследство
+# переименования wk -> slave (2026-08-29), третьи -- slave -> puppet
+# (2026-08-30): в старых каталогах остались клоны прежних пулов, часть из них
+# с НЕсохранённой работой, и сторож обязан продолжать их видеть.
+# Legacy-глоб убирается, когда соответствующий каталог опустеет.
+CLONE_GLOBS=("$HOME"/puppets/pu-* "$HOME"/slaves/sl-* "$HOME"/wk/wk-*)
+TARGET_GLOBS=("$HOME"/.cache/target-pu-* "$HOME"/.cache/target-sl-* "$HOME"/.cache/target-wk-*)
 
 if [ -e "$HOME/Access-Your-Private-Data.desktop" ] \
-    || { [ ! -d "$HOME/slaves" ] && [ ! -d "$HOME/wk" ]; }; then
-    echo "  ! \$HOME has no slaves/ (unmounted ecryptfs?) -- refusing to sweep" >&2
+    || { [ ! -d "$HOME/puppets" ] && [ ! -d "$HOME/slaves" ] && [ ! -d "$HOME/wk" ]; }; then
+    echo "  ! \$HOME has no puppets/ (unmounted ecryptfs?) -- refusing to sweep" >&2
     report_space
     exit 0
 fi
 
 # Gate 2: clones exist but NOT ONE has a live tmux server. On a node that hosts
-# slaves that is not a pile of orphans, it is tmux being unreachable -- the node
+# puppets that is not a pile of orphans, it is tmux being unreachable -- the node
 # just booted, or this task cannot see /tmp/tmux-$(id -u). Deleting every clone
 # on the node is never the right answer to that, and a genuine all-orphans node
 # is rare enough to do by hand.
@@ -143,7 +144,7 @@ if [ "$clones" -gt 0 ] && [ "$live" -eq 0 ]; then
     SKIP_TIER1=1
 fi
 
-echo "tier 1: orphaned slave dirs ($live/$clones slaves live)"
+echo "tier 1: orphaned puppet dirs ($live/$clones puppets live)"
 [ -n "${SKIP_TIER1:-}" ] && echo "  skipped (see warning above)"
 for d in "${CLONE_GLOBS[@]}"; do
     [ -n "${SKIP_TIER1:-}" ] && break
@@ -165,7 +166,7 @@ done
 # --------------------------------------------------------------------------
 echo "tier 2: retired paths idle > ${STALE_DAYS}d"
 # $HOME/cache: rugent's CARGO_TARGET_DIR before #627 moved it to
-# ~/.cache/target-<slave>. Left behind on every node that built there.
+# ~/.cache/target-<puppet>. Left behind on every node that built there.
 for stale in "$HOME/cache"; do
     [ -d "$stale" ] || continue
     if has_recent "$stale" "$STALE_DAYS"; then
@@ -176,7 +177,7 @@ for stale in "$HOME/cache"; do
 done
 
 # --------------------------------------------------------------------------
-# Tier 3 -- size-cap LIVE slaves' target dirs, only under pressure.
+# Tier 3 -- size-cap LIVE puppets' target dirs, only under pressure.
 # --------------------------------------------------------------------------
 avail=$(free_gb "$HOME")
 if [ "$avail" -ge "$FREE_MIN_GB" ]; then
@@ -251,7 +252,7 @@ while os.getppid() != 1:
             # incremental/ first: cargo-sweep weighs only the artifacts
             # `cargo metadata` knows about, so it walks straight past this one
             # -- on mirror it held 62 GB that a 304 GiB sweep left sitting
-            # there, and on gamer 46 GB across three live slaves on
+            # there, and on gamer 46 GB across three live puppets on
             # 2026-08-28. Regenerable at any age: every run builds a different
             # commit and cargo never reuses a byte of it.
             for inc in "$t"/*/incremental; do

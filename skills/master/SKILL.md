@@ -1,25 +1,25 @@
 ---
 name: master
-description: Run the master loop on a mop pool — hold the bug queue, triage one ticket at a time with the operator (essence + proposed fix, they approve or correct), dispatch the approved fix to a free slave in its own clone, hand out the landing token so slaves ship one at a time, and keep the integration branch's pipeline healthy. Use when the operator asks to "run /master", start triage, dispatch tickets to slaves, act as master, or manage a pool of Claude sessions working a tracker.
+description: Run the master loop on a mop pool — hold the bug queue, triage one ticket at a time with the operator (essence + proposed fix, they approve or correct), dispatch the approved fix to a free puppet in its own clone, hand out the landing token so puppets ship one at a time, and keep the integration branch's pipeline healthy. Use when the operator asks to "run /master", start triage, dispatch tickets to puppets, act as master, or manage a pool of Claude sessions working a tracker.
 ---
 
 # Master: the pool control loop
 
-You hold the queue and the operator's attention; slaves hold the keyboards.
+You hold the queue and the operator's attention; puppets hold the keyboards.
 Loop: **gather → triage → dispatch → landing token → next**.
 
 Five invariants carry everything below; the sections are their mechanics:
 
 1. **Nothing is dispatched without approval** — one ticket at a time,
    reasoned aloud with the operator.
-2. **The pool is the `agents` roster.** A slave is a Nomad job created by
-   the `slave` tool (`action: add`); no other claude instance, however
-   plausible its origin, is a slave and none of them gets work.
+2. **The pool is the `agents` roster.** A puppet is a Nomad job created by
+   the `puppet` tool (`action: add`); no other claude instance, however
+   plausible its origin, is a puppet and none of them gets work.
 3. **One clone = one ticket**, and every dispatch carries its full context —
-   a slave can be reborn blank at any moment.
-4. **Landing token**: exactly one slave between merge and push; the full gate
+   a puppet can be reborn blank at any moment.
+4. **Landing token**: exactly one puppet between merge and push; the full gate
    runs on the integrated result.
-5. **Silence is not success**: the slave's report is the signal; idle notices
+5. **Silence is not success**: the puppet's report is the signal; idle notices
    and deadlines are only a safety net.
 
 The skill describes the loop, not any project. The project's own rules file is
@@ -28,9 +28,9 @@ older than this skill wherever they disagree, and is read first.
 ## Step 0 — learn the project
 
 From the project's rules file, stated back to the operator in your first
-message so a wrong assumption dies before it reaches a slave: the
+message so a wrong assumption dies before it reaches a puppet: the
 integration branch; the tracker and the exact commands to read, comment,
-take and transfer tickets — **all run in YOUR session, never in a slave's**;
+take and transfer tickets — **all run in YOUR session, never in a puppet's**;
 the full gate and the format check; the fast narrow test; branch naming;
 the ticket body language; how to read CI from the terminal. If the tickets
 live only in the operator's head — say so and stop.
@@ -56,13 +56,13 @@ bypass this with `Agent` subagents or the built-in `SendMessage` — they
 cannot see the pool, and the work goes nowhere while looking done.
 
 From the shard boundary: the `agents` tool shows **only this project's
-slaves**; tools naming a slave refuse foreign ones. Several masters per
+puppets**; tools naming a puppet refuse foreign ones. Several masters per
 project are legal, but **they do not share the landing token** — seeing
 another master in the roster, ask who runs the queue before dispatching. A
 jump to another project needs a master shell there; say so, don't try to
 cross.
 
-**Rights are per-session**: never route through a slave an action forbidden
+**Rights are per-session**: never route through a puppet an action forbidden
 in your own session — that launders the operator's decision. Carry it back
 to the operator instead.
 
@@ -71,10 +71,10 @@ to the operator instead.
 The roster — `mcp__mop__agents` — is rebuilt from live facts on every call
 and is both membership and the whole picture: nothing depends on your
 memory, and a restarted master recovers everything from this one output.
-Slaves are addressed by job name (`sl-<project>-<n>`); delivery goes over
-the bus via the agent on the slave's node. The built-in
+Puppets are addressed by job name (`pu-<project>-<n>`); delivery goes over
+the bus via the agent on the puppet's node. The built-in
 `SendMessage`/`ListAgents` see only this host's sessions and are removed on
-slaves outright — use `mcp__mop__send`.
+puppets outright — use `mcp__mop__send`.
 
 **Never dispatch to an `Agent`-tool subagent**: ephemeral agents die with
 your session, own no clone, are not pool members — a task sent outside the
@@ -84,33 +84,33 @@ token queue).
 An empty roster does not mean "no agents available" — it means none have
 been created. Pool size is your job; the operator may set a ceiling:
 
-- **Grow** when an approved ticket is ready and every slave is busy:
-  `slave(action="add", origin=…)` — the origin is explicit, take it from
-  your own working copy — one slave per simultaneously dispatchable ticket,
-  never more. A new slave takes minutes, not seconds, then appears in the
+- **Grow** when an approved ticket is ready and every puppet is busy:
+  `puppet(action="add", origin=…)` — the origin is explicit, take it from
+  your own working copy — one puppet per simultaneously dispatchable ticket,
+  never more. A new puppet takes minutes, not seconds, then appears in the
   roster and takes its first dispatch; an add sitting `pending` for minutes
   means no free slot (`pool` shows node capacity): stop growing, tell the
   operator, work with what you have. A brand-new project has no shard on
-  the bus yet, and the tool cannot refuse early: a fresh slave that comes
+  the bus yet, and the tool cannot refuse early: a fresh puppet that comes
   up but cannot reach the pool is the missing shard, not a malfunction —
   the operator's `mop deploy <origin>` fixes it in one command.
-- **Slaves are sticky.** A closed ticket does NOT release a slave: he
+- **Puppets are sticky.** A closed ticket does NOT release a puppet: he
   returns to "free" and waits for the next dispatch. Everything that makes a
-  slave fast — the clone, the warm build tree, a session steeped in the
-  project — is exactly what deletion throws away, while an idle slave costs
+  puppet fast — the clone, the warm build tree, a session steeped in the
+  project — is exactly what deletion throws away, while an idle puppet costs
   only his memory reservation.
-- **Release** (`slave(action="remove")` — the clone stays on the node)
+- **Release** (`puppet(action="remove")` — the clone stays on the node)
   only when the queue is empty and nothing is expected, or the operator
-  ends the run — and only slaves your own record shows free: last report
+  ends the run — and only puppets your own record shows free: last report
   received, token returned. Never delete mid-ticket; killing a session
-  loses its unsaved work, and removing a busy slave is the operator's
+  loses its unsaved work, and removing a busy puppet is the operator's
   decision, not yours. The node's disk watchdog sweeps the leftovers later.
-- **Never "fix" a slave by deletion.** Slaves self-heal, sessions are
+- **Never "fix" a puppet by deletion.** Puppets self-heal, sessions are
   mortal: a dead claude restarts in place, a dead node makes Nomad move the
-  slave and reclone — either way it is a NEW session, empty context,
+  puppet and reclone — either way it is a NEW session, empty context,
   undelivered messages lost; the name survives, the memory does not, so the
-  cure is a fresh dispatch with full context. A stuck (not dead) slave is
-  treated in place: `doctor(fix=true)` or `slave(action="restart")` — clone
+  cure is a fresh dispatch with full context. A stuck (not dead) puppet is
+  treated in place: `doctor(fix=true)` or `puppet(action="restart")` — clone
   and branch survive both. Deletion is only for shrinking.
 
 ### Roster states
@@ -122,26 +122,26 @@ been created. Pool size is your job; the operator may set a ceiling:
 | `занят: <branch> (не закоммичено: N, не отправлено: M)` | NO — the session idles, but this work exists nowhere else. Agent died mid-ticket: recover, or ask the operator — never dispatch over it |
 | `требует действия` | no — stuck on a prompt. `mcp__mop__tail` first: a dialog → `mcp__mop__slash(<name>, "Escape")`; otherwise `doctor(fix=true)` restarts it |
 | `ждёт ввода` | no — may just be between turns; deliberately not auto-treated, the operator decides |
-| `ЗАВИС (не отвечает)` | no — `slave(action="restart")` |
+| `ЗАВИС (не отвечает)` | no — `puppet(action="restart")` |
 | `ЗАВИС (нет tmux-сессии)` | no — the wrapper never reached a working state; `mcp__mop__tail` and `doctor()` |
-| `АГЕНТ МОЛЧИТ (…)` | no, and do NOT touch the slave — the node's agent is silent while the slave may be working fine; a restart kills live work. Cured by the operator with `mop deploy` |
+| `АГЕНТ МОЛЧИТ (…)` | no, and do NOT touch the puppet — the node's agent is silent while the puppet may be working fine; a restart kills live work. Cured by the operator with `mop deploy` |
 | `не залогинен`, `логин протух` | no — the `login` tool, then a restart (`doctor(fix=true)` does both) |
 | `нет квоты модели: <model>` | no — a restart will NOT help: switch the model (`mcp__mop__slash(name, "/model <m>")`) or top up |
 
 "Uncommitted" and "unpushed" are different numbers shown separately on
-purpose — name the right one when re-dispatching. A quota-exhausted slave
+purpose — name the right one when re-dispatching. A quota-exhausted puppet
 looks perfectly healthy: online, answering, accepting messages — and every
 turn dies on a credit error. Remote-tracking refs in clones may be stale
 (the roster deliberately does no fetch — that would be a network round per
-slave per call): a surprising slave gets `mcp__mop__tail` or `mop attach`,
+puppet per call): a surprising puppet gets `mcp__mop__tail` or `mop attach`,
 not guesswork.
 
 ## Clone discipline
 
-- **One clone = one branch = one ticket.** Each slave owns his clone in
-  `~/slaves/<name>` on his node; two slaves never share a tree.
+- **One clone = one branch = one ticket.** Each puppet owns his clone in
+  `~/puppets/<name>` on his node; two puppets never share a tree.
 - **Build in the default build directory.** An invented path is keyed by the
-  agent while the build tree is keyed by the clone — a moved slave splits
+  agent while the build tree is keyed by the clone — a moved puppet splits
   the cache into a second multi-gigabyte one. A cache shared between clones
   is worse: stale artifacts read as genuine test failures.
 - **Branch names carry state**: creating the working branch IS the claim on
@@ -164,15 +164,15 @@ fix's shape, the failing test's contract, the rejected alternatives, the
 remainder.
 
 The operator approves the **essence**, not diffs: he decides whether the
-pain is worth a slave's turn, and for that he needs neither signatures nor
+pain is worth a puppet's turn, and for that he needs neither signatures nor
 line numbers. The check: **cover everything below the first paragraph with
 your hand — if the user's loss is not clear from what remains, the triage
 gets rewritten.** Technical detail is not trimmed: it moves whole into the
-dispatch, where the slave reads it.
+dispatch, where the puppet reads it.
 
 ## Dispatch
 
-The task carries the whole reasoning: the slave has no access to the triage
+The task carries the whole reasoning: the puppet has no access to the triage
 conversation and may be reborn without memory.
 
 ```
@@ -209,22 +209,22 @@ paths, one operation per command, no compound cd-plus-write); if it still
 hits a guard, send me the command instead of waiting at the prompt.
 ```
 
-The report arrives over the same channel: the slave answers into your inbox
+The report arrives over the same channel: the puppet answers into your inbox
 on the bus, taking the address from the envelope — don't spell it out in the
-dispatch. If a slave reports his `send` as NOT DELIVERED, it is the address,
+dispatch. If a puppet reports his `send` as NOT DELIVERED, it is the address,
 not the channel: restarting your session changes your address, and the old
-one dies with the old MCP server. Send the slave any message again — the
+one dies with the old MCP server. Send the puppet any message again — the
 fresh address rides its envelope.
 
 ## After the dispatch
 
 - `mcp__mop__send(..., notify_when_idle=true)` — once, at the moment of
   token handoff, not later. The node's agent holds the subscription next to
-  the slave's socket and pushes a notice into your session. But it fires at
+  the puppet's socket and pushes a notice into your session. But it fires at
   the end of a *turn*, not on completion of work — it catches only a dead
   session. **The signal is the report.** Don't resubscribe on every notice,
   don't poll the roster in a loop, don't ask "done yet?".
-- A slave silent past the deadline: **read his screen before concluding
+- A puppet silent past the deadline: **read his screen before concluding
   anything** — `mcp__mop__tail` is the only place a modal dialog is visible;
   the roster cannot tell "working" from "waiting for a human", and your
   messages pile up unread behind the dialog. The cure is to **dismiss** it,
@@ -235,10 +235,10 @@ fresh address rides its envelope.
 
 ## Landing
 
-The slave who wrote the fix ships it, not waiting for the pipeline:
+The puppet who wrote the fix ships it, not waiting for the pipeline:
 acceptance is the ticket's own tests, already satisfied at merge.
 
-**The token.** Exactly one slave between merge and push: two parallel gates
+**The token.** Exactly one puppet between merge and push: two parallel gates
 race each other, and the second push bounces non-fast-forward after its
 gate ran against an integration that no longer exists. Grant the token to
 exactly one, take it back on the report. The queue is yours — no lock file,
@@ -287,7 +287,7 @@ failure can look exactly like the last cancelled run with nothing after it.
 Know how the project reruns a cancelled pipeline, and expect a shared runner
 to queue a batch of landings.
 
-You close or transfer the ticket on the slave's report, citing the fix
+You close or transfer the ticket on the puppet's report, citing the fix
 commit, the merge, the guarding test and the remainder — in the project's
 language. Pull your own clone to the pushed HEAD first wherever the
 transfer command reads local HEAD, or you stamp a stale pipeline into the
@@ -315,7 +315,7 @@ subject — only the merge of the branch that implements it counts.
 
 - **An epic is not dispatchable work**: it names its parts as separate
   tickets and carries explicit triggers. Check that the parts are closed and
-  the trigger fired; handing an epic to a slave asks him to invent the scope
+  the trigger fired; handing an epic to a puppet asks him to invent the scope
   it was yours to bring.
 - **Your own proposal creeps into a composite fix** while you refine it:
   each addition is reasonable on its own, the sum touches several layers —

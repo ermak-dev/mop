@@ -3,12 +3,12 @@
 
 Ловит залипания, протухший логин, restart-backoff и исчерпанную квоту модели.
 --fix лечит то, что лечится; молчащий агент узла в этот список не входит —
-слейв при этом может прекрасно работать, а рестарт убьёт работу в клоне.
+папет при этом может прекрасно работать, а рестарт убьёт работу в клоне.
 """
 import sys
 
 import lib
-from mop import keys, nomad, slaves
+from mop import keys, nomad, puppets
 from mop.render import table
 
 
@@ -30,8 +30,8 @@ def treat(issue):
             nomad.alloc_stop(alloc["ID"])
             return "alloc stop — Nomad пересоздаст без backoff"
         if action == "model":
-            slaves.switch_model(alloc["NodeName"], name, slaves.FALLBACK_MODEL)
-            return f"/model {slaves.FALLBACK_MODEL}"
+            puppets.switch_model(alloc["NodeName"], name, puppets.FALLBACK_MODEL)
+            return f"/model {puppets.FALLBACK_MODEL}"
         nomad.alloc_restart(alloc["ID"])
         return "restart"
     except Exception as e:
@@ -42,7 +42,7 @@ def main(argv):
     fix = "--fix" in argv
     if set(argv) - {"--fix"}:
         lib.usage(__doc__)
-    issues = slaves.diagnose()
+    issues = puppets.diagnose()
     if not issues:
         print("пул здоров: залипаний нет")
         return

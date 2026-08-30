@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""перенацелить слейва: mop change <имя> <git-origin> [--llm ПРОФИЛЬ]
+"""перенацелить папета: mop change <имя> <git-origin> [--llm ПРОФИЛЬ]
 
 Профиль без --llm сохраняется: смена репозитория не должна молча уронить
-слейва обратно на claude.
+папета обратно на claude.
 """
 import lib
-from mop import config, llm, nomad, slaves
+from mop import config, llm, nomad, puppets
 
 
 def main(argv):
@@ -18,9 +18,9 @@ def main(argv):
     old, old_llm = meta.get("origin", "?"), meta.get("llm", config.get("MOP_DEFAULT_LLM"))
     profile = profile or (old_llm if llm.get(old_llm) else config.get("MOP_DEFAULT_LLM"))
     lib.push_llm_keys(profile)
-    nomad.register(slaves.job_spec(name, origin, profile))
+    nomad.register(puppets.job_spec(name, origin, profile))
     print(f"{name}: {old} [{old_llm}] → {origin} [{profile}]")
-    print("слейв перезапускается с новым репозиторием (клон пересоздаётся врапером)")
+    print("папет перезапускается с новым репозиторием (клон пересоздаётся врапером)")
 
 
 lib.run(lib.cluster(main))

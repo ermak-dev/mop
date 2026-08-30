@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Проверка slave_state без пула: python3 tests/state.py
+"""Проверка puppet_state без пула: python3 tests/state.py
 
 Пока состояние собиралось поверх alloc exec, проверить его можно было только
-на живом слейве — и регрессия однажды спряталась именно здесь: пробник сессии
+на живом папете — и регрессия однажды спряталась именно здесь: пробник сессии
 молча падал в откат по ветке, а `mop list` выглядел исправным. С переездом на
 шину агент отдаёт ФАКТЫ, а вердикт собирается чистой функцией, поэтому вся
 матрица проверяется здесь.
@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.slaves import is_free, slave_state  # noqa: E402
+from mop.puppets import is_free, puppet_state  # noqa: E402
 
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
 WORK = {"cur": "bug/1063", "def": "master", "dirty": 0, "ahead": 0}
@@ -41,11 +41,11 @@ def facts(session, clone=CLEAN, screen="Herding bytes"):
 
 CASES = [
     # (что случилось, факты, ожидаемое состояние)
-    ("узел не признаёт слейв своим",
+    ("узел не признаёт папет своим",
      {"present": False}, "ЗАВИС (нет tmux-сессии)"),
     ("агент вернул ошибку",
      {"error": "tmux не отвечает"}, "ЗАВИС (tmux не отвечает)"),
-    ("пустой пейн — слейв только поднялся",
+    ("пустой пейн — папет только поднялся",
      facts("idle 1 1", screen="   \n\n"), "свободен"),
 
     # Сокет = живость, файл = активность. Сочетания разбираются здесь.
@@ -95,7 +95,7 @@ CASES = [
 def main():
     bad = 0
     for what, given, want in CASES:
-        got = slave_state(given)
+        got = puppet_state(given)
         if got != want:
             bad += 1
             print(f"ПРОВАЛ  {what}\n  ждали:  {want!r}\n  вышло: {got!r}")

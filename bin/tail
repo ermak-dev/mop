@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""хвост tmux-буфера слейва: mop tail <имя> [-n N] [-f]
+"""хвост tmux-буфера папета: mop tail <имя> [-n N] [-f]
 
   -n N   сколько строк (по умолчанию 10)
   -f     следить дальше, пока не Ctrl-C
@@ -7,7 +7,7 @@
 import time
 
 import lib
-from mop import slaves
+from mop import puppets
 
 
 def appended_since(prev, cur):
@@ -48,7 +48,7 @@ def main(argv):
     name, lines, follow = parse(argv)
     lib.guard(name)
     node = lib.running_node(name)
-    buf = slaves.pane_lines(node, name)
+    buf = puppets.pane_lines(node, name)
     for line in buf[-lines:]:
         print(line, flush=True)
     if not follow:
@@ -56,9 +56,9 @@ def main(argv):
     while True:
         time.sleep(2)
         try:
-            cur = slaves.pane_lines(node, name)
+            cur = puppets.pane_lines(node, name)
         except Exception:
-            # слейв мог перезапуститься или переехать — перецепляемся
+            # папет мог перезапуститься или переехать — перецепляемся
             node = lib.running_node(name)
             continue
         for line in appended_since(buf, cur):

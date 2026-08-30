@@ -8,7 +8,7 @@
 Командлет пользуется этим так:
 
     import lib
-    from mop import slaves
+    from mop import puppets
 
     def main(argv):
         ...
@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import bus, config, keys, llm, nomad, slaves  # noqa: E402
+from mop import bus, config, keys, llm, nomad, puppets  # noqa: E402
 
 
 def run(fn, argv=None):
@@ -67,8 +67,8 @@ def cwd_origin(required=True):
 
 
 def project_of(origin):
-    """Проект он же шард. Определение одно на всю систему — в slaves."""
-    return slaves.shard_of(origin)
+    """Проект он же шард. Определение одно на всю систему — в puppets."""
+    return puppets.shard_of(origin)
 
 
 def shard_creds(shard):
@@ -81,7 +81,7 @@ def in_shard():
 
 
 def guard(name):
-    """Перила мастер-шелла: не трогать чужого слейва.
+    """Перила мастер-шелла: не трогать чужого папета.
 
     Это НЕ граница — MOP_SHARD оператор может и снять. Настоящая живёт в кредах
     NATS и в проверке агента. Здесь мы лишь не даём промахнуться вслепую."""
@@ -89,7 +89,7 @@ def guard(name):
     if shard is None:
         return
     meta = require_job(name).get("Meta") or {}
-    owner = slaves.shard_of(meta.get("origin", ""))
+    owner = puppets.shard_of(meta.get("origin", ""))
     if owner != shard:
         sys.exit(f"{name} — шард {owner}, а этот мастер ведёт {shard}. "
                  f"Выйди из мастер-шелла или запусти mop master для {owner}.")
@@ -115,7 +115,7 @@ def require_job(name):
     try:
         return nomad.get_job(name)
     except nomad.NotFound:
-        sys.exit(f"нет такого слейва: {name}")
+        sys.exit(f"нет такого папета: {name}")
 
 
 def running_alloc(name):
@@ -126,7 +126,7 @@ def running_alloc(name):
 
 
 def running_node(name):
-    """Узел слейва — адрес для шины. Аллокация адресом быть перестала вместе
+    """Узел папета — адрес для шины. Аллокация адресом быть перестала вместе
     с alloc exec; агент подписан на субъект узла."""
     return running_alloc(name)["NodeName"]
 
@@ -136,7 +136,7 @@ def push_llm_keys(llm):
     results = keys.push_llm_keys(llm)
     if results is None:
         return
-    print(f"раздаю секреты на узлы пула ({slaves.SECRETS_FILE})...")
+    print(f"раздаю секреты на узлы пула ({puppets.SECRETS_FILE})...")
     bad = [f"{n}: {r}" for n, r in sorted(results.items()) if r != "OK"]
     if bad:
         print("  не всем узлам: " + "; ".join(bad))
@@ -145,7 +145,7 @@ def push_llm_keys(llm):
 def pool_lines():
     try:
         out = []
-        for n in slaves.pool():
+        for n in puppets.pool():
             if n["status"] != "ready":
                 out.append(f"  {n['name']}: {n['status']}")
             elif "error" in n:

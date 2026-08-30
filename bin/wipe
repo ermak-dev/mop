@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""снести рабочую копию слейва: mop wipe <имя>
+"""снести рабочую копию папета: mop wipe <имя>
 
 Клон сбрасывается к HEAD (несохранённое и untracked пропадают), target-каталог
 удаляется целиком. Агент откажет, если tmux-сессия жива: голый wipe — для
-остановленного слейва, полный цикл — mop recycle.
+остановленного папета, полный цикл — mop recycle.
 """
 import sys
 
 import lib
-from mop import nomad, slaves
+from mop import nomad, puppets
 
 
 def main(argv):
@@ -19,7 +19,7 @@ def main(argv):
     alloc = nomad.latest_alloc(name)
     if not alloc:
         sys.exit(f"{name}: нет аллокации — узел неизвестен")
-    r = slaves.wipe(alloc["NodeName"], name)
+    r = puppets.wipe(alloc["NodeName"], name)
     print(f"{name}: клон сброшен к HEAD, target снесён ({r['target']})")
 
 

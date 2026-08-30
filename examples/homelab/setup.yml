@@ -12,16 +12,16 @@
 # Запуск:  mop deploy
 
 - name: Тулчейн и окружение проектов на узлах пула
-  hosts: slave
+  hosts: puppet
   become: yes
   gather_facts: no
 
   vars:
     nextest_version: 0.9.98
-    # Project env files a fresh clone cannot invent: the slave wrapper copies
-    # these from ~/slave-env/<project>/ into every clone it creates, the same way
+    # Project env files a fresh clone cannot invent: the puppet wrapper copies
+    # these from ~/puppet-env/<project>/ into every clone it creates, the same way
     # ~/bin/code seeds worktrees on mate. Sources live on the control machine.
-    slave_env_files:
+    puppet_env_files:
       - {project: rugent, file: ~/rugent/.env}
       - {project: rugent, file: ~/rugent/.env-prod}
       - {project: rugent, file: ~/rugent/.providers}
@@ -32,7 +32,7 @@
     # cmake: cloudpub's libz-ng-sys builds zlib-ng with it; the gtk/webkit dev
     # set: cloudpub's workspace includes a Tauri gui crate, and `clo test
     # --rust` builds the whole graph.
-    - name: Ensure slave toolchain packages
+    - name: Ensure puppet toolchain packages
       ansible.builtin.apt:
         name:
           - postgresql
@@ -76,7 +76,7 @@
         mode: '0755'
         creates: "{{ MOP_HOME }}/.cargo/bin/cargo-nextest"
 
-    # cargo-sweep: the size cap sl-sweep (deploy/) applies to a LIVE slave's
+    # cargo-sweep: the size cap pu-sweep (deploy/) applies to a LIVE puppet's
     # target dir. The sweep degrades gracefully without it, and the tool itself
     # is project toolchain, so it stays here rather than moving to deploy/.
     # An age gate cannot stand in for it -- cargo rewrites fingerprints on every
@@ -84,7 +84,7 @@
     # older than 3 days in a 48 GB dir; see ~/bin/cleanup). Built from source
     # rather than pinned to a release tarball: cargo-sweep ships no linux-gnu
     # binary in its releases, and it compiles in about half a minute.
-    - name: Install cargo-sweep (size cap for sl-sweep tier 3)
+    - name: Install cargo-sweep (size cap for pu-sweep tier 3)
       ansible.builtin.command: "{{ MOP_HOME }}/.cargo/bin/cargo install cargo-sweep --locked"
       become_user: "{{ MOP_USER }}"
       args:
@@ -153,7 +153,7 @@
 
     # node for cloudpub's frontend/e2e test sets, per BUILD.md: nvm + 22.12.0 (BUILD.md says 22.11.0, but server/Dockerfile pins
     # NODE_VERSION=22.12.0 and vite refuses anything older).
-    # Per-user install under the pool user -- the same account the slaves run as.
+    # Per-user install under the pool user -- the same account the puppets run as.
     - name: Install nvm
       become_user: "{{ MOP_USER }}"
       ansible.builtin.shell: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
@@ -174,20 +174,20 @@
         creates: "{{ MOP_HOME }}/.nvm/versions/node/v22.12.0/bin/yarn"
         executable: /bin/bash
 
-    - name: Create slave-env project dirs
+    - name: Create puppet-env project dirs
       ansible.builtin.file:
-        path: "{{ MOP_HOME }}/slave-env/{{ item }}"
+        path: "{{ MOP_HOME }}/puppet-env/{{ item }}"
         state: directory
         owner: "{{ MOP_USER }}"
         group: "{{ MOP_USER }}"
         mode: '0700'
-      loop: "{{ slave_env_files | map(attribute='project') | unique }}"
+      loop: "{{ puppet_env_files | map(attribute='project') | unique }}"
 
     - name: Distribute project env files
       ansible.builtin.copy:
         src: "{{ item.file }}"
-        dest: "{{ MOP_HOME }}/slave-env/{{ item.project }}/"
+        dest: "{{ MOP_HOME }}/puppet-env/{{ item.project }}/"
         owner: "{{ MOP_USER }}"
         group: "{{ MOP_USER }}"
         mode: '0600'
-      loop: "{{ slave_env_files }}"
+      loop: "{{ puppet_env_files }}"

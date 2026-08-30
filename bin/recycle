@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""пересоздать слейва на чистой рабочей копии: mop recycle <имя>
+"""пересоздать папета на чистой рабочей копии: mop recycle <имя>
 
 Несохранённое сносится восстановлением из git, target-каталог удаляется
 целиком (первая сборка после рецикла долгая). Клон не переклонируется.
 """
 import lib
-from mop import slaves
+from mop import puppets
 
 
 def main(argv):
@@ -14,7 +14,7 @@ def main(argv):
     name = argv[0]
     lib.guard(name)
     print(f"останавливаю {name}, сбрасываю клон к HEAD, сношу target...")
-    r = slaves.recycle(name)
+    r = puppets.recycle(name)
     print(f"пересоздан {name} на {r['node']}")
 
 

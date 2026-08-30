@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""пересоздать свободных слейвов на узлах без места: mop gc [--dry]
+"""пересоздать свободных папетов на узлах без места: mop gc [--dry]
 
 Узел, где свободно меньше MOP_GC_FREE_MIN_GB, получает рецикл своих
-СВОБОДНЫХ слейвов (клон к HEAD, target снесён) — не больше
+СВОБОДНЫХ папетов (клон к HEAD, target снесён) — не больше
 MOP_GC_MAX_PER_RUN за прогон. Запускать оператором, не в мастер-шелле:
 давление узла — факт про всех жильцов, а не про один шард.
 """
 import lib
-from mop import bus, config, slaves
+from mop import bus, config, puppets
 
 
 def main(argv):
@@ -16,12 +16,12 @@ def main(argv):
         lib.usage(__doc__)
     limit = config.num("MOP_GC_FREE_MIN_GB")
     cap = config.num("MOP_GC_MAX_PER_RUN")
-    rows = slaves.slave_rows()
+    rows = puppets.puppet_rows()
     nodes = sorted({r["node"] for r in rows if r["node"] != "-"})
     disks = bus.request_many({n: {"verb": "disk"} for n in nodes})
 
     # Давление и кандидаты: узлы от самого тесного, внутри узла — от самого
-    # жирного (место слейва уже спрослено глаголом sizes, дополнительных
+    # жирного (место папета уже спрослено глаголом sizes, дополнительных
     # поездок сортировка не стоит).
     plan = []
     for n in nodes:
@@ -33,16 +33,16 @@ def main(argv):
         if d["free_gb"] >= limit:
             continue
         cands = [r for r in rows
-                 if r["node"] == n and slaves.is_free(r["state"])]
+                 if r["node"] == n and puppets.is_free(r["state"])]
         if not cands:
             print(f"  {n}: свободно {d['free_gb']} ГБ < {limit}, "
-                  f"но свободных слейвов нет")
+                  f"но свободных папетов нет")
             continue
         names = [r["name"] for r in
                  sorted(cands, key=lambda r: -(r.get("disk_kb") or 0))]
         plan.append((d["free_gb"], n, names))
     if not plan:
-        print(f"давления нет: на узлах со слейвами свободно не меньше {limit} ГБ")
+        print(f"давления нет: на узлах со папетами свободно не меньше {limit} ГБ")
         return
 
     done = 0
@@ -53,7 +53,7 @@ def main(argv):
             print(f"{n}: свободно {free_gb} ГБ < {limit} — рецикл {name}"
                   + (" [dry]" if dry else ""))
             if not dry:
-                slaves.recycle(name)
+                puppets.recycle(name)
             done += 1
 
 

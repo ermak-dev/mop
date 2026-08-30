@@ -1,7 +1,7 @@
 # Disk watchdog on every pool node: sysbatch puts one instance on each eligible
 # client, periodic runs it by cron. New nodes join the schedule the moment they
 # join the cluster. The script itself is distributed by deploy/setup.yml
-# (pool play) to /usr/local/bin/sl-sweep.
+# (pool play) to /usr/local/bin/pu-sweep.
 #
 # Hourly, not nightly. It was nightly until 2026-08-28, when a node filled its
 # disk between two runs and sat out of the cluster for two days. The sweep is
@@ -14,7 +14,7 @@
 # prohibit_overlap then blocks each following run. One unreachable node stopped
 # the other nodes being swept too. Placement headroom is therefore part of the
 # design -- see nomad_reserved_mb in the nomad playbook.
-job "sl-cleanup" {
+job "pu-cleanup" {
   datacenters = ["{{ MOP_POOL_DC }}"]
   type        = "sysbatch"
 
@@ -30,7 +30,7 @@ job "sl-cleanup" {
       user   = "{{ MOP_USER }}"
 
       config {
-        command = "/usr/local/bin/sl-sweep"
+        command = "/usr/local/bin/pu-sweep"
       }
 
       env {

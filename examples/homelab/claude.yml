@@ -1,12 +1,12 @@
 # ПРИМЕР, НЕ ЧАСТЬ ПРОДУКТА. Узловая обвязка автора: его личные скиллы и
 # MCP-серверы автоматизации рабочего стола. Пулу mop ничего из этого не нужно —
-# пакет, зависимости и агент ставит deploy/setup.yml, а свой MCP-сервер слейву
+# пакет, зависимости и агент ставит deploy/setup.yml, а свой MCP-сервер папету
 # прописывает врапер при каждой загрузке.
 #
 # Run:  mop deploy
 
-- name: Claude skills and MCP servers on the slave hosts
-  hosts: slave
+- name: Claude skills and MCP servers on the puppet hosts
+  hosts: puppet
   become: no
   gather_facts: no
 
@@ -21,7 +21,7 @@
     # Узел, живущий ВНУТРИ windows-хоста, достаёт до него только по loopback:
     # там mirrored networking, и Windows-файрвол роняет хайрпин на LAN-адрес.
     #
-    # Критерий тот же, что у врапера слейва: адрес windows-хоста среди адресов
+    # Критерий тот же, что у врапера папета: адрес windows-хоста среди адресов
     # собственных интерфейсов. Раньше здесь стоял список ssh-алиасов из
     # MOP_SSH_ALIAS — он давал верный ответ по совпадению, а не по смыслу:
     # «узел, у которого есть алиас» и «узел внутри windows» — разные вещи,
@@ -61,14 +61,14 @@
     # а сравнить желаемое с фактом CLI не умеет -- токены он прячет даже от
     # get. exec -- чтобы код возврата задачи был кодом add, а не remove.
     # claude на узле живёт в nvm, которого нет в PATH неинтерактивного ssh:
-    # MOP_SLAVE_PATH -- уже готовый PATH слейва, им же и ищем.
+    # MOP_PUPPET_PATH -- уже готовый PATH папета, им же и ищем.
     - name: Register playwright MCP
       ansible.builtin.shell:
         cmd: |
           claude mcp remove -s user playwright >/dev/null 2>&1 || true
           exec claude mcp add -s user playwright -- npx -y '@playwright/mcp@latest' --headless --isolated --browser chromium
       environment:
-        PATH: "{{ MOP_SLAVE_PATH | replace('{HOME}', MOP_HOME) }}"
+        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
       changed_when: false
 
     - name: Register windows-mcp
@@ -77,7 +77,7 @@
           claude mcp remove -s user windows-mcp >/dev/null 2>&1 || true
           exec claude mcp add -s user --transport http windows-mcp '{{ windows_mcp_url }}' --header 'Authorization: Bearer {{ windows_mcp_token }}'
       environment:
-        PATH: "{{ MOP_SLAVE_PATH | replace('{HOME}', MOP_HOME) }}"
+        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
       changed_when: false
       no_log: true
 
@@ -87,6 +87,6 @@
           claude mcp remove -s user mac-mcp >/dev/null 2>&1 || true
           exec claude mcp add -s user --transport http mac-mcp 'http://{{ MAC_MCP_HOST }}:{{ MCP_PORT }}/mcp' --header 'Authorization: Bearer {{ mac_mcp_token }}'
       environment:
-        PATH: "{{ MOP_SLAVE_PATH | replace('{HOME}', MOP_HOME) }}"
+        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
       changed_when: false
       no_log: true

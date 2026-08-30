@@ -23,7 +23,7 @@
 # Раньше они расходились у gamer, и mop нёс ради этого настройку с таблицей
 # имён; агент, подписавшийся не на тот субъект, выглядел как выключенный узел.
 - name: Bus address on the LAN
-  hosts: slave:master
+  hosts: puppet:master
   gather_facts: no
 
   tasks:
@@ -47,7 +47,7 @@
     # заводит файл при первом обращении и возвращает то же значение дальше.
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_tgz: "https://github.com/nats-io/nats-server/releases/download/v{{ MOP_NATS_VERSION }}/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64.tar.gz"
-    nats_nodes: "{{ groups['slave'] }}"
+    nats_nodes: "{{ groups['puppet'] }}"
     # Шарды считает `mop deploy` из ростера Nomad и своей памяти (см. bin/deploy)
     # и передаёт сюда --extra-vars. Пустой список -- законное состояние пустого
     # пула: сервер поднимется, мастеров просто ещё нет.
@@ -114,8 +114,8 @@
 # bus.json уже несли новое поле, а агент рядом о нём не знал и падал на
 # соединении. Аварийный путь, зависящий от соседнего плейбука, -- не аварийный
 # путь.
-- name: mop-agent on the slave hosts
-  hosts: slave
+- name: mop-agent on the puppet hosts
+  hosts: puppet
   gather_facts: no
 
   vars:
@@ -125,7 +125,7 @@
     # весь пул и по факту утверждала, что UID пользователя всюду одинаков; на
     # узле с другим UID юнит агента уехал бы с чужим XDG_RUNTIME_DIR, и это
     # ровно тот отказ, который не видно: session.py не нашёл бы каталог
-    # сокетов, а живые слейва читались бы мёртвыми.
+    # сокетов, а живые папета читались бы мёртвыми.
     # ansible_facts[...], а не голое имя факта: с 2.24 ansible перестаёт
     # поднимать факты в переменные, и getent_passwd без префикса умрёт.
     mop_uid: "{{ ansible_facts['getent_passwd'][MOP_USER][1] }}"
@@ -170,7 +170,7 @@
           - "--exclude=.env"
       notify: restart mop-agent
 
-    # Свой MCP-сервер -- часть продукта: без него слейв без инструментов.
+    # Свой MCP-сервер -- часть продукта: без него папет без инструментов.
     # Регистрирует сам claude (`claude mcp add` пишет ~/.claude.json), ручного
     # мерджа больше нет. CLI не умеет сравнивать желаемое с фактом (токены
     # прячет даже от get), поэтому приводим тупо: снять и поставить. Скоап
@@ -181,9 +181,9 @@
           claude mcp remove -s user mop >/dev/null 2>&1 || true
           exec claude mcp add -s user mop -- '{{ MOP_HOME }}/mop/bin/mop' mcp
       # claude на узле живёт в nvm, которого нет в PATH неинтерактивного ssh;
-      # MOP_SLAVE_PATH -- уже готовый PATH слейва, им же и ищем.
+      # MOP_PUPPET_PATH -- уже готовый PATH папета, им же и ищем.
       environment:
-        PATH: "{{ MOP_SLAVE_PATH | replace('{HOME}', MOP_HOME) }}"
+        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
       changed_when: false
 
     - name: Credentials dir
@@ -200,21 +200,21 @@
       notify: restart mop-agent
 
     # Креды на КАЖДЫЙ шард, а не одни на узел. Врапер подсовывает их сессии
-    # слейва через MOP_BUS_CONFIG, и без этого слейв ходил бы под кредом агента
+    # папета через MOP_BUS_CONFIG, и без этого папет ходил бы под кредом агента
     # -- то есть мог бы написать в чужой проект, а агент бы этого не поймал:
     # он видит, кого спрашивают, но не видит, кто спрашивает.
-    - name: Bus credentials for the slaves, one per shard
+    - name: Bus credentials for the puppets, one per shard
       ansible.builtin.template:
         src: bus.json.j2
         dest: "{{ MOP_HOME }}/.config/mop/bus-{{ item }}.json"
         mode: "0600"
       loop: "{{ shards }}"
       vars:
-        nats_user: "slave-{{ item }}"
-        nats_password: "{{ lookup('password', secrets_dir + '/nats-slave-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
+        nats_user: "puppet-{{ item }}"
+        nats_password: "{{ lookup('password', secrets_dir + '/nats-puppet-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
 
     # Токен Nomad возили на узлы, чтобы узловой mop mcp дотягивался до соседей
-    # и до инбокса мастера, и цена была названа прямо: слейв, добравшийся до
+    # и до инбокса мастера, и цена была названа прямо: папет, добравшийся до
     # файла, мог снести чужие джобы. Шина даёт ту же связь правами по субъектам,
     # поэтому полномочия узлам больше не нужны. Перестать раздавать мало --
     # старая копия так и лежала бы.
@@ -246,12 +246,12 @@
     # поэтому едет ядром, а не examples. Скрипт ставится на узлы, джоб
     # регистрируется ниже отдельной игрой на сервере. Он обязан работать при
     # выключенном мастере -- иначе теряется единственная уборка, которой всё
-    # равно (сироты не требуют суждений о живых слейвах).
-    - name: Deploy the sl-sweep script (disk watchdog)
+    # равно (сироты не требуют суждений о живых папетах).
+    - name: Deploy the pu-sweep script (disk watchdog)
       become: yes
       ansible.builtin.copy:
-        src: sl-sweep.sh
-        dest: /usr/local/bin/sl-sweep
+        src: pu-sweep.sh
+        dest: /usr/local/bin/pu-sweep
         mode: "0755"
 
     # Прогон плейбука без этой проверки не отличает «юнит запущен» от «агент
@@ -273,7 +273,7 @@
         daemon_reload: yes
 
 
-# Управляющая машина: только креды. Агента здесь нет и не нужно -- слейвов на
+# Управляющая машина: только креды. Агента здесь нет и не нужно -- папетов на
 # ней не живёт, а инбокс мастера слушает сам `mop mcp`.
 - name: Bus credentials on the master
   hosts: master
@@ -317,6 +317,22 @@
         nats_user: "master-{{ item }}"
         nats_password: "{{ lookup('password', secrets_dir + '/nats-master-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
 
+    # Скилл /master -- интерфейс мастер-сессии, как ~/bin/mop. Сам он живёт в
+    # репозитории, снаружи только симлинк: правка через ~/.claude попадала бы
+    # в тот же файл, но проходила бы мимо истории.
+    - name: Claude skills dir
+      ansible.builtin.file:
+        path: "{{ MOP_HOME }}/.claude/skills"
+        state: directory
+        mode: "0755"
+
+    - name: Master skill symlink
+      ansible.builtin.file:
+        src: "{{ playbook_dir | dirname }}/skills/master"
+        dest: "{{ MOP_HOME }}/.claude/skills/master"
+        state: link
+        force: true
+
 
 # Джоб дискового сторожа. Регистрируется СЕРВЕРОМ: токен есть только у него,
 # а спека несут значения установки (датацентр, пользователь, $HOME, пороги) --
@@ -332,25 +348,25 @@
     # template, а не copy: спека несёт значения установки. ${...} для этого не
     # годится -- это интерполяция HCL, Nomad стал бы разрешать её сам и не
     # нашёл бы переменной.
-    - name: Deploy the sl-cleanup job spec
+    - name: Deploy the pu-cleanup job spec
       ansible.builtin.template:
-        src: sl-cleanup.nomad.hcl.j2
-        dest: "{{ nomad_home }}/sl-cleanup.nomad.hcl"
+        src: pu-cleanup.nomad.hcl.j2
+        dest: "{{ nomad_home }}/pu-cleanup.nomad.hcl"
         mode: "0644"
       register: cleanup_spec
 
-    - name: Check the sl-cleanup job is registered
+    - name: Check the pu-cleanup job is registered
       ansible.builtin.shell: >
         NOMAD_ADDR=http://127.0.0.1:{{ MOP_NOMAD_PORT }}
         NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
-        /usr/local/bin/nomad job status sl-cleanup
+        /usr/local/bin/nomad job status pu-cleanup
       register: cleanup_status
       failed_when: false
       changed_when: false
 
-    - name: Register the sl-cleanup job
+    - name: Register the pu-cleanup job
       ansible.builtin.shell: >
         NOMAD_ADDR=http://127.0.0.1:{{ MOP_NOMAD_PORT }}
         NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
-        /usr/local/bin/nomad job run {{ nomad_home }}/sl-cleanup.nomad.hcl
+        /usr/local/bin/nomad job run {{ nomad_home }}/pu-cleanup.nomad.hcl
       when: cleanup_spec.changed or cleanup_status.rc != 0

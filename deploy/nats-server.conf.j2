@@ -19,7 +19,7 @@ server_name = "mop"
 max_payload = 1MB
 
 # Права по субъектам -- то, ради чего шину и заводили: раньше на узлы ехал
-# management-токен Nomad, и слейв мог снести чужие джобы.
+# management-токен Nomad, и папет мог снести чужие джобы.
 #
 # ЧЕТЫРЕ РОДА ПОЛЬЗОВАТЕЛЕЙ, и делятся они по двум осям сразу -- шард (проект) и
 # роль. Первый токен субъекта -- шард, поэтому право «только свой проект»
@@ -50,12 +50,12 @@ authorization {
       }
     }
 
-    # Слейвы проекта {{ shard }}. Врапер подсовывает эти креды сессии через
-    # MOP_BUS_CONFIG, поэтому `mop mcp` внутри слейва достаёт только своих
+    # Папеты проекта {{ shard }}. Врапер подсовывает эти креды сессии через
+    # MOP_BUS_CONFIG, поэтому `mop mcp` внутри папета достаёт только своих
     # соседей и своего мастера. Управляющий субъект .rpc сюда не входит:
     # печать в чужой TUI и запись файлов остаются за мастером.
     {
-      user: "slave-{{ shard }}", password: "{{ lookup('password', secrets_dir + '/nats-slave-' + shard + '.pass length=32 chars=ascii_letters,digits') }}"
+      user: "puppet-{{ shard }}", password: "{{ lookup('password', secrets_dir + '/nats-puppet-' + shard + '.pass length=32 chars=ascii_letters,digits') }}"
       permissions: {
         publish: { allow: ["mop.{{ shard }}.node.*.msg", "mop.{{ shard }}.all.msg",
                            "mop.{{ shard }}.master.>", "mop.{{ shard }}.events",

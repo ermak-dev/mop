@@ -1,8 +1,8 @@
 """Раздача файлов на узлы пула: креды claude.ai и ключи LLM-провайдеров.
 
 Основной путь — глагол `write` агенту узла: он есть на каждом узле независимо
-от того, живёт там слейв или нет, и не требует свободной памяти. Раньше на его
-месте был exec в аллокацию живого слейва — узлы пула забиты памятью под завязку
+от того, живёт там папет или нет, и не требует свободной памяти. Раньше на его
+месте был exec в аллокацию живого папета — узлы пула забиты памятью под завязку
 и sysbatch туда не садится (DimensionExhausted: memory).
 
 Sysbatch остался запасным путём для узла, чей агент молчит. Он не exec, и
@@ -14,9 +14,9 @@ import json
 import os
 import time
 
-from . import bus, llm, nomad, slaves
+from . import bus, llm, nomad, puppets
 
-LOGIN_JOB = "sl-login"
+LOGIN_JOB = "pu-login"
 
 
 def push_script(files):
@@ -49,9 +49,9 @@ def push_spec(name, script, node_names):
             "Tasks": [{
                 "Name": "login",
                 "Driver": "raw_exec",
-                "User": slaves.USER,
+                "User": puppets.USER,
                 "Config": {"command": "/bin/bash", "args": ["-c", script]},
-                "Env": {"HOME": slaves.HOME},
+                "Env": {"HOME": puppets.HOME},
                 "Resources": {"CPU": 100, "MemoryMB": 64},
             }],
         }],
@@ -69,7 +69,7 @@ def distribute(files):
     _push_via_agents(files, sorted(nodes), results)
     _push_via_sysbatch(script, sorted(nodes - set(results)), results)
     for node in nodes:
-        results.setdefault(node, "НЕ ДОСТАЛСЯ — ни слейва, ни места под sysbatch")
+        results.setdefault(node, "НЕ ДОСТАЛСЯ — ни папета, ни места под sysbatch")
     return results
 
 
@@ -137,16 +137,16 @@ def llm_keys_blob():
         return None, None
     found = {}
     try:
-        with open(os.path.expanduser(slaves.LOCAL_KEYS_FILE)) as f:
+        with open(os.path.expanduser(puppets.LOCAL_KEYS_FILE)) as f:
             for line in f:
                 k, sep, v = line.partition("=")
                 k, v = k.strip(), v.strip().strip('"').strip("'")
                 if sep and k in wanted and v:
                     found[k] = v
     except OSError:
-        return None, f"нет {slaves.LOCAL_KEYS_FILE} — профили с ключом не поднимутся"
+        return None, f"нет {puppets.LOCAL_KEYS_FILE} — профили с ключом не поднимутся"
     missing = sorted(wanted - set(found))
-    note = f"в {slaves.LOCAL_KEYS_FILE} нет: {', '.join(missing)}" if missing else None
+    note = f"в {puppets.LOCAL_KEYS_FILE} нет: {', '.join(missing)}" if missing else None
     if not found:
         return None, note
     return "".join(f"{k}={v}\n" for k, v in sorted(found.items())), note
@@ -158,8 +158,8 @@ def _as_file(path, text_or_bytes):
 
 
 def push_llm_keys(profile):
-    """Ключ профиля обязан лежать на узле РАНЬШЕ слейва: без него врапер
-    валится, а Nomad уводит слейв в restart-backoff. Узел заранее неизвестен
+    """Ключ профиля обязан лежать на узле РАНЬШЕ папета: без него врапер
+    валится, а Nomad уводит папет в restart-backoff. Узел заранее неизвестен
     (место выбирает планировщик), поэтому раздаём на весь пул.
     -> {узел: результат} либо None, если профилю ключ не нужен.
 
@@ -172,7 +172,7 @@ def push_llm_keys(profile):
     blob, note = llm_keys_blob()
     if not blob or key not in blob:
         raise RuntimeError(f"профиль {profile}: {note}")
-    return distribute([_as_file(slaves.SECRETS_FILE, blob)])
+    return distribute([_as_file(puppets.SECRETS_FILE, blob)])
 
 
 def credentials():
@@ -204,15 +204,15 @@ def push_login():
 
     Токен Nomad отсюда убран, и это не забывчивость. Его возили на узлы, чтобы
     узловой mop mcp дотягивался до соседей и до инбокса мастера, — и цена была
-    названа прямо: слейв, добравшийся до файла, мог снести чужие джобы. Шина
+    названа прямо: папет, добравшийся до файла, мог снести чужие джобы. Шина
     даёт ту же связь правами по субъектам, поэтому полномочия узлам больше не
     нужны. Старую копию файла с узлов сносит плейбук nats: перестать раздавать
     значит оставить лежать."""
-    files = [_as_file(f"{slaves.HOME}/.claude/.credentials.json", credentials())]
+    files = [_as_file(f"{puppets.HOME}/.claude/.credentials.json", credentials())]
     what = ["креды claude.ai"]
     blob, note = llm_keys_blob()
     if blob:
-        files.append(_as_file(slaves.SECRETS_FILE, blob))
+        files.append(_as_file(puppets.SECRETS_FILE, blob))
         what.append("секреты узла (" + ", ".join(
             l.split("=")[0] for l in blob.splitlines()) + ")")
     return distribute(files), what, note

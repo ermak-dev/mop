@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""послать сообщение слейву пула или сессии на этой машине
+"""послать сообщение папету пула или сессии на этой машине
 
   mop send <цель> <текст>            отправить
   mop send <цель> -                  текст со stdin
   mop send <цель> <текст> --wait[=N] отправить и ждать, пока адресат освободится
   mop send --list                    живые сессии на этой машине
 
-<цель> — имя слейва (sl-rugent-1), имя сессии, pid, каталог или путь к сокету.
-Слейв узнаётся по префиксу sl- и достаётся через шину; всё остальное — местная
+<цель> — имя папета (pu-rugent-1), имя сессии, pid, каталог или путь к сокету.
+Папет узнаётся по префиксу pu- и достаётся через шину; всё остальное — местная
 сессия через её uds-инбокс напрямую.
 
   --priority now|next|later   куда в очередь адресата (по умолчанию next)
@@ -20,7 +20,7 @@ import argparse
 import sys
 
 import lib
-from mop import bus, session, slaves
+from mop import bus, session, puppets
 from mop.render import table
 
 MAX_WAIT = 600
@@ -34,8 +34,8 @@ def show_sessions():
     print("\n".join(table(rows)) if rows else "живых сессий нет")
 
 
-def to_slave(a, body):
-    """Через шину: сокет слейва host-local, до него дотягивается агент узла."""
+def to_puppet(a, body):
+    """Через шину: сокет папета host-local, до него дотягивается агент узла."""
     wait = min(a.wait or 0, MAX_WAIT)
     r = bus.request(lib.running_node(a.target), "send", name=a.target, message=body,
                     priority=a.priority, wait=wait, timeout=wait + bus.TIMEOUT)
@@ -47,7 +47,7 @@ def to_slave(a, body):
     if a.wait is None:
         return 0
     if not r.get("idle"):
-        print(f"ждал {wait}s — слейв не сообщил, что освободился")
+        print(f"ждал {wait}s — папет не сообщил, что освободился")
         return 2
     print(f"<- {r['idle']}")
     return 0
@@ -90,10 +90,10 @@ def main(argv):
     body = sys.stdin.read().rstrip("\n") if a.message == "-" else a.message
     if not body.strip():
         sys.exit("пустое сообщение отправлять нечего")
-    if not a.target.startswith(slaves.JOB_PREFIX):
+    if not a.target.startswith(puppets.JOB_PREFIX):
         return to_session(a, body)
     lib.guard(a.target)
-    return to_slave(a, body)
+    return to_puppet(a, body)
 
 
 lib.run(lib.cluster(main))

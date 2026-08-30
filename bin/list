@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""слейвы пула: кто где, занят или свободен, чем поднят
+"""папеты пула: кто где, занят или свободен, чем поднят
 
 «Свободен» означает, что в клоне нет несохранённой работы, а не что сессия
 молчит: на этом стоит решение о диспатче.
 """
 import lib
-from mop import slaves
+from mop import puppets
 from mop.render import table
 
 
 def place(row):
-    """Колонка «место»: клон + target слейва, обмер спросом (du без кэша).
+    """Колонка «место»: клон + target папета, обмер спросом (du без кэша).
     Прочерк — обмер не доехал: не ноль, ноль был бы «измерено и пусто»."""
     kb = row.get("disk_kb")
     if kb is None:
@@ -19,43 +19,43 @@ def place(row):
 
 
 def free(row):
-    # Правило «свободен по префиксу» живёт в slaves.is_free — оно одно на
+    # Правило «свободен по префиксу» живёт в puppets.is_free — оно одно на
     # систему: на нём стоят и подсказка здесь, и выбор жертв в mop gc.
-    return slaves.is_free(row["state"])
+    return puppets.is_free(row["state"])
 
 
 def hint(rows, origin):
     """Одна подсказка под таблицей: чего именно не хватает прямо сейчас."""
     if not rows:
-        return (f"Создайте первый слейв для {lib.project_of(origin)}: mop add {origin}"
-                if origin else "Создайте слейва: mop add <git-origin>")
+        return (f"Создайте первый папет для {lib.project_of(origin)}: mop add {origin}"
+                if origin else "Создайте папета: mop add <git-origin>")
     if not any(free(r) for r in rows):
-        return (f"\nНет свободных слейвов для {lib.project_of(origin)}. "
+        return (f"\nНет свободных папетов для {lib.project_of(origin)}. "
                 f"Создайте: mop add {origin}" if origin
-                else "\nНет свободных слейвов. Создайте: mop add <git-origin>")
+                else "\nНет свободных папетов. Создайте: mop add <git-origin>")
     if not origin:
         return None
     project = lib.project_of(origin)
     mine = [r for r in rows if project in r["origin"]]
     if not mine:
-        return f"\nНет слейвов для {project}. Создайте: mop add {origin}"
+        return f"\nНет папетов для {project}. Создайте: mop add {origin}"
     if not any(free(r) for r in mine):
-        return f"\nВсе слейвы для {project} заняты. Создайте ещё: mop add {origin}"
+        return f"\nВсе папеты для {project} заняты. Создайте ещё: mop add {origin}"
     return None
 
 
 def main(argv):
     if argv:
         lib.usage(__doc__)
-    rows = slaves.slave_rows()
+    rows = puppets.puppet_rows()
     if rows:
         print("\n".join(table([(r["name"], r["node"], r["alloc_status"],
                                 r["state"], place(r), r["llm"], r["origin"]) for r in rows])))
     else:
-        print("слейвов нет")
+        print("папетов нет")
     origin = lib.cwd_origin(required=False)
     # В мастер-шелле подсказка — про ШАРД, а не про каталог, в котором стоишь.
-    # Иначе `mop list` из ~/mop в мастере rugent советовал бы завести слейва
+    # Иначе `mop list` из ~/mop в мастере rugent советовал бы завести папета
     # для mop, которого этот мастер всё равно не увидит.
     shard = lib.in_shard()
     if shard and origin and lib.project_of(origin) != shard:
