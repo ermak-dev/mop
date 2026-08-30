@@ -5,21 +5,21 @@
 слейва обратно на claude.
 """
 import lib
-from mop import nomad, slaves
+from mop import config, llm, nomad, slaves
 
 
 def main(argv):
-    llm, args = lib.parse_llm(argv)
+    profile, args = lib.parse_llm(argv)
     if len(args) != 2:
         lib.usage(__doc__)
     name, origin = args
     lib.guard(name)
     meta = lib.require_job(name).get("Meta") or {}
-    old, old_llm = meta.get("origin", "?"), meta.get("llm", slaves.DEFAULT_LLM)
-    llm = llm or (old_llm if old_llm in slaves.LLM_PROFILES else slaves.DEFAULT_LLM)
-    lib.push_llm_keys(llm)
-    nomad.register(slaves.job_spec(name, origin, llm))
-    print(f"{name}: {old} [{old_llm}] → {origin} [{llm}]")
+    old, old_llm = meta.get("origin", "?"), meta.get("llm", config.get("MOP_DEFAULT_LLM"))
+    profile = profile or (old_llm if llm.get(old_llm) else config.get("MOP_DEFAULT_LLM"))
+    lib.push_llm_keys(profile)
+    nomad.register(slaves.job_spec(name, origin, profile))
+    print(f"{name}: {old} [{old_llm}] → {origin} [{profile}]")
     print("слейв перезапускается с новым репозиторием (клон пересоздаётся врапером)")
 
 

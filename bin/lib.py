@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import bus, config, keys, nomad, slaves  # noqa: E402
+from mop import bus, config, keys, llm, nomad, slaves  # noqa: E402
 
 
 def run(fn, argv=None):
@@ -98,18 +98,17 @@ def guard(name):
 def parse_llm(args):
     """Выкусить --llm PROFILE (или --llm=PROFILE) откуда угодно в аргументах.
     -> (профиль | None, остальные аргументы)."""
-    llm, rest, it = None, [], iter(args)
+    profile, rest, it = None, [], iter(args)
     for a in it:
         if a == "--llm":
-            llm = next(it, "")
+            profile = next(it, "")
         elif a.startswith("--llm="):
-            llm = a.split("=", 1)[1]
+            profile = a.split("=", 1)[1]
         else:
             rest.append(a)
-    if llm is not None and llm not in slaves.LLM_PROFILES:
-        sys.exit(f"нет LLM-профиля {llm or '(пусто)'}; есть: "
-                 f"{', '.join(slaves.LLM_PROFILES)} (mop llm)")
-    return llm, rest
+    if profile is not None:
+        llm.require(profile)
+    return profile, rest
 
 
 def require_job(name):

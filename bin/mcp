@@ -39,7 +39,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mcp.server.mcpserver import MCPServer                     # noqa: E402
 from mcp.types import ToolAnnotations                          # noqa: E402
 
-from mop import bus, keys, nomad, session, slaves         # noqa: E402
+from mop import bus, config, keys, nomad, session, slaves         # noqa: E402
+from mop.llm import profiles as llm_profiles              # noqa: E402
 from mop.render import table                              # noqa: E402
 
 app = MCPServer(
@@ -455,9 +456,9 @@ def slave(action: str, name: str = "", origin: str = "", llm: str = "") -> str:
 def _slave_add(origin, llm):
     if not origin:
         return "add: нужен origin репозитория"
-    llm = llm or slaves.DEFAULT_LLM
-    if llm not in slaves.LLM_PROFILES:
-        return f"нет LLM-профиля {llm}; есть: {', '.join(slaves.LLM_PROFILES)}"
+    llm = llm or config.get("MOP_DEFAULT_LLM")
+    if llm not in llm_profiles():
+        return f"нет LLM-профиля {llm}; есть: {', '.join(llm_profiles())}"
     keys.push_llm_keys(llm)
     name = slaves.next_name(os.path.basename(origin).removesuffix(".git"))
     nomad.register(slaves.job_spec(name, origin, llm))
@@ -469,9 +470,9 @@ def _slave_retarget(name, origin, llm):
     origin = origin or meta.get("origin")
     # профиль без явного llm сохраняется: смена репозитория не должна молча
     # ронять слейв обратно на claude
-    llm = llm or meta.get("llm", slaves.DEFAULT_LLM)
-    if llm not in slaves.LLM_PROFILES:
-        return f"нет LLM-профиля {llm}; есть: {', '.join(slaves.LLM_PROFILES)}"
+    llm = llm or meta.get("llm", config.get("MOP_DEFAULT_LLM"))
+    if llm not in llm_profiles():
+        return f"нет LLM-профиля {llm}; есть: {', '.join(llm_profiles())}"
     keys.push_llm_keys(llm)
     nomad.register(slaves.job_spec(name, origin, llm))
     return f"{name} -> {origin} [{llm}], перезапускается"

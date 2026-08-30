@@ -69,6 +69,10 @@ DEFAULTS = {
     # тулчейн стоит на узлах), а не продукта; {HOME} подставляется на месте.
     "MOP_SLAVE_PATH": "/usr/local/bin:/usr/bin:/bin:{HOME}/.local/bin:{HOME}/.cargo/bin:{HOME}/.nvm/versions/node/v22.12.0/bin",
     "MOP_FALLBACK_MODEL": "opus",
+    # Каким профилем из mop/llm/ поднимать сессию без явного --llm: слейва
+    # или мастера. Выбор установки, а не продукта: контора на одном провайдере
+    # меняет дефолт, а не каждую команду.
+    "MOP_DEFAULT_LLM": "claude",
     "MOP_SWEEP_FREE_MIN_GB": "60",
     "MOP_SWEEP_MAX_TARGET": "15GB",
     "MOP_SWEEP_STALE_DAYS": "14",

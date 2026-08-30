@@ -14,7 +14,7 @@ import json
 import os
 import time
 
-from . import bus, nomad, slaves
+from . import bus, llm, nomad, slaves
 
 LOGIN_JOB = "sl-login"
 
@@ -132,7 +132,7 @@ def llm_keys_blob():
     .env проекта: там же лежат креды GitLab, и на узлах пула им делать нечего.
     Едет ровно перечисленное.
     -> (содержимое|None, замечание|None)"""
-    wanted = {p["key"] for p in slaves.LLM_PROFILES.values() if p.get("key")}
+    wanted = {p["key"] for p in llm.profiles().values() if p.get("key")}
     wanted |= set(slaves.NODE_SECRETS)
     if not wanted:
         return None, None
@@ -158,17 +158,21 @@ def _as_file(path, text_or_bytes):
     return (path, base64.b64encode(raw).decode())
 
 
-def push_llm_keys(llm):
+def push_llm_keys(profile):
     """Ключ профиля обязан лежать на узле РАНЬШЕ слейва: без него врапер
     валится, а Nomad уводит слейв в restart-backoff. Узел заранее неизвестен
     (место выбирает планировщик), поэтому раздаём на весь пул.
-    -> {узел: результат} либо None, если профилю ключ не нужен."""
-    key = slaves.LLM_PROFILES[llm].get("key")
+    -> {узел: результат} либо None, если профилю ключ не нужен.
+
+    Чужому имени — тихий None, а не отказ: валидация имени — дело вызывающих
+    (parse_llm, job_spec), а отказ здесь читался бы как «ключа нет» и уводил
+    бы разбор не туда."""
+    key = (llm.get(profile) or {}).get("key")
     if not key:
         return None
     blob, note = llm_keys_blob()
     if not blob or key not in blob:
-        raise RuntimeError(f"профиль {llm}: {note}")
+        raise RuntimeError(f"профиль {profile}: {note}")
     return distribute([_as_file(slaves.SECRETS_FILE, blob)])
 
 

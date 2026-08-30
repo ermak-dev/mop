@@ -1,4 +1,4 @@
-"""Слейвы пула: спека job'а, LLM-профили и достоверное состояние места.
+"""Слейвы пула: спека job'а и достоверное состояние места.
 
 Модуль ВОЗВРАЩАЕТ ДАННЫЕ и ничего не печатает. Форматирование живёт во
 фронтендах (командлеты в bin/ печатают таблицы, mop mcp отдаёт то же самое
@@ -9,7 +9,7 @@ import os
 import re
 import time
 
-from . import bus, config, nomad
+from . import bus, config, llm, nomad
 
 PROJECT = config.PROJECT
 
@@ -38,33 +38,9 @@ MAC_MCP_HOST = config.get("MAC_MCP_HOST")
 # провайдера — больше в слейв ничего не меняется, поэтому tmux, tail, doctor
 # и детект залипаний работают одинаково для любого профиля.
 #
-# "key" — ИМЯ переменной в .env проекта (локальный источник правды по ключам).
-# Сам ключ в спеку джоба НЕ кладём: она видна в UI Nomad и остаётся в его
-# состоянии. Вместо этого раздаём на узлы файл
-# ~/.config/mop/secrets.env (только с тем, что названо явно), а врапер уже на
-# узле подставляет нужное в сессию.
-LLM_PROFILES = {
-    # штатный Claude: авторизация — логин claude.ai (mop login), env пустой
-    "claude": {"key": None, "env": {}},
-    # z.ai GLM coding plan, https://docs.z.ai/devpack/tool/claude
-    "glm": {
-        "key": "Z_AI_KEY",
-        "auth_var": "ANTHROPIC_AUTH_TOKEN",
-        "env": {
-            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-            # [1m] — окно контекста модели, claude срезает суффикс перед
-            # запросом (проверено на z.ai). Без него claude считает незнакомую
-            # модель 200-килотокенной и жмёт auto-compact вчетверо раньше,
-            # чем нужно: у glm-5.3 контекст 1M.
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3[1m]",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3[1m]",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3-flash",
-            # длинные ходы у GLM легко перебивают дефолтный таймаут клиента
-            "API_TIMEOUT_MS": "3000000",
-        },
-    },
-}
-DEFAULT_LLM = "claude"
+# Сами профили — плагины в mop/llm/ (один файл = один профиль, имя файла =
+# имя). Здесь только потребление. Дефолт — настройка установки: контора на
+# одном провайдере меняет дефолт, а не каждую команду.
 # Источник правды по секретам проекта — .env рядом с кодом. Всё, что задаёт
 # человек, лежит там; порождаемое само (пароли NATS, токен Nomad, логин
 # claude.ai) — не там и туда не попадает.
@@ -266,16 +242,23 @@ def clone_dir(name):
     return f"{HOME}/slaves/{name}"
 
 
-def job_spec(name, origin, llm=DEFAULT_LLM):
+def job_spec(name, origin, profile=None):
     project = os.path.basename(origin).removesuffix(".git")
-    prof = LLM_PROFILES[llm]
+    profile = profile or config.get("MOP_DEFAULT_LLM")
+    prof = llm.get(profile)
+    if prof is None:
+        # Протухший Meta.llm у работающего джоба: профиль удалили из реестра,
+        # а джоб жив. Отказ обязан звать слейва по имени — иначе искать, кто
+        # именно не перерегистрируется, придётся по трассе.
+        raise RuntimeError(f"{name}: нет LLM-профиля {profile}; есть: "
+                           f"{', '.join(llm.profiles())} (mop llm)")
     llm_env = "".join(f"{k}={v}\n" for k, v in prof["env"].items())
     return {"Job": {
         "ID": name,
         "Name": name,
         "Datacenters": [nomad.POOL_DC],
         "Type": "service",
-        "Meta": {"origin": origin, "llm": llm},
+        "Meta": {"origin": origin, "llm": profile},
         "TaskGroups": [{
             "Name": "slaves",
             "Count": 1,
@@ -301,7 +284,7 @@ def job_spec(name, origin, llm=DEFAULT_LLM):
                     "HOME": HOME,
                     "PATH": config.get("MOP_SLAVE_PATH").replace("{HOME}", HOME),
                     # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
-                    "SL_LLM": llm,
+                    "SL_LLM": profile,
                     "SL_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
                     "SL_LLM_KEY_VAR": prof.get("key") or "",
                     "SL_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
@@ -616,7 +599,7 @@ def slave_rows():
             "alloc_status": (item["error"] or (alloc["ClientStatus"] if alloc
                                                else job.get("Status", "?"))),
             "state": item["state"] or "-",
-            "llm": meta.get("llm", DEFAULT_LLM),
+            "llm": meta.get("llm", config.get("MOP_DEFAULT_LLM")),
             "origin": meta.get("origin", "?"),
             "disk_kb": item.get("disk_kb"),
         })
@@ -747,7 +730,7 @@ def recycle(name):
     origin = meta.get("origin")
     if not origin:
         raise RuntimeError(f"у {name} нет origin в Meta — это не слейв?")
-    llm = meta.get("llm", DEFAULT_LLM)
+    llm = meta.get("llm", config.get("MOP_DEFAULT_LLM"))
     alloc = nomad.latest_alloc(name)
     node = alloc["NodeName"] if alloc else None
     if not node:

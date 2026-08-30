@@ -5,7 +5,7 @@
 (tmux, состояние, детект залипаний) для любого профиля одинаково.
 """
 import lib
-from mop import keys, slaves
+from mop import keys, llm, slaves
 
 
 def main(argv):
@@ -13,10 +13,10 @@ def main(argv):
         lib.usage(__doc__)
     blob, note = keys.llm_keys_blob()
     have = {l.split("=", 1)[0] for l in (blob or "").splitlines() if "=" in l}
-    for name, prof in slaves.LLM_PROFILES.items():
+    for name, prof in llm.profiles().items():
         key = prof.get("key")
         if not key:
-            state = "логин claude.ai (mop login)"
+            state = prof["doc"] or "ключа не требует"
         elif key in have:
             state = f"ключ {key}: есть"
         else:

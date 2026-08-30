@@ -8,14 +8,14 @@ import os
 import time
 
 import lib
-from mop import nomad, slaves
+from mop import config, nomad, slaves
 
 
 def main(argv):
-    llm, args = lib.parse_llm(argv)
+    profile, args = lib.parse_llm(argv)
     if len(args) > 1:
         lib.usage(__doc__)
-    llm = llm or slaves.DEFAULT_LLM
+    profile = profile or config.get("MOP_DEFAULT_LLM")
     origin = args[0] if args else lib.cwd_origin()
     shard = slaves.shard_of(origin)
     # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS, и
@@ -24,9 +24,9 @@ def main(argv):
     if not os.path.exists(lib.shard_creds(shard)):
         lib.usage(f"шарда {shard} ещё нет на шине.\nЗаведи его: mop deploy nats")
     name = slaves.next_name(shard)
-    lib.push_llm_keys(llm)
-    nomad.register(slaves.job_spec(name, origin, llm))
-    print(f"{name}: {origin} [{llm}]")
+    lib.push_llm_keys(profile)
+    nomad.register(slaves.job_spec(name, origin, profile))
+    print(f"{name}: {origin} [{profile}]")
 
     node = None
     for _ in range(120):

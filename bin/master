@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""запустить claude в режиме мастера шарда: mop master [git-origin]
+"""запустить claude в режиме мастера шарда: mop master [--llm ПРОФИЛЬ] [git-origin]
 
 Без аргумента берётся origin текущей рабочей копии. Один проект — один шард:
 мастер видит и достаёт только своих слейвов, чужие для него не существуют.
@@ -25,12 +25,18 @@ mop — то есть где угодно, только не там, где ма
 held-очередь и ждёт человека — то есть петля перестаёт быть автоматической
 ровно на главном своём сигнале. Цена названа: мастер держит токен Nomad,
 пушит и ходит в трекер, и спрашивать он теперь не будет ни о чём.
+
+--llm поднимает сессию мастера на профиле из mop/llm/ — том же наборе, каким
+живут слейвы. Без флага действует MOP_DEFAULT_LLM установки. Статический env
+профиля уходит в сессию целиком, а ключ читается из .env мастерской машины:
+узельного secrets.env здесь нет, и местный .env для того и является
+источником правды по ключам.
 """
 import json
 import os
 
 import lib
-from mop import slaves
+from mop import config, llm, slaves
 
 # --strict-mcp-config НЕ добавляем: у оператора есть свои серверы, и мастер-шелл
 # не повод их отбирать.
@@ -43,9 +49,11 @@ def mcp_config():
 
 
 def main(argv):
-    if len(argv) > 1:
+    profile, args = lib.parse_llm(argv)
+    profile = profile or config.get("MOP_DEFAULT_LLM")
+    if len(args) > 1:
         lib.usage(__doc__)
-    origin = argv[0] if argv else lib.cwd_origin()
+    origin = args[0] if args else lib.cwd_origin()
     shard = slaves.shard_of(origin)
     creds = lib.shard_creds(shard)
     if not os.path.exists(creds):
@@ -55,10 +63,21 @@ def main(argv):
         lib.usage(f"нет кредов шарда {shard} ({creds}).\n"
                   f"Заведи шард: mop deploy nats")
 
-    env = dict(os.environ, MOP_SHARD=shard, MOP_BUS_CONFIG=creds)
-    print(f"мастер шарда {shard} ({origin})")
+    # Профиль тот же, что у слейвов, но источник ключа другой: не узловой
+    # secrets.env (мастеру узел не выдавал ничего), а местный .env. Отказа — а
+    # не тишины: сессия без ключа отбивает каждый ход 401-й, а читается живой.
+    prof = llm.require(profile)
+    env = dict(os.environ, MOP_SHARD=shard, MOP_BUS_CONFIG=creds,
+               **prof["env"])
+    if prof["key"]:
+        key = config.get(prof["key"])
+        if not key:
+            lib.usage(f"профиль {profile}: нет {prof['key']} в "
+                      f"{slaves.LOCAL_KEYS_FILE} — впиши и повтори")
+        env[prof["auth_var"]] = key
+    print(f"мастер шарда {shard} ({origin}) [{profile}]")
     os.execvpe("claude", ["claude", "--dangerously-skip-permissions",
-                          "--mcp-config", mcp_config()] + argv[1:], env)
+                          "--mcp-config", mcp_config()] + args[1:], env)
 
 
 lib.run(lib.cluster(main))
