@@ -53,7 +53,7 @@
     win_inside: "{{ MOP_SSH_ALIAS.split(',') | map('split','=') | map('last') | list }}"
     windows_mcp_url: >-
       {{ 'http://127.0.0.1:' ~ MCP_PORT ~ '/mcp' if inventory_hostname in win_inside
-         else 'http://' ~ WINDOWS_MCP_FQDN ~ ':' ~ MCP_PORT ~ '/mcp' }}
+         else 'http://' ~ WINDOWS_MCP_HOST ~ ':' ~ MCP_PORT ~ '/mcp' }}
 
   tasks:
     - name: Ensure ~/.claude exists
