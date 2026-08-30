@@ -1,4 +1,4 @@
-# mop
+# mop - Master Of Puppets
 
 Пул claude-слейвов поверх Nomad: как он разворачивается, чем управляется и как
 с слейвами разговаривать.
@@ -35,18 +35,19 @@ bin/mop            диспетчер: mop <подкоманда>; наружу 
 bin/common         общее окружение командлетов (молчит: mcp говорит по stdio)
 bin/lib.py         общая часть питоновских командлетов — единственное, что печатает
 bin/add …          по командлету на подкоманду: add/list/delete/change/restart/
-                   attach/tail/llm/login/doctor/send/master/shards/mcp/deploy/help
+                   attach/tail/llm/login/doctor/send/master/shards/mcp/deploy/
+                   recycle/gc/help
 deploy/            ansible — всё, что ставит сам mop:
   nomad/setup.yml    кластер Nomad: сервер и клиенты — ГДЕ стоит слейв
-  setup.yml          шина, агент на узлах, креды — КАК с ним говорить
-examples/homelab/  установка автора: окружение узлов, сторож диска, прокси
+  setup.yml          шина, агент и сторож диска на узлах — КАК с ним говорить
+examples/homelab/  установка автора: окружение узлов, тулчейн, прокси
 tests/state.py     матрица состояний слейва, проверяется без пула
 skills/pm/         скилл мастера: петля управления пулом (симлинк из ~/.claude)
 docs/BUS.md        субъекты шины, глаголы агента, права
 docs/CHANNEL.md    протокол канала сообщений claude code
 docs/MCP.md        архитектура MCP-сервера и его инструменты
 docs/SECURITY.md   что защищено чем и где известный пробел
-docs/GC.md         план: место на узлах и пересоздание свободных слейвов
+docs/GC.md         место на узлах: сторож и пересоздание свободных слейвов
 ```
 
 ## Про имена и язык
@@ -67,7 +68,7 @@ MCP-сервер начал бы разбирать текст, свёрстан
 
 **Nomad решает, где слейв стоит.** Размещение, бюджет памяти, рестарты,
 переезд при потере узла. `slave` ходит в него по REST
-(`https://nomad.ermak.dev`), токен — из `$NOMAD_TOKEN` или
+(`http://$MOP_SERVER_LAN:4646`), токен — из `$NOMAD_TOKEN` или
 `~/.config/nomad/bootstrap.json`, и живёт этот токен ТОЛЬКО на управляющей
 машине.
 
@@ -97,7 +98,7 @@ claude живёт в tmux» и держится, пока жива tmux-сесс
 ~/bin/mop              -> ../mop/bin/mop
 ~/etc/nomad            -> ../mop/nomad
 ~/etc/nats             -> ../mop/nats
-~/.claude/skills/pm    -> /home/ermak/mop/skills/pm
+~/.claude/skills/pm    -> /home/you/mop/skills/pm
 ```
 
 `~/.claude/skills/pm` абсолютен намеренно: тот же путь обязан разрешаться и на

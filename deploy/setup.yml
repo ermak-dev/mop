@@ -225,6 +225,18 @@
     - name: Flush handlers before checking
       ansible.builtin.meta: flush_handlers
 
+    # Дисковый сторож — объекты mop (клоны, target-каталоги), а не проекта,
+    # поэтому едет ядром, а не examples. Скрипт ставится на узлы, джоб
+    # регистрируется ниже отдельной игрой на сервере. Он обязан работать при
+    # выключенном мастере -- иначе теряется единственная уборка, которой всё
+    # равно (сироты не требуют суждений о живых слейвах).
+    - name: Deploy the sl-sweep script (disk watchdog)
+      become: yes
+      ansible.builtin.copy:
+        src: sl-sweep.sh
+        dest: /usr/local/bin/sl-sweep
+        mode: "0755"
+
     # Прогон плейбука без этой проверки не отличает «юнит запущен» от «агент
     # подписался»: systemd доволен процессом, который упал в реконнект.
     - name: Confirm the agent is connected
@@ -287,3 +299,41 @@
       vars:
         nats_user: "master-{{ item }}"
         nats_password: "{{ lookup('password', secrets_dir + '/nats-master-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
+
+
+# Джоб дискового сторожа. Регистрируется СЕРВЕРОМ: токен есть только у него,
+# а спека несут значения установки (датацентр, пользователь, $HOME, пороги) --
+# всё приезжает --extra-vars от `mop deploy`, плейбуки .env не читают.
+- name: Disk watchdog job
+  hosts: mop_server
+  gather_facts: no
+
+  vars:
+    nomad_home: "{{ MOP_NOMAD_DATA | dirname }}"
+
+  tasks:
+    # template, а не copy: спека несёт значения установки. ${...} для этого не
+    # годится -- это интерполяция HCL, Nomad стал бы разрешать её сам и не
+    # нашёл бы переменной.
+    - name: Deploy the sl-cleanup job spec
+      ansible.builtin.template:
+        src: sl-cleanup.nomad.hcl.j2
+        dest: "{{ nomad_home }}/sl-cleanup.nomad.hcl"
+        mode: "0644"
+      register: cleanup_spec
+
+    - name: Check the sl-cleanup job is registered
+      ansible.builtin.shell: >
+        NOMAD_ADDR=http://127.0.0.1:{{ MOP_NOMAD_PORT }}
+        NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
+        /usr/local/bin/nomad job status sl-cleanup
+      register: cleanup_status
+      failed_when: false
+      changed_when: false
+
+    - name: Register the sl-cleanup job
+      ansible.builtin.shell: >
+        NOMAD_ADDR=http://127.0.0.1:{{ MOP_NOMAD_PORT }}
+        NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
+        /usr/local/bin/nomad job run {{ nomad_home }}/sl-cleanup.nomad.hcl
+      when: cleanup_spec.changed or cleanup_status.rc != 0

@@ -4,19 +4,19 @@
 # Three tiers, cheapest first, mirroring the classes in ~/bin/cleanup:
 #
 #   orphans     — a live slave == a live tmux session named after its job: the
-#                 wrapper in ~/командлеты bin/ dies with its tmux session, and a
-#                 stopped/moved job takes the session down with it. So any
-#                 ~/wk/<name> or ~/.cache/target-<name> without an
-#                 exactly-matching tmux session is an orphan: a deleted slave's
-#                 leftovers (mop delete keeps them on purpose) or the trail of
-#                 one that moved to another node. Cheap to re-create, so the rare
-#                 race with a mop restarting at sweep time costs a re-clone.
-#                 Swept unconditionally.
+#                 wrapper dies with its tmux session, and a stopped/moved job
+#                 takes the session down with it. So any ~/slaves/<name> or
+#                 ~/.cache/target-<name> without an exactly-matching tmux
+#                 session is an orphan: a deleted slave's leftovers (mop delete
+#                 keeps them on purpose) or the trail of one that moved to
+#                 another node. Cheap to re-create, so the rare race with a mop
+#                 restarting at sweep time costs a re-clone. Swept
+#                 unconditionally.
 #   stale       — paths nothing references any more, age-gated. These are what a
 #                 glob-driven sweep misses: $HOME/cache is rugent's pre-#627
 #                 CARGO_TARGET_DIR, retired 2026-08-20, and matches neither
-#                 ~/slaves/sl-* nor ~/.cache/target-sl-*. It still held 59 GB on
-#                 gamer on 2026-08-28, four days after the last write.
+#                 ~/slaves/sl-* nor ~/.cache/target-sl-*. It still held 59 GB
+#                 2026-08-28, four days after the last write.
 #   size-capped — LIVE slaves' target dirs, trimmed by cargo-sweep, and only
 #                 under space pressure. Not age-gated: cargo rewrites
 #                 fingerprints on every build, so an active target dir never
@@ -24,38 +24,13 @@
 #                 holding cargo's own lock, so a build cannot be running in one
 #                 while it is swept.
 #
-# WHICH FILESYSTEM IS ACTUALLY FULL
-#
-# On gamer the pool node is WSL2, and `df $HOME` is a lie: / is a 1007 GB sparse
-# ext4.vhdx that reported 26% used / 714 GB free on 2026-08-28 while the Windows
-# C: drive backing it was down to 8 GB and WSL would no longer boot
-# (Wsl/Service/CreateInstance/E_FAIL) -- the node had been off the cluster for
-# two days. The old sweep printed `df -h $HOME` and would have seen nothing
-# wrong. So the gate is the TIGHTEST of $HOME and, on WSL, the backing store at
-# /mnt/c.
-#
-# FREEING SPACE IN HERE DOES NOT, BY ITSELF, GIVE C: A BYTE BACK.
-#
-# / is mounted `discard` and `fstrim --dry-run` reports 0 B pending, which looks
-# like the blocks are being returned. They are not: measured on 2026-08-28,
-# deleting 102 GB inside WSL took / from 242 GB used to 140 GB while
-# ext4.vhdx stayed at 255.13 GB and C: free did not move (123.0 -> 122.5 GB).
-# The vhdx carries the plain `Archive` attribute, not `SparseFile`, so the host
-# file only ever grows to its high-water mark and discards inside the guest
-# deallocate nothing on NTFS.
-#
-# Returning the space needs the vhdx made sparse -- `wsl --manage <d>
-# --set-sparse true` for the existing one, `[experimental] sparseVhd=true` in
-# .wslconfig for any new one -- both of which need the distro stopped. Until
-# that is done, this sweep buys room inside the guest (which is what stops a
-# slave's build failing) but the guest's footprint on C: only ratchets up, and
-# C: is what actually stopped this node.
-#
-# Env knobs (set in the nomad job spec):
+# Env knobs (set in the nomad job spec, values of this installation):
 #   MOP_SWEEP_FREE_MIN_GB escalate to tier 3 below this much free   (default 60)
 #   MOP_SWEEP_MAX_TARGET  per-target-dir cap for cargo-sweep      (default 15GB)
 #   MOP_SWEEP_STALE_DAYS   age gate for tier 2                      (default 14)
 #   MOP_SWEEP_DRY          set to 1 to report without deleting
+# WK_SWEEP_* are accepted as fallbacks: the job spec carried them under those
+# names until 2026-08-30, and a node may still run the old registration.
 set -u
 
 FREE_MIN_GB=${MOP_SWEEP_FREE_MIN_GB:-${WK_SWEEP_FREE_MIN_GB:-60}}
@@ -85,31 +60,11 @@ freed_kb=0
 # `tmux -L <job>` since the shared-server cgroup OOM incident.
 live_player() { tmux -L "$1" has-session -t "=$1" 2>/dev/null; }
 
-# Free GB on the filesystem holding $1. Both ext4 and the 9p /mnt/c answer this.
-free_gb() { df -BG --output=avail "$1" 2>/dev/null | awk 'NR==2{print $1+0}'; }
-
-# The filesystems whose exhaustion actually stops this node. On WSL the vhdx
-# backing store is the real limit and is invisible from `df $HOME`.
-WATCH=("$HOME")
-if [ -d /mnt/c ] && grep -qi microsoft /proc/version 2>/dev/null; then
-    WATCH+=(/mnt/c)
-fi
-
-# The tightest of them, in GB.
-pressure_gb() {
-    local min="" g
-    for p in "${WATCH[@]}"; do
-        g=$(free_gb "$p") || continue
-        [ -z "$g" ] && continue
-        { [ -z "$min" ] || [ "$g" -lt "$min" ]; } && min="$g"
-    done
-    echo "${min:-999999}"
-}
+# Free GB on the filesystem holding the slaves' clones and target dirs.
+free_gb() { df -BG --output=avail "$HOME" 2>/dev/null | awk 'NR==2{print $1+0}'; }
 
 report_space() {
-    for p in "${WATCH[@]}"; do
-        printf '  %-14s %s\n' "$p" "$(df -h "$p" 2>/dev/null | awk 'NR==2{printf "%s used of %s, %s free (%s)", $3, $2, $4, $5}')"
-    done
+    printf '  %-14s %s\n' "$HOME" "$(df -h "$HOME" 2>/dev/null | awk 'NR==2{printf "%s used of %s, %s free (%s)", $3, $2, $4, $5}')"
 }
 
 # rm_path <path> <label> -- remove and account for a whole path.
@@ -122,9 +77,9 @@ rm_path() {
     note "$label" "$(hr "$kb")"
     freed_kb=$((freed_kb + kb))
     [ -n "$DRY" ] && return 0
-    # Slave clones are ermak's, but anything a container wrote into a cache is
-    # root's; ermak cannot unlink those. `sudo -n` never prompts, and where it
-    # is not permitted this fails exactly as it did before.
+    # Slave clones are the user's, but anything a container wrote into a cache
+    # is root's; the user cannot unlink those. `sudo -n` never prompts, and
+    # where it is not permitted this fails exactly as it did before.
     rm -rf "$path" 2>/dev/null || sudo -n rm -rf "$path" 2>/dev/null
 }
 
@@ -147,7 +102,7 @@ echo
 # Two sanity gates before anything is deleted. Both exist because "no live tmux
 # session" is only evidence of an orphan when tmux could have answered at all --
 # and on 2026-08-28 mirror spent nine minutes in a state where it could not:
-# the box was hard-reset, /home/ermak is ecryptfs and comes back UNMOUNTED, and
+# the box was hard-reset, /home/<user> is ecryptfs and comes back UNMOUNTED, and
 # the slaves only start once someone logs in with a password. A sweep landing
 # in that window would have seen every clone with no session and deleted the lot.
 # Nightly, that window was a rounding error; hourly it is a real exposure.
@@ -223,9 +178,9 @@ done
 # --------------------------------------------------------------------------
 # Tier 3 -- size-cap LIVE slaves' target dirs, only under pressure.
 # --------------------------------------------------------------------------
-avail=$(pressure_gb)
+avail=$(free_gb "$HOME")
 if [ "$avail" -ge "$FREE_MIN_GB" ]; then
-    echo "tier 3: skipped -- ${avail} GB free on the tightest watched fs (>= ${FREE_MIN_GB} GB)"
+    echo "tier 3: skipped -- ${avail} GB free (>= ${FREE_MIN_GB} GB)"
 else
     echo "tier 3: ${avail} GB free < ${FREE_MIN_GB} GB -- capping live target dirs at ${MAX_TARGET}"
     live_targets=()
@@ -344,4 +299,4 @@ echo "=== disk after ==="
 report_space
 
 # Leave a machine-readable line for `nomad alloc logs` and any future scrape.
-echo "wk_sweep_freed_kb=$freed_kb wk_sweep_free_gb=$(pressure_gb)"
+echo "wk_sweep_freed_kb=$freed_kb wk_sweep_free_gb=$(free_gb "$HOME")"

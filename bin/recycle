@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""пересоздать слейва на чистой рабочей копии: mop recycle <имя>
+
+Несохранённое сносится восстановлением из git, target-каталог удаляется
+целиком (первая сборка после рецикла долгая). Клон не переклонируется.
+"""
+import lib
+from mop import slaves
+
+
+def main(argv):
+    if len(argv) != 1:
+        lib.usage(__doc__)
+    name = argv[0]
+    lib.guard(name)
+    print(f"останавливаю {name}, сбрасываю клон к HEAD, сношу target...")
+    r = slaves.recycle(name)
+    print(f"пересоздан {name} на {r['node']}")
+
+
+lib.run(lib.cluster(main))

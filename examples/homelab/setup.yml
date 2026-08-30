@@ -2,51 +2,14 @@
 # Окружение узлов пула — УСТАНОВКА АВТОРА, продуктом не являющаяся.
 #
 # Сам mop ставится двумя плейбуками в deploy/: кластер Nomad (deploy/nomad) и
-# шина с агентом (deploy/setup.yml). Ни тот, ни другой не знают, какие проекты
-# в пуле собираются и чем. Здесь — знают: postgres и redis для тестов cloudpub,
-# тулчейн Rust, node с yarn, env-файлы проектов, сторож диска для cargo.
+# шина с агентом и дисковым сторожем (deploy/setup.yml). Ни тот, ни другой не
+# знают, какие проекты в пуле собираются и чем. Здесь — знают: postgres и
+# redis для тестов cloudpub, тулчейн Rust, node с yarn, env-файлы проектов.
 #
 # Как инструкция это не годится — только как образец того, что вообще бывает
 # нужно узлу сверх голого Nomad. У вас список будет другим.
 #
 # Запуск:  mop deploy homelab
-
-- name: Ночной сторож диска
-  hosts: mop_server
-  become: no
-  gather_facts: no
-
-  vars:
-    nomad_home: "{{ MOP_NOMAD_DATA | dirname }}"
-
-  tasks:
-    # см. sl-cleanup.nomad.hcl.
-    # template, а не copy: спека несёт значения установки (датацентр, пользователь,
-    # $HOME). ${...} для этого не годится -- это интерполяция HCL, Nomad стал бы
-    # разрешать её сам и не нашёл бы переменной.
-    - name: Deploy the sl-cleanup job spec
-      ansible.builtin.template:
-        src: sl-cleanup.nomad.hcl.j2
-        dest: "{{ nomad_home }}/sl-cleanup.nomad.hcl"
-        mode: '0644'
-      register: cleanup_spec
-
-    - name: Check the sl-cleanup job is registered
-      ansible.builtin.shell: >
-        NOMAD_ADDR=http://127.0.0.1:{{ MOP_NOMAD_PORT }}
-        NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
-        /usr/local/bin/nomad job status sl-cleanup
-      register: cleanup_status
-      failed_when: false
-      changed_when: false
-
-    - name: Register the sl-cleanup job
-      ansible.builtin.shell: >
-        NOMAD_ADDR=http://127.0.0.1:{{ MOP_NOMAD_PORT }}
-        NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
-        /usr/local/bin/nomad job run {{ nomad_home }}/sl-cleanup.nomad.hcl
-      when: cleanup_spec.changed or cleanup_status.rc != 0
-
 
 - name: Тулчейн и окружение проектов на узлах пула
   hosts: nomad_clients
@@ -113,7 +76,9 @@
         mode: '0755'
         creates: "{{ MOP_HOME }}/.cargo/bin/cargo-nextest"
 
-    # cargo-sweep: the size cap sl-sweep applies to a LIVE slave's target dir.
+    # cargo-sweep: the size cap sl-sweep (deploy/) applies to a LIVE slave's
+    # target dir. The sweep degrades gracefully without it, and the tool itself
+    # is project toolchain, so it stays here rather than moving to deploy/.
     # An age gate cannot stand in for it -- cargo rewrites fingerprints on every
     # build, so an actively built target dir never looks old (0 of 34,509 files
     # older than 3 days in a 48 GB dir; see ~/bin/cleanup). Built from source
@@ -124,12 +89,6 @@
       become_user: "{{ MOP_USER }}"
       args:
         creates: "{{ MOP_HOME }}/.cargo/bin/cargo-sweep"
-
-    - name: Deploy the sl-sweep script (run nightly by the sl-cleanup job)
-      ansible.builtin.copy:
-        src: sl-sweep.sh
-        dest: /usr/local/bin/sl-sweep
-        mode: '0755'
 
     # --- cloudpub integration-test environment ---------------------------
     # The subset of cloudpub's bin/docker-test that the rust integration

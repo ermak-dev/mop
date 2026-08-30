@@ -9,12 +9,19 @@ from mop import slaves
 from mop.render import table
 
 
+def place(row):
+    """Колонка «место»: клон + target слейва, обмер спросом (du без кэша).
+    Прочерк — обмер не доехал: не ноль, ноль был бы «измерено и пусто»."""
+    kb = row.get("disk_kb")
+    if kb is None:
+        return "-"
+    return f"{kb / 2**20:.0f} ГБ" if kb >= 2**20 else f"{kb / 2**10:.0f} МБ"
+
+
 def free(row):
-    """Свободен ли слейв. По ПРЕФИКСУ: у свободного места состояние обычно
-    несёт ещё и ветку — «свободен (master)». Точное сравнение врало и до
-    переезда на шину: таблица показывала свободные места, а подсказка под ней
-    уверяла, что свободных нет."""
-    return row["state"].startswith("свободен")
+    # Правило «свободен по префиксу» живёт в slaves.is_free — оно одно на
+    # систему: на нём стоят и подсказка здесь, и выбор жертв в mop gc.
+    return slaves.is_free(row["state"])
 
 
 def hint(rows, origin):
@@ -43,7 +50,7 @@ def main(argv):
     rows = slaves.slave_rows()
     if rows:
         print("\n".join(table([(r["name"], r["node"], r["alloc_status"],
-                                r["state"], r["llm"], r["origin"]) for r in rows])))
+                                r["state"], place(r), r["llm"], r["origin"]) for r in rows])))
     else:
         print("слейвов нет")
     origin = lib.cwd_origin(required=False)

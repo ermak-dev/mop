@@ -46,10 +46,11 @@ CLONES = f"{HOME}/slaves"
 # кто чем занят; печатать в чужой TUI и писать файлы — не имеет.
 PUBLIC_VERBS = ("ping", "local", "state", "states", "send", "tail")
 
-# Глаголы УЗЛА, а не проекта. Раздача кредов пишет файлы, общие для всех
-# жильцов хоста, поэтому мастеру проекта её отдавать нельзя: он перезаписал бы
-# креды, которыми живёт соседний проект.
-ADMIN_VERBS = ("write",)
+# Глаголы УЗЛА, а не проекта. Раздача кредов пишет файлы, а место на диске —
+# факт про хост со всеми его жильцами, поэтому мастеру проекта их отдавать
+# нельзя: файлами он перезаписал бы креды соседа, а местом видел бы соседнюю
+# нагрузку. Всё это — оператору из admin.
+ADMIN_VERBS = ("write", "disk")
 
 # Что разрешено отправлять в пейн. Тот же список, что у фронтенда, — но
 # проверка здесь настоящая, а там подсказка пользователю.
@@ -166,6 +167,22 @@ async def clone_facts(name):
             "dirty": dirty, "ahead": ahead}
 
 
+async def du_kb(name):
+    """Сколько места занимает слейв: клон плюс его target-каталог, в КБ.
+
+    Меряется ПО СПРОСУ, без кэша (пока): du по большому target — обход сотен
+    тысяч inode, и цену платит каждый спрашивающий. nice обязателен — обмер
+    конкурирует за IO с живыми сборками. Отказ du — None, а не ноль: ноль
+    это измеренное «пусто», отказ — «не знаю»."""
+    paths = [p for p in (clone_dir(name), f"{HOME}/.cache/target-{name}")
+             if os.path.isdir(p)]
+    if not paths:
+        return None
+    out, _ = await sh(f"nice -n 19 du -sx {' '.join(paths)} 2>/dev/null",
+                      timeout=120)
+    return sum(int(l.split()[0]) for l in out.splitlines() if l[:1].isdigit())
+
+
 async def facts(name):
     """Всё, что узел знает о слейве, одним ответом.
 
@@ -201,6 +218,18 @@ async def v_states(req):
     names = [n for n in (req.get("names") or []) if await _mine(req, n)]
     got = await asyncio.gather(*(facts(n) for n in names))
     return {"slaves": dict(zip(names, got))}
+
+
+async def v_sizes(req):
+    """Место слейвов пачкой: клон + target, du по спросу.
+
+    ОТДЕЛЬНЫЙ глагол, а не поле в states: du небыстрый, и воткнуть его в
+    быстрый ответ о состояниях — значит читать медленный обмер как «агент
+    молчит 20с». Не доехал за таймаут — у мастера прочерк, а не ложный
+    диагноз."""
+    names = [n for n in (req.get("names") or []) if await _mine(req, n)]
+    kbs = await asyncio.gather(*(du_kb(n) for n in names))
+    return {"sizes": dict(zip(names, kbs))}
 
 
 async def v_local(req):
@@ -293,6 +322,53 @@ async def v_tail(req):
     return {"lines": await pane_lines(req["name"])}
 
 
+async def v_disk(_req):
+    """df по ФС, где живут клоны и target-каталоги. Узловой ФАКТ: давление
+    оценивает мастер (mop gc), здесь только цифра.
+
+    Одна ФС — $HOME: WSL-узла в кластере больше нет, и хитрости с бэкинг-
+    стором уехали вместе с ним (смотри историю в docs/GC.md)."""
+    out, code = await sh(f"df -BG --output=avail,size {HOME}")
+    if code not in (0, None) or not out.strip():
+        return {"error": f"df не ответил: {out.strip() or f'exit {code}'}"}
+    try:
+        avail, size = out.splitlines()[1].split()
+        return {"path": HOME, "free_gb": int(avail.rstrip("G")),
+                "total_gb": int(size.rstrip("G"))}
+    except (IndexError, ValueError):
+        return {"error": f"df ответил не тем: {out.strip()!r}"}
+
+
+async def v_wipe(req):
+    """Снести рабочую копию слейва и восстановить её из git; target — целиком.
+
+    Это половина рецикла (вторая — перерегистрация джоба у мастера). Клон не
+    переклонируется — дорого и незачем: `git add -A && git reset --hard HEAD`
+    убирает и несохранённое, и untracked, но не трогает игнорируемые — .env,
+    привезённый врапером, переживает. target-каталог — чисто производные
+    данные, он удаляется rm -rf и тем самым снимается почти весь объём.
+
+    Предохранитель: живая tmux-сессия — отказ. Агент не судит, свободен ли
+    слейв, но «сессия жива» — факт, и снос под живой сессией недопустим
+    независимо от того, что решил мастер."""
+    name = req["name"]
+    if not name.startswith(PREFIX) or "/" in name:
+        return {"error": f"имя {name!r} не похоже на {PREFIX}<проект>-<n>"}
+    if await tmux_alive(name):
+        return {"error": f"{name}: tmux-сессия жива — сначала останови джоб"}
+    out, code = await sh(
+        f"git -C {clone_dir(name)} add -A && git -C {clone_dir(name)} reset --hard HEAD")
+    if code not in (0, None):
+        return {"error": f"git в {clone_dir(name)}: {out.strip() or f'exit {code}'}"}
+    target = f"{HOME}/.cache/target-{name}"
+    # Долго: сотни тысяч inode. Таймаут шире офисного — и обычный вызов шела
+    # сюда не годится, он бы убил rm на полпути.
+    _, code = await sh(f"rm -rf {target}", timeout=600)
+    if code not in (0, None):
+        return {"error": f"rm {target}: exit {code}"}
+    return {"reset": True, "target": target}
+
+
 async def v_type(req):
     """Напечатать слэш-команду в пейн и вернуть экран после неё.
 
@@ -350,12 +426,13 @@ async def v_write(req):
 
 
 VERBS = {"ping": v_ping, "local": v_local, "state": v_state,
-         "states": v_states, "send": v_send, "tail": v_tail, "type": v_type,
-         "write": v_write}
+         "states": v_states, "sizes": v_sizes, "send": v_send,
+         "tail": v_tail, "type": v_type, "write": v_write,
+         "disk": v_disk, "wipe": v_wipe}
 
 # Глаголы, которые называют конкретного слейва: у них шард запроса обязан
 # сойтись с настоящим шардом слейва.
-NAMED_VERBS = ("state", "send", "tail", "type")
+NAMED_VERBS = ("state", "send", "tail", "type", "wipe")
 
 
 async def _mine(req, name):

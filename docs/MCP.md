@@ -121,7 +121,7 @@ send» без причины. Подробности и проверка — [BU
 (мастер работает в `~/rugent`, `~/cloudpub`):
 
 ```
-claude mcp add --scope user mop /home/ermak/mop/bin/mop mcp
+claude mcp add --scope user mop $HOME/mop/bin/mop mcp
 ```
 
 Проверка без claude — сервер печатает число инструментов и найденный инбокс

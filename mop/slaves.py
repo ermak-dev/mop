@@ -7,6 +7,7 @@
 import base64
 import os
 import re
+import time
 
 from . import bus, config, nomad
 
@@ -126,15 +127,7 @@ edit_json "$HOME/.claude.json" '.projects[$d].hasTrustDialogAccepted = true
 # host), so a slave can drive and verify the GUI clients. HTTP transport, so any
 # node that can resolve/reach the hosts gets them; a node that cannot just sees
 # the server fail to connect.
-# windows-mcp runs on the Windows host (gamer) bound to 0.0.0.0:8000. Off-host
-# slaves reach it by the host's LAN IP; a slave running IN the gamer host's own
-# mirrored-mode WSL shares that LAN IP, where the Windows bind is only reachable
-# via loopback - so it must use 127.0.0.1 instead.
-if ip -4 -o addr show 2>/dev/null | grep -q "$SL_WIN_HOST"; then
-    WINURL="http://127.0.0.1:$SL_MCP_PORT/mcp"
-else
-    WINURL="http://$SL_WIN_HOST:$SL_MCP_PORT/mcp"
-fi
+WINURL="http://$SL_WIN_HOST:$SL_MCP_PORT/mcp"
 # Токены НЕ в спеке: она видна в UI Nomad и остаётся в его состоянии. Едут
 # тем же файлом, что и ключи провайдеров, и достаются отсюда так же -- sed'ом,
 # а не source: файл с секретами не исполняем.
@@ -306,7 +299,7 @@ def job_spec(name, origin, llm=DEFAULT_LLM):
                     "SL_WIN_HOST": WINDOWS_MCP_HOST,
                     "SL_MAC_HOST": MAC_MCP_HOST,
                     "HOME": HOME,
-                    "PATH": f"/usr/local/bin:/usr/bin:/bin:{HOME}/.local/bin:{HOME}/.cargo/bin:{HOME}/.nvm/versions/node/v22.12.0/bin",
+                    "PATH": config.get("MOP_SLAVE_PATH").replace("{HOME}", HOME),
                     # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
                     "SL_LLM": llm,
                     "SL_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
@@ -536,6 +529,17 @@ def slave_state(f):
     return _state_from_clone(f.get("clone"))
 
 
+def is_free(state):
+    """Свободен ли слейв по строке состояния из slave_state.
+
+    По ПРЕФИКСУ: у свободного места состояние обычно несёт ещё и ветку —
+    «свободен (master)». Точное сравнение врало и до переезда на шину:
+    таблица показывала свободные места, а подсказка под ней уверяла, что
+    свободных нет. На этом ответе стоит и решение о диспатче, и выбор жертвы
+    для рецикла."""
+    return state.startswith("свободен")
+
+
 # ─── сводки для фронтендов ───────────────────────────────────────────────
 def _collect():
     """Ростер Nomad плюс состояние с узлов, ОДНИМ заходом.
@@ -570,6 +574,16 @@ def _collect():
     except bus.BusError as e:
         answers = {node: bus.BusError(str(e)) for node in by_node}
 
+    # Место слейвов — ОТДЕЛЬНЫЙ поезд с щедрым таймаутом: du небыстрый, и
+    # вплавить его в states значило бы читать медленный обмер как «агент
+    # молчит». Не доехало — в колонке прочерк, список состояний цел.
+    try:
+        sizes = bus.request_many({
+            node: {"verb": "sizes", "names": [i["job"]["ID"] for i in its]}
+            for node, its in by_node.items()}, timeout=45)
+    except bus.BusError as e:
+        sizes = {node: bus.BusError(str(e)) for node in by_node}
+
     for node, its in by_node.items():
         answer = answers.get(node)
         # Молчащий агент — ОТДЕЛЬНАЯ болезнь, не "слейв завис": слейв при этом
@@ -579,13 +593,19 @@ def _collect():
                 i["state"] = f"АГЕНТ МОЛЧИТ ({answer})"
             continue
         got = (answer or {}).get("slaves") or {}
+        sanswer = sizes.get(node)
+        sgot = ({} if isinstance(sanswer, Exception)
+                else ((sanswer or {}).get("sizes") or {}))
         for i in its:
             i["state"] = slave_state(got.get(i["job"]["ID"]))
+            i["disk_kb"] = sgot.get(i["job"]["ID"])
     return items
 
 
 def slave_rows():
-    """Слейва как ДАННЫЕ: [{name, node, alloc_status, state, llm, origin}]."""
+    """Слейва как ДАННЫЕ: [{name, node, alloc_status, state, llm, origin,
+    disk_kb}]. disk_kb — клон плюс target, обмеряется спросом; None — du не
+    доехал, это прочерк, а не ноль."""
     rows = []
     for item in _collect():
         job, alloc = item["job"], item["alloc"]
@@ -598,6 +618,7 @@ def slave_rows():
             "state": item["state"] or "-",
             "llm": meta.get("llm", DEFAULT_LLM),
             "origin": meta.get("origin", "?"),
+            "disk_kb": item.get("disk_kb"),
         })
     return rows
 
@@ -678,6 +699,69 @@ def _action_for(state):
     if state.startswith("нет квоты модели"):
         return "model"
     return False
+
+
+# ─── рецикл ───────────────────────────────────────────────────────────────
+def wipe(node, name):
+    """Глагол wipe напрямую, без остановки джоба. Агент сам откажет, если
+    tmux-сессия жива: голый wipe — для уже остановленного слейва, полный
+    цикл (стоп → снос → подъём) — recycle."""
+    r = bus.request(node, "wipe", name=name, timeout=600)
+    if "error" in r:
+        raise RuntimeError(r["error"])
+    return r
+
+
+def _wait_stopped(name):
+    """Дождаться, пока последняя аллокация перестанет быть running.
+
+    Останов джоба убивает задачу через KillTimeout (15с) и вместе с врапером —
+    tmux-сессию. Сносить рабочую копию под живой сессией нельзя, поэтому ждём
+    именно терминального статуса аллокации, а не «джоб dead» в API: между
+    ними сидит остановка задачи на узле."""
+    for _ in range(45):
+        alloc = nomad.latest_alloc(name)
+        if not alloc or alloc["ClientStatus"] != "running":
+            return
+        time.sleep(2)
+    raise RuntimeError(f"аллокация {name} не останавливается — узел жив?")
+
+
+def recycle(name):
+    """Пересоздать слейва на чистой рабочей копии. -> {node}.
+
+    Клон НЕ переклонируется: несохранённое сносится восстановлением из git
+    (глагол wipe: `git add -A && git reset --hard HEAD` — убирает и untracked,
+    но не трогает игнорируемые, так что .env, привезённый врапером, живёт),
+    target-каталог удаляется целиком — он и есть почти весь объём. Первая
+    сборка после рецикла долгая, поэтому это крайняя мера, а не гигиена.
+
+    Порядок ОБЯЗАТЕЛЕН: остановить джоб → дождаться терминала → wipe →
+    перерегистрировать спеку. Между решением «свободен» и сносом слейву
+    успевает прилететь задача (mop send идёт мимо мастера, у пула несколько
+    мастеров), и остановленный джоб — единственное состояние, в котором
+    сессии гарантированно нет. Перерегистрация, а не alloc_restart: врапер
+    живёт в спеке джоба, рестарт аллокации поднял бы старую."""
+    job = nomad.get_job(name)
+    meta = job.get("Meta") or {}
+    origin = meta.get("origin")
+    if not origin:
+        raise RuntimeError(f"у {name} нет origin в Meta — это не слейв?")
+    llm = meta.get("llm", DEFAULT_LLM)
+    alloc = nomad.latest_alloc(name)
+    node = alloc["NodeName"] if alloc else None
+    if not node:
+        raise RuntimeError(f"у {name} нет аллокации — рециклить нечего")
+
+    nomad.deregister(name, purge=False)
+    _wait_stopped(name)
+    try:
+        wipe(node, name)
+    except RuntimeError as e:
+        raise RuntimeError(f"{e}; джоб остановлен — после починки узла "
+                           f"повтори: mop recycle {name}")
+    nomad.register(job_spec(name, origin, llm))
+    return {"node": node}
 
 
 # ─── ввод в TUI слейва ───────────────────────────────────────────────────

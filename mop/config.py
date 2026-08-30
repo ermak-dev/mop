@@ -28,6 +28,7 @@ GitLab, которым в пуле делать нечего. Всё, что н�
 агента. Поэтому дефолты обязаны быть рабочими сами по себе.
 """
 import os
+import pwd
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 ENV_FILE = os.path.join(PROJECT, ".env")
@@ -50,7 +51,7 @@ REQUIRED = {
 # Дефолт верен для любой установки; переопределяют редко.
 DEFAULTS = {
     "MOP_HOME": os.path.expanduser("~"),
-    "MOP_USER": os.environ.get("USER") or "ermak",
+    "MOP_USER": os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name,
     "MOP_POOL_DC": "home",
     "MOP_CONTROL_DC": "control",
     "MOP_NOMAD_DATA": os.path.expanduser("~/nomad/data"),
@@ -64,10 +65,20 @@ DEFAULTS = {
     "MOP_NOMAD_RPC_PORT": "4647",   # RPC: туда дозваниваются клиенты Nomad
     "MOP_NATS_VERSION": "2.14.6",
     "MOP_SLAVE_MEM_MB": "8192",
+    # PATH слейва на узлах. Версия node в nvm — свойство установки (какой
+    # тулчейн стоит на узлах), а не продукта; {HOME} подставляется на месте.
+    "MOP_SLAVE_PATH": "/usr/local/bin:/usr/bin:/bin:{HOME}/.local/bin:{HOME}/.cargo/bin:{HOME}/.nvm/versions/node/v22.12.0/bin",
     "MOP_FALLBACK_MODEL": "opus",
     "MOP_SWEEP_FREE_MIN_GB": "60",
     "MOP_SWEEP_MAX_TARGET": "15GB",
     "MOP_SWEEP_STALE_DAYS": "14",
+    # Жёсткий порог: ниже него mop gc пересоздаёт свободных слейвов. Обязан
+    # быть заметно ниже MOP_SWEEP_FREE_MIN_GB — сначала должно отработать
+    # дешёвое подрезание target-ов, и только если оно не помогло, дорогой рецикл.
+    "MOP_GC_FREE_MIN_GB": "25",
+    # Сколько слейвов mop gc готов пересоздать за один прогон: рецикл стоит
+    # переклонирования зависимостей, чинить давление им надо не спеша.
+    "MOP_GC_MAX_PER_RUN": "1",
     "MCP_PORT": "8000",
 }
 
@@ -138,7 +149,7 @@ def get(name, default=None):
 
     Дефолт НЕ передаётся вызывающим. Пока передавался, каждая точка вызова
     несла свою копию — и копии пережили превращение SETTINGS в источник
-    правды: `config.get("NOMAD_ADDR", "https://nomad.ermak.dev")` продолжал
+    правды: зашитый в точке вызова дефолт `NOMAD_ADDR` продолжал
     отдавать адрес автора там, где REQUIRED уже требовал заполнить его руками.
     Настройка описана в одном месте или ни в одном."""
     if default is None:

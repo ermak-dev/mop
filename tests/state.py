@@ -15,10 +15,24 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.slaves import slave_state  # noqa: E402
+from mop.slaves import is_free, slave_state  # noqa: E402
 
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
 WORK = {"cur": "bug/1063", "def": "master", "dirty": 0, "ahead": 0}
+
+
+# Правило «свободен по префиксу» стоит под выбором жертв в mop gc: снести
+# чужую работу из-за точного сравнения со «свободен» — дорогая опечатка.
+FREE_CASES = [
+    ("свободен", True),
+    ("свободен (master)", True),
+    ("свободен (bug/1063)", True),
+    ("занят", False),
+    ("занят: bug/1063 (не закоммичено: 3)", False),
+    ("ЗАВИС (не отвечает)", False),
+    ("АГЕНТ МОЛЧИТ (агент узла mirror молчит 20с)", False),
+    ("требует действия", False),
+]
 
 
 def facts(session, clone=CLEAN, screen="Herding bytes"):
@@ -84,8 +98,14 @@ def main():
         got = slave_state(given)
         if got != want:
             bad += 1
-            print(f"ПРОВАЛ  {what}\n  ждали:  {want!r}\n  вышло:  {got!r}")
-    print(f"{len(CASES) - bad}/{len(CASES)} сошлось")
+            print(f"ПРОВАЛ  {what}\n  ждали:  {want!r}\n  вышло: {got!r}")
+    cases = len(CASES)
+    for state, want in FREE_CASES:
+        cases += 1
+        if is_free(state) != want:
+            bad += 1
+            print(f"ПРОВАЛ  is_free({state!r})")
+    print(f"{cases - bad}/{cases} сошлось")
     return 1 if bad else 0
 
 

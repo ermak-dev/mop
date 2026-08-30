@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""место на узлах пула: mop disk [узел]
+
+df по файловой системе, где живут клоны и target-каталоги слейвов.
+Глагол узловой: в мастер-шелле откажет — место хоста видит оператор.
+"""
+import lib
+from mop import bus, nomad
+from mop.render import table
+
+
+def main(argv):
+    if len(argv) > 1:
+        lib.usage(__doc__)
+    nodes = [argv[0]] if argv else sorted(nomad.ready_nodes())
+    answers = bus.request_many({n: {"verb": "disk"} for n in nodes})
+    rows = [("УЗЕЛ", "ФС", "СВОБОДНО", "ВСЕГО")]
+    for n in nodes:
+        a = answers.get(n)
+        if isinstance(a, Exception) or not a or a.get("error"):
+            why = a if isinstance(a, Exception) else (a or {}).get("error") or "нет ответа"
+            rows.append((n, str(why), "", ""))
+        else:
+            rows.append((n, a["path"], f"{a['free_gb']} ГБ", f"{a['total_gb']} ГБ"))
+    print("\n".join(table(rows)))
+
+
+lib.run(lib.cluster(main))
