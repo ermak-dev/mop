@@ -14,6 +14,14 @@ datacenter = "{{ MOP_POOL_DC }}"
 data_dir   = "{{ MOP_NOMAD_DATA }}"
 bind_addr  = "0.0.0.0"
 
+# Проверка обновлений у вендора выключена: это единственное, чем кластер сам
+# ходил в интернет. При каждом старте и дальше раз в сутки Nomad стучится на
+# checkpoint-api.hashicorp.com -- в логах узла это видно как
+# `Failed to check for updates`. Пулу оно бесполезно вдвойне: версия задана
+# настройкой MOP_NOMAD_VERSION и ставится плейбуком, так что поступить с
+# ответом кластеру всё равно нечего.
+disable_update_check = true
+
 ports {
   http = {{ MOP_NOMAD_PORT }}
   rpc  = {{ MOP_NOMAD_RPC_PORT }}
