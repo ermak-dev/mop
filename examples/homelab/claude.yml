@@ -3,42 +3,10 @@
 # пакет, зависимости и агент ставит deploy/setup.yml, а свой MCP-сервер слейву
 # прописывает врапер при каждой загрузке.
 #
-# Claude slave-node configuration: user-level skills + MCP servers.
-#
-# Slave sessions on the pool run under the same user as the control machine
-# and read ~/.claude the same way. Two pieces are managed here, both
-# authoritative (drift found 2026-08-26: mirror held stale skills and two
-# dead ssh-based MCP entries whose host aliases do not exist there;
-# gamer-wsl held no skills at all):
-#
-#  - ~/.claude/skills: rsync --delete from the control machine's copy, so a
-#    skill retired here disappears from the pool too.
-#  - mcpServers in ~/.claude.json: set to the rendered claude-mcp.json.j2
-#    (playwright headless, windows-mcp, mac-mcp -- the set every pool node
-#    can actually run: stdio playwright needs only the cached browsers, the
-#    http servers resolve from the pool; ssh-based servers from the control
-#    machine's own config are deliberately NOT rolled out, the pool nodes
-#    lack those ssh host aliases). The rest of ~/.claude.json is per-machine
-#    live state and is left untouched; the merge is an atomic tmp+rename. A
-#    concurrently running Claude session may rewrite the file over the merge
-#    -- the next playbook run reconverges.
-#
-# windows-mcp lives on the gamer box (moved off pwate 2026-08-26; the token
-# is gamer's ~/.windows-mcp/config.toml auth_key). Its URL is per-host:
-# gamer-wsl runs INSIDE that box with mirrored networking, where the Windows
-# firewall drops the hairpin to the LAN address and only 127.0.0.1 reaches
-# the host -- every other node uses its LAN address.
-#
-# The http bearer tokens come from the project's .env, not from this template:
-# the same two used to sit in the clear here AND inside the Nomad job spec,
-# which is visible in the UI and persists in cluster state. Rendered they are
-# still in the clear in ~/.claude.json on every node -- same exposure as before
-# -- but the repository no longer carries them.
-#
-# Run:  ansible-playbook -i ~/etc/inventory.ini ~/etc/nomad/claude.yml
+# Run:  mop deploy
 
-- name: Claude skills and MCP servers on nomad slave nodes
-  hosts: nomad_clients
+- name: Claude skills and MCP servers on the slave hosts
+  hosts: slave
   become: no
   gather_facts: no
 
@@ -76,7 +44,7 @@
         state: directory
         mode: "0755"
 
-    # copy_links: скилл pm лежит в репозитории (skills/pm) и виден на
+    # copy_links: скилл master лежит в репозитории (skills/master) и виден на
     # управляющей машине симлинком из ~/.claude/skills. Без разыменования на
     # узел уехал бы сам симлинк, и он бы там висел в пустоту ровно до
     # следующей задачи, которая синкает пакет mop, -- то есть на первом же
@@ -89,41 +57,36 @@
         recursive: yes
         copy_links: yes
 
-    # mop mcp: тот же пул как инструменты для слейва. Узел ходит ТОЛЬКО через
-    # шину -- токена Nomad там больше нет (его снимает deploy/setup.yml), и
-    # сервер поднимается в узловом профиле: канал есть, управления джобами нет.
-    # Ростер он собирает опросом самой шины, а не списком джобов.
-    #
-    # Порядок важен: этот плейбук привозит на узел mop/agent.py, и без него
-    # юнит из deploy/setup.yml не с чего запускать. Сначала claude.yml, потом nats.
-    - name: Deliver the declared MCP server set
-      ansible.builtin.template:
-        src: claude-mcp.json.j2
-        dest: .claude/mcp-servers.declared.json
-        mode: "0600"
+    # Сначала снять, потом поставить: add на существующей записи ошибается,
+    # а сравнить желаемое с фактом CLI не умеет -- токены он прячет даже от
+    # get. exec -- чтобы код возврата задачи был кодом add, а не remove.
+    # claude на узле живёт в nvm, которого нет в PATH неинтерактивного ssh:
+    # MOP_SLAVE_PATH -- уже готовый PATH слейва, им же и ищем.
+    - name: Register playwright MCP
+      ansible.builtin.shell:
+        cmd: |
+          claude mcp remove -s user playwright >/dev/null 2>&1 || true
+          exec claude mcp add -s user playwright -- npx -y '@playwright/mcp@latest' --headless --isolated --browser chromium
+      environment:
+        PATH: "{{ MOP_SLAVE_PATH | replace('{HOME}', MOP_HOME) }}"
+      changed_when: false
 
-    - name: Merge mcpServers into ~/.claude.json
-      ansible.builtin.command:
-        argv:
-          - python3
-          - -c
-          - |
-            import json, os, tempfile
-            home = os.path.expanduser("~")
-            cfg_path = os.path.join(home, ".claude.json")
-            declared = json.load(open(os.path.join(home, ".claude", "mcp-servers.declared.json")))
-            try:
-                cfg = json.load(open(cfg_path))
-            except FileNotFoundError:
-                cfg = {}
-            if cfg.get("mcpServers") == declared:
-                print("unchanged"); raise SystemExit
-            cfg["mcpServers"] = declared
-            fd, tmp = tempfile.mkstemp(dir=home, prefix=".claude.json.")
-            with os.fdopen(fd, "w") as f:
-                json.dump(cfg, f, indent=2, ensure_ascii=False)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, cfg_path)
-            print("changed")
-      register: mcp_merge
-      changed_when: mcp_merge.stdout == "changed"
+    - name: Register windows-mcp
+      ansible.builtin.shell:
+        cmd: |
+          claude mcp remove -s user windows-mcp >/dev/null 2>&1 || true
+          exec claude mcp add -s user --transport http windows-mcp '{{ windows_mcp_url }}' --header 'Authorization: Bearer {{ windows_mcp_token }}'
+      environment:
+        PATH: "{{ MOP_SLAVE_PATH | replace('{HOME}', MOP_HOME) }}"
+      changed_when: false
+      no_log: true
+
+    - name: Register mac-mcp
+      ansible.builtin.shell:
+        cmd: |
+          claude mcp remove -s user mac-mcp >/dev/null 2>&1 || true
+          exec claude mcp add -s user --transport http mac-mcp 'http://{{ MAC_MCP_HOST }}:{{ MCP_PORT }}/mcp' --header 'Authorization: Bearer {{ mac_mcp_token }}'
+      environment:
+        PATH: "{{ MOP_SLAVE_PATH | replace('{HOME}', MOP_HOME) }}"
+      changed_when: false
+      no_log: true

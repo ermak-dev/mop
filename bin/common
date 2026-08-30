@@ -7,8 +7,8 @@ export BIN_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 export PROJECT_HOME="$(dirname "$BIN_DIR")"
 export PYTHONPATH="$PROJECT_HOME${PYTHONPATH:+:$PYTHONPATH}"
 
-# Инвентарь общий с остальными плейбуками, живёт вне этого репозитория.
-export INVENTORY="${INVENTORY:-$HOME/etc/inventory.ini}"
+# Инвентарь — часть установки: живёт в корне проекта, в git не попадает.
+export INVENTORY="${INVENTORY:-$PROJECT_HOME/inventory.ini}"
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; BOLD=$'\033[1m'; NC=$'\033[0m'
 export RED GREEN BOLD NC

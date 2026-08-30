@@ -1,3 +1,4 @@
 .env
+inventory.ini
 *.pyc
 __pycache__/

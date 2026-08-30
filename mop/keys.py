@@ -126,14 +126,13 @@ def _push_via_sysbatch(script, nodes, results):
 
 def llm_keys_blob():
     """Что везти на узлы в secrets.env: ТОЛЬКО названное явно — ключи, которые
-    просит хоть один LLM-профиль, и секреты, которые нужны самому врапёру.
+    просит хоть один LLM-профиль.
 
     Фильтр здесь не гигиена, а условие, на котором источником может быть общий
     .env проекта: там же лежат креды GitLab, и на узлах пула им делать нечего.
     Едет ровно перечисленное.
     -> (содержимое|None, замечание|None)"""
     wanted = {p["key"] for p in llm.profiles().values() if p.get("key")}
-    wanted |= set(slaves.NODE_SECRETS)
     if not wanted:
         return None, None
     found = {}

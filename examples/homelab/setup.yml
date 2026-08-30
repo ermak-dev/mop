@@ -9,10 +9,10 @@
 # Как инструкция это не годится — только как образец того, что вообще бывает
 # нужно узлу сверх голого Nomad. У вас список будет другим.
 #
-# Запуск:  mop deploy homelab
+# Запуск:  mop deploy
 
 - name: Тулчейн и окружение проектов на узлах пула
-  hosts: nomad_clients
+  hosts: slave
   become: yes
   gather_facts: no
 

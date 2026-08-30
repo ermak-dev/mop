@@ -12,16 +12,16 @@
 #
 # ACL включён: без токена API отвечает 403. Bootstrap-токен выпускается ОДИН
 # раз, лежит рядом с data_dir на сервере и забирается на управляющую машину в
-# ~/.config/nomad/bootstrap.json. На узлы пула он не едет — см. docs/SECURITY.md.
+# ~/.config/nomad/bootstrap.json. На узлы пула он не едет.
 #
-# Запуск:  mop deploy nomad
+# Запуск:  mop deploy
 #
 # Симлинк ~/etc/nomad обязателен, как и ~/etc/nats: `net setup <имя>` и
 # ~/etc/site.yml находят плейбук по одному лишь пути ~/etc/<имя>/setup.yml,
 # таблицы имён нигде нет. Симлинк и есть эта таблица; заводит его `mop deploy`.
 
 - name: Nomad server
-  hosts: mop_server
+  hosts: server
   become: no
   gather_facts: no
 
@@ -114,8 +114,8 @@
         flat: yes
 
 
-- name: Nomad clients on the pool nodes
-  hosts: nomad_clients
+- name: Nomad client on the slave hosts
+  hosts: slave
   become: yes
   gather_facts: no
 
@@ -138,8 +138,8 @@
 # был для слейва недосягаем. С переездом на шину эта причина отпала, но
 # членство оставлено: ростер кластера — единственное место, где мастер видит
 # ёмкость узлов, и считать её проще, будучи внутри.
-- name: Nomad client on the control machine
-  hosts: nomad_control
+- name: Nomad client on the master
+  hosts: master
   become: yes
   gather_facts: no
 

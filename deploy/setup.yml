@@ -13,8 +13,7 @@
 # файл на управляющей машине при первом прогоне и переиспользует дальше.
 # Потерять их не страшно -- новый прогон раздаст новые сразу и серверу, и узлам.
 #
-# Запуск:  net setup nats                        # или:
-#          ansible-playbook -i ~/etc/inventory.ini ~/etc/nats/setup.yml
+# Запуск:  mop deploy
 #
 # Симлинк ~/etc/nats обязателен, как и ~/etc/nomad: таблицы «имя -> плейбук»
 # нигде нет, путь и есть таблица.
@@ -24,7 +23,7 @@
 # Раньше они расходились у gamer, и mop нёс ради этого настройку с таблицей
 # имён; агент, подписавшийся не на тот субъект, выглядел как выключенный узел.
 - name: Bus address on the LAN
-  hosts: nomad_clients:nomad_control
+  hosts: slave:master
   gather_facts: no
 
   tasks:
@@ -39,7 +38,7 @@
 
 
 - name: NATS server for the mop bus
-  hosts: mop_server
+  hosts: server
   become: yes
   gather_facts: no
 
@@ -48,7 +47,7 @@
     # заводит файл при первом обращении и возвращает то же значение дальше.
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_tgz: "https://github.com/nats-io/nats-server/releases/download/v{{ MOP_NATS_VERSION }}/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64.tar.gz"
-    nats_nodes: "{{ groups['nomad_clients'] }}"
+    nats_nodes: "{{ groups['slave'] }}"
     # Шарды считает `mop deploy` из ростера Nomad и своей памяти (см. bin/deploy)
     # и передаёт сюда --extra-vars. Пустой список -- законное состояние пустого
     # пула: сервер поднимется, мастеров просто ещё нет.
@@ -115,8 +114,8 @@
 # bus.json уже несли новое поле, а агент рядом о нём не знал и падал на
 # соединении. Аварийный путь, зависящий от соседнего плейбука, -- не аварийный
 # путь.
-- name: mop-agent on the pool nodes
-  hosts: nomad_clients
+- name: mop-agent on the slave hosts
+  hosts: slave
   gather_facts: no
 
   vars:
@@ -127,7 +126,9 @@
     # узле с другим UID юнит агента уехал бы с чужим XDG_RUNTIME_DIR, и это
     # ровно тот отказ, который не видно: session.py не нашёл бы каталог
     # сокетов, а живые слейва читались бы мёртвыми.
-    mop_uid: "{{ getent_passwd[MOP_USER][1] }}"
+    # ansible_facts[...], а не голое имя факта: с 2.24 ansible перестаёт
+    # поднимать факты в переменные, и getent_passwd без префикса умрёт.
+    mop_uid: "{{ ansible_facts['getent_passwd'][MOP_USER][1] }}"
     nats_addr: "{{ nats_lan }}"
     nats_user: "node-{{ inventory_hostname }}"
     nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + inventory_hostname + '.pass length=32 chars=ascii_letters,digits') }}"
@@ -168,6 +169,22 @@
           # 2026-08-29: лежал целиком, 0600, со всеми секретами проекта.
           - "--exclude=.env"
       notify: restart mop-agent
+
+    # Свой MCP-сервер -- часть продукта: без него слейв без инструментов.
+    # Регистрирует сам claude (`claude mcp add` пишет ~/.claude.json), ручного
+    # мерджа больше нет. CLI не умеет сравнивать желаемое с фактом (токены
+    # прячет даже от get), поэтому приводим тупо: снять и поставить. Скоап
+    # user: локальный прилип бы к каталогу запуска.
+    - name: Register the pool MCP server for claude
+      ansible.builtin.shell:
+        cmd: |
+          claude mcp remove -s user mop >/dev/null 2>&1 || true
+          exec claude mcp add -s user mop -- '{{ MOP_HOME }}/mop/bin/mop' mcp
+      # claude на узле живёт в nvm, которого нет в PATH неинтерактивного ssh;
+      # MOP_SLAVE_PATH -- уже готовый PATH слейва, им же и ищем.
+      environment:
+        PATH: "{{ MOP_SLAVE_PATH | replace('{HOME}', MOP_HOME) }}"
+      changed_when: false
 
     - name: Credentials dir
       ansible.builtin.file:
@@ -258,8 +275,8 @@
 
 # Управляющая машина: только креды. Агента здесь нет и не нужно -- слейвов на
 # ней не живёт, а инбокс мастера слушает сам `mop mcp`.
-- name: Bus credentials on the control machine
-  hosts: nomad_control
+- name: Bus credentials on the master
+  hosts: master
   gather_facts: no
 
   vars:
@@ -305,7 +322,7 @@
 # а спека несут значения установки (датацентр, пользователь, $HOME, пороги) --
 # всё приезжает --extra-vars от `mop deploy`, плейбуки .env не читают.
 - name: Disk watchdog job
-  hosts: mop_server
+  hosts: server
   gather_facts: no
 
   vars:

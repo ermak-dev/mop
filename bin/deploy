@@ -1,25 +1,15 @@
 #!/bin/bash -e
-# развернуть: mop deploy [nomad|pool|homelab|claude|all] [origin|шард ...]
+# развернуть: mop deploy [origin|шард ...]
 #
-# ПРОДУКТ -- первые две цели, и только они переносимы между установками:
-#
-#   nomad     кластер Nomad: сервер и клиенты. ГДЕ стоит слейв.
-#   pool      шина, агент и сторож диска на узлах, креды. КАК с ним говорить.
-#
-# Остальное -- установка автора из examples/, пулу не нужное:
-#
-#   homelab   окружение узлов: тулчейн проектов, прокси перед API.
-#   claude    личные скиллы и MCP рабочего стола.
-#
-# Порядок: nomad -> homelab -> claude -> pool. Пакет mop на узлы привозит pool,
-# и юнит агента он же запускает -- до него запускать нечего.
+# Полный прогон установки, всегда целиком и одним плейбуком -- site.yml
+# склеивает импортами все слои (номad, окружение узлов, шину), поэтому
+# ansible-процесс один и PLAY RECAP один: строка на машину, суммирующая
+# все слои. Отдельных целей нет: чинить упавшее дешевле повторным прогоном,
+# чем вспоминанием, какая цель за что отвечала. Порядок слоёв живёт в site.yml.
 #
 # Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
 # больше нет, поэтому упавшего агента и битые креды чинят только отсюда --
 # и по этой же причине deploy не имеет права ничего занимать у самого mop.
-
-WHAT="${1:-all}"
-shift || true      # остаток -- шарды, которых в пуле ещё нет
 
 # Плейбуки находятся по одному лишь соглашению о пути: `net setup <имя>`
 # разворачивается в ~/etc/<имя>/setup.yml, таблицы имён нигде нет. Симлинки и
@@ -60,9 +50,19 @@ shards_json() {
 }
 
 if [[ ! -f "$INVENTORY" ]]; then
-    fail "нет инвентаря $INVENTORY -- он общий с остальными плейбуками и живёт вне этого репозитория"
+    fail "нет инвентаря $INVENTORY -- заведите его из примера: cp inventory.ini.example inventory.ini"
     exit 1
 fi
+
+# Прежние цели запуска. Отвергаем, а не молча трактуем как имя шарда: старая
+# привычка `mop deploy pool` завела бы на шине пользователя master-pool, и
+# разбирались бы с этим уже по симптомам.
+case "$1" in
+    nomad|pool|homelab|claude|nats|all)
+        fail "целей запуска больше нет: mop deploy [origin|шард ...]"
+        exit 1
+        ;;
+esac
 
 # Плейбуки находятся по имени каталога в ~/etc, поэтому цель симлинка может
 # меняться, а имя -- нет: ~/etc/site.yml импортирует ~/etc/nomad/setup.yml по
@@ -71,24 +71,7 @@ link nomad   deploy/nomad
 link nats    deploy
 link homelab examples/homelab
 
-case "$WHAT" in
-    pool)          play deploy/setup.yml --extra-vars "$(shards_json "$@")" ;;
-    nomad)         play deploy/nomad/setup.yml ;;
-    homelab)       play examples/homelab/setup.yml ;;
-    claude)        play examples/homelab/claude.yml ;;
-    nats)          # прежнее имя pool; оставлено, чтобы не ломать привычку
-                   play deploy/setup.yml --extra-vars "$(shards_json "$@")" ;;
-    all)
-        play deploy/nomad/setup.yml
-        play examples/homelab/setup.yml
-        play examples/homelab/claude.yml
-        play deploy/setup.yml --extra-vars "$(shards_json "$@")"
-        ;;
-    *)
-        fail "mop deploy [nomad|pool|homelab|claude|all] [origin|шард ...]"
-        exit 1
-        ;;
-esac
+play site.yml --extra-vars "$(shards_json "$@")"
 
 section "проверка"
 # Прогон без неё не отличает «плейбук зелёный» от «пул отвечает»: агент,

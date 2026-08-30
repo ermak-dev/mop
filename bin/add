@@ -22,7 +22,7 @@ def main(argv):
     # слейв поднимется, но к шине не подключится — прочитается как «АГЕНТ
     # МОЛЧИТ» на пустом месте. Лучше отказать здесь, чем разбираться там.
     if not os.path.exists(lib.shard_creds(shard)):
-        lib.usage(f"шарда {shard} ещё нет на шине.\nЗаведи его: mop deploy nats")
+        lib.usage(f"шарда {shard} ещё нет на шине.\nЗаведи его: mop deploy {origin}")
     name = slaves.next_name(shard)
     lib.push_llm_keys(profile)
     nomad.register(slaves.job_spec(name, origin, profile))

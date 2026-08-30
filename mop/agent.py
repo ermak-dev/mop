@@ -327,7 +327,7 @@ async def v_disk(_req):
     оценивает мастер (mop gc), здесь только цифра.
 
     Одна ФС — $HOME: WSL-узла в кластере больше нет, и хитрости с бэкинг-
-    стором уехали вместе с ним (смотри историю в docs/GC.md)."""
+    стором уехали вместе с ним."""
     out, code = await sh(f"df -BG --output=avail,size {HOME}")
     if code not in (0, None) or not out.strip():
         return {"error": f"df не ответил: {out.strip() or f'exit {code}'}"}

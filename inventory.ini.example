@@ -1,0 +1,29 @@
+# Инвентарь ansible: какие машины есть и какая у каждой роль. Скопируйте
+# в inventory.ini и впишите свои:
+#
+#     cp inventory.ini.example inventory.ini
+#
+# inventory.ini в .gitignore и в git не попадает. Имена здесь — ssh-алиасы:
+# ansible зовёт `ssh <имя>` без своих ключей, адрес и порт знает ~/.ssh/config,
+# и этот файл их не повторяет. Роль — это группа, плейбуки mop не знают ни
+# одного конкретного хоста.
+#
+#   server   сервер: Nomad-сервер и шина NATS, машина, которая включена всегда
+#   slave    узлы пула: на них живут слейвы
+#   master   управляющая машина: где лежит репозиторий и откуда запускают mop
+
+[server]
+myserver
+
+[slave]
+node1
+node2
+
+# Обычно машина, на которой вы читаете этот файл.
+[master]
+mylaptop ansible_connection=local
+
+# Все машины — Debian/Ubuntu: фиксация интерпретатора убирает discovery
+# и его предупреждение на каждом прогоне.
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3

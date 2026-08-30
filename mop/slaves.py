@@ -26,11 +26,6 @@ FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL")
 # половины одного соглашения.
 JOB_PREFIX = "sl-"
 
-# MCP автоматизации рабочего стола: адреса чужих хостов, не наших узлов.
-MCP_PORT = config.get("MCP_PORT")
-WINDOWS_MCP_HOST = config.get("WINDOWS_MCP_HOST")
-MAC_MCP_HOST = config.get("MAC_MCP_HOST")
-
 # ─── LLM-профили ─────────────────────────────────────────────────────────
 # Слейв — всегда claude code; профиль меняет ровно одно: КУДА он ходит за
 # токенами. Anthropic-совместимый эндпоинт провайдера (ANTHROPIC_BASE_URL),
@@ -45,9 +40,9 @@ MAC_MCP_HOST = config.get("MAC_MCP_HOST")
 # человек, лежит там; порождаемое само (пароли NATS, токен Nomad, логин
 # claude.ai) — не там и туда не попадает.
 LOCAL_KEYS_FILE = os.path.join(PROJECT, ".env")
-# Подмножество, которое уезжает на узлы: ключи, названные профилями, плюс то,
-# что нужно самому врапёру.
-NODE_SECRETS = ("WINDOWS_MCP_TOKEN", "MAC_MCP_TOKEN")
+# Подмножество .env, которое уезжает на узлы: только ключи, названные
+# профилями. Секреты MCP-серверов установки едут иначе -- их прописывает
+# examples/homelab/claude.yml прямо в регистрацию сервера.
 SECRETS_FILE = f"{HOME}/.config/mop/secrets.env"    # копия на узле пула
 
 # Врапер — собственно задача Nomad: довести узел до "клон есть, claude в
@@ -99,23 +94,12 @@ edit_json() {  # <file> <jq-program> [jq-args...]
 edit_json "$HOME/.claude.json" '.projects[$d].hasTrustDialogAccepted = true
     | .hasCompletedOnboarding = true
     | .theme = (.theme // "dark")' --arg d "$d"
-# Desktop-automation MCP servers: win-mcp (Windows host pwate) and mac-mcp (mac
-# host), so a slave can drive and verify the GUI clients. HTTP transport, so any
-# node that can resolve/reach the hosts gets them; a node that cannot just sees
-# the server fail to connect.
-WINURL="http://$SL_WIN_HOST:$SL_MCP_PORT/mcp"
-# Токены НЕ в спеке: она видна в UI Nomad и остаётся в его состоянии. Едут
-# тем же файлом, что и ключи провайдеров, и достаются отсюда так же -- sed'ом,
-# а не source: файл с секретами не исполняем.
-secrets="$HOME/.config/mop/secrets.env"
-wintok=$(sed -n "s/^WINDOWS_MCP_TOKEN=//p" "$secrets" 2>/dev/null | tail -1)
-mactok=$(sed -n "s/^MAC_MCP_TOKEN=//p" "$secrets" 2>/dev/null | tail -1)
-edit_json "$HOME/.claude.json" '.mcpServers["windows-mcp"] = {"type":"http","url":$winurl,"headers":{"Authorization":("Bearer " + $wintok)}}
-  | .mcpServers["mac-mcp"] = {"type":"http","url":$macurl,"headers":{"Authorization":("Bearer " + $mactok)}}
-  | .mcpServers["playwright"] = {"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--browser","chromium"]}
-  | .mcpServers["mop"] = {"type":"stdio","command":$mop,"args":["mcp"]}' \
-    --arg winurl "$WINURL" --arg macurl "http://$SL_MAC_HOST:$SL_MCP_PORT/mcp" \
-    --arg mop "$HOME/mop/bin/mop" --arg wintok "$wintok" --arg mactok "$mactok"
+# Свой MCP-сервер регистрируем через сам claude: он владелец ~/.claude.json,
+# и никаких ручных мерджей. add на существующей записи ошибается -- и это
+# устраивает: в записи нет секретов, наличие означает правильность, полную
+# сходимость (если сменился путь) делает deploy. Чужие сервера -- дело
+# установки (examples/homelab/claude.yml), врапер о них не знает.
+claude mcp add --scope user mop -- "$HOME/mop/bin/mop" mcp >/dev/null 2>&1 || true
 # playwright-mcp needs a browser on the node; install is idempotent and cached
 # in ~/.cache/ms-playwright, so every slave boot just confirms it is there.
 npx -y playwright install chromium >/dev/null 2>&1 || true
@@ -192,7 +176,7 @@ fi
 # читается мастером как живой, но молчащий.
 shard_creds="$HOME/.config/mop/bus-$SL_SHARD.json"
 if [ ! -f "$shard_creds" ]; then
-    echo "нет кредов шарда $SL_SHARD в $shard_creds -- заведи шард: mop deploy nats" >&2
+    echo "нет кредов шарда $SL_SHARD в $shard_creds -- заведи шард: mop deploy $SL_ORIGIN" >&2
     exit 1
 fi
 
@@ -278,9 +262,6 @@ def job_spec(name, origin, profile=None):
                     "SL_ORIGIN": origin,
                     "SL_PROJECT": project,
                     "SL_SHARD": shard_of(origin),
-                    "SL_MCP_PORT": MCP_PORT,
-                    "SL_WIN_HOST": WINDOWS_MCP_HOST,
-                    "SL_MAC_HOST": MAC_MCP_HOST,
                     "HOME": HOME,
                     "PATH": config.get("MOP_SLAVE_PATH").replace("{HOME}", HOME),
                     # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
