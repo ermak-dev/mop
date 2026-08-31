@@ -40,7 +40,10 @@
 
     - name: Ensure ~/.claude exists
       ansible.builtin.file:
-        path: .claude
+        # Абсолютный путь: по ssh относительный попадает в дом узла, но на
+        # машине с local connection (управляющая в роли узла пула) -- в каталог
+        # плейбука, и следующий же синк высыпал бы скиллы прямо в репозиторий.
+        path: "{{ MOP_HOME }}/.claude"
         state: directory
         mode: "0755"
 
@@ -49,13 +52,18 @@
     # узел уехал бы сам симлинк, и он бы там висел в пустоту ровно до
     # следующей задачи, которая синкает пакет mop, -- то есть на первом же
     # прогоне на свежем узле.
+    # Пропуск на управляющей машине не лень: она и есть ИСТОЧНИК этого синка,
+    # а copy_links на её симлинке скилла мастера заменил бы его настоящей
+    # копией в ~/.claude/skills -- и правки скилла перестали бы попадать
+    # в историю репозитория.
     - name: Sync ~/.claude/skills from the control machine
       ansible.posix.synchronize:
         src: "{{ lookup('env', 'HOME') }}/.claude/skills/"
-        dest: .claude/skills/
+        dest: "{{ MOP_HOME }}/.claude/skills/"
         delete: yes
         recursive: yes
         copy_links: yes
+      when: "'master' not in group_names"
 
     # Сначала снять, потом поставить: add на существующей записи ошибается,
     # а сравнить желаемое с фактом CLI не умеет -- токены он прячет даже от

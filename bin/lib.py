@@ -72,7 +72,10 @@ def project_of(origin):
 
 
 def shard_creds(shard):
-    return os.path.expanduser(f"~/.config/mop/bus-{shard}.json")
+    """Креды МАСТЕРА шарда. bus-master-<шард>.json: имя bus-<шард>.json на
+    узлах пула занято кредами папета того же шарда, и на машине в двух ролях
+    файл не может быть сразу обоими."""
+    return os.path.expanduser(f"~/.config/mop/bus-master-{shard}.json")
 
 
 def in_shard():

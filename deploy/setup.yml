@@ -218,10 +218,15 @@
     # файла, мог снести чужие джобы. Шина даёт ту же связь правами по субъектам,
     # поэтому полномочия узлам больше не нужны. Перестать раздавать мало --
     # старая копия так и лежала бы.
+    #
+    # Кроме управляющей машины: у неё этот файл -- ЕДИНСТВЕННЫЙ токен (NOMAD_TOKEN
+    # в её окружении нет), и снести его здесь значит ослепить весь mop: мастер
+    # первым же запросом к API получит 403.
     - name: Drop the Nomad management token from the pool
       ansible.builtin.file:
         path: "{{ MOP_HOME }}/.config/nomad/bootstrap.json"
         state: absent
+      when: "'master' not in group_names"
 
     - name: Agent unit
       become: yes
@@ -306,11 +311,16 @@
         mode: "0600"
 
     # По креденшлу на шард: их подхватывает `mop master`, и именно они делают
-    # мастера слепым к чужим проектам.
+    # мастера слепым к чужим проектам. Имя bus-master-<шард>.json, а не
+    # bus-<шард>.json: последнее имя раскатывает по узлам пула игра агента,
+    # но с пользователем puppet-<шард>, и на машине в двух ролях (управляющая
+    # И узел пула) один файл не может быть сразу обоими -- чья запись
+    # последняя, под тем папет и ходит. bus-<шард>.json везде означает одно:
+    # креды ПАПЕТА этого шарда.
     - name: Master credentials, one per shard
       ansible.builtin.template:
         src: bus.json.j2
-        dest: "{{ MOP_HOME }}/.config/mop/bus-{{ item }}.json"
+        dest: "{{ MOP_HOME }}/.config/mop/bus-master-{{ item }}.json"
         mode: "0600"
       loop: "{{ shards }}"
       vars:
