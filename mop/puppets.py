@@ -553,9 +553,14 @@ def _state_from_session(st, clone):
         return "free"
     dirty, ahead = clone.get("dirty") or 0, clone.get("ahead") or 0
     if dirty or ahead:
+        # idle, а НЕ busy: сессия здесь стоит, занят только клон. Одним словом
+        # на оба случая мастер читал «работает» там, где на деле лежит брошенная
+        # посреди тикета работа, — а это разные разговоры: первого ждут, второго
+        # спасают. Диспатчу оба одинаково запрещены, и это решает не слово, а
+        # is_free: свободно только то, что начинается с free.
         what = ", ".join(p for p in (f"uncommitted: {dirty}" if dirty else "",
                                      f"unpushed: {ahead}" if ahead else "") if p)
-        return f"busy: {clone.get('cur')} ({what})"
+        return f"idle: {clone.get('cur')} ({what})"
     cur = clone.get("cur")
     return f"free ({cur})" if cur else "free"
 
