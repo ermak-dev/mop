@@ -591,9 +591,16 @@ def puppet_rows():
 
 
 def pool():
-    """Узлы как ДАННЫЕ: [{name, status, free_mb, total_mb, slots, error}]."""
+    """Узлы пула как ДАННЫЕ: [{name, status, free_mb, total_mb, slots, error}].
+
+    Только датацентр пула: джобы папетов объявляют его, и планировщик на узлы
+    других dc не смотрит вовсе. Показать такой узел свободными слотами —
+    пообещать то, чего планировщик не даст: управляляющая машина в control
+    однажды так светилась тремя слотами, пока два папета стояли в queued."""
     out = []
     for n in nomad.client().nodes.get_nodes():
+        if n.get("Datacenter") != nomad.POOL_DC:
+            continue
         if n["Status"] != "ready":
             out.append({"name": n["Name"], "status": n["Status"]})
             continue
