@@ -6,7 +6,12 @@ the dispatch decision rests on this.
 """
 import lib
 from mop import puppets
-from mop.render import table
+
+# Ширины ФИКСИРОВАННЫЕ, и это плата за потоковый вывод: выровнять по самой
+# длинной строке можно только собрав их все, то есть промолчав до конца обмера.
+# Значение шире своей колонки не режется, а сдвигает хвост строки — как в df.
+# Последняя колонка (origin) не добивается вовсе.
+WIDTHS = (15, 7, 8, 46, 7, 7)
 
 
 def place(row):
@@ -44,14 +49,22 @@ def hint(rows, origin):
     return None
 
 
+def line(r):
+    cells = (r["name"], r["node"], r["alloc_status"], r["state"], place(r), r["llm"])
+    return "  ".join(c.ljust(w) for c, w in zip(cells, WIDTHS)) + "  " + r["origin"]
+
+
 def main(argv):
     if argv:
         lib.usage(__doc__)
-    rows = puppets.puppet_rows()
-    if rows:
-        print("\n".join(table([(r["name"], r["node"], r["alloc_status"],
-                                r["state"], place(r), r["llm"], r["origin"]) for r in rows])))
-    else:
+    # Печатаем ПО МЕРЕ готовности: состояния всего пула приходят за десятые
+    # доли секунды, а обмер места — секунды, и собирать таблицу целиком значит
+    # молчать всё это время. Порядок здесь — по готовности, а не по имени.
+    rows = []
+    for r in puppets.puppet_rows_stream():
+        print(line(r), flush=True)
+        rows.append(r)
+    if not rows:
         print("no puppets")
     origin = lib.cwd_origin(required=False)
     # В мастер-шелле подсказка — про ШАРД, а не про каталог, в котором стоишь.

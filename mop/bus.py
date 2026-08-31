@@ -44,6 +44,7 @@ LookupError и не доезжали никуда.
 import asyncio
 import json
 import os
+import queue
 import sys
 import threading
 
@@ -293,6 +294,50 @@ def request_many(requests, timeout=TIMEOUT, channel="rpc", shard=None):
         return await asyncio.gather(*(one(n, requests[n]) for n in nodes))
 
     return dict(zip(nodes, _call(all_of(), timeout)))
+
+
+def request_stream(requests, timeout=TIMEOUT, channel="rpc", shard=None):
+    """Как request_many, но пары (ключ, ответ) отдаются ПО МЕРЕ ГОТОВНОСТИ.
+
+    Нужен там, где ответ показывают сразу, а не собирают в таблицу: обмер
+    места одного папета занимает секунды, и ждать самого медленного, чтобы
+    показать первого, незачем. Ключ отдельно от узла именно поэтому — вопросов
+    к ОДНОМУ узлу может быть несколько, по одному на папета, а request_many
+    ключуется узлом и такого не умеет.
+
+    requests: {ключ: (узел, запрос)}. -> генератор (ключ, ответ | BusError).
+    Ошибка приезжает значением, а не броском: один молчащий узел не должен
+    уносить с собой картину по остальным.
+    """
+    if not requests:
+        return
+    nc = connect()
+    done = queue.Queue()
+
+    async def one(key, node, req):
+        try:
+            msg = await nc.request(
+                subject(node, channel, shard),
+                json.dumps(req, ensure_ascii=False).encode(), timeout=timeout)
+            done.put((key, json.loads(msg.data.decode())))
+        except NoRespondersError:
+            done.put((key, BusError(f"node agent {node} is not subscribed")))
+        except asyncio.TimeoutError:
+            done.put((key, BusError(_silence(f"node agent {node}", timeout))))
+        except Exception as e:
+            done.put((key, BusError(f"{node}: {e}")))
+
+    async def all_of():
+        await asyncio.gather(*(one(k, n, r) for k, (n, r) in requests.items()))
+
+    fut = asyncio.run_coroutine_threadsafe(all_of(), _ensure_loop())
+    try:
+        for _ in range(len(requests)):
+            yield done.get(timeout=timeout + 5)
+    finally:
+        # Генератор могли бросить недочитанным (Ctrl-C, `| head`) — фоновые
+        # запросы в этом случае дожидаться некому, и цикл остался бы с ними.
+        fut.cancel()
 
 
 def gather(verb, timeout=5, subj=None, **fields):

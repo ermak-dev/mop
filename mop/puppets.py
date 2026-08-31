@@ -677,7 +677,7 @@ def is_free(state):
 
 
 # ─── сводки для фронтендов ───────────────────────────────────────────────
-def _collect():
+def _roster():
     """Ростер Nomad плюс состояние с узлов, ОДНИМ заходом.
 
     Общая часть list и doctor. Раньше каждый ходил на узлы сам и платил по
@@ -685,6 +685,10 @@ def _collect():
     последовательных подключений, и столько же ещё раз, если следом звали
     doctor. Теперь: один запрос в Nomad за ростером и по одному запросу на
     УЗЕЛ за всеми его папетами, параллельно по одному соединению.
+
+    Места здесь НЕТ намеренно: обмер диска стоит секунд, а состояние приходит
+    за десятые доли. Кому место нужно, тот берёт puppet_rows_stream; doctor
+    ждал du впустую, ни разу в него не заглянув.
 
     -> [{job, alloc, state}]; state=None там, где спрашивать некого.
     """
@@ -710,16 +714,6 @@ def _collect():
     except bus.BusError as e:
         answers = {node: bus.BusError(str(e)) for node in by_node}
 
-    # Место папетов — ОТДЕЛЬНЫЙ поезд с щедрым таймаутом: du небыстрый, и
-    # вплавить его в states значило бы читать медленный обмер как «агент
-    # молчит». Не доехало — в колонке прочерк, список состояний цел.
-    try:
-        sizes = bus.request_many({
-            node: {"verb": "sizes", "names": [i["job"]["ID"] for i in its]}
-            for node, its in by_node.items()}, timeout=45)
-    except bus.BusError as e:
-        sizes = {node: bus.BusError(str(e)) for node in by_node}
-
     for node, its in by_node.items():
         answer = answers.get(node)
         # Молчащий агент — ОТДЕЛЬНАЯ болезнь, не "папет завис": папет при этом
@@ -729,34 +723,72 @@ def _collect():
                 i["state"] = f"AGENT SILENT ({answer})"
             continue
         got = (answer or {}).get("puppets") or {}
-        sanswer = sizes.get(node)
-        sgot = ({} if isinstance(sanswer, Exception)
-                else ((sanswer or {}).get("sizes") or {}))
         for i in its:
             i["state"] = puppet_state(got.get(i["job"]["ID"]))
-            i["disk_kb"] = sgot.get(i["job"]["ID"])
     return items
+
+
+def _row(item, disk_kb=None):
+    job, alloc = item["job"], item["alloc"]
+    meta = job.get("Meta") or {}
+    return {
+        "name": job["ID"],
+        "node": alloc["NodeName"] if alloc else "-",
+        "alloc_status": (item["error"] or (alloc["ClientStatus"] if alloc
+                                           else job.get("Status", "?"))),
+        "state": item["state"] or "-",
+        "llm": meta.get("llm", config.get("MOP_DEFAULT_LLM")),
+        "origin": meta.get("origin", "?"),
+        "disk_kb": disk_kb,
+    }
+
+
+def puppet_rows_stream():
+    """Папета как ДАННЫЕ, но строки отдаются ПО МЕРЕ ГОТОВНОСТИ.
+
+    Ждать нечего только на бумаге: состояния всего пула приходят за десятые
+    доли секунды, а обмер места — секунды, и печатать нечего, пока не сойдётся
+    ВЕСЬ обмер. Поэтому место спрашивается по одному папету и строка уходит
+    наружу, как только сошлась её собственная.
+
+    Отсюда и порядок — по готовности, а не по имени. Кому нужен стабильный
+    (таблица MCP, doctor), тот зовёт puppet_rows, который просто сортирует.
+
+    Обмер живёт ОТДЕЛЬНЫМ поездом со щедрым таймаутом: вплавить его в states
+    значило бы читать медленный du как «агент молчит». Не доехало — прочерк в
+    колонке, а состояние на месте.
+    """
+    items = _roster()
+    asked, rest = {}, []
+    for i in items:
+        alloc = i["alloc"]
+        if alloc and alloc["ClientStatus"] == "running":
+            asked[i["job"]["ID"]] = (alloc["NodeName"],
+                                     {"verb": "sizes", "names": [i["job"]["ID"]]})
+        else:
+            rest.append(i)
+    by_name = {i["job"]["ID"]: i for i in items}
+
+    # Папета, у которых спрашивать некого, ждать нечего — они уходят первыми.
+    for i in rest:
+        yield _row(i)
+    try:
+        for name, answer in bus.request_stream(asked, timeout=45):
+            sizes = ({} if isinstance(answer, Exception)
+                     else ((answer or {}).get("sizes") or {}))
+            yield _row(by_name[name], sizes.get(name))
+    except bus.BusError:
+        # Шина легла целиком — ростер всё равно показываем: он из Nomad и к
+        # шине отношения не имеет.
+        for name in asked:
+            yield _row(by_name[name])
 
 
 def puppet_rows():
     """Папета как ДАННЫЕ: [{name, node, alloc_status, state, llm, origin,
     disk_kb}]. disk_kb — клон плюс target, обмеряется спросом; None — du не
     доехал, это прочерк, а не ноль."""
-    rows = []
-    for item in _collect():
-        job, alloc = item["job"], item["alloc"]
-        meta = job.get("Meta") or {}
-        rows.append({
-            "name": job["ID"],
-            "node": alloc["NodeName"] if alloc else "-",
-            "alloc_status": (item["error"] or (alloc["ClientStatus"] if alloc
-                                               else job.get("Status", "?"))),
-            "state": item["state"] or "-",
-            "llm": meta.get("llm", config.get("MOP_DEFAULT_LLM")),
-            "origin": meta.get("origin", "?"),
-            "disk_kb": item.get("disk_kb"),
-        })
-    return rows
+    return sorted(puppet_rows_stream(), key=lambda r: r["name"])
 
 
 def pool():
@@ -795,7 +827,7 @@ def pool():
 def diagnose():
     """Проблемы пула как ДАННЫЕ: [{name, alloc, diagnosis, action}]."""
     issues = []
-    for item in _collect():
+    for item in _roster():
         job, alloc = item["job"], item["alloc"]
         if not alloc or alloc["ClientStatus"] in ("lost", "unknown", "failed",
                                                   "pending"):
