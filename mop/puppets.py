@@ -374,8 +374,8 @@ def next_name(project):
 # они и есть источник правды (обе появляются независимо от моста claude.ai):
 #
 # 1) ФАЙЛ АКТИВНОСТИ ~/.claude/sessions/<pid>.json: cwd (по нему матчим — он
-#    стабилен, в отличие от name), status (idle|busy|requires_action|waiting|
-#    offline), pid, messagingSocketPath. Слабость: после грязной смерти
+#    стабилен, в отличие от name), status (idle|busy|shell|requires_action|
+#    waiting|offline; список открытый), pid, messagingSocketPath. Слабость: после грязной смерти
 #    процесса файл остаётся с протухшим status.
 # 2) СОКЕТ ЖИВОСТИ: успешный connect -> процесс жив и слушает. Строже файла:
 #    ловит смерть мгновенно, без всяких таймстампов.
@@ -400,7 +400,10 @@ def next_name(project):
 # Всё, что ниже, — ЧИСТЫЕ функции над этими фактами. Так вышло не случайно:
 # пока состояние собиралось поверх exec, проверить его без живого пула было
 # нельзя, и регрессия однажды спряталась именно здесь.
-SESSION_STATES = ("idle", "busy", "requires_action", "waiting", "offline")
+# Известные статусы файла сессии. Список СПРАВОЧНЫЙ: незнакомый статус
+# больше не отбрасывается (см. _session_state), иначе новое слово claude
+# молча уводит вердикт в скоринг по буферу.
+SESSION_STATES = ("idle", "busy", "shell", "requires_action", "waiting", "offline")
 
 
 def facts(node, name):
@@ -410,7 +413,15 @@ def facts(node, name):
 
 def _session_state(line):
     """Ответ пробника "<status> <alive> <listen>" -> состояние сессии, либо
-    None, если файла сессии нет."""
+    None, если файла сессии НЕТ.
+
+    Незнакомый статус возвращается как есть, и это важно: раньше он приравнивался
+    к отсутствию файла, а значит уводил в древний скоринг по словам. Так и
+    случилось, когда claude завёл статус `shell` (сессия выполняет команду):
+    занятые папета показывались просто «busy», без ветки, — но это было не
+    состояние сессии, а угадайка по буферу. Она же могла насчитать в буфере
+    больше «idle», чем «working», и объявить занятого папета СВОБОДНЫМ, а на
+    этом ответе стоит решение мастера о диспатче."""
     if not line or line == "none":
         return None
     parts = line.split()
@@ -419,7 +430,7 @@ def _session_state(line):
     status, alive, listen = parts[0], parts[1] == "1", parts[2] == "1"
     if not listen:
         return "hung" if alive else "offline"
-    return status if status in SESSION_STATES else None
+    return status
 
 
 # Следы ХОДА: результат инструмента, запуск команд, реплика модели. Индикатор
@@ -582,9 +593,19 @@ def _state_from_session(st, clone):
         return "waiting for input"
     if st in ("offline", "hung"):
         return "HUNG (not responding)"
-    if st == "busy":
+    # `shell` — claude выполняет команду; для нас это та же работа, что busy.
+    #
+    # Ветку показываем ЛЮБУЮ, в том числе дефолтную: свободное место её и так
+    # называет («free (master)»), и молчание у занятого читалось как «ветки
+    # нет вообще», хотя папет просто работал на дефолтной.
+    if st in ("busy", "shell"):
+        cur = (clone or {}).get("cur")
+        return f"busy: {cur}" if cur else "busy"
+    # Незнакомый статус — НЕ повод считать место свободным. Показываем как есть:
+    # так новое слово claude видно сразу, а не прячется за угадыванием.
+    if st != "idle":
         branch = _work_branch(clone)
-        return f"busy: {branch}" if branch else "busy"
+        return f"{st}: {branch}" if branch else st
 
     if not clone:
         return "free"

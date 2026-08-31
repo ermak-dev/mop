@@ -50,7 +50,15 @@ CASES = [
 
     # Сокет = живость, файл = активность. Сочетания разбираются здесь.
     ("session alive and working", facts("busy 1 1", WORK), "busy: bug/1063"),
-    ("working on the default branch", facts("busy 1 1", CLEAN), "busy"),
+    # claude завёл статус shell (выполняет команду) — для нас это та же работа.
+    # Пока он был незнаком, вердикт уходил в скоринг по буферу: ветка терялась,
+    # а занятый папет мог быть объявлен свободным.
+    ("session is running a shell command", facts("shell 1 1", WORK), "busy: bug/1063"),
+    ("unknown status is shown as is, never as free",
+     facts("compacting 1 1", WORK), "compacting: bug/1063"),
+    ("unknown status without a branch of its own",
+     facts("compacting 1 1", CLEAN), "compacting"),
+    ("working on the default branch", facts("busy 1 1", CLEAN), "busy: master"),
     ("process alive, but the socket is silent", facts("hung 1 0"), "HUNG (not responding)"),
     ("process dead, file stale", facts("idle 0 0"), "HUNG (not responding)"),
     ("stuck on an action request",
@@ -109,13 +117,13 @@ CASES = [
     ("footer scrolled up — the question's already answered",
      facts("busy 1 1", CLEAN,
            "  Enter to confirm \u00b7 Esc to cancel\n"
-           "Herding bytes\n  6 tasks (3 done)"), "busy"),
+           "Herding bytes\n  6 tasks (3 done)"), "busy: master"),
     ("model quota ran out",
      facts("idle 1 1", CLEAN, "You're out of usage credits. keep using Opus 4.5"),
      "no model quota: Opus 4.5"),
     ("quota was hit, but the model's already switched",
      facts("busy 1 1", CLEAN,
-           "out of usage credits\nSet model to sonnet\nHerding bytes"), "busy"),
+           "out of usage credits\nSet model to sonnet\nHerding bytes"), "busy: master"),
     # Отказ провайдера: в таблицу едет средний блок скобок. Код (1308) и
     # request id мастеру не говорят ничего, «Request rejected (429)» умалчивает
     # время возврата квоты — а именно оно решает, ждать папета или переводить.
@@ -152,7 +160,7 @@ CASES = [
     ("there was a refusal, but the model's already switched",
      facts("busy 1 1", CLEAN,
            "● API Error: Request rejected (429) · [1308][Usage limit reached]\n"
-           "Set model to sonnet\nHerding bytes"), "busy"),
+           "Set model to sonnet\nHerding bytes"), "busy: master"),
 
     # Файла сессии нет (старый claude / нет python3) -> откаты.
     ("no session file, but the pane says working",
