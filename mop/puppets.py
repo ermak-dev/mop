@@ -14,7 +14,8 @@ from . import bus, config, llm, nomad
 PROJECT = config.PROJECT
 
 # Значения этой установки — .env поверх дефолтов; см. mop/config.py.
-MEM = config.num("MOP_PUPPET_MEM_MB")   # бюджет папета, МБ (на Linux-узлах cgroup-лимит ЖЁСТКИЙ)
+MEM = config.num("MOP_PUPPET_MEM_MB")   # бюджет папета, МБ: резерв планировщика и мера слотов
+MEM_MAX = config.num("MOP_PUPPET_MEM_MAX_MB")  # потолок, за которым cgroup всё-таки убивает
 HOME = config.get("MOP_HOME")             # $HOME на узлах пула
 USER = config.get("MOP_USER")               # под кем идут задачи
 # Куда переводить папет, у которого кончилась квота текущей модели
@@ -336,7 +337,7 @@ def job_spec(name, origin, profile=None, cont=False):
                 "User": USER,
                 "Config": {"command": "/bin/bash", "args": ["-c", WRAPPER]},
                 "Env": env,
-                "Resources": {"CPU": 1000, "MemoryMB": MEM},
+                "Resources": {"CPU": 1000, "MemoryMB": MEM, "MemoryMaxMB": MEM_MAX},
                 "KillTimeout": 15 * 10**9,
             }],
         }],
