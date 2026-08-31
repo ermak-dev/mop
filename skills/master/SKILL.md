@@ -117,16 +117,18 @@ been created. Pool size is your job; the operator may set a ceiling:
 
 | state | dispatch? |
 |---|---|
-| `свободен`, `свободен (<branch>)` | yes — clean, everything on a remote; the branch is informational |
-| `занят: <branch>` | no — the session is really working |
-| `занят: <branch> (не закоммичено: N, не отправлено: M)` | NO — the session idles, but this work exists nowhere else. Agent died mid-ticket: recover, or ask the operator — never dispatch over it |
-| `требует действия` | no — stuck on a prompt. `mcp__mop__tail` first: a dialog → `mcp__mop__slash(<name>, "Escape")`; otherwise `doctor(fix=true)` restarts it |
-| `ждёт ввода` | no — may just be between turns; deliberately not auto-treated, the operator decides |
-| `ЗАВИС (не отвечает)` | no — `puppet(action="restart")` |
-| `ЗАВИС (нет tmux-сессии)` | no — the wrapper never reached a working state; `mcp__mop__tail` and `doctor()` |
-| `АГЕНТ МОЛЧИТ (…)` | no, and do NOT touch the puppet — the node's agent is silent while the puppet may be working fine; a restart kills live work. Cured by the operator with `mop deploy` |
-| `не залогинен`, `логин протух` | no — the `login` tool, then a restart (`doctor(fix=true)` does both) |
-| `нет квоты модели: <model>` | no — a restart will NOT help: switch the model (`mcp__mop__slash(name, "/model <m>")`) or top up |
+| `free`, `free (<branch>)` | yes — clean, everything on a remote; the branch is informational |
+| `busy: <branch>` | no — the session is really working |
+| `busy: <branch> (uncommitted: N, unpushed: M)` | NO — the session idles, but this work exists nowhere else. Agent died mid-ticket: recover, or ask the operator — never dispatch over it |
+| `needs action` | no — stuck on a prompt. `mcp__mop__tail` first: a dialog → `mcp__mop__slash(<name>, "Escape")`; otherwise `doctor(fix=true)` restarts it |
+| `waiting for input` | no — may just be between turns; deliberately not auto-treated, the operator decides |
+| `HUNG (not responding)` | no — `puppet(action="restart")` |
+| `HUNG (no tmux session)` | no — the wrapper never reached a working state; `mcp__mop__tail` and `doctor()` |
+| `AGENT SILENT (…)` | no, and do NOT touch the puppet — the node's agent is silent while the puppet may be working fine; a restart kills live work. Cured by the operator with `mop deploy` |
+| `not logged in`, `login expired` | no — the `login` tool, then a restart (`doctor(fix=true)` does both) |
+| `no model quota: <model>` | no — a restart will NOT help: switch the model (`mcp__mop__slash(name, "/model <m>")`) or top up |
+| `error: <provider message>` | no — the provider refused the turn; the message carries the reason and, for a quota, when it resets. A restart will NOT help: switch the model or wait it out |
+| `no clone yet` | no — the wrapper has not finished cloning; look again shortly, `mcp__mop__tail` if it persists |
 
 "Uncommitted" and "unpushed" are different numbers shown separately on
 purpose — name the right one when re-dispatching. A quota-exhausted puppet

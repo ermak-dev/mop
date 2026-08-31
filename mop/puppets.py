@@ -79,7 +79,7 @@ edit_json() {  # <file> <jq-program> [jq-args...]
     # `jq empty` is NOT a validity check: a zero-byte file is an empty jq input
     # stream, so it exits 0, every filter over it yields nothing, and the 0-byte
     # config got written straight back (2026-08-28, one node — all six puppets parked
-    # on the config prompt while `mop list` showed only "ЗАВИС"). Demand an
+    # on the config prompt while `mop list` showed only "HUNG"). Demand an
     # actual object, and never install an empty result.
     jq -e 'type == "object"' "$file" >/dev/null 2>&1 || echo '{}' > "$file"
     if jq "$@" "$program" "$file" > "$tmp" && [ -s "$tmp" ]; then
@@ -123,12 +123,12 @@ edit_json "$HOME/.claude/settings.json" '.skipDangerousModePermissionPrompt = tr
 # Слияние, а не присваивание: чужие deny-правила на узле сносить незачем.
 #
 # AskUserQuestion: у папета нет человека за терминалом. Вызов паркует сессию
-# намертво -- это ровно то состояние "требует действия", которое doctor лечит
+# намертво -- это ровно то состояние "needs action", которое doctor лечит
 # рестартом. Без инструмента модель решает сама и идёт дальше.
 #
 # EnterWorktree/ExitWorktree: тихо ломают модель состояния. clone_holds_work
 # смотрит в клон папета; ушедший в worktree оставит клон чистым, list покажет
-# "свободен", и мастер задиспатчит поверх живой работы. Отказ молчаливый, а
+# "free", и мастер задиспатчит поверх живой работы. Отказ молчаливый, а
 # цена -- потерянная работа.
 edit_json "$HOME/.claude/settings.json" '.permissions.deny =
     ((.permissions.deny // []) + ["SendMessage", "ListAgents",
@@ -330,10 +330,13 @@ def next_name(project):
 # Итог: сокет = живость, файл = активность.
 #   нет коннекта + pid мёртв ....... offline (файл протух, не верим)
 #   нет коннекта + pid жив ......... hung    (сессия рушится/подвисла)
-#   коннект есть + idle ............ свободен
-#   коннект есть + busy ............ занят
-#   коннект есть + requires_action . требует действия
-#   коннект есть + waiting ......... ждёт ввода
+#   коннект есть + idle ............ free
+#   коннект есть + busy ............ busy
+#   коннект есть + requires_action . needs action
+#   коннект есть + waiting ......... waiting for input
+#
+# Сами строки состояния — ПО-АНГЛИЙСКИ: их читает не только человек, но и
+# модель (mop list, инструменты MCP), а промпты и скиллы пула англоязычны.
 # Нет файла (старый claude / нет python3) -> None, и мы откатываемся на
 # прежнюю tmux-эвристику. Детект протухшего логина остаётся на tmux — в файле
 # он не виден.
@@ -382,19 +385,19 @@ def _screen_complaint(activity):
     # означало бы что угодно, только не болезнь. Для профилей с ключом
     # провайдера (glm) логин claude.ai вообще не при делах.
     if "not logged in" in low or "login expired" in low:
-        return "login", ("не залогинен" if "not logged in" in low else "логин протух")
+        return "login", ("not logged in" if "not logged in" in low else "login expired")
     # Квота модели и прочие API ошибки. Жалоба живёт в скроллбэке и после
     # лечения, поэтому считается актуальной только если ПОСЛЕ неё модель не
     # переключали: иначе вылеченное папет вечно читалось бы как больное.
     if "out of usage credits" in low and low.rfind("out of usage credits") > low.rfind("set model to"):
         m = re.search(r"keep using ([^\s]+(?: [0-9.]+)?)", activity, re.I)
-        return "quota", (f"нет квоты модели: {m.group(1)}" if m else "нет квоты модели")
+        return "quota", (f"no model quota: {m.group(1)}" if m else "no model quota")
     # Отказ провайдера приезжает иначе — строкой «API Error», и рестарт её тоже
     # не лечит. Актуальность считается так же, как у квоты выше.
     if "api error" in low and low.rfind("api error") > low.rfind("set model to"):
         text = _api_error_text(activity)
         if text:
-            return "error", f"ошибка: {text}"
+            return "error", f"error: {text}"
     return None
 
 
@@ -440,9 +443,9 @@ def _tmux_guess(activity):
     idle = sum(1 for x in ("резерв", "reserve", "waiting", "idle",
                            "свободен", "await") if x in low)
     if work > idle:
-        return "занят"
+        return "busy"
     if idle > work:
-        return "свободен"
+        return "free"
     return None
 
 
@@ -470,37 +473,37 @@ def _state_from_session(st, clone):
     бывает прибит к origin/master, и тогда всё невлитое врёт как «не
     отправлено» (поймано на живом папете).
 
-    «Не закоммичено» и «не отправлено» показываем РАЗДЕЛЬНО: это разные
-    состояния и разный разговор с агентом. Сложив их в одно «только локально:
-    3», мастер однажды сказал переродившемуся месту «у тебя было 3 локальных
-    коммита», тогда как там лежали 3 несохранённых файла и ноль коммитов."""
+    «uncommitted» и «unpushed» показываем РАЗДЕЛЬНО: это разные состояния и
+    разный разговор с агентом. Сложив их в одно «только локально: 3», мастер
+    однажды сказал переродившемуся месту «у тебя было 3 локальных коммита»,
+    тогда как там лежали 3 несохранённых файла и ноль коммитов."""
     if st == "requires_action":
-        return "требует действия"
+        return "needs action"
     if st == "waiting":
-        return "ждёт ввода"
+        return "waiting for input"
     if st in ("offline", "hung"):
-        return "ЗАВИС (не отвечает)"
+        return "HUNG (not responding)"
     if st == "busy":
         branch = _work_branch(clone)
-        return f"занят: {branch}" if branch else "занят"
+        return f"busy: {branch}" if branch else "busy"
 
     if not clone:
-        return "свободен"
+        return "free"
     dirty, ahead = clone.get("dirty") or 0, clone.get("ahead") or 0
     if dirty or ahead:
-        what = ", ".join(p for p in (f"не закоммичено: {dirty}" if dirty else "",
-                                     f"не отправлено: {ahead}" if ahead else "") if p)
-        return f"занят: {clone.get('cur')} ({what})"
+        what = ", ".join(p for p in (f"uncommitted: {dirty}" if dirty else "",
+                                     f"unpushed: {ahead}" if ahead else "") if p)
+        return f"busy: {clone.get('cur')} ({what})"
     cur = clone.get("cur")
-    return f"свободен ({cur})" if cur else "свободен"
+    return f"free ({cur})" if cur else "free"
 
 
 def _state_from_clone(clone):
     """Последний откат: одна лишь ветка клона."""
     if not clone:
-        return "клона ещё нет"
+        return "no clone yet"
     branch = _work_branch(clone)
-    return f"занят: {branch}" if branch else "свободен"
+    return f"busy: {branch}" if branch else "free"
 
 
 def puppet_state(f):
@@ -510,13 +513,13 @@ def puppet_state(f):
     молчит. На этом стоит решение мастера о диспатче, и ломать условие нельзя.
     """
     if not f or f.get("error"):
-        return f"ЗАВИС ({(f or {}).get('error', 'нет ответа')[:40]})"
+        return f"HUNG ({(f or {}).get('error', 'no answer')[:40]})"
     if not f.get("present"):
-        return "ЗАВИС (нет tmux-сессии)"
+        return "HUNG (no tmux session)"
 
     activity = f.get("screen") or ""
     if not activity.strip():
-        return "свободен"
+        return "free"
 
     complaint = _screen_complaint(activity)
     if complaint:
@@ -541,11 +544,11 @@ def is_free(state):
     """Свободен ли папет по строке состояния из puppet_state.
 
     По ПРЕФИКСУ: у свободного места состояние обычно несёт ещё и ветку —
-    «свободен (master)». Точное сравнение врало и до переезда на шину:
+    «free (master)». Точное сравнение врало и до переезда на шину:
     таблица показывала свободные места, а подсказка под ней уверяла, что
     свободных нет. На этом ответе стоит и решение о диспатче, и выбор жертвы
     для рецикла."""
-    return state.startswith("свободен")
+    return state.startswith("free")
 
 
 # ─── сводки для фронтендов ───────────────────────────────────────────────
@@ -598,7 +601,7 @@ def _collect():
         # может прекрасно работать, и рестартить его нельзя.
         if isinstance(answer, Exception):
             for i in its:
-                i["state"] = f"АГЕНТ МОЛЧИТ ({answer})"
+                i["state"] = f"AGENT SILENT ({answer})"
             continue
         got = (answer or {}).get("puppets") or {}
         sanswer = sizes.get(node)
@@ -658,10 +661,10 @@ def pool():
 # ─── диагностика ─────────────────────────────────────────────────────────
 # Категории и лечение:
 #   залип/не отвечает      -> restart аллокации (клон и ветка переживают)
-#   не залогинен/протух    -> раздать креды на пул, затем restart папета
+#   not logged in/expired  -> раздать креды на пул, затем restart папета
 #   pending/failed/lost    -> alloc stop: Nomad пересоздаёт сразу, минуя
 #                             restart-backoff (до 30 мин)
-#   нет квоты модели       -> печать /model в пейн; рестарт квоту не вернёт
+#   no model quota/error   -> печать /model в пейн; рестарт квоту не вернёт
 #   queued без аллокации   -> мест в пуле нет, лечится не отсюда
 #   агент узла молчит      -> отсюда никак: лечится юнитом на самом узле
 def diagnose():
@@ -700,18 +703,18 @@ def _action_for(state):
     # Молчит АГЕНТ, а не папет. Рестарт папета тут ничего не лечит и вполне
     # может убить живую работу в клоне: про сам папет мы в этот момент не
     # знаем ничего. Показать — да, трогать — нет.
-    if state.startswith("АГЕНТ МОЛЧИТ"):
+    if state.startswith("AGENT SILENT"):
         return None
-    if state.startswith("ЗАВИС"):
+    if state.startswith("HUNG"):
         return "restart"
     # Сессия жива, но упёрлась в запрос действия и сама не сдвинется.
-    # "ждёт ввода" (waiting) НЕ трогаем: это бывает и нормальным межходовым
+    # "waiting for input" НЕ трогаем: это бывает и нормальным межходовым
     # состоянием, автолечить его опасно — только показываем.
-    if state == "требует действия":
+    if state == "needs action":
         return "restart"
-    if state.startswith(("не залогинен", "логин протух")):
+    if state.startswith(("not logged in", "login expired")):
         return "login+restart"
-    if state.startswith(("нет квоты модели", "ошибка")):
+    if state.startswith(("no model quota", "error")):
         return "model"
     return False
 
