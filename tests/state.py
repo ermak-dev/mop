@@ -114,6 +114,24 @@ CASES = [
     ("отказ провайдера без скобок — показываем что есть",
      facts("idle 1 1", CLEAN, "● API Error: Connection error"),
      "error: Connection error"),
+    # Пара снята с живого пула 2026-08-31: обе сессии несут в буфере ОДИН И ТОТ
+    # ЖЕ отказ, но первую восстановили вместе со скроллбэком, и она работает.
+    # Отличает их не жалоба, а то, что под ней.
+    ("восстановленная сессия принесла отказ из истории и работает",
+     facts("idle 1 1", WORK,
+           "● API Error: Request rejected (429) · [1308][Usage limit reached]\n"
+           "✻ Brewed for 57m 29s · done 2:04 PM\n"
+           "● Session model glm-5.3 could not be restored — using opus instead\n"
+           "❯ продолжай\n  \u23bf  4 skills available\n  Ran 3 shell commands"),
+     "free (bug/1063)"),
+    ("та же жалоба, но под ней только оборванный ход — папет правда встал",
+     facts("idle 1 1", WORK,
+           "  Ran 2 shell commands\n"
+           "● API Error: Request rejected (429) · [1308][Usage limit reached]\n"
+           "✻ Baked for 49m 57s · done 2:04 PM\n"
+           "  2 tasks (0 done, 1 in progress, 1 open)\n"
+           "  \u25fc Add clo gitlab fetch-redemption"),
+     "error: Usage limit reached"),
     ("отказ был, но модель уже переключили",
      facts("busy 1 1", CLEAN,
            "● API Error: Request rejected (429) · [1308][Usage limit reached]\n"

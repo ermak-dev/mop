@@ -396,6 +396,29 @@ def _session_state(line):
     return status if status in SESSION_STATES else None
 
 
+# Следы ХОДА: результат инструмента, запуск команд, реплика модели. Индикатор
+# «✻ Baked for 49m · done» в этот список НЕ входит намеренно — им подписан и
+# тот самый ход, который отказом и кончился.
+_TURN_AFTER = re.compile(r"^\s*(⎿|Ran \d|● (?!API Error))", re.M | re.I)
+
+
+def _outlived(activity, low, mark):
+    """Пережита ли жалоба, стоящая в буфере на позиции mark.
+
+    Восстановленная сессия приносит С СОБОЙ весь скроллбэк, включая отказ, на
+    котором её когда-то оборвало: pu-cloudpub-1 поднялся с 251.5k токенов
+    истории, прекрасно работал под другой моделью — и читался в ростере
+    больным, потому что жалоба в буфере была.
+
+    Отличает живого от больного не сама жалоба, а то, ЧТО ПОД НЕЙ. У живого
+    ниже лежат следы ходов; у больного — только подпись оборванного хода,
+    сводка задач и пустая рамка ввода. Переключение модели считается тем же
+    доказательством: жалоба на прежнюю модель к новой не относится."""
+    if low.rfind("set model to") > mark:
+        return True
+    return bool(_TURN_AFTER.search(activity, mark))
+
+
 def _screen_complaint(activity):
     """Жалоба, видимая только на экране. -> (вид, текст) или None.
 
@@ -426,15 +449,14 @@ def _screen_complaint(activity):
     # провайдера (glm) логин claude.ai вообще не при делах.
     if "not logged in" in low or "login expired" in low:
         return "login", ("not logged in" if "not logged in" in low else "login expired")
-    # Квота модели и прочие API ошибки. Жалоба живёт в скроллбэке и после
-    # лечения, поэтому считается актуальной только если ПОСЛЕ неё модель не
-    # переключали: иначе вылеченное папет вечно читалось бы как больное.
-    if "out of usage credits" in low and low.rfind("out of usage credits") > low.rfind("set model to"):
+    # Квота модели и прочие отказы провайдера. Жалоба остаётся в скроллбэке и
+    # после лечения — актуальна она только пока её не пережили.
+    mark = low.rfind("out of usage credits")
+    if mark >= 0 and not _outlived(activity, low, mark):
         m = re.search(r"keep using ([^\s]+(?: [0-9.]+)?)", activity, re.I)
         return "quota", (f"no model quota: {m.group(1)}" if m else "no model quota")
-    # Отказ провайдера приезжает иначе — строкой «API Error», и рестарт её тоже
-    # не лечит. Актуальность считается так же, как у квоты выше.
-    if "api error" in low and low.rfind("api error") > low.rfind("set model to"):
+    mark = low.rfind("api error")
+    if mark >= 0 and not _outlived(activity, low, mark):
         text = _api_error_text(activity)
         if text:
             return "error", f"error: {text}"
