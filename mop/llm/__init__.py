@@ -46,11 +46,11 @@ def contract(name, mod):
     doc = (mod.__doc__ or "").strip().splitlines()
     if not isinstance(env, dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
-        raise RuntimeError(f"{where}: ENV обязан быть dict[str, str]")
+        raise RuntimeError(f"{where}: ENV must be dict[str, str]")
     if key is not None and (not isinstance(key, str) or not _VAR.match(key)):
-        raise RuntimeError(f"{where}: KEY — имя переменной .env либо None")
+        raise RuntimeError(f"{where}: KEY — .env variable name or None")
     if not isinstance(auth_var, str) or not _VAR.match(auth_var):
-        raise RuntimeError(f"{where}: AUTH_VAR — имя переменной окружения")
+        raise RuntimeError(f"{where}: AUTH_VAR — environment variable name")
     return {"key": key, "auth_var": auth_var, "env": env,
             "doc": doc[0].strip() if doc else ""}
 
@@ -77,6 +77,6 @@ def require(name):
     """Профиль по имени; громкий отказ с перечнем доступных, если нет."""
     prof = get(name)
     if prof is None:
-        raise RuntimeError(f"нет LLM-профиля {name or '(пусто)'}; есть: "
+        raise RuntimeError(f"no LLM profile {name or '(empty)'}; available: "
                            f"{', '.join(profiles())} (mop llm)")
     return prof

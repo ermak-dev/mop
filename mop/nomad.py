@@ -17,7 +17,7 @@ try:
     import nomad as _nomad
     import nomad.api.exceptions
 except ImportError:
-    sys.exit("нужны библиотеки API: pip install --user --break-system-packages "
+    sys.exit("API library required: pip install --user --break-system-packages "
              "python-nomad")
 
 from . import config  # noqa: E402
@@ -55,13 +55,13 @@ def client():
         try:
             _client = _nomad.Nomad(address=ADDR, token=token(), timeout=30, verify=True)
         except Exception as e:
-            raise ConnectionError(f"нет связи с {ADDR}: {e}")
+            raise ConnectionError(f"no connection to {ADDR}: {e}")
     return _client
 
 
 def describe_error(e):
     """Человеческая причина отказа Nomad — одинаково во всех вызывающих."""
-    return f"ошибка API Nomad: {e}" if isinstance(e, ApiError) else f"ошибка связи с Nomad: {e}"
+    return f"Nomad API error: {e}" if isinstance(e, ApiError) else f"Nomad connection error: {e}"
 
 
 def alloc_restart(alloc_id):

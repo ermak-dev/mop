@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""настройки этой установки: mop config [--json]
+"""settings of this installation: mop config [--json]
 
-Показывает, чем система живёт сейчас и откуда каждое значение взялось:
-переменная окружения важнее .env, .env важнее дефолта в коде.
+Shows what the system runs on right now and where each value came from: an
+environment variable outranks .env, .env outranks the default in the code.
 
-Дефолты равны сегодняшним значениям кластера намеренно: .env лежит в
-.gitignore, и свежий клон без него обязан подниматься как есть. Обязательными
-в .env остаются одни секреты.
+Defaults intentionally equal the cluster's current values: .env is in
+.gitignore, and a fresh clone without it must still come up as-is. The only
+things required in .env are secrets.
 """
 import json
 
@@ -23,9 +23,9 @@ def main(argv):
         return
     if argv:
         lib.usage(__doc__)
-    print("\n".join(table([("НАСТРОЙКА", "ЗНАЧЕНИЕ", "ОТКУДА")]
+    print("\n".join(table([("SETTING", "VALUE", "SOURCE")]
                           + [(k, v, src) for k, (v, src) in eff.items()])))
-    print(f"\nфайл: {config.ENV_FILE}")
+    print(f"\nfile: {config.ENV_FILE}")
 
 
 lib.run(main)

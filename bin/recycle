@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""пересоздать папета на чистой рабочей копии: mop recycle <имя>
+"""recreate a puppet on a clean working copy: mop recycle <name>
 
-Несохранённое сносится восстановлением из git, target-каталог удаляется
-целиком (первая сборка после рецикла долгая). Клон не переклонируется.
+Unsaved changes are wiped by restoring from git, the target directory is
+removed entirely (the first build after a recycle is slow). The clone
+itself isn't recloned.
 """
 import lib
 from mop import puppets
@@ -13,9 +14,9 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     lib.guard(name)
-    print(f"останавливаю {name}, сбрасываю клон к HEAD, сношу target...")
+    print(f"stopping {name}, resetting clone to HEAD, wiping target...")
     r = puppets.recycle(name)
-    print(f"пересоздан {name} на {r['node']}")
+    print(f"recreated {name} on {r['node']}")
 
 
 lib.run(lib.cluster(main))

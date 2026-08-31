@@ -35,7 +35,7 @@ import sys
 try:
     import nats
 except ImportError:
-    sys.exit("нужна библиотека шины: pip install --user --break-system-packages nats-py")
+    sys.exit("bus library needed: pip install --user --break-system-packages nats-py")
 
 from . import bus, config, session
 
@@ -141,7 +141,7 @@ async def pane_lines(name):
     видимую часть."""
     out, code = await sh(f"tmux -L {name} capture-pane -p -t {name} -S -")
     if code not in (0, None):
-        raise RuntimeError(f"tmux в {name}: {out.strip() or f'exit {code}'}")
+        raise RuntimeError(f"tmux in {name}: {out.strip() or f'exit {code}'}")
     lines = out.splitlines()
     while lines and not lines[-1].strip():
         lines.pop()
@@ -285,7 +285,7 @@ async def v_send(req):
         if req.get("reply_to"):
             asyncio.create_task(_watch_idle(name, sock, req["reply_to"]))
         else:
-            out["notify"] = "не указан reply_to — уведомлять некуда"
+            out["notify"] = "no reply_to given — nothing to notify"
     return out
 
 
@@ -312,9 +312,9 @@ async def _watch_idle(name, sock, reply_to):
     try:
         state = await asyncio.to_thread(_await_idle, name, sock, IDLE_WAIT)
     except Exception as e:
-        return await _tell_master(reply_to, f"mop: не дождался простоя {name}: {e}")
-    await _tell_master(reply_to, f"mop: папет {name} — {state}" if state
-                       else f"mop: {name} не отчитался о простое за {IDLE_WAIT}с")
+        return await _tell_master(reply_to, f"mop: gave up waiting for {name} to idle: {e}")
+    await _tell_master(reply_to, f"mop: puppet {name} — {state}" if state
+                       else f"mop: {name} did not report idle within {IDLE_WAIT}s")
 
 
 async def _tell_master(reply_to, text):
@@ -339,13 +339,13 @@ async def v_disk(_req):
     стором уехали вместе с ним."""
     out, code = await sh(f"df -BG --output=avail,size {HOME}")
     if code not in (0, None) or not out.strip():
-        return {"error": f"df не ответил: {out.strip() or f'exit {code}'}"}
+        return {"error": f"df did not answer: {out.strip() or f'exit {code}'}"}
     try:
         avail, size = out.splitlines()[1].split()
         return {"path": HOME, "free_gb": int(avail.rstrip("G")),
                 "total_gb": int(size.rstrip("G"))}
     except (IndexError, ValueError):
-        return {"error": f"df ответил не тем: {out.strip()!r}"}
+        return {"error": f"df answered with garbage: {out.strip()!r}"}
 
 
 async def v_wipe(req):
@@ -364,9 +364,9 @@ async def v_wipe(req):
     независимо от того, что решил мастер."""
     name = req["name"]
     if not name.startswith(PREFIX) or "/" in name:
-        return {"error": f"имя {name!r} не похоже на {PREFIX}<проект>-<n>"}
+        return {"error": f"name {name!r} doesn't look like {PREFIX}<project>-<n>"}
     if await tmux_alive(name):
-        return {"error": f"{name}: tmux-сессия жива — сначала останови джоб"}
+        return {"error": f"{name}: tmux session is alive — stop the job first"}
     d = clone_dir(name)
     # Исключения чистки — из НАСТРОЙКИ, той же, что сеет врапер (PU_SEED в
     # спеке). Список в двух местах — здесь и в врапере — расползается ровно
@@ -376,7 +376,7 @@ async def v_wipe(req):
     out, code = await sh(
         f"git -C {d} reset --hard HEAD && git -C {d} clean -xdff {excl}")
     if code not in (0, None):
-        return {"error": f"git в {d}: {out.strip() or f'exit {code}'}"}
+        return {"error": f"git in {d}: {out.strip() or f'exit {code}'}"}
     target = f"{HOME}/.cache/target-{name}"
     # Долго: сотни тысяч inode. Таймаут шире офисного — и обычный вызов шела
     # сюда не годится, он бы убил rm на полпути.
@@ -404,9 +404,9 @@ async def v_type(req):
                              f"sleep 1; tmux -L {name} capture-pane -p -t {name}")
         return {"screen": out} if code in (0, None) else {"error": out.strip()}
     if command.split()[0:1] and command.split()[0] not in SLASH_ALLOWED:
-        return {"error": f"разрешены только: {', '.join(SLASH_ALLOWED + KEYS_ALLOWED)}"}
+        return {"error": f"only allowed: {', '.join(SLASH_ALLOWED + KEYS_ALLOWED)}"}
     if "'" in command:
-        return {"error": "кавычка в команде: команда едет в шелл одной строкой"}
+        return {"error": "quote in command: command goes to the shell as one line"}
     keys = ""
     if command:
         keys = (f"tmux -L {name} send-keys -t {name} C-u; sleep 0.3; "
@@ -427,7 +427,7 @@ async def v_write(req):
     written = []
     for path, b64 in req.get("files") or []:
         if path not in WRITABLE:
-            return {"error": f"писать в {path} агенту не разрешено"}
+            return {"error": f"agent is not allowed to write to {path}"}
         try:
             data = base64.b64decode(b64)
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -471,23 +471,23 @@ async def handle(msg, public):
         req = json.loads(msg.data.decode())
     except ValueError:
         return await msg.respond(
-            json.dumps({"error": "запрос не JSON"}, ensure_ascii=False).encode())
+            json.dumps({"error": "request is not JSON"}, ensure_ascii=False).encode())
     parts = msg.subject.split(".")
     req["_shard"] = parts[1] if len(parts) > 1 else ""
 
     verb = req.get("verb")
     fn = VERBS.get(verb)
     if fn is None:
-        out = {"error": f"нет глагола {verb}; есть: {', '.join(sorted(VERBS))}"}
+        out = {"error": f"no such verb {verb}; available: {', '.join(sorted(VERBS))}"}
     elif public and verb not in PUBLIC_VERBS:
         # Не «нет прав», а прямо: глагол существует, но не в этом субъекте.
-        out = {"error": f"глагол {verb} доступен только мастеру"}
+        out = {"error": f"verb {verb} is available to the master only"}
     elif verb in ADMIN_VERBS and req["_shard"] != bus.ADMIN:
-        out = {"error": f"глагол {verb} — узловой, шарду {req['_shard']} не отдаётся"}
+        out = {"error": f"verb {verb} is node-level, not given to shard {req['_shard']}"}
     elif verb in NAMED_VERBS and not await _mine(req, req.get("name") or ""):
         # Главная проверка шардирования. Прав NATS тут мало: мастер шарда A
         # законно пишет в свой субъект, но может назвать папета из B.
-        out = {"error": f"папет {req.get('name')} не в шарде {req['_shard']}"}
+        out = {"error": f"puppet {req.get('name')} is not in shard {req['_shard']}"}
     else:
         try:
             out = await fn(req)
@@ -522,8 +522,8 @@ async def serve():
     await _conn.subscribe(f"mop.*.node.{node}.msg", cb=on_msg)
     # Общий субъект: сюда спрашивают те, кто не знает состава пула.
     await _conn.subscribe("mop.*.all.msg", cb=on_msg)
-    print(f"mop-agent: узел {node}, подписан на mop.*.node.{node}.rpc|msg "
-          f"и mop.*.all.msg", flush=True)
+    print(f"mop-agent: node {node}, subscribed to mop.*.node.{node}.rpc|msg "
+          f"and mop.*.all.msg", flush=True)
     await asyncio.Event().wait()
 
 
@@ -534,8 +534,8 @@ async def check():
     и не положено — это и есть та граница прав, ради которой шину заводили.
     Первый прогон проверки уткнулся ровно в неё, и был неправ он, а не права."""
     c = bus.config()
-    print(f"mop-agent: узел {node_name()}, шина {c['url']}, "
-          f"глаголов {len(VERBS)} (публичных {len(PUBLIC_VERBS)})")
+    print(f"mop-agent: node {node_name()}, bus {c['url']}, "
+          f"{len(VERBS)} verbs ({len(PUBLIC_VERBS)} public)")
     nc = await nats.connect(servers=[c["url"]], user=c.get("user"),
                             password=c.get("password"),
                             name="mop-agent/check",
@@ -543,7 +543,7 @@ async def check():
     try:
         msg = await nc.request(bus.subject(node_name(), "msg", shard=bus.ADMIN),
                                json.dumps({"verb": "ping"}).encode(), timeout=5)
-        print(f"подписан: {msg.data.decode()}")
+        print(f"subscribed: {msg.data.decode()}")
     finally:
         await nc.close()
 
@@ -553,7 +553,7 @@ def main(argv):
         try:
             asyncio.run(check())
         except Exception as e:
-            print(f"агент НЕ отвечает на своём субъекте: {e}", file=sys.stderr)
+            print(f"agent is NOT answering on its subject: {e}", file=sys.stderr)
             return 1
         return 0
     try:

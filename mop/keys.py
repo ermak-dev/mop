@@ -63,13 +63,13 @@ def distribute(files):
     script = push_script(files)
     nodes = nomad.ready_nodes()
     if not nodes:
-        raise RuntimeError("в пуле нет ready-узлов")
+        raise RuntimeError("no ready nodes in the pool")
 
     results = {}
     _push_via_agents(files, sorted(nodes), results)
     _push_via_sysbatch(script, sorted(nodes - set(results)), results)
     for node in nodes:
-        results.setdefault(node, "НЕ ДОСТАЛСЯ — ни папета, ни места под sysbatch")
+        results.setdefault(node, "NOT REACHED — no puppet, no room for sysbatch")
     return results
 
 
@@ -112,7 +112,7 @@ def _push_via_sysbatch(script, nodes, results):
             for a in allocs:
                 if a["ClientStatus"] in ("complete", "failed"):
                     results[a["NodeName"]] = ("OK" if a["ClientStatus"] == "complete"
-                                              else "FAILED (sysbatch, смотри nomad UI)")
+                                              else "FAILED (sysbatch, see nomad UI)")
                 else:
                     pending = True
             if allocs and not pending:
@@ -144,9 +144,9 @@ def llm_keys_blob():
                 if sep and k in wanted and v:
                     found[k] = v
     except OSError:
-        return None, f"нет {puppets.LOCAL_KEYS_FILE} — профили с ключом не поднимутся"
+        return None, f"no {puppets.LOCAL_KEYS_FILE} — profiles needing a key won't start"
     missing = sorted(wanted - set(found))
-    note = f"в {puppets.LOCAL_KEYS_FILE} нет: {', '.join(missing)}" if missing else None
+    note = f"{puppets.LOCAL_KEYS_FILE} is missing: {', '.join(missing)}" if missing else None
     if not found:
         return None, note
     return "".join(f"{k}={v}\n" for k, v in sorted(found.items())), note
@@ -171,7 +171,7 @@ def push_llm_keys(profile):
         return None
     blob, note = llm_keys_blob()
     if not blob or key not in blob:
-        raise RuntimeError(f"профиль {profile}: {note}")
+        raise RuntimeError(f"profile {profile}: {note}")
     return distribute([_as_file(puppets.SECRETS_FILE, blob)])
 
 
@@ -183,9 +183,9 @@ def credentials():
             raw = f.read()
         json.loads(raw)
     except FileNotFoundError:
-        raise RuntimeError(f"нет {src} — сначала залогиньтесь в claude на этой машине")
+        raise RuntimeError(f"no {src} — log in to claude on this machine first")
     except ValueError:
-        raise RuntimeError(f"{src}: не валидный JSON, раздавать нечего")
+        raise RuntimeError(f"{src}: not valid JSON, nothing to distribute")
     return raw
 
 
@@ -209,10 +209,10 @@ def push_login():
     нужны. Старую копию файла с узлов сносит плейбук nats: перестать раздавать
     значит оставить лежать."""
     files = [_as_file(f"{puppets.HOME}/.claude/.credentials.json", credentials())]
-    what = ["креды claude.ai"]
+    what = ["claude.ai credentials"]
     blob, note = llm_keys_blob()
     if blob:
         files.append(_as_file(puppets.SECRETS_FILE, blob))
-        what.append("секреты узла (" + ", ".join(
+        what.append("node secrets (" + ", ".join(
             l.split("=")[0] for l in blob.splitlines()) + ")")
     return distribute(files), what, note

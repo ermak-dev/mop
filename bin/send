@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""послать сообщение папету пула или сессии на этой машине
+"""send a message to a pool puppet or a session on this machine
 
-  mop send <цель> <текст>            отправить
-  mop send <цель> -                  текст со stdin
-  mop send <цель> <текст> --wait[=N] отправить и ждать, пока адресат освободится
-  mop send --list                    живые сессии на этой машине
+  mop send <target> <text>            send
+  mop send <target> -                 text from stdin
+  mop send <target> <text> --wait[=N] send and wait until the recipient goes free
+  mop send --list                     live sessions on this machine
 
-<цель> — имя папета (pu-<проект>-1), имя сессии, pid, каталог или путь к сокету.
-Папет узнаётся по префиксу pu- и достаётся через шину; всё остальное — местная
-сессия через её uds-инбокс напрямую.
+<target> — puppet name (pu-<project>-1), session name, pid, directory, or socket
+path. A puppet is recognized by the pu- prefix and reached over the bus; anything
+else is a local session, reached directly through its uds inbox.
 
-  --priority now|next|later   куда в очередь адресата (по умолчанию next)
-  --mode bypass|prompting     каким режимом прав представиться (bypass)
-  --quiet                     молча, только код возврата
+  --priority now|next|later   where in the recipient's queue (default next)
+  --mode bypass|prompting     which permission mode to present as (bypass)
+  --quiet                     silent, exit code only
 
-Протокол канала — CHANNEL.md, субъекты шины — BUS.md.
+Channel protocol — CHANNEL.md, bus subjects — BUS.md.
 """
 import argparse
 import sys
@@ -28,10 +28,10 @@ MAX_WAIT = 600
 
 def show_sessions():
     rows = [(d.get("name") or "-", str(d.get("pid")),
-             "жива" if session.socket_alive(d["messagingSocketPath"]) else "мертва",
+             "alive" if session.socket_alive(d["messagingSocketPath"]) else "dead",
              d.get("status") or "-", d.get("cwd") or "-")
             for d in session.sessions()]
-    print("\n".join(table(rows)) if rows else "живых сессий нет")
+    print("\n".join(table(rows)) if rows else "no live sessions")
 
 
 def to_puppet(a, body):
@@ -40,14 +40,14 @@ def to_puppet(a, body):
     r = bus.request(lib.running_node(a.target), "send", name=a.target, message=body,
                     priority=a.priority, wait=wait, timeout=wait + bus.TIMEOUT)
     if "error" in r:
-        sys.exit(f"{a.target}: НЕ ДОСТАВЛЕНО — {r['error']}")
+        sys.exit(f"{a.target}: NOT DELIVERED — {r['error']}")
     if a.quiet:
         return 0 if (a.wait is None or r.get("idle")) else 2
     print(f"-> {a.target} msg_id={r['msg_id']}")
     if a.wait is None:
         return 0
     if not r.get("idle"):
-        print(f"ждал {wait}s — папет не сообщил, что освободился")
+        print(f"waited {wait}s — puppet never reported going free")
         return 2
     print(f"<- {r['idle']}")
     return 0
@@ -57,7 +57,7 @@ def to_session(a, body):
     sess = session.find(a.target)
     sock = sess["messagingSocketPath"]
     if not session.socket_alive(sock):
-        sys.exit(f"{sess.get('name')}: инбокс не слушает — сессия мертва")
+        sys.exit(f"{sess.get('name')}: inbox not listening — session is dead")
     r = session.send(sock, body, priority=a.priority, mode=a.mode,
                      from_name="mop", wait_idle=min(a.wait or 0, MAX_WAIT))
     if a.quiet:
@@ -66,7 +66,7 @@ def to_session(a, body):
     if a.wait is None:
         return 0
     if r["idle"] is None:
-        print(f"ждал {a.wait}s — сессия не сообщила, что освободилась")
+        print(f"waited {a.wait}s — session never reported going idle")
         return 2
     detail = r["idle"].get("detail")
     print(f"<- {r['idle'].get('state', '?')}" + (f": {detail}" if detail else ""))
@@ -89,7 +89,7 @@ def main(argv):
 
     body = sys.stdin.read().rstrip("\n") if a.message == "-" else a.message
     if not body.strip():
-        sys.exit("пустое сообщение отправлять нечего")
+        sys.exit("empty message — nothing to send")
     if not a.target.startswith(puppets.JOB_PREFIX):
         return to_session(a, body)
     lib.guard(a.target)

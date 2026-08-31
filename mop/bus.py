@@ -51,7 +51,7 @@ try:
     import nats
     from nats.errors import NoRespondersError
 except ImportError:
-    sys.exit("нужна библиотека шины: pip install --user --break-system-packages nats-py")
+    sys.exit("bus library required: pip install --user --break-system-packages nats-py")
 
 CONFIG = os.environ.get("MOP_BUS_CONFIG") or os.path.expanduser("~/.config/mop/bus.json")
 TIMEOUT = 20             # обычный запрос к агенту
@@ -91,11 +91,11 @@ def config():
         with open(CONFIG) as f:
             c = json.load(f)
     except FileNotFoundError:
-        raise BusError(f"нет кредов шины: {CONFIG} — разверни плейбук nats")
+        raise BusError(f"no bus credentials: {CONFIG} — run the nats playbook")
     except ValueError as e:
-        raise BusError(f"{CONFIG} нечитаем: {e}")
+        raise BusError(f"{CONFIG} is unreadable: {e}")
     if not c.get("url"):
-        raise BusError(f"в {CONFIG} нет url")
+        raise BusError(f"{CONFIG} has no url")
     return c
 
 
@@ -151,7 +151,7 @@ def connect():
         except BusError:
             raise
         except Exception as e:
-            raise BusError(f"нет связи с шиной: {e}")
+            raise BusError(f"no connection to bus: {e}")
         return _conn
 
 
@@ -201,8 +201,8 @@ def _silence(who, timeout):
     """Почему тихо. Отличать «нет прав» от «агент лёг» обязательно: лечение
     у них разное и противоположное по стоимости ошибки."""
     if _last_error and "permissions violation" in _last_error.lower():
-        return f"шина не пропустила запрос — {who}: {_last_error}"
-    return f"{who} молчит {timeout}с"
+        return f"bus did not let the request through — {who}: {_last_error}"
+    return f"{who} did not answer in {timeout}s"
 
 
 def _ask(subj, who, dead, verb, timeout, **fields):
@@ -214,8 +214,8 @@ def _ask(subj, who, dead, verb, timeout, **fields):
     единственное, что их различает, — субъект, в который спрашивали."""
     payload = json.dumps({"verb": verb, **fields}, ensure_ascii=False).encode()
     if len(payload) > MAX_PAYLOAD:
-        raise BusError(f"запрос {verb} длиннее лимита шины "
-                       f"({len(payload)} > {MAX_PAYLOAD} байт)")
+        raise BusError(f"request {verb} exceeds the bus limit "
+                       f"({len(payload)} > {MAX_PAYLOAD} bytes)")
     nc = connect()
     try:
         msg = _call(nc.request(subj, payload, timeout=timeout), timeout)
@@ -228,7 +228,7 @@ def _ask(subj, who, dead, verb, timeout, **fields):
     try:
         return json.loads(msg.data.decode())
     except ValueError:
-        raise BusError(f"{who} ответил не JSON: {msg.data[:120]!r}")
+        raise BusError(f"{who} answered with non-JSON: {msg.data[:120]!r}")
 
 
 def request(node, verb, timeout=TIMEOUT, channel="rpc", shard=None, **fields):
@@ -241,8 +241,8 @@ def request(node, verb, timeout=TIMEOUT, channel="rpc", shard=None, **fields):
     Ошибка агента приезжает полем `error` внутри ответа и НЕ поднимает
     исключение: это ответ, а не отказ шины. Исключение — только когда до
     агента не доехали."""
-    return _ask(subject(node, channel, shard), f"агент узла {node}",
-                f"агент узла {node} не подписан — юнит mop-agent не работает",
+    return _ask(subject(node, channel, shard), f"node agent {node}",
+                f"node agent {node} is not subscribed — the mop-agent unit is not running",
                 verb, timeout, **fields)
 
 
@@ -254,9 +254,9 @@ def ask(master_id, verb, timeout=TIMEOUT, shard=None, **fields):
     отправителю нужен вердикт доставки, а не факт отправки. Публикация в инбокс
     мёртвого мастера выглядела бы успехом — а это ТИШИНА, то есть худший исход
     для петли, где отчёт папета и есть главный сигнал."""
-    return _ask(inbox(master_id, shard), f"мастер {master_id}",
-                f"мастера {master_id} нет на шине: сессия закрыта или адрес не его "
-                f"— посмотри mcp__mop__agents",
+    return _ask(inbox(master_id, shard), f"master {master_id}",
+                f"master {master_id} is not on the bus: session closed or the address "
+                f"isn't its own — see mcp__mop__agents",
                 verb, timeout, **fields)
 
 
@@ -281,9 +281,9 @@ def request_many(requests, timeout=TIMEOUT, channel="rpc", shard=None):
                 json.dumps(req, ensure_ascii=False).encode(), timeout=timeout)
             return json.loads(msg.data.decode())
         except NoRespondersError:
-            return BusError(f"агент узла {node} не подписан")
+            return BusError(f"node agent {node} is not subscribed")
         except asyncio.TimeoutError:
-            return BusError(_silence(f"агент узла {node}", timeout))
+            return BusError(_silence(f"node agent {node}", timeout))
         except Exception as e:
             return BusError(f"{node}: {e}")
 

@@ -176,7 +176,7 @@ if [ -n "$PU_LLM_KEY_VAR" ]; then
     if [ -z "$key" ]; then
         # Валимся громко: без ключа claude поднимется и будет отбивать каждый
         # ход 401-й, а папет будет читаться как живое и свободное.
-        echo "LLM-профиль $PU_LLM: на узле нет ключа $PU_LLM_KEY_VAR в $keyfile — раздай: mop login" >&2
+        echo "LLM profile $PU_LLM: node has no key $PU_LLM_KEY_VAR in $keyfile -- hand out: mop login" >&2
         exit 1
     fi
     llm_env+=(-e "$PU_LLM_AUTH_VAR=$key")
@@ -189,7 +189,7 @@ fi
 # читается мастером как живой, но молчащий.
 shard_creds="$HOME/.config/mop/bus-$PU_SHARD.json"
 if [ ! -f "$shard_creds" ]; then
-    echo "нет кредов шарда $PU_SHARD в $shard_creds -- заведи шард: mop deploy $PU_ORIGIN" >&2
+    echo "no credentials for shard $PU_SHARD in $shard_creds -- set up the shard: mop deploy $PU_ORIGIN" >&2
     exit 1
 fi
 
@@ -269,7 +269,7 @@ def job_spec(name, origin, profile=None, cont=False):
         # Протухший Meta.llm у работающего джоба: профиль удалили из реестра,
         # а джоб жив. Отказ обязан звать папета по имени — иначе искать, кто
         # именно не перерегистрируется, придётся по трассе.
-        raise RuntimeError(f"{name}: нет LLM-профиля {profile}; есть: "
+        raise RuntimeError(f"{name}: no LLM profile {profile}; available: "
                            f"{', '.join(llm.profiles())} (mop llm)")
     llm_env = "".join(f"{k}={v}\n" for k, v in prof["env"].items())
     meta = {"origin": origin, "llm": profile}
@@ -437,7 +437,7 @@ def _screen_complaint(activity):
     # показывал живую сессию, так что ростер читал папета здоровым.
     tail = [l for l in activity.splitlines() if l.strip()][-2:]
     if any("enter to confirm" in l.lower() for l in tail):
-        what = "resume prompt" if "resume full session as-is" in low else "диалог"
+        what = "resume prompt" if "resume full session as-is" in low else "dialog"
         return "dialog", f"needs action: {what}"
     # Логин. Варианты экрана: "Not logged in · Run /login", "Login expired ·
     # Please run /login". Проверять до скоринга: у залипшего мид-таск в буфере
@@ -754,15 +754,15 @@ def _placement_issue(job, alloc):
     name = job["ID"]
     if alloc and alloc["ClientStatus"] in ("pending", "failed"):
         return {"name": name, "alloc": alloc, "action": "stop",
-                "diagnosis": f"аллок {alloc['ClientStatus']} (restart-backoff?)"}
+                "diagnosis": f"allocation {alloc['ClientStatus']} (restart-backoff?)"}
     if alloc:
         return {"name": name, "alloc": alloc, "action": "stop",
-                "diagnosis": f"аллок {alloc['ClientStatus']}"}
+                "diagnosis": f"allocation {alloc['ClientStatus']}"}
     queued = (job.get("JobSummary", {}).get("Summary", {}).get("puppets") or {}).get("Queued", 0)
     if queued:
         return {"name": name, "alloc": None, "action": None,
-                "diagnosis": "queued — нет свободных слотов в пуле"}
-    return {"name": name, "alloc": None, "action": None, "diagnosis": "нет аллокации"}
+                "diagnosis": "queued — no free slots in the pool"}
+    return {"name": name, "alloc": None, "action": None, "diagnosis": "no allocation"}
 
 
 def _action_for(state):
@@ -812,7 +812,7 @@ def _wait_stopped(name):
         if not alloc or alloc["ClientStatus"] != "running":
             return
         time.sleep(2)
-    raise RuntimeError(f"аллокация {name} не останавливается — узел жив?")
+    raise RuntimeError(f"allocation {name} won't stop — is the node alive?")
 
 
 def recycle(name):
@@ -834,20 +834,20 @@ def recycle(name):
     meta = job.get("Meta") or {}
     origin = meta.get("origin")
     if not origin:
-        raise RuntimeError(f"у {name} нет origin в Meta — это не папет?")
+        raise RuntimeError(f"{name} has no origin in Meta — is this even a puppet?")
     llm = meta.get("llm", config.get("MOP_DEFAULT_LLM"))
     alloc = nomad.latest_alloc(name)
     node = alloc["NodeName"] if alloc else None
     if not node:
-        raise RuntimeError(f"у {name} нет аллокации — рециклить нечего")
+        raise RuntimeError(f"{name} has no allocation — nothing to recycle")
 
     nomad.deregister(name, purge=False)
     _wait_stopped(name)
     try:
         wipe(node, name)
     except RuntimeError as e:
-        raise RuntimeError(f"{e}; джоб остановлен — после починки узла "
-                           f"повтори: mop recycle {name}")
+        raise RuntimeError(f"{e}; job is stopped — after fixing the node "
+                           f"retry: mop recycle {name}")
     nomad.register(job_spec(name, origin, llm))
     return {"node": node}
 
@@ -886,12 +886,12 @@ def switch_model(node, name, model):
     if "switch model?" in out.lower():
         out = press_enter(node, name)
     if "switch model?" in out.lower():
-        raise RuntimeError("диалог смены модели не закрылся")
+        raise RuntimeError("model switch dialog did not close")
 
 
 def pane_lines(node, name):
     """Весь буфер tmux-пейна папета (история + экран)."""
     r = bus.request(node, "tail", name=name)
     if "error" in r:
-        raise RuntimeError(f"tmux в {name}: {r['error']}")
+        raise RuntimeError(f"tmux in {name}: {r['error']}")
     return r.get("lines") or []

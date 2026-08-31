@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""место на узлах пула: mop disk [узел]
+"""space on pool nodes: mop disk [node]
 
-df по файловой системе, где живут клоны и target-каталоги папетов.
-Глагол узловой: в мастер-шелле откажет — место хоста видит оператор.
+df on the filesystem where puppet clones and target directories live.
+This is a node-level verb: it refuses in a master shell — host space is
+the operator's to see.
 """
 import lib
 from mop import bus, nomad
@@ -14,14 +15,14 @@ def main(argv):
         lib.usage(__doc__)
     nodes = [argv[0]] if argv else sorted(nomad.ready_nodes())
     answers = bus.request_many({n: {"verb": "disk"} for n in nodes})
-    rows = [("УЗЕЛ", "ФС", "СВОБОДНО", "ВСЕГО")]
+    rows = [("NODE", "FS", "FREE", "TOTAL")]
     for n in nodes:
         a = answers.get(n)
         if isinstance(a, Exception) or not a or a.get("error"):
-            why = a if isinstance(a, Exception) else (a or {}).get("error") or "нет ответа"
+            why = a if isinstance(a, Exception) else (a or {}).get("error") or "no response"
             rows.append((n, str(why), "", ""))
         else:
-            rows.append((n, a["path"], f"{a['free_gb']} ГБ", f"{a['total_gb']} ГБ"))
+            rows.append((n, a["path"], f"{a['free_gb']} GB", f"{a['total_gb']} GB"))
     print("\n".join(table(rows)))
 
 

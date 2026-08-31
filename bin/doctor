@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""диагностика пула: mop doctor [--fix]
+"""pool diagnostics: mop doctor [--fix]
 
-Ловит залипания, протухший логин, restart-backoff и исчерпанную квоту модели.
---fix лечит то, что лечится; молчащий агент узла в этот список не входит —
-папет при этом может прекрасно работать, а рестарт убьёт работу в клоне.
+Catches stuck puppets, a stale login, restart backoff, and exhausted model
+quota. --fix treats what's treatable; a silent node agent is not on this
+list — the puppet may well be working fine, and a restart would kill that
+work in the clone.
 """
 import sys
 
@@ -17,7 +18,7 @@ def _login():
     зовём библиотеку, а не соседний командлет: командлет разбирает аргументы
     и печатает, оболочкой друг для друга они быть не должны."""
     results, what, _ = keys.push_login()
-    print("раздаю " + " + ".join(what) + " на узлы пула")
+    print("pushing " + " + ".join(what) + " to pool nodes")
     for node in sorted(results):
         print(f"  {node}: {results[node]}")
 
@@ -28,14 +29,14 @@ def treat(issue):
     try:
         if action == "stop":
             nomad.alloc_stop(alloc["ID"])
-            return "alloc stop — Nomad пересоздаст без backoff"
+            return "alloc stop — Nomad will recreate it without backoff"
         if action == "model":
             puppets.switch_model(alloc["NodeName"], name, puppets.FALLBACK_MODEL)
             return f"/model {puppets.FALLBACK_MODEL}"
         nomad.alloc_restart(alloc["ID"])
         return "restart"
     except Exception as e:
-        return f"{action} не вышел: {str(e)[:80]}"
+        return f"{action} failed: {str(e)[:80]}"
 
 
 def main(argv):
@@ -44,7 +45,7 @@ def main(argv):
         lib.usage(__doc__)
     issues = puppets.diagnose()
     if not issues:
-        print("пул здоров: залипаний нет")
+        print("pool is healthy: nothing stuck")
         return
 
     print("\n".join(table([
@@ -54,21 +55,21 @@ def main(argv):
     if not fix:
         # Подсказку печатаем только если --fix действительно что-то сделает.
         # Иначе она врёт: у «no model quota» и «queued» лечения здесь нет.
-        print("\nлечение: mop doctor --fix" if any(i["action"] for i in issues)
-              else "\nавтолечения нет — решение оператора")
+        print("\ntreatment: mop doctor --fix" if any(i["action"] for i in issues)
+              else "\nno auto-treatment — operator's call")
         return
 
     print()
     if any(i["action"] == "login+restart" for i in issues):
         if not keys.credentials_fresh():
-            sys.exit("локальные креды протухли или битые — сначала залогинься "
-                     "в claude на этой машине, потом mop doctor --fix")
+            sys.exit("local credentials are stale or broken — log in to claude "
+                     "on this machine first, then mop doctor --fix")
         _login()
         print()
     for issue in issues:
         if issue["action"]:
             print(f"  {issue['name']}: {treat(issue)}")
-    print("\nконтроль: mop list (и mop tail <имя> для бывших залипших)")
+    print("\ncheck: mop list (and mop tail <name> for what used to be stuck)")
 
 
 lib.run(lib.cluster(main))

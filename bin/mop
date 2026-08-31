@@ -1,6 +1,6 @@
 #!/bin/bash -e
-# mop — единая точка входа в пул. Всё остальное в bin/ — командлеты, по одному
-# на подкоманду; `mop` их только находит и запускает.
+# mop — the single entry point into the pool. Everything else in bin/ is a
+# commandlet, one per subcommand; `mop` only finds and runs them.
 #
 # Симлинк резолвим до конца: наружу торчит ~/bin/mop, а дерево проекта надо
 # найти относительно НАСТОЯЩЕГО файла, а не относительно ссылки.
@@ -20,7 +20,7 @@ fi
 
 CMD="$BIN_DIR/$SUB"
 if [[ ! -f "$CMD" || "$SUB" == "common" || "$SUB" == "mop" || "$SUB" == lib.py ]]; then
-    echo "mop: нет подкоманды «$SUB»" >&2
+    echo "mop: no such subcommand «$SUB»" >&2
     "$BIN_DIR/help" >&2
     exit 1
 fi

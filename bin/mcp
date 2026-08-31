@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MCP-сервер пула: тот же пул инструментами для claude
+"""pool MCP server: the same pool as tools for claude
 
 Запускается как `mop mcp`, транспорт stdio.
 
@@ -46,17 +46,17 @@ from mop.render import table                              # noqa: E402
 app = MCPServer(
     "mop",
     instructions=(
-        "Пул claude-папетов поверх Nomad.\n\n"
-        "ЭТО ЕДИНСТВЕННЫЙ КАНАЛ СВЯЗИ С ПУЛОМ. Чтобы написать папету или узнать, "
-        "кто свободен, бери `send` и `agents` отсюда. Встроенные "
-        "SendMessage/ListAgents для этого не годятся: они видят только сессии "
-        "ЭТОГО ЖЕ хоста, а папеты живут на разных узлах — на соседнем узле "
-        "встроенный поиск молча никого не найдёт. Здесь доставка идёт через "
-        "Nomad, и хост значения не имеет.\n\n"
-        "`agents` — кто есть и в каком состоянии, `send` — сообщение папету, "
-        "`tail` — что у него на экране. Перед диспатчем всегда сверяйся с "
-        "`agents`: «free» там означает, что в клоне нет несохранённой "
-        "работы, а не просто что сессия молчит."
+        "Pool of claude puppets on top of Nomad.\n\n"
+        "THIS IS THE ONLY CHANNEL TO THE POOL. To message a puppet or find out "
+        "who's free, use `send` and `agents` from here. The built-in "
+        "SendMessage/ListAgents won't do: they only see sessions on THIS SAME "
+        "host, and puppets live on other nodes — on a neighboring node the "
+        "built-in lookup will silently find no one. Delivery here goes through "
+        "Nomad, and the host doesn't matter.\n\n"
+        "`agents` — who's around and in what state, `send` — message a puppet, "
+        "`tail` — what's on its screen. Always check `agents` before "
+        "dispatching: \"free\" there means the clone has no unsaved work, not "
+        "just that the session is silent."
     ),
 )
 
@@ -128,9 +128,9 @@ def puppet_alloc(name):
     рестарта папета меняется pid, а с ним и имя сокета."""
     alloc = nomad.latest_alloc(name)
     if not alloc:
-        raise LookupError(f"{name}: нет аллокации — папет не размещён")
+        raise LookupError(f"{name}: no allocation — puppet not placed")
     if alloc["ClientStatus"] != "running":
-        raise LookupError(f"{name}: аллокация {alloc['ClientStatus']}, не running")
+        raise LookupError(f"{name}: allocation {alloc['ClientStatus']}, not running")
     return alloc
 
 
@@ -144,7 +144,7 @@ def puppet_node(name):
     for answer in bus.gather("local"):
         if name in (answer.get("puppets") or {}):
             return answer["node"]
-    raise LookupError(f"{name}: ни один агент пула не признаёт этот папет своим")
+    raise LookupError(f"{name}: no pool agent claims this puppet as its own")
 
 
 def master_socket():
@@ -216,7 +216,7 @@ def on_inbox(m):
                 "session": d.get("name"), "cwd": d.get("cwd")}
     sock = master_socket()
     if not sock:
-        return {"error": f"у мастера {MASTER_ID} нет сессии — весть класть некуда"}
+        return {"error": f"master {MASTER_ID} has no session — nowhere to deliver the note"}
     # priority по умолчанию later: так кладёт вести агент, и перебивать ход
     # мастера уведомлением о простое незачем. Папет со своим отчётом просит
     # громче — и имеет право, отчёта мастер ждёт.
@@ -228,11 +228,11 @@ def on_inbox(m):
 
 # ─── инструменты: канал ──────────────────────────────────────────────────
 @tool(annotations=READ_ONLY, description=(
-    "Кому можно писать: папеты пула по ВСЕМ узлам, мастера своего шарда и "
-    "сессии claude на этой машине. Полнее встроенного ListAgents, который "
-    "видит только этот хост. Для папета показывает достоверное состояние "
-    "(free/busy/HUNG/no model quota/несохранённая работа в клоне), "
-    "LLM-профиль и репозиторий; для мастера — адрес, которым ему отвечают."))
+    "Who you can message: pool puppets on ALL nodes, masters of your shard, "
+    "and claude sessions on this machine. Fuller than the built-in "
+    "ListAgents, which only sees this host. For a puppet it shows the true "
+    "state (free/busy/HUNG/no model quota/unsaved work in the clone), "
+    "LLM profile, and repository; for a master, the address to reply to."))
 def agents(project: str = "") -> str:
     out = _roster(project) if MASTER else _roster_from_bus()
     out += _masters()
@@ -242,21 +242,21 @@ def agents(project: str = "") -> str:
              for d in session.sessions()
              if session.socket_alive(d["messagingSocketPath"])]
     if here:
-        out += ["", "сессии на этой машине:",
-                *table([("СЕССИЯ", "PID", "СТАТУС", "КАТАЛОГ"), *here])]
+        out += ["", "sessions on this machine:",
+                *table([("SESSION", "PID", "STATUS", "DIRECTORY"), *here])]
     return "\n".join(out)
 
 
 def _roster(project):
     """Ростер мастера: Nomad знает про папета то, чего не знает узел, —
     состояние аллокации, профиль LLM, репозиторий."""
-    rows = [("ПАПЕТ", "УЗЕЛ", "АЛЛОК", "СОСТОЯНИЕ", "LLM", "РЕПОЗИТОРИЙ")]
+    rows = [("PUPPET", "NODE", "ALLOC", "STATE", "LLM", "REPOSITORY")]
     for r in puppets.puppet_rows():
         if project and project not in r["origin"]:
             continue
         rows.append((r["name"], r["node"], r["alloc_status"], r["state"],
                      r["llm"], r["origin"]))
-    return ["папета пула:", *table(rows)] if len(rows) > 1 else ["папета пула: нет"]
+    return ["pool puppets:", *table(rows)] if len(rows) > 1 else ["pool puppets: none"]
 
 
 def _roster_from_bus():
@@ -265,15 +265,15 @@ def _roster_from_bus():
     Колонок меньше, и это честно: аллокацию и репозиторий узлу взять неоткуда.
     Для того, ради чего папет смотрит в agents — кому написать и кто свободен, —
     хватает имени, узла и состояния."""
-    rows = [("ПАПЕТ", "УЗЕЛ", "СОСТОЯНИЕ")]
+    rows = [("PUPPET", "NODE", "STATE")]
     try:
         answers = bus.gather("local")
     except bus.BusError as e:
-        return [f"шина недоступна: {e}"]
+        return [f"bus unavailable: {e}"]
     for answer in sorted(answers, key=lambda a: a.get("node") or ""):
         for name, facts in sorted((answer.get("puppets") or {}).items()):
             rows.append((name, answer.get("node") or "?", puppets.puppet_state(facts)))
-    return ["папета пула:", *table(rows)] if len(rows) > 1 else ["папета пула: нет"]
+    return ["pool puppets:", *table(rows)] if len(rows) > 1 else ["pool puppets: none"]
 
 
 def _masters():
@@ -290,32 +290,33 @@ def _masters():
         found = bus.gather("who", timeout=MASTERS_WAIT,
                            subj=bus.inbox(bus.ALL_MASTERS))
     except bus.BusError as e:
-        return ["", f"мастера шарда {bus.SHARD}: шина недоступна ({e})"]
+        return ["", f"masters of shard {bus.SHARD}: bus unavailable ({e})"]
     if not found:
-        return ["", f"мастеров шарда {bus.SHARD} на шине нет"]
-    rows = [("МАСТЕР (адрес для send)", "СЕССИЯ", "КАТАЛОГ")]
+        return ["", f"no masters of shard {bus.SHARD} on the bus"]
+    rows = [("MASTER (address for send)", "SESSION", "DIRECTORY")]
     for d in sorted(found, key=lambda d: str(d.get("master"))):
-        mine = " (это я)" if d.get("master") == MASTER_ID else ""
+        mine = " (this is me)" if d.get("master") == MASTER_ID else ""
         rows.append((str(d.get("master")), (d.get("session") or "-") + mine,
                      d.get("cwd") or "-"))
-    return ["", "мастера шарда:", *table(rows)]
+    return ["", "masters of shard:", *table(rows)]
 
 
 @tool(description=(
-    "Послать сообщение папету пула, мастеру шарда или сессии на этой машине. "
-    "ЕДИНСТВЕННЫЙ рабочий способ достучаться и до папета, и до мастера: "
-    "встроенный SendMessage дотягивается только до сессий этого же хоста и на "
-    "соседнем узле молча никого не найдёт. `to`: имя папета (pu-<проект>-<n>), "
-    "адрес мастера из agents или из конверта полученного сообщения "
-    "(from-name), имя/pid локальной сессии. Возвращает вердикт доставки, а не "
-    "факт отправки. notify_when_idle=true не блокирует: когда адресат "
-    "освободится, уведомление придёт отдельным сообщением."))
+    "Send a message to a pool puppet, a shard master, or a session on this "
+    "machine. The ONLY working way to reach both a puppet and a master: the "
+    "built-in SendMessage only reaches sessions on this same host and on a "
+    "neighboring node will silently find no one. `to`: puppet name "
+    "(pu-<project>-<n>), master address from agents or from the envelope of "
+    "a received message (from-name), name/pid of a local session. Returns a "
+    "delivery verdict, not the fact of sending. notify_when_idle=true does "
+    "not block: when the recipient frees up, a notification arrives as a "
+    "separate message."))
 def send(to: str, message: str, priority: str = "next",
          notify_when_idle: bool = False, wait_seconds: int = 0) -> str:
     if priority not in session.PRIORITIES:
-        return f"priority должен быть одним из {', '.join(session.PRIORITIES)}"
+        return f"priority must be one of {', '.join(session.PRIORITIES)}"
     if not message.strip():
-        return "пустое сообщение отправлять нечего"
+        return "empty message, nothing to send"
 
     # Три адреса, и порядок разбора не произвольный. Папет узнаётся префиксом
     # джоба — это единственное имя, которое строит сам пул. Дальше пробуем свой
@@ -357,10 +358,10 @@ def _send_to_master(name, message, priority):
         r = bus.ask(name, "message", text=message, priority=priority,
                     **{"from": my_name()})
     except bus.BusError as e:
-        return f"{name}: НЕ ДОСТАВЛЕНО — {e}"
+        return f"{name}: NOT DELIVERED — {e}"
     if "error" in r:
-        return f"{name}: НЕ ДОСТАВЛЕНО — {r['error']}"
-    return f"{name}: доставлено (msg_id={r.get('msg_id')})"
+        return f"{name}: NOT DELIVERED — {r['error']}"
+    return f"{name}: delivered (msg_id={r.get('msg_id')})"
 
 
 def _send_to_puppet(name, message, priority, notify_when_idle, wait_seconds):
@@ -381,45 +382,46 @@ def _send_to_puppet(name, message, priority, notify_when_idle, wait_seconds):
                              from_name=my_name(),
                              reply_to=MY_INBOX, timeout=wait + bus.TIMEOUT)
     except bus.BusError as e:
-        return f"{name}: НЕ ДОСТАВЛЕНО — {e}"
+        return f"{name}: NOT DELIVERED — {e}"
     if "error" in result:
-        return f"{name}: НЕ ДОСТАВЛЕНО — {result['error']}"
+        return f"{name}: NOT DELIVERED — {result['error']}"
 
-    verdict = f"{name}: доставлено (msg_id={result['msg_id']})"
+    verdict = f"{name}: delivered (msg_id={result['msg_id']})"
     if wait:
-        verdict += f", простой: {result.get('idle') or 'не дождался за ' + str(wait) + 'с'}"
+        verdict += f", idle: {result.get('idle') or 'did not wait it out in ' + str(wait) + 's'}"
     if notify_when_idle and not wait:
-        verdict += "; уведомлю, когда освободится"
+        verdict += "; will notify when it frees up"
     return verdict
 
 
 def _send_locally(sess, message, priority, wait_seconds):
     sock = sess["messagingSocketPath"]
     if not session.socket_alive(sock):
-        return f"{sess.get('name')}: инбокс не слушает — сессия мертва"
+        return f"{sess.get('name')}: inbox not listening — session is dead"
     r = session.send(sock, message, priority=priority, from_name=my_name(),
                      wait_idle=min(max(wait_seconds, 0), MAX_WAIT))
-    verdict = f"{sess.get('name')}: доставлено (msg_id={r['msg_id']})"
+    verdict = f"{sess.get('name')}: delivered (msg_id={r['msg_id']})"
     if wait_seconds:
-        verdict += f", простой: {(r['idle'] or {}).get('state') or 'не дождался'}"
+        verdict += f", idle: {(r['idle'] or {}).get('state') or 'did not wait it out'}"
     return verdict
 
 
 @tool(annotations=READ_ONLY, description=(
-    "Хвост tmux-буфера папета — единственный способ увидеть то, чего нет в "
-    "состоянии: held-диалог чужого сообщения, промпт логина, жалобу на квоту."))
+    "Tail of the puppet's tmux buffer — the only way to see what's not in "
+    "the state: a held dialog for someone else's message, a login prompt, "
+    "a quota complaint."))
 def tail(name: str, lines: int = 40, grep: str = "") -> str:
     buf = puppets.pane_lines(puppet_node(name), name)
     if grep:
         buf = [l for l in buf if grep.lower() in l.lower()]
-    return "\n".join(buf[-max(1, lines):]) or "(пусто)"
+    return "\n".join(buf[-max(1, lines):]) or "(empty)"
 
 
 # ─── инструменты: управление ─────────────────────────────────────────────
 @master_tool(annotations=READ_ONLY, description=(
-    "Ёмкость пула: узлы, свободная память и сколько ещё папетов туда влезет."))
+    "Pool capacity: nodes, free memory, and how many more puppets fit."))
 def pool() -> str:
-    rows = [("УЗЕЛ", "СТАТУС", "СВОБОДНО", "СЛОТОВ")]
+    rows = [("NODE", "STATUS", "FREE", "SLOTS")]
     for n in puppets.pool():
         if n["status"] != "ready":
             rows.append((n["name"], n["status"], "-", "-"))
@@ -427,34 +429,35 @@ def pool() -> str:
             rows.append((n["name"], "ready", n["error"], "-"))
         else:
             rows.append((n["name"], "ready",
-                         f"{n['free_mb'] / 1024:.0f}/{n['total_mb'] / 1024:.0f} ГБ",
+                         f"{n['free_mb'] / 1024:.0f}/{n['total_mb'] / 1024:.0f} GB",
                          str(n["slots"])))
     return "\n".join(table(rows))
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(
-    "Управление папетами: add (создать), remove (удалить), restart "
-    "(перезапустить залипшее), update (сменить репозиторий или LLM). "
-    "Клон при remove остаётся на узле и переиспользуется.\n\n"
-    "update со сменой ОДНОГО LLM продолжает работу: папет поднимется на той "
-    "же истории каталога, то есть тикет переезжает на другую модель посреди "
-    "дела. Без origin репозиторий сохраняется, без llm — профиль. fresh=true "
-    "поднимает с чистой сессией; при смене репозитория чисто всегда. restart "
-    "лечит и потому ВСЕГДА чистый: вернуть залипшего в тот же контекст значит "
-    "воспроизвести залипание."))
+    "Manage puppets: add (create), remove (delete), restart (restart a "
+    "stuck one), update (change repository or LLM). The clone survives "
+    "remove on the node and gets reused.\n\n"
+    "update that only changes the LLM continues the work: the puppet comes "
+    "up on the same clone history, i.e. the ticket moves to another model "
+    "mid-task. Without origin the repository is kept, without llm — the "
+    "profile. fresh=true comes up with a clean session; on a repository "
+    "change it's always clean. restart is a cure, so it's ALWAYS clean: "
+    "putting a stuck puppet back into the same context means reproducing "
+    "the stuck state."))
 def puppet(action: str, name: str = "", origin: str = "", llm: str = "",
            fresh: bool = False) -> str:
     if action == "add":
         return _puppet_add(origin, llm)
     if not name:
-        return f"{action}: нужно имя папета"
+        return f"{action}: puppet name required"
     if action == "remove":
         nomad.get_job(name)
         nomad.deregister(name)
-        return f"удалён {name} (клон остался в {puppets.clone_dir(name)})"
+        return f"removed {name} (clone kept in {puppets.clone_dir(name)})"
     if action == "restart":
         nomad.alloc_restart(puppet_alloc(name)["ID"])
-        return f"{name}: перезапускается (чистая сессия)"
+        return f"{name}: restarting (clean session)"
     # retarget — прежнее имя. Оно принимается молча, потому что список
     # инструментов приезжает модели ОДИН РАЗ на старте сессии: мастер, поднятый
     # до переименования, до самого перезапуска будет звать по-старому, и отказ
@@ -466,14 +469,14 @@ def puppet(action: str, name: str = "", origin: str = "", llm: str = "",
 
 def _puppet_add(origin, llm):
     if not origin:
-        return "add: нужен origin репозитория"
+        return "add: repository origin required"
     llm = llm or config.get("MOP_DEFAULT_LLM")
     if llm not in llm_profiles():
-        return f"нет LLM-профиля {llm}; есть: {', '.join(llm_profiles())}"
+        return f"no LLM profile {llm}; available: {', '.join(llm_profiles())}"
     keys.push_llm_keys(llm)
     name = puppets.next_name(os.path.basename(origin).removesuffix(".git"))
     nomad.register(puppets.job_spec(name, origin, llm))
-    return f"{name}: {origin} [{llm}] — размещается, состояние смотри в agents"
+    return f"{name}: {origin} [{llm}] — placing, check state in agents"
 
 
 def _puppet_update(name, origin, llm, fresh=False):
@@ -484,33 +487,33 @@ def _puppet_update(name, origin, llm, fresh=False):
     # ронять папет обратно на claude
     llm = llm or meta.get("llm", config.get("MOP_DEFAULT_LLM"))
     if llm not in llm_profiles():
-        return f"нет LLM-профиля {llm}; есть: {', '.join(llm_profiles())}"
+        return f"no LLM profile {llm}; available: {', '.join(llm_profiles())}"
     keys.push_llm_keys(llm)
     # Историю каталога переносим только внутри того же репозитория: клон при
     # смене origin пересоздаётся, и прежний разговор был про другой проект.
     cont = not fresh and origin == old
     nomad.register(puppets.job_spec(name, origin, llm, cont=cont))
-    how = "история каталога поднимется" if cont else "чистая сессия"
-    return f"{name} -> {origin} [{llm}], перезапускается: {how}"
+    how = "clone history will resume" if cont else "clean session"
+    return f"{name} -> {origin} [{llm}], restarting: {how}"
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(
-    "Диагностика пула: залипания, протухший логин, restart-backoff, "
-    "исчерпанная квота модели. С fix=true лечит то, что лечится."))
+    "Pool diagnostics: stuck puppets, a stale login, restart backoff, "
+    "exhausted model quota. With fix=true, treats what can be treated."))
 def doctor(fix: bool = False) -> str:
     issues = puppets.diagnose()
     if not issues:
-        return "пул здоров: залипаний нет"
+        return "pool is healthy: no stuck puppets"
     rows = [(i["name"], i["alloc"]["NodeName"] if i["alloc"] else "-",
-             i["diagnosis"], i["action"] or "лечения нет") for i in issues]
-    out = table([("СИДЕНЬЕ", "УЗЕЛ", "ДИАГНОЗ", "ЛЕЧЕНИЕ"), *rows])
+             i["diagnosis"], i["action"] or "no treatment") for i in issues]
+    out = table([("PUPPET", "NODE", "DIAGNOSIS", "TREATMENT"), *rows])
     if not fix:
         return "\n".join(out)
 
     if any(i["action"] == "login+restart" for i in issues):
         if not keys.credentials_fresh():
-            return "\n".join(out + ["", "локальные креды протухли — залогинься в "
-                                    "claude на управляющей машине, потом doctor(fix=true)"])
+            return "\n".join(out + ["", "local credentials are stale — log into "
+                                    "claude on the control machine, then doctor(fix=true)"])
         keys.push_login()
     done = [f"  {i['name']}: {_treat(i)}" for i in issues if i["action"]]
     return "\n".join(out + ["", *done])
@@ -521,25 +524,25 @@ def _treat(issue):
     try:
         if action == "stop":
             nomad.alloc_stop(alloc["ID"])
-            return "alloc stop — Nomad пересоздаст без backoff"
+            return "alloc stop — Nomad will recreate without backoff"
         if action == "model":
             puppets.switch_model(alloc["NodeName"], name, puppets.FALLBACK_MODEL)
             return f"/model {puppets.FALLBACK_MODEL}"
         nomad.alloc_restart(alloc["ID"])
         return "restart"
     except Exception as e:
-        return f"{action} не вышел: {str(e)[:80]}"
+        return f"{action} failed: {str(e)[:80]}"
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(
-    "Слэш-команда в TUI папета. Нужна отдельно, потому что каналом слэш-"
-    "команды не проходят: сообщение кладётся в очередь с skipSlashCommands. "
-    "Escape СНИМАЕТ залипший диалог, не отвечая на него: залипший папет "
-    "невидим для ростера, а сообщения копятся в очереди непрочитанными. "
-    f"Разрешены: {', '.join(SLASH_ALLOWED)}."))
+    "Slash command in a puppet's TUI. Needed separately because slash "
+    "commands don't pass through the channel: the message is queued with "
+    "skipSlashCommands. Escape DISMISSES a stuck dialog without answering "
+    "it: a stuck puppet is invisible to the roster, and messages pile up "
+    f"unread in the queue. Allowed: {', '.join(SLASH_ALLOWED)}."))
 def slash(name: str, command: str) -> str:
     if not command.split()[0:1] or command.split()[0] not in SLASH_ALLOWED:
-        return f"разрешены только: {', '.join(SLASH_ALLOWED)}"
+        return f"only allowed: {', '.join(SLASH_ALLOWED)}"
     node = puppet_node(name)
     if command.startswith("/model "):
         puppets.switch_model(node, name, command.split(None, 1)[1])
@@ -548,11 +551,11 @@ def slash(name: str, command: str) -> str:
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(
-    "Раздать на узлы пула креды claude.ai и ключи LLM-провайдеров. Лечит "
-    "папета, упёршиеся в протухший логин."))
+    "Push claude.ai credentials and LLM provider keys out to the pool's "
+    "nodes. Fixes puppets stuck on a stale login."))
 def login() -> str:
     results, what, note = keys.push_login()
-    out = [("везу: " + " + ".join(what))] + ([note] if note else [])
+    out = [("pushing: " + " + ".join(what))] + ([note] if note else [])
     return "\n".join(out + table([(n, results[n]) for n in sorted(results)]))
 
 
@@ -590,14 +593,14 @@ def main():
         try:
             where = bus.config()["url"]
         except bus.BusError as e:
-            where = f"НЕТ ({e})"
-        who = ("узел" if not MASTER
-               else "оператор" if bus.SHARD == bus.ADMIN
-               else f"мастер шарда {bus.SHARD}")
-        print(f"mop mcp: профиль {who}, "
-              f"{len(app._tool_manager.list_tools())} инструментов, шина {where}, "
-              f"адрес {my_name()}, инбокс {MY_INBOX if MASTER else '(не мастер)'}, "
-              f"сессия: {master_socket() or 'не найдена'}")
+            where = f"NONE ({e})"
+        who = ("node" if not MASTER
+               else "operator" if bus.SHARD == bus.ADMIN
+               else f"master of shard {bus.SHARD}")
+        print(f"mop mcp: profile {who}, "
+              f"{len(app._tool_manager.list_tools())} tools, bus {where}, "
+              f"address {my_name()}, inbox {MY_INBOX if MASTER else '(not a master)'}, "
+              f"session: {master_socket() or 'not found'}")
         return 0
     watch_inbox()
     app.run("stdio")

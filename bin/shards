@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""шарды пула: mop shards [origin|шард ...]
+"""pool shards: mop shards [origin|shard ...]
 
-Шард — это проект: один репозиторий, один срез пула, один мастер. Список
-складывается из трёх источников и всегда объединением, никогда заменой:
+A shard is a project: one repository, one slice of the pool, one master. The
+list is built from three sources, always by union, never by replacement:
 
-  * ростер Nomad — у кого есть живой джоб;
-  * память в ~/.config/mop/shards — у кого он БЫЛ;
-  * аргументы — новый проект, для которого папета ещё нет.
+  * the Nomad roster — who has a live job;
+  * memory in ~/.config/mop/shards — who HAD one;
+  * arguments — a new project that doesn't have a puppet yet.
 
-Память нужна ровно из-за второго пункта: удалив последнего папета проекта, без
-неё мы на следующем deploy молча выкинули бы его пользователя из конфига NATS,
-и работающий мастер перестал бы подключаться.
+Memory exists exactly because of the second point: without it, deleting a
+project's last puppet would silently drop its user from the NATS config on
+the next deploy, and a running master would stop connecting.
 """
 import os
 
@@ -39,8 +39,8 @@ def collect(extra=()):
     except Exception as e:
         # Ростер недоступен — работаем по памяти, но говорим об этом: молча
         # сузить список значит выписать шард из конфига NATS.
-        print(f"ростер Nomad недоступен ({nomad.describe_error(e)}), "
-              f"беру только запомненные", flush=True)
+        print(f"Nomad roster unavailable ({nomad.describe_error(e)}), "
+              f"using only remembered shards", flush=True)
     return sorted(known)
 
 

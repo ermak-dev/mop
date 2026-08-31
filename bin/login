@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""раздать креды claude.ai и ключи LLM на узлы пула: mop login
+"""push claude.ai credentials and LLM keys to pool nodes: mop login
 
-Едет глаголом `write` агенту узла, с откатом на sysbatch-джоб для узла, чей
-агент молчит. Токена Nomad здесь нет и не будет: узлы лишились его вместе с
-переездом на шину.
+Travels as the `write` verb to the node agent, falling back to a sysbatch
+job for a node whose agent is silent. There's no Nomad token here and never
+will be: nodes lost it when the move to the bus happened.
 """
 import lib
 from mop import keys
@@ -14,8 +14,8 @@ def main(argv):
         lib.usage(__doc__)
     results, what, note = keys.push_login()
     if note:
-        print(f"ключи LLM: {note}")
-    print("раздаю " + " + ".join(what) + " на узлы пула")
+        print(f"LLM keys: {note}")
+    print("pushing " + " + ".join(what) + " to pool nodes")
     for node in sorted(results):
         print(f"  {node}: {results[node]}")
 

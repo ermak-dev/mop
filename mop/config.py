@@ -44,8 +44,8 @@ ENV_FILE = os.path.join(PROJECT, ".env")
 # Каждая настройка, которую можно вычислить, но которую заставляют вписать,
 # — это ещё одно место, где установка расходится сама с собой.
 REQUIRED = {
-    "MOP_SERVER_LAN": "адрес сервера в локальной сети: туда ходят и узлы (RPC "
-                      "Nomad, шина), и мастер (API Nomad)",
+    "MOP_SERVER_LAN": "server address on the LAN: nodes reach it (Nomad RPC, "
+                      "bus), and so does the master (Nomad API)",
 }
 
 # Дефолт верен для любой установки; переопределяют редко.
@@ -127,9 +127,9 @@ def require():
     локалку — худшее, что может сделать инструмент на новой машине."""
     gaps = [f"  {k} — {why}" for k, why in REQUIRED.items() if not get(k, "")]
     if gaps:
-        raise Missing("не заполнены обязательные настройки в " + ENV_FILE
+        raise Missing("required settings not filled in " + ENV_FILE
                       + ":\n" + "\n".join(gaps)
-                      + "\n\nобразец: cp .env.example .env")
+                      + "\n\ntemplate: cp .env.example .env")
 
 _env = None
 
@@ -174,13 +174,13 @@ def effective():
     out = {}
     for name, default in SETTINGS.items():
         if os.environ.get(name):
-            out[name] = (os.environ[name], "окружение")
+            out[name] = (os.environ[name], "env")
         elif _load().get(name):
             out[name] = (_load()[name], ".env")
         elif name in DERIVED:
-            out[name] = (DERIVED[name](), "вычислено")
+            out[name] = (DERIVED[name](), "derived")
         else:
-            out[name] = (default, "дефолт")
+            out[name] = (default, "default")
     return out
 
 

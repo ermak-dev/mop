@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""папеты пула: кто где, busy или free, чем поднят
+"""pool puppets: who's where, busy or free, what LLM it runs on
 
-«free» означает, что в клоне нет несохранённой работы, а не что сессия
-молчит: на этом стоит решение о диспатче.
+"free" means the clone has no unsaved work, not that the session is silent:
+the dispatch decision rests on this.
 """
 import lib
 from mop import puppets
@@ -15,7 +15,7 @@ def place(row):
     kb = row.get("disk_kb")
     if kb is None:
         return "-"
-    return f"{kb / 2**20:.0f} ГБ" if kb >= 2**20 else f"{kb / 2**10:.0f} МБ"
+    return f"{kb / 2**20:.0f} GB" if kb >= 2**20 else f"{kb / 2**10:.0f} MB"
 
 
 def free(row):
@@ -27,20 +27,20 @@ def free(row):
 def hint(rows, origin):
     """Одна подсказка под таблицей: чего именно не хватает прямо сейчас."""
     if not rows:
-        return (f"Создайте первый папет для {lib.project_of(origin)}: mop add {origin}"
-                if origin else "Создайте папета: mop add <git-origin>")
+        return (f"Create the first puppet for {lib.project_of(origin)}: mop add {origin}"
+                if origin else "Create a puppet: mop add <git-origin>")
     if not any(free(r) for r in rows):
-        return (f"\nНет свободных папетов для {lib.project_of(origin)}. "
-                f"Создайте: mop add {origin}" if origin
-                else "\nНет свободных папетов. Создайте: mop add <git-origin>")
+        return (f"\nNo free puppets for {lib.project_of(origin)}. "
+                f"Create one: mop add {origin}" if origin
+                else "\nNo free puppets. Create one: mop add <git-origin>")
     if not origin:
         return None
     project = lib.project_of(origin)
     mine = [r for r in rows if project in r["origin"]]
     if not mine:
-        return f"\nНет папетов для {project}. Создайте: mop add {origin}"
+        return f"\nNo puppets for {project}. Create one: mop add {origin}"
     if not any(free(r) for r in mine):
-        return f"\nВсе папеты для {project} заняты. Создайте ещё: mop add {origin}"
+        return f"\nAll puppets for {project} are busy. Create another: mop add {origin}"
     return None
 
 
@@ -52,7 +52,7 @@ def main(argv):
         print("\n".join(table([(r["name"], r["node"], r["alloc_status"],
                                 r["state"], place(r), r["llm"], r["origin"]) for r in rows])))
     else:
-        print("папетов нет")
+        print("no puppets")
     origin = lib.cwd_origin(required=False)
     # В мастер-шелле подсказка — про ШАРД, а не про каталог, в котором стоишь.
     # Иначе `mop list` из репозитория самого mop в мастер-шелле проекта

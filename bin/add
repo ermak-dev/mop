@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""создать папета: mop add [--llm ПРОФИЛЬ] [git-origin]
+"""create a puppet: mop add [--llm PROFILE] [git-origin]
 
-Без origin берётся origin текущей рабочей копии. Имя выбирается само:
-<проект>-<номер>. Размещение решает Nomad — папет бронирует 8 ГБ из пула.
+Without origin, the origin of the current working copy is used. The name is
+picked automatically: <project>-<number>. Nomad decides placement — a puppet
+reserves 8 GB from the pool.
 """
 import os
 import time
@@ -22,7 +23,7 @@ def main(argv):
     # папет поднимется, но к шине не подключится — прочитается как «АГЕНТ
     # МОЛЧИТ» на пустом месте. Лучше отказать здесь, чем разбираться там.
     if not os.path.exists(lib.shard_creds(shard)):
-        lib.usage(f"шарда {shard} ещё нет на шине.\nЗаведи его: mop deploy {origin}")
+        lib.usage(f"shard {shard} isn't on the bus yet.\nSet it up: mop deploy {origin}")
     name = puppets.next_name(shard)
     lib.push_llm_keys(profile)
     nomad.register(puppets.job_spec(name, origin, profile))
@@ -39,11 +40,11 @@ def main(argv):
                 print("  → running")
                 return
             if a["ClientStatus"] == "failed":
-                print("  → FAILED, смотри: mop list / nomad UI")
+                print("  → FAILED, check: mop list / nomad UI")
                 return
         time.sleep(1)
-    print(f"  → пока {'pending — свободных слотов нет?' if node is None else 'не running'}, "
-          f"смотри mop list")
+    print(f"  → still {'pending — no free slots?' if node is None else 'not running'}, "
+          f"check mop list")
 
 
 lib.run(lib.cluster(main))

@@ -103,7 +103,7 @@ def resolve(target):
     if os.path.isdir(target):
         d = live_session_for_cwd(target)
         if d is None:
-            raise LookupError(f"в {target} нет живой сессии claude")
+            raise LookupError(f"no live claude session in {target}")
         return d
     return find(target)
 
@@ -121,12 +121,12 @@ def find(target):
         hits = [d for d in sessions()
                 if os.path.realpath(d.get("cwd") or "") == os.path.realpath(target)]
     if not hits:
-        raise LookupError(f"нет сессии: {target}")
+        raise LookupError(f"session not found: {target}")
     if len(hits) > 1:
         # Имена выводятся из каталога и не уникальны; молча взять первую —
         # значит однажды написать не тому.
         names = ", ".join(f"{d.get('name')}[{d.get('pid')}]" for d in hits)
-        raise Ambiguous(f"под '{target}' подходит несколько сессий: {names} — уточни pid")
+        raise Ambiguous(f"'{target}' matches several sessions: {names} — specify pid")
     return hits[0]
 
 
@@ -181,15 +181,15 @@ def probe(cwd):
 # его собственного инбокса живёт ровно столько, сколько ждёт доставка.
 def reply_hint(from_name=None):
     """Чем закончить тело сообщения: куда адресату отвечать."""
-    how = (f"Ответить отправителю: mcp__mop__send(to=\"{from_name}\", …) — это "
-           f"его адрес на шине, а не имя сессии."
+    how = (f"Reply to the sender: mcp__mop__send(to=\"{from_name}\", …) — that "
+           f"is its bus address, not a session name."
            if from_name and from_name != "mop" else
-           "Обратного адреса отправитель не назвал.")
-    return ("[канал mop] Доставлено сокет-каналом пула. " + how +
-            " Кому ещё можно писать — mcp__mop__agents: папета пула и мастера "
-            "шарда. Встроенный SendMessage для этого не годится: он "
-            "дотягивается только до сессий этого же хоста и про остальной пул "
-            "не знает.")
+           "The sender did not give a reply address.")
+    return ("[mop channel] Delivered over the pool's socket channel. " + how +
+            " Who else you can write to — mcp__mop__agents: the pool's puppets and "
+            "the shard's masters. The built-in SendMessage won't work for this: it "
+            "only reaches sessions on this same host and knows nothing about the "
+            "rest of the pool.")
 
 
 def envelope(body, from_addr=None, from_name=None, mode="bypass"):
@@ -240,9 +240,9 @@ def write_frames(sock_path, frames, token=None):
     try:
         s.connect(sock_path)
     except FileNotFoundError:
-        raise ConnectionError(f"инбокс не найден: {sock_path} — сессия умерла или переехала")
+        raise ConnectionError(f"inbox not found: {sock_path} — session died or moved")
     except ConnectionRefusedError:
-        raise ConnectionError(f"инбокс мёртв: {sock_path} — процесс не слушает")
+        raise ConnectionError(f"inbox is dead: {sock_path} — process is not listening")
     try:
         s.sendall(line.encode())
     finally:
@@ -369,8 +369,8 @@ def main(argv):
             out = {"error": str(e)}
         print(json.dumps(out, ensure_ascii=False))
         return 0 if "error" not in out else 1
-    print("usage: session.py probe <cwd> | send <цель> <текст> [--priority P] "
-          "[--mode M] [--from-name N] [--wait СЕК]", file=sys.stderr)
+    print("usage: session.py probe <cwd> | send <target> <text> [--priority P] "
+          "[--mode M] [--from-name N] [--wait SEC]", file=sys.stderr)
     return 2
 
 

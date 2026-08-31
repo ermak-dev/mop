@@ -62,7 +62,7 @@ def cwd_origin(required=True):
             capture_output=True, text=True, check=True).stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         if required:
-            sys.exit("не рабочая копия git и origin не указан: mop add <git-origin>")
+            sys.exit("not a git working copy and no origin given: mop add <git-origin>")
         return None
 
 
@@ -94,8 +94,8 @@ def guard(name):
     meta = require_job(name).get("Meta") or {}
     owner = puppets.shard_of(meta.get("origin", ""))
     if owner != shard:
-        sys.exit(f"{name} — шард {owner}, а этот мастер ведёт {shard}. "
-                 f"Выйди из мастер-шелла или запусти mop master для {owner}.")
+        sys.exit(f"{name} — shard {owner}, but this master runs {shard}. "
+                 f"Leave the master shell or run mop master for {owner}.")
 
 
 def parse_llm(args):
@@ -118,13 +118,13 @@ def require_job(name):
     try:
         return nomad.get_job(name)
     except nomad.NotFound:
-        sys.exit(f"нет такого папета: {name}")
+        sys.exit(f"no such puppet: {name}")
 
 
 def running_alloc(name):
     a = nomad.latest_alloc(name)
     if not a or a["ClientStatus"] != "running":
-        sys.exit(f"{name} не running")
+        sys.exit(f"{name} not running")
     return a
 
 
@@ -139,10 +139,10 @@ def push_llm_keys(llm):
     results = keys.push_llm_keys(llm)
     if results is None:
         return
-    print(f"раздаю секреты на узлы пула ({puppets.SECRETS_FILE})...")
+    print(f"pushing secrets to pool nodes ({puppets.SECRETS_FILE})...")
     bad = [f"{n}: {r}" for n, r in sorted(results.items()) if r != "OK"]
     if bad:
-        print("  не всем узлам: " + "; ".join(bad))
+        print("  not all nodes: " + "; ".join(bad))
 
 
 def pool_lines():
@@ -154,8 +154,8 @@ def pool_lines():
             elif "error" in n:
                 out.append(f"  {n['name']}: {n['error']}")
             else:
-                out.append(f"  {n['name']}: свободно {n['free_mb'] / 1024:.0f}/"
-                           f"{n['total_mb'] / 1024:.0f} ГБ ({n['slots']} слотов)")
+                out.append(f"  {n['name']}: free {n['free_mb'] / 1024:.0f}/"
+                           f"{n['total_mb'] / 1024:.0f} GB ({n['slots']} slots)")
         return out
     except Exception as e:
         return [f"  {nomad.describe_error(e)}"]

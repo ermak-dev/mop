@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""перезапустить зависшего папета: mop restart <имя>
+"""restart a stuck puppet: mop restart <name>
 
-Клон и ветка переживают рестарт — врапер поднимается на том же каталоге.
+The clone and branch survive a restart — the wrapper comes up on the same
+directory.
 """
 import lib
 from mop import nomad
@@ -13,13 +14,13 @@ def main(argv):
     name = argv[0]
     lib.guard(name)
     a = lib.running_alloc(name)
-    print(f"перезапускаю {name} на {a['NodeName']}...")
+    print(f"restarting {name} on {a['NodeName']}...")
     try:
         nomad.alloc_restart(a["ID"])
-        print("папет перезапускается")
+        print("puppet is restarting")
     except Exception as e:
-        print(f"ошибка перезапуска: {e}")
-        print(f"Альтернатива: mop delete {name} && mop add <origin>")
+        print(f"restart failed: {e}")
+        print(f"Alternative: mop delete {name} && mop add <origin>")
 
 
 lib.run(lib.cluster(main))

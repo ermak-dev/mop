@@ -1,5 +1,5 @@
 #!/bin/bash -e
-# развернуть: mop deploy [origin|шард ...]
+# deploy: mop deploy [origin|shard ...]
 #
 # Полный прогон установки, всегда целиком и одним плейбуком -- site.yml
 # склеивает импортами все слои (номad, окружение узлов, шину), поэтому
@@ -20,7 +20,7 @@ link() {
     if [[ "$(readlink -f "$HOME/etc/$name" 2>/dev/null)" != "$want" ]]; then
         mkdir -p "$HOME/etc"
         ln -sfn "$want" "$HOME/etc/$name"
-        ok "  симлинк ~/etc/$name -> $want"
+        ok "  symlink ~/etc/$name -> $want"
     fi
 }
 
@@ -50,7 +50,7 @@ shards_json() {
 }
 
 if [[ ! -f "$INVENTORY" ]]; then
-    fail "нет инвентаря $INVENTORY -- заведите его из примера: cp inventory.ini.example inventory.ini"
+    fail "no inventory $INVENTORY -- create it from the example: cp inventory.ini.example inventory.ini"
     exit 1
 fi
 
@@ -59,7 +59,7 @@ fi
 # разбирались бы с этим уже по симптомам.
 case "$1" in
     nomad|pool|homelab|claude|nats|all)
-        fail "целей запуска больше нет: mop deploy [origin|шард ...]"
+        fail "run targets are gone: mop deploy [origin|shard ...]"
         exit 1
         ;;
 esac
@@ -73,7 +73,7 @@ link homelab examples/homelab
 
 play site.yml --extra-vars "$(shards_json "$@")"
 
-section "проверка"
+section "check"
 # Прогон без неё не отличает «плейбук зелёный» от «пул отвечает»: агент,
 # упавший в бесконечный реконнект, systemd вполне устраивает.
 "$BIN_DIR/mop" list

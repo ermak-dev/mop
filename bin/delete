@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""удалить папета: mop delete <имя>
+"""delete a puppet: mop delete <name>
 
-Клон на узле остаётся лежать и переиспользуется, если папета поднять снова.
+The clone stays on the node and gets reused if the puppet is brought up
+again.
 """
 import lib
 from mop import nomad, puppets
@@ -13,7 +14,7 @@ def main(argv):
     name = argv[0]
     lib.guard(name)
     nomad.deregister(name)
-    print(f"удалён {name} (клон остался в {puppets.clone_dir(name)} на узле)")
+    print(f"deleted {name} (clone left at {puppets.clone_dir(name)} on the node)")
 
 
 lib.run(lib.cluster(main))

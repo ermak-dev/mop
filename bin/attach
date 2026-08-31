@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""подключиться к tmux-сессии папета: mop attach <имя>
+"""attach to a puppet's tmux session: mop attach <name>
 
-Единственная подкоманда, которая ходит по ssh, а не через шину: живой
-терминал глаголом не отдать.
+The only subcommand that goes over ssh instead of the bus: a live terminal
+isn't something a bus verb can hand over.
 """
 import os
 

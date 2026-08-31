@@ -1,9 +1,9 @@
 #!/bin/bash
-# Список подкоманд. Он же — ответ на `mop` без аргументов.
+# List of subcommands. It's also the answer to `mop` with no arguments.
 skip=("common" "help" "mop" "lib.py")
-echo "mop — пул claude-папетов поверх Nomad, шина сообщений поверх NATS"
+echo "mop — pool of claude puppets on top of Nomad, message bus on top of NATS"
 echo
-echo "  mop <подкоманда> [аргументы]"
+echo "  mop <subcommand> [arguments]"
 echo
 for f in "$BIN_DIR"/*; do
     [[ -f "$f" ]] || continue          # __pycache__ и прочий сор — не подкоманды
@@ -14,4 +14,4 @@ for f in "$BIN_DIR"/*; do
     printf "    %-9s %s\n" "$name" "$desc"
 done
 echo
-echo "  mop help          этот список"
+echo "  mop help          this list"

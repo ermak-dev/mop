@@ -1,42 +1,48 @@
 #!/usr/bin/env python3
-"""запустить claude в режиме мастера шарда: mop master [--llm ПРОФИЛЬ] [git-origin] [опции claude]
+"""launch claude as a shard's master: mop master [--llm PROFILE] [git-origin] [claude options]
 
-Без аргумента берётся origin текущей рабочей копии. Один проект — один шард:
-мастер видит и достаёт только своих папетов, чужие для него не существуют.
+Without an argument, the origin of the current working copy is used. One
+project — one shard: a master sees and reaches only its own puppets; anyone
+else's don't exist for it.
 
-Свои у команды только --llm и origin; ВСЁ ОСТАЛЬНОЕ уезжает в claude как есть
-(`mop master --continue` продолжает прошлую сессию мастера). Зеркалить чужие
-флаги у себя команда не станет: их у claude десятки, и список разошёлся бы с
-первой же его версией. Флаг со ЗНАЧЕНИЕМ передавайте после `--`
-(`mop master -- --model opus`): иначе значение неотличимо от origin.
+Only --llm and origin belong to this command; EVERYTHING ELSE goes to claude
+as-is (`mop master --continue` resumes the master's last session). The
+command won't mirror claude's own flags: there are dozens of them, and the
+list would drift the moment claude ships a new version. Pass a flag that
+takes a VALUE after `--` (`mop master -- --model opus`): otherwise the value
+is indistinguishable from origin.
 
-Мастеров можно держать сколько угодно, в том числе несколько на один проект:
-инбокс адресуется мастером, а не шардом, и вести не путаются.
+You can run as many masters as you like, including several for one project:
+an inbox is addressed by master, not by shard, so they never get confused.
 
-Всё, что делает команда, — считает шард, находит его креды и уходит в claude.
-Дальше срез наследуется: mop mcp, запущенный этой сессией как потомок, увидит
-MOP_SHARD и MOP_BUS_CONFIG и подпишется на инбокс своего шарда.
+All this command does is work out the shard, find its credentials, and exec
+into claude. From there the slice is inherited: mop mcp, spawned by this
+session as a child, sees MOP_SHARD and MOP_BUS_CONFIG and subscribes to its
+shard's inbox.
 
-Сервер пула приезжает АРГУМЕНТОМ, а не из конфига каталога. Мастер стоит в
-рабочей копии СВОЕГО проекта, а `.mcp.json` с сервером лежит в репозитории
-mop — то есть где угодно, только не там, где мастера запускают. Первый же
-запуск в чужом каталоге поднял сессию вообще без mcp__mop__*, и она не смогла
-ни увидеть ростер, ни написать папету. Прописать сервер глобально можно, но
-~/.claude.json — живое состояние, которое переписывают работающие сессии;
-аргумент ничего не трогает и действует ровно на эту сессию.
+The pool server arrives as an ARGUMENT, not from a directory config. The
+master sits in a working copy of ITS OWN project, while the `.mcp.json` that
+names the server lives in the mop repository — that is, anywhere except
+where masters actually run. The very first run in a foreign directory came up
+with no mcp__mop__* at all, and the session could neither see the roster nor
+write to a puppet. Registering the server globally is possible, but
+~/.claude.json is live state that running sessions rewrite; the argument
+touches nothing and applies to this session alone.
 
-Мастер поднимается в том же классе прав, что и пул, которым он командует.
-Папеты живут под --dangerously-skip-permissions, и канал сообщений сверяет
-классы: отчёт папета, приехавший в мастера обычного режима, кладётся в
-held-очередь и ждёт человека — то есть петля перестаёт быть автоматической
-ровно на главном своём сигнале. Цена названа: мастер держит токен Nomad,
-пушит и ходит в трекер, и спрашивать он теперь не будет ни о чём.
+The master comes up in the same permission class as the pool it commands.
+Puppets live under --dangerously-skip-permissions, and the message channel
+checks classes: a puppet's report that reaches a master in ordinary mode gets
+parked in the held queue to wait for a human — meaning the loop stops being
+automatic on exactly its main signal. The price is named up front: the
+master holds the Nomad token, pushes, and talks to the tracker, and it will
+no longer ask about any of that.
 
---llm поднимает сессию мастера на профиле из mop/llm/ — том же наборе, каким
-живут папеты. Без флага действует MOP_DEFAULT_LLM установки. Статический env
-профиля уходит в сессию целиком, а ключ читается из .env мастерской машины:
-узельного secrets.env здесь нет, и местный .env для того и является
-источником правды по ключам.
+--llm brings the master's session up on a profile from mop/llm/ — the same
+set puppets run on. Without the flag, the installation's MOP_DEFAULT_LLM
+applies. The profile's static env goes into the session whole, while the key
+itself is read from the master machine's .env: there's no node secrets.env
+here, and the local .env is exactly what serves as the source of truth for
+keys.
 """
 import json
 import os
@@ -81,8 +87,8 @@ def main(argv):
     # иначе дальше будет «нет кредов шарда opus», и искать опечатку придётся
     # в совсем другом месте.
     if not any(c in origin for c in ":/"):
-        lib.usage(f"{origin!r} не похож на git-origin.\n"
-                  f"Опции claude со значением передавайте после --: "
+        lib.usage(f"{origin!r} doesn't look like a git-origin.\n"
+                  f"Pass claude options that take a value after --: "
                   f"mop master -- {' '.join(passthru + [origin])}")
     shard = puppets.shard_of(origin)
     creds = lib.shard_creds(shard)
@@ -90,8 +96,8 @@ def main(argv):
         # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS,
         # и папет к шине не подключится. Говорим прямо, а не запускаем ansible
         # за спиной оператора: на узел ведёт одна дорога, и это deploy.
-        lib.usage(f"нет кредов шарда {shard} ({creds}).\n"
-                  f"Заведи шард: mop deploy {origin}")
+        lib.usage(f"no credentials for shard {shard} ({creds}).\n"
+                  f"Set up the shard: mop deploy {origin}")
 
     # Профиль тот же, что у папетов, но источник ключа другой: не узловой
     # secrets.env (мастеру узел не выдавал ничего), а местный .env. Отказа — а
@@ -102,10 +108,10 @@ def main(argv):
     if prof["key"]:
         key = config.get(prof["key"])
         if not key:
-            lib.usage(f"профиль {profile}: нет {prof['key']} в "
-                      f"{puppets.LOCAL_KEYS_FILE} — впиши и повтори")
+            lib.usage(f"profile {profile}: no {prof['key']} in "
+                      f"{puppets.LOCAL_KEYS_FILE} — add it and retry")
         env[prof["auth_var"]] = key
-    print(f"мастер шарда {shard} ({origin}) [{profile}]"
+    print(f"master of shard {shard} ({origin}) [{profile}]"
           + (f" + claude {' '.join(passthru)}" if passthru else ""))
     os.execvpe("claude", ["claude", "--dangerously-skip-permissions",
                           "--mcp-config", mcp_config()] + passthru, env)

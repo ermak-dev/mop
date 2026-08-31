@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""хвост tmux-буфера папета: mop tail <имя> [-n N] [-f]
+"""tail of a puppet's tmux buffer: mop tail <name> [-n N] [-f]
 
-  -n N   сколько строк (по умолчанию 10)
-  -f     следить дальше, пока не Ctrl-C
+  -n N   how many lines (default 10)
+  -f     keep following until Ctrl-C
 """
 import time
 

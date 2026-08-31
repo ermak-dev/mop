@@ -1,4 +1,4 @@
-"""Anthropic — авторизация логином claude.ai (mop login)"""
+"""Anthropic — authorization via claude.ai login (mop login)"""
 
 KEY = None
 ENV = {}
