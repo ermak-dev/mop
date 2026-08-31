@@ -190,8 +190,12 @@ tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null || true
 # this wrapper happens to start it, and every later session inherits the first
 # wrapper's variables (all puppets ended up sharing one CARGO_TARGET_DIR)
 claude_args="--dangerously-skip-permissions"
-if [ "${PU_RESUME:-}" = "true" ]; then
-    claude_args="$claude_args --resume"
+# --continue, а НЕ --resume: без ID сессии resume открывает интерактивный
+# выбор, и папет паркуется на нём намертво -- у него нет человека, который
+# выберет строку. continue поднимает последний разговор этого каталога сам.
+# Каталог тот же и после пересоздания клона: история claude лежит вне клона.
+if [ "$${PU_FRESH:-}" != "true" ]; then
+    claude_args="$claude_args --continue"
 fi
 tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     -e CARGO_TARGET_DIR="$HOME/.cache/target-$PU_NAME" \
@@ -252,7 +256,7 @@ def job_spec(name, origin, profile=None):
         "PU_SEED": config.get("MOP_PUPPET_SEED"),
         "HOME": HOME,
         "PATH": config.get("MOP_PUPPET_PATH").replace("{HOME}", HOME),
-        "PU_RESUME": "",  # будет переопределена при необходимости
+        "PU_FRESH": "",  # непусто -> claude поднимется без истории каталога
         # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
         "PU_LLM": profile,
         "PU_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),

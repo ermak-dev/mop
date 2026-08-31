@@ -1,49 +1,37 @@
 #!/usr/bin/env python3
-"""перенацелить папета: mop change <имя> <git-origin> [--llm ПРОФИЛЬ] [--resume]
+"""перенацелить папета: mop change <имя> <git-origin> [--llm ПРОФИЛЬ] [--fresh]
 
 Профиль без --llm сохраняется: смена репозитория не должна молча уронить
 папета обратно на claude.
 
---resume: при перезапуске claude восстановить последнюю сессию (вместо новой).
+По умолчанию поднявшийся claude продолжает последний разговор каталога, так
+что смена профиля (`--llm`) переводит на другую модель уже начатую работу.
+--fresh поднимает папета с чистого листа.
 """
-import argparse
 import lib
 from mop import config, llm, nomad, puppets
 
 
 def main(argv):
-    p = argparse.ArgumentParser(add_help=False, usage=__doc__)
     profile, args = lib.parse_llm(argv)
-
-    # Парсим оставшиеся аргументы
-    name = origin = None
-    resume = False
-
-    for arg in args:
-        if arg == "--resume":
-            resume = True
-        elif not name:
-            name = arg
-        elif not origin:
-            origin = arg
-
-    if not name or not origin:
+    fresh = "--fresh" in args
+    args = [a for a in args if a != "--fresh"]
+    if len(args) != 2:
         lib.usage(__doc__)
-
+    name, origin = args
     lib.guard(name)
     meta = lib.require_job(name).get("Meta") or {}
     old, old_llm = meta.get("origin", "?"), meta.get("llm", config.get("MOP_DEFAULT_LLM"))
     profile = profile or (old_llm if llm.get(old_llm) else config.get("MOP_DEFAULT_LLM"))
     lib.push_llm_keys(profile)
-
     spec = puppets.job_spec(name, origin, profile)
-    if resume:
-        spec["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]["PU_RESUME"] = "true"
-
+    if fresh:
+        spec["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]["PU_FRESH"] = "true"
     nomad.register(spec)
     print(f"{name}: {old} [{old_llm}] → {origin} [{profile}]")
-    resume_msg = " (восстановит последнюю сессию)" if resume else ""
-    print(f"папет перезапускается с новым репозиторием{resume_msg}")
+    print("папет перезапускается с новым репозиторием (клон пересоздаётся врапером)")
+    print("история каталога поднимается заново" if not fresh
+          else "история не поднимается (--fresh)")
 
 
 lib.run(lib.cluster(main))
