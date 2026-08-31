@@ -93,8 +93,19 @@ edit_json() {  # <file> <jq-program> [jq-args...]
 [ -f "$HOME/.claude.json" ] || echo '{}' > "$HOME/.claude.json"
 # A puppet has no human to answer the first-run wizard: without these keys every
 # claude sits on the theme prompt, which also reads as a hung puppet.
+#
+# resumeReturnDismissed is the same class of trap, one level deeper. Resuming a
+# LONG conversation (over ~70 minutes or ~100k tokens) asks whether to restore
+# it whole, from a summary, or to stop asking -- and the dialog is what the
+# "stop asking" answer writes here. On 2026-08-31 a profile switch parked
+# pu-cloudpub-1 on exactly that question with 251.5k tokens behind it: no CLI
+# flag turns it off, and nobody was there to press a key. The two thresholds
+# are also env-tunable (CLAUDE_CODE_RESUME_THRESHOLD_MINUTES,
+# CLAUDE_CODE_RESUME_TOKEN_THRESHOLD), but raising a threshold only moves the
+# wall further away -- the key removes it.
 edit_json "$HOME/.claude.json" '.projects[$d].hasTrustDialogAccepted = true
     | .hasCompletedOnboarding = true
+    | .resumeReturnDismissed = true
     | .theme = (.theme // "dark")' --arg d "$d"
 # Свой MCP-сервер регистрируем через сам claude: он владелец ~/.claude.json,
 # и никаких ручных мерджей. add на существующей записи ошибается -- и это
@@ -392,13 +403,19 @@ def _screen_complaint(activity):
     выдать не может. Для мастер это неотличимо от молчания.
     """
     low = activity.lower()
-    # Выбор при подъёме истории: длинную сессию claude предлагает поднять
-    # сводкой, целиком или «больше не спрашивать». Человека за терминалом нет,
-    # выбор не сделает никто, и папет стоит на нём молча — а файл сессии при
-    # этом показывает живую сессию. Поймано на живом папете 2026-08-31 после
-    # смены профиля: 251.5k токенов истории, и ростер читал папета здоровым.
-    if "resume full session as-is" in low or "resume from summary" in low:
-        return "resume", "resume prompt (нужен выбор)"
+    # Модальный диалог claude. Ловим его по ФУТЕРУ, а не по тексту конкретного
+    # вопроса: «Enter to confirm · Esc to cancel» стоит под любым выбором, и
+    # список вопросов, которые claude умеет задать, нам не принадлежит — он
+    # растёт с каждой версией, а список причин залипания расти не должен.
+    #
+    # Только в ХВОСТЕ экрана: диалог рисуется внизу, а уехавший вверх футер
+    # означает уже отвеченный вопрос. Поймано на живом папете 2026-08-31 —
+    # выбор, чем поднимать историю (251.5k токенов), и файл сессии при этом
+    # показывал живую сессию, так что ростер читал папета здоровым.
+    tail = [l for l in activity.splitlines() if l.strip()][-2:]
+    if any("enter to confirm" in l.lower() for l in tail):
+        what = "resume prompt" if "resume full session as-is" in low else "диалог"
+        return "dialog", f"needs action: {what}"
     # Логин. Варианты экрана: "Not logged in · Run /login", "Login expired ·
     # Please run /login". Проверять до скоринга: у залипшего мид-таск в буфере
     # полно рабочих слов.
@@ -733,10 +750,10 @@ def _action_for(state):
     # Сессия жива, но упёрлась в запрос действия и сама не сдвинется.
     # "waiting for input" НЕ трогаем: это бывает и нормальным межходовым
     # состоянием, автолечить его опасно — только показываем.
-    if state.startswith("needs action") or state.startswith("resume prompt"):
-        # Рестарт лечит и этот выбор: разрешение на подъём истории разовое, и
-        # врапер погасил его маркером ещё до запуска claude — папет поднимется
-        # чисто и спрашивать будет не о чем.
+    if state.startswith("needs action"):
+        # Рестарт лечит и залипание на диалоге: разрешение на подъём истории
+        # разовое, и врапер погасил его маркером ещё до запуска claude — папет
+        # поднимется чисто и спрашивать будет не о чем.
         return "restart"
     if state.startswith(("not logged in", "login expired")):
         return "login+restart"

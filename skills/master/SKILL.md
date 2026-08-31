@@ -120,7 +120,7 @@ been created. Pool size is your job; the operator may set a ceiling:
 | `free`, `free (<branch>)` | yes — clean, everything on a remote; the branch is informational |
 | `busy: <branch>` | no — the session is really working |
 | `busy: <branch> (uncommitted: N, unpushed: M)` | NO — the session idles, but this work exists nowhere else. Agent died mid-ticket: recover, or ask the operator — never dispatch over it |
-| `needs action` | no — stuck on a prompt. `mcp__mop__tail` first: a dialog → `mcp__mop__slash(<name>, "Escape")`; otherwise `doctor(fix=true)` restarts it |
+| `needs action`, `needs action: <what>` | no — stuck on a prompt with nobody to answer it. `mcp__mop__tail` first: a dialog → `mcp__mop__slash(<name>, "Escape")`; otherwise `doctor(fix=true)` restarts it. `needs action: resume prompt` means he was asked how to restore a long conversation — Escape cancels the restore, a restart brings him up clean |
 | `waiting for input` | no — may just be between turns; deliberately not auto-treated, the operator decides |
 | `HUNG (not responding)` | no — `puppet(action="restart")` |
 | `HUNG (no tmux session)` | no — the wrapper never reached a working state; `mcp__mop__tail` and `doctor()` |

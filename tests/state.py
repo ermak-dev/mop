@@ -81,8 +81,18 @@ CASES = [
      facts("idle 1 1", WORK,
            "This session is 1h 30m old and 251.5k tokens.\n"
            "  1. Resume from summary (recommended)\n"
-           "  2. Resume full session as-is\n  3. Don't ask me again"),
-     "resume prompt (нужен выбор)"),
+           "  2. Resume full session as-is\n  3. Don't ask me again\n"
+           "  Enter to confirm \u00b7 Esc to cancel"),
+     "needs action: resume prompt"),
+    ("любой другой диалог — по футеру, вопрос знать не обязательно",
+     facts("idle 1 1", CLEAN,
+           "Do you want to proceed?\n  1. Yes\n  2. No\n"
+           "  Enter to confirm \u00b7 Esc to cancel"),
+     "needs action: диалог"),
+    ("футер уехал вверх — вопрос уже отвечен",
+     facts("busy 1 1", CLEAN,
+           "  Enter to confirm \u00b7 Esc to cancel\n"
+           "Herding bytes\n  6 tasks (3 done)"), "busy"),
     ("кончилась квота модели",
      facts("idle 1 1", CLEAN, "You're out of usage credits. keep using Opus 4.5"),
      "no model quota: Opus 4.5"),
