@@ -435,8 +435,14 @@ def pool() -> str:
 @master_tool(annotations=DESTRUCTIVE, description=(
     "Управление папетами: add (создать), remove (удалить), restart "
     "(перезапустить залипшее), retarget (сменить репозиторий или LLM). "
-    "Клон при remove остаётся на узле и переиспользуется."))
-def puppet(action: str, name: str = "", origin: str = "", llm: str = "") -> str:
+    "Клон при remove остаётся на узле и переиспользуется.\n\n"
+    "retarget со сменой ОДНОГО LLM продолжает работу: папет поднимется на той "
+    "же истории каталога, то есть тикет переезжает на другую модель посреди "
+    "дела. fresh=true поднимает с чистой сессией; при смене репозитория чисто "
+    "всегда. restart лечит и потому ВСЕГДА чистый: вернуть залипшего в тот же "
+    "контекст значит воспроизвести залипание."))
+def puppet(action: str, name: str = "", origin: str = "", llm: str = "",
+           fresh: bool = False) -> str:
     if action == "add":
         return _puppet_add(origin, llm)
     if not name:
@@ -447,9 +453,9 @@ def puppet(action: str, name: str = "", origin: str = "", llm: str = "") -> str:
         return f"удалён {name} (клон остался в {puppets.clone_dir(name)})"
     if action == "restart":
         nomad.alloc_restart(puppet_alloc(name)["ID"])
-        return f"{name}: перезапускается"
+        return f"{name}: перезапускается (чистая сессия)"
     if action == "retarget":
-        return _puppet_retarget(name, origin, llm)
+        return _puppet_retarget(name, origin, llm, fresh)
     return "action: add | remove | restart | retarget"
 
 
@@ -465,17 +471,22 @@ def _puppet_add(origin, llm):
     return f"{name}: {origin} [{llm}] — размещается, состояние смотри в agents"
 
 
-def _puppet_retarget(name, origin, llm):
+def _puppet_retarget(name, origin, llm, fresh=False):
     meta = nomad.get_job(name).get("Meta") or {}
-    origin = origin or meta.get("origin")
+    old = meta.get("origin")
+    origin = origin or old
     # профиль без явного llm сохраняется: смена репозитория не должна молча
     # ронять папет обратно на claude
     llm = llm or meta.get("llm", config.get("MOP_DEFAULT_LLM"))
     if llm not in llm_profiles():
         return f"нет LLM-профиля {llm}; есть: {', '.join(llm_profiles())}"
     keys.push_llm_keys(llm)
-    nomad.register(puppets.job_spec(name, origin, llm))
-    return f"{name} -> {origin} [{llm}], перезапускается"
+    # Историю каталога переносим только внутри того же репозитория: клон при
+    # смене origin пересоздаётся, и прежний разговор был про другой проект.
+    cont = not fresh and origin == old
+    nomad.register(puppets.job_spec(name, origin, llm, cont=cont))
+    how = "история каталога поднимется" if cont else "чистая сессия"
+    return f"{name} -> {origin} [{llm}], перезапускается: {how}"
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(

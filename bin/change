@@ -24,14 +24,14 @@ def main(argv):
     old, old_llm = meta.get("origin", "?"), meta.get("llm", config.get("MOP_DEFAULT_LLM"))
     profile = profile or (old_llm if llm.get(old_llm) else config.get("MOP_DEFAULT_LLM"))
     lib.push_llm_keys(profile)
-    spec = puppets.job_spec(name, origin, profile)
-    if fresh:
-        spec["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]["PU_FRESH"] = "true"
-    nomad.register(spec)
+    # История каталога переживает только смену ПРОФИЛЯ: при смене репозитория
+    # врапер пересоздаёт клон, а разговор остался от прежнего проекта — поднять
+    # его в чужом репозитории значит выдать папету чужой контекст за свой.
+    cont = not fresh and origin == old
+    nomad.register(puppets.job_spec(name, origin, profile, cont=cont))
     print(f"{name}: {old} [{old_llm}] → {origin} [{profile}]")
-    print("папет перезапускается с новым репозиторием (клон пересоздаётся врапером)")
-    print("история каталога поднимается заново" if not fresh
-          else "история не поднимается (--fresh)")
+    print("папет перезапускается" + (", история каталога поднимется" if cont
+          else " с чистой сессией" + (" (--fresh)" if fresh else ": репозиторий другой")))
 
 
 lib.run(lib.cluster(main))

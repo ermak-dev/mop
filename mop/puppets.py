@@ -190,11 +190,19 @@ tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null || true
 # this wrapper happens to start it, and every later session inherits the first
 # wrapper's variables (all puppets ended up sharing one CARGO_TARGET_DIR)
 claude_args="--dangerously-skip-permissions"
+# Продолжение истории каталога -- РОВНО ОДИН подъём на перерегистрацию спеки.
+# Одноразовость здесь не прихоть: рестарт аллокации спеку не перечитывает, а
+# ЛЕЧЕНИЕ залипшего папета -- это именно рестарт. Липкий --continue возвращал
+# бы вылеченного ровно в тот контекст, на котором он залип, то есть лечил бы
+# симптом и воспроизводил болезнь. Поэтому мастер кладёт в спеку разовый
+# токен, а врапер гасит его маркером в клоне: совпал -- поднимаемся чисто.
+#
 # --continue, а НЕ --resume: без ID сессии resume открывает интерактивный
-# выбор, и папет паркуется на нём намертво -- у него нет человека, который
-# выберет строку. continue поднимает последний разговор этого каталога сам.
-# Каталог тот же и после пересоздания клона: история claude лежит вне клона.
-if [ "$${PU_FRESH:-}" != "true" ]; then
+# выбор, и папет паркуется на нём намертво -- выбрать строку ему некому.
+marker="$d/.git/mop-continue"
+if [ -n "$${PU_CONTINUE:-}" ] \
+    && [ "$(cat "$marker" 2>/dev/null)" != "$PU_CONTINUE" ]; then
+    printf '%s' "$PU_CONTINUE" > "$marker"
     claude_args="$claude_args --continue"
 fi
 tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
@@ -236,7 +244,13 @@ def clone_dir(name):
     return f"{HOME}/puppets/{name}"
 
 
-def job_spec(name, origin, profile=None):
+def job_spec(name, origin, profile=None, cont=False):
+    """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
+    историю каталога (`claude --continue`).
+
+    По умолчанию ЧИСТО, и умолчание выбрано так намеренно: подъём с историей
+    нужен ровно там, где работу продолжают под другой моделью, а везде ещё
+    (новый папет, рецикл, лечение) чистый старт — половина смысла операции."""
     project = os.path.basename(origin).removesuffix(".git")
     profile = profile or config.get("MOP_DEFAULT_LLM")
     prof = llm.get(profile)
@@ -256,7 +270,9 @@ def job_spec(name, origin, profile=None):
         "PU_SEED": config.get("MOP_PUPPET_SEED"),
         "HOME": HOME,
         "PATH": config.get("MOP_PUPPET_PATH").replace("{HOME}", HOME),
-        "PU_FRESH": "",  # непусто -> claude поднимется без истории каталога
+        # Разовый токен: врапер гасит его маркером в клоне, поэтому историю
+        # поднимет только первый подъём по этой спеке, а рестарты — чистые.
+        "PU_CONTINUE": str(time.time()) if cont else "",
         # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
         "PU_LLM": profile,
         "PU_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),

@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""запустить claude в режиме мастера шарда: mop master [--llm ПРОФИЛЬ] [git-origin]
+"""запустить claude в режиме мастера шарда: mop master [--llm ПРОФИЛЬ] [git-origin] [опции claude]
 
 Без аргумента берётся origin текущей рабочей копии. Один проект — один шард:
 мастер видит и достаёт только своих папетов, чужие для него не существуют.
+
+Свои у команды только --llm и origin; ВСЁ ОСТАЛЬНОЕ уезжает в claude как есть
+(`mop master --continue` продолжает прошлую сессию мастера). Зеркалить чужие
+флаги у себя команда не станет: их у claude десятки, и список разошёлся бы с
+первой же его версией. Флаг со ЗНАЧЕНИЕМ передавайте после `--`
+(`mop master -- --model opus`): иначе значение неотличимо от origin.
 
 Мастеров можно держать сколько угодно, в том числе несколько на один проект:
 инбокс адресуется мастером, а не шардом, и вести не путаются.
@@ -48,12 +54,36 @@ def mcp_config():
     }}})
 
 
+def claude_args(args):
+    """Разделить свои аргументы и чужие. -> (origin | None, опции для claude).
+
+    Чужое узнаётся по дефису, а `--` отдаёт claude весь хвост дословно — без
+    него флаг со значением неотличим от origin, и «--model opus» тихо ушёл бы
+    искать шард «opus»."""
+    if "--" in args:
+        cut = args.index("--")
+        args, tail = args[:cut], args[cut + 1:]
+    else:
+        tail = []
+    mine = [a for a in args if not a.startswith("-")]
+    return mine, [a for a in args if a.startswith("-")] + tail
+
+
 def main(argv):
     profile, args = lib.parse_llm(argv)
     profile = profile or config.get("MOP_DEFAULT_LLM")
-    if len(args) > 1:
+    mine, passthru = claude_args(args)
+    if len(mine) > 1:
         lib.usage(__doc__)
-    origin = args[0] if args else lib.cwd_origin()
+    origin = mine[0] if mine else lib.cwd_origin()
+    # Origin, в котором нет ни хоста, ни пути, — почти наверняка значение
+    # чужого флага, приехавшее сюда позиционно. Отказ обязан назвать причину:
+    # иначе дальше будет «нет кредов шарда opus», и искать опечатку придётся
+    # в совсем другом месте.
+    if not any(c in origin for c in ":/"):
+        lib.usage(f"{origin!r} не похож на git-origin.\n"
+                  f"Опции claude со значением передавайте после --: "
+                  f"mop master -- {' '.join(passthru + [origin])}")
     shard = puppets.shard_of(origin)
     creds = lib.shard_creds(shard)
     if not os.path.exists(creds):
@@ -75,9 +105,10 @@ def main(argv):
             lib.usage(f"профиль {profile}: нет {prof['key']} в "
                       f"{puppets.LOCAL_KEYS_FILE} — впиши и повтори")
         env[prof["auth_var"]] = key
-    print(f"мастер шарда {shard} ({origin}) [{profile}]")
+    print(f"мастер шарда {shard} ({origin}) [{profile}]"
+          + (f" + claude {' '.join(passthru)}" if passthru else ""))
     os.execvpe("claude", ["claude", "--dangerously-skip-permissions",
-                          "--mcp-config", mcp_config()] + args[1:], env)
+                          "--mcp-config", mcp_config()] + passthru, env)
 
 
 lib.run(lib.cluster(main))
