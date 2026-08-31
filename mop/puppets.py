@@ -189,6 +189,10 @@ tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null || true
 # env must go through -e: a plain env prefix only reaches the tmux SERVER when
 # this wrapper happens to start it, and every later session inherits the first
 # wrapper's variables (all puppets ended up sharing one CARGO_TARGET_DIR)
+claude_args="--dangerously-skip-permissions"
+if [ "${PU_RESUME:-}" = "true" ]; then
+    claude_args="$claude_args --resume"
+fi
 tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     -e CARGO_TARGET_DIR="$HOME/.cache/target-$PU_NAME" \
     -e CARGO_BUILD_JOBS=1 \
@@ -196,7 +200,7 @@ tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     -e MOP_SHARD="$PU_SHARD" \
     -e MOP_BUS_CONFIG="$shard_creds" \
     "$${llm_env[@]}" \
-    "$HOME/.local/bin/claude --dangerously-skip-permissions"
+    "$HOME/.local/bin/claude $claude_args"
 trap 'tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null; exit 0' TERM INT
 while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wait $!; done
 """
@@ -239,12 +243,28 @@ def job_spec(name, origin, profile=None):
         raise RuntimeError(f"{name}: нет LLM-профиля {profile}; есть: "
                            f"{', '.join(llm.profiles())} (mop llm)")
     llm_env = "".join(f"{k}={v}\n" for k, v in prof["env"].items())
+    meta = {"origin": origin, "llm": profile}
+    env = {
+        "PU_NAME": name,
+        "PU_ORIGIN": origin,
+        "PU_PROJECT": project,
+        "PU_SHARD": shard_of(origin),
+        "PU_SEED": config.get("MOP_PUPPET_SEED"),
+        "HOME": HOME,
+        "PATH": config.get("MOP_PUPPET_PATH").replace("{HOME}", HOME),
+        "PU_RESUME": "",  # будет переопределена при необходимости
+        # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
+        "PU_LLM": profile,
+        "PU_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
+        "PU_LLM_KEY_VAR": prof.get("key") or "",
+        "PU_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
+    }
     return {"Job": {
         "ID": name,
         "Name": name,
         "Datacenters": [nomad.POOL_DC],
         "Type": "service",
-        "Meta": {"origin": origin, "llm": profile},
+        "Meta": meta,
         "TaskGroups": [{
             "Name": "puppets",
             "Count": 1,
@@ -259,20 +279,7 @@ def job_spec(name, origin, profile=None):
                 "Driver": "raw_exec",
                 "User": USER,
                 "Config": {"command": "/bin/bash", "args": ["-c", WRAPPER]},
-                "Env": {
-                    "PU_NAME": name,
-                    "PU_ORIGIN": origin,
-                    "PU_PROJECT": project,
-                    "PU_SHARD": shard_of(origin),
-                    "PU_SEED": config.get("MOP_PUPPET_SEED"),
-                    "HOME": HOME,
-                    "PATH": config.get("MOP_PUPPET_PATH").replace("{HOME}", HOME),
-                    # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
-                    "PU_LLM": profile,
-                    "PU_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
-                    "PU_LLM_KEY_VAR": prof.get("key") or "",
-                    "PU_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
-                },
+                "Env": env,
                 "Resources": {"CPU": 1000, "MemoryMB": MEM},
                 "KillTimeout": 15 * 10**9,
             }],
@@ -372,17 +379,23 @@ def _screen_complaint(activity):
     # провайдера (glm) логин claude.ai вообще не при делах.
     if "not logged in" in low or "login expired" in low:
         return "login", ("не залогинен" if "not logged in" in low else "логин протух")
-    # Квота модели: каждое входящее сообщение мгновенно возвращает "You're out
-    # of usage credits…" и сессия падает обратно в idle. Рестарт НЕ лечит —
-    # нужен либо другой /model, либо пополнение.
-    #
-    # Жалоба живёт в скроллбэке и после лечения, поэтому считается актуальной
-    # только если ПОСЛЕ неё модель не переключали: иначе вылеченное папет
-    # вечно читалось бы как больное.
+    # Квота модели и прочие API ошибки. Жалоба живёт в скроллбэке и после
+    # лечения, поэтому считается актуальной только если ПОСЛЕ неё модель не
+    # переключали: иначе вылеченное папет вечно читалось бы как больное.
+    if "api error" in low:
+        # Парсим полную ошибку: [API Error: Request rejected (429) · [...][...]]
+        # Захватываем от "API Error:" до конца строки или следующей скобки
+        m = re.search(r"\[API Error: ([^\]]*(?:\][^\]]*)*)\]", activity, re.I)
+        if m:
+            error_text = m.group(1).strip()
+            # Убираем лишние скобки в конце, если есть
+            error_text = error_text.rstrip("]")
+            return "error", error_text
     if ("out of usage credits" in low
             and low.rfind("out of usage credits") > low.rfind("set model to")):
         m = re.search(r"keep using ([^\s]+(?: [0-9.]+)?)", activity, re.I)
-        return "quota", (f"нет квоты модели: {m.group(1)}" if m else "нет квоты модели")
+        error_text = m.group(1) if m else "нет квоты модели"
+        return "error", error_text
     return None
 
 
@@ -447,9 +460,6 @@ def _state_from_session(st, clone):
         what = ", ".join(p for p in (f"не закоммичено: {dirty}" if dirty else "",
                                      f"не отправлено: {ahead}" if ahead else "") if p)
         return f"занят: {clone.get('cur')} ({what})"
-    # Чисто и всё на origin — терять нечего, место переиспользуемо. Ветку
-    # показываем справочно: диспатч всё равно обязан начать с переключения на
-    # интеграционную ветку, иначе новая ветка тикета уедет от оставшейся здесь.
     cur = clone.get("cur")
     return f"свободен ({cur})" if cur else "свободен"
 
@@ -670,7 +680,7 @@ def _action_for(state):
         return "restart"
     if state.startswith(("не залогинен", "логин протух")):
         return "login+restart"
-    if state.startswith("нет квоты модели"):
+    if state.startswith("ошибка"):
         return "model"
     return False
 
