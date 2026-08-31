@@ -75,6 +75,14 @@ CASES = [
      "login expired: bug/1063"),
     ("не залогинен вовсе",
      facts("idle 1 1", CLEAN, "Not logged in · Run /login"), "not logged in"),
+    # Подъём истории спрашивает, чем поднимать длинную сессию. Файл сессии при
+    # этом здоров, и без экрана папет читался бы свободным.
+    ("встал на выборе, чем поднимать историю",
+     facts("idle 1 1", WORK,
+           "This session is 1h 30m old and 251.5k tokens.\n"
+           "  1. Resume from summary (recommended)\n"
+           "  2. Resume full session as-is\n  3. Don't ask me again"),
+     "resume prompt (нужен выбор)"),
     ("кончилась квота модели",
      facts("idle 1 1", CLEAN, "You're out of usage credits. keep using Opus 4.5"),
      "no model quota: Opus 4.5"),
