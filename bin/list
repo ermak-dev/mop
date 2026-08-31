@@ -55,8 +55,9 @@ def main(argv):
         print("папетов нет")
     origin = lib.cwd_origin(required=False)
     # В мастер-шелле подсказка — про ШАРД, а не про каталог, в котором стоишь.
-    # Иначе `mop list` из ~/mop в мастере rugent советовал бы завести папета
-    # для mop, которого этот мастер всё равно не увидит.
+    # Иначе `mop list` из репозитория самого mop в мастер-шелле проекта
+    # советовал бы завести папета для mop, которого этот мастер всё равно
+    # не увидит.
     shard = lib.in_shard()
     if shard and origin and lib.project_of(origin) != shard:
         origin = None

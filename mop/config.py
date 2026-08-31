@@ -12,7 +12,7 @@
                 API, и записывать его вторым местом значит завести источник
                 правды, который однажды разойдётся с первым.
   НЕОБЯЗАТЕЛЬНЫЕ  пусто значит «такой функциональности нет»: MCP рабочего
-                стола, ssh-алиасы, резерв памяти.
+                стола, резерв памяти.
 
 Порядок старшинства: переменная окружения > .env > дефолт. Окружение впереди,
 потому что на нём уже стоят NOMAD_ADDR и NOMAD_TOKEN, и разовое
@@ -189,16 +189,3 @@ def num(name, default=None):
         return int(get(name, default))
     except ValueError:
         return int(default if default is not None else SETTINGS[name])
-
-
-def pairs(name, default=None):
-    """`a=b,c=d` -> {"a": "b", "c": "d"}.
-
-    Отображения (узел -> ssh-алиас, узел -> резерв памяти) в .env иначе не
-    выразить, а заводить рядом второй формат файла — хуже, чем одна строка."""
-    out = {}
-    for chunk in get(name, default).split(","):
-        k, sep, v = chunk.partition("=")
-        if sep and k.strip():
-            out[k.strip()] = v.strip()
-    return out

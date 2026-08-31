@@ -1,7 +1,7 @@
 #!/bin/bash
 # Puppet-pool disk sweep (nomad job pu-cleanup, sysbatch+periodic).
 #
-# Three tiers, cheapest first, mirroring the classes in ~/bin/cleanup:
+# Three tiers, cheapest first:
 #
 #   orphans     — a live puppet == a live tmux session named after its job: the
 #                 wrapper dies with its tmux session, and a stopped/moved job
@@ -13,14 +13,14 @@
 #                 restarting at sweep time costs a re-clone. Swept
 #                 unconditionally.
 #   stale       — paths nothing references any more, age-gated. These are what a
-#                 glob-driven sweep misses: $HOME/cache is rugent's pre-#627
+#                 glob-driven sweep misses: $HOME/cache is a project's old
 #                 CARGO_TARGET_DIR, retired 2026-08-20, and matches neither
 #                 ~/puppets/pu-* nor ~/.cache/target-pu-*. It still held 59 GB
 #                 2026-08-28, four days after the last write.
 #   size-capped — LIVE puppets' target dirs, trimmed by cargo-sweep, and only
 #                 under space pressure. Not age-gated: cargo rewrites
 #                 fingerprints on every build, so an active target dir never
-#                 looks old (see the measurement in ~/bin/cleanup). Swept while
+#                 looks old. Swept while
 #                 holding cargo's own lock, so a build cannot be running in one
 #                 while it is swept.
 #
@@ -101,7 +101,7 @@ echo
 # --------------------------------------------------------------------------
 # Two sanity gates before anything is deleted. Both exist because "no live tmux
 # session" is only evidence of an orphan when tmux could have answered at all --
-# and on 2026-08-28 mirror spent nine minutes in a state where it could not:
+# and on 2026-08-28 one node spent nine minutes in a state where it could not:
 # the box was hard-reset, /home/<user> is ecryptfs and comes back UNMOUNTED, and
 # the puppets only start once someone logs in with a password. A sweep landing
 # in that window would have seen every clone with no session and deleted the lot.
@@ -165,7 +165,7 @@ done
 # Tier 2 -- retired paths nothing references, age-gated. Always.
 # --------------------------------------------------------------------------
 echo "tier 2: retired paths idle > ${STALE_DAYS}d"
-# $HOME/cache: rugent's CARGO_TARGET_DIR before #627 moved it to
+# $HOME/cache: a project's CARGO_TARGET_DIR from before the move to
 # ~/.cache/target-<puppet>. Left behind on every node that built there.
 for stale in "$HOME/cache"; do
     [ -d "$stale" ] || continue
@@ -251,9 +251,9 @@ while os.getppid() != 1:
             fi
             # incremental/ first: cargo-sweep weighs only the artifacts
             # `cargo metadata` knows about, so it walks straight past this one
-            # -- on mirror it held 62 GB that a 304 GiB sweep left sitting
-            # there, and on gamer 46 GB across three live puppets on
-            # 2026-08-28. Regenerable at any age: every run builds a different
+            # -- it once held 62 GB that a 304 GiB sweep left sitting there,
+            # and on another node 46 GB across three live puppets on 2026-08-28.
+            # Regenerable at any age: every run builds a different
             # commit and cargo never reuses a byte of it.
             for inc in "$t"/*/incremental; do
                 [ -d "$inc" ] || continue
@@ -261,8 +261,8 @@ while os.getppid() != 1:
             done
 
             # cargo-sweep asks `cargo metadata` where the artifacts are rather
-            # than guessing path shapes -- the guessing is what hid 106 GB on
-            # win from ~/bin/cleanup for months. No network at sweep time;
+            # than guessing path shapes -- the guessing once hid 106 GB in a
+            # target dir for months. No network at sweep time;
             # lockfiles are committed.
             if $have_sweep; then
             out=$(CARGO_NET_OFFLINE=true cargo-sweep sweep -r $swargs "$t" 2>&1)

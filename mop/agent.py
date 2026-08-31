@@ -81,7 +81,7 @@ IDLE_WAIT = 600          # потолок ожидания простоя для
 
 def node_name():
     """Имя узла в Nomad. Оно же в субъекте, поэтому берётся из окружения, а не
-    угадывается: у gamer имя узла и hostname расходятся."""
+    угадывается: имя узла и hostname могут расходиться."""
     return os.environ.get("MOP_NODE") or socket.gethostname()
 
 

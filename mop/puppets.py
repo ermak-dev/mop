@@ -78,7 +78,7 @@ edit_json() {  # <file> <jq-program> [jq-args...]
     flock 9
     # `jq empty` is NOT a validity check: a zero-byte file is an empty jq input
     # stream, so it exits 0, every filter over it yields nothing, and the 0-byte
-    # config got written straight back (gamer, 2026-08-28 — all six puppets parked
+    # config got written straight back (2026-08-28, one node — all six puppets parked
     # on the config prompt while `mop list` showed only "ЗАВИС"). Demand an
     # actual object, and never install an empty result.
     jq -e 'type == "object"' "$file" >/dev/null 2>&1 || echo '{}' > "$file"
@@ -134,8 +134,8 @@ edit_json "$HOME/.claude/settings.json" '.permissions.deny =
     ((.permissions.deny // []) + ["SendMessage", "ListAgents",
       "AskUserQuestion", "EnterWorktree", "ExitWorktree"] | unique)'
 # CARGO_TARGET_DIR grows without bound - 22 to 49 GB per puppet in practice, and
-# five of them filled the gamer node's disk on 2026-08-26, which killed the WSL
-# VM and stranded every allocation on it. Boot is the only safe moment to drop
+# five of them filled a node's disk on 2026-08-26, which killed the WSL VM and
+# stranded every allocation on it. Boot is the only safe moment to drop
 # one: nothing is building yet, and the cache is pure derived data.
 TARGET_DIR="$HOME/.cache/target-$PU_NAME"
 if [ -d "$TARGET_DIR" ] \
@@ -206,8 +206,8 @@ def shard_of(origin):
     """Шард (он же проект) по origin репозитория.
 
     Basename без .git, и это ЕДИНСТВЕННОЕ определение проекта в системе.
-    Соблазн взять хеш от полного origin есть — тогда два `rugent.git` на разных
-    хостах не слились бы в один шард. Но имена папетов уже строятся отсюда же
+    Соблазн взять хеш от полного origin есть — тогда два одноимённых репозитория
+    на разных хостах не слились бы в один шард. Но имена папетов уже строятся отсюда же
     (`pu-<проект>-<n>`), и завести рядом второе, более точное понятие «проект»
     значит получить два места, по-разному отвечающих на вопрос «чей это папет».
     Цена честная и названа: одинаковые basename делят шард ровно так же, как
@@ -424,7 +424,7 @@ def _state_from_session(st, clone):
     Пропадает только то, чего нет ни на одной удалённой ветке. Числа считает
     агент через `--not --remotes`, а НЕ через `@{u}..`: upstream рабочей ветки
     бывает прибит к origin/master, и тогда всё невлитое врёт как «не
-    отправлено» (так и вышло на rugent-7).
+    отправлено» (поймано на живом папете).
 
     «Не закоммичено» и «не отправлено» показываем РАЗДЕЛЬНО: это разные
     состояния и разный разговор с агентом. Сложив их в одно «только локально:
