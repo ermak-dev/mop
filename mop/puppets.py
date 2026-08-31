@@ -460,7 +460,8 @@ def _screen_complaint(activity):
     # означает уже отвеченный вопрос. Поймано на живом папете 2026-08-31 —
     # выбор, чем поднимать историю (251.5k токенов), и файл сессии при этом
     # показывал живую сессию, так что ростер читал папета здоровым.
-    tail = [l for l in activity.splitlines() if l.strip()][-2:]
+    lines = [l for l in activity.splitlines() if l.strip()]
+    tail = lines[-2:]
     if any("enter to confirm" in l.lower() for l in tail):
         what = "resume prompt" if "resume full session as-is" in low else "dialog"
         return "dialog", f"needs action: {what}"
@@ -472,8 +473,18 @@ def _screen_complaint(activity):
     # папета больше не ходят на мост claude.ai, и "/rc failed" на их экране
     # означало бы что угодно, только не болезнь. Для профилей с ключом
     # провайдера (glm) логин claude.ai вообще не при делах.
-    if "not logged in" in low or "login expired" in low:
-        return "login", ("not logged in" if "not logged in" in low else "login expired")
+    # Логин ищем в ХВОСТЕ экрана, и это не мелочь. Живая жалоба стоит в
+    # статус-баре, который claude дорисовывает под рамкой ввода; жалоба из
+    # ПРОШЛОГО приезжает вместе с историей (`--continue`) обычной репликой с
+    # маркером «●» посреди буфера. Поймано 2026-08-31 сразу после раздачи
+    # свежих кредов: папет поднялся залогиненным, а ростер держал его больным
+    # по строке, которой был час от роду.
+    #
+    # _outlived здесь не годится: у только что поднявшегося папета ходов ещё
+    # НЕТ, и любая жалоба из истории выглядела бы свежей.
+    foot = " ".join(l.lower() for l in lines[-3:])
+    if "not logged in" in foot or "login expired" in foot:
+        return "login", ("not logged in" if "not logged in" in foot else "login expired")
     # Квота модели и прочие отказы провайдера. Жалоба остаётся в скроллбэке и
     # после лечения — актуальна она только пока её не пережили.
     mark = low.rfind("out of usage credits")

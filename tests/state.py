@@ -73,6 +73,23 @@ CASES = [
     ("login expired",
      facts("idle 1 1", WORK, "Login expired · Please run /login"),
      "login expired: bug/1063"),
+    # Живая жалоба про логин стоит в статус-баре под рамкой ввода. Снято с
+    # живого папета 2026-08-31.
+    ("not logged in — жалоба в статус-баре",
+     facts("idle 1 1", CLEAN,
+           "\u203b recap: ticket landed, waiting for the master\n"
+           "\u276f \n  -- INSERT -- bypass permissions on \u00b7 2 agents\n"
+           "                    Not logged in \u00b7 Run /login"),
+     "not logged in"),
+    # А жалоба из ПРОШЛОГО приезжает вместе с историей обычной репликой посреди
+    # буфера — папет при этом залогинен и здоров.
+    ("восстановленная сессия принесла старую жалобу про логин",
+     facts("idle 1 1", CLEAN,
+           "\u25cf 502 on 127.0.0.1:2001 — backend did not come up\n"
+           "\u25cf Login expired \u00b7 Please run /login\n"
+           "\u273b Churned for 43m 17s \u00b7 done 4:42 PM\n"
+           "\u276f \n  -- INSERT -- bypass permissions on \u00b7 2 agents"),
+     "free (master)"),
     ("not logged in at all",
      facts("idle 1 1", CLEAN, "Not logged in · Run /login"), "not logged in"),
     # Подъём истории спрашивает, чем поднимать длинную сессию. Файл сессии при
