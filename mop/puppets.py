@@ -51,6 +51,32 @@ SECRETS_FILE = f"{HOME}/.config/mop/secrets.env"    # копия на узле �
 WRAPPER = r"""
 set -e
 d="$HOME/puppets/$PU_NAME"
+# The old session dies FIRST, before anything touches the directory. It used to
+# die at the very bottom, just before the new session was opened -- some 140
+# lines and one `npx playwright install` later -- so a retarget removed the
+# clone out from under a LIVE claude.
+tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null || true
+
+# ...and whatever outlived it holding the directory as its cwd is killed too.
+# A puppet's own MCP server did exactly that (2026-08-31): orphaned by the
+# kill above, it kept answering `agents` from memory while every `send` failed
+# for the rest of the session, because its cwd pointed at an unlinked inode.
+# The same thing was behind the older "fatal: cannot change to '<clone>'".
+# The clone may already be gone (the disk sweep can remove it), and the kernel
+# marks such a cwd " (deleted)" -- match on the name with that suffix stripped.
+free_dir() {
+    local dir="$1" cwd pid
+    for p in /proc/[0-9]*; do
+        pid=$${p##*/}
+        cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
+        cwd=$${cwd% (deleted)}
+        case "$cwd" in
+            "$dir"|"$dir"/*) kill "$pid" 2>/dev/null || true ;;
+        esac
+    done
+}
+free_dir "$d"
+
 if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" != "$PU_ORIGIN" ]; then
     rm -rf "$d"
 fi
@@ -196,7 +222,6 @@ fi
 # a dedicated tmux SERVER per puppet (-L): with the default server every
 # session on the node lives in the cgroup of whichever wrapper started the
 # server first, and one task budget OOM-kills all puppets at once
-tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null || true
 # env must go through -e: a plain env prefix only reaches the tmux SERVER when
 # this wrapper happens to start it, and every later session inherits the first
 # wrapper's variables (all puppets ended up sharing one CARGO_TARGET_DIR)
