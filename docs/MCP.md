@@ -45,7 +45,7 @@ MCP-сервер пула: ростер, канал сообщений папе�
 | `send` | все | — | `to`, `message`, `priority`, `notify_when_idle`, `wait_seconds` |
 | `tail` | все | readOnly | `name`, `lines`, `grep` |
 | `pool` | мастер, оператор | readOnly | — |
-| `puppet` | мастер, оператор | destructive | `action: add\|remove\|restart\|retarget`, `name`, `origin`, `llm`, `fresh` |
+| `puppet` | мастер, оператор | destructive | `action: add\|remove\|restart\|update`, `name`, `origin`, `llm`, `fresh` |
 | `doctor` | мастер, оператор | destructive | `fix` |
 | `slash` | мастер, оператор | destructive | `name`, `command` |
 | `login` | мастер, оператор | destructive | — |
@@ -64,7 +64,7 @@ MCP-сервер пула: ростер, канал сообщений папе�
   «Error executing tool <имя>» без причины, и отказ обязан называть себя.
 * `slash` работает по белому списку (`/model`, `/clear`, `/compact`, `/rc`,
   `/status` и Escape); без списка это произвольный ввод в чужую сессию.
-* `puppet(retarget)` со сменой одного профиля поднимает папета НА ТОЙ ЖЕ
+* `puppet(update)` со сменой одного профиля поднимает папета НА ТОЙ ЖЕ
   истории каталога: тикет переезжает на другую модель посреди дела. Разрешение
   на это — разовый токен в спеке, который врапер гасит маркером в клоне, а не
   постоянный флаг. Иначе его подхватил бы и `restart`, то есть ЛЕЧЕНИЕ, и

@@ -434,13 +434,14 @@ def pool() -> str:
 
 @master_tool(annotations=DESTRUCTIVE, description=(
     "Управление папетами: add (создать), remove (удалить), restart "
-    "(перезапустить залипшее), retarget (сменить репозиторий или LLM). "
+    "(перезапустить залипшее), update (сменить репозиторий или LLM). "
     "Клон при remove остаётся на узле и переиспользуется.\n\n"
-    "retarget со сменой ОДНОГО LLM продолжает работу: папет поднимется на той "
+    "update со сменой ОДНОГО LLM продолжает работу: папет поднимется на той "
     "же истории каталога, то есть тикет переезжает на другую модель посреди "
-    "дела. fresh=true поднимает с чистой сессией; при смене репозитория чисто "
-    "всегда. restart лечит и потому ВСЕГДА чистый: вернуть залипшего в тот же "
-    "контекст значит воспроизвести залипание."))
+    "дела. Без origin репозиторий сохраняется, без llm — профиль. fresh=true "
+    "поднимает с чистой сессией; при смене репозитория чисто всегда. restart "
+    "лечит и потому ВСЕГДА чистый: вернуть залипшего в тот же контекст значит "
+    "воспроизвести залипание."))
 def puppet(action: str, name: str = "", origin: str = "", llm: str = "",
            fresh: bool = False) -> str:
     if action == "add":
@@ -454,9 +455,13 @@ def puppet(action: str, name: str = "", origin: str = "", llm: str = "",
     if action == "restart":
         nomad.alloc_restart(puppet_alloc(name)["ID"])
         return f"{name}: перезапускается (чистая сессия)"
-    if action == "retarget":
-        return _puppet_retarget(name, origin, llm, fresh)
-    return "action: add | remove | restart | retarget"
+    # retarget — прежнее имя. Оно принимается молча, потому что список
+    # инструментов приезжает модели ОДИН РАЗ на старте сессии: мастер, поднятый
+    # до переименования, до самого перезапуска будет звать по-старому, и отказ
+    # застал бы его посреди тикета.
+    if action in ("update", "retarget"):
+        return _puppet_update(name, origin, llm, fresh)
+    return "action: add | remove | restart | update"
 
 
 def _puppet_add(origin, llm):
@@ -471,7 +476,7 @@ def _puppet_add(origin, llm):
     return f"{name}: {origin} [{llm}] — размещается, состояние смотри в agents"
 
 
-def _puppet_retarget(name, origin, llm, fresh=False):
+def _puppet_update(name, origin, llm, fresh=False):
     meta = nomad.get_job(name).get("Meta") or {}
     old = meta.get("origin")
     origin = origin or old
