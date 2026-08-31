@@ -386,27 +386,48 @@ def _screen_complaint(activity):
     # Квота модели и прочие API ошибки. Жалоба живёт в скроллбэке и после
     # лечения, поэтому считается актуальной только если ПОСЛЕ неё модель не
     # переключали: иначе вылеченное папет вечно читалось бы как больное.
-    if "api error" in low:
-        # Парсим API Error: может быть в виде:
-        # ● API Error: Request rejected (429) · [1308][Usage limit...]
-        # или [API Error: ...]
-        # Ловим от "API Error:" до конца строки/многострочного блока
-        m = re.search(r"API Error: ([^\n]*(?:\n[^\n]*)*?)(?:\n|$)", activity, re.I)
-        if m:
-            error_text = m.group(1).strip()
-            # Убираем лишние скобки/спецсимволы в конце
-            error_text = error_text.rstrip("[]")
-            return "error", error_text
-    if "out of usage credits" in low:
-        # Актуальна только если "set model to" не идёт после в буфере
-        # (иначе модель уже переключили, это история)
-        pos_error = low.rfind("out of usage credits")
-        pos_switched = low.rfind("set model to")
-        if pos_switched == -1 or pos_error > pos_switched:
-            m = re.search(r"keep using ([^\s]+(?: [0-9.]+)?)", activity, re.I)
-            error_text = m.group(1) if m else "нет квоты модели"
-            return "error", error_text
+    if "out of usage credits" in low and low.rfind("out of usage credits") > low.rfind("set model to"):
+        m = re.search(r"keep using ([^\s]+(?: [0-9.]+)?)", activity, re.I)
+        return "quota", (f"нет квоты модели: {m.group(1)}" if m else "нет квоты модели")
+    # Отказ провайдера приезжает иначе — строкой «API Error», и рестарт её тоже
+    # не лечит. Актуальность считается так же, как у квоты выше.
+    if "api error" in low and low.rfind("api error") > low.rfind("set model to"):
+        text = _api_error_text(activity)
+        if text:
+            return "error", f"ошибка: {text}"
     return None
+
+
+def _api_error_text(activity):
+    """Человекочитаемая часть отказа провайдера, либо None.
+
+    Экран: «● API Error: Request rejected (429) · [1308][Usage limit reached
+    for 5 hour. Your limit will reset at …][<request id>]». Мастеру нужен
+    ТОЛЬКО средний блок: код и request id ему ничего не говорят, а «Request
+    rejected (429)» умалчивает главное — когда квота вернётся.
+
+    Сообщение длинное, и рендер claude переносит его на следующую строку. Где
+    оно кончилось, видно по балансу скобок, а не по концу строки: пустые строки
+    агент из пейна уже вырезал, поэтому следующий блок экрана начинается сразу
+    за жалобой. Склейка нормализует отступ переноса — она врёт, если рендер
+    разорвал слово посередине, и тогда в таблицу приедет лишний пробел.
+    """
+    m = re.search(r"API Error:", activity, re.I)
+    if not m:
+        return None
+    buf, depth, opened = [], 0, False
+    for line in activity[m.end():].splitlines()[:6]:
+        buf.append(line.strip())
+        depth += line.count("[") - line.count("]")
+        opened = opened or "[" in line
+        if opened and depth <= 0:
+            break
+    text = " ".join(b for b in buf if b).strip()
+    # Блок со словами и есть сообщение: код и request id пробелов не содержат.
+    for group in re.findall(r"\[([^\[\]]*)\]", text):
+        if " " in group.strip():
+            return group.strip()
+    return text or None
 
 
 
@@ -690,7 +711,7 @@ def _action_for(state):
         return "restart"
     if state.startswith(("не залогинен", "логин протух")):
         return "login+restart"
-    if state.startswith("ошибка"):
+    if state.startswith(("нет квоты модели", "ошибка")):
         return "model"
     return False
 

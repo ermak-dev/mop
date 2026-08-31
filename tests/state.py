@@ -81,6 +81,25 @@ CASES = [
     ("квота была, но модель уже переключили",
      facts("busy 1 1", CLEAN,
            "out of usage credits\nSet model to sonnet\nHerding bytes"), "занят"),
+    # Отказ провайдера: в таблицу едет средний блок скобок. Код (1308) и
+    # request id мастеру не говорят ничего, «Request rejected (429)» умалчивает
+    # время возврата квоты — а именно оно решает, ждать папета или переводить.
+    ("провайдер отказал по квоте, сообщение перенесено рендером",
+     facts("idle 1 1", WORK,
+           "● API Error: Request rejected (429) · [1308][Usage limit reached for"
+           " 5 hour. Your limit will reset at 2026-08-31\n"
+           "  18:19:41][20260831150427d7cd9f9634d84ecc]\n"
+           "✻ Brewed for 57m 29s · done 2:04 PM\n"
+           "  6 tasks (3 done, 1 in progress, 2 open)"),
+     "ошибка: Usage limit reached for 5 hour. Your limit will reset at"
+     " 2026-08-31 18:19:41"),
+    ("отказ провайдера без скобок — показываем что есть",
+     facts("idle 1 1", CLEAN, "● API Error: Connection error"),
+     "ошибка: Connection error"),
+    ("отказ был, но модель уже переключили",
+     facts("busy 1 1", CLEAN,
+           "● API Error: Request rejected (429) · [1308][Usage limit reached]\n"
+           "Set model to sonnet\nHerding bytes"), "занят"),
 
     # Файла сессии нет (старый claude / нет python3) -> откаты.
     ("нет файла сессии, но пейн говорит о работе",
