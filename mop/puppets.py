@@ -391,11 +391,15 @@ def _screen_complaint(activity):
             # Убираем лишние скобки в конце, если есть
             error_text = error_text.rstrip("]")
             return "error", error_text
-    if ("out of usage credits" in low
-            and low.rfind("out of usage credits") > low.rfind("set model to")):
-        m = re.search(r"keep using ([^\s]+(?: [0-9.]+)?)", activity, re.I)
-        error_text = m.group(1) if m else "нет квоты модели"
-        return "error", error_text
+    if "out of usage credits" in low:
+        # Актуальна только если "set model to" не идёт после в буфере
+        # (иначе модель уже переключили, это история)
+        pos_error = low.rfind("out of usage credits")
+        pos_switched = low.rfind("set model to")
+        if pos_switched == -1 or pos_error > pos_switched:
+            m = re.search(r"keep using ([^\s]+(?: [0-9.]+)?)", activity, re.I)
+            error_text = m.group(1) if m else "нет квоты модели"
+            return "error", error_text
     return None
 
 
