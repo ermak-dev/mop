@@ -383,13 +383,15 @@ def _screen_complaint(activity):
     # лечения, поэтому считается актуальной только если ПОСЛЕ неё модель не
     # переключали: иначе вылеченное папет вечно читалось бы как больное.
     if "api error" in low:
-        # Парсим полную ошибку: [API Error: Request rejected (429) · [...][...]]
-        # Захватываем от "API Error:" до конца строки или следующей скобки
-        m = re.search(r"\[API Error: ([^\]]*(?:\][^\]]*)*)\]", activity, re.I)
+        # Парсим API Error: может быть в виде:
+        # ● API Error: Request rejected (429) · [1308][Usage limit...]
+        # или [API Error: ...]
+        # Ловим от "API Error:" до конца строки/многострочного блока
+        m = re.search(r"API Error: ([^\n]*(?:\n[^\n]*)*?)(?:\n|$)", activity, re.I)
         if m:
             error_text = m.group(1).strip()
-            # Убираем лишние скобки в конце, если есть
-            error_text = error_text.rstrip("]")
+            # Убираем лишние скобки/спецсимволы в конце
+            error_text = error_text.rstrip("[]")
             return "error", error_text
     if "out of usage credits" in low:
         # Актуальна только если "set model to" не идёт после в буфере
