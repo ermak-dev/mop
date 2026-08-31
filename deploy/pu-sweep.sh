@@ -83,6 +83,31 @@ rm_path() {
     rm -rf "$path" 2>/dev/null || sudo -n rm -rf "$path" 2>/dev/null
 }
 
+# Does the clone hold work that exists nowhere else? Uncommitted files, or
+# commits on no remote. Same two probes the node agent reports state with, and
+# `--not --remotes` for the same reason: a working branch whose upstream is
+# pinned to origin/master makes `@{u}..` call merged work unpushed.
+#
+# This is tier 1's third gate, and it was paid for. On 2026-08-31 a puppet was
+# switched from one LLM profile to another; the wrapper tears the tmux session
+# down and brings a new one up, and a sweep landing in that window saw a clone
+# with no session and deleted it -- along with a ticket's uncommitted work. The
+# header above calls the race cheap ("costs a re-clone"), and for a CLEAN clone
+# it is. For one holding work it is not cheap at all, and no amount of tuning
+# the window makes it safe: the sweep cannot tell a restarting puppet from a
+# deleted one, so it must instead refuse to delete anything irreplaceable.
+#
+# The cost is named: a genuinely orphaned clone left behind by `mop delete` now
+# survives if it holds work, and its disk with it. That is the correct trade --
+# disk is bought, an afternoon of a ticket is not -- and `mop wipe <name>`
+# removes it deliberately.
+holds_work() {
+    local d="$1"
+    [ -d "$d/.git" ] || return 1
+    [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ] && return 0
+    [ "$(git -C "$d" rev-list --count HEAD --not --remotes 2>/dev/null || echo 0)" -gt 0 ]
+}
+
 # Does $1 hold anything written in the last $2 days? A directory's own mtime
 # only moves when an entry is added or removed directly in it, so a tree that is
 # still being written can carry a weeks-old timestamp. -quit stops at the first
@@ -151,6 +176,11 @@ for d in "${CLONE_GLOBS[@]}"; do
     [ -d "$d" ] || continue
     n=$(basename "$d")
     live_player "$n" && continue
+    # Нет сессии — ещё не значит «нечего терять»: папет мог перезапускаться.
+    if holds_work "$d"; then
+        note "$n: unsaved work, kept" "-"
+        continue
+    fi
     rm_path "$d" "orphaned clone $n"
 done
 for t in "${TARGET_GLOBS[@]}"; do
