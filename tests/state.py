@@ -32,6 +32,7 @@ FREE_CASES = [
     ("HUNG (not responding)", False),
     ("AGENT SILENT (node agent node1 silent for 20s)", False),
     ("needs action", False),
+    ("unknown (no clone data)", False),
 ]
 
 
@@ -168,7 +169,27 @@ CASES = [
     ("no session file, pane is silent -> branch alone",
      facts("none", WORK, "какой-то текст"), "busy: bug/1063"),
     ("no session file, no clone either",
-     facts("none", None, "какой-то текст"), "no clone yet"),
+     facts("none", None, "какой-то текст"), "unknown (no clone data)"),
+
+    # Клон — последнее слово на КАЖДОМ пути к «free», а не только на пути через
+    # файл сессии. Четвёрка ниже снята с бага 01.09 (pu-rugent-3): три дороги
+    # в обход клона и одна в обход самих данных.
+    ("no session file, work sits on the default branch — the fallback used to"
+     " hide it, since it deliberately mutes the default branch name",
+     facts("none", {**CLEAN, "ahead": 2}, "какой-то текст"),
+     "idle: master (unpushed: 2)"),
+    ("empty pane over a dirty clone — the window right after a restart, where"
+     " unsaved work is exactly what's at stake",
+     facts("idle 1 1", {**CLEAN, "dirty": 3}, "   \n\n"),
+     "idle: master (uncommitted: 3)"),
+    ("buffer scoring says idle, but the clone holds unpushed work",
+     facts("none", {**WORK, "ahead": 2}, "waiting in reserve"),
+     "idle: bug/1063 (unpushed: 2)"),
+    ("session is idle and the clone probe brought nothing back",
+     facts("idle 1 1", None), "unknown (no clone data)"),
+    ("half a clone answer is no answer: a missing count is not a zero",
+     facts("idle 1 1", {"cur": "master", "def": "master"}),
+     "unknown (no clone data)"),
 ]
 
 

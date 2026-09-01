@@ -128,7 +128,7 @@ been created. Pool size is your job; the operator may set a ceiling:
 | `not logged in`, `login expired` | no — the `login` tool, then a restart (`doctor(fix=true)` does both) |
 | `no model quota: <model>` | no — a restart will NOT help: switch the model (`mcp__mop__slash(name, "/model <m>")`) or top up |
 | `error: <provider message>` | no — the provider refused the turn; the message carries the reason and, for a quota, when it resets. A restart will NOT help: switch the model or wait it out |
-| `no clone yet` | no — the wrapper has not finished cloning; look again shortly, `mcp__mop__tail` if it persists |
+| `unknown (no clone data)` | no — the node did not report the clone, so nothing is known about the work in it. Never a synonym for free: look yourself (`mcp__mop__tail`, or ask the puppet) before doing anything to that slot |
 
 "Uncommitted" and "unpushed" are different numbers shown separately on
 purpose — name the right one when re-dispatching. A quota-exhausted puppet
