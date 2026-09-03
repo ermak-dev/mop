@@ -36,6 +36,7 @@
       ansible.builtin.apt:
         name:
           - postgresql
+          - build-essential
           - cmake
           - pkg-config
           - libglib2.0-dev
@@ -57,6 +58,22 @@
         name: postgresql
         state: started
         enabled: yes
+
+    # Тулчейн Rust ставит rustup, а не apt: cargo нужен тот же, каким собирают
+    # проекты (stable, с rustfmt и clippy), и обновлять его должен сам папет,
+    # а не релиз дистрибутива. До появления этой задачи cargo на узлах стоял
+    # с рук -- и свежий узел падал на `cargo install` ниже, потому что бинаря
+    # просто не было: каталог ~/.cargo/bin ему заводила соседняя задача, и
+    # отказ читался как «сломался cargo-sweep», а не «нет Rust».
+    # --no-modify-path: PATH папета задаётся настройкой MOP_PUPPET_PATH, и
+    # правка ~/.profile до него всё равно не доедет -- врапер не логин-шелл.
+    - name: Install the Rust toolchain (rustup)
+      become_user: "{{ MOP_USER }}"
+      ansible.builtin.shell: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
+        | sh -s -- -y --no-modify-path --profile default
+      args:
+        creates: "{{ MOP_HOME }}/.cargo/bin/cargo"
 
     - name: Ensure ~/.cargo/bin exists
       ansible.builtin.file:
@@ -107,17 +124,47 @@
         state: started
         enabled: yes
 
-    - name: Ensure ru_RU.UTF-8 locale exists (test database locale)
-      ansible.builtin.command: locale-gen ru_RU.UTF-8
-      register: locale_gen
-      changed_when: "'done' in locale_gen.stdout"
+    # `locale-gen ru_RU.UTF-8` -- ubuntu'изм: в Debian аргументы игнорируются,
+    # генерится только раскомментированное в /etc/locale.gen. Задача молча
+    # ничего не делала, а падала следом соседняя -- createdb с этой локалью.
+    - name: Ensure ru_RU.UTF-8 is enabled (test database locale)
+      ansible.builtin.lineinfile:
+        path: /etc/locale.gen
+        regexp: '^#?\s*ru_RU\.UTF-8 UTF-8'
+        line: 'ru_RU.UTF-8 UTF-8'
+      register: locale_line
+
+    - name: Generate locales
+      ansible.builtin.command: locale-gen
+      when: locale_line is changed
+
+    # Работающий postgres о новой локали не узнаёт: список он читает при старте,
+    # и createdb ниже отвечал «invalid locale name» на локаль, которая в системе
+    # уже была. Видно только на свежем узле -- там, где locale-gen и срабатывает.
+    - name: Restart postgres to pick up the new locale
+      ansible.builtin.systemd:
+        name: postgresql
+        state: restarted
+      when: locale_line is changed
+
+    # Версию postgres ищем, а не знаем: она была прибита к 16 («Ubuntu 24.04 на
+    # каждом узле»), и первый же узел на Debian 12 принёс 15 -- задача падала
+    # на несуществующем пути, унося с собой весь остаток прогона для узла.
+    - name: Find pg_hba.conf of the installed postgres
+      ansible.builtin.find:
+        paths: /etc/postgresql
+        patterns: pg_hba.conf
+        recurse: yes
+      register: pg_hba_files
 
     - name: Trust local postgres auth (clo tooling connects as -U cloudpub)
       ansible.builtin.replace:
-        # Ubuntu 24.04 => postgresql 16 on every node
-        path: /etc/postgresql/16/main/pg_hba.conf
+        path: "{{ item.path }}"
         regexp: '^(local\s+all\s+all\s+)peer$'
         replace: '\1trust'
+      loop: "{{ pg_hba_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
       register: pg_hba
 
     - name: Reload postgres auth config
@@ -126,10 +173,13 @@
         state: reloaded
       when: pg_hba.changed
 
+    # `&& echo CREATED`, а не `; echo CREATED`: с точкой с запятой код возврата
+    # группы -- это код echo, и провалившийся psql рапортовал changed. Так и
+    # пропустили узел без тестовой базы при зелёном PLAY RECAP.
     - name: Create cloudpub role (superuser -- the test framework drops and creates databases)
       ansible.builtin.shell: >
         [ -n "$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='cloudpub'")" ]
-        || { sudo -u postgres psql -c "CREATE ROLE cloudpub SUPERUSER LOGIN PASSWORD 'cloudpub'"; echo CREATED; }
+        || { sudo -u postgres psql -c "CREATE ROLE cloudpub SUPERUSER LOGIN PASSWORD 'cloudpub'" && echo CREATED; }
       register: pg_role
       changed_when: "'CREATED' in pg_role.stdout"
 
@@ -141,7 +191,7 @@
       ansible.builtin.shell: >
         [ -n "$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='test_cloudpub'")" ]
         || { sudo -u postgres createdb -O cloudpub --template=template0
-        --encoding=UTF8 --locale=ru_RU.UTF-8 test_cloudpub; echo CREATED; }
+        --encoding=UTF8 --locale=ru_RU.UTF-8 test_cloudpub && echo CREATED; }
       register: pg_db
       changed_when: "'CREATED' in pg_db.stdout"
 
