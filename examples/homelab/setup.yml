@@ -21,6 +21,9 @@
     # Project env files a fresh clone cannot invent: the puppet wrapper copies
     # these from ~/puppet-env/<project>/ into every clone it creates, the same way
     # ~/bin/code seeds worktrees on mate. Sources live on the control machine.
+    # Origin шардов этого пула. Клон папета ходит на него по ssh, и узел обязан
+    # знать и ключ хоста, и чем представиться.
+    git_host: git.ermak.dev
     puppet_env_files:
       - {project: rugent, file: ~/rugent/.env}
       - {project: rugent, file: ~/rugent/.env-prod}
@@ -223,6 +226,52 @@
       args:
         creates: "{{ MOP_HOME }}/.nvm/versions/node/v22.12.0/bin/yarn"
         executable: /bin/bash
+
+    # Клон заводит сам папет, по ssh, ДО claude -- и без ключа и доверенного
+    # host key падает на `Host key verification failed` с кодом 128, а Nomad
+    # уводит аллокацию в рестарт с получасовым backoff. Поймано на свежем узле:
+    # deploy зелёный, узел выглядит настроенным, папет не поднимается вовсе.
+    # На старых узлах ключ лежал от личной раскатки хозяина, поэтому промах и
+    # не проявлялся.
+    - name: SSH dir of the pool user
+      ansible.builtin.file:
+        path: "{{ MOP_HOME }}/.ssh"
+        state: directory
+        owner: "{{ MOP_USER }}"
+        group: "{{ MOP_USER }}"
+        mode: '0700'
+
+    - name: Git identity of the pool user
+      ansible.builtin.copy:
+        src: "{{ lookup('env', 'HOME') }}/.ssh/{{ item.name }}"
+        dest: "{{ MOP_HOME }}/.ssh/{{ item.name }}"
+        owner: "{{ MOP_USER }}"
+        group: "{{ MOP_USER }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {name: id_rsa, mode: '0600'}
+        - {name: id_rsa.pub, mode: '0644'}
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Ключ хоста снимаем с управляющей машины и кладём явно: интерактивного
+    # «yes» в клоне из-под Nomad ввести некому, а StrictHostKeyChecking=no
+    # означал бы клон откуда угодно.
+    - name: Host key of the git server
+      delegate_to: localhost
+      become: no
+      run_once: yes
+      ansible.builtin.command: ssh-keyscan -t ed25519 {{ git_host }}
+      register: git_hostkey
+      changed_when: false
+
+    - name: Trust the git host key
+      ansible.builtin.known_hosts:
+        path: "{{ MOP_HOME }}/.ssh/known_hosts"
+        name: "{{ git_host }}"
+        key: "{{ git_hostkey.stdout_lines | reject('match', '^#') | first }}"
+        state: present
+      become_user: "{{ MOP_USER }}"
 
     - name: Create puppet-env project dirs
       ansible.builtin.file:
