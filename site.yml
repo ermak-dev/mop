@@ -8,6 +8,7 @@
 #
 # Один прогон -- один PLAY RECAP: строка на машину, суммирующая все слои.
 
+- import_playbook: deploy/node.yml             # чем узел обязан быть до всего
 - import_playbook: deploy/nomad/setup.yml      # ГДЕ стоит папет
 - import_playbook: examples/homelab/setup.yml  # окружение узлов (установка автора)
 - import_playbook: examples/homelab/claude.yml # скиллы и MCP (установка автора)

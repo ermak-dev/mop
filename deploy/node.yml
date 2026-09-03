@@ -1,0 +1,47 @@
+---
+# Чем узел обязан быть, прежде чем на него ставят что-либо ещё.
+#
+# Слой появился после свежего узла (gpu, Debian 12): прогон падал на первом же
+# `cargo install`, а до шины не доходил вовсе. Причина шире одного cargo --
+# плейбуки молча полагались на то, что базовое поставлено руками. На узлах,
+# заведённых давно, так и было, поэтому промах не проявлялся годами.
+#
+# Что именно нужно самому mop, а не проектам в пуле:
+#   git    -- клон папету заводит врапер (mop/puppets.py), из спеки джоба;
+#   tmux   -- в нём живёт сессия папета, ею же меряется его состояние;
+#   rsync  -- им ansible.posix.synchronize возит пакет mop и скиллы;
+#   claude -- собственно папет; его же зовёт `claude mcp add` в deploy/setup.yml.
+#
+# Слой идёт ПЕРВЫМ в site.yml: и окружение узлов, и шина уже пользуются этим
+# набором, а не доставляют его.
+#
+# Run:  mop deploy
+
+- name: Base prerequisites of a pool node
+  hosts: puppet
+  become: no
+  gather_facts: no
+
+  tasks:
+    - name: Ensure the tools mop itself runs on a node
+      become: yes
+      ansible.builtin.apt:
+        name:
+          - git
+          - tmux
+          - rsync
+          - curl
+        state: present
+
+    # Нативный установщик, а не npm: claude кладёт себя в ~/.local/share/claude
+    # и симлинкует в ~/.local/bin -- ровно туда, куда смотрит MOP_PUPPET_PATH.
+    # Под пользователем пула, а не под root: PATH папета -- это его домашний
+    # каталог, и claude из /root узел бы не увидел.
+    #
+    # creates, а не state=latest: ставим один раз, дальше claude обновляет себя
+    # сам, и прогон deploy не имеет права подменить версию под работающим
+    # папетом.
+    - name: Install the claude CLI
+      ansible.builtin.shell: curl -fsSL https://claude.ai/install.sh | bash
+      args:
+        creates: "{{ MOP_HOME }}/.local/bin/claude"
