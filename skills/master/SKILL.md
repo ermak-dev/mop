@@ -17,8 +17,9 @@ Five invariants carry everything below; the sections are their mechanics:
    plausible its origin, is a puppet and none of them gets work.
 3. **One clone = one ticket**, and every dispatch carries its full context —
    a puppet can be reborn blank at any moment.
-4. **Landing token**: exactly one puppet between merge and push; the full gate
-   runs on the integrated result.
+4. **Landing token**: exactly one puppet between merge and push; the
+   integrated result gets the format check and the ticket's own tests, and
+   the full suite stays CI's job on the push.
 5. **Silence is not success**: the puppet's report is the signal; idle notices
    and deadlines are only a safety net.
 
@@ -31,7 +32,8 @@ From the project's rules file, stated back to the operator in your first
 message so a wrong assumption dies before it reaches a puppet: the
 integration branch; the tracker and the exact commands to read, comment,
 take and transfer tickets — **all run in YOUR session, never in a puppet's**;
-the full gate and the format check; the fast narrow test; branch naming;
+what the landing gate is and what the project leaves to CI; the format
+check; the fast narrow test; branch naming;
 the ticket body language; how to read CI from the terminal. If the tickets
 live only in the operator's head — say so and stop.
 
@@ -202,10 +204,12 @@ Not doing: <what the triage explicitly rejected, and why>.
 
 Protocol: failing test → minimal fix → <narrow test> → <format/lint>.
 Then ASK ME for the landing token and wait — no merge, no push without it.
-With it: merge --no-ff onto a fresh <integration branch> → the FULL gate on
-the integrated result → one push → switch back to <integration branch> (a
-clone back on the default branch is what reads as free) → return the token
-and report. Do not wait for builds.
+With it: merge --no-ff onto a fresh <integration branch> → <format/lint> plus
+THIS TICKET'S OWN TESTS on the integrated result → one push → switch back to
+<integration branch> (a clone back on the default branch is what reads as
+free) → return the token and report. Do not run the full suite and do not
+wait for builds: the suite is CI's job on the push, and the token is held
+only between merge and push.
 Report: branch, FULL sha of the fix commit, FULL sha of the merge, the
 guarding test's name, the remainder left, and the tracker comment ready to
 paste in <tracker language> — I paste it, not you.
@@ -261,10 +265,17 @@ Under the token, in order:
 
 1. Fresh integration branch, `git merge --no-ff` — one merge commit per
    ticket keeps `git revert -m 1 <merge>` a one-push rollback.
-2. **The FULL gate on the integrated result**, not the narrow test.
+2. **The format/lint check plus the ticket's own tests on the integrated
+   result** — what the merge could have broken, not everything the project
+   has. The full suite is CI's job on the push: running it under the token
+   serialises tens of minutes behind every landing while the queue stands
+   still, and consecutive pushes cancel each other's runs anyway. A project
+   whose rules file says otherwise wins; check it before dispatching.
 3. **One** push (a short-lived ref of the branch, if the integration branch
    is checked out somewhere else).
-4. Return the token, report, wait for the next task.
+4. Return the token, report, wait for the next task. The puppet does not
+   wait for its pipeline — the master owns the verdict on the integration
+   branch, and a puppet holding the token until green is the same stall.
 
 Gate discipline, for any runner:
 
