@@ -9,6 +9,7 @@
 # Что именно нужно самому mop, а не проектам в пуле:
 #   git    -- клон папету заводит врапер (mop/puppets.py), из спеки джоба;
 #   tmux   -- в нём живёт сессия папета, ею же меряется его состояние;
+#   jq     -- им врапер гасит первый запуск claude (edit_json в puppets.py);
 #   rsync  -- им ansible.posix.synchronize возит пакет mop и скиллы;
 #   claude -- собственно папет; его же зовёт `claude mcp add` в deploy/setup.yml.
 #
@@ -29,6 +30,7 @@
         name:
           - git
           - tmux
+          - jq
           - rsync
           - curl
         state: present
