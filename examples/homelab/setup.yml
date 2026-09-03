@@ -18,6 +18,14 @@
 
   vars:
     nextest_version: 0.9.98
+    # Постгресс — из PGDG, одной версией на весь флот: дистро-репы разносят
+    # узлы по мажорам (noble везёт 16, bookworm -- 15), а тесты ходят в
+    # локальный кластер всех узлов. Минор прибит точно: PGDG уже держит 18.6
+    # рядом с 18.4, и без пина «поставь 18.4» оборачивается «поставь последний
+    # 18.x». Пул хранит ~3 минорника -- когда 18.4 выпилят, прогон упадёт на
+    # задаче Resolve ниже, и правится это цифрой здесь.
+    postgres_major: 18
+    postgres_version: "18.4"
     # Project env files a fresh clone cannot invent: the puppet wrapper copies
     # these from ~/puppet-env/<project>/ into every clone it creates, the same way
     # ~/bin/code seeds worktrees on mate. Sources live on the control machine.
@@ -31,14 +39,13 @@
       - {project: cloudpub, file: ~/cloudpub/.env}
 
   tasks:
-    # postgresql: rug test creates a per-run database via `sudo -u postgres`;
     # cmake: cloudpub's libz-ng-sys builds zlib-ng with it; the gtk/webkit dev
     # set: cloudpub's workspace includes a Tauri gui crate, and `clo test
-    # --rust` builds the whole graph.
+    # --rust` builds the whole graph. (Постгресс в списке не живёт -- он идёт
+    # из PGDG отдельным блоком ниже.)
     - name: Ensure puppet toolchain packages
       ansible.builtin.apt:
         name:
-          - postgresql
           - build-essential
           - cmake
           - pkg-config
@@ -56,11 +63,103 @@
           - media-types
         state: present
 
+    # --- postgres: PGDG, весь флот на одном минорнике ----------------------
+    # Не дистро-пакет `postgresql`: он тянет мажор дистро, а дистро у узлов
+    # разные, и rug (per-run база через `sudo -u postgres`) с cloudpub'ом
+    # получали на разных узлах разный постгресс. PGDG кладёт в оба дистро
+    # одинаковые пакеты; версия -- в postgres_version наверху.
+    - name: Ensure /etc/apt/keyrings exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: PGDG signing key
+      ansible.builtin.get_url:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        dest: /etc/apt/keyrings/postgresql.asc
+        mode: '0644'
+
+    # Suite у PGDG дистро-специфичный (bookworm-pgdg / noble-pgdg); фактов
+    # игра не собирает (gather_facts: no), кодовое имя читаем с узла.
+    - name: Detect distro codename
+      ansible.builtin.shell: . /etc/os-release && echo -n "$VERSION_CODENAME"
+      register: pgdg_codename
+      changed_when: false
+
+    - name: Add the PGDG apt repo
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/pgdg.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/postgresql.asc] https://apt.postgresql.org/pub/repos/apt {{ pgdg_codename.stdout }}-pgdg main
+        mode: '0644'
+      register: pgdg_repo
+
+    - name: Update apt cache for the PGDG repo
+      ansible.builtin.apt:
+        update_cache: yes
+      when: pgdg_repo is changed
+
+    # Суффикс точной версии зависит от дистро (18.4-1.pgdg24.04+1 против
+    # ...pgdg12+1), поэтому её собираем из переменной через apt-cache. Пустой
+    # ответ -- 18.4 уже выпилен из пула, см. комментарий у postgres_version.
+    # (madison печатает «пакет | версия | репо»: с дефолтным FS awk версией
+    # будет третье поле, второе -- литеральная вертикальная черта.)
+    - name: Resolve the exact package version of postgres {{ postgres_version }}
+      ansible.builtin.shell: >
+        apt-cache madison postgresql-{{ postgres_major }}
+        | awk -v v='{{ postgres_version }}-' '$3 ~ "^" v {print $3; exit}'
+      register: pg_exact
+      changed_when: false
+      failed_when: pg_exact.stdout == ''
+
+    # Пин до установки, а не после: 18.5/18.6 лежат в том же репо, и без пина
+    # любой apt upgrade на узле уводил бы минор от заданного. Приоритет 1001
+    # разрешает и обратный ход -- узел, уведённый в 18.6 мимо плейбука,
+    # следующим прогоном возвращается на 18.4. Глоб postgresql*, а не
+    # postgresql-18*: у семейства разные префиксы (postgresql-doc-18,
+    # postgresql-server-dev-18), и неприпиннутый близнец в 18.6 через строгие
+    # (=)-зависимости заставлял apt сносить припиннутый сервер 18.4 прямо в
+    # соседней транзакции. Пакеты с другим номером (postgresql-common,
+    # libpq5, pgvector) под глоб версии не подпадают и живут как хотят.
+    - name: Pin postgres {{ postgres_version }} against repo drift
+      ansible.builtin.copy:
+        dest: /etc/apt/preferences.d/postgresql-pgdg
+        content: |
+          Package: postgresql*
+          Pin: version {{ postgres_version }}*
+          Pin-Priority: 1001
+        mode: '0644'
+
+    # pgvector не пиним: нумерация у него своя (0.8.x), к минору сервера он
+    # безразличен. Нужен сразу: fireai на mate ходит в vector. (contrib
+    # отдельным пакетом не ставим: с десятки это виртуальный пакет внутри
+    # postgresql-18, hstore/ltree/pg_trgm уже там.)
+    - name: Install postgres {{ postgres_version }} from PGDG
+      ansible.builtin.apt:
+        name:
+          - postgresql-{{ postgres_major }}={{ pg_exact.stdout }}
+          - postgresql-client-{{ postgres_major }}={{ pg_exact.stdout }}
+          - postgresql-{{ postgres_major }}-pgvector
+        state: present
+        # Даунгрейд -- законный сценарий: узел, уведённый в свежий минор
+        # мимо плейбука (или его пакеты-близнецы), возвращается на пин.
+        allow_downgrade: yes
+
     - name: Ensure postgres is running
       ansible.builtin.systemd:
         name: postgresql
         state: started
         enabled: yes
+
+    # Проверяем не «пакет поставился», а что на 5432 реально слушает заданный
+    # минор -- весь смысл PGDG-блока. server_version_num (18.4 -> 180004), а
+    # не server_version: тот печатает «18.4 (Debian 18.4-1.pgdg…)».
+    - name: Verify postgres is {{ postgres_version }}
+      ansible.builtin.command: sudo -u postgres psql -tAc "SHOW server_version_num"
+      register: pg_version_check
+      changed_when: false
+      failed_when: pg_version_check.stdout | int != (postgres_major | int) * 10000 + (postgres_version.split('.')[1] | int)
 
     # Тулчейн Rust ставит rustup, а не apt: cargo нужен тот же, каким собирают
     # проекты (stable, с rustfmt и clippy), и обновлять его должен сам папет,
@@ -150,9 +249,11 @@
         state: restarted
       when: locale_line is changed
 
-    # Версию postgres ищем, а не знаем: она была прибита к 16 («Ubuntu 24.04 на
-    # каждом узле»), и первый же узел на Debian 12 принёс 15 -- задача падала
-    # на несуществующем пути, унося с собой весь остаток прогона для узла.
+    # Путь к pg_hba содержит мажор, но литерал здесь не нужен: когда его
+    # прибивали к 16 («Ubuntu 24.04 на каждом узле»), первый же узел на
+    # Debian 12 принёс 15 -- и задача падала на несуществующем пути, унося с
+    # собой весь остаток прогона. Мажор теперь пинит PGDG-блок выше; поиск
+    # дешевле, чем вторая копия этой правки.
     - name: Find pg_hba.conf of the installed postgres
       ansible.builtin.find:
         paths: /etc/postgresql
