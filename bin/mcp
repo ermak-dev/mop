@@ -104,15 +104,6 @@ def tool(**kw):
     return deco
 
 
-# Раздача кредов -- глагол write узла, и он отдан только псевдошарду admin:
-# мастер шарда ходит под кредом master-<шард>, которому и NATS, и агент
-# отказывают. Инструмент из его профиля возвращал FAILED по каждому узлу,
-# а doctor затем перезапускал папетов без кредов. Отказываем до поездки.
-OPERATOR_ONLY = ("" if bus.SHARD == bus.ADMIN else
-                 f"credentials are node files and shard {bus.SHARD} cannot write "
-                 "them: run `mop login` on the control machine as operator")
-
-
 def master_tool(**kw):
     """Инструмент, который есть только у мастера. На узле функция остаётся
     обычной питоновской и просто не попадает в список инструментов."""
@@ -524,13 +515,10 @@ def doctor(fix: bool = False) -> str:
     # перезапускались и возвращались в то же «not logged in».
     delivered = {}
     if any(i["action"] == "login+restart" for i in issues):
-        if OPERATOR_ONLY:
-            out += ["", OPERATOR_ONLY]
-        elif not keys.credentials_fresh():
+        if not keys.credentials_fresh():
             return "\n".join(out + ["", "local credentials are stale — log into "
                                     "claude on the control machine, then doctor(fix=true)"])
-        else:
-            delivered = keys.push_login()[0]
+        delivered = keys.push_login()[0]
     done = [f"  {i['name']}: {_treat(i, delivered)}" for i in issues if i["action"]]
     return "\n".join(out + ["", *done])
 
@@ -574,8 +562,6 @@ def slash(name: str, command: str) -> str:
     "Push claude.ai credentials and LLM provider keys out to the pool's "
     "nodes. Fixes puppets stuck on a stale login."))
 def login() -> str:
-    if OPERATOR_ONLY:
-        return OPERATOR_ONLY
     results, what, note = keys.push_login()
     out = [("pushing: " + " + ".join(what))] + ([note] if note else [])
     return "\n".join(out + table([(n, results[n]) for n in sorted(results)]))
