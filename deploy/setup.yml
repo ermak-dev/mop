@@ -267,6 +267,11 @@
         chdir: "{{ mop_home }}"
       environment:
         MOP_NODE: "{{ inventory_hostname }}"
+        # Пустой MOP_BUS_CONFIG затирает креды окружения, если deploy запущен
+        # из мастер-шелла: на машине в двух ролях (mate) проверка иначе шла на
+        # шину как master-<шард>, и отказ прав на mop.admin.node.<узел>.msg
+        # читался как «агент не подписан» -- при живом и здоровом агенте.
+        MOP_BUS_CONFIG: ""
       changed_when: false
 
   handlers:
