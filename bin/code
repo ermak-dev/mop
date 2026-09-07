@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""launch claude on an LLM profile, outside the pool: mop code [--llm PROFILE] [claude options]
+
+Same profile machinery as `mop master`, none of the pool. No shard, no bus
+credentials, no mop MCP server: this is an ordinary claude session that just
+happens to come up on a chosen provider. Use it where the pool has nothing to
+do with the job — a scratch checkout, someone else's repository, a shell on
+a machine that never got `mop deploy`.
+
+Only --llm belongs to this command; EVERYTHING ELSE goes to claude as-is
+(`mop code --continue` resumes the last session here). The command won't
+mirror claude's own flags: there are dozens of them, and the list would drift
+the moment claude ships a new version.
+
+Permissions are claude's default, unlike `mop master`. A master runs skipping
+them because the message channel checks permission classes and a puppet's
+report would otherwise park in the held queue; nobody reports to this session,
+so the price isn't worth paying. Pass --dangerously-skip-permissions yourself
+if you want it.
+
+--llm brings the session up on a profile from mop/llm/ — the same set puppets
+run on. Without the flag, the installation's MOP_DEFAULT_LLM applies. The
+profile's static env goes into the session whole, while the key itself is read
+from this machine's .env: there's no node secrets.env here, and the local .env
+is exactly what serves as the source of truth for keys.
+"""
+import os
+
+import lib
+from mop import config, llm, puppets
+
+
+def main(argv):
+    # Никакого разбора позиционных: своих аргументов у команды нет, и всё,
+    # кроме --llm, уезжает claude дословно. Отсюда же отсутствие обязательного
+    # `--` из `mop master`: там он отделял origin от значения чужого флага,
+    # здесь отделять не от чего.
+    profile, passthru = lib.parse_llm(argv)
+    profile = profile or config.get("MOP_DEFAULT_LLM")
+
+    # Тот же источник ключа, что у мастера: местный .env, а не узловой
+    # secrets.env. Отказ — а не тишина: сессия без ключа отбивает каждый ход
+    # 401-й, а читается живой.
+    prof = llm.require(profile)
+    env = dict(os.environ, **prof["env"])
+    if prof["key"]:
+        key = config.get(prof["key"])
+        if not key:
+            lib.usage(f"profile {profile}: no {prof['key']} in "
+                      f"{puppets.LOCAL_KEYS_FILE} — add it and retry")
+        env[prof["auth_var"]] = key
+    # flush до exec: буфер stdout не переживает execvpe, и строка о профиле
+    # пропадала бы везде, где вывод не в терминал.
+    print(f"claude [{profile}]"
+          + (f" + {' '.join(passthru)}" if passthru else ""), flush=True)
+    os.execvpe("claude", ["claude"] + passthru, env)
+
+
+# Не lib.cluster: пула эта команда не касается, и требовать настроенный
+# кластер ради запуска claude в чужом каталоге не за что.
+lib.run(main)
