@@ -17,9 +17,10 @@ Five invariants carry everything below; the sections are their mechanics:
    plausible its origin, is a puppet and none of them gets work.
 3. **One clone = one ticket**, and every dispatch carries its full context —
    a puppet can be reborn blank at any moment.
-4. **Landing token**: exactly one puppet between merge and push; the
-   integrated result gets the format check and the ticket's own tests, and
-   the full suite stays CI's job on the push.
+4. **Landing token**: exactly one puppet between merge and push, and the
+   gate on the integrated result is the SMALLEST thing that keeps the
+   integration branch buildable — usually just the format/lint check. Tests
+   are CI's job on the push.
 5. **Silence is not success**: the puppet's report is the signal; idle notices
    and deadlines are only a safety net.
 
@@ -265,12 +266,31 @@ Under the token, in order:
 
 1. Fresh integration branch, `git merge --no-ff` — one merge commit per
    ticket keeps `git revert -m 1 <merge>` a one-push rollback.
-2. **The format/lint check plus the ticket's own tests on the integrated
-   result** — what the merge could have broken, not everything the project
-   has. The full suite is CI's job on the push: running it under the token
-   serialises tens of minutes behind every landing while the queue stands
-   still, and consecutive pushes cancel each other's runs anyway. A project
-   whose rules file says otherwise wins; check it before dispatching.
+2. **The format/lint check on the integrated result, and nothing more
+   unless you can name what it buys.** Tests are CI's job on the push.
+   Running them under the token serialises tens of minutes behind every
+   landing while the queue stands still, and consecutive pushes cancel each
+   other's runs anyway. A project whose rules file says otherwise wins;
+   check it before dispatching.
+
+   **Find out what the format check already does before adding to it.**
+   A lint step that type-checks (`cargo clippy --workspace --all-targets`,
+   `tsc --noEmit`, `mypy`) IS the compile, and stricter — a separate build
+   phase beside it buys nothing and costs the whole build twice. Measured
+   here: a gate ran `rug fmt --check` AND `cargo check --workspace
+   --all-targets` for a whole session before anyone read `bin/fmt` and saw
+   clippy already in it.
+
+   **The one thing worth gating on is that the integration branch still
+   BUILDS**, because everyone rebases on it: a head that does not compile
+   stops the next puppet with an error they cannot attribute — they cannot
+   tell a broken branch from a broken base. Everything past that is
+   post-hoc, and post-hoc is fine: CI runs on the push, and you fix forward.
+
+   **Full per-crate suites under the token are the classic waste.** They are
+   green at the author, green after the merge, and they cost the queue tens
+   of minutes per package. If you are tempted, first ask what a landing gate
+   caught this week that CI would not have caught twenty minutes later.
 3. **One** push (a short-lived ref of the branch, if the integration branch
    is checked out somewhere else).
 4. Return the token, report, wait for the next task. The puppet does not
@@ -288,6 +308,14 @@ Gate discipline, for any runner:
 - Suite and lint **in sequence**: started together they queue behind the
   build tool's lock, and a gate waiting on a lock is indistinguishable from
   a hung one.
+- **Keep the landing on ONE puppet while the queue is long.** The build
+  directory is keyed by the clone, so a landing that moves between puppets
+  pays a cold compile every time — here that was over half the gate's wall
+  clock. Same puppet, warm tree; branches reach it through the origin
+  anyway, so nothing else changes.
+- **Do not dry-run the merge separately when the gate compiles.** It is the
+  same build twice, and the gate's is the better one: it runs on the tree
+  that goes out, not on a copy of it.
 - The run **writes its own verdict into its log**
   (`{ ./cmd; echo "===EXIT=$?==="; } > gate.log 2>&1`). An exit code
   recovered from outside the run is a reconstruction: a pipe reports its
