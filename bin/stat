@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""token usage across the pool, a bar per day: mop stat [--days N] [--puppets]
+
+Sums claude token counters (input, output, cache write, cache read) over
+every puppet on every ready node for the last N days (default 14), by the
+node's local date. --puppets breaks the same window down per puppet, the
+biggest spender first, instead of drawing the chart. Read off the puppets'
+own transcripts, so a puppet whose clone was removed no longer counts. In a
+master shell the picture is the shard's, not the pool's.
+"""
+import shutil
+
+import lib
+from mop import bus, nomad, usage
+from mop.render import table
+
+DEFAULT_DAYS = 14
+# Разбор транскриптов — не мгновенный: у узла десяток папетов, у каждого
+# транскрипты за окно, и обычные 20с шины на «агент молчит» здесь были бы
+# ложным диагнозом.
+TIMEOUT = 90
+
+
+def human(n):
+    """1234567 -> 1.2M: на графике важен порядок, а не разряды."""
+    for unit, div in (("G", 1e9), ("M", 1e6), ("k", 1e3)):
+        if n >= div:
+            v = n / div
+            return f"{v:.1f}{unit}" if v < 10 else f"{v:.0f}{unit}"
+    return str(n)
+
+
+def parse(argv):
+    """-> (дней, по папетам?)"""
+    days, by_puppet = DEFAULT_DAYS, False
+    it = iter(argv)
+    for a in it:
+        if a == "--puppets":
+            by_puppet = True
+            continue
+        if a == "--days":
+            a = next(it, "")
+        elif a.startswith("--days="):
+            a = a.split("=", 1)[1]
+        else:
+            lib.usage(__doc__)
+        try:
+            days = int(a)
+        except ValueError:
+            lib.usage(__doc__)
+        if days < 1:
+            lib.usage(__doc__)
+    return days, by_puppet
+
+
+def chart(days, per_day):
+    """Строка на день: дата, полоса, итог. Полоса — доля от самого жирного
+    дня, ширина — под терминал, чтобы график не ломался переносами."""
+    axis = usage.days_back(days)
+    totals = {d: usage.total(per_day.get(d, {})) for d in axis}
+    peak = max(totals.values()) or 1
+    width = max(shutil.get_terminal_size((80, 24)).columns - 12 - 8, 10)
+    for d in axis:
+        n = totals[d]
+        bar = "#" * round(width * n / peak)
+        print(f"{d}  {bar.ljust(width)} {human(n) if n else '-':>6}")
+
+
+def _sum_days(rows):
+    acc = usage.empty()
+    for row in rows.values():
+        for k in usage.KINDS:
+            acc[k] += int(row.get(k) or 0)
+    return acc
+
+
+def breakdown(per_puppet):
+    """Таблица по папетам, от самого прожорливого. per_puppet: {(имя, узел):
+    {kind: n}}. Ключ с узлом, а не одно имя: переехавший папет оставляет
+    транскрипты на старом узле, и обе строки — его расход."""
+    rows = [("PUPPET", "NODE", "INPUT", "OUTPUT", "CACHE-W", "CACHE-R", "TOTAL")]
+    order = sorted(per_puppet.items(), key=lambda kv: -usage.total(kv[1]))
+    for (name, node), t in order:
+        rows.append((name, node, human(t["input"]), human(t["output"]),
+                     human(t["cache_write"]), human(t["cache_read"]),
+                     human(usage.total(t))))
+    print("\n".join(table(rows)))
+
+
+def main(argv):
+    days, by_puppet = parse(argv)
+    nodes = sorted(nomad.ready_nodes())
+    answers = bus.request_many({n: {"verb": "usage", "days": days} for n in nodes},
+                               timeout=TIMEOUT)
+    per_day, per_puppet, failed = {}, {}, []
+    for n in nodes:
+        a = answers.get(n)
+        if isinstance(a, Exception) or not a or a.get("error"):
+            why = a if isinstance(a, Exception) else (a or {}).get("error") or "no response"
+            failed.append(f"{n}: {why}")
+            continue
+        for name, rows in a.get("usage", {}).items():
+            per_puppet[(name, n)] = _sum_days(rows)
+            usage.merge(per_day, rows)
+    puppets = len(per_puppet)
+
+    if len(failed) == len(nodes):
+        # Ни одного ответа — график из прочерков был бы ложью про пустой пул.
+        return "no node answered:\n  " + "\n  ".join(failed)
+    shard = lib.in_shard()
+    who = f"shard {shard}" if shard else "whole pool"
+    print(f"tokens per day, {who}, last {days} days: "
+          f"{puppets} puppets on {len(nodes) - len(failed)} nodes")
+    if by_puppet:
+        breakdown(per_puppet)
+    else:
+        chart(days, per_day)
+    grand = _sum_days(per_day)
+    print(f"total {human(usage.total(grand))}: "
+          + ", ".join(f"{k.replace('_', ' ')} {human(grand[k])}" for k in usage.KINDS))
+    for f in failed:
+        print(f"  not counted — {f}")
+
+
+lib.run(lib.cluster(main))
