@@ -37,7 +37,7 @@ try:
 except ImportError:
     sys.exit("bus library needed: pip install --user --break-system-packages nats-py")
 
-from . import bus, config, session
+from . import bus, config, session, usage
 
 HOME = os.path.expanduser("~")
 CLONES = f"{HOME}/puppets"
@@ -452,10 +452,40 @@ async def v_write(req):
     return {"written": written}
 
 
+async def v_usage(req):
+    """Расход токенов папетов этого узла по дням: {usage: {папет: {дата:
+    {input, output, cache_write, cache_read}}}}, окно — `days` суток включая
+    сегодня, по местному времени узла.
+
+    Считается по транскриптам ~/.claude/projects/<slug клона>/ (подробности и
+    ловушка с дублями — в usage.py). Папета перечисляем по КЛОНАМ, а не по
+    каталогам транскриптов: имя в slug'е искалечено (точки и подчёркивания
+    стали дефисами), и обратно в имя папета, которое сверяется с шардом, его
+    не собрать. Цена — снесённый вместе с клоном папет из статистики
+    выпадает, хотя транскрипты его ещё лежат.
+
+    Чужих папетов выбрасываем молча, как states: мастер шарда видит расход
+    своего шарда, оператор — всего узла."""
+    days = min(max(int(req.get("days") or 7), 1), 366)
+    try:
+        names = sorted(n for n in os.listdir(CLONES) if n.startswith(PREFIX))
+    except OSError:
+        names = []
+    names = [n for n in names if await _mine(req, n)]
+
+    def one(name):
+        d = f"{usage.PROJECTS}/{usage.slug(clone_dir(name))}"
+        return usage.scan(d, days) if os.path.isdir(d) else {}
+    # В потоке: разбор транскриптов — файловый ввод и json, а петля агента
+    # в это время обязана отвечать на состояния.
+    got = await asyncio.gather(*(asyncio.to_thread(one, n) for n in names))
+    return {"node": node_name(), "usage": dict(zip(names, got))}
+
+
 VERBS = {"ping": v_ping, "local": v_local, "state": v_state,
          "states": v_states, "sizes": v_sizes, "send": v_send,
          "tail": v_tail, "type": v_type, "write": v_write,
-         "disk": v_disk, "wipe": v_wipe}
+         "disk": v_disk, "wipe": v_wipe, "usage": v_usage}
 
 # Глаголы, которые называют конкретного папета: у них шард запроса обязан
 # сойтись с настоящим шардом папета.
