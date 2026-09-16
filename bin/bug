@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""project tracker: GitLab issues, one issue per unit of work
+
+  mop bug list [--all] [--label L] [-t TEXT]   open issues, worst first
+  mop bug show <iid>                           full body
+  mop bug new "Заголовок" [--label L ...]      body from --body-file or stdin
+  mop bug new "Заголовок" --epic 12            child of epic #12
+  mop bug epic <iid>                           the epic's children and progress
+  mop bug comment <iid> "текст"                comment (or - for stdin)
+  mop bug start <iid> [slug] [--no-branch]     claim: status::wip + branch
+  mop bug close <iid> --comment "..."          close, default status::fixed
+  mop bug relabel <iid> --status live          back to the queue
+  mop bug labels                               the label vocabulary
+
+Coordinates come from the working copy's git origin; credentials are
+GITLAB_TOKEN (or GITLAB_USER + GITLAB_PASSWORD) in .env. Titles, bodies and comments are in
+Russian; branch names and commits stay English.
+"""
+import argparse
+import sys
+
+import lib
+from mop import gitlab
+from mop.render import table
+
+
+def read_body(text, path):
+    """Тело задачи: --body-file, аргумент или stdin. Через файл и stdin — ради
+    бэктиков и переносов: шелл их съедает, а тело задачи без них не написать."""
+    if path:
+        with open(path) as f:
+            return f.read().strip()
+    if text and text != "-":
+        return text.strip()
+    return sys.stdin.read().strip()
+
+
+def cmd_list(a):
+    issues = gitlab.issues(state="all" if a.all else "opened",
+                           labels=[gitlab.check_label(l) for l in a.label],
+                           search=a.text)
+    if not issues:
+        print("no issues")
+        return
+    print("\n".join(table(
+        [(f"#{i['iid']}",
+          gitlab.scoped(i["labels"], "status::").removeprefix("status::") or "-",
+          gitlab.scoped(i["labels"], "sev::").removeprefix("sev::") or "-",
+          gitlab.scoped(i["labels"], "component::").removeprefix("component::") or "-",
+          i["title"]) for i in issues])))
+
+
+def cmd_show(a):
+    i = gitlab.issue(a.iid)
+    print(f"#{i['iid']} {i['title']}")
+    print(f"{i['state']} · {', '.join(i['labels']) or 'no labels'} · {i['web_url']}\n")
+    print(i.get("description") or "(empty)")
+
+
+def cmd_new(a):
+    labels = [gitlab.check_label(l) for l in a.label]
+    if not gitlab.scoped(labels, "status::"):
+        labels.append("status::live")
+    body = read_body(None, a.body_file)
+    if a.epic:
+        body = gitlab.with_epic(body, a.epic)
+    i = gitlab.create(a.title, body, labels)
+    print(f"#{i['iid']} {i['web_url']}")
+
+
+def cmd_epic(a):
+    """Дети эпика и прогресс. Закрытых считаем по состоянию задачи, а не по
+    метке: закрыть можно и из веба, и тогда метка отстанет от правды."""
+    kids = gitlab.children(a.iid)
+    if not kids:
+        print(f"#{a.iid}: no children yet")
+        return
+    done = sum(1 for i in kids if i["state"] == "closed")
+    print("\n".join(table(
+        [(f"#{i['iid']}",
+          "closed" if i["state"] == "closed" else
+          (gitlab.scoped(i["labels"], "status::").removeprefix("status::") or "-"),
+          i["title"]) for i in kids])))
+    print(f"\n{done}/{len(kids)} closed")
+
+
+def cmd_comment(a):
+    gitlab.comment(a.iid, read_body(a.text, a.body_file))
+    print(f"#{a.iid} commented")
+
+
+def cmd_start(a):
+    """Взять задачу: метка wip плюс ветка.
+
+    Ветку заводит ИСПОЛНИТЕЛЬ в своём клоне, поэтому у мастера есть
+    --no-branch: общий чекаут мастера не переключается никогда."""
+    i = gitlab.issue(a.iid)
+    branch = gitlab.branch_name(i["labels"], a.iid, a.slug or i["title"])
+    gitlab.relabel(a.iid, gitlab.with_status(i["labels"], "wip"))
+    note = f"Работа начата в ветке `{branch}`"
+    if a.worker:
+        note += f" · воркер {a.worker}"
+    gitlab.comment(a.iid, note + ".")
+    if a.no_branch:
+        print(f"#{a.iid} claimed; branch for the executor: {branch}")
+        return
+    lib.git("fetch", "origin")
+    lib.git("checkout", "-b", branch, lib.default_branch())
+    print(f"#{a.iid} claimed, on {branch}")
+
+
+def cmd_close(a):
+    i = gitlab.issue(a.iid)
+    if a.comment:
+        gitlab.comment(a.iid, a.comment)
+    gitlab.close(a.iid, gitlab.with_status(i["labels"], a.status))
+    print(f"#{a.iid} closed as {a.status}")
+
+
+def cmd_relabel(a):
+    i = gitlab.issue(a.iid)
+    labels = gitlab.with_status(i["labels"], a.status) if a.status else list(i["labels"])
+    for l in a.label:
+        group = gitlab.check_label(l).split("::")[0]
+        labels = [x for x in labels if not x.startswith(f"{group}::")] + [l]
+    (gitlab.reopen if a.status in gitlab.OPEN_STATUSES and i["state"] == "closed"
+     else gitlab.relabel)(a.iid, labels)
+    print(f"#{a.iid}: {', '.join(labels)}")
+
+
+def cmd_labels(_a):
+    print("\n".join(table([(g + "::", ", ".join(v)) for g, v in gitlab.VOCAB.items()])))
+    print("\nOne label from each group per issue: a second one of the same "
+          "group silently replaces the first.")
+
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="mop bug", add_help=False)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add(name, fn, **kw):
+        s = sub.add_parser(name, add_help=False, **kw)
+        s.set_defaults(fn=fn)
+        return s
+
+    s = add("list", cmd_list)
+    s.add_argument("--all", action="store_true")
+    s.add_argument("--label", action="append", default=[])
+    s.add_argument("-t", "--text")
+
+    add("show", cmd_show).add_argument("iid")
+
+    s = add("new", cmd_new)
+    s.add_argument("title")
+    s.add_argument("--label", action="append", default=[])
+    s.add_argument("--body-file")
+    s.add_argument("--epic")
+
+    add("epic", cmd_epic).add_argument("iid")
+
+    s = add("comment", cmd_comment)
+    s.add_argument("iid")
+    s.add_argument("text", nargs="?")
+    s.add_argument("--body-file")
+
+    s = add("start", cmd_start)
+    s.add_argument("iid")
+    s.add_argument("slug", nargs="?")
+    s.add_argument("--worker")
+    s.add_argument("--no-branch", action="store_true")
+
+    s = add("close", cmd_close)
+    s.add_argument("iid")
+    s.add_argument("--comment")
+    s.add_argument("--status", default="fixed", choices=gitlab.CLOSE_STATUSES)
+
+    s = add("relabel", cmd_relabel)
+    s.add_argument("iid")
+    s.add_argument("--status", choices=gitlab.OPEN_STATUSES + gitlab.CLOSE_STATUSES)
+    s.add_argument("--label", action="append", default=[])
+
+    add("labels", cmd_labels)
+
+    if not argv:
+        lib.usage(__doc__)
+    a = p.parse_args(argv)
+    return a.fn(a)
+
+
+# Не lib.cluster: трекер к кластеру отношения не имеет, и требовать
+# настроенный Nomad ради чтения задачи не за что.
+lib.run(main)
