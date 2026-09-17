@@ -46,6 +46,7 @@ CONTRACT = [
     ("no projects_dir", plugin(projects_dir=None), False),
     ("no attach_argv", plugin(attach_argv=None), False),
     ("no repair_argv", plugin(repair_argv=None), False),
+    ("no run_argv", plugin(run_argv=None), False),
     ("a verb that is not callable", plugin(argv="ssh"), False),
     # SESSION_PY уезжает в шелл внутри тела. Пустое значение там молча
     # соберётся в `python3  probe <clone>` — python прочитает probe как файл.
@@ -71,6 +72,7 @@ NAMES = [
 # прямо в tmux-сервер папета. На этом стоит `mop attach`.
 HOST_ARGV = [
     ("argv is empty: the body is the node", "argv", []),
+    ("nothing to connect with either: the wrapper runs here", "run_argv", []),
     ("repair path is the same as the main one", "repair_argv", []),
     ("a human attaches to the puppet's own tmux server", "attach_argv",
      ["tmux", "-L", "pu-mop-1", "attach", "-t", "pu-mop-1"]),
@@ -264,6 +266,27 @@ def main():
     if "BatchMode=yes" not in " ".join(a):
         bad += 1
         print("FAILED  pve.argv without BatchMode can stop on a password prompt")
+
+    # Соединение ВРАПЕРА живёт столько же, сколько папет, и мультиплексировать
+    # его нельзя. Поймано на живом папете: мастер-соединение, уходящее по
+    # ControlPersist, уносит с собой сессию врапера — ssh отдаёт 255, Nomad
+    # читает это как падение задачи и перезапускает папета на ровном месте.
+    cases += 1
+    r = pve.run_argv("pu-mop-1")
+    joined = " ".join(r)
+    if r[:1] != ["ssh"] or not any(x.endswith("@" + ip) for x in r):
+        bad += 1
+        print(f"FAILED  pve.run_argv must be ssh into {ip}: {r!r}")
+    cases += 1
+    if "ControlMaster=no" not in joined or "ControlPath=none" not in joined:
+        bad += 1
+        print("FAILED  pve.run_argv must not share a multiplexed connection — "
+              "the master's ControlPersist would take the puppet down with it")
+    cases += 1
+    if "ServerAliveInterval" not in joined:
+        bad += 1
+        print("FAILED  pve.run_argv holds a connection for the puppet's whole "
+              "life; without a keepalive a silent NAT drop reads as a dead puppet")
 
     # Аварийный путь — НЕ ssh: он нужен ровно тогда, когда у тела сломана сеть,
     # sshd или права на authorized_keys.
