@@ -39,6 +39,13 @@
       - {project: cloudpub, file: ~/cloudpub/.env}
 
   tasks:
+    # Это окружение ПАПЕТА, а не узла: на узле, чьи тела —
+    # контейнеры, оно должно стоять В ТЕЛЕ, и кладёт его туда
+    # сборка образа (mop driver build), а не этот прогон.
+    - name: A node that is not its own body gets none of this
+      ansible.builtin.meta: end_host
+      when: mop_driver | default('host') != 'host'
+
     # cmake: cloudpub's libz-ng-sys builds zlib-ng with it; the gtk/webkit dev
     # set: cloudpub's workspace includes a Tauri gui crate, and `clo test
     # --rust` builds the whole graph. (Постгресс в списке не живёт -- он идёт

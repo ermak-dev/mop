@@ -175,7 +175,10 @@
     # мерджа больше нет. CLI не умеет сравнивать желаемое с фактом (токены
     # прячет даже от get), поэтому приводим тупо: снять и поставить. Скоап
     # user: локальный прилип бы к каталогу запуска.
+    # Только там, где claude и стоит: на узле, чьи тела — контейнеры, свой
+    # MCP-сервер регистрирует сборка образа, внутри тела.
     - name: Register the pool MCP server for claude
+      when: mop_driver | default('host') == 'host'
       ansible.builtin.shell:
         cmd: |
           claude mcp remove -s user mop >/dev/null 2>&1 || true
@@ -191,6 +194,19 @@
         path: "{{ MOP_HOME }}/.config/mop"
         state: directory
         mode: "0700"
+
+    # В ЧЁМ живёт папет этого узла. ФАЙЛОМ, а не строкой Environment= в юните
+    # агента: драйвер спрашивают двое с разным окружением -- агент из своего
+    # юнита и внешний врапер из процесса задачи Nomad. Пока значение жило в
+    # юните, врапер его не видел и молча поднимал папета драйвером host, то
+    # есть прямо на гипервизоре. Источник правды -- группа в инвентаре, и
+    # оттуда же оно уезжает в meta клиента Nomad.
+    - name: What a puppet lives in on this node
+      ansible.builtin.copy:
+        dest: "{{ MOP_HOME }}/.config/mop/driver"
+        content: "{{ mop_driver | default('host') }}\n"
+        mode: "0644"
+      notify: restart mop-agent
 
     - name: Bus credentials for the agent
       ansible.builtin.template:

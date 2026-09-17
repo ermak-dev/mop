@@ -1,0 +1,41 @@
+# Чем обязано быть ТЕЛО — задачами, а не игрой.
+#
+# Отдельный файл, потому что зовут его ДВОЕ и по разным группам: deploy/body.yml
+# по узлам, которые сами себе тело, и deploy/pve-build.yml по контейнеру,
+# который вот-вот станет образом шарда. Второе определение «чем обязано быть
+# тело» разошлось бы с первым молча — и упало бы не на прогоне, а на первом
+# клоне папета.
+- name: Ensure the tools a puppet works with
+  become: yes
+  ansible.builtin.apt:
+    name:
+      - git
+      - tmux
+      - jq
+      - rsync
+      - curl
+      - python3
+      - python3-pip
+    state: present
+
+# Без линжера в теле не появится /run/user/<uid>: session.py не найдёт каталог
+# сокетов сессий, уйдёт на запасной путь, где никого нет, и ЖИВЫЕ папета будут
+# читаться мёртвыми. Та же ловушка, что записана про XDG_RUNTIME_DIR в юните
+# агента, только с другой стороны.
+- name: A session bus that survives the last logout
+  become: yes
+  ansible.builtin.command: "loginctl enable-linger {{ MOP_USER }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ MOP_USER }}"
+
+# Нативный установщик, а не npm: claude кладёт себя в ~/.local/share/claude
+# и симлинкует в ~/.local/bin -- ровно туда, куда смотрит MOP_PUPPET_PATH.
+# Под пользователем пула, а не под root: PATH папета -- это его домашний
+# каталог, и claude из /root тело бы не увидело.
+#
+# creates, а не state=latest: ставим один раз, дальше claude обновляет себя
+# сам, и прогон deploy не имеет права подменить версию под работающим папетом.
+- name: Install the claude CLI
+  ansible.builtin.shell: curl -fsSL https://claude.ai/install.sh | bash
+  args:
+    creates: "{{ MOP_HOME }}/.local/bin/claude"

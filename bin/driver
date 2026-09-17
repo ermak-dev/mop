@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""node driver: in what a puppet lives
+
+  mop driver                     drivers in the registry, and this node's one
+  mop driver list                bodies standing on this node — no Nomad needed
+  mop driver run <name>          raise the body and run the puppet inside it
+  mop driver build <shard>       bake the shard's image on the hypervisors
+
+`run` is what the job spec calls. The outer wrapper is driver-agnostic because
+Nomad picks the node only after the spec is registered, so the master cannot
+know what the body will be; everything about the body happens here, on the
+node that owns it.
+"""
+import asyncio
+import base64
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+
+import lib
+from mop import config, driver
+from mop.render import table
+
+# Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
+# /tmp в теле бывает общим или вычищаемым, а этот файл обязан прожить ровно
+# столько, сколько живёт папет.
+INNER = ".cache/mop-wrapper.sh"
+
+# Что внешний врапер переливает внутрь тела. Список ЗАКРЫТ: открытый означал бы
+# дыру, через которую в тело уехало бы окружение узла целиком — вместе с тем,
+# чего папету видеть не положено.
+CARRY = ("PU_NAME", "PU_ORIGIN", "PU_PROJECT", "PU_SHARD", "PU_SEED",
+         "PU_CONTINUE", "PU_LLM", "PU_LLM_ENV", "PU_LLM_KEY_VAR",
+         "PU_LLM_AUTH_VAR", "HOME", "PATH")
+
+
+def shard_of_name(name):
+    """Шард по имени папета. Дубль puppets.shard_of_name намеренный, по тому
+    же доводу, что и в агенте: тянуть сюда puppets значит тянуть на узел
+    python-nomad ради одного rsplit."""
+    return name[len("pu-"):].rsplit("-", 1)[0]
+
+
+def v_show(_argv):
+    """Реестр драйверов и тот, которым живёт эта машина."""
+    here = driver.current_name()
+    rows = [("DRIVER", "", "WHAT A BODY IS")]
+    for name, d in sorted(driver.drivers().items()):
+        rows.append((name, "*" if name == here else "", d["doc"]))
+    print("\n".join(table(rows)))
+    print(f"\nthis machine: {here} — from MOP_DRIVER, which deploy fills from "
+          f"the node's inventory group")
+    return 0
+
+
+def v_list(_argv):
+    """Тела на ЭТОЙ машине. Ростер без Nomad: токена на узле нет."""
+    names = asyncio.run(driver.current().bodies())
+    print("\n".join(names) if names else "no bodies on this machine")
+    return 0
+
+
+def _inner_script():
+    """Внутренний врапер с прелюдией из окружения задачи.
+
+    Прелюдия обязательна: переменные спеки живут в процессе задачи НА УЗЛЕ, а
+    врапер исполняется в ТЕЛЕ — без переливки он не узнал бы ни имени папета,
+    ни origin, ни имени ключа LLM-профиля."""
+    blob = os.environ.get("PU_WRAPPER") or ""
+    if not blob:
+        sys.exit("no PU_WRAPPER in the task environment — this job spec predates "
+                 "the wrapper split; re-register the puppet: mop recycle <name>")
+    prelude = "".join(f"export {k}={shlex.quote(os.environ.get(k, ''))}\n"
+                      for k in CARRY)
+    return prelude + base64.b64decode(blob).decode()
+
+
+def v_run(argv):
+    """Поднять тело и отработать в нём внутренний врапер. Зовётся из спеки.
+
+    СМЕРТЬ ВРАПЕРА ОБЯЗАНА УБИВАТЬ СЕССИЮ. На «живой папет = живая tmux-сессия
+    с именем джоба» стоит и ростер, и сбор сирот: умри внешний врапер молча,
+    Nomad считал бы папета остановленным, а в теле остался бы живой claude, с
+    которым уже никто не разговаривает. Гасим ВНУТРИ тела: pid сессии живёт в
+    его namespace, и снаружи такого pid либо нет, либо это чужой процесс."""
+    if len(argv) != 1:
+        lib.usage(__doc__)
+    name = argv[0]
+    if not driver.valid_name(name):
+        sys.exit(f"{name!r} doesn't look like a puppet name")
+    d = driver.current()
+
+    r = asyncio.run(d.ensure(name, {"shard": shard_of_name(name)}))
+    if r.get("error"):
+        sys.exit(f"no body for {name}: {r['error']}")
+    print(f"{name}: body {r.get('body') or 'the node itself'}"
+          + (f" at {r['address']}" if r.get("address") else ""), flush=True)
+
+    inner = os.path.join(config.get("MOP_HOME"), INNER)
+    w = asyncio.run(d.push(name, inner, _inner_script().encode()))
+    if w.get("error"):
+        sys.exit(f"the wrapper did not reach the body of {name}: {w['error']}")
+
+    prefix = d.argv(name)
+
+    def inside(script):
+        return prefix + [script] if prefix else ["bash", "-c", script]
+
+    state = {"child": None, "asked": False}
+
+    def stop(_sig, _frm):
+        state["asked"] = True
+        subprocess.run(inside(f"tmux -L {name} kill-session -t {name}"),
+                       capture_output=True)
+        if state["child"]:
+            state["child"].terminate()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    state["child"] = subprocess.Popen(inside(f"bash {shlex.quote(inner)}"))
+    code = state["child"].wait()
+    # Остановка по TERM — штатное завершение: так Nomad снимает задачу, и
+    # ненулевой код здесь читался бы как падение папета.
+    return 0 if state["asked"] else code
+
+
+def v_build(argv):
+    """Собрать образ шарда на узлах с контейнерным драйвером.
+
+    Сборкой, а не подъёмом из базового образа на месте: падение плейбука видно
+    при сборке, а не в три часа ночи внутри врапера. Дальше каждое тело —
+    клон шаблона, на lvm-thin связанный и мгновенный."""
+    if len(argv) != 1:
+        lib.usage(__doc__)
+    settings = json.dumps({k: v for k, (v, _) in config.effective().items()},
+                          ensure_ascii=False)
+    return subprocess.call(
+        ["ansible-playbook", "-i", os.environ["INVENTORY"],
+         os.path.join(config.PROJECT, "deploy", "pve-build.yml"),
+         "--extra-vars", settings, "--extra-vars", f"mop_shard={argv[0]}"])
+
+
+VERBS = {"list": v_list, "run": v_run, "build": v_build}
+
+
+def main(argv):
+    if not argv:
+        return v_show(argv)
+    fn = VERBS.get(argv[0])
+    if fn is None:
+        lib.usage(__doc__)
+    return fn(argv[1:])
+
+
+lib.run(main)

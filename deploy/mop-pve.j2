@@ -1,0 +1,231 @@
+#!/bin/bash
+# mop-pve — единственная дорога агента к жизненному циклу тел на гипервизоре.
+#
+# Ставится плейбуком в /usr/local/sbin, зовётся через `sudo -n` пользователем
+# пула. Набор глаголов ЗАКРЫТ ровно по той же причине, по какой закрыт набор
+# глаголов агента: выдать пользователю пула `pct` целиком значит выдать root на
+# гипервизоре — `pct exec` входит в ЛЮБОЙ контейнер, включая соседние боевые.
+#
+# В REST API Proxmox нет ни exec внутрь LXC, ни записи файла, так что вести
+# жизненный цикл по API, а работу с телом — обёрткой означало бы два места,
+# отвечающих на один вопрос. Здесь одно.
+#
+# КАЖДЫЙ глагол проверяет две вещи, и обе молча ломаются, если их не проверять:
+#   1) VMID лежит в диапазоне mop — чужой контейнер этой обёрткой не тронуть;
+#   2) hostname контейнера начинается с pu- — диапазон могли занять и до нас.
+# Единственное исключение — create, которому hostname ещё только назначают:
+# там проверяется сам hostname.
+#
+# Файл шаблонный: диапазон и пользователь пула приезжают из настроек mop.
+set -euo pipefail
+
+VMID_MIN={{ pve_vmid_min }}
+VMID_MAX={{ pve_vmid_max }}
+POOL_USER={{ MOP_USER }}
+
+die() { echo "mop-pve: $*" >&2; exit 64; }
+
+# Проверка ДИАПАЗОНА. Без неё обёртка становится тем же pct: номер приезжает
+# снаружи, а снаружи -- это агент, которому команду мог продиктовать мастер.
+check_vmid() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]] || die "vmid ${1:-} is not a number"
+    (( $1 >= VMID_MIN && $1 <= VMID_MAX )) \
+        || die "vmid $1 is outside mop's range $VMID_MIN..$VMID_MAX"
+}
+
+# Проверка ИМЕНИ: диапазон мог быть занят до mop, и тогда одного номера мало.
+check_host() {
+    local h
+    h=$(pct config "$1" 2>/dev/null | sed -n 's/^hostname: //p') \
+        || die "no container $1"
+    [[ "$h" == pu-* ]] || die "container $1 is named $h — not a puppet body"
+}
+
+check_name() {
+    [[ "${1:-}" == pu-* ]] || die "hostname ${1:-} is not a puppet body"
+    [[ "$1" =~ ^[A-Za-z0-9.-]+$ ]] || die "hostname $1 has characters no host may have"
+}
+
+verb="${1:-}"; shift || true
+
+case "$verb" in
+
+# Ростер тел БЕЗ Nomad: "<vmid> <hostname> <status>" построчно. На гипервизоре
+# каталог сокетов tmux пуст, и это единственный способ узнать, что тут стоит.
+list)
+    pct list | tail -n +2 | while read -r vmid status _rest; do
+        h=$(pct config "$vmid" 2>/dev/null | sed -n 's/^hostname: //p') || continue
+        [[ "$h" == pu-* ]] || continue
+        (( vmid >= VMID_MIN && vmid <= VMID_MAX )) || continue
+        echo "$vmid $h $status"
+    done
+    ;;
+
+# Ёмкость УЗЛА под тела: память хоста и место в хранилище тел, в МБ и ГБ.
+# df $HOME здесь не значит ничего -- тела лежат не в нём.
+capacity)
+    storage="${1:?storage}"
+    read -r mem_total mem_avail < <(
+        awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print int(t/1024), int(a/1024)}' /proc/meminfo)
+    read -r disk_total disk_avail < <(
+        pvesm status --storage "$storage" | tail -n +2 \
+        | awk '{printf "%d %d\n", int($4/1048576), int($6/1048576)}')
+    echo "$mem_total $mem_avail $disk_total $disk_avail"
+    ;;
+
+# Тело из БАЗОВОГО образа. Зовётся только сборкой шаблона (`mop driver build`):
+# каждое тело потом -- клон шаблона, а не новый прогон плейбука.
+create)
+    vmid="${1:?vmid}"; hostname="${2:?hostname}"; template="${3:?template}"
+    storage="${4:?storage}"; cores="${5:?cores}"; mem="${6:?mem}"
+    disk="${7:?disk}"; bridge="${8:?bridge}"; cidr="${9:?cidr}"; gw="${10:?gw}"
+    pubkey="${11:?pubkey}"
+    check_vmid "$vmid"; check_name "$hostname"
+    [[ -f "$pubkey" ]] || die "no public key $pubkey"
+    # unprivileged: папет внутри тела -- обычный пользователь, и запереть
+    # агента снаружи правкой authorized_keys он не должен даже теоретически.
+    # onboot=0: телами управляет Nomad через врапер, а не автозапуск хоста --
+    # иначе после перезагрузки гипервизора поднялись бы тела без задач.
+    pct create "$vmid" "$template" \
+        --hostname "$hostname" \
+        --storage "$storage" \
+        --rootfs "$storage:$disk" \
+        --cores "$cores" --memory "$mem" --swap 0 \
+        --net0 "name=eth0,bridge=$bridge,ip=$cidr,gw=$gw" \
+        --unprivileged 1 --features nesting=1 --onboot 0 \
+        --ssh-public-keys "$pubkey" >&2
+    echo "$vmid"
+    ;;
+
+# Тело из ШАБЛОНА шарда. Связанный клон, если хранилище умеет: тогда подъём
+# мгновенный и места стоит только записанное. Не умеет -- полный, и это
+# единственная разница.
+clone)
+    src="${1:?src}"; vmid="${2:?vmid}"; hostname="${3:?hostname}"
+    storage="${4:?storage}"; cidr="${5:?cidr}"; gw="${6:?gw}"
+    mem="${7:?mem}"; bridge="${8:?bridge}"; cores="${9:?cores}"
+    check_vmid "$src"; check_vmid "$vmid"; check_name "$hostname"
+    check_host "$src"
+    pct clone "$src" "$vmid" --hostname "$hostname" >&2 \
+        || pct clone "$src" "$vmid" --hostname "$hostname" \
+             --full 1 --storage "$storage" >&2
+    pct set "$vmid" --memory "$mem" --swap 0 --cores "$cores" \
+        --net0 "name=eth0,bridge=$bridge,ip=$cidr,gw=$gw" >&2
+    echo "$vmid"
+    ;;
+
+start)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    pct status "$1" | grep -q running || pct start "$1" >&2
+    ;;
+
+stop)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    pct status "$1" | grep -q running && pct stop "$1" >&2 || true
+    ;;
+
+# Превратить тело в шаблон шарда. Обратного глагола нет: шаблон сносится тем
+# же destroy.
+template)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    pct template "$1" >&2
+    ;;
+
+destroy)
+    check_vmid "${1:?vmid}"
+    # Нет контейнера -- не ошибка: снос обязан быть идемпотентным, иначе
+    # повторный прогон уборки читается как отказ.
+    pct config "$1" >/dev/null 2>&1 || exit 0
+    check_host "$1"
+    pct stop "$1" >/dev/null 2>&1 || true
+    pct destroy "$1" --force 1 --purge 1 >&2
+    ;;
+
+# Довести свежий контейнер до машины, в которую вообще можно войти по ssh.
+# Отдельный глагол, а не скрипт снаружи, потому что всё здесь требует root
+# ВНУТРИ тела, а пользователя пула там ещё нет -- то есть `exec` неприменим по
+# определению.
+#
+# authorized_keys лежит в /etc под root СПЕЦИАЛЬНО: папет в теле
+# непривилегированный, и запереть агента снаружи правкой ~/.ssh или прав на
+# $HOME (sshd со StrictModes) он не должен мочь даже случайно.
+bootstrap)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    vmid="$1"
+    pct exec "$vmid" -- /bin/bash -lc '
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq sudo openssh-server python3 ca-certificates >/dev/null
+        id '"$POOL_USER"' >/dev/null 2>&1 || useradd -m -s /bin/bash '"$POOL_USER"'
+        install -d -m 755 -o root -g root /etc/ssh/authorized_keys.d
+        # PerSourcePenalties выключен НАМЕРЕННО, и это не послабление.
+        # OpenSSH 10 копит штраф за неудачные попытки и дальше роняет
+        # соединения от этого адреса ЦЕЛИКОМ -- вместе с верным ключом.
+        # Адрес этот ровно один: свой же узел, который в тело и ходит. Поймано
+        # на первой сборке образа: ключ лежал на месте, был верным, а агент
+        # читал тело как молчащее.
+        {
+            printf "AuthorizedKeysFile /etc/ssh/authorized_keys.d/%%u\n"
+            printf "PerSourcePenalties no\n"
+        } > /etc/ssh/sshd_config.d/mop.conf
+        printf "%s ALL=(ALL) NOPASSWD:ALL\n" '"$POOL_USER"' > /etc/sudoers.d/mop
+        chmod 440 /etc/sudoers.d/mop
+        # restart, а НЕ `enable --now`: postinst пакета openssh-server поднимает
+        # sshd прямо при установке, то есть ДО того, как лёг конфиг выше. На
+        # уже запущенном юните `--now` не делает ничего, и sshd продолжает
+        # читать ~/.ssh/authorized_keys вместо нашего пути под root. Выглядит
+        # это как «ключ на месте, но не подходит»: поймано на первой сборке,
+        # два прогона подряд.
+        systemctl enable ssh
+        systemctl restart ssh
+        # Без линжера в теле не появится /run/user/<uid>, session.py не найдёт
+        # каталог сокетов, и ЖИВЫЕ папета будут читаться мёртвыми.
+        loginctl enable-linger '"$POOL_USER"'
+    ' >&2
+    ;;
+
+# Кому дозволено входить в тело по ssh. Содержимое со stdin, целиком: это
+# ЗАМЕНА, а не дополнение -- сборка образа кладёт сюда два ключа, а запечатывая
+# образ, оставляет один.
+keys)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+    cat > "$tmp"
+    pct push "$1" "$tmp" "/etc/ssh/authorized_keys.d/$POOL_USER" \
+        --perms 644 --user 0 --group 0 >&2
+    ;;
+
+# АВАРИЙНЫЙ путь внутрь тела -- когда молчит основной (ssh). От имени
+# пользователя пула, а не root: иначе аварийная проба врала бы про права и
+# про $HOME, то есть отвечала бы не про того папета.
+exec)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    vmid="$1"; shift
+    exec pct exec "$vmid" -- /usr/sbin/runuser -l "$POOL_USER" -c "$*"
+    ;;
+
+# Файл ВНУТРЬ тела, содержимое со stdin. Нужен до того, как ssh заработает:
+# креды шины, врапер, логин claude.ai. Режим задаётся явно -- у кредов он 600.
+#
+# `pct push`, а не `pct exec ... cat >`: exec гоняет stdin через lxc-attach, и
+# на большом файле это тихо рвётся посередине. Владельца ставим РУКАМИ, по uid
+# внутри тела: pct push кладёт файл от root, и папет, работающий под
+# пользователем пула, своих же кредов потом не прочтёт.
+push)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    vmid="$1"; path="${2:?path}"; mode="${3:-600}"
+    [[ "$path" == /* ]] || die "path $path is not absolute"
+    uid=$(pct exec "$vmid" -- /usr/bin/id -u "$POOL_USER") || die "no user $POOL_USER in $vmid"
+    gid=$(pct exec "$vmid" -- /usr/bin/id -g "$POOL_USER") || die "no user $POOL_USER in $vmid"
+    tmp=$(mktemp); chmod 600 "$tmp"
+    trap 'rm -f "$tmp"' EXIT
+    cat > "$tmp"
+    pct exec "$vmid" -- /usr/bin/install -d -o "$uid" -g "$gid" -m 700 "$(dirname "$path")" >&2
+    pct push "$vmid" "$tmp" "$path" --perms "$mode" --user "$uid" --group "$gid" >&2
+    ;;
+
+*)
+    die "no such verb ${verb:-(empty)}; available: list capacity create clone bootstrap keys start stop template destroy exec push"
+    ;;
+esac

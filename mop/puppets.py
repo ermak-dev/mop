@@ -46,9 +46,32 @@ LOCAL_KEYS_FILE = os.path.join(PROJECT, ".env")
 # examples/homelab/claude.yml прямо в регистрацию сервера.
 SECRETS_FILE = f"{HOME}/.config/mop/secrets.env"    # копия на узле пула
 
-# Врапер — собственно задача Nomad: довести узел до "клон есть, claude в
-# tmux" и жить, пока жива tmux-сессия. Смерть врапера = рестарт/переезд
-# папета силами Nomad; на новом узле врапер сам разворачивает всё заново.
+# ВРАПЕР ДЕЛИТСЯ НАДВОЕ (docs/DRIVER.md).
+#
+# ВНЕШНИЙ — вот он, и он драйвер-агностичен: узел сам знает, в чём живёт его
+# папет, а мастер в момент сборки спеки этого знать не может — Nomad выбирает
+# узел УЖЕ ПОСЛЕ регистрации. Поэтому в спеке не может стоять ни `pct exec`,
+# ни что-либо ещё про тело.
+OUTER = r"""
+exec "$HOME/mop/bin/mop" driver run "$PU_NAME"
+"""
+
+# ВНУТРЕННИЙ — собственно задача: довести ТЕЛО до "клон есть, claude в tmux" и
+# жить, пока жива tmux-сессия. Смерть врапера = рестарт/переезд папета силами
+# Nomad; в новом теле врапер сам разворачивает всё заново.
+#
+# Едет в спеке base64 в переменной окружения, и это снимает целый класс
+# ловушек: подстановку `${…}` Nomad вычисляет сам во ВСЕЙ строке команды,
+# включая комментарии, — отсюда были двойные доллары ниже. В base64 он не
+# заглядывает — и поэтому двойные доллары пришлось УБРАТЬ, а не оставить как
+# косметику: они были не защитой, а заменой. Nomad схлопывал `$$` в `$` перед
+# запуском, а в base64 схлопывать некому, и `$${p##*/}` доехало бы в тело
+# буквально — то есть как PID, приклеенный к мусору. Первый же подъём
+# контейнерного папета упал на этом: «syntax error near unexpected token `(`».
+#
+# Обе ловушки при этом остаются верными и разъезжаются по механизмам: правка
+# логики ТЕЛА доезжает прогоном `mop deploy`, правка логики СЕССИИ по-прежнему
+# требует перерегистрации джоба.
 WRAPPER = r"""
 set -e
 d="$HOME/puppets/$PU_NAME"
@@ -68,9 +91,9 @@ tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null || true
 free_dir() {
     local dir="$1" cwd pid
     for p in /proc/[0-9]*; do
-        pid=$${p##*/}
+        pid=${p##*/}
         cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
-        cwd=$${cwd% (deleted)}
+        cwd=${cwd% (deleted)}
         case "$cwd" in
             "$dir"|"$dir"/*) kill "$pid" 2>/dev/null || true ;;
         esac
@@ -85,7 +108,7 @@ if [ ! -d "$d/.git" ]; then
     mkdir -p "$HOME/puppets"
     git clone -q "$PU_ORIGIN" "$d"
 fi
-for pat in $${PU_SEED//,/ }; do
+for pat in ${PU_SEED//,/ }; do
     for f in "$HOME/puppet-env/$PU_PROJECT"/$pat; do
         [ -e "$f" ] && cp -a "$f" "$d/" || true
     done
@@ -199,7 +222,7 @@ if [ -n "$PU_LLM_KEY_VAR" ]; then
     # раскрытие массива llm_env, валят РЕГИСТРАЦИЮ джоба на "Invalid
     # expression" ещё до запуска: [@] для HCL не выражение. Осторожно, это
     # правило действует и на комментарии — Nomad разбирает всю строку.
-    [ -f "$keyfile" ] && key=$(sed -n "s/^$${PU_LLM_KEY_VAR}=//p" "$keyfile" | tail -1)
+    [ -f "$keyfile" ] && key=$(sed -n "s/^${PU_LLM_KEY_VAR}=//p" "$keyfile" | tail -1)
     if [ -z "$key" ]; then
         # Валимся громко: без ключа claude поднимется и будет отбивать каждый
         # ход 401-й, а папет будет читаться как живое и свободное.
@@ -237,7 +260,7 @@ claude_args="--dangerously-skip-permissions"
 # --continue, а НЕ --resume: без ID сессии resume открывает интерактивный
 # выбор, и папет паркуется на нём намертво -- выбрать строку ему некому.
 marker="$d/.git/mop-continue"
-if [ -n "$${PU_CONTINUE:-}" ] \
+if [ -n "${PU_CONTINUE:-}" ] \
     && [ "$(cat "$marker" 2>/dev/null)" != "$PU_CONTINUE" ]; then
     printf '%s' "$PU_CONTINUE" > "$marker"
     claude_args="$claude_args --continue"
@@ -248,7 +271,7 @@ tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     -e PATH="$d/bin:$PATH" \
     -e MOP_SHARD="$PU_SHARD" \
     -e MOP_BUS_CONFIG="$shard_creds" \
-    "$${llm_env[@]}" \
+    "${llm_env[@]}" \
     "$HOME/.local/bin/claude $claude_args"
 trap 'tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null; exit 0' TERM INT
 while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wait $!; done
@@ -315,6 +338,11 @@ def job_spec(name, origin, profile=None, cont=False):
         "PU_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
         "PU_LLM_KEY_VAR": prof.get("key") or "",
         "PU_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
+        # Внутренний врапер — в спеке, как и был, но base64: узел исполняет
+        # его В ТЕЛЕ, каким бы оно ни было. Утащить его в пакет на узле
+        # значило бы молча поменять инвариант «правка сессии доезжает
+        # перерегистрацией».
+        "PU_WRAPPER": base64.b64encode(WRAPPER.encode()).decode(),
     }
     return {"Job": {
         "ID": name,
@@ -335,7 +363,7 @@ def job_spec(name, origin, profile=None, cont=False):
                 "Name": nomad.TASK,
                 "Driver": "raw_exec",
                 "User": USER,
-                "Config": {"command": "/bin/bash", "args": ["-c", WRAPPER]},
+                "Config": {"command": "/bin/bash", "args": ["-c", OUTER]},
                 "Env": env,
                 "Resources": {"CPU": 1000, "MemoryMB": MEM, "MemoryMaxMB": MEM_MAX},
                 "KillTimeout": 15 * 10**9,

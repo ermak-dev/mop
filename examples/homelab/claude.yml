@@ -18,6 +18,13 @@
     mac_mcp_token: "{{ lookup('ini', 'MAC_MCP_TOKEN type=properties file=' + project_env) }}"
 
   tasks:
+    # Это окружение ПАПЕТА, а не узла: на узле, чьи тела —
+    # контейнеры, оно должно стоять В ТЕЛЕ, и кладёт его туда
+    # сборка образа (mop driver build), а не этот прогон.
+    - name: A node that is not its own body gets none of this
+      ansible.builtin.meta: end_host
+      when: mop_driver | default('host') != 'host'
+
     # Узел, живущий ВНУТРИ windows-хоста, достаёт до него только по loopback:
     # там mirrored networking, и Windows-файрвол роняет хайрпин на LAN-адрес.
     #
