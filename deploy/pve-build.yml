@@ -259,24 +259,6 @@
       delegate_to: localhost
       become: no
 
-    # Кэш crates ТОЖЕ в образ, и греется он единственным честным способом --
-    # разрешением зависимостей настоящего дерева. Дерево берём ИЗ ЗЕРКАЛА:
-    # это локальный клон, ему не нужны ни сеть, ни ключ. Тихо мимо, если в теле
-    # нет cargo или проект не на Rust: греть нечего, и это не отказ.
-    - name: Warm up the crates cache from the shard's own tree
-      become_user: "{{ MOP_USER }}"
-      ansible.builtin.shell: |
-        set -e
-        command -v cargo >/dev/null || exit 0
-        tmp=$(mktemp -d)
-        trap 'rm -rf "$tmp"' EXIT
-        git clone -q "$HOME/.cache/mop-mirror/{{ mop_shard }}.git" "$tmp/src"
-        [ -f "$tmp/src/Cargo.toml" ] || exit 0
-        cd "$tmp/src" && { cargo fetch --locked || cargo fetch || true; }
-      environment:
-        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
-      changed_when: false
-
     - name: Python dependencies of a puppet
       ansible.builtin.pip:
         name: [nats-py, mcp, python-nomad, requests]
@@ -321,6 +303,32 @@
     - name: Task files this installation names
       ansible.builtin.include_tasks: "{{ playbook_dir }}/../{{ item | trim }}"
       loop: "{{ MOP_BODY_EXTRA.split(',') | select | list }}"
+
+    # Кэш crates тоже в образ, и греется он единственным честным способом --
+    # разрешением зависимостей настоящего дерева. Дерево берём ИЗ ЗЕРКАЛА: это
+    # локальный клон, ему не нужны ни сеть, ни ключ.
+    #
+    # ПОСЛЕ установочного, и порядок здесь не произволен: cargo ставит оно, а
+    # не продукт. Пока прогрев стоял в игре продукта, он честно отрабатывал
+    # веткой «cargo нет -- греть нечем», задуманной для проектов не на Rust, —
+    # и отказ был неотличим от штатного пропуска. Поймано на образе cloudpub:
+    # плейбук зелёный, образ собран, кэш crates пуст.
+    - name: Warm up the crates cache from the shard's own tree
+      become: yes
+      become_user: "{{ MOP_USER }}"
+      ansible.builtin.shell: |
+        set -e
+        command -v cargo >/dev/null || exit 0
+        mirror="$HOME/.cache/mop-mirror/{{ mop_shard }}.git"
+        [ -d "$mirror" ] || exit 0
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT
+        git clone -q "$mirror" "$tmp/src"
+        [ -f "$tmp/src/Cargo.toml" ] || exit 0
+        cd "$tmp/src" && { cargo fetch --locked || cargo fetch || true; }
+      environment:
+        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
+      changed_when: true
 
 
 - name: Seal the image
