@@ -20,6 +20,8 @@ from . import sh, valid_name
 
 HOME = config.get("MOP_HOME")
 PREFIX = "pu-"
+# Тело и узел — одна машина: исполнять «в теле» здесь значит исполнять на узле.
+BODY_IS_NODE = True
 # Каталог сокетов tmux-серверов. У каждого папета свой сервер (-L <имя>),
 # поэтому имя сокета и есть имя папета — отсюда и ростер без Nomad.
 TMUX_DIR = os.environ.get("TMUX_TMPDIR") or f"/tmp/tmux-{os.getuid()}"

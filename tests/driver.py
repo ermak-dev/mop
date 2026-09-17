@@ -28,6 +28,7 @@ def plugin(**attrs):
     for verb in driver.VERBS:
         mod.__dict__[verb] = lambda *a, **k: None
     mod.SESSION_PY = "/opt/mop/mop/session.py"
+    mod.BODY_IS_NODE = False
     mod.__dict__.update(attrs)
     return mod
 
@@ -50,6 +51,8 @@ CONTRACT = [
     ("a verb that is not callable", plugin(argv="ssh"), False),
     # SESSION_PY уезжает в шелл внутри тела. Пустое значение там молча
     # соберётся в `python3  probe <clone>` — python прочитает probe как файл.
+    ("BODY_IS_NODE not declared", plugin(BODY_IS_NODE=None), False),
+    ("BODY_IS_NODE not a bool", plugin(BODY_IS_NODE="yes"), False),
     ("no SESSION_PY", plugin(SESSION_PY=None), False),
     ("empty SESSION_PY", plugin(SESSION_PY=""), False),
     ("SESSION_PY is not a path", plugin(SESSION_PY="session.py"), False),
@@ -186,6 +189,14 @@ def main():
     # ── драйвер pve: всё выводится из имени ──────────────────────────────
     pve = driver.module("pve")
 
+    # Раздача файла (`mop login`) идёт в узел И в каждое тело. У host второе
+    # было бы той же записью в тот же файл по разу на папета — и, что хуже,
+    # отчёт обещал бы запись в тела, которых нет.
+    cases += 1
+    if host.BODY_IS_NODE is not True:
+        bad += 1
+        print("FAILED  host.BODY_IS_NODE must be True — the body IS the node")
+
     cases += 1
     if not isinstance(driver.get("pve"), dict):
         bad += 1
@@ -249,6 +260,11 @@ def main():
             bad += 1
             print(f"FAILED  pve.address_of: {name!r} and {addrs[ip]!r} share {ip}")
         addrs[ip] = name
+
+    cases += 1
+    if pve.BODY_IS_NODE is not False:
+        bad += 1
+        print("FAILED  pve.BODY_IS_NODE must be False — a body is a container")
 
     # ssh, а не proxmox_pct_remote: ControlPersist держит соединение, и проба
     # состояния перестаёт платить рукопожатием.

@@ -18,6 +18,7 @@ usage. Сложить строки как есть значит завысить
 import json
 import os
 import re
+import sys
 from datetime import datetime, timedelta
 
 KINDS = ("input", "output", "cache_write", "cache_read")
@@ -127,3 +128,22 @@ def days_back(days, now=None):
     нужны и пустые дни: провал в расходе виден только на месте."""
     now = now or datetime.now()
     return [(now - timedelta(days=i)).date().isoformat() for i in range(days - 1, -1, -1)]
+
+
+def main(argv):
+    """CLI: usage.py <каталог транскриптов> <дней> -> JSON {дата: {вид: n}}.
+
+    Форма нужна ровно по той же причине, что и у session.py: транскрипты
+    контейнерного папета лежат ВНУТРИ тела, и импортировать этот модуль с
+    гипервизора не над чем — там их просто нет. Молчаливый отказ был бы
+    худшим: расход показался бы нулевым, а не неизвестным."""
+    if len(argv) < 2:
+        print("usage: usage.py <projects-dir> <days>", file=sys.stderr)
+        return 2
+    d, days = argv[0], int(argv[1])
+    print(json.dumps(scan(d, days) if os.path.isdir(d) else {}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
