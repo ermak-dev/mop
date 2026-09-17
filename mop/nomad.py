@@ -120,6 +120,54 @@ def get_job(job_id):
     return client().job.get_job(job_id)
 
 
+def node_id(node_name):
+    """ID узла по имени; None, если такого нет. Ineligible тоже считается:
+    узел, выведенный из планирования, остаётся узлом."""
+    for n in client().nodes.get_nodes():
+        if n["Name"] == node_name:
+            return n["ID"]
+    return None
+
+
+def set_node_meta(node_name, updates):
+    """Динамическая `meta` узла: то, что меняется без перезаписи client.hcl.
+
+    Здесь живёт перечень шардов, чьи образы на узле собраны, — его ведёт
+    `mop driver build`. Статическую строку из client.hcl динамическая
+    перекрывает и переживает перезапуск клиента, поэтому прогон deploy
+    собранных образов не забывает.
+
+    Ходит ОТСЮДА, с управляющей машины: токен Nomad есть только у неё, и
+    выдавать его узлам ради одной записи значило бы вернуть то, ради чего
+    заводили шину."""
+    import requests
+    nid = node_id(node_name)
+    if nid is None:
+        raise RuntimeError(f"no node {node_name} in the cluster")
+    r = requests.post(f"{ADDR}/v1/client/metadata?node_id={nid}",
+                      headers={"X-Nomad-Token": token()},
+                      json={"Meta": updates}, timeout=30)
+    r.raise_for_status()
+
+
+def node_dynamic_meta(node_name):
+    """Динамическая `meta` узла ПРЯМО С УЗЛА, а не из серверной копии.
+
+    Серверная отстаёт: после записи она догоняет секундами, и прочитанный в
+    это окно перечень шардов оказался бы пустым. Дописать к нему новый шард
+    значит СТЕРЕТЬ ранее объявленные образы — узел молча перестал бы
+    обслуживать половину своих шардов, а увидели бы это по папетам, зависшим
+    в queued."""
+    nid = node_id(node_name)
+    if nid is None:
+        raise RuntimeError(f"no node {node_name} in the cluster")
+    import requests
+    r = requests.get(f"{ADDR}/v1/client/metadata?node_id={nid}",
+                     headers={"X-Nomad-Token": token()}, timeout=30)
+    r.raise_for_status()
+    return r.json().get("Dynamic") or {}
+
+
 def node_meta(node_name):
     """`meta` клиента Nomad по имени узла. Пусто, если узла нет.
 

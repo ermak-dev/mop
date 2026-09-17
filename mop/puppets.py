@@ -322,11 +322,12 @@ def job_spec(name, origin, profile=None, cont=False):
                            f"{', '.join(llm.profiles())} (mop llm)")
     llm_env = "".join(f"{k}={v}\n" for k, v in prof["env"].items())
     meta = {"origin": origin, "llm": profile}
+    shard = shard_of(origin)
     env = {
         "PU_NAME": name,
         "PU_ORIGIN": origin,
         "PU_PROJECT": project,
-        "PU_SHARD": shard_of(origin),
+        "PU_SHARD": shard,
         "PU_SEED": config.get("MOP_PUPPET_SEED"),
         "HOME": HOME,
         "PATH": config.get("MOP_PUPPET_PATH").replace("{HOME}", HOME),
@@ -350,6 +351,7 @@ def job_spec(name, origin, profile=None, cont=False):
         "Datacenters": [nomad.POOL_DC],
         "Type": "service",
         "Meta": meta,
+        "Constraints": [shard_constraint(shard)],
         "TaskGroups": [{
             "Name": "puppets",
             "Count": 1,
@@ -370,6 +372,30 @@ def job_spec(name, origin, profile=None, cont=False):
             }],
         }],
     }}
+
+
+# Слово, которым узел объявляет, что обслуживает ЛЮБОЙ шард. Так говорят про
+# себя узлы, где тело равно узлу: им нечего готовить заранее. Узел, чьи тела —
+# контейнеры, перечисляет шарды поимённо — те, чьи образы на нём собраны.
+ANY_SHARD = "any"
+
+
+def shard_constraint(shard):
+    """Ограничение размещения: узел обязан уметь обслужить ЭТОТ шард.
+
+    До появления тел вопрос не стоял — любой узел пула умел любого папета. У
+    узла-гипервизора это перестало быть правдой: тело клонируется из образа
+    ШАРДА, и папет шарда, чей образ там не собран, не поднимется никогда.
+    Планировщик об этом не знал и ставил такого папета туда при первом же
+    давлении; поймано на живом пуле (pu-rugent-6 на hyper), и лечилось руками.
+
+    Регулярное выражение по списку через запятую, а не set_contains, потому
+    что `any` обязано быть словом ЦЕЛИКОМ: узлу общего назначения нечего
+    перечислять, а новый шард заводится после прогона deploy и в перечне
+    заведомо не окажется. Якоря не украшение — без них `mop` совпадёт с
+    `mop2`, а `op` с `mop`, и оба промаха молчаливы."""
+    return {"LTarget": "${meta.mop_shards}", "Operand": "regexp",
+            "RTarget": f"(^|,)({ANY_SHARD}|{re.escape(shard)})(,|$)"}
 
 
 def jobs(shard=None):
