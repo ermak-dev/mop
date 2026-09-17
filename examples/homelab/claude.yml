@@ -1,104 +1,26 @@
-# ПРИМЕР, НЕ ЧАСТЬ ПРОДУКТА. Узловая обвязка автора: его личные скиллы и
-# MCP-серверы автоматизации рабочего стола. Пулу mop ничего из этого не нужно —
-# пакет, зависимости и агент ставит deploy/setup.yml, а свой MCP-сервер папету
+---
+# ПРИМЕР, НЕ ЧАСТЬ ПРОДУКТА. Обвязка автора: его личные скиллы и MCP-серверы
+# автоматизации рабочего стола. Пулу mop ничего из этого не нужно — пакет,
+# зависимости и агент ставит deploy/setup.yml, а свой MCP-сервер папету
 # прописывает врапер при каждой загрузке.
+#
+# Сами задачи живут в body-claude.yml: это окружение ТЕЛА, и его же печёт в
+# образ шарда `mop driver build`.
 #
 # Run:  mop deploy
 
-- name: Claude skills and MCP servers on the puppet hosts
+- name: Claude skills and MCP servers in the puppet bodies
   hosts: puppet
   become: no
   gather_facts: no
 
-  vars:
-    # Читаем .env проекта как properties: секции в нём нет, а type=properties
-    # ровно про файлы вида KEY=value.
-    project_env: "{{ lookup('env', 'HOME') }}/mop/.env"
-    windows_mcp_token: "{{ lookup('ini', 'WINDOWS_MCP_TOKEN type=properties file=' + project_env) }}"
-    mac_mcp_token: "{{ lookup('ini', 'MAC_MCP_TOKEN type=properties file=' + project_env) }}"
-
   tasks:
-    # Это окружение ПАПЕТА, а не узла: на узле, чьи тела —
-    # контейнеры, оно должно стоять В ТЕЛЕ, и кладёт его туда
-    # сборка образа (mop driver build), а не этот прогон.
+    # Узел, чьи тела — контейнеры, всего этого не получает: скиллы и MCP-серверы
+    # пишутся в ~/.claude сессии папета, а её на таком узле нет. Кладёт их туда
+    # сборка образа.
     - name: A node that is not its own body gets none of this
       ansible.builtin.meta: end_host
       when: mop_driver | default('host') != 'host'
 
-    # Узел, живущий ВНУТРИ windows-хоста, достаёт до него только по loopback:
-    # там mirrored networking, и Windows-файрвол роняет хайрпин на LAN-адрес.
-    #
-    # Критерий тот же, что у врапера папета: адрес windows-хоста среди адресов
-    # собственных интерфейсов узла.
-    - name: Own IPv4 addresses of this node
-      ansible.builtin.command: ip -4 -o addr show
-      register: node_addrs
-      changed_when: false
-
-    - name: URL of windows-mcp as seen from this node
-      ansible.builtin.set_fact:
-        windows_mcp_url: >-
-          {{ 'http://127.0.0.1:' ~ MCP_PORT ~ '/mcp'
-             if WINDOWS_MCP_HOST and WINDOWS_MCP_HOST in node_addrs.stdout
-             else 'http://' ~ WINDOWS_MCP_HOST ~ ':' ~ MCP_PORT ~ '/mcp' }}
-
-    - name: Ensure ~/.claude exists
-      ansible.builtin.file:
-        # Абсолютный путь: по ssh относительный попадает в дом узла, но на
-        # машине с local connection (управляющая в роли узла пула) -- в каталог
-        # плейбука, и следующий же синк высыпал бы скиллы прямо в репозиторий.
-        path: "{{ MOP_HOME }}/.claude"
-        state: directory
-        mode: "0755"
-
-    # copy_links: скилл master лежит в репозитории (skills/master) и виден на
-    # управляющей машине симлинком из ~/.claude/skills. Без разыменования на
-    # узел уехал бы сам симлинк, и он бы там висел в пустоту ровно до
-    # следующей задачи, которая синкает пакет mop, -- то есть на первом же
-    # прогоне на свежем узле.
-    # Пропуск на управляющей машине не лень: она и есть ИСТОЧНИК этого синка,
-    # а copy_links на её симлинке скилла мастера заменил бы его настоящей
-    # копией в ~/.claude/skills -- и правки скилла перестали бы попадать
-    # в историю репозитория.
-    - name: Sync ~/.claude/skills from the control machine
-      ansible.posix.synchronize:
-        src: "{{ lookup('env', 'HOME') }}/.claude/skills/"
-        dest: "{{ MOP_HOME }}/.claude/skills/"
-        delete: yes
-        recursive: yes
-        copy_links: yes
-      when: "'master' not in group_names"
-
-    # Сначала снять, потом поставить: add на существующей записи ошибается,
-    # а сравнить желаемое с фактом CLI не умеет -- токены он прячет даже от
-    # get. exec -- чтобы код возврата задачи был кодом add, а не remove.
-    # claude на узле живёт в nvm, которого нет в PATH неинтерактивного ssh:
-    # MOP_PUPPET_PATH -- уже готовый PATH папета, им же и ищем.
-    - name: Register playwright MCP
-      ansible.builtin.shell:
-        cmd: |
-          claude mcp remove -s user playwright >/dev/null 2>&1 || true
-          exec claude mcp add -s user playwright -- npx -y '@playwright/mcp@latest' --headless --isolated --browser chromium
-      environment:
-        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
-      changed_when: false
-
-    - name: Register windows-mcp
-      ansible.builtin.shell:
-        cmd: |
-          claude mcp remove -s user windows-mcp >/dev/null 2>&1 || true
-          exec claude mcp add -s user --transport http windows-mcp '{{ windows_mcp_url }}' --header 'Authorization: Bearer {{ windows_mcp_token }}'
-      environment:
-        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
-      changed_when: false
-      no_log: true
-
-    - name: Register mac-mcp
-      ansible.builtin.shell:
-        cmd: |
-          claude mcp remove -s user mac-mcp >/dev/null 2>&1 || true
-          exec claude mcp add -s user --transport http mac-mcp 'http://{{ MAC_MCP_HOST }}:{{ MCP_PORT }}/mcp' --header 'Authorization: Bearer {{ mac_mcp_token }}'
-      environment:
-        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
-      changed_when: false
-      no_log: true
+    - name: Skills and MCP servers of this installation
+      ansible.builtin.include_tasks: body-claude.yml

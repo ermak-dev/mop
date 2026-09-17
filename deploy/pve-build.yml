@@ -239,13 +239,31 @@
         PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
       changed_when: false
 
-    # Тулчейн, базы и env-файлы КОНКРЕТНОГО проекта -- дело установки, не
-    # продукта: путь называет настройка, пусто значит «ничего сверх
-    # обязательного». Без этого крючка deploy/ пришлось бы обрастать чужими
-    # тулчейнами, а образ шарда всё равно остался бы неполным.
-    - name: What this installation adds to a body
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/../{{ MOP_BODY_EXTRA }}"
-      when: MOP_BODY_EXTRA | default('') | length > 0
+
+# Тулчейн, базы, env-файлы, скиллы и свои MCP-серверы -- дело УСТАНОВКИ, не
+# продукта: файлы называет настройка MOP_BODY_EXTRA, пусто значит «ничего сверх
+# обязательного». Без этого крючка deploy/ пришлось бы обрастать чужими
+# тулчейнами, а образ шарда всё равно остался бы неполным.
+#
+# ОТДЕЛЬНОЙ ИГРОЙ, а не задачей в предыдущей, и причин две. Первая: `become` не
+# бывает атрибутом include, его наследуют только от игры. Вторая важнее -- у
+# двух половин разные умолчания: продуктовые задачи тела идут ПОД
+# ПОЛЬЗОВАТЕЛЕМ ПУЛА (pip --user, пакет mop в его $HOME), а установочные -- под
+# root, как и в прогоне по узлам. Слить их в одну игру значит выбрать одно
+# умолчание на обе и получить root-овый ~/.local у папета.
+- name: What this installation adds to a body
+  hosts: mop_building
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Nothing to add when the installation names nothing
+      ansible.builtin.meta: end_host
+      when: MOP_BODY_EXTRA | default('') | length == 0
+
+    - name: Task files this installation names
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../{{ item | trim }}"
+      loop: "{{ MOP_BODY_EXTRA.split(',') | select | list }}"
 
 
 - name: Seal the image
