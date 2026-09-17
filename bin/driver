@@ -104,23 +104,26 @@ def v_run(argv):
     if w.get("error"):
         sys.exit(f"the wrapper did not reach the body of {name}: {w['error']}")
 
-    prefix = d.argv(name)
+    # Врапер идёт своим соединением (run_argv), а гашение сессии — обычным
+    # (argv): первое живёт столько же, сколько папет, и мультиплексировать его
+    # нельзя, второе коротко и платить за него рукопожатием незачем.
+    hold, probe = d.run_argv(name), d.argv(name)
 
-    def inside(script):
+    def inside(prefix, script):
         return prefix + [script] if prefix else ["bash", "-c", script]
 
     state = {"child": None, "asked": False}
 
     def stop(_sig, _frm):
         state["asked"] = True
-        subprocess.run(inside(f"tmux -L {name} kill-session -t {name}"),
+        subprocess.run(inside(probe, f"tmux -L {name} kill-session -t {name}"),
                        capture_output=True)
         if state["child"]:
             state["child"].terminate()
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    state["child"] = subprocess.Popen(inside(f"bash {shlex.quote(inner)}"))
+    state["child"] = subprocess.Popen(inside(hold, f"bash {shlex.quote(inner)}"))
     code = state["child"].wait()
     # Остановка по TERM — штатное завершение: так Nomad снимает задачу, и
     # ненулевой код здесь читался бы как падение папета.

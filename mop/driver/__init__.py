@@ -24,6 +24,8 @@ Nomad не нужен вовсе — в этом половина смысла �
     bodies()               что есть на этом узле — ростер без Nomad
     capacity()             память и место хранилища тел
     argv(name)             префикс команды: [] у host, ssh у контейнера
+    run_argv(name)         чем узел запускает врапер в теле: соединение живёт
+                           столько же, сколько папет
     push(name, path, data) положить файл внутрь (mop login)
     projects_dir(name)     где транскрипты — mop stat, usage
     attach_argv(name)      чем входит человек
@@ -41,7 +43,7 @@ from pathlib import Path
 
 # Глаголы контракта. Список закрыт и проверяется громко при загрузке: агент
 # зовёт их из петли, и отсутствующий argv прочитается там как «узел молчит».
-VERBS = ("ensure", "destroy", "bodies", "capacity", "argv", "push",
+VERBS = ("ensure", "destroy", "bodies", "capacity", "argv", "run_argv", "push",
          "projects_dir", "attach_argv", "repair_argv")
 
 DEFAULT = "host"
