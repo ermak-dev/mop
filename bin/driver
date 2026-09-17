@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 import lib
-from mop import config, driver
+from mop import config, driver, nomad
 from mop.render import table
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
@@ -195,12 +195,50 @@ def v_build(argv):
     клон шаблона, на lvm-thin связанный и мгновенный."""
     if len(argv) != 1:
         lib.usage(__doc__)
+    shard = argv[0]
     settings = json.dumps({k: v for k, (v, _) in config.effective().items()},
                           ensure_ascii=False)
-    return subprocess.call(
+    rc = subprocess.call(
         ["ansible-playbook", "-i", os.environ["INVENTORY"],
          os.path.join(config.PROJECT, "deploy", "pve-build.yml"),
-         "--extra-vars", settings, "--extra-vars", f"mop_shard={argv[0]}"])
+         "--extra-vars", settings, "--extra-vars", f"mop_shard={shard}"])
+    if rc == 0:
+        announce(shard)
+    return rc
+
+
+def announce(shard):
+    """Сказать кластеру, что образ этого шарда на узлах СОБРАН.
+
+    Без этого планировщик про образ не знает, и папет шарда на узел не сядет —
+    ограничение в спеке смотрит именно на этот перечень. Отдельным шагом после
+    плейбука, а не задачей в нём: токен Nomad есть только у управляющей машины,
+    и тащить его в плейбук, который ходит на узлы, значит вернуть то, ради чего
+    заводили шину.
+
+    Пишем ПОСЛЕ успешной сборки: объявить образ, которого нет, — это папет,
+    висящий pending, и ровно тот отказ, от которого ограничение и заводилось."""
+    for name, meta in node_drivers().items():
+        if meta.get("mop_driver", driver.DEFAULT) == driver.DEFAULT:
+            continue          # узел общего назначения объявляет any и так
+        # Перечень берём С УЗЛА: серверная копия отстаёт на секунды, и
+        # дописать к устаревшей значит стереть ранее объявленные образы.
+        dyn = nomad.node_dynamic_meta(name)
+        have = [s for s in (dyn.get("mop_shards") or "").split(",") if s]
+        if shard in have:
+            print(f"  {name}: image of {shard} already announced")
+            continue
+        nomad.set_node_meta(name, {"mop_shards": ",".join(sorted(have + [shard]))})
+        print(f"  {name}: now serves {', '.join(sorted(have + [shard]))}")
+
+
+def node_drivers():
+    """{имя узла: его meta} по всему кластеру — включая выведенные из
+    планирования: узел, снятый с раздачи, остаётся узлом и образы на нём
+    лежат."""
+    c = nomad.client()
+    return {n["Name"]: (c.node.get_node(n["ID"]).get("Meta") or {})
+            for n in c.nodes.get_nodes()}
 
 
 VERBS = {"list": v_list, "run": v_run, "sweep": v_sweep, "build": v_build}
