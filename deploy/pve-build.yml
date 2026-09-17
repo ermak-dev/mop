@@ -172,6 +172,8 @@
 
   vars:
     mop_tgz: "/tmp/mop-package-{{ mop_shard }}.tgz"
+    mirror_tmp: "/tmp/mop-mirror-{{ mop_shard }}.git"
+    mirror_tgz: "/tmp/mop-mirror-{{ mop_shard }}.tgz"
 
   tasks:
     - name: Wait for sshd inside the body
@@ -220,6 +222,61 @@
     # весь пакет. Без python-nomad сервер не стартует, claude показывает «1
     # failed» в /mcp, а папет остаётся БЕЗ ИНСТРУМЕНТОВ -- живой, свободный и
     # бесполезный.
+    # ЗЕРКАЛО ШАРДА В ОБРАЗ: дальше каждое тело клонирует репозиторий из него
+    # локально, а не тянет по сети заново. Врапер сам смотрит, есть ли зеркало,
+    # и без него клонирует как раньше -- у драйвера host его не бывает вовсе.
+    #
+    # Снимается НА УПРАВЛЯЮЩЕЙ МАШИНЕ, а не в сборочном теле, и это не про
+    # удобство: ключа к git в теле на этом шаге нет и заводить его там незачем.
+    # Приватный ключ узла попадает в тело позже, при подъёме папета (MOP_BODY_SEED),
+    # а в ОБРАЗЕ ему делать нечего -- образ живёт дольше любой ротации ключа.
+    - name: Take a fresh mirror of the shard
+      ansible.builtin.shell: |
+        set -e
+        rm -rf {{ mirror_tmp }} {{ mirror_tgz }}
+        git clone --mirror -q {{ mop_origin | quote }} {{ mirror_tmp }}
+        tar czf {{ mirror_tgz }} -C {{ mirror_tmp }} .
+      delegate_to: localhost
+      become: no
+      changed_when: true
+
+    - name: Where the mirrors live in the body
+      ansible.builtin.file:
+        path: "{{ MOP_HOME }}/.cache/mop-mirror/{{ mop_shard }}.git"
+        state: directory
+        mode: "0755"
+
+    - name: Mirror of the shard, for bodies to clone from locally
+      ansible.builtin.unarchive:
+        src: "{{ mirror_tgz }}"
+        dest: "{{ MOP_HOME }}/.cache/mop-mirror/{{ mop_shard }}.git/"
+
+    - name: Drop the mirror's copy on the control machine
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: ["{{ mirror_tmp }}", "{{ mirror_tgz }}"]
+      delegate_to: localhost
+      become: no
+
+    # Кэш crates ТОЖЕ в образ, и греется он единственным честным способом --
+    # разрешением зависимостей настоящего дерева. Дерево берём ИЗ ЗЕРКАЛА:
+    # это локальный клон, ему не нужны ни сеть, ни ключ. Тихо мимо, если в теле
+    # нет cargo или проект не на Rust: греть нечего, и это не отказ.
+    - name: Warm up the crates cache from the shard's own tree
+      become_user: "{{ MOP_USER }}"
+      ansible.builtin.shell: |
+        set -e
+        command -v cargo >/dev/null || exit 0
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT
+        git clone -q "$HOME/.cache/mop-mirror/{{ mop_shard }}.git" "$tmp/src"
+        [ -f "$tmp/src/Cargo.toml" ] || exit 0
+        cd "$tmp/src" && { cargo fetch --locked || cargo fetch || true; }
+      environment:
+        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
+      changed_when: false
+
     - name: Python dependencies of a puppet
       ansible.builtin.pip:
         name: [nats-py, mcp, python-nomad, requests]
