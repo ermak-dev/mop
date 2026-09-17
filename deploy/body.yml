@@ -24,6 +24,15 @@
   gather_facts: no
 
   tasks:
+    # Узел, который сам телом не бывает, из этой игры выходит сразу. Его тела
+    # — отдельные объекты, их строит `mop driver build` и гоняет по ним ЭТУ ЖЕ
+    # игру со своим инвентарём. Условие смотрит на драйвер, а не на имя
+    # группы: список драйверов живёт в mop/driver/, и второе его место здесь
+    # разошлось бы с первым молча.
+    - name: A node that is not its own body is not a body
+      ansible.builtin.meta: end_host
+      when: mop_driver | default('host') != 'host'
+
     - name: Ensure the tools a puppet works with
       become: yes
       ansible.builtin.apt:

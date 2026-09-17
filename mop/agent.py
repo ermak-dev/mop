@@ -29,6 +29,7 @@ import asyncio
 import base64
 import json
 import os
+import shlex
 import socket
 import sys
 
@@ -37,10 +38,16 @@ try:
 except ImportError:
     sys.exit("bus library needed: pip install --user --break-system-packages nats-py")
 
-from . import bus, config, session, usage
+from . import bus, driver, usage
 
 HOME = os.path.expanduser("~")
 CLONES = f"{HOME}/puppets"
+
+# Драйвер УЗЛА, не папета, и берётся он из окружения (юнит агента), а не из
+# запроса: иначе мастер шарда A прислал бы своё значение и заставил агента
+# исполнить команду не там. Дефолт host — узел, ничего про драйверы не
+# знающий, обязан вести себя ровно как раньше.
+DRIVER = driver.current()
 
 # Глаголы, доступные не-мастеру. Папет имеет право написать соседу и посмотреть,
 # кто чем занят; печатать в чужой TUI и писать файлы — не имеет.
@@ -82,8 +89,9 @@ WRITABLE = (
 # Префикс имён джобов-папетов; он же префикс tmux-серверов и каталогов клонов.
 # Дубль puppets.JOB_PREFIX намеренный: тянуть сюда puppets значит тянуть на узел
 # python-nomad, а агенту Nomad не нужен вовсе — в этом половина смысла переезда.
+# Ростер тел перечисляет драйвер (у host — по сокетам tmux в /tmp/tmux-<uid>):
+# на гипервизоре этот каталог пуст, и знать о нём агенту незачем.
 PREFIX = "pu-"
-TMUX_DIR = os.environ.get("TMUX_TMPDIR") or f"/tmp/tmux-{os.getuid()}"
 
 # Окно должно накрывать не только последний ход, но и ЖАЛОБУ над ним: строка
 # «API Error: … Usage limit reached» остаётся стоять, а claude дорисовывает под
@@ -114,7 +122,7 @@ async def puppet_shard(name):
 
     Пока клона нет (папет грузится) — откат на имя, которое по построению
     согласовано с origin: next_name строит его из того же basename."""
-    out, _ = await sh(f"git -C {clone_dir(name)} remote get-url origin 2>/dev/null")
+    out, _ = await bsh(name, f"git -C {clone_dir(name)} remote get-url origin 2>/dev/null")
     origin = out.strip().splitlines()[-1] if out.strip() else ""
     if origin:
         return os.path.basename(origin).removesuffix(".git")
@@ -123,33 +131,45 @@ async def puppet_shard(name):
 
 # ─── локальные пробы ─────────────────────────────────────────────────────
 async def sh(script, timeout=20):
-    """Шелл на своём же узле. -> (вывод, код). Единственное место, где агент
-    вообще запускает шелл, и скрипт всегда наш, никогда не из запроса."""
-    proc = await asyncio.create_subprocess_shell(
-        script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
+    """Шелл на своём же УЗЛЕ. -> (вывод, код).
+
+    Для узловых суждений: место на диске, ростер тел. Всё, что про конкретного
+    папета, идёт через bsh — в ТЕЛЕ."""
+    return await driver.sh(script, timeout)
+
+
+async def bsh(name, script, timeout=20):
+    """Шелл ВНУТРИ ТЕЛА папета. -> (вывод, код).
+
+    У драйвера host префикс пустой и это тот же шелл на узле; у контейнерного
+    драйвера — ssh внутрь. Соблазн оставить пробу снаружи (смонтировать наружу
+    tmux-сокет и каталог сессий) ложный: `session.probe` проверяет живость
+    через `os.kill(pid, 0)`, а pid тела в namespace хоста означает другой
+    процесс или никакой — ломается различение `hung` и `offline`. Плюс tmux
+    отказывается соединять клиента с сервером другой версии.
+
+    Скрипт всегда наш, никогда не из запроса, а имя папета попадает в него
+    только после driver.valid_name."""
+    if not driver.valid_name(name):
         return "", None
-    return out.decode(errors="replace"), proc.returncode
+    return await driver.sh(script, timeout, prefix=DRIVER.argv(name))
 
 
 async def tmux_alive(name):
-    _, code = await sh(f"tmux -L {name} has-session -t {name} 2>/dev/null")
+    _, code = await bsh(name, f"tmux -L {name} has-session -t {name} 2>/dev/null")
     return code == 0
 
 
 async def screen(name, lines=SCREEN_LINES):
-    out, _ = await sh(f"tmux -L {name} capture-pane -t {name} -p -S - "
-                      f"| grep -v '^$' | tail -{lines}")
+    out, _ = await bsh(name, f"tmux -L {name} capture-pane -t {name} -p -S - "
+                             f"| grep -v '^$' | tail -{lines}")
     return out
 
 
 async def pane_lines(name):
     """Весь буфер пейна без хвостовых пустых строк, которыми tmux добивает
     видимую часть."""
-    out, code = await sh(f"tmux -L {name} capture-pane -p -t {name} -S -")
+    out, code = await bsh(name, f"tmux -L {name} capture-pane -p -t {name} -S -")
     if code not in (0, None):
         raise RuntimeError(f"tmux in {name}: {out.strip() or f'exit {code}'}")
     lines = out.splitlines()
@@ -166,7 +186,8 @@ async def clone_facts(name):
     `@{u}..` считает влитое неотправленным. На этих числах стоит решение
     мастера о диспатче, переписывать их вместе с транспортом нельзя."""
     d = clone_dir(name)
-    out, _ = await sh(
+    out, _ = await bsh(
+        name,
         f'cd {d} 2>/dev/null || exit 0; '
         f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
         f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
@@ -192,14 +213,61 @@ async def du_kb(name):
     Меряется ПО СПРОСУ, без кэша (пока): du по большому target — обход сотен
     тысяч inode, и цену платит каждый спрашивающий. nice обязателен — обмер
     конкурирует за IO с живыми сборками. Отказ du — None, а не ноль: ноль
-    это измеренное «пусто», отказ — «не знаю»."""
-    paths = [p for p in (clone_dir(name), f"{HOME}/.cache/target-{name}")
-             if os.path.isdir(p)]
-    if not paths:
+    это измеренное «пусто», отказ — «не знаю».
+
+    Каталоги отбирает сам шелл В ТЕЛЕ (`-d`), а не os.path.isdir здесь: у
+    контейнерного папета этих путей на узле нет вовсе, и проверка снаружи
+    вернула бы «ничего не занимает» для полного клона."""
+    paths = f"{clone_dir(name)} {HOME}/.cache/target-{name}"
+    out, code = await bsh(
+        name,
+        f'p=""; for x in {paths}; do [ -d "$x" ] && p="$p $x"; done; '
+        f'[ -n "$p" ] && nice -n 19 du -sx $p 2>/dev/null',
+        timeout=120)
+    if code is None:
         return None
-    out, _ = await sh(f"nice -n 19 du -sx {' '.join(paths)} 2>/dev/null",
-                      timeout=120)
-    return sum(int(l.split()[0]) for l in out.splitlines() if l[:1].isdigit())
+    kbs = [int(l.split()[0]) for l in out.splitlines() if l[:1].isdigit()]
+    return sum(kbs) if kbs else None
+
+
+# ─── сессия папета: всегда ВНУТРИ тела ───────────────────────────────────
+# session.py ходит к сокету сессии и проверяет живость через os.kill(pid, 0) —
+# то и другое имеет смысл только там, где сессия и живёт. Поэтому агент зовёт
+# его не импортом, а ОТДЕЛЬНЫМ ПРОЦЕССОМ через тот же префикс, что и tmux:
+# у host это тот же узел, у контейнерного драйвера — ssh внутрь. Модуль для
+# того и сделан standalone, с CLI, печатающим в stdout.
+def _session_cmd(verb, *args):
+    return " ".join(["python3", shlex.quote(DRIVER.SESSION_PY), verb]
+                    + [shlex.quote(str(a)) for a in args])
+
+
+async def session_probe(name):
+    """Достоверное состояние сессии: "<status> <alive> <listen>" либо "none".
+
+    Отказ пробы отдаём как "none", а не как исключение: у мастера это значит
+    «файла сессии нет», и он уходит на откат по буферу пейна — ровно то же,
+    что было, когда пробник не находил сессии."""
+    out, code = await bsh(name, _session_cmd("probe", clone_dir(name)))
+    if code not in (0, None) or not out.strip():
+        return "none"
+    return out.strip().splitlines()[-1].strip()
+
+
+async def session_json(name, script, timeout=20):
+    """Ответ session.py, который печатает JSON (send, wait-idle).
+
+    Разбираем ПОСЛЕДНЮЮ строку: ssh в тело волен подмешать сверху свои
+    предупреждения (баннер, добавленный ключ хоста), и первая строка тогда
+    не JSON."""
+    out, code = await bsh(name, script, timeout)
+    if code is None:
+        return {"error": f"{name}: the body did not answer in {timeout}s"}
+    for line in reversed(out.strip().splitlines()):
+        try:
+            return json.loads(line)
+        except ValueError:
+            continue
+    return {"error": out.strip() or f"session.py exit {code}"}
 
 
 async def facts(name):
@@ -212,9 +280,7 @@ async def facts(name):
     if not await tmux_alive(name):
         return {"present": False}
     scr, sess, clone = await asyncio.gather(
-        screen(name),
-        asyncio.to_thread(session.probe, clone_dir(name)),
-        clone_facts(name))
+        screen(name), session_probe(name), clone_facts(name))
     return {"present": True, "screen": scr, "session": sess, "clone": clone}
 
 
@@ -256,11 +322,11 @@ async def v_local(req):
 
     Ростер без Nomad. Нужен узловому `mop mcp`: токена у него больше нет, и
     список джобов взять неоткуда. Мастер этим глаголом не пользуется — у него
-    ростер богаче: аллокации, профиль LLM, репозиторий."""
-    try:
-        names = sorted(n for n in os.listdir(TMUX_DIR) if n.startswith(PREFIX))
-    except OSError:
-        names = []
+    ростер богаче: аллокации, профиль LLM, репозиторий.
+
+    Перечисляет ДРАЙВЕР: у host это сокеты tmux-серверов в /tmp/tmux-<uid>, а
+    на гипервизоре этот каталог пуст — тела там отдельные объекты."""
+    names = await DRIVER.bodies()
     alive = [n for n in names if await tmux_alive(n) and await _mine(req, n)]
     got = await asyncio.gather(*(facts(n) for n in alive))
     return {"node": node_name(), "puppets": dict(zip(alive, got))}
@@ -274,55 +340,40 @@ async def v_send(req):
     мастера. Отсюда push без опроса — и без потока внутри MCP-сервера, который
     раньше ждал простоя, сидя в аллокации."""
     name = req["name"]
-    try:
-        sock = session.resolve(clone_dir(name))["messagingSocketPath"]
-    except Exception as e:
-        return {"error": str(e)}
     wait = min(max(int(req.get("wait") or 0), 0), IDLE_WAIT)
-    try:
-        r = await asyncio.to_thread(
-            session.send, sock, req["message"],
-            priority=req.get("priority", "next"),
-            from_name=req.get("from_name", "mop"),
-            wait_idle=wait)
-    except Exception as e:
-        return {"error": str(e)}
-    out = {"msg_id": r["msg_id"], "idle": (r["idle"] or {}).get("state")}
+    # Цель — КЛОН, а не сокет: session.py резолвит сессию сам, внутри тела, где
+    # только и лежат её файлы. Снаружи сокет контейнерного папета не виден.
+    out = await session_json(name, _session_cmd(
+        "send", clone_dir(name), req["message"],
+        "--priority", req.get("priority", "next"),
+        "--from-name", req.get("from_name", "mop"),
+        "--wait", wait), timeout=wait + 20)
+    if out.get("error"):
+        return out
     if req.get("notify") and not wait:
         # Куда отвечать, говорит сам мастер: инбокс адресуется мастером, а не
         # шардом, иначе два терминала в одном проекте получали бы вести друг
         # друга. Без reply_to ждать бессмысленно — некому сказать.
         if req.get("reply_to"):
-            asyncio.create_task(_watch_idle(name, sock, req["reply_to"]))
+            asyncio.create_task(_watch_idle(name, req["reply_to"]))
         else:
             out["notify"] = "no reply_to given — nothing to notify"
     return out
 
 
-def _await_idle(name, sock, timeout):
-    """Подписка на простой БЕЗ сообщения папету.
+async def _watch_idle(name, reply_to):
+    """Дождаться простоя и сказать мастеру, который об этом попросил.
 
-    `session.send` всегда пишет пользовательский кадр первым, и прежний
-    watch_idle этим и пользовался: папет получал пустое тело с одной лишь
-    подсказкой. Здесь нужен только control-кадр — спрашивать «ты освободился?»,
-    занимая ход, значит мешать ровно тому, чего ждёшь."""
-    inbox = session.Inbox(os.path.dirname(sock), tag=name[-8:])
-    try:
-        sub = session.control_frame(
-            "notify_when_idle", **{"from": inbox.address, "from_mode": "bypass"})
-        session.write_frames(sock, [sub], session.peer_token(sock))
-        return (inbox.wait_for("peer_idle_notice", sub["msg_id"], timeout)
-                or {}).get("state")
-    finally:
-        inbox.close()
-
-
-async def _watch_idle(name, sock, reply_to):
-    """Дождаться простоя и сказать мастеру, который об этом попросил."""
-    try:
-        state = await asyncio.to_thread(_await_idle, name, sock, IDLE_WAIT)
-    except Exception as e:
-        return await _tell_master(reply_to, f"mop: gave up waiting for {name} to idle: {e}")
+    Ожидание держит session.py В ТЕЛЕ (глагол wait-idle): подписка идёт к
+    сокету сессии, а он host-local внутри тела. Метка нужна, когда узел ждёт
+    сразу нескольких папетов — иначе два инбокса отберут друг у друга путь
+    <pid>.sock."""
+    r = await session_json(name, _session_cmd(
+        "wait-idle", clone_dir(name), IDLE_WAIT, name[-8:]), timeout=IDLE_WAIT + 20)
+    if r.get("error"):
+        return await _tell_master(
+            reply_to, f"mop: gave up waiting for {name} to idle: {r['error']}")
+    state = r.get("state")
     await _tell_master(reply_to, f"mop: puppet {name} — {state}" if state
                        else f"mop: {name} did not report idle within {IDLE_WAIT}s")
 
@@ -369,31 +420,19 @@ async def v_wipe(req):
     чисто производные данные, он удаляется rm -rf и тем самым снимается
     почти весь объём.
 
+    Что именно сносится, решает ДРАЙВЕР: у host тело — сам узел, снести его
+    нельзя, и сносится всё, что папет в нём нажил; у контейнерного драйвера
+    уходит целиком контейнер, а следующий подъём делает новый.
+
     Предохранитель: живая tmux-сессия — отказ. Агент не судит, свободен ли
     папет, но «сессия жива» — факт, и снос под живой сессией недопустим
     независимо от того, что решил мастер."""
     name = req["name"]
-    if not name.startswith(PREFIX) or "/" in name:
+    if not driver.valid_name(name):
         return {"error": f"name {name!r} doesn't look like {PREFIX}<project>-<n>"}
     if await tmux_alive(name):
         return {"error": f"{name}: tmux session is alive — stop the job first"}
-    d = clone_dir(name)
-    # Исключения чистки — из НАСТРОЙКИ, той же, что сеет врапер (PU_SEED в
-    # спеке). Список в двух местах — здесь и в врапере — расползается ровно
-    # к «посеяли одно, снесли другое».
-    excl = " ".join(f"-e '{p}'" for p in
-                     (s.strip() for s in config.get("MOP_PUPPET_SEED").split(",")) if p)
-    out, code = await sh(
-        f"git -C {d} reset --hard HEAD && git -C {d} clean -xdff {excl}")
-    if code not in (0, None):
-        return {"error": f"git in {d}: {out.strip() or f'exit {code}'}"}
-    target = f"{HOME}/.cache/target-{name}"
-    # Долго: сотни тысяч inode. Таймаут шире офисного — и обычный вызов шела
-    # сюда не годится, он бы убил rm на полпути.
-    _, code = await sh(f"rm -rf {target}", timeout=600)
-    if code not in (0, None):
-        return {"error": f"rm {target}: exit {code}"}
-    return {"reset": True, "target": target}
+    return await DRIVER.destroy(name)
 
 
 async def v_type(req):
@@ -410,8 +449,9 @@ async def v_type(req):
     if command in KEYS_ALLOWED:
         # Голая клавиша: ни очистки строки, ни Enter следом — Escape снимает
         # диалог, а Enter после него отправил бы пустой ход.
-        out, code = await sh(f"tmux -L {name} send-keys -t {name} {command}; "
-                             f"sleep 1; tmux -L {name} capture-pane -p -t {name}")
+        out, code = await bsh(name,
+                              f"tmux -L {name} send-keys -t {name} {command}; "
+                              f"sleep 1; tmux -L {name} capture-pane -p -t {name}")
         return {"screen": out} if code in (0, None) else {"error": out.strip()}
     if command.split()[0:1] and command.split()[0] not in SLASH_ALLOWED:
         return {"error": f"only allowed: {', '.join(SLASH_ALLOWED + KEYS_ALLOWED)}"}
@@ -421,8 +461,8 @@ async def v_type(req):
     if command:
         keys = (f"tmux -L {name} send-keys -t {name} C-u; sleep 0.3; "
                 f"tmux -L {name} send-keys -t {name} '{command}'; sleep 0.3; ")
-    out, code = await sh(keys + f"tmux -L {name} send-keys -t {name} Enter; "
-                                f"sleep 2; tmux -L {name} capture-pane -p -t {name}")
+    out, code = await bsh(name, keys + f"tmux -L {name} send-keys -t {name} Enter; "
+                                      f"sleep 2; tmux -L {name} capture-pane -p -t {name}")
     if code not in (0, None):
         return {"error": out.strip() or f"tmux exit {code}"}
     return {"screen": out}
