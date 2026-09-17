@@ -5,8 +5,10 @@ The only subcommand that goes over ssh instead of the bus: a live terminal
 isn't something a bus verb can hand over.
 """
 import os
+import shlex
 
 import lib
+from mop import driver, nomad
 
 
 def main(argv):
@@ -15,10 +17,16 @@ def main(argv):
     name = argv[0]
     lib.guard(name)
     a = lib.running_alloc(name)
+    node = a["NodeName"]
+    # Чем входят В ТЕЛО, знает драйвер УЗЛА: у host это сразу tmux, у
+    # контейнерного — ещё один ssh внутрь. Драйвер берём из meta клиента
+    # Nomad, куда его кладёт deploy; узел, ничего о драйвере не сказавший,
+    # ведёт себя как раньше.
+    d = driver.module(nomad.node_meta(node).get("mop_driver") or driver.DEFAULT)
+    inside = " ".join(shlex.quote(x) for x in d.attach_argv(name))
     # Имя узла в Nomad — имя из инвентаря, а инвентарь берёт способ дозвона
     # из ~/.ssh/config по тому же имени. Таблицы имён между ними нет и не нужно.
-    os.execvp("ssh", ["ssh", "-t", a["NodeName"],
-                      "tmux", "-L", name, "attach", "-t", name])
+    os.execvp("ssh", ["ssh", "-t", node, inside])
 
 
 lib.run(lib.cluster(main))

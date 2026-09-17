@@ -118,3 +118,17 @@ def deregister(job_id, purge=True):
 
 def get_job(job_id):
     return client().job.get_job(job_id)
+
+
+def node_meta(node_name):
+    """`meta` клиента Nomad по имени узла. Пусто, если узла нет.
+
+    Здесь лежит ДРАЙВЕР узла: мастеру он нужен, чтобы знать, чем входить в
+    тело папета (`mop attach`), а спрашивать об этом сам узел нельзя — ответ
+    пришёл бы по той же шине, которой может и не быть, когда как раз и
+    понадобился аварийный вход. Значение кладёт `mop deploy` из той же
+    переменной инвентаря, что и в юнит агента."""
+    for n in client().nodes.get_nodes():
+        if n["Name"] == node_name:
+            return client().node.get_node(n["ID"]).get("Meta") or {}
+    return {}

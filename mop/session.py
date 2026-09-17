@@ -347,10 +347,43 @@ def send(sock_path, body, priority="next", mode="bypass", from_name="mop",
             inbox.close()
 
 
+def wait_idle(cwd, timeout, tag=None):
+    """Дождаться простоя сессии в cwd, НЕ занимая её ход. -> состояние | None.
+
+    `send` всегда пишет пользовательский кадр первым, и прежний ожидатель этим
+    и пользовался: сессия получала пустое тело с одной лишь подсказкой. Здесь
+    нужен только control-кадр — спрашивать «ты освободился?», занимая ход,
+    значит мешать ровно тому, чего ждёшь.
+
+    Форма CLI обязательна, а не удобна: у контейнерного папета сокет сессии
+    живёт ВНУТРИ тела, и ждать его импортом с узла некому. Без этого глагола
+    push-уведомления мастеру у таких папетов молча не приходят."""
+    sock = resolve(cwd)["messagingSocketPath"]
+    inbox = Inbox(os.path.dirname(sock), tag=tag)
+    try:
+        sub = control_frame("notify_when_idle",
+                            **{"from": inbox.address, "from_mode": "bypass"})
+        write_frames(sock, [sub], peer_token(sock))
+        return (inbox.wait_for("peer_idle_notice", sub["msg_id"], timeout)
+                or {}).get("state")
+    finally:
+        inbox.close()
+
+
 def main(argv):
     if len(argv) >= 2 and argv[0] == "probe":
         print(probe(argv[1]))
         return 0
+    if len(argv) >= 3 and argv[0] == "wait-idle":
+        # JSON и здесь, по той же причине, что у send: чаще всего эта ветка
+        # исполняется в другой машине, и вызывающий читает один лишь stdout.
+        try:
+            out = {"state": wait_idle(argv[1], int(argv[2]),
+                                      tag=(argv[3] if len(argv) > 3 else None))}
+        except Exception as e:
+            out = {"error": str(e)}
+        print(json.dumps(out, ensure_ascii=False))
+        return 0 if "error" not in out else 1
     if len(argv) >= 3 and argv[0] == "send":
         # Ответ всегда JSON, в том числе на ошибку: чаще всего эта ветка
         # исполняется на другом хосте, и вызывающий читает один лишь stdout.
@@ -369,8 +402,9 @@ def main(argv):
             out = {"error": str(e)}
         print(json.dumps(out, ensure_ascii=False))
         return 0 if "error" not in out else 1
-    print("usage: session.py probe <cwd> | send <target> <text> [--priority P] "
-          "[--mode M] [--from-name N] [--wait SEC]", file=sys.stderr)
+    print("usage: session.py probe <cwd> | wait-idle <cwd> <timeout> [tag] | "
+          "send <target> <text> [--priority P] [--mode M] [--from-name N] "
+          "[--wait SEC]", file=sys.stderr)
     return 2
 
 
