@@ -35,7 +35,21 @@
 #
 # creates, а не state=latest: ставим один раз, дальше claude обновляет себя
 # сам, и прогон deploy не имеет права подменить версию под работающим папетом.
+#
+# pipefail и проверка результата — не перестраховка. `shell` исполняет строку
+# через /bin/sh БЕЗ pipefail, и код возврата конвейера `curl | bash` — это код
+# bash: оборванная загрузка даёт ему пустой ввод, он выходит нулём, и задача
+# зелёная. Тело уезжает в шаблон БЕЗ claude, а папет в таком теле не поднимется
+# никогда. Поймано на сборке образа cloudpub: отказ всплыл восемью задачами
+# позже, в другой игре, как `exec: claude: not found`.
+#
+# `creates` от этого не спасает и не для того: оно решает, НАДО ли запускать, а
+# не удалось ли.
 - name: Install the claude CLI
-  ansible.builtin.shell: curl -fsSL https://claude.ai/install.sh | bash
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -fsSL https://claude.ai/install.sh | bash
+    test -x "{{ MOP_HOME }}/.local/bin/claude"
   args:
     creates: "{{ MOP_HOME }}/.local/bin/claude"
+    executable: /bin/bash

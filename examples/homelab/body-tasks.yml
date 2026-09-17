@@ -315,11 +315,19 @@
 # node for cloudpub's frontend/e2e test sets, per BUILD.md: nvm + 22.12.0 (BUILD.md says 22.11.0, but server/Dockerfile pins
 # NODE_VERSION=22.12.0 and vite refuses anything older).
 # Per-user install under the pool user -- the same account the puppets run as.
+# pipefail и проверка результата — по тому же доводу, что у установщика claude
+# в deploy/body-tasks.yml: код конвейера `curl | bash` это код bash, и
+# оборванная загрузка проходит как успех. Без node тело собирается «зелёным», а
+# первый же `npx` в нём не находит ничего.
 - name: Install nvm
   become_user: "{{ MOP_USER }}"
-  ansible.builtin.shell: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+    test -s "{{ MOP_HOME }}/.nvm/nvm.sh"
   args:
     creates: "{{ MOP_HOME }}/.nvm/nvm.sh"
+    executable: /bin/bash
 
 - name: Install node 22.12.0
   become_user: "{{ MOP_USER }}"
