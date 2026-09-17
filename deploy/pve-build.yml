@@ -1,0 +1,285 @@
+---
+# Образ шарда: `mop driver build <шард>`.
+#
+# Тело из базового образа → то, чем обязано быть ЛЮБОЕ тело (body-tasks.yml) →
+# пакет mop → остановить → шаблон. Дальше каждое тело папета — клон этого
+# шаблона: на lvm-thin связанный и мгновенный.
+#
+# СБОРКОЙ, А НЕ ПОДЪЁМОМ НА МЕСТЕ. Поднимать тело из базового образа и гонять
+# плейбук при каждом `ensure` соблазнительно — одним механизмом меньше, — но
+# тогда падение плейбука видно в три часа ночи внутри врапера, и выглядит оно
+# как «папет не поднимается».
+#
+# КЛЮЧ СБОРКИ. Тело стоит в своей сети за NAT узла, и управляющая машина
+# достаёт до него только через сам узел (ProxyJump). Значит для сборки ей
+# нужен ключ, которого у тела иначе нет. Ключ этот ВРЕМЕННЫЙ: он кладётся
+# рядом с ключом узла на время сборки и снимается перед тем, как образ
+# запечатан. Постоянного ключа мастера в образе нет — он был бы второй дорогой
+# к телу, мимо единственного места, где проверяется шардирование.
+#
+# Run:  mop driver build <шард>
+
+- name: Bake the shard's image on the hypervisor
+  hosts: puppet
+  become: no
+  gather_facts: no
+
+  vars:
+    pve: "sudo -n /usr/local/sbin/mop-pve"
+    build_key: "{{ lookup('env', 'HOME') }}/.config/mop/body-build"
+
+  tasks:
+    - name: Only a node whose bodies are containers has an image to build
+      ansible.builtin.meta: end_host
+      when: mop_driver | default('host') != 'pve'
+
+    - name: A shard must be named
+      ansible.builtin.assert:
+        that: mop_shard | default('') | length > 0
+        fail_msg: "mop driver build <shard>"
+
+    # Номер и адрес спрашиваем У ДРАЙВЕРА, а не считаем здесь второй раз:
+    # разойдись два вычисления — `ensure` искал бы образ не там, и увидели бы
+    # мы это на первом подъёме папета, а не на сборке.
+    - name: Ask the driver for the image's vmid, name and network
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import sys
+            sys.path.insert(0, sys.argv[1])
+            from mop.driver import pve
+            print(pve.template_vmid(sys.argv[2]), pve.template_name(sys.argv[2]),
+                  pve.GATEWAY, pve.PREFIXLEN)
+          - "{{ playbook_dir }}/.."
+          - "{{ mop_shard }}"
+      delegate_to: localhost
+      changed_when: false
+      register: tmpl
+
+    - name: Name what came back
+      ansible.builtin.set_fact:
+        tmpl_vmid: "{{ tmpl.stdout.split()[0] }}"
+        tmpl_name: "{{ tmpl.stdout.split()[1] }}"
+        pve_gw: "{{ tmpl.stdout.split()[2] }}"
+        pve_cidr: "{{ tmpl.stdout.split()[3] }}"
+
+    # Адрес сборочного тела — ШЛЮЗ ПЛЮС ОДИН. Живые тела стоят с него же, но
+    # выше: address_of начинает с сети + 2, и пересечься им негде.
+    - name: Its address while it is being built
+      ansible.builtin.set_fact:
+        tmpl_ip: "{{ '.'.join(pve_gw.split('.')[0:3]) }}.{{ pve_gw.split('.')[3] | int + 1 }}"
+
+    - name: A temporary key for reaching the body from here
+      ansible.builtin.command:
+        cmd: "ssh-keygen -t ed25519 -N '' -C mop-build -f {{ build_key }}"
+        creates: "{{ build_key }}"
+      delegate_to: localhost
+
+    - name: Read the node's key and the build key
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      register: keyfiles
+      loop:
+        - {path: "{{ MOP_HOME }}/.ssh/mop-body.pub", where: node}
+        - {path: "{{ build_key }}.pub", where: control}
+      loop_control:
+        label: "{{ item.where }}"
+      delegate_to: "{{ (item.where == 'node') | ternary(inventory_hostname, 'localhost') }}"
+
+    - name: Name the two keys apart
+      ansible.builtin.set_fact:
+        node_key: "{{ keyfiles.results[0].content | b64decode | trim }}"
+        control_key: "{{ keyfiles.results[1].content | b64decode | trim }}"
+
+    # Пересборка начинается со сноса: образ собирается начисто, иначе в нём
+    # накапливается то, чего в плейбуке уже нет.
+    - name: Throw away the previous image
+      ansible.builtin.command: "{{ pve }} destroy {{ tmpl_vmid }}"
+      changed_when: true
+
+    - name: Raise a container from the base image
+      ansible.builtin.command: >-
+        {{ pve }} create {{ tmpl_vmid }} {{ tmpl_name }} {{ MOP_PVE_TEMPLATE }}
+        {{ MOP_PVE_STORAGE }} {{ MOP_PVE_CORES }} {{ MOP_PUPPET_MEM_MAX_MB }}
+        {{ MOP_PVE_DISK_GB }} {{ MOP_PVE_BRIDGE }} {{ tmpl_ip }}/{{ pve_cidr }}
+        {{ pve_gw }} {{ MOP_HOME }}/.ssh/mop-body.pub
+      changed_when: true
+
+    # Пересозданное тело приезжает с НОВЫМ ключом хоста, и accept-new тут не
+    # лечит: запись под этим адресом уже есть, и ssh читает смену ключа как
+    # атаку. Драйвер снимает старую запись на узле, эта строка — на
+    # управляющей машине, откуда идёт сборка. Без неё ВТОРАЯ сборка образа
+    # падает на «host key verification failed», а первая проходит.
+    - name: Forget the address's previous host key
+      ansible.builtin.command: "ssh-keygen -R {{ tmpl_ip }} -f {{ lookup('env', 'HOME') }}/.ssh/known_hosts-mop-body"
+      delegate_to: localhost
+      changed_when: false
+      failed_when: false
+
+    - name: Start it
+      ansible.builtin.command: "{{ pve }} start {{ tmpl_vmid }}"
+      changed_when: true
+
+    # Отдельной пробы сети нет: bootstrap начинается с `apt-get update`, и
+    # пока сеть у тела не поднялась, он же и есть проба. Прежняя проба ходила
+    # глаголом exec, который входит В ТЕЛО ПОД ПОЛЬЗОВАТЕЛЕМ ПУЛА, — а его на
+    # этом шаге ещё нет, так что сорок раз подряд она мерила не то.
+    - name: The pool user, sshd, sudo and a lingering session bus
+      ansible.builtin.command: "{{ pve }} bootstrap {{ tmpl_vmid }}"
+      register: boot
+      until: boot.rc == 0
+      retries: 12
+      delay: 5
+      changed_when: true
+
+    - name: Let both the node and this build machine in
+      ansible.builtin.shell:
+        cmd: "{{ pve }} keys {{ tmpl_vmid }}"
+        stdin: "{{ node_key }}\n{{ control_key }}\n"
+      changed_when: true
+
+    # Тело за NAT узла, и дорога к нему у управляющей машины одна — через сам
+    # узел. ProxyJump, а не proxmox_pct_remote: pct-транспорт платит запуском
+    # lxc-attach за КАЖДЫЙ модуль, и сборка на нём идёт минутами дольше.
+    - name: Take the body into the inventory for the rest of the run
+      ansible.builtin.add_host:
+        name: "{{ tmpl_name }}"
+        groups: mop_building
+        ansible_host: "{{ tmpl_ip }}"
+        ansible_user: "{{ MOP_USER }}"
+        ansible_python_interpreter: /usr/bin/python3
+        ansible_ssh_private_key_file: "{{ build_key }}"
+        # IdentitiesOnly: без него ssh сперва предъявляет КАЖДЫЙ ключ из
+        # агента, и тело успевает отказать столько раз, что включает штраф за
+        # источник — после чего роняет и верный ключ тоже.
+        ansible_ssh_common_args: >-
+          -o ProxyJump={{ inventory_hostname }}
+          -o IdentitiesOnly=yes
+          -o PreferredAuthentications=publickey
+          -o StrictHostKeyChecking=accept-new
+          -o UserKnownHostsFile={{ lookup('env', 'HOME') }}/.ssh/known_hosts-mop-body
+        mop_body_of: "{{ inventory_hostname }}"
+        mop_body_vmid: "{{ tmpl_vmid }}"
+      changed_when: false
+
+
+- name: What the image must contain
+  hosts: mop_building
+  become: no
+  gather_facts: no
+
+  vars:
+    mop_tgz: "/tmp/mop-package-{{ mop_shard }}.tgz"
+
+  tasks:
+    - name: Wait for sshd inside the body
+      ansible.builtin.wait_for_connection:
+        timeout: 120
+
+    - name: What a body must be
+      ansible.builtin.include_tasks: body-tasks.yml
+
+    - name: Where the package goes
+      ansible.builtin.file:
+        path: "{{ MOP_HOME }}/mop"
+        state: directory
+        mode: "0755"
+
+    # Пакет mop нужен телу ради ОДНОГО файла — session.py: пробу живости и
+    # канал сообщений агент исполняет внутри тела, и импортировать их снаружи
+    # нечем. Возим пакет целиком по той же причине, по какой его возит игра
+    # агента: возить один файл значит завести второе место, где записано, что
+    # именно телу нужно.
+    # Архивом, а не synchronize: тот строит свой ssh САМ и теряет при этом
+    # ansible_ssh_common_args, то есть ProxyJump, — и честно пытается достать
+    # 10.77.0.2 с управляющей машины напрямую, которой в эту сеть хода нет.
+    # unarchive же идёт обычным соединением ansible, со всеми его аргументами.
+    #
+    # delete=yes тут не нужен: образ каждый раз собирается начисто, устаревать
+    # в нём нечему.
+    - name: Pack the mop package up
+      ansible.builtin.command:
+        # .env НИКОГДА не уезжает с управляющей машины: там креды GitLab,
+        # которым в пуле делать нечего, а в теле папета — тем более.
+        cmd: >-
+          tar czf {{ mop_tgz }} -C {{ lookup('env', 'HOME') }}/mop
+          --exclude=.git --exclude=__pycache__ --exclude=.env
+          --exclude=inventory.ini .
+      delegate_to: localhost
+      changed_when: true
+
+    - name: The mop package, for session.py inside the body
+      ansible.builtin.unarchive:
+        src: "{{ mop_tgz }}"
+        dest: "{{ MOP_HOME }}/mop/"
+
+    # Тот же набор, что игра агента ставит на узлы, и по той же причине: в
+    # теле работает `mop mcp` -- узловой профиль MCP-сервера, и импортирует он
+    # весь пакет. Без python-nomad сервер не стартует, claude показывает «1
+    # failed» в /mcp, а папет остаётся БЕЗ ИНСТРУМЕНТОВ -- живой, свободный и
+    # бесполезный.
+    - name: Python dependencies of a puppet
+      ansible.builtin.pip:
+        name: [nats-py, mcp, python-nomad, requests]
+        extra_args: --user --break-system-packages
+        state: present
+
+    # Свой MCP-сервер -- часть продукта: без него папет без инструментов.
+    # Регистрирует сам claude (`claude mcp add` пишет ~/.claude.json). На узлах
+    # это делает deploy/setup.yml; в теле -- здесь, потому что ~/.claude.json
+    # у тела свой.
+    - name: Register the pool MCP server for claude inside the body
+      ansible.builtin.shell:
+        cmd: |
+          claude mcp remove -s user mop >/dev/null 2>&1 || true
+          exec claude mcp add -s user mop -- '{{ MOP_HOME }}/mop/bin/mop' mcp
+      environment:
+        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
+      changed_when: false
+
+    # Тулчейн, базы и env-файлы КОНКРЕТНОГО проекта -- дело установки, не
+    # продукта: путь называет настройка, пусто значит «ничего сверх
+    # обязательного». Без этого крючка deploy/ пришлось бы обрастать чужими
+    # тулчейнами, а образ шарда всё равно остался бы неполным.
+    - name: What this installation adds to a body
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../{{ MOP_BODY_EXTRA }}"
+      when: MOP_BODY_EXTRA | default('') | length > 0
+
+
+- name: Seal the image
+  hosts: puppet
+  become: no
+  gather_facts: no
+
+  vars:
+    pve: "sudo -n /usr/local/sbin/mop-pve"
+
+  tasks:
+    - name: Nothing to seal where bodies are not containers
+      ansible.builtin.meta: end_host
+      when: mop_driver | default('host') != 'pve'
+
+    # Ключ сборки снимается ДО того, как образ станет шаблоном: иначе он
+    # размножился бы в каждое тело и стал второй постоянной дорогой к папету —
+    # мимо агента, то есть мимо единственной проверки шардирования.
+    - name: Only the node's key survives into the image
+      ansible.builtin.shell:
+        cmd: "{{ pve }} keys {{ tmpl_vmid }}"
+        stdin: "{{ node_key }}\n"
+      changed_when: true
+
+    - name: Stop it
+      ansible.builtin.command: "{{ pve }} stop {{ tmpl_vmid }}"
+      changed_when: true
+
+    - name: Turn it into the shard's image
+      ansible.builtin.command: "{{ pve }} template {{ tmpl_vmid }}"
+      changed_when: true
+
+    - name: Say what a puppet of this shard will now grow from
+      ansible.builtin.debug:
+        msg: >-
+          {{ tmpl_name }} ({{ tmpl_vmid }}) on {{ inventory_hostname }} —
+          bodies of shard {{ mop_shard }} are clones of it now

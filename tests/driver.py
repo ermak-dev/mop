@@ -14,6 +14,7 @@
 """
 import os
 import sys
+import tempfile
 import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -76,6 +77,13 @@ HOST_ARGV = [
 ]
 
 
+# Драйвер pve: тело — контейнер LXC, и всё про него ВЫВОДИТСЯ ИЗ ИМЕНИ.
+# Второе имя для того же (VMID в модели mop, адрес в реестре) означало бы
+# второе место, отвечающее на вопрос «чей это папет».
+PVE_NAMES = ("pu-mop-1", "pu-mop-2", "pu-rugent-7", "pu-cloudpub-11",
+             "pu-some.proj-3")
+
+
 def main():
     bad = 0
     cases = 0
@@ -133,20 +141,167 @@ def main():
             bad += 1
             print(f"FAILED  host.{verb}: {what}\n  wanted: {want!r}\n  got: {got!r}")
 
-    cases += 1
-    saved = os.environ.pop("MOP_DRIVER", None)
+    # Драйвер УЗЛА, а не папета, и спрашивают его ДВОЕ с разным окружением:
+    # агент из юнита systemd и внешний врапер из процесса задачи Nomad. Пока
+    # значение жило строкой Environment= в юните, врапер его не видел и молча
+    # поднимал папета драйвером host — на гипервизоре это значит «прямо на
+    # гипервизоре, мимо тела». Поэтому источник правды — файл узла.
+    saved_env = os.environ.pop("MOP_DRIVER", None)
+    saved_file = driver.NODE_FILE
+    tmp = os.path.join(tempfile.mkdtemp(), "driver")
     try:
+        driver.NODE_FILE = tmp
+        cases += 1
         if driver.current_name() != "host":
             bad += 1
             print("FAILED  a node that says nothing about a driver must be host")
+        cases += 1
+        with open(tmp, "w") as f:
+            f.write("pve\n")
+        if driver.current_name() != "pve":
+            bad += 1
+            print("FAILED  current_name() must read the node's file — an empty "
+                  "environment is the wrapper's normal case")
+        cases += 1
+        with open(tmp, "w") as f:
+            f.write("\n")
+        if driver.current_name() != "host":
+            bad += 1
+            print("FAILED  an empty file must mean host, not an empty driver name")
+        cases += 1
+        with open(tmp, "w") as f:
+            f.write("pve\n")
         os.environ["MOP_DRIVER"] = "host"
         if driver.current() is not host:
             bad += 1
-            print("FAILED  current() must follow MOP_DRIVER")
+            print("FAILED  MOP_DRIVER must outrank the node's file")
     finally:
+        driver.NODE_FILE = saved_file
         os.environ.pop("MOP_DRIVER", None)
-        if saved is not None:
-            os.environ["MOP_DRIVER"] = saved
+        if saved_env is not None:
+            os.environ["MOP_DRIVER"] = saved_env
+
+    # ── драйвер pve: всё выводится из имени ──────────────────────────────
+    pve = driver.module("pve")
+
+    cases += 1
+    if not isinstance(driver.get("pve"), dict):
+        bad += 1
+        print("FAILED  registry didn't find the pve driver")
+
+    # VMID в своём диапазоне и НЕ пересекается с диапазоном шаблонов: шаблон
+    # живёт рядом с телами и сносится теми же глаголами, так что налезь один
+    # на другой — снос папета унёс бы образ шарда.
+    seen = {}
+    for name in PVE_NAMES:
+        cases += 1
+        vmid = pve.vmid_of(name)
+        if not pve.BODY_MIN <= vmid <= pve.BODY_MAX:
+            bad += 1
+            print(f"FAILED  pve.vmid_of({name!r}) = {vmid}, outside "
+                  f"{pve.BODY_MIN}..{pve.BODY_MAX}")
+        if vmid in seen:
+            bad += 1
+            print(f"FAILED  pve.vmid_of: {name!r} and {seen[vmid]!r} collide on {vmid}")
+        seen[vmid] = name
+
+    cases += 1
+    if pve.vmid_of("pu-mop-1") != pve.vmid_of("pu-mop-1"):
+        bad += 1
+        print("FAILED  pve.vmid_of must be a function of the name, nothing else")
+
+    for shard in ("mop", "rugent", "cloudpub"):
+        cases += 1
+        t = pve.template_vmid(shard)
+        if not pve.TMPL_MIN <= t <= pve.TMPL_MAX:
+            bad += 1
+            print(f"FAILED  pve.template_vmid({shard!r}) = {t}, outside "
+                  f"{pve.TMPL_MIN}..{pve.TMPL_MAX}")
+        if pve.BODY_MIN <= t <= pve.BODY_MAX:
+            bad += 1
+            print(f"FAILED  template {t} lands in the body range — a wipe would "
+                  f"take the shard's image with it")
+        cases += 1
+        # Имя шаблона обязано быть под охраной префикса (root-обёртка на
+        # гипервизоре пускает только pu-*), но НЕ быть именем папета: иначе
+        # ростер тел показал бы образ живым папетом.
+        tn = pve.template_name(shard)
+        if not tn.startswith("pu-") or driver.valid_name(tn):
+            bad += 1
+            print(f"FAILED  template name {tn!r} must start with pu- and not "
+                  f"look like a puppet name")
+
+    # Адрес выводится из VMID, а не хранится: хранимый однажды разойдётся с
+    # тем, что реально стоит на контейнере.
+    addrs = {}
+    for name in PVE_NAMES:
+        cases += 1
+        ip = pve.address_of(name)
+        if ip == pve.GATEWAY:
+            bad += 1
+            print(f"FAILED  pve.address_of({name!r}) is the gateway {ip}")
+        if not ip.startswith(pve.SUBNET.rsplit(".", 2)[0] + "."):
+            bad += 1
+            print(f"FAILED  pve.address_of({name!r}) = {ip}, outside {pve.SUBNET}")
+        if ip in addrs:
+            bad += 1
+            print(f"FAILED  pve.address_of: {name!r} and {addrs[ip]!r} share {ip}")
+        addrs[ip] = name
+
+    # ssh, а не proxmox_pct_remote: ControlPersist держит соединение, и проба
+    # состояния перестаёт платить рукопожатием.
+    cases += 1
+    a = pve.argv("pu-mop-1")
+    ip = pve.address_of("pu-mop-1")
+    if a[:1] != ["ssh"] or not any(x.endswith("@" + ip) for x in a):
+        bad += 1
+        print(f"FAILED  pve.argv must be ssh into {ip}: {a!r}")
+    cases += 1
+    if "ControlPersist=" not in " ".join(a):
+        bad += 1
+        print("FAILED  pve.argv without ControlPersist pays a handshake per probe")
+    cases += 1
+    if "BatchMode=yes" not in " ".join(a):
+        bad += 1
+        print("FAILED  pve.argv without BatchMode can stop on a password prompt")
+
+    # Аварийный путь — НЕ ssh: он нужен ровно тогда, когда у тела сломана сеть,
+    # sshd или права на authorized_keys.
+    cases += 1
+    r = pve.repair_argv("pu-mop-1")
+    if not r or "ssh" in r[0]:
+        bad += 1
+        print(f"FAILED  pve.repair_argv must not go over ssh: {r!r}")
+    cases += 1
+    if str(pve.vmid_of("pu-mop-1")) not in r:
+        bad += 1
+        print(f"FAILED  pve.repair_argv must name the body's vmid: {r!r}")
+
+    # Человек входит в тело, а не на гипервизор: на гипервизоре tmux-сервера
+    # папета нет вовсе.
+    cases += 1
+    at = pve.attach_argv("pu-mop-1")
+    if at[:1] != ["ssh"] or "tmux" not in at:
+        bad += 1
+        print(f"FAILED  pve.attach_argv must ssh into the body and run tmux: {at!r}")
+
+    # Имя, не прошедшее valid_name, в шелл гипервизора не попадает вовсе.
+    for bogus in ("pu-mop-1;id", "../etc", ""):
+        cases += 1
+        try:
+            pve.vmid_of(bogus)
+            bad += 1
+            print(f"FAILED  pve.vmid_of({bogus!r}) must refuse")
+        except ValueError:
+            pass
+
+    # Транскрипты лежат ВНУТРИ тела: считать их путём на гипервизоре значит
+    # молча получить нулевой расход токенов у контейнерных папетов.
+    cases += 1
+    if pve.projects_dir("pu-mop-1") == host.projects_dir("pu-mop-1") \
+            and pve.HOME != host.HOME:
+        bad += 1
+        print("FAILED  pve.projects_dir must point inside the body")
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
