@@ -66,6 +66,24 @@ def cwd_origin(required=True):
         return None
 
 
+def git(*args):
+    """git в рабочей копии проекта. Отказ — строкой, а не трассировкой: она
+    здесь ничего не добавляет, а скрывает единственное, что нужно знать."""
+    r = subprocess.run(["git", *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"git {' '.join(args)}: {(r.stderr or r.stdout).strip()}")
+    return r.stdout.strip()
+
+
+def default_branch():
+    """Ветка по умолчанию у origin. origin/HEAD выставлен не в каждом клоне —
+    откат на master, потому что отказ здесь означал бы «не могу завести ветку»
+    там, где ветку завести можно."""
+    r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else "origin/master"
+
+
 def project_of(origin):
     """Проект он же шард. Определение одно на всю систему — в puppets."""
     return puppets.shard_of(origin)
