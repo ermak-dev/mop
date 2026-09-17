@@ -5,7 +5,7 @@
   mop driver list                bodies standing on this node — no Nomad needed
   mop driver run <name>          raise the body and run the puppet inside it
   mop driver sweep [--dry]       destroy bodies with no puppet left in them
-  mop driver build <shard>       bake the shard's image on the hypervisors
+  mop driver build <shard|origin> bake the shard's image on the hypervisors
 
 `run` is what the job spec calls. The outer wrapper is driver-agnostic because
 Nomad picks the node only after the spec is registered, so the master cannot
@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 import lib
-from mop import config, driver, nomad
+from mop import bus, config, driver, nomad, puppets
 from mop.render import table
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
@@ -195,16 +195,40 @@ def v_build(argv):
     клон шаблона, на lvm-thin связанный и мгновенный."""
     if len(argv) != 1:
         lib.usage(__doc__)
-    shard = argv[0]
+    origin = origin_of(argv[0])
+    shard = os.path.basename(origin).removesuffix(".git")
     settings = json.dumps({k: v for k, (v, _) in config.effective().items()},
                           ensure_ascii=False)
     rc = subprocess.call(
         ["ansible-playbook", "-i", os.environ["INVENTORY"],
          os.path.join(config.PROJECT, "deploy", "pve-build.yml"),
-         "--extra-vars", settings, "--extra-vars", f"mop_shard={shard}"])
+         "--extra-vars", settings,
+         "--extra-vars", json.dumps({"mop_shard": shard, "mop_origin": origin})])
     if rc == 0:
         announce(shard)
     return rc
+
+
+def origin_of(arg):
+    """ORIGIN шарда: им же и сказали, либо ищем по имени. Громко, если нет.
+
+    Образу нужен origin, а не имя: из зеркала репозитория растут клоны всех
+    тел шарда. Обратного отображения «имя -> origin» в системе нет и заводить
+    его нельзя — шард определяется РОВНО одним способом, basename origin без
+    .git, и таблица имён рядом однажды разошлась бы с ним. Поэтому не таблица,
+    а поиск по тому, что уже есть: джобы шарда и рабочая копия под рукой."""
+    if "/" in arg or ":" in arg:
+        return arg                      # это и есть origin
+    for job in puppets.jobs(shard=bus.ADMIN):
+        o = (job.get("Meta") or {}).get("origin") or ""
+        if o and os.path.basename(o).removesuffix(".git") == arg:
+            return o
+    here = lib.cwd_origin(required=False)
+    if here and os.path.basename(here).removesuffix(".git") == arg:
+        return here
+    sys.exit(f"don't know where shard {arg} comes from: it has no puppets and "
+             f"this working copy is a different project.\n"
+             f"Name it outright: mop driver build <git-origin>")
 
 
 def announce(shard):
