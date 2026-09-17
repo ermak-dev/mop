@@ -31,6 +31,7 @@ Nomad не нужен вовсе — в этом половина смысла �
     attach_argv(name)      чем входит человек
     repair_argv(name)      аварийный путь, когда основной молчит
     SESSION_PY             путь к session.py ВНУТРИ тела
+    BODY_IS_NODE           тело и узел — одна машина (True у host)
 
 Разводить узел и тела по двум реестрам значит получить решётку «узел × тело»
 и два места, отвечающих на один вопрос.
@@ -86,6 +87,14 @@ def contract(name, mod):
         if not callable(fn):
             raise RuntimeError(f"{where}: no {verb}() — the contract is "
                                f"{', '.join(VERBS)} (docs/DRIVER.md)")
+    # Одно тело на узел или много — это РАЗНЫЕ вопросы к одному драйверу, и
+    # спрашивать «пустой ли argv» вместо ответа значит выводить свойство из
+    # побочного признака. Раздача файлов (`mop login`) на этом стоит: у host
+    # запись в каждое тело была бы записью в тот же файл по разу на папета, а
+    # отчёт обещал бы запись в тела, которых нет.
+    if not isinstance(getattr(mod, "BODY_IS_NODE", None), bool):
+        raise RuntimeError(f"{where}: BODY_IS_NODE — True when the body is the "
+                           f"node itself, False when it is a thing of its own")
     session_py = getattr(mod, "SESSION_PY", None)
     # Абсолютный, потому что исполняется ВНУТРИ тела и из чужого каталога:
     # относительный там молча соберётся в `python3 session.py`, которого нет,
@@ -96,6 +105,7 @@ def contract(name, mod):
     doc = (mod.__doc__ or "").strip().splitlines()
     return {"verbs": {v: getattr(mod, v) for v in VERBS},
             "session_py": session_py,
+            "body_is_node": mod.BODY_IS_NODE,
             "doc": doc[0].strip() if doc else ""}
 
 

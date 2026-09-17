@@ -39,6 +39,8 @@ from . import sh, valid_name
 USER = config.get("MOP_USER")
 HOME = config.get("MOP_HOME")
 PREFIX = "pu-"
+# Тело — вещь сама по себе: у него свой $HOME, свои процессы и свой ssh.
+BODY_IS_NODE = False
 
 # Обёртка на гипервизоре — единственная дорога к жизненному циклу тел.
 WRAPPER = "/usr/local/sbin/mop-pve"
@@ -302,11 +304,49 @@ async def ensure(name, params=None):
         return {"error": f"{name}: body {vmid} won't start: "
                          f"{out.strip() or f'exit {code}'}"}
 
+    r = await _sync_package(name, vmid)
+    if r.get("error"):
+        return r
     r = await _seed(name, vmid, shard)
     if r.get("error"):
         return r
     return {"name": name, "body": vmid, "created": created,
             "address": address_of(name)}
+
+
+# Где на УЗЛЕ лежит пакет mop, который надо продублировать в тело: каталог
+# проекта, от самого себя. Тот же, что привозит на узел `mop deploy`.
+PACKAGE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+async def _sync_package(name, vmid):
+    """Пакет mop внутрь тела — НА КАЖДОМ ПОДЪЁМЕ.
+
+    Без этого правка session.py или usage.py доезжала бы до тела только со
+    СБОРКОЙ ОБРАЗА, то есть ловушка «правка логики тела доезжает прогоном
+    mop deploy» (docs/DRIVER.md) была бы неправдой — молча. Поймано на
+    `mop stat`: в теле лежал пакет времён сборки образа, у usage.py в нём ещё
+    не было CLI, и расход контейнерного папета читался как РОВНЫЙ НОЛЬ —
+    неотличимо от «папет ничего не потратил».
+
+    Обёрткой, а не ssh: тот же путь, которым внутрь едет всё остальное, и
+    работает он раньше, чем поднимется sshd."""
+    blob = "/tmp/mop-package.tgz"
+    tar = (f"tar czf - -C {shlex.quote(PACKAGE)} "
+           f"--exclude=.git --exclude=__pycache__ --exclude=.env "
+           f"--exclude=inventory.ini .")
+    out, code = await sh(f"{tar} | {_pve_cmd('push', vmid, blob, '600')}", 300)
+    if code not in (0, None):
+        return {"error": f"{name}: the mop package did not reach the body: "
+                         f"{out.strip() or f'exit {code}'}"}
+    out, code = await _pve(
+        "exec", vmid,
+        f"mkdir -p {HOME}/mop && tar xzf {blob} -C {HOME}/mop && rm -f {blob}",
+        timeout=300)
+    if code not in (0, None):
+        return {"error": f"{name}: the mop package did not unpack in the body: "
+                         f"{out.strip() or f'exit {code}'}"}
+    return {}
 
 
 def _seed_files(shard):

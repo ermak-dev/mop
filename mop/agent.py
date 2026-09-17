@@ -393,20 +393,15 @@ async def v_tail(req):
 
 
 async def v_disk(_req):
-    """df по ФС, где живут клоны и target-каталоги. Узловой ФАКТ: давление
-    оценивает мастер (mop gc), здесь только цифра.
+    """Место в ХРАНИЛИЩЕ ТЕЛ. Узловой ФАКТ: давление оценивает мастер
+    (mop gc), здесь только цифра.
 
-    Одна ФС — $HOME: WSL-узла в кластере больше нет, и хитрости с бэкинг-
-    стором уехали вместе с ним."""
-    out, code = await sh(f"df -BG --output=avail,size {HOME}")
-    if code not in (0, None) or not out.strip():
-        return {"error": f"df did not answer: {out.strip() or f'exit {code}'}"}
-    try:
-        avail, size = out.splitlines()[1].split()
-        return {"path": HOME, "free_gb": int(avail.rstrip("G")),
-                "total_gb": int(size.rstrip("G"))}
-    except (IndexError, ValueError):
-        return {"error": f"df answered with garbage: {out.strip()!r}"}
+    Меряет ДРАЙВЕР: у host хранилище тел — это $HOME со всеми клонами и
+    target-каталогами, а на гипервизоре в $HOME не лежит ни одного папета, и
+    `df $HOME` там отвечал бы про совершенно постороннюю файловую систему.
+    Молча: число выглядит правдоподобно, а `mop gc` принимает по нему решение
+    о сносе."""
+    return await DRIVER.capacity()
 
 
 async def v_wipe(req):
@@ -474,12 +469,17 @@ async def v_write(req):
     Заменяет ту ветку раздачи кредов, что ездила шеллом в аллокацию. Список
     закрыт: без него это была бы произвольная запись в $HOME, то есть
     исполнение кода через ~/.bashrc."""
-    written = []
+    files = []
     for path, b64 in req.get("files") or []:
         if path not in WRITABLE:
             return {"error": f"agent is not allowed to write to {path}"}
+        files.append((path, base64.b64decode(b64)))
+
+    # НА УЗЕЛ — всегда: отсюда драйвер сеет файл в каждое новое тело при
+    # подъёме, и узел обязан держать свежую копию, даже когда тел сейчас нет.
+    written = []
+    for path, data in files:
         try:
-            data = base64.b64decode(b64)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp = f"{path}.tmp"
             with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
@@ -489,6 +489,22 @@ async def v_write(req):
         except Exception as e:
             return {"error": f"{path}: {e}"}
         written.append(path)
+
+    # ...И В КАЖДОЕ ЖИВОЕ ТЕЛО, иначе протухший логин лечился бы только
+    # рестартом папета — то есть ценой его работы.
+    #
+    # У драйвера, где тело и есть узел, второй записи не бывает: это тот же
+    # файл, а список тел там просто перечисляет папетов.
+    bodies = [] if DRIVER.BODY_IS_NODE else await DRIVER.bodies()
+    for name in bodies:
+        for path, data in files:
+            r = await DRIVER.push(name, path, data)
+            if r.get("error"):
+                # Отказ по ОДНОМУ телу не отменяет остальных: узел уже получил
+                # свежую копию, и молчащее тело -- отдельная беда.
+                written.append(f"{name}:{path} FAILED — {r['error']}")
+            else:
+                written.append(f"{name}:{path}")
     return {"written": written}
 
 
@@ -497,28 +513,39 @@ async def v_usage(req):
     {input, output, cache_write, cache_read}}}}, окно — `days` суток включая
     сегодня, по местному времени узла.
 
-    Считается по транскриптам ~/.claude/projects/<slug клона>/ (подробности и
-    ловушка с дублями — в usage.py). Папета перечисляем по КЛОНАМ, а не по
-    каталогам транскриптов: имя в slug'е искалечено (точки и подчёркивания
-    стали дефисами), и обратно в имя папета, которое сверяется с шардом, его
-    не собрать. Цена — снесённый вместе с клоном папет из статистики
-    выпадает, хотя транскрипты его ещё лежат.
+    Считается по транскриптам <projects_dir>/<slug клона>/ (подробности и
+    ловушка с дублями — в usage.py), и считается ВНУТРИ ТЕЛА: у контейнерного
+    папета этих файлов на узле нет вовсе, а отсутствие файлов неотличимо от
+    нулевого расхода — счёт снаружи показал бы ноль там, где папет сжёг
+    миллионы.
+
+    Папета перечисляет ДРАЙВЕР (bodies), а не listdir клонов: на гипервизоре
+    каталога клонов нет. Имя в slug'е искалечено (точки и подчёркивания стали
+    дефисами), и обратно в имя папета, которое сверяется с шардом, его не
+    собрать, — поэтому идём от имени к каталогу, а не наоборот.
 
     Чужих папетов выбрасываем молча, как states: мастер шарда видит расход
     своего шарда, оператор — всего узла."""
     days = min(max(int(req.get("days") or 7), 1), 366)
-    try:
-        names = sorted(n for n in os.listdir(CLONES) if n.startswith(PREFIX))
-    except OSError:
-        names = []
-    names = [n for n in names if await _mine(req, n)]
+    names = [n for n in await DRIVER.bodies() if await _mine(req, n)]
+    # usage.py лежит рядом с session.py: SESSION_PY и называет то место, куда
+    # пакет mop приехал ВНУТРИ тела.
+    usage_py = os.path.join(os.path.dirname(DRIVER.SESSION_PY), "usage.py")
 
-    def one(name):
-        d = f"{usage.PROJECTS}/{usage.slug(clone_dir(name))}"
-        return usage.scan(d, days) if os.path.isdir(d) else {}
-    # В потоке: разбор транскриптов — файловый ввод и json, а петля агента
-    # в это время обязана отвечать на состояния.
-    got = await asyncio.gather(*(asyncio.to_thread(one, n) for n in names))
+    async def one(name):
+        d = f"{DRIVER.projects_dir(name)}/{usage.slug(clone_dir(name))}"
+        out, code = await bsh(name, " ".join(
+            ["python3", shlex.quote(usage_py), shlex.quote(d), str(days)]), 120)
+        if code not in (0, None):
+            return {}
+        for line in reversed(out.strip().splitlines()):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        return {}
+
+    got = await asyncio.gather(*(one(n) for n in names))
     return {"node": node_name(), "usage": dict(zip(names, got))}
 
 

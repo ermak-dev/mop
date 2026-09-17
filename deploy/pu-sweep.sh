@@ -122,6 +122,30 @@ report_space
 echo
 
 # --------------------------------------------------------------------------
+# Tier 0 -- orphaned BODIES. Only where a body is a thing of its own.
+# --------------------------------------------------------------------------
+# On a node whose bodies are containers, $HOME holds no clones at all: tiers
+# 1-3 below would find nothing and are right not to. What piles up there is the
+# body itself, and only the driver knows how to list one and throw it away. Its
+# own safety gate mirrors tier 1's, for the same reason.
+#
+# Драйвер узла читаем из ФАЙЛА УЗЛА -- того же, по которому его узнают агент и
+# внешний врапер. Второе место, отвечающее на «в чём здесь живёт папет»,
+# разошлось бы с первым молча, и сторож начал бы мести не тот узел.
+MOP_NODE_DRIVER=$(cat "$HOME/.config/mop/driver" 2>/dev/null || echo host)
+if [ "$MOP_NODE_DRIVER" != host ]; then
+    echo "tier 0: orphaned bodies (driver $MOP_NODE_DRIVER)"
+    "$HOME/mop/bin/mop" driver sweep ${DRY:+--dry} 2>&1 | sed 's/^/  /' || true
+    # Ярусы ниже -- про клоны и target-каталоги в $HOME узла, а здесь их нет:
+    # они внутри тел, и уходят вместе с телом. Уйти сейчас честнее, чем
+    # отбиться предупреждением «в $HOME нет puppets/» -- оно про сломанный
+    # узел, а этот узел исправен.
+    echo
+    report_space
+    exit 0
+fi
+
+# --------------------------------------------------------------------------
 # Tier 1 -- orphaned puppet clones and target dirs. Always.
 # --------------------------------------------------------------------------
 # Two sanity gates before anything is deleted. Both exist because "no live tmux
