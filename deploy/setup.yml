@@ -168,6 +168,9 @@
           # кредами GitLab, сводил бы эту фильтрацию к нулю. На узле пойман
           # 2026-08-29: лежал целиком, 0600, со всеми секретами проекта.
           - "--exclude=.env"
+          # Карта установки -- кто есть кто и где -- дело управляющей машины.
+          # Узел о соседях не спрашивает, а всё своё берёт из node.env.
+          - "--exclude=inventory.ini"
       notify: restart mop-agent
 
     # Свой MCP-сервер -- часть продукта: без него папет без инструментов.
@@ -195,18 +198,69 @@
         state: directory
         mode: "0700"
 
-    # В ЧЁМ живёт папет этого узла. ФАЙЛОМ, а не строкой Environment= в юните
-    # агента: драйвер спрашивают двое с разным окружением -- агент из своего
-    # юнита и внешний врапер из процесса задачи Nomad. Пока значение жило в
-    # юните, врапер его не видел и молча поднимал папета драйвером host, то
-    # есть прямо на гипервизоре. Источник правды -- группа в инвентаре, и
-    # оттуда же оно уезжает в meta клиента Nomad.
-    - name: What a puppet lives in on this node
+    # Что УЗЕЛ знает о себе сам. Источник правды -- ИНВЕНТАРЬ: значение группы
+    # с переопределением на хосте; чего инвентарь не назвал, берётся из
+    # настроек установки.
+    #
+    # Файлом, а не строками Environment= в юните агента: узловые настройки
+    # спрашивают ДВОЕ с разным окружением -- агент из своего юнита и внешний
+    # врапер из процесса задачи Nomad. Пока драйвер жил в юните, врапер его не
+    # видел и молча поднимал папета драйвером host, то есть прямо на
+    # гипервизоре.
+    #
+    # Список -- из config.NODE_SCOPED, один на систему: второй здесь означал бы
+    # настройку, которая молча не доехала.
+    - name: What this node knows about itself
       ansible.builtin.copy:
-        dest: "{{ MOP_HOME }}/.config/mop/driver"
-        content: "{{ mop_driver | default('host') }}\n"
+        dest: "{{ MOP_HOME }}/.config/mop/node.env"
         mode: "0644"
+        content: |
+          # Узловые настройки. Кладёт `mop deploy` из инвентаря -- править
+          # здесь бесполезно, следующий прогон перепишет.
+          {% for k in MOP_NODE_SCOPED.split(',') %}
+          {{ k }}={{ hostvars[inventory_hostname][k | lower] | default(lookup('vars', k, default='')) }}
+          {% endfor %}
       notify: restart mop-agent
+
+    # Регистр РАЗНЫЙ по обе стороны, и это стоило узла: в инвентаре переменные
+    # пишут строчными (`mop_driver`), ключи настроек -- прописными
+    # (`MOP_DRIVER`). Пока шаблон искал ключ как есть, он не находил ничего,
+    # честно брал общее значение установки, и гипервизор объявлял себя узлом
+    # с драйвером host -- то есть врапер поднял бы папета ПРЯМО НА
+    # ГИПЕРВИЗОРЕ, мимо тела. Прогон при этом зелёный.
+    #
+    # Отсюда проверка: сверяем то, что записали, с тем, что сказал инвентарь.
+    # Дешевле один assert, чем узел, который врёт о себе.
+    - name: Read back what the node now says about itself
+      ansible.builtin.slurp:
+        src: "{{ MOP_HOME }}/.config/mop/node.env"
+      register: node_env
+
+    # slurp, а не lookup('file'): lookup читает файл НА УПРАВЛЯЮЩЕЙ МАШИНЕ, и
+    # delegate_to этого не меняет. Первая же попытка сверяла узел сам с собой.
+    - name: What was written is what the inventory said
+      ansible.builtin.assert:
+        that:
+          - "'MOP_DRIVER=' + (mop_driver | default('host')) in (node_env.content | b64decode).splitlines()"
+        fail_msg: >-
+          node.env on {{ inventory_hostname }} disagrees with the inventory about its
+          driver — a node that lies about itself raises puppets in the wrong place
+        success_msg: "{{ inventory_hostname }}: driver {{ mop_driver | default('host') }}"
+
+    # Переезд убирает за собой. rsync --exclude НЕ сносит уже лежащее: он
+    # исключённое как раз БЕРЕЖЁТ, — поэтому старые копии убираются явно.
+    #
+    # Драйвер переехал в node.env вместе с остальными узловыми настройками: два
+    # места для одного ответа разошлись бы молча. Инвентарь узлу больше не
+    # нужен вовсе — всё своё он берёт из node.env, а карта установки (кто есть
+    # кто и где) дело управляющей машины.
+    - name: What the node no longer needs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ MOP_HOME }}/.config/mop/driver"
+        - "{{ MOP_HOME }}/mop/inventory.ini"
 
     - name: Bus credentials for the agent
       ansible.builtin.template:

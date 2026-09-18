@@ -34,6 +34,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 ## Boundaries
 
  - **MUST** `mop/`, `bin/`, `docs/`, `skills/`, `deploy/` know no concrete host: anything installation-specific is a setting in `config.SETTINGS` or a line in `.env`
+ - **MUST** Three sources, one question each: `.env` answers for the INSTALLATION, the inventory for the MACHINE, `config.SETTINGS` holds the defaults. `.env` never reaches a node — what the node must know is listed in `config.NODE_SCOPED` and rendered by `mop deploy` into `~/.config/mop/node.env`. A node-side setting written anywhere else silently does not arrive
  - **MUST** A value specific to this machine is a setting whose default equals today's value, never a literal in the code
  - **MUST** A required setting with no sensible default goes in `config.REQUIRED`: silently walking into someone else's LAN is worse than a loud refusal
  - **MUST NOT** Nothing a SPECIFIC project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is `examples/`

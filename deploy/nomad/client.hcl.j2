@@ -68,12 +68,17 @@ client {
   options = {
     "fingerprint.denylist" = "env_aws,env_gce,env_azure,env_digitalocean"
   }
-{% if (nomad_reserved_mb | default({})).get(inventory_hostname, 0) %}
+{% if mop_reserved_mb | default(0) | int %}
   # Память, отрезанная под чужих жильцов хоста: планировщик считает её
   # неразмещаемой, и пул папетов упирается в «сколько намерил Nomad минус
-  # это». Задаётся настройкой MOP_RESERVED_MB.
+  # это».
+  #
+  # Переменная ИНВЕНТАРЯ, а не настройка: число у каждой машины своё, и
+  # общей настройкой оно быть не может. Пока места для per-node значений не
+  # было, эта карта жила строкой `mate=6962,hyper=118000`, которую плейбук
+  # разбирал вручную.
   reserved {
-    memory = {{ nomad_reserved_mb[inventory_hostname] }}
+    memory = {{ mop_reserved_mb | int }}
   }
 {% endif %}
 }

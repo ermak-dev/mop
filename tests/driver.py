@@ -19,7 +19,7 @@ import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import driver  # noqa: E402
+from mop import config, driver  # noqa: E402
 
 
 def plugin(**attrs):
@@ -152,36 +152,41 @@ def main():
     # поднимал папета драйвером host — на гипервизоре это значит «прямо на
     # гипервизоре, мимо тела». Поэтому источник правды — файл узла.
     saved_env = os.environ.pop("MOP_DRIVER", None)
-    saved_file = driver.NODE_FILE
-    tmp = os.path.join(tempfile.mkdtemp(), "driver")
+    saved_file = config.NODE_ENV_FILE
+    tmp = os.path.join(tempfile.mkdtemp(), "node.env")
     try:
-        driver.NODE_FILE = tmp
+        config.NODE_ENV_FILE = tmp
+        config.forget()
         cases += 1
         if driver.current_name() != "host":
             bad += 1
             print("FAILED  a node that says nothing about a driver must be host")
         cases += 1
         with open(tmp, "w") as f:
-            f.write("pve\n")
+            f.write("MOP_DRIVER=pve\n")
+        config.forget()
         if driver.current_name() != "pve":
             bad += 1
             print("FAILED  current_name() must read the node's file — an empty "
                   "environment is the wrapper's normal case")
         cases += 1
         with open(tmp, "w") as f:
-            f.write("\n")
+            f.write("MOP_DRIVER=\n")
+        config.forget()
         if driver.current_name() != "host":
             bad += 1
             print("FAILED  an empty file must mean host, not an empty driver name")
         cases += 1
         with open(tmp, "w") as f:
-            f.write("pve\n")
+            f.write("MOP_DRIVER=pve\n")
+        config.forget()
         os.environ["MOP_DRIVER"] = "host"
         if driver.current() is not host:
             bad += 1
             print("FAILED  MOP_DRIVER must outrank the node's file")
     finally:
-        driver.NODE_FILE = saved_file
+        config.NODE_ENV_FILE = saved_file
+        config.forget()
         os.environ.pop("MOP_DRIVER", None)
         if saved_env is not None:
             os.environ["MOP_DRIVER"] = saved_env
