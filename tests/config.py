@@ -8,6 +8,7 @@
 на живом пуле.
 """
 import os
+import tempfile
 import pwd
 import sys
 
@@ -45,6 +46,79 @@ def main():
         os.environ.pop("USER", None)
         if saved is not None:
             os.environ["USER"] = saved
+
+    # ── старшинство источников ───────────────────────────────────────────
+    # Окружение > node.env > .env > дефолт. Ярус node.env появился потому, что
+    # .env НА УЗЛЫ НЕ ЕДЕТ (там креды GitLab), а тринадцать настроек читаются
+    # именно на узле — все MOP_PVE_*, потолок памяти тела, пользователь и дом.
+    # Пока яруса не было, вписанное в .env значение доезжало до мастера и НЕ
+    # доезжало до узла: сборка образа клала тело на одно хранилище, драйвер на
+    # узле искал его на другом, и не жаловался никто.
+    node = os.path.join(tempfile.mkdtemp(), "node.env")
+    saved_node, saved_env = config.NODE_ENV_FILE, config.ENV_FILE
+    envf = os.path.join(tempfile.mkdtemp(), ".env")
+    with open(envf, "w") as f:
+        f.write("MOP_PVE_STORAGE=from-env-file\nMOP_PVE_CORES=2\n")
+    try:
+        config.NODE_ENV_FILE, config.ENV_FILE = node, envf
+        config.forget()
+        cases += 1
+        if config.get("MOP_PVE_STORAGE") != "from-env-file":
+            bad += 1
+            print("FAILED  .env must outrank the default when there is no node file")
+
+        with open(node, "w") as f:
+            f.write("# узловое, положено прогоном deploy\n"
+                    "MOP_PVE_STORAGE=from-node\n")
+        config.forget()
+        cases += 1
+        if config.get("MOP_PVE_STORAGE") != "from-node":
+            bad += 1
+            print("FAILED  node.env must outrank .env — that is the whole point")
+        cases += 1
+        if config.num("MOP_PVE_CORES") != 2:
+            bad += 1
+            print("FAILED  a setting absent from node.env must still come from .env")
+
+        os.environ["MOP_PVE_STORAGE"] = "from-environment"
+        cases += 1
+        if config.get("MOP_PVE_STORAGE") != "from-environment":
+            bad += 1
+            print("FAILED  the environment must outrank node.env — a one-off run "
+                  "has to keep working")
+        os.environ.pop("MOP_PVE_STORAGE", None)
+
+        os.unlink(node)
+        config.forget()
+        cases += 1
+        if config.get("MOP_PVE_STORAGE") != "from-env-file":
+            bad += 1
+            print("FAILED  a missing node.env is the normal case on the control "
+                  "machine, not an error")
+        cases += 1
+        if config.effective()["MOP_PVE_CORES"][1] != ".env":
+            bad += 1
+            print("FAILED  effective() must name where a value came from")
+        with open(node, "w") as f:
+            f.write("MOP_PVE_CORES=8\n")
+        config.forget()
+        cases += 1
+        if config.effective()["MOP_PVE_CORES"] != ("8", "node"):
+            bad += 1
+            print(f"FAILED  effective() must call the node file by its name: "
+                  f"{config.effective()['MOP_PVE_CORES']!r}")
+    finally:
+        config.NODE_ENV_FILE, config.ENV_FILE = saved_node, saved_env
+        config.forget()
+
+    # Список узловых настроек -- ОДИН: по нему deploy решает, что рендерить в
+    # node.env. Разойдись он с тем, что читает узел, и настройка молча не
+    # доедет -- ровно та беда, ради которой ярус и заводился.
+    cases += 1
+    unknown = [k for k in config.NODE_SCOPED if k not in config.SETTINGS]
+    if unknown:
+        bad += 1
+        print(f"FAILED  NODE_SCOPED names settings that do not exist: {unknown}")
 
     # Настройка старше дефолта: установка, где пользователь пула не совпадает
     # с тем, под кем крутится mop, вписывает его в .env.

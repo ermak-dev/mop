@@ -122,8 +122,6 @@
   vars:
     nomad_version: "{{ MOP_NOMAD_VERSION }}"
     nomad_zip: "{{ MOP_NOMAD_MIRROR }}/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
-    # Память узлов, отрезанная под чужих жильцов хоста; из MOP_RESERVED_MB.
-    nomad_reserved_mb: "{{ dict(MOP_RESERVED_MB.split(',') | map('split','=')) }}"
 
   tasks:
     - name: Nomad agent

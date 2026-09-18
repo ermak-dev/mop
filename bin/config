@@ -19,7 +19,13 @@ def main(argv):
     eff = config.effective()
     if argv == ["--json"]:
         # Так это уезжает в плейбуки: `mop deploy` отдаёт их --extra-vars.
-        print(json.dumps({k: v for k, (v, _) in eff.items()}, ensure_ascii=False))
+        #
+        # MOP_NODE_SCOPED -- не настройка, а СПИСОК узловых настроек: по нему
+        # прогон решает, что рендерить в node.env каждого узла. Список живёт в
+        # config.py одним местом, и плейбук берёт его оттуда, а не повторяет.
+        out = {k: v for k, (v, _) in eff.items()}
+        out["MOP_NODE_SCOPED"] = ",".join(config.NODE_SCOPED)
+        print(json.dumps(out, ensure_ascii=False))
         return
     if argv:
         lib.usage(__doc__)

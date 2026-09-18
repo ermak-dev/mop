@@ -14,9 +14,11 @@
   НЕОБЯЗАТЕЛЬНЫЕ  пусто значит «такой функциональности нет»: MCP рабочего
                 стола, резерв памяти.
 
-Порядок старшинства: переменная окружения > .env > дефолт. Окружение впереди,
-потому что на нём уже стоят NOMAD_ADDR и NOMAD_TOKEN, и разовое
-`NOMAD_ADDR=… mop list` должно продолжать работать.
+Порядок старшинства: переменная окружения > node.env > .env > дефолт.
+Окружение впереди, потому что на нём уже стоят NOMAD_ADDR и NOMAD_TOKEN, и
+разовое `NOMAD_ADDR=… mop list` должно продолжать работать. node.env — то, что
+узел знает О СЕБЕ: его кладёт `mop deploy` из инвентаря, и на управляющей
+машине этого файла обычно нет вовсе.
 
 ТОТ ЖЕ ФАЙЛ ЧИТАЕТ ANSIBLE (`lookup('ini', … type=properties)`), поэтому формат
 намеренно примитивен: `КЛЮЧ=значение`, решётка — комментарий, кавычки по краям
@@ -24,14 +26,30 @@
 
 НА УЗЛАХ ЭТОГО ФАЙЛА НЕТ: rsync его исключает, потому что там лежат креды
 GitLab, которым в пуле делать нечего. Всё, что нужно узлу, приезжает туда
-явно — секреты файлом `secrets.env`, настройки строками `Environment=` в юните
-агента. Поэтому дефолты обязаны быть рабочими сами по себе.
+явно — секреты файлом `secrets.env`, узловые настройки файлом `node.env`.
+Дефолты при этом всё равно обязаны быть рабочими сами по себе: узел, до
+которого deploy ещё не доходил, обязан вести себя разумно.
 """
 import os
 import pwd
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 ENV_FILE = os.path.join(PROJECT, ".env")
+
+# Что УЗЕЛ знает о себе сам. Формат тот же примитивный, что у .env; кладёт файл
+# `mop deploy`, собирая его из инвентаря — глобального значения группы и
+# переопределения на хосте.
+#
+# Ярус нужен, потому что .env НА УЗЛЫ НЕ ЕДЕТ (там креды GitLab), а на узле
+# читается тринадцать настроек: все MOP_PVE_*, потолок памяти тела,
+# пользователь, дом, списки посева. Пока яруса не было, вписанное в .env
+# доезжало до мастера и НЕ доезжало до узла — сборка образа клала тело на одно
+# хранилище, драйвер на узле искал его на другом, и не жаловался никто.
+#
+# Там, где это уже кусало, лечили по разу каждую: MOP_PUPPET_SEED ездил строкой
+# Environment= в юните агента, MOP_DRIVER — отдельным файлом. Здесь они
+# сходятся в один механизм.
+NODE_ENV_FILE = os.path.expanduser("~/.config/mop/node.env")
 
 
 def pool_user():
@@ -67,6 +85,10 @@ REQUIRED = {
 
 # Дефолт верен для любой установки; переопределяют редко.
 DEFAULTS = {
+    # В ЧЁМ на этом узле живёт папет (mop/driver/). Дефолт host не косметика:
+    # узел, который про драйверы ничего не знает, обязан вести себя ровно как
+    # раньше, иначе раскатка шва стала бы раскаткой поведения.
+    "MOP_DRIVER": "host",
     "MOP_HOME": os.path.expanduser("~"),
     "MOP_USER": pool_user(),
     "MOP_POOL_DC": "home",
@@ -162,7 +184,6 @@ DEFAULTS = {
 # Пусто = такой функциональности нет. Проверять надо ПУСТОТУ, а не отсутствие
 # ключа: иначе выключенная функция и незаполненная настройка неразличимы.
 OPTIONAL = {
-    "MOP_RESERVED_MB": "",    # узел=МБ под чужих жильцов хоста
     # MCP автоматизации рабочего стола: пусто — папеты просто не увидят этих
     # серверов. Адреса именно IP, а не имена: по WINDOWS_MCP_HOST врапер ещё и
     # узнаёт, что папет живёт ВНУТРИ этого хоста, сравнивая его с адресами
@@ -203,6 +224,33 @@ SETTINGS = {**{k: "" for k in REQUIRED}, **{k: "" for k in DERIVED},
             **DEFAULTS, **OPTIONAL}
 
 
+# Настройки УЗЛА: те, что читаются на самом узле и могут у машин различаться.
+# Список ОДИН на систему: по нему `mop deploy` решает, что рендерить в
+# node.env, а по нему же видно, чего узлу ждать. Разойдись он с тем, что узел
+# читает, — настройка молча не доедет, ровно та беда, ради которой ярус и
+# заводился.
+#
+# Здесь только УЗЛОВАЯ ось. Размеры ТЕЛА (память, диск, ядра, базовый образ)
+# лежат тут же временно: их настоящая ось — ШАРД, потому что образ пер-шардовый
+# и cloudpub с rust и постгресом хочет не того, что mop на питоне. Пока оси
+# шарда нет, они ведут себя как узловые.
+NODE_SCOPED = (
+    "MOP_DRIVER",          # в чём на этом узле живёт папет
+    "MOP_USER",            # под кем идут задачи
+    "MOP_HOME",            # $HOME пула на узле
+    "MOP_PUPPET_SEED",     # что врапер сеет в клон, а wipe щадит
+    "MOP_BODY_SEED",       # что узел переливает в каждое своё тело
+    "MOP_PUPPET_MEM_MAX_MB",
+    "MOP_PVE_STORAGE",
+    "MOP_PVE_TEMPLATE",
+    "MOP_PVE_BRIDGE",
+    "MOP_PVE_SUBNET",
+    "MOP_PVE_VMID_BASE",
+    "MOP_PVE_DISK_GB",
+    "MOP_PVE_CORES",
+)
+
+
 class Missing(RuntimeError):
     """Обязательная настройка не заполнена."""
 
@@ -218,26 +266,45 @@ def require():
                       + ":\n" + "\n".join(gaps)
                       + "\n\ntemplate: cp .env.example .env")
 
-_env = None
+_cache = {}
 
 
-def _load():
-    global _env
-    if _env is not None:
-        return _env
-    _env = {}
+def _read(path):
+    """Файл вида КЛЮЧ=значение -> dict. Отсутствие файла — штатный случай:
+    на узле нет .env, на управляющей машине нет node.env."""
+    out = {}
     try:
-        with open(ENV_FILE) as f:
+        with open(path) as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
                 k, sep, v = line.partition("=")
                 if sep:
-                    _env[k.strip()] = v.strip().strip('"').strip("'")
+                    out[k.strip()] = v.strip().strip('"').strip("'")
     except OSError:
-        pass  # нет .env — работаем на дефолтах, это штатный случай на узле
-    return _env
+        pass
+    return out
+
+
+def _load():
+    """Настройки установки: .env рядом с кодом."""
+    if ENV_FILE not in _cache:
+        _cache[ENV_FILE] = _read(ENV_FILE)
+    return _cache[ENV_FILE]
+
+
+def _node():
+    """Настройки ЭТОГО УЗЛА: node.env, положенный прогоном deploy."""
+    if NODE_ENV_FILE not in _cache:
+        _cache[NODE_ENV_FILE] = _read(NODE_ENV_FILE)
+    return _cache[NODE_ENV_FILE]
+
+
+def forget():
+    """Забыть прочитанное. Нужно проверкам, которые подсовывают свои файлы;
+    в работе файлы читаются один раз за процесс и меняться не могут."""
+    _cache.clear()
 
 
 def get(name, default=None):
@@ -250,7 +317,7 @@ def get(name, default=None):
     Настройка описана в одном месте или ни в одном."""
     if default is None:
         default = SETTINGS.get(name, "")
-    value = os.environ.get(name) or _load().get(name)
+    value = os.environ.get(name) or _node().get(name) or _load().get(name)
     if value:
         return value
     return DERIVED[name]() if not default and name in DERIVED else default
@@ -262,6 +329,8 @@ def effective():
     for name, default in SETTINGS.items():
         if os.environ.get(name):
             out[name] = (os.environ[name], "env")
+        elif _node().get(name):
+            out[name] = (_node()[name], "node")
         elif _load().get(name):
             out[name] = (_load()[name], ".env")
         elif name in DERIVED:
