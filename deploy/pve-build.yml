@@ -124,13 +124,21 @@
       ansible.builtin.command: "{{ pve }} destroy {{ tmpl_vmid }}"
       changed_when: true
 
+    # Пароли — СО STDIN и только здесь, при сборке образа. В node.env они не
+    # едут и в NODE_SCOPED не входят: тот файл лежит на узлах с правами 0644,
+    # и на host-узле его читает любой папет — общий $HOME. Пусто значит
+    # «пароля нет», и аккаунт остаётся заблокированным.
     - name: Raise a container from the base image
-      ansible.builtin.command: >-
-        {{ pve }} create {{ tmpl_vmid }} {{ tmpl_name }} {{ MOP_PVE_TEMPLATE }}
-        {{ MOP_PVE_STORAGE }} {{ body_cores }} {{ body_mem }}
-        {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ tmpl_ip }}/{{ pve_cidr }}
-        {{ pve_gw }} {{ MOP_HOME }}/.ssh/mop-body.pub
+      ansible.builtin.shell:
+        cmd: >-
+          {{ pve }} create {{ tmpl_vmid }} {{ tmpl_name }} {{ MOP_PVE_TEMPLATE }}
+          {{ MOP_PVE_STORAGE }} {{ body_cores }} {{ body_mem }}
+          {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ tmpl_ip }}/{{ pve_cidr }}
+          {{ pve_gw }} {{ MOP_HOME }}/.ssh/mop-body.pub
+        stdin: "{{ mop_body_root_password | default('') }}"
+        stdin_add_newline: false
       changed_when: true
+      no_log: true
 
     # Пересозданное тело приезжает с НОВЫМ ключом хоста, и accept-new тут не
     # лечит: запись под этим адресом уже есть, и ssh читает смену ключа как
@@ -152,12 +160,16 @@
     # глаголом exec, который входит В ТЕЛО ПОД ПОЛЬЗОВАТЕЛЕМ ПУЛА, — а его на
     # этом шаге ещё нет, так что сорок раз подряд она мерила не то.
     - name: The pool user, sshd, sudo and a lingering session bus
-      ansible.builtin.command: "{{ pve }} bootstrap {{ tmpl_vmid }}"
+      ansible.builtin.shell:
+        cmd: "{{ pve }} bootstrap {{ tmpl_vmid }}"
+        stdin: "{{ mop_body_user_password | default('') }}"
+        stdin_add_newline: false
       register: boot
       until: boot.rc == 0
       retries: 12
       delay: 5
       changed_when: true
+      no_log: true
 
     - name: Let both the node and this build machine in
       ansible.builtin.shell:
