@@ -111,6 +111,60 @@ def main():
         config.NODE_ENV_FILE, config.ENV_FILE = saved_node, saved_env
         config.forget()
 
+    # ── .mop: что проект просит себе сам ─────────────────────────────────
+    # Файл приезжает ИЗ ЧУЖОГО РЕПОЗИТОРИЯ и говорит, сколько ресурсов взять.
+    # Поэтому разбор обязан быть проверяем здесь: что дозволено, то и
+    # применяется, остальное отбрасывается ГРОМКО — молча проглоченный ключ
+    # это либо не сработавшая настройка, либо сработавшая чужая.
+    MOP = [
+        # (что проверяем, текст .mop, принято, отброшено)
+        ("размеры тела", "MOP_PVE_DISK_GB=200\nMOP_PVE_CORES=8\n",
+         {"MOP_PVE_DISK_GB": "200", "MOP_PVE_CORES": "8"}, []),
+        ("комментарии и пустые строки",
+         "# мой проект тяжёлый\n\nMOP_PVE_DISK_GB=200\n",
+         {"MOP_PVE_DISK_GB": "200"}, []),
+        ("пробелы по краям", "  MOP_PVE_CORES = 8  \n",
+         {"MOP_PVE_CORES": "8"}, []),
+        ("кавычки снимаются", 'MOP_PVE_CORES="8"\n', {"MOP_PVE_CORES": "8"}, []),
+        # Проект НЕ вправе переставить сервер пула, сменить пользователя или
+        # подсунуть свои задачи ansible в образ: это не его размеры, это чужая
+        # машина. Состав образа — решение УСТАНОВКИ, и MOP_BODY_EXTRA сюда не
+        # входит намеренно.
+        ("чужая настройка отбрасывается", "MOP_SERVER_LAN=10.0.0.1\n",
+         {}, ["MOP_SERVER_LAN"]),
+        ("состав образа проекту не отдан", "MOP_BODY_EXTRA=../../etc/passwd\n",
+         {}, ["MOP_BODY_EXTRA"]),
+        ("выдуманный ключ", "ЧТО_УГОДНО=1\n", {}, ["ЧТО_УГОДНО"]),
+        ("своё и чужое вперемешку",
+         "MOP_PVE_CORES=8\nMOP_USER=root\n",
+         {"MOP_PVE_CORES": "8"}, ["MOP_USER"]),
+        ("пустой файл", "", {}, []),
+        ("строка без знака равенства", "просто текст\n", {}, []),
+    ]
+    for what, text, want, want_bad in MOP:
+        cases += 1
+        got, bad_keys = config.shard_settings(text)
+        if got != want or sorted(bad_keys) != sorted(want_bad):
+            bad += 1
+            print(f"FAILED  .mop, {what}\n  wanted: {want!r} + отброшено {want_bad!r}"
+                  f"\n  got: {got!r} + отброшено {bad_keys!r}")
+
+    # Всё, что проект вправе просить, обязано быть настройкой: иначе оно
+    # никуда не доедет, а отказа не будет.
+    cases += 1
+    unknown = [k for k in config.SHARD_SCOPED if k not in config.SETTINGS]
+    if unknown:
+        bad += 1
+        print(f"FAILED  SHARD_SCOPED names settings that do not exist: {unknown}")
+
+    # Потолок — УЗЛОВОЙ: чужой проект просит, машина решает. Без потолка .mop
+    # это способ занять гипервизор, а не настройка.
+    for cap in ("MOP_BODY_MEM_CAP_MB", "MOP_BODY_DISK_CAP_GB", "MOP_BODY_CORES_CAP"):
+        cases += 1
+        if cap not in config.NODE_SCOPED:
+            bad += 1
+            print(f"FAILED  {cap} must be node-scoped — the machine has the last word")
+
     # Список узловых настроек -- ОДИН: по нему deploy решает, что рендерить в
     # node.env. Разойдись он с тем, что читает узел, и настройка молча не
     # доедет -- ровно та беда, ради которой ярус и заводился.

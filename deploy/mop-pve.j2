@@ -103,14 +103,20 @@ create)
 clone)
     src="${1:?src}"; vmid="${2:?vmid}"; hostname="${3:?hostname}"
     storage="${4:?storage}"; cidr="${5:?cidr}"; gw="${6:?gw}"
-    mem="${7:?mem}"; bridge="${8:?bridge}"; cores="${9:?cores}"
+    bridge="${7:?bridge}"
     check_vmid "$src"; check_vmid "$vmid"; check_name "$hostname"
     check_host "$src"
     pct clone "$src" "$vmid" --hostname "$hostname" >&2 \
         || pct clone "$src" "$vmid" --hostname "$hostname" \
              --full 1 --storage "$storage" >&2
-    pct set "$vmid" --memory "$mem" --swap 0 --cores "$cores" \
-        --net0 "name=eth0,bridge=$bridge,ip=$cidr,gw=$gw" >&2
+    # Память, ядра и диск ЗДЕСЬ НЕ ВЫСТАВЛЯЮТСЯ: тело наследует их от образа,
+    # `pct clone` копирует конфиг целиком. Это и делает ОБРАЗ носителем
+    # шардовых размеров — проект просит их в своём `.mop`, сборка вписывает в
+    # образ, а на узел не едет ничего. Выставь их здесь — и значения установки
+    # затёрли бы просьбу проекта, ради которой всё и затевалось.
+    #
+    # Адрес — другое дело: он у каждого тела свой и выводится из имени.
+    pct set "$vmid" --net0 "name=eth0,bridge=$bridge,ip=$cidr,gw=$gw" >&2
     echo "$vmid"
     ;;
 

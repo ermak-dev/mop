@@ -67,6 +67,31 @@
 
     # Адрес сборочного тела — ШЛЮЗ ПЛЮС ОДИН. Живые тела стоят с него же, но
     # выше: address_of начинает с сети + 2, и пересечься им негде.
+    # Размеры тела: чего просит ПРОЕКТ (.mop), но не выше потолка ЭТОЙ машины.
+    # Просит чужой репозиторий, а решает узел, на котором тело будет стоять, —
+    # иначе .mop это не настройка, а способ занять гипервизор. Потолки узловые
+    # (config.NODE_SCOPED), то есть переопределяются в инвентаре на хосте.
+    #
+    # Порядок старшинства целиком: узел > шард > установка > дефолт.
+    - name: How big a body of this shard may be here
+      ansible.builtin.set_fact:
+        body_mem: "{{ [(mop_shard_asks | default({})).get('MOP_PUPPET_MEM_MAX_MB', MOP_PUPPET_MEM_MAX_MB) | int,
+                       MOP_BODY_MEM_CAP_MB | int] | min }}"
+        body_disk: "{{ [(mop_shard_asks | default({})).get('MOP_PVE_DISK_GB', MOP_PVE_DISK_GB) | int,
+                        MOP_BODY_DISK_CAP_GB | int] | min }}"
+        body_cores: "{{ [(mop_shard_asks | default({})).get('MOP_PVE_CORES', MOP_PVE_CORES) | int,
+                         MOP_BODY_CORES_CAP | int] | min }}"
+
+    - name: Say what the body will be built with
+      ansible.builtin.debug:
+        msg: >-
+          {{ mop_shard }} on {{ inventory_hostname }}: {{ body_mem }} MB,
+          {{ body_disk }} GB, {{ body_cores }} cores
+          {{ '(capped by the node)' if (mop_shard_asks | default({})) and
+             (body_mem | int < (mop_shard_asks.MOP_PUPPET_MEM_MAX_MB | default(0) | int)
+              or body_disk | int < (mop_shard_asks.MOP_PVE_DISK_GB | default(0) | int)
+              or body_cores | int < (mop_shard_asks.MOP_PVE_CORES | default(0) | int)) else '' }}
+
     - name: Its address while it is being built
       ansible.builtin.set_fact:
         tmpl_ip: "{{ '.'.join(pve_gw.split('.')[0:3]) }}.{{ pve_gw.split('.')[3] | int + 1 }}"
@@ -102,8 +127,8 @@
     - name: Raise a container from the base image
       ansible.builtin.command: >-
         {{ pve }} create {{ tmpl_vmid }} {{ tmpl_name }} {{ MOP_PVE_TEMPLATE }}
-        {{ MOP_PVE_STORAGE }} {{ MOP_PVE_CORES }} {{ MOP_PUPPET_MEM_MAX_MB }}
-        {{ MOP_PVE_DISK_GB }} {{ MOP_PVE_BRIDGE }} {{ tmpl_ip }}/{{ pve_cidr }}
+        {{ MOP_PVE_STORAGE }} {{ body_cores }} {{ body_mem }}
+        {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ tmpl_ip }}/{{ pve_cidr }}
         {{ pve_gw }} {{ MOP_HOME }}/.ssh/mop-body.pub
       changed_when: true
 
