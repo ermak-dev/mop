@@ -1,11 +1,17 @@
 # Чем обязано быть ТЕЛО ЭТОЙ УСТАНОВКИ — сверх того, чем обязано быть любое
-# тело (deploy/body-tasks.yml).
+# тело (роль body продукта).
 #
 # ЗАДАЧАМИ, А НЕ ИГРОЙ, потому что вызывающих двое и ходят они по разным
 # спискам: examples/homelab/setup.yml — по узлам, которые сами себе тело, и
 # deploy/pve-build.yml — по контейнеру, который вот-вот станет образом шарда.
 # Второе определение «чем обязано быть тело» разошлось бы с первым молча, и
 # упало бы это не на прогоне, а на первой сборке папета.
+#
+# ОДНИМ ФАЙЛОМ, а не двумя. Скиллы и MCP-серверы жили отдельно исторически, от
+# двух отдельных плейбуков; разъединяло их ровно одно — `become` на уровне
+# игры, — а с тех пор как каждая задача в конце файла называет пользователя
+# пула явно, разъединять нечего. Две игры по одним и тем же хостам с одним и
+# тем же условием — это одна игра.
 #
 # ВСЁ ЭТО УЕЗЖАЕТ В ОБРАЗ, а не ставится при подъёме. Правило одно: одинаковое
 # у всех тел шарда и меняющееся редко печётся в образ (`mop driver build`), а
@@ -15,7 +21,7 @@
 # Postgres и redis тут СВОИ У КАЖДОГО ТЕЛА, и это решение, а не умолчание:
 # тесты cloudpub дропают и создают базы, и один постгрес на всех папетов узла —
 # известный источник столкновений. Цена названа: по своему постгресу на тело,
-# и платится она памятью, а не местом (каталог данных на узле — десятки КБ).
+# и платится она памятью, а не местом.
 #
 # Файл ждёт от вызывающего `become: yes`: почти всё здесь ставится под root, а
 # пользовательское помечено become_user поимённо.
@@ -360,3 +366,147 @@
     group: "{{ MOP_USER }}"
     mode: '0600'
   loop: "{{ puppet_env_files }}"
+
+
+# ── скиллы и MCP-серверы установки ───────────────────────────────────────
+# Пишутся в ~/.claude и ~/.claude.json, то есть туда, где живёт сессия папета,
+# — поэтому это тело, а не узел. Идут ПОСЛЕ тулчейна: регистрация сервера зовёт
+# claude, а он ищется в PATH, который ставит nvm.
+#
+# КАЖДАЯ задача ниже, трогающая дом пользователя пула, называет его ЯВНО
+# (`become_user`), а не полагается на умолчание игры. Пока здесь стояло
+# умолчание, `claude mcp add` в сборке образа записал все три сервера в
+# /root/.claude.json: задачи зелёные, образ собран, а папет в теле остался с
+# одним лишь своим сервером.
+
+- name: Values the desktop MCP servers are registered with
+  ansible.builtin.set_fact:
+    # Читаем .env проекта как properties: секции в нём нет, а type=properties
+    # ровно про файлы вида KEY=value.
+    windows_mcp_token: "{{ lookup('ini', 'WINDOWS_MCP_TOKEN type=properties file=' + lookup('env', 'HOME') + '/mop/.env') }}"
+    mac_mcp_token: "{{ lookup('ini', 'MAC_MCP_TOKEN type=properties file=' + lookup('env', 'HOME') + '/mop/.env') }}"
+    skills_tgz: "/tmp/mop-skills.tgz"
+  no_log: true
+
+# Узел, живущий ВНУТРИ windows-хоста, достаёт до него только по loopback:
+# там mirrored networking, и Windows-файрвол роняет хайрпин на LAN-адрес.
+#
+# Критерий тот же, что у врапера папета: адрес windows-хоста среди адресов
+# собственных интерфейсов узла.
+- name: Own IPv4 addresses of this node
+  ansible.builtin.command: ip -4 -o addr show
+  register: node_addrs
+  changed_when: false
+
+- name: URL of windows-mcp as seen from this node
+  ansible.builtin.set_fact:
+    windows_mcp_url: >-
+      {{ 'http://127.0.0.1:' ~ MCP_PORT ~ '/mcp'
+         if WINDOWS_MCP_HOST and WINDOWS_MCP_HOST in node_addrs.stdout
+         else 'http://' ~ WINDOWS_MCP_HOST ~ ':' ~ MCP_PORT ~ '/mcp' }}
+
+- name: Ensure ~/.claude exists
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.file:
+    # Абсолютный путь: по ssh относительный попадает в дом узла, но на
+    # машине с local connection (управляющая в роли узла пула) -- в каталог
+    # плейбука, и следующий же синк высыпал бы скиллы прямо в репозиторий.
+    path: "{{ MOP_HOME }}/.claude"
+    state: directory
+    mode: "0755"
+
+# tar -h вместо copy_links: скилл master лежит в репозитории (skills/master) и
+# виден на управляющей машине симлинком из ~/.claude/skills. Без разыменования
+# в тело уехал бы сам симлинк и висел бы там в пустоту.
+#
+# Архивом, а не synchronize: тот строит свой ssh САМ и теряет при этом
+# ansible_ssh_common_args, то есть ProxyJump, -- и честно идёт в сеть тел с
+# управляющей машины, которой туда хода нет. Ровно на этом сборка образа уже
+# спотыкалась на пакете mop.
+#
+# Пропуск на управляющей машине не лень: она и есть ИСТОЧНИК этого синка, а
+# разыменование её симлинка скилла мастера заменило бы его настоящей копией -- и
+# правки скилла перестали бы попадать в историю репозитория.
+- name: Pack the skills up
+  ansible.builtin.command:
+    cmd: tar czhf {{ skills_tgz }} -C {{ lookup('env', 'HOME') }}/.claude/skills .
+  delegate_to: localhost
+  become: no
+  changed_when: true
+  when: "'master' not in group_names"
+
+# Снести и разложить заново -- это `delete: yes`, которым synchronize выметал
+# снятые скиллы. Без сноса удалённый скилл лежал бы в теле вечно, а это хуже
+# миллисекундной дыры внутри прогона deploy, который и так перезапускает агента.
+- name: Old skills go before the new ones
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.claude/skills"
+    state: "{{ item }}"
+    mode: "0755"
+  loop: [absent, directory]
+  when: "'master' not in group_names"
+
+- name: Sync ~/.claude/skills from the control machine
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.unarchive:
+    src: "{{ skills_tgz }}"
+    dest: "{{ MOP_HOME }}/.claude/skills/"
+  when: "'master' not in group_names"
+
+# Сначала снять, потом поставить: add на существующей записи ошибается,
+# а сравнить желаемое с фактом CLI не умеет -- токены он прячет даже от
+# get. exec -- чтобы код возврата задачи был кодом add, а не remove.
+# claude на узле живёт в nvm, которого нет в PATH неинтерактивного ssh:
+# MOP_PUPPET_PATH -- уже готовый PATH папета, им же и ищем.
+# Chromium В ОБРАЗ, а не при подъёме папета. Врапер и так делает
+# `npx -y playwright install chromium` на каждой загрузке, но это установка на
+# 2 ГБ по сети: в теле, где её не сделали заранее, она идёт при ПЕРВОМ подъёме
+# каждого нового папета, а кончается строка на `|| true` -- то есть провал
+# ничего не скажет. Здесь она разовая, и врапер после неё лишь подтверждает
+# наличие.
+- name: Warm up chromium for playwright
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.shell: npx -y playwright install chromium
+  args:
+    creates: "{{ MOP_HOME }}/.cache/ms-playwright"
+  environment:
+    PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
+
+- name: Register playwright MCP
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.shell:
+    cmd: |
+      claude mcp remove -s user playwright >/dev/null 2>&1 || true
+      exec claude mcp add -s user playwright -- npx -y '@playwright/mcp@latest' --headless --isolated --browser chromium
+  environment:
+    PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
+  changed_when: false
+
+- name: Register windows-mcp
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.shell:
+    cmd: |
+      claude mcp remove -s user windows-mcp >/dev/null 2>&1 || true
+      exec claude mcp add -s user --transport http windows-mcp '{{ windows_mcp_url }}' --header 'Authorization: Bearer {{ windows_mcp_token }}'
+  environment:
+    PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
+  changed_when: false
+  no_log: true
+
+- name: Register mac-mcp
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.shell:
+    cmd: |
+      claude mcp remove -s user mac-mcp >/dev/null 2>&1 || true
+      exec claude mcp add -s user --transport http mac-mcp 'http://{{ MAC_MCP_HOST }}:{{ MCP_PORT }}/mcp' --header 'Authorization: Bearer {{ mac_mcp_token }}'
+  environment:
+    PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
+  changed_when: false
+  no_log: true
