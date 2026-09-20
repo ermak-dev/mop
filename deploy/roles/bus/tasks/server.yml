@@ -1,0 +1,43 @@
+# Сервер шины: NATS. Один на установку, на машине, которая включена всегда.
+- name: Unpack nats-server {{ MOP_NATS_VERSION }}
+  ansible.builtin.unarchive:
+    src: "{{ nats_tgz }}"
+    dest: /tmp
+    remote_src: yes
+    creates: "/tmp/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64/nats-server"
+
+- name: Install nats-server
+  ansible.builtin.copy:
+    src: "/tmp/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64/nats-server"
+    dest: /usr/local/bin/nats-server
+    remote_src: yes
+    mode: "0755"
+  notify: restart nats
+
+- name: Config dir
+  ansible.builtin.file:
+    path: /etc/nats
+    state: directory
+    mode: "0755"
+
+- name: Server config
+  ansible.builtin.template:
+    src: nats-server.conf.j2
+    dest: /etc/nats/nats-server.conf
+    # Пароли внутри: читает только root, под которым служба и ходит.
+    mode: "0600"
+  notify: restart nats
+
+- name: Systemd unit
+  ansible.builtin.template:
+    src: nats.service.j2
+    dest: /etc/systemd/system/nats.service
+    mode: "0644"
+  notify: restart nats
+
+- name: Enable and start
+  ansible.builtin.systemd:
+    name: nats
+    enabled: yes
+    state: started
+    daemon_reload: yes

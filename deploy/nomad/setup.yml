@@ -24,108 +24,18 @@
   hosts: server
   become: no
   gather_facts: no
-
-  vars:
-    nomad_version: "{{ MOP_NOMAD_VERSION }}"
-    nomad_zip: "{{ MOP_NOMAD_MIRROR }}/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
-    nomad_home: "{{ MOP_NOMAD_DATA | dirname }}"
-
   tasks:
-    - name: Ensure unzip is present
-      become: yes
-      ansible.builtin.apt:
-        name: unzip
-        state: present
-
-    - name: Download nomad {{ nomad_version }}
-      ansible.builtin.get_url:
-        url: "{{ nomad_zip }}"
-        dest: "/tmp/nomad_{{ nomad_version }}.zip"
-        mode: '0644'
-
-    - name: Install nomad binary
-      become: yes
-      ansible.builtin.unarchive:
-        src: "/tmp/nomad_{{ nomad_version }}.zip"
-        dest: /usr/local/bin
-        remote_src: yes
-        mode: '0755'
-
-    - name: Create nomad data dir
-      ansible.builtin.file:
-        path: "{{ nomad_home }}/data"
-        state: directory
-        mode: '0755'
-
-    - name: Deploy server config
-      ansible.builtin.template:
-        src: server.hcl.j2
-        dest: "{{ nomad_home }}/server.hcl"
-        mode: '0644'
-      register: server_config
-
-    - name: Install systemd unit
-      become: yes
-      ansible.builtin.template:
-        src: nomad.service.j2
-        dest: /etc/systemd/system/nomad.service
-        mode: '0644'
-      vars:
-        nomad_user: "{{ MOP_USER }}"
-        nomad_config: "{{ nomad_home }}/server.hcl"
-      register: server_unit
-
-    - name: Start nomad server
-      become: yes
-      ansible.builtin.systemd:
+    - ansible.builtin.include_role:
         name: nomad
-        state: "{{ (server_config.changed or server_unit.changed) | ternary('restarted', 'started') }}"
-        enabled: yes
-        daemon_reload: yes
-
-    # 403 — тоже ответ: ACL включён, значит сервер жив и отвечает.
-    - name: Wait for the HTTP API
-      ansible.builtin.uri:
-        url: http://127.0.0.1:{{ MOP_NOMAD_PORT }}/v1/agent/self
-        status_code: [200, 403]
-      register: api
-      until: api.status in [200, 403]
-      retries: 15
-      delay: 2
-
-    # --- ACL bootstrap: один раз, рядом с data_dir ------------------------
-    # `creates` — это и есть «один раз»: повторный bootstrap Nomad отвергает,
-    # а файл с токеном перетереть пустым выводом значит потерять доступ к
-    # кластеру безвозвратно.
-    - name: Bootstrap ACL (first run only)
-      ansible.builtin.shell: >
-        /usr/local/bin/nomad acl bootstrap -json
-        > {{ nomad_home }}/bootstrap.json
-        && chmod 600 {{ nomad_home }}/bootstrap.json
-      args:
-        creates: "{{ nomad_home }}/bootstrap.json"
-      environment:
-        NOMAD_ADDR: http://127.0.0.1:{{ MOP_NOMAD_PORT }}
-
-    - name: Fetch the management token to the control machine
-      ansible.builtin.fetch:
-        src: "{{ nomad_home }}/bootstrap.json"
-        dest: "{{ lookup('env', 'HOME') }}/.config/nomad/bootstrap.json"
-        flat: yes
+        tasks_from: server
 
 
 - name: Nomad client on the puppet hosts
   hosts: puppet
   become: yes
   gather_facts: no
-
-  vars:
-    nomad_version: "{{ MOP_NOMAD_VERSION }}"
-    nomad_zip: "{{ MOP_NOMAD_MIRROR }}/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
-
-  tasks:
-    - name: Nomad agent
-      ansible.builtin.include_tasks: client-agent.yml
+  roles:
+    - nomad
 
 
 # Управляющая машина в кластере.
@@ -145,12 +55,7 @@
   hosts: master:!puppet
   become: yes
   gather_facts: no
-
   vars:
-    nomad_version: "{{ MOP_NOMAD_VERSION }}"
-    nomad_zip: "{{ MOP_NOMAD_MIRROR }}/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_linux_amd64.zip"
     nomad_datacenter: "{{ MOP_CONTROL_DC }}"
-
-  tasks:
-    - name: Nomad agent
-      ansible.builtin.include_tasks: client-agent.yml
+  roles:
+    - nomad

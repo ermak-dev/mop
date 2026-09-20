@@ -16,6 +16,14 @@ export INVENTORY="${INVENTORY:-$PROJECT_HOME/inventory.ini}"
 # потому что common подключают все командлеты.
 export ANSIBLE_CONFIG="${ANSIBLE_CONFIG:-$PROJECT_HOME/ansible.cfg}"
 
+# Где искать роли. Переменной, а не строкой в ansible.cfg: относительные пути
+# там ansible разрешает от ТЕКУЩЕГО каталога, а абсолютные были бы литералом
+# конкретной машины в репозитории. Здесь они собираются из PROJECT_HOME.
+#
+# Роли есть только у ПРОДУКТА. Установка автора (examples/) обходится парой
+# файлов задач: ролевое дерево ей ничего не даёт, а читать его дольше.
+export ANSIBLE_ROLES_PATH="${ANSIBLE_ROLES_PATH:-$PROJECT_HOME/deploy/roles}"
+
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; BOLD=$'\033[1m'; NC=$'\033[0m'
 export RED GREEN BOLD NC
 

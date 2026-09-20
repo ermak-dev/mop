@@ -1,0 +1,219 @@
+# Агент шины на узле: пакет mop, зависимости, креды, юнит, сторож диска.
+#
+# Роль НЕ несёт настроек: всё, что ей нужно, приходит переменными игры —
+# они там и остались, потому что часть из них ленивая (mop_uid берётся из
+# getent, который отрабатывает первой задачей).
+- name: UID of the pool user on this node
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ MOP_USER }}"
+
+- name: Ensure python3-pip
+  become: yes
+  ansible.builtin.apt:
+    name: python3-pip
+    state: present
+
+# Всё, что нужно самому mop на узле: клиент шины, MCP-сервер узлового
+# профиля и то, что он импортирует.
+- name: Python dependencies of mop
+  ansible.builtin.pip:
+    name: [nats-py, mcp, python-nomad, requests]
+    extra_args: --user --break-system-packages
+    state: present
+
+- name: Sync the mop package from the control machine
+  ansible.posix.synchronize:
+    src: "{{ lookup('env', 'HOME') }}/mop/"
+    dest: "{{ mop_home }}/"
+    delete: yes
+    recursive: yes
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=__pycache__"
+      # .env НИКОГДА не уезжает на узлы. keys.distribute возит туда только
+      # названное явно (secrets.env), и общий rsync, тащащий весь файл с
+      # кредами GitLab, сводил бы эту фильтрацию к нулю. На узле пойман
+      # 2026-08-29: лежал целиком, 0600, со всеми секретами проекта.
+      - "--exclude=.env"
+      # Карта установки -- кто есть кто и где -- дело управляющей машины.
+      # Узел о соседях не спрашивает, а всё своё берёт из node.env.
+      - "--exclude=inventory.ini"
+  notify: restart mop-agent
+
+# Свой MCP-сервер -- часть продукта: без него папет без инструментов.
+# Регистрирует сам claude (`claude mcp add` пишет ~/.claude.json), ручного
+# мерджа больше нет. CLI не умеет сравнивать желаемое с фактом (токены
+# прячет даже от get), поэтому приводим тупо: снять и поставить. Скоап
+# user: локальный прилип бы к каталогу запуска.
+# Только там, где claude и стоит: на узле, чьи тела — контейнеры, свой
+# MCP-сервер регистрирует сборка образа, внутри тела.
+- name: Register the pool MCP server for claude
+  when: mop_driver | default(MOP_DRIVER) == 'host'
+  ansible.builtin.shell:
+    cmd: |
+      claude mcp remove -s user mop >/dev/null 2>&1 || true
+      exec claude mcp add -s user mop -- '{{ MOP_HOME }}/mop/bin/mop' mcp
+  # claude на узле живёт в nvm, которого нет в PATH неинтерактивного ssh;
+  # MOP_PUPPET_PATH -- уже готовый PATH папета, им же и ищем.
+  environment:
+    PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
+  changed_when: false
+
+- name: Credentials dir
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop"
+    state: directory
+    mode: "0700"
+
+# Что УЗЕЛ знает о себе сам. Источник правды -- ИНВЕНТАРЬ: значение группы
+# с переопределением на хосте; чего инвентарь не назвал, берётся из
+# настроек установки.
+#
+# Файлом, а не строками Environment= в юните агента: узловые настройки
+# спрашивают ДВОЕ с разным окружением -- агент из своего юнита и внешний
+# врапер из процесса задачи Nomad. Пока драйвер жил в юните, врапер его не
+# видел и молча поднимал папета драйвером host, то есть прямо на
+# гипервизоре.
+#
+# Список -- из config.NODE_SCOPED, один на систему: второй здесь означал бы
+# настройку, которая молча не доехала.
+- name: What this node knows about itself
+  ansible.builtin.copy:
+    dest: "{{ MOP_HOME }}/.config/mop/node.env"
+    mode: "0644"
+    content: |
+      # Узловые настройки. Кладёт `mop deploy` из инвентаря -- править
+      # здесь бесполезно, следующий прогон перепишет.
+      {% for k in MOP_NODE_SCOPED.split(',') %}
+      {{ k }}={{ hostvars[inventory_hostname][k | lower] | default(lookup('vars', k, default='')) }}
+      {% endfor %}
+  notify: restart mop-agent
+
+# Регистр РАЗНЫЙ по обе стороны, и это стоило узла: в инвентаре переменные
+# пишут строчными (`mop_driver`), ключи настроек -- прописными
+# (`MOP_DRIVER`). Пока шаблон искал ключ как есть, он не находил ничего,
+# честно брал общее значение установки, и гипервизор объявлял себя узлом
+# с драйвером host -- то есть врапер поднял бы папета ПРЯМО НА
+# ГИПЕРВИЗОРЕ, мимо тела. Прогон при этом зелёный.
+#
+# Отсюда проверка: сверяем то, что записали, с тем, что сказал инвентарь.
+# Дешевле один assert, чем узел, который врёт о себе.
+- name: Read back what the node now says about itself
+  ansible.builtin.slurp:
+    src: "{{ MOP_HOME }}/.config/mop/node.env"
+  register: node_env
+
+# slurp, а не lookup('file'): lookup читает файл НА УПРАВЛЯЮЩЕЙ МАШИНЕ, и
+# delegate_to этого не меняет. Первая же попытка сверяла узел сам с собой.
+- name: What was written is what the inventory said
+  ansible.builtin.assert:
+    that:
+      - "'MOP_DRIVER=' + (mop_driver | default(MOP_DRIVER)) in (node_env.content | b64decode).splitlines()"
+    fail_msg: >-
+      node.env on {{ inventory_hostname }} disagrees with the inventory about its
+      driver — a node that lies about itself raises puppets in the wrong place
+    success_msg: "{{ inventory_hostname }}: driver {{ mop_driver | default(MOP_DRIVER) }}"
+
+# Переезд убирает за собой. rsync --exclude НЕ сносит уже лежащее: он
+# исключённое как раз БЕРЕЖЁТ, — поэтому старые копии убираются явно.
+#
+# Драйвер переехал в node.env вместе с остальными узловыми настройками: два
+# места для одного ответа разошлись бы молча. Инвентарь узлу больше не
+# нужен вовсе — всё своё он берёт из node.env, а карта установки (кто есть
+# кто и где) дело управляющей машины.
+# НЕ НА УПРАВЛЯЮЩЕЙ МАШИНЕ. Она бывает узлом пула по совместительству
+# (mate: и master, и puppet), и там «копия узла» -- это ОРИГИНАЛ. Первый
+# прогон этой задачи снёс инвентарь у самого себя, и следующий `mop deploy`
+# отказался работать: «no inventory». Тот же предохранитель, что у сноса
+# токена Nomad десятью задачами ниже.
+- name: What the node no longer needs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ MOP_HOME }}/.config/mop/driver"
+    - "{{ MOP_HOME }}/mop/inventory.ini"
+  when: "'master' not in group_names"
+
+- name: Bus credentials for the agent
+  ansible.builtin.template:
+    src: bus.json.j2
+    dest: "{{ MOP_HOME }}/.config/mop/bus.json"
+    mode: "0600"
+  notify: restart mop-agent
+
+# Креды на КАЖДЫЙ шард, а не одни на узел. Врапер подсовывает их сессии
+# папета через MOP_BUS_CONFIG, и без этого папет ходил бы под кредом агента
+# -- то есть мог бы написать в чужой проект, а агент бы этого не поймал:
+# он видит, кого спрашивают, но не видит, кто спрашивает.
+- name: Bus credentials for the puppets, one per shard
+  ansible.builtin.template:
+    src: bus.json.j2
+    dest: "{{ MOP_HOME }}/.config/mop/bus-{{ item }}.json"
+    mode: "0600"
+  loop: "{{ shards }}"
+  vars:
+    nats_user: "puppet-{{ item }}"
+    nats_password: "{{ lookup('password', secrets_dir + '/nats-puppet-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
+
+# Токен Nomad возили на узлы, чтобы узловой mop mcp дотягивался до соседей
+# и до инбокса мастера, и цена была названа прямо: папет, добравшийся до
+# файла, мог снести чужие джобы. Шина даёт ту же связь правами по субъектам,
+# поэтому полномочия узлам больше не нужны. Перестать раздавать мало --
+# старая копия так и лежала бы.
+#
+# Кроме управляющей машины: у неё этот файл -- ЕДИНСТВЕННЫЙ токен (NOMAD_TOKEN
+# в её окружении нет), и снести его здесь значит ослепить весь mop: мастер
+# первым же запросом к API получит 403.
+- name: Drop the Nomad management token from the pool
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/nomad/bootstrap.json"
+    state: absent
+  when: "'master' not in group_names"
+
+- name: Agent unit
+  become: yes
+  ansible.builtin.template:
+    src: mop-agent.service.j2
+    dest: /etc/systemd/system/mop-agent.service
+    mode: "0644"
+  notify: restart mop-agent
+
+- name: Enable and start the agent
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-agent
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Flush handlers before checking
+  ansible.builtin.meta: flush_handlers
+
+# Дисковый сторож — объекты mop (клоны, target-каталоги), а не проекта,
+# поэтому едет ядром, а не examples. Скрипт ставится на узлы, джоб
+# регистрируется ниже отдельной игрой на сервере. Он обязан работать при
+# выключенном мастере -- иначе теряется единственная уборка, которой всё
+# равно (сироты не требуют суждений о живых папетах).
+- name: Deploy the pu-sweep script (disk watchdog)
+  become: yes
+  ansible.builtin.copy:
+    src: pu-sweep.sh
+    dest: /usr/local/bin/pu-sweep
+    mode: "0755"
+
+# Прогон плейбука без этой проверки не отличает «юнит запущен» от «агент
+# подписался»: systemd доволен процессом, который упал в реконнект.
+- name: Confirm the agent is connected
+  ansible.builtin.command: /usr/bin/python3 -m mop.agent --check
+  args:
+    chdir: "{{ mop_home }}"
+  environment:
+    MOP_NODE: "{{ inventory_hostname }}"
+    # Пустой MOP_BUS_CONFIG затирает креды окружения, если deploy запущен
+    # из мастер-шелла: на машине в двух ролях (mate) проверка иначе шла на
+    # шину как master-<шард>, и отказ прав на mop.admin.node.<узел>.msg
+    # читался как «агент не подписан» -- при живом и здоровом агенте.
+    MOP_BUS_CONFIG: ""
+  changed_when: false
