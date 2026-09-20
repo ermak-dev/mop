@@ -31,7 +31,7 @@
   tasks:
     - name: Only a node whose bodies are containers has an image to build
       ansible.builtin.meta: end_host
-      when: mop_driver | default('host') != 'pve'
+      when: mop_driver | default(MOP_DRIVER) != 'pve'
 
     - name: A shard must be named
       ansible.builtin.assert:
@@ -367,7 +367,7 @@
   tasks:
     - name: Nothing to seal where bodies are not containers
       ansible.builtin.meta: end_host
-      when: mop_driver | default('host') != 'pve'
+      when: mop_driver | default(MOP_DRIVER) != 'pve'
 
     # Ключ сборки снимается ДО того, как образ станет шаблоном: иначе он
     # размножился бы в каждое тело и стал второй постоянной дорогой к папету —

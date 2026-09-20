@@ -20,7 +20,7 @@
     # сборка образа.
     - name: A node that is not its own body gets none of this
       ansible.builtin.meta: end_host
-      when: mop_driver | default('host') != 'host'
+      when: mop_driver | default(MOP_DRIVER) != 'host'
 
     - name: Skills and MCP servers of this installation
       ansible.builtin.include_tasks: body-claude.yml

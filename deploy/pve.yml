@@ -38,7 +38,7 @@
   tasks:
     - name: Nodes that are their own body need none of this
       ansible.builtin.meta: end_host
-      when: mop_driver | default('host') != 'pve'
+      when: mop_driver | default(MOP_DRIVER) != 'pve'
 
     # ── сеть тел ─────────────────────────────────────────────────────────
     # Мост БЕЗ портов: наружу тела ходят NAT'ом через сам узел. Правила NAT

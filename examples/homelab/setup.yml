@@ -87,7 +87,7 @@
     # сборка образа (mop driver build), а не этот прогон.
     - name: A node that is not its own body gets none of this
       ansible.builtin.meta: end_host
-      when: mop_driver | default('host') != 'host'
+      when: mop_driver | default(MOP_DRIVER) != 'host'
 
     - name: What a body of this installation must be
       ansible.builtin.include_tasks: body-tasks.yml
