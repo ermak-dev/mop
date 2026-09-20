@@ -1,0 +1,28 @@
+# Что нужно телу для проекта RUGENT — сверх общего (setup.yml).
+#
+# Самый короткий из файлов проектов, и это нормально: rugent собирается тем же
+# тулчейном, что лежит в общем, и своих сервисов не просит. Нужны ему только
+# env-файлы, которых свежий клон выдумать не может: врапер копирует их из
+# ~/puppet-env/<проект> в каждый заводимый клон.
+#
+# Подключается настройкой MOP_BODY_EXTRA, после setup.yml.
+
+- name: puppet-env dir for rugent
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/puppet-env/rugent"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: '0700'
+
+- name: Project env files of rugent
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ MOP_HOME }}/puppet-env/rugent/"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: '0600'
+  loop:
+    - ~/rugent/.env
+    - ~/rugent/.env-prod
+    - ~/rugent/.providers
