@@ -200,6 +200,13 @@ keys)
     cat > "$tmp"
     pct push "$1" "$tmp" "/etc/ssh/authorized_keys.d/$POOL_USER" \
         --perms 644 --user 0 --group 0 >&2
+    # И ЗАКРЫТЬ ROOT. `pct create --ssh-public-keys` кладёт ключ узла ещё и в
+    # /root/.ssh/authorized_keys, а PermitRootLogin там without-password.
+    # Драйвер этой дверью не пользуется -- argv() ходит под пользователем
+    # пула, -- так что она просто стоит открытой в каждом образе. Здесь, а не
+    # отдельным глаголом: «кому можно в это тело» -- один вопрос, и отвечать
+    # на него должно одно место.
+    pct exec "$1" -- /bin/sh -c 'rm -f /root/.ssh/authorized_keys' >&2
     ;;
 
 # АВАРИЙНЫЙ путь внутрь тела -- когда молчит основной (ssh). От имени
