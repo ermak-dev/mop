@@ -10,6 +10,12 @@ export PYTHONPATH="$PROJECT_HOME${PYTHONPATH:+:$PYTHONPATH}"
 # Инвентарь — часть установки: живёт в корне проекта, в git не попадает.
 export INVENTORY="${INVENTORY:-$PROJECT_HOME/inventory.ini}"
 
+# Настройки самого ansible — часть ПРОДУКТА, и находятся они по этой
+# переменной. Свой ansible.cfg ansible ищет относительно текущего каталога, а
+# зовут его и `mop deploy`, и `mop driver build`, из любого места. Здесь —
+# потому что common подключают все командлеты.
+export ANSIBLE_CONFIG="${ANSIBLE_CONFIG:-$PROJECT_HOME/ansible.cfg}"
+
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; BOLD=$'\033[1m'; NC=$'\033[0m'
 export RED GREEN BOLD NC
 
