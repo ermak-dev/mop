@@ -22,7 +22,7 @@
     # в mop/driver/, и второе его место здесь разошлось бы с первым молча.
     - name: A node that is not its own body is not a body
       ansible.builtin.meta: end_host
-      when: mop_driver | default('host') != 'host'
+      when: mop_driver | default(MOP_DRIVER) != 'host'
 
     - name: What a body must be
       ansible.builtin.include_tasks: body-tasks.yml

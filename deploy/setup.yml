@@ -181,7 +181,7 @@
     # Только там, где claude и стоит: на узле, чьи тела — контейнеры, свой
     # MCP-сервер регистрирует сборка образа, внутри тела.
     - name: Register the pool MCP server for claude
-      when: mop_driver | default('host') == 'host'
+      when: mop_driver | default(MOP_DRIVER) == 'host'
       ansible.builtin.shell:
         cmd: |
           claude mcp remove -s user mop >/dev/null 2>&1 || true
@@ -241,11 +241,11 @@
     - name: What was written is what the inventory said
       ansible.builtin.assert:
         that:
-          - "'MOP_DRIVER=' + (mop_driver | default('host')) in (node_env.content | b64decode).splitlines()"
+          - "'MOP_DRIVER=' + (mop_driver | default(MOP_DRIVER)) in (node_env.content | b64decode).splitlines()"
         fail_msg: >-
           node.env on {{ inventory_hostname }} disagrees with the inventory about its
           driver — a node that lies about itself raises puppets in the wrong place
-        success_msg: "{{ inventory_hostname }}: driver {{ mop_driver | default('host') }}"
+        success_msg: "{{ inventory_hostname }}: driver {{ mop_driver | default(MOP_DRIVER) }}"
 
     # Переезд убирает за собой. rsync --exclude НЕ сносит уже лежащее: он
     # исключённое как раз БЕРЕЖЁТ, — поэтому старые копии убираются явно.
