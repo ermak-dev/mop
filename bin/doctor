@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """pool diagnostics: mop doctor [--fix]
 
-Catches stuck puppets, a stale login, restart backoff, and exhausted model
-quota. --fix treats what's treatable; a silent node agent is not on this
-list — the puppet may well be working fine, and a restart would kill that
-work in the clone.
+Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
+and a job spec older than the node driver — that last one looks perfectly
+healthy until the scheduler moves it to a hypervisor.
+
+--fix treats what's treatable; a silent node agent is not on this list — the
+puppet may well be working fine, and a restart would kill that work in the
+clone.
 """
 import sys
 
@@ -33,6 +36,15 @@ def treat(issue):
         if action == "model":
             puppets.switch_model(alloc["NodeName"], name, puppets.FALLBACK_MODEL)
             return f"/model {puppets.FALLBACK_MODEL}"
+        if action == "update":
+            # Перерегистрация, а не рестарт: врапер живёт В СПЕКЕ, и рестарт
+            # аллокации поднял бы ту же старую. Клон переживает — меняется
+            # только спека.
+            job = nomad.get_job(name)
+            meta = job.get("Meta") or {}
+            nomad.register(puppets.job_spec(name, meta["origin"],
+                                            meta.get("llm")))
+            return "spec re-registered — the puppet comes up with the new wrapper"
         nomad.alloc_restart(alloc["ID"])
         return "restart"
     except Exception as e:
