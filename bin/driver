@@ -199,14 +199,46 @@ def v_build(argv):
     shard = os.path.basename(origin).removesuffix(".git")
     settings = json.dumps({k: v for k, (v, _) in config.effective().items()},
                           ensure_ascii=False)
+    asked, rejected = shard_asks(origin, shard)
+    for k, v in sorted(asked.items()):
+        print(f"  {shard}/.mop asks for {k}={v}")
+    for k in sorted(rejected):
+        # Громко: проглоченный ключ -- это либо настройка, которая не
+        # сработала, либо чужая, которая сработала.
+        print(f"  {shard}/.mop: {k} is not a project's to set — ignored")
     rc = subprocess.call(
         ["ansible-playbook", "-i", os.environ["INVENTORY"],
          os.path.join(config.PROJECT, "deploy", "pve-build.yml"),
          "--extra-vars", settings,
-         "--extra-vars", json.dumps({"mop_shard": shard, "mop_origin": origin})])
+         "--extra-vars", json.dumps({"mop_shard": shard, "mop_origin": origin,
+                                     "mop_shard_asks": asked})])
     if rc == 0:
         announce(shard)
     return rc
+
+
+def shard_asks(origin, shard):
+    """Что проект просит себе в `.mop`. -> ({разрешённое}, [отброшенное]).
+
+    Читаем ИЗ РЕПОЗИТОРИЯ проекта, на управляющей машине, ДО плейбука: файл
+    принадлежит проекту, версионируется вместе с ним, и второго места, где
+    записаны его размеры, не заводится.
+
+    `git show` по голому зеркалу, без рабочего дерева: клон ради одного файла
+    был бы лишней минутой на каждую сборку. Нет файла — нет и просьб, это
+    штатный случай: большинству проектов хватает значений установки."""
+    tmp = f"/tmp/mop-dotmop-{shard}.git"
+    subprocess.call(["rm", "-rf", tmp])
+    try:
+        r = subprocess.run(["git", "clone", "--mirror", "-q", origin, tmp],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"cannot read {shard}: {(r.stderr or r.stdout).strip()}")
+        got = subprocess.run(["git", "-C", tmp, "show", "HEAD:.mop"],
+                             capture_output=True, text=True)
+        return config.shard_settings(got.stdout if got.returncode == 0 else "")
+    finally:
+        subprocess.call(["rm", "-rf", tmp])
 
 
 def origin_of(arg):

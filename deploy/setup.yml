@@ -254,6 +254,11 @@
     # места для одного ответа разошлись бы молча. Инвентарь узлу больше не
     # нужен вовсе — всё своё он берёт из node.env, а карта установки (кто есть
     # кто и где) дело управляющей машины.
+    # НЕ НА УПРАВЛЯЮЩЕЙ МАШИНЕ. Она бывает узлом пула по совместительству
+    # (mate: и master, и puppet), и там «копия узла» -- это ОРИГИНАЛ. Первый
+    # прогон этой задачи снёс инвентарь у самого себя, и следующий `mop deploy`
+    # отказался работать: «no inventory». Тот же предохранитель, что у сноса
+    # токена Nomad десятью задачами ниже.
     - name: What the node no longer needs
       ansible.builtin.file:
         path: "{{ item }}"
@@ -261,6 +266,7 @@
       loop:
         - "{{ MOP_HOME }}/.config/mop/driver"
         - "{{ MOP_HOME }}/mop/inventory.ini"
+      when: "'master' not in group_names"
 
     - name: Bus credentials for the agent
       ansible.builtin.template:

@@ -50,13 +50,15 @@ STORAGE = config.get("MOP_PVE_STORAGE")
 TEMPLATE = config.get("MOP_PVE_TEMPLATE")
 BRIDGE = config.get("MOP_PVE_BRIDGE")
 SUBNET = config.get("MOP_PVE_SUBNET")
-CORES = config.num("MOP_PVE_CORES")
-DISK_GB = config.num("MOP_PVE_DISK_GB")
-# Потолок памяти ставится ТЕЛУ, и настройка та же, что у задачи Nomad. Задача
-# папета больше не содержит: `pct` исполняется демоном, а не потомком задачи,
-# поэтому cgroup задачи не ограничивает ничего, а MemoryMB в спеке вырождается
-# в бухгалтерию слотов. Не поставить потолок здесь — значит снять его вовсе.
-MEM_MAX_MB = config.num("MOP_PUPPET_MEM_MAX_MB")
+# Память, ядра и диск тела драйвер НЕ ЗАДАЁТ: тело наследует их от образа
+# шарда, а в образ их вписывает сборка — из `.mop` самого проекта, подрезанного
+# потолком узла. Носителем шардовых размеров становится образ, и на узел не
+# едет ни одного числа. Поставь их здесь — и значения установки затёрли бы
+# просьбу проекта.
+#
+# Потолок памяти при этом всё равно стоит НА ТЕЛЕ, а не на задаче Nomad:
+# `pct` исполняется демоном, а не потомком задачи, поэтому cgroup задачи не
+# ограничивает ничего, а MemoryMB в спеке вырождается в бухгалтерию слотов.
 
 # Диапазон VMID: первые 900 — тела, последние 100 — шаблоны шардов. Разводить
 # их обязательно: снос папета глаголом destroy иначе унёс бы образ шарда, и
@@ -288,7 +290,7 @@ async def ensure(name, params=None):
     if not standing:
         src = template_vmid(shard)
         out, code = await _pve("clone", src, vmid, name, STORAGE, cidr_of(name),
-                               GATEWAY, MEM_MAX_MB, BRIDGE, CORES)
+                               GATEWAY, BRIDGE)
         if code not in (0, None):
             return {"error": f"no body for {name}: {out.strip() or f'exit {code}'}; "
                              f"build the shard's image: mop driver build {shard}"}
