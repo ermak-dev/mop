@@ -83,9 +83,40 @@ CASES = [
 ]
 
 
+# Спека, зарегистрированная ДО раскола врапера и ограничения размещения,
+# опасна на узле-гипервизоре: старый врапер разворачивает папета ПРЯМО НА УЗЛЕ,
+# а ограничения, которое не пустило бы его туда, в ней нет. Признак должен быть
+# чистой функцией: иначе узнать об этом можно только из лога задачи НА УЗЛЕ,
+# куда мастер шарда не смотрит.
+def job(outer=True, constrained=True):
+    spec = puppets.job_spec("pu-mop-1", ORIGIN)["Job"]
+    if not outer:
+        spec["TaskGroups"][0]["Tasks"][0]["Config"]["args"] = ["-c", "старый врапер"]
+        spec["TaskGroups"][0]["Tasks"][0]["Env"].pop("PU_WRAPPER", None)
+    if not constrained:
+        spec["Constraints"] = None
+    return spec
+
+
+STALE = [
+    ("сегодняшняя спека", job(), False),
+    ("без внешнего врапера", job(outer=False), True),
+    ("без ограничения размещения", job(constrained=False), True),
+    ("без того и другого", job(outer=False, constrained=False), True),
+]
+
+
 def main():
     bad = 0
     cases = 0
+
+    for what, spec, want in STALE:
+        cases += 1
+        if puppets.spec_is_stale(spec) != want:
+            bad += 1
+            print(f"FAILED  {what}: спека "
+                  f"{'признана устаревшей' if not want else 'признана свежей'}, "
+                  f"ждали обратного")
 
     for shard, meta, want in CASES:
         cases += 1

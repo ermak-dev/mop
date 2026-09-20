@@ -932,11 +932,40 @@ def pool():
 #   no model quota/error   -> печать /model в пейн; рестарт квоту не вернёт
 #   queued без аллокации   -> мест в пуле нет, лечится не отсюда
 #   агент узла молчит      -> отсюда никак: лечится юнитом на самом узле
+def spec_is_stale(job):
+    """Опасна ли эта спека на узле-гипервизоре. ЧИСТАЯ функция.
+
+    Джоб, зарегистрированный до раскола врапера и до ограничения размещения,
+    несёт СТАРЫЙ врапер — тот, что разворачивает папета прямо на узле, — и не
+    несёт ограничения, которое не пустило бы его на гипервизор. Там это значит
+    попытку завести клон и tmux НА САМОМ ГИПЕРВИЗОРЕ: падает, уходит в
+    бесконечный рестарт и оставляет за собой каталоги.
+
+    Ограничение живёт В СПЕКЕ, а спека сама не перечитывается: всё, что
+    зарегистрировано раньше, защиты не имеет. Узнать об этом можно было только
+    по симптому — в логе задачи на узле, куда мастер шарда не смотрит.
+    Поймано на pu-cloudpub-1, лечится `mop update <имя>`."""
+    task = job["TaskGroups"][0]["Tasks"][0]
+    script = (task.get("Config") or {}).get("args") or ["", ""]
+    if "driver run" not in script[-1]:
+        return True
+    return not any((c or {}).get("LTarget") == "${meta.mop_shards}"
+                   for c in (job.get("Constraints") or []))
+
+
 def diagnose():
     """Проблемы пула как ДАННЫЕ: [{name, alloc, diagnosis, action}]."""
     issues = []
     for item in _roster():
         job, alloc = item["job"], item["alloc"]
+        # Спека проверяется РАНЬШЕ состояния: папет со старой спекой может
+        # выглядеть совершенно здоровым ровно до первого перепланирования.
+        if spec_is_stale(nomad.get_job(job["ID"])):
+            issues.append({
+                "name": job["ID"], "alloc": alloc,
+                "diagnosis": "spec predates the driver — unsafe on a hypervisor",
+                "action": "update"})
+            continue
         if not alloc or alloc["ClientStatus"] in ("lost", "unknown", "failed",
                                                   "pending"):
             issues.append(_placement_issue(job, alloc))
