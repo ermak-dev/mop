@@ -82,6 +82,10 @@ create)
     pubkey="${11:?pubkey}"
     check_vmid "$vmid"; check_name "$hostname"
     [[ -f "$pubkey" ]] || die "no public key $pubkey"
+    # Пароль root -- со stdin, а не аргументом: аргументы видны в `ps` всякому
+    # на гипервизоре, включая соседние контейнеры. Пусто -- аккаунт остаётся
+    # заблокированным, как и было до появления этой возможности.
+    root_pw=$(cat)
     # unprivileged: папет внутри тела -- обычный пользователь, и запереть
     # агента снаружи правкой authorized_keys он не должен даже теоретически.
     # onboot=0: телами управляет Nomad через врапер, а не автозапуск хоста --
@@ -93,7 +97,8 @@ create)
         --cores "$cores" --memory "$mem" --swap 0 \
         --net0 "name=eth0,bridge=$bridge,ip=$cidr,gw=$gw" \
         --unprivileged 1 --features nesting=1 --onboot 0 \
-        --ssh-public-keys "$pubkey" >&2
+        --ssh-public-keys "$pubkey" \
+        ${root_pw:+--password "$root_pw"} >&2
     echo "$vmid"
     ;;
 
@@ -158,6 +163,8 @@ destroy)
 bootstrap)
     check_vmid "${1:?vmid}"; check_host "$1"
     vmid="$1"
+    # Пароль пользователя пула -- тоже со stdin и тоже необязателен.
+    user_pw=$(cat)
     pct exec "$vmid" -- /bin/bash -lc '
         set -e
         export DEBIAN_FRONTEND=noninteractive
@@ -174,6 +181,12 @@ bootstrap)
         {
             printf "AuthorizedKeysFile /etc/ssh/authorized_keys.d/%%u\n"
             printf "PerSourcePenalties no\n"
+            # Пароль в теле -- для КОНСОЛИ (pct console, веб-консоль Proxmox),
+            # куда ключом не входят. По ssh он не нужен и вреден: хеш один на
+            # все тела шарда, лежит в образе, а прочесть /etc/shadow папет в
+            # своём теле может -- у него sudo. Открытый вход по паролю
+            # превратил бы это в дорогу из тела в тело по общей сети NAT.
+            printf "PasswordAuthentication no\n"
         } > /etc/ssh/sshd_config.d/mop.conf
         printf "%s ALL=(ALL) NOPASSWD:ALL\n" '"$POOL_USER"' > /etc/sudoers.d/mop
         chmod 440 /etc/sudoers.d/mop
@@ -189,6 +202,12 @@ bootstrap)
         # каталог сокетов, и ЖИВЫЕ папета будут читаться мёртвыми.
         loginctl enable-linger '"$POOL_USER"'
     ' >&2
+    # Отдельным шагом после useradd: пароля может и не быть, а пользователь
+    # нужен всегда.
+    if [[ -n "$user_pw" ]]; then
+        printf '%s:%s\n' "$POOL_USER" "$user_pw" \
+            | pct exec "$vmid" -- /usr/sbin/chpasswd >&2
+    fi
     ;;
 
 # Кому дозволено входить в тело по ssh. Содержимое со stdin, целиком: это
