@@ -1,8 +1,17 @@
 # Агент Nomad: бинарь, конфиг клиента, systemd-юнит.
 #
-# Вынесено из setup.yml, потому что нужно двум играм: рабочим узлам пула и
-# управляющей машине. У них общий агент и РАЗНЫЕ датацентры -- см. заголовок
-# игры про управляющую машину.
+# Одна роль на оба лица кластера: клиент (этот файл) стоит на каждом узле пула
+# и на управляющей машине, сервер (server.yml) — на одной. Общий у них бинарь,
+# и дублировать его загрузку значило бы две версии в двух местах.
+#
+# Роль НЕ несёт настроек: ниже только ВЫВОД из тех, что уже пришли через
+# --extra-vars. Версия и зеркало — это config.SETTINGS, и второй ярус
+# старшинства (defaults роли) сломал бы цепочку молча.
+- name: Where nomad comes from
+  ansible.builtin.set_fact:
+    nomad_version: "{{ MOP_NOMAD_VERSION }}"
+    nomad_zip: "{{ MOP_NOMAD_MIRROR }}/nomad/{{ MOP_NOMAD_VERSION }}/nomad_{{ MOP_NOMAD_VERSION }}_linux_amd64.zip"
+
 - name: Ensure unzip is present
   ansible.builtin.apt:
     name: unzip

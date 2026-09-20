@@ -1,0 +1,7 @@
+# Управляющая машина, она же узел пула по совместительству. Конфликт
+# client.hcl между играми объезжается в deploy/nomad/setup.yml (master:!puppet).
+---
+ansible_connection: local
+
+# Память под её собственную работу как управляющей.
+mop_reserved_mb: 6962

@@ -1,21 +1,6 @@
 ---
-# Чем обязан быть узел-ГИПЕРВИЗОР — тот, у которого тело папета не он сам, а
-# контейнер LXC (docs/DRIVER.md).
-#
-# Три вещи, и каждая существует потому, что без неё тело молча не работает:
-#   сеть     — отдельный мост с NAT: адрес тела ВЫВОДИТСЯ ИЗ ИМЕНИ, и
-#              раздавать такие адреса в чужой локалке значит однажды
-#              столкнуться с её DHCP;
-#   ключ     — пара ключей УЗЛА к своим телам плюс отдельный known_hosts:
-#              пересозданное тело приезжает с новым ключом хоста, и общий
-#              known_hosts превратил бы каждый рецикл в «агент молчит»;
-#   обёртка  — /usr/local/sbin/mop-pve, единственная дорога агента к
-#              жизненному циклу тел. Выдать пользователю пула `pct` целиком
-#              значило бы выдать root на гипервизоре вместе с соседними
-#              боевыми контейнерами.
-#
-# Игра идёт ТОЛЬКО по узлам с контейнерным драйвером. Условие смотрит на
-# драйвер, а не на имя группы: список драйверов живёт в mop/driver/, и второе
+# Узел, чьи тела — контейнеры. Игра идёт ТОЛЬКО по таким: условие смотрит на
+# драйвер, а не на имя группы — список драйверов живёт в mop/driver/, и второе
 # его место здесь разошлось бы с первым молча.
 #
 # Run:  mop deploy
@@ -25,111 +10,11 @@
   become: yes
   gather_facts: no
 
-  vars:
-    # Сеть разбираем строкой, а шлюз БЕРЁМ ГОТОВЫМ (MOP_PVE_GATEWAY): его
-    # считает config.py, и второе вычисление здесь однажды дало бы другой
-    # адрес — молча, потому что мост встал бы, а тела просто не достучались.
-    pve_net: "{{ MOP_PVE_SUBNET.split('/')[0] }}"
-    pve_cidr: "{{ MOP_PVE_SUBNET.split('/')[1] }}"
-    pve_gw: "{{ MOP_PVE_GATEWAY }}"
-    pve_vmid_min: "{{ MOP_PVE_VMID_BASE | int }}"
-    pve_vmid_max: "{{ (MOP_PVE_VMID_BASE | int) + 999 }}"
-
   tasks:
     - name: Nodes that are their own body need none of this
       ansible.builtin.meta: end_host
       when: mop_driver | default(MOP_DRIVER) != 'pve'
 
-    # ── сеть тел ─────────────────────────────────────────────────────────
-    # Мост БЕЗ портов: наружу тела ходят NAT'ом через сам узел. Правила NAT
-    # висят на самом мосте (post-up), а не отдельным юнитом: поднимается
-    # интерфейс — поднимаются правила, и рассогласоваться им негде.
-    - name: Bridge for the bodies
-      ansible.builtin.copy:
-        dest: /etc/network/interfaces.d/mop
-        mode: "0644"
-        content: |
-          # mop: мост тел папетов. Заводит deploy/pve.yml, править руками
-          # незачем -- значения приезжают из MOP_PVE_BRIDGE и MOP_PVE_SUBNET.
-          auto {{ MOP_PVE_BRIDGE }}
-          iface {{ MOP_PVE_BRIDGE }} inet static
-              address {{ pve_gw }}/{{ pve_cidr }}
-              bridge-ports none
-              bridge-stp off
-              bridge-fd 0
-              post-up echo 1 > /proc/sys/net/ipv4/ip_forward
-              post-up iptables -t nat -C POSTROUTING -s {{ pve_net }}/{{ pve_cidr }} ! -o {{ MOP_PVE_BRIDGE }} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {{ pve_net }}/{{ pve_cidr }} ! -o {{ MOP_PVE_BRIDGE }} -j MASQUERADE
-              post-up iptables -C FORWARD -i {{ MOP_PVE_BRIDGE }} -j ACCEPT 2>/dev/null || iptables -A FORWARD -i {{ MOP_PVE_BRIDGE }} -j ACCEPT
-              post-up iptables -C FORWARD -o {{ MOP_PVE_BRIDGE }} -j ACCEPT 2>/dev/null || iptables -A FORWARD -o {{ MOP_PVE_BRIDGE }} -j ACCEPT
-      register: pve_bridge
-
-    - name: Raise the bridge
-      ansible.builtin.command: "ifup {{ MOP_PVE_BRIDGE }}"
-      when: pve_bridge.changed
-      changed_when: true
-      failed_when: false
-
-    # ifup на уже поднятом мосте ничего не делает, поэтому правила после
-    # правки конфига приходится досыпать отдельно -- иначе тело молча теряет
-    # выход наружу ровно до перезагрузки узла.
-    - name: Confirm the bridge is up and NAT is in place
-      ansible.builtin.shell: |
-        set -e
-        ip link show {{ MOP_PVE_BRIDGE }} >/dev/null
-        sysctl -qw net.ipv4.ip_forward=1
-        iptables -t nat -C POSTROUTING -s {{ pve_net }}/{{ pve_cidr }} ! -o {{ MOP_PVE_BRIDGE }} -j MASQUERADE 2>/dev/null \
-          || iptables -t nat -A POSTROUTING -s {{ pve_net }}/{{ pve_cidr }} ! -o {{ MOP_PVE_BRIDGE }} -j MASQUERADE
-        iptables -C FORWARD -i {{ MOP_PVE_BRIDGE }} -j ACCEPT 2>/dev/null \
-          || iptables -A FORWARD -i {{ MOP_PVE_BRIDGE }} -j ACCEPT
-        iptables -C FORWARD -o {{ MOP_PVE_BRIDGE }} -j ACCEPT 2>/dev/null \
-          || iptables -A FORWARD -o {{ MOP_PVE_BRIDGE }} -j ACCEPT
-      changed_when: false
-
-    # ── root-обёртка ─────────────────────────────────────────────────────
-    - name: The one road to a body's life cycle
-      ansible.builtin.template:
-        src: mop-pve.j2
-        dest: /usr/local/sbin/mop-pve
-        mode: "0755"
-
-    # Право названо поимённо и ровно одно. `pct` целиком здесь был бы root:
-    # `pct exec` входит в ЛЮБОЙ контейнер узла, включая боевые.
-    - name: The pool user may call it, and only it
-      ansible.builtin.copy:
-        dest: /etc/sudoers.d/mop-pve
-        mode: "0440"
-        validate: "visudo -cf %s"
-        content: |
-          {{ MOP_USER }} ALL=(root) NOPASSWD: /usr/local/sbin/mop-pve
-
-    # ── ключ узла к своим телам ──────────────────────────────────────────
-    # Ключ УЗЛА, не мастера. Мастер и так ходит ssh на узлы, но его ключ в
-    # образе создал бы вторую дорогу к телу -- мимо единственного места, где
-    # проверяется шардирование. Агент сверяет шард субъекта с настоящим origin
-    # клона; ssh о шардах не знает ничего.
-    - name: A keypair of its own for reaching the bodies
-      become_user: "{{ MOP_USER }}"
-      ansible.builtin.command:
-        cmd: ssh-keygen -t ed25519 -N '' -C mop-body@{{ inventory_hostname }} -f {{ MOP_HOME }}/.ssh/mop-body
-        creates: "{{ MOP_HOME }}/.ssh/mop-body"
-
-    - name: A known_hosts of its own for them
-      become_user: "{{ MOP_USER }}"
-      ansible.builtin.file:
-        path: "{{ MOP_HOME }}/.ssh/known_hosts-mop-body"
-        state: touch
-        mode: "0600"
-        access_time: preserve
-        modification_time: preserve
-
-    # ── базовый образ ────────────────────────────────────────────────────
-    - name: The base image the shard templates grow from
-      ansible.builtin.shell: |
-        set -e
-        vol={{ MOP_PVE_TEMPLATE }}
-        store=${vol%%:*}; file=${vol##*/}
-        pveam list "$store" 2>/dev/null | grep -q "$file" && exit 0
-        pveam update >/dev/null
-        pveam download "$store" "$file"
-      register: pve_image
-      changed_when: "'download' in pve_image.stdout"
+    - name: What a hypervisor must be
+      ansible.builtin.include_role:
+        name: pve

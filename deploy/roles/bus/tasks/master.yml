@@ -1,0 +1,57 @@
+# Креды шины на управляющей машине. Агента здесь нет и не нужно: папетов на
+# ней не живёт, а инбокс мастера слушает сам `mop mcp`.
+- name: Python client for the bus
+  ansible.builtin.pip:
+    name: nats-py
+    extra_args: --user --break-system-packages
+    state: present
+
+- name: Credentials dir
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop"
+    state: directory
+    mode: "0700"
+
+- name: Operator credentials
+  ansible.builtin.template:
+    src: bus.json.j2
+    dest: "{{ MOP_HOME }}/.config/mop/bus.json"
+    mode: "0600"
+
+# По креденшлу на шард: их подхватывает `mop master`, и именно они делают
+# мастера слепым к чужим проектам. Имя bus-master-<шард>.json, а не
+# bus-<шард>.json: последнее имя раскатывает по узлам пула игра агента,
+# но с пользователем puppet-<шард>, и на машине в двух ролях (управляющая
+# И узел пула) один файл не может быть сразу обоими -- чья запись
+# последняя, под тем папет и ходит. bus-<шард>.json везде означает одно:
+# креды ПАПЕТА этого шарда.
+- name: Master credentials, one per shard
+  ansible.builtin.template:
+    src: bus.json.j2
+    dest: "{{ MOP_HOME }}/.config/mop/bus-master-{{ item }}.json"
+    mode: "0600"
+  loop: "{{ shards }}"
+  vars:
+    nats_user: "master-{{ item }}"
+    nats_password: "{{ lookup('password', secrets_dir + '/nats-master-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
+
+# Скилл /master -- интерфейс мастер-сессии, как ~/bin/mop. Сам он живёт в
+# репозитории, снаружи только симлинк: правка через ~/.claude попадала бы
+# в тот же файл, но проходила бы мимо истории.
+- name: Claude skills dir
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.claude/skills"
+    state: directory
+    mode: "0755"
+
+- name: Master skill symlink
+  ansible.builtin.file:
+    src: "{{ playbook_dir | dirname }}/skills/master"
+    dest: "{{ MOP_HOME }}/.claude/skills/master"
+    state: link
+    force: true
+
+
+# Джоб дискового сторожа. Регистрируется СЕРВЕРОМ: токен есть только у него,
+# а спека несут значения установки (датацентр, пользователь, $HOME, пороги) --
+# всё приезжает --extra-vars от `mop deploy`, плейбуки .env не читают.
