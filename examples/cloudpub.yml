@@ -1,0 +1,318 @@
+# Что нужно телу для проекта CLOUDPUB — сверх общего (setup.yml).
+#
+# Образец того, как выглядит «файл проекта»: свои сервисы, своя тестовая база,
+# свои env-файлы. У вашего проекта список будет другим, а форма — та же.
+#
+# Сервисы здесь СВОИ У КАЖДОГО ТЕЛА, и это выбор: тесты дропают и создают
+# базы, а один постгрес на всех папетов узла — известный источник
+# столкновений. Цена — по своему постгресу на тело, и платится она памятью.
+#
+# Подключается настройкой MOP_BODY_EXTRA, после setup.yml.
+
+- name: Versions this project pins
+  ansible.builtin.set_fact:
+    # Постгресс — из PGDG, одной версией на весь флот: дистро-репы разносят
+    # тела по мажорам, а тесты ходят в локальный кластер. Минор прибит точно:
+    # PGDG держит рядом несколько, и без пина «поставь 18.4» оборачивается
+    # «поставь последний 18.x».
+    postgres_major: 18
+    postgres_version: "18.4"
+
+
+# cmake: cloudpub's libz-ng-sys builds zlib-ng with it; the gtk/webkit dev
+# set: cloudpub's workspace includes a Tauri gui crate, and `clo test
+# --rust` builds the whole graph. (Постгресс в списке не живёт -- он идёт
+# из PGDG отдельным блоком ниже.)
+- name: Ensure puppet toolchain packages
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - cmake
+      - pkg-config
+      - libglib2.0-dev
+      - libgtk-3-dev
+      - libwebkit2gtk-4.1-dev
+      - librsvg2-dev
+      - libsoup-3.0-dev
+      # the rest of cloudpub's own build image (Dockerfile), minus the
+      # cross-compilers its release builds use
+      - protobuf-compiler
+      - file
+      - libcap2-bin
+      - libxml2
+      - media-types
+    state: present
+
+# --- postgres: PGDG, весь флот на одном минорнике ----------------------
+# Не дистро-пакет `postgresql`: он тянет мажор дистро, а дистро у узлов
+# разные, и rug (per-run база через `sudo -u postgres`) с cloudpub'ом
+# получали на разных узлах разный постгресс. PGDG кладёт в оба дистро
+# одинаковые пакеты; версия -- в postgres_version наверху.
+- name: Ensure /etc/apt/keyrings exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: PGDG signing key
+  ansible.builtin.get_url:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    dest: /etc/apt/keyrings/postgresql.asc
+    mode: '0644'
+
+# Suite у PGDG дистро-специфичный (bookworm-pgdg / noble-pgdg); фактов
+# игра не собирает (gather_facts: no), кодовое имя читаем с узла.
+- name: Detect distro codename
+  ansible.builtin.shell: . /etc/os-release && echo -n "$VERSION_CODENAME"
+  register: pgdg_codename
+  changed_when: false
+
+- name: Add the PGDG apt repo
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/pgdg.list
+    content: |
+      deb [signed-by=/etc/apt/keyrings/postgresql.asc] https://apt.postgresql.org/pub/repos/apt {{ pgdg_codename.stdout }}-pgdg main
+    mode: '0644'
+  register: pgdg_repo
+
+- name: Update apt cache for the PGDG repo
+  ansible.builtin.apt:
+    update_cache: yes
+  when: pgdg_repo is changed
+
+# Суффикс точной версии зависит от дистро (18.4-1.pgdg24.04+1 против
+# ...pgdg12+1), поэтому её собираем из переменной через apt-cache. Пустой
+# ответ -- 18.4 уже выпилен из пула, см. комментарий у postgres_version.
+# (madison печатает «пакет | версия | репо»: с дефолтным FS awk версией
+# будет третье поле, второе -- литеральная вертикальная черта.)
+- name: Resolve the exact package version of postgres {{ postgres_version }}
+  ansible.builtin.shell: >
+    apt-cache madison postgresql-{{ postgres_major }}
+    | awk -v v='{{ postgres_version }}-' '$3 ~ "^" v {print $3; exit}'
+  register: pg_exact
+  changed_when: false
+  failed_when: pg_exact.stdout == ''
+
+# Пин до установки, а не после: 18.5/18.6 лежат в том же репо, и без пина
+# любой apt upgrade на узле уводил бы минор от заданного. Приоритет 1001
+# разрешает и обратный ход -- узел, уведённый в 18.6 мимо плейбука,
+# следующим прогоном возвращается на 18.4. Глоб postgresql*, а не
+# postgresql-18*: у семейства разные префиксы (postgresql-doc-18,
+# postgresql-server-dev-18), и неприпиннутый близнец в 18.6 через строгие
+# (=)-зависимости заставлял apt сносить припиннутый сервер 18.4 прямо в
+# соседней транзакции. Пакеты с другим номером (postgresql-common,
+# libpq5, pgvector) под глоб версии не подпадают и живут как хотят.
+- name: Pin postgres {{ postgres_version }} against repo drift
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/postgresql-pgdg
+    content: |
+      Package: postgresql*
+      Pin: version {{ postgres_version }}*
+      Pin-Priority: 1001
+    mode: '0644'
+
+# pgvector не пиним: нумерация у него своя (0.8.x), к минору сервера он
+# безразличен. Нужен сразу: fireai на mate ходит в vector. (contrib
+# отдельным пакетом не ставим: с десятки это виртуальный пакет внутри
+# postgresql-18, hstore/ltree/pg_trgm уже там.)
+- name: Install postgres {{ postgres_version }} from PGDG
+  ansible.builtin.apt:
+    name:
+      - postgresql-{{ postgres_major }}={{ pg_exact.stdout }}
+      - postgresql-client-{{ postgres_major }}={{ pg_exact.stdout }}
+      - postgresql-{{ postgres_major }}-pgvector
+    state: present
+    # Даунгрейд -- законный сценарий: узел, уведённый в свежий минор
+    # мимо плейбука (или его пакеты-близнецы), возвращается на пин.
+    allow_downgrade: yes
+
+# КЛАСТЕР, а не `postgresql`. В Debian `postgresql.service` -- МЕТА-ЮНИТ, и он
+# числится active независимо от того, поднят кластер или лежит; настоящий
+# сервер живёт в postgresql@<мажор>-main. Пока задача смотрела на обёртку, она
+# была зелёной ВСЕГДА: на узле gpu кластер оказался down, прогон этого не
+# заметил, и упала следующая задача -- с диагнозом про версию, хотя версия ни
+# при чём, сервера не было вовсе.
+#
+# enabled на кластере обязателен отдельно: юнит приезжает из пакета
+# `disabled` (preset: enabled), и после перезагрузки узла сам не поднимается.
+- name: Ensure the postgres cluster is running
+  ansible.builtin.systemd:
+    name: "postgresql@{{ postgres_major }}-main"
+    state: started
+    enabled: yes
+
+# Готовность спрашиваем У СЕРВЕРА, а не у systemd: «юнит запущен» и «сокет
+# принимает соединения» -- разные утверждения, и между ними секунды recovery.
+- name: Wait for postgres to accept connections
+  ansible.builtin.command: pg_isready -q
+  register: pg_ready
+  until: pg_ready.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
+
+# Проверяем не «пакет поставился», а что на 5432 реально слушает заданный
+# минор -- весь смысл PGDG-блока. server_version_num (18.4 -> 180004), а
+# не server_version: тот печатает «18.4 (Debian 18.4-1.pgdg…)».
+- name: Verify postgres is {{ postgres_version }}
+  ansible.builtin.command: sudo -u postgres psql -tAc "SHOW server_version_num"
+  register: pg_version_check
+  changed_when: false
+  failed_when: pg_version_check.stdout | int != (postgres_major | int) * 10000 + (postgres_version.split('.')[1] | int)
+
+# Тулчейн Rust ставит rustup, а не apt: cargo нужен тот же, каким собирают
+# проекты (stable, с rustfmt и clippy), и обновлять его должен сам папет,
+# а не релиз дистрибутива. До появления этой задачи cargo на узлах стоял
+# с рук -- и свежий узел падал на `cargo install` ниже, потому что бинаря
+# просто не было: каталог ~/.cargo/bin ему заводила соседняя задача, и
+# отказ читался как «сломался cargo-sweep», а не «нет Rust».
+# --no-modify-path: PATH папета задаётся настройкой MOP_PUPPET_PATH, и
+# правка ~/.profile до него всё равно не доедет -- врапер не логин-шелл.
+
+# --- cloudpub integration-test environment ---------------------------
+# The subset of cloudpub's bin/docker-test that the rust integration
+# suite needs: trusted local postgres with a cloudpub superuser role, a
+# ru_RU test database, pg_trgm inherited via template1, redis, and
+# cloudpub.local resolving to loopback. (rug test needs none of this: it
+# provisions its own role and per-run database via `sudo -u postgres`.)
+- name: Ensure redis is present
+  ansible.builtin.apt:
+    name: redis-server
+    state: present
+
+- name: Ensure redis is running
+  ansible.builtin.systemd:
+    name: redis-server
+    state: started
+    enabled: yes
+
+# У redis юнит настоящий, а не обёртка, но спросить сам сервер всё равно
+# дешевле, чем узнать о его молчании из чужой упавшей задачи.
+- name: Wait for redis to answer
+  ansible.builtin.command: redis-cli ping
+  register: redis_ping
+  until: redis_ping.stdout == "PONG"
+  retries: 15
+  delay: 2
+  changed_when: false
+
+# `locale-gen ru_RU.UTF-8` -- ubuntu'изм: в Debian аргументы игнорируются,
+# генерится только раскомментированное в /etc/locale.gen. Задача молча
+# ничего не делала, а падала следом соседняя -- createdb с этой локалью.
+
+# `locale-gen ru_RU.UTF-8` -- ubuntu'изм: в Debian аргументы игнорируются,
+# генерится только раскомментированное в /etc/locale.gen. Задача молча
+# ничего не делала, а падала следом соседняя -- createdb с этой локалью.
+- name: Ensure ru_RU.UTF-8 is enabled (test database locale)
+  ansible.builtin.lineinfile:
+    path: /etc/locale.gen
+    regexp: '^#?\s*ru_RU\.UTF-8 UTF-8'
+    line: 'ru_RU.UTF-8 UTF-8'
+  register: locale_line
+
+- name: Generate locales
+  ansible.builtin.command: locale-gen
+  when: locale_line is changed
+
+# Работающий postgres о новой локали не узнаёт: список он читает при старте,
+# и createdb ниже отвечал «invalid locale name» на локаль, которая в системе
+# уже была. Видно только на свежем узле -- там, где locale-gen и срабатывает.
+- name: Restart postgres to pick up the new locale
+  ansible.builtin.systemd:
+    name: "postgresql@{{ postgres_major }}-main"
+    state: restarted
+  when: locale_line is changed
+
+- name: Wait for it to come back
+  ansible.builtin.command: pg_isready -q
+  register: pg_ready_again
+  until: pg_ready_again.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
+  when: locale_line is changed
+
+# Путь к pg_hba содержит мажор, но литерал здесь не нужен: когда его
+# прибивали к 16 («Ubuntu 24.04 на каждом узле»), первый же узел на
+# Debian 12 принёс 15 -- и задача падала на несуществующем пути, унося с
+# собой весь остаток прогона. Мажор теперь пинит PGDG-блок выше; поиск
+# дешевле, чем вторая копия этой правки.
+- name: Find pg_hba.conf of the installed postgres
+  ansible.builtin.find:
+    paths: /etc/postgresql
+    patterns: pg_hba.conf
+    recurse: yes
+  register: pg_hba_files
+
+- name: Trust local postgres auth (clo tooling connects as -U cloudpub)
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: '^(local\s+all\s+all\s+)peer$'
+    replace: '\1trust'
+  loop: "{{ pg_hba_files.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: pg_hba
+
+- name: Reload postgres auth config
+  ansible.builtin.systemd:
+    name: postgresql
+    state: reloaded
+  when: pg_hba.changed
+
+# `&& echo CREATED`, а не `; echo CREATED`: с точкой с запятой код возврата
+# группы -- это код echo, и провалившийся psql рапортовал changed. Так и
+# пропустили узел без тестовой базы при зелёном PLAY RECAP.
+- name: Create cloudpub role (superuser -- the test framework drops and creates databases)
+  ansible.builtin.shell: >
+    [ -n "$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='cloudpub'")" ]
+    || { sudo -u postgres psql -c "CREATE ROLE cloudpub SUPERUSER LOGIN PASSWORD 'cloudpub'" && echo CREATED; }
+  register: pg_role
+  changed_when: "'CREATED' in pg_role.stdout"
+
+- name: Create pg_trgm in template1 (inherited by every test-created database)
+  ansible.builtin.command: sudo -u postgres psql -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+  changed_when: false
+
+- name: Create test_cloudpub database
+  ansible.builtin.shell: >
+    [ -n "$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='test_cloudpub'")" ]
+    || { sudo -u postgres createdb -O cloudpub --template=template0
+    --encoding=UTF8 --locale=ru_RU.UTF-8 test_cloudpub && echo CREATED; }
+  register: pg_db
+  changed_when: "'CREATED' in pg_db.stdout"
+
+- name: Resolve cloudpub.local to loopback
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    line: "127.0.0.1 cloudpub.local"
+    regexp: 'cloudpub\.local'
+
+# node for cloudpub's frontend/e2e test sets, per BUILD.md: nvm + 22.12.0 (BUILD.md says 22.11.0, but server/Dockerfile pins
+# NODE_VERSION=22.12.0 and vite refuses anything older).
+# Per-user install under the pool user -- the same account the puppets run as.
+# pipefail и проверка результата — по тому же доводу, что у установщика claude
+# в deploy/body-tasks.yml: код конвейера `curl | bash` это код bash, и
+# оборванная загрузка проходит как успех. Без node тело собирается «зелёным», а
+# первый же `npx` в нём не находит ничего.
+
+
+# Env-файлы, которых свежий клон выдумать не может: врапер копирует их из
+# ~/puppet-env/<проект> в каждый заводимый клон. Источник — управляющая машина.
+- name: puppet-env dir for cloudpub
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/puppet-env/cloudpub"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: '0700'
+
+- name: Project env files of cloudpub
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ MOP_HOME }}/puppet-env/cloudpub/"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: '0600'
+  loop:
+    - ~/cloudpub/.env
