@@ -159,11 +159,30 @@
     # мимо плейбука (или его пакеты-близнецы), возвращается на пин.
     allow_downgrade: yes
 
-- name: Ensure postgres is running
+# КЛАСТЕР, а не `postgresql`. В Debian `postgresql.service` -- МЕТА-ЮНИТ, и он
+# числится active независимо от того, поднят кластер или лежит; настоящий
+# сервер живёт в postgresql@<мажор>-main. Пока задача смотрела на обёртку, она
+# была зелёной ВСЕГДА: на узле gpu кластер оказался down, прогон этого не
+# заметил, и упала следующая задача -- с диагнозом про версию, хотя версия ни
+# при чём, сервера не было вовсе.
+#
+# enabled на кластере обязателен отдельно: юнит приезжает из пакета
+# `disabled` (preset: enabled), и после перезагрузки узла сам не поднимается.
+- name: Ensure the postgres cluster is running
   ansible.builtin.systemd:
-    name: postgresql
+    name: "postgresql@{{ postgres_major }}-main"
     state: started
     enabled: yes
+
+# Готовность спрашиваем У СЕРВЕРА, а не у systemd: «юнит запущен» и «сокет
+# принимает соединения» -- разные утверждения, и между ними секунды recovery.
+- name: Wait for postgres to accept connections
+  ansible.builtin.command: pg_isready -q
+  register: pg_ready
+  until: pg_ready.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
 
 # Проверяем не «пакет поставился», а что на 5432 реально слушает заданный
 # минор -- весь смысл PGDG-блока. server_version_num (18.4 -> 180004), а
@@ -239,6 +258,16 @@
     state: started
     enabled: yes
 
+# У redis юнит настоящий, а не обёртка, но спросить сам сервер всё равно
+# дешевле, чем узнать о его молчании из чужой упавшей задачи.
+- name: Wait for redis to answer
+  ansible.builtin.command: redis-cli ping
+  register: redis_ping
+  until: redis_ping.stdout == "PONG"
+  retries: 15
+  delay: 2
+  changed_when: false
+
 # `locale-gen ru_RU.UTF-8` -- ubuntu'изм: в Debian аргументы игнорируются,
 # генерится только раскомментированное в /etc/locale.gen. Задача молча
 # ничего не делала, а падала следом соседняя -- createdb с этой локалью.
@@ -258,8 +287,17 @@
 # уже была. Видно только на свежем узле -- там, где locale-gen и срабатывает.
 - name: Restart postgres to pick up the new locale
   ansible.builtin.systemd:
-    name: postgresql
+    name: "postgresql@{{ postgres_major }}-main"
     state: restarted
+  when: locale_line is changed
+
+- name: Wait for it to come back
+  ansible.builtin.command: pg_isready -q
+  register: pg_ready_again
+  until: pg_ready_again.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
   when: locale_line is changed
 
 # Путь к pg_hba содержит мажор, но литерал здесь не нужен: когда его
