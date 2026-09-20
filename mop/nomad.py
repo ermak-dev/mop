@@ -120,6 +120,75 @@ def get_job(job_id):
     return client().job.get_job(job_id)
 
 
+# ─── жизненный цикл узла ─────────────────────────────────────────────────
+# Состав пула перестал быть неизменным вместе с появлением драйверов: узел
+# теперь выводят, чтобы отдать его память телам, и вводят обратно. Токен Nomad
+# есть только у управляющей машины, поэтому и живёт это здесь.
+LIVE_STATUSES = ("running", "pending")
+
+
+def forget_refusal(node, allocs):
+    """Почему этот узел НЕЛЬЗЯ убрать из ростера; None — можно.
+
+    Чистая функция и проверяется без кластера (tests/node.py), потому что
+    ошибиться тут можно ровно один раз: узел, забытый из-под живого папета,
+    исчезает из ростера, а claude в нём продолжает работать — и мастер о нём
+    больше никогда не узнает.
+
+    Два запрета, и второй не очевиден: узел, ОТКРЫТЫЙ для планирования,
+    забывать нельзя даже пустым — планировщик поставит на него папета между
+    проверкой и сносом. Исключение — мёртвый узел: его как раз затем и
+    забывают, чтобы не мозолил ростер, и поставить на него всё равно нечего."""
+    live = [a["JobID"] for a in allocs if a.get("ClientStatus") in LIVE_STATUSES]
+    if live:
+        return (f"{node['Name']} still runs {', '.join(sorted(live))} — "
+                f"drain it first: mop node drain {node['Name']}")
+    if node.get("Status") != "down" and node.get("SchedulingEligibility") == "eligible":
+        return (f"{node['Name']} is still open to the scheduler — "
+                f"drain it first: mop node drain {node['Name']}")
+    return None
+
+
+def _node_post(node_name, path, body=None):
+    """POST в узловую ручку Nomad; python-nomad таких не знает."""
+    import requests
+    nid = node_id(node_name)
+    if nid is None:
+        raise RuntimeError(f"no node {node_name} in the cluster")
+    r = requests.post(f"{ADDR}/v1/node/{nid}/{path}",
+                      headers={"X-Nomad-Token": token()},
+                      json={"NodeID": nid, **(body or {})}, timeout=30)
+    r.raise_for_status()
+    return nid
+
+
+def node_eligibility(node_name, eligible):
+    """Открыть или закрыть узел для планировщика."""
+    _node_post(node_name, "eligibility",
+               {"Eligibility": "eligible" if eligible else "ineligible"})
+
+
+def node_drain(node_name, deadline=300):
+    """Увести папетов с узла и закрыть его для планирования.
+
+    Deadline — не «сколько ждать ответа», а сколько Nomad даёт задачам уйти
+    по-хорошему, прежде чем снимет их силой. Врапер по TERM гасит сессию, так
+    что уход по-хорошему — это закрытая сессия, а не убитый claude."""
+    _node_post(node_name, "drain",
+               {"DrainSpec": {"Deadline": deadline * 10**9,
+                              "IgnoreSystemJobs": False}})
+
+
+def node_allocs(node_name):
+    nid = node_id(node_name)
+    return client().node.get_allocations(nid) if nid else []
+
+
+def node_forget(node_name):
+    """Убрать узел из ростера. Предохранитель — у вызывающего (forget_refusal)."""
+    _node_post(node_name, "purge")
+
+
 def node_id(node_name):
     """ID узла по имени; None, если такого нет. Ineligible тоже считается:
     узел, выведенный из планирования, остаётся узлом."""
