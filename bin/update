@@ -7,9 +7,9 @@ repository must not silently drop the profile back to default, and vice
 versa.
 
 By default the claude that comes up resumes the directory's last
-conversation, so switching profiles moves work already IN PROGRESS onto a
+conversation, so switching profiles moves work already in progress onto a
 different model. That's a one-off allowance: an allocation restart doesn't
-reread the spec, and treatment IS a restart — a treated puppet isn't obliged
+reread the spec, and treatment is a restart — a treated puppet isn't obliged
 to come back into the context it got stuck on.
 --fresh brings it up with a clean session.
 """
@@ -33,7 +33,7 @@ def main(argv):
     origin = args[1] if len(args) > 1 else old
     profile = profile or (old_llm if llm.get(old_llm) else config.get("MOP_DEFAULT_LLM"))
     lib.push_llm_keys(profile)
-    # История каталога переживает только смену ПРОФИЛЯ: при смене репозитория
+    # История каталога переживает только смену профиля: при смене репозитория
     # врапер пересоздаёт клон, а разговор остался от прежнего проекта — поднять
     # его в чужом репозитории значит выдать папету чужой контекст за свой.
     cont = not fresh and origin == old

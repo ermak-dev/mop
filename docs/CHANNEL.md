@@ -164,7 +164,7 @@ skipAttachments: true}`. Отсюда ограничение: **слэш-ком�
 
 ```json
 {"type":"control","action":"peer_idle_notice",
- "orig_msg_id":"<uuid4 ПОДПИСКИ>","state":"idle",
+ "orig_msg_id":"<uuid4 подписки>","state":"idle",
  "from":"uds:…","from_mode":"bypass","msgV":1,"msg_id":"…"}
 ```
 

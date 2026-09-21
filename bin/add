@@ -20,8 +20,8 @@ def main(argv):
     origin = args[0] if args else lib.cwd_origin()
     shard = puppets.shard_of(origin)
     # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS, и
-    # папет поднимется, но к шине не подключится — прочитается как «АГЕНТ
-    # МОЛЧИТ» на пустом месте. Лучше отказать здесь, чем разбираться там.
+    # папет поднимется, но к шине не подключится — прочитается как «агент
+    # молчит» на пустом месте. Лучше отказать здесь, чем разбираться там.
     if not os.path.exists(lib.shard_creds(shard)):
         lib.usage(f"shard {shard} isn't on the bus yet.\nSet it up: mop deploy {origin}")
     name = puppets.next_name(shard)

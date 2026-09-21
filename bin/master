@@ -5,7 +5,7 @@ Without an argument, the origin of the current working copy is used. One
 project — one shard: a master sees and reaches only its own puppets; anyone
 else's don't exist for it.
 
-Only --llm and origin belong to this command; EVERYTHING ELSE goes to claude
+Only --llm and origin belong to this command; everything else goes to claude
 as-is (`mop master --continue` resumes the master's last session). The
 command won't mirror claude's own flags: there are dozens of them, and the
 list would drift the moment claude ships a new version. Pass a flag that
@@ -21,7 +21,7 @@ session as a child, sees MOP_SHARD and MOP_BUS_CONFIG and subscribes to its
 shard's inbox.
 
 The pool server arrives as an ARGUMENT, not from a directory config. The
-master sits in a working copy of ITS OWN project, while the `.mcp.json` that
+master sits in a working copy of its own project, while the `.mcp.json` that
 names the server lives in the mop repository — that is, anywhere except
 where masters actually run. The very first run in a foreign directory came up
 with no mcp__mop__* at all, and the session could neither see the roster nor
@@ -50,7 +50,7 @@ import os
 import lib
 from mop import config, llm, puppets
 
-# --strict-mcp-config НЕ добавляем: у оператора есть свои серверы, и мастер-шелл
+# --strict-mcp-config не добавляем: у оператора есть свои серверы, и мастер-шелл
 # не повод их отбирать.
 def mcp_config():
     return json.dumps({"mcpServers": {"mop": {

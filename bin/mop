@@ -3,7 +3,7 @@
 # commandlet, one per subcommand; `mop` only finds and runs them.
 #
 # Симлинк резолвим до конца: наружу торчит ~/bin/mop, а дерево проекта надо
-# найти относительно НАСТОЯЩЕГО файла, а не относительно ссылки.
+# найти относительно настоящего файла, а не относительно ссылки.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
     DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"

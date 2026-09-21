@@ -12,7 +12,7 @@ WorkingDirectory={{ mop_home }}
 Environment=MOP_NODE={{ inventory_hostname }}
 # Без неё session.py не найдёт каталог сокетов сессий и уйдёт на запасной
 # путь, где никого нет: папета читались бы как мёртвые при живых сессиях.
-# UID спрошен у САМОГО УЗЛА (getent), а не задан настройкой на весь пул.
+# UID спрошен у самого узла (getent), а не задан настройкой на весь пул.
 Environment=XDG_RUNTIME_DIR=/run/user/{{ mop_uid }}
 # Что wipe щадит при чистке клона: те же gitignore-шаблоны, которыми врапер
 # сеет в клон .env* и .providers из ~/puppet-env. Список у врапера и агента

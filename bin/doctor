@@ -37,7 +37,7 @@ def treat(issue):
             puppets.switch_model(alloc["NodeName"], name, puppets.FALLBACK_MODEL)
             return f"/model {puppets.FALLBACK_MODEL}"
         if action == "update":
-            # Перерегистрация, а не рестарт: врапер живёт В СПЕКЕ, и рестарт
+            # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
             # аллокации поднял бы ту же старую. Клон переживает — меняется
             # только спека.
             job = nomad.get_job(name)
