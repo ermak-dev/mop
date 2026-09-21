@@ -71,7 +71,35 @@ link nomad   deploy/nomad
 link nats    deploy
 link homelab examples/homelab
 
-play site.yml --extra-vars "$(shards_json "$@")"
+# Манифесты шардов (#25): режутся из ORIGIN библиотечным разбором ЗДЕСЬ,
+# на управляющей машине. Плейбук получает готовые пути и не заводит второго,
+# снисходительного парсера у себя. Недоступный origin валит прогон громко:
+# шард, названный установкой, обязан существовать.
+manifests_json() {
+    python3 - <<'PY'
+import json
+from mop import config, manifest
+out = {}
+for origin in (config.get("MOP_SHARD_ORIGINS") or "").split(","):
+    origin = origin.strip()
+    if not origin:
+        continue
+    shard, asks, vars_path, tasks_path, alien = manifest.fetch(origin)
+    entry = {"asks": asks}
+    if vars_path:
+        entry["vars"] = vars_path
+    if tasks_path:
+        entry["tasks"] = tasks_path
+    out[shard] = entry
+    for k in alien:
+        print(f"  {shard}/mop.yaml: {k} is not a project's to set — ignored",
+              flush=True)
+print(json.dumps({"mop_manifests": out}))
+PY
+}
+
+play site.yml --extra-vars "$(shards_json "$@")" \
+              --extra-vars "$(manifests_json)"
 
 section "check"
 # Прогон без неё не отличает «плейбук зелёный» от «пул отвечает»: агент,
