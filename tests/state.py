@@ -11,6 +11,7 @@
 на живом пуле, и тестов на него нет.
 """
 import os
+from mop import puppets
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -193,6 +194,47 @@ CASES = [
 ]
 
 
+# ── ростер глазами одного шарда (#29) ──────────────────────────────────────
+# HYPOTHESIS: джоба-папет без origin в Meta (старая регистрация) невидима
+# ЛЮБОМУ списку, включая admin, — что и выглядело как «папеты исчезают»:
+# pu-rugent-1..10 жили на hyper running, невидимые всему.
+# SOLUTION: определение папета — service-джоб с префиксом pu- (pu-cleanup и
+# его периодические дети — sysbatch); origin — свойство современной спеки, а
+# не пропуск в ростер. Admin видит и непомеченных, шард — только своих.
+def _job(name, jtype="service", origin=None):
+    return {"ID": name, "Type": jtype,
+            "Meta": {"origin": origin} if origin else None}
+
+
+def check_visible(cases):
+    bad = 0
+    for what, listing, shard, want in cases:
+        got = puppets.visible(listing, shard)
+        got_ids = [j["ID"] for j in got]
+        if sorted(got_ids) != sorted(want):
+            bad += 1
+            print(f"FAILED  visible, {what}: wanted {want}, got {got_ids}")
+    return bad, len(cases)
+
+
+VISIBLE = [
+    # Главное: непомеченный работающий папет виден admin — «исчезнувший» пул
+    # обязан быть виден хоть оператору.
+    ("непомеченный виден admin", [_job("pu-rugent-8")], "admin", ["pu-rugent-8"]),
+    ("непомеченного не видит шард", [_job("pu-rugent-8")], "mop", []),
+    ("свой по origin виден шард", [_job("pu-mop-1", origin="…/mop.git")], "mop",
+     ["pu-mop-1"]),
+    ("чужой по origin не виден шард", [_job("pu-mop-1", origin="…/mop.git")], "rugent", []),
+    ("admin видит всех", [_job("pu-mop-1", origin="…/mop.git"), _job("pu-rugent-8")],
+     "admin", ["pu-mop-1", "pu-rugent-8"]),
+    # pu-cleanup и его периодические дети — sysbatch, не папеты: их префикс
+    # pu- обманчив, и в ростере им места нет ни для кого.
+    ("watchdog не виден admin", [_job("pu-cleanup", "sysbatch")], "admin", []),
+    ("периодический ребёнок не виден admin",
+     [_job("pu-cleanup/periodic-1", "sysbatch")], "admin", []),
+]
+
+
 def main():
     bad = 0
     for what, given, want in CASES:
@@ -201,6 +243,9 @@ def main():
             bad += 1
             print(f"FAILED  {what}\n  wanted:  {want!r}\n  got: {got!r}")
     cases = len(CASES)
+    vbad, vcases = check_visible(VISIBLE)
+    bad += vbad
+    cases += vcases
     for state, want in FREE_CASES:
         cases += 1
         if is_free(state) != want:
