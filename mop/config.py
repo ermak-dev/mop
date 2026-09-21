@@ -345,18 +345,6 @@ def manifest(text):
     return of_vars, tasks
 
 
-def shard_settings(text):
-    """Содержимое `.mop` -> ({разрешённое}, [отброшенные ключи]).
-
-    Отброшенное возвращается, а не молчит: проглоченный ключ — это либо
-    настройка, которая не сработала, либо чужая, которая сработала. И то и
-    другое обязано быть видно тому, кто собирает образ."""
-    good, bad = {}, []
-    for k, v in _parse(text).items():
-        (good.__setitem__(k, v) if k in SHARD_SCOPED else bad.append(k))
-    return good, bad
-
-
 class Missing(RuntimeError):
     """Обязательная настройка не заполнена."""
 
