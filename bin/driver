@@ -199,23 +199,17 @@ def v_build(argv):
     shard = os.path.basename(origin).removesuffix(".git")
     settings = json.dumps({k: v for k, (v, _) in config.effective().items()},
                           ensure_ascii=False)
-    asked, vars_file, tasks_file, alien, mine = shard_manifest(origin, shard)
-    for k, v in sorted(asked.items()):
-        print(f"  {shard}/mop.yaml asks for {k}={v}")
-    for k in alien:
+    got = shard_manifest(origin, shard)
+    for k, v in sorted(got["asks"].items()):
+        print(f"  {shard}/.mop/node.yaml asks for {k}={v}")
+    for k in got["alien"]:
         # Громко: проглоченный ключ -- это либо настройка, которая не
         # сработала, либо чужая, которая сработала.
-        print(f"  {shard}/mop.yaml: {k} is not a project's to set — ignored")
-    extra = {"mop_shard": shard, "mop_origin": origin, "mop_shard_asks": asked,
-             # Конвенция env_files: имена знает проект, байты возит
-             # установка. Форма — ТА ЖЕ, что у deploy: {шард, файл}; роль
-             # тела ждёт её, и второй формы у одного механизма не бывает.
-             "mop_env_files": [{"shard": shard, "file": n}
-                               for n in mine.get("env_files") or []]}
-    if vars_file:
-        extra["mop_shard_vars"] = vars_file
-    if tasks_file:
-        extra["mop_shard_tasks"] = tasks_file
+        print(f"  {shard}/.mop: {k} is not a project's to set — ignored")
+    extra = {"mop_shard": shard, "mop_origin": origin,
+             "mop_shard_asks": got["asks"],
+             "mop_shard_vars": got["ws_vars"],
+             "mop_shard_tasks": got["ws_tasks"]}
     rc = subprocess.call(
         ["ansible-playbook", "-i", os.environ["INVENTORY"],
          os.path.join(config.PROJECT, "deploy", "pve-build.yml"),
@@ -227,12 +221,11 @@ def v_build(argv):
 
 
 def shard_manifest(origin, shard):
-    """Манифест проекта из его origin — дорогой за ним живёт в библиотеке
-    (mop/manifest.py): у неё двое вызывающих, эта сборка и deploy host-узлов,
-    и одно определение. Здесь только перевод громкого отказа в выход."""
+    """Манифесты проекта из его origin — дорога за ними живёт в библиотеке
+    (mop/manifest.py): у неё двое вызывающих, эта сборка и deploy, и одно
+    определение. Здесь только перевод громкого отказа в выход."""
     try:
-        got = manifest.fetch(origin)
-        return got[1:]
+        return manifest.fetch(origin)
     except RuntimeError as e:
         sys.exit(str(e))
 

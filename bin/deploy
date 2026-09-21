@@ -78,26 +78,20 @@ manifests_json() {
 import json
 from mop import config, manifest
 out = {}
-envs = []
 for origin in (config.get("MOP_SHARD_ORIGINS") or "").split(","):
     origin = origin.strip()
     if not origin:
         continue
-    shard, asks, vars_path, tasks_path, alien, mine = manifest.fetch(origin)
-    entry = {"asks": asks}
-    if vars_path:
-        entry["vars"] = vars_path
-    if tasks_path:
-        entry["tasks"] = tasks_path
-    out[shard] = entry
-    # Конвенция env_files: ИМЕНА объявляет проект в mop.yaml, БАЙТЫ возит
-    # установка из рабочей копии на мастере -- секреты в git не попадают.
-    for name in mine.get("env_files") or []:
-        envs.append({"shard": shard, "file": name})
-    for k in alien:
-        print(f"  {shard}/mop.yaml: {k} is not a project's to set — ignored",
+    got = manifest.fetch(origin)
+    entry = {"asks": got["asks"]}
+    for side in ("node_tasks", "ws_vars", "ws_tasks"):
+        if got[side]:
+            entry[side] = got[side]
+    out[got["shard"]] = entry
+    for k in got["alien"]:
+        print(f"  {got['shard']}/.mop: {k} is not a project's to set — ignored",
               flush=True)
-print(json.dumps({"mop_manifests": out, "mop_env_files": envs}))
+print(json.dumps({"mop_manifests": out}))
 PY
 }
 

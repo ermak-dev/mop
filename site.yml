@@ -8,8 +8,7 @@
 #
 # Один прогон -- один PLAY RECAP: строка на машину, суммирующая все слои.
 
-- import_playbook: deploy/node.yml             # чем узел обязан быть до всего
-- import_playbook: examples/nodes.yml          # узловое установки автора
+- import_playbook: deploy/node.yml             # чем узел обязан быть до всего (в т.ч. git-доступ: MOP_GIT_HOST)
 - import_playbook: deploy/pve.yml              # узел, чьи тела — контейнеры
 - import_playbook: deploy/body.yml             # чем обязано быть тело папета
 - import_playbook: deploy/nomad/setup.yml      # ГДЕ стоит папет
