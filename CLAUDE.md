@@ -30,51 +30,52 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** Commandlets never call each other as a subprocess: each parses its own arguments and prints for itself
  - **MUST** `mop/session.py` is stdlib only, with no import from the package: it travels as source to wherever the session lives
  - **MUST NOT** Do not add emoji unless asked to
+ - **MUST NOT** Do not write in caps: emphasis is the wording's job, not the shift key's. Caps are reserved for what is literally uppercase — identifiers, acronyms, status tokens (`FAILED`, `AGENT SILENT`) and the MUST/SHOULD keywords of this file
 
 ## Boundaries
 
  - **MUST** `mop/`, `bin/`, `docs/`, `skills/`, `deploy/` know no concrete host: anything installation-specific is a setting in `config.SETTINGS` or a line in `.env`
- - **MUST** Three sources, one question each: `.env` answers for the INSTALLATION, the inventory for the MACHINE, `config.SETTINGS` holds the defaults. `.env` never reaches a node — what the node must know is listed in `config.NODE_SCOPED` and rendered by `mop deploy` into `~/.config/mop/node.env`. A node-side setting written anywhere else silently does not arrive
+ - **MUST** Three sources, one question each: `.env` answers for the installation, the inventory for the machine, `config.SETTINGS` holds the defaults. `.env` never reaches a node — what the node must know is listed in `config.NODE_SCOPED` and rendered by `mop deploy` into `~/.config/mop/node.env`. A node-side setting written anywhere else silently does not arrive
  - **MUST** A value specific to this machine is a setting whose default equals today's value, never a literal in the code
  - **MUST** A required setting with no sensible default goes in `config.REQUIRED`: silently walking into someone else's LAN is worse than a loud refusal
- - **MUST NOT** Nothing a SPECIFIC project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is the installation's own `setup.yaml` and the projects' `.mop/workspace.yaml`
- - **MUST** A shard is a project, and there is ONE definition: `puppets.shard_of`, the origin's basename without `.git`; puppet names are built from it too
- - **MUST** Two layers: Nomad decides WHERE a puppet stands, the bus decides HOW to talk to it. The Nomad token lives on the control machine only
+ - **MUST NOT** Nothing a specific project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is the installation's own `setup.yaml` and the projects' `.mop/workspace.yaml`
+ - **MUST** A shard is a project, and there is one definition: `puppets.shard_of`, the origin's basename without `.git`; puppet names are built from it too
+ - **MUST** Two layers: Nomad decides where a puppet stands, the bus decides how to talk to it. The Nomad token lives on the control machine only
  - **MUST** Symlinks pointing in from outside are interfaces: `~/bin/mop`, `~/etc/nomad`, `~/etc/nats`, `~/.claude/skills/master`; a playbook is found by the path `~/etc/[name]/setup.yml`, and there is no name table anywhere
  - Terminology: **master** is the controlling side, **puppet** the working one; `free (master)` in a state string is a git branch, not a role
 
 ## Secrets
 
  - **MUST** The project's secrets live in `.env` and nowhere else; what generates itself (NATS passwords, the Nomad token, the claude.ai login) never lands there
- - **MUST** `.env` NEVER travels to the nodes — rsync excludes it explicitly
+ - **MUST** `.env` never travels to the nodes — rsync excludes it explicitly
  - **MUST** No secrets in a Nomad job spec: it is visible in the UI and stays in the cluster's state; keys go to the nodes as a file, the spec carries only variable names
- - **MUST** A puppet reaches the bus under ITS SHARD's credentials, not the node's: the agent sees who is being asked about, never who is asking
+ - **MUST** A puppet reaches the bus under its shard's credentials, not the node's: the agent sees who is being asked about, never who is asking
  - **MUST** Nodes are given nothing beyond their subjects: a new need is an agent verb, not a privilege
- - **MUST** The node-level verb `disk` lives in the `admin` pseudo-shard only. `write` was taken OUT of that list deliberately — otherwise a shard's master cannot `mop login` its own puppets; that is safe exactly while both `WRITABLE` files are assembled from the MACHINE, not from the master's project
+ - **MUST** The node-level verb `disk` lives in the `admin` pseudo-shard only. `write` was taken out of that list deliberately — otherwise a shard's master cannot `mop login` its own puppets; that is safe exactly while both `WRITABLE` files are assembled from the machine, not from the master's project
 
 ## Traps that cost debugging
 
 Every one of them fails silently — hence a list, not "read the code".
 
- - **MUST** The wrapper lives IN THE JOB SPEC: editing `mop/puppets.py` does not reach a running puppet through an allocation restart, it needs a re-registration
+ - **MUST** The wrapper lives in the job spec: editing `mop/puppets.py` does not reach a running puppet through an allocation restart, it needs a re-registration
  - **MUST** Escape curly substitutions with a double dollar — Nomad runs the spec through hcl2 and parses the whole line, **comments included**
- - **MUST** The node agent lives OUTSIDE the job spec, under systemd, one per node: otherwise every edit to it would re-register every job, and it must answer precisely while a puppet is restarting
+ - **MUST** The node agent lives outside the job spec, under systemd, one per node: otherwise every edit to it would re-register every job, and it must answer precisely while a puppet is restarting
  - **MUST** The agent's unit needs `XDG_RUNTIME_DIR=/run/user/1000`: without it `session.py` misses the socket directory and live puppets read as dead
  - **MUST** `AGENT SILENT` has no cure: the puppet may be working perfectly, and a restart would kill the work in its clone
- - **MUST** Address a puppet's session only through the freshest LIVE one: files of dead sessions pile up, and the freshest may well be a corpse
+ - **MUST** Address a puppet's session only through the freshest live one: files of dead sessions pile up, and the freshest may well be a corpse
  - **MUST** "free" means the clone holds no unsaved work, not that the session is silent: the dispatch decision rests on it
  - **MUST** Wrap MCP tool bodies in `loud`: an exception reaches the model as "Error executing tool [name]" — with no reason
  - **MUST** The master's address is its bus inbox (`[host]-[pid]`), not the claude session name: that name is derived from a directory, is not unique and is unknown to the bus
 
 ## Strict TDD Protocol
 
-**MANDATORY for everything checkable without the pool** — pure functions
+**Mandatory for everything checkable without the pool** — pure functions
 (`puppets.puppet_state`, `session.envelope`, `render.table`,
 `gitlab.with_status`). The exceptions: what lives only on the live pool (the
 wrapper, the playbooks, the agent's verbs), thin commandlet glue, mechanical
 edits.
 
-1. **Write a failing check FIRST** in `tests/[module].py`, named for the defect or the property.
+1. **Write a failing check first** in `tests/[module].py`, named for the defect or the property.
 2. **Verify it fails** for the right reason (`python3 tests/[module].py`). If it passes, the check is wrong.
 3. **Implement the minimal fix.** Track reasoning in test-file comments (`HYPOTHESIS:`, `SOLUTION:`, `RESULT:`) and undo every wrong-hypothesis change.
 4. **Verify green** — run every file in `tests/` and leave `STATUS: FIXED — see #123` in the check.
@@ -94,7 +95,7 @@ Work lives in GitLab issues. The coordinates come from the working copy's git or
  - **MUST** Use `mop bug` for every interaction with the tracker, never the API directly
  - **MUST** If a capability is missing, add it to `bin/bug` plus a check of its pure logic in `tests/gitlab.py`
  - **MUST** Issue titles, bodies and comments are in Russian; code, branch names and commits stay English
- - **MUST** Every unit of work is an issue BEFORE the fix, in the fixed report shape: steps to reproduce, expected result, actual result, evidence, the root cause (only when confirmed) and what to do
+ - **MUST** Every unit of work is an issue before the fix, in the fixed report shape: steps to reproduce, expected result, actual result, evidence, the root cause (only when confirmed) and what to do
  - **MUST** Exactly one label from each group `status::`, `sev::`, `component::` — a second of the same group silently replaces the first; `mop bug labels` prints the vocabulary
  - **MUST** One issue = one defect: split a compound one and cross-link the parts
  - **MUST** Search for a duplicate before opening (`mop bug list --all -t ...`): the test is the fix, not the wording — if one change closes both, it is one issue
@@ -107,7 +108,7 @@ There is no pipeline: code reaches the pool through a `mop deploy` run, and `mas
 
  - **MUST** Every issue lives on its own branch `[type]/[iid][-slug]` off a fresh `origin/master` (`mop bug start`)
  - **MUST** One fix = one layer: touching the wrapper, a playbook and the library at once is an unrevertable, unmeasurable change
- - **MUST** A commit explains WHY: the diff already shows what changed, and the incident behind the fix is worth more than a list of files
+ - **MUST** A commit explains why: the diff already shows what changed, and the incident behind the fix is worth more than a list of files
  - **MUST** Reference the issue in the commit subject as a bare `#74`, never a closing keyword
  - **MUST** Land by local integration, one push: `git merge --no-ff` into a fresh `master`, then a single `git push`; one merge commit per issue keeps `git revert -m 1` as the rollback
  - **MUST** If you touched what travels to the nodes (`mop/`, `bin/`, `deploy/`), roll it out with `mop deploy` and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Проверка настроек без пула: python3 tests/config.py
 
-Здесь только то, что СЧИТАЕТСЯ, а не лежит литералом: у вычисленного дефолта
+Здесь только то, что считается, а не лежит литералом: у вычисленного дефолта
 есть шанс оказаться неверным, и проявляется это далеко от config.py.
 
 Это не фреймворк и не прогон всего проекта: остальное по-прежнему добывается
@@ -22,11 +22,11 @@ def main():
     cases = 0
     me = pwd.getpwuid(os.getuid()).pw_name
 
-    # ЗАЩЕМЛЕНО ЖИВЫМ ОТКАЗОМ (2026-09-17, первый контейнерный папет).
+    # Защемлено живым отказом (2026-09-17, первый контейнерный папет).
     # Дефолт MOP_USER брался из $USER. Внешний врапер исполняется задачей
     # Nomad, а клиент Nomad ходит под root и свой $USER задаче отдаёт —
     # поэтому драйвер собрал `ssh root@<тело>` и получил «Permission denied»
-    # при совершенно исправном ключе. uid процесса — ФАКТ, $USER — всего лишь
+    # при совершенно исправном ключе. uid процесса — факт, $USER — всего лишь
     # утверждение, и верить надо факту.
     saved = os.environ.get("USER")
     try:
@@ -49,16 +49,16 @@ def main():
 
     # ── старшинство источников ───────────────────────────────────────────
     # Окружение > node.env > .env > дефолт. Ярус node.env появился потому, что
-    # .env НА УЗЛЫ НЕ ЕДЕТ (там креды GitLab), а тринадцать настроек читаются
+    # .env на узлы не едет (там креды GitLab), а тринадцать настроек читаются
     # именно на узле — все MOP_PVE_*, потолок памяти тела, пользователь и дом.
-    # Пока яруса не было, вписанное в .env значение доезжало до мастера и НЕ
+    # Пока яруса не было, вписанное в .env значение доезжало до мастера и не
     # доезжало до узла: сборка образа клала тело на одно хранилище, драйвер на
     # узле искал его на другом, и не жаловался никто.
     node = os.path.join(tempfile.mkdtemp(), "node.env")
     saved_node, saved_env = config.NODE_ENV_FILE, config.ENV_FILE
     envf = os.path.join(tempfile.mkdtemp(), ".env")
     with open(envf, "w") as f:
-        f.write("MOP_PVE_STORAGE=from-env-file\nMOP_PVE_CORES=2\n")
+        f.write("MOP_PVE_STORAGE=from-env-file\nMOP_CORES=2\n")
     try:
         config.NODE_ENV_FILE, config.ENV_FILE = node, envf
         config.forget()
@@ -76,7 +76,7 @@ def main():
             bad += 1
             print("FAILED  node.env must outrank .env — that is the whole point")
         cases += 1
-        if config.num("MOP_PVE_CORES") != 2:
+        if config.num("MOP_CORES") != 2:
             bad += 1
             print("FAILED  a setting absent from node.env must still come from .env")
 
@@ -96,17 +96,17 @@ def main():
             print("FAILED  a missing node.env is the normal case on the control "
                   "machine, not an error")
         cases += 1
-        if config.effective()["MOP_PVE_CORES"][1] != ".env":
+        if config.effective()["MOP_CORES"][1] != ".env":
             bad += 1
             print("FAILED  effective() must name where a value came from")
         with open(node, "w") as f:
-            f.write("MOP_PVE_CORES=8\n")
+            f.write("MOP_CORES=8\n")
         config.forget()
         cases += 1
-        if config.effective()["MOP_PVE_CORES"] != ("8", "node"):
+        if config.effective()["MOP_CORES"] != ("8", "node"):
             bad += 1
             print(f"FAILED  effective() must call the node file by its name: "
-                  f"{config.effective()['MOP_PVE_CORES']!r}")
+                  f"{config.effective()['MOP_CORES']!r}")
     finally:
         config.NODE_ENV_FILE, config.ENV_FILE = saved_node, saved_env
         config.forget()
@@ -116,10 +116,10 @@ def main():
     # оговорена, и отход от неё — ошибка, а не «прочиталось как получилось»:
     # молчаливо потерянные tasks означают образ без окружения проекта.
     MANIFEST = [
-        ("полный манифест", """- name: what a body is\n  vars:\n    MOP_PVE_CORES: "8"\n    postgres_major: 18\n  tasks:\n    - name: t\n""",
-         {"MOP_PVE_CORES": "8", "postgres_major": 18}, [{"name": "t"}]),
-        ("только vars — манифест mop", """- name: x\n  vars:\n    MOP_PVE_DISK_GB: "40"\n""",
-         {"MOP_PVE_DISK_GB": "40"}, []),
+        ("полный манифест", """- name: what a body is\n  vars:\n    MOP_CORES: "8"\n    postgres_major: 18\n  tasks:\n    - name: t\n""",
+         {"MOP_CORES": "8", "postgres_major": 18}, [{"name": "t"}]),
+        ("только vars — манифест mop", """- name: x\n  vars:\n    MOP_DISK_GB: "40"\n""",
+         {"MOP_DISK_GB": "40"}, []),
         ("пустая игра допустима", "- name: nothing to ask\n", {}, []),
         ("пустой vars", """- name: x\n  vars: {}\n  tasks: []\n""", {}, []),
     ]
@@ -156,14 +156,14 @@ def main():
         print(f"FAILED  mop.yaml, {what}: должен был отказаться ValueError")
 
     # Расщепление vars манифеста (#26): просьбы (SHARD_SCOPED) идут в размеры
-    # образа, остальное НЕ-настройочное — конфигурация самого проекта и едет
+    # образа, остальное не-настройочное — конфигурация самого проекта и едет
     # его задачам. А вот имя, совпадающее с настоящей настройкой mop, — чужое:
-    # в контексте задач оно ЗАТЁРЛО бы правду машины (MOP_USER, MOP_HOME).
+    # в контексте задач оно затёрло бы правду машины (MOP_USER, MOP_HOME).
     PARTS = [
         ("полный расклад",
-         {"MOP_PVE_CORES": 8, "postgres_major": 18, "MOP_USER": "root"},
-         {"MOP_PVE_CORES": "8"}, {"postgres_major": 18}, ["MOP_USER"]),
-        ("только просьбы", {"MOP_PVE_DISK_GB": "40"}, {"MOP_PVE_DISK_GB": "40"}, {}, []),
+         {"MOP_CORES": 8, "postgres_major": 18, "MOP_USER": "root"},
+         {"MOP_CORES": "8"}, {"postgres_major": 18}, ["MOP_USER"]),
+        ("только просьбы", {"MOP_DISK_GB": "40"}, {"MOP_DISK_GB": "40"}, {}, []),
         ("только своё", {"toolchain": "rust"}, {}, {"toolchain": "rust"}, []),
         ("пусто", {}, {}, {}, []),
     ]
@@ -183,7 +183,7 @@ def main():
         bad += 1
         print(f"FAILED  SHARD_SCOPED names settings that do not exist: {unknown}")
 
-    # Потолок — УЗЛОВОЙ: чужой проект просит, машина решает. Без потолка mop.yaml
+    # Потолок — узловой: чужой проект просит, машина решает. Без потолка mop.yaml
     # это способ занять гипервизор, а не настройка.
     for cap in ("MOP_BODY_MEM_CAP_MB", "MOP_BODY_DISK_CAP_GB", "MOP_BODY_CORES_CAP"):
         cases += 1
@@ -191,7 +191,7 @@ def main():
             bad += 1
             print(f"FAILED  {cap} must be node-scoped — the machine has the last word")
 
-    # Список узловых настроек -- ОДИН: по нему deploy решает, что рендерить в
+    # Список узловых настроек -- один: по нему deploy решает, что рендерить в
     # node.env. Разойдись он с тем, что читает узел, и настройка молча не
     # доедет -- ровно та беда, ради которой ярус и заводился.
     cases += 1
@@ -211,7 +211,7 @@ def main():
     finally:
         os.environ.pop("MOP_USER", None)
 
-    # Шлюз сети тел СЧИТАЕТСЯ из подсети: два места для одного адреса разошлись
+    # Шлюз сети тел считается из подсети: два места для одного адреса разошлись
     # бы молча — мост встал бы, а тела просто не достучались.
     cases += 1
     os.environ["MOP_PVE_SUBNET"] = "192.168.250.0/24"

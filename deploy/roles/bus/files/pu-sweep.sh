@@ -17,7 +17,7 @@
 #                 CARGO_TARGET_DIR, retired 2026-08-20, and matches neither
 #                 ~/puppets/pu-* nor ~/.cache/target-pu-*. It still held 59 GB
 #                 2026-08-28, four days after the last write.
-#   size-capped — LIVE puppets' target dirs, trimmed by cargo-sweep, and only
+#   size-capped — live puppets' target dirs, trimmed by cargo-sweep, and only
 #                 under space pressure. Not age-gated: cargo rewrites
 #                 fingerprints on every build, so an active target dir never
 #                 looks old. Swept while
@@ -56,7 +56,7 @@ note() { printf '  %-46s %10s\n' "$1" "$2"; }
 
 freed_kb=0
 
-# A live puppet == a live session on ITS OWN tmux server: each puppet runs
+# A live puppet == a live session on its own tmux server: each puppet runs
 # `tmux -L <job>` since the shared-server cgroup OOM incident.
 live_player() { tmux -L "$1" has-session -t "=$1" 2>/dev/null; }
 
@@ -129,7 +129,7 @@ echo
 # body itself, and only the driver knows how to list one and throw it away. Its
 # own safety gate mirrors tier 1's, for the same reason.
 #
-# Драйвер узла читаем из ФАЙЛА УЗЛА -- того же, по которому его узнают агент и
+# Драйвер узла читаем из файла узла -- того же, по которому его узнают агент и
 # внешний врапер. Второе место, отвечающее на «в чём здесь живёт папет»,
 # разошлось бы с первым молча, и сторож начал бы мести не тот узел.
 MOP_NODE_DRIVER=$(cat "$HOME/.config/mop/driver" 2>/dev/null || echo host)
@@ -164,7 +164,7 @@ fi
 # Три корня клонов и три корня target-ов. Вторые в каждой паре -- наследство
 # переименования wk -> slave (2026-08-29), третьи -- slave -> puppet
 # (2026-08-30): в старых каталогах остались клоны прежних пулов, часть из них
-# с НЕсохранённой работой, и сторож обязан продолжать их видеть.
+# с несохранённой работой, и сторож обязан продолжать их видеть.
 # Legacy-глоб убирается, когда соответствующий каталог опустеет.
 CLONE_GLOBS=("$HOME"/puppets/pu-* "$HOME"/slaves/sl-* "$HOME"/wk/wk-*)
 TARGET_GLOBS=("$HOME"/.cache/target-pu-* "$HOME"/.cache/target-sl-* "$HOME"/.cache/target-wk-*)
@@ -176,7 +176,7 @@ if [ -e "$HOME/Access-Your-Private-Data.desktop" ] \
     exit 0
 fi
 
-# Gate 2: clones exist but NOT ONE has a live tmux server. On a node that hosts
+# Gate 2: clones exist but not one has a live tmux server. On a node that hosts
 # puppets that is not a pile of orphans, it is tmux being unreachable -- the node
 # just booted, or this task cannot see /tmp/tmux-$(id -u). Deleting every clone
 # on the node is never the right answer to that, and a genuine all-orphans node
@@ -231,7 +231,7 @@ for stale in "$HOME/cache"; do
 done
 
 # --------------------------------------------------------------------------
-# Tier 3 -- size-cap LIVE puppets' target dirs, only under pressure.
+# Tier 3 -- size-cap live puppets' target dirs, only under pressure.
 # --------------------------------------------------------------------------
 avail=$(free_gb "$HOME")
 if [ "$avail" -ge "$FREE_MIN_GB" ]; then
