@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pool shards: mop shards [origin|shard ...]
+"""pool shards: mop shards [--origins] [origin|shard ...]
 
 A shard is a project: one repository, one slice of the pool, one master. The
 list is built from three sources, always by union, never by replacement:
@@ -29,32 +29,49 @@ def remembered():
 
 
 def collect(extra=()):
-    """Все шарды, какие система знает. -> отсортированный список."""
-    known = remembered()
+    """Все шарды, какие система знает. -> ({origin'ы}, {легаси-имена}).
+
+    Источники те же трое: ростер Nomad (origin'ы живых джобов), память
+    (origin'ы, а от легаси-времён — имена без origin'а) и аргументы.
+    Память хранит ORIGIN'Ы, а не имена (#33): имя выводится basename'ом,
+    а имя в origin не разворачивается."""
+    origins, legacy = puppets.shard_ids(
+        l for l in remembered() if not l.startswith("-"))
     for arg in extra:
-        known.add(puppets.shard_of(arg) if "/" in arg or ":" in arg else arg)
+        if arg.startswith("-"):
+            continue
+        if "/" in arg or ":" in arg:
+            origins.add(arg)
+        else:
+            legacy.add(arg)
     try:
-        known |= {puppets.shard_of(j["Meta"]["origin"])
-                  for j in puppets.jobs(shard=bus.ADMIN)}
+        origins |= {j["Meta"]["origin"] for j in puppets.jobs(shard=bus.ADMIN)
+                    if (j.get("Meta") or {}).get("origin")}
     except Exception as e:
         # Ростер недоступен — работаем по памяти, но говорим об этом: молча
         # сузить список значит выписать шард из конфига NATS.
         print(f"Nomad roster unavailable ({nomad.describe_error(e)}), "
               f"using only remembered shards", flush=True)
-    return sorted(known)
+    return origins, legacy
 
 
-def remember(shards):
+def remember(lines):
     os.makedirs(os.path.dirname(FILE), exist_ok=True)
     with open(FILE, "w") as f:
-        f.write("".join(f"{s}\n" for s in shards))
+        f.write("".join(f"{s}\n" for s in sorted(lines)))
 
 
 def main(argv):
-    shards = collect(argv)
-    remember(shards)
-    for s in shards:
-        print(s)
+    want_origins = "--origins" in argv
+    args = [a for a in argv if a != "--origins"]
+    origins, legacy = collect(args)
+    remember(origins | legacy)
+    if want_origins:
+        for o in sorted(origins):
+            print(o)
+        return
+    for n in sorted({puppets.shard_of(o) for o in origins} | legacy):
+        print(n)
 
 
 lib.run(lib.cluster(main))

@@ -16,7 +16,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - `/mop` — the library: returns data, prints nothing
  - `/bin` — commandlets, one subcommand per file; they are the only thing that prints
  - `/deploy` — the product's installation: Nomad, the bus, the agent, the disk watchdog
- - `/setup.yaml` — the setup example: common body environment, an installation's copy to adapt
+ - `/setup.yaml.example` — the body environment example: an installation copies it to `setup.yaml`, which git ignores like `.env` and `inventory.yaml`
  - `/skills/master` — the master session's skill, symlinked from outside
  - `/docs` — one file per subsystem
  - `/tests` — checks of pure functions, not a framework
@@ -37,7 +37,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** Three sources, one question each: `.env` answers for the INSTALLATION, the inventory for the MACHINE, `config.SETTINGS` holds the defaults. `.env` never reaches a node — what the node must know is listed in `config.NODE_SCOPED` and rendered by `mop deploy` into `~/.config/mop/node.env`. A node-side setting written anywhere else silently does not arrive
  - **MUST** A value specific to this machine is a setting whose default equals today's value, never a literal in the code
  - **MUST** A required setting with no sensible default goes in `config.REQUIRED`: silently walking into someone else's LAN is worse than a loud refusal
- - **MUST NOT** Nothing a SPECIFIC project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is `setup.yaml` to adapt and the projects' `.mop/workspace.yaml`
+ - **MUST NOT** Nothing a SPECIFIC project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is the installation's own `setup.yaml` and the projects' `.mop/workspace.yaml`
  - **MUST** A shard is a project, and there is ONE definition: `puppets.shard_of`, the origin's basename without `.git`; puppet names are built from it too
  - **MUST** Two layers: Nomad decides WHERE a puppet stands, the bus decides HOW to talk to it. The Nomad token lives on the control machine only
  - **MUST** Symlinks pointing in from outside are interfaces: `~/bin/mop`, `~/etc/nomad`, `~/etc/nats`, `~/.claude/skills/master`; a playbook is found by the path `~/etc/[name]/setup.yml`, and there is no name table anywhere
