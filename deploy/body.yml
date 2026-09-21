@@ -44,3 +44,46 @@
         apply:
           become: yes
       loop: "{{ (MOP_BODY_EXTRA | default('')).split(',') | select | list }}"
+
+# ЧТО ПРОЕКТ ГОВОРИТ О СВОЁМ ОКРУЖЕНИИ (#25/#27). Узел применяется
+# манифестам шардов установки: vars и tasks из mop.yaml каждого, уже
+# вырезанные на управляющей машине из его origin (bin/deploy) — плейбук не
+# парсит сам и второго, снисходительного разбора не заводит.
+#
+# Секреты сюда не попадают ПРИНЦИПИАЛЬНО: их нет в git, и на host-узлах их
+# возит examples/env.yml установки. А вот задачи исполняются от root: узел
+# доверяет репозиториям, названным в MOP_SHARD_ORIGINS, — это записанное
+# решение эпика #25, сменившее прежнее «проекту отданы только размеры».
+#
+# Нет манифеста — нечего применять, и узел про этот шард молчит: общее
+# (MOP_BODY_EXTRA выше) уже стоит.
+- name: What each shard's manifest adds to this node
+  hosts: puppet
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: A node that is not its own body is not a body
+      ansible.builtin.meta: end_host
+      when: mop_driver | default(MOP_DRIVER) != 'host'
+
+    - name: No shard has a manifest
+      ansible.builtin.meta: end_host
+      when: (mop_manifests | default({})) | length == 0
+
+    # СНАЧАЛА конфигурация всех, ПОТОМ задачи всех: у include_vars нет охвата
+    # на один include, и переменные проектов живут в одном словаре узла.
+    # Совпавшее имя между проектами перебивается по порядку — единственная
+    # цена простоты; имена в vars манифеста — внутреннее дело проекта.
+    - name: Configuration of each shard that has one
+      ansible.builtin.include_vars:
+        file: "{{ item.value.vars }}"
+      loop: "{{ mop_manifests | dict2items | selectattr('value.vars', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Tasks of each shard that has any
+      ansible.builtin.include_tasks: "{{ item.value.tasks }}"
+      loop: "{{ mop_manifests | dict2items | selectattr('value.tasks', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.key }}"

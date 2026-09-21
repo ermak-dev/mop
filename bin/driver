@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 import lib
-from mop import bus, config, driver, nomad, puppets
+from mop import bus, config, driver, manifest, nomad, puppets
 from mop.render import table
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
@@ -222,50 +222,14 @@ def v_build(argv):
 
 
 def shard_manifest(origin, shard):
-    """Манифест проекта из его origin. -> (просьбы, путь к файлу vars,
-    путь к файлу tasks, чужие имена); без манифеста — ({}, None, None, []).
-
-    Читаем ИЗ РЕПОЗИТОРИЯ проекта, на управляющей машине, ДО плейбука:
-    манифест принадлежит проекту, версионируется вместе с ним, и второго
-    места, где записано его окружение, не заводится.
-
-    `git show` по голому зеркалу, без рабочего дерева: клон ради одного файла
-    был бы лишней минутой на каждую сборку. Нет mop.yaml — нет ни просьб, ни
-    окружения, это штатный случай: большинству проектов хватает общего.
-
-    Файлы, а не extra-переменные: задачи и конфигурация — это СТРУКТУРА, и
-    пусть её кладёт yaml, а не json в аргументах командной строки."""
-    tmp = f"/tmp/mop-manifest-{shard}.git"
-    subprocess.call(["rm", "-rf", tmp])
+    """Манифест проекта из его origin — дорогой за ним живёт в библиотеке
+    (mop/manifest.py): у неё двое вызывающих, эта сборка и deploy host-узлов,
+    и одно определение. Здесь только перевод громкого отказа в выход."""
     try:
-        r = subprocess.run(["git", "clone", "--mirror", "-q", origin, tmp],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            sys.exit(f"cannot read {shard}: {(r.stderr or r.stdout).strip()}")
-        got = subprocess.run(["git", "-C", tmp, "show", "HEAD:mop.yaml"],
-                             capture_output=True, text=True)
-        if got.returncode != 0:
-            return {}, None, None, []
-        try:
-            mvars, tasks = config.manifest(got.stdout)
-        except ValueError as e:
-            sys.exit(f"{shard}/mop.yaml: {e}")
-        asks, mine, alien = config.manifest_parts(mvars)
-        import yaml
-        out = f"/tmp/mop-manifest-{shard}"
-        os.makedirs(out, exist_ok=True)
-        vars_file = tasks_file = None
-        if mine:
-            vars_file = os.path.join(out, "vars.yml")
-            with open(vars_file, "w") as f:
-                yaml.safe_dump(mine, f, allow_unicode=True)
-        if tasks:
-            tasks_file = os.path.join(out, "tasks.yml")
-            with open(tasks_file, "w") as f:
-                yaml.safe_dump(tasks, f, allow_unicode=True, default_flow_style=False)
+        _, asks, vars_file, tasks_file, alien = manifest.fetch(origin)
         return asks, vars_file, tasks_file, alien
-    finally:
-        subprocess.call(["rm", "-rf", tmp])
+    except RuntimeError as e:
+        sys.exit(str(e))
 
 
 def origin_of(arg):
