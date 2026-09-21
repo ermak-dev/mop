@@ -53,3 +53,39 @@
   args:
     creates: "{{ MOP_HOME }}/.local/bin/claude"
     executable: /bin/bash
+
+# ENV-ФАЙЛЫ, НАЗВАННЫЕ МАНИФЕСТОМ ШАРДА (#30/#25). ИМЕНА объявляет проект
+# (env_files в vars своего mop.yaml), БАЙТЫ возит установка: секреты в git
+# не попадают, из origin их привезти нельзя, и источник один — рабочая копия
+# проекта на управляющей машине. Врапер копирует их из ~/puppet-env/<шард>
+# в каждый заводимый клон — то есть эти задачи часть того, чем тело ОБЯЗАНО
+# быть, и место им здесь, в роли, а не в files установки: у роли два
+# вызывающих (прогон по узлам и сборка образа), и определение одно.
+#
+# Прав НЕ выше пользователя пула: каталоги его, файлы его. Нет объявленных
+# файлов — нечего возить, задачи молча пусты; объявлен отсутствующий на
+# мастере — ГРОМКО: проект попросил то, чего установка дать не может.
+- name: puppet-env dir of each shard that named its env files
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/puppet-env/{{ item.shard }}"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: '0700'
+  loop: "{{ mop_env_files | default([]) }}"
+  loop_control:
+    label: "{{ item.shard }}"
+
+- name: Project env files, named by the project itself
+  ansible.builtin.copy:
+    src: "{{ lookup('env', 'HOME') }}/{{ item.shard }}/{{ item.file }}"
+    dest: "{{ MOP_HOME }}/puppet-env/{{ item.shard }}/"
+    # владелец ЯВНО: в сборке образа роль исполняется под root, и без
+    # этого файлы стали бы root-only -- врапер пользователя пула не
+    # прочитал бы собственные env файлы.
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: '0600'
+  loop: "{{ mop_env_files | default([]) }}"
+  loop_control:
+    label: "{{ item.shard }}/{{ item.file }}"
