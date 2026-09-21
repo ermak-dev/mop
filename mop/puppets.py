@@ -416,19 +416,35 @@ def shard_constraint(shard):
             "RTarget": f"(^|,)({ANY_SHARD}|{re.escape(shard)})(,|$)"}
 
 
-def jobs(shard=None):
-    """Джобы папетов. Префикс pu- ловит и pu-cleanup с его периодическими
-    детьми; папеты — те, что врапер пометил origin'ом.
+def visible(listing, shard):
+    """Папеты из сырого списка джобов глазами одного шарда (#29).
 
-    shard=None -> срез ЭТОГО процесса: `mop master` ставит MOP_SHARD, и мастер
-    проекта перестаёт видеть чужих папетов уже здесь, в ростере. Псевдошард
-    admin (оператор вне мастер-шелла) видит всё."""
-    listing = nomad.client().jobs.get_jobs(prefix=JOB_PREFIX, meta=True)
-    out = [j for j in listing if "origin" in (j.get("Meta") or {})]
+    Папет — service-джоб с префиксом pu-; pu-cleanup и его периодические
+    дети — sysbatch, им в ростере места нет. Origin в Meta у папета может
+    НЕ БЫТЬ: это спека старой регистрации, никогда не перерегистрированная
+    (врапер живёт в спеке), и такой папет работает, но невидим — на этом
+    пул rugent «исчезал» из всех списков, оставаясь живым. Псевдошард admin
+    видит и непомеченных; шард — только помеченных своим origin: чей
+    непомеченный, из него самого не узнать."""
     shard = shard or bus.SHARD
-    if shard == bus.ADMIN:
-        return out
-    return [j for j in out if shard_of(j["Meta"]["origin"]) == shard]
+    out = []
+    for j in listing:
+        if not j.get("ID", "").startswith(JOB_PREFIX) or j.get("Type") != "service":
+            continue
+        origin = (j.get("Meta") or {}).get("origin")
+        if shard == bus.ADMIN:
+            out.append(j)
+        elif origin and shard_of(origin) == shard:
+            out.append(j)
+    return out
+
+
+def jobs(shard=None):
+    """Джобы папетов, видимые ЭТОМУ процессу: `mop master` ставит MOP_SHARD,
+    и мастер проекта перестаёт видеть чужих папетов уже здесь, в ростере.
+    Кто виден кому — visible(): #29."""
+    listing = nomad.client().jobs.get_jobs(prefix=JOB_PREFIX, meta=True)
+    return visible(listing, shard)
 
 
 def next_name(project):
