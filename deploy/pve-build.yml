@@ -351,12 +351,14 @@
     # опираться. Оба файла лежат на управляющей машине: их вырезал
     # `mop driver build` из зеркала origin ещё до плейбука.
     - name: The shard's own configuration, when it has one
-      when: mop_shard_vars | default('')
+      # length > 0, а не голая строка в when: условие обязано дать boolean,
+      # строку ansible отвергает — поймано первой же живой сборкой #26.
+      when: (mop_shard_vars | default('')) | length > 0
       ansible.builtin.include_vars:
         file: "{{ mop_shard_vars }}"
 
     - name: The shard's own tasks, when it has any
-      when: mop_shard_tasks | default('')
+      when: (mop_shard_tasks | default('')) | length > 0
       ansible.builtin.include_tasks: "{{ mop_shard_tasks }}"
 
     # Кэш crates тоже в образ, и греется он единственным честным способом --
