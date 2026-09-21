@@ -207,8 +207,11 @@ def v_build(argv):
         # сработала, либо чужая, которая сработала.
         print(f"  {shard}/mop.yaml: {k} is not a project's to set — ignored")
     extra = {"mop_shard": shard, "mop_origin": origin, "mop_shard_asks": asked,
-             # Конвенция env_files: имена знает проект, байты возит установка.
-             "mop_env_files": mine.get("env_files") or []}
+             # Конвенция env_files: имена знает проект, байты возит
+             # установка. Форма — ТА ЖЕ, что у deploy: {шард, файл}; роль
+             # тела ждёт её, и второй формы у одного механизма не бывает.
+             "mop_env_files": [{"shard": shard, "file": n}
+                               for n in mine.get("env_files") or []]}
     if vars_file:
         extra["mop_shard_vars"] = vars_file
     if tasks_file:
