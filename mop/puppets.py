@@ -416,6 +416,20 @@ def shard_constraint(shard):
             "RTarget": f"(^|,)({ANY_SHARD}|{re.escape(shard)})(,|$)"}
 
 
+def shard_ids(lines):
+    """Строки памяти/аргументов -> ({origin'ы}, {легаси-имена}).
+
+    Память шардов хранит ORIGIN'ы, а не имена (#33): имя выводится
+    basename'ом, а вот имя в origin разворачивать некуда — таблицы имён
+    нет и заводить нельзя. Строка без / и : — имя с легаси-времён, origin
+    которого уже не узнать; такие НЕ теряются, иначе их шард молча
+    выпадает из конфига NATS при следующем deploy.
+    """
+    stripped = {l.strip() for l in lines if l.strip()}
+    origins = {l for l in stripped if "/" in l or ":" in l}
+    return origins, stripped - origins
+
+
 def visible(listing, shard):
     """Папеты из сырого списка джобов глазами одного шарда (#29).
 

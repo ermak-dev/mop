@@ -54,6 +54,19 @@ if [[ ! -f "$INVENTORY" ]]; then
     exit 1
 fi
 
+# Файлы окружения тел называет MOP_BODY_EXTRA, а лежат они в УСТАНОВКЕ и в git
+# не попадают (setup.yaml -- копия setup.yaml.example). Проверяем здесь: у
+# ansible пропавший include_tasks валит прогон в середине, когда полпула уже
+# перенастроено, и читается это как поломка плейбука, а не как «файла нет».
+while read -r extra; do
+    [[ -z "$extra" || -f "$PROJECT_HOME/$extra" ]] && continue
+    fail "no body environment file $extra -- create it from the example: cp setup.yaml.example setup.yaml (or empty MOP_BODY_EXTRA in .env)"
+    exit 1
+done < <(python3 -c "
+import json, sys
+for part in json.load(sys.stdin).get('MOP_BODY_EXTRA', '').split(','):
+    print(part.strip())" <<<"$SETTINGS")
+
 # Прежние цели запуска. Отвергаем, а не молча трактуем как имя шарда: старая
 # привычка `mop deploy pool` завела бы на шине пользователя master-pool, и
 # разбирались бы с этим уже по симптомам.
@@ -70,15 +83,20 @@ esac
 link nomad   deploy/nomad
 link nats    deploy
 # Манифесты шардов (#25): режутся из ORIGIN библиотечным разбором ЗДЕСЬ,
-# на управляющей машине. Плейбук получает готовые пути и не заводит второго,
-# снисходительного парсера у себя. Недоступный origin валит прогон громко:
-# шард, названный установкой, обязан существовать.
+# на управляющей машине. Origin'ы -- из памяти шардов (`mop shards`): она
+# узнаёт origin в момент завода шарда аргументом, и отдельного списка в
+# настройках не существует (#33). Плейбук получает готовые пути и не
+# заводит второго, снисходительного парсера у себя. Недоступный origin
+# валит прогон громко: названный шард обязан существовать.
 manifests_json() {
-    python3 - <<'PY'
+    local origins
+    origins="$("$BIN_DIR/mop" shards --origins)"
+    MOP_ORIGINS="$origins" python3 - <<'PY'
 import json
-from mop import config, manifest
+import os
+from mop import manifest
 out = {}
-for origin in (config.get("MOP_SHARD_ORIGINS") or "").split(","):
+for origin in (os.environ.get("MOP_ORIGINS") or "").splitlines():
     origin = origin.strip()
     if not origin:
         continue
