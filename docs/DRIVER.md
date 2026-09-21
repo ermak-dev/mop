@@ -239,7 +239,7 @@ VMID). Столкновение хешей ловится громко в `ensur
 
 Границу проекта playbook не нарушает: `deploy/body.yml` — то, чем обязано быть
 ЛЮБОЕ тело (git, tmux, jq, claude, python3 + nats-py, пакет mop); тулчейн,
-тулчейн и postgres остаются в `setup.yaml` установки (копия
+тулчейн и postgres остаются в `setup.yaml` установки (её копия
 `setup.yaml.example` в корне),
 env-файлы — задачами `.mop/workspace.yaml` самих проектов; подключается
 всё настройкой.

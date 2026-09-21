@@ -16,7 +16,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - `/mop` — the library: returns data, prints nothing
  - `/bin` — commandlets, one subcommand per file; they are the only thing that prints
  - `/deploy` — the product's installation: Nomad, the bus, the agent, the disk watchdog
- - `/setup.yaml.example` — the body environment example: an installation copies it to `setup.yaml`, which git ignores like `.env` and `inventory.yaml`
+ - `/setup.yaml.example` — the puppet environment example: an installation copies it to `setup.yaml`, which git ignores like `.env` and `inventory.yaml`
  - `/skills/master` — the master session's skill, symlinked from outside
  - `/docs` — one file per subsystem
  - `/tests` — checks of pure functions, not a framework

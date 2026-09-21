@@ -45,6 +45,9 @@
 #
 # `creates` от этого не спасает и не для того: оно решает, НАДО ли запускать, а
 # не удалось ли.
+# retries: загрузка -- сто метров через NAT тела, и транзитный обрыв TLS
+# (SSL_read eof) ронял ВСЮ сборку, хотя путь рабочий: три образа через него
+# уже прошли. Повторы переживают обрыв; отказ после них остаётся громким.
 - name: Install the claude CLI
   ansible.builtin.shell: |
     set -o pipefail
@@ -53,3 +56,7 @@
   args:
     creates: "{{ MOP_HOME }}/.local/bin/claude"
     executable: /bin/bash
+  register: claude_cli
+  retries: 4
+  delay: 15
+  until: claude_cli is success
