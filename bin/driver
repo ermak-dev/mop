@@ -199,44 +199,71 @@ def v_build(argv):
     shard = os.path.basename(origin).removesuffix(".git")
     settings = json.dumps({k: v for k, (v, _) in config.effective().items()},
                           ensure_ascii=False)
-    asked, rejected = shard_asks(origin, shard)
+    asked, vars_file, tasks_file, alien = shard_manifest(origin, shard)
     for k, v in sorted(asked.items()):
-        print(f"  {shard}/.mop asks for {k}={v}")
-    for k in sorted(rejected):
+        print(f"  {shard}/mop.yaml asks for {k}={v}")
+    for k in alien:
         # Громко: проглоченный ключ -- это либо настройка, которая не
         # сработала, либо чужая, которая сработала.
-        print(f"  {shard}/.mop: {k} is not a project's to set — ignored")
+        print(f"  {shard}/mop.yaml: {k} is not a project's to set — ignored")
+    extra = {"mop_shard": shard, "mop_origin": origin, "mop_shard_asks": asked}
+    if vars_file:
+        extra["mop_shard_vars"] = vars_file
+    if tasks_file:
+        extra["mop_shard_tasks"] = tasks_file
     rc = subprocess.call(
         ["ansible-playbook", "-i", os.environ["INVENTORY"],
          os.path.join(config.PROJECT, "deploy", "pve-build.yml"),
          "--extra-vars", settings,
-         "--extra-vars", json.dumps({"mop_shard": shard, "mop_origin": origin,
-                                     "mop_shard_asks": asked})])
+         "--extra-vars", json.dumps(extra)])
     if rc == 0:
         announce(shard)
     return rc
 
 
-def shard_asks(origin, shard):
-    """Что проект просит себе в `.mop`. -> ({разрешённое}, [отброшенное]).
+def shard_manifest(origin, shard):
+    """Манифест проекта из его origin. -> (просьбы, путь к файлу vars,
+    путь к файлу tasks, чужие имена); без манифеста — ({}, None, None, []).
 
-    Читаем ИЗ РЕПОЗИТОРИЯ проекта, на управляющей машине, ДО плейбука: файл
-    принадлежит проекту, версионируется вместе с ним, и второго места, где
-    записаны его размеры, не заводится.
+    Читаем ИЗ РЕПОЗИТОРИЯ проекта, на управляющей машине, ДО плейбука:
+    манифест принадлежит проекту, версионируется вместе с ним, и второго
+    места, где записано его окружение, не заводится.
 
     `git show` по голому зеркалу, без рабочего дерева: клон ради одного файла
-    был бы лишней минутой на каждую сборку. Нет файла — нет и просьб, это
-    штатный случай: большинству проектов хватает значений установки."""
-    tmp = f"/tmp/mop-dotmop-{shard}.git"
+    был бы лишней минутой на каждую сборку. Нет mop.yaml — нет ни просьб, ни
+    окружения, это штатный случай: большинству проектов хватает общего.
+
+    Файлы, а не extra-переменные: задачи и конфигурация — это СТРУКТУРА, и
+    пусть её кладёт yaml, а не json в аргументах командной строки."""
+    tmp = f"/tmp/mop-manifest-{shard}.git"
     subprocess.call(["rm", "-rf", tmp])
     try:
         r = subprocess.run(["git", "clone", "--mirror", "-q", origin, tmp],
                            capture_output=True, text=True)
         if r.returncode != 0:
             sys.exit(f"cannot read {shard}: {(r.stderr or r.stdout).strip()}")
-        got = subprocess.run(["git", "-C", tmp, "show", "HEAD:.mop"],
+        got = subprocess.run(["git", "-C", tmp, "show", "HEAD:mop.yaml"],
                              capture_output=True, text=True)
-        return config.shard_settings(got.stdout if got.returncode == 0 else "")
+        if got.returncode != 0:
+            return {}, None, None, []
+        try:
+            mvars, tasks = config.manifest(got.stdout)
+        except ValueError as e:
+            sys.exit(f"{shard}/mop.yaml: {e}")
+        asks, mine, alien = config.manifest_parts(mvars)
+        import yaml
+        out = f"/tmp/mop-manifest-{shard}"
+        os.makedirs(out, exist_ok=True)
+        vars_file = tasks_file = None
+        if mine:
+            vars_file = os.path.join(out, "vars.yml")
+            with open(vars_file, "w") as f:
+                yaml.safe_dump(mine, f, allow_unicode=True)
+        if tasks:
+            tasks_file = os.path.join(out, "tasks.yml")
+            with open(tasks_file, "w") as f:
+                yaml.safe_dump(tasks, f, allow_unicode=True, default_flow_style=False)
+        return asks, vars_file, tasks_file, alien
     finally:
         subprocess.call(["rm", "-rf", tmp])
 

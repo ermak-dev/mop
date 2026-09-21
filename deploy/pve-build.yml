@@ -345,6 +345,19 @@
       ansible.builtin.include_tasks: "{{ playbook_dir }}/../{{ item | trim }}"
       loop: "{{ MOP_BODY_EXTRA.split(',') | select | list }}"
 
+    # Манифест САМОГО ШАРДА (#25): сначала его конфигурация, потом его
+    # задачи — после общих файлов установки, чтобы проект мог на них
+    # опираться. Оба файла лежат на управляющей машине: их вырезал
+    # `mop driver build` из зеркала origin ещё до плейбука.
+    - name: The shard's own configuration, when it has one
+      when: mop_shard_vars | default('')
+      ansible.builtin.include_vars:
+        file: "{{ mop_shard_vars }}"
+
+    - name: The shard's own tasks, when it has any
+      when: mop_shard_tasks | default('')
+      ansible.builtin.include_tasks: "{{ mop_shard_tasks }}"
+
     # Кэш crates тоже в образ, и греется он единственным честным способом --
     # разрешением зависимостей настоящего дерева. Дерево берём ИЗ ЗЕРКАЛА: это
     # локальный клон, ему не нужны ни сеть, ни ключ.

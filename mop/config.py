@@ -287,6 +287,59 @@ SHARD_SCOPED = (
 )
 
 
+def manifest_parts(mvars):
+    """vars манифеста -> (просьбы, конфигурация проекта, чужие имена).
+
+    Три судьбы у одного словаря: ключи SHARD_SCOPED — просьба о размерах
+    (едет в образ числами); ключи, не являющиеся настройками mop, —
+    конфигурация самого проекта (едет контекстом его задачам); ключи,
+    совпадающие с настоящими настройками, — ЧУЖИЕ: в контексте задач они
+    затёрли бы правду машины (MOP_USER, MOP_HOME), поэтому отбрасываются
+    громко, со списком.
+    """
+    asks = {k: str(v) for k, v in mvars.items() if k in SHARD_SCOPED}
+    mine = {k: v for k, v in mvars.items() if k not in SETTINGS}
+    alien = sorted(k for k in mvars if k in SETTINGS and k not in SHARD_SCOPED)
+    return asks, mine, alien
+
+
+def manifest(text):
+    """`mop.yaml` -> ({vars}, [tasks]).
+
+    Манифест проекта (#25): одна игра, где vars — и просьба (ключи
+    SHARD_SCOPED), и конфигурация его окружения, а tasks — само окружение
+    сверх общего. Форма оговорена жёстко, и отход от неё — ValueError, а не
+    «прочиталось как получилось»: молча потерянные tasks означают образ без
+    окружения проекта, а молча потерянные vars — образ не тех размеров.
+
+    yaml импортируется ЛЕНИВО и только здесь: пакет ездит на узлы, где
+    pyyaml может не оказаться, а манифест читается исключительно на
+    управляющей машине.
+    """
+    import yaml
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise ValueError(f"mop.yaml is not YAML: {str(e).splitlines()[0]}")
+    if not isinstance(doc, list) or len(doc) != 1 or not isinstance(doc[0], dict):
+        raise ValueError("mop.yaml must be one play: a list of exactly one mapping")
+    play = doc[0]
+    # Отсутствие секции — нормально (нечего просить/ставить), но ПРИСУТСТВИЕ
+    # не той формы — ошибка: `tasks: {}` не «пустые задачи», а опечатка,
+    # из-за которой образ тихо остался бы без окружения проекта.
+    of_vars = play.get("vars")
+    tasks = play.get("tasks")
+    if of_vars is None:
+        of_vars = {}
+    if tasks is None:
+        tasks = []
+    if not isinstance(of_vars, dict):
+        raise ValueError("mop.yaml vars must be a mapping")
+    if not isinstance(tasks, list):
+        raise ValueError("mop.yaml tasks must be a list")
+    return of_vars, tasks
+
+
 def shard_settings(text):
     """Содержимое `.mop` -> ({разрешённое}, [отброшенные ключи]).
 
