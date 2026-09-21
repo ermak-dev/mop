@@ -283,9 +283,16 @@ if [ -n "${PU_CONTINUE:-}" ] \
     printf '%s' "$PU_CONTINUE" > "$marker"
     claude_args="$claude_args --continue"
 fi
+# Сколько заданий сборки телу положено: MOP_CORES (#44). На host-узле он
+# лежит в node.env; в pve-теле node.env нет, и nproc тела РОВНО то, что
+# испечено из MOP_CORES сборкой образа. Зашитая единица врала про машину
+# кратно: телу с четырьмя ядрами один поток сборки.
+cores="$(nproc)"
+mc="$(grep -a '^MOP_CORES=' "$HOME/.config/mop/node.env" 2>/dev/null | tail -1 | cut -d= -f2)"
+[ -n "$mc" ] && cores="$mc"
 tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     -e CARGO_TARGET_DIR="$HOME/.cache/target-$PU_NAME" \
-    -e CARGO_BUILD_JOBS=1 \
+    -e CARGO_BUILD_JOBS="$cores" \
     -e PATH="$d/bin:$PATH" \
     -e MOP_SHARD="$PU_SHARD" \
     -e MOP_BUS_CONFIG="$shard_creds" \
