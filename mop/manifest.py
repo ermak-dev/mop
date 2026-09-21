@@ -14,12 +14,17 @@ from . import config
 
 
 def fetch(origin):
-    """origin -> (имя шарда, просьбы, путь vars, путь tasks, чужие имена).
+    """origin -> (имя шарда, просьбы, путь vars, путь tasks, чужие имена,
+    словарь самого проекта).
 
-    Нет mop.yaml — (имя, {}, None, None, []): большинству проектов хватает
-    общего, и отсутствие манифеста — штатный случай, а не ошибка. Ошибки —
-    громкие: недоступный origin и кривая форма поднимают RuntimeError, их
-    переводит в выход вызывающий.
+    Словарь проекта возвращается ЦЕЛИКОМ: вызывающие берут из него своё
+    (deploy — конвенцию env_files, задачи получают его файлом vars.yml), и
+    второй разбора не заводится.
+
+    Нет mop.yaml — (имя, {}, None, None, [], {}): большинству проектов
+    хватает общего, и отсутствие манифеста — штатный случай, а не ошибка.
+    Ошибки — громкие: недоступный origin и кривая форма поднимают
+    RuntimeError, их переводит в выход вызывающий.
 
     Зеркало, а не рабочий клон: манифест принадлежит РЕПОЗИТОРИЮ, и origin —
     единственная его правда; рабочая копия на управляющей машине может быть
@@ -38,7 +43,7 @@ def fetch(origin):
         got = subprocess.run(["git", "-C", tmp, "show", "HEAD:mop.yaml"],
                              capture_output=True, text=True)
         if got.returncode != 0:
-            return shard, {}, None, None, []
+            return shard, {}, None, None, [], {}
         try:
             mvars, tasks = config.manifest(got.stdout)
         except ValueError as e:
@@ -56,6 +61,6 @@ def fetch(origin):
             with open(tasks_path, "w") as f:
                 yaml.safe_dump(tasks, f, allow_unicode=True,
                                default_flow_style=False)
-        return shard, asks, vars_path, tasks_path, alien
+        return shard, asks, vars_path, tasks_path, alien, mine
     finally:
         subprocess.run(["rm", "-rf", tmp], capture_output=True)
