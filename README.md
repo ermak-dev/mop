@@ -29,6 +29,7 @@ claude code на остальных машинах (папеты, на узла�
        cp .env.example .env && chmod 600 .env
        cp inventory.yaml.example inventory.yaml
        cp setup.yaml.example setup.yaml
+       cp setup.yaml.example setup.yaml
 
    `.env` — что знает установка. Обязательных настроек две: `MOP_SERVER_LAN` —
    адрес сервера в локальной сети (на него ходят и узлы, и мастер),

@@ -3,3 +3,4 @@ inventory.ini
 *.pyc
 __pycache__/
 inventory.yaml
+setup.yaml

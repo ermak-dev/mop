@@ -38,6 +38,46 @@
     nextest_version: 0.9.98
 
 
+# ЯЩИК ИНСТРУМЕНТОВ: линтеры, клиенты и мелочи, без которых папет
+# «проверить и померить» не может. apt ставит то, что в дистро есть;
+# shfmt, gh и ruff в apt этого дистро нет — одиночными бинарями с
+# приpinенной версией (creates, как у claude CLI: обновление -- правка
+# версии здесь).
+- name: Ensure the everyday toolbox (apt part)
+  ansible.builtin.apt:
+    name:
+      - shellcheck
+      - postgresql-client
+      - docker.io
+      - bc
+      - time        # /usr/bin/time: у builtin-версии нет -v
+    state: present
+
+- name: Install shfmt (single binary, not in apt)
+  ansible.builtin.get_url:
+    url: https://github.com/mvdan/sh/releases/download/v3.11.0/shfmt_v3.11.0_linux_amd64
+    dest: /usr/local/bin/shfmt
+    mode: '0755'
+
+- name: Install gh (single tarball, not in apt)
+  ansible.builtin.unarchive:
+    src: https://github.com/cli/cli/releases/download/v2.74.0/gh_2.74.0_linux_amd64.tar.gz
+    dest: /usr/local/bin
+    extra_opts: ["--strip-components=1", "--wildcards", "*/bin/gh"]
+    remote_src: yes
+    mode: '0755'
+
+- name: Install ruff (single binary, not in apt of this distro)
+  ansible.builtin.get_url:
+    url: https://github.com/astral-sh/ruff/releases/download/0.9.6/ruff-x86_64-unknown-linux-gnu.tar.gz
+    dest: /tmp/ruff.tgz
+    mode: '0644'
+  register: ruff_tgz
+
+- name: Unpack ruff
+  ansible.builtin.shell: tar xzf /tmp/ruff.tgz --strip-components=1 -C /usr/local/bin ruff-x86_64-unknown-linux-gnu/ruff
+  when: ruff_tgz is changed
+
 # Тулчейн Rust ставит rustup, а не apt: cargo нужен тот же, каким собирают
 # проекты (stable, с rustfmt и clippy), и обновлять его должен сам папет,
 # а не релиз дистрибутива. До появления этой задачи cargo на узлах стоял
