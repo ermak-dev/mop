@@ -339,9 +339,9 @@
       ansible.builtin.meta: end_host
       when: MOP_BODY_EXTRA | default('') | length == 0
 
-    # include_tasks с явным путём, а не роль: examples/ — установка автора, и
-    # ей ролевое дерево ни к чему. Путь считается от плейбука, потому что
-    # вызывающих у этих файлов двое — прогон по узлам и эта сборка.
+    # include_tasks с явным путём, а не роль: setup.yaml -- ПРИМЕР установки,
+    # и ролевое дерево ему ни к чему. Путь считается от плейбука, потому что
+    # вызывающих у файла двое -- прогон по узлам и эта сборка.
     - name: Task files this installation names
       ansible.builtin.include_tasks: "{{ playbook_dir }}/../{{ item | trim }}"
       loop: "{{ MOP_BODY_EXTRA.split(',') | select | list }}"
