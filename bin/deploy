@@ -50,7 +50,7 @@ shards_json() {
 }
 
 if [[ ! -f "$INVENTORY" ]]; then
-    fail "no inventory $INVENTORY -- create it from the example: cp inventory.ini.example inventory.ini"
+    fail "no inventory $INVENTORY -- create it from the example: cp inventory.yaml.example inventory.yaml"
     exit 1
 fi
 

@@ -8,7 +8,9 @@ export PROJECT_HOME="$(dirname "$BIN_DIR")"
 export PYTHONPATH="$PROJECT_HOME${PYTHONPATH:+:$PYTHONPATH}"
 
 # Инвентарь — часть установки: живёт в корне проекта, в git не попадает.
-export INVENTORY="${INVENTORY:-$PROJECT_HOME/inventory.ini}"
+# YAML, а не INI: переменные МАШИНЫ пишутся под самим хостом, а в INI эта
+# форма либо не парсится, либо предупреждает на каждом прогоне (#24).
+export INVENTORY="${INVENTORY:-$PROJECT_HOME/inventory.yaml}"
 
 # Настройки самого ansible — часть ПРОДУКТА, и находятся они по этой
 # переменной. Свой ansible.cfg ansible ищет относительно текущего каталога, а
