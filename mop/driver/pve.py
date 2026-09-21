@@ -336,7 +336,7 @@ async def _sync_package(name, vmid):
     blob = "/tmp/mop-package.tgz"
     tar = (f"tar czf - -C {shlex.quote(PACKAGE)} "
            f"--exclude=.git --exclude=__pycache__ --exclude=.env "
-           f"--exclude=inventory.ini .")
+           f"--exclude=inventory.ini --exclude=inventory.yaml .")
     out, code = await sh(f"{tar} | {_pve_cmd('push', vmid, blob, '600')}", 300)
     if code not in (0, None):
         return {"error": f"{name}: the mop package did not reach the body: "

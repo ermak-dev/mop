@@ -246,7 +246,7 @@
         cmd: >-
           tar czf {{ mop_tgz }} -C {{ lookup('env', 'HOME') }}/mop
           --exclude=.git --exclude=__pycache__ --exclude=.env
-          --exclude=inventory.ini .
+          --exclude=inventory.ini --exclude=inventory.yaml .
       delegate_to: localhost
       changed_when: true
 
