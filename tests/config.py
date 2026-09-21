@@ -149,6 +149,70 @@ def main():
             print(f"FAILED  .mop, {what}\n  wanted: {want!r} + отброшено {want_bad!r}"
                   f"\n  got: {got!r} + отброшено {bad_keys!r}")
 
+    # mop.yaml: манифест проекта (#26). Одна игра: vars — просьба и
+    # конфигурация проекта, tasks — его окружение сверх общего. Форма строго
+    # оговорена, и отход от неё — ошибка, а не «прочиталось как получилось»:
+    # молчаливо потерянные tasks означают образ без окружения проекта.
+    MANIFEST = [
+        ("полный манифест", """- name: what a body is\n  vars:\n    MOP_PVE_CORES: "8"\n    postgres_major: 18\n  tasks:\n    - name: t\n""",
+         {"MOP_PVE_CORES": "8", "postgres_major": 18}, [{"name": "t"}]),
+        ("только vars — манифест mop", """- name: x\n  vars:\n    MOP_PVE_DISK_GB: "40"\n""",
+         {"MOP_PVE_DISK_GB": "40"}, []),
+        ("пустая игра допустима", "- name: nothing to ask\n", {}, []),
+        ("пустой vars", """- name: x\n  vars: {}\n  tasks: []\n""", {}, []),
+    ]
+    for what, text, want_vars, want_tasks in MANIFEST:
+        cases += 1
+        try:
+            got_vars, got_tasks = config.manifest(text)
+        except ValueError as e:
+            bad += 1
+            print(f"FAILED  mop.yaml, {what}: поднялся ValueError {e}")
+            continue
+        if got_vars != want_vars or got_tasks != want_tasks:
+            bad += 1
+            print(f"FAILED  mop.yaml, {what}\n  wanted: {want_vars!r} / {want_tasks!r}"
+                  f"\n  got: {got_vars!r} / {got_tasks!r}")
+
+    # HYPOTHESIS: отход от формы — не список игр, две игры, игра не словарь,
+    # пустой файл — обязан валиться ValueError: у манифеста один хозяин и
+    # одна форма, «почти правильный» файл это образ без половины замысла.
+    for what, text in [
+        ("не список", "vars: {}\n"),
+        ("две игры", "- name: a\n- name: b\n"),
+        ("игра не словарь", "- просто строка\n"),
+        ("пустой файл", ""),
+        ("vars не словарь", "- name: x\n  vars: 5\n"),
+        ("tasks не список", "- name: x\n  tasks: {}\n"),
+    ]:
+        cases += 1
+        try:
+            config.manifest(text)
+        except ValueError:
+            continue
+        bad += 1
+        print(f"FAILED  mop.yaml, {what}: должен был отказаться ValueError")
+
+    # Расщепление vars манифеста (#26): просьбы (SHARD_SCOPED) идут в размеры
+    # образа, остальное НЕ-настройочное — конфигурация самого проекта и едет
+    # его задачам. А вот имя, совпадающее с настоящей настройкой mop, — чужое:
+    # в контексте задач оно ЗАТЁРЛО бы правду машины (MOP_USER, MOP_HOME).
+    PARTS = [
+        ("полный расклад",
+         {"MOP_PVE_CORES": 8, "postgres_major": 18, "MOP_USER": "root"},
+         {"MOP_PVE_CORES": "8"}, {"postgres_major": 18}, ["MOP_USER"]),
+        ("только просьбы", {"MOP_PVE_DISK_GB": "40"}, {"MOP_PVE_DISK_GB": "40"}, {}, []),
+        ("только своё", {"toolchain": "rust"}, {}, {"toolchain": "rust"}, []),
+        ("пусто", {}, {}, {}, []),
+    ]
+    for what, mvars, want_asks, want_mine, want_alien in PARTS:
+        cases += 1
+        asks, mine, alien = config.manifest_parts(mvars)
+        if (asks != want_asks or mine != want_mine or sorted(alien) != want_alien):
+            bad += 1
+            print(f"FAILED  parts, {what}\n  wanted: {want_asks!r}/{want_mine!r}/{want_alien!r}"
+                  f"\n  got: {asks!r}/{mine!r}/{alien!r}")
+
     # Всё, что проект вправе просить, обязано быть настройкой: иначе оно
     # никуда не доедет, а отказа не будет.
     cases += 1
