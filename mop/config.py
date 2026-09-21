@@ -81,6 +81,9 @@ def pool_user():
 REQUIRED = {
     "MOP_SERVER_LAN": "server address on the LAN: nodes reach it (Nomad RPC, "
                       "bus), and so does the master (Nomad API)",
+    # Откуда папеты клонируют проекты: узел доверяет ключ именно этого хоста,
+    # и угадывать чужой forge молча mop не будет.
+    "MOP_GIT_HOST": "git host the puppets clone from (known_hosts of nodes)",
 }
 
 # Дефолт верен для любой установки; переопределяют редко.

@@ -45,19 +45,39 @@
           become: yes
       loop: "{{ (MOP_BODY_EXTRA | default('')).split(',') | select | list }}"
 
-# ЧТО ПРОЕКТ ГОВОРИТ О СВОЁМ ОКРУЖЕНИИ (#25/#27). Узел применяется
-# манифестам шардов установки: vars и tasks из mop.yaml каждого, уже
-# вырезанные на управляющей машине из его origin (bin/deploy) — плейбук не
-# парсит сам и второго, снисходительного разбора не заводит.
+# ЧТО ПРОЕКТ ПРОСИТ ОТ УЗЛА (#32): задачи .mop/node.yaml каждого шарда,
+# вырезанные на управляющей машине из его origin. Без отсечки по драйверу:
+# узловое нужно узлу ВСЕГДА, даже если папет в нём не живёт (симметрия
+# сеянию git-ключа в роли node). Общего узлового в продукте уже хватает —
+# у большинства проектов этой половины нет вовсе, и игра пуста.
+- name: What each shard's manifest asks of this node
+  hosts: puppet
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: No shard has node tasks
+      ansible.builtin.meta: end_host
+      when: (mop_manifests | default({}))
+             | dict2items | selectattr('value.node_tasks', 'defined')
+             | list | length == 0
+
+    - name: Node tasks of each shard that has them
+      ansible.builtin.include_tasks: "{{ item.value.node_tasks }}"
+      loop: "{{ mop_manifests | dict2items | selectattr('value.node_tasks', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+# ЧТО ПРОЕКТУ НУЖНО В ТЕЛЕ (#25/#27/#32): vars и tasks его
+# .mop/workspace.yaml. Файлы подготовлены на управляющей машине из origin
+# (bin/deploy) — плейбук не парсит сам и второго разбора не заводит.
+# Копирование файлов — ЗАДАЧАМИ копирования самого манифеста: формат ansible
+# декларативен, и отдельных конвенций транспорту не нужно.
 #
-# Секреты сюда не попадают ПРИНЦИПИАЛЬНО: их нет в git, и на host-узлах их
-# возит examples/env.yml установки. А вот задачи исполняются от root: узел
-# доверяет репозиториям, названным в MOP_SHARD_ORIGINS, — это записанное
-# решение эпика #25, сменившее прежнее «проекту отданы только размеры».
-#
-# Нет манифеста — нечего применять, и узел про этот шард молчит: общее
-# (MOP_BODY_EXTRA выше) уже стоит.
-- name: What each shard's manifest adds to this node
+# Секреты в задачах остаются секретами: src — путь на УПРАВЛЯЮЩЕЙ машине,
+# в git их по-прежнему нет. А вот задачи исполняются от root: узел доверяет
+# репозиториям, названным в MOP_SHARD_ORIGINS, — записанное решение эпика #25.
+- name: What each shard's manifest adds to a body
   hosts: puppet
   become: yes
   gather_facts: no
@@ -67,23 +87,25 @@
       ansible.builtin.meta: end_host
       when: mop_driver | default(MOP_DRIVER) != 'host'
 
-    - name: No shard has a manifest
+    - name: No shard has workspace tasks
       ansible.builtin.meta: end_host
-      when: (mop_manifests | default({})) | length == 0
+      when: (mop_manifests | default({}))
+             | dict2items | selectattr('value.ws_tasks', 'defined')
+             | list | length == 0
 
     # СНАЧАЛА конфигурация всех, ПОТОМ задачи всех: у include_vars нет охвата
     # на один include, и переменные проектов живут в одном словаре узла.
     # Совпавшее имя между проектами перебивается по порядку — единственная
     # цена простоты; имена в vars манифеста — внутреннее дело проекта.
-    - name: Configuration of each shard that has one
+    - name: Workspace configuration of each shard that has one
       ansible.builtin.include_vars:
-        file: "{{ item.value.vars }}"
-      loop: "{{ mop_manifests | dict2items | selectattr('value.vars', 'defined') | list }}"
+        file: "{{ item.value.ws_vars }}"
+      loop: "{{ mop_manifests | dict2items | selectattr('value.ws_vars', 'defined') | list }}"
       loop_control:
         label: "{{ item.key }}"
 
-    - name: Tasks of each shard that has any
-      ansible.builtin.include_tasks: "{{ item.value.tasks }}"
-      loop: "{{ mop_manifests | dict2items | selectattr('value.tasks', 'defined') | list }}"
+    - name: Workspace tasks of each shard that has any
+      ansible.builtin.include_tasks: "{{ item.value.ws_tasks }}"
+      loop: "{{ mop_manifests | dict2items | selectattr('value.ws_tasks', 'defined') | list }}"
       loop_control:
         label: "{{ item.key }}"
