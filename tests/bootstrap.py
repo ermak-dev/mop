@@ -85,7 +85,7 @@ def main():
                           "proj", "pu-proj-1", "/home/pool/puppets/pu-proj-1",
                           "/s/proj-tasks.yml", "/s/proj-vars.yml")
     joined = " ".join(argv)
-    for want in ("ansible-playbook", "10.77.38.100,", "ansible_user=pool",
+    for want in ("ansible-playbook", "10.77.38.100,", "\"ansible_user\": \"pool\"",
                  "mop-bootstrap", "StrictHostKeyChecking=no", "mop_puppet",
                  "pu-proj-1", "/s/proj-tasks.yml", "/s/proj-vars.yml",
                  "/x/deploy/bootstrap.yml"):
