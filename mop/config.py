@@ -95,7 +95,6 @@ DEFAULTS = {
     "MOP_HOME": os.path.expanduser("~"),
     "MOP_USER": pool_user(),
     "MOP_POOL_DC": "home",
-    "MOP_CONTROL_DC": "control",
     "MOP_NOMAD_DATA": os.path.expanduser("~/nomad/data"),
     "MOP_NOMAD_VERSION": "1.10.5",
     # Откуда качать бинарь Nomad. Дефолт — официальные релизы; установке в
