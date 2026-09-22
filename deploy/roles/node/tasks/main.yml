@@ -53,18 +53,22 @@
     group: "{{ MOP_USER }}"
     mode: '0700'
 
+# Какой ключ -- настройка MOP_GIT_KEY (дефолт: первый из стандартных имён на
+# контроллере), а имя на узле то же, что на контроллере: ssh подхватывает
+# стандартные имена сам, а тело сеет оба (MOP_BODY_SEED). Наличие файла
+# проверяет `mop deploy` до прогона.
 - name: Git identity of the pool user
   ansible.builtin.copy:
-    src: "{{ lookup('env', 'HOME') }}/.ssh/{{ item.name }}"
-    dest: "{{ MOP_HOME }}/.ssh/{{ item.name }}"
+    src: "{{ MOP_GIT_KEY }}{{ item.suffix }}"
+    dest: "{{ MOP_HOME }}/.ssh/{{ MOP_GIT_KEY | basename }}{{ item.suffix }}"
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
     mode: "{{ item.mode }}"
   loop:
-    - {name: id_rsa, mode: '0600'}
-    - {name: id_rsa.pub, mode: '0644'}
+    - {suffix: '', mode: '0600'}
+    - {suffix: '.pub', mode: '0644'}
   loop_control:
-    label: "{{ item.name }}"
+    label: "{{ MOP_GIT_KEY | basename }}{{ item.suffix }}"
 
 # Ключ хоста снимаем с управляющей машины и кладём явно: интерактивного
 # «yes» в клоне из-под Nomad ввести некому, а StrictHostKeyChecking=no

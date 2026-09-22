@@ -227,7 +227,26 @@ OPTIONAL = {
 # момент импорта ещё не читали. Значение из окружения или .env старше — разовое
 # `NOMAD_ADDR=… mop list` обязано продолжать работать, и на внешний кластер
 # нацеливаются им же.
+GIT_KEYS = ("~/.ssh/id_ed25519", "~/.ssh/id_rsa")
+
+
+def git_key(candidates=None):
+    """Ключ пула к git на контроллере: первый существующий из стандартных
+    имён, либо пусто -- тогда deploy отказывает до прогона, а не посреди
+    плейбука. Имя было зашито как id_rsa (ключ автора), и на хосте с одним
+    id_ed25519 роль узла падала на «Could not find id_rsa on the Controller»
+    (#67). Проверка в tests/config.py."""
+    for c in (candidates or [os.path.expanduser(k) for k in GIT_KEYS]):
+        if os.path.exists(c):
+            return c
+    return ""
+
+
 DERIVED = {
+    # Приватный ключ, под которым узлы и тела клонируют проекты; его
+    # публичная часть зарегистрирована на MOP_GIT_HOST. Едет на узел под тем
+    # же именем, и тело сеет оба стандартных имени (MOP_BODY_SEED).
+    "MOP_GIT_KEY": git_key,
     "NOMAD_ADDR": lambda: "http://{}:{}".format(get("MOP_SERVER_LAN"),
                                                 get("MOP_NOMAD_PORT")),
     # Шлюз сети тел — первый адрес MOP_PVE_SUBNET, он же адрес моста на самом
