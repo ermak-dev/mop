@@ -5,6 +5,7 @@ The same picture as `mop list`, `mop node` and `mop stat` on one page,
 refreshed in place (docs/WEB.md):
 
   /            the page
+  /logo.png    the logo (docs/logo.png), also the favicon
   /api/pool    the current snapshot as JSON
   /events      the same snapshot pushed as server-sent events
   /healthz     200 once the first snapshot is in
@@ -22,6 +23,7 @@ import lib
 from mop import bus, config, web
 
 PAGE = os.path.join(config.PROJECT, "web", "index.html")
+LOGO = os.path.join(config.PROJECT, "docs", "logo.png")   # фавикон и шапка
 PING_EVERY = 15      # с: пустой кадр SSE, чтобы прокси и браузер не рвали тишину
 
 COLLECTOR = web.Collector()
@@ -50,6 +52,9 @@ class Handler(BaseHTTPRequestHandler):
             # а стоит это одного файла в page cache.
             with open(PAGE, "rb") as f:
                 return self._send(200, f.read(), "text/html; charset=utf-8")
+        if path == "/logo.png":
+            with open(LOGO, "rb") as f:
+                return self._send(200, f.read(), "image/png")
         if path == "/api/pool":
             return self._send(200, json.dumps(COLLECTOR.current(), ensure_ascii=False))
         if path == "/healthz":
