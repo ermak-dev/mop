@@ -291,14 +291,26 @@ fi
 cores="$(nproc)"
 mc="$(grep -a '^MOP_CORES=' "$HOME/.config/mop/node.env" 2>/dev/null | tail -1 | cut -d= -f2)"
 [ -n "$mc" ] && cores="$mc"
+# PATH идёт присваиванием В САМОЙ КОМАНДЕ, а не через -e, и это не стиль.
+# tmux кладёт -e в окружение СЕССИИ, и обычные переменные оттуда до панели
+# доезжают -- CARGO_TARGET_DIR и MOP_SHARD ниже приезжают именно так. А PATH
+# панели он берёт от своего сервера, и значение из -e просто не применяется.
+# Измерено 22.09, tmux 3.4: `new-session -e PATH=/ZZZ:$PATH -e FOO=bar` дал
+# процессу FOO=bar и ИСХОДНЫЙ PATH, при том что show-environment показывал оба.
+# Цена была тихой: каталог bin/ клона кладётся первым ради того, чтобы у папета
+# работала команда проекта (`rug` у rugent), -- и не работала, а правила
+# проекта требуют звать её именно так.
+#
+# Присваивание внутри строки команды, а не префиксом перед `tmux`: префикс
+# уехал бы в окружение СЕРВЕРА tmux, а это ровно та ловушка, из-за которой все
+# папеты однажды делили один CARGO_TARGET_DIR.
 tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     -e CARGO_TARGET_DIR="$HOME/.cache/target-$PU_NAME" \
     -e CARGO_BUILD_JOBS="$cores" \
-    -e PATH="$d/bin:$PATH" \
     -e MOP_SHARD="$PU_SHARD" \
     -e MOP_BUS_CONFIG="$shard_creds" \
     "${llm_env[@]}" \
-    "$HOME/.local/bin/claude $claude_args"
+    "PATH=$d/bin:$PATH $HOME/.local/bin/claude $claude_args"
 trap 'tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null; exit 0' TERM INT
 while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wait $!; done
 """
