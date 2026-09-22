@@ -23,7 +23,7 @@ export ANSIBLE_CONFIG="${ANSIBLE_CONFIG:-$PROJECT_HOME/ansible.cfg}"
 # конкретной машины в репозитории. Здесь они собираются из PROJECT_HOME.
 #
 # Роли есть только у продукта. Общий файл окружения папетов -- собственный
-# setup.yaml установки в корне (в git его нет, есть пример); ролевое дерево
+# sandbox.yaml установки в корне (в git его нет, есть пример); ролевое дерево
 # ему ничего не даёт, а читать дольше.
 export ANSIBLE_ROLES_PATH="${ANSIBLE_ROLES_PATH:-$PROJECT_HOME/deploy/roles}"
 

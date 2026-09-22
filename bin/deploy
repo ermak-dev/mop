@@ -73,12 +73,12 @@ if [[ ! -f "$INVENTORY" ]]; then
 fi
 
 # Файлы окружения папетов называет MOP_BODY_EXTRA, а лежат они в установке и в
-# git не попадают (setup.yaml -- копия setup.yaml.example). Проверяем здесь: у
+# git не попадают (sandbox.yaml -- копия sandbox.yaml.example). Проверяем здесь: у
 # ansible пропавший include_tasks валит прогон в середине, когда полпула уже
 # перенастроено, и читается это как поломка плейбука, а не как «файла нет».
 while read -r extra; do
     [[ -z "$extra" || -f "$PROJECT_HOME/$extra" ]] && continue
-    fail "no body environment file $extra -- create it from the example: cp setup.yaml.example setup.yaml (or empty MOP_BODY_EXTRA in .env)"
+    fail "no body environment file $extra -- create it from the example: cp sandbox.yaml.example sandbox.yaml (or empty MOP_BODY_EXTRA in .env)"
     exit 1
 done < <(python3 -c "
 import json, sys
@@ -129,12 +129,16 @@ for origin in (os.environ.get("MOP_ORIGINS") or "").splitlines():
         continue
     got = manifest.fetch(origin)
     entry = {"asks": got["asks"]}
-    for side in ("node_tasks", "ws_vars", "ws_tasks"):
+    for side in ("sandbox_vars", "sandbox_tasks", "bootstrap_vars", "bootstrap_tasks"):
         if got[side]:
             entry[side] = got[side]
     out[got["shard"]] = entry
     for k in got["alien"]:
         print(f"  {got['shard']}/.mop: {k} is not a project's to set — ignored",
+              flush=True)
+    for old in got["legacy"]:
+        print(f"  {got['shard']}/{old}: read as .mop/sandbox.yaml for the transition "
+              f"(#61) — rename it, the old name will stop being read",
               flush=True)
 print(json.dumps({"mop_manifests": out}))
 PY

@@ -4,7 +4,26 @@
 здесь — дорога за ним: зеркало или каталог, файлы для ansible. Молчит и
 печатает вызывающий: библиотека возвращает данные.
 
-Файлы, а не значения в аргументах: задачи и конфигурация манифеста —
+Два файла, и имена говорят, когда каждый играется (#61):
+
+    .mop/sandbox.yaml    размеры тела (vars по конвенции SHARD_SCOPED),
+                         конфигурация проекта (остальные vars) и системные
+                         пакеты (tasks) — ПЕЧЁТСЯ в образ шарда; на узле,
+                         где тело равно узлу, играется прогоном deploy
+    .mop/bootstrap.yaml  env-файлы и настройка окружения — играется при
+                         КАЖДОМ старте песочницы (#62)
+
+Раньше файлы звались node.yaml и workspace.yaml и обещали обратное тому,
+что делал механизм: workspace пёкся в образ, node играл на машине-узле (на
+гипервизоре — на самом Proxmox, где папета нет), а при старте не играло
+ничто. Старые имена читаются переходно — оба как sandbox, ровно так, как они
+и работали, — и возвращаются в `legacy`, чтобы вызывающий сказал об этом
+вслух: непереехавший проект не должен молча остаться без манифеста. Порядок
+переезда обязателен: mop читает оба имени → переезжают проекты → старое имя
+снимается.
+
+Тяжёлое — в sandbox: то, что лежит в bootstrap, платится на каждом подъёме
+папета. Файлы, а не значения в аргументах: задачи и конфигурация манифеста —
 структура, и пусть её кладёт yaml, а не json в командной строке.
 """
 import os
@@ -12,19 +31,16 @@ import subprocess
 
 from . import config, puppets
 
-NODE = ".mop/node.yaml"
-WORKSPACE = ".mop/workspace.yaml"
+SANDBOX = ".mop/sandbox.yaml"
+BOOTSTRAP = ".mop/bootstrap.yaml"
+# Переходные имена: читаются как sandbox, пока проекты не переехали.
+LEGACY = (".mop/node.yaml", ".mop/workspace.yaml")
 
 
 def fetch(origin):
     """origin -> словарь манифестов проекта: {'shard', 'asks', 'alien',
-    'node_tasks', 'ws_vars', 'ws_tasks'} (пути или None).
-
-    Два манифеста в .mop/ репозитория (#32): node.yaml — что проекту нужно
-    от узла (ресурсы в vars по конвенции SHARD_SCOPED, узловые задачи в
-    tasks), workspace.yaml — что нужно его телу (конфигурация в vars,
-    окружение в tasks; копирование файлов — задачами copy, без отдельных
-    конвенций: формат ansible уже декларативен).
+    'legacy', 'sandbox_vars', 'sandbox_tasks', 'bootstrap_vars',
+    'bootstrap_tasks'} (пути или None).
 
     Нет файла — соответствующая часть None: большинству проектов хватает
     общего. Ошибки — громкие: недоступный origin и кривая форма поднимают
@@ -75,21 +91,43 @@ def _collect(shard, show):
     # Файлы для ansible живут в base и переживают вызов — /tmp вычищается
     # перезагрузкой, мусор копится только до неё.
     base = f"/tmp/mop-manifest-{shard}-{os.getpid()}"
-    out = {"shard": shard, "asks": {}, "alien": [],
-           "node_tasks": None, "ws_vars": None, "ws_tasks": None}
-    node = _parse(show(NODE), shard, NODE)
-    if node is not None:
-        nvars, ntasks = node
-        out["asks"], _, out["alien"] = config.manifest_parts(nvars)
-        out["node_tasks"] = _write(base, shard, "node-tasks.yml", ntasks)
-    ws = _parse(show(WORKSPACE), shard, WORKSPACE)
-    if ws is not None:
-        wvars, wtasks = ws
-        _, mine, alien = config.manifest_parts(wvars)
-        out["alien"] += [k for k in alien if k not in out["alien"]]
+    out = {"shard": shard, "asks": {}, "alien": [], "legacy": [],
+           "sandbox_vars": None, "sandbox_tasks": None,
+           "bootstrap_vars": None, "bootstrap_tasks": None}
+
+    def note_alien(names):
+        out["alien"] += [k for k in names if k not in out["alien"]]
+
+    # Песочница: новое имя, а за ним — старые, слитые в неё в том порядке, в
+    # каком они играли: узловое прежде рабочего.
+    s_vars, s_tasks = {}, []
+    for path in (SANDBOX, *LEGACY):
+        got = _parse(show(path), shard, path)
+        if got is None:
+            continue
+        if path in LEGACY:
+            out["legacy"].append(path)
+        mvars, tasks = got
+        asks, mine, alien = config.manifest_parts(mvars)
+        out["asks"].update(asks)
+        s_vars.update(mine)
+        note_alien(alien)
+        s_tasks += tasks
+    if s_vars:
+        out["sandbox_vars"] = _write(base, shard, "sandbox-vars.yml", None, s_vars)
+    out["sandbox_tasks"] = _write(base, shard, "sandbox-tasks.yml", s_tasks)
+
+    # Bootstrap: размеров здесь не просят — они дело песочницы, и просьба
+    # тут была бы проглочена молча, поэтому идёт в чужие, по имени.
+    got = _parse(show(BOOTSTRAP), shard, BOOTSTRAP)
+    if got is not None:
+        bvars, btasks = got
+        asks, mine, alien = config.manifest_parts(bvars)
+        note_alien(sorted(set(alien) | set(asks)))
         if mine:
-            out["ws_vars"] = _write(base, shard, "ws-vars.yml", None, mine)
-        out["ws_tasks"] = _write(base, shard, "ws-tasks.yml", wtasks)
+            out["bootstrap_vars"] = _write(base, shard, "bootstrap-vars.yml", None, mine)
+        out["bootstrap_tasks"] = _write(base, shard, "bootstrap-tasks.yml", btasks)
+    out["alien"].sort()
     return out
 
 

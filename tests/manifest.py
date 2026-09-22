@@ -46,34 +46,101 @@ def tree(files):
 # HYPOTHESIS: до #46 единственная дорога — fetch(origin) через зеркало, и файл
 # рабочей копии для сборки не существовал. SOLUTION: fetch_tree(root, shard)
 # читает те же два файла из каталога. STATUS: FIXED — see #46
+#
+# Раскладка манифеста (#61). Имена файлов обещали одно, механизм делал
+# другое: workspace.yaml пёкся в образ, node.yaml играл на машине-узле (на
+# гипервизоре — на самом Proxmox, где папета нет), а при старте не играло
+# ничто. Теперь два файла с честными именами:
+#   sandbox.yaml    размеры тела и системные пакеты — печётся в образ
+#                   (или играется на host-узле при deploy)
+#   bootstrap.yaml  env-файлы и настройка окружения — играется при КАЖДОМ
+#                   старте песочницы (#62)
+# Старые имена читаются переходно и отдаются как sandbox — с пометкой legacy,
+# чтобы вызывающий сказал об этом вслух; непереехавший проект не должен молча
+# остаться без манифеста.
+# HYPOTHESIS: manifest знает только node.yaml и workspace.yaml (ключи
+# node_tasks/ws_*). SOLUTION: sandbox_*/bootstrap_* плюс переходное чтение
+# старых имён. STATUS: FIXED — see #61
+SANDBOX = """
+- name: sandbox
+  vars:
+    MOP_MEM_MB: 2048
+    MOP_SERVER_LAN: 10.0.0.1
+    PROJECT_PORT: 8080
+  tasks:
+    - name: sandbox task
+      ansible.builtin.debug: {msg: hi}
+"""
+BOOTSTRAP = """
+- name: bootstrap
+  vars:
+    MOP_DISK_GB: 10
+    ENV_FILE: .env
+  tasks:
+    - name: bootstrap task
+      ansible.builtin.debug: {msg: hi}
+"""
+EMPTY = {"shard": "bare", "asks": {}, "alien": [], "legacy": [],
+         "sandbox_vars": None, "sandbox_tasks": None,
+         "bootstrap_vars": None, "bootstrap_tasks": None}
+
+
 def main():
     failed = 0
-    got = manifest.fetch_tree(tree({".mop/node.yaml": NODE,
-                                    ".mop/workspace.yaml": WS}), "proj")
-    want_asks = {"MOP_MEM_MB": "2048"}
-    if got["shard"] != "proj" or got["asks"] != want_asks:
+    got = manifest.fetch_tree(tree({".mop/sandbox.yaml": SANDBOX,
+                                    ".mop/bootstrap.yaml": BOOTSTRAP}), "proj")
+    if got["shard"] != "proj" or got["asks"] != {"MOP_MEM_MB": "2048"}:
         failed += 1
         print(f"FAIL asks: {got}")
-    if got["alien"] != ["MOP_SERVER_LAN"]:
+    # Чужое имя в sandbox и просьба о размере в bootstrap — оба не на месте,
+    # и оба названы, а не проглочены.
+    if got["alien"] != ["MOP_DISK_GB", "MOP_SERVER_LAN"]:
         failed += 1
         print(f"FAIL alien: {got['alien']}")
-    for k in ("node_tasks", "ws_vars", "ws_tasks"):
-        if not (got[k] and os.path.exists(got[k])):
+    if got["legacy"]:
+        failed += 1
+        print(f"FAIL legacy must be empty for the new names: {got['legacy']}")
+    for k in ("sandbox_vars", "sandbox_tasks", "bootstrap_vars", "bootstrap_tasks"):
+        if not (got.get(k) and os.path.exists(got[k])):
             failed += 1
-            print(f"FAIL {k}: {got[k]!r}")
+            print(f"FAIL {k}: {got.get(k)!r}")
+    # Старые имена: node.yaml + workspace.yaml читаются как sandbox — просьбы,
+    # конфигурация и задачи обоих, — и об этом сказано.
+    got = manifest.fetch_tree(tree({".mop/node.yaml": NODE,
+                                    ".mop/workspace.yaml": WS}), "old")
+    if got["asks"] != {"MOP_MEM_MB": "2048"} or got["alien"] != ["MOP_SERVER_LAN"]:
+        failed += 1
+        print(f"FAIL legacy asks/alien: {got}")
+    if sorted(got["legacy"]) != [".mop/node.yaml", ".mop/workspace.yaml"]:
+        failed += 1
+        print(f"FAIL legacy names: {got['legacy']}")
+    for k in ("sandbox_vars", "sandbox_tasks"):
+        if not (got.get(k) and os.path.exists(got[k])):
+            failed += 1
+            print(f"FAIL legacy {k}: {got.get(k)!r}")
+    if got["bootstrap_tasks"] or got["bootstrap_vars"]:
+        failed += 1
+        print("FAIL legacy files must not become a bootstrap: nothing played "
+              "them at start before, nothing should now")
+    if got["sandbox_tasks"]:
+        import yaml
+        with open(got["sandbox_tasks"]) as f:
+            names = [t["name"] for t in yaml.safe_load(f)]
+        if names != ["node task", "ws task"]:
+            failed += 1
+            print(f"FAIL legacy tasks must merge into the sandbox, node first: {names}")
     # Без .mop вовсе — общего хватает, все половины None.
     got = manifest.fetch_tree(tree({}), "bare")
-    if got != {"shard": "bare", "asks": {}, "alien": [],
-               "node_tasks": None, "ws_vars": None, "ws_tasks": None}:
+    if got != EMPTY:
         failed += 1
         print(f"FAIL bare: {got}")
     # Кривая форма — громко и с именем файла, а не «прочиталось как получилось».
     try:
-        manifest.fetch_tree(tree({".mop/node.yaml": "vars: {}\n"}), "bad")
+        manifest.fetch_tree(tree({".mop/sandbox.yaml": "vars: {}\n"}), "bad")
         failed += 1
         print("FAIL malformed: no error")
     except RuntimeError as e:
-        if "bad/.mop/node.yaml" not in str(e):
+        if "bad/.mop/sandbox.yaml" not in str(e):
             failed += 1
             print(f"FAIL malformed message: {e}")
     print("manifest: FAILED" if failed else "manifest: ok")

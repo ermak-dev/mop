@@ -44,7 +44,7 @@ clone_dir = driver.clone_dir
 LOCAL_KEYS_FILE = os.path.join(PROJECT, ".env")
 # Подмножество .env, которое уезжает на узлы: только ключи, названные
 # профилями. Секреты MCP-серверов установки едут иначе -- их прописывает
-# setup.yaml прямо в регистрацию сервера.
+# sandbox.yaml прямо в регистрацию сервера.
 SECRETS_FILE = f"{HOME}/.config/mop/secrets.env"    # копия на узле пула
 
 # Врапер делится надвое (docs/DRIVER.md).
@@ -180,7 +180,7 @@ edit_json "$HOME/.claude.json" '.projects[$d].hasTrustDialogAccepted = true
 # и никаких ручных мерджей. add на существующей записи ошибается -- и это
 # устраивает: в записи нет секретов, наличие означает правильность, полную
 # сходимость (если сменился путь) делает deploy. Чужие сервера -- дело
-# установки (setup.yaml), врапер о них не знает.
+# установки (sandbox.yaml), врапер о них не знает.
 claude mcp add --scope user mop -- "$HOME/mop/bin/mop" mcp >/dev/null 2>&1 || true
 # playwright-mcp needs a browser on the node; install is idempotent and cached
 # in ~/.cache/ms-playwright, so every puppet boot just confirms it is there.

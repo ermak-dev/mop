@@ -3,4 +3,6 @@ inventory.ini
 *.pyc
 __pycache__/
 inventory.yaml
+sandbox.yaml
+# прежнее имя файла окружения (#61): копия установки могла остаться под ним
 setup.yaml
