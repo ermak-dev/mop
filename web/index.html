@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mop pool</title>
+<title>Пул mop</title>
 <!--
   Дашборд пула (docs/WEB.md). Одна страница без сборки и без зависимостей:
   в deploy/ нет node-тулчейна, и npm-сборка ради статуса была бы именно им.
@@ -81,41 +81,36 @@
 <body>
 <main>
   <header>
-    <h1>mop pool</h1>
+    <h1>Пул mop</h1>
     <div class="chips" id="chips"></div>
-    <div class="fresh" id="fresh">connecting…</div>
+    <div class="fresh" id="fresh">подключение…</div>
   </header>
   <div class="errors" id="errors"></div>
 
   <section>
-    <h2>Nodes <small id="nodes-note"></small></h2>
+    <h2>Узлы <small id="nodes-note"></small></h2>
     <div id="nodes"></div>
   </section>
 
   <div id="shards"></div>
 
-  <section>
-    <h2>Doctor <small id="issues-note"></small></h2>
-    <div id="issues"></div>
-  </section>
-
   <div class="two">
     <section>
-      <h2>Tokens per day <small id="usage-note"></small></h2>
+      <h2>Токены по дням <small id="usage-note"></small></h2>
       <div id="usage"></div>
     </section>
     <section>
-      <h2>Top spenders <small>the window, biggest first</small></h2>
+      <h2>Кто сколько тратит <small>за окно, от самого прожорливого</small></h2>
       <div id="spenders"></div>
     </section>
   </div>
 
   <section class="journal">
-    <h2>Journal <small>bus events, newest first</small></h2>
+    <h2>Журнал <small>события шины, новые сверху</small></h2>
     <div id="journal"></div>
   </section>
 
-  <footer>read-only · actions stay with <code>mop</code> · <a href="/api/pool">JSON</a></footer>
+  <footer>только чтение · действия остаются в <code>mop</code> · <a href="/api/pool">JSON</a></footer>
 </main>
 
 <script>
@@ -126,11 +121,14 @@
   const human = (n) => { for (const [u, d] of [["G", 1e9], ["M", 1e6], ["k", 1e3]]) if (n >= d) { const v = n / d; return (v < 10 ? v.toFixed(1) : v.toFixed(0)) + u; } return String(n); };
   const hhmm = (ts) => ts ? new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : "-";
   const KINDS = ["free", "busy", "sick", "silent", "down"];
+  // Корзины считает mop/web.py, здесь только их имена для человека.
+  const KIND_RU = {free: "свободен", busy: "занят", sick: "болен", silent: "агент молчит", down: "не бежит"};
+  const plural = (n, one, few, many) => { const m = n % 100, d = n % 10; return n + " " + (m > 10 && m < 20 ? many : d === 1 ? one : d > 1 && d < 5 ? few : many); };
 
   let snap = null;
 
   function table(head, rows, cls) {
-    if (!rows.length) return '<div class="empty">nothing here</div>';
+    if (!rows.length) return '<div class="empty">пусто</div>';
     return `<table><thead><tr>${head.map(h => `<th class="${h.startsWith("#") ? "num" : ""}">${esc(h.replace(/^#/, ""))}</th>`).join("")}</tr></thead>`
       + `<tbody>${rows.map(r => `<tr class="${cls ? cls(r) : ""}">${r.cells.map((c, i) => `<td class="${head[i].startsWith("#") ? "num" : ""} ${c.cls || ""}">${c.html ?? esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
   }
@@ -138,13 +136,13 @@
   function render(s) {
     snap = s;
     const c = s.counts;
-    $("chips").innerHTML = `<span class="chip total">${c.puppets} puppets</span>`
-      + KINDS.map(k => c[k] ? `<span class="chip ${k}">${c[k]} ${k}</span>` : "").join("");
+    $("chips").innerHTML = `<span class="chip total">${plural(c.puppets, "папет", "папета", "папетов")}</span>`
+      + KINDS.map(k => c[k] ? `<span class="chip ${k}">${c[k]} ${KIND_RU[k]}</span>` : "").join("");
     $("errors").textContent = (s.errors || []).join("\n");
 
     const nodes = s.nodes || [];
-    $("nodes-note").textContent = nodes.length ? `${nodes.length} in the cluster` : "";
-    $("nodes").innerHTML = table(["node", "driver", "serves", "state", "#free", "#total", "#slots"],
+    $("nodes-note").textContent = nodes.length ? `${nodes.length} в кластере` : "";
+    $("nodes").innerHTML = table(["узел", "драйвер", "шарды", "состояние", "#свободно", "#всего", "#слотов"],
       nodes.map(n => ({cells: [n.name, n.driver, n.serves, n.state,
         n.free_mb == null ? "-" : (n.free_mb / 1024).toFixed(0) + " GB",
         n.total_mb == null ? "-" : (n.total_mb / 1024).toFixed(0) + " GB",
@@ -153,39 +151,32 @@
 
     $("shards").innerHTML = (s.shards || []).map(sh => {
       const cc = sh.counts;
-      const note = KINDS.filter(k => cc[k]).map(k => `${cc[k]} ${k}`).join(", ");
+      const note = KINDS.filter(k => cc[k]).map(k => `${cc[k]} ${KIND_RU[k]}`).join(", ");
       return `<section><h2>${esc(sh.name)} <small>${esc(note)}</small></h2>`
-        + table(["puppet", "node", "alloc", "state", "llm", "#disk", "origin"],
+        + table(["папет", "узел", "аллокация", "состояние", "модель", "#место", "репозиторий"],
           sh.puppets.map(p => ({kind: p.kind, cells: [
             {html: `<span class="dot"></span>${esc(p.name)}`}, p.node, p.alloc_status,
             {html: esc(p.state), cls: "state"}, p.llm, gb(p.disk_kb), {html: `<code>${esc(p.origin)}</code>`}]})),
           (r) => r.kind)
         + `</section>`;
-    }).join("") || '<section><div class="empty">no puppets</div></section>';
-
-    const issues = s.issues || [];
-    $("issues-note").textContent = issues.length ? `${issues.length} to look at` : "nothing to treat";
-    $("issues").innerHTML = table(["puppet", "node", "diagnosis", "treatment"],
-      issues.map(i => ({cells: [i.name, i.node, {html: esc(i.diagnosis), cls: "state"},
-        i.action ? `mop doctor --fix (${i.action})` : "show only"]})),
-      (r) => "sick");
+    }).join("") || '<section><div class="empty">папетов нет</div></section>';
 
     const days = s.usage || [];
     const peak = Math.max(1, ...days.map(d => d.total));
     const grand = days.reduce((a, d) => a + d.total, 0);
-    $("usage-note").textContent = days.length ? `last ${days.length} days, ${human(grand)} total` : "not collected yet";
+    $("usage-note").textContent = days.length ? `за ${plural(days.length, "день", "дня", "дней")}, всего ${human(grand)}` : "ещё не собрано";
     $("usage").innerHTML = days.length
       ? `<div class="bars">${days.map(d => `<span class="d">${esc(d.date)}</span><span class="b"><i style="width:${(100 * d.total / peak).toFixed(1)}%"></i></span><span class="n">${d.total ? human(d.total) : "-"}</span>`).join("")}</div>`
-      : '<div class="empty">usage arrives after the first scan of the transcripts</div>';
+      : '<div class="empty">расход появится после первого разбора транскриптов</div>';
 
-    $("spenders").innerHTML = table(["puppet", "node", "#in", "#out", "#cache-w", "#cache-r", "#total"],
+    $("spenders").innerHTML = table(["папет", "узел", "#вход", "#выход", "#кэш зап.", "#кэш чт.", "#всего"],
       (s.per_puppet || []).slice(0, 12).map(p => ({cells: [p.name, p.node, human(p.input), human(p.output),
         human(p.cache_write), human(p.cache_read), human(p.total)]})));
 
     const j = (s.journal || []).slice().reverse();
     $("journal").innerHTML = j.length
-      ? `<ul>${j.map(e => `<li><span class="t">${hhmm(e.at)}</span><span class="e">${esc(e.event)}</span>${esc(e.name)} <span class="t">on ${esc(e.node)}, shard ${esc(e.shard)}</span> ${esc(e.text)}</li>`).join("")}</ul>`
-      : '<div class="empty">no events yet — the agents publish send, idle, type, wipe and their own start</div>';
+      ? `<ul>${j.map(e => `<li><span class="t">${hhmm(e.at)}</span><span class="e">${esc(e.event)}</span>${esc(e.name)} <span class="t">на ${esc(e.node)}, шард ${esc(e.shard)}</span> ${esc(e.text)}</li>`).join("")}</ul>`
+      : '<div class="empty">событий пока нет — агенты пишут send, idle, type, wipe и свой запуск</div>';
     tick();
   }
 
@@ -194,7 +185,7 @@
     if (!snap || !snap.at) return;
     const age = Math.max(0, Math.round(Date.now() / 1000 - snap.at));
     const el = $("fresh");
-    el.textContent = `updated ${age}s ago`;
+    el.textContent = `обновлено ${age} с назад`;
     el.classList.toggle("stale", age > 60);
   }
   setInterval(tick, 1000);
@@ -209,7 +200,7 @@
   function connect() {
     const es = new EventSource("/events");
     es.addEventListener("snapshot", (e) => { render(JSON.parse(e.data)); if (polling) { clearInterval(polling); polling = null; } });
-    es.onerror = () => { $("fresh").textContent = "reconnecting…"; poll(); };
+    es.onerror = () => { $("fresh").textContent = "переподключение…"; poll(); };
   }
   fetch("/api/pool").then(r => r.json()).then(render).catch(() => {});
   connect();

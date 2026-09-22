@@ -876,9 +876,7 @@ def roster():
 
 
 def rows_from(items):
-    """Строки без обмера из ростера: дашборд берёт ростер один раз и
-    кормит им и строки, и diagnose, — второй заход на узлы за теми же
-    состояниями удваивал бы нагрузку на агентов каждым кругом."""
+    """Строки без обмера из ростера."""
     return [_row(i) for i in items]
 
 
@@ -1028,12 +1026,10 @@ def spec_is_stale(job):
                    for c in (job.get("Constraints") or []))
 
 
-def diagnose(items=None):
-    """Проблемы пула как данные: [{name, alloc, diagnosis, action}].
-    items — уже собранный ростер (roster), когда состояния у вызывающего
-    есть; без него собирается свой."""
+def diagnose():
+    """Проблемы пула как данные: [{name, alloc, diagnosis, action}]."""
     issues = []
-    for item in roster() if items is None else items:
+    for item in roster():
         job, alloc = item["job"], item["alloc"]
         # Спека проверяется раньше состояния: папет со старой спекой может
         # выглядеть совершенно здоровым ровно до первого перепланирования.

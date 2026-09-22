@@ -1,7 +1,7 @@
 """Дашборд пула: снимок для страницы и сборщик, который его держит (#66).
 
-Ещё один фронтенд над теми же данными, что `mop list`, `mop node`,
-`mop doctor` и `mop stat`: библиотека отдаёт строки, здесь они складываются
+Ещё один фронтенд над теми же данными, что `mop list`, `mop node` и
+`mop stat`: библиотека отдаёт строки, здесь они складываются
 в один JSON, а страница (web/index.html) его рисует. Второго разбора состояний
 на стороне браузера нет намеренно — корзина папета (free/busy/sick/silent/down)
 считается здесь, и на ней же стоят счётчики в шапке.
@@ -94,20 +94,16 @@ def usage_axis(per_day, days, now=None):
     return out
 
 
-def snapshot(rows, nodes, issues, usage, per_puppet, journal, errors, at):
+def snapshot(rows, nodes, usage, per_puppet, journal, errors, at):
     """Один JSON на страницу и /api/pool. Набор ключей закреплён — страница
-    читает их по имени."""
+    читает их по имени.
+
+    Диагностики здесь нет (решение оператора 2026-09-22): она стоила
+    запроса к Nomad на каждого папета каждым кругом, а лечение всё равно
+    остаётся за `mop doctor`; больной папет и так виден корзиной sick."""
     return {"at": at, "shards": shards(rows), "counts": counts(rows),
-            "nodes": nodes, "issues": issues, "usage": usage,
+            "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "journal": journal, "errors": errors}
-
-
-def issue_row(issue):
-    """Проблема из puppets.diagnose без объекта аллокации: странице нужны
-    имя, узел, диагноз и лечение, а не весь ответ Nomad."""
-    alloc = issue.get("alloc") or {}
-    return {"name": issue["name"], "node": alloc.get("NodeName") or "-",
-            "diagnosis": issue["diagnosis"], "action": issue.get("action")}
 
 
 # ─── сборщик ─────────────────────────────────────────────────────────────
@@ -122,7 +118,7 @@ class Collector:
     def __init__(self):
         self._cond = threading.Condition()
         self.version = 0
-        self.rows, self.sizes, self.nodes, self.issues = [], {}, [], []
+        self.rows, self.sizes, self.nodes = [], {}, []
         self.usage, self.per_puppet, self.journal = [], [], []
         self.errors = {}
         self.at = None
@@ -132,7 +128,7 @@ class Collector:
     def current(self):
         with self._cond:
             return snapshot(with_sizes(self.rows, self.sizes), self.nodes,
-                            self.issues, self.usage, self.per_puppet,
+                            self.usage, self.per_puppet,
                             self.journal, [f"{k}: {v}" for k, v in
                                            sorted(self.errors.items())],
                             self.at)
@@ -172,12 +168,10 @@ class Collector:
     def _states(self):
         while True:
             try:
-                items = puppets.roster()
-                rows = sorted(puppets.rows_from(items), key=lambda r: r["name"])
+                rows = puppets.puppet_rows(sizes=False)
                 nodes = pool_nodes.rows()
-                issues = [issue_row(i) for i in puppets.diagnose(items)]
                 with self._cond:
-                    self.rows, self.nodes, self.issues = rows, nodes, issues
+                    self.rows, self.nodes = rows, nodes
                     self.at = time.time()
                     self._note("states", None)
             except Exception as e:

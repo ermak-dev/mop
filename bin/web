@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """pool dashboard on the web: mop web [--port N] [--bind ADDR]
 
-The same picture as `mop list`, `mop node`, `mop doctor` and `mop stat` on
-one page, refreshed in place (docs/WEB.md):
+The same picture as `mop list`, `mop node` and `mop stat` on one page,
+refreshed in place (docs/WEB.md):
 
   /            the page
   /api/pool    the current snapshot as JSON

@@ -154,10 +154,10 @@ def check_snapshot():
     """Снимок — один JSON для страницы и /api/pool: всё, что в нём лежит,
     страница читает по имени, поэтому набор ключей закреплён."""
     failed = 0
-    snap = web.snapshot(rows=ROWS, nodes=[{"name": "mate"}], issues=[],
+    snap = web.snapshot(rows=ROWS, nodes=[{"name": "mate"}],
                         usage=[], per_puppet=[], journal=[], errors=["bus: down"],
                         at=1_000_000.0)
-    want = {"at", "shards", "counts", "nodes", "issues", "usage", "per_puppet",
+    want = {"at", "shards", "counts", "nodes", "usage", "per_puppet",
             "journal", "errors"}
     if set(snap) != want:
         failed += 1
