@@ -56,10 +56,17 @@ try:
 except ImportError:
     sys.exit("bus library required: pip install --user --break-system-packages nats-py")
 
-CONFIG = os.environ.get("MOP_BUS_CONFIG") or os.path.expanduser("~/.config/mop/bus.json")
+from . import config as settings, creds  # noqa: E402
+
+# Файл кредов, если его подсунули: врапер папета через tmux -e, `mop master`
+# сессии мастера. Без него креды собирает config() из каталога сервера.
+FILE = os.environ.get("MOP_BUS_CONFIG")
+# Креды агента узла: их кладёт плейбук, и агент читает только их — каталог
+# сервера с кредами мастера на машине в двух ролях ему не указ.
+NODE_FILE = os.path.expanduser("~/.config/mop/bus.json")
 TIMEOUT = 20             # обычный запрос к агенту
 MAX_PAYLOAD = 900_000    # под max_payload сервера (1 МБ) с запасом на конверт
-ADMIN = "admin"          # псевдошард оператора: все шарды плюс узловой disk
+ADMIN = creds.ADMIN      # псевдошард оператора: все шарды плюс узловой disk
 ALL_MASTERS = "all"      # псевдо-id мастера: инбокс, на котором отвечают все
 
 # Чей срез пула виден этому процессу. Ставит `mop master`, наследуют его
@@ -77,8 +84,27 @@ class BusError(RuntimeError):
     «агент узла молчит» от «папет завис»: лечение у них разное."""
 
 
-def config():
-    """{url, user, password} — раскатывается ansible'ом.
+def _load(path):
+    """Файл кредов как его рендерит плейбук: {url, user, password}."""
+    try:
+        with open(path) as f:
+            c = json.load(f)
+    except ValueError as e:
+        raise BusError(f"{path} is unreadable: {e}")
+    if not c.get("url"):
+        raise BusError(f"{path} has no url")
+    return c
+
+
+def config(file=None):
+    """{url, user, password} этого процесса.
+
+    Порядок: файл, который назвали (агент — свой узловой, врапер и `mop
+    master` — через MOP_BUS_CONFIG), иначе сборка из каталога сервера
+    (mop/creds.py) по MOP_SERVER_LAN и MOP_SHARD, иначе старые файлы
+    плейбука — bus.json оператора и bus-master-<шард>.json. Запасной путь
+    временный: пока мастера настраивает ansible, он остаётся единственным
+    на свежей машине; уходит вместе с игрой мастера.
 
     В url всегда LAN-адрес, никогда публичное имя: оно резолвится в адрес
     роутера, а хайрпин на порт шины роутер не делает — проверено, connection
@@ -86,20 +112,26 @@ def config():
 
     Шина без TLS, и креды тут единственное, что отделяет шард от шарда, —
     поэтому файл 0600 и по одному на шард. Почему без TLS — комментарии в
-    deploy/nats-server.conf.j2.
-
-    Отдельный файл, а не переменные окружения: искать креды в одном месте
-    дешевле, чем помнить два соглашения."""
+    deploy/nats-server.conf.j2."""
+    path = file or FILE
+    if path:
+        try:
+            return _load(path)
+        except FileNotFoundError:
+            raise BusError(f"no bus credentials: {path} — run mop deploy")
+    host = settings.get("MOP_SERVER_LAN")
+    directory = creds.server_dir(host)
+    password = creds.password(directory, SHARD)
+    if password is not None:
+        return creds.bus_config(host, settings.get("MOP_NATS_PORT"), SHARD, password)
+    legacy = NODE_FILE if SHARD == ADMIN else os.path.expanduser(
+        f"~/.config/mop/bus-master-{SHARD}.json")
     try:
-        with open(CONFIG) as f:
-            c = json.load(f)
+        return _load(legacy)
     except FileNotFoundError:
-        raise BusError(f"no bus credentials: {CONFIG} — run the nats playbook")
-    except ValueError as e:
-        raise BusError(f"{CONFIG} is unreadable: {e}")
-    if not c.get("url"):
-        raise BusError(f"{CONFIG} has no url")
-    return c
+        raise BusError(f"no bus credentials for {creds.user_of(SHARD)}: neither "
+                       f"{directory}/{creds.pass_file(SHARD)} nor {legacy} — "
+                       f"run mop join <server> (or mop deploy on the server)")
 
 
 # ─── соединение ──────────────────────────────────────────────────────────

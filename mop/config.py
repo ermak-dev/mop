@@ -348,12 +348,16 @@ class Missing(RuntimeError):
     """Обязательная настройка не заполнена."""
 
 
-def require():
-    """Проверить обязательные. Зовут фронтенды перед работой с кластером.
+def require(*names):
+    """Проверить обязательные — все, либо названные. Зовут фронтенды перед
+    работой с кластером: мастеру нужен один MOP_SERVER_LAN, MOP_GIT_HOST
+    читают только плейбуки, и требовать его на машине оператора значит
+    заставлять вписывать то, чем она не пользуется.
 
     Отказ громкий и с перечнем: молча взять чужой дефолт и пойти в чужую
     локалку — худшее, что может сделать инструмент на новой машине."""
-    gaps = [f"  {k} — {why}" for k, why in REQUIRED.items() if not get(k, "")]
+    gaps = [f"  {k} — {why}" for k, why in REQUIRED.items()
+            if (not names or k in names) and not get(k, "")]
     if gaps:
         raise Missing("required settings not filled in " + ENV_FILE
                       + ":\n" + "\n".join(gaps)

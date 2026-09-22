@@ -627,7 +627,7 @@ async def handle(msg, public):
 
 async def serve():
     global _conn
-    c = bus.config()
+    c = bus.config(bus.NODE_FILE)
     node = node_name()
     _conn = await nats.connect(
         **bus.auth(c), name=f"mop-agent/{node}",
@@ -658,7 +658,7 @@ async def check():
     Спрашиваем через публичный субъект узла, а не через .rpc: туда узлу писать
     и не положено — это и есть та граница прав, ради которой шину заводили.
     Первый прогон проверки уткнулся ровно в неё, и был неправ он, а не права."""
-    c = bus.config()
+    c = bus.config(bus.NODE_FILE)
     print(f"mop-agent: node {node_name()}, bus {c['url']}, "
           f"{len(VERBS)} verbs ({len(PUBLIC_VERBS)} public)")
     nc = await nats.connect(**bus.auth(c), name="mop-agent/check",
