@@ -17,7 +17,15 @@
 # Всё, что нужно самому mop на узле: клиент шины, MCP-сервер узлового
 # профиля и то, что он импортирует. Список один на узел, тело и `mop setup`
 # (mop/deps.py), сюда едет --extra-vars от `mop deploy`.
+#
+# Под пользователем пула, кем бы ansible ни зашёл. На узлах, где ssh идёт
+# под ним же, разницы нет; на Proxmox ansible заходит как root, и --user
+# клал библиотеки в /root/.local, где агент их не видел и падал в рестарт,
+# а systemd был доволен. То же ниже у регистрации MCP, самопроверки и у
+# каждого файла в доме пула.
 - name: Python dependencies of mop
+  become: yes
+  become_user: "{{ MOP_USER }}"
   ansible.builtin.pip:
     name: "{{ MOP_PIP_DEPS.split(',') }}"
     extra_args: --user --break-system-packages
@@ -43,6 +51,18 @@
       - "--exclude=inventory.yaml"
   notify: restart mop-agent
 
+# rsync кладёт файлы от того, кто зашёл; при входе root пакет в доме пула
+# принадлежал бы root, и врапер под пользователем пула не смог бы даже
+# писать __pycache__.
+- name: The package belongs to the pool user
+  become: yes
+  ansible.builtin.file:
+    path: "{{ mop_home }}"
+    state: directory
+    recurse: yes
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+
 # Свой MCP-сервер -- часть продукта: без него папет без инструментов.
 # Регистрирует сам claude (`claude mcp add` пишет ~/.claude.json), ручного
 # мерджа больше нет. CLI не умеет сравнивать желаемое с фактом (токены
@@ -52,6 +72,8 @@
 # MCP-сервер регистрирует сборка образа, внутри тела.
 - name: Register the pool MCP server for claude
   when: mop_driver | default(MOP_DRIVER) == 'host'
+  become: yes
+  become_user: "{{ MOP_USER }}"
   ansible.builtin.shell:
     cmd: |
       claude mcp remove -s user mop >/dev/null 2>&1 || true
@@ -63,10 +85,22 @@
   changed_when: false
 
 - name: Credentials dir
+  become: yes
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config"
+    state: directory
+    mode: "0755"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+
+- name: Credentials dir of mop
+  become: yes
   ansible.builtin.file:
     path: "{{ MOP_HOME }}/.config/mop"
     state: directory
     mode: "0700"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
 
 # Что узел знает о себе сам. Источник правды -- инвентарь: значение группы
 # с переопределением на хосте; чего инвентарь не назвал, берётся из
@@ -81,9 +115,12 @@
 # Список -- из config.NODE_SCOPED, один на систему: второй здесь означал бы
 # настройку, которая молча не доехала.
 - name: What this node knows about itself
+  become: yes
   ansible.builtin.copy:
     dest: "{{ MOP_HOME }}/.config/mop/node.env"
     mode: "0644"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
     content: |
       # Узловые настройки. Кладёт `mop deploy` из инвентаря -- править
       # здесь бесполезно, следующий прогон перепишет.
@@ -102,6 +139,7 @@
 # Отсюда проверка: сверяем то, что записали, с тем, что сказал инвентарь.
 # Дешевле один assert, чем узел, который врёт о себе.
 - name: Read back what the node now says about itself
+  become: yes
   ansible.builtin.slurp:
     src: "{{ MOP_HOME }}/.config/mop/node.env"
   register: node_env
@@ -126,6 +164,7 @@
 # кто и где) дело контроллера, и она в inventory.yaml: старый inventory.ini
 # сносится и на контроллере-узле тоже.
 - name: What the node no longer needs
+  become: yes
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
@@ -134,10 +173,13 @@
     - "{{ MOP_HOME }}/mop/inventory.ini"
 
 - name: Bus credentials for the agent
+  become: yes
   ansible.builtin.template:
     src: bus.json.j2
     dest: "{{ MOP_HOME }}/.config/mop/bus.json"
     mode: "0600"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
   notify: restart mop-agent
 
 # Креды на каждый шард, а не одни на узел. Врапер подсовывает их сессии
@@ -145,10 +187,13 @@
 # -- то есть мог бы написать в чужой проект, а агент бы этого не поймал:
 # он видит, кого спрашивают, но не видит, кто спрашивает.
 - name: Bus credentials for the puppets, one per shard
+  become: yes
   ansible.builtin.template:
     src: bus.json.j2
     dest: "{{ MOP_HOME }}/.config/mop/bus-{{ item }}.json"
     mode: "0600"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
   loop: "{{ shards }}"
   vars:
     nats_user: "puppet-{{ item }}"
@@ -164,6 +209,7 @@
 # (~/.config/mop/servers/<адрес>/), куда его кладёт игра сервера, а это --
 # старое место, откуда его читали до #51.
 - name: Drop the Nomad management token from the pool
+  become: yes
   ansible.builtin.file:
     path: "{{ MOP_HOME }}/.config/nomad/bootstrap.json"
     state: absent
@@ -202,6 +248,8 @@
 # Прогон плейбука без этой проверки не отличает «юнит запущен» от «агент
 # подписался»: systemd доволен процессом, который упал в реконнект.
 - name: Confirm the agent is connected
+  become: yes
+  become_user: "{{ MOP_USER }}"
   ansible.builtin.command: /usr/bin/python3 -m mop.agent --check
   args:
     chdir: "{{ mop_home }}"
