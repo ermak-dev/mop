@@ -1,0 +1,53 @@
+# Эта машина: контроллер (с неё гоняют mop deploy) либо машина оператора.
+#
+# Запуск:  mop setup [--operator]  — он же ставит ansible, если его нет, и
+# передаёт сюда настройки (--extra-vars, как mop deploy) и роль mop_role.
+#
+# Плейбук, а не apt/pip из питона: остальное в mop ставит ansible, и второй
+# способ ставить пакеты завёл бы вторую правду о том, что стоит на машине.
+# Ничего из пула здесь нет: узлы и тела — deploy/node.yml и deploy/body.yml.
+#
+# Debian 13: пакет ansible полный, с коллекциями; ansible.posix нужен ради
+# synchronize в deploy/roles/bus. На хосте с одним ansible-core коллекцию
+# доставит galaxy, задача ниже.
+- name: This machine
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    role: "{{ mop_role | default('controller') }}"
+    # Оператор плейбуки пула не гоняет, но этот -- гоняет: ansible нужен обоим.
+    apt_packages:
+      controller: [ansible, rsync, git, curl, python3-pip]
+      operator: [ansible, git, python3-pip]
+
+  tasks:
+    - name: The role must be one of the two
+      ansible.builtin.assert:
+        that: role in apt_packages
+        fail_msg: "mop_role must be controller or operator, not {{ role }}"
+
+    - name: System packages of the {{ role }}
+      become: yes
+      ansible.builtin.apt:
+        name: "{{ apt_packages[role] }}"
+        state: present
+
+    # Тот же список, что у узла и тела: MOP_PIP_DEPS из mop/deps.py.
+    - name: Python libraries of mop
+      ansible.builtin.pip:
+        name: "{{ MOP_PIP_DEPS.split(',') }}"
+        extra_args: --user --break-system-packages
+        state: present
+
+    - name: Is ansible.posix here
+      ansible.builtin.command: ansible-galaxy collection list ansible.posix
+      register: posix
+      changed_when: false
+      failed_when: false
+      when: role == 'controller'
+
+    - name: ansible.posix, when the host's ansible is core only
+      ansible.builtin.command: ansible-galaxy collection install ansible.posix
+      when: role == 'controller' and (posix.rc != 0 or 'ansible.posix' not in posix.stdout)

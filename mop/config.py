@@ -360,7 +360,7 @@ def playbook_vars():
     from . import deps
     out = {k: v for k, (v, _) in effective().items()}
     out["MOP_NODE_SCOPED"] = ",".join(NODE_SCOPED)
-    out["MOP_PIP_DEPS"] = ",".join(p for p, _ in deps.PIP)
+    out["MOP_PIP_DEPS"] = ",".join(deps.PIP)
     return out
 
 

@@ -1,67 +1,58 @@
 #!/usr/bin/env python3
 """this machine's own dependencies: mop setup [--operator]
 
-Installs what the machine running mop needs and nothing for the pool: the
-pool's nodes and bodies are ansible's business (mop deploy). Without a flag
-the machine is the controller, the one that runs mop deploy: ansible with
-the ansible.posix collection, rsync, git, curl, and the python libraries
-mop is written on. With --operator it is an operator's machine: the python
-libraries and git, and a word about claude if it is not in PATH.
+Sets up the machine running mop, and nothing for the pool: the pool's
+nodes and bodies are ansible's business (mop deploy). Without a flag the
+machine is the controller, the one that runs mop deploy: ansible with the
+ansible.posix collection, rsync, git, curl, pip and the python libraries
+mop is written on. With --operator it is an operator's machine: ansible
+(to run this very setup), git, pip and the same libraries, and a word
+about claude if it is not in PATH.
 
-Running it again does nothing: every item is checked before it is
-installed. apt goes through sudo, pip installs per user, and the list of
-libraries lives in mop/deps.py, one for both roles.
+Ansible does the work, as everywhere else in mop: this command only
+installs ansible itself through apt when it is missing (Debian 13 ships
+the full ansible package, collections included) and runs
+deploy/self.yml against localhost. Running it again changes nothing.
+
+This file imports nothing that setup is about to install: bin/lib.py
+pulls in the bus client at import, and a setup that needs nats-py to
+install nats-py refused to start on a fresh machine.
 """
-import importlib
+import json
+import os
 import shutil
 import subprocess
+import sys
 
-import lib
-from mop import deps
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
+from mop import config  # noqa: E402  (stdlib only)
 
-def have_command(name):
-    if "." in name:            # коллекция ansible, а не бинарник
-        if not shutil.which("ansible-galaxy"):
-            return False
-        r = subprocess.run(["ansible-galaxy", "collection", "list", name],
-                           capture_output=True, text=True)
-        return r.returncode == 0 and name in r.stdout
-    # git и curl проверяются как команды; ansible — по своему бинарнику.
-    return shutil.which("ansible-playbook" if name == "ansible" else name) is not None
-
-
-def have_module(name):
-    try:
-        importlib.import_module(name)
-        return True
-    except ImportError:
-        return False
-
-
-def run(cmd):
-    print("  " + " ".join(cmd))
-    subprocess.run(cmd, check=True)
+PLAYBOOK = os.path.join(config.PROJECT, "deploy", "self.yml")
 
 
 def main(argv):
     if argv not in ([], ["--operator"]):
-        lib.usage(__doc__)
+        sys.exit(__doc__.strip())
     role = "operator" if argv else "controller"
-    todo = deps.plan(role, have_command, have_module)
-    if todo["apt"]:
-        run(["sudo", "apt-get", "install", "-y"] + todo["apt"])
-    if todo["galaxy"]:
-        run(["ansible-galaxy", "collection", "install"] + todo["galaxy"])
-    if todo["pip"]:
-        run(["python3", "-m", "pip", "install", "--user", "--break-system-packages"]
-            + todo["pip"])
-    if not any(todo.values()):
-        print(f"{role}: nothing to install")
-    else:
-        print(f"{role}: installed")
+    if not shutil.which("ansible-playbook"):
+        print("installing ansible (apt)")
+        subprocess.run(["sudo", "apt-get", "update", "-q"], check=True)
+        subprocess.run(["sudo", "apt-get", "install", "-y", "-q", "ansible"], check=True)
+    settings = json.dumps(config.playbook_vars(), ensure_ascii=False)
+    r = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local",
+                        PLAYBOOK, "--extra-vars", settings,
+                        "--extra-vars", json.dumps({"mop_role": role})])
+    if r.returncode:
+        sys.exit(r.returncode)
     if role == "operator" and not shutil.which("claude"):
         print("claude is not in PATH: install Claude Code before mop master")
 
 
-lib.run(main)
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"setup failed: {' '.join(e.cmd)} exited {e.returncode}")
+    except KeyboardInterrupt:
+        sys.exit(130)
