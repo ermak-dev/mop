@@ -10,8 +10,14 @@
 # Поэтому он обязан работать на голом ssh и ничего не занимать у самого mop.
 #
 # Пароли не лежат в репозитории и не задаются руками: lookup('password') заводит
-# файл на управляющей машине при первом прогоне и переиспользует дальше.
-# Потерять их не страшно -- новый прогон раздаст новые сразу и серверу, и узлам.
+# файл на контроллере при первом прогоне и переиспользует дальше. Потерять их
+# не страшно -- новый прогон раздаст новые сразу и серверу, и узлам.
+#
+# Контроллер -- сервер: там репозиторий, .env, ssh к узлам и secrets/. Машина
+# оператора в инвентаре не значится и ansible не видит: свои креды она
+# получает командой `mop join`, скилл и проверку шарда делает `mop master`.
+# Что мастеру положено, контроллер собирает себе сам в конце `mop deploy`
+# (~/.config/mop/servers/<адрес>/), и join везёт ровно этот каталог.
 #
 # Запуск:  mop deploy
 #
@@ -23,7 +29,7 @@
 # Агент подписывается на субъект того же имени, и расхождение читалось бы как
 # выключенный узел.
 - name: Bus address on the LAN
-  hosts: puppet:master
+  hosts: puppet
   gather_facts: no
 
   tasks:
@@ -78,22 +84,6 @@
     shards: "{{ mop_shards | default([]) }}"
   roles:
     - bus
-
-
-- name: Bus credentials on the master
-  hosts: master
-  gather_facts: no
-
-  vars:
-    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
-    nats_addr: "{{ nats_lan }}"
-    nats_user: admin
-    nats_password: "{{ lookup('password', secrets_dir + '/nats-admin.pass length=32 chars=ascii_letters,digits') }}"
-    shards: "{{ mop_shards | default([]) }}"
-  tasks:
-    - ansible.builtin.include_role:
-        name: bus
-        tasks_from: master
 
 
 - name: Disk watchdog job
