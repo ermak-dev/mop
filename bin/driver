@@ -29,7 +29,7 @@ import subprocess
 import sys
 
 import lib
-from mop import bus, config, driver, image, puppets
+from mop import bootstrap, bus, config, driver, image, puppets
 from mop.render import table
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
@@ -99,6 +99,18 @@ def v_run(argv):
         sys.exit(f"no body for {name}: {r['error']}")
     print(f"{name}: body {r.get('body') or 'the node itself'}"
           + (f" at {r['address']}" if r.get("address") else ""), flush=True)
+
+    # Bootstrap песочницы (#62): сервер играет .mop/bootstrap.yaml шарда, а
+    # узел ждёт ответа до того, как откроет tmux. Отказ — это отказ: выход
+    # ненулём, Nomad перезапускает, ростер показывает падение. Папет не
+    # поднимается «наполовину» с окружением, которого нет.
+    try:
+        b = bootstrap.run(d, name, driver.shard_of_name(name))
+    except (RuntimeError, bus.BusError) as e:
+        sys.exit(f"bootstrap of {name} failed: {e}")
+    print(f"{name}: bootstrap "
+          + (f"played in {b.get('seconds')}s" if b.get("played")
+             else "none for the shard"), flush=True)
 
     inner = os.path.join(config.get("MOP_HOME"), INNER)
     w = asyncio.run(d.push(name, inner, _inner_script().encode()))

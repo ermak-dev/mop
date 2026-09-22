@@ -200,6 +200,34 @@
     nats_user: "puppet-{{ item }}"
     nats_password: "{{ lookup('password', secrets_dir + '/nats-puppet-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
 
+# Ключ сервера для bootstrap'а песочниц (#62): публичная часть — узлу, и
+# узел сам впускает сервер в тело на время bootstrap'а (admit) и выпускает
+# после. В образ ключ не печётся: постоянно открытая дверь в тело мимо
+# агента — то, от чего отказались для ключа мастера. Факт берётся с хоста
+# сервера (игра ключа в deploy/setup.yml); прогон без сервера его не
+# кладёт и не стирает.
+- name: Public key of the server's bootstrap, for admitting it into a body
+  become: yes
+  ansible.builtin.copy:
+    content: "{{ hostvars[groups['server'][0]]['mop_bootstrap_pub'] }}\n"
+    dest: "{{ MOP_HOME }}/.config/mop/bootstrap.pub"
+    mode: "0644"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+  when: hostvars[groups['server'][0]]['mop_bootstrap_pub'] is defined
+
+# Где тело равно узлу, впускать и выпускать нечего: дверь на узел у
+# сервера-контроллера и так есть, ключ лежит постоянно.
+- name: The server may enter a node that is its own body
+  become: yes
+  ansible.posix.authorized_key:
+    user: "{{ MOP_USER }}"
+    key: "{{ hostvars[groups['server'][0]]['mop_bootstrap_pub'] }}"
+    state: present
+  when: >-
+    hostvars[groups['server'][0]]['mop_bootstrap_pub'] is defined
+    and (mop_driver | default(MOP_DRIVER)) == 'host'
+
 # Токен Nomad возили на узлы, чтобы узловой mop mcp дотягивался до соседей
 # и до инбокса мастера, и цена была названа прямо: папет, добравшийся до
 # файла, мог снести чужие джобы. Шина даёт ту же связь правами по субъектам,

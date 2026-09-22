@@ -164,3 +164,9 @@ async def push(name, path, data):
 def projects_dir(name):
     """Где лежат транскрипты папета — по ним считается расход токенов."""
     return f"{HOME}/.claude/projects"
+
+
+async def admit(name, pubkey):
+    """Серверу в узел дорога есть всегда: его ключ кладёт в authorized_keys
+    пользователя пула `mop deploy` (роль bus). Открывать и закрывать нечего."""
+    return {}

@@ -72,11 +72,14 @@ authorization {
     # их разделяет, и обслуживает всех жильцов хоста. Разделение здесь -- по
     # узлу: подписка только на свой, иначе агент мог бы перехватить запрос
     # мастера к соседнему узлу, ответив первым (подписка в NATS не эксклюзивна).
+    # Субъект сервера (#62) -- те же креды из процесса задачи Nomad: узел
+    # просит bootstrap песочницы за папета, и шард в субъекте сверяет сервер.
     {
       user: "node-{{ node }}", password: "{{ lookup('password', secrets_dir + '/nats-node-' + node + '.pass length=32 chars=ascii_letters,digits') }}"
       permissions: {
         publish: { allow: ["mop.*.master.>", "mop.*.events",
-                           "mop.*.node.{{ node }}.msg", "_INBOX.>"] }
+                           "mop.*.node.{{ node }}.msg", "mop.*.server.rpc",
+                           "_INBOX.>"] }
         subscribe: { allow: ["mop.*.node.{{ node }}.>", "mop.*.all.msg",
                              "_INBOX.>"] }
       }

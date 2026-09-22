@@ -48,6 +48,8 @@ CONTRACT = [
     ("no attach_argv", plugin(attach_argv=None), False),
     ("no repair_argv", plugin(repair_argv=None), False),
     ("no run_argv", plugin(run_argv=None), False),
+    # admit (#62): открыть/закрыть телу дорогу для bootstrap'а с сервера.
+    ("no admit", plugin(admit=None), False),
     ("a verb that is not callable", plugin(argv="ssh"), False),
     # SESSION_PY уезжает в шелл внутри тела. Пустое значение там молча
     # соберётся в `python3  probe <clone>` — python прочитает probe как файл.

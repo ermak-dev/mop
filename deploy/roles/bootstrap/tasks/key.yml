@@ -1,0 +1,21 @@
+# Ключ сервера к песочницам (#62). Свой, не ключ пула к git и не ключ узла к
+# телам: у каждой дороги свой ключ, и отозвать одну не значит отозвать все.
+# Заводится ДО игры агентов (deploy/setup.yml): узлам нужна его публичная
+# часть, чтобы впускать сервер в тело на время bootstrap'а.
+- name: A keypair of the server for entering sandboxes
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.command:
+    cmd: ssh-keygen -t ed25519 -N '' -C mop-bootstrap@{{ inventory_hostname }} -f {{ MOP_HOME }}/.ssh/mop-bootstrap
+    creates: "{{ MOP_HOME }}/.ssh/mop-bootstrap"
+
+- name: Read its public part
+  become: yes
+  ansible.builtin.slurp:
+    src: "{{ MOP_HOME }}/.ssh/mop-bootstrap.pub"
+  register: bootstrap_pub
+
+# Фактом хоста сервера: игра агентов читает его через hostvars.
+- name: Name it for the nodes' play
+  ansible.builtin.set_fact:
+    mop_bootstrap_pub: "{{ bootstrap_pub.content | b64decode | trim }}"
