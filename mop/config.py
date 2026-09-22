@@ -377,9 +377,10 @@ def _parse(text):
     return out
 
 
-def _read(path):
+def read_env(path):
     """То же файлом. Отсутствие файла — штатный случай: на узле нет .env, на
-    управляющей машине нет node.env, у проекта может не быть .mop."""
+    управляющей машине нет node.env. Публична, потому что тем же форматом
+    читаются и ключи LLM из .env (keys.llm_keys_blob)."""
     try:
         with open(path) as f:
             return _parse(f.read())
@@ -387,18 +388,21 @@ def _read(path):
         return {}
 
 
+def _file(path):
+    """Файл настроек, прочитанный один раз за процесс."""
+    if path not in _cache:
+        _cache[path] = read_env(path)
+    return _cache[path]
+
+
 def _load():
     """Настройки установки: .env рядом с кодом."""
-    if ENV_FILE not in _cache:
-        _cache[ENV_FILE] = _read(ENV_FILE)
-    return _cache[ENV_FILE]
+    return _file(ENV_FILE)
 
 
 def _node():
     """Настройки этого узла: node.env, положенный прогоном deploy."""
-    if NODE_ENV_FILE not in _cache:
-        _cache[NODE_ENV_FILE] = _read(NODE_ENV_FILE)
-    return _cache[NODE_ENV_FILE]
+    return _file(NODE_ENV_FILE)
 
 
 def forget():

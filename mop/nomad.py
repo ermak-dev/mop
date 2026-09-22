@@ -64,12 +64,19 @@ def describe_error(e):
     return f"Nomad API error: {e}" if isinstance(e, ApiError) else f"Nomad connection error: {e}"
 
 
+def _raw(method, path, **kw):
+    """Ручка API, которой python-nomad не знает: сырой HTTP с токеном.
+    -> ответ requests, уже проверенный на код."""
+    import requests
+    r = requests.request(method, f"{ADDR}{path}",
+                         headers={"X-Nomad-Token": token()}, timeout=30, **kw)
+    r.raise_for_status()
+    return r
+
+
 def alloc_restart(alloc_id):
     """POST /v1/client/allocation/:id/restart — в python-nomad такого нет."""
-    import requests
-    r = requests.post(f"{ADDR}/v1/client/allocation/{alloc_id}/restart",
-                      headers={"X-Nomad-Token": token()}, json={}, timeout=30)
-    r.raise_for_status()
+    _raw("POST", f"/v1/client/allocation/{alloc_id}/restart", json={})
 
 
 def alloc_stop(alloc_id):
@@ -151,14 +158,8 @@ def forget_refusal(node, allocs):
 
 def _node_post(node_name, path, body=None):
     """POST в узловую ручку Nomad; python-nomad таких не знает."""
-    import requests
-    nid = node_id(node_name)
-    if nid is None:
-        raise RuntimeError(f"no node {node_name} in the cluster")
-    r = requests.post(f"{ADDR}/v1/node/{nid}/{path}",
-                      headers={"X-Nomad-Token": token()},
-                      json={"NodeID": nid, **(body or {})}, timeout=30)
-    r.raise_for_status()
+    nid = require_node_id(node_name)
+    _raw("POST", f"/v1/node/{nid}/{path}", json={"NodeID": nid, **(body or {})})
     return nid
 
 
@@ -189,13 +190,24 @@ def node_forget(node_name):
     _node_post(node_name, "purge")
 
 
+def node_summary(node_name):
+    """Узел из ростера по имени; None, если такого нет. Ineligible тоже
+    считается: узел, выведенный из планирования, остаётся узлом."""
+    return next((n for n in client().nodes.get_nodes() if n["Name"] == node_name),
+                None)
+
+
 def node_id(node_name):
-    """ID узла по имени; None, если такого нет. Ineligible тоже считается:
-    узел, выведенный из планирования, остаётся узлом."""
-    for n in client().nodes.get_nodes():
-        if n["Name"] == node_name:
-            return n["ID"]
-    return None
+    """ID узла по имени; None, если такого нет."""
+    return (node_summary(node_name) or {}).get("ID")
+
+
+def require_node_id(node_name):
+    """ID узла по имени; громкий отказ, если узла нет."""
+    nid = node_id(node_name)
+    if nid is None:
+        raise RuntimeError(f"no node {node_name} in the cluster")
+    return nid
 
 
 def set_node_meta(node_name, updates):
@@ -209,14 +221,8 @@ def set_node_meta(node_name, updates):
     Ходит отсюда, с управляющей машины: токен Nomad есть только у неё, и
     выдавать его узлам ради одной записи значило бы вернуть то, ради чего
     заводили шину."""
-    import requests
-    nid = node_id(node_name)
-    if nid is None:
-        raise RuntimeError(f"no node {node_name} in the cluster")
-    r = requests.post(f"{ADDR}/v1/client/metadata?node_id={nid}",
-                      headers={"X-Nomad-Token": token()},
-                      json={"Meta": updates}, timeout=30)
-    r.raise_for_status()
+    _raw("POST", f"/v1/client/metadata?node_id={require_node_id(node_name)}",
+         json={"Meta": updates})
 
 
 def node_dynamic_meta(node_name):
@@ -227,13 +233,7 @@ def node_dynamic_meta(node_name):
     значит стереть ранее объявленные образы — узел молча перестал бы
     обслуживать половину своих шардов, а увидели бы это по папетам, зависшим
     в queued."""
-    nid = node_id(node_name)
-    if nid is None:
-        raise RuntimeError(f"no node {node_name} in the cluster")
-    import requests
-    r = requests.get(f"{ADDR}/v1/client/metadata?node_id={nid}",
-                     headers={"X-Nomad-Token": token()}, timeout=30)
-    r.raise_for_status()
+    r = _raw("GET", f"/v1/client/metadata?node_id={require_node_id(node_name)}")
     return r.json().get("Dynamic") or {}
 
 
@@ -245,7 +245,14 @@ def node_meta(node_name):
     пришёл бы по той же шине, которой может и не быть, когда как раз и
     понадобился аварийный вход. Значение кладёт `mop deploy` из той же
     переменной инвентаря, что и в юнит агента."""
-    for n in client().nodes.get_nodes():
-        if n["Name"] == node_name:
-            return client().node.get_node(n["ID"]).get("Meta") or {}
-    return {}
+    nid = node_id(node_name)
+    return (client().node.get_node(nid).get("Meta") or {}) if nid else {}
+
+
+def nodes_meta():
+    """{имя узла: его meta} по всему кластеру, одним обходом ростера —
+    включая выведенные из планирования: узел, снятый с раздачи, остаётся
+    узлом, и образы на нём лежат."""
+    c = client()
+    return {n["Name"]: (c.node.get_node(n["ID"]).get("Meta") or {})
+            for n in c.nodes.get_nodes()}

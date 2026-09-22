@@ -9,7 +9,7 @@ import os
 import re
 import time
 
-from . import bus, config, llm, nomad
+from . import bus, config, driver, llm, nomad
 
 PROJECT = config.PROJECT
 
@@ -21,11 +21,12 @@ USER = config.get("MOP_USER")               # под кем идут задач�
 # Куда переводить папет, у которого кончилась квота текущей модели
 # (решение оператора 27.08: Fable → Opus).
 FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL")
-# Префикс не настраивается: на нём стоят глобы сторожа диска (включая
-# переходные ~/wk/wk-*), shard_of_name и имена tmux-серверов. Сделать его
-# переменной, пока сторож знает оба префикса буквально, — значит развести
-# половины одного соглашения.
-JOB_PREFIX = "pu-"
+# Соглашение об имени папета (префикс, разбор, каталоги) живёт в реестре
+# драйверов: это единственный stdlib-модуль, который читают и мастер, и узел.
+# Здесь — только имена, под которыми его знает мастер.
+JOB_PREFIX = driver.PREFIX
+shard_of_name = driver.shard_of_name
+clone_dir = driver.clone_dir
 
 # ─── LLM-профили ─────────────────────────────────────────────────────────
 # Папет — всегда claude code; профиль меняет ровно одно: куда он ходит за
@@ -317,18 +318,6 @@ def shard_of(origin):
     return os.path.basename(origin).removesuffix(".git")
 
 
-def shard_of_name(name):
-    """Шард по имени папета: pu-<проект>-<n>. Откат для случая, когда клона
-    ещё нет, — origin спросить не у кого, а имя уже есть."""
-    if not name.startswith(JOB_PREFIX):
-        return ""
-    return name[len(JOB_PREFIX):].rsplit("-", 1)[0]
-
-
-def clone_dir(name):
-    return f"{HOME}/puppets/{name}"
-
-
 def job_spec(name, origin, profile=None, cont=False):
     """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
     историю каталога (`claude --continue`).
@@ -336,7 +325,6 @@ def job_spec(name, origin, profile=None, cont=False):
     По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
     нужен ровно там, где работу продолжают под другой моделью, а везде ещё
     (новый папет, рецикл, лечение) чистый старт — половина смысла операции."""
-    project = os.path.basename(origin).removesuffix(".git")
     profile = profile or config.get("MOP_DEFAULT_LLM")
     prof = llm.get(profile)
     if prof is None:
@@ -351,7 +339,9 @@ def job_spec(name, origin, profile=None, cont=False):
     env = {
         "PU_NAME": name,
         "PU_ORIGIN": origin,
-        "PU_PROJECT": project,
+        # Два имени одного: врапер исторически читает PU_PROJECT (посев из
+        # ~/puppet-env/<проект>), а шард и есть проект.
+        "PU_PROJECT": shard,
         "PU_SHARD": shard,
         "PU_SEED": config.get("MOP_PUPPET_SEED"),
         "HOME": HOME,
@@ -1051,6 +1041,35 @@ def _action_for(state):
     if state.startswith(("no model quota", "error")):
         return "model"
     return False
+
+
+def treat(issue):
+    """Применить лечение к одной проблеме из diagnose. -> что вышло, строкой.
+
+    Одно место на оба фронтенда, `mop doctor --fix` и инструмент doctor в MCP:
+    пока лечение жило в каждом своём, они разошлись — CLI перерегистрировал
+    спеку по диагнозу `update`, а MCP на тот же диагноз делал рестарт, то есть
+    поднимал ту же старую спеку (#47). Гейт «креды доехали?» перед
+    login+restart остаётся у вызывающего: раздача — его дело."""
+    action, alloc, name = issue["action"], issue["alloc"], issue["name"]
+    try:
+        if action == "stop":
+            nomad.alloc_stop(alloc["ID"])
+            return "alloc stop — Nomad will recreate it without backoff"
+        if action == "model":
+            switch_model(alloc["NodeName"], name, FALLBACK_MODEL)
+            return f"/model {FALLBACK_MODEL}"
+        if action == "update":
+            # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
+            # аллокации поднял бы ту же старую. Клон переживает — меняется
+            # только спека.
+            meta = nomad.get_job(name).get("Meta") or {}
+            nomad.register(job_spec(name, meta["origin"], meta.get("llm")))
+            return "spec re-registered — the puppet comes up with the new wrapper"
+        nomad.alloc_restart(alloc["ID"])
+        return "restart"
+    except Exception as e:
+        return f"{action} failed: {str(e)[:80]}"
 
 
 # ─── рецикл ───────────────────────────────────────────────────────────────

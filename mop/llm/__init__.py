@@ -23,9 +23,9 @@
 «нет ключа» далеко от причины. Дешёвое место поймать это — загрузка
 реестра у мастера.
 """
-import importlib
 import re
-from pathlib import Path
+
+from .. import plugins
 
 _VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_AUTH_VAR = "ANTHROPIC_AUTH_TOKEN"
@@ -59,12 +59,7 @@ def profiles():
     """Весь реестр: {имя профиля: контракт}. Имя файла = имя профиля."""
     global _CACHE
     if _CACHE is None:
-        _CACHE = {}
-        for path in sorted(Path(__file__).parent.glob("*.py")):
-            if path.stem.startswith("_"):
-                continue
-            mod = importlib.import_module(f".{path.stem}", __package__)
-            _CACHE[path.stem] = contract(path.stem, mod)
+        _CACHE = plugins.discover(__file__, __package__, contract)
     return _CACHE
 
 

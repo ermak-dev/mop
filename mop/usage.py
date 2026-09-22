@@ -123,6 +123,15 @@ def total(row):
     return sum(row.get(k) or 0 for k in KINDS)
 
 
+def sum_days(rows):
+    """{date: {kind: n}} -> один {kind: n} за всё окно."""
+    acc = empty()
+    for row in rows.values():
+        for k in KINDS:
+            acc[k] += int(row.get(k) or 0)
+    return acc
+
+
 def days_back(days, now=None):
     """Список дат окна по порядку, от старой к сегодняшней, — оси графика
     нужны и пустые дни: провал в расходе виден только на месте."""

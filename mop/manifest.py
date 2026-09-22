@@ -10,7 +10,7 @@
 import os
 import subprocess
 
-from . import config
+from . import config, puppets
 
 NODE = ".mop/node.yaml"
 WORKSPACE = ".mop/workspace.yaml"
@@ -34,7 +34,7 @@ def fetch(origin):
     единственная его правда для deploy, у которого рабочей копии чужого
     проекта нет вовсе. Читается HEAD зеркала, то есть дефолтная ветка.
     """
-    shard = os.path.basename(origin).removesuffix(".git")
+    shard = puppets.shard_of(origin)
     import tempfile
     with_dir = tempfile.mkdtemp(prefix=f"mop-mirror-{shard}-")
     tmp = os.path.join(with_dir, "mirror.git")

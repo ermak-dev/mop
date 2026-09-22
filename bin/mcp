@@ -31,7 +31,6 @@ BUS.md, устройство сервера — MCP.md.
 """
 import functools
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -474,7 +473,7 @@ def _puppet_add(origin, llm):
     if llm not in llm_profiles():
         return f"no LLM profile {llm}; available: {', '.join(llm_profiles())}"
     keys.push_llm_keys(llm)
-    name = puppets.next_name(os.path.basename(origin).removesuffix(".git"))
+    name = puppets.next_name(puppets.shard_of(origin))
     nomad.register(puppets.job_spec(name, origin, llm))
     return f"{name}: {origin} [{llm}] — placing, check state in agents"
 
@@ -524,22 +523,14 @@ def doctor(fix: bool = False) -> str:
 
 
 def _treat(issue, delivered):
-    action, alloc, name = issue["action"], issue["alloc"], issue["name"]
-    if action == "login+restart":
+    """Лечение — общее с `mop doctor` (puppets.treat); здесь только гейт:
+    рестарт после раздачи кредов имеет смысл, только если раздача дошла."""
+    if issue["action"] == "login+restart":
+        alloc = issue["alloc"]
         got = delivered.get(alloc["NodeName"]) if alloc else None
         if got != "OK":
             return f"restart skipped: credentials not delivered ({got or 'not pushed'})"
-    try:
-        if action == "stop":
-            nomad.alloc_stop(alloc["ID"])
-            return "alloc stop — Nomad will recreate without backoff"
-        if action == "model":
-            puppets.switch_model(alloc["NodeName"], name, puppets.FALLBACK_MODEL)
-            return f"/model {puppets.FALLBACK_MODEL}"
-        nomad.alloc_restart(alloc["ID"])
-        return "restart"
-    except Exception as e:
-        return f"{action} failed: {str(e)[:80]}"
+    return puppets.treat(issue)
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(

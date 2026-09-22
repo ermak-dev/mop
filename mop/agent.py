@@ -39,9 +39,9 @@ except ImportError:
     sys.exit("bus library needed: pip install --user --break-system-packages nats-py")
 
 from . import bus, driver, usage
+from .driver import clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
-CLONES = f"{HOME}/puppets"
 
 # Драйвер узла, не папета, и берётся он из окружения (юнит агента), а не из
 # запроса: иначе мастер шарда A прислал бы своё значение и заставил агента
@@ -86,12 +86,11 @@ WRITABLE = (
     f"{HOME}/.config/mop/secrets.env",
 )
 
-# Префикс имён джобов-папетов; он же префикс tmux-серверов и каталогов клонов.
-# Дубль puppets.JOB_PREFIX намеренный: тянуть сюда puppets значит тянуть на узел
-# python-nomad, а агенту Nomad не нужен вовсе — в этом половина смысла переезда.
 # Ростер тел перечисляет драйвер (у host — по сокетам tmux в /tmp/tmux-<uid>):
-# на гипервизоре этот каталог пуст, и знать о нём агенту незачем.
-PREFIX = "pu-"
+# на гипервизоре этот каталог пуст, и знать о нём агенту незачем. Соглашение
+# об имени папета живёт там же, в реестре драйверов: это узловой stdlib-модуль,
+# а puppets на узел не тянем — он приводит python-nomad, который агенту не
+# нужен вовсе.
 
 # Окно должно накрывать не только последний ход, но и жалобу над ним: строка
 # «API Error: … Usage limit reached» остаётся стоять, а claude дорисовывает под
@@ -112,10 +111,6 @@ def node_name():
     return os.environ.get("MOP_NODE") or socket.gethostname()
 
 
-def clone_dir(name):
-    return f"{CLONES}/{name}"
-
-
 async def puppet_shard(name):
     """Чей это папет. Origin клона — авторитет: врапер сносит клон, если origin
     разошёлся с PU_ORIGIN, так что клон и спека не расходятся никогда.
@@ -126,18 +121,10 @@ async def puppet_shard(name):
     origin = out.strip().splitlines()[-1] if out.strip() else ""
     if origin:
         return os.path.basename(origin).removesuffix(".git")
-    return name[len(PREFIX):].rsplit("-", 1)[0] if name.startswith(PREFIX) else ""
+    return driver.shard_of_name(name)
 
 
 # ─── локальные пробы ─────────────────────────────────────────────────────
-async def sh(script, timeout=20):
-    """Шелл на своём же узле. -> (вывод, код).
-
-    Для узловых суждений: место на диске, ростер тел. Всё, что про конкретного
-    папета, идёт через bsh — в теле."""
-    return await driver.sh(script, timeout)
-
-
 async def bsh(name, script, timeout=20):
     """Шелл внутри тела папета. -> (вывод, код).
 
@@ -171,7 +158,7 @@ async def pane_lines(name):
     видимую часть."""
     out, code = await bsh(name, f"tmux -L {name} capture-pane -p -t {name} -S -")
     if code not in (0, None):
-        raise RuntimeError(f"tmux in {name}: {out.strip() or f'exit {code}'}")
+        raise RuntimeError(f"tmux in {name}: {why(out, code)}")
     lines = out.splitlines()
     while lines and not lines[-1].strip():
         lines.pop()
@@ -218,7 +205,7 @@ async def du_kb(name):
     Каталоги отбирает сам шелл в теле (`-d`), а не os.path.isdir здесь: у
     контейнерного папета этих путей на узле нет вовсе, и проверка снаружи
     вернула бы «ничего не занимает» для полного клона."""
-    paths = f"{clone_dir(name)} {HOME}/.cache/target-{name}"
+    paths = f"{clone_dir(name)} {target_dir(name)}"
     out, code = await bsh(
         name,
         f'p=""; for x in {paths}; do [ -d "$x" ] && p="$p $x"; done; '
@@ -253,20 +240,28 @@ async def session_probe(name):
     return out.strip().splitlines()[-1].strip()
 
 
-async def session_json(name, script, timeout=20):
-    """Ответ session.py, который печатает JSON (send, wait-idle).
+def _last_json(out):
+    """Последняя JSON-строка вывода либо None.
 
-    Разбираем последнюю строку: ssh в тело волен подмешать сверху свои
+    Последняя, а не первая: ssh в тело волен подмешать сверху свои
     предупреждения (баннер, добавленный ключ хоста), и первая строка тогда
-    не JSON."""
-    out, code = await bsh(name, script, timeout)
-    if code is None:
-        return {"error": f"{name}: the body did not answer in {timeout}s"}
+    не JSON. Так читаются и session.py, и usage.py."""
     for line in reversed(out.strip().splitlines()):
         try:
             return json.loads(line)
         except ValueError:
             continue
+    return None
+
+
+async def session_json(name, script, timeout=20):
+    """Ответ session.py, который печатает JSON (send, wait-idle)."""
+    out, code = await bsh(name, script, timeout)
+    if code is None:
+        return {"error": f"{name}: the body did not answer in {timeout}s"}
+    got = _last_json(out)
+    if got is not None:
+        return got
     return {"error": out.strip() or f"session.py exit {code}"}
 
 
@@ -424,7 +419,7 @@ async def v_wipe(req):
     независимо от того, что решил мастер."""
     name = req["name"]
     if not driver.valid_name(name):
-        return {"error": f"name {name!r} doesn't look like {PREFIX}<project>-<n>"}
+        return {"error": driver.bad_name(name)}
     if await tmux_alive(name):
         return {"error": f"{name}: tmux session is alive — stop the job first"}
     return await DRIVER.destroy(name)
@@ -480,12 +475,7 @@ async def v_write(req):
     written = []
     for path, data in files:
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = f"{path}.tmp"
-            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
-                      "wb") as f:
-                f.write(data)
-            os.replace(tmp, path)
+            driver.write_private(path, data)
         except Exception as e:
             return {"error": f"{path}: {e}"}
         written.append(path)
@@ -538,12 +528,7 @@ async def v_usage(req):
             ["python3", shlex.quote(usage_py), shlex.quote(d), str(days)]), 120)
         if code not in (0, None):
             return {}
-        for line in reversed(out.strip().splitlines()):
-            try:
-                return json.loads(line)
-            except ValueError:
-                continue
-        return {}
+        return _last_json(out) or {}
 
     got = await asyncio.gather(*(one(n) for n in names))
     return {"node": node_name(), "usage": dict(zip(names, got))}
@@ -611,8 +596,7 @@ async def serve():
     c = bus.config()
     node = node_name()
     _conn = await nats.connect(
-        servers=[c["url"]], user=c.get("user"), password=c.get("password"),
-        name=f"mop-agent/{node}",
+        **bus.auth(c), name=f"mop-agent/{node}",
         allow_reconnect=True, max_reconnect_attempts=-1, reconnect_time_wait=2)
     # cb обязан быть корутиной — nats-py отвергает обычную функцию. И каждый
     # запрос уходит в свою задачу: последовательная обработка означала бы, что
@@ -643,9 +627,7 @@ async def check():
     c = bus.config()
     print(f"mop-agent: node {node_name()}, bus {c['url']}, "
           f"{len(VERBS)} verbs ({len(PUBLIC_VERBS)} public)")
-    nc = await nats.connect(servers=[c["url"]], user=c.get("user"),
-                            password=c.get("password"),
-                            name="mop-agent/check",
+    nc = await nats.connect(**bus.auth(c), name="mop-agent/check",
                             allow_reconnect=False, connect_timeout=5)
     try:
         msg = await nc.request(bus.subject(node_name(), "msg", shard=bus.ADMIN),

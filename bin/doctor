@@ -12,7 +12,7 @@ clone.
 import sys
 
 import lib
-from mop import keys, nomad, puppets
+from mop import keys, puppets
 from mop.render import table
 
 
@@ -24,31 +24,6 @@ def _login():
     print("pushing " + " + ".join(what) + " to pool nodes")
     for node in sorted(results):
         print(f"  {node}: {results[node]}")
-
-
-def treat(issue):
-    """Применить лечение к одной проблеме. -> что вышло, одной строкой."""
-    action, alloc, name = issue["action"], issue["alloc"], issue["name"]
-    try:
-        if action == "stop":
-            nomad.alloc_stop(alloc["ID"])
-            return "alloc stop — Nomad will recreate it without backoff"
-        if action == "model":
-            puppets.switch_model(alloc["NodeName"], name, puppets.FALLBACK_MODEL)
-            return f"/model {puppets.FALLBACK_MODEL}"
-        if action == "update":
-            # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
-            # аллокации поднял бы ту же старую. Клон переживает — меняется
-            # только спека.
-            job = nomad.get_job(name)
-            meta = job.get("Meta") or {}
-            nomad.register(puppets.job_spec(name, meta["origin"],
-                                            meta.get("llm")))
-            return "spec re-registered — the puppet comes up with the new wrapper"
-        nomad.alloc_restart(alloc["ID"])
-        return "restart"
-    except Exception as e:
-        return f"{action} failed: {str(e)[:80]}"
 
 
 def main(argv):
@@ -80,7 +55,7 @@ def main(argv):
         print()
     for issue in issues:
         if issue["action"]:
-            print(f"  {issue['name']}: {treat(issue)}")
+            print(f"  {issue['name']}: {puppets.treat(issue)}")
     print("\ncheck: mop list (and mop tail <name> for what used to be stuck)")
 
 

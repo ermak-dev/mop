@@ -14,9 +14,11 @@ import json
 import os
 import time
 
-from . import bus, llm, nomad, puppets
+from . import bus, config, llm, nomad, puppets
 
 LOGIN_JOB = "pu-login"
+# Логин claude.ai управляющей машины — то, что раздаётся на узлы.
+CREDENTIALS = os.path.expanduser("~/.claude/.credentials.json")
 
 
 def push_script(files):
@@ -135,16 +137,12 @@ def llm_keys_blob():
     wanted = {p["key"] for p in llm.profiles().values() if p.get("key")}
     if not wanted:
         return None, None
-    found = {}
-    try:
-        with open(os.path.expanduser(puppets.LOCAL_KEYS_FILE)) as f:
-            for line in f:
-                k, sep, v = line.partition("=")
-                k, v = k.strip(), v.strip().strip('"').strip("'")
-                if sep and k in wanted and v:
-                    found[k] = v
-    except OSError:
+    if not os.path.exists(puppets.LOCAL_KEYS_FILE):
         return None, f"no {puppets.LOCAL_KEYS_FILE} — profiles needing a key won't start"
+    # Тот же разбор, что у настроек: это и есть .env, ключи в нём — строки
+    # того же примитивного формата.
+    found = {k: v for k, v in config.read_env(puppets.LOCAL_KEYS_FILE).items()
+             if k in wanted and v}
     missing = sorted(wanted - set(found))
     note = f"{puppets.LOCAL_KEYS_FILE} is missing: {', '.join(missing)}" if missing else None
     if not found:
@@ -177,22 +175,21 @@ def push_llm_keys(profile):
 
 def credentials():
     """Локальные креды claude.ai, годные к раздаче."""
-    src = os.path.expanduser("~/.claude/.credentials.json")
     try:
-        with open(src, "rb") as f:
+        with open(CREDENTIALS, "rb") as f:
             raw = f.read()
         json.loads(raw)
     except FileNotFoundError:
-        raise RuntimeError(f"no {src} — log in to claude on this machine first")
+        raise RuntimeError(f"no {CREDENTIALS} — log in to claude on this machine first")
     except ValueError:
-        raise RuntimeError(f"{src}: not valid JSON, nothing to distribute")
+        raise RuntimeError(f"{CREDENTIALS}: not valid JSON, nothing to distribute")
     return raw
 
 
 def credentials_fresh():
     """Годятся ли локальные креды: валидный JSON, expiresAt в будущем."""
     try:
-        with open(os.path.expanduser("~/.claude/.credentials.json")) as f:
+        with open(CREDENTIALS) as f:
             c = json.load(f)
         return ((c.get("claudeAiOauth") or {}).get("expiresAt") or 0) / 1000 > time.time()
     except Exception:

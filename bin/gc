@@ -26,8 +26,8 @@ def main(argv):
     plan = []
     for n in nodes:
         d = disks.get(n)
-        if isinstance(d, Exception) or not d or d.get("error"):
-            why = d if isinstance(d, Exception) else d.get("error") or "no response"
+        why = bus.failure(d)
+        if why:
             print(f"  {n}: free space unknown — {why}")
             continue
         if d["free_gb"] >= limit:

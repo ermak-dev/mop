@@ -27,7 +27,7 @@ is exactly what serves as the source of truth for keys.
 import os
 
 import lib
-from mop import config, llm, puppets
+from mop import config
 
 
 def main(argv):
@@ -39,16 +39,9 @@ def main(argv):
     profile = profile or config.get("MOP_DEFAULT_LLM")
 
     # Тот же источник ключа, что у мастера: местный .env, а не узловой
-    # secrets.env. Отказ — а не тишина: сессия без ключа отбивает каждый ход
-    # 401-й, а читается живой.
-    prof = llm.require(profile)
-    env = dict(os.environ, **prof["env"])
-    if prof["key"]:
-        key = config.get(prof["key"])
-        if not key:
-            lib.usage(f"profile {profile}: no {prof['key']} in "
-                      f"{puppets.LOCAL_KEYS_FILE} — add it and retry")
-        env[prof["auth_var"]] = key
+    # secrets.env — общее в lib.session_env.
+    _, session = lib.session_env(profile)
+    env = dict(os.environ, **session)
     # flush до exec: буфер stdout не переживает execvpe, и строка о профиле
     # пропадала бы везде, где вывод не в терминал.
     # Флаг добавляется здесь, а не оставляется пользователю: команда для

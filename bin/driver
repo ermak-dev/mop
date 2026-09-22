@@ -39,13 +39,6 @@ CARRY = ("PU_NAME", "PU_ORIGIN", "PU_PROJECT", "PU_SHARD", "PU_SEED",
          "PU_LLM_AUTH_VAR", "HOME", "PATH")
 
 
-def shard_of_name(name):
-    """Шард по имени папета. Дубль puppets.shard_of_name намеренный, по тому
-    же доводу, что и в агенте: тянуть сюда puppets значит тянуть на узел
-    python-nomad ради одного rsplit."""
-    return name[len("pu-"):].rsplit("-", 1)[0]
-
-
 def v_show(_argv):
     """Реестр драйверов и тот, которым живёт эта машина."""
     here = driver.current_name()
@@ -95,7 +88,7 @@ def v_run(argv):
         sys.exit(f"{name!r} doesn't look like a puppet name")
     d = driver.current()
 
-    r = asyncio.run(d.ensure(name, {"shard": shard_of_name(name)}))
+    r = asyncio.run(d.ensure(name, {"shard": driver.shard_of_name(name)}))
     if r.get("error"):
         sys.exit(f"no body for {name}: {r['error']}")
     print(f"{name}: body {r.get('body') or 'the node itself'}"
@@ -210,7 +203,7 @@ def v_build(argv):
             sys.exit("not a git working copy and no shard given: "
                      "mop driver build <shard|origin>")
         root = lib.git("rev-parse", "--show-toplevel")
-    shard = os.path.basename(origin).removesuffix(".git")
+    shard = puppets.shard_of(origin)
     settings = json.dumps({k: v for k, (v, _) in config.effective().items()},
                           ensure_ascii=False)
     got = shard_manifest(origin, shard, root)
@@ -264,10 +257,10 @@ def origin_of(arg):
         return arg                      # это и есть origin
     for job in puppets.jobs(shard=bus.ADMIN):
         o = (job.get("Meta") or {}).get("origin") or ""
-        if o and os.path.basename(o).removesuffix(".git") == arg:
+        if o and puppets.shard_of(o) == arg:
             return o
     here = lib.cwd_origin(required=False)
-    if here and os.path.basename(here).removesuffix(".git") == arg:
+    if here and puppets.shard_of(here) == arg:
         return here
     sys.exit(f"don't know where shard {arg} comes from: it has no puppets and "
              f"this working copy is a different project.\n"
@@ -285,7 +278,7 @@ def announce(shard):
 
     Пишем после успешной сборки: объявить образ, которого нет, — это папет,
     висящий pending, и ровно тот отказ, от которого ограничение и заводилось."""
-    for name, meta in node_drivers().items():
+    for name, meta in nomad.nodes_meta().items():
         if meta.get("mop_driver", driver.DEFAULT) == driver.DEFAULT:
             continue          # узел общего назначения объявляет any и так
         # Перечень берём с узла: серверная копия отстаёт на секунды, и
@@ -297,15 +290,6 @@ def announce(shard):
             continue
         nomad.set_node_meta(name, {"mop_shards": ",".join(sorted(have + [shard]))})
         print(f"  {name}: now serves {', '.join(sorted(have + [shard]))}")
-
-
-def node_drivers():
-    """{имя узла: его meta} по всему кластеру — включая выведенные из
-    планирования: узел, снятый с раздачи, остаётся узлом и образы на нём
-    лежат."""
-    c = nomad.client()
-    return {n["Name"]: (c.node.get_node(n["ID"]).get("Meta") or {})
-            for n in c.nodes.get_nodes()}
 
 
 VERBS = {"list": v_list, "run": v_run, "sweep": v_sweep, "build": v_build}

@@ -48,7 +48,7 @@ import json
 import os
 
 import lib
-from mop import config, llm, puppets
+from mop import config, puppets
 
 # --strict-mcp-config не добавляем: у оператора есть свои серверы, и мастер-шелл
 # не повод их отбирать.
@@ -100,17 +100,9 @@ def main(argv):
                   f"Set up the shard: mop deploy {origin}")
 
     # Профиль тот же, что у папетов, но источник ключа другой: не узловой
-    # secrets.env (мастеру узел не выдавал ничего), а местный .env. Отказа — а
-    # не тишины: сессия без ключа отбивает каждый ход 401-й, а читается живой.
-    prof = llm.require(profile)
-    env = dict(os.environ, MOP_SHARD=shard, MOP_BUS_CONFIG=creds,
-               **prof["env"])
-    if prof["key"]:
-        key = config.get(prof["key"])
-        if not key:
-            lib.usage(f"profile {profile}: no {prof['key']} in "
-                      f"{puppets.LOCAL_KEYS_FILE} — add it and retry")
-        env[prof["auth_var"]] = key
+    # secrets.env, а местный .env — общее с `mop code`, в lib.session_env.
+    _, session = lib.session_env(profile)
+    env = dict(os.environ, MOP_SHARD=shard, MOP_BUS_CONFIG=creds, **session)
     print(f"master of shard {shard} ({origin}) [{profile}]"
           + (f" + claude {' '.join(passthru)}" if passthru else ""))
     os.execvpe("claude", ["claude", "--dangerously-skip-permissions",
