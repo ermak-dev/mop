@@ -23,12 +23,10 @@ claude code на остальных машинах (папеты, на узла�
 
    Всё запускается через `mop <подкоманда>`
 
-2. Настроить окружение установки. Три файла, у каждого свой вопрос; ни один
-   в git не попадает, рядом с каждым лежит пример:
+2. Настроить окружение установки. Три файла конфигурации:
 
        cp .env.example .env && chmod 600 .env
        cp inventory.yaml.example inventory.yaml
-       cp setup.yaml.example setup.yaml
        cp setup.yaml.example setup.yaml
 
    `.env` — что знает установка. Обязательных настроек две: `MOP_SERVER_LAN` —
