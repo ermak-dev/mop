@@ -19,7 +19,7 @@
 #
 # Run:  mop driver build <шард>
 
-- name: Bake the shard's image on the hypervisor
+- name: Bake the shard's image on the Proxmox nodes
   hosts: puppet
   become: no
   gather_facts: no

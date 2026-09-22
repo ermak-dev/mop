@@ -1,4 +1,4 @@
-"""Proxmox: a body is an LXC container on a hypervisor node
+"""Proxmox: a body is an LXC container on a Proxmox node
 
 Тело папета — контейнер LXC на узле-гипервизоре.
 
