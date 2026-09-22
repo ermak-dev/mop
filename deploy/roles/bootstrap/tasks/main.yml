@@ -6,11 +6,15 @@
 # старте песочницы, в том числе когда Nomad перезапускает аллокацию сам, а
 # мастера нет вовсе; сервер — машина, которая включена всегда, и у неё
 # есть дорога к телам (#59).
+# Со свежими списками: сервер живёт долго, и его кэш apt протухает — первая
+# же раскатка упала на 404 по версии пакета, которой в зеркале уже нет.
 - name: Ansible, to play a shard's bootstrap into a sandbox
   become: yes
   ansible.builtin.apt:
     name: ansible
     state: present
+    update_cache: yes
+    cache_valid_time: 3600
 
 - name: Where the shards' bootstraps live
   become: yes
