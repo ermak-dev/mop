@@ -63,22 +63,15 @@
   loop_control:
     label: "{{ item.0 }}-{{ item.1 }}"
 
-# Тот же rsync, что у дашборда (роль web), и дубль осознанный по тому же
-# доводу, что у роли bus: игра, которая запускает подписчика, обязана
-# привезти его код сама и перезапустить его, когда код сменился. Второй
-# прогон по уже привезённому — пустой.
-- name: Sync the mop package from the control machine
-  ansible.posix.synchronize:
-    src: "{{ lookup('env', 'HOME') }}/mop/"
-    dest: "{{ MOP_HOME }}/mop/"
-    delete: yes
-    recursive: yes
-    rsync_opts:
-      - "--exclude=.git"
-      - "--exclude=__pycache__"
-      - "--exclude=.env"
-      - "--exclude=inventory.ini"
-      - "--exclude=inventory.yaml"
+# Пакет на сервер привозит роль web -- та же машина, тот же каталог, -- и
+# второй rsync здесь ничего не менял бы: первый уже всё привёз, а подписчик
+# оставался на старом коде (поймано первой раскаткой: юнит не перезапустился).
+# Поэтому перезапуск -- по результату ТОГО синка: зарегистрированная
+# переменная переживает игру.
+- name: The package changed under the service
+  ansible.builtin.debug:
+    msg: "mop package changed on the server — restarting mop-bootstrap"
+  changed_when: (mop_server_package | default({})) is changed
   notify: restart mop-bootstrap
 
 - name: Systemd unit

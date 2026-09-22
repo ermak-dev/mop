@@ -33,6 +33,9 @@
       - "--exclude=.env"
       - "--exclude=inventory.ini"
       - "--exclude=inventory.yaml"
+  # Результат синка переживает игру: по нему перезапускается и второй процесс
+  # сервера, mop-bootstrap (роль bootstrap) -- тот же пакет в том же каталоге.
+  register: mop_server_package
   notify: restart mop-web
 
 - name: Credentials dir of the server, closed like the master's
