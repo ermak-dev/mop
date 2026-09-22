@@ -1193,8 +1193,12 @@ def delete(name):
     nomad.deregister(name)
     if not node:
         return {"node": None, "body": None}
+    # Контракт драйвера — словарь, а НЕ модуль: `driver.require` отдаёт
+    # проверенный реестром контракт, и флаг в нём лежит ключом body_is_node.
+    # Модуль с атрибутом BODY_IS_NODE возвращает только `driver.current()`, и
+    # он про ЭТОТ узел, а нам нужен чужой — по имени.
     drv = (nomad.node_meta(node) or {}).get("mop_driver") or driver.DEFAULT
-    if driver.require(drv).BODY_IS_NODE:
+    if driver.require(drv)["body_is_node"]:
         return {"node": node, "body": "kept"}
     _wait_stopped(name)
     wipe(node, name)

@@ -380,6 +380,28 @@ def main():
             print(f"FAILED  build address of {sh} is {addr}, outside {net} "
                   f"or equal to the gateway")
 
+    # Контракт драйвера — СЛОВАРЬ, и флаг в нём ключом, а не атрибутом.
+    # Модуль с атрибутом BODY_IS_NODE отдаёт только `current()`, и он про свой
+    # узел; спросить про чужой можно лишь по имени, через реестр. Перепутать
+    # эти две вещи легко, а отказ приходит не там: `mop delete` успевает снять
+    # джоб и падает уже ПОСЛЕ этого на AttributeError, оставляя тело сиротой
+    # (поймано 22.09 живым прогоном, на двух телах сразу).
+    for name in ("host", "pve"):
+        cases += 1
+        c = driver.require(name)
+        if not isinstance(c, dict) or "body_is_node" not in c:
+            bad += 1
+            print(f"FAILED  driver.require({name!r}) must be a mapping with "
+                  f"body_is_node, got {type(c).__name__}")
+
+    cases += 1
+    if driver.require("host")["body_is_node"] is not True \
+            or driver.require("pve")["body_is_node"] is not False:
+        bad += 1
+        print("FAILED  body_is_node must tell a node-body driver from a "
+              "container one — everything that decides what to destroy "
+              "hangs on it")
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 
