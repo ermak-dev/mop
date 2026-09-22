@@ -59,6 +59,13 @@ shards_json() {
         | python3 -c "import json,sys; print(json.dumps({'mop_shards': [l.strip() for l in sys.stdin if l.strip()]}))"
 }
 
+# Без ansible прогон падал бы на «command not found» посреди вывода
+# настроек; зависимости контроллера ставит mop setup, и отказ его называет.
+if ! command -v ansible-playbook >/dev/null; then
+    fail "no ansible-playbook on this machine -- run mop setup"
+    exit 1
+fi
+
 if [[ ! -f "$INVENTORY" ]]; then
     fail "no inventory $INVENTORY -- create it from the example: cp inventory.yaml.example inventory.yaml"
     exit 1
