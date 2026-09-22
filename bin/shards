@@ -13,6 +13,7 @@ project's last puppet would silently drop its user from the NATS config on
 the next deploy, and a running master would stop connecting.
 """
 import os
+import sys
 
 import lib
 from mop import bus, nomad, puppets
@@ -49,9 +50,12 @@ def collect(extra=()):
                     if (j.get("Meta") or {}).get("origin")}
     except Exception as e:
         # Ростер недоступен — работаем по памяти, но говорим об этом: молча
-        # сузить список значит выписать шард из конфига NATS.
+        # сузить список значит выписать шард из конфига NATS. В stderr:
+        # stdout этой команды `mop deploy` читает как список origin'ов, и
+        # первый прогон на свежем контроллере отдавал это предупреждение
+        # git'у как адрес репозитория.
         print(f"Nomad roster unavailable ({nomad.describe_error(e)}), "
-              f"using only remembered shards", flush=True)
+              f"using only remembered shards", file=sys.stderr, flush=True)
     return origins, legacy
 
 
