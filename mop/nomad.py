@@ -44,7 +44,8 @@ def token():
     if t:
         return t
     raise LookupError(f"no Nomad token: {creds.server_dir()}/{creds.TOKEN_FILE} — "
-                      f"run mop join <server>")
+                      f"on the controller the first mop deploy fetches it, "
+                      f"elsewhere run mop join <server>")
 
 
 def client():
