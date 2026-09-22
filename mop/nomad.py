@@ -9,7 +9,6 @@ attach, ради живого терминала.
 отсюда были и лимит на длину сообщения, и двухфазная установка session.py на
 узел. Шина сняла и то и другое: ничего из этого в коде больше нет.
 """
-import json
 import os
 import sys
 
@@ -20,7 +19,7 @@ except ImportError:
     sys.exit("API library required: pip install --user --break-system-packages "
              "python-nomad")
 
-from . import config  # noqa: E402
+from . import config, creds  # noqa: E402
 
 ADDR = config.get("NOMAD_ADDR")
 TASK = "claude"          # имя задачи внутри группы папета
@@ -38,11 +37,19 @@ _client = None
 
 
 def token():
-    t = os.environ.get("NOMAD_TOKEN")
+    """Management-токен: окружение, каталог сервера (mop/creds.py), и — пока
+    мастера настраивает ansible — старое место, куда его забирала игра
+    сервера. Нет нигде — LookupError: на нём стоит профиль `mop mcp`, и
+    узел без токена так и должен читаться."""
+    t = os.environ.get("NOMAD_TOKEN") or creds.token(creds.server_dir())
     if t:
         return t
-    with open(os.path.expanduser("~/.config/nomad/bootstrap.json")) as f:
-        return json.load(f)["SecretID"]
+    legacy = os.path.expanduser("~/.config/nomad/bootstrap.json")
+    t = creds.token(os.path.dirname(legacy))
+    if t:
+        return t
+    raise LookupError(f"no Nomad token: neither {creds.server_dir()}/{creds.TOKEN_FILE}"
+                      f" nor {legacy} — run mop join <server>")
 
 
 def client():
