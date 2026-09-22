@@ -12,7 +12,7 @@ runs there — a node dropped from under a live puppet keeps working and the
 master never hears of it again.
 """
 import lib
-from mop import driver, nomad, puppets
+from mop import nodes, nomad
 from mop.render import table
 
 
@@ -20,24 +20,12 @@ def v_list(_argv):
     """Узлы пула как таблица. То же, что видно в подвале `mop list`, плюс то,
     чего там нет: драйвер, чьи шарды узел умеет и состояние планирования."""
     rows = [("NODE", "DRIVER", "SERVES", "STATE", "FREE", "TOTAL", "SLOTS")]
-    cap = {n["name"]: n for n in puppets.pool()}
-    metas = nomad.nodes_meta()
-    for n in sorted(nomad.client().nodes.get_nodes(), key=lambda n: n["Name"]):
-        meta = metas.get(n["Name"], {})
-        c = cap.get(n["Name"], {})
-        state = n["Status"]
-        if n.get("Drain"):
-            state += ", draining"
-        elif n.get("SchedulingEligibility") == "ineligible":
-            state += ", closed"
+    for r in nodes.rows():
         rows.append((
-            n["Name"],
-            meta.get("mop_driver") or driver.DEFAULT,
-            meta.get("mop_shards") or "-",
-            state,
-            f"{c['free_mb'] // 1024} GB" if "free_mb" in c else "-",
-            f"{c['total_mb'] // 1024} GB" if "total_mb" in c else "-",
-            str(c.get("slots", "-")),
+            r["name"], r["driver"], r["serves"], r["state"],
+            f"{r['free_mb'] // 1024} GB" if r["free_mb"] is not None else "-",
+            f"{r['total_mb'] // 1024} GB" if r["total_mb"] is not None else "-",
+            str(r["slots"]) if r["slots"] is not None else "-",
         ))
     print("\n".join(table(rows)))
 
