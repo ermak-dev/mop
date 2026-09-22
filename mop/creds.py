@@ -91,18 +91,17 @@ def pick(listing):
                   or (n.startswith("nats-master-") and n.endswith(".pass")))
 
 
-def collect(secrets_dir, token_file, dest):
+def collect(secrets_dir, dest):
     """Собрать каталог сервера на самом контроллере: он тоже машина
     оператора, и после `mop deploy` на нём всё должно работать без join.
-    -> имена положенных файлов."""
+    Токен сюда кладёт игра сервера (fetch), а тот пишет с правами по
+    umask -- поэтому права закрываются у всего, что лежит в каталоге, а не
+    только у скопированного. -> имена положенных паролей."""
     import shutil
     make_dir(dest)
     names = pick(os.listdir(secrets_dir))
     for n in names:
         shutil.copyfile(os.path.join(secrets_dir, n), os.path.join(dest, n))
-    if os.path.exists(token_file):
-        shutil.copyfile(token_file, os.path.join(dest, TOKEN_FILE))
-        names.append(TOKEN_FILE)
-    for n in names:
+    for n in os.listdir(dest):
         os.chmod(os.path.join(dest, n), 0o600)
     return names

@@ -133,9 +133,8 @@ python3 -c "
 import os
 from mop import config, creds
 dest = creds.server_dir()
-got = creds.collect(os.path.expanduser('~/.config/mop/secrets'),
-                    os.path.expanduser('~/.config/nomad/bootstrap.json'), dest)
-print(f'  server credentials: {len(got)} files in {dest}')"
+got = creds.collect(os.path.expanduser('~/.config/mop/secrets'), dest)
+print(f'  server credentials: {len(got)} passwords in {dest}')"
 
 section "check"
 # Прогон без неё не отличает «плейбук зелёный» от «пул отвечает»: агент,

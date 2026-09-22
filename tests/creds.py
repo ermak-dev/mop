@@ -97,10 +97,16 @@ def main():
     for name in listing:
         with open(os.path.join(secrets, name), "w") as f:
             f.write(name + "\n")
+    # Токен в каталог кладёт fetch игры сервера, с правами по umask; collect
+    # обязан закрыть и его (#54): на свежем контроллере он лежал бы 0644.
     dest = os.path.join(tempfile.mkdtemp(), "10.0.0.5")
+    os.makedirs(dest)
+    with open(os.path.join(dest, "bootstrap.json"), "w") as f:
+        json.dump({"SecretID": "tok-123"}, f)
+    os.chmod(os.path.join(dest, "bootstrap.json"), 0o644)
     cases += 1
-    copied = creds.collect(secrets, os.path.join(d, "bootstrap.json"), dest)
-    if sorted(os.listdir(dest)) != sorted(want + ["bootstrap.json"]) or copied != want + ["bootstrap.json"]:
+    copied = creds.collect(secrets, dest)
+    if sorted(os.listdir(dest)) != sorted(want + ["bootstrap.json"]) or copied != want:
         bad += 1
         print(f"FAILED  collect -> {copied}, dir {sorted(os.listdir(dest))}")
     cases += 1
@@ -108,10 +114,11 @@ def main():
         bad += 1
         print("FAILED  collected files must read back through password()/token()")
     cases += 1
-    mode = os.stat(dest).st_mode & 0o777
-    if mode != 0o700:
+    modes = {n: os.stat(os.path.join(dest, n)).st_mode & 0o777 for n in os.listdir(dest)}
+    if (os.stat(dest).st_mode & 0o777) != 0o700 or any(m != 0o600 for m in modes.values()):
         bad += 1
-        print(f"FAILED  the server directory holds secrets: mode {oct(mode)}, wanted 0o700")
+        print(f"FAILED  the server directory holds secrets: dir "
+              f"{oct(os.stat(dest).st_mode & 0o777)}, files {modes}")
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0

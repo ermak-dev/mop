@@ -99,12 +99,10 @@ def _load(path):
 def config(file=None):
     """{url, user, password} этого процесса.
 
-    Порядок: файл, который назвали (агент — свой узловой, врапер и `mop
-    master` — через MOP_BUS_CONFIG), иначе сборка из каталога сервера
-    (mop/creds.py) по MOP_SERVER_LAN и MOP_SHARD, иначе старые файлы
-    плейбука — bus.json оператора и bus-master-<шард>.json. Запасной путь
-    временный: пока мастера настраивает ansible, он остаётся единственным
-    на свежей машине; уходит вместе с игрой мастера.
+    Порядок: файл, который назвали (агент — свой узловой, врапер папета —
+    через MOP_BUS_CONFIG), иначе сборка из каталога сервера (mop/creds.py)
+    по MOP_SERVER_LAN и MOP_SHARD. Третьего нет: файлы плейбука
+    bus-master-<шард>.json ушли вместе с игрой мастера (#53).
 
     В url всегда LAN-адрес, никогда публичное имя: оно резолвится в адрес
     роутера, а хайрпин на порт шины роутер не делает — проверено, connection
@@ -122,16 +120,11 @@ def config(file=None):
     host = settings.get("MOP_SERVER_LAN")
     directory = creds.server_dir(host)
     password = creds.password(directory, SHARD)
-    if password is not None:
-        return creds.bus_config(host, settings.get("MOP_NATS_PORT"), SHARD, password)
-    legacy = NODE_FILE if SHARD == ADMIN else os.path.expanduser(
-        f"~/.config/mop/bus-master-{SHARD}.json")
-    try:
-        return _load(legacy)
-    except FileNotFoundError:
-        raise BusError(f"no bus credentials for {creds.user_of(SHARD)}: neither "
-                       f"{directory}/{creds.pass_file(SHARD)} nor {legacy} — "
+    if password is None:
+        raise BusError(f"no bus credentials for {creds.user_of(SHARD)}: "
+                       f"{directory}/{creds.pass_file(SHARD)} — "
                        f"run mop join <server> (or mop deploy on the server)")
+    return creds.bus_config(host, settings.get("MOP_NATS_PORT"), SHARD, password)
 
 
 # ─── соединение ──────────────────────────────────────────────────────────
