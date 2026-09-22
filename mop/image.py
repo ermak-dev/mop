@@ -41,18 +41,115 @@ def extra_vars(origin, got):
     return extra
 
 
-def bake(origin, got, out=None):
+def bake(origin, got, out=None, fresh=False):
     """Прогнать плейбук сборки. -> код возврата ansible.
 
     out — куда писать вывод плейбука: файл (MCP пишет в журнал и присылает
     хвост вестью) либо None (терминал видит прогон живьём). Инвентарь — из
-    окружения, его ставит диспетчер `mop` для всех командлетов."""
+    окружения, его ставит диспетчер `mop` для всех командлетов.
+
+    fresh — начисто, с базового образа. Умолчание — инкремент (#60): шаблон
+    клонируется в сборочное тело, плейбук играется там и качает только
+    новое, и лишь потом образ подменяется. Инкремент не даёт чистоты: то,
+    чего в плейбуке уже нет, в образе останется — за этим и остаётся fresh."""
     settings = json.dumps(config.playbook_vars(), ensure_ascii=False)
+    extra = extra_vars(origin, got)
+    if fresh:
+        extra["mop_fresh"] = True
     return subprocess.call(
         ["ansible-playbook", "-i", os.environ["INVENTORY"], PLAYBOOK,
          "--extra-vars", settings,
-         "--extra-vars", json.dumps(extra_vars(origin, got))],
+         "--extra-vars", json.dumps(extra)],
         stdout=out, stderr=subprocess.STDOUT if out else None)
+
+
+# ─── тела шарда до и после сборки (#60) ───────────────────────────────────
+# Пересборка — операция над ШАРДОМ, а не над образом: образ с живым клоном
+# не заменить, значит тела шарда на контейнерных узлах сносятся до сборки и
+# папеты поднимаются заново после — уже клонами нового образа. Попутно это
+# чинит ловушку, пойманную 22.09: `ensure` переиспользует стоящее тело, и
+# «пересозданный» папет приходил с прежними пакетами. Цена названа: снос
+# теряет прогретые target (35 ГБ и 329 с на папета), поэтому занятый папет
+# — отказ, если не сказано force.
+def plan_clear(rows, force=False):
+    """Кого сносить перед сборкой. rows: [{name, node, container, state}]
+    -> [имя]; RuntimeError с именами, если кто-то занят и не force.
+
+    Тела на узлах, где тело равно узлу, сборки не касаются. Свободен —
+    только тот, о ком это сказано прямо (puppets.is_free): молчащий агент
+    и папет без состояния читаются как занятые, потому что снос под живой
+    работой хуже отказа."""
+    mine = [r for r in rows if r.get("container")]
+    busy = [r["name"] for r in mine if not puppets.is_free(r.get("state") or "")]
+    if busy and not force:
+        raise RuntimeError(
+            f"rebuilding the image destroys the shard's bodies, and these are "
+            f"not free: {', '.join(busy)} — wait, or mop driver build --force")
+    return [r["name"] for r in mine]
+
+
+def shard_rows(shard):
+    """Папеты шарда, как их видит plan_clear: [{name, node, container,
+    state, job}]. Не размещённые (без аллокации) не считаются: тела у них
+    нет, снимать нечего."""
+    meta = nomad.nodes_meta()
+    rows = []
+    for item in puppets.roster():
+        job = item["job"]
+        if puppets.shard_of((job.get("Meta") or {}).get("origin") or "") != shard:
+            continue
+        node = item["alloc"]["NodeName"] if item["alloc"] else None
+        if not node:
+            continue
+        drv = (meta.get(node) or {}).get("mop_driver", driver.DEFAULT)
+        rows.append({"name": job["ID"], "node": node, "job": job,
+                     "container": not driver.require(drv)["body_is_node"],
+                     "state": item["state"]})
+    return rows
+
+
+def clear(shard, force=False):
+    """Остановить папетов шарда на контейнерных узлах и снести их тела.
+    -> [{name, origin, llm, node}] — кого поднять заново после сборки.
+    Отказ по занятым — RuntimeError из plan_clear, до первого останова."""
+    rows = shard_rows(shard)
+    jobs = {r["name"]: (r["job"], r["node"]) for r in rows}
+    gone = []
+    for name in plan_clear(rows, force):
+        job, node = jobs[name]
+        m = job.get("Meta") or {}
+        nomad.deregister(name, purge=False)
+        puppets._wait_stopped(name)
+        puppets.wipe(node, name)
+        gone.append({"name": name, "origin": m.get("origin"),
+                     "llm": m.get("llm") or config.get("MOP_DEFAULT_LLM"),
+                     "node": node})
+    return gone
+
+
+def restore(gone):
+    """Поднять снесённых заново — той же спекой, из нового образа. Зовётся
+    и после неудачной сборки: старый образ на месте, папетам есть из чего
+    клонироваться."""
+    for p in gone:
+        nomad.register(puppets.job_spec(p["name"], p["origin"], p["llm"]))
+
+
+def build(origin, got, out=None, fresh=False, force=False):
+    """Вся сборка как операция над шардом: снять тела → плейбук → поднять
+    папетов заново → объявить образ. -> {rc, gone, announced}.
+
+    Одна дорога на оба фронтенда (`mop driver build`, инструмент build в
+    MCP). Папеты поднимаются заново при ЛЮБОМ исходе плейбука: при отказе
+    старый образ на месте, и оставить их снятыми значило бы наказать шард
+    за неудачную сборку дважды. Объявление — только после успеха."""
+    gone = clear(got["shard"], force)
+    try:
+        rc = bake(origin, got, out, fresh)
+    finally:
+        restore(gone)
+    announced = announce(got["shard"]) if rc == 0 else []
+    return {"rc": rc, "gone": gone, "announced": announced}
 
 
 def announce(shard):

@@ -1,9 +1,30 @@
 ---
-# Образ шарда: `mop driver build <шард>`.
+# Образ шарда: `mop driver build <шард> [--fresh]`.
 #
-# Тело из базового образа → то, чем обязано быть любое тело (body-tasks.yml) →
-# пакет mop → остановить → шаблон. Дальше каждое тело папета — клон этого
-# шаблона: на lvm-thin связанный и мгновенный.
+# Сборочное тело → то, чем обязано быть любое тело (роль body) → пакет mop →
+# файлы установки и манифест шарда → остановить → на место образа. Дальше
+# каждое тело папета — клон этого образа: на lvm-thin связанный и мгновенный.
+#
+# Инкрементально (#60). Сборочное тело — ПОЛНАЯ копия нынешнего образа, и
+# плейбук в нём играется идемпотентно: creates, state=present, сверки версий
+# — качается только новое. Раньше сборка начиналась со сноса образа и тянула
+# всё заново (claude CLI 234 МБ, chromium 658 МБ, rustup, ffmpeg): 40-90
+# минут по каналу 22.09, четыре раза за день, а обрыв посередине оставлял
+# шард вообще без образа. Теперь старый образ стоит, пока новый не готов.
+#
+# Почему копия, а не снятие флага шаблона: `pct set --template 0` флаг
+# снимает, но том образа остаётся базовым (base-*, read-only, k-флаг
+# активации) — контейнер не стартует, и обратно в шаблон не превращается.
+# Проверено на hyper 22.09 одноразовым контейнером.
+#
+# Цена инкремента названа: чистоты он не даёт — то, чего в плейбуке уже
+# нет, в образе останется. За этим `--fresh`: сборочное тело из базового
+# образа, всё заново. И тела шарда на этом узле сносятся до сборки (это
+# делает `mop driver build` на управляющей машине, mop/image.py): у образа с
+# живым клоном не отнять место.
+#
+# Обрыв посередине: сборочное тело стоит под своим именем, и следующий
+# прогон ПРОДОЛЖАЕТ в нём — восстановление одной командой, той же.
 #
 # Сборкой, а не подъёмом на месте. Поднимать тело из базового образа и гонять
 # плейбук при каждом `ensure` соблазнительно — одним механизмом меньше, — но
@@ -17,7 +38,7 @@
 # запечатан. Постоянного ключа мастера в образе нет — он был бы второй дорогой
 # к телу, мимо единственного места, где проверяется шардирование.
 #
-# Run:  mop driver build <шард>
+# Run:  mop driver build <шард> [--fresh] [--force]
 
 - name: Bake the shard's image on the Proxmox nodes
   hosts: puppet
@@ -65,6 +86,56 @@
         pve_gw: "{{ tmpl.stdout.split()[2] }}"
         pve_cidr: "{{ tmpl.stdout.split()[3] }}"
         tmpl_ip: "{{ tmpl.stdout.split()[4] }}"
+
+    # Что стоит на узле: есть ли образ, осталось ли сборочное тело от
+    # оборванного прогона, не стоят ли ещё тела шарда.
+    - name: What stands on this node
+      ansible.builtin.command: "{{ pve }} list"
+      register: standing
+      changed_when: false
+
+    # Номер сборочного тела выбирает драйвер по списку: оборванную сборку
+    # продолжаем в её теле, иначе берём свободный номер из диапазона
+    # шаблонов (pve.stage_vmid, проверено в tests/driver.py).
+    - name: Ask the driver where to build
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import sys
+            sys.path.insert(0, sys.argv[1])
+            from mop.driver import pve
+            listing = pve.parse_list(sys.argv[3])
+            v = pve.stage_vmid(sys.argv[2], listing)
+            print(v, pve.stage_name(sys.argv[2]), pve.address_of_vmid(v))
+          - "{{ playbook_dir }}/.."
+          - "{{ mop_shard }}"
+          - "{{ standing.stdout }}"
+      delegate_to: localhost
+      changed_when: false
+      register: stage
+
+    - name: Name the build body
+      ansible.builtin.set_fact:
+        stage_vmid: "{{ stage.stdout.split()[0] }}"
+        stage_name: "{{ stage.stdout.split()[1] }}"
+        stage_ip: "{{ stage.stdout.split()[2] }}"
+        have_image: "{{ standing.stdout_lines | select('search', ' ' ~ tmpl_name ~ ' ') | list | length > 0 }}"
+        have_stage: "{{ standing.stdout_lines | select('search', ' ' ~ stage.stdout.split()[1] ~ ' ') | list | length > 0 }}"
+        shard_bodies: "{{ standing.stdout_lines | map('split') | map(attribute=1) | select('match', '^pu-' ~ (mop_shard | regex_escape) ~ '-[0-9]+$') | list }}"
+
+    # Образ с живым клоном не заменить, поэтому тел шарда на узле быть не
+    # должно. Их снимает `mop driver build` до плейбука (останов джобов и
+    # снос тел); что осталось — сироты, и это дело `mop sweep`, а не
+    # сборки: снести чужую работу молча хуже отказа.
+    - name: No body of the shard may still stand here
+      ansible.builtin.assert:
+        that: shard_bodies | length == 0
+        fail_msg: >-
+          bodies of {{ mop_shard }} still stand on {{ inventory_hostname }}:
+          {{ shard_bodies | join(', ') }} — the image cannot be replaced under
+          them; orphans go with mop sweep, live puppets with mop driver build --force
 
     # Размеры тела: чего просит проект (mop.yaml), но не выше потолка этой
     # машины. Просит чужой репозиторий, а решает узел, на котором тело будет
@@ -114,25 +185,64 @@
         node_key: "{{ keyfiles.results[0].content | b64decode | trim }}"
         control_key: "{{ keyfiles.results[1].content | b64decode | trim }}"
 
-    # Пересборка начинается со сноса: образ собирается начисто, иначе в нём
-    # накапливается то, чего в плейбуке уже нет.
-    - name: Throw away the previous image
-      ansible.builtin.command: "{{ pve }} destroy {{ tmpl_vmid }}"
+    # Откуда растёт сборочное тело — три случая, и каждый назван вслух:
+    #   оборванная сборка   продолжаем в её теле как есть;
+    #   есть образ          полная копия образа, плейбук доложит разницу;
+    #   ничего / --fresh    контейнер из базового образа, всё заново.
+    - name: Where the build body comes from
+      ansible.builtin.set_fact:
+        build_from: >-
+          {{ 'stage' if (have_stage | bool and not (mop_fresh | default(false) | bool))
+             else ('image' if (have_image | bool and not (mop_fresh | default(false) | bool))
+             else 'base') }}
+
+    - name: Say so
+      ansible.builtin.debug:
+        msg: >-
+          {{ mop_shard }} on {{ inventory_hostname }}:
+          {{ {'stage': 'resuming the build body ' ~ stage_name ~ ' left by a previous run',
+              'image': 'incremental — a full copy of ' ~ tmpl_name ~ ' (' ~ tmpl_vmid ~ ')',
+              'base': 'fresh — from the base image'}[build_from] }}
+          as {{ stage_name }} ({{ stage_vmid }}) at {{ stage_ip }}
+
+    # --fresh на оборванной сборке: её тело в мусор, начинаем с базы.
+    - name: A fresh build starts without the leftovers
+      ansible.builtin.command: "{{ pve }} destroy {{ stage_vmid }}"
+      when: have_stage | bool and build_from == 'base'
       changed_when: true
+
+    - name: The build body, a full copy of the image
+      ansible.builtin.command: >-
+        {{ pve }} clone {{ tmpl_vmid }} {{ stage_vmid }} {{ stage_name }}
+        {{ MOP_PVE_STORAGE }} {{ stage_ip }}/{{ pve_cidr }} {{ pve_gw }}
+        {{ MOP_PVE_BRIDGE }} full
+      when: build_from == 'image'
+      changed_when: true
+
+    # Копия несёт размеры СТАРОГО образа, а манифест мог поменяться: память
+    # и ядра ставятся заново, диск — только вверх (тонкий том не ужать; в
+    # меньшую сторону доезжает только --fresh).
+    - name: The build body takes today's sizes
+      ansible.builtin.command: >-
+        {{ pve }} size {{ stage_vmid }} {{ body_cores }} {{ body_mem }} {{ body_disk }}
+      when: build_from != 'base'
+      register: resized
+      changed_when: resized.stdout | length > 0
 
     # Пароли — со STDIN и только здесь, при сборке образа. В node.env они не
     # едут и в NODE_SCOPED не входят: тот файл лежит на узлах с правами 0644,
     # и на host-узле его читает любой папет — общий $HOME. Пусто значит
     # «пароля нет», и аккаунт остаётся заблокированным.
-    - name: Raise a container from the base image
+    - name: The build body, a container from the base image
       ansible.builtin.shell:
         cmd: >-
-          {{ pve }} create {{ tmpl_vmid }} {{ tmpl_name }} {{ MOP_PVE_TEMPLATE }}
+          {{ pve }} create {{ stage_vmid }} {{ stage_name }} {{ MOP_PVE_TEMPLATE }}
           {{ MOP_PVE_STORAGE }} {{ body_cores }} {{ body_mem }}
-          {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ tmpl_ip }}/{{ pve_cidr }}
+          {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ stage_ip }}/{{ pve_cidr }}
           {{ pve_gw }} {{ MOP_HOME }}/.ssh/mop-body.pub
         stdin: "{{ mop_body_root_password | default('') }}"
         stdin_add_newline: false
+      when: build_from == 'base'
       changed_when: true
       no_log: true
 
@@ -142,22 +252,25 @@
     # управляющей машине, откуда идёт сборка. Без неё вторая сборка образа
     # падает на «host key verification failed», а первая проходит.
     - name: Forget the address's previous host key
-      ansible.builtin.command: "ssh-keygen -R {{ tmpl_ip }} -f {{ lookup('env', 'HOME') }}/.ssh/known_hosts-mop-body"
+      ansible.builtin.command: "ssh-keygen -R {{ stage_ip }} -f {{ lookup('env', 'HOME') }}/.ssh/known_hosts-mop-body"
       delegate_to: localhost
       changed_when: false
       failed_when: false
 
     - name: Start it
-      ansible.builtin.command: "{{ pve }} start {{ tmpl_vmid }}"
+      ansible.builtin.command: "{{ pve }} start {{ stage_vmid }}"
       changed_when: true
 
     # Отдельной пробы сети нет: bootstrap начинается с `apt-get update`, и
     # пока сеть у тела не поднялась, он же и есть проба. Прежняя проба ходила
     # глаголом exec, который входит в тело под пользователем пула, — а его на
     # этом шаге ещё нет, так что сорок раз подряд она мерила не то.
+    # И на копии образа тоже: глагол идемпотентен, а его `apt-get update`
+    # заодно освежает списки пакетов — без этого установка нового пакета в
+    # старый образ падала бы на 404 по устаревшим индексам.
     - name: The pool user, sshd, sudo and a lingering session bus
       ansible.builtin.shell:
-        cmd: "{{ pve }} bootstrap {{ tmpl_vmid }}"
+        cmd: "{{ pve }} bootstrap {{ stage_vmid }}"
         stdin: "{{ mop_body_user_password | default('') }}"
         stdin_add_newline: false
       register: boot
@@ -169,7 +282,7 @@
 
     - name: Let both the node and this build machine in
       ansible.builtin.shell:
-        cmd: "{{ pve }} keys {{ tmpl_vmid }}"
+        cmd: "{{ pve }} keys {{ stage_vmid }}"
         stdin: "{{ node_key }}\n{{ control_key }}\n"
       changed_when: true
 
@@ -178,9 +291,9 @@
     # lxc-attach за каждый модуль, и сборка на нём идёт минутами дольше.
     - name: Take the body into the inventory for the rest of the run
       ansible.builtin.add_host:
-        name: "{{ tmpl_name }}"
+        name: "{{ stage_name }}"
         groups: mop_building
-        ansible_host: "{{ tmpl_ip }}"
+        ansible_host: "{{ stage_ip }}"
         ansible_user: "{{ MOP_USER }}"
         ansible_python_interpreter: /usr/bin/python3
         ansible_ssh_private_key_file: "{{ build_key }}"
@@ -206,7 +319,7 @@
           -o StrictHostKeyChecking=accept-new
           -o UserKnownHostsFile={{ lookup('env', 'HOME') }}/.ssh/known_hosts-mop-body
         mop_body_of: "{{ inventory_hostname }}"
-        mop_body_vmid: "{{ tmpl_vmid }}"
+        mop_body_vmid: "{{ stage_vmid }}"
       changed_when: false
 
 
@@ -229,11 +342,14 @@
       ansible.builtin.include_role:
         name: body
 
-    - name: Where the package goes
+    # Старая копия — в мусор: архив поверх неё оставил бы файлы, которых в
+    # пакете уже нет (инкремент играет по копии образа).
+    - name: Where the package goes, emptied first
       ansible.builtin.file:
         path: "{{ MOP_HOME }}/mop"
-        state: directory
+        state: "{{ item }}"
         mode: "0755"
+      loop: [absent, directory]
 
     # Пакет mop нужен телу ради одного файла — session.py: пробу живости и
     # канал сообщений агент исполняет внутри тела, и импортировать их снаружи
@@ -245,8 +361,6 @@
     # 10.77.0.2 с управляющей машины напрямую, которой в эту сеть хода нет.
     # unarchive же идёт обычным соединением ansible, со всеми его аргументами.
     #
-    # delete=yes тут не нужен: образ каждый раз собирается начисто, устаревать
-    # в нём нечему.
     - name: Pack the mop package up
       ansible.builtin.command:
         # .env никогда не уезжает с управляющей машины: там креды GitLab,
@@ -286,11 +400,14 @@
       become: no
       changed_when: true
 
+    # Сначала снести: инкремент играет по копии образа, и архив поверх старого
+    # зеркала оставил бы в нём протухшие ссылки и объекты.
     - name: Where the mirrors live in the body
       ansible.builtin.file:
         path: "{{ MOP_HOME }}/.cache/mop-mirror/{{ mop_shard }}.git"
-        state: directory
+        state: "{{ item }}"
         mode: "0755"
+      loop: [absent, directory]
 
     - name: Mirror of the shard, for bodies to clone from locally
       ansible.builtin.unarchive:
@@ -416,16 +533,36 @@
     # мимо агента, то есть мимо единственной проверки шардирования.
     - name: Only the node's key survives into the image
       ansible.builtin.shell:
-        cmd: "{{ pve }} keys {{ tmpl_vmid }}"
+        cmd: "{{ pve }} keys {{ stage_vmid }}"
         stdin: "{{ node_key }}\n"
       changed_when: true
 
-    - name: Stop it
-      ansible.builtin.command: "{{ pve }} stop {{ tmpl_vmid }}"
+    - name: Stop the build body
+      ansible.builtin.command: "{{ pve }} stop {{ stage_vmid }}"
+      changed_when: true
+
+    # Подмена образа — только теперь, когда новый собран целиком. Обрыв
+    # между сносом и запечатыванием оставляет сборочное тело: следующий
+    # прогон продолжит в нём и дойдёт сюда снова.
+    - name: The previous image makes way
+      ansible.builtin.command: "{{ pve }} destroy {{ tmpl_vmid }}"
+      changed_when: true
+
+    # Полной копией: связанный клон зависел бы от сборочного тела, которое
+    # сейчас будет снесено.
+    - name: The image, a full copy of the build body
+      ansible.builtin.command: >-
+        {{ pve }} clone {{ stage_vmid }} {{ tmpl_vmid }} {{ tmpl_name }}
+        {{ MOP_PVE_STORAGE }} {{ tmpl_ip }}/{{ pve_cidr }} {{ pve_gw }}
+        {{ MOP_PVE_BRIDGE }} full
       changed_when: true
 
     - name: Turn it into the shard's image
       ansible.builtin.command: "{{ pve }} template {{ tmpl_vmid }}"
+      changed_when: true
+
+    - name: The build body has served
+      ansible.builtin.command: "{{ pve }} destroy {{ stage_vmid }}"
       changed_when: true
 
     - name: Say what a puppet of this shard will now grow from
