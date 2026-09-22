@@ -60,3 +60,45 @@
   retries: 4
   delay: 15
   until: claude_cli is success
+
+# /tmp в теле — tmpfs, и её размер systemd просит у ядра процентами
+# (`size=50%` в /usr/lib/systemd/system/tmp.mount). Проценты считает ядро, от
+# НАСТОЯЩЕЙ памяти машины, а не от лимита cgroup: lxcfs подменяет файл
+# /proc/meminfo, но не внутреннюю арифметику tmpfs. Замерено 22.09 на теле
+# pu-rugent-2: 8 ГБ памяти внутри, `df -h /tmp` показывает 63 ГБ — половину
+# памяти гипервизора.
+#
+# Опасно это тем, что tmpfs — ЭТО память. Тело, записавшее в /tmp несколько
+# гигабайт, убивает себя OOM'ом (swap'а у тела нет), а `df` до последнего
+# показывает десятки свободных гигабайт. Явный размер превращает эту смерть в
+# обычный ENOSPC, который видно и в котором виноват тот, кто пишет.
+#
+# mode=1777 повторяет умолчание systemd намеренно: /tmp общий для всех
+# пользователей тела, и его приватность уже однажды стоила молчаливого
+# отключения проверки подписей apt.
+#
+# Только для тел-контейнеров: `mop_body_of` ставит add_host сборки образа
+# (deploy/pve-build.yml). На host-узле роль играет по самому узлу, и его /tmp
+# принадлежит машине целиком — трогать его правом проекта не является.
+- name: A /tmp sized by this body, not by the hypervisor
+  when: mop_body_of is defined
+  block:
+    - name: Where the tmp.mount override goes
+      ansible.builtin.file:
+        path: /etc/systemd/system/tmp.mount.d
+        state: directory
+        mode: '0755'
+
+    - name: The override itself
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/tmp.mount.d/mop-size.conf
+        mode: '0644'
+        content: |
+          # Set by mop (deploy/roles/body): a percentage here is resolved by
+          # the kernel from the HYPERVISOR's memory, not this body's.
+          [Mount]
+          Options=mode=1777,strictatime,nosuid,nodev,size=2G,nr_inodes=1m
+
+    - name: Let systemd see it
+      ansible.builtin.systemd_service:
+        daemon_reload: yes
