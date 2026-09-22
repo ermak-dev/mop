@@ -30,6 +30,16 @@ link() {
 # однажды разойдутся.
 SETTINGS="$("$BIN_DIR/mop" config --json)"
 
+# Полный REQUIRED спрашивает только deploy: остальным командлетам хватает
+# адреса сервера, а MOP_GIT_HOST читают одни плейбуки (known_hosts узлов).
+python3 -c "
+import sys
+from mop import config
+try:
+    config.require()
+except config.Missing as e:
+    sys.exit(str(e))"
+
 play() {
     local book="$1"; shift
     section "ansible: $book"
@@ -115,6 +125,17 @@ PY
 
 play site.yml --extra-vars "$(shards_json "$@")" \
               --extra-vars "$(manifests_json)"
+
+# Контроллер -- тоже машина оператора: его каталог сервера собирается здесь
+# из secrets/ и bootstrap.json, а на другую машину его везёт `mop join`.
+# Библиотекой, не подпроцессом: командлеты друг друга не зовут.
+python3 -c "
+import os
+from mop import config, creds
+dest = creds.server_dir()
+got = creds.collect(os.path.expanduser('~/.config/mop/secrets'),
+                    os.path.expanduser('~/.config/nomad/bootstrap.json'), dest)
+print(f'  server credentials: {len(got)} files in {dest}')"
 
 section "check"
 # Прогон без неё не отличает «плейбук зелёный» от «пул отвечает»: агент,

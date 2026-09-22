@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import bus, config, keys, llm, nomad, puppets  # noqa: E402
+from mop import bus, config, creds, keys, llm, nomad, puppets  # noqa: E402
 
 
 def run(fn, argv=None):
@@ -45,7 +45,10 @@ def cluster(fn):
     настроек — до первого сетевого вызова, чтобы отказ был про настройки, а не
     про таймаут к чужому адресу."""
     def wrap(argv):
-        config.require()
+        # Один адрес, а не весь REQUIRED: MOP_GIT_HOST читают плейбуки, и на
+        # машине оператора его не с чего заполнять. Полный список спрашивает
+        # `mop deploy`.
+        config.require("MOP_SERVER_LAN")
         return fn(argv)
     return wrap
 
@@ -84,11 +87,14 @@ def default_branch():
     return r.stdout.strip() if r.returncode == 0 else "origin/master"
 
 
-def shard_creds(shard):
-    """Креды мастера шарда. bus-master-<шард>.json: имя bus-<шард>.json на
-    узлах пула занято кредами папета того же шарда, и на машине в двух ролях
-    файл не может быть сразу обоими."""
-    return os.path.expanduser(f"~/.config/mop/bus-master-{shard}.json")
+def shard_ready(shard):
+    """Есть ли у этой машины креды мастера шарда: пароль в каталоге сервера
+    (mop/creds.py) либо, на время перехода, bus-master-<шард>.json, который
+    пока раскатывает игра мастера. Нет ни того ни другого — у проекта ещё
+    нет пользователя на шине, и папет к ней не подключится."""
+    if creds.password(creds.server_dir(), shard) is not None:
+        return True
+    return os.path.exists(os.path.expanduser(f"~/.config/mop/bus-master-{shard}.json"))
 
 
 def in_shard():

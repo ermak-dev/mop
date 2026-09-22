@@ -22,7 +22,7 @@ def main(argv):
     # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS, и
     # папет поднимется, но к шине не подключится — прочитается как «агент
     # молчит» на пустом месте. Лучше отказать здесь, чем разбираться там.
-    if not os.path.exists(lib.shard_creds(shard)):
+    if not lib.shard_ready(shard):
         lib.usage(f"shard {shard} isn't on the bus yet.\nSet it up: mop deploy {origin}")
     name = puppets.next_name(shard)
     lib.push_llm_keys(profile)

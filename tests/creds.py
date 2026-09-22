@@ -78,15 +78,40 @@ def main():
         bad += 1
         print("FAILED  a missing token is None: the profile of mop mcp hangs on it")
 
-    # Что `mop join` везёт с сервера: только своё. Пароли узлов и папетов
-    # мастеру не положены — с ними он мог бы представиться узлом.
+    # Что едет мастеру из secrets/ сервера: только своё. Пароли узлов и
+    # папетов мастеру не положены — с ними он мог бы представиться узлом.
+    # HYPOTHESIS (#52): контроллер и `mop join` должны отбирать одни и те же
+    # файлы, иначе на одной машине оператор увидит больше, чем на другой.
     cases += 1
-    got = creds.files_for(["rugent", "mop"])
-    want = ["nats-admin.pass", "nats-master-rugent.pass", "nats-master-mop.pass",
-            "bootstrap.json"]
+    listing = ["nats-node-mate.pass", "nats-master-rugent.pass", "junk",
+               "nats-puppet-rugent.pass", "nats-admin.pass", "nats-master-mop.pass"]
+    got = creds.pick(listing)
+    want = ["nats-admin.pass", "nats-master-mop.pass", "nats-master-rugent.pass"]
     if got != want:
         bad += 1
-        print(f"FAILED  files_for -> {got}, wanted {want}")
+        print(f"FAILED  pick -> {got}, wanted {want}")
+
+    # Контроллер собирает свой каталог сервера из secrets/ и bootstrap.json:
+    # он тоже машина оператора, и после deploy на нём всё работает без join.
+    secrets = tempfile.mkdtemp()
+    for name in listing:
+        with open(os.path.join(secrets, name), "w") as f:
+            f.write(name + "\n")
+    dest = os.path.join(tempfile.mkdtemp(), "10.0.0.5")
+    cases += 1
+    copied = creds.collect(secrets, os.path.join(d, "bootstrap.json"), dest)
+    if sorted(os.listdir(dest)) != sorted(want + ["bootstrap.json"]) or copied != want + ["bootstrap.json"]:
+        bad += 1
+        print(f"FAILED  collect -> {copied}, dir {sorted(os.listdir(dest))}")
+    cases += 1
+    if creds.password(dest, "mop") != "nats-master-mop.pass" or creds.token(dest) != "tok-123":
+        bad += 1
+        print("FAILED  collected files must read back through password()/token()")
+    cases += 1
+    mode = os.stat(dest).st_mode & 0o777
+    if mode != 0o700:
+        bad += 1
+        print(f"FAILED  the server directory holds secrets: mode {oct(mode)}, wanted 0o700")
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
