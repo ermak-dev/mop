@@ -1110,6 +1110,63 @@ def _wait_stopped(name):
     raise RuntimeError(f"allocation {name} won't stop — is the node alive?")
 
 
+def classify_junk(answers, known):
+    """Что на узлах лишнее. -> [{node, kind, name, detail, sweepable}].
+
+    Чистая функция: узлы уже опрошены, Nomad уже спрошен. Разделять стоило
+    не ради красоты — решение «что снести» должно быть проверяемо тестом, а
+    не только живым пулом, где ошибка стоит чужой работы.
+
+    Авторитет здесь Nomad, а не tmux. Узловой `mop driver sweep` судит по
+    отсутствию сессии, и это верный признак ДЛЯ УЗЛА, который про Nomad не
+    знает вовсе; но он же путает сироту с папетом между рестартами. С
+    управляющей машины виден список джобов, и «тела нет в нём» — факт, а не
+    догадка.
+
+    Два рода находок, и они намеренно разного веса:
+
+    СИРОТА — тело, которого нет среди джобов. Его папет удалён, а тело
+    осталось: на гипервизоре это работающий контейнер с памятью и диском,
+    которого больше никто не считает своим (поймано 22.09: pu-rugent-2 жил
+    так, держа 118 ГБ тонкого тома). Сносится.
+
+    СБОРОЧНОЕ ТЕЛО — имя шаблона в работающем состоянии. Запечатанный образ
+    всегда стоит, так что работающий шаблон это либо сборка прямо сейчас,
+    либо оборванная. Отсюда их НЕ РАЗЛИЧИТЬ, и поэтому такое тело только
+    называется, но не сносится: снести чужую идущую сборку дороже, чем
+    оставить мусор до следующего раза."""
+    out = []
+    for node in sorted(answers):
+        a = answers[node] or {}
+        work = a.get("work") or {}
+        for name in sorted(a.get("bodies") or []):
+            if name in known:
+                continue
+            w = work.get(name) or {}
+            dirty, ahead = w.get("dirty") or 0, w.get("ahead") or 0
+            if dirty or ahead:
+                # Сирота с несохранённой работой остаётся. Джоба у неё нет,
+                # значит вернуть её к делу уже нельзя, — но снесённое не
+                # возвращается вовсе, а лежащий контейнер стоит только места.
+                # Размен очевиден в одну сторону.
+                out.append({
+                    "node": node, "kind": "orphan", "name": name,
+                    "detail": f"holds work: {dirty} uncommitted, {ahead} "
+                              f"unpushed on {w.get('cur') or '(detached)'}",
+                    "sweepable": False})
+                continue
+            out.append({"node": node, "kind": "orphan", "name": name,
+                        "detail": "no puppet with this name", "sweepable": True})
+        for t in a.get("templates") or []:
+            if not t.get("running"):
+                continue
+            out.append({"node": node, "kind": "build body", "name": t["name"],
+                        "detail": f"vmid {t.get('vmid')} still running — "
+                                  f"a build in flight, or one that broke",
+                        "sweepable": False})
+    return out
+
+
 def delete(name):
     """Снести папета. -> {'node', 'body': 'destroyed'|'kept'|None}.
 

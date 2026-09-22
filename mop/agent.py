@@ -67,7 +67,7 @@ PUBLIC_VERBS = ("ping", "local", "state", "states", "send", "tail")
 #
 # Папета это не касается: `write` не в PUBLIC_VERBS, а креды puppet-<шард>
 # в субъект .rpc не пишут вовсе.
-ADMIN_VERBS = ("disk",)
+ADMIN_VERBS = ("disk", "junk")
 
 # Что разрешено отправлять в пейн. Тот же список, что у фронтенда, — но
 # проверка здесь настоящая, а там подсказка пользователю.
@@ -498,6 +498,40 @@ async def v_write(req):
     return {"written": written}
 
 
+async def v_junk(req):
+    """Что стоит на этом узле, БЕЗ фильтров: {node, driver, bodies,
+    templates}.
+
+    От `local` отличается тем, ради чего и заведён: тот показывает папетов
+    (живая сессия, свой шард), а этот — объекты. Мусор по определению не
+    имеет живой сессии и не принадлежит никому, так что фильтры `local`
+    отсеяли бы ровно то, что ищут. Поэтому глагол админский: он рассказывает
+    про чужие шарды тоже, а сопоставлять с Nomad всё равно некому, кроме
+    управляющей машины.
+
+    `templates` есть не у всякого драйвера — у host сборочных тел не бывает
+    вовсе, и пустой список там честнее выдуманного."""
+    tmpl = getattr(DRIVER, "templates", None)
+    names = await DRIVER.bodies()
+    # Работу в клоне спрашиваем ЗДЕСЬ, а не оставляем решать по имени. Тело
+    # без tmux-сессии `facts` описывает как {present: False} и про клон молчит
+    # — верно для узла, до которого не достучаться, но сирота на гипервизоре
+    # жива и отвечает по ssh. Без этого уборка сносила бы тела, не спросив,
+    # есть ли в них несохранённое: 22.09 она так снесла два контейнера чужих
+    # шардов, и повезло, что пустых.
+    work = {}
+    for n in names:
+        c = await clone_facts(n)
+        if c:
+            work[n] = {"dirty": c.get("dirty"), "ahead": c.get("ahead"),
+                       "cur": c.get("cur")}
+    return {"node": node_name(),
+            "driver": driver.current_name(),
+            "bodies": names,
+            "work": work,
+            "templates": (await tmpl()) if tmpl else []}
+
+
 async def v_usage(req):
     """Расход токенов папетов этого узла по дням: {usage: {папет: {дата:
     {input, output, cache_write, cache_read}}}}, окно — `days` суток включая
@@ -537,7 +571,7 @@ async def v_usage(req):
 VERBS = {"ping": v_ping, "local": v_local, "state": v_state,
          "states": v_states, "sizes": v_sizes, "send": v_send,
          "tail": v_tail, "type": v_type, "write": v_write,
-         "disk": v_disk, "wipe": v_wipe, "usage": v_usage}
+         "disk": v_disk, "wipe": v_wipe, "usage": v_usage, "junk": v_junk}
 
 # Глаголы, которые называют конкретного папета: у них шард запроса обязан
 # сойтись с настоящим шардом папета.
