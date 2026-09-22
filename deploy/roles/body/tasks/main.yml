@@ -80,7 +80,15 @@
 # Только для тел-контейнеров: `mop_body_of` ставит add_host сборки образа
 # (deploy/pve-build.yml). На host-узле роль играет по самому узлу, и его /tmp
 # принадлежит машине целиком — трогать его правом проекта не является.
+# become: yes здесь обязателен и не наследуется: обе игры, включающие эту
+# роль, идут с `become: no` (deploy/body.yml и deploy/pve-build.yml), а
+# каждая задача называет своё сама — установщик claude, например, нарочно
+# идёт от пользователя пула. Без него сборка образа падает на
+# `Permission denied: /etc/systemd/system/tmp.mount.d`, и падает громко:
+# ansible прерывает прогон, образ остаётся незапечатанным, а прежний
+# шаблон к тому моменту уже снесён.
 - name: A /tmp sized by this body, not by the hypervisor
+  become: yes
   when: mop_body_of is defined
   block:
     - name: Where the tmp.mount override goes
