@@ -348,6 +348,22 @@ class Missing(RuntimeError):
     """Обязательная настройка не заполнена."""
 
 
+def playbook_vars():
+    """Что едет плейбукам --extra-vars: настройки плюс списки, которые живут
+    в коде одним местом. Одна функция на `mop deploy` (через `mop config
+    --json`) и на сборку образа (mop/image.py): пока их было две, список
+    доезжал до узла и не доезжал до тела, молча.
+
+    MOP_NODE_SCOPED -- узловые настройки, по нему прогон рендерит node.env.
+    MOP_PIP_DEPS -- python-библиотеки mop (mop/deps.py) для узла, тела и
+    `mop setup`."""
+    from . import deps
+    out = {k: v for k, (v, _) in effective().items()}
+    out["MOP_NODE_SCOPED"] = ",".join(NODE_SCOPED)
+    out["MOP_PIP_DEPS"] = ",".join(p for p, _ in deps.PIP)
+    return out
+
+
 def require(*names):
     """Проверить обязательные — все, либо названные. Зовут фронтенды перед
     работой с кластером: мастеру нужен один MOP_SERVER_LAN, MOP_GIT_HOST
