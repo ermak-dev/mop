@@ -125,6 +125,23 @@ clone)
     echo "$vmid"
     ;;
 
+# Адрес стоящего тела: тот же net0, что ставит clone, но на теле, которое
+# уже есть. Нужен переходу #58 -- формула адреса сменилась, и тело со старым
+# адресом иначе молчало бы до рецикла. Сравнение перед записью обязательно:
+# `pct set --net0` на работающем контейнере переподключает интерфейс, и
+# делать это на каждом подъёме значило бы ронять сеть тела на ровном месте.
+# Печатает адрес, только если поменял: по этому драйвер снимает старый ключ
+# хоста.
+net)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    vmid="$1"; cidr="${2:?cidr}"; gw="${3:?gw}"; bridge="${4:?bridge}"
+    have=",$(pct config "$vmid" | sed -n 's/^net0: //p'),"
+    [[ "$have" == *",ip=$cidr,"* && "$have" == *",gw=$gw,"* \
+        && "$have" == *",bridge=$bridge,"* ]] && exit 0
+    pct set "$vmid" --net0 "name=eth0,bridge=$bridge,ip=$cidr,gw=$gw" >&2
+    echo "$cidr"
+    ;;
+
 start)
     check_vmid "${1:?vmid}"; check_host "$1"
     pct status "$1" | grep -q running || pct start "$1" >&2
@@ -280,6 +297,6 @@ push)
     ;;
 
 *)
-    die "no such verb ${verb:-(empty)}; available: list capacity create clone bootstrap keys start stop template destroy exec push"
+    die "no such verb ${verb:-(empty)}; available: list capacity create clone net bootstrap keys start stop template destroy exec push"
     ;;
 esac

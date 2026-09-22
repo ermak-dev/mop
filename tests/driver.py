@@ -380,6 +380,33 @@ def main():
             print(f"FAILED  build address of {sh} is {addr}, outside {net} "
                   f"or equal to the gateway")
 
+    # Адрес считается от АБСОЛЮТНОГО VMID, а не от базы этого узла (#58).
+    # База (MOP_PVE_VMID_BASE) узловая и у второго гипервизора своя, а
+    # смещение от неё сажало первое тело ЛЮБОГО гипервизора на сеть+2: два
+    # узла выдали бы один адрес двум телам, и маршрут к сети тел стал бы
+    # неоднозначным — не при настройке, а позже и молча. От абсолютного VMID
+    # разные базы дают непересекающиеся куски одной плоской сети, и маршрут
+    # к каждому гипервизору выходит однозначным сам собой.
+    # HYPOTHESIS: address_of_vmid = сеть + 2 + (vmid − BODY_MIN).
+    # SOLUTION: сеть + vmid, без базы. STATUS: FIXED — see #58
+    for v in (pve.BODY_MIN, pve.BODY_MIN + 828, pve.TMPL_MAX):
+        cases += 1
+        want = str(net.network_address + v)
+        if pve.address_of_vmid(v) != want:
+            bad += 1
+            print(f"FAILED  pve.address_of_vmid({v}) = {pve.address_of_vmid(v)}, "
+                  f"wanted {want}: the address must not depend on this node's base")
+
+    # VMID, не влезающий в сеть тел, — громкий отказ, а не адрес соседней
+    # сети: уехавший за подсеть адрес не отказывает, он просто не отвечает.
+    cases += 1
+    try:
+        pve.address_of_vmid(net.num_addresses + 5)
+        bad += 1
+        print("FAILED  pve.address_of_vmid past the subnet must refuse")
+    except ValueError:
+        pass
+
     # Контракт драйвера — СЛОВАРЬ, и флаг в нём ключом, а не атрибутом.
     # Модуль с атрибутом BODY_IS_NODE отдаёт только `current()`, и он про свой
     # узел; спросить про чужой можно лишь по имени, через реестр. Перепутать

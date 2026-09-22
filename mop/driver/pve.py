@@ -116,10 +116,27 @@ def template_vmid(shard):
 
 
 def address_of_vmid(vmid):
-    """Адрес тела по его VMID. Одна формула на живые тела и на сборочные:
-    диапазоны VMID не пересекаются (BODY_* против TMPL_*), значит не
-    пересекаются и адреса — и это свойство держится само, а не проверкой."""
-    return str(_NET.network_address + 2 + (vmid - BODY_MIN))
+    """Адрес тела по его VMID: сеть плюс АБСОЛЮТНЫЙ номер. Одна формула на
+    живые тела и на сборочные: диапазоны VMID не пересекаются (BODY_* против
+    TMPL_*), значит не пересекаются и адреса — и это свойство держится само,
+    а не проверкой.
+
+    Абсолютный, а не смещение от базы этого узла (#58). База узловая
+    (MOP_PVE_VMID_BASE в NODE_SCOPED), у второго гипервизора она своя, и
+    смещение от неё сажало первое тело ЛЮБОГО гипервизора на сеть+2: два узла
+    выдали бы один адрес двум телам, а маршрут «10.77.0.0/16 via кто?» из
+    локалки стал бы неоднозначным — не при настройке, а позже и молча. От
+    абсолютного номера разные базы дают непересекающиеся куски ОДНОЙ плоской
+    сети, и маршрут к каждому гипервизору выходит однозначным сам собой
+    (`routes`, deploy/pve.yml). Адрес при этом читается глазами: последние
+    два октета — это VMID.
+
+    Номер, не влезающий в сеть, — отказ, а не адрес соседней сети: уехавший
+    за подсеть адрес не отказывает, он просто не отвечает."""
+    if not 2 <= vmid < _NET.num_addresses - 1:
+        raise ValueError(f"vmid {vmid} does not fit the bodies' network {SUBNET}: "
+                         f"lower MOP_PVE_VMID_BASE or widen MOP_PVE_SUBNET")
+    return str(_NET.network_address + vmid)
 
 
 def address_of(name):
@@ -346,6 +363,20 @@ async def ensure(name, params=None):
                              f"build the shard's image: mop driver build {shard}"}
         created = True
         await _forget_host_key(name)
+    else:
+        # Адрес стоящего тела переутверждается на каждом подъёме, и это
+        # переход, а не гигиена: формула адреса сменилась (#58), и тело,
+        # стоящее со старым адресом, иначе читалось бы молчащим до рецикла —
+        # вместе с работой в своём клоне. Обёртка сравнивает и пишет только
+        # разницу, так что здоровому телу это не стоит ни переподключения
+        # интерфейса, ни секунды.
+        out, code = await _pve("net", vmid, cidr_of(name), GATEWAY, BRIDGE,
+                               timeout=60)
+        if code not in (0, None):
+            return {"error": f"{name}: body {vmid} won't take its address "
+                             f"{address_of(name)}: {why(out, code)}"}
+        if out.strip():
+            await _forget_host_key(name)
 
     out, code = await _pve("start", vmid, timeout=120)
     if code not in (0, None):
