@@ -89,8 +89,11 @@
   environment:
     NOMAD_ADDR: http://127.0.0.1:{{ MOP_NOMAD_PORT }}
 
-- name: Fetch the management token to the control machine
+# Сразу в каталог сервера (mop/creds.py): оттуда его читает mop на
+# контроллере, и оттуда же `mop join` везёт его оператору. Отдельного
+# ~/.config/nomad больше нет: у mop один каталог кредов на сервер.
+- name: Fetch the management token to the controller
   ansible.builtin.fetch:
     src: "{{ nomad_home }}/bootstrap.json"
-    dest: "{{ lookup('env', 'HOME') }}/.config/nomad/bootstrap.json"
+    dest: "{{ lookup('env', 'HOME') }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/bootstrap.json"
     flat: yes
