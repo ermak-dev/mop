@@ -31,7 +31,8 @@
 # Нативный установщик, а не npm: claude кладёт себя в ~/.local/share/claude
 # и симлинкует в ~/.local/bin -- ровно туда, куда смотрит MOP_PUPPET_PATH.
 # Под пользователем пула, а не под root: PATH папета -- это его домашний
-# каталог, и claude из /root тело бы не увидело.
+# каталог, и claude из /root тело бы не увидело. become_user, а не
+# «кто зашёл, тот и ставит»: на Proxmox ansible заходит как root.
 #
 # creates, а не state=latest: ставим один раз, дальше claude обновляет себя
 # сам, и прогон deploy не имеет права подменить версию под работающим папетом.
@@ -49,6 +50,8 @@
 # (SSL_read eof) ронял всю сборку, хотя путь рабочий: три образа через него
 # уже прошли. Повторы переживают обрыв; отказ после них остаётся громким.
 - name: Install the claude CLI
+  become: yes
+  become_user: "{{ MOP_USER }}"
   ansible.builtin.shell: |
     set -o pipefail
     curl -fsSL https://claude.ai/install.sh | bash
