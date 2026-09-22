@@ -24,8 +24,11 @@
     pve_net: "{{ MOP_PVE_SUBNET.split('/')[0] }}"
     pve_cidr: "{{ MOP_PVE_SUBNET.split('/')[1] }}"
     pve_gw: "{{ MOP_PVE_GATEWAY }}"
-    pve_vmid_min: "{{ MOP_PVE_VMID_BASE | int }}"
-    pve_vmid_max: "{{ (MOP_PVE_VMID_BASE | int) + 999 }}"
+    # База VMID — свойство ЭТОГО гипервизора (строка хоста в инвентаре), а
+    # сеть одна на пул: от абсолютного VMID разные базы дают разные куски
+    # одной плоской сети (#58), и второй гипервизор отличается ровно базой.
+    pve_vmid_min: "{{ (mop_pve_vmid_base | default(MOP_PVE_VMID_BASE)) | int }}"
+    pve_vmid_max: "{{ ((mop_pve_vmid_base | default(MOP_PVE_VMID_BASE)) | int) + 999 }}"
 
 - name: Nodes that are their own body need none of this
   ansible.builtin.meta: end_host
@@ -124,3 +127,45 @@
     pveam download "$store" "$file"
   register: pve_image
   changed_when: "'download' in pve_image.stdout"
+
+# ── дорога к телам снаружи (#59) ─────────────────────────────────────
+# Тела за NAT узла, и снаружи до них одна дорога — через сам узел: FORWARD
+# пропускает в обе стороны, MASQUERADE трогает только исходящие, серверу не
+# хватало ровно маршрута (проверено на живом сервере 22.09: один `ip route
+# add` — и тело отвечает за 0.146 мс). Здесь узел называет, ЧТО раздать:
+# свой адрес со стороны сервера и блоки своего куска сети; раздаёт их
+# серверу вторая игра deploy/pve.yml (tasks_from: server).
+#
+# Адрес — тот, с которого узел сам ходит на сервер (src у `ip route get`):
+# именно он и есть следующий хоп для сервера, и повторять его в инвентаре
+# вторым местом незачем.
+- name: The node's address as the server sees it
+  ansible.builtin.command: "ip -4 -o route get {{ MOP_SERVER_LAN }}"
+  register: pve_toward_server
+  changed_when: false
+
+# Блоки считает драйвер, на управляющей машине и с базой ЭТОГО узла: второе
+# вычисление в jinja разошлось бы с формулой адреса молча, а формула —
+# одна (pve.routes_of, проверена в tests/driver.py).
+- name: Routes to this node's bodies, from the driver
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sys
+        sys.path.insert(0, sys.argv[1])
+        from mop.driver import pve
+        print(" ".join(pve.routes_of(sys.argv[2], int(sys.argv[3]))))
+      - "{{ playbook_dir }}/.."
+      - "{{ MOP_PVE_SUBNET }}"
+      - "{{ pve_vmid_min }}"
+  delegate_to: localhost
+  become: no
+  changed_when: false
+  register: pve_route_list
+
+- name: Name both for the server's play
+  ansible.builtin.set_fact:
+    pve_lan: "{{ pve_toward_server.stdout.split()[pve_toward_server.stdout.split().index('src') + 1] }}"
+    pve_routes: "{{ pve_route_list.stdout.split() }}"

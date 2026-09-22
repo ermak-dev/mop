@@ -407,6 +407,45 @@ def main():
     except ValueError:
         pass
 
+    # Маршрут к телам этого узла (#59): сервер достаёт до тел только через
+    # гипервизор, и кто-то обязан раздать ему маршрут. Кусок сети одного
+    # гипервизора — это адреса его диапазона VMID (тела и шаблоны), и
+    # покрывать его надо ТОЧНО: шире — и маршруты двух гипервизоров
+    # налезут друг на друга, уже — и часть тел останется недостижимой.
+    # HYPOTHESIS: маршрута нет вовсе, роль pve кончается мостом и NAT.
+    # SOLUTION: pve.routes_of(subnet, base) — CIDR'ы, покрывающие ровно
+    # [сеть+base, сеть+base+999]; проверяется без пула. STATUS: FIXED — see #59
+    cases += 1
+    try:
+        got = pve.routes_of(pve.SUBNET, 9000)
+    except AttributeError:
+        got = None
+        bad += 1
+        print("FAILED  pve.routes_of is missing: nobody hands the server a route")
+    if got is not None:
+        nets = [_ip.ip_network(c) for c in got]
+        covered = set()
+        for n in nets:
+            covered |= set(n.hosts()) | {n.network_address, n.broadcast_address}
+        want = {net.network_address + v for v in range(9000, 10000)}
+        cases += 1
+        if covered != want:
+            bad += 1
+            print(f"FAILED  routes_of covers {len(covered)} addresses, wanted "
+                  f"exactly the 1000 of vmids 9000..9999: {got}")
+        # Второй гипервизор со своей базой не пересекается с первым ни одним
+        # адресом — иначе маршрут неоднозначен, и ломается это молча.
+        cases += 1
+        other = [_ip.ip_network(c) for c in pve.routes_of(pve.SUBNET, 20000)]
+        if any(a.overlaps(b) for a in nets for b in other):
+            bad += 1
+            print("FAILED  routes of two bases overlap")
+        # И это маршруты именно ЭТОЙ сети, а не соседней.
+        cases += 1
+        if any(not n.subnet_of(net) for n in nets + other):
+            bad += 1
+            print(f"FAILED  a route leaves the bodies' network {net}")
+
     # Контракт драйвера — СЛОВАРЬ, и флаг в нём ключом, а не атрибутом.
     # Модуль с атрибутом BODY_IS_NODE отдаёт только `current()`, и он про свой
     # узел; спросить про чужой можно лишь по имени, через реестр. Перепутать
