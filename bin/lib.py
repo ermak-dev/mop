@@ -88,13 +88,10 @@ def default_branch():
 
 
 def shard_ready(shard):
-    """Есть ли у этой машины креды мастера шарда: пароль в каталоге сервера
-    (mop/creds.py) либо, на время перехода, bus-master-<шард>.json, который
-    пока раскатывает игра мастера. Нет ни того ни другого — у проекта ещё
-    нет пользователя на шине, и папет к ней не подключится."""
-    if creds.password(creds.server_dir(), shard) is not None:
-        return True
-    return os.path.exists(os.path.expanduser(f"~/.config/mop/bus-master-{shard}.json"))
+    """Есть ли у этой машины креды мастера шарда — пароль в каталоге сервера
+    (mop/creds.py). Нет — у проекта ещё нет пользователя на шине, и папет к
+    ней не подключится."""
+    return creds.password(creds.server_dir(), shard) is not None
 
 
 def in_shard():

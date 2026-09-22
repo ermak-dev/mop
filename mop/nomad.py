@@ -37,19 +37,14 @@ _client = None
 
 
 def token():
-    """Management-токен: окружение, каталог сервера (mop/creds.py), и — пока
-    мастера настраивает ansible — старое место, куда его забирала игра
-    сервера. Нет нигде — LookupError: на нём стоит профиль `mop mcp`, и
+    """Management-токен: окружение либо каталог сервера (mop/creds.py).
+    Нет ни там ни там — LookupError: на нём стоит профиль `mop mcp`, и
     узел без токена так и должен читаться."""
     t = os.environ.get("NOMAD_TOKEN") or creds.token(creds.server_dir())
     if t:
         return t
-    legacy = os.path.expanduser("~/.config/nomad/bootstrap.json")
-    t = creds.token(os.path.dirname(legacy))
-    if t:
-        return t
-    raise LookupError(f"no Nomad token: neither {creds.server_dir()}/{creds.TOKEN_FILE}"
-                      f" nor {legacy} — run mop join <server>")
+    raise LookupError(f"no Nomad token: {creds.server_dir()}/{creds.TOKEN_FILE} — "
+                      f"run mop join <server>")
 
 
 def client():
