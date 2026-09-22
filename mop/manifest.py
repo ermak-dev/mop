@@ -1,4 +1,4 @@
-"""Манифест шарда: mop.yaml в корне проекта, прочитанный из его origin.
+"""Манифест шарда: .mop/ в корне проекта, прочитанный из его origin.
 
 Чистый разбор и его проверки живут в config (manifest, manifest_parts);
 здесь — дорога за ним: зеркало, git show, файлы для ansible. Молчит и
@@ -13,7 +13,23 @@ import subprocess
 from . import config
 
 
-def fetch(origin):
+def ref_of(branch):
+    """Ветка -> ref в зеркале origin. None — HEAD зеркала, то есть дефолтная
+    ветка проекта; имя — refs/heads/имя.
+
+    Отдельная функция ради одного тихого отказа (#46): detached HEAD рабочей
+    копии `git rev-parse --abbrev-ref` называет словом HEAD, и ref с таким
+    именем в зеркале — дефолтная ветка. Сборка молча собрала бы не то, что
+    просили, — поэтому здесь ValueError, а не подстановка."""
+    if branch is None:
+        return "HEAD"
+    if not branch or branch == "HEAD":
+        raise ValueError("the working copy is on no branch (detached HEAD): "
+                         "check one out or name the origin outright")
+    return f"refs/heads/{branch}"
+
+
+def fetch(origin, branch=None):
     """origin -> словарь манифестов проекта: {'shard', 'asks', 'alien',
     'node_tasks', 'ws_vars', 'ws_tasks'} (пути или None).
 
@@ -30,8 +46,14 @@ def fetch(origin):
     Зеркало, а не рабочий клон: манифест принадлежит репозиторию, и origin —
     единственная его правда; рабочая копия на управляющей машине может быть
     грязной или вчерашней.
+
+    branch — какую ветку origin читать (#46): None — дефолтную, иначе
+    названную, и её отсутствие в origin — громкий отказ, а не тихий откат на
+    дефолтную. Ветка всё равно берётся из зеркала, не из рабочей копии:
+    незапушенное в образ не едет, узел доверяет только origin.
     """
     shard = os.path.basename(origin).removesuffix(".git")
+    ref = ref_of(branch)
     # base с PID: вырезка происходит и в deploy, и в сборке, и руками, и
     # один путь на всех однажды столкнул два клона в один tmp_pack (#32).
     # Файлы для ansible живут в base и переживают вызов — /tmp вычищается
@@ -46,14 +68,19 @@ def fetch(origin):
         if r.returncode != 0:
             raise RuntimeError(f"cannot read {shard}: "
                                f"{(r.stderr or r.stdout).strip()}")
+        if branch is not None and subprocess.run(
+                ["git", "-C", tmp, "rev-parse", "--verify", "-q", ref],
+                capture_output=True).returncode != 0:
+            raise RuntimeError(f"{shard} has no branch {branch} in origin: "
+                               f"push it first")
         out = {"shard": shard, "asks": {}, "alien": [],
                "node_tasks": None, "ws_vars": None, "ws_tasks": None}
-        node = _read(tmp, shard, ".mop/node.yaml")
+        node = _read(tmp, shard, ".mop/node.yaml", ref)
         if node is not None:
             nvars, ntasks = node
             out["asks"], _, out["alien"] = config.manifest_parts(nvars)
             out["node_tasks"] = _write(base, shard, "node-tasks.yml", ntasks)
-        ws = _read(tmp, shard, ".mop/workspace.yaml")
+        ws = _read(tmp, shard, ".mop/workspace.yaml", ref)
         if ws is not None:
             wvars, wtasks = ws
             _, mine, alien = config.manifest_parts(wvars)
@@ -66,9 +93,10 @@ def fetch(origin):
         subprocess.run(["rm", "-rf", with_dir], capture_output=True)
 
 
-def _read(tmp, shard, path):
-    """Один манифест из зеркала. -> (vars, tasks) или None, если файла нет."""
-    got = subprocess.run(["git", "-C", tmp, "show", f"HEAD:{path}"],
+def _read(tmp, shard, path, ref):
+    """Один манифест из зеркала на ref. -> (vars, tasks) или None, если файла
+    нет. Ref уже проверен вызывающим: отказ здесь — только отсутствие файла."""
+    got = subprocess.run(["git", "-C", tmp, "show", f"{ref}:{path}"],
                          capture_output=True, text=True)
     if got.returncode != 0:
         return None
