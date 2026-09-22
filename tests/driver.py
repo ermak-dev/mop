@@ -305,6 +305,19 @@ def main():
         bad += 1
         print("FAILED  pve.run_argv must not share a multiplexed connection — "
               "the master's ControlPersist would take the puppet down with it")
+    # ПОРЯДОК, а не присутствие: у ssh побеждает первая встреченная опция, и
+    # `ControlMaster=no` после `auto` из общего списка не действует. Так
+    # врапер молча становился клиентом мастер-сокета агента и умирал с ним
+    # при каждом рестарте юнита — задача выходила кодом 255 (22.09, дважды).
+    # HYPOTHESIS: переопределение стоит после _SSH_OPTS. SOLUTION: перед.
+    # STATUS: FIXED — see #72
+    cases += 1
+    masters = [x for x in r if x.startswith("ControlMaster=")]
+    paths = [x for x in r if x.startswith("ControlPath=")]
+    if masters[:1] != ["ControlMaster=no"] or paths[:1] != ["ControlPath=none"]:
+        bad += 1
+        print(f"FAILED  pve.run_argv: the FIRST ControlMaster/ControlPath must be "
+              f"no/none — ssh takes the first value it sees: {masters} {paths}")
     cases += 1
     if "ServerAliveInterval" not in joined:
         bad += 1
