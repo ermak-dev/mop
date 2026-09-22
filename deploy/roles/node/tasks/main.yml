@@ -23,6 +23,29 @@
 # обязательная настройка MOP_GIT_HOST: молча угадывать чужой forge хуже
 # громкого отказа. Механизм — часть продукта; значение — установки.
 
+# Пользователь пула -- служебный: дом, ключи, sudo на mop-pve у гипервизора.
+# На обжитых узлах он совпадал с оператором и был заведён руками до плейбуков,
+# и первая же задача, трогающая его дом, падала на свежем узле с «failed to
+# look up user» (#65). become на самой задаче: игра узла идёт без become, а
+# passwd правит только root. Дом -- явно владельцу: каталог, созданный root'ом
+# до пользователя, `user` не переписывает, и он остался бы чужим.
+- name: The pool user
+  become: yes
+  ansible.builtin.user:
+    name: "{{ MOP_USER }}"
+    home: "{{ MOP_HOME }}"
+    shell: /bin/bash
+    create_home: yes
+
+- name: Home of the pool user
+  become: yes
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0755"
+
 - name: SSH dir of the pool user
   ansible.builtin.file:
     path: "{{ MOP_HOME }}/.ssh"
