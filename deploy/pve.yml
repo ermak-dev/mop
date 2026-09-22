@@ -5,7 +5,7 @@
 #
 # Run:  mop deploy
 
-- name: A hypervisor node, where a puppet's body is a container
+- name: A Proxmox node, where a puppet's body is a container
   hosts: puppet
   become: yes
   gather_facts: no
@@ -15,6 +15,6 @@
       ansible.builtin.meta: end_host
       when: mop_driver | default(MOP_DRIVER) != 'pve'
 
-    - name: What a hypervisor must be
+    - name: What a Proxmox node must be
       ansible.builtin.include_role:
         name: pve

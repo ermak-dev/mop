@@ -1,4 +1,4 @@
-"""Proxmox: a body is an LXC container on a hypervisor node
+"""Proxmox: a body is an LXC container on a Proxmox node
 
 Тело папета — контейнер LXC на узле-гипервизоре.
 
@@ -34,11 +34,9 @@ import os
 import shlex
 
 from .. import config
-from . import sh, valid_name
+from . import HOME, PREFIX, bad_name, sh, shard_of_name, valid_name, why
 
 USER = config.get("MOP_USER")
-HOME = config.get("MOP_HOME")
-PREFIX = "pu-"
 # Тело — вещь сама по себе: у него свой $HOME, свои процессы и свой ssh.
 BODY_IS_NODE = False
 
@@ -100,7 +98,7 @@ def vmid_of(name):
     Столкновение двух имён на одном номере возможно и поймано громко: ensure
     сверяет hostname занятого номера с ожидаемым."""
     if not valid_name(name):
-        raise ValueError(f"name {name!r} doesn't look like {PREFIX}<project>-<n>")
+        raise ValueError(bad_name(name))
     h = int(hashlib.sha1(name.encode()).hexdigest()[:8], 16)
     return BODY_MIN + h % (BODY_MAX - BODY_MIN + 1)
 
@@ -117,12 +115,35 @@ def template_vmid(shard):
     return TMPL_MIN + h % (TMPL_MAX - TMPL_MIN + 1)
 
 
+def address_of_vmid(vmid):
+    """Адрес тела по его VMID. Одна формула на живые тела и на сборочные:
+    диапазоны VMID не пересекаются (BODY_* против TMPL_*), значит не
+    пересекаются и адреса — и это свойство держится само, а не проверкой."""
+    return str(_NET.network_address + 2 + (vmid - BODY_MIN))
+
+
 def address_of(name):
     """Адрес тела. Тоже из имени — через VMID, одной цепочкой.
 
     Хранить адрес негде: `pct config` знал бы его, но спрашивать гипервизор на
     каждую пробу состояния значит платить за пробу процессом."""
-    return str(_NET.network_address + 2 + (vmid_of(name) - BODY_MIN))
+    return address_of_vmid(vmid_of(name))
+
+
+def template_address(shard):
+    """Адрес тела шарда, ПОКА ОНО СОБИРАЕТСЯ.
+
+    Считается из VMID шаблона тем же способом, что и у живого тела, и это
+    не косметика. Раньше здесь стоял «шлюз плюс один», один и тот же для
+    всех шардов, а рядом — довод, что пересечься адресам негде: живые тела
+    якобы идут выше. Довод неверен дважды. Две сборки на одном гипервизоре
+    всегда садились на один адрес (поймано 22.09: rugent и rudesktop
+    одновременно, оба 10.77.0.2 — ssh уходил в чужой контейнер, и прогон не
+    падал, а ВИС: apt спал в anon_pipe_write, ansible ждал в ep_poll, обе
+    стороны живы, таймаута нет). И «выше» тоже не так: address_of начинает
+    ровно с сети+2, то есть со шлюза плюс один, — тело с VMID в начале
+    диапазона получило бы тот же адрес."""
+    return address_of_vmid(template_vmid(shard))
 
 
 def cidr_of(name):
@@ -203,18 +224,26 @@ def projects_dir(name):
 
 
 # ─── жизненный цикл тела ─────────────────────────────────────────────────
-async def _pve(verb, *args, timeout=600):
-    """Глагол обёртки на гипервизоре. -> (вывод, код).
+def _pve_cmd(verb, *args):
+    """Глагол обёртки на гипервизоре, строкой для шелла.
 
     Аргументы экранируются здесь и только здесь: обёртка исполняется под root,
-    и имя, приехавшее с шины, обязано дойти до неё одним словом."""
-    return await sh(" ".join(shlex.quote(str(x)) for x in (*SUDO, verb, *args)),
-                    timeout)
-
-
-def _pve_cmd(verb, *args):
-    """Та же команда строкой — для случаев, когда ей нужен stdin."""
+    и имя, приехавшее с шины, обязано дойти до неё одним словом. Строка, а не
+    вызов, потому что части команд нужен stdin (`push`)."""
     return " ".join(shlex.quote(str(x)) for x in (*SUDO, verb, *args))
+
+
+async def _pve(verb, *args, timeout=600):
+    """Тот же глагол, исполненный. -> (вывод, код)."""
+    return await sh(_pve_cmd(verb, *args), timeout)
+
+
+async def _forget_host_key(name):
+    """Ключ хоста у пересозданного тела другой, и старая запись превратила бы
+    каждое соединение в отказ «ключ не совпал» — агент прочитал бы это как
+    молчащее тело. Зовётся и при создании, и при сносе."""
+    await sh(f"ssh-keygen -R {address_of(name)} "
+             f"-f {shlex.quote(KNOWN_HOSTS)} >/dev/null 2>&1 || true")
 
 
 async def bodies():
@@ -241,7 +270,7 @@ async def capacity():
     не относящееся."""
     out, code = await _pve("capacity", STORAGE, timeout=60)
     if code not in (0, None) or not out.strip():
-        return {"error": f"mop-pve capacity: {out.strip() or f'exit {code}'}"}
+        return {"error": f"mop-pve capacity: {why(out, code)}"}
     try:
         mem_total, mem_free, disk_total, disk_free = out.split()[:4]
     except ValueError:
@@ -276,8 +305,8 @@ async def ensure(name, params=None):
     поднялся."""
     params = params or {}
     if not valid_name(name):
-        return {"error": f"name {name!r} doesn't look like {PREFIX}<project>-<n>"}
-    shard = params.get("shard") or name[len(PREFIX):].rsplit("-", 1)[0]
+        return {"error": bad_name(name)}
+    shard = params.get("shard") or shard_of_name(name)
     vmid = vmid_of(name)
 
     standing = await _hostname(vmid)
@@ -292,19 +321,15 @@ async def ensure(name, params=None):
         out, code = await _pve("clone", src, vmid, name, STORAGE, cidr_of(name),
                                GATEWAY, BRIDGE)
         if code not in (0, None):
-            return {"error": f"no body for {name}: {out.strip() or f'exit {code}'}; "
+            return {"error": f"no body for {name}: {why(out, code)}; "
                              f"build the shard's image: mop driver build {shard}"}
         created = True
-        # Ключ хоста у пересозданного тела другой, и старая запись превратила
-        # бы каждое соединение в отказ «ключ не совпал» — агент прочитал бы
-        # это как молчащее тело.
-        await sh(f"ssh-keygen -R {address_of(name)} "
-                 f"-f {shlex.quote(KNOWN_HOSTS)} >/dev/null 2>&1 || true")
+        await _forget_host_key(name)
 
     out, code = await _pve("start", vmid, timeout=120)
     if code not in (0, None):
         return {"error": f"{name}: body {vmid} won't start: "
-                         f"{out.strip() or f'exit {code}'}"}
+                         f"{why(out, code)}"}
 
     r = await _sync_package(name, vmid)
     if r.get("error"):
@@ -340,14 +365,14 @@ async def _sync_package(name, vmid):
     out, code = await sh(f"{tar} | {_pve_cmd('push', vmid, blob, '600')}", 300)
     if code not in (0, None):
         return {"error": f"{name}: the mop package did not reach the body: "
-                         f"{out.strip() or f'exit {code}'}"}
+                         f"{why(out, code)}"}
     out, code = await _pve(
         "exec", vmid,
         f"mkdir -p {HOME}/mop && tar xzf {blob} -C {HOME}/mop && rm -f {blob}",
         timeout=300)
     if code not in (0, None):
         return {"error": f"{name}: the mop package did not unpack in the body: "
-                         f"{out.strip() or f'exit {code}'}"}
+                         f"{why(out, code)}"}
     return {}
 
 
@@ -383,7 +408,7 @@ async def _seed(name, vmid, shard):
             f"{_pve_cmd('push', vmid, path, mode)} < {shlex.quote(path)}", 120)
         if code not in (0, None):
             return {"error": f"{name}: {path} did not reach the body: "
-                             f"{out.strip() or f'exit {code}'}"}
+                             f"{why(out, code)}"}
     return {}
 
 
@@ -394,7 +419,7 @@ async def push(name, path, data):
     работает. Белый список путей проверяет звавший — драйвер транспорт, а не
     право."""
     if not valid_name(name):
-        return {"error": f"name {name!r} doesn't look like {PREFIX}<project>-<n>"}
+        return {"error": bad_name(name)}
     tmp = f"/tmp/mop-push-{os.getpid()}"
     try:
         with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
@@ -409,7 +434,7 @@ async def push(name, path, data):
         except OSError:
             pass
     if code not in (0, None):
-        return {"error": f"{path}: {out.strip() or f'exit {code}'}"}
+        return {"error": f"{path}: {why(out, code)}"}
     return {"written": path}
 
 
@@ -420,11 +445,10 @@ async def destroy(name):
     это ровно то, чего от рецикла ждут: чистое дерево без следов прошлой
     работы, включая то, что `git clean` не выметает."""
     if not valid_name(name):
-        return {"error": f"name {name!r} doesn't look like {PREFIX}<project>-<n>"}
+        return {"error": bad_name(name)}
     vmid = vmid_of(name)
     out, code = await _pve("destroy", vmid, timeout=600)
     if code not in (0, None):
-        return {"error": f"{name}: body {vmid} won't go: {out.strip() or f'exit {code}'}"}
-    await sh(f"ssh-keygen -R {address_of(name)} "
-             f"-f {shlex.quote(KNOWN_HOSTS)} >/dev/null 2>&1 || true")
+        return {"error": f"{name}: body {vmid} won't go: {why(out, code)}"}
+    await _forget_host_key(name)
     return {"destroyed": vmid, "target": f"body {vmid}"}

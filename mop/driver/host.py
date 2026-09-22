@@ -16,10 +16,9 @@ tmux-сокет в `/tmp/tmux-<uid>`, файл сессии в `~/.claude/sessio
 import os
 
 from .. import config
-from . import sh, valid_name
+from . import (HOME, PREFIX, bad_name, clone_dir, sh, target_dir, valid_name,
+               why, write_private)
 
-HOME = config.get("MOP_HOME")
-PREFIX = "pu-"
 # Тело и узел — одна машина: исполнять «в теле» здесь значит исполнять на узле.
 BODY_IS_NODE = True
 # Каталог сокетов tmux-серверов. У каждого папета свой сервер (-L <имя>),
@@ -32,20 +31,12 @@ SESSION_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
                           "session.py")
 
 
-def clone_dir(name):
-    return f"{HOME}/puppets/{name}"
-
-
-def target_dir(name):
-    return f"{HOME}/.cache/target-{name}"
-
-
 # ─── жизненный цикл тела ─────────────────────────────────────────────────
 async def ensure(name, params=None):
     """Тело уже есть: это сам узел. Создавать нечего, и это не заглушка —
     это и есть ответ драйвера host на вопрос «в чём живёт папет»."""
     if not valid_name(name):
-        return {"error": f"name {name!r} doesn't look like {PREFIX}<project>-<n>"}
+        return {"error": bad_name(name)}
     return {"name": name, "body": None, "created": False, "address": None}
 
 
@@ -61,14 +52,14 @@ async def destroy(name):
     target-каталог — чисто производные данные, он уходит целиком, и с ним
     почти весь объём."""
     if not valid_name(name):
-        return {"error": f"name {name!r} doesn't look like {PREFIX}<project>-<n>"}
+        return {"error": bad_name(name)}
     d = clone_dir(name)
     excl = " ".join(f"-e '{p}'" for p in
                     (s.strip() for s in config.get("MOP_PUPPET_SEED").split(",")) if p)
     out, code = await sh(f"git -C {d} reset --hard HEAD && "
                          f"git -C {d} clean -xdff {excl}")
     if code not in (0, None):
-        return {"error": f"git in {d}: {out.strip() or f'exit {code}'}"}
+        return {"error": f"git in {d}: {why(out, code)}"}
     target = target_dir(name)
     # Долго: сотни тысяч inode. Таймаут шире офисного — обычный убил бы rm на
     # полпути и оставил каталог наполовину снесённым.
@@ -98,7 +89,7 @@ async def capacity():
     означает измеренное «пусто»."""
     out, code = await sh(f"df -BG --output=avail,size {HOME}")
     if code not in (0, None) or not out.strip():
-        return {"error": f"df did not answer: {out.strip() or f'exit {code}'}"}
+        return {"error": f"df did not answer: {why(out, code)}"}
     try:
         avail, size = out.splitlines()[1].split()
         disk = {"path": HOME, "free_gb": int(avail.rstrip("G")),
@@ -138,12 +129,7 @@ async def push(name, path, data):
     У host это обычная запись на узле. Белый список путей проверяет звавший:
     драйвер — транспорт, а не право."""
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.tmp"
-        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
-                  "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)
+        write_private(path, data)
     except Exception as e:
         return {"error": f"{path}: {e}"}
     return {"written": path}

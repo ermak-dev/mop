@@ -14,7 +14,6 @@
 
 Второй режим и есть причина запрета на импорты: на узел уезжает один файл.
 """
-import base64
 import glob
 import json
 import os
@@ -68,16 +67,18 @@ def socket_alive(path):
         s.close()
 
 
+def _in_cwd(cwd):
+    """Файлы сессий этого каталога, свежие первыми. Сравнение по realpath:
+    сессия и спрашивающий могут называть один каталог через разные ссылки."""
+    target = os.path.realpath(cwd)
+    mine = [d for d in sessions() if os.path.realpath(d.get("cwd") or "") == target]
+    return sorted(mine, key=lambda d: d.get("statusUpdatedAt", 0), reverse=True)
+
+
 def session_for_cwd(cwd):
     """Сессия, работающая в этом каталоге; самая свежая, если их несколько."""
-    target = os.path.realpath(cwd)
-    best = None
-    for d in sessions():
-        if os.path.realpath(d.get("cwd") or "") != target:
-            continue
-        if best is None or d.get("statusUpdatedAt", 0) > best.get("statusUpdatedAt", 0):
-            best = d
-    return best
+    mine = _in_cwd(cwd)
+    return mine[0] if mine else None
 
 
 def live_session_for_cwd(cwd):
@@ -87,9 +88,7 @@ def live_session_for_cwd(cwd):
     18): каждая умершая сессия оставляет свой. Брать просто самую свежую
     нельзя — она может быть трупом; спрашиваем сокет и спускаемся по времени,
     пока кто-нибудь не отзовётся."""
-    target = os.path.realpath(cwd)
-    mine = [d for d in sessions() if os.path.realpath(d.get("cwd") or "") == target]
-    for d in sorted(mine, key=lambda d: d.get("statusUpdatedAt", 0), reverse=True):
+    for d in _in_cwd(cwd):
         if socket_alive(d["messagingSocketPath"]):
             return d
     return None
@@ -97,9 +96,8 @@ def live_session_for_cwd(cwd):
 
 def resolve(target):
     """Куда писать. Каталог -> живая сессия в нём (так адресуют папет пула),
-    остальное -> строгий поиск по имени/pid."""
-    if target.endswith(".sock"):
-        return {"messagingSocketPath": target, "pid": None, "name": target}
+    остальное -> строгий поиск по имени/pid; путь к сокету find принимает как
+    есть."""
     if os.path.isdir(target):
         d = live_session_for_cwd(target)
         if d is None:
@@ -118,8 +116,7 @@ def find(target):
             or d.get("name") == target
             or d.get("cwd") == target]
     if not hits:
-        hits = [d for d in sessions()
-                if os.path.realpath(d.get("cwd") or "") == os.path.realpath(target)]
+        hits = _in_cwd(target)
     if not hits:
         raise LookupError(f"session not found: {target}")
     if len(hits) > 1:

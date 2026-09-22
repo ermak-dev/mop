@@ -6,8 +6,6 @@
 # setup.yaml в .gitignore и в git не попадает: он часть установки, как .env и
 # inventory.yaml. Ниже стоит окружение той установки, в которой mop писали:
 # это образец, а не список обязательного, — выкиньте чужое и впишите своё.
-# Нужное одному проекту — в .mop/workspace.yaml самих проектов: его привозит
-# из их origin и deploy, и сборка образа (#25, #32).
 #
 # ── Как приспособить под себя ───────────────────────────────────────────────
 #
@@ -48,7 +46,6 @@
     name:
       - shellcheck
       - postgresql-client
-      - docker.io
       - bc
       - time        # /usr/bin/time: у builtin-версии нет -v
     state: present
@@ -59,10 +56,13 @@
     dest: /usr/local/bin/shfmt
     mode: '0755'
 
+# dest -- /usr/local, а не /usr/local/bin: strip-components=1 превращает
+# gh_X/bin/gh в bin/gh, и с dest /usr/local/bin бинарь уезжал в bin/bin
+# (поймано живым прогоном на gpu: gh MISSING).
 - name: Install gh (single tarball, not in apt)
   ansible.builtin.unarchive:
     src: https://github.com/cli/cli/releases/download/v2.74.0/gh_2.74.0_linux_amd64.tar.gz
-    dest: /usr/local/bin
+    dest: /usr/local
     extra_opts: ["--strip-components=1", "--wildcards", "*/bin/gh"]
     remote_src: yes
     mode: '0755'

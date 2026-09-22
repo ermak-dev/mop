@@ -19,7 +19,7 @@
 #
 # Run:  mop driver build <шард>
 
-- name: Bake the shard's image on the hypervisor
+- name: Bake the shard's image on the Proxmox nodes
   hosts: puppet
   become: no
   gather_facts: no
@@ -51,7 +51,7 @@
             sys.path.insert(0, sys.argv[1])
             from mop.driver import pve
             print(pve.template_vmid(sys.argv[2]), pve.template_name(sys.argv[2]),
-                  pve.GATEWAY, pve.PREFIXLEN)
+                  pve.GATEWAY, pve.PREFIXLEN, pve.template_address(sys.argv[2]))
           - "{{ playbook_dir }}/.."
           - "{{ mop_shard }}"
       delegate_to: localhost
@@ -64,9 +64,8 @@
         tmpl_name: "{{ tmpl.stdout.split()[1] }}"
         pve_gw: "{{ tmpl.stdout.split()[2] }}"
         pve_cidr: "{{ tmpl.stdout.split()[3] }}"
+        tmpl_ip: "{{ tmpl.stdout.split()[4] }}"
 
-    # Адрес сборочного тела — шлюз плюс один. Живые тела стоят с него же, но
-    # выше: address_of начинает с сети + 2, и пересечься им негде.
     # Размеры тела: чего просит проект (mop.yaml), но не выше потолка этой
     # машины. Просит чужой репозиторий, а решает узел, на котором тело будет
     # стоять, — иначе манифест это не настройка, а способ занять гипервизор.
@@ -92,10 +91,6 @@
              (body_mem | int < (mop_shard_asks.MOP_MEM_MB | default(0) | int)
               or body_disk | int < (mop_shard_asks.MOP_DISK_GB | default(0) | int)
               or body_cores | int < (mop_shard_asks.MOP_CORES | default(0) | int)) else '' }}
-
-    - name: Its address while it is being built
-      ansible.builtin.set_fact:
-        tmpl_ip: "{{ '.'.join(pve_gw.split('.')[0:3]) }}.{{ pve_gw.split('.')[3] | int + 1 }}"
 
     - name: A temporary key for reaching the body from here
       ansible.builtin.command:
@@ -192,8 +187,20 @@
         # IdentitiesOnly: без него ssh сперва предъявляет каждый ключ из
         # агента, и тело успевает отказать столько раз, что включает штраф за
         # источник — после чего роняет и верный ключ тоже.
+        # ServerAlive* — чтобы молчащий транспорт падал, а не висел. Замерено
+        # 22.09: на просевшем транзите (260 КБ/с вместо 1.4 МБ/с) сборка
+        # встала намертво в apt — `apt-get` спал в anon_pipe_write, то есть
+        # писал в трубу, которую перестали читать, а ansible на своём конце
+        # ждал в ep_poll. Обе стороны живые, данные не идут, таймаута нет ни
+        # у одной: прогон висел бы до утра, и в логе это неотличимо от
+        # медленной загрузки. Пять минут тишины транспорта (30 × 10) — это
+        # про сам канал, а не про молчание apt: на живом соединении sshd
+        # отвечает на keepalive независимо от того, печатает ли что-то
+        # команда, так что здоровым прогонам это ничего не стоит.
         ansible_ssh_common_args: >-
           -o ProxyJump={{ inventory_hostname }}
+          -o ServerAliveInterval=30
+          -o ServerAliveCountMax=10
           -o IdentitiesOnly=yes
           -o PreferredAuthentications=publickey
           -o StrictHostKeyChecking=accept-new

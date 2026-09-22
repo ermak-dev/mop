@@ -21,8 +21,9 @@ def v_list(_argv):
     чего там нет: драйвер, чьи шарды узел умеет и состояние планирования."""
     rows = [("NODE", "DRIVER", "SERVES", "STATE", "FREE", "TOTAL", "SLOTS")]
     cap = {n["name"]: n for n in puppets.pool()}
+    metas = nomad.nodes_meta()
     for n in sorted(nomad.client().nodes.get_nodes(), key=lambda n: n["Name"]):
-        meta = nomad.node_meta(n["Name"])
+        meta = metas.get(n["Name"], {})
         c = cap.get(n["Name"], {})
         state = n["Status"]
         if n.get("Drain"):
@@ -63,8 +64,7 @@ def v_forget(argv):
     if len(argv) != 1:
         lib.usage(__doc__)
     name = argv[0]
-    node = next((n for n in nomad.client().nodes.get_nodes()
-                 if n["Name"] == name), None)
+    node = nomad.node_summary(name)
     if node is None:
         lib.usage(f"no node {name} in the cluster")
     why = nomad.forget_refusal(node, nomad.node_allocs(name))

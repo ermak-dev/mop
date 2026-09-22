@@ -103,6 +103,13 @@ def config():
 
 
 # ─── соединение ──────────────────────────────────────────────────────────
+def auth(c):
+    """Аргументы nats.connect по кредам из config(): один способ представиться
+    шине на всех — фасад мастера, петля агента и его самопроверка."""
+    return {"servers": [c["url"]], "user": c.get("user"),
+            "password": c.get("password")}
+
+
 def _ensure_loop():
     global _loop
     if _loop is not None:
@@ -130,11 +137,8 @@ async def _on_error(e):
 
 
 async def _aconnect():
-    c = config()
     return await nats.connect(
-        servers=[c["url"]],
-        user=c.get("user"), password=c.get("password"),
-        name="mop", error_cb=_on_error,
+        **auth(config()), name="mop", error_cb=_on_error,
         # Молча копить неотправленное в ожидании сервера — худший вид отказа:
         # вызывающий получит успех, которого не было.
         allow_reconnect=True, max_reconnect_attempts=-1,
@@ -263,6 +267,37 @@ def ask(master_id, verb, timeout=TIMEOUT, shard=None, **fields):
                 verb, timeout, **fields)
 
 
+async def _one(nc, node, req, timeout, channel, shard):
+    """Один запрос узлу внутри цикла. -> ответ | BusError.
+
+    Общая часть request_many и request_stream: ошибка возвращается, а не
+    бросается — один молчащий узел не должен уносить с собой картину по
+    остальным."""
+    try:
+        msg = await nc.request(
+            subject(node, channel, shard),
+            json.dumps(req, ensure_ascii=False).encode(), timeout=timeout)
+        return json.loads(msg.data.decode())
+    except NoRespondersError:
+        return BusError(f"node agent {node} is not subscribed")
+    except asyncio.TimeoutError:
+        return BusError(_silence(f"node agent {node}", timeout))
+    except Exception as e:
+        return BusError(f"{node}: {e}")
+
+
+def failure(answer):
+    """Почему ответ узла не годится: текст либо None, если ответ есть.
+
+    Три исхода у каждого ответа request_many — исключение шины, пустота,
+    поле error от агента, — и каждый командлет разбирал их сам."""
+    if isinstance(answer, Exception):
+        return str(answer)
+    if not answer:
+        return "no response"
+    return answer.get("error") or None
+
+
 def request_many(requests, timeout=TIMEOUT, channel="rpc", shard=None):
     """Разные запросы разным узлам, параллельно по одному соединению.
 
@@ -276,24 +311,11 @@ def request_many(requests, timeout=TIMEOUT, channel="rpc", shard=None):
     if not requests:
         return {}
     nc = connect()
-
-    async def one(node, req):
-        try:
-            msg = await nc.request(
-                subject(node, channel, shard),
-                json.dumps(req, ensure_ascii=False).encode(), timeout=timeout)
-            return json.loads(msg.data.decode())
-        except NoRespondersError:
-            return BusError(f"node agent {node} is not subscribed")
-        except asyncio.TimeoutError:
-            return BusError(_silence(f"node agent {node}", timeout))
-        except Exception as e:
-            return BusError(f"{node}: {e}")
-
     nodes = list(requests)
 
     async def all_of():
-        return await asyncio.gather(*(one(n, requests[n]) for n in nodes))
+        return await asyncio.gather(
+            *(_one(nc, n, requests[n], timeout, channel, shard) for n in nodes))
 
     return dict(zip(nodes, _call(all_of(), timeout)))
 
@@ -317,17 +339,7 @@ def request_stream(requests, timeout=TIMEOUT, channel="rpc", shard=None):
     done = queue.Queue()
 
     async def one(key, node, req):
-        try:
-            msg = await nc.request(
-                subject(node, channel, shard),
-                json.dumps(req, ensure_ascii=False).encode(), timeout=timeout)
-            done.put((key, json.loads(msg.data.decode())))
-        except NoRespondersError:
-            done.put((key, BusError(f"node agent {node} is not subscribed")))
-        except asyncio.TimeoutError:
-            done.put((key, BusError(_silence(f"node agent {node}", timeout))))
-        except Exception as e:
-            done.put((key, BusError(f"{node}: {e}")))
+        done.put((key, await _one(nc, node, req, timeout, channel, shard)))
 
     async def all_of():
         await asyncio.gather(*(one(k, n, r) for k, (n, r) in requests.items()))

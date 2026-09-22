@@ -9,7 +9,7 @@ import os
 import re
 import time
 
-from . import bus, config, llm, nomad
+from . import bus, config, driver, llm, nomad
 
 PROJECT = config.PROJECT
 
@@ -21,11 +21,12 @@ USER = config.get("MOP_USER")               # под кем идут задач�
 # Куда переводить папет, у которого кончилась квота текущей модели
 # (решение оператора 27.08: Fable → Opus).
 FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL")
-# Префикс не настраивается: на нём стоят глобы сторожа диска (включая
-# переходные ~/wk/wk-*), shard_of_name и имена tmux-серверов. Сделать его
-# переменной, пока сторож знает оба префикса буквально, — значит развести
-# половины одного соглашения.
-JOB_PREFIX = "pu-"
+# Соглашение об имени папета (префикс, разбор, каталоги) живёт в реестре
+# драйверов: это единственный stdlib-модуль, который читают и мастер, и узел.
+# Здесь — только имена, под которыми его знает мастер.
+JOB_PREFIX = driver.PREFIX
+shard_of_name = driver.shard_of_name
+clone_dir = driver.clone_dir
 
 # ─── LLM-профили ─────────────────────────────────────────────────────────
 # Папет — всегда claude code; профиль меняет ровно одно: куда он ходит за
@@ -290,14 +291,26 @@ fi
 cores="$(nproc)"
 mc="$(grep -a '^MOP_CORES=' "$HOME/.config/mop/node.env" 2>/dev/null | tail -1 | cut -d= -f2)"
 [ -n "$mc" ] && cores="$mc"
+# PATH идёт присваиванием В САМОЙ КОМАНДЕ, а не через -e, и это не стиль.
+# tmux кладёт -e в окружение СЕССИИ, и обычные переменные оттуда до панели
+# доезжают -- CARGO_TARGET_DIR и MOP_SHARD ниже приезжают именно так. А PATH
+# панели он берёт от своего сервера, и значение из -e просто не применяется.
+# Измерено 22.09, tmux 3.4: `new-session -e PATH=/ZZZ:$PATH -e FOO=bar` дал
+# процессу FOO=bar и ИСХОДНЫЙ PATH, при том что show-environment показывал оба.
+# Цена была тихой: каталог bin/ клона кладётся первым ради того, чтобы у папета
+# работала команда проекта (`rug` у rugent), -- и не работала, а правила
+# проекта требуют звать её именно так.
+#
+# Присваивание внутри строки команды, а не префиксом перед `tmux`: префикс
+# уехал бы в окружение СЕРВЕРА tmux, а это ровно та ловушка, из-за которой все
+# папеты однажды делили один CARGO_TARGET_DIR.
 tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     -e CARGO_TARGET_DIR="$HOME/.cache/target-$PU_NAME" \
     -e CARGO_BUILD_JOBS="$cores" \
-    -e PATH="$d/bin:$PATH" \
     -e MOP_SHARD="$PU_SHARD" \
     -e MOP_BUS_CONFIG="$shard_creds" \
     "${llm_env[@]}" \
-    "$HOME/.local/bin/claude $claude_args"
+    "PATH=$d/bin:$PATH $HOME/.local/bin/claude $claude_args"
 trap 'tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null; exit 0' TERM INT
 while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wait $!; done
 """
@@ -317,18 +330,6 @@ def shard_of(origin):
     return os.path.basename(origin).removesuffix(".git")
 
 
-def shard_of_name(name):
-    """Шард по имени папета: pu-<проект>-<n>. Откат для случая, когда клона
-    ещё нет, — origin спросить не у кого, а имя уже есть."""
-    if not name.startswith(JOB_PREFIX):
-        return ""
-    return name[len(JOB_PREFIX):].rsplit("-", 1)[0]
-
-
-def clone_dir(name):
-    return f"{HOME}/puppets/{name}"
-
-
 def job_spec(name, origin, profile=None, cont=False):
     """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
     историю каталога (`claude --continue`).
@@ -336,7 +337,6 @@ def job_spec(name, origin, profile=None, cont=False):
     По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
     нужен ровно там, где работу продолжают под другой моделью, а везде ещё
     (новый папет, рецикл, лечение) чистый старт — половина смысла операции."""
-    project = os.path.basename(origin).removesuffix(".git")
     profile = profile or config.get("MOP_DEFAULT_LLM")
     prof = llm.get(profile)
     if prof is None:
@@ -351,7 +351,9 @@ def job_spec(name, origin, profile=None, cont=False):
     env = {
         "PU_NAME": name,
         "PU_ORIGIN": origin,
-        "PU_PROJECT": project,
+        # Два имени одного: врапер исторически читает PU_PROJECT (посев из
+        # ~/puppet-env/<проект>), а шард и есть проект.
+        "PU_PROJECT": shard,
         "PU_SHARD": shard,
         "PU_SEED": config.get("MOP_PUPPET_SEED"),
         "HOME": HOME,
@@ -1053,6 +1055,35 @@ def _action_for(state):
     return False
 
 
+def treat(issue):
+    """Применить лечение к одной проблеме из diagnose. -> что вышло, строкой.
+
+    Одно место на оба фронтенда, `mop doctor --fix` и инструмент doctor в MCP:
+    пока лечение жило в каждом своём, они разошлись — CLI перерегистрировал
+    спеку по диагнозу `update`, а MCP на тот же диагноз делал рестарт, то есть
+    поднимал ту же старую спеку (#47). Гейт «креды доехали?» перед
+    login+restart остаётся у вызывающего: раздача — его дело."""
+    action, alloc, name = issue["action"], issue["alloc"], issue["name"]
+    try:
+        if action == "stop":
+            nomad.alloc_stop(alloc["ID"])
+            return "alloc stop — Nomad will recreate it without backoff"
+        if action == "model":
+            switch_model(alloc["NodeName"], name, FALLBACK_MODEL)
+            return f"/model {FALLBACK_MODEL}"
+        if action == "update":
+            # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
+            # аллокации поднял бы ту же старую. Клон переживает — меняется
+            # только спека.
+            meta = nomad.get_job(name).get("Meta") or {}
+            nomad.register(job_spec(name, meta["origin"], meta.get("llm")))
+            return "spec re-registered — the puppet comes up with the new wrapper"
+        nomad.alloc_restart(alloc["ID"])
+        return "restart"
+    except Exception as e:
+        return f"{action} failed: {str(e)[:80]}"
+
+
 # ─── рецикл ───────────────────────────────────────────────────────────────
 def wipe(node, name):
     """Глагол wipe напрямую, без остановки джоба. Агент сам откажет, если
@@ -1077,6 +1108,40 @@ def _wait_stopped(name):
             return
         time.sleep(2)
     raise RuntimeError(f"allocation {name} won't stop — is the node alive?")
+
+
+def delete(name):
+    """Снести папета. -> {'node', 'body': 'destroyed'|'kept'|None}.
+
+    У host тело — сам узел, и клон намеренно ОСТАЁТСЯ: он и есть ценность,
+    прогретое дерево, которое переиспользует следующий подъём под тем же
+    именем. Снести узел всё равно нельзя.
+
+    У контейнерного драйвера «оставить клон» нечему: клон живёт ВНУТРИ тела,
+    и оставленное тело — это работающий контейнер с зарезервированной
+    памятью и занятым диском, которого больше никто не считает своим.
+    Замерено 22.09 на hyper: после `mop delete` контейнер продолжал
+    работать, а следующий `mop add` поднял ЕГО ЖЕ, со всем прежним
+    содержимым, — то есть новый папет получил тело от старого вместе с его
+    пакетами, кэшами и мусором, и «свежий папет на свежем образе» оказался
+    неправдой, которую ничто не сообщало.
+
+    Порядок тот же, что у рецикла, и по той же причине: остановить джоб →
+    дождаться терминального статуса → сносить. Глагол wipe у контейнерного
+    драйвера уносит тело целиком, и он же откажет, если tmux-сессия ещё
+    жива, — снос под живой сессией недопустим независимо от того, что решил
+    мастер."""
+    alloc = nomad.latest_alloc(name)
+    node = alloc["NodeName"] if alloc else None
+    nomad.deregister(name)
+    if not node:
+        return {"node": None, "body": None}
+    drv = (nomad.node_meta(node) or {}).get("mop_driver") or driver.DEFAULT
+    if driver.require(drv).BODY_IS_NODE:
+        return {"node": node, "body": "kept"}
+    _wait_stopped(name)
+    wipe(node, name)
+    return {"node": node, "body": "destroyed"}
 
 
 def recycle(name):

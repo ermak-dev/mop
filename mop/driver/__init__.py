@@ -40,9 +40,8 @@ import asyncio
 import importlib
 import os
 import re
-from pathlib import Path
 
-from .. import config
+from .. import config, plugins
 
 # Глаголы контракта. Список закрыт и проверяется громко при загрузке: агент
 # зовёт их из петли, и отсутствующий argv прочитается там как «узел молчит».
@@ -51,13 +50,23 @@ VERBS = ("ensure", "destroy", "bodies", "capacity", "argv", "run_argv", "push",
 
 DEFAULT = config.SETTINGS["MOP_DRIVER"]
 
+# Соглашение об имени папета живёт здесь, потому что здесь его читают обе
+# стороны. Форма pu-<проект>-<n> строится у мастера (puppets.next_name), а
+# разбирается на узле: агентом, драйверами, внешним врапером. Узлу puppets не
+# импортировать — он тянет python-nomad, — и пока общего stdlib-дома не было,
+# каждый читатель держал свою копию префикса и своего rsplit (#47).
+#
+# Префикс не настраивается: на нём стоят глобы сторожа диска (включая
+# переходные ~/wk/wk-*) и имена tmux-серверов. Сделать его переменной, пока
+# сторож знает оба префикса буквально, — значит развести половины одного
+# соглашения.
+PREFIX = "pu-"
+
 # Имя папета склеивается в шелл — и у host, и у драйвера контейнеров, — а
 # приезжает оно с шины. Проверка поэтому одна, здесь: два списка допустимого
 # разъехались бы молча, и разошлись бы они как раз на той стороне, где команда
 # идёт внутрь чужой машины.
-#
-# Форма та же, что строит puppets.next_name: pu-<проект>-<n>.
-_NAME = re.compile(r"^pu-[A-Za-z0-9][A-Za-z0-9._-]*-\d+$")
+_NAME = re.compile(rf"^{PREFIX}[A-Za-z0-9][A-Za-z0-9._-]*-\d+$")
 
 _CACHE = None
 
@@ -65,6 +74,50 @@ _CACHE = None
 def valid_name(name):
     """Похоже ли это на имя папета. Всё, что не похоже, в шелл не попадает."""
     return bool(name) and bool(_NAME.match(name))
+
+
+def bad_name(name):
+    """Текст отказа по имени — один на все места, где имя проверяют."""
+    return f"name {name!r} doesn't look like {PREFIX}<project>-<n>"
+
+
+def shard_of_name(name):
+    """Шард по имени папета: pu-<проект>-<n>. Откат для случая, когда клона
+    ещё нет, — origin спросить не у кого, а имя уже есть. Без префикса —
+    пусто, а не кусок чужой строки."""
+    if not name.startswith(PREFIX):
+        return ""
+    return name[len(PREFIX):].rsplit("-", 1)[0]
+
+
+# Где папет живёт в теле. Один путь и у мастера (mcp, delete называют его
+# человеку), и у узла (агент меряет и пробует), и у врапера в спеке.
+HOME = config.get("MOP_HOME")
+
+
+def clone_dir(name):
+    return f"{HOME}/puppets/{name}"
+
+
+def target_dir(name):
+    return f"{HOME}/.cache/target-{name}"
+
+
+def why(out, code):
+    """Причина отказа шелла одной строкой: вывод, а если он пуст — код."""
+    return out.strip() or f"exit {code}"
+
+
+def write_private(path, data):
+    """Файл 600, атомарно: во временный рядом и rename. Так узел кладёт креды
+    (агент, глагол write) и так драйвер host кладёт файл в своё тело — это
+    одна и та же запись, и была скопирована дословно."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
+              "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
 
 
 def contract(name, mod):
@@ -104,12 +157,7 @@ def drivers():
     """Весь реестр: {имя драйвера: контракт}. Имя файла = имя драйвера."""
     global _CACHE
     if _CACHE is None:
-        _CACHE = {}
-        for path in sorted(Path(__file__).parent.glob("*.py")):
-            if path.stem.startswith("_"):
-                continue
-            mod = importlib.import_module(f".{path.stem}", __package__)
-            _CACHE[path.stem] = contract(path.stem, mod)
+        _CACHE = plugins.discover(__file__, __package__, contract)
     return _CACHE
 
 

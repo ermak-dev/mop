@@ -66,14 +66,6 @@ def chart(days, per_day):
         print(f"{d}  {bar.ljust(width)} {human(n) if n else '-':>6}")
 
 
-def _sum_days(rows):
-    acc = usage.empty()
-    for row in rows.values():
-        for k in usage.KINDS:
-            acc[k] += int(row.get(k) or 0)
-    return acc
-
-
 def breakdown(per_puppet):
     """Таблица по папетам, от самого прожорливого. per_puppet: {(имя, узел):
     {kind: n}}. Ключ с узлом, а не одно имя: переехавший папет оставляет
@@ -95,12 +87,12 @@ def main(argv):
     per_day, per_puppet, failed = {}, {}, []
     for n in nodes:
         a = answers.get(n)
-        if isinstance(a, Exception) or not a or a.get("error"):
-            why = a if isinstance(a, Exception) else (a or {}).get("error") or "no response"
+        why = bus.failure(a)
+        if why:
             failed.append(f"{n}: {why}")
             continue
         for name, rows in a.get("usage", {}).items():
-            per_puppet[(name, n)] = _sum_days(rows)
+            per_puppet[(name, n)] = usage.sum_days(rows)
             usage.merge(per_day, rows)
     puppets = len(per_puppet)
 
@@ -115,7 +107,7 @@ def main(argv):
         breakdown(per_puppet)
     else:
         chart(days, per_day)
-    grand = _sum_days(per_day)
+    grand = usage.sum_days(per_day)
     print(f"total {human(usage.total(grand))}: "
           + ", ".join(f"{k.replace('_', ' ')} {human(grand[k])}" for k in usage.KINDS))
     for f in failed:

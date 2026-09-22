@@ -31,7 +31,6 @@ BUS.md, устройство сервера — MCP.md.
 """
 import functools
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -436,8 +435,9 @@ def pool() -> str:
 
 @master_tool(annotations=DESTRUCTIVE, description=(
     "Manage puppets: add (create), remove (delete), restart (restart a "
-    "stuck one), update (change repository or LLM). The clone survives "
-    "remove on the node and gets reused.\n\n"
+    "stuck one), update (change repository or LLM). Where the body is the "
+    "node, remove keeps the clone and a puppet of that name reuses it; "
+    "where the body is a container, remove takes the body with it.\n\n"
     "update that only changes the LLM continues the work: the puppet comes "
     "up on the same clone history, i.e. the ticket moves to another model "
     "mid-task. Without origin the repository is kept, without llm — the "
@@ -453,8 +453,12 @@ def puppet(action: str, name: str = "", origin: str = "", llm: str = "",
         return f"{action}: puppet name required"
     if action == "remove":
         nomad.get_job(name)
-        nomad.deregister(name)
-        return f"removed {name} (clone kept in {puppets.clone_dir(name)})"
+        r = puppets.delete(name)
+        if r["body"] == "destroyed":
+            return f"removed {name} (body gone from {r['node']})"
+        if r["body"] == "kept":
+            return f"removed {name} (clone kept in {puppets.clone_dir(name)})"
+        return f"removed {name} (no allocation — nothing to clean up)"
     if action == "restart":
         nomad.alloc_restart(puppet_alloc(name)["ID"])
         return f"{name}: restarting (clean session)"
@@ -474,7 +478,7 @@ def _puppet_add(origin, llm):
     if llm not in llm_profiles():
         return f"no LLM profile {llm}; available: {', '.join(llm_profiles())}"
     keys.push_llm_keys(llm)
-    name = puppets.next_name(os.path.basename(origin).removesuffix(".git"))
+    name = puppets.next_name(puppets.shard_of(origin))
     nomad.register(puppets.job_spec(name, origin, llm))
     return f"{name}: {origin} [{llm}] — placing, check state in agents"
 
@@ -524,22 +528,14 @@ def doctor(fix: bool = False) -> str:
 
 
 def _treat(issue, delivered):
-    action, alloc, name = issue["action"], issue["alloc"], issue["name"]
-    if action == "login+restart":
+    """Лечение — общее с `mop doctor` (puppets.treat); здесь только гейт:
+    рестарт после раздачи кредов имеет смысл, только если раздача дошла."""
+    if issue["action"] == "login+restart":
+        alloc = issue["alloc"]
         got = delivered.get(alloc["NodeName"]) if alloc else None
         if got != "OK":
             return f"restart skipped: credentials not delivered ({got or 'not pushed'})"
-    try:
-        if action == "stop":
-            nomad.alloc_stop(alloc["ID"])
-            return "alloc stop — Nomad will recreate without backoff"
-        if action == "model":
-            puppets.switch_model(alloc["NodeName"], name, puppets.FALLBACK_MODEL)
-            return f"/model {puppets.FALLBACK_MODEL}"
-        nomad.alloc_restart(alloc["ID"])
-        return "restart"
-    except Exception as e:
-        return f"{action} failed: {str(e)[:80]}"
+    return puppets.treat(issue)
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(

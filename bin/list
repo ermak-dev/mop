@@ -32,15 +32,15 @@ def free(row):
 def hint(rows, origin):
     """Одна подсказка под таблицей: чего именно не хватает прямо сейчас."""
     if not rows:
-        return (f"Create the first puppet for {lib.project_of(origin)}: mop add {origin}"
+        return (f"Create the first puppet for {puppets.shard_of(origin)}: mop add {origin}"
                 if origin else "Create a puppet: mop add <git-origin>")
     if not any(free(r) for r in rows):
-        return (f"\nNo free puppets for {lib.project_of(origin)}. "
+        return (f"\nNo free puppets for {puppets.shard_of(origin)}. "
                 f"Create one: mop add {origin}" if origin
                 else "\nNo free puppets. Create one: mop add <git-origin>")
     if not origin:
         return None
-    project = lib.project_of(origin)
+    project = puppets.shard_of(origin)
     mine = [r for r in rows if project in r["origin"]]
     if not mine:
         return f"\nNo puppets for {project}. Create one: mop add {origin}"
@@ -72,7 +72,7 @@ def main(argv):
     # советовал бы завести папета для mop, которого этот мастер всё равно
     # не увидит.
     shard = lib.in_shard()
-    if shard and origin and lib.project_of(origin) != shard:
+    if shard and origin and puppets.shard_of(origin) != shard:
         origin = None
     tip = hint(rows, origin)
     if tip:

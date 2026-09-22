@@ -84,11 +84,6 @@ def default_branch():
     return r.stdout.strip() if r.returncode == 0 else "origin/master"
 
 
-def project_of(origin):
-    """Проект он же шард. Определение одно на всю систему — в puppets."""
-    return puppets.shard_of(origin)
-
-
 def shard_creds(shard):
     """Креды мастера шарда. bus-master-<шард>.json: имя bus-<шард>.json на
     узлах пула занято кредами папета того же шарда, и на машине в двух ролях
@@ -150,6 +145,25 @@ def running_node(name):
     """Узел папета — адрес для шины. Аллокация адресом быть перестала вместе
     с alloc exec; агент подписан на субъект узла."""
     return running_alloc(name)["NodeName"]
+
+
+def session_env(profile):
+    """Окружение сессии claude на профиле из mop/llm/: статическая часть
+    профиля плюс ключ. -> (профиль, {переменные}).
+
+    Источник ключа — местный .env, а не узловой secrets.env: на управляющей
+    машине узел ничего не выдавал. Отказ, а не тишина: сессия без ключа
+    отбивает каждый ход 401-й, а читается живой. Так поднимаются и мастер,
+    и `mop code`."""
+    prof = llm.require(profile)
+    env = dict(prof["env"])
+    if prof["key"]:
+        key = config.get(prof["key"])
+        if not key:
+            usage(f"profile {profile}: no {prof['key']} in "
+                  f"{puppets.LOCAL_KEYS_FILE} — add it and retry")
+        env[prof["auth_var"]] = key
+    return prof, env
 
 
 def push_llm_keys(llm):

@@ -18,9 +18,9 @@ def main(argv):
     rows = [("NODE", "FS", "FREE", "TOTAL")]
     for n in nodes:
         a = answers.get(n)
-        if isinstance(a, Exception) or not a or a.get("error"):
-            why = a if isinstance(a, Exception) else (a or {}).get("error") or "no response"
-            rows.append((n, str(why), "", ""))
+        why = bus.failure(a)
+        if why:
+            rows.append((n, why, "", ""))
         else:
             rows.append((n, a["path"], f"{a['free_gb']} GB", f"{a['total_gb']} GB"))
     print("\n".join(table(rows)))
