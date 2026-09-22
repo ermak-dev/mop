@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 import lib
-from mop import bus, driver, image, puppets
+from mop import bus, config, driver, image, puppets
 from mop.render import table
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
