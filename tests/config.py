@@ -223,6 +223,35 @@ def main():
     finally:
         os.environ.pop("MOP_PVE_SUBNET", None)
 
+    # Ключ пула к git: первый существующий из стандартных имён контроллера, а
+    # не зашитый id_rsa. HYPOTHESIS (#66): на хосте с одним id_ed25519 deploy
+    # падал посреди плейбука на «Could not find id_rsa on the Controller».
+    keys = tempfile.mkdtemp()
+    ed = os.path.join(keys, "id_ed25519")
+    rsa = os.path.join(keys, "id_rsa")
+    cases += 1
+    if config.git_key([ed, rsa]) != "":
+        bad += 1
+        print("FAILED  no key at all must be empty, so deploy can refuse up front")
+    open(rsa, "w").close()
+    cases += 1
+    if config.git_key([ed, rsa]) != rsa:
+        bad += 1
+        print(f"FAILED  the only key present must win: {config.git_key([ed, rsa])!r}")
+    open(ed, "w").close()
+    cases += 1
+    if config.git_key([ed, rsa]) != ed:
+        bad += 1
+        print("FAILED  with both present the first candidate wins, and it is ed25519")
+    cases += 1
+    os.environ["MOP_GIT_KEY"] = "/elsewhere/pool-key"
+    try:
+        if config.get("MOP_GIT_KEY") != "/elsewhere/pool-key":
+            bad += 1
+            print("FAILED  MOP_GIT_KEY from the environment must outrank the derived default")
+    finally:
+        os.environ.pop("MOP_GIT_KEY", None)
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 

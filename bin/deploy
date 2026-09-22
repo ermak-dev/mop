@@ -85,6 +85,15 @@ import json, sys
 for part in json.load(sys.stdin).get('MOP_BODY_EXTRA', '').split(','):
     print(part.strip())" <<<"$SETTINGS")
 
+# Ключ пула к git: роль узла копирует его с контроллера, и без него прогон
+# падал бы на середине. Дефолт считает config (первый из стандартных имён),
+# так что отказ значит «ключа нет вовсе», а не «назван не тот».
+GIT_KEY="$(python3 -c "import json, sys; print(json.load(sys.stdin).get('MOP_GIT_KEY', ''))" <<<"$SETTINGS")"
+if [[ -z "$GIT_KEY" || ! -f "$GIT_KEY" || ! -f "$GIT_KEY.pub" ]]; then
+    fail "no git key for the pool on this machine (MOP_GIT_KEY=${GIT_KEY:-unset}) -- make one: ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519, register its .pub on MOP_GIT_HOST, or name yours in .env"
+    exit 1
+fi
+
 # Прежние цели запуска. Отвергаем, а не молча трактуем как имя шарда: старая
 # привычка `mop deploy pool` завела бы на шине пользователя master-pool, и
 # разбирались бы с этим уже по симптомам.
