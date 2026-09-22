@@ -93,6 +93,14 @@ def main():
             failed += 1
             print(f"FAIL argv lacks {want!r}: {argv}")
 
+    # Значение с пробелами едет только JSON'ом: голое `-e k=v w=x` ansible
+    # режет по пробелам на несколько пар, и до ssh доезжало одно `-o`
+    # (поймано первым живым прогоном: «no argument after keyword -o»).
+    for i, a in enumerate(argv):
+        if a == "-e" and " " in argv[i + 1] and not argv[i + 1].lstrip().startswith("{"):
+            failed += 1
+            print(f"FAIL a bare -e value with spaces is split by ansible: {argv[i + 1]!r}")
+
     print("bootstrap: FAILED" if failed else "bootstrap: ok")
     return 1 if failed else 0
 
