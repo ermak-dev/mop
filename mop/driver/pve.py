@@ -115,6 +115,48 @@ def template_vmid(shard):
     return TMPL_MIN + h % (TMPL_MAX - TMPL_MIN + 1)
 
 
+def stage_name(shard):
+    """Имя СБОРОЧНОГО тела шарда (#60): в нём играется плейбук, и только
+    потом оно становится образом. Под тем же префиксом pu-tmpl-, чтобы
+    ростер тел его не показывал папетом, а `mop sweep` — назвал, но не снёс."""
+    return f"{template_name(shard)}-build"
+
+
+def parse_list(text):
+    """Вывод глагола list -> [(vmid, hostname, status)]. Один разбор на
+    ростер тел, ростер образов и выбор сборочного номера."""
+    out = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].isdigit():
+            out.append((int(parts[0]), parts[1],
+                        parts[2] if len(parts) > 2 else ""))
+    return out
+
+
+def stage_vmid(shard, listing):
+    """Номер сборочного тела по тому, что стоит на узле (parse_list).
+
+    Не хеш, а свободный номер: сборочное тело живёт минуты, а хеш второго
+    имени столкнулся бы с образом соседнего шарда с вероятностью один к ста
+    — и молча. Стоящее тело с именем сборки этого шарда возвращается КАК
+    ЕСТЬ: это оборванная сборка, и следующий прогон обязан продолжить в
+    ней, а не заводить ещё одну. Иначе — старший свободный номер диапазона
+    шаблонов, не совпадающий с номером образа: два номера одному шарду
+    нужны одновременно, пока образ подменяется."""
+    mine = template_vmid(shard)
+    taken = {}
+    for vmid, name, _ in listing:
+        taken[vmid] = name
+        if name == stage_name(shard):
+            return vmid
+    for vmid in range(TMPL_MAX, TMPL_MIN - 1, -1):
+        if vmid != mine and vmid not in taken:
+            return vmid
+    raise RuntimeError(f"no free vmid for a build body of {shard} in "
+                       f"{TMPL_MIN}..{TMPL_MAX}: sweep old images (mop sweep)")
+
+
 def address_of_vmid(vmid):
     """Адрес тела по его VMID: сеть плюс АБСОЛЮТНЫЙ номер. Одна формула на
     живые тела и на сборочные: диапазоны VMID не пересекаются (BODY_* против
@@ -300,12 +342,7 @@ async def bodies():
     out, code = await _pve("list", timeout=60)
     if code not in (0, None):
         return []
-    names = []
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[1].startswith(PREFIX):
-            names.append(parts[1])
-    return sorted(n for n in names if valid_name(n))
+    return sorted(n for _, n, _ in parse_list(out) if valid_name(n))
 
 
 async def templates():
@@ -320,12 +357,8 @@ async def templates():
     out, code = await _pve("list", timeout=60)
     if code not in (0, None):
         return []
-    found = []
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[1].startswith(f"{PREFIX}tmpl-"):
-            found.append({"name": parts[1], "vmid": parts[0],
-                          "running": parts[2] == "running"})
+    found = [{"name": n, "vmid": str(v), "running": st == "running"}
+             for v, n, st in parse_list(out) if n.startswith(f"{PREFIX}tmpl-")]
     return sorted(found, key=lambda t: t["name"])
 
 
@@ -352,10 +385,9 @@ async def _hostname(vmid):
     out, code = await _pve("list", timeout=60)
     if code not in (0, None):
         return ""
-    for line in out.splitlines():
-        parts = line.split()
-        if parts and parts[0] == str(vmid):
-            return parts[1] if len(parts) > 1 else ""
+    for v, name, _ in parse_list(out):
+        if v == vmid:
+            return name
     return ""
 
 

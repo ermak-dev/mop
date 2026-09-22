@@ -105,15 +105,25 @@ create)
 # Тело из шаблона шарда. Связанный клон, если хранилище умеет: тогда подъём
 # мгновенный и места стоит только записанное. Не умеет -- полный, и это
 # единственная разница.
+#
+# Восьмой аргумент `full` -- полная копия по требованию (#60): так сборка
+# снимает с образа сборочное тело и кладёт готовое обратно. Связанный клон
+# там не годится дважды: сборочное тело обязано пережить снос образа, из
+# которого выросло, а новый образ -- не зависеть от сборочного тела.
 clone)
     src="${1:?src}"; vmid="${2:?vmid}"; hostname="${3:?hostname}"
     storage="${4:?storage}"; cidr="${5:?cidr}"; gw="${6:?gw}"
-    bridge="${7:?bridge}"
+    bridge="${7:?bridge}"; full="${8:-}"
     check_vmid "$src"; check_vmid "$vmid"; check_name "$hostname"
     check_host "$src"
-    pct clone "$src" "$vmid" --hostname "$hostname" >&2 \
-        || pct clone "$src" "$vmid" --hostname "$hostname" \
-             --full 1 --storage "$storage" >&2
+    if [[ "$full" == full ]]; then
+        pct clone "$src" "$vmid" --hostname "$hostname" \
+            --full 1 --storage "$storage" >&2
+    else
+        pct clone "$src" "$vmid" --hostname "$hostname" >&2 \
+            || pct clone "$src" "$vmid" --hostname "$hostname" \
+                 --full 1 --storage "$storage" >&2
+    fi
     # Память, ядра и диск здесь не выставляются: тело наследует их от образа,
     # `pct clone` копирует конфиг целиком. Это и делает образ носителем
     # шардовых размеров — проект просит их в своём mop.yaml, сборка вписывает в
@@ -123,6 +133,20 @@ clone)
     # Адрес — другое дело: он у каждого тела свой и выводится из имени.
     pct set "$vmid" --net0 "name=eth0,bridge=$bridge,ip=$cidr,gw=$gw" >&2
     echo "$vmid"
+    ;;
+
+# Размеры сборочного тела при инкременте (#60): память и ядра -- как просит
+# манифест сегодня, диск -- только вверх. Ужать тонкий том нельзя, и это
+# названо: уменьшение диска в .mop доезжает только сборкой --fresh.
+size)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    vmid="$1"; cores="${2:?cores}"; mem="${3:?mem}"; disk="${4:?disk}"
+    pct set "$vmid" --cores "$cores" --memory "$mem" >&2
+    cur=$(pct config "$vmid" | sed -n 's/^rootfs: .*size=\([0-9]*\)G.*/\1/p')
+    if [[ -n "$cur" ]] && (( disk > cur )); then
+        pct resize "$vmid" rootfs "${disk}G" >&2
+        echo "disk ${cur}G -> ${disk}G"
+    fi
     ;;
 
 # Адрес стоящего тела: тот же net0, что ставит clone, но на теле, которое
@@ -297,6 +321,6 @@ push)
     ;;
 
 *)
-    die "no such verb ${verb:-(empty)}; available: list capacity create clone net bootstrap keys start stop template destroy exec push"
+    die "no such verb ${verb:-(empty)}; available: list capacity create clone size net bootstrap keys start stop template destroy exec push"
     ;;
 esac

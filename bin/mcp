@@ -460,8 +460,12 @@ def nodes() -> str:
     "background: the call returns at once, and a note arrives in this "
     "session when it is done, with the outcome and the log path. Needed "
     "after every change to .mop, and before the first puppet of a shard "
-    "can land on a pve node."))
-def build(origin: str = "") -> str:
+    "can land on a pve node. Incremental by default: a copy of the image "
+    "takes what changed; fresh=true builds from the base image anew. The "
+    "shard's puppets on container nodes are stopped, their bodies "
+    "destroyed and raised again from the new image — a busy one refuses "
+    "the build unless force=true."))
+def build(origin: str = "", fresh: bool = False, force: bool = False) -> str:
     if origin:
         root = None
     else:
@@ -476,7 +480,13 @@ def build(origin: str = "") -> str:
     got = image.prepare(origin, root)
     shard = got["shard"]
     log = f"/tmp/mop-build-{shard}-{os.getpid()}.log"
-    threading.Thread(target=_build_and_tell, args=(origin, got, log),
+    # Отказ по занятым папетам — здесь и сразу, а не вестью через минуту:
+    # он приходит до первого останова и ничего не меняет.
+    try:
+        image.plan_clear(image.shard_rows(shard), force)
+    except RuntimeError as e:
+        return f"build: {e}"
+    threading.Thread(target=_build_and_tell, args=(origin, got, log, fresh, force),
                      daemon=True, name=f"mop-build-{shard}").start()
     head = [f"{shard}: image build started, .mop from "
             f"{'the working copy ' + root if root else 'origin, default branch'}; "
@@ -486,7 +496,7 @@ def build(origin: str = "") -> str:
     return "\n".join(head)
 
 
-def _build_and_tell(origin, got, log):
+def _build_and_tell(origin, got, log, fresh=False, force=False):
     """Сборка в фоне и весть в сессию по завершении.
 
     Тем же путём, каким приезжают вести агентов (on_inbox): у сервера есть
@@ -496,10 +506,13 @@ def _build_and_tell(origin, got, log):
     shard = got["shard"]
     try:
         with open(log, "w") as f:
-            rc = image.bake(origin, got, out=f)
+            r = image.build(origin, got, out=f, fresh=fresh, force=force)
+        rc = r["rc"]
+        raised = ", ".join(p["name"] for p in r["gone"]) or "none"
         if rc == 0:
-            said = "; ".join(f"{n}: {w}" for n, w in image.announce(shard))
-            text = f"mop: image of {shard} built and announced — {said}"
+            said = "; ".join(f"{n}: {w}" for n, w in r["announced"])
+            text = (f"mop: image of {shard} built and announced — {said}; "
+                    f"puppets raised again from it: {raised}")
         else:
             with open(log) as f:
                 tail = "".join(f.readlines()[-15:])

@@ -446,6 +446,64 @@ def main():
             bad += 1
             print(f"FAILED  a route leaves the bodies' network {net}")
 
+    # Сборочное тело (#60). Пересборка больше не начинается со сноса образа:
+    # шаблон полностью клонируется в сборочное тело, плейбук играется там
+    # (идемпотентно — качается только новое), и лишь потом образ заменяется.
+    # Сборочное тело зовётся по шарду, чтобы оборванную сборку можно было
+    # ПРОДОЛЖИТЬ одной командой: следующий прогон находит его по имени.
+    # HYPOTHESIS: stage_name/stage_vmid/parse_list нет вовсе — образ сносится
+    # первой задачей. SOLUTION: чистые функции ниже. STATUS: FIXED — see #60
+    cases += 1
+    try:
+        sn = pve.stage_name("mop")
+        if not sn.startswith("pu-tmpl-") or driver.valid_name(sn) \
+                or sn == pve.template_name("mop"):
+            bad += 1
+            print(f"FAILED  stage name {sn!r} must be a template-like name of its own")
+    except AttributeError:
+        bad += 1
+        print("FAILED  pve.stage_name is missing")
+
+    listing = "9828 pu-rugent-1 running\n9988 pu-tmpl-rugent stopped\n"
+    cases += 1
+    try:
+        parsed = pve.parse_list(listing)
+        if parsed != [(9828, "pu-rugent-1", "running"),
+                      (9988, "pu-tmpl-rugent", "stopped")]:
+            bad += 1
+            print(f"FAILED  parse_list: {parsed!r}")
+    except AttributeError:
+        parsed = None
+        bad += 1
+        print("FAILED  pve.parse_list is missing")
+
+    if parsed is not None:
+        # Оборванная сборка: её тело стоит под именем шарда — продолжаем в нём.
+        cases += 1
+        left = parsed + [(9950, pve.stage_name("mop"), "stopped")]
+        if pve.stage_vmid("mop", left) != 9950:
+            bad += 1
+            print("FAILED  stage_vmid must resume the build body left by a previous run")
+        # Иначе — свободный номер из диапазона шаблонов, не занятый и не
+        # совпадающий с номером образа этого шарда.
+        cases += 1
+        v = pve.stage_vmid("mop", parsed)
+        taken = {vm for vm, _, _ in parsed}
+        if not pve.TMPL_MIN <= v <= pve.TMPL_MAX or v in taken \
+                or v == pve.template_vmid("mop"):
+            bad += 1
+            print(f"FAILED  stage_vmid({v}) must be a free template slot of its own")
+        # Диапазон занят целиком — громко, а не номер чужого контейнера.
+        cases += 1
+        full = [(vm, f"pu-tmpl-x{vm}", "stopped")
+                for vm in range(pve.TMPL_MIN, pve.TMPL_MAX + 1)]
+        try:
+            pve.stage_vmid("mop", full)
+            bad += 1
+            print("FAILED  stage_vmid with no free slot must refuse")
+        except RuntimeError:
+            pass
+
     # Контракт драйвера — СЛОВАРЬ, и флаг в нём ключом, а не атрибутом.
     # Модуль с атрибутом BODY_IS_NODE отдаёт только `current()`, и он про свой
     # узел; спросить про чужой можно лишь по имени, через реестр. Перепутать
