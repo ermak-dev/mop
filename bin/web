@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""pool dashboard on the web: mop web [--port N] [--bind ADDR]
+
+The same picture as `mop list`, `mop node`, `mop doctor` and `mop stat` on
+one page, refreshed in place (docs/WEB.md):
+
+  /            the page
+  /api/pool    the current snapshot as JSON
+  /events      the same snapshot pushed as server-sent events
+  /healthz     200 once the first snapshot is in
+
+Read-only by design: the page has no login, and a restart from a button
+would kill the work in a puppet's clone. Actions stay with `mop`.
+Port and bind address default to MOP_WEB_PORT (9000) and MOP_WEB_BIND.
+"""
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import lib
+from mop import bus, config, web
+
+PAGE = os.path.join(config.PROJECT, "web", "index.html")
+PING_EVERY = 15      # с: пустой кадр SSE, чтобы прокси и браузер не рвали тишину
+
+COLLECTOR = web.Collector()
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "mop-web"
+
+    def log_message(self, fmt, *args):
+        """Молчим про каждый запрос: под systemd журнал забился бы SSE-пингами.
+        Ошибки печатает log_error, и он остаётся."""
+
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        data = body if isinstance(body, bytes) else body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/":
+            # Читается на каждый запрос: правка страницы видна без рестарта,
+            # а стоит это одного файла в page cache.
+            with open(PAGE, "rb") as f:
+                return self._send(200, f.read(), "text/html; charset=utf-8")
+        if path == "/api/pool":
+            return self._send(200, json.dumps(COLLECTOR.current(), ensure_ascii=False))
+        if path == "/healthz":
+            if COLLECTOR.at is None:
+                return self._send(503, "no snapshot yet\n", "text/plain")
+            return self._send(200, "ok\n", "text/plain")
+        if path == "/events":
+            return self.stream()
+        self._send(404, "no such path\n", "text/plain")
+
+    def stream(self):
+        """SSE: снимок при подключении и на каждое изменение, пинг в тишине.
+        Соединение живёт в своём потоке; обрыв клиента — нормальный выход."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        version = 0
+        try:
+            while True:
+                got, snap = COLLECTOR.wait(version, PING_EVERY)
+                if got != version:
+                    version = got
+                    payload = json.dumps(snap or COLLECTOR.current(), ensure_ascii=False)
+                    self.wfile.write(f"event: snapshot\ndata: {payload}\n\n".encode())
+                else:
+                    self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
+
+def parse(argv):
+    port, bind = config.num("MOP_WEB_PORT"), config.get("MOP_WEB_BIND")
+    it = iter(argv)
+    for a in it:
+        if a == "--port":
+            try:
+                port = int(next(it, ""))
+            except ValueError:
+                lib.usage(__doc__)
+        elif a == "--bind":
+            bind = next(it, None) or lib.usage(__doc__)
+        else:
+            lib.usage(__doc__)
+    return port, bind
+
+
+def listen_events():
+    """Журнал шарда с шины: под кредами admin видны все шарды. Шина легла —
+    дашборд живёт опросом, а причина видна в снимке."""
+    try:
+        bus.subscribe("mop.*.events", lambda msg: COLLECTOR.event(web.journal_entry(msg)))
+    except bus.BusError as e:
+        with COLLECTOR._cond:
+            COLLECTOR.errors["events"] = str(e)
+
+
+def main(argv):
+    port, bind = parse(argv)
+    COLLECTOR.start()
+    threading.Thread(target=listen_events, daemon=True, name="mop-web-events").start()
+    srv = ThreadingHTTPServer((bind, port), Handler)
+    srv.daemon_threads = True
+    print(f"mop-web: http://{bind}:{port}/ — states every {web.STATES_EVERY}s, "
+          f"sizes every {web.SIZES_EVERY}s, usage every {web.USAGE_EVERY}s", flush=True)
+    srv.serve_forever()
+
+
+lib.run(lib.cluster(main))

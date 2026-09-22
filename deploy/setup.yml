@@ -96,3 +96,18 @@
     - ansible.builtin.include_role:
         name: bus
         tasks_from: watchdog
+
+
+# Дашборд пула (docs/WEB.md): тот же сервер, что и шина, -- машина, которая
+# включена всегда, и единственная, кроме машин операторов, где мастеру
+# положено быть. Идёт после шины и после игры сервера Nomad: креды, которые
+# роль кладёт дашборду, рождаются там.
+- name: Pool dashboard on the server
+  hosts: server
+  become: no
+  gather_facts: no
+
+  vars:
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
+  roles:
+    - web

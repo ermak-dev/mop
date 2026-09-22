@@ -824,7 +824,7 @@ def is_free(state):
 
 
 # ─── сводки для фронтендов ───────────────────────────────────────────────
-def _roster():
+def roster():
     """Ростер Nomad плюс состояние с узлов, одним заходом.
 
     Общая часть list и doctor. Раньше каждый ходил на узлы сам и платил по
@@ -875,6 +875,13 @@ def _roster():
     return items
 
 
+def rows_from(items):
+    """Строки без обмера из ростера: дашборд берёт ростер один раз и
+    кормит им и строки, и diagnose, — второй заход на узлы за теми же
+    состояниями удваивал бы нагрузку на агентов каждым кругом."""
+    return [_row(i) for i in items]
+
+
 def _row(item, disk_kb=None):
     job, alloc = item["job"], item["alloc"]
     meta = job.get("Meta") or {}
@@ -905,7 +912,7 @@ def puppet_rows_stream():
     значило бы читать медленный du как «агент молчит». Не доехало — прочерк в
     колонке, а состояние на месте.
     """
-    items = _roster()
+    items = roster()
     asked, rest = {}, []
     for i in items:
         alloc = i["alloc"]
@@ -931,11 +938,40 @@ def puppet_rows_stream():
             yield _row(by_name[name])
 
 
-def puppet_rows():
+def puppet_rows(sizes=True):
     """Папета как данные: [{name, node, alloc_status, state, llm, origin,
     disk_kb}]. disk_kb — клон плюс target, обмеряется спросом; None — du не
-    доехал, это прочерк, а не ноль."""
+    доехал, это прочерк, а не ноль.
+
+    sizes=False — без обмера вовсе: дашборд (mop/web.py) опрашивает
+    состояния в разы чаще, чем место, и ждать du на каждом круге значило бы
+    показывать состояние с опозданием на обмер. Место он берёт отдельно,
+    puppet_sizes, своим расписанием."""
+    if not sizes:
+        return sorted(rows_from(roster()), key=lambda r: r["name"])
     return sorted(puppet_rows_stream(), key=lambda r: r["name"])
+
+
+def puppet_sizes(rows, timeout=45):
+    """Обмер места по строкам puppet_rows: {имя: КБ}. Спрашиваются только
+    те, у кого бежит аллокация; кого не обмерили — в ответе нет, и это
+    прочерк у вызывающего. Легла шина — пустой ответ, не исключение: место
+    здесь не главное, а состояние уже показано."""
+    asked = {}
+    for r in rows:
+        if r["alloc_status"] == "running" and r["node"] != "-":
+            asked[r["name"]] = (r["node"], {"verb": "sizes", "names": [r["name"]]})
+    out = {}
+    try:
+        for name, answer in bus.request_stream(asked, timeout=timeout):
+            if isinstance(answer, Exception):
+                continue
+            kb = ((answer or {}).get("sizes") or {}).get(name)
+            if kb is not None:
+                out[name] = kb
+    except bus.BusError:
+        pass
+    return out
 
 
 def pool():
@@ -992,10 +1028,12 @@ def spec_is_stale(job):
                    for c in (job.get("Constraints") or []))
 
 
-def diagnose():
-    """Проблемы пула как данные: [{name, alloc, diagnosis, action}]."""
+def diagnose(items=None):
+    """Проблемы пула как данные: [{name, alloc, diagnosis, action}].
+    items — уже собранный ростер (roster), когда состояния у вызывающего
+    есть; без него собирается свой."""
     issues = []
-    for item in _roster():
+    for item in roster() if items is None else items:
         job, alloc = item["job"], item["alloc"]
         # Спека проверяется раньше состояния: папет со старой спекой может
         # выглядеть совершенно здоровым ровно до первого перепланирования.

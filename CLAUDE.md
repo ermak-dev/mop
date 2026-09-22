@@ -9,7 +9,7 @@ This file holds only what the repository cannot tell you by itself: structure
 comes from `ls`, commands from `mop` with no arguments, the reason behind a
 particular decision from the comment next to the code, subsystems from `docs/`:
 [BUS](docs/BUS.md), [CHANNEL](docs/CHANNEL.md), [MCP](docs/MCP.md),
-[GC](docs/GC.md), [DRIVER](docs/DRIVER.md).
+[GC](docs/GC.md), [DRIVER](docs/DRIVER.md), [WEB](docs/WEB.md).
 
 ## Overall structure
 
@@ -18,6 +18,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - `/deploy` — the product's installation: Nomad, the bus, the agent, the disk watchdog
  - `/setup.yaml.example` — the puppet environment example: an installation copies it to `setup.yaml`, which git ignores like `.env` and `inventory.yaml`
  - `/skills/master` — the master session's skill, symlinked from outside
+ - `/web` — the dashboard page, served by `mop web`; no build step, no dependencies
  - `/docs` — one file per subsystem
  - `/tests` — checks of pure functions, not a framework
 

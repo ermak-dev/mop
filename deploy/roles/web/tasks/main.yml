@@ -1,0 +1,94 @@
+# Дашборд пула на сервере: пакет mop, зависимости, креды мастера, юнит.
+#
+# Сервер, а не узел: дашборд читает пул как мастер — по токену Nomad и под
+# admin шины, — а узлам ни того ни другого не дают. И не машина оператора:
+# страница нужна тогда, когда мастер-шелл закрыт.
+#
+# Креды кладутся в тот же каталог, откуда их читает любой мастер
+# (~/.config/mop/servers/<адрес>/, mop/creds.py): дашборд — тот же клиент,
+# что и `mop list`, и второго способа представиться шине у него нет.
+- name: Ensure python3-pip
+  become: yes
+  ansible.builtin.apt:
+    name: python3-pip
+    state: present
+
+- name: Python dependencies of mop
+  ansible.builtin.pip:
+    name: "{{ MOP_PIP_DEPS.split(',') }}"
+    extra_args: --user --break-system-packages
+    state: present
+
+# Те же исключения, что у узла (deploy/roles/bus): .env с кредами GitLab на
+# сервер не едет, всё нужное дашборду приходит юнитом и каталогом кредов.
+- name: Sync the mop package from the control machine
+  ansible.posix.synchronize:
+    src: "{{ lookup('env', 'HOME') }}/mop/"
+    dest: "{{ MOP_HOME }}/mop/"
+    delete: yes
+    recursive: yes
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=__pycache__"
+      - "--exclude=.env"
+      - "--exclude=inventory.ini"
+      - "--exclude=inventory.yaml"
+  notify: restart mop-web
+
+- name: Credentials dir of the server, closed like the master's
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0700"
+  loop:
+    - "{{ MOP_HOME }}/.config/mop"
+    - "{{ MOP_HOME }}/.config/mop/servers"
+    - "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}"
+
+# Пароль admin — из secrets/ контроллера, тот же файл, что видит nats-server.
+- name: Bus password of the operator
+  ansible.builtin.copy:
+    src: "{{ secrets_dir }}/nats-admin.pass"
+    dest: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/nats-admin.pass"
+    mode: "0600"
+  notify: restart mop-web
+
+# Токен Nomad -- из каталога сервера на контроллере: туда его забирает игра
+# сервера Nomad (deploy/nomad), и она в site.yml идёт раньше этой.
+- name: Management token of Nomad
+  ansible.builtin.copy:
+    src: "{{ lookup('env', 'HOME') }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/bootstrap.json"
+    dest: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/bootstrap.json"
+    mode: "0600"
+  notify: restart mop-web
+
+- name: Systemd unit
+  become: yes
+  ansible.builtin.template:
+    src: mop-web.service.j2
+    dest: /etc/systemd/system/mop-web.service
+    mode: "0644"
+  notify: restart mop-web
+
+- name: Enable and start
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-web
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Apply the restart now, before the check
+  ansible.builtin.meta: flush_handlers
+
+# Прогоном, а не чтением статуса: юнит в бесконечном рестарте systemd вполне
+# устраивает. Первый снимок ждёт ростера Nomad и ответа узлов -- секунды.
+- name: The dashboard answers with a snapshot
+  ansible.builtin.uri:
+    url: "http://{{ MOP_SERVER_LAN }}:{{ MOP_WEB_PORT }}/healthz"
+    status_code: 200
+  register: web_health
+  until: web_health.status == 200
+  retries: 20
+  delay: 3
+  delegate_to: localhost

@@ -1,0 +1,8 @@
+# Рестарт дашборда: заказывают задачи роли через notify -- новый пакет,
+# новые креды, новый юнит.
+- name: restart mop-web
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-web
+    state: restarted
+    daemon_reload: yes

@@ -32,6 +32,7 @@ import os
 import shlex
 import socket
 import sys
+import time
 
 try:
     import nats
@@ -345,6 +346,7 @@ async def v_send(req):
         "--wait", wait), timeout=wait + 20)
     if out.get("error"):
         return out
+    await _event("send", name, text=f"from {req.get('from_name', 'mop')}")
     if req.get("notify") and not wait:
         # Куда отвечать, говорит сам мастер: инбокс адресуется мастером, а не
         # шардом, иначе два терминала в одном проекте получали бы вести друг
@@ -371,6 +373,7 @@ async def _watch_idle(name, reply_to):
     state = r.get("state")
     await _tell_master(reply_to, f"mop: puppet {name} — {state}" if state
                        else f"mop: {name} did not report idle within {IDLE_WAIT}s")
+    await _event("idle", name, text=state or f"no idle within {IDLE_WAIT}s")
 
 
 async def _tell_master(reply_to, text):
@@ -379,6 +382,27 @@ async def _tell_master(reply_to, text):
     try:
         await _conn.publish(reply_to, json.dumps(
             {"node": node_name(), "text": text}, ensure_ascii=False).encode())
+    except Exception:
+        pass
+
+
+async def _event(kind, name=None, **fields):
+    """Запись в журнал шарда (mop.<шард>.events, #66).
+
+    Агент публикует то, что делает сам: доставил сообщение, дождался
+    простоя, напечатал команду, снёс тело, поднялся. Смену состояния внутри
+    сессии он не видит — её по-прежнему спрашивает мастер, — но по этим
+    событиям дашборд сдвигает опрос вперёд и держит журнал. Шард берётся у
+    самого папета, а не из субъекта запроса: оператор пишет из admin, а
+    событие принадлежит проекту. Отказ — тишина: журнал вторичен, и ронять
+    глагол из-за него нельзя."""
+    if _conn is None:
+        return
+    shard = await puppet_shard(name) if name else bus.ADMIN
+    try:
+        await _conn.publish(bus.events(shard), json.dumps(
+            {"event": kind, "node": node_name(), "name": name, "shard": shard,
+             "at": time.time(), **fields}, ensure_ascii=False).encode())
     except Exception:
         pass
 
@@ -422,6 +446,8 @@ async def v_wipe(req):
         return {"error": driver.bad_name(name)}
     if await tmux_alive(name):
         return {"error": f"{name}: tmux session is alive — stop the job first"}
+    # Событие до сноса: после него origin клона спрашивать уже не у кого.
+    await _event("wipe", name)
     return await DRIVER.destroy(name)
 
 
@@ -455,6 +481,7 @@ async def v_type(req):
                                       f"sleep 2; tmux -L {name} capture-pane -p -t {name}")
     if code not in (0, None):
         return {"error": out.strip() or f"tmux exit {code}"}
+    await _event("type", name, text=command)
     return {"screen": out}
 
 
@@ -649,6 +676,7 @@ async def serve():
     await _conn.subscribe("mop.*.all.msg", cb=on_msg)
     print(f"mop-agent: node {node}, subscribed to mop.*.node.{node}.rpc|msg "
           f"and mop.*.all.msg", flush=True)
+    await _event("up", text=f"agent on {node}")
     await asyncio.Event().wait()
 
 
