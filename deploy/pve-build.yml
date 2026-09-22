@@ -51,7 +51,7 @@
             sys.path.insert(0, sys.argv[1])
             from mop.driver import pve
             print(pve.template_vmid(sys.argv[2]), pve.template_name(sys.argv[2]),
-                  pve.GATEWAY, pve.PREFIXLEN)
+                  pve.GATEWAY, pve.PREFIXLEN, pve.template_address(sys.argv[2]))
           - "{{ playbook_dir }}/.."
           - "{{ mop_shard }}"
       delegate_to: localhost
@@ -64,9 +64,8 @@
         tmpl_name: "{{ tmpl.stdout.split()[1] }}"
         pve_gw: "{{ tmpl.stdout.split()[2] }}"
         pve_cidr: "{{ tmpl.stdout.split()[3] }}"
+        tmpl_ip: "{{ tmpl.stdout.split()[4] }}"
 
-    # Адрес сборочного тела — шлюз плюс один. Живые тела стоят с него же, но
-    # выше: address_of начинает с сети + 2, и пересечься им негде.
     # Размеры тела: чего просит проект (mop.yaml), но не выше потолка этой
     # машины. Просит чужой репозиторий, а решает узел, на котором тело будет
     # стоять, — иначе манифест это не настройка, а способ занять гипервизор.
@@ -92,10 +91,6 @@
              (body_mem | int < (mop_shard_asks.MOP_MEM_MB | default(0) | int)
               or body_disk | int < (mop_shard_asks.MOP_DISK_GB | default(0) | int)
               or body_cores | int < (mop_shard_asks.MOP_CORES | default(0) | int)) else '' }}
-
-    - name: Its address while it is being built
-      ansible.builtin.set_fact:
-        tmpl_ip: "{{ '.'.join(pve_gw.split('.')[0:3]) }}.{{ pve_gw.split('.')[3] | int + 1 }}"
 
     - name: A temporary key for reaching the body from here
       ansible.builtin.command:

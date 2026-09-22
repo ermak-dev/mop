@@ -347,6 +347,39 @@ def main():
         bad += 1
         print("FAILED  pve.projects_dir must point inside the body")
 
+    # Адрес сборочного тела обязан быть СВОИМ у каждого шарда и не задевать
+    # живые тела. Раньше он считался как «шлюз плюс один» одинаково для всех,
+    # и это ловилось не отказом, а зависанием: две сборки на одном
+    # гипервизоре садились на один адрес, ssh уходил в чужой контейнер, обе
+    # стороны оставались живыми и молчали (22.09, rugent против rudesktop).
+    shards = ("rugent", "cloudpub", "mop", "rudesktop", "a", "zzz")
+    cases += 1
+    if len({pve.template_address(s) for s in shards}) != len(shards):
+        bad += 1
+        print("FAILED  two shards share one build address")
+
+    # Диапазоны не пересекаются по построению: VMID шаблонов идут выше VMID
+    # тел, и адрес считается из VMID одной формулой. Проверяем края — именно
+    # там прежний «шлюз плюс один» и совпадал с первым живым телом.
+    cases += 1
+    body_addrs = {pve.address_of_vmid(v) for v in (pve.BODY_MIN, pve.BODY_MAX)}
+    tmpl_addrs = {pve.address_of_vmid(v) for v in (pve.TMPL_MIN, pve.TMPL_MAX)}
+    if body_addrs & tmpl_addrs:
+        bad += 1
+        print("FAILED  build addresses overlap live bodies")
+
+    # И адрес обязан быть настоящим адресом этой сети, не шлюзом: выехавший
+    # за подсеть адрес не отказывает, он просто не отвечает.
+    import ipaddress as _ip
+    net = _ip.ip_network(pve.SUBNET)
+    for sh in shards:
+        cases += 1
+        addr = _ip.ip_address(pve.template_address(sh))
+        if addr not in net or str(addr) == pve.GATEWAY:
+            bad += 1
+            print(f"FAILED  build address of {sh} is {addr}, outside {net} "
+                  f"or equal to the gateway")
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 
