@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Пул mop</title>
+<title>Master Of Puppet</title>
+<link rel="icon" type="image/png" href="/logo.png">
 <!--
   Дашборд пула (docs/WEB.md). Одна страница без сборки и без зависимостей:
   в deploy/ нет node-тулчейна, и npm-сборка ради статуса была бы именно им.
@@ -33,9 +34,9 @@
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   main { max-width: 1200px; margin: 0 auto; padding: 16px; }
   header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px 20px; margin-bottom: 12px; }
-  header h1 { font-size: 20px; margin: 0; font-weight: 600; }
-  header .fresh { color: var(--mute); }
-  header .fresh.stale { color: var(--sick); font-weight: 600; }
+  header h1 { font-size: 20px; margin: 0; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+  header .logo { height: 28px; width: 28px; }
+  @media (prefers-color-scheme: dark) { header .logo { filter: invert(1); } }
   .chips { display: flex; flex-wrap: wrap; gap: 8px; }
   .chip { padding: 2px 10px; border-radius: 999px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .chip.free { background: var(--free-bg); color: var(--free); }
@@ -81,9 +82,8 @@
 <body>
 <main>
   <header>
-    <h1>Пул mop</h1>
+    <h1><img class="logo" src="/logo.png" alt="">Master Of Puppet</h1>
     <div class="chips" id="chips"></div>
-    <div class="fresh" id="fresh">подключение…</div>
   </header>
   <div class="errors" id="errors"></div>
 
@@ -122,10 +122,8 @@
   const hhmm = (ts) => ts ? new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : "-";
   const KINDS = ["free", "busy", "sick", "silent", "down"];
   // Корзины считает mop/web.py, здесь только их имена для человека.
-  const KIND_RU = {free: "свободен", busy: "занят", sick: "болен", silent: "агент молчит", down: "не бежит"};
+  const KIND_RU = {free: "свободен", busy: "занят", sick: "болен", silent: "агент молчит", down: "не работает"};
   const plural = (n, one, few, many) => { const m = n % 100, d = n % 10; return n + " " + (m > 10 && m < 20 ? many : d === 1 ? one : d > 1 && d < 5 ? few : many); };
-
-  let snap = null;
 
   function table(head, rows, cls) {
     if (!rows.length) return '<div class="empty">пусто</div>';
@@ -134,7 +132,6 @@
   }
 
   function render(s) {
-    snap = s;
     const c = s.counts;
     $("chips").innerHTML = `<span class="chip total">${plural(c.puppets, "папет", "папета", "папетов")}</span>`
       + KINDS.map(k => c[k] ? `<span class="chip ${k}">${c[k]} ${KIND_RU[k]}</span>` : "").join("");
@@ -177,18 +174,7 @@
     $("journal").innerHTML = j.length
       ? `<ul>${j.map(e => `<li><span class="t">${hhmm(e.at)}</span><span class="e">${esc(e.event)}</span>${esc(e.name)} <span class="t">на ${esc(e.node)}, шард ${esc(e.shard)}</span> ${esc(e.text)}</li>`).join("")}</ul>`
       : '<div class="empty">событий пока нет — агенты пишут send, idle, type, wipe и свой запуск</div>';
-    tick();
   }
-
-  // Свежесть считается на странице: снимок несёт время сборки, а не возраст.
-  function tick() {
-    if (!snap || !snap.at) return;
-    const age = Math.max(0, Math.round(Date.now() / 1000 - snap.at));
-    const el = $("fresh");
-    el.textContent = `обновлено ${age} с назад`;
-    el.classList.toggle("stale", age > 60);
-  }
-  setInterval(tick, 1000);
 
   // SSE, а при обрыве — опрос: EventSource сам переподключается, но пока
   // сервер лежит, страница обязана хоть что-то показывать.
@@ -200,7 +186,7 @@
   function connect() {
     const es = new EventSource("/events");
     es.addEventListener("snapshot", (e) => { render(JSON.parse(e.data)); if (polling) { clearInterval(polling); polling = null; } });
-    es.onerror = () => { $("fresh").textContent = "переподключение…"; poll(); };
+    es.onerror = () => poll();
   }
   fetch("/api/pool").then(r => r.json()).then(render).catch(() => {});
   connect();

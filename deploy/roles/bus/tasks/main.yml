@@ -84,12 +84,13 @@
     PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
   changed_when: false
 
+# Только владелец: режим ~/.config -- дело машины, а не наш. Первый прогон
+# с явным 0755 ослабил 0700 на двух узлах.
 - name: Credentials dir
   become: yes
   ansible.builtin.file:
     path: "{{ MOP_HOME }}/.config"
     state: directory
-    mode: "0755"
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
 

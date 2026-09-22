@@ -52,7 +52,7 @@
 
 | Корзина | Когда |
 |---|---|
-| `down` | аллокация не бежит (pending, lost, queued, ошибка ростера) — спрашивать некого |
+| `down` | аллокация не работает (pending, lost, queued, ошибка ростера) — спрашивать некого |
 | `silent` | `AGENT SILENT`: молчит узел, не папет; лечения с мастера нет |
 | `free` | `puppets.is_free`: в клоне нет несохранённой работы |
 | `sick` | `HUNG`, `needs action`, `not logged in`, `login expired`, `no model quota`, `error` |
