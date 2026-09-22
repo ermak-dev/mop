@@ -281,11 +281,17 @@ def run_argv(name):
     Keepalive по той же причине: за NAT узла молчащее соединение однажды
     выпадет из таблицы, и врапер будет считать папета живым, разговаривая с
     дырой."""
-    return ["ssh", *_SSH_OPTS,
+    # Переопределения ПЕРЕД общим списком: у ssh побеждает первая
+    # встреченная опция (ssh_config(5)), и `ControlMaster=no` после `auto`
+    # не действовал — врапер молча мультиплексировался через мастер-сокет
+    # агента и умирал с ним при каждом рестарте юнита (#72). Проверка
+    # порядка в tests/driver.py.
+    return ["ssh",
             "-o", "ControlMaster=no",
             "-o", "ControlPath=none",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
+            *_SSH_OPTS,
             f"{USER}@{address_of(name)}"]
 
 
