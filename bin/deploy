@@ -28,6 +28,14 @@ link() {
 # --extra-vars. Плейбуки .env не читают сами: на узлах его нет (rsync
 # исключает -- там креды GitLab), а два способа добраться до одних значений
 # однажды разойдутся.
+# До первого `mop config`: тот импортирует клиент шины и без nats-py
+# завершает процесс словами про pip, а не про то, что машина не настроена.
+# Зависимости контроллера ставит mop setup, и отказ его называет.
+if ! command -v ansible-playbook >/dev/null; then
+    fail "no ansible-playbook on this machine -- run mop setup"
+    exit 1
+fi
+
 SETTINGS="$("$BIN_DIR/mop" config --json)"
 
 # Полный REQUIRED спрашивает только deploy: остальным командлетам хватает
@@ -58,13 +66,6 @@ shards_json() {
     "$BIN_DIR/mop" shards "$@" \
         | python3 -c "import json,sys; print(json.dumps({'mop_shards': [l.strip() for l in sys.stdin if l.strip()]}))"
 }
-
-# Без ansible прогон падал бы на «command not found» посреди вывода
-# настроек; зависимости контроллера ставит mop setup, и отказ его называет.
-if ! command -v ansible-playbook >/dev/null; then
-    fail "no ansible-playbook on this machine -- run mop setup"
-    exit 1
-fi
 
 if [[ ! -f "$INVENTORY" ]]; then
     fail "no inventory $INVENTORY -- create it from the example: cp inventory.yaml.example inventory.yaml"
