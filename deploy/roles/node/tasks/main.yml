@@ -44,7 +44,6 @@
     state: directory
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
-    mode: "0755"
 
 - name: SSH dir of the pool user
   ansible.builtin.file:
