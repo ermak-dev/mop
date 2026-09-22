@@ -14,8 +14,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop import image  # noqa: E402
 
-GOT = {"shard": "proj", "asks": {"MOP_MEM_MB": "2048"}, "alien": [],
-       "node_tasks": None, "ws_vars": None, "ws_tasks": "/tmp/x/ws-tasks.yml"}
+# В образ едет только sandbox (#61): bootstrap играется при старте песочницы
+# сервером, и в сборке ему делать нечего.
+GOT = {"shard": "proj", "asks": {"MOP_MEM_MB": "2048"}, "alien": [], "legacy": [],
+       "sandbox_vars": None, "sandbox_tasks": "/tmp/x/sandbox-tasks.yml",
+       "bootstrap_vars": "/tmp/x/bootstrap-vars.yml",
+       "bootstrap_tasks": "/tmp/x/bootstrap-tasks.yml"}
 
 
 def main():
@@ -23,7 +27,7 @@ def main():
     extra = image.extra_vars("git@h:g/proj.git", GOT)
     want = {"mop_shard": "proj", "mop_origin": "git@h:g/proj.git",
             "mop_shard_asks": {"MOP_MEM_MB": "2048"},
-            "mop_shard_tasks": "/tmp/x/ws-tasks.yml"}
+            "mop_shard_tasks": "/tmp/x/sandbox-tasks.yml"}
     if extra != want:
         failed += 1
         print(f"FAIL extra_vars: {extra} != {want}")

@@ -34,10 +34,11 @@ def extra_vars(origin, got):
     живой сборкой (#26), держится tests/image.py."""
     extra = {"mop_shard": got["shard"], "mop_origin": origin,
              "mop_shard_asks": got["asks"]}
-    if got["ws_vars"]:
-        extra["mop_shard_vars"] = got["ws_vars"]
-    if got["ws_tasks"]:
-        extra["mop_shard_tasks"] = got["ws_tasks"]
+    # В образ едет только песочница (#61): bootstrap играется при старте.
+    if got["sandbox_vars"]:
+        extra["mop_shard_vars"] = got["sandbox_vars"]
+    if got["sandbox_tasks"]:
+        extra["mop_shard_tasks"] = got["sandbox_tasks"]
     return extra
 
 

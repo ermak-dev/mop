@@ -45,39 +45,17 @@
           become: yes
       loop: "{{ (MOP_BODY_EXTRA | default('')).split(',') | select | list }}"
 
-# Что проект просит от узла (#32): задачи .mop/node.yaml каждого шарда,
-# вырезанные на управляющей машине из его origin. Без отсечки по драйверу:
-# узловое нужно узлу всегда, даже если папет в нём не живёт (симметрия
-# сеянию git-ключа в роли node). Общего узлового в продукте уже хватает —
-# у большинства проектов этой половины нет вовсе, и игра пуста.
-- name: What each shard's manifest asks of this node
-  hosts: puppet
-  become: yes
-  gather_facts: no
-
-  tasks:
-    - name: No shard has node tasks
-      ansible.builtin.meta: end_host
-      when: (mop_manifests | default({}))
-             | dict2items | selectattr('value.node_tasks', 'defined')
-             | list | length == 0
-
-    - name: Node tasks of each shard that has them
-      ansible.builtin.include_tasks: "{{ item.value.node_tasks }}"
-      loop: "{{ mop_manifests | dict2items | selectattr('value.node_tasks', 'defined') | list }}"
-      loop_control:
-        label: "{{ item.key }}"
-
-# Что проекту нужно в теле (#25/#27/#32): vars и tasks его
-# .mop/workspace.yaml. Файлы подготовлены на управляющей машине из origin
-# (bin/deploy) — плейбук не парсит сам и второго разбора не заводит.
-# Копирование файлов — задачами копирования самого манифеста: формат ansible
-# декларативен, и отдельных конвенций транспорту не нужно.
+# Что проект печёт в свою песочницу (#61): vars и tasks его
+# .mop/sandbox.yaml. На узле-гипервизоре это делает сборка образа
+# (deploy/pve-build.yml); здесь — узлы, где тело равно узлу, и потому играется
+# то же самое на самой машине при deploy. Файлы подготовлены на управляющей
+# машине из origin (bin/deploy) — плейбук не парсит сам и второго разбора не
+# заводит.
 #
-# Секреты в задачах остаются секретами: src — путь на управляющей машине,
-# в git их по-прежнему нет. А вот задачи исполняются от root: узел доверяет
-# репозиториям, чьи origin'ы в памяти шардов, — запи
-- name: What each shard's manifest adds to a body
+# Задачи исполняются от root: узел доверяет репозиториям, чьи origin'ы в
+# памяти шардов. bootstrap.yaml проекта здесь не играется вовсе: его время —
+# каждый старт песочницы, и играет его сервер (#62).
+- name: What each shard's sandbox adds to a body
   hosts: puppet
   become: yes
   gather_facts: no
@@ -87,25 +65,25 @@
       ansible.builtin.meta: end_host
       when: mop_driver | default(MOP_DRIVER) != 'host'
 
-    - name: No shard has workspace tasks
+    - name: No shard has sandbox tasks
       ansible.builtin.meta: end_host
       when: (mop_manifests | default({}))
-             | dict2items | selectattr('value.ws_tasks', 'defined')
+             | dict2items | selectattr('value.sandbox_tasks', 'defined')
              | list | length == 0
 
     # Сначала конфигурация всех, потом задачи всех: у include_vars нет охвата
     # на один include, и переменные проектов живут в одном словаре узла.
     # Совпавшее имя между проектами перебивается по порядку — единственная
     # цена простоты; имена в vars манифеста — внутреннее дело проекта.
-    - name: Workspace configuration of each shard that has one
+    - name: Sandbox configuration of each shard that has one
       ansible.builtin.include_vars:
-        file: "{{ item.value.ws_vars }}"
-      loop: "{{ mop_manifests | dict2items | selectattr('value.ws_vars', 'defined') | list }}"
+        file: "{{ item.value.sandbox_vars }}"
+      loop: "{{ mop_manifests | dict2items | selectattr('value.sandbox_vars', 'defined') | list }}"
       loop_control:
         label: "{{ item.key }}"
 
-    - name: Workspace tasks of each shard that has any
-      ansible.builtin.include_tasks: "{{ item.value.ws_tasks }}"
-      loop: "{{ mop_manifests | dict2items | selectattr('value.ws_tasks', 'defined') | list }}"
+    - name: Sandbox tasks of each shard that has any
+      ansible.builtin.include_tasks: "{{ item.value.sandbox_tasks }}"
+      loop: "{{ mop_manifests | dict2items | selectattr('value.sandbox_tasks', 'defined') | list }}"
       loop_control:
         label: "{{ item.key }}"

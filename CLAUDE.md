@@ -16,7 +16,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - `/mop` — the library: returns data, prints nothing
  - `/bin` — commandlets, one subcommand per file; they are the only thing that prints
  - `/deploy` — the product's installation: Nomad, the bus, the agent, the disk watchdog
- - `/setup.yaml.example` — the puppet environment example: an installation copies it to `setup.yaml`, which git ignores like `.env` and `inventory.yaml`
+ - `/sandbox.yaml.example` — the puppet environment example: an installation copies it to `sandbox.yaml`, which git ignores like `.env` and `inventory.yaml`
  - `/skills/master` — the master session's skill, symlinked from outside
  - `/web` — the dashboard page, served by `mop web`; no build step, no dependencies
  - `/docs` — one file per subsystem
@@ -39,7 +39,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** Three sources, one question each: `.env` answers for the installation, the inventory for the machine, `config.SETTINGS` holds the defaults. `.env` never reaches a node — what the node must know is listed in `config.NODE_SCOPED` and rendered by `mop deploy` into `~/.config/mop/node.env`. A node-side setting written anywhere else silently does not arrive
  - **MUST** A value specific to this machine is a setting whose default equals today's value, never a literal in the code
  - **MUST** A required setting with no sensible default goes in `config.REQUIRED`: silently walking into someone else's LAN is worse than a loud refusal
- - **MUST NOT** Nothing a specific project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is the installation's own `setup.yaml` and the projects' `.mop/workspace.yaml`
+ - **MUST NOT** Nothing a specific project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is the installation's own `sandbox.yaml` and the projects' `.mop/sandbox.yaml` (baked) and `.mop/bootstrap.yaml` (played at every start)
  - **MUST** A shard is a project, and there is one definition: `puppets.shard_of`, the origin's basename without `.git`; puppet names are built from it too
  - **MUST** Two layers: Nomad decides where a puppet stands, the bus decides how to talk to it. The Nomad token lives on the server and, through `mop join`, on operators' machines; it never reaches a node
  - **MUST** The server is the ansible controller and the operator's machine is not in the inventory: it gets the server's credentials with `mop join` into `~/.config/mop/servers/[address]/`, and `MOP_SERVER_LAN` in the environment retargets a master at another server
