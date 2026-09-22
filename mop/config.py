@@ -97,10 +97,11 @@ DEFAULTS = {
     "MOP_POOL_DC": "home",
     "MOP_NOMAD_DATA": os.path.expanduser("~/nomad/data"),
     "MOP_NOMAD_VERSION": "1.10.5",
-    # Откуда качать бинарь Nomad. Дефолт — официальные релизы; установке в
-    # стране, откуда releases.hashicorp.com недоступен, нужно зеркало, и это
-    # значение установки, а не литерал продукта.
-    "MOP_NOMAD_MIRROR": "https://releases.hashicorp.com",
+    # Откуда качать бинарь Nomad: путь /nomad/<версия>/nomad_<версия>_linux_amd64.zip
+    # от этого корня. Дефолт — зеркало, которое отвечает из сети этой
+    # установки; официальный https://releases.hashicorp.com отсюда не
+    # отвечает и остаётся переопределением в .env.
+    "MOP_NOMAD_MIRROR": "https://mirror.yandex.ru/mirrors/releases.hashicorp.com",
     "MOP_NATS_PORT": "4222",
     "MOP_NOMAD_PORT": "4646",       # HTTP API: туда ходит мастер
     "MOP_NOMAD_RPC_PORT": "4647",   # RPC: туда дозваниваются клиенты Nomad
