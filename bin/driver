@@ -5,7 +5,8 @@
   mop driver list                bodies standing on this node — no Nomad needed
   mop driver run <name>          raise the body and run the puppet inside it
   mop driver sweep [--dry]       destroy bodies with no puppet left in them
-  mop driver build <shard|origin> bake the shard's image on the hypervisors
+  mop driver build [shard|origin] bake the shard's image on the hypervisors;
+                                 no argument: this working copy, .mop as it lies
 
 `run` is what the job spec calls. The outer wrapper is driver-agnostic because
 Nomad picks the node only after the spec is registered, so the master cannot
@@ -192,14 +193,29 @@ def v_build(argv):
 
     Сборкой, а не подъёмом из базового образа на месте: падение плейбука видно
     при сборке, а не в три часа ночи внутри врапера. Дальше каждое тело —
-    клон шаблона, на lvm-thin связанный и мгновенный."""
-    if len(argv) != 1:
+    клон шаблона, на lvm-thin связанный и мгновенный.
+
+    Без аргумента — эта рабочая копия, и `.mop` берётся из её файлов как
+    лежат, без коммита и без push (#46): правку манифеста пробуют образом, а
+    не влитием в master. Зеркало в образ по-прежнему снимается с origin —
+    тела клонируют репозиторий, не копию. С аргументом — дефолтная ветка
+    origin, как в deploy: там нет рабочей копии, которая сказала бы иначе."""
+    if len(argv) > 1:
         lib.usage(__doc__)
-    origin = origin_of(argv[0])
+    if argv:
+        origin, root = origin_of(argv[0]), None
+    else:
+        origin = lib.cwd_origin(required=False)
+        if not origin:
+            sys.exit("not a git working copy and no shard given: "
+                     "mop driver build <shard|origin>")
+        root = lib.git("rev-parse", "--show-toplevel")
     shard = os.path.basename(origin).removesuffix(".git")
     settings = json.dumps({k: v for k, (v, _) in config.effective().items()},
                           ensure_ascii=False)
-    got = shard_manifest(origin, shard)
+    got = shard_manifest(origin, shard, root)
+    print(f"  {shard}/.mop read from "
+          f"{'this working copy' if root else 'origin, default branch'}")
     for k, v in sorted(got["asks"].items()):
         print(f"  {shard}/.mop/node.yaml asks for {k}={v}")
     for k in got["alien"]:
@@ -225,12 +241,13 @@ def v_build(argv):
     return rc
 
 
-def shard_manifest(origin, shard):
-    """Манифесты проекта из его origin — дорога за ними живёт в библиотеке
-    (mop/manifest.py): у неё двое вызывающих, эта сборка и deploy, и одно
-    определение. Здесь только перевод громкого отказа в выход."""
+def shard_manifest(origin, shard, root=None):
+    """Манифесты проекта: из рабочей копии root, если она есть, иначе из его
+    origin. Дорога за ними живёт в библиотеке (mop/manifest.py): у неё двое
+    вызывающих, эта сборка и deploy, и одно определение. Здесь только
+    перевод громкого отказа в выход."""
     try:
-        return manifest.fetch(origin)
+        return manifest.fetch_tree(root, shard) if root else manifest.fetch(origin)
     except RuntimeError as e:
         sys.exit(str(e))
 
