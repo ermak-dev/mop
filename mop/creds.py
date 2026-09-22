@@ -74,6 +74,35 @@ def token(directory):
         return None
 
 
-def files_for(shards):
-    """Что `mop join` везёт с сервера: своё и только своё."""
-    return ([pass_file(None)] + [pass_file(s) for s in shards] + [TOKEN_FILE])
+def make_dir(dest):
+    """Каталог сервера и его родитель закрыты от всех: там пароли. mode у
+    makedirs действует только на последний уровень, поэтому явно."""
+    os.makedirs(dest, mode=0o700, exist_ok=True)
+    for d in (os.path.dirname(dest), dest):
+        os.chmod(d, 0o700)
+
+
+def pick(listing):
+    """Что из secrets/ сервера едет мастеру: своё и только своё. Один отбор
+    для контроллера (collect) и для `mop join` — иначе на одной машине
+    оператор видел бы больше, чем на другой."""
+    return sorted(n for n in listing
+                  if n == pass_file(None)
+                  or (n.startswith("nats-master-") and n.endswith(".pass")))
+
+
+def collect(secrets_dir, token_file, dest):
+    """Собрать каталог сервера на самом контроллере: он тоже машина
+    оператора, и после `mop deploy` на нём всё должно работать без join.
+    -> имена положенных файлов."""
+    import shutil
+    make_dir(dest)
+    names = pick(os.listdir(secrets_dir))
+    for n in names:
+        shutil.copyfile(os.path.join(secrets_dir, n), os.path.join(dest, n))
+    if os.path.exists(token_file):
+        shutil.copyfile(token_file, os.path.join(dest, TOKEN_FILE))
+        names.append(TOKEN_FILE)
+    for n in names:
+        os.chmod(os.path.join(dest, n), 0o600)
+    return names

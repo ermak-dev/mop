@@ -15,10 +15,15 @@ is indistinguishable from origin.
 You can run as many masters as you like, including several for one project:
 an inbox is addressed by master, not by shard, so they never get confused.
 
-All this command does is work out the shard, find its credentials, and exec
+All this command does is work out the shard, check its credentials, and exec
 into claude. From there the slice is inherited: mop mcp, spawned by this
-session as a child, sees MOP_SHARD and MOP_BUS_CONFIG and subscribes to its
-shard's inbox.
+session as a child, sees MOP_SHARD, builds the shard's bus credentials from
+the server's directory (mop/creds.py) and subscribes to its shard's inbox.
+
+No ansible on this machine: the credentials arrive with `mop join <server>`,
+the server itself is named by MOP_SERVER_LAN (the environment outranks .env,
+so one variable retargets the master at another pool), and the /master skill
+is linked from here.
 
 The pool server arrives as an ARGUMENT, not from a directory config. The
 master sits in a working copy of its own project, while the `.mcp.json` that
@@ -49,6 +54,25 @@ import os
 
 import lib
 from mop import config, puppets
+
+SKILL = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                     "skills", "master")
+SKILL_LINK = os.path.expanduser("~/.claude/skills/master")
+
+
+# Скилл /master -- интерфейс мастер-сессии, как ~/bin/mop. Сам он живёт в
+# репозитории, снаружи только симлинк: правка через ~/.claude попадала бы в
+# тот же файл, но проходила бы мимо истории. Ставим здесь, а не плейбуком:
+# машина оператора ansible не видит.
+def link_skill():
+    if os.path.realpath(SKILL_LINK) == SKILL:
+        return
+    os.makedirs(os.path.dirname(SKILL_LINK), exist_ok=True)
+    if os.path.lexists(SKILL_LINK):
+        os.remove(SKILL_LINK)
+    os.symlink(SKILL, SKILL_LINK)
+    print(f"skill /master -> {SKILL}")
+
 
 # --strict-mcp-config не добавляем: у оператора есть свои серверы, и мастер-шелл
 # не повод их отбирать.
@@ -91,18 +115,20 @@ def main(argv):
                   f"Pass claude options that take a value after --: "
                   f"mop master -- {' '.join(passthru + [origin])}")
     shard = puppets.shard_of(origin)
-    creds = lib.shard_creds(shard)
-    if not os.path.exists(creds):
+    if not lib.shard_ready(shard):
         # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS,
         # и папет к шине не подключится. Говорим прямо, а не запускаем ansible
-        # за спиной оператора: на узел ведёт одна дорога, и это deploy.
-        lib.usage(f"no credentials for shard {shard} ({creds}).\n"
-                  f"Set up the shard: mop deploy {origin}")
+        # за спиной оператора: на узел ведёт одна дорога, и это deploy на
+        # сервере; сюда его плоды привозит join.
+        lib.usage(f"no credentials for shard {shard} on this machine.\n"
+                  f"Set up the shard on the server: mop deploy {origin}, "
+                  f"then bring its credentials here: mop join <server>")
+    link_skill()
 
     # Профиль тот же, что у папетов, но источник ключа другой: не узловой
     # secrets.env, а местный .env — общее с `mop code`, в lib.session_env.
     _, session = lib.session_env(profile)
-    env = dict(os.environ, MOP_SHARD=shard, MOP_BUS_CONFIG=creds, **session)
+    env = dict(os.environ, MOP_SHARD=shard, **session)
     print(f"master of shard {shard} ({origin}) [{profile}]"
           + (f" + claude {' '.join(passthru)}" if passthru else ""))
     os.execvpe("claude", ["claude", "--dangerously-skip-permissions",
