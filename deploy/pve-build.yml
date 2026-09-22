@@ -305,9 +305,11 @@
       delegate_to: localhost
       become: no
 
+    # Список один на узел, тело и `mop setup` (mop/deps.py), приезжает
+    # --extra-vars от `mop deploy`.
     - name: Python dependencies of a puppet
       ansible.builtin.pip:
-        name: [nats-py, mcp, python-nomad, requests]
+        name: "{{ MOP_PIP_DEPS.split(',') }}"
         extra_args: --user --break-system-packages
         state: present
 

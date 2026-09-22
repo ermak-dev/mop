@@ -47,8 +47,7 @@ def bake(origin, got, out=None):
     out — куда писать вывод плейбука: файл (MCP пишет в журнал и присылает
     хвост вестью) либо None (терминал видит прогон живьём). Инвентарь — из
     окружения, его ставит диспетчер `mop` для всех командлетов."""
-    settings = json.dumps({k: v for k, (v, _) in config.effective().items()},
-                          ensure_ascii=False)
+    settings = json.dumps(config.playbook_vars(), ensure_ascii=False)
     return subprocess.call(
         ["ansible-playbook", "-i", os.environ["INVENTORY"], PLAYBOOK,
          "--extra-vars", settings,
