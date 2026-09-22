@@ -1,0 +1,24 @@
+[Unit]
+Description=mop-routes (дорога с сервера к телам папетов на гипервизорах)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# По блоку на каждый кусок сети тел: гипервизор, его база VMID, его адрес.
+# Ставит deploy/pve.yml из того, что назвали сами гипервизоры; править
+# руками незачем, следующий прогон перепишет.
+{% for h in pve_hops %}
+{% for cidr in hostvars[h].pve_routes %}
+ExecStart=/usr/sbin/ip route replace {{ cidr }} via {{ hostvars[h].pve_lan }}
+{% endfor %}
+{% endfor %}
+{% for h in pve_hops %}
+{% for cidr in hostvars[h].pve_routes %}
+ExecStop=-/usr/sbin/ip route del {{ cidr }} via {{ hostvars[h].pve_lan }}
+{% endfor %}
+{% endfor %}
+
+[Install]
+WantedBy=multi-user.target

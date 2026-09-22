@@ -167,6 +167,35 @@ def cidr_of(name):
     return f"{address_of(name)}/{PREFIXLEN}"
 
 
+def routes_of(subnet, base):
+    """Маршруты к телам гипервизора с этой базой VMID: [CIDR], покрывающие
+    ровно адреса его диапазона — тела и шаблоны, base..base+999 (#59).
+
+    Тела стоят за NAT узла, и дорога к ним снаружи одна — через сам узел:
+    FORWARD пропускает в обе стороны, MASQUERADE трогает только исходящие,
+    и серверу не хватает ровно маршрута. Покрытие точное, а не «вся сеть
+    через этот узел»: сеть одна и плоская, а гипервизоров может быть
+    несколько, и маршруты двух узлов не должны налезать друг на друга.
+    Отсюда summarize_address_range — минимальный набор выровненных блоков,
+    без лишнего адреса с обеих сторон.
+
+    Аргументы явные, а не настройки модуля: считается на управляющей
+    машине за КАЖДЫЙ гипервизор с ЕГО базой и сетью (deploy/pve.yml), а
+    модуль читает настройки той машины, где импортирован."""
+    net = ipaddress.ip_network(subnet)
+    first = net.network_address + base
+    last = net.network_address + base + 999
+    if last >= net.broadcast_address:
+        raise ValueError(f"vmid base {base} does not fit the bodies' network "
+                         f"{subnet}: lower MOP_PVE_VMID_BASE or widen MOP_PVE_SUBNET")
+    return [str(n) for n in ipaddress.summarize_address_range(first, last)]
+
+
+def routes():
+    """То же для этого узла."""
+    return routes_of(SUBNET, _BASE)
+
+
 # ─── доступ в тело ───────────────────────────────────────────────────────
 # accept-new, а не ask: тело поднимается без человека, и вопрос про ключ
 # хоста запарковал бы врапер навсегда. Пересозданное тело меняет ключ, поэтому

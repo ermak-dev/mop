@@ -1,0 +1,62 @@
+# Сервер: маршруты к телам каждого гипервизора (#59). Играется по группе
+# server второй игрой deploy/pve.yml, после того как гипервизоры назвали свои
+# адреса и блоки (main.yml).
+#
+# Юнитом systemd, а не строкой в /etc/network: у сервера может быть любой
+# сетевой стек (ifupdown, networkd, NM), а `ip route replace` идемпотентен
+# при любом из них и переживает перезагрузку вместе с юнитом. Маршрут,
+# добавленный руками 22.09, живёт до перезагрузки — он не замена этому.
+#
+# Это ЗАПИСАННОЕ РЕШЕНИЕ о доступе, а не побочное следствие маршрута:
+# прямая дорога из локалки к телу идёт мимо агента — единственного места,
+# где проверяется шардирование, — и ровно от этого отказались для
+# постоянного ключа мастера в образе (deploy/pve-build.yml). Маршрут даёт
+# только СЕТЬ; войти в тело он не даёт: в телах PasswordAuthentication no,
+# вход по ключу, а ключей в образе — только узла. Серверу дорога нужна
+# ради bootstrap'а песочниц (#62) и диагностики.
+- name: Hypervisors that announced their slice of the bodies' network
+  ansible.builtin.set_fact:
+    pve_hops: >-
+      {{ groups['puppet'] | map('extract', hostvars)
+         | selectattr('pve_routes', 'defined')
+         | map(attribute='inventory_hostname') | list }}
+
+- name: The routes, as a unit that survives a reboot
+  ansible.builtin.template:
+    src: mop-routes.service.j2
+    dest: /etc/systemd/system/mop-routes.service
+    mode: "0644"
+  register: routes_unit
+  when: pve_hops | length > 0
+
+- name: Apply them now
+  ansible.builtin.systemd:
+    name: mop-routes
+    enabled: yes
+    state: "{{ 'restarted' if routes_unit.changed else 'started' }}"
+    daemon_reload: yes
+  when: pve_hops | length > 0
+
+# Гипервизоров нет — юнита нет: пул без тел не держит маршрутов в никуда.
+- name: No hypervisors, no routes
+  ansible.builtin.systemd:
+    name: mop-routes
+    enabled: no
+    state: stopped
+  failed_when: false
+  when: pve_hops | length == 0
+
+- name: Drop the unit with them
+  ansible.builtin.file:
+    path: /etc/systemd/system/mop-routes.service
+    state: absent
+  when: pve_hops | length == 0
+
+# Проверка прогоном, а не чтением юнита: маршрут в таблице — единственное,
+# что здесь имеет значение.
+- name: The server reaches each hypervisor's slice through it
+  ansible.builtin.command: "ip -4 route get {{ hostvars[item].pve_routes[0].split('/')[0] }}"
+  loop: "{{ pve_hops }}"
+  register: route_check
+  changed_when: false
+  failed_when: "('via ' ~ hostvars[item].pve_lan) not in route_check.stdout"

@@ -18,3 +18,17 @@
     - name: What a Proxmox node must be
       ansible.builtin.include_role:
         name: pve
+
+# Дорога с сервера к телам (#59): маршруты к куску сети каждого гипервизора
+# через его адрес в локалке. Отдельной игрой по группе server, потому что
+# гипервизоры только что назвали свои адреса и блоки — здесь их собирают.
+- name: Routes from the server to the bodies
+  hosts: server
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: What the server must route to
+      ansible.builtin.include_role:
+        name: pve
+        tasks_from: server
