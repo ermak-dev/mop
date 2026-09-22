@@ -126,18 +126,22 @@ def argv(playbook, address, user, key, settings, shard, name, clone, tasks, of_v
     сервера. Ключ хоста не спрашивается и не помнится: тело пересоздаётся и
     приезжает с новым, а известного заранее у сервера нет — цена названа
     (сеть тел — локальная за NAT узла, и дорога в неё только с сервера)."""
+    # Всё одним JSON'ом, и это не вкус: голое `-e k=v` со значением в
+    # несколько слов ansible режет по пробелам на несколько пар, и до ssh
+    # доезжало одно `-o` («no argument after keyword -o», первый живой прогон).
     extra = {"mop_shard": shard, "mop_puppet": name, "mop_clone": clone,
-             "mop_bootstrap_tasks": tasks}
+             "mop_bootstrap_tasks": tasks,
+             "ansible_user": user,
+             "ansible_ssh_private_key_file": key,
+             "ansible_ssh_common_args": "-o StrictHostKeyChecking=no "
+                                        "-o UserKnownHostsFile=/dev/null "
+                                        "-o IdentitiesOnly=yes -o ConnectTimeout=10 "
+                                        "-o LogLevel=ERROR"}
     if of_vars:
         extra["mop_bootstrap_vars"] = of_vars
     return ["ansible-playbook", "-i", f"{address},", playbook,
             "-e", json.dumps(settings, ensure_ascii=False),
-            "-e", json.dumps(extra, ensure_ascii=False),
-            "-e", f"ansible_user={user}",
-            "-e", f"ansible_ssh_private_key_file={key}",
-            "-e", "ansible_ssh_common_args=-o StrictHostKeyChecking=no "
-                  "-o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes "
-                  "-o ConnectTimeout=10 -o LogLevel=ERROR"]
+            "-e", json.dumps(extra, ensure_ascii=False)]
 
 
 # ─── сервер ──────────────────────────────────────────────────────────────
