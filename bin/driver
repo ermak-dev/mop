@@ -15,7 +15,6 @@ node that owns it.
 """
 import asyncio
 import base64
-import json
 import os
 import shlex
 import signal
@@ -23,7 +22,7 @@ import subprocess
 import sys
 
 import lib
-from mop import bus, config, driver, manifest, nomad, puppets
+from mop import bus, driver, image, puppets
 from mop.render import table
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
@@ -203,10 +202,10 @@ def v_build(argv):
             sys.exit("not a git working copy and no shard given: "
                      "mop driver build <shard|origin>")
         root = lib.git("rev-parse", "--show-toplevel")
-    shard = puppets.shard_of(origin)
-    settings = json.dumps({k: v for k, (v, _) in config.effective().items()},
-                          ensure_ascii=False)
-    got = shard_manifest(origin, shard, root)
+    # Дорога сборки живёт в библиотеке (mop/image.py): у неё двое
+    # вызывающих, этот командлет и инструмент build в MCP. Здесь печать.
+    got = image.prepare(origin, root)
+    shard = got["shard"]
     print(f"  {shard}/.mop read from "
           f"{'this working copy' if root else 'origin, default branch'}")
     for k, v in sorted(got["asks"].items()):
@@ -215,34 +214,11 @@ def v_build(argv):
         # Громко: проглоченный ключ -- это либо настройка, которая не
         # сработала, либо чужая, которая сработала.
         print(f"  {shard}/.mop: {k} is not a project's to set — ignored")
-    # None-половины не передаём вообще, а не как null: `default('')` в
-    # условиях плейбука не подменяет определённый None, и len(None) ронял
-    # сборку шарда без vars (rugent: только задачи). Поймано живой сборкой.
-    extra = {"mop_shard": shard, "mop_origin": origin,
-             "mop_shard_asks": got["asks"]}
-    if got["ws_vars"]:
-        extra["mop_shard_vars"] = got["ws_vars"]
-    if got["ws_tasks"]:
-        extra["mop_shard_tasks"] = got["ws_tasks"]
-    rc = subprocess.call(
-        ["ansible-playbook", "-i", os.environ["INVENTORY"],
-         os.path.join(config.PROJECT, "deploy", "pve-build.yml"),
-         "--extra-vars", settings,
-         "--extra-vars", json.dumps(extra)])
+    rc = image.bake(origin, got)
     if rc == 0:
-        announce(shard)
+        for node, what in image.announce(shard):
+            print(f"  {node}: {what}")
     return rc
-
-
-def shard_manifest(origin, shard, root=None):
-    """Манифесты проекта: из рабочей копии root, если она есть, иначе из его
-    origin. Дорога за ними живёт в библиотеке (mop/manifest.py): у неё двое
-    вызывающих, эта сборка и deploy, и одно определение. Здесь только
-    перевод громкого отказа в выход."""
-    try:
-        return manifest.fetch_tree(root, shard) if root else manifest.fetch(origin)
-    except RuntimeError as e:
-        sys.exit(str(e))
 
 
 def origin_of(arg):
@@ -265,31 +241,6 @@ def origin_of(arg):
     sys.exit(f"don't know where shard {arg} comes from: it has no puppets and "
              f"this working copy is a different project.\n"
              f"Name it outright: mop driver build <git-origin>")
-
-
-def announce(shard):
-    """Сказать кластеру, что образ этого шарда на узлах собран.
-
-    Без этого планировщик про образ не знает, и папет шарда на узел не сядет —
-    ограничение в спеке смотрит именно на этот перечень. Отдельным шагом после
-    плейбука, а не задачей в нём: токен Nomad есть только у управляющей машины,
-    и тащить его в плейбук, который ходит на узлы, значит вернуть то, ради чего
-    заводили шину.
-
-    Пишем после успешной сборки: объявить образ, которого нет, — это папет,
-    висящий pending, и ровно тот отказ, от которого ограничение и заводилось."""
-    for name, meta in nomad.nodes_meta().items():
-        if meta.get("mop_driver", driver.DEFAULT) == driver.DEFAULT:
-            continue          # узел общего назначения объявляет any и так
-        # Перечень берём с узла: серверная копия отстаёт на секунды, и
-        # дописать к устаревшей значит стереть ранее объявленные образы.
-        dyn = nomad.node_dynamic_meta(name)
-        have = [s for s in (dyn.get("mop_shards") or "").split(",") if s]
-        if shard in have:
-            print(f"  {name}: image of {shard} already announced")
-            continue
-        nomad.set_node_meta(name, {"mop_shards": ",".join(sorted(have + [shard]))})
-        print(f"  {name}: now serves {', '.join(sorted(have + [shard]))}")
 
 
 VERBS = {"list": v_list, "run": v_run, "sweep": v_sweep, "build": v_build}

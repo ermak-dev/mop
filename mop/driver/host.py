@@ -14,6 +14,7 @@ tmux-сокет в `/tmp/tmux-<uid>`, файл сессии в `~/.claude/sessio
 гипервизор: поведение обязано не измениться, и сравнивать надо с ним самим.
 """
 import os
+import socket
 
 from .. import config
 from . import (HOME, PREFIX, bad_name, clone_dir, sh, target_dir, valid_name,
@@ -69,16 +70,41 @@ async def destroy(name):
     return {"reset": True, "target": target}
 
 
+def _server_alive(path):
+    """Отвечает ли сервер tmux на этом сокете.
+
+    Проверка соединением, а не запуском `tmux has-session`: перечисление тел
+    зовут в горячих местах (ростер узла, раздача логина), и процесс на каждый
+    сокет там лишний. Мёртвый сокет отказывает сразу, живой принимает
+    соединение и тут же его закрывает — серверу это ничего не стоит."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        return s.connect_ex(path) == 0
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 async def bodies():
     """Папета, у которых на этом узле есть тело, — по сокетам tmux-серверов.
 
     Ростер без Nomad. У драйвера host «тело есть» означает ровно «сервер tmux
     поднят»: отдельного объекта, который можно было бы перечислить, здесь нет.
-    """
+
+    Сокет переживает свой сервер, и одного его наличия мало. Пока здесь
+    стоял голый listdir, узел объявлял телами файлы, оставшиеся от папетов
+    месячной давности: на управляющей машине их набралось четырнадцать — от
+    29 августа до 20 сентября, ни одного живого сервера, ни одного клона в
+    ~/puppets. Уборка (`mop sweep`) честно прочитала их как сирот и
+    попыталась снести несуществующие рабочие копии. Сами файлы безобидны:
+    замерено, что tmux поднимает сервер на мёртвом сокете и переиспользует
+    его, — поэтому их не убирают, их просто не считают телами."""
     try:
-        return sorted(n for n in os.listdir(TMUX_DIR) if n.startswith(PREFIX))
+        names = [n for n in os.listdir(TMUX_DIR) if n.startswith(PREFIX)]
     except OSError:
         return []
+    return sorted(n for n in names if _server_alive(os.path.join(TMUX_DIR, n)))
 
 
 async def capacity():

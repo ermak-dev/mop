@@ -262,6 +262,27 @@ async def bodies():
     return sorted(n for n in names if valid_name(n))
 
 
+async def templates():
+    """Сборочные тела и образы этого гипервизора: [{name, vmid, running}].
+
+    Не тела папетов: `bodies()` их отсеивает, потому что имя шаблона не
+    проходит valid_name, и это верно — папета в них нет. Но мусор из них
+    выходит настоящий: запечатанный образ всегда СТОИТ, значит работающее
+    тело с именем шаблона — это либо сборка прямо сейчас, либо сборка,
+    которую оборвали. Различить их отсюда нечем, поэтому глагол только
+    перечисляет; решает тот, кто знает, идёт ли сборка."""
+    out, code = await _pve("list", timeout=60)
+    if code not in (0, None):
+        return []
+    found = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1].startswith(f"{PREFIX}tmpl-"):
+            found.append({"name": parts[1], "vmid": parts[0],
+                          "running": parts[2] == "running"})
+    return sorted(found, key=lambda t: t["name"])
+
+
 async def capacity():
     """Память гипервизора и место в хранилище тел.
 
