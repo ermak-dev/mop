@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """delete a puppet: mop delete <name>
 
-The clone stays on the node and gets reused if the puppet is brought up
-again.
+Where the body is the node itself, the clone stays and is reused if a puppet
+of that name comes back. Where the body is a container, it goes with the
+puppet: the clone lives inside it, and a body nobody owns is a running
+container holding memory and disk.
 """
 import lib
-from mop import nomad, puppets
+from mop import puppets
 
 
 def main(argv):
@@ -13,8 +15,13 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     lib.guard(name)
-    nomad.deregister(name)
-    print(f"deleted {name} (clone left at {puppets.clone_dir(name)} on the node)")
+    r = puppets.delete(name)
+    if r["body"] == "destroyed":
+        print(f"deleted {name} (body gone from {r['node']})")
+    elif r["body"] == "kept":
+        print(f"deleted {name} (clone left at {puppets.clone_dir(name)} on {r['node']})")
+    else:
+        print(f"deleted {name} (no allocation — nothing to clean up)")
 
 
 lib.run(lib.cluster(main))
