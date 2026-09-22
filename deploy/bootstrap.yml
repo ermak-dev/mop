@@ -1,0 +1,34 @@
+---
+# Bootstrap песочницы папета (#62, docs/BOOTSTRAP.md): играет СЕРВЕР по
+# запросу узла при каждом старте — `mop bootstrap serve` зовёт этот плейбук
+# с инвентарём из одной машины по адресу (тело либо узел, где тело равно
+# узлу), под пользователем пула, ключом сервера.
+#
+# Здесь только рамка: задачи и конфигурация — файлы шарда, которые сервер
+# держит в ~/.config/mop/bootstrap/ (кладут `mop deploy` из origin, `mop add`
+# и `mop bootstrap push` из рабочей копии мастера). От root, как и задачи
+# песочницы: пул доверяет репозиториям своих шардов; что трогает дом
+# пользователя пула, называет его явно (become_user).
+#
+# Переменные прогона: mop_shard, mop_puppet, mop_clone (путь клона папета),
+# плюс настройки установки (MOP_HOME, MOP_USER, …).
+#
+# Run:  сервером, из mop/bootstrap.py; руками — незачем.
+
+- name: Bootstrap of a puppet's sandbox
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Wait for sshd inside the sandbox
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: The shard's bootstrap configuration, when it has one
+      when: mop_bootstrap_vars is defined
+      ansible.builtin.include_vars:
+        file: "{{ mop_bootstrap_vars }}"
+
+    - name: The shard's bootstrap tasks
+      ansible.builtin.include_tasks: "{{ mop_bootstrap_tasks }}"

@@ -1,0 +1,112 @@
+# Bootstrap песочниц на сервере (#62, docs/BOOTSTRAP.md): ansible, файлы
+# шардов, юнит подписчика. Идёт после дашборда: пакет mop и креды оператора
+# на сервер привозит роль web, и здесь они уже лежат.
+#
+# Сервер, а не узел и не машина оператора: bootstrap играется при КАЖДОМ
+# старте песочницы, в том числе когда Nomad перезапускает аллокацию сам, а
+# мастера нет вовсе; сервер — машина, которая включена всегда, и у неё
+# есть дорога к телам (#59).
+- name: Ansible, to play a shard's bootstrap into a sandbox
+  become: yes
+  ansible.builtin.apt:
+    name: ansible
+    state: present
+
+- name: Where the shards' bootstraps live
+  become: yes
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop/bootstrap"
+    state: directory
+    mode: "0700"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+
+# Файлы шардов из origin (дефолтная ветка), вырезанные на управляющей
+# машине (bin/deploy, mop_manifests). Мастер кладёт свою рабочую копию
+# поверх (`mop add`, `mop bootstrap push`) — deploy её не бережёт: origin
+# и есть правда прогона, а рабочая копия — решение мастера до следующего.
+- name: Bootstrap tasks of each shard that has them
+  become: yes
+  ansible.builtin.copy:
+    src: "{{ item.value.bootstrap_tasks }}"
+    dest: "{{ MOP_HOME }}/.config/mop/bootstrap/{{ item.key }}-tasks.yml"
+    mode: "0600"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+  loop: "{{ mop_manifests | default({}) | dict2items | selectattr('value.bootstrap_tasks', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Bootstrap configuration of each shard that has one
+  become: yes
+  ansible.builtin.copy:
+    src: "{{ item.value.bootstrap_vars }}"
+    dest: "{{ MOP_HOME }}/.config/mop/bootstrap/{{ item.key }}-vars.yml"
+    mode: "0600"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+  loop: "{{ mop_manifests | default({}) | dict2items | selectattr('value.bootstrap_vars', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+# Проект убрал bootstrap — сервер не играет вчерашний.
+- name: No stale bootstrap for a shard that has none
+  become: yes
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop/bootstrap/{{ item.0 }}-{{ item.1 }}.yml"
+    state: absent
+  loop: "{{ (mop_shards | default([])) | difference(mop_manifests | default({}) | dict2items | selectattr('value.bootstrap_tasks', 'defined') | map(attribute='key') | list) | product(['tasks', 'vars']) | list }}"
+  loop_control:
+    label: "{{ item.0 }}-{{ item.1 }}"
+
+# Тот же rsync, что у дашборда (роль web), и дубль осознанный по тому же
+# доводу, что у роли bus: игра, которая запускает подписчика, обязана
+# привезти его код сама и перезапустить его, когда код сменился. Второй
+# прогон по уже привезённому — пустой.
+- name: Sync the mop package from the control machine
+  ansible.posix.synchronize:
+    src: "{{ lookup('env', 'HOME') }}/mop/"
+    dest: "{{ MOP_HOME }}/mop/"
+    delete: yes
+    recursive: yes
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=__pycache__"
+      - "--exclude=.env"
+      - "--exclude=inventory.ini"
+      - "--exclude=inventory.yaml"
+  notify: restart mop-bootstrap
+
+- name: Systemd unit
+  become: yes
+  ansible.builtin.template:
+    src: mop-bootstrap.service.j2
+    dest: /etc/systemd/system/mop-bootstrap.service
+    mode: "0644"
+  notify: restart mop-bootstrap
+
+- name: Enable and start
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-bootstrap
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Apply the restart now, before the check
+  ansible.builtin.meta: flush_handlers
+
+# Прогоном, а не чтением статуса: юнит в реконнекте systemd устраивает, а
+# папет тем временем не поднимется — узел ждёт ответа, которого нет.
+- name: The service answers on the bus
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.command: "{{ MOP_HOME }}/mop/bin/mop bootstrap check"
+  environment:
+    MOP_SERVER_LAN: "{{ MOP_SERVER_LAN }}"
+    MOP_NATS_PORT: "{{ MOP_NATS_PORT }}"
+  register: boot_check
+  until: boot_check.rc == 0
+  retries: 10
+  delay: 3
+  changed_when: false

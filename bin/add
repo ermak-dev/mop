@@ -9,7 +9,7 @@ import os
 import time
 
 import lib
-from mop import config, nomad, puppets
+from mop import bootstrap, bus, config, nomad, puppets
 
 
 def main(argv):
@@ -26,6 +26,16 @@ def main(argv):
         lib.usage(f"shard {shard} isn't on the bus yet.\nSet it up: mop deploy {origin}")
     name = puppets.next_name(shard)
     lib.push_llm_keys(profile)
+    # bootstrap.yaml рабочей копии — на сервер ДО регистрации (#62): первый
+    # подъём обязан увидеть его. Из рабочей копии, потому что решает мастер;
+    # нет файла — сервер держит то, что положил deploy из origin.
+    if not args and os.path.exists(bootstrap.FILE):
+        try:
+            got = bootstrap.push_from(os.getcwd(), shard)
+            print(f"  {bootstrap.FILE}: on the server, {got.get('tasks', 0)} task(s)"
+                  + (f"; ignored: {', '.join(got['alien'])}" if got.get("alien") else ""))
+        except bus.BusError as e:
+            print(f"  {bootstrap.FILE} did not reach the server: {e}")
     nomad.register(puppets.job_spec(name, origin, profile))
     print(f"{name}: {origin} [{profile}]")
 

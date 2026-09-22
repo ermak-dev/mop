@@ -1,0 +1,293 @@
+"""Bootstrap песочницы: .mop/bootstrap.yaml проекта играет СЕРВЕР при каждом
+старте песочницы (#62).
+
+До этого манифест при подъёме не играл никто: единственным механизмом было
+копирование env-файлов врапером по PU_SEED, и оно глотало отказ. Решение
+оператора 22.09 — играть сервером, ценой времени холодного старта ради
+гибкости настройки окружения. Четыре решения внутри, каждое названо:
+
+  ansible на сервере   ставит роль deploy/roles/bootstrap; сервер — та
+                       машина, которая включена всегда, и у неё есть
+                       дорога к телам (#59);
+  ключ в тело          у сервера свой ключ (~/.ssh/mop-bootstrap), и в
+                       образе его НЕТ: узел впускает его в тело на время
+                       bootstrap'а (admit) и выпускает после — постоянный
+                       ключ был бы второй дорогой к телу мимо агента, то
+                       есть мимо единственной проверки шардирования. На
+                       узле, где тело равно узлу, ключ лежит в
+                       authorized_keys пользователя пула постоянно: у
+                       сервера-контроллера дорога на узел и так есть;
+  хранение файла       ~/.config/mop/bootstrap/<шард>-{tasks,vars}.yml на
+                       сервере. Кладут заранее: `mop deploy` — из origin
+                       (дефолтная ветка) всем шардам, `mop add` и
+                       `mop bootstrap push` — из рабочей копии мастера.
+                       Слать в момент старта нельзя: Nomad перезапускает
+                       аллокации сам, когда мастера может не быть вовсе;
+  триггер              узел на старте зовёт сервер (mop.<шард>.server.rpc,
+                       глагол bootstrap) и ЖДЁТ ответа, прежде чем открыть
+                       tmux. Отказ — это отказ: врапер выходит ненулём,
+                       Nomad перезапускает, ростер показывает падение.
+                       Папет не поднимается «наполовину».
+
+Что теряется, названо: файл из рабочей копии мастера — не из дефолтной
+ветки origin. Решает мастер, и это приемлемо; из клона папета файл не едет
+никогда — на host-узле это было бы исполнение с рабочей ветки в общем теле.
+
+Потолок времени: bootstrap идёт и при лечении залипшего папета (doctor
+--fix, restart). Держать в секундах; тяжёлое — в sandbox.yaml.
+
+Обе половины в одном файле, как у драйвера: узел (run) и сервер (serve)
+— одно решение. Узловая половина живёт stdlib'ом плюс шиной.
+"""
+import asyncio
+import json
+import os
+import shlex
+import socket
+import subprocess
+import sys
+import time
+
+from . import bus, config, driver
+
+# На сервере: файлы шардов и ключ к телам.
+ROOT = os.path.expanduser("~/.config/mop/bootstrap")
+KEY = os.path.expanduser("~/.ssh/mop-bootstrap")
+PLAYBOOK = os.path.join(config.PROJECT, "deploy", "bootstrap.yml")
+# На узле: публичная часть ключа сервера, её кладёт `mop deploy`.
+PUB_ON_NODE = f"{driver.HOME}/.config/mop/bootstrap.pub"
+# Файл проекта, из которого `mop add` и `mop bootstrap push` шлют текст.
+FILE = ".mop/bootstrap.yaml"
+# Сколько узел ждёт сервер. Больше «секунд», чтобы прогон с загрузкой не
+# срывался на ровном месте; меньше — чтобы висящий сервер читался отказом,
+# а не молчащим папетом.
+TIMEOUT = 300
+
+
+# ─── хранение на сервере ─────────────────────────────────────────────────
+def files_of(root, shard):
+    """(задачи, конфигурация) шарда — пути или None, если нет."""
+    tasks = os.path.join(root, f"{shard}-tasks.yml")
+    of_vars = os.path.join(root, f"{shard}-vars.yml")
+    return (tasks if os.path.exists(tasks) else None,
+            of_vars if os.path.exists(of_vars) else None)
+
+
+def store(root, shard, text):
+    """Положить bootstrap шарда: text — содержимое .mop/bootstrap.yaml, пусто
+    — снять (проект убрал файл, сервер не должен играть вчерашний).
+    -> {tasks, vars, alien}; кривая форма — ValueError с именем шарда.
+
+    Просьбы о размерах (SHARD_SCOPED) здесь не на месте — они дело
+    песочницы — и идут в alien по имени, а не глотаются."""
+    tasks_path = os.path.join(root, f"{shard}-tasks.yml")
+    vars_path = os.path.join(root, f"{shard}-vars.yml")
+    if not text.strip():
+        for p in (tasks_path, vars_path):
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+        return {"tasks": 0, "vars": 0, "alien": []}
+    try:
+        mvars, tasks = config.manifest(text)
+    except ValueError as e:
+        raise ValueError(f"{shard}/{FILE}: {e}")
+    asks, mine, alien = config.manifest_parts(mvars)
+    alien = sorted(set(alien) | set(asks))
+    import yaml
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    for path, what in ((tasks_path, tasks), (vars_path, mine)):
+        if what:
+            with open(path, "w") as f:
+                yaml.safe_dump(what, f, allow_unicode=True, default_flow_style=False)
+        else:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+    return {"tasks": len(tasks), "vars": len(mine), "alien": alien}
+
+
+def refusal(req, shard):
+    """Почему запрос узла не годится, либо None. Шард — из субъекта (его
+    держат права NATS), имя — из тела: узел, представившийся своим
+    субъектом, не может попросить сыграть чужой bootstrap в своё тело."""
+    name = req.get("name") or ""
+    if not driver.valid_name(name):
+        return driver.bad_name(name)
+    if driver.shard_of_name(name) != shard:
+        return f"puppet {name} is not in shard {shard}"
+    return None
+
+
+def argv(playbook, address, user, key, settings, shard, name, clone, tasks, of_vars):
+    """Аргументы прогона: одна машина по адресу, пользователь пула, ключ
+    сервера. Ключ хоста не спрашивается и не помнится: тело пересоздаётся и
+    приезжает с новым, а известного заранее у сервера нет — цена названа
+    (сеть тел — локальная за NAT узла, и дорога в неё только с сервера)."""
+    extra = {"mop_shard": shard, "mop_puppet": name, "mop_clone": clone,
+             "mop_bootstrap_tasks": tasks}
+    if of_vars:
+        extra["mop_bootstrap_vars"] = of_vars
+    return ["ansible-playbook", "-i", f"{address},", playbook,
+            "-e", json.dumps(settings, ensure_ascii=False),
+            "-e", json.dumps(extra, ensure_ascii=False),
+            "-e", f"ansible_user={user}",
+            "-e", f"ansible_ssh_private_key_file={key}",
+            "-e", "ansible_ssh_common_args=-o StrictHostKeyChecking=no "
+                  "-o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes "
+                  "-o ConnectTimeout=10 -o LogLevel=ERROR"]
+
+
+# ─── сервер ──────────────────────────────────────────────────────────────
+def play(req, shard):
+    """Сыграть bootstrap шарда в песочницу папета. -> {ok, played, ...}.
+    Нет файла — ok без прогона: большинству проектов хватает общего."""
+    tasks, of_vars = files_of(ROOT, shard)
+    if not tasks:
+        return {"ok": True, "played": False, "text": f"no bootstrap for {shard}"}
+    name = req["name"]
+    cmd = argv(PLAYBOOK, req.get("address") or "", config.get("MOP_USER"), KEY,
+               config.playbook_vars(), shard, name, driver.clone_dir(name),
+               tasks, of_vars)
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT - 10,
+                           env={**os.environ, "ANSIBLE_CONFIG": os.path.join(config.PROJECT, "ansible.cfg")})
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "played": True, "rc": None,
+                "seconds": round(time.time() - t0, 1),
+                "tail": f"bootstrap of {name} did not finish in {TIMEOUT - 10}s — "
+                        f"keep bootstrap.yaml in seconds, bake the heavy part into sandbox.yaml"}
+    tail = "\n".join((r.stdout + r.stderr).splitlines()[-25:])
+    return {"ok": r.returncode == 0, "played": True, "rc": r.returncode,
+            "seconds": round(time.time() - t0, 1), "tail": tail}
+
+
+def _shards_here():
+    try:
+        return sorted({n.rsplit("-", 1)[0] for n in os.listdir(ROOT)
+                       if n.endswith("-tasks.yml")})
+    except FileNotFoundError:
+        return []
+
+
+async def _handle(msg):
+    try:
+        req = json.loads(msg.data.decode())
+    except ValueError:
+        req = {}
+    parts = msg.subject.split(".")
+    shard = parts[1] if len(parts) > 1 else ""
+    verb = req.get("verb")
+    try:
+        if verb == "ping":
+            out = {"ok": True, "shards": _shards_here()}
+        elif verb == "bootstrap":
+            why = refusal(req, shard)
+            if why:
+                out = {"error": why}
+            else:
+                # В отдельном потоке: прогон идёт секунды, а петля обязана
+                # отвечать остальным.
+                out = await asyncio.get_running_loop().run_in_executor(
+                    None, play, req, shard)
+        elif verb == "put":
+            got = store(ROOT, shard, req.get("text") or "")
+            out = {"ok": True, **got}
+        else:
+            out = {"error": f"no such verb {verb}; available: ping, bootstrap, put"}
+    except Exception as e:
+        out = {"error": f"{verb}: {e}"}
+    print(f"{shard}.{verb} {req.get('name', '')}: "
+          f"{out.get('error') or ('ok' if out.get('ok') else out)}"
+          + (f" in {out['seconds']}s" if out.get("seconds") is not None else ""),
+          flush=True)
+    if not out.get("ok", True):
+        print(out.get("tail", ""), flush=True)
+    try:
+        await msg.respond(json.dumps(out, ensure_ascii=False).encode())
+    except Exception:
+        pass
+
+
+async def serve():
+    """Подписчик сервера. Креды — оператора (admin): сервер слушает все
+    шарды, и своего файла кредов у него нет — тот же каталог, что у
+    дашборда (mop/creds.py)."""
+    import nats
+    c = bus.config()
+    nc = await nats.connect(**bus.auth(c), name="mop-bootstrap",
+                            allow_reconnect=True, max_reconnect_attempts=-1,
+                            reconnect_time_wait=2)
+
+    async def on_rpc(msg):
+        asyncio.create_task(_handle(msg))
+
+    await nc.subscribe(bus.server_subject("*"), cb=on_rpc)
+    print(f"mop-bootstrap: subscribed to {bus.server_subject('*')}, "
+          f"files in {ROOT}: {', '.join(_shards_here()) or 'none'}", flush=True)
+    await asyncio.Event().wait()
+
+
+# ─── узел ────────────────────────────────────────────────────────────────
+def toward_server():
+    """Адрес этого узла со стороны сервера — тот, с которого узел сам ходит
+    на сервер. Нужен узлу, где тело равно узлу: серверу надо куда-то
+    прийти. Без сети: соединение UDP ничего не шлёт, только выбирает
+    маршрут."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((config.get("MOP_SERVER_LAN"), 1))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
+def run(d, name, shard):
+    """Bootstrap песочницы папета с этого узла: впустить сервер, позвать,
+    дождаться, выпустить. -> ответ сервера; отказ — RuntimeError/BusError.
+
+    Зовётся из `mop driver run` до внутреннего врапера. Дверь закрывается в
+    любом исходе: ключ сервера в теле живёт ровно столько, сколько идёт
+    bootstrap."""
+    if d.BODY_IS_NODE:
+        address, pub = toward_server(), None
+    else:
+        address = d.address_of(name)
+        try:
+            with open(PUB_ON_NODE) as f:
+                pub = f.read().strip()
+        except FileNotFoundError:
+            raise RuntimeError(f"no server key on this node ({PUB_ON_NODE}) — "
+                               f"run mop deploy")
+        r = asyncio.run(d.admit(name, pub))
+        if r.get("error"):
+            raise RuntimeError(f"cannot let the server into the body: {r['error']}")
+    try:
+        bus.connect(bus.NODE_FILE)
+        out = bus.ask_server("bootstrap", timeout=TIMEOUT, shard=shard,
+                             name=name, address=address)
+    finally:
+        if pub is not None:
+            asyncio.run(d.admit(name, None))
+    if out.get("error"):
+        raise RuntimeError(out["error"])
+    if not out.get("ok"):
+        raise RuntimeError(f"bootstrap failed (ansible exit {out.get('rc')}):\n"
+                           f"{out.get('tail', '')}")
+    return out
+
+
+# ─── мастер ──────────────────────────────────────────────────────────────
+def push_from(root, shard):
+    """Отправить .mop/bootstrap.yaml рабочей копии root на сервер под шардом.
+    -> ответ сервера, либо None, если файла в рабочей копии нет: тогда
+    сервер держит то, что положил deploy, и трогать это незачем."""
+    path = os.path.join(root, FILE)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        text = f.read()
+    return bus.ask_server("put", shard=shard, text=text)

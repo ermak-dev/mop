@@ -21,6 +21,8 @@
     mop.<шард>.master.<id>.inbox   агент И папет -> конкретный мастер
     mop.<шард>.master.all.inbox    опрос: кто из мастеров шарда жив
     mop.<шард>.events              журнал шарда
+    mop.<шард>.server.rpc          сервер: bootstrap песочницы (узел зовёт
+                                   при старте), put (мастер кладёт файл)
 
 `admin` — не шард, а его отсутствие: так ходит оператор из обычного шелла.
 Узловой здесь только `disk`: место на хосте — факт про всех его жильцов.
@@ -161,9 +163,9 @@ async def _on_error(e):
     _last_error = str(e)
 
 
-async def _aconnect():
+async def _aconnect(file=None):
     return await nats.connect(
-        **auth(config()), name="mop", error_cb=_on_error,
+        **auth(config(file)), name="mop", error_cb=_on_error,
         # Молча копить неотправленное в ожидании сервера — худший вид отказа:
         # вызывающий получит успех, которого не было.
         allow_reconnect=True, max_reconnect_attempts=-1,
@@ -171,15 +173,19 @@ async def _aconnect():
     )
 
 
-def connect():
+def connect(file=None):
     """Соединение процесса. Ленивое: фронтенды, которым шина не нужна
-    (`mop add`, `mop delete`), не должны падать от её недоступности."""
+    (`mop add`, `mop delete`), не должны падать от её недоступности.
+
+    file — чьи креды: узел из процесса задачи Nomad (`mop driver run`)
+    представляется своим узловым файлом, а не каталогом сервера, которого
+    на узле нет."""
     global _conn
     with _lock:
         if _conn is not None and not _conn.is_closed:
             return _conn
         try:
-            _conn = _call(_aconnect(), 10)
+            _conn = _call(_aconnect(file), 10)
         except BusError:
             raise
         except Exception as e:
@@ -224,6 +230,13 @@ def inbox(master_id, shard=None):
 
 def events(shard=None):
     return f"mop.{shard or SHARD}.events"
+
+
+def server_subject(shard=None):
+    """Сервер как адресат (#62): bootstrap песочниц и хранение их файлов.
+    Первый токен — шард, как у всех: узел пишет за папета своего шарда,
+    мастер — за свой проект, а права NATS делят так же, как везде."""
+    return f"mop.{shard or SHARD}.server.rpc"
 
 
 # ─── запросы ─────────────────────────────────────────────────────────────
@@ -289,6 +302,14 @@ def ask(master_id, verb, timeout=TIMEOUT, shard=None, **fields):
     return _ask(inbox(master_id, shard), f"master {master_id}",
                 f"master {master_id} is not on the bus: session closed or the address "
                 f"isn't its own — see mcp__mop__agents",
+                verb, timeout, **fields)
+
+
+def ask_server(verb, timeout=TIMEOUT, shard=None, **fields):
+    """Глагол серверу (mop-bootstrap). -> разобранный ответ (dict)."""
+    return _ask(server_subject(shard), "bootstrap service",
+                "no bootstrap service is subscribed — the mop-bootstrap unit is "
+                "not running on the server",
                 verb, timeout, **fields)
 
 

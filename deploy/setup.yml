@@ -63,6 +63,19 @@
         tasks_from: server
 
 
+# Ключ сервера к песочницам (#62) — до игры агентов: узлам нужна его
+# публичная часть (роль bus кладёт её на узел и, где тело равно узлу, в
+# authorized_keys пользователя пула).
+- name: Bootstrap key of the server
+  hosts: server
+  gather_facts: no
+
+  tasks:
+    - ansible.builtin.include_role:
+        name: bootstrap
+        tasks_from: key
+
+
 - name: mop-agent on the puppet hosts
   hosts: puppet
   gather_facts: no
@@ -111,3 +124,14 @@
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
   roles:
     - web
+
+
+# Bootstrap песочниц (#62, docs/BOOTSTRAP.md): подписчик на сервере, который
+# играет .mop/bootstrap.yaml шарда при каждом старте папета. После дашборда:
+# пакет mop и креды оператора на сервер привозит роль web.
+- name: Bootstrap of sandboxes, on the server
+  hosts: server
+  become: no
+  gather_facts: no
+  roles:
+    - bootstrap

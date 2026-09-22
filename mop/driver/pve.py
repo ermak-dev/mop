@@ -525,6 +525,30 @@ async def _seed(name, vmid, shard):
     return {}
 
 
+async def admit(name, pubkey):
+    """Впустить ключ сервера в тело на время bootstrap'а (#62) либо
+    выпустить (pubkey=None). Глагол keys заменяет файл целиком, и ключ узла
+    в нём есть всегда — иначе, выпуская сервер, узел запер бы тело от себя.
+
+    Только на время: постоянный ключ в образе был бы второй дорогой к телу
+    мимо агента, то есть мимо единственной проверки шардирования, — ровно
+    то, от чего отказались для ключа мастера при сборке образа."""
+    if not valid_name(name):
+        return {"error": bad_name(name)}
+    try:
+        with open(f"{SSH_KEY}.pub") as f:
+            text = f.read().strip() + "\n"
+    except FileNotFoundError:
+        return {"error": f"no node key {SSH_KEY}.pub — run mop deploy"}
+    if pubkey:
+        text += pubkey.strip() + "\n"
+    out, code = await sh(f"printf %s {shlex.quote(text)} | "
+                         f"{_pve_cmd('keys', vmid_of(name))}", 60)
+    if code not in (0, None):
+        return {"error": f"{name}: keys: {why(out, code)}"}
+    return {"admitted": bool(pubkey)}
+
+
 async def push(name, path, data):
     """Положить файл в тело: 600, владельцем — пользователь пула.
 

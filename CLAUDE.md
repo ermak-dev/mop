@@ -9,7 +9,8 @@ This file holds only what the repository cannot tell you by itself: structure
 comes from `ls`, commands from `mop` with no arguments, the reason behind a
 particular decision from the comment next to the code, subsystems from `docs/`:
 [BUS](docs/BUS.md), [CHANNEL](docs/CHANNEL.md), [MCP](docs/MCP.md),
-[GC](docs/GC.md), [DRIVER](docs/DRIVER.md), [WEB](docs/WEB.md).
+[GC](docs/GC.md), [DRIVER](docs/DRIVER.md), [WEB](docs/WEB.md),
+[BOOTSTRAP](docs/BOOTSTRAP.md).
 
 ## Overall structure
 

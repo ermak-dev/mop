@@ -30,6 +30,9 @@ Nomad не нужен вовсе — в этом половина смысла �
     projects_dir(name)     где транскрипты — mop stat, usage
     attach_argv(name)      чем входит человек
     repair_argv(name)      аварийный путь, когда основной молчит
+    admit(name, pubkey)    впустить ключ сервера в тело на время bootstrap'а
+                           (#62), None — выпустить; у host пусто: ключ там
+                           лежит постоянно
     SESSION_PY             путь к session.py внутри тела
     BODY_IS_NODE           тело и узел — одна машина (True у host)
 
@@ -46,7 +49,7 @@ from .. import config, plugins
 # Глаголы контракта. Список закрыт и проверяется громко при загрузке: агент
 # зовёт их из петли, и отсутствующий argv прочитается там как «узел молчит».
 VERBS = ("ensure", "destroy", "bodies", "capacity", "argv", "run_argv", "push",
-         "projects_dir", "attach_argv", "repair_argv")
+         "projects_dir", "attach_argv", "repair_argv", "admit")
 
 DEFAULT = config.SETTINGS["MOP_DRIVER"]
 
