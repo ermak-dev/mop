@@ -135,10 +135,7 @@ def argv(playbook, address, user, key, settings, project, name, clone, tasks, of
     # Всё одним JSON'ом, и это не вкус: голое `-e k=v` со значением в
     # несколько слов ansible режет по пробелам на несколько пар, и до ssh
     # доезжало одно `-o` («no argument after keyword -o», первый живой прогон).
-    # Оба имени, пока идёт переименование (#85): переменные прогона видны
-    # задачам проекта в его `.mop/bootstrap.yaml`, и это публичный интерфейс.
-    extra = {"mop_project": project, "mop_shard": project,
-             "mop_puppet": name, "mop_clone": clone,
+    extra = {"mop_project": project, "mop_puppet": name, "mop_clone": clone,
              "mop_bootstrap_tasks": tasks,
              "ansible_user": user,
              "ansible_ssh_private_key_file": key,

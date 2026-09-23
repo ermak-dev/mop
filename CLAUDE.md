@@ -41,7 +41,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** A value specific to this machine is a setting whose default equals today's value, never a literal in the code
  - **MUST** A required setting with no sensible default goes in `config.REQUIRED`: silently walking into someone else's LAN is worse than a loud refusal
  - **MUST NOT** Nothing a specific project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is the installation's own `sandbox.yaml` and the projects' `.mop/sandbox.yaml` (baked) and `.mop/bootstrap.yaml` (played at every start)
- - **MUST** A project has one definition: `puppets.project_of`, the origin's basename without `.git`; puppet names are built from it too. The word «shard» is gone (#85); it survives only as the Nomad node meta key `mop_shards`, which names what a node can serve
+ - **MUST** A project has one definition: `puppets.project_of`, the origin's basename without `.git`; puppet names are built from it too. The word «shard» is gone (#85)
  - **MUST** Two layers: Nomad decides where a puppet stands, the bus decides how to talk to it. The Nomad token lives on the server and, through `mop join`, on operators' machines; it never reaches a node
  - **MUST** The server is the ansible controller and the operator's machine is not in the inventory: it gets the server's credentials with `mop join` into `~/.config/mop/servers/[address]/`, and `MOP_SERVER_LAN` in the environment retargets a master at another server
  - **MUST** Symlinks pointing in from outside are interfaces: `~/bin/mop`, `~/etc/nomad`, `~/etc/nats`, `~/.claude/skills/master`; a playbook is found by the path `~/etc/[name]/setup.yml`, and there is no name table anywhere

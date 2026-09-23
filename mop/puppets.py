@@ -312,7 +312,6 @@ tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     -e CARGO_TARGET_DIR="$HOME/.cache/target-$PU_NAME" \
     -e CARGO_BUILD_JOBS="$cores" \
     -e MOP_PROJECT="$PU_PROJECT" \
-    -e MOP_SHARD="$PU_PROJECT" \
     -e MOP_BUS_CONFIG="$project_creds" \
     "${llm_env[@]}" \
     "PATH=$d/bin:$PATH $HOME/.local/bin/claude $claude_args"
@@ -429,7 +428,7 @@ def project_constraint(project):
     # Ключ меты УЗЛА. Остался прежним при переименовании (#85): его объявляет
     # клиент Nomad, и переименовать значит оставить всякую уже
     # зарегистрированную спеку без узлов, которые её принимают.
-    return {"LTarget": "${meta.mop_shards}", "Operand": "regexp",
+    return {"LTarget": "${meta.mop_projects}", "Operand": "regexp",
             "RTarget": f"(^|,)({ANY_PROJECT}|{re.escape(project)})(,|$)"}
 
 
@@ -1105,7 +1104,7 @@ def spec_is_stale(job):
     script = (task.get("Config") or {}).get("args") or ["", ""]
     if "driver run" not in script[-1]:
         return True
-    return not any((c or {}).get("LTarget") == "${meta.mop_shards}"
+    return not any((c or {}).get("LTarget") == "${meta.mop_projects}"
                    for c in (job.get("Constraints") or []))
 
 

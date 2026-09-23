@@ -28,16 +28,10 @@ def main():
     want = {"mop_project": "proj", "mop_origin": "git@h:g/proj.git",
             "mop_project_asks": {"MOP_MEM_MB": "2048"},
             "mop_project_tasks": "/tmp/x/sandbox-tasks.yml"}
-    if {k: v for k, v in extra.items() if not k.startswith("mop_shard")} != want:
+    if extra != want:
         failed += 1
         print(f"FAIL extra_vars: {extra} != {want}")
-    # Прежние имена едут рядом, пока идёт переименование (#85): переменные
-    # прогона видны задачам проекта в его `.mop`, и уронить их сразу значит
-    # молча сломать чужой манифест.
-    if extra.get("mop_shard") != "proj" or "mop_shard_asks" not in extra:
-        failed += 1
-        print(f"FAIL extra_vars: the old names must still travel: {extra}")
-    if "mop_project_vars" in extra or "mop_shard_vars" in extra:
+    if "mop_project_vars" in extra:
         failed += 1
         print("FAIL extra_vars: a None half must be absent, not null")
     # Пересборка — операция над ПРОЕКТОМ (#60): тела проекта на контейнерных

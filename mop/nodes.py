@@ -20,10 +20,10 @@ def row(summary, meta, cap):
         state += ", closed"
     return {"name": summary["Name"],
             "driver": meta.get("mop_driver") or driver.DEFAULT,
-            # mop_shards — ключ меты УЗЛА, прежнее имя (#85): его объявляет
+            # mop_projects — ключ меты УЗЛА, прежнее имя (#85): его объявляет
             # клиент Nomad, и переименование оставило бы старые спеки без
             # узлов, которые их принимают.
-            "serves": meta.get("mop_shards") or "-",
+            "serves": meta.get("mop_projects") or "-",
             "state": state,
             "free_mb": cap.get("free_mb"),
             "total_mb": cap.get("total_mb"),
