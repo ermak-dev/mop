@@ -138,6 +138,29 @@ def fetch_is_shallow_and_blobless():
     return bad
 
 
+# #141: сервер не знал ключа хоста форжа, и origin не читался нигде на
+# нём: ни сборщиком, ни самим `mop deploy`, который читает `.mop` проектов до
+# плейбука, а значит до задачи, которая этот ключ положила бы.
+# HYPOTHESIS: ключи форжей кладёт плейбук (роль node, затем cluster) --
+# курица и яйцо: deploy падает раньше. SOLUTION: клон манифеста принимает
+# новый ключ хоста сам (accept-new) и по-прежнему отказывает сменившемуся;
+# выбранный оператором ssh (GIT_SSH_COMMAND, GIT_SSH) не трогаем.
+# STATUS: FIXED — see #141
+def clone_env_accepts_new_host_keys():
+    """-> список отказов."""
+    bad = []
+    env = manifest.clone_env({"PATH": "/bin"})
+    if "StrictHostKeyChecking=accept-new" not in env.get("GIT_SSH_COMMAND", ""):
+        bad.append(f"a new host key must be accepted: {env.get('GIT_SSH_COMMAND')!r}")
+    if env.get("PATH") != "/bin":
+        bad.append("the rest of the environment must pass through")
+    for mine in ({"GIT_SSH_COMMAND": "ssh -i k"}, {"GIT_SSH": "/usr/bin/plink"}):
+        env = manifest.clone_env(dict(mine))
+        if env != mine:
+            bad.append(f"an operator's own ssh must stay as it is: {mine} -> {env}")
+    return bad
+
+
 def main():
     failed = 0
     got = manifest.fetch_tree(tree({".mop/sandbox.yaml": SANDBOX,
@@ -203,6 +226,9 @@ def main():
         if "bad/.mop/sandbox.yaml" not in str(e):
             failed += 1
             print(f"FAIL malformed message: {e}")
+    for why in clone_env_accepts_new_host_keys():
+        failed += 1
+        print(f"FAIL clone env: {why}")
     for why in fetch_is_shallow_and_blobless():
         failed += 1
         print(f"FAIL fetch: {why}")
