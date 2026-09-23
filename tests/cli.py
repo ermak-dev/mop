@@ -216,6 +216,51 @@ def main():
                 failed += 1
                 print(f"FAIL {os.path.relpath(path)}: no main(argv)")
 
+    # ── #111: origin из рабочей копии, одним механизмом ─────────────────
+    # HYPOTHESIS: `mop project add` требовал origin всегда, а команды, что
+    # умели брать его из рабочей копии, делали это каждая по-своему: своя
+    # проверка на вид origin'а у master, свой запасной путь у driver build,
+    # отказ cwd_origin всегда называл `mop add`.
+    # SOLUTION: lib.pick_origin -- чистое решение, lib.origin -- git и отказ.
+    from mop import puppets
+    for good in ("git@git.ermak.dev:ermak/mop.git", "https://h/g/mop.git",
+                 "/srv/git/mop.git"):
+        if not puppets.looks_like_origin(good):
+            failed += 1
+            print(f"FAIL looks_like_origin({good!r}) must be true")
+    # Голое имя и значение чужого флага, приехавшее позиционно, -- не origin.
+    for bad in ("mop", "opus", "", "  "):
+        if puppets.looks_like_origin(bad):
+            failed += 1
+            print(f"FAIL looks_like_origin({bad!r}) must be false")
+
+    here = "git@git.ermak.dev:ermak/mop.git"
+    other = "git@git.ermak.dev:rugent/rugent.git"
+    # Явный аргумент старше рабочей копии.
+    if lib.pick_origin(other, here) != other:
+        failed += 1
+        print("FAIL pick_origin: an explicit origin must win over the working copy")
+    # Нет аргумента -- рабочая копия.
+    if lib.pick_origin(None, here) != here:
+        failed += 1
+        print("FAIL pick_origin: without an argument the working copy's origin")
+    # Отказы -- ValueError с причиной, а не None: None дальше читался бы как
+    # проект с пустым именем.
+    for arg, cwd, why in (("opus", here, "doesn't look like a git-origin"),
+                          (None, None, "no origin given")):
+        try:
+            got = lib.pick_origin(arg, cwd)
+        except ValueError as e:
+            if why not in str(e):
+                failed += 1
+                print(f"FAIL pick_origin({arg!r}, {cwd!r}) refused without the reason: {e}")
+            continue
+        failed += 1
+        print(f"FAIL pick_origin({arg!r}, {cwd!r}) must refuse, got {got!r}")
+    # Неверный явный аргумент не подменяется рабочей копией: опечатка иначе
+    # молча завела бы не тот проект.
+    # STATUS: FIXED — see #111
+
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0
 

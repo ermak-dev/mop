@@ -16,7 +16,7 @@ def main(argv):
     if len(args) > 1:
         lib.usage(__doc__)
     profile = profile or config.get("MOP_DEFAULT_LLM")
-    origin = args[0] if args else lib.cwd_origin()
+    origin = lib.origin(args[0] if args else None, __doc__)
     project = puppets.project_of(origin)
     # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS, и
     # папет поднимется, но к шине не подключится — прочитается как «агент

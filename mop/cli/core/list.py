@@ -65,7 +65,7 @@ def main(argv):
         rows.append(r)
     if not rows:
         print("no puppets")
-    origin = lib.cwd_origin(required=False)
+    origin = lib.cwd_origin()
     # В мастер-шелле подсказка — про проект, а не про каталог, в котором стоишь.
     # Иначе `mop list` из репозитория самого mop в мастер-шелле проекта
     # советовал бы завести папета для mop, которого этот мастер всё равно

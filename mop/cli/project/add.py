@@ -1,4 +1,6 @@
-"""register a project and put it on the bus: mop project add <git-origin>
+"""register a project and put it on the bus: mop project add [git-origin]
+
+Without origin, the origin of the current working copy is used.
 
 Writes the origin into the registry (~/.config/mop/projects) and plays
 deploy/projects.yml — the NATS user puppet-<project> on the server, the
@@ -26,9 +28,9 @@ PLAYBOOK = "deploy/projects.yml"
 
 
 def main(argv):
-    if len(argv) != 1 or argv[0].startswith("-"):
+    if len(argv) > 1 or any(a.startswith("-") for a in argv):
         lib.usage(__doc__)
-    origin = argv[0]
+    origin = lib.origin(argv[0] if argv else None, __doc__)
     origins, legacy, note = projects.registry()
     if note:
         print(note, file=sys.stderr, flush=True)

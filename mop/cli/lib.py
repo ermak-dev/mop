@@ -64,16 +64,46 @@ def usage(doc):
     sys.exit(doc.strip())
 
 
-def cwd_origin(required=True):
-    """origin текущей рабочей копии. required=False -> None вместо отказа."""
+def cwd_origin():
+    """origin текущей рабочей копии, либо None: не рабочая копия или у неё
+    нет origin. Отказывать -- дело вызывающего: только он знает, как себя
+    назвать в отказе (#111)."""
     try:
         return subprocess.run(
             ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, check=True).stdout.strip()
+            capture_output=True, text=True, check=True).stdout.strip() or None
     except (subprocess.CalledProcessError, FileNotFoundError):
-        if required:
-            sys.exit("not a git working copy and no origin given: mop add <git-origin>")
         return None
+
+
+def pick_origin(arg, here):
+    """Какой origin взять команде. Чистая функция (#111).
+
+    arg -- явный аргумент или None, here -- origin рабочей копии или None.
+    Явный старше рабочей копии. Неверный явный -- отказ, а не подмена
+    рабочей копией: опечатка иначе молча завела бы не тот проект. Отказ --
+    ValueError с причиной: None дальше читался бы как проект с пустым
+    именем."""
+    if arg is not None:
+        if not puppets.looks_like_origin(arg):
+            raise ValueError(f"{arg!r} doesn't look like a git-origin "
+                             f"(a host or a path is expected, not a project name)")
+        return arg.strip()
+    if here:
+        return here
+    raise ValueError("not in a git working copy with an origin, and no origin given")
+
+
+def origin(arg, doc):
+    """Origin для команды: явный аргумент, иначе рабочая копия (#111).
+
+    Единый вход для всех команд, которым нужен origin проекта. doc -- то,
+    что показать после причины отказа (обычно докстринг команды): отказ
+    называет ту команду, что спрашивала, а не `mop add`."""
+    try:
+        return pick_origin(arg, None if arg is not None else cwd_origin())
+    except ValueError as e:
+        usage(f"{e}\n\n{doc.strip()}")
 
 
 def git(*args):

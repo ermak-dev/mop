@@ -41,7 +41,7 @@ def with_origin(origin, known):
     режется манифест `.mop` и им же клонируется папет. Приняв имя, реестр
     завёл бы пользователя на шине для проекта, которого не достать."""
     origin = (origin or "").strip()
-    if not any(c in origin for c in ":/"):
+    if not puppets.looks_like_origin(origin):
         raise RuntimeError(f"{origin!r} doesn't look like a git-origin: "
                            f"a project is registered by its origin, not by its name")
     return known | {origin}, origin not in known
