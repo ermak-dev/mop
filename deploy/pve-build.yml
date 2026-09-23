@@ -380,8 +380,15 @@
         # про сам канал, а не про молчание apt: на живом соединении sshd
         # отвечает на keepalive независимо от того, печатает ли что-то
         # команда, так что здоровым прогонам это ничего не стоит.
+        #
+        # Прыжок -- тем же пользователем и адресом, каким прогон ходит на
+        # узел (#119). Голое имя узла ssh разворачивает по своему конфигу, и
+        # переменные инвентаря в прыжок не попадают: контроллер под root, у
+        # которого узел прописан только в инвентаре (`ansible_user: ermak`),
+        # прыгал как root@узел и получал отказ по ключу. Непрописанное в
+        # инвентаре остаётся ssh-конфигу, как было.
         ansible_ssh_common_args: >-
-          -o ProxyJump={{ inventory_hostname }}
+          -o ProxyJump={{ jump }}
           -o ServerAliveInterval=30
           -o ServerAliveCountMax=10
           -o IdentitiesOnly=yes
@@ -390,6 +397,11 @@
           -o UserKnownHostsFile={{ lookup('env', 'HOME') }}/.ssh/known_hosts-mop-body
         mop_body_of: "{{ inventory_hostname }}"
         mop_body_vmid: "{{ stage_vmid }}"
+      vars:
+        jump: >-
+          {{ (ansible_user ~ '@') if ansible_user is defined else '' -}}
+          {{ ansible_host | default(inventory_hostname) -}}
+          {{ (':' ~ ansible_port) if ansible_port is defined else '' }}
       changed_when: false
 
 
