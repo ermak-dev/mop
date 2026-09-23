@@ -10,8 +10,10 @@
 # поэтому перезапуск -- по результату ТОГО синка (как в роли bootstrap).
 - name: The package changed under the service
   ansible.builtin.debug:
-    msg: "mop package changed on the server — restarting mop-cluster"
-  changed_when: (mop_server_package | default({})) is changed
+    msg: "mop package or bus identity changed on the server — restarting mop-cluster"
+  # Пакет или идентичность сервера на шине (#104): старое соединение
+  # держит прежнего пользователя до рестарта.
+  changed_when: (mop_server_package | default({})) is changed or (mop_server_identity | default({})) is changed
   notify: restart mop-cluster
 
 - name: Systemd unit

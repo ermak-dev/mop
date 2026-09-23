@@ -53,7 +53,9 @@ def check_parse():
 def check_reserved():
     """Имя человека не должно совпасть с ролевым: это тихая подмена роли."""
     out = []
-    for bad in ("admin", "master-mop", "puppet-mop", "node-mate"):
+    # service (#104) -- машинный пользователь сервисов сервера: человек с
+    # этим именем получил бы права сервисов под видом оператора.
+    for bad in ("admin", "service", "master-mop", "puppet-mop", "node-mate"):
         try:
             operators.parse(f"{bad}:mop")
         except ValueError:
