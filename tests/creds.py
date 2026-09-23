@@ -174,6 +174,45 @@ def main():
         print(f"FAILED  the server directory holds secrets: dir "
               f"{oct(os.stat(dest).st_mode & 0o777)}, files {modes}")
 
+    # ── #125: сервер и логин `mop join` из рабочей копии.
+    # Сервер: явно > привязка клона > единственный нашедшийся среди серверов,
+    # где уже есть вход > .env; иначе отказ. STATUS: FIXED — see #125
+    for args, want in [
+        (dict(explicit="a", bound="b", serving=["c"], default="d"), "a"),
+        (dict(explicit=None, bound="b", serving=["c"], default="d"), "b"),
+        (dict(explicit=None, bound=None, serving=["c"], default="d"), "c"),
+        (dict(explicit=None, bound=None, serving=[], default="d"), "d"),
+    ]:
+        cases += 1
+        try:
+            got = creds.pick_server(**args)
+        except (AttributeError, ValueError) as e:
+            got = e
+        if got != want:
+            bad += 1
+            print(f"FAILED  pick_server({args}) -> {got!r}, wanted {want!r}")
+    for args in (dict(explicit=None, bound=None, serving=["c", "e"], default="d"),
+                 dict(explicit=None, bound=None, serving=[], default="")):
+        cases += 1
+        try:
+            creds.pick_server(**args)
+            bad += 1
+            print(f"FAILED  pick_server({args}) must refuse: ambiguous or nothing")
+        except ValueError:
+            pass
+        except AttributeError:
+            bad += 1
+            print("FAILED  creds.pick_server is missing")
+    # Логин: явно > записанный для этого сервера > $USER.
+    for args, want in [(("ivan", "anton", "ermak"), "ivan"),
+                       ((None, "anton", "ermak"), "anton"),
+                       ((None, None, "ermak"), "ermak")]:
+        cases += 1
+        got = getattr(creds, "pick_login", lambda *a: None)(*args)
+        if got != want:
+            bad += 1
+            print(f"FAILED  pick_login{args} -> {got!r}, wanted {want!r}")
+
     # ── #97: клиенты каталога сервера — на шину по wss через TLS-прокси.
     # HYPOTHESIS: bus_config всегда собирал nats://<LAN>:4222 без TLS, и
     # пароль оператора уходил по LAN открытым текстом.

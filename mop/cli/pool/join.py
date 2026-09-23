@@ -1,43 +1,60 @@
-"""log in to the server's bus as yourself: mop join --user <name>
+"""log in to a server's bus as yourself: mop join [--server ADDRESS] [LOGIN]
+
+Inside a working copy, what is not named is taken from it (#125):
+
+  server   --server, else MOP_SERVER_LAN from the environment, else the
+           clone's binding (git config mop.server), else the one server you
+           are already logged in to whose registry has this clone's origin,
+           else MOP_SERVER_LAN from .env
+  login    LOGIN, else the login already kept for that server, else $USER
 
 The password is asked for (or read from MOP_BUS_PASSWORD; on the controller,
 from its own secrets/nats-op-<name>.pass) and checked by connecting before
-anything is written. What you may reach is decided by your role in
-MOP_OPERATORS on the server, not by files here:
+anything is written; if you are already logged in to that server under that
+login, nothing is asked. What you may reach is decided by your role in
+MOP_OPERATORS on the server.
 
-  anton:admin                 the whole pool plus the machines
-  ivan:user:rugent,cloudpub   the named projects
-  olga:user:*                 every project, not the machines
+The bus is reached through the server's TLS proxy (wss://<server>/nats); a
+self-signed certificate is pinned on first login, before the password is
+sent, and its fingerprint printed — compare it on the controller:
+openssl x509 -noout -fingerprint -sha256 -in ~/.config/mop/secrets/tls.pem
 
-The bus is reached through the server's TLS proxy
-(wss://<MOP_SERVER_LAN>/nats); a self-signed certificate is pinned on first
-login, before the password is sent, and its fingerprint printed.
-
-Writes ~/.config/mop/servers/<MOP_SERVER_LAN>/operator.json. The directory is
-keyed by MOP_SERVER_LAN, so a second server is a second login, and
-MOP_SERVER_LAN=<address> mop master retargets the master at it.
-
-The shared role passwords (admin, master-<project>) and the old way of
-copying them over ssh are gone (#106): one person, one login. Copies of them
-left from an earlier join are removed. The Nomad token never travels here
-(#82): pool control goes through verbs on the bus.
+The password stays in ~/.config/mop/servers/<server>/: one login per person
+per server, for every project. The working copy only remembers which server
+it belongs to (git config mop.server, not committed), and every mop command
+run in it goes there. --user NAME is the old spelling of LOGIN.
 """
 import getpass
+import glob
 import os
+import subprocess
 import sys
 
 from mop.cli import lib
 from mop import bus, config, creds, operators
 
 
-def as_operator(argv):
-    """Имя оператора из аргументов либо окружения; None -- не названо."""
-    for i, a in enumerate(argv):
-        if a == "--user":
-            return argv[i + 1] if i + 1 < len(argv) else ""
-        if a.startswith("--user="):
-            return a.split("=", 1)[1]
-    return os.environ.get("MOP_BUS_USER") or None
+def parse(argv):
+    """-> (сервер|None, логин|None). Отказ -- usage."""
+    server, login, rest = None, None, list(argv)
+    while rest:
+        a = rest.pop(0)
+        if a in ("--server", "--user"):
+            if not rest:
+                lib.usage(__doc__)
+            v = rest.pop(0)
+        elif a.startswith("--server=") or a.startswith("--user="):
+            a, v = a.split("=", 1)
+        elif a.startswith("-") or login is not None:
+            lib.usage(__doc__)
+        else:
+            login = a
+            continue
+        if a == "--server":
+            server = v
+        else:
+            login = v
+    return server, login
 
 
 def own_password(user):
@@ -52,24 +69,84 @@ def own_password(user):
         return None
 
 
-def login(user):
+def git(*args):
+    r = subprocess.run(["git", *args], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def serving(origin):
+    """Серверы, где у машины уже есть вход и чей реестр знает origin."""
+    out = []
+    for d in sorted(glob.glob(os.path.join(creds.ROOT, "*"))):
+        host = os.path.basename(d)
+        try:
+            ans = bus.ask_once(bus.server_config(host), bus.cluster_subject(bus.ADMIN),
+                               "projects")
+        except Exception:
+            continue
+        if origin in (ans.get("origins") or []):
+            out.append(host)
+    return out
+
+
+def main(argv):
+    explicit, login = parse(argv)
+    in_clone = git("rev-parse", "--show-toplevel") is not None
+    origin = lib.cwd_origin() if in_clone else None
+    bound = git("config", "--get", config.CLONE_SCOPED["MOP_SERVER_LAN"]) if in_clone else None
+    explicit = explicit or os.environ.get("MOP_SERVER_LAN")
+    found = serving(origin) if origin and not (explicit or bound) else []
+    # .env -- последним: config.get здесь отдал бы привязку клона раньше него.
+    default = config._node().get("MOP_SERVER_LAN") or config._load().get("MOP_SERVER_LAN")
+    try:
+        host = creds.pick_server(explicit, bound, found, default)
+    except ValueError as e:
+        lib.usage(str(e))
+    # Дальше весь процесс -- про этот сервер: каталог кредов, TLS-прокси.
+    os.environ["MOP_SERVER_LAN"] = host
+    dest = creds.server_dir(host)
+    stored = creds.operator(dest)
+    login = creds.pick_login(login or os.environ.get("MOP_BUS_USER"),
+                             (stored or {}).get("user"), os.environ.get("USER"))
+    try:
+        if not (stored and stored.get("user") == login and _still_valid(host)):
+            _login(host, login, dest)
+    except RuntimeError as e:
+        lib.fail(str(e))
+        return 1
+    if in_clone and bound != host:
+        git("config", "--local", config.CLONE_SCOPED["MOP_SERVER_LAN"], host)
+    return 0
+
+
+def _still_valid(host):
+    """Пускает ли шина по уже лежащим кредам: тогда пароль не спрашиваем."""
+    try:
+        bus.check(bus.server_config(host))
+        return True
+    except Exception:
+        return False
+
+
+def _pinned(path):
+    """DER закреплённого сертификата, либо None."""
+    if not path:
+        return None
+    import ssl
+    try:
+        with open(path) as f:
+            return ssl.PEM_cert_to_DER_cert(f.read())
+    except (OSError, ValueError):
+        return None
+
+
+def _login(host, user, dest):
     """Вход своим именем: пароль спрашиваем, проверяем соединением, кладём.
 
     Проверка соединением обязательна: молча положенный неверный пароль
     читается потом как «агент не отвечает» через двадцать секунд таймаута —
     самый дорогой из возможных способов узнать об опечатке."""
-    if not user:
-        lib.usage(__doc__)
-    password = os.environ.get("MOP_BUS_PASSWORD") or own_password(user)
-    if not password:
-        if not sys.stdin.isatty():
-            raise RuntimeError("no MOP_BUS_PASSWORD and no terminal to ask on")
-        password = getpass.getpass(f"password for {user} on "
-                                   f"{config.get('MOP_SERVER_LAN')}: ")
-    if not password:
-        raise RuntimeError("empty password")
-    dest = creds.server_dir()
-    host, https = config.get("MOP_SERVER_LAN"), config.get("MOP_HTTPS_PORT")
+    https = config.get("MOP_HTTPS_PORT")
     # Шина -- через TLS-прокси (#97). Самоподписанный сертификат закрепляем
     # при первом входе, до пароля: пароль уходит только туда, чей сертификат
     # уже закреплён. Настоящий не закрепляем, прежний пин снимаем.
@@ -81,10 +158,21 @@ def login(user):
     if der is None and pin:
         os.remove(pin)
     if der is not None:
+        new = _pinned(pin) != der
         pin = creds.write_cert(dest, der)
-        print(f"{pin}: self-signed certificate {creds.fingerprint(der)}")
-        print("  compare on the controller: openssl x509 -noout -fingerprint "
-              "-sha256 -in ~/.config/mop/secrets/tls.pem")
+        # Единственная строка успешного входа: сверить отпечаток -- дело
+        # человека, и молча закреплённый сертификат этого не даёт.
+        if new:
+            print(f"{host}: self-signed certificate {creds.fingerprint(der)}")
+    # Пароль -- после прокси: опечатка в адресе сервера отказывает сразу, а
+    # не после вопроса о пароле.
+    password = os.environ.get("MOP_BUS_PASSWORD") or own_password(user)
+    if not password:
+        if not sys.stdin.isatty():
+            raise RuntimeError("no MOP_BUS_PASSWORD and no terminal to ask on")
+        password = getpass.getpass(f"password for {user} on {host}: ")
+    if not password:
+        raise RuntimeError("empty password")
     # Сначала проверяем, потом кладём: каталог не должен запомнить того, кого
     # шина не пустила.
     c = creds.wss_config(host, https, None, password, user=user,
@@ -93,8 +181,7 @@ def login(user):
         bus.check(c)
     except Exception as e:
         raise RuntimeError(f"the bus did not take {user}: {e}")
-    path = creds.write_operator(dest, user, password)
-    print(f"{path}: {user}")
+    creds.write_operator(dest, user, password)
     # Ролевые пароли прежних join'ов (#106) и токен Nomad (#82): шина их не
     # знает или они здесь не нужны, а лежащие -- это секрет без пользы.
     gone = creds.legacy(os.listdir(dest))
@@ -103,20 +190,3 @@ def login(user):
         gone.append(creds.TOKEN_FILE)
     for n in gone:
         os.remove(os.path.join(dest, n))
-    if gone:
-        print(f"  removed here: {', '.join(gone)}")
-    print("  what you may reach is decided by the bus, not by this file: "
-          "your role in MOP_OPERATORS on the server")
-    return 0
-
-
-def main(argv):
-    user = as_operator(argv)
-    if user is None or [a for a in argv if a != "--user" and not a.startswith("--user=")
-                        and a != user]:
-        lib.usage(__doc__)
-    return login(user)
-
-
-# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)

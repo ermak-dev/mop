@@ -10,7 +10,7 @@
 кредов разом. В каталоге лежит ровно то, что машине положено:
 
     operator.json               кто эта машина на шине: человек после
-                                `mop join --user`, на сервере -- service (#104)
+                                `mop join`, на сервере -- service (#104)
     tls.pem                     самоподписанный сертификат TLS-прокси (#97)
     bootstrap.json              management-токен Nomad, только на контроллере
 
@@ -139,7 +139,7 @@ def untrusted_cert(host, port, timeout=10):
     доверяет (настоящий сертификат закреплять нельзя: продление сломало бы
     клиента).
 
-    Зовёт `mop join --user` ДО того, как отправит пароль: пароль уходит
+    Зовёт `mop join` ДО того, как отправит пароль: пароль уходит
     только в соединение, чей сертификат уже закреплён."""
     import socket
     try:
@@ -179,6 +179,33 @@ def operator(directory):
     if not got.get("user") or not got.get("password"):
         return None
     return {"user": got["user"], "password": got["password"]}
+
+
+def pick_server(explicit, bound, serving, default):
+    """Сервер `mop join` (#125). Чистая функция.
+
+    explicit -- аргумент или окружение; bound -- привязка клона; serving --
+    серверы, где уже есть вход и чей реестр знает origin клона; default --
+    .env. Два нашедшихся -- отказ, а не первый попавшийся: креды ушли бы не
+    туда. Ничего -- отказ: адрес при первом входе называют явно."""
+    if explicit:
+        return explicit
+    if bound:
+        return bound
+    if len(serving) > 1:
+        raise ValueError(f"this project is served by {', '.join(sorted(serving))}: "
+                         f"name one, mop join --server <address>")
+    if serving:
+        return serving[0]
+    if default:
+        return default
+    raise ValueError("no server known for this working copy: "
+                     "mop join --server <address>")
+
+
+def pick_login(explicit, stored, env_user):
+    """Логин `mop join`: явно > записанный для этого сервера > $USER."""
+    return explicit or stored or env_user
 
 
 def write_operator(directory, user, password):
@@ -222,7 +249,7 @@ def make_dir(dest):
 def pick(listing):
     """Что из secrets/ сервера едет в каталог сервера оператора: только
     закреплённый сертификат. Паролей людям не копируют (#106) -- человек
-    входит своим именем, и его пароль приходит `mop join --user`."""
+    входит своим именем, и его пароль приходит `mop join`."""
     return sorted(n for n in listing if n == CERT_FILE)
 
 

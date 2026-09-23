@@ -131,7 +131,14 @@ def config(file=None):
             return _load(path)
         except FileNotFoundError:
             raise BusError(f"no bus credentials: {path} — run mop deploy")
-    host = settings.get("MOP_SERVER_LAN")
+    return server_config(settings.get("MOP_SERVER_LAN"))
+
+
+def server_config(host):
+    """Креды этой машины на названном сервере -- из его каталога.
+
+    Отдельно от config(), потому что `mop join` спрашивает и чужие серверы,
+    на которые у машины уже есть вход: чей реестр знает этот клон (#125)."""
     directory = creds.server_dir(host)
     # Каталог сервера -- это человек или сервис сервера, и ходят они через
     # TLS-прокси (#97): пароль по сети открытым текстом не идёт. Кред один --
@@ -141,7 +148,7 @@ def config(file=None):
     op = creds.operator(directory)
     if not op:
         raise BusError(f"no bus credentials: {directory}/{creds.OPERATOR_FILE} "
-                       f"is missing — run mop join --user <name>")
+                       f"is missing — run mop join --server {host}")
     return creds.wss_config(host, settings.get("MOP_HTTPS_PORT"), PROJECT,
                             op["password"], user=op["user"],
                             cafile=creds.cafile(directory))
@@ -201,7 +208,7 @@ def check(c):
 
     Одноразовое соединение без реконнекта: здесь проверяют пароль, и
     бесконечные попытки превратили бы неверный пароль в зависание вместо
-    ответа. Зовёт `mop join --user` до того, как что-то запишет (#84)."""
+    ответа. Зовёт `mop join` до того, как что-то запишет (#84)."""
     async def quiet(_e):
         pass          # отказ вернётся исключением; трассировка в stderr — шум
 
@@ -210,6 +217,26 @@ def check(c):
                                 allow_reconnect=False, connect_timeout=5)
         await nc.close()
     _call(once(), 15)
+
+
+def ask_once(c, subj, verb, timeout=5, **fields):
+    """Один запрос отдельным соединением по кредам c. -> ответ (dict).
+
+    Для серверов, которые не текущие: общее соединение процесса привязано к
+    одному серверу, а `mop join` спрашивает все, где у машины есть вход."""
+    async def quiet(_e):
+        pass
+
+    async def once():
+        nc = await nats.connect(**auth(c), name="mop-join", error_cb=quiet,
+                                allow_reconnect=False, connect_timeout=timeout)
+        try:
+            msg = await nc.request(subj, json.dumps({"verb": verb, **fields}).encode(),
+                                   timeout=timeout)
+            return json.loads(msg.data.decode())
+        finally:
+            await nc.close()
+    return _call(once(), timeout * 3)
 
 
 def connect(file=None):
