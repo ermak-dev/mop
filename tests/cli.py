@@ -122,6 +122,27 @@ def main():
         failed += 1
         print(f"FAIL play_vars without manifests: {lib.play_vars(['mop'])}")
 
+    # Локаль прогонов (#92): ansible требует UTF-8 и берёт её из окружения, а
+    # свежая машина несёт LANG=C. Ставит её диспетчер, потому что зовут
+    # прогон и `mop setup`, и `mop deploy`, и сборка образа.
+    import os as _os
+    _keep = _os.environ.pop("LC_ALL", None)
+    cli.environment()
+    if not _os.environ.get("LC_ALL", "").upper().endswith("UTF-8"):
+        failed += 1
+        print(f"FAIL environment must set a UTF-8 locale: "
+              f"{_os.environ.get('LC_ALL')!r}")
+    # Заданное оператором не трогаем: своя локаль — его дело.
+    _os.environ["LC_ALL"] = "ru_RU.UTF-8"
+    cli.environment()
+    if _os.environ.get("LC_ALL") != "ru_RU.UTF-8":
+        failed += 1
+        print("FAIL environment must not override an explicit LC_ALL")
+    if _keep is None:
+        _os.environ.pop("LC_ALL", None)
+    else:
+        _os.environ["LC_ALL"] = _keep
+
     # Чем запускать команду, которой нужны права root (#91). Под root —
     # ничем: повышать нечего, а на выделенном сервере ещё и нечем, там
     # `sudo` попросту не стоит, и команда падала трассировкой на первом же
