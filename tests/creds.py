@@ -174,21 +174,6 @@ def main():
         print(f"FAILED  the server directory holds secrets: dir "
               f"{oct(os.stat(dest).st_mode & 0o777)}, files {modes}")
 
-    # forget: пароли снятого проекта уходят и с контроллера, и из каталога
-    # сервера — обоими путями их читает один и тот же project_ready.
-    cases += 1
-    a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
-    for d in (a, b):
-        for n in ("nats-master-gone.pass", "nats-puppet-gone.pass",
-                  "nats-master-stay.pass"):
-            with open(os.path.join(d, n), "w") as f:
-                f.write("x\n")
-    removed = creds.forget("gone", a, b)
-    left = sorted(set(os.listdir(a)) | set(os.listdir(b)))
-    if left != ["nats-master-stay.pass"] or len(removed) != 4:
-        bad += 1
-        print(f"FAILED  forget -> {removed}, left {left}")
-
     # ── #97: клиенты каталога сервера — на шину по wss через TLS-прокси.
     # HYPOTHESIS: bus_config всегда собирал nats://<LAN>:4222 без TLS, и
     # пароль оператора уходил по LAN открытым текстом.

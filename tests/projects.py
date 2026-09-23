@@ -82,44 +82,6 @@ def check_delete():
     return out
 
 
-def check_merge():
-    """merged: разовый перенос памяти и ростера в реестр.
-
-    Память контроллера хранит origin'ы и легаси-имена, ростер — origin'ы
-    живых папетов. Потерять хоть одну строку значит выписать проект из
-    конфига NATS на следующем прогоне, поэтому перенос — объединение.
-    """
-    out = []
-    got = projects.merged({RU, "oldproject"}, {MOP, RU})
-    if got != {RU, MOP, "oldproject"}:
-        out.append(f"merge lost a line: {got}")
-
-    got = projects.merged(set(), set())
-    if got != set():
-        out.append(f"empty install is not empty: {got}")
-    return out
-
-
-def check_migration_needed():
-    """Когда реестр вообще спрашивает пул.
-
-    HYPOTHESIS (#90): реестра нет -> спрашиваем ростер, а на новой установке
-    ни шины, ни сервиса ещё нет, и deploy падает до ansible — тем самым
-    прогоном, который их и поднимает.
-    SOLUTION: ростер нужен там, где есть ЧТО переносить, то есть при непустой
-    памяти контроллера. Нет памяти — пустой реестр без вопросов к пулу.
-    STATUS: FIXED — see #90
-    """
-    out = []
-    if projects.needs_roster(memory=set()):
-        out.append("an empty memory must not ask the pool: there is nothing "
-                   "to carry over, and on a fresh machine there is no pool")
-    if not projects.needs_roster(memory={RU}):
-        out.append("a non-empty memory must ask the pool: a project with a "
-                   "live puppet but no memory line would lose its bus user")
-    return out
-
-
 def check_names():
     """names: имена проектов для плейбука — basename'ы плюс легаси."""
     out = []
@@ -209,11 +171,34 @@ def check_git_hosts():
     return out
 
 
+def check_for_deploy():
+    """HYPOTHESIS (#117): `mop deploy` читал реестр контроллера, а правда о
+    проектах теперь -- реестр сервера, который правят глаголы сервиса.
+    SOLUTION: deploy спрашивает сервер; нет ответа (чистая установка: шины
+    ещё нет) -- берёт копию этой машины и говорит об этом.
+    STATUS: FIXED — see #117"""
+    out = []
+    try:
+        fn = projects.for_deploy
+    except AttributeError:
+        return ["projects.for_deploy is missing"]
+    lines, note = fn({"ok": True, "lines": ["git@h:g/mop.git", "legacy"]}, {"git@h:g/old.git"})
+    if lines != {"git@h:g/mop.git", "legacy"} or note:
+        out.append(f"a server answer must win silently: {lines} {note!r}")
+    lines, note = fn({"error": "no cluster service"}, {"git@h:g/old.git"})
+    if lines != {"git@h:g/old.git"} or not note or "no cluster service" not in note:
+        out.append(f"without the server the local copy is used, and said so: {lines} {note!r}")
+    # Пустой ответ сервера -- правда (проектов нет), а не повод взять копию.
+    lines, note = fn({"ok": True, "lines": []}, {"git@h:g/old.git"})
+    if lines != set():
+        out.append(f"an empty server registry is the truth: {lines}")
+    return out
+
+
 def main():
     failed = []
-    for check in (check_add, check_delete, check_merge,
-                  check_migration_needed, check_names, check_limits,
-                  check_git_hosts):
+    for check in (check_add, check_delete, check_names, check_limits,
+                  check_git_hosts, check_for_deploy):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     print("\n".join(failed) if failed else "", end="\n" if failed else "")

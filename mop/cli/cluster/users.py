@@ -17,11 +17,9 @@ def main(argv):
         lib.usage(__doc__)
     names = projects.names(*puppets.project_ids(projects.read()))
     try:
-        base = natsconf.read_base()
+        changed, _ = natsconf.apply(names, bootstrap.PUPPET_CREDS)
     except (OSError, ValueError) as e:
         sys.exit(f"no base users ({e}) -- mop deploy writes {natsconf.BASE}")
-    text = natsconf.render(base, natsconf.passwords(names, bootstrap.PUPPET_CREDS))
-    changed = natsconf.write(text)
     print(f"{natsconf.USERS}: {len(names)} project(s)"
           + (f" ({', '.join(names)})" if names else "")
           + (", changed" if changed else ", unchanged"))

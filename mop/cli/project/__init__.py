@@ -9,9 +9,10 @@
 
 A project is one repository, one slice of the pool, one master; its name is
 the basename of its origin, and the pool builds puppet names from it. The
-registry (~/.config/mop/projects) is the only answer to "which projects are
-set up": the playbook renders the NATS user puppet-<project> from it, and
-operators reach the project by their role in MOP_OPERATORS.
+registry lives on the server and is the only answer to "which projects are
+set up"; every subcommand is an operator's verb of the cluster service
+(#117), so it works from any machine with the admin role, not only from the
+controller. Operators reach a project by their role in MOP_OPERATORS.
 
 Registering used to be a side effect of `mop deploy <origin>` and there was
 no way to take a project off (#79). `mop deploy` no longer takes origins.

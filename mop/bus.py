@@ -364,6 +364,35 @@ def ask(master_id, verb, timeout=TIMEOUT, project=None, **fields):
                 verb, timeout, **fields)
 
 
+def can_login(user, password, port, host="127.0.0.1", tries=10):
+    """Пускает ли шина этого пользователя. Громко, если нет.
+
+    Отдельным соединением и с повторами: SIGHUP nats-server отрабатывает не
+    мгновенно, а о битом конфиге не сообщает вовсе (#117) -- подключение и
+    есть проверка, что новый пользователь заведён."""
+    import time
+    import nats
+
+    async def once():
+        async def quiet(_e):
+            pass
+        nc = await nats.connect(servers=[f"nats://{host}:{port}"], user=user,
+                                password=password, connect_timeout=2,
+                                allow_reconnect=False, max_reconnect_attempts=0,
+                                error_cb=quiet)
+        await nc.close()
+
+    last = None
+    for _ in range(tries):
+        try:
+            asyncio.run(once())
+            return
+        except Exception as e:
+            last = e
+            time.sleep(0.5)
+    raise BusError(f"{user} cannot log in to the bus: {last or 'refused'}")
+
+
 def ask_cluster(verb, timeout=TIMEOUT, project=None, **fields):
     """Глагол сервису кластера (mop-cluster). -> разобранный ответ (dict)."""
     return _ask(cluster_subject(project), "cluster service",

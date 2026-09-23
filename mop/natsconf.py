@@ -137,6 +137,22 @@ def write(text, path=USERS):
     return True
 
 
+def apply(names, creds_dir, path=USERS):
+    """Файл пользователей по реестру: пароли, текст, запись.
+    -> (изменился ли, {проект: пароль}). Reload -- дело вызывающего."""
+    pw = passwords(names, creds_dir)
+    return write(render(read_base(), pw), path), pw
+
+
+def read_users(path=USERS):
+    """Текст файла, либо None -- его ещё нет. Нужен для отката."""
+    try:
+        with open(path) as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
 def reload():
     """SIGHUP nats-server: он работает под пользователем пула (#115), и сигнал
     свой uid шлёт без посредников. О битом конфиге SIGHUP не сообщает --

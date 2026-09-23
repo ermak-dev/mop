@@ -3,9 +3,8 @@
 # `mop cluster users` (mop/natsconf.py). Отсюда -- только то, что знает один
 # контроллер: люди, сервисы и узлы с их паролями, и реестр проектов.
 #
-# Отдельный файл задач, потому что его играют и полная установка, и узкий
-# прогон `mop project add|delete` (deploy/projects.yml): разойдясь, один
-# заводил бы проект, а другой его снимал.
+# Проекты заводит и снимает сервис кластера (#117) тем же `mop/natsconf.py`,
+# что и команда ниже: второго рендерера нет.
 
 # Пароли -- здесь, на контроллере: lookup('password') заводит файл при
 # первом прогоне и возвращает то же значение дальше. Словари -- set_fact в
@@ -39,16 +38,26 @@
     mode: "0600"
   no_log: true
 
-# Реестр проектов -- на сервер. Пока проекты заводит `mop project add` на
-# контроллере, реестр контроллера и есть правда, и он переписывает
-# серверный; глаголы сервиса (#117) перевернут это направление.
-- name: Registry of the projects, on the server
+# Реестр проектов живёт на сервере и правится глаголами сервиса (#117).
+# Переход: сервер без реестра получает копию контроллера -- один раз, и
+# дальше она не переписывается (force: no), иначе прогон стирал бы проекты,
+# заведённые глаголом. На чистой установке копии нет -- реестр пуст.
+- name: Registry of the projects on the controller
+  ansible.builtin.stat:
+    path: "{{ lookup('env', 'HOME') }}/.config/mop/projects"
+  delegate_to: localhost
+  become: no
+  register: controller_registry
+
+- name: Registry of the projects, on the server, once
+  when: controller_registry.stat.exists
   ansible.builtin.copy:
     src: "{{ lookup('env', 'HOME') }}/.config/mop/projects"
     dest: "{{ MOP_HOME }}/.config/mop/projects"
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
     mode: "0600"
+    force: no
 
 - name: Users file of the bus, written by the server
   become: yes
