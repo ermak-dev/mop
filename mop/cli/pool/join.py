@@ -1,12 +1,11 @@
 """log in to a server's bus as yourself: mop join [--server ADDRESS] [LOGIN]
 
-Inside a working copy, what is not named is taken from it (#125):
-
-  server   --server, else MOP_SERVER_LAN from the environment, else the
-           clone's binding (git config mop.server), else the one server you
-           are already logged in to whose registry has this clone's origin,
-           else MOP_SERVER_LAN from .env
-  login    LOGIN, else the login already kept for that server, else $USER
+What is not named comes from the command's context (#131): the working
+copy's binding (git config mop.server, mop.user), over it the environment
+(MOP_SERVER_LAN, MOP_BUS_USER), over it the command line (--server, LOGIN).
+With no server in any of them: the one server you are already logged in to
+whose registry has this clone's origin, else MOP_SERVER_LAN from .env. With
+no login: the one kept for that server, else $USER.
 
 The password is asked for (or read from MOP_BUS_PASSWORD; on the controller,
 from its own secrets/nats-op-<name>.pass) and checked by connecting before
@@ -20,9 +19,9 @@ sent, and its fingerprint printed — compare it on the controller:
 openssl x509 -noout -fingerprint -sha256 -in ~/.config/mop/secrets/tls.pem
 
 The password stays in ~/.config/mop/servers/<server>/: one login per person
-per server, for every project. The working copy only remembers which server
-it belongs to (git config mop.server, not committed), and every mop command
-run in it goes there. --user NAME is the old spelling of LOGIN.
+per server, for every project. The working copy remembers only the server
+and the login (git config mop.server, mop.user, not committed), and every
+mop command run in it goes there. --user NAME is the old spelling of LOGIN.
 """
 import getpass
 import glob
@@ -31,7 +30,7 @@ import subprocess
 import sys
 
 from mop.cli import lib
-from mop import bus, config, creds, operators
+from mop import bus, config, context, creds, operators
 
 
 def parse(argv):
@@ -90,32 +89,42 @@ def serving(origin):
 
 
 def main(argv):
-    explicit, login = parse(argv)
+    """Сервер и логин -- из контекста команды (#131): клон < окружение <
+    командная строка; `--server` снимает диспетчер, логин -- здесь."""
+    explicit_server, login = parse(argv)
+    ctx = context.current()
+    if explicit_server:                       # `mop join --server` мимо диспетчера
+        ctx = context.resolve({"server": explicit_server}, os.environ,
+                              context.clone_binding())
     in_clone = git("rev-parse", "--show-toplevel") is not None
     origin = lib.cwd_origin() if in_clone else None
-    bound = git("config", "--get", config.CLONE_SCOPED["MOP_SERVER_LAN"]) if in_clone else None
-    explicit = explicit or os.environ.get("MOP_SERVER_LAN")
-    found = serving(origin) if origin and not (explicit or bound) else []
-    # .env -- последним: config.get здесь отдал бы привязку клона раньше него.
+    src = ctx.sources.get("server")
+    explicit = ctx.server if src in ("cli", "env") else None
+    bound = ctx.server if src == "clone" else None
+    found = serving(origin) if origin and not ctx.server else []
     default = config._node().get("MOP_SERVER_LAN") or config._load().get("MOP_SERVER_LAN")
     try:
         host = creds.pick_server(explicit, bound, found, default)
     except ValueError as e:
         lib.usage(str(e))
     # Дальше весь процесс -- про этот сервер: каталог кредов, TLS-прокси.
-    os.environ["MOP_SERVER_LAN"] = host
-    dest = creds.server_dir(host)
-    stored = creds.operator(dest)
-    login = creds.pick_login(login or os.environ.get("MOP_BUS_USER"),
-                             (stored or {}).get("user"), os.environ.get("USER"))
-    try:
-        if not (stored and stored.get("user") == login and _still_valid(host)):
-            _login(host, login, dest)
-    except RuntimeError as e:
-        lib.fail(str(e))
-        return 1
-    if in_clone and bound != host:
-        git("config", "--local", config.CLONE_SCOPED["MOP_SERVER_LAN"], host)
+    with context.use(context.resolve({"server": host}, {}, {})):
+        dest = creds.server_dir(host)
+        stored = creds.operator(dest)
+        login = creds.pick_login(login or ctx.user, (stored or {}).get("user"),
+                                 os.environ.get("USER"))
+        try:
+            if not (stored and stored.get("user") == login and _still_valid(host)):
+                _login(host, login, dest)
+        except RuntimeError as e:
+            lib.fail(str(e))
+            return 1
+    # Клон запоминает свой сервер и логин (#125, #131); пароль -- нет.
+    if in_clone:
+        clone = context.clone_binding()
+        for name, value in (("server", host), ("user", login)):
+            if clone.get(name) != value:
+                git("config", "--local", context.FIELDS[name][0], value)
     return 0
 
 
