@@ -24,7 +24,7 @@ INNER = ".cache/mop-wrapper.sh"
 # Что внешний врапер переливает внутрь тела. Список закрыт: открытый означал бы
 # дыру, через которую в тело уехало бы окружение узла целиком — вместе с тем,
 # чего папету видеть не положено.
-CARRY = ("PU_NAME", "PU_ORIGIN", "PU_PROJECT", "PU_SHARD", "PU_SEED",
+CARRY = ("PU_NAME", "PU_ORIGIN", "PU_PROJECT", "PU_PROJECT", "PU_SEED",
          "PU_CONTINUE", "PU_LLM", "PU_LLM_ENV", "PU_LLM_KEY_VAR",
          "PU_LLM_AUTH_VAR", "HOME", "PATH")
 
@@ -59,30 +59,30 @@ def main(argv):
         sys.exit(f"{name!r} doesn't look like a puppet name")
     d = driver.current()
 
-    r = asyncio.run(d.ensure(name, {"shard": driver.shard_of_name(name)}))
+    r = asyncio.run(d.ensure(name, {"project": driver.project_of_name(name)}))
     if r.get("error"):
         sys.exit(f"no body for {name}: {r['error']}")
     print(f"{name}: body {r.get('body') or 'the node itself'}"
           + (f" at {r['address']}" if r.get("address") else ""), flush=True)
 
-    # Bootstrap песочницы (#62): сервер играет .mop/bootstrap.yaml шарда, а
+    # Bootstrap песочницы (#62): сервер играет .mop/bootstrap.yaml проекта, а
     # узел ждёт ответа до того, как откроет tmux. Отказ — это отказ: выход
     # ненулём, Nomad перезапускает, ростер показывает падение. Папет не
     # поднимается «наполовину» с окружением, которого нет.
     try:
-        b = bootstrap.run(d, name, driver.shard_of_name(name))
+        b = bootstrap.run(d, name, driver.project_of_name(name))
     except (RuntimeError, bus.BusError) as e:
         sys.exit(f"bootstrap of {name} failed: {e}")
     print(f"{name}: bootstrap "
           + (f"played in {b.get('seconds')}s" if b.get("played")
-             else "none for the shard"), flush=True)
+             else "none for the project"), flush=True)
 
     # Кред папета приезжает тем же ответом (#83): узел перестаёт хранить его
     # в покое — файл появляется в теле ровно на время жизни папета и ровно
     # для его проекта. Пока прогон кладёт bus-<проект>.json на узлы сам,
     # ответ без кредов — не отказ: врапер возьмёт файл оттуда, и это переход.
     if b.get("bus"):
-        project = driver.shard_of_name(name)
+        project = driver.project_of_name(name)
         path = f"{driver.HOME}/.config/mop/bus-{project}.json"
         w = asyncio.run(d.push(name, path,
                                json.dumps(b["bus"]).encode() + b"\n"))

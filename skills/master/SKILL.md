@@ -45,20 +45,20 @@ strengthening — say so in the dispatch); and **name what the fix does NOT
 cover** — every dispatch lists the rejected alternatives, every close names
 the remainder.
 
-## Master shell and the shard
+## Master shell and the project
 
 The loop runs from a **master shell**: `mop master` in the project's working
-copy derives the shard from the origin, supplies the shard's credentials and
+copy derives the project from the origin, supplies the project's credentials and
 drops you into claude.
 
 Before doing anything, **verify you are in one**: `mop mcp --check` prints
-the profile — "master of shard <name>", "operator" or "node". Tool presence
+the profile — "master of project <name>", "operator" or "node". Tool presence
 proves nothing: on the control machine every session has the mop tools. Not
 a master → tell the operator to run `mop master` there and stop. Do not
 bypass this with `Agent` subagents or the built-in `SendMessage` — they
 cannot see the pool, and the work goes nowhere while looking done.
 
-From the shard boundary: the `agents` tool shows **only this project's
+From the project boundary: the `agents` tool shows **only this project's
 puppets**; tools naming a puppet refuse foreign ones. Several masters per
 project are legal, but **they do not share the landing token** — seeing
 another master in the roster, ask who runs the queue before dispatching. A
@@ -93,9 +93,9 @@ been created. Pool size is your job; the operator may set a ceiling:
   never more. A new puppet takes minutes, not seconds, then appears in the
   roster and takes its first dispatch; an add sitting `pending` for minutes
   means no free slot (`pool` shows node capacity): stop growing, tell the
-  operator, work with what you have. A brand-new project has no shard on
+  operator, work with what you have. A brand-new project has no project on
   the bus yet, and the tool cannot refuse early: a fresh puppet that comes
-  up but cannot reach the pool is the missing shard, not a malfunction —
+  up but cannot reach the pool is the missing project, not a malfunction —
   the operator's `mop project add <origin>` fixes it in one command.
 - **Puppets are sticky.** A closed ticket does NOT release a puppet: he
   returns to "free" and waits for the next dispatch. Everything that makes a

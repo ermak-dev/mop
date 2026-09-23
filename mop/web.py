@@ -10,7 +10,7 @@
 десятые доли секунды, обмер места — du по target-каталогам с сотнями тысяч
 inode, расход токенов — разбор транскриптов в каждом теле. Спрашивать всё
 одним кругом значило бы показывать состояние с опозданием на самый медленный
-опрос. Событие на шине (mop.<шард>.events) сдвигает быстрый круг вперёд:
+опрос. Событие на шине (mop.<проект>.events) сдвигает быстрый круг вперёд:
 после `send` папет читается занятым через секунду, а не через четверть
 минуты.
 
@@ -62,14 +62,14 @@ def counts(rows):
     return out
 
 
-def shards(rows):
-    """Строки по шардам: [{name, puppets, counts}], шарды и папеты по имени.
+def projects(rows):
+    """Строки по проектам: [{name, puppets, counts}], проекты и папеты по имени.
     Корзина кладётся в строку (`kind`), чтобы страница красила по ней."""
     by = {}
     for r in rows:
         origin = r.get("origin") or "?"
-        shard = puppets.shard_of(origin) if origin != "?" else "?"
-        by.setdefault(shard, []).append({**r, "kind": classify(r)})
+        project = puppets.project_of(origin) if origin != "?" else "?"
+        by.setdefault(project, []).append({**r, "kind": classify(r)})
     return [{"name": s, "puppets": sorted(ps, key=lambda r: r["name"]),
              "counts": counts(ps)} for s, ps in sorted(by.items())]
 
@@ -101,7 +101,7 @@ def snapshot(rows, nodes, usage, per_puppet, journal, errors, at):
     Диагностики здесь нет (решение оператора 2026-09-22): она стоила
     запроса к Nomad на каждого папета каждым кругом, а лечение всё равно
     остаётся за `mop doctor`; больной папет и так виден корзиной sick."""
-    return {"at": at, "shards": shards(rows), "counts": counts(rows),
+    return {"at": at, "projects": projects(rows), "counts": counts(rows),
             "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "journal": journal, "errors": errors}
 
@@ -243,7 +243,7 @@ def journal_entry(msg):
     """Событие с шины -> запись журнала. Поля, которых нет, — прочерк, а
     не KeyError в потоке шины."""
     return {"event": msg.get("event") or "?", "node": msg.get("node") or "-",
-            "name": msg.get("name") or "-", "shard": msg.get("shard") or "-",
+            "name": msg.get("name") or "-", "project": msg.get("project") or "-",
             "text": msg.get("text") or ""}
 
 

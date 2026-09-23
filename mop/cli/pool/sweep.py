@@ -5,7 +5,7 @@ is in no job is an orphan, and on a hypervisor an orphan is a running
 container holding memory and disk that nothing accounts for.
 
 Run this as the operator, not from a master shell: what stands on a node is
-a fact about every tenant, not about one shard — the same reason `mop gc`
+a fact about every tenant, not about one project — the same reason `mop gc`
 and `mop disk` live outside a master's reach.
 
 Two kinds, deliberately of different weight. An ORPHAN is destroyed: its
@@ -44,7 +44,7 @@ def main(argv):
     for n, why in silent.items():
         print(f"  ! {n}: {why} — not swept, its bodies are unknown")
 
-    # Все джобы пула, а не только своего шарда: сирота чужого проекта — такой
+    # Все джобы пула, а не только своего проекта: сирота чужого проекта — такой
     # же занятый контейнер, и «не мой» не делает его чьим-то.
     heard = [n for n in nodes if n not in silent]
     if not heard:

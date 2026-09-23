@@ -4,7 +4,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# Под root ради /etc/nats/nats-server.conf: внутри пароли всех шардов, и файл
+# Под root ради /etc/nats/nats-server.conf: внутри пароли всех проектов, и файл
 # читается только root'ом. (Раньше причиной был ключ letsencrypt; TLS снят,
 # причина осталась другая.)
 ExecStart=/usr/local/bin/nats-server -c /etc/nats/nats-server.conf

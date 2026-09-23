@@ -21,7 +21,7 @@
   vars:
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_nodes: "{{ groups['puppet'] }}"
-    shards: "{{ mop_shards | default([]) }}"
+    projects: "{{ mop_projects | default([]) }}"
   tasks:
     - ansible.builtin.include_role:
         name: bus
@@ -34,7 +34,7 @@
 
   vars:
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
-    shards: "{{ mop_shards | default([]) }}"
+    projects: "{{ mop_projects | default([]) }}"
     # Адрес шины -- LAN-адрес сервера, тот же, что в полной игре: публичное
     # имя резолвится в роутер, который не делает хайрпин.
     nats_addr: "nats://{{ MOP_SERVER_LAN }}:{{ MOP_NATS_PORT }}"

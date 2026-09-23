@@ -9,14 +9,14 @@
 Всё выводится из имени. Имя тела = имя папета = hostname контейнера; VMID и
 адрес считаются из него чистыми функциями. VMID в модель mop не входит — это
 деталь драйвера: второе имя для того же означало бы второе место, отвечающее
-на вопрос «чей это папет», ровно то, от чего предостерегает правило о шарде.
+на вопрос «чей это папет», ровно то, от чего предостерегает правило о проекте.
 Отсюда же берётся проверяемость: ни vmid_of, ни address_of не ходят никуда,
 и обе проверены в tests/driver.py.
 
 Две дороги в тело, и обе названы:
   основная  — ssh под ключом узла (не мастера: мастер и так ходит ssh на узлы,
               но вторая дорога в тело шла бы мимо единственного места, где
-              проверяется шардирование — агента);
+              проверяется проектирование — агента);
   аварийная — `mop-pve exec` через root-обёртку на гипервизоре, которая сама
               проверяет диапазон VMID и что hostname тела начинается с pu-.
               Нужна ровно тогда, когда у тела сломана сеть, sshd или права на
@@ -34,7 +34,7 @@ import os
 import shlex
 
 from .. import config
-from . import HOME, PREFIX, bad_name, sh, shard_of_name, valid_name, why
+from . import HOME, PREFIX, bad_name, sh, project_of_name, valid_name, why
 
 USER = config.get("MOP_USER")
 # Тело — вещь сама по себе: у него свой $HOME, свои процессы и свой ssh.
@@ -49,8 +49,8 @@ TEMPLATE = config.get("MOP_PVE_TEMPLATE")
 BRIDGE = config.get("MOP_PVE_BRIDGE")
 SUBNET = config.get("MOP_PVE_SUBNET")
 # Память, ядра и диск тела драйвер не задаёт: тело наследует их от образа
-# шарда, а в образ их вписывает сборка — из `.mop` самого проекта, подрезанного
-# потолком узла. Носителем шардовых размеров становится образ, и на узел не
+# проекта, а в образ их вписывает сборка — из `.mop` самого проекта, подрезанного
+# потолком узла. Носителем проектовых размеров становится образ, и на узел не
 # едет ни одного числа. Поставь их здесь — и значения установки затёрли бы
 # просьбу проекта.
 #
@@ -58,8 +58,8 @@ SUBNET = config.get("MOP_PVE_SUBNET")
 # `pct` исполняется демоном, а не потомком задачи, поэтому cgroup задачи не
 # ограничивает ничего, а MemoryMB в спеке вырождается в бухгалтерию слотов.
 
-# Диапазон VMID: первые 900 — тела, последние 100 — шаблоны шардов. Разводить
-# их обязательно: снос папета глаголом destroy иначе унёс бы образ шарда, и
+# Диапазон VMID: первые 900 — тела, последние 100 — шаблоны проектов. Разводить
+# их обязательно: снос папета глаголом destroy иначе унёс бы образ проекта, и
 # заметили бы это на следующей сборке, а не сразу.
 _BASE = config.num("MOP_PVE_VMID_BASE")
 BODY_MIN, BODY_MAX = _BASE, _BASE + 899
@@ -103,23 +103,23 @@ def vmid_of(name):
     return BODY_MIN + h % (BODY_MAX - BODY_MIN + 1)
 
 
-def template_name(shard):
-    """Имя шаблона шарда. Под охраной префикса pu- (обёртка на гипервизоре
+def template_name(project):
+    """Имя шаблона проекта. Под охраной префикса pu- (обёртка на гипервизоре
     пускает только такие), но не имя папета: иначе ростер тел показал бы образ
     живым папетом."""
-    return f"{PREFIX}tmpl-{shard}"
+    return f"{PREFIX}tmpl-{project}"
 
 
-def template_vmid(shard):
-    h = int(hashlib.sha1(shard.encode()).hexdigest()[:8], 16)
+def template_vmid(project):
+    h = int(hashlib.sha1(project.encode()).hexdigest()[:8], 16)
     return TMPL_MIN + h % (TMPL_MAX - TMPL_MIN + 1)
 
 
-def stage_name(shard):
-    """Имя СБОРОЧНОГО тела шарда (#60): в нём играется плейбук, и только
+def stage_name(project):
+    """Имя СБОРОЧНОГО тела проекта (#60): в нём играется плейбук, и только
     потом оно становится образом. Под тем же префиксом pu-tmpl-, чтобы
     ростер тел его не показывал папетом, а `mop sweep` — назвал, но не снёс."""
-    return f"{template_name(shard)}-build"
+    return f"{template_name(project)}-build"
 
 
 def parse_list(text):
@@ -134,26 +134,26 @@ def parse_list(text):
     return out
 
 
-def stage_vmid(shard, listing):
+def stage_vmid(project, listing):
     """Номер сборочного тела по тому, что стоит на узле (parse_list).
 
     Не хеш, а свободный номер: сборочное тело живёт минуты, а хеш второго
-    имени столкнулся бы с образом соседнего шарда с вероятностью один к ста
-    — и молча. Стоящее тело с именем сборки этого шарда возвращается КАК
+    имени столкнулся бы с образом соседнего проекта с вероятностью один к ста
+    — и молча. Стоящее тело с именем сборки этого проекта возвращается КАК
     ЕСТЬ: это оборванная сборка, и следующий прогон обязан продолжить в
     ней, а не заводить ещё одну. Иначе — старший свободный номер диапазона
-    шаблонов, не совпадающий с номером образа: два номера одному шарду
+    шаблонов, не совпадающий с номером образа: два номера одному проекту
     нужны одновременно, пока образ подменяется."""
-    mine = template_vmid(shard)
+    mine = template_vmid(project)
     taken = {}
     for vmid, name, _ in listing:
         taken[vmid] = name
-        if name == stage_name(shard):
+        if name == stage_name(project):
             return vmid
     for vmid in range(TMPL_MAX, TMPL_MIN - 1, -1):
         if vmid != mine and vmid not in taken:
             return vmid
-    raise RuntimeError(f"no free vmid for a build body of {shard} in "
+    raise RuntimeError(f"no free vmid for a build body of {project} in "
                        f"{TMPL_MIN}..{TMPL_MAX}: sweep old images (mop sweep)")
 
 
@@ -189,12 +189,12 @@ def address_of(name):
     return address_of_vmid(vmid_of(name))
 
 
-def template_address(shard):
-    """Адрес тела шарда, ПОКА ОНО СОБИРАЕТСЯ.
+def template_address(project):
+    """Адрес тела проекта, ПОКА ОНО СОБИРАЕТСЯ.
 
     Считается из VMID шаблона тем же способом, что и у живого тела, и это
     не косметика. Раньше здесь стоял «шлюз плюс один», один и тот же для
-    всех шардов, а рядом — довод, что пересечься адресам негде: живые тела
+    всех проектов, а рядом — довод, что пересечься адресам негде: живые тела
     якобы идут выше. Довод неверен дважды. Две сборки на одном гипервизоре
     всегда садились на один адрес (поймано 22.09: rugent и rudesktop
     одновременно, оба 10.77.0.2 — ssh уходил в чужой контейнер, и прогон не
@@ -202,7 +202,7 @@ def template_address(shard):
     стороны живы, таймаута нет). И «выше» тоже не так: address_of начинает
     ровно с сети+2, то есть со шлюза плюс один, — тело с VMID в начале
     диапазона получило бы тот же адрес."""
-    return address_of_vmid(template_vmid(shard))
+    return address_of_vmid(template_vmid(project))
 
 
 def cidr_of(name):
@@ -398,20 +398,20 @@ async def _hostname(vmid):
 
 
 async def ensure(name, params=None):
-    """Тело для папета: клон шаблона шарда, лимиты, адрес, старт.
+    """Тело для папета: клон шаблона проекта, лимиты, адрес, старт.
 
     Идемпотентно: тело уже стоит — только поднимаем. Это и есть штатный путь,
     потому что `ensure` зовёт врапер на каждом подъёме папета, а рестарт
     аллокации случается куда чаще пересоздания.
 
-    Креды шарда кладутся внутрь здесь: шард в этот момент известен, а папет
+    Креды проекта кладутся внутрь здесь: проект в этот момент известен, а папет
     без кредов шины читается мастером как живой, но молчащий — худший из
     отказов. `push` обёрткой, а не по ssh: на свежем теле ssh ещё не
     поднялся."""
     params = params or {}
     if not valid_name(name):
         return {"error": bad_name(name)}
-    shard = params.get("shard") or shard_of_name(name)
+    project = params.get("project") or project_of_name(name)
     vmid = vmid_of(name)
 
     standing = await _hostname(vmid)
@@ -422,12 +422,12 @@ async def ensure(name, params=None):
                          f"rename or widen MOP_PVE_VMID_BASE"}
     created = False
     if not standing:
-        src = template_vmid(shard)
+        src = template_vmid(project)
         out, code = await _pve("clone", src, vmid, name, STORAGE, cidr_of(name),
                                GATEWAY, BRIDGE)
         if code not in (0, None):
             return {"error": f"no body for {name}: {why(out, code)}; "
-                             f"build the shard's image: mop driver build {shard}"}
+                             f"build the project's image: mop driver build {project}"}
         created = True
         await _forget_host_key(name)
     else:
@@ -453,7 +453,7 @@ async def ensure(name, params=None):
     r = await _sync_package(name, vmid)
     if r.get("error"):
         return r
-    r = await _seed(name, vmid, shard)
+    r = await _seed(name, vmid, project)
     if r.get("error"):
         return r
     return {"name": name, "body": vmid, "created": created,
@@ -501,7 +501,7 @@ async def _sync_package(name, vmid):
     return {}
 
 
-def _seed_files(shard):
+def _seed_files(project):
     """Что узел переливает в тело на каждом подъёме: [(путь, режим)].
 
     Путь один и тот же с обеих сторон: у драйвера host папет живёт прямо в
@@ -512,19 +512,19 @@ def _seed_files(shard):
     Список закрыт (настройка MOP_BODY_SEED) и собран из машины, а не из
     проекта мастера, — тот же довод, по которому закрыт WRITABLE у агента.
 
-    Креды шарда идут отдельной строкой: их имя зависит от шарда, а шард
+    Креды проекта идут отдельной строкой: их имя зависит от проекта, а проект
     известен только здесь. Без них папет поднимется и будет молчать — худший
     из отказов, потому что мастеру он читается как живой."""
-    out = [(f"{HOME}/.config/mop/bus-{shard}.json", "600")]
+    out = [(f"{HOME}/.config/mop/bus-{project}.json", "600")]
     for rel in (p.strip() for p in config.get("MOP_BODY_SEED").split(",")):
         if rel:
             out.append((f"{HOME}/{rel}", "600"))
     return out
 
 
-async def _seed(name, vmid, shard):
+async def _seed(name, vmid, project):
     """Перелить в тело то, без чего папет поднимется и будет молчать."""
-    for path, mode in _seed_files(shard):
+    for path, mode in _seed_files(project):
         if not os.path.exists(path):
             # Нет — не отказ: ключей LLM у профиля claude не бывает вовсе, а
             # ключ узла зовётся то id_rsa, то id_ed25519.
@@ -543,7 +543,7 @@ async def admit(name, pubkey):
     в нём есть всегда — иначе, выпуская сервер, узел запер бы тело от себя.
 
     Только на время: постоянный ключ в образе был бы второй дорогой к телу
-    мимо агента, то есть мимо единственной проверки шардирования, — ровно
+    мимо агента, то есть мимо единственной проверки проектирования, — ровно
     то, от чего отказались для ключа мастера при сборке образа."""
     if not valid_name(name):
         return {"error": bad_name(name)}

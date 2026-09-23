@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Проверка сборки образа шарда без пула: python3 tests/image.py
+"""Проверка сборки образа проекта без пула: python3 tests/image.py
 
 Чистая часть сборки — что уезжает плейбуку в --extra-vars из манифеста.
 Ошибка тихая и уже случалась (#26): None-половина, переданная как null,
 не подменяется `default('')` в условиях плейбука, и len(None) ронял сборку
-шарда, у которого есть только задачи. Поэтому половины без содержимого не
+проекта, у которого есть только задачи. Поэтому половины без содержимого не
 передаются вовсе, и это свойство держит эта проверка (#49).
 """
 import os
@@ -16,7 +16,7 @@ from mop import image  # noqa: E402
 
 # В образ едет только sandbox (#61): bootstrap играется при старте песочницы
 # сервером, и в сборке ему делать нечего.
-GOT = {"shard": "proj", "asks": {"MOP_MEM_MB": "2048"}, "alien": [], "legacy": [],
+GOT = {"project": "proj", "asks": {"MOP_MEM_MB": "2048"}, "alien": [], "legacy": [],
        "sandbox_vars": None, "sandbox_tasks": "/tmp/x/sandbox-tasks.yml",
        "bootstrap_vars": "/tmp/x/bootstrap-vars.yml",
        "bootstrap_tasks": "/tmp/x/bootstrap-tasks.yml"}
@@ -25,16 +25,22 @@ GOT = {"shard": "proj", "asks": {"MOP_MEM_MB": "2048"}, "alien": [], "legacy": [
 def main():
     failed = 0
     extra = image.extra_vars("git@h:g/proj.git", GOT)
-    want = {"mop_shard": "proj", "mop_origin": "git@h:g/proj.git",
-            "mop_shard_asks": {"MOP_MEM_MB": "2048"},
-            "mop_shard_tasks": "/tmp/x/sandbox-tasks.yml"}
-    if extra != want:
+    want = {"mop_project": "proj", "mop_origin": "git@h:g/proj.git",
+            "mop_project_asks": {"MOP_MEM_MB": "2048"},
+            "mop_project_tasks": "/tmp/x/sandbox-tasks.yml"}
+    if {k: v for k, v in extra.items() if not k.startswith("mop_shard")} != want:
         failed += 1
         print(f"FAIL extra_vars: {extra} != {want}")
-    if "mop_shard_vars" in extra:
+    # Прежние имена едут рядом, пока идёт переименование (#85): переменные
+    # прогона видны задачам проекта в его `.mop`, и уронить их сразу значит
+    # молча сломать чужой манифест.
+    if extra.get("mop_shard") != "proj" or "mop_shard_asks" not in extra:
+        failed += 1
+        print(f"FAIL extra_vars: the old names must still travel: {extra}")
+    if "mop_project_vars" in extra or "mop_shard_vars" in extra:
         failed += 1
         print("FAIL extra_vars: a None half must be absent, not null")
-    # Пересборка — операция над ШАРДОМ (#60): тела шарда на контейнерных
+    # Пересборка — операция над ПРОЕКТОМ (#60): тела проекта на контейнерных
     # узлах сносятся до сборки (у шаблона с живым клоном не отнять место), и
     # занятый папет — отказ, если не сказано --force. Тела на узлах, где тело
     # равно узлу, сборка не касается вовсе.

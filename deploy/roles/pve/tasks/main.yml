@@ -99,8 +99,8 @@
 # ── ключ узла к своим телам ──────────────────────────────────────────
 # Ключ узла, не мастера. Мастер и так ходит ssh на узлы, но его ключ в
 # образе создал бы вторую дорогу к телу -- мимо единственного места, где
-# проверяется шардирование. Агент сверяет шард субъекта с настоящим origin
-# клона; ssh о шардах не знает ничего.
+# проверяется проектирование. Агент сверяет проект субъекта с настоящим origin
+# клона; ssh о проектах не знает ничего.
 - name: A keypair of its own for reaching the bodies
   become_user: "{{ MOP_USER }}"
   ansible.builtin.command:
@@ -117,7 +117,7 @@
     modification_time: preserve
 
 # ── базовый образ ────────────────────────────────────────────────────
-- name: The base image the shard templates grow from
+- name: The base image the project templates grow from
   ansible.builtin.shell: |
     set -e
     vol={{ MOP_PVE_TEMPLATE }}

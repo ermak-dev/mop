@@ -1,6 +1,6 @@
 """Реестр проектов пула: кто заведён. Данные, без печати (печатает `mop project`).
 
-Проект (он же шард) — один репозиторий, один срез пула, один мастер. По
+Проект (он же проект) — один репозиторий, один срез пула, один мастер. По
 этому списку плейбук заводит пользователей NATS `master-<проект>` и
 `puppet-<проект>`: без записи здесь мастер не подключится к шине, а папет
 поднимется и будет читаться как «агент молчит» на пустом месте.
@@ -28,8 +28,8 @@ import os
 from . import bus, puppets
 
 FILE = os.path.expanduser("~/.config/mop/projects")
-# Память шардов до #79. Читается ровно один раз — при переносе в реестр.
-MEMORY = os.path.expanduser("~/.config/mop/shards")
+# Память проектов до #79. Читается ровно один раз — при переносе в реестр.
+MEMORY = os.path.expanduser("~/.config/mop/projects")
 
 
 # ─── чистое: что реестр принимает, что теряет ────────────────────────────
@@ -54,7 +54,7 @@ def without_project(name, known):
     вердикт означает «такого в реестре не было» и печатается как отказ:
     опечатка в имени иначе читалась бы как успешное снятие."""
     dropped = sorted(l for l in known
-                     if l == name or puppets.shard_of(l) == name)
+                     if l == name or puppets.project_of(l) == name)
     return known - set(dropped), dropped
 
 
@@ -69,7 +69,7 @@ def merged(memory, roster):
 
 def names(origins, legacy):
     """Имена проектов для плейбука: basename origin'ов плюс легаси, по порядку."""
-    return sorted({puppets.shard_of(o) for o in origins} | set(legacy))
+    return sorted({puppets.project_of(o) for o in origins} | set(legacy))
 
 
 # ─── файл реестра ────────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ def write(lines, path=FILE):
 
 def roster_origins():
     """Origin'ы живых папетов. Нужны один раз — при переносе памяти."""
-    return {j["Meta"]["origin"] for j in puppets.jobs(shard=bus.ADMIN)
+    return {j["Meta"]["origin"] for j in puppets.jobs(project=bus.ADMIN)
             if (j.get("Meta") or {}).get("origin")}
 
 
@@ -116,4 +116,4 @@ def registry():
         write(lines)
         note = (f"{FILE}: registry created from {len(memory)} remembered and "
                 f"{len(live)} running project(s); {MEMORY} is no longer read")
-    return (*puppets.shard_ids(read()), note)
+    return (*puppets.project_ids(read()), note)

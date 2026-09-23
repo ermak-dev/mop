@@ -41,7 +41,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** A value specific to this machine is a setting whose default equals today's value, never a literal in the code
  - **MUST** A required setting with no sensible default goes in `config.REQUIRED`: silently walking into someone else's LAN is worse than a loud refusal
  - **MUST NOT** Nothing a specific project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is the installation's own `sandbox.yaml` and the projects' `.mop/sandbox.yaml` (baked) and `.mop/bootstrap.yaml` (played at every start)
- - **MUST** A shard is a project, and there is one definition: `puppets.shard_of`, the origin's basename without `.git`; puppet names are built from it too
+ - **MUST** A project has one definition: `puppets.project_of`, the origin's basename without `.git`; puppet names are built from it too. The word «shard» is gone (#85); it survives only as the Nomad node meta key `mop_shards`, which names what a node can serve
  - **MUST** Two layers: Nomad decides where a puppet stands, the bus decides how to talk to it. The Nomad token lives on the server and, through `mop join`, on operators' machines; it never reaches a node
  - **MUST** The server is the ansible controller and the operator's machine is not in the inventory: it gets the server's credentials with `mop join` into `~/.config/mop/servers/[address]/`, and `MOP_SERVER_LAN` in the environment retargets a master at another server
  - **MUST** Symlinks pointing in from outside are interfaces: `~/bin/mop`, `~/etc/nomad`, `~/etc/nats`, `~/.claude/skills/master`; a playbook is found by the path `~/etc/[name]/setup.yml`, and there is no name table anywhere
@@ -52,9 +52,9 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** The project's secrets live in `.env` and nowhere else; what generates itself (NATS passwords, the Nomad token, the claude.ai login) never lands there
  - **MUST** `.env` never travels to the nodes — rsync excludes it explicitly
  - **MUST** No secrets in a Nomad job spec: it is visible in the UI and stays in the cluster's state; keys go to the nodes as a file, the spec carries only variable names
- - **MUST** A puppet reaches the bus under its shard's credentials, not the node's: the agent sees who is being asked about, never who is asking
+ - **MUST** A puppet reaches the bus under its project's credentials, not the node's: the agent sees who is being asked about, never who is asking
  - **MUST** Nodes are given nothing beyond their subjects: a new need is an agent verb, not a privilege
- - **MUST** The node-level verb `disk` lives in the `admin` pseudo-shard only. `write` was taken out of that list deliberately — otherwise a shard's master cannot `mop login` its own puppets; that is safe exactly while both `WRITABLE` files are assembled from the machine, not from the master's project
+ - **MUST** The node-level verb `disk` lives in the `admin` pseudo-project only. `write` was taken out of that list deliberately — otherwise a project's master cannot `mop login` its own puppets; that is safe exactly while both `WRITABLE` files are assembled from the machine, not from the master's project
 
 ## Traps that cost debugging
 

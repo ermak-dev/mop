@@ -19,7 +19,7 @@ import os
 import sys
 
 from mop.cli import lib
-from mop import creds, manifest, puppets, shards
+from mop import creds, manifest, puppets, projects
 
 PLAYBOOK = "deploy/projects.yml"
 
@@ -28,13 +28,13 @@ def main(argv):
     if len(argv) != 1 or argv[0].startswith("-"):
         lib.usage(__doc__)
     origin = argv[0]
-    origins, legacy, note = shards.registry()
+    origins, legacy, note = projects.registry()
     if note:
         print(note, file=sys.stderr, flush=True)
     # Отказ на голое имя — здесь, до сетевых вызовов: origin'ом проект
     # заводится, им же режется манифест и им же клонируется папет.
-    lines, added = shards.with_origin(origin, origins | legacy)
-    name = puppets.shard_of(origin)
+    lines, added = projects.with_origin(origin, origins | legacy)
+    name = puppets.project_of(origin)
 
     # Недоступный origin валит команду громко: заведённый проект обязан
     # существовать, иначе пользователь на шине есть, а клонировать нечего.
@@ -42,12 +42,12 @@ def main(argv):
     needs_deploy = [k for k in ("sandbox_vars", "sandbox_tasks",
                                 "bootstrap_vars", "bootstrap_tasks") if got[k]]
 
-    shards.write(lines)
-    print(f"  {shards.FILE}: {name} "
+    projects.write(lines)
+    print(f"  {projects.FILE}: {name} "
           + ("registered" if added else "was already registered"))
 
     lib.section(f"ansible: {PLAYBOOK}")
-    rc = lib.play(PLAYBOOK, shards.names(*puppets.shard_ids(lines)))
+    rc = lib.play(PLAYBOOK, projects.names(*puppets.project_ids(lines)))
     if rc and rc != lib.UNREACHABLE:
         lib.fail(f"ansible exited {rc}; {name} is in the registry but not on the "
                  f"bus — run mop project add {origin} again")

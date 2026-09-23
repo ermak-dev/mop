@@ -84,12 +84,12 @@ def main():
         print("FAIL describe of a module without a docstring must be empty")
 
     # deploy на python (#76): чистое — отвергнутые старые цели, недостающие
-    # файлы MOP_BODY_EXTRA, имена шардов из origin'ов и легаси, --extra-vars.
-    # HYPOTHESIS: deploy на bash, зовёт mop config/shards/list подпроцессом.
+    # файлы MOP_BODY_EXTRA, имена проектов из origin'ов и легаси, --extra-vars.
+    # HYPOTHESIS: deploy на bash, зовёт mop config/projects/list подпроцессом.
     # SOLUTION: mop.cli.pool.deploy поверх библиотеки. STATUS: FIXED — see #76
     try:
         from mop.cli.pool import deploy
-        from mop import shards
+        from mop import projects
     except ImportError as e:
         print(f"FAIL {e}")
         return 1
@@ -106,19 +106,19 @@ def main():
     if deploy.missing_extras("", root) != []:
         failed += 1
         print("FAIL missing_extras of an empty setting must be empty")
-    if shards.names({"git@h:g/proj.git", "git@h:g/mop.git"}, {"legacy"}) != ["legacy", "mop", "proj"]:
+    if projects.names({"git@h:g/proj.git", "git@h:g/mop.git"}, {"legacy"}) != ["legacy", "mop", "proj"]:
         failed += 1
-        print(f"FAIL shards.names: {shards.names({'git@h:g/proj.git', 'git@h:g/mop.git'}, {'legacy'})}")
+        print(f"FAIL projects.names: {projects.names({'git@h:g/proj.git', 'git@h:g/mop.git'}, {'legacy'})}")
     # Списком, а не строкой: `--extra-vars mop_shards=[...]` ansible берёт как
     # строку и проходит по её символам, порождая пользователей `master-[`.
     ev = lib.play_vars(["mop", "proj"], {"proj": {"asks": {}}})
-    if json.loads(ev[0]) != {"mop_shards": ["mop", "proj"]} or json.loads(ev[1]) != {"mop_manifests": {"proj": {"asks": {}}}}:
+    if json.loads(ev[0]) != {"mop_projects": ["mop", "proj"]} or json.loads(ev[1]) != {"mop_manifests": {"proj": {"asks": {}}}}:
         failed += 1
         print(f"FAIL play_vars: {ev}")
     # Узкий прогон проектов (#79) идёт без манифестов: их читают слои узла и
     # тела, а не роль шины. Лишний --extra-vars пустым словарём стирал бы
     # манифесты, уже разложенные полной игрой.
-    if lib.play_vars(["mop"]) != [json.dumps({"mop_shards": ["mop"]})]:
+    if lib.play_vars(["mop"]) != [json.dumps({"mop_projects": ["mop"]})]:
         failed += 1
         print(f"FAIL play_vars without manifests: {lib.play_vars(['mop'])}")
 

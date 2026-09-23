@@ -3,7 +3,7 @@
 
 Дашборд (#66) — ещё один фронтенд над теми же данными, что `mop list`,
 `mop node` и `mop doctor`. Его единственная логика — как строки папетов
-раскладываются по шардам и в какую из пяти корзин попадает папет
+раскладываются по проектам и в какую из пяти корзин попадает папет
 (free/busy/sick/silent/down): на корзинах стоят счётчики в шапке страницы,
 и здесь они проверяются на той же матрице состояний, что и is_free.
 Сборщик, HTTP и страница проверяются только на живом пуле.
@@ -71,15 +71,15 @@ def check_classify():
     return failed
 
 
-def check_shards():
+def check_projects():
     failed = 0
-    got = web.shards(ROWS)
+    got = web.projects(ROWS)
     names = [s["name"] for s in got]
-    # По имени шарда, папеты внутри — по имени: порядок на странице стабилен,
+    # По имени проекта, папеты внутри — по имени: порядок на странице стабилен,
     # а puppet_rows_stream отдаёт строки по готовности.
     if names != ["?", "mop", "rugent"]:
         failed += 1
-        print(f"FAIL shards order: {names}")
+        print(f"FAIL projects order: {names}")
     by = {s["name"]: s for s in got}
     if [p["name"] for p in by["rugent"]["puppets"]] != ["pu-rugent-1", "pu-rugent-2"]:
         failed += 1
@@ -157,7 +157,7 @@ def check_snapshot():
     snap = web.snapshot(rows=ROWS, nodes=[{"name": "mate"}],
                         usage=[], per_puppet=[], journal=[], errors=["bus: down"],
                         at=1_000_000.0)
-    want = {"at", "shards", "counts", "nodes", "usage", "per_puppet",
+    want = {"at", "projects", "counts", "nodes", "usage", "per_puppet",
             "journal", "errors"}
     if set(snap) != want:
         failed += 1
@@ -169,7 +169,7 @@ def check_snapshot():
 
 
 def main():
-    failed = (check_classify() + check_shards() + check_sizes()
+    failed = (check_classify() + check_projects() + check_sizes()
               + check_journal() + check_usage() + check_snapshot())
     print("web: FAILED" if failed else "web: ok")
     return 1 if failed else 0

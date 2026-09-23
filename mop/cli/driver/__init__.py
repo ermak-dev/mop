@@ -4,8 +4,8 @@
   mop driver list                bodies standing on this node — no Nomad needed
   mop driver run <name>          raise the body and run the puppet inside it
   mop driver sweep [--dry]       destroy bodies with no puppet left in them
-  mop driver build [shard|origin] [--fresh] [--force]
-                                 bake the shard's image on the hypervisors;
+  mop driver build [project|origin] [--fresh] [--force]
+                                 bake the project's image on the hypervisors;
                                  no argument: this working copy, .mop as it lies
 
 `run` is what the job spec calls. The outer wrapper is driver-agnostic because

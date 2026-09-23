@@ -1,8 +1,8 @@
 ---
-# Образ шарда: `mop driver build <шард> [--fresh]`.
+# Образ проекта: `mop driver build <проект> [--fresh]`.
 #
 # Сборочное тело → то, чем обязано быть любое тело (роль body) → пакет mop →
-# файлы установки и манифест шарда → остановить → на место образа. Дальше
+# файлы установки и манифест проекта → остановить → на место образа. Дальше
 # каждое тело папета — клон этого образа: на lvm-thin связанный и мгновенный.
 #
 # Инкрементально (#60). Сборочное тело — ПОЛНАЯ копия нынешнего образа, и
@@ -10,7 +10,7 @@
 # — качается только новое. Раньше сборка начиналась со сноса образа и тянула
 # всё заново (claude CLI 234 МБ, chromium 658 МБ, rustup, ffmpeg): 40-90
 # минут по каналу 22.09, четыре раза за день, а обрыв посередине оставлял
-# шард вообще без образа. Теперь старый образ стоит, пока новый не готов.
+# проект вообще без образа. Теперь старый образ стоит, пока новый не готов.
 #
 # Почему копия, а не снятие флага шаблона: `pct set --template 0` флаг
 # снимает, но том образа остаётся базовым (base-*, read-only, k-флаг
@@ -19,7 +19,7 @@
 #
 # Цена инкремента названа: чистоты он не даёт — то, чего в плейбуке уже
 # нет, в образе останется. За этим `--fresh`: сборочное тело из базового
-# образа, всё заново. И тела шарда на этом узле сносятся до сборки (это
+# образа, всё заново. И тела проекта на этом узле сносятся до сборки (это
 # делает `mop driver build` на управляющей машине, mop/image.py): у образа с
 # живым клоном не отнять место.
 #
@@ -36,11 +36,11 @@
 # нужен ключ, которого у тела иначе нет. Ключ этот временный: он кладётся
 # рядом с ключом узла на время сборки и снимается перед тем, как образ
 # запечатан. Постоянного ключа мастера в образе нет — он был бы второй дорогой
-# к телу, мимо единственного места, где проверяется шардирование.
+# к телу, мимо единственного места, где проверяется проектирование.
 #
-# Run:  mop driver build <шард> [--fresh] [--force]
+# Run:  mop driver build <проект> [--fresh] [--force]
 
-- name: Bake the shard's image on the Proxmox nodes
+- name: Bake the project's image on the Proxmox nodes
   hosts: puppet
   become: no
   gather_facts: no
@@ -54,10 +54,10 @@
       ansible.builtin.meta: end_host
       when: mop_driver | default(MOP_DRIVER) != 'pve'
 
-    - name: A shard must be named
+    - name: A project must be named
       ansible.builtin.assert:
-        that: mop_shard | default('') | length > 0
-        fail_msg: "mop driver build <shard>"
+        that: mop_project | default('') | length > 0
+        fail_msg: "mop driver build <project>"
 
     # Номер и адрес спрашиваем у драйвера, а не считаем здесь второй раз:
     # разойдись два вычисления — `ensure` искал бы образ не там, и увидели бы
@@ -74,7 +74,7 @@
             print(pve.template_vmid(sys.argv[2]), pve.template_name(sys.argv[2]),
                   pve.GATEWAY, pve.PREFIXLEN, pve.template_address(sys.argv[2]))
           - "{{ playbook_dir }}/.."
-          - "{{ mop_shard }}"
+          - "{{ mop_project }}"
       delegate_to: localhost
       changed_when: false
       register: tmpl
@@ -88,7 +88,7 @@
         tmpl_ip: "{{ tmpl.stdout.split()[4] }}"
 
     # Что стоит на узле: есть ли образ, осталось ли сборочное тело от
-    # оборванного прогона, не стоят ли ещё тела шарда.
+    # оборванного прогона, не стоят ли ещё тела проекта.
     - name: What stands on this node
       ansible.builtin.command: "{{ pve }} list"
       register: standing
@@ -110,7 +110,7 @@
             v = pve.stage_vmid(sys.argv[2], listing)
             print(v, pve.stage_name(sys.argv[2]), pve.address_of_vmid(v))
           - "{{ playbook_dir }}/.."
-          - "{{ mop_shard }}"
+          - "{{ mop_project }}"
           - "{{ standing.stdout }}"
       delegate_to: localhost
       changed_when: false
@@ -123,18 +123,18 @@
         stage_ip: "{{ stage.stdout.split()[2] }}"
         have_image: "{{ standing.stdout_lines | select('search', ' ' ~ tmpl_name ~ ' ') | list | length > 0 }}"
         have_stage: "{{ standing.stdout_lines | select('search', ' ' ~ stage.stdout.split()[1] ~ ' ') | list | length > 0 }}"
-        shard_bodies: "{{ standing.stdout_lines | map('split') | map(attribute=1) | select('match', '^pu-' ~ (mop_shard | regex_escape) ~ '-[0-9]+$') | list }}"
+        project_bodies: "{{ standing.stdout_lines | map('split') | map(attribute=1) | select('match', '^pu-' ~ (mop_project | regex_escape) ~ '-[0-9]+$') | list }}"
 
-    # Образ с живым клоном не заменить, поэтому тел шарда на узле быть не
+    # Образ с живым клоном не заменить, поэтому тел проекта на узле быть не
     # должно. Их снимает `mop driver build` до плейбука (останов джобов и
     # снос тел); что осталось — сироты, и это дело `mop sweep`, а не
     # сборки: снести чужую работу молча хуже отказа.
-    - name: No body of the shard may still stand here
+    - name: No body of the project may still stand here
       ansible.builtin.assert:
-        that: shard_bodies | length == 0
+        that: project_bodies | length == 0
         fail_msg: >-
-          bodies of {{ mop_shard }} still stand on {{ inventory_hostname }}:
-          {{ shard_bodies | join(', ') }} — the image cannot be replaced under
+          bodies of {{ mop_project }} still stand on {{ inventory_hostname }}:
+          {{ project_bodies | join(', ') }} — the image cannot be replaced under
           them; orphans go with mop sweep, live puppets with mop driver build --force
 
     # Размеры тела: чего просит проект (mop.yaml), но не выше потолка этой
@@ -143,25 +143,25 @@
     # Потолки узловые (config.NODE_SCOPED), то есть переопределяются в
     # инвентаре на хосте.
     #
-    # Порядок старшинства целиком: узел > шард > установка > дефолт.
-    - name: How big a body of this shard may be here
+    # Порядок старшинства целиком: узел > проект > установка > дефолт.
+    - name: How big a body of this project may be here
       ansible.builtin.set_fact:
-        body_mem: "{{ [(mop_shard_asks | default({})).get('MOP_MEM_MB', MOP_MEM_MB) | int,
+        body_mem: "{{ [(mop_project_asks | default({})).get('MOP_MEM_MB', MOP_MEM_MB) | int,
                        MOP_BODY_MEM_CAP_MB | int] | min }}"
-        body_disk: "{{ [(mop_shard_asks | default({})).get('MOP_DISK_GB', MOP_DISK_GB) | int,
+        body_disk: "{{ [(mop_project_asks | default({})).get('MOP_DISK_GB', MOP_DISK_GB) | int,
                         MOP_BODY_DISK_CAP_GB | int] | min }}"
-        body_cores: "{{ [(mop_shard_asks | default({})).get('MOP_CORES', MOP_CORES) | int,
+        body_cores: "{{ [(mop_project_asks | default({})).get('MOP_CORES', MOP_CORES) | int,
                          MOP_BODY_CORES_CAP | int] | min }}"
 
     - name: Say what the body will be built with
       ansible.builtin.debug:
         msg: >-
-          {{ mop_shard }} on {{ inventory_hostname }}: {{ body_mem }} MB,
+          {{ mop_project }} on {{ inventory_hostname }}: {{ body_mem }} MB,
           {{ body_disk }} GB, {{ body_cores }} cores
-          {{ '(capped by the node)' if (mop_shard_asks | default({})) and
-             (body_mem | int < (mop_shard_asks.MOP_MEM_MB | default(0) | int)
-              or body_disk | int < (mop_shard_asks.MOP_DISK_GB | default(0) | int)
-              or body_cores | int < (mop_shard_asks.MOP_CORES | default(0) | int)) else '' }}
+          {{ '(capped by the node)' if (mop_project_asks | default({})) and
+             (body_mem | int < (mop_project_asks.MOP_MEM_MB | default(0) | int)
+              or body_disk | int < (mop_project_asks.MOP_DISK_GB | default(0) | int)
+              or body_cores | int < (mop_project_asks.MOP_CORES | default(0) | int)) else '' }}
 
     - name: A temporary key for reaching the body from here
       ansible.builtin.command:
@@ -199,7 +199,7 @@
     - name: Say so
       ansible.builtin.debug:
         msg: >-
-          {{ mop_shard }} on {{ inventory_hostname }}:
+          {{ mop_project }} on {{ inventory_hostname }}:
           {{ {'stage': 'resuming the build body ' ~ stage_name ~ ' left by a previous run',
               'image': 'incremental — a full copy of ' ~ tmpl_name ~ ' (' ~ tmpl_vmid ~ ')',
               'base': 'fresh — from the base image'}[build_from] }}
@@ -329,9 +329,9 @@
   gather_facts: no
 
   vars:
-    mop_tgz: "/tmp/mop-package-{{ mop_shard }}.tgz"
-    mirror_tmp: "/tmp/mop-mirror-{{ mop_shard }}.git"
-    mirror_tgz: "/tmp/mop-mirror-{{ mop_shard }}.tgz"
+    mop_tgz: "/tmp/mop-package-{{ mop_project }}.tgz"
+    mirror_tmp: "/tmp/mop-mirror-{{ mop_project }}.git"
+    mirror_tgz: "/tmp/mop-mirror-{{ mop_project }}.tgz"
 
   tasks:
     - name: Wait for sshd inside the body
@@ -382,7 +382,7 @@
     # весь пакет. Без python-nomad сервер не стартует, claude показывает «1
     # failed» в /mcp, а папет остаётся без инструментов -- живой, свободный и
     # бесполезный.
-    # Зеркало шарда в образ: дальше каждое тело клонирует репозиторий из него
+    # Зеркало проекта в образ: дальше каждое тело клонирует репозиторий из него
     # локально, а не тянет по сети заново. Врапер сам смотрит, есть ли зеркало,
     # и без него клонирует как раньше -- у драйвера host его не бывает вовсе.
     #
@@ -390,7 +390,7 @@
     # удобство: ключа к git в теле на этом шаге нет и заводить его там незачем.
     # Приватный ключ узла попадает в тело позже, при подъёме папета (MOP_BODY_SEED),
     # а в образе ему делать нечего -- образ живёт дольше любой ротации ключа.
-    - name: Take a fresh mirror of the shard
+    - name: Take a fresh mirror of the project
       ansible.builtin.shell: |
         set -e
         rm -rf {{ mirror_tmp }} {{ mirror_tgz }}
@@ -404,15 +404,15 @@
     # зеркала оставил бы в нём протухшие ссылки и объекты.
     - name: Where the mirrors live in the body
       ansible.builtin.file:
-        path: "{{ MOP_HOME }}/.cache/mop-mirror/{{ mop_shard }}.git"
+        path: "{{ MOP_HOME }}/.cache/mop-mirror/{{ mop_project }}.git"
         state: "{{ item }}"
         mode: "0755"
       loop: [absent, directory]
 
-    - name: Mirror of the shard, for bodies to clone from locally
+    - name: Mirror of the project, for bodies to clone from locally
       ansible.builtin.unarchive:
         src: "{{ mirror_tgz }}"
-        dest: "{{ MOP_HOME }}/.cache/mop-mirror/{{ mop_shard }}.git/"
+        dest: "{{ MOP_HOME }}/.cache/mop-mirror/{{ mop_project }}.git/"
 
     - name: Drop the mirror's copy on the control machine
       ansible.builtin.file:
@@ -447,7 +447,7 @@
 # Тулчейн, базы, env-файлы, скиллы и свои MCP-серверы -- дело установки, не
 # продукта: файлы называет настройка MOP_BODY_EXTRA, пусто значит «ничего сверх
 # обязательного». Без этого крючка deploy/ пришлось бы обрастать чужими
-# тулчейнами, а образ шарда всё равно остался бы неполным.
+# тулчейнами, а образ проекта всё равно остался бы неполным.
 #
 # Отдельной игрой, а не задачей в предыдущей, и причин две. Первая: `become` не
 # бывает атрибутом include, его наследуют только от игры. Вторая важнее -- у
@@ -473,20 +473,20 @@
       ansible.builtin.include_tasks: "{{ playbook_dir }}/../{{ item | trim }}"
       loop: "{{ MOP_BODY_EXTRA.split(',') | select | list }}"
 
-    # Манифест самого шарда (#25): сначала его конфигурация, потом его
+    # Манифест самого проекта (#25): сначала его конфигурация, потом его
     # задачи — после общих файлов установки, чтобы проект мог на них
     # опираться. Оба файла лежат на управляющей машине: их вырезал
     # `mop driver build` из зеркала origin ещё до плейбука.
-    - name: The shard's own configuration, when it has one
+    - name: The project's own configuration, when it has one
       # length > 0, а не голая строка в when: условие обязано дать boolean,
       # строку ansible отвергает — поймано первой же живой сборкой #26.
-      when: (mop_shard_vars | default('')) | length > 0
+      when: (mop_project_vars | default('')) | length > 0
       ansible.builtin.include_vars:
-        file: "{{ mop_shard_vars }}"
+        file: "{{ mop_project_vars }}"
 
-    - name: The shard's own tasks, when it has any
-      when: (mop_shard_tasks | default('')) | length > 0
-      ansible.builtin.include_tasks: "{{ mop_shard_tasks }}"
+    - name: The project's own tasks, when it has any
+      when: (mop_project_tasks | default('')) | length > 0
+      ansible.builtin.include_tasks: "{{ mop_project_tasks }}"
 
     # Кэш crates тоже в образ, и греется он единственным честным способом --
     # разрешением зависимостей настоящего дерева. Дерево берём из зеркала: это
@@ -497,13 +497,13 @@
     # веткой «cargo нет -- греть нечем», задуманной для проектов не на Rust, —
     # и отказ был неотличим от штатного пропуска. Поймано на образе cloudpub:
     # плейбук зелёный, образ собран, кэш crates пуст.
-    - name: Warm up the crates cache from the shard's own tree
+    - name: Warm up the crates cache from the project's own tree
       become: yes
       become_user: "{{ MOP_USER }}"
       ansible.builtin.shell: |
         set -e
         command -v cargo >/dev/null || exit 0
-        mirror="$HOME/.cache/mop-mirror/{{ mop_shard }}.git"
+        mirror="$HOME/.cache/mop-mirror/{{ mop_project }}.git"
         [ -d "$mirror" ] || exit 0
         tmp=$(mktemp -d)
         trap 'rm -rf "$tmp"' EXIT
@@ -530,7 +530,7 @@
 
     # Ключ сборки снимается до того, как образ станет шаблоном: иначе он
     # размножился бы в каждое тело и стал второй постоянной дорогой к папету —
-    # мимо агента, то есть мимо единственной проверки шардирования.
+    # мимо агента, то есть мимо единственной проверки проектирования.
     - name: Only the node's key survives into the image
       ansible.builtin.shell:
         cmd: "{{ pve }} keys {{ stage_vmid }}"
@@ -557,7 +557,7 @@
         {{ MOP_PVE_BRIDGE }} full
       changed_when: true
 
-    - name: Turn it into the shard's image
+    - name: Turn it into the project's image
       ansible.builtin.command: "{{ pve }} template {{ tmpl_vmid }}"
       changed_when: true
 
@@ -565,8 +565,8 @@
       ansible.builtin.command: "{{ pve }} destroy {{ stage_vmid }}"
       changed_when: true
 
-    - name: Say what a puppet of this shard will now grow from
+    - name: Say what a puppet of this project will now grow from
       ansible.builtin.debug:
         msg: >-
           {{ tmpl_name }} ({{ tmpl_vmid }}) on {{ inventory_hostname }} —
-          bodies of shard {{ mop_shard }} are clones of it now
+          bodies of project {{ mop_project }} are clones of it now

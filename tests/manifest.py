@@ -44,7 +44,7 @@ def tree(files):
 
 
 # HYPOTHESIS: до #46 единственная дорога — fetch(origin) через зеркало, и файл
-# рабочей копии для сборки не существовал. SOLUTION: fetch_tree(root, shard)
+# рабочей копии для сборки не существовал. SOLUTION: fetch_tree(root, project)
 # читает те же два файла из каталога. STATUS: FIXED — see #46
 #
 # Раскладка манифеста (#61). Имена файлов обещали одно, механизм делал
@@ -80,7 +80,7 @@ BOOTSTRAP = """
     - name: bootstrap task
       ansible.builtin.debug: {msg: hi}
 """
-EMPTY = {"shard": "bare", "asks": {}, "alien": [], "legacy": [],
+EMPTY = {"project": "bare", "asks": {}, "alien": [], "legacy": [],
          "sandbox_vars": None, "sandbox_tasks": None,
          "bootstrap_vars": None, "bootstrap_tasks": None}
 
@@ -89,7 +89,7 @@ def main():
     failed = 0
     got = manifest.fetch_tree(tree({".mop/sandbox.yaml": SANDBOX,
                                     ".mop/bootstrap.yaml": BOOTSTRAP}), "proj")
-    if got["shard"] != "proj" or got["asks"] != {"MOP_MEM_MB": "2048"}:
+    if got["project"] != "proj" or got["asks"] != {"MOP_MEM_MB": "2048"}:
         failed += 1
         print(f"FAIL asks: {got}")
     # Чужое имя в sandbox и просьба о размере в bootstrap — оба не на месте,

@@ -21,49 +21,49 @@ from mop import puppets  # noqa: E402
 ORIGIN = "git@git.example.dev:someone/mop.git"
 
 
-def shard_constraint(spec):
-    """Ограничение про шарды из спеки; None, если его там нет."""
+def project_constraint(spec):
+    """Ограничение про проекты из спеки; None, если его там нет."""
     for c in spec["Job"].get("Constraints") or []:
         if c.get("LTarget") == "${meta.mop_shards}":
             return c
     return None
 
 
-def serves(shard, meta_value):
-    """Сядет ли папет шарда на узел, объявивший такое meta.mop_shards.
+def serves(project, meta_value):
+    """Сядет ли папет проекта на узел, объявивший такое meta.mop_shards.
 
     Считаем ровно тем, что уедет в Nomad: RTarget ограничения как регулярное
     выражение над значением meta. Go RE2 и python re на этом классе выражений
     ведут себя одинаково.
 
-    Спеку собираем от ORIGIN этого шарда, а не от имени: шард в системе
+    Спеку собираем от ORIGIN этого проекта, а не от имени: проект в системе
     определяется ровно одним способом — basename origin без .git."""
-    c = shard_constraint(puppets.job_spec(
-        f"pu-{shard}-1", f"git@git.example.dev:someone/{shard}.git"))
+    c = project_constraint(puppets.job_spec(
+        f"pu-{project}-1", f"git@git.example.dev:someone/{project}.git"))
     assert c and c.get("Operand") == "regexp", f"no regexp constraint: {c!r}"
     return re.search(c["RTarget"], meta_value) is not None
 
 
-# (шард, что узел объявил, сядет ли)
+# (проект, что узел объявил, сядет ли)
 CASES = [
     # Узел общего назначения — тот, где тело равно узлу, — обслуживает любой
-    # шард, в том числе заведённый после прогона deploy. Без этого первый же
+    # проект, в том числе заведённый после прогона deploy. Без этого первый же
     # `mop add` нового проекта вешал бы папета в queued навсегда.
     ("mop", "any", True),
-    ("совсем-новый-шард", "any", True),
+    ("совсем-новый-проект", "any", True),
 
     ("mop", "mop", True),
     ("mop", "mop,rugent", True),
     ("mop", "rugent,mop", True),
     ("mop", "rugent,mop,cloudpub", True),
 
-    # Узел, который этого шарда не умеет.
+    # Узел, который этого проекта не умеет.
     ("mop", "rugent", False),
     ("mop", "", False),
 
     # Ловушка подстроки, и она обоюдная: без якорей `mop` совпал бы с `mop2`,
     # а `op` — с `mop`. Оба промаха тихие: папет уезжает на узел, где образа
-    # его шарда нет, и висит pending, пока кто-нибудь не прочитает лог задачи
+    # его проекта нет, и висит pending, пока кто-нибудь не прочитает лог задачи
     # на узле.
     ("mop", "mop2", False),
     ("mop", "not-mop", False),
@@ -71,11 +71,11 @@ CASES = [
     ("mop", "mopmop", False),
 
     # `any` — слово целиком, а не приставка: узел, объявивший `anything`,
-    # обслуживает шард `anything`, и только его.
+    # обслуживает проект `anything`, и только его.
     ("mop", "anything", False),
     ("anything", "anything", True),
 
-    # Имя шарда — basename репозитория, в нём бывают точка и дефис. Точка в
+    # Имя проекта — basename репозитория, в нём бывают точка и дефис. Точка в
     # незаэкранированном выражении совпадает с чем угодно.
     ("my.proj", "my.proj", True),
     ("my.proj", "myXproj", False),
@@ -87,7 +87,7 @@ CASES = [
 # опасна на узле-гипервизоре: старый врапер разворачивает папета прямо на узле,
 # а ограничения, которое не пустило бы его туда, в ней нет. Признак должен быть
 # чистой функцией: иначе узнать об этом можно только из лога задачи на узле,
-# куда мастер шарда не смотрит.
+# куда мастер проекта не смотрит.
 def job(outer=True, constrained=True):
     spec = puppets.job_spec("pu-mop-1", ORIGIN)["Job"]
     if not outer:
@@ -118,28 +118,28 @@ def main():
                   f"{'признана устаревшей' if not want else 'признана свежей'}, "
                   f"ждали обратного")
 
-    for shard, meta, want in CASES:
+    for project, meta, want in CASES:
         cases += 1
-        got = serves(shard, meta)
+        got = serves(project, meta)
         if got != want:
             bad += 1
-            print(f"FAILED  shard {shard!r} on a node announcing {meta!r}: "
+            print(f"FAILED  project {project!r} on a node announcing {meta!r}: "
                   f"got {got}, wanted {want}")
 
     # Ограничение обязано быть в каждой спеке: папет без него садится куда
     # угодно, и вся проверка становится украшением.
     cases += 1
-    if shard_constraint(puppets.job_spec("pu-mop-1", ORIGIN)) is None:
+    if project_constraint(puppets.job_spec("pu-mop-1", ORIGIN)) is None:
         bad += 1
-        print("FAILED  a job spec without the shard constraint schedules anywhere")
+        print("FAILED  a job spec without the project constraint schedules anywhere")
 
-    # Шард берётся из ORIGIN, а не из имени: имя — производное, и разойтись
+    # Проект берётся из ORIGIN, а не из имени: имя — производное, и разойтись
     # они могут только при ручной регистрации, где ошибка и опаснее всего.
     cases += 1
-    c = shard_constraint(puppets.job_spec("pu-anything-7", ORIGIN))
+    c = project_constraint(puppets.job_spec("pu-anything-7", ORIGIN))
     if not re.search(c["RTarget"], "mop"):
         bad += 1
-        print("FAILED  the constraint must follow the origin's shard, not the name")
+        print("FAILED  the constraint must follow the origin's project, not the name")
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0

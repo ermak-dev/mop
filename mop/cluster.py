@@ -90,7 +90,7 @@ def refusal(project, verb, origin=None, name=None, job_exists=False,
         if not origin:
             return (f"{name} carries no origin: an old registration, and whose it "
                     f"is cannot be told from the job — only the operator reaches it")
-        owner = puppets.shard_of(origin)
+        owner = puppets.project_of(origin)
         if owner != project:
             return f"{name} belongs to project {owner}, not {project}"
     return None
@@ -98,7 +98,7 @@ def refusal(project, verb, origin=None, name=None, job_exists=False,
 
 def _foreign_origin(project, origin):
     """Чужой ли это origin для проекта. -> строка или None."""
-    owner = puppets.shard_of(origin or "")
+    owner = puppets.project_of(origin or "")
     if owner != project:
         return (f"{origin} belongs to project {owner}, not {project}: "
                 f"a master works inside its own project only")
@@ -134,7 +134,7 @@ def _ping(project, req):
 
 def _add(project, req):
     origin = req.get("origin")
-    name = puppets.next_name(puppets.shard_of(origin))
+    name = puppets.next_name(puppets.project_of(origin))
     nomad.register(puppets.job_spec(name, origin, req.get("profile")))
     return {"ok": True, "name": name, "origin": origin}
 

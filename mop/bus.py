@@ -10,33 +10,33 @@
 туда. Маска и scatter-gather не нужны, и заодно не отвечает узел, на котором
 остался протухший клон переехавшего папета.
 
-Шард — первый токен субъекта. Один проект — один срез пула, и мастера разных
+Проект — первый токен субъекта. Один проект — один срез пула, и мастера разных
 проектов не видят папетов друг друга:
 
-    mop.admin.node.<узел>.rpc      оператор: все шарды плюс узловой disk
-    mop.<шард>.node.<узел>.rpc     мастер шарда: state, states, sizes, tail,
+    mop.admin.node.<узел>.rpc      оператор: все проекты плюс узловой disk
+    mop.<проект>.node.<узел>.rpc     мастер проекта: state, states, sizes, tail,
                                    type, send, wipe, write
-    mop.<шард>.node.<узел>.msg     папет шарда: state/states/tail/send
-    mop.<шард>.all.msg             всем агентам сразу
-    mop.<шард>.master.<id>.inbox   агент И папет -> конкретный мастер
-    mop.<шард>.master.all.inbox    опрос: кто из мастеров шарда жив
-    mop.<шард>.events              журнал шарда
-    mop.<шард>.server.rpc          сервер: bootstrap песочницы (узел зовёт
+    mop.<проект>.node.<узел>.msg     папет проекта: state/states/tail/send
+    mop.<проект>.all.msg             всем агентам сразу
+    mop.<проект>.master.<id>.inbox   агент И папет -> конкретный мастер
+    mop.<проект>.master.all.inbox    опрос: кто из мастеров проекта жив
+    mop.<проект>.events              журнал проекта
+    mop.<проект>.server.rpc          сервер: bootstrap песочницы (узел зовёт
                                    при старте), put (мастер кладёт файл)
 
-`admin` — не шард, а его отсутствие: так ходит оператор из обычного шелла.
+`admin` — не проект, а его отсутствие: так ходит оператор из обычного шелла.
 Узловой здесь только `disk`: место на хосте — факт про всех его жильцов.
-`write` мастеру шарда отдан: оба файла его белого списка собираются на
+`write` мастеру проекта отдан: оба файла его белого списка собираются на
 управляющей машине, а не из проекта мастера, так что раздача кредов не даёт
 одному проекту перезаписать креды другого. Полностью — в docs/BUS.md.
 
-Инбокс адресуется мастером, а не шардом: два терминала, открытые в одном
+Инбокс адресуется мастером, а не проектом: два терминала, открытые в одном
 проекте, иначе получали бы вести друг друга. Свой адрес мастер передаёт агенту
 полем `reply_to`, а папету — конвертом каждого сообщения (`from-name`).
 
 Обратный канал — тот же инбокс. Папет отвечает мастеру запросом в
-`mop.<шард>.master.<id>.inbox`, и вердикт доставки приезжает ответом. Права на
-это у папета были с самого начала (`mop.<шард>.master.>`), не было маршрута:
+`mop.<проект>.master.<id>.inbox`, и вердикт доставки приезжает ответом. Права на
+это у папета были с самого начала (`mop.<проект>.master.>`), не было маршрута:
 `send` знал два адреса — папет пула и сессия этого хоста, — а мастер живёт на
 другом хосте и папетом не является. Отчёты папетов уходили в
 LookupError и не доезжали никуда.
@@ -68,13 +68,18 @@ FILE = os.environ.get("MOP_BUS_CONFIG")
 NODE_FILE = os.path.expanduser("~/.config/mop/bus.json")
 TIMEOUT = 20             # обычный запрос к агенту
 MAX_PAYLOAD = 900_000    # под max_payload сервера (1 МБ) с запасом на конверт
-ADMIN = creds.ADMIN      # псевдошард оператора: все шарды плюс узловой disk
+ADMIN = creds.ADMIN      # псевдопроект оператора: все проекты плюс узловой disk
 CLUSTER_CHANNEL = "cluster"   # токен субъекта сервиса кластера (mop/cluster.py)
 ALL_MASTERS = "all"      # псевдо-id мастера: инбокс, на котором отвечают все
 
 # Чей срез пула виден этому процессу. Ставит `mop master`, наследуют его
 # потомки — в том числе mop mcp, запущенный сессией мастера.
-SHARD = os.environ.get("MOP_SHARD") or ADMIN
+# MOP_SHARD — прежнее имя, читается один релиз (#85). Уронить его сразу
+# нельзя: врапер живёт в СПЕКЕ джоба, и всякий папет, зарегистрированный до
+# переименования, ставит сессии именно его. Такой папет молча ходил бы на
+# шину оператором вместо своего проекта — то есть видел бы чужих.
+PROJECT = (os.environ.get("MOP_PROJECT") or os.environ.get("MOP_SHARD")
+           or ADMIN)
 
 _lock = threading.Lock()
 _loop = None
@@ -113,15 +118,15 @@ def config(file=None):
 
     Порядок: файл, который назвали (агент — свой узловой, врапер папета —
     через MOP_BUS_CONFIG), иначе сборка из каталога сервера (mop/creds.py)
-    по MOP_SERVER_LAN и MOP_SHARD. Третьего нет: файлы плейбука
-    bus-master-<шард>.json ушли вместе с игрой мастера (#53).
+    по MOP_SERVER_LAN и MOP_PROJECT. Третьего нет: файлы плейбука
+    bus-master-<проект>.json ушли вместе с игрой мастера (#53).
 
     В url всегда LAN-адрес, никогда публичное имя: оно резолвится в адрес
     роутера, а хайрпин на порт шины роутер не делает — проверено, connection
     refused с обоих узлов.
 
-    Шина без TLS, и креды тут единственное, что отделяет шард от шарда, —
-    поэтому файл 0600 и по одному на шард. Почему без TLS — комментарии в
+    Шина без TLS, и креды тут единственное, что отделяет проект от проекта, —
+    поэтому файл 0600 и по одному на проект. Почему без TLS — комментарии в
     deploy/nats-server.conf.j2."""
     path = file or FILE
     if path:
@@ -137,15 +142,15 @@ def config(file=None):
     # перевела всех.
     op = creds.operator(directory)
     if op:
-        return creds.bus_config(host, settings.get("MOP_NATS_PORT"), SHARD,
+        return creds.bus_config(host, settings.get("MOP_NATS_PORT"), PROJECT,
                                 op["password"], user=op["user"])
-    password = creds.password(directory, SHARD)
+    password = creds.password(directory, PROJECT)
     if password is None:
-        raise BusError(f"no bus credentials for {creds.user_of(SHARD)}: "
+        raise BusError(f"no bus credentials for {creds.user_of(PROJECT)}: "
                        f"neither {directory}/{creds.OPERATOR_FILE} nor "
-                       f"{directory}/{creds.pass_file(SHARD)} — "
+                       f"{directory}/{creds.pass_file(PROJECT)} — "
                        f"run mop join --user <name> (or mop deploy on the server)")
-    return creds.bus_config(host, settings.get("MOP_NATS_PORT"), SHARD, password)
+    return creds.bus_config(host, settings.get("MOP_NATS_PORT"), PROJECT, password)
 
 
 # ─── соединение ──────────────────────────────────────────────────────────
@@ -249,34 +254,34 @@ def close():
 
 
 # ─── субъекты ────────────────────────────────────────────────────────────
-def subject(node, channel="rpc", shard=None):
-    return f"mop.{shard or SHARD}.node.{node}.{channel}"
+def subject(node, channel="rpc", project=None):
+    return f"mop.{project or PROJECT}.node.{node}.{channel}"
 
 
-def broadcast(shard=None):
+def broadcast(project=None):
     """Все агенты разом. Нужен там, где спрашивающий не знает состава пула."""
-    return f"mop.{shard or SHARD}.all.msg"
+    return f"mop.{project or PROJECT}.all.msg"
 
 
-def inbox(master_id, shard=None):
-    """Адрес мастера: сюда ему пишут агенты узлов И папеты шарда.
+def inbox(master_id, project=None):
+    """Адрес мастера: сюда ему пишут агенты узлов И папеты проекта.
 
     Обратный канал не заводил себе отдельного субъекта намеренно: у мастера
     уже есть ровно одно место, куда ему кладут вести, и права на него у
-    папета уже были (`mop.<шард>.master.>` в его creds). Отдельный субъект
+    папета уже были (`mop.<проект>.master.>` в его creds). Отдельный субъект
     означал бы второй ответ на вопрос «куда писать мастеру» — и правку прав
     на сервере ради того, что и так разрешено.
 
     master_id=ALL_MASTERS — не адрес, а опрос: отвечают все живые мастера
-    шарда. Так папет узнаёт, кому он может ответить, не имея ростера."""
-    return f"mop.{shard or SHARD}.master.{master_id}.inbox"
+    проекта. Так папет узнаёт, кому он может ответить, не имея ростера."""
+    return f"mop.{project or PROJECT}.master.{master_id}.inbox"
 
 
-def events(shard=None):
-    return f"mop.{shard or SHARD}.events"
+def events(project=None):
+    return f"mop.{project or PROJECT}.events"
 
 
-def cluster_subject(shard=None):
+def cluster_subject(project=None):
     """Сервис кластера как адресат (#80): Nomad за шиной.
 
     Свой субъект, а не `server.rpc`: в субъект сервера имеет право писать
@@ -284,14 +289,14 @@ def cluster_subject(shard=None):
     что джобы регистрирует и снимает любой узел. Здесь прав ни у кого не
     прибавляется: у `master-<проект>` уже есть весь `mop.<проект>.>`, а у
     папета и узла его нет."""
-    return f"mop.{shard or SHARD}.{CLUSTER_CHANNEL}.rpc"
+    return f"mop.{project or PROJECT}.{CLUSTER_CHANNEL}.rpc"
 
 
-def server_subject(shard=None):
+def server_subject(project=None):
     """Сервер как адресат (#62): bootstrap песочниц и хранение их файлов.
-    Первый токен — шард, как у всех: узел пишет за папета своего шарда,
+    Первый токен — проект, как у всех: узел пишет за папета своего проекта,
     мастер — за свой проект, а права NATS делят так же, как везде."""
-    return f"mop.{shard or SHARD}.server.rpc"
+    return f"mop.{project or PROJECT}.server.rpc"
 
 
 # ─── запросы ─────────────────────────────────────────────────────────────
@@ -331,22 +336,22 @@ def _ask(subj, who, dead, verb, timeout, **fields):
         raise BusError(f"{who} answered with non-JSON: {msg.data[:120]!r}")
 
 
-def request(node, verb, timeout=TIMEOUT, channel="rpc", shard=None, **fields):
+def request(node, verb, timeout=TIMEOUT, channel="rpc", project=None, **fields):
     """Глагол агенту узла. -> разобранный ответ (dict).
 
-    `shard` — явный параметр, а не поле запроса: адрес живёт в субъекте, и
+    `project` — явный параметр, а не поле запроса: адрес живёт в субъекте, и
     попади он в тело, права NATS его бы не увидели. Обычно не нужен: процесс
-    ходит своим шардом, который ему поставил `mop master`.
+    ходит своим проектом, который ему поставил `mop master`.
 
     Ошибка агента приезжает полем `error` внутри ответа и не поднимает
     исключение: это ответ, а не отказ шины. Исключение — только когда до
     агента не доехали."""
-    return _ask(subject(node, channel, shard), f"node agent {node}",
+    return _ask(subject(node, channel, project), f"node agent {node}",
                 f"node agent {node} is not subscribed — the mop-agent unit is not running",
                 verb, timeout, **fields)
 
 
-def ask(master_id, verb, timeout=TIMEOUT, shard=None, **fields):
+def ask(master_id, verb, timeout=TIMEOUT, project=None, **fields):
     """Глагол мастеру, в его инбокс. -> разобранный ответ (dict).
 
     Обратная сторона канала: папет отвечает тому, кто его послал. Запрос-ответ,
@@ -354,29 +359,29 @@ def ask(master_id, verb, timeout=TIMEOUT, shard=None, **fields):
     отправителю нужен вердикт доставки, а не факт отправки. Публикация в инбокс
     мёртвого мастера выглядела бы успехом — а это тишина, то есть худший исход
     для петли, где отчёт папета и есть главный сигнал."""
-    return _ask(inbox(master_id, shard), f"master {master_id}",
+    return _ask(inbox(master_id, project), f"master {master_id}",
                 f"master {master_id} is not on the bus: session closed or the address "
                 f"isn't its own — see mcp__mop__agents",
                 verb, timeout, **fields)
 
 
-def ask_cluster(verb, timeout=TIMEOUT, shard=None, **fields):
+def ask_cluster(verb, timeout=TIMEOUT, project=None, **fields):
     """Глагол сервису кластера (mop-cluster). -> разобранный ответ (dict)."""
-    return _ask(cluster_subject(shard), "cluster service",
+    return _ask(cluster_subject(project), "cluster service",
                 "no cluster service is subscribed — the mop-cluster unit is "
                 "not running on the server",
                 verb, timeout, **fields)
 
 
-def ask_server(verb, timeout=TIMEOUT, shard=None, **fields):
+def ask_server(verb, timeout=TIMEOUT, project=None, **fields):
     """Глагол серверу (mop-bootstrap). -> разобранный ответ (dict)."""
-    return _ask(server_subject(shard), "bootstrap service",
+    return _ask(server_subject(project), "bootstrap service",
                 "no bootstrap service is subscribed — the mop-bootstrap unit is "
                 "not running on the server",
                 verb, timeout, **fields)
 
 
-async def _one(nc, node, req, timeout, channel, shard):
+async def _one(nc, node, req, timeout, channel, project):
     """Один запрос узлу внутри цикла. -> ответ | BusError.
 
     Общая часть request_many и request_stream: ошибка возвращается, а не
@@ -384,7 +389,7 @@ async def _one(nc, node, req, timeout, channel, shard):
     остальным."""
     try:
         msg = await nc.request(
-            subject(node, channel, shard),
+            subject(node, channel, project),
             json.dumps(req, ensure_ascii=False).encode(), timeout=timeout)
         return json.loads(msg.data.decode())
     except NoRespondersError:
@@ -407,7 +412,7 @@ def failure(answer):
     return answer.get("error") or None
 
 
-def request_many(requests, timeout=TIMEOUT, channel="rpc", shard=None):
+def request_many(requests, timeout=TIMEOUT, channel="rpc", project=None):
     """Разные запросы разным узлам, параллельно по одному соединению.
 
     Ради этого всё и затевалось: раньше состояние пула стоило по четыре
@@ -424,12 +429,12 @@ def request_many(requests, timeout=TIMEOUT, channel="rpc", shard=None):
 
     async def all_of():
         return await asyncio.gather(
-            *(_one(nc, n, requests[n], timeout, channel, shard) for n in nodes))
+            *(_one(nc, n, requests[n], timeout, channel, project) for n in nodes))
 
     return dict(zip(nodes, _call(all_of(), timeout)))
 
 
-def request_stream(requests, timeout=TIMEOUT, channel="rpc", shard=None):
+def request_stream(requests, timeout=TIMEOUT, channel="rpc", project=None):
     """Как request_many, но пары (ключ, ответ) отдаются по мере готовности.
 
     Нужен там, где ответ показывают сразу, а не собирают в таблицу: обмер
@@ -448,7 +453,7 @@ def request_stream(requests, timeout=TIMEOUT, channel="rpc", shard=None):
     done = queue.Queue()
 
     async def one(key, node, req):
-        done.put((key, await _one(nc, node, req, timeout, channel, shard)))
+        done.put((key, await _one(nc, node, req, timeout, channel, project)))
 
     async def all_of():
         await asyncio.gather(*(one(k, n, r) for k, (n, r) in requests.items()))

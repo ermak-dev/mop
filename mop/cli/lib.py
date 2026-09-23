@@ -104,13 +104,13 @@ UNREACHABLE = 4
 def play_vars(projects, manifests=None):
     """Списки плейбуку как --extra-vars, JSON'ом. -> [строки].
 
-    Объектом, а не парой ключ=значение: `--extra-vars mop_shards=[...]`
+    Объектом, а не парой ключ=значение: `--extra-vars mop_projects=[...]`
     ansible принимает как строку, и цикл в шаблоне честно проходится по её
     символам, порождая пользователей `master-[`, `master-"` и так далее.
 
     Манифесты — только у полной игры: узкому прогону проектов (bus) они не
     нужны, их читают слои узла и тела."""
-    out = [json.dumps({"mop_shards": list(projects)})]
+    out = [json.dumps({"mop_projects": list(projects)})]
     if manifests is not None:
         out.append(json.dumps({"mop_manifests": manifests}, ensure_ascii=False))
     return out
@@ -124,7 +124,7 @@ def play(playbook, projects, manifests=None):
     местом, иначе узкий прогон заводил бы проект не так, как полный.
 
     Списки едут --extra-vars ОБЪЕКТОМ, а не парой ключ=значение:
-    `--extra-vars mop_shards=[...]` ansible принимает как строку, и цикл в
+    `--extra-vars mop_projects=[...]` ansible принимает как строку, и цикл в
     шаблоне честно проходится по её символам, порождая пользователей
     `master-[`, `master-"` и так далее.
     """
@@ -141,7 +141,7 @@ def play(playbook, projects, manifests=None):
          *sum((["--extra-vars", v] for v in extra), [])])
 
 
-def shard_ready(shard):
+def project_ready(project):
     """Есть ли у этой машины чем представиться шине за этот проект.
 
     Два пути, и первый старше. Оператор-человек (#84) ходит одними кредами на
@@ -152,28 +152,28 @@ def shard_ready(shard):
     установка не перевела операторов на собственные имена."""
     directory = creds.server_dir()
     return (creds.operator(directory) is not None
-            or creds.password(directory, shard) is not None)
+            or creds.password(directory, project) is not None)
 
 
-def in_shard():
-    """Шард этого шелла, либо None у оператора вне `mop master`."""
-    return None if bus.SHARD == bus.ADMIN else bus.SHARD
+def in_project():
+    """Проект этого шелла, либо None у оператора вне `mop master`."""
+    return None if bus.PROJECT == bus.ADMIN else bus.PROJECT
 
 
 def guard(name):
     """Перила мастер-шелла: не трогать чужого папета.
 
-    Это не граница — MOP_SHARD оператор может и снять. Настоящая живёт в кредах
+    Это не граница — MOP_PROJECT оператор может и снять. Настоящая живёт в кредах
     NATS, в проверке агента и в проверке сервиса кластера (#80). Здесь мы лишь
     не даём промахнуться вслепую: отказ отсюда называет, куда идти, а отказ
     сервиса — чей это папет."""
-    shard = in_shard()
-    if shard is None:
+    project = in_project()
+    if project is None:
         return
     meta = require_job(name).get("meta") or {}
-    owner = puppets.shard_of(meta.get("origin", ""))
-    if owner != shard:
-        sys.exit(f"{name} — shard {owner}, but this master runs {shard}. "
+    owner = puppets.project_of(meta.get("origin", ""))
+    if owner != project:
+        sys.exit(f"{name} — project {owner}, but this master runs {project}. "
                  f"Leave the master shell or run mop master for {owner}.")
 
 

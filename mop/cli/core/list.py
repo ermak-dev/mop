@@ -31,15 +31,15 @@ def free(row):
 def hint(rows, origin):
     """Одна подсказка под таблицей: чего именно не хватает прямо сейчас."""
     if not rows:
-        return (f"Create the first puppet for {puppets.shard_of(origin)}: mop add {origin}"
+        return (f"Create the first puppet for {puppets.project_of(origin)}: mop add {origin}"
                 if origin else "Create a puppet: mop add <git-origin>")
     if not any(free(r) for r in rows):
-        return (f"\nNo free puppets for {puppets.shard_of(origin)}. "
+        return (f"\nNo free puppets for {puppets.project_of(origin)}. "
                 f"Create one: mop add {origin}" if origin
                 else "\nNo free puppets. Create one: mop add <git-origin>")
     if not origin:
         return None
-    project = puppets.shard_of(origin)
+    project = puppets.project_of(origin)
     mine = [r for r in rows if project in r["origin"]]
     if not mine:
         return f"\nNo puppets for {project}. Create one: mop add {origin}"
@@ -66,12 +66,12 @@ def main(argv):
     if not rows:
         print("no puppets")
     origin = lib.cwd_origin(required=False)
-    # В мастер-шелле подсказка — про шард, а не про каталог, в котором стоишь.
+    # В мастер-шелле подсказка — про проект, а не про каталог, в котором стоишь.
     # Иначе `mop list` из репозитория самого mop в мастер-шелле проекта
     # советовал бы завести папета для mop, которого этот мастер всё равно
     # не увидит.
-    shard = lib.in_shard()
-    if shard and origin and puppets.shard_of(origin) != shard:
+    project = lib.in_project()
+    if project and origin and puppets.project_of(origin) != project:
         origin = None
     tip = hint(rows, origin)
     if tip:

@@ -194,34 +194,34 @@ CASES = [
 ]
 
 
-# ── ростер глазами одного шарда (#29) ──────────────────────────────────────
+# ── ростер глазами одного проекта (#29) ──────────────────────────────────────
 # HYPOTHESIS: джоба-папет без origin в Meta (старая регистрация) невидима
 # любому списку, включая admin, — что и выглядело как «папеты исчезают»:
 # pu-rugent-1..10 жили на hyper running, невидимые всему.
 # SOLUTION: определение папета — service-джоб с префиксом pu- (pu-cleanup и
 # его периодические дети — sysbatch); origin — свойство современной спеки, а
-# не пропуск в ростер. Admin видит и непомеченных, шард — только своих.
+# не пропуск в ростер. Admin видит и непомеченных, проект — только своих.
 def _job(name, jtype="service", origin=None):
     return {"ID": name, "Type": jtype,
             "Meta": {"origin": origin} if origin else None}
 
 
-# ── память шардов: origin'ы и легаси-имена (#33) ─────────────────────────────
+# ── память проектов: origin'ы и легаси-имена (#33) ─────────────────────────────
 # HYPOTHESIS: память обязана хранить origin'ы (имя выводится basename'ом, а
 # вот имя в origin не разворачивается), но строки-имена от легаси-времён
 # терять нельзя: их origin уже не узнать, а потеря имени молча выписывает
-# шарда из конфига NATS при следующем deploy.
-def check_shard_ids(cases):
+# проекта из конфига NATS при следующем deploy.
+def check_project_ids(cases):
     bad = 0
     for what, lines, want_o, want_n in cases:
-        got_o, got_n = puppets.shard_ids(lines)
+        got_o, got_n = puppets.project_ids(lines)
         if got_o != want_o or got_n != want_n:
             bad += 1
-            print(f"FAILED  shard_ids, {what}: origins {got_o!r} names {got_n!r}")
+            print(f"FAILED  project_ids, {what}: origins {got_o!r} names {got_n!r}")
     return bad, len(cases)
 
 
-SHARD_IDS = [
+PROJECT_IDS = [
     ("origin'ы узнаются, имена остаются",
      ["git@h:ermak/mop.git", "https://h/rugent/rugent.git", "backup"],
      {"git@h:ermak/mop.git", "https://h/rugent/rugent.git"}, {"backup"}),
@@ -232,8 +232,8 @@ SHARD_IDS = [
 
 def check_visible(cases):
     bad = 0
-    for what, listing, shard, want in cases:
-        got = puppets.visible(listing, shard)
+    for what, listing, project, want in cases:
+        got = puppets.visible(listing, project)
         got_ids = [j["ID"] for j in got]
         if sorted(got_ids) != sorted(want):
             bad += 1
@@ -245,10 +245,10 @@ VISIBLE = [
     # Главное: непомеченный работающий папет виден admin — «исчезнувший» пул
     # обязан быть виден хоть оператору.
     ("непомеченный виден admin", [_job("pu-rugent-8")], "admin", ["pu-rugent-8"]),
-    ("непомеченного не видит шард", [_job("pu-rugent-8")], "mop", []),
-    ("свой по origin виден шард", [_job("pu-mop-1", origin="…/mop.git")], "mop",
+    ("непомеченного не видит проект", [_job("pu-rugent-8")], "mop", []),
+    ("свой по origin виден проект", [_job("pu-mop-1", origin="…/mop.git")], "mop",
      ["pu-mop-1"]),
-    ("чужой по origin не виден шард", [_job("pu-mop-1", origin="…/mop.git")], "rugent", []),
+    ("чужой по origin не виден проект", [_job("pu-mop-1", origin="…/mop.git")], "rugent", []),
     ("admin видит всех", [_job("pu-mop-1", origin="…/mop.git"), _job("pu-rugent-8")],
      "admin", ["pu-mop-1", "pu-rugent-8"]),
     # pu-cleanup и его периодические дети — sysbatch, не папеты: их префикс
@@ -268,7 +268,7 @@ def main():
             print(f"FAILED  {what}\n  wanted:  {want!r}\n  got: {got!r}")
     cases = len(CASES)
     vbad, vcases = check_visible(VISIBLE)
-    sbad, scases = check_shard_ids(SHARD_IDS)
+    sbad, scases = check_project_ids(PROJECT_IDS)
     bad += sbad
     cases += scases
     bad += vbad

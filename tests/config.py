@@ -155,7 +155,7 @@ def main():
         bad += 1
         print(f"FAILED  mop.yaml, {what}: должен был отказаться ValueError")
 
-    # Расщепление vars манифеста (#26): просьбы (SHARD_SCOPED) идут в размеры
+    # Расщепление vars манифеста (#26): просьбы (PROJECT_SCOPED) идут в размеры
     # образа, остальное не-настройочное — конфигурация самого проекта и едет
     # его задачам. А вот имя, совпадающее с настоящей настройкой mop, — чужое:
     # в контексте задач оно затёрло бы правду машины (MOP_USER, MOP_HOME).
@@ -178,10 +178,10 @@ def main():
     # Всё, что проект вправе просить, обязано быть настройкой: иначе оно
     # никуда не доедет, а отказа не будет.
     cases += 1
-    unknown = [k for k in config.SHARD_SCOPED if k not in config.SETTINGS]
+    unknown = [k for k in config.PROJECT_SCOPED if k not in config.SETTINGS]
     if unknown:
         bad += 1
-        print(f"FAILED  SHARD_SCOPED names settings that do not exist: {unknown}")
+        print(f"FAILED  PROJECT_SCOPED names settings that do not exist: {unknown}")
 
     # Потолок — узловой: чужой проект просит, машина решает. Без потолка mop.yaml
     # это способ занять гипервизор, а не настройка.
