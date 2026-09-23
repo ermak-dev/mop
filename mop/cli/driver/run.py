@@ -12,6 +12,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 
 from mop.cli import lib
 from mop import bootstrap, bus, config, driver
@@ -20,6 +21,12 @@ from mop import bootstrap, bus, config, driver
 # /tmp в теле бывает общим или вычищаемым, а этот файл обязан прожить ровно
 # столько, сколько живёт папет.
 INNER = ".cache/mop-wrapper.sh"
+
+# Проба ssh перед врапером (#73): около минуты на то, чтобы сеть свежего тела
+# догнала, дольше -- уже не гонка, а поломка, и отказ должен быть громким.
+SSH_PROBE_TRIES = 12
+SSH_PROBE_PAUSE = 5
+SSH_PROBE_TIMEOUT = 20
 
 # Что внешний врапер переливает внутрь тела. Список закрыт: открытый означал бы
 # дыру, через которую в тело уехало бы окружение узла целиком — вместе с тем,
@@ -104,6 +111,25 @@ def main(argv):
 
     def inside(prefix, script):
         return prefix + [script] if prefix else ["bash", "-c", script]
+
+    # Тело должно пустить врапер тем же соединением, которым он пойдёт (#73):
+    # сеть свежего клона догоняет не сразу, и первый ssh уходил в Connection
+    # timed out при исправном теле. Промах здесь -- пауза, а не падение
+    # задачи и круг рестарта Nomad. У host префикса нет, и пробовать нечего.
+    if hold:
+        def attempt():
+            try:
+                r = subprocess.run(hold + ["true"], capture_output=True,
+                                   text=True, timeout=SSH_PROBE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                return False, f"no answer in {SSH_PROBE_TIMEOUT}s"
+            return r.returncode == 0, (r.stderr.strip() or f"exit {r.returncode}")
+        ok, why, n = driver.until_ok(attempt, SSH_PROBE_TRIES, SSH_PROBE_PAUSE,
+                                     time.sleep)
+        if not ok:
+            sys.exit(f"the body of {name} did not let ssh in after {n} tries: {why}")
+        if n > 1:
+            print(f"{name}: ssh into the body passed on try {n}", flush=True)
 
     state = {"child": None, "asked": False}
 
