@@ -11,6 +11,8 @@ WorkingDirectory={{ MOP_HOME }}/mop
 # (config.DERIVED), поэтому второй переменной для Nomad здесь нет.
 Environment=MOP_SERVER_LAN={{ MOP_SERVER_LAN }}
 Environment=MOP_NATS_PORT={{ MOP_NATS_PORT }}
+# Каталог сервера ходит на шину через TLS-прокси (#97).
+Environment=MOP_HTTPS_PORT={{ MOP_HTTPS_PORT }}
 Environment=MOP_HOME={{ MOP_HOME }}
 Environment=MOP_USER={{ MOP_USER }}
 Environment=PYTHONUNBUFFERED=1

@@ -111,6 +111,20 @@
         tasks_from: watchdog
 
 
+# TLS-прокси (#96): одна точка входа для людей -- дашборд в корне, шина по
+# WebSocket на /nats. До дашборда и сервисов сервера: их каталог сервера
+# ходит на шину через этот прокси (#97). Сквозная проверка -- в роли web.
+- name: TLS proxy on the server
+  hosts: server
+  become: yes
+  gather_facts: no
+
+  vars:
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
+  roles:
+    - proxy
+
+
 # Дашборд пула (docs/WEB.md): тот же сервер, что и шина, -- машина, которая
 # включена всегда, и единственная, кроме машин операторов, где мастеру
 # положено быть. Идёт после шины и после игры сервера Nomad: креды, которые
@@ -124,20 +138,6 @@
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
   roles:
     - web
-
-
-# TLS-прокси (#96): одна точка входа для людей -- дашборд в корне, шина по
-# WebSocket на /nats. После дашборда и шины: прогон проверяет прокси
-# запросом к дашборду сквозь него.
-- name: TLS proxy on the server
-  hosts: server
-  become: yes
-  gather_facts: no
-
-  vars:
-    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
-  roles:
-    - proxy
 
 
 # Bootstrap песочниц (#62, docs/BOOTSTRAP.md): подписчик на сервере, который

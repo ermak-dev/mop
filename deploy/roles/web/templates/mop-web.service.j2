@@ -11,6 +11,8 @@ WorkingDirectory={{ MOP_HOME }}/mop
 # юнит и есть источник этой настройки на сервере.
 Environment=MOP_SERVER_LAN={{ MOP_SERVER_LAN }}
 Environment=MOP_NATS_PORT={{ MOP_NATS_PORT }}
+# Каталог сервера ходит на шину через TLS-прокси (#97).
+Environment=MOP_HTTPS_PORT={{ MOP_HTTPS_PORT }}
 Environment=MOP_NOMAD_PORT={{ MOP_NOMAD_PORT }}
 Environment=MOP_POOL_DC={{ MOP_POOL_DC }}
 Environment=PYTHONUNBUFFERED=1

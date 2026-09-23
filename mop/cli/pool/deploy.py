@@ -156,8 +156,10 @@ def main(argv):
     # Контроллер — тоже машина оператора: его каталог сервера собирается здесь
     # из secrets/ и bootstrap.json, а на другую машину его везёт `mop join`.
     dest = creds.server_dir()
-    got = creds.collect(os.path.expanduser("~/.config/mop/secrets"), dest)
-    print(f"  server credentials: {len(got)} passwords in {dest}")
+    # Самоподписанный сертификат закрепляется, настоящий -- нет (#97).
+    got = creds.collect(os.path.expanduser("~/.config/mop/secrets"), dest,
+                        pin=not config.get("MOP_TLS_CERT"))
+    print(f"  server credentials: {', '.join(got)} in {dest}")
 
     lib.section("check")
     check()

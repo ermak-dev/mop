@@ -105,6 +105,7 @@
   environment:
     MOP_SERVER_LAN: "{{ MOP_SERVER_LAN }}"
     MOP_NATS_PORT: "{{ MOP_NATS_PORT }}"
+    MOP_HTTPS_PORT: "{{ MOP_HTTPS_PORT }}"
   register: boot_check
   until: boot_check.rc == 0
   retries: 10
