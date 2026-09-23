@@ -5,6 +5,12 @@
     state: restarted
     daemon_reload: yes
 
+# Новый users.conf без смены основного конфига: соединения не рвём.
+- name: reload nats
+  ansible.builtin.systemd:
+    name: nats
+    state: reloaded
+
 
 # Агент на рабочих узлах.
 #

@@ -1,0 +1,42 @@
+# Пакет mop и его зависимости на сервере. Отдельным файлом (#116): его
+# играет первой игра сервера NATS -- пользователей шины пишет `mop cluster
+# users`, то есть пакет обязан лежать на сервере раньше шины. Роль web его
+# больше не играет: второй синк ничего не менял бы, а результат первого
+# (mop_server_package) переписал бы на «без изменений», и сервисы остались
+# бы на старом коде.
+- name: Ensure python3-pip
+  become: yes
+  ansible.builtin.apt:
+    name: python3-pip
+    state: present
+
+# Под пользователем пула, как у узла (deploy/roles/bus): --user от root'а
+# клал библиотеки в /root/.local, где mop-web их не видит (#108).
+- name: Python dependencies of mop
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.pip:
+    name: "{{ MOP_PIP_DEPS.split(',') }}"
+    extra_args: --user --break-system-packages
+    state: present
+
+# Те же исключения, что у узла (deploy/roles/bus): .env с кредами GitLab на
+# сервер не едет, всё нужное дашборду приходит юнитом и каталогом кредов.
+- name: Sync the mop package from the control machine
+  become: no
+  ansible.posix.synchronize:
+    src: "{{ lookup('env', 'HOME') }}/mop/"
+    dest: "{{ MOP_HOME }}/mop/"
+    delete: yes
+    recursive: yes
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=__pycache__"
+      - "--exclude=.env"
+      - "--exclude=inventory.ini"
+      - "--exclude=inventory.yaml"
+      # Пакет -- пользователю пула, кем бы ни зашёл ansible (#108).
+      - "--chown={{ MOP_USER }}:{{ MOP_USER }}"
+  # Результат синка переживает игру: по нему перезапускается и второй процесс
+  # сервера, mop-bootstrap (роль bootstrap) -- тот же пакет в том же каталоге.
+  register: mop_server_package

@@ -23,9 +23,19 @@
     group: "{{ MOP_USER }}"
     mode: "0700"
 
-# Пользователи проектов: тот же файл, что играет узкий прогон
-# `mop project add|delete` (deploy/projects.yml).
+# Пользователи шины (#116): тот же файл, что играет узкий прогон
+# `mop project add|delete` (deploy/projects.yml). До основного конфига:
+# тот включает users.conf, и без файла NATS не поднялся бы.
 - ansible.builtin.include_tasks: projects.yml
+
+- name: Server config
+  ansible.builtin.template:
+    src: nats-server.conf.j2
+    dest: /etc/nats/nats-server.conf
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0600"
+  notify: restart nats
 
 - name: Systemd unit
   ansible.builtin.template:

@@ -1,18 +1,62 @@
-# Проекты пула на сервере: пользователи NATS. Отдельный файл, потому что это
-# единственное, что делает `mop project add|delete` (deploy/projects.yml), и
-# одновременно часть полной игры сервера — иначе узкий прогон и полный
-# разошлись бы, и проект, заведённый одним, исчезал бы после другого.
+# Пользователи шины на сервере (#116). Файл `/etc/nats/users.conf`, который
+# основной конфиг включает в authorization, пишет не шаблон, а сервер:
+# `mop cluster users` (mop/natsconf.py). Отсюда -- только то, что знает один
+# контроллер: люди, сервисы и узлы с их паролями, и реестр проектов.
 #
-# Пользователи считаются из реестра проектов (mop/projects.py), он приезжает
-# сюда переменной mop_projects. Пустой список законен: пустой пул, мастеров
-# ещё нет.
-- name: Server config
-  ansible.builtin.template:
-    src: nats-server.conf.j2
-    dest: /etc/nats/nats-server.conf
-    # Пароли внутри: читает только пользователь пула, под которым служба и
-    # ходит (#115).
+# Отдельный файл задач, потому что его играют и полная установка, и узкий
+# прогон `mop project add|delete` (deploy/projects.yml): разойдясь, один
+# заводил бы проект, а другой его снимал.
+
+# Пароли -- здесь, на контроллере: lookup('password') заводит файл при
+# первом прогоне и возвращает то же значение дальше. Словари -- set_fact в
+# цикле: строка с {% set %} внутри осталась бы строкой, а не словарём.
+- name: Operators of the bus, with their passwords
+  ansible.builtin.set_fact:
+    mop_operators_base: >-
+      {{ mop_operators_base | default({}) | combine({item.key: {
+           'password': lookup('password', secrets_dir + '/nats-op-' + item.key + '.pass length=32 chars=ascii_letters,digits'),
+           'allow': item.value.allow, 'deny': item.value.deny or []}}) }}
+  loop: "{{ MOP_OPERATOR_SUBJECTS | default({}) | dict2items }}"
+  no_log: true
+
+- name: Nodes of the bus, with their passwords
+  ansible.builtin.set_fact:
+    mop_nodes_base: >-
+      {{ mop_nodes_base | default({}) | combine({item:
+           lookup('password', secrets_dir + '/nats-node-' + item + '.pass length=32 chars=ascii_letters,digits')}) }}
+  loop: "{{ nats_nodes }}"
+  no_log: true
+
+- name: Base users of the bus -- people, services, nodes
+  ansible.builtin.copy:
+    content: >-
+      {{ {'service': lookup('password', secrets_dir + '/nats-service.pass length=32 chars=ascii_letters,digits'),
+          'operators': mop_operators_base | default({}),
+          'nodes': mop_nodes_base | default({})} | to_json }}
+    dest: /etc/nats/base-users.json
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
     mode: "0600"
-  notify: restart nats
+  no_log: true
+
+# Реестр проектов -- на сервер. Пока проекты заводит `mop project add` на
+# контроллере, реестр контроллера и есть правда, и он переписывает
+# серверный; глаголы сервиса (#117) перевернут это направление.
+- name: Registry of the projects, on the server
+  ansible.builtin.copy:
+    src: "{{ lookup('env', 'HOME') }}/.config/mop/projects"
+    dest: "{{ MOP_HOME }}/.config/mop/projects"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0600"
+
+- name: Users file of the bus, written by the server
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.command: "{{ MOP_HOME }}/mop/bin/mop cluster users"
+  environment:
+    MOP_SERVER_LAN: "{{ MOP_SERVER_LAN }}"
+    MOP_NATS_PORT: "{{ MOP_NATS_PORT }}"
+  register: mop_users
+  changed_when: "', changed' in mop_users.stdout"
+  notify: reload nats

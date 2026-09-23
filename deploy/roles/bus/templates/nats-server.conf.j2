@@ -46,67 +46,8 @@ websocket {
 # Машины (service, узлы, папеты) этим не ограничены: их пароли генерируются
 # и ничего, кроме шины, не открывают.
 authorization {
-  users = [
-    # Сервисы сервера (#104): дашборд, bootstrap песочниц, сервис кластера.
-    # Машина, а не человек: пароль не уходит ни одному оператору, и отзыв
-    # доступа человека сервер не задевает. Права пока как у admin -- все
-    # проекты и узловые глаголы; сузить их по сервисам -- отдельная работа.
-    {
-      user: "service", password: "{{ lookup('password', secrets_dir + '/nats-service.pass length=32 chars=ascii_letters,digits') }}"
-      permissions: {
-        publish:   { allow: ["mop.>", "_INBOX.>"] }
-        subscribe: { allow: ["mop.>", "_INBOX.>"] }
-      }
-    }
-{% for op, subs in (MOP_OPERATOR_SUBJECTS | default({})).items() %}
-
-    # Оператор {{ op }} -- человек, а не роль (#84, #106). Права по его роли
-    # в MOP_OPERATORS (mop/operators.py): admin -- весь пул с машинами, user --
-    # названные проекты или все без mop.admin.>. Отозвать доступ одному --
-    # убрать одного пользователя. Пароль -- там же, где остальные.
-    {
-      user: "{{ op }}", password: "{{ lookup('password', secrets_dir + '/nats-op-' + op + '.pass length=32 chars=ascii_letters,digits') }}"
-      allowed_connection_types: ["WEBSOCKET"]
-      permissions: {
-        publish:   { allow: {{ subs.allow | to_json }}{% if subs.deny %}, deny: {{ subs.deny | to_json }}{% endif %} }
-        subscribe: { allow: {{ subs.allow | to_json }}{% if subs.deny %}, deny: {{ subs.deny | to_json }}{% endif %} }
-      }
-    }
-{% endfor %}
-{% for project in projects %}
-
-    # Папеты проекта {{ project }}. Врапер подсовывает эти креды сессии через
-    # MOP_BUS_CONFIG, поэтому `mop mcp` внутри папета достаёт только своих
-    # соседей и своего мастера. Управляющий субъект .rpc сюда не входит:
-    # печать в чужой TUI и запись файлов остаются за мастером.
-    {
-      user: "puppet-{{ project }}", password: "{{ lookup('password', secrets_dir + '/nats-puppet-' + project + '.pass length=32 chars=ascii_letters,digits') }}"
-      permissions: {
-        publish: { allow: ["mop.{{ project }}.node.*.msg", "mop.{{ project }}.all.msg",
-                           "mop.{{ project }}.master.>", "mop.{{ project }}.events",
-                           "_INBOX.>"] }
-        subscribe: { allow: ["_INBOX.>"] }
-      }
-    }
-{% endfor %}
-{% for node in nats_nodes %}
-
-    # Агент узла {{ node }}. Проекты он пересекает сознательно: он и есть то, что
-    # их разделяет, и обслуживает всех жильцов хоста. Разделение здесь -- по
-    # узлу: подписка только на свой, иначе агент мог бы перехватить запрос
-    # мастера к соседнему узлу, ответив первым (подписка в NATS не эксклюзивна).
-    # Субъект сервера (#62) -- те же креды из процесса задачи Nomad: узел
-    # просит bootstrap песочницы за папета, и проект в субъекте сверяет сервер.
-    {
-      user: "node-{{ node }}", password: "{{ lookup('password', secrets_dir + '/nats-node-' + node + '.pass length=32 chars=ascii_letters,digits') }}"
-      permissions: {
-        publish: { allow: ["mop.*.master.>", "mop.*.events",
-                           "mop.*.node.{{ node }}.msg", "mop.*.server.rpc",
-                           "_INBOX.>"] }
-        subscribe: { allow: ["mop.*.node.{{ node }}.>", "mop.*.all.msg",
-                             "_INBOX.>"] }
-      }
-    }
-{% endfor %}
-  ]
+  # Список пользователей пишет сервер (#116, mop/natsconf.py): люди, сервисы
+  # и узлы -- из base-users.json от `mop deploy`, папеты -- из реестра
+  # сервера. Одним файлом: include внутри массива users NATS не принимает.
+  include ./users.conf
 }

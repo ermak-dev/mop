@@ -7,41 +7,12 @@
 # Креды кладутся в тот же каталог, откуда их читает любой мастер
 # (~/.config/mop/servers/<адрес>/, mop/creds.py): дашборд — тот же клиент,
 # что и `mop list`, и второго способа представиться шине у него нет.
-- name: Ensure python3-pip
-  become: yes
-  ansible.builtin.apt:
-    name: python3-pip
-    state: present
-
-# Под пользователем пула, как у узла (deploy/roles/bus): --user от root'а
-# клал библиотеки в /root/.local, где mop-web их не видит (#108).
-- name: Python dependencies of mop
-  become: yes
-  become_user: "{{ MOP_USER }}"
-  ansible.builtin.pip:
-    name: "{{ MOP_PIP_DEPS.split(',') }}"
-    extra_args: --user --break-system-packages
-    state: present
-
-# Те же исключения, что у узла (deploy/roles/bus): .env с кредами GitLab на
-# сервер не едет, всё нужное дашборду приходит юнитом и каталогом кредов.
-- name: Sync the mop package from the control machine
-  ansible.posix.synchronize:
-    src: "{{ lookup('env', 'HOME') }}/mop/"
-    dest: "{{ MOP_HOME }}/mop/"
-    delete: yes
-    recursive: yes
-    rsync_opts:
-      - "--exclude=.git"
-      - "--exclude=__pycache__"
-      - "--exclude=.env"
-      - "--exclude=inventory.ini"
-      - "--exclude=inventory.yaml"
-      # Пакет -- пользователю пула, кем бы ни зашёл ansible (#108).
-      - "--chown={{ MOP_USER }}:{{ MOP_USER }}"
-  # Результат синка переживает игру: по нему перезапускается и второй процесс
-  # сервера, mop-bootstrap (роль bootstrap) -- тот же пакет в том же каталоге.
-  register: mop_server_package
+# Пакет и зависимости уже на сервере: их кладёт игра сервера NATS
+# (tasks/package.yml, #116). Рестарт дашборда -- по результату того синка.
+- name: The package changed under the dashboard
+  ansible.builtin.debug:
+    msg: "mop package changed on the server — restarting mop-web"
+  changed_when: (mop_server_package | default({})) is changed
   notify: restart mop-web
 
 # Всё в каталоге кредов -- пользователю пула: сервисы читают его под ним, а
