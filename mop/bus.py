@@ -184,6 +184,37 @@ def _call(coro, timeout):
     return asyncio.run_coroutine_threadsafe(coro, _ensure_loop()).result(timeout + 5)
 
 
+def _why_not(c, error):
+    """Причина отказа подключения (#130): из ошибки попытки, которую nats-py
+    отдал в error_cb, -- само исключение у него пустой NoServersError. Для
+    TLS -- куда резолвится имя и чей сертификат предъявлен против
+    закреплённого: чужой адрес иначе читался бы как неверный пароль."""
+    import socket
+    from urllib.parse import urlparse
+    who = c.get("user") or "?"
+    u = urlparse(c.get("url") or "")
+    host, port = u.hostname or "?", u.port or (443 if u.scheme == "wss" else 4222)
+    try:
+        addr = socket.gethostbyname(host)
+    except OSError:
+        addr = None
+    error = error or ""
+    presented = pinned = None
+    if "CERTIFICATE_VERIFY_FAILED" in error or "SSLCertVerificationError" in error:
+        try:
+            presented = creds.fingerprint(creds.peer_cert(host, port))
+        except OSError:
+            pass
+        if c.get("cafile"):
+            try:
+                import ssl
+                with open(c["cafile"]) as f:
+                    pinned = creds.fingerprint(ssl.PEM_cert_to_DER_cert(f.read()))
+            except (OSError, ValueError):
+                pass
+    return creds.connect_failure(who, error, host, port, addr, presented, pinned)
+
+
 async def _on_error(e):
     """Отказ прав NATS приезжает сюда, а не в ответ на запрос: сервер молча
     не доставляет публикацию, и запрос честно висит до таймаута. Без этого
@@ -209,14 +240,21 @@ def check(c):
     Одноразовое соединение без реконнекта: здесь проверяют пароль, и
     бесконечные попытки превратили бы неверный пароль в зависание вместо
     ответа. Зовёт `mop join` до того, как что-то запишет (#84)."""
-    async def quiet(_e):
-        pass          # отказ вернётся исключением; трассировка в stderr — шум
+    seen = []
+
+    async def quiet(e):
+        seen.append(str(e))   # причина отказа (#130); в stderr -- шум
 
     async def once():
         nc = await nats.connect(**auth(c), name="mop-join", error_cb=quiet,
                                 allow_reconnect=False, connect_timeout=5)
         await nc.close()
-    _call(once(), 15)
+    try:
+        _call(once(), 15)
+    except BusError:
+        raise
+    except Exception as e:
+        raise BusError(_why_not(c, (seen[-1] if seen else "") or str(e)))
 
 
 def ask_once(c, subj, verb, timeout=5, **fields):
@@ -255,16 +293,11 @@ def connect(file=None):
         except BusError:
             raise
         except Exception as e:
-            # Имя пользователя обязательно в тексте: отказ «Authorization
-            # Violation» приезжает из nats-py пустой строкой, и без имени
-            # отозванный доступ (#84) читается как «сервер лёг».
             try:
-                who = config(file).get("user") or "?"
+                c = config(file)
             except Exception:
-                who = "?"
-            why = str(e) or ("wrong password, or the bus does not know this "
-                             "user any more")
-            raise BusError(f"no connection to bus as {who}: {why}")
+                c = {}
+            raise BusError(_why_not(c, _last_error or str(e)))
         return _conn
 
 
