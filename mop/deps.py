@@ -13,6 +13,7 @@
 
 PIP = (
     "nats-py",        # шина
+    "aiohttp",        # её WebSocket-транспорт: wss через TLS-прокси (#97)
     "python-nomad",   # API Nomad
     "requests",       # ручки Nomad, которых python-nomad не знает
     "mcp",            # сервер инструментов мастера и папета

@@ -101,19 +101,7 @@
     enabled: yes
     state: started
 
-- name: Apply the reload now, before the check
+# Сквозная проверка -- запрос к дашборду через прокси -- в конце роли web:
+# дашборд ходит на шину через этот же прокси (#97) и поднимается после него.
+- name: Apply the reload now
   ansible.builtin.meta: flush_handlers
-
-# С контроллера и по имени: так ходит оператор, и проверка видит то же, что
-# он, -- резолв, сертификат на это имя и прокси до дашборда.
-- name: The dashboard answers through the proxy
-  delegate_to: localhost
-  become: no
-  ansible.builtin.uri:
-    url: "https://{{ MOP_SERVER_LAN }}:{{ MOP_HTTPS_PORT }}/healthz"
-    ca_path: "{{ omit if MOP_TLS_CERT else secrets_dir + '/tls.pem' }}"
-    status_code: 200
-  register: proxy_health
-  until: proxy_health.status == 200
-  retries: 10
-  delay: 3

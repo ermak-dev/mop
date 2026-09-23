@@ -12,8 +12,12 @@ HYPOTHESIS (#51): креды мастера запечены плейбуком 
 SOLUTION: mop/creds.py собирает конфиг на лету из ~/.config/mop/servers/<адрес>/.
 STATUS: FIXED — see #51
 """
+import hashlib
 import json
 import os
+import shutil
+import ssl
+import subprocess
 import sys
 import tempfile
 
@@ -185,6 +189,103 @@ def main():
     if left != ["nats-master-stay.pass"] or len(removed) != 4:
         bad += 1
         print(f"FAILED  forget -> {removed}, left {left}")
+
+    # ── #97: клиенты каталога сервера — на шину по wss через TLS-прокси.
+    # HYPOTHESIS: bus_config всегда собирал nats://<LAN>:4222 без TLS, и
+    # пароль оператора уходил по LAN открытым текстом.
+    # SOLUTION: wss_config — адрес прокси (#96) и закреплённый сертификат;
+    # bus_config остаётся узлам и папетам, их кред едет файлом и ответом
+    # bootstrap.
+    cases += 1
+    got = creds.wss_config("mop.example", "443", None, "s3cret", user="anton")
+    want = {"url": "wss://mop.example:443/nats", "user": "anton",
+            "password": "s3cret"}
+    if got != want:
+        bad += 1
+        print(f"FAILED  wss_config -> {got}, wanted {want}")
+    cases += 1
+    got = creds.wss_config("mop.example", "8443", "rugent", "pw",
+                           cafile="/x/tls.pem")
+    want = {"url": "wss://mop.example:8443/nats", "user": "master-rugent",
+            "password": "pw", "cafile": "/x/tls.pem"}
+    if got != want:
+        bad += 1
+        print(f"FAILED  wss_config with a pinned certificate -> {got}")
+
+    # TLS-контекст: nats:// его не получает (4222 без TLS, и контекст там —
+    # отказ на рукопожатии), wss — всегда с проверкой имени и цепочки.
+    cases += 1
+    if creds.tls_context({"url": "nats://10.0.0.5:4222"}) is not None:
+        bad += 1
+        print("FAILED  tls_context for nats:// must be None: 4222 speaks no TLS")
+    cases += 1
+    ctx = creds.tls_context({"url": "wss://mop.example:443/nats"})
+    if ctx is None or ctx.verify_mode != ssl.CERT_REQUIRED or not ctx.check_hostname:
+        bad += 1
+        print(f"FAILED  tls_context for wss must verify name and chain: {ctx}")
+
+    # Закреплённый самоподписанный сертификат — единственный, кому верим:
+    # системное доверие рядом с ним — лишняя дорога для подмены.
+    if shutil.which("openssl"):
+        pem = os.path.join(tempfile.mkdtemp(), creds.CERT_FILE)
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt",
+                        "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1",
+                        "-subj", "/CN=mop.example", "-keyout", pem + ".key",
+                        "-out", pem], check=True, capture_output=True)
+        cases += 1
+        ctx = creds.tls_context({"url": "wss://mop.example:443/nats",
+                                 "cafile": pem})
+        cas = ctx.get_ca_certs() if ctx else []
+        if len(cas) != 1:
+            bad += 1
+            print(f"FAILED  a pinned certificate must be the only trust: {len(cas)} CAs")
+
+    # Сертификат едет оператору вместе с паролями: без него wss на
+    # самоподписанный не поднимется ни у join по ssh, ни у контроллера.
+    cases += 1
+    if creds.CERT_FILE not in creds.pick(listing + [creds.CERT_FILE]):
+        bad += 1
+        print("FAILED  pick must bring the pinned certificate")
+    cases += 1
+    d = tempfile.mkdtemp()
+    if creds.cafile(d) is not None:
+        bad += 1
+        print("FAILED  cafile of a directory without a pin is None: system trust")
+    open(os.path.join(d, creds.CERT_FILE), "w").close()
+    cases += 1
+    if creds.cafile(d) != os.path.join(d, creds.CERT_FILE):
+        bad += 1
+        print(f"FAILED  cafile -> {creds.cafile(d)!r}")
+
+    # Установка перешла на настоящий сертификат (MOP_TLS_CERT): старый
+    # самоподписанный в secrets/ остаётся лежать, и закреплённый у клиента
+    # он отверг бы настоящий. collect с pin=False обязан его снять.
+    secrets = tempfile.mkdtemp()
+    for n in ("nats-admin.pass", creds.CERT_FILE):
+        with open(os.path.join(secrets, n), "w") as f:
+            f.write(n)
+    dest = os.path.join(tempfile.mkdtemp(), "mop.example")
+    cases += 1
+    creds.collect(secrets, dest)
+    if creds.cafile(dest) is None:
+        bad += 1
+        print("FAILED  collect must pin the self-signed certificate")
+    cases += 1
+    got = creds.collect(secrets, dest, pin=False)
+    if creds.cafile(dest) is not None or got != ["nats-admin.pass"]:
+        bad += 1
+        print(f"FAILED  collect(pin=False) must drop the pin: {got}, "
+              f"dir {sorted(os.listdir(dest))}")
+
+    # Отпечаток — то, что оператор сверяет глазами при первом входе.
+    cases += 1
+    got = creds.fingerprint(b"x")
+    want = "SHA256:" + ":".join(
+        f"{b:02X}" for b in hashlib.sha256(b"x").digest())
+    if got != want:
+        bad += 1
+        print(f"FAILED  fingerprint -> {got}, wanted {want}")
+    # STATUS: FIXED — see #97
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0

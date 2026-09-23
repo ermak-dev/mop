@@ -14,6 +14,7 @@
     nats-admin.pass             оператор: все проекты плюс узловой disk
     nats-master-<проект>.pass     мастер проекта
     bootstrap.json              management-токен Nomad
+    tls.pem                     самоподписанный сертификат TLS-прокси (#97)
 
 Паролей узлов и папетов здесь нет намеренно: с ними мастер мог бы
 представиться узлом, а границу проектов держат ровно креды.
@@ -21,8 +22,10 @@
 Конфиг шины собирается из адреса, порта, проекта и пароля — чистая функция,
 проверяется в tests/creds.py.
 """
+import hashlib
 import json
 import os
+import ssl
 
 from . import config
 
@@ -33,6 +36,12 @@ ROOT = os.path.expanduser("~/.config/mop/servers")
 OPERATOR_FILE = "operator.json"
 ADMIN = "admin"          # псевдопроект оператора: проекта нет
 TOKEN_FILE = "bootstrap.json"
+# Сертификат TLS-прокси сервера, закреплённый у клиента (#97). Только
+# самоподписанный: настоящий проверяется системным доверием, и закреплять
+# его значило бы сломать клиента на первом же продлении.
+CERT_FILE = "tls.pem"
+# Путь шины за прокси: nginx отдаёт его WebSocket-листенеру nats-server (#96).
+WSS_PATH = "/nats"
 
 
 def server_dir(host=None):
@@ -70,6 +79,78 @@ def bus_config(host, port, project, password, user=None):
     в ответе на bootstrap песочницы (#83, docs/BOOTSTRAP.md)."""
     return {"url": f"nats://{host}:{port}", "user": user or user_of(project),
             "password": password}
+
+
+def wss_config(host, https_port, project, password, user=None, cafile=None):
+    """{url, user, password[, cafile]} клиента каталога сервера (#97): шина
+    через TLS-прокси, а не сырой 4222. Пароль оператора не должен идти по
+    сети открытым текстом -- тем более когда он станет паролем LDAP.
+
+    bus_config остаётся узлам и папетам: их кред едет файлом и ответом
+    bootstrap, генерируется и ничего, кроме шины, не открывает."""
+    out = {"url": f"wss://{host}:{https_port}{WSS_PATH}",
+           "user": user or user_of(project), "password": password}
+    if cafile:
+        out["cafile"] = cafile
+    return out
+
+
+def tls_context(c):
+    """TLS-контекст для nats.connect по конфигу шины, либо None.
+
+    nats:// -- None: на 4222 TLS нет, и контекст там -- отказ рукопожатия.
+    wss -- всегда с проверкой имени и цепочки; закреплённый сертификат, если
+    он есть, -- единственное доверие: системное рядом с ним было бы лишней
+    дорогой для подмены."""
+    if not c.get("url", "").startswith("wss://"):
+        return None
+    if c.get("cafile"):
+        return ssl.create_default_context(cafile=c["cafile"])
+    return ssl.create_default_context()
+
+
+def cafile(directory):
+    """Путь закреплённого сертификата в каталоге сервера, либо None --
+    тогда доверие системное."""
+    path = os.path.join(directory, CERT_FILE)
+    return path if os.path.exists(path) else None
+
+
+def fingerprint(der):
+    """Отпечаток сертификата так, как его печатает openssl -fingerprint:
+    его оператор сверяет глазами при первом входе."""
+    return "SHA256:" + ":".join(f"{b:02X}" for b in hashlib.sha256(der).digest())
+
+
+def untrusted_cert(host, port, timeout=10):
+    """DER сертификата сервера, если система ему не доверяет; None -- если
+    доверяет (настоящий сертификат закреплять нельзя: продление сломало бы
+    клиента).
+
+    Зовёт `mop join --user` ДО того, как отправит пароль: пароль уходит
+    только в соединение, чей сертификат уже закреплён."""
+    import socket
+    try:
+        with socket.create_connection((host, int(port)), timeout) as raw:
+            with ssl.create_default_context().wrap_socket(raw, server_hostname=host):
+                return None
+    except ssl.SSLCertVerificationError:
+        pass
+    blind = ssl.create_default_context()
+    blind.check_hostname = False
+    blind.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, int(port)), timeout) as raw:
+        with blind.wrap_socket(raw, server_hostname=host) as tls:
+            return tls.getpeercert(binary_form=True)
+
+
+def write_cert(directory, der):
+    """Закрепить сертификат в каталоге сервера. -> путь."""
+    make_dir(directory)
+    path = os.path.join(directory, CERT_FILE)
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        f.write(ssl.DER_cert_to_PEM_cert(der))
+    return path
 
 
 def operator(directory):
@@ -131,7 +212,7 @@ def pick(listing):
     для контроллера (collect) и для `mop join` — иначе на одной машине
     оператор видел бы больше, чем на другой."""
     return sorted(n for n in listing
-                  if n == pass_file(None)
+                  if n in (pass_file(None), CERT_FILE)
                   or (n.startswith("nats-master-") and n.endswith(".pass")))
 
 
@@ -168,15 +249,21 @@ def forget(project, *dirs):
     return gone
 
 
-def collect(secrets_dir, dest):
+def collect(secrets_dir, dest, pin=True):
     """Собрать каталог сервера на самом контроллере: он тоже машина
     оператора, и после `mop deploy` на нём всё должно работать без join.
     Токен сюда кладёт игра сервера (fetch), а тот пишет с правами по
     umask -- поэтому права закрываются у всего, что лежит в каталоге, а не
-    только у скопированного. -> имена положенных паролей."""
+    только у скопированного. -> имена положенных файлов.
+
+    pin=False -- у установки настоящий сертификат (MOP_TLS_CERT): старый
+    самоподписанный остаётся лежать в secrets/, и закреплённый здесь он
+    отверг бы настоящий. Поэтому его не копируют, а прежнюю копию снимают."""
     import shutil
     make_dir(dest)
-    names = pick(os.listdir(secrets_dir))
+    names = [n for n in pick(os.listdir(secrets_dir)) if pin or n != CERT_FILE]
+    if not pin and os.path.exists(os.path.join(dest, CERT_FILE)):
+        os.remove(os.path.join(dest, CERT_FILE))
     for n in names:
         shutil.copyfile(os.path.join(secrets_dir, n), os.path.join(dest, n))
     for n in os.listdir(dest):

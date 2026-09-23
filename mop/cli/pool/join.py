@@ -4,7 +4,11 @@ Two ways in, and the first is the one to use.
 
   mop join --user anton     log in as yourself: the password is asked for
                             (or read from MOP_BUS_PASSWORD) and checked by
-                            connecting; nothing is copied and no ssh is needed
+                            connecting; nothing is copied and no ssh is needed.
+                            The bus is reached through the server's TLS proxy
+                            (wss://<MOP_SERVER_LAN>/nats); a self-signed
+                            certificate is pinned on first login, before the
+                            password is sent, and its fingerprint printed
 
   mop join <ssh-host>       the old way: tar the server's credential
                             directory over ssh. Kept until every installation
@@ -68,10 +72,26 @@ def login(user):
     if not password:
         raise RuntimeError("empty password")
     dest = creds.server_dir()
+    host, https = config.get("MOP_SERVER_LAN"), config.get("MOP_HTTPS_PORT")
+    # Шина -- через TLS-прокси (#97). Самоподписанный сертификат закрепляем
+    # при первом входе, до пароля: пароль уходит только туда, чей сертификат
+    # уже закреплён. Настоящий не закрепляем, прежний пин снимаем.
+    try:
+        der = creds.untrusted_cert(host, https)
+    except OSError as e:
+        raise RuntimeError(f"no TLS proxy at {host}:{https}: {e}")
+    pin = creds.cafile(dest)
+    if der is None and pin:
+        os.remove(pin)
+    if der is not None:
+        pin = creds.write_cert(dest, der)
+        print(f"{pin}: self-signed certificate {creds.fingerprint(der)}")
+        print("  compare on the controller: openssl x509 -noout -fingerprint "
+              "-sha256 -in ~/.config/mop/secrets/tls.pem")
     # Сначала проверяем, потом кладём: каталог не должен запомнить того, кого
     # шина не пустила.
-    c = creds.bus_config(config.get("MOP_SERVER_LAN"),
-                         config.get("MOP_NATS_PORT"), None, password, user=user)
+    c = creds.wss_config(host, https, None, password, user=user,
+                         cafile=pin if der is not None else None)
     try:
         bus.check(c)
     except Exception as e:

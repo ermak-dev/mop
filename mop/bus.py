@@ -109,7 +109,7 @@ def _load(path):
 
 
 def config(file=None):
-    """{url, user, password} этого процесса.
+    """{url, user, password[, cafile]} этого процесса.
 
     Порядок: файл, который назвали (агент — свой узловой, врапер папета —
     через MOP_BUS_CONFIG), иначе сборка из каталога сервера (mop/creds.py)
@@ -120,9 +120,11 @@ def config(file=None):
     роутера, а хайрпин на порт шины роутер не делает — проверено, connection
     refused с обоих узлов.
 
-    Шина без TLS, и креды тут единственное, что отделяет проект от проекта, —
-    поэтому файл 0600 и по одному на проект. Почему без TLS — комментарии в
-    deploy/nats-server.conf.j2."""
+    Файл узла и папета — nats:// на 4222 без TLS, и креды там единственное,
+    что отделяет проект от проекта, — поэтому файл 0600 и по одному на
+    проект. Каталог сервера — люди и сервисы сервера, они идут wss через
+    TLS-прокси (#97); почему 4222 без TLS — комментарии в
+    deploy/roles/bus/templates/nats-server.conf.j2."""
     path = file or FILE
     if path:
         try:
@@ -135,25 +137,33 @@ def config(file=None):
     # его проекты, а какой именно проект — решает СУБЪЕКТ, и права на субъект
     # проверяет сервер NATS. Прежний путь остаётся рядом, пока установка не
     # перевела всех.
+    # Каталог сервера -- это человек или сервис сервера, и ходят они через
+    # TLS-прокси (#97): пароль по сети открытым текстом не идёт.
+    https, pin = settings.get("MOP_HTTPS_PORT"), creds.cafile(directory)
     op = creds.operator(directory)
     if op:
-        return creds.bus_config(host, settings.get("MOP_NATS_PORT"), PROJECT,
-                                op["password"], user=op["user"])
+        return creds.wss_config(host, https, PROJECT, op["password"],
+                                user=op["user"], cafile=pin)
     password = creds.password(directory, PROJECT)
     if password is None:
         raise BusError(f"no bus credentials for {creds.user_of(PROJECT)}: "
                        f"neither {directory}/{creds.OPERATOR_FILE} nor "
                        f"{directory}/{creds.pass_file(PROJECT)} — "
                        f"run mop join --user <name> (or mop deploy on the server)")
-    return creds.bus_config(host, settings.get("MOP_NATS_PORT"), PROJECT, password)
+    return creds.wss_config(host, https, PROJECT, password, cafile=pin)
 
 
 # ─── соединение ──────────────────────────────────────────────────────────
 def auth(c):
     """Аргументы nats.connect по кредам из config(): один способ представиться
     шине на всех — фасад мастера, петля агента и его самопроверка."""
-    return {"servers": [c["url"]], "user": c.get("user"),
-            "password": c.get("password")}
+    out = {"servers": [c["url"]], "user": c.get("user"),
+           "password": c.get("password")}
+    # wss -- через TLS-прокси (#97); nats:// узлов и папетов -- без TLS.
+    tls = creds.tls_context(c)
+    if tls is not None:
+        out["tls"] = tls
+    return out
 
 
 def _ensure_loop():
