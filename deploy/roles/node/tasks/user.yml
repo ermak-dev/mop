@@ -1,0 +1,33 @@
+# Пользователь пула: под ним работают папеты на узле и Nomad-сервер с
+# сервисами mop на сервере. Играют его роль node (#65) и игра сервера Nomad
+# (#108): сервер узлом не является, и пока пользователь заводился только
+# здесь, на свежем сервере юнит Nomad падал с 217/USER.
+#
+# become на самой задаче: игры идут без become, а passwd правит только root.
+# Дом -- явно владельцу: каталог, созданный root'ом до пользователя, `user`
+# не переписывает, и он остался бы чужим.
+# sudo -- чем ansible переходит к пользователю пула (become_user): так
+# делают проверки сервисов на сервере и pip. На узле он стоит всегда (туда
+# ansible и заходит через sudo), а в минимальном контейнере сервера его нет,
+# и переход падал бы на первой же такой задаче (#108).
+- name: sudo, for become_user
+  become: yes
+  ansible.builtin.apt:
+    name: sudo
+    state: present
+
+- name: The pool user
+  become: yes
+  ansible.builtin.user:
+    name: "{{ MOP_USER }}"
+    home: "{{ MOP_HOME }}"
+    shell: /bin/bash
+    create_home: yes
+
+- name: Home of the pool user
+  become: yes
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"

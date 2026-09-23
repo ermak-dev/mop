@@ -33,16 +33,28 @@
     remote_src: yes
     mode: '0755'
 
+# Владелец -- пользователь пула, под которым работает сервер (nomad_user
+# ниже), а не тот, кем ansible зашёл: на сервере с root'ом каталог данных
+# доставался root'у, и Nomad не мог в него писать (#108).
 - name: Create nomad data dir
+  become: yes
   ansible.builtin.file:
-    path: "{{ nomad_home }}/data"
+    path: "{{ item }}"
     state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
     mode: '0755'
+  loop:
+    - "{{ nomad_home }}"
+    - "{{ nomad_home }}/data"
 
 - name: Deploy server config
+  become: yes
   ansible.builtin.template:
     src: server.hcl.j2
     dest: "{{ nomad_home }}/server.hcl"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
     mode: '0644'
   register: server_config
 

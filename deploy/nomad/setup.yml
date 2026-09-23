@@ -26,6 +26,11 @@
   become: no
   gather_facts: no
   tasks:
+    # Nomad-сервер работает под пользователем пула (nomad.service.j2), а
+    # сервер узлом не является и роль node не играет (#108).
+    - ansible.builtin.include_role:
+        name: node
+        tasks_from: user
     - ansible.builtin.include_role:
         name: nomad
         tasks_from: server
