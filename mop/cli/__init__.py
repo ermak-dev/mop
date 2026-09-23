@@ -157,6 +157,28 @@ def main(argv):
     return run(importlib.import_module(modname).main, rest)
 
 
+def utf8_locale(env):
+    """Какую локаль поставить прогонам, либо None — и так UTF-8.
+
+    Ansible требует UTF-8 и берёт её из окружения. Свежая машина несёт
+    `LANG=C`, сгенерированных UTF-8 локалей там нет, и первый же `mop setup`
+    на выделенном сервере отказывался стартовать.
+
+    Машину, у которой локаль настоящая, не трогаем: установка вправе говорить
+    по-русски, и подменять её на `C.UTF-8` значит менять язык вывода там, где
+    об этом не просили. Старшинство — как у самой libc: LC_ALL, потом
+    LC_CTYPE, потом LANG; решает ПЕРВАЯ заданная, а не первая подходящая.
+
+    `C.UTF-8` встроена в glibc и генерации не требует — тем и хороша как
+    запасная."""
+    for key in ("LC_ALL", "LC_CTYPE", "LANG"):
+        value = env.get(key)
+        if value:
+            normal = value.upper().replace("-", "").replace("_", "")
+            return None if normal.endswith("UTF8") else "C.UTF-8"
+    return "C.UTF-8"
+
+
 def environment():
     """Окружение прогонов ansible: инвентарь установки, свой ansible.cfg,
     роли продукта. Раньше это ставил bin/common для bash-командлетов;
@@ -169,11 +191,10 @@ def environment():
     # текущего каталога, а абсолютные были бы литералом конкретной машины.
     os.environ.setdefault("ANSIBLE_CONFIG", os.path.join(PROJECT, "ansible.cfg"))
     os.environ.setdefault("ANSIBLE_ROLES_PATH", os.path.join(PROJECT, "deploy", "roles"))
-    # Локаль прогонов. Ansible требует UTF-8 и берёт её из окружения, а свежая
-    # машина несёт LANG=C: сгенерированных UTF-8 локалей там нет, и первый же
-    # `mop setup` на выделенном сервере отказывался стартовать (#92). C.UTF-8
-    # встроена в glibc и генерации не требует; заданное оператором не трогаем.
-    os.environ.setdefault("LC_ALL", "C.UTF-8")
+    # Локаль прогонов: ansible требует UTF-8 (#92).
+    fallback = utf8_locale(os.environ)
+    if fallback:
+        os.environ["LC_ALL"] = fallback
 
 
 def run(fn, argv):

@@ -28,6 +28,12 @@
         that: role in apt_packages
         fail_msg: "mop_role must be controller or operator, not {{ role }}"
 
+    # Локаль -- раньше всего остального: ansible на не-UTF-8 машине не
+    # стартует вовсе, и следующий же прогон упёрся бы в это (#92).
+    - ansible.builtin.include_role:
+        name: node
+        tasks_from: locale
+
     - name: System packages of the {{ role }}
       become: yes
       ansible.builtin.apt:

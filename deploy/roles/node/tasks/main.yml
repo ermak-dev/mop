@@ -29,6 +29,9 @@
 # look up user» (#65). become на самой задаче: игра узла идёт без become, а
 # passwd правит только root. Дом -- явно владельцу: каталог, созданный root'ом
 # до пользователя, `user` не переписывает, и он остался бы чужим.
+# Локаль узла: тот же файл, что играет `mop setup` на управляющих машинах.
+- ansible.builtin.include_tasks: locale.yml
+
 - name: The pool user
   become: yes
   ansible.builtin.user:
