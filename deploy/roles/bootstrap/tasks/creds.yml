@@ -1,0 +1,50 @@
+# Пароли папетов на сервер (#83): по одному на проект, из secrets/ контроллера.
+#
+# Сервер раздаёт их узлам в ответе на bootstrap песочницы, и узел перестаёт
+# хранить кред проекта, у которого на нём сейчас никто не живёт. Новой власти
+# серверу это не даёт: он и так ходит на шину под `admin`, то есть может
+# больше любого папета.
+#
+# Каталог отдельный от servers/<адрес>/ намеренно: тот про то, что держит
+# ОПЕРАТОР, и пароль папета оператору не положен (creds.pick). Положи их туда
+# -- и `mop join` увёз бы их первой же командой.
+- name: Where the puppets' bus passwords live on the server
+  become: yes
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop/puppets"
+    state: directory
+    mode: "0700"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+
+- name: Bus password of each project, for the server to hand out
+  become: yes
+  ansible.builtin.copy:
+    content: "{{ lookup('password', secrets_dir + '/nats-puppet-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
+    dest: "{{ MOP_HOME }}/.config/mop/puppets/nats-puppet-{{ item }}.pass"
+    mode: "0600"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+  loop: "{{ shards }}"
+  no_log: yes
+
+# Проект сняли -- пароль уходит и отсюда: иначе сервер раздавал бы кред
+# пользователя, которого на шине уже нет, и папет читался бы как молчащий.
+- name: Passwords of projects the pool no longer serves
+  become: yes
+  ansible.builtin.find:
+    paths: "{{ MOP_HOME }}/.config/mop/puppets"
+    patterns: "nats-puppet-*.pass"
+  register: mop_puppet_creds
+  when: shards | length > 0
+
+- name: Drop them
+  become: yes
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ mop_puppet_creds.files | default([]) | map(attribute='path') | difference(wanted) }}"
+  vars:
+    wanted: >-
+      {{ shards | map('regex_replace', '^', MOP_HOME ~ '/.config/mop/puppets/nats-puppet-')
+                | map('regex_replace', '$', '.pass') | list }}

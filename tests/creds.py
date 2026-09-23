@@ -47,6 +47,28 @@ def main():
             print(f"FAILED  pass_file({shard!r}) -> {creds.pass_file(shard)!r}, "
                   f"wanted {fname!r}")
 
+    # Кред папета: его выдаёт сервер в ответе на bootstrap песочницы (#83),
+    # поэтому имя пользователя приходится называть явно — user_of() отвечает
+    # про мастера, и молча получить master-<проект> там, где нужен
+    # puppet-<проект>, значит выдать папету права мастера.
+    cases += 1
+    if creds.puppet_pass_file("rugent") != "nats-puppet-rugent.pass":
+        bad += 1
+        print(f"FAILED  puppet_pass_file -> {creds.puppet_pass_file('rugent')!r}")
+    cases += 1
+    got = creds.bus_config("10.0.0.5", "4222", "rugent", "s3cret",
+                           user=creds.puppet_user("rugent"))
+    want = {"url": "nats://10.0.0.5:4222", "user": "puppet-rugent",
+            "password": "s3cret"}
+    if got != want:
+        bad += 1
+        print(f"FAILED  bus_config with an explicit user -> {got}")
+    cases += 1
+    # Без явного пользователя поведение прежнее: шард -> мастер шарда.
+    if creds.bus_config("10.0.0.5", "4222", "rugent", "x")["user"] != "master-rugent":
+        bad += 1
+        print("FAILED  bus_config without a user must stay the master of the shard")
+
     # Каталог сервера — по адресу, и только по нему: два сервера — два
     # каталога, и переменная окружения переключает оба вместе с NOMAD_ADDR.
     cases += 1

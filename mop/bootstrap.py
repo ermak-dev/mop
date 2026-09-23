@@ -48,10 +48,16 @@ import subprocess
 import sys
 import time
 
-from . import bus, config, driver
+from . import bus, config, creds, driver
 
 # На сервере: файлы шардов и ключ к телам.
 ROOT = os.path.expanduser("~/.config/mop/bootstrap")
+# На сервере: пароли папетов, по одному на проект. Их кладёт роль сервера из
+# secrets/ контроллера, и раздаёт их сервер в ответе на bootstrap: узел
+# перестаёт хранить кред проекта, у которого на нём сейчас никто не живёт
+# (#83). Каталог отдельный от servers/<адрес>/ намеренно — тот про то, что
+# держит ОПЕРАТОР, и пароль папета оператору не положен (creds.pick).
+PUPPET_CREDS = os.path.expanduser("~/.config/mop/puppets")
 KEY = os.path.expanduser("~/.ssh/mop-bootstrap")
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "bootstrap.yml")
 # На узле: публичная часть ключа сервера, её кладёт `mop deploy`.
@@ -177,6 +183,24 @@ def _shards_here():
         return []
 
 
+def puppet_creds(project, root=None):
+    """Кред папета проекта для ответа узлу, либо None.
+
+    None — не отказ: пока прогон кладёт `bus-<проект>.json` на узлы сам,
+    врапер возьмёт файл оттуда. Так и выглядит переход."""
+    path = os.path.join(root or PUPPET_CREDS, creds.puppet_pass_file(project))
+    try:
+        with open(path) as f:
+            password = f.read().strip()
+    except OSError:
+        return None
+    if not password:
+        return None
+    return creds.bus_config(config.get("MOP_SERVER_LAN"),
+                            config.get("MOP_NATS_PORT"), project, password,
+                            user=creds.puppet_user(project))
+
+
 async def _handle(msg):
     try:
         req = json.loads(msg.data.decode())
@@ -197,6 +221,11 @@ async def _handle(msg):
                 # отвечать остальным.
                 out = await asyncio.get_running_loop().run_in_executor(
                     None, play, req, shard)
+                # Кред папета едет тем же ответом: узел уже позвал нас, и
+                # второго разговора ради одного файла не нужно.
+                got = puppet_creds(shard)
+                if got and not out.get("error"):
+                    out["bus"] = got
         elif verb == "put":
             got = store(ROOT, shard, req.get("text") or "")
             out = {"ok": True, **got}
