@@ -11,61 +11,8 @@ every start of a puppet, before its session opens (docs/BOOTSTRAP.md). The
 server holds one copy per shard: mop deploy puts it from origin, mop add and
 this push from the working copy.
 """
-import asyncio
-import os
-import sys
-
 from mop.cli import lib
-from mop import bootstrap, bus, puppets
-
-
-def v_serve(_argv):
-    try:
-        asyncio.run(bootstrap.serve())
-    except KeyboardInterrupt:
-        return 0
-    return 0
-
-
-def v_push(argv):
-    if len(argv) > 1:
-        lib.usage(__doc__)
-    origin = argv[0] if argv else lib.cwd_origin()
-    shard = puppets.shard_of(origin)
-    root = lib.git("rev-parse", "--show-toplevel")
-    path = os.path.join(root, bootstrap.FILE)
-    if os.path.exists(path):
-        with open(path) as f:
-            text = f.read()
-    else:
-        text = ""
-    got = bus.ask_server("put", shard=shard, text=text)
-    if got.get("error"):
-        sys.exit(f"{shard}: {got['error']}")
-    if not text:
-        print(f"{shard}: no {bootstrap.FILE} here — removed on the server")
-        return 0
-    print(f"{shard}: {bootstrap.FILE} on the server — {got.get('tasks', 0)} task(s), "
-          f"{got.get('vars', 0)} var(s)")
-    for k in got.get("alien") or []:
-        print(f"  {k} is not a bootstrap's to set — ignored")
-    return 0
-
-
-def v_check(_argv):
-    got = bus.ask_server("ping", timeout=5)
-    if got.get("error"):
-        sys.exit(f"bootstrap service: {got['error']}")
-    print(f"bootstrap service answers; files for: {', '.join(got.get('shards') or []) or 'no shard'}")
-    return 0
-
-
-VERBS = {"serve": v_serve, "push": v_push, "check": v_check}
 
 
 def main(argv):
-    if not argv or argv[0] not in VERBS:
-        lib.usage(__doc__)
-    return VERBS[argv[0]](argv[1:])
-
-
+    lib.usage(__doc__)
