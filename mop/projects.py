@@ -83,6 +83,28 @@ def names(origins, legacy):
     return sorted({puppets.project_of(o) for o in origins} | set(legacy))
 
 
+def git_hosts(origins, default):
+    """Хосты, ключам которых узел доверяет в known_hosts. Чистая функция.
+
+    MOP_GIT_HOST установки плюс ssh-хосты origin'ов реестра (#121): проект
+    бывает и с чужого форжа, ключ пула там пускают, а ключа хоста узел не
+    знал -- и папет падал на клоне. https и локальный путь ключа хоста не
+    требуют. Порт у ssh:// -- в записи known_hosts как [host]:port."""
+    found = []
+    for origin in origins:
+        o = (origin or "").strip()
+        host = None
+        if o.startswith("ssh://"):
+            netloc = o[len("ssh://"):].split("/", 1)[0].rsplit("@", 1)[-1]
+            name, _, port = netloc.partition(":")
+            host = f"[{name}]:{port}" if port and port != "22" else name
+        elif "://" not in o and ":" in o and not o.startswith("/"):
+            host = o.split(":", 1)[0].rsplit("@", 1)[-1]
+        if host:
+            found.append(host)
+    return [default] + sorted(set(found) - {default})
+
+
 # ─── лимиты: потолок папетов проекта (#107) ─────────────────────────────
 # Политика, а не состав: реестр отвечает «какие проекты заведены», лимиты --
 # «сколько папетов проекту можно». Отдельный файл, а не суффикс в строке

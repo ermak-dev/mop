@@ -175,10 +175,45 @@ def check_limits():
     return out
 
 
+def check_git_hosts():
+    """HYPOTHESIS (#121): узел доверял ключу хоста одного MOP_GIT_HOST, и
+    папет проекта с другого форжа падал на клоне: Host key verification
+    failed. SOLUTION: хосты для known_hosts -- MOP_GIT_HOST плюс ssh-хосты
+    origin'ов реестра. STATUS: FIXED — see #121"""
+    out = []
+    try:
+        fn = projects.git_hosts
+    except AttributeError:
+        return ["projects.git_hosts is missing"]
+    cases = [
+        # Проект на форже установки -- один хост, без дубля.
+        (["git@dev.corp:rud/app.git"], "dev.corp", ["dev.corp"]),
+        # Проект с чужого форжа -- его хост добавляется.
+        (["git@git.ermak.dev:ermak/mop.git", "git@dev.corp:rud/app.git"],
+         "dev.corp", ["dev.corp", "git.ermak.dev"]),
+        # ssh:// с портом: known_hosts пишет такой хост как [host]:port.
+        (["ssh://git@forge.example:2222/team/x.git"], "dev.corp",
+         ["dev.corp", "[forge.example]:2222"]),
+        (["ssh://git@forge.example/team/x.git"], "dev.corp",
+         ["dev.corp", "forge.example"]),
+        # https и локальный путь ключа хоста не требуют.
+        (["https://github.com/a/b.git", "/srv/git/c.git"], "dev.corp",
+         ["dev.corp"]),
+        # Пустой реестр -- хост установки всё равно нужен: им клонирует сборка.
+        ([], "dev.corp", ["dev.corp"]),
+    ]
+    for origins, default, want in cases:
+        got = fn(origins, default)
+        if got != want:
+            out.append(f"git_hosts({origins!r}, {default!r}) -> {got!r}, wanted {want!r}")
+    return out
+
+
 def main():
     failed = []
     for check in (check_add, check_delete, check_merge,
-                  check_migration_needed, check_names, check_limits):
+                  check_migration_needed, check_names, check_limits,
+                  check_git_hosts):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     print("\n".join(failed) if failed else "", end="\n" if failed else "")

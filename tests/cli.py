@@ -134,6 +134,17 @@ def main():
         failed += 1
         print(f"FAIL play_vars with limits: {got}")
     # STATUS: FIXED — see #107
+    # Хосты форжей (#121) едут полной игре списком: роль узла доверяет ключу
+    # каждого. Без них -- ключа нет вовсе, узкий прогон проектов их не
+    # передаёт и роль узла не играет.
+    got = lib.play_vars(["mop"], git_hosts=["dev.corp", "git.ermak.dev"])
+    if json.loads(got[0]).get("mop_git_hosts") != ["dev.corp", "git.ermak.dev"]:
+        failed += 1
+        print(f"FAIL play_vars with git hosts: {got}")
+    if "mop_git_hosts" in json.loads(lib.play_vars(["mop"])[0]):
+        failed += 1
+        print("FAIL play_vars without git hosts must not send an empty list")
+    # STATUS: FIXED — see #121
 
     # Локаль прогонов (#92): ansible требует UTF-8 и берёт её из окружения, а
     # свежая машина несёт LANG=C. Ставит её диспетчер, потому что зовут
