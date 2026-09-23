@@ -68,6 +68,30 @@ def main():
         failed += 1
         print("FAIL resolve of nothing must be None")
 
+    # HYPOTHESIS (#140): строка хода одна, и строкам вывода сборки на
+    # терминале негде жить. SOLUTION: frame() -- кадр из нескольких строк,
+    # перерисовываемый на месте: вверх на прежнюю высоту, стереть до конца
+    # экрана, новые строки, обрезанные по ширине, чтобы перенос не сбил счёт.
+    E = "\033"
+    got = lib.frame(0, ["one", "two", "step"], 80)
+    if got != f"\r{E}[Jone\ntwo\nstep":
+        failed += 1
+        print(f"FAIL frame from nothing: {got!r}")
+    got = lib.frame(3, ["step"], 80)
+    if got != f"\r{E}[2A{E}[Jstep":
+        failed += 1
+        print(f"FAIL frame over three rows: {got!r}")
+    if lib.frame(1, [], 80) != f"\r{E}[J":
+        failed += 1
+        print(f"FAIL frame to nothing erases: {lib.frame(1, [], 80)!r}")
+    # Цвета и управляющие символы строки ansible не должны ни красить
+    # кадр, ни сдвигать курсор; ширина -- по видимым символам.
+    got = lib.frame(0, [f"{E}[0;32mok: [hyper]{E}[0m\tx\r", "abcdefghij"], 6)
+    if got != f"\r{E}[Jok: [\nabcde":
+        failed += 1
+        print(f"FAIL frame must strip escapes and cut to width: {got!r}")
+    # STATUS: FIXED — see #140
+
     # Описание — первая строка докстринга, прочитанная без импорта: импорт
     # тянул бы шину и падал бы на машине без nats-py ради строки help.
     d = tempfile.mkdtemp(prefix="mop-test-cli-")

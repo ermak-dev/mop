@@ -52,6 +52,36 @@ def main():
         if "fresh" not in str(e):
             failed.append(f"the refusal must name the mode: {e}")
 
+    # HYPOTHESIS (#140): клиент видел только имя задачи; строки ansible
+    # доходили лишь хвостом при отказе. SOLUTION: Batch копит строки и
+    # отдаёт пачкой -- по времени (не publish на строку) или по размеру
+    # (сообщение шины конечно); длинная строка режется.
+    b = builder.Batch(interval=0.5, most=3, width=10)
+    if b.add("a", now=0.0) is not None or b.add("b", now=0.2) is not None:
+        failed.append("lines within the interval must wait for the batch")
+    got = b.add("c", now=0.6)
+    if got != ["a", "b", "c"]:
+        failed.append(f"a line past the interval must send the batch: {got}")
+    b.add("d", now=0.7)
+    b.add("e", now=0.8)
+    got = b.add("f", now=0.9)
+    if got != ["d", "e", "f"]:
+        failed.append(f"a full batch must go before the interval: {got}")
+    # Тишина после строки (долгая задача): пачку забирает таймер, а не
+    # следующая строка, которой может не быть минутами.
+    b.add("g", now=1.0)
+    if b.due(now=1.2) is not None:
+        failed.append("the timer must not take a batch before the interval")
+    if b.due(now=1.6) != ["g"]:
+        failed.append("the timer must take a batch past the interval")
+    if b.due(now=5.0) is not None or b.take() is not None:
+        failed.append("an empty batch is None, not []")
+    b.add("x" * 25, now=6.0)
+    got = b.take()
+    if got != ["x" * 10 + "…"]:
+        failed.append(f"a long line must be cut to width: {got}")
+    # STATUS: FIXED — see #140
+
     print("\n".join(f"FAIL {l}" for l in failed) if failed else "", end="\n" if failed else "")
     print("builder: FAILED" if failed else "builder: ok")
     return 1 if failed else 0

@@ -11,7 +11,8 @@ ssh к гипервизорам и токен Nomad есть только на �
 каталога сервера пользователя пула (MOP_SERVER_DIR), а не как человек.
 
 Ход сборки -- потоком в инбокс просителя (bus.ask_stream): шаг (задача
-ansible или этап над телами) и сердцебиение; итог -- последним. Сборки идут
+ansible или этап над телами), строки вывода пачками (#140) и сердцебиение;
+итог -- последним. Сборки идут
 по одной: шаблоны на гипервизоре делят зеркало (#100).
 
 Данные и события, без печати: печатает проситель.
@@ -28,6 +29,12 @@ from . import bus, driver, image, nomad, puppets
 MODES = ("missing", "update", "rebuild")
 HEARTBEAT = 15
 TAIL = 40
+# Строки вывода -- пачкой не чаще LINES_EVERY секунд и не больше LINES_MOST
+# за раз (#140): publish на строку заваливал бы шину на apt, а сообщение
+# конечно. Строка длиннее LINE_WIDTH -- это json результата задачи, а не лог.
+LINES_EVERY = 0.5
+LINES_MOST = 200
+LINE_WIDTH = 2000
 
 _TASK = re.compile(r"^TASK \[(?:[^\]]*? : )?(.+?)\] \*+\s*$")
 _one_at_a_time = threading.Lock()
@@ -39,6 +46,44 @@ def step_of(line):
     строки узлов шагом не являются."""
     m = _TASK.match(line or "")
     return m.group(1) if m else None
+
+
+class Batch:
+    """Строки вывода, копящиеся до отправки пачкой (#140).
+
+    add -- с новой строкой, due -- по таймеру: после строки может стоять
+    минутная задача, и её строку нельзя держать до следующей. Оба отдают
+    пачку или None. Под замком: add зовёт поток ansible, due -- таймер."""
+
+    def __init__(self, interval=LINES_EVERY, most=LINES_MOST, width=LINE_WIDTH):
+        self.interval, self.most, self.width = interval, most, width
+        self.lines, self.since = [], None
+        self._lock = threading.Lock()
+
+    def add(self, line, now):
+        with self._lock:
+            if len(line) > self.width:
+                line = line[:self.width] + "…"
+            if not self.lines:
+                self.since = now
+            self.lines.append(line)
+            if len(self.lines) >= self.most or now - self.since >= self.interval:
+                return self._take()
+            return None
+
+    def due(self, now):
+        with self._lock:
+            if self.lines and now - self.since >= self.interval:
+                return self._take()
+            return None
+
+    def take(self):
+        with self._lock:
+            return self._take()
+
+    def _take(self):
+        out, self.lines = self.lines, []
+        return out or None
 
 
 def needs_build(mode, serving, project):
@@ -95,23 +140,41 @@ def run(req, send):
             state["step"] = s
             send(step=s)
 
+        batch, sending = Batch(), threading.Lock()
+
+        def lines(take):
+            # Взять и отправить -- под одним замком: пачки таймера и потока
+            # ansible иначе могли бы уйти в шину не в том порядке.
+            with sending:
+                got = take()
+                if got:
+                    send(lines=got)
+
         def line(text):
             tail.append(text)
+            lines(lambda: batch.add(text, time.time()))
             s = step_of(text)
             if s:
+                lines(batch.take)       # строки задачи -- раньше её шага
                 step(s)
 
         def beat():
+            last = time.time()
             while state["alive"]:
-                time.sleep(HEARTBEAT)
-                if state["alive"]:
-                    send(step=state["step"], elapsed=int(time.time() - state["since"]))
+                time.sleep(LINES_EVERY)
+                if not state["alive"]:
+                    break
+                lines(lambda: batch.due(time.time()))
+                if time.time() - last >= HEARTBEAT:
+                    last = time.time()
+                    send(step=state["step"], elapsed=int(last - state["since"]))
         threading.Thread(target=beat, daemon=True).start()
         try:
             r = image.build(origin, got, fresh=(mode == "rebuild"),
                             force=bool(req.get("force")), on_line=line, on_step=step)
         finally:
             state["alive"] = False
+            lines(batch.take)
         out = {"ok": r["rc"] == 0, "rc": r["rc"], "project": project,
                "gone": [p["name"] for p in r["gone"]]}
         if r["rc"]:
