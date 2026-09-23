@@ -4,6 +4,11 @@ from mop.cli import lib
 from mop import bus
 
 
+# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
+MCP = {"annotations": "destructive", "args": [
+    {"name": "name", "type": "string", "required": True, "help": "node name"}]}
+
+
 def main(argv):
     if len(argv) != 1:
         lib.usage(__doc__)

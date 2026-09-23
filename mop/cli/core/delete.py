@@ -9,6 +9,11 @@ from mop.cli import lib
 from mop import puppets
 
 
+# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
+MCP = {"annotations": "destructive", "args": [
+    {"name": "name", "type": "string", "required": True, "help": "puppet name, pu-<project>-<n>"}]}
+
+
 def main(argv):
     if len(argv) != 1:
         lib.usage(__doc__)

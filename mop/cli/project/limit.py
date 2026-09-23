@@ -17,6 +17,12 @@ from mop.cli import lib
 from mop import bus, projects
 
 
+# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
+MCP = {"annotations": "destructive", "args": [
+    {"name": "name", "type": "string", "help": "project; without it, every project's limit"},
+    {"name": "limit", "type": "string", "help": "N, 0 to freeze, none to lift"}]}
+
+
 def main(argv):
     if not argv:
         ans = bus.ask_cluster("projects", project=bus.ADMIN)

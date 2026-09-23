@@ -20,6 +20,13 @@ from mop.cli import lib
 from mop import bus, manifest, puppets
 
 
+# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
+MCP = {"annotations": "destructive", "background": True, "args": [
+    {"name": "origin", "type": "string", "help": "git origin; without it, the origin of the master's working copy"},
+    {"name": "update", "type": "boolean", "flag": "--update", "help": "build the image even if it exists, incrementally"},
+    {"name": "rebuild", "type": "boolean", "flag": "--rebuild", "help": "build the image from the base image"}]}
+
+
 def main(argv):
     mode = "missing"
     verbose = False

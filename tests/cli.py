@@ -296,8 +296,131 @@ def main():
     # молча завела бы не тот проект.
     # STATUS: FIXED — see #111
 
+    failed += check_mcp_declarations()
+
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0
+
+
+def check_mcp_declarations():
+    """#160: инструменты управления MCP -- объявления в самих командлетах.
+
+    HYPOTHESIS: MCP держал вторую реализацию add/update/build руками, и она
+    разошлась с командлетами (не слал workspace, собирал образ мимо сборщика).
+    SOLUTION: командлет объявляет `MCP = {...}`; mop mcp находит объявления
+    обходом пакета, читает их без импорта и зовёт сам командлет."""
+    failed = 0
+    d = tempfile.mkdtemp(prefix="mop-test-mcp-")
+    p = os.path.join(d, "x.py")
+
+    # Объявление читается без импорта, как докстринг: модуль тянет шину.
+    with open(p, "w") as f:
+        f.write('"""x"""\nimport nothing_such\n'
+                'MCP = {"annotations": "destructive", "args": ['
+                '{"name": "name", "type": "string", "required": True}]}\n')
+    got = cli.declared(p)
+    if (got or {}).get("annotations") != "destructive" or \
+            [a["name"] for a in got.get("args", [])] != ["name"]:
+        failed += 1
+        print(f"FAIL declared: {got!r}")
+    # Без объявления команда в MCP не видна: attach, master, code, service.
+    with open(p, "w") as f:
+        f.write('"""x"""\n')
+    if cli.declared(p) is not None:
+        failed += 1
+        print("FAIL declared: a module without MCP must stay out of MCP")
+    # Кривое объявление -- громкий отказ, а не молча пропавший инструмент.
+    for bad in ('MCP = {"args": [{"name": "fresh", "type": "boolean"}]}',  # без флага
+                'MCP = {"args": [{"name": "x", "type": "float", "flag": "--x"}]}',
+                'MCP = {"annotations": "sometimes"}',
+                'MCP = {"args": [{"name": "a", "type": "string"},'
+                ' {"name": "b", "type": "string", "required": True}]}',  # необязательный позиционный раньше обязательного
+                'MCP = {"colour": 1}',
+                'MCP = dict(args=[])'):                                  # не литерал
+        with open(p, "w") as f:
+            f.write(bad + "\n")
+        try:
+            cli.declared(p)
+        except ValueError:
+            continue
+        failed += 1
+        print(f"FAIL declared must refuse: {bad}")
+
+    # Описание инструмента -- докстринг командлета целиком: usage и смысл.
+    with open(p, "w") as f:
+        f.write('"""do x: mop x <name>\n\nmore text\n"""\nimport nothing_such\n')
+    if cli.docstring(p) != "do x: mop x <name>\n\nmore text":
+        failed += 1
+        print(f"FAIL docstring: {cli.docstring(p)!r}")
+    # Вывод командлета уходит модели без цветов терминала: lib.fail красит
+    # всегда. Строки и табуляция остаются.
+    got = lib.plain("\033[0;31mpu-mop-1: gone\033[0m\n\tnext\r")
+    if got != "pu-mop-1: gone\n\tnext":
+        failed += 1
+        print(f"FAIL plain: {got!r}")
+
+    # Имя инструмента -- слова команды через подчёркивание.
+    found = [("core", "add", False), ("node", "", True), ("service", "mcp", False)]
+    group_verbs = {"node": {"drain", "up"}}
+    names = {n: words for n, words, _ in cli.tool_commands(found, group_verbs)}
+    want = {"add": ["add"], "node": ["node"], "node_drain": ["node", "drain"],
+            "node_up": ["node", "up"], "mcp": ["mcp"]}
+    if names != want:
+        failed += 1
+        print(f"FAIL tool_commands: {names}")
+
+    # argv из значений инструмента: позиционные по порядку, флаги по имени.
+    args = [{"name": "name", "type": "string", "required": True},
+            {"name": "origin", "type": "string"},
+            {"name": "llm", "type": "string", "flag": "--llm"},
+            {"name": "days", "type": "integer", "flag": "--days"},
+            {"name": "fresh", "type": "boolean", "flag": "--fresh"}]
+    for values, want in (
+            ({"name": "pu-mop-1"}, ["pu-mop-1"]),
+            ({"name": "pu-mop-1", "origin": "git@h:g/mop.git", "llm": "opus",
+              "fresh": True, "days": 3},
+             ["pu-mop-1", "git@h:g/mop.git", "--llm", "opus", "--days", "3", "--fresh"]),
+            ({"name": "pu-mop-1", "origin": "", "llm": "", "fresh": False,
+              "days": None}, ["pu-mop-1"])):
+        got = cli.tool_argv(args, values)
+        if got != want:
+            failed += 1
+            print(f"FAIL tool_argv({values}) = {got}, want {want}")
+    # Отказы: нет обязательного; позиционное, похожее на флаг, -- иначе
+    # модель одним значением включала бы чужой флаг командлета.
+    for values in ({}, {"name": ""}, {"name": "--fresh"},
+                   {"name": "pu-mop-1", "origin": "-x"}):
+        try:
+            got = cli.tool_argv(args, values)
+        except ValueError:
+            continue
+        failed += 1
+        print(f"FAIL tool_argv({values}) must refuse, got {got}")
+    # Пропущенный необязательный позиционный, а за ним заданный -- сдвиг на
+    # чужое место: отказ.
+    two = [{"name": "a", "type": "string"}, {"name": "b", "type": "string"}]
+    try:
+        got = cli.tool_argv(two, {"b": "x"})
+        failed += 1
+        print(f"FAIL tool_argv must refuse a gap in positionals, got {got}")
+    except ValueError:
+        pass
+    # STATUS: FIXED — see #160
+
+    # Каждое объявление в дереве разбирается: кривое уронило бы mop mcp
+    # целиком на старте мастера.
+    for section, name, is_pkg in cli.scan():
+        paths = [cli._path_of(section, name, is_pkg)]
+        if is_pkg:
+            paths += [os.path.join(cli.PACKAGE, section, f"{v}.py")
+                      for v in sorted(cli.verbs().get(section, ()))]
+        for path in paths:
+            try:
+                cli.declared(path)
+            except ValueError as e:
+                failed += 1
+                print(f"FAIL {os.path.relpath(path)}: {e}")
+    return failed
 
 
 if __name__ == "__main__":
