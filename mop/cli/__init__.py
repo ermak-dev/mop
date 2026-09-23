@@ -212,10 +212,15 @@ def environment():
     # текущего каталога, а абсолютные были бы литералом конкретной машины.
     os.environ.setdefault("ANSIBLE_CONFIG", os.path.join(PROJECT, "ansible.cfg"))
     os.environ.setdefault("ANSIBLE_ROLES_PATH", os.path.join(PROJECT, "deploy", "roles"))
+    from .. import config as _config
+    # Замер времени задач — только по просьбе установки (#103): он нужен при
+    # разборе раскатки и мешает во всех остальных прогонах.
+    if _config.get("MOP_ANSIBLE_PROFILE"):
+        os.environ.setdefault("ANSIBLE_CALLBACKS_ENABLED",
+                              "ansible.posix.profile_tasks")
     # Локаль прогонов: ansible требует UTF-8 (#92). LC_ALL, а не LANG:
     # он старше всех категорий разом и перебивает чужие LC_*, приехавшие с
     # машины оператора по ssh.
-    from .. import config as _config
     os.environ["LC_ALL"] = run_locale(_config.get("MOP_LOCALE"))
 
 
