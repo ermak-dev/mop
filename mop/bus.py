@@ -224,7 +224,16 @@ def connect(file=None):
         except BusError:
             raise
         except Exception as e:
-            raise BusError(f"no connection to bus: {e}")
+            # Имя пользователя обязательно в тексте: отказ «Authorization
+            # Violation» приезжает из nats-py пустой строкой, и без имени
+            # отозванный доступ (#84) читается как «сервер лёг».
+            try:
+                who = config(file).get("user") or "?"
+            except Exception:
+                who = "?"
+            why = str(e) or ("wrong password, or the bus does not know this "
+                             "user any more")
+            raise BusError(f"no connection to bus as {who}: {why}")
         return _conn
 
 
