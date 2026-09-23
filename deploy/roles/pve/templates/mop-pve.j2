@@ -320,7 +320,21 @@ push)
     pct push "$vmid" "$tmp" "$path" --perms "$mode" --user "$uid" --group "$gid" >&2
     ;;
 
+# Файлы в тело одним pct exec (#136): tar со stdin распаковывается в дом
+# пользователя пула ОТ ЕГО ИМЕНИ. push зовёт pct четыре раза на файл (id -u,
+# id -g, каталог, push) по ~0,8 с каждый -- 4 с на файл, и `mop login` на
+# узле с двумя телами шёл 20 с; unpack кладёт любое число файлов за ~0,9 с.
+# От пользователя пула, а не root+chown: писать можно ровно туда, куда может
+# сам папет, каталоги создаются его, и 0700/0600 даёт umask. Пути в архиве --
+# относительные от дома; GNU tar сам срезает ведущий / и не пишет через ..
+unpack)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    vmid="$1"
+    pct exec "$vmid" -- runuser -u "$POOL_USER" -- \
+        /bin/sh -c 'cd && umask 077 && tar -x --no-same-owner -f -'
+    ;;
+
 *)
-    die "no such verb ${verb:-(empty)}; available: list capacity create clone size net bootstrap keys start stop template destroy exec push"
+    die "no such verb ${verb:-(empty)}; available: list capacity create clone size net bootstrap keys start stop template destroy exec push unpack"
     ;;
 esac
