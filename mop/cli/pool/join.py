@@ -1,10 +1,15 @@
 """server credentials for this operator: mop join [ssh-host]
 
 Brings ~/.config/mop/servers/<MOP_SERVER_LAN>/ from the server: the
-operator's bus password, one master password per shard and the Nomad
-management token — exactly what the server's own `mop deploy` collected for
-itself, nothing about nodes or puppets. After this, `mop list` and
-`mop master` work here with no ansible run on this machine.
+operator's bus password and one master password per project — nothing about
+nodes or puppets. After this, `mop list` and `mop master` work here with no
+ansible run on this machine.
+
+The Nomad management token is NOT brought any more (#82). It used to travel
+here because the master talked to Nomad itself; that talk moved onto the bus
+(#80, #81), and a management token on every master's machine is full control
+over the cluster past every project check. A copy left from an earlier join
+is removed.
 
 ssh-host is the ssh alias of the server; without it, MOP_SERVER_LAN is used
 as the address. The directory is keyed by MOP_SERVER_LAN, so a second server
@@ -27,6 +32,15 @@ from mop import config, creds
 def main(argv):
     if len(argv) > 1 or any(a.startswith("-") for a in argv):
         lib.usage(__doc__)
+    # На контроллере join бессмыслен и вреден: свой каталог он собирает сам в
+    # конце `mop deploy` (creds.collect), и ТОКЕН ему нужен — им работают
+    # сервис кластера, deploy и сборка образов. Признак контроллера — его
+    # secrets/: lookup('password') заводит этот каталог только там.
+    if os.path.isdir(os.path.expanduser("~/.config/mop/secrets")):
+        raise RuntimeError(
+            "this machine is the controller: it collects its own credentials "
+            "at the end of mop deploy, and it keeps the Nomad token that "
+            "join must not touch")
     host = argv[0] if argv else config.get("MOP_SERVER_LAN")
     dest = creds.server_dir()
     # tar, а не scp: файлы едут одним потоком с правами, а каталог на той
@@ -45,7 +59,7 @@ def main(argv):
             if not m.isfile():
                 continue
             name = os.path.basename(m.name)
-            if name not in creds.pick([name]) and name != creds.TOKEN_FILE:
+            if name not in creds.pick([name]):
                 continue          # чужое не берём, даже если сервер положил
             with open(os.path.join(dest, name), "wb") as f:
                 f.write(tar.extractfile(m).read())
@@ -57,6 +71,10 @@ def main(argv):
     # `mop master`, что проект на шине есть, — и мастер поднимется, чтобы
     # не подключиться. Чистим только по непустому ответу сервера.
     dropped = creds.stale(os.listdir(dest), names)
+    # Токен от прежних join'ов — туда же: он больше не нужен здесь ни одной
+    # команде, а пока лежит, остаётся полным доступом к кластеру.
+    if os.path.exists(os.path.join(dest, creds.TOKEN_FILE)):
+        dropped.append(creds.TOKEN_FILE)
     for n in dropped:
         os.remove(os.path.join(dest, n))
     print(f"{dest}: {', '.join(sorted(names))}")

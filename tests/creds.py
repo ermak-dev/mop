@@ -91,6 +91,15 @@ def main():
         bad += 1
         print(f"FAILED  pick -> {got}, wanted {want}")
 
+    # Токен Nomad оператору НЕ положен (#82): управление уехало за шину, и
+    # management-токен на каждой машине мастера — полный контроль над
+    # кластером в обход всякой проверки проекта. Отбор — единственное место,
+    # где это записано, поэтому проверяется отдельной строкой.
+    cases += 1
+    if creds.TOKEN_FILE in creds.pick(listing + [creds.TOKEN_FILE]):
+        bad += 1
+        print("FAILED  pick must never hand the Nomad token to an operator")
+
     # Контроллер собирает свой каталог сервера из secrets/ и bootstrap.json:
     # он тоже машина оператора, и после deploy на нём всё работает без join.
     secrets = tempfile.mkdtemp()
