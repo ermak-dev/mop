@@ -37,6 +37,20 @@ BOOTSTRAP = ".mop/bootstrap.yaml"
 LEGACY = (".mop/node.yaml", ".mop/workspace.yaml")
 
 
+def clone_env(environ):
+    """Окружение клона манифеста. Чистая функция (#141).
+
+    Новый ключ хоста форжа принимается (accept-new), сменившийся -- отказ,
+    как всегда. Доверие то же, что у ssh-keyscan в плейбуке, но без курицы
+    и яйца: `mop deploy` читает `.mop` проектов до плейбука, а сборщик и
+    `mop project add` -- без него вовсе, и неизвестный хост валил их на
+    «Host key verification failed». Свой ssh оператора не трогаем."""
+    env = dict(environ)
+    if "GIT_SSH_COMMAND" not in env and "GIT_SSH" not in env:
+        env["GIT_SSH_COMMAND"] = "ssh -o StrictHostKeyChecking=accept-new"
+    return env
+
+
 def fetch(origin):
     """origin -> словарь манифестов проекта: {'project', 'asks', 'alien',
     'legacy', 'sandbox_vars', 'sandbox_tasks', 'bootstrap_vars',
@@ -61,14 +75,15 @@ def fetch(origin):
     try:
         r = subprocess.run(["git", "clone", "--bare", "--depth", "1",
                             "--filter=blob:none", "-q", origin, tmp],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=clone_env(os.environ))
         if r.returncode != 0:
             raise RuntimeError(f"cannot read {project}: "
                                f"{(r.stderr or r.stdout).strip()}")
 
         def show(path):
             got = subprocess.run(["git", "-C", tmp, "show", f"HEAD:{path}"],
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True,
+                                 env=clone_env(os.environ))
             return got.stdout if got.returncode == 0 else None
         return _collect(project, show)
     finally:
