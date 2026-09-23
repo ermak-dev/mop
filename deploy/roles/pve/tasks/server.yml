@@ -9,7 +9,7 @@
 #
 # Это ЗАПИСАННОЕ РЕШЕНИЕ о доступе, а не побочное следствие маршрута:
 # прямая дорога из локалки к телу идёт мимо агента — единственного места,
-# где проверяется проектирование, — и ровно от этого отказались для
+# где проверяется, чей это папет, — и ровно от этого отказались для
 # постоянного ключа мастера в образе (deploy/pve-build.yml). Маршрут даёт
 # только СЕТЬ; войти в тело он не даёт: в телах PasswordAuthentication no,
 # вход по ключу, а ключей в образе — только узла. Серверу дорога нужна
@@ -78,9 +78,29 @@
 
 # Проверка прогоном, а не чтением юнита: маршрут в таблице — единственное,
 # что здесь имеет значение.
-- name: The server reaches each hypervisor's slice through it
+- name: Ask the kernel where each hypervisor's slice goes
   ansible.builtin.command: "ip -4 route get {{ hostvars[item].pve_routes[0].split('/')[0] }}"
   loop: "{{ pve_hops }}"
   register: route_check
   changed_when: false
-  failed_when: "('via ' ~ hostvars[item].pve_lan) not in route_check.stdout"
+
+# Вердикт отдельной задачей, а не failed_when у команды: у команды нет
+# fail_msg, и отказ показывал голый вывод `ip route` при rc=0. Понять из него,
+# что next hop — ЧУЖОЙ гипервизор, можно было только сходив за pve_lan каждого
+# узла руками (#94).
+- name: The server reaches each hypervisor's slice through it
+  ansible.builtin.assert:
+    that: "('via ' ~ hostvars[item.item].pve_lan) in item.stdout"
+    fail_msg: >-
+      the bodies of {{ item.item }} ({{ hostvars[item.item].pve_lan }}) are not
+      reached through it: the kernel sends {{ item.item ~ "'s" }} slice
+      {{ hostvars[item.item].pve_routes[0] }} to
+      {{ item.stdout.split('via ')[1].split()[0] if 'via ' in item.stdout
+         else 'a directly attached network' }}.
+      Two usual causes: another hypervisor announced the same slice (the check
+      above names them), or mop-routes has not been restarted since its next
+      hop changed -- systemctl restart mop-routes.
+    success_msg: "{{ item.item }}: {{ hostvars[item.item].pve_routes[0] }} via {{ hostvars[item.item].pve_lan }}"
+  loop: "{{ route_check.results }}"
+  loop_control:
+    label: "{{ item.item }}"
