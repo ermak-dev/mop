@@ -59,7 +59,8 @@ def main():
         except AttributeError:
             break
 
-    root = tempfile.mkdtemp(prefix="mop-test-secrets-")
+    # Корень -- ещё не существующий: его заводит само хранилище, как на сервере.
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-test-secrets-"), "project-secrets")
     try:
         ps.put_file(root, "proj", ".env", b"A=1\n")
         ps.put_file(root, "proj", "config/app.json", b"{}")
