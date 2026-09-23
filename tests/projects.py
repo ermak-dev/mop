@@ -100,6 +100,26 @@ def check_merge():
     return out
 
 
+def check_migration_needed():
+    """Когда реестр вообще спрашивает пул.
+
+    HYPOTHESIS (#90): реестра нет -> спрашиваем ростер, а на новой установке
+    ни шины, ни сервиса ещё нет, и deploy падает до ansible — тем самым
+    прогоном, который их и поднимает.
+    SOLUTION: ростер нужен там, где есть ЧТО переносить, то есть при непустой
+    памяти контроллера. Нет памяти — пустой реестр без вопросов к пулу.
+    STATUS: FIXED — see #90
+    """
+    out = []
+    if projects.needs_roster(memory=set()):
+        out.append("an empty memory must not ask the pool: there is nothing "
+                   "to carry over, and on a fresh machine there is no pool")
+    if not projects.needs_roster(memory={RU}):
+        out.append("a non-empty memory must ask the pool: a project with a "
+                   "live puppet but no memory line would lose its bus user")
+    return out
+
+
 def check_names():
     """names: имена проектов для плейбука — basename'ы плюс легаси."""
     out = []
@@ -117,7 +137,8 @@ def check_names():
 
 def main():
     failed = []
-    for check in (check_add, check_delete, check_merge, check_names):
+    for check in (check_add, check_delete, check_merge,
+                  check_migration_needed, check_names):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     print("\n".join(failed) if failed else "", end="\n" if failed else "")
