@@ -928,11 +928,12 @@ _WRAPPER_FAIL = re.compile(r"^(\S+) of pu-\S+ (?:failed|brought no )|did not rea
 _ANSIBLE_NOISE = ("[ERROR]: ", "Task failed: ", "Unexpected AnsibleActionFail error: ")
 
 
-def task_summary(alloc):
+def task_summary(alloc, now=None):
     """Задача аллокации -> {state, restarts, exit, next_s, failed} | None.
 
-    exit -- код последнего выхода, next_s -- через сколько секунд Nomad
-    перезапустит (только если задача сейчас этого и ждёт)."""
+    exit -- код последнего выхода, next_s -- через сколько секунд от now Nomad
+    перезапустит (только если задача сейчас этого и ждёт): время события плюс
+    задержка, а не задержка сама -- та верна лишь в миг события."""
     states = (alloc or {}).get("TaskStates") or {}
     if not states:
         return None
@@ -940,10 +941,14 @@ def task_summary(alloc):
     events = t.get("Events") or []
     exits = [e.get("ExitCode") for e in events if e.get("Type") == "Terminated"]
     last = events[-1] if events else {}
-    delay = last.get("StartDelay") if last.get("Type") == "Restarting" else None
+    next_s = None
+    if last.get("Type") == "Restarting" and last.get("StartDelay"):
+        at = (last.get("Time") or 0) + last["StartDelay"]
+        now = time.time() if now is None else now
+        next_s = max(0, int(at // 1_000_000_000 - now))
     return {"state": t.get("State"), "restarts": t.get("Restarts") or 0,
             "exit": exits[-1] if exits else None,
-            "next_s": int(delay // 1_000_000_000) if delay else None,
+            "next_s": next_s,
             "failed": bool(t.get("Failed"))}
 
 

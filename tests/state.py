@@ -280,7 +280,8 @@ ALLOC = {"ClientStatus": "pending", "TaskStates": {"claude": {
     "State": "pending", "Failed": False, "Restarts": 4,
     "Events": [{"Type": "Started"},
                {"Type": "Terminated", "ExitCode": 1},
-               {"Type": "Restarting", "StartDelay": 1576228170008}]}}}
+               {"Type": "Restarting", "StartDelay": 1576228170008,
+                "Time": 1_000_000_000_000}]}}}
 
 
 def check_failing():
@@ -288,11 +289,22 @@ def check_failing():
     задачи и причина из stderr. STATUS: FIXED — see #126"""
     bad, cases = 0, 0
     cases += 1
-    t = getattr(puppets, "task_summary", lambda a: None)(ALLOC)
+    t = puppets.task_summary(ALLOC, now=1000)
     want = {"state": "pending", "restarts": 4, "exit": 1, "next_s": 1576, "failed": False}
     if t != want:
         bad += 1
         print(f"FAILED  task_summary -> {t}, wanted {want}")
+    # Срок -- оставшийся, а не задержка на момент события: через десять минут
+    # «next in 26m» было бы неправдой.
+    cases += 1
+    later = puppets.task_summary(ALLOC, now=1000 + 600)
+    if later["next_s"] != 976:
+        bad += 1
+        print(f"FAILED  next_s must count down from the event: {later['next_s']}")
+    cases += 1
+    if puppets.task_summary(ALLOC, now=1000 + 99999)["next_s"] != 0:
+        bad += 1
+        print("FAILED  a passed deadline is 0, not negative")
     # Причина -- из последней попытки, первая ошибка после строки врапера.
     cases += 1
     got = getattr(puppets, "failure_reason", lambda s: None)(STDERR)
