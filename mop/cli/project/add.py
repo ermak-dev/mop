@@ -2,9 +2,8 @@
 
 Without origin, the origin of the current working copy is used.
 
-Registers the project on the server (operator's verb project_add, #117),
-puts its .mop/bootstrap.yaml on the server, and builds its image on the
-container nodes through the server's builder (#123) when it is missing on
+Registers the project on the server (operator's verb project_add, #117)
+and builds its image from .mop/sandbox.yaml on the container nodes through the server's builder (#123) when it is missing on
 any of them. Afterwards `mop add` can place a puppet right away.
 
   --update    build the image even if it exists, incrementally
@@ -53,15 +52,6 @@ def _add(origin, name, mode, p):
     if ans.get("error"):
         p.clear()
         lib.fail(f"{name}: {ans['error']}")
-        return 1
-
-    # Bootstrap -- на сервер текстом, как `mop bootstrap push`; нет файла --
-    # пустой текст снимает вчерашний.
-    p.step("bootstrap to the server")
-    ans = bus.ask_server("put", project=name, text=got["bootstrap_text"] or "")
-    if ans.get("error"):
-        p.clear()
-        lib.fail(f"{name}: bootstrap: {ans['error']}")
         return 1
 
     p.step("image")

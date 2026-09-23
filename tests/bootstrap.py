@@ -149,6 +149,40 @@ def main():
         failed += 1
         print(f"FAIL secrets in bootstrap: {e}")
 
+    # HYPOTHESIS (#133): workspace хранился на проект и писался четырьмя
+    # дорогами; удаление из рабочей копии не доходило, и старт играл
+    # проектную копию из origin. SOLUTION: workspace -- файл папета, старт
+    # играет копию своего папета. STATUS: FIXED — see #133
+    from mop import cluster, project_secrets
+    root = tempfile.mkdtemp(prefix="mop-test-ws-")
+    saved = (bootstrap.ROOT, project_secrets.ROOT)
+    bootstrap.ROOT, project_secrets.ROOT = root, os.path.join(root, "no-secrets")
+    try:
+        bootstrap.store(root, "proj", TEXT)               # старая проектная копия
+        got = bootstrap.play({"name": "pu-proj-1", "address": ""}, "proj")
+        if got.get("played") is not False:
+            failed += 1
+            print(f"FAIL play must ignore a project-level copy: {got}")
+        # add/update несут workspace: текст -- положить папету, пусто -- снять,
+        # нет поля -- не трогать (restart без рабочей копии).
+        cluster.store_workspace(root, "pu-proj-1", {"workspace": TEXT})
+        if bootstrap.files_of(root, "pu-proj-1")[0] is None:
+            failed += 1
+            print("FAIL store_workspace must lay the puppet's own copy")
+        cluster.store_workspace(root, "pu-proj-1", {})
+        if bootstrap.files_of(root, "pu-proj-1")[0] is None:
+            failed += 1
+            print("FAIL a request without workspace must leave the copy alone")
+        cluster.store_workspace(root, "pu-proj-1", {"workspace": ""})
+        if bootstrap.files_of(root, "pu-proj-1") != (None, None):
+            failed += 1
+            print("FAIL an empty workspace must remove the puppet's copy")
+    except AttributeError as e:
+        failed += 1
+        print(f"FAIL workspace per puppet: {e}")
+    finally:
+        bootstrap.ROOT, project_secrets.ROOT = saved
+
     print("bootstrap: FAILED" if failed else "bootstrap: ok")
     return 1 if failed else 0
 

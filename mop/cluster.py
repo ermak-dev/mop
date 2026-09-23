@@ -179,6 +179,14 @@ def _live_count(target):
     return sum(1 for j in got if j.get("Status") != "dead")
 
 
+def store_workspace(root, name, req):
+    """workspace папета из запроса add/update (#133). Текст -- положить,
+    пусто -- снять (в рабочей копии файла нет), нет поля -- не трогать:
+    так перерегистрация без рабочей копии не стирает положенное."""
+    if "workspace" in req:
+        bootstrap.store(root, name, req["workspace"] or "")
+
+
 def _add(project, req):
     origin = req.get("origin")
     # Лимит -- проекта из origin, а не просителя: оператор через admin
@@ -190,6 +198,8 @@ def _add(project, req):
     if why:
         return {"error": why}
     name = puppets.next_name(target)
+    # workspace -- до регистрации: первый подъём обязан его увидеть.
+    store_workspace(bootstrap.ROOT, name, req)
     nomad.register(puppets.job_spec(name, origin, req.get("profile")))
     return {"ok": True, "name": name, "origin": origin}
 
@@ -198,6 +208,7 @@ def _update(project, req):
     # Спеку собирает сервер: `register(spec)` глаголом не бывает, иначе
     # проситель кладёт на узел что хочет (докстринг модуля).
     name = req["name"]
+    store_workspace(bootstrap.ROOT, name, req)
     nomad.register(puppets.job_spec(name, req.get("origin"), req.get("profile"),
                                     cont=bool(req.get("cont"))))
     return {"ok": True, "name": name}
@@ -224,6 +235,10 @@ def _delete(project, req):
     работает рецикл: джоб останавливается, рабочая копия сносится, и та же
     спека поднимается обратно."""
     nomad.deregister(req["name"], purge=bool(req.get("purge", True)))
+    # Снятый насовсем папет уносит свой workspace (#133); рецикл (purge=False)
+    # его сохраняет -- update следом положит свежий.
+    if req.get("purge", True):
+        bootstrap.store(bootstrap.ROOT, req["name"], "")
     return {"ok": True, "name": req["name"]}
 
 

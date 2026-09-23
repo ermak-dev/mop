@@ -40,7 +40,8 @@ def main(argv):
     # иначе кто угодно с доступом к шине клал бы на узел свою командную
     # строку. Решение «что меняем» остаётся здесь, сборка — там.
     got = bus.ask_cluster("update", name=name, origin=origin, profile=profile,
-                          cont=cont, new_origin=origin if origin != old else None)
+                          cont=cont, new_origin=origin if origin != old else None,
+                          workspace=lib.workspace_text(origin))
     if got.get("error"):
         lib.fail(got["error"])
         return 1

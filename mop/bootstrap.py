@@ -17,10 +17,11 @@
                        узле, где тело равно узлу, ключ лежит в
                        authorized_keys пользователя пула постоянно: у
                        сервера-контроллера дорога на узел и так есть;
-  хранение файла       ~/.config/mop/bootstrap/<проект>-{tasks,vars}.yml на
-                       сервере. Кладут заранее: `mop deploy` — из origin
-                       (дефолтная ветка) всем проектам, `mop add` и
-                       `mop bootstrap push` — из рабочей копии мастера.
+  хранение файла       ~/.config/mop/bootstrap/<папет>-{tasks,vars}.yml на
+                       сервере (#133): workspace -- файл папета, sandbox --
+                       проекта. Кладут его только глаголы жизненного цикла
+                       папета (`mop add`, `mop update`, `mop recycle`) из
+                       рабочей копии мастера, пустой текст снимает.
                        Слать в момент старта нельзя: Nomad перезапускает
                        аллокации сам, когда мастера может не быть вовсе;
   триггер              узел на старте зовёт сервер (mop.<проект>.server.rpc,
@@ -62,7 +63,7 @@ KEY = os.path.expanduser("~/.ssh/mop-bootstrap")
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "bootstrap.yml")
 # На узле: публичная часть ключа сервера, её кладёт `mop deploy`.
 PUB_ON_NODE = f"{driver.HOME}/.config/mop/bootstrap.pub"
-# Файл проекта, из которого `mop add` и `mop bootstrap push` шлют текст.
+# Файл рабочей копии, из которого `mop add|update|recycle` шлют workspace.
 FILE = ".mop/bootstrap.yaml"
 # Сколько узел ждёт сервер. Больше «секунд», чтобы прогон с загрузкой не
 # срывался на ровном месте; меньше — чтобы висящий сервер читался отказом,
@@ -166,7 +167,8 @@ def argv(playbook, address, user, key, settings, project, name, clone, tasks, of
 def play(req, project):
     """Сыграть bootstrap проекта в песочницу папета. -> {ok, played, ...}.
     Нет файла — ok без прогона: большинству проектов хватает общего."""
-    tasks, of_vars = files_of(ROOT, project)
+    # workspace -- файл папета (#133): копия того, кто стартует, а не проекта.
+    tasks, of_vars = files_of(ROOT, req["name"])
     secrets = project_secrets.project_dir(project_secrets.ROOT, project)
     secrets = secrets if os.path.isdir(secrets) else None
     if not needs_play(tasks, secrets):
@@ -189,10 +191,11 @@ def play(req, project):
             "seconds": round(time.time() - t0, 1), "tail": tail}
 
 
-def _projects_here():
+def _puppets_here():
+    """Папеты, чей workspace лежит на сервере (#133)."""
     try:
-        return sorted({n.rsplit("-", 1)[0] for n in os.listdir(ROOT)
-                       if n.endswith("-tasks.yml")})
+        return sorted(n[:-len("-tasks.yml")] for n in os.listdir(ROOT)
+                      if n.endswith("-tasks.yml"))
     except FileNotFoundError:
         return []
 
@@ -237,7 +240,7 @@ async def _handle(msg):
     verb = req.get("verb")
     try:
         if verb == "ping":
-            out = {"ok": True, "projects": _projects_here()}
+            out = {"ok": True, "puppets": _puppets_here()}
         elif verb == "bootstrap":
             why = refusal(req, project)
             if why:
@@ -250,11 +253,10 @@ async def _handle(msg):
                 # Кред папета едет тем же ответом: узел уже позвал нас, и
                 # второго разговора ради одного файла не нужно.
                 out = with_creds(out, puppet_creds(project), project)
-        elif verb == "put":
-            got = store(ROOT, project, req.get("text") or "")
-            out = {"ok": True, **got}
         else:
-            out = {"error": f"no such verb {verb}; available: ping, bootstrap, put"}
+            # `put` снят (#133): workspace кладут глаголы жизненного цикла
+            # папета у сервиса кластера, а в этот субъект пишут и узлы.
+            out = {"error": f"no such verb {verb}; available: ping, bootstrap"}
     except Exception as e:
         out = {"error": f"{verb}: {e}"}
     print(f"{project}.{verb} {req.get('name', '')}: "
@@ -284,7 +286,7 @@ async def serve():
 
     await nc.subscribe(bus.server_subject("*"), cb=on_rpc)
     print(f"mop-bootstrap: subscribed to {bus.server_subject('*')}, "
-          f"files in {ROOT}: {', '.join(_projects_here()) or 'none'}", flush=True)
+          f"workspaces in {ROOT}: {', '.join(_puppets_here()) or 'none'}", flush=True)
     await asyncio.Event().wait()
 
 
@@ -338,13 +340,3 @@ def run(d, name, project):
 
 
 # ─── мастер ──────────────────────────────────────────────────────────────
-def push_from(root, project):
-    """Отправить .mop/bootstrap.yaml рабочей копии root на сервер под проектом.
-    -> ответ сервера, либо None, если файла в рабочей копии нет: тогда
-    сервер держит то, что положил deploy, и трогать это незачем."""
-    path = os.path.join(root, FILE)
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        text = f.read()
-    return bus.ask_server("put", project=project, text=text)
