@@ -13,7 +13,11 @@
     name: python3-pip
     state: present
 
+# Под пользователем пула, как у узла (deploy/roles/bus): --user от root'а
+# клал библиотеки в /root/.local, где mop-web их не видит (#108).
 - name: Python dependencies of mop
+  become: yes
+  become_user: "{{ MOP_USER }}"
   ansible.builtin.pip:
     name: "{{ MOP_PIP_DEPS.split(',') }}"
     extra_args: --user --break-system-packages
@@ -33,15 +37,23 @@
       - "--exclude=.env"
       - "--exclude=inventory.ini"
       - "--exclude=inventory.yaml"
+      # Пакет -- пользователю пула, кем бы ни зашёл ansible (#108).
+      - "--chown={{ MOP_USER }}:{{ MOP_USER }}"
   # Результат синка переживает игру: по нему перезапускается и второй процесс
   # сервера, mop-bootstrap (роль bootstrap) -- тот же пакет в том же каталоге.
   register: mop_server_package
   notify: restart mop-web
 
+# Всё в каталоге кредов -- пользователю пула: сервисы читают его под ним, а
+# ansible на сервере может заходить и root'ом (#108), и тогда 0600 от root
+# был бы для них закрыт.
 - name: Credentials dir of the server, closed like the master's
+  become: yes
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
     mode: "0700"
   loop:
     - "{{ MOP_HOME }}/.config/mop"
@@ -56,6 +68,8 @@
   ansible.builtin.copy:
     content: "{{ {'user': 'service', 'password': lookup('password', secrets_dir + '/nats-service.pass length=32 chars=ascii_letters,digits')} | to_json }}"
     dest: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/operator.json"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
     mode: "0600"
   no_log: true
   # Переживает игру: по нему перезапускаются mop-bootstrap и mop-cluster.
@@ -76,6 +90,8 @@
   ansible.builtin.copy:
     src: "{{ secrets_dir }}/tls.pem"
     dest: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/tls.pem"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
     mode: "0600"
   when: not MOP_TLS_CERT
   notify: restart mop-web
@@ -93,6 +109,8 @@
   ansible.builtin.copy:
     src: "{{ lookup('env', 'HOME') }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/bootstrap.json"
     dest: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/bootstrap.json"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
     mode: "0600"
   notify: restart mop-web
 

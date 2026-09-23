@@ -32,21 +32,9 @@
 # Локаль узла: тот же файл, что играет `mop setup` на управляющих машинах.
 - ansible.builtin.include_tasks: locale.yml
 
-- name: The pool user
-  become: yes
-  ansible.builtin.user:
-    name: "{{ MOP_USER }}"
-    home: "{{ MOP_HOME }}"
-    shell: /bin/bash
-    create_home: yes
-
-- name: Home of the pool user
-  become: yes
-  ansible.builtin.file:
-    path: "{{ MOP_HOME }}"
-    state: directory
-    owner: "{{ MOP_USER }}"
-    group: "{{ MOP_USER }}"
+# Сам пользователь -- отдельным файлом: его же играет сервер (#108), где
+# Nomad и сервисы mop работают под тем же пользователем.
+- ansible.builtin.include_tasks: user.yml
 
 - name: SSH dir of the pool user
   ansible.builtin.file:
