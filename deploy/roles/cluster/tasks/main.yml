@@ -16,6 +16,8 @@
   changed_when: (mop_server_package | default({})) is changed or (mop_server_identity | default({})) is changed
   notify: restart mop-cluster
 
+- ansible.builtin.include_tasks: limits.yml
+
 - name: Systemd unit
   become: yes
   ansible.builtin.template:

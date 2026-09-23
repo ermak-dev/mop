@@ -140,9 +140,31 @@ def check_gone_job():
     return out
 
 
+def check_limit():
+    """Потолок папетов проекта (#107): add сверх него -- отказ.
+
+    STATUS: FIXED — see #107
+    """
+    out = []
+    if cluster.over_limit("rugent", 2, None) is not None:
+        out.append("no limit must never refuse")
+    if cluster.over_limit("rugent", 2, 3) is not None:
+        out.append("below the limit add must pass")
+    why = cluster.over_limit("rugent", 3, 3)
+    # Отказ называет проект, счёт и потолок: иначе «не заводится» ищут в
+    # Nomad и в слотах узлов.
+    if not why or "rugent" not in why or "3" not in why:
+        out.append(f"at the limit add must be refused with numbers: {why!r}")
+    # 0 -- заморозка: новых не заводить вовсе.
+    if cluster.over_limit("rugent", 0, 0) is None:
+        out.append("limit 0 must refuse every add")
+    return out
+
+
 def main():
     failed = []
-    for check in (check_subject, check_verbs, check_ownership, check_gone_job):
+    for check in (check_subject, check_verbs, check_ownership, check_gone_job,
+                  check_limit):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:

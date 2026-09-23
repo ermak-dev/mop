@@ -101,7 +101,7 @@ def default_branch():
 UNREACHABLE = 4
 
 
-def play_vars(projects, manifests=None):
+def play_vars(projects, manifests=None, limits=None):
     """Списки плейбуку как --extra-vars, JSON'ом. -> [строки].
 
     Объектом, а не парой ключ=значение: `--extra-vars mop_projects=[...]`
@@ -110,7 +110,14 @@ def play_vars(projects, manifests=None):
 
     Манифесты — только у полной игры: узкому прогону проектов (bus) они не
     нужны, их читают слои узла и тела."""
-    out = [json.dumps({"mop_projects": list(projects)})]
+    # Лимиты папетов (#107) едут рядом с проектами, и пустые тоже: сервис
+    # кластера на сервере читает их файлом, и узкий прогон `mop project`
+    # обязан класть его так же, как полный. Файл читает play(), не эта
+    # функция: она чистая.
+    head = {"mop_projects": list(projects)}
+    if limits is not None:
+        head["mop_limits"] = limits
+    out = [json.dumps(head)]
     if manifests is not None:
         out.append(json.dumps({"mop_manifests": manifests}, ensure_ascii=False))
     return out
@@ -142,8 +149,9 @@ def play(playbook, projects, manifests=None):
         raise RuntimeError("MOP_OPERATORS is empty: nobody could log in to the "
                            "bus. Name at least one person in .env, e.g. "
                            "MOP_OPERATORS=anton:admin")
+    from mop import projects as registry
     extra = ([json.dumps(vars_, ensure_ascii=False)]
-             + play_vars(projects, manifests))
+             + play_vars(projects, manifests, registry.read_limits()))
     return subprocess.call(
         ["ansible-playbook", "-i", inventory, os.path.join(PROJECT, playbook),
          *sum((["--extra-vars", v] for v in extra), [])])

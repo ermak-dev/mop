@@ -26,6 +26,10 @@
     - ansible.builtin.include_role:
         name: bus
         tasks_from: projects
+    # Лимиты папетов (#107): тот же файл задач, что играет роль cluster.
+    - ansible.builtin.include_role:
+        name: cluster
+        tasks_from: limits
 
 
 - name: Bus credentials of the puppets, one per project

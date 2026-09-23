@@ -39,6 +39,11 @@ def main(argv):
 
     projects.write(lines)
     print(f"  {projects.FILE}: {', '.join(dropped)} dropped")
+    # Лимит снятого проекта (#107) уходит с ним: заведённый заново проект
+    # получил бы чужой потолок из прошлого.
+    limits = projects.read_limits()
+    if name in limits:
+        projects.write_limits(projects.with_limit(limits, name, None))
 
     lib.section(f"ansible: {PLAYBOOK}")
     rc = lib.play(PLAYBOOK, projects.names(*puppets.project_ids(lines)))
