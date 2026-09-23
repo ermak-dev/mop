@@ -133,6 +133,12 @@
   hosts: server
   become: no
   gather_facts: no
+
+  vars:
+    # Пароли папетов лежат на КОНТРОЛЛЕРЕ: lookup('password') исполняется
+    # здесь, а не на сервере. Роль везёт их серверу (#83).
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
+    shards: "{{ mop_shards | default([]) }}"
   roles:
     - bootstrap
 

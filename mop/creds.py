@@ -47,9 +47,24 @@ def pass_file(shard):
     return f"nats-{user_of(shard)}.pass"
 
 
-def bus_config(host, port, shard, password):
-    """{url, user, password} — то, что раньше рендерил bus.json.j2."""
-    return {"url": f"nats://{host}:{port}", "user": user_of(shard),
+def puppet_user(project):
+    """Пользователь NATS папета. Отдельно от user_of: тот отвечает про
+    мастера, и молча получить master-<проект> там, где нужен puppet-<проект>,
+    значит выдать папету права мастера."""
+    return f"puppet-{project}"
+
+
+def puppet_pass_file(project):
+    """Имя файла пароля папета — как в secrets/ сервера."""
+    return f"nats-{puppet_user(project)}.pass"
+
+
+def bus_config(host, port, shard, password, user=None):
+    """{url, user, password} — то, что раньше рендерил bus.json.j2.
+
+    user называют явно там, где это не мастер: сервер выдаёт папету его кред
+    в ответе на bootstrap песочницы (#83, docs/BOOTSTRAP.md)."""
+    return {"url": f"nats://{host}:{port}", "user": user or user_of(shard),
             "password": password}
 
 
