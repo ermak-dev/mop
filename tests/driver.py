@@ -591,6 +591,45 @@ def main():
         bad += 1
         print("FAILED  push_many must be a driver verb: the agent writes a body in one call")
 
+    # #73: первый ssh врапера в свежее тело ушёл в Connection timed out, а
+    # повтор Nomad через 17 с вошёл сразу. HYPOTHESIS: сеть свежего клона
+    # (мост/ARP) догоняет не сразу, а между стартом тела и run_argv пробы
+    # нет. SOLUTION: until_ok -- повторять пробу тем же соединением, отказ
+    # после повторов громкий, с последней причиной.
+    # RESULT: 4 проверки. STATUS: FIXED — see #73
+    try:
+        slept = []
+
+        def flaky(results):
+            it = iter(results)
+            return lambda: next(it)
+        cases += 1
+        got = driver.until_ok(flaky([(False, "timed out"), (False, "timed out"),
+                                     (True, None)]), 5, 2, slept.append)
+        if got != (True, None, 3) or slept != [2, 2]:
+            bad += 1
+            print(f"FAILED  until_ok must retry until the probe passes: {got}, slept {slept}")
+        cases += 1
+        slept.clear()
+        got = driver.until_ok(flaky([(True, None)]), 5, 2, slept.append)
+        if got != (True, None, 1) or slept:
+            bad += 1
+            print(f"FAILED  a healthy body must cost one probe and no pause: {got}, slept {slept}")
+        cases += 1
+        slept.clear()
+        got = driver.until_ok(flaky([(False, f"try {i}") for i in range(3)]), 3, 2,
+                              slept.append)
+        if got != (False, "try 2", 3):
+            bad += 1
+            print(f"FAILED  after the last try the refusal carries the last reason: {got}")
+        cases += 1
+        if slept != [2, 2]:
+            bad += 1
+            print(f"FAILED  no pause after the last try: slept {slept}")
+    except AttributeError:
+        bad += 1
+        print("FAILED  driver.until_ok is missing")
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 

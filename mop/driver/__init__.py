@@ -74,6 +74,24 @@ _NAME = re.compile(rf"^{PREFIX}[A-Za-z0-9][A-Za-z0-9._-]*-\d+$")
 _CACHE = None
 
 
+def until_ok(attempt, tries, pause, sleep):
+    """Повторять пробу, пока не пройдёт. -> (прошла, последняя причина, попыток).
+
+    attempt() -> (ok, why). Пауза -- между попытками, не после последней:
+    отказ обязан приходить сразу, как только кончились повторы. Поймано на
+    свежем теле (#73): первый ssh врапера ушёл в Connection timed out, а
+    повтор Nomad через 17 с вошёл сразу, -- и каждый такой промах стоил
+    падения задачи и круга рестарта."""
+    why = None
+    for n in range(1, tries + 1):
+        ok, why = attempt()
+        if ok:
+            return True, None, n
+        if n < tries:
+            sleep(pause)
+    return False, why, tries
+
+
 def valid_name(name):
     """Похоже ли это на имя папета. Всё, что не похоже, в шелл не попадает."""
     return bool(name) and bool(_NAME.match(name))
