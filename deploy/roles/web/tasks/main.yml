@@ -86,12 +86,13 @@
 
 # Прогоном, а не чтением статуса: юнит в бесконечном рестарте systemd вполне
 # устраивает. Первый снимок ждёт ростера Nomad и ответа узлов -- секунды.
+# На самом сервере и по MOP_WEB_BIND: снаружи дашборд виден только через
+# TLS-прокси (#96), и его проверка -- в роли proxy.
 - name: The dashboard answers with a snapshot
   ansible.builtin.uri:
-    url: "http://{{ MOP_SERVER_LAN }}:{{ MOP_WEB_PORT }}/healthz"
+    url: "http://{{ '127.0.0.1' if MOP_WEB_BIND == '0.0.0.0' else MOP_WEB_BIND }}:{{ MOP_WEB_PORT }}/healthz"
     status_code: 200
   register: web_health
   until: web_health.status == 200
   retries: 20
   delay: 3
-  delegate_to: localhost

@@ -1,0 +1,6 @@
+# reload, а не restart: соединения шины через /nats переживают перечитывание
+# конфига и сертификата.
+- name: reload nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: reloaded

@@ -126,6 +126,20 @@
     - web
 
 
+# TLS-прокси (#96): одна точка входа для людей -- дашборд в корне, шина по
+# WebSocket на /nats. После дашборда и шины: прогон проверяет прокси
+# запросом к дашборду сквозь него.
+- name: TLS proxy on the server
+  hosts: server
+  become: yes
+  gather_facts: no
+
+  vars:
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
+  roles:
+    - proxy
+
+
 # Bootstrap песочниц (#62, docs/BOOTSTRAP.md): подписчик на сервере, который
 # играет .mop/bootstrap.yaml проекта при каждом старте папета. После дашборда:
 # пакет mop и креды оператора на сервер привозит роль web.
