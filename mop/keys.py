@@ -1,142 +1,64 @@
 """Раздача файлов на узлы пула: креды claude.ai и ключи LLM-провайдеров.
 
-Основной путь — глагол `write` агенту узла: он есть на каждом узле независимо
-от того, живёт там папет или нет, и не требует свободной памяти. Раньше на его
-месте был exec в аллокацию живого папета — узлы пула забиты памятью под завязку
-и sysbatch туда не садится (DimensionExhausted: memory).
-
-Sysbatch остался запасным путём для узла, чей агент молчит. Он не exec, и
-именно поэтому пережил переезд: раздача кредов не имеет права зависеть от
-шины — на первый узел она везёт креды самой шины.
+Путь один — глагол `write` агенту узла, всем узлам разом: агент есть на
+каждом узле независимо от того, живёт там папет или нет, пишет файл на узел
+и в каждое живое тело. Запасного пути через sysbatch-джоб Nomad больше нет
+(#135): ему нужен токен, которого вне сервера нет, в тела pve-узла он не
+доставал, а довод «раздача не смеет зависеть от шины — она везёт креды самой
+шины» устарел: креды шины узлу кладёт `mop deploy`. Молчащий агент — отказ с
+причиной; лечится он юнитом на узле, а не раздачей в обход.
 """
 import base64
 import json
 import os
 import time
 
-from . import bus, config, llm, nomad, puppets
+from . import bus, config, llm, puppets
 
-LOGIN_JOB = "pu-login"
 # Логин claude.ai управляющей машины — то, что раздаётся на узлы.
 CREDENTIALS = os.path.expanduser("~/.claude/.credentials.json")
 
 
-def push_script(files):
-    """files: [(абсолютный путь, base64 содержимого)] — атомарная запись, 600.
+def results_from(nodes, answers):
+    """Ответы агентов -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"}.
+    Чистая функция (#135): молчание агента называется молчанием, без
+    отсылки к токену Nomad и контроллеру."""
+    out = {}
+    for node in nodes:
+        a = answers.get(node)
+        if isinstance(a, Exception):
+            out[node] = f"NOT REACHED: {a}"
+        elif a is None:
+            out[node] = "NOT REACHED: no answer"
+        elif a.get("error"):
+            out[node] = f"FAILED: {str(a['error'])[:120]}"
+        else:
+            out[node] = "OK"
+    return out
 
-    b64-алфавит безопасен внутри одинарных кавычек, поэтому содержимое
-    подставляется в скрипт как есть."""
-    parts = ["set -e", "umask 077"]
-    for path, b64 in files:
-        parts.append(f'mkdir -p "{os.path.dirname(path)}"')
-        parts.append(f"printf '%s' '{b64}' | base64 -d > \"{path}.tmp\"")
-        parts.append(f'mv "{path}.tmp" "{path}"')
-    return "; ".join(parts)
 
-
-def push_spec(name, script, node_names):
-    return {"Job": {
-        "ID": name,
-        "Name": name,
-        "Datacenters": [nomad.POOL_DC],
-        "Type": "sysbatch",
-        "Constraints": [{
-            "LTarget": "${node.unique.name}",
-            "Operand": "regexp",
-            "RTarget": "^(" + "|".join(node_names) + ")$",
-        }],
-        "TaskGroups": [{
-            "Name": "login",
-            "Count": 1,
-            "Tasks": [{
-                "Name": "login",
-                "Driver": "raw_exec",
-                "User": puppets.USER,
-                "Config": {"command": "/bin/bash", "args": ["-c", script]},
-                "Env": {"HOME": puppets.HOME},
-                "Resources": {"CPU": 100, "MemoryMB": 64},
-            }],
-        }],
-    }}
+# Запись в тела pve-узла идёт секундами на тело (#136, #137): таймаут --
+# с запасом, иначе живой агент читался бы молчащим.
+WRITE_TIMEOUT = 60
 
 
 def distribute(files):
-    """Разложить [(путь, b64)] по всем ready-узлам пула -> {узел: результат}."""
-    script = push_script(files)
-    # Состав пула — через шину, как и всё остальное (#81). Инвариант модуля
-    # это не ломает: он про то, что доставка НА узел не смеет зависеть от
-    # шины ЭТОГО узла, а спросить сервер о списке мы всегда можем — креды
-    # оператора у нас есть по определению, иначе раздавать нечего.
-    nodes = puppets.ready_nodes()
+    """Разложить [(путь, b64)] по всем ready-узлам пула -> {узел: результат}.
+
+    Всем узлам разом -- глаголом `write` их агентам. Агент пишет только в
+    свой белый список путей; попытка привезти что-то ещё вернётся отказом,
+    а не тихо запишется."""
+    # Состав пула -- через шину, как и всё остальное (#81).
+    nodes = sorted(puppets.ready_nodes())
     if not nodes:
         raise RuntimeError("no ready nodes in the pool")
-
-    results = {}
-    _push_via_agents(files, sorted(nodes), results)
-    _push_via_sysbatch(script, sorted(nodes - set(results)), results)
-    for node in nodes:
-        results.setdefault(node, "NOT REACHED — no puppet, no room for sysbatch")
-    return results
-
-
-def _push_via_agents(files, nodes, results):
-    """Всем узлам разом — глаголом `write` их агентам.
-
-    Агент пишет только в свой белый список путей; попытка привезти что-то ещё
-    вернётся отказом, а не тихо запишется. Молчащий агент здесь не ошибка —
-    узел просто уходит в запасной путь."""
     try:
         answers = bus.request_many(
-            {n: {"verb": "write", "files": [list(f) for f in files]} for n in nodes})
-    except bus.BusError:
-        return
-    for node, answer in answers.items():
-        if isinstance(answer, Exception):
-            continue
-        results[node] = ("OK" if not answer.get("error")
-                         else f"FAILED: {str(answer['error'])[:80]}")
-
-
-def _push_via_sysbatch(script, nodes, results):
-    """Пустые узлы — коротким sysbatch-джобом, после — purge, чтобы секреты не
-    оставались в состоянии Nomad."""
-    if not nodes:
-        return
-    # Запасной путь остался на Nomad намеренно: он для узла, чей агент молчит,
-    # то есть ровно для случая, когда шина до узла не достаёт. Токен Nomad
-    # есть только у контроллера, и это честная граница — молчащий агент
-    # лечится прогоном оттуда же (CLAUDE.md: AGENT SILENT лечится юнитом).
-    if nomad.token_or_none() is None:
-        for n in nodes:
-            results[n] = ("NOT REACHED — agent silent, and no Nomad token here: "
-                          "run mop login on the controller")
-        return
-    try:
-        nomad.deregister(LOGIN_JOB)
-    except Exception:
-        pass
-    nomad.register(push_spec(LOGIN_JOB, script, nodes))
-    try:
-        for _ in range(60):
-            time.sleep(1)
-            try:
-                allocs = nomad.client().job.get_allocations(LOGIN_JOB)
-            except nomad.NotFound:
-                continue
-            pending = False
-            for a in allocs:
-                if a["ClientStatus"] in ("complete", "failed"):
-                    results[a["NodeName"]] = ("OK" if a["ClientStatus"] == "complete"
-                                              else "FAILED (sysbatch, see nomad UI)")
-                else:
-                    pending = True
-            if allocs and not pending:
-                break
-    finally:
-        try:
-            nomad.deregister(LOGIN_JOB)
-        except Exception:
-            pass
+            {n: {"verb": "write", "files": [list(f) for f in files]} for n in nodes},
+            timeout=WRITE_TIMEOUT)
+    except bus.BusError as e:
+        answers = {n: e for n in nodes}
+    return results_from(nodes, answers)
 
 
 def llm_keys_blob():
