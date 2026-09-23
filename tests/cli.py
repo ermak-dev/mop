@@ -122,6 +122,18 @@ def main():
         failed += 1
         print(f"FAIL play_vars without manifests: {lib.play_vars(['mop'])}")
 
+    # Чем запускать команду, которой нужны права root (#91). Под root —
+    # ничем: повышать нечего, а на выделенном сервере ещё и нечем, там
+    # `sudo` попросту не стоит, и команда падала трассировкой на первом же
+    # шаге установки.
+    from mop.cli.pool import setup as pool_setup
+    if pool_setup.elevate(uid=0) != []:
+        failed += 1
+        print(f"FAIL elevate as root: {pool_setup.elevate(uid=0)}")
+    if pool_setup.elevate(uid=1000) != ["sudo"]:
+        failed += 1
+        print(f"FAIL elevate as a user: {pool_setup.elevate(uid=1000)}")
+
     # Группы разрезаны по глаголам (#77): каждый глагол из usage группы
     # (`  mop <группа> <глагол>`) — свой модуль, и диспетчер находит его по
     # имени; таблиц VERBS в группах нет.
