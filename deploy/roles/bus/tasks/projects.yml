@@ -10,6 +10,9 @@
   ansible.builtin.template:
     src: nats-server.conf.j2
     dest: /etc/nats/nats-server.conf
-    # Пароли внутри: читает только root, под которым служба и ходит.
+    # Пароли внутри: читает только пользователь пула, под которым служба и
+    # ходит (#115).
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
     mode: "0600"
   notify: restart nats

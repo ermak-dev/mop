@@ -14,11 +14,14 @@
     mode: "0755"
   notify: restart nats
 
+# Каталог и конфиг -- пользователю пула: NATS работает под ним (#115).
 - name: Config dir
   ansible.builtin.file:
     path: /etc/nats
     state: directory
-    mode: "0755"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0700"
 
 # Пользователи проектов: тот же файл, что играет узкий прогон
 # `mop project add|delete` (deploy/projects.yml).

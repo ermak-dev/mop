@@ -58,6 +58,12 @@
     # пула: сервер поднимется, мастеров просто ещё нет.
     projects: "{{ mop_projects | default([]) }}"
   tasks:
+    # NATS работает под пользователем пула (#115). В полной игре его уже
+    # завела игра сервера Nomad, но этот плейбук -- аварийный путь и обязан
+    # подниматься сам.
+    - ansible.builtin.include_role:
+        name: node
+        tasks_from: user
     - ansible.builtin.include_role:
         name: bus
         tasks_from: server

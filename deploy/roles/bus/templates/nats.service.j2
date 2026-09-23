@@ -4,9 +4,15 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# Под root ради /etc/nats/nats-server.conf: внутри пароли всех проектов, и файл
-# читается только root'ом. (Раньше причиной был ключ letsencrypt; TLS снят,
-# причина осталась другая.)
+# Под пользователем пула, а не root (#115). Root держали ради режима 0600 на
+# конфиге с паролями, но граница эта ничего не охраняла: пользователь пула на
+# сервере уже держит токен Nomad (любой код на любом узле), читает пароли
+# папетов для bootstrap'а и ходит на шину как `service` с `mop.>`. Зато под
+# своим uid сервис пула может сам перечитать конфиг сигналом (#116), без sudo
+# и привилегированного посредника. Порты непривилегированные: 4222 и
+# WebSocket на петле за nginx.
+User={{ MOP_USER }}
+Group={{ MOP_USER }}
 ExecStart=/usr/local/bin/nats-server -c /etc/nats/nats-server.conf
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
