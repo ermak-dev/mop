@@ -24,15 +24,13 @@
     pve_net: "{{ MOP_PVE_SUBNET.split('/')[0] }}"
     pve_cidr: "{{ MOP_PVE_SUBNET.split('/')[1] }}"
     pve_gw: "{{ MOP_PVE_GATEWAY }}"
-    # База VMID — свойство ЭТОГО гипервизора (строка хоста в инвентаре), а
-    # сеть одна на пул: от абсолютного VMID разные базы дают разные куски
-    # одной плоской сети (#58), и второй гипервизор отличается ровно базой.
-    pve_vmid_min: "{{ (mop_pve_vmid_base | default(MOP_PVE_VMID_BASE)) | int }}"
-    pve_vmid_max: "{{ ((mop_pve_vmid_base | default(MOP_PVE_VMID_BASE)) | int) + 999 }}"
 
 - name: Nodes that are their own body need none of this
   ansible.builtin.meta: end_host
   when: mop_driver | default(MOP_DRIVER) != 'pve'
+
+# База VMID -- общий файл: её же спрашивает сборка образа.
+- ansible.builtin.include_tasks: vmid.yml
 
 # ── сеть тел ─────────────────────────────────────────────────────────
 # Мост без портов: наружу тела ходят NAT'ом через сам узел. Правила NAT

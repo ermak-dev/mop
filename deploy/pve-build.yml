@@ -59,6 +59,11 @@
         that: mop_project | default('') | length > 0
         fail_msg: "mop driver build <project>"
 
+    # База VMID этого гипервизора -- тот же файл, что играет игра узла.
+    - ansible.builtin.include_role:
+        name: pve
+        tasks_from: vmid
+
     # Номер и адрес спрашиваем у драйвера, а не считаем здесь второй раз:
     # разойдись два вычисления — `ensure` искал бы образ не там, и увидели бы
     # мы это на первом подъёме папета, а не на сборке.
@@ -75,6 +80,12 @@
                   pve.GATEWAY, pve.PREFIXLEN, pve.template_address(sys.argv[2]))
           - "{{ playbook_dir }}/.."
           - "{{ mop_project }}"
+      environment:
+        # База ЭТОГО узла, а не общая настройка установки: номер и адрес
+        # образа обязаны считаться от неё, иначе два гипервизора метят в один
+        # номер и один адрес (#101). Вычисление одно -- драйвер; окружение
+        # лишь говорит ему, про чей узел спрашивают.
+        MOP_PVE_VMID_BASE: "{{ pve_vmid_min }}"
       delegate_to: localhost
       changed_when: false
       register: tmpl
@@ -112,6 +123,12 @@
           - "{{ playbook_dir }}/.."
           - "{{ mop_project }}"
           - "{{ standing.stdout }}"
+      environment:
+        # База ЭТОГО узла, а не общая настройка установки: номер и адрес
+        # образа обязаны считаться от неё, иначе два гипервизора метят в один
+        # номер и один адрес (#101). Вычисление одно -- драйвер; окружение
+        # лишь говорит ему, про чей узел спрашивают.
+        MOP_PVE_VMID_BASE: "{{ pve_vmid_min }}"
       delegate_to: localhost
       changed_when: false
       register: stage
