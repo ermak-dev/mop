@@ -48,12 +48,25 @@
     - "{{ MOP_HOME }}/.config/mop/servers"
     - "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}"
 
-# Пароль admin — из secrets/ контроллера, тот же файл, что видит nats-server.
-- name: Bus password of the operator
+# Кем сервер представляется шине (#104): машинный пользователь service, а
+# не admin, чей пароль общий с людьми. Файл тот же, что у оператора после
+# `mop join --user` (creds.operator): «кто эта машина на шине». Пароль --
+# тот же lookup, что видит nats-server.
+- name: Bus identity of the server's services
   ansible.builtin.copy:
-    src: "{{ secrets_dir }}/nats-admin.pass"
-    dest: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/nats-admin.pass"
+    content: "{{ {'user': 'service', 'password': lookup('password', secrets_dir + '/nats-service.pass length=32 chars=ascii_letters,digits')} | to_json }}"
+    dest: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/operator.json"
     mode: "0600"
+  no_log: true
+  # Переживает игру: по нему перезапускаются mop-bootstrap и mop-cluster.
+  register: mop_server_identity
+  notify: restart mop-web
+
+# Переход: пароль admin, лежавший здесь до #104, серверу больше не нужен.
+- name: No admin password on the server
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/nats-admin.pass"
+    state: absent
   notify: restart mop-web
 
 # Самоподписанный сертификат TLS-прокси (#97): сервисы сервера ходят на

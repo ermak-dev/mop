@@ -51,6 +51,18 @@ authorization {
         subscribe: { allow: ["mop.>", "_INBOX.>"] }
       }
     }
+
+    # Сервисы сервера (#104): дашборд, bootstrap песочниц, сервис кластера.
+    # Машина, а не человек: пароль не уходит ни одному оператору, и отзыв
+    # доступа человека сервер не задевает. Права пока как у admin -- все
+    # проекты и узловые глаголы; сузить их по сервисам -- отдельная работа.
+    {
+      user: "service", password: "{{ lookup('password', secrets_dir + '/nats-service.pass length=32 chars=ascii_letters,digits') }}"
+      permissions: {
+        publish:   { allow: ["mop.>", "_INBOX.>"] }
+        subscribe: { allow: ["mop.>", "_INBOX.>"] }
+      }
+    }
 {% for op, subs in (MOP_OPERATOR_SUBJECTS | default({})).items() %}
 
     # Оператор {{ op }} -- человек, а не роль (#84). Права ровно на его

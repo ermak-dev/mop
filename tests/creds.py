@@ -117,6 +117,16 @@ def main():
         bad += 1
         print(f"FAILED  pick -> {got}, wanted {want}")
 
+    # Пароль сервисов сервера оператору НЕ положен (#104): это машинный
+    # пользователь, и отдав его человеку, отзыв доступа человека снова
+    # означал бы смену пароля сервера.
+    cases += 1
+    if creds.SERVICE_PASS_FILE != "nats-service.pass" or \
+            creds.SERVICE_PASS_FILE in creds.pick(listing + ["nats-service.pass"]):
+        bad += 1
+        print("FAILED  pick must never hand the service password to an operator")
+    # STATUS: FIXED — see #104
+
     # Токен Nomad оператору НЕ положен (#82): управление уехало за шину, и
     # management-токен на каждой машине мастера — полный контроль над
     # кластером в обход всякой проверки проекта. Отбор — единственное место,
