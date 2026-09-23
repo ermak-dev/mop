@@ -131,7 +131,7 @@ def default_branch():
 UNREACHABLE = 4
 
 
-def play_vars(projects, manifests=None, limits=None):
+def play_vars(projects, manifests=None, limits=None, git_hosts=None):
     """Списки плейбуку как --extra-vars, JSON'ом. -> [строки].
 
     Объектом, а не парой ключ=значение: `--extra-vars mop_projects=[...]`
@@ -147,13 +147,16 @@ def play_vars(projects, manifests=None, limits=None):
     head = {"mop_projects": list(projects)}
     if limits is not None:
         head["mop_limits"] = limits
+    # Хосты форжей (#121) -- только полной игре: их читает роль узла.
+    if git_hosts is not None:
+        head["mop_git_hosts"] = list(git_hosts)
     out = [json.dumps(head)]
     if manifests is not None:
         out.append(json.dumps({"mop_manifests": manifests}, ensure_ascii=False))
     return out
 
 
-def play(playbook, projects, manifests=None):
+def play(playbook, projects, manifests=None, git_hosts=None):
     """Прогон плейбука установки. -> код возврата ansible.
 
     Один вход для полной игры (site.yml) и для узкого прогона проектов
@@ -181,7 +184,7 @@ def play(playbook, projects, manifests=None):
                            "MOP_OPERATORS=anton:admin")
     from mop import projects as registry
     extra = ([json.dumps(vars_, ensure_ascii=False)]
-             + play_vars(projects, manifests, registry.read_limits()))
+             + play_vars(projects, manifests, registry.read_limits(), git_hosts))
     return subprocess.call(
         ["ansible-playbook", "-i", inventory, os.path.join(PROJECT, playbook),
          *sum((["--extra-vars", v] for v in extra), [])])

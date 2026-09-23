@@ -138,7 +138,8 @@ def main(argv):
         print(note, file=sys.stderr, flush=True)
 
     lib.section("ansible: site.yml")
-    rc = lib.play(SITE, projects.names(origins, legacy), manifests(origins))
+    rc = lib.play(SITE, projects.names(origins, legacy), manifests(origins),
+                  projects.git_hosts(origins, config.get("MOP_GIT_HOST")))
     if rc and rc != lib.UNREACHABLE:
         # Сборка кредов и проверка ростера не идут после красного прогона, и
         # это сказано, а не проглочено.
