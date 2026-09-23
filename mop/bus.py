@@ -133,24 +133,18 @@ def config(file=None):
             raise BusError(f"no bus credentials: {path} — run mop deploy")
     host = settings.get("MOP_SERVER_LAN")
     directory = creds.server_dir(host)
-    # Оператор-человек старше ролевого пароля (#84): у него одни креды на все
-    # его проекты, а какой именно проект — решает СУБЪЕКТ, и права на субъект
-    # проверяет сервер NATS. Прежний путь остаётся рядом, пока установка не
-    # перевела всех.
     # Каталог сервера -- это человек или сервис сервера, и ходят они через
-    # TLS-прокси (#97): пароль по сети открытым текстом не идёт.
-    https, pin = settings.get("MOP_HTTPS_PORT"), creds.cafile(directory)
+    # TLS-прокси (#97): пароль по сети открытым текстом не идёт. Кред один --
+    # кто эта машина на шине (#106): одни креды на все проекты человека, а
+    # какой именно проект -- решает СУБЪЕКТ, и права на субъект проверяет
+    # сервер NATS. Ролевых паролей admin и master-<проект> больше нет.
     op = creds.operator(directory)
-    if op:
-        return creds.wss_config(host, https, PROJECT, op["password"],
-                                user=op["user"], cafile=pin)
-    password = creds.password(directory, PROJECT)
-    if password is None:
-        raise BusError(f"no bus credentials for {creds.user_of(PROJECT)}: "
-                       f"neither {directory}/{creds.OPERATOR_FILE} nor "
-                       f"{directory}/{creds.pass_file(PROJECT)} — "
-                       f"run mop join --user <name> (or mop deploy on the server)")
-    return creds.wss_config(host, https, PROJECT, password, cafile=pin)
+    if not op:
+        raise BusError(f"no bus credentials: {directory}/{creds.OPERATOR_FILE} "
+                       f"is missing — run mop join --user <name>")
+    return creds.wss_config(host, settings.get("MOP_HTTPS_PORT"), PROJECT,
+                            op["password"], user=op["user"],
+                            cafile=creds.cafile(directory))
 
 
 # ─── соединение ──────────────────────────────────────────────────────────

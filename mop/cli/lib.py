@@ -134,7 +134,15 @@ def play(playbook, projects, manifests=None):
     if not os.path.isfile(inventory):
         raise RuntimeError(f"no inventory {inventory} -- create it from the example: "
                            f"cp inventory.yaml.example inventory.yaml")
-    extra = ([json.dumps(config.playbook_vars(), ensure_ascii=False)]
+    vars_ = config.playbook_vars()
+    # Без операторов на шину не войдёт ни один человек (#106): ролевых
+    # admin и master-<проект> больше нет. Громкий отказ до прогона лучше,
+    # чем установка, в которую никто не может войти.
+    if not vars_["MOP_OPERATOR_SUBJECTS"]:
+        raise RuntimeError("MOP_OPERATORS is empty: nobody could log in to the "
+                           "bus. Name at least one person in .env, e.g. "
+                           "MOP_OPERATORS=anton:admin")
+    extra = ([json.dumps(vars_, ensure_ascii=False)]
              + play_vars(projects, manifests))
     return subprocess.call(
         ["ansible-playbook", "-i", inventory, os.path.join(PROJECT, playbook),
@@ -144,15 +152,12 @@ def play(playbook, projects, manifests=None):
 def project_ready(project):
     """Есть ли у этой машины чем представиться шине за этот проект.
 
-    Два пути, и первый старше. Оператор-человек (#84) ходит одними кредами на
-    все свои проекты, и что именно ему положено, решает сервер NATS, а не
-    файл, — поэтому здесь только «есть чем представиться», а отказ по правам
-    приезжает с шины и читается отдельно (bus._silence). Прежний путь —
-    пароль роли `master-<проект>` в каталоге сервера — остаётся рядом, пока
-    установка не перевела операторов на собственные имена."""
-    directory = creds.server_dir()
-    return (creds.operator(directory) is not None
-            or creds.password(directory, project) is not None)
+    Кред один -- человек (#84, #106): одни креды на все его проекты, и что
+    именно ему положено, решает сервер NATS по роли, а не файл, -- поэтому
+    здесь только «есть чем представиться», а отказ по правам приезжает с
+    шины и читается отдельно (bus._silence). project остаётся в подписи:
+    вопрос задают про проект, и ответ однажды может от него зависеть."""
+    return creds.operator(creds.server_dir()) is not None
 
 
 def in_project():

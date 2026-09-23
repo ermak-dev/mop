@@ -60,8 +60,8 @@ def main(argv):
     gone = creds.forget(name, os.path.expanduser("~/.config/mop/secrets"),
                         creds.server_dir())
     lib.ok(f"  {name}: off the bus; {len(gone)} password file(s) removed here")
-    print("  other operators still hold theirs — those stop working, "
-          "and mop join <server> removes them")
+    print("  operators need nothing: their rights end with the project's "
+          "subjects")
     return rc
 
 

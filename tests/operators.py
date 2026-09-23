@@ -25,23 +25,35 @@ from mop import operators  # noqa: E402
 
 
 def check_parse():
-    """Разбор настройки: кто есть и на что имеет право."""
+    """Разбор настройки: кто есть, в какой роли и на какие проекты (#106)."""
     out = []
-    got = operators.parse("anton:mop,rugent; ivan:cloudpub ;  ")
-    want = {"anton": ["mop", "rugent"], "ivan": ["cloudpub"]}
+    got = operators.parse("anton:admin; ivan:user:cloudpub,rugent ;  ")
+    want = {"anton": {"role": "admin", "projects": ["*"]},
+            "ivan": {"role": "user", "projects": ["cloudpub", "rugent"]}}
     if got != want:
         out.append(f"parse -> {got}, wanted {want}")
 
-    # Звёздочка — все проекты, как у оператора сегодня. Пишется явно: пустой
-    # список прав значил бы «на всё» ровно там, где опечатка даёт доступ.
-    if operators.parse("anton:*") != {"anton": ["*"]}:
-        out.append(f"star -> {operators.parse('anton:*')}")
+    # user на весь пул -- не admin: «все проекты» и «машинные глаголы» были
+    # одним флагом `*`, и дать первое без второго было нельзя.
+    got = operators.parse("ivan:user:*")
+    if got != {"ivan": {"role": "user", "projects": ["*"]}}:
+        out.append(f"user:* -> {got}")
+
+    # Переход: прежняя запись без роли читается так, как работала до #106 --
+    # `*` давал весь mop.>, то есть admin; список проектов -- user.
+    got = operators.parse("anton:*; ivan:mop,rugent")
+    want = {"anton": {"role": "admin", "projects": ["*"]},
+            "ivan": {"role": "user", "projects": ["mop", "rugent"]}}
+    if got != want:
+        out.append(f"legacy -> {got}, wanted {want}")
 
     if operators.parse("") != {}:
         out.append("an empty setting must give no operators, not an error")
 
-    # Имя без проектов — отказ, а не «на всё»: прав по умолчанию не бывает.
-    for bad in ("anton", "anton:", ":mop"):
+    # Права не подразумеваются никогда. admin с проектами -- отказ, а не
+    # молчаливое сужение или расширение: запись говорит одно, права другое.
+    for bad in ("anton", "anton:", ":mop", "ivan:user", "ivan:user:",
+                "anton:admin:mop", "anton:owner:mop", "anton:user:mop:x"):
         try:
             operators.parse(bad)
         except ValueError:
@@ -57,34 +69,42 @@ def check_reserved():
     # этим именем получил бы права сервисов под видом оператора.
     for bad in ("admin", "service", "master-mop", "puppet-mop", "node-mate"):
         try:
-            operators.parse(f"{bad}:mop")
+            operators.parse(f"{bad}:user:mop")
         except ValueError:
             continue
         out.append(f"{bad!r} must be refused as an operator name")
     # Обычное человеческое имя проходит.
-    if operators.parse("anton:mop") != {"anton": ["mop"]}:
+    if operators.parse("anton:user:mop") != {"anton": {"role": "user", "projects": ["mop"]}}:
         out.append("an ordinary name must be accepted")
     return out
 
 
-def check_subjects():
-    """Права пользователя: свои проекты и инбоксы, и ничего сверх."""
+def check_permissions():
+    """Права пользователя по роли: свои проекты и инбоксы, и ничего сверх."""
     out = []
-    got = operators.subjects(["mop", "rugent"])
-    if got != ["mop.mop.>", "mop.rugent.>", "_INBOX.>"]:
-        out.append(f"subjects -> {got}")
-    # `*` — весь mop.>, как у admin: оператору всего пула нечего перечислять.
-    if operators.subjects(["*"]) != ["mop.>", "_INBOX.>"]:
-        out.append(f"star subjects -> {operators.subjects(['*'])}")
+    got = operators.permissions({"role": "user", "projects": ["rugent", "mop"]})
+    want = {"allow": ["mop.mop.>", "mop.rugent.>", "_INBOX.>"], "deny": []}
+    if got != want:
+        out.append(f"user -> {got}, wanted {want}")
+    # admin -- весь mop.>: все проекты плюс машинные глаголы в mop.admin.*.
+    got = operators.permissions({"role": "admin", "projects": ["*"]})
+    if got != {"allow": ["mop.>", "_INBOX.>"], "deny": []}:
+        out.append(f"admin -> {got}")
+    # user:* -- все проекты, но не машины: mop.admin.> закрыт явно, иначе
+    # mop.> отдал бы и disk, и drain узлов.
+    got = operators.permissions({"role": "user", "projects": ["*"]})
+    if got != {"allow": ["mop.>", "_INBOX.>"], "deny": ["mop.admin.>"]}:
+        out.append(f"user:* -> {got}")
     # _INBOX обязателен: без него request-reply молча не работает.
-    if "_INBOX.>" not in operators.subjects(["mop"]):
+    if "_INBOX.>" not in operators.permissions({"role": "user", "projects": ["mop"]})["allow"]:
         out.append("_INBOX.> is mandatory or request-reply silently fails")
     return out
+    # STATUS: FIXED — see #106
 
 
 def main():
     failed = []
-    for check in (check_parse, check_reserved, check_subjects):
+    for check in (check_parse, check_reserved, check_permissions):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:

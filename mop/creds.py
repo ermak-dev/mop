@@ -7,16 +7,16 @@
 
 Теперь мастер — любая машина с mop и адресом сервера: `MOP_SERVER_LAN` из
 окружения (оно старше .env) переключает NOMAD_ADDR, адрес шины и каталог
-кредов разом. В каталоге лежит ровно то, что мастеру положено, под теми же
-именами, что lookup('password') заводит в secrets/ сервера — копия без
-переименования, её и делает `mop join`:
+кредов разом. В каталоге лежит ровно то, что машине положено:
 
-    nats-admin.pass             оператор: все проекты плюс узловой disk
-    nats-master-<проект>.pass     мастер проекта
-    bootstrap.json              management-токен Nomad
-    tls.pem                     самоподписанный сертификат TLS-прокси (#97)
     operator.json               кто эта машина на шине: человек после
                                 `mop join --user`, на сервере -- service (#104)
+    tls.pem                     самоподписанный сертификат TLS-прокси (#97)
+    bootstrap.json              management-токен Nomad, только на контроллере
+
+Общих паролей людей (nats-admin.pass, nats-master-<проект>.pass) здесь больше
+нет (#106): человек входит своим именем, и что ему можно, решает роль в
+MOP_OPERATORS, а не набор файлов.
 
 Паролей узлов и папетов здесь нет намеренно: с ними мастер мог бы
 представиться узлом, а границу проектов держат ровно креды.
@@ -216,30 +216,19 @@ def make_dir(dest):
 
 
 def pick(listing):
-    """Что из secrets/ сервера едет мастеру: своё и только своё. Один отбор
-    для контроллера (collect) и для `mop join` — иначе на одной машине
-    оператор видел бы больше, чем на другой."""
-    return sorted(n for n in listing
-                  if n in (pass_file(None), CERT_FILE)
+    """Что из secrets/ сервера едет в каталог сервера оператора: только
+    закреплённый сертификат. Паролей людям не копируют (#106) -- человек
+    входит своим именем, и его пароль приходит `mop join --user`."""
+    return sorted(n for n in listing if n == CERT_FILE)
+
+
+def legacy(listing):
+    """Ролевые пароли людей, оставшиеся от времён до #106. -> [имена].
+
+    Шина их больше не знает, а лежащие они выдают «кредов нет» за «креды
+    есть»: мастер поднялся бы, чтобы не подключиться."""
+    return sorted(n for n in listing if n == pass_file(None)
                   or (n.startswith("nats-master-") and n.endswith(".pass")))
-
-
-def stale(local, remote):
-    """Файлы каталога, которых у сервера больше нет. -> [имена].
-
-    Проект сняли (#79) — его пароль мастера остаётся лежать у оператора, и
-    `lib.project_ready` по нему отвечает «проект на шине есть»: мастер
-    поднимется, чтобы не подключиться. Отбор строго по паролям мастеров:
-    админский пароль и токен к проектам отношения не имеют, а чужое в
-    каталоге не наше дело.
-
-    Пустой список сервера ничего не чистит: tar мог прийти пустым, а
-    снести по этому поводу все креды — худшее из возможных прочтений."""
-    if not remote:
-        return []
-    mine = {n for n in local
-            if n.startswith("nats-master-") and n.endswith(".pass")}
-    return sorted(mine - set(remote))
 
 
 def forget(project, *dirs):
@@ -270,6 +259,8 @@ def collect(secrets_dir, dest, pin=True):
     import shutil
     make_dir(dest)
     names = [n for n in pick(os.listdir(secrets_dir)) if pin or n != CERT_FILE]
+    for n in legacy(os.listdir(dest)):
+        os.remove(os.path.join(dest, n))
     if not pin and os.path.exists(os.path.join(dest, CERT_FILE)):
         os.remove(os.path.join(dest, CERT_FILE))
     for n in names:

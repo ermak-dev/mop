@@ -19,7 +19,7 @@ into claude. From there the slice is inherited: mop mcp, spawned by this
 session as a child, sees MOP_PROJECT, builds the project's bus credentials from
 the server's directory (mop/creds.py) and subscribes to its project's inbox.
 
-No ansible on this machine: the credentials arrive with `mop join <server>`,
+No ansible on this machine: the credentials arrive with `mop join --user`,
 the server itself is named by MOP_SERVER_LAN (the environment outranks .env,
 so one variable retargets the master at another pool), and the /master skill
 is linked from here.
@@ -119,9 +119,10 @@ def main(argv):
         # и папет к шине не подключится. Говорим прямо, а не запускаем ansible
         # за спиной оператора: на узел ведёт одна дорога, и это deploy на
         # сервере; сюда его плоды привозит join.
-        lib.usage(f"no credentials for project {project} on this machine.\n"
-                  f"Register it on the server: mop project add {origin}, "
-                  f"then bring its credentials here: mop join <server>")
+        lib.usage(f"no bus credentials on this machine.\n"
+                  f"Log in as yourself: mop join --user <name>. The project "
+                  f"must be registered (mop project add {origin}) and yours "
+                  f"in MOP_OPERATORS on the server")
     link_skill()
 
     # Профиль тот же, что у папетов, но источник ключа другой: не узловой

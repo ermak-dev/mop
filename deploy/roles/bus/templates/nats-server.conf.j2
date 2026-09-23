@@ -31,9 +31,12 @@ websocket {
 # Права по субъектам -- то, ради чего шину и заводили: раньше на узлы ехал
 # management-токен Nomad, и папет мог снести чужие джобы.
 #
-# Четыре рода пользователей, и делятся они по двум осям сразу -- проект (проект) и
-# роль. Первый токен субъекта -- проект, поэтому право «только свой проект»
-# выражается одним префиксом.
+# Люди и машины (#106). Люди -- операторы из MOP_OPERATORS, по одному
+# пользователю на человека, с ролью admin или user. Машины -- service,
+# node-<узел>, puppet-<проект>: их никто не назначает, они выводятся из
+# инвентаря и реестра проектов. Общих паролей людей (admin, master-<проект>)
+# больше нет. Первый токен субъекта -- проект, поэтому право «только свой
+# проект» выражается одним префиксом.
 #
 # _INBOX.> обязателен всем, кто задаёт вопросы: без него request-reply молча не
 # работает. Это первое, обо что спотыкаются.
@@ -44,20 +47,6 @@ websocket {
 # и ничего, кроме шины, не открывают.
 authorization {
   users = [
-    # Оператор вне мастер-шелла. Псевдопроект admin -- это отсутствие проекта:
-    # все проекты плюс узловой disk (место на хосте -- факт про всех его
-    # жильцов). Живёт только на управляющей машине. Раздача кредов --
-    # глагол write, и он не отличает оператора от мастера проекта: NATS делит
-    # субъекты, а глаголы внутри них проверяет сам агент.
-    {
-      user: "admin", password: "{{ lookup('password', secrets_dir + '/nats-admin.pass length=32 chars=ascii_letters,digits') }}"
-      allowed_connection_types: ["WEBSOCKET"]
-      permissions: {
-        publish:   { allow: ["mop.>", "_INBOX.>"] }
-        subscribe: { allow: ["mop.>", "_INBOX.>"] }
-      }
-    }
-
     # Сервисы сервера (#104): дашборд, bootstrap песочниц, сервис кластера.
     # Машина, а не человек: пароль не уходит ни одному оператору, и отзыв
     # доступа человека сервер не задевает. Права пока как у admin -- все
@@ -71,29 +60,20 @@ authorization {
     }
 {% for op, subs in (MOP_OPERATOR_SUBJECTS | default({})).items() %}
 
-    # Оператор {{ op }} -- человек, а не роль (#84). Права ровно на его
-    # проекты: отозвать доступ одному значит убрать одного пользователя, а не
-    # сменить пароль всем операторам проекта. Пароль -- там же, где остальные.
+    # Оператор {{ op }} -- человек, а не роль (#84, #106). Права по его роли
+    # в MOP_OPERATORS (mop/operators.py): admin -- весь пул с машинами, user --
+    # названные проекты или все без mop.admin.>. Отозвать доступ одному --
+    # убрать одного пользователя. Пароль -- там же, где остальные.
     {
       user: "{{ op }}", password: "{{ lookup('password', secrets_dir + '/nats-op-' + op + '.pass length=32 chars=ascii_letters,digits') }}"
       allowed_connection_types: ["WEBSOCKET"]
       permissions: {
-        publish:   { allow: [{% for s in subs %}"{{ s }}"{% if not loop.last %}, {% endif %}{% endfor %}] }
-        subscribe: { allow: [{% for s in subs %}"{{ s }}"{% if not loop.last %}, {% endif %}{% endfor %}] }
+        publish:   { allow: {{ subs.allow | to_json }}{% if subs.deny %}, deny: {{ subs.deny | to_json }}{% endif %} }
+        subscribe: { allow: {{ subs.allow | to_json }}{% if subs.deny %}, deny: {{ subs.deny | to_json }}{% endif %} }
       }
     }
 {% endfor %}
 {% for project in projects %}
-
-    # Мастер проекта {{ project }}: весь свой проект и ничего сверх него.
-    {
-      user: "master-{{ project }}", password: "{{ lookup('password', secrets_dir + '/nats-master-' + project + '.pass length=32 chars=ascii_letters,digits') }}"
-      allowed_connection_types: ["WEBSOCKET"]
-      permissions: {
-        publish:   { allow: ["mop.{{ project }}.>", "_INBOX.>"] }
-        subscribe: { allow: ["mop.{{ project }}.>", "_INBOX.>"] }
-      }
-    }
 
     # Папеты проекта {{ project }}. Врапер подсовывает эти креды сессии через
     # MOP_BUS_CONFIG, поэтому `mop mcp` внутри папета достаёт только своих
