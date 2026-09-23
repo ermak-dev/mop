@@ -541,6 +541,17 @@ def main():
               "container one — everything that decides what to destroy "
               "hangs on it")
 
+    # HYPOTHESIS (#114): pve-тело получает кред проекта копией файла с
+    # гипервизора, а файл туда клал прогон; прогон его больше не кладёт.
+    # SOLUTION: кред едет в тело только из ответа bootstrap (driver run), в
+    # переливке с узла его нет. STATUS: FIXED — see #114
+    from mop.driver import pve
+    cases += 1
+    if any("bus-" in path for path, _ in pve._seed_files()):
+        bad += 1
+        print("FAILED  pve seed must not copy the node's bus-<project>.json: "
+              "the credentials come from the bootstrap answer only")
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 

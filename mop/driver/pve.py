@@ -453,7 +453,7 @@ async def ensure(name, params=None):
     r = await _sync_package(name, vmid)
     if r.get("error"):
         return r
-    r = await _seed(name, vmid, project)
+    r = await _seed(name, vmid)
     if r.get("error"):
         return r
     return {"name": name, "body": vmid, "created": created,
@@ -501,7 +501,7 @@ async def _sync_package(name, vmid):
     return {}
 
 
-def _seed_files(project):
+def _seed_files():
     """Что узел переливает в тело на каждом подъёме: [(путь, режим)].
 
     Путь один и тот же с обеих сторон: у драйвера host папет живёт прямо в
@@ -512,19 +512,18 @@ def _seed_files(project):
     Список закрыт (настройка MOP_BODY_SEED) и собран из машины, а не из
     проекта мастера, — тот же довод, по которому закрыт WRITABLE у агента.
 
-    Креды проекта идут отдельной строкой: их имя зависит от проекта, а проект
-    известен только здесь. Без них папет поднимется и будет молчать — худший
-    из отказов, потому что мастеру он читается как живой."""
-    out = [(f"{HOME}/.config/mop/bus-{project}.json", "600")]
+    Кред проекта здесь не едет (#114): его привозит в тело ответ bootstrap'а
+    (`mop driver run`), а узел его больше не хранит."""
+    out = []
     for rel in (p.strip() for p in config.get("MOP_BODY_SEED").split(",")):
         if rel:
             out.append((f"{HOME}/{rel}", "600"))
     return out
 
 
-async def _seed(name, vmid, project):
+async def _seed(name, vmid):
     """Перелить в тело то, без чего папет поднимется и будет молчать."""
-    for path, mode in _seed_files(project):
+    for path, mode in _seed_files():
         if not os.path.exists(path):
             # Нет — не отказ: ключей LLM у профиля claude не бывает вовсе, а
             # ключ узла зовётся то id_rsa, то id_ed25519.

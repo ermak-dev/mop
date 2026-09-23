@@ -1,15 +1,13 @@
----
-# Проекты пула: узкий прогон для `mop project add` и `mop project delete`.
+# Проекты пула: узкий прогон для `mop project add|delete|limit`.
 #
-# Завод проекта — это два файла на двух сторонах: пользователи master-<проект>
-# и puppet-<проект> в конфиге NATS на сервере, и кред папета на каждом узле.
-# Всё остальное, чем занят site.yml, к появлению проекта отношения не имеет,
-# и гонять полную установку ради двух шаблонов значит держать завод проекта
-# побочным эффектом прогона — ровно то, от чего уходит #79.
+# Завод проекта -- дело одного сервера: пользователь puppet-<проект> в
+# конфиге NATS, пароль проекта в каталоге, из которого сервер раздаёт его
+# узлам в ответе bootstrap'а (#83), и лимиты. На узлы прогон не ходит (#114):
+# кред папета они получают только от сервера, в момент подъёма.
 #
-# Задачи не свои: это те же файлы роли bus, которые играет полная установка
-# (tasks/projects.yml и tasks/node_projects.yml). Второй копии нет намеренно
-# -- разойдясь, узкий прогон заводил бы проект, а полный его снимал.
+# Задачи не свои: это те же файлы ролей bus, bootstrap и cluster, которые
+# играет полная установка. Второй копии нет намеренно -- разойдясь, узкий
+# прогон заводил бы проект, а полный его снимал.
 #
 # Запуск: mop project add <origin> | mop project delete <имя>
 
@@ -26,23 +24,14 @@
     - ansible.builtin.include_role:
         name: bus
         tasks_from: projects
+    # Пароль проекта -- серверу, чтобы тот отдал его узлу в ответе
+    # bootstrap'а. Без этого заведённый проект доезжал бы до сервера
+    # только полным `mop deploy`, а папет до него не поднимался бы.
+    - ansible.builtin.include_role:
+        name: bootstrap
+        tasks_from: creds
     # Лимиты папетов (#107): тот же файл задач, что играет роль cluster.
     - ansible.builtin.include_role:
         name: cluster
         tasks_from: limits
 
-
-- name: Bus credentials of the puppets, one per project
-  hosts: puppet
-  gather_facts: no
-
-  vars:
-    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
-    projects: "{{ mop_projects | default([]) }}"
-    # Адрес шины -- LAN-адрес сервера, тот же, что в полной игре: публичное
-    # имя резолвится в роутер, который не делает хайрпин.
-    nats_addr: "nats://{{ MOP_SERVER_LAN }}:{{ MOP_NATS_PORT }}"
-  tasks:
-    - ansible.builtin.include_role:
-        name: bus
-        tasks_from: node_projects

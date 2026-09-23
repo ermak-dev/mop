@@ -77,22 +77,20 @@ def main(argv):
           + (f"played in {b.get('seconds')}s" if b.get("played")
              else "none for the project"), flush=True)
 
-    # Кред папета приезжает тем же ответом (#83): узел перестаёт хранить его
-    # в покое — файл появляется в теле ровно на время жизни папета и ровно
-    # для его проекта. Пока прогон кладёт bus-<проект>.json на узлы сам,
-    # ответ без кредов — не отказ: врапер возьмёт файл оттуда, и это переход.
-    if b.get("bus"):
-        project = driver.project_of_name(name)
-        path = f"{driver.HOME}/.config/mop/bus-{project}.json"
-        w = asyncio.run(d.push(name, path,
-                               json.dumps(b["bus"]).encode() + b"\n"))
-        if w.get("error"):
-            # Не валимся: файл мог уже лежать от прогона. Не молчим: если не
-            # лежал, врапер сейчас откажет, и причина должна быть в логе.
-            print(f"{name}: bus credentials did not reach the body: "
-                  f"{w['error']}", flush=True)
-        else:
-            print(f"{name}: bus credentials in {path}", flush=True)
+    # Кред папета приезжает тем же ответом (#83), и только им (#114): узел
+    # его не хранит, файл появляется в теле на подъёме папета и для его
+    # проекта. Ответ без кредов сервер отдаёт отказом, так что здесь его нет
+    # -- но старый сервер ещё может так ответить, и тогда падаем громко:
+    # папет без шины мастеру читается живым, но молчащим.
+    if not b.get("bus"):
+        sys.exit(f"bootstrap of {name} brought no bus credentials -- "
+                 f"is the project registered? mop project add <origin>")
+    project = driver.project_of_name(name)
+    path = f"{driver.HOME}/.config/mop/bus-{project}.json"
+    w = asyncio.run(d.push(name, path, json.dumps(b["bus"]).encode() + b"\n"))
+    if w.get("error"):
+        sys.exit(f"bus credentials did not reach the body of {name}: {w['error']}")
+    print(f"{name}: bus credentials in {path}", flush=True)
 
     inner = os.path.join(config.get("MOP_HOME"), INNER)
     w = asyncio.run(d.push(name, inner, _inner_script().encode()))
