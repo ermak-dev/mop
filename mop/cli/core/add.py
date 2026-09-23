@@ -68,9 +68,9 @@ def _add(origin, project, profile, named, p):
             node = a["NodeName"]
             if a["ClientStatus"] == "running":
                 return 0
-            if a["ClientStatus"] == "failed":
+            if a["ClientStatus"] == "failed" or lib.failing(a):
                 p.clear()
-                lib.fail(f"{name} failed to start on {node}: mop list, mop doctor")
+                lib.fail(f"{name} on {node}: {lib.failing(a) or 'failed to start'}")
                 return 1
             p.step(f"{name}: starting on {node}")
         time.sleep(1)

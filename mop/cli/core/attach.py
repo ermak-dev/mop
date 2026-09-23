@@ -17,7 +17,8 @@ def main(argv):
     lib.guard(name)
     a, node_driver = lib.alloc_of(name)
     if not a or a["ClientStatus"] != "running":
-        lib.usage(f"{name} not running")
+        lib.fail(lib.not_running(name, a))
+        return 1
     node = a["NodeName"]
     # Чем входят в тело, знает драйвер узла: у host это сразу tmux, у
     # контейнерного — ещё один ssh внутрь. Драйвер приезжает вместе с

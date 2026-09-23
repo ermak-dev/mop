@@ -11,11 +11,11 @@
 на живом пуле, и тестов на него нет.
 """
 import os
-from mop import puppets
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
+from mop import puppets  # noqa: E402
 from mop.puppets import is_free, puppet_state  # noqa: E402
 
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
@@ -259,6 +259,79 @@ VISIBLE = [
 ]
 
 
+# ── #126: падающий на старте папет. Nomad держит аллокацию в restart-backoff
+# в `pending`, и ростер показывал его ищущим место. Образец -- настоящий
+# stderr pu-rugent-1 (две попытки подряд, bootstrap без файлов на сервере).
+STDERR = """pu-rugent-1: body 9828 at 10.77.38.100
+bootstrap of pu-rugent-1 failed: bootstrap failed (ansible exit 2):
+TASK [Project env files of rugent] ***
+[ERROR]: Task failed: Unexpected AnsibleActionFail error: Could not find or access '~/rugent/.env' on the Ansible Controller.
+If you are using a module and expect the file to exist on the remote, see the remote_src option
+PLAY RECAP *****
+bootstrap of pu-rugent-1 failed: bootstrap failed (ansible exit 2):
+[ERROR]: Task failed: Unexpected AnsibleActionFail error: Could not find or access '~/rugent/.env-prod' on the Ansible Controller.
+If you are using a module and expect the file to exist on the remote, see the remote_src option
+Origin: /home/ermak/.config/mop/bootstrap/rugent-tasks.yml:8:3
+[ERROR]: Task failed: Unexpected AnsibleActionFail error: Could not find or access '~/rugent/.providers' on the Ansible Controller.
+PLAY RECAP *****
+10.77.38.100               : ok=3    changed=0    unreachable=0    failed=1
+"""
+ALLOC = {"ClientStatus": "pending", "TaskStates": {"claude": {
+    "State": "pending", "Failed": False, "Restarts": 4,
+    "Events": [{"Type": "Started"},
+               {"Type": "Terminated", "ExitCode": 1},
+               {"Type": "Restarting", "StartDelay": 1576228170008}]}}}
+
+
+def check_failing():
+    """HYPOTHESIS (#126): ростер читал только ClientStatus. SOLUTION: сводка
+    задачи и причина из stderr. STATUS: FIXED — see #126"""
+    bad, cases = 0, 0
+    cases += 1
+    t = getattr(puppets, "task_summary", lambda a: None)(ALLOC)
+    want = {"state": "pending", "restarts": 4, "exit": 1, "next_s": 1576, "failed": False}
+    if t != want:
+        bad += 1
+        print(f"FAILED  task_summary -> {t}, wanted {want}")
+    # Причина -- из последней попытки, первая ошибка после строки врапера.
+    cases += 1
+    got = getattr(puppets, "failure_reason", lambda s: None)(STDERR)
+    want = "bootstrap: Could not find or access '~/rugent/.env-prod' on the Ansible Controller."
+    if got != want:
+        bad += 1
+        print(f"FAILED  failure_reason -> {got!r}, wanted {want!r}")
+    # Без знакомых строк -- последняя непустая, а пусто -- None.
+    cases += 1
+    if getattr(puppets, "failure_reason", lambda s: 0)("x\nsomething broke\n\n") != "something broke" \
+            or getattr(puppets, "failure_reason", lambda s: 0)("") is not None:
+        bad += 1
+        print("FAILED  failure_reason must fall back to the last line, and None on empty")
+    # Строка ростера: падающий -- failing с причиной и сроком, а не pending.
+    cases += 1
+    fn = getattr(puppets, "failing_row", None)
+    got = fn("pending", t, "bootstrap: no file") if fn else None
+    want = ("failing", "FAILED: bootstrap: no file (4 restarts, next in 26m)")
+    if got != want:
+        bad += 1
+        print(f"FAILED  failing_row -> {got}, wanted {want}")
+    # Работающая задача и задача без падений -- не failing.
+    for task in ({"state": "running", "restarts": 4, "exit": 1, "next_s": None, "failed": False},
+                 {"state": "pending", "restarts": 0, "exit": None, "next_s": None, "failed": False},
+                 None):
+        cases += 1
+        if fn and fn("pending", task, None) is not None:
+            bad += 1
+            print(f"FAILED  failing_row must be None for {task}")
+    # Задача исчерпала попытки -- тоже failing, без срока.
+    cases += 1
+    dead = {"state": "dead", "restarts": 9, "exit": 1, "next_s": None, "failed": True}
+    got = fn("failed", dead, "boom") if fn else None
+    if got != ("failing", "FAILED: boom (9 restarts, gave up)"):
+        bad += 1
+        print(f"FAILED  failing_row for a task that gave up -> {got}")
+    return bad, cases
+
+
 def main():
     bad = 0
     for what, given, want in CASES:
@@ -273,6 +346,9 @@ def main():
     cases += scases
     bad += vbad
     cases += vcases
+    fbad, fcases = check_failing()
+    bad += fbad
+    cases += fcases
     for state, want in FREE_CASES:
         cases += 1
         if is_free(state) != want:

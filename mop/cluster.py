@@ -233,6 +233,9 @@ def _alloc(project, req):
     if not alloc:
         return {"ok": True, "alloc": None, "driver": None}
     slim = {k: alloc.get(k) for k in puppets.ALLOC_FIELDS}
+    # Падает ли задача и почему (#126): `mop attach` и `mop add` говорят это
+    # вместо «not running» и двух минут ожидания.
+    slim["task"], slim["reason"] = puppets.task_and_reason(alloc)
     meta = nomad.node_meta(alloc["NodeName"]) or {}
     return {"ok": True, "alloc": slim, "driver": meta.get("mop_driver")}
 

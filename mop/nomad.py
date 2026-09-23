@@ -89,6 +89,15 @@ def alloc_restart(alloc_id):
     _raw("POST", f"/v1/client/allocation/{alloc_id}/restart", json={})
 
 
+def alloc_stderr(alloc_id, task, tail=8000):
+    """Хвост stderr задачи аллокации (#126): причина падения на старте живёт
+    только там. python-nomad отдаёт логи потоком, здесь нужен один хвост."""
+    r = _raw("GET", f"/v1/client/fs/logs/{alloc_id}",
+             params={"task": task, "type": "stderr", "origin": "end",
+                     "offset": tail, "plain": "true"})
+    return r.text
+
+
 def alloc_stop(alloc_id):
     client().allocation.stop_allocation(alloc_id)
 

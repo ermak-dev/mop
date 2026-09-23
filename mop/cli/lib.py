@@ -289,10 +289,23 @@ def alloc_of(name):
     return got.get("alloc"), got.get("driver")
 
 
+def failing(a):
+    """Строка состояния падающего папета из ответа `alloc`, либо None (#126)."""
+    got = puppets.failing_row((a or {}).get("ClientStatus"), (a or {}).get("task"),
+                              (a or {}).get("reason"))
+    return got[1] if got else None
+
+
+def not_running(name, a):
+    """Почему к папету нельзя подключиться: падает (с причиной) или не запущен."""
+    why = failing(a)
+    return f"{name}: {why}" if why else f"{name} not running"
+
+
 def running_alloc(name):
     a, _ = alloc_of(name)
     if not a or a["ClientStatus"] != "running":
-        sys.exit(f"{name} not running")
+        sys.exit(not_running(name, a))
     return a
 
 
