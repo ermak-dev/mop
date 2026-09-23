@@ -9,7 +9,7 @@ import os
 import time
 
 from mop.cli import lib
-from mop import bootstrap, bus, config, puppets
+from mop import bus, config, puppets
 
 
 def main(argv):
@@ -37,23 +37,13 @@ def _add(origin, project, profile, named, p):
     ничего; отказ и не вставший папет -- ошибкой."""
     p.step("LLM keys to the nodes")
     lib.push_llm_keys(profile)
-    # bootstrap.yaml рабочей копии — на сервер ДО регистрации (#62): первый
-    # подъём обязан увидеть его. Из рабочей копии, потому что решает мастер;
-    # нет файла — сервер держит то, что положил `mop project add` из origin.
-    if not named and os.path.exists(bootstrap.FILE):
-        p.step("bootstrap to the server")
-        try:
-            got = bootstrap.push_from(os.getcwd(), project)
-        except bus.BusError as e:
-            got = {"error": str(e)}
-        if got.get("error"):
-            p.clear()
-            lib.fail(f"{bootstrap.FILE} did not reach the server: {got['error']}")
-            return 1
     # Имя выбирает сервис кластера вместе с регистрацией: спека собирается
     # там же (#80), а выбор имени и есть первая её строка.
+    # workspace папета (#133) едет с регистрацией: рабочая копия проекта,
+    # вне её -- origin; нет файла -- у папета workspace нет.
     p.step("registering")
-    got = bus.ask_cluster("add", origin=origin, profile=profile, timeout=30)
+    got = bus.ask_cluster("add", origin=origin, profile=profile, timeout=30,
+                          workspace=lib.workspace_text(origin))
     if got.get("error"):
         p.clear()
         lib.fail(got["error"])

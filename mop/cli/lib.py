@@ -108,6 +108,21 @@ def cwd_origin():
         return None
 
 
+def workspace_text(origin):
+    """workspace папета (#133): .mop/bootstrap.yaml рабочей копии проекта,
+    если команда идёт из неё, иначе из origin (ветка по умолчанию). Нет
+    файла -- пустой текст: сервер снимает копию папета, и удаление доходит."""
+    from mop import bootstrap, manifest
+    if cwd_origin() == origin:
+        top = git("rev-parse", "--show-toplevel")
+        try:
+            with open(os.path.join(top, bootstrap.FILE)) as f:
+                return f.read()
+        except FileNotFoundError:
+            return ""
+    return manifest.fetch(origin)["bootstrap_text"] or ""
+
+
 def pick_origin(arg, here):
     """Какой origin взять команде. Чистая функция (#111).
 

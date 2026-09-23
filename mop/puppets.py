@@ -1468,7 +1468,7 @@ def delete(name):
     return {"node": node, "body": "destroyed"}
 
 
-def recycle(name):
+def recycle(name, workspace_of=None):
     """Пересоздать папета на чистой рабочей копии. -> {node}.
 
     Клон не переклонируется: сбрасывается на месте глаголом wipe (reset
@@ -1487,7 +1487,10 @@ def recycle(name):
     успевает прилететь задача (mop send идёт мимо мастера, у пула несколько
     мастеров), и остановленный джоб — единственное состояние, в котором
     сессии гарантированно нет. Перерегистрация, а не alloc_restart: врапер
-    живёт в спеке джоба, рестарт аллокации поднял бы старую."""
+    живёт в спеке джоба, рестарт аллокации поднял бы старую.
+
+    workspace_of(origin) -> текст workspace папета (#133); None -- сервер
+    оставляет положенный (рецикл без рабочей копии, `mop gc`)."""
     meta = _cluster("spec", name=name).get("meta") or {}
     origin = meta.get("origin")
     if not origin:
@@ -1505,7 +1508,8 @@ def recycle(name):
     except RuntimeError as e:
         raise RuntimeError(f"{e}; job is stopped — after fixing the node "
                            f"retry: mop recycle {name}")
-    _cluster("update", name=name, origin=origin, profile=llm)
+    fields = {"workspace": workspace_of(origin)} if workspace_of else {}
+    _cluster("update", name=name, origin=origin, profile=llm, **fields)
     return {"node": node}
 
 
