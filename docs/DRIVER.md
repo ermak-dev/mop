@@ -38,7 +38,7 @@ hostname. Второе имя для того же означало бы вто�
 ```python
 # mop/driver/pve.py — "Proxmox: тело папета — контейнер LXC на узле-гипервизоре"
 
-# ── жизненный цикл тела: зовёт bin/driver (из врапера), recycle, gc ──
+# ── жизненный цикл тела: зовёт mop driver run (из врапера), recycle, gc ──
 def ensure(name, params)      # клон из шаблона шарда, лимиты, адрес, старт
 def destroy(name)             # снос тела
 def bodies() -> [name]        # что есть на этом узле — ростер без Nomad

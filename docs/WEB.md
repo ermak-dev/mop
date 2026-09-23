@@ -15,7 +15,7 @@
 |---|---|---|
 | снимок | `mop/web.py` | чистые функции: корзина папета, группы по шардам, счётчики, ось расхода |
 | сборщик | `mop/web.py`, `Collector` | три потока с тремя расписаниями держат снимок и версию |
-| HTTP | `bin/web` | stdlib `http.server`: `/`, `/api/pool`, `/events` (SSE), `/healthz` |
+| HTTP | `mop/cli/service/web.py` | stdlib `http.server`: `/`, `/api/pool`, `/events` (SSE), `/healthz` |
 | страница | `web/index.html` | ванильный JS без сборки: читает снимок и красит |
 | события | `mop/agent.py`, `_event` | агент пишет в `mop.<шард>.events`, дашборд подписан под `admin` |
 | раскатка | `deploy/roles/web` | пакет, зависимости, креды мастера и юнит `mop-web` на сервере |

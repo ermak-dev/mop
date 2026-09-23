@@ -1,6 +1,7 @@
 #!/bin/bash -e
-# mop — the single entry point into the pool. Everything else in bin/ is a
-# commandlet, one per subcommand; `mop` only finds and runs them.
+# mop — the single entry point into the pool, and the only file in bin/. The
+# subcommands are modules of the package (mop/cli, docs and dispatch there);
+# this launcher only finds the project and hands over.
 #
 # Симлинк резолвим до конца: наружу торчит ~/bin/mop, а дерево проекта надо
 # найти относительно настоящего файла, а не относительно ссылки.
@@ -10,26 +11,9 @@ while [ -h "$SOURCE" ]; do
     SOURCE="$(readlink "$SOURCE")"
     [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
 done
-BIN_DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
-source "$BIN_DIR/common"
-
-SUB="$1"
-if [[ -z "$SUB" ]]; then
-    exec "$BIN_DIR/help"
-fi
-
-CMD="$BIN_DIR/$SUB"
-if [[ ! -f "$CMD" || "$SUB" == "common" || "$SUB" == "mop" || "$SUB" == lib.py ]]; then
-    echo "mop: no such subcommand «$SUB»" >&2
-    "$BIN_DIR/help" >&2
-    exit 1
-fi
-
-shift
-# Питоновские командлеты запускаем процессом, а не source: `mop mcp` говорит
-# по stdio, и ему нужен чистый обмен, без наследования нашего шелла.
-if head -1 "$CMD" | grep -q python3; then
-    exec python3 "$CMD" "$@"
-fi
-# Шелловые — через source, чтобы им достались функции из common.
-source "$CMD"
+PROJECT="$( cd -P "$( dirname "$SOURCE" )/.." && pwd )"
+# Пакет находится по PYTHONPATH, а не по текущему каталогу: зовут из любого.
+export PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}"
+# Процессом, а не source: `mop mcp` говорит по stdio, и ему нужен чистый
+# обмен, без наследования чужого шелла.
+exec python3 -m mop.cli "$@"
