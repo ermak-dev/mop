@@ -22,32 +22,6 @@ def place(row):
     return f"{kb / 2**20:.0f} GB" if kb >= 2**20 else f"{kb / 2**10:.0f} MB"
 
 
-def free(row):
-    # Правило «free по префиксу» живёт в puppets.is_free — оно одно на
-    # систему: на нём стоят и подсказка здесь, и выбор жертв в mop gc.
-    return puppets.is_free(row["state"])
-
-
-def hint(rows, origin):
-    """Одна подсказка под таблицей: чего именно не хватает прямо сейчас."""
-    if not rows:
-        return (f"Create the first puppet for {puppets.project_of(origin)}: mop add {origin}"
-                if origin else "Create a puppet: mop add <git-origin>")
-    if not any(free(r) for r in rows):
-        return (f"\nNo free puppets for {puppets.project_of(origin)}. "
-                f"Create one: mop add {origin}" if origin
-                else "\nNo free puppets. Create one: mop add <git-origin>")
-    if not origin:
-        return None
-    project = puppets.project_of(origin)
-    mine = [r for r in rows if project in r["origin"]]
-    if not mine:
-        return f"\nNo puppets for {project}. Create one: mop add {origin}"
-    if not any(free(r) for r in mine):
-        return f"\nAll puppets for {project} are busy. Create another: mop add {origin}"
-    return None
-
-
 def line(r):
     cells = (r["name"], r["node"], r["alloc_status"], r["state"], place(r), r["llm"])
     return "  ".join(c.ljust(w) for c, w in zip(cells, WIDTHS)) + "  " + r["origin"]
@@ -65,17 +39,6 @@ def main(argv):
         rows.append(r)
     if not rows:
         print("no puppets")
-    origin = lib.cwd_origin()
-    # В мастер-шелле подсказка — про проект, а не про каталог, в котором стоишь.
-    # Иначе `mop list` из репозитория самого mop в мастер-шелле проекта
-    # советовал бы завести папета для mop, которого этот мастер всё равно
-    # не увидит.
-    project = lib.in_project()
-    if project and origin and puppets.project_of(origin) != project:
-        origin = None
-    tip = hint(rows, origin)
-    if tip:
-        print(tip)
     print("pool:")
     print("\n".join(lib.pool_lines()))
 
