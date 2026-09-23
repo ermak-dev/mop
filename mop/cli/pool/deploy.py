@@ -15,7 +15,7 @@ import shutil
 import sys
 
 from mop.cli import lib
-from mop import config, creds, manifest, puppets, projects
+from mop import bus, config, creds, manifest, puppets, projects
 
 # Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
 # больше нет, поэтому упавшего агента и битые креды чинят только отсюда — и
@@ -130,12 +130,17 @@ def main(argv):
     link("nomad", "deploy/nomad")
     link("nats", "deploy")
 
-    # Проекты: реестр, и только он. Плейбук заводит по пользователю NATS на
-    # каждый и раскатывает креды. Пустой список законен: пустой пул, мастеров
-    # ещё нет.
-    origins, legacy, note = projects.registry()
+    # Проекты: реестр сервера, и только он (#117). Пользователей NATS по нему
+    # заводит сам сервер; прогону он нужен ради манифестов и хостов форжей.
+    # Пустой список законен: пустой пул, мастеров ещё нет.
+    try:
+        answer = bus.ask_cluster("projects", project=bus.ADMIN, timeout=10)
+    except Exception as e:
+        answer = {"error": str(e)}
+    lines, note = projects.for_deploy(answer, projects.read())
     if note:
-        print(note, file=sys.stderr, flush=True)
+        print(f"  {note}", file=sys.stderr, flush=True)
+    origins, legacy = puppets.project_ids(lines)
 
     lib.section("ansible: site.yml")
     rc = lib.play(SITE, projects.names(origins, legacy), manifests(origins),

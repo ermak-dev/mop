@@ -160,7 +160,7 @@ def play(playbook, projects, manifests=None, git_hosts=None):
     """Прогон плейбука установки. -> код возврата ansible.
 
     Один вход для полной игры (site.yml) и для узкого прогона проектов
-    (deploy/projects.yml): списки, которые едут плейбуку, собираются одним
+    (до #117): списки, которые едут плейбуку, собираются одним
     местом, иначе узкий прогон заводил бы проект не так, как полный.
 
     Списки едут --extra-vars ОБЪЕКТОМ, а не парой ключ=значение:
@@ -182,9 +182,9 @@ def play(playbook, projects, manifests=None, git_hosts=None):
         raise RuntimeError("MOP_OPERATORS is empty: nobody could log in to the "
                            "bus. Name at least one person in .env, e.g. "
                            "MOP_OPERATORS=anton:admin")
-    from mop import projects as registry
+    # Лимиты (#107) больше не едут: их держит и правит сервер (#117).
     extra = ([json.dumps(vars_, ensure_ascii=False)]
-             + play_vars(projects, manifests, registry.read_limits(), git_hosts))
+             + play_vars(projects, manifests, git_hosts=git_hosts))
     return subprocess.call(
         ["ansible-playbook", "-i", inventory, os.path.join(PROJECT, playbook),
          *sum((["--extra-vars", v] for v in extra), [])])

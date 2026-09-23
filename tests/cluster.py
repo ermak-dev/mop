@@ -161,10 +161,41 @@ def check_limit():
     return out
 
 
+def check_project_verbs():
+    """HYPOTHESIS (#117): проекты заводил только прогон ansible на
+    контроллере, и с машины оператора `mop project add` падал.
+    SOLUTION: глаголы проектов у сервиса кластера -- только оператору: мастер
+    проекта не заводит чужих проектов и не поднимает себе лимит.
+    STATUS: FIXED — see #117"""
+    out = []
+    for verb in ("projects", "project_add", "project_delete", "project_limit"):
+        if verb not in cluster.ADMIN_VERBS:
+            out.append(f"{verb} must be an operator's verb")
+            continue
+        if cluster.refusal("rugent", verb) is None:
+            out.append(f"a project's master must not get {verb}")
+        if cluster.refusal("admin", verb) is not None:
+            out.append(f"the operator must get {verb}")
+    try:
+        why = cluster.delete_refusal("ghost", [], [])
+    except AttributeError:
+        return out + ["cluster.delete_refusal is missing"]
+    # Нет в реестре -- отказ с именем: опечатка иначе читалась бы снятием.
+    if not why or "ghost" not in why:
+        out.append(f"deleting an unknown project must be refused by name: {why!r}")
+    # Живые папеты -- отказ с их именами: мастер потерял бы шину под ними.
+    why = cluster.delete_refusal("rugent", ["git@h:g/rugent.git"], ["pu-rugent-2", "pu-rugent-1"])
+    if not why or "pu-rugent-1" not in why:
+        out.append(f"deleting a project with puppets must name them: {why!r}")
+    if cluster.delete_refusal("rugent", ["git@h:g/rugent.git"], []) is not None:
+        out.append("a registered project without puppets must be deletable")
+    return out
+
+
 def main():
     failed = []
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
-                  check_limit):
+                  check_limit, check_project_verbs):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:

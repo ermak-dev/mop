@@ -231,21 +231,6 @@ def legacy(listing):
                   or (n.startswith("nats-master-") and n.endswith(".pass")))
 
 
-def forget(project, *dirs):
-    """Снять пароли проекта в названных каталогах. -> [снятые пути].
-
-    И secrets/ контроллера, и каталог сервера: оба читает один и тот же
-    project_ready, и оставленный в одном пароль отвечал бы за оба."""
-    gone = []
-    for d in dirs:
-        for n in (pass_file(project), f"nats-puppet-{project}.pass"):
-            path = os.path.join(d, n)
-            if os.path.exists(path):
-                os.remove(path)
-                gone.append(path)
-    return gone
-
-
 def collect(secrets_dir, dest, pin=True):
     """Собрать каталог сервера на самом контроллере: он тоже машина
     оператора, и после `mop deploy` на нём всё должно работать без join.

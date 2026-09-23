@@ -13,10 +13,10 @@
 объединение никогда не заменой — затем, что недоступный ростер сузил бы
 список молча. Снять проект было нельзя вовсе.
 
-Теперь список — реестр: файл контроллера, который правят `mop project add` и
-`mop project delete`, и единственный ответ на вопрос «какие проекты
-заведены». Ростер и аргументы в него больше не вливаются; память переносится
-в него один раз (merged) и дальше не читается.
+Теперь список — реестр (#79), и живёт он на сервере (#117): правят его
+глаголы сервиса кластера `project_add|delete`, `mop deploy` спрашивает его
+глаголом `projects`. Это единственный ответ на вопрос «какие проекты
+заведены».
 
 Реестр хранит ORIGIN'Ы (#33): имя выводится basename'ом, а имя в origin не
 разворачивается — таблицы имён нет и заводить нельзя. От легаси-времён в нём
@@ -26,11 +26,9 @@
 import json
 import os
 
-from . import bus, puppets
+from . import puppets
 
 FILE = os.path.expanduser("~/.config/mop/projects")
-# Память проектов до #79. Читается ровно один раз — при переносе в реестр.
-MEMORY = os.path.expanduser("~/.config/mop/projects")
 
 
 # ─── чистое: что реестр принимает, что теряет ────────────────────────────
@@ -57,25 +55,6 @@ def without_project(name, known):
     dropped = sorted(l for l in known
                      if l == name or puppets.project_of(l) == name)
     return known - set(dropped), dropped
-
-
-def needs_roster(memory):
-    """Спрашивать ли пул при переносе памяти в реестр. Чистая функция.
-
-    Ростер нужен там, где есть ЧТО переносить: он ловит проект, у которого
-    папет живой, а строки в памяти нет. Пустая память означает новую
-    установку — пула ещё нет вовсе, и спросить его нельзя в принципе: шину и
-    сервис поднимает тот самый прогон, который об этом спрашивает (#90)."""
-    return bool(memory)
-
-
-def merged(memory, roster):
-    """Реестр из памяти контроллера и ростера Nomad — разовый перенос.
-
-    Объединение, а не выбор: потерять строку значит выписать проект из
-    конфига NATS на следующем прогоне, а вернуть его потом некому — память
-    после переноса не читается."""
-    return set(memory) | set(roster)
 
 
 def names(origins, legacy):
@@ -168,37 +147,15 @@ def write(lines, path=FILE):
         f.write("".join(f"{s}\n" for s in sorted(lines)))
 
 
-def roster_origins():
-    """Origin'ы живых папетов. Нужны один раз — при переносе памяти."""
-    return {j["Meta"]["origin"] for j in puppets.jobs(project=bus.ADMIN)
-            if (j.get("Meta") or {}).get("origin")}
+def for_deploy(answer, local):
+    """Реестр для `mop deploy`. -> (строки, примечание|None). Чистая функция.
 
-
-def registry():
-    """Реестр: -> ({origin'ы}, {легаси-имена}, примечание|None).
-
-    Нет файла — переносим память и ростер, пишем и говорим об этом строкой
-    (печатает командлет). Недоступный ростер здесь — отказ, а не
-    предупреждение: перенос разовый, и пропущенный проект потом неоткуда
-    взять."""
-    note = None
-    if not os.path.exists(FILE):
-        memory = read(MEMORY)
-        live = set()
-        if needs_roster(memory):
-            try:
-                live = roster_origins()
-            except Exception as e:
-                raise RuntimeError(
-                    f"the project registry {FILE} doesn't exist yet and the pool "
-                    f"roster is unavailable ({e}): "
-                    f"a project missing from the first registry loses its bus "
-                    f"user. Fix the roster, or write {FILE} by hand — one origin "
-                    f"per line")
-        lines = merged(memory, live)
-        write(lines)
-        note = (f"{FILE}: registry created from {len(memory)} remembered and "
-                f"{len(live)} running project(s)"
-                + (f"; {MEMORY} is no longer read" if memory else
-                   " — a fresh installation serves no project yet"))
-    return (*puppets.project_ids(read()), note)
+    Правда -- реестр сервера (#117): его правят глаголы сервиса кластера.
+    Сервер не ответил -- это чистая установка (шины ещё нет, её поднимает
+    этот же прогон) или упавший сервис; тогда -- копия этой машины, и об
+    этом говорится. Пустой ответ сервера -- правда, а не повод взять копию."""
+    if answer.get("ok"):
+        return set(answer.get("lines") or []), None
+    return set(local), (f"the server's project registry is unavailable "
+                        f"({answer.get('error')}): using this machine's copy, "
+                        f"{len(local)} line(s)")

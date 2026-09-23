@@ -26,8 +26,10 @@ bootstrap песочницы за папета). Положи туда глаг�
 """
 import asyncio
 import json
+import os
+import threading
 
-from . import bus, nodes, nomad, projects, puppets
+from . import bootstrap, bus, config, creds, natsconf, nodes, nomad, projects, puppets
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
@@ -37,7 +39,10 @@ PROJECT_VERBS = ("ping", "roster", "pool", "add", "update", "restart", "stop",
                  "delete", "alloc", "spec")
 # Глаголы оператора: про машины. Место на узле общее для всех его жильцов, а
 # увод папетов с машины касается всех проектов разом — мастеру не показываем.
-ADMIN_VERBS = ("nodes", "drain", "up", "forget", "meta")
+# Проекты (#117) -- тоже оператору: завод проекта заводит пользователя на
+# шине, а лимит мастер поднял бы себе сам.
+ADMIN_VERBS = ("nodes", "drain", "up", "forget", "meta",
+               "projects", "project_add", "project_delete", "project_limit")
 VERBS = PROJECT_VERBS + ADMIN_VERBS
 # Глаголы, которые называют джоб: у них проверяется владелец.
 NAMED_VERBS = ("update", "restart", "stop", "delete", "alloc", "spec")
@@ -104,8 +109,22 @@ def over_limit(project, count, limit):
     if limit is None or count < limit:
         return None
     return (f"project {project} has {count} puppet(s) and its limit is {limit}: "
-            f"delete one, or raise the limit on the controller: "
-            f"mop project limit {project} <N|none>")
+            f"delete one, or raise the limit: mop project limit {project} <N|none>")
+
+
+def delete_refusal(name, dropped, alive):
+    """Отказ снять проект. -> строка или None. Чистая функция.
+
+    dropped -- строки реестра, которые снятие убрало бы; пусто значит «такого
+    проекта нет», и это отказ с именем: опечатка иначе читалась бы снятием.
+    alive -- джобы проекта: мастер потерял бы шину под живыми папетами, а
+    они работали бы дальше, и услышать их было бы некому."""
+    if not dropped:
+        return f"no project {name} in the registry; what the pool serves: mop project list"
+    if alive:
+        return (f"{name} still has puppets: {', '.join(sorted(alive))}. "
+                f"Delete them first: mop delete {sorted(alive)[0]}")
+    return None
 
 
 def _foreign_origin(project, origin):
@@ -272,10 +291,119 @@ def _meta(project, req):
     return {"ok": True, "node": req["node"], "meta": nomad.node_meta(req["node"])}
 
 
+# ─── глаголы: проекты (#117) ─────────────────────────────────────────────
+# Реестр, лимиты и пароли папетов живут здесь, на сервере, и пишет их только
+# сервис. Глаголы идут в потоках петли, поэтому правка реестра -- под замком:
+# два одновременных завода иначе потеряли бы один из проектов.
+_projects_lock = threading.Lock()
+
+
+def _names(lines):
+    return projects.names(*puppets.project_ids(lines))
+
+
+def _users_apply(names, verify_user=None):
+    """Файл пользователей шины по реестру, reload, проверка подключением.
+    Не вышло -- исключение; откат делает вызывающий."""
+    changed, pw = natsconf.apply(names, bootstrap.PUPPET_CREDS)
+    if changed:
+        natsconf.reload()
+    # Проверяем всегда, а не только при изменении: SIGHUP о битом конфиге не
+    # сообщает, и «файл уже такой» не значит «шина его приняла».
+    if verify_user:
+        bus.can_login(creds.puppet_user(verify_user), pw[verify_user],
+                      config.get("MOP_NATS_PORT"))
+    else:
+        bus.can_login("service", natsconf.read_base()["service"],
+                      config.get("MOP_NATS_PORT"))
+    return changed
+
+
+def _with_rollback(lines, change):
+    """Правка реестра с откатом: реестр и файл пользователей возвращаются,
+    если шина нового пользователя не пустила."""
+    users = natsconf.read_users()
+    try:
+        return change()
+    except Exception:
+        projects.write(lines)
+        if users is not None:
+            natsconf.write(users)
+            try:
+                natsconf.reload()
+            except Exception:
+                pass
+        raise
+
+
+def _projects(project, req):
+    lines = projects.read()
+    origins, legacy = puppets.project_ids(lines)
+    return {"ok": True, "names": projects.names(origins, legacy),
+            "origins": sorted(origins), "lines": sorted(lines),
+            "limits": projects.read_limits()}
+
+
+def _project_add(project, req):
+    origin = req["origin"]
+    with _projects_lock:
+        lines = projects.read()
+        new, added = projects.with_origin(origin, lines)
+        name = puppets.project_of(origin)
+
+        def change():
+            projects.write(new)
+            _users_apply(_names(new), verify_user=name)
+        _with_rollback(lines, change)
+    return {"ok": True, "name": name, "added": added}
+
+
+def _project_delete(project, req):
+    name = req["name"]
+    with _projects_lock:
+        lines = projects.read()
+        new, dropped = projects.without_project(name, lines)
+        alive = [j["ID"] for j in puppets.nomad_jobs(bus.ADMIN)
+                 if puppets.project_of((j.get("Meta") or {}).get("origin", "")) == name]
+        why = delete_refusal(name, dropped, alive)
+        if why:
+            return {"error": why}
+
+        def change():
+            projects.write(new)
+            _users_apply(_names(new))
+        _with_rollback(lines, change)
+        # Лимит снятого проекта (#107) уходит с ним: заведённый заново проект
+        # получил бы чужой потолок из прошлого. Пароль -- тоже: сервер раздавал
+        # бы кред пользователя, которого на шине уже нет.
+        limits = projects.read_limits()
+        if name in limits:
+            projects.write_limits(projects.with_limit(limits, name, None))
+        try:
+            os.remove(os.path.join(bootstrap.PUPPET_CREDS, creds.puppet_pass_file(name)))
+        except FileNotFoundError:
+            pass
+    return {"ok": True, "name": name, "dropped": dropped}
+
+
+def _project_limit(project, req):
+    name = req["name"]
+    value = req.get("value")
+    if value is not None:
+        value = projects.parse_limit(str(value))
+    with _projects_lock:
+        if name not in _names(projects.read()):
+            return {"error": f"no project {name} in the registry; what the pool "
+                             f"serves: mop project list"}
+        projects.write_limits(projects.with_limit(projects.read_limits(), name, value))
+    return {"ok": True, "name": name, "limit": value}
+
+
 HANDLERS = {"ping": _ping, "roster": _roster, "pool": _pool, "add": _add, "update": _update, "restart": _restart,
             "stop": _stop, "delete": _delete, "alloc": _alloc, "spec": _spec,
             "nodes": _nodes, "drain": _drain, "up": _up, "forget": _forget,
-            "meta": _meta}
+            "meta": _meta, "projects": _projects, "project_add": _project_add,
+            "project_delete": _project_delete, "project_limit": _project_limit}
 
 
 def answer(project, req):
@@ -313,7 +441,7 @@ async def _handle(msg):
     # В отдельном потоке: вызовы Nomad блокирующие, а петля обязана отвечать
     # остальным, пока один запрос ждёт HTTP.
     out = await asyncio.get_running_loop().run_in_executor(None, answer, project, req)
-    print(f"{project}.{req.get('verb')} {req.get('name') or req.get('node') or ''}: "
+    print(f"{project}.{req.get('verb')} {req.get('name') or req.get('node') or req.get('origin') or ''}: "
           f"{out.get('error') or 'ok'}", flush=True)
     try:
         await msg.respond(json.dumps(out, ensure_ascii=False).encode())
