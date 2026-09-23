@@ -1,0 +1,34 @@
+# Ключи хостов форжей в known_hosts_path от имени known_hosts_owner.
+# Зовут роль node (пользователь пула на узле) и роль cluster (пользователь
+# сборщика на сервере, #141): origin клонируют оба.
+# Ключ хоста снимаем с управляющей машины и кладём явно: интерактивного
+# «yes» в клоне из-под Nomad ввести некому, а StrictHostKeyChecking=no
+# означал бы клон откуда угодно.
+#
+# Хостов бывает больше одного (#121): проект может жить на чужом форже, и
+# тогда ключ пула там пускают, а ключа хоста узел не знал. Список --
+# MOP_GIT_HOST плюс хосты origin'ов реестра (projects.git_hosts); без него
+# (прогон не из `mop deploy`) -- один MOP_GIT_HOST, как было. Хост с портом
+# приходит как [host]:port -- так его пишет known_hosts.
+- name: Host keys of the git servers
+  delegate_to: localhost
+  become: no
+  run_once: yes
+  ansible.builtin.command: >-
+    ssh-keyscan -t ed25519
+    {{ ('-p ' ~ item[1:].split(']:')[1] ~ ' ' ~ item[1:].split(']:')[0])
+       if item.startswith('[') else item }}
+  loop: "{{ mop_git_hosts | default([MOP_GIT_HOST]) }}"
+  register: git_hostkeys
+  changed_when: false
+
+- name: Trust the git host keys
+  ansible.builtin.known_hosts:
+    path: "{{ known_hosts_path }}"
+    name: "{{ item.item }}"
+    key: "{{ item.stdout_lines | reject('match', '^#') | first }}"
+    state: present
+  loop: "{{ git_hostkeys.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  become_user: "{{ known_hosts_owner }}"
