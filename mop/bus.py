@@ -291,6 +291,12 @@ def cluster_subject(project=None):
     return f"mop.{project or PROJECT}.{CLUSTER_CHANNEL}.rpc"
 
 
+def build_subject():
+    """Сборщик образов (#123): только оператору -- образ собирается кодом
+    проекта на гипервизорах."""
+    return f"mop.{ADMIN}.build.rpc"
+
+
 def server_subject(project=None):
     """Сервер как адресат (#62): bootstrap песочниц и хранение их файлов.
     Первый токен — проект, как у всех: узел пишет за папета своего проекта,
@@ -494,6 +500,52 @@ def request_stream(requests, timeout=TIMEOUT, channel="rpc", project=None):
         # Генератор могли бросить недочитанным (Ctrl-C, `| head`) — фоновые
         # запросы в этом случае дожидаться некому, и цикл остался бы с ними.
         fut.cancel()
+
+
+def ask_stream(subj, who, verb, first=10, idle=120, **fields):
+    """Долгий запрос с ходом работы (#123). -> генератор событий (dict);
+    последнее несёт done.
+
+    Обычный request-reply отвечает одним сообщением, а сборка идёт минутами:
+    ответчик шлёт в инбокс просителя шаги и сердцебиение, итог -- последним.
+    Первое событие ждём first секунд (нет подписчика -- publish молчит, и
+    без этого отказ читался бы как долгая сборка), дальше -- idle между
+    событиями: ответчик шлёт сердцебиение, и тишина значит, что он умер."""
+    nc = connect()
+    got = queue.Queue()
+    payload = json.dumps({"verb": verb, **fields}, ensure_ascii=False).encode()
+
+    async def start():
+        inbox = nc.new_inbox()
+
+        async def on_msg(msg):
+            try:
+                got.put(json.loads(msg.data.decode()))
+            except ValueError:
+                pass
+        sub = await nc.subscribe(inbox, cb=on_msg)
+        await nc.publish(subj, payload, reply=inbox)
+        await nc.flush(timeout=5)
+        return sub
+
+    sub = _call(start(), 10)
+    wait = first
+    try:
+        while True:
+            try:
+                ev = got.get(timeout=wait)
+            except queue.Empty:
+                raise BusError(f"no answer from the {who} for {wait}s"
+                               + (" — is it running on the server?" if wait == first else ""))
+            wait = idle
+            yield ev
+            if ev.get("done"):
+                return
+    finally:
+        try:
+            _call(sub.unsubscribe(), 5)
+        except Exception:
+            pass
 
 
 def gather(verb, timeout=5, subj=None, **fields):

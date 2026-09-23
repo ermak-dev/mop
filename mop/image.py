@@ -42,7 +42,7 @@ def extra_vars(origin, got):
     return extra
 
 
-def bake(origin, got, out=None, fresh=False):
+def bake(origin, got, out=None, fresh=False, on_line=None):
     """Прогнать плейбук сборки. -> код возврата ansible.
 
     out — куда писать вывод плейбука: файл (MCP пишет в журнал и присылает
@@ -52,16 +52,24 @@ def bake(origin, got, out=None, fresh=False):
     fresh — начисто, с базового образа. Умолчание — инкремент (#60): шаблон
     клонируется в сборочное тело, плейбук играется там и качает только
     новое, и лишь потом образ подменяется. Инкремент не даёт чистоты: то,
-    чего в плейбуке уже нет, в образе останется — за этим и остаётся fresh."""
+    чего в плейбуке уже нет, в образе останется — за этим и остаётся fresh.
+
+    on_line — вместо out: каждая строка вывода отдаётся вызывающему (сборщик
+    на сервере показывает по ним шаг, #123)."""
     settings = json.dumps(config.playbook_vars(), ensure_ascii=False)
     extra = extra_vars(origin, got)
     if fresh:
         extra["mop_fresh"] = True
-    return subprocess.call(
-        ["ansible-playbook", "-i", os.environ["INVENTORY"], PLAYBOOK,
-         "--extra-vars", settings,
-         "--extra-vars", json.dumps(extra)],
-        stdout=out, stderr=subprocess.STDOUT if out else None)
+    argv = ["ansible-playbook", "-i", os.environ["INVENTORY"], PLAYBOOK,
+            "--extra-vars", settings, "--extra-vars", json.dumps(extra)]
+    if on_line is None:
+        return subprocess.call(argv, stdout=out,
+                               stderr=subprocess.STDOUT if out else None)
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, bufsize=1)
+    for line in p.stdout:
+        on_line(line.rstrip("\n"))
+    return p.wait()
 
 
 # ─── тела проекта до и после сборки (#60) ───────────────────────────────────
@@ -136,19 +144,28 @@ def restore(gone):
         nomad.register(puppets.job_spec(p["name"], p["origin"], p["llm"]))
 
 
-def build(origin, got, out=None, fresh=False, force=False):
+def build(origin, got, out=None, fresh=False, force=False, on_line=None,
+          on_step=None):
     """Вся сборка как операция над проектом: снять тела → плейбук → поднять
     папетов заново → объявить образ. -> {rc, gone, announced}.
 
     Одна дорога на оба фронтенда (`mop driver build`, инструмент build в
     MCP). Папеты поднимаются заново при ЛЮБОМ исходе плейбука: при отказе
     старый образ на месте, и оставить их снятыми значило бы наказать проект
-    за неудачную сборку дважды. Объявление — только после успеха."""
+    за неудачную сборку дважды. Объявление — только после успеха.
+
+    on_step — имя этапа вызывающему (сборщик шлёт его просителю, #123)."""
+    step = on_step or (lambda _s: None)
+    step("stopping the project's bodies")
     gone = clear(got["project"], force)
     try:
-        rc = bake(origin, got, out, fresh)
+        rc = bake(origin, got, out, fresh, on_line)
     finally:
+        if gone:
+            step("raising the project's puppets again")
         restore(gone)
+    if rc == 0:
+        step("announcing the image to the nodes")
     announced = announce(got["project"]) if rc == 0 else []
     return {"rc": rc, "gone": gone, "announced": announced}
 
