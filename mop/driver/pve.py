@@ -485,9 +485,15 @@ async def _sync_package(name, vmid):
     if code not in (0, None):
         return {"error": f"{name}: the mop package did not reach the body: "
                          f"{why(out, code)}"}
+    # Старую копию — в мусор, а не архив поверх неё: tar не удаляет то, чего
+    # в пакете больше нет, и в теле копились бы файлы, снятые с узла
+    # (поймано на переезде bin/ в mop/cli, #75: в теле остался весь старый
+    # bin/). В этот момент из пакета в теле ничего не исполняется — врапер
+    # идёт следом.
     out, code = await _pve(
         "exec", vmid,
-        f"mkdir -p {HOME}/mop && tar xzf {blob} -C {HOME}/mop && rm -f {blob}",
+        f"rm -rf {HOME}/mop && mkdir -p {HOME}/mop && tar xzf {blob} -C {HOME}/mop "
+        f"&& rm -f {blob}",
         timeout=300)
     if code not in (0, None):
         return {"error": f"{name}: the mop package did not unpack in the body: "
