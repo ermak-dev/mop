@@ -11,7 +11,8 @@ refreshed in place (docs/WEB.md):
 
 Read-only by design: the page has no login, and a restart from a button
 would kill the work in a puppet's clone. Actions stay with `mop`.
-Port and bind address default to MOP_WEB_PORT (9000) and MOP_WEB_BIND.
+Port and bind address default to MOP_WEB_PORT (9000) and MOP_WEB_BIND
+(127.0.0.1): outside the server the page is reached through the TLS proxy.
 """
 import json
 import os

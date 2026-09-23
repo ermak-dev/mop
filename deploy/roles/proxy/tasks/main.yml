@@ -1,0 +1,119 @@
+# TLS-прокси сервера (#96): одна точка входа для людей. Дашборд в корне,
+# шина по WebSocket на /nats (листенер nats-server на петле, конфиг --
+# deploy/roles/bus). Узлы и папеты остаются на 4222: их креды генерируются
+# и ничего, кроме шины, не открывают.
+#
+# TLS здесь, а не в nats-server: его сняли потому, что сертификат живёт в
+# памяти процесса и продлить его без рестарта шины нечем. nginx перечитывает
+# файлы по reload, и продление -- это новый прогон, а не авария.
+#
+# Сертификат -- MOP_TLS_CERT/MOP_TLS_KEY из .env (пути на контроллере). Не
+# заданы -- контроллер один раз заводит самоподписанный в secrets/, рядом с
+# паролями: тот же каталог переживает прогоны, и клиенты, закрепившие его,
+# не ломаются от следующего deploy.
+
+# Имя в сертификате -- MOP_SERVER_LAN, потому что по нему ходят клиенты.
+# Адрес и имя -- разные поля SAN, и перепутанное поле проверку не проходит.
+# keyUsage и basicConstraints явно: Python 3.13 проверяет цепочку в строгом
+# режиме OpenSSL и отвергает самоподписанный сертификат без них.
+- name: Self-signed certificate on the controller, once
+  delegate_to: localhost
+  become: no
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -newkey
+      - ec
+      - -pkeyopt
+      - ec_paramgen_curve:prime256v1
+      - -nodes
+      - -days
+      - "3650"
+      - -subj
+      - "/CN={{ MOP_SERVER_LAN }}"
+      - -addext
+      - "subjectAltName={{ 'IP' if MOP_SERVER_LAN is match('^[0-9.]+$') else 'DNS' }}:{{ MOP_SERVER_LAN }}"
+      - -addext
+      - "basicConstraints=critical,CA:TRUE"
+      - -addext
+      - "keyUsage=critical,digitalSignature,keyCertSign"
+      - -addext
+      - "extendedKeyUsage=serverAuth"
+      - -keyout
+      - "{{ secrets_dir }}/tls.key"
+      - -out
+      - "{{ secrets_dir }}/tls.pem"
+    creates: "{{ secrets_dir }}/tls.pem"
+  when: not MOP_TLS_CERT
+  run_once: yes
+
+- name: nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: yes
+    cache_valid_time: 3600
+
+# Сайт по умолчанию слушает 80 и отвечает страницей nginx: на сервере mop
+# ему нечего показывать, а 80 занимает наш редирект.
+- name: No default site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: reload nginx
+
+- name: Certificate dir
+  ansible.builtin.file:
+    path: /etc/nginx/mop
+    state: directory
+    mode: "0700"
+
+- name: Certificate and key
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "/etc/nginx/mop/{{ item.dest }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: "{{ MOP_TLS_CERT or secrets_dir + '/tls.pem' }}", dest: tls.pem, mode: "0644" }
+    - { src: "{{ MOP_TLS_KEY or secrets_dir + '/tls.key' }}", dest: tls.key, mode: "0600" }
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: reload nginx
+
+- name: Site
+  ansible.builtin.template:
+    src: mop.conf.j2
+    dest: /etc/nginx/conf.d/mop.conf
+    mode: "0644"
+  notify: reload nginx
+
+# Проверка до reload: битый конфиг, отданный reload'у, nginx отвергнет
+# молча для прогона -- старый продолжит работать, и правка «не доедет».
+- name: Config is valid
+  ansible.builtin.command: nginx -t
+  changed_when: false
+
+- name: Enable and start
+  ansible.builtin.systemd:
+    name: nginx
+    enabled: yes
+    state: started
+
+- name: Apply the reload now, before the check
+  ansible.builtin.meta: flush_handlers
+
+# С контроллера и по имени: так ходит оператор, и проверка видит то же, что
+# он, -- резолв, сертификат на это имя и прокси до дашборда.
+- name: The dashboard answers through the proxy
+  delegate_to: localhost
+  become: no
+  ansible.builtin.uri:
+    url: "https://{{ MOP_SERVER_LAN }}:{{ MOP_HTTPS_PORT }}/healthz"
+    ca_path: "{{ omit if MOP_TLS_CERT else secrets_dir + '/tls.pem' }}"
+    status_code: 200
+  register: proxy_health
+  until: proxy_health.status == 200
+  retries: 10
+  delay: 3

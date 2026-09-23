@@ -1,0 +1,57 @@
+# TLS-прокси mop (#96). Разворачивает deploy/roles/proxy, описан в docs/WEB.md
+# и docs/BUS.md.
+
+map $http_upgrade $mop_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen {{ MOP_HTTPS_PORT }} ssl;
+    listen [::]:{{ MOP_HTTPS_PORT }} ssl;
+    server_name {{ MOP_SERVER_LAN }};
+
+    ssl_certificate     /etc/nginx/mop/tls.pem;
+    ssl_certificate_key /etc/nginx/mop/tls.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    # Шина. Таймауты в час: NATS пингует раз в две минуты, и дефолтные
+    # 60 секунд рвали бы молчащее соединение мастера.
+    location = /nats {
+        proxy_pass http://127.0.0.1:{{ MOP_NATS_WS_PORT }};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $mop_connection_upgrade;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+    # Поток снимков дашборда (SSE): без буферизации, иначе снимок стоит в
+    # буфере nginx, пока не наберётся килобайтами следующих.
+    location = /events {
+        proxy_pass http://127.0.0.1:{{ MOP_WEB_PORT }};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:{{ MOP_WEB_PORT }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+{% if MOP_HTTPS_PORT | string == "443" %}
+
+# Открытый HTTP только отсылает на TLS: набранный по привычке http:// адрес
+# дашборда не должен отвечать тишиной.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ MOP_SERVER_LAN }};
+    return 301 https://$host$request_uri;
+}
+{% endif %}
