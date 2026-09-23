@@ -37,6 +37,11 @@ websocket {
 #
 # _INBOX.> обязателен всем, кто задаёт вопросы: без него request-reply молча не
 # работает. Это первое, обо что спотыкаются.
+#
+# Люди входят только через WebSocket (#105), то есть через TLS-прокси nginx:
+# на 4222 TLS нет, и пароль человека там шёл бы по LAN открытым текстом.
+# Машины (service, узлы, папеты) этим не ограничены: их пароли генерируются
+# и ничего, кроме шины, не открывают.
 authorization {
   users = [
     # Оператор вне мастер-шелла. Псевдопроект admin -- это отсутствие проекта:
@@ -46,6 +51,7 @@ authorization {
     # субъекты, а глаголы внутри них проверяет сам агент.
     {
       user: "admin", password: "{{ lookup('password', secrets_dir + '/nats-admin.pass length=32 chars=ascii_letters,digits') }}"
+      allowed_connection_types: ["WEBSOCKET"]
       permissions: {
         publish:   { allow: ["mop.>", "_INBOX.>"] }
         subscribe: { allow: ["mop.>", "_INBOX.>"] }
@@ -70,6 +76,7 @@ authorization {
     # сменить пароль всем операторам проекта. Пароль -- там же, где остальные.
     {
       user: "{{ op }}", password: "{{ lookup('password', secrets_dir + '/nats-op-' + op + '.pass length=32 chars=ascii_letters,digits') }}"
+      allowed_connection_types: ["WEBSOCKET"]
       permissions: {
         publish:   { allow: [{% for s in subs %}"{{ s }}"{% if not loop.last %}, {% endif %}{% endfor %}] }
         subscribe: { allow: [{% for s in subs %}"{{ s }}"{% if not loop.last %}, {% endif %}{% endfor %}] }
@@ -81,6 +88,7 @@ authorization {
     # Мастер проекта {{ project }}: весь свой проект и ничего сверх него.
     {
       user: "master-{{ project }}", password: "{{ lookup('password', secrets_dir + '/nats-master-' + project + '.pass length=32 chars=ascii_letters,digits') }}"
+      allowed_connection_types: ["WEBSOCKET"]
       permissions: {
         publish:   { allow: ["mop.{{ project }}.>", "_INBOX.>"] }
         subscribe: { allow: ["mop.{{ project }}.>", "_INBOX.>"] }
