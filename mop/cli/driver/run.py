@@ -28,7 +28,7 @@ CARRY = ("PU_NAME", "PU_ORIGIN", "PU_PROJECT", "PU_SHARD", "PU_SEED",
          "PU_LLM_AUTH_VAR", "HOME", "PATH")
 
 
-def main():
+def _inner_script():
     """Внутренний врапер с прелюдией из окружения задачи.
 
     Прелюдия обязательна: переменные спеки живут в процессе задачи на узле, а
