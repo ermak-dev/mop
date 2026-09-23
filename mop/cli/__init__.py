@@ -125,7 +125,10 @@ def usage(found=None):
     """Список команд по секциям — ответ на `mop` без аргументов."""
     found = scan() if found is None else found
     lines = ["mop — pool of claude puppets on top of Nomad, message bus on top of NATS",
-             "", "  mop <command> [arguments]"]
+             "", "  mop [--server ADDRESS] <command> [arguments]",
+             "", "  the server and the login come from the working copy (git config",
+             "  mop.server, mop.user), then MOP_SERVER_LAN / MOP_BUS_USER, then",
+             "  --server; with none of them, from .env"]
     groups = [(s, n, p) for s, n, p in found if p]
     for section in SECTIONS:
         rows = [(n, describe(_path_of(section, n, False)))
@@ -141,6 +144,12 @@ def usage(found=None):
 
 # ─── запуск ──────────────────────────────────────────────────────────────
 def main(argv):
+    # Глобальная опция (#131): сервер для любой команды, с любого места argv.
+    from mop import context
+    try:
+        server, argv = context.strip_server(argv)
+    except ValueError as e:
+        sys.exit(f"mop: {e}")
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(usage())
         return 0
@@ -153,8 +162,11 @@ def main(argv):
         print(usage(), file=sys.stderr)
         return 1
     modname, rest = found
-    environment()
-    return run(importlib.import_module(modname).main, rest)
+    # Контекст -- до environment(): тот читает настройки, и сервер в них
+    # должен быть уже этой команды. Слои: клон < окружение < --server.
+    with context.use(context.here({"server": server} if server else {})):
+        environment()
+        return run(importlib.import_module(modname).main, rest)
 
 
 FALLBACK_LOCALE = "C.UTF-8"

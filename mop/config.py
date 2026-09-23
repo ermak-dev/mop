@@ -478,30 +478,17 @@ def _file(path):
     return _cache[path]
 
 
-# Привязка рабочей копии (#125): какие настройки клон задаёт своим git
-# config. Только сервер: он и есть то, что у двух клонов разное -- `~/rugent`
-# смотрит на одну установку, клон проекта другой установки на другую.
-# Хранится в .git/config клона, не коммитится: это данные клона, не проекта.
-CLONE_SCOPED = {"MOP_SERVER_LAN": "mop.server"}
-CLONE = "<clone>"
+# Поля контекста команды (#131, mop/context.py): их значение, если контекст
+# его задал, старше файлов. Контекст уже учёл клон, окружение и командную
+# строку в своём порядке.
+CONTEXT_SCOPED = {"MOP_SERVER_LAN": "server"}
 
 
-def _clone():
-    """Привязка клона текущего каталога, один раз за процесс. Не клон, нет
-    git или привязки -- пусто."""
-    if CLONE not in _cache:
-        import subprocess
-        out = {}
-        for name, key in CLONE_SCOPED.items():
-            try:
-                r = subprocess.run(["git", "config", "--get", key],
-                                   capture_output=True, text=True)
-                if r.returncode == 0 and r.stdout.strip():
-                    out[name] = r.stdout.strip()
-            except OSError:
-                pass
-        _cache[CLONE] = out
-    return _cache[CLONE]
+def _context(name):
+    if name not in CONTEXT_SCOPED:
+        return None
+    from . import context
+    return getattr(context.current(), CONTEXT_SCOPED[name])
 
 
 def _load():
@@ -521,8 +508,8 @@ def forget():
 
 
 def get(name, default=None):
-    """Значение настройки: окружение > привязка клона (#125, только
-    CLONE_SCOPED) > node.env > .env > дефолт из SETTINGS.
+    """Значение настройки: контекст команды (#131, только CONTEXT_SCOPED) >
+    окружение > node.env > .env > дефолт из SETTINGS.
 
     Дефолт не передаётся вызывающим. Пока передавался, каждая точка вызова
     несла свою копию — и копии пережили превращение SETTINGS в источник
@@ -531,8 +518,7 @@ def get(name, default=None):
     Настройка описана в одном месте или ни в одном."""
     if default is None:
         default = SETTINGS.get(name, "")
-    value = (os.environ.get(name)
-             or (_clone().get(name) if name in CLONE_SCOPED else None)
+    value = (_context(name) or os.environ.get(name)
              or _node().get(name) or _load().get(name))
     if value:
         return value
@@ -543,10 +529,12 @@ def effective():
     """Все настройки с учётом .env и окружения. -> {имя: (значение, откуда)}."""
     out = {}
     for name, default in SETTINGS.items():
-        if os.environ.get(name):
+        if _context(name):
+            from . import context
+            out[name] = (_context(name), context.current().sources.get(
+                CONTEXT_SCOPED[name], "context"))
+        elif os.environ.get(name):
             out[name] = (os.environ[name], "env")
-        elif name in CLONE_SCOPED and _clone().get(name):
-            out[name] = (_clone()[name], "clone")
         elif _node().get(name):
             out[name] = (_node()[name], "node")
         elif _load().get(name):
