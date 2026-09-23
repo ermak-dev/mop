@@ -58,17 +58,6 @@
 # контроллера -- тем, кто сейчас играет этот прогон: у него инвентарь и
 # ключи к гипервизорам. Контроллер -- сам сервер, поэтому его дом и имя
 # берутся из окружения прогона.
-# Сборщик сам клонирует origin проекта (manifest.fetch, #123) под
-# пользователем контроллера, и без ключа хоста форжа клон падает на «Host key
-# verification failed» (#141): ключи роли node кладутся только на узлы.
-- name: Git host keys for the builder
-  ansible.builtin.include_role:
-    name: node
-    tasks_from: git_host_keys
-  vars:
-    known_hosts_path: "{{ lookup('env', 'HOME') }}/.ssh/known_hosts"
-    known_hosts_owner: "{{ lookup('env', 'USER') }}"
-
 - name: Image builder unit
   become: yes
   ansible.builtin.template:
