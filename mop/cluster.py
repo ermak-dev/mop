@@ -41,6 +41,11 @@ ADMIN_VERBS = ("nodes", "drain", "up", "forget", "meta")
 VERBS = PROJECT_VERBS + ADMIN_VERBS
 # Глаголы, которые называют джоб: у них проверяется владелец.
 NAMED_VERBS = ("update", "restart", "stop", "delete", "alloc", "spec")
+# Из них те, что ДЕЛАЮТ: им отсутствие джоба — отказ. Читающему `alloc` нет:
+# `puppets.delete` спрашивает аллокацию УЖЕ СНЯТОГО джоба, дожидаясь, пока
+# тот перестанет быть running, и отказ там оставлял тело работать сиротой
+# (#89). `spec` в список входит: на его отказе стоит `lib.require_job`.
+ACTING_VERBS = ("update", "restart", "stop", "delete", "spec")
 
 
 # ─── чистое: кому что можно ──────────────────────────────────────────────
@@ -173,7 +178,12 @@ def _alloc(project, req):
     Драйвер здесь, а не отдельным глаголом: `mop attach` спрашивает ровно эти
     две вещи вместе — где папет стоит и чем в него входят, — и второй запрос
     по сети ради одного поля меты был бы платой ни за что."""
-    alloc = nomad.latest_alloc(req["name"])
+    try:
+        alloc = nomad.latest_alloc(req["name"])
+    except Exception:
+        # Джоба уже нет — это ответ, а не отказ: так `puppets.delete` ждёт,
+        # пока снятый джоб перестанет быть running.
+        alloc = None
     if not alloc:
         return {"ok": True, "alloc": None, "driver": None}
     slim = {k: alloc.get(k) for k in puppets.ALLOC_FIELDS}
@@ -256,7 +266,7 @@ def answer(project, req):
                   job_exists=exists, new_origin=req.get("new_origin"))
     if why:
         return {"error": why}
-    if verb in NAMED_VERBS and name and not exists:
+    if verb in ACTING_VERBS and name and not exists:
         return {"error": f"no job {name} in the cluster"}
     try:
         return HANDLERS[verb](project, req)
