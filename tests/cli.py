@@ -135,6 +135,33 @@ def main():
             failed += 1
             print(f"FAIL group {group}: its docstring lists no verbs")
 
+    # Каждый модуль команды определяет `main` ровно один раз, и никакое имя
+    # верхнего уровня не определяется дважды: второе определение молча
+    # затирает первое, и py_compile этого не видит. Поймано на живом узле —
+    # `_inner_script` переименовали в `main` вместе с `v_run`, и врапер
+    # падал NameError после ensure.
+    import ast as _ast
+    for root, _, files in os.walk(cli.PACKAGE):
+        for f in files:
+            if not f.endswith(".py") or f.startswith("_") and f != "__init__.py":
+                continue
+            path = os.path.join(root, f)
+            if root == cli.PACKAGE:
+                continue
+            with open(path) as fh:
+                tree = _ast.parse(fh.read())
+            defs = [n.name for n in tree.body if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef))]
+            dup = sorted({d for d in defs if defs.count(d) > 1})
+            if dup:
+                failed += 1
+                print(f"FAIL {os.path.relpath(path)}: defined twice: {dup}")
+            is_section_init = f == "__init__.py" and os.path.basename(root) in cli.SECTIONS
+            if not is_section_init and "main" not in defs and not any(
+                    isinstance(n, _ast.Assign) and any(getattr(t, "id", "") == "main" for t in n.targets)
+                    for n in tree.body):
+                failed += 1
+                print(f"FAIL {os.path.relpath(path)}: no main(argv)")
+
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0
 
