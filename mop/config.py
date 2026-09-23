@@ -478,6 +478,32 @@ def _file(path):
     return _cache[path]
 
 
+# Привязка рабочей копии (#125): какие настройки клон задаёт своим git
+# config. Только сервер: он и есть то, что у двух клонов разное -- `~/rugent`
+# смотрит на одну установку, клон проекта другой установки на другую.
+# Хранится в .git/config клона, не коммитится: это данные клона, не проекта.
+CLONE_SCOPED = {"MOP_SERVER_LAN": "mop.server"}
+CLONE = "<clone>"
+
+
+def _clone():
+    """Привязка клона текущего каталога, один раз за процесс. Не клон, нет
+    git или привязки -- пусто."""
+    if CLONE not in _cache:
+        import subprocess
+        out = {}
+        for name, key in CLONE_SCOPED.items():
+            try:
+                r = subprocess.run(["git", "config", "--get", key],
+                                   capture_output=True, text=True)
+                if r.returncode == 0 and r.stdout.strip():
+                    out[name] = r.stdout.strip()
+            except OSError:
+                pass
+        _cache[CLONE] = out
+    return _cache[CLONE]
+
+
 def _load():
     """Настройки установки: .env рядом с кодом."""
     return _file(ENV_FILE)
@@ -495,7 +521,8 @@ def forget():
 
 
 def get(name, default=None):
-    """Значение настройки: окружение > .env > дефолт из SETTINGS.
+    """Значение настройки: окружение > привязка клона (#125, только
+    CLONE_SCOPED) > node.env > .env > дефолт из SETTINGS.
 
     Дефолт не передаётся вызывающим. Пока передавался, каждая точка вызова
     несла свою копию — и копии пережили превращение SETTINGS в источник
@@ -504,7 +531,9 @@ def get(name, default=None):
     Настройка описана в одном месте или ни в одном."""
     if default is None:
         default = SETTINGS.get(name, "")
-    value = os.environ.get(name) or _node().get(name) or _load().get(name)
+    value = (os.environ.get(name)
+             or (_clone().get(name) if name in CLONE_SCOPED else None)
+             or _node().get(name) or _load().get(name))
     if value:
         return value
     return DERIVED[name]() if not default and name in DERIVED else default
@@ -516,6 +545,8 @@ def effective():
     for name, default in SETTINGS.items():
         if os.environ.get(name):
             out[name] = (os.environ[name], "env")
+        elif name in CLONE_SCOPED and _clone().get(name):
+            out[name] = (_clone()[name], "clone")
         elif _node().get(name):
             out[name] = (_node()[name], "node")
         elif _load().get(name):

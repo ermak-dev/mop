@@ -252,6 +252,34 @@ def main():
     finally:
         os.environ.pop("MOP_GIT_KEY", None)
 
+    # HYPOTHESIS (#125): сервер -- один на машину (окружение или .env), и
+    # второй сервер требовал MOP_SERVER_LAN=... в каждой команде.
+    # SOLUTION: привязка клона (git config mop.server) между окружением и
+    # файлами. STATUS: FIXED — see #125
+    cases += 1
+    saved = os.environ.pop("MOP_SERVER_LAN", None)
+    try:
+        config.forget()
+        config._cache[config.CLONE] = {"MOP_SERVER_LAN": "bound.example"}
+        if config.get("MOP_SERVER_LAN") != "bound.example":
+            bad += 1
+            print("FAILED  the clone's mop.server must set MOP_SERVER_LAN")
+        os.environ["MOP_SERVER_LAN"] = "env.example"
+        if config.get("MOP_SERVER_LAN") != "env.example":
+            bad += 1
+            print("FAILED  the environment must outrank the clone's binding")
+        os.environ.pop("MOP_SERVER_LAN")
+        # Привязка -- только у названных настроек: прочее клон не задаёт.
+        config._cache[config.CLONE] = {"MOP_SERVER_LAN": "bound.example",
+                                       "MOP_NATS_PORT": "1"}
+        if config.get("MOP_NATS_PORT") == "1":
+            bad += 1
+            print("FAILED  a clone must not set settings other than the server")
+    finally:
+        config.forget()
+        if saved is not None:
+            os.environ["MOP_SERVER_LAN"] = saved
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 
