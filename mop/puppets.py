@@ -505,6 +505,21 @@ def nomad_jobs(project=None):
     return visible(listing, project)
 
 
+def task_and_reason(alloc):
+    """Сводка задачи и, у падающей, причина из stderr (#126). Только сервис
+    кластера: у него Nomad. stderr читается лишь у падающих -- это запрос к
+    клиенту Nomad на узле, и платить его за здоровых незачем."""
+    task = task_summary(alloc)
+    reason = None
+    if failing_row(alloc.get("ClientStatus"), task, None):
+        try:
+            name = sorted(alloc["TaskStates"])[0]
+            reason = failure_reason(nomad.alloc_stderr(alloc["ID"], name))
+        except Exception:
+            pass
+    return task, reason
+
+
 def nomad_items(project=None, stale=False):
     """Ростер из Nomad: джоб плюс его аллокация. Тоже только сервис кластера.
 
@@ -513,13 +528,15 @@ def nomad_items(project=None, stale=False):
     сетью между ними."""
     items = []
     for j in sorted(nomad_jobs(project), key=lambda j: j["ID"]):
-        alloc, err = None, None
+        alloc, err, task, reason = None, None, None, None
         try:
             got = nomad.latest_alloc(j["ID"])
             alloc = {k: got.get(k) for k in ALLOC_FIELDS} if got else None
+            if got:
+                task, reason = task_and_reason(got)
         except Exception as e:
             err = nomad.describe_error(e)
-        item = {"job": j, "alloc": alloc, "error": err}
+        item = {"job": j, "alloc": alloc, "error": err, "task": task, "reason": reason}
         if stale:
             # Полный джоб, а не заглушка из списка: врапер и ограничение
             # размещения лежат в спеке, а её get_jobs не отдаёт.
@@ -901,6 +918,86 @@ def is_free(state):
 
 
 # ─── сводки для фронтендов ───────────────────────────────────────────────
+# ─── падающий на старте папет (#126) ────────────────────────────────────
+# Nomad держит аллокацию, чья задача упала и ждёт перезапуска, в `pending` --
+# том же слове, что у аллокации, которой ещё ищут место. Ростер читал только
+# ClientStatus и показывал падающего папета ищущим место; причина была видна
+# лишь в `nomad alloc logs -stderr`. Сводку задачи и причину собирает сервис
+# кластера (у него Nomad), вердикт -- здесь.
+_WRAPPER_FAIL = re.compile(r"^(\S+) of pu-\S+ (?:failed|brought no )|did not reach the body")
+_ANSIBLE_NOISE = ("[ERROR]: ", "Task failed: ", "Unexpected AnsibleActionFail error: ")
+
+
+def task_summary(alloc):
+    """Задача аллокации -> {state, restarts, exit, next_s, failed} | None.
+
+    exit -- код последнего выхода, next_s -- через сколько секунд Nomad
+    перезапустит (только если задача сейчас этого и ждёт)."""
+    states = (alloc or {}).get("TaskStates") or {}
+    if not states:
+        return None
+    t = states[sorted(states)[0]]
+    events = t.get("Events") or []
+    exits = [e.get("ExitCode") for e in events if e.get("Type") == "Terminated"]
+    last = events[-1] if events else {}
+    delay = last.get("StartDelay") if last.get("Type") == "Restarting" else None
+    return {"state": t.get("State"), "restarts": t.get("Restarts") or 0,
+            "exit": exits[-1] if exits else None,
+            "next_s": int(delay // 1_000_000_000) if delay else None,
+            "failed": bool(t.get("Failed"))}
+
+
+def failure_reason(stderr):
+    """Хвост stderr задачи -> одна строка причины | None.
+
+    В stderr копятся все попытки, поэтому -- последняя: строка врапера
+    («bootstrap of pu-x failed: …») и первая ошибка ansible после неё, она
+    и есть корень. Незнакомый вывод -- последняя непустая строка."""
+    lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    if not lines:
+        return None
+
+    def clean(line):
+        for noise in _ANSIBLE_NOISE:
+            if line.startswith(noise):
+                line = line[len(noise):]
+        return line[:200]
+    marks = [i for i, l in enumerate(lines) if _WRAPPER_FAIL.search(l)]
+    if marks:
+        i = marks[-1]
+        m = _WRAPPER_FAIL.match(lines[i])
+        errors = [l for l in lines[i + 1:] if l.startswith("[ERROR]: ")]
+        if errors and m:
+            return f"{m.group(1)}: {clean(errors[0])}"
+        return clean(lines[i])
+    errors = [l for l in lines if l.startswith("[ERROR]: ")]
+    return clean(errors[-1] if errors else lines[-1])
+
+
+def _human(seconds):
+    if seconds >= 3600:
+        return f"{seconds // 3600}h"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def failing_row(alloc_status, task, reason):
+    """(колонка аллокации, колонка состояния) падающего папета | None.
+
+    Падающий -- задача не работает, уже падала ненулём или сдалась. Работающую
+    задачу с прошлыми падениями не трогаем: она поднялась."""
+    if not task or task["state"] == "running":
+        return None
+    gave_up = task["failed"] or task["state"] == "dead"
+    if not gave_up and not (task["restarts"] and task["exit"] not in (None, 0)):
+        return None
+    why = reason or f"exit {task['exit']}"
+    when = "gave up" if gave_up else (f"next in {_human(task['next_s'])}"
+                                      if task["next_s"] else "restarting")
+    return "failing", f"FAILED: {why} ({task['restarts']} restarts, {when})"
+
+
 def roster(stale=False):
     """Ростер пула плюс состояние с узлов, одним заходом.
 
@@ -956,12 +1053,17 @@ def rows_from(items):
 def _row(item, disk_kb=None):
     job, alloc = item["job"], item["alloc"]
     meta = job.get("Meta") or {}
+    status = item["error"] or (alloc["ClientStatus"] if alloc else job.get("Status", "?"))
+    state = item["state"] or "-"
+    # Падающий на старте -- failing с причиной, а не pending (#126).
+    failing = failing_row(status, item.get("task"), item.get("reason"))
+    if failing and not item["error"]:
+        status, state = failing
     return {
         "name": job["ID"],
         "node": alloc["NodeName"] if alloc else "-",
-        "alloc_status": (item["error"] or (alloc["ClientStatus"] if alloc
-                                           else job.get("Status", "?"))),
-        "state": item["state"] or "-",
+        "alloc_status": status,
+        "state": state,
         "llm": meta.get("llm", config.get("MOP_DEFAULT_LLM")),
         "origin": meta.get("origin", "?"),
         "disk_kb": disk_kb,
@@ -1133,6 +1235,14 @@ def diagnose():
                 "name": job["ID"], "alloc": alloc,
                 "diagnosis": "spec predates the driver — unsafe on a hypervisor",
                 "action": "update"})
+            continue
+        # Падает на старте (#126): снять аллокацию -- только начать тот же круг
+        # заново; лечится причина, поэтому без автолечения и с ней в диагнозе.
+        failing = failing_row(alloc and alloc["ClientStatus"], item.get("task"),
+                              item.get("reason"))
+        if failing:
+            issues.append({"name": job["ID"], "alloc": alloc,
+                           "diagnosis": failing[1], "action": None})
             continue
         if not alloc or alloc["ClientStatus"] in ("lost", "unknown", "failed",
                                                   "pending"):
