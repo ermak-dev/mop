@@ -78,6 +78,12 @@ def breakdown(per_puppet):
     print("\n".join(table(rows)))
 
 
+# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
+MCP = {"annotations": "readonly", "args": [
+    {"name": "days", "type": "integer", "flag": "--days", "help": "window in days, 14 by default"},
+    {"name": "puppets", "type": "boolean", "flag": "--puppets", "help": "per puppet instead of per day"}]}
+
+
 def main(argv):
     days, by_puppet = parse(argv)
     nodes = sorted(puppets.ready_nodes())

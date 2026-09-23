@@ -4,12 +4,15 @@
 
 Транспорт stdio, запускается дочерним процессом сессии — мастера или папета.
 
-Три профиля, и решают их факты, а не флаги:
+Три профиля, и решают их креды на шине, а не флаги (is_master):
 
-  * токен Nomad + MOP_PROJECT -> мастер проекта: канал и управление джобами, но
-    только своим срезом пула (`mop master` ставит обе переменные);
-  * токен без проекта -> оператор: то же самое, но по всему пулу;
-  * без токена -> узел: один канал, ростер собирается опросом самой шины.
+  * кред оператора + MOP_PROJECT -> мастер проекта: канал и управление, но
+    только своим срезом пула (`mop master` ставит проект);
+  * кред оператора без проекта -> оператор: то же самое, но по всему пулу;
+  * кред `puppet-<проект>` -> узел: один канал, ростер -- опросом самой шины.
+
+Управление -- сами командлеты (#160): командлет с объявлением `MCP = {...}`
+становится инструментом, своей реализации операций здесь нет.
 
 Так узел физически не может позвать то, чего ему не положено, вместо того
 чтобы не звать по уговору.
@@ -29,18 +32,19 @@ bridge-сессии, а папета пула живут на других уз�
 BUS.md, устройство сервера — MCP.md.
 """
 import functools
+import inspect
 import os
 import subprocess
-import sys
 import threading
+from typing import Annotated, Optional
 
 
 from mcp.server.mcpserver import MCPServer                     # noqa: E402
 from mcp.types import ToolAnnotations                          # noqa: E402
+from pydantic import Field                                     # noqa: E402
 
-from mop import bus, config, image, keys, session, puppets  # noqa: E402
-from mop import nodes as pool_nodes                        # noqa: E402
-from mop.llm import profiles as llm_profiles              # noqa: E402
+from mop import bus, cli, session, puppets                # noqa: E402
+from mop.cli import lib                                   # noqa: E402
 from mop.render import table                              # noqa: E402
 
 app = MCPServer(
@@ -52,11 +56,14 @@ app = MCPServer(
         "SendMessage/ListAgents won't do: they only see sessions on THIS SAME "
         "host, and puppets live on other nodes — on a neighboring node the "
         "built-in lookup will silently find no one. Delivery here goes through "
-        "Nomad, and the host doesn't matter.\n\n"
+        "the pool's bus, and the host doesn't matter.\n\n"
         "`agents` — who's around and in what state, `send` — message a puppet, "
         "`tail` — what's on its screen. Always check `agents` before "
         "dispatching: \"free\" there means the clone has no unsaved work, not "
-        "just that the session is silent."
+        "just that the session is silent.\n\n"
+        "The other tools are the mop commands themselves, run from this "
+        "session's working copy: their output is the answer, and a command "
+        "that succeeds quietly answers `done` — the result shows in `agents`."
     ),
 )
 
@@ -424,228 +431,6 @@ def tail(name: str, lines: int = 40, grep: str = "") -> str:
 
 
 # ─── инструменты: управление ─────────────────────────────────────────────
-@master_tool(annotations=READ_ONLY, description=(
-    "Pool capacity: nodes, free memory, and how many more puppets fit."))
-def pool() -> str:
-    rows = [("NODE", "STATUS", "FREE", "SLOTS")]
-    for n in puppets.pool():
-        if n["status"] != "ready":
-            rows.append((n["name"], n["status"], "-", "-"))
-        elif "error" in n:
-            rows.append((n["name"], "ready", n["error"], "-"))
-        else:
-            rows.append((n["name"], "ready",
-                         f"{n['free_mb'] / 1024:.0f}/{n['total_mb'] / 1024:.0f} GB",
-                         str(n["slots"])))
-    return "\n".join(table(rows))
-
-
-@master_tool(annotations=READ_ONLY, description=(
-    "Pool nodes: driver (host: puppets run on the node itself; pve: each "
-    "puppet in its own container), which projects' images the node serves "
-    "(`any` for host nodes), scheduling state, free memory and slots. A "
-    "puppet pending on a pve node whose SERVES lacks its project is waiting "
-    "for an image that will never come: `build` it."))
-def nodes() -> str:
-    rows = [("NODE", "DRIVER", "SERVES", "STATE", "FREE", "SLOTS")]
-    for r in pool_nodes.rows():
-        rows.append((r["name"], r["driver"], r["serves"], r["state"],
-                     f"{r['free_mb'] / 1024:.0f}/{r['total_mb'] / 1024:.0f} GB"
-                     if r["free_mb"] is not None else "-",
-                     str(r["slots"]) if r["slots"] is not None else "-"))
-    return "\n".join(table(rows))
-
-
-@master_tool(annotations=DESTRUCTIVE, description=(
-    "Bake the project's image on the pool's container nodes (pve). Without "
-    "origin: this master's working copy, and .mop is read from its files as "
-    "they lie, uncommitted included. With origin: .mop from the default "
-    "branch of that repository. The build takes minutes and runs in the "
-    "background: the call returns at once, and a note arrives in this "
-    "session when it is done, with the outcome and the log path. Needed "
-    "after every change to .mop, and before the first puppet of a project "
-    "can land on a pve node. Incremental by default: a copy of the image "
-    "takes what changed; fresh=true builds from the base image anew. The "
-    "project's puppets on container nodes are stopped, their bodies "
-    "destroyed and raised again from the new image — a busy one refuses "
-    "the build unless force=true."))
-def build(origin: str = "", fresh: bool = False, force: bool = False) -> str:
-    if origin:
-        root = None
-    else:
-        cwd = (my_session() or {}).get("cwd")
-        if not cwd:
-            return "build: no session directory known — name the origin"
-        r = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            return f"build: {cwd} is not a git working copy — name the origin"
-        origin, root = r.stdout.strip(), cwd
-    got = image.prepare(origin, root)
-    project = got["project"]
-    log = f"/tmp/mop-build-{project}-{os.getpid()}.log"
-    # Отказ по занятым папетам — здесь и сразу, а не вестью через минуту:
-    # он приходит до первого останова и ничего не меняет.
-    try:
-        image.plan_clear(image.project_rows(project), force)
-    except RuntimeError as e:
-        return f"build: {e}"
-    threading.Thread(target=_build_and_tell, args=(origin, got, log, fresh, force),
-                     daemon=True, name=f"mop-build-{project}").start()
-    head = [f"{project}: image build started, .mop from "
-            f"{'the working copy ' + root if root else 'origin, default branch'}; "
-            f"log {log}"]
-    head += [f"  asks {k}={v}" for k, v in sorted(got["asks"].items())]
-    head += [f"  {k} is not a project's to set — ignored" for k in got["alien"]]
-    return "\n".join(head)
-
-
-def _build_and_tell(origin, got, log, fresh=False, force=False):
-    """Сборка в фоне и весть в сессию по завершении.
-
-    Тем же путём, каким приезжают вести агентов (on_inbox): у сервера есть
-    сокет сессии, которая его запустила. Хвост журнала — только при отказе:
-    зелёный прогон читать незачем, красный надо, и путь к целому уже
-    назван."""
-    project = got["project"]
-    try:
-        with open(log, "w") as f:
-            r = image.build(origin, got, out=f, fresh=fresh, force=force)
-        rc = r["rc"]
-        raised = ", ".join(p["name"] for p in r["gone"]) or "none"
-        if rc == 0:
-            said = "; ".join(f"{n}: {w}" for n, w in r["announced"])
-            text = (f"mop: image of {project} built and announced — {said}; "
-                    f"puppets raised again from it: {raised}")
-        else:
-            with open(log) as f:
-                tail = "".join(f.readlines()[-15:])
-            text = f"mop: image build of {project} FAILED (ansible exit {rc}), log {log}\n{tail}"
-    except Exception as e:
-        text = f"mop: image build of {project} FAILED — {e}; log {log}"
-    sock = master_socket()
-    if sock:
-        try:
-            session.send(sock, text, priority="later", from_name="mop")
-        except Exception:
-            pass
-
-
-@master_tool(annotations=DESTRUCTIVE, description=(
-    "Manage puppets: add (create), remove (delete), restart (restart a "
-    "stuck one), update (change repository or LLM). Where the body is the "
-    "node, remove keeps the clone and a puppet of that name reuses it; "
-    "where the body is a container, remove takes the body with it.\n\n"
-    "update that only changes the LLM continues the work: the puppet comes "
-    "up on the same clone history, i.e. the ticket moves to another model "
-    "mid-task. Without origin the repository is kept, without llm — the "
-    "profile. fresh=true comes up with a clean session; on a repository "
-    "change it's always clean. restart is a cure, so it's ALWAYS clean: "
-    "putting a stuck puppet back into the same context means reproducing "
-    "the stuck state."))
-def puppet(action: str, name: str = "", origin: str = "", llm: str = "",
-           fresh: bool = False) -> str:
-    if action == "add":
-        return _puppet_add(origin, llm)
-    if not name:
-        return f"{action}: puppet name required"
-    if action == "remove":
-        r = puppets.delete(name)
-        if r["body"] == "destroyed":
-            return f"removed {name} (body gone from {r['node']})"
-        if r["body"] == "kept":
-            return f"removed {name} (clone kept in {puppets.clone_dir(name)})"
-        return f"removed {name} (no allocation — nothing to clean up)"
-    if action == "restart":
-        got = bus.ask_cluster("restart", name=name)
-        if got.get("error"):
-            return f"{name}: {got['error']}"
-        return f"{name}: restarting (clean session)"
-    # retarget — прежнее имя. Оно принимается молча, потому что список
-    # инструментов приезжает модели один раз на старте сессии: мастер, поднятый
-    # до переименования, до самого перезапуска будет звать по-старому, и отказ
-    # застал бы его посреди тикета.
-    if action in ("update", "retarget"):
-        return _puppet_update(name, origin, llm, fresh)
-    return "action: add | remove | restart | update"
-
-
-def _puppet_add(origin, llm):
-    if not origin:
-        return "add: repository origin required"
-    llm = llm or config.get("MOP_DEFAULT_LLM")
-    if llm not in llm_profiles():
-        return f"no LLM profile {llm}; available: {', '.join(llm_profiles())}"
-    keys.push_llm_keys(llm)
-    # Имя выбирает сервис кластера вместе с регистрацией: спека собирается
-    # там же, и выбор имени — первая её строка (docs/CLUSTER.md).
-    got = bus.ask_cluster("add", origin=origin, profile=llm, timeout=30)
-    if got.get("error"):
-        return f"add: {got['error']}"
-    return f"{got['name']}: {origin} [{llm}] — placing, check state in agents"
-
-
-def _puppet_update(name, origin, llm, fresh=False):
-    spec = bus.ask_cluster("spec", name=name)
-    if spec.get("error"):
-        return f"{name}: {spec['error']}"
-    meta = spec.get("meta") or {}
-    old = meta.get("origin")
-    origin = origin or old
-    # профиль без явного llm сохраняется: смена репозитория не должна молча
-    # ронять папет обратно на claude
-    llm = llm or meta.get("llm", config.get("MOP_DEFAULT_LLM"))
-    if llm not in llm_profiles():
-        return f"no LLM profile {llm}; available: {', '.join(llm_profiles())}"
-    keys.push_llm_keys(llm)
-    # Историю каталога переносим только внутри того же репозитория: клон при
-    # смене origin пересоздаётся, и прежний разговор был про другой проект.
-    cont = not fresh and origin == old
-    got = bus.ask_cluster("update", name=name, origin=origin, profile=llm,
-                          cont=cont, new_origin=origin if origin != old else None)
-    if got.get("error"):
-        return f"{name}: {got['error']}"
-    how = "clone history will resume" if cont else "clean session"
-    return f"{name} -> {origin} [{llm}], restarting: {how}"
-
-
-@master_tool(annotations=DESTRUCTIVE, description=(
-    "Pool diagnostics: stuck puppets, a stale login, restart backoff, "
-    "exhausted model quota. With fix=true, treats what can be treated."))
-def doctor(fix: bool = False) -> str:
-    issues = puppets.diagnose()
-    if not issues:
-        return "pool is healthy: no stuck puppets"
-    rows = [(i["name"], i["alloc"]["NodeName"] if i["alloc"] else "-",
-             i["diagnosis"], i["action"] or "no treatment") for i in issues]
-    out = table([("PUPPET", "NODE", "DIAGNOSIS", "TREATMENT"), *rows])
-    if not fix:
-        return "\n".join(out)
-
-    # Рестарт после раздачи кредов имеет смысл, только если раздача дошла:
-    # результат push_login выбрасывался, папеты на узле без кредов
-    # перезапускались и возвращались в то же «not logged in».
-    delivered = {}
-    if any(i["action"] == "login+restart" for i in issues):
-        if not keys.credentials_fresh():
-            return "\n".join(out + ["", "local credentials are stale — log into "
-                                    "claude on the control machine, then doctor(fix=true)"])
-        delivered = keys.push_login()[0]
-    done = [f"  {i['name']}: {_treat(i, delivered)}" for i in issues if i["action"]]
-    return "\n".join(out + ["", *done])
-
-
-def _treat(issue, delivered):
-    """Лечение — общее с `mop doctor` (puppets.treat); здесь только гейт:
-    рестарт после раздачи кредов имеет смысл, только если раздача дошла."""
-    if issue["action"] == "login+restart":
-        alloc = issue["alloc"]
-        got = delivered.get(alloc["NodeName"]) if alloc else None
-        if got != "OK":
-            return f"restart skipped: credentials not delivered ({got or 'not pushed'})"
-    return puppets.treat(issue)
-
-
 @master_tool(annotations=DESTRUCTIVE, description=(
     "Slash command in a puppet's TUI. Needed separately because slash "
     "commands don't pass through the channel: the message is queued with "
@@ -662,13 +447,93 @@ def slash(name: str, command: str) -> str:
     return f"{name}: {command}\n{puppets.type_command(node, name, command)[-1500:]}"
 
 
-@master_tool(annotations=DESTRUCTIVE, description=(
-    "Push claude.ai credentials and LLM provider keys out to the pool's "
-    "nodes. Fixes puppets stuck on a stale login."))
-def login() -> str:
-    results, what, note = keys.push_login()
-    out = [("pushing: " + " + ".join(what))] + ([note] if note else [])
-    return "\n".join(out + table([(n, results[n]) for n in sorted(results)]))
+# ─── инструменты: командлеты (#160) ──────────────────────────────────────
+# Управление пулом -- не вторая реализация, а сами командлеты. Командлет,
+# объявивший `MCP = {...}` (mop/cli/__init__.py), становится инструментом:
+# описание -- его докстринг, вызов -- `mop <команда>` подпроцессом из
+# каталога сессии мастера, ответ -- его вывод как есть. Своя копия add и
+# build здесь уже разошлась однажды с командлетами (workspace, сборщик);
+# копии нет -- расходиться нечему.
+MOP = os.path.join(cli.BIN, "mop")
+COMMAND_TIMEOUT = 600
+TYPES = {"string": str, "integer": int, "boolean": bool}
+HINTS = {"readonly": READ_ONLY, "destructive": DESTRUCTIVE}
+
+
+def run_command(words, argv):
+    """`mop <слова> <argv>` из каталога сессии -> ответ модели.
+
+    Каталог -- сессии, а не процесса: сервер запускают откуда угодно, а
+    origin и workspace командлет берёт из рабочей копии, в которой стоит
+    мастер. Вывод отдаётся как есть, без разбора: он английский и читается
+    моделью (CLAUDE.md), а цвета терминала снимаются."""
+    cwd = (my_session() or {}).get("cwd") or os.getcwd()
+    try:
+        r = subprocess.run([MOP, *words, *argv], cwd=cwd, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"mop {' '.join(words)}: no answer in {COMMAND_TIMEOUT}s — still running"
+    text = lib.plain(r.stdout + r.stderr).strip()
+    if r.returncode:
+        return f"mop {' '.join(words)}: FAILED (exit {r.returncode})\n{text}".rstrip()
+    return text or "done"
+
+
+def run_in_background(words, argv):
+    """Долгая команда: ответ сразу, итог -- вестью в сессию, тем же путём,
+    каким приезжают вести агентов (on_inbox)."""
+    def go():
+        text = f"mop {' '.join(words)}: {run_command(words, argv)}"
+        sock = master_socket()
+        if sock:
+            try:
+                session.send(sock, text, priority="later", from_name="mop")
+            except Exception:
+                pass
+    threading.Thread(target=go, daemon=True, name=f"mop-{'-'.join(words)}").start()
+    return (f"mop {' '.join(words)}: started; the outcome arrives in this "
+            f"session as a separate message")
+
+
+def command_tool(name, words, path, decl):
+    """Инструмент из объявления командлета. Сигнатура собирается из args:
+    по ней SDK строит схему, которую видит модель."""
+    args = decl.get("args", [])
+
+    def call(**values):
+        argv = cli.tool_argv(args, values)
+        run = run_in_background if decl.get("background") else run_command
+        return run(words, argv)
+
+    params = []
+    for a in args:
+        t = TYPES[a["type"]]
+        default = inspect.Parameter.empty if a.get("required") else \
+            False if t is bool else None
+        hint = t if a.get("required") or t is bool else Optional[t]
+        params.append(inspect.Parameter(
+            a["name"], inspect.Parameter.KEYWORD_ONLY, default=default,
+            annotation=Annotated[hint, Field(description=a.get("help", ""))]))
+    call.__name__ = name
+    call.__signature__ = inspect.Signature(params, return_annotation=str)
+    if name in {t.name for t in app._tool_manager.list_tools()}:
+        raise RuntimeError(f"tool {name} is defined twice: by hand and by {path}")
+    app.add_tool(loud(call), name=name, description=cli.docstring(path),
+                 annotations=HINTS.get(decl.get("annotations")))
+
+
+def command_tools():
+    """Все объявленные командлеты -- инструменты. Только у мастера: узлу
+    управление не положено, и его креды в сервис кластера не пишут."""
+    if not MASTER:
+        return
+    for name, words, path in cli.tool_commands(cli.scan(), cli.verbs()):
+        decl = cli.declared(path)
+        if decl is not None:
+            command_tool(name, words, path, decl)
+
+
+command_tools()
 
 
 def watch_inbox():

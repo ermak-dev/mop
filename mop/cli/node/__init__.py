@@ -15,6 +15,10 @@ from mop import nodes
 from mop.render import table
 
 
+# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
+MCP = {"annotations": "readonly"}
+
+
 def main(argv):
     if argv:
         lib.usage(__doc__)

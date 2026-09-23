@@ -29,7 +29,8 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** A missing capability is a new commandlet in `mop/cli/`, never a workaround from outside
  - **MUST** The library returns data and stays silent; the frontends in `mop/cli/` print — otherwise a second frontend starts parsing text laid out for a terminal
  - **MUST** Output is English: it is read by the model through MCP, not only by a human. Comments and docstrings are Russian
- - **MUST** Commandlets never call each other as a subprocess: each parses its own arguments and prints for itself
+ - **MUST** Commandlets never call each other as a subprocess: each parses its own arguments and prints for itself. The one caller of commandlets is the MCP adapter (#160): it runs a commandlet that declares `MCP = {...}` and hands its output to the model unparsed
+ - **MUST** MCP never reimplements a pool operation: a management tool is a commandlet's `MCP` declaration, or the two copies drift apart
  - **MUST** `mop/session.py` is stdlib only, with no import from the package: it travels as source to wherever the session lives
  - **MUST NOT** Do not add emoji unless asked to
  - **MUST NOT** Do not write in caps: emphasis is the wording's job, not the shift key's. Caps are reserved for what is literally uppercase — identifiers, acronyms, status tokens (`FAILED`, `AGENT SILENT`) and the MUST/SHOULD keywords of this file

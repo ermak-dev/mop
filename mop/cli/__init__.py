@@ -107,14 +107,115 @@ def resolve(argv, cat, group_verbs):
     return mod, rest
 
 
-def describe(path):
-    """Первая строка докстринга модуля, без импорта; пусто, если нет."""
+def docstring(path):
+    """Докстринг модуля целиком, без импорта; пусто, если нет. Он же usage
+    команды и описание её инструмента в MCP (#160)."""
     try:
         with open(path) as f:
             doc = ast.get_docstring(ast.parse(f.read()))
     except (OSError, SyntaxError):
         return ""
-    return (doc or "").strip().splitlines()[0].strip() if doc else ""
+    return (doc or "").strip()
+
+
+def describe(path):
+    """Первая строка докстринга модуля, без импорта; пусто, если нет."""
+    doc = docstring(path)
+    return doc.splitlines()[0].strip() if doc else ""
+
+
+# ─── чистое: команда как инструмент MCP (#160) ───────────────────────────
+# Командлет объявляет себя инструментом константой `MCP` в своём модуле:
+#   MCP = {"annotations": "destructive" | "readonly",
+#          "background": True,          # итог -- вестью в сессию, не ответом
+#          "args": [{"name", "type": string|integer|boolean,
+#                    "flag": "--x" (без него -- позиционный),
+#                    "required": bool, "help": "..."}]}
+# Таблицы команд нет: объявление живёт рядом с разбором argv, который оно
+# описывает, и расходиться им негде.
+DECL_KEYS = {"annotations", "background", "args"}
+ARG_KEYS = {"name", "type", "flag", "required", "help"}
+ARG_TYPES = ("string", "integer", "boolean")
+ANNOTATIONS = ("readonly", "destructive")
+
+
+def declared(path):
+    """Объявление `MCP` модуля, без импорта; None -- команда в MCP не видна.
+    Кривое объявление -- ValueError: пропавший молча инструмент искали бы
+    долго, а отказ на старте `mop mcp` называет файл."""
+    with open(path) as f:
+        tree = ast.parse(f.read())
+    node = next((n for n in tree.body if isinstance(n, ast.Assign)
+                 and any(getattr(t, "id", "") == "MCP" for t in n.targets)), None)
+    if node is None:
+        return None
+    try:
+        decl = ast.literal_eval(node.value)
+    except ValueError:
+        raise ValueError("MCP must be a literal dict")
+    if not isinstance(decl, dict) or set(decl) - DECL_KEYS:
+        raise ValueError(f"MCP keys are {', '.join(sorted(DECL_KEYS))}")
+    if decl.get("annotations") not in (None, *ANNOTATIONS):
+        raise ValueError(f"MCP annotations: one of {', '.join(ANNOTATIONS)}")
+    optional_seen = False
+    for a in decl.get("args", []):
+        if set(a) - ARG_KEYS or not str(a.get("name", "")).isidentifier():
+            raise ValueError(f"MCP arg {a!r}: keys are {', '.join(sorted(ARG_KEYS))}, "
+                             f"name an identifier")
+        if a.get("type") not in ARG_TYPES:
+            raise ValueError(f"MCP arg {a['name']}: type one of {', '.join(ARG_TYPES)}")
+        if a["type"] != "string" and not a.get("flag"):
+            raise ValueError(f"MCP arg {a['name']}: a {a['type']} needs a flag")
+        if not a.get("flag"):
+            # Необязательный позиционный -- только в хвосте: пропуск в
+            # середине сдвинул бы следующие на чужое место.
+            if a.get("required") and optional_seen:
+                raise ValueError(f"MCP arg {a['name']}: a required positional "
+                                 f"after an optional one")
+            optional_seen = optional_seen or not a.get("required")
+    return decl
+
+
+def tool_commands(found, group_verbs):
+    """[(каталог, имя, подпакет?)] -> [(имя инструмента, слова команды,
+    путь модуля)]. Группа -- сама и каждый её глагол: `node_drain`."""
+    out = []
+    for section, name, is_pkg in found:
+        if not is_pkg:
+            out.append((name, [name], _path_of(section, name, False)))
+            continue
+        out.append((section, [section], _path_of(section, "", True)))
+        for verb in sorted(group_verbs.get(section, ())):
+            out.append((f"{section}_{verb}", [section, verb],
+                        os.path.join(PACKAGE, section, f"{verb}.py")))
+    return out
+
+
+def tool_argv(args, values):
+    """Значения инструмента -> argv командлета. ValueError -- отказ модели.
+
+    Позиционное значение с дефисом впереди -- отказ: командлет прочёл бы его
+    флагом, и одно поле включало бы чужой флаг."""
+    argv, flags, skipped = [], [], None
+    for a in args:
+        v = values.get(a["name"])
+        if a.get("flag"):
+            if a["type"] == "boolean":
+                flags += [a["flag"]] if v else []
+            elif v not in (None, ""):
+                flags += [a["flag"], str(v)]
+            continue
+        if v in (None, ""):
+            if a.get("required"):
+                raise ValueError(f"{a['name']} is required")
+            skipped = skipped or a["name"]
+            continue
+        if skipped:
+            raise ValueError(f"{a['name']} needs {skipped} too: positionals go in order")
+        if str(v).startswith("-"):
+            raise ValueError(f"{a['name']}: {v!r} would read as a flag")
+        argv.append(str(v))
+    return argv + flags
 
 
 def _path_of(section, name, is_pkg):

@@ -12,6 +12,12 @@ from mop.cli import lib
 from mop import bus, config, puppets
 
 
+# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
+MCP = {"annotations": "destructive", "args": [
+    {"name": "origin", "type": "string", "help": "git origin; without it, the origin of the master's working copy"},
+    {"name": "llm", "type": "string", "flag": "--llm", "help": "LLM profile"}]}
+
+
 def main(argv):
     profile, args = lib.parse_llm(argv)
     if len(args) > 1:

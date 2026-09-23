@@ -11,6 +11,10 @@ from mop.cli import lib
 from mop import keys
 
 
+# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
+MCP = {"annotations": "destructive"}
+
+
 def main(argv):
     if argv:
         lib.usage(__doc__)

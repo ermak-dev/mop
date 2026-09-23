@@ -25,6 +25,11 @@ def _login():
         print(f"  {node}: {results[node]}")
 
 
+# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
+MCP = {"annotations": "destructive", "args": [
+    {"name": "fix", "type": "boolean", "flag": "--fix", "help": "treat what is treatable"}]}
+
+
 def main(argv):
     fix = "--fix" in argv
     if set(argv) - {"--fix"}:

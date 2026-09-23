@@ -16,6 +16,14 @@ from mop.cli import lib
 from mop import bus, config, llm
 
 
+# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
+MCP = {"annotations": "destructive", "args": [
+    {"name": "name", "type": "string", "required": True, "help": "puppet name, pu-<project>-<n>"},
+    {"name": "origin", "type": "string", "help": "new git origin; without it, the repository is kept"},
+    {"name": "llm", "type": "string", "flag": "--llm", "help": "LLM profile"},
+    {"name": "fresh", "type": "boolean", "flag": "--fresh", "help": "come up with a clean session"}]}
+
+
 def main(argv):
     profile, args = lib.parse_llm(argv)
     fresh = "--fresh" in args
