@@ -1,0 +1,53 @@
+# Проекты пула на узле: креды папетов. Тот же смысл, что у projects.yml на
+# сервере, — узкий прогон `mop project add|delete` и полная игра узла идут
+# по одному коду.
+
+# Креды на каждый проект, а не одни на узел. Врапер подсовывает их сессии
+# папета через MOP_BUS_CONFIG, и без этого папет ходил бы под кредом агента
+# -- то есть мог бы написать в чужой проект, а агент бы этого не поймал:
+# он видит, кого спрашивают, но не видит, кто спрашивает.
+- name: Bus credentials for the puppets, one per project
+  become: yes
+  ansible.builtin.template:
+    src: bus.json.j2
+    dest: "{{ MOP_HOME }}/.config/mop/bus-{{ item }}.json"
+    mode: "0600"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+  loop: "{{ shards }}"
+  vars:
+    nats_user: "puppet-{{ item }}"
+    nats_password: "{{ lookup('password', secrets_dir + '/nats-puppet-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
+
+# Снятый проект уносит с узла и свой кред: пользователя на шине уже нет, и
+# файл остаётся лежать секретом, которым не представиться. Пока снятия не
+# было (#79), убирать было нечего — теперь есть.
+#
+# Пустой список проектов cleanup пропускает намеренно: пустой реестр законен
+# на пустой установке, но на живой он означает сбитый прогон, а не «снять
+# креды со всех узлов разом».
+- name: Bus credentials left from projects the pool no longer serves
+  become: yes
+  ansible.builtin.find:
+    paths: "{{ MOP_HOME }}/.config/mop"
+    patterns: "bus-*.json"
+  register: mop_bus_files
+  when: shards | length > 0
+
+# Разностью списков, а не разбором имени файла. Первая версия резала имя
+# проекта регуляркой с группой захвата -- `regex_replace('^bus-(.*)\.json$',
+# '\1')`, -- и это ровно та строка, которую YAML отдаёт Jinja как есть, а
+# Jinja читает '\1' питоновским escape'ом: получался символ \x01, ни один
+# файл не совпадал ни с одним проектом, и задача сносила ВСЕ креды папетов со
+# всех узлов. Поймал прогон --check; писать имена файлов из списка проектов и
+# вычитать -- короче и нечему молча разойтись.
+- name: Drop them
+  become: yes
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ mop_bus_files.files | default([]) | map(attribute='path') | difference(wanted) }}"
+  vars:
+    wanted: >-
+      {{ shards | map('regex_replace', '^', MOP_HOME ~ '/.config/mop/bus-')
+                | map('regex_replace', '$', '.json') | list }}

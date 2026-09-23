@@ -183,22 +183,9 @@
     group: "{{ MOP_USER }}"
   notify: restart mop-agent
 
-# Креды на каждый шард, а не одни на узел. Врапер подсовывает их сессии
-# папета через MOP_BUS_CONFIG, и без этого папет ходил бы под кредом агента
-# -- то есть мог бы написать в чужой проект, а агент бы этого не поймал:
-# он видит, кого спрашивают, но не видит, кто спрашивает.
-- name: Bus credentials for the puppets, one per shard
-  become: yes
-  ansible.builtin.template:
-    src: bus.json.j2
-    dest: "{{ MOP_HOME }}/.config/mop/bus-{{ item }}.json"
-    mode: "0600"
-    owner: "{{ MOP_USER }}"
-    group: "{{ MOP_USER }}"
-  loop: "{{ shards }}"
-  vars:
-    nats_user: "puppet-{{ item }}"
-    nats_password: "{{ lookup('password', secrets_dir + '/nats-puppet-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
+# Креды папетов, по одному на проект: тот же файл, что играет узкий прогон
+# `mop project add|delete` (deploy/projects.yml).
+- ansible.builtin.include_tasks: node_projects.yml
 
 # Ключ сервера для bootstrap'а песочниц (#62): публичная часть — узлу, и
 # узел сам впускает сервер в тело на время bootstrap'а (admit) и выпускает

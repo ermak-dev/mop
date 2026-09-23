@@ -1,14 +1,17 @@
-"""deploy: mop deploy [origin|shard ...]
+"""deploy: mop deploy
 
 The whole installation in one run: one playbook, site.yml, so there is one
 ansible process and one PLAY RECAP — a line per machine over every layer.
 No separate targets: fixing what fell over is cheaper by rerunning than by
-remembering which target owned it. Naming an origin registers its shard.
+remembering which target owned it.
+
+Machines, not projects. Which projects the pool serves is the registry
+(~/.config/mop/projects) and `mop project add|delete`; deploy reads it and
+takes no arguments (#79). While it accepted an origin, registering a project
+was a side effect of a full run, and there was no way to take one off at all.
 """
-import json
 import os
 import shutil
-import subprocess
 import sys
 
 from mop.cli import lib
@@ -19,8 +22,8 @@ from mop import config, creds, manifest, puppets, shards
 # по этой же причине deploy не имеет права ничего занимать у самого mop:
 # библиотечные вызовы здесь ходят в Nomad и по файлам, но не на шину.
 
-SITE = os.path.join(lib.PROJECT, "site.yml")
-# Прежние цели запуска. Отвергаем, а не молча трактуем как имя шарда: старая
+SITE = "site.yml"
+# Прежние цели запуска. Отвергаем, а не молча трактуем как имя проекта: старая
 # привычка `mop deploy pool` завела бы на шине пользователя master-pool, и
 # разбирались бы с этим уже по симптомам.
 RUN_TARGETS = ("nomad", "pool", "homelab", "claude", "nats", "all")
@@ -37,15 +40,6 @@ def missing_extras(setting, root):
     уже перенастроено, и читается это как поломка плейбука, а не «файла нет»."""
     return [p.strip() for p in setting.split(",")
             if p.strip() and not os.path.isfile(os.path.join(root, p.strip()))]
-
-
-def extra_vars(shard_names, manifests):
-    """Два --extra-vars плейбуку, JSON'ом. Объектом, а не парой ключ=значение:
-    `--extra-vars mop_shards=[...]` ansible принимает как строку, и цикл в
-    шаблоне честно проходится по её символам, порождая пользователей
-    `master-[`, `master-"` и так далее."""
-    return [json.dumps({"mop_shards": list(shard_names)}),
-            json.dumps({"mop_manifests": manifests}, ensure_ascii=False)]
 
 
 def link(name, target):
@@ -106,7 +100,12 @@ def main(argv):
     # сервера, а MOP_GIT_HOST читают одни плейбуки.
     config.require()
     if refused_target(argv):
-        lib.fail("run targets are gone: mop deploy [origin|shard ...]")
+        lib.fail("run targets are gone: mop deploy takes no arguments")
+        return 1
+    if argv:
+        # Origin в аргументах заводил проект побочным эффектом прогона (#79).
+        lib.fail(f"mop deploy takes no arguments; {argv[0]} looks like a project.\n"
+                 f"Register it: mop project add {argv[0]}")
         return 1
     inventory = os.environ["INVENTORY"]
     if not os.path.isfile(inventory):
@@ -131,20 +130,15 @@ def main(argv):
     link("nomad", "deploy/nomad")
     link("nats", "deploy")
 
-    # Шарды: ростер Nomad плюс память плюс названные в аргументах. Плейбук
-    # заводит по пользователю NATS на каждый и раскатывает креды. Пустой
-    # список законен: пустой пул, мастеров ещё нет.
-    origins, legacy, warnings = shards.collect(argv)
-    for w in warnings:
-        print(w, file=sys.stderr, flush=True)
-    shards.remember(origins | legacy)
+    # Проекты: реестр, и только он. Плейбук заводит по пользователю NATS на
+    # каждый и раскатывает креды. Пустой список законен: пустой пул, мастеров
+    # ещё нет.
+    origins, legacy, note = shards.registry()
+    if note:
+        print(note, file=sys.stderr, flush=True)
 
     lib.section("ansible: site.yml")
-    rc = subprocess.call(
-        ["ansible-playbook", "-i", inventory, SITE,
-         "--extra-vars", json.dumps(config.playbook_vars(), ensure_ascii=False),
-         *sum((["--extra-vars", v] for v in
-               extra_vars(shards.names(origins, legacy), manifests(origins))), [])])
+    rc = lib.play(SITE, shards.names(origins, legacy), manifests(origins))
     if rc:
         # Как и раньше: сборка кредов и проверка ростера не идут после
         # красного прогона, и это сказано, а не проглочено.

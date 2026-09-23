@@ -22,7 +22,8 @@ def main(argv):
     # папет поднимется, но к шине не подключится — прочитается как «агент
     # молчит» на пустом месте. Лучше отказать здесь, чем разбираться там.
     if not lib.shard_ready(shard):
-        lib.usage(f"shard {shard} isn't on the bus yet.\nSet it up: mop deploy {origin}")
+        lib.usage(f"project {shard} isn't on the bus yet.\n"
+                  f"Register it on the server: mop project add {origin}")
     name = puppets.next_name(shard)
     lib.push_llm_keys(profile)
     # bootstrap.yaml рабочей копии — на сервер ДО регистрации (#62): первый

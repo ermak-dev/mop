@@ -1,8 +1,11 @@
-"""pool shards: mop shards [--origins] [origin|shard ...]
+"""pool shards: mop shards [--origins] — renamed to mop project list
 
-A shard is a project: one repository, one slice of the pool, one master. The
-list is the union of the Nomad roster, the memory in ~/.config/mop/shards and
-the arguments (mop/shards.py); naming a new origin here registers it.
+Kept while the epic that renames shard to project is in flight (#78): the
+word is in operators' fingers, in the master skill and in the docs. It
+prints the same list and says where the command went.
+
+The arguments are gone with it: naming an origin here used to register a
+project, and that is `mop project add` now (#79).
 """
 import sys
 
@@ -11,15 +14,16 @@ from mop import shards
 
 
 def main(argv):
-    want_origins = "--origins" in argv
-    args = [a for a in argv if a != "--origins"]
-    origins, legacy, warnings = shards.collect(args)
-    for w in warnings:
-        # В stderr: stdout этой команды читают как список, и первый прогон
-        # на свежем контроллере отдавал предупреждение git'у как адрес.
-        print(w, file=sys.stderr, flush=True)
-    shards.remember(origins | legacy)
-    for n in (sorted(origins) if want_origins else shards.names(origins, legacy)):
+    if [a for a in argv if a != "--origins"]:
+        lib.usage(f"mop shards no longer registers anything.\n"
+                  f"Register a project: mop project add <git-origin>\n"
+                  f"What the pool serves: mop project list")
+    print("mop shards is now mop project list", file=sys.stderr, flush=True)
+    origins, legacy, note = shards.registry()
+    if note:
+        print(note, file=sys.stderr, flush=True)
+    for n in (sorted(origins) if "--origins" in argv
+              else shards.names(origins, legacy)):
         print(n)
 
 

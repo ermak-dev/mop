@@ -1,0 +1,44 @@
+---
+# Проекты пула: узкий прогон для `mop project add` и `mop project delete`.
+#
+# Завод проекта — это два файла на двух сторонах: пользователи master-<проект>
+# и puppet-<проект> в конфиге NATS на сервере, и кред папета на каждом узле.
+# Всё остальное, чем занят site.yml, к появлению проекта отношения не имеет,
+# и гонять полную установку ради двух шаблонов значит держать завод проекта
+# побочным эффектом прогона — ровно то, от чего уходит #79.
+#
+# Задачи не свои: это те же файлы роли bus, которые играет полная установка
+# (tasks/projects.yml и tasks/node_projects.yml). Второй копии нет намеренно
+# -- разойдясь, узкий прогон заводил бы проект, а полный его снимал.
+#
+# Запуск: mop project add <origin> | mop project delete <имя>
+
+- name: NATS users of the pool's projects
+  hosts: server
+  become: yes
+  gather_facts: no
+
+  vars:
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
+    nats_nodes: "{{ groups['puppet'] }}"
+    shards: "{{ mop_shards | default([]) }}"
+  tasks:
+    - ansible.builtin.include_role:
+        name: bus
+        tasks_from: projects
+
+
+- name: Bus credentials of the puppets, one per project
+  hosts: puppet
+  gather_facts: no
+
+  vars:
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
+    shards: "{{ mop_shards | default([]) }}"
+    # Адрес шины -- LAN-адрес сервера, тот же, что в полной игре: публичное
+    # имя резолвится в роутер, который не делает хайрпин.
+    nats_addr: "nats://{{ MOP_SERVER_LAN }}:{{ MOP_NATS_PORT }}"
+  tasks:
+    - ansible.builtin.include_role:
+        name: bus
+        tasks_from: node_projects

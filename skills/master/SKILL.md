@@ -96,7 +96,7 @@ been created. Pool size is your job; the operator may set a ceiling:
   operator, work with what you have. A brand-new project has no shard on
   the bus yet, and the tool cannot refuse early: a fresh puppet that comes
   up but cannot reach the pool is the missing shard, not a malfunction —
-  the operator's `mop deploy <origin>` fixes it in one command.
+  the operator's `mop project add <origin>` fixes it in one command.
 - **Puppets are sticky.** A closed ticket does NOT release a puppet: he
   returns to "free" and waits for the next dispatch. Everything that makes a
   puppet fast — the clone, the warm build tree, a session steeped in the

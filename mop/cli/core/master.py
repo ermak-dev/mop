@@ -119,8 +119,8 @@ def main(argv):
         # и папет к шине не подключится. Говорим прямо, а не запускаем ansible
         # за спиной оператора: на узел ведёт одна дорога, и это deploy на
         # сервере; сюда его плоды привозит join.
-        lib.usage(f"no credentials for shard {shard} on this machine.\n"
-                  f"Set up the shard on the server: mop deploy {origin}, "
+        lib.usage(f"no credentials for project {shard} on this machine.\n"
+                  f"Register it on the server: mop project add {origin}, "
                   f"then bring its credentials here: mop join <server>")
     link_skill()
 

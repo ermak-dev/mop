@@ -20,13 +20,9 @@
     state: directory
     mode: "0755"
 
-- name: Server config
-  ansible.builtin.template:
-    src: nats-server.conf.j2
-    dest: /etc/nats/nats-server.conf
-    # Пароли внутри: читает только root, под которым служба и ходит.
-    mode: "0600"
-  notify: restart nats
+# Пользователи проектов: тот же файл, что играет узкий прогон
+# `mop project add|delete` (deploy/projects.yml).
+- ansible.builtin.include_tasks: projects.yml
 
 - name: Systemd unit
   ansible.builtin.template:
