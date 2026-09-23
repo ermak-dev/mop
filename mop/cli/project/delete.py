@@ -22,9 +22,6 @@ def main(argv):
     if ans.get("error"):
         lib.fail(f"{name}: {ans['error']}")
         return 1
-    lib.ok(f"  {name}: off the bus ({', '.join(ans.get('dropped') or [])})")
-    print("  operators need nothing: their rights end with the project's "
-          "subjects")
     return 0
 
 

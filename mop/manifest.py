@@ -93,7 +93,7 @@ def _collect(project, show):
     base = f"/tmp/mop-manifest-{project}-{os.getpid()}"
     out = {"project": project, "asks": {}, "alien": [], "legacy": [],
            "sandbox_vars": None, "sandbox_tasks": None,
-           "bootstrap_vars": None, "bootstrap_tasks": None}
+           "bootstrap_vars": None, "bootstrap_tasks": None, "bootstrap_text": None}
 
     def note_alien(names):
         out["alien"] += [k for k in names if k not in out["alien"]]
@@ -119,7 +119,10 @@ def _collect(project, show):
 
     # Bootstrap: размеров здесь не просят — они дело песочницы, и просьба
     # тут была бы проглочена молча, поэтому идёт в чужие, по имени.
-    got = _parse(show(BOOTSTRAP), project, BOOTSTRAP)
+    # Сырой текст -- тоже (#124): сервер принимает bootstrap глаголом `put`
+    # текстом, и `mop project add` кладёт его туда сам, без прогона.
+    out["bootstrap_text"] = show(BOOTSTRAP)
+    got = _parse(out["bootstrap_text"], project, BOOTSTRAP)
     if got is not None:
         bvars, btasks = got
         asks, mine, alien = config.manifest_parts(bvars)

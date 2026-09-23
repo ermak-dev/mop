@@ -82,7 +82,7 @@ BOOTSTRAP = """
 """
 EMPTY = {"project": "bare", "asks": {}, "alien": [], "legacy": [],
          "sandbox_vars": None, "sandbox_tasks": None,
-         "bootstrap_vars": None, "bootstrap_tasks": None}
+         "bootstrap_vars": None, "bootstrap_tasks": None, "bootstrap_text": None}
 
 
 def main():
@@ -104,6 +104,13 @@ def main():
         if not (got.get(k) and os.path.exists(got[k])):
             failed += 1
             print(f"FAIL {k}: {got.get(k)!r}")
+    # HYPOTHESIS (#124): `mop project add` советовал запустить deploy, чтобы
+    # bootstrap проекта попал на сервер, хотя сервер принимает его глаголом
+    # `put` текстом. SOLUTION: манифест отдаёт и сырой текст bootstrap.yaml.
+    # STATUS: FIXED — see #124
+    if got.get("bootstrap_text") != BOOTSTRAP:
+        failed += 1
+        print(f"FAIL bootstrap_text must be the file as it lies: {got.get('bootstrap_text')!r}")
     # Старые имена: node.yaml + workspace.yaml читаются как sandbox — просьбы,
     # конфигурация и задачи обоих, — и об этом сказано.
     got = manifest.fetch_tree(tree({".mop/node.yaml": NODE,
