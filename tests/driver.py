@@ -569,6 +569,12 @@ def main():
         if got != want:
             bad += 1
             print(f"FAILED  tar_of must hold home-relative 0600 files: {got}")
+        # Время файла -- сейчас: tar без mtime распаковывается 1970-м годом.
+        import time
+        with tarfile.open(fileobj=io.BytesIO(blob)) as t:
+            if any(abs(m.mtime - time.time()) > 60 for m in t.getmembers()):
+                bad += 1
+                print("FAILED  tar_of must stamp the files with the current time")
     except AttributeError:
         bad += 1
         print("FAILED  pve.tar_of is missing")

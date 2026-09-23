@@ -31,6 +31,7 @@
 import hashlib
 import ipaddress
 import os
+import time
 import shlex
 
 from .. import config
@@ -573,7 +574,7 @@ def tar_of(files, home):
             if not path.startswith(home.rstrip("/") + "/") or rel.startswith(".."):
                 raise ValueError(f"{path}: outside {home}")
             info = tarfile.TarInfo(rel)
-            info.size, info.mode = len(data), 0o600
+            info.size, info.mode, info.mtime = len(data), 0o600, int(time.time())
             t.addfile(info, io.BytesIO(data))
     return buf.getvalue()
 
