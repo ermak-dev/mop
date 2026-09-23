@@ -256,18 +256,44 @@
     # едут и в NODE_SCOPED не входят: тот файл лежит на узлах с правами 0644,
     # и на host-узле его читает любой папет — общий $HOME. Пусто значит
     # «пароля нет», и аккаунт остаётся заблокированным.
-    - name: The build body, a container from the base image
-      ansible.builtin.shell:
-        cmd: >-
-          {{ pve }} create {{ stage_vmid }} {{ stage_name }} {{ MOP_PVE_TEMPLATE }}
-          {{ MOP_PVE_STORAGE }} {{ body_cores }} {{ body_mem }}
-          {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ stage_ip }}/{{ pve_cidr }}
-          {{ pve_gw }} {{ MOP_HOME }}/.ssh/mop-body.pub
-        stdin: "{{ mop_body_root_password | default('') }}"
-        stdin_add_newline: false
+    # Пароль уезжает файлом, а не аргументом задачи, и `no_log` стоит только
+    # на той задаче, что файл пишет. Пока метка висела на самом создании,
+    # отказ приходил без единого слова — «the output has been hidden», — и
+    # диагноз приходилось искать в журнале гипервизора, хотя обёртка пишет
+    # причину внятно (#102). Секрет при этом по-прежнему не попадает ни в
+    # лог, ни в список процессов: он идёт через stdin, а файл 0600 и снимается
+    # в любом исходе.
+    - name: Create the build body
       when: build_from == 'base'
-      changed_when: true
-      no_log: true
+      block:
+        - name: A file to hand the root password over by
+          ansible.builtin.tempfile:
+            state: file
+            prefix: mop-body-pw.
+          register: body_pw
+
+        - name: The password itself
+          ansible.builtin.copy:
+            content: "{{ mop_body_root_password | default('') }}"
+            dest: "{{ body_pw.path }}"
+            mode: "0600"
+          no_log: true
+
+        - name: The build body, a container from the base image
+          ansible.builtin.shell:
+            cmd: >-
+              {{ pve }} create {{ stage_vmid }} {{ stage_name }} {{ MOP_PVE_TEMPLATE }}
+              {{ MOP_PVE_STORAGE }} {{ body_cores }} {{ body_mem }}
+              {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ stage_ip }}/{{ pve_cidr }}
+              {{ pve_gw }} {{ MOP_HOME }}/.ssh/mop-body.pub
+              < {{ body_pw.path | quote }}
+          changed_when: true
+      always:
+        - name: The password file goes away whatever happened
+          ansible.builtin.file:
+            path: "{{ body_pw.path }}"
+            state: absent
+          when: body_pw.path is defined
 
     # Пересозданное тело приезжает с новым ключом хоста, и accept-new тут не
     # лечит: запись под этим адресом уже есть, и ssh читает смену ключа как
@@ -291,17 +317,38 @@
     # И на копии образа тоже: глагол идемпотентен, а его `apt-get update`
     # заодно освежает списки пакетов — без этого установка нового пакета в
     # старый образ падала бы на 404 по устаревшим индексам.
-    - name: The pool user, sshd, sudo and a lingering session bus
-      ansible.builtin.shell:
-        cmd: "{{ pve }} bootstrap {{ stage_vmid }}"
-        stdin: "{{ mop_body_user_password | default('') }}"
-        stdin_add_newline: false
-      register: boot
-      until: boot.rc == 0
-      retries: 12
-      delay: 5
-      changed_when: true
-      no_log: true
+    # Тот же приём, что и у создания тела (#102): пароль файлом, `no_log`
+    # только на записи файла. Здесь молчание стоило бы дороже — задача идёт с
+    # двенадцатью повторами, и стойкий отказ молчал бы минуту.
+    - name: Bring the body up to what a node is
+      block:
+        - name: A file to hand the user password over by
+          ansible.builtin.tempfile:
+            state: file
+            prefix: mop-user-pw.
+          register: user_pw
+
+        - name: The password itself
+          ansible.builtin.copy:
+            content: "{{ mop_body_user_password | default('') }}"
+            dest: "{{ user_pw.path }}"
+            mode: "0600"
+          no_log: true
+
+        - name: The pool user, sshd, sudo and a lingering session bus
+          ansible.builtin.shell:
+            cmd: "{{ pve }} bootstrap {{ stage_vmid }} < {{ user_pw.path | quote }}"
+          register: boot
+          until: boot.rc == 0
+          retries: 12
+          delay: 5
+          changed_when: true
+      always:
+        - name: The password file goes away whatever happened
+          ansible.builtin.file:
+            path: "{{ user_pw.path }}"
+            state: absent
+          when: user_pw.path is defined
 
     - name: Let both the node and this build machine in
       ansible.builtin.shell:
