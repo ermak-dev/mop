@@ -135,10 +135,50 @@ def check_names():
     return out
 
 
+def check_limits():
+    """Потолок папетов проекта (#107): что принимается и как снимается.
+
+    HYPOTHESIS: лимитов нет, проект занимает пул, пока не кончатся слоты.
+    SOLUTION: лимит -- политика проекта в своём файле рядом с реестром;
+    сервис кластера сверяет с ним `add`.
+    STATUS: FIXED — see #107
+    """
+    out = []
+    # Число и снятие. 0 законен: «новых папетов не заводить» -- заморозка.
+    for text, want in (("3", 3), ("0", 0), ("none", None)):
+        try:
+            got = projects.parse_limit(text)
+        except ValueError as e:
+            out.append(f"parse_limit({text!r}) refused: {e}")
+            continue
+        if got != want:
+            out.append(f"parse_limit({text!r}) -> {got!r}, wanted {want!r}")
+    # Мусор -- отказ, а не «без лимита»: опечатка снимала бы потолок молча.
+    for bad in ("", "-1", "three", "2.5"):
+        try:
+            projects.parse_limit(bad)
+        except ValueError:
+            continue
+        out.append(f"parse_limit({bad!r}) must be refused")
+
+    got = projects.with_limit({"mop": 2}, "rugent", 5)
+    if got != {"mop": 2, "rugent": 5}:
+        out.append(f"with_limit set -> {got}")
+    got = projects.with_limit({"mop": 2, "rugent": 5}, "rugent", None)
+    if got != {"mop": 2}:
+        out.append(f"with_limit clear -> {got}")
+    # Исходный словарь не трогаем: чистая функция.
+    src = {"mop": 2}
+    projects.with_limit(src, "mop", None)
+    if src != {"mop": 2}:
+        out.append("with_limit must not change its argument")
+    return out
+
+
 def main():
     failed = []
     for check in (check_add, check_delete, check_merge,
-                  check_migration_needed, check_names):
+                  check_migration_needed, check_names, check_limits):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     print("\n".join(failed) if failed else "", end="\n" if failed else "")

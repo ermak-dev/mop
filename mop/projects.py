@@ -23,6 +23,7 @@
 остаются голые имена, origin которых уже не узнать; завести новую такую
 строку нельзя, а старую не теряем.
 """
+import json
 import os
 
 from . import bus, puppets
@@ -80,6 +81,53 @@ def merged(memory, roster):
 def names(origins, legacy):
     """Имена проектов для плейбука: basename origin'ов плюс легаси, по порядку."""
     return sorted({puppets.project_of(o) for o in origins} | set(legacy))
+
+
+# ─── лимиты: потолок папетов проекта (#107) ─────────────────────────────
+# Политика, а не состав: реестр отвечает «какие проекты заведены», лимиты --
+# «сколько папетов проекту можно». Отдельный файл, а не суффикс в строке
+# origin'а: иначе поменялся бы разбор реестра всюду, где читают origin.
+# Правит его `mop project limit` на контроллере, на сервер его кладёт прогон
+# (deploy/roles/cluster), а сверяет сервис кластера в глаголе `add`.
+LIMITS = os.path.expanduser("~/.config/mop/limits.json")
+
+
+def parse_limit(text):
+    """Строка команды -> потолок: число >= 0 или None («без лимита»).
+
+    Мусор -- отказ, а не «без лимита»: опечатка снимала бы потолок молча.
+    0 законен -- заморозка: новых папетов не заводить."""
+    text = (text or "").strip()
+    if text == "none":
+        return None
+    if not text.isdigit():
+        raise ValueError(f"limit must be a whole number or none, got {text!r}")
+    return int(text)
+
+
+def with_limit(limits, name, value):
+    """Лимиты после установки или снятия (value=None). -> новый словарь."""
+    out = dict(limits)
+    if value is None:
+        out.pop(name, None)
+    else:
+        out[name] = value
+    return out
+
+
+def read_limits(path=LIMITS):
+    """{проект: потолок}; нет файла -- лимитов нет."""
+    try:
+        with open(path) as f:
+            return {k: int(v) for k, v in json.load(f).items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def write_limits(limits, path=LIMITS):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(limits, f, sort_keys=True)
 
 
 # ─── файл реестра ────────────────────────────────────────────────────────

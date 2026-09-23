@@ -121,6 +121,19 @@ def main():
     if lib.play_vars(["mop"]) != [json.dumps({"mop_projects": ["mop"]})]:
         failed += 1
         print(f"FAIL play_vars without manifests: {lib.play_vars(['mop'])}")
+    # Лимиты папетов (#107) едут рядом с проектами, и пустые тоже: пустой
+    # словарь -- правда контроллера «лимитов нет», и сервер обязан её
+    # получить, иначе снятый лимит жил бы там дальше. Сама функция чистая:
+    # файл читает play(), а не она.
+    got = lib.play_vars(["mop"], limits={})
+    if got != [json.dumps({"mop_projects": ["mop"], "mop_limits": {}})]:
+        failed += 1
+        print(f"FAIL play_vars with empty limits: {got}")
+    got = lib.play_vars(["mop"], limits={"mop": 2})
+    if json.loads(got[0]).get("mop_limits") != {"mop": 2}:
+        failed += 1
+        print(f"FAIL play_vars with limits: {got}")
+    # STATUS: FIXED — see #107
 
     # Локаль прогонов (#92): ansible требует UTF-8 и берёт её из окружения, а
     # свежая машина несёт LANG=C. Ставит её диспетчер, потому что зовут

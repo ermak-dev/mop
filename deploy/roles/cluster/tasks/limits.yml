@@ -1,0 +1,22 @@
+# Лимиты папетов проектов (#107): файл, который сервис кластера читает на
+# каждый `add`. Отдельный файл задач, потому что его играют и полная
+# установка (роль cluster), и узкий прогон `mop project` (deploy/projects.yml):
+# разойдясь, один клал бы лимит, а другой его стирал.
+#
+# От root с владельцем, а не become_user: задача входит и в узкий прогон, а
+# там роль web, заводящая каталог, не играется.
+- name: Config dir of the pool user
+  become: yes
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    mode: "0700"
+
+- name: Puppet limits of the projects
+  become: yes
+  ansible.builtin.copy:
+    content: "{{ mop_limits | default({}) | to_json }}"
+    dest: "{{ MOP_HOME }}/.config/mop/limits.json"
+    owner: "{{ MOP_USER }}"
+    mode: "0644"

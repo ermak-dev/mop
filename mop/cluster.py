@@ -27,7 +27,7 @@ bootstrap песочницы за папета). Положи туда глаг�
 import asyncio
 import json
 
-from . import bus, nodes, nomad, puppets
+from . import bus, nodes, nomad, projects, puppets
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
@@ -96,6 +96,18 @@ def refusal(project, verb, origin=None, name=None, job_exists=False,
     return None
 
 
+def over_limit(project, count, limit):
+    """Отказ `add` по потолку папетов проекта (#107). -> строка или None.
+
+    Отказ называет проект, счёт и потолок: иначе «папет не заводится» ищут в
+    Nomad и в слотах узлов."""
+    if limit is None or count < limit:
+        return None
+    return (f"project {project} has {count} puppet(s) and its limit is {limit}: "
+            f"delete one, or raise the limit on the controller: "
+            f"mop project limit {project} <N|none>")
+
+
 def _foreign_origin(project, origin):
     """Чужой ли это origin для проекта. -> строка или None."""
     owner = puppets.project_of(origin or "")
@@ -132,9 +144,24 @@ def _ping(project, req):
             "verbs": list(VERBS)}
 
 
+def _live_count(target):
+    """Сколько джобов проекта живо. По префиксу имени: имена `pu-<проект>-<n>`
+    строятся из того же basename, что и проект (next_name)."""
+    got = nomad.client().jobs.get_jobs(prefix=f"{puppets.JOB_PREFIX}{target}-")
+    return sum(1 for j in got if j.get("Status") != "dead")
+
+
 def _add(project, req):
     origin = req.get("origin")
-    name = puppets.next_name(puppets.project_of(origin))
+    # Лимит -- проекта из origin, а не просителя: оператор через admin
+    # заводит папета тому же проекту и упирается в тот же потолок. Файл
+    # читается на каждый запрос: правка лимита доезжает без рестарта.
+    target = puppets.project_of(origin)
+    why = over_limit(target, _live_count(target),
+                     projects.read_limits().get(target))
+    if why:
+        return {"error": why}
+    name = puppets.next_name(target)
     nomad.register(puppets.job_spec(name, origin, req.get("profile")))
     return {"ok": True, "name": name, "origin": origin}
 
