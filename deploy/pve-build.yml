@@ -163,11 +163,17 @@
               or body_disk | int < (mop_project_asks.MOP_DISK_GB | default(0) | int)
               or body_cores | int < (mop_project_asks.MOP_CORES | default(0) | int)) else '' }}
 
+    # run_once, а не `creates`: ключ ОДИН на контроллер, а задача играется по
+    # разу на каждый гипервизор. При стратегии linear оба хоста проходят шаг
+    # одновременно, оба видят, что файла нет, и оба зовут ssh-keygen —
+    # проигравший получает приглашение на перезапись и ненулевой код (#99).
+    # `creates` тут бессилен: он проверяет до, а гонка происходит после.
     - name: A temporary key for reaching the body from here
       ansible.builtin.command:
         cmd: "ssh-keygen -t ed25519 -N '' -C mop-build -f {{ build_key }}"
         creates: "{{ build_key }}"
       delegate_to: localhost
+      run_once: true
 
     - name: Read the node's key and the build key
       ansible.builtin.slurp:
