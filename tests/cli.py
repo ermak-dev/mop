@@ -109,7 +109,7 @@ def main():
     if projects.names({"git@h:g/proj.git", "git@h:g/mop.git"}, {"legacy"}) != ["legacy", "mop", "proj"]:
         failed += 1
         print(f"FAIL projects.names: {projects.names({'git@h:g/proj.git', 'git@h:g/mop.git'}, {'legacy'})}")
-    # Списком, а не строкой: `--extra-vars mop_shards=[...]` ansible берёт как
+    # Списком, а не строкой: `--extra-vars mop_projects=[...]` ansible берёт как
     # строку и проходит по её символам, порождая пользователей `master-[`.
     ev = lib.play_vars(["mop", "proj"], {"proj": {"asks": {}}})
     if json.loads(ev[0]) != {"mop_projects": ["mop", "proj"]} or json.loads(ev[1]) != {"mop_manifests": {"proj": {"asks": {}}}}:

@@ -19,7 +19,7 @@ CASES = [
      {"name": "gpu", "driver": "host", "serves": "-", "state": "ready",
       "free_mb": 40960, "total_mb": 40960, "slots": 5}),
     ({"Name": "hyper", "Status": "ready", "Drain": True, "SchedulingEligibility": "ineligible"},
-     {"mop_driver": "pve", "mop_shards": "mop,rugent"}, {},
+     {"mop_driver": "pve", "mop_projects": "mop,rugent"}, {},
      {"name": "hyper", "driver": "pve", "serves": "mop,rugent", "state": "ready, draining",
       "free_mb": None, "total_mb": None, "slots": None}),
     ({"Name": "mate", "Status": "ready", "SchedulingEligibility": "ineligible"}, {}, {},

@@ -32,17 +32,13 @@ def extra_vars(origin, got):
     null: `default('')` в условиях плейбука не подменяет определённый None,
     и len(None) ронял сборку проекта без vars (rugent: только задачи). Поймано
     живой сборкой (#26), держится tests/image.py."""
-    # Оба имени, пока идёт переименование (#85): `mop_shard*` — публичный
-    # интерфейс к задачам проекта в его `.mop`, и уронить его сразу значит
-    # молча сломать чужой манифест. Снимется, когда проекты перепишут свои.
-    extra = {"mop_project": got["project"], "mop_shard": got["project"],
-             "mop_origin": origin,
-             "mop_project_asks": got["asks"], "mop_shard_asks": got["asks"]}
+    extra = {"mop_project": got["project"], "mop_origin": origin,
+             "mop_project_asks": got["asks"]}
     # В образ едет только песочница (#61): bootstrap играется при старте.
     if got["sandbox_vars"]:
-        extra["mop_project_vars"] = extra["mop_shard_vars"] = got["sandbox_vars"]
+        extra["mop_project_vars"] = got["sandbox_vars"]
     if got["sandbox_tasks"]:
-        extra["mop_project_tasks"] = extra["mop_shard_tasks"] = got["sandbox_tasks"]
+        extra["mop_project_tasks"] = got["sandbox_tasks"]
     return extra
 
 
@@ -177,10 +173,10 @@ def announce(project):
             continue
         # Перечень берём с узла: серверная копия отстаёт на секунды, и
         # дописать к устаревшей значит стереть ранее объявленные образы.
-        have = [s for s in (nomad.node_dynamic_meta(name).get("mop_shards") or "").split(",") if s]
+        have = [s for s in (nomad.node_dynamic_meta(name).get("mop_projects") or "").split(",") if s]
         if project in have:
             out.append((name, "already announced"))
             continue
-        nomad.set_node_meta(name, {"mop_shards": ",".join(sorted(have + [project]))})
+        nomad.set_node_meta(name, {"mop_projects": ",".join(sorted(have + [project]))})
         out.append((name, f"announced, serves {', '.join(sorted(have + [project]))}"))
     return out

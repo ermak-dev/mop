@@ -24,13 +24,13 @@ ORIGIN = "git@git.example.dev:someone/mop.git"
 def project_constraint(spec):
     """Ограничение про проекты из спеки; None, если его там нет."""
     for c in spec["Job"].get("Constraints") or []:
-        if c.get("LTarget") == "${meta.mop_shards}":
+        if c.get("LTarget") == "${meta.mop_projects}":
             return c
     return None
 
 
 def serves(project, meta_value):
-    """Сядет ли папет проекта на узел, объявивший такое meta.mop_shards.
+    """Сядет ли папет проекта на узел, объявивший такое meta.mop_projects.
 
     Считаем ровно тем, что уедет в Nomad: RTarget ограничения как регулярное
     выражение над значением meta. Go RE2 и python re на этом классе выражений
