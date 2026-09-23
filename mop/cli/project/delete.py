@@ -42,10 +42,18 @@ def main(argv):
 
     lib.section(f"ansible: {PLAYBOOK}")
     rc = lib.play(PLAYBOOK, shards.names(*puppets.shard_ids(lines)))
-    if rc:
-        lib.fail(f"ansible exited {rc}; {name} is out of the registry but may still "
-                 f"be on the bus — run mop project delete {name} again")
+    if rc and rc != lib.UNREACHABLE:
+        lib.fail(f"ansible exited {rc}; {name} is out of the registry but still on "
+                 f"the bus — run mop project delete {name} again")
         return rc
+    if rc == lib.UNREACHABLE:
+        # Тут недоступная машина опаснее, чем при заводе: на ней остаётся
+        # лежать кред снятого проекта. Пользователя на шине уже нет, так что
+        # представиться им нельзя, но секрет лежит — и уйдёт следующим deploy.
+        lib.fail(f"some machines did not answer; a node that was down still holds "
+                 f"{name}'s credentials until the next mop deploy. If the server "
+                 f"was the one missing, its bus users are still there — run "
+                 f"mop project delete {name} again")
 
     # Пароль мастера снятого проекта читается как «проект на шине есть»
     # (lib.shard_ready): `mop master` поднялся бы, чтобы не подключиться.
@@ -54,7 +62,7 @@ def main(argv):
     lib.ok(f"  {name}: off the bus; {len(gone)} password file(s) removed here")
     print("  other operators still hold theirs — those stop working, "
           "and mop join <server> removes them")
-    return 0
+    return rc
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).

@@ -94,6 +94,13 @@ def default_branch():
     return r.stdout.strip() if r.returncode == 0 else "origin/master"
 
 
+# Код ansible «часть машин не ответила». Отличать его от настоящего отказа
+# обязательно: выключенный узел — не сломанная команда, и сказать про него
+# «проект, возможно, не на шине» значит отправить оператора искать поломку
+# там, где её нет.
+UNREACHABLE = 4
+
+
 def play_vars(projects, manifests=None):
     """Списки плейбуку как --extra-vars, JSON'ом. -> [строки].
 
