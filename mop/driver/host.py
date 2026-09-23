@@ -161,6 +161,15 @@ async def push(name, path, data):
     return {"written": path}
 
 
+async def push_many(name, files):
+    """Несколько файлов в тело: у host это записи на узле, по одной."""
+    for path, data in files:
+        r = await push(name, path, data)
+        if r.get("error"):
+            return r
+    return {"written": [p for p, _ in files]}
+
+
 def projects_dir(name):
     """Где лежат транскрипты папета — по ним считается расход токенов."""
     return f"{HOME}/.claude/projects"

@@ -512,16 +512,19 @@ async def v_write(req):
     #
     # У драйвера, где тело и есть узел, второй записи не бывает: это тот же
     # файл, а список тел там просто перечисляет папетов.
+    #
+    # Все тела разом и все файлы тела одним вызовом (#137): по очереди и по
+    # файлу это стоило ~4 с на файл, и `mop login` на узле с двумя телами
+    # читался молчащим агентом.
     bodies = [] if DRIVER.BODY_IS_NODE else await DRIVER.bodies()
-    for name in bodies:
-        for path, data in files:
-            r = await DRIVER.push(name, path, data)
-            if r.get("error"):
-                # Отказ по одному телу не отменяет остальных: узел уже получил
-                # свежую копию, и молчащее тело -- отдельная беда.
-                written.append(f"{name}:{path} FAILED — {r['error']}")
-            else:
-                written.append(f"{name}:{path}")
+    answers = await asyncio.gather(*(DRIVER.push_many(name, files) for name in bodies))
+    for name, r in zip(bodies, answers):
+        if r.get("error"):
+            # Отказ по одному телу не отменяет остальных: узел уже получил
+            # свежую копию, и молчащее тело -- отдельная беда.
+            written.append(f"{name} FAILED — {r['error']}")
+        else:
+            written += [f"{name}:{p}" for p in r.get("written") or []]
     return {"written": written}
 
 

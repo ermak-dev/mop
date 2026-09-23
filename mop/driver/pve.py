@@ -560,30 +560,57 @@ async def admit(name, pubkey):
     return {"admitted": bool(pubkey)}
 
 
-async def push(name, path, data):
-    """Положить файл в тело: 600, владельцем — пользователь пула.
+def tar_of(files, home):
+    """[(абсолютный путь, bytes)] -> tar с путями от home, 0600. Чистая
+    функция (#137). Путь вне дома -- отказ: распаковывает пользователь пула
+    у себя дома, и куда ещё, кроме дома, ему класть нечего."""
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        for path, data in files:
+            rel = os.path.relpath(os.path.normpath(path), home)
+            if not path.startswith(home.rstrip("/") + "/") or rel.startswith(".."):
+                raise ValueError(f"{path}: outside {home}")
+            info = tarfile.TarInfo(rel)
+            info.size, info.mode = len(data), 0o600
+            t.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
 
-    Обёрткой, а не по ssh: этим же путём внутрь едет то, без чего ssh ещё не
-    работает. Белый список путей проверяет звавший — драйвер транспорт, а не
-    право."""
+
+async def push_many(name, files):
+    """Положить файлы в тело одним вызовом обёртки (#137): tar через
+    `mop-pve unpack` -- один pct exec от пользователя пула, а не четыре pct на
+    файл. Обёрткой, а не по ssh: этим же путём внутрь едет то, без чего ssh
+    ещё не работает. Белый список путей проверяет звавший -- драйвер
+    транспорт, а не право."""
     if not valid_name(name):
         return {"error": bad_name(name)}
-    tmp = f"/tmp/mop-push-{os.getpid()}"
     try:
-        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
-                  "wb") as f:
-            f.write(data)
-        out, code = await sh(
-            f"{_pve_cmd('push', vmid_of(name), path, '600')} < {shlex.quote(tmp)}",
-            120)
+        blob = tar_of(files, HOME)
+    except ValueError as e:
+        return {"error": str(e)}
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="mop-push-")     # свой у каждого вызова
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(blob)
+        out, code = await sh(f"{_pve_cmd('unpack', vmid_of(name))} < {shlex.quote(tmp)}", 120)
     finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
     if code not in (0, None):
-        return {"error": f"{path}: {why(out, code)}"}
-    return {"written": path}
+        return {"error": f"{name}: unpack: {why(out, code)}"}
+    return {"written": [p for p, _ in files]}
+
+
+async def push(name, path, data):
+    """Один файл в тело: 600, владелец -- пользователь пула. Частный случай
+    push_many."""
+    r = await push_many(name, [(path, data)])
+    return r if r.get("error") else {"written": path}
 
 
 async def destroy(name):

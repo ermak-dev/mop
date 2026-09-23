@@ -552,6 +552,39 @@ def main():
         print("FAILED  pve seed must not copy the node's bus-<project>.json: "
               "the credentials come from the bootstrap answer only")
 
+    # HYPOTHESIS (#137): файл в pve-тело стоил ~4 с (четыре pct на файл), и
+    # агент писал в тела по очереди. SOLUTION: все файлы тела -- одним tar
+    # через `mop-pve unpack` (#136). STATUS: FIXED — see #137
+    import io
+    import tarfile
+    from mop.driver import pve
+    cases += 1
+    try:
+        blob = pve.tar_of([(f"{pve.HOME}/.claude/.credentials.json", b"{}"),
+                           (f"{pve.HOME}/.config/mop/secrets.env", b"K=v\n")], pve.HOME)
+        with tarfile.open(fileobj=io.BytesIO(blob)) as t:
+            got = {m.name: (m.mode, t.extractfile(m).read()) for m in t.getmembers()}
+        want = {".claude/.credentials.json": (0o600, b"{}"),
+                ".config/mop/secrets.env": (0o600, b"K=v\n")}
+        if got != want:
+            bad += 1
+            print(f"FAILED  tar_of must hold home-relative 0600 files: {got}")
+    except AttributeError:
+        bad += 1
+        print("FAILED  pve.tar_of is missing")
+    for outside in ("/etc/passwd", f"{pve.HOME}/../x", "/tmp/x"):
+        cases += 1
+        try:
+            pve.tar_of([(outside, b"x")], pve.HOME)
+            bad += 1
+            print(f"FAILED  tar_of must refuse a path outside the home: {outside}")
+        except (ValueError, AttributeError):
+            pass
+    cases += 1
+    if "push_many" not in driver.VERBS:
+        bad += 1
+        print("FAILED  push_many must be a driver verb: the agent writes a body in one call")
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 
