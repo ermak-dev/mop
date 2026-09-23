@@ -11,6 +11,9 @@ are rendered again from the registry.
 A project's own .mop manifest (sandbox and bootstrap) is NOT played here —
 it belongs to the node and body layers, and those are `mop deploy`. The
 command says so when the project has one.
+
+A node that is down when this runs does not get the credentials; it picks
+them up at the next `mop deploy`, and the command says which case it hit.
 """
 import os
 import sys
@@ -45,10 +48,19 @@ def main(argv):
 
     lib.section(f"ansible: {PLAYBOOK}")
     rc = lib.play(PLAYBOOK, shards.names(*puppets.shard_ids(lines)))
-    if rc:
-        lib.fail(f"ansible exited {rc}; {name} is in the registry but may not be "
-                 f"on the bus — run mop project add {origin} again")
+    if rc and rc != lib.UNREACHABLE:
+        lib.fail(f"ansible exited {rc}; {name} is in the registry but not on the "
+                 f"bus — run mop project add {origin} again")
         return rc
+    if rc == lib.UNREACHABLE:
+        # Выключенный узел — не отказ команды: проект доехал до всех, кто
+        # ответил. Но доехал НЕ ДО ВСЕХ, и молчать об этом нельзя: папет
+        # проекта, вставший на такой узел, не найдёт кредов и прочитается как
+        # «агент молчит» на пустом месте.
+        lib.fail(f"some machines did not answer; {name} reached every machine that "
+                 f"did. A node that was down gets the credentials at the next "
+                 f"mop deploy; if the server was the one missing, nothing reached "
+                 f"the bus — run mop project add {origin} again")
 
     # Контроллер — тоже машина оператора: пароль мастера нового проекта
     # обязан оказаться в его каталоге сервера, иначе `mop master` здесь же
@@ -64,7 +76,7 @@ def main(argv):
     if needs_deploy:
         print(f"  {name}/.mop: {', '.join(needs_deploy)} — played by the node and "
               f"body layers, run mop deploy to play them")
-    return 0
+    return rc
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
