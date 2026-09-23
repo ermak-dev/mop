@@ -6,6 +6,7 @@ Bootstrap (#62): .mop/bootstrap.yaml проекта играет СЕРВЕР п
 сервере, аргументы прогона и проверка, что узел просит про папета своего
 проекта. Сам прогон, ключ в тело и ожидание врапера — только на живом пуле.
 """
+import json
 import os
 import sys
 import tempfile
@@ -125,6 +126,28 @@ def main():
     except AttributeError:
         failed += 1
         print("FAIL bootstrap.with_creds is missing")
+
+    # HYPOTHESIS (#128): bootstrap играется, только если у проекта есть
+    # задачи, и секретов проекта не знает. SOLUTION: рамка играется, если
+    # есть задачи или секреты; секреты едут путём к каталогу на сервере, а
+    # не значениями -- argv виден в ps. STATUS: FIXED — see #128
+    try:
+        if bootstrap.needs_play(None, None) or not bootstrap.needs_play(None, "/s/sec") \
+                or not bootstrap.needs_play("/s/t.yml", None):
+            failed += 1
+            print("FAIL needs_play: play when there are tasks or secrets, only then")
+        a = bootstrap.argv("/x/deploy/bootstrap.yml", "10.0.0.2", "pool", "/k",
+                           {}, "proj", "pu-proj-1", "/c", None, None, secrets="/s/sec")
+        extra = json.loads(a[a.index("-e", a.index("-e") + 1) + 1])
+        if extra.get("mop_secrets_dir") != "/s/sec":
+            failed += 1
+            print(f"FAIL argv must carry the secrets dir: {extra}")
+        if "mop_bootstrap_tasks" in extra:
+            failed += 1
+            print("FAIL argv without project tasks must not name any")
+    except (AttributeError, TypeError) as e:
+        failed += 1
+        print(f"FAIL secrets in bootstrap: {e}")
 
     print("bootstrap: FAILED" if failed else "bootstrap: ok")
     return 1 if failed else 0

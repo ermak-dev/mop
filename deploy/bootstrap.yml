@@ -25,10 +25,40 @@
       ansible.builtin.wait_for_connection:
         timeout: 60
 
+    # Секреты проекта (#127, #128) -- каталог целиком, заново при каждом
+    # старте: новое появляется, удалённое исчезает. До задач проекта: те
+    # могут на них опираться. Врапер кладёт файлы в клон, переменные в сессию.
+    - name: The project's secrets, removed before they are laid anew
+      when: mop_secrets_dir is defined
+      ansible.builtin.file:
+        path: "{{ MOP_HOME }}/.config/mop/project-secrets/{{ mop_project }}"
+        state: absent
+
+    - name: Where a body keeps its project's secrets
+      when: mop_secrets_dir is defined
+      ansible.builtin.file:
+        path: "{{ MOP_HOME }}/.config/mop/project-secrets"
+        state: directory
+        owner: "{{ MOP_USER }}"
+        group: "{{ MOP_USER }}"
+        mode: "0700"
+
+    - name: The project's secrets
+      when: mop_secrets_dir is defined
+      ansible.builtin.copy:
+        src: "{{ mop_secrets_dir }}/"
+        dest: "{{ MOP_HOME }}/.config/mop/project-secrets/{{ mop_project }}/"
+        owner: "{{ MOP_USER }}"
+        group: "{{ MOP_USER }}"
+        mode: "0600"
+        directory_mode: "0700"
+      no_log: true
+
     - name: The project's bootstrap configuration, when it has one
       when: mop_bootstrap_vars is defined
       ansible.builtin.include_vars:
         file: "{{ mop_bootstrap_vars }}"
 
     - name: The project's bootstrap tasks
+      when: mop_bootstrap_tasks is defined
       ansible.builtin.include_tasks: "{{ mop_bootstrap_tasks }}"

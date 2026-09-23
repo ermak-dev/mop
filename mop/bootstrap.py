@@ -48,7 +48,7 @@ import subprocess
 import sys
 import time
 
-from . import bus, config, creds, driver
+from . import bus, config, creds, driver, project_secrets
 
 # На сервере: файлы проектов и ключ к телам.
 ROOT = os.path.expanduser("~/.config/mop/bootstrap")
@@ -127,7 +127,14 @@ def refusal(req, project):
     return None
 
 
-def argv(playbook, address, user, key, settings, project, name, clone, tasks, of_vars):
+def needs_play(tasks, secrets):
+    """Играть ли рамку: у проекта есть задачи или секреты (#128). Ни того ни
+    другого -- ответ без прогона: большинству проектов хватает общего."""
+    return bool(tasks or secrets)
+
+
+def argv(playbook, address, user, key, settings, project, name, clone, tasks, of_vars,
+         secrets=None):
     """Аргументы прогона: одна машина по адресу, пользователь пула, ключ
     сервера. Ключ хоста не спрашивается и не помнится: тело пересоздаётся и
     приезжает с новым, а известного заранее у сервера нет — цена названа
@@ -136,15 +143,20 @@ def argv(playbook, address, user, key, settings, project, name, clone, tasks, of
     # несколько слов ansible режет по пробелам на несколько пар, и до ssh
     # доезжало одно `-o` («no argument after keyword -o», первый живой прогон).
     extra = {"mop_project": project, "mop_puppet": name, "mop_clone": clone,
-             "mop_bootstrap_tasks": tasks,
              "ansible_user": user,
              "ansible_ssh_private_key_file": key,
              "ansible_ssh_common_args": "-o StrictHostKeyChecking=no "
                                         "-o UserKnownHostsFile=/dev/null "
                                         "-o IdentitiesOnly=yes -o ConnectTimeout=10 "
                                         "-o LogLevel=ERROR"}
+    if tasks:
+        extra["mop_bootstrap_tasks"] = tasks
     if of_vars:
         extra["mop_bootstrap_vars"] = of_vars
+    # Секреты проекта (#127) -- путём к каталогу, не значениями: argv
+    # прогона виден в ps любому на сервере.
+    if secrets:
+        extra["mop_secrets_dir"] = secrets
     return ["ansible-playbook", "-i", f"{address},", playbook,
             "-e", json.dumps(settings, ensure_ascii=False),
             "-e", json.dumps(extra, ensure_ascii=False)]
@@ -155,12 +167,14 @@ def play(req, project):
     """Сыграть bootstrap проекта в песочницу папета. -> {ok, played, ...}.
     Нет файла — ok без прогона: большинству проектов хватает общего."""
     tasks, of_vars = files_of(ROOT, project)
-    if not tasks:
+    secrets = project_secrets.project_dir(project_secrets.ROOT, project)
+    secrets = secrets if os.path.isdir(secrets) else None
+    if not needs_play(tasks, secrets):
         return {"ok": True, "played": False, "text": f"no bootstrap for {project}"}
     name = req["name"]
     cmd = argv(PLAYBOOK, req.get("address") or "", config.get("MOP_USER"), KEY,
                config.playbook_vars(), project, name, driver.clone_dir(name),
-               tasks, of_vars)
+               tasks, of_vars, secrets)
     t0 = time.time()
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT - 10,
