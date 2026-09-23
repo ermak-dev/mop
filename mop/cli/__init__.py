@@ -169,6 +169,11 @@ def environment():
     # текущего каталога, а абсолютные были бы литералом конкретной машины.
     os.environ.setdefault("ANSIBLE_CONFIG", os.path.join(PROJECT, "ansible.cfg"))
     os.environ.setdefault("ANSIBLE_ROLES_PATH", os.path.join(PROJECT, "deploy", "roles"))
+    # Локаль прогонов. Ansible требует UTF-8 и берёт её из окружения, а свежая
+    # машина несёт LANG=C: сгенерированных UTF-8 локалей там нет, и первый же
+    # `mop setup` на выделенном сервере отказывался стартовать (#92). C.UTF-8
+    # встроена в glibc и генерации не требует; заданное оператором не трогаем.
+    os.environ.setdefault("LC_ALL", "C.UTF-8")
 
 
 def run(fn, argv):
