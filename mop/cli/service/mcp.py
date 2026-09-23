@@ -225,7 +225,7 @@ def on_inbox(m):
     общий инбокс проекта, «кто из мастеров жив»."""
     if m.get("verb") == "who":
         d = my_session() or {}
-        return {"master": MASTER_ID, "project": bus.PROJECT,
+        return {"master": MASTER_ID, "project": bus.PROJECT, "user": bus.login(),
                 "session": d.get("name"), "cwd": d.get("cwd")}
     sock = master_socket()
     if not sock:
@@ -263,12 +263,12 @@ def agents(project: str = "") -> str:
 def _roster(project):
     """Ростер мастера: Nomad знает про папета то, чего не знает узел, —
     состояние аллокации, профиль LLM, репозиторий."""
-    rows = [("PUPPET", "NODE", "ALLOC", "STATE", "LLM", "REPOSITORY")]
+    rows = [("PUPPET", "NODE", "ALLOC", "STATE", "OWNER", "LLM", "REPOSITORY")]
     for r in puppets.puppet_rows():
         if project and project not in r["origin"]:
             continue
         rows.append((r["name"], r["node"], r["alloc_status"], r["state"],
-                     r["llm"], r["origin"]))
+                     r["owner"], r["llm"], r["origin"]))
     return ["pool puppets:", *table(rows)] if len(rows) > 1 else ["pool puppets: none"]
 
 
@@ -306,11 +306,11 @@ def _masters():
         return ["", f"masters of project {bus.PROJECT}: bus unavailable ({e})"]
     if not found:
         return ["", f"no masters of project {bus.PROJECT} on the bus"]
-    rows = [("MASTER (address for send)", "SESSION", "DIRECTORY")]
+    rows = [("MASTER (address for send)", "USER", "SESSION", "DIRECTORY")]
     for d in sorted(found, key=lambda d: str(d.get("master"))):
         mine = " (this is me)" if d.get("master") == MASTER_ID else ""
-        rows.append((str(d.get("master")), (d.get("session") or "-") + mine,
-                     d.get("cwd") or "-"))
+        rows.append((str(d.get("master")), d.get("user") or "-",
+                     (d.get("session") or "-") + mine, d.get("cwd") or "-"))
     return ["", "masters of project:", *table(rows)]
 
 
@@ -323,9 +323,13 @@ def _masters():
     "a received message (from-name), name/pid of a local session. Returns a "
     "delivery verdict, not the fact of sending. notify_when_idle=true does "
     "not block: when the recipient frees up, a notification arrives as a "
-    "separate message."))
+    "separate message. A master's message to a puppet makes the master its "
+    "owner (the OWNER column); a puppet led by another master — work in its "
+    "clone, or dispatched in the last minutes — refuses, naming the owner. "
+    "force=true takes it over: only when that master is gone or agrees."))
 def send(to: str, message: str, priority: str = "next",
-         notify_when_idle: bool = False, wait_seconds: int = 0) -> str:
+         notify_when_idle: bool = False, wait_seconds: int = 0,
+         force: bool = False) -> str:
     if priority not in session.PRIORITIES:
         return f"priority must be one of {', '.join(session.PRIORITIES)}"
     if not message.strip():
@@ -337,7 +341,8 @@ def send(to: str, message: str, priority: str = "next",
     # потому что больше адресов не бывает, и «не нашёл здесь» обязано вести к
     # нему, а не в LookupError: ровно этим отчёты папетов и терялись.
     if to.startswith(puppets.JOB_PREFIX):
-        return _send_to_puppet(to, message, priority, notify_when_idle, wait_seconds)
+        return _send_to_puppet(to, message, priority, notify_when_idle, wait_seconds,
+                               force)
     here = _local_session(to)
     if here:
         return _send_locally(here, message, priority, wait_seconds)
@@ -377,7 +382,8 @@ def _send_to_master(name, message, priority):
     return f"{name}: delivered (msg_id={r.get('msg_id')})"
 
 
-def _send_to_puppet(name, message, priority, notify_when_idle, wait_seconds):
+def _send_to_puppet(name, message, priority, notify_when_idle, wait_seconds,
+                    force=False):
     """Доставка через агента узла.
 
     Ожидание простоя целиком уехало на узел: подписку держит агент рядом с
@@ -393,6 +399,10 @@ def _send_to_puppet(name, message, priority, notify_when_idle, wait_seconds):
                              # для ответа: без этого «ответь мне» указывает в
                              # никуда, а папет узнаёт об этом уже отказом.
                              from_name=my_name(),
+                             # Владелец задания (#161): мастер называет себя
+                             # логином, папет -- никем и аренды не берёт.
+                             owner=bus.login() if MASTER else None,
+                             force=force,
                              reply_to=MY_INBOX, timeout=wait + bus.TIMEOUT)
     except bus.BusError as e:
         return f"{name}: NOT DELIVERED — {e}"
@@ -400,6 +410,8 @@ def _send_to_puppet(name, message, priority, notify_when_idle, wait_seconds):
         return f"{name}: NOT DELIVERED — {result['error']}"
 
     verdict = f"{name}: delivered (msg_id={result['msg_id']})"
+    if result.get("owner_note"):
+        verdict += f"; {result['owner_note']}"
     if wait:
         verdict += f", idle: {result.get('idle') or 'did not wait it out in ' + str(wait) + 's'}"
     if notify_when_idle and not wait:

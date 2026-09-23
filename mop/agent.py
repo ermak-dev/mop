@@ -39,7 +39,7 @@ try:
 except ImportError:
     sys.exit("bus library needed: pip install --user --break-system-packages nats-py")
 
-from . import bus, driver, usage
+from . import bus, driver, lease, usage
 from .driver import clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
@@ -181,7 +181,8 @@ async def clone_facts(name):
         f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
         f'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
         f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
-        f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"')
+        f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"; '
+        f'echo "owner=$(head -1 {lease.FILE} 2>/dev/null)"')
     kv = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
     if "dirty" not in kv:
         return None
@@ -192,7 +193,9 @@ async def clone_facts(name):
     return {"cur": kv.get("cur") or "(detached)",
             "def": (kv.get("def") or "").rsplit("/", 1)[-1] or None,
             "origin": kv.get("origin") or None,
-            "dirty": dirty, "ahead": ahead}
+            "dirty": dirty, "ahead": ahead,
+            # Кто ведёт задание (#161): сырая запись, живость считает мастер.
+            "owner": lease.parse(kv.get("owner"))}
 
 
 async def du_kb(name):
@@ -328,6 +331,42 @@ async def v_local(req):
     return {"node": node_name(), "puppets": dict(zip(alive, got))}
 
 
+# Проверка владельца и запись -- под замком на папета: два `send` в одно
+# окно иначе оба увидели бы «ничей» (#161). Агент на узле один, поэтому
+# замка в процессе достаточно.
+_owner_locks = {}
+
+
+async def _claim(name, req):
+    """Аренда задания перед доставкой. -> (отказ|None, откат|None, заметка|None).
+
+    Откат -- прежняя запись: не доехало сообщение -- возвращаем её, иначе
+    неудачный `send` держал бы папета окно диспатча впустую."""
+    me = req.get("owner")
+    if not me:
+        return None, None, None
+    clone = await clone_facts(name)
+    owner = (clone or {}).get("owner")
+    act, note = lease.verdict(owner, me, clone, time.time(), bool(req.get("force")))
+    if act == "refuse":
+        return f"{name}: {note}", None, None
+    if act != "take" or clone is None:
+        return None, None, note
+    path = f"{clone_dir(name)}/{lease.FILE}"
+    out, code = await bsh(name, f"printf %s {shlex.quote(lease.render(me, time.time()))} "
+                                f"> {shlex.quote(path)}")
+    if code not in (0, None):
+        return f"{name}: owner not recorded: {why(out, code)}", None, None
+    return None, (path, owner), note
+
+
+async def _unclaim(name, undo):
+    path, owner = undo
+    body = lease.render(owner["user"], owner["at"]) if owner else ""
+    await bsh(name, f"printf %s {shlex.quote(body)} > {shlex.quote(path)}"
+                    if body else f"rm -f {shlex.quote(path)}")
+
+
 async def v_send(req):
     """Сообщение в сессию папета. -> {msg_id} либо {error}.
 
@@ -337,6 +376,10 @@ async def v_send(req):
     раньше ждал простоя, сидя в аллокации."""
     name = req["name"]
     wait = min(max(int(req.get("wait") or 0), 0), IDLE_WAIT)
+    async with _owner_locks.setdefault(name, asyncio.Lock()):
+        refused, undo, note = await _claim(name, req)
+    if refused:
+        return {"error": refused}
     # Цель — клон, а не сокет: session.py резолвит сессию сам, внутри тела, где
     # только и лежат её файлы. Снаружи сокет контейнерного папета не виден.
     out = await session_json(name, _session_cmd(
@@ -345,7 +388,11 @@ async def v_send(req):
         "--from-name", req.get("from_name", "mop"),
         "--wait", wait), timeout=wait + 20)
     if out.get("error"):
+        if undo:
+            await _unclaim(name, undo)
         return out
+    if note:
+        out["owner_note"] = note
     await _event("send", name, text=f"from {req.get('from_name', 'mop')}")
     if req.get("notify") and not wait:
         # Куда отвечать, говорит сам мастер: инбокс адресуется мастером, а не

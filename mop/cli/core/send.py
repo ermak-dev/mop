@@ -12,6 +12,7 @@ else is a local session, reached directly through its uds inbox.
   --priority now|next|later   where in the recipient's queue (default next)
   --mode bypass|prompting     which permission mode to present as (bypass)
   --quiet                     silent, exit code only
+  --force                     take over a puppet another master leads (#161)
 
 Channel protocol — CHANNEL.md, bus subjects — BUS.md.
 """
@@ -37,12 +38,14 @@ def to_puppet(a, body):
     """Через шину: сокет папета host-local, до него дотягивается агент узла."""
     wait = min(a.wait or 0, MAX_WAIT)
     r = bus.request(lib.running_node(a.target), "send", name=a.target, message=body,
-                    priority=a.priority, wait=wait, timeout=wait + bus.TIMEOUT)
+                    priority=a.priority, wait=wait, owner=bus.login(),
+                    force=a.force, timeout=wait + bus.TIMEOUT)
     if "error" in r:
         sys.exit(f"{a.target}: NOT DELIVERED — {r['error']}")
     if a.quiet:
         return 0 if (a.wait is None or r.get("idle")) else 2
-    print(f"-> {a.target} msg_id={r['msg_id']}")
+    print(f"-> {a.target} msg_id={r['msg_id']}"
+          + (f"; {r['owner_note']}" if r.get("owner_note") else ""))
     if a.wait is None:
         return 0
     if not r.get("idle"):
@@ -83,6 +86,7 @@ def main(argv):
     p.add_argument("--priority", choices=session.PRIORITIES, default="next")
     p.add_argument("--mode", choices=session.MODES, default="bypass")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--force", action="store_true")
     p.add_argument("--wait", nargs="?", type=int, const=MAX_WAIT, default=None)
     a = p.parse_args(argv)
 

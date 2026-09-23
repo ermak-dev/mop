@@ -9,7 +9,7 @@ import os
 import re
 import time
 
-from . import bus, config, driver, llm, nomad
+from . import bus, config, driver, lease, llm, nomad
 
 PROJECT = config.PROJECT
 
@@ -1071,6 +1071,7 @@ def roster(stale=False):
     got, by_node = [], {}
     for item in items(stale=stale):
         item["state"] = None
+        item["owner"] = None
         alloc = item["alloc"]
         if alloc and alloc["ClientStatus"] == "running":
             by_node.setdefault(alloc["NodeName"], []).append(item)
@@ -1095,9 +1096,19 @@ def roster(stale=False):
                 i["state"] = f"AGENT SILENT ({answer})"
             continue
         seen = (answer or {}).get("puppets") or {}
+        now = time.time()
         for i in its:
-            i["state"] = puppet_state(seen.get(i["job"]["ID"]))
+            f = seen.get(i["job"]["ID"])
+            i["state"] = puppet_state(f)
+            i["owner"] = owner_of(f, now)
     return got
+
+
+def owner_of(facts, now):
+    """Кто ведёт задание папета (#161), если аренда живая; иначе None."""
+    clone = ((facts or {}).get("clone")) or None
+    owner = (clone or {}).get("owner")
+    return owner["user"] if lease.live(owner, clone, now) else None
 
 
 def rows_from(items):
@@ -1119,6 +1130,7 @@ def _row(item, disk_kb=None):
         "node": alloc["NodeName"] if alloc else "-",
         "alloc_status": status,
         "state": state,
+        "owner": item.get("owner") or "-",
         "llm": meta.get("llm", config.get("MOP_DEFAULT_LLM")),
         "origin": meta.get("origin", "?"),
         "disk_kb": disk_kb,
