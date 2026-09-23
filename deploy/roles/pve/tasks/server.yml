@@ -21,6 +21,30 @@
          | selectattr('pve_routes', 'defined')
          | map(attribute='inventory_hostname') | list }}
 
+# Срез сети тел считается из базы VMID узла, и база у каждого гипервизора
+# обязана быть своя (docstring pve.address_of_vmid, #58). Ничто этого не
+# проверяло: два узла на общем дефолте объявляли один и тот же срез, прогон
+# молча ставил каждую подсеть дважды, второй `ip route replace` затирал
+# первый, и до правды дело доходило проверкой маршрута ниже — чей отказ про
+# адресацию не говорит ничего. Совпавший срез означает вдобавок одинаковые
+# АДРЕСА тел на двух машинах: маршрут тут лишь первый симптом (#93).
+- name: No two hypervisors may announce the same slice of the bodies' network
+  ansible.builtin.assert:
+    that: announced | length == announced | unique | list | length
+    fail_msg: >-
+      announced by more than one hypervisor:
+      {% for c in announced | unique %}
+      {%- if (announced | select('equalto', c) | list | length) > 1 %}{{ c }} {% endif %}
+      {%- endfor %}
+      Their VMID bases collide, so their slices -- and their bodies'
+      addresses -- collide too. Give each hypervisor its own base in the
+      inventory: mop_pve_vmid_base under its host in the proxmox group.
+      Who announced what:
+      {% for h in pve_hops %}{{ h }}={{ hostvars[h].pve_routes | join(',') }} {% endfor %}
+  vars:
+    announced: "{{ pve_hops | map('extract', hostvars, 'pve_routes') | flatten }}"
+  when: pve_hops | length > 0
+
 - name: The routes, as a unit that survives a reboot
   ansible.builtin.template:
     src: mop-routes.service.j2
