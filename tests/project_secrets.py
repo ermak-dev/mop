@@ -75,6 +75,9 @@ def main():
             failed.append("a secret file must be 0600")
         if stat.S_IMODE(os.stat(os.path.join(root, "proj")).st_mode) != 0o700:
             failed.append("a project's secrets dir must be 0700")
+        # Корень тоже: его листинг -- это какие у пула проекты с секретами.
+        if stat.S_IMODE(os.stat(root).st_mode) != 0o700:
+            failed.append("the secrets root must be 0700, not what makedirs left")
         if not ps.remove_file(root, "proj", "config/app.json") or \
                 ps.remove_file(root, "proj", "config/app.json"):
             failed.append("remove_file must say whether there was such a file")

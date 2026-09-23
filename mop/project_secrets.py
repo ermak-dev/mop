@@ -73,11 +73,19 @@ def _write(path, data):
     os.replace(tmp, path)
 
 
+def _open_project(root, project):
+    """Корень и каталог проекта, оба 0700: makedirs отдаёт промежуточным
+    каталогам права по umask, и листинг корня -- какие проекты с секретами --
+    был бы виден всем на сервере."""
+    _mkdir(root)
+    _mkdir(project_dir(root, project))
+
+
 def put_file(root, project, name, data):
     name = valid_name(name)
     if len(data) > MAX_BYTES:
         raise ValueError(f"{name}: {len(data)} bytes, a secret file is at most {MAX_BYTES}")
-    _mkdir(project_dir(root, project))
+    _open_project(root, project)
     _write(os.path.join(project_dir(root, project), FILES, name), data)
     return name
 
@@ -117,7 +125,7 @@ def _vars(root, project):
 
 
 def _write_vars(root, project, values):
-    _mkdir(project_dir(root, project))
+    _open_project(root, project)
     text = "".join(f"{k}={values[k]}\n" for k in sorted(values))
     _write(os.path.join(project_dir(root, project), VARS), text.encode())
 
