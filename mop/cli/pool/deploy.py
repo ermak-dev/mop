@@ -139,11 +139,19 @@ def main(argv):
 
     lib.section("ansible: site.yml")
     rc = lib.play(SITE, projects.names(origins, legacy), manifests(origins))
-    if rc:
-        # Как и раньше: сборка кредов и проверка ростера не идут после
-        # красного прогона, и это сказано, а не проглочено.
+    if rc and rc != lib.UNREACHABLE:
+        # Сборка кредов и проверка ростера не идут после красного прогона, и
+        # это сказано, а не проглочено.
         lib.fail(f"ansible exited {rc}; server credentials and the roster check skipped")
         return rc
+    if rc == lib.UNREACHABLE:
+        # Выключенная машина — не красный прогон: на всех, кто ответил, слои
+        # разложены. Остановиться здесь значило бы не собрать креды и не
+        # показать ростер до тех пор, пока узел не вернут, — а именно тогда
+        # они и нужны. Машине по возвращении нужен свой прогон, и это
+        # сказано.
+        lib.fail("some machines did not answer; everything that did is "
+                 "configured. Run mop deploy again when they are back")
 
     # Контроллер — тоже машина оператора: его каталог сервера собирается здесь
     # из secrets/ и bootstrap.json, а на другую машину его везёт `mop join`.
