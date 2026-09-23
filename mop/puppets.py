@@ -459,6 +459,21 @@ def project_constraint(project):
             "RTarget": f"(^|,)({ANY_PROJECT}|{re.escape(project)})(,|$)"}
 
 
+def unserved(project, nodes):
+    """Некуда ли поставить папета проекта. -> bool. Чистая функция.
+
+    nodes -- [{status, eligible, meta}] узлов пула. Узел годится, если он
+    ready, открыт для планирования и его meta.mop_projects проходит то же
+    выражение, что уезжает в Nomad (project_constraint): иначе диагноз и
+    планировщик разошлись бы на `mop2` против `mop`. Узел без ключа в meta
+    ограничение не проходит -- так же отвечает и Nomad (#118)."""
+    rx = re.compile(project_constraint(project)["RTarget"])
+    return not any(n.get("status") == "ready" and n.get("eligible", True)
+                   and "mop_projects" in (n.get("meta") or {})
+                   and rx.search(n["meta"]["mop_projects"])
+                   for n in nodes)
+
+
 def project_ids(lines):
     """Строки памяти/аргументов -> ({origin'ы}, {легаси-имена}).
 
@@ -542,7 +557,7 @@ def nomad_items(project=None, stale=False):
     Аллокация приезжает вместе с джобом намеренно: клиент за ней отдельно уже
     не сходит, а N+1 запрос по шине вместо N+1 вызова API — та же цена, но с
     сетью между ними."""
-    items = []
+    items, placement = [], None
     for j in sorted(nomad_jobs(project), key=lambda j: j["ID"]):
         alloc, err, task, reason = None, None, None, None
         try:
@@ -553,6 +568,13 @@ def nomad_items(project=None, stale=False):
         except Exception as e:
             err = nomad.describe_error(e)
         item = {"job": j, "alloc": alloc, "error": err, "task": task, "reason": reason}
+        if not alloc and not err and _queued(j):
+            # Очередь без узла, который служит проекту, -- не нехватка мест
+            # (#118). Узлы -- один раз на ростер и только если есть очередь.
+            if placement is None:
+                placement = _placement_nodes()
+            item["unserved"] = unserved(
+                project_of((j.get("Meta") or {}).get("origin", "")), placement)
         if stale:
             # Полный джоб, а не заглушка из списка: врапер и ограничение
             # размещения лежат в спеке, а её get_jobs не отдаёт.
@@ -562,6 +584,18 @@ def nomad_items(project=None, stale=False):
                 item["stale"] = False
         items.append(item)
     return items
+
+
+def _queued(job):
+    """Сколько аллокаций джоба ждёт места у планировщика."""
+    return (job.get("JobSummary", {}).get("Summary", {}).get("puppets") or {}).get("Queued", 0)
+
+
+def _placement_nodes():
+    """Узлы пула для unserved(): состояние из nomad_pool, meta -- по узлу.
+    Только на сервере."""
+    metas = nomad.nodes_meta()
+    return [dict(n, meta=metas.get(n["name"], {})) for n in nomad_pool()]
 
 
 def items(project=None, stale=False):
@@ -1220,6 +1254,7 @@ def nomad_pool():
 #                             restart-backoff (до 30 мин)
 #   no model quota/error   -> печать /model в пейн; рестарт квоту не вернёт
 #   queued без аллокации   -> мест в пуле нет, лечится не отсюда
+#   queued, узла нет       -> образа проекта нет ни на одном узле: mop project add
 #   агент узла молчит      -> отсюда никак: лечится юнитом на самом узле
 def spec_is_stale(job):
     """Опасна ли эта спека на узле-гипервизоре. Чистая функция.
@@ -1267,7 +1302,7 @@ def diagnose():
             continue
         if not alloc or alloc["ClientStatus"] in ("lost", "unknown", "failed",
                                                   "pending"):
-            issues.append(_placement_issue(job, alloc))
+            issues.append(_placement_issue(job, alloc, item.get("unserved")))
             continue
         action = _action_for(item["state"])
         if action is not False:
@@ -1276,7 +1311,9 @@ def diagnose():
     return issues
 
 
-def _placement_issue(job, alloc):
+def _placement_issue(job, alloc, unserved=False):
+    """Диагноз джоба, который не стоит. unserved -- пометка сервиса
+    кластера: ни один готовый узел не обслуживает проект (#118)."""
     name = job["ID"]
     if alloc and alloc["ClientStatus"] in ("pending", "failed"):
         return {"name": name, "alloc": alloc, "action": "stop",
@@ -1284,8 +1321,14 @@ def _placement_issue(job, alloc):
     if alloc:
         return {"name": name, "alloc": alloc, "action": "stop",
                 "diagnosis": f"allocation {alloc['ClientStatus']}"}
-    queued = (job.get("JobSummary", {}).get("Summary", {}).get("puppets") or {}).get("Queued", 0)
-    if queued:
+    if _queued(job) and unserved:
+        # Слоты тут ни при чём: ограничение размещения по образу (#10) не
+        # пускает никуда, и ожидание не вылечит ничего.
+        origin = (job.get("Meta") or {}).get("origin") or "<origin>"
+        return {"name": name, "alloc": None, "action": None,
+                "diagnosis": f"queued — no ready node has an image of "
+                             f"{project_of(origin)}: mop project add {origin}"}
+    if _queued(job):
         return {"name": name, "alloc": None, "action": None,
                 "diagnosis": "queued — no free slots in the pool"}
     return {"name": name, "alloc": None, "action": None, "diagnosis": "no allocation"}
