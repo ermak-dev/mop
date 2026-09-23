@@ -157,26 +157,41 @@ def main(argv):
     return run(importlib.import_module(modname).main, rest)
 
 
-def utf8_locale(env):
-    """Какую локаль поставить прогонам, либо None — и так UTF-8.
+FALLBACK_LOCALE = "C.UTF-8"
 
-    Ansible требует UTF-8 и берёт её из окружения. Свежая машина несёт
-    `LANG=C`, сгенерированных UTF-8 локалей там нет, и первый же `mop setup`
-    на выделенном сервере отказывался стартовать.
 
-    Машину, у которой локаль настоящая, не трогаем: установка вправе говорить
-    по-русски, и подменять её на `C.UTF-8` значит менять язык вывода там, где
-    об этом не просили. Старшинство — как у самой libc: LC_ALL, потом
-    LC_CTYPE, потом LANG; решает ПЕРВАЯ заданная, а не первая подходящая.
+def locale_usable(name):
+    """Есть ли такая локаль на этой машине. Побочных эффектов не оставляет:
+    что выставили на пробу, тем же вызовом и возвращаем обратно."""
+    import locale as loc
+    try:
+        loc.setlocale(loc.LC_ALL, name)
+        return True
+    except (loc.Error, ValueError):
+        return False
+    finally:
+        try:
+            loc.setlocale(loc.LC_ALL, "C")
+        except Exception:
+            pass
 
-    `C.UTF-8` встроена в glibc и генерации не требует — тем и хороша как
-    запасная."""
-    for key in ("LC_ALL", "LC_CTYPE", "LANG"):
-        value = env.get(key)
-        if value:
-            normal = value.upper().replace("-", "").replace("_", "")
-            return None if normal.endswith("UTF8") else "C.UTF-8"
-    return "C.UTF-8"
+
+def run_locale(wanted, usable=locale_usable):
+    """Локаль прогонов: локаль УСТАНОВКИ, если она на машине есть.
+
+    Считается от настройки, а не от унаследованного окружения, и это не
+    придирка. Окружение как раз и бывает сломано: ssh привозит `LC_*` с
+    машины оператора, на сервере такой локали нет, и ansible отказывается
+    стартовать — при том что `LANG` и `LC_CTYPE` выглядят исправными, так что
+    по ним не понять ничего. Мы ставим `LC_ALL`, а он старше всех категорий
+    разом, поэтому чинит и чужие `LC_TIME` с `LC_NUMERIC`.
+
+    Ansible требует UTF-8; запасная — встроенная в glibc `C.UTF-8`, она есть
+    везде и генерации не требует."""
+    wanted = (wanted or "").strip()
+    if not wanted.upper().replace("-", "").replace("_", "").endswith("UTF8"):
+        return FALLBACK_LOCALE
+    return wanted if usable(wanted) else FALLBACK_LOCALE
 
 
 def environment():
@@ -191,10 +206,11 @@ def environment():
     # текущего каталога, а абсолютные были бы литералом конкретной машины.
     os.environ.setdefault("ANSIBLE_CONFIG", os.path.join(PROJECT, "ansible.cfg"))
     os.environ.setdefault("ANSIBLE_ROLES_PATH", os.path.join(PROJECT, "deploy", "roles"))
-    # Локаль прогонов: ansible требует UTF-8 (#92).
-    fallback = utf8_locale(os.environ)
-    if fallback:
-        os.environ["LC_ALL"] = fallback
+    # Локаль прогонов: ansible требует UTF-8 (#92). LC_ALL, а не LANG:
+    # он старше всех категорий разом и перебивает чужие LC_*, приехавшие с
+    # машины оператора по ssh.
+    from .. import config as _config
+    os.environ["LC_ALL"] = run_locale(_config.get("MOP_LOCALE"))
 
 
 def run(fn, argv):

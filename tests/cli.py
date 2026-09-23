@@ -125,19 +125,24 @@ def main():
     # Локаль прогонов (#92): ansible требует UTF-8 и берёт её из окружения, а
     # свежая машина несёт LANG=C. Ставит её диспетчер, потому что зовут
     # прогон и `mop setup`, и `mop deploy`, и сборка образа.
-    for env, want in [
-            ({}, "C.UTF-8"),                       # ничего не сказано
-            ({"LANG": "C"}, "C.UTF-8"),            # свежая машина
-            ({"LANG": "POSIX"}, "C.UTF-8"),
-            ({"LANG": "ru_RU.UTF-8"}, None),       # установка говорит по-русски
-            ({"LANG": "ru_RU.utf8"}, None),        # то же имя, другая запись
-            ({"LC_ALL": "en_US.UTF-8", "LANG": "C"}, None),   # LC_ALL старше
-            ({"LC_ALL": "C", "LANG": "ru_RU.UTF-8"}, "C.UTF-8"),
-            ({"LC_CTYPE": "ru_RU.UTF-8", "LANG": "C"}, None)]:
-        got = cli.utf8_locale(env)
+    # Локаль прогона считается от локали УСТАНОВКИ, а не от унаследованного
+    # окружения. Окружение как раз и бывает сломано: ssh привозит LC_* с
+    # машины оператора, и на сервере такой локали нет — ansible тогда не
+    # стартует, хотя LANG и LC_CTYPE выглядят исправными.
+    have = {"C.UTF-8", "ru_RU.UTF-8"}
+    for wanted, want in [("ru_RU.UTF-8", "ru_RU.UTF-8"),   # есть на машине
+                         ("de_DE.UTF-8", "C.UTF-8"),       # нет — запасная
+                         ("C", "C.UTF-8"),                 # не UTF-8 — запасная
+                         ("", "C.UTF-8")]:
+        got = cli.run_locale(wanted, usable=have.__contains__)
         if got != want:
             failed += 1
-            print(f"FAIL utf8_locale({env}) -> {got!r}, wanted {want!r}")
+            print(f"FAIL run_locale({wanted!r}) -> {got!r}, wanted {want!r}")
+    # Запасная берётся, даже если и её на машине нет: сказать нечего, а
+    # C.UTF-8 встроена в glibc и есть везде, где есть сам glibc.
+    if cli.run_locale("ru_RU.UTF-8", usable=lambda _: False) != "C.UTF-8":
+        failed += 1
+        print("FAIL run_locale must fall back to C.UTF-8")
 
     # Чем запускать команду, которой нужны права root (#91). Под root —
     # ничем: повышать нечего, а на выделенном сервере ещё и нечем, там
