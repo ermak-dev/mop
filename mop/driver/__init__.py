@@ -49,7 +49,7 @@ from .. import config, plugins
 # Глаголы контракта. Список закрыт и проверяется громко при загрузке: агент
 # зовёт их из петли, и отсутствующий argv прочитается там как «узел молчит».
 VERBS = ("ensure", "destroy", "bodies", "capacity", "argv", "run_argv", "push",
-         "projects_dir", "attach_argv", "repair_argv", "admit")
+         "push_many", "projects_dir", "attach_argv", "repair_argv", "admit")
 
 DEFAULT = config.SETTINGS["MOP_DRIVER"]
 
