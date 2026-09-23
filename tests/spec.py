@@ -141,6 +141,16 @@ def main():
         bad += 1
         print("FAILED  the constraint must follow the origin's project, not the name")
 
+    # Врапер -- шелл в base64 спеки, и синтаксическая ошибка в нём видна
+    # только на узле, падением каждого подъёма. bash -n ловит её здесь.
+    cases += 1
+    import subprocess
+    r = subprocess.run(["bash", "-n"], input=puppets.WRAPPER, text=True,
+                       capture_output=True)
+    if r.returncode:
+        bad += 1
+        print(f"FAILED  the wrapper is not valid bash: {r.stderr.strip()}")
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 
