@@ -53,3 +53,33 @@
   retries: 10
   delay: 3
   changed_when: false
+
+# Сборщик образов (#123): `mop driver build` за шиной. Под пользователем
+# контроллера -- тем, кто сейчас играет этот прогон: у него инвентарь и
+# ключи к гипервизорам. Контроллер -- сам сервер, поэтому его дом и имя
+# берутся из окружения прогона.
+- name: Image builder unit
+  become: yes
+  ansible.builtin.template:
+    src: mop-builder.service.j2
+    dest: /etc/systemd/system/mop-builder.service
+    mode: "0644"
+  vars:
+    controller_user: "{{ lookup('env', 'USER') }}"
+    controller_home: "{{ lookup('env', 'HOME') }}"
+  notify: restart mop-builder
+
+- name: The controller's code changed under the builder
+  ansible.builtin.debug:
+    msg: "mop package changed on the controller — restarting mop-builder"
+  changed_when: (mop_server_version | default({})) is changed
+  notify: restart mop-builder
+
+- name: Enable and start the builder
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-builder
+    enabled: yes
+    state: started
+    daemon_reload: yes
+

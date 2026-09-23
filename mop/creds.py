@@ -55,7 +55,11 @@ WSS_PATH = "/nats"
 def server_dir(host=None):
     """Каталог кредов сервера. Ключ — адрес, и только он: у двух серверов два
     каталога, и переменная окружения переключает их вместе с NOMAD_ADDR."""
-    return os.path.join(ROOT, host or config.get("MOP_SERVER_LAN"))
+    # MOP_SERVER_DIR -- каталог названный прямо (#123): сборщик работает под
+    # пользователем контроллера, а на шину ходит как `service` из каталога
+    # пользователя пула, а не как человек, чьи креды лежат у контроллера.
+    return os.environ.get("MOP_SERVER_DIR") or os.path.join(
+        ROOT, host or config.get("MOP_SERVER_LAN"))
 
 
 def user_of(project):

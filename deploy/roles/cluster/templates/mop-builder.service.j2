@@ -1,0 +1,20 @@
+[Unit]
+Description=mop-builder (сборщик образов проектов: mop driver build за шиной, mop.admin.build.rpc)
+After=network-online.target nats.service mop-cluster.service
+Wants=network-online.target
+
+[Service]
+# Под пользователем контроллера, а не пула (#123): плейбук сборки идёт его
+# инвентарём, его .env и его ключами к гипервизорам -- тем же, чем идёт
+# `mop deploy`. На шину -- как service, каталогом сервера пользователя пула:
+# человек на шине за сервис не отвечает (#104).
+User={{ controller_user }}
+WorkingDirectory={{ controller_home }}/mop
+Environment=MOP_SERVER_DIR={{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}
+Environment=PYTHONUNBUFFERED=1
+ExecStart={{ controller_home }}/mop/bin/mop cluster builder
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
