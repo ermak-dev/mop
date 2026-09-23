@@ -1,0 +1,27 @@
+"""wipe a puppet's working copy: mop wipe <name>
+
+The clone is reset to HEAD (unsaved and untracked changes are gone), the
+target directory is removed entirely. The agent refuses if the tmux session
+is alive: a bare wipe is for a stopped puppet — the full cycle is mop recycle.
+"""
+import sys
+
+from mop.cli import lib
+from mop import nomad, puppets
+
+
+def main(argv):
+    if len(argv) != 1:
+        lib.usage(__doc__)
+    name = argv[0]
+    lib.guard(name)
+    alloc = nomad.latest_alloc(name)
+    if not alloc:
+        sys.exit(f"{name}: no allocation — node unknown")
+    r = puppets.wipe(alloc["NodeName"], name)
+    print(f"{name}: clone reset to HEAD, target wiped ({r['target']})")
+
+
+
+# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
+main = lib.cluster(main)

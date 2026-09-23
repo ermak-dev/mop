@@ -1,0 +1,24 @@
+"""push claude.ai credentials and LLM keys to pool nodes: mop login
+
+Travels as the `write` verb to the node agent, falling back to a sysbatch
+job for a node whose agent is silent. There's no Nomad token here and never
+will be: nodes lost it when the move to the bus happened.
+"""
+from mop.cli import lib
+from mop import keys
+
+
+def main(argv):
+    if argv:
+        lib.usage(__doc__)
+    results, what, note = keys.push_login()
+    if note:
+        print(f"LLM keys: {note}")
+    print("pushing " + " + ".join(what) + " to pool nodes")
+    for node in sorted(results):
+        print(f"  {node}: {results[node]}")
+
+
+
+# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
+main = lib.cluster(main)

@@ -1,0 +1,30 @@
+"""space on pool nodes: mop disk [node]
+
+df on the filesystem where puppet clones and target directories live.
+This is a node-level verb: it refuses in a master shell — host space is
+the operator's to see.
+"""
+from mop.cli import lib
+from mop import bus, nomad
+from mop.render import table
+
+
+def main(argv):
+    if len(argv) > 1:
+        lib.usage(__doc__)
+    nodes = [argv[0]] if argv else sorted(nomad.ready_nodes())
+    answers = bus.request_many({n: {"verb": "disk"} for n in nodes})
+    rows = [("NODE", "FS", "FREE", "TOTAL")]
+    for n in nodes:
+        a = answers.get(n)
+        why = bus.failure(a)
+        if why:
+            rows.append((n, why, "", ""))
+        else:
+            rows.append((n, a["path"], f"{a['free_gb']} GB", f"{a['total_gb']} GB"))
+    print("\n".join(table(rows)))
+
+
+
+# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
+main = lib.cluster(main)

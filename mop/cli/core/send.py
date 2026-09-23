@@ -1,0 +1,100 @@
+"""send a message to a pool puppet or a session on this machine
+
+  mop send <target> <text>            send
+  mop send <target> -                 text from stdin
+  mop send <target> <text> --wait[=N] send and wait until the recipient goes free
+  mop send --list                     live sessions on this machine
+
+<target> — puppet name (pu-<project>-1), session name, pid, directory, or socket
+path. A puppet is recognized by the pu- prefix and reached over the bus; anything
+else is a local session, reached directly through its uds inbox.
+
+  --priority now|next|later   where in the recipient's queue (default next)
+  --mode bypass|prompting     which permission mode to present as (bypass)
+  --quiet                     silent, exit code only
+
+Channel protocol — CHANNEL.md, bus subjects — BUS.md.
+"""
+import argparse
+import sys
+
+from mop.cli import lib
+from mop import bus, session, puppets
+from mop.render import table
+
+MAX_WAIT = 600
+
+
+def show_sessions():
+    rows = [(d.get("name") or "-", str(d.get("pid")),
+             "alive" if session.socket_alive(d["messagingSocketPath"]) else "dead",
+             d.get("status") or "-", d.get("cwd") or "-")
+            for d in session.sessions()]
+    print("\n".join(table(rows)) if rows else "no live sessions")
+
+
+def to_puppet(a, body):
+    """Через шину: сокет папета host-local, до него дотягивается агент узла."""
+    wait = min(a.wait or 0, MAX_WAIT)
+    r = bus.request(lib.running_node(a.target), "send", name=a.target, message=body,
+                    priority=a.priority, wait=wait, timeout=wait + bus.TIMEOUT)
+    if "error" in r:
+        sys.exit(f"{a.target}: NOT DELIVERED — {r['error']}")
+    if a.quiet:
+        return 0 if (a.wait is None or r.get("idle")) else 2
+    print(f"-> {a.target} msg_id={r['msg_id']}")
+    if a.wait is None:
+        return 0
+    if not r.get("idle"):
+        print(f"waited {wait}s — puppet never reported going free")
+        return 2
+    print(f"<- {r['idle']}")
+    return 0
+
+
+def to_session(a, body):
+    sess = session.find(a.target)
+    sock = sess["messagingSocketPath"]
+    if not session.socket_alive(sock):
+        sys.exit(f"{sess.get('name')}: inbox not listening — session is dead")
+    r = session.send(sock, body, priority=a.priority, mode=a.mode,
+                     from_name="mop", wait_idle=min(a.wait or 0, MAX_WAIT))
+    if a.quiet:
+        return 0 if (a.wait is None or r["idle"]) else 2
+    print(f"-> {sess.get('name')} [{sess.get('pid')}] msg_id={r['msg_id']}")
+    if a.wait is None:
+        return 0
+    if r["idle"] is None:
+        print(f"waited {a.wait}s — session never reported going idle")
+        return 2
+    detail = r["idle"].get("detail")
+    print(f"<- {r['idle'].get('state', '?')}" + (f": {detail}" if detail else ""))
+    return 0
+
+
+def main(argv):
+    if argv and argv[0] in ("--list", "list"):
+        return show_sessions()
+    if len(argv) < 2:
+        lib.usage(__doc__)
+    p = argparse.ArgumentParser(add_help=False, usage=__doc__)
+    p.add_argument("target")
+    p.add_argument("message")
+    p.add_argument("--priority", choices=session.PRIORITIES, default="next")
+    p.add_argument("--mode", choices=session.MODES, default="bypass")
+    p.add_argument("--quiet", action="store_true")
+    p.add_argument("--wait", nargs="?", type=int, const=MAX_WAIT, default=None)
+    a = p.parse_args(argv)
+
+    body = sys.stdin.read().rstrip("\n") if a.message == "-" else a.message
+    if not body.strip():
+        sys.exit("empty message — nothing to send")
+    if not a.target.startswith(puppets.JOB_PREFIX):
+        return to_session(a, body)
+    lib.guard(a.target)
+    return to_puppet(a, body)
+
+
+
+# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
+main = lib.cluster(main)

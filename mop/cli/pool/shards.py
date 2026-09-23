@@ -1,0 +1,82 @@
+"""pool shards: mop shards [--origins] [origin|shard ...]
+
+A shard is a project: one repository, one slice of the pool, one master. The
+list is built from three sources, always by union, never by replacement:
+
+  * the Nomad roster — who has a live job;
+  * memory in ~/.config/mop/shards — who HAD one;
+  * arguments — a new project that doesn't have a puppet yet.
+
+Memory exists exactly because of the second point: without it, deleting a
+project's last puppet would silently drop its user from the NATS config on
+the next deploy, and a running master would stop connecting.
+"""
+import os
+import sys
+
+from mop.cli import lib
+from mop import bus, nomad, puppets
+
+FILE = os.path.expanduser("~/.config/mop/shards")
+
+
+def remembered():
+    try:
+        with open(FILE) as f:
+            return {l.strip() for l in f if l.strip()}
+    except OSError:
+        return set()
+
+
+def collect(extra=()):
+    """Все шарды, какие система знает. -> ({origin'ы}, {легаси-имена}).
+
+    Источники те же трое: ростер Nomad (origin'ы живых джобов), память
+    (origin'ы, а от легаси-времён — имена без origin'а) и аргументы.
+    Память хранит ORIGIN'Ы, а не имена (#33): имя выводится basename'ом,
+    а имя в origin не разворачивается."""
+    origins, legacy = puppets.shard_ids(
+        l for l in remembered() if not l.startswith("-"))
+    for arg in extra:
+        if arg.startswith("-"):
+            continue
+        if "/" in arg or ":" in arg:
+            origins.add(arg)
+        else:
+            legacy.add(arg)
+    try:
+        origins |= {j["Meta"]["origin"] for j in puppets.jobs(shard=bus.ADMIN)
+                    if (j.get("Meta") or {}).get("origin")}
+    except Exception as e:
+        # Ростер недоступен — работаем по памяти, но говорим об этом: молча
+        # сузить список значит выписать шард из конфига NATS. В stderr:
+        # stdout этой команды `mop deploy` читает как список origin'ов, и
+        # первый прогон на свежем контроллере отдавал это предупреждение
+        # git'у как адрес репозитория.
+        print(f"Nomad roster unavailable ({nomad.describe_error(e)}), "
+              f"using only remembered shards", file=sys.stderr, flush=True)
+    return origins, legacy
+
+
+def remember(lines):
+    os.makedirs(os.path.dirname(FILE), exist_ok=True)
+    with open(FILE, "w") as f:
+        f.write("".join(f"{s}\n" for s in sorted(lines)))
+
+
+def main(argv):
+    want_origins = "--origins" in argv
+    args = [a for a in argv if a != "--origins"]
+    origins, legacy = collect(args)
+    remember(origins | legacy)
+    if want_origins:
+        for o in sorted(origins):
+            print(o)
+        return
+    for n in sorted({puppets.shard_of(o) for o in origins} | legacy):
+        print(n)
+
+
+
+# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
+main = lib.cluster(main)

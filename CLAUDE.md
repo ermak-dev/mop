@@ -15,7 +15,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 ## Overall structure
 
  - `/mop` — the library: returns data, prints nothing
- - `/bin` — commandlets, one subcommand per file; they are the only thing that prints
+ - `/bin` — one file, the `mop` launcher; the commandlets are modules of `/mop/cli`, one subcommand per module, in sections (`core`, `pool`, `service`) and groups (`driver`, `bug`, `node`, `bootstrap`); they are the only thing that prints
  - `/deploy` — the product's installation: Nomad, the bus, the agent, the disk watchdog
  - `/sandbox.yaml.example` — the puppet environment example: an installation copies it to `sandbox.yaml`, which git ignores like `.env` and `inventory.yaml`
  - `/skills/master` — the master session's skill, symlinked from outside
@@ -26,8 +26,8 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 ## Project environment
 
  - **MUST** Run everything through `mop [subcommand]` — the dispatcher sets PYTHONPATH, and without it a commandlet does not find the package
- - **MUST** A missing capability is a new commandlet in `bin/`, never a workaround from outside
- - **MUST** The library returns data and stays silent; the frontends in `bin/` print — otherwise a second frontend starts parsing text laid out for a terminal
+ - **MUST** A missing capability is a new commandlet in `mop/cli/`, never a workaround from outside
+ - **MUST** The library returns data and stays silent; the frontends in `mop/cli/` print — otherwise a second frontend starts parsing text laid out for a terminal
  - **MUST** Output is English: it is read by the model through MCP, not only by a human. Comments and docstrings are Russian
  - **MUST** Commandlets never call each other as a subprocess: each parses its own arguments and prints for itself
  - **MUST** `mop/session.py` is stdlib only, with no import from the package: it travels as source to wherever the session lives
@@ -36,7 +36,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 
 ## Boundaries
 
- - **MUST** `mop/`, `bin/`, `docs/`, `skills/`, `deploy/` know no concrete host: anything installation-specific is a setting in `config.SETTINGS` or a line in `.env`
+ - **MUST** `mop/`, `docs/`, `skills/`, `deploy/` know no concrete host: anything installation-specific is a setting in `config.SETTINGS` or a line in `.env`
  - **MUST** Three sources, one question each: `.env` answers for the installation, the inventory for the machine, `config.SETTINGS` holds the defaults. `.env` never reaches a node — what the node must know is listed in `config.NODE_SCOPED` and rendered by `mop deploy` into `~/.config/mop/node.env`. A node-side setting written anywhere else silently does not arrive
  - **MUST** A value specific to this machine is a setting whose default equals today's value, never a literal in the code
  - **MUST** A required setting with no sensible default goes in `config.REQUIRED`: silently walking into someone else's LAN is worse than a loud refusal
@@ -96,7 +96,7 @@ edits.
 Work lives in GitLab issues. The coordinates come from the working copy's git origin, the credentials from `.env`.
 
  - **MUST** Use `mop bug` for every interaction with the tracker, never the API directly
- - **MUST** If a capability is missing, add it to `bin/bug` plus a check of its pure logic in `tests/gitlab.py`
+ - **MUST** If a capability is missing, add it to `mop/cli/bug` plus a check of its pure logic in `tests/gitlab.py`
  - **MUST** Issue titles, bodies and comments are in Russian; code, branch names and commits stay English
  - **MUST** Every unit of work is an issue before the fix, in the fixed report shape: steps to reproduce, expected result, actual result, evidence, the root cause (only when confirmed) and what to do
  - **MUST** Exactly one label from each group `status::`, `sev::`, `component::` — a second of the same group silently replaces the first; `mop bug labels` prints the vocabulary
@@ -114,7 +114,7 @@ There is no pipeline: code reaches the pool through a `mop deploy` run, and `mas
  - **MUST** A commit explains why: the diff already shows what changed, and the incident behind the fix is worth more than a list of files
  - **MUST** Reference the issue in the commit subject as a bare `#74`, never a closing keyword
  - **MUST** Land by local integration, one push: `git merge --no-ff` into a fresh `master`, then a single `git push`; one merge commit per issue keeps `git revert -m 1` as the rollback
- - **MUST** If you touched what travels to the nodes (`mop/`, `bin/`, `deploy/`), roll it out with `mop deploy` and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives
+ - **MUST** If you touched what travels to the nodes (`mop/`, `deploy/`), roll it out with `mop deploy` and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives
  - **MUST** Close the issue right after the rollout: `mop bug close [iid] --comment "…"` naming the commit and what it was verified with
  - **MUST** In pool mode the tracker belongs to the MASTER: the executor runs no `mop bug` at all and sends the comment text instead, which the master pastes
  - **MUST** In pool mode the executor lands on the branch the MASTER named and never picks the target itself
