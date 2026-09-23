@@ -147,7 +147,7 @@ mop driver build
 mop list                   ростер в терминале (в сессии мастера то же даёт инструмент agents)
 mop project list           какие проекты заведены в пуле
 mop attach <имя>           живой терминал папета (ssh + tmux)
-mop project add <origin>   завести новый проект
+mop project add [origin]   завести новый проект (без origin — эта рабочая копия)
 mop project delete <имя>   снять проект с пула
 mop driver build [origin]  собрать образ проекта на гипервизорах; без аргумента берётся эта рабочая копия
 mop node                   узлы пула: драйвер, проекты, ёмкость

@@ -1,7 +1,8 @@
 """pool projects: mop project [add <git-origin>|delete <name>|list]
 
   mop project              what the pool serves: one line per project
-  mop project add <origin> register a project and put it on the bus
+  mop project add [origin] register a project and put it on the bus
+                           (default: this working copy's origin)
   mop project delete <name> take it off the bus and out of the registry
   mop project limit [<name> <N|none>]  puppet limit of a project
   mop project list [--origins]  the same list, for scripts

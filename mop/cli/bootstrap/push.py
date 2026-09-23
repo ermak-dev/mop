@@ -13,7 +13,7 @@ from mop import bootstrap, bus, puppets
 def main(argv):
     if len(argv) > 1:
         lib.usage(__doc__)
-    origin = argv[0] if argv else lib.cwd_origin()
+    origin = lib.origin(argv[0] if argv else None, __doc__)
     project = puppets.project_of(origin)
     root = lib.git("rev-parse", "--show-toplevel")
     path = os.path.join(root, bootstrap.FILE)

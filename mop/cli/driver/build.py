@@ -30,10 +30,7 @@ def main(argv):
     if argv:
         origin, root = origin_of(argv[0]), None
     else:
-        origin = lib.cwd_origin(required=False)
-        if not origin:
-            sys.exit("not a git working copy and no project given: "
-                     "mop driver build <project|origin>")
+        origin = lib.origin(None, __doc__)
         root = lib.git("rev-parse", "--show-toplevel")
     # Дорога сборки живёт в библиотеке (mop/image.py): у неё двое
     # вызывающих, этот командлет и инструмент build в MCP. Здесь печать.
@@ -70,13 +67,13 @@ def origin_of(arg):
     его нельзя — проект определяется ровно одним способом, basename origin без
     .git, и таблица имён рядом однажды разошлась бы с ним. Поэтому не таблица,
     а поиск по тому, что уже есть: джобы проекта и рабочая копия под рукой."""
-    if "/" in arg or ":" in arg:
+    if puppets.looks_like_origin(arg):
         return arg                      # это и есть origin
     for job in puppets.jobs(project=bus.ADMIN):
         o = (job.get("Meta") or {}).get("origin") or ""
         if o and puppets.project_of(o) == arg:
             return o
-    here = lib.cwd_origin(required=False)
+    here = lib.cwd_origin()
     if here and puppets.project_of(here) == arg:
         return here
     sys.exit(f"don't know where project {arg} comes from: it has no puppets and "

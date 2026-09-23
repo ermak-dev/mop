@@ -334,6 +334,17 @@ def project_of(origin):
     return os.path.basename(origin).removesuffix(".git")
 
 
+def looks_like_origin(text):
+    """Похоже ли на git-origin: есть хост или путь (`:` или `/`).
+
+    Голое имя проекта origin'ом не является -- обратного отображения «имя ->
+    origin» в системе нет. И значение чужого флага, приехавшее позиционно
+    (`mop master --model opus` -> `opus`), тоже: без этой проверки дальше
+    было бы «нет проекта opus», и опечатку искали бы не там (#111)."""
+    text = (text or "").strip()
+    return bool(text) and any(c in text for c in ":/")
+
+
 def job_spec(name, origin, profile=None, cont=False):
     """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
     историю каталога (`claude --continue`).

@@ -104,15 +104,13 @@ def main(argv):
     mine, passthru = claude_args(args)
     if len(mine) > 1:
         lib.usage(__doc__)
-    origin = mine[0] if mine else lib.cwd_origin()
     # Origin, в котором нет ни хоста, ни пути, — почти наверняка значение
-    # чужого флага, приехавшее сюда позиционно. Отказ обязан назвать причину:
-    # иначе дальше будет «нет кредов проекта opus», и искать опечатку придётся
-    # в совсем другом месте.
-    if not any(c in origin for c in ":/"):
-        lib.usage(f"{origin!r} doesn't look like a git-origin.\n"
-                  f"Pass claude options that take a value after --: "
-                  f"mop master -- {' '.join(passthru + [origin])}")
+    # чужого флага, приехавшее сюда позиционно. Отказ обязан назвать причину
+    # и выход: иначе дальше будет «нет кредов проекта opus», и искать
+    # опечатку придётся в совсем другом месте.
+    hint = (f"Pass claude options that take a value after --: "
+            f"mop master -- {' '.join(passthru + mine)}" if mine else __doc__)
+    origin = lib.origin(mine[0] if mine else None, hint)
     project = puppets.project_of(origin)
     if not lib.project_ready(project):
         # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS,
