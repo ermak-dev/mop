@@ -47,6 +47,38 @@ def ok(text):
     print(f"{_GREEN}{text}{_NC}", flush=True)
 
 
+class Progress:
+    """Ход долгой команды: одна строка шага, перерисовываемая на месте (#124).
+
+    Быстрая команда при успехе молчит, долгая показывает, что делает сейчас,
+    и больше ничего: ни эха параметров, ни справок, ни советов. Строка живёт
+    только на терминале и стирается по завершении; не на терминале (скрипт,
+    модель) -- тишина до ошибки."""
+
+    def __init__(self, what):
+        import time
+        self._time = time.time
+        self.what, self.t0 = what, time.time()
+        self.tty = sys.stderr.isatty()
+        self.shown = False
+
+    def step(self, text):
+        if not self.tty:
+            return
+        s = int(self._time() - self.t0)
+        line = f"{self.what}: {text} [{s // 60}:{s % 60:02d}]"
+        width = shutil.get_terminal_size((80, 20)).columns
+        sys.stderr.write("\r\033[K" + line[:width - 1])
+        sys.stderr.flush()
+        self.shown = True
+
+    def clear(self):
+        if self.shown:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
+            self.shown = False
+
+
 def cluster(fn):
     """Командлет, которому нужен настроенный кластер. Проверка обязательных
     настроек — до первого сетевого вызова, чтобы отказ был про настройки, а не
@@ -290,14 +322,14 @@ def session_env(profile):
 
 
 def push_llm_keys(llm):
-    """Ключи профиля на узлы, с отчётом. Молчит для профилей без ключа."""
+    """Ключи профиля на узлы. При успехе молчит (#124); не дошедшие --
+    ошибкой, с узлами."""
     results = keys.push_llm_keys(llm)
     if results is None:
         return
-    print(f"pushing secrets to pool nodes ({puppets.SECRETS_FILE})...")
     bad = [f"{n}: {r}" for n, r in sorted(results.items()) if r != "OK"]
     if bad:
-        print("  not all nodes: " + "; ".join(bad))
+        fail(f"{puppets.SECRETS_FILE} did not reach every node: " + "; ".join(bad))
 
 
 def pool_lines():

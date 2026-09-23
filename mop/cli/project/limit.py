@@ -37,7 +37,6 @@ def main(argv):
     if ans.get("error"):
         lib.fail(f"{name}: {ans['error']}")
         return 1
-    lib.ok(f"  {name}: " + ("has no limit" if value is None else f"limited to {value}"))
     return 0
 
 

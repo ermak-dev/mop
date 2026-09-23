@@ -2,7 +2,8 @@
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>. Nomad decides placement — a puppet
-reserves 8 GB from the pool.
+reserves 8 GB from the pool. Silent when the puppet is running; on a
+terminal it shows the current step. The new puppet is in mop list.
 """
 import os
 import time
@@ -24,43 +25,60 @@ def main(argv):
     if not lib.project_ready(project):
         lib.usage(f"project {project} isn't on the bus yet.\n"
                   f"Register it on the server: mop project add {origin}")
+    p = lib.Progress(project)
+    try:
+        return _add(origin, project, profile, bool(args), p)
+    finally:
+        p.clear()
+
+
+def _add(origin, project, profile, named, p):
+    """Долгая команда (#124): на терминале -- текущий шаг, при успехе --
+    ничего; отказ и не вставший папет -- ошибкой."""
+    p.step("LLM keys to the nodes")
     lib.push_llm_keys(profile)
     # bootstrap.yaml рабочей копии — на сервер ДО регистрации (#62): первый
     # подъём обязан увидеть его. Из рабочей копии, потому что решает мастер;
-    # нет файла — сервер держит то, что положил deploy из origin.
-    if not args and os.path.exists(bootstrap.FILE):
+    # нет файла — сервер держит то, что положил `mop project add` из origin.
+    if not named and os.path.exists(bootstrap.FILE):
+        p.step("bootstrap to the server")
         try:
             got = bootstrap.push_from(os.getcwd(), project)
-            print(f"  {bootstrap.FILE}: on the server, {got.get('tasks', 0)} task(s)"
-                  + (f"; ignored: {', '.join(got['alien'])}" if got.get("alien") else ""))
         except bus.BusError as e:
-            print(f"  {bootstrap.FILE} did not reach the server: {e}")
+            got = {"error": str(e)}
+        if got.get("error"):
+            p.clear()
+            lib.fail(f"{bootstrap.FILE} did not reach the server: {got['error']}")
+            return 1
     # Имя выбирает сервис кластера вместе с регистрацией: спека собирается
     # там же (#80), а выбор имени и есть первая её строка.
+    p.step("registering")
     got = bus.ask_cluster("add", origin=origin, profile=profile, timeout=30)
     if got.get("error"):
+        p.clear()
         lib.fail(got["error"])
         return 1
     name = got["name"]
-    print(f"{name}: {origin} [{profile}]")
 
+    p.step(f"{name}: waiting for a node")
     node = None
     for _ in range(120):
         a, _ = lib.alloc_of(name)
         if a:
-            if node is None:
-                node = a["NodeName"]
-                print(f"  → {node}")
+            node = a["NodeName"]
             if a["ClientStatus"] == "running":
-                print("  → running")
-                return
+                return 0
             if a["ClientStatus"] == "failed":
-                print("  → FAILED, check: mop list / nomad UI")
-                return
+                p.clear()
+                lib.fail(f"{name} failed to start on {node}: mop list, mop doctor")
+                return 1
+            p.step(f"{name}: starting on {node}")
         time.sleep(1)
-    print(f"  → still {'pending — no free slots?' if node is None else 'not running'}, "
-          f"check mop list")
-
+    p.clear()
+    lib.fail(f"{name} is " + ("not placed on any node" if node is None
+                              else f"still starting on {node}")
+             + " after 2 minutes: mop doctor")
+    return 1
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
