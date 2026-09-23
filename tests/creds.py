@@ -120,6 +120,41 @@ def main():
         print(f"FAILED  the server directory holds secrets: dir "
               f"{oct(os.stat(dest).st_mode & 0o777)}, files {modes}")
 
+    # Что каталог сервера ТЕРЯЕТ. Проект сняли (#79) — его пароль мастера
+    # у оператора остаётся, и lib.shard_ready по нему отвечает «проект на
+    # шине есть»: `mop master` поднимется, чтобы не подключиться. Отбор —
+    # строго пароли мастеров: админский и токен к проектам отношения не
+    # имеют, а чужое в каталоге не наше дело.
+    cases += 1
+    local = ["nats-admin.pass", "nats-master-mop.pass", "nats-master-gone.pass",
+             "bootstrap.json", "junk"]
+    got = creds.stale(local, ["nats-master-mop.pass", "nats-admin.pass"])
+    if got != ["nats-master-gone.pass"]:
+        bad += 1
+        print(f"FAILED  stale -> {got}, wanted ['nats-master-gone.pass']")
+    cases += 1
+    # Пустой ответ сервера — не повод снести всё: tar пришёл пустым, сеть
+    # моргнула, отбор на той стороне поменялся. Чистим только при ответе.
+    if creds.stale(local, []) != []:
+        bad += 1
+        print(f"FAILED  stale on an empty listing must keep everything: "
+              f"{creds.stale(local, [])}")
+
+    # forget: пароли снятого проекта уходят и с контроллера, и из каталога
+    # сервера — обоими путями их читает один и тот же shard_ready.
+    cases += 1
+    a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
+    for d in (a, b):
+        for n in ("nats-master-gone.pass", "nats-puppet-gone.pass",
+                  "nats-master-stay.pass"):
+            with open(os.path.join(d, n), "w") as f:
+                f.write("x\n")
+    removed = creds.forget("gone", a, b)
+    left = sorted(set(os.listdir(a)) | set(os.listdir(b)))
+    if left != ["nats-master-stay.pass"] or len(removed) != 4:
+        bad += 1
+        print(f"FAILED  forget -> {removed}, left {left}")
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 

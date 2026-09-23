@@ -15,7 +15,9 @@
 
 Диспетчер (mop/cli/__init__.py) зовёт `lib.run(main, argv)` сам.
 """
+import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -90,6 +92,46 @@ def default_branch():
     r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
                        capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else "origin/master"
+
+
+def play_vars(projects, manifests=None):
+    """Списки плейбуку как --extra-vars, JSON'ом. -> [строки].
+
+    Объектом, а не парой ключ=значение: `--extra-vars mop_shards=[...]`
+    ansible принимает как строку, и цикл в шаблоне честно проходится по её
+    символам, порождая пользователей `master-[`, `master-"` и так далее.
+
+    Манифесты — только у полной игры: узкому прогону проектов (bus) они не
+    нужны, их читают слои узла и тела."""
+    out = [json.dumps({"mop_shards": list(projects)})]
+    if manifests is not None:
+        out.append(json.dumps({"mop_manifests": manifests}, ensure_ascii=False))
+    return out
+
+
+def play(playbook, projects, manifests=None):
+    """Прогон плейбука установки. -> код возврата ansible.
+
+    Один вход для полной игры (site.yml) и для узкого прогона проектов
+    (deploy/projects.yml): списки, которые едут плейбуку, собираются одним
+    местом, иначе узкий прогон заводил бы проект не так, как полный.
+
+    Списки едут --extra-vars ОБЪЕКТОМ, а не парой ключ=значение:
+    `--extra-vars mop_shards=[...]` ansible принимает как строку, и цикл в
+    шаблоне честно проходится по её символам, порождая пользователей
+    `master-[`, `master-"` и так далее.
+    """
+    if not shutil.which("ansible-playbook"):
+        raise RuntimeError("no ansible-playbook on this machine -- run mop setup")
+    inventory = os.environ["INVENTORY"]
+    if not os.path.isfile(inventory):
+        raise RuntimeError(f"no inventory {inventory} -- create it from the example: "
+                           f"cp inventory.yaml.example inventory.yaml")
+    extra = ([json.dumps(config.playbook_vars(), ensure_ascii=False)]
+             + play_vars(projects, manifests))
+    return subprocess.call(
+        ["ansible-playbook", "-i", inventory, os.path.join(PROJECT, playbook),
+         *sum((["--extra-vars", v] for v in extra), [])])
 
 
 def shard_ready(shard):

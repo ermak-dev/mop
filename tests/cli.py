@@ -14,6 +14,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop import cli  # noqa: E402
+from mop.cli import lib  # noqa: E402
 
 # (каталог, имя, подпакет?) — то, что находит обход mop/cli.
 FOUND = [
@@ -110,10 +111,16 @@ def main():
         print(f"FAIL shards.names: {shards.names({'git@h:g/proj.git', 'git@h:g/mop.git'}, {'legacy'})}")
     # Списком, а не строкой: `--extra-vars mop_shards=[...]` ansible берёт как
     # строку и проходит по её символам, порождая пользователей `master-[`.
-    ev = deploy.extra_vars(["mop", "proj"], {"proj": {"asks": {}}})
+    ev = lib.play_vars(["mop", "proj"], {"proj": {"asks": {}}})
     if json.loads(ev[0]) != {"mop_shards": ["mop", "proj"]} or json.loads(ev[1]) != {"mop_manifests": {"proj": {"asks": {}}}}:
         failed += 1
-        print(f"FAIL extra_vars: {ev}")
+        print(f"FAIL play_vars: {ev}")
+    # Узкий прогон проектов (#79) идёт без манифестов: их читают слои узла и
+    # тела, а не роль шины. Лишний --extra-vars пустым словарём стирал бы
+    # манифесты, уже разложенные полной игрой.
+    if lib.play_vars(["mop"]) != [json.dumps({"mop_shards": ["mop"]})]:
+        failed += 1
+        print(f"FAIL play_vars without manifests: {lib.play_vars(['mop'])}")
 
     # Группы разрезаны по глаголам (#77): каждый глагол из usage группы
     # (`  mop <группа> <глагол>`) — свой модуль, и диспетчер находит его по

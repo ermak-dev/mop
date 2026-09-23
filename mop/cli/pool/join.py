@@ -11,8 +11,9 @@ as the address. The directory is keyed by MOP_SERVER_LAN, so a second server
 is a second directory, and MOP_SERVER_LAN=<address> mop master retargets the
 master at it.
 
-Run again after `mop deploy` on the server added a shard: a new master
-password appears there, not here.
+Run again after `mop project add` on the server added a project: a new
+master password appears there, not here. A project taken off the pool with
+`mop project delete` takes its password out of this directory too.
 """
 import io
 import os
@@ -52,7 +53,15 @@ def main(argv):
             names.append(name)
     if not names:
         raise RuntimeError(f"{host}:{remote} holds nothing for a master")
+    # Снятый проект (#79) уносит и свой пароль: оставленный, он отвечает
+    # `mop master`, что проект на шине есть, — и мастер поднимется, чтобы
+    # не подключиться. Чистим только по непустому ответу сервера.
+    dropped = creds.stale(os.listdir(dest), names)
+    for n in dropped:
+        os.remove(os.path.join(dest, n))
     print(f"{dest}: {', '.join(sorted(names))}")
+    if dropped:
+        print(f"  gone from the server, removed here: {', '.join(dropped)}")
 
 
 

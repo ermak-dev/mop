@@ -91,6 +91,39 @@ def pick(listing):
                   or (n.startswith("nats-master-") and n.endswith(".pass")))
 
 
+def stale(local, remote):
+    """Файлы каталога, которых у сервера больше нет. -> [имена].
+
+    Проект сняли (#79) — его пароль мастера остаётся лежать у оператора, и
+    `lib.shard_ready` по нему отвечает «проект на шине есть»: мастер
+    поднимется, чтобы не подключиться. Отбор строго по паролям мастеров:
+    админский пароль и токен к проектам отношения не имеют, а чужое в
+    каталоге не наше дело.
+
+    Пустой список сервера ничего не чистит: tar мог прийти пустым, а
+    снести по этому поводу все креды — худшее из возможных прочтений."""
+    if not remote:
+        return []
+    mine = {n for n in local
+            if n.startswith("nats-master-") and n.endswith(".pass")}
+    return sorted(mine - set(remote))
+
+
+def forget(project, *dirs):
+    """Снять пароли проекта в названных каталогах. -> [снятые пути].
+
+    И secrets/ контроллера, и каталог сервера: оба читает один и тот же
+    shard_ready, и оставленный в одном пароль отвечал бы за оба."""
+    gone = []
+    for d in dirs:
+        for n in (pass_file(project), f"nats-puppet-{project}.pass"):
+            path = os.path.join(d, n)
+            if os.path.exists(path):
+                os.remove(path)
+                gone.append(path)
+    return gone
+
+
 def collect(secrets_dir, dest):
     """Собрать каталог сервера на самом контроллере: он тоже машина
     оператора, и после `mop deploy` на нём всё должно работать без join.
