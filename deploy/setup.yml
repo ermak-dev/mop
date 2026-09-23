@@ -64,6 +64,11 @@
     - ansible.builtin.include_role:
         name: node
         tasks_from: user
+    # Пакет mop -- до шины (#116): пользователей шины пишет `mop cluster
+    # users` на сервере.
+    - ansible.builtin.include_role:
+        name: web
+        tasks_from: package
     - ansible.builtin.include_role:
         name: bus
         tasks_from: server
