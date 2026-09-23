@@ -41,6 +41,19 @@ authorization {
         subscribe: { allow: ["mop.>", "_INBOX.>"] }
       }
     }
+{% for op, subs in (MOP_OPERATOR_SUBJECTS | default({})).items() %}
+
+    # Оператор {{ op }} -- человек, а не роль (#84). Права ровно на его
+    # проекты: отозвать доступ одному значит убрать одного пользователя, а не
+    # сменить пароль всем операторам проекта. Пароль -- там же, где остальные.
+    {
+      user: "{{ op }}", password: "{{ lookup('password', secrets_dir + '/nats-op-' + op + '.pass length=32 chars=ascii_letters,digits') }}"
+      permissions: {
+        publish:   { allow: [{% for s in subs %}"{{ s }}"{% if not loop.last %}, {% endif %}{% endfor %}] }
+        subscribe: { allow: [{% for s in subs %}"{{ s }}"{% if not loop.last %}, {% endif %}{% endfor %}] }
+      }
+    }
+{% endfor %}
 {% for shard in shards %}
 
     # Мастер проекта {{ shard }}: весь свой шард и ничего сверх него.

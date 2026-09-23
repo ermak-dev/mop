@@ -1,4 +1,14 @@
-"""server credentials for this operator: mop join [ssh-host]
+"""server credentials for this operator: mop join --user <name> | [ssh-host]
+
+Two ways in, and the first is the one to use.
+
+  mop join --user anton     log in as yourself: the password is asked for
+                            (or read from MOP_BUS_PASSWORD) and checked by
+                            connecting; nothing is copied and no ssh is needed
+
+  mop join <ssh-host>       the old way: tar the server's credential
+                            directory over ssh. Kept until every installation
+                            has moved its operators onto their own names (#84).
 
 Brings ~/.config/mop/servers/<MOP_SERVER_LAN>/ from the server: the
 operator's bus password and one master password per project — nothing about
@@ -20,16 +30,63 @@ Run again after `mop project add` on the server added a project: a new
 master password appears there, not here. A project taken off the pool with
 `mop project delete` takes its password out of this directory too.
 """
+import getpass
 import io
 import os
 import subprocess
+import sys
 import tarfile
 
 from mop.cli import lib
-from mop import config, creds
+from mop import bus, config, creds
+
+
+def as_operator(argv):
+    """Имя оператора из аргументов либо окружения; None — прежний путь."""
+    for i, a in enumerate(argv):
+        if a == "--user":
+            return argv[i + 1] if i + 1 < len(argv) else ""
+        if a.startswith("--user="):
+            return a.split("=", 1)[1]
+    return os.environ.get("MOP_BUS_USER") or None
+
+
+def login(user):
+    """Вход своим именем: пароль спрашиваем, проверяем соединением, кладём.
+
+    Проверка соединением обязательна: молча положенный неверный пароль
+    читается потом как «агент не отвечает» через двадцать секунд таймаута —
+    самый дорогой из возможных способов узнать об опечатке."""
+    if not user:
+        lib.usage("mop join --user <name>: name required")
+    password = os.environ.get("MOP_BUS_PASSWORD")
+    if not password:
+        if not sys.stdin.isatty():
+            raise RuntimeError("no MOP_BUS_PASSWORD and no terminal to ask on")
+        password = getpass.getpass(f"password for {user} on "
+                                   f"{config.get('MOP_SERVER_LAN')}: ")
+    if not password:
+        raise RuntimeError("empty password")
+    dest = creds.server_dir()
+    # Сначала проверяем, потом кладём: каталог не должен запомнить того, кого
+    # шина не пустила.
+    c = creds.bus_config(config.get("MOP_SERVER_LAN"),
+                         config.get("MOP_NATS_PORT"), None, password, user=user)
+    try:
+        bus.check(c)
+    except Exception as e:
+        raise RuntimeError(f"the bus did not take {user}: {e}")
+    path = creds.write_operator(dest, user, password)
+    print(f"{path}: {user}")
+    print("  what you may reach is decided by the bus, not by this file: "
+          "MOP_OPERATORS on the server")
+    return 0
 
 
 def main(argv):
+    user = as_operator(argv)
+    if user is not None:
+        return login(user)
     if len(argv) > 1 or any(a.startswith("-") for a in argv):
         lib.usage(__doc__)
     # На контроллере join бессмыслен и вреден: свой каталог он собирает сам в

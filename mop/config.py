@@ -111,6 +111,10 @@ DEFAULTS = {
     # поставить сюда 127.0.0.1 и закрыть API для LAN совсем — ценой того,
     # что UI Nomad перестанет открываться с других машин.
     "MOP_NOMAD_HTTP_BIND": "0.0.0.0",
+    # Операторы установки: люди с доступом к пулу и их проекты (#84).
+    # Формат `имя:проект,проект; имя:*` разбирает mop/operators.py; пусто —
+    # операторов нет, и на шине живут только прежние ролевые пользователи.
+    "MOP_OPERATORS": "",
     "MOP_NOMAD_RPC_PORT": "4647",   # RPC: туда дозваниваются клиенты Nomad
     "MOP_NATS_VERSION": "2.14.6",
     "MOP_PUPPET_MEM_MB": "8192",
@@ -389,10 +393,16 @@ def playbook_vars():
     MOP_NODE_SCOPED -- узловые настройки, по нему прогон рендерит node.env.
     MOP_PIP_DEPS -- python-библиотеки mop (mop/deps.py) для узла, тела и
     `mop setup`."""
-    from . import deps
+    from . import deps, operators
     out = {k: v for k, (v, _) in effective().items()}
     out["MOP_NODE_SCOPED"] = ",".join(NODE_SCOPED)
     out["MOP_PIP_DEPS"] = ",".join(deps.PIP)
+    # Права операторов — субъектами, уже разобранные: шаблон конфига NATS
+    # не должен разбирать настройку второй раз, иначе два разбора разойдутся
+    # молча, и разойдутся они В ПРАВАХ.
+    out["MOP_OPERATOR_SUBJECTS"] = {
+        name: operators.subjects(projects)
+        for name, projects in operators.parse(out.get("MOP_OPERATORS", "")).items()}
     return out
 
 

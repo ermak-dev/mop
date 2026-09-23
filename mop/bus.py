@@ -131,11 +131,20 @@ def config(file=None):
             raise BusError(f"no bus credentials: {path} — run mop deploy")
     host = settings.get("MOP_SERVER_LAN")
     directory = creds.server_dir(host)
+    # Оператор-человек старше ролевого пароля (#84): у него одни креды на все
+    # его проекты, а какой именно проект — решает СУБЪЕКТ, и права на субъект
+    # проверяет сервер NATS. Прежний путь остаётся рядом, пока установка не
+    # перевела всех.
+    op = creds.operator(directory)
+    if op:
+        return creds.bus_config(host, settings.get("MOP_NATS_PORT"), SHARD,
+                                op["password"], user=op["user"])
     password = creds.password(directory, SHARD)
     if password is None:
         raise BusError(f"no bus credentials for {creds.user_of(SHARD)}: "
+                       f"neither {directory}/{creds.OPERATOR_FILE} nor "
                        f"{directory}/{creds.pass_file(SHARD)} — "
-                       f"run mop join <server> (or mop deploy on the server)")
+                       f"run mop join --user <name> (or mop deploy on the server)")
     return creds.bus_config(host, settings.get("MOP_NATS_PORT"), SHARD, password)
 
 
@@ -181,6 +190,22 @@ async def _aconnect(file=None):
         allow_reconnect=True, max_reconnect_attempts=-1,
         reconnect_time_wait=2, connect_timeout=5,
     )
+
+
+def check(c):
+    """Пустить ли нас шина с этими кредами. Отказ — исключение.
+
+    Одноразовое соединение без реконнекта: здесь проверяют пароль, и
+    бесконечные попытки превратили бы неверный пароль в зависание вместо
+    ответа. Зовёт `mop join --user` до того, как что-то запишет (#84)."""
+    async def quiet(_e):
+        pass          # отказ вернётся исключением; трассировка в stderr — шум
+
+    async def once():
+        nc = await nats.connect(**auth(c), name="mop-join", error_cb=quiet,
+                                allow_reconnect=False, connect_timeout=5)
+        await nc.close()
+    _call(once(), 15)
 
 
 def connect(file=None):
