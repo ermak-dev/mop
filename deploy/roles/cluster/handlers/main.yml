@@ -1,0 +1,6 @@
+- name: restart mop-cluster
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-cluster
+    state: restarted
+    daemon_reload: yes

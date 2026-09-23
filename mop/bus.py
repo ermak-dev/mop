@@ -69,6 +69,7 @@ NODE_FILE = os.path.expanduser("~/.config/mop/bus.json")
 TIMEOUT = 20             # обычный запрос к агенту
 MAX_PAYLOAD = 900_000    # под max_payload сервера (1 МБ) с запасом на конверт
 ADMIN = creds.ADMIN      # псевдошард оператора: все шарды плюс узловой disk
+CLUSTER_CHANNEL = "cluster"   # токен субъекта сервиса кластера (mop/cluster.py)
 ALL_MASTERS = "all"      # псевдо-id мастера: инбокс, на котором отвечают все
 
 # Чей срез пула виден этому процессу. Ставит `mop master`, наследуют его
@@ -232,6 +233,17 @@ def events(shard=None):
     return f"mop.{shard or SHARD}.events"
 
 
+def cluster_subject(shard=None):
+    """Сервис кластера как адресат (#80): Nomad за шиной.
+
+    Свой субъект, а не `server.rpc`: в субъект сервера имеет право писать
+    агент узла (bootstrap песочницы), и глаголы над Nomad там означали бы,
+    что джобы регистрирует и снимает любой узел. Здесь прав ни у кого не
+    прибавляется: у `master-<проект>` уже есть весь `mop.<проект>.>`, а у
+    папета и узла его нет."""
+    return f"mop.{shard or SHARD}.{CLUSTER_CHANNEL}.rpc"
+
+
 def server_subject(shard=None):
     """Сервер как адресат (#62): bootstrap песочниц и хранение их файлов.
     Первый токен — шард, как у всех: узел пишет за папета своего шарда,
@@ -302,6 +314,14 @@ def ask(master_id, verb, timeout=TIMEOUT, shard=None, **fields):
     return _ask(inbox(master_id, shard), f"master {master_id}",
                 f"master {master_id} is not on the bus: session closed or the address "
                 f"isn't its own — see mcp__mop__agents",
+                verb, timeout, **fields)
+
+
+def ask_cluster(verb, timeout=TIMEOUT, shard=None, **fields):
+    """Глагол сервису кластера (mop-cluster). -> разобранный ответ (dict)."""
+    return _ask(cluster_subject(shard), "cluster service",
+                "no cluster service is subscribed — the mop-cluster unit is "
+                "not running on the server",
                 verb, timeout, **fields)
 
 

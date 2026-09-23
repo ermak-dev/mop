@@ -1,0 +1,51 @@
+# Сервис кластера на сервере (#80, mop/cluster.py): подписчик, который держит
+# токен Nomad и отвечает глаголами пула на шине.
+#
+# Сервер, а не машина оператора: токен обязан остаться на одной машине, иначе
+# смысла в сервисе нет. Идёт после дашборда: пакет mop и креды оператора на
+# сервер привозит роль web, и здесь они уже лежат.
+
+# Пакет на сервер привозит роль web -- та же машина, тот же каталог. Второй
+# rsync тут ничего не менял бы, а подписчик остался бы на старом коде,
+# поэтому перезапуск -- по результату ТОГО синка (как в роли bootstrap).
+- name: The package changed under the service
+  ansible.builtin.debug:
+    msg: "mop package changed on the server — restarting mop-cluster"
+  changed_when: (mop_server_package | default({})) is changed
+  notify: restart mop-cluster
+
+- name: Systemd unit
+  become: yes
+  ansible.builtin.template:
+    src: mop-cluster.service.j2
+    dest: /etc/systemd/system/mop-cluster.service
+    mode: "0644"
+  notify: restart mop-cluster
+
+- name: Enable and start
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-cluster
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Apply the restart now, before the check
+  ansible.builtin.meta: flush_handlers
+
+# Прогоном, а не чтением статуса: юнит в бесконечном реконнекте systemd
+# вполне устраивает, а мастер тем временем не получит ни ростера, ни папета.
+# Проверка заодно отвечает, видит ли сервис Nomad: адрес у него свой, и
+# молчащий Nomad читался бы как молчащий сервис.
+- name: The service answers on the bus and sees Nomad
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.command: "{{ MOP_HOME }}/mop/bin/mop cluster check"
+  environment:
+    MOP_SERVER_LAN: "{{ MOP_SERVER_LAN }}"
+    MOP_NATS_PORT: "{{ MOP_NATS_PORT }}"
+  register: cluster_check
+  until: cluster_check.rc == 0
+  retries: 10
+  delay: 3
+  changed_when: false
