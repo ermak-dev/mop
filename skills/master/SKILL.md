@@ -92,18 +92,35 @@ been created. Pool size is your job; the operator may set a ceiling:
   your own working copy — one puppet per simultaneously dispatchable ticket,
   never more. A new puppet takes minutes, not seconds, then appears in the
   roster and takes its first dispatch; an add sitting `pending` for minutes
-  means no free slot (`pool` shows node capacity): stop growing, tell the
-  operator, work with what you have. A brand-new project has no project on
-  the bus yet, and the tool cannot refuse early: a fresh puppet that comes
-  up but cannot reach the pool is the missing project, not a malfunction —
-  the operator's `mop project add <origin>` fixes it in one command.
+  means one of two things. No free slot (`pool` shows node capacity): stop
+  growing, tell the operator, work with what you have. Or no image: on a
+  node whose puppets live in containers (driver `pve`) a puppet lands only
+  where its project's image is baked, and without one it waits forever,
+  however many slots are free. The image is the operator's: `mop project
+  add --update <origin>` bakes it; `nodes` shows which projects each node
+  serves, if your login has the admin role. A brand-new project has no
+  project on the bus yet, and the tool cannot refuse early: a fresh puppet
+  that comes up but cannot reach the pool is the missing project, not a
+  malfunction — the operator's `mop project add <origin>` fixes it in one
+  command.
+- **The environment is a ticket, not a shell command.** A puppet reporting
+  "no postgres here" or "tool X missing" has found a gap in the project's
+  environment, and the fix lives in the repository: `.mop/sandbox.yaml` for
+  packages and the body's size (baked into the image once, so it needs a
+  rebuild), `.mop/bootstrap.yaml` for env files and setup played at every
+  start (docs/BOOTSTRAP.md); a missing key or password is the operator's
+  `mop secret`. A package the puppet installed by hand is gone on the first
+  recycle, and in a container it goes with the body — a report that leans
+  on such an install is not done. Such a ticket splits in two layers: the
+  environment first, the fix on top of it.
 - **Puppets are sticky.** A closed ticket does NOT release a puppet: he
   returns to "free" and waits for the next dispatch. Everything that makes a
   puppet fast — the clone, the warm build tree, a session steeped in the
   project — is exactly what deletion throws away, while an idle puppet costs
   only his memory reservation.
-- **Release** (`puppet(action="remove")` — the clone stays on the node)
-  only when the queue is empty and nothing is expected, or the operator
+- **Release** (`puppet(action="remove")`; on a host node the clone stays
+  and a puppet of the same name reuses it, in a container it goes with the
+  body) only when the queue is empty and nothing is expected, or the operator
   ends the run — and only puppets your own record shows free: last report
   received, token returned. Never delete mid-ticket; killing a session
   loses its unsaved work, and removing a busy puppet is the operator's
