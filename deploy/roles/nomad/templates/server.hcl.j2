@@ -37,10 +37,12 @@ addresses {
   http = "{{ MOP_NOMAD_HTTP_BIND }}"
 }
 
+# Не MOP_SERVER_LAN как есть: Nomad резолвит его на сервере, а имя хоста
+# там обычно смотрит в 127.0.1.1. Адрес выбирает tasks/server.yml (#109).
 advertise {
-  http = "{{ MOP_SERVER_LAN }}"
-  rpc  = "{{ MOP_SERVER_LAN }}"
-  serf = "{{ MOP_SERVER_LAN }}"
+  http = "{{ nomad_advertise }}"
+  rpc  = "{{ nomad_advertise }}"
+  serf = "{{ nomad_advertise }}"
 }
 
 server {
