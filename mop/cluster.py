@@ -29,14 +29,20 @@ import json
 import os
 import threading
 
-from . import bootstrap, bus, config, creds, natsconf, nodes, nomad, projects, puppets
+import base64
+
+from . import (bootstrap, bus, config, creds, natsconf, nodes, nomad,
+               project_secrets, projects, puppets)
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
 
 # Глаголы проекта: про его собственных папетов.
 PROJECT_VERBS = ("ping", "roster", "pool", "add", "update", "restart", "stop",
-                 "delete", "alloc", "spec")
+                 "delete", "alloc", "spec",
+                 # Секреты проекта (#127): проект -- из субъекта.
+                 "secret_put", "secret_list", "secret_remove")
+SECRET_VERBS = ("secret_put", "secret_list", "secret_remove")
 # Глаголы оператора: про машины. Место на узле общее для всех его жильцов, а
 # увод папетов с машины касается всех проектов разом — мастеру не показываем.
 # Проекты (#117) -- тоже оператору: завод проекта заводит пользователя на
@@ -78,6 +84,9 @@ def refusal(project, verb, origin=None, name=None, job_exists=False,
         return (f"no such verb {verb}; project verbs: {', '.join(PROJECT_VERBS)}; "
                 f"operator verbs: {', '.join(ADMIN_VERBS)}")
     operator = project == bus.ADMIN
+    if verb in SECRET_VERBS and operator:
+        return (f"{verb}: secrets belong to a project — ask on "
+                f"mop.<project>.cluster.rpc, not the operator's subject")
     if verb in ADMIN_VERBS and not operator:
         return (f"{verb} is the operator's verb: a node is shared by every project "
                 f"on it, and {project} sees only its own puppets")
@@ -386,6 +395,10 @@ def _project_delete(project, req):
             os.remove(os.path.join(bootstrap.PUPPET_CREDS, creds.puppet_pass_file(name)))
         except FileNotFoundError:
             pass
+        # Секреты снятого проекта (#127): заведённый заново получил бы чужие.
+        import shutil
+        shutil.rmtree(project_secrets.project_dir(project_secrets.ROOT, name),
+                      ignore_errors=True)
     return {"ok": True, "name": name, "dropped": dropped}
 
 
@@ -402,11 +415,57 @@ def _project_limit(project, req):
     return {"ok": True, "name": name, "limit": value}
 
 
+# ─── глаголы: секреты проекта (#127) ─────────────────────────────────────
+def _registered(project):
+    """Отказ по незаведённому проекту: опечатка в имени завела бы секреты
+    проекту, которого нет."""
+    if project not in _names(projects.read()):
+        return {"error": f"no project {project} in the registry: mop project add"}
+    return None
+
+
+def _secret_put(project, req):
+    why = _registered(project)
+    if why:
+        return why
+    root = project_secrets.ROOT
+    if req.get("kind") == "file":
+        data = base64.b64decode(req["data"])
+        return {"ok": True, "name": project_secrets.put_file(root, project, req["name"], data)}
+    if req.get("kind") == "var":
+        key, value = project_secrets.parse_var(f"{req['key']}={req['value']}")
+        project_secrets.set_var(root, project, key, value)
+        return {"ok": True, "name": key}
+    return {"error": "secret_put: kind is file or var"}
+
+
+def _secret_list(project, req):
+    root = project_secrets.ROOT
+    return {"ok": True, "files": project_secrets.list_files(root, project),
+            "vars": project_secrets.list_vars(root, project)}
+
+
+def _secret_remove(project, req):
+    root = project_secrets.ROOT
+    kind, name = req.get("kind"), req.get("name") or ""
+    if kind == "file":
+        gone = project_secrets.remove_file(root, project, name)
+    elif kind == "var":
+        gone = project_secrets.remove_var(root, project, name)
+    else:
+        return {"error": "secret_remove: kind is file or var"}
+    if not gone:
+        return {"error": f"no secret {kind} {name} in project {project}"}
+    return {"ok": True}
+
+
 HANDLERS = {"ping": _ping, "roster": _roster, "pool": _pool, "add": _add, "update": _update, "restart": _restart,
             "stop": _stop, "delete": _delete, "alloc": _alloc, "spec": _spec,
             "nodes": _nodes, "drain": _drain, "up": _up, "forget": _forget,
             "meta": _meta, "projects": _projects, "project_add": _project_add,
-            "project_delete": _project_delete, "project_limit": _project_limit}
+            "project_delete": _project_delete, "project_limit": _project_limit,
+            "secret_put": _secret_put, "secret_list": _secret_list,
+            "secret_remove": _secret_remove}
 
 
 def answer(project, req):
@@ -430,6 +489,9 @@ def answer(project, req):
         return HANDLERS[verb](project, req)
     except KeyError as e:
         return {"error": f"{verb}: missing field {e}"}
+    except ValueError as e:
+        # Отказ по содержимому запроса (имя, размер, переменная), а не Nomad.
+        return {"error": f"{verb}: {e}"}
     except Exception as e:
         return {"error": f"{verb}: {nomad.describe_error(e)}"}
 

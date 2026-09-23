@@ -192,10 +192,28 @@ def check_project_verbs():
     return out
 
 
+def check_secret_verbs():
+    """HYPOTHESIS (#127): секреты проекта класть было некуда. SOLUTION:
+    глаголы сервиса на субъекте проекта -- мастеру своего проекта и
+    оператору от имени проекта; у псевдопроекта admin секретов нет.
+    STATUS: FIXED — see #127"""
+    out = []
+    for verb in ("secret_put", "secret_list", "secret_remove"):
+        if verb not in cluster.PROJECT_VERBS:
+            out.append(f"{verb} must be a project's verb")
+            continue
+        if cluster.refusal("rugent", verb) is not None:
+            out.append(f"a project's master must get {verb}: {cluster.refusal('rugent', verb)}")
+        if cluster.refusal("admin", verb) is None:
+            out.append(f"{verb} on the admin pseudo-project must be refused: secrets belong to a project")
+    return out
+
+
 def main():
     failed = []
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
-                  check_limit, check_project_verbs):
+                  check_limit, check_project_verbs,
+                  check_secret_verbs):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:
