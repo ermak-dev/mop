@@ -34,10 +34,18 @@ check_vmid() {
 }
 
 # Проверка имени: диапазон мог быть занят до mop, и тогда одного номера мало.
+# Имя контейнера -- из его конфига напрямую (#138), а не `pct config`: тот
+# поднимает perl, ~0,8 с на вызов, а `list` звал его на каждый контейнер
+# гипервизора. Только основная секция: ниже `[снимок]` у снимков свои hostname.
+conf_hostname() {
+    local f="/etc/pve/lxc/$1.conf"
+    [[ -f "$f" ]] || return 1
+    sed -n '/^\[/q; s/^hostname: //p' "$f"
+}
+
 check_host() {
     local h
-    h=$(pct config "$1" 2>/dev/null | sed -n 's/^hostname: //p') \
-        || die "no container $1"
+    h=$(conf_hostname "$1") || die "no container $1"
     [[ "$h" == pu-* ]] || die "container $1 is named $h — not a puppet body"
 }
 
@@ -54,7 +62,7 @@ case "$verb" in
 # каталог сокетов tmux пуст, и это единственный способ узнать, что тут стоит.
 list)
     pct list | tail -n +2 | while read -r vmid status _rest; do
-        h=$(pct config "$vmid" 2>/dev/null | sed -n 's/^hostname: //p') || continue
+        h=$(conf_hostname "$vmid") || continue
         [[ "$h" == pu-* ]] || continue
         (( vmid >= VMID_MIN && vmid <= VMID_MAX )) || continue
         echo "$vmid $h $status"
