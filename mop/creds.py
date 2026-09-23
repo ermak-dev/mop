@@ -27,6 +27,10 @@ import os
 from . import config
 
 ROOT = os.path.expanduser("~/.config/mop/servers")
+# Кред оператора-человека (#84): один файл на машину, а не по паролю на
+# проект. Пользователь тут один — сам человек, — и от проекта он не зависит:
+# проект живёт в СУБЪЕКТЕ, права на субъект проверяет сервер NATS.
+OPERATOR_FILE = "operator.json"
 ADMIN = "admin"          # псевдошард оператора: шарда нет
 TOKEN_FILE = "bootstrap.json"
 
@@ -66,6 +70,31 @@ def bus_config(host, port, shard, password, user=None):
     в ответе на bootstrap песочницы (#83, docs/BOOTSTRAP.md)."""
     return {"url": f"nats://{host}:{port}", "user": user or user_of(shard),
             "password": password}
+
+
+def operator(directory):
+    """{user, password} оператора этой машины, либо None.
+
+    None — не отказ: пока установка не перевела операторов на собственные
+    имена, рядом живёт прежний путь (пароль роли `master-<проект>`), и пустой
+    файл означает просто «этот путь не выбран»."""
+    try:
+        with open(os.path.join(directory, OPERATOR_FILE)) as f:
+            got = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not got.get("user") or not got.get("password"):
+        return None
+    return {"user": got["user"], "password": got["password"]}
+
+
+def write_operator(directory, user, password):
+    """Положить кред оператора. Каталог и файл закрыты: там пароль."""
+    make_dir(directory)
+    path = os.path.join(directory, OPERATOR_FILE)
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        json.dump({"user": user, "password": password}, f)
+    return path
 
 
 def password(directory, shard):
