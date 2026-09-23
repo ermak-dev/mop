@@ -7,6 +7,7 @@
 значит, git по дороге не спрашивают, и незакоммиченное доезжает.
 """
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -85,6 +86,58 @@ EMPTY = {"project": "bare", "asks": {}, "alien": [], "legacy": [],
          "bootstrap_vars": None, "bootstrap_tasks": None, "bootstrap_text": None}
 
 
+# #139: `mop project add` висел на «reading .mop» больше минуты: fetch
+# клонировал зеркало всей истории (rudesktop: 77 с, 451 МБ), чтобы прочитать
+# два файла HEAD. Свойство: клон несёт один коммит и ни одного блоба, кроме
+# прочитанных, а манифест при этом читается целиком.
+# HYPOTHESIS: `git clone --mirror` тянет всю историю и все блобы.
+# SOLUTION: голый клон --depth 1 --filter=blob:none; `git show` догружает
+# нужный блоб лениво. RESULT: 0,7 с и 440 КБ на rudesktop.
+def run(*argv, cwd=None):
+    subprocess.run(argv, cwd=cwd, check=True, capture_output=True)
+
+
+def fetch_is_shallow_and_blobless():
+    """-> список отказов."""
+    src = tree({".mop/bootstrap.yaml": BOOTSTRAP, "heavy.bin": "x" * 100000})
+    run("git", "init", "-q", "-b", "master", cwd=src)
+    run("git", "config", "uploadpack.allowFilter", "true", cwd=src)
+    for i in range(3):
+        with open(os.path.join(src, "history.txt"), "w") as f:
+            f.write(f"commit {i}\n")
+        run("git", "add", "-A", cwd=src)
+        run("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit",
+            "-q", "-m", f"c{i}", cwd=src)
+    seen = {}
+    real = manifest.subprocess.run
+
+    def spy(argv, *a, **kw):
+        r = real(argv, *a, **kw)
+        if argv[:2] == ["git", "clone"] and r.returncode == 0:
+            dest = argv[-1]
+            seen["commits"] = real(["git", "-C", dest, "rev-list", "--count", "HEAD"],
+                                   capture_output=True, text=True).stdout.strip()
+            # --missing=print не догружает: видно, чего клон не принёс.
+            objs = real(["git", "-C", dest, "rev-list", "--objects", "--all",
+                         "--missing=print"], capture_output=True, text=True).stdout
+            seen["missing"] = sum(1 for l in objs.splitlines() if l.startswith("?"))
+        return r
+
+    manifest.subprocess.run = spy
+    try:
+        got = manifest.fetch(f"file://{src}")
+    finally:
+        manifest.subprocess.run = real
+    bad = []
+    if got.get("bootstrap_text") != BOOTSTRAP:
+        bad.append(f"bootstrap must read through the clone: {got.get('bootstrap_text')!r}")
+    if seen.get("commits") != "1":
+        bad.append(f"clone must carry one commit, carries {seen.get('commits')}")
+    if not seen.get("missing"):
+        bad.append("clone must not carry the blobs it doesn't read (heavy.bin, history.txt)")
+    return bad
+
+
 def main():
     failed = 0
     got = manifest.fetch_tree(tree({".mop/sandbox.yaml": SANDBOX,
@@ -150,6 +203,9 @@ def main():
         if "bad/.mop/sandbox.yaml" not in str(e):
             failed += 1
             print(f"FAIL malformed message: {e}")
+    for why in fetch_is_shallow_and_blobless():
+        failed += 1
+        print(f"FAIL fetch: {why}")
     print("manifest: FAILED" if failed else "manifest: ok")
     return 1 if failed else 0
 

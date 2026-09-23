@@ -46,16 +46,21 @@ def fetch(origin):
     общего. Ошибки — громкие: недоступный origin и кривая форма поднимают
     RuntimeError, их переводит в выход вызывающий.
 
-    Зеркало, а не рабочий клон: манифест принадлежит репозиторию, и origin —
-    единственная его правда для deploy, у которого рабочей копии чужого
-    проекта нет вовсе. Читается HEAD зеркала, то есть дефолтная ветка.
+    Клон origin, а не рабочая копия: манифест принадлежит репозиторию, и
+    origin — единственная его правда для deploy, у которого рабочей копии
+    чужого проекта нет вовсе. Читается HEAD клона, то есть дефолтная ветка.
+
+    Голый, глубины 1 и без блобов (#139): нужны два файла HEAD, а зеркало
+    всей истории стоило rudesktop 77 с и 451 МБ -- `mop project add` висел
+    на «reading .mop». `git show` догружает свой блоб сам.
     """
     project = puppets.project_of(origin)
     import tempfile
     with_dir = tempfile.mkdtemp(prefix=f"mop-mirror-{project}-")
-    tmp = os.path.join(with_dir, "mirror.git")
+    tmp = os.path.join(with_dir, "head.git")
     try:
-        r = subprocess.run(["git", "clone", "--mirror", "-q", origin, tmp],
+        r = subprocess.run(["git", "clone", "--bare", "--depth", "1",
+                            "--filter=blob:none", "-q", origin, tmp],
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"cannot read {project}: "
