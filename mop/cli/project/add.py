@@ -1,4 +1,4 @@
-"""make a project ready: mop project add [--update|--rebuild] [git-origin]
+"""make a project ready: mop project add [--update|--rebuild] [-v] [git-origin]
 
 Without origin, the origin of the current working copy is used.
 
@@ -8,9 +8,11 @@ any of them. Afterwards `mop add` can place a puppet right away.
 
   --update    build the image even if it exists, incrementally
   --rebuild   build it from the base image
+  -v          print every line of the build's output, not only on a terminal
 
 Idempotent: run it again after changing the project's .mop. Silent when all
-goes well; on a terminal it shows the current step.
+goes well; on a terminal it shows the current step under the last lines of
+the build's output, and erases both when done.
 """
 import sys
 
@@ -20,9 +22,12 @@ from mop import bus, manifest, puppets
 
 def main(argv):
     mode = "missing"
+    verbose = False
     args = []
     for a in argv:
-        if a in ("--update", "--rebuild"):
+        if a in ("-v", "--verbose"):
+            verbose = True
+        elif a in ("--update", "--rebuild"):
             if mode != "missing":
                 lib.usage(__doc__)
             mode = a[2:]
@@ -34,7 +39,7 @@ def main(argv):
         lib.usage(__doc__)
     origin = lib.origin(args[0] if args else None, __doc__)
     name = puppets.project_of(origin)
-    p = lib.Progress(name)
+    p = lib.Progress(name, verbose)
     try:
         return _add(origin, name, mode, p)
     finally:
@@ -60,12 +65,16 @@ def _add(origin, name, mode, p):
         if ev.get("done"):
             if ev.get("error") or not ev.get("ok"):
                 p.clear()
-                for line in ev.get("tail") or []:
+                # С -v строки уже напечатаны все, хвост повторил бы их.
+                for line in [] if p.verbose else ev.get("tail") or []:
                     print(line, file=sys.stderr)
                 lib.fail(f"{name}: {ev.get('error') or 'image build failed'}")
                 return 1
             return 0
-        p.step(f"image: {ev.get('step', '')}")
+        if ev.get("lines"):
+            p.log(ev["lines"])
+        if "step" in ev:
+            p.step(f"image: {ev['step']}")
     return 0
 
 

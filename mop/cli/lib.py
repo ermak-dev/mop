@@ -17,6 +17,7 @@
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,36 +48,78 @@ def ok(text):
     print(f"{_GREEN}{text}{_NC}", flush=True)
 
 
+# Управляющие последовательности и символы строки чужого вывода: в кадре
+# они красили бы его и двигали курсор, а ширина считается по видимому.
+_ESCAPES = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]|[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def frame(drawn, rows, width):
+    """Кадр хода на терминале (#140): что записать, чтобы drawn строк,
+    нарисованных прежде, сменились строками rows. Курсор стоит в конце
+    последней строки кадра. Строки -- без управляющих символов и обрезаны
+    по ширине: перенос строки сбил бы счёт высоты, и кадр полз бы вниз."""
+    up = f"\033[{drawn - 1}A" if drawn > 1 else ""
+    clean = [_ESCAPES.sub("", r.replace("\t", " "))[:width - 1] for r in rows]
+    return "\r" + up + "\033[J" + "\n".join(clean)
+
+
 class Progress:
-    """Ход долгой команды: одна строка шага, перерисовываемая на месте (#124).
+    """Ход долгой команды: строка шага, перерисовываемая на месте (#124).
 
     Быстрая команда при успехе молчит, долгая показывает, что делает сейчас,
     и больше ничего: ни эха параметров, ни справок, ни советов. Строка живёт
     только на терминале и стирается по завершении; не на терминале (скрипт,
-    модель) -- тишина до ошибки."""
+    модель) -- тишина до ошибки.
 
-    def __init__(self, what):
+    Вывод, который идёт долго (ansible сборки, #140), -- log(): на терминале
+    над строкой шага окно последних WINDOW строк, стирается вместе с ней.
+    verbose -- каждая строка в stdout насовсем, и не на терминале тоже."""
+
+    WINDOW = 8
+
+    def __init__(self, what, verbose=False):
+        import collections
         import time
         self._time = time.time
         self.what, self.t0 = what, time.time()
         self.tty = sys.stderr.isatty()
-        self.shown = False
+        self.verbose = verbose
+        self.window = collections.deque(maxlen=self.WINDOW)
+        self.text, self.drawn = None, 0
 
     def step(self, text):
-        if not self.tty:
-            return
-        s = int(self._time() - self.t0)
-        line = f"{self.what}: {text} [{s // 60}:{s % 60:02d}]"
-        width = shutil.get_terminal_size((80, 20)).columns
-        sys.stderr.write("\r\033[K" + line[:width - 1])
-        sys.stderr.flush()
-        self.shown = True
+        self.text = text
+        self._draw()
+
+    def log(self, lines):
+        if self.verbose:
+            self._erase()
+            for line in lines:
+                print(line, flush=True)
+        else:
+            self.window.extend(lines)
+        self._draw()
 
     def clear(self):
-        if self.shown:
-            sys.stderr.write("\r\033[K")
+        self._erase()
+        self.window.clear()
+
+    def _draw(self):
+        if not self.tty or self.text is None:
+            return
+        s = int(self._time() - self.t0)
+        rows = [*self.window, f"{self.what}: {self.text} [{s // 60}:{s % 60:02d}]"]
+        width = shutil.get_terminal_size((80, 20)).columns
+        sys.stderr.write(frame(self.drawn, rows, width))
+        sys.stderr.flush()
+        self.drawn = len(rows)
+
+    def _erase(self):
+        if self.drawn:
+            width = shutil.get_terminal_size((80, 20)).columns
+            sys.stderr.write(frame(self.drawn, [], width))
             sys.stderr.flush()
-            self.shown = False
+            self.drawn = 0
 
 
 def cluster(fn):
