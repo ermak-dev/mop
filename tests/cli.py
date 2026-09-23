@@ -6,6 +6,7 @@
 разбор argv в (модуль, аргументы) и описание команды из докстринга без
 импорта модуля. Сам запуск команд — только руками.
 """
+import json
 import os
 import sys
 import tempfile
@@ -80,6 +81,39 @@ def main():
     if cli.describe(p) != "":
         failed += 1
         print("FAIL describe of a module without a docstring must be empty")
+
+    # deploy на python (#76): чистое — отвергнутые старые цели, недостающие
+    # файлы MOP_BODY_EXTRA, имена шардов из origin'ов и легаси, --extra-vars.
+    # HYPOTHESIS: deploy на bash, зовёт mop config/shards/list подпроцессом.
+    # SOLUTION: mop.cli.pool.deploy поверх библиотеки. STATUS: FIXED — see #76
+    try:
+        from mop.cli.pool import deploy
+        from mop import shards
+    except ImportError as e:
+        print(f"FAIL {e}")
+        return 1
+    for argv, want in [(["nomad"], "nomad"), (["pool"], "pool"), (["all"], "all"),
+                       ([], None), (["git@h:g/x.git"], None), (["mop"], None)]:
+        if deploy.refused_target(argv) != want:
+            failed += 1
+            print(f"FAIL refused_target({argv}) != {want!r}")
+    root = tempfile.mkdtemp(prefix="mop-test-deploy-")
+    open(os.path.join(root, "sandbox.yaml"), "w").close()
+    if deploy.missing_extras("sandbox.yaml, other.yaml,", root) != ["other.yaml"]:
+        failed += 1
+        print(f"FAIL missing_extras: {deploy.missing_extras('sandbox.yaml, other.yaml,', root)}")
+    if deploy.missing_extras("", root) != []:
+        failed += 1
+        print("FAIL missing_extras of an empty setting must be empty")
+    if shards.names({"git@h:g/proj.git", "git@h:g/mop.git"}, {"legacy"}) != ["legacy", "mop", "proj"]:
+        failed += 1
+        print(f"FAIL shards.names: {shards.names({'git@h:g/proj.git', 'git@h:g/mop.git'}, {'legacy'})}")
+    # Списком, а не строкой: `--extra-vars mop_shards=[...]` ansible берёт как
+    # строку и проходит по её символам, порождая пользователей `master-[`.
+    ev = deploy.extra_vars(["mop", "proj"], {"proj": {"asks": {}}})
+    if json.loads(ev[0]) != {"mop_shards": ["mop", "proj"]} or json.loads(ev[1]) != {"mop_manifests": {"proj": {"asks": {}}}}:
+        failed += 1
+        print(f"FAIL extra_vars: {ev}")
 
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0

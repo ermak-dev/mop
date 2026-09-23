@@ -28,6 +28,23 @@ PROJECT = config.PROJECT
 BIN = os.path.join(PROJECT, "bin")
 
 
+# Цвета терминала — для `mop deploy`, у которого прогон длинный и заголовки
+# разделов нужны глазу. Печатает только cli.
+_RED, _GREEN, _BOLD, _NC = "\033[0;31m", "\033[0;32m", "\033[1m", "\033[0m"
+
+
+def section(text):
+    print(f"\n{_BOLD}{text}{_NC}", flush=True)
+
+
+def fail(text):
+    print(f"{_RED}{text}{_NC}", file=sys.stderr, flush=True)
+
+
+def ok(text):
+    print(f"{_GREEN}{text}{_NC}", flush=True)
+
+
 def cluster(fn):
     """Командлет, которому нужен настроенный кластер. Проверка обязательных
     настроек — до первого сетевого вызова, чтобы отказ был про настройки, а не

@@ -24,13 +24,10 @@
 Описание для help читается из файла разбором AST, без импорта: импорт тянул
 бы шину и падал бы на машине без nats-py ради одной строки списка.
 
-Переход: `deploy` пока на bash (bin/deploy, bin/common) и запускается отсюда
-как исключение, до #76.
 """
 import ast
 import importlib
 import os
-import subprocess
 import sys
 
 PACKAGE = os.path.dirname(os.path.realpath(__file__))
@@ -45,8 +42,6 @@ TITLES = {
     "pool": "the pool and its machines, for the operator",
     "service": "run by systemd and the job spec, not by hand",
 }
-# Переходное: команды, которые ещё живут в bin/ на bash (#76).
-BASH = ("deploy",)
 
 
 # ─── чистое: каталог, разбор, описание ───────────────────────────────────
@@ -135,9 +130,6 @@ def usage(found=None):
     for section in SECTIONS:
         rows = [(n, describe(_path_of(section, n, False)))
                 for s, n, p in found if s == section]
-        if section == "pool":
-            rows += [(b, describe_bash(os.path.join(BIN, b))) for b in BASH]
-            rows.sort()
         if section == "service" and groups:
             lines += ["", "  groups: mop <group> <verb>, mop <group> alone for the verbs"]
             lines += [f"    {s:<10} {describe(_path_of(s, '', True))}" for s, _, _ in groups]
@@ -147,28 +139,11 @@ def usage(found=None):
     return "\n".join(lines)
 
 
-def describe_bash(path):
-    """Описание bash-командлета: первая строка комментария после shebang."""
-    try:
-        with open(path) as f:
-            for line in f.readlines()[1:4]:
-                if line.startswith("# "):
-                    return line[2:].strip()
-    except OSError:
-        pass
-    return ""
-
-
 # ─── запуск ──────────────────────────────────────────────────────────────
 def main(argv):
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(usage())
         return 0
-    if argv[0] in BASH:
-        # Шелловый командлет получает функции из common тем же source, что и
-        # раньше; сам файл живёт в bin/ до переезда на python (#76).
-        cmd = f'source "$0/common"; source "$0/{argv[0]}"'
-        os.execvp("bash", ["bash", "-e", "-c", cmd, BIN, *argv[1:]])
     try:
         found = resolve(argv, catalog(scan()), verbs())
     except RuntimeError as e:

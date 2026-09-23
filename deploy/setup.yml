@@ -53,7 +53,7 @@
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_tgz: "https://github.com/nats-io/nats-server/releases/download/v{{ MOP_NATS_VERSION }}/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64.tar.gz"
     nats_nodes: "{{ groups['puppet'] }}"
-    # Шарды считает `mop deploy` из ростера Nomad и своей памяти (см. bin/deploy)
+    # Шарды считает `mop deploy` из ростера Nomad и своей памяти (см. mop/cli/pool/deploy.py)
     # и передаёт сюда --extra-vars. Пустой список -- законное состояние пустого
     # пула: сервер поднимется, мастеров просто ещё нет.
     shards: "{{ mop_shards | default([]) }}"
