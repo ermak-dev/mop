@@ -93,7 +93,11 @@ def main(argv):
         for name, rows in a.get("usage", {}).items():
             per_puppet[(name, n)] = usage.sum_days(rows)
             usage.merge(per_day, rows)
-    puppets = len(per_puppet)
+    # Не `puppets`: так звали бы и модуль, из которого строкой выше берут
+    # состав пула, и локальный счётчик — питон трактует такую функцию как
+    # использующую локальную переменную до присваивания, и падает на первой
+    # же строке.
+    counted = len(per_puppet)
 
     if len(failed) == len(nodes):
         # Ни одного ответа — график из прочерков был бы ложью про пустой пул.
@@ -101,7 +105,7 @@ def main(argv):
     shard = lib.in_shard()
     who = f"shard {shard}" if shard else "whole pool"
     print(f"tokens per day, {who}, last {days} days: "
-          f"{puppets} puppets on {len(nodes) - len(failed)} nodes")
+          f"{counted} puppets on {len(nodes) - len(failed)} nodes")
     if by_puppet:
         breakdown(per_puppet)
     else:
