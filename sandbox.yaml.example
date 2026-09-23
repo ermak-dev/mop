@@ -233,13 +233,26 @@
 # Пропуск на управляющей машине не лень: она и есть источник этого синка, а
 # разыменование её симлинка скилла мастера заменило бы его настоящей копией -- и
 # правки скилла перестали бы попадать в историю репозитория.
+# Скиллы на контроллере есть не всегда (#120): пример писался, когда
+# контроллером была рабочая машина автора с claude, а сервер-контроллер его
+# не держит вовсе. Нет каталога -- в тело нечего везти, и сборка образа не
+# должна на этом падать; скиллы, уже лежащие в теле, не трогаем.
+- name: Skills on the control machine
+  ansible.builtin.stat:
+    path: "{{ lookup('env', 'HOME') }}/.claude/skills"
+  delegate_to: localhost
+  become: no
+  register: control_skills
+
 - name: Pack the skills up
   ansible.builtin.command:
     cmd: tar czhf {{ skills_tgz }} -C {{ lookup('env', 'HOME') }}/.claude/skills .
   delegate_to: localhost
   become: no
   changed_when: true
-  when: "'master' not in group_names"
+  when:
+    - "'master' not in group_names"
+    - control_skills.stat.exists
 
 # Снести и разложить заново -- это `delete: yes`, которым synchronize выметал
 # снятые скиллы. Без сноса удалённый скилл лежал бы в теле вечно, а это хуже
@@ -252,7 +265,9 @@
     state: "{{ item }}"
     mode: "0755"
   loop: [absent, directory]
-  when: "'master' not in group_names"
+  when:
+    - "'master' not in group_names"
+    - control_skills.stat.exists
 
 - name: Sync ~/.claude/skills from the control machine
   become: yes
@@ -260,7 +275,9 @@
   ansible.builtin.unarchive:
     src: "{{ skills_tgz }}"
     dest: "{{ MOP_HOME }}/.claude/skills/"
-  when: "'master' not in group_names"
+  when:
+    - "'master' not in group_names"
+    - control_skills.stat.exists
 
 # Сначала снять, потом поставить: add на существующей записи ошибается,
 # а сравнить желаемое с фактом CLI не умеет -- токены он прячет даже от
