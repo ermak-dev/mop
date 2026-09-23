@@ -180,7 +180,7 @@ def _login(host, user, dest):
     try:
         bus.check(c)
     except Exception as e:
-        raise RuntimeError(f"the bus did not take {user}: {e}")
+        raise RuntimeError(str(e))
     creds.write_operator(dest, user, password)
     # Ролевые пароли прежних join'ов (#106) и токен Nomad (#82): шина их не
     # знает или они здесь не нужны, а лежащие -- это секрет без пользы.

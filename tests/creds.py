@@ -213,6 +213,39 @@ def main():
             bad += 1
             print(f"FAILED  pick_login{args} -> {got!r}, wanted {want!r}")
 
+    # ── #130: отказ подключения к шине называет свою причину.
+    # HYPOTHESIS: пустой NoServersError подменялся «wrong password», а
+    # настоящая ошибка (TLS: чужой сертификат по чужому адресу) терялась.
+    # SOLUTION: причина -- из ошибок попыток. STATUS: FIXED — see #130
+    tls = ("Cannot connect to host mop.corp.ermak.dev:443 ssl:True "
+           "[SSLCertVerificationError: (1, '[SSL: CERTIFICATE_VERIFY_FAILED] "
+           "certificate verify failed: unable to get local issuer certificate')]")
+    fn = getattr(creds, "connect_failure", None)
+    cases += 1
+    got = fn("ermak", tls, "mop.corp.ermak.dev", 443, "79.141.65.134",
+             presented="SHA256:20:39", pinned="SHA256:AE:71") if fn else ""
+    if not all(w in got for w in ("ermak", "mop.corp.ermak.dev", "79.141.65.134",
+                                  "SHA256:20:39", "SHA256:AE:71", "resolves")) \
+            or "password" in got:
+        bad += 1
+        print(f"FAILED  a TLS refusal must name the address and both certificates: {got!r}")
+    cases += 1
+    got = fn("ermak", "nats: 'Authorization Violation'", "h", 443, "10.0.0.1") if fn else ""
+    if "password" not in got:
+        bad += 1
+        print(f"FAILED  an authorization refusal is about the password: {got!r}")
+    cases += 1
+    got = fn("ermak", "Cannot connect to host h:443 ssl:True [Connect call failed ('10.0.0.1', 443)]",
+             "h", 443, "10.0.0.1") if fn else ""
+    if "10.0.0.1" not in got or "password" in got:
+        bad += 1
+        print(f"FAILED  an unreachable server is named with its address: {got!r}")
+    cases += 1
+    got = fn("ermak", "", "h", 443, None) if fn else ""
+    if "password" in got or "h" not in got:
+        bad += 1
+        print(f"FAILED  no known reason must not be read as a wrong password: {got!r}")
+
     # ── #97: клиенты каталога сервера — на шину по wss через TLS-прокси.
     # HYPOTHESIS: bus_config всегда собирал nats://<LAN>:4222 без TLS, и
     # пароль оператора уходил по LAN открытым текстом.

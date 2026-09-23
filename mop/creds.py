@@ -156,6 +156,41 @@ def untrusted_cert(host, port, timeout=10):
             return tls.getpeercert(binary_form=True)
 
 
+def peer_cert(host, port, timeout=5):
+    """DER сертификата, который сервер предъявляет сейчас, без проверки.
+    Для отказа подключения (#130): доверяет ли ему система -- неважно, важно,
+    тот ли он, что закреплён."""
+    import socket
+    blind = ssl.create_default_context()
+    blind.check_hostname = False
+    blind.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, int(port)), timeout) as raw:
+        with blind.wrap_socket(raw, server_hostname=host) as tls:
+            return tls.getpeercert(binary_form=True)
+
+
+def connect_failure(user, error, host, port, addr, presented=None, pinned=None):
+    """Отказ подключения к шине -> строка причины. Чистая функция (#130).
+
+    error -- текст последней ошибки попытки (nats-py отдаёт её в error_cb, а
+    само исключение -- пустой NoServersError). Пустая причина прежде читалась
+    как «неверный пароль», и чужой сертификат по чужому адресу искали в
+    паролях."""
+    head = f"no connection to bus as {user}: "
+    where = f"{host}:{port}" + (f" ({addr})" if addr else " (does not resolve)")
+    text = error or ""
+    if "CERTIFICATE_VERIFY_FAILED" in text or "SSLCertVerificationError" in text:
+        return (head + f"{where} presented a certificate other than the one expected "
+                f"(presented {presented or '?'}, pinned {pinned or 'none: the system CAs'}). "
+                f"Check where {host} resolves: getent hosts {host}")
+    if "Authorization Violation" in text or "authorization" in text.lower():
+        return head + "wrong password, or the bus does not know this user any more"
+    if not addr or "Connect call failed" in text or "Cannot connect" in text \
+            or "timed out" in text.lower() or "Name or service not known" in text:
+        return head + f"cannot reach {where}" + (f": {text}" if text else "")
+    return head + (text or f"{where} refused without a reason")
+
+
 def write_cert(directory, der):
     """Закрепить сертификат в каталоге сервера. -> путь."""
     make_dir(directory)
