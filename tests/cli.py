@@ -125,23 +125,19 @@ def main():
     # Локаль прогонов (#92): ansible требует UTF-8 и берёт её из окружения, а
     # свежая машина несёт LANG=C. Ставит её диспетчер, потому что зовут
     # прогон и `mop setup`, и `mop deploy`, и сборка образа.
-    import os as _os
-    _keep = _os.environ.pop("LC_ALL", None)
-    cli.environment()
-    if not _os.environ.get("LC_ALL", "").upper().endswith("UTF-8"):
-        failed += 1
-        print(f"FAIL environment must set a UTF-8 locale: "
-              f"{_os.environ.get('LC_ALL')!r}")
-    # Заданное оператором не трогаем: своя локаль — его дело.
-    _os.environ["LC_ALL"] = "ru_RU.UTF-8"
-    cli.environment()
-    if _os.environ.get("LC_ALL") != "ru_RU.UTF-8":
-        failed += 1
-        print("FAIL environment must not override an explicit LC_ALL")
-    if _keep is None:
-        _os.environ.pop("LC_ALL", None)
-    else:
-        _os.environ["LC_ALL"] = _keep
+    for env, want in [
+            ({}, "C.UTF-8"),                       # ничего не сказано
+            ({"LANG": "C"}, "C.UTF-8"),            # свежая машина
+            ({"LANG": "POSIX"}, "C.UTF-8"),
+            ({"LANG": "ru_RU.UTF-8"}, None),       # установка говорит по-русски
+            ({"LANG": "ru_RU.utf8"}, None),        # то же имя, другая запись
+            ({"LC_ALL": "en_US.UTF-8", "LANG": "C"}, None),   # LC_ALL старше
+            ({"LC_ALL": "C", "LANG": "ru_RU.UTF-8"}, "C.UTF-8"),
+            ({"LC_CTYPE": "ru_RU.UTF-8", "LANG": "C"}, None)]:
+        got = cli.utf8_locale(env)
+        if got != want:
+            failed += 1
+            print(f"FAIL utf8_locale({env}) -> {got!r}, wanted {want!r}")
 
     # Чем запускать команду, которой нужны права root (#91). Под root —
     # ничем: повышать нечего, а на выделенном сервере ещё и нечем, там
