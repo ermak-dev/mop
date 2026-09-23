@@ -7,7 +7,7 @@ import os
 import shlex
 
 from mop.cli import lib
-from mop import driver, nomad
+from mop import driver
 
 
 def main(argv):
@@ -15,13 +15,15 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     lib.guard(name)
-    a = lib.running_alloc(name)
+    a, node_driver = lib.alloc_of(name)
+    if not a or a["ClientStatus"] != "running":
+        lib.usage(f"{name} not running")
     node = a["NodeName"]
     # Чем входят в тело, знает драйвер узла: у host это сразу tmux, у
-    # контейнерного — ещё один ssh внутрь. Драйвер берём из meta клиента
-    # Nomad, куда его кладёт deploy; узел, ничего о драйвере не сказавший,
-    # ведёт себя как раньше.
-    d = driver.module(nomad.node_meta(node).get("mop_driver") or driver.DEFAULT)
+    # контейнерного — ещё один ssh внутрь. Драйвер приезжает вместе с
+    # аллокацией (глагол `alloc`), вторым запросом за ним не ходим; узел,
+    # ничего о драйвере не сказавший, ведёт себя как раньше.
+    d = driver.module(node_driver or driver.DEFAULT)
     inside = " ".join(shlex.quote(x) for x in d.attach_argv(name))
     # Имя узла в Nomad — имя из инвентаря, а инвентарь берёт способ дозвона
     # из ~/.ssh/config по тому же имени. Таблицы имён между ними нет и не нужно.

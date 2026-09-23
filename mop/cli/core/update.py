@@ -13,7 +13,7 @@ to come back into the context it got stuck on.
 --fresh brings it up with a clean session.
 """
 from mop.cli import lib
-from mop import config, llm, nomad, puppets
+from mop import bus, config, llm
 
 
 def main(argv):
@@ -24,7 +24,7 @@ def main(argv):
         lib.usage(__doc__)
     name = args[0]
     lib.guard(name)
-    meta = lib.require_job(name).get("Meta") or {}
+    meta = lib.require_job(name).get("meta") or {}
     old, old_llm = meta.get("origin"), meta.get("llm", config.get("MOP_DEFAULT_LLM"))
     if not old:
         # Джоб без origin в Meta — не папет: ростер их и не показывает.
@@ -36,7 +36,14 @@ def main(argv):
     # врапер пересоздаёт клон, а разговор остался от прежнего проекта — поднять
     # его в чужом репозитории значит выдать папету чужой контекст за свой.
     cont = not fresh and origin == old
-    nomad.register(puppets.job_spec(name, origin, profile, cont=cont))
+    # Спеку собирает сервис кластера: сюда она больше не ездит (#80) —
+    # иначе кто угодно с доступом к шине клал бы на узел свою командную
+    # строку. Решение «что меняем» остаётся здесь, сборка — там.
+    got = bus.ask_cluster("update", name=name, origin=origin, profile=profile,
+                          cont=cont, new_origin=origin if origin != old else None)
+    if got.get("error"):
+        lib.fail(got["error"])
+        return 1
     moved = f"{old} [{old_llm}] → {origin} [{profile}]" if origin != old \
         else f"{origin}: {old_llm} → {profile}" if profile != old_llm \
         else f"{origin} [{profile}], unchanged"

@@ -7,7 +7,7 @@ is alive: a bare wipe is for a stopped puppet — the full cycle is mop recycle.
 import sys
 
 from mop.cli import lib
-from mop import nomad, puppets
+from mop import puppets
 
 
 def main(argv):
@@ -15,7 +15,7 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     lib.guard(name)
-    alloc = nomad.latest_alloc(name)
+    alloc, _ = lib.alloc_of(name)
     if not alloc:
         sys.exit(f"{name}: no allocation — node unknown")
     r = puppets.wipe(alloc["NodeName"], name)

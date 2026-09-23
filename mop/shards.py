@@ -25,7 +25,7 @@
 """
 import os
 
-from . import bus, nomad, puppets
+from . import bus, puppets
 
 FILE = os.path.expanduser("~/.config/mop/projects")
 # Память шардов до #79. Читается ровно один раз — при переносе в реестр.
@@ -108,8 +108,8 @@ def registry():
             live = roster_origins()
         except Exception as e:
             raise RuntimeError(
-                f"the project registry {FILE} doesn't exist yet and the Nomad "
-                f"roster is unavailable ({nomad.describe_error(e)}): "
+                f"the project registry {FILE} doesn't exist yet and the pool "
+                f"roster is unavailable ({e}): "
                 f"a project missing from the first registry loses its bus user. "
                 f"Fix the roster, or write {FILE} by hand — one origin per line")
         lines = merged(memory, live)

@@ -10,7 +10,7 @@ master shell the picture is the shard's, not the pool's.
 import shutil
 
 from mop.cli import lib
-from mop import bus, nomad, usage
+from mop import bus, usage, puppets
 from mop.render import table
 
 DEFAULT_DAYS = 14
@@ -80,7 +80,7 @@ def breakdown(per_puppet):
 
 def main(argv):
     days, by_puppet = parse(argv)
-    nodes = sorted(nomad.ready_nodes())
+    nodes = sorted(puppets.ready_nodes())
     answers = bus.request_many({n: {"verb": "usage", "days": days} for n in nodes},
                                timeout=TIMEOUT)
     per_day, per_puppet, failed = {}, {}, []

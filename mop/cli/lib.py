@@ -21,7 +21,7 @@ import shutil
 import subprocess
 import sys
 
-from mop import bus, config, creds, keys, llm, nomad, puppets  # noqa: E402
+from mop import bus, config, creds, keys, llm, puppets  # noqa: E402
 
 
 # Каталоги установки: корень проекта и bin/ с единственным исполняемым
@@ -157,11 +157,13 @@ def guard(name):
     """Перила мастер-шелла: не трогать чужого папета.
 
     Это не граница — MOP_SHARD оператор может и снять. Настоящая живёт в кредах
-    NATS и в проверке агента. Здесь мы лишь не даём промахнуться вслепую."""
+    NATS, в проверке агента и в проверке сервиса кластера (#80). Здесь мы лишь
+    не даём промахнуться вслепую: отказ отсюда называет, куда идти, а отказ
+    сервиса — чей это папет."""
     shard = in_shard()
     if shard is None:
         return
-    meta = require_job(name).get("Meta") or {}
+    meta = require_job(name).get("meta") or {}
     owner = puppets.shard_of(meta.get("origin", ""))
     if owner != shard:
         sys.exit(f"{name} — shard {owner}, but this master runs {shard}. "
@@ -185,14 +187,25 @@ def parse_llm(args):
 
 
 def require_job(name):
-    try:
-        return nomad.get_job(name)
-    except nomad.NotFound:
-        sys.exit(f"no such puppet: {name}")
+    """Метаданные папета через шину: origin, профиль, статус, устарела ли
+    спека. Целого джоба тут больше нет — его читал только spec_is_stale, и
+    вердикт теперь приходит готовым от сервиса кластера (#81)."""
+    got = bus.ask_cluster("spec", name=name)
+    if got.get("error"):
+        sys.exit(got["error"])
+    return got
+
+
+def alloc_of(name):
+    """Аллокация папета и драйвер её узла, одним запросом. -> (alloc|None, драйвер)."""
+    got = bus.ask_cluster("alloc", name=name)
+    if got.get("error"):
+        sys.exit(got["error"])
+    return got.get("alloc"), got.get("driver")
 
 
 def running_alloc(name):
-    a = nomad.latest_alloc(name)
+    a, _ = alloc_of(name)
     if not a or a["ClientStatus"] != "running":
         sys.exit(f"{name} not running")
     return a
@@ -247,4 +260,4 @@ def pool_lines():
                            f"{n['total_mb'] / 1024:.0f} GB ({n['slots']} slots)")
         return out
     except Exception as e:
-        return [f"  {nomad.describe_error(e)}"]
+        return [f"  {e}"]
