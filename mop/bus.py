@@ -134,6 +134,20 @@ def config(file=None):
     return server_config(settings.get("MOP_SERVER_LAN"))
 
 
+def login():
+    """Логин человека, под которым этот процесс на шине, или None.
+
+    Им мастер называет себя владельцем задания (#161). Папет, узел и сервисы
+    сервера -- не люди: их `send` аренду не берёт."""
+    try:
+        user = config().get("user") or ""
+    except Exception:
+        return None
+    if not user or user == "service" or user.startswith(("puppet-", "node-")):
+        return None
+    return user
+
+
 def server_config(host):
     """Креды этой машины на названном сервере -- из его каталога.
 
