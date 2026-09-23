@@ -7,7 +7,11 @@ def read_body(text, path):
     """Тело задачи: --body-file, аргумент или stdin. Через файл и stdin — ради
     бэктиков и переносов: шелл их съедает, а тело задачи без них не написать."""
     if path:
-        with open(path) as f:
+        # encoding явно: тела задач по-русски (CLAUDE.md), а кодировка по
+        # умолчанию берётся из локали процесса — то есть зависит от машины, с
+        # которой команду позвали. На локали без UTF-8 чтение падало
+        # UnicodeDecodeError, и это про машину, а не про текст.
+        with open(path, encoding="utf-8") as f:
             return f.read().strip()
     if text and text != "-":
         return text.strip()

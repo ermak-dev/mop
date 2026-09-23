@@ -161,9 +161,15 @@ FALLBACK_LOCALE = "C.UTF-8"
 
 
 def locale_usable(name):
-    """Есть ли такая локаль на этой машине. Побочных эффектов не оставляет:
-    что выставили на пробу, тем же вызовом и возвращаем обратно."""
+    """Есть ли такая локаль на этой машине.
+
+    Проба меняет локаль ПРОЦЕССА, и вернуть надо ровно ту, что была, а не
+    «C»: от локали процесса зависит кодировка, которую питон берёт для
+    open() без явного encoding. Возврат в «C» превращал её в ascii, и первое
+    же чтение русского файла падало UnicodeDecodeError — поймано на
+    `mop bug new --body-file`."""
     import locale as loc
+    keep = loc.setlocale(loc.LC_ALL)
     try:
         loc.setlocale(loc.LC_ALL, name)
         return True
@@ -171,8 +177,8 @@ def locale_usable(name):
         return False
     finally:
         try:
-            loc.setlocale(loc.LC_ALL, "C")
-        except Exception:
+            loc.setlocale(loc.LC_ALL, keep)
+        except (loc.Error, ValueError):
             pass
 
 
