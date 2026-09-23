@@ -1,8 +1,10 @@
 """register a project and put it on the bus: mop project add <git-origin>
 
 Writes the origin into the registry (~/.config/mop/projects) and plays
-deploy/projects.yml — the NATS users master-<project> and puppet-<project>
-on the server, the puppet credentials on every node. Nothing else: this is
+deploy/projects.yml — the NATS user puppet-<project> on the server, the
+puppet credentials on every node. Operators reach the project by their role
+in MOP_OPERATORS (admin and user:* at once, a user with a list once it is
+named there). Nothing else: this is
 what the appearance of a project actually changes.
 
 Idempotent, and that is also the repair: run it again and the credentials
@@ -15,11 +17,10 @@ command says so when the project has one.
 A node that is down when this runs does not get the credentials; it picks
 them up at the next `mop deploy`, and the command says which case it hit.
 """
-import os
 import sys
 
 from mop.cli import lib
-from mop import creds, manifest, puppets, projects
+from mop import manifest, puppets, projects
 
 PLAYBOOK = "deploy/projects.yml"
 
@@ -62,17 +63,12 @@ def main(argv):
                  f"mop deploy; if the server was the one missing, nothing reached "
                  f"the bus — run mop project add {origin} again")
 
-    # Контроллер — тоже машина оператора: пароль мастера нового проекта
-    # обязан оказаться в его каталоге сервера, иначе `mop master` здесь же
-    # скажет, что проекта на шине нет.
-    dest = creds.server_dir()
-    secrets = os.path.expanduser("~/.config/mop/secrets")
-    if os.path.isdir(secrets):
-        creds.collect(secrets, dest)
-        lib.ok(f"  {name}: on the bus; credentials in {dest}")
-    else:
-        lib.ok(f"  {name}: on the bus")
-    print("  other operators pick it up with: mop join <server>")
+    # Везти оператору нечего (#106): пароля на проект больше нет, человек
+    # ходит своим именем, и новый проект ему открывает роль.
+    lib.ok(f"  {name}: on the bus")
+    print("  operators reach it by their role in MOP_OPERATORS: admin and "
+          "user:* already do, a user with a list needs it named and a "
+          "mop deploy")
     if needs_deploy:
         print(f"  {name}/.mop: {', '.join(needs_deploy)} — played by the node and "
               f"body layers, run mop deploy to play them")

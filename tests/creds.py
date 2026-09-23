@@ -108,11 +108,14 @@ def main():
     # папетов мастеру не положены — с ними он мог бы представиться узлом.
     # HYPOTHESIS (#52): контроллер и `mop join` должны отбирать одни и те же
     # файлы, иначе на одной машине оператор увидит больше, чем на другой.
+    # #106: общих паролей людей больше нет -- ни admin, ни master-<проект>.
+    # Человек входит своим именем (`mop join --user`), и из secrets/ ему
+    # положен только закреплённый сертификат.
     cases += 1
     listing = ["nats-node-mate.pass", "nats-master-rugent.pass", "junk",
                "nats-puppet-rugent.pass", "nats-admin.pass", "nats-master-mop.pass"]
-    got = creds.pick(listing)
-    want = ["nats-admin.pass", "nats-master-mop.pass", "nats-master-rugent.pass"]
+    got = creds.pick(listing + [creds.CERT_FILE])
+    want = [creds.CERT_FILE]
     if got != want:
         bad += 1
         print(f"FAILED  pick -> {got}, wanted {want}")
@@ -139,7 +142,7 @@ def main():
     # Контроллер собирает свой каталог сервера из secrets/ и bootstrap.json:
     # он тоже машина оператора, и после deploy на нём всё работает без join.
     secrets = tempfile.mkdtemp()
-    for name in listing:
+    for name in listing + [creds.CERT_FILE]:
         with open(os.path.join(secrets, name), "w") as f:
             f.write(name + "\n")
     # Токен в каталог кладёт fetch игры сервера, с правами по umask; collect
@@ -149,41 +152,27 @@ def main():
     with open(os.path.join(dest, "bootstrap.json"), "w") as f:
         json.dump({"SecretID": "tok-123"}, f)
     os.chmod(os.path.join(dest, "bootstrap.json"), 0o644)
+    # Переход (#106): ролевые пароли, собранные до него, в каталоге лежат.
+    # Шина их больше не знает, и оставленные они лишь выдают «кредов нет»
+    # за «креды есть».
+    for n in ("nats-admin.pass", "nats-master-mop.pass"):
+        with open(os.path.join(dest, n), "w") as f:
+            f.write("old\n")
     cases += 1
     copied = creds.collect(secrets, dest)
     if sorted(os.listdir(dest)) != sorted(want + ["bootstrap.json"]) or copied != want:
         bad += 1
         print(f"FAILED  collect -> {copied}, dir {sorted(os.listdir(dest))}")
     cases += 1
-    if creds.password(dest, "mop") != "nats-master-mop.pass" or creds.token(dest) != "tok-123":
+    if creds.token(dest) != "tok-123":
         bad += 1
-        print("FAILED  collected files must read back through password()/token()")
+        print("FAILED  collected files must read back through token()")
     cases += 1
     modes = {n: os.stat(os.path.join(dest, n)).st_mode & 0o777 for n in os.listdir(dest)}
     if (os.stat(dest).st_mode & 0o777) != 0o700 or any(m != 0o600 for m in modes.values()):
         bad += 1
         print(f"FAILED  the server directory holds secrets: dir "
               f"{oct(os.stat(dest).st_mode & 0o777)}, files {modes}")
-
-    # Что каталог сервера ТЕРЯЕТ. Проект сняли (#79) — его пароль мастера
-    # у оператора остаётся, и lib.project_ready по нему отвечает «проект на
-    # шине есть»: `mop master` поднимется, чтобы не подключиться. Отбор —
-    # строго пароли мастеров: админский и токен к проектам отношения не
-    # имеют, а чужое в каталоге не наше дело.
-    cases += 1
-    local = ["nats-admin.pass", "nats-master-mop.pass", "nats-master-gone.pass",
-             "bootstrap.json", "junk"]
-    got = creds.stale(local, ["nats-master-mop.pass", "nats-admin.pass"])
-    if got != ["nats-master-gone.pass"]:
-        bad += 1
-        print(f"FAILED  stale -> {got}, wanted ['nats-master-gone.pass']")
-    cases += 1
-    # Пустой ответ сервера — не повод снести всё: tar пришёл пустым, сеть
-    # моргнула, отбор на той стороне поменялся. Чистим только при ответе.
-    if creds.stale(local, []) != []:
-        bad += 1
-        print(f"FAILED  stale on an empty listing must keep everything: "
-              f"{creds.stale(local, [])}")
 
     # forget: пароли снятого проекта уходят и с контроллера, и из каталога
     # сервера — обоими путями их читает один и тот же project_ready.
@@ -282,7 +271,7 @@ def main():
         print("FAILED  collect must pin the self-signed certificate")
     cases += 1
     got = creds.collect(secrets, dest, pin=False)
-    if creds.cafile(dest) is not None or got != ["nats-admin.pass"]:
+    if creds.cafile(dest) is not None or got != []:
         bad += 1
         print(f"FAILED  collect(pin=False) must drop the pin: {got}, "
               f"dir {sorted(os.listdir(dest))}")

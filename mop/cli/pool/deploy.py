@@ -154,12 +154,20 @@ def main(argv):
                  "configured. Run mop deploy again when they are back")
 
     # Контроллер — тоже машина оператора: его каталог сервера собирается здесь
-    # из secrets/ и bootstrap.json, а на другую машину его везёт `mop join`.
+    # из secrets/ и bootstrap.json. Самоподписанный сертификат закрепляется,
+    # настоящий -- нет (#97); ролевые пароли до #106 снимаются.
     dest = creds.server_dir()
-    # Самоподписанный сертификат закрепляется, настоящий -- нет (#97).
     got = creds.collect(os.path.expanduser("~/.config/mop/secrets"), dest,
                         pin=not config.get("MOP_TLS_CERT"))
-    print(f"  server credentials: {', '.join(got)} in {dest}")
+    print(f"  server credentials: {', '.join(got) or 'nothing to pin'} in {dest}")
+    if creds.operator(dest) is None:
+        # Проверка ниже ходит на шину, а войти этой машине пока нечем:
+        # человек входит своим именем, и выбрать его за оператора deploy не
+        # может. Громко, а не красной проверкой с непонятной причиной.
+        lib.fail(f"installed, but this machine is nobody on the bus yet: "
+                 f"log in with mop join --user <name> (a name from "
+                 f"MOP_OPERATORS), then mop list")
+        return 1
 
     lib.section("check")
     check()

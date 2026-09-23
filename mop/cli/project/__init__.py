@@ -8,9 +8,8 @@
 A project is one repository, one slice of the pool, one master; its name is
 the basename of its origin, and the pool builds puppet names from it. The
 registry (~/.config/mop/projects) is the only answer to "which projects are
-set up": the playbook renders the NATS users master-<project> and
-puppet-<project> from it, and without a user there a master cannot reach the
-bus at all.
+set up": the playbook renders the NATS user puppet-<project> from it, and
+operators reach the project by their role in MOP_OPERATORS.
 
 Registering used to be a side effect of `mop deploy <origin>` and there was
 no way to take a project off (#79). `mop deploy` no longer takes origins.

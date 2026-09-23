@@ -423,8 +423,8 @@ def playbook_vars():
     # не должен разбирать настройку второй раз, иначе два разбора разойдутся
     # молча, и разойдутся они В ПРАВАХ.
     out["MOP_OPERATOR_SUBJECTS"] = {
-        name: operators.subjects(projects)
-        for name, projects in operators.parse(out.get("MOP_OPERATORS", "")).items()}
+        name: operators.permissions(op)
+        for name, op in operators.parse(out.get("MOP_OPERATORS", "")).items()}
     return out
 
 
