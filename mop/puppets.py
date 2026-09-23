@@ -136,6 +136,21 @@ for pat in ${PU_SEED//,/ }; do
         [ -e "$f" ] && cp -a "$f" "$d/"
     done
 done
+# Секреты проекта (#127-#129): bootstrap кладёт их в тело при каждом старте,
+# отсюда файлы -- в клон по своим путям, переменные -- в сессию. Файлы --
+# свежие на каждом подъёме, поверх вчерашних. Переменные читаются строками,
+# а не source: файл секретов не исполняем. Они идут в -e ДО наших, чтобы
+# проект не мог подменить MOP_PROJECT или кред шины.
+sec="$HOME/.config/mop/project-secrets/$PU_PROJECT"
+if [ -d "$sec/files" ]; then
+    cp -a "$sec/files/." "$d/"
+fi
+project_env=()
+if [ -f "$sec/vars.env" ]; then
+    while IFS= read -r kv; do
+        if [ -n "$kv" ]; then project_env+=(-e "$kv"); fi
+    done < "$sec/vars.env"
+fi
 mkdir -p "$HOME/.claude"
 # ~/.claude.json and ~/.claude/settings.json are NODE-level: every puppet on the
 # host edits the same two files, and puppets boot together after a node restart.
@@ -309,6 +324,7 @@ mc="$(grep -a '^MOP_CORES=' "$HOME/.config/mop/node.env" 2>/dev/null | tail -1 |
 # уехал бы в окружение СЕРВЕРА tmux, а это ровно та ловушка, из-за которой все
 # папеты однажды делили один CARGO_TARGET_DIR.
 tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
+    "${project_env[@]}" \
     -e CARGO_TARGET_DIR="$HOME/.cache/target-$PU_NAME" \
     -e CARGO_BUILD_JOBS="$cores" \
     -e MOP_PROJECT="$PU_PROJECT" \
