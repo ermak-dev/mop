@@ -58,6 +58,16 @@ def without_project(name, known):
     return known - set(dropped), dropped
 
 
+def needs_roster(memory):
+    """Спрашивать ли пул при переносе памяти в реестр. Чистая функция.
+
+    Ростер нужен там, где есть ЧТО переносить: он ловит проект, у которого
+    папет живой, а строки в памяти нет. Пустая память означает новую
+    установку — пула ещё нет вовсе, и спросить его нельзя в принципе: шину и
+    сервис поднимает тот самый прогон, который об этом спрашивает (#90)."""
+    return bool(memory)
+
+
 def merged(memory, roster):
     """Реестр из памяти контроллера и ростера Nomad — разовый перенос.
 
@@ -104,16 +114,21 @@ def registry():
     note = None
     if not os.path.exists(FILE):
         memory = read(MEMORY)
-        try:
-            live = roster_origins()
-        except Exception as e:
-            raise RuntimeError(
-                f"the project registry {FILE} doesn't exist yet and the pool "
-                f"roster is unavailable ({e}): "
-                f"a project missing from the first registry loses its bus user. "
-                f"Fix the roster, or write {FILE} by hand — one origin per line")
+        live = set()
+        if needs_roster(memory):
+            try:
+                live = roster_origins()
+            except Exception as e:
+                raise RuntimeError(
+                    f"the project registry {FILE} doesn't exist yet and the pool "
+                    f"roster is unavailable ({e}): "
+                    f"a project missing from the first registry loses its bus "
+                    f"user. Fix the roster, or write {FILE} by hand — one origin "
+                    f"per line")
         lines = merged(memory, live)
         write(lines)
         note = (f"{FILE}: registry created from {len(memory)} remembered and "
-                f"{len(live)} running project(s); {MEMORY} is no longer read")
+                f"{len(live)} running project(s)"
+                + (f"; {MEMORY} is no longer read" if memory else
+                   " — a fresh installation serves no project yet"))
     return (*puppets.project_ids(read()), note)
