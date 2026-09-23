@@ -33,6 +33,33 @@
     remote_src: yes
     mode: '0755'
 
+# Какой адрес сервер объявляет клиентам (#109). Nomad резолвит advertise на
+# САМОМ сервере и раздаёт узлам полученный IP. Имя хоста на сервере обычно
+# смотрит в loopback: Debian и Proxmox (LXC по DHCP) пишут в /etc/hosts
+# `127.0.1.1 <fqdn> <имя>`, и узлы получали собственный 127.0.1.1 -- down.
+# Поэтому: имя, которое здесь резолвится в loopback, заменяем адресом, с
+# которого сервер ходит наружу (src маршрута по умолчанию). Проверка именно
+# на loopback, а не «резолвится ли»: домен поиска с wildcard-DNS резолвит и
+# несуществующее имя.
+- name: How MOP_SERVER_LAN resolves on the server itself
+  ansible.builtin.command: getent ahostsv4 {{ MOP_SERVER_LAN }}
+  register: server_name_here
+  changed_when: false
+  failed_when: false
+
+# `ip route get` пакетов не шлёт: только спрашивает таблицу маршрутов.
+- name: Address of the server's default route
+  ansible.builtin.command: ip -4 route get 1.1.1.1
+  register: server_route
+  changed_when: false
+
+- name: Address the server advertises to its clients
+  ansible.builtin.set_fact:
+    nomad_advertise: >-
+      {{ (server_route.stdout | regex_search('src (\S+)', '\1') | first)
+         if (server_name_here.stdout.split() | first | default('127.0.0.1')) is match('^127\.')
+         else MOP_SERVER_LAN }}
+
 # Владелец -- пользователь пула, под которым работает сервер (nomad_user
 # ниже), а не тот, кем ansible зашёл: на сервере с root'ом каталог данных
 # доставался root'у, и Nomad не мог в него писать (#108).
