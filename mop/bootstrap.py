@@ -184,10 +184,7 @@ def _projects_here():
 
 
 def puppet_creds(project, root=None):
-    """Кред папета проекта для ответа узлу, либо None.
-
-    None — не отказ: пока прогон кладёт `bus-<проект>.json` на узлы сам,
-    врапер возьмёт файл оттуда. Так и выглядит переход."""
+    """Кред папета проекта для ответа узлу, либо None — пароля нет."""
     path = os.path.join(root or PUPPET_CREDS, creds.puppet_pass_file(project))
     try:
         with open(path) as f:
@@ -199,6 +196,21 @@ def puppet_creds(project, root=None):
     return creds.bus_config(config.get("MOP_SERVER_LAN"),
                             config.get("MOP_NATS_PORT"), project, password,
                             user=creds.puppet_user(project))
+
+
+def with_creds(out, got, project):
+    """Ответ bootstrap'а с кредом папета. Чистая функция.
+
+    Нет пароля проекта — отказ, а не ответ без кредов (#114): других дорог
+    креду в тело больше нет, прогон не кладёт `bus-<проект>.json` на узлы, и
+    папет без шины читался бы мастером как живой, но молчащий. Отказ прогона
+    главнее: кред к упавшему bootstrap'у не приклеиваем."""
+    if out.get("error"):
+        return out
+    if not got:
+        return {"error": f"no bus password for project {project} on the server "
+                         f"-- register it: mop project add <origin>"}
+    return {**out, "bus": got}
 
 
 async def _handle(msg):
@@ -223,9 +235,7 @@ async def _handle(msg):
                     None, play, req, project)
                 # Кред папета едет тем же ответом: узел уже позвал нас, и
                 # второго разговора ради одного файла не нужно.
-                got = puppet_creds(project)
-                if got and not out.get("error"):
-                    out["bus"] = got
+                out = with_creds(out, puppet_creds(project), project)
         elif verb == "put":
             got = store(ROOT, project, req.get("text") or "")
             out = {"ok": True, **got}

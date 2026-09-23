@@ -101,6 +101,31 @@ def main():
             failed += 1
             print(f"FAIL a bare -e value with spaces is split by ansible: {argv[i + 1]!r}")
 
+    # HYPOTHESIS (#114): ответ bootstrap без кредов — не отказ, потому что
+    # узел держал `bus-<проект>.json` от прогона; снимаем файл — и папет
+    # поднимается без шины, читаясь мастером как живой, но молчащий.
+    # SOLUTION: сервер отказывает в bootstrap громко, с именем проекта.
+    # STATUS: FIXED — see #114
+    creds = {"url": "nats://s:4222", "user": "puppet-proj", "password": "p"}
+    try:
+        got = bootstrap.with_creds({"ok": True}, creds, "proj")
+        if got.get("bus") != creds or got.get("error"):
+            failed += 1
+            print(f"FAIL with_creds must carry the credentials: {got}")
+        got = bootstrap.with_creds({"ok": True}, None, "proj")
+        if not got.get("error") or "proj" not in got["error"]:
+            failed += 1
+            print(f"FAIL with_creds: no password for the project must be "
+                  f"a refusal naming it, got {got}")
+        # Отказ прогона главнее: кред к упавшему bootstrap не приклеиваем.
+        got = bootstrap.with_creds({"error": "play failed"}, creds, "proj")
+        if got.get("bus") or got.get("error") != "play failed":
+            failed += 1
+            print(f"FAIL with_creds must keep the play's error: {got}")
+    except AttributeError:
+        failed += 1
+        print("FAIL bootstrap.with_creds is missing")
+
     print("bootstrap: FAILED" if failed else "bootstrap: ok")
     return 1 if failed else 0
 

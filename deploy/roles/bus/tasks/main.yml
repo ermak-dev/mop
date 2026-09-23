@@ -183,8 +183,7 @@
     group: "{{ MOP_USER }}"
   notify: restart mop-agent
 
-# Креды папетов, по одному на проект: тот же файл, что играет узкий прогон
-# `mop project add|delete` (deploy/projects.yml).
+# Кредов папетов узел больше не хранит (#114): снимаем оставшиеся.
 - ansible.builtin.include_tasks: node_projects.yml
 
 # Ключ сервера для bootstrap'а песочниц (#62): публичная часть — узлу, и
