@@ -12,7 +12,7 @@
 - name: The package changed under the dashboard
   ansible.builtin.debug:
     msg: "mop package changed on the server — restarting mop-web"
-  changed_when: (mop_server_package | default({})) is changed
+  changed_when: (mop_server_package | default({})) is changed or (mop_server_version | default({})) is changed
   notify: restart mop-web
 
 # Всё в каталоге кредов -- пользователю пула: сервисы читают его под ним, а

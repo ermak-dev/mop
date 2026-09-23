@@ -40,3 +40,42 @@
   # Результат синка переживает игру: по нему перезапускается и второй процесс
   # сервера, mop-bootstrap (роль bootstrap) -- тот же пакет в том же каталоге.
   register: mop_server_package
+
+# Синк -- не единственный признак нового кода (#122). Там, где контроллер --
+# сам сервер под пользователем пула, источник и цель синка -- один каталог,
+# синк всегда «без изменений», и сервисы годами работали бы на коде, с
+# которым стартовали. Отпечаток версии -- HEAD, состояние и правки рабочей
+# копии контроллера; изменился он -- сервисы перезапускаются так же, как по
+# синку.
+- name: Version of the package on the control machine
+  delegate_to: localhost
+  become: no
+  ansible.builtin.shell:
+    cmd: >-
+      { git rev-parse HEAD; git status --porcelain; git diff HEAD; }
+      | sha256sum | cut -d' ' -f1
+    chdir: "{{ lookup('env', 'HOME') }}/mop"
+  register: mop_package_fingerprint
+  changed_when: false
+
+# Каталог заводит и роль web, но она играется позже, а на свежем сервере
+# его ещё нет.
+- name: Config dir of the pool user, for the version
+  become: yes
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0700"
+
+- name: Version of the package the server's services run
+  become: yes
+  ansible.builtin.copy:
+    content: "{{ mop_package_fingerprint.stdout }}\n"
+    dest: "{{ MOP_HOME }}/.config/mop/package.version"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0644"
+  register: mop_server_version
+
