@@ -1,6 +1,6 @@
 """Креды сервера на машине оператора: ~/.config/mop/servers/<адрес>/.
 
-Раньше их рендерил плейбук: bus.json и bus-master-<шард>.json с запечённым
+Раньше их рендерил плейбук: bus.json и bus-master-<проект>.json с запечённым
 адресом шины лежали на одной управляющей машине, и мастер вне неё не
 поднимался, а второй сервер был невозможен в принципе — файлы одни. Мастер и
 контроллер ansible были одной машиной, отсюда и схема.
@@ -11,14 +11,14 @@
 именами, что lookup('password') заводит в secrets/ сервера — копия без
 переименования, её и делает `mop join`:
 
-    nats-admin.pass             оператор: все шарды плюс узловой disk
-    nats-master-<шард>.pass     мастер шарда
+    nats-admin.pass             оператор: все проекты плюс узловой disk
+    nats-master-<проект>.pass     мастер проекта
     bootstrap.json              management-токен Nomad
 
 Паролей узлов и папетов здесь нет намеренно: с ними мастер мог бы
-представиться узлом, а границу шардов держат ровно креды.
+представиться узлом, а границу проектов держат ровно креды.
 
-Конфиг шины собирается из адреса, порта, шарда и пароля — чистая функция,
+Конфиг шины собирается из адреса, порта, проекта и пароля — чистая функция,
 проверяется в tests/creds.py.
 """
 import json
@@ -31,7 +31,7 @@ ROOT = os.path.expanduser("~/.config/mop/servers")
 # проект. Пользователь тут один — сам человек, — и от проекта он не зависит:
 # проект живёт в СУБЪЕКТЕ, права на субъект проверяет сервер NATS.
 OPERATOR_FILE = "operator.json"
-ADMIN = "admin"          # псевдошард оператора: шарда нет
+ADMIN = "admin"          # псевдопроект оператора: проекта нет
 TOKEN_FILE = "bootstrap.json"
 
 
@@ -41,14 +41,14 @@ def server_dir(host=None):
     return os.path.join(ROOT, host or config.get("MOP_SERVER_LAN"))
 
 
-def user_of(shard):
-    """Пользователь NATS по шарду: нет шарда — оператор."""
-    return ADMIN if not shard or shard == ADMIN else f"master-{shard}"
+def user_of(project):
+    """Пользователь NATS по проекту: нет проекта — оператор."""
+    return ADMIN if not project or project == ADMIN else f"master-{project}"
 
 
-def pass_file(shard):
+def pass_file(project):
     """Имя файла пароля — такое же, как в secrets/ сервера."""
-    return f"nats-{user_of(shard)}.pass"
+    return f"nats-{user_of(project)}.pass"
 
 
 def puppet_user(project):
@@ -63,12 +63,12 @@ def puppet_pass_file(project):
     return f"nats-{puppet_user(project)}.pass"
 
 
-def bus_config(host, port, shard, password, user=None):
+def bus_config(host, port, project, password, user=None):
     """{url, user, password} — то, что раньше рендерил bus.json.j2.
 
     user называют явно там, где это не мастер: сервер выдаёт папету его кред
     в ответе на bootstrap песочницы (#83, docs/BOOTSTRAP.md)."""
-    return {"url": f"nats://{host}:{port}", "user": user or user_of(shard),
+    return {"url": f"nats://{host}:{port}", "user": user or user_of(project),
             "password": password}
 
 
@@ -97,11 +97,11 @@ def write_operator(directory, user, password):
     return path
 
 
-def password(directory, shard):
+def password(directory, project):
     """Пароль из каталога сервера, либо None: у вызывающего есть запасной
     путь (старые файлы плейбука), и пустой каталог — не отказ."""
     try:
-        with open(os.path.join(directory, pass_file(shard))) as f:
+        with open(os.path.join(directory, pass_file(project))) as f:
             return f.read().strip()
     except FileNotFoundError:
         return None
@@ -139,7 +139,7 @@ def stale(local, remote):
     """Файлы каталога, которых у сервера больше нет. -> [имена].
 
     Проект сняли (#79) — его пароль мастера остаётся лежать у оператора, и
-    `lib.shard_ready` по нему отвечает «проект на шине есть»: мастер
+    `lib.project_ready` по нему отвечает «проект на шине есть»: мастер
     поднимется, чтобы не подключиться. Отбор строго по паролям мастеров:
     админский пароль и токен к проектам отношения не имеют, а чужое в
     каталоге не наше дело.
@@ -157,7 +157,7 @@ def forget(project, *dirs):
     """Снять пароли проекта в названных каталогах. -> [снятые пути].
 
     И secrets/ контроллера, и каталог сервера: оба читает один и тот же
-    shard_ready, и оставленный в одном пароль отвечал бы за оба."""
+    project_ready, и оставленный в одном пароль отвечал бы за оба."""
     gone = []
     for d in dirs:
         for n in (pass_file(project), f"nats-puppet-{project}.pass"):

@@ -11,7 +11,7 @@
 #   - защищал он верхний этаж над открытым: RPC Nomad на 4647 не шифрован и не
 #     аутентифицирован, и подмена там стоит исполнения кода на узлах.
 #
-# Осталось два слоя: креды по шардам (ниже) и недоступность 4222 снаружи.
+# Осталось два слоя: креды по проектам (ниже) и недоступность 4222 снаружи.
 # Второй держится роутером, а не этим файлом. Если узел уезжает из локалки,
 # правильный ответ -- оверлей (Tailscale, WireGuard), а не проброс порта.
 listen = "0.0.0.0:{{ MOP_NATS_PORT }}"
@@ -21,18 +21,18 @@ max_payload = 1MB
 # Права по субъектам -- то, ради чего шину и заводили: раньше на узлы ехал
 # management-токен Nomad, и папет мог снести чужие джобы.
 #
-# Четыре рода пользователей, и делятся они по двум осям сразу -- шард (проект) и
-# роль. Первый токен субъекта -- шард, поэтому право «только свой проект»
+# Четыре рода пользователей, и делятся они по двум осям сразу -- проект (проект) и
+# роль. Первый токен субъекта -- проект, поэтому право «только свой проект»
 # выражается одним префиксом.
 #
 # _INBOX.> обязателен всем, кто задаёт вопросы: без него request-reply молча не
 # работает. Это первое, обо что спотыкаются.
 authorization {
   users = [
-    # Оператор вне мастер-шелла. Псевдошард admin -- это отсутствие шарда:
+    # Оператор вне мастер-шелла. Псевдопроект admin -- это отсутствие проекта:
     # все проекты плюс узловой disk (место на хосте -- факт про всех его
     # жильцов). Живёт только на управляющей машине. Раздача кредов --
-    # глагол write, и он не отличает оператора от мастера шарда: NATS делит
+    # глагол write, и он не отличает оператора от мастера проекта: NATS делит
     # субъекты, а глаголы внутри них проверяет сам агент.
     {
       user: "admin", password: "{{ lookup('password', secrets_dir + '/nats-admin.pass length=32 chars=ascii_letters,digits') }}"
@@ -54,26 +54,26 @@ authorization {
       }
     }
 {% endfor %}
-{% for shard in shards %}
+{% for project in projects %}
 
-    # Мастер проекта {{ shard }}: весь свой шард и ничего сверх него.
+    # Мастер проекта {{ project }}: весь свой проект и ничего сверх него.
     {
-      user: "master-{{ shard }}", password: "{{ lookup('password', secrets_dir + '/nats-master-' + shard + '.pass length=32 chars=ascii_letters,digits') }}"
+      user: "master-{{ project }}", password: "{{ lookup('password', secrets_dir + '/nats-master-' + project + '.pass length=32 chars=ascii_letters,digits') }}"
       permissions: {
-        publish:   { allow: ["mop.{{ shard }}.>", "_INBOX.>"] }
-        subscribe: { allow: ["mop.{{ shard }}.>", "_INBOX.>"] }
+        publish:   { allow: ["mop.{{ project }}.>", "_INBOX.>"] }
+        subscribe: { allow: ["mop.{{ project }}.>", "_INBOX.>"] }
       }
     }
 
-    # Папеты проекта {{ shard }}. Врапер подсовывает эти креды сессии через
+    # Папеты проекта {{ project }}. Врапер подсовывает эти креды сессии через
     # MOP_BUS_CONFIG, поэтому `mop mcp` внутри папета достаёт только своих
     # соседей и своего мастера. Управляющий субъект .rpc сюда не входит:
     # печать в чужой TUI и запись файлов остаются за мастером.
     {
-      user: "puppet-{{ shard }}", password: "{{ lookup('password', secrets_dir + '/nats-puppet-' + shard + '.pass length=32 chars=ascii_letters,digits') }}"
+      user: "puppet-{{ project }}", password: "{{ lookup('password', secrets_dir + '/nats-puppet-' + project + '.pass length=32 chars=ascii_letters,digits') }}"
       permissions: {
-        publish: { allow: ["mop.{{ shard }}.node.*.msg", "mop.{{ shard }}.all.msg",
-                           "mop.{{ shard }}.master.>", "mop.{{ shard }}.events",
+        publish: { allow: ["mop.{{ project }}.node.*.msg", "mop.{{ project }}.all.msg",
+                           "mop.{{ project }}.master.>", "mop.{{ project }}.events",
                            "_INBOX.>"] }
         subscribe: { allow: ["_INBOX.>"] }
       }
@@ -81,12 +81,12 @@ authorization {
 {% endfor %}
 {% for node in nats_nodes %}
 
-    # Агент узла {{ node }}. Шарды он пересекает сознательно: он и есть то, что
+    # Агент узла {{ node }}. Проекты он пересекает сознательно: он и есть то, что
     # их разделяет, и обслуживает всех жильцов хоста. Разделение здесь -- по
     # узлу: подписка только на свой, иначе агент мог бы перехватить запрос
     # мастера к соседнему узлу, ответив первым (подписка в NATS не эксклюзивна).
     # Субъект сервера (#62) -- те же креды из процесса задачи Nomad: узел
-    # просит bootstrap песочницы за папета, и шард в субъекте сверяет сервер.
+    # просит bootstrap песочницы за папета, и проект в субъекте сверяет сервер.
     {
       user: "node-{{ node }}", password: "{{ lookup('password', secrets_dir + '/nats-node-' + node + '.pass length=32 chars=ascii_letters,digits') }}"
       permissions: {

@@ -1,6 +1,6 @@
 """pool nodes: mop node [drain|up|forget <name>]
 
-  mop node                 what the pool stands on: driver, shards, capacity
+  mop node                 what the pool stands on: driver, projects, capacity
   mop node drain <name>    move its puppets off and close it to the scheduler
   mop node up <name>       open it to the scheduler again
   mop node forget <name>   drop it from the roster
@@ -19,7 +19,7 @@ def main(argv):
     if argv:
         lib.usage(__doc__)
     """Узлы пула как таблица. То же, что видно в подвале `mop list`, плюс то,
-    чего там нет: драйвер, чьи шарды узел умеет и состояние планирования."""
+    чего там нет: драйвер, чьи проекты узел умеет и состояние планирования."""
     rows = [("NODE", "DRIVER", "SERVES", "STATE", "FREE", "TOTAL", "SLOTS")]
     for r in nodes.rows():
         rows.append((

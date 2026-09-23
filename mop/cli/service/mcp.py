@@ -6,9 +6,9 @@
 
 Три профиля, и решают их факты, а не флаги:
 
-  * токен Nomad + MOP_SHARD -> мастер шарда: канал и управление джобами, но
+  * токен Nomad + MOP_PROJECT -> мастер проекта: канал и управление джобами, но
     только своим срезом пула (`mop master` ставит обе переменные);
-  * токен без шарда -> оператор: то же самое, но по всему пулу;
+  * токен без проекта -> оператор: то же самое, но по всему пулу;
   * без токена -> узел: один канал, ростер собирается опросом самой шины.
 
 Так узел физически не может позвать то, чего ему не положено, вместо того
@@ -63,9 +63,9 @@ app = MCPServer(
 def is_master():
     """Есть ли у нас право управлять пулом. Смотрим, ЧЬИ У НАС КРЕДЫ.
 
-    Это факт, а не флаг: пользователь NATS и есть набор прав. `puppet-<шард>`
+    Это факт, а не флаг: пользователь NATS и есть набор прав. `puppet-<проект>`
     в субъект сервиса кластера не пишет вовсе (nats-server.conf), `admin` и
-    `master-<шард>` пишут — то есть вопрос «мастер ли мы» и вопрос «под кем мы
+    `master-<проект>` пишут — то есть вопрос «мастер ли мы» и вопрос «под кем мы
     на шине» это один вопрос.
 
     Раньше здесь лежала проверка «есть ли токен Nomad». Она отвечала верно
@@ -215,10 +215,10 @@ def on_inbox(m):
     для него не меняется ничего.
 
     `who` — единственный глагол, который не кладут в сессию: им спрашивают
-    общий инбокс шарда, «кто из мастеров жив»."""
+    общий инбокс проекта, «кто из мастеров жив»."""
     if m.get("verb") == "who":
         d = my_session() or {}
-        return {"master": MASTER_ID, "shard": bus.SHARD,
+        return {"master": MASTER_ID, "project": bus.PROJECT,
                 "session": d.get("name"), "cwd": d.get("cwd")}
     sock = master_socket()
     if not sock:
@@ -234,7 +234,7 @@ def on_inbox(m):
 
 # ─── инструменты: канал ──────────────────────────────────────────────────
 @tool(annotations=READ_ONLY, description=(
-    "Who you can message: pool puppets on ALL nodes, masters of your shard, "
+    "Who you can message: pool puppets on ALL nodes, masters of your project, "
     "and claude sessions on this machine. Fuller than the built-in "
     "ListAgents, which only sees this host. For a puppet it shows the true "
     "state (free/busy/HUNG/no model quota/unsaved work in the clone), "
@@ -283,9 +283,9 @@ def _roster_from_bus():
 
 
 def _masters():
-    """Мастера шарда: кому отсюда можно ответить.
+    """Мастера проекта: кому отсюда можно ответить.
 
-    Реестра нет намеренно — спрашиваем общий инбокс шарда, и живой мастер это
+    Реестра нет намеренно — спрашиваем общий инбокс проекта, и живой мастер это
     тот, кто отозвался. Папету эта строка нужна как воздух: без неё адрес
     мастера негде взять, кроме конверта уже полученного письма.
 
@@ -296,19 +296,19 @@ def _masters():
         found = bus.gather("who", timeout=MASTERS_WAIT,
                            subj=bus.inbox(bus.ALL_MASTERS))
     except bus.BusError as e:
-        return ["", f"masters of shard {bus.SHARD}: bus unavailable ({e})"]
+        return ["", f"masters of project {bus.PROJECT}: bus unavailable ({e})"]
     if not found:
-        return ["", f"no masters of shard {bus.SHARD} on the bus"]
+        return ["", f"no masters of project {bus.PROJECT} on the bus"]
     rows = [("MASTER (address for send)", "SESSION", "DIRECTORY")]
     for d in sorted(found, key=lambda d: str(d.get("master"))):
         mine = " (this is me)" if d.get("master") == MASTER_ID else ""
         rows.append((str(d.get("master")), (d.get("session") or "-") + mine,
                      d.get("cwd") or "-"))
-    return ["", "masters of shard:", *table(rows)]
+    return ["", "masters of project:", *table(rows)]
 
 
 @tool(description=(
-    "Send a message to a pool puppet, a shard master, or a session on this "
+    "Send a message to a pool puppet, a project master, or a session on this "
     "machine. The ONLY working way to reach both a puppet and a master: the "
     "built-in SendMessage only reaches sessions on this same host and on a "
     "neighboring node will silently find no one. `to`: puppet name "
@@ -442,9 +442,9 @@ def pool() -> str:
 
 @master_tool(annotations=READ_ONLY, description=(
     "Pool nodes: driver (host: puppets run on the node itself; pve: each "
-    "puppet in its own container), which shards' images the node serves "
+    "puppet in its own container), which projects' images the node serves "
     "(`any` for host nodes), scheduling state, free memory and slots. A "
-    "puppet pending on a pve node whose SERVES lacks its shard is waiting "
+    "puppet pending on a pve node whose SERVES lacks its project is waiting "
     "for an image that will never come: `build` it."))
 def nodes() -> str:
     rows = [("NODE", "DRIVER", "SERVES", "STATE", "FREE", "SLOTS")]
@@ -457,16 +457,16 @@ def nodes() -> str:
 
 
 @master_tool(annotations=DESTRUCTIVE, description=(
-    "Bake the shard's image on the pool's container nodes (pve). Without "
+    "Bake the project's image on the pool's container nodes (pve). Without "
     "origin: this master's working copy, and .mop is read from its files as "
     "they lie, uncommitted included. With origin: .mop from the default "
     "branch of that repository. The build takes minutes and runs in the "
     "background: the call returns at once, and a note arrives in this "
     "session when it is done, with the outcome and the log path. Needed "
-    "after every change to .mop, and before the first puppet of a shard "
+    "after every change to .mop, and before the first puppet of a project "
     "can land on a pve node. Incremental by default: a copy of the image "
     "takes what changed; fresh=true builds from the base image anew. The "
-    "shard's puppets on container nodes are stopped, their bodies "
+    "project's puppets on container nodes are stopped, their bodies "
     "destroyed and raised again from the new image — a busy one refuses "
     "the build unless force=true."))
 def build(origin: str = "", fresh: bool = False, force: bool = False) -> str:
@@ -482,17 +482,17 @@ def build(origin: str = "", fresh: bool = False, force: bool = False) -> str:
             return f"build: {cwd} is not a git working copy — name the origin"
         origin, root = r.stdout.strip(), cwd
     got = image.prepare(origin, root)
-    shard = got["shard"]
-    log = f"/tmp/mop-build-{shard}-{os.getpid()}.log"
+    project = got["project"]
+    log = f"/tmp/mop-build-{project}-{os.getpid()}.log"
     # Отказ по занятым папетам — здесь и сразу, а не вестью через минуту:
     # он приходит до первого останова и ничего не меняет.
     try:
-        image.plan_clear(image.shard_rows(shard), force)
+        image.plan_clear(image.project_rows(project), force)
     except RuntimeError as e:
         return f"build: {e}"
     threading.Thread(target=_build_and_tell, args=(origin, got, log, fresh, force),
-                     daemon=True, name=f"mop-build-{shard}").start()
-    head = [f"{shard}: image build started, .mop from "
+                     daemon=True, name=f"mop-build-{project}").start()
+    head = [f"{project}: image build started, .mop from "
             f"{'the working copy ' + root if root else 'origin, default branch'}; "
             f"log {log}"]
     head += [f"  asks {k}={v}" for k, v in sorted(got["asks"].items())]
@@ -507,7 +507,7 @@ def _build_and_tell(origin, got, log, fresh=False, force=False):
     сокет сессии, которая его запустила. Хвост журнала — только при отказе:
     зелёный прогон читать незачем, красный надо, и путь к целому уже
     назван."""
-    shard = got["shard"]
+    project = got["project"]
     try:
         with open(log, "w") as f:
             r = image.build(origin, got, out=f, fresh=fresh, force=force)
@@ -515,14 +515,14 @@ def _build_and_tell(origin, got, log, fresh=False, force=False):
         raised = ", ".join(p["name"] for p in r["gone"]) or "none"
         if rc == 0:
             said = "; ".join(f"{n}: {w}" for n, w in r["announced"])
-            text = (f"mop: image of {shard} built and announced — {said}; "
+            text = (f"mop: image of {project} built and announced — {said}; "
                     f"puppets raised again from it: {raised}")
         else:
             with open(log) as f:
                 tail = "".join(f.readlines()[-15:])
-            text = f"mop: image build of {shard} FAILED (ansible exit {rc}), log {log}\n{tail}"
+            text = f"mop: image build of {project} FAILED (ansible exit {rc}), log {log}\n{tail}"
     except Exception as e:
-        text = f"mop: image build of {shard} FAILED — {e}; log {log}"
+        text = f"mop: image build of {project} FAILED — {e}; log {log}"
     sock = master_socket()
     if sock:
         try:
@@ -672,7 +672,7 @@ def login() -> str:
 
 
 def watch_inbox():
-    """Подписки мастера: свой инбокс и общий инбокс шарда.
+    """Подписки мастера: свой инбокс и общий инбокс проекта.
 
     MCP умеет только «запрос-ответ» — вбросить что-то в ход модели сервер не
     может. Но он дочерний процесс сессии и знает её сокет, поэтому кладёт
@@ -707,8 +707,8 @@ def main(argv=None):
         except bus.BusError as e:
             where = f"NONE ({e})"
         who = ("node" if not MASTER
-               else "operator" if bus.SHARD == bus.ADMIN
-               else f"master of shard {bus.SHARD}")
+               else "operator" if bus.PROJECT == bus.ADMIN
+               else f"master of project {bus.PROJECT}")
         print(f"mop mcp: profile {who}, "
               f"{len(app._tool_manager.list_tools())} tools, bus {where}, "
               f"address {my_name()}, inbox {MY_INBOX if MASTER else '(not a master)'}, "

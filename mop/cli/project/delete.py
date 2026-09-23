@@ -14,7 +14,7 @@ import os
 import sys
 
 from mop.cli import lib
-from mop import bus, creds, puppets, shards
+from mop import bus, creds, puppets, projects
 
 PLAYBOOK = "deploy/projects.yml"
 
@@ -23,25 +23,25 @@ def main(argv):
     if len(argv) != 1 or argv[0].startswith("-"):
         lib.usage(__doc__)
     name = argv[0]
-    origins, legacy, note = shards.registry()
+    origins, legacy, note = projects.registry()
     if note:
         print(note, file=sys.stderr, flush=True)
-    lines, dropped = shards.without_project(name, origins | legacy)
+    lines, dropped = projects.without_project(name, origins | legacy)
     if not dropped:
-        lib.usage(f"no project {name} in {shards.FILE}.\n"
+        lib.usage(f"no project {name} in {projects.FILE}.\n"
                   f"What the pool serves: mop project list")
 
-    alive = [j["ID"] for j in puppets.jobs(shard=bus.ADMIN)
-             if puppets.shard_of((j.get("Meta") or {}).get("origin", "")) == name]
+    alive = [j["ID"] for j in puppets.jobs(project=bus.ADMIN)
+             if puppets.project_of((j.get("Meta") or {}).get("origin", "")) == name]
     if alive:
         lib.usage(f"{name} still has puppets: {', '.join(sorted(alive))}.\n"
                   f"Delete them first: mop delete {sorted(alive)[0]}")
 
-    shards.write(lines)
-    print(f"  {shards.FILE}: {', '.join(dropped)} dropped")
+    projects.write(lines)
+    print(f"  {projects.FILE}: {', '.join(dropped)} dropped")
 
     lib.section(f"ansible: {PLAYBOOK}")
-    rc = lib.play(PLAYBOOK, shards.names(*puppets.shard_ids(lines)))
+    rc = lib.play(PLAYBOOK, projects.names(*puppets.project_ids(lines)))
     if rc and rc != lib.UNREACHABLE:
         lib.fail(f"ansible exited {rc}; {name} is out of the registry but still on "
                  f"the bus — run mop project delete {name} again")
@@ -56,7 +56,7 @@ def main(argv):
                  f"mop project delete {name} again")
 
     # Пароль мастера снятого проекта читается как «проект на шине есть»
-    # (lib.shard_ready): `mop master` поднялся бы, чтобы не подключиться.
+    # (lib.project_ready): `mop master` поднялся бы, чтобы не подключиться.
     gone = creds.forget(name, os.path.expanduser("~/.config/mop/secrets"),
                         creds.server_dir())
     lib.ok(f"  {name}: off the bus; {len(gone)} password file(s) removed here")

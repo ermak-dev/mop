@@ -1,4 +1,4 @@
-"""Образ шарда: манифест -> прогон плейбука сборки -> объявление узлам.
+"""Образ проекта: манифест -> прогон плейбука сборки -> объявление узлам.
 
 Дорога у сборки одна, а фронтендов два — `mop driver build` в терминале и
 инструмент `build` в MCP мастера (#49), — поэтому она живёт здесь.
@@ -18,11 +18,11 @@ PLAYBOOK = os.path.join(config.PROJECT, "deploy", "pve-build.yml")
 
 
 def prepare(origin, root=None):
-    """Манифесты шарда: из рабочей копии root, если она названа, иначе из
+    """Манифесты проекта: из рабочей копии root, если она названа, иначе из
     origin (дефолтная ветка). -> словарь manifest.fetch плюс 'origin'.
     Отказ — RuntimeError, как у manifest."""
-    shard = puppets.shard_of(origin)
-    got = manifest.fetch_tree(root, shard) if root else manifest.fetch(origin)
+    project = puppets.project_of(origin)
+    got = manifest.fetch_tree(root, project) if root else manifest.fetch(origin)
     got["origin"] = origin
     return got
 
@@ -30,15 +30,19 @@ def prepare(origin, root=None):
 def extra_vars(origin, got):
     """Что уезжает плейбуку. None-половины не передаём вообще, а не как
     null: `default('')` в условиях плейбука не подменяет определённый None,
-    и len(None) ронял сборку шарда без vars (rugent: только задачи). Поймано
+    и len(None) ронял сборку проекта без vars (rugent: только задачи). Поймано
     живой сборкой (#26), держится tests/image.py."""
-    extra = {"mop_shard": got["shard"], "mop_origin": origin,
-             "mop_shard_asks": got["asks"]}
+    # Оба имени, пока идёт переименование (#85): `mop_shard*` — публичный
+    # интерфейс к задачам проекта в его `.mop`, и уронить его сразу значит
+    # молча сломать чужой манифест. Снимется, когда проекты перепишут свои.
+    extra = {"mop_project": got["project"], "mop_shard": got["project"],
+             "mop_origin": origin,
+             "mop_project_asks": got["asks"], "mop_shard_asks": got["asks"]}
     # В образ едет только песочница (#61): bootstrap играется при старте.
     if got["sandbox_vars"]:
-        extra["mop_shard_vars"] = got["sandbox_vars"]
+        extra["mop_project_vars"] = extra["mop_shard_vars"] = got["sandbox_vars"]
     if got["sandbox_tasks"]:
-        extra["mop_shard_tasks"] = got["sandbox_tasks"]
+        extra["mop_project_tasks"] = extra["mop_shard_tasks"] = got["sandbox_tasks"]
     return extra
 
 
@@ -64,9 +68,9 @@ def bake(origin, got, out=None, fresh=False):
         stdout=out, stderr=subprocess.STDOUT if out else None)
 
 
-# ─── тела шарда до и после сборки (#60) ───────────────────────────────────
+# ─── тела проекта до и после сборки (#60) ───────────────────────────────────
 # Пересборка — операция над ШАРДОМ, а не над образом: образ с живым клоном
-# не заменить, значит тела шарда на контейнерных узлах сносятся до сборки и
+# не заменить, значит тела проекта на контейнерных узлах сносятся до сборки и
 # папеты поднимаются заново после — уже клонами нового образа. Попутно это
 # чинит ловушку, пойманную 22.09: `ensure` переиспользует стоящее тело, и
 # «пересозданный» папет приходил с прежними пакетами. Цена названа: снос
@@ -84,20 +88,20 @@ def plan_clear(rows, force=False):
     busy = [r["name"] for r in mine if not puppets.is_free(r.get("state") or "")]
     if busy and not force:
         raise RuntimeError(
-            f"rebuilding the image destroys the shard's bodies, and these are "
+            f"rebuilding the image destroys the project's bodies, and these are "
             f"not free: {', '.join(busy)} — wait, or mop driver build --force")
     return [r["name"] for r in mine]
 
 
-def shard_rows(shard):
-    """Папеты шарда, как их видит plan_clear: [{name, node, container,
+def project_rows(project):
+    """Папеты проекта, как их видит plan_clear: [{name, node, container,
     state, job}]. Не размещённые (без аллокации) не считаются: тела у них
     нет, снимать нечего."""
     meta = nomad.nodes_meta()
     rows = []
     for item in puppets.roster():
         job = item["job"]
-        if puppets.shard_of((job.get("Meta") or {}).get("origin") or "") != shard:
+        if puppets.project_of((job.get("Meta") or {}).get("origin") or "") != project:
             continue
         node = item["alloc"]["NodeName"] if item["alloc"] else None
         if not node:
@@ -109,11 +113,11 @@ def shard_rows(shard):
     return rows
 
 
-def clear(shard, force=False):
-    """Остановить папетов шарда на контейнерных узлах и снести их тела.
+def clear(project, force=False):
+    """Остановить папетов проекта на контейнерных узлах и снести их тела.
     -> [{name, origin, llm, node}] — кого поднять заново после сборки.
     Отказ по занятым — RuntimeError из plan_clear, до первого останова."""
-    rows = shard_rows(shard)
+    rows = project_rows(project)
     jobs = {r["name"]: (r["job"], r["node"]) for r in rows}
     gone = []
     for name in plan_clear(rows, force):
@@ -137,27 +141,27 @@ def restore(gone):
 
 
 def build(origin, got, out=None, fresh=False, force=False):
-    """Вся сборка как операция над шардом: снять тела → плейбук → поднять
+    """Вся сборка как операция над проектом: снять тела → плейбук → поднять
     папетов заново → объявить образ. -> {rc, gone, announced}.
 
     Одна дорога на оба фронтенда (`mop driver build`, инструмент build в
     MCP). Папеты поднимаются заново при ЛЮБОМ исходе плейбука: при отказе
-    старый образ на месте, и оставить их снятыми значило бы наказать шард
+    старый образ на месте, и оставить их снятыми значило бы наказать проект
     за неудачную сборку дважды. Объявление — только после успеха."""
-    gone = clear(got["shard"], force)
+    gone = clear(got["project"], force)
     try:
         rc = bake(origin, got, out, fresh)
     finally:
         restore(gone)
-    announced = announce(got["shard"]) if rc == 0 else []
+    announced = announce(got["project"]) if rc == 0 else []
     return {"rc": rc, "gone": gone, "announced": announced}
 
 
-def announce(shard):
-    """Сказать кластеру, что образ этого шарда на узлах собран.
+def announce(project):
+    """Сказать кластеру, что образ этого проекта на узлах собран.
     -> [(узел, 'announced'|'already announced'|'not a container node')].
 
-    Без этого планировщик про образ не знает, и папет шарда на узел не
+    Без этого планировщик про образ не знает, и папет проекта на узел не
     сядет — ограничение в спеке смотрит именно на этот перечень. Отдельным
     шагом после плейбука, а не задачей в нём: токен Nomad есть только у
     управляющей машины, и тащить его в плейбук, который ходит на узлы,
@@ -174,9 +178,9 @@ def announce(shard):
         # Перечень берём с узла: серверная копия отстаёт на секунды, и
         # дописать к устаревшей значит стереть ранее объявленные образы.
         have = [s for s in (nomad.node_dynamic_meta(name).get("mop_shards") or "").split(",") if s]
-        if shard in have:
+        if project in have:
             out.append((name, "already announced"))
             continue
-        nomad.set_node_meta(name, {"mop_shards": ",".join(sorted(have + [shard]))})
-        out.append((name, f"announced, serves {', '.join(sorted(have + [shard]))}"))
+        nomad.set_node_meta(name, {"mop_shards": ",".join(sorted(have + [project]))})
+        out.append((name, f"announced, serves {', '.join(sorted(have + [project]))}"))
     return out

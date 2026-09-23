@@ -4,7 +4,7 @@
 Bootstrap (#62): .mop/bootstrap.yaml проекта играет СЕРВЕР при каждом старте
 песочницы, узел зовёт его с шины и ждёт. Чистое здесь — хранение файла на
 сервере, аргументы прогона и проверка, что узел просит про папета своего
-шарда. Сам прогон, ключ в тело и ожидание врапера — только на живом пуле.
+проекта. Сам прогон, ключ в тело и ожидание врапера — только на живом пуле.
 """
 import os
 import sys
@@ -30,7 +30,7 @@ def main():
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
 
     # HYPOTHESIS: механизма нет вовсе — ничто не играет манифест при старте.
-    # SOLUTION: файл шарда хранится на сервере заранее (deploy/add кладут), а
+    # SOLUTION: файл проекта хранится на сервере заранее (deploy/add кладут), а
     # играется по запросу узла. STATUS: FIXED — see #62
     try:
         got = bootstrap.store(root, "proj", TEXT)
@@ -53,8 +53,8 @@ def main():
     bootstrap.store(root, "proj", "")
     if bootstrap.files_of(root, "proj") != (None, None):
         failed += 1
-        print("FAIL an empty bootstrap must remove the shard's files")
-    # Кривая форма — громко, с именем шарда.
+        print("FAIL an empty bootstrap must remove the project's files")
+    # Кривая форма — громко, с именем проекта.
     try:
         bootstrap.store(root, "bad", "vars: {}\n")
         failed += 1
@@ -62,24 +62,24 @@ def main():
     except ValueError as e:
         if "bad" not in str(e):
             failed += 1
-            print(f"FAIL malformed message must name the shard: {e}")
+            print(f"FAIL malformed message must name the project: {e}")
 
-    # Узел просит за папета; шард — из субъекта (права NATS), имя — из тела
+    # Узел просит за папета; проект — из субъекта (права NATS), имя — из тела
     # запроса. Расхождение — отказ: узел, представившийся своим субъектом,
     # не может попросить сыграть чужой bootstrap в своё тело.
     if bootstrap.refusal({"name": "pu-proj-1"}, "proj") is not None:
         failed += 1
-        print("FAIL refusal: a puppet of the shard must pass")
+        print("FAIL refusal: a puppet of the project must pass")
     if bootstrap.refusal({"name": "pu-other-1"}, "proj") is None:
         failed += 1
-        print("FAIL refusal: a puppet of another shard must be refused")
+        print("FAIL refusal: a puppet of another project must be refused")
     if bootstrap.refusal({"name": "pu-proj-1; id"}, "proj") is None:
         failed += 1
         print("FAIL refusal: a name that is not a puppet name must be refused")
 
     # Аргументы прогона: одна машина по адресу, пользователь пула, ключ
     # сервера, без вопроса о ключе хоста (тело пересоздаётся и меняет его),
-    # переменные прогона — шард, папет, клон, файлы.
+    # переменные прогона — проект, папет, клон, файлы.
     argv = bootstrap.argv("/x/deploy/bootstrap.yml", "10.77.38.100", "pool",
                           "/home/pool/.ssh/mop-bootstrap", {"MOP_HOME": "/home/pool"},
                           "proj", "pu-proj-1", "/home/pool/puppets/pu-proj-1",

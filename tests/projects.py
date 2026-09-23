@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Проверка реестра проектов без кластера: python3 tests/shards.py
+"""Проверка реестра проектов без кластера: python3 tests/projects.py
 
 Реестр — единственный ответ на вопрос «какие проекты заведены»: по нему
 плейбук рендерит пользователей NATS. Пока его не было, список собирался
@@ -21,7 +21,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import shards  # noqa: E402
+from mop import projects  # noqa: E402
 
 RU = "git@git.ermak.dev:ermak/rudesktop.git"
 MOP = "git@git.ermak.dev:ermak/mop.git"
@@ -32,13 +32,13 @@ def check_add():
     """with_origin: что реестр принимает."""
     out = []
 
-    got, added = shards.with_origin(MOP, {RU})
+    got, added = projects.with_origin(MOP, {RU})
     if got != {RU, MOP} or not added:
         out.append(f"new origin not added: {got}, added={added}")
 
     # Повтор — не ошибка и не изменение: `mop project add` идемпотентен,
     # иначе повторный завод проекта читался бы как отказ.
-    got, added = shards.with_origin(RU, {RU})
+    got, added = projects.with_origin(RU, {RU})
     if got != {RU} or added:
         out.append(f"duplicate origin changed the registry: {got}, added={added}")
 
@@ -47,7 +47,7 @@ def check_add():
     # Легаси-строки в реестре живут, но завести новую такую нельзя.
     for bad in ("rudesktop", "", "   "):
         try:
-            shards.with_origin(bad, set())
+            projects.with_origin(bad, set())
         except RuntimeError:
             continue
         out.append(f"bare name {bad!r} accepted as an origin")
@@ -58,25 +58,25 @@ def check_delete():
     """without_project: что реестр теряет."""
     out = []
 
-    got, dropped = shards.without_project("rudesktop", {RU, MOP})
+    got, dropped = projects.without_project("rudesktop", {RU, MOP})
     if got != {MOP} or dropped != [RU]:
         out.append(f"delete by project name: {got}, dropped={dropped}")
 
     # Имя проекта — basename origin'а, и оно же имя пользователя NATS.
     # Два origin'а с одним basename — один проект: снимать надо оба, иначе
     # реестр помнит проект, которого на шине уже нет.
-    got, dropped = shards.without_project("rudesktop", {RU, OTHER, MOP})
+    got, dropped = projects.without_project("rudesktop", {RU, OTHER, MOP})
     if got != {MOP} or dropped != sorted([RU, OTHER]):
         out.append(f"two origins of one project: {got}, dropped={dropped}")
 
     # Легаси-строка — имя без origin'а: снимается по себе самой.
-    got, dropped = shards.without_project("oldshard", {"oldshard", MOP})
-    if got != {MOP} or dropped != ["oldshard"]:
+    got, dropped = projects.without_project("oldproject", {"oldproject", MOP})
+    if got != {MOP} or dropped != ["oldproject"]:
         out.append(f"legacy name not dropped: {got}, dropped={dropped}")
 
     # Неизвестный проект — пустой вердикт, а не молчаливое «сделано»:
     # опечатка в имени иначе читалась бы как успешное снятие.
-    got, dropped = shards.without_project("nosuch", {RU})
+    got, dropped = projects.without_project("nosuch", {RU})
     if got != {RU} or dropped != []:
         out.append(f"unknown project reported as dropped: {got}, dropped={dropped}")
     return out
@@ -90,11 +90,11 @@ def check_merge():
     конфига NATS на следующем прогоне, поэтому перенос — объединение.
     """
     out = []
-    got = shards.merged({RU, "oldshard"}, {MOP, RU})
-    if got != {RU, MOP, "oldshard"}:
+    got = projects.merged({RU, "oldproject"}, {MOP, RU})
+    if got != {RU, MOP, "oldproject"}:
         out.append(f"merge lost a line: {got}")
 
-    got = shards.merged(set(), set())
+    got = projects.merged(set(), set())
     if got != set():
         out.append(f"empty install is not empty: {got}")
     return out
@@ -103,13 +103,13 @@ def check_merge():
 def check_names():
     """names: имена проектов для плейбука — basename'ы плюс легаси."""
     out = []
-    got = shards.names({RU, MOP}, {"oldshard"})
-    if got != ["mop", "oldshard", "rudesktop"]:
+    got = projects.names({RU, MOP}, {"oldproject"})
+    if got != ["mop", "oldproject", "rudesktop"]:
         out.append(f"names: {got}")
     # Два origin'а одного проекта дают ОДНО имя: пользователь в конфиге
     # NATS заводится по имени, и дубль в цикле плейбука — второй lookup
     # того же пароля.
-    got = shards.names({RU, OTHER}, set())
+    got = projects.names({RU, OTHER}, set())
     if got != ["rudesktop"]:
         out.append(f"duplicate basenames: {got}")
     return out
@@ -121,7 +121,7 @@ def main():
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     print("\n".join(failed) if failed else "", end="\n" if failed else "")
-    print("shards: FAILED" if failed else "shards: ok")
+    print("projects: FAILED" if failed else "projects: ok")
     return 1 if failed else 0
 
 

@@ -17,12 +17,12 @@ def main(argv):
         lib.usage(__doc__)
     profile = profile or config.get("MOP_DEFAULT_LLM")
     origin = args[0] if args else lib.cwd_origin()
-    shard = puppets.shard_of(origin)
+    project = puppets.project_of(origin)
     # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS, и
     # папет поднимется, но к шине не подключится — прочитается как «агент
     # молчит» на пустом месте. Лучше отказать здесь, чем разбираться там.
-    if not lib.shard_ready(shard):
-        lib.usage(f"project {shard} isn't on the bus yet.\n"
+    if not lib.project_ready(project):
+        lib.usage(f"project {project} isn't on the bus yet.\n"
                   f"Register it on the server: mop project add {origin}")
     lib.push_llm_keys(profile)
     # bootstrap.yaml рабочей копии — на сервер ДО регистрации (#62): первый
@@ -30,7 +30,7 @@ def main(argv):
     # нет файла — сервер держит то, что положил deploy из origin.
     if not args and os.path.exists(bootstrap.FILE):
         try:
-            got = bootstrap.push_from(os.getcwd(), shard)
+            got = bootstrap.push_from(os.getcwd(), project)
             print(f"  {bootstrap.FILE}: on the server, {got.get('tasks', 0)} task(s)"
                   + (f"; ignored: {', '.join(got['alien'])}" if got.get("alien") else ""))
         except bus.BusError as e:

@@ -1,6 +1,6 @@
 """launch claude on an LLM profile, outside the pool: mop code [--llm PROFILE] [claude options]
 
-Same profile machinery as `mop master`, none of the pool. No shard, no bus
+Same profile machinery as `mop master`, none of the pool. No project, no bus
 credentials, no mop MCP server: this is an ordinary claude session that just
 happens to come up on a chosen provider. Use it where the pool has nothing to
 do with the job — a scratch checkout, someone else's repository, a shell on

@@ -25,7 +25,7 @@
     mode: "0600"
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
-  loop: "{{ shards }}"
+  loop: "{{ projects }}"
   no_log: yes
 
 # Проект сняли -- пароль уходит и отсюда: иначе сервер раздавал бы кред
@@ -36,7 +36,7 @@
     paths: "{{ MOP_HOME }}/.config/mop/puppets"
     patterns: "nats-puppet-*.pass"
   register: mop_puppet_creds
-  when: shards | length > 0
+  when: projects | length > 0
 
 - name: Drop them
   become: yes
@@ -46,5 +46,5 @@
   loop: "{{ mop_puppet_creds.files | default([]) | map(attribute='path') | difference(wanted) }}"
   vars:
     wanted: >-
-      {{ shards | map('regex_replace', '^', MOP_HOME ~ '/.config/mop/puppets/nats-puppet-')
+      {{ projects | map('regex_replace', '^', MOP_HOME ~ '/.config/mop/puppets/nats-puppet-')
                 | map('regex_replace', '$', '.pass') | list }}

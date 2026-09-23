@@ -1,7 +1,7 @@
-"""launch claude as a shard's master: mop master [--llm PROFILE] [git-origin] [claude options]
+"""launch claude as a project's master: mop master [--llm PROFILE] [git-origin] [claude options]
 
 Without an argument, the origin of the current working copy is used. One
-project — one shard: a master sees and reaches only its own puppets; anyone
+project — one project: a master sees and reaches only its own puppets; anyone
 else's don't exist for it.
 
 Only --llm and origin belong to this command; everything else goes to claude
@@ -12,12 +12,12 @@ takes a VALUE after `--` (`mop master -- --model opus`): otherwise the value
 is indistinguishable from origin.
 
 You can run as many masters as you like, including several for one project:
-an inbox is addressed by master, not by shard, so they never get confused.
+an inbox is addressed by master, not by project, so they never get confused.
 
-All this command does is work out the shard, check its credentials, and exec
+All this command does is work out the project, check its credentials, and exec
 into claude. From there the slice is inherited: mop mcp, spawned by this
-session as a child, sees MOP_SHARD, builds the shard's bus credentials from
-the server's directory (mop/creds.py) and subscribes to its shard's inbox.
+session as a child, sees MOP_PROJECT, builds the project's bus credentials from
+the server's directory (mop/creds.py) and subscribes to its project's inbox.
 
 No ansible on this machine: the credentials arrive with `mop join <server>`,
 the server itself is named by MOP_SERVER_LAN (the environment outranks .env,
@@ -88,7 +88,7 @@ def claude_args(args):
 
     Чужое узнаётся по дефису, а `--` отдаёт claude весь хвост дословно — без
     него флаг со значением неотличим от origin, и «--model opus» тихо ушёл бы
-    искать шард «opus»."""
+    искать проект «opus»."""
     if "--" in args:
         cut = args.index("--")
         args, tail = args[:cut], args[cut + 1:]
@@ -107,19 +107,19 @@ def main(argv):
     origin = mine[0] if mine else lib.cwd_origin()
     # Origin, в котором нет ни хоста, ни пути, — почти наверняка значение
     # чужого флага, приехавшее сюда позиционно. Отказ обязан назвать причину:
-    # иначе дальше будет «нет кредов шарда opus», и искать опечатку придётся
+    # иначе дальше будет «нет кредов проекта opus», и искать опечатку придётся
     # в совсем другом месте.
     if not any(c in origin for c in ":/"):
         lib.usage(f"{origin!r} doesn't look like a git-origin.\n"
                   f"Pass claude options that take a value after --: "
                   f"mop master -- {' '.join(passthru + [origin])}")
-    shard = puppets.shard_of(origin)
-    if not lib.shard_ready(shard):
+    project = puppets.project_of(origin)
+    if not lib.project_ready(project):
         # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS,
         # и папет к шине не подключится. Говорим прямо, а не запускаем ansible
         # за спиной оператора: на узел ведёт одна дорога, и это deploy на
         # сервере; сюда его плоды привозит join.
-        lib.usage(f"no credentials for project {shard} on this machine.\n"
+        lib.usage(f"no credentials for project {project} on this machine.\n"
                   f"Register it on the server: mop project add {origin}, "
                   f"then bring its credentials here: mop join <server>")
     link_skill()
@@ -127,8 +127,8 @@ def main(argv):
     # Профиль тот же, что у папетов, но источник ключа другой: не узловой
     # secrets.env, а местный .env — общее с `mop code`, в lib.session_env.
     _, session = lib.session_env(profile)
-    env = dict(os.environ, MOP_SHARD=shard, **session)
-    print(f"master of shard {shard} ({origin}) [{profile}]"
+    env = dict(os.environ, MOP_PROJECT=project, **session)
+    print(f"master of project {project} ({origin}) [{profile}]"
           + (f" + claude {' '.join(passthru)}" if passthru else ""))
     os.execvpe("claude", ["claude", "--dangerously-skip-permissions",
                           "--mcp-config", mcp_config()] + passthru, env)

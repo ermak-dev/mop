@@ -25,7 +25,7 @@ FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL")
 # драйверов: это единственный stdlib-модуль, который читают и мастер, и узел.
 # Здесь — только имена, под которыми его знает мастер.
 JOB_PREFIX = driver.PREFIX
-shard_of_name = driver.shard_of_name
+project_of_name = driver.project_of_name
 clone_dir = driver.clone_dir
 
 # ─── LLM-профили ─────────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" != "$PU_ORIGIN" 
 fi
 if [ ! -d "$d/.git" ]; then
     mkdir -p "$HOME/puppets"
-    # Зеркало шарда, если тело принесло его с образом: объекты берутся
+    # Зеркало проекта, если тело принесло его с образом: объекты берутся
     # локально, а недостающее -- то, что появилось в origin после сборки
     # образа, -- git дотягивает по сети сам. Клон остаётся полноценным и
     # свежим, отставание зеркала лечится обычным fetch, а не пересборкой.
@@ -120,7 +120,7 @@ if [ ! -d "$d/.git" ]; then
     # Нет зеркала -- клонируем как раньше. У драйвера host его не бывает
     # вовсе, и ветка обязана быть тихой: отказ здесь означал бы папета,
     # который не поднимается на обычном узле.
-    mirror="$HOME/.cache/mop-mirror/$PU_SHARD.git"
+    mirror="$HOME/.cache/mop-mirror/$PU_PROJECT.git"
     if [ -d "$mirror" ]; then
         git clone -q --reference "$mirror" "$PU_ORIGIN" "$d"
     else
@@ -255,14 +255,14 @@ if [ -n "$PU_LLM_KEY_VAR" ]; then
     llm_env+=(-e "$PU_LLM_AUTH_VAR=$key")
 fi
 
-# Креды шарда, а не узла. Без этого папет ходил бы на шину под кредом агента и
+# Креды проекта, а не узла. Без этого папет ходил бы на шину под кредом агента и
 # мог бы написать в чужой проект: агент видит, кого спрашивают, но не видит,
 # кто спрашивает, и такую подмену не поймал бы. Файл раскатывает deploy/setup.yml
-# по одному на шард; если его нет -- валимся громко, потому что папет без шины
+# по одному на проект; если его нет -- валимся громко, потому что папет без шины
 # читается мастером как живой, но молчащий.
-shard_creds="$HOME/.config/mop/bus-$PU_SHARD.json"
-if [ ! -f "$shard_creds" ]; then
-    echo "no credentials for shard $PU_SHARD in $shard_creds -- set up the shard: mop deploy $PU_ORIGIN" >&2
+project_creds="$HOME/.config/mop/bus-$PU_PROJECT.json"
+if [ ! -f "$project_creds" ]; then
+    echo "no credentials for project $PU_PROJECT in $project_creds -- set it up: mop project add $PU_ORIGIN" >&2
     exit 1
 fi
 
@@ -297,7 +297,7 @@ mc="$(grep -a '^MOP_CORES=' "$HOME/.config/mop/node.env" 2>/dev/null | tail -1 |
 [ -n "$mc" ] && cores="$mc"
 # PATH идёт присваиванием В САМОЙ КОМАНДЕ, а не через -e, и это не стиль.
 # tmux кладёт -e в окружение СЕССИИ, и обычные переменные оттуда до панели
-# доезжают -- CARGO_TARGET_DIR и MOP_SHARD ниже приезжают именно так. А PATH
+# доезжают -- CARGO_TARGET_DIR и MOP_PROJECT ниже приезжают именно так. А PATH
 # панели он берёт от своего сервера, и значение из -e просто не применяется.
 # Измерено 22.09, tmux 3.4: `new-session -e PATH=/ZZZ:$PATH -e FOO=bar` дал
 # процессу FOO=bar и ИСХОДНЫЙ PATH, при том что show-environment показывал оба.
@@ -311,8 +311,9 @@ mc="$(grep -a '^MOP_CORES=' "$HOME/.config/mop/node.env" 2>/dev/null | tail -1 |
 tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     -e CARGO_TARGET_DIR="$HOME/.cache/target-$PU_NAME" \
     -e CARGO_BUILD_JOBS="$cores" \
-    -e MOP_SHARD="$PU_SHARD" \
-    -e MOP_BUS_CONFIG="$shard_creds" \
+    -e MOP_PROJECT="$PU_PROJECT" \
+    -e MOP_SHARD="$PU_PROJECT" \
+    -e MOP_BUS_CONFIG="$project_creds" \
     "${llm_env[@]}" \
     "PATH=$d/bin:$PATH $HOME/.local/bin/claude $claude_args"
 trap 'tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null; exit 0' TERM INT
@@ -320,15 +321,15 @@ while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wa
 """
 
 
-def shard_of(origin):
-    """Шард (он же проект) по origin репозитория.
+def project_of(origin):
+    """Проект (он же проект) по origin репозитория.
 
     Basename без .git, и это единственное определение проекта в системе.
     Соблазн взять хеш от полного origin есть — тогда два одноимённых репозитория
-    на разных хостах не слились бы в один шард. Но имена папетов уже строятся отсюда же
+    на разных хостах не слились бы в один проект. Но имена папетов уже строятся отсюда же
     (`pu-<проект>-<n>`), и завести рядом второе, более точное понятие «проект»
     значит получить два места, по-разному отвечающих на вопрос «чей это папет».
-    Цена честная и названа: одинаковые basename делят шард ровно так же, как
+    Цена честная и названа: одинаковые basename делят проект ровно так же, как
     уже делят имена. Понадобится развести — сюда добавляется суффикс от
     sha256(origin), и больше никуда."""
     return os.path.basename(origin).removesuffix(".git")
@@ -351,14 +352,14 @@ def job_spec(name, origin, profile=None, cont=False):
                            f"{', '.join(llm.profiles())} (mop llm)")
     llm_env = "".join(f"{k}={v}\n" for k, v in prof["env"].items())
     meta = {"origin": origin, "llm": profile}
-    shard = shard_of(origin)
+    project = project_of(origin)
     env = {
         "PU_NAME": name,
         "PU_ORIGIN": origin,
         # Два имени одного: врапер исторически читает PU_PROJECT (посев из
-        # ~/puppet-env/<проект>), а шард и есть проект.
-        "PU_PROJECT": shard,
-        "PU_SHARD": shard,
+        # ~/puppet-env/<проект>), а проект и есть проект.
+        "PU_PROJECT": project,
+        "PU_PROJECT": project,
         "PU_SEED": config.get("MOP_PUPPET_SEED"),
         "HOME": HOME,
         "PATH": config.get("MOP_PUPPET_PATH").replace("{HOME}", HOME),
@@ -382,7 +383,7 @@ def job_spec(name, origin, profile=None, cont=False):
         "Datacenters": [nomad.POOL_DC],
         "Type": "service",
         "Meta": meta,
-        "Constraints": [shard_constraint(shard)],
+        "Constraints": [project_constraint(project)],
         "TaskGroups": [{
             "Name": "puppets",
             "Count": 1,
@@ -405,37 +406,40 @@ def job_spec(name, origin, profile=None, cont=False):
     }}
 
 
-# Слово, которым узел объявляет, что обслуживает любой шард. Так говорят про
+# Слово, которым узел объявляет, что обслуживает любой проект. Так говорят про
 # себя узлы, где тело равно узлу: им нечего готовить заранее. Узел, чьи тела —
-# контейнеры, перечисляет шарды поимённо — те, чьи образы на нём собраны.
-ANY_SHARD = "any"
+# контейнеры, перечисляет проекты поимённо — те, чьи образы на нём собраны.
+ANY_PROJECT = "any"
 
 
-def shard_constraint(shard):
-    """Ограничение размещения: узел обязан уметь обслужить этот шард.
+def project_constraint(project):
+    """Ограничение размещения: узел обязан уметь обслужить этот проект.
 
     До появления тел вопрос не стоял — любой узел пула умел любого папета. У
     узла-гипервизора это перестало быть правдой: тело клонируется из образа
-    шарда, и папет шарда, чей образ там не собран, не поднимется никогда.
+    проекта, и папет проекта, чей образ там не собран, не поднимется никогда.
     Планировщик об этом не знал и ставил такого папета туда при первом же
     давлении; поймано на живом пуле (pu-rugent-6 на hyper), и лечилось руками.
 
     Регулярное выражение по списку через запятую, а не set_contains, потому
     что `any` обязано быть словом целиком: узлу общего назначения нечего
-    перечислять, а новый шард заводится после прогона deploy и в перечне
+    перечислять, а новый проект заводится после прогона deploy и в перечне
     заведомо не окажется. Якоря не украшение — без них `mop` совпадёт с
     `mop2`, а `op` с `mop`, и оба промаха молчаливы."""
+    # Ключ меты УЗЛА. Остался прежним при переименовании (#85): его объявляет
+    # клиент Nomad, и переименовать значит оставить всякую уже
+    # зарегистрированную спеку без узлов, которые её принимают.
     return {"LTarget": "${meta.mop_shards}", "Operand": "regexp",
-            "RTarget": f"(^|,)({ANY_SHARD}|{re.escape(shard)})(,|$)"}
+            "RTarget": f"(^|,)({ANY_PROJECT}|{re.escape(project)})(,|$)"}
 
 
-def shard_ids(lines):
+def project_ids(lines):
     """Строки памяти/аргументов -> ({origin'ы}, {легаси-имена}).
 
-    Память шардов хранит ORIGIN'ы, а не имена (#33): имя выводится
+    Память проектов хранит ORIGIN'ы, а не имена (#33): имя выводится
     basename'ом, а вот имя в origin разворачивать некуда — таблицы имён
     нет и заводить нельзя. Строка без / и : — имя с легаси-времён, origin
-    которого уже не узнать; такие не теряются, иначе их шард молча
+    которого уже не узнать; такие не теряются, иначе их проект молча
     выпадает из конфига NATS при следующем deploy.
     """
     stripped = {l.strip() for l in lines if l.strip()}
@@ -443,36 +447,36 @@ def shard_ids(lines):
     return origins, stripped - origins
 
 
-def visible(listing, shard):
-    """Папеты из сырого списка джобов глазами одного шарда (#29).
+def visible(listing, project):
+    """Папеты из сырого списка джобов глазами одного проекта (#29).
 
     Папет — service-джоб с префиксом pu-; pu-cleanup и его периодические
     дети — sysbatch, им в ростере места нет. Origin в Meta у папета может
     не быть: это спека старой регистрации, никогда не перерегистрированная
     (врапер живёт в спеке), и такой папет работает, но невидим — на этом
-    пул rugent «исчезал» из всех списков, оставаясь живым. Псевдошард admin
-    видит и непомеченных; шард — только помеченных своим origin: чей
+    пул rugent «исчезал» из всех списков, оставаясь живым. Псевдопроект admin
+    видит и непомеченных; проект — только помеченных своим origin: чей
     непомеченный, из него самого не узнать."""
-    shard = shard or bus.SHARD
+    project = project or bus.PROJECT
     out = []
     for j in listing:
         if not j.get("ID", "").startswith(JOB_PREFIX) or j.get("Type") != "service":
             continue
         origin = (j.get("Meta") or {}).get("origin")
-        if shard == bus.ADMIN:
+        if project == bus.ADMIN:
             out.append(j)
-        elif origin and shard_of(origin) == shard:
+        elif origin and project_of(origin) == project:
             out.append(j)
     return out
 
 
-def _cluster(verb, shard=None, timeout=bus.TIMEOUT, **fields):
+def _cluster(verb, project=None, timeout=bus.TIMEOUT, **fields):
     """Глагол сервису кластера с громким отказом. -> ответ.
 
     Ошибка сервиса — это исключение здесь, а не поле в ответе: вызывающие в
     этом модуле — библиотечные функции, и молча вернуть половину ответа
     значит показать половину пула как целый."""
-    got = bus.ask_cluster(verb, shard=shard, timeout=timeout, **fields)
+    got = bus.ask_cluster(verb, project=project, timeout=timeout, **fields)
     if got.get("error"):
         raise RuntimeError(got["error"])
     return got
@@ -484,21 +488,21 @@ def _cluster(verb, shard=None, timeout=bus.TIMEOUT, **fields):
 ALLOC_FIELDS = ("ID", "JobID", "NodeName", "ClientStatus", "DesiredStatus")
 
 
-def nomad_jobs(shard=None):
+def nomad_jobs(project=None):
     """Джобы папетов из Nomad. Зовёт это только сервис кластера: он один
     говорит с Nomad от чужого имени (docs/CLUSTER.md)."""
     listing = nomad.client().jobs.get_jobs(prefix=JOB_PREFIX, meta=True)
-    return visible(listing, shard)
+    return visible(listing, project)
 
 
-def nomad_items(shard=None, stale=False):
+def nomad_items(project=None, stale=False):
     """Ростер из Nomad: джоб плюс его аллокация. Тоже только сервис кластера.
 
     Аллокация приезжает вместе с джобом намеренно: клиент за ней отдельно уже
     не сходит, а N+1 запрос по шине вместо N+1 вызова API — та же цена, но с
     сетью между ними."""
     items = []
-    for j in sorted(nomad_jobs(shard), key=lambda j: j["ID"]):
+    for j in sorted(nomad_jobs(project), key=lambda j: j["ID"]):
         alloc, err = None, None
         try:
             got = nomad.latest_alloc(j["ID"])
@@ -517,20 +521,20 @@ def nomad_items(shard=None, stale=False):
     return items
 
 
-def items(shard=None, stale=False):
+def items(project=None, stale=False):
     """Ростер через шину: джобы и аллокации от сервиса кластера.
 
     Мастер больше не ходит в Nomad — ни ростером, ни чем-либо ещё (#81).
     Видимость считает сервис тем же visible(), но по проекту из СУБЪЕКТА:
-    расширить её, подставив чужой шард, нельзя — права NATS не дадут."""
-    return _cluster("roster", shard=shard, stale=stale).get("items") or []
+    расширить её, подставив чужой проект, нельзя — права NATS не дадут."""
+    return _cluster("roster", project=project, stale=stale).get("items") or []
 
 
-def jobs(shard=None):
-    """Джобы папетов, видимые этому процессу: `mop master` ставит MOP_SHARD,
+def jobs(project=None):
+    """Джобы папетов, видимые этому процессу: `mop master` ставит MOP_PROJECT,
     и мастер проекта перестаёт видеть чужих папетов уже здесь, в ростере.
     Кто виден кому — visible(): #29."""
-    return [i["job"] for i in items(shard)]
+    return [i["job"] for i in items(project)]
 
 
 def next_name(project):
@@ -1095,7 +1099,7 @@ def spec_is_stale(job):
 
     Ограничение живёт в спеке, а спека сама не перечитывается: всё, что
     зарегистрировано раньше, защиты не имеет. Узнать об этом можно было только
-    по симптому — в логе задачи на узле, куда мастер шарда не смотрит.
+    по симптому — в логе задачи на узле, куда мастер проекта не смотрит.
     Поймано на pu-cloudpub-1, лечится `mop update <имя>`."""
     task = job["TaskGroups"][0]["Tasks"][0]
     script = (task.get("Config") or {}).get("args") or ["", ""]
@@ -1334,7 +1338,7 @@ def recycle(name):
     Цена рецикла зависит от драйвера, и с появлением тел она разошлась. У
     host первая сборка после рецикла долгая, поэтому там это крайняя мера, а
     не гигиена. У контейнерного драйвера тело сносится целиком и клонируется
-    из прогретого образа шарда, где тулчейн и кэши уже лежат, — там рецикл
+    из прогретого образа проекта, где тулчейн и кэши уже лежат, — там рецикл
     стоит секунд.
 
     Порядок обязателен: остановить джоб → дождаться терминала → wipe →

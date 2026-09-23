@@ -104,7 +104,7 @@ def parse(argv):
 
 
 def listen_events():
-    """Журнал шарда с шины: под кредами admin видны все шарды. Шина легла —
+    """Журнал проекта с шины: под кредами admin видны все проекты. Шина легла —
     дашборд живёт опросом, а причина видна в снимке."""
     try:
         bus.subscribe("mop.*.events", lambda msg: COLLECTOR.event(web.journal_entry(msg)))

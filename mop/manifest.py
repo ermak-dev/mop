@@ -1,4 +1,4 @@
-"""Манифест шарда: .mop/ в корне проекта, из его origin или из рабочей копии.
+"""Манифест проекта: .mop/ в корне проекта, из его origin или из рабочей копии.
 
 Чистый разбор и его проверки живут в config (manifest, manifest_parts);
 здесь — дорога за ним: зеркало или каталог, файлы для ansible. Молчит и
@@ -6,9 +6,9 @@
 
 Два файла, и имена говорят, когда каждый играется (#61):
 
-    .mop/sandbox.yaml    размеры тела (vars по конвенции SHARD_SCOPED),
+    .mop/sandbox.yaml    размеры тела (vars по конвенции PROJECT_SCOPED),
                          конфигурация проекта (остальные vars) и системные
-                         пакеты (tasks) — ПЕЧЁТСЯ в образ шарда; на узле,
+                         пакеты (tasks) — ПЕЧЁТСЯ в образ проекта; на узле,
                          где тело равно узлу, играется прогоном deploy
     .mop/bootstrap.yaml  env-файлы и настройка окружения — играется при
                          КАЖДОМ старте песочницы (#62)
@@ -38,7 +38,7 @@ LEGACY = (".mop/node.yaml", ".mop/workspace.yaml")
 
 
 def fetch(origin):
-    """origin -> словарь манифестов проекта: {'shard', 'asks', 'alien',
+    """origin -> словарь манифестов проекта: {'project', 'asks', 'alien',
     'legacy', 'sandbox_vars', 'sandbox_tasks', 'bootstrap_vars',
     'bootstrap_tasks'} (пути или None).
 
@@ -50,27 +50,27 @@ def fetch(origin):
     единственная его правда для deploy, у которого рабочей копии чужого
     проекта нет вовсе. Читается HEAD зеркала, то есть дефолтная ветка.
     """
-    shard = puppets.shard_of(origin)
+    project = puppets.project_of(origin)
     import tempfile
-    with_dir = tempfile.mkdtemp(prefix=f"mop-mirror-{shard}-")
+    with_dir = tempfile.mkdtemp(prefix=f"mop-mirror-{project}-")
     tmp = os.path.join(with_dir, "mirror.git")
     try:
         r = subprocess.run(["git", "clone", "--mirror", "-q", origin, tmp],
                            capture_output=True, text=True)
         if r.returncode != 0:
-            raise RuntimeError(f"cannot read {shard}: "
+            raise RuntimeError(f"cannot read {project}: "
                                f"{(r.stderr or r.stdout).strip()}")
 
         def show(path):
             got = subprocess.run(["git", "-C", tmp, "show", f"HEAD:{path}"],
                                  capture_output=True, text=True)
             return got.stdout if got.returncode == 0 else None
-        return _collect(shard, show)
+        return _collect(project, show)
     finally:
         subprocess.run(["rm", "-rf", with_dir], capture_output=True)
 
 
-def fetch_tree(root, shard):
+def fetch_tree(root, project):
     """Те же манифесты из рабочей копии root: файлы как лежат, незакоммиченные
     тоже (#46). Ради этого сборка и заводилась в рабочей копии: правку `.mop`
     пробуют образом, а не влитием в master. Новой власти это не даёт — у того,
@@ -81,17 +81,17 @@ def fetch_tree(root, shard):
             return None
         with open(p) as f:
             return f.read()
-    return _collect(shard, show)
+    return _collect(project, show)
 
 
-def _collect(shard, show):
+def _collect(project, show):
     """Словарь манифестов из источника show: path -> текст или None."""
     # base с PID: вырезка происходит и в deploy, и в сборке, и руками, и
     # один путь на всех однажды столкнул два клона в один tmp_pack (#32).
     # Файлы для ansible живут в base и переживают вызов — /tmp вычищается
     # перезагрузкой, мусор копится только до неё.
-    base = f"/tmp/mop-manifest-{shard}-{os.getpid()}"
-    out = {"shard": shard, "asks": {}, "alien": [], "legacy": [],
+    base = f"/tmp/mop-manifest-{project}-{os.getpid()}"
+    out = {"project": project, "asks": {}, "alien": [], "legacy": [],
            "sandbox_vars": None, "sandbox_tasks": None,
            "bootstrap_vars": None, "bootstrap_tasks": None}
 
@@ -102,7 +102,7 @@ def _collect(shard, show):
     # каком они играли: узловое прежде рабочего.
     s_vars, s_tasks = {}, []
     for path in (SANDBOX, *LEGACY):
-        got = _parse(show(path), shard, path)
+        got = _parse(show(path), project, path)
         if got is None:
             continue
         if path in LEGACY:
@@ -114,34 +114,34 @@ def _collect(shard, show):
         note_alien(alien)
         s_tasks += tasks
     if s_vars:
-        out["sandbox_vars"] = _write(base, shard, "sandbox-vars.yml", None, s_vars)
-    out["sandbox_tasks"] = _write(base, shard, "sandbox-tasks.yml", s_tasks)
+        out["sandbox_vars"] = _write(base, project, "sandbox-vars.yml", None, s_vars)
+    out["sandbox_tasks"] = _write(base, project, "sandbox-tasks.yml", s_tasks)
 
     # Bootstrap: размеров здесь не просят — они дело песочницы, и просьба
     # тут была бы проглочена молча, поэтому идёт в чужие, по имени.
-    got = _parse(show(BOOTSTRAP), shard, BOOTSTRAP)
+    got = _parse(show(BOOTSTRAP), project, BOOTSTRAP)
     if got is not None:
         bvars, btasks = got
         asks, mine, alien = config.manifest_parts(bvars)
         note_alien(sorted(set(alien) | set(asks)))
         if mine:
-            out["bootstrap_vars"] = _write(base, shard, "bootstrap-vars.yml", None, mine)
-        out["bootstrap_tasks"] = _write(base, shard, "bootstrap-tasks.yml", btasks)
+            out["bootstrap_vars"] = _write(base, project, "bootstrap-vars.yml", None, mine)
+        out["bootstrap_tasks"] = _write(base, project, "bootstrap-tasks.yml", btasks)
     out["alien"].sort()
     return out
 
 
-def _parse(text, shard, path):
+def _parse(text, project, path):
     """Один манифест. -> (vars, tasks) или None, если файла нет."""
     if text is None:
         return None
     try:
         return config.manifest(text)
     except ValueError as e:
-        raise RuntimeError(f"{shard}/{path}: {e}")
+        raise RuntimeError(f"{project}/{path}: {e}")
 
 
-def _write(base, shard, name, tasks=None, of_vars=None):
+def _write(base, project, name, tasks=None, of_vars=None):
     """Секция манифеста во временный файл для ansible; None, если пусто."""
     import yaml
     what = of_vars if of_vars is not None else tasks

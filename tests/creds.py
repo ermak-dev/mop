@@ -2,7 +2,7 @@
 """Креды сервера на машине оператора без пула: python3 tests/creds.py
 
 Проверяется то, что раньше делал шаблон ansible и что теперь собирает сам
-mop: конфиг шины из адреса, порта, шарда и пароля, имена файлов в каталоге
+mop: конфиг шины из адреса, порта, проекта и пароля, имена файлов в каталоге
 сервера и чтение токена. Ошибка тут молчит особенно охотно: не тот
 пользователь NATS — это не отказ, а «агент не отвечает» через двадцать
 секунд таймаута.
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop import creds  # noqa: E402
 
-# (шард, пользователь NATS, файл пароля). Имена файлов совпадают с тем, что
+# (проект, пользователь NATS, файл пароля). Имена файлов совпадают с тем, что
 # lookup('password') заводит в secrets/ сервера: копия без переименования.
 USERS = [
     (None, "admin", "nats-admin.pass"),
@@ -34,17 +34,17 @@ def main():
     bad = 0
     cases = 0
 
-    for shard, user, fname in USERS:
+    for project, user, fname in USERS:
         cases += 1
-        got = creds.bus_config("10.0.0.5", "4222", shard, "s3cret")
+        got = creds.bus_config("10.0.0.5", "4222", project, "s3cret")
         want = {"url": "nats://10.0.0.5:4222", "user": user, "password": "s3cret"}
         if got != want:
             bad += 1
-            print(f"FAILED  bus_config({shard!r}) -> {got}, wanted {want}")
+            print(f"FAILED  bus_config({project!r}) -> {got}, wanted {want}")
         cases += 1
-        if creds.pass_file(shard) != fname:
+        if creds.pass_file(project) != fname:
             bad += 1
-            print(f"FAILED  pass_file({shard!r}) -> {creds.pass_file(shard)!r}, "
+            print(f"FAILED  pass_file({project!r}) -> {creds.pass_file(project)!r}, "
                   f"wanted {fname!r}")
 
     # Кред папета: его выдаёт сервер в ответе на bootstrap песочницы (#83),
@@ -64,10 +64,10 @@ def main():
         bad += 1
         print(f"FAILED  bus_config with an explicit user -> {got}")
     cases += 1
-    # Без явного пользователя поведение прежнее: шард -> мастер шарда.
+    # Без явного пользователя поведение прежнее: проект -> мастер проекта.
     if creds.bus_config("10.0.0.5", "4222", "rugent", "x")["user"] != "master-rugent":
         bad += 1
-        print("FAILED  bus_config without a user must stay the master of the shard")
+        print("FAILED  bus_config without a user must stay the master of the project")
 
     # Каталог сервера — по адресу, и только по нему: два сервера — два
     # каталога, и переменная окружения переключает оба вместе с NOMAD_ADDR.
@@ -152,7 +152,7 @@ def main():
               f"{oct(os.stat(dest).st_mode & 0o777)}, files {modes}")
 
     # Что каталог сервера ТЕРЯЕТ. Проект сняли (#79) — его пароль мастера
-    # у оператора остаётся, и lib.shard_ready по нему отвечает «проект на
+    # у оператора остаётся, и lib.project_ready по нему отвечает «проект на
     # шине есть»: `mop master` поднимется, чтобы не подключиться. Отбор —
     # строго пароли мастеров: админский и токен к проектам отношения не
     # имеют, а чужое в каталоге не наше дело.
@@ -172,7 +172,7 @@ def main():
               f"{creds.stale(local, [])}")
 
     # forget: пароли снятого проекта уходят и с контроллера, и из каталога
-    # сервера — обоими путями их читает один и тот же shard_ready.
+    # сервера — обоими путями их читает один и тот же project_ready.
     cases += 1
     a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
     for d in (a, b):

@@ -1,5 +1,5 @@
 # Bootstrap песочниц на сервере (#62, docs/BOOTSTRAP.md): ansible, файлы
-# шардов, юнит подписчика. Идёт после дашборда: пакет mop и креды оператора
+# проектов, юнит подписчика. Идёт после дашборда: пакет mop и креды оператора
 # на сервер привозит роль web, и здесь они уже лежат.
 #
 # Сервер, а не узел и не машина оператора: bootstrap играется при КАЖДОМ
@@ -8,7 +8,7 @@
 # есть дорога к телам (#59).
 # Со свежими списками: сервер живёт долго, и его кэш apt протухает — первая
 # же раскатка упала на 404 по версии пакета, которой в зеркале уже нет.
-- name: Ansible, to play a shard's bootstrap into a sandbox
+- name: Ansible, to play a project's bootstrap into a sandbox
   become: yes
   ansible.builtin.apt:
     name: ansible
@@ -16,7 +16,7 @@
     update_cache: yes
     cache_valid_time: 3600
 
-- name: Where the shards' bootstraps live
+- name: Where the projects' bootstraps live
   become: yes
   ansible.builtin.file:
     path: "{{ MOP_HOME }}/.config/mop/bootstrap"
@@ -25,11 +25,11 @@
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
 
-# Файлы шардов из origin (дефолтная ветка), вырезанные на управляющей
+# Файлы проектов из origin (дефолтная ветка), вырезанные на управляющей
 # машине (mop deploy, mop_manifests). Мастер кладёт свою рабочую копию
 # поверх (`mop add`, `mop bootstrap push`) — deploy её не бережёт: origin
 # и есть правда прогона, а рабочая копия — решение мастера до следующего.
-- name: Bootstrap tasks of each shard that has them
+- name: Bootstrap tasks of each project that has them
   become: yes
   ansible.builtin.copy:
     src: "{{ item.value.bootstrap_tasks }}"
@@ -41,7 +41,7 @@
   loop_control:
     label: "{{ item.key }}"
 
-- name: Bootstrap configuration of each shard that has one
+- name: Bootstrap configuration of each project that has one
   become: yes
   ansible.builtin.copy:
     src: "{{ item.value.bootstrap_vars }}"
@@ -54,12 +54,12 @@
     label: "{{ item.key }}"
 
 # Проект убрал bootstrap — сервер не играет вчерашний.
-- name: No stale bootstrap for a shard that has none
+- name: No stale bootstrap for a project that has none
   become: yes
   ansible.builtin.file:
     path: "{{ MOP_HOME }}/.config/mop/bootstrap/{{ item.0 }}-{{ item.1 }}.yml"
     state: absent
-  loop: "{{ (mop_shards | default([])) | difference(mop_manifests | default({}) | dict2items | selectattr('value.bootstrap_tasks', 'defined') | map(attribute='key') | list) | product(['tasks', 'vars']) | list }}"
+  loop: "{{ (mop_projects | default([])) | difference(mop_manifests | default({}) | dict2items | selectattr('value.bootstrap_tasks', 'defined') | map(attribute='key') | list) | product(['tasks', 'vars']) | list }}"
   loop_control:
     label: "{{ item.0 }}-{{ item.1 }}"
 

@@ -14,7 +14,7 @@
     mode: "0600"
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
-  loop: "{{ shards }}"
+  loop: "{{ projects }}"
   vars:
     nats_user: "puppet-{{ item }}"
     nats_password: "{{ lookup('password', secrets_dir + '/nats-puppet-' + item + '.pass length=32 chars=ascii_letters,digits') }}"
@@ -32,7 +32,7 @@
     paths: "{{ MOP_HOME }}/.config/mop"
     patterns: "bus-*.json"
   register: mop_bus_files
-  when: shards | length > 0
+  when: projects | length > 0
 
 # Разностью списков, а не разбором имени файла. Первая версия резала имя
 # проекта регуляркой с группой захвата -- `regex_replace('^bus-(.*)\.json$',
@@ -49,5 +49,5 @@
   loop: "{{ mop_bus_files.files | default([]) | map(attribute='path') | difference(wanted) }}"
   vars:
     wanted: >-
-      {{ shards | map('regex_replace', '^', MOP_HOME ~ '/.config/mop/bus-')
+      {{ projects | map('regex_replace', '^', MOP_HOME ~ '/.config/mop/bus-')
                 | map('regex_replace', '$', '.json') | list }}

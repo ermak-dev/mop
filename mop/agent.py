@@ -15,10 +15,10 @@
 произвольная команда в чужой TUI и произвольная запись в $HOME — это два разных
 способа получить исполнение кода на узле.
 
-Шард агент пересекает сознательно: он и есть то, что шарды разделяет, и
-обслуживает всех жильцов узла. Прав NATS для этого мало — мастер шарда A
+Проект агент пересекает сознательно: он и есть то, что проекты разделяет, и
+обслуживает всех жильцов узла. Прав NATS для этого мало — мастер проекта A
 законно пишет в свой субъект, но может подставить в поле `name` папета из B.
-Поэтому на каждый глагол, называющий папет, сверяем шард из субъекта с
+Поэтому на каждый глагол, называющий папет, сверяем проект из субъекта с
 настоящим origin его клона.
 
 Права проверяются дважды: на сервере NATS (кто в какой субъект пишет) и здесь
@@ -45,7 +45,7 @@ from .driver import clone_dir, target_dir, why
 HOME = os.path.expanduser("~")
 
 # Драйвер узла, не папета, и берётся он из окружения (юнит агента), а не из
-# запроса: иначе мастер шарда A прислал бы своё значение и заставил агента
+# запроса: иначе мастер проекта A прислал бы своё значение и заставил агента
 # исполнить команду не там. Дефолт host — узел, ничего про драйверы не
 # знающий, обязан вести себя ровно как раньше.
 DRIVER = driver.current()
@@ -61,12 +61,12 @@ PUBLIC_VERBS = ("ping", "local", "state", "states", "send", "tail")
 # креды проекта B», но перезаписывать в этой установке нечего: оба файла из
 # WRITABLE собираются не из проекта мастера, а из машины — .credentials.json
 # из логина claude.ai управляющей машины, secrets.env из .env самого mop
-# (`puppets.LOCAL_KEYS_FILE` — это PROJECT репозитория mop, а не шарда).
-# Мастер любого шарда везёт байт в байт то же, что вёз бы оператор. Ценой
+# (`puppets.LOCAL_KEYS_FILE` — это PROJECT репозитория mop, а не проекта).
+# Мастер любого проекта везёт байт в байт то же, что вёз бы оператор. Ценой
 # запрета было `mop login` из мастер-шелла: он отбивался по каждому узлу, и
 # doctor оставался без единственного лечения протухшего логина.
 #
-# Папета это не касается: `write` не в PUBLIC_VERBS, а креды puppet-<шард>
+# Папета это не касается: `write` не в PUBLIC_VERBS, а креды puppet-<проект>
 # в субъект .rpc не пишут вовсе.
 ADMIN_VERBS = ("disk", "junk")
 
@@ -112,7 +112,7 @@ def node_name():
     return os.environ.get("MOP_NODE") or socket.gethostname()
 
 
-async def puppet_shard(name):
+async def puppet_project(name):
     """Чей это папет. Origin клона — авторитет: врапер сносит клон, если origin
     разошёлся с PU_ORIGIN, так что клон и спека не расходятся никогда.
 
@@ -122,7 +122,7 @@ async def puppet_shard(name):
     origin = out.strip().splitlines()[-1] if out.strip() else ""
     if origin:
         return os.path.basename(origin).removesuffix(".git")
-    return driver.shard_of_name(name)
+    return driver.project_of_name(name)
 
 
 # ─── локальные пробы ─────────────────────────────────────────────────────
@@ -349,7 +349,7 @@ async def v_send(req):
     await _event("send", name, text=f"from {req.get('from_name', 'mop')}")
     if req.get("notify") and not wait:
         # Куда отвечать, говорит сам мастер: инбокс адресуется мастером, а не
-        # шардом, иначе два терминала в одном проекте получали бы вести друг
+        # проектом, иначе два терминала в одном проекте получали бы вести друг
         # друга. Без reply_to ждать бессмысленно — некому сказать.
         if req.get("reply_to"):
             asyncio.create_task(_watch_idle(name, req["reply_to"]))
@@ -387,21 +387,21 @@ async def _tell_master(reply_to, text):
 
 
 async def _event(kind, name=None, **fields):
-    """Запись в журнал шарда (mop.<шард>.events, #66).
+    """Запись в журнал проекта (mop.<проект>.events, #66).
 
     Агент публикует то, что делает сам: доставил сообщение, дождался
     простоя, напечатал команду, снёс тело, поднялся. Смену состояния внутри
     сессии он не видит — её по-прежнему спрашивает мастер, — но по этим
-    событиям дашборд сдвигает опрос вперёд и держит журнал. Шард берётся у
+    событиям дашборд сдвигает опрос вперёд и держит журнал. Проект берётся у
     самого папета, а не из субъекта запроса: оператор пишет из admin, а
     событие принадлежит проекту. Отказ — тишина: журнал вторичен, и ронять
     глагол из-за него нельзя."""
     if _conn is None:
         return
-    shard = await puppet_shard(name) if name else bus.ADMIN
+    project = await puppet_project(name) if name else bus.ADMIN
     try:
-        await _conn.publish(bus.events(shard), json.dumps(
-            {"event": kind, "node": node_name(), "name": name, "shard": shard,
+        await _conn.publish(bus.events(project), json.dumps(
+            {"event": kind, "node": node_name(), "name": name, "project": project,
              "at": time.time(), **fields}, ensure_ascii=False).encode())
     except Exception:
         pass
@@ -530,10 +530,10 @@ async def v_junk(req):
     templates}.
 
     От `local` отличается тем, ради чего и заведён: тот показывает папетов
-    (живая сессия, свой шард), а этот — объекты. Мусор по определению не
+    (живая сессия, свой проект), а этот — объекты. Мусор по определению не
     имеет живой сессии и не принадлежит никому, так что фильтры `local`
     отсеяли бы ровно то, что ищут. Поэтому глагол админский: он рассказывает
-    про чужие шарды тоже, а сопоставлять с Nomad всё равно некому, кроме
+    про чужие проекты тоже, а сопоставлять с Nomad всё равно некому, кроме
     управляющей машины.
 
     `templates` есть не у всякого драйвера — у host сборочных тел не бывает
@@ -545,7 +545,7 @@ async def v_junk(req):
     # — верно для узла, до которого не достучаться, но сирота на гипервизоре
     # жива и отвечает по ssh. Без этого уборка сносила бы тела, не спросив,
     # есть ли в них несохранённое: 22.09 она так снесла два контейнера чужих
-    # шардов, и повезло, что пустых.
+    # проектов, и повезло, что пустых.
     work = {}
     for n in names:
         c = await clone_facts(n)
@@ -572,11 +572,11 @@ async def v_usage(req):
 
     Папета перечисляет драйвер (bodies), а не listdir клонов: на гипервизоре
     каталога клонов нет. Имя в slug'е искалечено (точки и подчёркивания стали
-    дефисами), и обратно в имя папета, которое сверяется с шардом, его не
+    дефисами), и обратно в имя папета, которое сверяется с проектом, его не
     собрать, — поэтому идём от имени к каталогу, а не наоборот.
 
-    Чужих папетов выбрасываем молча, как states: мастер шарда видит расход
-    своего шарда, оператор — всего узла."""
+    Чужих папетов выбрасываем молча, как states: мастер проекта видит расход
+    своего проекта, оператор — всего узла."""
     days = min(max(int(req.get("days") or 7), 1), 366)
     names = [n for n in await DRIVER.bodies() if await _mine(req, n)]
     # usage.py лежит рядом с session.py: SESSION_PY и называет то место, куда
@@ -600,14 +600,14 @@ VERBS = {"ping": v_ping, "local": v_local, "state": v_state,
          "tail": v_tail, "type": v_type, "write": v_write,
          "disk": v_disk, "wipe": v_wipe, "usage": v_usage, "junk": v_junk}
 
-# Глаголы, которые называют конкретного папета: у них шард запроса обязан
-# сойтись с настоящим шардом папета.
+# Глаголы, которые называют конкретного папета: у них проект запроса обязан
+# сойтись с настоящим проектом папета.
 NAMED_VERBS = ("state", "send", "tail", "type", "wipe")
 
 
 async def _mine(req, name):
-    """Принадлежит ли папет шарду, из чьего субъекта пришёл запрос."""
-    return req.get("_shard") == bus.ADMIN or await puppet_shard(name) == req.get("_shard")
+    """Принадлежит ли папет проекту, из чьего субъекта пришёл запрос."""
+    return req.get("_project") == bus.ADMIN or await puppet_project(name) == req.get("_project")
 
 
 # ─── петля ───────────────────────────────────────────────────────────────
@@ -616,9 +616,9 @@ _conn = None
 
 async def handle(msg, public):
     """Разбор и три проверки: глагол существует, субъект его допускает, папет
-    принадлежит спрашивающему шарду.
+    принадлежит спрашивающему проекту.
 
-    Шард берём из субъекта (`mop.<шард>.node.<узел>.<канал>`), а не из тела
+    Проект берём из субъекта (`mop.<проект>.node.<узел>.<канал>`), а не из тела
     запроса: тело пишет отправитель, субъект — права NATS."""
     try:
         req = json.loads(msg.data.decode())
@@ -626,7 +626,7 @@ async def handle(msg, public):
         return await msg.respond(
             json.dumps({"error": "request is not JSON"}, ensure_ascii=False).encode())
     parts = msg.subject.split(".")
-    req["_shard"] = parts[1] if len(parts) > 1 else ""
+    req["_project"] = parts[1] if len(parts) > 1 else ""
 
     verb = req.get("verb")
     fn = VERBS.get(verb)
@@ -635,12 +635,12 @@ async def handle(msg, public):
     elif public and verb not in PUBLIC_VERBS:
         # Не «нет прав», а прямо: глагол существует, но не в этом субъекте.
         out = {"error": f"verb {verb} is available to the master only"}
-    elif verb in ADMIN_VERBS and req["_shard"] != bus.ADMIN:
-        out = {"error": f"verb {verb} is node-level, not given to shard {req['_shard']}"}
+    elif verb in ADMIN_VERBS and req["_project"] != bus.ADMIN:
+        out = {"error": f"verb {verb} is node-level, not given to project {req['_project']}"}
     elif verb in NAMED_VERBS and not await _mine(req, req.get("name") or ""):
-        # Главная проверка шардирования. Прав NATS тут мало: мастер шарда A
+        # Главная проверка проектирования. Прав NATS тут мало: мастер проекта A
         # законно пишет в свой субъект, но может назвать папета из B.
-        out = {"error": f"puppet {req.get('name')} is not in shard {req['_shard']}"}
+        out = {"error": f"puppet {req.get('name')} is not in project {req['_project']}"}
     else:
         try:
             out = await fn(req)
@@ -668,8 +668,8 @@ async def serve():
     async def on_msg(msg):
         asyncio.create_task(handle(msg, public=True))
 
-    # Маска по шарду: агент обслуживает всех жильцов узла, а кто из какого
-    # шарда — решает уже проверка в handle.
+    # Маска по проекту: агент обслуживает всех жильцов узла, а кто из какого
+    # проекта — решает уже проверка в handle.
     await _conn.subscribe(f"mop.*.node.{node}.rpc", cb=on_rpc)
     await _conn.subscribe(f"mop.*.node.{node}.msg", cb=on_msg)
     # Общий субъект: сюда спрашивают те, кто не знает состава пула.
@@ -692,7 +692,7 @@ async def check():
     nc = await nats.connect(**bus.auth(c), name="mop-agent/check",
                             allow_reconnect=False, connect_timeout=5)
     try:
-        msg = await nc.request(bus.subject(node_name(), "msg", shard=bus.ADMIN),
+        msg = await nc.request(bus.subject(node_name(), "msg", project=bus.ADMIN),
                                json.dumps({"verb": "ping"}).encode(), timeout=5)
         print(f"subscribed: {msg.data.decode()}")
     finally:

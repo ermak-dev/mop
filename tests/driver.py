@@ -211,7 +211,7 @@ def main():
 
     # VMID в своём диапазоне и не пересекается с диапазоном шаблонов: шаблон
     # живёт рядом с телами и сносится теми же глаголами, так что налезь один
-    # на другой — снос папета унёс бы образ шарда.
+    # на другой — снос папета унёс бы образ проекта.
     seen = {}
     for name in PVE_NAMES:
         cases += 1
@@ -230,22 +230,22 @@ def main():
         bad += 1
         print("FAILED  pve.vmid_of must be a function of the name, nothing else")
 
-    for shard in ("mop", "rugent", "cloudpub"):
+    for project in ("mop", "rugent", "cloudpub"):
         cases += 1
-        t = pve.template_vmid(shard)
+        t = pve.template_vmid(project)
         if not pve.TMPL_MIN <= t <= pve.TMPL_MAX:
             bad += 1
-            print(f"FAILED  pve.template_vmid({shard!r}) = {t}, outside "
+            print(f"FAILED  pve.template_vmid({project!r}) = {t}, outside "
                   f"{pve.TMPL_MIN}..{pve.TMPL_MAX}")
         if pve.BODY_MIN <= t <= pve.BODY_MAX:
             bad += 1
             print(f"FAILED  template {t} lands in the body range — a wipe would "
-                  f"take the shard's image with it")
+                  f"take the project's image with it")
         cases += 1
         # Имя шаблона обязано быть под охраной префикса (root-обёртка на
         # гипервизоре пускает только pu-*), но не быть именем папета: иначе
         # ростер тел показал бы образ живым папетом.
-        tn = pve.template_name(shard)
+        tn = pve.template_name(project)
         if not tn.startswith("pu-") or driver.valid_name(tn):
             bad += 1
             print(f"FAILED  template name {tn!r} must start with pu- and not "
@@ -362,16 +362,16 @@ def main():
         bad += 1
         print("FAILED  pve.projects_dir must point inside the body")
 
-    # Адрес сборочного тела обязан быть СВОИМ у каждого шарда и не задевать
+    # Адрес сборочного тела обязан быть СВОИМ у каждого проекта и не задевать
     # живые тела. Раньше он считался как «шлюз плюс один» одинаково для всех,
     # и это ловилось не отказом, а зависанием: две сборки на одном
     # гипервизоре садились на один адрес, ssh уходил в чужой контейнер, обе
     # стороны оставались живыми и молчали (22.09, rugent против rudesktop).
-    shards = ("rugent", "cloudpub", "mop", "rudesktop", "a", "zzz")
+    projects = ("rugent", "cloudpub", "mop", "rudesktop", "a", "zzz")
     cases += 1
-    if len({pve.template_address(s) for s in shards}) != len(shards):
+    if len({pve.template_address(s) for s in projects}) != len(projects):
         bad += 1
-        print("FAILED  two shards share one build address")
+        print("FAILED  two projects share one build address")
 
     # Диапазоны не пересекаются по построению: VMID шаблонов идут выше VMID
     # тел, и адрес считается из VMID одной формулой. Проверяем края — именно
@@ -387,7 +387,7 @@ def main():
     # за подсеть адрес не отказывает, он просто не отвечает.
     import ipaddress as _ip
     net = _ip.ip_network(pve.SUBNET)
-    for sh in shards:
+    for sh in projects:
         cases += 1
         addr = _ip.ip_address(pve.template_address(sh))
         if addr not in net or str(addr) == pve.GATEWAY:
@@ -464,7 +464,7 @@ def main():
     # Сборочное тело (#60). Пересборка больше не начинается со сноса образа:
     # шаблон полностью клонируется в сборочное тело, плейбук играется там
     # (идемпотентно — качается только новое), и лишь потом образ заменяется.
-    # Сборочное тело зовётся по шарду, чтобы оборванную сборку можно было
+    # Сборочное тело зовётся по проекту, чтобы оборванную сборку можно было
     # ПРОДОЛЖИТЬ одной командой: следующий прогон находит его по имени.
     # HYPOTHESIS: stage_name/stage_vmid/parse_list нет вовсе — образ сносится
     # первой задачей. SOLUTION: чистые функции ниже. STATUS: FIXED — see #60
@@ -493,14 +493,14 @@ def main():
         print("FAILED  pve.parse_list is missing")
 
     if parsed is not None:
-        # Оборванная сборка: её тело стоит под именем шарда — продолжаем в нём.
+        # Оборванная сборка: её тело стоит под именем проекта — продолжаем в нём.
         cases += 1
         left = parsed + [(9950, pve.stage_name("mop"), "stopped")]
         if pve.stage_vmid("mop", left) != 9950:
             bad += 1
             print("FAILED  stage_vmid must resume the build body left by a previous run")
         # Иначе — свободный номер из диапазона шаблонов, не занятый и не
-        # совпадающий с номером образа этого шарда.
+        # совпадающий с номером образа этого проекта.
         cases += 1
         v = pve.stage_vmid("mop", parsed)
         taken = {vm for vm, _, _ in parsed}

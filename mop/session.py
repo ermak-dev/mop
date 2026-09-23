@@ -184,7 +184,7 @@ def reply_hint(from_name=None):
            "The sender did not give a reply address.")
     return ("[mop channel] Delivered over the pool's socket channel. " + how +
             " Who else you can write to — mcp__mop__agents: the pool's puppets and "
-            "the shard's masters. The built-in SendMessage won't work for this: it "
+            "the project's masters. The built-in SendMessage won't work for this: it "
             "only reaches sessions on this same host and knows nothing about the "
             "rest of the pool.")
 

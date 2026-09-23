@@ -15,7 +15,7 @@
 #
 # Контроллер -- сервер: там репозиторий, .env, ssh к узлам и secrets/. Машина
 # оператора в инвентаре не значится и ansible не видит: свои креды она
-# получает командой `mop join`, скилл и проверку шарда делает `mop master`.
+# получает командой `mop join`, скилл и проверку проекта делает `mop master`.
 # Что мастеру положено, контроллер собирает себе сам в конце `mop deploy`
 # (~/.config/mop/servers/<адрес>/), и join везёт ровно этот каталог.
 #
@@ -53,10 +53,10 @@
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_tgz: "https://github.com/nats-io/nats-server/releases/download/v{{ MOP_NATS_VERSION }}/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64.tar.gz"
     nats_nodes: "{{ groups['puppet'] }}"
-    # Шарды считает `mop deploy` из ростера Nomad и своей памяти (см. mop/cli/pool/deploy.py)
+    # Проекты считает `mop deploy` из ростера Nomad и своей памяти (см. mop/cli/pool/deploy.py)
     # и передаёт сюда --extra-vars. Пустой список -- законное состояние пустого
     # пула: сервер поднимется, мастеров просто ещё нет.
-    shards: "{{ mop_shards | default([]) }}"
+    projects: "{{ mop_projects | default([]) }}"
   tasks:
     - ansible.builtin.include_role:
         name: bus
@@ -94,7 +94,7 @@
     nats_addr: "{{ nats_lan }}"
     nats_user: "node-{{ inventory_hostname }}"
     nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + inventory_hostname + '.pass length=32 chars=ascii_letters,digits') }}"
-    shards: "{{ mop_shards | default([]) }}"
+    projects: "{{ mop_projects | default([]) }}"
   roles:
     - bus
 
@@ -127,7 +127,7 @@
 
 
 # Bootstrap песочниц (#62, docs/BOOTSTRAP.md): подписчик на сервере, который
-# играет .mop/bootstrap.yaml шарда при каждом старте папета. После дашборда:
+# играет .mop/bootstrap.yaml проекта при каждом старте папета. После дашборда:
 # пакет mop и креды оператора на сервер привозит роль web.
 - name: Bootstrap of sandboxes, on the server
   hosts: server
@@ -138,7 +138,7 @@
     # Пароли папетов лежат на КОНТРОЛЛЕРЕ: lookup('password') исполняется
     # здесь, а не на сервере. Роль везёт их серверу (#83).
     secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
-    shards: "{{ mop_shards | default([]) }}"
+    projects: "{{ mop_projects | default([]) }}"
   roles:
     - bootstrap
 

@@ -92,7 +92,7 @@
     <div id="nodes"></div>
   </section>
 
-  <div id="shards"></div>
+  <div id="projects"></div>
 
   <div class="two">
     <section>
@@ -139,14 +139,14 @@
 
     const nodes = s.nodes || [];
     $("nodes-note").textContent = nodes.length ? `${nodes.length} в кластере` : "";
-    $("nodes").innerHTML = table(["узел", "драйвер", "шарды", "состояние", "#свободно", "#всего", "#слотов"],
+    $("nodes").innerHTML = table(["узел", "драйвер", "проекты", "состояние", "#свободно", "#всего", "#слотов"],
       nodes.map(n => ({cells: [n.name, n.driver, n.serves, n.state,
         n.free_mb == null ? "-" : (n.free_mb / 1024).toFixed(0) + " GB",
         n.total_mb == null ? "-" : (n.total_mb / 1024).toFixed(0) + " GB",
         n.slots == null ? "-" : String(n.slots)]})),
       (r) => /ready$/.test(r.cells[3]) ? "free" : /draining|closed/.test(r.cells[3]) ? "busy" : "down");
 
-    $("shards").innerHTML = (s.shards || []).map(sh => {
+    $("projects").innerHTML = (s.projects || []).map(sh => {
       const cc = sh.counts;
       const note = KINDS.filter(k => cc[k]).map(k => `${cc[k]} ${KIND_RU[k]}`).join(", ");
       return `<section><h2>${esc(sh.name)} <small>${esc(note)}</small></h2>`
@@ -172,7 +172,7 @@
 
     const j = (s.journal || []).slice().reverse();
     $("journal").innerHTML = j.length
-      ? `<ul>${j.map(e => `<li><span class="t">${hhmm(e.at)}</span><span class="e">${esc(e.event)}</span>${esc(e.name)} <span class="t">на ${esc(e.node)}, шард ${esc(e.shard)}</span> ${esc(e.text)}</li>`).join("")}</ul>`
+      ? `<ul>${j.map(e => `<li><span class="t">${hhmm(e.at)}</span><span class="e">${esc(e.event)}</span>${esc(e.name)} <span class="t">на ${esc(e.node)}, проект ${esc(e.project)}</span> ${esc(e.text)}</li>`).join("")}</ul>`
       : '<div class="empty">событий пока нет — агенты пишут send, idle, type, wipe и свой запуск</div>';
   }
 

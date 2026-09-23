@@ -53,9 +53,9 @@
 # заводит.
 #
 # Задачи исполняются от root: узел доверяет репозиториям, чьи origin'ы в
-# памяти шардов. bootstrap.yaml проекта здесь не играется вовсе: его время —
+# памяти проектов. bootstrap.yaml проекта здесь не играется вовсе: его время —
 # каждый старт песочницы, и играет его сервер (#62).
-- name: What each shard's sandbox adds to a body
+- name: What each project's sandbox adds to a body
   hosts: puppet
   become: yes
   gather_facts: no
@@ -65,7 +65,7 @@
       ansible.builtin.meta: end_host
       when: mop_driver | default(MOP_DRIVER) != 'host'
 
-    - name: No shard has sandbox tasks
+    - name: No project has sandbox tasks
       ansible.builtin.meta: end_host
       when: (mop_manifests | default({}))
              | dict2items | selectattr('value.sandbox_tasks', 'defined')
@@ -75,14 +75,14 @@
     # на один include, и переменные проектов живут в одном словаре узла.
     # Совпавшее имя между проектами перебивается по порядку — единственная
     # цена простоты; имена в vars манифеста — внутреннее дело проекта.
-    - name: Sandbox configuration of each shard that has one
+    - name: Sandbox configuration of each project that has one
       ansible.builtin.include_vars:
         file: "{{ item.value.sandbox_vars }}"
       loop: "{{ mop_manifests | dict2items | selectattr('value.sandbox_vars', 'defined') | list }}"
       loop_control:
         label: "{{ item.key }}"
 
-    - name: Sandbox tasks of each shard that has any
+    - name: Sandbox tasks of each project that has any
       ansible.builtin.include_tasks: "{{ item.value.sandbox_tasks }}"
       loop: "{{ mop_manifests | dict2items | selectattr('value.sandbox_tasks', 'defined') | list }}"
       loop_control:

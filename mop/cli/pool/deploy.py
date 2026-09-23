@@ -15,7 +15,7 @@ import shutil
 import sys
 
 from mop.cli import lib
-from mop import config, creds, manifest, puppets, shards
+from mop import config, creds, manifest, puppets, projects
 
 # Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
 # больше нет, поэтому упавшего агента и битые креды чинят только отсюда — и
@@ -59,10 +59,10 @@ def link(name, target):
 
 
 def manifests(origins):
-    """Манифесты шардов (#25, #61): режутся из ORIGIN библиотечным разбором
+    """Манифесты проектов (#25, #61): режутся из ORIGIN библиотечным разбором
     здесь, на управляющей машине. Плейбук получает готовые пути и не
     заводит второго, снисходительного парсера. Недоступный origin валит
-    прогон громко: названный шард обязан существовать."""
+    прогон громко: названный проект обязан существовать."""
     out = {}
     for origin in sorted(origins):
         got = manifest.fetch(origin)
@@ -70,11 +70,11 @@ def manifests(origins):
         for side in ("sandbox_vars", "sandbox_tasks", "bootstrap_vars", "bootstrap_tasks"):
             if got[side]:
                 entry[side] = got[side]
-        out[got["shard"]] = entry
+        out[got["project"]] = entry
         for k in got["alien"]:
-            print(f"  {got['shard']}/.mop: {k} is not a project's to set — ignored", flush=True)
+            print(f"  {got['project']}/.mop: {k} is not a project's to set — ignored", flush=True)
         for old in got["legacy"]:
-            print(f"  {got['shard']}/{old}: read as .mop/sandbox.yaml for the transition "
+            print(f"  {got['project']}/{old}: read as .mop/sandbox.yaml for the transition "
                   f"(#61) — rename it, the old name will stop being read", flush=True)
     return out
 
@@ -133,12 +133,12 @@ def main(argv):
     # Проекты: реестр, и только он. Плейбук заводит по пользователю NATS на
     # каждый и раскатывает креды. Пустой список законен: пустой пул, мастеров
     # ещё нет.
-    origins, legacy, note = shards.registry()
+    origins, legacy, note = projects.registry()
     if note:
         print(note, file=sys.stderr, flush=True)
 
     lib.section("ansible: site.yml")
-    rc = lib.play(SITE, shards.names(origins, legacy), manifests(origins))
+    rc = lib.play(SITE, projects.names(origins, legacy), manifests(origins))
     if rc:
         # Как и раньше: сборка кредов и проверка ростера не идут после
         # красного прогона, и это сказано, а не проглочено.
