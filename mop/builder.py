@@ -101,6 +101,21 @@ def needs_build(mode, serving, project):
     return True
 
 
+def failure(e):
+    """Исключение сборки -> причина отказа просителю (#142).
+
+    RuntimeError -- отказ, сформулированный нами (манифест, занятые тела):
+    как есть. Nomad -- через describe_error. Прочее -- с типом, но не под
+    чужим именем: «Nomad connection error» над ключом хоста гнал искать
+    поломку не там. Имени проекта здесь нет: его ставит клиент."""
+    import requests
+    if isinstance(e, RuntimeError):
+        return str(e)
+    if isinstance(e, (nomad.ApiError, requests.exceptions.RequestException)):
+        return nomad.describe_error(e)
+    return f"{type(e).__name__}: {e}"
+
+
 # ─── сервер ──────────────────────────────────────────────────────────────
 def serving_now():
     """{контейнерный узел: [проекты, чей образ на нём объявлен]}."""
@@ -178,11 +193,11 @@ def run(req, send):
         out = {"ok": r["rc"] == 0, "rc": r["rc"], "project": project,
                "gone": [p["name"] for p in r["gone"]]}
         if r["rc"]:
-            out["error"] = f"image build of {project} failed (ansible exit {r['rc']})"
+            out["error"] = f"image build failed (ansible exit {r['rc']})"
             out["tail"] = list(tail)
         return out
     except Exception as e:
-        return {"error": f"{project}: {nomad.describe_error(e)}"}
+        return {"error": failure(e)}
     finally:
         _one_at_a_time.release()
 

@@ -82,6 +82,27 @@ def main():
         failed.append(f"a long line must be cut to width: {got}")
     # STATUS: FIXED — see #140
 
+    # HYPOTHESIS (#142): любой отказ сборщика шёл через nomad.describe_error
+    # и с именем проекта, а клиент приписывал имя ещё раз: «rudesktop:
+    # rudesktop: Nomad connection error: cannot read rudesktop: Host key
+    # verification failed». SOLUTION: failure() -- RuntimeError (манифест,
+    # занятые тела) как есть, Nomad -- через describe_error; имя ставит клиент.
+    from mop import nomad
+    got = builder.failure(RuntimeError("cannot read rudesktop: Host key verification failed."))
+    if got != "cannot read rudesktop: Host key verification failed.":
+        failed.append(f"a manifest refusal must go as it is: {got!r}")
+    got = builder.failure(nomad.ApiError("403 permission denied"))
+    if got != nomad.describe_error(nomad.ApiError("403 permission denied")):
+        failed.append(f"a Nomad refusal must be named as Nomad's: {got!r}")
+    import requests
+    got = builder.failure(requests.exceptions.ConnectionError("refused"))
+    if got != "Nomad connection error: refused":
+        failed.append(f"an unreachable Nomad must be named as such: {got!r}")
+    got = builder.failure(KeyError("NodeName"))
+    if "Nomad" in got or "NodeName" not in got:
+        failed.append(f"any other error must not pose as Nomad's: {got!r}")
+    # STATUS: FIXED — see #142
+
     print("\n".join(f"FAIL {l}" for l in failed) if failed else "", end="\n" if failed else "")
     print("builder: FAILED" if failed else "builder: ok")
     return 1 if failed else 0
