@@ -44,8 +44,10 @@ def token():
     if t:
         return t
     raise LookupError(f"no Nomad token: {creds.server_dir()}/{creds.TOKEN_FILE} — "
-                      f"on the controller the first mop deploy fetches it, "
-                      f"elsewhere run mop join <server>")
+                      f"it lives on the server and nowhere else (#82). The "
+                      f"controller's first mop deploy fetches it; a master's "
+                      f"machine does not need it, because pool commands go "
+                      f"through the cluster service (docs/CLUSTER.md)")
 
 
 def token_or_none():
