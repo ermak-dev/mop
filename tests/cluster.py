@@ -115,9 +115,34 @@ def check_ownership():
     return out
 
 
+def check_gone_job():
+    """Снятый джоб: читающий глагол отвечает, действующий отказывает.
+
+    HYPOTHESIS (#89): `alloc` отвечал «no job … in the cluster» на любой
+    снятый джоб, и `puppets.delete` падал между снятием джоба и сносом тела —
+    тело оставалось работать сиротой.
+    SOLUTION: `alloc` отдаёт alloc=None; гейт существования остаётся у
+    глаголов, которые что-то делают.
+    STATUS: FIXED — see #89
+    """
+    out = []
+    gone = {"verb": "alloc", "name": "pu-rugent-9"}
+    got = cluster.answer("admin", gone)
+    if got.get("error") or "alloc" not in got:
+        out.append(f"alloc of a job that is gone must answer, not refuse: {got}")
+    elif got["alloc"] is not None:
+        out.append(f"alloc of a job that is gone must be None: {got}")
+
+    for verb in ("restart", "stop", "delete", "update"):
+        got = cluster.answer("admin", {"verb": verb, "name": "pu-rugent-9"})
+        if not got.get("error"):
+            out.append(f"{verb} of a job that is gone must refuse: {got}")
+    return out
+
+
 def main():
     failed = []
-    for check in (check_subject, check_verbs, check_ownership):
+    for check in (check_subject, check_verbs, check_ownership, check_gone_job):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:
