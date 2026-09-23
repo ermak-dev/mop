@@ -11,11 +11,13 @@ runs there — a node dropped from under a live puppet keeps working and the
 master never hears of it again.
 """
 from mop.cli import lib
-from mop import nodes, nomad
+from mop import nodes
 from mop.render import table
 
 
-def v_list(_argv):
+def main(argv):
+    if argv:
+        lib.usage(__doc__)
     """Узлы пула как таблица. То же, что видно в подвале `mop list`, плюс то,
     чего там нет: драйвер, чьи шарды узел умеет и состояние планирования."""
     rows = [("NODE", "DRIVER", "SERVES", "STATE", "FREE", "TOTAL", "SLOTS")]
@@ -27,52 +29,6 @@ def v_list(_argv):
             str(r["slots"]) if r["slots"] is not None else "-",
         ))
     print("\n".join(table(rows)))
-
-
-def v_drain(argv):
-    if len(argv) != 1:
-        lib.usage(__doc__)
-    name = argv[0]
-    print(f"draining {name}: puppets leave, no new ones arrive...")
-    nomad.node_drain(name)
-    print(f"{name} is closed to the scheduler. Watch them land: mop list")
-
-
-def v_up(argv):
-    if len(argv) != 1:
-        lib.usage(__doc__)
-    nomad.node_eligibility(argv[0], True)
-    print(f"{argv[0]} is open to the scheduler again")
-
-
-def v_forget(argv):
-    """Убрать узел из ростера. Отказ — громкий и с причиной: решение
-    необратимо, а забытый из-под живого папета узел продолжает работать."""
-    if len(argv) != 1:
-        lib.usage(__doc__)
-    name = argv[0]
-    node = nomad.node_summary(name)
-    if node is None:
-        lib.usage(f"no node {name} in the cluster")
-    why = nomad.forget_refusal(node, nomad.node_allocs(name))
-    if why:
-        lib.usage(why)
-    nomad.node_forget(name)
-    print(f"{name} is out of the roster. Take it out of the inventory too, "
-          f"or the next deploy will configure it again.")
-
-
-VERBS = {"drain": v_drain, "up": v_up, "forget": v_forget}
-
-
-def main(argv):
-    if not argv:
-        return v_list(argv)
-    fn = VERBS.get(argv[0])
-    if fn is None:
-        lib.usage(__doc__)
-    return fn(argv[1:])
-
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).

@@ -115,6 +115,26 @@ def main():
         failed += 1
         print(f"FAIL extra_vars: {ev}")
 
+    # Группы разрезаны по глаголам (#77): каждый глагол из usage группы
+    # (`  mop <группа> <глагол>`) — свой модуль, и диспетчер находит его по
+    # имени; таблиц VERBS в группах нет.
+    # HYPOTHESIS: группа — один модуль с VERBS. SOLUTION: подпакет, глагол —
+    # модуль, __init__ отвечает без глагола. STATUS: FIXED — see #77
+    import re
+    have = cli.verbs()
+    for group in sorted(g for _, g, _ in [(0, s, p) for s, _, p in cli.scan() if p]):
+        path = os.path.join(cli.PACKAGE, group, "__init__.py")
+        with open(path) as f:
+            doc = f.read()
+        listed = set(re.findall(rf"^  mop {group} ([a-z]+)", doc, re.M))
+        missing = listed - have.get(group, set())
+        if missing:
+            failed += 1
+            print(f"FAIL group {group}: verbs without a module: {sorted(missing)}")
+        if not listed:
+            failed += 1
+            print(f"FAIL group {group}: its docstring lists no verbs")
+
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0
 
