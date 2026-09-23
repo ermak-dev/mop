@@ -60,8 +60,13 @@ cannot see the pool, and the work goes nowhere while looking done.
 
 From the project boundary: the `agents` tool shows **only this project's
 puppets**; tools naming a puppet refuse foreign ones. Several masters per
-project are legal, but **they do not share the landing token** — seeing
-another master in the roster, ask who runs the queue before dispatching. A
+project are legal. Your `send` to a puppet makes you the owner of its
+ticket: the OWNER column in `agents` shows who leads each puppet, and a
+`send` into a puppet another master leads (work in its clone, or dispatched
+minutes ago) is refused with that master's name. Dispatch only to free
+puppets with no owner or your own; `force=true` only when that master is
+gone for good or agrees. **The landing token is not shared** — with another
+master in the roster, agree with them who runs the landing queue. A
 jump to another project needs a master shell there; say so, don't try to
 cross.
 
