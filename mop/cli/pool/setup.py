@@ -29,14 +29,28 @@ from mop import config  # noqa: E402  (stdlib only)
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "self.yml")
 
 
+def elevate(uid=None):
+    """Чем запускать команду, которой нужны права root. -> префикс argv.
+
+    Под root — ничем. Это не оптимизация: на выделенном сервере `sudo` часто
+    просто не стоит, и безусловный префикс роняет первый же шаг установки
+    трассировкой про отсутствующий файл (#91)."""
+    return [] if (os.getuid() if uid is None else uid) == 0 else ["sudo"]
+
+
 def _setup(argv):
     if argv not in ([], ["--operator"]):
         sys.exit(__doc__.strip())
     role = "operator" if argv else "controller"
     if not shutil.which("ansible-playbook"):
         print("installing ansible (apt)")
-        subprocess.run(["sudo", "apt-get", "update", "-q"], check=True)
-        subprocess.run(["sudo", "apt-get", "install", "-y", "-q", "ansible"], check=True)
+        root = elevate()
+        if root and not shutil.which("sudo"):
+            sys.exit("ansible is missing and this user cannot install it: "
+                     "no sudo here. Install ansible, or run mop setup as root")
+        subprocess.run([*root, "apt-get", "update", "-q"], check=True)
+        subprocess.run([*root, "apt-get", "install", "-y", "-q", "ansible"],
+                       check=True)
     settings = json.dumps(config.playbook_vars(), ensure_ascii=False)
     r = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local",
                         PLAYBOOK, "--extra-vars", settings,
@@ -52,3 +66,6 @@ def main(argv):
         return _setup(argv)
     except subprocess.CalledProcessError as e:
         sys.exit(f"setup failed: {' '.join(e.cmd)} exited {e.returncode}")
+    except OSError as e:
+        # Трассировка про отсутствующий файл говорит о питоне, а не о машине.
+        sys.exit(f"setup failed: {e}")
