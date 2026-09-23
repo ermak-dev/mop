@@ -38,7 +38,7 @@ import threading
 from mcp.server.mcpserver import MCPServer                     # noqa: E402
 from mcp.types import ToolAnnotations                          # noqa: E402
 
-from mop import bus, config, image, keys, nomad, session, puppets  # noqa: E402
+from mop import bus, config, image, keys, session, puppets  # noqa: E402
 from mop import nodes as pool_nodes                        # noqa: E402
 from mop.llm import profiles as llm_profiles              # noqa: E402
 from mop.render import table                              # noqa: E402
@@ -60,20 +60,26 @@ app = MCPServer(
     ),
 )
 
-def has_nomad_token():
-    """Есть ли у нас право управлять кластером.
+def is_master():
+    """Есть ли у нас право управлять пулом. Смотрим, ЧЬИ У НАС КРЕДЫ.
 
-    Это факт, а не флаг: на узле файла с токеном просто нет — его перестали
-    туда возить, когда канал переехал на шину. Профиль сервера выводится
-    отсюда, поэтому узел не может позвать управление джобами даже по ошибке."""
+    Это факт, а не флаг: пользователь NATS и есть набор прав. `puppet-<шард>`
+    в субъект сервиса кластера не пишет вовсе (nats-server.conf), `admin` и
+    `master-<шард>` пишут — то есть вопрос «мастер ли мы» и вопрос «под кем мы
+    на шине» это один вопрос.
+
+    Раньше здесь лежала проверка «есть ли токен Nomad». Она отвечала верно
+    ровно потому, что токен возили только мастерам; с уходом токена с машин
+    операторов (#82) она отвечала бы «папет» всем сразу. Спрашивать саму шину
+    тоже можно, но это секунды на старте каждого папета и отказ прав в логе
+    на ровном месте — а ответ уже лежит в кредах, локально."""
     try:
-        nomad.token()
-        return True
+        return not bus.config()["user"].startswith("puppet-")
     except Exception:
         return False
 
 
-MASTER = has_nomad_token()
+MASTER = is_master()
 # Свой адрес для вестей от агентов. Уникален на процесс: два терминала,
 # открытые в одном проекте, иначе разбирали бы вести друг друга.
 MASTER_ID = f"{os.uname().nodename}-{os.getpid()}"
@@ -126,7 +132,7 @@ MASTERS_WAIT = 2
 def puppet_alloc(name):
     """Живая аллокация папета. Путь к сокету никогда не кэшируем: после
     рестарта папета меняется pid, а с ним и имя сокета."""
-    alloc = nomad.latest_alloc(name)
+    alloc = bus.ask_cluster("alloc", name=name).get("alloc")
     if not alloc:
         raise LookupError(f"{name}: no allocation — puppet not placed")
     if alloc["ClientStatus"] != "running":
@@ -137,7 +143,7 @@ def puppet_alloc(name):
 def puppet_node(name):
     """Узел папета — адрес на шине.
 
-    У мастера узел берётся из ростера Nomad. На узле ростера нет, и мы
+    У мастера узел берётся из ростера пула. На узле ростера нет, и мы
     спрашиваем сам пул: чей агент признаёт этот папет своим."""
     if MASTER:
         return puppet_alloc(name)["NodeName"]
@@ -544,7 +550,6 @@ def puppet(action: str, name: str = "", origin: str = "", llm: str = "",
     if not name:
         return f"{action}: puppet name required"
     if action == "remove":
-        nomad.get_job(name)
         r = puppets.delete(name)
         if r["body"] == "destroyed":
             return f"removed {name} (body gone from {r['node']})"
@@ -552,7 +557,9 @@ def puppet(action: str, name: str = "", origin: str = "", llm: str = "",
             return f"removed {name} (clone kept in {puppets.clone_dir(name)})"
         return f"removed {name} (no allocation — nothing to clean up)"
     if action == "restart":
-        nomad.alloc_restart(puppet_alloc(name)["ID"])
+        got = bus.ask_cluster("restart", name=name)
+        if got.get("error"):
+            return f"{name}: {got['error']}"
         return f"{name}: restarting (clean session)"
     # retarget — прежнее имя. Оно принимается молча, потому что список
     # инструментов приезжает модели один раз на старте сессии: мастер, поднятый
@@ -570,13 +577,19 @@ def _puppet_add(origin, llm):
     if llm not in llm_profiles():
         return f"no LLM profile {llm}; available: {', '.join(llm_profiles())}"
     keys.push_llm_keys(llm)
-    name = puppets.next_name(puppets.shard_of(origin))
-    nomad.register(puppets.job_spec(name, origin, llm))
-    return f"{name}: {origin} [{llm}] — placing, check state in agents"
+    # Имя выбирает сервис кластера вместе с регистрацией: спека собирается
+    # там же, и выбор имени — первая её строка (docs/CLUSTER.md).
+    got = bus.ask_cluster("add", origin=origin, profile=llm, timeout=30)
+    if got.get("error"):
+        return f"add: {got['error']}"
+    return f"{got['name']}: {origin} [{llm}] — placing, check state in agents"
 
 
 def _puppet_update(name, origin, llm, fresh=False):
-    meta = nomad.get_job(name).get("Meta") or {}
+    spec = bus.ask_cluster("spec", name=name)
+    if spec.get("error"):
+        return f"{name}: {spec['error']}"
+    meta = spec.get("meta") or {}
     old = meta.get("origin")
     origin = origin or old
     # профиль без явного llm сохраняется: смена репозитория не должна молча
@@ -588,7 +601,10 @@ def _puppet_update(name, origin, llm, fresh=False):
     # Историю каталога переносим только внутри того же репозитория: клон при
     # смене origin пересоздаётся, и прежний разговор был про другой проект.
     cont = not fresh and origin == old
-    nomad.register(puppets.job_spec(name, origin, llm, cont=cont))
+    got = bus.ask_cluster("update", name=name, origin=origin, profile=llm,
+                          cont=cont, new_origin=origin if origin != old else None)
+    if got.get("error"):
+        return f"{name}: {got['error']}"
     how = "clone history will resume" if cont else "clean session"
     return f"{name} -> {origin} [{llm}], restarting: {how}"
 

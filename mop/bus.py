@@ -84,7 +84,16 @@ _last_error = None
 
 class BusError(RuntimeError):
     """Шина не довезла. Отдельный тип, потому что вызывающий обязан отличать
-    «агент узла молчит» от «папет завис»: лечение у них разное."""
+    «агент узла молчит» от «папет завис»: лечение у них разное.
+
+    no_responders=True означает «нас пустили в субъект, но там никто не
+    подписан» — это ответ сервера NATS, а не таймаут. Отличать обязательно:
+    отсутствие подписчика и отсутствие ПРАВА писать выглядят одинаково
+    тихо, а значат противоположное (mop/cli/service/mcp.py, is_master)."""
+
+    def __init__(self, message, no_responders=False):
+        super().__init__(message)
+        self.no_responders = no_responders
 
 
 def _load(path):
@@ -277,7 +286,7 @@ def _ask(subj, who, dead, verb, timeout, **fields):
     try:
         msg = _call(nc.request(subj, payload, timeout=timeout), timeout)
     except NoRespondersError:
-        raise BusError(dead)
+        raise BusError(dead, no_responders=True)
     except asyncio.TimeoutError:
         raise BusError(_silence(who, timeout))
     except Exception as e:

@@ -4,7 +4,7 @@ Graceful: the wrapper takes its session down on TERM, so a puppet leaves
 with its clone intact.
 """
 from mop.cli import lib
-from mop import nomad
+from mop import bus
 
 
 def main(argv):
@@ -12,7 +12,9 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     print(f"draining {name}: puppets leave, no new ones arrive...")
-    nomad.node_drain(name)
+    got = bus.ask_cluster("drain", node=name, timeout=60)
+    if got.get("error"):
+        lib.usage(got["error"])
     print(f"{name} is closed to the scheduler. Watch them land: mop list")
 
 

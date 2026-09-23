@@ -33,8 +33,8 @@ from . import bus, nodes, nomad, puppets
 CHANNEL = "cluster"
 
 # Глаголы проекта: про его собственных папетов.
-PROJECT_VERBS = ("ping", "roster", "add", "update", "restart", "stop", "delete",
-                 "alloc", "spec")
+PROJECT_VERBS = ("ping", "roster", "pool", "add", "update", "restart", "stop",
+                 "delete", "alloc", "spec")
 # Глаголы оператора: про машины. Место на узле общее для всех его жильцов, а
 # увод папетов с машины касается всех проектов разом — мастеру не показываем.
 ADMIN_VERBS = ("nodes", "drain", "up", "forget", "meta")
@@ -160,15 +160,25 @@ def _stop(project, req):
 
 
 def _delete(project, req):
-    nomad.deregister(req["name"])
+    """Снять джоб. purge=False оставляет его в истории остановленным — так
+    работает рецикл: джоб останавливается, рабочая копия сносится, и та же
+    спека поднимается обратно."""
+    nomad.deregister(req["name"], purge=bool(req.get("purge", True)))
     return {"ok": True, "name": req["name"]}
 
 
 def _alloc(project, req):
-    alloc = nomad.latest_alloc(req["name"]) or {}
-    return {"ok": True, "alloc": {k: alloc.get(k) for k in
-                                  ("ID", "NodeName", "ClientStatus", "DesiredStatus",
-                                   "CreateTime", "ModifyTime")} if alloc else None}
+    """Аллокация папета плюс драйвер её узла.
+
+    Драйвер здесь, а не отдельным глаголом: `mop attach` спрашивает ровно эти
+    две вещи вместе — где папет стоит и чем в него входят, — и второй запрос
+    по сети ради одного поля меты был бы платой ни за что."""
+    alloc = nomad.latest_alloc(req["name"])
+    if not alloc:
+        return {"ok": True, "alloc": None, "driver": None}
+    slim = {k: alloc.get(k) for k in puppets.ALLOC_FIELDS}
+    meta = nomad.node_meta(alloc["NodeName"]) or {}
+    return {"ok": True, "alloc": slim, "driver": meta.get("mop_driver")}
 
 
 def _spec(project, req):
@@ -180,13 +190,25 @@ def _spec(project, req):
 
 
 def _roster(project, req):
-    """Джобы папетов глазами проекта. Отбор — тот же visible(): непомеченные
-    видит только оператор, и это не два правила, а одно."""
-    return {"ok": True, "jobs": puppets.jobs(shard=project)}
+    """Ростер глазами проекта: джоб плюс его аллокация. Отбор — тот же
+    visible(): непомеченные видит только оператор, и это не два правила, а
+    одно. Аллокация едет вместе с джобом — клиенту иначе пришлось бы идти за
+    каждой отдельным запросом по сети.
+
+    stale=True добавляет вердикт об устаревшей спеке, и только по просьбе: он
+    стоит вызова API на каждый джоб, а нужен одному `mop doctor`. Платить за
+    него в каждом `mop list` было бы платой за чужой глагол."""
+    return {"ok": True, "items": puppets.nomad_items(project, stale=bool(req.get("stale")))}
+
+
+def _pool(project, req):
+    """Ёмкость узлов пула. Проекту это положено: по свободным слотам мастер
+    решает, заводить ли папета. Кто ещё живёт на узле — глагол `nodes`."""
+    return {"ok": True, "nodes": puppets.nomad_pool()}
 
 
 def _nodes(project, req):
-    return {"ok": True, "nodes": nodes.rows()}
+    return {"ok": True, "nodes": nodes.nomad_rows()}
 
 
 def _drain(project, req):
@@ -213,7 +235,7 @@ def _meta(project, req):
     return {"ok": True, "node": req["node"], "meta": nomad.node_meta(req["node"])}
 
 
-HANDLERS = {"ping": _ping, "roster": _roster, "add": _add, "update": _update, "restart": _restart,
+HANDLERS = {"ping": _ping, "roster": _roster, "pool": _pool, "add": _add, "update": _update, "restart": _restart,
             "stop": _stop, "delete": _delete, "alloc": _alloc, "spec": _spec,
             "nodes": _nodes, "drain": _drain, "up": _up, "forget": _forget,
             "meta": _meta}

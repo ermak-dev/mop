@@ -8,7 +8,7 @@ import os
 import time
 
 from mop.cli import lib
-from mop import bootstrap, bus, config, nomad, puppets
+from mop import bootstrap, bus, config, puppets
 
 
 def main(argv):
@@ -24,7 +24,6 @@ def main(argv):
     if not lib.shard_ready(shard):
         lib.usage(f"project {shard} isn't on the bus yet.\n"
                   f"Register it on the server: mop project add {origin}")
-    name = puppets.next_name(shard)
     lib.push_llm_keys(profile)
     # bootstrap.yaml рабочей копии — на сервер ДО регистрации (#62): первый
     # подъём обязан увидеть его. Из рабочей копии, потому что решает мастер;
@@ -36,12 +35,18 @@ def main(argv):
                   + (f"; ignored: {', '.join(got['alien'])}" if got.get("alien") else ""))
         except bus.BusError as e:
             print(f"  {bootstrap.FILE} did not reach the server: {e}")
-    nomad.register(puppets.job_spec(name, origin, profile))
+    # Имя выбирает сервис кластера вместе с регистрацией: спека собирается
+    # там же (#80), а выбор имени и есть первая её строка.
+    got = bus.ask_cluster("add", origin=origin, profile=profile, timeout=30)
+    if got.get("error"):
+        lib.fail(got["error"])
+        return 1
+    name = got["name"]
     print(f"{name}: {origin} [{profile}]")
 
     node = None
     for _ in range(120):
-        a = nomad.latest_alloc(name)
+        a, _ = lib.alloc_of(name)
         if a:
             if node is None:
                 node = a["NodeName"]

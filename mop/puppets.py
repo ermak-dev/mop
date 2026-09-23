@@ -466,12 +466,71 @@ def visible(listing, shard):
     return out
 
 
+def _cluster(verb, shard=None, timeout=bus.TIMEOUT, **fields):
+    """Глагол сервису кластера с громким отказом. -> ответ.
+
+    Ошибка сервиса — это исключение здесь, а не поле в ответе: вызывающие в
+    этом модуле — библиотечные функции, и молча вернуть половину ответа
+    значит показать половину пула как целый."""
+    got = bus.ask_cluster(verb, shard=shard, timeout=timeout, **fields)
+    if got.get("error"):
+        raise RuntimeError(got["error"])
+    return got
+
+
+# Поля аллокации, которые читает клиент. Возим их, а не аллокацию целиком:
+# в ней TaskStates и события, и тринадцать таких ответов упираются в предел
+# сообщения шины на пустом месте.
+ALLOC_FIELDS = ("ID", "JobID", "NodeName", "ClientStatus", "DesiredStatus")
+
+
+def nomad_jobs(shard=None):
+    """Джобы папетов из Nomad. Зовёт это только сервис кластера: он один
+    говорит с Nomad от чужого имени (docs/CLUSTER.md)."""
+    listing = nomad.client().jobs.get_jobs(prefix=JOB_PREFIX, meta=True)
+    return visible(listing, shard)
+
+
+def nomad_items(shard=None, stale=False):
+    """Ростер из Nomad: джоб плюс его аллокация. Тоже только сервис кластера.
+
+    Аллокация приезжает вместе с джобом намеренно: клиент за ней отдельно уже
+    не сходит, а N+1 запрос по шине вместо N+1 вызова API — та же цена, но с
+    сетью между ними."""
+    items = []
+    for j in sorted(nomad_jobs(shard), key=lambda j: j["ID"]):
+        alloc, err = None, None
+        try:
+            got = nomad.latest_alloc(j["ID"])
+            alloc = {k: got.get(k) for k in ALLOC_FIELDS} if got else None
+        except Exception as e:
+            err = nomad.describe_error(e)
+        item = {"job": j, "alloc": alloc, "error": err}
+        if stale:
+            # Полный джоб, а не заглушка из списка: врапер и ограничение
+            # размещения лежат в спеке, а её get_jobs не отдаёт.
+            try:
+                item["stale"] = spec_is_stale(nomad.get_job(j["ID"]))
+            except Exception:
+                item["stale"] = False
+        items.append(item)
+    return items
+
+
+def items(shard=None, stale=False):
+    """Ростер через шину: джобы и аллокации от сервиса кластера.
+
+    Мастер больше не ходит в Nomad — ни ростером, ни чем-либо ещё (#81).
+    Видимость считает сервис тем же visible(), но по проекту из СУБЪЕКТА:
+    расширить её, подставив чужой шард, нельзя — права NATS не дадут."""
+    return _cluster("roster", shard=shard, stale=stale).get("items") or []
+
+
 def jobs(shard=None):
     """Джобы папетов, видимые этому процессу: `mop master` ставит MOP_SHARD,
     и мастер проекта перестаёт видеть чужих папетов уже здесь, в ростере.
     Кто виден кому — visible(): #29."""
-    listing = nomad.client().jobs.get_jobs(prefix=JOB_PREFIX, meta=True)
-    return visible(listing, shard)
+    return [i["job"] for i in items(shard)]
 
 
 def next_name(project):
@@ -828,8 +887,8 @@ def is_free(state):
 
 
 # ─── сводки для фронтендов ───────────────────────────────────────────────
-def roster():
-    """Ростер Nomad плюс состояние с узлов, одним заходом.
+def roster(stale=False):
+    """Ростер пула плюс состояние с узлов, одним заходом.
 
     Общая часть list и doctor. Раньше каждый ходил на узлы сам и платил по
     четыре рукопожатия exec'а за папета — на десяти папетах это сорок
@@ -843,17 +902,13 @@ def roster():
 
     -> [{job, alloc, state}]; state=None там, где спрашивать некого.
     """
-    items, by_node = [], {}
-    for j in sorted(jobs(), key=lambda j: j["ID"]):
-        alloc, err = None, None
-        try:
-            alloc = nomad.latest_alloc(j["ID"])
-        except Exception as e:
-            err = nomad.describe_error(e)
-        item = {"job": j, "alloc": alloc, "state": None, "error": err}
+    got, by_node = [], {}
+    for item in items(stale=stale):
+        item["state"] = None
+        alloc = item["alloc"]
         if alloc and alloc["ClientStatus"] == "running":
             by_node.setdefault(alloc["NodeName"], []).append(item)
-        items.append(item)
+        got.append(item)
 
     # Шина легла целиком — ростер всё равно показываем. Он приходит из Nomad и
     # к шине отношения не имеет; уронить `list` вместе с ней значит оставить
@@ -873,10 +928,10 @@ def roster():
             for i in its:
                 i["state"] = f"AGENT SILENT ({answer})"
             continue
-        got = (answer or {}).get("puppets") or {}
+        seen = (answer or {}).get("puppets") or {}
         for i in its:
-            i["state"] = puppet_state(got.get(i["job"]["ID"]))
-    return items
+            i["state"] = puppet_state(seen.get(i["job"]["ID"]))
+    return got
 
 
 def rows_from(items):
@@ -977,6 +1032,22 @@ def puppet_sizes(rows, timeout=45):
 
 
 def pool():
+    """Ёмкость пула через шину: [{name, status, free_mb, total_mb, slots}].
+
+    Мастеру это видно и должно быть видно: по свободным слотам он решает,
+    заводить ли ещё папета. Кто ещё живёт на узле и чьи образы там собраны —
+    не видно: это `mop node`, глагол оператора (docs/CLUSTER.md)."""
+    return bus.ask_cluster("pool").get("nodes") or []
+
+
+def ready_nodes():
+    """Имена узлов, на которые Nomad вообще станет что-то ставить. Через шину:
+    тот же ответ, что раньше давал nomad.ready_nodes() на машине оператора."""
+    return {n["name"] for n in pool()
+            if n.get("status") == "ready" and n.get("eligible", True)}
+
+
+def nomad_pool():
     """Узлы пула как данные: [{name, status, free_mb, total_mb, slots, error}].
 
     Только датацентр пула: джобы папетов объявляют его, и планировщик на узлы
@@ -993,7 +1064,11 @@ def pool():
         try:
             free, total = nomad.node_capacity(n)
             out.append({"name": n["Name"], "status": "ready", "free_mb": free,
-                        "total_mb": total, "slots": free // MEM})
+                        "total_mb": total, "slots": free // MEM,
+                        # Закрытый для планирования узел остаётся ready и место
+                        # на нём показывает честно, но ставить туда Nomad не
+                        # станет — и раздавать креды туда незачем.
+                        "eligible": n.get("SchedulingEligibility") != "ineligible"})
         except Exception as e:
             out.append({"name": n["Name"], "status": "ready",
                         "error": nomad.describe_error(e)})
@@ -1033,11 +1108,13 @@ def spec_is_stale(job):
 def diagnose():
     """Проблемы пула как данные: [{name, alloc, diagnosis, action}]."""
     issues = []
-    for item in roster():
+    for item in roster(stale=True):
         job, alloc = item["job"], item["alloc"]
         # Спека проверяется раньше состояния: папет со старой спекой может
         # выглядеть совершенно здоровым ровно до первого перепланирования.
-        if spec_is_stale(nomad.get_job(job["ID"])):
+        # Вердикт считает сервис кластера: спека лежит в Nomad, а сюда её
+        # больше не возят.
+        if item.get("stale"):
             issues.append({
                 "name": job["ID"], "alloc": alloc,
                 "diagnosis": "spec predates the driver — unsafe on a hypervisor",
@@ -1104,7 +1181,7 @@ def treat(issue):
     action, alloc, name = issue["action"], issue["alloc"], issue["name"]
     try:
         if action == "stop":
-            nomad.alloc_stop(alloc["ID"])
+            _cluster("stop", name=name)
             return "alloc stop — Nomad will recreate it without backoff"
         if action == "model":
             switch_model(alloc["NodeName"], name, FALLBACK_MODEL)
@@ -1113,10 +1190,11 @@ def treat(issue):
             # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
             # аллокации поднял бы ту же старую. Клон переживает — меняется
             # только спека.
-            meta = nomad.get_job(name).get("Meta") or {}
-            nomad.register(job_spec(name, meta["origin"], meta.get("llm")))
+            meta = _cluster("spec", name=name).get("meta") or {}
+            _cluster("update", name=name, origin=meta["origin"],
+                     profile=meta.get("llm"))
             return "spec re-registered — the puppet comes up with the new wrapper"
-        nomad.alloc_restart(alloc["ID"])
+        _cluster("restart", name=name)
         return "restart"
     except Exception as e:
         return f"{action} failed: {str(e)[:80]}"
@@ -1141,7 +1219,7 @@ def _wait_stopped(name):
     именно терминального статуса аллокации, а не «джоб dead» в API: между
     ними сидит остановка задачи на узле."""
     for _ in range(45):
-        alloc = nomad.latest_alloc(name)
+        alloc = _cluster("alloc", name=name).get("alloc")
         if not alloc or alloc["ClientStatus"] != "running":
             return
         time.sleep(2)
@@ -1226,16 +1304,18 @@ def delete(name):
     драйвера уносит тело целиком, и он же откажет, если tmux-сессия ещё
     жива, — снос под живой сессией недопустим независимо от того, что решил
     мастер."""
-    alloc = nomad.latest_alloc(name)
+    got = _cluster("alloc", name=name)
+    alloc = got.get("alloc")
     node = alloc["NodeName"] if alloc else None
-    nomad.deregister(name)
+    _cluster("delete", name=name)
     if not node:
         return {"node": None, "body": None}
     # Контракт драйвера — словарь, а НЕ модуль: `driver.require` отдаёт
     # проверенный реестром контракт, и флаг в нём лежит ключом body_is_node.
     # Модуль с атрибутом BODY_IS_NODE возвращает только `driver.current()`, и
-    # он про ЭТОТ узел, а нам нужен чужой — по имени.
-    drv = (nomad.node_meta(node) or {}).get("mop_driver") or driver.DEFAULT
+    # он про ЭТОТ узел, а нам нужен чужой — по имени. Драйвер приезжает вместе
+    # с аллокацией: второго запроса за одним полем меты не делаем.
+    drv = got.get("driver") or driver.DEFAULT
     if driver.require(drv)["body_is_node"]:
         return {"node": node, "body": "kept"}
     _wait_stopped(name)
@@ -1263,25 +1343,24 @@ def recycle(name):
     мастеров), и остановленный джоб — единственное состояние, в котором
     сессии гарантированно нет. Перерегистрация, а не alloc_restart: врапер
     живёт в спеке джоба, рестарт аллокации поднял бы старую."""
-    job = nomad.get_job(name)
-    meta = job.get("Meta") or {}
+    meta = _cluster("spec", name=name).get("meta") or {}
     origin = meta.get("origin")
     if not origin:
         raise RuntimeError(f"{name} has no origin in Meta — is this even a puppet?")
     llm = meta.get("llm", config.get("MOP_DEFAULT_LLM"))
-    alloc = nomad.latest_alloc(name)
+    alloc = _cluster("alloc", name=name).get("alloc")
     node = alloc["NodeName"] if alloc else None
     if not node:
         raise RuntimeError(f"{name} has no allocation — nothing to recycle")
 
-    nomad.deregister(name, purge=False)
+    _cluster("delete", name=name, purge=False)
     _wait_stopped(name)
     try:
         wipe(node, name)
     except RuntimeError as e:
         raise RuntimeError(f"{e}; job is stopped — after fixing the node "
                            f"retry: mop recycle {name}")
-    nomad.register(job_spec(name, origin, llm))
+    _cluster("update", name=name, origin=origin, profile=llm)
     return {"node": node}
 
 

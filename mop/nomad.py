@@ -48,6 +48,15 @@ def token():
                       f"elsewhere run mop join <server>")
 
 
+def token_or_none():
+    """Токен, либо None: у вызывающего есть запасной путь и он обязан о нём
+    сказать, а не упасть трассировкой (mop/keys.py)."""
+    try:
+        return token()
+    except LookupError:
+        return None
+
+
 def client():
     global _client
     if _client is None:

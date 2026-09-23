@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime
 
-from . import bus, nomad, puppets, usage
+from . import bus, puppets, usage
 from . import nodes as pool_nodes
 
 STATES_EVERY = 15      # с: ростер Nomad + состояния с узлов
@@ -219,7 +219,7 @@ class Collector:
 def gather_usage(days=USAGE_DAYS):
     """Расход по узлам, как в `mop stat`: -> ({дата: {вид: n}},
     [{name, node, total, вид: n}] от прожорливого к скромному)."""
-    nodes = sorted(nomad.ready_nodes())
+    nodes = sorted(puppets.ready_nodes())
     answers = bus.request_many({n: {"verb": "usage", "days": days} for n in nodes},
                                timeout=USAGE_TIMEOUT)
     per_day, per_puppet, failed = {}, [], []

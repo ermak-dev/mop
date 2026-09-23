@@ -21,7 +21,7 @@ right signal for a node left alone; this one is the right signal for the
 machine that holds the register.
 """
 from mop.cli import lib
-from mop import bus, nomad, puppets
+from mop import bus, puppets
 from mop.render import table
 
 
@@ -30,7 +30,7 @@ def main(argv):
     if argv and not dry:
         lib.usage(__doc__)
 
-    nodes = sorted(nomad.ready_nodes())
+    nodes = sorted(puppets.ready_nodes())
     if not nodes:
         print("no ready nodes")
         return 0

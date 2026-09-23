@@ -5,14 +5,14 @@ This is a node-level verb: it refuses in a master shell — host space is
 the operator's to see.
 """
 from mop.cli import lib
-from mop import bus, nomad
+from mop import bus, puppets
 from mop.render import table
 
 
 def main(argv):
     if len(argv) > 1:
         lib.usage(__doc__)
-    nodes = [argv[0]] if argv else sorted(nomad.ready_nodes())
+    nodes = [argv[0]] if argv else sorted(puppets.ready_nodes())
     answers = bus.request_many({n: {"verb": "disk"} for n in nodes})
     rows = [("NODE", "FS", "FREE", "TOTAL")]
     for n in nodes:

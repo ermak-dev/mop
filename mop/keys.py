@@ -63,7 +63,11 @@ def push_spec(name, script, node_names):
 def distribute(files):
     """Разложить [(путь, b64)] по всем ready-узлам пула -> {узел: результат}."""
     script = push_script(files)
-    nodes = nomad.ready_nodes()
+    # Состав пула — через шину, как и всё остальное (#81). Инвариант модуля
+    # это не ломает: он про то, что доставка НА узел не смеет зависеть от
+    # шины ЭТОГО узла, а спросить сервер о списке мы всегда можем — креды
+    # оператора у нас есть по определению, иначе раздавать нечего.
+    nodes = puppets.ready_nodes()
     if not nodes:
         raise RuntimeError("no ready nodes in the pool")
 
@@ -97,6 +101,15 @@ def _push_via_sysbatch(script, nodes, results):
     """Пустые узлы — коротким sysbatch-джобом, после — purge, чтобы секреты не
     оставались в состоянии Nomad."""
     if not nodes:
+        return
+    # Запасной путь остался на Nomad намеренно: он для узла, чей агент молчит,
+    # то есть ровно для случая, когда шина до узла не достаёт. Токен Nomad
+    # есть только у контроллера, и это честная граница — молчащий агент
+    # лечится прогоном оттуда же (CLAUDE.md: AGENT SILENT лечится юнитом).
+    if nomad.token_or_none() is None:
+        for n in nodes:
+            results[n] = ("NOT REACHED — agent silent, and no Nomad token here: "
+                          "run mop login on the controller")
         return
     try:
         nomad.deregister(LOGIN_JOB)
