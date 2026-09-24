@@ -112,15 +112,25 @@
     nats_users_before.stat.checksum | default('')
   notify: reload nats
 
-# Люди для сервиса callout (#206). Провайдер личностей читает файл
-# операторов и переходные пароли из secrets/ контроллера, куда учётке пула
-# хода нет; сервис читает копию в /etc/nats/identity, 0600. Нового здесь
-# ничего: те же пароли уже лежат в base-users.json у того же пользователя.
-# Без callout копии нет и не остаётся.
-- name: Identity for the callout
-  when: MOP_AUTH_CALLOUT == 'on'
+# Люди для сервисов сервера: callout (#206) и глагол identity у
+# mop-bootstrap (#167, имя и почта владельца задания для git identity
+# клона). Провайдер личностей читает файл операторов и переходные пароли из
+# secrets/ контроллера, куда учётке пула хода нет; сервисы читают копию в
+# /etc/nats/identity, 0600 (identity.server_provider). Нового здесь ничего:
+# те же пароли уже лежат в base-users.json у того же пользователя. Копия
+# есть при callout или при файле операторов -- имена и почты только в нём;
+# без обоих её нет и не остаётся.
+- name: Operators file on the controller
+  ansible.builtin.stat:
+    path: "{{ MOP_OPERATORS_FILE or (secrets_dir + '/operators') }}"
+  delegate_to: localhost
+  become: no
+  register: operators_file
+
+- name: Identity for the server's services
+  when: MOP_AUTH_CALLOUT == 'on' or operators_file.stat.exists
   block:
-    - name: Identity dir of the callout
+    - name: Identity dir of the server's services
       ansible.builtin.file:
         path: /etc/nats/identity
         state: directory
@@ -140,14 +150,7 @@
         label: "{{ item.key }}"
       no_log: true
 
-    - name: Operators file on the controller
-      ansible.builtin.stat:
-        path: "{{ MOP_OPERATORS_FILE or (secrets_dir + '/operators') }}"
-      delegate_to: localhost
-      become: no
-      register: operators_file
-
-    - name: Operators file for the callout
+    - name: Operators file for the server's services
       ansible.builtin.copy:
         src: "{{ MOP_OPERATORS_FILE or (secrets_dir + '/operators') }}"
         dest: /etc/nats/identity/operators
@@ -156,14 +159,14 @@
         mode: "0600"
       when: operators_file.stat.exists
 
-    - name: No operators file on the controller, none for the callout
+    - name: No operators file on the controller, none for the services
       ansible.builtin.file:
         path: /etc/nats/identity/operators
         state: absent
       when: not operators_file.stat.exists
 
-- name: No identity copy without the callout
-  when: MOP_AUTH_CALLOUT != 'on'
+- name: No identity copy without the callout and the operators file
+  when: MOP_AUTH_CALLOUT != 'on' and not operators_file.stat.exists
   ansible.builtin.file:
     path: /etc/nats/identity
     state: absent

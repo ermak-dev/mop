@@ -596,6 +596,69 @@ def check_users_reload_199(check):
               and "!=" in cw and "stdout" not in cw, cw)
 
 
+def check_identity_copy_167(check, ptasks):
+    """HYPOTHESIS (#167): глагол identity (mop-bootstrap) читает файл
+    операторов копией в /etc/nats/identity -- secrets/ контроллера пользователю
+    пула закрыт. Копию роль bus кладёт только при MOP_AUTH_CALLOUT=on (#206),
+    и при off глагол всегда отвечал бы «нет профиля».
+    SOLUTION: та же копия, тем же местом роли bus, кладётся всякий раз, когда
+    на контроллере есть файл операторов, при callout on -- как было; снимается,
+    только когда нет ни callout, ни файла. STATUS: FIXED — see #167
+
+    Условия when задач роли -- простые выражения; проверка исполняет их на
+    четырёх сочетаниях (callout, файл) и смотрит, какие задачи пошли. Берутся
+    задачи роли, касающиеся копии или файла операторов: у прочих свои
+    переменные."""
+    import types
+    ptasks = [t for t in ptasks if "/etc/nats/identity" in json.dumps(t)
+              or "operators_file" in json.dumps(t)]
+
+    def runs(task, env):
+        conds = task.get("when", [])
+        for c in conds if isinstance(conds, list) else [conds]:
+            try:
+                if not eval(str(c), {}, dict(env)):   # noqa: S307 -- свой yaml
+                    return False
+            except Exception as e:  # noqa: BLE001 -- выражение не читается
+                raise AssertionError(f"when {c!r}: {e}")
+        return True
+
+    def ran(tasks, env, out):
+        for t in tasks:
+            if not runs(t, env):
+                continue
+            if "block" in t:
+                ran(t["block"], env, out)
+            else:
+                out.append(t)
+        return out
+
+    def target(t):
+        for mod in ("ansible.builtin.copy", "ansible.builtin.file", "ansible.builtin.stat"):
+            if mod in t:
+                return mod.rsplit(".", 1)[1], (t[mod] or {}).get("dest") or (t[mod] or {}).get("path"), \
+                    (t[mod] or {}).get("state")
+        return None, None, None
+
+    for callout in ("on", "off"):
+        for exists in (True, False):
+            env = {"MOP_AUTH_CALLOUT": callout,
+                   "operators_file": types.SimpleNamespace(stat=types.SimpleNamespace(exists=exists))}
+            try:
+                done = [target(t) for t in ran(ptasks, env, [])]
+            except AssertionError as e:
+                check(f"bus identity copy, callout {callout}, file {exists}: conditions read", False, e)
+                continue
+            what = f"bus identity copy, callout {callout}, operators file {exists}"
+            laid = ("copy", "/etc/nats/identity/operators", None) in done
+            gone = ("file", "/etc/nats/identity", "absent") in done
+            check(f"{what}: the operators file is copied exactly when it exists", laid == exists, done)
+            check(f"{what}: the copy is removed only with neither callout nor file",
+                  gone == (callout != "on" and not exists), done)
+            check(f"{what}: the controller's operators file is looked at",
+                  any(k == "stat" and "operators" in str(p) for k, p, _ in done), done)
+
+
 def main():
     cases = bad = 0
 
@@ -849,6 +912,7 @@ def main():
     check("bus: the callout file is read before and after mop cluster users",
           names.index("Callout file of the bus, before") < names.index(users_task.get("name"))
           < names.index("Callout file of the bus, after") if after and users_task else False)
+    check_identity_copy_167(check, ptasks)
     conf = open(os.path.join(DEPLOY, "roles", "bus", "templates", "nats-server.conf.j2")).read()
     check("nats-server.conf includes callout.conf inside authorization",
           re.search(r"authorization \{[^}]*include \./callout\.conf", conf) is not None)
