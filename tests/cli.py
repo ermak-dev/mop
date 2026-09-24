@@ -301,6 +301,7 @@ def main():
     failed += check_mcp_declarations()
     failed += check_refusals()
     failed += check_output_rules()
+    failed += check_empty_llm()
 
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0
@@ -819,6 +820,37 @@ def check_output_179():
         lib.guard, bus.call_cluster, keys.push_llm_keys, lib.workspace_text = keep
     return failed
 
+
+
+def check_empty_llm():
+    """HYPOTHESIS (#164): `--llm` без значения давал профиль "", и отказ
+    llm.require звучал как «no LLM profile (empty)» — не про флаг, который
+    забыли заполнить. SOLUTION: пустое значение — ошибка использования в
+    parse_llm, до реестра профилей. STATUS: FIXED — see #164"""
+    failed = 0
+
+    def through_dispatcher(argv):
+        return silent_run(lambda a: cli.run(lambda x: lib.parse_llm(x) and None, a), argv)
+    for argv in (["--llm", ""], ["pu-mop-1", "--llm"], ["--llm="], ["--llm", "--fresh"]):
+        out, err, code = through_dispatcher(argv)
+        lines = err.strip().splitlines()
+        if out or not code or len(lines) != 1 or "Traceback" in err \
+                or not lines[0].startswith("--llm needs a profile name"):
+            failed += 1
+            print(f"FAIL parse_llm({argv}): out {out!r} err {err!r} code {code!r}")
+    got = lib.parse_llm(["pu-mop-1", "--llm", "claude"])
+    if got != ("claude", ["pu-mop-1"]):
+        failed += 1
+        print(f"FAIL parse_llm with a profile: {got!r}")
+    if lib.parse_llm(["pu-mop-1"]) != (None, ["pu-mop-1"]):
+        failed += 1
+        print("FAIL parse_llm without --llm must leave the profile unset")
+    # Неизвестный профиль — прежний отказ, слово в слово.
+    out, err, code = through_dispatcher(["--llm", "no-such"])
+    if not code or not err.startswith("no LLM profile no-such; available: "):
+        failed += 1
+        print(f"FAIL an unknown profile keeps its refusal: {err!r} {code!r}")
+    return failed
 
 if __name__ == "__main__":
     sys.exit(main())
