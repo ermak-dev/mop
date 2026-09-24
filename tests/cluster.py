@@ -288,14 +288,19 @@ def check_forget_inventory_178():
     if fn("mop-2", None) is not None:
         out.append("no host list (a server deployed before #178) must not refuse")
 
-    # Через глагол: отказ -- до Nomad; файла нет -- как прежде.
+    # Через глагол: отказ -- до Nomad; файла нет -- как прежде. Сводка узла
+    # (#196) -- тоже вызов Nomad, и при отказе её не спрашивают.
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from cli import no_network
     d = tempfile.mkdtemp(prefix="mop-test-forget-")
     path = os.path.join(d, "inventory-hosts.json")
     touched = []
-    keep = (getattr(cluster, "INVENTORY_HOSTS", None), nomad.node_allocs,
-            nomad.forget_refusal, nomad.node_forget)
+    keep = (getattr(cluster, "INVENTORY_HOSTS", None), nomad.node_summary,
+            nomad.node_allocs, nomad.forget_refusal, nomad.node_forget)
+    undo = no_network()
     try:
         cluster.INVENTORY_HOSTS = path
+        nomad.node_summary = lambda node: touched.append("summary") or {"Name": node}
         nomad.node_allocs = lambda node: touched.append("allocs") or []
         nomad.forget_refusal = lambda node, allocs: None
         nomad.node_forget = lambda node: touched.append("forget")
@@ -306,16 +311,59 @@ def check_forget_inventory_178():
             out.append(f"forget of an inventory host: {got!r}, Nomad touched: {touched}")
         touched.clear()
         got = cluster.answer("admin", {"verb": "forget", "node": "gone"})
-        if not got.get("ok") or touched != ["allocs", "forget"]:
+        if not got.get("ok") or touched != ["summary", "allocs", "forget"]:
             out.append(f"forget of a host out of the inventory: {got!r}, {touched}")
         os.remove(path)
         touched.clear()
         got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
-        if not got.get("ok") or touched != ["allocs", "forget"]:
+        if not got.get("ok") or touched != ["summary", "allocs", "forget"]:
             out.append(f"forget with no host list must work as before: {got!r}, {touched}")
     finally:
-        (cluster.INVENTORY_HOSTS, nomad.node_allocs, nomad.forget_refusal,
-         nomad.node_forget) = keep
+        (cluster.INVENTORY_HOSTS, nomad.node_summary, nomad.node_allocs,
+         nomad.forget_refusal, nomad.node_forget) = keep
+        undo()
+    return out
+
+
+def check_forget_summary_196():
+    """HYPOTHESIS (#196): _forget отдаёт forget_refusal имя узла (строку), а
+    та читает сводку -- node['Name'], node.get('Status'); AttributeError, и
+    forget с #80 не доходит до purge ни на одном узле.
+    SOLUTION: _forget берёт сводку узла (nomad.node_summary) и отдаёт её;
+    узла нет -- отказ с именем, без allocs и purge.
+    STATUS: FIXED — see #196"""
+    from mop import nomad
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from cli import no_network
+    out = []
+    touched = []
+    closed = {"Name": "mop-2", "ID": "n2", "Status": "ready",
+              "SchedulingEligibility": "ineligible"}
+    allocs = []
+    keep = (nomad.node_summary, nomad.node_allocs, nomad.node_forget)
+    undo = no_network()
+    try:
+        nomad.node_summary = lambda name: dict(closed) if name == "mop-2" else None
+        nomad.node_allocs = lambda name: touched.append("allocs") or list(allocs)
+        nomad.node_forget = lambda name: touched.append("forget")
+        got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
+        if not got.get("ok") or touched != ["allocs", "forget"]:
+            out.append(f"forget of a drained node must reach purge: {got!r}, {touched}")
+        touched.clear()
+        allocs[:] = [{"JobID": "pu-mop-1", "ClientStatus": "running"}]
+        got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
+        err = got.get("error") or ""
+        if "pu-mop-1" not in err or "drain" not in err or "forget" in touched:
+            out.append(f"forget of a node with a live alloc must refuse with the job: "
+                       f"{got!r}, {touched}")
+        touched.clear()
+        got = cluster.answer("admin", {"verb": "forget", "node": "ghost"})
+        if "ghost" not in (got.get("error") or "") or touched:
+            out.append(f"forget of an unknown node must refuse by name, touching "
+                       f"nothing: {got!r}, {touched}")
+    finally:
+        nomad.node_summary, nomad.node_allocs, nomad.node_forget = keep
+        undo()
     return out
 
 
@@ -324,7 +372,7 @@ def main():
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,
                   check_secret_verbs, check_verb_table_173,
-                  check_forget_inventory_178):
+                  check_forget_inventory_178, check_forget_summary_196):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:
