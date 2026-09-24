@@ -32,7 +32,7 @@ import asyncio
 import os
 import re
 
-from . import busnames, fsutil, identity, natsconf, nkjwt, operators
+from . import busnames, config, fsutil, identity, natsconf, nkjwt, operators
 
 SUBJECT = "$SYS.REQ.USER.AUTH"
 USER = busnames.CALLOUT     # машинный пользователь сервиса
@@ -208,3 +208,28 @@ async def serve(url, password, keys_, humans, puppets, log):
     await nc.flush()
     log(f"mop-callout: answering {SUBJECT} as {USER}, issuer {keys_.issuer}")
     await asyncio.Event().wait()
+
+
+def humans_provider():
+    """Провайдер личностей сервиса: по настройкам установки, но файлы -- из
+    IDENTITY_DIR. Файл операторов и переходные пароли лежат у контроллера
+    (secrets/), куда пользователю пула хода нет; deploy кладёт копию сюда,
+    0600. Секреты провайдера -- файлами там же, не окружением юнита: юнит
+    читаем всем."""
+    settings = {k: config.get(k) for k in identity.SETTINGS}
+    settings["MOP_OPERATORS_FILE"] = os.path.join(IDENTITY_DIR, identity.OPERATORS_FILE)
+    return identity.provider(settings, IDENTITY_DIR)
+
+
+async def run(log):
+    """Сервис целиком, из настроек сервера. Callout выключен -- отказ: юнит
+    ставится только при on, и запущенный при off он отвечал бы nats,
+    который его не спрашивает."""
+    if not natsconf.callout_on(config.get("MOP_AUTH_CALLOUT")):
+        raise RuntimeError("MOP_AUTH_CALLOUT is off: nats does not ask the callout")
+    from . import bootstrap   # PUPPET_CREDS: пароли папетов пишет natsconf
+    password = natsconf.read_base().get(USER)
+    if not password:
+        raise RuntimeError(f"{natsconf.BASE} has no {USER} password -- run mop deploy")
+    await serve(f"nats://127.0.0.1:{config.get('MOP_NATS_PORT')}", password, keys(),
+                humans_provider(), PuppetProvider(bootstrap.PUPPET_CREDS), log)
