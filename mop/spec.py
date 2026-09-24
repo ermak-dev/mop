@@ -11,6 +11,8 @@ spec_is_stale видит у всего пула сразу. Поэтому пе�
 байт в байт: tests/spec.py.
 """
 import base64
+import hashlib
+import json
 import re
 import time
 
@@ -333,23 +335,11 @@ while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wa
 """
 
 
-def job_spec(name, origin, profile=None, cont=False):
-    """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
-    историю каталога (`claude --continue`).
-
-    По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
-    нужен ровно там, где работу продолжают под другой моделью, а везде ещё
-    (новый папет, рецикл, лечение) чистый старт — половина смысла операции."""
-    profile = llm.resolve(profile)
-    prof = llm.get(profile)
-    if prof is None:
-        # Протухший Meta.llm у работающего джоба: профиль удалили из реестра,
-        # а джоб жив. Отказ обязан звать папета по имени — иначе искать, кто
-        # именно не перерегистрируется, придётся по трассе.
-        raise RuntimeError(f"{name}: no LLM profile {profile}; available: "
-                           f"{', '.join(llm.profiles())} (mop llm)")
+def task_env(name, origin, profile, prof, cont=False):
+    """Окружение задачи папета. Одно место и для job_spec, и для версии
+    шаблона: current_version зовёт его с пустым профилем, не спрашивая реестр
+    профилей (#174) — набор ключей от профиля не зависит."""
     llm_env = "".join(f"{k}={v}\n" for k, v in prof["env"].items())
-    meta = {"origin": origin, "llm": profile}
     project = driver.project_of(origin)
     env = {
         "PU_NAME": name,
@@ -383,6 +373,28 @@ def job_spec(name, origin, profile=None, cont=False):
     # значило бы молча поменять инвариант «правка сессии доезжает
     # перерегистрацией».
     env["PU_WRAPPER"] = base64.b64encode(WRAPPER.encode()).decode()
+    return env
+
+
+def job_spec(name, origin, profile=None, cont=False):
+    """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
+    историю каталога (`claude --continue`).
+
+    По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
+    нужен ровно там, где работу продолжают под другой моделью, а везде ещё
+    (новый папет, рецикл, лечение) чистый старт — половина смысла операции."""
+    profile = llm.resolve(profile)
+    prof = llm.get(profile)
+    if prof is None:
+        # Протухший Meta.llm у работающего джоба: профиль удалили из реестра,
+        # а джоб жив. Отказ обязан звать папета по имени — иначе искать, кто
+        # именно не перерегистрируется, придётся по трассе.
+        raise RuntimeError(f"{name}: no LLM profile {profile}; available: "
+                           f"{', '.join(llm.profiles())} (mop llm)")
+    meta = {"origin": origin, "llm": profile}
+    project = driver.project_of(origin)
+    env = task_env(name, origin, profile, prof, cont)
+    meta[SPEC_META] = template_version(env)
     return {"Job": {
         "ID": name,
         "Name": name,
@@ -456,6 +468,32 @@ def queued(job):
     return (job.get("JobSummary", {}).get("Summary", {}).get(GROUP) or {}).get("Queued", 0)
 
 
+# Версия шаблона спеки в Meta джоба (#174). Врапер живёт в спеке, и джоб,
+# зарегистрированный прежним mop, работает прежним врапером до перерегистрации
+# (CLAUDE.md) — а обе проверки spec_is_stale ниже он проходит. После #155 так
+# жил пятый папет чужого проекта, и ничто его не выдавало.
+SPEC_META = "mop_spec"
+
+
+def template_version(env):
+    """Короткий хеш того, что общее у спек всех папетов: врапер, внешняя
+    команда, НАБОР переменных, имена группы и задачи, форма ограничения.
+    Значения конкретного папета (имя, origin, профиль, cont) в него не входят:
+    иначе устаревшим читался бы каждый второй."""
+    c = project_constraint("x")
+    shape = {"wrapper": WRAPPER, "outer": OUTER, "env": sorted(env),
+             "group": GROUP, "task": TASK,
+             "constraint": [c["LTarget"], c["Operand"]]}
+    return hashlib.sha256(json.dumps(shape, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def current_version():
+    """Версия шаблона, который собрал бы сегодняшний mop. Без реестра
+    профилей: удалённый MOP_DEFAULT_LLM иначе ронял бы spec_is_stale, а ростер
+    глотает падение как «спека свежая» — та самая тихая ошибка (#174)."""
+    return template_version(task_env("pu-spec-1", "spec", "", {"env": {}}))
+
+
 def spec_is_stale(job):
     """Опасна ли эта спека на узле-гипервизоре. Чистая функция.
 
@@ -468,7 +506,11 @@ def spec_is_stale(job):
     Ограничение живёт в спеке, а спека сама не перечитывается: всё, что
     зарегистрировано раньше, защиты не имеет. Узнать об этом можно было только
     по симптому — в логе задачи на узле, куда мастер проекта не смотрит.
-    Поймано на pu-cloudpub-1, лечится `mop update <имя>`."""
+    Поймано на pu-cloudpub-1, лечится `mop update <имя>`.
+
+    И спека прежнего шаблона (#174): без версии в Meta или с другой."""
+    if (job.get("Meta") or {}).get(SPEC_META) != current_version():
+        return True
     task = job["TaskGroups"][0]["Tasks"][0]
     script = (task.get("Config") or {}).get("args") or ["", ""]
     if "driver run" not in script[-1]:

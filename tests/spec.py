@@ -127,12 +127,76 @@ def job(outer=True, constrained=True):
     return j
 
 
+def job_meta(version):
+    """Сегодняшняя спека с другой версией шаблона; None — без ключа вовсе."""
+    j = job()
+    j["Meta"] = dict(j["Meta"])
+    if version is None:
+        j["Meta"].pop("mop_spec", None)
+    else:
+        j["Meta"]["mop_spec"] = version
+    return j
+
+
 STALE = [
     ("сегодняшняя спека", job(), False),
     ("без внешнего врапера", job(outer=False), True),
     ("без ограничения размещения", job(constrained=False), True),
     ("без того и другого", job(outer=False, constrained=False), True),
+    # #174: спека зарегистрирована прежним шаблоном — старый врапер, прежний
+    # список переменных. Проходит обе проверки выше и работает, но не тем,
+    # что собрал бы сегодняшний mop: так после #155 жил пятый папет чужого
+    # проекта, и ничто его не выдавало.
+    ("без версии шаблона (зарегистрирована до #174)", job_meta(None), True),
+    ("с чужой версией шаблона", job_meta("0123456789ab"), True),
 ]
+
+
+def check_template_version():
+    """HYPOTHESIS (#174): spec_is_stale смотрел только на внешний врапер и
+    ограничение размещения, и спека прежнего шаблона читалась свежей.
+    SOLUTION: версия шаблона в Meta — хеш того, что общее у спек всех
+    папетов, без значений конкретного папета. STATUS: FIXED — see #174"""
+    bad, cases = 0, 0
+    versions = {(spec.job_spec(n, o, p, cont=c)["Job"].get("Meta") or {}).get("mop_spec")
+                for n, o, p, c in SPEC_INPUTS}
+    cases += 1
+    if len(versions) != 1 or None in versions:
+        bad += 1
+        print(f"FAILED  the template version must be one for every puppet: {versions}")
+    # Одна строка врапера — другая версия: иначе правка врапера снова
+    # прошла бы мимо doctor.
+    cases += 1
+    keep = spec.WRAPPER
+    try:
+        spec.WRAPPER = keep + "\n# one more line\n"
+        other = (spec.job_spec(*SPEC_INPUTS[0][:3])["Job"].get("Meta") or {}).get("mop_spec")
+    finally:
+        spec.WRAPPER = keep
+    if other in versions or other is None:
+        bad += 1
+        print("FAILED  a changed wrapper line must change the template version")
+    # Версия не зависит от реестра профилей: удалённый MOP_DEFAULT_LLM иначе
+    # ронял spec_is_stale, а ростер глотал падение как «спека свежая» —
+    # ровно та тихая ошибка, которую закрывает #174.
+    cases += 1
+    keep = os.environ["MOP_DEFAULT_LLM"]
+    try:
+        os.environ["MOP_DEFAULT_LLM"] = "no-such-profile"
+        got = spec.current_version()
+    except Exception as e:
+        got = f"raised {e!r}"
+    finally:
+        os.environ["MOP_DEFAULT_LLM"] = keep
+    if got not in versions:
+        bad += 1
+        print(f"FAILED  current_version with a removed default profile: {got!r}, "
+              f"wanted {versions}")
+    cases += 1
+    if spec.current_version() not in versions:
+        bad += 1
+        print("FAILED  current_version must equal the version job_spec puts in Meta")
+    return bad, cases
 
 
 # (имя, origin, профиль, cont): оба профиля (без ключа и с ключом и картой
@@ -288,6 +352,9 @@ def main():
             f.write("\n")
         return 0
     bad, cases = check_snapshot()
+    vbad, vcases = check_template_version()
+    bad += vbad
+    cases += vcases
     pbad, pcases = check_wrapper_paths()
     bad += pbad
     cases += pcases

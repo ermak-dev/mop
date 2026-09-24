@@ -289,6 +289,58 @@ def check_treatment():
         print(f"FAILED  treatment: nobody produces {state!r}")
     return bad, cases + 1
 
+
+# ── #174: устаревшая спека и лечение ─────────────────────────────────────────
+# Перерегистрация перезапускает сессию: свободному папету это ничего не стоит,
+# занятому — убивает ход. Поэтому устаревшая спека лечится `update` только у
+# свободного папета и у того, где сессии нет вовсе (аллокация не бежит); у
+# остальных она показана и ждёт. После раскатки #174 устаревшими читаются
+# ВСЕ папеты разом — ключа версии нет ни у кого, — и doctor --fix обязан
+# тронуть только свободных.
+SPEC_ACTION = [
+    ("free", "update"), (None, "update"),
+    ("busy", None), ("idle", None), ("waiting", None), ("dialog", None),
+    ("hung", None), ("silent", None), ("login", None), ("quota", None),
+    ("error", None), ("unknown", None), ("other", None),
+]
+
+
+def check_stale_spec():
+    """STATUS: FIXED — see #174"""
+    from mop import state
+    bad, cases = 0, 0
+    fn = getattr(state, "spec_action", None)
+    for kind, want in SPEC_ACTION:
+        cases += 1
+        got = fn(kind) if fn else "missing"
+        if got != want:
+            bad += 1
+            print(f"FAILED  spec_action({kind!r}) -> {got!r}, wanted {want!r}")
+    # doctor целиком: roster подменён, лечение — из diagnose.
+    run = {"ClientStatus": "running", "NodeName": "n1"}
+
+    def item(name, kind, st, stale=True, alloc=run):
+        return {"job": {"ID": name}, "alloc": alloc, "stale": stale,
+                "state": st, "kind": kind, "task": None, "reason": None}
+    keep = puppets.roster
+    try:
+        puppets.roster = lambda stale=False: [
+            item("pu-a-1", "free", "free (master)"),
+            item("pu-a-2", "busy", "busy: feat/7"),
+            item("pu-a-3", "hung", "HUNG (not responding)"),
+            item("pu-a-4", "free", "free (master)", stale=False),
+        ]
+        got = [(i["name"], i["action"]) for i in puppets.diagnose()]
+    finally:
+        puppets.roster = keep
+    want = [("pu-a-1", "update"), ("pu-a-2", None), ("pu-a-3", None),
+            ("pu-a-3", "restart")]
+    cases += 1
+    if got != want:
+        bad += 1
+        print(f"FAILED  diagnose over stale specs: {got}, wanted {want}")
+    return bad, cases
+
 # ── ростер глазами одного проекта (#29) ──────────────────────────────────────
 # HYPOTHESIS: джоба-папет без origin в Meta (старая регистрация) невидима
 # любому списку, включая admin, — что и выглядело как «папеты исчезают»:
@@ -457,6 +509,9 @@ def main():
     bad += fbad
     cases += fcases
     tbad, tcases = check_treatment()
+    sbad2, scases2 = check_stale_spec()
+    bad += sbad2
+    cases += scases2
     bad += tbad
     cases += tcases
     for state, want in FREE_CASES:

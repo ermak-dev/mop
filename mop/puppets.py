@@ -10,7 +10,7 @@ import os
 import time
 
 from . import bus, config, driver, lease, llm, spec
-from .state import action_for, failing_row, silent, verdict
+from .state import action_for, failing_row, silent, spec_action, verdict
 
 PROJECT = config.PROJECT
 
@@ -371,12 +371,21 @@ def diagnose():
         # выглядеть совершенно здоровым ровно до первого перепланирования.
         # Вердикт считает сервис кластера: спека лежит в Nomad, а сюда её
         # больше не возят.
+        #
+        # Перерегистрация — только свободному (#174): после раскатки нового
+        # шаблона устаревшим читается весь пул сразу, и --fix не вправе
+        # перезапустить ни одной занятой сессии. Занятый показан и проходит
+        # остальные проверки: залипшему нужен его restart и сейчас.
         if item.get("stale"):
-            issues.append({
-                "name": job["ID"], "alloc": alloc,
-                "diagnosis": "spec predates the driver — unsafe on a hypervisor",
-                "action": "update"})
-            continue
+            action = spec_action(item.get("kind"))
+            if action:
+                issues.append({"name": job["ID"], "alloc": alloc,
+                               "diagnosis": "job spec is from an older mop",
+                               "action": action})
+                continue
+            issues.append({"name": job["ID"], "alloc": alloc, "action": None,
+                           "diagnosis": f"job spec is from an older mop; not "
+                                        f"re-registered while {item['state']}"})
         # Падает на старте (#126): снять аллокацию -- только начать тот же круг
         # заново; лечится причина, поэтому без автолечения и с ней в диагнозе.
         failing = failing_row(alloc and alloc["ClientStatus"], item.get("task"),
