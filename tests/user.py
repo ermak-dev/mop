@@ -89,10 +89,32 @@ def main():
     os.environ["INVENTORY"] = INVENTORY
     natsconf.IDENTITY_DIR = os.path.join(NATS, "identity")
 
+    # ── свежий сервер: инвентарь есть, secrets/ ещё нет (#238) ───────────
+    # HYPOTHESIS: refusal() узнаёт сервер по двум признакам сразу -- secrets/
+    # и инвентарь. secrets/ заводит только mop deploy, а тот без людей
+    # отказывает (#219): на свежем сервере mop user add и mop deploy
+    # отказывают друг из-за друга.
+    # SOLUTION: сервер узнаётся по инвентарю; secrets/ (0700) mop user
+    # заводит сам, там же, где пишет файл операторов.
+    # STATUS: FIXED — see #238
+    open(INVENTORY, "w").write("all: {}\n")
+    code, out, err = run("add", ["root", "--role", "admin", "--stdin"], "pw-r\n")
+    check("fresh server: add without secrets/ succeeds", code == 0, (code, out, err))
+    check("fresh server: secrets/ is made 0700", os.path.isdir(identity.SECRETS)
+          and stat.S_IMODE(os.stat(identity.SECRETS).st_mode) == 0o700)
+    check("fresh server: the operators file is 0600 with the person",
+          content() is not None and stat.S_IMODE(os.stat(FILE).st_mode) == 0o600
+          and authenticates("root", "pw-r") is not None, content())
+    # Дальше проверки ждут чистый дом: ни файла, ни secrets/, ни инвентаря.
+    import shutil
+    shutil.rmtree(identity.SECRETS, ignore_errors=True)
+    os.remove(INVENTORY)
+
     # ── не сервер: ни secrets/, ни инвентаря ─────────────────────────────
     code, out, err = run("add", ["alice", "--role", "admin", "--stdin"], "pw\n")
     check("off the server: refused", code != 0 and "server" in err and content() is None,
           (code, out, err))
+    check("off the server: the refusal names the inventory", "inventory.yaml" in err, err)
     os.makedirs(identity.SECRETS)
     code, out, err = run("add", ["alice", "--role", "admin", "--stdin"], "pw\n")
     check("secrets/ but no inventory: still not the server",

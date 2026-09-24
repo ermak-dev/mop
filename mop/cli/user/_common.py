@@ -19,10 +19,12 @@ def settings():
 def refusal(got):
     """Отказ по месту и провайдеру, либо None.
 
-    Сервер -- машина, где лежат secrets/ установки (их заводит deploy) и
-    инвентарь: так узнаётся контроллер, у которого и живёт файл операторов.
-    Проверка по одному каталогу пропустила бы машину оператора после mop
-    join -- у неё ~/.config/mop есть, но secrets/ и инвентаря нет.
+    Сервер -- машина с инвентарём: так узнаётся контроллер, у которого и
+    живёт файл операторов. Машину оператора после mop join инвентарь и
+    отличает: ~/.config/mop у неё есть, инвентаря нет. secrets/ признаком не
+    годится (#238): его заводит mop deploy, а тот без людей отказывает, и на
+    свежем сервере mop user и deploy отказывали друг из-за друга; каталог
+    mop user заводит сам, когда пишет файл (identity._save).
 
     Файл правится, когда file -- звено цепочки (#232): при file,ldap в нём
     локальные люди поверх каталога."""
@@ -34,9 +36,9 @@ def refusal(got):
         return (f"people live in LDAP (MOP_AUTH_PROVIDER={got.get('MOP_AUTH_PROVIDER')}): "
                 "add, change and remove them there")
     inventory = os.environ.get("INVENTORY", "")
-    if not os.path.isdir(identity.SECRETS) or not os.path.isfile(inventory):
+    if not os.path.isfile(inventory):
         return (f"mop user works on the server, where the operators file lives "
-                f"(no {identity.SECRETS} or {inventory or 'inventory.yaml'} here)")
+                f"(no {inventory or 'inventory.yaml'} here)")
     return None
 
 

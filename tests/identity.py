@@ -535,11 +535,33 @@ def check_copy_owner_234():
     return out
 
 
+def check_save_makes_dir_238():
+    """HYPOTHESIS (#238): на свежем сервере каталога secrets/ нет, и первый
+    файл операторов записать некуда. SOLUTION: запись файла заводит
+    недостающий каталог 0700; лежащий не трогает. STATUS: FIXED — see #238"""
+    import stat
+    out = []
+    root = tempfile.mkdtemp(prefix="mop-test-identity-")
+    path = os.path.join(root, "secrets", "operators")
+    line = identity.format_line(Identity("anton", "admin", ("*",)), identity.hash_password("x"))
+    identity._save(path, [line])
+    d = os.path.dirname(path)
+    if not os.path.isdir(d) or stat.S_IMODE(os.stat(d).st_mode) != 0o700:
+        out.append("a missing directory of the operators file must be made 0700")
+    if stat.S_IMODE(os.stat(path).st_mode) != 0o600 or identity.PlainFileProvider(path).lookup("anton") is None:
+        out.append("the operators file must be 0600 with the person")
+    os.chmod(root, 0o755)
+    identity._save(os.path.join(root, "other"), [line])
+    if stat.S_IMODE(os.stat(root).st_mode) != 0o755:
+        out.append("an existing directory (MOP_OPERATORS_FILE may name any) must not be chmod-ed")
+    return out
+
+
 def main():
     failed = []
     for check in (check_identity, check_hash, check_provider, check_one_source_219, check_choice,
                   check_deploy, check_chain_232, check_deploy_chain_232,
-                  check_copy_owner_234):
+                  check_copy_owner_234, check_save_makes_dir_238):
         try:
             lines = check()
         except Exception as e:  # noqa: BLE001 -- падение проверки -- тоже провал
