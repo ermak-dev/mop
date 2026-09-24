@@ -161,9 +161,10 @@ def check_snapshot():
     страница читает по имени, поэтому набор ключей закреплён."""
     failed = 0
     snap = web.snapshot(rows=ROWS, nodes=[{"name": "mate"}],
-                        usage=[], per_puppet=[], journal=[], errors=["bus: down"],
+                        usage=[], per_puppet=[], per_user=[], journal=[], errors=["bus: down"],
                         at=1_000_000.0)
-    want = {"at", "projects", "counts", "nodes", "usage", "per_puppet",
+    # per_user -- расход по людям (#245).
+    want = {"at", "projects", "counts", "nodes", "usage", "per_puppet", "per_user",
             "journal", "errors"}
     if set(snap) != want:
         failed += 1
@@ -171,6 +172,60 @@ def check_snapshot():
     if snap["counts"]["puppets"] != 5 or snap["errors"] != ["bus: down"]:
         failed += 1
         print(f"FAIL snapshot body: {snap['counts']} {snap['errors']}")
+    return failed
+
+
+def check_by_user_245():
+    """HYPOTHESIS (#245): оператор видит расход по папетам и по дням, но не
+    по людям -- кто сколько тратит, не видно. #244 учит глагол usage агента
+    класть рядом со старым полем usage новое by_login:
+    {папет: {логин: {дата: {вид: n}}}}, "-" -- неприписанное.
+    SOLUTION: чистая свёртка ответов узлов в строки по людям, от самого
+    прожорливого; узел со старым агентом (без by_login) -- не ошибка: весь
+    расход его папетов -- «-». Сумма по людям равна сумме по папетам.
+    STATUS: FIXED — see #245"""
+    failed = 0
+    fn = getattr(web, "user_rows", None)
+    if fn is None:
+        print("FAIL #245: web.user_rows is missing")
+        return 1
+
+    def u(i, o, w, r):
+        return {"input": i, "output": o, "cache_write": w, "cache_read": r}
+    answers = {
+        # Новый агент: у каждого папета расход разложен по логинам.
+        "hyper": {"ok": True,
+                  "usage": {"pu-mop-1": {"2026-09-22": u(10, 5, 0, 100), "2026-09-21": u(1, 1, 1, 1)},
+                            "pu-mop-2": {"2026-09-22": u(4, 4, 4, 4)}},
+                  "by_login": {"pu-mop-1": {"anton": {"2026-09-22": u(10, 5, 0, 100)},
+                                            "-": {"2026-09-21": u(1, 1, 1, 1)}},
+                               "pu-mop-2": {"ivan": {"2026-09-22": u(4, 4, 4, 4)}}}},
+        # Старый агент: by_login нет -- весь расход в «-».
+        "gpu": {"ok": True, "usage": {"pu-mop-3": {"2026-09-22": u(2, 0, 0, 0)}}},
+        # Новый агент, но папета нет в by_login -- его расход тоже «-».
+        "mini": {"ok": True, "usage": {"pu-web-1": {"2026-09-22": u(0, 3, 0, 0)}},
+                 "by_login": {}},
+        # Узел не ответил -- его нет ни в одной строке.
+        "dead": {"error": "agent silent"},
+    }
+    got = fn(answers)
+    want = [{"login": "anton", "input": 10, "output": 5, "cache_write": 0, "cache_read": 100, "total": 115},
+            {"login": "ivan", "input": 4, "output": 4, "cache_write": 4, "cache_read": 4, "total": 16},
+            {"login": "-", "input": 3, "output": 4, "cache_write": 1, "cache_read": 1, "total": 9}]
+    if got != want:
+        failed += 1
+        print(f"FAIL #245 user_rows: {got}")
+    # Инвариант: по людям -- столько же, сколько по папетам.
+    puppets_total = sum(sum(sum(r.values()) for r in rows.values())
+                        for a in answers.values() for rows in (a.get("usage") or {}).values())
+    if sum(r["total"] for r in got) != puppets_total:
+        failed += 1
+        print(f"FAIL #245 invariant: users {sum(r['total'] for r in got)} != puppets {puppets_total}")
+    snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=got,
+                        journal=[], errors=[], at=1.0)
+    if snap.get("per_user") != got:
+        failed += 1
+        print(f"FAIL #245 snapshot per_user: {snap.get('per_user')}")
     return failed
 
 
@@ -185,7 +240,7 @@ def check_sick_in_project_210():
     failed = 0
     rows = [row("pu-mop-1", MOP, State("hung", "not responding")),
             row("pu-mop-2", MOP, State("busy", branch="feat/210"))]
-    snap = web.snapshot(rows=rows, nodes=[], usage=[], per_puppet=[], journal=[],
+    snap = web.snapshot(rows=rows, nodes=[], usage=[], per_puppet=[], per_user=[], journal=[],
                         errors=[], at=1.0)
     want = {"puppets": 2, "free": 0, "busy": 1, "sick": 1, "silent": 0, "down": 0}
     if snap["counts"] != want:
@@ -205,7 +260,7 @@ def check_sick_in_project_210():
 def main():
     failed = (check_classify() + check_projects() + check_sizes()
               + check_journal() + check_usage() + check_snapshot()
-              + check_sick_in_project_210())
+              + check_sick_in_project_210() + check_by_user_245())
     print("web: FAILED" if failed else "web: ok")
     return 1 if failed else 0
 

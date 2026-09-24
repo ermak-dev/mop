@@ -102,6 +102,8 @@
     <section>
       <h2>Кто сколько тратит <small>за окно, от самого прожорливого</small></h2>
       <div id="spenders"></div>
+      <h2>Кто сколько тратит — по пользователям <small>чьё сообщение начало ход; «-» — неприписанное</small></h2>
+      <div id="users"></div>
     </section>
   </div>
 
@@ -171,6 +173,13 @@
     $("spenders").innerHTML = table(["папет", "узел", "#вход", "#выход", "#кэш зап.", "#кэш чт.", "#всего"],
       (s.per_puppet || []).slice(0, 12).map(p => ({cells: [p.name, p.node, human(p.input), human(p.output),
         human(p.cache_write), human(p.cache_read), human(p.total)]})));
+
+    const u = s.per_user || [];
+    $("users").innerHTML = u.length
+      ? table(["пользователь", "#вход", "#выход", "#кэш зап.", "#кэш чт.", "#всего"],
+          u.map(p => ({cells: [p.login, human(p.input), human(p.output),
+            human(p.cache_write), human(p.cache_read), human(p.total)]})))
+      : '<div class="empty">расход по пользователям появится после первого разбора транскриптов</div>';
 
     const j = (s.journal || []).slice().reverse();
     $("journal").innerHTML = j.length

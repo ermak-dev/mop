@@ -220,6 +220,36 @@ def sum_days(rows):
     return acc
 
 
+def by_user(answer):
+    """Ответ глагола usage одного узла -> {логин: {вид: n}} за всё окно (#245).
+
+    by_login (#244) лежит рядом со старым usage: {папет: {логин: {дата:
+    {вид: n}}}}, и по договору сумма по логинам равна строке папета.
+    Папета, которого в by_login нет, -- и всех папетов старого агента, у
+    которого by_login нет вовсе, -- расход целиком неприписанный («-»): не
+    ошибка, а ответ «не знаю кто». Канон -- usage: чего в нём нет, того в
+    выдаче нет."""
+    out = {}
+    split = answer.get("by_login") or {}
+    for puppet, rows in (answer.get("usage") or {}).items():
+        parts = split.get(puppet)
+        for login, lrows in (parts.items() if parts else [(NOBODY, rows)]):
+            add = sum_days(lrows)
+            acc = out.setdefault(login or NOBODY, empty())
+            for k in KINDS:
+                acc[k] += add[k]
+    return out
+
+
+def add_users(into, part):
+    """Сложить {логин: {вид: n}} в накопитель того же вида."""
+    for login, row in part.items():
+        acc = into.setdefault(login, empty())
+        for k in KINDS:
+            acc[k] += int(row.get(k) or 0)
+    return into
+
+
 def days_back(days, now=None):
     """Список дат окна по порядку, от старой к сегодняшней, — оси графика
     нужны и пустые дни: провал в расходе виден только на месте."""
