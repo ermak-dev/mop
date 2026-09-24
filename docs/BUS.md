@@ -2,7 +2,8 @@
 
 Как мастер разговаривает с узлами: сообщения поверх NATS. Сервер разворачивает
 [deploy/setup.yml](../deploy/setup.yml), права — `deploy/nats-server.conf.j2`,
-подписчик — `mop/agent.py`, клиент — `mop/bus.py`.
+подписчик — `mop/agent.py` (глаголы и таблица прав; программа — `mop agent`,
+`mop/cli/service/agent.py`, #150), клиент — `mop/bus.py`.
 
 Шина довозит байты до узла; разговор с самой сессией claude — отдельный слой,
 [CHANNEL.md](CHANNEL.md).

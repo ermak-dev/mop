@@ -24,20 +24,19 @@
 Права проверяются дважды: на сервере NATS (кто в какой субъект пишет) и здесь
 (какой глагол, каким субъектом и про чьего папета). Право, проверенное в одном
 месте, однажды окажется проверенным ни в одном.
+
+Здесь -- глаголы и решение о праве, данные без печати. Программа (подключение,
+петля, --check) -- командлет `mop agent`, mop/cli/service/agent.py (#150).
 """
 import asyncio
 import base64
+import collections
 import json
 import os
 import shlex
 import socket
 import sys
 import time
-
-try:
-    import nats
-except ImportError:
-    sys.exit("bus library needed: pip install --user --break-system-packages nats-py")
 
 from . import bus, busnames, driver, fsutil, lease, usage
 from .driver import clone_dir, target_dir, why
@@ -49,26 +48,6 @@ HOME = os.path.expanduser("~")
 # исполнить команду не там. Дефолт host — узел, ничего про драйверы не
 # знающий, обязан вести себя ровно как раньше.
 DRIVER = driver.current()
-
-# Глаголы, доступные не-мастеру. Папет имеет право написать соседу и посмотреть,
-# кто чем занят; печатать в чужой TUI и писать файлы — не имеет.
-PUBLIC_VERBS = ("ping", "local", "state", "states", "send", "tail")
-
-# Глаголы узла, а не проекта: место на диске — факт про хост со всеми его
-# жильцами, и мастеру проекта соседняя нагрузка не показывается.
-#
-# `write` отсюда убран. Он лежал здесь из-за «мастер проекта A перезапишет
-# креды проекта B», но перезаписывать в этой установке нечего: оба файла из
-# WRITABLE собираются не из проекта мастера, а из машины — .credentials.json
-# из логина claude.ai управляющей машины, secrets.env из .env самого mop
-# (`puppets.LOCAL_KEYS_FILE` — это PROJECT репозитория mop, а не проекта).
-# Мастер любого проекта везёт байт в байт то же, что вёз бы оператор. Ценой
-# запрета было `mop login` из мастер-шелла: он отбивался по каждому узлу, и
-# doctor оставался без единственного лечения протухшего логина.
-#
-# Папета это не касается: `write` не в PUBLIC_VERBS, а креды puppet-<проект>
-# в субъект .rpc не пишут вовсе.
-ADMIN_VERBS = ("disk", "junk")
 
 # Что разрешено отправлять в пейн. Тот же список, что у фронтенда, — но
 # проверка здесь настоящая, а там подсказка пользователю.
@@ -143,21 +122,60 @@ async def bsh(name, script, timeout=20):
     return await driver.sh(script, timeout, prefix=DRIVER.argv(name))
 
 
+class Tmux:
+    """Строки скрипта для tmux папета: и сервер (-L), и сессия (-t) зовутся
+    его именем. Только строки -- исполняет bsh, и имя до шелла доходит лишь
+    после driver.valid_name."""
+
+    def __init__(self, name):
+        self.name = name
+        self.base = f"tmux -L {name}"
+
+    def alive(self):
+        return f"{self.base} has-session -t {self.name} 2>/dev/null"
+
+    def screen(self, lines):
+        """Последние непустые строки буфера."""
+        return (f"{self.base} capture-pane -t {self.name} -p -S - "
+                f"| grep -v '^$' | tail -{lines}")
+
+    def buffer(self):
+        """Весь буфер, с историей."""
+        return f"{self.base} capture-pane -p -t {self.name} -S -"
+
+    def visible(self):
+        return f"{self.base} capture-pane -p -t {self.name}"
+
+    def keys(self, keys):
+        return f"{self.base} send-keys -t {self.name} {keys}"
+
+    def press(self, key):
+        """Голая клавиша и экран после неё."""
+        return f"{self.keys(key)}; sleep 1; {self.visible()}"
+
+    def type(self, command):
+        """Очистить строку, напечатать команду, Enter, экран. Кавычку в
+        команде отбивает вызывающий: команда идёт в шелл одной строкой."""
+        quoted = f"'{command}'"
+        keys = (f"{self.keys('C-u')}; sleep 0.3; "
+                f"{self.keys(quoted)}; sleep 0.3; ") if command else ""
+        return keys + f"{self.keys('Enter')}; sleep 2; {self.visible()}"
+
+
 async def tmux_alive(name):
-    _, code = await bsh(name, f"tmux -L {name} has-session -t {name} 2>/dev/null")
+    _, code = await bsh(name, Tmux(name).alive())
     return code == 0
 
 
 async def screen(name, lines=SCREEN_LINES):
-    out, _ = await bsh(name, f"tmux -L {name} capture-pane -t {name} -p -S - "
-                             f"| grep -v '^$' | tail -{lines}")
+    out, _ = await bsh(name, Tmux(name).screen(lines))
     return out
 
 
 async def pane_lines(name):
     """Весь буфер пейна без хвостовых пустых строк, которыми tmux добивает
     видимую часть."""
-    out, code = await bsh(name, f"tmux -L {name} capture-pane -p -t {name} -S -")
+    out, code = await bsh(name, Tmux(name).buffer())
     if code not in (0, None):
         raise RuntimeError(f"tmux in {name}: {why(out, code)}")
     lines = out.splitlines()
@@ -284,15 +302,15 @@ async def facts(name):
 
 
 # ─── глаголы ─────────────────────────────────────────────────────────────
-async def v_ping(_req):
+async def v_ping(_conn, _req):
     return {"node": node_name()}
 
 
-async def v_state(req):
+async def v_state(_conn, req):
     return await facts(req["name"])
 
 
-async def v_states(req):
+async def v_states(_conn, req):
     """Пачкой: у узла обычно несколько папетов, и спрашивают о них всегда
     вместе. Одна поездка вместо N.
 
@@ -304,7 +322,7 @@ async def v_states(req):
     return {"puppets": dict(zip(names, got))}
 
 
-async def v_sizes(req):
+async def v_sizes(_conn, req):
     """Место папетов пачкой: клон + target, du по спросу.
 
     Отдельный глагол, а не поле в states: du небыстрый, и воткнуть его в
@@ -316,7 +334,7 @@ async def v_sizes(req):
     return {"sizes": dict(zip(names, kbs))}
 
 
-async def v_local(req):
+async def v_local(_conn, req):
     """Папета, живущие на этом узле, — по сокетам tmux-серверов.
 
     Ростер без Nomad. Нужен узловому `mop mcp`: токена у него больше нет, и
@@ -367,7 +385,7 @@ async def _unclaim(name, undo):
                     if body else f"rm -f {shlex.quote(path)}")
 
 
-async def v_send(req):
+async def v_send(conn, req):
     """Сообщение в сессию папета. -> {msg_id} либо {error}.
 
     `notify=true` не блокирует ответ: подписку на простой держит фоновая
@@ -393,19 +411,19 @@ async def v_send(req):
         return out
     if note:
         out["owner_note"] = note
-    await _event("send", name, text=f"from {req.get('from_name', 'mop')}")
+    await _event(conn, "send", name, text=f"from {req.get('from_name', 'mop')}")
     if req.get("notify") and not wait:
         # Куда отвечать, говорит сам мастер: инбокс адресуется мастером, а не
         # проектом, иначе два терминала в одном проекте получали бы вести друг
         # друга. Без reply_to ждать бессмысленно — некому сказать.
         if req.get("reply_to"):
-            asyncio.create_task(_watch_idle(name, req["reply_to"]))
+            asyncio.create_task(_watch_idle(conn, name, req["reply_to"]))
         else:
             out["notify"] = "no reply_to given — nothing to notify"
     return out
 
 
-async def _watch_idle(name, reply_to):
+async def _watch_idle(conn, name, reply_to):
     """Дождаться простоя и сказать мастеру, который об этом попросил.
 
     Ожидание держит session.py в теле (глагол wait-idle): подписка идёт к
@@ -416,24 +434,22 @@ async def _watch_idle(name, reply_to):
         "wait-idle", clone_dir(name), IDLE_WAIT, name[-8:]), timeout=IDLE_WAIT + 20)
     if r.get("error"):
         return await _tell_master(
-            reply_to, f"mop: gave up waiting for {name} to idle: {r['error']}")
+            conn, reply_to, f"mop: gave up waiting for {name} to idle: {r['error']}")
     state = r.get("state")
-    await _tell_master(reply_to, f"mop: puppet {name} — {state}" if state
+    await _tell_master(conn, reply_to, f"mop: puppet {name} — {state}" if state
                        else f"mop: {name} did not report idle within {IDLE_WAIT}s")
-    await _event("idle", name, text=state or f"no idle within {IDLE_WAIT}s")
+    await _event(conn, "idle", name, text=state or f"no idle within {IDLE_WAIT}s")
 
 
-async def _tell_master(reply_to, text):
-    if _conn is None:
-        return
+async def _tell_master(conn, reply_to, text):
     try:
-        await _conn.publish(reply_to, json.dumps(
+        await conn.publish(reply_to, json.dumps(
             {"node": node_name(), "text": text}, ensure_ascii=False).encode())
     except Exception:
         pass
 
 
-async def _event(kind, name=None, **fields):
+async def _event(conn, kind, name=None, **fields):
     """Запись в журнал проекта (mop.<проект>.events, #66).
 
     Агент публикует то, что делает сам: доставил сообщение, дождался
@@ -443,22 +459,20 @@ async def _event(kind, name=None, **fields):
     самого папета, а не из субъекта запроса: оператор пишет из admin, а
     событие принадлежит проекту. Отказ — тишина: журнал вторичен, и ронять
     глагол из-за него нельзя."""
-    if _conn is None:
-        return
     project = await puppet_project(name) if name else bus.ADMIN
     try:
-        await _conn.publish(bus.events(project), json.dumps(
+        await conn.publish(bus.events(project), json.dumps(
             {"event": kind, "node": node_name(), "name": name, "project": project,
              "at": time.time(), **fields}, ensure_ascii=False).encode())
     except Exception:
         pass
 
 
-async def v_tail(req):
+async def v_tail(_conn, req):
     return {"lines": await pane_lines(req["name"])}
 
 
-async def v_disk(_req):
+async def v_disk(_conn, _req):
     """Место в хранилище тел. Узловой факт: давление оценивает мастер
     (mop gc), здесь только цифра.
 
@@ -470,7 +484,7 @@ async def v_disk(_req):
     return await DRIVER.capacity()
 
 
-async def v_wipe(req):
+async def v_wipe(conn, req):
     """Снести рабочую копию папета и восстановить её из git; target — целиком.
 
     Это половина рецикла (вторая — перерегистрация джоба у мастера). Клон не
@@ -494,11 +508,11 @@ async def v_wipe(req):
     if await tmux_alive(name):
         return {"error": f"{name}: tmux session is alive — stop the job first"}
     # Событие до сноса: после него origin клона спрашивать уже не у кого.
-    await _event("wipe", name)
+    await _event(conn, "wipe", name)
     return await DRIVER.destroy(name)
 
 
-async def v_type(req):
+async def v_type(conn, req):
     """Напечатать слэш-команду в пейн и вернуть экран после неё.
 
     Печатью, а не сообщением по каналу: слэш-команды через канал не проходят
@@ -512,27 +526,20 @@ async def v_type(req):
     if command in KEYS_ALLOWED:
         # Голая клавиша: ни очистки строки, ни Enter следом — Escape снимает
         # диалог, а Enter после него отправил бы пустой ход.
-        out, code = await bsh(name,
-                              f"tmux -L {name} send-keys -t {name} {command}; "
-                              f"sleep 1; tmux -L {name} capture-pane -p -t {name}")
+        out, code = await bsh(name, Tmux(name).press(command))
         return {"screen": out} if code in (0, None) else {"error": out.strip()}
     if command.split()[0:1] and command.split()[0] not in SLASH_ALLOWED:
         return {"error": f"only allowed: {', '.join(SLASH_ALLOWED + KEYS_ALLOWED)}"}
     if "'" in command:
         return {"error": "quote in command: command goes to the shell as one line"}
-    keys = ""
-    if command:
-        keys = (f"tmux -L {name} send-keys -t {name} C-u; sleep 0.3; "
-                f"tmux -L {name} send-keys -t {name} '{command}'; sleep 0.3; ")
-    out, code = await bsh(name, keys + f"tmux -L {name} send-keys -t {name} Enter; "
-                                      f"sleep 2; tmux -L {name} capture-pane -p -t {name}")
+    out, code = await bsh(name, Tmux(name).type(command))
     if code not in (0, None):
         return {"error": out.strip() or f"tmux exit {code}"}
-    await _event("type", name, text=command)
+    await _event(conn, "type", name, text=command)
     return {"screen": out}
 
 
-async def v_write(req):
+async def v_write(_conn, req):
     """Атомарная запись файла из белого списка, 600.
 
     Заменяет ту ветку раздачи кредов, что ездила шеллом в аллокацию. Список
@@ -575,7 +582,7 @@ async def v_write(req):
     return {"written": written}
 
 
-async def v_junk(req):
+async def v_junk(_conn, req):
     """Что стоит на этом узле, БЕЗ фильтров: {node, driver, bodies,
     templates}.
 
@@ -609,7 +616,7 @@ async def v_junk(req):
             "templates": (await tmpl()) if tmpl else []}
 
 
-async def v_usage(req):
+async def v_usage(_conn, req):
     """Расход токенов папетов этого узла по дням: {usage: {папет: {дата:
     {input, output, cache_write, cache_read}}}}, окно — `days` суток включая
     сегодня, по местному времени узла.
@@ -645,14 +652,71 @@ async def v_usage(req):
     return {"node": node_name(), "usage": dict(zip(names, got))}
 
 
-VERBS = {"ping": v_ping, "local": v_local, "state": v_state,
-         "states": v_states, "sizes": v_sizes, "send": v_send,
-         "tail": v_tail, "type": v_type, "write": v_write,
-         "disk": v_disk, "wipe": v_wipe, "usage": v_usage, "junk": v_junk}
+# ─── права: одна таблица ─────────────────────────────────────────────────
+# Кому глагол дан (#150). Раньше это были четыре параллельных набора, и новый
+# глагол правился в четырёх местах.
+#
+# PUBLIC -- и не-мастеру, субъектом .msg. Папет имеет право написать соседу и
+# посмотреть, кто чем занят; печатать в чужой TUI и писать файлы -- не имеет.
+#
+# MASTER -- только субъектом .rpc: мастеру проекта и оператору.
+#
+# NODE -- глагол узла, а не проекта: только оператору (`mop.admin.*`). Место на
+# диске -- факт про хост со всеми его жильцами, и мастеру проекта соседняя
+# нагрузка не показывается.
+#
+# `write` из NODE убран. Он лежал там из-за «мастер проекта A перезапишет
+# креды проекта B», но перезаписывать в этой установке нечего: оба файла из
+# WRITABLE собираются не из проекта мастера, а из машины — .credentials.json
+# из логина claude.ai управляющей машины, secrets.env из .env самого mop
+# (`puppets.LOCAL_KEYS_FILE` — это PROJECT репозитория mop, а не проекта).
+# Мастер любого проекта везёт байт в байт то же, что вёз бы оператор. Ценой
+# запрета было `mop login` из мастер-шелла: он отбивался по каждому узлу, и
+# doctor оставался без единственного лечения протухшего логина. Папета это не
+# касается: `write` не PUBLIC, а креды puppet-<проект> в субъект .rpc не пишут
+# вовсе.
+#
+# named -- глагол называет конкретного папета, и проект запроса обязан сойтись
+# с настоящим проектом папета.
+PUBLIC, MASTER, NODE = "public", "master", "node"
+Verb = collections.namedtuple("Verb", "fn scope named")
+VERBS = {
+    "ping":   Verb(v_ping,   PUBLIC, False),
+    "local":  Verb(v_local,  PUBLIC, False),
+    "state":  Verb(v_state,  PUBLIC, True),
+    "states": Verb(v_states, PUBLIC, False),
+    "sizes":  Verb(v_sizes,  MASTER, False),
+    "send":   Verb(v_send,   PUBLIC, True),
+    "tail":   Verb(v_tail,   PUBLIC, True),
+    "type":   Verb(v_type,   MASTER, True),
+    "write":  Verb(v_write,  MASTER, False),
+    "disk":   Verb(v_disk,   NODE,   False),
+    "wipe":   Verb(v_wipe,   MASTER, True),
+    "usage":  Verb(v_usage,  MASTER, False),
+    "junk":   Verb(v_junk,   NODE,   False),
+}
+# Прежние наборы -- выводом из таблицы, для тех, кто их читает.
+PUBLIC_VERBS = tuple(v for v, d in VERBS.items() if d.scope == PUBLIC)
+ADMIN_VERBS = tuple(v for v, d in VERBS.items() if d.scope == NODE)
+NAMED_VERBS = tuple(v for v, d in VERBS.items() if d.named)
 
-# Глаголы, которые называют конкретного папета: у них проект запроса обязан
-# сойтись с настоящим проектом папета.
-NAMED_VERBS = ("state", "send", "tail", "type", "wipe")
+
+def refusal(verb, public, project):
+    """Отказ по глаголу, субъекту и проекту, либо None. Проверку владельца
+    папета (named) делает handle: она спрашивает клон."""
+    spec = VERBS.get(verb)
+    if spec is None:
+        return f"no such verb {verb}; available: {', '.join(sorted(VERBS))}"
+    if public and spec.scope != PUBLIC:
+        # Не «нет прав», а прямо: глагол существует, но не в этом субъекте.
+        return f"verb {verb} is available to the master only"
+    if spec.scope == NODE and project != busnames.ADMIN:
+        return f"verb {verb} is node-level, not given to project {project}"
+    return None
+
+
+def foreign(name, project):
+    return f"puppet {name} is not in project {project}"
 
 
 async def _mine(req, name):
@@ -661,10 +725,7 @@ async def _mine(req, name):
 
 
 # ─── петля ───────────────────────────────────────────────────────────────
-_conn = None
-
-
-async def handle(msg, public):
+async def handle(conn, msg, public):
     """Разбор и три проверки: глагол существует, субъект его допускает, папет
     принадлежит спрашивающему проекту.
 
@@ -679,21 +740,16 @@ async def handle(msg, public):
     req["_project"] = parts[1] if len(parts) > 1 else ""
 
     verb = req.get("verb")
-    fn = VERBS.get(verb)
-    if fn is None:
-        out = {"error": f"no such verb {verb}; available: {', '.join(sorted(VERBS))}"}
-    elif public and verb not in PUBLIC_VERBS:
-        # Не «нет прав», а прямо: глагол существует, но не в этом субъекте.
-        out = {"error": f"verb {verb} is available to the master only"}
-    elif verb in ADMIN_VERBS and req["_project"] != bus.ADMIN:
-        out = {"error": f"verb {verb} is node-level, not given to project {req['_project']}"}
-    elif verb in NAMED_VERBS and not await _mine(req, req.get("name") or ""):
+    why = refusal(verb, public, req["_project"])
+    if why is None and VERBS[verb].named and not await _mine(req, req.get("name") or ""):
         # Главная проверка проектирования. Прав NATS тут мало: мастер проекта A
         # законно пишет в свой субъект, но может назвать папета из B.
-        out = {"error": f"puppet {req.get('name')} is not in project {req['_project']}"}
+        why = foreign(req.get("name"), req["_project"])
+    if why:
+        out = {"error": why}
     else:
         try:
-            out = await fn(req)
+            out = await VERBS[verb].fn(conn, req)
         except Exception as e:
             out = {"error": f"{verb}: {e}"}
     try:
@@ -702,69 +758,33 @@ async def handle(msg, public):
         pass
 
 
-async def serve():
-    global _conn
-    c = bus.config(bus.NODE_FILE)
-    node = node_name()
-    _conn = await nats.connect(
-        **bus.auth(c), name=f"mop-agent/{node}",
-        allow_reconnect=True, max_reconnect_attempts=-1, reconnect_time_wait=2)
-    # cb обязан быть корутиной — nats-py отвергает обычную функцию. И каждый
-    # запрос уходит в свою задачу: последовательная обработка означала бы, что
-    # одно долгое ожидание простоя запирает весь узел.
+async def attach(conn, node):
+    """Подписать агента узла на его субъекты и объявить подъём. -> [субъекты].
+
+    cb обязан быть корутиной — nats-py отвергает обычную функцию. И каждый
+    запрос уходит в свою задачу: последовательная обработка означала бы, что
+    одно долгое ожидание простоя запирает весь узел.
+
+    Маска по проекту: агент обслуживает всех жильцов узла, а кто из какого
+    проекта — решает уже проверка в handle. Общий all.msg — для тех, кто не
+    знает состава пула. Те же субъекты, что в правах узла (natsconf, #144)."""
     async def on_rpc(msg):
-        asyncio.create_task(handle(msg, public=False))
+        asyncio.create_task(handle(conn, msg, public=False))
 
     async def on_msg(msg):
-        asyncio.create_task(handle(msg, public=True))
+        asyncio.create_task(handle(conn, msg, public=True))
 
-    # Маска по проекту: агент обслуживает всех жильцов узла, а кто из какого
-    # проекта — решает уже проверка в handle. Общий all.msg — для тех, кто не
-    # знает состава пула. Те же субъекты, что в правах узла (natsconf, #144).
     subs = busnames.agent_subscriptions(node)
     for subj in subs["rpc"]:
-        await _conn.subscribe(subj, cb=on_rpc)
+        await conn.subscribe(subj, cb=on_rpc)
     for subj in subs["msg"]:
-        await _conn.subscribe(subj, cb=on_msg)
-    print(f"mop-agent: node {node}, subscribed to "
-          f"{', '.join(subs['rpc'] + subs['msg'])}", flush=True)
-    await _event("up", text=f"agent on {node}")
-    await asyncio.Event().wait()
-
-
-async def check():
-    """Проверка прогоном, а не чтением конфига: юнит, упавший в бесконечный
-    реконнект, systemd вполне устраивает, и «запущен» не значит «подписан».
-    Спрашиваем через публичный субъект узла, а не через .rpc: туда узлу писать
-    и не положено — это и есть та граница прав, ради которой шину заводили.
-    Первый прогон проверки уткнулся ровно в неё, и был неправ он, а не права."""
-    c = bus.config(bus.NODE_FILE)
-    print(f"mop-agent: node {node_name()}, bus {c['url']}, "
-          f"{len(VERBS)} verbs ({len(PUBLIC_VERBS)} public)")
-    nc = await nats.connect(**bus.auth(c), name="mop-agent/check",
-                            allow_reconnect=False, connect_timeout=5)
-    try:
-        msg = await nc.request(bus.subject(node_name(), "msg", project=bus.ADMIN),
-                               json.dumps({"verb": "ping"}).encode(), timeout=5)
-        print(f"subscribed: {msg.data.decode()}")
-    finally:
-        await nc.close()
-
-
-def main(argv):
-    if "--check" in argv:
-        try:
-            asyncio.run(check())
-        except Exception as e:
-            print(f"agent is NOT answering on its subject: {e}", file=sys.stderr)
-            return 1
-        return 0
-    try:
-        asyncio.run(serve())
-    except KeyboardInterrupt:
-        return 0
-    return 0
+        await conn.subscribe(subj, cb=on_msg)
+    await _event(conn, "up", text=f"agent on {node}")
+    return subs["rpc"] + subs["msg"]
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    # Переход (#150): юниты узлов зовут `python3 -m mop.agent [--check]`, и
+    # звать будут, пока ExecStart не переедет на `mop agent` прогоном deploy.
+    from mop.cli.service import agent as program
+    sys.exit(program.main(sys.argv[1:]))
