@@ -252,6 +252,12 @@ OPTIONAL = {
     # MCP-серверами идут после тулчейна, потому что регистрация сервера зовёт
     # claude, а claude ищется в PATH, который ставит nvm.
     "MOP_BODY_EXTRA": "",
+    # Git identity папетов (#167): чьим именем подписаны их коммиты. Установки,
+    # а не проекта и не образа -- её вписывает оператор. Пусто -- как было:
+    # в теле нет ни user.name, ни user.email. Обе или ни одной: половину
+    # отвергает `mop deploy`.
+    "MOP_GIT_NAME": "",
+    "MOP_GIT_EMAIL": "",
     # Сертификат TLS-прокси (#96): пути к PEM на контроллере. Пусто -- прогон
     # один раз заводит самоподписанный в secrets/ на имя MOP_SERVER_LAN, и
     # клиенты закрепляют его файлом; заданный проверяется системным доверием.
@@ -352,11 +358,13 @@ SERVER_SCOPED = {
                       "MOP_HOME", "MOP_USER"),
     # Nomad (NOMAD_ADDR выводится из адреса сервера и порта, плюс DC) и то,
     # что читает mop/spec.py: спецификацию папета собирает этот сервис, и
-    # профиль LLM по умолчанию тоже решает он (create без --llm).
+    # профиль LLM по умолчанию тоже решает он (create без --llm), как и git
+    # identity папетов (#167).
     "mop-cluster": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                     "MOP_HOME", "MOP_USER", "MOP_NOMAD_PORT", "MOP_POOL_DC",
                     "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",
-                    "MOP_PUPPET_PATH", "MOP_DEFAULT_LLM"),
+                    "MOP_PUPPET_PATH", "MOP_DEFAULT_LLM",
+                    "MOP_GIT_NAME", "MOP_GIT_EMAIL"),
     "mop-web": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                 "MOP_NOMAD_PORT", "MOP_POOL_DC"),
 }
