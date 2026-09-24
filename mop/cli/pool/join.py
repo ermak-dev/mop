@@ -7,11 +7,11 @@ With no server in any of them: the one server you are already logged in to
 whose registry has this clone's origin, else MOP_SERVER_LAN from .env. With
 no login: the one kept for that server, else $USER.
 
-The password is asked for (or read from MOP_BUS_PASSWORD; on the controller,
-from its own secrets/nats-op-<name>.pass) and checked by connecting before
-anything is written; if you are already logged in to that server under that
-login, nothing is asked. What you may reach is decided by your role in
-MOP_OPERATORS on the server.
+The password is asked for (or read from MOP_BUS_PASSWORD) and checked by
+connecting before anything is written; if you are already logged in to that
+server under that login, nothing is asked. Who you are and what you may
+reach is decided by the server's identity provider: its operators file
+(mop user) or its directory.
 
 The bus is reached through the server's TLS proxy (wss://<server>/nats); a
 self-signed certificate is pinned on first login, before the password is
@@ -30,7 +30,7 @@ import subprocess
 import sys
 
 from mop.cli import lib
-from mop import bus, config, context, creds, operators
+from mop import bus, config, context, creds
 
 
 def parse(argv):
@@ -54,18 +54,6 @@ def parse(argv):
         else:
             login = v
     return server, login
-
-
-def own_password(user):
-    """Пароль с самого контроллера: lookup('password') завёл его в secrets/.
-    Больше войти контроллеру не с чего -- спрашивать у человека пароль,
-    который лежит тут же, значит заставить его читать файл руками."""
-    path = os.path.expanduser(f"~/.config/mop/secrets/{operators.pass_file(user)}")
-    try:
-        with open(path) as f:
-            return f.read().strip() or None
-    except OSError:
-        return None
 
 
 def git(*args):
@@ -177,7 +165,7 @@ def _login(host, user, dest):
             print(f"{host}: self-signed certificate {creds.fingerprint(der)}")
     # Пароль -- после прокси: опечатка в адресе сервера отказывает сразу, а
     # не после вопроса о пароле.
-    password = os.environ.get("MOP_BUS_PASSWORD") or own_password(user)
+    password = os.environ.get("MOP_BUS_PASSWORD")
     if not password:
         if not sys.stdin.isatty():
             raise RuntimeError("no MOP_BUS_PASSWORD and no terminal to ask on")

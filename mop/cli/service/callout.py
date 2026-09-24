@@ -1,4 +1,4 @@
-"""mop callout: the bus's auth callout (unit mop-callout, MOP_AUTH_CALLOUT=on)
+"""mop callout: the bus's auth callout (unit mop-callout)
 
 On the server, as the pool user. nats-server asks it at every connect of
 someone not in auth_users: people are checked by the identity provider and

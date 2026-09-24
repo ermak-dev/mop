@@ -1294,6 +1294,12 @@ def check_deploy_check():
     inventory, key = os.path.join(d, "inventory.yaml"), os.path.join(d, "id")
     for f in (inventory, key, key + ".pub"):
         open(f, "w").close()
+    # Один человек в файле операторов: без людей deploy отказывает (#219).
+    from mop import identity
+    people = os.path.join(d, "operators")
+    with open(people, "w") as f:
+        f.write(identity.format_line(identity.Identity("anton", "admin", ("*",)),
+                                     identity.hash_password("x")) + "\n")
     calls, collected, checked = [], [], []
     listing = [INVENTORY_CLEAN]
     undo = no_network()
@@ -1307,7 +1313,7 @@ def check_deploy_check():
         subprocess.call = lambda argv, **kw: calls.append(argv) or 0
         subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(
             argv, 0, json.dumps(listing[0]), "")
-        playvars.playbook_vars = lambda: {"MOP_OPERATOR_SUBJECTS": ["x"]}
+        playvars.playbook_vars = lambda: {}
         deploy.missing_extras = lambda setting, root: []
         deploy.link = lambda name, target: None
         deploy.manifests = lambda origins: {}
@@ -1317,7 +1323,8 @@ def check_deploy_check():
         projects.read = lambda: []
         creds.collect = lambda *a, **kw: collected.append(1) or []
         creds.operator = lambda dest: "anton"
-        os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key})
+        os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key,
+                           "MOP_OPERATORS_FILE": people})
         for argv, dry in (([], False), (["--check"], True)):
             calls.clear(), collected.clear(), checked.clear()
             out, err, code = silent_run(deploy.main, argv)
