@@ -331,10 +331,21 @@ def parse_llm(args):
     for a in it:
         if a == "--llm":
             profile = next(it, "")
+            # Следом флаг, а не имя: `--llm --fresh` съедал бы соседний флаг
+            # как профиль и отказывал про профиль «--fresh».
+            if profile.startswith("-"):
+                rest.append(profile)
+                profile = ""
         elif a.startswith("--llm="):
             profile = a.split("=", 1)[1]
         else:
             rest.append(a)
+    if profile == "":
+        # Забытое значение -- ошибка использования, а не «нет профиля ''»
+        # (#164). RuntimeError: диспетчер делает из него одну строку в
+        # stderr, как из любого отказа (#146).
+        raise RuntimeError(f"--llm needs a profile name; available: "
+                           f"{', '.join(llm.profiles())}")
     if profile is not None:
         llm.require(profile)
     return profile, rest
