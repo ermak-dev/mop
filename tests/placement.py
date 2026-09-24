@@ -14,6 +14,11 @@ SOLUTION: сервис кластера помечает джоб в очере�
 Nomad), а диагноз читает пометку.
 RESULT: 10/10.
 STATUS: FIXED — see #118
+
+Потолок памяти (#197): спека несёт ограничение `${meta.mop_mem_cap_mb} >=
+потолок папета`, и очередь по нему -- ни образ, ни слоты. placement_gap
+говорит, какое из ограничений держит, сравнивая как Nomad (численно).
+STATUS: FIXED — see #197
 """
 import os
 import sys
@@ -61,6 +66,33 @@ def main():
     check("unserved diagnosis names the cure", "mop project add" in d, True)
     d = puppets._placement_issue(queued_job(), None, unserved=False)["diagnosis"]
     check("served but queued is about slots", d, "queued — no free slots in the pool")
+
+    # ── #197: потолок узла против потолка папета ─────────────────────────
+    # Спека несёт ограничение `${meta.mop_mem_cap_mb} >= потолок`; очередь,
+    # которую держит оно, -- не образ и не слоты, и диагноз обязан это сказать.
+    both = {"mop_projects": "mop"}
+    check("cap above the ceiling", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "32768"})], 16384), False)
+    check("cap equal to the ceiling", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "16384"})], 16384), False)
+    check("cap below the ceiling", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "8192"})], 16384), "memory")
+    # Численно, как Nomad: лексически "9000" >= "12288".
+    check("cap compared as a number", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "9000"})], 12288), "memory")
+    # Узел без ключа ограничение не проходит (Nomad: lFound=false).
+    check("serving node without a cap", spec.placement_gap("mop", [node(both)], 8192), "memory")
+    check("one of the serving nodes is big enough",
+          spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "4096"}),
+                                node({**both, "mop_mem_cap_mb": "65536"})], 16384), False)
+    # Большой потолок у узла, который проекта не обслуживает, не в счёт.
+    check("the big node has no image",
+          spec.placement_gap("mop", [node({"mop_projects": "rugent", "mop_mem_cap_mb": "65536"}),
+                                node({**both, "mop_mem_cap_mb": "4096"})], 16384), "memory")
+    check("unserved stays a yes/no over both", spec.unserved("mop", [node({**both, "mop_mem_cap_mb": "8192"})], 16384), True)
+    check("no image still reads as the image", spec.placement_gap("mop", [node({"mop_mem_cap_mb": "65536"})], 16384), "image")
+    # Спека до #197 потолка узла не спрашивает.
+    check("a spec without a ceiling", spec.placement_gap("mop", [node(both)], None), False)
+    d = puppets._placement_issue(queued_job(), None, unserved="memory", ceiling=16384)["diagnosis"]
+    check(f"memory diagnosis names the ceiling and the node's cap ({d})",
+          "16384" in d and "mop_mem_cap_mb" in d and "image" not in d and "no free slots" not in d, True)
+    check(f"memory diagnosis names the project's ask ({d})", "MOP_MEM_MB" in d and "mop" in d, True)
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
