@@ -853,6 +853,7 @@ def check_output_rest():
         print(f"FAIL driver build echoes on success: {out!r} code {code!r}")
     failed += check_output_179()
     failed += check_output_182()
+    failed += check_restore_all_188()
     return failed
 
 
@@ -1004,6 +1005,57 @@ def check_output_182():
         (image.prepare, image.build, image.clear, image.bake, image.announce,
          nomad.register, spec.job_spec, projects.read, natsconf.apply,
          natsconf.reload) = keep
+        undo()
+    return failed
+
+
+def check_restore_all_188():
+    """HYPOTHESIS (#188): image.restore поднимал папетов до первого отказа
+    Nomad; остальные снятые в `gone` не пробовались вовсе, и об этом не
+    говорил никто -- пересборка оставляла их лежать.
+    SOLUTION: пробовать каждого, отказы собрать и бросить одним исключением,
+    по строке на папета («<папет> on <узел>: not raised again: <причина>»).
+    STATUS: FIXED — see #188"""
+    from mop import image, nomad, spec
+    failed = 0
+    undo = no_network()
+    keep = (nomad.register, spec.job_spec)
+    gone = [{"name": f"pu-p-{i}", "origin": "git@h:g/p.git", "llm": "claude",
+             "node": "hyper"} for i in (1, 2, 3)]
+    try:
+        spec.job_spec = lambda name, origin, llm: {"ID": name}
+        for refused in ({"pu-p-1"}, {"pu-p-1", "pu-p-3"}, set()):
+            registered = []
+
+            def register(job, refused=refused):
+                if job["ID"] in refused:
+                    raise RuntimeError(f"Nomad refused {job['ID']}")
+                registered.append(job["ID"])
+            nomad.register = register
+            try:
+                image.restore(gone)
+                err = None
+            except RuntimeError as e:
+                err = str(e)
+            want = [p["name"] for p in gone if p["name"] not in refused]
+            if registered != want:
+                failed += 1
+                print(f"FAIL restore with {sorted(refused)} refused registered "
+                      f"{registered}, wanted {want}")
+            if not refused:
+                if err is not None:
+                    failed += 1
+                    print(f"FAIL restore with nothing refused raised: {err!r}")
+                continue
+            lines = (err or "").splitlines()
+            want_lines = [f"{n} on hyper: not raised again: Nomad refused {n}"
+                          for n in sorted(refused)]
+            if lines != want_lines:
+                failed += 1
+                print(f"FAIL restore with {sorted(refused)} refused: {err!r}, "
+                      f"wanted {want_lines}")
+    finally:
+        nomad.register, spec.job_spec = keep
         undo()
     return failed
 

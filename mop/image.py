@@ -139,15 +139,21 @@ def clear(project, force=False):
 def restore(gone):
     """Поднять снесённых заново — той же спекой, из нового образа. Зовётся
     и после неудачной сборки: старый образ на месте, папетам есть из чего
-    клонироваться."""
+    клонироваться.
+
+    Каждого, а не до первого отказа (#188): остановка на первом оставляла
+    остальных снятых лежать, и об этом не говорил никто. Отказы -- одним
+    исключением, по строке на папета, с именем (#182): голый отказ Nomad не
+    говорил, кого из снятых не подняли."""
+    failed = []
     for p in gone:
         try:
             nomad.register(spec.job_spec(p["name"], p["origin"], p["llm"]))
         except Exception as e:
-            # С именем папета (#182): голый отказ Nomad не говорил, кого из
-            # снятых не подняли.
-            raise RuntimeError(f"{p['name']} on {p.get('node') or '?'}: "
-                               f"not raised again: {e}") from e
+            failed.append(f"{p['name']} on {p.get('node') or '?'}: "
+                          f"not raised again: {e}")
+    if failed:
+        raise RuntimeError("\n".join(failed))
 
 
 def build(origin, got, out=None, fresh=False, force=False, on_line=None,
