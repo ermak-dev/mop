@@ -38,12 +38,17 @@
     # Пока здесь стояло умолчание игры (become: no), прогон был зелёным
     # на всём, что только проверяет состояние, и падал на первом чтении
     # чужого файла: pg_hba.conf, 0640 postgres.
+    #
+    # Своё имя переменной цикла (#194): item принадлежит файлу установки, и
+    # его собственный цикл иначе затенял бы внешний.
     - name: What this installation adds to a body
       ansible.builtin.include_tasks:
-        file: "{{ playbook_dir }}/../{{ item | trim }}"
+        file: "{{ playbook_dir }}/../{{ extra_file | trim }}"
         apply:
           become: yes
       loop: "{{ (MOP_BODY_EXTRA | default('')).split(',') | select | list }}"
+      loop_control:
+        loop_var: extra_file
 
 # Что проект печёт в свою песочницу (#61): vars и tasks его
 # .mop/sandbox.yaml. На узле-гипервизоре это делает сборка образа
@@ -82,8 +87,10 @@
       loop_control:
         label: "{{ item.key }}"
 
+    # item -- проекта (#194): как и у файлов установки выше.
     - name: Sandbox tasks of each project that has any
-      ansible.builtin.include_tasks: "{{ item.value.sandbox_tasks }}"
+      ansible.builtin.include_tasks: "{{ sandbox_project.value.sandbox_tasks }}"
       loop: "{{ mop_manifests | dict2items | selectattr('value.sandbox_tasks', 'defined') | list }}"
       loop_control:
-        label: "{{ item.key }}"
+        loop_var: sandbox_project
+        label: "{{ sandbox_project.key }}"
