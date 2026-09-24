@@ -409,6 +409,58 @@ def check_git_identity():
     return bad, cases
 
 
+# Спека собирается в подпроцессе с данным MOP_DRIVER: настройки читаются
+# при импорте, и сменить драйвер можно только свежим процессом. Сеть в нём
+# закрыта на уровне сокета до первого импорта.
+_SPEC_UNDER_DRIVER = r"""
+import json, socket, sys
+def refuse(*a, **k):
+    raise RuntimeError("the check tried to reach the network")
+socket.socket.connect = socket.socket.connect_ex = refuse
+sys.path.insert(0, sys.argv[1])
+from mop import spec
+print(json.dumps(spec.job_spec("pu-mop-1", "git@h:g/mop.git"), sort_keys=True))
+"""
+
+
+def check_driver_free_183():
+    """HYPOTHESIS (#183): спеку строит сервис кластера на сервере, а пути в её
+    окружении (#155) берутся из mop/driver -- не зависят ли они от драйвера
+    машины, которая строит спеку, а не узла, куда встанет папет?
+    RESULT: не зависят: пути читают только MOP_HOME, MOP_DRIVER на пути спеки
+    не читается вовсе (разведка #183). Проверка закрепляет это: правка,
+    которая сделает значение спеки драйверным, упадёт здесь. Узловые
+    MOP_HOME/MOP_USER/MOP_PUPPET_SEED/MOP_MEM_MB в спеке -- отдельная задача
+    слоя deploy (#186).
+    STATUS: FIXED — see #183"""
+    import subprocess
+    bad = cases = 0
+    got = {}
+    for drv in ("host", "pve", "no-such-driver"):
+        env = dict(os.environ, MOP_DRIVER=drv, MOP_SERVER_LAN="192.0.2.1",
+                   MOP_HOME="/home/pool", MOP_USER="pool")
+        env.pop("MOP_BUS_CONFIG", None)
+        root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        r = subprocess.run([sys.executable, "-c", _SPEC_UNDER_DRIVER, root], env=env,
+                           capture_output=True, text=True)
+        cases += 1
+        if r.returncode:
+            bad += 1
+            print(f"FAILED  job_spec under MOP_DRIVER={drv}: {r.stderr[-300:]}")
+            continue
+        got[drv] = json.loads(r.stdout)
+    for drv in ("pve", "no-such-driver"):
+        cases += 1
+        if drv in got and "host" in got:
+            spec_host = got["host"]
+            # PU_CONTINUE -- время; при cont=False оно пустое и равно.
+            if got[drv] != spec_host:
+                bad += 1
+                print(f"FAILED  job_spec differs under MOP_DRIVER={drv} from host: "
+                      f"the spec is built on the server, not on the puppet's node")
+    return bad, cases
+
+
 def main():
     if sys.argv[1:] == ["--snapshot"]:
         # Снять слепок заново: только осознанно, когда спека меняется нарочно
@@ -428,6 +480,9 @@ def main():
     gbad, gcases = check_git_identity()
     bad += gbad
     cases += gcases
+    dbad, dcases = check_driver_free_183()
+    bad += dbad
+    cases += dcases
 
     for what, j, want in STALE:
         cases += 1
