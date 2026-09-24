@@ -92,16 +92,14 @@ def check_decisions():
 
 
 def check_tmux():
-    """Девять мест адресации tmux -- те же строки, что до #150."""
+    """Места адресации tmux -- те же строки, что до #150. Снимок экрана для
+    фактов ушёл вместе с ключом screen (#236)."""
     n = "pu-mop-1"
     t = agent.Tmux(n)
     out = []
     for got, want in (
             # tmux_alive
             (t.alive(), f"tmux -L {n} has-session -t {n} 2>/dev/null"),
-            # screen: порядок -t/-p прежний, сохранён как был
-            (t.screen(20), f"tmux -L {n} capture-pane -t {n} -p -S - "
-                           f"| grep -v '^$' | tail -20"),
             # pane_lines
             (t.buffer(), f"tmux -L {n} capture-pane -p -t {n} -S -"),
             # v_type: голая клавиша
@@ -815,7 +813,7 @@ def check_state_fact_224():
     import asyncio
     import json
     out = []
-    saved = (agent.bsh, agent.clone_facts, agent.tmux_alive, agent.screen)
+    saved = (agent.bsh, agent.clone_facts, agent.tmux_alive)
     rec = {"status": "idle", "waitingFor": None, "alive": True, "listen": False,
            "turn": {"event": "StopFailure", "at": 1790245436,
                     "error": "authentication_failed", "detail": "Login expired"}}
@@ -832,13 +830,10 @@ def check_state_fact_224():
     async def alive(name):
         return True
 
-    async def screen(name):
-        return "Herding bytes"
-
     async def clone(name):
         return {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
     try:
-        agent.clone_facts, agent.tmux_alive, agent.screen = clone, alive, screen
+        agent.clone_facts, agent.tmux_alive = clone, alive
         for what, answers, want_session, want_state, want_calls in (
                 ("new session.py", {"state": ("banner\n" + json.dumps(rec), 0)},
                  "idle 1 0", rec, ["state"]),
@@ -856,7 +851,50 @@ def check_state_fact_224():
                     or ("state" in got) != (want_state is not None) or calls != want_calls:
                 out.append(f"facts, {what} -> {got!r}, calls {calls}")
     finally:
-        (agent.bsh, agent.clone_facts, agent.tmux_alive, agent.screen) = saved
+        (agent.bsh, agent.clone_facts, agent.tmux_alive) = saved
+    return out
+
+
+# ── факты без экрана (#236) ──────────────────────────────────────────────
+# HYPOTHESIS: после #235 вердикт facts["screen"] не читает, а агент всё равно
+# снимает пейн (capture-pane) у каждого папета на каждом опросе ростера — в
+# теле pve это лишний заход в тело и 20 строк по шине. Держали его на переход
+# для мастеров со старой библиотекой; все они теперь не старше b0aca2c.
+# SOLUTION: facts не снимает экран и не шлёт ключ screen; вердикт по тем же
+# фактам прежний. tail/slash/attach снимают пейн своими глаголами.
+# STATUS: FIXED — see #236
+def check_no_screen_fact_236():
+    import asyncio
+    import json
+    from mop.state import verdict
+    out = []
+    saved = (agent.bsh, agent.clone_facts)
+    scripts = []
+    rec = {"status": "idle", "waitingFor": None, "alive": True, "listen": True,
+           "turn": {"event": "Stop", "at": 1790245436, "error": None, "detail": None}}
+
+    async def bsh(name, script, timeout=20):
+        scripts.append(script)
+        if "has-session" in script:
+            return "", 0
+        if "capture-pane" in script:
+            return "Herding bytes", 0
+        return json.dumps(rec), 0
+
+    async def clone(name):
+        return {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
+    try:
+        agent.bsh, agent.clone_facts = bsh, clone
+        got = asyncio.run(agent.facts("pu-mop-1"))
+        if "screen" in got:
+            out.append(f"facts must carry no screen key: {got!r}")
+        if any("capture-pane" in s for s in scripts):
+            out.append(f"facts must not capture the pane: {scripts!r}")
+        with_screen = {**got, "screen": "Not logged in · Run /login"}
+        if str(verdict(got)) != "free (master)" or str(verdict(with_screen)) != str(verdict(got)):
+            out.append(f"verdict must not change: {verdict(got)} vs {verdict(with_screen)}")
+    finally:
+        agent.bsh, agent.clone_facts = saved
     return out
 
 
@@ -866,7 +904,7 @@ def main():
                   check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
                   check_gates_40, check_caller_207, check_git_identity_167,
-                  check_state_fact_224):
+                  check_state_fact_224, check_no_screen_fact_236):
         try:
             failed += check()
         except Exception as e:
