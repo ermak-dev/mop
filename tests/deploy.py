@@ -154,6 +154,115 @@ def render(text, variables):
         **variables, lookup=lambda kind, name: variables[name] if kind == "vars" else None)
 
 
+# ── #184: пробы только для чтения в check-режиме ─────────────────────────────
+# HYPOTHESIS: в check-режиме ansible пропускает command/shell, пропущенная
+# задача ничего не регистрирует (ни stdout, ни rc), и задача, читающая её
+# результат, падает. Первая такая — «Trust the git host keys» в роли node,
+# поэтому `mop deploy --check` (#177) останавливался на каждой машине.
+# SOLUTION: check_mode: false на пробах, которые только читают; их результат
+# нужен и прогону без изменений.
+CMD_MODULES = {"command", "shell", "ansible.builtin.command", "ansible.builtin.shell"}
+# (файл роли, имя задачи, что она регистрирует, команды, из которых состоит)
+PROBES = [
+    ("node/tasks/main.yml", "Host keys of the git servers", "git_hostkeys", ["ssh-keyscan"]),
+    ("pve/tasks/main.yml", "The node's address as the server sees it", "pve_toward_server",
+     ["getent", "ip -4 -o route get"]),
+    ("pve/tasks/server.yml", "Ask the kernel where each hypervisor's slice goes", "route_check",
+     ["ip -4 route get"]),
+    ("nomad/tasks/server.yml", "How MOP_SERVER_LAN resolves on the server itself",
+     "server_name_here", ["getent"]),
+    ("nomad/tasks/server.yml", "Address of the server's default route", "server_route",
+     ["ip -4 route get"]),
+    ("web/tasks/package.yml", "Version of the package on the control machine",
+     "mop_package_fingerprint", ["git rev-parse", "git status --porcelain", "git diff", "sha256sum"]),
+    ("bus/tasks/watchdog.yml", "Check the pu-cleanup job is registered", "cleanup_status",
+     ["nomad job status"]),
+]
+# Чего в пробе быть не может: всё, что меняет машину.
+WRITES = re.compile(r"\b(rm|mv|cp|tee|install|mkdir|chmod|chown|systemctl|apt|apt-get|pip|"
+                    r"sed -i|nomad job run|touch|ln)\b|[^2&]>\s*[^&\s]")
+
+
+def site_tasks():
+    """Задачи, до которых доходит site.yml: import_playbook, роли, tasks_from,
+    include/import_tasks со статическим путём. -> [(файл, задача)]."""
+    seen, out = set(), []
+
+    def load(p):
+        with open(p) as fh:
+            return yaml.safe_load(fh) or []
+
+    def role(name, tasks_from="main"):
+        for sub in (f"tasks/{tasks_from}.yml", "handlers/main.yml"):
+            p = os.path.join(DEPLOY, "roles", name, sub)
+            if os.path.isfile(p) and p not in seen:
+                seen.add(p)
+                walk(load(p), p)
+
+    def walk(tasks, f):
+        for t in tasks or []:
+            if not isinstance(t, dict):
+                continue
+            for k in ("block", "rescue", "always"):
+                walk(t.get(k), f)
+            for inc in ("include_tasks", "import_tasks", "ansible.builtin.include_tasks",
+                        "ansible.builtin.import_tasks"):
+                v = t.get(inc)
+                v = v.get("file") if isinstance(v, dict) else v
+                if isinstance(v, str) and "{{" not in v:
+                    p = os.path.normpath(os.path.join(os.path.dirname(f), v))
+                    if os.path.isfile(p) and p not in seen:
+                        seen.add(p)
+                        walk(load(p), p)
+            for rk in ("include_role", "import_role", "ansible.builtin.include_role",
+                       "ansible.builtin.import_role"):
+                if rk in t:
+                    role(t[rk]["name"], t[rk].get("tasks_from", "main"))
+            out.append((f, t))
+
+    def playbook(p):
+        for play in load(p):
+            if "import_playbook" in play:
+                playbook(os.path.normpath(os.path.join(os.path.dirname(p), play["import_playbook"])))
+                continue
+            for sec in ("pre_tasks", "tasks", "post_tasks", "handlers"):
+                walk(play.get(sec), p)
+            for r in play.get("roles") or []:
+                role(r if isinstance(r, str) else r.get("role") or r.get("name"))
+    playbook(os.path.join(os.path.dirname(DEPLOY), "site.yml"))
+    return out
+
+
+def check_probes(check):
+    """STATUS: FIXED — see #184"""
+    tasks = site_tasks()
+    # Общее свойство: command/shell, чей результат читает другая задача,
+    # в check-режиме обязан выполняться.
+    for f, t in tasks:
+        reg = t.get("register")
+        if not reg or not CMD_MODULES & set(t) or t.get("check_mode") is False:
+            continue
+        readers = [o.get("name") for _, o in tasks if o is not t
+                   and re.search(r"\b" + re.escape(reg) + r"\b", yaml.safe_dump(o))]
+        check(f"{os.path.relpath(f, DEPLOY)}: {t.get('name')!r} registers {reg}, read by "
+              f"{readers}: it must run in check mode", not readers)
+    # Семь проб поимённо: только читают, в настоящем прогоне не «changed».
+    by = {(os.path.relpath(f, os.path.join(DEPLOY, "roles")), t.get("name")): t for f, t in tasks}
+    for path, name, reg, commands in PROBES:
+        t = by.get((path, name))
+        if t is None:
+            check(f"probe {path}: {name!r} exists", False)
+            continue
+        mod = next(k for k in t if k in CMD_MODULES)
+        text = t[mod]["cmd"] if isinstance(t[mod], dict) else t[mod]
+        check(f"probe {name!r}: register {reg}", t.get("register") == reg, t.get("register"))
+        check(f"probe {name!r}: check_mode: false", t.get("check_mode") is False)
+        check(f"probe {name!r}: changed_when: false", t.get("changed_when") is False)
+        missing = [c for c in commands if c not in " ".join(text.split())]
+        check(f"probe {name!r}: runs {commands}", not missing, missing)
+        check(f"probe {name!r}: changes nothing", not WRITES.search(text), WRITES.search(text))
+
+
 def main():
     cases = bad = 0
 
@@ -259,6 +368,8 @@ def main():
                                               if not l.lstrip().startswith("#")))
         want = [home] if home else []
         check(f"{needle!r} lives only in {home or 'no file'}", where == want, where)
+
+    check_probes(check)
 
     print(f"deploy: {cases - bad}/{cases}" + (" FAILED" if bad else " ok"))
     return 1 if bad else 0

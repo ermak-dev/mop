@@ -83,6 +83,8 @@
   loop: "{{ pve_hops }}"
   register: route_check
   changed_when: false
+  # Только читает, и её результат нужен и прогону без изменений (#184).
+  check_mode: false
 
 # Вердикт отдельной задачей, а не failed_when у команды: у команды нет
 # fail_msg, и отказ показывал голый вывод `ip route` при rc=0. Понять из него,
