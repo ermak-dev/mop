@@ -66,7 +66,15 @@ exec "$HOME/mop/bin/mop" driver run "$PU_NAME"
 # требует перерегистрации джоба.
 WRAPPER = r"""
 set -e
-d="$HOME/puppets/$PU_NAME"
+# Paths come from the job spec (#155), not from this text. An empty one is a
+# refusal before the first command: `rm -rf "$d"` and free_dir below over an
+# empty string would hit everything in the body.
+: "${PU_CLONE:?no PU_CLONE in the task environment}"
+: "${PU_TARGET:?no PU_TARGET in the task environment}"
+: "${PU_SECRETS:?no PU_SECRETS in the task environment}"
+: "${PU_PROJECT_CREDS:?no PU_PROJECT_CREDS in the task environment}"
+: "${PU_SECRETS_DIR:?no PU_SECRETS_DIR in the task environment}"
+d="$PU_CLONE"
 # The old session dies first, before anything touches the directory. It used to
 # die at the very bottom, just before the new session was opened -- some 140
 # lines and one `npx playwright install` later -- so a retarget removed the
@@ -97,7 +105,7 @@ if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" != "$PU_ORIGIN" 
     rm -rf "$d"
 fi
 if [ ! -d "$d/.git" ]; then
-    mkdir -p "$HOME/puppets"
+    mkdir -p "$(dirname "$d")"
     # Зеркало проекта, если тело принесло его с образом: объекты берутся
     # локально, а недостающее -- то, что появилось в origin после сборки
     # образа, -- git дотягивает по сети сам. Клон остаётся полноценным и
@@ -132,7 +140,7 @@ done
 # свежие на каждом подъёме, поверх вчерашних. Переменные читаются строками,
 # а не source: файл секретов не исполняем. Они идут в -e ДО наших, чтобы
 # проект не мог подменить MOP_PROJECT или кред шины.
-sec="$HOME/.config/mop/project-secrets/$PU_PROJECT"
+sec="$PU_SECRETS_DIR"
 if [ -d "$sec/files" ]; then
     cp -a "$sec/files/." "$d/"
 fi
@@ -227,7 +235,7 @@ edit_json "$HOME/.claude/settings.json" '.permissions.deny =
 # five of them filled a node's disk on 2026-08-26, which killed the WSL VM and
 # stranded every allocation on it. Boot is the only safe moment to drop
 # one: nothing is building yet, and the cache is pure derived data.
-TARGET_DIR="$HOME/.cache/target-$PU_NAME"
+TARGET_DIR="$PU_TARGET"
 if [ -d "$TARGET_DIR" ] \
     && [ "$(du -sm "$TARGET_DIR" 2>/dev/null | cut -f1 || echo 0)" -gt 30000 ]; then
     rm -rf "$TARGET_DIR"
@@ -242,7 +250,7 @@ if [ -n "$PU_LLM_ENV" ]; then
     done <<< "$(printf '%s' "$PU_LLM_ENV" | base64 -d)"
 fi
 if [ -n "$PU_LLM_KEY_VAR" ]; then
-    keyfile="$HOME/.config/mop/secrets.env"
+    keyfile="$PU_SECRETS"
     key=""
     # sed, а не source: файл с ключами не исполняем
     # Двойной доллар — экранирование интерполяции Nomad: спеку задачи он
@@ -266,7 +274,7 @@ fi
 # кто спрашивает, и такую подмену не поймал бы. Файл раскатывает deploy/setup.yml
 # по одному на проект; если его нет -- валимся громко, потому что папет без шины
 # читается мастером как живой, но молчащий.
-project_creds="$HOME/.config/mop/bus-$PU_PROJECT.json"
+project_creds="$PU_PROJECT_CREDS"
 if [ ! -f "$project_creds" ]; then
     echo "no credentials for project $PU_PROJECT in $project_creds -- set it up: mop project add $PU_ORIGIN" >&2
     exit 1
@@ -316,7 +324,7 @@ mc="$(grep -a '^MOP_CORES=' "$HOME/.config/mop/node.env" 2>/dev/null | tail -1 |
 # папеты однажды делили один CARGO_TARGET_DIR.
 tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
     "${project_env[@]}" \
-    -e CARGO_TARGET_DIR="$HOME/.cache/target-$PU_NAME" \
+    -e CARGO_TARGET_DIR="$PU_TARGET" \
     -e CARGO_BUILD_JOBS="$cores" \
     -e MOP_PROJECT="$PU_PROJECT" \
     -e MOP_BUS_CONFIG="$project_creds" \
@@ -348,11 +356,16 @@ def job_spec(name, origin, profile=None, cont=False):
     env = {
         "PU_NAME": name,
         "PU_ORIGIN": origin,
-        # Два имени одного: врапер исторически читает PU_PROJECT (посев из
-        # ~/puppet-env/<проект>), а проект и есть проект.
-        "PU_PROJECT": project,
         "PU_PROJECT": project,
         "PU_SEED": config.get("MOP_PUPPET_SEED"),
+        # Пути в теле (#155): врапер их не собирает, а читает. Одно место на
+        # мастера, агента и врапер — mop/driver; копия в тексте врапера
+        # расходилась бы с ними молча, узнать было бы только по симптому.
+        "PU_CLONE": driver.clone_dir(name),
+        "PU_TARGET": driver.target_dir(name),
+        "PU_SECRETS": driver.SECRETS_FILE,
+        "PU_PROJECT_CREDS": driver.project_creds(project),
+        "PU_SECRETS_DIR": driver.project_secrets_dir(project),
         "HOME": HOME,
         "PATH": config.get("MOP_PUPPET_PATH").replace("{HOME}", HOME),
         # Разовый токен: врапер гасит его маркером в клоне, поэтому историю
@@ -363,12 +376,15 @@ def job_spec(name, origin, profile=None, cont=False):
         "PU_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
         "PU_LLM_KEY_VAR": prof.get("key") or "",
         "PU_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
-        # Внутренний врапер — в спеке, как и был, но base64: узел исполняет
-        # его в теле, каким бы оно ни было. Утащить его в пакет на узле
-        # значило бы молча поменять инвариант «правка сессии доезжает
-        # перерегистрацией».
-        "PU_WRAPPER": base64.b64encode(WRAPPER.encode()).decode(),
     }
+    # Что `mop driver run` переливает в тело: всё окружение спеки, кроме
+    # самого врапера. Списком здесь, а не копией там (#155).
+    env["PU_CARRY"] = ",".join(env)
+    # Внутренний врапер — в спеке, как и был, но base64: узел исполняет
+    # его в теле, каким бы оно ни было. Утащить его в пакет на узле
+    # значило бы молча поменять инвариант «правка сессии доезжает
+    # перерегистрацией».
+    env["PU_WRAPPER"] = base64.b64encode(WRAPPER.encode()).decode()
     return {"Job": {
         "ID": name,
         "Name": name,

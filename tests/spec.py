@@ -174,6 +174,110 @@ def check_snapshot():
     return bad, len(SPEC_INPUTS) + 1
 
 
+# ── #155: пути узла — переменными спеки ───────────────────────────────────────
+# HYPOTHESIS: врапер сам собирал пути узла ($HOME/puppets/$PU_NAME,
+# target-$PU_NAME, secrets.env, bus-$PU_PROJECT.json, project-secrets/) — копии
+# driver.clone_dir, driver.target_dir и соседей, которые разъезжаются молча.
+# А CARRY в `mop driver run` перепечатывал список переменных спеки руками.
+# SOLUTION: пути считает job_spec (driver.*) и кладёт в окружение задачи,
+# врапер их только читает; CARRY — список ключей самой спеки (PU_CARRY).
+#
+# Где каждый путь окажется на узле, не меняется: OLD_PATHS — ровно строки
+# врапера до #155, и значение каждой новой переменной обязано совпасть с тем,
+# что из них получилось бы.
+OLD_PATHS = {
+    "PU_CLONE": "$HOME/puppets/$PU_NAME",
+    "PU_TARGET": "$HOME/.cache/target-$PU_NAME",
+    "PU_SECRETS": "$HOME/.config/mop/secrets.env",
+    "PU_PROJECT_CREDS": "$HOME/.config/mop/bus-$PU_PROJECT.json",
+    "PU_SECRETS_DIR": "$HOME/.config/mop/project-secrets/$PU_PROJECT",
+}
+# Список ключей, который переливал старый `mop driver run`: спека,
+# зарегистрированная до #155, PU_CARRY не несёт, и её папет обязан подняться
+# после раскатки до перерегистрации.
+LEGACY_CARRY = ["PU_NAME", "PU_ORIGIN", "PU_PROJECT", "PU_SEED", "PU_CONTINUE",
+                "PU_LLM", "PU_LLM_ENV", "PU_LLM_KEY_VAR", "PU_LLM_AUTH_VAR",
+                "HOME", "PATH"]
+
+
+def expand(template, env):
+    return re.sub(r"\$(HOME|PU_NAME|PU_PROJECT)\b", lambda m: env[m.group(1)], template)
+
+
+def check_wrapper_paths():
+    """STATUS: FIXED — see #155"""
+    from mop import driver
+    from mop.cli.driver import run
+    bad, cases = 0, 0
+    for name, origin, profile, cont in SPEC_INPUTS:
+        env = spec.job_spec(name, origin, profile, cont=cont)["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
+        project = env.get("PU_PROJECT")
+        # (b) каждый путь — там же, где его строил старый врапер, и там же,
+        # где его строит остальной код.
+        want = {k: expand(t, env) for k, t in OLD_PATHS.items()}
+        same_as = {"PU_CLONE": driver.clone_dir(name),
+                   "PU_TARGET": driver.target_dir(name),
+                   "PU_SECRETS": getattr(driver, "SECRETS_FILE", None),
+                   "PU_PROJECT_CREDS": getattr(driver, "project_creds", lambda p: None)(project),
+                   "PU_SECRETS_DIR": getattr(driver, "project_secrets_dir", lambda p: None)(project)}
+        for k in OLD_PATHS:
+            cases += 1
+            if env.get(k) != want[k] or same_as[k] != want[k]:
+                bad += 1
+                print(f"FAILED  {k} for {name}: spec {env.get(k)!r}, driver {same_as[k]!r}, "
+                      f"the old wrapper {want[k]!r}")
+        # (c) в тело едут ровно ключи спеки, кроме самого врапера.
+        cases += 1
+        body = [k for k in env if k not in ("PU_WRAPPER", "PU_CARRY")]
+        got = getattr(run, "carry", lambda e: None)(env)
+        if (env.get("PU_CARRY") or "").split(",") != body or got != body:
+            bad += 1
+            print(f"FAILED  carry for {name}: PU_CARRY {env.get('PU_CARRY')!r}, "
+                  f"run.carry {got!r}, spec keys {body!r}")
+        # (a) всё, что врапер читает, в спеке есть и в тело доезжает.
+        cases += 1
+        reads = set(re.findall(r"\$\{?(PU_[A-Z_]+)", spec.WRAPPER))
+        missing = sorted(reads - set(body))
+        if missing:
+            bad += 1
+            print(f"FAILED  the wrapper reads {missing}, which the spec does not carry into the body")
+    # Спека старше #155 едет старым списком: иначе папет падает на первом же
+    # рестарте между раскаткой и перерегистрацией.
+    cases += 1
+    old_env = {k: "x" for k in LEGACY_CARRY}
+    if getattr(run, "carry", lambda e: None)(old_env) != LEGACY_CARRY:
+        bad += 1
+        print("FAILED  a spec without PU_CARRY must carry the pre-#155 list")
+    # Врапер путей узла больше не собирает.
+    for pattern in ("$HOME/puppets", "target-$PU_NAME", "secrets.env",
+                    "project-secrets", "bus-$PU_PROJECT"):
+        cases += 1
+        if pattern in spec.WRAPPER:
+            bad += 1
+            print(f"FAILED  the wrapper still builds a node path itself: {pattern}")
+    # Пустой путь — отказ до первой команды: `rm -rf "$d"` и free_dir над
+    # пустой строкой задели бы всё, что есть в теле.
+    cases += 1
+    for k in OLD_PATHS:
+        if f'${{{k}:?' not in spec.WRAPPER:
+            bad += 1
+            print(f"FAILED  the wrapper must refuse an empty {k} before touching anything")
+            break
+    # Дубль PU_PROJECT в литерале словаря — молчаливый: второй перетирает
+    # первый, и правка одного из них ничего не значит.
+    cases += 1
+    import ast
+    tree = ast.parse(open(spec.__file__).read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+            if len(keys) != len(set(keys)):
+                bad += 1
+                print(f"FAILED  duplicate keys in a dict literal of spec.py: {keys}")
+                break
+    return bad, cases
+
+
 def main():
     if sys.argv[1:] == ["--snapshot"]:
         # Снять слепок заново: только осознанно, когда спека меняется нарочно
@@ -184,6 +288,9 @@ def main():
             f.write("\n")
         return 0
     bad, cases = check_snapshot()
+    pbad, pcases = check_wrapper_paths()
+    bad += pbad
+    cases += pcases
 
     for what, j, want in STALE:
         cases += 1

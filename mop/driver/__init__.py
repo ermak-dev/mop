@@ -170,8 +170,11 @@ def project_of_name(name):
 
 
 # Где папет живёт в теле. Один путь и у мастера (mcp, delete называют его
-# человеку), и у узла (агент меряет и пробует), и у врапера в спеке.
+# человеку), и у узла (агент меряет и пробует), и у врапера в спеке: врапер
+# своих путей не собирает, job_spec отдаёт ему эти в окружении задачи (#155).
 HOME = config.get("MOP_HOME")
+# Ключи LLM-профилей на узле: подмножество .env, которое раздаёт `mop login`.
+SECRETS_FILE = f"{HOME}/.config/mop/secrets.env"
 
 
 def clone_dir(name):
@@ -180,6 +183,16 @@ def clone_dir(name):
 
 def target_dir(name):
     return f"{HOME}/.cache/target-{name}"
+
+
+def project_creds(project):
+    """Кред шины проекта в теле: его кладёт `mop driver run` на подъёме."""
+    return f"{HOME}/.config/mop/bus-{project}.json"
+
+
+def project_secrets_dir(project):
+    """Секреты проекта в теле (#127): их кладёт bootstrap при каждом старте."""
+    return f"{HOME}/.config/mop/project-secrets/{project}"
 
 
 def why(out, code):
