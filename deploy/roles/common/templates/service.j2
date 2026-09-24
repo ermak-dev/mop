@@ -11,7 +11,15 @@ WorkingDirectory={{ MOP_HOME }}/mop
 {% if e in unit.notes | default({}) %}
 {{ unit.notes[e] }}
 {% endif %}
-Environment={{ e }}={{ lookup('vars', e) }}
+{# systemd делит Environment= по пробелам и раскрывает %-спецификаторы (#185): #}
+{# процент удваивается всегда, а значение с пробелом, кавычкой или обратным слешем #}
+{# идёт в кавычках с экранированием. Без них -- как прежде, байт в байт. #}
+{% set v = lookup('vars', e) | string | replace('%', '%%') %}
+{% if [' ', '\t', '"', "'", '\\'] | select('in', v) | list %}
+Environment="{{ e }}={{ v | replace('\\', '\\\\') | replace('"', '\\"') }}"
+{% else %}
+Environment={{ e }}={{ v }}
+{% endif %}
 {% endfor %}
 Environment=PYTHONUNBUFFERED=1
 {% for e in unit.before_exec | default([]) %}
