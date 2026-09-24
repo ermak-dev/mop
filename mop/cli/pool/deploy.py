@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 from mop.cli import lib
-from mop import bus, config, creds, driver, manifest, puppets, projects
+from mop import bus, config, creds, driver, identity, manifest, puppets, projects
 
 # Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
 # больше нет, поэтому упавшего агента и битые креды чинят только отсюда — и
@@ -136,6 +136,19 @@ def driver_refusals(listing, default):
     return out
 
 
+def operator_refusals(settings, secrets_dir=identity.SECRETS):
+    """Отказы по личностям операторов (#205). -> [строка].
+
+    Провайдер отказывает логину, определённому дважды, по одному -- чтобы
+    один дубль при переносе людей из MOP_OPERATORS в файл не выключил вход
+    всем. Здесь -- громкий отказ всего, до плейбука: неизвестный провайдер,
+    битый файл операторов, каждый дубль."""
+    try:
+        return identity.provider(settings, secrets_dir).conflicts()
+    except ValueError as e:
+        return [str(e)]
+
+
 def inventory_listing(inventory):
     """Инвентарь глазами ansible. -> (listing | None, отказ | None)."""
     r = subprocess.run(["ansible-inventory", "-i", inventory, "--list"],
@@ -242,7 +255,8 @@ def main(argv):
     refusals = (driver_refusals(listing, config.get("MOP_DRIVER"))
                 + uniform_refusals(listing, {n: config.get(n) for n in config.POOL_UNIFORM},
                                    config.get("MOP_DRIVER"))
-                + memory_refusals(listing, config.get("MOP_BODY_MEM_CAP_MB")))
+                + memory_refusals(listing, config.get("MOP_BODY_MEM_CAP_MB"))
+                + operator_refusals({n: config.get(n) for n in identity.SETTINGS}))
     for why in refusals:
         lib.fail(why)
     if refusals:

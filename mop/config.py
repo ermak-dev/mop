@@ -127,6 +127,12 @@ DEFAULTS = {
     # Формат `имя:проект,проект; имя:*` разбирает mop/operators.py; пусто —
     # операторов нет, и на шине живут только прежние ролевые пользователи.
     "MOP_OPERATORS": "",
+    # Откуда берутся личности операторов (#205, mop/identity.py). file --
+    # файл операторов на сервере плюс MOP_OPERATORS, то есть сегодняшнее
+    # поведение; ldap -- #208.
+    "MOP_AUTH_PROVIDER": "file",
+    # Файл операторов провайдера file; пусто -- secrets/operators сервера.
+    "MOP_OPERATORS_FILE": "",
     "MOP_NOMAD_RPC_PORT": "4647",   # RPC: туда дозваниваются клиенты Nomad
     "MOP_NATS_VERSION": "2.14.6",
     "MOP_PUPPET_MEM_MB": "8192",
