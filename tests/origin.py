@@ -43,18 +43,19 @@ SAME = [
     ("https://u:tok@h/g/p.git", ("h", "g/p"), [], True, "p"),
     ("git://h/g/p.git", ("h", "g/p"), [], True, "p"),
     ("/srv/git/p.git", ("", ""), [], True, "p"),
-    # Хвостовой / и scp без группы: project_of здесь кривой (пусто и
-    # «git@h:p»), но из него строятся имена папетов -- правило не трогаем.
-    ("ssh://h/g/p/", ("h", "g/p"), ["h"], True, ""),
-    ("http://h/g/p.git/", ("h", "g/p"), [], True, ""),
-    ("https://h/g/p/", ("h", "g/p"), [], True, ""),
-    ("git@h:p.git", ("h", "p"), ["h"], True, "git@h:p"),
+    # Хвостовой / и scp без группы: до #165 project_of давал здесь пусто и
+    # «git@h:p» (имя папета pu-git@h:p-1, valid_name его и не пускал).
+    ("ssh://h/g/p/", ("h", "g/p"), ["h"], True, "p"),
+    ("http://h/g/p.git/", ("h", "g/p"), [], True, "p"),
+    ("https://h/g/p/", ("h", "g/p"), [], True, "p"),
+    ("git@h:p.git", ("h", "p"), ["h"], True, "p"),
     # git+ssh:// ключа хоста по-прежнему не получает: схема не ssh.
     ("git+ssh://git@h/g/p.git", ("h", "g/p"), [], True, "p"),
     ("mop", ("", ""), [], False, "mop"),
     ("", ("", ""), [], False, ""),
     ("  ", ("", ""), [], False, "  "),
-    (":x", ("", ""), [], True, ":x"),
+    # Мусор: до #165 -- «:x» как есть, теперь путь разбора.
+    (":x", ("", ""), [], True, "x"),
     ("x:", ("", ""), ["x"], True, "x:"),
 ]
 
@@ -148,6 +149,24 @@ def main():
                         copies.append(os.path.relpath(path, ROOT))
     if copies != [os.path.join("mop", "driver", "__init__.py")]:
         fail(f"project rule must live only in mop/driver/__init__.py, found in {copies}")
+
+    # HYPOTHESIS (#165): project_of брал basename всей строки, и на
+    # вырожденных формах выходил мусор: scp без группы -- «git@h:p», хвостовой
+    # слеш -- пустой проект.
+    # SOLUTION: путь -- из parse_origin, если разбирается; иначе прежний
+    # ответ. Реальные формы (SAME выше) не сдвинулись.
+    # STATUS: FIXED — see #165
+    for url, want in (("git@h:p.git", "p"), ("git@h:p", "p"),
+                      ("https://h/g/p/", "p"), ("ssh://git@h:2222/g/p.git/", "p"),
+                      ("x:", "x:"), ("mop", "mop"), ("", "")):
+        cases += 1
+        if driver.project_of(url) != want:
+            fail(f"project_of({url!r}) -> {driver.project_of(url)!r}, wanted {want!r}")
+    # Прежний мусор именем папета не становился: valid_name его не пускает.
+    for n in ("pu-git@h:p-1", "pu--1"):
+        cases += 1
+        if driver.valid_name(n):
+            fail(f"valid_name({n!r}) accepted an old garbage name")
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
