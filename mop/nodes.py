@@ -3,11 +3,11 @@
 Одна строка на узел, читают её `mop node` и инструмент `nodes` в MCP (#49).
 Модуль возвращает данные и ничего не печатает.
 """
-from . import driver, nomad, puppets
+from . import driver, nomad
 
 
 def row(summary, meta, cap):
-    """Сводка узла из ростера + его meta + ёмкость (puppets.pool) -> строка.
+    """Сводка узла из ростера + его meta + ёмкость (cluster.nomad_pool) -> строка.
 
     Состояние: draining старше closed — узел, с которого уводят папетов,
     закрыт для планирования по определению, и сказать только «закрыт»
@@ -30,13 +30,15 @@ def row(summary, meta, cap):
             "slots": cap.get("slots")}
 
 
-def nomad_rows():
+def nomad_rows(pool):
     """Все узлы кластера, по имени. Ёмкость есть только у ready-узлов пула,
     у остальных None — прочерк, а не ноль.
 
     Из Nomad, то есть только на сервере: зовёт это сервис кластера, глагол
-    `nodes` (docs/CLUSTER.md)."""
-    cap = {n["name"]: n for n in puppets.nomad_pool()}
+    `nodes` (docs/CLUSTER.md). pool — ёмкость узлов пула (cluster.nomad_pool):
+    аргументом, а не импортом, потому что сервис кластера сам импортирует этот
+    модуль (#152)."""
+    cap = {n["name"]: n for n in pool}
     metas = nomad.nodes_meta()
     return [row(n, metas.get(n["Name"], {}), cap.get(n["Name"], {}))
             for n in sorted(nomad.client().nodes.get_nodes(), key=lambda n: n["Name"])]

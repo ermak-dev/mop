@@ -30,7 +30,7 @@ import threading
 import base64
 
 from . import (bootstrap, bus, busnames, config, creds, natsconf, nodes, nomad,
-               project_secrets, projects, puppets, service)
+               project_secrets, projects, puppets, service, spec, state)
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
@@ -134,6 +134,116 @@ def _foreign_origin(project, origin):
     return None
 
 
+# ─── Nomad-половина ростера (#152) ───────────────────────────────────────
+# Жила в puppets.py рядом с клиентом шины мастера, хотя звал её только этот
+# сервис: он один говорит с Nomad от чужого имени (docs/CLUSTER.md).
+# Поля аллокации, которые читает клиент. Возим их, а не аллокацию целиком:
+# в ней TaskStates и события, и тринадцать таких ответов упираются в предел
+# сообщения шины на пустом месте.
+ALLOC_FIELDS = ("ID", "JobID", "NodeName", "ClientStatus", "DesiredStatus")
+
+
+def nomad_jobs(project=None):
+    """Джобы папетов из Nomad. Зовёт это только сервис кластера: он один
+    говорит с Nomad от чужого имени (docs/CLUSTER.md)."""
+    listing = nomad.client().jobs.get_jobs(prefix=puppets.JOB_PREFIX, meta=True)
+    return puppets.visible(listing, project)
+
+
+def task_and_reason(alloc):
+    """Сводка задачи и, у падающей, причина из stderr (#126). Только сервис
+    кластера: у него Nomad. stderr читается лишь у падающих -- это запрос к
+    клиенту Nomad на узле, и платить его за здоровых незачем."""
+    task = state.task_summary(alloc)
+    reason = None
+    if state.failing_row(alloc.get("ClientStatus"), task, None):
+        try:
+            reason = state.failure_reason(
+                nomad.alloc_stderr(alloc["ID"], state.task_name(alloc)))
+        except Exception:
+            pass
+    return task, reason
+
+
+def nomad_items(project=None, stale=False):
+    """Ростер из Nomad: джоб плюс его аллокация. Тоже только сервис кластера.
+
+    Аллокация приезжает вместе с джобом намеренно: клиент за ней отдельно уже
+    не сходит, а N+1 запрос по шине вместо N+1 вызова API — та же цена, но с
+    сетью между ними."""
+    items, placement = [], None
+    for j in sorted(nomad_jobs(project), key=lambda j: j["ID"]):
+        alloc, err, task, reason = None, None, None, None
+        try:
+            got = nomad.latest_alloc(j["ID"])
+            alloc = {k: got.get(k) for k in ALLOC_FIELDS} if got else None
+            if got:
+                task, reason = task_and_reason(got)
+        except Exception as e:
+            err = nomad.describe_error(e)
+        item = {"job": j, "alloc": alloc, "error": err, "task": task, "reason": reason}
+        if not alloc and not err and spec.queued(j):
+            # Очередь без узла, который служит проекту, -- не нехватка мест
+            # (#118). Узлы -- один раз на ростер и только если есть очередь.
+            if placement is None:
+                placement = _placement_nodes()
+            item["unserved"] = spec.unserved(
+                puppets.project_of((j.get("Meta") or {}).get("origin", "")), placement)
+        if stale:
+            # Полный джоб, а не заглушка из списка: врапер и ограничение
+            # размещения лежат в спеке, а её get_jobs не отдаёт.
+            try:
+                item["stale"] = spec.spec_is_stale(nomad.get_job(j["ID"]))
+            except Exception:
+                item["stale"] = False
+        items.append(item)
+    return items
+
+
+def _placement_nodes():
+    """Узлы пула для unserved(): состояние из nomad_pool, meta -- по узлу.
+    Только на сервере."""
+    metas = nomad.nodes_meta()
+    return [dict(n, meta=metas.get(n["name"], {})) for n in nomad_pool()]
+
+
+def next_name(project):
+    prefix = puppets.JOB_PREFIX
+    taken = {j["ID"] for j in nomad.client().jobs.get_jobs(prefix=f"{prefix}{project}-")}
+    n = 1
+    while f"{prefix}{project}-{n}" in taken:
+        n += 1
+    return f"{prefix}{project}-{n}"
+
+
+def nomad_pool():
+    """Узлы пула как данные: [{name, status, free_mb, total_mb, slots, error}].
+
+    Только датацентр пула: джобы папетов объявляют его, и планировщик на узлы
+    других dc не смотрит вовсе. Показать такой узел свободными слотами —
+    пообещать то, чего планировщик не даст: управляляющая машина в control
+    однажды так светилась тремя слотами, пока два папета стояли в queued."""
+    out = []
+    for n in nomad.client().nodes.get_nodes():
+        if n.get("Datacenter") != nomad.POOL_DC:
+            continue
+        if n["Status"] != "ready":
+            out.append({"name": n["Name"], "status": n["Status"]})
+            continue
+        try:
+            free, total = nomad.node_capacity(n)
+            out.append({"name": n["Name"], "status": "ready", "free_mb": free,
+                        "total_mb": total, "slots": free // spec.MEM,
+                        # Закрытый для планирования узел остаётся ready и место
+                        # на нём показывает честно, но ставить туда Nomad не
+                        # станет — и раздавать креды туда незачем.
+                        "eligible": n.get("SchedulingEligibility") != "ineligible"})
+        except Exception as e:
+            out.append({"name": n["Name"], "status": "ready",
+                        "error": nomad.describe_error(e)})
+    return out
+
+
 # ─── глаголы: Nomad ──────────────────────────────────────────────────────
 def _owner(name):
     """(origin джоба, есть ли джоб). Разные исходы у «нет джоба» и «джоб без
@@ -186,10 +296,10 @@ def _add(project, req):
                      projects.read_limits().get(target))
     if why:
         return {"error": why}
-    name = puppets.next_name(target)
+    name = next_name(target)
     # workspace -- до регистрации: первый подъём обязан его увидеть.
     store_workspace(bootstrap.ROOT, name, req)
-    nomad.register(puppets.job_spec(name, origin, req.get("profile")))
+    nomad.register(spec.job_spec(name, origin, req.get("profile")))
     return {"ok": True, "name": name, "origin": origin}
 
 
@@ -198,8 +308,8 @@ def _update(project, req):
     # проситель кладёт на узел что хочет (докстринг модуля).
     name = req["name"]
     store_workspace(bootstrap.ROOT, name, req)
-    nomad.register(puppets.job_spec(name, req.get("origin"), req.get("profile"),
-                                    cont=bool(req.get("cont"))))
+    nomad.register(spec.job_spec(name, req.get("origin"), req.get("profile"),
+                                 cont=bool(req.get("cont"))))
     return {"ok": True, "name": name}
 
 
@@ -245,10 +355,10 @@ def _alloc(project, req):
         alloc = None
     if not alloc:
         return {"ok": True, "alloc": None, "driver": None}
-    slim = {k: alloc.get(k) for k in puppets.ALLOC_FIELDS}
+    slim = {k: alloc.get(k) for k in ALLOC_FIELDS}
     # Падает ли задача и почему (#126): `mop attach` и `mop add` говорят это
     # вместо «not running» и двух минут ожидания.
-    slim["task"], slim["reason"] = puppets.task_and_reason(alloc)
+    slim["task"], slim["reason"] = task_and_reason(alloc)
     meta = nomad.node_meta(alloc["NodeName"]) or {}
     return {"ok": True, "alloc": slim, "driver": meta.get("mop_driver")}
 
@@ -258,7 +368,7 @@ def _spec(project, req):
     if not job:
         return {"error": f"no job {req['name']}"}
     return {"ok": True, "meta": job.get("Meta") or {},
-            "status": job.get("Status"), "stale": puppets.spec_is_stale(job)}
+            "status": job.get("Status"), "stale": spec.spec_is_stale(job)}
 
 
 def _roster(project, req):
@@ -270,17 +380,17 @@ def _roster(project, req):
     stale=True добавляет вердикт об устаревшей спеке, и только по просьбе: он
     стоит вызова API на каждый джоб, а нужен одному `mop doctor`. Платить за
     него в каждом `mop list` было бы платой за чужой глагол."""
-    return {"ok": True, "items": puppets.nomad_items(project, stale=bool(req.get("stale")))}
+    return {"ok": True, "items": nomad_items(project, stale=bool(req.get("stale")))}
 
 
 def _pool(project, req):
     """Ёмкость узлов пула. Проекту это положено: по свободным слотам мастер
     решает, заводить ли папета. Кто ещё живёт на узле — глагол `nodes`."""
-    return {"ok": True, "nodes": puppets.nomad_pool()}
+    return {"ok": True, "nodes": nomad_pool()}
 
 
 def _nodes(project, req):
-    return {"ok": True, "nodes": nodes.nomad_rows()}
+    return {"ok": True, "nodes": nodes.nomad_rows(nomad_pool())}
 
 
 def _drain(project, req):
@@ -379,7 +489,7 @@ def _project_delete(project, req):
     with _projects_lock:
         lines = projects.read()
         new, dropped = projects.without_project(name, lines)
-        alive = [j["ID"] for j in puppets.nomad_jobs(bus.ADMIN)
+        alive = [j["ID"] for j in nomad_jobs(bus.ADMIN)
                  if puppets.project_of((j.get("Meta") or {}).get("origin", "")) == name]
         why = delete_refusal(name, dropped, alive)
         if why:

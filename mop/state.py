@@ -398,16 +398,24 @@ _WRAPPER_FAIL = re.compile(r"^(\S+) of pu-\S+ (?:failed|brought no )|did not rea
 _ANSIBLE_NOISE = ("[ERROR]: ", "Task failed: ", "Unexpected AnsibleActionFail error: ")
 
 
+def task_name(alloc):
+    """Имя задачи папета в аллокации | None. Одна на сводку и на чтение
+    stderr (#152): разойдись они, причина падения читалась бы из чужой
+    задачи."""
+    states = (alloc or {}).get("TaskStates") or {}
+    return sorted(states)[0] if states else None
+
+
 def task_summary(alloc, now=None):
     """Задача аллокации -> {state, restarts, exit, next_s, failed} | None.
 
     exit -- код последнего выхода, next_s -- через сколько секунд от now Nomad
     перезапустит (только если задача сейчас этого и ждёт): время события плюс
     задержка, а не задержка сама -- та верна лишь в миг события."""
-    states = (alloc or {}).get("TaskStates") or {}
-    if not states:
+    name = task_name(alloc)
+    if name is None:
         return None
-    t = states[sorted(states)[0]]
+    t = alloc["TaskStates"][name]
     events = t.get("Events") or []
     exits = [e.get("ExitCode") for e in events if e.get("Type") == "Terminated"]
     last = events[-1] if events else {}
