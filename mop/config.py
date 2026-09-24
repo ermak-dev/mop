@@ -129,13 +129,9 @@ DEFAULTS = {
     # генерирует и делает системной `mop setup` на управляющих машинах и игра
     # узла на узлах пула. UTF-8 обязателен: без него не стартует ansible.
     "MOP_LOCALE": "C.UTF-8",
-    # Операторы установки: люди с доступом к пулу и их проекты (#84).
-    # Формат `имя:проект,проект; имя:*` разбирает mop/operators.py; пусто —
-    # операторов нет, и на шине живут только прежние ролевые пользователи.
-    "MOP_OPERATORS": "",
-    # Откуда берутся личности операторов (#205, mop/identity.py). file --
-    # файл операторов на сервере плюс MOP_OPERATORS, то есть сегодняшнее
-    # поведение; ldap -- #208.
+    # Откуда берутся люди (#205, mop/identity.py): file -- файл операторов
+    # (`mop user`), ldap -- каталог (#208). Второго источника нет (#219):
+    # MOP_OPERATORS ушёл, и `mop deploy` отказывает, пока он лежит в .env.
     "MOP_AUTH_PROVIDER": "file",
     # Файл операторов провайдера file; пусто -- secrets/operators сервера.
     "MOP_OPERATORS_FILE": "",
@@ -154,12 +150,6 @@ DEFAULTS = {
     "MOP_LDAP_PROJECT_GROUP": "mop-{project}",  # cn группы проекта
     "MOP_LDAP_STARTTLS": "",
     "MOP_LDAP_CA_FILE": "",                # пусто -- системное хранилище
-    # Кто решает, пускать ли на шину людей и папетов (#206). off -- статический
-    # users.conf, как было; on -- сервис mop-callout спрашивает провайдера
-    # личностей и файлы паролей папетов на каждом входе. Лежит сервис -- новых
-    # входов людей и папетов нет (живые соединения живут, узлы и сервисы не
-    # задеты); откат -- off и mop deploy.
-    "MOP_AUTH_CALLOUT": "off",
     "MOP_NOMAD_RPC_PORT": "4647",   # RPC: туда дозваниваются клиенты Nomad
     "MOP_NATS_VERSION": "2.14.6",
     "MOP_PUPPET_MEM_MB": "8192",
@@ -415,7 +405,7 @@ NOT_NODE = ("MOP_MEM_MB",)
 # mop-bootstrap (#167). Один список, иначе один сервис знал бы каталог, а
 # другой нет. Пароль служебной учётки LDAP сюда не входит: юнит читаем
 # всем, и он едет файлом 0600 в /etc/nats/identity (#214).
-IDENTITY_SCOPED = ("MOP_AUTH_PROVIDER", "MOP_OPERATORS",
+IDENTITY_SCOPED = ("MOP_AUTH_PROVIDER",
                    "MOP_LDAP_URL", "MOP_LDAP_BIND_DN", "MOP_LDAP_BASE",
                    "MOP_LDAP_LOGIN_ATTR", "MOP_LDAP_NAME_ATTR", "MOP_LDAP_EMAIL_ATTR",
                    "MOP_LDAP_GROUP_BASE", "MOP_LDAP_GROUP_FILTER", "MOP_LDAP_ADMIN_GROUP",
@@ -436,14 +426,10 @@ SERVER_SCOPED = {
                     "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",
                     "MOP_PUPPET_PATH", "MOP_DEFAULT_LLM",
                     # reload шины с проверкой (#211): `mop project add/rm`
-                    "MOP_NATS_MONITOR_PORT",
-                    # users.conf при заводе проекта рендерится с callout или
-                    # без (#206): без настройки сервис вернул бы людей и
-                    # папетов в статический список
-                    "MOP_AUTH_CALLOUT"),
+                    "MOP_NATS_MONITOR_PORT"),
     # Сервис auth callout (#206): шина на петле, провайдер личностей. Пароли
     # и сиды -- файлами 0600 в /etc/nats, не здесь: юнит читаем всем.
-    "mop-callout": ("MOP_NATS_PORT", "MOP_AUTH_CALLOUT") + IDENTITY_SCOPED,
+    "mop-callout": ("MOP_NATS_PORT",) + IDENTITY_SCOPED,
     "mop-web": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                 "MOP_NOMAD_PORT", "MOP_POOL_DC"),
 }

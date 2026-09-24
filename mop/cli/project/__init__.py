@@ -12,7 +12,7 @@ the basename of its origin, and the pool builds puppet names from it. The
 registry lives on the server and is the only answer to "which projects are
 set up"; every subcommand is an operator's verb of the cluster service
 (#117), so it works from any machine with the admin role, not only from the
-controller. Operators reach a project by their role in MOP_OPERATORS.
+controller. Operators reach a project by their role in the server's identity provider.
 
 Registering used to be a side effect of `mop deploy <origin>` and there was
 no way to take a project off (#79). `mop deploy` no longer takes origins.

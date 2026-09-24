@@ -344,8 +344,79 @@ def main():
         print(f"FAILED  fingerprint -> {got}, wanted {want}")
     # STATUS: FIXED — see #97
 
+    c, b = check_no_human_over_nats_219()
+    cases, bad = cases + c, bad + b
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
+
+
+def check_no_human_over_nats_219():
+    """HYPOTHESIS (#219): людей больше нет в users.conf -- их пускает только
+    callout, и только через WebSocket (#105). Путь на сервере, который входит
+    человеком по голому nats://, после #219 получил бы отказ: deploy, mop
+    list/doctor под root на контроллере, дашборд, первый mop join, сервисы.
+    SOLUTION: проверено по коду -- человеком ходят только через wss
+    (bus.server_config -> creds.wss_config); nats:// строится только папету
+    (bus_config с user=puppet), узлу (bus.json) и машинам (callout,
+    can_login с puppet или service). Переходный пароль контроллера
+    (nats-op-*.pass) join больше не читает.
+    STATUS: FIXED — see #219
+    -> (случаев, провалов)."""
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    cases = bad = 0
+
+    def check(what, ok, detail=""):
+        nonlocal cases, bad
+        cases += 1
+        if not ok:
+            bad += 1
+            print(f"FAILED  {what}" + (f": {detail}" if detail else ""))
+
+    # Каталог сервера оператора -- всегда wss.
+    # Как настоящий: servers/<адрес>/ -- make_dir закрывает и родителя.
+    d = os.path.join(tempfile.mkdtemp(prefix="mop-test-creds-219-"), "servers", "10.0.0.1")
+    creds.write_operator(d, "anton", "pw")
+    keep = os.environ.get("MOP_SERVER_DIR")
+    os.environ["MOP_SERVER_DIR"] = d
+    try:
+        from mop import bus
+        c = bus.server_config("10.0.0.1")
+        check("a person's bus config (the server directory) is wss",
+              c["url"].startswith("wss://") and c["user"] == "anton", c)
+    except ImportError as e:
+        print(f"SKIPPED the wss check of bus.server_config: {e}")
+    finally:
+        if keep is None:
+            os.environ.pop("MOP_SERVER_DIR", None)
+        else:
+            os.environ["MOP_SERVER_DIR"] = keep
+
+    sources = {}
+    for base, _, files in os.walk(os.path.join(root, "mop")):
+        for f in files:
+            if f.endswith(".py"):
+                path = os.path.join(base, f)
+                sources[os.path.relpath(path, root)] = open(path).read()
+    # nats:// строится одним bus_config -- только папету (и машинам -- файлом).
+    for path, text in sources.items():
+        for m in re.finditer(r"creds\.bus_config\((.*?)\)\s*$", text, re.S | re.M):
+            call = m.group(1)
+            check(f"{path}: bus_config (plain nats://) only for a puppet",
+                  "puppet_user" in call, call.strip()[:120])
+        for m in re.finditer(r"can_login\(([^)]*)", text):
+            call = m.group(1)
+            check(f"{path}: can_login (plain nats://) only for a puppet or the service",
+                  "puppet_user" in call or "SERVICE" in call or path == "mop/bus.py", call[:120])
+        literal = [l for l in text.splitlines() if 'f"nats://' in l and "#" not in l.split('f"nats://')[0]]
+        for line in literal:
+            check(f"{path}: a nats:// URL only for machines (bus_config, can_login, callout)",
+                  path in ("mop/creds.py", "mop/bus.py", "mop/callout.py"), line.strip())
+    join = sources.get(os.path.join("mop", "cli", "pool", "join.py"), "")
+    check("mop join reads no transition password (secrets/nats-op-*.pass)",
+          "nats-op" not in join and "pass_file(" not in join)
+    return cases, bad
 
 
 if __name__ == "__main__":

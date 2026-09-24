@@ -7,7 +7,13 @@ from mop.cli import lib
 
 
 def settings():
-    return {n: config.get(n) for n in identity.SETTINGS}
+    """Настройки провайдера плюс прежний MOP_OPERATORS (#219). Его больше нет
+    в identity.SETTINGS и config.SETTINGS, но config.get читает его из .env:
+    по нему import знает, кого переносить, а add, passwd и delete -- кто ещё
+    не перенесён."""
+    out = {n: config.get(n) for n in identity.SETTINGS}
+    out["MOP_OPERATORS"] = config.get("MOP_OPERATORS")
+    return out
 
 
 def refusal(got):

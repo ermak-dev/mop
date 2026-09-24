@@ -41,7 +41,7 @@ REQUIRED = ("MOP_LDAP_URL", "MOP_LDAP_BIND_DN", "MOP_LDAP_BIND_PASSWORD", "MOP_L
 NAMES = REQUIRED + ("MOP_LDAP_LOGIN_ATTR", "MOP_LDAP_NAME_ATTR", "MOP_LDAP_EMAIL_ATTR",
                     "MOP_LDAP_GROUP_BASE", "MOP_LDAP_GROUP_FILTER", "MOP_LDAP_ADMIN_GROUP",
                     "MOP_LDAP_PROJECT_GROUP", "MOP_LDAP_STARTTLS", "MOP_LDAP_CA_FILE")
-# Логин -- имя пользователя шины и поле MOP_OPERATORS: без разделителей
+# Логин -- имя пользователя шины и поле строки прав (operators.parse): без разделителей
 # разбора (: ; ,), масок субъектов (* >) и пробелов.
 LOGIN = re.compile(r"[A-Za-z0-9._@-]+")
 PROJECT = r"(?P<project>[A-Za-z0-9._-]+)"
@@ -135,7 +135,7 @@ def norm_dn(dn):
 
 
 def rights(cfg, groups):
-    """Группы [(dn, атрибуты)] -> поля MOP_OPERATORS ([admin] | [user, проекты])
+    """Группы [(dn, атрибуты)] -> поля роли ([admin] | [user, проекты])
     или None -- доступа нет."""
     if cfg.admin_group and any(norm_dn(dn) == norm_dn(cfg.admin_group) for dn, _ in groups):
         return [operators.ADMIN]

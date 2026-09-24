@@ -292,13 +292,6 @@ def play(playbook, projects, manifests=None, git_hosts=None, check=False,
         raise RuntimeError(f"no inventory {inventory} -- create it from the example: "
                            f"cp inventory.yaml.example inventory.yaml")
     vars_ = playvars.playbook_vars()
-    # Без операторов на шину не войдёт ни один человек (#106): ролевых
-    # admin и master-<проект> больше нет. Громкий отказ до прогона лучше,
-    # чем установка, в которую никто не может войти.
-    if not vars_["MOP_OPERATOR_SUBJECTS"]:
-        raise RuntimeError("MOP_OPERATORS is empty: nobody could log in to the "
-                           "bus. Name at least one person in .env, e.g. "
-                           "MOP_OPERATORS=anton:admin")
     # Лимиты (#107) больше не едут: их держит и правит сервер (#117).
     extra = ([json.dumps(vars_, ensure_ascii=False)]
              + play_vars(projects, manifests, git_hosts=git_hosts,

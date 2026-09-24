@@ -115,8 +115,8 @@ CLUSTER_READS = ("mop/cluster.py", "mop/nomad.py", "mop/spec.py", "mop/llm/__ini
 VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "10.0.0.1",
         "MOP_NATS_PORT": "4222", "MOP_HTTPS_PORT": "443", "MOP_NOMAD_PORT": "4646",
         "MOP_POOL_DC": "home", "MOP_WEB_PORT": "8080", "MOP_WEB_BIND": "0.0.0.0",
-        "MOP_NATS_MONITOR_PORT": "8222", "MOP_AUTH_CALLOUT": "off",
-        "MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS": "anton:admin; ivan:user:rugent",
+        "MOP_NATS_MONITOR_PORT": "8222",
+        "MOP_AUTH_PROVIDER": "file",
         # Провайдер ldap (#208, #214): у пустых по умолчанию -- образцы.
         "MOP_LDAP_URL": "ldaps://ldap.example.dev", "MOP_LDAP_BIND_DN": "cn=mop,ou=services,dc=example,dc=dev",
         "MOP_LDAP_BASE": "dc=example,dc=dev", "MOP_LDAP_GROUP_BASE": "ou=groups,dc=example,dc=dev",
@@ -139,15 +139,14 @@ ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          "MOP_MEM_MB", "MOP_PUPPET_SEED", "MOP_PUPPET_PATH",
                          "MOP_DEFAULT_LLM",
                          # reload шины с проверкой (#211): /varz на петле.
-                         "MOP_NATS_MONITOR_PORT",
-                         # callout или статический users.conf (#206).
-                         "MOP_AUTH_CALLOUT")}
+                         "MOP_NATS_MONITOR_PORT")}
 # Несекретные настройки провайдера личностей (#214) -- сервисам, которые его
 # строят: callout и глагол личности bootstrap'а. Одним списком
 # (config.IDENTITY_SCOPED); что у юнита уже было, в добавки не входит.
 ADDED["mop-bootstrap"] = config.IDENTITY_SCOPED
-ADDED["mop-callout"] = tuple(n for n in config.IDENTITY_SCOPED
-                             if n not in ("MOP_AUTH_PROVIDER", "MOP_OPERATORS"))
+# mop-callout снят заново в #219 (без MOP_AUTH_CALLOUT и MOP_OPERATORS):
+# добавок после снимка нет.
+ADDED["mop-callout"] = ()
 
 PINNED = {
     'mop-bootstrap': "[Unit]\nDescription=mop-bootstrap (bootstrap песочниц: играет .mop/bootstrap.yaml проекта при каждом старте папета)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет: всё, что подписчику и прогону нужно знать об\n# установке, приезжает юнитом. MOP_HOME и MOP_USER -- те, что у узлов: их\n# читают задачи bootstrap'а как переменные прогона, и дефолт сервера\n# (его собственный дом) здесь был бы неправдой.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_HOME=/home/mopuser\nEnvironment=MOP_USER=mopuser\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop bootstrap serve\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
@@ -155,7 +154,9 @@ PINNED = {
     'mop-web': '[Unit]\nDescription=mop-web (дашборд пула: состояние по HTTP)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет, а адрес сервера обязателен: без него config\n# отказывается работать (и правильно). Окружение старше .env, поэтому\n# юнит и есть источник этой настройки на сервере.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_NOMAD_PORT=4646\nEnvironment=MOP_POOL_DC=home\nEnvironment=PYTHONUNBUFFERED=1\n# Через диспетчер: он ставит PYTHONPATH, без него командлет пакета не найдёт.\nExecStart=/home/mopuser/mop/bin/mop web --port 8080 --bind 0.0.0.0\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n',
 }
 # Юнит auth callout (#206) -- новый: снимок с его появления, байт в байт.
-PINNED["mop-callout"] = '[Unit]\nDescription=mop-callout (auth callout шины: кто входит, решает провайдер личностей)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# Шина на петле. Пароль пользователя callout, сиды издателя и xkey --\n# файлами 0600 в /etc/nats, не здесь: юнит читаем всем.\nEnvironment=MOP_NATS_PORT=4222\nEnvironment=MOP_AUTH_CALLOUT=off\nEnvironment=MOP_AUTH_PROVIDER=file\nEnvironment="MOP_OPERATORS=anton:admin; ivan:user:rugent"\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop callout\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n'
+PINNED["mop-callout"] = '[Unit]\nDescription=mop-callout (auth callout шины: кто входит, решает провайдер личностей)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# Шина на петле. Пароль пользователя callout, сиды издателя и xkey --\n# файлами 0600 в /etc/nats, не здесь: юнит читаем всем.\nEnvironment=MOP_NATS_PORT=4222\nEnvironment=MOP_AUTH_PROVIDER=file\nEnvironment=MOP_LDAP_URL=ldaps://ldap.example.dev\nEnvironment=MOP_LDAP_BIND_DN=cn=mop,ou=services,dc=example,dc=dev\nEnvironment=MOP_LDAP_BASE=dc=example,dc=dev\nEnvironment=MOP_LDAP_LOGIN_ATTR=uid\nEnvironment=MOP_LDAP_NAME_ATTR=displayName,cn\nEnvironment=MOP_LDAP_EMAIL_ATTR=mail\nEnvironment=MOP_LDAP_GROUP_BASE=ou=groups,dc=example,dc=dev\nEnvironment=MOP_LDAP_GROUP_FILTER=(|(member={dn})(uniqueMember={dn})(memberUid={login}))\nEnvironment="MOP_LDAP_ADMIN_GROUP=cn=mop admins,ou=groups,dc=example,dc=dev"\nEnvironment=MOP_LDAP_PROJECT_GROUP=mop-{project}\nEnvironment=MOP_LDAP_STARTTLS=no\nEnvironment=MOP_LDAP_CA_FILE=/etc/ssl/certs/corp-ca.pem\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop callout\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n'
+# Снят заново в #219: окружение -- без MOP_AUTH_CALLOUT (callout всегда включён)
+# и без MOP_OPERATORS (людей даёт только провайдер).
 
 
 def settings_read(path):
@@ -606,16 +607,19 @@ def check_users_reload_199(check):
 def check_identity_copy_167(check, ptasks):
     """HYPOTHESIS (#167): глагол identity (mop-bootstrap) читает файл
     операторов копией в /etc/nats/identity -- secrets/ контроллера пользователю
-    пула закрыт. Копию роль bus кладёт только при MOP_AUTH_CALLOUT=on (#206),
-    и при off глагол всегда отвечал бы «нет профиля».
-    SOLUTION: та же копия, тем же местом роли bus, кладётся всякий раз, когда
-    на контроллере есть файл операторов, при callout on -- как было; снимается,
-    только когда нет ни callout, ни файла. STATUS: FIXED — see #167
+    пула закрыт.
+    SOLUTION: копию кладёт роль bus. STATUS: FIXED — see #167
+
+    С #219 callout включён всегда, и копия есть всегда: людей даёт только
+    провайдер, а сервисы читают его копией. В ней -- файл операторов, если
+    он есть у контроллера, и пароль LDAP при провайдере ldap (#214);
+    переходных паролей людей (nats-op-*.pass) больше нет.
 
     Условия when задач роли -- простые выражения; проверка исполняет их на
-    четырёх сочетаниях (callout, файл) и смотрит, какие задачи пошли. Берутся
-    задачи роли, касающиеся копии или файла операторов: у прочих свои
-    переменные."""
+    сочетаниях (файл операторов, провайдер) и смотрит, какие задачи пошли.
+    Берутся задачи роли, касающиеся копии или файла операторов: у прочих
+    свои переменные."""
+    import itertools
     import types
     ptasks = [t for t in ptasks if "/etc/nats/identity" in json.dumps(t)
               or "operators_file" in json.dumps(t)]
@@ -647,34 +651,42 @@ def check_identity_copy_167(check, ptasks):
                     (t[mod] or {}).get("state")
         return None, None, None
 
-    # Провайдер -- третье измерение (#214): пароль LDAP лежит в той же копии.
-    import itertools
-    for callout, exists, prov in itertools.product(("on", "off"), (True, False), ("file", "ldap")):
-        env = {"MOP_AUTH_CALLOUT": callout, "MOP_AUTH_PROVIDER": prov,
+    for exists, prov in itertools.product((True, False), ("file", "ldap")):
+        env = {"MOP_AUTH_PROVIDER": prov,
                "operators_file": types.SimpleNamespace(stat=types.SimpleNamespace(exists=exists))}
         try:
             done = [target(t) for t in ran(ptasks, env, [])]
         except AssertionError as e:
-            check(f"bus identity copy, callout {callout}, file {exists}, {prov}: conditions read",
-                  False, e)
+            check(f"bus identity copy, file {exists}, {prov}: conditions read", False, e)
             continue
-        what = f"bus identity copy, callout {callout}, operators file {exists}, provider {prov}"
-        # Копия есть при callout, при файле операторов или при ldap (#216):
-        # глаголу identity (#167) без callout нужен пароль LDAP из неё.
-        copy = callout == "on" or exists or prov == "ldap"
-        bind = ("copy", "/etc/nats/identity/ldap-bind.pass", None) in done
-        unbind = ("file", "/etc/nats/identity/ldap-bind.pass", "absent") in done
-        check(f"{what}: the LDAP bind password is laid exactly with ldap and the copy",
-              bind == (copy and prov == "ldap"), done)
-        check(f"{what}: inside the copy, another provider leaves no bind password",
-              unbind == (copy and prov != "ldap"), done)
-        laid = ("copy", "/etc/nats/identity/operators", None) in done
-        gone = ("file", "/etc/nats/identity", "absent") in done
-        check(f"{what}: the operators file is copied exactly when it exists", laid == exists, done)
-        check(f"{what}: the copy is removed only with neither callout, file nor ldap",
-              gone == (not copy), done)
+        what = f"bus identity copy, operators file {exists}, provider {prov}"
+        check(f"{what}: the copy's directory is always laid (#219)",
+              ("file", "/etc/nats/identity", "directory") in done, done)
+        check(f"{what}: the copy is never removed as a whole (#219)",
+              ("file", "/etc/nats/identity", "absent") not in done, done)
+        check(f"{what}: the operators file is copied exactly when it exists",
+              (("copy", "/etc/nats/identity/operators", None) in done) == exists, done)
+        check(f"{what}: the LDAP bind password is laid exactly with ldap",
+              (("copy", "/etc/nats/identity/ldap-bind.pass", None) in done) == (prov == "ldap"), done)
+        check(f"{what}: another provider leaves no bind password",
+              (("file", "/etc/nats/identity/ldap-bind.pass", "absent") in done) == (prov != "ldap"),
+              done)
         check(f"{what}: the controller's operators file is looked at",
               any(k == "stat" and "operators" in str(p) for k, p, _ in done), done)
+
+
+def check_one_source_219(check):
+    """HYPOTHESIS (#219): deploy заводит людям пароли (nats-op-*.pass),
+    кладёт их в base-users.json и копию личностей, а выключатель
+    MOP_AUTH_CALLOUT держит вторую дорогу -- статических людей.
+    SOLUTION: люди только из провайдера; callout всегда включён.
+    STATUS: FIXED — see #219"""
+    for path in deploy_files():
+        text = open(path).read()
+        for gone in ("MOP_AUTH_CALLOUT", "MOP_OPERATORS ", "MOP_OPERATORS\n", "MOP_OPERATORS'",
+                     'MOP_OPERATORS"', "MOP_OPERATORS}", "MOP_OPERATOR_SUBJECTS", "nats-op-",
+                     "mop_operators_base"):
+            check(f"{os.path.relpath(path, DEPLOY)}: no {gone.strip()!r} (#219)", gone not in text)
 
 
 def main():
@@ -924,13 +936,12 @@ def main():
     check("bus: a changed users.conf still reloads nats",
           (by.get("Users file of the bus, after") or {}).get("notify") == "reload nats")
     users_task = by.get("Users file of the bus, written by the server") or {}
-    check("bus: mop cluster users knows whether the callout is on",
-          "MOP_AUTH_CALLOUT" in (users_task.get("environment") or {}), users_task.get("environment"))
     names = [t.get("name") for t in ptasks]
     check("bus: the callout file is read before and after mop cluster users",
           names.index("Callout file of the bus, before") < names.index(users_task.get("name"))
           < names.index("Callout file of the bus, after") if after and users_task else False)
     check_identity_copy_167(check, ptasks)
+    check_one_source_219(check)
     conf = open(os.path.join(DEPLOY, "roles", "bus", "templates", "nats-server.conf.j2")).read()
     check("nats-server.conf includes callout.conf inside authorization",
           re.search(r"authorization \{[^}]*include \./callout\.conf", conf) is not None)

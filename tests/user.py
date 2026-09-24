@@ -67,8 +67,9 @@ def check(what, ok, detail=""):
         failed.append(f"{what}" + (f": {detail}" if detail else ""))
 
 
-def provider(setting=""):
-    return identity.PlainFileProvider(FILE, setting, identity.SECRETS)
+def provider():
+    # Файл -- единственный источник людей (#219).
+    return identity.PlainFileProvider(FILE)
 
 
 def content():

@@ -118,9 +118,9 @@ def main(argv):
         # за спиной оператора: на узел ведёт одна дорога, и это deploy на
         # сервере; сюда его плоды привозит join.
         lib.usage(f"no bus credentials on this machine.\n"
-                  f"Log in as yourself: mop join --user <name>. The project "
+                  f"Log in as yourself: mop join <login>. The project "
                   f"must be registered (mop project add {origin}) and yours "
-                  f"in MOP_OPERATORS on the server")
+                  f"in the server's identity provider (mop user, or the directory)")
     link_skill()
 
     # Профиль тот же, что у папетов, но источник ключа другой: не узловой

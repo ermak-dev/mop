@@ -136,17 +136,30 @@ def driver_refusals(listing, default):
     return out
 
 
-def operator_refusals(settings, secrets_dir=identity.SECRETS):
-    """Отказы по личностям операторов (#205). -> [строка].
+# Отказ, пока в .env лежит прежний второй источник людей (#219).
+OPERATORS_GONE = ("MOP_OPERATORS is gone: move people with `mop user import` on the server, "
+                  "then remove the line")
 
-    Провайдер отказывает логину, определённому дважды, по одному -- чтобы
-    один дубль при переносе людей из MOP_OPERATORS в файл не выключил вход
-    всем. Здесь -- громкий отказ всего, до плейбука: неизвестный провайдер,
-    битый файл операторов, каждый дубль."""
+
+def operator_refusals(settings, secrets_dir=identity.SECRETS, leftover=""):
+    """Отказы по людям (#205, #219). -> [строка].
+
+    leftover -- значение MOP_OPERATORS из .env: его больше не читает никто,
+    и молча лежащий он значил бы людей, которых шина не пустит. Провайдер
+    отказывает логину, определённому дважды, по одному; здесь -- громкий
+    отказ всего, до плейбука: неизвестный провайдер, битый файл операторов,
+    каждый дубль, и файл без единого человека -- на шину не вошёл бы никто."""
+    if (leftover or "").strip():
+        return [OPERATORS_GONE]
     try:
-        return identity.provider(settings, secrets_dir).conflicts()
+        source = identity.provider(settings, secrets_dir)
+        out = source.conflicts()
     except ValueError as e:
         return [str(e)]
+    if isinstance(source, identity.PlainFileProvider) and not out and not source.identities():
+        out.append(f"no people in {source.path}: nobody could log in to the bus -- "
+                   f"add someone with mop user add <login> on the server")
+    return out
 
 
 def inventory_listing(inventory):
@@ -249,7 +262,8 @@ def main(argv):
                 + uniform_refusals(listing, {n: config.get(n) for n in config.POOL_UNIFORM},
                                    config.get("MOP_DRIVER"))
                 + memory_refusals(listing, config.get("MOP_BODY_MEM_CAP_MB"))
-                + operator_refusals({n: config.get(n) for n in identity.SETTINGS}))
+                + operator_refusals({n: config.get(n) for n in identity.SETTINGS},
+                                    leftover=config.get("MOP_OPERATORS")))
     for why in refusals:
         lib.fail(why)
     if refusals:
@@ -318,8 +332,8 @@ def main(argv):
         # человек входит своим именем, и выбрать его за оператора deploy не
         # может. Громко, а не красной проверкой с непонятной причиной.
         lib.fail(f"installed, but this machine is nobody on the bus yet: "
-                 f"log in with mop join --user <name> (a name from "
-                 f"MOP_OPERATORS), then mop list")
+                 f"log in with mop join <login> (a person from mop user, or "
+                 f"from the directory), then mop list")
         return 1
 
     lib.section("check")
