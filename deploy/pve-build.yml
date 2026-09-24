@@ -150,7 +150,7 @@
     #
     # Порядок старшинства целиком: узел > проект > установка > дефолт.
     #
-    # Строка хоста в инвентаре -- имя настройки строчными (mop_mem_mb), как
+    # Строка хоста в инвентаре -- имя настройки строчными (mop_disk_gb), как
     # её ищет шаблон node.env (роль bus); прописное имя -- значение установки
     # из --extra-vars. Пока выражения ниже брали прописное напрямую, строка
     # хоста не доезжала до сборки, молча (#192). Правило чтения здесь одно,
@@ -160,14 +160,16 @@
         node_body: >-
           {{ node_body | default({}) | combine({item:
              hostvars[inventory_hostname][item | lower] | default(lookup('vars', item))}) }}
-      loop: [MOP_MEM_MB, MOP_DISK_GB, MOP_CORES,
-             MOP_BODY_MEM_CAP_MB, MOP_BODY_DISK_CAP_GB, MOP_BODY_CORES_CAP]
+      loop: [MOP_DISK_GB, MOP_CORES, MOP_BODY_DISK_CAP_GB, MOP_BODY_CORES_CAP]
 
     # Потолок узла -- min(), размер -- просьба проекта, иначе значение узла.
+    # Память -- не узла (#197): она свойство папета, просьба проекта, иначе
+    # установки, и ставит её телу ensure из спеки на каждом подъёме. Тело
+    # сборки берёт ту же цепочку без узла; потолок узла о памяти -- только
+    # ограничение размещения папета (meta mop_mem_cap_mb).
     - name: How big a body of this project may be here
       ansible.builtin.set_fact:
-        body_mem: "{{ [(mop_project_asks | default({})).get('MOP_MEM_MB', node_body.MOP_MEM_MB) | int,
-                       node_body.MOP_BODY_MEM_CAP_MB | int] | min }}"
+        body_mem: "{{ (mop_project_asks | default({})).get('MOP_MEM_MB', MOP_MEM_MB) | int }}"
         body_disk: "{{ [(mop_project_asks | default({})).get('MOP_DISK_GB', node_body.MOP_DISK_GB) | int,
                         node_body.MOP_BODY_DISK_CAP_GB | int] | min }}"
         body_cores: "{{ [(mop_project_asks | default({})).get('MOP_CORES', node_body.MOP_CORES) | int,
@@ -179,8 +181,7 @@
           {{ mop_project }} on {{ inventory_hostname }}: {{ body_mem }} MB,
           {{ body_disk }} GB, {{ body_cores }} cores
           {{ '(capped by the node)' if (mop_project_asks | default({})) and
-             (body_mem | int < (mop_project_asks.MOP_MEM_MB | default(0) | int)
-              or body_disk | int < (mop_project_asks.MOP_DISK_GB | default(0) | int)
+             (body_disk | int < (mop_project_asks.MOP_DISK_GB | default(0) | int)
               or body_cores | int < (mop_project_asks.MOP_CORES | default(0) | int)) else '' }}
 
     # run_once, а не `creates`: ключ ОДИН на контроллер, а задача играется по
