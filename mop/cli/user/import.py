@@ -30,7 +30,9 @@ def main(argv):
     except ValueError as e:
         lib.fail(str(e))
         return 1
-    identity.refresh_copy(path)
+    why = identity.refresh_copy(path)
+    if why:
+        print(why)
     # Одна строка, и не молча: без следующего шага эти логины не входят.
     print(f"moved {', '.join(moved)} into {path}: remove MOP_OPERATORS from .env "
           f"and run mop deploy -- until then they are defined twice and refused")

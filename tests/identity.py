@@ -453,10 +453,93 @@ def check_deploy_chain_232():
     return out
 
 
+# ── #234: копия личностей -- владельца каталога, не вызвавшего ───────────
+# HYPOTHESIS: `mop user` от root обновлял /etc/nats/identity/operators сам
+# (refresh_copy, #218), и файл выходил root:root 0600 в каталоге ermak:ermak
+# 0700: сервисы пула (callout, identity) его не читали, и на шину не входил
+# никто, пока файлу не вернули владельца руками.
+# SOLUTION: копия получает uid:gid каталога копии (его задаёт deploy); не
+# выходит отдать ей этого владельца -- отказ одной строкой с путём и
+# «run mop deploy», прежняя копия остаётся как была.
+# Без настоящего root владелец подменяется: identity._owner (кто владеет
+# каталогом) заменён заглушкой с чужим uid:gid. Настоящий fchown от
+# непривилегированного пользователя тогда падает EPERM -- это случай «не
+# root и не владелец»; подменённый os.fchown/os.chown, пишущий вызовы, --
+# случай root, у которого chown проходит.
+# STATUS: FIXED — see #234
+def check_copy_owner_234():
+    out = []
+    tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
+    src = os.path.join(tmp, "operators")
+    with open(src, "w") as f:
+        f.write("new\n")
+    nats = os.path.join(tmp, "nats")
+    folder = os.path.join(nats, "identity")
+    os.makedirs(folder)
+    copy = os.path.join(folder, identity.OPERATORS_FILE)
+    with open(copy, "w") as f:
+        f.write("old\n")
+    me = (os.getuid(), os.getgid())
+    foreign = (me[0] + 4242, me[1] + 4242)
+    if me[0] == 0:
+        return ["run this check as an ordinary user: root's chown passes everywhere"]
+    keep = getattr(identity, "_owner", None)
+    identity._owner = lambda path: foreign
+    try:
+        # Не root и не владелец: отдать копию владельцу каталога нельзя.
+        why = identity.refresh_copy(src, folder)
+        st = os.stat(copy)
+        if (st.st_uid, st.st_gid) != foreign and open(copy).read() != "old\n":
+            out.append(f"a caller that is not the directory's owner left the copy owned by "
+                       f"{st.st_uid}:{st.st_gid}, the directory is {foreign[0]}:{foreign[1]}")
+        if not isinstance(why, str) or copy not in why or "mop deploy" not in why \
+                or "\n" in why:
+            out.append(f"the refusal must be one line naming {copy} and mop deploy: {why!r}")
+        if open(copy).read() != "old\n":
+            out.append("a refused refresh must leave the old copy as it was")
+        if [n for n in os.listdir(folder) if n != identity.OPERATORS_FILE]:
+            out.append(f"a refused refresh must leave no temporary file: {os.listdir(folder)}")
+        # root: chown проходит -- файл уходит владельцу каталога, атомарно, 0600.
+        calls = []
+        real = os.fchown, os.chown
+        os.fchown = lambda fd, uid, gid: calls.append(("fchown", uid, gid))
+        os.chown = lambda p, uid, gid, **kw: calls.append(("chown", uid, gid))
+        try:
+            why = identity.refresh_copy(src, folder)
+        finally:
+            os.fchown, os.chown = real
+        if why:
+            out.append(f"a caller that may chown must refresh the copy: {why!r}")
+        if not calls or any((uid, gid) != foreign for _, uid, gid in calls):
+            out.append(f"the copy must be given the directory's owner {foreign}: {calls}")
+        if open(copy).read() != "new\n" or oct(os.stat(copy).st_mode & 0o777) != "0o600":
+            out.append("the refreshed copy: the new content, 0600")
+        # Каталога ещё нет: он тоже не остаётся за вызвавшим -- владелец
+        # берётся у /etc/nats над ним.
+        fresh = os.path.join(tmp, "nats2", "identity")
+        os.makedirs(os.path.dirname(fresh))
+        why = identity.refresh_copy(src, fresh)
+        if os.path.exists(fresh) and os.stat(fresh).st_uid != foreign[0]:
+            out.append("a directory made by the refresh must not stay the caller's")
+        if not isinstance(why, str) or "mop deploy" not in why:
+            out.append(f"a directory the caller cannot give away: refusal: {why!r}")
+        # Свой каталог -- как прежде: успех, None.
+        identity._owner = lambda path: me
+        if identity.refresh_copy(src, folder) is not None:
+            out.append("the directory's own owner refreshes silently: None")
+    finally:
+        if keep is None:
+            del identity._owner
+        else:
+            identity._owner = keep
+    return out
+
+
 def main():
     failed = []
     for check in (check_identity, check_hash, check_provider, check_one_source_219, check_choice,
-                  check_deploy, check_chain_232, check_deploy_chain_232):
+                  check_deploy, check_chain_232, check_deploy_chain_232,
+                  check_copy_owner_234):
         try:
             lines = check()
         except Exception as e:  # noqa: BLE001 -- падение проверки -- тоже провал

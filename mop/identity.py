@@ -386,23 +386,51 @@ def import_setting(path, setting, secrets_dir=SECRETS):
     return [w.login for w in people]
 
 
+def _owner(path):
+    """-> (uid, gid) владельца пути."""
+    st = os.stat(path)
+    return st.st_uid, st.st_gid
+
+
 def refresh_copy(path, folder=None):
     """Копия файла операторов для сервисов сервера (natsconf.IDENTITY_DIR,
-    её же кладёт deploy). -> записана ли. Каталог над копией -- /etc/nats
-    пользователя пула: писать туда может только он; не может (не сервер
-    шины, другой пользователь) -- False, копию обновит mop deploy."""
+    её же кладёт deploy). -> None, если записана, иначе строка: почему нет и
+    что копию обновит mop deploy. Каталог над копией -- /etc/nats
+    пользователя пула: писать туда может только он (или root); не может (не
+    сервер шины, другой пользователь) -- строка.
+
+    Копия -- владельца своего каталога, не вызвавшего (#234): его задаёт
+    deploy, и от его имени её читают сервисы. `mop user` от root оставлял
+    файл root:root 0600, и callout отказывал каждому входу. Не выходит
+    отдать владельцу каталога (не root и не он) -- отказ, прежняя копия
+    остаётся: устаревшая лучше нечитаемой. Каталог, которого ещё нет,
+    получает владельца /etc/nats над ним."""
     from . import natsconf   # лениво: как у server_provider
     folder = folder or natsconf.IDENTITY_DIR
+    copy = os.path.join(folder, OPERATORS_FILE)
+    later = "the server's services read a copy of the operators file: run mop deploy"
     parent = os.path.dirname(folder)
     if not os.path.isdir(parent) or not os.access(parent, os.W_OK | os.X_OK):
-        return False
+        return later
     try:
+        if not os.path.isdir(folder):
+            owner = _owner(parent)
+            os.mkdir(folder, 0o700)
+            try:
+                os.chown(folder, *owner)
+            except OSError:
+                os.rmdir(folder)
+                raise
+        owner = _owner(folder)
         fsutil.make_private_dir(folder)
         with open(path, "rb") as f:
-            fsutil.write_private(os.path.join(folder, OPERATORS_FILE), f.read())
+            fsutil.write_private(copy, f.read(), owner=owner)
+    except PermissionError as e:
+        return (f"{copy}: cannot hand it to the owner of {folder} ({e.strerror}), "
+                f"the services would not read it: run mop deploy")
     except OSError:
-        return False
-    return True
+        return later
+    return None
 
 
 # ─── выбор провайдера ────────────────────────────────────────────────────
