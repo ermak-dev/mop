@@ -15,12 +15,21 @@
 # окружения раннера, ни секретов, ни переменных установки, ни шагов deploy.
 #
 # MOP_TESTS_STRICT=1 -- контракт #229: под ней любой SKIPPED -- отказ.
+#
+# Выкладка (#240): зелёный master раскатывает установку сам. builder ходит
+# по ssh на сервер mop отдельным ключом, и на сервере у этого ключа в
+# authorized_keys `restrict,from="…",command="…"` -- принудительная команда
+# `mop deploy --from-ci` (#239): клиент не шлёт никакой команды, решает
+# сервер, и ключ не умеет ничего, кроме как раскатить зелёный master. Ключ,
+# known_hosts и адрес -- защищённые переменные CI установки: их видят только
+# конвейеры защищённой ветки master, ветки папетов -- никогда. В репозитории
+# нет ни хоста, ни ключа: копия проекта в другом месте задачи просто не видит.
 
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "push"
 
-stages: [test]
+stages: [test, deploy]
 
 .tests:
   stage: test
@@ -83,3 +92,28 @@ test:py3.13:
   extends: .tests
   variables:
     PYTHON_IMAGE: python:3.13-slim
+
+deploy:mop:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $MOP_DEPLOY_TARGET
+  tags: [docker]
+  needs: [test:py3.12, test:py3.13]
+  # Одна выкладка за раз: два master'а подряд не раскатываются внахлёст.
+  resource_group: mop-deploy
+  variables:
+    DEPLOY_KEY: "$CI_BUILDS_DIR/mop-deploy-$CI_JOB_ID.key"
+  script:
+    # Ключ -- копией 0600: ssh отвергает ключ, открытый другим, а права
+    # файла переменной решает раннер.
+    - (umask 077 && cp "$MOP_DEPLOY_SSH_KEY" "$DEPLOY_KEY")
+    - chmod 600 "$DEPLOY_KEY"
+    # Без удалённой команды: её задаёт сервер (command= в authorized_keys).
+    # Отказ ssh или deploy -- отказ задачи.
+    - >-
+      ssh -T -i "$DEPLOY_KEY" -o IdentitiesOnly=yes -o BatchMode=yes
+      -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$MOP_DEPLOY_KNOWN_HOSTS"
+      "$MOP_DEPLOY_TARGET"
+  after_script:
+    # И при отказе: копия ключа не переживает задачу.
+    - rm -f "$DEPLOY_KEY"
