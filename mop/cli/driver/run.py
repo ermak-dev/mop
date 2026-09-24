@@ -65,6 +65,17 @@ def _inner_script():
     return prelude + base64.b64decode(blob).decode()
 
 
+def ensure_params(name, environ):
+    """Что ensure узнаёт о папете из окружения задачи. Чистая функция.
+
+    mem -- потолок памяти из спеки (PU_MEM_MB, #197); спека до #197 его не
+    несёт, и тогда память тела не трогается."""
+    params = {"project": driver.project_of_name(name)}
+    if environ.get("PU_MEM_MB"):
+        params["mem"] = environ["PU_MEM_MB"]
+    return params
+
+
 def main(argv):
     """Поднять тело и отработать в нём внутренний врапер. Зовётся из спеки.
 
@@ -80,7 +91,7 @@ def main(argv):
         sys.exit(f"{name!r} doesn't look like a puppet name")
     d = driver.current()
 
-    r = asyncio.run(d.ensure(name, {"project": driver.project_of_name(name)}))
+    r = asyncio.run(d.ensure(name, ensure_params(name, os.environ)))
     if r.get("error"):
         sys.exit(f"no body for {name}: {r['error']}")
     print(f"{name}: body {r.get('body') or 'the node itself'}"

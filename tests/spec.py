@@ -45,6 +45,10 @@ SNAPSHOT = os.path.join(os.path.dirname(os.path.realpath(__file__)), "spec_snaps
 
 from mop import config, spec  # noqa: E402
 
+# Просьбы проектов (#197) спека читает файлом сервера: слепок снимается без
+# него -- так спеку видит установка, где deploy просьб ещё не привозил.
+spec.ASKS_FILE = os.path.join(os.path.dirname(SNAPSHOT), "no-such-project-asks.json")
+
 # Git identity (#167) слепок снимает НЕ заданной: так спеку видит установка
 # без этих настроек. Пустое окружение уступило бы .env и node.env (config.get),
 # поэтому из прочитанных файлов их вычищаем -- иначе слепок совпадал бы только
@@ -409,6 +413,181 @@ def check_git_identity():
     return bad, cases
 
 
+# ── #197: память папета -- его свойство ──────────────────────────────────────
+# HYPOTHESIS: у папета три несвязанных числа памяти. Резерв Nomad --
+# MOP_PUPPET_MEM_MB, потолок Nomad -- MOP_MEM_MB, оба только установки; на pve
+# настоящая память тела -- `pct --memory` из образа, то есть из `.mop` проекта
+# на момент сборки. Слоты врут, просьба проекта на host не действует вовсе.
+# SOLUTION: одна функция: потолок -- просьба проекта (MOP_MEM_MB его `.mop`),
+# иначе установки (.env поверх дефолта); резерв -- бюджет установки, но не
+# выше потолка. Применяет Nomad на обоих драйверах.
+# (просьбы проекта, потолок установки, бюджет установки, (резерв, потолок))
+MEMORY = [
+    ("no ask: the installation's ceiling", {}, 12288, 8192, (8192, 12288)),
+    ("the ask over the installation", {"MOP_MEM_MB": "16384"}, 12288, 8192, (8192, 16384)),
+    # Просьба ниже бюджета: резерв не выше потолка, иначе Nomad отвергнет
+    # спеку (MemoryMaxMB < MemoryMB), а слоты пообещали бы больше, чем тело.
+    ("an ask below the budget", {"MOP_MEM_MB": "6144"}, 12288, 8192, (6144, 6144)),
+    ("an int ask from YAML", {"MOP_MEM_MB": 4096}, 12288, 8192, (4096, 4096)),
+    ("other asks are not memory", {"MOP_DISK_GB": "50"}, 12288, 8192, (8192, 12288)),
+    ("an installation ceiling below its budget", {}, 4096, 8192, (4096, 4096)),
+]
+# Просьба, которую нельзя применить: громко, а не молчаливая подмена
+# значением установки -- проект просил другого.
+BAD_ASKS = ["lots", "", "0", "-512", "8G", "1.5"]
+
+
+def check_memory_197():
+    """Цепочка памяти папета: дефолт -> .env -> `.mop` проекта.
+    STATUS: FIXED — see #197"""
+    bad = cases = 0
+    for what, asks, ceiling, budget, want in MEMORY:
+        cases += 1
+        got = spec.memory(asks, ceiling, budget)
+        if got != want:
+            bad += 1
+            print(f"FAILED  memory, {what}: {got}, wanted {want}")
+    for ask in BAD_ASKS:
+        cases += 1
+        try:
+            got = spec.memory({"MOP_MEM_MB": ask}, 12288, 8192)
+        except ValueError as e:
+            if "MOP_MEM_MB" not in str(e):
+                bad += 1
+                print(f"FAILED  memory, ask {ask!r}: the refusal does not name MOP_MEM_MB: {e}")
+            continue
+        bad += 1
+        print(f"FAILED  memory, ask {ask!r}: took it as {got}, wanted a refusal")
+    return bad, cases
+
+
+def check_project_asks_197():
+    """Просьбы проектов на сервере: файл, который кладёт роль cluster из
+    манифестов `mop deploy`. Нет файла или нет проекта в нём -- значения
+    установки, без падения: это любой проект до первого прогона.
+    STATUS: FIXED — see #197"""
+    import tempfile
+    bad = cases = 0
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "project-asks.json")
+        cases += 1
+        if spec.project_asks("mop", path) != {}:
+            bad += 1
+            print("FAILED  project_asks without the file: wanted {}")
+        with open(path, "w") as f:
+            json.dump({"mop": {"MOP_MEM_MB": "6144", "MOP_CORES": "4"}}, f)
+        for project, want in (("mop", {"MOP_MEM_MB": "6144", "MOP_CORES": "4"}),
+                              ("rugent", {})):
+            cases += 1
+            got = spec.project_asks(project, path)
+            if got != want:
+                bad += 1
+                print(f"FAILED  project_asks({project!r}): {got}, wanted {want}")
+    return bad, cases
+
+
+def memory_constraint(rendered):
+    """Ограничение про потолок памяти узла; None, если его нет. Литерал
+    ключа нарочно: проверка читает то, что уедет в Nomad."""
+    for c in rendered["Job"].get("Constraints") or []:
+        if c.get("LTarget") == "${meta.mop_mem_cap_mb}":
+            return c
+    return None
+
+
+def check_spec_memory_197():
+    """Спека применяет память папета (#197): резерв и потолок Nomad -- из
+    spec.memory для проекта папета, потолок едет в окружение задачи
+    (PU_MEM_MB, его читает `mop driver run` pve), и узел берёт папета, только
+    если его потолок (meta.mop_mem_cap_mb) не ниже потолка папета.
+    Бюджет и потолок установки -- PINNED: 4096 и 8192.
+    STATUS: FIXED — see #197"""
+    import tempfile
+    bad = cases = 0
+
+    def expect(what, ok, detail=""):
+        nonlocal bad, cases
+        cases += 1
+        if not ok:
+            bad += 1
+            print(f"FAILED  spec memory, {what}" + (f": {detail}" if detail else ""))
+
+    saved = spec.ASKS_FILE
+    with tempfile.TemporaryDirectory() as d:
+        spec.ASKS_FILE = os.path.join(d, "project-asks.json")
+        with open(spec.ASKS_FILE, "w") as f:
+            json.dump({"big": {"MOP_MEM_MB": "16384"}, "small": {"MOP_MEM_MB": "2048"},
+                       "odd": {"MOP_MEM_MB": "8G"}, "plain": {"MOP_CORES": "8"}}, f)
+        try:
+            for project, want in (("big", (4096, 16384)), ("small", (2048, 2048)),
+                                  ("plain", (4096, 8192)), ("absent", (4096, 8192))):
+                j = spec.job_spec(f"pu-{project}-1", f"git@git.example.dev:someone/{project}.git")
+                task = j["Job"]["TaskGroups"][0]["Tasks"][0]
+                res = task["Resources"]
+                expect(f"{project}: MemoryMB/MemoryMaxMB",
+                       (res.get("MemoryMB"), res.get("MemoryMaxMB")) == want, res)
+                expect(f"{project}: PU_MEM_MB is the ceiling",
+                       task["Env"].get("PU_MEM_MB") == str(want[1]), task["Env"].get("PU_MEM_MB"))
+                expect(f"{project}: PU_MEM_MB is carried into the body",
+                       "PU_MEM_MB" in task["Env"].get("PU_CARRY", "").split(","))
+                c = memory_constraint(j)
+                expect(f"{project}: the node's cap constraint",
+                       c == {"LTarget": "${meta.mop_mem_cap_mb}", "Operand": ">=",
+                             "RTarget": str(want[1])}, c)
+                expect(f"{project}: the project constraint stays", project_constraint(j) is not None)
+                expect(f"{project}: the ceiling reads back from the spec",
+                       spec.ceiling_of(j["Job"]) == want[1], spec.ceiling_of(j["Job"]))
+                expect(f"{project}: a fresh spec is not stale", not spec.spec_is_stale(j["Job"]))
+            try:
+                spec.job_spec("pu-odd-1", "git@git.example.dev:someone/odd.git")
+                expect("odd: an ask that cannot be applied is refused", False)
+            except RuntimeError as e:
+                expect("odd: the refusal names the puppet and the ask",
+                       "pu-odd-1" in str(e) and "MOP_MEM_MB" in str(e), e)
+        finally:
+            spec.ASKS_FILE = saved
+    # Спека до #197: ни ограничения, ни потолка в нём.
+    expect("a spec without the cap constraint has no ceiling",
+           spec.ceiling_of({"Constraints": [{"LTarget": "${meta.mop_projects}"}]}) is None)
+    return bad, cases
+
+
+# Как Nomad 1.10 сравнивает `>=` (scheduler/feasible.go, checkOrder): обе
+# стороны целые (strconv.ParseInt, основание 10) -- как целые, иначе обе
+# float -- как float, иначе лексически. (слева -- meta узла, справа -- потолок
+# папета, сядет ли)
+ORDER = [
+    ("32768", "16384", True),
+    ("16384", "16384", True),
+    ("8192", "16384", False),
+    # Лексически "9" > "10" и "9000" > "12288": численное сравнение здесь
+    # единственное, что отличает потолок от строки.
+    ("9", "10", False),
+    ("9000", "12288", False),
+    ("10000", "9999", True),
+    ("+16384", "16384", True),
+    ("16384.5", "16384", True),
+    # Не число -- лексический порядок Nomad, и именно поэтому deploy
+    # отвергает потолок узла не из одного целого числа.
+    ("32G", "16384", True),
+    (" 32768", "16384", False),
+    ("", "16384", False),
+]
+
+
+def check_nomad_order_197():
+    """Зеркало checkOrder Nomad для диагноза unserved: он обязан отвечать
+    ровно как планировщик. STATUS: FIXED — see #197"""
+    bad = cases = 0
+    for left, right, want in ORDER:
+        cases += 1
+        got = spec.nomad_order(">=", left, right)
+        if got != want:
+            bad += 1
+            print(f"FAILED  nomad_order({left!r} >= {right!r}): {got}, wanted {want}")
+    return bad, cases
+
+
 # Спека собирается в подпроцессе с данным MOP_DRIVER: настройки читаются
 # при импорте, и сменить драйвер можно только свежим процессом. Сеть в нём
 # закрыта на уровне сокета до первого импорта.
@@ -419,6 +598,7 @@ def refuse(*a, **k):
 socket.socket.connect = socket.socket.connect_ex = refuse
 sys.path.insert(0, sys.argv[1])
 from mop import spec
+spec.ASKS_FILE = "/nonexistent/project-asks.json"
 print(json.dumps(spec.job_spec("pu-mop-1", "git@h:g/mop.git"), sort_keys=True))
 """
 
@@ -483,6 +663,11 @@ def main():
     dbad, dcases = check_driver_free_183()
     bad += dbad
     cases += dcases
+    for check in (check_memory_197, check_project_asks_197, check_spec_memory_197,
+                  check_nomad_order_197):
+        cbad, ccases = check()
+        bad += cbad
+        cases += ccases
 
     for what, j, want in STALE:
         cases += 1

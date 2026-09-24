@@ -397,7 +397,8 @@ def diagnose():
             continue
         if not alloc or alloc["ClientStatus"] in ("lost", "unknown", "failed",
                                                   "pending"):
-            issues.append(_placement_issue(job, alloc, item.get("unserved")))
+            issues.append(_placement_issue(job, alloc, item.get("unserved"),
+                                           item.get("ceiling")))
             continue
         action = action_for(item["kind"])
         if action is not False:
@@ -406,9 +407,11 @@ def diagnose():
     return issues
 
 
-def _placement_issue(job, alloc, unserved=False):
+def _placement_issue(job, alloc, unserved=False, ceiling=None):
     """Диагноз джоба, который не стоит. unserved -- пометка сервиса
-    кластера: ни один готовый узел не обслуживает проект (#118)."""
+    кластера (spec.placement_gap): ни один готовый узел не обслуживает
+    проект (#118) или, со значением "memory", потолок каждого из них ниже
+    ceiling, потолка папета (#197)."""
     name = job["ID"]
     if alloc and alloc["ClientStatus"] in ("pending", "failed"):
         return {"name": name, "alloc": alloc, "action": "stop",
@@ -416,6 +419,15 @@ def _placement_issue(job, alloc, unserved=False):
     if alloc:
         return {"name": name, "alloc": alloc, "action": "stop",
                 "diagnosis": f"allocation {alloc['ClientStatus']}"}
+    if spec.queued(job) and unserved == "memory":
+        # Просьба проекта больше, чем готова дать любая машина с его образом:
+        # ни ожидание, ни сборка образа не помогут.
+        project = project_of((job.get("Meta") or {}).get("origin") or "")
+        return {"name": name, "alloc": None, "action": None,
+                "diagnosis": f"queued — no ready node of {project} takes a "
+                             f"{ceiling} MB puppet (node meta mop_mem_cap_mb): "
+                             f"lower MOP_MEM_MB in {project}'s .mop or raise "
+                             f"mop_body_mem_cap_mb of a node"}
     if spec.queued(job) and unserved:
         # Слоты тут ни при чём: ограничение размещения по образу (#10) не
         # пускает никуда, и ожидание не вылечит ничего.

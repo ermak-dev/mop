@@ -157,6 +157,17 @@ size)
     fi
     ;;
 
+# Память тела (#197): потолок папета из его спеки, на каждом подъёме. Только
+# память: ядра и диск остаются образу, и глагол size сборки их не отдаёт.
+# swap не трогаем -- его ставит create. Пишет только разницу, как net.
+memory)
+    check_vmid "${1:?vmid}"; check_host "$1"
+    vmid="$1"; mem="${2:?mem}"
+    [[ "$mem" =~ ^[1-9][0-9]*$ ]] || die "memory $mem is not a whole number of megabytes"
+    [[ "$(pct config "$vmid" | sed -n 's/^memory: //p')" == "$mem" ]] && exit 0
+    pct set "$vmid" --memory "$mem" >&2
+    ;;
+
 # Адрес стоящего тела: тот же net0, что ставит clone, но на теле, которое
 # уже есть. Нужен переходу #58 -- формула адреса сменилась, и тело со старым
 # адресом иначе молчало бы до рецикла. Сравнение перед записью обязательно:
@@ -343,6 +354,6 @@ unpack)
     ;;
 
 *)
-    die "no such verb ${verb:-(empty)}; available: list capacity create clone size net bootstrap keys start stop template destroy exec push unpack"
+    die "no such verb ${verb:-(empty)}; available: list capacity create clone size memory net bootstrap keys start stop template destroy exec push unpack"
     ;;
 esac

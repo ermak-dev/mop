@@ -815,8 +815,125 @@ def main():
         print(f"FAILED  check_clone_lock_195: {type(e).__name__}: {e}")
     cases, bad = cases + c, bad + b
 
+    try:
+        c, b = check_body_memory_197()
+    except Exception as e:
+        c, b = 1, 1
+        print(f"FAILED  check_body_memory_197: {type(e).__name__}: {e}")
+    cases, bad = cases + c, bad + b
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
+
+
+# ── память тела -- из спеки, на каждом подъёме (#197) ───────────────────
+# HYPOTHESIS: память pve-тела -- `pct --memory` образа, испечённая сборкой из
+# `.mop` на тот момент; спека папета (MemoryMaxMB) до тела не доходит, и
+# стоящее тело не меняется никогда.
+# SOLUTION: спека несёт потолок в PU_MEM_MB, `mop driver run` отдаёт его
+# ensure, и ensure до start ставит телу память глаголом `mop-pve memory` --
+# и новому клону, и стоящему телу. Спека до #197 PU_MEM_MB не несёт: тогда
+# память тела не трогается, как было.
+# STATUS: FIXED — see #197
+def check_body_memory_197():
+    import asyncio
+    from mop.driver import pve
+    from mop.cli.driver import run
+
+    cases = bad = 0
+
+    def check(what, got, want):
+        nonlocal cases, bad
+        cases += 1
+        if not want(got):
+            bad += 1
+            print(f"FAILED  #197 {what}: got {got!r}")
+
+    name = "pu-mop-1"
+    vmid = pve.vmid_of(name)
+
+    def fake(fail=None, code=1):
+        """sh: список вызовов глаголов обёртки; fail -- глагол, который
+        отвечает кодом code (None -- таймаут)."""
+        calls = []
+
+        async def sh(script, timeout=20, prefix=()):
+            words = [w.strip("'") for w in script.split()]
+            verb = next((w for w in words if w in (
+                "list", "clone", "net", "memory", "start", "push", "exec")), None)
+            calls.append((verb, words))
+            if verb == fail:
+                # Таймаут приходит без вывода, как у настоящего sh.
+                return ("no such thing\n" if code is not None else ""), code
+            return "", 0
+        return sh, calls
+
+    def verbs(calls):
+        return [v for v, _ in calls if v]
+
+    async def standing(_v):
+        return name
+
+    async def empty(_v):
+        return ""
+
+    saved = (pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            key = os.path.join(d, "mop-body")
+            with open(key + ".pub", "w") as f:
+                f.write("ssh-ed25519 AAAA node\n")
+            pve.SSH_KEY = key
+            pve._seed_files = lambda: []
+
+            for what, stand in (("a standing body", standing), ("a fresh clone", empty)):
+                pve._hostname = stand
+                pve.sh, calls = fake()
+                r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": "16384"}))
+                check(f"{what}: ensure succeeds", r, lambda r: not r.get("error"))
+                mem = [w for v, w in calls if v == "memory"]
+                check(f"{what}: memory is set once, to the spec's ceiling", mem,
+                      lambda m: len(m) == 1 and m[0][-2:] == [str(vmid), "16384"])
+                check(f"{what}: memory is set before start", verbs(calls),
+                      lambda v: "memory" in v and "start" in v
+                      and v.index("memory") < v.index("start"))
+
+            pve._hostname = standing
+            pve.sh, calls = fake()
+            r = asyncio.run(pve.ensure(name, {"project": "mop"}))
+            check("a spec before #197: the body's memory is left alone", verbs(calls),
+                  lambda v: "memory" not in v and "start" in v)
+
+            pve.sh, calls = fake("memory")
+            r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": "16384"}))
+            check("memory refused: ensure refuses, naming the body and the size", r,
+                  lambda r: str(vmid) in (r.get("error") or "")
+                  and "16384" in r["error"] and "no such thing" in r["error"])
+            check("memory refused: the body is not started", verbs(calls),
+                  lambda v: "start" not in v)
+            pve.sh, calls = fake("memory", None)
+            r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": "16384"}))
+            check("memory timed out: a refusal, not a success", r,
+                  lambda r: "timed out" in (r.get("error") or ""))
+
+            for bad_mem in ("lots", "0", "-1", "8G"):
+                pve.sh, calls = fake()
+                r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": bad_mem}))
+                check(f"mem {bad_mem!r}: refused before the hypervisor", (r, verbs(calls)),
+                      lambda rv: "PU_MEM_MB" in (rv[0].get("error") or "")
+                      and "memory" not in rv[1] and "start" not in rv[1])
+    finally:
+        pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname = saved
+
+    # `mop driver run` отдаёт ensure потолок из окружения задачи.
+    check("run: params carry the spec's ceiling",
+          run.ensure_params(name, {"PU_MEM_MB": "16384"}),
+          lambda p: p == {"project": "mop", "mem": "16384"})
+    check("run: a spec before #197 carries no mem",
+          run.ensure_params(name, {}), lambda p: p == {"project": "mop"})
+    check("run: an empty PU_MEM_MB is no mem",
+          run.ensure_params(name, {"PU_MEM_MB": ""}), lambda p: p == {"project": "mop"})
+    return cases, bad
 
 
 # ── имя драйвера узла -- одно правило (#175) ────────────────────────────

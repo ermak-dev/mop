@@ -92,6 +92,7 @@ SOLUTION: своё имя переменной цикла у каждого incl
 include -- шаблон, а не файл репозитория), и `item` в задаче не встречается.
 """
 import ast
+import json
 import os
 import re
 import shlex
@@ -341,8 +342,10 @@ def check_probes(check):
 
 
 # ── #192: размеры тела при сборке — строка хоста раньше установки ─────────────
-BODY_KNOBS = ("MOP_MEM_MB", "MOP_DISK_GB", "MOP_CORES",
-              "MOP_BODY_MEM_CAP_MB", "MOP_BODY_DISK_CAP_GB", "MOP_BODY_CORES_CAP")
+# Память из них ушла (#197): она свойство папета -- просьба проекта, иначе
+# установки, -- и узел о ней говорит только размещением (mop_mem_cap_mb в
+# meta Nomad). Тело сборки берёт память по той же цепочке, без узла.
+BODY_KNOBS = ("MOP_DISK_GB", "MOP_CORES", "MOP_BODY_DISK_CAP_GB", "MOP_BODY_CORES_CAP")
 # Правило node.env (roles/bus/tasks/main.yml): строчная хоста, иначе установка.
 NODE_RULE = "hostvars[inventory_hostname][item | lower] | default(lookup('vars', item))"
 
@@ -358,9 +361,12 @@ def check_body_sizes(check, can_render):
     if sizes is None:
         return
     exprs = sizes.get("ansible.builtin.set_fact") or {}
-    for k in ("body_mem", "body_disk", "body_cores"):
+    for k in ("body_disk", "body_cores"):
         bare = re.findall(r"(?<![.'\w])MOP_[A-Z_]+(?!')", exprs.get(k, ""))
         check(f"pve-build: {k} takes no installation setting past the host's", not bare, bare)
+    check("pve-build: body_mem takes nothing of the node (#197)",
+          "node_body" not in exprs.get("body_mem", "") and "hostvars" not in exprs.get("body_mem", ""),
+          exprs.get("body_mem"))
     if node is None:
         return
     names = [t.get("name") for t in play["tasks"]]
@@ -393,13 +399,16 @@ def check_body_sizes(check, can_render):
         return tuple(int(env.from_string(exprs[k]).render(**v, lookup=lookup))
                      for k in ("body_mem", "body_disk", "body_cores"))
     cases = [
+        # Память хоста не читается (#197): строку mop_mem_mb отвергает deploy.
         ("the host's size over the installation's",
-         {"mop_mem_mb": "8192", "mop_disk_gb": 50, "mop_cores": "4"}, None, (8192, 50, 4)),
+         {"mop_mem_mb": "8192", "mop_disk_gb": 50, "mop_cores": "4"}, None, (12288, 50, 4)),
         ("the installation's without a host line", {}, None, (12288, 120, 4)),
-        ("the project's ask over the host's size", {"mop_mem_mb": "8192"},
+        ("the project's ask over the installation's memory", {},
          {"MOP_MEM_MB": "16384"}, (16384, 120, 4)),
+        # Потолок узла памяти тела сборки не режет (#197): он -- ограничение
+        # размещения папета, а не размер сборки.
         ("the host's cap under the ask", {"mop_body_mem_cap_mb": "4096", "mop_body_cores_cap": 2},
-         {"MOP_MEM_MB": "16384", "MOP_CORES": "8"}, (4096, 120, 2)),
+         {"MOP_MEM_MB": "16384", "MOP_CORES": "8"}, (16384, 120, 2)),
         ("the host's cap under its own size", {"mop_disk_gb": "500", "mop_body_disk_cap_gb": "60"},
          None, (12288, 60, 4)),
     ]
@@ -609,6 +618,61 @@ def main():
     check("cluster: the host list only when deploy sent one",
           len(wrote) == 1 and "mop_inventory_hosts is defined" in when(wrote[0]),
           [when(t) for t in wrote])
+
+    # ── просьбы проектов -- файлом сервису кластера (#197) ────────────────
+    # Спеку строит сервис под учёткой пула, а `.mop` проектов читает deploy на
+    # контроллере. Файла нет -- у каждого проекта память установки, поэтому
+    # разошедшееся имя файла отменило бы просьбы молча.
+    from mop import spec
+    want = "{{ MOP_HOME }}/.config/mop/" + os.path.basename(spec.ASKS_FILE)
+    wrote = [t for f, t in site_tasks() if f.endswith("roles/cluster/tasks/main.yml")
+             and "mop_manifests" in str(t.get("ansible.builtin.copy", {}).get("content"))]
+    check("cluster: the role writes the projects' asks where the spec reads them",
+          len(wrote) == 1 and wrote[0]["ansible.builtin.copy"].get("dest") == want
+          and wrote[0]["ansible.builtin.copy"].get("owner") == "{{ MOP_USER }}",
+          [t.get("ansible.builtin.copy") for t in wrote] or want)
+    check("cluster: the asks only when deploy sent the manifests",
+          len(wrote) == 1 and "mop_manifests is defined" in when(wrote[0]),
+          [when(t) for t in wrote])
+    if can_render and len(wrote) == 1:
+        import jinja2
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        env.filters["to_json"] = json.dumps
+        env.filters["dict2items"] = lambda d: [{"key": k, "value": v} for k, v in d.items()]
+        manifests = {"mop": {"asks": {"MOP_MEM_MB": "6144"}, "sandbox_vars": "/x"},
+                     "rugent": {"asks": {}}}
+        try:
+            got = json.loads(env.from_string(wrote[0]["ansible.builtin.copy"]["content"])
+                             .render(mop_manifests=manifests))
+        except Exception as e:  # noqa: BLE001 -- проверка, не код пула
+            got = f"{type(e).__name__}: {e}"
+        check("cluster: the asks file is {project: asks}, nothing else of the manifest",
+              got == {"mop": {"MOP_MEM_MB": "6144"}, "rugent": {}}, got)
+
+    # ── потолок памяти узла -- в meta Nomad (#197) ───────────────────────
+    # Спека папета требует `${meta.mop_mem_cap_mb} >= потолок`: ключ, которого
+    # на узле нет, ограничение не проходит, а имя, разошедшееся со спекой,
+    # закрыло бы пул целиком. Значение -- по правилу node.env: строка хоста,
+    # иначе установка.
+    from mop import spec
+    hcl_path = os.path.join(DEPLOY, "roles", "nomad", "templates", "client.hcl.j2")
+    hcl = open(hcl_path).read()
+    check("client.hcl: the node's memory cap is in its meta under the spec's key",
+          re.search(r"^\s*" + re.escape(spec.META_MEM_CAP) + r"\s*=", hcl, re.M) is not None,
+          spec.META_MEM_CAP)
+    if can_render:
+        base = {"inventory_hostname": "hyper", "MOP_POOL_DC": "pool", "MOP_SERVER_LAN": "10.0.0.1",
+                "MOP_NOMAD_RPC_PORT": "4647", "MOP_DRIVER": "host", "MOP_BODY_MEM_CAP_MB": "32768"}
+        for what, host, want in (("the installation's cap", {}, "32768"),
+                                 ("the host's own cap", {"mop_body_mem_cap_mb": "65536"}, "65536"),
+                                 ("the host's cap from YAML as a number",
+                                  {"mop_body_mem_cap_mb": 65536}, "65536")):
+            try:
+                out = render(hcl, {**base, **host})
+                got = re.findall(r'^\s*' + re.escape(spec.META_MEM_CAP) + r'\s*=\s*"([^"]*)"', out, re.M)
+            except Exception as e:  # noqa: BLE001 -- проверка, не код пула
+                got = f"{type(e).__name__}: {e}"
+            check(f"client.hcl: {what}", got == [want], got)
 
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")

@@ -54,12 +54,8 @@ def inventory_hosts(listing):
 def uniform_refusals(listing, installed, default):
     """Отказы по настройкам, одинаковым для всего пула (#190). -> [строка на
     хост и настройку]. installed -- {настройка: значение установки}, default
-    -- MOP_DRIVER для хостов без своего mop_driver.
-
-    Настройки config.HOST_UNIFORM сверяются только на узлах, чей драйвер не
-    контейнерный: на контейнерном это размер тела, а не потолок задачи.
-    Драйвер, которого нет, сверяется как host -- отказ по нему самому скажет
-    driver_refusals.
+    -- MOP_DRIVER для хостов без своего mop_driver (сегодня не нужен: все
+    такие настройки общие для любого драйвера).
 
     Перекрытие в инвентаре -- имя настройки строчными (так его находит
     шаблон node.env). Число из YAML и та же строка -- одно значение."""
@@ -67,20 +63,57 @@ def uniform_refusals(listing, installed, default):
     out = []
     for host in inventory_hosts(listing):
         mine = hostvars.get(host) or {}
-        try:
-            container = driver.is_container(
-                driver.of_node({"mop_driver": mine.get("mop_driver", default)}, node=host))
-        except RuntimeError:
-            container = False
         for name in sorted(installed):
-            if container and name in config.HOST_UNIFORM:
-                continue
             key = name.lower()
             if key in mine and str(mine[key]) != str(installed[name]):
                 out.append(f"{host}: {key}={mine[key]} differs from the installation's "
                            f"{name}={installed[name]}: the server builds every puppet's "
                            f"spec with its own value")
     return out
+
+
+def memory_refusals(listing, cap):
+    """Отказы по памяти в инвентаре (#197). -> [строка]. cap -- потолок
+    установки, MOP_BODY_MEM_CAP_MB.
+
+    Строка mop_mem_mb -- отказ на любом узле и в любой группе: память --
+    свойство папета, и строка, которая раньше не действовала нигде, молча не
+    действовала бы и дальше. Группы смотрим отдельно: `ansible-inventory
+    --list` сводит их vars в hostvars, `--export` -- нет.
+
+    Потолок узла едет в meta Nomad, где `>=` сравнивает численно только два
+    целых (scheduler/feasible.go, checkOrder), а иначе -- лексически: "32G"
+    или " 32768" открыли бы узел любому потолку молча. Поэтому -- одно целое
+    число, и у установки тоже, если хоть одному хосту он достаётся."""
+    key, cap_key = config.NOT_NODE[0].lower(), "mop_body_mem_cap_mb"
+    hostvars = (listing.get("_meta") or {}).get("hostvars") or {}
+    where = [(h, hostvars.get(h) or {}) for h in inventory_hosts(listing)]
+    where += [(name, group.get("vars") or {}) for name, group in sorted(listing.items())
+              if name != "_meta" and isinstance(group, dict)]
+    out = []
+    for name, mine in where:
+        for k in (n.lower() for n in config.NOT_NODE):
+            if k in mine:
+                out.append(f"{name}: {k}={mine[k]} -- {k} is not a node setting any more: "
+                           f"the puppet's memory comes from .env ({k.upper()}) and the "
+                           f"project's .mop -- remove the line")
+    inherit = False
+    for host, mine in where[:len(inventory_hosts(listing))]:
+        if cap_key not in mine:
+            inherit = True
+        elif not whole_mb(mine[cap_key]):
+            out.append(f"{host}: {cap_key}={mine[cap_key]!r} is not a whole number of "
+                       f"megabytes: Nomad would compare it as text")
+    if inherit and not whole_mb(cap):
+        out.append(f"MOP_BODY_MEM_CAP_MB={cap!r} in .env is not a whole number of "
+                   f"megabytes: Nomad would compare it as text")
+    return out
+
+
+def whole_mb(value):
+    """Целое число мегабайт одной строкой, как его прочтёт Nomad."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0 \
+        or isinstance(value, str) and value.isdigit() and int(value) > 0
 
 
 def driver_refusals(listing, default):
@@ -207,9 +240,9 @@ def main(argv):
         lib.fail(why)
         return 1
     refusals = (driver_refusals(listing, config.get("MOP_DRIVER"))
-                + uniform_refusals(listing, {n: config.get(n) for n in
-                                             config.POOL_UNIFORM + config.HOST_UNIFORM},
-                                   config.get("MOP_DRIVER")))
+                + uniform_refusals(listing, {n: config.get(n) for n in config.POOL_UNIFORM},
+                                   config.get("MOP_DRIVER"))
+                + memory_refusals(listing, config.get("MOP_BODY_MEM_CAP_MB")))
     for why in refusals:
         lib.fail(why)
     if refusals:

@@ -180,8 +180,15 @@ def nomad_items(project=None, stale=False):
             # (#118). Узлы -- один раз на ростер и только если есть очередь.
             if placement is None:
                 placement = _placement_nodes()
-            item["unserved"] = spec.unserved(
-                puppets.project_of((j.get("Meta") or {}).get("origin", "")), placement)
+            # Потолок папета -- из его зарегистрированной спеки (#197): её и
+            # размещает Nomad, а не ту, что собрал бы сегодняшний .mop.
+            try:
+                item["ceiling"] = spec.ceiling_of(nomad.get_job(j["ID"]))
+            except Exception:
+                item["ceiling"] = None
+            item["unserved"] = spec.placement_gap(
+                puppets.project_of((j.get("Meta") or {}).get("origin", "")), placement,
+                item["ceiling"])
         if stale:
             # Полный джоб, а не заглушка из списка: врапер и ограничение
             # размещения лежат в спеке, а её get_jobs не отдаёт.

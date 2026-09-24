@@ -30,6 +30,21 @@
     group: "{{ MOP_USER }}"
     mode: "0644"
 
+# Просьбы проектов (#197): память папета -- его свойство, и потолок в спеке
+# -- MOP_MEM_MB из `.mop` проекта. `.mop` режет deploy на контроллере, а спеку
+# строит сервис под учёткой пула; из манифестов сюда едут только просьбы.
+# Сервис читает файл на каждую сборку спеки, поэтому правка `.mop` доходит до
+# спеки со следующим прогоном deploy, не раньше.
+- name: The projects' asks, for the puppet's spec
+  when: mop_manifests is defined
+  become: yes
+  ansible.builtin.copy:
+    content: "{ {% for name in mop_manifests | sort %}{{ name | to_json }}: {{ mop_manifests[name].asks | to_json }}{{ '' if loop.last else ', ' }}{% endfor %} }\n"
+    dest: "{{ MOP_HOME }}/.config/mop/project-asks.json"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0644"
+
 - name: Systemd unit
   become: yes
   ansible.builtin.template:

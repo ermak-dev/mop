@@ -13,6 +13,7 @@ spec_is_stale видит у всего пула сразу. Поэтому пе�
 import base64
 import hashlib
 import json
+import os
 import re
 import time
 
@@ -20,9 +21,49 @@ from . import config, driver, llm, nomad
 
 # Значения этой установки — .env поверх дефолтов; см. mop/config.py.
 MEM = config.num("MOP_PUPPET_MEM_MB")   # бюджет папета, МБ: резерв планировщика и мера слотов
-MEM_MAX = config.num("MOP_MEM_MB")  # потолок, за которым cgroup всё-таки убивает
+MEM_MAX = config.num("MOP_MEM_MB")  # потолок, за которым cgroup всё-таки убивает, если проект не просил своего
 HOME = config.get("MOP_HOME")             # $HOME на узлах пула
 USER = config.get("MOP_USER")               # под кем идут задачи
+
+# Просьбы проектов (#197): {проект: {настройка: значение}} из их `.mop`. Файл
+# кладёт роль cluster из манифестов `mop deploy`: сервис строит спеку под
+# учёткой пула и файлов контроллера не видит.
+ASKS_FILE = os.path.expanduser("~/.config/mop/project-asks.json")
+
+
+def project_asks(project, path=None):
+    """Что проект просит в своём `.mop`. -> {настройка: значение}.
+
+    Нет файла или проекта в нём -- пусто, и папет получает значения
+    установки: так живёт любой проект до первого прогона deploy после его
+    заведения. Битый файл -- падение: его пишет ansible целиком, и
+    молчаливый откат на установку спрятал бы поломку прогона."""
+    try:
+        with open(path or ASKS_FILE) as f:
+            asks = json.load(f)
+    except FileNotFoundError:
+        return {}
+    return dict(asks.get(project) or {})
+
+
+def memory(asks, ceiling, budget):
+    """Память папета (#197). -> (резерв, потолок), МБ. Чистая функция.
+
+    Потолок -- просьба проекта (MOP_MEM_MB его `.mop`), иначе установки:
+    ceiling -- это MOP_MEM_MB, .env поверх дефолта. Резерв -- бюджет
+    установки (budget, MOP_PUPPET_MEM_MB), но не выше потолка: MemoryMaxMB
+    ниже MemoryMB Nomad отвергает, а слоты пообещали бы больше тела.
+
+    Просьба, которую нельзя применить, -- ValueError: подмена значением
+    установки молча дала бы проекту не то, что он просил."""
+    ask = asks.get("MOP_MEM_MB")
+    if ask is not None:
+        text = str(ask).strip()
+        if not text.isdigit() or int(text) <= 0:
+            raise ValueError(f"MOP_MEM_MB={ask!r} in the project's .mop is not "
+                             f"a whole number of megabytes")
+        ceiling = int(text)
+    return min(budget, ceiling), ceiling
 
 
 # Имена внутри спеки. Каждое читается и снаружи — Nomad отдаёт по ним сводку
@@ -37,6 +78,10 @@ META_PROJECTS = "mop_projects"
 # Подстановку `${…}` Nomad вычисляет сам при планировании: здесь она нужна
 # именно такой, одним долларом, — это ссылка на мету узла, а не текст.
 PROJECTS_TARGET = "${meta." + META_PROJECTS + "}"
+# Потолок памяти, который узел готов дать одному папету (#197): его
+# MOP_BODY_MEM_CAP_MB, которую `mop deploy` рендерит в meta client.hcl.
+META_MEM_CAP = "mop_mem_cap_mb"
+MEM_CAP_TARGET = "${meta." + META_MEM_CAP + "}"
 
 
 
@@ -335,10 +380,11 @@ while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wa
 """
 
 
-def task_env(name, origin, profile, prof, cont=False):
+def task_env(name, origin, profile, prof, cont=False, mem=0):
     """Окружение задачи папета. Одно место и для job_spec, и для версии
     шаблона: current_version зовёт его с пустым профилем, не спрашивая реестр
-    профилей (#174) — набор ключей от профиля не зависит."""
+    профилей (#174) — набор ключей от профиля не зависит. mem -- потолок
+    памяти папета, МБ (spec.memory)."""
     llm_env = "".join(f"{k}={v}\n" for k, v in prof["env"].items())
     project = driver.project_of(origin)
     env = {
@@ -364,6 +410,10 @@ def task_env(name, origin, profile, prof, cont=False):
         "PU_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
         "PU_LLM_KEY_VAR": prof.get("key") or "",
         "PU_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
+        # Потолок памяти папета (#197): на host его держит cgroup задачи
+        # (MemoryMaxMB), в pve-теле -- `pct --memory`, который ставит ensure
+        # драйвера из этой переменной на каждом подъёме.
+        "PU_MEM_MB": str(mem),
     }
     env.update(git_identity(config.get("MOP_GIT_NAME"), config.get("MOP_GIT_EMAIL")))
     # Что `mop driver run` переливает в тело: всё окружение спеки, кроме
@@ -408,7 +458,11 @@ def job_spec(name, origin, profile=None, cont=False):
                            f"{', '.join(llm.profiles())} (mop llm)")
     meta = {"origin": origin, "llm": profile}
     project = driver.project_of(origin)
-    env = task_env(name, origin, profile, prof, cont)
+    try:
+        reserve, ceiling = memory(project_asks(project), MEM_MAX, MEM)
+    except ValueError as e:
+        raise RuntimeError(f"{name}: {e} ({project})")
+    env = task_env(name, origin, profile, prof, cont, ceiling)
     meta[SPEC_META] = template_version(env)
     return {"Job": {
         "ID": name,
@@ -416,7 +470,7 @@ def job_spec(name, origin, profile=None, cont=False):
         "Datacenters": [nomad.POOL_DC],
         "Type": "service",
         "Meta": meta,
-        "Constraints": [project_constraint(project)],
+        "Constraints": [project_constraint(project), memory_constraint(ceiling)],
         "TaskGroups": [{
             "Name": GROUP,
             "Count": 1,
@@ -432,7 +486,7 @@ def job_spec(name, origin, profile=None, cont=False):
                 "User": USER,
                 "Config": {"command": "/bin/bash", "args": ["-c", OUTER]},
                 "Env": env,
-                "Resources": {"CPU": 1000, "MemoryMB": MEM, "MemoryMaxMB": MEM_MAX},
+                "Resources": {"CPU": 1000, "MemoryMB": reserve, "MemoryMaxMB": ceiling},
                 "KillTimeout": 15 * 10**9,
             }],
         }],
@@ -463,19 +517,82 @@ def project_constraint(project):
             "RTarget": f"(^|,)({ANY_PROJECT}|{re.escape(project)})(,|$)"}
 
 
-def unserved(project, nodes):
-    """Некуда ли поставить папета проекта. -> bool. Чистая функция.
+def memory_constraint(ceiling):
+    """Ограничение размещения: потолок узла не ниже потолка папета (#197).
+
+    Без него просьба проекта больше, чем машина готова дать телу, молча
+    переподписывала бы гипервизор. `>=` в Nomad 1.10 сравнивает численно,
+    если обе стороны -- целые (scheduler/feasible.go, checkOrder; зеркало --
+    nomad_order), иначе лексически; поэтому справа -- целое строкой, а deploy
+    отвергает потолок узла не из одного целого. Узел без ключа в meta
+    ограничение не проходит: папет не встаёт туда, где потолка не знают."""
+    return {"LTarget": MEM_CAP_TARGET, "Operand": ">=", "RTarget": str(int(ceiling))}
+
+
+def ceiling_of(job):
+    """Потолок папета из зарегистрированной спеки: по ограничению, с которым
+    её и размещает Nomad. None -- спека до #197, потолка узла она не
+    спрашивает."""
+    for c in job.get("Constraints") or []:
+        if (c or {}).get("LTarget") == MEM_CAP_TARGET:
+            return int(c["RTarget"])
+    return None
+
+
+_GO_INT = re.compile(r"[+-]?[0-9]+")
+
+
+def nomad_order(op, left, right):
+    """Порядок, как его считает Nomad 1.10 (checkOrder): обе стороны целые
+    -- как целые, обе float -- как float, иначе лексически. Чистая функция.
+
+    Зеркало нужно диагнозу unserved: иначе он и планировщик разошлись бы
+    ровно на тех значениях, где лексический порядок врёт ("9" > "10").
+    float -- приближение strconv.ParseFloat: пробелы по краям Go не
+    принимает, python принимает, поэтому их отсекаем сами."""
+    import operator
+    cmp = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}[op]
+    if _GO_INT.fullmatch(left) and _GO_INT.fullmatch(right):
+        return cmp(int(left), int(right))
+    try:
+        if left == left.strip() and right == right.strip():
+            return cmp(float(left), float(right))
+    except ValueError:
+        pass
+    return cmp(left, right)
+
+
+def unserved(project, nodes, ceiling=None):
+    """Некуда ли поставить папета проекта. -> bool. Чистая функция;
+    почему -- placement_gap."""
+    return bool(placement_gap(project, nodes, ceiling))
+
+
+def placement_gap(project, nodes, ceiling=None):
+    """Почему папета проекта некуда поставить. Чистая функция.
 
     nodes -- [{status, eligible, meta}] узлов пула. Узел годится, если он
     ready, открыт для планирования и его meta.mop_projects проходит то же
     выражение, что уезжает в Nomad (project_constraint): иначе диагноз и
     планировщик разошлись бы на `mop2` против `mop`. Узел без ключа в meta
-    ограничение не проходит -- так же отвечает и Nomad (#118)."""
+    ограничение не проходит -- так же отвечает и Nomad (#118).
+
+    ceiling -- потолок папета (ceiling_of его спеки), None -- спека до #197.
+    -> False, "image" (проект не обслуживает ни один узел) или "memory"
+    (обслуживают, но потолок каждого ниже потолка папета, #197)."""
     rx = re.compile(project_constraint(project)["RTarget"])
-    return not any(n.get("status") == "ready" and n.get("eligible", True)
-                   and META_PROJECTS in (n.get("meta") or {})
-                   and rx.search(n["meta"][META_PROJECTS])
-                   for n in nodes)
+    serving = [n for n in nodes
+               if n.get("status") == "ready" and n.get("eligible", True)
+               and META_PROJECTS in (n.get("meta") or {})
+               and rx.search(n["meta"][META_PROJECTS])]
+    if not serving:
+        return "image"
+    if ceiling is not None and not any(
+            META_MEM_CAP in n["meta"]
+            and nomad_order(">=", n["meta"][META_MEM_CAP], str(int(ceiling)))
+            for n in serving):
+        return "memory"
+    return False
 
 
 def queued(job):
@@ -496,9 +613,11 @@ def template_version(env):
     Значения конкретного папета (имя, origin, профиль, cont) в него не входят:
     иначе устаревшим читался бы каждый второй."""
     c = project_constraint("x")
+    m = memory_constraint(0)
     shape = {"wrapper": WRAPPER, "outer": OUTER, "env": sorted(env),
              "group": GROUP, "task": TASK,
-             "constraint": [c["LTarget"], c["Operand"]]}
+             "constraint": [c["LTarget"], c["Operand"]],
+             "memory": [m["LTarget"], m["Operand"]]}
     return hashlib.sha256(json.dumps(shape, sort_keys=True).encode()).hexdigest()[:12]
 
 
