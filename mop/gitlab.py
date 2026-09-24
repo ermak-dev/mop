@@ -35,9 +35,11 @@ VOCAB = {
                   "deploy", "mcp", "master", "cli", "docs"),
     "type": ("bug", "feature", "refactor", "docs", "ci", "epic"),
 }
-# Незакрытые состояния: задача в очереди (live) либо взята в работу (wip).
-OPEN_STATUSES = ("live", "wip")
-CLOSE_STATUSES = ("fixed", "noise", "dup", "parked")
+# Незакрытые состояния: задача в очереди (live), взята в работу (wip) либо
+# отложена (parked) — отложенная открыта, но не в работе; закрытая отложенная
+# пропадает из `mop bug list` и выглядит сделанной (#202).
+OPEN_STATUSES = ("live", "wip", "parked")
+CLOSE_STATUSES = ("fixed", "noise", "dup")
 SEV_ORDER = {"sev::high": 0, "sev::med": 1, "sev::low": 2}
 
 TYPES = {"bug": "bug", "feature": "feat", "refactor": "refactor",
@@ -265,3 +267,12 @@ def with_status(existing, status):
     if status not in allowed:
         raise RuntimeError(f"unknown status '{status}'; one of: {', '.join(allowed)}")
     return [x for x in existing if not x.startswith("status::")] + [f"status::{status}"]
+
+
+def relabel_action(state, status):
+    """Чем `mop bug relabel` меняет задачу: "reopen" либо "relabel".
+
+    Открытый статус на закрытой задаче открывает её — иначе задача с меткой
+    очереди молча сидит среди закрытых и пропадает из `mop bug list` (#202).
+    Закрывать relabel не умеет: это `mop bug close`, с комментарием."""
+    return "reopen" if status in OPEN_STATUSES and state == "closed" else "relabel"

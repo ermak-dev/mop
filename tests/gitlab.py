@@ -42,6 +42,27 @@ STATUS = [
     ([], "live", ["status::live"]),
 ]
 
+# #202: смена статуса через relabel — решает ли она заодно состояние задачи.
+# parked — «открыта, но не в работе»: закрытая #167, отложенная в бэклог,
+# осталась закрытой и пропала из `mop bug list`, отложенное выглядело сделанным.
+# relabel только открывает: закрытие — работа `mop bug close`, с комментарием.
+# HYPOTHESIS: relabel открывает лишь статусы из OPEN_STATUSES, а parked стоял
+# среди закрывающих. SOLUTION: parked переехал в OPEN_STATUSES, решение вынесено
+# в gitlab.relabel_action. RESULT: parked на закрытой открывает, close больше
+# не предлагает parked. STATUS: FIXED — see #202
+RELABEL_ACTION = [
+    ("closed", "parked", "reopen"),
+    ("closed", "live", "reopen"),
+    ("closed", "wip", "reopen"),
+    ("closed", "fixed", "relabel"),
+    ("closed", "noise", "relabel"),
+    ("closed", "dup", "relabel"),
+    ("closed", None, "relabel"),      # только --label: состояние не трогаем
+    ("opened", "parked", "relabel"),
+    ("opened", "fixed", "relabel"),   # закрывает close, не relabel
+    ("opened", "live", "relabel"),
+]
+
 
 # Эпик — не сущность GitLab (она в платной редакции), а маркер в теле задачи:
 # первая строка «**Эпик:** #N». Отсюда два требования, и оба молчаливые:
@@ -84,6 +105,19 @@ def main():
         if sorted(got) != sorted(want):
             bad += 1
             print(f"FAILED  with_status({labels}, {status!r}) -> {got!r}, wanted {want!r}")
+
+    for state, status, want in RELABEL_ACTION:
+        cases += 1
+        got = gitlab.relabel_action(state, status)
+        if got != want:
+            bad += 1
+            print(f"FAILED  relabel_action({state!r}, {status!r}) -> {got!r}, wanted {want!r}")
+
+    # Закрыть «как отложенную» нельзя: отложенная открыта (#202).
+    cases += 1
+    if "parked" in gitlab.CLOSE_STATUSES or "parked" not in gitlab.OPEN_STATUSES:
+        bad += 1
+        print("FAILED  parked must be an open status, not a closing one")
 
     cases += 1
     try:

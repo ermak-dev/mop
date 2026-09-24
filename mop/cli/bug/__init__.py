@@ -9,6 +9,7 @@
   mop bug start <iid> [slug] [--no-branch]     claim: status::wip + branch
   mop bug close <iid> --comment "..."          close, default status::fixed
   mop bug relabel <iid> --status live          back to the queue
+  mop bug relabel <iid> --status parked        postponed: stays open, not worked on
   mop bug labels                               the label vocabulary
 
 Coordinates come from the working copy's git origin; credentials are
