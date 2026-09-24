@@ -274,6 +274,27 @@ async def session_probe(name):
     return out.strip().splitlines()[-1].strip()
 
 
+async def session_state(name):
+    """Сессия и исход последнего хода: (строка probe, словарь state либо None).
+
+    Один процесс вместо probe: `session.py state` (#222) отдаёт то же, что
+    probe, и запись хода, которую пишут хуки (#224). Строку session собираем из
+    того же словаря — мастер со старой библиотекой читает только её.
+
+    Старый session.py на узле не знает глагола и сразу выходит с ошибкой —
+    тогда probe ровно как раньше. Таймаут — другое дело: тело не ответило, и
+    probe прождал бы столько же впустую; ответ "none", как у таймаута probe."""
+    out, code = await bsh(name, _session_cmd("state", clone_dir(name)))
+    if code is None:
+        return "none", None
+    st = _last_json(out) if code == 0 else None
+    if not isinstance(st, dict) or "status" not in st:
+        return await session_probe(name), None
+    if st["status"] is None:
+        return "none", st
+    return f"{st['status']} {int(bool(st.get('alive')))} {int(bool(st.get('listen')))}", st
+
+
 def _last_json(out):
     """Последняя JSON-строка вывода либо None.
 
@@ -308,9 +329,12 @@ async def facts(name):
     с тех пор, как она жила поверх exec."""
     if not await tmux_alive(name):
         return {"present": False}
-    scr, sess, clone = await asyncio.gather(
-        screen(name), session_probe(name), clone_facts(name))
-    return {"present": True, "screen": scr, "session": sess, "clone": clone}
+    scr, (sess, st), clone = await asyncio.gather(
+        screen(name), session_state(name), clone_facts(name))
+    got = {"present": True, "screen": scr, "session": sess, "clone": clone}
+    if st is not None:
+        got["state"] = st
+    return got
 
 
 # ─── глаголы ─────────────────────────────────────────────────────────────

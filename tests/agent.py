@@ -801,12 +801,72 @@ def check_git_identity_167():
     return out
 
 
+# ── факт state: исход хода едет мастеру (#224) ───────────────────────────
+# HYPOTHESIS: исход хода (StopFailure и код ошибки) пишут хуки в запись,
+# которую отдаёт `session.py state` (#222), а агент звал только probe и
+# отдавал мастеру строку "<status> <alive> <listen>" — записи хода мастер не
+# видел, и провал хода посреди работы читался «idle».
+# SOLUTION: facts зовёт state (один процесс вместо probe) и шлёт разобранный
+# словарь новым ключом state, а строку session собирает из него же — мастер со
+# старой библиотекой читает только session. Старый session.py на узле (state
+# не отвечает) — откат на probe ровно как раньше, без ключа state.
+# STATUS: FIXED — see #224
+def check_state_fact_224():
+    import asyncio
+    import json
+    out = []
+    saved = (agent.bsh, agent.clone_facts, agent.tmux_alive, agent.screen)
+    rec = {"status": "idle", "waitingFor": None, "alive": True, "listen": False,
+           "turn": {"event": "StopFailure", "at": 1790245436,
+                    "error": "authentication_failed", "detail": "Login expired"}}
+    none = {"status": None, "waitingFor": None, "alive": False, "listen": False, "turn": None}
+    calls = []
+
+    def fake(answers):
+        async def bsh(name, script, timeout=20):
+            verb = script.split()[2]
+            calls.append(verb)
+            return answers.get(verb, ("", 1))
+        return bsh
+
+    async def alive(name):
+        return True
+
+    async def screen(name):
+        return "Herding bytes"
+
+    async def clone(name):
+        return {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
+    try:
+        agent.clone_facts, agent.tmux_alive, agent.screen = clone, alive, screen
+        for what, answers, want_session, want_state, want_calls in (
+                ("new session.py", {"state": ("banner\n" + json.dumps(rec), 0)},
+                 "idle 1 0", rec, ["state"]),
+                ("no session", {"state": (json.dumps(none), 0)}, "none", none, ["state"]),
+                ("old session.py: state is an unknown verb",
+                 {"state": ("usage: session.py ...", 2), "probe": ("busy 1 1", 0)},
+                 "busy 1 1", None, ["state", "probe"]),
+                # Таймаут -- тело не ответило, и probe ждал бы те же 20 секунд
+                # впустую: ответ "none", как у таймаута probe до #224.
+                ("state timed out", {"state": ("", None)}, "none", None, ["state"])):
+            calls.clear()
+            agent.bsh = fake(answers)
+            got = asyncio.run(agent.facts("pu-mop-1"))
+            if got.get("session") != want_session or got.get("state") != want_state \
+                    or ("state" in got) != (want_state is not None) or calls != want_calls:
+                out.append(f"facts, {what} -> {got!r}, calls {calls}")
+    finally:
+        (agent.bsh, agent.clone_facts, agent.tmux_alive, agent.screen) = saved
+    return out
+
+
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
                   check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
-                  check_gates_40, check_caller_207, check_git_identity_167):
+                  check_gates_40, check_caller_207, check_git_identity_167,
+                  check_state_fact_224):
         try:
             failed += check()
         except Exception as e:
