@@ -653,18 +653,13 @@ def run_hooks_section(section, home, path):
                           env={"HOME": home, "PU_NAME": "pu-mop-1", "PATH": path})
 
 
-def check_claude_hooks_223():
-    """STATUS: FIXED — see #223"""
-    import base64
+def _hooks_written(section):
+    """(a)-(c) проверки #223: файл хуков, который пишет врапер. Нужен jq.
+    -> (bad, cases)."""
     import shutil
     import subprocess
     import tempfile
     bad, cases = 0, 0
-    section = hooks_section()
-    cases += 1
-    if section is None:
-        print("FAILED  the wrapper has no claude hooks section")
-        return 1, cases
     home = tempfile.mkdtemp()
     try:
         # Кусок исполняется как в теле: set -e, свой HOME, имя папета. Второй
@@ -746,6 +741,29 @@ def check_claude_hooks_223():
                           f"{r.returncode} {r.stdout!r} {r.stderr!r}")
     finally:
         shutil.rmtree(home)
+    return bad, cases
+
+
+def check_claude_hooks_223():
+    """STATUS: FIXED — see #223"""
+    import base64
+    import shutil
+    import subprocess
+    import tempfile
+    bad, cases = 0, 0
+    section = hooks_section()
+    cases += 1
+    if section is None:
+        print("FAILED  the wrapper has no claude hooks section")
+        return 1, cases
+    # (a)-(c) пишет файл хуков врапер, и пишет его jq (он в теле: edit_json).
+    # Без jq на машине проверок врапер честно уходит в ветку «без хуков»,
+    # и эти проверки читались бы поломкой (#230: python:3.x-slim). Пропуск --
+    # громкий и в конце: (d)-(f), в том числе ветка без jq, идут всегда.
+    no_jq = shutil.which("jq", path=os.environ["PATH"]) is None
+    if not no_jq:
+        got = _hooks_written(section)
+        bad, cases = bad + got[0], cases + got[1]
     # (d) хуки -- наблюдение, а не условие подъёма: файл не записался --
     # папет встаёт без --settings и говорит об этом, а не падает. Упавший
     # врапер -- это папет, который не поднимается вовсе, из-за того, что
@@ -804,6 +822,8 @@ def check_claude_hooks_223():
             bad += 1
             print(f"FAILED  {inputs[0]}: hooks or substitutions outside the base64 "
                   f"wrapper: {sorted(subs)}")
+    if no_jq:
+        hermetic.skip("the claude hooks wrapper block", "no jq on this machine")
     return bad, cases
 
 
