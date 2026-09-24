@@ -108,7 +108,7 @@ Work lives in GitLab issues. The coordinates come from the working copy's git or
 
 ## Delivery
 
-There is no pipeline: code reaches the pool through a `mop deploy` run, and `master` is the branch it is rolled out from.
+CI (`.gitlab-ci.yml`) runs every file in `tests/` on every push, in Docker, on Python 3.12 and 3.13, with `MOP_TESTS_STRICT=1` (#228). Code reaches the pool through `mop deploy`, and `master` is the branch it is rolled out from: on an installation whose CI deploy variables are set, a green `master` pipeline runs it by itself (`deploy:mop`, a forced-command `mop deploy --from-ci` on the server, #239/#240); elsewhere it is run by hand. `mop ci` reads pipelines, job logs and runners, and `mop ci lint` checks `.gitlab-ci.yml` before a push.
 
  - **MUST** Every issue lives on its own branch `[type]/[iid][-slug]` off a fresh `origin/master` (`mop bug start`)
  - **MUST** One fix = one layer: touching the wrapper, a playbook and the library at once is an unrevertable, unmeasurable change
@@ -117,7 +117,7 @@ There is no pipeline: code reaches the pool through a `mop deploy` run, and `mas
  - **MUST** Push the issue branch as soon as it is ready: work that lives only in a clone dies with the clone
  - **MUST** Land by local integration, one push: `git merge --no-ff` into a fresh `origin/master`, every file in `tests/` on the merged tree, then a single `git push`; one merge commit per issue keeps `git revert -m 1` as the rollback
  - **MUST** Landing takes no token here (#225): the whole check runs in about 20 seconds, and git itself refuses the losing push of a race. A rejected push means fetch, merge again, rerun `tests/`, push — never a force push. `mop landing` is for projects whose gate runs for tens of minutes
- - **MUST** If you touched what travels to the nodes (`mop/`, `deploy/`), roll it out with `mop deploy` and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives
+ - **MUST** If you touched what travels to the nodes (`mop/`, `deploy/`), make sure it is rolled out and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives. Where CI deploys, watch the `master` pipeline's `deploy:mop` job in `mop ci` instead of running `mop deploy` by hand — a manual deploy races the CI one; elsewhere run `mop deploy` yourself
  - **MUST** Close the issue right after the rollout: `mop bug close [iid] --comment "…"` naming the commit and what it was verified with
  - **MUST** In pool mode the tracker belongs to the MASTER: the executor runs no `mop bug` at all and sends the comment text instead, which the master pastes
  - **MUST** In pool mode the executor lands on the branch the MASTER named and never picks the target itself
