@@ -221,6 +221,24 @@ FROM_CI = [
 ]
 
 
+# Под --from-ci «жди» значит одно: HEAD ушёл дальше коммита, запустившего
+# джобу (её needs: гарантирует, что её тесты кончились), и у нового коммита
+# своя джоба deploy стоит за нашей в resource_group. Отказ красил бы старый
+# пайплайн красным при здоровом master — выход 0 со строкой хода. Любой
+# другой отказ остаётся отказом, в том числе упавший тест нового HEAD.
+DEFER = (f"  from-ci: {SHA[:12]} is still being tested; its own pipeline's deploy job "
+         f"rolls it out — nothing to do now")
+FROM_CI_DEFER = [
+    ([f"wait for pipeline {URL} (running)"], DEFER),
+    ([f"wait for pipeline {URL} (pending)"], DEFER),
+    ([], None),
+    ([f"pipeline {URL} is running but job 1 test/unit failed: refusing"], None),
+    ([f"pipeline failed for {SHA[:12]}: {URL}"], None),
+    ([f"no pipeline for {SHA}"], None),
+    ([f"cannot read the pipeline for {SHA}: HTTP 502"], None),
+]
+
+
 def check_from_ci_sync():
     """Настоящий git во временном каталоге: fetch и --ff-only (#239). -> [строка]."""
     import subprocess
@@ -359,6 +377,14 @@ def main():
         if got != want:
             bad += 1
             print(f"FAILED  from_ci_refusals{args} -> {got!r}, wanted {want!r}")
+
+    for refusals, want in FROM_CI_DEFER:
+        cases += 1
+        fn = getattr(deploy, "from_ci_deferred", None)
+        got = fn(refusals, SHA) if fn else "no deploy.from_ci_deferred"
+        if got != want:
+            bad += 1
+            print(f"FAILED  from_ci_deferred({refusals!r}) -> {got!r}, wanted {want!r}")
 
     cases += 1
     sync = check_from_ci_sync()

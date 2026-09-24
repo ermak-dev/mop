@@ -219,6 +219,9 @@ def pipeline(sha):
 # Стадия, в которой CI катит сам себя (#239): пока её джоба идёт, пайплайн
 # running, и о зелёности коммита говорят только джобы остальных стадий.
 DEPLOY_STAGE = "deploy"
+# Начало ответа «жди». Одно место: по нему `mop deploy --from-ci` отличает
+# «коммит ещё тестируется» от прочих отказов (#239).
+WAIT = "wait for pipeline "
 
 
 def pipeline_verdict(pipeline, sha, jobs=None):
@@ -248,7 +251,7 @@ def pipeline_verdict(pipeline, sha, jobs=None):
         if tests and all(j.get("status") == "success" or j.get("allow_failure")
                          and j.get("status") == "failed" for j in tests):
             return None
-        return f"wait for pipeline {url} ({status})"
+        return f"{WAIT}{url} ({status})"
     return f"pipeline {url} is {status}, not success: refusing"
 
 

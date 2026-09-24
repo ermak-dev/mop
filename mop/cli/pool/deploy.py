@@ -25,6 +25,9 @@ gated.
 be on origin's default branch with no tracked file modified; it fetches,
 fast-forwards to origin and rolls that out. The pipeline gate is mandatory
 there: it refuses without MOP_DEPLOY_NEEDS_GREEN=1 and with --skip-pipeline.
+When the only answer of the gate is "wait", HEAD has moved past the commit
+that started the job, and that newer commit's own deploy job rolls it out:
+--from-ci then says so and exits 0. Every other refusal stays a refusal.
 """
 import json
 import os
@@ -241,6 +244,22 @@ def from_ci_refusals(setting, skip_pipeline, dry, branch, default, dirty):
     return out
 
 
+def from_ci_deferred(refusals, sha):
+    """Отказы гейта под --from-ci -> строка хода вместо отказа, либо None.
+
+    Единственный отказ «жди» под --from-ci значит одно: HEAD ушёл дальше
+    коммита, запустившего джобу (её needs: гарантирует, что её тесты уже
+    кончились), а у нового коммита своя джоба deploy стоит за нашей в
+    resource_group. Отказ красил бы старый пайплайн красным при здоровом
+    master; катить новый коммит -- работа его собственной джобы. Любой другой
+    отказ остаётся отказом, упавший тест нового HEAD тоже: master сломан, и
+    красный здесь правда."""
+    if len(refusals) == 1 and refusals[0].startswith(gitlab.WAIT):
+        return (f"  from-ci: {sha[:12]} is still being tested; its own pipeline's deploy "
+                f"job rolls it out — nothing to do now")
+    return None
+
+
 def _git(root, *args):
     return subprocess.run(["git", "-C", root, *args], capture_output=True, text=True,
                           stdin=subprocess.DEVNULL)
@@ -420,9 +439,14 @@ def main(argv):
         print("  pipeline check skipped (--skip-pipeline): rolling out "
               f"{head_sha(lib.PROJECT) or 'HEAD'} without asking GitLab", flush=True)
     elif not dry:
-        refusals += pipeline_refusals(config.get("MOP_DEPLOY_NEEDS_GREEN"),
-                                      gitlab.has_credentials(), head_sha(lib.PROJECT),
-                                      gitlab.pipeline, gitlab.jobs)
+        sha = head_sha(lib.PROJECT)
+        gate = pipeline_refusals(config.get("MOP_DEPLOY_NEEDS_GREEN"),
+                                 gitlab.has_credentials(), sha, gitlab.pipeline, gitlab.jobs)
+        deferred = from_ci and not refusals and from_ci_deferred(gate, sha)
+        if deferred:
+            print(deferred, flush=True)
+            return 0
+        refusals += gate
     for why in refusals:
         lib.fail(why)
     if refusals:
