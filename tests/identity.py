@@ -189,17 +189,17 @@ def check_transition():
             out.append(f"{setting!r}: {got} != operators.parse {today}")
             continue
         for i in p.identities():
-            if operators.permissions(i) != operators.permissions(today[i.login]):
+            if operators.permissions(i) != operators.permissions(today[i.login], i.login):
                 out.append(f"{setting!r}: permissions of {i.login} differ")
         base = {"service": "svc", "nodes": {"hyper": "hy"}}
         old = natsconf.render({**base, "operators": {
-            n: {"password": n, **operators.permissions(o)} for n, o in today.items()}}, {"mop": "pu"})
+            n: {"password": n, **operators.permissions(o, n)} for n, o in today.items()}}, {"mop": "pu"})
         new = natsconf.render({**base, "operators": {
             i.login: {"password": i.login, **operators.permissions(i)} for i in p.identities()}},
             {"mop": "pu"})
         if new != old:
             out.append(f"{setting!r}: users.conf drifted")
-        if identity.subjects(setting) != {n: operators.permissions(o) for n, o in today.items()}:
+        if identity.subjects(setting) != {n: operators.permissions(o, n) for n, o in today.items()}:
             out.append(f"{setting!r}: subjects for the playbooks drifted")
     return out
 

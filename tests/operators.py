@@ -81,23 +81,39 @@ def check_reserved():
 
 
 def check_permissions():
-    """Права пользователя по роли: свои проекты и инбоксы, и ничего сверх."""
+    """Права пользователя по роли: свои проекты и инбоксы, и ничего сверх.
+
+    allow/deny -- подписка, она та же, что до #207; публикация -- явным
+    списком (publish/publish_deny), логин в rpc -- свой (tests/natsconf.py
+    проверяет её правилами файла)."""
     out = []
-    got = operators.permissions({"role": "user", "projects": ["rugent", "mop"]})
+
+    def sub(got):
+        return {"allow": got["allow"], "deny": got["deny"]}
+    got = operators.permissions({"role": "user", "projects": ["rugent", "mop"]}, "ivan")
     want = {"allow": ["mop.mop.>", "mop.rugent.>", "_INBOX.>"], "deny": []}
-    if got != want:
+    if sub(got) != want:
         out.append(f"user -> {got}, wanted {want}")
+    want_pub = [f"mop.{p}.{t}" for p in ("mop", "rugent") for t in (
+        "node.*.rpc.ivan", "cluster.rpc.ivan", "node.*.rpc", "cluster.rpc", "node.*.msg",
+        "all.msg", "master.>", "events", "server.rpc")] + ["_INBOX.>"]
+    if got["publish"] != want_pub or got["publish_deny"] != []:
+        out.append(f"user publishes -> {got['publish']}, {got['publish_deny']}")
     # admin -- весь mop.>: все проекты плюс машинные глаголы в mop.admin.*.
-    got = operators.permissions({"role": "admin", "projects": ["*"]})
-    if got != {"allow": ["mop.>", "_INBOX.>"], "deny": []}:
+    got = operators.permissions({"role": "admin", "projects": ["*"]}, "anton")
+    if sub(got) != {"allow": ["mop.>", "_INBOX.>"], "deny": []}:
         out.append(f"admin -> {got}")
+    if "mop.admin.build.rpc" not in got["publish"] or got["publish_deny"]:
+        out.append(f"admin publishes the builder and no deny: {got}")
     # user:* -- все проекты, но не машины: mop.admin.> закрыт явно, иначе
     # mop.> отдал бы и disk, и drain узлов.
-    got = operators.permissions({"role": "user", "projects": ["*"]})
-    if got != {"allow": ["mop.>", "_INBOX.>"], "deny": ["mop.admin.>"]}:
+    got = operators.permissions({"role": "user", "projects": ["*"]}, "olga")
+    if sub(got) != {"allow": ["mop.>", "_INBOX.>"], "deny": ["mop.admin.>"]} \
+            or got["publish_deny"] != ["mop.admin.>"] or "mop.admin.build.rpc" in got["publish"]:
         out.append(f"user:* -> {got}")
     # _INBOX обязателен: без него request-reply молча не работает.
-    if "_INBOX.>" not in operators.permissions({"role": "user", "projects": ["mop"]})["allow"]:
+    got = operators.permissions({"role": "user", "projects": ["mop"]}, "ivan")
+    if "_INBOX.>" not in got["allow"] or "_INBOX.>" not in got["publish"]:
         out.append("_INBOX.> is mandatory or request-reply silently fails")
     return out
     # STATUS: FIXED — see #106

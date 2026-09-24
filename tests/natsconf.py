@@ -114,6 +114,105 @@ def permitted(allow, subject, deny=()):
             and not any(covers(d, subject) or covers(subject, d) for d in deny))
 
 
+def rules(text):
+    """Отрендеренный users.conf -> {пользователь: {publish|subscribe: (allow, deny)}}:
+    проверяются правила файла, который прочтёт NATS, а не словарь до него."""
+    import json
+    import re
+    out = {}
+    for block in text.split("\n  {\n")[1:]:
+        user = re.search(r'user: "([^"]+)"', block).group(1)
+        sides = {}
+        for side in ("publish", "subscribe"):
+            m = re.search(side + r':\s*\{ allow: (\[.*?\])(?:, deny: (\[.*?\]))? \}', block)
+            sides[side] = (json.loads(m.group(1)), json.loads(m.group(2) or "[]"))
+        out[user] = sides
+    return out
+
+
+def check_login_in_subject_207():
+    """HYPOTHESIS (#207): человеку дан весь mop.<p>.> (или mop.> без admin) --
+    логин токеном субъекта он подделал бы так же, как полем тела.
+    SOLUTION: публикация человека -- явным списком: rpc агента и сервиса
+    кластера -- только со СВОИМ логином (плюс прежние субъекты без логина на
+    время перехода), остальное, что люди публикуют сегодня, -- как было.
+    Подписка -- как была. Машины логин человека не публикуют: у сервиса --
+    deny на субъекты с логином, у узлов и папетов их нет в списке.
+    STATUS: FIXED — see #207"""
+    from mop import busnames
+    out = []
+    ops = operators.parse("alice:user:mop; bob:user:mop; anton:admin; olga:user:*")
+    try:
+        base = {"service": "svc-pass",
+                "operators": {n: {"password": "p", **operators.permissions(o, n)}
+                              for n, o in ops.items()},
+                "nodes": {"hyper": "hy-pass"}}
+    except TypeError as e:
+        return [f"operators.permissions(op, login) is missing: {e}"]
+    got = rules(natsconf.render(base, {"mop": "pu-pass"}))
+
+    def may(user, subj, side="publish"):
+        allow, deny = got[user][side]
+        return permitted(allow, subj, deny)
+
+    def expect(user, subj, want, side="publish"):
+        if may(user, subj, side) != want:
+            out.append(f"{user} {'may' if want else 'must not'} {side} {subj}")
+
+    # Свой логин -- да, чужой -- нет; прежние субъекты -- на время перехода.
+    expect("alice", "mop.mop.node.hyper.rpc.alice", True)
+    expect("alice", "mop.mop.node.hyper.rpc.bob", False)
+    expect("alice", "mop.mop.cluster.rpc.alice", True)
+    expect("alice", "mop.mop.cluster.rpc.bob", False)
+    expect("alice", "mop.mop.node.hyper.rpc", True)
+    expect("alice", "mop.mop.cluster.rpc", True)
+    # Всё, что человек публикует сегодня, остаётся: инбоксы мастеров и
+    # опрос who, события, публичный канал, all, сервер, ответы.
+    for subj in ("mop.mop.node.hyper.msg", "mop.mop.all.msg", "mop.mop.master.h-1.inbox",
+                 "mop.mop.master.all.inbox", "mop.mop.events", "mop.mop.server.rpc",
+                 "_INBOX.abc.1"):
+        expect("alice", subj, True)
+    # Чужой проект и машинное -- как было: нет.
+    for subj in ("mop.rugent.node.hyper.rpc.alice", "mop.admin.node.hyper.rpc.alice",
+                 "mop.admin.build.rpc", "mop.rugent.events"):
+        expect("alice", subj, False)
+    # Подписка не сужалась: свой инбокс и ответы.
+    for subj in ("mop.mop.master.h-1.inbox", "mop.mop.master.all.inbox", "_INBOX.abc.1"):
+        expect("alice", subj, True, "subscribe")
+    # admin: весь пул, но логин -- свой.
+    for subj in ("mop.rugent.node.hyper.rpc.anton", "mop.admin.node.hyper.rpc.anton",
+                 "mop.admin.cluster.rpc.anton", "mop.admin.build.rpc",
+                 "mop.admin.master.h-1.inbox", "mop.rugent.events", "mop.admin.node.hyper.rpc"):
+        expect("anton", subj, True)
+    for subj in ("mop.rugent.node.hyper.rpc.bob", "mop.admin.cluster.rpc.bob"):
+        expect("anton", subj, False)
+    # user:* -- любой проект, но не admin, и логин свой.
+    expect("olga", "mop.rugent.node.hyper.rpc.olga", True)
+    expect("olga", "mop.rugent.node.hyper.rpc.bob", False)
+    expect("olga", "mop.admin.node.hyper.rpc.olga", False)
+    expect("olga", "mop.admin.cluster.rpc.olga", False)
+    # Машины не публикуют логин человека.
+    for user in ("service", "node-hyper", "puppet-mop"):
+        for subj in ("mop.mop.node.hyper.rpc.alice", "mop.mop.cluster.rpc.alice",
+                     "mop.admin.node.hyper.rpc.anton", "mop.admin.cluster.rpc.anton"):
+            expect(user, subj, False)
+    # ...а своё делают как прежде: сервис спрашивает агента без логина
+    # (ворота #40), отвечает и пишет события.
+    for subj in ("mop.admin.node.hyper.rpc", "mop.mop.events", "_INBOX.abc.1"):
+        expect("service", subj, True)
+    for subj in busnames.service_subscriptions():
+        expect("service", subj, True, "subscribe")
+    for subj in busnames.agent_subscriptions("hyper")["rpc"]:
+        expect("node-hyper", subj, True, "subscribe")
+    # Логин, который не токен, -- отказ, а не права на чужой субъект.
+    try:
+        operators.permissions(ops["alice"], "al.ice")
+        out.append("a login with a dot must be refused: it would be two tokens")
+    except ValueError:
+        pass
+    return out
+
+
 def main():
     failed = []
 
@@ -166,7 +265,7 @@ def main():
     # и подписки. Характеризация: файл пользователей тот же байт в байт.
     ops = operators.parse(OPERATORS)
     base = {"service": "svc-pass",
-            "operators": {n: {"password": f"{n}-pass", **operators.permissions(o)}
+            "operators": {n: {"password": f"{n}-pass", **operators.permissions(o, n)}
                           for n, o in ops.items()},
             "nodes": {"hyper": "hy-pass", "mini": "mi-pass"}}
     got = natsconf.render(base, {"mop": "pu-pass", "rugent": "ru-pass"})
@@ -199,12 +298,14 @@ def main():
     # Мастер слушает свой инбокс и опрос `who`: оператор с проектом, admin
     # -- за псевдопроект admin, user:* -- за любой проект.
     for name, project in (("ivan", "rugent"), ("anton", busnames.ADMIN), ("olga", "mop")):
-        perms = operators.permissions(ops[name])
+        perms = operators.permissions(ops[name], name)
         for subj in (busnames.inbox(project, "host-1"),
                      busnames.inbox(project, busnames.ALL_MASTERS), reply):
             if not permitted(perms["allow"], subj, perms["deny"]):
                 failed.append(f"{name} may not subscribe to {subj}")
     # STATUS: FIXED — see #144
+
+    failed += check_login_in_subject_207()
 
     # Пароли папетов рождаются на сервере: недостающий заводится, имеющийся
     # не меняется -- иначе живые папеты отвалились бы от шины.

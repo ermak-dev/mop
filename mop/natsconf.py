@@ -45,11 +45,12 @@ def _list(items):
     return "[" + ", ".join(_q(i) for i in items) + "]"
 
 
-def _perms(allow, deny=None, sub_allow=None):
-    """Блок прав. Подписка не задана -- те же права, что на публикацию."""
+def _perms(allow, deny=None, sub_allow=None, sub_deny=None):
+    """Блок прав: allow/deny -- публикация. Подписка не задана -- те же
+    права, что на публикацию."""
     def side(a, d):
         return "{ allow: " + _list(a) + (f", deny: {_list(d)}" if d else "") + " }"
-    sub = side(allow, deny) if sub_allow is None else side(sub_allow, None)
+    sub = side(allow, deny) if sub_allow is None else side(sub_allow, sub_deny)
     return (f"    permissions: {{\n      publish:   {side(allow, deny)}\n"
             f"      subscribe: {sub}\n    }}")
 
@@ -61,6 +62,10 @@ def _user(name, password, perms, extra=""):
 
 # Сервисы сервера (#104): машина, а не человек. Права пока как у admin.
 SERVICE_PERMISSIONS = [busnames.everything(), busnames.INBOX]
+# ...кроме субъектов с логином человека (#207): машина его не называет, а
+# сервис с mop.> иначе опубликовал бы запрос от чьего угодно имени.
+SERVICE_PUBLISH_DENY = [busnames.node(busnames.ANY, "*", "rpc", login=busnames.ANY),
+                        busnames.cluster(busnames.ANY, login=busnames.ANY)]
 
 
 def puppet_permissions(project):
@@ -95,10 +100,17 @@ def render(base, projects):
         if not pw:
             raise ValueError(f"project {p} has no bus password")
     out = ["users = ["]
-    out.append(_user(busnames.SERVICE, base[busnames.SERVICE], _perms(SERVICE_PERMISSIONS)))
+    out.append(_user(busnames.SERVICE, base[busnames.SERVICE],
+                     _perms(SERVICE_PERMISSIONS, SERVICE_PUBLISH_DENY,
+                            sub_allow=SERVICE_PERMISSIONS)))
     # Люди (#106): вход только через WebSocket (#105), права по роли.
+    # Публикация -- своим списком (#207); запись без него (base-users.json
+    # до #207) -- как прежде, одни права на обе стороны.
     for name, op in sorted((base.get("operators") or {}).items()):
-        out.append(_user(name, op["password"], _perms(op["allow"], op.get("deny")),
+        perms = (_perms(op["publish"], op.get("publish_deny"), sub_allow=op["allow"],
+                        sub_deny=op.get("deny"))
+                 if "publish" in op else _perms(op["allow"], op.get("deny")))
+        out.append(_user(name, op["password"], perms,
                          '    allowed_connection_types: ["WEBSOCKET"]\n'))
     for p in sorted(projects):
         perms = puppet_permissions(p)
