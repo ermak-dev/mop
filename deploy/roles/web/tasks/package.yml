@@ -43,6 +43,8 @@
     chdir: "{{ mop_source }}"
   register: mop_package_fingerprint
   changed_when: false
+  # Только читает, и её результат нужен и прогону без изменений (#184).
+  check_mode: false
 
 # Каталог заводит и роль web, но она играется позже, а на свежем сервере
 # его ещё нет.

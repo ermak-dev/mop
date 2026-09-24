@@ -55,6 +55,8 @@
   register: cleanup_status
   failed_when: false
   changed_when: false
+  # Только читает, и её результат нужен и прогону без изменений (#184).
+  check_mode: false
 
 - name: Register the pu-cleanup job
   ansible.builtin.shell: >
