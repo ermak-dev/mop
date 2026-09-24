@@ -8,13 +8,16 @@
 на живом пуле.
 """
 import os
+import subprocess
 import tempfile
 import pwd
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import config  # noqa: E402
+from mop import config, manifest  # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
 def main():
@@ -126,7 +129,7 @@ def main():
     for what, text, want_vars, want_tasks in MANIFEST:
         cases += 1
         try:
-            got_vars, got_tasks = config.manifest(text)
+            got_vars, got_tasks = manifest.play(text)
         except ValueError as e:
             bad += 1
             print(f"FAILED  mop.yaml, {what}: поднялся ValueError {e}")
@@ -149,7 +152,7 @@ def main():
     ]:
         cases += 1
         try:
-            config.manifest(text)
+            manifest.play(text)
         except ValueError:
             continue
         bad += 1
@@ -169,7 +172,7 @@ def main():
     ]
     for what, mvars, want_asks, want_mine, want_alien in PARTS:
         cases += 1
-        asks, mine, alien = config.manifest_parts(mvars)
+        asks, mine, alien = manifest.parts(mvars)
         if (asks != want_asks or mine != want_mine or sorted(alien) != want_alien):
             bad += 1
             print(f"FAILED  parts, {what}\n  wanted: {want_asks!r}/{want_mine!r}/{want_alien!r}"
@@ -272,6 +275,74 @@ def main():
     finally:
         if saved is not None:
             os.environ["MOP_SERVER_LAN"] = saved
+
+    # HYPOTHESIS (#156): config -- нижний слой, а тянул вверх operators и
+    # deps (playbook_vars), держал разбор манифеста и копию полей контекста;
+    # три настройки процесса читались мимо config и в `mop config` не видны.
+    # SOLUTION: разбор манифеста -- в manifest, playbook_vars -- в playvars,
+    # поля контекста объявляет context и сам вписывает их в config; три
+    # переменные -- PROCESS_SCOPED: в SETTINGS, но только из окружения.
+    # STATUS: FIXED — see #156
+    probe = ("import sys; sys.path.insert(0, %r); import mop.config as c; "
+             "c.get('MOP_SERVER_LAN'); c.effective(); "
+             "print(sorted(m for m in ('mop.operators', 'mop.deps', 'mop.context') "
+             "if m in sys.modules))" % ROOT)
+    got = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                         text=True).stdout.strip()
+    cases += 1
+    if got != "[]":
+        bad += 1
+        print(f"FAILED  import mop.config loads modules from above: {got}")
+
+    cases += 1
+    if context.FIELDS and config.CONTEXT_SCOPED != {"MOP_SERVER_LAN": "server"}:
+        bad += 1
+        print(f"FAILED  CONTEXT_SCOPED -> {config.CONTEXT_SCOPED!r}")
+
+    PROCESS = ("MOP_SERVER_DIR", "MOP_BUS_CONFIG", "MOP_PROJECT")
+    cases += 1
+    if getattr(config, "PROCESS_SCOPED", None) != PROCESS:
+        bad += 1
+        print(f"FAILED  PROCESS_SCOPED -> {getattr(config, 'PROCESS_SCOPED', None)!r}")
+    listed = config.effective()
+    saved = {k: os.environ.pop(k, None) for k in PROCESS}
+    try:
+        # Файлы не переключают проект и каталог кредов: только окружение.
+        config._cache[config.ENV_FILE] = {k: "from-env-file" for k in PROCESS}
+        config._cache[config.NODE_ENV_FILE] = {k: "from-node-env" for k in PROCESS}
+        for k in PROCESS:
+            cases += 1
+            if k not in listed or config.SETTINGS.get(k) != "":
+                bad += 1
+                print(f"FAILED  {k} must be a setting with default '' listed by mop config")
+            cases += 1
+            if config.get(k) != "":
+                bad += 1
+                print(f"FAILED  {k} read from a file: {config.get(k)!r}")
+            os.environ[k] = "set"
+            cases += 1
+            if config.get(k) != "set" or config.effective()[k] != ("set", "env"):
+                bad += 1
+                print(f"FAILED  {k} must come from the environment")
+        try:
+            from mop import playvars
+            pv = playvars.playbook_vars()
+        except ImportError as e:
+            pv = {"import": str(e)}
+        cases += 1
+        want = (set(config.SETTINGS) - set(PROCESS)) | {
+            "MOP_NODE_SCOPED", "MOP_PIP_DEPS", "MOP_OPERATOR_SUBJECTS"}
+        if set(pv) != want:
+            bad += 1
+            print(f"FAILED  playbook_vars keys differ: extra {sorted(set(pv) - want)}, "
+                  f"missing {sorted(want - set(pv))}")
+    finally:
+        config.forget()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0

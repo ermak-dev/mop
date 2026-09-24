@@ -58,7 +58,7 @@ def server_dir(host=None):
     # MOP_SERVER_DIR -- каталог названный прямо (#123): сборщик работает под
     # пользователем контроллера, а на шину ходит как `service` из каталога
     # пользователя пула, а не как человек, чьи креды лежат у контроллера.
-    return os.environ.get("MOP_SERVER_DIR") or os.path.join(
+    return config.get("MOP_SERVER_DIR") or os.path.join(
         ROOT, host or config.get("MOP_SERVER_LAN"))
 
 

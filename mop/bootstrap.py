@@ -49,7 +49,7 @@ import subprocess
 import sys
 import time
 
-from . import bus, busnames, config, creds, driver, project_secrets, service
+from . import bus, busnames, config, creds, driver, playvars, project_secrets, service
 
 # На сервере: файлы проектов и ключ к телам.
 ROOT = os.path.expanduser("~/.config/mop/bootstrap")
@@ -96,11 +96,13 @@ def store(root, project, text):
             except FileNotFoundError:
                 pass
         return {"tasks": 0, "vars": 0, "alien": []}
+    # Лениво: manifest тянет puppets, а bootstrap ему нужен ради одного разбора.
+    from . import manifest
     try:
-        mvars, tasks = config.manifest(text)
+        mvars, tasks = manifest.play(text)
     except ValueError as e:
         raise ValueError(f"{project}/{FILE}: {e}")
-    asks, mine, alien = config.manifest_parts(mvars)
+    asks, mine, alien = manifest.parts(mvars)
     alien = sorted(set(alien) | set(asks))
     import yaml
     os.makedirs(root, mode=0o700, exist_ok=True)
@@ -175,7 +177,7 @@ def play(req, project):
         return {"ok": True, "played": False, "text": f"no bootstrap for {project}"}
     name = req["name"]
     cmd = argv(PLAYBOOK, req.get("address") or "", config.get("MOP_USER"), KEY,
-               config.playbook_vars(), project, name, driver.clone_dir(name),
+               playvars.playbook_vars(), project, name, driver.clone_dir(name),
                tasks, of_vars, secrets)
     t0 = time.time()
     try:

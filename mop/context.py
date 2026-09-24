@@ -21,6 +21,8 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 
+from . import config
+
 # Поле контекста -> (ключ git config, переменная окружения).
 FIELDS = {"server": ("mop.server", "MOP_SERVER_LAN"),
           "user": ("mop.user", "MOP_BUS_USER")}
@@ -92,6 +94,11 @@ def here(cli=None):
 
 def current():
     return _current.get()
+
+
+# Поля, что старше файлов настроек, объявлены здесь одним местом (#156):
+# config -- нижний слой и сверху не читает, поэтому вписываем сами.
+config.attach_context({var: name for name, (_, var) in FIELDS.items()}, current)
 
 
 @contextlib.contextmanager
