@@ -26,7 +26,7 @@
 import json
 import os
 
-from . import puppets
+from . import driver, puppets
 
 FILE = os.path.expanduser("~/.config/mop/projects")
 
@@ -71,16 +71,10 @@ def git_hosts(origins, default):
     требуют. Порт у ssh:// -- в записи known_hosts как [host]:port."""
     found = []
     for origin in origins:
-        o = (origin or "").strip()
-        host = None
-        if o.startswith("ssh://"):
-            netloc = o[len("ssh://"):].split("/", 1)[0].rsplit("@", 1)[-1]
-            name, _, port = netloc.partition(":")
-            host = f"[{name}]:{port}" if port and port != "22" else name
-        elif "://" not in o and ":" in o and not o.startswith("/"):
-            host = o.split(":", 1)[0].rsplit("@", 1)[-1]
-        if host:
-            found.append(host)
+        scheme, _, host, port, _ = driver.parse_origin(origin) or (None,) * 5
+        # Только ssh: и ssh://, и scp-форма (разбор общий, #154).
+        if scheme == "ssh" and host:
+            found.append(f"[{host}]:{port}" if port and port != "22" else host)
     return [default] + sorted(set(found) - {default})
 
 

@@ -121,7 +121,7 @@ async def puppet_project(name):
     out, _ = await bsh(name, f"git -C {clone_dir(name)} remote get-url origin 2>/dev/null")
     origin = out.strip().splitlines()[-1] if out.strip() else ""
     if origin:
-        return os.path.basename(origin).removesuffix(".git")
+        return driver.project_of(origin)
     return driver.project_of_name(name)
 
 
