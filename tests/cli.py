@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, ROOT)
 
 from mop import cli  # noqa: E402

@@ -14,6 +14,7 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, ROOT)
 
 from mop import driver, gitlab, projects, puppets  # noqa: E402
