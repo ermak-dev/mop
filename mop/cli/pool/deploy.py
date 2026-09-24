@@ -15,12 +15,14 @@ on the machines changes, and the output is the difference a real run would
 make. Nothing after the playbook runs: collecting the server credentials
 writes files, and the roster check is not the question a dry run answers.
 """
+import json
 import os
 import shutil
+import subprocess
 import sys
 
 from mop.cli import lib
-from mop import bus, config, creds, manifest, puppets, projects
+from mop import bus, config, creds, driver, manifest, puppets, projects
 
 # Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
 # больше нет, поэтому упавшего агента и битые креды чинят только отсюда — и
@@ -37,6 +39,39 @@ RUN_TARGETS = ("nomad", "pool", "homelab", "claude", "nats", "all")
 def refused_target(argv):
     """Старая цель запуска в аргументах либо None."""
     return argv[0] if argv and argv[0] in RUN_TARGETS else None
+
+
+def driver_refusals(listing, default):
+    """Отказы по драйверам хостов инвентаря (#186). -> [строка на хост].
+
+    listing -- `ansible-inventory --list`: ansible сам сводит переменные групп
+    и хоста, и драйвер здесь тот же, что получит плейбук. Хост без своей
+    переменной есть только в списке группы, и драйвер у него default
+    (MOP_DRIVER) -- ровно `mop_driver | default(MOP_DRIVER)` шаблонов.
+    Правило имени одно -- driver.of_node (#175): опечатка, дошедшая до meta
+    Nomad, ловилась бы только читателями, по узлу за раз."""
+    hostvars = (listing.get("_meta") or {}).get("hostvars") or {}
+    hosts = set(hostvars)
+    for name, group in listing.items():
+        if name != "_meta" and isinstance(group, dict):
+            hosts.update(group.get("hosts") or [])
+    out = []
+    for host in sorted(hosts):
+        value = (hostvars.get(host) or {}).get("mop_driver", default)
+        try:
+            driver.of_node({"mop_driver": value}, node=host)
+        except RuntimeError as e:
+            out.append(str(e))
+    return out
+
+
+def inventory_listing(inventory):
+    """Инвентарь глазами ansible. -> (listing | None, отказ | None)."""
+    r = subprocess.run(["ansible-inventory", "-i", inventory, "--list"],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if r.returncode:
+        return None, f"inventory {inventory} does not parse: {(r.stderr or r.stdout).strip()}"
+    return json.loads(r.stdout), None
 
 
 def missing_extras(setting, root):
@@ -126,6 +161,17 @@ def main(argv):
     if not os.path.isfile(inventory):
         lib.fail(f"no inventory {inventory} -- create it from the example: "
                  f"cp inventory.yaml.example inventory.yaml")
+        return 1
+    # Драйвер каждого хоста -- до плейбука (#186): опечатка иначе доезжала
+    # до meta Nomad и всплывала у читателей по узлу за раз.
+    listing, why = inventory_listing(inventory)
+    if why:
+        lib.fail(why)
+        return 1
+    refusals = driver_refusals(listing, config.get("MOP_DRIVER"))
+    for why in refusals:
+        lib.fail(why)
+    if refusals:
         return 1
     for extra in missing_extras(config.get("MOP_BODY_EXTRA"), lib.PROJECT):
         lib.fail(f"no body environment file {extra} -- create it from the example: "

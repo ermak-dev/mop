@@ -303,6 +303,7 @@ def main():
     failed += check_output_rules()
     failed += check_empty_llm()
     failed += check_deploy_check()
+    failed += check_inventory_drivers()
     failed += check_bus_import_169()      # последней: перезагружает модули
 
     print("cli: FAILED" if failed else "cli: ok")
@@ -855,6 +856,58 @@ def check_empty_llm():
     return failed
 
 
+# ── #186: драйвер узла из инвентаря — до плейбука ────────────────────────────
+# Вывод настоящего `ansible-inventory --list` (ansible-core 2.21) на инвентаре:
+#   puppet: plain (без переменной), explicit (mop_driver: host), hyper,
+#           typo (mop_driver: pvee); proxmox: hyper, vars mop_driver: pve;
+#   server: localhost.
+# Хост без своих переменных есть только в списке группы, в _meta.hostvars
+# его нет, — и драйвер у него MOP_DRIVER, как у `mop_driver | default(MOP_DRIVER)`
+# в шаблонах.
+INVENTORY_TYPO = {
+    "_meta": {"hostvars": {
+        "explicit": {"mop_driver": "host"},
+        "hyper": {"mop_driver": "pve", "mop_pve_vmid_base": "9000"},
+        "localhost": {"ansible_connection": "local"},
+        "typo": {"mop_driver": "pvee"}}},
+    "all": {"children": ["ungrouped", "server", "puppet", "proxmox"]},
+    "proxmox": {"hosts": ["hyper"]},
+    "puppet": {"hosts": ["plain", "explicit", "hyper", "typo"]},
+    "server": {"hosts": ["localhost"]},
+}
+INVENTORY_CLEAN = {**INVENTORY_TYPO, "_meta": {"hostvars": {
+    **INVENTORY_TYPO["_meta"]["hostvars"], "typo": {"mop_driver": "pve"}}}}
+
+
+def check_inventory_drivers():
+    """HYPOTHESIS (#186): опечатка в mop_driver инвентаря доезжала до meta
+    Nomad, и ловили её только читатели (driver.of_node, #175). SOLUTION: deploy
+    прогоняет драйвер каждого хоста через of_node до плейбука.
+    STATUS: FIXED — see #186"""
+    from mop.cli.pool import deploy
+    failed = 0
+    fn = getattr(deploy, "driver_refusals", None)
+    got = fn(INVENTORY_TYPO, "host") if fn else None
+    if got is None or len(got) != 1 or not got[0].startswith("typo: unknown driver 'pvee'"):
+        failed += 1
+        print(f"FAIL driver_refusals: {got!r}, wanted one refusal for typo/pvee")
+    if fn and fn(INVENTORY_CLEAN, "host"):
+        failed += 1
+        print(f"FAIL a clean inventory refused: {fn(INVENTORY_CLEAN, 'host')!r}")
+    # Пусто и нет ключа -- драйвер по умолчанию, как у of_node; а битый
+    # MOP_DRIVER ловится на тех, кому он достаётся.
+    if fn:
+        bad = fn(INVENTORY_CLEAN, "pvee")
+        if sorted(r.split(":")[0] for r in bad) != ["localhost", "plain"]:
+            failed += 1
+            print(f"FAIL a broken MOP_DRIVER must name the hosts that inherit it: {bad!r}")
+        empty = {**INVENTORY_CLEAN, "_meta": {"hostvars": {"plain": {"mop_driver": ""}}}}
+        if fn(empty, "host"):
+            failed += 1
+            print("FAIL an empty mop_driver is the default driver, not a refusal")
+    return failed
+
+
 def check_deploy_check():
     """HYPOTHESIS (#177): доказать, что правка deploy/ не меняет узлы, было
     нечем — `mop deploy` аргументов не берёт, и #157 подкладывал на PATH
@@ -871,7 +924,9 @@ def check_deploy_check():
     for f in (inventory, key, key + ".pub"):
         open(f, "w").close()
     calls, collected, checked = [], [], []
-    keep = (shutil.which, config.require, subprocess.call, playvars.playbook_vars,
+    listing = [INVENTORY_CLEAN]
+    undo = no_network()
+    keep = (shutil.which, config.require, subprocess.call, subprocess.run, playvars.playbook_vars,
             deploy.missing_extras, deploy.link, deploy.manifests, deploy.check,
             bus.ask_cluster, projects.for_deploy, projects.read, creds.collect,
             creds.operator, dict(os.environ))
@@ -879,6 +934,8 @@ def check_deploy_check():
         shutil.which = lambda cmd: f"/usr/bin/{cmd}"
         config.require = lambda *a: None
         subprocess.call = lambda argv, **kw: calls.append(argv) or 0
+        subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 0, json.dumps(listing[0]), "")
         playvars.playbook_vars = lambda: {"MOP_OPERATOR_SUBJECTS": ["x"]}
         deploy.missing_extras = lambda setting, root: []
         deploy.link = lambda name, target: None
@@ -911,8 +968,21 @@ def check_deploy_check():
             if not code or calls:
                 failed += 1
                 print(f"FAIL deploy {argv} must be refused before any playbook: code {code!r}")
+        # #186: опечатка в драйвере хоста — отказ до плейбука, строка на хост.
+        listing[0] = INVENTORY_TYPO
+        for argv in ([], ["--check"]):
+            calls.clear(), collected.clear()
+            out, err, code = silent_run(deploy.main, argv)
+            plays = [c for c in calls if c and c[0] == "ansible-playbook"]
+            lines = [lib.plain(l) for l in err.strip().splitlines()]
+            if code != 1 or plays or collected or len(lines) != 1 \
+                    or not lines[0].startswith("typo: unknown driver 'pvee'"):
+                failed += 1
+                print(f"FAIL deploy {argv} over a driver typo: code {code!r}, "
+                      f"plays {plays!r}, err {err!r}")
     finally:
-        (shutil.which, config.require, subprocess.call, playvars.playbook_vars,
+        undo()
+        (shutil.which, config.require, subprocess.call, subprocess.run, playvars.playbook_vars,
          deploy.missing_extras, deploy.link, deploy.manifests, deploy.check,
          bus.ask_cluster, projects.for_deploy, projects.read, creds.collect,
          creds.operator, env) = keep
