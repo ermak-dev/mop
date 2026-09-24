@@ -28,8 +28,10 @@ pbkdf2_hmac, но требует памяти (~16 МБ на попытку), и
 
 Переход: провайдер читает и сегодняшний MOP_OPERATORS с паролями из
 secrets/nats-op-<логин>.pass -- каждый нынешний логин работает как был. Логин
-и в файле, и в настройке -- громкий отказ: у человека одно определение, и два
-пароля на один вход -- это вход, которого никто не выбирал.
+и в файле, и в настройке (или дважды в файле) -- отказ: у человека одно
+определение, и два пароля на один вход -- это вход, которого никто не
+выбирал. Отказ бьёт по этому логину, остальные входят; громкий отказ всего
+-- у mop deploy, до плейбука.
 """
 import base64
 import dataclasses
@@ -43,6 +45,8 @@ from . import operators
 
 SECRETS = os.path.expanduser("~/.config/mop/secrets")
 OPERATORS_FILE = "operators"
+# Настройки, из которых provider() собирает провайдера.
+SETTINGS = ("MOP_AUTH_PROVIDER", "MOP_OPERATORS", "MOP_OPERATORS_FILE")
 FIELDS = 6
 SCHEME = "scrypt"
 # Параметры scrypt для интерактивного входа; память -- 128 * N * r байт.
@@ -147,6 +151,14 @@ def subjects(setting):
     return {i.login: operators.permissions(i) for i in from_setting(setting)}
 
 
+def _conflict(login, sources):
+    """Логин и его источники -> строка отказа."""
+    if len(set(sources)) == 1:
+        return f"login {login} is defined twice in {sources[0]}"
+    # Настройка первой: её правят в .env, файл -- на сервере.
+    return f"login {login} is defined both in MOP_OPERATORS and in {sources[0]}"
+
+
 # ─── плоский файл ────────────────────────────────────────────────────────
 class PlainFileProvider:
     """Файл операторов плюс переход с MOP_OPERATORS.
@@ -159,8 +171,10 @@ class PlainFileProvider:
         self.path, self.setting, self.secrets_dir = path, setting, secrets_dir
 
     def _records(self):
-        """-> {логин: (Identity, хеш или None)}; None -- пароль в файле deploy'я."""
-        out = {}
+        """-> ({логин: (Identity, хеш или None)}, {логин: [источники]}).
+        Хеш None -- пароль в файле deploy'я. Логин, определённый дважды,
+        уходит во второй словарь и ни в первом, ни в выдаче не участвует."""
+        seen = {}
         try:
             with open(self.path) as f:
                 lines = f.readlines()
@@ -170,25 +184,36 @@ class PlainFileProvider:
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             who, hashed = parse_line(line)
-            if who.login in out:
-                raise ValueError(f"operators file: {who.login} is defined twice")
-            out[who.login] = (who, hashed)
+            seen.setdefault(who.login, []).append((self.path, (who, hashed)))
         for who in from_setting(self.setting):
-            if who.login in out:
-                raise ValueError(f"{who.login} is both in the operators file and in "
-                                 f"MOP_OPERATORS: keep one definition")
-            out[who.login] = (who, None)
-        return out
+            seen.setdefault(who.login, []).append(("MOP_OPERATORS", (who, None)))
+        records = {login: got[0][1] for login, got in seen.items() if len(got) == 1}
+        twice = {login: [src for src, _ in got] for login, got in seen.items() if len(got) > 1}
+        return records, twice
+
+    def _one(self, login):
+        """-> (Identity, хеш) или None. Логин, определённый дважды, -- Refused:
+        отказ бьёт по нему одному, а не по провайдеру (#205). При переносе
+        людей из MOP_OPERATORS в файл один дубль иначе выключил бы вход всем;
+        громкий отказ всего -- в mop deploy, по conflicts()."""
+        records, twice = self._records()
+        if login in twice:
+            raise Refused(_conflict(login, twice[login]))
+        return records.get(login)
+
+    def conflicts(self):
+        """-> [строка на логин, определённый дважды]; для mop deploy."""
+        return [_conflict(login, sources) for login, sources in sorted(self._records()[1].items())]
 
     def identities(self):
-        return [who for who, _ in self._records().values()]
+        return [who for who, _ in self._records()[0].values()]
 
     def lookup(self, login):
-        got = self._records().get(login)
+        got = self._one(login)
         return got[0] if got else None
 
     def authenticate(self, login, password):
-        got = self._records().get(login)
+        got = self._one(login)
         if got is None:
             raise Refused(f"{login}: unknown login")
         who, hashed = got
