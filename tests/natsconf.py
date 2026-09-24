@@ -19,64 +19,29 @@ from mop import natsconf, operators  # noqa: E402
 
 BASE = {
     "service": "svc-pass",
-    "operators": {"anton": {"password": "op-pass", "allow": ["mop.>", "_INBOX.>"],
-                            "deny": ["mop.admin.>"]},
-                  "boss": {"password": "boss-pass", "allow": ["mop.>", "_INBOX.>"],
-                           "deny": []}},
+    "callout": "co-pass",
     "nodes": {"hyper": "node-pass"},
 }
 
 # Снимок users.conf до #144: имена субъектов и пользователей собраны в одно
 # определение, и рефакторинг обязан не сдвинуть в файле ни байта. Снят заново
-# в #207 намеренно: публикация людей -- явным списком с логином в rpc, у
-# сервиса -- deny на субъекты с логином; подписка, папеты и узлы -- прежние.
-# И в #212: подписка людей -- явным списком (инбоксы, события, _INBOX).
-# И в #213: инбоксы мастеров человека -- только под его логином, плюс who.
+# в #207, #212, #213 (права людей) и в #219 намеренно: людей и папетов в
+# файле больше нет -- их пускает auth callout (#206), а статически входят
+# только машины, которых callout не спрашивает.
 OPERATORS = "anton:admin; ivan:user:rugent,cloudpub; olga:user:*"
 USERS_CONF = """users = [
+  {
+    user: "callout", password: "co-pass"
+    permissions: {
+      publish:   { allow: ["$SYS._INBOX.>"] }
+      subscribe: { allow: ["$SYS.REQ.USER.AUTH"] }
+    }
+  }
   {
     user: "service", password: "svc-pass"
     permissions: {
       publish:   { allow: ["mop.>", "_INBOX.>"], deny: ["mop.*.node.*.rpc.*", "mop.*.cluster.rpc.*"] }
       subscribe: { allow: ["mop.>", "_INBOX.>"] }
-    }
-  }
-  {
-    user: "anton", password: "anton-pass"
-    allowed_connection_types: ["WEBSOCKET"]
-    permissions: {
-      publish:   { allow: ["mop.*.node.*.rpc.anton", "mop.*.cluster.rpc.anton", "mop.*.node.*.rpc", "mop.*.cluster.rpc", "mop.*.node.*.msg", "mop.*.all.msg", "mop.*.master.>", "mop.*.events", "mop.*.server.rpc", "mop.admin.build.rpc", "_INBOX.>"] }
-      subscribe: { allow: ["mop.*.master.anton.>", "mop.*.master.all.inbox", "mop.*.events", "_INBOX.>"] }
-    }
-  }
-  {
-    user: "ivan", password: "ivan-pass"
-    allowed_connection_types: ["WEBSOCKET"]
-    permissions: {
-      publish:   { allow: ["mop.cloudpub.node.*.rpc.ivan", "mop.cloudpub.cluster.rpc.ivan", "mop.cloudpub.node.*.rpc", "mop.cloudpub.cluster.rpc", "mop.cloudpub.node.*.msg", "mop.cloudpub.all.msg", "mop.cloudpub.master.>", "mop.cloudpub.events", "mop.cloudpub.server.rpc", "mop.rugent.node.*.rpc.ivan", "mop.rugent.cluster.rpc.ivan", "mop.rugent.node.*.rpc", "mop.rugent.cluster.rpc", "mop.rugent.node.*.msg", "mop.rugent.all.msg", "mop.rugent.master.>", "mop.rugent.events", "mop.rugent.server.rpc", "_INBOX.>"] }
-      subscribe: { allow: ["mop.cloudpub.master.ivan.>", "mop.cloudpub.master.all.inbox", "mop.cloudpub.events", "mop.rugent.master.ivan.>", "mop.rugent.master.all.inbox", "mop.rugent.events", "_INBOX.>"] }
-    }
-  }
-  {
-    user: "olga", password: "olga-pass"
-    allowed_connection_types: ["WEBSOCKET"]
-    permissions: {
-      publish:   { allow: ["mop.*.node.*.rpc.olga", "mop.*.cluster.rpc.olga", "mop.*.node.*.rpc", "mop.*.cluster.rpc", "mop.*.node.*.msg", "mop.*.all.msg", "mop.*.master.>", "mop.*.events", "mop.*.server.rpc", "_INBOX.>"], deny: ["mop.admin.>"] }
-      subscribe: { allow: ["mop.*.master.olga.>", "mop.*.master.all.inbox", "mop.*.events", "_INBOX.>"], deny: ["mop.admin.>"] }
-    }
-  }
-  {
-    user: "puppet-mop", password: "pu-pass"
-    permissions: {
-      publish:   { allow: ["mop.mop.node.*.msg", "mop.mop.all.msg", "mop.mop.master.>", "mop.mop.events", "_INBOX.>"] }
-      subscribe: { allow: ["_INBOX.>"] }
-    }
-  }
-  {
-    user: "puppet-rugent", password: "ru-pass"
-    permissions: {
-      publish:   { allow: ["mop.rugent.node.*.msg", "mop.rugent.all.msg", "mop.rugent.master.>", "mop.rugent.events", "_INBOX.>"] }
-      subscribe: { allow: ["_INBOX.>"] }
     }
   }
   {
@@ -134,6 +99,23 @@ def rules(text):
     return out
 
 
+def granted(ops, projects=("mop",)):
+    """Права всех, кто на шине: машины -- из users.conf, как их прочтёт NATS;
+    люди и папеты -- тем, что выдаёт им auth callout (#206, #219): людям --
+    operators.permissions, папетам -- natsconf.puppet_permissions. Те же
+    функции, что callout кладёт в JWT (tests/callout.py сверяет стороны)."""
+    got = rules(natsconf.render({"service": "svc-pass", "callout": "co-pass",
+                                 "nodes": {"hyper": "hy-pass"}}))
+    for n, o in ops.items():
+        p = operators.permissions(o, n)
+        got[n] = {"publish": (p["publish"], p["publish_deny"]),
+                  "subscribe": (p["allow"], p["deny"])}
+    for pr in projects:
+        p = natsconf.puppet_permissions(pr)
+        got[f"puppet-{pr}"] = {"publish": (p["publish"], []), "subscribe": (p["subscribe"], [])}
+    return got
+
+
 def check_login_in_subject_207():
     """HYPOTHESIS (#207): человеку дан весь mop.<p>.> (или mop.> без admin) --
     логин токеном субъекта он подделал бы так же, как полем тела.
@@ -147,14 +129,7 @@ def check_login_in_subject_207():
     out = []
     ops = operators.parse("alice:user:mop; bob:user:mop; anton:admin; olga:user:*; "
                           "anton.ermak:user:mop")
-    try:
-        base = {"service": "svc-pass",
-                "operators": {n: {"password": "p", **operators.permissions(o, n)}
-                              for n, o in ops.items()},
-                "nodes": {"hyper": "hy-pass"}}
-    except TypeError as e:
-        return [f"operators.permissions(op, login) is missing: {e}"]
-    got = rules(natsconf.render(base, {"mop": "pu-pass"}))
+    got = granted(ops)
 
     def may(user, subj, side="publish"):
         allow, deny = got[user][side]
@@ -239,11 +214,7 @@ def check_subscribe_212():
     STATUS: FIXED — see #212"""
     out = []
     ops = operators.parse("alice:user:mop; anton:admin; olga:user:*")
-    base = {"service": "svc-pass",
-            "operators": {n: {"password": "p", **operators.permissions(o, n)}
-                          for n, o in ops.items()},
-            "nodes": {"hyper": "hy-pass"}}
-    got = rules(natsconf.render(base, {"mop": "pu-pass"}))
+    got = granted(ops)
 
     def expect(user, subj, want):
         allow, deny = got[user]["subscribe"]
@@ -288,11 +259,7 @@ def check_inbox_login_213():
     STATUS: FIXED — see #213"""
     out = []
     ops = operators.parse("alice:user:mop; bob:user:mop; anton.ermak:admin; olga:user:*")
-    base = {"service": "svc-pass",
-            "operators": {n: {"password": "p", **operators.permissions(o, n)}
-                          for n, o in ops.items()},
-            "nodes": {"hyper": "hy-pass"}}
-    got = rules(natsconf.render(base, {"mop": "pu-pass"}))
+    got = granted(ops)
 
     def sub(user, subj, want):
         allow, deny = got[user]["subscribe"]
@@ -344,55 +311,36 @@ def main():
     # и сервис пула не может завести проект, не повторив шаблон второй копией.
     # SOLUTION: один рендерер на Python, им пользуются и deploy, и сервис.
     # STATUS: FIXED — see #116
-    text = natsconf.render(BASE, {"mop": "pu-pass", "rugent": "ru-pass"})
+    # С #219 в файле только машины: людей и папетов пускает callout (#206).
+    text = natsconf.render(BASE)
     for want in ('user: "service", password: "svc-pass"',
-                 'user: "anton", password: "op-pass"',
-                 'allowed_connection_types: ["WEBSOCKET"]',
-                 '"mop.admin.>"',
+                 'user: "callout", password: "co-pass"',
                  'user: "node-hyper", password: "node-pass"',
-                 '"mop.*.node.hyper.>"',
-                 'user: "puppet-mop", password: "pu-pass"',
-                 '"mop.mop.node.*.msg"',
-                 'user: "puppet-rugent", password: "ru-pass"'):
+                 '"mop.*.node.hyper.>"'):
         if want not in text:
             failed.append(f"render lacks {want!r}")
+    for gone in ('allowed_connection_types', 'user: "puppet-', 'user: "anton"'):
+        if gone in text:
+            failed.append(f"users.conf must hold machines only (#219), found {gone!r}")
     if not text.lstrip().startswith("users = ["):
         failed.append("render must be the users array, the file included "
                       "into authorization {}")
-    # Пустой deny не пишется: NATS принял бы и пустой, но `deny: []` рядом с
-    # оператором-админом читается как недосмотр.
-    boss = text[text.index('user: "boss"'):text.index('user: "node-hyper"')]
-    if "deny" in boss:
-        failed.append("an operator without deny must not get a deny list")
-    # Папет чужого проекта не видит: права папета -- только его проект.
-    pu = text[text.index('user: "puppet-mop"'):text.index('user: "puppet-rugent"')]
-    if "rugent" in pu:
-        failed.append("puppet-mop's permissions mention another project")
     # Порядок стабилен: иначе каждый прогон менял бы файл и дёргал reload.
-    if natsconf.render(BASE, {"rugent": "ru-pass", "mop": "pu-pass"}) != text:
-        failed.append("render must not depend on the order of projects")
+    if natsconf.render({**BASE, "nodes": {"mini": "m", "hyper": "node-pass"}}) != \
+            natsconf.render({**BASE, "nodes": {"hyper": "node-pass", "mini": "m"}}):
+        failed.append("render must not depend on the order of nodes")
     # Кавычка в пароле не рвёт файл.
-    odd = natsconf.render({**BASE, "service": 'a"b'}, {})
+    odd = natsconf.render({**BASE, "service": 'a"b'})
     if 'password: "a\\"b"' not in odd:
         failed.append(f"a quote in a password must be escaped: {odd[:120]!r}")
-    # Проект без пароля -- отказ, а не пользователь без пароля.
-    try:
-        natsconf.render(BASE, {"mop": ""})
-        failed.append("a project without a password must be refused")
-    except ValueError as e:
-        if "mop" not in str(e):
-            failed.append(f"the refusal must name the project: {e}")
 
     # HYPOTHESIS (#144): субъекты и имена пользователей набраны руками в шести
     # модулях; переименование в одном месте молча разводит права и подписки.
     # SOLUTION: одно определение (mop/busnames.py), из него строятся и права,
     # и подписки. Характеризация: файл пользователей тот же байт в байт.
     ops = operators.parse(OPERATORS)
-    base = {"service": "svc-pass",
-            "operators": {n: {"password": f"{n}-pass", **operators.permissions(o, n)}
-                          for n, o in ops.items()},
-            "nodes": {"hyper": "hy-pass", "mini": "mi-pass"}}
-    got = natsconf.render(base, {"mop": "pu-pass", "rugent": "ru-pass"})
+    got = natsconf.render({"service": "svc-pass", "callout": "co-pass",
+                           "nodes": {"hyper": "hy-pass", "mini": "mi-pass"}})
     if got != USERS_CONF:
         failed.append("users.conf drifted from its snapshot:\n" + got)
 
@@ -493,37 +441,24 @@ def main():
     # машина вне auth_users пойдёт в callout и получит отказ, а изменить
     # auth_users reload'ом nats не даёт (стенд #206: «config reload not
     # supported for AuthCallout») -- только рестартом.
-    # SOLUTION: MOP_AUTH_CALLOUT (по умолчанию off -- users.conf байт в байт
-    # как был); on -- статические пользователи и auth_users из одного списка
+    # SOLUTION: статические пользователи и auth_users из одного списка
     # машин; блок callout -- своим файлом callout.conf, и его смена --
-    # рестарт, а не reload.
-    # STATUS: FIXED — see #206
+    # рестарт, а не reload. С #219 callout всегда включён: людей вне
+    # провайдера нет, и выключенный callout не пустил бы никого.
+    # STATUS: FIXED — see #206, #219
     import re
-    base = dict(BASE, callout="co-pass")
-    projects = {"mop": "pu-pass", "rugent": "ru-pass"}
     try:
-        check_on = natsconf.callout_on
-        for value, want in (("on", True), ("off", False), ("", False)):
-            if check_on(value) is not want:
-                failed.append(f"callout_on({value!r}) must be {want}")
-        try:
-            check_on("yes")
-            failed.append("MOP_AUTH_CALLOUT=yes must be refused: on or off, nothing else")
-        except ValueError:
-            pass
-        if natsconf.render(base, projects, callout=False) != natsconf.render(BASE, projects):
-            failed.append("callout off: users.conf must be byte-identical to today's")
-        on = natsconf.render(base, projects, callout=True)
+        if hasattr(natsconf, "callout_on") or hasattr(natsconf, "CALLOUT_OFF"):
+            failed.append("#219: the callout is always on -- no off switch in natsconf")
+        on = natsconf.render(BASE)
         static = re.findall(r'user: "([^"]+)"', on)
         if static != ["callout", "service", "node-hyper"]:
-            failed.append(f"callout on: static users are the machines only: {static}")
-        if 'allowed_connection_types' in on:
-            failed.append("callout on: no human entry may stay in users.conf")
+            failed.append(f"static users are the machines only: {static}")
         cblock = on[on.index('user: "callout"'):on.index('user: "service"')]
         if '"$SYS._INBOX.>"' not in cblock or '"$SYS.REQ.USER.AUTH"' not in cblock \
                 or '"mop.>"' in cblock:
             failed.append(f"the callout user may only answer auth requests: {cblock!r}")
-        conf = natsconf.render_callout(base, "AISSUER", "XKEY")
+        conf = natsconf.render_callout(BASE, "AISSUER", "XKEY")
         auth_users = re.findall(r'"([^"]+)"', re.search(r"auth_users: \[([^]]*)\]", conf).group(1))
         if auth_users != static:
             failed.append(f"auth_users {auth_users} must be the static users {static}")
@@ -532,26 +467,23 @@ def main():
             if want not in conf:
                 failed.append(f"callout.conf lacks {want!r}: {conf}")
         # Не разойтись: новый узел попадает в оба списка сразу.
-        grown = dict(base, nodes=dict(base["nodes"], mini="mi-pass"))
-        s2 = re.findall(r'user: "([^"]+)"', natsconf.render(grown, projects, callout=True))
+        grown = dict(BASE, nodes=dict(BASE["nodes"], mini="mi-pass"))
+        s2 = re.findall(r'user: "([^"]+)"', natsconf.render(grown))
         a2 = re.findall(r'"([^"]+)"', re.search(r"auth_users: \[([^]]*)\]",
                                                 natsconf.render_callout(grown, "A", "X")).group(1))
         if s2 != a2 or "node-mini" not in a2:
             failed.append(f"a new node must land in both lists: {s2} vs {a2}")
-        off = natsconf.render_callout(base, None, None, callout=False)
-        if "auth_callout" in off or "timeout" in off:
-            failed.append(f"callout off: callout.conf holds nothing for nats: {off!r}")
         try:
-            natsconf.render(BASE, projects, callout=True)
-            failed.append("callout on without a callout password must be refused")
+            natsconf.render({k: v for k, v in BASE.items() if k != "callout"})
+            failed.append("no callout password must be refused: nobody could let people in")
         except ValueError:
             pass
         # Рестарт или reload: решает блок callout, а не users.conf.
-        if not natsconf.needs_restart(off, conf) or natsconf.needs_restart(conf, conf) \
+        if not natsconf.needs_restart("# old\n", conf) or natsconf.needs_restart(conf, conf) \
                 or not natsconf.needs_restart(None, conf):
             failed.append("a changed or new callout.conf needs a restart, an unchanged one not")
-    except AttributeError as e:
-        failed.append(f"auth callout rendering is missing: {e}")
+    except (AttributeError, TypeError) as e:
+        failed.append(f"auth callout rendering: {type(e).__name__}: {e}")
 
     print("\n".join(f"FAIL {l}" for l in failed) if failed else "", end="\n" if failed else "")
     print("natsconf: FAILED" if failed else "natsconf: ok")

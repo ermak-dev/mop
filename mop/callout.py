@@ -1,12 +1,11 @@
 """Auth callout NATS (#206): кто входит на шину, решает сервис, а не список.
 
-Пока MOP_AUTH_CALLOUT=off, люди и папеты -- статические пользователи
-users.conf (mop/natsconf.py). С on NATS на каждом входе того, кого нет в
-auth_users, публикует запрос на $SYS.REQ.USER.AUTH, и отвечает этот сервис:
+Людей и папетов в users.conf нет (#219): NATS на каждом входе того, кого
+нет в auth_users, публикует запрос на $SYS.REQ.USER.AUTH, и отвечает этот
+сервис:
 
   * человек -- провайдер личностей (#205, identity.provider): логин и пароль;
-    права -- operators.permissions(Identity), те же, что рендерит
-    users.conf сегодня: публикация с его логином токеном субъекта (#207),
+    права -- operators.permissions(Identity): публикация с его логином токеном субъекта (#207),
     подписка -- маски проектов. Только через WebSocket, как статическая запись с
     allowed_connection_types (#105): поле в JWT пользователя nats-server
     2.14.6 из ответа callout не применяет (стенд #203), поэтому -- отказом
@@ -210,11 +209,7 @@ async def serve(url, password, keys_, humans, puppets, log):
 
 
 async def run(log):
-    """Сервис целиком, из настроек сервера. Callout выключен -- отказ: юнит
-    ставится только при on, и запущенный при off он отвечал бы nats,
-    который его не спрашивает."""
-    if not natsconf.callout_on(config.get("MOP_AUTH_CALLOUT")):
-        raise RuntimeError("MOP_AUTH_CALLOUT is off: nats does not ask the callout")
+    """Сервис целиком, из настроек сервера."""
     from . import bootstrap   # PUPPET_CREDS: пароли папетов пишет natsconf
     password = natsconf.read_base().get(USER)
     if not password:
