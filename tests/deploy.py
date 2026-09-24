@@ -47,6 +47,19 @@ SOLUTION: Environment="K=V" с экранированием кавычки и о
 Нынешние юниты такого не содержат и остаются байт в байт. Проверка читает
 юнит по правилам systemd.
 STATUS: FIXED — see #185
+Размеры тела при сборке (#192): pve-build.yml читал размеры и потолки тела
+только прописными -- переменными установки (--extra-vars). Инвентарь пишет
+их строчными (mop_mem_mb, mop_body_mem_cap_mb), и так же их ищет шаблон
+node.env; сборка строки хоста не видела, и тела шли с размерами установки.
+Комментарий плейбука при этом обещал «узел > проект > установка > дефолт».
+
+HYPOTHESIS: выражения задачи «How big a body of this project may be here»
+ссылаются на MOP_* напрямую, мимо hostvars.
+SOLUTION: одна задача перед ней собирает node_body по правилу node.env --
+строчная переменная хоста, иначе значение установки; размеры и потолки
+берутся только из неё. Просьба проекта стоит между: потолок узла -- min(),
+размер -- просьба, иначе node_body.
+STATUS: FIXED — see #192
 """
 import ast
 import os
@@ -297,6 +310,77 @@ def check_probes(check):
         check(f"probe {name!r}: changes nothing", not WRITES.search(text), WRITES.search(text))
 
 
+# ── #192: размеры тела при сборке — строка хоста раньше установки ─────────────
+BODY_KNOBS = ("MOP_MEM_MB", "MOP_DISK_GB", "MOP_CORES",
+              "MOP_BODY_MEM_CAP_MB", "MOP_BODY_DISK_CAP_GB", "MOP_BODY_CORES_CAP")
+# Правило node.env (roles/bus/tasks/main.yml): строчная хоста, иначе установка.
+NODE_RULE = "hostvars[inventory_hostname][item | lower] | default(lookup('vars', item))"
+
+
+def check_body_sizes(check, can_render):
+    """STATUS: FIXED — see #192"""
+    play = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))[0]
+    by = {t.get("name"): t for t in play["tasks"]}
+    sizes = by.get("How big a body of this project may be here")
+    node = by.get("What this node says about the size of its bodies")
+    check("pve-build: the body's size task exists", sizes is not None)
+    check("pve-build: the node's own sizes are read in one task", node is not None)
+    if sizes is None:
+        return
+    exprs = sizes.get("ansible.builtin.set_fact") or {}
+    for k in ("body_mem", "body_disk", "body_cores"):
+        bare = re.findall(r"(?<![.'\w])MOP_[A-Z_]+(?!')", exprs.get(k, ""))
+        check(f"pve-build: {k} takes no installation setting past the host's", not bare, bare)
+    if node is None:
+        return
+    names = [t.get("name") for t in play["tasks"]]
+    check("pve-build: the node's sizes are read before they are used",
+          names.index(node["name"]) < names.index(sizes["name"]))
+    check("pve-build: every body setting is read, and only those",
+          sorted(node.get("loop") or []) == sorted(BODY_KNOBS), node.get("loop"))
+    check("pve-build: every body setting is node-scoped",
+          set(BODY_KNOBS) <= set(config.NODE_SCOPED))
+    fact = (node.get("ansible.builtin.set_fact") or {}).get("node_body", "")
+    check("pve-build: the node's sizes are read the way node.env reads them",
+          NODE_RULE in " ".join(fact.split()), fact)
+    if not can_render:
+        return
+    from jinja2.nativetypes import NativeEnvironment
+    env = NativeEnvironment(undefined=__import__("jinja2").StrictUndefined)
+    env.filters["combine"] = lambda a, b: {**a, **b}
+    installed = {"MOP_MEM_MB": "12288", "MOP_DISK_GB": "120", "MOP_CORES": "4",
+                 "MOP_BODY_MEM_CAP_MB": "32768", "MOP_BODY_DISK_CAP_GB": "400",
+                 "MOP_BODY_CORES_CAP": "16"}
+
+    def build(host, asks=None):
+        """node_body циклом set_fact, затем размеры -- как их считает ansible."""
+        v = {**installed, "inventory_hostname": "hyper", "hostvars": {"hyper": host}}
+        if asks is not None:
+            v["mop_project_asks"] = asks
+        lookup = lambda kind, name: v[name] if kind == "vars" else None  # noqa: E731
+        for item in node["loop"]:
+            v["node_body"] = env.from_string(fact).render(**v, item=item, lookup=lookup)
+        return tuple(int(env.from_string(exprs[k]).render(**v, lookup=lookup))
+                     for k in ("body_mem", "body_disk", "body_cores"))
+    cases = [
+        ("the host's size over the installation's",
+         {"mop_mem_mb": "8192", "mop_disk_gb": 50, "mop_cores": "4"}, None, (8192, 50, 4)),
+        ("the installation's without a host line", {}, None, (12288, 120, 4)),
+        ("the project's ask over the host's size", {"mop_mem_mb": "8192"},
+         {"MOP_MEM_MB": "16384"}, (16384, 120, 4)),
+        ("the host's cap under the ask", {"mop_body_mem_cap_mb": "4096", "mop_body_cores_cap": 2},
+         {"MOP_MEM_MB": "16384", "MOP_CORES": "8"}, (4096, 120, 2)),
+        ("the host's cap under its own size", {"mop_disk_gb": "500", "mop_body_disk_cap_gb": "60"},
+         None, (12288, 60, 4)),
+    ]
+    for what, host, asks, want in cases:
+        try:
+            got = build(host, asks)
+        except Exception as e:  # noqa: BLE001 -- проверка, не код пула
+            got = f"{type(e).__name__}: {e}"
+        check(f"pve-build: {what}", got == want, got)
+
+
 def main():
     cases = bad = 0
 
@@ -421,6 +505,7 @@ def main():
         check(f"{needle!r} lives only in {home or 'no file'}", where == want, where)
 
     check_probes(check)
+    check_body_sizes(check, can_render)
 
     print(f"deploy: {cases - bad}/{cases}" + (" FAILED" if bad else " ok"))
     return 1 if bad else 0
