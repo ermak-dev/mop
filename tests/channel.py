@@ -397,6 +397,37 @@ def main():
         s.restore()
     # STATUS: FIXED — see #213
 
+    # ─── #226: --check не выдаёт свой адрес за адрес живого сервера ─────────
+    # HYPOTHESIS: `mop mcp --check` -- отдельный процесс; MASTER_ID строится
+    # из его собственного pid, и напечатанный адрес с инбоксом не слушает
+    # никто. Отданный папету, он уводит ответ в пустоту.
+    # SOLUTION: --check печатает профиль, число инструментов, шину и сокет
+    # сессии -- и ничего похожего на адрес. Адрес мастера берётся только из
+    # таблицы мастеров в agents или из конверта письма.
+    import re
+    keep = mcp.MASTER
+    mcp.MASTER = True
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = mcp.main(["--check"])
+    finally:
+        mcp.MASTER = keep
+    text = out.getvalue()
+    check("--check succeeds", code, 0)
+    check("--check still names the profile and the session",
+          "profile " in text and "session: " in text, True)
+    check("--check prints no <login>.<host>-<pid> address",
+          re.findall(r"\b[\w-]+\.[\w-]+-\d+\b", text), [])
+    check("--check prints no .inbox subject", ".inbox" in text, False)
+    check("--check does not print its own MASTER_ID", mcp.MASTER_ID in text, False)
+    described = {t.name: t.description for t in mcp.app._tool_manager.list_tools()}
+    check("agents says where a master's address comes from",
+          "only from the masters table" in (described.get("agents") or ""), True)
+    # RESULT: красный на старом --check (адрес master.<хост>-<pid> и .inbox в
+    # выводе), зелёный после.
+    # STATUS: FIXED — see #226
+
     print(f"channel: {cases - bad}/{cases}" + (" FAILED" if bad else " ok"))
     return 1 if bad else 0
 
