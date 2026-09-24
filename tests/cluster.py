@@ -21,7 +21,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import cluster  # noqa: E402
+from mop import cluster, service  # noqa: E402
 
 RUGENT = "git@git.ermak.dev:rugent/rugent.git"
 MOP = "git@git.ermak.dev:ermak/mop.git"
@@ -33,7 +33,7 @@ def check_subject():
     for subj, want in [("mop.rugent.cluster.rpc", "rugent"),
                        ("mop.admin.cluster.rpc", "admin"),
                        ("mop.mop.cluster.rpc", "mop")]:
-        got = cluster.project_of(subj)
+        got = service.project_from_subject(subj)
         if got != want:
             out.append(f"project_of({subj}) -> {got!r}, wanted {want!r}")
     return out
