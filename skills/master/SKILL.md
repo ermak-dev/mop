@@ -65,8 +65,9 @@ ticket: the OWNER column in `agents` shows who leads each puppet, and a
 `send` into a puppet another master leads (work in its clone, or dispatched
 minutes ago) is refused with that master's name. Dispatch only to free
 puppets with no owner or your own; `force=true` only when that master is
-gone for good or agrees. **The landing token is not shared** — with another
-master in the roster, agree with them who runs the landing queue. A
+gone for good or agrees. **The landing token is shared**: it lives with the
+cluster service, one per project, and another master in the roster takes the
+same one (see Landing). A
 jump to another project needs a master shell there; say so, don't try to
 cross.
 
@@ -281,8 +282,14 @@ acceptance is the ticket's own tests, already satisfied at merge.
 **The token.** Exactly one puppet between merge and push: two parallel gates
 race each other, and the second push bounces non-fast-forward after its
 gate ran against an integration that no longer exists. Grant the token to
-exactly one, take it back on the report. The queue is yours — no lock file,
-no extra tooling.
+exactly one, take it back on the report — through the `landing` tool
+(`mop landing`), not in your head: `landing take <puppet>` before you tell
+the puppet it may land, `landing give` on its report. The token lives with
+the cluster service, one per project, so every master of the project sees
+the same one: `take` refuses while another master holds it, naming who, for
+which puppet and since when — wait for their `give`, or agree with them.
+The order of your own queue is still yours. `--force` only for a holder that
+is gone for good; it names whom it took the token from — tell them.
 
 Under the token, in order:
 
