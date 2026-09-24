@@ -16,16 +16,17 @@ from mop import nodes  # noqa: E402
 
 CASES = [
     # (сводка, meta, ёмкость, ожидаемая строка)
-    ({"Name": "gpu", "Status": "ready"}, {}, {"free_mb": 40960, "total_mb": 40960, "slots": 5},
+    ({"Name": "gpu", "Status": "ready"}, {}, {"free_mb": 40960, "total_mb": 40960, "slots": 5,
+                                         "slots_total": 5},
      {"name": "gpu", "driver": "host", "serves": "-", "state": "ready",
-      "free_mb": 40960, "total_mb": 40960, "slots": 5}),
+      "free_mb": 40960, "total_mb": 40960, "slots": 5, "slots_total": 5}),
     ({"Name": "hyper", "Status": "ready", "Drain": True, "SchedulingEligibility": "ineligible"},
      {"mop_driver": "pve", "mop_projects": "mop,rugent"}, {},
      {"name": "hyper", "driver": "pve", "serves": "mop,rugent", "state": "ready, draining",
-      "free_mb": None, "total_mb": None, "slots": None}),
+      "free_mb": None, "total_mb": None, "slots": None, "slots_total": None}),
     ({"Name": "mate", "Status": "ready", "SchedulingEligibility": "ineligible"}, {}, {},
      {"name": "mate", "driver": "host", "serves": "-", "state": "ready, closed",
-      "free_mb": None, "total_mb": None, "slots": None}),
+      "free_mb": None, "total_mb": None, "slots": None, "slots_total": None}),
 ]
 
 

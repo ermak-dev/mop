@@ -530,14 +530,32 @@ def check_refusals_163():
 
         # Обычный ответ -- вывод прежний, символ в символ.
         row = {"name": "hyper", "driver": "pve", "serves": "mop", "state": "ready",
-               "free_mb": 40960, "total_mb": 65536, "slots": 5}
-        bus.ask_cluster = lambda verb, **kw: {"nodes": [row]}
+               "free_mb": 40960, "total_mb": 65536, "slots": 5, "slots_total": 8}
+        # #243: слоты -- свободно/всего; всего не знает сервис старше -- «-».
+        old = {k: v for k, v in row.items() if k != "slots_total"}
+        down = {"name": "mate", "driver": "host", "serves": "-", "state": "down",
+                "free_mb": None, "total_mb": None, "slots": None, "slots_total": None}
+        bus.ask_cluster = lambda verb, **kw: {"nodes": [row, dict(old, name="old"), down]}
         got = run(node.main)
         want = ("NODE   DRIVER  SERVES  STATE  FREE   TOTAL  SLOTS\n"
-                "hyper  pve     mop     ready  40 GB  64 GB  5\n", "", 0)
+                "hyper  pve     mop     ready  40 GB  64 GB  5/8\n"
+                "old    pve     mop     ready  40 GB  64 GB  5/-\n"
+                "mate   host    -       down   -      -      -\n", "", 0)
         if got != want:
             failed += 1
             print(f"FAIL mop node on a normal answer: {got!r}")
+        pool = [{"name": "gpu", "status": "ready", "free_mb": 2048, "total_mb": 40960,
+                 "slots": 0, "slots_total": 5},
+                {"name": "old", "status": "ready", "free_mb": 2048, "total_mb": 40960,
+                 "slots": 0},
+                {"name": "off", "status": "down"}]
+        bus.ask_cluster = lambda verb, **kw: {"nodes": pool}
+        want = ["  gpu: free 2/40 GB, slots 0/5", "  old: free 2/40 GB, slots 0/-",
+                "  off: down"]
+        if lib.pool_lines() != want:
+            failed += 1
+            print(f"FAIL pool_lines: {lib.pool_lines()!r}")
+        bus.ask_cluster = lambda verb, **kw: {"nodes": [row]}
         puppets.ready_nodes = keep[4]
         if puppets.pool() != [row]:
             failed += 1

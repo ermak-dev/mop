@@ -13,7 +13,7 @@ which the next deploy would configure it from again.
 """
 from mop.cli import lib
 from mop import nodes
-from mop.render import table
+from mop.render import ratio, table
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -32,7 +32,7 @@ def main(argv):
             r["name"], r["driver"], r["serves"], r["state"],
             f"{r['free_mb'] // 1024} GB" if r["free_mb"] is not None else "-",
             f"{r['total_mb'] // 1024} GB" if r["total_mb"] is not None else "-",
-            str(r["slots"]) if r["slots"] is not None else "-",
+            ratio(r["slots"], r.get("slots_total")),
         ))
     print("\n".join(table(rows)))
     # Узел с неизвестным драйвером -- в таблице с «?», причина строкой ниже.

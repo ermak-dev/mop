@@ -36,7 +36,8 @@ def row(summary, meta, cap):
             "state": state,
             "free_mb": cap.get("free_mb"),
             "total_mb": cap.get("total_mb"),
-            "slots": cap.get("slots")}
+            "slots": cap.get("slots"),
+            "slots_total": cap.get("slots_total")}
 
 
 def nomad_rows(pool):

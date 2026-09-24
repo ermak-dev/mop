@@ -332,7 +332,8 @@ def puppet_sizes(rows, timeout=45):
 
 
 def pool():
-    """Ёмкость пула через шину: [{name, status, free_mb, total_mb, slots}].
+    """Ёмкость пула через шину:
+    [{name, status, free_mb, total_mb, slots, slots_total}].
 
     Мастеру это видно и должно быть видно: по свободным слотам он решает,
     заводить ли ещё папета. Кто ещё живёт на узле и чьи образы там собраны —

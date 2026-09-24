@@ -218,7 +218,9 @@ def next_name(project):
 
 
 def nomad_pool():
-    """Узлы пула как данные: [{name, status, free_mb, total_mb, slots, error}].
+    """Узлы пула как данные:
+    [{name, status, free_mb, total_mb, slots, slots_total, error}].
+    slots -- свободные, slots_total -- сколько папетов берёт пустой узел (#243).
 
     Только датацентр пула: джобы папетов объявляют его, и планировщик на узлы
     других dc не смотрит вовсе. Показать такой узел свободными слотами —
@@ -235,6 +237,7 @@ def nomad_pool():
             free, total = nomad.node_capacity(n)
             out.append({"name": n["Name"], "status": "ready", "free_mb": free,
                         "total_mb": total, "slots": free // spec.MEM,
+                        "slots_total": total // spec.MEM,
                         # Закрытый для планирования узел остаётся ready и место
                         # на нём показывает честно, но ставить туда Nomad не
                         # станет — и раздавать креды туда незачем.

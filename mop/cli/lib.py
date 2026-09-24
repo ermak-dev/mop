@@ -23,7 +23,7 @@ import shutil
 import subprocess
 import sys
 
-from mop import bus, config, creds, identity, keys, llm, playvars, puppets  # noqa: E402
+from mop import bus, config, creds, identity, keys, llm, playvars, puppets, render  # noqa: E402
 
 
 # Каталоги установки: корень проекта и bin/ с единственным исполняемым
@@ -407,7 +407,8 @@ def pool_lines():
                 out.append(f"  {n['name']}: {n['error']}")
             else:
                 out.append(f"  {n['name']}: free {n['free_mb'] / 1024:.0f}/"
-                           f"{n['total_mb'] / 1024:.0f} GB ({n['slots']} slots)")
+                           f"{n['total_mb'] / 1024:.0f} GB, "
+                           f"slots {render.ratio(n['slots'], n.get('slots_total'))}")
         return out
     except Exception as e:
         return [f"  {e}"]
