@@ -305,6 +305,7 @@ def main():
     failed += check_empty_llm()
     failed += check_deploy_check()
     failed += check_inventory_drivers()
+    failed += check_pool_uniform()
     failed += check_bus_import_169()      # последними: перезагружают модули
     failed += check_nomad_import_187()
 
@@ -1091,6 +1092,51 @@ def check_inventory_drivers():
     return failed
 
 
+def check_pool_uniform():
+    """HYPOTHESIS (#190): спеку папета строит сервер своими MOP_HOME,
+    MOP_USER, MOP_PUPPET_SEED, MOP_MEM_MB, а агент и `mop driver run` на узле
+    читают их из node.env этого узла. Строка хоста в инвентаре, перекрывшая
+    любую из них, молча разводит врапер и агента: клон ложится туда, куда
+    агент не смотрит. SOLUTION: config.POOL_UNIFORM и отказ deploy до
+    плейбука, если хост задаёт им значение, отличное от установки.
+    STATUS: FIXED — see #190"""
+    from mop import config
+    from mop.cli.pool import deploy
+    failed = 0
+    undo = no_network()
+    try:
+        uniform = getattr(config, "POOL_UNIFORM", None)
+        if not uniform or not {"MOP_HOME", "MOP_USER", "MOP_PUPPET_SEED", "MOP_MEM_MB"} <= set(uniform):
+            failed += 1
+            print(f"FAIL config.POOL_UNIFORM must name the settings the spec reads: {uniform!r}")
+        fn = getattr(deploy, "uniform_refusals", None)
+        installed = {n: config.get(n) for n in (uniform or ())}
+
+        def listing(hostvars):
+            return {"_meta": {"hostvars": hostvars},
+                    "puppet": {"hosts": ["plain", "hyper", "odd"]}}
+        cases = [
+            ("an override", {"odd": {"mop_home": "/srv/elsewhere"}}, ["odd: mop_home"]),
+            ("two settings on one host", {"odd": {"mop_user": "someone",
+                                                  "mop_mem_mb": 1}},
+             ["odd: mop_mem_mb", "odd: mop_user"]),
+            ("the same value", {"odd": {"mop_home": installed.get("MOP_HOME")}}, []),
+            # Из YAML число приезжает числом: 12288 и "12288" -- одно значение.
+            ("the same value as a number",
+             {"odd": {"mop_mem_mb": int(installed.get("MOP_MEM_MB") or 0)}}, []),
+            ("no override", {"hyper": {"mop_driver": "pve"}}, []),
+        ]
+        for what, hv, want in cases:
+            got = fn(listing(hv), installed) if fn else None
+            heads = sorted(g.split("=")[0] for g in got) if got is not None else None
+            if heads != want:
+                failed += 1
+                print(f"FAIL uniform_refusals, {what}: {got!r}, wanted lines for {want}")
+    finally:
+        undo()
+    return failed
+
+
 def check_deploy_check():
     """HYPOTHESIS (#177): доказать, что правка deploy/ не меняет узлы, было
     нечем — `mop deploy` аргументов не берёт, и #157 подкладывал на PATH
@@ -1151,6 +1197,18 @@ def check_deploy_check():
             if not code or calls:
                 failed += 1
                 print(f"FAIL deploy {argv} must be refused before any playbook: code {code!r}")
+        # #190: перекрытая на хосте настройка, из которой сервер строит спеку.
+        listing[0] = {**INVENTORY_CLEAN, "_meta": {"hostvars": {
+            **INVENTORY_CLEAN["_meta"]["hostvars"], "plain": {"mop_home": "/srv/elsewhere"}}}}
+        for argv in ([], ["--check"]):
+            calls.clear(), collected.clear()
+            out, err, code = silent_run(deploy.main, argv)
+            plays = [c for c in calls if c and c[0] == "ansible-playbook"]
+            lines = [lib.plain(l) for l in err.strip().splitlines()]
+            if code != 1 or plays or len(lines) != 1 or not lines[0].startswith("plain: mop_home="):
+                failed += 1
+                print(f"FAIL deploy {argv} over a host override of MOP_HOME: code {code!r}, "
+                      f"plays {plays!r}, err {err!r}")
         # #186: опечатка в драйвере хоста — отказ до плейбука, строка на хост.
         listing[0] = INVENTORY_TYPO
         for argv in ([], ["--check"]):
