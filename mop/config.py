@@ -405,9 +405,12 @@ NOT_NODE = ("MOP_MEM_MB",)
 # mop-cluster молча ходил на дефолтный порт и DC Nomad. Сверяет их с кодом
 # tests/deploy.py. Секретам здесь не место: юнит читаем всем на машине.
 SERVER_SCOPED = {
-    # MOP_HOME и MOP_USER -- узловые: их читают задачи bootstrap'а.
+    # MOP_HOME и MOP_USER -- узловые: их читают задачи bootstrap'а. Провайдер
+    # личностей -- для глагола identity (#167): имя и почта владельца задания,
+    # те же настройки, что у mop-callout; файл операторов -- копией в
+    # /etc/nats/identity (identity.server_provider), не окружением юнита.
     "mop-bootstrap": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
-                      "MOP_HOME", "MOP_USER"),
+                      "MOP_HOME", "MOP_USER", "MOP_AUTH_PROVIDER", "MOP_OPERATORS"),
     # Nomad (NOMAD_ADDR выводится из адреса сервера и порта, плюс DC) и то,
     # что читает mop/spec.py: спецификацию папета собирает этот сервис, и
     # профиль LLM по умолчанию тоже решает он (create без --llm).

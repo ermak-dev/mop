@@ -27,6 +27,74 @@ TEXT = """
 """
 
 
+def check_identity_167():
+    """HYPOTHESIS (#167): коммит папета подписан тем, кого назвал мастер
+    разовым `git -c`, а не человеком, которого проверила шина. Агент узла
+    знает логин владельца из субъекта (#207), но профиля (имя, почта) у него
+    нет: провайдер личностей (#205) живёт на сервере.
+    SOLUTION: глагол `identity` у сервиса сервера (server.rpc -- в него узлу
+    писать уже можно, в cluster.rpc нельзя и не надо): логин -> имя и почта
+    из провайдера сервера, и ничего больше -- ни роли, ни проектов, ни хеша.
+    Профиль без имени или без почты -- не профиль: половина identity коммит
+    всё равно не спасает. Имя и почта из тела запроса не читаются.
+
+    Сервис работает под пользователем пула, а файл операторов лежит в
+    secrets/ контроллера, куда ему хода нет (#206): провайдер тот же, что у
+    callout (identity.server_provider), и читает копию deploy'я в
+    natsconf.IDENTITY_DIR, а не MOP_OPERATORS_FILE.
+    STATUS: FIXED — see #167"""
+    from mop import identity, natsconf
+    failed = 0
+    tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
+    path = os.path.join(tmp, "operators")
+    # Файл контроллера, который сервису не виден: его olga -- другая.
+    elsewhere = os.path.join(tempfile.mkdtemp(prefix="mop-test-identity-"), "operators")
+    with open(elsewhere, "w") as f:
+        f.write(identity.format_line(identity.Identity("olga", "user", ("mop",), "Not Olga",
+                                                       "no@example.dev"),
+                                     identity.hash_password("pw")) + "\n")
+    rows = [identity.Identity("olga", "user", ("mop",), "Ольга Петрова", "olga@example.dev"),
+            identity.Identity("ivan", "user", ("mop",), "Иван", ""),
+            identity.Identity("anna.k", "admin", (), "", "anna@example.dev")]
+    with open(path, "w") as f:
+        f.write("".join(identity.format_line(w, identity.hash_password("pw")) + "\n"
+                        for w in rows))
+    keep = {k: os.environ.get(k) for k in ("MOP_OPERATORS_FILE", "MOP_OPERATORS")}
+    os.environ.update({"MOP_OPERATORS_FILE": elsewhere, "MOP_OPERATORS": "boss:admin"})
+    keep_dir, natsconf.IDENTITY_DIR = natsconf.IDENTITY_DIR, tmp
+    try:
+        for req, want in (
+                ({"login": "olga"}, {"login": "olga", "name": "Ольга Петрова",
+                                     "email": "olga@example.dev"}),
+                # Имя и почта из тела -- не источник: только провайдер.
+                ({"login": "olga", "name": "Mallory", "email": "m@evil"},
+                 {"login": "olga", "name": "Ольга Петрова", "email": "olga@example.dev"}),
+                ({"login": "ivan"}, {"login": "ivan"}),
+                ({"login": "anna.k"}, {"login": "anna.k"}),
+                ({"login": "boss"}, {"login": "boss"}),
+                ({"login": "nobody"}, {"login": "nobody"})):
+            got = bootstrap.answer("mop", {"verb": "identity", **req})
+            if got != want:
+                failed += 1
+                print(f"FAIL identity {req} -> {got}, wanted {want}")
+        for bad in (None, "", "a\nb", 7):
+            got = bootstrap.answer("mop", {"verb": "identity", "login": bad})
+            if not got.get("error"):
+                failed += 1
+                print(f"FAIL identity of {bad!r} must be refused, got {got}")
+        if "identity" not in bootstrap.answer("mop", {"verb": "nope"}).get("error", ""):
+            failed += 1
+            print("FAIL the unknown-verb refusal must list identity")
+    finally:
+        natsconf.IDENTITY_DIR = keep_dir
+        for k, v in keep.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return failed
+
+
 def main():
     failed = 0
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
@@ -217,6 +285,7 @@ def main():
     finally:
         bootstrap.ROOT, project_secrets.ROOT = saved
 
+    failed += check_identity_167()
     print("bootstrap: FAILED" if failed else "bootstrap: ok")
     return 1 if failed else 0
 

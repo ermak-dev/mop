@@ -136,7 +136,11 @@ ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          # reload шины с проверкой (#211): /varz на петле.
                          "MOP_NATS_MONITOR_PORT",
                          # callout или статический users.conf (#206).
-                         "MOP_AUTH_CALLOUT")}
+                         "MOP_AUTH_CALLOUT"),
+         # Глагол identity (#167): имя и почта владельца задания из провайдера
+         # личностей сервера -- те же настройки, что у mop-callout; файлы
+         # провайдера -- копией в /etc/nats/identity, не окружением юнита.
+         "mop-bootstrap": ("MOP_AUTH_PROVIDER", "MOP_OPERATORS")}
 
 PINNED = {
     'mop-bootstrap': "[Unit]\nDescription=mop-bootstrap (bootstrap песочниц: играет .mop/bootstrap.yaml проекта при каждом старте папета)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет: всё, что подписчику и прогону нужно знать об\n# установке, приезжает юнитом. MOP_HOME и MOP_USER -- те, что у узлов: их\n# читают задачи bootstrap'а как переменные прогона, и дефолт сервера\n# (его собственный дом) здесь был бы неправдой.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_HOME=/home/mopuser\nEnvironment=MOP_USER=mopuser\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop bootstrap serve\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",

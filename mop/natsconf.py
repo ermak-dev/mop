@@ -25,6 +25,10 @@ import urllib.request
 from . import busnames, config, fsutil
 
 DIR = "/etc/nats"
+# Копия файлов провайдера личностей (#206, #167): файл операторов и
+# переходные пароли. Их читают сервисы сервера под пользователем пула, а
+# secrets/ контроллера ему закрыт; кладёт копию deploy (роль bus).
+IDENTITY_DIR = os.path.join(DIR, "identity")
 BASE = os.path.join(DIR, "base-users.json")
 USERS = os.path.join(DIR, "users.conf")
 # Блок auth callout (#206) -- своим файлом: его смену nats перечитать не
