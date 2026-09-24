@@ -11,10 +11,13 @@ import os
 import secrets
 
 
-def _write(path, data, private):
+def _write(path, data, private, owner=None):
     """Временный файл рядом, fsync, rename. Читатель видит либо прежний файл
     целиком, либо новый целиком: nats-server перечитывает users.conf в любой
-    момент, а обрыв посреди записи кредов оставлял усечённый файл."""
+    момент, а обрыв посреди записи кредов оставлял усечённый файл.
+
+    owner -- (uid, gid) файла, отданный до первого байта (#234): не выходит
+    -- OSError, и на месте остаётся прежний файл, а не чужой."""
     raw = data.encode() if isinstance(data, str) else data
     # Имя с солью, а не `path.tmp`: два писателя одного файла не пишут в
     # один временный, а брошенный после обрыва не мешает следующей записи.
@@ -26,6 +29,10 @@ def _write(path, data, private):
             # 0600 до первого байта и независимо от umask: mode у open
             # umask только урезает.
             os.fchmod(fd, 0o600)
+        if owner is not None:
+            st = os.fstat(fd)
+            if (st.st_uid, st.st_gid) != tuple(owner):
+                os.fchown(fd, *owner)
         with os.fdopen(fd, "wb") as f:
             fd = None
             f.write(raw)
@@ -42,10 +49,10 @@ def _write(path, data, private):
         raise
 
 
-def write_private(path, data):
+def write_private(path, data, owner=None):
     """Файл с секретом: ровно 0600, атомарно. Каталог -- забота вызывающего:
-    у каждого своё правило, каким ему быть."""
-    _write(path, data, private=True)
+    у каждого своё правило, каким ему быть. owner -- как у _write."""
+    _write(path, data, private=True, owner=owner)
 
 
 def write_atomic(path, data):

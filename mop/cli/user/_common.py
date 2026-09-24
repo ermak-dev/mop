@@ -76,6 +76,7 @@ def run(change, path):
     except ValueError as e:
         lib.fail(str(e))
         return 1
-    if not identity.refresh_copy(path):
-        print("the server's services read a copy of the operators file: run mop deploy")
+    why = identity.refresh_copy(path)
+    if why:
+        print(why)
     return 0
