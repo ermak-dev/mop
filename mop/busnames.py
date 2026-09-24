@@ -154,6 +154,7 @@ def service_subscriptions():
 
 # ─── пользователи ────────────────────────────────────────────────────────
 SERVICE = "service"      # машинный пользователь сервисов сервера (#104)
+CALLOUT = "callout"      # сервис auth callout (#206): отвечает NATS, кто входит
 MASTER_PREFIX, PUPPET_PREFIX, NODE_PREFIX = "master-", "puppet-", "node-"
 
 
@@ -174,12 +175,12 @@ def is_puppet(user):
 
 
 def is_machine(user):
-    """Не человек: сервис сервера, папет или узел."""
-    return user == SERVICE or user.startswith((PUPPET_PREFIX, NODE_PREFIX))
+    """Не человек: сервис сервера, callout, папет или узел."""
+    return user in (SERVICE, CALLOUT) or user.startswith((PUPPET_PREFIX, NODE_PREFIX))
 
 
 # Имена ролей на шине: человеку их не выдать (operators.RESERVED).
-RESERVED = (ADMIN, SERVICE)
+RESERVED = (ADMIN, SERVICE, CALLOUT)
 RESERVED_PREFIXES = (MASTER_PREFIX, PUPPET_PREFIX, NODE_PREFIX)
 
 
