@@ -19,7 +19,9 @@ Environment=XDG_RUNTIME_DIR=/run/user/{{ mop_uid }}
 # один (MOP_PUPPET_SEED), и сюда он едет --extra-vars от mop deploy.
 Environment=MOP_PUPPET_SEED={{ MOP_PUPPET_SEED }}
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 -m mop.agent
+# Командлет через лаунчер пакета узла (#172), как `mop bootstrap check` и
+# `mop cluster users`: диспетчер живёт на node.env, .env ему не нужен.
+ExecStart={{ mop_home }}/bin/mop agent
 Restart=always
 RestartSec=5
 
