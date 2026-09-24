@@ -16,21 +16,39 @@
 # Роль не несёт настроек: ни defaults, ни vars. Значения приходят цепочкой
 # окружение > node.env > .env > дефолт (config.py), и второй ярус старшинства
 # здесь сломал бы её молча. Ниже только разбор уже полученных значений.
-- name: Take the bodies' network apart
-  ansible.builtin.set_fact:
-    # Сеть разбираем строкой, а шлюз берём готовым (MOP_PVE_GATEWAY): его
-    # считает config.py, и второе вычисление здесь однажды дало бы другой
-    # адрес — молча, потому что мост встал бы, а тела просто не достучались.
-    pve_net: "{{ MOP_PVE_SUBNET.split('/')[0] }}"
-    pve_cidr: "{{ MOP_PVE_SUBNET.split('/')[1] }}"
-    pve_gw: "{{ MOP_PVE_GATEWAY }}"
-
 - name: Nodes that are their own body need none of this
   ansible.builtin.meta: end_host
   when: mop_driver | default(MOP_DRIVER) != 'pve'
 
 # База VMID -- общий файл: её же спрашивает сборка образа.
 - ansible.builtin.include_tasks: vmid.yml
+
+# Всё остальное про узел -- у драйвера, на управляющей машине и с базой
+# ЭТОГО узла (#158): сеть, шлюз и префикс, маршруты, путь обёртки, ключ,
+# верх диапазона VMID. Второе вычисление здесь однажды дало бы другой
+# адрес — молча, потому что мост встал бы, а тела просто не достучались.
+- name: Ask the driver about this node
+  ansible.builtin.command:
+    argv:
+      - "{{ playbook_dir }}/../bin/mop"
+      - driver
+      - pve-facts
+      - --base
+      - "{{ pve_vmid_min }}"
+  delegate_to: localhost
+  become: no
+  changed_when: false
+  # Чистое чтение: под --check command иначе пропускается, и роль падала бы
+  # на разборе сети, не показав ни одной разницы.
+  check_mode: false
+  register: node_facts
+
+- name: Take the bodies' network apart
+  ansible.builtin.set_fact:
+    pve_facts: "{{ node_facts.stdout | from_json }}"
+    pve_net: "{{ (node_facts.stdout | from_json).network }}"
+    pve_cidr: "{{ (node_facts.stdout | from_json).prefix }}"
+    pve_gw: "{{ (node_facts.stdout | from_json).gateway }}"
 
 # ── сеть тел ─────────────────────────────────────────────────────────
 # Мост без портов: наружу тела ходят NAT'ом через сам узел. Правила NAT
@@ -81,7 +99,7 @@
 - name: The one road to a body's life cycle
   ansible.builtin.template:
     src: mop-pve.j2
-    dest: /usr/local/sbin/mop-pve
+    dest: "{{ pve_facts.wrapper }}"
     mode: "0755"
 
 # Право названо поимённо и ровно одно. `pct` целиком здесь был бы root:
@@ -92,7 +110,7 @@
     mode: "0440"
     validate: "visudo -cf %s"
     content: |
-      {{ MOP_USER }} ALL=(root) NOPASSWD: /usr/local/sbin/mop-pve
+      {{ MOP_USER }} ALL=(root) NOPASSWD: {{ pve_facts.wrapper }}
 
 # ── ключ узла к своим телам ──────────────────────────────────────────
 # Ключ узла, не мастера. Мастер и так ходит ssh на узлы, но его ключ в
@@ -102,13 +120,13 @@
 - name: A keypair of its own for reaching the bodies
   become_user: "{{ MOP_USER }}"
   ansible.builtin.command:
-    cmd: ssh-keygen -t ed25519 -N '' -C mop-body@{{ inventory_hostname }} -f {{ MOP_HOME }}/.ssh/mop-body
-    creates: "{{ MOP_HOME }}/.ssh/mop-body"
+    cmd: ssh-keygen -t ed25519 -N '' -C mop-body@{{ inventory_hostname }} -f {{ pve_facts.ssh_key }}
+    creates: "{{ pve_facts.ssh_key }}"
 
 - name: A known_hosts of its own for them
   become_user: "{{ MOP_USER }}"
   ansible.builtin.file:
-    path: "{{ MOP_HOME }}/.ssh/known_hosts-mop-body"
+    path: "{{ pve_facts.known_hosts }}"
     state: touch
     mode: "0600"
     access_time: preserve
@@ -158,26 +176,8 @@
 
 # Блоки считает драйвер, на управляющей машине и с базой ЭТОГО узла: второе
 # вычисление в jinja разошлось бы с формулой адреса молча, а формула —
-# одна (pve.routes_of, проверена в tests/driver.py).
-- name: Routes to this node's bodies, from the driver
-  ansible.builtin.command:
-    argv:
-      - python3
-      - -c
-      - |
-        import sys
-        sys.path.insert(0, sys.argv[1])
-        from mop.driver import pve
-        print(" ".join(pve.routes_of(sys.argv[2], int(sys.argv[3]))))
-      - "{{ playbook_dir }}/.."
-      - "{{ MOP_PVE_SUBNET }}"
-      - "{{ pve_vmid_min }}"
-  delegate_to: localhost
-  become: no
-  changed_when: false
-  register: pve_route_list
-
+# одна (pve.routes_of, проверена в tests/driver.py); приехали с фактами.
 - name: Name both for the server's play
   ansible.builtin.set_fact:
     pve_lan: "{{ pve_toward_server.stdout.split()[pve_toward_server.stdout.split().index('src') + 1] }}"
-    pve_routes: "{{ pve_route_list.stdout.split() }}"
+    pve_routes: "{{ pve_facts.routes }}"

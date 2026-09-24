@@ -215,7 +215,8 @@ def main():
         path = os.path.join(cli.PACKAGE, group, "__init__.py")
         with open(path) as f:
             doc = f.read()
-        listed = set(re.findall(rf"^  mop {group} ([a-z]+)", doc, re.M))
+        # Глагол бывает и через дефис: `mop driver pve-facts` (#158).
+        listed = set(re.findall(rf"^  mop {group} ([a-z][a-z-]*)", doc, re.M))
         missing = listed - have.get(group, set())
         if missing:
             failed += 1

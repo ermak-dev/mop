@@ -46,7 +46,7 @@
   gather_facts: no
 
   vars:
-    pve: "sudo -n /usr/local/sbin/mop-pve"
+    pve: "sudo -n {{ pve_facts.wrapper }}"
     build_key: "{{ lookup('env', 'HOME') }}/.config/mop/body-build"
 
   tasks:
@@ -64,39 +64,27 @@
         name: pve
         tasks_from: vmid
 
-    # Номер и адрес спрашиваем у драйвера, а не считаем здесь второй раз:
-    # разойдись два вычисления — `ensure` искал бы образ не там, и увидели бы
-    # мы это на первом подъёме папета, а не на сборке.
-    - name: Ask the driver for the image's vmid, name and network
+    # Всё про узел и проект спрашиваем у драйвера, а не считаем здесь второй
+    # раз: разойдись два вычисления — `ensure` искал бы образ не там, и
+    # увидели бы мы это на первом подъёме папета, а не на сборке. Одна
+    # команда на управляющей машине (#158), база -- ЭТОГО узла (#101).
+    - name: Ask the driver about this node
       ansible.builtin.command:
         argv:
-          - python3
-          - -c
-          - |
-            import sys
-            sys.path.insert(0, sys.argv[1])
-            from mop.driver import pve
-            print(pve.template_vmid(sys.argv[2]), pve.template_name(sys.argv[2]),
-                  pve.GATEWAY, pve.PREFIXLEN, pve.template_address(sys.argv[2]))
-          - "{{ playbook_dir }}/.."
-          - "{{ mop_project }}"
-      environment:
-        # База ЭТОГО узла, а не общая настройка установки: номер и адрес
-        # образа обязаны считаться от неё, иначе два гипервизора метят в один
-        # номер и один адрес (#101). Вычисление одно -- драйвер; окружение
-        # лишь говорит ему, про чей узел спрашивают.
-        MOP_PVE_VMID_BASE: "{{ pve_vmid_min }}"
+          - "{{ playbook_dir }}/../bin/mop"
+          - driver
+          - pve-facts
+          - --base
+          - "{{ pve_vmid_min }}"
       delegate_to: localhost
       changed_when: false
-      register: tmpl
+      # Чистое чтение: и под --check факты обязаны приехать.
+      check_mode: false
+      register: node_facts
 
     - name: Name what came back
       ansible.builtin.set_fact:
-        tmpl_vmid: "{{ tmpl.stdout.split()[0] }}"
-        tmpl_name: "{{ tmpl.stdout.split()[1] }}"
-        pve_gw: "{{ tmpl.stdout.split()[2] }}"
-        pve_cidr: "{{ tmpl.stdout.split()[3] }}"
-        tmpl_ip: "{{ tmpl.stdout.split()[4] }}"
+        pve_facts: "{{ node_facts.stdout | from_json }}"
 
     # Что стоит на узле: есть ли образ, осталось ли сборочное тело от
     # оборванного прогона, не стоят ли ещё тела проекта.
@@ -107,40 +95,40 @@
 
     # Номер сборочного тела выбирает драйвер по списку: оборванную сборку
     # продолжаем в её теле, иначе берём свободный номер из диапазона
-    # шаблонов (pve.stage_vmid, проверено в tests/driver.py).
-    - name: Ask the driver where to build
+    # шаблонов (pve.stage_vmid, проверено в tests/driver.py). Список
+    # разбирает он же -- один разбор, а не второй поиском по строкам.
+    - name: Ask the driver about the image and where to build
       ansible.builtin.command:
         argv:
-          - python3
-          - -c
-          - |
-            import sys
-            sys.path.insert(0, sys.argv[1])
-            from mop.driver import pve
-            listing = pve.parse_list(sys.argv[3])
-            v = pve.stage_vmid(sys.argv[2], listing)
-            print(v, pve.stage_name(sys.argv[2]), pve.address_of_vmid(v))
-          - "{{ playbook_dir }}/.."
+          - "{{ playbook_dir }}/../bin/mop"
+          - driver
+          - pve-facts
+          - --base
+          - "{{ pve_vmid_min }}"
+          - --project
           - "{{ mop_project }}"
+          - --listing
           - "{{ standing.stdout }}"
-      environment:
-        # База ЭТОГО узла, а не общая настройка установки: номер и адрес
-        # образа обязаны считаться от неё, иначе два гипервизора метят в один
-        # номер и один адрес (#101). Вычисление одно -- драйвер; окружение
-        # лишь говорит ему, про чей узел спрашивают.
-        MOP_PVE_VMID_BASE: "{{ pve_vmid_min }}"
       delegate_to: localhost
       changed_when: false
-      register: stage
+      check_mode: false
+      register: build_facts
 
-    - name: Name the build body
+    - name: Name the image and the build body
+      vars:
+        f: "{{ build_facts.stdout | from_json }}"
       ansible.builtin.set_fact:
-        stage_vmid: "{{ stage.stdout.split()[0] }}"
-        stage_name: "{{ stage.stdout.split()[1] }}"
-        stage_ip: "{{ stage.stdout.split()[2] }}"
-        have_image: "{{ standing.stdout_lines | select('search', ' ' ~ tmpl_name ~ ' ') | list | length > 0 }}"
-        have_stage: "{{ standing.stdout_lines | select('search', ' ' ~ stage.stdout.split()[1] ~ ' ') | list | length > 0 }}"
-        project_bodies: "{{ standing.stdout_lines | map('split') | map(attribute=1) | select('match', '^pu-' ~ (mop_project | regex_escape) ~ '-[0-9]+$') | list }}"
+        pve_gw: "{{ f.gateway }}"
+        pve_cidr: "{{ f.prefix }}"
+        tmpl_vmid: "{{ f.image.vmid }}"
+        tmpl_name: "{{ f.image.name }}"
+        tmpl_ip: "{{ f.image.address }}"
+        stage_vmid: "{{ f.stage.vmid }}"
+        stage_name: "{{ f.stage.name }}"
+        stage_ip: "{{ f.stage.address }}"
+        have_image: "{{ f.image.present }}"
+        have_stage: "{{ f.stage.present }}"
+        project_bodies: "{{ f.bodies }}"
 
     # Образ с живым клоном не заменить, поэтому тел проекта на узле быть не
     # должно. Их снимает `mop driver build` до плейбука (останов джобов и
@@ -197,7 +185,7 @@
         src: "{{ item.path }}"
       register: keyfiles
       loop:
-        - {path: "{{ MOP_HOME }}/.ssh/mop-body.pub", where: node}
+        - {path: "{{ pve_facts.ssh_key }}.pub", where: node}
         - {path: "{{ build_key }}.pub", where: control}
       loop_control:
         label: "{{ item.where }}"
@@ -285,7 +273,7 @@
               {{ pve }} create {{ stage_vmid }} {{ stage_name }} {{ MOP_PVE_TEMPLATE }}
               {{ MOP_PVE_STORAGE }} {{ body_cores }} {{ body_mem }}
               {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ stage_ip }}/{{ pve_cidr }}
-              {{ pve_gw }} {{ MOP_HOME }}/.ssh/mop-body.pub
+              {{ pve_gw }} {{ pve_facts.ssh_key }}.pub
               < {{ body_pw.path | quote }}
           changed_when: true
       always:
@@ -612,7 +600,7 @@
   gather_facts: no
 
   vars:
-    pve: "sudo -n /usr/local/sbin/mop-pve"
+    pve: "sudo -n {{ pve_facts.wrapper }}"
 
   tasks:
     - name: Nothing to seal where bodies are not containers
