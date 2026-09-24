@@ -59,6 +59,17 @@
     mode: "0600"
     force: no
 
+# Перезагружать ли nats, решает сам файл: контрольная сумма до команды и
+# после (#199). Не вывод: команда на успехе молчит (#182), и чтение
+# «, changed» из её вывода молча оставило новый узел без пользователя шины --
+# агент получил «Authorization Violation», а nats не перечитывал файл сутки.
+- name: Users file of the bus, before
+  become: yes
+  ansible.builtin.stat:
+    path: /etc/nats/users.conf
+    get_checksum: yes
+  register: nats_users_before
+
 - name: Users file of the bus, written by the server
   become: yes
   become_user: "{{ MOP_USER }}"
@@ -66,6 +77,15 @@
   environment:
     MOP_SERVER_LAN: "{{ MOP_SERVER_LAN }}"
     MOP_NATS_PORT: "{{ MOP_NATS_PORT }}"
-  register: mop_users
-  changed_when: "', changed' in mop_users.stdout"
+  changed_when: false
+
+- name: Users file of the bus, after
+  become: yes
+  ansible.builtin.stat:
+    path: /etc/nats/users.conf
+    get_checksum: yes
+  register: nats_users_after
+  changed_when: >-
+    nats_users_after.stat.checksum | default('') !=
+    nats_users_before.stat.checksum | default('')
   notify: reload nats
