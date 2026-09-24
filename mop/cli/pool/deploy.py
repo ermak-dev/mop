@@ -1,4 +1,4 @@
-"""deploy: mop deploy
+"""deploy: mop deploy [--check]
 
 The whole installation in one run: one playbook, site.yml, so there is one
 ansible process and one PLAY RECAP — a line per machine over every layer.
@@ -9,6 +9,11 @@ Machines, not projects. Which projects the pool serves is the registry
 (~/.config/mop/projects) and `mop project add|delete`; deploy reads it and
 takes no arguments (#79). While it accepted an origin, registering a project
 was a side effect of a full run, and there was no way to take one off at all.
+
+--check runs the same playbook in ansible's check mode with --diff: nothing
+on the machines changes, and the output is the difference a real run would
+make. Nothing after the playbook runs: collecting the server credentials
+writes files, and the roster check is not the question a dry run answers.
 """
 import os
 import shutil
@@ -99,6 +104,9 @@ def main(argv):
     # Полный REQUIRED спрашивает только deploy: остальным хватает адреса
     # сервера, а MOP_GIT_HOST читают одни плейбуки.
     config.require()
+    dry = argv == ["--check"]
+    if dry:
+        argv = []
     if refused_target(argv):
         lib.fail("run targets are gone: mop deploy takes no arguments")
         return 1
@@ -144,7 +152,11 @@ def main(argv):
 
     lib.section("ansible: site.yml")
     rc = lib.play(SITE, projects.names(origins, legacy), manifests(origins),
-                  projects.git_hosts(origins, config.get("MOP_GIT_HOST")))
+                  projects.git_hosts(origins, config.get("MOP_GIT_HOST")), check=dry)
+    if dry:
+        # Всё ниже пишет (creds.collect) или отвечает на другой вопрос
+        # (ростер): прогон без изменений кончается на плейбуке (#177).
+        return rc
     if rc and rc != lib.UNREACHABLE:
         # Сборка кредов и проверка ростера не идут после красного прогона, и
         # это сказано, а не проглочено.
