@@ -10,11 +10,38 @@
 Это не фреймворк и не прогон всего проекта: остальное по-прежнему добывается
 на живом пуле.
 """
+import json
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+# ── #152: слепок спеки ────────────────────────────────────────────────────────
+# Спека зарегистрированного папета живёт в Nomad, и любое её расхождение с
+# тем, что соберёт следующая версия кода, видно только по симптому:
+# spec_is_stale метит весь пул, doctor перерегистрирует каждого папета на обеих
+# установках. Поэтому перенос job_spec между модулями сверяется со слепком
+# байт в байт, а не «по смыслу».
+#
+# Всё, что спека читает из установки, прибито окружением ДО импорта mop
+# (окружение старше .env и node.env, см. mop/config.py): иначе слепок совпадал
+# бы только на машине, где его сняли. Время — единственный недетерминизм
+# (PU_CONTINUE) — заморожено тем же способом.
+PINNED = {
+    "MOP_HOME": "/home/pool",
+    "MOP_USER": "pool",
+    "MOP_PUPPET_MEM_MB": "4096",
+    "MOP_MEM_MB": "8192",
+    "MOP_PUPPET_SEED": ".env*,.providers",
+    "MOP_PUPPET_PATH": "{HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+    "MOP_POOL_DC": "pool",
+    "MOP_DEFAULT_LLM": "claude",
+}
+os.environ.update(PINNED)
+time.time = lambda: 1_790_000_000.0
+SNAPSHOT = os.path.join(os.path.dirname(os.path.realpath(__file__)), "spec_snapshot.json")
 
 from mop import puppets  # noqa: E402
 
@@ -106,9 +133,55 @@ STALE = [
 ]
 
 
-def main():
+# (имя, origin, профиль, cont): оба профиля (без ключа и с ключом и картой
+# моделей), профиль по умолчанию, проект с точкой в имени (экранирование в
+# ограничении) и разовый подъём с историей. Драйвера среди входов нет: спека
+# от него не зависит — внешний врапер один на все тела (docs/DRIVER.md).
+SPEC_INPUTS = [
+    ("pu-mop-1", "git@git.example.dev:someone/mop.git", "claude", False),
+    ("pu-mop-2", "git@git.example.dev:someone/mop.git", None, False),
+    ("pu-rugent-3", "https://git.example.dev/rugent/rugent.git", "glm", False),
+    ("pu-my.proj-1", "git@git.example.dev:someone/my.proj.git", "glm", True),
+]
+
+
+def render(name, origin, profile, cont):
+    """Спека ровно так, как её увидит Nomad: JSON, в порядке ключей."""
+    return json.dumps(puppets.job_spec(name, origin, profile, cont=cont),
+                      ensure_ascii=False, indent=1)
+
+
+def check_snapshot():
+    """Спека для закреплённых входов совпадает со слепком байт в байт, а
+    спека со слепка не читается устаревшей. STATUS: FIXED — see #152"""
+    with open(SNAPSHOT) as f:
+        want = json.load(f)
     bad = 0
-    cases = 0
+    for inputs in SPEC_INPUTS:
+        key = " ".join(str(x) for x in inputs)
+        got = render(*inputs)
+        if got != want.get(key):
+            bad += 1
+            print(f"FAILED  rendered spec for {key} differs from the snapshot")
+        elif puppets.spec_is_stale(json.loads(want[key])["Job"]):
+            bad += 1
+            print(f"FAILED  the snapshot spec for {key} reads as stale")
+    if set(want) != {" ".join(str(x) for x in i) for i in SPEC_INPUTS}:
+        bad += 1
+        print("FAILED  the snapshot and SPEC_INPUTS disagree on the cases")
+    return bad, len(SPEC_INPUTS) + 1
+
+
+def main():
+    if sys.argv[1:] == ["--snapshot"]:
+        # Снять слепок заново: только осознанно, когда спека меняется нарочно
+        # и все папеты всё равно перерегистрируются.
+        with open(SNAPSHOT, "w") as f:
+            json.dump({" ".join(str(x) for x in i): render(*i) for i in SPEC_INPUTS},
+                      f, ensure_ascii=False, indent=1)
+            f.write("\n")
+        return 0
+    bad, cases = check_snapshot()
 
     for what, spec, want in STALE:
         cases += 1
