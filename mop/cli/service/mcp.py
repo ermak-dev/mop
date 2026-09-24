@@ -34,7 +34,9 @@ BUS.md, устройство сервера — MCP.md.
 import functools
 import inspect
 import os
+import re
 import subprocess
+import sys
 import threading
 from typing import Annotated, Optional
 
@@ -88,9 +90,28 @@ def is_master():
 
 
 MASTER = is_master()
-# Свой адрес для вестей от агентов. Уникален на процесс: два терминала,
-# открытые в одном проекте, иначе разбирали бы вести друг друга.
-MASTER_ID = f"{os.uname().nodename}-{os.getpid()}"
+
+
+def master_id(user):
+    """Свой адрес для вестей от агентов и отчётов папетов. Уникален на
+    процесс: два терминала, открытые в одном проекте, иначе разбирали бы
+    вести друг друга.
+
+    Логин владельца -- первым токеном (#213): человеку можно слушать только
+    инбоксы под своим логином. Без кредов шины -- прежний <хост>-<pid>:
+    подписываться всё равно нечем."""
+    local = f"{os.uname().nodename}-{os.getpid()}"
+    return busnames.master_address(user, local) if user else local
+
+
+def _bus_user():
+    try:
+        return bus.config().get("user") or None
+    except Exception:
+        return None
+
+
+MASTER_ID = master_id(_bus_user())
 MY_INBOX = bus.inbox(MASTER_ID)
 
 
@@ -405,6 +426,37 @@ def command_tools():
 command_tools()
 
 
+REFUSED = re.compile(r'permissions violation for subscription to "([^"]+)"')
+_refused_told = set()
+
+
+def refused_inbox(error, subjects):
+    """Текст асинхронной ошибки шины -> субъект из subjects, в подписке на
+    который шина отказала, либо None."""
+    m = REFUSED.search(error or "")
+    return m.group(1) if m and m.group(1) in subjects else None
+
+
+def on_bus_error(error):
+    """Шина отказала в подписке на свой инбокс (#213) -- громко: соединение
+    при этом живо, а вести и отчёты папетов молча не доходят. Строка -- в
+    сессию и в stderr MCP-сервера: если сессия push не примет, след остаётся
+    в логе. Один раз на субъект."""
+    subj = refused_inbox(error, (MY_INBOX, bus.inbox(bus.ALL_MASTERS)))
+    if subj is None or subj in _refused_told:
+        return
+    _refused_told.add(subj)
+    line = (f"mop: the bus refused this master's inbox {subj} -- notes from agents "
+            f"and puppet reports will not arrive; restart the mop MCP server (/mcp)")
+    print(line, file=sys.stderr, flush=True)
+    sock = channel.master_socket()
+    if sock:
+        try:
+            session.send(sock, line, priority="now", from_name="mop")
+        except Exception:
+            pass
+
+
 def watch_inbox():
     """Подписки мастера: свой инбокс и общий инбокс проекта.
 
@@ -424,6 +476,7 @@ def watch_inbox():
     вместо доставленного в никуда."""
     if not MASTER or not channel.master_socket():
         return
+    bus.ERROR_LISTENERS.append(on_bus_error)
     try:
         bus.subscribe(MY_INBOX, on_inbox)
         bus.subscribe(bus.inbox(bus.ALL_MASTERS), on_inbox)
