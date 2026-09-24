@@ -10,7 +10,8 @@ import os
 import time
 
 from . import bus, config, driver, lease, llm, spec
-from .state import action_for, failing_row, silent, spec_action, verdict
+from .domain import Owner
+from .state import PuppetRow, action_for, failing_row, silent, spec_action, verdict
 
 PROJECT = config.PROJECT
 
@@ -221,8 +222,8 @@ def _judge(item, state):
 def owner_of(facts, now):
     """Кто ведёт задание папета (#161), если аренда живая; иначе None."""
     clone = ((facts or {}).get("clone")) or None
-    owner = (clone or {}).get("owner")
-    return owner["user"] if lease.live(owner, clone, now) else None
+    owner = Owner.from_dict((clone or {}).get("owner"))
+    return owner.user if lease.live(owner, clone, now) else None
 
 
 def rows_from(items):
@@ -240,17 +241,17 @@ def _row(item, disk_kb=None):
     if failing and not item["error"]:
         status, state = failing
         kind = "failing"
-    return {
-        "name": job["ID"],
-        "node": alloc["NodeName"] if alloc else "-",
-        "alloc_status": status,
-        "state": state,
-        "kind": kind,
-        "owner": item.get("owner") or "-",
-        "llm": llm.of_meta(meta),
-        "origin": meta.get("origin", "?"),
-        "disk_kb": disk_kb,
-    }
+    return PuppetRow(
+        name=job["ID"],
+        node=alloc["NodeName"] if alloc else "-",
+        alloc_status=status,
+        state=state,
+        kind=kind,
+        owner=item.get("owner") or "-",
+        llm=llm.of_meta(meta),
+        origin=meta.get("origin", "?"),
+        disk_kb=disk_kb,
+    )
 
 
 def puppet_rows_stream():
@@ -295,18 +296,17 @@ def puppet_rows_stream():
 
 
 def puppet_rows(sizes=True):
-    """Папета как данные: [{name, node, alloc_status, state, kind, llm,
-    origin, disk_kb}]; kind — вид вердикта (mop/state.py), state — его
-    строка. disk_kb — клон плюс target, обмеряется спросом; None — du не
-    доехал, это прочерк, а не ноль.
+    """Папета как данные: [PuppetRow] (#204); kind — вид вердикта
+    (mop/state.py), state — его строка. disk_kb — клон плюс target,
+    обмеряется спросом; None — du не доехал, это прочерк, а не ноль.
 
     sizes=False — без обмера вовсе: дашборд (mop/web.py) опрашивает
     состояния в разы чаще, чем место, и ждать du на каждом круге значило бы
     показывать состояние с опозданием на обмер. Место он берёт отдельно,
     puppet_sizes, своим расписанием."""
     if not sizes:
-        return sorted(rows_from(roster()), key=lambda r: r["name"])
-    return sorted(puppet_rows_stream(), key=lambda r: r["name"])
+        return sorted(rows_from(roster()), key=lambda r: r.name)
+    return sorted(puppet_rows_stream(), key=lambda r: r.name)
 
 
 def puppet_sizes(rows, timeout=45):
@@ -316,8 +316,8 @@ def puppet_sizes(rows, timeout=45):
     здесь не главное, а состояние уже показано."""
     asked = {}
     for r in rows:
-        if r["alloc_status"] == "running" and r["node"] != "-":
-            asked[r["name"]] = (r["node"], {"verb": "sizes", "names": [r["name"]]})
+        if r.alloc_status == "running" and r.node != "-":
+            asked[r.name] = (r.node, {"verb": "sizes", "names": [r.name]})
     out = {}
     try:
         for name, answer in bus.request_stream(asked, timeout=timeout):

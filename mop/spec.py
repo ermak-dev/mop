@@ -18,6 +18,7 @@ import re
 import time
 
 from . import config, driver, llm, nomad
+from .domain import Project
 
 # Значения этой установки — .env поверх дефолтов; см. mop/config.py.
 MEM = config.num("MOP_PUPPET_MEM_MB")   # бюджет папета, МБ: резерв планировщика и мера слотов
@@ -31,8 +32,9 @@ USER = config.get("MOP_USER")               # под кем идут задач�
 ASKS_FILE = os.path.expanduser("~/.config/mop/project-asks.json")
 
 
-def project_asks(project, path=None):
-    """Что проект просит в своём `.mop`. -> {настройка: значение}.
+def read_asks(path=None):
+    """Просьбы всех проектов. -> {проект: {настройка: значение}}; в проект
+    их переводит domain.Project.of (#204).
 
     Нет файла или проекта в нём -- пусто, и папет получает значения
     установки: так живёт любой проект до первого прогона deploy после его
@@ -40,10 +42,9 @@ def project_asks(project, path=None):
     молчаливый откат на установку спрятал бы поломку прогона."""
     try:
         with open(path or ASKS_FILE) as f:
-            asks = json.load(f)
+            return json.load(f)
     except FileNotFoundError:
         return {}
-    return dict(asks.get(project) or {})
 
 
 def memory(asks, ceiling, budget):
@@ -457,11 +458,11 @@ def job_spec(name, origin, profile=None, cont=False):
         raise RuntimeError(f"{name}: no LLM profile {profile}; available: "
                            f"{', '.join(llm.profiles())} (mop llm)")
     meta = {"origin": origin, "llm": profile}
-    project = driver.project_of(origin)
+    project = Project.of(origin, asks=read_asks())
     try:
-        reserve, ceiling = memory(project_asks(project), MEM_MAX, MEM)
+        reserve, ceiling = memory(project.asks, MEM_MAX, MEM)
     except ValueError as e:
-        raise RuntimeError(f"{name}: {e} ({project})")
+        raise RuntimeError(f"{name}: {e} ({project.name})")
     env = task_env(name, origin, profile, prof, cont, ceiling)
     meta[SPEC_META] = template_version(env)
     return {"Job": {
@@ -470,7 +471,7 @@ def job_spec(name, origin, profile=None, cont=False):
         "Datacenters": [nomad.POOL_DC],
         "Type": "service",
         "Meta": meta,
-        "Constraints": [project_constraint(project), memory_constraint(ceiling)],
+        "Constraints": [project_constraint(project.name), memory_constraint(ceiling)],
         "TaskGroups": [{
             "Name": GROUP,
             "Count": 1,

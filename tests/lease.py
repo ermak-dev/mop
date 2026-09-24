@@ -21,6 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop import lease  # noqa: E402
+from mop.domain import Owner  # noqa: E402
 
 NOW = 1_000_000
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
@@ -30,7 +31,7 @@ AHEAD = dict(CLEAN, ahead=1)
 
 
 def rec(user, age):
-    return {"user": user, "at": NOW - age}
+    return Owner(user, NOW - age)
 
 
 def main():
@@ -47,9 +48,10 @@ def main():
         return lease.verdict(owner, me, clone, NOW, force=force)[0]
 
     # Запись: туда и обратно, мусор -- не владелец.
-    check("render/parse", lease.parse(lease.render("anton", NOW)), {"user": "anton", "at": NOW})
+    # Строка файла -- Owner.render/parse (#204).
+    check("render/parse", Owner.parse(Owner("anton", NOW).render()), Owner("anton", NOW))
     for junk in ("", "anton", "anton\tnot-a-time", "\t123", None):
-        check(f"parse junk {junk!r}", lease.parse(junk), None)
+        check(f"parse junk {junk!r}", Owner.parse(junk), None)
 
     # Отправитель не назвался (папет соседу) -- аренда не трогается.
     check("anonymous sender passes", act(rec("olga", 5), None, ON_BRANCH), "pass")

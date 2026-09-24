@@ -8,7 +8,7 @@
 """
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,34 @@ class State:
 
     def __str__(self):
         return _SHOW[self.kind](self.detail, self.branch)
+
+
+@dataclass(frozen=True)
+class PuppetRow:
+    """Строка ростера мастера (#204): то, что читают `mop list`, MCP, gc и
+    дашборд. state -- строка вердикта для показа, kind -- его вид, на нём
+    решения; owner -- логин с живой арендой или прочерк; disk_kb -- клон
+    плюс target, None -- обмер не доехал (прочерк, а не ноль).
+
+    Порядок полей -- порядок ключей прежнего словаря: to_dict уходит в
+    снимок дашборда, и страница читает его по имени."""
+    name: str
+    node: str
+    alloc_status: str
+    state: str
+    kind: str
+    owner: str
+    llm: str
+    origin: str
+    disk_kb: int = None
+
+    def to_dict(self):
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d):
+        """Незнакомый ключ -- TypeError: молча лишнее поле и было болезнью."""
+        return cls(**d)
 
 
 def _tail(head, sep, tail):

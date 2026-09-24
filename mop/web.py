@@ -16,6 +16,7 @@ inode, расход токенов — разбор транскриптов в 
 
 Модуль возвращает данные и ничего не печатает; HTTP живёт в bin/web.
 """
+import dataclasses
 import threading
 import time
 from datetime import datetime
@@ -42,9 +43,9 @@ def classify(row):
 
     Болен тот, кому doctor назначает лечение: корзина спрашивает его самого
     (state.action_for), а не держит копию списка префиксов (#145)."""
-    if row["alloc_status"] != "running":
+    if row.alloc_status != "running":
         return "down"
-    kind = row.get("kind")
+    kind = row.kind
     if kind == "silent":
         return "silent"
     if state.is_free(kind):
@@ -64,19 +65,24 @@ def counts(rows):
 def projects(rows):
     """Строки по проектам: [{name, puppets, counts}], проекты и папеты по имени.
     Корзина кладётся в строку (`kind`) поверх вида вердикта, чтобы страница
-    красила по ней: самой странице вид не нужен, и разбирать она не должна."""
+    красила по ней: самой странице вид не нужен, и разбирать она не должна.
+    Здесь строка ростера и становится JSON страницы (#204): to_dict -- одно
+    место на весь снимок."""
     by = {}
     for r in rows:
-        origin = r.get("origin") or "?"
+        origin = r.origin or "?"
         project = puppets.project_of(origin) if origin != "?" else "?"
-        by.setdefault(project, []).append({**r, "kind": classify(r)})
-    return [{"name": s, "puppets": sorted(ps, key=lambda r: r["name"]),
+        # Счётчик проекта считается уже по корзине в kind, как и до #204: у
+        # больного корзина sick, а classify по ней отвечает busy. Это
+        # прежнее поведение, а не правка этого рефакторинга.
+        by.setdefault(project, []).append(dataclasses.replace(r, kind=classify(r)))
+    return [{"name": s, "puppets": [r.to_dict() for r in sorted(ps, key=lambda r: r.name)],
              "counts": counts(ps)} for s, ps in sorted(by.items())]
 
 
 def with_sizes(rows, sizes):
     """Обмер вливается в строки по имени; кого не обмерили — None."""
-    return [{**r, "disk_kb": sizes.get(r["name"])} for r in rows]
+    return [dataclasses.replace(r, disk_kb=sizes.get(r.name)) for r in rows]
 
 
 def push(journal, entry, cap=EVENTS_CAP):

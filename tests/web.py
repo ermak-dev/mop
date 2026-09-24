@@ -16,16 +16,16 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop import web  # noqa: E402
-from mop.state import State, silent  # noqa: E402
+from mop.state import PuppetRow, State, silent  # noqa: E402
 
 FREE = State("free", branch="master")
 
 
 def row(name, origin, state=FREE, alloc="running", node="mate"):
     """Строка puppet_rows: вердикт State, либо None там, где спрашивать некого."""
-    return {"name": name, "node": node, "alloc_status": alloc,
-            "state": str(state) if state else "-", "kind": state and state.kind,
-            "llm": "claude", "origin": origin, "disk_kb": None}
+    return PuppetRow(name=name, node=node, alloc_status=alloc,
+                     state=str(state) if state else "-", kind=state and state.kind,
+                     owner="-", llm="claude", origin=origin, disk_kb=None)
 
 
 MOP = "git@git.ermak.dev:ermak/mop.git"
@@ -71,7 +71,7 @@ def check_classify():
         got = web.classify(r)
         if got != want:
             failed += 1
-            print(f"FAIL classify({r['name']}: {r['state']!r}/{r['alloc_status']}): "
+            print(f"FAIL classify({r.name}: {r.state!r}/{r.alloc_status}): "
                   f"{got} != {want}")
     return failed
 
@@ -111,12 +111,12 @@ def check_sizes():
     не обмерили — прочерк (None), а не ноль и не потеря строки."""
     failed = 0
     got = web.with_sizes(ROWS[:2], {"pu-mop-1": 2048})
-    kb = {r["name"]: r["disk_kb"] for r in got}
+    kb = {r.name: r.disk_kb for r in got}
     if kb != {"pu-rugent-2": None, "pu-mop-1": 2048}:
         failed += 1
         print(f"FAIL with_sizes: {kb}")
     # Исходные строки не трогаем: сборщик держит их между поездами.
-    if ROWS[1]["disk_kb"] is not None:
+    if ROWS[1].disk_kb is not None:
         failed += 1
         print("FAIL with_sizes mutated its input")
     return failed

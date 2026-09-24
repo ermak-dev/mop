@@ -16,7 +16,7 @@ def main(argv):
     limit = config.num("MOP_GC_FREE_MIN_GB")
     cap = config.num("MOP_GC_MAX_PER_RUN")
     rows = puppets.puppet_rows()
-    nodes = sorted({r["node"] for r in rows if r["node"] != "-"})
+    nodes = sorted({r.node for r in rows if r.node != "-"})
     disks = bus.request_many({n: {"verb": "disk"} for n in nodes})
 
     # Давление и кандидаты: узлы от самого тесного, внутри узла — от самого
@@ -31,14 +31,12 @@ def main(argv):
             continue
         if d["free_gb"] >= limit:
             continue
-        cands = [r for r in rows
-                 if r["node"] == n and state.is_free(r["kind"])]
+        cands = [r for r in rows if r.node == n and state.is_free(r.kind)]
         if not cands:
             print(f"  {n}: {d['free_gb']} GB free < {limit}, "
                   f"but no free puppets")
             continue
-        names = [r["name"] for r in
-                 sorted(cands, key=lambda r: -(r.get("disk_kb") or 0))]
+        names = [r.name for r in sorted(cands, key=lambda r: -(r.disk_kb or 0))]
         plan.append((d["free_gb"], n, names))
     if not plan:
         print(f"no pressure: every node with puppets has at least {limit} GB free")

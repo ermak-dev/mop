@@ -465,13 +465,18 @@ def check_project_asks_197():
     """Просьбы проектов на сервере: файл, который кладёт роль cluster из
     манифестов `mop deploy`. Нет файла или нет проекта в нём -- значения
     установки, без падения: это любой проект до первого прогона.
+    Просьбы проекта -- Project.of над таблицей read_asks (#204).
     STATUS: FIXED — see #197"""
     import tempfile
+    from mop.domain import Project
     bad = cases = 0
+
+    def project_asks(project, path):
+        return Project.of(f"git@h:g/{project}.git", asks=spec.read_asks(path)).asks
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "project-asks.json")
         cases += 1
-        if spec.project_asks("mop", path) != {}:
+        if project_asks("mop", path) != {}:
             bad += 1
             print("FAILED  project_asks without the file: wanted {}")
         with open(path, "w") as f:
@@ -479,7 +484,7 @@ def check_project_asks_197():
         for project, want in (("mop", {"MOP_MEM_MB": "6144", "MOP_CORES": "4"}),
                               ("rugent", {})):
             cases += 1
-            got = spec.project_asks(project, path)
+            got = project_asks(project, path)
             if got != want:
                 bad += 1
                 print(f"FAILED  project_asks({project!r}): {got}, wanted {want}")

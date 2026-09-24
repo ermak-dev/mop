@@ -40,7 +40,6 @@ if __name__ == "__main__":
 
 import asyncio  # noqa: E402
 import base64
-import collections
 import json
 import os
 import shlex
@@ -48,6 +47,7 @@ import socket
 import time
 
 from . import bus, busnames, driver, fsutil, lease, service, usage
+from .domain import Owner, Verb
 from .driver import clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
@@ -217,12 +217,14 @@ async def clone_facts(name):
         dirty, ahead = int(kv.get("dirty") or 0), int(kv.get("ahead") or 0)
     except ValueError:
         return None
+    owner = Owner.parse(kv.get("owner"))
     return {"cur": kv.get("cur") or "(detached)",
             "def": (kv.get("def") or "").rsplit("/", 1)[-1] or None,
             "origin": kv.get("origin") or None,
             "dirty": dirty, "ahead": ahead,
             # Кто ведёт задание (#161): сырая запись, живость считает мастер.
-            "owner": lease.parse(kv.get("owner"))}
+            # По шине -- словарём (#204), обратно его читает Owner.from_dict.
+            "owner": owner and owner.to_dict()}
 
 
 async def du_kb(name):
@@ -373,14 +375,14 @@ async def _claim(name, req):
     if not me:
         return None, None, None
     clone = await clone_facts(name)
-    owner = (clone or {}).get("owner")
+    owner = Owner.from_dict((clone or {}).get("owner"))
     act, note = lease.verdict(owner, me, clone, time.time(), bool(req.get("force")))
     if act == "refuse":
         return f"{name}: {note}", None, None
     if act != "take" or clone is None:
         return None, None, note
     path = f"{clone_dir(name)}/{lease.FILE}"
-    mine = lease.render(me, time.time())
+    mine = Owner(me, int(time.time())).render()
     out, code = await bsh(name, f"printf %s {shlex.quote(mine)} > {shlex.quote(path)}")
     # Таймаут -- не записано (#171): иначе «владелец есть», а файла нет.
     if code != 0:
@@ -401,7 +403,7 @@ async def _unclaim(name, undo):
     Чужая запись -- не наш откат: оставляем её и ничего не говорим. Зовут под
     _owner_locks, так что между сравнением и записью чужого claim не бывает."""
     path, owner, mine = undo
-    body = lease.render(owner["user"], owner["at"]) if owner else ""
+    body = owner.render() if owner else ""
     write = (f"printf %s {shlex.quote(body)} > {shlex.quote(path)}"
              if body else f"rm -f {shlex.quote(path)}")
     # $(cat) срезает конечный перевод строки -- сравниваем без него.
@@ -716,9 +718,9 @@ async def v_usage(_conn, req):
 # вовсе.
 #
 # named -- глагол называет конкретного папета, и проект запроса обязан сойтись
-# с настоящим проектом папета.
+# с настоящим проектом папета. Verb -- общий с сервисом кластера (#204);
+# acting у агента не бывает.
 PUBLIC, MASTER, NODE = "public", "master", "node"
-Verb = collections.namedtuple("Verb", "fn scope named")
 VERBS = {
     "ping":   Verb(v_ping,   PUBLIC, False),
     "local":  Verb(v_local,  PUBLIC, False),
