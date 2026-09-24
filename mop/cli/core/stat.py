@@ -107,7 +107,8 @@ def main(argv):
 
     if len(failed) == len(nodes):
         # Ни одного ответа — график из прочерков был бы ложью про пустой пул.
-        return "no node answered:\n  " + "\n  ".join(failed)
+        # Отказ -- исключением, как у прочих командлетов (#146, #163).
+        raise RuntimeError("no node answered:\n  " + "\n  ".join(failed))
     project = lib.in_project()
     who = f"project {project}" if project else "whole pool"
     print(f"tokens per day, {who}, last {days} days: "

@@ -300,6 +300,7 @@ def main():
 
     failed += check_mcp_declarations()
     failed += check_refusals()
+    failed += check_refusals_163()
     failed += check_output_rules()
     failed += check_empty_llm()
     failed += check_deploy_check()
@@ -426,6 +427,106 @@ def check_mcp_declarations():
             except ValueError as e:
                 failed += 1
                 print(f"FAIL {os.path.relpath(path)}: {e}")
+    return failed
+
+
+def check_refusals_163():
+    """#163: отказ сервиса кластера на pool и nodes читался пустым списком.
+
+    HYPOTHESIS: puppets.pool() и nodes.rows() делали
+    `bus.ask_cluster(...).get("nodes") or []`: нет прав или Nomad лежит --
+    `mop node` рисовал пустую таблицу, ростер пула -- пул без узлов, а всё,
+    что шло через ready_nodes (stat, disk, sweep, раздача ключей), работало
+    по пустому множеству. stat отдавал отказ из main строкой.
+    SOLUTION: оба читателя -- через bus.call_cluster (Refused с текстом
+    сервиса), stat бросает тот же текст; диспетчер делает из этого stderr и
+    ненулевой выход, stdout пуст. Узел с кривым драйвером (#175) -- строка
+    с ошибкой, а не отказ списка: это другой случай.
+    STATUS: FIXED — see #163"""
+    import contextlib
+    import importlib
+    import io
+    from mop import bus, puppets
+
+    failed = 0
+    reason = "no rights for nodes: project mop"
+
+    def run(fn, argv=()):
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                cli.run(fn, list(argv))
+            except SystemExit as e:
+                code = e.code
+        return out.getvalue(), err.getvalue(), code
+
+    def refusal(what, got, text):
+        nonlocal failed
+        out, err, code = got
+        if not isinstance(code, int) or code == 0 or out or err != text + "\n":
+            failed += 1
+            print(f"FAIL {what}: stdout {out!r}, stderr {err!r}, exit {code!r}")
+
+    # Живой шине сюда хода нет: и соединение, и адрес -- заглушки.
+    async def no_bus(*a, **k):
+        raise AssertionError("a check reached the live bus")
+
+    def no_connect(*a, **k):
+        raise AssertionError("a check reached the live bus")
+    keep = (bus.ask_cluster, bus.request_many, bus.connect, bus.nats.connect,
+            puppets.ready_nodes, os.environ.get("MOP_SERVER_LAN"))
+    try:
+        bus.connect, bus.nats.connect = no_connect, no_bus
+        os.environ["MOP_SERVER_LAN"] = "192.0.2.1"
+        node = importlib.import_module("mop.cli.node")
+        stat = importlib.import_module("mop.cli.core.stat")
+
+        bus.ask_cluster = lambda verb, **kw: {"error": reason}
+        refusal("mop node on a refusal", run(node.main), reason)
+        for fn in (puppets.pool, puppets.ready_nodes):
+            try:
+                got = fn()
+                failed += 1
+                print(f"FAIL {fn.__name__} read a refusal as {got!r}")
+            except bus.Refused as e:
+                if str(e) != reason:
+                    failed += 1
+                    print(f"FAIL {fn.__name__} lost the reason: {e!r}")
+        refusal("mop stat on a pool refusal", run(stat.main), reason)
+        # Подвал `mop list`: причина видна, а не пустой пул.
+        if lib.pool_lines() != [f"  {reason}"]:
+            failed += 1
+            print(f"FAIL pool_lines on a refusal: {lib.pool_lines()!r}")
+
+        # stat: ни один узел не ответил -- тот же текст, что раньше, но
+        # отказом: stderr, ненулевой выход, stdout пуст.
+        puppets.ready_nodes = lambda: {"n1", "n2"}
+        bus.request_many = lambda reqs, **kw: {}
+        refusal("mop stat with no node answering", run(stat.main),
+                "no node answered:\n  n1: no response\n  n2: no response")
+
+        # Обычный ответ -- вывод прежний, символ в символ.
+        row = {"name": "hyper", "driver": "pve", "serves": "mop", "state": "ready",
+               "free_mb": 40960, "total_mb": 65536, "slots": 5}
+        bus.ask_cluster = lambda verb, **kw: {"nodes": [row]}
+        got = run(node.main)
+        want = ("NODE   DRIVER  SERVES  STATE  FREE   TOTAL  SLOTS\n"
+                "hyper  pve     mop     ready  40 GB  64 GB  5\n", "", 0)
+        if got != want:
+            failed += 1
+            print(f"FAIL mop node on a normal answer: {got!r}")
+        puppets.ready_nodes = keep[4]
+        if puppets.pool() != [row]:
+            failed += 1
+            print(f"FAIL pool on a normal answer: {puppets.pool()!r}")
+    finally:
+        (bus.ask_cluster, bus.request_many, bus.connect, bus.nats.connect,
+         puppets.ready_nodes) = keep[:5]
+        if keep[5] is None:
+            os.environ.pop("MOP_SERVER_LAN", None)
+        else:
+            os.environ["MOP_SERVER_LAN"] = keep[5]
     return failed
 
 
