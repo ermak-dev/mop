@@ -783,7 +783,13 @@ async def v_usage(_conn, req):
     собрать, — поэтому идём от имени к каталогу, а не наоборот.
 
     Чужих папетов выбрасываем молча, как states: мастер проекта видит расход
-    своего проекта, оператор — всего узла."""
+    своего проекта, оператор — всего узла.
+
+    Рядом — by_login: {папет: {логин: {дата: {...}}}}, тот же расход по
+    логину мастера, чьё сообщение вызвало ход (#244). usage не меняется: его
+    читают mop stat и дашборд. Сумма by_login по логинам за папет и день —
+    ровно строка usage. Старый usage.py в теле флага --by-login не знает и
+    печатает прежнюю форму; тогда весь расход папета за «-»."""
     days = min(max(int(req.get("days") or 7), 1), 366)
     names = [n for n in await DRIVER.bodies() if await _mine(req, n)]
     # usage.py лежит рядом с session.py: SESSION_PY и называет то место, куда
@@ -793,13 +799,15 @@ async def v_usage(_conn, req):
     async def one(name):
         d = f"{DRIVER.projects_dir(name)}/{usage.slug(clone_dir(name))}"
         out, code = await bsh(name, " ".join(
-            ["python3", shlex.quote(usage_py), shlex.quote(d), str(days)]), 120)
-        if code not in (0, None):
-            return {}
-        return _last_json(out) or {}
+            ["python3", shlex.quote(usage_py), shlex.quote(d), str(days), "--by-login"]), 120)
+        got = (_last_json(out) or {}) if code in (0, None) else {}
+        if "by_login" in got and "usage" in got:
+            return got["usage"], got["by_login"]
+        return got, ({usage.NOBODY: got} if got else {})
 
     got = await asyncio.gather(*(one(n) for n in names))
-    return {"node": node_name(), "usage": dict(zip(names, got))}
+    return {"node": node_name(), "usage": {n: g[0] for n, g in zip(names, got)},
+            "by_login": {n: g[1] for n, g in zip(names, got)}}
 
 
 # ─── права: одна таблица ─────────────────────────────────────────────────
