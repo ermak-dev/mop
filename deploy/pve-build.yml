@@ -175,6 +175,15 @@
         body_cores: "{{ [(mop_project_asks | default({})).get('MOP_CORES', node_body.MOP_CORES) | int,
                          node_body.MOP_BODY_CORES_CAP | int] | min }}"
 
+    # Хранилище тел -- тоже узловое (#227): mop_pve_storage строки хоста, иначе
+    # установки, по правилу node.env. Два гипервизора зовут свои хранилища
+    # по-разному (на rumop nvmez-data есть только у agent1, nvmez2-data --
+    # только у agent2), и пока сборка брала MOP_PVE_STORAGE установки
+    # напрямую, тела шли на NVMe узла, а образ молча пёкся на local-lvm.
+    - name: Where this node keeps its bodies
+      ansible.builtin.set_fact:
+        node_storage: "{{ hostvars[inventory_hostname]['mop_pve_storage'] | default(MOP_PVE_STORAGE) }}"
+
     - name: Say what the body will be built with
       ansible.builtin.debug:
         msg: >-
@@ -241,7 +250,7 @@
     - name: The build body, a full copy of the image
       ansible.builtin.command: >-
         {{ pve }} clone {{ tmpl_vmid }} {{ stage_vmid }} {{ stage_name }}
-        {{ MOP_PVE_STORAGE }} {{ stage_ip }}/{{ pve_cidr }} {{ pve_gw }}
+        {{ node_storage }} {{ stage_ip }}/{{ pve_cidr }} {{ pve_gw }}
         {{ MOP_PVE_BRIDGE }} full
       when: build_from == 'image'
       changed_when: true
@@ -278,7 +287,7 @@
         secret_step: The build body, a container from the base image
         secret_cmd: >-
           {{ pve }} create {{ stage_vmid }} {{ stage_name }} {{ MOP_PVE_TEMPLATE }}
-          {{ MOP_PVE_STORAGE }} {{ body_cores }} {{ body_mem }}
+          {{ node_storage }} {{ body_cores }} {{ body_mem }}
           {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ stage_ip }}/{{ pve_cidr }}
           {{ pve_gw }} {{ pve_facts.ssh_key }}.pub
 
@@ -609,7 +618,7 @@
     - name: The image, a full copy of the build body
       ansible.builtin.command: >-
         {{ pve }} clone {{ stage_vmid }} {{ tmpl_vmid }} {{ tmpl_name }}
-        {{ MOP_PVE_STORAGE }} {{ tmpl_ip }}/{{ pve_cidr }} {{ pve_gw }}
+        {{ node_storage }} {{ tmpl_ip }}/{{ pve_cidr }} {{ pve_gw }}
         {{ MOP_PVE_BRIDGE }} full
       changed_when: true
 

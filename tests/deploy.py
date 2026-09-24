@@ -386,6 +386,68 @@ BODY_KNOBS = ("MOP_DISK_GB", "MOP_CORES", "MOP_BODY_DISK_CAP_GB", "MOP_BODY_CORE
 NODE_RULE = "hostvars[inventory_hostname][item | lower] | default(lookup('vars', item))"
 
 
+# ── хранилище тел -- из строки хоста, как в node.env (#227) ──────────────
+# HYPOTHESIS: MOP_PVE_STORAGE узловая (config.NODE_SCOPED): mop_pve_storage
+# строки хоста доезжает в node.env, и тела клонируются на хранилище узла; но
+# pve-build.yml подставлял {{ MOP_PVE_STORAGE }} напрямую -- значение
+# установки из .env -- в трёх местах (клон сборочного тела, создание,
+# клон образа). На rumop тела шли на NVMe, а образы пеклись на local-lvm
+# (agent1: 72% из 54 ГБ под тремя шаблонами), прогон зелёный.
+# SOLUTION: как размеры тела (#192) -- задача читает хранилище узла по
+# правилу node.env в свой факт node_storage до первой задачи, которая его
+# берёт; ни одной голой подстановки MOP_PVE_STORAGE в pve-build.yml.
+# STATUS: FIXED — see #227
+def check_pve_storage_227(check, can_render):
+    plays = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))
+
+    def flat(ts):
+        for t in ts or []:
+            yield t
+            yield from flat((t or {}).get("block"))
+    # Клон образа -- в игре «Seal the image» того же хоста: факт первой игры
+    # до неё доживает, и смотреть надо все игры файла, по порядку.
+    tasks = [t for p in plays for t in flat(p.get("tasks"))]
+    names = [t.get("name") for t in tasks]
+    node = next((t for t in tasks if "node_storage" in
+                 ((t.get("ansible.builtin.set_fact") or {}))), None)
+    check("pve-build: the node's storage is read in its own task", node is not None)
+    if node is None:
+        return
+    fact = str((node.get("ansible.builtin.set_fact") or {}).get("node_storage", ""))
+    rule = NODE_RULE.replace("item | lower", "'mop_pve_storage'").replace(
+        "lookup('vars', item)", "MOP_PVE_STORAGE")
+    check("pve-build: the node's storage is read the way node.env reads it",
+          rule in " ".join(fact.split()), fact)
+    # Строки команд -- в том числе secret_cmd включённой роли.
+    def commands(t):
+        out = [str(t.get("ansible.builtin.command", ""))]
+        out.append(str((t.get("vars") or {}).get("secret_cmd", "")))
+        return " ".join(out)
+    users = [i for i, t in enumerate(tasks) if "node_storage" in commands(t)]
+    check("pve-build: all three storage uses take the node's storage",
+          len(users) == 3, [names[i] for i in users])
+    if users:
+        check("pve-build: the storage is read before its first use",
+              names.index(node["name"]) < min(users), (node["name"], names[min(users)]))
+    for t in tasks:
+        bare = re.findall(r"(?<![.'\w])MOP_PVE_STORAGE(?!')", commands(t))
+        check(f"pve-build: {t.get('name')}: no installation storage past the host's",
+              not bare, commands(t).strip()[:160])
+    if not can_render:
+        return
+    import jinja2
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    for what, host, want in (("the host's own storage", {"mop_pve_storage": "nvmez-data"}, "nvmez-data"),
+                             ("the installation's without a host line", {}, "local-lvm")):
+        v = {"MOP_PVE_STORAGE": "local-lvm", "inventory_hostname": "agent1",
+             "hostvars": {"agent1": host}}
+        try:
+            got = env.from_string(fact).render(**v)
+        except Exception as e:  # noqa: BLE001 -- проверка, не код пула
+            got = f"{type(e).__name__}: {e}"
+        check(f"pve-build: node_storage is {what}", got == want, got)
+
+
 def check_body_sizes(check, can_render):
     """STATUS: FIXED — see #192"""
     play = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))[0]
@@ -1017,6 +1079,7 @@ def main():
 
     check_probes(check)
     check_body_sizes(check, can_render)
+    check_pve_storage_227(check, can_render)
     check_include_loop_var(check)
     check_users_reload_199(check)
 
