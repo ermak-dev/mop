@@ -149,14 +149,29 @@
     # инвентаре на хосте.
     #
     # Порядок старшинства целиком: узел > проект > установка > дефолт.
+    #
+    # Строка хоста в инвентаре -- имя настройки строчными (mop_mem_mb), как
+    # её ищет шаблон node.env (роль bus); прописное имя -- значение установки
+    # из --extra-vars. Пока выражения ниже брали прописное напрямую, строка
+    # хоста не доезжала до сборки, молча (#192). Правило чтения здесь одно,
+    # то же, что у node.env.
+    - name: What this node says about the size of its bodies
+      ansible.builtin.set_fact:
+        node_body: >-
+          {{ node_body | default({}) | combine({item:
+             hostvars[inventory_hostname][item | lower] | default(lookup('vars', item))}) }}
+      loop: [MOP_MEM_MB, MOP_DISK_GB, MOP_CORES,
+             MOP_BODY_MEM_CAP_MB, MOP_BODY_DISK_CAP_GB, MOP_BODY_CORES_CAP]
+
+    # Потолок узла -- min(), размер -- просьба проекта, иначе значение узла.
     - name: How big a body of this project may be here
       ansible.builtin.set_fact:
-        body_mem: "{{ [(mop_project_asks | default({})).get('MOP_MEM_MB', MOP_MEM_MB) | int,
-                       MOP_BODY_MEM_CAP_MB | int] | min }}"
-        body_disk: "{{ [(mop_project_asks | default({})).get('MOP_DISK_GB', MOP_DISK_GB) | int,
-                        MOP_BODY_DISK_CAP_GB | int] | min }}"
-        body_cores: "{{ [(mop_project_asks | default({})).get('MOP_CORES', MOP_CORES) | int,
-                         MOP_BODY_CORES_CAP | int] | min }}"
+        body_mem: "{{ [(mop_project_asks | default({})).get('MOP_MEM_MB', node_body.MOP_MEM_MB) | int,
+                       node_body.MOP_BODY_MEM_CAP_MB | int] | min }}"
+        body_disk: "{{ [(mop_project_asks | default({})).get('MOP_DISK_GB', node_body.MOP_DISK_GB) | int,
+                        node_body.MOP_BODY_DISK_CAP_GB | int] | min }}"
+        body_cores: "{{ [(mop_project_asks | default({})).get('MOP_CORES', node_body.MOP_CORES) | int,
+                         node_body.MOP_BODY_CORES_CAP | int] | min }}"
 
     - name: Say what the body will be built with
       ansible.builtin.debug:
