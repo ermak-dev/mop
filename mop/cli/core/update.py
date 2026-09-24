@@ -50,12 +50,8 @@ def main(argv):
     bus.call_cluster("update", name=name, origin=origin, profile=profile,
                      cont=cont, new_origin=origin if origin != old else None,
                      workspace=lib.workspace_text(origin))
-    moved = f"{old} [{old_llm}] → {origin} [{profile}]" if origin != old \
-        else f"{origin}: {old_llm} → {profile}" if profile != old_llm \
-        else f"{origin} [{profile}], unchanged"
-    print(f"{name}: {moved}")
-    print("puppet is restarting" + (", directory history will come up" if cont
-          else " with a clean session" + (" (--fresh)" if fresh else ": repository changed")))
+    # На успехе молчим (#179), как restart: MCP ответит модели `done`, а эхо
+    # параметров повторяло то, что человек только что набрал сам.
 
 
 

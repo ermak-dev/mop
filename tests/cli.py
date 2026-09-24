@@ -739,6 +739,84 @@ def check_output_rest():
     if out or code:
         failed += 1
         print(f"FAIL driver build echoes on success: {out!r} code {code!r}")
+    failed += check_output_179()
+    return failed
+
+
+def check_output_179():
+    """HYPOTHESIS (#179): после #159 остались отказы `mop sweep` в stdout (а
+    «no ready nodes» ещё и с кодом 0 -- отказ читался успехом),
+    предупреждения `mop driver build` в stdout и эхо `mop update` на успехе.
+    SOLUTION: отказы и предупреждения -- в stderr теми же словами, «no ready
+    nodes» -- код 1, update на успехе молчит (MCP ответит done, как restart).
+    STATUS: FIXED — see #179"""
+    from mop import bus, image, keys, llm, puppets
+    from mop.cli.core import update
+    from mop.cli.driver import build
+    from mop.cli.pool import sweep
+    failed = 0
+
+    def expect(what, got, text, nonzero):
+        nonlocal failed
+        out, err, code = got
+        if out or text not in err or (bool(code) != nonzero):
+            failed += 1
+            print(f"FAIL {what}: stdout {out!r}, stderr {err!r}, code {code!r}")
+
+    keep = (puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk)
+    try:
+        puppets.ready_nodes = lambda: set()
+        expect("sweep with no ready nodes", silent_run(sweep.main, []),
+               "no ready nodes", True)
+        puppets.ready_nodes = lambda: {"n1"}
+        bus.request_many = lambda asks, **kw: {"n1": None}
+        expect("sweep where no node answered", silent_run(sweep.main, []),
+               "no node answered", True)
+        bus.request_many = lambda asks, **kw: {"n1": {"bodies": [], "templates": []}}
+        puppets.jobs = lambda *a, **kw: []
+        expect("sweep where Nomad lists no puppets", silent_run(sweep.main, []),
+               "Nomad lists no puppets", True)
+        # Промолчавший узел при ответившем соседе: отказ по нему -- тоже в
+        # stderr, а код выхода за него отвечает.
+        bus.request_many = lambda asks, **kw: {"n1": {"bodies": [], "templates": []},
+                                               "n2": None}
+        puppets.ready_nodes = lambda: {"n1", "n2"}
+        puppets.jobs = lambda *a, **kw: [{"ID": "pu-a-1"}]
+        puppets.classify_junk = lambda answers, known: []
+        expect("sweep with one silent node", silent_run(sweep.main, []),
+               "n2: no response", True)
+    finally:
+        puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk = keep
+
+    keep = (image.prepare, image.build)
+    try:
+        image.prepare = lambda origin, root: {"project": "p", "asks": {},
+                                              "alien": ["MOP_X"], "legacy": [".mop.yaml"]}
+        image.build = lambda origin, got, **kw: {"gone": [], "announced": [], "rc": 0}
+        out, err, code = silent_run(build.main, ["git@h:g/p.git"])
+    finally:
+        image.prepare, image.build = keep
+    if out or code or "MOP_X is not a project's to set — ignored" not in err \
+            or "read as .mop/sandbox.yaml for the transition" not in err:
+        failed += 1
+        print(f"FAIL driver build warnings must go to stderr: {out!r} {err!r} {code!r}")
+
+    calls = []
+    keep = (lib.guard, bus.call_cluster, keys.push_llm_keys, lib.workspace_text)
+    try:
+        lib.guard = lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
+        bus.call_cluster = lambda verb, **kw: calls.append(verb) or {"ok": True}
+        keys.push_llm_keys = lambda profile: None
+        lib.workspace_text = lambda origin: ""
+        for argv in (["pu-mop-1"], ["pu-mop-1", "--fresh"], ["pu-mop-1", "git@h:g/other.git"]):
+            calls.clear()
+            out, err, code = silent_run(update.main, argv)
+            if out or err or code or calls != ["update"]:
+                failed += 1
+                print(f"FAIL update {argv} must be silent on success: out {out!r} "
+                      f"err {err!r} code {code!r} calls {calls}")
+    finally:
+        lib.guard, bus.call_cluster, keys.push_llm_keys, lib.workspace_text = keep
     return failed
 
 
