@@ -65,7 +65,10 @@ ticket: the OWNER column in `agents` shows who leads each puppet, and a
 `send` into a puppet another master leads (work in its clone, or dispatched
 minutes ago) is refused with that master's name. Dispatch only to free
 puppets with no owner or your own; `force=true` only when that master is
-gone for good or agrees. **The landing token is shared**: it lives with the
+gone for good or agrees. The same gate stands on every tool that changes a
+puppet — `slash`, `restart`, `update`, `recycle`, `wipe`, `delete`: another
+master's puppet is refused with their name, `force` under the same rule.
+**The landing token is shared**: it lives with the
 cluster service, one per project, and another master in the roster takes the
 same one (see Landing). A
 jump to another project needs a master shell there; say so, don't try to
