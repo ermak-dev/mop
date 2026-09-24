@@ -304,6 +304,7 @@ def main():
     failed += check_output_rules()
     failed += check_empty_llm()
     failed += check_deploy_check()
+    failed += check_fallback_model_183()
     failed += check_bus_import_169()      # последней: перезагружает модули
 
     print("cli: FAILED" if failed else "cli: ok")
@@ -1161,6 +1162,44 @@ def check_bus_import_169():
                 parent, child = name.rsplit(".", 1)
                 if parent in keep:
                     setattr(keep[parent], child, mod)
+    return failed
+
+
+def check_fallback_model_183():
+    """HYPOTHESIS (#183): puppets.py читал MOP_FALLBACK_MODEL на уровне модуля,
+    и всякий, кто импортирует puppets (сервис кластера), считался читающим
+    эту настройку, хотя применяет её один treat() -- `mop doctor --fix` на
+    машине оператора.
+    SOLUTION: treat() читает её при вызове; на уровне модуля чтения нет.
+    STATUS: FIXED — see #183"""
+    import ast
+    from mop import puppets
+    failed = 0
+    tree = ast.parse(open(os.path.join(ROOT, "mop", "puppets.py")).read())
+    top = [n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                                        ast.ClassDef))]
+    if any("MOP_FALLBACK_MODEL" in ast.unparse(n) for n in top):
+        failed += 1
+        print("FAIL puppets.py reads MOP_FALLBACK_MODEL at import, not in treat()")
+    typed = []
+    undo = no_network()
+    keep = (puppets.switch_model, os.environ.get("MOP_FALLBACK_MODEL"))
+    try:
+        puppets.switch_model = lambda node, name, model: typed.append(model)
+        os.environ["MOP_FALLBACK_MODEL"] = "sonnet-for-183"
+        got = puppets.treat({"action": "model", "name": "pu-mop-1",
+                             "alloc": {"NodeName": "n1"}})
+    finally:
+        puppets.switch_model = keep[0]
+        if keep[1] is None:
+            os.environ.pop("MOP_FALLBACK_MODEL", None)
+        else:
+            os.environ["MOP_FALLBACK_MODEL"] = keep[1]
+        undo()
+    if got != "/model sonnet-for-183" or typed != ["sonnet-for-183"]:
+        failed += 1
+        print(f"FAIL treat(model) must use MOP_FALLBACK_MODEL as it is at the call: "
+              f"{got!r}, typed {typed}")
     return failed
 
 

@@ -16,9 +16,6 @@ PROJECT = config.PROJECT
 
 # Значения этой установки — .env поверх дефолтов; см. mop/config.py.
 HOME = spec.HOME                           # $HOME на узлах пула
-# Куда переводить папет, у которого кончилась квота текущей модели
-# (решение оператора 27.08: Fable → Opus).
-FALLBACK_MODEL = config.get("MOP_FALLBACK_MODEL")
 # Соглашение об имени папета (префикс, разбор, каталоги) живёт в реестре
 # драйверов: это единственный stdlib-модуль, который читают и мастер, и узел.
 # Здесь — только имена, под которыми его знает мастер.
@@ -446,8 +443,14 @@ def treat(issue):
             _cluster("stop", name=name)
             return "alloc stop — Nomad will recreate it without backoff"
         if action == "model":
-            switch_model(alloc["NodeName"], name, FALLBACK_MODEL)
-            return f"/model {FALLBACK_MODEL}"
+            # Куда переводить папет, у которого кончилась квота текущей
+            # модели (решение оператора 27.08: Fable → Opus). При вызове, а
+            # не при импорте (#183): иначе всякий, кто
+            # импортирует puppets (сервис кластера), числился бы читающим
+            # настройку, которую применяет один doctor --fix.
+            model = config.get("MOP_FALLBACK_MODEL")
+            switch_model(alloc["NodeName"], name, model)
+            return f"/model {model}"
         if action == "update":
             # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
             # аллокации поднял бы ту же старую. Клон переживает — меняется
