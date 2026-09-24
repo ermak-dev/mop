@@ -365,6 +365,7 @@ def task_env(name, origin, profile, prof, cont=False):
         "PU_LLM_KEY_VAR": prof.get("key") or "",
         "PU_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
     }
+    env.update(git_identity(config.get("MOP_GIT_NAME"), config.get("MOP_GIT_EMAIL")))
     # Что `mop driver run` переливает в тело: всё окружение спеки, кроме
     # самого врапера. Списком здесь, а не копией там (#155).
     env["PU_CARRY"] = ",".join(env)
@@ -374,6 +375,20 @@ def task_env(name, origin, profile, prof, cont=False):
     # перерегистрацией».
     env["PU_WRAPPER"] = base64.b64encode(WRAPPER.encode()).decode()
     return env
+
+
+def git_identity(name, email):
+    """Git identity папета окружением задачи (#167). Чистая функция.
+
+    Переменными GIT_*, а не ~/.gitconfig тела: git читает их старше любого
+    конфига, а тело их получает той же переливкой PU_CARRY, что и остальное.
+    Половину не ставим: коммит с именем без почты всё равно падает, а
+    отвергает половину `mop deploy` -- падение здесь прошло бы через
+    current_version ростера и читалось бы «спека свежая» (#174)."""
+    if not (name and email):
+        return {}
+    return {f"GIT_{who}_{what}": value for who in ("AUTHOR", "COMMITTER")
+            for what, value in (("NAME", name), ("EMAIL", email))}
 
 
 def job_spec(name, origin, profile=None, cont=False):

@@ -68,7 +68,8 @@ CLUSTER_READS = ("mop/cluster.py", "mop/nomad.py", "mop/spec.py", "mop/llm/__ini
 
 VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "10.0.0.1",
         "MOP_NATS_PORT": "4222", "MOP_HTTPS_PORT": "443", "MOP_NOMAD_PORT": "4646",
-        "MOP_POOL_DC": "home", "MOP_WEB_PORT": "8080", "MOP_WEB_BIND": "0.0.0.0"}
+        "MOP_POOL_DC": "home", "MOP_WEB_PORT": "8080", "MOP_WEB_BIND": "0.0.0.0",
+        "MOP_GIT_NAME": "Pool Bot", "MOP_GIT_EMAIL": "bot@example.dev"}
 # Значения, которые юнит обязан донести целиком (#185): пробел, кавычки,
 # обратный слеш. Подставляются вместо настройки из набора юнита.
 AWKWARD = ("Pool Bot", 'say "hi"', "a\\b", "tab\there", "it's", "100%", "%h")
@@ -82,7 +83,9 @@ EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml"]
 # умолчанию (llm.resolve из job_spec).
 ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          "MOP_MEM_MB", "MOP_PUPPET_SEED", "MOP_PUPPET_PATH",
-                         "MOP_DEFAULT_LLM")}
+                         "MOP_DEFAULT_LLM",
+                         # git identity папета (#167): её кладёт в спеку job_spec.
+                         "MOP_GIT_NAME", "MOP_GIT_EMAIL")}
 
 PINNED = {
     'mop-bootstrap': "[Unit]\nDescription=mop-bootstrap (bootstrap песочниц: играет .mop/bootstrap.yaml проекта при каждом старте папета)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет: всё, что подписчику и прогону нужно знать об\n# установке, приезжает юнитом. MOP_HOME и MOP_USER -- те, что у узлов: их\n# читают задачи bootstrap'а как переменные прогона, и дефолт сервера\n# (его собственный дом) здесь был бы неправдой.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_HOME=/home/mopuser\nEnvironment=MOP_USER=mopuser\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop bootstrap serve\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
@@ -263,13 +266,18 @@ def main():
                 continue
             # Юнит с добавками: без комментариев и без добавленных строк он
             # тот же, что был, а добавленные строки -- со значениями игры.
-            added = {f"Environment={n}={variables[n]}" for n in ADDED[unit]}
+            # Добавленная строка узнаётся по имени, разобранному как у systemd:
+            # значение с пробелом (git identity, #167) идёт в кавычках (#185).
+            def named(line):
+                return line.startswith("Environment=") and \
+                    set(environment(line)) & set(ADDED[unit])
             bare = [l for l in got.splitlines() if not l.startswith("#")]
             check(f"{unit}: as before but for the added lines",
-                  [l for l in bare if l not in added] ==
+                  [l for l in bare if not named(l)] ==
                   [l for l in PINNED[unit].splitlines() if not l.startswith("#")])
-            check(f"{unit}: every addition rendered", added <= set(bare),
-                  sorted(added - set(bare)))
+            seen = environment(got)
+            wrong = {n: seen.get(n) for n in ADDED[unit] if seen.get(n) != variables[n]}
+            check(f"{unit}: every addition rendered", not wrong, wrong)
 
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")
