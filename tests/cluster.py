@@ -209,11 +209,67 @@ def check_secret_verbs():
     return out
 
 
+def check_verb_table_173():
+    """HYPOTHESIS (#173): права глаголов сервиса кластера -- в пяти
+    параллельных наборах (PROJECT_VERBS, SECRET_VERBS, ADMIN_VERBS,
+    NAMED_VERBS, ACTING_VERBS) плюс HANDLERS; новый глагол правится в
+    нескольких местах, и право расходится молча.
+    SOLUTION: одна таблица {глагол: Verb(fn, scope, named, acting)}, наборы
+    выводятся из неё. Характеризация: tests/cluster_verbs_snapshot.json снят
+    с кода ДО правки -- наборы, отказ refusal() и развилка answer() по каждому
+    глаголу (+ неизвестный и нестроковый) x оператор/проект x джоб
+    нет/свой/чужой/без метки x смена origin; после правки -- байт в байт.
+    STATUS: FIXED — see #173"""
+    import json
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from cli import no_network
+    out = []
+    here = os.path.dirname(os.path.realpath(__file__))
+    with open(os.path.join(here, "cluster_verbs_snapshot.json")) as f:
+        snap = json.load(f)
+    for name, want in snap["sets"].items():
+        got = list(getattr(cluster, name))
+        if got != want:
+            out.append(f"{name} -> {got}, wanted {want}")
+    if not isinstance(cluster.VERBS, dict):
+        return out + ["cluster.VERBS must be the one table {verb: Verb(...)}"]
+    own, foreign = "git@h:g/mop.git", "git@h:g/rugent.git"
+    states = {"none": (None, False), "own": (own, True), "foreign": (foreign, True),
+              "unlabeled": (None, True)}
+    called = []
+    undo = no_network()
+    keep_table, keep_owner = dict(cluster.VERBS), cluster._owner
+    try:
+        for v, d in keep_table.items():
+            cluster.VERBS[v] = d._replace(fn=(lambda verb: lambda project, req: called.append(verb)
+                                              or {"ok": True, "handled": verb})(v))
+        for key, want in snap["refusal"].items():
+            verb, project, state, new = json.loads(key)
+            origin, exists = states[state]
+            got = cluster.refusal(project, verb, origin=origin, name="pu-x-1",
+                                  job_exists=exists, new_origin=new)
+            if got != want:
+                out.append(f"refusal {key}: {got!r}, wanted {want!r}")
+            cluster._owner = lambda name, o=origin, e=exists: (o, e)
+            called.clear()
+            got = {"reply": cluster.answer(project, {"verb": verb, "name": "pu-x-1",
+                                                     "new_origin": new}),
+                   "called": list(called)}
+            if got != snap["answer"][key]:
+                out.append(f"answer {key}: {got!r}, wanted {snap['answer'][key]!r}")
+    finally:
+        cluster.VERBS.clear()
+        cluster.VERBS.update(keep_table)
+        cluster._owner = keep_owner
+        undo()
+    return out[:20] + ([f"... and {len(out) - 20} more"] if len(out) > 20 else [])
+
+
 def main():
     failed = []
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,
-                  check_secret_verbs):
+                  check_secret_verbs, check_verb_table_173):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:

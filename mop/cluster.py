@@ -24,6 +24,7 @@ bootstrap песочницы за папета). Положи туда глаг�
 Подписчик — mop-cluster, юнит на сервере; проверяется `mop cluster check`.
 Чистая часть (права) — tests/cluster.py.
 """
+import collections
 import os
 import threading
 
@@ -35,26 +36,16 @@ from . import (bootstrap, bus, busnames, config, creds, natsconf, nodes, nomad,
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
 
-# Глаголы проекта: про его собственных папетов.
-PROJECT_VERBS = ("ping", "roster", "pool", "add", "update", "restart", "stop",
-                 "delete", "alloc", "spec",
-                 # Секреты проекта (#127): проект -- из субъекта.
-                 "secret_put", "secret_list", "secret_remove")
-SECRET_VERBS = ("secret_put", "secret_list", "secret_remove")
-# Глаголы оператора: про машины. Место на узле общее для всех его жильцов, а
-# увод папетов с машины касается всех проектов разом — мастеру не показываем.
-# Проекты (#117) -- тоже оператору: завод проекта заводит пользователя на
-# шине, а лимит мастер поднял бы себе сам.
-ADMIN_VERBS = ("nodes", "drain", "up", "forget", "meta",
-               "projects", "project_add", "project_delete", "project_limit")
-VERBS = PROJECT_VERBS + ADMIN_VERBS
-# Глаголы, которые называют джоб: у них проверяется владелец.
-NAMED_VERBS = ("update", "restart", "stop", "delete", "alloc", "spec")
-# Из них те, что ДЕЛАЮТ: им отсутствие джоба — отказ. Читающему `alloc` нет:
-# `puppets.delete` спрашивает аллокацию УЖЕ СНЯТОГО джоба, дожидаясь, пока
-# тот перестанет быть running, и отказ там оставлял тело работать сиротой
-# (#89). `spec` в список входит: на его отказе стоит `lib.guard`.
-ACTING_VERBS = ("update", "restart", "stop", "delete", "spec")
+# Кому глагол дан -- одна таблица VERBS в конце модуля, рядом с обработчиками
+# (#173); прежние наборы выводятся из неё.
+PROJECT, SECRET, ADMIN = "project", "secret", "admin"
+Verb = collections.namedtuple("Verb", "fn scope named acting")
+
+
+def _row(verb):
+    """Строка таблицы по глаголу либо None. Нестроковый глагол -- неизвестный:
+    список ключом таблицы бросил бы TypeError (#168 у агента)."""
+    return VERBS.get(verb) if isinstance(verb, str) else None
 
 
 # ─── чистое: кому что можно ──────────────────────────────────────────────
@@ -69,14 +60,15 @@ def refusal(project, verb, origin=None, name=None, job_exists=False,
     его мастеру значит отдать наугад (puppets.visible показывает такие только
     оператору по той же причине). Джоба нет вовсе — не отказ прав: об этом
     скажет сам глагол, иначе опечатка в имени читается как «нет прав»."""
-    if verb not in VERBS:
+    spec = _row(verb)
+    if spec is None:
         return (f"no such verb {verb}; project verbs: {', '.join(PROJECT_VERBS)}; "
                 f"operator verbs: {', '.join(ADMIN_VERBS)}")
     operator = project == bus.ADMIN
-    if verb in SECRET_VERBS and operator:
+    if spec.scope == SECRET and operator:
         return (f"{verb}: secrets belong to a project — ask on "
                 f"mop.<project>.cluster.rpc, not the operator's subject")
-    if verb in ADMIN_VERBS and not operator:
+    if spec.scope == ADMIN and not operator:
         return (f"{verb} is the operator's verb: a node is shared by every project "
                 f"on it, and {project} sees only its own puppets")
     if operator:
@@ -89,7 +81,7 @@ def refusal(project, verb, origin=None, name=None, job_exists=False,
         why = _foreign_origin(project, new_origin)
         if why:
             return why
-    if verb in NAMED_VERBS and (origin or job_exists):
+    if spec.named and (origin or job_exists):
         if not origin:
             return (f"{name} carries no origin: an old registration, and whose it "
                     f"is cannot be told from the job — only the operator reaches it")
@@ -573,13 +565,53 @@ def _secret_remove(project, req):
     return {"ok": True}
 
 
-HANDLERS = {"ping": _ping, "roster": _roster, "pool": _pool, "add": _add, "update": _update, "restart": _restart,
-            "stop": _stop, "delete": _delete, "alloc": _alloc, "spec": _spec,
-            "nodes": _nodes, "drain": _drain, "up": _up, "forget": _forget,
-            "meta": _meta, "projects": _projects, "project_add": _project_add,
-            "project_delete": _project_delete, "project_limit": _project_limit,
-            "secret_put": _secret_put, "secret_list": _secret_list,
-            "secret_remove": _secret_remove}
+# ─── права: одна таблица (#173) ──────────────────────────────────────────
+# Раньше -- пять параллельных наборов и HANDLERS: новый глагол правился в
+# нескольких местах, и право расходилось молча. Порядок строк -- прежний
+# VERBS: из него выводятся наборы и перечень в отказе на неизвестный глагол.
+#
+# PROJECT -- про собственных папетов проекта; оператору тоже.
+# SECRET -- секреты проекта (#127): проект -- из субъекта, оператору нет.
+# ADMIN -- про машины: место на узле общее для всех его жильцов, а увод
+# папетов с машины касается всех проектов разом -- мастеру не показываем.
+# Проекты (#117) -- тоже оператору: завод проекта заводит пользователя на
+# шине, а лимит мастер поднял бы себе сам.
+#
+# named -- глагол называет джоб: у него проверяется владелец.
+# acting -- из них те, что ДЕЛАЮТ: им отсутствие джоба -- отказ. Читающему
+# `alloc` нет: `puppets.delete` спрашивает аллокацию УЖЕ СНЯТОГО джоба,
+# дожидаясь, пока тот перестанет быть running, и отказ там оставлял тело
+# работать сиротой (#89). `spec` в их числе: на его отказе стоит `lib.guard`.
+VERBS = {
+    "ping":           Verb(_ping,           PROJECT, False, False),
+    "roster":         Verb(_roster,         PROJECT, False, False),
+    "pool":           Verb(_pool,           PROJECT, False, False),
+    "add":            Verb(_add,            PROJECT, False, False),
+    "update":         Verb(_update,         PROJECT, True,  True),
+    "restart":        Verb(_restart,        PROJECT, True,  True),
+    "stop":           Verb(_stop,           PROJECT, True,  True),
+    "delete":         Verb(_delete,         PROJECT, True,  True),
+    "alloc":          Verb(_alloc,          PROJECT, True,  False),
+    "spec":           Verb(_spec,           PROJECT, True,  True),
+    "secret_put":     Verb(_secret_put,     SECRET,  False, False),
+    "secret_list":    Verb(_secret_list,    SECRET,  False, False),
+    "secret_remove":  Verb(_secret_remove,  SECRET,  False, False),
+    "nodes":          Verb(_nodes,          ADMIN,   False, False),
+    "drain":          Verb(_drain,          ADMIN,   False, False),
+    "up":             Verb(_up,             ADMIN,   False, False),
+    "forget":         Verb(_forget,         ADMIN,   False, False),
+    "meta":           Verb(_meta,           ADMIN,   False, False),
+    "projects":       Verb(_projects,       ADMIN,   False, False),
+    "project_add":    Verb(_project_add,    ADMIN,   False, False),
+    "project_delete": Verb(_project_delete, ADMIN,   False, False),
+    "project_limit":  Verb(_project_limit,  ADMIN,   False, False),
+}
+# Прежние наборы -- выводом из таблицы.
+PROJECT_VERBS = tuple(v for v, d in VERBS.items() if d.scope in (PROJECT, SECRET))
+SECRET_VERBS = tuple(v for v, d in VERBS.items() if d.scope == SECRET)
+ADMIN_VERBS = tuple(v for v, d in VERBS.items() if d.scope == ADMIN)
+NAMED_VERBS = tuple(v for v, d in VERBS.items() if d.named)
+ACTING_VERBS = tuple(v for v, d in VERBS.items() if d.acting)
 
 
 def answer(project, req):
@@ -590,17 +622,18 @@ def answer(project, req):
     чей это папет, несёт только Meta.origin."""
     verb = req.get("verb")
     name = req.get("name")
+    spec = _row(verb)
     origin, exists = (None, False)
-    if verb in NAMED_VERBS and name:
+    if spec and spec.named and name:
         origin, exists = _owner(name)
     why = refusal(project, verb, origin=origin or req.get("origin"), name=name,
                   job_exists=exists, new_origin=req.get("new_origin"))
     if why:
         return {"error": why}
-    if verb in ACTING_VERBS and name and not exists:
+    if spec.acting and name and not exists:
         return {"error": f"no job {name} in the cluster"}
     try:
-        return HANDLERS[verb](project, req)
+        return spec.fn(project, req)
     except KeyError as e:
         return {"error": f"{verb}: missing field {e}"}
     except ValueError as e:
