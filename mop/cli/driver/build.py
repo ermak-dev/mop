@@ -41,10 +41,11 @@ def main(argv):
     for k in got["alien"]:
         # Громко: проглоченный ключ -- это либо настройка, которая не
         # сработала, либо чужая, которая сработала.
-        print(f"  {project}/.mop: {k} is not a project's to set — ignored")
+        print(f"  {project}/.mop: {k} is not a project's to set — ignored",
+              file=sys.stderr)
     for old in got["legacy"]:
         print(f"  {project}/{old}: read as .mop/sandbox.yaml for the transition "
-              f"(#61) — rename it, the old name will stop being read")
+              f"(#61) — rename it, the old name will stop being read", file=sys.stderr)
     # Пересборка — операция над проектом (#60): тела проекта на контейнерных
     # узлах снимаются до плейбука и поднимаются заново после, при любом
     # исходе. Занятый папет — отказ до первого останова, если не --force.

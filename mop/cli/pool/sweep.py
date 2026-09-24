@@ -20,6 +20,8 @@ nothing of Nomad, and judges by the absence of a tmux session. That is the
 right signal for a node left alone; this one is the right signal for the
 machine that holds the register.
 """
+import sys
+
 from mop.cli import lib
 from mop import bus, puppets
 from mop.render import table
@@ -32,8 +34,9 @@ def main(argv):
 
     nodes = sorted(puppets.ready_nodes())
     if not nodes:
-        print("no ready nodes")
-        return 0
+        # Отказ, а не «чисто» (#179): осмотра не было.
+        print("no ready nodes", file=sys.stderr)
+        return 1
     answers = bus.request_many({n: {"verb": "junk"} for n in nodes})
 
     # Узел, который не ответил, — не пустой узел. Промолчавший считался бы
@@ -42,7 +45,7 @@ def main(argv):
     silent = {n: bus.failure(answers.get(n)) for n in nodes}
     silent = {n: why for n, why in silent.items() if why}
     for n, why in silent.items():
-        print(f"  ! {n}: {why} — not swept, its bodies are unknown")
+        print(f"  ! {n}: {why} — not swept, its bodies are unknown", file=sys.stderr)
 
     # Все джобы пула, а не только своего проекта: сирота чужого проекта — такой
     # же занятый контейнер, и «не мой» не делает его чьим-то.
@@ -50,7 +53,7 @@ def main(argv):
     if not heard:
         # Ни один не ответил — это НЕ «чисто». Печатать здесь «нечего
         # убирать» значило бы отчитаться об осмотре, которого не было.
-        print(f"no node answered — nothing was examined, let alone swept")
+        print("no node answered — nothing was examined, let alone swept", file=sys.stderr)
         return 1
 
     # Пустой список джобов — это не «весь пул мусор», это Nomad, который
@@ -60,7 +63,8 @@ def main(argv):
     known = {j["ID"] for j in puppets.jobs()}
     if not known:
         print("Nomad lists no puppets at all — that reads as 'every body is "
-              "garbage', which is never the right answer; refusing to sweep")
+              "garbage', which is never the right answer; refusing to sweep",
+              file=sys.stderr)
         return 1
 
     rows = puppets.classify_junk({n: answers[n] for n in heard}, known)
