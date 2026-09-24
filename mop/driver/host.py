@@ -13,10 +13,12 @@ tmux-сокет в `/tmp/tmux-<uid>`, файл сессии в `~/.claude/sessio
 единственный способ проверить шов до того, как в инвентаре появится
 гипервизор: поведение обязано не измениться, и сравнивать надо с ним самим.
 """
+import json
 import os
 import socket
+from urllib.parse import urlparse
 
-from .. import config
+from .. import busnames, config
 from . import (HOME, PREFIX, bad_name, clone_dir, sh, target_dir, valid_name,
                why, write_private)
 
@@ -28,6 +30,11 @@ TMUX_DIR = os.environ.get("TMUX_TMPDIR") or f"/tmp/tmux-{os.getuid()}"
 
 # session.py исполняется внутри тела, а тело здесь — узел, поэтому путь
 # берётся от самого пакета: он и есть тот, что приехал на узел rsync'ом.
+# Откуда узел знает адрес сервера: url его кредов шины (#200). MOP_SERVER_LAN
+# в node.env не едет, а вторая его копия в NODE_SCOPED разъехалась бы с той,
+# что плейбук уже рендерит в этот файл.
+NODE_FILE = os.path.expanduser(busnames.NODE_FILE)
+
 SESSION_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "session.py")
 
@@ -182,14 +189,40 @@ async def admit(name, let_in):
     return {}
 
 
+def _server():
+    """Адрес сервера — хост из url кредов шины узла, либо RuntimeError.
+
+    Не config.get("MOP_SERVER_LAN"): на узле этой настройки нет, и пустой
+    адрес маршрутизировался к localhost — сервер получал 127.0.0.1 и ходил
+    ssh'ем сам в себя (#200). В url плейбук кладёт LAN-адрес сервера
+    (deploy/setup.yml, nats_lan) — тот, которым агент уже ходит на шину."""
+    try:
+        with open(NODE_FILE) as f:
+            url = json.load(f).get("url") or ""
+    except (OSError, ValueError, AttributeError) as e:
+        raise RuntimeError(f"no server address: {NODE_FILE} is unreadable "
+                           f"({e}) — run mop deploy")
+    try:
+        server = urlparse(url).hostname
+    except ValueError:
+        server = None
+    if not server:
+        raise RuntimeError(f"no server address: {NODE_FILE} has no host in its "
+                           f"url {url!r} — run mop deploy")
+    return server
+
+
 def address(name):
     """Адрес тела со стороны сервера — это адрес узла, тот, с которого узел
     сам ходит на сервер. Без сети: соединение UDP ничего не шлёт, только
     выбирает маршрут."""
+    server = _server()
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect((config.get("MOP_SERVER_LAN"), 1))
+        s.connect((server, 1))
         return s.getsockname()[0]
+    except (socket.gaierror, OSError) as e:
+        raise RuntimeError(f"no route to the server {server} (from {NODE_FILE}): {e}")
     finally:
         s.close()
 

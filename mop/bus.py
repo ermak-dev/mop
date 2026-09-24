@@ -68,7 +68,7 @@ from . import busnames, config as settings, creds  # noqa: E402
 FILE = settings.get("MOP_BUS_CONFIG") or None
 # Креды агента узла: их кладёт плейбук, и агент читает только их — каталог
 # сервера с кредами мастера на машине в двух ролях ему не указ.
-NODE_FILE = os.path.expanduser("~/.config/mop/bus.json")
+NODE_FILE = os.path.expanduser(busnames.NODE_FILE)
 TIMEOUT = 20             # обычный запрос к агенту
 MAX_PAYLOAD = 900_000    # под max_payload сервера (1 МБ) с запасом на конверт
 ADMIN = busnames.ADMIN   # псевдопроект оператора: все проекты плюс узловой disk

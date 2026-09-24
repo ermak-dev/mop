@@ -176,19 +176,26 @@ def check_contract_151():
                     fail(f"{os.path.relpath(os.path.join(base, f), ROOT)}:{n} "
                          f"branches on the driver type: {line.strip()}")
 
-    # Характеризация: ответы прежних веток.
-    keep = os.environ.get("MOP_SERVER_LAN")
+    # Характеризация: ответы прежних веток. Адрес сервера у host с #200 -- из
+    # url кредов шины узла, а не из настройки; сервер тот же.
+    keep = os.environ.get("MOP_SERVER_LAN"), host.NODE_FILE
     os.environ["MOP_SERVER_LAN"] = "127.0.0.1"
+    tmp = tempfile.TemporaryDirectory()
+    host.NODE_FILE = os.path.join(tmp.name, "bus.json")
+    with open(host.NODE_FILE, "w") as f:
+        f.write('{"url": "nats://127.0.0.1:4222"}')
     try:
         cases += 1
         if host.address("pu-mop-1") != old_toward_server():
             fail(f"host.address -> {host.address('pu-mop-1')!r}, "
                  f"wanted {old_toward_server()!r} (the node, seen from the server)")
     finally:
-        if keep is None:
+        host.NODE_FILE = keep[1]
+        tmp.cleanup()
+        if keep[0] is None:
             os.environ.pop("MOP_SERVER_LAN", None)
         else:
-            os.environ["MOP_SERVER_LAN"] = keep
+            os.environ["MOP_SERVER_LAN"] = keep[0]
     for n in ("pu-mop-1", "pu-rugent-7"):
         cases += 1
         if pve.address(n) != pve.address_of(n):
@@ -822,8 +829,124 @@ def main():
         print(f"FAILED  check_body_memory_197: {type(e).__name__}: {e}")
     cases, bad = cases + c, bad + b
 
+    try:
+        c, b = check_host_address_200()
+    except Exception as e:
+        c, b = 1, 1
+        print(f"FAILED  check_host_address_200: {type(e).__name__}: {e}")
+    cases, bad = cases + c, bad + b
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
+
+
+# ── адрес узла со стороны сервера -- из кредов шины узла (#200) ─────────
+# HYPOTHESIS: host.address выбирает маршрут к config.get("MOP_SERVER_LAN"), а
+# этой настройки на узле нет: её нет в NODE_SCOPED, и в node.env она не
+# приезжает. Пустой адрес -- маршрут к localhost, узел отдаёт bootstrap'у
+# 127.0.0.1, и сервер ходит ssh'ем сам в себя. На сервере-узле это случайно
+# верно, у pve адрес контейнерный -- поэтому до первого удалённого host-узла
+# (gpu, wate-wsl) не проявлялось.
+# SOLUTION: адрес сервера узел берёт из того, чем уже ходит к нему, -- из url
+# своих кредов шины (bus.NODE_FILE): плейбук рендерит туда тот же
+# MOP_SERVER_LAN (deploy/setup.yml, nats_lan). Вторая копия факта в
+# NODE_SCOPED разъехалась бы с первой. Нет файла, нет url, имя не резолвится
+# -- отказ с названием источника, а не 127.0.0.1.
+# RESULT: маршрут выбирается к хосту из url файла шины; четыре отказа
+# называют файл, пятый -- имя, которое не резолвится.
+# STATUS: FIXED — see #200
+def check_host_address_200():
+    """-> (случаев, провалов)."""
+    import socket as real
+    from cli import no_network
+    from mop.driver import host
+    cases = bad = 0
+
+    def check(what, got, want):
+        nonlocal cases, bad
+        cases += 1
+        if got != want:
+            bad += 1
+            print(f"FAILED  {what}\n  wanted: {want!r}\n  got: {got!r}")
+
+    targets = []
+
+    class Sock:
+        """UDP-сокет без сети: помнит, куда выбирали маршрут."""
+        def __init__(self, *a):
+            pass
+
+        def connect(self, addr):
+            if addr[0] == "nowhere.invalid":
+                raise real.gaierror(-2, "Name or service not known")
+            targets.append(addr)
+
+        def getsockname(self):
+            return ("192.0.2.77", 40000)
+
+        def close(self):
+            pass
+
+    stub = types.SimpleNamespace(socket=Sock, AF_INET=real.AF_INET,
+                                 SOCK_DGRAM=real.SOCK_DGRAM, gaierror=real.gaierror,
+                                 error=real.error)
+    undo = no_network()
+    saved = (host.socket, getattr(host, "NODE_FILE", None))
+    # Настройка на узле -- не тот сервер: ответ обязан прийти из файла шины.
+    os.environ["MOP_SERVER_LAN"] = "198.51.100.9"
+    try:
+        host.socket = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            def bus_file(body):
+                path = os.path.join(tmp, "bus.json")
+                with open(path, "w") as f:
+                    f.write(body)
+                host.NODE_FILE = path
+                return path
+
+            def refusal(what, *words):
+                nonlocal cases, bad
+                cases += 1
+                try:
+                    got = host.address("pu-mop-1")
+                except RuntimeError as e:
+                    missing = [w for w in words if w not in str(e)]
+                    if missing:
+                        bad += 1
+                        print(f"FAILED  {what}: refusal {str(e)!r} doesn't name {missing}")
+                    return
+                bad += 1
+                print(f"FAILED  {what}: answered {got!r}, wanted a refusal")
+
+            bus_file('{"url": "nats://192.0.2.1:4222", "user": "node", "password": "x"}')
+            del targets[:]
+            check("address from the node's bus url", host.address("pu-mop-1"), "192.0.2.77")
+            check("route chosen toward the bus server", targets, [("192.0.2.1", 1)])
+
+            bus_file('{"url": "nats://server.example:4222", "user": "node", "password": "x"}')
+            del targets[:]
+            host.address("pu-mop-1")
+            check("a server name routes by name", targets, [("server.example", 1)])
+
+            path = os.path.join(tmp, "absent.json")
+            host.NODE_FILE = path
+            refusal("no bus file", path)
+            path = bus_file('{"user": "node", "password": "x"}')
+            refusal("bus file without url", path, "url")
+            path = bus_file('{"url": "nats://:4222"}')
+            refusal("bus url without a host", path)
+            path = bus_file('not json')
+            refusal("unreadable bus file", path)
+            path = bus_file('{"url": "nats://nowhere.invalid:4222"}')
+            refusal("unresolvable server", path, "nowhere.invalid")
+    finally:
+        host.socket = saved[0]
+        if saved[1] is None:
+            host.__dict__.pop("NODE_FILE", None)
+        else:
+            host.NODE_FILE = saved[1]
+        undo()
+    return cases, bad
 
 
 # ── память тела -- из спеки, на каждом подъёме (#197) ───────────────────
