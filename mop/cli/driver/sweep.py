@@ -28,7 +28,7 @@ def main(argv):
     if argv and not dry:
         lib.usage(__doc__)
     d = driver.current()
-    if d.BODY_IS_NODE:
+    if not driver.is_container(driver.current_name()):
         print("bodies here are the node itself — the disk watchdog sweeps clones")
         return 0
 

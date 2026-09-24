@@ -21,7 +21,7 @@ from . import (HOME, PREFIX, bad_name, clone_dir, sh, target_dir, valid_name,
                why, write_private)
 
 # Тело и узел — одна машина: исполнять «в теле» здесь значит исполнять на узле.
-BODY_IS_NODE = True
+IS_CONTAINER = False
 # Каталог сокетов tmux-серверов. У каждого папета свой сервер (-L <имя>),
 # поэтому имя сокета и есть имя папета — отсюда и ростер без Nomad.
 TMUX_DIR = os.environ.get("TMUX_TMPDIR") or f"/tmp/tmux-{os.getuid()}"
@@ -175,7 +175,24 @@ def projects_dir(name):
     return f"{HOME}/.claude/projects"
 
 
-async def admit(name, pubkey):
+async def admit(name, let_in):
     """Серверу в узел дорога есть всегда: его ключ кладёт в authorized_keys
     пользователя пула `mop deploy` (роль bus). Открывать и закрывать нечего."""
     return {}
+
+
+def address(name):
+    """Адрес тела со стороны сервера — это адрес узла, тот, с которого узел
+    сам ходит на сервер. Без сети: соединение UDP ничего не шлёт, только
+    выбирает маршрут."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((config.get("MOP_SERVER_LAN"), 1))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
+async def templates():
+    """Сборочных тел у host не бывает: образ собирать не во что."""
+    return []

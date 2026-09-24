@@ -110,9 +110,9 @@ def project_rows(project):
         node = item["alloc"]["NodeName"] if item["alloc"] else None
         if not node:
             continue
-        drv = (meta.get(node) or {}).get("mop_driver", driver.DEFAULT)
+        drv = driver.of_node(meta.get(node))
         rows.append({"name": job["ID"], "node": node, "job": job,
-                     "container": not driver.require(drv)["body_is_node"],
+                     "container": driver.require(drv)["is_container"],
                      "state": item["state"], "kind": item["kind"]})
     return rows
 
@@ -185,7 +185,7 @@ def announce(project):
     заводилось."""
     out = []
     for name, meta in sorted(nomad.nodes_meta().items()):
-        if meta.get("mop_driver", driver.DEFAULT) == driver.DEFAULT:
+        if not driver.is_container(driver.of_node(meta)):
             out.append((name, "not a container node"))  # объявляет any и так
             continue
         # Перечень берём с узла: серверная копия отстаёт на секунды, и

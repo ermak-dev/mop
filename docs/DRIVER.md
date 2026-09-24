@@ -51,8 +51,20 @@ def push(name, path, data)    # положить файл внутрь (mop logi
 def projects_dir(name)        # где транскрипты — mop stat, usage
 def attach_argv(name)         # чем входит человек
 def repair_argv(name)         # аварийный путь, когда основной молчит
-def admit(name, pubkey)       # впустить ключ сервера на время bootstrap'а (BOOTSTRAP.md)
+def admit(name, let_in)       # впустить ключ сервера на время bootstrap'а (BOOTSTRAP.md)
+def address(name)             # где сервер найдёт тело: у host — сам узел
+async def templates()         # сборочные тела и образы; у host — []
+
+IS_CONTAINER = True           # тела — отдельные объекты; False у host
+SESSION_PY = "/…/session.py"  # путь к session.py внутри тела
 ```
+
+Потребитель не ветвится по типу драйвера, а зовёт контракт (#151): флаг,
+прочитанный вне `mop/driver/`, — это переключатель типа, и третий драйвер
+проходил проверку контракта, чтобы упасть у потребителя. Всё, что потребители
+берут у модуля, перечислено в `driver.CONSUMED`; `tests/driver.py` выводит этот
+список из их кода и сверяет с каждым драйвером. Тип чужого узла по его meta —
+`driver.is_container(driver.of_node(meta))`.
 
 Две половины в одном файле: узел и его тела — одно решение, а не два. Развести
 их по двум реестрам значит получить решётку «узел × тело» и те же два места с

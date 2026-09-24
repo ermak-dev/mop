@@ -44,7 +44,6 @@ import asyncio
 import json
 import os
 import shlex
-import socket
 import subprocess
 import sys
 import time
@@ -61,8 +60,6 @@ ROOT = os.path.expanduser("~/.config/mop/bootstrap")
 PUPPET_CREDS = os.path.expanduser("~/.config/mop/puppets")
 KEY = os.path.expanduser("~/.ssh/mop-bootstrap")
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "bootstrap.yml")
-# На узле: публичная часть ключа сервера, её кладёт `mop deploy`.
-PUB_ON_NODE = f"{driver.HOME}/.config/mop/bootstrap.pub"
 # Файл рабочей копии, из которого `mop add|update|recycle` шлют workspace.
 FILE = ".mop/bootstrap.yaml"
 # Сколько узел ждёт сервер. Больше «секунд», чтобы прогон с загрузкой не
@@ -278,46 +275,24 @@ async def serve(log):
 
 
 # ─── узел ────────────────────────────────────────────────────────────────
-def toward_server():
-    """Адрес этого узла со стороны сервера — тот, с которого узел сам ходит
-    на сервер. Нужен узлу, где тело равно узлу: серверу надо куда-то
-    прийти. Без сети: соединение UDP ничего не шлёт, только выбирает
-    маршрут."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect((config.get("MOP_SERVER_LAN"), 1))
-        return s.getsockname()[0]
-    finally:
-        s.close()
-
-
 def run(d, name, project):
     """Bootstrap песочницы папета с этого узла: впустить сервер, позвать,
     дождаться, выпустить. -> ответ сервера; отказ — RuntimeError/BusError.
 
     Зовётся из `mop driver run` до внутреннего врапера. Дверь закрывается в
     любом исходе: ключ сервера в теле живёт ровно столько, сколько идёт
-    bootstrap."""
-    if d.BODY_IS_NODE:
-        address, pub = toward_server(), None
-    else:
-        address = d.address_of(name)
-        try:
-            with open(PUB_ON_NODE) as f:
-                pub = f.read().strip()
-        except FileNotFoundError:
-            raise RuntimeError(f"no server key on this node ({PUB_ON_NODE}) — "
-                               f"run mop deploy")
-        r = asyncio.run(d.admit(name, pub))
-        if r.get("error"):
-            raise RuntimeError(f"cannot let the server into the body: {r['error']}")
+    bootstrap. Где сервер найдёт тело и надо ли его впускать, решает драйвер
+    (#151): у host тело — сам узел, и дорога туда есть всегда."""
+    address = d.address(name)
+    r = asyncio.run(d.admit(name, True))
+    if r.get("error"):
+        raise RuntimeError(f"cannot let the server into the body: {r['error']}")
     try:
         bus.connect(bus.NODE_FILE)
         out = bus.ask_server("bootstrap", timeout=TIMEOUT, project=project,
                              name=name, address=address)
     finally:
-        if pub is not None:
-            asyncio.run(d.admit(name, None))
+        asyncio.run(d.admit(name, False))
     if out.get("error"):
         raise RuntimeError(out["error"])
     if not out.get("ok"):

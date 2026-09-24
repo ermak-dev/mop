@@ -28,7 +28,7 @@ def plugin(**attrs):
     for verb in driver.VERBS:
         mod.__dict__[verb] = lambda *a, **k: None
     mod.SESSION_PY = "/opt/mop/mop/session.py"
-    mod.BODY_IS_NODE = False
+    mod.IS_CONTAINER = True
     mod.__dict__.update(attrs)
     return mod
 
@@ -53,8 +53,12 @@ CONTRACT = [
     ("a verb that is not callable", plugin(argv="ssh"), False),
     # SESSION_PY уезжает в шелл внутри тела. Пустое значение там молча
     # соберётся в `python3  probe <clone>` — python прочитает probe как файл.
-    ("BODY_IS_NODE not declared", plugin(BODY_IS_NODE=None), False),
-    ("BODY_IS_NODE not a bool", plugin(BODY_IS_NODE="yes"), False),
+    ("IS_CONTAINER not declared", plugin(IS_CONTAINER=None), False),
+    ("IS_CONTAINER not a bool", plugin(IS_CONTAINER="yes"), False),
+    # #151: адрес тела и сборочные тела -- в контракте; драйвер без них
+    # проходил проверку и падал у потребителя (bootstrap, junk).
+    ("no address", plugin(address=None), False),
+    ("no templates", plugin(templates=None), False),
     ("no SESSION_PY", plugin(SESSION_PY=None), False),
     ("empty SESSION_PY", plugin(SESSION_PY=""), False),
     ("SESSION_PY is not a path", plugin(SESSION_PY="session.py"), False),
@@ -89,6 +93,147 @@ HOST_ARGV = [
 # второе место, отвечающее на вопрос «чей это папет».
 PVE_NAMES = ("pu-mop-1", "pu-mop-2", "pu-rugent-7", "pu-cloudpub-11",
              "pu-some.proj-3")
+
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def consumed_names():
+    """Что потребители берут у модуля драйвера -- выводом из их кода, а не
+    списком: `DRIVER.<имя>` в агенте, `d.<имя>` там, где d -- модуль драйвера
+    (`driver.current()`/`driver.module(...)` или первый аргумент `d`), и
+    `driver.current().<имя>`."""
+    import re
+    found = set()
+    for base, _, files in os.walk(os.path.join(ROOT, "mop")):
+        if os.path.join("mop", "driver") in base:
+            continue
+        for f in files:
+            if not f.endswith(".py"):
+                continue
+            text = open(os.path.join(base, f)).read()
+            # (?<!/): `docs/DRIVER.md` в тексте -- путь, а не обращение.
+            found |= set(re.findall(r"(?<!/)\bDRIVER\.([A-Za-z_]+)", text))
+            found |= set(re.findall(r"driver\.current\(\)\.([A-Za-z_]+)", text))
+            # d -- модуль драйвера: присвоен из реестра или пришёл первым
+            # аргументом (bootstrap.run(d, name, project)).
+            if re.search(r"\bd = driver\.(current|module)\(|\bdef \w+\(d, ", text):
+                found |= set(re.findall(r"\bd\.([A-Za-z_]+)", text))
+    return found
+
+
+def old_toward_server():
+    """Адрес узла со стороны сервера, как его считал bootstrap до #151."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((config.get("MOP_SERVER_LAN"), 1))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
+def check_contract_151():
+    """#151: адрес, сборочные тела и тип узла -- в контракте, ветки по флагу
+    -- в драйверах. -> (случаев, провалов)."""
+    import asyncio
+    import re
+    cases = bad = 0
+
+    def fail(text):
+        nonlocal bad
+        bad += 1
+        print(f"FAILED  {text}")
+
+    host, pve = driver.module("host"), driver.module("pve")
+
+    # Всё, что потребители зовут у драйвера, объявлено контрактом, и каждый
+    # драйвер это имеет: третий драйвер иначе проходит проверку и падает у
+    # потребителя.
+    used = consumed_names()
+    cases += 1
+    if not used or used - set(driver.CONSUMED):
+        fail(f"consumers call {sorted(used - set(driver.CONSUMED))} outside "
+             f"driver.CONSUMED {driver.CONSUMED}")
+    for name, mod in (("host", host), ("pve", pve)):
+        for attr in driver.CONSUMED:
+            cases += 1
+            if not hasattr(mod, attr):
+                fail(f"{name} has no {attr}, which consumers call")
+
+    # Флага и сравнения с драйвером по умолчанию вне mop/driver/ нет.
+    for base, _, files in os.walk(os.path.join(ROOT, "mop")):
+        if os.path.join("mop", "driver") in base:
+            continue
+        for f in files:
+            if not f.endswith(".py"):
+                continue
+            for n, line in enumerate(open(os.path.join(base, f)), 1):
+                code = line.split("#")[0]
+                if re.search(r"BODY_IS_NODE|IS_CONTAINER|address_of\(|getattr\(.*templates"
+                             r"|[!=]= *driver\.DEFAULT", code):
+                    cases += 1
+                    fail(f"{os.path.relpath(os.path.join(base, f), ROOT)}:{n} "
+                         f"branches on the driver type: {line.strip()}")
+
+    # Характеризация: ответы прежних веток.
+    keep = os.environ.get("MOP_SERVER_LAN")
+    os.environ["MOP_SERVER_LAN"] = "127.0.0.1"
+    try:
+        cases += 1
+        if host.address("pu-mop-1") != old_toward_server():
+            fail(f"host.address -> {host.address('pu-mop-1')!r}, "
+                 f"wanted {old_toward_server()!r} (the node, seen from the server)")
+    finally:
+        if keep is None:
+            os.environ.pop("MOP_SERVER_LAN", None)
+        else:
+            os.environ["MOP_SERVER_LAN"] = keep
+    for n in ("pu-mop-1", "pu-rugent-7"):
+        cases += 1
+        if pve.address(n) != pve.address_of(n):
+            fail(f"pve.address({n}) -> {pve.address(n)}, wanted {pve.address_of(n)}")
+    cases += 1
+    if asyncio.run(host.templates()) != []:
+        fail("host.templates() must be [] — a node-body driver builds no images")
+    cases += 1
+    if not asyncio.iscoroutinefunction(pve.templates):
+        fail("pve.templates must stay a coroutine")
+    for name, want in (("host", False), ("pve", True), ("", True), ("nosuch", True)):
+        # Неизвестный драйвер -- контейнерный: до #151 builder и image
+        # решали `!= DEFAULT`.
+        cases += 1
+        if driver.is_container(name) is not want:
+            fail(f"driver.is_container({name!r}) must be {want}")
+    for meta, want in (({}, driver.DEFAULT), ({"mop_driver": "pve"}, "pve"),
+                       ({"mop_driver": ""}, ""), (None, driver.DEFAULT)):
+        cases += 1
+        if driver.of_node(meta) != want:
+            fail(f"driver.of_node({meta!r}) -> {driver.of_node(meta)!r}, wanted {want!r}")
+
+    # Впуск ключа сервера (#62) -- полиморфный admit(name, open): host открывать
+    # нечего, pve без ключа сервера на узле отказывает прежним текстом.
+    for open_ in (True, False):
+        cases += 1
+        if asyncio.run(host.admit("pu-mop-1", open_)) != {}:
+            fail(f"host.admit(..., {open_}) must be a no-op")
+    cases += 1
+    if driver.SERVER_PUB != f"{driver.HOME}/.config/mop/bootstrap.pub":
+        fail(f"driver.SERVER_PUB moved: {driver.SERVER_PUB}")
+    missing = os.path.join(tempfile.mkdtemp(prefix="mop-test-driver-"), "bootstrap.pub")
+    keep_pub, pve.SERVER_PUB = pve.SERVER_PUB, missing
+    try:
+        cases += 1
+        try:
+            asyncio.run(pve.admit("pu-mop-1", True))
+            fail("pve.admit without the server key must refuse")
+        except RuntimeError as e:
+            want = f"no server key on this node ({missing}) — run mop deploy"
+            if str(e) != want:
+                fail(f"pve refusal without the server key: {str(e)!r}, wanted {want!r}")
+    finally:
+        pve.SERVER_PUB = keep_pub
+    return cases, bad
 
 
 def main():
@@ -200,9 +345,9 @@ def main():
     # было бы той же записью в тот же файл по разу на папета — и, что хуже,
     # отчёт обещал бы запись в тела, которых нет.
     cases += 1
-    if host.BODY_IS_NODE is not True:
+    if host.IS_CONTAINER is not False:
         bad += 1
-        print("FAILED  host.BODY_IS_NODE must be True — the body IS the node")
+        print("FAILED  host.IS_CONTAINER must be False — the body IS the node")
 
     cases += 1
     if not isinstance(driver.get("pve"), dict):
@@ -269,9 +414,9 @@ def main():
         addrs[ip] = name
 
     cases += 1
-    if pve.BODY_IS_NODE is not False:
+    if pve.IS_CONTAINER is not True:
         bad += 1
-        print("FAILED  pve.BODY_IS_NODE must be False — a body is a container")
+        print("FAILED  pve.IS_CONTAINER must be True — a body is a container")
 
     # ssh, а не proxmox_pct_remote: ControlPersist держит соединение, и проба
     # состояния перестаёт платить рукопожатием.
@@ -520,7 +665,7 @@ def main():
             pass
 
     # Контракт драйвера — СЛОВАРЬ, и флаг в нём ключом, а не атрибутом.
-    # Модуль с атрибутом BODY_IS_NODE отдаёт только `current()`, и он про свой
+    # Модуль с атрибутом IS_CONTAINER отдаёт только `current()`, и он про свой
     # узел; спросить про чужой можно лишь по имени, через реестр. Перепутать
     # эти две вещи легко, а отказ приходит не там: `mop delete` успевает снять
     # джоб и падает уже ПОСЛЕ этого на AttributeError, оставляя тело сиротой
@@ -528,16 +673,16 @@ def main():
     for name in ("host", "pve"):
         cases += 1
         c = driver.require(name)
-        if not isinstance(c, dict) or "body_is_node" not in c:
+        if not isinstance(c, dict) or "is_container" not in c:
             bad += 1
             print(f"FAILED  driver.require({name!r}) must be a mapping with "
-                  f"body_is_node, got {type(c).__name__}")
+                  f"is_container, got {type(c).__name__}")
 
     cases += 1
-    if driver.require("host")["body_is_node"] is not True \
-            or driver.require("pve")["body_is_node"] is not False:
+    if driver.require("host")["is_container"] is not False \
+            or driver.require("pve")["is_container"] is not True:
         bad += 1
-        print("FAILED  body_is_node must tell a node-body driver from a "
+        print("FAILED  is_container must tell a node-body driver from a "
               "container one — everything that decides what to destroy "
               "hangs on it")
 
@@ -633,6 +778,13 @@ def main():
     c, b = check_pve_facts()
     cases += c
     bad += b
+
+    try:
+        c, b = check_contract_151()
+    except Exception as e:
+        c, b = 1, 1
+        print(f"FAILED  check_contract_151: {type(e).__name__}: {e}")
+    cases, bad = cases + c, bad + b
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0

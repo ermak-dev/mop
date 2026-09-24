@@ -30,11 +30,18 @@ Nomad решает, где стоит папет, шина — как с ним 
     projects_dir(name)     где транскрипты — mop stat, usage
     attach_argv(name)      чем входит человек
     repair_argv(name)      аварийный путь, когда основной молчит
-    admit(name, pubkey)    впустить ключ сервера в тело на время bootstrap'а
-                           (#62), None — выпустить; у host пусто: ключ там
-                           лежит постоянно
+    admit(name, let_in)    впустить ключ сервера в тело на время bootstrap'а
+                           (#62), let_in=False — выпустить; у host пусто: ключ
+                           там лежит постоянно
+    address(name)          где сервер найдёт тело: у host — сам узел, у
+                           контейнера — адрес тела (#151)
+    templates()            сборочные тела и образы узла; у host их нет (#151)
     SESSION_PY             путь к session.py внутри тела
-    BODY_IS_NODE           тело и узел — одна машина (True у host)
+    IS_CONTAINER           тела — отдельные объекты, а не сам узел (False у host)
+
+Потребитель ветвится не по флагу, а зовёт контракт (#151): флаг, прочитанный
+вне драйвера, — это переключатель типа, и третий драйвер проходил проверку
+контракта, чтобы упасть у потребителя.
 
 Разводить узел и тела по двум реестрам значит получить решётку «узел × тело»
 и два места, отвечающих на один вопрос.
@@ -49,7 +56,11 @@ from .. import config, fsutil, plugins
 # Глаголы контракта. Список закрыт и проверяется громко при загрузке: агент
 # зовёт их из петли, и отсутствующий argv прочитается там как «узел молчит».
 VERBS = ("ensure", "destroy", "bodies", "capacity", "argv", "run_argv", "push",
-         "push_many", "projects_dir", "attach_argv", "repair_argv", "admit")
+         "push_many", "projects_dir", "attach_argv", "repair_argv", "admit",
+         "address", "templates")
+# Всё, что потребители берут у модуля драйвера: глаголы и два значения.
+# tests/driver.py выводит этот список из кода потребителей и сверяет.
+CONSUMED = VERBS + ("SESSION_PY", "IS_CONTAINER")
 
 DEFAULT = config.SETTINGS["MOP_DRIVER"]
 
@@ -177,6 +188,11 @@ HOME = config.get("MOP_HOME")
 SECRETS_FILE = f"{HOME}/.config/mop/secrets.env"
 
 
+# Публичный ключ сервера на узле: его впускают в тело на время bootstrap'а
+# (#62). Кладёт `mop deploy` (роль bus).
+SERVER_PUB = f"{HOME}/.config/mop/bootstrap.pub"
+
+
 def clone_dir(name):
     return f"{HOME}/puppets/{name}"
 
@@ -210,7 +226,7 @@ def write_private(path, data):
 
 
 def contract(name, mod):
-    """Модуль-плагин -> {verbs, session_py, doc}; RuntimeError при нарушении.
+    """Модуль-плагин -> {session_py, is_container, doc}; RuntimeError при нарушении.
 
     Отдельная от загрузки функция, потому что проверяема без пула
     (tests/driver.py): ошибка контракта обязана находиться до живых папетов."""
@@ -225,9 +241,9 @@ def contract(name, mod):
     # побочного признака. Раздача файлов (`mop login`) на этом стоит: у host
     # запись в каждое тело была бы записью в тот же файл по разу на папета, а
     # отчёт обещал бы запись в тела, которых нет.
-    if not isinstance(getattr(mod, "BODY_IS_NODE", None), bool):
-        raise RuntimeError(f"{where}: BODY_IS_NODE — True when the body is the "
-                           f"node itself, False when it is a thing of its own")
+    if not isinstance(getattr(mod, "IS_CONTAINER", None), bool):
+        raise RuntimeError(f"{where}: IS_CONTAINER — False when the body is the "
+                           f"node itself, True when it is a thing of its own")
     session_py = getattr(mod, "SESSION_PY", None)
     # Абсолютный, потому что исполняется внутри тела и из чужого каталога:
     # относительный там молча соберётся в `python3 session.py`, которого нет,
@@ -236,9 +252,8 @@ def contract(name, mod):
         raise RuntimeError(f"{where}: SESSION_PY — absolute path to session.py "
                            f"inside the body")
     doc = (mod.__doc__ or "").strip().splitlines()
-    return {"verbs": {v: getattr(mod, v) for v in VERBS},
-            "session_py": session_py,
-            "body_is_node": mod.BODY_IS_NODE,
+    return {"session_py": session_py,
+            "is_container": mod.IS_CONTAINER,
             "doc": doc[0].strip() if doc else ""}
 
 
@@ -262,6 +277,27 @@ def require(name):
         raise RuntimeError(f"no node driver {name or '(empty)'}; available: "
                            f"{', '.join(drivers())} (docs/DRIVER.md)")
     return d
+
+
+def of_node(meta):
+    """Имя драйвера узла по его meta в Nomad. Узел без ключа — драйвер по
+    умолчанию: так ведёт себя узел, до которого deploy не доходил."""
+    return (meta or {}).get("mop_driver", DEFAULT)
+
+
+def is_container(name):
+    """Тела на узле с этим драйвером — отдельные объекты (контейнеры), а не
+    сам узел. Драйвер, которого в реестре нет, — контейнерный: он не host, и
+    так решали сборщик и объявление образов до #151 (`!= DEFAULT`)."""
+    d = get(name)
+    return d["is_container"] if d else True
+
+
+async def bodies_apart(mod):
+    """Тела, отдельные от узла: куда файл кладётся вторым ходом после узла
+    (`mop login`). У host тело — сам узел, и второй записи не бывает: это тот
+    же файл, а отчёт обещал бы запись в тела, которых нет."""
+    return await mod.bodies() if mod.IS_CONTAINER else []
 
 
 def module(name):
