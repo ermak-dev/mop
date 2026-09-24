@@ -119,7 +119,8 @@
 # /etc/nats/identity, 0600 (identity.server_provider). Нового здесь ничего:
 # те же пароли уже лежат в base-users.json у того же пользователя. Копия
 # есть при callout или при файле операторов -- имена и почты только в нём;
-# без обоих её нет и не остаётся.
+# и при провайдере ldap (#216): пароль служебной учётки глаголу identity
+# (#167) нужен и без callout. Без всех трёх её нет и не остаётся.
 - name: Operators file on the controller
   ansible.builtin.stat:
     path: "{{ MOP_OPERATORS_FILE or (secrets_dir + '/operators') }}"
@@ -128,7 +129,7 @@
   register: operators_file
 
 - name: Identity for the server's services
-  when: MOP_AUTH_CALLOUT == 'on' or operators_file.stat.exists
+  when: MOP_AUTH_CALLOUT == 'on' or operators_file.stat.exists or MOP_AUTH_PROVIDER == 'ldap'
   block:
     - name: Identity dir of the server's services
       ansible.builtin.file:
@@ -185,8 +186,8 @@
         path: /etc/nats/identity/ldap-bind.pass
         state: absent
 
-- name: No identity copy without the callout and the operators file
-  when: MOP_AUTH_CALLOUT != 'on' and not operators_file.stat.exists
+- name: No identity copy without the callout, the operators file and ldap
+  when: MOP_AUTH_CALLOUT != 'on' and not operators_file.stat.exists and MOP_AUTH_PROVIDER != 'ldap'
   ansible.builtin.file:
     path: /etc/nats/identity
     state: absent

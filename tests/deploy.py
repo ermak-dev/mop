@@ -659,7 +659,9 @@ def check_identity_copy_167(check, ptasks):
                   False, e)
             continue
         what = f"bus identity copy, callout {callout}, operators file {exists}, provider {prov}"
-        copy = callout == "on" or exists
+        # Копия есть при callout, при файле операторов или при ldap (#216):
+        # глаголу identity (#167) без callout нужен пароль LDAP из неё.
+        copy = callout == "on" or exists or prov == "ldap"
         bind = ("copy", "/etc/nats/identity/ldap-bind.pass", None) in done
         unbind = ("file", "/etc/nats/identity/ldap-bind.pass", "absent") in done
         check(f"{what}: the LDAP bind password is laid exactly with ldap and the copy",
@@ -669,8 +671,8 @@ def check_identity_copy_167(check, ptasks):
         laid = ("copy", "/etc/nats/identity/operators", None) in done
         gone = ("file", "/etc/nats/identity", "absent") in done
         check(f"{what}: the operators file is copied exactly when it exists", laid == exists, done)
-        check(f"{what}: the copy is removed only with neither callout nor file",
-              gone == (callout != "on" and not exists), done)
+        check(f"{what}: the copy is removed only with neither callout, file nor ldap",
+              gone == (not copy), done)
         check(f"{what}: the controller's operators file is looked at",
               any(k == "stat" and "operators" in str(p) for k, p, _ in done), done)
 
