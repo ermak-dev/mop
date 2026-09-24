@@ -712,8 +712,11 @@ NAMED_VERBS = tuple(v for v, d in VERBS.items() if d.named)
 
 def refusal(verb, public, project):
     """Отказ по глаголу, субъекту и проекту, либо None. Проверку владельца
-    папета (named) делает handle: она спрашивает клон."""
-    spec = VERBS.get(verb)
+    папета (named) делает handle: она спрашивает клон.
+
+    Нестроковый глагол -- неизвестный (#168): `[1]` как ключ таблицы бросал
+    TypeError, и запрос оставался без ответа."""
+    spec = VERBS.get(verb) if isinstance(verb, str) else None
     if spec is None:
         return f"no such verb {verb}; available: {', '.join(sorted(VERBS))}"
     if public and spec.scope != PUBLIC:
@@ -745,6 +748,11 @@ async def handle(conn, msg, public):
     except ValueError:
         return await msg.respond(
             json.dumps({"error": "request is not JSON"}, ensure_ascii=False).encode())
+    if not isinstance(req, dict):
+        # До таблицы (#168): `[1]` падал на req["_project"], и задача умирала
+        # без ответа -- проситель ждал таймаут.
+        return await msg.respond(
+            json.dumps({"error": "request is not a JSON object"}).encode())
     parts = msg.subject.split(".")
     req["_project"] = parts[1] if len(parts) > 1 else ""
 

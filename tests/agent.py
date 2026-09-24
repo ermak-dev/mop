@@ -178,10 +178,72 @@ def check_timeouts_171():
     return out
 
 
+def check_intake():
+    """HYPOTHESIS (#168): тело-JSON не объект (`[1]`, `"x"`) роняет задачу
+    handle на req["_project"], а нехэшируемый глагол (`{"verb": [1]}`) -- на
+    поиске в таблице внутри refusal(): ответа нет, проситель ждёт таймаут.
+    SOLUTION: handle отказывает телу-не-объекту до таблицы; refusal читает
+    нестроковый глагол как неизвестный -- тот же отказ, что у неизвестной
+    строки.
+    STATUS: FIXED — see #168"""
+    import asyncio
+    import json
+    out, called = [], []
+
+    class Msg:
+        def __init__(self, data, subject):
+            self.subject, self.data, self.replies = subject, data, []
+
+        async def respond(self, data):
+            self.replies.append(json.loads(data))
+
+    def spy(verb):
+        async def fn(conn, req):
+            called.append(verb)
+            return {"verb": verb}
+        return fn
+
+    keep = dict(agent.VERBS)
+    try:
+        for v, d in keep.items():
+            agent.VERBS[v] = d._replace(fn=spy(v))
+
+        def ask(body, subject="mop.admin.node.hyper.rpc"):
+            called.clear()
+            msg = Msg(body, subject)
+            asyncio.run(agent.handle(None, msg, public=subject.endswith(".msg")))
+            return msg.replies
+
+        for body in (b"[1]", b'"x"', b"7", b"null"):
+            got = ask(body)
+            if got != [{"error": "request is not a JSON object"}] or called:
+                out.append(f"body {body!r}: replies {got!r}, verbs called {called}")
+
+        def unknown(v):
+            return f"no such verb {v}; available: {', '.join(sorted(keep))}"
+        for verb in ([1], {}, 7, True):
+            got = ask(json.dumps({"verb": verb}).encode())
+            if got != [{"error": unknown(verb)}] or called:
+                out.append(f"verb {verb!r}: replies {got!r}, wanted the unknown-verb "
+                           f"refusal, verbs called {called}")
+        # Прежнее не меняется: не-JSON, неизвестная строка, обычный запрос.
+        if ask(b"junk") != [{"error": "request is not JSON"}]:
+            out.append("a non-JSON body must keep its old refusal")
+        if ask(b'{"verb": "nosuch"}') != [{"error": unknown("nosuch")}]:
+            out.append("an unknown string verb must keep its refusal")
+        got = ask(b'{"verb": "ping"}', "mop.mop.node.hyper.msg")
+        if got != [{"verb": "ping"}] or called != ["ping"]:
+            out.append(f"a well-formed ping must reach its verb: {got!r}, {called}")
+    finally:
+        agent.VERBS.clear()
+        agent.VERBS.update(keep)
+    return out
+
+
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
-                  check_timeouts_171):
+                  check_timeouts_171, check_intake):
         try:
             failed += check()
         except Exception as e:
