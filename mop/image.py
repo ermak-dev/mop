@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 
-from . import config, driver, llm, manifest, nomad, puppets, state
+from . import config, driver, llm, manifest, nomad, puppets, spec, state
 
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "pve-build.yml")
 
@@ -141,7 +141,7 @@ def restore(gone):
     и после неудачной сборки: старый образ на месте, папетам есть из чего
     клонироваться."""
     for p in gone:
-        nomad.register(puppets.job_spec(p["name"], p["origin"], p["llm"]))
+        nomad.register(spec.job_spec(p["name"], p["origin"], p["llm"]))
 
 
 def build(origin, got, out=None, fresh=False, force=False, on_line=None,

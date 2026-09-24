@@ -43,14 +43,16 @@ os.environ.update(PINNED)
 time.time = lambda: 1_790_000_000.0
 SNAPSHOT = os.path.join(os.path.dirname(os.path.realpath(__file__)), "spec_snapshot.json")
 
-from mop import puppets  # noqa: E402
+from mop import spec  # noqa: E402
 
 ORIGIN = "git@git.example.dev:someone/mop.git"
 
 
-def project_constraint(spec):
-    """Ограничение про проекты из спеки; None, если его там нет."""
-    for c in spec["Job"].get("Constraints") or []:
+def project_constraint(rendered):
+    """Ограничение про проекты из спеки; None, если его там нет. Литерал
+    ключа здесь нарочно, а не spec.PROJECTS_TARGET: проверка читает то, что
+    уедет в Nomad, а не то, что код о себе думает."""
+    for c in rendered["Job"].get("Constraints") or []:
         if c.get("LTarget") == "${meta.mop_projects}":
             return c
     return None
@@ -65,7 +67,7 @@ def serves(project, meta_value):
 
     Спеку собираем от ORIGIN этого проекта, а не от имени: проект в системе
     определяется ровно одним способом — basename origin без .git."""
-    c = project_constraint(puppets.job_spec(
+    c = project_constraint(spec.job_spec(
         f"pu-{project}-1", f"git@git.example.dev:someone/{project}.git"))
     assert c and c.get("Operand") == "regexp", f"no regexp constraint: {c!r}"
     return re.search(c["RTarget"], meta_value) is not None
@@ -116,13 +118,13 @@ CASES = [
 # чистой функцией: иначе узнать об этом можно только из лога задачи на узле,
 # куда мастер проекта не смотрит.
 def job(outer=True, constrained=True):
-    spec = puppets.job_spec("pu-mop-1", ORIGIN)["Job"]
+    j = spec.job_spec("pu-mop-1", ORIGIN)["Job"]
     if not outer:
-        spec["TaskGroups"][0]["Tasks"][0]["Config"]["args"] = ["-c", "старый врапер"]
-        spec["TaskGroups"][0]["Tasks"][0]["Env"].pop("PU_WRAPPER", None)
+        j["TaskGroups"][0]["Tasks"][0]["Config"]["args"] = ["-c", "старый врапер"]
+        j["TaskGroups"][0]["Tasks"][0]["Env"].pop("PU_WRAPPER", None)
     if not constrained:
-        spec["Constraints"] = None
-    return spec
+        j["Constraints"] = None
+    return j
 
 
 STALE = [
@@ -147,7 +149,7 @@ SPEC_INPUTS = [
 
 def render(name, origin, profile, cont):
     """Спека ровно так, как её увидит Nomad: JSON, в порядке ключей."""
-    return json.dumps(puppets.job_spec(name, origin, profile, cont=cont),
+    return json.dumps(spec.job_spec(name, origin, profile, cont=cont),
                       ensure_ascii=False, indent=1)
 
 
@@ -163,7 +165,7 @@ def check_snapshot():
         if got != want.get(key):
             bad += 1
             print(f"FAILED  rendered spec for {key} differs from the snapshot")
-        elif puppets.spec_is_stale(json.loads(want[key])["Job"]):
+        elif spec.spec_is_stale(json.loads(want[key])["Job"]):
             bad += 1
             print(f"FAILED  the snapshot spec for {key} reads as stale")
     if set(want) != {" ".join(str(x) for x in i) for i in SPEC_INPUTS}:
@@ -183,9 +185,9 @@ def main():
         return 0
     bad, cases = check_snapshot()
 
-    for what, spec, want in STALE:
+    for what, j, want in STALE:
         cases += 1
-        if puppets.spec_is_stale(spec) != want:
+        if spec.spec_is_stale(j) != want:
             bad += 1
             print(f"FAILED  {what}: спека "
                   f"{'признана устаревшей' if not want else 'признана свежей'}, "
@@ -202,14 +204,14 @@ def main():
     # Ограничение обязано быть в каждой спеке: папет без него садится куда
     # угодно, и вся проверка становится украшением.
     cases += 1
-    if project_constraint(puppets.job_spec("pu-mop-1", ORIGIN)) is None:
+    if project_constraint(spec.job_spec("pu-mop-1", ORIGIN)) is None:
         bad += 1
         print("FAILED  a job spec without the project constraint schedules anywhere")
 
     # Проект берётся из ORIGIN, а не из имени: имя — производное, и разойтись
     # они могут только при ручной регистрации, где ошибка и опаснее всего.
     cases += 1
-    c = project_constraint(puppets.job_spec("pu-anything-7", ORIGIN))
+    c = project_constraint(spec.job_spec("pu-anything-7", ORIGIN))
     if not re.search(c["RTarget"], "mop"):
         bad += 1
         print("FAILED  the constraint must follow the origin's project, not the name")
@@ -218,7 +220,7 @@ def main():
     # только на узле, падением каждого подъёма. bash -n ловит её здесь.
     cases += 1
     import subprocess
-    r = subprocess.run(["bash", "-n"], input=puppets.WRAPPER, text=True,
+    r = subprocess.run(["bash", "-n"], input=spec.WRAPPER, text=True,
                        capture_output=True)
     if r.returncode:
         bad += 1

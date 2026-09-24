@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import puppets  # noqa: E402
+from mop import puppets, spec  # noqa: E402
 
 ORIGIN = "git@git.example.dev:someone/mop.git"
 
@@ -45,15 +45,15 @@ def main():
             print(f"FAILED  {what}: got {got!r}, want {want!r}")
 
     # Узлы, которые проект обслуживают, — тем же выражением, что и в Nomad.
-    check("pve node with the image", puppets.unserved("mop", [node({"mop_projects": "rugent,mop"})]), False)
-    check("host node serves any", puppets.unserved("mop", [node({"mop_projects": "any"})]), False)
+    check("pve node with the image", spec.unserved("mop", [node({"mop_projects": "rugent,mop"})]), False)
+    check("host node serves any", spec.unserved("mop", [node({"mop_projects": "any"})]), False)
     # Свидетельство #118: pve-узлы без образа, SERVES `-`.
-    check("pve nodes without images", puppets.unserved("mop", [node({}), node({"mop_projects": ""})]), True)
-    check("other project's image only", puppets.unserved("mop", [node({"mop_projects": "mop2"})]), True)
+    check("pve nodes without images", spec.unserved("mop", [node({}), node({"mop_projects": ""})]), True)
+    check("other project's image only", spec.unserved("mop", [node({"mop_projects": "mop2"})]), True)
     # Узел с образом, на который Nomad не ставит, — не спасает.
-    check("serving node is down", puppets.unserved("mop", [node({"mop_projects": "mop"}, status="down")]), True)
-    check("serving node is closed", puppets.unserved("mop", [node({"mop_projects": "mop"}, eligible=False)]), True)
-    check("no nodes at all", puppets.unserved("mop", []), True)
+    check("serving node is down", spec.unserved("mop", [node({"mop_projects": "mop"}, status="down")]), True)
+    check("serving node is closed", spec.unserved("mop", [node({"mop_projects": "mop"}, eligible=False)]), True)
+    check("no nodes at all", spec.unserved("mop", []), True)
 
     # Диагноз: без узла — про образ, с узлом — про слоты.
     d = puppets._placement_issue(queued_job(), None, unserved=True)["diagnosis"]
