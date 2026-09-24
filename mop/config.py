@@ -340,6 +340,27 @@ NODE_SCOPED = (
 )
 
 
+# Настройки сервисов сервера (#176): .env на сервер не едет, и сервис видит
+# установку только окружением своего юнита. Список -- тот, по которому
+# `mop deploy` рендерит Environment= юнита (MOP_SERVER_SCOPED), один на юнит:
+# рукописные списки в задачах ролей разошлись с тем, что сервис читает, и
+# mop-cluster молча ходил на дефолтный порт и DC Nomad. Сверяет их с кодом
+# tests/deploy.py. Секретам здесь не место: юнит читаем всем на машине.
+SERVER_SCOPED = {
+    # MOP_HOME и MOP_USER -- узловые: их читают задачи bootstrap'а.
+    "mop-bootstrap": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
+                      "MOP_HOME", "MOP_USER"),
+    # Nomad (NOMAD_ADDR выводится из адреса сервера и порта, плюс DC) и то,
+    # что читает mop/spec.py: спецификацию папета собирает этот сервис, и
+    # профиль LLM по умолчанию тоже решает он (create без --llm).
+    "mop-cluster": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
+                    "MOP_HOME", "MOP_USER", "MOP_NOMAD_PORT", "MOP_POOL_DC",
+                    "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",
+                    "MOP_PUPPET_PATH", "MOP_DEFAULT_LLM"),
+    "mop-web": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
+                "MOP_NOMAD_PORT", "MOP_POOL_DC"),
+}
+
 # Что проект вправе просить себе сам — файлом `.mop` в корне своего
 # репозитория. Проект и есть проект: значения лежат рядом с кодом,
 # версионируются вместе с ним и принадлежат тому, кто владеет проектом;

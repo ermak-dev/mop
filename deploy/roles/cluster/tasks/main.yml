@@ -25,19 +25,17 @@
     mode: "0644"
   vars:
     unit:
+      name: mop-cluster
       description: "mop-cluster (сервис кластера: Nomad за шиной, глаголы пула на mop.*.cluster.rpc)"
       after: network-online.target nats.service nomad.service
-      env:
-        - |-
+      # Окружение -- config.SERVER_SCOPED (#176); здесь только комментарии к нему.
+      notes:
+        MOP_SERVER_LAN: |-
           # .env на сервер не едет: что сервису нужно знать об установке, приезжает
-          # юнитом. MOP_SERVER_LAN отвечает сразу за адрес шины и за NOMAD_ADDR
-          # (config.DERIVED), поэтому второй переменной для Nomad здесь нет.
-        - MOP_SERVER_LAN
-        - MOP_NATS_PORT
-        - "# Каталог сервера ходит на шину через TLS-прокси (#97)."
-        - MOP_HTTPS_PORT
-        - MOP_HOME
-        - MOP_USER
+          # юнитом. NOMAD_ADDR выводится из MOP_SERVER_LAN и MOP_NOMAD_PORT
+          # (config.DERIVED), поэтому своей переменной для него здесь нет.
+        MOP_HTTPS_PORT: "# Каталог сервера ходит на шину через TLS-прокси (#97)."
+        MOP_NOMAD_PORT: "# Nomad и то, что читает mop/spec.py: спецификацию папета собирает этот сервис (#176)."
       command: cluster serve
   notify: restart mop-cluster
 
