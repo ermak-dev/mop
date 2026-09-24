@@ -1159,11 +1159,15 @@ def check_pool_uniform():
     undo = no_network()
     try:
         uniform = getattr(config, "POOL_UNIFORM", None)
-        if not uniform or not {"MOP_HOME", "MOP_USER", "MOP_PUPPET_SEED", "MOP_MEM_MB"} <= set(uniform):
+        host_only = getattr(config, "HOST_UNIFORM", None)
+        if set(uniform or ()) != {"MOP_HOME", "MOP_USER", "MOP_PUPPET_SEED"} \
+                or set(host_only or ()) != {"MOP_MEM_MB"}:
             failed += 1
-            print(f"FAIL config.POOL_UNIFORM must name the settings the spec reads: {uniform!r}")
+            print(f"FAIL config.POOL_UNIFORM {uniform!r} / HOST_UNIFORM {host_only!r}: "
+                  f"paths and user on every host, MOP_MEM_MB on host-driver nodes")
         fn = getattr(deploy, "uniform_refusals", None)
-        installed = {n: config.get(n) for n in (uniform or ())}
+        installed = {n: config.get(n) for n in (uniform or ()) + (host_only or ())}
+        installed["MOP_MEM_MB"] = "12288"
 
         def listing(hostvars):
             return {"_meta": {"hostvars": hostvars},
@@ -1178,9 +1182,20 @@ def check_pool_uniform():
             ("the same value as a number",
              {"odd": {"mop_mem_mb": int(installed.get("MOP_MEM_MB") or 0)}}, []),
             ("no override", {"hyper": {"mop_driver": "pve"}}, []),
+            # MOP_MEM_MB -- MemoryMaxMB задачи. На host-узле задача и есть
+            # claude, и перекрытие расходится с сервером молча; на
+            # контейнерном задача -- врапер, а строка инвентаря -- размер тела
+            # (как на mop.corp.ermak.dev: группа puppet, mop_mem_mb "8192").
+            ("mop_mem_mb on a pve node", {"hyper": {"mop_driver": "pve", "mop_mem_mb": "8192"}}, []),
+            ("mop_mem_mb on a host node", {"odd": {"mop_mem_mb": "8192"}}, ["odd: mop_mem_mb"]),
+            ("mop_mem_mb on a host node, the installation's value",
+             {"odd": {"mop_mem_mb": "12288"}}, []),
+            # Пути и пользователь -- общие и для контейнерного узла.
+            ("mop_home on a pve node", {"hyper": {"mop_driver": "pve", "mop_home": "/srv/x"}},
+             ["hyper: mop_home"]),
         ]
         for what, hv, want in cases:
-            got = fn(listing(hv), installed) if fn else None
+            got = fn(listing(hv), installed, "host") if fn else None
             heads = sorted(g.split("=")[0] for g in got) if got is not None else None
             if heads != want:
                 failed += 1

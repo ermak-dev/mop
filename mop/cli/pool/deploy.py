@@ -51,9 +51,15 @@ def inventory_hosts(listing):
     return sorted(hosts)
 
 
-def uniform_refusals(listing, installed):
+def uniform_refusals(listing, installed, default):
     """Отказы по настройкам, одинаковым для всего пула (#190). -> [строка на
-    хост и настройку]. installed -- {настройка: значение установки}.
+    хост и настройку]. installed -- {настройка: значение установки}, default
+    -- MOP_DRIVER для хостов без своего mop_driver.
+
+    Настройки config.HOST_UNIFORM сверяются только на узлах, чей драйвер не
+    контейнерный: на контейнерном это размер тела, а не потолок задачи.
+    Драйвер, которого нет, сверяется как host -- отказ по нему самому скажет
+    driver_refusals.
 
     Перекрытие в инвентаре -- имя настройки строчными (так его находит
     шаблон node.env). Число из YAML и та же строка -- одно значение."""
@@ -61,7 +67,14 @@ def uniform_refusals(listing, installed):
     out = []
     for host in inventory_hosts(listing):
         mine = hostvars.get(host) or {}
+        try:
+            container = driver.is_container(
+                driver.of_node({"mop_driver": mine.get("mop_driver", default)}, node=host))
+        except RuntimeError:
+            container = False
         for name in sorted(installed):
+            if container and name in config.HOST_UNIFORM:
+                continue
             key = name.lower()
             if key in mine and str(mine[key]) != str(installed[name]):
                 out.append(f"{host}: {key}={mine[key]} differs from the installation's "
@@ -194,7 +207,9 @@ def main(argv):
         lib.fail(why)
         return 1
     refusals = (driver_refusals(listing, config.get("MOP_DRIVER"))
-                + uniform_refusals(listing, {n: config.get(n) for n in config.POOL_UNIFORM}))
+                + uniform_refusals(listing, {n: config.get(n) for n in
+                                             config.POOL_UNIFORM + config.HOST_UNIFORM},
+                                   config.get("MOP_DRIVER")))
     for why in refusals:
         lib.fail(why)
     if refusals:
