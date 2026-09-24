@@ -14,10 +14,26 @@
     name: python3-pip
     state: present
 
+# Задача двумя близнецами (#191): модуль pip в check mode при любом extra_args
+# отвечает changed=True, не глядя, и `mop deploy --check` показывал changed на
+# каждой машине. Настоящий прогон -- ровно прежняя задача; в check mode --
+# она же без extra_args, и модуль сверяет список с pip list: все site, что
+# видит пользователь пула (become -- с его HOME, а значит и с его user site).
+# PIP_USER вместо близнеца не годится: он сузил бы и pip list до user site, и
+# системный requests читался бы отсутствующим.
 - name: Python dependencies of mop
+  when: not ansible_check_mode
   become: "{{ pip_pool_user | default(false) }}"
   become_user: "{{ MOP_USER }}"
   ansible.builtin.pip:
     name: "{{ MOP_PIP_DEPS.split(',') }}"
     extra_args: --user --break-system-packages
+    state: present
+
+- name: Python dependencies of mop (check mode)
+  when: ansible_check_mode
+  become: "{{ pip_pool_user | default(false) }}"
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.pip:
+    name: "{{ MOP_PIP_DEPS.split(',') }}"
     state: present

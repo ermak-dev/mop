@@ -14,13 +14,27 @@
     name: unzip
     state: present
 
+# Стоит ли уже нужная версия -- спросить сам бинарь (#191). Без пробы get_url
+# решал по zip в /tmp, а зеркало на If-Modified-Since отвечает 200: настоящий
+# прогон каждый раз качал zip целиком и говорил ok по совпавшему sha1, а
+# `mop deploy --check` (HEAD, пустой временный файл) -- changed на каждой
+# машине. Проба ничего не меняет и потому идёт и в check mode.
+- name: Which nomad is installed
+  ansible.builtin.command: /usr/local/bin/nomad version
+  register: nomad_installed
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
 - name: Download nomad {{ nomad_version }}
+  when: nomad_installed.stdout_lines[:1] != ['Nomad v' ~ nomad_version]
   ansible.builtin.get_url:
     url: "{{ nomad_zip }}"
     dest: "/tmp/nomad_{{ nomad_version }}.zip"
     mode: '0644'
 
 - name: Install nomad binary
+  when: nomad_installed.stdout_lines[:1] != ['Nomad v' ~ nomad_version]
   become: yes
   ansible.builtin.unarchive:
     src: "/tmp/nomad_{{ nomad_version }}.zip"
