@@ -41,6 +41,35 @@ def refused_target(argv):
     return argv[0] if argv and argv[0] in RUN_TARGETS else None
 
 
+def inventory_hosts(listing):
+    """Все хосты `ansible-inventory --list`: у хоста без своих переменных
+    нет строки в _meta.hostvars, он есть только в списке группы."""
+    hosts = set((listing.get("_meta") or {}).get("hostvars") or {})
+    for name, group in listing.items():
+        if name != "_meta" and isinstance(group, dict):
+            hosts.update(group.get("hosts") or [])
+    return sorted(hosts)
+
+
+def uniform_refusals(listing, installed):
+    """Отказы по настройкам, одинаковым для всего пула (#190). -> [строка на
+    хост и настройку]. installed -- {настройка: значение установки}.
+
+    Перекрытие в инвентаре -- имя настройки строчными (так его находит
+    шаблон node.env). Число из YAML и та же строка -- одно значение."""
+    hostvars = (listing.get("_meta") or {}).get("hostvars") or {}
+    out = []
+    for host in inventory_hosts(listing):
+        mine = hostvars.get(host) or {}
+        for name in sorted(installed):
+            key = name.lower()
+            if key in mine and str(mine[key]) != str(installed[name]):
+                out.append(f"{host}: {key}={mine[key]} differs from the installation's "
+                           f"{name}={installed[name]}: the server builds every puppet's "
+                           f"spec with its own value")
+    return out
+
+
 def driver_refusals(listing, default):
     """Отказы по драйверам хостов инвентаря (#186). -> [строка на хост].
 
@@ -51,12 +80,8 @@ def driver_refusals(listing, default):
     Правило имени одно -- driver.of_node (#175): опечатка, дошедшая до meta
     Nomad, ловилась бы только читателями, по узлу за раз."""
     hostvars = (listing.get("_meta") or {}).get("hostvars") or {}
-    hosts = set(hostvars)
-    for name, group in listing.items():
-        if name != "_meta" and isinstance(group, dict):
-            hosts.update(group.get("hosts") or [])
     out = []
-    for host in sorted(hosts):
+    for host in inventory_hosts(listing):
         value = (hostvars.get(host) or {}).get("mop_driver", default)
         try:
             driver.of_node({"mop_driver": value}, node=host)
@@ -168,7 +193,8 @@ def main(argv):
     if why:
         lib.fail(why)
         return 1
-    refusals = driver_refusals(listing, config.get("MOP_DRIVER"))
+    refusals = (driver_refusals(listing, config.get("MOP_DRIVER"))
+                + uniform_refusals(listing, {n: config.get(n) for n in config.POOL_UNIFORM}))
     for why in refusals:
         lib.fail(why)
     if refusals:
