@@ -10,14 +10,15 @@ attach, ради живого терминала.
 узел. Шина сняла и то и другое: ничего из этого в коде больше нет.
 """
 import os
-import sys
 
 try:
     import nomad as _nomad
     import nomad.api.exceptions
 except ImportError:
-    sys.exit("API library required: pip install --user --break-system-packages "
-             "python-nomad")
+    # Отказ, а не выход (#187, как bus в #169): библиотека не кончает процесс.
+    # Одну строку из него делает тот, кто её импортировал (cli.run).
+    raise ImportError("API library required: pip install --user --break-system-packages "
+                      "python-nomad") from None
 
 from . import config, creds  # noqa: E402
 
