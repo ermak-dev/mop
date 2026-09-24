@@ -135,6 +135,20 @@ def needs_play(tasks, secrets):
     return bool(tasks or secrets)
 
 
+def split_address(address):
+    """`адрес[:порт]` от узла -> (адрес, порт или None). Чистая функция.
+
+    Порт шлёт host-узел со sshd не на 22 (#201); тело pve и узел на 22 шлют
+    голый адрес. Строка пришла с шины, поэтому порт — число в пределах, а
+    не что угодно в -e прогона: иное — ValueError, и answer отдаёт отказ."""
+    host, sep, port = address.rpartition(":")
+    if not sep:
+        return address, None
+    if not host or not port.isdigit() or not 0 < int(port) < 65536:
+        raise ValueError(f"bad node address {address!r}: wanted address[:port]")
+    return host, int(port)
+
+
 def argv(playbook, address, user, key, settings, project, name, clone, tasks, of_vars,
          secrets=None):
     """Аргументы прогона: одна машина по адресу, пользователь пула, ключ
@@ -144,6 +158,7 @@ def argv(playbook, address, user, key, settings, project, name, clone, tasks, of
     # Всё одним JSON'ом, и это не вкус: голое `-e k=v` со значением в
     # несколько слов ansible режет по пробелам на несколько пар, и до ssh
     # доезжало одно `-o` («no argument after keyword -o», первый живой прогон).
+    host, port = split_address(address)
     extra = {"mop_project": project, "mop_puppet": name, "mop_clone": clone,
              "ansible_user": user,
              "ansible_ssh_private_key_file": key,
@@ -151,6 +166,8 @@ def argv(playbook, address, user, key, settings, project, name, clone, tasks, of
                                         "-o UserKnownHostsFile=/dev/null "
                                         "-o IdentitiesOnly=yes -o ConnectTimeout=10 "
                                         "-o LogLevel=ERROR"}
+    if port is not None:
+        extra["ansible_port"] = port
     if tasks:
         extra["mop_bootstrap_tasks"] = tasks
     if of_vars:
@@ -159,7 +176,7 @@ def argv(playbook, address, user, key, settings, project, name, clone, tasks, of
     # прогона виден в ps любому на сервере.
     if secrets:
         extra["mop_secrets_dir"] = secrets
-    return ["ansible-playbook", "-i", f"{address},", playbook,
+    return ["ansible-playbook", "-i", f"{host},", playbook,
             "-e", json.dumps(settings, ensure_ascii=False),
             "-e", json.dumps(extra, ensure_ascii=False)]
 

@@ -185,6 +185,12 @@ DEFAULTS = {
     "MOP_HTTPS_PORT": "443",
     # WebSocket-листенер nats-server: только на петле, TLS терминирует nginx.
     "MOP_NATS_WS_PORT": "4280",
+    # Порт sshd узла, которым сервер ходит на него сам -- bootstrap песочницы
+    # host-папета (#201). Узловой: у узла на WSL sshd на 2222, и знал это
+    # один ssh config root'а на контроллере. В node.env его рендерит
+    # стандартный ansible_port строки инвентаря -- тот же, которым туда
+    # ходит сам `mop deploy`.
+    "MOP_SSH_PORT": "22",
 
     # ── драйвер pve: тело папета — контейнер LXC ─────────────────────────
     # Всё здесь — свойства установки, а не продукта: где лежат диски тел, из
@@ -348,6 +354,7 @@ NODE_SCOPED = (
     "MOP_BODY_MEM_CAP_MB",
     "MOP_BODY_DISK_CAP_GB",
     "MOP_BODY_CORES_CAP",
+    "MOP_SSH_PORT",        # в node.env из ansible_port инвентаря (#201)
 )
 
 

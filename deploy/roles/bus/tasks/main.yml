@@ -79,6 +79,10 @@
 #
 # Список -- из config.NODE_SCOPED, один на систему: второй здесь означал бы
 # настройку, которая молча не доехала.
+#
+# Порт sshd узла (MOP_SSH_PORT, #201) строка хоста называет стандартным
+# ansible_port, а не mop_ssh_port: по нему же ходит сам прогон, и два имени
+# одного порта разошлись бы -- deploy доехал бы, а bootstrap нет.
 - name: What this node knows about itself
   become: yes
   ansible.builtin.copy:
@@ -90,7 +94,8 @@
       # Узловые настройки. Кладёт `mop deploy` из инвентаря -- править
       # здесь бесполезно, следующий прогон перепишет.
       {% for k in MOP_NODE_SCOPED.split(',') %}
-      {{ k }}={{ hostvars[inventory_hostname][k | lower] | default(lookup('vars', k, default='')) }}
+      {% set own = 'ansible_port' if k == 'MOP_SSH_PORT' else k | lower %}
+      {{ k }}={{ hostvars[inventory_hostname][own] | default(lookup('vars', k, default='')) }}
       {% endfor %}
   notify: restart mop-agent
 

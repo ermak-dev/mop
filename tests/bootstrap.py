@@ -149,6 +149,39 @@ def main():
         failed += 1
         print(f"FAIL secrets in bootstrap: {e}")
 
+    # HYPOTHESIS (#201): прогон ходит на host-узел портом 22, а у узла на
+    # WSL sshd слушает 2222 -- на 22 отвечает другой sshd, и вход отвергнут
+    # (Permission denied (publickey)). Порт знал только ssh config root'а на
+    # контроллере. SOLUTION: узел отдаёт адрес с портом (`адрес:порт`, если
+    # не 22), прогон кладёт порт в ansible_port своего инвентаря; голый адрес
+    # -- сегодняшний прогон без ansible_port. Порт -- число, пришедшее от
+    # узла: не число -- отказ, а не строка в -e. STATUS: FIXED — see #201
+    try:
+        def inventory_and_extra(address):
+            a = bootstrap.argv("/x/deploy/bootstrap.yml", address, "pool", "/k",
+                               {}, "proj", "pu-proj-1", "/c", None, None)
+            return a[a.index("-i") + 1], json.loads(a[a.index("-e", a.index("-e") + 1) + 1])
+        inv, extra = inventory_and_extra("192.168.1.37:2222")
+        if inv != "192.168.1.37," or extra.get("ansible_port") != 2222:
+            failed += 1
+            print(f"FAIL argv for address:port must play the address on ansible_port: "
+                  f"-i {inv!r}, ansible_port={extra.get('ansible_port')!r}")
+        inv, extra = inventory_and_extra("10.77.38.100")
+        if inv != "10.77.38.100," or "ansible_port" in extra:
+            failed += 1
+            print(f"FAIL argv for a bare address must stay today's: -i {inv!r}, {extra}")
+        for bad in ("192.168.1.37:22x", "192.168.1.37:0", "192.168.1.37:70000", ":2222"):
+            try:
+                inv, extra = inventory_and_extra(bad)
+            except ValueError:
+                continue
+            failed += 1
+            print(f"FAIL argv must refuse the address {bad!r}, played -i {inv!r} "
+                  f"ansible_port={extra.get('ansible_port')!r}")
+    except (AttributeError, TypeError) as e:
+        failed += 1
+        print(f"FAIL ssh port in bootstrap: {e}")
+
     # HYPOTHESIS (#133): workspace хранился на проект и писался четырьмя
     # дорогами; удаление из рабочей копии не доходило, и старт играл
     # проектную копию из origin. SOLUTION: workspace -- файл папета, старт
