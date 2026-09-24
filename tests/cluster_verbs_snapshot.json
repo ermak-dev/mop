@@ -3,145 +3,145 @@
 "[\"\", \"admin\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"admin\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"\", \"mop\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"add\", \"admin\", \"foreign\", \"git@h:g/mop.git\"]": {
@@ -1425,145 +1425,145 @@
 "[\"nosuch\", \"admin\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"admin\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"nosuch\", \"mop\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[\"ping\", \"admin\", \"foreign\", \"git@h:g/mop.git\"]": {
@@ -4374,605 +4374,605 @@
 "[7, \"admin\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"admin\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[7, \"mop\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"admin\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[[1], \"mop\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"admin\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[null, \"mop\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"admin\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"foreign\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"foreign\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"none\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"none\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"none\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"own\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"own\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"own\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 },
 "[{}, \"mop\", \"unlabeled\", null]": {
 "called": [],
 "reply": {
-"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"error": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 }
 }
 },
 "refusal": {
-"[\"\", \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"foreign\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"none\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"own\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"admin\", \"unlabeled\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"foreign\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"none\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"own\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"\", \"mop\", \"unlabeled\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"foreign\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"none\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"own\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"admin\", \"unlabeled\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"foreign\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"none\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"own\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"\", \"mop\", \"unlabeled\", null]": "no such verb ; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
 "[\"add\", \"admin\", \"foreign\", \"git@h:g/mop.git\"]": null,
 "[\"add\", \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": null,
 "[\"add\", \"admin\", \"foreign\", null]": null,
@@ -5141,30 +5141,30 @@
 "[\"nodes\", \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "nodes is the operator's verb: a node is shared by every project on it, and mop sees only its own puppets",
 "[\"nodes\", \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "nodes is the operator's verb: a node is shared by every project on it, and mop sees only its own puppets",
 "[\"nodes\", \"mop\", \"unlabeled\", null]": "nodes is the operator's verb: a node is shared by every project on it, and mop sees only its own puppets",
-"[\"nosuch\", \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"foreign\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"none\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"own\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"admin\", \"unlabeled\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"foreign\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"none\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"own\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[\"nosuch\", \"mop\", \"unlabeled\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"foreign\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"none\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"own\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"admin\", \"unlabeled\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"foreign\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"none\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"own\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[\"nosuch\", \"mop\", \"unlabeled\", null]": "no such verb nosuch; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
 "[\"ping\", \"admin\", \"foreign\", \"git@h:g/mop.git\"]": null,
 "[\"ping\", \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": null,
 "[\"ping\", \"admin\", \"foreign\", null]": null,
@@ -5525,102 +5525,102 @@
 "[\"update\", \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "pu-x-1 carries no origin: an old registration, and whose it is cannot be told from the job — only the operator reaches it",
 "[\"update\", \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "git@h:g/rugent.git belongs to project rugent, not mop: a master works inside its own project only",
 "[\"update\", \"mop\", \"unlabeled\", null]": "pu-x-1 carries no origin: an old registration, and whose it is cannot be told from the job — only the operator reaches it",
-"[7, \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"foreign\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"none\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"own\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"admin\", \"unlabeled\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"foreign\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"none\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"own\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[7, \"mop\", \"unlabeled\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"foreign\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"none\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"own\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"admin\", \"unlabeled\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"foreign\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"none\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"own\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[[1], \"mop\", \"unlabeled\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"foreign\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"none\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"own\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"admin\", \"unlabeled\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"foreign\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"none\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"own\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[null, \"mop\", \"unlabeled\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"foreign\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"none\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"own\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"admin\", \"unlabeled\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"foreign\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"none\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"own\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
-"[{}, \"mop\", \"unlabeled\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
+"[7, \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"foreign\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"none\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"own\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"admin\", \"unlabeled\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"foreign\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"none\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"own\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[7, \"mop\", \"unlabeled\", null]": "no such verb 7; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"foreign\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"none\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"own\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"admin\", \"unlabeled\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"foreign\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"none\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"own\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[[1], \"mop\", \"unlabeled\", null]": "no such verb [1]; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"foreign\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"none\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"own\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"admin\", \"unlabeled\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"foreign\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"none\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"own\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[null, \"mop\", \"unlabeled\", null]": "no such verb None; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"foreign\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"none\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"none\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"none\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"own\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"own\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"own\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"admin\", \"unlabeled\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"foreign\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"foreign\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"none\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"none\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"none\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"own\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"own\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"own\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"unlabeled\", \"git@h:g/mop.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"unlabeled\", \"git@h:g/rugent.git\"]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit",
+"[{}, \"mop\", \"unlabeled\", null]": "no such verb {}; project verbs: ping, roster, pool, add, update, restart, stop, delete, alloc, spec, secret_put, secret_list, secret_remove, landing; operator verbs: nodes, drain, up, forget, meta, projects, project_add, project_delete, project_limit"
 },
 "sets": {
 "ACTING_VERBS": [
@@ -5662,7 +5662,8 @@
 "spec",
 "secret_put",
 "secret_list",
-"secret_remove"
+"secret_remove",
+"landing"
 ],
 "SECRET_VERBS": [
 "secret_put",
@@ -5683,6 +5684,7 @@
 "secret_put",
 "secret_list",
 "secret_remove",
+"landing",
 "nodes",
 "drain",
 "up",

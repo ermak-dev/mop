@@ -28,11 +28,12 @@ import collections
 import json
 import os
 import threading
+import time
 
 import base64
 
-from . import (bootstrap, bus, busnames, config, creds, natsconf, nodes, nomad,
-               project_secrets, projects, puppets, service, spec, state)
+from . import (bootstrap, bus, busnames, config, creds, landing, natsconf, nodes,
+               nomad, project_secrets, projects, puppets, service, spec, state)
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
@@ -608,6 +609,42 @@ def _secret_remove(project, req):
     return {"ok": True}
 
 
+# ─── глагол: токен посадки (#42) ─────────────────────────────────────────
+# Take -- проверка и запись одним шагом: глаголы идут в потоках петли, и два
+# мастера, прочтя «свободен» оба, иначе взяли бы токен оба.
+_landing_lock = threading.Lock()
+
+
+def _landing(project, req):
+    """take/give/show токена посадки проекта. Проект -- из субъекта; у
+    оператора (admin) токена нет, он называет проект полем."""
+    if project == bus.ADMIN:
+        project = req.get("project")
+        if not project:
+            return {"error": "landing: the token is a project's — name the project"}
+    action = req.get("action") or "show"
+    if action == "show":
+        return {"ok": True, "project": project, "token": landing.read().get(project)}
+    if action not in ("take", "give"):
+        return {"error": f"landing: no such action {action}; take, give or show"}
+    who = req.get("holder")
+    if not who:
+        return {"error": "landing: no holder — the token is taken by a person's "
+                         "login on the bus"}
+    force = bool(req.get("force"))
+    with _landing_lock:
+        tokens = landing.read()
+        if action == "take":
+            new, got = landing.take(tokens, project, who, req["puppet"],
+                                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                    force=force)
+        else:
+            new, got = landing.give(tokens, project, who, force=force)
+        if new != tokens:
+            landing.write(new)
+    return dict(got, project=project)
+
+
 # ─── права: одна таблица (#173) ──────────────────────────────────────────
 # Раньше -- пять параллельных наборов и HANDLERS: новый глагол правился в
 # нескольких местах, и право расходилось молча. Порядок строк -- прежний
@@ -639,6 +676,7 @@ VERBS = {
     "secret_put":     Verb(_secret_put,     SECRET,  False, False),
     "secret_list":    Verb(_secret_list,    SECRET,  False, False),
     "secret_remove":  Verb(_secret_remove,  SECRET,  False, False),
+    "landing":        Verb(_landing,        PROJECT, False, False),
     "nodes":          Verb(_nodes,          ADMIN,   False, False),
     "drain":          Verb(_drain,          ADMIN,   False, False),
     "up":             Verb(_up,             ADMIN,   False, False),
@@ -689,7 +727,8 @@ def answer(project, req):
 # ─── подписчик ───────────────────────────────────────────────────────────
 def journal(project, req, out):
     """Строки журнала на один ответ."""
-    who = req.get("name") or req.get("node") or req.get("origin") or ""
+    who = (req.get("name") or req.get("node") or req.get("origin")
+           or req.get("puppet") or "")
     return [f"{project}.{req.get('verb')} {who}: {out.get('error') or 'ok'}"]
 
 
