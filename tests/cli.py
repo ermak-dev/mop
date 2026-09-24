@@ -963,7 +963,7 @@ def check_output_182():
     through = lambda main, argv: silent_run(lambda a: cli.run(main, a), argv)
     keep = (image.prepare, image.build, image.clear, image.bake, image.announce,
             nomad.register, spec.job_spec, projects.read, natsconf.apply,
-            natsconf.reload)
+            natsconf.reload, natsconf.apply_callout)
     try:
         got = {"project": "p", "asks": {"MOP_CORES": "8"}, "alien": [], "legacy": []}
         image.prepare = lambda origin, root: got
@@ -1007,6 +1007,8 @@ def check_output_182():
         projects.read = lambda: ["git@h:g/p.git"]
         natsconf.apply = lambda names, creds: (True, None)
         natsconf.reload = lambda: None
+        # callout.conf (#206) -- тот же /etc/nats: здесь не пишется.
+        natsconf.apply_callout = lambda: False
         for argv in ([], ["--reload"]):
             out, err, code = through(users.main, argv)
             if out or err or code:
@@ -1016,7 +1018,7 @@ def check_output_182():
     finally:
         (image.prepare, image.build, image.clear, image.bake, image.announce,
          nomad.register, spec.job_spec, projects.read, natsconf.apply,
-         natsconf.reload) = keep
+         natsconf.reload, natsconf.apply_callout) = keep
         undo()
     return failed
 

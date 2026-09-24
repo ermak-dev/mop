@@ -56,4 +56,8 @@ authorization {
   # и узлы -- из base-users.json от `mop deploy`, папеты -- из реестра
   # сервера. Одним файлом: include внутри массива users NATS не принимает.
   include ./users.conf
+  # Блок auth callout (#206), пишет `mop cluster users`: при
+  # MOP_AUTH_CALLOUT=off в файле только комментарий. Свой файл, потому что
+  # его смену nats берёт только рестартом, а users.conf -- reload'ом.
+  include ./callout.conf
 }

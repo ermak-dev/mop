@@ -33,3 +33,11 @@
     state: restarted
     daemon_reload: yes
 
+
+# Сервис auth callout (#206): после смены пакета -- на новом коде.
+- name: restart mop-callout
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-callout
+    state: restarted
+    daemon_reload: yes

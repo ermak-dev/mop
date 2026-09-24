@@ -49,3 +49,5 @@
     enabled: yes
     state: started
     daemon_reload: yes
+
+- ansible.builtin.include_tasks: callout.yml

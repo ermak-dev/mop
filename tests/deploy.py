@@ -116,11 +116,14 @@ VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "1
         "MOP_NATS_PORT": "4222", "MOP_HTTPS_PORT": "443", "MOP_NOMAD_PORT": "4646",
         "MOP_POOL_DC": "home", "MOP_WEB_PORT": "8080", "MOP_WEB_BIND": "0.0.0.0",
         "MOP_GIT_NAME": "Pool Bot", "MOP_GIT_EMAIL": "bot@example.dev",
-        "MOP_NATS_MONITOR_PORT": "8222", "MOP_AUTH_CALLOUT": "off"}
+        "MOP_NATS_MONITOR_PORT": "8222", "MOP_AUTH_CALLOUT": "off",
+        "MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS": "anton:admin; ivan:user:rugent"}
 # Значения, которые юнит обязан донести целиком (#185): пробел, кавычки,
 # обратный слеш. Подставляются вместо настройки из набора юнита.
 AWKWARD = ("Pool Bot", 'say "hi"', "a\\b", "tab\there", "it's", "100%", "%h")
-UNITS = {"mop-bootstrap": "bootstrap", "mop-cluster": "cluster", "mop-web": "web"}
+UNITS = {"mop-bootstrap": "bootstrap", "mop-cluster": "cluster", "mop-web": "web",
+         # auth callout (#206): часть шины, ставит роль bus.
+         "mop-callout": "bus"}
 # Исключения синка пакета до #157, во всех четырёх копиях одни и те же.
 EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml"]
 # Что #176 добавляет в юнит mop-cluster: всё это сервис читает, а юнит не
@@ -143,6 +146,8 @@ PINNED = {
     'mop-cluster': '[Unit]\nDescription=mop-cluster (сервис кластера: Nomad за шиной, глаголы пула на mop.*.cluster.rpc)\nAfter=network-online.target nats.service nomad.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет: что сервису нужно знать об установке, приезжает\n# юнитом. MOP_SERVER_LAN отвечает сразу за адрес шины и за NOMAD_ADDR\n# (config.DERIVED), поэтому второй переменной для Nomad здесь нет.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_HOME=/home/mopuser\nEnvironment=MOP_USER=mopuser\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop cluster serve\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n',
     'mop-web': '[Unit]\nDescription=mop-web (дашборд пула: состояние по HTTP)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет, а адрес сервера обязателен: без него config\n# отказывается работать (и правильно). Окружение старше .env, поэтому\n# юнит и есть источник этой настройки на сервере.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_NOMAD_PORT=4646\nEnvironment=MOP_POOL_DC=home\nEnvironment=PYTHONUNBUFFERED=1\n# Через диспетчер: он ставит PYTHONPATH, без него командлет пакета не найдёт.\nExecStart=/home/mopuser/mop/bin/mop web --port 8080 --bind 0.0.0.0\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n',
 }
+# Юнит auth callout (#206) -- новый: снимок с его появления, байт в байт.
+PINNED["mop-callout"] = '[Unit]\nDescription=mop-callout (auth callout шины: кто входит, решает провайдер личностей)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# Шина на петле. Пароль пользователя callout, сиды издателя и xkey --\n# файлами 0600 в /etc/nats, не здесь: юнит читаем всем.\nEnvironment=MOP_NATS_PORT=4222\nEnvironment=MOP_AUTH_CALLOUT=off\nEnvironment=MOP_AUTH_PROVIDER=file\nEnvironment="MOP_OPERATORS=anton:admin; ivan:user:rugent"\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop callout\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n'
 
 
 def settings_read(path):
@@ -207,9 +212,14 @@ def deploy_files():
 
 def unit_task(role, unit):
     """Задача роли, что ставит юнит: её src и vars."""
+    def flat(tasks):
+        # Юнит под условием -- в block (mop-callout, #206): смотрим и внутрь.
+        for t in tasks or []:
+            yield t
+            yield from flat((t or {}).get("block"))
     for f in os.listdir(os.path.join(DEPLOY, "roles", role, "tasks")):
         with open(os.path.join(DEPLOY, "roles", role, "tasks", f)) as fh:
-            for t in yaml.safe_load(fh) or []:
+            for t in flat(yaml.safe_load(fh)):
                 tmpl = (t or {}).get("ansible.builtin.template") or {}
                 if tmpl.get("dest") == f"/etc/systemd/system/{unit}.service":
                     return tmpl, t.get("vars") or {}
@@ -637,7 +647,8 @@ def main():
         # (#176); тот же, что был, плюс добавленное этим тикетом.
         check(f"{unit}: no hand-typed env list in the task",
               "env" not in (uvars.get("unit") or {}), (uvars.get("unit") or {}).get("env"))
-        was = re.findall(r"^Environment=([A-Z_]+)=", PINNED[unit], re.M)
+        # И в кавычках (#185): значение с пробелом systemd иначе разрезал бы.
+        was = re.findall(r'^Environment="?([A-Z_]+)=', PINNED[unit], re.M)
         now = list(scoped.get(unit, ())) + ["PYTHONUNBUFFERED"]
         want = was + list(ADDED.get(unit, ()))
         check(f"{unit}: the env set as before plus the additions",
@@ -817,6 +828,29 @@ def main():
                 got = f"{type(e).__name__}: {e}"
             check(f"node.env: MOP_SSH_PORT from {what}", got ==
                   (want, host.get("mop_driver", installed.get("MOP_DRIVER"))), got)
+
+    # ── callout.conf -- рестарт, users.conf -- reload (#206) ────────────
+    # Блок auth_callout nats reload'ом не берёт и валит весь reload (стенд
+    # #206); смену его файла прогон обязан отдать рестарту.
+    # STATUS: FIXED — see #206
+    ptasks = yaml.safe_load(open(os.path.join(DEPLOY, "roles", "bus", "tasks", "projects.yml")))
+    by = {t.get("name"): t for t in ptasks}
+    after = by.get("Callout file of the bus, after") or {}
+    check("bus: a changed callout.conf restarts nats",
+          (after.get("ansible.builtin.stat") or {}).get("path") == "/etc/nats/callout.conf"
+          and after.get("notify") == "restart nats", after)
+    check("bus: a changed users.conf still reloads nats",
+          (by.get("Users file of the bus, after") or {}).get("notify") == "reload nats")
+    users_task = by.get("Users file of the bus, written by the server") or {}
+    check("bus: mop cluster users knows whether the callout is on",
+          "MOP_AUTH_CALLOUT" in (users_task.get("environment") or {}), users_task.get("environment"))
+    names = [t.get("name") for t in ptasks]
+    check("bus: the callout file is read before and after mop cluster users",
+          names.index("Callout file of the bus, before") < names.index(users_task.get("name"))
+          < names.index("Callout file of the bus, after") if after and users_task else False)
+    conf = open(os.path.join(DEPLOY, "roles", "bus", "templates", "nats-server.conf.j2")).read()
+    check("nats-server.conf includes callout.conf inside authorization",
+          re.search(r"authorization \{[^}]*include \./callout\.conf", conf) is not None)
 
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")

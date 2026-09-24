@@ -429,6 +429,10 @@ SERVER_SCOPED = {
                     # без (#206): без настройки сервис вернул бы людей и
                     # папетов в статический список
                     "MOP_AUTH_CALLOUT"),
+    # Сервис auth callout (#206): шина на петле, провайдер личностей. Пароли
+    # и сиды -- файлами 0600 в /etc/nats, не здесь: юнит читаем всем.
+    "mop-callout": ("MOP_NATS_PORT", "MOP_AUTH_CALLOUT", "MOP_AUTH_PROVIDER",
+                    "MOP_OPERATORS"),
     "mop-web": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                 "MOP_NOMAD_PORT", "MOP_POOL_DC"),
 }
