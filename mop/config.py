@@ -36,7 +36,13 @@ import pwd
 from . import fsutil
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-ENV_FILE = os.path.join(PROJECT, ".env")
+# MOP_ENV_FILE -- другой файл вместо .env клона (#217). Нужен проверкам:
+# изоляция (tests/hermetic.py, #209) подменяла ENV_FILE только в своём
+# процессе, и командлет, запущенный проверкой через bin/mop, читал настоящий
+# .env репозитория -- на контроллере с MOP_HOME в нём проверка краснела.
+# Переменная окружения наследуется дочерними процессами, атрибут модуля --
+# нет. Настройкой (SETTINGS) не является: это вопрос «где лежат настройки».
+ENV_FILE = os.environ.get("MOP_ENV_FILE") or os.path.join(PROJECT, ".env")
 
 # Что узел знает о себе сам. Формат тот же примитивный, что у .env; кладёт файл
 # `mop deploy`, собирая его из инвентаря — глобального значения группы и
