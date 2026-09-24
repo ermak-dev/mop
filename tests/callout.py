@@ -159,24 +159,34 @@ def main():
           (out["aud"], out["sub"], out["iss"], out["nats"]["type"]) ==
           (r["nats"]["server_id"]["id"], r["nats"]["user_nkey"], V["issuer"],
            "authorization_response"), out)
+    # Две стороны с #207: публикация -- явным списком с логином вызывающего,
+    # подписка -- прежние маски. Той же функцией, что рендерит users.conf.
     rights = operators.permissions(Humans.PEOPLE["anton"][1])
-    want = {"allow": rights["allow"]}
-    if rights["deny"]:
-        want["deny"] = rights["deny"]
+
+    def side(allow, deny):
+        return {"allow": allow, **({"deny": deny} if deny else {})}
+    want_pub = side(rights["publish"], rights["publish_deny"])
+    want_sub = side(rights["allow"], rights["deny"])
     check("human: the claim is for this connection, in $G, by name",
           claim and (claim["sub"], claim["aud"], claim["name"], claim["iss"]) ==
           (r["nats"]["user_nkey"], "$G", "anton", V["issuer"]), claim)
-    check("human: publish rights are today's (operators.permissions)",
-          claim and claim["nats"]["pub"] == want, claim and claim["nats"].get("pub"))
-    check("human: subscribe rights equal publish, as in users.conf today",
-          claim and claim["nats"]["sub"] == want, claim and claim["nats"].get("sub"))
+    check("human: publish rights are operators.permissions' publish side",
+          claim and claim["nats"]["pub"] == want_pub, claim and claim["nats"].get("pub"))
+    check("human: subscribe rights are operators.permissions' subscribe side",
+          claim and claim["nats"]["sub"] == want_sub, claim and claim["nats"].get("sub"))
     # exp закрывает соединение в срок (стенд #206): при лежащем callout
     # человек не вернулся бы, а «живые соединения живут» -- обещание перехода.
     check("human: the claim never expires", claim and "exp" not in claim, claim)
     out, claim = answer(request("ivan", "i-pw"))
     rights = operators.permissions(Humans.PEOPLE["ivan"][1])
     check("user role: rights of its projects, deny omitted when empty",
-          claim and claim["nats"]["pub"] == {"allow": rights["allow"]}, claim and claim["nats"])
+          claim and claim["nats"]["pub"] == {"allow": rights["publish"]}
+          and claim["nats"]["sub"] == {"allow": rights["allow"]}, claim and claim["nats"])
+    # #207: логин -- токен субъекта; писать от чужого имени нельзя.
+    pub = (claim or {}).get("nats", {}).get("pub", {}).get("allow", [])
+    check("user role: publishes rpc under its own login only",
+          busnames.node("rugent", "*", "rpc", login="ivan") in pub
+          and busnames.node("rugent", "*", "rpc", login="anton") not in pub, pub)
     refused("human over plain nats (#105: WebSocket only)", request("anton", "a-pw", "nats"),
             ["WebSocket"])
     refused("human with a wrong password", request("anton", "nope"), ["anton", "wrong password"])

@@ -6,7 +6,8 @@ auth_users, публикует запрос на $SYS.REQ.USER.AUTH, и отве
 
   * человек -- провайдер личностей (#205, identity.provider): логин и пароль;
     права -- operators.permissions(Identity), те же, что рендерит
-    users.conf сегодня. Только через WebSocket, как статическая запись с
+    users.conf сегодня: публикация с его логином токеном субъекта (#207),
+    подписка -- маски проектов. Только через WebSocket, как статическая запись с
     allowed_connection_types (#105): поле в JWT пользователя nats-server
     2.14.6 из ответа callout не применяет (стенд #203), поэтому -- отказом
     здесь, по client_info.type;
@@ -129,10 +130,12 @@ def rights(login, ctype, password, humans, puppets):
         raise identity.Refused(f"{login}: people connect over WebSocket only "
                                f"(mop join, wss through the proxy), not {ctype or 'this'}")
     who = humans.authenticate(login, password)
+    # Две стороны (#207): публикация -- явным списком с логином вызывающего
+    # токеном субъекта, подписка -- маски проектов. Та же функция, что
+    # рендерит статическую запись: своей сборки прав здесь нет.
     p = operators.permissions(who)
-    # Подписка -- те же маски, что публикация: так пишет users.conf (_perms).
-    side = _side(p["allow"], p["deny"])
-    return who.login, {"pub": side, "sub": dict(side)}
+    return who.login, {"pub": _side(p["publish"], p["publish_deny"]),
+                       "sub": _side(p["allow"], p["deny"])}
 
 
 def respond(req, humans, puppets, keys_, now=None):
