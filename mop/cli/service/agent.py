@@ -4,7 +4,8 @@
   mop agent --check    ask this node's agent over the bus whether it answers
 
 One per node, under systemd, outside the job spec (docs/BUS.md). The unit
-still starts it as `python3 -m mop.agent`, which lands here (#150).
+starts it as `mop agent` (#172); units not yet rolled out still start
+`python3 -m mop.agent`, which lands here too (#150).
 
 Runs on a node: nothing here may import what a node does not have
 (python-nomad, the installation's .env) -- hence no mop.cli.lib.

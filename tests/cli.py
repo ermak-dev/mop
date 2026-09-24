@@ -317,6 +317,7 @@ def main():
     failed += check_pool_uniform()
     failed += check_node_memory_197()
     failed += check_fallback_model_183()
+    failed += check_agent_on_node_172()
     failed += check_bus_import_169()      # последними: перезагружают модули
     failed += check_nomad_import_187()
 
@@ -1431,6 +1432,39 @@ def no_network():
             else:
                 os.environ[k] = v
     return undo
+
+
+def check_agent_on_node_172():
+    """#172: юнит агента переезжает с `python3 -m mop.agent` на `mop agent`,
+    а на узле .env нет -- только node.env. Считалось, что диспетчер откажет
+    там на REQUIRED; не отказывает: require зовёт только lib.cluster, а
+    командлет агента его не берёт. Проверка зелёная с первого прогона и
+    закрепляет нынешнее поведение, а не чинит: отказ здесь уронил бы агента
+    на каждом узле, как только юнит переедет. Живьём то же на hyper:
+    `cd / && ~/mop/bin/mop agent --check` -- exit 0, subscribed.
+
+    Узел здесь -- временный дом с одним node.env, .env нет, каталог `/`.
+    Дальше отказа на настройках команда дойти обязана: до агента -- его
+    отказ на кредах шины, либо, без nats-py, отказ командлета про библиотеку.
+    STATUS: FIXED — see #172"""
+    import subprocess
+    import tempfile
+    home = tempfile.mkdtemp(prefix="mop-node-172-")
+    os.makedirs(os.path.join(home, ".config", "mop"))
+    with open(os.path.join(home, ".config", "mop", "node.env"), "w") as f:
+        f.write("MOP_DRIVER=host\nMOP_USER=mopuser\n")
+    env = hermetic.child_env({"HOME": home,
+                              "MOP_ENV_FILE": os.path.join(home, "no-such.env"),
+                              "MOP_NODE": "hyper"})
+    r = subprocess.run(["bash", os.path.join(ROOT, "bin", "mop"), "agent", "--check"],
+                       cwd="/", env=env, capture_output=True, text=True, timeout=60)
+    out = r.stdout + r.stderr
+    reached = "no bus credentials" in out or "bus library needed" in out
+    if "required settings not filled" in out or not reached:
+        print(f"FAIL mop agent --check on a node with node.env and no .env must reach "
+              f"the agent: rc {r.returncode}, {out.strip()!r}")
+        return 1
+    return 0
 
 
 def check_bus_import_169():

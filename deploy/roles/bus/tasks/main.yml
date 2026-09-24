@@ -234,7 +234,7 @@
 - name: Confirm the agent is connected
   become: yes
   become_user: "{{ MOP_USER }}"
-  ansible.builtin.command: /usr/bin/python3 -m mop.agent --check
+  ansible.builtin.command: "{{ mop_home }}/bin/mop agent --check"
   args:
     chdir: "{{ mop_home }}"
   environment:

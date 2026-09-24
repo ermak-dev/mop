@@ -746,6 +746,39 @@ def check_identity_copy_167(check, ptasks):
               any(k == "stat" and "operators" in str(p) for k, p, _ in done), done)
 
 
+def check_agent_unit_172(check, can_render):
+    """HYPOTHESIS (#172): юнит агента и проверка deploy зовут переходный
+    `python3 -m mop.agent` (#150), а не командлет. Считалось, что на узле
+    диспетчер откажет без .env (REQUIRED); не отказывает -- проверено на
+    hyper, `cd / && ~/mop/bin/mop agent --check` с одним node.env, и в
+    tests/cli.py (check_agent_on_node_172).
+    SOLUTION: ExecStart и задача проверки -- `{{ mop_home }}/bin/mop agent`,
+    лаунчер пакета узла; __main__ в mop/agent.py живёт до раскатки на обе
+    установки.
+    STATUS: FIXED — see #172"""
+    unit = os.path.join(DEPLOY, "roles", "bus", "templates", "mop-agent.service.j2")
+    text = open(unit).read()
+    check("mop-agent unit: no python3 -m mop.agent (#172)", "-m mop.agent" not in text)
+    if can_render:
+        got = render(text, {"MOP_USER": "mopuser", "mop_home": "/home/mopuser/mop",
+                            "inventory_hostname": "hyper", "mop_uid": 1000,
+                            "MOP_PUPPET_SEED": ".env*"})
+        execs = [l for l in got.splitlines() if l.startswith("ExecStart=")]
+        check("mop-agent unit: ExecStart is the commandlet (#172)",
+              execs == ["ExecStart=/home/mopuser/mop/bin/mop agent"], execs)
+    tasks = [t for f, t in all_tasks() if f.endswith("roles/bus/tasks/main.yml")
+             and t.get("name") == "Confirm the agent is connected"]
+    check("bus role: one agent check task (#172)", len(tasks) == 1, len(tasks))
+    for t in tasks:
+        check("agent check: runs the commandlet (#172)",
+              t.get("ansible.builtin.command") == "{{ mop_home }}/bin/mop agent --check",
+              t.get("ansible.builtin.command"))
+        check("agent check: same chdir and node name (#172)",
+              (t.get("args") or {}).get("chdir") == "{{ mop_home }}"
+              and (t.get("environment") or {}).get("MOP_NODE") == "{{ inventory_hostname }}",
+              (t.get("args"), t.get("environment")))
+
+
 def check_one_source_219(check):
     """HYPOTHESIS (#219): deploy заводит людям пароли (nats-op-*.pass),
     кладёт их в base-users.json и копию личностей, а выключатель
@@ -1013,6 +1046,7 @@ def main():
           < names.index("Callout file of the bus, after") if after and users_task else False)
     check_identity_copy_167(check, ptasks)
     check_one_source_219(check)
+    check_agent_unit_172(check, can_render)
     conf = open(os.path.join(DEPLOY, "roles", "bus", "templates", "nats-server.conf.j2")).read()
     check("nats-server.conf includes callout.conf inside authorization",
           re.search(r"authorization \{[^}]*include \./callout\.conf", conf) is not None)
