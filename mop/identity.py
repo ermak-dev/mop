@@ -41,7 +41,7 @@ import os
 import secrets
 import typing
 
-from . import operators
+from . import busnames, fsutil, operators
 
 SECRETS = os.path.expanduser("~/.config/mop/secrets")
 OPERATORS_FILE = "operators"
@@ -284,14 +284,157 @@ def service_settings(get, secrets_dir):
     return out
 
 
+# ─── правка файла операторов (#218) ──────────────────────────────────────
+# Команда `mop user` на сервере. Файл правится строкой на человека: чужие
+# строки и комментарии остаются как были, запись -- атомарно и 0600. Отказы
+# -- ValueError с причиной, до записи: наполовину правленого файла не бывает.
+def operators_path(settings, secrets_dir=SECRETS):
+    """Где файл операторов: MOP_OPERATORS_FILE, иначе secrets/operators."""
+    return settings.get("MOP_OPERATORS_FILE") or os.path.join(secrets_dir, OPERATORS_FILE)
+
+
+def person(login, role, projects="", name="", email=""):
+    """Поля человека -> Identity по правилам MOP_OPERATORS (operators.parse):
+    роль, проекты, имена ролей шины. Отказ громкий."""
+    if not busnames.valid_login(login) or any(c in login for c in ":;"):
+        # Двоеточие и точка с запятой -- разделители строки файла и настройки.
+        raise ValueError(f"{login!r} is not a login")
+    if role not in operators.ROLES:
+        # Строго: прежняя запись MOP_OPERATORS без роли (`имя:проекты`)
+        # прочла бы `root` как проект.
+        raise ValueError(f"{login}: role {role or 'missing'}: "
+                         f"--role admin, or --role user --projects <p,...>")
+    who = _identity(login, [role] + ([projects] if projects else []), name, email)
+    format_line(who, "")      # двоеточие в имени или почте -- отказ здесь
+    return who
+
+
+def _lines(path):
+    try:
+        with open(path) as f:
+            return f.readlines()
+    except FileNotFoundError:
+        return []
+
+
+def _index(lines, login):
+    """Номер строки логина или None."""
+    for i, line in enumerate(lines):
+        if line.strip() and not line.lstrip().startswith("#") \
+                and parse_line(line)[0].login == login:
+            return i
+    return None
+
+
+def _save(path, lines):
+    fsutil.write_private(path, "".join(l if l.endswith("\n") else l + "\n" for l in lines))
+
+
+def _in_setting(login, setting):
+    if login in operators.parse(setting):
+        return (f"{login} is in MOP_OPERATORS, not in the file: "
+                f"mop user import moves it there with its password")
+    return None
+
+
+def _found(path, login, setting):
+    """-> (строки, номер) логина в файле, иначе ValueError с причиной."""
+    lines = _lines(path)
+    i = _index(lines, login)
+    if i is None:
+        raise ValueError(_in_setting(login, setting) or f"{login}: no such login in {path}")
+    return lines, i
+
+
+def add_person(path, who, password, setting=""):
+    """Новый человек в файл. Логин уже в файле или в MOP_OPERATORS -- отказ:
+    два определения одного логина провайдер отвергает (#205)."""
+    if not password:
+        raise ValueError("empty password")
+    why = _in_setting(who.login, setting)
+    if why:
+        raise ValueError(why)
+    lines = _lines(path)
+    if _index(lines, who.login) is not None:
+        raise ValueError(f"{who.login} is already in {path}")
+    _save(path, lines + [format_line(who, hash_password(password))])
+
+
+def set_password(path, login, password, setting=""):
+    """Новый пароль; остальное в строке как было."""
+    if not password:
+        raise ValueError("empty password")
+    lines, i = _found(path, login, setting)
+    who, _ = parse_line(lines[i])
+    lines[i] = format_line(who, hash_password(password))
+    _save(path, lines)
+
+
+def remove_person(path, login, setting=""):
+    lines, i = _found(path, login, setting)
+    _save(path, lines[:i] + lines[i + 1:])
+
+
+def import_setting(path, setting, secrets_dir=SECRETS):
+    """ПЕРЕХОД: MOP_OPERATORS -> файл, с нынешними паролями
+    (secrets/nats-op-<логин>.pass -> хеш), ролью и проектами; имени и почты у
+    настройки нет. -> [логины]. Всё или ничего: логин уже в файле или без
+    пароля -- отказ до записи. Уходит вместе с MOP_OPERATORS (#219): после
+    переноса оператор убирает настройку из .env, и прежний operator.json на
+    машинах работает без нового mop join -- пароль тот же."""
+    people = from_setting(setting)
+    if not people:
+        raise ValueError("MOP_OPERATORS is empty: nothing to import")
+    lines = _lines(path)
+    there = [w.login for w in people if _index(lines, w.login) is not None]
+    if there:
+        raise ValueError(f"already in {path}: {', '.join(there)}")
+    add, missing = [], []
+    for who in people:
+        try:
+            with open(os.path.join(secrets_dir, operators.pass_file(who.login))) as f:
+                password = f.read().strip()
+        except FileNotFoundError:
+            password = ""
+        if not password:
+            missing.append(who.login)
+            continue
+        add.append(format_line(who, hash_password(password)))
+    if missing:
+        raise ValueError(f"no password in {secrets_dir} for {', '.join(missing)}: "
+                         f"their password is made by mop deploy")
+    _save(path, lines + add)
+    return [w.login for w in people]
+
+
+def refresh_copy(path, folder=None):
+    """Копия файла операторов для сервисов сервера (natsconf.IDENTITY_DIR,
+    её же кладёт deploy). -> записана ли. Каталог над копией -- /etc/nats
+    пользователя пула: писать туда может только он; не может (не сервер
+    шины, другой пользователь) -- False, копию обновит mop deploy. Переходные
+    пароли копии -- дело deploy'я: они из MOP_OPERATORS, а не из файла."""
+    from . import natsconf   # лениво: как у server_provider
+    folder = folder or natsconf.IDENTITY_DIR
+    parent = os.path.dirname(folder)
+    if not os.path.isdir(parent) or not os.access(parent, os.W_OK | os.X_OK):
+        return False
+    try:
+        fsutil.make_private_dir(folder)
+        with open(path, "rb") as f:
+            fsutil.write_private(os.path.join(folder, OPERATORS_FILE), f.read())
+    except OSError:
+        return False
+    return True
+
+
 # ─── выбор провайдера ────────────────────────────────────────────────────
 def provider(settings, secrets_dir=SECRETS):
     """Настройки -> провайдер по MOP_AUTH_PROVIDER. Неизвестное имя -- отказ:
     молча упасть на file значило бы пустить по другому списку людей."""
     kind = settings.get("MOP_AUTH_PROVIDER") or "file"
     if kind == "file":
-        path = settings.get("MOP_OPERATORS_FILE") or os.path.join(secrets_dir, OPERATORS_FILE)
-        return PlainFileProvider(path, settings.get("MOP_OPERATORS", ""), secrets_dir)
+        return PlainFileProvider(operators_path(settings, secrets_dir),
+                                 settings.get("MOP_OPERATORS", ""), secrets_dir)
     if kind == "ldap":
         # Лениво: ldapauth -- поверх identity, а ldap3 -- только при вызове.
         from . import ldapauth

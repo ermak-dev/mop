@@ -706,7 +706,7 @@ CAPS_OK = {
     # статусы, которые читают глазами и модель
     "FAILED", "AGENT", "SILENT", "DELIVERED", "HUNG", "MUST", "SHOULD",
     # протоколы, сигналы, литералы чужих программ
-    "JSON", "NATS", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
+    "JSON", "NATS", "LDAP", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
     "PLAY", "RECAP",
     # идентификаторы в тексте
     "SECTIONS",
