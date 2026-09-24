@@ -380,12 +380,12 @@ async def _claim(name, req):
     if act != "take" or clone is None:
         return None, None, note
     path = f"{clone_dir(name)}/{lease.FILE}"
-    out, code = await bsh(name, f"printf %s {shlex.quote(lease.render(me, time.time()))} "
-                                f"> {shlex.quote(path)}")
+    mine = lease.render(me, time.time())
+    out, code = await bsh(name, f"printf %s {shlex.quote(mine)} > {shlex.quote(path)}")
     # Таймаут -- не записано (#171): иначе «владелец есть», а файла нет.
     if code != 0:
         return f"{name}: owner not recorded: {why(out, code)}", None, None
-    return None, (path, owner), note
+    return None, (path, owner, mine), note
 
 
 async def _unclaim(name, undo):
@@ -393,11 +393,20 @@ async def _unclaim(name, undo):
 
     Не вернули (таймаут, #171, или ошибка) -- аренда осталась за мастером,
     чей send не доехал, и следующему откажут, назвав не того владельца (#181):
-    звавший обязан это сказать."""
-    path, owner = undo
+    звавший обязан это сказать.
+
+    Только если в файле всё ещё наша запись (#189): пока доставка шла, аренду
+    мог взять другой мастер (force), и откат вслепую перетёр бы его запись
+    прежним владельцем или стёр бы файл -- его работа осталась бы ничьей.
+    Чужая запись -- не наш откат: оставляем её и ничего не говорим. Зовут под
+    _owner_locks, так что между сравнением и записью чужого claim не бывает."""
+    path, owner, mine = undo
     body = lease.render(owner["user"], owner["at"]) if owner else ""
-    out, code = await bsh(name, f"printf %s {shlex.quote(body)} > {shlex.quote(path)}"
-                                if body else f"rm -f {shlex.quote(path)}")
+    write = (f"printf %s {shlex.quote(body)} > {shlex.quote(path)}"
+             if body else f"rm -f {shlex.quote(path)}")
+    # $(cat) срезает конечный перевод строки -- сравниваем без него.
+    out, code = await bsh(name, f'[ "$(cat {shlex.quote(path)} 2>/dev/null)" = '
+                                f'{shlex.quote(mine.rstrip(chr(10)))} ] || exit 0; {write}')
     return why(out, code) if code != 0 else None
 
 
@@ -422,7 +431,12 @@ async def v_send(conn, req):
         "--from-name", req.get("from_name", "mop"),
         "--wait", wait), timeout=wait + 20)
     if out.get("error"):
-        failed = await _unclaim(name, undo) if undo else None
+        # Под тем же замком, что и claim (#189): иначе между сравнением и
+        # записью отката вклинился бы чужой send.
+        failed = None
+        if undo:
+            async with _owner_locks.setdefault(name, asyncio.Lock()):
+                failed = await _unclaim(name, undo)
         if failed:
             out["error"] += f"; owner not restored: {failed}"
         return out

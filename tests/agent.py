@@ -346,11 +346,104 @@ def check_subject_173():
     return out
 
 
+def check_unclaim_race_189():
+    """HYPOTHESIS (#189): v_send ставит аренду под _owner_locks, а откат
+    неудачной доставки делает ВНЕ замка и не глядя: второй мастер (force)
+    успевает взять папета, пока первый ждёт доставки, и откат первого
+    перетирает его запись прежним владельцем или стирает файл.
+    SOLUTION: откат -- под тем же замком и только если в файле всё ещё наша
+    запись. STATUS: FIXED — see #189
+
+    Шелл настоящий: bsh исполняет скрипт агента bash'ем над временным
+    клоном, так что сравнение-и-запись проверяется как есть, а не заглушкой."""
+    import asyncio
+    import subprocess
+    import tempfile
+    from mop import lease
+    out = []
+    root = tempfile.mkdtemp(prefix="mop-test-189-")
+    os.makedirs(os.path.join(root, ".git"))
+    path = os.path.join(root, lease.FILE)
+    saved = (agent.bsh, agent.clone_facts, agent.clone_dir, agent.session_json, agent._event)
+
+    async def bsh(name, script, timeout=20):
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        return r.stdout + r.stderr, r.returncode
+
+    async def facts(name):
+        text = open(path).read() if os.path.exists(path) else ""
+        return {"owner": lease.parse(text), "dirty": 0, "ahead": 0,
+                "cur": "master", "def": "master"}
+
+    async def no_event(*a, **k):
+        return None
+
+    def owner_now():
+        return lease.parse(open(path).read()) if os.path.exists(path) else None
+    try:
+        agent.bsh, agent.clone_facts, agent._event = bsh, facts, no_event
+        agent.clone_dir = lambda name: root
+
+        # Гонка: A взял аренду и ждёт доставки; B берёт с force и доставляет;
+        # доставка A падает, и A откатывает.
+        async def race():
+            b_done = asyncio.Event()
+
+            async def deliver(name, cmd, timeout=20):
+                if "--from-name a " in cmd:
+                    await b_done.wait()
+                    return {"error": "not delivered"}
+                return {"msg_id": "m-b"}
+            agent.session_json = deliver
+
+            async def a():
+                return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
+                                                 "owner": "alice", "from_name": "a"})
+
+            async def b():
+                while owner_now() is None:
+                    await asyncio.sleep(0.01)
+                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                                "owner": "bob", "from_name": "b",
+                                                "force": True})
+                b_done.set()
+                return got
+            return await asyncio.gather(a(), b())
+        ra, rb = asyncio.run(race())
+        if not ra.get("error") or rb.get("error"):
+            out.append(f"race: a {ra!r}, b {rb!r} -- a must fail, b must deliver")
+        if (owner_now() or {}).get("user") != "bob":
+            out.append(f"race: the lease must stay with bob, got {owner_now()!r}")
+
+        # Одна неудачная доставка -- откат как прежде: к прежнему владельцу,
+        # а без него файл снимается.
+        async def fail(name, cmd, timeout=20):
+            return {"error": "not delivered"}
+        agent.session_json = fail
+        stale = lease.render("carol", 1000)
+        for before, want in ((None, None), (stale, stale)):
+            if before is None:
+                if os.path.exists(path):
+                    os.remove(path)
+            else:
+                open(path, "w").write(before)
+            got = asyncio.run(agent.v_send(None, {"name": "pu-mop-1", "message": "z",
+                                                  "owner": "dave", "from_name": "d"}))
+            now = open(path).read() if os.path.exists(path) else None
+            if not got.get("error") or now != want:
+                out.append(f"single failed send over {before!r}: {got!r}, file {now!r}, "
+                           f"wanted {want!r}")
+    finally:
+        (agent.bsh, agent.clone_facts, agent.clone_dir, agent.session_json,
+         agent._event) = saved
+    return out
+
+
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
                   check_timeouts_171, check_unclaim_181, check_intake,
-                  check_main_169, check_subject_173):
+                  check_main_169, check_subject_173, check_unclaim_race_189):
         try:
             failed += check()
         except Exception as e:
