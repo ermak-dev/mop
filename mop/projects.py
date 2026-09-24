@@ -62,18 +62,23 @@ def names(origins, legacy):
     return sorted({puppets.project_of(o) for o in origins} | set(legacy))
 
 
+# Схемы, которые git везёт по ssh; scp-форму parse_origin сам зовёт ssh.
+SSH_SCHEMES = ("ssh", "git+ssh", "ssh+git")
+
+
 def git_hosts(origins, default):
     """Хосты, ключам которых узел доверяет в known_hosts. Чистая функция.
 
     MOP_GIT_HOST установки плюс ssh-хосты origin'ов реестра (#121): проект
     бывает и с чужого форжа, ключ пула там пускают, а ключа хоста узел не
     знал -- и папет падал на клоне. https и локальный путь ключа хоста не
-    требуют. Порт у ssh:// -- в записи known_hosts как [host]:port."""
+    требуют. Порт у ssh-схем -- в записи known_hosts как [host]:port."""
     found = []
     for origin in origins:
         scheme, _, host, port, _ = driver.parse_origin(origin) or (None,) * 5
-        # Только ssh: и ssh://, и scp-форма (разбор общий, #154).
-        if scheme == "ssh" and host:
+        # Только ssh: ssh://, scp-форма (разбор общий, #154) и git+ssh:// /
+        # ssh+git:// -- git клонирует их тем же ssh (#166).
+        if scheme in SSH_SCHEMES and host:
             found.append(f"[{host}]:{port}" if port and port != "22" else host)
     return [default] + sorted(set(found) - {default})
 

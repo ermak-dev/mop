@@ -163,6 +163,22 @@ def check_git_hosts():
          ["dev.corp"]),
         # Пустой реестр -- хост установки всё равно нужен: им клонирует сборка.
         ([], "dev.corp", ["dev.corp"]),
+        # HYPOTHESIS (#166): git клонирует git+ssh:// и ssh+git:// по ssh, а
+        # git_hosts их хостов не давал -- узел не знал ключа форжа, и папет
+        # падал на клоне «Host key verification failed» (как #121/#141).
+        # SOLUTION: схемы ssh, git+ssh, ssh+git -- все ssh. STATUS: FIXED — see #166
+        (["git+ssh://git@forge.example/team/x.git"], "dev.corp",
+         ["dev.corp", "forge.example"]),
+        (["git+ssh://git@forge.example:2222/team/x.git"], "dev.corp",
+         ["dev.corp", "[forge.example]:2222"]),
+        (["ssh+git://forge.example/team/x.git"], "dev.corp",
+         ["dev.corp", "forge.example"]),
+        (["ssh+git://git@forge.example:22/team/x.git"], "dev.corp",
+         ["dev.corp", "forge.example"]),
+        (["ssh+git://git@forge.example:2222/team/x"], "dev.corp",
+         ["dev.corp", "[forge.example]:2222"]),
+        # https по-прежнему не ssh.
+        (["https://forge.example:8443/team/x.git"], "dev.corp", ["dev.corp"]),
     ]
     for origins, default, want in cases:
         got = fn(origins, default)
