@@ -12,9 +12,7 @@ MCP = {"annotations": "destructive", "args": [
 def main(argv):
     if len(argv) != 1:
         lib.usage(__doc__)
-    got = bus.ask_cluster("up", node=argv[0])
-    if got.get("error"):
-        lib.usage(got["error"])
+    bus.call_cluster("up", node=argv[0])
     print(f"{argv[0]} is open to the scheduler again")
 
 

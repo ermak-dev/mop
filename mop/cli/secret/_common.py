@@ -1,6 +1,4 @@
 """Общее у `mop secret file` и `mop secret var`: проект рабочей копии и глагол."""
-import sys
-
 from mop.cli import lib
 from mop import bus, puppets
 
@@ -11,9 +9,5 @@ def project(doc):
 
 
 def ask(project, verb, **fields):
-    """Глагол сервиса на субъекте проекта. Отказ -- сообщение и выход."""
-    got = bus.ask_cluster(verb, project=project, **fields)
-    if got.get("error"):
-        lib.fail(got["error"])
-        sys.exit(1)
-    return got
+    """Глагол сервиса на субъекте проекта. Отказ -- bus.Refused (#146)."""
+    return bus.call_cluster(verb, project=project, **fields)

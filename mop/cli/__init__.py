@@ -353,6 +353,11 @@ def run(fn, argv):
         # читаться как инструкция, а не как трассировка.
         sys.exit(str(e))
     except (ConnectionError, RuntimeError, LookupError) as e:
-        sys.exit(str(e))
+        # Отказ сервиса (bus.Refused) и неработающий папет (LookupError) --
+        # здесь, а не в каждом командлете (#146): одна строка в stderr,
+        # ненулевой выход. Печатаем сами, а не sys.exit(строка): так это
+        # видно и проверке, а не только интерпретатору на выходе.
+        print(e, file=sys.stderr, flush=True)
+        sys.exit(1)
     except KeyboardInterrupt:
         sys.exit(130)

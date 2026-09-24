@@ -136,24 +136,15 @@ MASTERS_WAIT = 2
 
 
 # ─── адресация ───────────────────────────────────────────────────────────
-def puppet_alloc(name):
-    """Живая аллокация папета. Путь к сокету никогда не кэшируем: после
-    рестарта папета меняется pid, а с ним и имя сокета."""
-    alloc = bus.ask_cluster("alloc", name=name).get("alloc")
-    if not alloc:
-        raise LookupError(f"{name}: no allocation — puppet not placed")
-    if alloc["ClientStatus"] != "running":
-        raise LookupError(f"{name}: allocation {alloc['ClientStatus']}, not running")
-    return alloc
-
-
 def puppet_node(name):
     """Узел папета — адрес на шине.
 
     У мастера узел берётся из ростера пула. На узле ростера нет, и мы
     спрашиваем сам пул: чей агент признаёт этот папет своим."""
     if MASTER:
-        return puppet_alloc(name)["NodeName"]
+        # Своей копии «аллокация должна работать» здесь больше нет (#146):
+        # она читала отказ сервиса как «не размещён» и теряла причину.
+        return puppets.running_alloc(name)["NodeName"]
     for answer in bus.gather("local"):
         if name in (answer.get("puppets") or {}):
             return answer["node"]

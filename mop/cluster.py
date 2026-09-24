@@ -55,7 +55,7 @@ NAMED_VERBS = ("update", "restart", "stop", "delete", "alloc", "spec")
 # Из них те, что ДЕЛАЮТ: им отсутствие джоба — отказ. Читающему `alloc` нет:
 # `puppets.delete` спрашивает аллокацию УЖЕ СНЯТОГО джоба, дожидаясь, пока
 # тот перестанет быть running, и отказ там оставлял тело работать сиротой
-# (#89). `spec` в список входит: на его отказе стоит `lib.require_job`.
+# (#89). `spec` в список входит: на его отказе стоит `lib.guard`.
 ACTING_VERBS = ("update", "restart", "stop", "delete", "spec")
 
 

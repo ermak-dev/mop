@@ -7,7 +7,7 @@ import os
 import shlex
 
 from mop.cli import lib
-from mop import driver
+from mop import driver, puppets
 
 
 def main(argv):
@@ -15,10 +15,7 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     lib.guard(name)
-    a, node_driver = lib.alloc_of(name)
-    if not a or a["ClientStatus"] != "running":
-        lib.fail(lib.not_running(name, a))
-        return 1
+    a, node_driver = puppets.running(name)
     node = a["NodeName"]
     # Чем входят в тело, знает драйвер узла: у host это сразу tmux, у
     # контейнерного — ещё один ssh внутрь. Драйвер приезжает вместе с

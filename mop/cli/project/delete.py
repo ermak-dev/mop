@@ -18,10 +18,10 @@ def main(argv):
     if len(argv) != 1 or argv[0].startswith("-"):
         lib.usage(__doc__)
     name = argv[0]
-    ans = bus.ask_cluster("project_delete", project=bus.ADMIN, name=name)
-    if ans.get("error"):
-        lib.fail(f"{name}: {ans['error']}")
-        return 1
+    try:
+        bus.call_cluster("project_delete", project=bus.ADMIN, name=name)
+    except bus.Refused as e:
+        raise bus.Refused(f"{name}: {e}")
     return 0
 
 

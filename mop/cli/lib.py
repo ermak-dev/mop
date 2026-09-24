@@ -303,20 +303,24 @@ def in_project():
 
 
 def guard(name):
-    """Перила мастер-шелла: не трогать чужого папета.
+    """Перила мастер-шелла: не трогать чужого папета. -> ответ `spec` либо
+    None у оператора вне `mop master`, которого перила не касаются.
 
     Это не граница — MOP_PROJECT оператор может и снять. Настоящая живёт в кредах
     NATS, в проверке агента и в проверке сервиса кластера (#80). Здесь мы лишь
     не даём промахнуться вслепую: отказ отсюда называет, куда идти, а отказ
-    сервиса — чей это папет."""
+    сервиса — чей это папет. Прочитанную спеку отдаём: иначе вызывающий
+    спрашивал бы её вторым таким же запросом (#146)."""
     project = in_project()
     if project is None:
-        return
-    meta = require_job(name).get("meta") or {}
+        return None
+    spec = bus.call_cluster("spec", name=name)
+    meta = spec.get("meta") or {}
     owner = puppets.project_of(meta.get("origin", ""))
     if owner != project:
         sys.exit(f"{name} — project {owner}, but this master runs {project}. "
                  f"Leave the master shell or run mop master for {owner}.")
+    return spec
 
 
 def parse_llm(args):
@@ -333,50 +337,6 @@ def parse_llm(args):
     if profile is not None:
         llm.require(profile)
     return profile, rest
-
-
-def require_job(name):
-    """Метаданные папета через шину: origin, профиль, статус, устарела ли
-    спека. Целого джоба тут больше нет — его читал только spec_is_stale, и
-    вердикт теперь приходит готовым от сервиса кластера (#81)."""
-    got = bus.ask_cluster("spec", name=name)
-    if got.get("error"):
-        sys.exit(got["error"])
-    return got
-
-
-def alloc_of(name):
-    """Аллокация папета и драйвер её узла, одним запросом. -> (alloc|None, драйвер)."""
-    got = bus.ask_cluster("alloc", name=name)
-    if got.get("error"):
-        sys.exit(got["error"])
-    return got.get("alloc"), got.get("driver")
-
-
-def failing(a):
-    """Строка состояния падающего папета из ответа `alloc`, либо None (#126)."""
-    got = puppets.failing_row((a or {}).get("ClientStatus"), (a or {}).get("task"),
-                              (a or {}).get("reason"))
-    return got[1] if got else None
-
-
-def not_running(name, a):
-    """Почему к папету нельзя подключиться: падает (с причиной) или не запущен."""
-    why = failing(a)
-    return f"{name}: {why}" if why else f"{name} not running"
-
-
-def running_alloc(name):
-    a, _ = alloc_of(name)
-    if not a or a["ClientStatus"] != "running":
-        sys.exit(not_running(name, a))
-    return a
-
-
-def running_node(name):
-    """Узел папета — адрес для шины. Аллокация адресом быть перестала вместе
-    с alloc exec; агент подписан на субъект узла."""
-    return running_alloc(name)["NodeName"]
 
 
 def session_env(profile):
