@@ -121,6 +121,9 @@ VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "1
         "MOP_LDAP_URL": "ldaps://ldap.example.dev", "MOP_LDAP_BIND_DN": "cn=mop,ou=services,dc=example,dc=dev",
         "MOP_LDAP_BASE": "dc=example,dc=dev", "MOP_LDAP_GROUP_BASE": "ou=groups,dc=example,dc=dev",
         "MOP_LDAP_ADMIN_GROUP": "cn=mop admins,ou=groups,dc=example,dc=dev",
+        # Группа доступа и вложенность AD (#220): тоже пустые по умолчанию.
+        "MOP_LDAP_ACCESS_GROUP": "CN=Pool Users,OU=Access,DC=example,DC=dev",
+        "MOP_LDAP_NESTED": "ad",
         "MOP_LDAP_STARTTLS": "no", "MOP_LDAP_CA_FILE": "/etc/ssl/certs/corp-ca.pem"}
 # Значения, которые юнит обязан донести целиком (#185): пробел, кавычки,
 # обратный слеш. Подставляются вместо настройки из набора юнита.
