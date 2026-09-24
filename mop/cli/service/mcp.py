@@ -51,12 +51,13 @@ app = MCPServer(
     "mop",
     instructions=(
         "Pool of claude puppets on top of Nomad.\n\n"
-        "THIS IS THE ONLY CHANNEL TO THE POOL. To message a puppet or find out "
+        "This is the only channel to the pool: to message a puppet or find out "
         "who's free, use `send` and `agents` from here. The built-in "
-        "SendMessage/ListAgents won't do: they only see sessions on THIS SAME "
+        "SendMessage/ListAgents won't do: they only see sessions on this same "
         "host, and puppets live on other nodes — on a neighboring node the "
-        "built-in lookup will silently find no one. Delivery here goes through "
-        "the pool's bus, and the host doesn't matter.\n\n"
+        "built-in lookup will silently find no one. Delivery here goes over "
+        "the pool's bus to the node agent that holds the puppet, so the host "
+        "doesn't matter.\n\n"
         "`agents` — who's around and in what state, `send` — message a puppet, "
         "`tail` — what's on its screen. Always check `agents` before "
         "dispatching: \"free\" there means the clone has no unsaved work, not "
@@ -244,7 +245,7 @@ def _masters():
 
 @tool(description=(
     "Send a message to a pool puppet, a project master, or a session on this "
-    "machine. The ONLY working way to reach both a puppet and a master: the "
+    "machine. The only working way to reach both a puppet and a master: the "
     "built-in SendMessage only reaches sessions on this same host and on a "
     "neighboring node will silently find no one. `to`: puppet name "
     "(pu-<project>-<n>), master address from agents or from the envelope of "
@@ -301,7 +302,7 @@ def tail(name: str, lines: int = 40, grep: str = "") -> str:
 @master_tool(annotations=DESTRUCTIVE, description=(
     "Slash command in a puppet's TUI. Needed separately because slash "
     "commands don't pass through the channel: the message is queued with "
-    "skipSlashCommands. Escape DISMISSES a stuck dialog without answering "
+    "skipSlashCommands. Escape dismisses a stuck dialog without answering "
     "it: a stuck puppet is invisible to the roster, and messages pile up "
     f"unread in the queue. Allowed: {', '.join(SLASH_ALLOWED)}."))
 def slash(name: str, command: str) -> str:
@@ -437,7 +438,7 @@ def main(argv=None):
         try:
             where = bus.config()["url"]
         except bus.BusError as e:
-            where = f"NONE ({e})"
+            where = f"none ({e})"
         who = ("node" if not MASTER
                else "operator" if bus.PROJECT == bus.ADMIN
                else f"master of project {bus.PROJECT}")

@@ -2,6 +2,9 @@
 
 Refuses while anything still runs there — a node dropped from under a live
 puppet keeps working and the master never hears of it again.
+
+The node stays in the inventory: take it out there too, or the next deploy
+configures it again.
 """
 from mop.cli import lib
 from mop import bus
@@ -17,8 +20,6 @@ def main(argv):
     # с проверкой не должны жить на разных машинах — иначе между ними успеет
     # приехать папет (mop/nomad.py, forget_refusal).
     bus.call_cluster("forget", node=name, timeout=30)
-    print(f"{name} is out of the roster. Take it out of the inventory too, "
-          f"or the next deploy will configure it again.")
 
 
 main = lib.cluster(main)

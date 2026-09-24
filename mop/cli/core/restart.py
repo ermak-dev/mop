@@ -17,14 +17,13 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     lib.guard(name)
-    a = puppets.running_alloc(name)
-    print(f"restarting {name} on {a['NodeName']}...")
+    # Не работает -- отказ с причиной (LookupError) до запроса рестарта.
+    puppets.running_alloc(name)
     try:
         bus.call_cluster("restart", name=name)
     except bus.Refused as e:
         raise bus.Refused(f"restart failed: {e}\n"
                           f"Alternative: mop delete {name} && mop add <origin>")
-    print("puppet is restarting")
 
 
 

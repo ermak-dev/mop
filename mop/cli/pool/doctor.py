@@ -16,13 +16,14 @@ from mop.render import table
 
 
 def _login():
-    """Раздача кредов перед лечением. Тот же вывод, что у `mop login`, — но
-    зовём библиотеку, а не соседний командлет: командлет разбирает аргументы
-    и печатает, оболочкой друг для друга они быть не должны."""
+    """Раздача кредов перед лечением. Зовём библиотеку, а не соседний
+    командлет: командлет разбирает аргументы и печатает, оболочкой друг для
+    друга они быть не должны. Показываем только узлы, куда креды не доехали
+    (#159): успех раздачи виден по лечению ниже, а не отчётом о каждом узле."""
     results, what, _ = keys.push_login()
-    print("pushing " + " + ".join(what) + " to pool nodes")
     for node in sorted(results):
-        print(f"  {node}: {results[node]}")
+        if results[node] != "OK":
+            print(f"  {node}: {' + '.join(what)} {results[node]}")
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -44,10 +45,11 @@ def main(argv):
          f"[{i['action']}]" if i["action"] and not fix else "")
         for i in issues])))
     if not fix:
-        # Подсказку печатаем только если --fix действительно что-то сделает.
-        # Иначе она врёт: у «no model quota» и «queued» лечения здесь нет.
-        print("\ntreatment: mop doctor --fix" if any(i["action"] for i in issues)
-              else "\nno auto-treatment — operator's call")
+        # Лечение уже названо в колонке ([restart], [model]…); совета «run
+        # --fix» под таблицей нет (#159). Нечего лечить — это и говорим: у
+        # «queued» и отказов лечения здесь нет, решает оператор.
+        if not any(i["action"] for i in issues):
+            print("\nno auto-treatment — operator's call")
         return
 
     print()
@@ -56,11 +58,9 @@ def main(argv):
             sys.exit("local credentials are stale or broken — log in to claude "
                      "on this machine first, then mop doctor --fix")
         _login()
-        print()
     for issue in issues:
         if issue["action"]:
             print(f"  {issue['name']}: {puppets.treat(issue)}")
-    print("\ncheck: mop list (and mop tail <name> for what used to be stuck)")
 
 
 
