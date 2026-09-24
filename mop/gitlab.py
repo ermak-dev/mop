@@ -216,12 +216,22 @@ def pipeline(sha):
     return got[0] if got else None
 
 
-def pipeline_verdict(pipeline, sha):
+# Стадия, в которой CI катит сам себя (#239): пока её джоба идёт, пайплайн
+# running, и о зелёности коммита говорят только джобы остальных стадий.
+DEPLOY_STAGE = "deploy"
+
+
+def pipeline_verdict(pipeline, sha, jobs=None):
     """Можно ли катить коммит с таким пайплайном (#231). -> None либо отказ.
 
-    Катить можно только success. Неизвестный статус — отказ с его именем:
+    Катить можно success. Неизвестный статус — отказ с его именем:
     отменённый или пропущенный пайплайн ничего не говорит о том, зелёный ли
-    коммит, а молча принятый новый статус GitLab открыл бы дорогу красному."""
+    коммит, а молча принятый новый статус GitLab открыл бы дорогу красному.
+
+    Идущий пайплайн с джобами (#239): его катит его же джоба deploy, и без
+    этого гейт отвечал бы ей «жди» до конца её самой. Проходит, если джобы
+    вне стадии deploy есть и каждая success (терпимый провал цвет не решает);
+    провал вне deploy — отказ с именем джобы, ждать там нечего. Иначе — «жди»."""
     if pipeline is None:
         return f"no pipeline for {sha}"
     status, url = pipeline.get("status"), pipeline.get("web_url")
@@ -230,6 +240,14 @@ def pipeline_verdict(pipeline, sha):
     if status == "failed":
         return f"pipeline failed for {sha[:12]}: {url}"
     if status in PIPELINE_WAIT:
+        tests = [j for j in jobs or [] if j.get("stage") != DEPLOY_STAGE]
+        broken = next((j for j in tests if is_failure(j)), None)
+        if broken:
+            return (f"pipeline {url} is {status} but job {broken['id']} "
+                    f"{broken.get('stage')}/{broken.get('name')} failed: refusing")
+        if tests and all(j.get("status") == "success" or j.get("allow_failure")
+                         and j.get("status") == "failed" for j in tests):
+            return None
         return f"wait for pipeline {url} ({status})"
     return f"pipeline {url} is {status}, not success: refusing"
 

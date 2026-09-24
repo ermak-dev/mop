@@ -1,4 +1,4 @@
-"""deploy: mop deploy [--check] [--skip-pipeline]
+"""deploy: mop deploy [--check] [--skip-pipeline] [--from-ci]
 
 The whole installation in one run: one playbook, site.yml, so there is one
 ansible process and one PLAY RECAP — a line per machine over every layer.
@@ -16,8 +16,15 @@ make. Nothing after the playbook runs: collecting the server credentials
 writes files, and the roster check is not the question a dry run answers.
 
 With MOP_DEPLOY_NEEDS_GREEN=1 in .env, deploy refuses unless the GitLab
-pipeline of the working copy's HEAD is success. --skip-pipeline is the
-emergency way past it, and says so. --check changes nothing and is not gated.
+pipeline of the working copy's HEAD is success, or still running with every
+job outside stage deploy green (CI rolling itself out). --skip-pipeline is
+the emergency way past it, and says so. --check changes nothing and is not
+gated.
+
+--from-ci is what CI's deploy job runs on the server: the working copy must
+be on origin's default branch with no tracked file modified; it fetches,
+fast-forwards to origin and rolls that out. The pipeline gate is mandatory
+there: it refuses without MOP_DEPLOY_NEEDS_GREEN=1 and with --skip-pipeline.
 """
 import json
 import os
@@ -170,12 +177,13 @@ def operator_refusals(settings, secrets_dir=identity.SECRETS, leftover=""):
     return out
 
 
-def pipeline_refusals(setting, have_creds, sha, fetch):
+def pipeline_refusals(setting, have_creds, sha, fetch, fetch_jobs=None):
     """Отказ по пайплайну катимого коммита (#231). -> [строка].
 
     setting -- MOP_DEPLOY_NEEDS_GREEN; have_creds -- есть ли чем спросить
     GitLab; sha -- HEAD рабочей копии, пусто -- не назван; fetch(sha) ->
-    пайплайн либо None. Включённая проверка ни при чём не пропускается молча:
+    пайплайн либо None; fetch_jobs(id) -> его джобы, спрашиваются только у
+    идущего (#239). Включённая проверка ни при чём не пропускается молча:
     нет кредов, коммита или ответа GitLab -- отказ с причиной."""
     if setting in ("", "0"):
         return []
@@ -191,8 +199,77 @@ def pipeline_refusals(setting, have_creds, sha, fetch):
         got = fetch(sha)
     except RuntimeError as e:
         return [f"cannot read the pipeline for {sha}: {e}"]
-    why = gitlab.pipeline_verdict(got, sha)
+    jobs = None
+    if got and fetch_jobs and got.get("status") in gitlab.PIPELINE_WAIT:
+        try:
+            jobs = fetch_jobs(got["id"])
+        except RuntimeError as e:
+            return [f"cannot read the jobs of pipeline {got['id']}: {e}"]
+    why = gitlab.pipeline_verdict(got, sha, jobs)
     return [why] if why else []
+
+
+# ─── --from-ci (#239) ────────────────────────────────────────────────────
+# CI катит установку сам: ключ джобы на сервере с forced command, и что бы
+# клиент ни прислал, сервер выполнит `mop deploy --from-ci`. Украденный ключ
+# поэтому умеет одно -- катить зелёный master, и держат это отказы ниже.
+def from_ci_refusals(setting, skip_pipeline, dry, branch, default, dirty):
+    """Можно ли катить из CI. -> [строка].
+
+    Гейт обязателен: без него --from-ci катил бы что угодно, что лежит в
+    master. Ветка -- по умолчанию у origin; отслеживаемое не тронуто
+    (dirty -- строки `git status --porcelain` без неотслеживаемых: .env,
+    inventory.yaml и бэкапы помехой не считаются)."""
+    out = []
+    if setting != "1":
+        out.append("--from-ci needs MOP_DEPLOY_NEEDS_GREEN=1 in .env: "
+                   "a CI rollout must pass the pipeline gate")
+    if skip_pipeline:
+        out.append("--from-ci and --skip-pipeline together: "
+                   "a CI rollout never skips the pipeline gate")
+    if dry:
+        out.append("--from-ci and --check together: --from-ci rolls out, "
+                   "--check is a dry run by hand")
+    if not default:
+        out.append("--from-ci: cannot name origin's default branch -- "
+                   "run git remote set-head origin --auto")
+    elif branch != default:
+        out.append(f"--from-ci: the working copy is on {branch}, not {default}")
+    if dirty:
+        out.append("--from-ci: tracked files are modified: "
+                   + ", ".join(line[3:] for line in dirty))
+    return out
+
+
+def _git(root, *args):
+    return subprocess.run(["git", "-C", root, *args], capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL)
+
+
+def ci_state(root):
+    """(ветка, ветка origin по умолчанию, [изменённое отслеживаемое]).
+    Ветка по умолчанию -- origin/HEAD, а не литерал: её знает git."""
+    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    head = _git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    default = head.stdout.strip().removeprefix("origin/") if head.returncode == 0 else ""
+    dirty = _git(root, "status", "--porcelain", "--untracked-files=no").stdout
+    return branch, default, [l for l in dirty.splitlines() if l.strip()]
+
+
+def ci_sync(root):
+    """git fetch и --ff-only к origin/<ветка>. -> (было, стало, отказ | None).
+    Только вперёд: разошедшийся с origin сервер -- не то, что CI вправе
+    перезаписать."""
+    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    old = _git(root, "rev-parse", "HEAD").stdout.strip()
+    r = _git(root, "fetch", "--quiet", "origin")
+    if r.returncode:
+        return old, old, f"--from-ci: git fetch failed: {(r.stderr or r.stdout).strip()}"
+    r = _git(root, "merge", "--ff-only", "--quiet", f"origin/{branch}")
+    if r.returncode:
+        return old, old, (f"--from-ci: {branch} does not fast-forward to origin/{branch}: "
+                          f"{(r.stderr or r.stdout).strip()}")
+    return old, _git(root, "rev-parse", "HEAD").stdout.strip(), None
 
 
 def head_sha(root):
@@ -256,6 +333,34 @@ def manifests(origins):
     return out
 
 
+def ci_pull(skip_pipeline, dry):
+    """--from-ci до прогона (#239): отказы, fetch, --ff-only. -> можно ли
+    катить дальше. Строки хода печатаются: они и есть лог джобы CI.
+
+    Сдвинувшийся HEAD -- перезапуск `mop deploy --from-ci` уже на новом коде:
+    этот процесс держит в памяти старый пакет, а катить обязан тот, что
+    приехал. Второй проход fetch не сдвигает и идёт дальше сам."""
+    branch, default, dirty = ci_state(lib.PROJECT)
+    refusals = from_ci_refusals(config.get("MOP_DEPLOY_NEEDS_GREEN"), skip_pipeline, dry,
+                                branch, default, dirty)
+    for why in refusals:
+        lib.fail(why)
+    if refusals:
+        return False
+    print(f"  from-ci: {branch}, tracked files clean; fetching origin", flush=True)
+    old, new, why = ci_sync(lib.PROJECT)
+    if why:
+        lib.fail(why)
+        return False
+    if old == new:
+        print(f"  from-ci: {branch} at {new[:12]}", flush=True)
+        return True
+    print(f"  from-ci: {branch} {old[:12]} -> {new[:12]}; restarting on the new code",
+          flush=True)
+    launcher = os.path.join(lib.BIN, "mop")
+    os.execv(launcher, [launcher, "deploy", "--from-ci"])
+
+
 def check():
     """Прогон без неё не отличает «плейбук зелёный» от «пул отвечает»: агент,
     упавший в бесконечный реконнект, systemd вполне устраивает. Своя сводка,
@@ -277,7 +382,8 @@ def main(argv):
     # сервера, а MOP_GIT_HOST читают одни плейбуки.
     config.require()
     skip_pipeline = "--skip-pipeline" in argv
-    argv = [a for a in argv if a != "--skip-pipeline"]
+    from_ci = "--from-ci" in argv
+    argv = [a for a in argv if a not in ("--skip-pipeline", "--from-ci")]
     dry = argv == ["--check"]
     if dry:
         argv = []
@@ -288,6 +394,8 @@ def main(argv):
         # Origin в аргументах заводил проект побочным эффектом прогона (#79).
         lib.fail(f"mop deploy takes no arguments; {argv[0]} looks like a project.\n"
                  f"Register it: mop project add {argv[0]}")
+        return 1
+    if from_ci and not ci_pull(skip_pipeline, dry):
         return 1
     inventory = os.environ["INVENTORY"]
     if not os.path.isfile(inventory):
@@ -314,7 +422,7 @@ def main(argv):
     elif not dry:
         refusals += pipeline_refusals(config.get("MOP_DEPLOY_NEEDS_GREEN"),
                                       gitlab.has_credentials(), head_sha(lib.PROJECT),
-                                      gitlab.pipeline)
+                                      gitlab.pipeline, gitlab.jobs)
     for why in refusals:
         lib.fail(why)
     if refusals:
