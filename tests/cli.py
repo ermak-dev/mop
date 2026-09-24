@@ -686,6 +686,59 @@ def check_output_rules():
     finally:
         (bus.call_cluster, puppets.running_alloc, lib.guard, puppets.diagnose,
          keys.llm_keys_blob, llm.profiles) = keep
+    failed += check_output_rest()
+    return failed
+
+
+def check_output_rest():
+    """Остаток #159: setup, sweep, driver build. STATUS: FIXED — see #159"""
+    import shutil
+    import subprocess
+    from mop import bus, config, image, puppets
+    from mop.cli.driver import build
+    from mop.cli.pool import setup, sweep
+    failed = 0
+
+    # setup: шаг установки — строка хода на терминале, не на терминале
+    # тишина; предупреждение про claude — в stderr, stdout пуст.
+    keep = (shutil.which, subprocess.run, config.playbook_vars)
+    ran = []
+    try:
+        shutil.which = lambda cmd: "/usr/bin/sudo" if cmd == "sudo" else None
+        subprocess.run = lambda args, **kw: ran.append(args) or subprocess.CompletedProcess(args, 0)
+        config.playbook_vars = lambda: {}
+        out, err, code = silent_run(setup.main, ["--operator"])
+    finally:
+        shutil.which, subprocess.run, config.playbook_vars = keep
+    if out or code or "claude is not in PATH" not in err or len(ran) != 3:
+        failed += 1
+        print(f"FAIL setup: stdout {out!r}, stderr {err!r}, code {code!r}, ran {len(ran)} commands")
+
+    # sweep: нечего убирать — успех, и он молчит.
+    keep = (puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk)
+    try:
+        puppets.ready_nodes = lambda: {"n1"}
+        bus.request_many = lambda asks, **kw: {"n1": {"bodies": [], "templates": []}}
+        puppets.jobs = lambda *a, **kw: [{"ID": "pu-a-1"}]
+        puppets.classify_junk = lambda answers, known: []
+        out, err, code = silent_run(sweep.main, [])
+    finally:
+        puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk = keep
+    if out or err or code:
+        failed += 1
+        print(f"FAIL sweep with nothing to sweep must be silent: {out!r} {err!r} {code!r}")
+
+    # driver build: без эха того, откуда прочитан .mop.
+    keep = (image.prepare, image.build)
+    try:
+        image.prepare = lambda origin, root: {"project": "p", "asks": {}, "alien": [], "legacy": []}
+        image.build = lambda origin, got, **kw: {"gone": [], "announced": [], "rc": 0}
+        out, err, code = silent_run(build.main, ["git@h:g/p.git"])
+    finally:
+        image.prepare, image.build = keep
+    if out or code:
+        failed += 1
+        print(f"FAIL driver build echoes on success: {out!r} code {code!r}")
     return failed
 
 

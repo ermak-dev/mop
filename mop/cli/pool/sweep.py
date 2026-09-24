@@ -65,7 +65,8 @@ def main(argv):
 
     rows = puppets.classify_junk({n: answers[n] for n in heard}, known)
     if not rows:
-        print(f"nothing to sweep on {len(heard)} node(s)")
+        # Нечего убирать -- успех, и он молчит (#159). Промолчавшие узлы уже
+        # названы выше, и код выхода за них отвечает.
         return 1 if silent else 0
 
     out = [("NODE", "KIND", "NAME", "WHY")]
