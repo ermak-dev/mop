@@ -212,19 +212,33 @@ def _server():
     return server
 
 
+def _ssh_port():
+    """Порт sshd узла из MOP_SSH_PORT (node.env, #201), либо RuntimeError."""
+    raw = config.get("MOP_SSH_PORT").strip()
+    if not raw.isdigit() or not 0 < int(raw) < 65536:
+        raise RuntimeError(f"MOP_SSH_PORT={raw!r} in node.env is not a port — "
+                           f"fix ansible_port in the inventory and run mop deploy")
+    return int(raw)
+
+
 def address(name):
     """Адрес тела со стороны сервера — это адрес узла, тот, с которого узел
     сам ходит на сервер. Без сети: соединение UDP ничего не шлёт, только
-    выбирает маршрут."""
+    выбирает маршрут.
+
+    sshd узла не на 22 (#201) — адрес `адрес:порт`: сервер ходит на тело
+    сам, и порт иначе знать неоткуда. На 22 — голый адрес, как было."""
+    port = _ssh_port()
     server = _server()
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect((server, 1))
-        return s.getsockname()[0]
+        here = s.getsockname()[0]
     except (socket.gaierror, OSError) as e:
         raise RuntimeError(f"no route to the server {server} (from {NODE_FILE}): {e}")
     finally:
         s.close()
+    return here if port == 22 else f"{here}:{port}"
 
 
 async def templates():

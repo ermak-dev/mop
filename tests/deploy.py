@@ -227,9 +227,15 @@ def render(text, variables):
     variables = dict(variables)
     for k in list(variables):
         variables[k] = deep(variables[k])
-    # lookup('vars', имя) шаблона -- как у ansible: значение переменной игры.
-    return env.from_string(text).render(
-        **variables, lookup=lambda kind, name: variables[name] if kind == "vars" else None)
+    # lookup('vars', имя[, default=]) шаблона -- как у ansible: значение
+    # переменной игры, а без неё -- default, если назван.
+    missing = object()
+
+    def lookup(kind, name, default=missing):
+        if kind != "vars":
+            return None
+        return variables[name] if default is missing else variables.get(name, default)
+    return env.from_string(text).render(**variables, lookup=lookup)
 
 
 # ── #184: пробы только для чтения в check-режиме ─────────────────────────────
@@ -774,6 +780,36 @@ def main():
             except Exception as e:  # noqa: BLE001 -- проверка, не код пула
                 got = f"{type(e).__name__}: {e}"
             check(f"client.hcl: {what}", got == [want], got)
+
+    # ── ssh-порт узла -- из ansible_port инвентаря (#201) ────────────────
+    # Порт, которым сервер ходит на узел, знал только ssh config root'а на
+    # контроллере: bootstrap (пользователь пула) шёл на 22 и получал отказ.
+    # ansible_port -- стандартная переменная: её же берёт сам прогон, и
+    # node.env рендерит её в MOP_SSH_PORT; нет её -- порт установки (22).
+    # STATUS: FIXED — see #201
+    bus_tasks = yaml.safe_load(open(os.path.join(DEPLOY, "roles", "bus", "tasks", "main.yml")))
+    node_env = next((t for t in bus_tasks
+                     if t.get("name") == "What this node knows about itself"), None)
+    check("bus: the node.env task is found", node_env is not None)
+    if can_render and node_env is not None:
+        content = node_env["ansible.builtin.copy"]["content"]
+        scoped = ",".join(config.NODE_SCOPED)
+        installed = {k: config.SETTINGS.get(k, "") for k in config.NODE_SCOPED}
+        for what, host, want in (("the host's ansible_port", {"ansible_port": 2222}, "2222"),
+                                 ("no ansible_port: the installation's", {}, "22"),
+                                 ("the host's mop_driver still read",
+                                  {"mop_driver": "pve"}, "22")):
+            try:
+                out = render(content, {**installed, "MOP_NODE_SCOPED": scoped,
+                                       "inventory_hostname": "wsl",
+                                       "hostvars": {"wsl": host}})
+                lines = dict(ln.split("=", 1) for ln in out.splitlines()
+                             if ln and not ln.startswith("#"))
+                got = (lines.get("MOP_SSH_PORT"), lines.get("MOP_DRIVER"))
+            except Exception as e:  # noqa: BLE001 -- проверка, не код пула
+                got = f"{type(e).__name__}: {e}"
+            check(f"node.env: MOP_SSH_PORT from {what}", got ==
+                  (want, host.get("mop_driver", installed.get("MOP_DRIVER"))), got)
 
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")

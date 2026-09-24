@@ -836,6 +836,13 @@ def main():
         print(f"FAILED  check_host_address_200: {type(e).__name__}: {e}")
     cases, bad = cases + c, bad + b
 
+    try:
+        c, b = check_ssh_port_201()
+    except Exception as e:
+        c, b = 1, 1
+        print(f"FAILED  check_ssh_port_201: {type(e).__name__}: {e}")
+    cases, bad = cases + c, bad + b
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 
@@ -945,6 +952,86 @@ def check_host_address_200():
             host.__dict__.pop("NODE_FILE", None)
         else:
             host.NODE_FILE = saved[1]
+        undo()
+    return cases, bad
+
+
+# ── ssh-порт host-узла -- узловая настройка (#201) ──────────────────────
+# HYPOTHESIS: host.address отдаёт голый адрес, и сервер ходит на узел портом
+# 22; у wate-wsl (WSL) sshd на 2222, а на 22 отвечает другой -- вход
+# отвергнут. Порт знал только ssh config root'а на контроллере.
+# SOLUTION: порт -- узловая настройка MOP_SSH_PORT (node.env из ansible_port
+# инвентаря, по умолчанию 22). Не 22 -- адрес `адрес:порт`; 22 -- голый
+# адрес, как сегодня. Не порт -- отказ с именем настройки.
+# STATUS: FIXED — see #201
+def check_ssh_port_201():
+    """-> (случаев, провалов)."""
+    import socket as real
+    from cli import no_network
+    from mop.driver import host
+    cases = bad = 0
+
+    def check(what, got, want):
+        nonlocal cases, bad
+        cases += 1
+        if got != want:
+            bad += 1
+            print(f"FAILED  {what}\n  wanted: {want!r}\n  got: {got!r}")
+
+    class Sock:
+        def __init__(self, *a):
+            pass
+
+        def connect(self, addr):
+            pass
+
+        def getsockname(self):
+            return ("192.168.1.37", 40000)
+
+        def close(self):
+            pass
+
+    stub = types.SimpleNamespace(socket=Sock, AF_INET=real.AF_INET,
+                                 SOCK_DGRAM=real.SOCK_DGRAM, gaierror=real.gaierror,
+                                 error=real.error)
+    undo = no_network()
+    saved = (host.socket, host.NODE_FILE, os.environ.get("MOP_SSH_PORT"))
+    try:
+        host.socket = stub
+        with tempfile.TemporaryDirectory() as tmp:
+            host.NODE_FILE = os.path.join(tmp, "bus.json")
+            with open(host.NODE_FILE, "w") as f:
+                f.write('{"url": "nats://192.0.2.1:4222"}')
+            os.environ.pop("MOP_SSH_PORT", None)
+            check("config: MOP_SSH_PORT defaults to 22",
+                  config.SETTINGS.get("MOP_SSH_PORT"), "22")
+            check("config: MOP_SSH_PORT reaches the node",
+                  "MOP_SSH_PORT" in config.NODE_SCOPED, True)
+            check("no port setting: the bare address, as today",
+                  host.address("pu-mop-1"), "192.168.1.37")
+            os.environ["MOP_SSH_PORT"] = "22"
+            check("port 22: the bare address", host.address("pu-mop-1"), "192.168.1.37")
+            os.environ["MOP_SSH_PORT"] = "2222"
+            check("port 2222: address:port", host.address("pu-mop-1"), "192.168.1.37:2222")
+            for garbage in ("22x", "0", "70000", " "):
+                os.environ["MOP_SSH_PORT"] = garbage
+                cases += 1
+                try:
+                    got = host.address("pu-mop-1")
+                except RuntimeError as e:
+                    if "MOP_SSH_PORT" not in str(e):
+                        bad += 1
+                        print(f"FAILED  port {garbage!r}: refusal {str(e)!r} "
+                              f"doesn't name MOP_SSH_PORT")
+                    continue
+                bad += 1
+                print(f"FAILED  port {garbage!r}: answered {got!r}, wanted a refusal")
+    finally:
+        host.socket, host.NODE_FILE = saved[0], saved[1]
+        if saved[2] is None:
+            os.environ.pop("MOP_SSH_PORT", None)
+        else:
+            os.environ["MOP_SSH_PORT"] = saved[2]
         undo()
     return cases, bad
 
