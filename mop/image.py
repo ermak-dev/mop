@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 
-from . import config, driver, manifest, nomad, puppets
+from . import config, driver, manifest, nomad, puppets, state
 
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "pve-build.yml")
 
@@ -81,15 +81,15 @@ def bake(origin, got, out=None, fresh=False, on_line=None):
 # теряет прогретые target (35 ГБ и 329 с на папета), поэтому занятый папет
 # — отказ, если не сказано force.
 def plan_clear(rows, force=False):
-    """Кого сносить перед сборкой. rows: [{name, node, container, state}]
+    """Кого сносить перед сборкой. rows: [{name, node, container, kind}]
     -> [имя]; RuntimeError с именами, если кто-то занят и не force.
 
     Тела на узлах, где тело равно узлу, сборки не касаются. Свободен —
-    только тот, о ком это сказано прямо (puppets.is_free): молчащий агент
+    только тот, о ком это сказано прямо (state.is_free): молчащий агент
     и папет без состояния читаются как занятые, потому что снос под живой
     работой хуже отказа."""
     mine = [r for r in rows if r.get("container")]
-    busy = [r["name"] for r in mine if not puppets.is_free(r.get("state") or "")]
+    busy = [r["name"] for r in mine if not state.is_free(r.get("kind"))]
     if busy and not force:
         raise RuntimeError(
             f"rebuilding the image destroys the project's bodies, and these are "
@@ -99,7 +99,7 @@ def plan_clear(rows, force=False):
 
 def project_rows(project):
     """Папеты проекта, как их видит plan_clear: [{name, node, container,
-    state, job}]. Не размещённые (без аллокации) не считаются: тела у них
+    state, kind, job}]. Не размещённые (без аллокации) не считаются: тела у них
     нет, снимать нечего."""
     meta = nomad.nodes_meta()
     rows = []
@@ -113,7 +113,7 @@ def project_rows(project):
         drv = (meta.get(node) or {}).get("mop_driver", driver.DEFAULT)
         rows.append({"name": job["ID"], "node": node, "job": job,
                      "container": not driver.require(drv)["body_is_node"],
-                     "state": item["state"]})
+                     "state": item["state"], "kind": item["kind"]})
     return rows
 
 

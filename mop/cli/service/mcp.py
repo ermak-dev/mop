@@ -43,7 +43,7 @@ from mcp.server.mcpserver import MCPServer                     # noqa: E402
 from mcp.types import ToolAnnotations                          # noqa: E402
 from pydantic import Field                                     # noqa: E402
 
-from mop import bus, cli, session, puppets                # noqa: E402
+from mop import bus, cli, session, puppets, state         # noqa: E402
 from mop.cli import lib                                   # noqa: E402
 from mop.render import table                              # noqa: E402
 
@@ -285,7 +285,7 @@ def _roster_from_bus():
         return [f"bus unavailable: {e}"]
     for answer in sorted(answers, key=lambda a: a.get("node") or ""):
         for name, facts in sorted((answer.get("puppets") or {}).items()):
-            rows.append((name, answer.get("node") or "?", puppets.puppet_state(facts)))
+            rows.append((name, answer.get("node") or "?", str(state.verdict(facts))))
     return ["pool puppets:", *table(rows)] if len(rows) > 1 else ["pool puppets: none"]
 
 

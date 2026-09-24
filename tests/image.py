@@ -41,10 +41,10 @@ def main():
     # HYPOTHESIS: plan_clear нет, сборка сносит образ, а папеты остаются жить
     # на старом. SOLUTION: чистый план из строк ростера. STATUS: FIXED — see #60
     rows = [
-        {"name": "pu-proj-1", "node": "hyper", "container": True, "state": "free (master)"},
-        {"name": "pu-proj-2", "node": "hyper", "container": True, "state": "busy (feat/x)"},
-        {"name": "pu-proj-3", "node": "mate", "container": False, "state": "busy (feat/y)"},
-        {"name": "pu-proj-4", "node": "hyper", "container": True, "state": "AGENT SILENT (x)"},
+        {"name": "pu-proj-1", "node": "hyper", "container": True, "kind": "free"},
+        {"name": "pu-proj-2", "node": "hyper", "container": True, "kind": "busy"},
+        {"name": "pu-proj-3", "node": "mate", "container": False, "kind": "busy"},
+        {"name": "pu-proj-4", "node": "hyper", "container": True, "kind": "silent"},
     ]
     try:
         try:

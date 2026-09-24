@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Проверка puppet_state без пула: python3 tests/state.py
+"""Проверка вердикта папета (mop/state.py) без пула: python3 tests/state.py
 
 Пока состояние собиралось поверх alloc exec, проверить его можно было только
 на живом папете — и регрессия однажды спряталась именно здесь: пробник сессии
@@ -16,24 +16,28 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop import puppets  # noqa: E402
-from mop.puppets import is_free, puppet_state  # noqa: E402
+from mop.state import (State, action_for, failing_row, failure_reason,  # noqa: E402
+                       is_free, silent, task_summary, verdict)
 
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
 WORK = {"cur": "bug/1063", "def": "master", "dirty": 0, "ahead": 0}
 
 
-# Правило «free по префиксу» стоит под выбором жертв в mop gc: снести
-# чужую работу из-за точного сравнения со «free» — дорогая опечатка.
+# Свобода стоит под выбором жертв в mop gc: снести чужую работу из-за
+# неверного ответа — дорогая опечатка. Пока вердикт был строкой, правило было
+# «free по префиксу», потому что свободное место несёт ещё и ветку; теперь это
+# вид, и ветка на ответ не влияет вовсе (#145).
 FREE_CASES = [
-    ("free", True),
-    ("free (master)", True),
-    ("free (bug/1063)", True),
-    ("busy", False),
-    ("idle: bug/1063 (uncommitted: 3)", False),
-    ("HUNG (not responding)", False),
-    ("AGENT SILENT (node agent node1 silent for 20s)", False),
-    ("needs action", False),
-    ("unknown (no clone data)", False),
+    (State("free"), True),
+    (State("free", branch="master"), True),
+    (State("free", branch="bug/1063"), True),
+    (State("busy"), False),
+    (State("idle", "uncommitted: 3", "bug/1063"), False),
+    (State("hung", "not responding"), False),
+    (silent("node agent node1 silent for 20s"), False),
+    (State("dialog"), False),
+    (State("unknown", "no clone data"), False),
+    (None, False),
 ]
 
 
@@ -47,6 +51,7 @@ CASES = [
      {"present": False}, "HUNG (no tmux session)"),
     ("agent returned an error",
      {"error": "tmux not responding"}, "HUNG (tmux not responding)"),
+    ("agent knows nothing about the puppet", None, "HUNG (no answer)"),
     ("empty pane — puppet just came up",
      facts("idle 1 1", screen="   \n\n"), "free"),
 
@@ -194,6 +199,96 @@ CASES = [
 ]
 
 
+
+# ── #145: лечение и свобода по каждому состоянию ─────────────────────────────
+# HYPOTHESIS: вердикт папета — английская фраза, и её потребители (doctor,
+# is_free, корзина дашборда, отчёт deploy) решают по префиксу. Переформулировка
+# сообщения молча меняет лечение и решение «свободен», на котором стоит диспатч.
+# SOLUTION: тип State(kind, detail, branch) в mop/state.py; потребители смотрят
+# в kind, а строка — только для показа.
+#
+# Характеризация: таблица ниже снята с ТЕКУЩИХ функций до переезда (строка ->
+# лечение, свобода, корзина дашборда) и прогнана зелёной на них. Переезд не
+# трогает таблицу; меняется только judge() — единственное место, которое
+# знает, как спросить код. Каждое состояние, которое пул умеет произвести:
+# вердикты по фактам (CASES), молчащий агент (SILENT) и падающий на старте.
+#
+# (строка состояния, лечение doctor, свободен, корзина дашборда)
+TREATMENT = [
+    ("HUNG (no tmux session)", "restart", False, "sick"),
+    ("HUNG (tmux not responding)", "restart", False, "sick"),
+    ("HUNG (no answer)", "restart", False, "sick"),
+    ("HUNG (not responding)", "restart", False, "sick"),
+    ("free", False, True, "free"),
+    ("free (master)", False, True, "free"),
+    ("free (bug/1063)", False, True, "free"),
+    ("busy", False, False, "busy"),
+    ("busy: bug/1063", False, False, "busy"),
+    ("busy: master", False, False, "busy"),
+    ("compacting: bug/1063", False, False, "busy"),
+    ("compacting", False, False, "busy"),
+    ("needs action", "restart", False, "sick"),
+    ("needs action: resume prompt", "restart", False, "sick"),
+    ("needs action: dialog", "restart", False, "sick"),
+    ("waiting for input", False, False, "busy"),
+    ("idle: bug/1063 (uncommitted: 3)", False, False, "busy"),
+    ("idle: bug/1063 (unpushed: 2)", False, False, "busy"),
+    ("idle: bug/1063 (uncommitted: 3, unpushed: 2)", False, False, "busy"),
+    ("idle: master (unpushed: 2)", False, False, "busy"),
+    ("idle: master (uncommitted: 3)", False, False, "busy"),
+    ("login expired: bug/1063", "login+restart", False, "sick"),
+    ("not logged in", "login+restart", False, "sick"),
+    ("no model quota: Opus 4.5", "model", False, "sick"),
+    ("error: Usage limit reached for 5 hour. Your limit will reset at"
+     " 2026-08-31 18:19:41", "model", False, "sick"),
+    ("error: Connection error", "model", False, "sick"),
+    ("error: Usage limit reached", "model", False, "sick"),
+    ("unknown (no clone data)", False, False, "busy"),
+    ("AGENT SILENT (no responders)", None, False, "silent"),
+    ("AGENT SILENT (nats: timeout)", None, False, "silent"),
+]
+
+# Молчащий агент рождается не из фактов, а из ответа шины: (ответ, строка).
+SILENT = [("no responders", "AGENT SILENT (no responders)"),
+          ("nats: timeout", "AGENT SILENT (nats: timeout)")]
+
+
+def judge(case):
+    """Как код отвечает про одно состояние: (строка, лечение, свободен, корзина).
+    case — факты из CASES либо ("silent", ответ шины).
+
+    До переезда здесь стояли строковые функции puppets.puppet_state,
+    puppets._action_for, is_free(строка) и строка вместо kind в row — таблица
+    TREATMENT была зелёной на них. После переезда решения берутся из вида, а
+    строка — из str(State): так таблица проверяет заодно, что str() воспроизводит
+    каждую строку дословно."""
+    from mop import web
+    v = silent(case[1]) if isinstance(case, tuple) else verdict(case)
+    row = {"alloc_status": "running", "state": str(v), "kind": v.kind}
+    return str(v), action_for(v.kind), is_free(v.kind), web.classify(row)
+
+
+def check_treatment():
+    bad, cases = 0, 0
+    table = {s: rest for s, *rest in TREATMENT}
+    seen = set()
+    inputs = [given for _, given, _ in CASES] + [("silent", a) for a, _ in SILENT]
+    for given in inputs:
+        cases += 1
+        state, *got = judge(given)
+        seen.add(state)
+        if state not in table:
+            bad += 1
+            print(f"FAILED  treatment: {state!r} is not in the table")
+        elif list(table[state]) != got:
+            bad += 1
+            print(f"FAILED  treatment of {state!r}: wanted {table[state]}, got {got}")
+    # Таблица без лишних строк: каждая её строка кем-то произведена.
+    for state in set(table) - seen:
+        bad += 1
+        print(f"FAILED  treatment: nobody produces {state!r}")
+    return bad, cases + 1
+
 # ── ростер глазами одного проекта (#29) ──────────────────────────────────────
 # HYPOTHESIS: джоба-папет без origin в Meta (старая регистрация) невидима
 # любому списку, включая admin, — что и выглядело как «папеты исчезают»:
@@ -289,7 +384,7 @@ def check_failing():
     задачи и причина из stderr. STATUS: FIXED — see #126"""
     bad, cases = 0, 0
     cases += 1
-    t = puppets.task_summary(ALLOC, now=1000)
+    t = task_summary(ALLOC, now=1000)
     want = {"state": "pending", "restarts": 4, "exit": 1, "next_s": 1576, "failed": False}
     if t != want:
         bad += 1
@@ -297,30 +392,30 @@ def check_failing():
     # Срок -- оставшийся, а не задержка на момент события: через десять минут
     # «next in 26m» было бы неправдой.
     cases += 1
-    later = puppets.task_summary(ALLOC, now=1000 + 600)
+    later = task_summary(ALLOC, now=1000 + 600)
     if later["next_s"] != 976:
         bad += 1
         print(f"FAILED  next_s must count down from the event: {later['next_s']}")
     cases += 1
-    if puppets.task_summary(ALLOC, now=1000 + 99999)["next_s"] != 0:
+    if task_summary(ALLOC, now=1000 + 99999)["next_s"] != 0:
         bad += 1
         print("FAILED  a passed deadline is 0, not negative")
     # Причина -- из последней попытки, первая ошибка после строки врапера.
     cases += 1
-    got = getattr(puppets, "failure_reason", lambda s: None)(STDERR)
+    got = failure_reason(STDERR)
     want = "bootstrap: Could not find or access '~/rugent/.env-prod' on the Ansible Controller."
     if got != want:
         bad += 1
         print(f"FAILED  failure_reason -> {got!r}, wanted {want!r}")
     # Без знакомых строк -- последняя непустая, а пусто -- None.
     cases += 1
-    if getattr(puppets, "failure_reason", lambda s: 0)("x\nsomething broke\n\n") != "something broke" \
-            or getattr(puppets, "failure_reason", lambda s: 0)("") is not None:
+    if failure_reason("x\nsomething broke\n\n") != "something broke" \
+            or failure_reason("") is not None:
         bad += 1
         print("FAILED  failure_reason must fall back to the last line, and None on empty")
     # Строка ростера: падающий -- failing с причиной и сроком, а не pending.
     cases += 1
-    fn = getattr(puppets, "failing_row", None)
+    fn = failing_row
     got = fn("pending", t, "bootstrap: no file") if fn else None
     want = ("failing", "FAILED: bootstrap: no file (4 restarts, next in 26m)")
     if got != want:
@@ -347,7 +442,7 @@ def check_failing():
 def main():
     bad = 0
     for what, given, want in CASES:
-        got = puppet_state(given)
+        got = str(verdict(given))
         if got != want:
             bad += 1
             print(f"FAILED  {what}\n  wanted:  {want!r}\n  got: {got!r}")
@@ -361,9 +456,12 @@ def main():
     fbad, fcases = check_failing()
     bad += fbad
     cases += fcases
+    tbad, tcases = check_treatment()
+    bad += tbad
+    cases += tcases
     for state, want in FREE_CASES:
         cases += 1
-        if is_free(state) != want:
+        if is_free(state and state.kind) != want:
             bad += 1
             print(f"FAILED  is_free({state!r})")
     print(f"{cases - bad}/{cases} matched")

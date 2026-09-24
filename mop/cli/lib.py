@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import sys
 
-from mop import bus, config, creds, keys, llm, puppets  # noqa: E402
+from mop import bus, config, creds, keys, llm, puppets, state  # noqa: E402
 
 
 # Каталоги установки: корень проекта и bin/ с единственным исполняемым
@@ -355,7 +355,7 @@ def alloc_of(name):
 
 def failing(a):
     """Строка состояния падающего папета из ответа `alloc`, либо None (#126)."""
-    got = puppets.failing_row((a or {}).get("ClientStatus"), (a or {}).get("task"),
+    got = state.failing_row((a or {}).get("ClientStatus"), (a or {}).get("task"),
                               (a or {}).get("reason"))
     return got[1] if got else None
 
