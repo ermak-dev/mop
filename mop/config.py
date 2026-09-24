@@ -33,6 +33,8 @@ GitLab, которым в пуле делать нечего. Всё, что н�
 import os
 import pwd
 
+from . import fsutil
+
 PROJECT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 ENV_FILE = os.path.join(PROJECT, ".env")
 
@@ -446,27 +448,13 @@ def require(*names):
 _cache = {}
 
 
-def _parse(text):
-    """Текст вида ключ=значение -> dict. Формат намеренно примитивен: его
-    читают и питон, и ansible, и sed."""
-    out = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        k, sep, v = line.partition("=")
-        if sep:
-            out[k.strip()] = v.strip().strip('"').strip("'")
-    return out
-
-
 def read_env(path):
     """То же файлом. Отсутствие файла — штатный случай: на узле нет .env, на
     управляющей машине нет node.env. Публична, потому что тем же форматом
     читаются и ключи LLM из .env (keys.llm_keys_blob)."""
     try:
         with open(path) as f:
-            return _parse(f.read())
+            return fsutil.read_kv(f.read())
     except OSError:
         return {}
 

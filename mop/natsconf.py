@@ -19,7 +19,7 @@ import signal
 import string
 import subprocess
 
-from . import busnames
+from . import busnames, fsutil
 
 DIR = "/etc/nats"
 BASE = os.path.join(DIR, "base-users.json")
@@ -109,16 +109,6 @@ def _pass_file(root, project):
     return os.path.join(root, busnames.pass_file(busnames.puppet_user(project)))
 
 
-def _write_private(path, text):
-    """Атомарно и 0600: nats-server может перечитать файл в любой момент."""
-    tmp = f"{path}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(text)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-
-
 def passwords(names, root):
     """{проект: пароль}; недостающий пароль заводится, имеющийся не меняется.
 
@@ -136,7 +126,7 @@ def passwords(names, root):
             out[p] = ""
         if not out[p]:
             out[p] = "".join(secrets.choice(alphabet) for _ in range(32))
-            _write_private(path, out[p] + "\n")
+            fsutil.write_private(path, out[p] + "\n")
     return out
 
 
@@ -153,7 +143,8 @@ def write(text, path=USERS):
                 return False
     except FileNotFoundError:
         pass
-    _write_private(path, text)
+    # Атомарно: nats-server может перечитать файл в любой момент.
+    fsutil.write_private(path, text)
     return True
 
 

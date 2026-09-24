@@ -4,14 +4,14 @@ A profile changes exactly one thing — where a puppet goes for tokens.
 Everything else (tmux, state, stuck detection) is the same for every profile.
 """
 from mop.cli import lib
-from mop import keys, llm, puppets
+from mop import fsutil, keys, llm, puppets
 
 
 def main(argv):
     if argv:
         lib.usage(__doc__)
     blob, note = keys.llm_keys_blob()
-    have = {l.split("=", 1)[0] for l in (blob or "").splitlines() if "=" in l}
+    have = set(fsutil.read_kv(blob or "", raw=True))
     for name, prof in llm.profiles().items():
         key = prof.get("key")
         if not key:
