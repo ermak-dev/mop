@@ -214,6 +214,26 @@ def main():
         code, out, err = run(name, argv, stdin)
         check(f"{name}: refused with the ldap provider",
               code != 0 and "LDAP" in err and content() == before, (code, err))
+    # ── #232: file,ldap -- файл в цепочке, mop user его правит ───────────
+    # HYPOTHESIS: отказ «people live in LDAP» -- по одному провайдеру ldap;
+    # при цепочке file,ldap локальных людей было бы нечем завести.
+    # SOLUTION: отказ -- только когда file нет в цепочке. STATUS: FIXED — see #232
+    for chain in ("file,ldap", "ldap,file"):
+        os.environ["MOP_AUTH_PROVIDER"] = chain
+        login = "ivy" if chain == "file,ldap" else "jon"
+        code, out, err = run("add", [login, "--role", "admin", "--stdin"], "pw\n")
+        check(f"add: works with {chain}", code == 0 and authenticates(login, "pw"),
+              (code, out, err))
+        code, out, err = run("passwd", [login, "--stdin"], "pw2\n")
+        check(f"passwd: works with {chain}", code == 0 and authenticates(login, "pw2"),
+              (code, out, err))
+        code, out, err = run("delete", [login])
+        check(f"delete: works with {chain}", code == 0 and provider().lookup(login) is None,
+              (code, out, err))
+    os.environ["MOP_AUTH_PROVIDER"] = "ldap,nope"
+    code, out, err = run("add", ["kit", "--role", "admin", "--stdin"], "pw\n")
+    check("add: an unknown link is refused, named", code != 0 and "nope" in err
+          and provider().lookup("kit") is None, (code, out, err))
     del os.environ["MOP_AUTH_PROVIDER"]
 
     # ── MOP_OPERATORS_FILE -- файл там, где его назвали ──────────────────

@@ -8,7 +8,8 @@
 People live in the identity provider (#205): with MOP_AUTH_PROVIDER=file, in
 the operators file on the server (~/.config/mop/secrets/operators, or
 MOP_OPERATORS_FILE), one line per person, the password as a scrypt hash.
-With ldap they live in LDAP, and mop user refuses.
+With file,ldap (a chain, #232) the file holds local people on top of LDAP and
+mop user edits it; with ldap alone they live in LDAP, and mop user refuses.
 
 Works on the server, where the file lives. The password is asked twice
 without echo, or read as one line from stdin with --stdin. The server's

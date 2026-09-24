@@ -22,9 +22,16 @@ def refusal(got):
     Сервер -- машина, где лежат secrets/ установки (их заводит deploy) и
     инвентарь: так узнаётся контроллер, у которого и живёт файл операторов.
     Проверка по одному каталогу пропустила бы машину оператора после mop
-    join -- у неё ~/.config/mop есть, но secrets/ и инвентаря нет."""
-    if (got.get("MOP_AUTH_PROVIDER") or "file") == "ldap":
-        return ("people live in LDAP (MOP_AUTH_PROVIDER=ldap): "
+    join -- у неё ~/.config/mop есть, но secrets/ и инвентаря нет.
+
+    Файл правится, когда file -- звено цепочки (#232): при file,ldap в нём
+    локальные люди поверх каталога."""
+    try:
+        kinds = identity.links(got.get("MOP_AUTH_PROVIDER"))
+    except ValueError as e:
+        return str(e)
+    if "file" not in kinds:
+        return (f"people live in LDAP (MOP_AUTH_PROVIDER={got.get('MOP_AUTH_PROVIDER')}): "
                 "add, change and remove them there")
     inventory = os.environ.get("INVENTORY", "")
     if not os.path.isdir(identity.SECRETS) or not os.path.isfile(inventory):

@@ -9,7 +9,9 @@ MOP_OPERATORS, разобранная в словарь {role, projects} (mop/op
 Источник личностей -- провайдер (AuthProvider): проверить пароль и найти по
 логину. Первый -- плоский файл на сервере (PlainFileProvider); LDAP -- #208,
 auth callout NATS, который будет их спрашивать, -- #206. Какой провайдер
-работает, решает настройка MOP_AUTH_PROVIDER.
+работает, решает настройка MOP_AUTH_PROVIDER; список через запятую --
+цепочка (#232), порядок -- старшинство: `file,ldap` -- локальные люди из
+файла поверх каталога.
 
 Файл операторов -- строка на человека, поля через двоеточие, как в
 /etc/passwd:
@@ -195,6 +197,12 @@ class PlainFileProvider:
     def identities(self):
         return [who for who, _ in self._records()[0].values()]
 
+    def knows(self, login):
+        """Есть ли у файла логин -- для цепочки (#232). Дубль -- знает: решать
+        ему, и он откажет."""
+        records, twice = self._records()
+        return login in records or login in twice
+
     def lookup(self, login):
         got = self._one(login)
         return got[0] if got else None
@@ -238,7 +246,7 @@ def service_settings(get, secrets_dir):
     кладёт deploy. Провайдер ldap без обоих -- отказ с путём файла: сервис
     без каталога -- вход, которого нет."""
     out = {k: get(k) for k in SETTINGS}
-    if (out.get("MOP_AUTH_PROVIDER") or "file") != "ldap" or out.get(BIND_PASSWORD):
+    if "ldap" not in links(out.get("MOP_AUTH_PROVIDER")) or out.get(BIND_PASSWORD):
         return out
     path = os.path.join(secrets_dir, BIND_PASSWORD_FILE)
     try:
@@ -247,7 +255,7 @@ def service_settings(get, secrets_dir):
     except FileNotFoundError:
         out[BIND_PASSWORD] = ""
     if not out[BIND_PASSWORD]:
-        raise ValueError(f"MOP_AUTH_PROVIDER=ldap, but {path} has no bind password "
+        raise ValueError(f"MOP_AUTH_PROVIDER has ldap, but {path} has no bind password "
                          f"-- set MOP_LDAP_BIND_PASSWORD in .env and run mop deploy")
     return out
 
@@ -398,18 +406,67 @@ def refresh_copy(path, folder=None):
 
 
 # ─── выбор провайдера ────────────────────────────────────────────────────
-def provider(settings, secrets_dir=SECRETS):
-    """Настройки -> провайдер по MOP_AUTH_PROVIDER. Неизвестное имя -- отказ:
-    молча упасть на file значило бы пустить по другому списку людей."""
-    kind = settings.get("MOP_AUTH_PROVIDER") or "file"
+KINDS = ("file", "ldap")
+
+
+def links(value):
+    """MOP_AUTH_PROVIDER -> кортеж имён звеньев в порядке старшинства (#232).
+    Пусто -- file. Неизвестное имя или повтор -- отказ с ним: молча упасть
+    на file значило бы пустить по другому списку людей, а повтор -- опечатка,
+    за которой, может быть, стоял другой порядок."""
+    names = [n.strip() for n in (value or "file").split(",")]
+    for i, name in enumerate(names):
+        if name not in KINDS:
+            raise ValueError(f"MOP_AUTH_PROVIDER={value!r}: no such provider {name!r}; "
+                             f"known: {', '.join(KINDS)}")
+        if name in names[:i]:
+            raise ValueError(f"MOP_AUTH_PROVIDER={value!r}: {name} is named twice")
+    return tuple(names)
+
+
+class ChainProvider:
+    """Звенья по порядку (#232): первое, которое знает логин (knows), решает
+    за всех -- и паролем, и личностью. Неверный пароль у знающего звена --
+    отказ, до следующих звеньев вход не доходит: одноимённая учётка ниже по
+    цепочке -- не второй пароль к логину, и лишнего bind'а и счётчика
+    неудач в AD нет. Последнее звено не спрашивается, знает ли оно: логин,
+    которого не знает никто выше, решает оно, и «unknown login» -- его ответ.
+
+    Звено -- AuthProvider с knows(login); conflicts -- у каждого своё."""
+
+    def __init__(self, links):
+        self.links = list(links)
+
+    def _decider(self, login):
+        for link in self.links[:-1]:
+            if link.knows(login):
+                return link
+        return self.links[-1]
+
+    def authenticate(self, login, password):
+        return self._decider(login).authenticate(login, password)
+
+    def lookup(self, login):
+        return self._decider(login).lookup(login)
+
+    def conflicts(self):
+        return [c for link in self.links for c in link.conflicts()]
+
+
+def _link(kind, settings, secrets_dir):
     if kind == "file":
         return PlainFileProvider(operators_path(settings, secrets_dir))
-    if kind == "ldap":
-        # Лениво: ldapauth -- поверх identity, а ldap3 -- только при вызове.
-        from . import ldapauth
-        cfg = ldapauth.settings(settings)
-        return ldapauth.LdapProvider(cfg, ldapauth.Ldap3Directory(cfg))
-    raise ValueError(f"MOP_AUTH_PROVIDER={kind!r}: no such provider; known: file, ldap")
+    # Лениво: ldapauth -- поверх identity, а ldap3 -- только при вызове.
+    from . import ldapauth
+    cfg = ldapauth.settings(settings)
+    return ldapauth.LdapProvider(cfg, ldapauth.Ldap3Directory(cfg))
+
+
+def provider(settings, secrets_dir=SECRETS):
+    """Настройки -> провайдер по MOP_AUTH_PROVIDER: одно имя -- само звено,
+    как до #232; список -- ChainProvider в его порядке."""
+    got = [_link(kind, settings, secrets_dir) for kind in links(settings.get("MOP_AUTH_PROVIDER"))]
+    return got[0] if len(got) == 1 else ChainProvider(got)
 
 
 def server_provider(folder=None):

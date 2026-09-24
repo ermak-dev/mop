@@ -478,11 +478,25 @@ def check_ad_groups_220():
     return out
 
 
+def check_knows_232():
+    """Звено цепочки (#232): знает логин -- в каталоге есть его запись, даже
+    без доступа (иначе одноимённая учётка ниже стала бы вторым паролем).
+    STATUS: FIXED — see #232"""
+    out = []
+    p = provider()
+    for login, want in (("anton", True), ("olga", True), ("nobody", False), ("a*", False)):
+        if p.knows(login) is not want:
+            out.append(f"knows({login!r}) must be {want}")
+    if p.directory.checked:
+        out.append(f"knows must never bind as the user: {p.directory.checked}")
+    return out
+
+
 def main():
     failed = []
     for check in (check_authenticate, check_mapping, check_lookup, check_settings,
                   check_choice, check_filters, check_ldap3, check_service_settings_214,
-                  check_ad_groups_220):
+                  check_ad_groups_220, check_knows_232):
         try:
             lines = check()
         except Exception as e:  # noqa: BLE001 -- падение проверки -- тоже провал

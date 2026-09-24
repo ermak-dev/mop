@@ -717,7 +717,11 @@ def check_identity_copy_167(check, ptasks):
                     (t[mod] or {}).get("state")
         return None, None, None
 
-    for exists, prov in itertools.product((True, False), ("file", "ldap")):
+    # #232: цепочка -- список через запятую; пароль LDAP -- когда ldap в ней
+    # звено, файл операторов -- когда он есть, как и прежде.
+    # STATUS: FIXED — see #232
+    for exists, prov in itertools.product((True, False),
+                                          ("file", "ldap", "file,ldap", "ldap, file")):
         env = {"MOP_AUTH_PROVIDER": prov,
                "operators_file": types.SimpleNamespace(stat=types.SimpleNamespace(exists=exists))}
         try:
@@ -732,10 +736,11 @@ def check_identity_copy_167(check, ptasks):
               ("file", "/etc/nats/identity", "absent") not in done, done)
         check(f"{what}: the operators file is copied exactly when it exists",
               (("copy", "/etc/nats/identity/operators", None) in done) == exists, done)
-        check(f"{what}: the LDAP bind password is laid exactly with ldap",
-              (("copy", "/etc/nats/identity/ldap-bind.pass", None) in done) == (prov == "ldap"), done)
-        check(f"{what}: another provider leaves no bind password",
-              (("file", "/etc/nats/identity/ldap-bind.pass", "absent") in done) == (prov != "ldap"),
+        with_ldap = "ldap" in prov
+        check(f"{what}: the LDAP bind password is laid exactly with ldap in the chain",
+              (("copy", "/etc/nats/identity/ldap-bind.pass", None) in done) == with_ldap, done)
+        check(f"{what}: a chain without ldap leaves no bind password",
+              (("file", "/etc/nats/identity/ldap-bind.pass", "absent") in done) != with_ldap,
               done)
         check(f"{what}: the controller's operators file is looked at",
               any(k == "stat" and "operators" in str(p) for k, p, _ in done), done)
@@ -1014,7 +1019,7 @@ def main():
 
     # ── пароль LDAP сервисам сервера -- файлом 0600 (#214) ───────────────
     # Окружение юнита читаемо всем, поэтому секрет провайдера -- файлом рядом
-    # с копией личностей, и только когда провайдер -- ldap.
+    # с копией личностей, и только когда ldap -- звено провайдера (#232).
     # STATUS: FIXED — see #214
     def every(tasks):
         for t in tasks or []:
@@ -1037,13 +1042,15 @@ def main():
         # операторов) -- файл пароля следует его условию, своего нет.
         block = next((b for b in ptasks if b.get("name") == "Identity for the server's services"), {})
         check("bus: the bind password file only with the ldap provider, inside the identity copy",
-              "MOP_AUTH_PROVIDER == 'ldap'" in str(w) and block.get("when") in (w or [None])
+              "'ldap' in MOP_AUTH_PROVIDER.replace(' ', '').split(',')" in str(w)
+              and block.get("when") in (w or [None])
               and t in (block.get("block") or []), w)
     gone = [(t, w) for t, w in every(ptasks)
             if (t.get("ansible.builtin.file") or {}).get("path") == bind
             and (t.get("ansible.builtin.file") or {}).get("state") == "absent"]
     check("bus: no bind password file without the ldap provider",
-          len(gone) == 1 and "MOP_AUTH_PROVIDER != 'ldap'" in str(gone[0][1]), gone)
+          len(gone) == 1
+          and "'ldap' not in MOP_AUTH_PROVIDER.replace(' ', '').split(',')" in str(gone[0][1]), gone)
 
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")
