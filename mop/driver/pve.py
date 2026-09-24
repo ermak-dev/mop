@@ -35,11 +35,11 @@ import time
 import shlex
 
 from .. import config
-from . import HOME, PREFIX, bad_name, sh, project_of_name, valid_name, why
+from . import HOME, PREFIX, SERVER_PUB, bad_name, sh, project_of_name, valid_name, why
 
 USER = config.get("MOP_USER")
 # Тело — вещь сама по себе: у него свой $HOME, свои процессы и свой ssh.
-BODY_IS_NODE = False
+IS_CONTAINER = True
 
 # Обёртка на гипервизоре — единственная дорога к жизненному циклу тел.
 WRAPPER = "/usr/local/sbin/mop-pve"
@@ -188,6 +188,11 @@ def address_of(name):
     Хранить адрес негде: `pct config` знал бы его, но спрашивать гипервизор на
     каждую пробу состояния значит платить за пробу процессом."""
     return address_of_vmid(vmid_of(name))
+
+
+def address(name):
+    """Где сервер найдёт тело (контракт, #151): адрес тела из имени."""
+    return address_of(name)
 
 
 def template_address(project):
@@ -537,14 +542,25 @@ async def _seed(name, vmid):
     return {}
 
 
-async def admit(name, pubkey):
+async def admit(name, let_in):
     """Впустить ключ сервера в тело на время bootstrap'а (#62) либо
-    выпустить (pubkey=None). Глагол keys заменяет файл целиком, и ключ узла
+    выпустить (let_in=False). Глагол keys заменяет файл целиком, и ключ узла
     в нём есть всегда — иначе, выпуская сервер, узел запер бы тело от себя.
 
     Только на время: постоянный ключ в образе был бы второй дорогой к телу
     мимо агента, то есть мимо единственной проверки проектирования, — ровно
-    то, от чего отказались для ключа мастера при сборке образа."""
+    то, от чего отказались для ключа мастера при сборке образа.
+
+    Нет ключа сервера на узле — исключение, а не отказ тела: это узел не
+    докатан, и текст тот же, что давал bootstrap до #151."""
+    pubkey = None
+    if let_in:
+        try:
+            with open(SERVER_PUB) as f:
+                pubkey = f.read().strip()
+        except FileNotFoundError:
+            raise RuntimeError(f"no server key on this node ({SERVER_PUB}) — "
+                               f"run mop deploy")
     if not valid_name(name):
         return {"error": bad_name(name)}
     try:

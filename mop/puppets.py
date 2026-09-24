@@ -560,12 +560,12 @@ def delete(name):
     if not node:
         return {"node": None, "body": None}
     # Контракт драйвера — словарь, а НЕ модуль: `driver.require` отдаёт
-    # проверенный реестром контракт, и флаг в нём лежит ключом body_is_node.
-    # Модуль с атрибутом BODY_IS_NODE возвращает только `driver.current()`, и
+    # проверенный реестром контракт, и флаг в нём лежит ключом is_container.
+    # Модуль с атрибутом IS_CONTAINER возвращает только `driver.current()`, и
     # он про ЭТОТ узел, а нам нужен чужой — по имени. Драйвер приезжает вместе
     # с аллокацией: второго запроса за одним полем меты не делаем.
     drv = got.get("driver") or driver.DEFAULT
-    if driver.require(drv)["body_is_node"]:
+    if not driver.require(drv)["is_container"]:
         return {"node": node, "body": "kept"}
     _wait_stopped(name)
     wipe(node, name)

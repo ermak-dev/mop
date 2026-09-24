@@ -570,7 +570,7 @@ async def v_write(_conn, req):
     # Все тела разом и все файлы тела одним вызовом (#137): по очереди и по
     # файлу это стоило ~4 с на файл, и `mop login` на узле с двумя телами
     # читался молчащим агентом.
-    bodies = [] if DRIVER.BODY_IS_NODE else await DRIVER.bodies()
+    bodies = await driver.bodies_apart(DRIVER)
     answers = await asyncio.gather(*(DRIVER.push_many(name, files) for name in bodies))
     for name, r in zip(bodies, answers):
         if r.get("error"):
@@ -593,9 +593,8 @@ async def v_junk(_conn, req):
     про чужие проекты тоже, а сопоставлять с Nomad всё равно некому, кроме
     управляющей машины.
 
-    `templates` есть не у всякого драйвера — у host сборочных тел не бывает
-    вовсе, и пустой список там честнее выдуманного."""
-    tmpl = getattr(DRIVER, "templates", None)
+    `templates` у host пуст: сборочных тел там не бывает вовсе, и пустой
+    список честнее выдуманного."""
     names = await DRIVER.bodies()
     # Работу в клоне спрашиваем ЗДЕСЬ, а не оставляем решать по имени. Тело
     # без tmux-сессии `facts` описывает как {present: False} и про клон молчит
@@ -613,7 +612,7 @@ async def v_junk(_conn, req):
             "driver": driver.current_name(),
             "bodies": names,
             "work": work,
-            "templates": (await tmpl()) if tmpl else []}
+            "templates": await DRIVER.templates()}
 
 
 async def v_usage(_conn, req):
