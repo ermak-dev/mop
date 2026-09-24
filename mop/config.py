@@ -191,6 +191,10 @@ DEFAULTS = {
     "MOP_HTTPS_PORT": "443",
     # WebSocket-листенер nats-server: только на петле, TLS терминирует nginx.
     "MOP_NATS_WS_PORT": "4280",
+    # Мониторинг nats-server (/varz), только на петле: по дайджесту
+    # работающего конфига reload проверяет, что nats принял новый файл (#211)
+    # -- отвергнутый reload иначе виден лишь в журнале nats.
+    "MOP_NATS_MONITOR_PORT": "8222",
     # Порт sshd узла, которым сервер ходит на него сам -- bootstrap песочницы
     # host-папета (#201). Узловой: у узла на WSL sshd на 2222, и знал это
     # один ssh config root'а на контроллере. В node.env его рендерит
@@ -397,7 +401,9 @@ SERVER_SCOPED = {
                     "MOP_HOME", "MOP_USER", "MOP_NOMAD_PORT", "MOP_POOL_DC",
                     "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",
                     "MOP_PUPPET_PATH", "MOP_DEFAULT_LLM",
-                    "MOP_GIT_NAME", "MOP_GIT_EMAIL"),
+                    "MOP_GIT_NAME", "MOP_GIT_EMAIL",
+                    # reload шины с проверкой (#211): `mop project add/rm`
+                    "MOP_NATS_MONITOR_PORT"),
     "mop-web": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                 "MOP_NOMAD_PORT", "MOP_POOL_DC"),
 }

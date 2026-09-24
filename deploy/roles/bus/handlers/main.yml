@@ -6,10 +6,15 @@
     daemon_reload: yes
 
 # Новый users.conf без смены основного конфига: соединения не рвём.
+# Не systemd reloaded: SIGHUP о своей судьбе не говорит, и отвергнутый
+# конфиг nats держал бы молча, а прогон был бы зелёным (#211). Команда
+# сверяет дайджест работающего конфига с файлом и валит прогон с причиной.
 - name: reload nats
-  ansible.builtin.systemd:
-    name: nats
-    state: reloaded
+  become: yes
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.command: "{{ MOP_HOME }}/mop/bin/mop cluster reload"
+  environment:
+    MOP_NATS_MONITOR_PORT: "{{ MOP_NATS_MONITOR_PORT }}"
 
 
 # Агент на рабочих узлах.

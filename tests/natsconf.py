@@ -223,6 +223,43 @@ def main():
     if mode != 0o600:
         failed.append(f"a password file must be 0600, got {oct(mode)}")
 
+    # HYPOTHESIS (#211): reload -- SIGHUP вслепую. nats отвергает reload молча
+    # (только «[ERR] Failed to reload server configuration» в своём журнале) и
+    # продолжает на старом конфиге, а `mop cluster users --reload`, удаление
+    # проекта и хендлер deploy докладывают успех.
+    # SOLUTION: до сигнала -- `nats-server -t` по файлу (битый файл -- отказ
+    # без сигнала, с текстом nats); после -- дайджест работающего конфига из
+    # /varz против дайджеста файла. Стенд (2.14.6): config_digest в varz равен
+    # sha256, который печатает -t; принятый reload его меняет, отвергнутый --
+    # и синтаксис, и непереносимая перезагрузкой правка (listen,
+    # auth_callout) -- оставляет старый.
+    # STATUS: FIXED — see #211
+    ok_t = ("nats-server: configuration file /etc/nats/nats-server.conf is valid "
+            "(sha256:0c42260ccf0e03c4f86507064f9726ef60037061b20006365f0cf12336b7cbbf)")
+    bad_t = ("nats-server: error parsing include file './users.conf', Parse error on line 3: "
+             "'Expected a map value terminator \",\" or a map terminator \"}\", but got 'p' instead.'")
+    new = "sha256:0c42260ccf0e03c4f86507064f9726ef60037061b20006365f0cf12336b7cbbf"
+    old = "sha256:e5d8e7ce4948cb97ef4cafe4384402fa24223d6c2f2a2334ddeae2b684be7192"
+    try:
+        if natsconf.digest_of(ok_t) != new:
+            failed.append(f"digest_of must read -t's sha256: {natsconf.digest_of(ok_t)!r}")
+        if natsconf.digest_of(bad_t) is not None:
+            failed.append("digest_of of a failed -t must be None")
+        if natsconf.reload_verdict(ok_t, new) is not None:
+            failed.append(f"running == file must be accepted: {natsconf.reload_verdict(ok_t, new)!r}")
+        why = natsconf.reload_verdict(ok_t, old) or ""
+        if not (old in why and new in why and "restart" in why):
+            failed.append(f"a kept old digest must be a refusal naming both digests and "
+                          f"the cure (restart): {why!r}")
+        why = natsconf.reload_verdict(bad_t, old) or ""
+        if "Parse error on line 3" not in why:
+            failed.append(f"an invalid file must be refused with nats' own words: {why!r}")
+        why = natsconf.reload_verdict(ok_t, None) or ""
+        if "varz" not in why:
+            failed.append(f"no running digest (monitoring silent) must be a refusal: {why!r}")
+    except AttributeError as e:
+        failed.append(f"verified reload is missing: {e}")
+
     print("\n".join(f"FAIL {l}" for l in failed) if failed else "", end="\n" if failed else "")
     print("natsconf: FAILED" if failed else "natsconf: ok")
     return 1 if failed else 0
