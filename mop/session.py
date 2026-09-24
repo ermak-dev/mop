@@ -24,6 +24,8 @@ import time
 import uuid
 
 SESSIONS = os.path.expanduser("~/.claude/sessions")
+# Записи исхода хода (#222): их пишет хук claude, читает `state`.
+TURNS = os.path.expanduser("~/.local/state/mop/turns")
 CONNECT_TIMEOUT = 5
 PRIORITIES = ("now", "next", "later")
 MODES = ("bypass", "prompting")
@@ -157,6 +159,106 @@ def probe(cwd):
         alive = False
     listen = socket_alive(d["messagingSocketPath"]) if d.get("messagingSocketPath") else False
     return f"{d.get('status', '?')} {int(alive)} {int(listen)}"
+
+
+# ─── исход хода: сток хуков claude (#222) ────────────────────────────────
+# Состояние папета угадывалось по экрану tmux, и 24.09 два папета, умершие
+# посреди хода на «Login expired», полтора часа читались как idle. Claude
+# Code сообщает исход хода сам: вместо Stop приходит StopFailure с кодом
+# ошибки (authentication_failed, rate_limit, billing_error, ...). Хук кладёт
+# запись по session_id, `state` отдаёт её вместе с файлом сессии.
+#
+# Какие события: начало сессии, запрос, нормальный конец хода и смена модели
+# снимают ошибку; StopFailure её ставит. PreToolUse/PostToolUse идут на
+# каждый вызов инструмента, а busy и так есть в файле сессии; Notification
+# не говорит, когда диалог закрылся, -- живой диалог в waitingFor файла.
+CLEARING = ("SessionStart", "UserPromptSubmit", "Stop", "PostModelSwitch")
+FAILURE = "StopFailure"
+DETAIL_MAX = 300
+TURN_TTL = 7 * 86400
+
+
+def _plain_id(sid):
+    """session_id -- имя файла: только буквы, цифры, дефис и подчёркивание,
+    иначе вход -- не наш (путь в имени писал бы мимо каталога)."""
+    return isinstance(sid, str) and bool(sid) and \
+        all(c.isalnum() or c in "-_" for c in sid) and sid.isascii()
+
+
+def turn_record(payload, now):
+    """Вход хука -> запись исхода хода или None (событие не наше, нет
+    session_id). Форма ровно {event, at, error, detail}."""
+    if not isinstance(payload, dict) or not _plain_id(payload.get("session_id")):
+        return None
+    event = payload.get("hook_event_name")
+    if event in CLEARING:
+        return {"event": event, "at": int(now), "error": None, "detail": None}
+    if event == FAILURE:
+        # Кода нет -- всё равно провал: «unknown» из словаря claude, а не
+        # None, который читался бы снятой ошибкой.
+        detail = payload.get("last_assistant_message")
+        return {"event": event, "at": int(now), "error": payload.get("error") or "unknown",
+                "detail": detail[:DETAIL_MAX] if isinstance(detail, str) and detail else None}
+    return None
+
+
+def _write_turn(root, sid, record, now):
+    """Запись атомарно: временный файл рядом + os.replace. Попутно снимаются
+    записи старше недели -- мёртвые сессии копятся."""
+    os.makedirs(root, exist_ok=True)
+    tmp = os.path.join(root, f".{sid}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(record, f)
+        os.replace(tmp, os.path.join(root, f"{sid}.json"))
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    for f in glob.glob(os.path.join(root, "*.json")):
+        try:
+            if os.path.getmtime(f) < now - TURN_TTL:
+                os.remove(f)
+        except OSError:
+            pass
+
+
+def hook(text, now, root=None):
+    """Вход хука (stdin) -> запись на диск, если событие наше."""
+    payload = json.loads(text)
+    record = turn_record(payload, now)
+    if record is not None:
+        _write_turn(root or TURNS, payload["session_id"], record, now)
+
+
+def read_turn(sid, root=None):
+    """Запись исхода хода сессии или None."""
+    if not _plain_id(sid):
+        return None
+    try:
+        with open(os.path.join(root or TURNS, f"{sid}.json")) as f:
+            got = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def state(cwd):
+    """Состояние свежейшей сессии каталога одной записью: status, alive и
+    listen -- как у probe, waitingFor -- из файла сессии (открытый диалог),
+    turn -- запись исхода хода этой сессии. Сессии нет -- те же ключи,
+    пустые: status и waitingFor null, alive и listen false, turn null."""
+    d = session_for_cwd(cwd)
+    if d is None:
+        return {"status": None, "waitingFor": None, "alive": False, "listen": False,
+                "turn": None}
+    try:
+        os.kill(int(d.get("pid")), 0)
+        alive = True
+    except Exception:
+        alive = False
+    listen = socket_alive(d["messagingSocketPath"]) if d.get("messagingSocketPath") else False
+    return {"status": d.get("status", "?"), "waitingFor": d.get("waitingFor"),
+            "alive": alive, "listen": listen, "turn": read_turn(d.get("sessionId"))}
 
 
 # ─── протокол канала ─────────────────────────────────────────────────────
@@ -368,6 +470,22 @@ def wait_idle(cwd, timeout, tag=None):
 
 
 def main(argv):
+    if argv[:1] == ["hook"]:
+        # Молча и всегда 0: stdout хуков SessionStart и UserPromptSubmit
+        # уходит в контекст модели, а код 2 на Stop заставил бы claude
+        # продолжить ход. Любой сбой стока -- не дело сессии.
+        try:
+            hook(sys.stdin.read(), time.time())
+        except BaseException:
+            pass
+        return 0
+    if len(argv) >= 2 and argv[0] == "state":
+        try:
+            out = state(argv[1])
+        except Exception as e:
+            out = {"error": str(e)}
+        print(json.dumps(out, ensure_ascii=False))
+        return 0 if "error" not in out else 1
     if len(argv) >= 2 and argv[0] == "probe":
         print(probe(argv[1]))
         return 0
@@ -399,7 +517,8 @@ def main(argv):
             out = {"error": str(e)}
         print(json.dumps(out, ensure_ascii=False))
         return 0 if "error" not in out else 1
-    print("usage: session.py probe <cwd> | wait-idle <cwd> <timeout> [tag] | "
+    print("usage: session.py probe <cwd> | state <cwd> | hook (stdin) | "
+          "wait-idle <cwd> <timeout> [tag] | "
           "send <target> <text> [--priority P] [--mode M] [--from-name N] "
           "[--wait SEC]", file=sys.stderr)
     return 2

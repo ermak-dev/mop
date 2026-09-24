@@ -1,0 +1,66 @@
+{
+ "_about": "Real hook inputs, Claude Code 2.1.281, captured 2026-09-24 with a throwaway `claude -p` whose --settings registered `cat > <file>` per event, run from a mktemp -d directory. ok: a normal prompt; fail: --model definitely-not-a-model. Only paths were shortened (scratch dir, home). PostModelSwitch was registered but cannot fire under -p, so it is not captured.",
+ "ok": {
+  "SessionStart": {
+   "session_id": "8bf1da83-92bb-402c-a382-9e99ba47af8e",
+   "transcript_path": "/home/u/.claude/projects/-tmp-scratch-work/8bf1da83-92bb-402c-a382-9e99ba47af8e.jsonl",
+   "cwd": "/tmp/scratch/work",
+   "hook_event_name": "SessionStart",
+   "source": "startup"
+  },
+  "Stop": {
+   "session_id": "8bf1da83-92bb-402c-a382-9e99ba47af8e",
+   "transcript_path": "/home/u/.claude/projects/-tmp-scratch-work/8bf1da83-92bb-402c-a382-9e99ba47af8e.jsonl",
+   "cwd": "/tmp/scratch/work",
+   "prompt_id": "9cdf80d2-63ee-42f9-9b00-9a1de22260a4",
+   "permission_mode": "default",
+   "effort": {
+    "level": "medium"
+   },
+   "hook_event_name": "Stop",
+   "stop_hook_active": false,
+   "last_assistant_message": "pong",
+   "background_tasks": [],
+   "session_crons": []
+  },
+  "UserPromptSubmit": {
+   "session_id": "8bf1da83-92bb-402c-a382-9e99ba47af8e",
+   "transcript_path": "/home/u/.claude/projects/-tmp-scratch-work/8bf1da83-92bb-402c-a382-9e99ba47af8e.jsonl",
+   "cwd": "/tmp/scratch/work",
+   "prompt_id": "9cdf80d2-63ee-42f9-9b00-9a1de22260a4",
+   "permission_mode": "default",
+   "hook_event_name": "UserPromptSubmit",
+   "prompt": "Reply with the single word: pong"
+  }
+ },
+ "fail": {
+  "SessionStart": {
+   "session_id": "08eeb178-0a4b-460c-83d6-9cad87142550",
+   "transcript_path": "/home/u/.claude/projects/-tmp-scratch-work/08eeb178-0a4b-460c-83d6-9cad87142550.jsonl",
+   "cwd": "/tmp/scratch/work",
+   "hook_event_name": "SessionStart",
+   "source": "startup"
+  },
+  "StopFailure": {
+   "session_id": "08eeb178-0a4b-460c-83d6-9cad87142550",
+   "transcript_path": "/home/u/.claude/projects/-tmp-scratch-work/08eeb178-0a4b-460c-83d6-9cad87142550.jsonl",
+   "cwd": "/tmp/scratch/work",
+   "prompt_id": "3ab70229-7900-4744-b987-08d5e2e62088",
+   "effort": {
+    "level": "high"
+   },
+   "hook_event_name": "StopFailure",
+   "error": "model_not_found",
+   "last_assistant_message": "There's an issue with the selected model (definitely-not-a-model). It may not exist or you may not have access to it. Run --model to pick a different model."
+  },
+  "UserPromptSubmit": {
+   "session_id": "08eeb178-0a4b-460c-83d6-9cad87142550",
+   "transcript_path": "/home/u/.claude/projects/-tmp-scratch-work/08eeb178-0a4b-460c-83d6-9cad87142550.jsonl",
+   "cwd": "/tmp/scratch/work",
+   "prompt_id": "3ab70229-7900-4744-b987-08d5e2e62088",
+   "permission_mode": "default",
+   "hook_event_name": "UserPromptSubmit",
+   "prompt": "Reply with the single word: pong"
+  }
+ }
+}
