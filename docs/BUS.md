@@ -139,6 +139,20 @@ scrypt) плюс `MOP_OPERATORS` с паролями из `nats-op-<имя>.pass
 подключает auth callout (#206, ниже); без него `users.conf` строится из
 `MOP_OPERATORS`, и человек из одного файла операторов на шину не войдёт.
 
+Правит файл операторов группа `mop user` (#218), только на сервере (там
+`secrets/` установки и инвентарь): `add <логин> --role admin|user
+[--projects …] [--name …] [--email …]`, `passwd`, `delete` — пароль
+дважды без эха или строкой из stdin (`--stdin`), запись атомарно и 0600.
+Роль и проекты — по правилам `MOP_OPERATORS`; логин из настройки команда не
+трогает. Переходный `mop user import` переносит `MOP_OPERATORS` в файл с
+нынешними паролями (хеш из `nats-op-<логин>.pass`: `operator.json` на
+машинах работает без нового `mop join`), после чего оператор убирает
+настройку из `.env` и прогоняет deploy; уходит вместе с `MOP_OPERATORS`
+(#219). Копию для сервисов (`/etc/nats/identity`) команда обновляет сама,
+если может писать в `/etc/nats`, иначе одной строкой просит `mop deploy`;
+задачи копии в deploy остаются. При `MOP_AUTH_PROVIDER=ldap` — отказ: люди
+в LDAP.
+
 Второй провайдер — `ldap` (#208, `mop/ldapauth.py`): вход search-then-bind
 (служебная учётка `MOP_LDAP_BIND_DN` находит запись по `MOP_LDAP_LOGIN_ATTR`
 под `MOP_LDAP_BASE`, пароль проверяет bind под DN человека), имя и почта из
