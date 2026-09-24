@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 
+import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop import bootstrap  # noqa: E402

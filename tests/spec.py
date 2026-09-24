@@ -16,6 +16,7 @@ import re
 import sys
 import time
 
+import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 # ── #152: слепок спеки ────────────────────────────────────────────────────────
@@ -50,14 +51,8 @@ from mop import config, spec  # noqa: E402
 spec.ASKS_FILE = os.path.join(os.path.dirname(SNAPSHOT), "no-such-project-asks.json")
 
 # Git identity (#167) слепок снимает НЕ заданной: так спеку видит установка
-# без этих настроек. Пустое окружение уступило бы .env и node.env (config.get),
-# поэтому из прочитанных файлов их вычищаем -- иначе слепок совпадал бы только
-# там, где identity в .env не вписана.
-GIT_SETTINGS = ("MOP_GIT_NAME", "MOP_GIT_EMAIL")
+# без этих настроек. .env и node.env машины проверке не видны (hermetic, #209).
 GIT_KEYS = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")
-for _path in (config.ENV_FILE, config.NODE_ENV_FILE):
-    config._cache[_path] = {k: v for k, v in config.read_env(_path).items()
-                            if k not in GIT_SETTINGS}
 
 ORIGIN = "git@git.example.dev:someone/mop.git"
 

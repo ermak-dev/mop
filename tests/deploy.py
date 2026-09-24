@@ -103,6 +103,7 @@ import yaml
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DEPLOY = os.path.join(ROOT, "deploy")
 COMMON = os.path.join(DEPLOY, "roles", "common")
+import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, ROOT)
 from mop import config  # noqa: E402
 # Что сервис кластера читает сам (#176): его код, клиент Nomad и спецификация,

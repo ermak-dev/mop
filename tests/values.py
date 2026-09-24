@@ -29,6 +29,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(HERE))
 
 from mop import agent, bus, cluster, puppets, projects, web  # noqa: E402
