@@ -26,7 +26,7 @@ is exactly what serves as the source of truth for keys.
 import os
 
 from mop.cli import lib
-from mop import config
+from mop import llm
 
 
 def main(argv):
@@ -35,7 +35,7 @@ def main(argv):
     # `--` из `mop master`: там он отделял origin от значения чужого флага,
     # здесь отделять не от чего.
     profile, passthru = lib.parse_llm(argv)
-    profile = profile or config.get("MOP_DEFAULT_LLM")
+    profile = llm.resolve(profile)
 
     # Тот же источник ключа, что у мастера: местный .env, а не узловой
     # secrets.env — общее в lib.session_env.

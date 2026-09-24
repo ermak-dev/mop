@@ -52,7 +52,7 @@ import json
 import os
 
 from mop.cli import lib
-from mop import config, puppets
+from mop import config, llm, puppets
 
 SKILL = os.path.join(config.PROJECT,
                      "skills", "master")
@@ -100,7 +100,7 @@ def claude_args(args):
 
 def main(argv):
     profile, args = lib.parse_llm(argv)
-    profile = profile or config.get("MOP_DEFAULT_LLM")
+    profile = llm.resolve(profile)
     mine, passthru = claude_args(args)
     if len(mine) > 1:
         lib.usage(__doc__)

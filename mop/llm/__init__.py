@@ -25,7 +25,7 @@
 """
 import re
 
-from .. import plugins
+from .. import config, plugins
 
 _VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_AUTH_VAR = "ANTHROPIC_AUTH_TOKEN"
@@ -66,6 +66,31 @@ def profiles():
 def get(name):
     """Профиль по имени либо None."""
     return profiles().get(name)
+
+
+def resolve(explicit=None, old=None):
+    """На каком профиле идти: явный, иначе прежний, пока он есть в реестре,
+    иначе умолчание инсталляции (MOP_DEFAULT_LLM).
+
+    Одно правило вместо набранных руками копий (#147). old -- профиль, на
+    котором джоб стоит сейчас: удалённый из реестра молча уступает
+    умолчанию, чтобы update не упирался в профиль, которого больше нет.
+    Пустая строка -- то же, что ничего."""
+    if explicit:
+        return explicit
+    if old and get(old):
+        return old
+    return config.get("MOP_DEFAULT_LLM")
+
+
+def of_meta(meta):
+    """Профиль, на котором джоб стоит: Meta.llm, иначе умолчание.
+
+    Реестр не спрашиваем: протухшее имя обязано остаться видным (ростер,
+    отказ job_spec по имени папета). Пустое значение отдаём как есть --
+    так было во всех местах, читавших Meta этим путём; tests/llm.py это
+    фиксирует."""
+    return (meta or {}).get("llm", config.get("MOP_DEFAULT_LLM"))
 
 
 def require(name):
