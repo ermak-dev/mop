@@ -448,12 +448,18 @@ def treat(issue):
     пока лечение жило в каждом своём, они разошлись — CLI перерегистрировал
     спеку по диагнозу `update`, а MCP на тот же диагноз делал рестарт, то есть
     поднимал ту же старую спеку (#47). Гейт «креды доехали?» перед
-    login+restart остаётся у вызывающего: раздача — его дело."""
+    login+restart остаётся у вызывающего: раздача — его дело.
+
+    Ворота владения (#40) лечение проходит (force): diagnose выбирает его по
+    состоянию, и каждое леченое состояние -- то, в котором сессия не работает
+    (HUNG, аллокация pending/failed/lost, кончилась квота, свободный со
+    старой спекой, #174). Чью аренду прошли -- в ответе."""
     action, alloc, name = issue["action"], issue["alloc"], issue["name"]
+    me = {"owner": bus.login(), "force": True}
     try:
         if action == "stop":
-            _cluster("stop", name=name)
-            return "alloc stop — Nomad will recreate it without backoff"
+            got = _cluster("stop", name=name, **me)
+            return "alloc stop — Nomad will recreate it without backoff" + _note(got)
         if action == "model":
             # Куда переводить папет, у которого кончилась квота текущей
             # модели (решение оператора 27.08: Fable → Opus). При вызове, а
@@ -461,28 +467,37 @@ def treat(issue):
             # импортирует puppets (сервис кластера), числился бы читающим
             # настройку, которую применяет один doctor --fix.
             model = config.get("MOP_FALLBACK_MODEL")
-            switch_model(alloc["NodeName"], name, model)
+            switch_model(alloc["NodeName"], name, model, force=True)
             return f"/model {model}"
         if action == "update":
             # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
             # аллокации поднял бы ту же старую. Клон переживает — меняется
             # только спека.
             meta = _cluster("spec", name=name).get("meta") or {}
-            _cluster("update", name=name, origin=meta["origin"],
-                     profile=meta.get("llm"))
-            return "spec re-registered — the puppet comes up with the new wrapper"
-        _cluster("restart", name=name)
-        return "restart"
+            got = _cluster("update", name=name, origin=meta["origin"],
+                           profile=meta.get("llm"), **me)
+            return ("spec re-registered — the puppet comes up with the new wrapper"
+                    + _note(got))
+        got = _cluster("restart", name=name, **me)
+        return "restart" + _note(got)
     except Exception as e:
         return f"{action} failed: {str(e)[:80]}"
 
 
+def _note(reply):
+    """Хвост ответа лечения: чью аренду прошли ворота (#40)."""
+    note = (reply or {}).get("owner_note")
+    return f" ({note})" if note else ""
+
+
 # ─── рецикл ───────────────────────────────────────────────────────────────
-def wipe(node, name):
+def wipe(node, name, force=False):
     """Глагол wipe напрямую, без остановки джоба. Агент сам откажет, если
     tmux-сессия жива: голый wipe — для уже остановленного папета, полный
-    цикл (стоп → снос → подъём) — recycle."""
-    r = bus.request(node, "wipe", name=name, timeout=600)
+    цикл (стоп → снос → подъём) — recycle. Чужой папет -- отказ агента с
+    именем владельца (#40), force его проходит."""
+    r = bus.request(node, "wipe", name=name, owner=bus.login(), force=force,
+                    timeout=600)
     if "error" in r:
         raise RuntimeError(r["error"])
     return r
@@ -560,8 +575,8 @@ def classify_junk(answers, known):
     return out
 
 
-def delete(name):
-    """Снести папета. -> {'node', 'body': 'destroyed'|'kept'|None}.
+def delete(name, force=False):
+    """Снести папета. -> {'node', 'body': 'destroyed'|'kept'|None, 'owner_note'}.
 
     У host тело — сам узел, и клон намеренно ОСТАЁТСЯ: он и есть ценность,
     прогретое дерево, которое переиспользует следующий подъём под тем же
@@ -584,9 +599,11 @@ def delete(name):
     got = _cluster("alloc", name=name)
     alloc = got.get("alloc")
     node = alloc["NodeName"] if alloc else None
-    _cluster("delete", name=name)
+    # Ворота владения (#40) -- у сервиса, до снятия джоба.
+    note = _cluster("delete", name=name, owner=bus.login(),
+                    force=force).get("owner_note")
     if not node:
-        return {"node": None, "body": None}
+        return {"node": None, "body": None, "owner_note": note}
     # Контракт драйвера — словарь, а НЕ модуль: `driver.require` отдаёт
     # проверенный реестром контракт, и флаг в нём лежит ключом is_container.
     # Модуль с атрибутом IS_CONTAINER возвращает только `driver.current()`, и
@@ -594,14 +611,14 @@ def delete(name):
     # с аллокацией: второго запроса за одним полем меты не делаем.
     drv = driver.of_node({"mop_driver": got.get("driver")}, node)
     if not driver.is_container(drv):
-        return {"node": node, "body": "kept"}
+        return {"node": node, "body": "kept", "owner_note": note}
     _wait_stopped(name)
-    wipe(node, name)
-    return {"node": node, "body": "destroyed"}
+    wipe(node, name, force)
+    return {"node": node, "body": "destroyed", "owner_note": note}
 
 
-def recycle(name, workspace_of=None):
-    """Пересоздать папета на чистой рабочей копии. -> {node}.
+def recycle(name, workspace_of=None, force=False):
+    """Пересоздать папета на чистой рабочей копии. -> {node, owner_note}.
 
     Клон не переклонируется: сбрасывается на месте глаголом wipe (reset
     отслеживаемого + clean -xdff, который выметает и игнорируемое, но
@@ -622,7 +639,11 @@ def recycle(name, workspace_of=None):
     живёт в спеке джоба, рестарт аллокации поднял бы старую.
 
     workspace_of(origin) -> текст workspace папета (#133); None -- сервер
-    оставляет положенный (рецикл без рабочей копии, `mop gc`)."""
+    оставляет положенный (рецикл без рабочей копии, `mop gc`).
+
+    Ворота владения (#40) -- на первом шаге, останове: чужой папет
+    отказывает до того, как что-то остановлено; force идёт во все три
+    шага."""
     meta = _cluster("spec", name=name).get("meta") or {}
     origin = meta.get("origin")
     if not origin:
@@ -633,22 +654,23 @@ def recycle(name, workspace_of=None):
     if not node:
         raise RuntimeError(f"{name} has no allocation — nothing to recycle")
 
-    _cluster("delete", name=name, purge=False)
+    me = {"owner": bus.login(), "force": force}
+    note = _cluster("delete", name=name, purge=False, **me).get("owner_note")
     _wait_stopped(name)
     try:
-        wipe(node, name)
+        wipe(node, name, force)
     except RuntimeError as e:
         raise RuntimeError(f"{e}; job is stopped — after fixing the node "
                            f"retry: mop recycle {name}")
     fields = {"workspace": workspace_of(origin)} if workspace_of else {}
-    _cluster("update", name=name, origin=origin, profile=profile, **fields)
-    return {"node": node}
+    _cluster("update", name=name, origin=origin, profile=profile, **me, **fields)
+    return {"node": node, "owner_note": note}
 
 
 # ─── ввод в TUI папета ───────────────────────────────────────────────────
 # Всё здесь адресуется узлом, а не аллокацией: alloc exec умер вместе со своей
 # адресацией, и агент подписан на субъект узла.
-def type_command(node, name, command):
+def type_command(node, name, command, force=False):
     """Напечатать слэш-команду в tmux-пейн папета и вернуть экран после неё.
 
     Печатью, а не сообщением по каналу: слэш-команды через канал не проходят
@@ -657,27 +679,29 @@ def type_command(node, name, command):
     исполняет сам TUI, ход на неё не тратится.
 
     Белый список команд проверяет агент: проверка на этой стороне осталась бы
-    подсказкой пользователю, а не правом."""
-    r = bus.request(node, "type", name=name, command=command, timeout=45)
+    подсказкой пользователю, а не правом. Владельца -- тоже (#40): чужой
+    папет -- отказ агента с именем, force его проходит."""
+    r = bus.request(node, "type", name=name, command=command, owner=bus.login(),
+                    force=force, timeout=45)
     if "error" in r:
         raise RuntimeError(r["error"])
     return r.get("screen") or ""
 
 
-def press_enter(node, name):
+def press_enter(node, name, force=False):
     """Подтвердить диалог. Только увидев его: слепой Enter на папет без
     диалога отправил бы пустой ход."""
-    return type_command(node, name, "")
+    return type_command(node, name, "", force)
 
 
-def switch_model(node, name, model):
+def switch_model(node, name, model, force=False):
     """Перевести папет на другую модель, напечатав /model в его tmux-пейн.
 
     `/model` не переключает молча — он спрашивает «Switch model?» с уже
     выделенным «Yes». Подтверждаем вторым Enter, но только увидев диалог."""
-    out = type_command(node, name, f"/model {model}")
+    out = type_command(node, name, f"/model {model}", force)
     if "switch model?" in out.lower():
-        out = press_enter(node, name)
+        out = press_enter(node, name, force)
     if "switch model?" in out.lower():
         raise RuntimeError("model switch dialog did not close")
 

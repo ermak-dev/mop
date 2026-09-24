@@ -368,12 +368,131 @@ def check_forget_summary_196():
     return out
 
 
+def check_gates_40():
+    """HYPOTHESIS (#40): владельца сверяет только send агента; restart, stop,
+    update, delete (и recycle, собранный из delete+update) сервис кластера
+    исполняет для любого мастера проекта, и работа другого мастера умирает
+    посреди тикета.
+    SOLUTION: перед изменением в Nomad сервис спрашивает у агента узла факты
+    клона (глагол clone) и решает той же lease.may_touch: чужая живая аренда
+    -- отказ с именем владельца до любого изменения; свой, ничей, force,
+    оператор -- проходят. Агент не ответил -- «не знаю» не значит «ничей»:
+    отказ, force его снимает. Аллокации нет -- спросить некого и убивать
+    нечего: проходит.
+    STATUS: FIXED — see #40"""
+    import time
+    from mop import bootstrap, bus, nomad, spec
+    from mop.domain import Owner
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from cli import no_network
+    out = []
+    if not hasattr(cluster, "_clone_of"):
+        return ["cluster._clone_of(name) is missing"]
+    olga = Owner("olga", int(time.time()) - 60).to_dict()
+    work = {"clone": {"cur": "bug/1-x", "def": "master", "dirty": 1, "ahead": 0,
+                      "owner": olga}}
+    changed, asked = [], []
+    answer = {"now": work}
+    keep = (cluster._clone_of, cluster._owner, nomad.latest_alloc, nomad.alloc_restart,
+            nomad.alloc_stop, nomad.register, nomad.deregister, spec.job_spec,
+            bootstrap.store)
+    undo = no_network()
+    try:
+        cluster._clone_of = lambda name: asked.append(name) or answer["now"]
+        cluster._owner = lambda name: (MOP, True)
+        nomad.latest_alloc = lambda name: {"ID": "a1", "NodeName": "n1"}
+        nomad.alloc_restart = lambda alloc: changed.append("restart")
+        nomad.alloc_stop = lambda alloc: changed.append("stop")
+        nomad.register = lambda job: changed.append("register")
+        nomad.deregister = lambda name, purge=True: changed.append("deregister")
+        spec.job_spec = lambda *a, **k: {"Job": "x"}
+        bootstrap.store = lambda *a, **k: changed.append("store")
+        verbs = {"restart": {}, "stop": {}, "update": {"origin": MOP},
+                 "delete": {}, "recycle": {"purge": False}}
+        for label, extra in verbs.items():
+            verb = "delete" if label == "recycle" else label
+
+            def ask(project, **more):
+                changed.clear()
+                asked.clear()
+                return cluster.answer(project, {"verb": verb, "name": "pu-mop-1",
+                                                **extra, **more})
+            answer["now"] = work
+            got = ask("mop", owner="anton")
+            if "olga" not in (got.get("error") or "") or changed:
+                out.append(f"{label} by another master must be refused naming olga "
+                           f"before any Nomad change: {got!r}, {changed}")
+            got = ask("mop")
+            if not got.get("error") or changed:
+                out.append(f"{label} by an anonymous caller must be refused: {got!r}, {changed}")
+            got = ask("mop", owner="olga")
+            if got.get("error") or not changed:
+                out.append(f"{label} by the owner must pass: {got!r}, {changed}")
+            got = ask("mop", owner="anton", force=True)
+            if got.get("error") or not changed or "olga" not in (got.get("owner_note") or ""):
+                out.append(f"{label} with force must pass naming olga: {got!r}, {changed}")
+            got = ask("admin", owner="anton")
+            if got.get("error") or not changed or asked:
+                out.append(f"{label} by the operator must pass without asking: "
+                           f"{got!r}, {changed}, asked {asked}")
+            # Ничей и без owner -- как до #40.
+            answer["now"] = {"clone": dict(work["clone"], owner=None)}
+            got = ask("mop")
+            if got.get("error") or not changed:
+                out.append(f"{label} of nobody's puppet must pass as before: {got!r}")
+            answer["now"] = None
+            got = ask("mop", owner="anton")
+            if got.get("error") or not changed:
+                out.append(f"{label} with no allocation must pass: {got!r}")
+            answer["now"] = {"error": "node agent n1 is not subscribed"}
+            got = ask("mop", owner="anton")
+            if "n1" not in (got.get("error") or "") or changed:
+                out.append(f"{label} with a silent agent must be refused with the "
+                           f"reason: {got!r}, {changed}")
+            got = ask("mop", owner="anton", force=True)
+            if got.get("error") or not changed:
+                out.append(f"{label} with a silent agent and force must pass: {got!r}")
+    finally:
+        (cluster._clone_of, cluster._owner, nomad.latest_alloc, nomad.alloc_restart,
+         nomad.alloc_stop, nomad.register, nomad.deregister, spec.job_spec,
+         bootstrap.store) = keep
+        undo()
+
+    # Факты -- у агента узла аллокации, через шину, глаголом clone.
+    keep = (nomad.latest_alloc, bus.request)
+    undo = no_network()
+    try:
+        calls = []
+        nomad.latest_alloc = lambda name: {"ID": "a1", "NodeName": "n1"}
+        bus.request = lambda node, verb, **k: calls.append((node, verb, k.get("name"))) \
+            or {"clone": None}
+        got = cluster._clone_of("pu-mop-1")
+        if got != {"clone": None} or calls != [("n1", "clone", "pu-mop-1")]:
+            out.append(f"_clone_of must ask the node's agent: {got!r}, {calls}")
+        nomad.latest_alloc = lambda name: None
+        if cluster._clone_of("pu-mop-1") is not None:
+            out.append("_clone_of without an allocation must be None")
+
+        def silent(node, verb, **k):
+            raise bus.BusError("node agent n1 is not subscribed")
+        nomad.latest_alloc = lambda name: {"ID": "a1", "NodeName": "n1"}
+        bus.request = silent
+        got = cluster._clone_of("pu-mop-1")
+        if "n1" not in ((got or {}).get("error") or ""):
+            out.append(f"_clone_of with a silent agent must say so: {got!r}")
+    finally:
+        nomad.latest_alloc, bus.request = keep
+        undo()
+    return out
+
+
 def main():
     failed = []
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,
                   check_secret_verbs, check_verb_table_173,
-                  check_forget_inventory_178, check_forget_summary_196):
+                  check_forget_inventory_178, check_forget_summary_196,
+                  check_gates_40):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:

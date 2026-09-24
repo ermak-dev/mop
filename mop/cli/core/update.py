@@ -1,4 +1,4 @@
-"""update a puppet: mop update <name> [git-origin] [--llm PROFILE] [--fresh]
+"""update a puppet: mop update <name> [git-origin] [--llm PROFILE] [--fresh] [--force]
 
 Changes what's named and keeps the rest: without origin the puppet stays on
 its repository, without --llm it stays on its profile. Switching the
@@ -11,6 +11,9 @@ different model. That's a one-off allowance: an allocation restart doesn't
 reread the spec, and treatment is a restart — a treated puppet isn't obliged
 to come back into the context it got stuck on.
 --fresh brings it up with a clean session.
+
+Another master's puppet (work in its clone, or dispatched minutes ago) is
+refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
 from mop import bus, llm
@@ -21,13 +24,15 @@ MCP = {"annotations": "destructive", "args": [
     {"name": "name", "type": "string", "required": True, "help": "puppet name, pu-<project>-<n>"},
     {"name": "origin", "type": "string", "help": "new git origin; without it, the repository is kept"},
     {"name": "llm", "type": "string", "flag": "--llm", "help": "LLM profile"},
-    {"name": "fresh", "type": "boolean", "flag": "--fresh", "help": "come up with a clean session"}]}
+    {"name": "fresh", "type": "boolean", "flag": "--fresh", "help": "come up with a clean session"},
+    {"name": "force", "type": "boolean", "flag": "--force",
+     "help": "act on a puppet another master leads; the answer names whom"}]}
 
 
 def main(argv):
     profile, args = lib.parse_llm(argv)
-    fresh = "--fresh" in args
-    args = [a for a in args if a != "--fresh"]
+    fresh, force = "--fresh" in args, "--force" in args
+    args = [a for a in args if a not in ("--fresh", "--force")]
     if not 1 <= len(args) <= 2:
         lib.usage(__doc__)
     name = args[0]
@@ -47,11 +52,15 @@ def main(argv):
     # Спеку собирает сервис кластера: сюда она больше не ездит (#80) —
     # иначе кто угодно с доступом к шине клал бы на узел свою командную
     # строку. Решение «что меняем» остаётся здесь, сборка — там.
-    bus.call_cluster("update", name=name, origin=origin, profile=profile,
-                     cont=cont, new_origin=origin if origin != old else None,
-                     workspace=lib.workspace_text(origin))
+    got = bus.call_cluster("update", name=name, origin=origin, profile=profile,
+                           cont=cont, new_origin=origin if origin != old else None,
+                           workspace=lib.workspace_text(origin),
+                           owner=bus.login(), force=force)
     # На успехе молчим (#179), как restart: MCP ответит модели `done`, а эхо
-    # параметров повторяло то, что человек только что набрал сам.
+    # параметров повторяло то, что человек только что набрал сам. Чью аренду
+    # прошёл force -- называем (#40).
+    if got.get("owner_note"):
+        print(f"{name}: {got['owner_note']}")
 
 
 
