@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import config
+from . import config, driver
 
 TIMEOUT = 20
 
@@ -56,21 +56,14 @@ def origin():
         return ""
 
 
-# Формы записи origin, которые надо понимать: scp-подобная
-# (git@host:group/proj.git), со схемой и портом (ssh://git@host:2222/g/p.git)
-# и https. Порт и схема отбрасываются — они не часть пути проекта; без этого
-# в путь уезжало «2222/group/...», а из https-формы хостом становилось «https».
-_ORIGIN = re.compile(r"""^(?:[a-z+]+://)?      # схема, если есть
-                          (?:[^@/]+@)?         # пользователь
-                          (?P<host>[^:/]+)     # хост
-                          (?::\d+)?            # порт — только вместе со схемой
-                          [:/](?P<path>.+?)(?:\.git)?/?$""", re.X)
-
-
 def _parse_origin(url):
-    """origin -> (хост, путь проекта). Пусто, если это не похоже на origin."""
-    m = _ORIGIN.match(url or "")
-    return (m.group("host"), m.group("path")) if m else ("", "")
+    """origin -> (хост, путь проекта). Пусто, если это не похоже на origin.
+
+    Разбор общий (driver.parse_origin, #154): scp, ssh:// с портом, https.
+    Порт и схема отбрасываются — они не часть пути проекта. Без хоста или
+    пути (локальный репозиторий) координат GitLab нет."""
+    _, _, host, _, path = driver.parse_origin(url) or (None, None, "", None, "")
+    return (host, path) if host and path else ("", "")
 
 
 def site():

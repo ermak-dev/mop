@@ -102,6 +102,64 @@ def bad_name(name):
     return f"name {name!r} doesn't look like {PREFIX}<project>-<n>"
 
 
+def project_of(origin):
+    """Проект по origin репозитория.
+
+    Basename без .git, и это единственное определение проекта в системе.
+    Живёт здесь, а не в puppets, потому что агент на узле puppets
+    импортировать не может, а своя копия правила однажды разошлась бы (#154).
+    Разбором origin'а (parse_origin) намеренно не пользуется: из basename
+    строятся имена папетов, и любое «более правильное» правило переименовало
+    бы уже живых. Отсюда и честные кривизны: `git@h:p.git` -> «git@h:p»,
+    хвостовой / -> пусто.
+
+    Соблазн взять хеш от полного origin есть — тогда два одноимённых репозитория
+    на разных хостах не слились бы в один проект. Но имена папетов уже строятся отсюда же
+    (`pu-<проект>-<n>`), и завести рядом второе, более точное понятие «проект»
+    значит получить два места, по-разному отвечающих на вопрос «чей это папет».
+    Цена честная и названа: одинаковые basename делят проект ровно так же, как
+    уже делят имена. Понадобится развести — сюда добавляется суффикс от
+    sha256(origin), и больше никуда."""
+    return os.path.basename(origin).removesuffix(".git")
+
+
+_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*)://")
+
+
+def parse_origin(url):
+    """origin -> (схема, пользователь, хост, порт, путь) либо None.
+
+    Один разборщик на всех (#154): раньше хост из origin'а доставали три
+    разных правила (gitlab, known_hosts, «похоже на origin»). Формы -- те же,
+    что у git:
+      scheme://[user@]host[:port]/path   схема в нижнем регистре
+      [user@]host:path                   scp-форма -- это ssh, порта не бывает
+      всё прочее со / или :              локальный путь, схема file, хоста нет
+    Путь -- без хвостового / и .git. None -- голое имя или пусто: origin'ом
+    это не является. Пустые пользователь и порт -- None; хост и путь бывают
+    пустыми у мусора вроде «:x», решать о нём -- потребителю."""
+    s = (url or "").strip()
+    if not s or not any(c in s for c in ":/"):
+        return None
+    m = _SCHEME.match(s)
+    if m:
+        scheme = m.group(1).lower()
+        netloc, _, path = s[m.end():].partition("/")
+        user, _, hostport = netloc.rpartition("@")
+        host, _, port = hostport.partition(":")
+        if scheme == "file":
+            path = "/" + path
+    elif ":" in s and "/" not in s.split(":", 1)[0]:
+        # Слеш до двоеточия -- локальный путь: так решает сам git.
+        scheme, port = "ssh", ""
+        left, _, path = s.partition(":")
+        user, _, host = left.rpartition("@")
+    else:
+        scheme, user, host, port, path = "file", "", "", "", s
+    path = path.removesuffix("/").removesuffix(".git")
+    return scheme, user or None, host, port or None, path
+
+
 def project_of_name(name):
     """Проект по имени папета: pu-<проект>-<n>. Откат для случая, когда клона
     ещё нет, — origin спросить не у кого, а имя уже есть. Без префикса —

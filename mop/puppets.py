@@ -338,18 +338,9 @@ while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wa
 """
 
 
-def project_of(origin):
-    """Проект (он же проект) по origin репозитория.
-
-    Basename без .git, и это единственное определение проекта в системе.
-    Соблазн взять хеш от полного origin есть — тогда два одноимённых репозитория
-    на разных хостах не слились бы в один проект. Но имена папетов уже строятся отсюда же
-    (`pu-<проект>-<n>`), и завести рядом второе, более точное понятие «проект»
-    значит получить два места, по-разному отвечающих на вопрос «чей это папет».
-    Цена честная и названа: одинаковые basename делят проект ровно так же, как
-    уже делят имена. Понадобится развести — сюда добавляется суффикс от
-    sha256(origin), и больше никуда."""
-    return os.path.basename(origin).removesuffix(".git")
+# Правило проекта -- у драйвера (#154): агент тоже его знает, а puppets
+# импортировать не может.
+project_of = driver.project_of
 
 
 def looks_like_origin(text):
@@ -359,8 +350,7 @@ def looks_like_origin(text):
     origin» в системе нет. И значение чужого флага, приехавшее позиционно
     (`mop master --model opus` -> `opus`), тоже: без этой проверки дальше
     было бы «нет проекта opus», и опечатку искали бы не там (#111)."""
-    text = (text or "").strip()
-    return bool(text) and any(c in text for c in ":/")
+    return driver.parse_origin(text) is not None
 
 
 def job_spec(name, origin, profile=None, cont=False):
@@ -486,7 +476,7 @@ def project_ids(lines):
     выпадает из конфига NATS при следующем deploy.
     """
     stripped = {l.strip() for l in lines if l.strip()}
-    origins = {l for l in stripped if "/" in l or ":" in l}
+    origins = {l for l in stripped if looks_like_origin(l)}
     return origins, stripped - origins
 
 
