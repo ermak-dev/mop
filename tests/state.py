@@ -10,13 +10,14 @@
 Это не фреймворк и не прогон всего проекта: остальное по-прежнему добывается
 на живом пуле, и тестов на него нет.
 """
+import json
 import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import puppets  # noqa: E402
+from mop import puppets, session  # noqa: E402
 from mop.state import (PuppetRow, State, action_for, failing_row, failure_reason,  # noqa: E402
                        is_free, silent, task_summary, verdict)
 
@@ -210,8 +211,10 @@ CASES = [
 # SOLUTION: агент шлёт факт state (ответ `session.py state`, #222) с записью
 # хода turn; при ней вердикт решает по turn и статусу сессии, мимо экрана. Без
 # записи хода (папет не перерегистрирован с хуками, #223) — прежний путь.
-# RESULT: записи построены по контракту #222, настоящие захваченные payload'ы
-# лежат на его ветке и подменят эти при ребейзе.
+# RESULT: записи хода — не рукописные: настоящие входы хуков из
+# tests/session_hooks.json (#222) прогоняются через session.turn_record, тот
+# же код, что пишет их на узле. authentication_failed захвачен не был —
+# это захваченный StopFailure с подменённым кодом и текстом.
 # STATUS: FIXED — see #224
 
 # Экран инцидента: жалоба — реплика над рамкой ввода, статус-бар чистый.
@@ -221,8 +224,18 @@ MIDTURN = ("● Reading mop/cli/user.py\n"
            "  -- INSERT -- bypass permissions on · 2 agents")
 
 
-def turn(event, error=None, detail=None):
-    return {"event": event, "at": "2026-09-24T10:23:56Z", "error": error, "detail": detail}
+with open(os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                       "session_hooks.json")) as _f:
+    HOOKS = json.load(_f)
+
+
+def turn(event, **over):
+    """Запись хода из захваченного входа хука; over подменяет поля входа,
+    None — убирает поле."""
+    payload = dict(HOOKS["fail" if event == "StopFailure" else "ok"][event])
+    for k, v in over.items():
+        payload.pop(k) if v is None else payload.__setitem__(k, v)
+    return session.turn_record(payload, 1790245436)
 
 
 def hooked(status, turn_rec, clone=WORK, waiting_for=None, screen=MIDTURN,
@@ -232,8 +245,8 @@ def hooked(status, turn_rec, clone=WORK, waiting_for=None, screen=MIDTURN,
     return {**facts(f"{status} {int(alive)} {int(listen)}", clone, screen), "state": st}
 
 
-FAILED_AUTH = turn("StopFailure", "authentication_failed",
-                   "Login expired · Please run /login")
+FAILED_AUTH = turn("StopFailure", error="authentication_failed",
+                   last_assistant_message="Login expired · Please run /login")
 RATE = ("API Error: Request rejected (429) · Usage limit reached for 5 hour. "
         "Your limit will reset at 2026-09-24 15:00:00")
 
@@ -267,15 +280,22 @@ HOOKED = [
     ("waiting with no reason given — as today",
      hooked("waiting", turn("Stop")), "waiting for input", False),
     ("rate limit: the refusal text, not the code",
-     hooked("idle", turn("StopFailure", "rate_limit", RATE)), f"error: {RATE}", False),
+     hooked("idle", turn("StopFailure", error="rate_limit", last_assistant_message=RATE)),
+     f"error: {RATE}", False),
     ("billing error is the quota kind",
-     hooked("idle", turn("StopFailure", "billing_error", "Credit balance is too low")),
+     hooked("idle", turn("StopFailure", error="billing_error",
+                         last_assistant_message="Credit balance is too low")),
      "no model quota: Credit balance is too low", False),
+    ("the captured failure verbatim: model_not_found, the refusal text shown",
+     hooked("idle", turn("StopFailure")),
+     "error: " + HOOKS["fail"]["StopFailure"]["last_assistant_message"], False),
     ("an unknown code is an error, never free",
-     hooked("idle", turn("StopFailure", "brand_new_code"), CLEAN),
+     hooked("idle", turn("StopFailure", error="brand_new_code",
+                         last_assistant_message=None), CLEAN),
      "error: brand_new_code", False),
-    ("a failure recorded as unknown is still an error",
-     hooked("idle", turn("StopFailure", "unknown", ""), CLEAN), "error: unknown", False),
+    ("a StopFailure without a code is recorded as unknown, still an error",
+     hooked("idle", turn("StopFailure", error=None, last_assistant_message=None), CLEAN),
+     "error: unknown", False),
     ("a dead session: the failure record does not hide it",
      hooked("idle", FAILED_AUTH, alive=False, listen=False), "HUNG (not responding)", False),
     # Без записи хода — прежний путь по экрану, со всеми его ограничениями.

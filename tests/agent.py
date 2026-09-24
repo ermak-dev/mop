@@ -817,7 +817,7 @@ def check_state_fact_224():
     out = []
     saved = (agent.bsh, agent.clone_facts, agent.tmux_alive, agent.screen)
     rec = {"status": "idle", "waitingFor": None, "alive": True, "listen": False,
-           "turn": {"event": "StopFailure", "at": "2026-09-24T10:23:56Z",
+           "turn": {"event": "StopFailure", "at": 1790245436,
                     "error": "authentication_failed", "detail": "Login expired"}}
     none = {"status": None, "waitingFor": None, "alive": False, "listen": False, "turn": None}
     calls = []
