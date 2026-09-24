@@ -6,20 +6,20 @@
 остальным, и сама установка с раздельными сервером и контроллером по
 документации не заводилась (#88).
 
-Теперь оператор — пользователь NATS с именем человека и правами ровно на свои
-проекты. Список живёт в настройке `MOP_OPERATORS`, пароли заводит
-`lookup('password')` там же, где и все остальные, а `mop join` спрашивает
-логин и пароль вместо того, чтобы везти чужой каталог.
+Теперь оператор — человек из провайдера личностей (#205, #219): файла
+операторов (`mop user`) или каталога LDAP. Здесь -- его роль и проекты и
+права на шине, которые по ним выдаёт auth callout (#206).
 
-Формат настройки (#106) -- `имя:роль[:проекты]`, точка с запятой между
-людьми, запятая между проектами:
+Роль и проекты записываются (в строке файла операторов, #205) как
+`имя:роль[:проекты]`; разбор -- parse, та же строка на человека через точку
+с запятой, запятая между проектами:
 
     anton:admin                 весь пул плюс машинные глаголы (mop.admin.*)
     ivan:user:rugent,cloudpub   только названные проекты
     olga:user:*                 все проекты, но не машины
 
-Прежняя запись без роли (`имя:*`, `имя:проект,проект`) читается так, как
-работала до #106: `*` давал весь mop.>, то есть admin.
+Запись без роли (`имя:*`, `имя:проект,проект`) читается так, как работала до
+#106: `*` давал весь mop.>, то есть admin.
 """
 from . import busnames
 
@@ -43,7 +43,7 @@ def entry(name, fields):
         if not got:
             # Пустые права -- не «на всё»: прав по умолчанию не бывает, а
             # опечатка `anton:` иначе выдала бы весь пул.
-            raise ValueError(f"MOP_OPERATORS: {name} has no projects; "
+            raise ValueError(f"operators: {name} has no projects; "
                              f"write {name}:user:<projects> or {name}:admin")
         return got
     if len(fields) == 1 and fields[0].strip() not in ROLES:
@@ -58,16 +58,16 @@ def entry(name, fields):
     if role == ADMIN:
         # admin с проектами -- противоречие: запись говорила бы одно, а
         # права были бы другими.
-        raise ValueError(f"MOP_OPERATORS: {name} is admin, which is the whole "
+        raise ValueError(f"operators: {name} is admin, which is the whole "
                          f"pool; drop the projects, or make {name} a user")
     if role == USER and len(fields) == 2:
         return {"role": USER, "projects": projects_of(fields[1])}
-    raise ValueError(f"MOP_OPERATORS: {name}: expected {name}:admin or "
+    raise ValueError(f"operators: {name}: expected {name}:admin or "
                      f"{name}:user:<projects>, got {':'.join(fields)!r}")
 
 
 def parse(setting):
-    """`MOP_OPERATORS` -> {имя: {role, projects}}. Пустая настройка -> {}.
+    """`имя:роль[:проекты]; ...` -> {имя: {role, projects}}. Пустая строка -> {}.
 
     Отказы громкие и на разбор, а не на прогон: список едет в конфиг NATS, и
     ошибка в нём -- это либо доступ, которого никто не давал, либо мастер,
@@ -79,12 +79,12 @@ def parse(setting):
             continue
         name, *fields = [f.strip() for f in chunk.split(":")]
         if not name:
-            raise ValueError(f"MOP_OPERATORS: no name in {chunk!r}")
+            raise ValueError(f"operators: no name in {chunk!r}")
         if not fields or not fields[0]:
-            raise ValueError(f"MOP_OPERATORS: {name} has no role; "
+            raise ValueError(f"operators: {name} has no role; "
                              f"write {name}:user:<projects> or {name}:admin")
         if name in RESERVED or name.startswith(RESERVED_PREFIXES):
-            raise ValueError(f"MOP_OPERATORS: {name!r} is a role on the bus, "
+            raise ValueError(f"operators: {name!r} is a role on the bus, "
                              f"not a person — pick another name")
         out[name] = entry(name, fields)
     return out
@@ -123,7 +123,7 @@ def permissions(op, login=None):
     if not busnames.valid_login(login):
         # Точку, пробел и маски кодирует busnames.login_token; пустой логин и
         # управляющие символы токеном не станут.
-        raise ValueError(f"MOP_OPERATORS: login {login!r} is empty or has "
+        raise ValueError(f"operators: login {login!r} is empty or has "
                          f"control characters")
     if ALL in projects:
         deny = [] if role == ADMIN else [busnames.everything(busnames.ADMIN)]

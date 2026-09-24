@@ -319,16 +319,17 @@ def check_service_settings_214():
     on_controller = dict(SETTINGS, MOP_LDAP_BIND_PASSWORD="from-env")
     if fn(on_controller.get, root)["MOP_LDAP_BIND_PASSWORD"] != "from-env":
         out.append("where config.get has the password (the controller), it wins over the file")
-    plain = {"MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS": "anton:admin"}
+    plain = {"MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS_FILE": "/srv/operators"}
     try:
         got = fn(plain.get, tempfile.mkdtemp())
-        if got.get("MOP_OPERATORS") != "anton:admin":
+        if got.get("MOP_OPERATORS_FILE") != "/srv/operators":
             out.append(f"the file provider's settings must pass through: {got}")
     except ValueError as e:
         out.append(f"the file provider needs no LDAP password file: {e}")
     # Один список несекретных настроек личности на оба сервиса сервера.
     scoped = getattr(config, "IDENTITY_SCOPED", ())
-    want = {"MOP_AUTH_PROVIDER", "MOP_OPERATORS"} | (set(ldapauth.NAMES) - {"MOP_LDAP_BIND_PASSWORD"})
+    # MOP_OPERATORS ушёл (#219): людей даёт только провайдер.
+    want = {"MOP_AUTH_PROVIDER"} | (set(ldapauth.NAMES) - {"MOP_LDAP_BIND_PASSWORD"})
     if set(scoped) != want:
         out.append(f"config.IDENTITY_SCOPED must be the provider's non-secret settings: "
                    f"{sorted(set(scoped) ^ want)} differ")

@@ -96,125 +96,105 @@ def check_hash():
     return out
 
 
-def provider(tmp, records="", setting="", passes=None):
+def provider(tmp, records=""):
     path = os.path.join(tmp, "operators")
     with open(path, "w") as f:
         f.write(records)
-    for name, pw in (passes or {}).items():
-        with open(os.path.join(tmp, operators.pass_file(name)), "w") as f:
-            f.write(pw + "\n")
-    return identity.PlainFileProvider(path, setting, tmp)
+    return identity.PlainFileProvider(path)
 
 
 def check_provider():
-    """authenticate и lookup: файл операторов и переход с MOP_OPERATORS."""
+    """authenticate и lookup: файл операторов -- единственный источник (#219)."""
     out = []
     tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
     olga = Identity("olga", "user", ("mop",), "Olga", "olga@example.dev")
-    p = provider(tmp, "# операторы\n\n" + identity.format_line(olga, identity.hash_password("olga-pw")) + "\n",
-                 "anton:admin; ivan:user:rugent", {"anton": "anton-pw"})
+    anton = Identity("anton", "admin", ("*",))
+    p = provider(tmp, "# операторы\n\n"
+                 + identity.format_line(olga, identity.hash_password("olga-pw")) + "\n"
+                 + identity.format_line(anton, identity.hash_password("anton-pw")) + "\n")
     if not isinstance(p, identity.AuthProvider):
         out.append("PlainFileProvider must satisfy AuthProvider")
-    if p.authenticate("olga", "olga-pw") != olga:
+    if p.authenticate("olga", "olga-pw") != olga or p.authenticate("anton", "anton-pw") != anton:
         out.append("the right password must give the identity from the file")
     if p.lookup("olga") != olga or p.lookup("nobody") is not None:
         out.append("lookup: the identity, or None for an unknown login")
-    # Переход: логин из MOP_OPERATORS входит сгенерированным паролем, как сегодня.
-    anton = Identity("anton", "admin", ("*",))
-    if p.authenticate("anton", "anton-pw") != anton or p.lookup("anton") != anton:
-        out.append("a MOP_OPERATORS login must authenticate with its generated password")
-    if p.lookup("ivan") != Identity("ivan", "user", ("rugent",)):
-        out.append(f"a MOP_OPERATORS login must be found: {p.lookup('ivan')}")
     for login, pw, why in (("olga", "wrong", "wrong password"),
-                           ("anton", "wrong", "wrong password"),
                            ("anton", "", "wrong password"),
-                           ("nobody", "x", "unknown login"),
-                           # Пароль ещё не заведён deploy'ем -- отказ, не вход.
-                           ("ivan", "", "no password")):
+                           ("nobody", "x", "unknown login")):
         try:
             p.authenticate(login, pw)
             out.append(f"{login}/{pw!r} must be refused")
         except identity.Refused as e:
             if why not in str(e):
                 out.append(f"{login}/{pw!r}: the reason must say {why!r}, got {e}")
-    # Один человек -- одно определение, но отказ бьёт по одному логину, а не
-    # по провайдеру: при переносе людей из MOP_OPERATORS в файл один дубль
-    # иначе выключил бы вход всем. Громкий отказ всего -- в mop deploy.
+    # Один человек -- одно определение; отказ бьёт по логину, не по провайдеру.
     tmp2 = tempfile.mkdtemp(prefix="mop-test-identity-")
     ivan = Identity("ivan", "user", ("mop",))
     dup = provider(tmp2, identity.format_line(olga, identity.hash_password("x")) + "\n"
                    + identity.format_line(ivan, identity.hash_password("i1")) + "\n"
-                   + identity.format_line(ivan, identity.hash_password("i2")) + "\n",
-                   "olga:admin; anton:admin", {"anton": "anton-pw", "olga": "x"})
-    for login, pw, sources in (("olga", "x", ("MOP_OPERATORS", dup.path)),
-                               ("ivan", "i1", (dup.path,))):
-        for call, args in (("authenticate", (login, pw)), ("lookup", (login,))):
-            try:
-                getattr(dup, call)(*args)
-                out.append(f"{call}({login}) defined twice must be refused")
-            except identity.Refused as e:
-                if login not in str(e) or not all(s in str(e) for s in sources):
-                    out.append(f"{call}({login}): the refusal must name {login} and {sources}: {e}")
-            except Exception as e:  # noqa: BLE001
-                out.append(f"{call}({login}) must be Refused, got {type(e).__name__}: {e}")
-    if dup.authenticate("anton", "anton-pw") != anton or dup.lookup("anton") != anton:
+                   + identity.format_line(ivan, identity.hash_password("i2")) + "\n")
+    for call, args in (("authenticate", ("ivan", "i1")), ("lookup", ("ivan",))):
+        try:
+            getattr(dup, call)(*args)
+            out.append(f"{call}(ivan) defined twice must be refused")
+        except identity.Refused as e:
+            if "ivan" not in str(e) or dup.path not in str(e):
+                out.append(f"{call}(ivan): the refusal must name ivan and {dup.path}: {e}")
+    if dup.authenticate("olga", "x") != olga:
         out.append("a duplicate must not take the other logins down")
-    if sorted(i.login for i in dup.identities()) != ["anton"]:
-        out.append(f"a login defined twice is nobody's identity: {dup.identities()}")
-    # Громкая сторона -- для mop deploy: каждый дубль строкой, с источниками.
-    got = dup.conflicts()
-    want = [f"login ivan is defined twice in {dup.path}",
-            f"login olga is defined both in MOP_OPERATORS and in {dup.path}"]
-    if got != want:
-        out.append(f"conflicts -> {got}, wanted {want}")
+    if dup.conflicts() != [f"login ivan is defined twice in {dup.path}"]:
+        out.append(f"conflicts -> {dup.conflicts()}")
     if p.conflicts():
         out.append(f"no duplicates, no conflicts: {p.conflicts()}")
-    # Нет файла -- установка как сегодня, только MOP_OPERATORS.
-    bare = identity.PlainFileProvider(os.path.join(tmp, "absent"), "anton:admin", tmp)
-    if bare.authenticate("anton", "anton-pw") != anton:
-        out.append("without an operators file the installation works as today")
+    # Нет файла -- нет людей: второго источника больше нет (#219).
+    bare = identity.PlainFileProvider(os.path.join(tmp, "absent"))
+    if bare.identities() or bare.lookup("anton") is not None:
+        out.append("without an operators file there is nobody")
     return out
 
 
-def check_transition():
-    """Установка только с MOP_OPERATORS: те же логины, роли и проекты, те же
-    права и тот же users.conf байт в байт, что у operators.parse."""
+def check_one_source_219():
+    """HYPOTHESIS (#219): людей два источника -- файл операторов и переходный
+    MOP_OPERATORS с паролями deploy'я (#205); оператор хочет один.
+    SOLUTION: люди только из провайдера (файл через `mop user`, или LDAP);
+    MOP_OPERATORS уходит из настроек, провайдера и плейбуков.
+    STATUS: FIXED — see #219"""
     out = []
-    for setting in SETTINGS:
-        today = operators.parse(setting)
-        tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
-        p = identity.PlainFileProvider(os.path.join(tmp, "absent"), setting, tmp)
-        got = {i.login: {"role": i.role, "projects": list(i.projects)} for i in p.identities()}
-        if got != today:
-            out.append(f"{setting!r}: {got} != operators.parse {today}")
-            continue
-        for i in p.identities():
-            if operators.permissions(i) != operators.permissions(today[i.login], i.login):
-                out.append(f"{setting!r}: permissions of {i.login} differ")
-        base = {"service": "svc", "nodes": {"hyper": "hy"}}
-        old = natsconf.render({**base, "operators": {
-            n: {"password": n, **operators.permissions(o, n)} for n, o in today.items()}}, {"mop": "pu"})
-        new = natsconf.render({**base, "operators": {
-            i.login: {"password": i.login, **operators.permissions(i)} for i in p.identities()}},
-            {"mop": "pu"})
-        if new != old:
-            out.append(f"{setting!r}: users.conf drifted")
-        if identity.subjects(setting) != {n: operators.permissions(o, n) for n, o in today.items()}:
-            out.append(f"{setting!r}: subjects for the playbooks drifted")
+    from mop import config, playvars
+    for where, names in (("config.SETTINGS", config.SETTINGS), ("identity.SETTINGS", identity.SETTINGS),
+                         ("config.IDENTITY_SCOPED", config.IDENTITY_SCOPED)):
+        if "MOP_OPERATORS" in names:
+            out.append(f"MOP_OPERATORS must be gone from {where}")
+    for gone in ("from_setting", "subjects"):
+        if hasattr(identity, gone):
+            out.append(f"identity.{gone} reads MOP_OPERATORS: it must be gone")
+    if "MOP_OPERATOR_SUBJECTS" in playvars.playbook_vars():
+        out.append("the playbooks must not get people's subjects any more")
+    try:
+        identity.PlainFileProvider("/nonexistent", "anton:admin")
+        out.append("PlainFileProvider must not take MOP_OPERATORS any more")
+    except TypeError:
+        pass
     return out
 
 
 def check_choice():
-    """Провайдер выбирает настройка; дефолт -- сегодняшнее поведение."""
+    """Провайдер выбирает настройка; дефолт -- файл операторов."""
     out = []
     from mop import config
     if config.SETTINGS.get("MOP_AUTH_PROVIDER") != "file":
-        out.append("MOP_AUTH_PROVIDER must default to file: today's behaviour")
+        out.append("MOP_AUTH_PROVIDER must default to file")
     tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
-    p = identity.provider({"MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS": "anton:admin",
-                           "MOP_OPERATORS_FILE": os.path.join(tmp, "operators")}, tmp)
+    path = os.path.join(tmp, "operators")
+    with open(path, "w") as f:
+        f.write(identity.format_line(Identity("anton", "admin", ("*",)),
+                                     identity.hash_password("x")) + "\n")
+    p = identity.provider({"MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS_FILE": path}, tmp)
     if not isinstance(p, identity.PlainFileProvider) or p.lookup("anton") is None:
-        out.append(f"file must give the plain file provider over MOP_OPERATORS: {p}")
+        out.append(f"file must give the plain file provider over the operators file: {p}")
+    p = identity.provider({"MOP_AUTH_PROVIDER": "file"}, tmp)
+    if p.path != path:
+        out.append(f"without MOP_OPERATORS_FILE the file is secrets/operators: {p.path}")
     # nope -- нет такого провайдера; ldap без настроек каталога (#208) --
     # тоже отказ, а не провайдер, который откажет каждому входу.
     for bad in ("ldap", "nope"):
@@ -228,8 +208,9 @@ def check_choice():
 
 
 def check_deploy():
-    """mop deploy отказывает до плейбука, если логин определён дважды или
-    провайдер не читается: там отказ всего -- громкий и вовремя."""
+    """mop deploy отказывает до плейбука: логин определён дважды, провайдер не
+    читается, людей нет вовсе (#219: войти было бы некому) или в .env ещё
+    лежит MOP_OPERATORS (#219: людей переносят `mop user import`)."""
     out = []
     from mop.cli.pool import deploy
     tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
@@ -241,23 +222,33 @@ def check_deploy():
     fn = getattr(deploy, "operator_refusals", None)
     if fn is None:
         return ["mop deploy has no operator_refusals"]
-    got = fn({**base, "MOP_OPERATORS": "olga:admin; anton:admin"}, tmp)
-    if got != [f"login olga is defined both in MOP_OPERATORS and in {path}"]:
-        out.append(f"a duplicate must stop deploy: {got}")
-    if fn({**base, "MOP_OPERATORS": "anton:admin"}, tmp):
-        out.append("no duplicates must not stop deploy")
-    if not fn({**base, "MOP_AUTH_PROVIDER": "ldap", "MOP_OPERATORS": "anton:admin"}, tmp):
-        out.append("an unknown provider must stop deploy")
+    if fn(base, tmp):
+        out.append(f"one person, no duplicates: deploy goes on: {fn(base, tmp)}")
+    gone = "MOP_OPERATORS is gone: move people with `mop user import` on the server, then remove the line"
+    if fn(base, tmp, leftover="anton:admin") != [gone]:
+        out.append(f"MOP_OPERATORS left in .env must stop deploy: {fn(base, tmp, leftover='anton:admin')}")
+    empty = os.path.join(tmp, "empty")
+    open(empty, "w").close()
+    got = fn({**base, "MOP_OPERATORS_FILE": empty}, tmp)
+    if len(got) != 1 or "mop user add" not in got[0] or empty not in got[0]:
+        out.append(f"nobody in the operators file must stop deploy: {got}")
+    if not fn({**base, "MOP_AUTH_PROVIDER": "ldap"}, tmp):
+        out.append("ldap without its settings must stop deploy")
+    with open(path, "a") as f:
+        f.write(identity.format_line(Identity("olga", "user", ("mop",)),
+                                     identity.hash_password("y")) + "\n")
+    if fn(base, tmp) != [f"login olga is defined twice in {path}"]:
+        out.append(f"a duplicate must stop deploy: {fn(base, tmp)}")
     with open(path, "a") as f:
         f.write("broken line\n")
-    if not fn({**base, "MOP_OPERATORS": "anton:admin"}, tmp):
+    if not fn(base, tmp):
         out.append("a broken operators file must stop deploy")
     return out
 
 
 def main():
     failed = []
-    for check in (check_identity, check_hash, check_provider, check_transition, check_choice,
+    for check in (check_identity, check_hash, check_provider, check_one_source_219, check_choice,
                   check_deploy):
         try:
             lines = check()
