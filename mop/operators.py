@@ -104,7 +104,8 @@ def permissions(op, login=None):
     чужим логином человеку нельзя. Остальное, что люди публикуют, -- как
     было: публичный канал, all, инбоксы мастеров и опрос who, события,
     сервер, сборщик (admin). Прежние rpc без логина -- на время перехода,
-    уходят с уборкой. Подписка не менялась.
+    уходят с уборкой. Подписка не менялась. Логин в субъекте -- токеном
+    busnames.login_token (anton.ermak -> anton%2Eermak).
 
     op -- identity.Identity (#205) или словарь разбора {role, projects};
     login -- логин, если op его не несёт (словарь)."""
@@ -112,9 +113,10 @@ def permissions(op, login=None):
                       else (op.role, op.projects))
     login = login or getattr(op, "login", None)
     if not busnames.valid_login(login):
-        # Точка разрезала бы логин на два токена, маска дала бы чужие.
-        raise ValueError(f"MOP_OPERATORS: {login!r} cannot be a subject token: "
-                         f"no dots, spaces, * or >")
+        # Точку, пробел и маски кодирует busnames.login_token; пустой логин и
+        # управляющие символы токеном не станут.
+        raise ValueError(f"MOP_OPERATORS: login {login!r} is empty or has "
+                         f"control characters")
     if ALL in projects:
         deny = [] if role == ADMIN else [busnames.everything(busnames.ADMIN)]
         allow, scope = [busnames.everything(), busnames.INBOX], [busnames.ANY]

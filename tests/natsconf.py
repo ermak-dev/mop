@@ -143,7 +143,8 @@ def check_login_in_subject_207():
     STATUS: FIXED — see #207"""
     from mop import busnames
     out = []
-    ops = operators.parse("alice:user:mop; bob:user:mop; anton:admin; olga:user:*")
+    ops = operators.parse("alice:user:mop; bob:user:mop; anton:admin; olga:user:*; "
+                          "anton.ermak:user:mop")
     try:
         base = {"service": "svc-pass",
                 "operators": {n: {"password": "p", **operators.permissions(o, n)}
@@ -206,12 +207,20 @@ def check_login_in_subject_207():
         expect("service", subj, True, "subscribe")
     for subj in busnames.agent_subscriptions("hyper")["rpc"]:
         expect("node-hyper", subj, True, "subscribe")
-    # Логин, который не токен, -- отказ, а не права на чужой субъект.
-    try:
-        operators.permissions(ops["alice"], "al.ice")
-        out.append("a login with a dot must be refused: it would be two tokens")
-    except ValueError:
-        pass
+    # Логин с точкой (LDAP/AD, #208) -- закодированным токеном, и только своим.
+    expect("anton.ermak", "mop.mop.node.hyper.rpc.anton%2Eermak", True)
+    expect("anton.ermak", "mop.mop.cluster.rpc.anton%2Eermak", True)
+    for subj in ("mop.mop.node.hyper.rpc.anton", "mop.mop.node.hyper.rpc.bob",
+                 "mop.mop.cluster.rpc.anton", "mop.mop.node.hyper.rpc.anton.ermak"):
+        expect("anton.ermak", subj, False)
+    expect("anton", "mop.mop.node.hyper.rpc.anton%2Eermak", False)
+    # Отказ на deploy -- только пустому логину и управляющим символам.
+    for bad in ("", "a\tb", "a\nb"):
+        try:
+            operators.permissions(ops["alice"], bad)
+            out.append(f"login {bad!r} must be refused")
+        except ValueError:
+            pass
     return out
 
 

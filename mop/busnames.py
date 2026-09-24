@@ -33,7 +33,7 @@ def everything(project=None):
 def node(project, name, channel="rpc", login=None):
     """Агент узла. login -- токен вызывающего (#207), только в rpc."""
     subj = f"{ROOT}.{project}.node.{name}.{channel}"
-    return f"{subj}.{login}" if login and channel == CALLER_CHANNEL else subj
+    return f"{subj}.{_token(login)}" if login and channel == CALLER_CHANNEL else subj
 
 
 def broadcast(project):
@@ -57,7 +57,7 @@ def events(project):
 def cluster(project, login=None):
     """Сервис кластера. login -- токен вызывающего (#207)."""
     subj = f"{ROOT}.{project}.{CLUSTER_CHANNEL}.{CALLER_CHANNEL}"
-    return f"{subj}.{login}" if login else subj
+    return f"{subj}.{_token(login)}" if login else subj
 
 
 # ─── вызывающий в субъекте (#207) ────────────────────────────────────────
@@ -68,13 +68,44 @@ def cluster(project, login=None):
 # Публиковать туда NATS даёт только этому человеку (operators.permissions),
 # машинам -- никому (natsconf). Прежние субъекты без логина живут до уборки
 # перехода: логин там по-прежнему называет тело (self-declared).
-_LOGIN_BAD = set(".*> \t\r\n")
+#
+# Логин в токене -- закодированный: в LDAP/AD anton.ermak -- норма (#208), а
+# точка разрезала бы его на два токена. NATS пускает в токен любой UTF-8,
+# кроме пробельных; `.` -- разделитель, `*` и `>` -- маски (docs.nats.io,
+# Subject-Based Messaging). Эти символы и сам `%` кодируются процентом по
+# байтам UTF-8: anton.ermak -> anton%2Eermak. `%` кодируется всегда, поэтому
+# кодирование инъективно: «a.b» и буквальное «a%2Eb» -- разные токены.
+_ESCAPED = set(".*>%")
 
 
 def valid_login(login):
-    """Годится ли логин токеном субъекта: точка разрезала бы его на два
-    токена, `*` и `>` -- маски NATS."""
-    return bool(login) and isinstance(login, str) and not (set(login) & _LOGIN_BAD)
+    """Годится ли логин: непустая строка без управляющих символов (таб,
+    перевод строки тоже управляющие). Остальное кодирует login_token."""
+    return bool(login) and isinstance(login, str) and \
+        not any(ord(c) < 32 or 127 <= ord(c) < 160 for c in login)
+
+
+def login_token(login):
+    """Логин -> токен субъекта. Обратная -- login_of."""
+    return "".join("".join(f"%{b:02X}" for b in c.encode())
+                   if c in _ESCAPED or c.isspace() else c for c in login)
+
+
+def login_of(token):
+    """Токен субъекта -> логин, либо None: токен не канонический (строчные
+    цифры, лишнее кодирование, битый `%`) -- не логин, иначе один логин
+    читался бы из двух токенов."""
+    import urllib.parse
+    try:
+        login = urllib.parse.unquote(token, errors="strict")
+    except (UnicodeDecodeError, TypeError):
+        return None
+    return login if valid_login(login) and login_token(login) == token else None
+
+
+def _token(login):
+    """Токен вызывающего в адресе: маска подписчика (`*`) -- как есть."""
+    return login if login == ANY else login_token(login)
 
 
 def caller(subject):
@@ -89,7 +120,7 @@ def caller(subject):
         login = parts[4]
     else:
         return None
-    return login if valid_login(login) and login != ANY else None
+    return login_of(login)
 
 
 def without_caller(subject):

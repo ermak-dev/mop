@@ -541,18 +541,43 @@ def check_caller_207():
     got = {s: busnames.caller(s) for s in (
         "mop.mop.node.hyper.rpc.alice", "mop.mop.node.hyper.rpc",
         "mop.mop.node.hyper.msg", "mop.mop.cluster.rpc.alice", "mop.mop.cluster.rpc",
-        "mop.mop.node.hyper.msg.alice", "mop.mop.master.h-1.inbox")}
+        "mop.mop.node.hyper.msg.alice", "mop.mop.master.h-1.inbox",
+        "mop.mop.node.hyper.rpc.anton%2Eermak", "mop.mop.cluster.rpc.anton%2Eermak",
+        "mop.mop.node.hyper.rpc.a%2eb", "mop.mop.node.hyper.rpc.*")}
     want = {"mop.mop.node.hyper.rpc.alice": "alice", "mop.mop.node.hyper.rpc": None,
             "mop.mop.node.hyper.msg": None, "mop.mop.cluster.rpc.alice": "alice",
             "mop.mop.cluster.rpc": None, "mop.mop.node.hyper.msg.alice": None,
-            "mop.mop.master.h-1.inbox": None}
+            "mop.mop.master.h-1.inbox": None,
+            "mop.mop.node.hyper.rpc.anton%2Eermak": "anton.ermak",
+            "mop.mop.cluster.rpc.anton%2Eermak": "anton.ermak",
+            "mop.mop.node.hyper.rpc.a%2eb": None, "mop.mop.node.hyper.rpc.*": None}
     if got != want:
         out.append(f"busnames.caller -> {got}, wanted {want}")
-    for bad in ("a.b", "a*", "a>", "a b", "", None):
+    # Логин -- любой, кроме пустого и управляющих символов: в LDAP/AD
+    # anton.ermak -- норма (#208). В токен субъекта он кодируется обратимо.
+    for bad in ("", None, "a\tb", "a\nb", "a\x00b", "a\x7fb"):
         if busnames.valid_login(bad):
-            out.append(f"{bad!r} must not be a login token")
-    if not busnames.valid_login("anton") or not busnames.valid_login("ivan_p-2"):
-        out.append("plain logins must be valid tokens")
+            out.append(f"{bad!r} must not be a login")
+    for fine in ("anton", "ivan_p-2", "anton.ermak", "a b", "a*", "a>", "a%b", "Антон"):
+        if not busnames.valid_login(fine):
+            out.append(f"{fine!r} must be a login")
+    for login, token in (("anton", "anton"), ("anton.ermak", "anton%2Eermak"),
+                         ("a b", "a%20b"), ("a*>", "a%2A%3E"), ("50%", "50%25"),
+                         ("Антон", "Антон"), ("a\u00a0b", "a%C2%A0b")):
+        got = busnames.login_token(login)
+        if got != token:
+            out.append(f"login_token({login!r}) -> {got!r}, wanted {token!r}")
+        if busnames.login_of(token) != login:
+            out.append(f"login_of({token!r}) -> {busnames.login_of(token)!r}, wanted {login!r}")
+        if any(c in token for c in ".*> ") or any(c.isspace() for c in token):
+            out.append(f"token {token!r} is not a single literal NATS token")
+    # Инъективно: «a.b» и буквальное «a%2Eb» -- разные токены.
+    if busnames.login_token("a.b") == busnames.login_token("a%2Eb"):
+        out.append("two logins must never share a token: a.b vs a%2Eb")
+    # Неканоничный токен -- не логин: иначе один логин читался бы из двух.
+    for token in ("a%2eb", "a%41", "a%", "a%zz", "*"):
+        if busnames.login_of(token) is not None:
+            out.append(f"login_of({token!r}) must be None: not a canonical token")
     subs = busnames.agent_subscriptions("hyper")
     if "mop.*.node.hyper.rpc.*" not in subs["rpc"] or "mop.*.node.hyper.rpc" not in subs["rpc"]:
         out.append(f"the agent must listen on both the login and the old rpc: {subs}")
@@ -601,6 +626,10 @@ def check_caller_207():
             out.append("msg carries no login")
         if bus.cluster_subject("mop") != "mop.mop.cluster.rpc.alice":
             out.append(f"a human's cluster subject must carry the login: {bus.cluster_subject('mop')}")
+        bus.login = lambda: "anton.ermak"
+        if bus.subject("hyper", project="mop") != "mop.mop.node.hyper.rpc.anton%2Eermak" \
+                or bus.cluster_subject("mop") != "mop.mop.cluster.rpc.anton%2Eermak":
+            out.append("a dotted login must travel encoded")
         bus.login = lambda: None
         if bus.subject("hyper", project="mop") != "mop.mop.node.hyper.rpc" \
                 or bus.cluster_subject("mop") != "mop.mop.cluster.rpc":
