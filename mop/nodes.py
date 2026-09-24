@@ -57,4 +57,5 @@ def rows():
     """То же через шину — для всех, кроме сервера. Глагол оператора: строка
     узла говорит, чьи образы на нём собраны и кто его делит."""
     from . import bus
-    return bus.ask_cluster("nodes").get("nodes") or []
+    # Отказ сервиса -- Refused, а не пустая таблица (#163).
+    return bus.call_cluster("nodes").get("nodes") or []
