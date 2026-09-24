@@ -587,13 +587,50 @@ def check_caller_207():
     return out
 
 
+def check_slots_total_243():
+    """HYPOTHESIS (#243): nomad_pool отдаёт только свободные слоты, и
+    сколько папетов берёт пустой узел, не видно никому.
+    SOLUTION: рядом со slots -- slots_total = total_mb // spec.MEM; slots
+    прежний, его читают другие. STATUS: FIXED — see #243"""
+    from mop import nomad, spec
+    out = []
+
+    class Nodes:
+        def get_nodes(self):
+            return [{"Name": "gpu", "Datacenter": nomad.POOL_DC, "Status": "ready"},
+                    {"Name": "off", "Datacenter": nomad.POOL_DC, "Status": "down"},
+                    {"Name": "ctl", "Datacenter": "control", "Status": "ready"}]
+
+    class Client:
+        nodes = Nodes()
+
+    keep = (nomad.client, nomad.node_capacity)
+    try:
+        nomad.client = lambda: Client()
+        nomad.node_capacity = lambda n: (2 * spec.MEM + 1, 5 * spec.MEM + spec.MEM // 2)
+        got = {n["name"]: n for n in cluster.nomad_pool()}
+    finally:
+        nomad.client, nomad.node_capacity = keep
+    gpu = got.get("gpu", {})
+    if gpu.get("slots") != 2 or gpu.get("slots_total") != 5:
+        out.append(f"gpu: slots 2 of 5 total, got {gpu}")
+    if "slots_total" in got.get("off", {}) or "ctl" in got:
+        out.append(f"a node not ready has no capacity, another dc is not listed: {got}")
+    # Строка `mop node` несёт его дальше.
+    from mop import nodes
+    row = nodes.row({"Name": "gpu", "Status": "ready"}, {}, gpu)
+    if row.get("slots_total") != 5:
+        out.append(f"nodes.row must carry slots_total: {row}")
+    return out
+
+
 def main():
     failed = []
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,
                   check_secret_verbs, check_verb_table_173,
                   check_forget_inventory_178, check_forget_summary_196,
-                  check_gates_40, check_caller_207):
+                  check_gates_40, check_caller_207, check_slots_total_243):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:

@@ -123,6 +123,8 @@
   const KINDS = ["free", "busy", "sick", "silent", "down"];
   // Корзины считает mop/web.py, здесь только их имена для человека.
   const KIND_RU = {free: "свободен", busy: "занят", sick: "болен", silent: "агент молчит", down: "не работает"};
+  // Та же запись, что render.ratio в питоне (#243): страница его не импортирует.
+  const ratio = (free, total) => free == null && total == null ? "-" : (free == null ? "-" : free) + "/" + (total == null ? "-" : total);
   const plural = (n, one, few, many) => { const m = n % 100, d = n % 10; return n + " " + (m > 10 && m < 20 ? many : d === 1 ? one : d > 1 && d < 5 ? few : many); };
 
   function table(head, rows, cls) {
@@ -139,11 +141,11 @@
 
     const nodes = s.nodes || [];
     $("nodes-note").textContent = nodes.length ? `${nodes.length} в кластере` : "";
-    $("nodes").innerHTML = table(["узел", "драйвер", "проекты", "состояние", "#свободно", "#всего", "#слотов"],
+    $("nodes").innerHTML = table(["узел", "драйвер", "проекты", "состояние", "#свободно", "#всего", "#слоты"],
       nodes.map(n => ({cells: [n.name, n.driver, n.serves, n.state,
         n.free_mb == null ? "-" : (n.free_mb / 1024).toFixed(0) + " GB",
         n.total_mb == null ? "-" : (n.total_mb / 1024).toFixed(0) + " GB",
-        n.slots == null ? "-" : String(n.slots)]})),
+        ratio(n.slots, n.slots_total)]})),
       (r) => /ready$/.test(r.cells[3]) ? "free" : /draining|closed/.test(r.cells[3]) ? "busy" : "down");
 
     $("projects").innerHTML = (s.projects || []).map(sh => {
