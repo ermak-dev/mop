@@ -1,0 +1,25 @@
+[Unit]
+Description={{ unit.description }}
+After={{ unit.after }}
+Wants=network-online.target
+
+[Service]
+User={{ MOP_USER }}
+WorkingDirectory={{ MOP_HOME }}/mop
+{% for e in unit.env %}
+{% if e.startswith('#') %}
+{{ e }}
+{% else %}
+Environment={{ e }}={{ lookup('vars', e) }}
+{% endif %}
+{% endfor %}
+Environment=PYTHONUNBUFFERED=1
+{% for e in unit.before_exec | default([]) %}
+{{ e }}
+{% endfor %}
+ExecStart={{ MOP_HOME }}/mop/bin/mop {{ unit.command }}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

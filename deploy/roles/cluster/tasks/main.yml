@@ -20,9 +20,25 @@
 - name: Systemd unit
   become: yes
   ansible.builtin.template:
-    src: mop-cluster.service.j2
+    src: "{{ role_path }}/../common/templates/service.j2"
     dest: /etc/systemd/system/mop-cluster.service
     mode: "0644"
+  vars:
+    unit:
+      description: "mop-cluster (сервис кластера: Nomad за шиной, глаголы пула на mop.*.cluster.rpc)"
+      after: network-online.target nats.service nomad.service
+      env:
+        - |-
+          # .env на сервер не едет: что сервису нужно знать об установке, приезжает
+          # юнитом. MOP_SERVER_LAN отвечает сразу за адрес шины и за NOMAD_ADDR
+          # (config.DERIVED), поэтому второй переменной для Nomad здесь нет.
+        - MOP_SERVER_LAN
+        - MOP_NATS_PORT
+        - "# Каталог сервера ходит на шину через TLS-прокси (#97)."
+        - MOP_HTTPS_PORT
+        - MOP_HOME
+        - MOP_USER
+      command: cluster serve
   notify: restart mop-cluster
 
 - name: Enable and start

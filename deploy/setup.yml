@@ -11,7 +11,8 @@
 #
 # Пароли не лежат в репозитории и не задаются руками: lookup('password') заводит
 # файл на контроллере при первом прогоне и переиспользует дальше. Потерять их
-# не страшно -- новый прогон раздаст новые сразу и серверу, и узлам.
+# не страшно -- новый прогон раздаст новые сразу и серверу, и узлам. Каталог
+# паролей (secrets_dir) и список проектов (projects) -- deploy/group_vars/all.yml.
 #
 # Контроллер -- сервер: там репозиторий, .env, ssh к узлам и secrets/. Машина
 # оператора в инвентаре не значится и ansible не видит: свои креды она
@@ -48,15 +49,8 @@
   gather_facts: no
 
   vars:
-    # Пароли лежат здесь, на управляющей машине, а не в репозитории; lookup
-    # заводит файл при первом обращении и возвращает то же значение дальше.
-    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     nats_tgz: "https://github.com/nats-io/nats-server/releases/download/v{{ MOP_NATS_VERSION }}/nats-server-v{{ MOP_NATS_VERSION }}-linux-amd64.tar.gz"
     nats_nodes: "{{ groups['puppet'] }}"
-    # Проекты считает `mop deploy` из ростера Nomad и своей памяти (см. mop/cli/pool/deploy.py)
-    # и передаёт сюда --extra-vars. Пустой список -- законное состояние пустого
-    # пула: сервер поднимется, мастеров просто ещё нет.
-    projects: "{{ mop_projects | default([]) }}"
   tasks:
     # NATS работает под пользователем пула (#115). В полной игре его уже
     # завела игра сервера Nomad, но этот плейбук -- аварийный путь и обязан
@@ -92,7 +86,6 @@
   gather_facts: no
 
   vars:
-    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
     mop_home: "{{ MOP_HOME }}/mop"
     # UID спрашиваем у узла, а не берём настройкой. Настройка была одна на
     # весь пул и по факту утверждала, что UID пользователя всюду одинаков; на
@@ -105,7 +98,6 @@
     nats_addr: "{{ nats_lan }}"
     nats_user: "node-{{ inventory_hostname }}"
     nats_password: "{{ lookup('password', secrets_dir + '/nats-node-' + inventory_hostname + '.pass length=32 chars=ascii_letters,digits') }}"
-    projects: "{{ mop_projects | default([]) }}"
   roles:
     - bus
 
@@ -130,8 +122,6 @@
   become: yes
   gather_facts: no
 
-  vars:
-    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
   roles:
     - proxy
 
@@ -145,8 +135,6 @@
   become: no
   gather_facts: no
 
-  vars:
-    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
   roles:
     - web
 
@@ -159,11 +147,6 @@
   become: no
   gather_facts: no
 
-  vars:
-    # Пароли папетов лежат на КОНТРОЛЛЕРЕ: lookup('password') исполняется
-    # здесь, а не на сервере. Роль везёт их серверу (#83).
-    secrets_dir: "{{ lookup('env', 'HOME') }}/.config/mop/secrets"
-    projects: "{{ mop_projects | default([]) }}"
   roles:
     - bootstrap
 

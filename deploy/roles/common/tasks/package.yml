@@ -1,0 +1,17 @@
+# Пакет mop с управляющей машины (#157): одна задача на узел (роль bus) и
+# сервер (роль web). Источник и исключения -- deploy/group_vars/all.yml.
+#
+# Параметры: package_dest -- куда; package_chown -- отдать файлы
+# пользователю пула самим rsync'ом. Результат -- mop_package: по нему
+# вызывающий решает, кого перезапускать.
+- name: Sync the mop package from the control machine
+  become: no
+  ansible.posix.synchronize:
+    src: "{{ mop_source }}/"
+    dest: "{{ package_dest }}/"
+    delete: yes
+    recursive: yes
+    rsync_opts: >-
+      {{ mop_package_excludes | map('regex_replace', '^', '--exclude=') | list
+         + (['--chown=' ~ MOP_USER ~ ':' ~ MOP_USER] if package_chown | default(false) else []) }}
+  register: mop_package

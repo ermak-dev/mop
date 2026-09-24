@@ -8,47 +8,23 @@
     database: passwd
     key: "{{ MOP_USER }}"
 
-- name: Ensure python3-pip
-  become: yes
-  ansible.builtin.apt:
-    name: python3-pip
-    state: present
+# Зависимости и пакет -- общими задачами (роль common, #157).
+- ansible.builtin.include_role:
+    name: common
+    tasks_from: pip
+  vars:
+    pip_pool_user: true
 
-# Всё, что нужно самому mop на узле: клиент шины, MCP-сервер узлового
-# профиля и то, что он импортирует. Список один на узел, тело и `mop setup`
-# (mop/deps.py), сюда едет --extra-vars от `mop deploy`.
-#
-# Под пользователем пула, кем бы ansible ни зашёл. На узлах, где ssh идёт
-# под ним же, разницы нет; на Proxmox ansible заходит как root, и --user
-# клал библиотеки в /root/.local, где агент их не видел и падал в рестарт,
-# а systemd был доволен. То же ниже у регистрации MCP, самопроверки и у
-# каждого файла в доме пула.
-- name: Python dependencies of mop
-  become: yes
-  become_user: "{{ MOP_USER }}"
-  ansible.builtin.pip:
-    name: "{{ MOP_PIP_DEPS.split(',') }}"
-    extra_args: --user --break-system-packages
-    state: present
+- ansible.builtin.include_role:
+    name: common
+    tasks_from: package
+  vars:
+    package_dest: "{{ mop_home }}"
 
-- name: Sync the mop package from the control machine
-  ansible.posix.synchronize:
-    src: "{{ lookup('env', 'HOME') }}/mop/"
-    dest: "{{ mop_home }}/"
-    delete: yes
-    recursive: yes
-    rsync_opts:
-      - "--exclude=.git"
-      - "--exclude=__pycache__"
-      # .env никогда не уезжает на узлы. keys.distribute возит туда только
-      # названное явно (secrets.env), и общий rsync, тащащий весь файл с
-      # кредами GitLab, сводил бы эту фильтрацию к нулю. На узле пойман
-      # 2026-08-29: лежал целиком, 0600, со всеми секретами проекта.
-      - "--exclude=.env"
-      # Карта установки -- кто есть кто и где -- дело управляющей машины.
-      # Узел о соседях не спрашивает, а всё своё берёт из node.env.
-      - "--exclude=inventory.ini"
-      - "--exclude=inventory.yaml"
+- name: A new package restarts the agent
+  ansible.builtin.debug:
+    msg: "mop package changed — restarting mop-agent"
+  changed_when: mop_package is changed
   notify: restart mop-agent
 
 # rsync кладёт файлы от того, кто зашёл; при входе root пакет в доме пула
@@ -63,26 +39,14 @@
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
 
-# Свой MCP-сервер -- часть продукта: без него папет без инструментов.
-# Регистрирует сам claude (`claude mcp add` пишет ~/.claude.json), ручного
-# мерджа больше нет. CLI не умеет сравнивать желаемое с фактом (токены
-# прячет даже от get), поэтому приводим тупо: снять и поставить. Скоап
-# user: локальный прилип бы к каталогу запуска.
-# Только там, где claude и стоит: на узле, чьи тела — контейнеры, свой
-# MCP-сервер регистрирует сборка образа, внутри тела.
-- name: Register the pool MCP server for claude
+# Свой MCP-сервер (роль common). Только там, где claude и стоит: на узле,
+# чьи тела — контейнеры, его регистрирует сборка образа, внутри тела.
+- ansible.builtin.include_role:
+    name: common
+    tasks_from: mcp
+  vars:
+    mcp_pool_user: true
   when: mop_driver | default(MOP_DRIVER) == 'host'
-  become: yes
-  become_user: "{{ MOP_USER }}"
-  ansible.builtin.shell:
-    cmd: |
-      claude mcp remove -s user mop >/dev/null 2>&1 || true
-      exec claude mcp add -s user mop -- '{{ MOP_HOME }}/mop/bin/mop' mcp
-  # claude на узле живёт в nvm, которого нет в PATH неинтерактивного ssh;
-  # MOP_PUPPET_PATH -- уже готовый PATH папета, им же и ищем.
-  environment:
-    PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
-  changed_when: false
 
 # Только владелец: режим ~/.config -- дело машины, а не наш. Первый прогон
 # с явным 0755 ослабил 0700 на двух узлах.

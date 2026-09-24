@@ -1,0 +1,23 @@
+# Всё, что нужно самому mop: клиент шины, MCP-сервер и то, что он
+# импортирует. Список один на узел, сервер, тело и `mop setup`
+# (MOP_PIP_DEPS из mop/deps.py, приезжает --extra-vars).
+#
+# pip_pool_user: ставить под пользователем пула, кем бы ansible ни зашёл. На
+# Proxmox ansible заходит как root, и --user клал библиотеки в /root/.local,
+# где агент их не видел и падал в рестарт, а systemd был доволен (#108). Без
+# него -- под тем, кем зашли: в теле это и есть пользователь пула, на
+# контроллере -- его хозяин.
+- name: Ensure python3-pip
+  when: pip_pool_user | default(false)
+  become: yes
+  ansible.builtin.apt:
+    name: python3-pip
+    state: present
+
+- name: Python dependencies of mop
+  become: "{{ pip_pool_user | default(false) }}"
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.pip:
+    name: "{{ MOP_PIP_DEPS.split(',') }}"
+    extra_args: --user --break-system-packages
+    state: present

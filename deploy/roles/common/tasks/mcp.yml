@@ -1,0 +1,20 @@
+# Свой MCP-сервер -- часть продукта: без него папет без инструментов.
+# Регистрирует сам claude (`claude mcp add` пишет ~/.claude.json), ручного
+# мерджа нет. CLI не умеет сравнивать желаемое с фактом (токены прячет даже
+# от get), поэтому приводим тупо: снять и поставить. Скоуп user: локальный
+# прилип бы к каталогу запуска.
+#
+# mcp_pool_user: регистрировать под пользователем пула (узел, куда ansible
+# заходит кем угодно); без него -- под тем, кем зашли (тело).
+- name: Register the pool MCP server for claude
+  become: "{{ mcp_pool_user | default(false) }}"
+  become_user: "{{ MOP_USER }}"
+  ansible.builtin.shell:
+    cmd: |
+      claude mcp remove -s user mop >/dev/null 2>&1 || true
+      exec claude mcp add -s user mop -- '{{ MOP_HOME }}/mop/bin/mop' mcp
+  # claude живёт в nvm, которого нет в PATH неинтерактивного ssh;
+  # MOP_PUPPET_PATH -- уже готовый PATH папета, им же и ищем.
+  environment:
+    PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
+  changed_when: false
