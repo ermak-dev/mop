@@ -437,9 +437,15 @@ async def capacity():
 
 
 async def _hostname(vmid):
-    """Как зовут контейнер с этим номером; пусто, если его нет."""
+    """Как зовут контейнер с этим номером; пусто, если его нет; None, если
+    гипервизор не ответил за срок.
+
+    Таймаут -- «не знаю», а не «нет» (#171): по этому ответу ensure решает,
+    клонировать ли, и пустота на таймауте вела к клону поверх занятого vmid."""
     out, code = await _pve("list", timeout=60)
-    if code not in (0, None):
+    if code is None:
+        return None
+    if code != 0:
         return ""
     for v, name, _ in parse_list(out):
         if v == vmid:
@@ -465,6 +471,9 @@ async def ensure(name, params=None):
     vmid = vmid_of(name)
 
     standing = await _hostname(vmid)
+    if standing is None:
+        return {"error": f"{name}: mop-pve list: {why('', None, 60)}; "
+                         f"not cloning over a body that may stand"}
     if standing and standing != name:
         # Столкновение хешей либо чужой жилец в нашем диапазоне. Громко:
         # молча поднять не то тело значит отдать папету чужую работу.

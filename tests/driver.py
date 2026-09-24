@@ -805,7 +805,9 @@ def main():
 # стартовало.
 # SOLUTION: мутирующие глаголы считают None отказом, причина -- why(),
 # которая для None говорит «timed out after Ns». Пробы только для чтения
-# (перечисление тел, шаблоны, имя контейнера, ёмкость) остаются как были.
+# (перечисление тел, шаблоны, ёмкость) остаются как были. Имя контейнера --
+# проба, но по ней ensure решает, клонировать ли: таймаут там -- отказ ensure,
+# а не клон поверх занятого vmid.
 # STATUS: FIXED — see #171
 def check_timeouts_171():
     import asyncio
@@ -896,8 +898,27 @@ def check_timeouts_171():
             check("pve.bodies tolerates", asyncio.run(pve.bodies()), lambda r: r == [])
             check("pve.templates tolerates", asyncio.run(pve.templates()),
                   lambda r: r == [])
-            check("pve._hostname tolerates", asyncio.run(pve._hostname(vmid)),
-                  lambda r: r == "")
+            # _hostname кормит мутирующее решение ensure (клонировать или
+            # поднять стоящее): таймаут -- «не знаю» (None), а не «пусто».
+            check("pve._hostname: timeout is unknown, not absent",
+                  asyncio.run(pve._hostname(vmid)), lambda r: r is None)
+            calls = []
+
+            async def list_times_out(script, timeout=20, prefix=()):
+                calls.append(script.split())
+                return ("", None) if "list" in script.split() else ("", 0)
+            pve.sh = list_times_out
+            r = asyncio.run(pve.ensure(name))
+            check("pve.ensure: list timed out -> refusal", r, timed_out)
+            check("pve.ensure: list timed out -> no clone", calls,
+                  lambda c: not any("clone" in w for w in c))
+
+            async def list_fails(script, timeout=20, prefix=()):
+                return ("", 1) if "list" in script.split() else ("", 0)
+            pve.sh = list_fails
+            check("pve._hostname: non-zero exit is absent, as before",
+                  asyncio.run(pve._hostname(vmid)), lambda r: r == "")
+            pve.sh = fake_sh(everything=True)
             check("pve.capacity is an error, as before", asyncio.run(pve.capacity()),
                   lambda r: bool(r.get("error")))
             host.sh = fake_sh(everything=True)
