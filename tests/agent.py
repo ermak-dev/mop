@@ -898,13 +898,69 @@ def check_no_screen_fact_236():
     return out
 
 
+# ── расход по логину в глаголе usage (#244) ───────────────────────────────
+# HYPOTHESIS: глагол usage отдаёт расход по папету и дню, но не по логину
+# мастера — оператор не видит, кто сколько тратит.
+# SOLUTION: usage.py зовётся с --by-login, агент кладёт рядом с прежним полем
+# usage новое by_login: {папет: {логин: {дата: {вид: n}}}}; usage не
+# меняется. Старый usage.py в теле флага не знает и печатает прежнюю форму —
+# тогда весь расход папета за «-»: инвариант (сумма по логинам == usage)
+# держится, а приписать его некому.
+# STATUS: FIXED — see #244
+def check_usage_by_login_244():
+    import asyncio
+    import json
+    out = []
+    saved = (agent.bsh, agent.DRIVER, agent._mine)
+    row = {"input": 1, "output": 2, "cache_write": 3, "cache_read": 4}
+    new = {"usage": {"2026-09-24": row},
+           "by_login": {"anton": {"2026-09-24": row}}}
+    answers = {"pu-mop-1": (json.dumps(new), 0),
+               "pu-mop-2": (json.dumps({"2026-09-24": row}), 0),   # старый usage.py
+               "pu-mop-3": ("boom", 1)}
+    scripts = []
+
+    async def bsh(name, script, timeout=20):
+        scripts.append(script)
+        return answers[name]
+
+    class Driver:
+        SESSION_PY = "/x/mop/session.py"
+
+        async def bodies(self):
+            return list(answers)
+
+        def projects_dir(self, name):
+            return "/p"
+
+    async def yes(*a, **k):
+        return True
+    try:
+        agent.bsh, agent.DRIVER, agent._mine = bsh, Driver(), yes
+        got = asyncio.run(agent.v_usage(None, {"days": 7}))
+    finally:
+        agent.bsh, agent.DRIVER, agent._mine = saved
+    want_usage = {"pu-mop-1": {"2026-09-24": row}, "pu-mop-2": {"2026-09-24": row},
+                  "pu-mop-3": {}}
+    want_by = {"pu-mop-1": {"anton": {"2026-09-24": row}},
+               "pu-mop-2": {"-": {"2026-09-24": row}}, "pu-mop-3": {}}
+    if got.get("usage") != want_usage:
+        out.append(f"usage must stay as it was: {got.get('usage')!r}")
+    if got.get("by_login") != want_by:
+        out.append(f"by_login: {got.get('by_login')!r}")
+    if not all(s.endswith(" 7 --by-login") for s in scripts):
+        out.append(f"usage.py must be asked --by-login: {scripts!r}")
+    return out
+
+
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
                   check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
                   check_gates_40, check_caller_207, check_git_identity_167,
-                  check_state_fact_224, check_no_screen_fact_236):
+                  check_state_fact_224, check_no_screen_fact_236,
+                  check_usage_by_login_244):
         try:
             failed += check()
         except Exception as e:
