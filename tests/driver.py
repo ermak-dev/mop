@@ -808,6 +808,13 @@ def main():
         print(f"FAILED  check_timeouts_171: {type(e).__name__}: {e}")
     cases, bad = cases + c, bad + b
 
+    try:
+        c, b = check_clone_lock_195()
+    except Exception as e:
+        c, b = 1, 1
+        print(f"FAILED  check_clone_lock_195: {type(e).__name__}: {e}")
+    cases, bad = cases + c, bad + b
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 
@@ -1051,6 +1058,136 @@ def check_timeouts_171():
                   lambda r: r == "timed out after 30s")
     finally:
         host.sh, pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname = saved
+    return cases, bad
+
+
+# ── блокировка шаблона на время чужого клона (#195) ─────────────────────
+# Наблюдение: после `mop driver build mop` на hyper четыре тела поднимались
+# разом, три из четырёх упали с «CT is locked (disk); build the project's
+# image: mop driver build mop» -- Proxmox держит блокировку шаблона на время
+# клона, и соседний клон получает отказ. Nomad перезапустил задачи, и за
+# ~3 минуты поднялись все: образ был на месте, совет пересобрать его --
+# ложный и вёл бы в ту же блокировку.
+# HYPOTHESIS: ensure сводит любой отказ `mop-pve clone` к «собери образ».
+# SOLUTION: отказ по блокировке («is locked», «can't lock file») ensure
+# повторяет с паузами, в сумме 119 с; не ушла -- отказ называет блокировку и
+# `pct unlock`. Совет собрать образ -- только когда шаблона нет в списке
+# гипервизора; иной отказ -- своей причиной.
+# RESULT: до правки 7 из 13 проверок красные, после -- все зелёные.
+# STATUS: FIXED — see #195
+def check_clone_lock_195():
+    import asyncio
+    from mop.driver import pve
+
+    cases = bad = 0
+
+    def check(what, got, want):
+        nonlocal cases, bad
+        cases += 1
+        if not want(got):
+            bad += 1
+            print(f"FAILED  #195 {what}: got {got!r}")
+
+    name, project = "pu-mop-1", "mop"
+    src = pve.template_vmid(project)
+    locked = f"CT is locked (disk)\n"
+
+    def fake(clone_answers, template=True):
+        """sh: list -- шаблон стоит (или нет), тела нет; clone -- ответы по
+        очереди, последний повторяется; остальное -- успех."""
+        calls = []
+
+        async def sh(script, timeout=20, prefix=()):
+            words = script.split()
+            if "list" in words:
+                return ((f"{src} {pve.template_name(project)} stopped\n"
+                         if template else ""), 0)
+            if "clone" in words:
+                calls.append(words)
+                n = min(len(calls), len(clone_answers)) - 1
+                return clone_answers[n]
+            return "", 0
+        return sh, calls
+
+    slept = []
+
+    async def sleep(s):
+        slept.append(s)
+
+    saved = (pve.sh, pve.SSH_KEY, pve._seed_files, getattr(pve, "_sleep", None))
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            key = os.path.join(d, "mop-body")
+            with open(key + ".pub", "w") as f:
+                f.write("ssh-ed25519 AAAA node\n")
+            seed = os.path.join(d, "seed")
+            with open(seed, "w") as f:
+                f.write("x")
+            pve.SSH_KEY = key
+            pve._seed_files = lambda: [(seed, "600")]
+            pve._sleep = sleep
+
+            # Блокировка дважды, потом клон проходит: тело поднято без рестарта.
+            pve.sh, calls = fake([(locked, 1), (locked, 1), (f"{src}\n", 0)])
+            r = asyncio.run(pve.ensure(name))
+            check("locked twice then ok -> body", r,
+                  lambda r: not r.get("error") and r.get("created") is True)
+            check("locked twice then ok -> three clones", len(calls),
+                  lambda n: n == 3)
+            check("locked twice then ok -> two pauses", len(slept),
+                  lambda n: n == 2)
+
+            # Второй текст отказа по блокировке -- файл конфига под замком.
+            slept.clear()
+            pve.sh, calls = fake([
+                ("can't lock file '/run/lock/lxc/pve-config-9001.lock' "
+                 "- got timeout\n", 1), (f"{src}\n", 0)])
+            r = asyncio.run(pve.ensure(name))
+            check("can't lock file -> retried", (r, len(calls)),
+                  lambda x: not x[0].get("error") and x[1] == 2)
+
+            # Блокировка не уходит: отказ называет блокировку, а не сборку, и
+            # ожидание ограничено.
+            slept.clear()
+            pve.sh, calls = fake([(locked, 1)])
+            r = asyncio.run(pve.ensure(name))
+            err = r.get("error") or ""
+            check("lock persists -> error", r, lambda r: bool(r.get("error")))
+            check("lock persists -> names the lock", err,
+                  lambda e: "locked" in e)
+            check("lock persists -> no build advice", err,
+                  lambda e: "mop driver build" not in e)
+            check("lock persists -> bounded wait", sum(slept),
+                  lambda t: 60 <= t <= 180)
+
+            # Шаблона нет: совет собрать образ, как сегодня.
+            slept.clear()
+            pve.sh, calls = fake([(f"mop-pve: no container {src}\n", 64)],
+                                 template=False)
+            r = asyncio.run(pve.ensure(name))
+            err = r.get("error") or ""
+            check("no template -> build advice", err,
+                  lambda e: f"mop driver build {project}" in e)
+            check("no template -> not retried", (len(calls), slept),
+                  lambda x: x == (1, []))
+
+            # Иной отказ при стоящем шаблоне: его причина, без совета.
+            pve.sh, calls = fake([("storage 'local-lvm' is full\n", 255)])
+            r = asyncio.run(pve.ensure(name))
+            err = r.get("error") or ""
+            check("other error -> its reason", err,
+                  lambda e: "storage 'local-lvm' is full" in e)
+            check("other error -> no build advice", err,
+                  lambda e: "mop driver build" not in e)
+            check("other error -> not retried", (len(calls), slept),
+                  lambda x: x == (1, []))
+    finally:
+        pve.sh, pve.SSH_KEY, pve._seed_files = saved[:3]
+        if saved[3] is None:
+            if hasattr(pve, "_sleep"):
+                del pve._sleep
+        else:
+            pve._sleep = saved[3]
     return cases, bad
 
 

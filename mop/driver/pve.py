@@ -28,6 +28,7 @@
 каждый глагол; `pct` целиком пользователю пула не выдан — это был бы root на
 гипервизоре вместе с соседними боевыми контейнерами.
 """
+import asyncio
 import hashlib
 import ipaddress
 import os
@@ -453,6 +454,51 @@ async def _hostname(vmid):
     return ""
 
 
+# Отказ клона по блокировке (#195). Proxmox держит блокировку шаблона, пока
+# с него снимается клон, и соседний клон того же шаблона получает отказ: на
+# шаблоне -- `CT is locked (disk)`, на файле конфига -- `can't lock file
+# ... got timeout`. После сборки образа Nomad поднимает тела проекта разом,
+# и это штатная очередь, а не поломка: ждём здесь, не роняя задачу в круг
+# рестарта.
+CLONE_LOCKED = ("is locked", "can't lock file")
+# Паузы между попытками, в сумме 119 с. Связанный клон держит шаблон секунды,
+# полный -- до минуты-другой; двух минут хватает очереди из нескольких тел.
+# Дольше не ждём: блокировка, пережившая две минуты, -- скорее всего,
+# оставленная оборванным клоном, и её снимает человек, а не терпение.
+CLONE_PAUSES = (2, 4, 8, 15, 15, 15, 15, 15, 15, 15)
+_sleep = asyncio.sleep
+
+
+def clone_locked(out):
+    """Отказ клона -- чужая блокировка, которая уйдёт сама."""
+    return any(s in out for s in CLONE_LOCKED)
+
+
+async def _clone(src, vmid, name):
+    """Клон шаблона, с повтором, пока шаблон занят чужим клоном. -> (вывод, код)."""
+    for pause in (*CLONE_PAUSES, None):
+        out, code = await _pve("clone", src, vmid, name, STORAGE, cidr_of(name),
+                               GATEWAY, BRIDGE)
+        if code == 0 or pause is None or not clone_locked(out):
+            return out, code
+        await _sleep(pause)
+
+
+async def _clone_refusal(name, project, src, out, code):
+    """Причина отказа клона. Совет собрать образ -- только когда образа
+    действительно нет: иначе он шлёт оператора пересобирать исправный образ
+    (#195)."""
+    reason = why(out, code, 600)
+    if code is not None and clone_locked(out):
+        return (f"no body for {name}: template {src} stayed locked for "
+                f"{sum(CLONE_PAUSES)}s: {reason}; if no clone or build is "
+                f"running, the lock is stale: pct unlock {src} on the hypervisor")
+    if await _hostname(src) == "":
+        return (f"no body for {name}: {reason}; "
+                f"build the project's image: mop driver build {project}")
+    return f"no body for {name}: {reason}"
+
+
 async def ensure(name, params=None):
     """Тело для папета: клон шаблона проекта, лимиты, адрес, старт.
 
@@ -482,12 +528,10 @@ async def ensure(name, params=None):
     created = False
     if not standing:
         src = template_vmid(project)
-        out, code = await _pve("clone", src, vmid, name, STORAGE, cidr_of(name),
-                               GATEWAY, BRIDGE)
+        out, code = await _clone(src, vmid, name)
         # Мутирующие шаги: таймаут -- отказ, не успех (#171).
         if code != 0:
-            return {"error": f"no body for {name}: {why(out, code, 600)}; "
-                             f"build the project's image: mop driver build {project}"}
+            return {"error": await _clone_refusal(name, project, src, out, code)}
         created = True
         await _forget_host_key(name)
     else:
