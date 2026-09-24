@@ -19,6 +19,9 @@ CLUSTER_CHANNEL = "cluster"   # токен субъекта сервиса кл�
 # Креды агента узла: их кладёт плейбук. Путь здесь, а не в bus, потому что
 # драйвер host берёт из их url адрес сервера (#200), а nats ему не нужен.
 NODE_FILE = "~/.config/mop/bus.json"
+# Канал, в котором человек называет себя токеном субъекта (#207): управляющий
+# rpc агента и сервис кластера. Публичный msg -- папетов, логина там нет.
+CALLER_CHANNEL = "rpc"
 
 
 # ─── субъекты ────────────────────────────────────────────────────────────
@@ -27,8 +30,10 @@ def everything(project=None):
     return f"{ROOT}.>" if project is None else f"{ROOT}.{project}.>"
 
 
-def node(project, name, channel="rpc"):
-    return f"{ROOT}.{project}.node.{name}.{channel}"
+def node(project, name, channel="rpc", login=None):
+    """Агент узла. login -- токен вызывающего (#207), только в rpc."""
+    subj = f"{ROOT}.{project}.node.{name}.{channel}"
+    return f"{subj}.{_token(login)}" if login and channel == CALLER_CHANNEL else subj
 
 
 def broadcast(project):
@@ -49,8 +54,79 @@ def events(project):
     return f"{ROOT}.{project}.events"
 
 
-def cluster(project):
-    return f"{ROOT}.{project}.{CLUSTER_CHANNEL}.rpc"
+def cluster(project, login=None):
+    """Сервис кластера. login -- токен вызывающего (#207)."""
+    subj = f"{ROOT}.{project}.{CLUSTER_CHANNEL}.{CALLER_CHANNEL}"
+    return f"{subj}.{_token(login)}" if login else subj
+
+
+# ─── вызывающий в субъекте (#207) ────────────────────────────────────────
+# Кто просит агента и сервис кластера, раньше называло тело запроса -- то
+# есть сам проситель. Теперь логин человека -- последний токен субъекта:
+#   mop.<проект>.node.<узел>.rpc.<логин>
+#   mop.<проект>.cluster.rpc.<логин>
+# Публиковать туда NATS даёт только этому человеку (operators.permissions),
+# машинам -- никому (natsconf). Прежние субъекты без логина живут до уборки
+# перехода: логин там по-прежнему называет тело (self-declared).
+#
+# Логин в токене -- закодированный: в LDAP/AD anton.ermak -- норма (#208), а
+# точка разрезала бы его на два токена. NATS пускает в токен любой UTF-8,
+# кроме пробельных; `.` -- разделитель, `*` и `>` -- маски (docs.nats.io,
+# Subject-Based Messaging). Эти символы и сам `%` кодируются процентом по
+# байтам UTF-8: anton.ermak -> anton%2Eermak. `%` кодируется всегда, поэтому
+# кодирование инъективно: «a.b» и буквальное «a%2Eb» -- разные токены.
+_ESCAPED = set(".*>%")
+
+
+def valid_login(login):
+    """Годится ли логин: непустая строка без управляющих символов (таб,
+    перевод строки тоже управляющие). Остальное кодирует login_token."""
+    return bool(login) and isinstance(login, str) and \
+        not any(ord(c) < 32 or 127 <= ord(c) < 160 for c in login)
+
+
+def login_token(login):
+    """Логин -> токен субъекта. Обратная -- login_of."""
+    return "".join("".join(f"%{b:02X}" for b in c.encode())
+                   if c in _ESCAPED or c.isspace() else c for c in login)
+
+
+def login_of(token):
+    """Токен субъекта -> логин, либо None: токен не канонический (строчные
+    цифры, лишнее кодирование, битый `%`) -- не логин, иначе один логин
+    читался бы из двух токенов."""
+    import urllib.parse
+    try:
+        login = urllib.parse.unquote(token, errors="strict")
+    except (UnicodeDecodeError, TypeError):
+        return None
+    return login if valid_login(login) and login_token(login) == token else None
+
+
+def _token(login):
+    """Токен вызывающего в адресе: маска подписчика (`*`) -- как есть."""
+    return login if login == ANY else login_token(login)
+
+
+def caller(subject):
+    """Логин вызывающего из субъекта, либо None: прежний субъект без логина,
+    публичный канал или не наш субъект."""
+    parts = (subject or "").split(".")
+    if len(parts) == 6 and parts[0] == ROOT and parts[2] == "node" \
+            and parts[4] == CALLER_CHANNEL:
+        login = parts[5]
+    elif len(parts) == 5 and parts[0] == ROOT and parts[2] == CLUSTER_CHANNEL \
+            and parts[3] == CALLER_CHANNEL:
+        login = parts[4]
+    else:
+        return None
+    return login_of(login)
+
+
+def without_caller(subject):
+    """Тот же адрес без логина: прежний субъект, на который отвечает агент
+    или сервис до #207 (переход)."""
+    return subject.rsplit(".", 1)[0] if caller(subject) else subject
 
 
 def server(project):
@@ -66,14 +142,14 @@ def agent_subscriptions(name):
     """На что подписан агент узла: {rpc: [...], msg: [...]}. Маска по проекту
     -- агент обслуживает всех жильцов узла, а подписка только на свой узел:
     в NATS она не эксклюзивна, и соседний агент мог бы ответить первым."""
-    return {"rpc": [node(ANY, name, "rpc")],
+    return {"rpc": [node(ANY, name, "rpc"), node(ANY, name, "rpc", login=ANY)],
             "msg": [node(ANY, name, "msg"), broadcast(ANY)]}
 
 
 def service_subscriptions():
     """На что подписаны сервисы сервера под `service`: bootstrap, кластер,
     сборщик, журнал дашборда."""
-    return [server(ANY), cluster(ANY), build(), events(ANY)]
+    return [server(ANY), cluster(ANY), cluster(ANY, login=ANY), build(), events(ANY)]
 
 
 # ─── пользователи ────────────────────────────────────────────────────────

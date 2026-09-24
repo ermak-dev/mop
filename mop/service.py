@@ -11,7 +11,7 @@
 import asyncio
 import json
 
-from . import bus
+from . import bus, busnames
 
 
 def project_from_subject(subject):
@@ -27,7 +27,7 @@ def project_from_subject(subject):
 NOT_AN_OBJECT = "request is not a JSON object"
 
 
-async def answer(name, project, data, handler, journal, log, send):
+async def answer(name, project, data, handler, journal, log, send, caller=None):
     """Ответ на одно сообщение -> dict; строки журнала -- в log.
 
     Ответ есть всегда (#162). Раньше обработчик, бросивший вне своего try
@@ -38,7 +38,11 @@ async def answer(name, project, data, handler, journal, log, send):
 
     Свой отказ каркас помечает done: он последний, а проситель потока
     (сборщик, bus.ask_stream) узнаёт итог только по нему -- без done причина
-    ушла бы в таймаут тишины."""
+    ушла бы в таймаут тишины.
+
+    caller -- логин из субъекта (#207): кладётся в req["_caller"] поверх
+    тела; на прежнем субъекте ключ снимается -- тело его не подделает, а
+    запрос обработчику тот же, что до #207."""
     try:
         req = json.loads(data.decode())
     except ValueError:
@@ -46,6 +50,9 @@ async def answer(name, project, data, handler, journal, log, send):
     if not isinstance(req, dict):
         req, out = {}, {"error": NOT_AN_OBJECT, "done": True}
     else:
+        req.pop("_caller", None)
+        if caller:
+            req["_caller"] = caller
         try:
             out = await asyncio.get_running_loop().run_in_executor(
                 None, handler, project, req, send)
@@ -57,7 +64,9 @@ async def answer(name, project, data, handler, journal, log, send):
 
 
 async def serve(name, subject, handler, log, journal, banner):
-    """Подписчик сервера: живёт, пока жив процесс.
+    """Подписчик сервера: живёт, пока жив процесс. subject -- строка или
+    список: сервис кластера слушает и прежний субъект, и субъект с логином
+    (#207).
 
     handler(project, req, send) -> ответ; зовётся в отдельном потоке: вызовы
     Nomad и прогоны ansible блокирующие, а петля обязана отвечать остальным,
@@ -76,7 +85,8 @@ async def serve(name, subject, handler, log, journal, banner):
             asyncio.run_coroutine_threadsafe(nc.publish(msg.reply, data), loop)
 
         out = await answer(name, project_from_subject(msg.subject), msg.data,
-                           handler, journal, log, send)
+                           handler, journal, log, send,
+                           caller=busnames.caller(msg.subject))
         try:
             await msg.respond(json.dumps(out, ensure_ascii=False).encode())
         except Exception:
@@ -87,6 +97,7 @@ async def serve(name, subject, handler, log, journal, banner):
         # бы сервис на первом долгом запросе.
         asyncio.create_task(handle(msg))
 
-    await nc.subscribe(subject, cb=on_msg)
+    for subj in ([subject] if isinstance(subject, str) else subject):
+        await nc.subscribe(subj, cb=on_msg)
     log(banner())
     await asyncio.Event().wait()

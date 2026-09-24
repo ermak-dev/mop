@@ -12,9 +12,9 @@
 - name: Operators of the bus, with their passwords
   ansible.builtin.set_fact:
     mop_operators_base: >-
-      {{ mop_operators_base | default({}) | combine({item.key: {
+      {{ mop_operators_base | default({}) | combine({item.key: item.value | combine({
            'password': lookup('password', secrets_dir + '/nats-op-' + item.key + '.pass length=32 chars=ascii_letters,digits'),
-           'allow': item.value.allow, 'deny': item.value.deny or []}}) }}
+           'deny': item.value.deny or []})}) }}
   loop: "{{ MOP_OPERATOR_SUBJECTS | default({}) | dict2items }}"
   no_log: true
 

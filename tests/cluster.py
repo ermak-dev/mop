@@ -487,13 +487,113 @@ def check_gates_40():
     return out
 
 
+def check_caller_207():
+    """HYPOTHESIS (#207): сервис кластера видит из субъекта только проект;
+    владелец для ворот (#40) и держатель токена посадки (#42) -- поля тела,
+    которые пишет сам проситель.
+    SOLUTION: логин человека -- токеном субъекта (mop.<p>.cluster.rpc.<логин>),
+    каркас сервиса кладёт его в req["_caller"] поверх всего, что пришло в
+    теле; ворота и landing читают одно значение, lease.caller. Прежний
+    субъект без логина -- переход: логин из тела, помеченный self-declared.
+    STATUS: FIXED — see #207"""
+    import asyncio
+    import json
+    import tempfile
+    import time
+    from mop import busnames, landing, lease, nomad
+    from mop.domain import Owner
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from cli import no_network
+    out = []
+    subs = busnames.service_subscriptions()
+    if "mop.*.cluster.rpc.*" not in subs or "mop.*.cluster.rpc" not in subs:
+        out.append(f"the services must listen on both cluster subjects: {subs}")
+
+    # Каркас: вызывающий -- из субъекта, тело его не подделает.
+    got = []
+
+    def handler(project, req, send):
+        got.append(req.get("_caller"))
+        return {"ok": True}
+    forged = json.dumps({"verb": "ping", "_caller": "bob"}).encode()
+    for caller, want in (("alice", "alice"), (None, None)):
+        got.clear()
+        try:
+            asyncio.run(service.answer("t", "mop", forged, handler,
+                                       lambda *a: [], lambda line: None, None,
+                                       caller=caller))
+        except TypeError as e:
+            return out + [f"service.answer must take the caller: {e}"]
+        if got != [want]:
+            out.append(f"service.answer with caller {caller!r} and a forged body -> "
+                       f"{got}, wanted {want!r}")
+
+    # Ворота (#40): решает вызывающий из субъекта, а не owner тела.
+    olga = Owner("olga", int(time.time()) - 60).to_dict()
+    work = {"clone": {"cur": "bug/1-x", "def": "master", "dirty": 1, "ahead": 0,
+                      "owner": olga}}
+    changed = []
+    keep = (cluster._clone_of, cluster._owner, nomad.latest_alloc, nomad.alloc_restart)
+    undo = no_network()
+    try:
+        cluster._clone_of = lambda name: work
+        cluster._owner = lambda name: (MOP, True)
+        nomad.latest_alloc = lambda name: {"ID": "a1", "NodeName": "n1"}
+        nomad.alloc_restart = lambda alloc: changed.append("restart")
+        req = {"verb": "restart", "name": "pu-mop-1"}
+        got = cluster.answer("mop", dict(req, _caller="anton", owner="olga"))
+        if "olga" not in (got.get("error") or "") or changed:
+            out.append(f"a forged body owner must not pass the gate: {got!r}")
+        got = cluster.answer("mop", dict(req, _caller="olga", owner="anton"))
+        if got.get("error") or changed != ["restart"]:
+            out.append(f"the subject's caller must be the one the gate sees: {got!r}")
+        changed.clear()
+        # Прежний субъект: логин из тела, как до #207.
+        got = cluster.answer("mop", dict(req, _caller=None, owner="olga"))
+        if got.get("error") or changed != ["restart"]:
+            out.append(f"the old subject must keep today's self-declared owner: {got!r}")
+    finally:
+        cluster._clone_of, cluster._owner, nomad.latest_alloc, nomad.alloc_restart = keep
+        undo()
+
+    # Токен посадки (#42): держатель -- тот же вызывающий.
+    d = tempfile.mkdtemp(prefix="mop-test-207-")
+    keep_file = landing.FILE
+    try:
+        landing.FILE = os.path.join(d, "landing.json")
+        got = cluster.answer("mop", {"verb": "landing", "action": "take", "puppet": "pu-mop-1",
+                                     "_caller": "alice", "holder": "bob"})
+        held = (landing.read().get("mop") or {}).get("holder")
+        if not got.get("ok") or held != "alice":
+            out.append(f"landing's holder must be the subject's caller: {got!r}, {held!r}")
+        got = cluster.answer("mop", {"verb": "landing", "action": "give",
+                                     "_caller": None, "holder": "alice"})
+        if not got.get("ok"):
+            out.append(f"the old subject must keep today's self-declared holder: {got!r}")
+    finally:
+        landing.FILE = keep_file
+
+    # Журнал помечает названное телом: переход виден, пока он есть.
+    line = " ".join(cluster.journal("mop", {"verb": "restart", "name": "pu-mop-1",
+                                            "_caller": None, "owner": "olga"}, {"ok": True}))
+    if "self-declared" not in line:
+        out.append(f"the journal must mark a self-declared caller: {line!r}")
+    line = " ".join(cluster.journal("mop", {"verb": "restart", "name": "pu-mop-1",
+                                            "_caller": "olga"}, {"ok": True}))
+    if "self-declared" in line or "olga" not in line:
+        out.append(f"the journal must name a subject's caller plainly: {line!r}")
+    if lease.caller({"_caller": "alice", "owner": "bob"}) != ("alice", True):
+        out.append("lease.caller must prefer the subject")
+    return out
+
+
 def main():
     failed = []
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,
                   check_secret_verbs, check_verb_table_173,
                   check_forget_inventory_178, check_forget_summary_196,
-                  check_gates_40):
+                  check_gates_40, check_caller_207):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:

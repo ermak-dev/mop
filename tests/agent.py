@@ -524,12 +524,132 @@ def check_gates_40():
     return out
 
 
+def check_caller_207():
+    """HYPOTHESIS (#207): агент видит из субъекта только проект, а кто
+    просит -- поле owner в теле, которое пишет сам отправитель; ворота (#40)
+    и аренда send (#161) стоят на названном, а не на проверенном.
+    SOLUTION: логин человека -- токеном субъекта (mop.<p>.node.<n>.rpc.<логин>),
+    публиковать туда NATS даёт только ему (natsconf, операторы); агент берёт
+    вызывающего из субъекта и тело в этом не участвует. Переход: прежний rpc
+    без логина принимается, и логин там -- названный телом (self-declared)
+    до уборки; публичный msg (папеты) владельца не несёт вовсе.
+    STATUS: FIXED — see #207"""
+    import asyncio
+    import json
+    from mop import bus, lease
+    out = []
+    got = {s: busnames.caller(s) for s in (
+        "mop.mop.node.hyper.rpc.alice", "mop.mop.node.hyper.rpc",
+        "mop.mop.node.hyper.msg", "mop.mop.cluster.rpc.alice", "mop.mop.cluster.rpc",
+        "mop.mop.node.hyper.msg.alice", "mop.mop.master.h-1.inbox",
+        "mop.mop.node.hyper.rpc.anton%2Eermak", "mop.mop.cluster.rpc.anton%2Eermak",
+        "mop.mop.node.hyper.rpc.a%2eb", "mop.mop.node.hyper.rpc.*")}
+    want = {"mop.mop.node.hyper.rpc.alice": "alice", "mop.mop.node.hyper.rpc": None,
+            "mop.mop.node.hyper.msg": None, "mop.mop.cluster.rpc.alice": "alice",
+            "mop.mop.cluster.rpc": None, "mop.mop.node.hyper.msg.alice": None,
+            "mop.mop.master.h-1.inbox": None,
+            "mop.mop.node.hyper.rpc.anton%2Eermak": "anton.ermak",
+            "mop.mop.cluster.rpc.anton%2Eermak": "anton.ermak",
+            "mop.mop.node.hyper.rpc.a%2eb": None, "mop.mop.node.hyper.rpc.*": None}
+    if got != want:
+        out.append(f"busnames.caller -> {got}, wanted {want}")
+    # Логин -- любой, кроме пустого и управляющих символов: в LDAP/AD
+    # anton.ermak -- норма (#208). В токен субъекта он кодируется обратимо.
+    for bad in ("", None, "a\tb", "a\nb", "a\x00b", "a\x7fb"):
+        if busnames.valid_login(bad):
+            out.append(f"{bad!r} must not be a login")
+    for fine in ("anton", "ivan_p-2", "anton.ermak", "a b", "a*", "a>", "a%b", "Антон"):
+        if not busnames.valid_login(fine):
+            out.append(f"{fine!r} must be a login")
+    for login, token in (("anton", "anton"), ("anton.ermak", "anton%2Eermak"),
+                         ("a b", "a%20b"), ("a*>", "a%2A%3E"), ("50%", "50%25"),
+                         ("Антон", "Антон"), ("a\u00a0b", "a%C2%A0b")):
+        got = busnames.login_token(login)
+        if got != token:
+            out.append(f"login_token({login!r}) -> {got!r}, wanted {token!r}")
+        if busnames.login_of(token) != login:
+            out.append(f"login_of({token!r}) -> {busnames.login_of(token)!r}, wanted {login!r}")
+        if any(c in token for c in ".*> ") or any(c.isspace() for c in token):
+            out.append(f"token {token!r} is not a single literal NATS token")
+    # Инъективно: «a.b» и буквальное «a%2Eb» -- разные токены.
+    if busnames.login_token("a.b") == busnames.login_token("a%2Eb"):
+        out.append("two logins must never share a token: a.b vs a%2Eb")
+    # Неканоничный токен -- не логин: иначе один логин читался бы из двух.
+    for token in ("a%2eb", "a%41", "a%", "a%zz", "*"):
+        if busnames.login_of(token) is not None:
+            out.append(f"login_of({token!r}) must be None: not a canonical token")
+    subs = busnames.agent_subscriptions("hyper")
+    if "mop.*.node.hyper.rpc.*" not in subs["rpc"] or "mop.*.node.hyper.rpc" not in subs["rpc"]:
+        out.append(f"the agent must listen on both the login and the old rpc: {subs}")
+
+    # Разбор в handle: глагол-заглушка отдаёт то, что видят ворота.
+    seen = []
+
+    async def probe(_conn, req):
+        seen.append(lease.caller(req))
+        return {"ok": True}
+
+    class Msg:
+        def __init__(self, subject, body):
+            self.subject, self.data = subject, json.dumps(body).encode()
+
+        async def respond(self, data):
+            pass
+
+    async def mine(name):
+        return "mop"
+    saved = (dict(agent.VERBS), agent.puppet_project)
+    try:
+        agent.VERBS["send"] = dataclasses.replace(agent.VERBS["send"], fn=probe)
+        agent.puppet_project = mine
+        body = {"verb": "send", "name": "pu-mop-1", "owner": "bob", "_caller": "bob"}
+        for subj, public, want in (
+                ("mop.mop.node.hyper.rpc.alice", False, ("alice", True)),
+                ("mop.mop.node.hyper.rpc", False, ("bob", False)),
+                ("mop.mop.node.hyper.msg", True, (None, False))):
+            seen.clear()
+            asyncio.run(agent.handle(None, Msg(subj, body), public))
+            if seen != [want]:
+                out.append(f"caller over {subj} with a forged body -> {seen}, wanted {want}")
+    finally:
+        agent.VERBS.clear()
+        agent.VERBS.update(saved[0])
+        agent.puppet_project = saved[1]
+
+    # Клиент: человек спрашивает по субъекту со своим логином, машина -- без.
+    keep = bus.login
+    try:
+        bus.login = lambda: "alice"
+        if bus.subject("hyper", project="mop") != "mop.mop.node.hyper.rpc.alice":
+            out.append(f"a human's rpc subject must carry the login: {bus.subject('hyper', project='mop')}")
+        if bus.subject("hyper", "msg", project="mop") != "mop.mop.node.hyper.msg":
+            out.append("msg carries no login")
+        if bus.cluster_subject("mop") != "mop.mop.cluster.rpc.alice":
+            out.append(f"a human's cluster subject must carry the login: {bus.cluster_subject('mop')}")
+        bus.login = lambda: "anton.ermak"
+        if bus.subject("hyper", project="mop") != "mop.mop.node.hyper.rpc.anton%2Eermak" \
+                or bus.cluster_subject("mop") != "mop.mop.cluster.rpc.anton%2Eermak":
+            out.append("a dotted login must travel encoded")
+        bus.login = lambda: None
+        if bus.subject("hyper", project="mop") != "mop.mop.node.hyper.rpc" \
+                or bus.cluster_subject("mop") != "mop.mop.cluster.rpc":
+            out.append("a machine asks without a login token")
+    finally:
+        bus.login = keep
+    if busnames.without_caller("mop.mop.node.hyper.rpc.alice") != "mop.mop.node.hyper.rpc" \
+            or busnames.without_caller("mop.mop.cluster.rpc.alice") != "mop.mop.cluster.rpc" \
+            or busnames.without_caller("mop.mop.events") != "mop.mop.events":
+        out.append("without_caller must strip exactly the login token (the fallback to "
+                   "an agent from before #207)")
+    return out
+
+
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
                   check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
-                  check_gates_40):
+                  check_gates_40, check_caller_207):
         try:
             failed += check()
         except Exception as e:

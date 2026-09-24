@@ -90,22 +90,52 @@ def parse(setting):
     return out
 
 
-def permissions(op):
-    """Права пользователя субъектами. -> {allow: [маски], deny: [маски]}.
+def permissions(op, login=None):
+    """Права пользователя субъектами. -> {allow, deny: подписка;
+    publish, publish_deny: публикация} -- списки масок.
 
     `_INBOX.>` обязателен всем, иначе request-reply молча не работает -- на
     этом однажды стоял целый вечер разбора (docs/BUS.md). user на весь пул
     получает mop.> без mop.admin.>: иначе вместе с проектами ему достались
     бы узлы -- disk, drain, forget.
 
-    op -- identity.Identity (#205) или словарь разбора {role, projects}."""
+    Публикация -- явным списком, а не mop.<p>.> (#207): в rpc агента и
+    сервиса кластера логин вызывающего -- токен субъекта, и публиковать с
+    чужим логином человеку нельзя. Остальное, что люди публикуют, -- как
+    было: публичный канал, all, инбоксы мастеров и опрос who, события,
+    сервер, сборщик (admin). Прежние rpc без логина -- на время перехода,
+    уходят с уборкой. Подписка не менялась. Логин в субъекте -- токеном
+    busnames.login_token (anton.ermak -> anton%2Eermak).
+
+    op -- identity.Identity (#205) или словарь разбора {role, projects};
+    login -- логин, если op его не несёт (словарь)."""
     role, projects = ((op["role"], op["projects"]) if isinstance(op, dict)
                       else (op.role, op.projects))
+    login = login or getattr(op, "login", None)
+    if not busnames.valid_login(login):
+        # Точку, пробел и маски кодирует busnames.login_token; пустой логин и
+        # управляющие символы токеном не станут.
+        raise ValueError(f"MOP_OPERATORS: login {login!r} is empty or has "
+                         f"control characters")
     if ALL in projects:
         deny = [] if role == ADMIN else [busnames.everything(busnames.ADMIN)]
-        return {"allow": [busnames.everything(), busnames.INBOX], "deny": deny}
-    return {"allow": [busnames.everything(p) for p in sorted(projects)]
-            + [busnames.INBOX], "deny": []}
+        allow, scope = [busnames.everything(), busnames.INBOX], [busnames.ANY]
+    else:
+        deny = []
+        allow = [busnames.everything(p) for p in sorted(projects)] + [busnames.INBOX]
+        scope = sorted(projects)
+    publish = []
+    for p in scope:
+        publish += [busnames.node(p, "*", "rpc", login=login),
+                    busnames.cluster(p, login=login),
+                    # Переход (#207): прежние субъекты без логина.
+                    busnames.node(p, "*", "rpc"), busnames.cluster(p),
+                    busnames.node(p, "*", "msg"), busnames.broadcast(p),
+                    busnames.masters(p), busnames.events(p), busnames.server(p)]
+    if role == ADMIN:
+        publish.append(busnames.build())
+    publish.append(busnames.INBOX)
+    return {"allow": allow, "deny": deny, "publish": publish, "publish_deny": deny}
 
 
 def pass_file(name):
