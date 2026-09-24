@@ -35,10 +35,23 @@ SOLUTION: config.SERVER_SCOPED -- {юнит: настройки}, playvars ве�
 ниже выводит то, что читают mop/cluster.py, mop/nomad.py и mop/spec.py
 (спецификацию собирает сервис кластера), из AST, а не руками.
 STATUS: FIXED — see #176
+
+Кавычки в env юнитов (#185): шаблон писал Environment=K=V как есть, а systemd
+делит строку по пробелам. Значение с пробелом доезжало до сервиса первым
+словом, остальное systemd отбрасывал с предупреждением в журнал -- молча.
+
+HYPOTHESIS: service.j2 не заключает значение в кавычки.
+SOLUTION: Environment="K=V" с экранированием кавычки и обратного слеша --
+только когда в значении есть пробел, кавычка или обратный слеш; процент
+удваивается всегда (systemd раскрывает %-спецификаторы и в Environment=).
+Нынешние юниты такого не содержат и остаются байт в байт. Проверка читает
+юнит по правилам systemd.
+STATUS: FIXED — see #185
 """
 import ast
 import os
 import re
+import shlex
 import sys
 
 import yaml
@@ -56,6 +69,9 @@ CLUSTER_READS = ("mop/cluster.py", "mop/nomad.py", "mop/spec.py", "mop/llm/__ini
 VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "10.0.0.1",
         "MOP_NATS_PORT": "4222", "MOP_HTTPS_PORT": "443", "MOP_NOMAD_PORT": "4646",
         "MOP_POOL_DC": "home", "MOP_WEB_PORT": "8080", "MOP_WEB_BIND": "0.0.0.0"}
+# Значения, которые юнит обязан донести целиком (#185): пробел, кавычки,
+# обратный слеш. Подставляются вместо настройки из набора юнита.
+AWKWARD = ("Pool Bot", 'say "hi"', "a\\b", "tab\there", "it's", "100%", "%h")
 UNITS = {"mop-bootstrap": "bootstrap", "mop-cluster": "cluster", "mop-web": "web"}
 # Исключения синка пакета до #157, во всех четырёх копиях одни и те же.
 EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml"]
@@ -110,6 +126,21 @@ def unit_env(names):
             todo += derived[n]
         elif n not in config.PROCESS_SCOPED:
             out.add(n)
+    return out
+
+
+def environment(unit_text):
+    """{переменная: значение} юнита так, как его разбирает systemd: строка
+    Environment= -- присваивания через пробел, в кавычках с экранированием;
+    слово без «=» отбрасывается. Спецификаторы systemd раскрывает раньше
+    разбора: %% -- это %, а любой другой %x подменяет значение (здесь -- на
+    метку, чтобы подмена была видна)."""
+    out = {}
+    for line in unit_text.splitlines():
+        if line.startswith("Environment="):
+            rest = re.sub(r"%(.)", lambda m: "%" if m[1] == "%" else f"<%{m[1]} expanded>",
+                          line[len("Environment="):])
+            out.update(a.split("=", 1) for a in shlex.split(rest) if "=" in a)
     return out
 
 
@@ -213,6 +244,18 @@ def main():
               sorted(now) == sorted(want), f"{sorted(now)} != {sorted(want)}")
         if can_render and os.path.isfile(template):
             got = render(open(template).read(), {**variables, **uvars})
+            # Environment= так, как его читает systemd (#185): присваивания
+            # через пробел, кавычки снимаются; слово без «=» systemd
+            # отбрасывает с предупреждением. Каждое значение -- целиком.
+            name = scoped[unit][0]
+            for value in AWKWARD:
+                try:
+                    seen = environment(render(open(template).read(),
+                                              {**variables, **uvars, name: value}))
+                except ValueError as e:  # незакрытая кавычка: строку не разобрать
+                    seen = {name: f"unparsable: {e}"}
+                check(f"{unit}: systemd reads {value!r} whole", seen.get(name) == value,
+                      seen.get(name))
             if unit not in ADDED:
                 check(f"{unit}: rendered byte for byte as before", got == PINNED[unit],
                       "\n" + "\n".join(f"  -{a!r}\n  +{b!r}" for a, b in
