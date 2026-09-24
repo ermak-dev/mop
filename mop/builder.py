@@ -119,7 +119,7 @@ def serving_now():
     """{контейнерный узел: [проекты, чей образ на нём объявлен]}."""
     out = {}
     for name, meta in nomad.nodes_meta().items():
-        if not driver.is_container(driver.of_node(meta)):
+        if not driver.is_container(driver.of_node(meta, name)):
             continue
         have = nomad.node_dynamic_meta(name).get("mop_projects") or ""
         out[name] = [s for s in have.split(",") if s]

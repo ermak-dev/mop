@@ -21,7 +21,7 @@ def main(argv):
     # контейнерного — ещё один ssh внутрь. Драйвер приезжает вместе с
     # аллокацией (глагол `alloc`), вторым запросом за ним не ходим; узел,
     # ничего о драйвере не сказавший, ведёт себя как раньше.
-    d = driver.module(node_driver or driver.DEFAULT)
+    d = driver.module(driver.of_node({"mop_driver": node_driver}, node))
     inside = " ".join(shlex.quote(x) for x in d.attach_argv(name))
     # Имя узла в Nomad — имя из инвентаря, а инвентарь берёт способ дозвона
     # из ~/.ssh/config по тому же имени. Таблицы имён между ними нет и не нужно.

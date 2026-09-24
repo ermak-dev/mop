@@ -291,18 +291,28 @@ def require(name):
     return d
 
 
-def of_node(meta):
-    """Имя драйвера узла по его meta в Nomad. Узел без ключа — драйвер по
-    умолчанию: так ведёт себя узел, до которого deploy не доходил."""
-    return (meta or {}).get("mop_driver", DEFAULT)
+def of_node(meta, node="this node"):
+    """Имя драйвера узла по его meta в Nomad -- единственное правило (#175).
+
+    Нет ключа или пусто -- драйвер по умолчанию: так ведёт себя узел,
+    настроенный до того, как поле появилось. Пока пустое значение оставалось
+    пустым здесь и превращалось в host в четырёх других местах, один и тот
+    же узел был контейнерным для сборщика и host для ростера.
+
+    Неизвестное имя -- опечатка в инвентаре -- громкий отказ с узлом и
+    значением, а не догадка: сборщик считал его контейнером, mop delete
+    падал на нём же."""
+    name = (meta or {}).get("mop_driver") or DEFAULT
+    if get(name) is None:
+        raise RuntimeError(f"{node}: unknown driver '{name}'; available: "
+                           f"{', '.join(drivers())} (docs/DRIVER.md)")
+    return name
 
 
 def is_container(name):
     """Тела на узле с этим драйвером — отдельные объекты (контейнеры), а не
-    сам узел. Драйвер, которого в реестре нет, — контейнерный: он не host, и
-    так решали сборщик и объявление образов до #151 (`!= DEFAULT`)."""
-    d = get(name)
-    return d["is_container"] if d else True
+    сам узел. Имя -- из of_node: неизвестное туда не доходит."""
+    return require(name)["is_container"]
 
 
 async def bodies_apart(mod):
@@ -328,7 +338,7 @@ def current_name():
 
     Из запроса не берётся никогда: иначе мастер проекта A прислал бы своё
     значение и заставил узел исполнить команду не там."""
-    return config.get("MOP_DRIVER") or DEFAULT
+    return of_node({"mop_driver": config.get("MOP_DRIVER")}, "this node (MOP_DRIVER)")
 
 
 def current():

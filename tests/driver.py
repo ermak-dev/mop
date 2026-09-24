@@ -199,14 +199,22 @@ def check_contract_151():
     cases += 1
     if not asyncio.iscoroutinefunction(pve.templates):
         fail("pve.templates must stay a coroutine")
-    for name, want in (("host", False), ("pve", True), ("", True), ("nosuch", True)):
-        # Неизвестный драйвер -- контейнерный: до #151 builder и image
-        # решали `!= DEFAULT`.
+    for name, want in (("host", False), ("pve", True)):
         cases += 1
         if driver.is_container(name) is not want:
             fail(f"driver.is_container({name!r}) must be {want}")
+    # До #175 неизвестное и пустое имя были «контейнером» (builder и image
+    # решали `!= DEFAULT`), а of_node оставлял пустое пустым. Теперь пустое
+    # -- DEFAULT, неизвестное -- отказ (check_driver_rule_175).
+    for name in ("", "nosuch"):
+        cases += 1
+        try:
+            driver.is_container(name)
+            fail(f"driver.is_container({name!r}) must refuse")
+        except RuntimeError:
+            pass
     for meta, want in (({}, driver.DEFAULT), ({"mop_driver": "pve"}, "pve"),
-                       ({"mop_driver": ""}, ""), (None, driver.DEFAULT)):
+                       ({"mop_driver": ""}, driver.DEFAULT), (None, driver.DEFAULT)):
         cases += 1
         if driver.of_node(meta) != want:
             fail(f"driver.of_node({meta!r}) -> {driver.of_node(meta)!r}, wanted {want!r}")
@@ -787,6 +795,13 @@ def main():
     cases, bad = cases + c, bad + b
 
     try:
+        c, b = check_driver_rule_175()
+    except Exception as e:
+        c, b = 1, 1
+        print(f"FAILED  check_driver_rule_175: {type(e).__name__}: {e}")
+    cases, bad = cases + c, bad + b
+
+    try:
         c, b = check_timeouts_171()
     except Exception as e:
         c, b = 1, 1
@@ -795,6 +810,73 @@ def main():
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
+
+
+# ── имя драйвера узла -- одно правило (#175) ────────────────────────────
+# HYPOTHESIS: of_node оставлял пустой mop_driver пустым (is_container("") ->
+# True, узел читался контейнерным), а четыре других места делали из пустого
+# host (`or DEFAULT`); неизвестное имя -- опечатка в инвентаре -- было
+# «контейнером» для сборщика и объявления образов и падало в mop delete.
+# SOLUTION: of_node -- единственное правило: нет ключа или пусто -> DEFAULT
+# (узел, настроенный до поля), неизвестное -> громкий отказ с узлом и
+# значением. Остальные места -- через него.
+# STATUS: FIXED — see #175
+def check_driver_rule_175():
+    import re
+    cases = bad = 0
+
+    def check(what, ok):
+        nonlocal cases, bad
+        cases += 1
+        if not ok:
+            bad += 1
+            print(f"FAILED  #175 {what}")
+
+    for meta, want in ((None, driver.DEFAULT), ({}, driver.DEFAULT),
+                       ({"mop_driver": ""}, driver.DEFAULT),
+                       ({"mop_driver": "host"}, "host"), ({"mop_driver": "pve"}, "pve")):
+        try:
+            got = driver.of_node(meta, "n1")
+        except Exception as e:
+            got = f"{type(e).__name__}: {e}"
+        check(f"of_node({meta!r}) -> {got!r}, wanted {want!r}", got == want)
+    check("is_container through of_node: empty is host",
+          driver.is_container(driver.of_node({"mop_driver": ""}, "n1")) is False)
+    check("is_container through of_node: pve is a container",
+          driver.is_container(driver.of_node({"mop_driver": "pve"}, "n1")) is True)
+    try:
+        driver.of_node({"mop_driver": "bogus"}, "hyper")
+        check("of_node of an unknown driver must refuse", False)
+    except RuntimeError as e:
+        check(f"the refusal names the node and the value: {e}",
+              "hyper" in str(e) and "bogus" in str(e) and "\n" not in str(e))
+    # Эта машина -- то же правило.
+    saved = os.environ.get("MOP_DRIVER")
+    try:
+        os.environ["MOP_DRIVER"] = "bogus"
+        try:
+            driver.current_name()
+            check("current_name of an unknown MOP_DRIVER must refuse", False)
+        except RuntimeError as e:
+            check("current_name names the value", "bogus" in str(e))
+    finally:
+        if saved is None:
+            os.environ.pop("MOP_DRIVER", None)
+        else:
+            os.environ["MOP_DRIVER"] = saved
+    # Правило одно: `or DEFAULT` для имени драйвера -- только в of_node.
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    found = []
+    for top, _, files in os.walk(os.path.join(root, "mop")):
+        for f in files:
+            if f.endswith(".py"):
+                path = os.path.join(top, f)
+                for i, line in enumerate(open(path), 1):
+                    if re.search(r"or (driver\.)?DEFAULT\b", line):
+                        found.append(f"{os.path.relpath(path, root)}:{i}")
+    check(f"`or DEFAULT` outside of_node: {found}",
+          all(x.startswith("mop/driver/__init__.py") for x in found) and len(found) <= 1)
+    return cases, bad
 
 
 # ── таймаут шелла -- не успех (#171) ─────────────────────────────────────

@@ -19,7 +19,7 @@ def row(summary, meta, cap):
     elif summary.get("SchedulingEligibility") == "ineligible":
         state += ", closed"
     return {"name": summary["Name"],
-            "driver": meta.get("mop_driver") or driver.DEFAULT,
+            "driver": driver.of_node(meta, summary["Name"]),
             # mop_projects — ключ меты УЗЛА, прежнее имя (#85): его объявляет
             # клиент Nomad, и переименование оставило бы старые спеки без
             # узлов, которые их принимают.
