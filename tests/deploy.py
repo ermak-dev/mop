@@ -78,6 +78,18 @@ SOLUTION: nomad -- проба `nomad version` (check_mode: false, ничего �
 пользователь пула; PIP_USER сузил бы список до user site и соврал бы про
 системный requests).
 STATUS: FIXED — see #191
+
+Переменная цикла у include чужих файлов (#194): цикл include_tasks по файлам
+установки (MOP_BODY_EXTRA) и проектов (sandbox_tasks манифеста) держал `item`,
+и вложенный цикл внутри такого файла её затенял -- ansible печатал «The loop
+variable 'item' is already in use» (задача «Old skills go before the new ones»
+из setup.yaml установки), а задача файла, сославшаяся бы на внешний item,
+молча получила бы внутренний.
+
+HYPOTHESIS: у внешних include-циклов в pve-build.yml и body.yml нет
+loop_control.loop_var, и путь они строят из `item`.
+SOLUTION: своё имя переменной цикла у каждого include чужого файла (путь
+include -- шаблон, а не файл репозитория), и `item` в задаче не встречается.
 """
 import ast
 import os
@@ -399,6 +411,57 @@ def check_body_sizes(check, can_render):
         check(f"pve-build: {what}", got == want, got)
 
 
+# ── #194: include-цикл чужих файлов не занимает item ─────────────────────────
+INCLUDES = ("ansible.builtin.include_tasks", "include_tasks",
+            "ansible.builtin.import_tasks", "import_tasks")
+LOOPS = ("loop", "with_items", "with_list", "with_dict", "with_fileglob")
+
+
+def all_tasks():
+    """Все задачи всех плейбуков и файлов задач deploy/, с блоками. -> [(файл, задача)]."""
+    out = []
+
+    def walk(f, items):
+        for t in items or []:
+            if not isinstance(t, dict):
+                continue
+            for key in ("tasks", "pre_tasks", "post_tasks", "handlers",
+                        "block", "rescue", "always"):
+                walk(f, t.get(key))
+            out.append((f, t))
+
+    for f in deploy_files():
+        if f.endswith(".yml"):
+            walk(f, yaml.safe_load(open(f)) or [])
+    return out
+
+
+def check_include_loop_var(check):
+    """STATUS: FIXED — see #194"""
+    found = []
+    for f, t in all_tasks():
+        mod = next((k for k in INCLUDES if k in t), None)
+        if not mod or not any(k in t for k in LOOPS):
+            continue
+        arg = t[mod]
+        path = arg.get("file") if isinstance(arg, dict) else arg
+        # Путь-шаблон -- файл не из репозитория: установки или проекта.
+        if "{{" not in str(path):
+            continue
+        where = f"{os.path.relpath(f, DEPLOY)}: {t.get('name')!r}"
+        found.append(where)
+        var = (t.get("loop_control") or {}).get("loop_var")
+        check(f"{where}: has its own loop_var", var not in (None, "item"), var)
+        check(f"{where}: does not refer to item",
+              not re.search(r"\bitem\b", yaml.safe_dump(t)), yaml.safe_dump(t))
+    # Проверка не пустая: три известных include чужих файлов на месте.
+    want = ["body.yml: 'Sandbox tasks of each project that has any'",
+            "body.yml: 'What this installation adds to a body'",
+            "pve-build.yml: 'Task files this installation names'"]
+    check("the include loops over foreign files are the known three", sorted(found) == want,
+          sorted(found))
+
+
 def main():
     cases = bad = 0
 
@@ -565,6 +628,7 @@ def main():
 
     check_probes(check)
     check_body_sizes(check, can_render)
+    check_include_loop_var(check)
 
     print(f"deploy: {cases - bad}/{cases}" + (" FAILED" if bad else " ok"))
     return 1 if bad else 0
