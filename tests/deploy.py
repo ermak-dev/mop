@@ -108,12 +108,14 @@ from mop import config  # noqa: E402
 # Что сервис кластера читает сам (#176): его код, клиент Nomad и спецификация,
 # а с ней профиль LLM -- job_spec зовёт llm.resolve, и create без --llm
 # приходит с profile=None, то есть с умолчанием установки.
-CLUSTER_READS = ("mop/cluster.py", "mop/nomad.py", "mop/spec.py", "mop/llm/__init__.py")
+CLUSTER_READS = ("mop/cluster.py", "mop/nomad.py", "mop/spec.py", "mop/llm/__init__.py",
+                 "mop/natsconf.py")
 
 VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "10.0.0.1",
         "MOP_NATS_PORT": "4222", "MOP_HTTPS_PORT": "443", "MOP_NOMAD_PORT": "4646",
         "MOP_POOL_DC": "home", "MOP_WEB_PORT": "8080", "MOP_WEB_BIND": "0.0.0.0",
-        "MOP_GIT_NAME": "Pool Bot", "MOP_GIT_EMAIL": "bot@example.dev"}
+        "MOP_GIT_NAME": "Pool Bot", "MOP_GIT_EMAIL": "bot@example.dev",
+        "MOP_NATS_MONITOR_PORT": "8222"}
 # Значения, которые юнит обязан донести целиком (#185): пробел, кавычки,
 # обратный слеш. Подставляются вместо настройки из набора юнита.
 AWKWARD = ("Pool Bot", 'say "hi"', "a\\b", "tab\there", "it's", "100%", "%h")
@@ -129,7 +131,9 @@ ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          "MOP_MEM_MB", "MOP_PUPPET_SEED", "MOP_PUPPET_PATH",
                          "MOP_DEFAULT_LLM",
                          # git identity папета (#167): её кладёт в спеку job_spec.
-                         "MOP_GIT_NAME", "MOP_GIT_EMAIL")}
+                         "MOP_GIT_NAME", "MOP_GIT_EMAIL",
+                         # reload шины с проверкой (#211): /varz на петле.
+                         "MOP_NATS_MONITOR_PORT")}
 
 PINNED = {
     'mop-bootstrap': "[Unit]\nDescription=mop-bootstrap (bootstrap песочниц: играет .mop/bootstrap.yaml проекта при каждом старте папета)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет: всё, что подписчику и прогону нужно знать об\n# установке, приезжает юнитом. MOP_HOME и MOP_USER -- те, что у узлов: их\n# читают задачи bootstrap'а как переменные прогона, и дефолт сервера\n# (его собственный дом) здесь был бы неправдой.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_HOME=/home/mopuser\nEnvironment=MOP_USER=mopuser\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop bootstrap serve\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",

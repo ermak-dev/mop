@@ -4,7 +4,7 @@ On the server, as the pool user. Reads the people, services and nodes that
 mop deploy put into /etc/nats/base-users.json, the projects from the
 server's registry (~/.config/mop/projects), gives a project without a bus
 password a new one, and writes /etc/nats/users.conf. --reload sends
-nats-server SIGHUP when the file changed.
+nats-server SIGHUP when the file changed and checks that nats took it.
 """
 import sys
 
@@ -22,5 +22,8 @@ def main(argv):
         sys.exit(f"no base users ({e}) -- mop deploy writes {natsconf.BASE}")
     # На успехе молчит (#182): «changed/unchanged» -- отчёт о сделанном.
     if changed and "--reload" in argv:
-        natsconf.reload()
+        try:
+            natsconf.reload()
+        except RuntimeError as e:
+            sys.exit(f"nats reload refused: {e}")
     return 0

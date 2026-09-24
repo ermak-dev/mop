@@ -14,17 +14,25 @@ authorization не сливается с первым.
 """
 import json
 import os
+import re
 import secrets
 import signal
 import string
 import subprocess
+import time
+import urllib.request
 
-from . import busnames, fsutil
+from . import busnames, config, fsutil
 
 DIR = "/etc/nats"
 BASE = os.path.join(DIR, "base-users.json")
 USERS = os.path.join(DIR, "users.conf")
+CONF = os.path.join(DIR, "nats-server.conf")
 UNIT = "nats"
+# Туда его ставит роль bus, и оттуда же его запускает юнит.
+NATS_BIN = "/usr/local/bin/nats-server"
+# Сколько ждать, пока nats перечитает конфиг: на стенде -- доли секунды.
+RELOAD_WAIT = 5
 
 
 # ─── чистое: текст файла ─────────────────────────────────────────────────
@@ -167,12 +175,78 @@ def read_users(path=USERS):
         return None
 
 
-def reload():
-    """SIGHUP nats-server: он работает под пользователем пула (#115), и сигнал
-    свой uid шлёт без посредников. О битом конфиге SIGHUP не сообщает --
-    проверяет вызывающий, подключением."""
+def digest_of(check):
+    """Дайджест конфига из вывода `nats-server -t`, либо None -- файл битый.
+    Чистая функция."""
+    m = re.search(r"is valid \((sha256:[0-9a-f]{64})\)", check or "")
+    return m.group(1) if m else None
+
+
+def reload_verdict(check, running):
+    """Принял ли nats файл. -> None, либо причина отказа. Чистая функция.
+
+    check -- вывод `nats-server -t` по файлу на диске, running -- дайджест
+    работающего конфига из /varz (None -- мониторинг не ответил).
+
+    Сравнение дайджестов, а не время загрузки и не журнал: config_digest в
+    /varz -- тот же sha256, что печатает -t (стенд #211, 2.14.6), поэтому
+    равенство значит «работает ровно этот файл», а не «что-то перечитано».
+    Отвергнутый reload -- и синтаксис, и правка, которую nats перечитывать не
+    умеет (listen, auth_callout), -- оставляет старый дайджест."""
+    want = digest_of(check)
+    if want is None:
+        lines = (check or "").strip().splitlines()
+        return f"{CONF} is invalid: {lines[-1] if lines else 'nats-server -t said nothing'}"
+    if running is None:
+        return (f"nats monitoring (/varz on 127.0.0.1:{config.get('MOP_NATS_MONITOR_PORT')}) "
+                f"did not answer: cannot tell whether nats took {want} -- "
+                f"a nats started before #211 has no monitoring: restart nats")
+    if running == want:
+        return None
+    return (f"nats kept its old config {running}, the file is {want}: the change "
+            f"cannot be reloaded (listen, auth_callout...) -- restart nats; "
+            f"journalctl -u {UNIT} names the reason")
+
+
+def check_file(path=None):
+    """Вывод `nats-server -t` по файлу: он же говорит, битый ли файл."""
+    r = subprocess.run([NATS_BIN, "-t", "-c", path or CONF], capture_output=True, text=True)
+    return (r.stdout + r.stderr).strip()
+
+
+def running_digest():
+    """config_digest работающего nats из /varz, либо None."""
+    url = f"http://127.0.0.1:{config.get('MOP_NATS_MONITOR_PORT')}/varz"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as r:
+            return json.load(r).get("config_digest")
+    except (OSError, ValueError):
+        return None
+
+
+def _main_pid():
     pid = subprocess.run(["systemctl", "show", "-p", "MainPID", "--value", UNIT],
                          capture_output=True, text=True).stdout.strip()
     if not pid.isdigit() or pid == "0":
         raise RuntimeError(f"{UNIT} is not running")
-    os.kill(int(pid), signal.SIGHUP)
+    return int(pid)
+
+
+def reload():
+    """SIGHUP nats-server и проверка, что он принял файл (#211). Отказ --
+    RuntimeError с причиной.
+
+    Битый файл -- отказ до сигнала: nats его всё равно отверг бы, молча.
+    Сигнал свой uid шлёт без посредников: nats под пользователем пула (#115)."""
+    check = check_file()
+    if digest_of(check) is None:
+        raise RuntimeError(reload_verdict(check, None))
+    os.kill(_main_pid(), signal.SIGHUP)
+    want, running = digest_of(check), None
+    deadline = time.monotonic() + RELOAD_WAIT
+    while time.monotonic() < deadline:
+        running = running_digest()
+        if running == want:
+            return
+        time.sleep(0.1)
+    raise RuntimeError(reload_verdict(check, running))
