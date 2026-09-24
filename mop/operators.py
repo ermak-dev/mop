@@ -110,9 +110,10 @@ def permissions(op, login=None):
     Подписка -- тоже явным списком (#212): подписанный на rpc агента или
     сервиса кластера человек отвечал бы первым вместо них, и логин в
     субъекте ничего бы не стоил. Клиент подписывается ровно на инбоксы
-    мастеров (свой и опрос who; master.>, а не master.*.inbox: адрес
-    <хост>-<pid>, и хост бывает с точками), события проекта (дашборд) и
-    _INBOX (ответы, поток сборщика).
+    мастеров, события проекта (дашборд) и _INBOX (ответы, поток сборщика).
+    Инбоксы -- только свои (#213): адрес мастера несёт логин владельца
+    первым токеном, и человек слушает mop.<p>.master.<свой токен>.> плюс
+    опрос who (master.all.inbox), а не master.> -- там лежат чужие отчёты.
 
     op -- identity.Identity (#205) или словарь разбора {role, projects};
     login -- логин, если op его не несёт (словарь)."""
@@ -129,7 +130,9 @@ def permissions(op, login=None):
         scope = [busnames.ANY]
     else:
         deny, scope = [], sorted(projects)
-    allow = [s for p in scope for s in (busnames.masters(p), busnames.events(p))]
+    allow = [s for p in scope for s in (busnames.own_masters(p, login),
+                                        busnames.inbox(p, busnames.ALL_MASTERS),
+                                        busnames.events(p))]
     allow.append(busnames.INBOX)
     publish = []
     for p in scope:

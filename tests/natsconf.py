@@ -31,6 +31,7 @@ BASE = {
 # в #207 намеренно: публикация людей -- явным списком с логином в rpc, у
 # сервиса -- deny на субъекты с логином; подписка, папеты и узлы -- прежние.
 # И в #212: подписка людей -- явным списком (инбоксы, события, _INBOX).
+# И в #213: инбоксы мастеров человека -- только под его логином, плюс who.
 OPERATORS = "anton:admin; ivan:user:rugent,cloudpub; olga:user:*"
 USERS_CONF = """users = [
   {
@@ -45,7 +46,7 @@ USERS_CONF = """users = [
     allowed_connection_types: ["WEBSOCKET"]
     permissions: {
       publish:   { allow: ["mop.*.node.*.rpc.anton", "mop.*.cluster.rpc.anton", "mop.*.node.*.rpc", "mop.*.cluster.rpc", "mop.*.node.*.msg", "mop.*.all.msg", "mop.*.master.>", "mop.*.events", "mop.*.server.rpc", "mop.admin.build.rpc", "_INBOX.>"] }
-      subscribe: { allow: ["mop.*.master.>", "mop.*.events", "_INBOX.>"] }
+      subscribe: { allow: ["mop.*.master.anton.>", "mop.*.master.all.inbox", "mop.*.events", "_INBOX.>"] }
     }
   }
   {
@@ -53,7 +54,7 @@ USERS_CONF = """users = [
     allowed_connection_types: ["WEBSOCKET"]
     permissions: {
       publish:   { allow: ["mop.cloudpub.node.*.rpc.ivan", "mop.cloudpub.cluster.rpc.ivan", "mop.cloudpub.node.*.rpc", "mop.cloudpub.cluster.rpc", "mop.cloudpub.node.*.msg", "mop.cloudpub.all.msg", "mop.cloudpub.master.>", "mop.cloudpub.events", "mop.cloudpub.server.rpc", "mop.rugent.node.*.rpc.ivan", "mop.rugent.cluster.rpc.ivan", "mop.rugent.node.*.rpc", "mop.rugent.cluster.rpc", "mop.rugent.node.*.msg", "mop.rugent.all.msg", "mop.rugent.master.>", "mop.rugent.events", "mop.rugent.server.rpc", "_INBOX.>"] }
-      subscribe: { allow: ["mop.cloudpub.master.>", "mop.cloudpub.events", "mop.rugent.master.>", "mop.rugent.events", "_INBOX.>"] }
+      subscribe: { allow: ["mop.cloudpub.master.ivan.>", "mop.cloudpub.master.all.inbox", "mop.cloudpub.events", "mop.rugent.master.ivan.>", "mop.rugent.master.all.inbox", "mop.rugent.events", "_INBOX.>"] }
     }
   }
   {
@@ -61,7 +62,7 @@ USERS_CONF = """users = [
     allowed_connection_types: ["WEBSOCKET"]
     permissions: {
       publish:   { allow: ["mop.*.node.*.rpc.olga", "mop.*.cluster.rpc.olga", "mop.*.node.*.rpc", "mop.*.cluster.rpc", "mop.*.node.*.msg", "mop.*.all.msg", "mop.*.master.>", "mop.*.events", "mop.*.server.rpc", "_INBOX.>"], deny: ["mop.admin.>"] }
-      subscribe: { allow: ["mop.*.master.>", "mop.*.events", "_INBOX.>"], deny: ["mop.admin.>"] }
+      subscribe: { allow: ["mop.*.master.olga.>", "mop.*.master.all.inbox", "mop.*.events", "_INBOX.>"], deny: ["mop.admin.>"] }
     }
   }
   {
@@ -180,8 +181,9 @@ def check_login_in_subject_207():
     for subj in ("mop.rugent.node.hyper.rpc.alice", "mop.admin.node.hyper.rpc.alice",
                  "mop.admin.build.rpc", "mop.rugent.events"):
         expect("alice", subj, False)
-    # Подписка: свой инбокс и ответы (список -- #212, check_subscribe_212).
-    for subj in ("mop.mop.master.h-1.inbox", "mop.mop.master.all.inbox", "_INBOX.abc.1"):
+    # Подписка: свой инбокс и ответы (список -- #212, check_subscribe_212;
+    # инбокс под своим логином -- #213, check_inbox_login_213).
+    for subj in ("mop.mop.master.alice.h-1.inbox", "mop.mop.master.all.inbox", "_INBOX.abc.1"):
         expect("alice", subj, True, "subscribe")
     # admin: весь пул, но логин -- свой.
     for subj in ("mop.rugent.node.hyper.rpc.anton", "mop.admin.node.hyper.rpc.anton",
@@ -258,19 +260,80 @@ def check_subscribe_212():
     for subj in ("mop.admin.build.rpc", "mop.>", "mop.*.cluster.rpc.*", "mop.*.node.*.rpc.*"):
         expect("anton", subj, False)
     # Всё, на что клиент подписывается сегодня: свой инбокс (адрес
-    # <хост>-<pid>, хост бывает с точками), опрос who, ответы и мультиплекс
-    # запросов nats-py, поток сборщика (новый _INBOX), события проекта.
+    # <логин>.<хост>-<pid> с #213, хост бывает с точками), опрос who, ответы
+    # и мультиплекс запросов nats-py, поток сборщика (новый _INBOX), события.
     for user, p in (("alice", "mop"), ("anton", "admin"), ("anton", "rugent"),
                     ("olga", "rugent")):
-        for subj in (f"mop.{p}.master.wate-1.inbox", f"mop.{p}.master.all.inbox",
-                     f"mop.{p}.master.host.lan-7.inbox", f"mop.{p}.events",
+        for subj in (f"mop.{p}.master.{user}.wate-1.inbox", f"mop.{p}.master.all.inbox",
+                     f"mop.{p}.master.{user}.host.lan-7.inbox", f"mop.{p}.events",
                      "_INBOX.abc", "_INBOX.abc.*"):
             expect(user, subj, True)
     # Дашборд под admin слушает события всех проектов разом.
     expect("anton", "mop.*.events", True)
     # Чужой проект и admin -- как было.
-    expect("alice", "mop.rugent.master.wate-1.inbox", False)
-    expect("olga", "mop.admin.master.wate-1.inbox", False)
+    expect("alice", "mop.rugent.master.alice.wate-1.inbox", False)
+    expect("olga", "mop.admin.master.olga.wate-1.inbox", False)
+    return out
+
+
+def check_inbox_login_213():
+    """HYPOTHESIS (#213): после #207/#212 человек подписан на
+    mop.<p>.master.> -- инбоксы всех мастеров проекта: адрес инбокса
+    <хост>-<pid> логина не несёт, и второй мастер читает отчёты папетов
+    первому.
+    SOLUTION: адрес мастера -- <токен логина>.<хост>-<pid>, инбокс
+    mop.<p>.master.<токен>.<хост>-<pid>.inbox; человек подписан только на
+    mop.<p>.master.<свой токен>.> и опрос who (mop.<p>.master.all.inbox).
+    Публикация в инбоксы мастеров -- как была: папеты, узлы, люди.
+    STATUS: FIXED — see #213"""
+    out = []
+    ops = operators.parse("alice:user:mop; bob:user:mop; anton.ermak:admin; olga:user:*")
+    base = {"service": "svc-pass",
+            "operators": {n: {"password": "p", **operators.permissions(o, n)}
+                          for n, o in ops.items()},
+            "nodes": {"hyper": "hy-pass"}}
+    got = rules(natsconf.render(base, {"mop": "pu-pass"}))
+
+    def sub(user, subj, want):
+        allow, deny = got[user]["subscribe"]
+        if permitted(allow, subj, deny) != want:
+            out.append(f"{user} {'may' if want else 'must not'} subscribe {subj}")
+
+    def pub(user, subj, want=True):
+        allow, deny = got[user]["publish"]
+        if permitted(allow, subj, deny) != want:
+            out.append(f"{user} {'may' if want else 'must not'} publish {subj}")
+
+    # Адрес: логин токеном впереди, хост с точками -- после.
+    from mop import busnames
+    addr = busnames.master_address("anton.ermak", "wate.lan-7")
+    if addr != "anton%2Eermak.wate.lan-7":
+        out.append(f"master_address -> {addr!r}")
+    if busnames.inbox("mop", addr) != "mop.mop.master.anton%2Eermak.wate.lan-7.inbox":
+        out.append(f"inbox of the new address -> {busnames.inbox('mop', addr)}")
+    alice = busnames.inbox("mop", busnames.master_address("alice", "wate-1"))
+    bob = busnames.inbox("mop", busnames.master_address("bob", "wate-2"))
+    who = busnames.inbox("mop", busnames.ALL_MASTERS)
+    sub("alice", alice, True)
+    sub("alice", who, True)
+    sub("alice", bob, False)
+    sub("bob", bob, True)
+    sub("bob", alice, False)
+    # Прежний адрес без логина -- ровно утечка: его не слушает никто из людей.
+    for old in ("mop.mop.master.wate-1.inbox", "mop.mop.master.host.lan-7.inbox",
+                "mop.mop.master.>", "mop.mop.master.*.>", "mop.mop.master.bob.>"):
+        sub("alice", old, False)
+    # Логин с точкой -- своим токеном, а не префиксом «anton».
+    sub("anton.ermak", busnames.inbox("mop", addr), True)
+    sub("anton.ermak", "mop.mop.master.anton.wate.lan-7.inbox", False)
+    # user:* -- свой инбокс в любом проекте, чужой -- нигде.
+    sub("olga", busnames.inbox("rugent", busnames.master_address("olga", "h-1")), True)
+    sub("olga", busnames.inbox("rugent", busnames.master_address("bob", "h-1")), False)
+    # Ответы в инбокс нового вида: папет проекта, агент узла, другой мастер.
+    pub("puppet-mop", alice)
+    pub("node-hyper", alice)
+    pub("bob", alice)
+    pub("puppet-mop", busnames.inbox("mop", addr))
     return out
 
 
@@ -360,7 +423,7 @@ def main():
     # -- за псевдопроект admin, user:* -- за любой проект.
     for name, project in (("ivan", "rugent"), ("anton", busnames.ADMIN), ("olga", "mop")):
         perms = operators.permissions(ops[name], name)
-        for subj in (busnames.inbox(project, "host-1"),
+        for subj in (busnames.inbox(project, busnames.master_address(name, "host-1")),
                      busnames.inbox(project, busnames.ALL_MASTERS), reply):
             if not permitted(perms["allow"], subj, perms["deny"]):
                 failed.append(f"{name} may not subscribe to {subj}")
@@ -368,6 +431,7 @@ def main():
 
     failed += check_login_in_subject_207()
     failed += check_subscribe_212()
+    failed += check_inbox_login_213()
 
     # Пароли папетов рождаются на сервере: недостающий заводится, имеющийся
     # не меняется -- иначе живые папеты отвалились бы от шины.

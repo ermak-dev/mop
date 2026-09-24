@@ -245,6 +245,17 @@ async def _on_error(e):
     диагноз, ведущий чинить работающий узел."""
     global _last_error
     _last_error = str(e)
+    for fn in list(ERROR_LISTENERS):
+        try:
+            fn(_last_error)
+        except Exception:
+            pass
+
+
+# Кому ещё нужны асинхронные ошибки шины (#213): MCP мастера узнаёт отсюда,
+# что шина отказала ему в подписке на свой инбокс. fn(текст) -> None, зовётся
+# из фонового цикла; библиотека сама ничего не печатает.
+ERROR_LISTENERS = []
 
 
 async def _aconnect(file=None):

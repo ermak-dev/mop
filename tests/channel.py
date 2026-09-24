@@ -327,6 +327,76 @@ def main():
             check(f"{rel} has no copy of {copy!r}", copy in src, False)
     # STATUS: FIXED — see #148
 
+    # ── #213: адрес мастера несёт логин ──────────────────────────────────
+    # HYPOTHESIS: адрес <хост>-<pid> логина не несёт, и подписку на свой
+    # инбокс не сузить до своего логина -- любой мастер проекта слушает все.
+    # SOLUTION: адрес -- <токен логина>.<хост>-<pid>; папет отвечает на адрес
+    # из конверта (from-name), агент -- в reply_to, и оба уже нового вида.
+    from mop import busnames, operators
+    local = f"{os.uname().nodename}-{os.getpid()}"
+    check("master_id of a person", mcp.master_id("anton.ermak"), f"anton%2Eermak.{local}")
+    check("master_id of the server's service", mcp.master_id("service"), f"service.{local}")
+    check("master_id without creds", mcp.master_id(None), local)
+    mine = bus.inbox(mcp.master_id("anton.ermak"), "mop")
+    perms = operators.permissions({"role": "user", "projects": ["mop"]}, "anton.ermak")
+    check("the master's inbox is its own to subscribe",
+          [m for m in perms["allow"] if ".master." in m and m.endswith(".>")],
+          ["mop.mop.master.anton%2Eermak.>"])
+    check("the inbox lies under it", mine.startswith("mop.mop.master.anton%2Eermak."), True)
+    s = Stubs().install()
+    try:
+        addr = "anton%2Eermak.wate.lan-7"
+        check("route a new-form address", channel.route(addr), ("master", addr))
+        s.put(mcp, "MASTER_ID", "bob.host-77")
+        s.put(mcp, "MY_INBOX", "mop.mop.master.bob.host-77.inbox")
+        s.answers["ask"] = {"msg_id": "m4"}
+        mcp.send(addr, "report")
+        check("the reply goes to the envelope's address", s.calls[-1][:2], ("ask", addr))
+        check("and names the sender by its full address", s.calls[-1][3]["from"], "bob.host-77")
+        s.answers["request"] = {"msg_id": "m5"}
+        mcp.send(PUPPET, "go", notify_when_idle=True)
+        check("agents get the new-form inbox as reply_to", s.calls[-1][3]["reply_to"],
+              "mop.mop.master.bob.host-77.inbox")
+    finally:
+        s.restore()
+
+    # Отказ шины в подписке на свой инбокс -- громко: строка в сессию и в
+    # stderr MCP-сервера. Прочие ошибки и чужие субъекты -- мимо.
+    mine, who = "mop.mop.master.bob.h-1.inbox", "mop.mop.master.all.inbox"
+    for text, want in (
+            (f'nats: permissions violation for subscription to "{mine}" (sid "1")', mine),
+            (f'nats: permissions violation for subscription to "{who}"', who),
+            ('nats: permissions violation for subscription to "mop.mop.events"', None),
+            (f'nats: permissions violation for publish to "{mine}"', None),
+            ("nats: unexpected EOF", None)):
+        check(f"refused_inbox {text!r}", mcp.refused_inbox(text, (mine, who)), want)
+    s = Stubs().install()
+    try:
+        s.put(mcp, "MASTER_ID", "bob.h-1")
+        s.put(mcp, "MY_INBOX", mine)
+        keep = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+        os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = SESS["messagingSocketPath"]
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                mcp.on_bus_error(f'nats: permissions violation for subscription to "{mine}"')
+                mcp.on_bus_error(f'nats: permissions violation for subscription to "{mine}"')
+                mcp.on_bus_error("nats: unexpected EOF")
+        finally:
+            if keep is None:
+                os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+            else:
+                os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = keep
+        pushed = [c for c in s.calls if c[0] == "session.send"]
+        check("the refusal is pushed into the session once", len(pushed), 1)
+        line = pushed[0][2] if pushed else ""
+        check("it names the inbox and the cure",
+              mine in line and "restart the mop MCP server" in line, True)
+        check("the same line goes to stderr", err.getvalue().strip(), line.strip())
+    finally:
+        s.restore()
+    # STATUS: FIXED — see #213
+
     print(f"channel: {cases - bad}/{cases}" + (" FAILED" if bad else " ok"))
     return 1 if bad else 0
 
