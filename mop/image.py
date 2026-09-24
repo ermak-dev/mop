@@ -141,7 +141,13 @@ def restore(gone):
     и после неудачной сборки: старый образ на месте, папетам есть из чего
     клонироваться."""
     for p in gone:
-        nomad.register(spec.job_spec(p["name"], p["origin"], p["llm"]))
+        try:
+            nomad.register(spec.job_spec(p["name"], p["origin"], p["llm"]))
+        except Exception as e:
+            # С именем папета (#182): голый отказ Nomad не говорил, кого из
+            # снятых не подняли.
+            raise RuntimeError(f"{p['name']} on {p.get('node') or '?'}: "
+                               f"not raised again: {e}") from e
 
 
 def build(origin, got, out=None, fresh=False, force=False, on_line=None,

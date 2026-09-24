@@ -20,10 +20,7 @@ def main(argv):
         changed, _ = natsconf.apply(names, bootstrap.PUPPET_CREDS)
     except (OSError, ValueError) as e:
         sys.exit(f"no base users ({e}) -- mop deploy writes {natsconf.BASE}")
-    print(f"{natsconf.USERS}: {len(names)} project(s)"
-          + (f" ({', '.join(names)})" if names else "")
-          + (", changed" if changed else ", unchanged"))
+    # На успехе молчит (#182): «changed/unchanged» -- отчёт о сделанном.
     if changed and "--reload" in argv:
         natsconf.reload()
-        print(f"{natsconf.UNIT}: reloaded")
     return 0

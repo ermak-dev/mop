@@ -36,8 +36,12 @@ def main(argv):
     # вызывающих, этот командлет и инструмент build в MCP. Здесь печать.
     got = image.prepare(origin, root)
     project = got["project"]
+    # Ход сборки -- шагами (#182): эхо манифеста и отчёт о телах были выводом
+    # того, что и так известно; на терминале это строка шага, не на
+    # терминале -- тишина до ошибки. Поток ansible идёт как шёл.
+    p = lib.Progress(project)
     for k, v in sorted(got["asks"].items()):
-        print(f"  {project}/.mop/sandbox.yaml asks for {k}={v}")
+        p.step(f"sandbox.yaml asks for {k}={v}")
     for k in got["alien"]:
         # Громко: проглоченный ключ -- это либо настройка, которая не
         # сработала, либо чужая, которая сработала.
@@ -49,13 +53,21 @@ def main(argv):
     # Пересборка — операция над проектом (#60): тела проекта на контейнерных
     # узлах снимаются до плейбука и поднимаются заново после, при любом
     # исходе. Занятый папет — отказ до первого останова, если не --force.
-    r = image.build(origin, got, fresh=fresh, force=force)
-    for p in r["gone"]:
-        print(f"  {p['name']} on {p['node']}: body destroyed, puppet raised again "
-              f"{'from the new image' if r['rc'] == 0 else 'from the old image'}")
+    try:
+        r = image.build(origin, got, fresh=fresh, force=force, on_step=p.step)
+    finally:
+        p.clear()
     for node, what in r["announced"]:
-        print(f"  {node}: {what}")
+        # Узел, которому образ объявить не вышло (#175), -- громко; прочие
+        # исходы -- не отчёт.
+        if not what.startswith(ANNOUNCED_OK):
+            print(what if what.startswith(f"{node}:") else f"{node}: {what}",
+                  file=sys.stderr)
     return r["rc"]
+
+
+# Исходы image.announce, которые не отказ.
+ANNOUNCED_OK = ("announced", "already announced", "not a container node")
 
 
 def origin_of(arg):
