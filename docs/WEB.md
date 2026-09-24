@@ -61,9 +61,9 @@
 | Корзина | Когда |
 |---|---|
 | `down` | аллокация не работает (pending, lost, queued, ошибка ростера) — спрашивать некого |
-| `silent` | `AGENT SILENT`: молчит узел, не папет; лечения с мастера нет |
-| `free` | `puppets.is_free`: в клоне нет несохранённой работы |
-| `sick` | `HUNG`, `needs action`, `not logged in`, `login expired`, `no model quota`, `error` |
+| `silent` | вид `silent` (`AGENT SILENT`): молчит узел, не папет; лечения с мастера нет |
+| `free` | `state.is_free`: в клоне нет несохранённой работы |
+| `sick` | вид, которому doctor назначает лечение (`state.action_for`): `HUNG`, `needs action`, `not logged in`, `login expired`, `no model quota`, `error` |
 | `busy` | всё остальное, включая `waiting for input` |
 
 Матрица проверяется без пула: `python3 tests/web.py`.

@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime
 
-from . import bus, puppets, usage
+from . import bus, puppets, state, usage
 from . import nodes as pool_nodes
 
 STATES_EVERY = 15      # с: ростер Nomad + состояния с узлов
@@ -31,26 +31,25 @@ USAGE_TIMEOUT = 90     # как у `mop stat`: разбор небыстрый
 EVENTS_CAP = 100       # сколько событий помнит журнал
 DEBOUNCE = 1.0         # с: пачка событий — один круг, а не по кругу на каждое
 
-# Состояния, при которых папет нездоров, а не занят: те же префиксы, по
-# которым doctor (puppets._action_for) назначает лечение.
-SICK = ("HUNG", "needs action", "not logged in", "login expired",
-        "no model quota", "error")
 KINDS = ("free", "busy", "sick", "silent", "down")
 
 
 # ─── чистые функции ──────────────────────────────────────────────────────
 def classify(row):
-    """Корзина папета по строке puppet_rows. Порядок проверок значим:
-    без бегущей аллокации состояния спрашивать не у кого, что бы ни лежало
-    в колонке; молчащий агент — не про папета, а про узел."""
+    """Корзина папета по виду вердикта в строке puppet_rows. Порядок проверок
+    значим: без бегущей аллокации состояния спрашивать не у кого, что бы ни
+    лежало в колонке; молчащий агент — не про папета, а про узел.
+
+    Болен тот, кому doctor назначает лечение: корзина спрашивает его самого
+    (state.action_for), а не держит копию списка префиксов (#145)."""
     if row["alloc_status"] != "running":
         return "down"
-    state = row["state"]
-    if state.startswith("AGENT SILENT"):
+    kind = row.get("kind")
+    if kind == "silent":
         return "silent"
-    if puppets.is_free(state):
+    if state.is_free(kind):
         return "free"
-    if state.startswith(SICK):
+    if state.action_for(kind):
         return "sick"
     return "busy"
 
@@ -64,7 +63,8 @@ def counts(rows):
 
 def projects(rows):
     """Строки по проектам: [{name, puppets, counts}], проекты и папеты по имени.
-    Корзина кладётся в строку (`kind`), чтобы страница красила по ней."""
+    Корзина кладётся в строку (`kind`) поверх вида вердикта, чтобы страница
+    красила по ней: самой странице вид не нужен, и разбирать она не должна."""
     by = {}
     for r in rows:
         origin = r.get("origin") or "?"

@@ -84,7 +84,7 @@ def check():
     упавший в бесконечный реконнект, systemd вполне устраивает. Своя сводка,
     а не `mop list`: командлеты друг друга не зовут."""
     items = puppets.roster()
-    silent = [i["job"]["ID"] for i in items if (i["state"] or "").startswith("AGENT SILENT")]
+    silent = [i["job"]["ID"] for i in items if i["kind"] == "silent"]
     print(f"  puppets: {len(items)}"
           + (f", agent silent for: {', '.join(silent)}" if silent else ", every node answers"))
     print("\n".join(lib.pool_lines()))
