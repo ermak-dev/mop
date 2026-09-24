@@ -108,10 +108,12 @@ def silent(answer):
 #
 # Сами строки состояния — по-английски: их читает не только человек, но и
 # модель (mop list, инструменты MCP), а промпты и скиллы пула англоязычны.
-# Нет файла (старый claude / нет python3) -> None, и мы откатываемся на
-# прежнюю tmux-эвристику. Исход хода (протухший логин, отказ провайдера) пишут
-# хуки в запись хода, агент везёт её фактом state (#224); у папета без хуков
-# он по-прежнему на tmux — в файле сессии его не видно.
+# Нет файла (сессия ещё не поднялась) -> None, и последнее слово за клоном.
+# Исход хода (протухший логин, отказ провайдера) пишут хуки в запись хода,
+# агент везёт её фактом state (#224). Экран пейна вердикт не читает (#235):
+# разбор был слеп — жалоба посреди хода рисуется не там, где её искали, а
+# футер у каждого диалога свой. Экран остался для глаз: tail, slash, attach.
+# Папет без хуков — случай перерегистрации, его показывает doctor.
 #
 # Пробник живёт в mop/session.py и исполняется агентом на узле: сокет папета
 # host-local, снаружи к нему не подключиться.
@@ -121,7 +123,7 @@ def silent(answer):
 # нельзя, и регрессия однажды спряталась именно здесь.
 # Известные статусы файла сессии. Список справочный: незнакомый статус
 # больше не отбрасывается (см. _session_state), иначе новое слово claude
-# молча уводит вердикт в скоринг по буферу.
+# молча уводил вердикт в скоринг по буферу (скоринга больше нет, #235).
 SESSION_STATES = ("idle", "busy", "shell", "requires_action", "waiting", "offline")
 
 
@@ -145,131 +147,6 @@ def _session_state(line):
     if not listen:
         return "hung" if alive else "offline"
     return status
-
-
-# Следы хода: результат инструмента, запуск команд, реплика модели. Индикатор
-# «✻ Baked for 49m · done» в этот список не входит намеренно — им подписан и
-# тот самый ход, который отказом и кончился.
-_TURN_AFTER = re.compile(r"^\s*(⎿|Ran \d|● (?!API Error))", re.M | re.I)
-
-
-def _outlived(activity, low, mark):
-    """Пережита ли жалоба, стоящая в буфере на позиции mark.
-
-    Восстановленная сессия приносит с собой весь скроллбэк, включая отказ, на
-    котором её когда-то оборвало: pu-cloudpub-1 поднялся с 251.5k токенов
-    истории, прекрасно работал под другой моделью — и читался в ростере
-    больным, потому что жалоба в буфере была.
-
-    Отличает живого от больного не сама жалоба, а то, что под ней. У живого
-    ниже лежат следы ходов; у больного — только подпись оборванного хода,
-    сводка задач и пустая рамка ввода. Переключение модели считается тем же
-    доказательством: жалоба на прежнюю модель к новой не относится."""
-    if low.rfind("set model to") > mark:
-        return True
-    return bool(_TURN_AFTER.search(activity, mark))
-
-
-def _screen_complaint(activity):
-    """Жалоба, видимая только на экране. -> State или None.
-
-    Оба случая — один класс: сессия жива, отвечает на ping'и, но ни одного хода
-    выдать не может. Для мастер это неотличимо от молчания.
-    """
-    low = activity.lower()
-    # Модальный диалог claude. Ловим его по футеру, а не по тексту конкретного
-    # вопроса: «Enter to confirm · Esc to cancel» стоит под любым выбором, и
-    # список вопросов, которые claude умеет задать, нам не принадлежит — он
-    # растёт с каждой версией, а список причин залипания расти не должен.
-    #
-    # Только в хвосте экрана: диалог рисуется внизу, а уехавший вверх футер
-    # означает уже отвеченный вопрос. Поймано на живом папете 2026-08-31 —
-    # выбор, чем поднимать историю (251.5k токенов), и файл сессии при этом
-    # показывал живую сессию, так что ростер читал папета здоровым.
-    lines = [l for l in activity.splitlines() if l.strip()]
-    tail = lines[-2:]
-    if any("enter to confirm" in l.lower() for l in tail):
-        what = "resume prompt" if "resume full session as-is" in low else "dialog"
-        return State("dialog", what)
-    # Логин. Варианты экрана: "Not logged in · Run /login", "Login expired ·
-    # Please run /login". Проверять до скоринга: у залипшего мид-таск в буфере
-    # полно рабочих слов.
-    #
-    # Строки про Remote Control отсюда убраны вместе с самим --remote-control:
-    # папета больше не ходят на мост claude.ai, и "/rc failed" на их экране
-    # означало бы что угодно, только не болезнь. Для профилей с ключом
-    # провайдера (glm) логин claude.ai вообще не при делах.
-    # Логин ищем в хвосте экрана, и это не мелочь. Живая жалоба стоит в
-    # статус-баре, который claude дорисовывает под рамкой ввода; жалоба из
-    # прошлого приезжает вместе с историей (`--continue`) обычной репликой с
-    # маркером «●» посреди буфера. Поймано 2026-08-31 сразу после раздачи
-    # свежих кредов: папет поднялся залогиненным, а ростер держал его больным
-    # по строке, которой был час от роду.
-    #
-    # _outlived здесь не годится: у только что поднявшегося папета ходов ещё
-    # нет, и любая жалоба из истории выглядела бы свежей.
-    foot = " ".join(l.lower() for l in lines[-3:])
-    if "not logged in" in foot or "login expired" in foot:
-        return State("login", "not logged in" if "not logged in" in foot else "login expired")
-    # Квота модели и прочие отказы провайдера. Жалоба остаётся в скроллбэке и
-    # после лечения — актуальна она только пока её не пережили.
-    mark = low.rfind("out of usage credits")
-    if mark >= 0 and not _outlived(activity, low, mark):
-        m = re.search(r"keep using ([^\s]+(?: [0-9.]+)?)", activity, re.I)
-        return State("quota", m.group(1) if m else None)
-    mark = low.rfind("api error")
-    if mark >= 0 and not _outlived(activity, low, mark):
-        text = _api_error_text(activity)
-        if text:
-            return State("error", text)
-    return None
-
-
-def _api_error_text(activity):
-    """Человекочитаемая часть отказа провайдера, либо None.
-
-    Экран: «● API Error: Request rejected (429) · [1308][Usage limit reached
-    for 5 hour. Your limit will reset at …][<request id>]». Мастеру нужен
-    только средний блок: код и request id ему ничего не говорят, а «Request
-    rejected (429)» умалчивает главное — когда квота вернётся.
-
-    Сообщение длинное, и рендер claude переносит его на следующую строку. Где
-    оно кончилось, видно по балансу скобок, а не по концу строки: пустые строки
-    агент из пейна уже вырезал, поэтому следующий блок экрана начинается сразу
-    за жалобой. Склейка нормализует отступ переноса — она врёт, если рендер
-    разорвал слово посередине, и тогда в таблицу приедет лишний пробел.
-    """
-    m = re.search(r"API Error:", activity, re.I)
-    if not m:
-        return None
-    buf, depth, opened = [], 0, False
-    for line in activity[m.end():].splitlines()[:6]:
-        buf.append(line.strip())
-        depth += line.count("[") - line.count("]")
-        opened = opened or "[" in line
-        if opened and depth <= 0:
-            break
-    text = " ".join(b for b in buf if b).strip()
-    # Блок со словами и есть сообщение: код и request id пробелов не содержат.
-    for group in re.findall(r"\[([^\[\]]*)\]", text):
-        if " " in group.strip():
-            return group.strip()
-    return text or None
-
-
-def _tmux_guess(activity):
-    """Древний скоринг по словам в буфере. Работает только там, где файла
-    сессии нет (старый claude / нет python3 на узле). -> State или None."""
-    low = activity.lower()
-    work = sum(1 for x in ("working", "herding", "garnishing", "finding",
-                           "checking", "running") if x in low)
-    idle = sum(1 for x in ("резерв", "reserve", "waiting", "idle",
-                           "свободен", "await") if x in low)
-    if work > idle:
-        return State("busy")
-    if idle > work:
-        return State("free")
-    return None
 
 
 def _work_branch(clone):
@@ -358,13 +235,13 @@ def _state_from_turn(f):
     """Вердикт по записи хода, которую пишут хуки (#224), -> State или None.
 
     Исход хода claude сообщает хуком StopFailure с кодом ошибки, а экран его
-    только рисует — и рисует репликой над рамкой ввода, где _screen_complaint
-    логин не ищет (там жалобы из истории). 24.09 pu-mop-2 и pu-mop-3 умерли
+    только рисует — и рисует репликой над рамкой ввода, где разбор экрана
+    логин не искал (там жалобы из истории). 24.09 pu-mop-2 и pu-mop-3 умерли
     посреди хода на «Login expired» и полтора часа читались «idle» с
     несохранённой работой: отчёта провал хода не шлёт, мастер ждал.
 
-    None — записи хода нет (папет не перерегистрирован с хуками, #223) или нет
-    сессии: тогда прежний путь по экрану. Экран остаётся переходным путём.
+    None — записи хода нет (папет не перерегистрирован с хуками, #223, или
+    ещё не начал сессию) или нет сессии: тогда решает один статус сессии.
 
     Занятая сессия бьёт запись: новый ход уже идёт, и старый провал к нему не
     относится. Незнакомый код — ошибка, а не свобода: список кодов растёт с
@@ -412,7 +289,7 @@ def verdict(f):
 
 
 def _verdict(f):
-    """Активность папета по экрану и файлу сессии. Про клон см. verdict."""
+    """Активность папета по записи хода и файлу сессии. Про клон см. verdict."""
     if not f or f.get("error"):
         return State("hung", (f or {}).get("error", "no answer")[:40])
     if not f.get("present"):
@@ -422,23 +299,9 @@ def _verdict(f):
     if hooked:
         return hooked
 
-    activity = f.get("screen") or ""
-    if not activity.strip():
-        return State("free")
-
-    complaint = _screen_complaint(activity)
-    if complaint:
-        if complaint.kind != "login":
-            return complaint
-        return State("login", complaint.detail, _work_branch(f.get("clone")))
-
     st = _session_state(f.get("session"))
     if st is not None:
         return _state_from_session(st, f.get("clone"))
-
-    guess = _tmux_guess(activity)
-    if guess:
-        return guess
 
     return _state_from_clone(f.get("clone"))
 
