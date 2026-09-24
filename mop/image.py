@@ -110,9 +110,9 @@ def project_rows(project):
         node = item["alloc"]["NodeName"] if item["alloc"] else None
         if not node:
             continue
-        drv = driver.of_node(meta.get(node))
+        drv = driver.of_node(meta.get(node), node)
         rows.append({"name": job["ID"], "node": node, "job": job,
-                     "container": driver.require(drv)["is_container"],
+                     "container": driver.is_container(drv),
                      "state": item["state"], "kind": item["kind"]})
     return rows
 
@@ -185,7 +185,13 @@ def announce(project):
     заводилось."""
     out = []
     for name, meta in sorted(nomad.nodes_meta().items()):
-        if not driver.is_container(driver.of_node(meta)):
+        # Неизвестный драйвер -- строка с отказом, остальные узлы дальше (#175).
+        try:
+            container = driver.is_container(driver.of_node(meta, name))
+        except RuntimeError as e:
+            out.append((name, str(e)))
+            continue
+        if not container:
             out.append((name, "not a container node"))  # объявляет any и так
             continue
         # Перечень берём с узла: серверная копия отстаёт на секунды, и

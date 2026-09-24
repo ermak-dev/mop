@@ -115,11 +115,21 @@ def failure(e):
 
 
 # ─── сервер ──────────────────────────────────────────────────────────────
-def serving_now():
-    """{контейнерный узел: [проекты, чей образ на нём объявлен]}."""
+def serving_now(refused=None):
+    """{контейнерный узел: [проекты, чей образ на нём объявлен]}.
+
+    Узел с неизвестным драйвером в решение не входит, а отказ по нему
+    дописывается в refused (#175): опечатка одного узла не останавливает
+    сборку для остальных."""
     out = {}
     for name, meta in nomad.nodes_meta().items():
-        if not driver.is_container(driver.of_node(meta)):
+        try:
+            container = driver.is_container(driver.of_node(meta, name))
+        except RuntimeError as e:
+            if refused is not None:
+                refused.append(str(e))
+            continue
+        if not container:
             continue
         have = nomad.node_dynamic_meta(name).get("mop_projects") or ""
         out[name] = [s for s in have.split(",") if s]
@@ -144,7 +154,11 @@ def run(req, send):
     try:
         send(step="reading the project's .mop")
         got = image.prepare(origin)
-        if not needs_build(mode, serving_now(), project):
+        refused = []
+        serving = serving_now(refused)
+        for why in refused:
+            send(step=f"skipping {why}")
+        if not needs_build(mode, serving, project):
             return {"ok": True, "skipped": True, "project": project}
         state = {"step": "starting", "since": time.time(), "alive": True}
         tail = collections.deque(maxlen=TAIL)

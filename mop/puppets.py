@@ -573,8 +573,8 @@ def delete(name):
     # Модуль с атрибутом IS_CONTAINER возвращает только `driver.current()`, и
     # он про ЭТОТ узел, а нам нужен чужой — по имени. Драйвер приезжает вместе
     # с аллокацией: второго запроса за одним полем меты не делаем.
-    drv = got.get("driver") or driver.DEFAULT
-    if not driver.require(drv)["is_container"]:
+    drv = driver.of_node({"mop_driver": got.get("driver")}, node)
+    if not driver.is_container(drv):
         return {"node": node, "body": "kept"}
     _wait_stopped(name)
     wipe(node, name)

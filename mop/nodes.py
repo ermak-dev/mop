@@ -18,8 +18,17 @@ def row(summary, meta, cap):
         state += ", draining"
     elif summary.get("SchedulingEligibility") == "ineligible":
         state += ", closed"
+    # Опечатка в драйвере одного узла -- строка с отказом, а не отказ всего
+    # списка (#175): список отвечает «что где стоит», и чужая опечатка не
+    # должна отнимать ответ. Операции над таким узлом отказывают громко.
+    try:
+        drv, error = driver.of_node(meta, summary["Name"]), {}
+    except RuntimeError as e:
+        # Поле error -- только у такого узла: строка исправного прежняя.
+        drv, error = "?", {"error": str(e)}
     return {"name": summary["Name"],
-            "driver": meta.get("mop_driver") or driver.DEFAULT,
+            "driver": drv,
+            **error,
             # mop_projects — ключ меты УЗЛА, прежнее имя (#85): его объявляет
             # клиент Nomad, и переименование оставило бы старые спеки без
             # узлов, которые их принимают.
