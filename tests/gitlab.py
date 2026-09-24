@@ -64,6 +64,86 @@ RELABEL_ACTION = [
 ]
 
 
+# #231: deploy катит HEAD рабочей копии сервера, а какой он — на совести того,
+# кто последним сделал pull. 24.09 origin/master полчаса стоял красным на
+# cff9f68 (регрессия #220), и deploy в это окно разнёс бы её по пулу.
+# HYPOTHESIS: deploy не спрашивает у GitLab, зелёный ли катимый коммит.
+# SOLUTION: gitlab.pipeline_verdict — статус пайплайна в «катить»/отказ;
+# deploy.pipeline_refusals — настройка MOP_DEPLOY_NEEDS_GREEN (дефолт пуст —
+# сегодняшнее поведение), громкий отказ без кредов GitLab, --skip-pipeline.
+# RESULT: проверки ниже. STATUS: FIXED — see #231
+SHA = "cff9f6812345678901234567890123456789abcd"
+URL = "https://git.example.dev/group/proj/-/pipelines/42"
+PIPELINE_VERDICT = [
+    ({"status": "success", "web_url": URL}, None),
+    ({"status": "failed", "web_url": URL}, f"pipeline failed for {SHA[:12]}: {URL}"),
+    ({"status": "running", "web_url": URL}, f"wait for pipeline {URL} (running)"),
+    ({"status": "pending", "web_url": URL}, f"wait for pipeline {URL} (pending)"),
+    ({"status": "created", "web_url": URL}, f"wait for pipeline {URL} (created)"),
+    (None, f"no pipeline for {SHA}"),
+    # Неизвестное — отказ с именем: отменённый или пропущенный пайплайн не
+    # говорит, что коммит зелёный.
+    ({"status": "canceled", "web_url": URL},
+     f"pipeline {URL} is canceled, not success: refusing"),
+    ({"status": "skipped", "web_url": URL},
+     f"pipeline {URL} is skipped, not success: refusing"),
+]
+
+
+def check_deploy_gate():
+    """Настройка, отказ без кредов и флаг deploy (#231). -> [строка FAILED]."""
+    from mop import config
+    from mop.cli.pool import deploy
+    out = []
+    if config.SETTINGS.get("MOP_DEPLOY_NEEDS_GREEN", None) != "":
+        out.append(f"MOP_DEPLOY_NEEDS_GREEN default is "
+                   f"{config.SETTINGS.get('MOP_DEPLOY_NEEDS_GREEN')!r}, wanted '' (no check)")
+    fn = getattr(deploy, "pipeline_refusals", None)
+    if fn is None:
+        return out + ["mop deploy has no pipeline_refusals"]
+
+    def boom(sha):
+        raise AssertionError("GitLab asked while the check is off")
+
+    def green(sha):
+        return {"status": "success", "web_url": URL}
+
+    def red(sha):
+        return {"status": "failed", "web_url": URL}
+
+    def down(sha):
+        raise RuntimeError("GET /pipelines -> HTTP 502: bad gateway")
+
+    cases = [
+        # Выключено — сегодняшнее поведение: GitLab не спрашивают вовсе.
+        (("", False, SHA, boom), []),
+        (("0", False, SHA, boom), []),
+        # Включено без кредов — громкий отказ, а не молчаливый пропуск.
+        (("1", False, SHA, boom),
+         ["MOP_DEPLOY_NEEDS_GREEN=1 but no GitLab credentials in .env (GITLAB_TOKEN, or "
+          "GITLAB_USER and GITLAB_PASSWORD): cannot check the pipeline of the commit "
+          "being rolled out"]),
+        (("1", True, SHA, green), []),
+        (("1", True, SHA, red), [f"pipeline failed for {SHA[:12]}: {URL}"]),
+        (("1", True, SHA, down),
+         [f"cannot read the pipeline for {SHA}: GET /pipelines -> HTTP 502: bad gateway"]),
+        # Рабочая копия без коммита: катимое не названо — и проверять нечего.
+        (("1", True, "", green),
+         ["cannot name the commit being rolled out: git rev-parse HEAD failed"]),
+        # Опечатка в .env не выключает проверку молча.
+        (("yes", True, SHA, green),
+         ["MOP_DEPLOY_NEEDS_GREEN='yes': want 1 (check) or empty (no check)"]),
+    ]
+    for args, want in cases:
+        try:
+            got = fn(*args)
+        except AssertionError as e:
+            got = [f"raised: {e}"]
+        if got != want:
+            out.append(f"pipeline_refusals{args[:3]} -> {got!r}, wanted {want!r}")
+    return out
+
+
 # Эпик — не сущность GitLab (она в платной редакции), а маркер в теле задачи:
 # первая строка «**Эпик:** #N». Отсюда два требования, и оба молчаливые:
 # маркер не должен задваиваться при повторной правке, а смена родителя не
@@ -118,6 +198,21 @@ def main():
     if "parked" in gitlab.CLOSE_STATUSES or "parked" not in gitlab.OPEN_STATUSES:
         bad += 1
         print("FAILED  parked must be an open status, not a closing one")
+
+    for pipeline, want in PIPELINE_VERDICT:
+        cases += 1
+        fn = getattr(gitlab, "pipeline_verdict", None)
+        got = fn(pipeline, SHA) if fn else "no gitlab.pipeline_verdict"
+        if got != want:
+            bad += 1
+            print(f"FAILED  pipeline_verdict({pipeline!r}) -> {got!r}, wanted {want!r}")
+
+    cases += 1
+    gate = check_deploy_gate()
+    if gate:
+        bad += 1
+        for line in gate:
+            print(f"FAILED  {line}")
 
     cases += 1
     try:
