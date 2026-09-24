@@ -24,8 +24,9 @@ def main(argv):
         lib.usage(__doc__)
     """Узлы пула как таблица. То же, что видно в подвале `mop list`, плюс то,
     чего там нет: драйвер, чьи проекты узел умеет и состояние планирования."""
+    got = nodes.rows()
     rows = [("NODE", "DRIVER", "SERVES", "STATE", "FREE", "TOTAL", "SLOTS")]
-    for r in nodes.rows():
+    for r in got:
         rows.append((
             r["name"], r["driver"], r["serves"], r["state"],
             f"{r['free_mb'] // 1024} GB" if r["free_mb"] is not None else "-",
@@ -33,6 +34,10 @@ def main(argv):
             str(r["slots"]) if r["slots"] is not None else "-",
         ))
     print("\n".join(table(rows)))
+    # Узел с неизвестным драйвером -- в таблице с «?», причина строкой ниже.
+    for r in got:
+        if r.get("error"):
+            print(r["error"])
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).

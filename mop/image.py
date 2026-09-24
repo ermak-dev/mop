@@ -185,7 +185,13 @@ def announce(project):
     заводилось."""
     out = []
     for name, meta in sorted(nomad.nodes_meta().items()):
-        if not driver.is_container(driver.of_node(meta, name)):
+        # Неизвестный драйвер -- строка с отказом, остальные узлы дальше (#175).
+        try:
+            container = driver.is_container(driver.of_node(meta, name))
+        except RuntimeError as e:
+            out.append((name, str(e)))
+            continue
+        if not container:
             out.append((name, "not a container node"))  # объявляет any и так
             continue
         # Перечень берём с узла: серверная копия отстаёт на секунды, и

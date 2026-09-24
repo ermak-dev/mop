@@ -874,6 +874,43 @@ def check_driver_rule_175():
                 for i, line in enumerate(open(path), 1):
                     if re.search(r"or (driver\.)?DEFAULT\b", line):
                         found.append(f"{os.path.relpath(path, root)}:{i}")
+    # Списки не слепнут от чужой опечатки: узел с неизвестным драйвером --
+    # строка с отказом, остальные видны. Операции над ним (delete, attach,
+    # build на нём) отказывают громко -- это of_node выше.
+    from mop import builder, image, nodes, nomad
+    metas = {"bad": {"mop_driver": "bogus"}, "hyper": {"mop_driver": "pve"}}
+    summary = lambda n: {"Name": n, "Status": "ready"}
+    try:
+        rows = [nodes.row(summary(n), metas[n], {}) for n in sorted(metas)]
+        got = {r["name"]: r for r in rows}
+        check("nodes.row: the good node is visible",
+              got["hyper"]["driver"] == "pve" and not got["hyper"].get("error"))
+        check(f"nodes.row: the bad node is a row with the refusal: {got['bad']}",
+              "bad: unknown driver 'bogus'" in (got["bad"].get("error") or ""))
+    except Exception as e:
+        check(f"nodes.row with a bad node: {type(e).__name__}: {e}", False)
+    saved = (nomad.nodes_meta, nomad.node_dynamic_meta, nomad.set_node_meta)
+    try:
+        nomad.nodes_meta = lambda: metas
+        nomad.node_dynamic_meta = lambda n: {"mop_projects": "mop"}
+        nomad.set_node_meta = lambda n, m: None
+        try:
+            refused = []
+            serving = builder.serving_now(refused)
+            check(f"serving_now: the good node counts: {serving}", serving == {"hyper": ["mop"]})
+            check(f"serving_now: the bad node is reported: {refused}",
+                  any("bad: unknown driver 'bogus'" in r for r in refused))
+        except Exception as e:
+            check(f"serving_now with a bad node: {type(e).__name__}: {e}", False)
+        try:
+            got = dict(image.announce("mop"))
+            check(f"announce: the good node answers: {got}", got.get("hyper") == "already announced")
+            check(f"announce: the bad node carries the refusal: {got}",
+                  "bad: unknown driver 'bogus'" in (got.get("bad") or ""))
+        except Exception as e:
+            check(f"announce with a bad node: {type(e).__name__}: {e}", False)
+    finally:
+        nomad.nodes_meta, nomad.node_dynamic_meta, nomad.set_node_meta = saved
     check(f"`or DEFAULT` outside of_node: {found}",
           all(x.startswith("mop/driver/__init__.py") for x in found) and len(found) <= 1)
     return cases, bad
