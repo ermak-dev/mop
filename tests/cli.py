@@ -305,7 +305,8 @@ def main():
     failed += check_empty_llm()
     failed += check_deploy_check()
     failed += check_inventory_drivers()
-    failed += check_bus_import_169()      # последней: перезагружает модули
+    failed += check_bus_import_169()      # последними: перезагружают модули
+    failed += check_nomad_import_187()
 
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0
@@ -1224,22 +1225,40 @@ def check_bus_import_169():
     командлет внутри cli.run, и run делает из ImportError одну строку в
     stderr и код 1.
     STATUS: FIXED — see #169"""
+    return missing_library("nats", "mop.bus", "bus library required: pip install --user "
+                           "--break-system-packages nats-py")
+
+
+def check_nomad_import_187():
+    """HYPOTHESIS (#187): mop/nomad.py при импорте без python-nomad зовёт
+    sys.exit -- тот же дефект, что у bus в #169: библиотека кончает процесс
+    сама.
+    SOLUTION: как в #169 -- ImportError с тем же текстом, одну строку из него
+    делает cli.run.
+    STATUS: FIXED — see #187"""
+    return missing_library("nomad", "mop.nomad", "API library required: pip install --user "
+                           "--break-system-packages python-nomad")
+
+
+def missing_library(lib, module, text):
+    """Импорт module без библиотеки lib -- ImportError с текстом text, а
+    командлет, которому module нужен, через cli.run -- одна строка в stderr и
+    код 1. Модули перезагружаются: проверка идёт последней."""
     import importlib
     import importlib.abc
     failed = 0
-    text = "bus library required: pip install --user --break-system-packages nats-py"
 
-    class NoNats(importlib.abc.MetaPathFinder):
+    class NoLib(importlib.abc.MetaPathFinder):
         def find_spec(self, name, path=None, target=None):
-            if name == "nats" or name.startswith("nats."):
+            if name == lib or name.startswith(lib + "."):
                 raise ModuleNotFoundError(f"No module named {name!r}", name=name)
             return None
 
-    def evict(nats_too):
+    def evict(lib_too):
         # Из sys.modules И из атрибутов пакета: `from mop import bus` берёт
         # атрибут пакета, и без этого вернул бы прежний bus с настоящим nats.
         for name in list(sys.modules):
-            if (nats_too and (name == "nats" or name.startswith("nats."))) or \
+            if (lib_too and (name == lib or name.startswith(lib + "."))) or \
                     (name.startswith("mop.") and name != "mop.cli"):
                 parent, _, child = name.rpartition(".")
                 if parent in sys.modules and getattr(sys.modules[parent], child, None) \
@@ -1260,21 +1279,21 @@ def check_bus_import_169():
     except NetworkGuard:
         pass
     keep = dict(sys.modules)
-    blocker = NoNats()
+    blocker = NoLib()
     sys.meta_path.insert(0, blocker)
     try:
         evict(True)
         try:
-            importlib.import_module("mop.bus")
+            importlib.import_module(module)
             failed += 1
-            print("FAIL importing mop.bus without nats must raise ImportError")
+            print(f"FAIL importing {module} without {lib} must raise ImportError")
         except ImportError as e:
             if str(e) != text:
                 failed += 1
-                print(f"FAIL mop.bus without nats: {e!r}, wanted {text!r}")
+                print(f"FAIL {module} without {lib}: {e!r}, wanted {text!r}")
         except SystemExit as e:
             failed += 1
-            print(f"FAIL mop.bus without nats ends the process: SystemExit({e.code!r})")
+            print(f"FAIL {module} without {lib} ends the process: SystemExit({e.code!r})")
         evict(False)
         # Командлет, которому нужна шина, через диспетчер: одна строка, код 1.
         # Без аргументов: если шина вдруг импортируется, командлет остановится
@@ -1292,7 +1311,7 @@ def check_bus_import_169():
                 code = f"escaped {type(e).__name__}"
         if code != 1 or err.getvalue() != text + "\n":
             failed += 1
-            print(f"FAIL a commandlet without nats through cli.run: code {code!r}, "
+            print(f"FAIL a commandlet without {lib} through cli.run: code {code!r}, "
                   f"stderr {err.getvalue()!r}")
     finally:
         undo()
