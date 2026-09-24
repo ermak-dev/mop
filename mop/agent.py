@@ -81,16 +81,6 @@ WRITABLE = (
 # а puppets на узел не тянем — он приводит python-nomad, который агенту не
 # нужен вовсе.
 
-# Окно должно накрывать не только последний ход, но и жалобу над ним: строка
-# «API Error: … Usage limit reached» остаётся стоять, а claude дорисовывает под
-# ней сводку задач и рамку ввода. На живом папете (2026-08-31) она оказалась
-# 14-й снизу, в окно из 10 строк не попала, и папет с выбранной квотой читался
-# в mop list как занятый своей веткой.
-#
-# Шире делать нельзя бесконечно: окно заодно задаёт свежесть жалобы. Пережитая
-# ошибка вытесняется выводом следующего хода, и только поэтому вылеченный папет
-# перестаёт читаться больным.
-SCREEN_LINES = 20        # столько непустых строк пейна едет в состоянии
 IDLE_WAIT = 600          # потолок ожидания простоя для notify
 IDENTITY_WAIT = 5        # сколько send ждёт профиль владельца у сервера (#167)
 
@@ -144,11 +134,6 @@ class Tmux:
     def alive(self):
         return f"{self.base} has-session -t {self.name} 2>/dev/null"
 
-    def screen(self, lines):
-        """Последние непустые строки буфера."""
-        return (f"{self.base} capture-pane -t {self.name} -p -S - "
-                f"| grep -v '^$' | tail -{lines}")
-
     def buffer(self):
         """Весь буфер, с историей."""
         return f"{self.base} capture-pane -p -t {self.name} -S -"
@@ -175,11 +160,6 @@ class Tmux:
 async def tmux_alive(name):
     _, code = await bsh(name, Tmux(name).alive())
     return code == 0
-
-
-async def screen(name, lines=SCREEN_LINES):
-    out, _ = await bsh(name, Tmux(name).screen(lines))
-    return out
 
 
 async def pane_lines(name):
@@ -329,12 +309,10 @@ async def facts(name):
     с тех пор, как она жила поверх exec."""
     if not await tmux_alive(name):
         return {"present": False}
-    # screen вердикт больше не читает (#235), но ключ остаётся на переход:
-    # мастер со старой библиотекой без него читает папета свободным. Убрать,
-    # когда библиотека каждого мастера несёт вердикт без экрана.
-    scr, (sess, st), clone = await asyncio.gather(
-        screen(name), session_state(name), clone_facts(name))
-    got = {"present": True, "screen": scr, "session": sess, "clone": clone}
+    # Экран в факты не входит (#235, #236): вердикт его не читает, а снимать
+    # пейн у каждого папета на каждом опросе ростера -- лишний заход в тело.
+    (sess, st), clone = await asyncio.gather(session_state(name), clone_facts(name))
+    got = {"present": True, "session": sess, "clone": clone}
     if st is not None:
         got["state"] = st
     return got

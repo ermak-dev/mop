@@ -45,7 +45,7 @@ FREE_CASES = [
 
 def facts(session, clone=CLEAN, screen=None):
     """Факты с узла. screen — только чтобы показать, что вердикт его не читает
-    (#235): агент пока шлёт пейн ради мастеров со старой библиотекой."""
+    (#235); агент его больше не шлёт (#236)."""
     got = {"present": True, "session": session, "clone": clone}
     return got if screen is None else {**got, "screen": screen}
 

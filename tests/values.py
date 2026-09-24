@@ -164,7 +164,7 @@ def agent_forms():
     настоящий шелл над временным клоном, как tests/agent.py (#189)."""
     out = {}
     saved = (agent.bsh, agent.clone_dir, agent.session_json, agent._event,
-             agent.time.time, agent.tmux_alive, agent.screen, agent.session_probe,
+             agent.time.time, agent.tmux_alive, agent.session_probe,
              agent._mine)
     root = tempfile.mkdtemp(prefix="mop-test-204-")
     os.makedirs(os.path.join(root, ".git"))
@@ -188,11 +188,9 @@ def agent_forms():
     async def probe(name):
         return "idle 1 1"
 
-    async def scr(name, lines=None):
-        return "Herding bytes"
     try:
         agent.bsh, agent._mine = canned, yes
-        agent.tmux_alive, agent.screen, agent.session_probe = yes, scr, probe
+        agent.tmux_alive, agent.session_probe = yes, probe
         names = [f"pu-mop-{i}" for i in range(len(OWNER_LINES))]
         out["clone_facts"] = dump([asyncio.run(agent.clone_facts(n)) for n in names])
         out["states"] = dump(asyncio.run(agent.v_states(None, {"names": names})))
@@ -235,7 +233,7 @@ def agent_forms():
         out["lease"] = dump(steps)
     finally:
         (agent.bsh, agent.clone_dir, agent.session_json, agent._event,
-         agent.time.time, agent.tmux_alive, agent.screen, agent.session_probe,
+         agent.time.time, agent.tmux_alive, agent.session_probe,
          agent._mine) = saved
     return out
 
