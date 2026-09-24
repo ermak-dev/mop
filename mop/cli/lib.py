@@ -228,7 +228,7 @@ def default_branch():
 UNREACHABLE = 4
 
 
-def play_vars(projects, manifests=None, limits=None, git_hosts=None):
+def play_vars(projects, manifests=None, limits=None, git_hosts=None, inventory_hosts=None):
     """Списки плейбуку как --extra-vars, JSON'ом. -> [строки].
 
     Объектом, а не парой ключ=значение: `--extra-vars mop_projects=[...]`
@@ -247,13 +247,18 @@ def play_vars(projects, manifests=None, limits=None, git_hosts=None):
     # Хосты форжей (#121) -- только полной игре: их читает роль узла.
     if git_hosts is not None:
         head["mop_git_hosts"] = list(git_hosts)
+    # Хосты инвентаря (#178) -- только полной игре: роль cluster кладёт их
+    # файлом, и по нему forget отказывает узлу, который deploy поставит снова.
+    if inventory_hosts is not None:
+        head["mop_inventory_hosts"] = list(inventory_hosts)
     out = [json.dumps(head)]
     if manifests is not None:
         out.append(json.dumps({"mop_manifests": manifests}, ensure_ascii=False))
     return out
 
 
-def play(playbook, projects, manifests=None, git_hosts=None, check=False):
+def play(playbook, projects, manifests=None, git_hosts=None, check=False,
+         inventory_hosts=None):
     """Прогон плейбука установки. -> код возврата ansible.
 
     Один вход для полной игры (site.yml) и для узкого прогона проектов
@@ -284,7 +289,8 @@ def play(playbook, projects, manifests=None, git_hosts=None, check=False):
                            "MOP_OPERATORS=anton:admin")
     # Лимиты (#107) больше не едут: их держит и правит сервер (#117).
     extra = ([json.dumps(vars_, ensure_ascii=False)]
-             + play_vars(projects, manifests, git_hosts=git_hosts))
+             + play_vars(projects, manifests, git_hosts=git_hosts,
+                         inventory_hosts=inventory_hosts))
     return subprocess.call(
         ["ansible-playbook", "-i", inventory, os.path.join(PROJECT, playbook),
          *sum((["--extra-vars", v] for v in extra), []),

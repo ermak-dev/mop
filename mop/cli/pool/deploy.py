@@ -246,7 +246,8 @@ def main(argv):
 
     lib.section("ansible: site.yml")
     rc = lib.play(SITE, projects.names(origins, legacy), manifests(origins),
-                  projects.git_hosts(origins, config.get("MOP_GIT_HOST")), check=dry)
+                  projects.git_hosts(origins, config.get("MOP_GIT_HOST")), check=dry,
+                  inventory_hosts=inventory_hosts(listing))
     if dry:
         # Всё ниже пишет (creds.collect) или отвечает на другой вопрос
         # (ростер): прогон без изменений кончается на плейбуке (#177).

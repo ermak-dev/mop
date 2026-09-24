@@ -166,6 +166,14 @@ def main():
     if json.loads(got[0]).get("mop_git_hosts") != ["dev.corp", "git.ermak.dev"]:
         failed += 1
         print(f"FAIL play_vars with git hosts: {got}")
+    # #178: хосты инвентаря -- списком, только когда их дали.
+    got = lib.play_vars(["mop"], inventory_hosts=["a", "b"])
+    if json.loads(got[0]).get("mop_inventory_hosts") != ["a", "b"]:
+        failed += 1
+        print(f"FAIL play_vars with inventory hosts: {got}")
+    if "mop_inventory_hosts" in json.loads(lib.play_vars(["mop"])[0]):
+        failed += 1
+        print("FAIL play_vars without inventory hosts must not send an empty list")
     if "mop_git_hosts" in json.loads(lib.play_vars(["mop"])[0]):
         failed += 1
         print("FAIL play_vars without git hosts must not send an empty list")
@@ -1252,6 +1260,16 @@ def check_deploy_check():
             if code or not plays or flags != ({"--check", "--diff"} if dry else set()):
                 failed += 1
                 print(f"FAIL deploy {argv}: code {code!r}, plays {plays!r}, err {err!r}")
+            # #178: хосты инвентаря едут плейбуку -- их файлом кладёт роль
+            # cluster, и по нему forget отказывает узлу, который deploy
+            # поставил бы снова.
+            sent = [json.loads(c[i + 1]) for c in plays for i, a in enumerate(c)
+                    if a == "--extra-vars"]
+            hosts = [v["mop_inventory_hosts"] for v in sent if "mop_inventory_hosts" in v]
+            if hosts != [["explicit", "hyper", "localhost", "plain", "typo"]]:
+                failed += 1
+                print(f"FAIL deploy {argv} must send the inventory's hosts to the "
+                      f"playbook (#178): {hosts!r}")
             if dry and collected:
                 failed += 1
                 print("FAIL deploy --check must not collect server credentials (it writes)")

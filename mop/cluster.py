@@ -25,6 +25,7 @@ bootstrap песочницы за папета). Положи туда глаг�
 Чистая часть (права) — tests/cluster.py.
 """
 import collections
+import json
 import os
 import threading
 
@@ -395,8 +396,39 @@ def _up(project, req):
     return {"ok": True, "node": req["node"]}
 
 
+# Хосты инвентаря контроллера (#178): кладёт `mop deploy` (роль cluster),
+# инвентарь сам лежит у контроллера, куда учётке пула хода нет.
+INVENTORY_HOSTS = os.path.expanduser("~/.config/mop/inventory-hosts.json")
+
+
+def inventory_refusal(node, hosts):
+    """Почему узел нельзя забыть по инвентарю; None -- можно (#178).
+
+    Узел, оставшийся в инвентаре, следующий `mop deploy` молча ставит снова,
+    и forget оказывается не решением, а паузой до прогона. hosts=None --
+    списка нет (сервер развёрнут до #178): не отказ, иначе оператор упёрся
+    бы в файл, которого ему никто не клал."""
+    if hosts is not None and node in hosts:
+        return (f"{node} is still in the inventory — take it out and run "
+                f"mop deploy first, or the next deploy configures it again")
+    return None
+
+
+def _inventory_hosts():
+    """Список хостов инвентаря из файла deploy; None, если файла нет."""
+    try:
+        with open(INVENTORY_HOSTS) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
 def _forget(project, req):
     node = req["node"]
+    # Инвентарь -- до Nomad: отказ не должен стоить ни одного вызова API.
+    why = inventory_refusal(node, _inventory_hosts())
+    if why:
+        return {"error": why}
     why = nomad.forget_refusal(node, nomad.node_allocs(node))
     if why:
         return {"error": why}

@@ -265,11 +265,66 @@ def check_verb_table_173():
     return out[:20] + ([f"... and {len(out) - 20} more"] if len(out) > 20 else [])
 
 
+def check_forget_inventory_178():
+    """HYPOTHESIS (#178): forget снимает узел с ростера Nomad, а в инвентаре
+    контроллера он остаётся, и следующий `mop deploy` молча ставит его снова.
+    Предупреждение об этом осталось одной строкой в usage (#159).
+    SOLUTION: deploy кладёт список хостов инвентаря файлом рядом с сервисом
+    кластера (cluster.INVENTORY_HOSTS), и forget отказывает по нему ДО
+    любого вызова Nomad. Файла нет (сервер до этой правки) -- как прежде.
+    STATUS: FIXED — see #178"""
+    import json
+    import tempfile
+    from mop import nomad
+    out = []
+    fn = getattr(cluster, "inventory_refusal", None)
+    if fn is None:
+        return ["cluster.inventory_refusal(node, hosts) is missing"]
+    why = fn("mop-2", ["localhost", "mop-2", "mop-3"])
+    if not why or "mop-2" not in why or "mop deploy" not in why:
+        out.append(f"a node in the inventory must be refused by name: {why!r}")
+    if fn("gone", ["localhost", "mop-2"]) is not None:
+        out.append("a node out of the inventory must not be refused by it")
+    if fn("mop-2", None) is not None:
+        out.append("no host list (a server deployed before #178) must not refuse")
+
+    # Через глагол: отказ -- до Nomad; файла нет -- как прежде.
+    d = tempfile.mkdtemp(prefix="mop-test-forget-")
+    path = os.path.join(d, "inventory-hosts.json")
+    touched = []
+    keep = (getattr(cluster, "INVENTORY_HOSTS", None), nomad.node_allocs,
+            nomad.forget_refusal, nomad.node_forget)
+    try:
+        cluster.INVENTORY_HOSTS = path
+        nomad.node_allocs = lambda node: touched.append("allocs") or []
+        nomad.forget_refusal = lambda node, allocs: None
+        nomad.node_forget = lambda node: touched.append("forget")
+        with open(path, "w") as f:
+            json.dump(["localhost", "mop-2"], f)
+        got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
+        if "mop-2" not in (got.get("error") or "") or touched:
+            out.append(f"forget of an inventory host: {got!r}, Nomad touched: {touched}")
+        touched.clear()
+        got = cluster.answer("admin", {"verb": "forget", "node": "gone"})
+        if not got.get("ok") or touched != ["allocs", "forget"]:
+            out.append(f"forget of a host out of the inventory: {got!r}, {touched}")
+        os.remove(path)
+        touched.clear()
+        got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
+        if not got.get("ok") or touched != ["allocs", "forget"]:
+            out.append(f"forget with no host list must work as before: {got!r}, {touched}")
+    finally:
+        (cluster.INVENTORY_HOSTS, nomad.node_allocs, nomad.forget_refusal,
+         nomad.node_forget) = keep
+    return out
+
+
 def main():
     failed = []
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,
-                  check_secret_verbs, check_verb_table_173):
+                  check_secret_verbs, check_verb_table_173,
+                  check_forget_inventory_178):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:
