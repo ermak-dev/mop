@@ -72,11 +72,13 @@ def projects(rows):
     for r in rows:
         origin = r.origin or "?"
         project = puppets.project_of(origin) if origin != "?" else "?"
-        # Счётчик проекта считается уже по корзине в kind, как и до #204: у
-        # больного корзина sick, а classify по ней отвечает busy. Это
-        # прежнее поведение, а не правка этого рефакторинга.
-        by.setdefault(project, []).append(dataclasses.replace(r, kind=classify(r)))
-    return [{"name": s, "puppets": [r.to_dict() for r in sorted(ps, key=lambda r: r.name)],
+        by.setdefault(project, []).append(r)
+    # Счётчик проекта -- тот же counts по виду вердикта, что и в шапке
+    # (#210): считать по строке, где kind уже заменён корзиной, значило
+    # отвечать classify("sick") -> busy, и залипший папет прятался в занятых.
+    return [{"name": s,
+             "puppets": [{**r.to_dict(), "kind": classify(r)}
+                         for r in sorted(ps, key=lambda r: r.name)],
              "counts": counts(ps)} for s, ps in sorted(by.items())]
 
 
