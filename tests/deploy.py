@@ -92,6 +92,7 @@ SOLUTION: своё имя переменной цикла у каждого incl
 include -- шаблон, а не файл репозитория), и `item` в задаче не встречается.
 """
 import ast
+import json
 import os
 import re
 import shlex
@@ -609,6 +610,36 @@ def main():
     check("cluster: the host list only when deploy sent one",
           len(wrote) == 1 and "mop_inventory_hosts is defined" in when(wrote[0]),
           [when(t) for t in wrote])
+
+    # ── просьбы проектов -- файлом сервису кластера (#197) ────────────────
+    # Спеку строит сервис под учёткой пула, а `.mop` проектов читает deploy на
+    # контроллере. Файла нет -- у каждого проекта память установки, поэтому
+    # разошедшееся имя файла отменило бы просьбы молча.
+    from mop import spec
+    want = "{{ MOP_HOME }}/.config/mop/" + os.path.basename(spec.ASKS_FILE)
+    wrote = [t for f, t in site_tasks() if f.endswith("roles/cluster/tasks/main.yml")
+             and "mop_manifests" in str(t.get("ansible.builtin.copy", {}).get("content"))]
+    check("cluster: the role writes the projects' asks where the spec reads them",
+          len(wrote) == 1 and wrote[0]["ansible.builtin.copy"].get("dest") == want
+          and wrote[0]["ansible.builtin.copy"].get("owner") == "{{ MOP_USER }}",
+          [t.get("ansible.builtin.copy") for t in wrote] or want)
+    check("cluster: the asks only when deploy sent the manifests",
+          len(wrote) == 1 and "mop_manifests is defined" in when(wrote[0]),
+          [when(t) for t in wrote])
+    if can_render and len(wrote) == 1:
+        import jinja2
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        env.filters["to_json"] = json.dumps
+        env.filters["dict2items"] = lambda d: [{"key": k, "value": v} for k, v in d.items()]
+        manifests = {"mop": {"asks": {"MOP_MEM_MB": "6144"}, "sandbox_vars": "/x"},
+                     "rugent": {"asks": {}}}
+        try:
+            got = json.loads(env.from_string(wrote[0]["ansible.builtin.copy"]["content"])
+                             .render(mop_manifests=manifests))
+        except Exception as e:  # noqa: BLE001 -- проверка, не код пула
+            got = f"{type(e).__name__}: {e}"
+        check("cluster: the asks file is {project: asks}, nothing else of the manifest",
+              got == {"mop": {"MOP_MEM_MB": "6144"}, "rugent": {}}, got)
 
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")
