@@ -14,6 +14,8 @@ def playbook_vars():
     доезжал до узла и не доезжал до тела, молча.
 
     MOP_NODE_SCOPED -- узловые настройки, по нему прогон рендерит node.env.
+    MOP_SERVER_SCOPED -- {юнит: настройки}, по нему рендерится env юнитов
+    сервисов сервера (#176).
     MOP_PIP_DEPS -- python-библиотеки mop (mop/deps.py) для узла, тела и
     `mop setup`."""
     # Настройки процесса (PROCESS_SCOPED) не едут: они про этот процесс, а не
@@ -21,6 +23,7 @@ def playbook_vars():
     out = {k: v for k, (v, _) in config.effective().items()
            if k not in config.PROCESS_SCOPED}
     out["MOP_NODE_SCOPED"] = ",".join(config.NODE_SCOPED)
+    out["MOP_SERVER_SCOPED"] = {u: list(v) for u, v in config.SERVER_SCOPED.items()}
     out["MOP_PIP_DEPS"] = ",".join(deps.PIP)
     # Права операторов — субъектами, уже разобранные: шаблон конфига NATS
     # не должен разбирать настройку второй раз, иначе два разбора разойдутся

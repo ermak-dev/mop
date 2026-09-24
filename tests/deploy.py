@@ -20,7 +20,23 @@ secrets_dir пять раз; env сервисов сервера набран в
 SOLUTION: роль common (package, pip, mcp, nomad_bin, secret_stdin, шаблон
 юнита), общие переменные в deploy/group_vars/all.yml.
 STATUS: FIXED — see #157
+
+Кому что из настроек (#176): .env на сервер не едет, и сервис сервера видит
+установку только окружением своего юнита. Набор env у юнитов был набран
+руками, и mop-cluster не получал MOP_NOMAD_PORT и MOP_POOL_DC, которые сам же
+читает (NOMAD_ADDR и датацентр в mop/nomad.py): при недефолтных значениях
+сервис шёл на дефолтный порт и в дефолтный DC, молча.
+
+HYPOTHESIS: env юнитов -- рукописные списки в vars задач, и с тем, что
+читает код сервиса, их ничто не сверяет.
+SOLUTION: config.SERVER_SCOPED -- {юнит: настройки}, playvars везёт его
+плейбукам как MOP_SERVER_SCOPED, шаблон юнита рендерит env из него;
+комментарии остаются в задаче (unit.notes, перед своей настройкой). Проверка
+ниже выводит то, что читают mop/cluster.py, mop/nomad.py и mop/spec.py
+(спецификацию собирает сервис кластера), из AST, а не руками.
+STATUS: FIXED — see #176
 """
+import ast
 import os
 import re
 import sys
@@ -30,6 +46,12 @@ import yaml
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DEPLOY = os.path.join(ROOT, "deploy")
 COMMON = os.path.join(DEPLOY, "roles", "common")
+sys.path.insert(0, ROOT)
+from mop import config  # noqa: E402
+# Что сервис кластера читает сам (#176): его код, клиент Nomad и спецификация,
+# а с ней профиль LLM -- job_spec зовёт llm.resolve, и create без --llm
+# приходит с profile=None, то есть с умолчанием установки.
+CLUSTER_READS = ("mop/cluster.py", "mop/nomad.py", "mop/spec.py", "mop/llm/__init__.py")
 
 VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "10.0.0.1",
         "MOP_NATS_PORT": "4222", "MOP_HTTPS_PORT": "443", "MOP_NOMAD_PORT": "4646",
@@ -37,12 +59,58 @@ VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "1
 UNITS = {"mop-bootstrap": "bootstrap", "mop-cluster": "cluster", "mop-web": "web"}
 # Исключения синка пакета до #157, во всех четырёх копиях одни и те же.
 EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml"]
+# Что #176 добавляет в юнит mop-cluster: всё это сервис читает, а юнит не
+# передавал. Порт и DC Nomad -- из тикета; объём, потолок, посев и PATH папета
+# нашла проверка ниже (их читает mop/spec.py, а спецификацию теперь собирает
+# сервис кластера, не машина оператора с её .env), как и профиль LLM по
+# умолчанию (llm.resolve из job_spec).
+ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
+                         "MOP_MEM_MB", "MOP_PUPPET_SEED", "MOP_PUPPET_PATH",
+                         "MOP_DEFAULT_LLM")}
 
 PINNED = {
     'mop-bootstrap': "[Unit]\nDescription=mop-bootstrap (bootstrap песочниц: играет .mop/bootstrap.yaml проекта при каждом старте папета)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет: всё, что подписчику и прогону нужно знать об\n# установке, приезжает юнитом. MOP_HOME и MOP_USER -- те, что у узлов: их\n# читают задачи bootstrap'а как переменные прогона, и дефолт сервера\n# (его собственный дом) здесь был бы неправдой.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_HOME=/home/mopuser\nEnvironment=MOP_USER=mopuser\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop bootstrap serve\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
     'mop-cluster': '[Unit]\nDescription=mop-cluster (сервис кластера: Nomad за шиной, глаголы пула на mop.*.cluster.rpc)\nAfter=network-online.target nats.service nomad.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет: что сервису нужно знать об установке, приезжает\n# юнитом. MOP_SERVER_LAN отвечает сразу за адрес шины и за NOMAD_ADDR\n# (config.DERIVED), поэтому второй переменной для Nomad здесь нет.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_HOME=/home/mopuser\nEnvironment=MOP_USER=mopuser\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop cluster serve\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n',
     'mop-web': '[Unit]\nDescription=mop-web (дашборд пула: состояние по HTTP)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет, а адрес сервера обязателен: без него config\n# отказывается работать (и правильно). Окружение старше .env, поэтому\n# юнит и есть источник этой настройки на сервере.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_NOMAD_PORT=4646\nEnvironment=MOP_POOL_DC=home\nEnvironment=PYTHONUNBUFFERED=1\n# Через диспетчер: он ставит PYTHONPATH, без него командлет пакета не найдёт.\nExecStart=/home/mopuser/mop/bin/mop web --port 8080 --bind 0.0.0.0\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n',
 }
+
+
+def settings_read(path):
+    """Настройки, что модуль читает: config.<что угодно>("MOP_...") с
+    литералом-именем из SETTINGS."""
+    tree = ast.parse(open(os.path.join(ROOT, path)).read())
+    return {n.args[0].value for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name) and n.func.value.id == "config"
+            and n.args and isinstance(n.args[0], ast.Constant)
+            and n.args[0].value in config.SETTINGS}
+
+
+def derived_inputs():
+    """{выводимая настройка: из каких она выводится} -- по get("...") в
+    лямбдах config.DERIVED."""
+    tree = ast.parse(open(os.path.join(ROOT, "mop", "config.py")).read())
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and [getattr(t, "id", "") for t in n.targets] == ["DERIVED"]:
+            return {k.value: {c.args[0].value for c in ast.walk(v)
+                              if isinstance(c, ast.Call) and getattr(c.func, "id", "") == "get"
+                              and c.args and isinstance(c.args[0], ast.Constant)}
+                    for k, v in zip(n.value.keys, n.value.values)}
+    return {}
+
+
+def unit_env(names):
+    """Что юнит должен получить окружением: прочитанное, выводимое -- через
+    то, из чего оно выводится (NOMAD_ADDR -- из адреса сервера и порта);
+    настройки процесса ставит родитель, а не установка."""
+    derived, out, todo = derived_inputs(), set(), list(names)
+    while todo:
+        n = todo.pop()
+        if n in derived:
+            todo += derived[n]
+        elif n not in config.PROCESS_SCOPED:
+            out.add(n)
+    return out
 
 
 def deploy_files():
@@ -106,6 +174,25 @@ def main():
         can_render = False
         print("SKIPPED rendering of the units: no jinja2 on this machine — "
               "only the structure below is checked")
+    # ── кому что из настроек (#176) ───────────────────────────────────────
+    scoped = getattr(config, "SERVER_SCOPED", {})
+    check("config.SERVER_SCOPED names every server unit",
+          sorted(scoped) == sorted(UNITS), sorted(scoped))
+    reads = set().union(*(settings_read(p) for p in CLUSTER_READS))
+    missing = sorted(unit_env(reads) - set(scoped.get("mop-cluster", ())))
+    check("mop-cluster gets every setting its code reads", not missing, missing)
+    for unit, names in scoped.items():
+        check(f"{unit}: settings, not secrets, in the unit",
+              not [n for n in names if re.search(r"TOKEN|PASS|SECRET", n)], names)
+        check(f"{unit}: every name is a setting",
+              all(n in config.SETTINGS for n in names), names)
+    from mop import playvars
+    check("playvars exports SERVER_SCOPED",
+          playvars.playbook_vars().get("MOP_SERVER_SCOPED") ==
+          {u: list(v) for u, v in scoped.items()})
+    variables = {**{k: v for k, v in config.SETTINGS.items() if v}, **VARS,
+                 "MOP_SERVER_SCOPED": {u: list(v) for u, v in scoped.items()}}
+
     for unit, role in UNITS.items():
         tmpl, uvars = unit_task(role, unit)
         check(f"{unit}: the role installs it", tmpl is not None)
@@ -115,18 +202,31 @@ def main():
               tmpl.get("src", "").endswith("common/templates/service.j2"), tmpl.get("src"))
         own = os.path.join(DEPLOY, "roles", role, "templates", f"{unit}.service.j2")
         check(f"{unit}: its own template is gone", not os.path.exists(own))
-        # Набор переменных окружения -- тот же, что был (#157 его не меняет).
+        # Набор env -- из config.SERVER_SCOPED, не рукописным списком задачи
+        # (#176); тот же, что был, плюс добавленное этим тикетом.
+        check(f"{unit}: no hand-typed env list in the task",
+              "env" not in (uvars.get("unit") or {}), (uvars.get("unit") or {}).get("env"))
         was = re.findall(r"^Environment=([A-Z_]+)=", PINNED[unit], re.M)
-        now = [e for e in (uvars.get("unit") or {}).get("env", []) if not e.startswith("#")]
-        now += ["PYTHONUNBUFFERED"] if os.path.isfile(template) and \
-            "PYTHONUNBUFFERED=1" in open(template).read() else []
-        check(f"{unit}: the same env set", sorted(now) == sorted(was),
-              f"{sorted(now)} != {sorted(was)}")
+        now = list(scoped.get(unit, ())) + ["PYTHONUNBUFFERED"]
+        want = was + list(ADDED.get(unit, ()))
+        check(f"{unit}: the env set as before plus the additions",
+              sorted(now) == sorted(want), f"{sorted(now)} != {sorted(want)}")
         if can_render and os.path.isfile(template):
-            got = render(open(template).read(), {**VARS, **uvars})
-            check(f"{unit}: rendered byte for byte as before", got == PINNED[unit],
-                  "\n" + "\n".join(f"  -{a!r}\n  +{b!r}" for a, b in
-                                   zip(PINNED[unit].splitlines(), got.splitlines()) if a != b))
+            got = render(open(template).read(), {**variables, **uvars})
+            if unit not in ADDED:
+                check(f"{unit}: rendered byte for byte as before", got == PINNED[unit],
+                      "\n" + "\n".join(f"  -{a!r}\n  +{b!r}" for a, b in
+                                       zip(PINNED[unit].splitlines(), got.splitlines()) if a != b))
+                continue
+            # Юнит с добавками: без комментариев и без добавленных строк он
+            # тот же, что был, а добавленные строки -- со значениями игры.
+            added = {f"Environment={n}={variables[n]}" for n in ADDED[unit]}
+            bare = [l for l in got.splitlines() if not l.startswith("#")]
+            check(f"{unit}: as before but for the added lines",
+                  [l for l in bare if l not in added] ==
+                  [l for l in PINNED[unit].splitlines() if not l.startswith("#")])
+            check(f"{unit}: every addition rendered", added <= set(bare),
+                  sorted(added - set(bare)))
 
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")

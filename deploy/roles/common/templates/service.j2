@@ -6,12 +6,12 @@ Wants=network-online.target
 [Service]
 User={{ MOP_USER }}
 WorkingDirectory={{ MOP_HOME }}/mop
-{% for e in unit.env %}
-{% if e.startswith('#') %}
-{{ e }}
-{% else %}
-Environment={{ e }}={{ lookup('vars', e) }}
+{# Набор -- config.SERVER_SCOPED (#176); комментарий задачи встаёт перед своей настройкой. #}
+{% for e in MOP_SERVER_SCOPED[unit.name] %}
+{% if e in unit.notes | default({}) %}
+{{ unit.notes[e] }}
 {% endif %}
+Environment={{ e }}={{ lookup('vars', e) }}
 {% endfor %}
 Environment=PYTHONUNBUFFERED=1
 {% for e in unit.before_exec | default([]) %}

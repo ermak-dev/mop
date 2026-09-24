@@ -93,19 +93,16 @@
     mode: "0644"
   vars:
     unit:
+      name: mop-web
       description: "mop-web (дашборд пула: состояние по HTTP)"
       after: network-online.target nats.service
-      env:
-        - |-
+      # Окружение -- config.SERVER_SCOPED (#176); здесь только комментарии к нему.
+      notes:
+        MOP_SERVER_LAN: |-
           # .env на сервер не едет, а адрес сервера обязателен: без него config
           # отказывается работать (и правильно). Окружение старше .env, поэтому
           # юнит и есть источник этой настройки на сервере.
-        - MOP_SERVER_LAN
-        - MOP_NATS_PORT
-        - "# Каталог сервера ходит на шину через TLS-прокси (#97)."
-        - MOP_HTTPS_PORT
-        - MOP_NOMAD_PORT
-        - MOP_POOL_DC
+        MOP_HTTPS_PORT: "# Каталог сервера ходит на шину через TLS-прокси (#97)."
       before_exec:
         - "# Через диспетчер: он ставит PYTHONPATH, без него командлет пакета не найдёт."
       command: "web --port {{ MOP_WEB_PORT }} --bind {{ MOP_WEB_BIND }}"

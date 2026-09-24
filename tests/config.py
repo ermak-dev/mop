@@ -331,7 +331,7 @@ def main():
             pv = {"import": str(e)}
         cases += 1
         want = (set(config.SETTINGS) - set(PROCESS)) | {
-            "MOP_NODE_SCOPED", "MOP_PIP_DEPS", "MOP_OPERATOR_SUBJECTS"}
+            "MOP_NODE_SCOPED", "MOP_SERVER_SCOPED", "MOP_PIP_DEPS", "MOP_OPERATOR_SUBJECTS"}
         if set(pv) != want:
             bad += 1
             print(f"FAILED  playbook_vars keys differ: extra {sorted(set(pv) - want)}, "
