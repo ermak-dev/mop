@@ -176,6 +176,26 @@ def check_template_version():
     if other in versions or other is None:
         bad += 1
         print("FAILED  a changed wrapper line must change the template version")
+    # Версия не зависит от реестра профилей: удалённый MOP_DEFAULT_LLM иначе
+    # ронял spec_is_stale, а ростер глотал падение как «спека свежая» —
+    # ровно та тихая ошибка, которую закрывает #174.
+    cases += 1
+    keep = os.environ["MOP_DEFAULT_LLM"]
+    try:
+        os.environ["MOP_DEFAULT_LLM"] = "no-such-profile"
+        got = spec.current_version()
+    except Exception as e:
+        got = f"raised {e!r}"
+    finally:
+        os.environ["MOP_DEFAULT_LLM"] = keep
+    if got not in versions:
+        bad += 1
+        print(f"FAILED  current_version with a removed default profile: {got!r}, "
+              f"wanted {versions}")
+    cases += 1
+    if spec.current_version() not in versions:
+        bad += 1
+        print("FAILED  current_version must equal the version job_spec puts in Meta")
     return bad, cases
 
 

@@ -335,23 +335,11 @@ while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wa
 """
 
 
-def job_spec(name, origin, profile=None, cont=False):
-    """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
-    историю каталога (`claude --continue`).
-
-    По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
-    нужен ровно там, где работу продолжают под другой моделью, а везде ещё
-    (новый папет, рецикл, лечение) чистый старт — половина смысла операции."""
-    profile = llm.resolve(profile)
-    prof = llm.get(profile)
-    if prof is None:
-        # Протухший Meta.llm у работающего джоба: профиль удалили из реестра,
-        # а джоб жив. Отказ обязан звать папета по имени — иначе искать, кто
-        # именно не перерегистрируется, придётся по трассе.
-        raise RuntimeError(f"{name}: no LLM profile {profile}; available: "
-                           f"{', '.join(llm.profiles())} (mop llm)")
+def task_env(name, origin, profile, prof, cont=False):
+    """Окружение задачи папета. Одно место и для job_spec, и для версии
+    шаблона: current_version зовёт его с пустым профилем, не спрашивая реестр
+    профилей (#174) — набор ключей от профиля не зависит."""
     llm_env = "".join(f"{k}={v}\n" for k, v in prof["env"].items())
-    meta = {"origin": origin, "llm": profile}
     project = driver.project_of(origin)
     env = {
         "PU_NAME": name,
@@ -385,6 +373,27 @@ def job_spec(name, origin, profile=None, cont=False):
     # значило бы молча поменять инвариант «правка сессии доезжает
     # перерегистрацией».
     env["PU_WRAPPER"] = base64.b64encode(WRAPPER.encode()).decode()
+    return env
+
+
+def job_spec(name, origin, profile=None, cont=False):
+    """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
+    историю каталога (`claude --continue`).
+
+    По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
+    нужен ровно там, где работу продолжают под другой моделью, а везде ещё
+    (новый папет, рецикл, лечение) чистый старт — половина смысла операции."""
+    profile = llm.resolve(profile)
+    prof = llm.get(profile)
+    if prof is None:
+        # Протухший Meta.llm у работающего джоба: профиль удалили из реестра,
+        # а джоб жив. Отказ обязан звать папета по имени — иначе искать, кто
+        # именно не перерегистрируется, придётся по трассе.
+        raise RuntimeError(f"{name}: no LLM profile {profile}; available: "
+                           f"{', '.join(llm.profiles())} (mop llm)")
+    meta = {"origin": origin, "llm": profile}
+    project = driver.project_of(origin)
+    env = task_env(name, origin, profile, prof, cont)
     meta[SPEC_META] = template_version(env)
     return {"Job": {
         "ID": name,
@@ -479,8 +488,10 @@ def template_version(env):
 
 
 def current_version():
-    """Версия шаблона, который собрал бы сегодняшний mop."""
-    return job_spec("pu-spec-1", "spec")["Job"]["Meta"][SPEC_META]
+    """Версия шаблона, который собрал бы сегодняшний mop. Без реестра
+    профилей: удалённый MOP_DEFAULT_LLM иначе ронял бы spec_is_stale, а ростер
+    глотает падение как «спека свежая» — та самая тихая ошибка (#174)."""
+    return template_version(task_env("pu-spec-1", "spec", "", {"env": {}}))
 
 
 def spec_is_stale(job):
