@@ -41,10 +41,6 @@ ACCOUNT = "$G"              # куда сажать вошедших: туда �
 # Ключи -- рядом с конфигом nats (0600, пользователь пула).
 ISSUER_FILE = os.path.join(natsconf.DIR, "callout-issuer.seed")
 XKEY_FILE = os.path.join(natsconf.DIR, "callout-xkey.seed")
-# Людское для провайдера личностей на сервере: копия, которую кладёт deploy
-# (файл операторов и переходные пароли) -- у пользователя пула нет хода в
-# secrets/ контроллера.
-IDENTITY_DIR = os.path.join(natsconf.DIR, "identity")
 # Имя проекта в логине папета: то, что годится в имя файла пароля и
 # ничего больше -- логин приходит от входящего.
 _PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -213,17 +209,6 @@ async def serve(url, password, keys_, humans, puppets, log):
     await asyncio.Event().wait()
 
 
-def humans_provider():
-    """Провайдер личностей сервиса: по настройкам установки, но файлы -- из
-    IDENTITY_DIR. Файл операторов и переходные пароли лежат у контроллера
-    (secrets/), куда пользователю пула хода нет; deploy кладёт копию сюда,
-    0600. Секреты провайдера -- файлами там же, не окружением юнита: юнит
-    читаем всем."""
-    settings = {k: config.get(k) for k in identity.SETTINGS}
-    settings["MOP_OPERATORS_FILE"] = os.path.join(IDENTITY_DIR, identity.OPERATORS_FILE)
-    return identity.provider(settings, IDENTITY_DIR)
-
-
 async def run(log):
     """Сервис целиком, из настроек сервера. Callout выключен -- отказ: юнит
     ставится только при on, и запущенный при off он отвечал бы nats,
@@ -235,4 +220,4 @@ async def run(log):
     if not password:
         raise RuntimeError(f"{natsconf.BASE} has no {USER} password -- run mop deploy")
     await serve(f"nats://127.0.0.1:{config.get('MOP_NATS_PORT')}", password, keys(),
-                humans_provider(), PuppetProvider(bootstrap.PUPPET_CREDS), log)
+                identity.server_provider(), PuppetProvider(bootstrap.PUPPET_CREDS), log)

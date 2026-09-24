@@ -241,6 +241,20 @@ class PlainFileProvider:
         return who
 
 
+def profile(source, login):
+    """Логин -> {login, name, email}: git identity владельца задания (#167).
+
+    Только имя и почта -- роль, проекты и хеш наружу не идут: глагол
+    identity спрашивает узел, и ему нужна подпись коммита, не права. Нет
+    логина, нет имени или нет почты -- {login} без них: половина identity
+    коммит не спасает, а «нет» отличимо от отказа. Логин, определённый
+    дважды, -- Refused, как у lookup."""
+    who = source.lookup(login)
+    if who and who.name and who.email:
+        return {"login": login, "name": who.name, "email": who.email}
+    return {"login": login}
+
+
 # ─── выбор провайдера ────────────────────────────────────────────────────
 def provider(settings, secrets_dir=SECRETS):
     """Настройки -> провайдер по MOP_AUTH_PROVIDER. Неизвестное имя -- отказ:
@@ -255,3 +269,18 @@ def provider(settings, secrets_dir=SECRETS):
         cfg = ldapauth.settings(settings)
         return ldapauth.LdapProvider(cfg, ldapauth.Ldap3Directory(cfg))
     raise ValueError(f"MOP_AUTH_PROVIDER={kind!r}: no such provider; known: file, ldap")
+
+
+def server_provider(folder=None):
+    """Провайдер сервисов сервера (callout #206, глагол identity #167): по
+    настройкам установки, но файлы -- из копии natsconf.IDENTITY_DIR. Файл
+    операторов и переходные пароли лежат у контроллера (secrets/), куда
+    пользователю пула хода нет; deploy кладёт копию туда, 0600. Секреты
+    провайдера -- файлами там же, не окружением юнита: юнит читаем всем.
+    Одно место на оба сервиса: иначе callout и identity читали бы разные
+    списки людей."""
+    from . import config, natsconf   # лениво: identity читают и без них
+    folder = folder or natsconf.IDENTITY_DIR
+    settings = {k: config.get(k) for k in SETTINGS}
+    settings["MOP_OPERATORS_FILE"] = os.path.join(folder, OPERATORS_FILE)
+    return provider(settings, folder)

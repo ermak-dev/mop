@@ -115,7 +115,6 @@ CLUSTER_READS = ("mop/cluster.py", "mop/nomad.py", "mop/spec.py", "mop/llm/__ini
 VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "10.0.0.1",
         "MOP_NATS_PORT": "4222", "MOP_HTTPS_PORT": "443", "MOP_NOMAD_PORT": "4646",
         "MOP_POOL_DC": "home", "MOP_WEB_PORT": "8080", "MOP_WEB_BIND": "0.0.0.0",
-        "MOP_GIT_NAME": "Pool Bot", "MOP_GIT_EMAIL": "bot@example.dev",
         "MOP_NATS_MONITOR_PORT": "8222", "MOP_AUTH_CALLOUT": "off",
         "MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS": "anton:admin; ivan:user:rugent"}
 # Значения, которые юнит обязан донести целиком (#185): пробел, кавычки,
@@ -134,12 +133,14 @@ EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml"]
 ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          "MOP_MEM_MB", "MOP_PUPPET_SEED", "MOP_PUPPET_PATH",
                          "MOP_DEFAULT_LLM",
-                         # git identity папета (#167): её кладёт в спеку job_spec.
-                         "MOP_GIT_NAME", "MOP_GIT_EMAIL",
                          # reload шины с проверкой (#211): /varz на петле.
                          "MOP_NATS_MONITOR_PORT",
                          # callout или статический users.conf (#206).
-                         "MOP_AUTH_CALLOUT")}
+                         "MOP_AUTH_CALLOUT"),
+         # Глагол identity (#167): имя и почта владельца задания из провайдера
+         # личностей сервера -- те же настройки, что у mop-callout; файлы
+         # провайдера -- копией в /etc/nats/identity, не окружением юнита.
+         "mop-bootstrap": ("MOP_AUTH_PROVIDER", "MOP_OPERATORS")}
 
 PINNED = {
     'mop-bootstrap': "[Unit]\nDescription=mop-bootstrap (bootstrap песочниц: играет .mop/bootstrap.yaml проекта при каждом старте папета)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет: всё, что подписчику и прогону нужно знать об\n# установке, приезжает юнитом. MOP_HOME и MOP_USER -- те, что у узлов: их\n# читают задачи bootstrap'а как переменные прогона, и дефолт сервера\n# (его собственный дом) здесь был бы неправдой.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_HOME=/home/mopuser\nEnvironment=MOP_USER=mopuser\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop bootstrap serve\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
@@ -595,6 +596,69 @@ def check_users_reload_199(check):
               and "!=" in cw and "stdout" not in cw, cw)
 
 
+def check_identity_copy_167(check, ptasks):
+    """HYPOTHESIS (#167): глагол identity (mop-bootstrap) читает файл
+    операторов копией в /etc/nats/identity -- secrets/ контроллера пользователю
+    пула закрыт. Копию роль bus кладёт только при MOP_AUTH_CALLOUT=on (#206),
+    и при off глагол всегда отвечал бы «нет профиля».
+    SOLUTION: та же копия, тем же местом роли bus, кладётся всякий раз, когда
+    на контроллере есть файл операторов, при callout on -- как было; снимается,
+    только когда нет ни callout, ни файла. STATUS: FIXED — see #167
+
+    Условия when задач роли -- простые выражения; проверка исполняет их на
+    четырёх сочетаниях (callout, файл) и смотрит, какие задачи пошли. Берутся
+    задачи роли, касающиеся копии или файла операторов: у прочих свои
+    переменные."""
+    import types
+    ptasks = [t for t in ptasks if "/etc/nats/identity" in json.dumps(t)
+              or "operators_file" in json.dumps(t)]
+
+    def runs(task, env):
+        conds = task.get("when", [])
+        for c in conds if isinstance(conds, list) else [conds]:
+            try:
+                if not eval(str(c), {}, dict(env)):   # noqa: S307 -- свой yaml
+                    return False
+            except Exception as e:  # noqa: BLE001 -- выражение не читается
+                raise AssertionError(f"when {c!r}: {e}")
+        return True
+
+    def ran(tasks, env, out):
+        for t in tasks:
+            if not runs(t, env):
+                continue
+            if "block" in t:
+                ran(t["block"], env, out)
+            else:
+                out.append(t)
+        return out
+
+    def target(t):
+        for mod in ("ansible.builtin.copy", "ansible.builtin.file", "ansible.builtin.stat"):
+            if mod in t:
+                return mod.rsplit(".", 1)[1], (t[mod] or {}).get("dest") or (t[mod] or {}).get("path"), \
+                    (t[mod] or {}).get("state")
+        return None, None, None
+
+    for callout in ("on", "off"):
+        for exists in (True, False):
+            env = {"MOP_AUTH_CALLOUT": callout,
+                   "operators_file": types.SimpleNamespace(stat=types.SimpleNamespace(exists=exists))}
+            try:
+                done = [target(t) for t in ran(ptasks, env, [])]
+            except AssertionError as e:
+                check(f"bus identity copy, callout {callout}, file {exists}: conditions read", False, e)
+                continue
+            what = f"bus identity copy, callout {callout}, operators file {exists}"
+            laid = ("copy", "/etc/nats/identity/operators", None) in done
+            gone = ("file", "/etc/nats/identity", "absent") in done
+            check(f"{what}: the operators file is copied exactly when it exists", laid == exists, done)
+            check(f"{what}: the copy is removed only with neither callout nor file",
+                  gone == (callout != "on" and not exists), done)
+            check(f"{what}: the controller's operators file is looked at",
+                  any(k == "stat" and "operators" in str(p) for k, p, _ in done), done)
+
+
 def main():
     cases = bad = 0
 
@@ -848,6 +912,7 @@ def main():
     check("bus: the callout file is read before and after mop cluster users",
           names.index("Callout file of the bus, before") < names.index(users_task.get("name"))
           < names.index("Callout file of the bus, after") if after and users_task else False)
+    check_identity_copy_167(check, ptasks)
     conf = open(os.path.join(DEPLOY, "roles", "bus", "templates", "nats-server.conf.j2")).read()
     check("nats-server.conf includes callout.conf inside authorization",
           re.search(r"authorization \{[^}]*include \./callout\.conf", conf) is not None)

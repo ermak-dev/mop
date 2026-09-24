@@ -644,12 +644,169 @@ def check_caller_207():
     return out
 
 
+def check_git_identity_167():
+    """HYPOTHESIS (#167): в клоне папета нет user.name/user.email, и пул
+    коммитит разовым `git -c`, который назвал мастер; оператор решил, что
+    автор коммита -- человек, прошедший проверку на шине.
+    SOLUTION: записав ПРОВЕРЕННОГО владельца (логин из субъекта, #207) после
+    доставки, агент спрашивает профиль у сервиса сервера (глагол identity,
+    server.rpc) и ставит repo-local user.name/user.email в клон. Правило одно:
+    после проверенной аренды в клоне identity нового владельца или никакой --
+    профиля нет или сервер не ответил, значит identity снята, а не оставлена
+    прежнему (иначе коммиты нового владельца шли бы под чужим именем), и
+    заметка говорит мастеру коммитить с -c. Названный телом владелец (прежний
+    субъект) identity не трогает; неудачная доставка -- тоже: аренда
+    откатывается, и identity остаётся той, что была.
+    STATUS: FIXED — see #167
+
+    Шелл и git настоящие: bsh исполняет скрипт агента bash'ем над временным
+    клоном, identity читается `git config --local`."""
+    import asyncio
+    import json
+    import subprocess
+    import tempfile
+    from mop import lease
+    from mop.domain import Owner
+    out = []
+    profiles = {"olga": {"name": "Ольга Петрова", "email": "olga@example.dev"},
+                "petr": {"name": "Pyotr O'Neil", "email": "petr@example.dev"}}
+    asked = []
+
+    class Reply:
+        def __init__(self, body):
+            self.data = json.dumps(body).encode()
+
+    class Conn:
+        async def request(self, subject, data, timeout=None):
+            req = json.loads(data.decode())
+            asked.append((subject, req))
+            if req.get("login") == "down":
+                raise asyncio.TimeoutError()
+            return Reply({"login": req["login"], **profiles.get(req["login"], {})})
+
+    root = tempfile.mkdtemp(prefix="mop-test-167-")
+    saved = (agent.bsh, agent.clone_facts, agent.clone_dir, agent.session_json,
+             agent._event, agent.puppet_project)
+
+    async def bsh(name, script, timeout=20):
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        return r.stdout + r.stderr, r.returncode
+
+    def clone():
+        """Свежий клон: git init, без identity."""
+        d = tempfile.mkdtemp(dir=root)
+        subprocess.run(["git", "init", "-q", d], check=True)
+        return d
+
+    state = {}
+
+    async def facts(name):
+        path = os.path.join(state["clone"], lease.FILE)
+        owner = Owner.parse(open(path).read()) if os.path.exists(path) else None
+        return {"owner": owner and owner.to_dict(), "dirty": 1, "ahead": 0,
+                "cur": "feat/1", "def": "master"}
+
+    async def delivered(name, cmd, timeout=20):
+        return {"error": "not delivered"} if state.get("fail") else {"msg_id": "m-1"}
+
+    async def no_event(*a, **k):
+        return None
+
+    async def project(name):
+        return "mop"
+
+    def ident():
+        got = {}
+        for key in ("name", "email"):
+            r = subprocess.run(["git", "-C", state["clone"], "config", "--local", f"user.{key}"],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                got[key] = r.stdout.strip()
+        return got
+
+    def send(caller=None, owner=None, force=False):
+        req = {"name": "pu-mop-1", "message": "x", "from_name": "m"}
+        if caller:
+            req["_caller"] = caller
+        if owner:
+            req["owner"] = owner
+        if force:
+            req["force"] = True
+        return asyncio.run(agent.v_send(Conn(), req))
+
+    try:
+        agent.bsh, agent.clone_facts, agent.session_json = bsh, facts, delivered
+        agent._event, agent.puppet_project = no_event, project
+        agent.clone_dir = lambda name: state["clone"]
+
+        # Проверенный владелец с профилем -- identity в клоне; спросили
+        # сервер своего проекта его логином.
+        state["clone"] = clone()
+        got = send(caller="olga")
+        if ident() != profiles["olga"]:
+            out.append(f"verified owner: identity {ident()}, wanted {profiles['olga']}")
+        if asked != [("mop.mop.server.rpc", {"verb": "identity", "login": "olga"})]:
+            out.append(f"verified owner: asked {asked}, wanted the server's identity verb")
+        if "olga@example.dev" not in (got.get("owner_note") or ""):
+            out.append(f"verified owner: the reply must name the identity, got {got}")
+
+        # Названный телом (прежний субъект) -- identity не трогаем, сервер
+        # не спрашиваем.
+        state["clone"], asked[:] = clone(), []
+        got = send(owner="bob")
+        if ident() or asked or got.get("error"):
+            out.append(f"self-declared: identity {ident()}, asked {asked}, reply {got}")
+
+        # Профиля нет -- identity не ставится, заметка велит -c.
+        state["clone"] = clone()
+        got = send(caller="ivan")
+        note = got.get("owner_note") or ""
+        if ident() or got.get("error") or "ivan" not in note or "git -c" not in note:
+            out.append(f"no profile: identity {ident()}, reply {got}")
+
+        # Сервер не ответил -- доставка не страдает, identity нет, заметка.
+        state["clone"] = clone()
+        got = send(caller="down")
+        if ident() or got.get("error") or "git -c" not in (got.get("owner_note") or ""):
+            out.append(f"server silent: identity {ident()}, reply {got}")
+
+        # force: аренда olga (работа в клоне) переходит к petr -- и identity.
+        state["clone"] = clone()
+        send(caller="olga")
+        got = send(caller="petr", force=True)
+        if ident() != profiles["petr"]:
+            out.append(f"force: identity {ident()}, wanted {profiles['petr']}; reply {got}")
+        # ...к ivan без профиля -- identity olga'и снята, не оставлена ему.
+        send(caller="olga", force=True)
+        got = send(caller="ivan", force=True)
+        if ident():
+            out.append(f"force to a login without a profile: the old identity stays {ident()}")
+        # Названный телом с force -- identity не трогает.
+        send(caller="olga", force=True)
+        send(owner="bob", force=True)
+        if ident() != profiles["olga"]:
+            out.append(f"self-declared force: identity must stay, got {ident()}")
+
+        # Доставка не удалась -- аренда откатывается, identity прежняя.
+        state["clone"] = clone()
+        send(caller="olga")
+        state["fail"] = True
+        got = send(caller="petr", force=True)
+        state["fail"] = False
+        if not got.get("error") or ident() != profiles["olga"]:
+            out.append(f"failed delivery: identity {ident()}, reply {got}")
+    finally:
+        (agent.bsh, agent.clone_facts, agent.clone_dir, agent.session_json,
+         agent._event, agent.puppet_project) = saved
+    return out
+
+
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
                   check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
-                  check_gates_40, check_caller_207):
+                  check_gates_40, check_caller_207, check_git_identity_167):
         try:
             failed += check()
         except Exception as e:

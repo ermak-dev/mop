@@ -92,6 +92,7 @@ WRITABLE = (
 # перестаёт читаться больным.
 SCREEN_LINES = 20        # столько непустых строк пейна едет в состоянии
 IDLE_WAIT = 600          # потолок ожидания простоя для notify
+IDENTITY_WAIT = 5        # сколько send ждёт профиль владельца у сервера (#167)
 
 
 def node_name():
@@ -439,6 +440,59 @@ async def _gated(name, req, act):
     return out
 
 
+# ─── git identity владельца (#167) ───────────────────────────────────────
+# Автор коммита -- человек, прошедший проверку на шине, а не установка и не
+# то, что мастер назвал разовым `git -c`. Правило одно: после проверенной
+# аренды в клоне identity нового владельца или никакой. Профиля нет или
+# сервер молчит -- identity снимается, а не остаётся прежнему: коммиты
+# нового владельца иначе шли бы под чужим именем. Названный телом владелец
+# (прежний субъект, self-declared) identity не трогает вовсе.
+async def owner_profile(conn, name, login):
+    """Имя и почта логина у сервиса сервера (глагол identity). -> (профиль
+    {name, email} | None, причина | None). Спрашиваем проектом папета: права
+    узла на server.rpc -- по любому проекту, а журнал сервера так читается."""
+    subject = busnames.server(await puppet_project(name))
+    try:
+        msg = await conn.request(subject, json.dumps({"verb": "identity", "login": login}).encode(),
+                                 timeout=IDENTITY_WAIT)
+        got = json.loads(msg.data.decode())
+    except Exception as e:
+        return None, f"the server did not answer ({type(e).__name__})"
+    if not isinstance(got, dict) or got.get("error"):
+        return None, f"the server refused: {got.get('error') if isinstance(got, dict) else got}"
+    if got.get("name") and got.get("email"):
+        return {"name": got["name"], "email": got["email"]}, None
+    return None, "no name/email in the profile"
+
+
+def identity_script(clone, path, mine, profile):
+    """Скрипт: identity владельца в клон (repo-local) или снять её. Чистая.
+
+    Только пока в файле аренды наша запись (как _unclaim, #189): пока шла
+    доставка и вопрос серверу, аренду мог забрать другой, и его identity
+    перетирать нельзя. Снятие отсутствующего ключа -- не ошибка."""
+    q = shlex.quote
+    guard = f'[ "$(cat {q(path)} 2>/dev/null)" = {q(mine.rstrip(chr(10)))} ] || exit 0; '
+    git = f"git -C {q(clone)} config --local"
+    if profile:
+        return guard + (f"{git} user.name {q(profile['name'])} && "
+                        f"{git} user.email {q(profile['email'])}")
+    return guard + f"{git} --unset-all user.name; {git} --unset-all user.email; exit 0"
+
+
+async def _follow_owner(conn, name, login, undo):
+    """Identity клона -- за проверенным владельцем. -> заметка мастеру."""
+    profile, missing = await owner_profile(conn, name, login)
+    path, _, mine = undo
+    async with _owner_locks.setdefault(name, asyncio.Lock()):
+        out, code = await bsh(name, identity_script(clone_dir(name), path, mine, profile))
+    if code != 0:
+        return f"git identity not set: {why(out, code)}"
+    if profile:
+        return f"commits as {profile['name']} <{profile['email']}>"
+    return f"no git identity for {login} ({missing}): the clone has none, commit with git -c"
+
+
 async def v_send(conn, req):
     """Сообщение в сессию папета. -> {msg_id} либо {error}.
 
@@ -469,6 +523,11 @@ async def v_send(conn, req):
         if failed:
             out["error"] += f"; owner not restored: {failed}"
         return out
+    me, verified = lease.caller(req)
+    if undo and verified:
+        # После доставки: не доехало -- аренда откатилась, и identity не
+        # наша. Коммит папет делает не в первую секунду хода.
+        note = "; ".join(filter(None, (note, await _follow_owner(conn, name, me, undo))))
     if note:
         out["owner_note"] = note
     await _event(conn, "send", name, text=f"from {req.get('from_name', 'mop')}")

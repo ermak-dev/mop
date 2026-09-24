@@ -48,7 +48,7 @@ import subprocess
 import sys
 import time
 
-from . import (bus, busnames, config, creds, driver, fsutil, playvars,
+from . import (bus, busnames, config, creds, driver, fsutil, identity, playvars,
                project_secrets, service)
 
 # На сервере: файлы проектов и ключ к телам.
@@ -248,6 +248,20 @@ def with_creds(out, got, project):
     return {**out, "bus": got}
 
 
+def owner_identity(req):
+    """Глагол identity (#167): логин -> имя и почта из провайдера личностей
+    сервера, для git identity в клоне папета.
+
+    Здесь, а не у сервиса кластера: спрашивает агент узла, а в server.rpc
+    узлу писать уже можно; cluster.rpc узлам закрыт, и открывать его ради
+    одного вопроса значило бы дать узлу глаголы над Nomad. Имя и почту из
+    тела не берём: источник -- только провайдер."""
+    login = req.get("login")
+    if not busnames.valid_login(login):
+        return {"error": f"{login!r} is not a login"}
+    return identity.profile(identity.server_provider(), login)
+
+
 def answer(project, req, _send=None):
     """Ответ на один запрос. Зовётся в отдельном потоке (service.serve):
     прогон идёт секунды, а петля обязана отвечать остальным."""
@@ -262,9 +276,11 @@ def answer(project, req, _send=None):
             # Кред папета едет тем же ответом: узел уже позвал нас, и
             # второго разговора ради одного файла не нужно.
             return with_creds(play(req, project), puppet_creds(project), project)
+        if verb == "identity":
+            return owner_identity(req)
         # `put` снят (#133): workspace кладут глаголы жизненного цикла
         # папета у сервиса кластера, а в этот субъект пишут и узлы.
-        return {"error": f"no such verb {verb}; available: ping, bootstrap"}
+        return {"error": f"no such verb {verb}; available: ping, bootstrap, identity"}
     except Exception as e:
         return {"error": f"{verb}: {e}"}
 

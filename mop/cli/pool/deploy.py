@@ -226,13 +226,6 @@ def main(argv):
     dry = argv == ["--check"]
     if dry:
         argv = []
-    # Git identity папетов (#167) -- обе или ни одной: половина доехала бы до
-    # спеки молча пропущенной, и коммит в клоне падал бы, как без неё.
-    git = {k: config.get(k) for k in ("MOP_GIT_NAME", "MOP_GIT_EMAIL")}
-    if any(git.values()) and not all(git.values()):
-        lib.fail(f"{' and '.join(k for k, v in git.items() if not v)} is empty in .env: "
-                 f"the puppets' git identity takes both MOP_GIT_NAME and MOP_GIT_EMAIL, or neither")
-        return 1
     if refused_target(argv):
         lib.fail("run targets are gone: mop deploy takes no arguments")
         return 1

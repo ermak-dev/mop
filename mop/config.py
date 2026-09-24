@@ -295,12 +295,6 @@ OPTIONAL = {
     # MCP-серверами идут после тулчейна, потому что регистрация сервера зовёт
     # claude, а claude ищется в PATH, который ставит nvm.
     "MOP_BODY_EXTRA": "",
-    # Git identity папетов (#167): чьим именем подписаны их коммиты. Установки,
-    # а не проекта и не образа -- её вписывает оператор. Пусто -- как было:
-    # в теле нет ни user.name, ни user.email. Обе или ни одной: половину
-    # отвергает `mop deploy`.
-    "MOP_GIT_NAME": "",
-    "MOP_GIT_EMAIL": "",
     # Сертификат TLS-прокси (#96): пути к PEM на контроллере. Пусто -- прогон
     # один раз заводит самоподписанный в secrets/ на имя MOP_SERVER_LAN, и
     # клиенты закрепляют его файлом; заданный проверяется системным доверием.
@@ -411,18 +405,19 @@ NOT_NODE = ("MOP_MEM_MB",)
 # mop-cluster молча ходил на дефолтный порт и DC Nomad. Сверяет их с кодом
 # tests/deploy.py. Секретам здесь не место: юнит читаем всем на машине.
 SERVER_SCOPED = {
-    # MOP_HOME и MOP_USER -- узловые: их читают задачи bootstrap'а.
+    # MOP_HOME и MOP_USER -- узловые: их читают задачи bootstrap'а. Провайдер
+    # личностей -- для глагола identity (#167): имя и почта владельца задания,
+    # те же настройки, что у mop-callout; файл операторов -- копией в
+    # /etc/nats/identity (identity.server_provider), не окружением юнита.
     "mop-bootstrap": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
-                      "MOP_HOME", "MOP_USER"),
+                      "MOP_HOME", "MOP_USER", "MOP_AUTH_PROVIDER", "MOP_OPERATORS"),
     # Nomad (NOMAD_ADDR выводится из адреса сервера и порта, плюс DC) и то,
     # что читает mop/spec.py: спецификацию папета собирает этот сервис, и
-    # профиль LLM по умолчанию тоже решает он (create без --llm), как и git
-    # identity папетов (#167).
+    # профиль LLM по умолчанию тоже решает он (create без --llm).
     "mop-cluster": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                     "MOP_HOME", "MOP_USER", "MOP_NOMAD_PORT", "MOP_POOL_DC",
                     "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",
                     "MOP_PUPPET_PATH", "MOP_DEFAULT_LLM",
-                    "MOP_GIT_NAME", "MOP_GIT_EMAIL",
                     # reload шины с проверкой (#211): `mop project add/rm`
                     "MOP_NATS_MONITOR_PORT",
                     # users.conf при заводе проекта рендерится с callout или
