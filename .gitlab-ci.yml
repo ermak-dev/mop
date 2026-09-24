@@ -1,0 +1,63 @@
+# Проверки mop (#230, эпик #228): каждый файл tests/ в Docker, на 3.12
+# (машина оператора) и 3.13 (сервер и узлы, Debian 13).
+#
+# Docker, а не рабочая копия: в образе всегда все библиотеки, и SKIPPED от
+# недостающей (#220: без jinja2 рендер юнитов пропускался, код 0) не
+# выглядит зелёным; пустой HOME -- та изоляция, за которую воевал #217; а
+# shell-раннер на контроллере отдал бы каждому push'у токен Nomad, сиды NATS
+# и .env установки. Здесь только проверка: ни секретов, ни переменных
+# установки, ни шагов deploy.
+#
+# MOP_TESTS_STRICT=1 -- контракт #229: под ней любой SKIPPED -- отказ.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+
+stages: [test]
+
+.tests:
+  stage: test
+  variables:
+    MOP_TESTS_STRICT: "1"
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    PIP_ROOT_USER_ACTION: "ignore"
+    # Каждый файл tests/ (hermetic.py среди них) -- отдельно; упавшие
+    # перечисляются, и задача падает, если упал хоть один. Текстом в
+    # переменной, чтобы тот же скрипт гонялся и вне раннера.
+    TESTS: |
+      failed=""
+      for f in tests/*.py; do
+        echo "=== $f"
+        python3 "$f" || failed="$failed $f"
+      done
+      if [ -n "$failed" ]; then echo "FAILED:$failed"; exit 1; fi
+      echo "every file in tests/ is green"
+  cache:
+    key: "pip-$CI_JOB_NAME"
+    paths: [.cache/pip]
+  before_script:
+    # git -- клоны во временных каталогах (agent, manifest); openssl --
+    # закреплённый сертификат (creds), без него проверка молча не идёт.
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends git openssl >/dev/null
+    # Библиотеки mop -- одним списком из mop/deps.py, тем же, что ставит
+    # deploy (nats-py, aiohttp, python-nomad, requests, mcp, pyyaml, ldap3,
+    # nkeys, pynacl); плюс jinja2, которым проверки рендерят шаблоны ролей.
+    - pip install -q jinja2 $(python3 -c "exec(open('mop/deps.py').read()); print(' '.join(PIP))")
+    # Непривилегированный, с пустым домом: проверки не видят ни root'а, ни
+    # чужого ~/.config/mop.
+    - useradd --home-dir /tmp/ci-home ci
+    - install -d -o ci -m 0700 /tmp/ci-home
+    - chown -R ci "$CI_PROJECT_DIR"
+  script:
+    - cd "$CI_PROJECT_DIR" && su ci -s /bin/bash -c "$TESTS"
+
+test:py3.12:
+  extends: .tests
+  image: python:3.12-slim
+
+test:py3.13:
+  extends: .tests
+  image: python:3.13-slim
