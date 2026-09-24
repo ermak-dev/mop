@@ -167,9 +167,74 @@ def check_silent():
     return out
 
 
+def check_errors():
+    """HYPOTHESIS (#162): обработчик, бросивший вне своего try (cluster.refusal
+    при лежащем Nomad), и тело-JSON не объект (`[1]` -> req.get на списке)
+    роняют задачу serve: ответа нет, проситель ждёт таймаут и видит молчание,
+    в журнале ни строки.
+    SOLUTION: service.answer -- ответ на одно сообщение: тело не объект --
+    отказ без обработчика; исключение обработчика -- отказ с его причиной и
+    строка журнала.
+    STATUS: FIXED — see #162"""
+    import asyncio
+    from mop import service
+    out = []
+    lines, called = [], []
+
+    def journal(project, req, reply):
+        return [f"{project}.{req.get('verb')}: {reply.get('error') or 'ok'}"]
+
+    def ask(handler, body):
+        lines.clear()
+        called.clear()
+        return asyncio.run(service.answer("mop-test", "mop", body, handler,
+                                          journal, lines.append, lambda **ev: None))
+
+    def boom(project, req, send):
+        called.append(req)
+        raise ConnectionError("Nomad unreachable")
+
+    got = ask(boom, b'{"verb": "restart", "name": "pu-mop-1"}')
+    err = got.get("error") or ""
+    if "Nomad unreachable" not in err or "ConnectionError" not in err \
+            or not err.startswith("mop-test"):
+        out.append(f"a raising handler must answer its reason, got {got!r}")
+    if len(lines) != 1 or "Nomad unreachable" not in lines[0]:
+        out.append(f"a raising handler must leave exactly one journal line, got {lines!r}")
+    # Ответ каркаса -- последний: проситель потока (сборщик, bus.ask_stream)
+    # узнаёт итог только по done, без него причина ушла бы в таймаут 120 с.
+    if got.get("done") is not True:
+        out.append(f"the skeleton's own error must be final (done), got {got!r}")
+
+    def fine(project, req, send):
+        called.append(req)
+        return {"ok": True, "p": project}
+
+    for body in (b"[1]", b'"x"', b"7", b"null"):
+        got = ask(fine, body)
+        if got != {"error": "request is not a JSON object", "done": True}:
+            out.append(f"body {body!r} must be refused as not an object, got {got!r}")
+        if called:
+            out.append(f"body {body!r} must not reach the handler")
+        if len(lines) != 1:
+            out.append(f"body {body!r} must leave one journal line, got {lines!r}")
+
+    # Прежнее поведение не меняется: обычный запрос -- ответ обработчика как
+    # есть; не-JSON вовсе -- пустой запрос в обработчик, как было до #162.
+    got = ask(fine, b'{"verb": "projects"}')
+    if got != {"ok": True, "p": "mop"} or called != [{"verb": "projects"}] \
+            or lines != ["mop.projects: ok"]:
+        out.append(f"a normal request must answer as before, got {got!r}, {lines!r}")
+    got = ask(fine, b"not json")
+    if got != {"ok": True, "p": "mop"} or called != [{}]:
+        out.append(f"a non-JSON body must still reach the handler as {{}}, got {got!r}")
+    return out
+
+
 def main():
     failed = []
-    for check in (check_project, check_journal, check_banner, check_silent):
+    for check in (check_project, check_journal, check_banner, check_silent,
+                  check_errors):
         try:
             failed += check()
         except Exception as e:
