@@ -355,10 +355,134 @@ def check_service_settings_214():
     return out
 
 
+# ── #220: AD -- группа доступа ко всем проектам и вложенные группы ────────
+# HYPOTHESIS: на AD установки rumop доступ даёт одна группа (полным DN) с
+# вложенностью, групп mop-<проект> нет; провайдер понимал только admin по DN,
+# проектные группы по шаблону cn и прямое членство -- каждому «no access».
+# SOLUTION: MOP_LDAP_ACCESS_GROUP (DN) -> user на все проекты (*);
+# MOP_LDAP_NESTED=ad -> членство проверяет правило in-chain
+# (memberOf:1.2.840.113556.1.4.1941:=<DN>) поиском записи пользователя, по
+# группе на запрос; проектные группы -- их DN, найденные по шаблону cn.
+# Дефолт (пусто) -- поведение #208. MOCK_SYNC ldap3 правило in-chain не
+# исполняет (поиск с ним молча пуст), поэтому фильтр и переходник проверены
+# на заглушке, не на mock.
+# STATUS: FIXED — see #220
+ACCESS = "CN=Pool Users,OU=Access,DC=corp,DC=example"
+AD_ADMINS = "CN=Pool Admins,OU=Access,DC=corp,DC=example"
+
+
+class AdStub(Stub):
+    """Каталог AD: членство -- с вложенностью, как его видит in-chain."""
+
+    def __init__(self, users, chain, projects):
+        super().__init__(users, {})
+        self.chain, self.projects, self.asked = chain, projects, []
+
+    def groups_of(self, dn, login):
+        raise AssertionError("nested=ad must not read direct membership")
+
+    def member_of(self, login, group):
+        self.asked.append(group)
+        return any(ldapauth.norm_dn(group) == ldapauth.norm_dn(g)
+                   for g in self.chain.get(login, ()))
+
+    def project_groups(self):
+        return list(self.projects)
+
+
+def check_ad_groups_220():
+    out = []
+    # Прямое членство (дефолт): группа доступа -- все проекты; с admin --
+    # admin; с проектными -- всё равно все.
+    p = provider(MOP_LDAP_ACCESS_GROUP=ACCESS)
+    p.directory.groups[udn("olga")] = [(ACCESS.lower(), {"cn": ["Pool Users"]})]
+    p.directory.groups[udn("ivan")] = [(ACCESS, {"cn": ["Pool Users"]}), group("mop-rugent")]
+    p.directory.groups[udn("anton")] += [(ACCESS, {"cn": ["Pool Users"]})]
+    for login, pw, want in (("olga", "o-pw", ("user", ("*",))),
+                            ("ivan", "i-pw", ("user", ("*",))),
+                            ("anton", "a-pw", ("admin", ("*",)))):
+        got = p.authenticate(login, pw)
+        if (got.role, got.projects) != want:
+            out.append(f"direct: {login} -> {got.role} {got.projects}, wanted {want}")
+    # Без группы доступа в настройках -- как в #208: olga без доступа.
+    if refused(provider().authenticate, "olga", "o-pw") is None:
+        out.append("without MOP_LDAP_ACCESS_GROUP, staff alone is still no access")
+
+    # Вложенность AD: членство спрашивается in-chain, прямой список не читается.
+    ad = {**SETTINGS, "MOP_LDAP_NESTED": "ad", "MOP_LDAP_ACCESS_GROUP": ACCESS,
+          "MOP_LDAP_ADMIN_GROUP": AD_ADMINS, "MOP_LDAP_LOGIN_ATTR": "sAMAccountName"}
+    chain = {"anton": [AD_ADMINS, ACCESS], "ivan": [ACCESS],
+             "petr": [f"CN=mop-rugent,OU=G,{BASE}"], "olga": []}
+    projects = [(f"CN=mop-rugent,OU=G,{BASE}", {"cn": ["mop-rugent"]}),
+                (f"CN=mop-cloudpub,OU=G,{BASE}", {"cn": ["mop-cloudpub"]})]
+    users = dict(USERS, petr=(udn("petr"), {"cn": ["Petr"]}, "p-pw"))
+    stub = AdStub(users, chain, projects)
+    pa = ldapauth.LdapProvider(ldapauth.settings(ad), stub)
+    for login, pw, want in (("anton", "a-pw", ("admin", ("*",))),
+                            ("ivan", "i-pw", ("user", ("*",))),
+                            ("petr", "p-pw", ("user", ("rugent",)))):
+        try:
+            got = pa.authenticate(login, pw)
+            if (got.role, got.projects) != want:
+                out.append(f"ad: {login} -> {got.role} {got.projects}, wanted {want}")
+        except Exception as e:  # noqa: BLE001
+            out.append(f"ad: {login} -> {type(e).__name__}: {e}")
+    e = refused(pa.authenticate, "olga", "o-pw")
+    if e is None or "no access" not in e:
+        out.append(f"ad: in no group is no access, got {e!r}")
+    if pa.lookup("ivan") is None or pa.lookup("olga") is not None:
+        out.append("ad: lookup follows the same membership")
+    # admin решает первым: при admin группу доступа не спрашиваем.
+    stub.asked.clear()
+    pa.authenticate("anton", "a-pw")
+    if stub.asked != [AD_ADMINS]:
+        out.append(f"ad: admin first, nothing after it: asked {stub.asked}")
+
+    # Настройки: неизвестный режим вложенности -- отказ с именем значения.
+    try:
+        ldapauth.settings({**SETTINGS, "MOP_LDAP_NESTED": "deep"})
+        out.append("MOP_LDAP_NESTED=deep must be refused")
+    except ValueError as e:
+        if "deep" not in str(e) or "ad" not in str(e):
+            out.append(f"the refusal must name the value and the choice: {e}")
+    cfg = ldapauth.settings(SETTINGS)
+    if (cfg.access_group, cfg.nested) != ("", ""):
+        out.append(f"defaults: no access group, direct membership: {cfg}")
+
+    # Фильтры: in-chain по записи пользователя, DN и логин экранированы.
+    got = ldapauth.in_chain_filter("sAMAccountName", "a*b", "CN=mop (all),OU=G,DC=x")
+    want = "(&(sAMAccountName=a\\2ab)(memberOf:1.2.840.113556.1.4.1941:=CN=mop \\28all\\29,OU=G,DC=x))"
+    if got != want:
+        out.append(f"in_chain_filter -> {got}, wanted {want}")
+    for pattern, want in (("mop-{project}", "(&(objectClass=group)(cn=mop-*))"),
+                          ("pool-{project}-users", "(&(objectClass=group)(cn=pool-*-users))"),
+                          ("a*{project}", "(&(objectClass=group)(cn=a\\2a*))")):
+        if ldapauth.project_groups_filter(pattern) != want:
+            out.append(f"project_groups_filter({pattern}) -> "
+                       f"{ldapauth.project_groups_filter(pattern)}, wanted {want}")
+
+    # Переходник: какие поиски он шлёт (mock правило in-chain не исполняет).
+    acfg = ldapauth.settings({**ad, "MOP_LDAP_GROUP_BASE": f"OU=G,{BASE}"})
+    d = ldapauth.Ldap3Directory(acfg)
+    sent = []
+    d._search = lambda base, filt, attrs: sent.append((base, filt)) or (
+        [("CN=x", {})] if "Pool Users" in filt else [])
+    if d.member_of("ivan", ACCESS) is not True or d.member_of("ivan", AD_ADMINS) is not False:
+        out.append("adapter member_of: an entry found is membership, none is not")
+    if sent[0] != (BASE, ldapauth.in_chain_filter("sAMAccountName", "ivan", ACCESS)):
+        out.append(f"adapter member_of searches the user under the base: {sent[0]}")
+    sent.clear()
+    d.project_groups()
+    if sent != [(f"OU=G,{BASE}", "(&(objectClass=group)(cn=mop-*))")]:
+        out.append(f"adapter project_groups searches the group base: {sent}")
+    return out
+
+
 def main():
     failed = []
     for check in (check_authenticate, check_mapping, check_lookup, check_settings,
-                  check_choice, check_filters, check_ldap3, check_service_settings_214):
+                  check_choice, check_filters, check_ldap3, check_service_settings_214,
+                  check_ad_groups_220):
         try:
             lines = check()
         except Exception as e:  # noqa: BLE001 -- падение проверки -- тоже провал

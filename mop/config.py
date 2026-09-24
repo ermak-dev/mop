@@ -147,6 +147,10 @@ DEFAULTS = {
     "MOP_LDAP_GROUP_BASE": "",             # пусто -- MOP_LDAP_BASE
     "MOP_LDAP_GROUP_FILTER": "(|(member={dn})(uniqueMember={dn})(memberUid={login}))",
     "MOP_LDAP_ADMIN_GROUP": "",            # DN группы admin; пусто -- admin'ов нет
+    # DN группы доступа ко всем проектам (#220): user на *; пусто -- нет такой.
+    "MOP_LDAP_ACCESS_GROUP": "",
+    # Вложенные группы: пусто -- прямое членство; ad -- правило in-chain AD.
+    "MOP_LDAP_NESTED": "",
     "MOP_LDAP_PROJECT_GROUP": "mop-{project}",  # cn группы проекта
     "MOP_LDAP_STARTTLS": "",
     "MOP_LDAP_CA_FILE": "",                # пусто -- системное хранилище
@@ -409,6 +413,7 @@ IDENTITY_SCOPED = ("MOP_AUTH_PROVIDER",
                    "MOP_LDAP_URL", "MOP_LDAP_BIND_DN", "MOP_LDAP_BASE",
                    "MOP_LDAP_LOGIN_ATTR", "MOP_LDAP_NAME_ATTR", "MOP_LDAP_EMAIL_ATTR",
                    "MOP_LDAP_GROUP_BASE", "MOP_LDAP_GROUP_FILTER", "MOP_LDAP_ADMIN_GROUP",
+                   "MOP_LDAP_ACCESS_GROUP", "MOP_LDAP_NESTED",
                    "MOP_LDAP_PROJECT_GROUP", "MOP_LDAP_STARTTLS", "MOP_LDAP_CA_FILE")
 
 SERVER_SCOPED = {
