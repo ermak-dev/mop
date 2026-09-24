@@ -42,7 +42,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** A value specific to this machine is a setting whose default equals today's value, never a literal in the code
  - **MUST** A required setting with no sensible default goes in `config.REQUIRED`: silently walking into someone else's LAN is worse than a loud refusal
  - **MUST NOT** Nothing a specific project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is the installation's own `sandbox.yaml` and the projects' `.mop/sandbox.yaml` (baked) and `.mop/bootstrap.yaml` (played at every start)
- - **MUST** A project has one definition: `puppets.project_of`, the origin's basename without `.git`; puppet names are built from it too. The word «shard» is gone (#85)
+ - **MUST** A project has one definition: `driver.project_of`, the origin's basename without `.git`; puppet names are built from it too. The word «shard» is gone (#85)
  - **MUST** Two layers: Nomad decides where a puppet stands, the bus decides how to talk to it. The Nomad token lives on the server and, through `mop join`, on operators' machines; it never reaches a node
  - **MUST** The server is the ansible controller and the operator's machine is not in the inventory: it gets the server's credentials with `mop join` into `~/.config/mop/servers/[address]/`, and `MOP_SERVER_LAN` in the environment retargets a master at another server
  - **MUST** Symlinks pointing in from outside are interfaces: `~/bin/mop`, `~/etc/nomad`, `~/etc/nats`, `~/.claude/skills/master`; a playbook is found by the path `~/etc/[name]/setup.yml`, and there is no name table anywhere
@@ -61,7 +61,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 
 Every one of them fails silently — hence a list, not "read the code".
 
- - **MUST** The wrapper lives in the job spec: editing `mop/puppets.py` does not reach a running puppet through an allocation restart, it needs a re-registration
+ - **MUST** The wrapper lives in the job spec: editing `mop/spec.py` does not reach a running puppet through an allocation restart, it needs a re-registration
  - **MUST** Escape curly substitutions with a double dollar — Nomad runs the spec through hcl2 and parses the whole line, **comments included**
  - **MUST** The node agent lives outside the job spec, under systemd, one per node: otherwise every edit to it would re-register every job, and it must answer precisely while a puppet is restarting
  - **MUST** The agent's unit needs `XDG_RUNTIME_DIR=/run/user/1000`: without it `session.py` misses the socket directory and live puppets read as dead
@@ -74,7 +74,7 @@ Every one of them fails silently — hence a list, not "read the code".
 ## Strict TDD Protocol
 
 **Mandatory for everything checkable without the pool** — pure functions
-(`puppets.puppet_state`, `session.envelope`, `render.table`,
+(`state.verdict`, `session.envelope`, `render.table`,
 `gitlab.with_status`). The exceptions: what lives only on the live pool (the
 wrapper, the playbooks, the agent's verbs), thin commandlet glue, mechanical
 edits.
