@@ -49,7 +49,7 @@ import subprocess
 import sys
 import time
 
-from . import bus, config, creds, driver, project_secrets
+from . import bus, busnames, config, creds, driver, project_secrets
 
 # На сервере: файлы проектов и ключ к телам.
 ROOT = os.path.expanduser("~/.config/mop/bootstrap")
@@ -284,8 +284,9 @@ async def serve():
     async def on_rpc(msg):
         asyncio.create_task(_handle(msg))
 
-    await nc.subscribe(bus.server_subject("*"), cb=on_rpc)
-    print(f"mop-bootstrap: subscribed to {bus.server_subject('*')}, "
+    subj = bus.server_subject(busnames.ANY)
+    await nc.subscribe(subj, cb=on_rpc)
+    print(f"mop-bootstrap: subscribed to {subj}, "
           f"workspaces in {ROOT}: {', '.join(_puppets_here()) or 'none'}", flush=True)
     await asyncio.Event().wait()
 

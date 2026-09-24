@@ -31,7 +31,7 @@ import threading
 
 import base64
 
-from . import (bootstrap, bus, config, creds, natsconf, nodes, nomad,
+from . import (bootstrap, bus, busnames, config, creds, natsconf, nodes, nomad,
                project_secrets, projects, puppets)
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
@@ -341,7 +341,7 @@ def _users_apply(names, verify_user=None):
         bus.can_login(creds.puppet_user(verify_user), pw[verify_user],
                       config.get("MOP_NATS_PORT"))
     else:
-        bus.can_login("service", natsconf.read_base()["service"],
+        bus.can_login(busnames.SERVICE, natsconf.read_base()[busnames.SERVICE],
                       config.get("MOP_NATS_PORT"))
     return changed
 
@@ -541,7 +541,7 @@ async def serve():
     async def on_rpc(msg):
         asyncio.create_task(_handle(msg))
 
-    subj = bus.cluster_subject("*")
+    subj = bus.cluster_subject(busnames.ANY)
     await nc.subscribe(subj, cb=on_rpc)
     print(f"mop-cluster: subscribed to {subj}, Nomad at {nomad.ADDR}", flush=True)
     await asyncio.Event().wait()

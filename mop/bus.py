@@ -58,7 +58,7 @@ try:
 except ImportError:
     sys.exit("bus library required: pip install --user --break-system-packages nats-py")
 
-from . import config as settings, creds  # noqa: E402
+from . import busnames, config as settings, creds  # noqa: E402
 
 # Файл кредов, если его подсунули: врапер папета через tmux -e, `mop master`
 # сессии мастера. Без него креды собирает config() из каталога сервера.
@@ -68,9 +68,8 @@ FILE = os.environ.get("MOP_BUS_CONFIG")
 NODE_FILE = os.path.expanduser("~/.config/mop/bus.json")
 TIMEOUT = 20             # обычный запрос к агенту
 MAX_PAYLOAD = 900_000    # под max_payload сервера (1 МБ) с запасом на конверт
-ADMIN = creds.ADMIN      # псевдопроект оператора: все проекты плюс узловой disk
-CLUSTER_CHANNEL = "cluster"   # токен субъекта сервиса кластера (mop/cluster.py)
-ALL_MASTERS = "all"      # псевдо-id мастера: инбокс, на котором отвечают все
+ADMIN = busnames.ADMIN   # псевдопроект оператора: все проекты плюс узловой disk
+ALL_MASTERS = busnames.ALL_MASTERS   # псевдо-id мастера: отвечают все
 
 # Чей срез пула виден этому процессу. Ставит `mop master`, наследуют его
 # потомки — в том числе mop mcp, запущенный сессией мастера.
@@ -143,7 +142,7 @@ def login():
         user = config().get("user") or ""
     except Exception:
         return None
-    if not user or user == "service" or user.startswith(("puppet-", "node-")):
+    if not user or busnames.is_machine(user):
         return None
     return user
 
@@ -328,12 +327,12 @@ def close():
 
 # ─── субъекты ────────────────────────────────────────────────────────────
 def subject(node, channel="rpc", project=None):
-    return f"mop.{project or PROJECT}.node.{node}.{channel}"
+    return busnames.node(project or PROJECT, node, channel)
 
 
 def broadcast(project=None):
     """Все агенты разом. Нужен там, где спрашивающий не знает состава пула."""
-    return f"mop.{project or PROJECT}.all.msg"
+    return busnames.broadcast(project or PROJECT)
 
 
 def inbox(master_id, project=None):
@@ -347,11 +346,11 @@ def inbox(master_id, project=None):
 
     master_id=ALL_MASTERS — не адрес, а опрос: отвечают все живые мастера
     проекта. Так папет узнаёт, кому он может ответить, не имея ростера."""
-    return f"mop.{project or PROJECT}.master.{master_id}.inbox"
+    return busnames.inbox(project or PROJECT, master_id)
 
 
 def events(project=None):
-    return f"mop.{project or PROJECT}.events"
+    return busnames.events(project or PROJECT)
 
 
 def cluster_subject(project=None):
@@ -362,20 +361,20 @@ def cluster_subject(project=None):
     что джобы регистрирует и снимает любой узел. Здесь прав ни у кого не
     прибавляется: у `master-<проект>` уже есть весь `mop.<проект>.>`, а у
     папета и узла его нет."""
-    return f"mop.{project or PROJECT}.{CLUSTER_CHANNEL}.rpc"
+    return busnames.cluster(project or PROJECT)
 
 
 def build_subject():
     """Сборщик образов (#123): только оператору -- образ собирается кодом
     проекта на гипервизорах."""
-    return f"mop.{ADMIN}.build.rpc"
+    return busnames.build()
 
 
 def server_subject(project=None):
     """Сервер как адресат (#62): bootstrap песочниц и хранение их файлов.
     Первый токен — проект, как у всех: узел пишет за папета своего проекта,
     мастер — за свой проект, а права NATS делят так же, как везде."""
-    return f"mop.{project or PROJECT}.server.rpc"
+    return busnames.server(project or PROJECT)
 
 
 # ─── запросы ─────────────────────────────────────────────────────────────

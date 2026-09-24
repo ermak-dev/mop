@@ -19,6 +19,8 @@ import signal
 import string
 import subprocess
 
+from . import busnames
+
 DIR = "/etc/nats"
 BASE = os.path.join(DIR, "base-users.json")
 USERS = os.path.join(DIR, "users.conf")
@@ -49,6 +51,30 @@ def _user(name, password, perms, extra=""):
             f"{extra}{perms}\n  }}")
 
 
+# Сервисы сервера (#104): машина, а не человек. Права пока как у admin.
+SERVICE_PERMISSIONS = [busnames.everything(), busnames.INBOX]
+
+
+def puppet_permissions(project):
+    """Папет проекта: пишет соседям и своему мастеру; управляющий .rpc сюда
+    не входит -- печать в чужой TUI и запись файлов остаются за мастером.
+    Слушает только ответы на свои запросы."""
+    return {"publish": [busnames.node(project, "*", "msg"), busnames.broadcast(project),
+                        busnames.masters(project), busnames.events(project), busnames.INBOX],
+            "subscribe": [busnames.INBOX]}
+
+
+def node_permissions(node):
+    """Агент узла: пересекает проекты сознательно (он их и разделяет), но
+    слушает только свой узел -- подписка в NATS не эксклюзивна."""
+    any_ = busnames.ANY
+    return {"publish": [busnames.masters(any_), busnames.events(any_),
+                        busnames.node(any_, node, "msg"), busnames.server(any_),
+                        busnames.INBOX],
+            "subscribe": [busnames.node(any_, node, ">"), busnames.broadcast(any_),
+                          busnames.INBOX]}
+
+
 def render(base, projects):
     """Базовые пользователи и папеты проектов -> текст `users.conf`.
 
@@ -61,32 +87,26 @@ def render(base, projects):
         if not pw:
             raise ValueError(f"project {p} has no bus password")
     out = ["users = ["]
-    # Сервисы сервера (#104): машина, а не человек. Права пока как у admin.
-    out.append(_user("service", base["service"], _perms(["mop.>", "_INBOX.>"])))
+    out.append(_user(busnames.SERVICE, base[busnames.SERVICE], _perms(SERVICE_PERMISSIONS)))
     # Люди (#106): вход только через WebSocket (#105), права по роли.
     for name, op in sorted((base.get("operators") or {}).items()):
         out.append(_user(name, op["password"], _perms(op["allow"], op.get("deny")),
                          '    allowed_connection_types: ["WEBSOCKET"]\n'))
-    # Папеты проекта: пишут соседям и своему мастеру; управляющий .rpc сюда
-    # не входит -- печать в чужой TUI и запись файлов остаются за мастером.
     for p in sorted(projects):
-        pub = [f"mop.{p}.node.*.msg", f"mop.{p}.all.msg", f"mop.{p}.master.>",
-               f"mop.{p}.events", "_INBOX.>"]
-        out.append(_user(f"puppet-{p}", projects[p], _perms(pub, sub_allow=["_INBOX.>"])))
-    # Агент узла: пересекает проекты сознательно (он их и разделяет), но
-    # слушает только свой узел -- подписка в NATS не эксклюзивна.
+        perms = puppet_permissions(p)
+        out.append(_user(busnames.puppet_user(p), projects[p],
+                         _perms(perms["publish"], sub_allow=perms["subscribe"])))
     for node, pw in sorted((base.get("nodes") or {}).items()):
-        pub = ["mop.*.master.>", "mop.*.events", f"mop.*.node.{node}.msg",
-               "mop.*.server.rpc", "_INBOX.>"]
-        sub = [f"mop.*.node.{node}.>", "mop.*.all.msg", "_INBOX.>"]
-        out.append(_user(f"node-{node}", pw, _perms(pub, sub_allow=sub)))
+        perms = node_permissions(node)
+        out.append(_user(busnames.node_user(node), pw,
+                         _perms(perms["publish"], sub_allow=perms["subscribe"])))
     out.append("]")
     return "\n".join(out) + "\n"
 
 
 # ─── сервер: пароли, файл, reload ────────────────────────────────────────
 def _pass_file(root, project):
-    return os.path.join(root, f"nats-puppet-{project}.pass")
+    return os.path.join(root, busnames.pass_file(busnames.puppet_user(project)))
 
 
 def _write_private(path, text):
