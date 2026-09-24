@@ -24,15 +24,13 @@ bootstrap песочницы за папета). Положи туда глаг�
 Подписчик — mop-cluster, юнит на сервере; проверяется `mop cluster check`.
 Чистая часть (права) — tests/cluster.py.
 """
-import asyncio
-import json
 import os
 import threading
 
 import base64
 
 from . import (bootstrap, bus, busnames, config, creds, natsconf, nodes, nomad,
-               project_secrets, projects, puppets)
+               project_secrets, projects, puppets, service)
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
@@ -60,15 +58,6 @@ ACTING_VERBS = ("update", "restart", "stop", "delete", "spec")
 
 
 # ─── чистое: кому что можно ──────────────────────────────────────────────
-def project_of(subject):
-    """Проект из субъекта `mop.<проект>.cluster.rpc`.
-
-    Из субъекта, а не из тела запроса: субъект проверен правами NATS, тело
-    пишет кто угодно."""
-    parts = (subject or "").split(".")
-    return parts[1] if len(parts) > 2 else ""
-
-
 def refusal(project, verb, origin=None, name=None, job_exists=False,
             new_origin=None):
     """Почему запрос отклонён. -> строка или None.
@@ -512,36 +501,19 @@ def answer(project, req):
 
 
 # ─── подписчик ───────────────────────────────────────────────────────────
-async def _handle(msg):
-    project = project_of(msg.subject)
-    try:
-        req = json.loads(msg.data.decode())
-    except ValueError:
-        req = {}
-    # В отдельном потоке: вызовы Nomad блокирующие, а петля обязана отвечать
-    # остальным, пока один запрос ждёт HTTP.
-    out = await asyncio.get_running_loop().run_in_executor(None, answer, project, req)
-    print(f"{project}.{req.get('verb')} {req.get('name') or req.get('node') or req.get('origin') or ''}: "
-          f"{out.get('error') or 'ok'}", flush=True)
-    try:
-        await msg.respond(json.dumps(out, ensure_ascii=False).encode())
-    except Exception:
-        pass
+def journal(project, req, out):
+    """Строки журнала на один ответ."""
+    who = req.get("name") or req.get("node") or req.get("origin") or ""
+    return [f"{project}.{req.get('verb')} {who}: {out.get('error') or 'ok'}"]
 
 
-async def serve():
+def banner(subject, nomad_addr):
+    return f"mop-cluster: subscribed to {subject}, Nomad at {nomad_addr}"
+
+
+async def serve(log):
     """Подписчик сервера. Креды — оператора (admin): сервис слушает все
     проекты, а разделяет их проверкой проекта из субъекта."""
-    import nats
-    c = bus.config()
-    nc = await nats.connect(**bus.auth(c), name="mop-cluster",
-                            allow_reconnect=True, max_reconnect_attempts=-1,
-                            reconnect_time_wait=2)
-
-    async def on_rpc(msg):
-        asyncio.create_task(_handle(msg))
-
     subj = bus.cluster_subject(busnames.ANY)
-    await nc.subscribe(subj, cb=on_rpc)
-    print(f"mop-cluster: subscribed to {subj}, Nomad at {nomad.ADDR}", flush=True)
-    await asyncio.Event().wait()
+    await service.serve("mop-cluster", subj, lambda project, req, _send: answer(project, req),
+                        log, journal, lambda: banner(subj, nomad.ADDR))

@@ -49,7 +49,7 @@ import subprocess
 import sys
 import time
 
-from . import bus, busnames, config, creds, driver, project_secrets
+from . import bus, busnames, config, creds, driver, project_secrets, service
 
 # На сервере: файлы проектов и ключ к телам.
 ROOT = os.path.expanduser("~/.config/mop/bootstrap")
@@ -230,65 +230,49 @@ def with_creds(out, got, project):
     return {**out, "bus": got}
 
 
-async def _handle(msg):
-    try:
-        req = json.loads(msg.data.decode())
-    except ValueError:
-        req = {}
-    parts = msg.subject.split(".")
-    project = parts[1] if len(parts) > 1 else ""
+def answer(project, req, _send=None):
+    """Ответ на один запрос. Зовётся в отдельном потоке (service.serve):
+    прогон идёт секунды, а петля обязана отвечать остальным."""
     verb = req.get("verb")
     try:
         if verb == "ping":
-            out = {"ok": True, "puppets": _puppets_here()}
-        elif verb == "bootstrap":
+            return {"ok": True, "puppets": _puppets_here()}
+        if verb == "bootstrap":
             why = refusal(req, project)
             if why:
-                out = {"error": why}
-            else:
-                # В отдельном потоке: прогон идёт секунды, а петля обязана
-                # отвечать остальным.
-                out = await asyncio.get_running_loop().run_in_executor(
-                    None, play, req, project)
-                # Кред папета едет тем же ответом: узел уже позвал нас, и
-                # второго разговора ради одного файла не нужно.
-                out = with_creds(out, puppet_creds(project), project)
-        else:
-            # `put` снят (#133): workspace кладут глаголы жизненного цикла
-            # папета у сервиса кластера, а в этот субъект пишут и узлы.
-            out = {"error": f"no such verb {verb}; available: ping, bootstrap"}
+                return {"error": why}
+            # Кред папета едет тем же ответом: узел уже позвал нас, и
+            # второго разговора ради одного файла не нужно.
+            return with_creds(play(req, project), puppet_creds(project), project)
+        # `put` снят (#133): workspace кладут глаголы жизненного цикла
+        # папета у сервиса кластера, а в этот субъект пишут и узлы.
+        return {"error": f"no such verb {verb}; available: ping, bootstrap"}
     except Exception as e:
-        out = {"error": f"{verb}: {e}"}
-    print(f"{project}.{verb} {req.get('name', '')}: "
-          f"{out.get('error') or ('ok' if out.get('ok') else out)}"
-          + (f" in {out['seconds']}s" if out.get("seconds") is not None else ""),
-          flush=True)
+        return {"error": f"{verb}: {e}"}
+
+
+def journal(project, req, out):
+    """Строки журнала на один ответ; у проваленного прогона -- ещё и его хвост."""
+    lines = [f"{project}.{req.get('verb')} {req.get('name', '')}: "
+             f"{out.get('error') or ('ok' if out.get('ok') else out)}"
+             + (f" in {out['seconds']}s" if out.get("seconds") is not None else "")]
     if not out.get("ok", True):
-        print(out.get("tail", ""), flush=True)
-    try:
-        await msg.respond(json.dumps(out, ensure_ascii=False).encode())
-    except Exception:
-        pass
+        lines.append(f"{out.get('tail', '')}")
+    return lines
 
 
-async def serve():
+def banner(subject, root, puppets):
+    return (f"mop-bootstrap: subscribed to {subject}, "
+            f"workspaces in {root}: {', '.join(puppets) or 'none'}")
+
+
+async def serve(log):
     """Подписчик сервера. Креды — оператора (admin): сервер слушает все
     проекты, и своего файла кредов у него нет — тот же каталог, что у
     дашборда (mop/creds.py)."""
-    import nats
-    c = bus.config()
-    nc = await nats.connect(**bus.auth(c), name="mop-bootstrap",
-                            allow_reconnect=True, max_reconnect_attempts=-1,
-                            reconnect_time_wait=2)
-
-    async def on_rpc(msg):
-        asyncio.create_task(_handle(msg))
-
     subj = bus.server_subject(busnames.ANY)
-    await nc.subscribe(subj, cb=on_rpc)
-    print(f"mop-bootstrap: subscribed to {subj}, "
-          f"workspaces in {ROOT}: {', '.join(_puppets_here()) or 'none'}", flush=True)
-    await asyncio.Event().wait()
+    await service.serve("mop-bootstrap", subj, answer, log, journal,
+                        lambda: banner(subj, ROOT, _puppets_here()))
 
 
 # ─── узел ────────────────────────────────────────────────────────────────

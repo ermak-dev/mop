@@ -15,6 +15,7 @@
 
 Диспетчер (mop/cli/__init__.py) зовёт `lib.run(main, argv)` сам.
 """
+import asyncio
 import json
 import os
 import re
@@ -423,3 +424,13 @@ def pool_lines():
         return out
     except Exception as e:
         return [f"  {e}"]
+
+
+def serve(service):
+    """Подписчик сервера под systemd (mop-cluster, mop-bootstrap,
+    mop-builder): строки журнала -- в stdout, оттуда их берёт journald."""
+    try:
+        asyncio.run(service(lambda line: print(line, flush=True)))
+    except KeyboardInterrupt:
+        pass
+    return 0

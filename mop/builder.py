@@ -15,16 +15,14 @@ ansible или этап над телами), строки вывода пачк
 итог -- последним. Сборки идут
 по одной: шаблоны на гипервизоре делят зеркало (#100).
 
-Данные и события, без печати: печатает проситель.
+Данные и события, без печати: печатают проситель и журнал `mop cluster builder`.
 """
-import asyncio
 import collections
-import json
 import re
 import threading
 import time
 
-from . import bus, driver, image, nomad, puppets
+from . import bus, driver, image, nomad, puppets, service
 
 MODES = ("missing", "update", "rebuild")
 HEARTBEAT = 15
@@ -130,7 +128,7 @@ def serving_now():
 
 def run(req, send):
     """Одна сборка по запросу. send(**событие) -- шаг просителю.
-    -> итог (dict), без done: его ставит подписчик."""
+    -> итог (dict), без done: его ставит answer."""
     origin = req.get("origin") or ""
     mode = req.get("mode") or "missing"
     if not puppets.looks_like_origin(origin):
@@ -202,36 +200,23 @@ def run(req, send):
         _one_at_a_time.release()
 
 
-async def _handle(nc, msg):
-    loop = asyncio.get_running_loop()
-    try:
-        req = json.loads(msg.data.decode())
-    except ValueError:
-        req = {}
-
-    def send(**ev):
-        data = json.dumps(ev, ensure_ascii=False).encode()
-        asyncio.run_coroutine_threadsafe(nc.publish(msg.reply, data), loop)
-
+def answer(_project, req, send):
+    """Итог сборки, последним событием потока: done отличает его от шагов."""
     if req.get("verb") != "build":
-        out = {"error": f"no such verb {req.get('verb')}; available: build"}
-    else:
-        send(step="accepted")
-        out = await loop.run_in_executor(None, run, req, send)
-    print(f"build {req.get('origin', '')} {req.get('mode', '')}: "
-          f"{out.get('error') or ('skipped' if out.get('skipped') else 'ok')}", flush=True)
-    await nc.publish(msg.reply, json.dumps({**out, "done": True}, ensure_ascii=False).encode())
+        return {"error": f"no such verb {req.get('verb')}; available: build", "done": True}
+    send(step="accepted")
+    return {**run(req, send), "done": True}
 
 
-async def serve():
-    import nats
-    nc = await nats.connect(**bus.auth(bus.config()), name="mop-builder",
-                            allow_reconnect=True, max_reconnect_attempts=-1,
-                            reconnect_time_wait=2)
+def journal(_project, req, out):
+    return [f"build {req.get('origin', '')} {req.get('mode', '')}: "
+            f"{out.get('error') or ('skipped' if out.get('skipped') else 'ok')}"]
 
-    async def on_msg(msg):
-        asyncio.create_task(_handle(nc, msg))
 
-    await nc.subscribe(bus.build_subject(), cb=on_msg)
-    print(f"mop-builder: subscribed to {bus.build_subject()}", flush=True)
-    await asyncio.Event().wait()
+def banner(subject):
+    return f"mop-builder: subscribed to {subject}"
+
+
+async def serve(log):
+    subj = bus.build_subject()
+    await service.serve("mop-builder", subj, answer, log, journal, lambda: banner(subj))
