@@ -57,6 +57,35 @@ MACHINE = ("MOP_", "NOMAD_", "PU_")
 HOME = tempfile.mkdtemp(prefix="mop-test-home-")
 
 
+# Строгий режим (#229): пропуск проверки -- провал файла. Читается до
+# изоляции -- она убирает MOP_* из окружения. Обычный режим -- как было:
+# строка SKIPPED, файл идёт дальше; строгий ставит сборка CI (#230), где
+# стоят все необязательные библиотеки и пропуску неоткуда взяться.
+STRICT = (os.environ.get("MOP_TESTS_STRICT") or "").lower() in ("1", "yes", "true", "on")
+
+
+def skip(what, why):
+    """Проверку `what` не прогнать: `why` (нет библиотеки, нет утилиты).
+    Единственное место, где печатается SKIPPED: пропуск, читавшийся зелёным,
+    отправил #220 в master красным. Строгий режим -- выход с ненулевым кодом
+    и именем пропуска, файл дальше не идёт."""
+    if STRICT:
+        raise SystemExit(f"FAILED  {what}: skipped ({why}) -- a skip is a failure "
+                         f"under MOP_TESTS_STRICT=1")
+    print(f"SKIPPED {what}: {why}", flush=True)
+
+
+def child_env(extra, strict=None):
+    """Окружение дочернего прогона проверок: без настроек машины (MOP_* и
+    прочие), с extra и со строгим режимом этого прогона -- иначе изоляция,
+    убравшая MOP_*, сделала бы детей мягкими."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(MACHINE)}
+    env.update(extra)
+    if STRICT if strict is None else strict:
+        env["MOP_TESTS_STRICT"] = "1"
+    return env
+
+
 def _isolate():
     # Дочерние процессы проверок (командлеты, python -c) иначе искали бы
     # пакеты пользователя во временном доме и не находили nats-py.
@@ -154,13 +183,64 @@ def check_children():
     return out
 
 
+def check_skip_strict():
+    """Пропуск проверки (#229): обычно -- строка SKIPPED и файл идёт дальше,
+    с MOP_TESTS_STRICT=1 -- файл падает с ненулевым кодом и именем пропуска.
+    Пропуск, читавшийся зелёным, однажды уже отправил #220 в master красным."""
+    out = []
+    code = ("import sys; sys.path.insert(0, %r); import hermetic; "
+            "hermetic.skip('the widget check', 'no widget library'); print('after the skip')"
+            % TESTS)
+    base = {k: v for k, v in os.environ.items() if not k.startswith(MACHINE)}
+    for strict in ("", "1"):
+        env = dict(base, **({"MOP_TESTS_STRICT": strict} if strict else {}))
+        r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
+                           text=True, cwd=ROOT)
+        lines = (r.stdout + r.stderr).splitlines()
+        went_on = "after the skip" in r.stdout.splitlines()
+        if not strict:
+            if r.returncode != 0 or "SKIPPED the widget check: no widget library" not in lines \
+                    or not went_on:
+                out.append(f"normal mode: a skip is a SKIPPED line and the file goes on: "
+                           f"exit {r.returncode}, {lines}")
+        elif r.returncode == 0 or went_on or not any(
+                "the widget check" in l and "MOP_TESTS_STRICT" in l for l in lines):
+            out.append(f"MOP_TESTS_STRICT=1: a skip must fail the file, naming it: "
+                       f"exit {r.returncode}, {lines}")
+    return out
+
+
+def check_own_skips():
+    """Ни один файл не печатает свой SKIPPED: все пропуски -- через skip()."""
+    out = []
+    for f in files():
+        for n, line in enumerate(open(f), 1):
+            if "SKIPPED" in line:
+                out.append(f"{os.path.basename(f)}:{n}: its own skip -- use hermetic.skip()")
+    return out
+
+
+def check_strict_children():
+    """Строгий режим доходит до дочерних прогонов (#229): изоляция убирает
+    MOP_* из окружения, и без явной передачи дети проверяли бы мягко."""
+    out = []
+    child_env_ = globals().get("child_env")
+    if child_env_ is None:
+        return ["hermetic has no child_env(): the children's environment is built ad hoc"]
+    env = child_env_({}, strict=True)
+    if env.get("MOP_TESTS_STRICT") != "1":
+        out.append(f"children of a strict run must be strict: {env.get('MOP_TESTS_STRICT')!r}")
+    if "MOP_TESTS_STRICT" in child_env_({}, strict=False):
+        out.append("children of a normal run must not be strict")
+    return out
+
+
 def check_runs():
     """Все файлы зелёные с пустым HOME и с враждебным -- во втором случае из
     копии репозитория с враждебным .env (#217)."""
     out = []
     # PYTHONUSERBASE здесь уже задан импортом: без него смена HOME прятала
     # бы nats-py самого файла проверок, а не машину.
-    base = {k: v for k, v in os.environ.items() if not k.startswith(MACHINE)}
     hostile, values = hostile_home()
     repo = hostile_repo(values)
     homes = {"clean": (tempfile.mkdtemp(prefix="mop-test-clean-"), {}, ROOT),
@@ -170,7 +250,7 @@ def check_runs():
         for f in files():
             f = os.path.join(root, "tests", os.path.basename(f))
             runs.append((label, f, subprocess.Popen(
-                [sys.executable, f], env={**base, **env, "HOME": home},
+                [sys.executable, f], env=child_env({**env, "HOME": home}),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=root)))
     for label, f, p in runs:
         text = p.communicate()[0]
@@ -182,7 +262,8 @@ def check_runs():
 
 def main():
     failed = []
-    for check in (check_imports, check_children, check_runs):
+    for check in (check_imports, check_children, check_skip_strict, check_own_skips,
+                  check_strict_children, check_runs):
         failed += [f"FAIL {check.__name__}: {line}" for line in check()]
     if failed:
         print("\n".join(failed))

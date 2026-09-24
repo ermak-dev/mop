@@ -8,8 +8,8 @@
 
 Сети нет. Логика провайдера -- над каталогом-заглушкой (Directory: найти
 пользователя, его группы, проверить пароль); переходник на ldap3 -- на его
-MOCK_SYNC, если ldap3 есть на машине, иначе строка SKIPPED, а не зелёный
-итог.
+MOCK_SYNC, если ldap3 есть на машине, иначе пропуск hermetic.skip (#229):
+строка в выводе, а при MOP_TESTS_STRICT=1 -- провал файла.
 
 HYPOTHESIS: подключить каталог организации некуда -- личности есть только в
 файле операторов и MOP_OPERATORS.
@@ -244,8 +244,8 @@ def check_ldap3():
     try:
         import ldap3
     except ImportError:
-        print("SKIPPED the ldap3 adapter: no ldap3 on this machine -- "
-              "only the provider over a stub directory is checked")
+        hermetic.skip("the ldap3 adapter", "no ldap3 on this machine -- "
+                      "only the provider over a stub directory is checked")
         return []
     out = []
     server = ldap3.Server("mock")
