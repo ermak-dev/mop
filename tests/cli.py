@@ -1556,7 +1556,8 @@ def check_fallback_model_183():
     undo = no_network()
     keep = (puppets.switch_model, os.environ.get("MOP_FALLBACK_MODEL"))
     try:
-        puppets.switch_model = lambda node, name, model: typed.append(model)
+        # force -- лечение проходит ворота владения (#40).
+        puppets.switch_model = lambda node, name, model, force=False: typed.append(model)
         os.environ["MOP_FALLBACK_MODEL"] = "sonnet-for-183"
         got = puppets.treat({"action": "model", "name": "pu-mop-1",
                              "alloc": {"NodeName": "n1"}})

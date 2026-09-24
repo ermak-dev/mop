@@ -303,15 +303,17 @@ def tail(name: str, lines: int = 40, grep: str = "") -> str:
     "commands don't pass through the channel: the message is queued with "
     "skipSlashCommands. Escape dismisses a stuck dialog without answering "
     "it: a stuck puppet is invisible to the roster, and messages pile up "
-    f"unread in the queue. Allowed: {', '.join(SLASH_ALLOWED)}."))
-def slash(name: str, command: str) -> str:
+    f"unread in the queue. Allowed: {', '.join(SLASH_ALLOWED)}. A puppet "
+    "another master leads is refused with that master's name; force=true "
+    "types anyway."))
+def slash(name: str, command: str, force: bool = False) -> str:
     if not command.split()[0:1] or command.split()[0] not in SLASH_ALLOWED:
         return f"only allowed: {', '.join(SLASH_ALLOWED)}"
     node = channel.puppet_node(name, MASTER)
     if command.startswith("/model "):
-        puppets.switch_model(node, name, command.split(None, 1)[1])
+        puppets.switch_model(node, name, command.split(None, 1)[1], force)
         return f"{name}: {command}"
-    return f"{name}: {command}\n{puppets.type_command(node, name, command)[-1500:]}"
+    return f"{name}: {command}\n{puppets.type_command(node, name, command, force)[-1500:]}"
 
 
 # ─── инструменты: командлеты (#160) ──────────────────────────────────────

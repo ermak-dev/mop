@@ -31,9 +31,10 @@ import time
 
 import base64
 
-from . import (bootstrap, bus, busnames, config, creds, landing, natsconf, nodes,
-               nomad, project_secrets, projects, puppets, service, spec, state)
-from .domain import Project, Verb
+from . import (bootstrap, bus, busnames, config, creds, landing, lease, natsconf,
+               nodes, nomad, project_secrets, projects, puppets, service, spec,
+               state)
+from .domain import Owner, Project, Verb
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
@@ -284,6 +285,64 @@ def store_workspace(root, name, req):
     так перерегистрация без рабочей копии не стирает положенное."""
     if "workspace" in req:
         bootstrap.store(root, name, req["workspace"] or "")
+
+
+# ─── ворота владения (#40) ───────────────────────────────────────────────
+# Кто ведёт задание папета, знает только его клон (`.git/mop-owner`, #161),
+# а клон -- на узле. Сервис спрашивает агента ДО изменения в Nomad: рестарт,
+# останов, перерегистрация и снос чужого папета убивали работу другого
+# мастера посреди тикета, и сверял владельца один send.
+GATE_TIMEOUT = 15
+
+
+def _clone_of(name):
+    """Факты клона от агента узла, где стоит папет.
+    -> None (аллокации нет) | {"clone": ...} | {"error": ...}."""
+    alloc = nomad.latest_alloc(name)
+    if not alloc or not alloc.get("NodeName"):
+        return None
+    try:
+        return bus.request(alloc["NodeName"], "clone", name=name,
+                           timeout=GATE_TIMEOUT, project=bus.ADMIN)
+    except bus.BusError as e:
+        return {"error": str(e)}
+
+
+def gate(name, req, facts, now):
+    """Пускать ли изменяющий глагол проекта. -> (отказ|None, заметка|None).
+
+    facts -- ответ _clone_of. Аллокации нет -- спросить некого и убивать
+    нечего: проходит. Агент не ответил -- «не знаю» не значит «ничей»
+    (AGENT SILENT: папет может работать): отказ с причиной, force его
+    снимает. Остальное решает lease.may_touch, как у агента."""
+    force = bool(req.get("force"))
+    if facts and facts.get("error"):
+        if force:
+            return None, f"owner unknown: {facts['error']}"
+        return (f"{name}: cannot tell who leads it — {facts['error']}; "
+                f"repeat with force if you know it is free"), None
+    clone = (facts or {}).get("clone")
+    owner = Owner.from_dict((clone or {}).get("owner"))
+    ok, note = lease.may_touch(owner, req.get("owner"), clone, now, force)
+    return (None, note) if ok else (f"{name}: {note}", None)
+
+
+def _gated(fn):
+    """Обработчик за воротами владения. Оператор (субъект admin) проходит,
+    не спрашивая агента: gc, doctor и sweep не должны упираться в аренду и
+    в молчащий узел."""
+    def run(project, req):
+        note = None
+        if project != bus.ADMIN:
+            why, note = gate(req["name"], req, _clone_of(req["name"]), time.time())
+            if why:
+                return {"error": why}
+        out = fn(project, req)
+        if note and not out.get("error"):
+            out = dict(out, owner_note=note)
+        return out
+    run.__name__ = fn.__name__
+    return run
 
 
 def _add(project, req):
@@ -660,15 +719,16 @@ def _landing(project, req):
 # `alloc` нет: `puppets.delete` спрашивает аллокацию УЖЕ СНЯТОГО джоба,
 # дожидаясь, пока тот перестанет быть running, и отказ там оставлял тело
 # работать сиротой (#89). `spec` в их числе: на его отказе стоит `lib.guard`.
+# _gated -- изменяющие папета: за воротами владения (#40).
 VERBS = {
     "ping":           Verb(_ping,           PROJECT, False, False),
     "roster":         Verb(_roster,         PROJECT, False, False),
     "pool":           Verb(_pool,           PROJECT, False, False),
     "add":            Verb(_add,            PROJECT, False, False),
-    "update":         Verb(_update,         PROJECT, True,  True),
-    "restart":        Verb(_restart,        PROJECT, True,  True),
-    "stop":           Verb(_stop,           PROJECT, True,  True),
-    "delete":         Verb(_delete,         PROJECT, True,  True),
+    "update":         Verb(_gated(_update), PROJECT, True,  True),
+    "restart":        Verb(_gated(_restart), PROJECT, True,  True),
+    "stop":           Verb(_gated(_stop), PROJECT, True,  True),
+    "delete":         Verb(_gated(_delete), PROJECT, True,  True),
     "alloc":          Verb(_alloc,          PROJECT, True,  False),
     "spec":           Verb(_spec,           PROJECT, True,  True),
     "secret_put":     Verb(_secret_put,     SECRET,  False, False),

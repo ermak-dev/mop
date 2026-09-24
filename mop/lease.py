@@ -42,22 +42,41 @@ def live(owner, clone, now):
     return holds_work(clone) or now - owner.at < WINDOW
 
 
+def may_touch(owner, me, clone, now, force=False, operator=False, retry="repeat"):
+    """Можно ли me изменить папета, чьё задание ведёт owner (#40).
+    -> (можно, причина).
+
+    Одни ворота на все изменяющие действия: send, slash/type, wipe, restart,
+    stop, update, delete, recycle. Пока владельца сверял один send, любой
+    мастер проекта рестартом или сносом убивал работу другого посреди тикета.
+
+    Свой или ничей -- можно. Чужой -- нельзя, пока аренда живая (в клоне
+    работа или диспатч моложе окна); безымянному тоже нельзя, иначе ворота
+    обходятся тем, что не назваться. force -- можно, причина называет, у
+    кого. Оператор (субъект admin: gc, doctor, sweep) проходит всегда: узел
+    и пул -- его, и упереться в аренду значит не вылечить пул. retry --
+    глагол подсказки в отказе: у send она прежняя, «send with force»."""
+    if operator or not owner or owner.user == me:
+        return True, None
+    if force:
+        return True, f"taken from {owner.user}"
+    if not live(owner, clone, now):
+        return True, None
+    minutes = max(int((now - owner.at) // 60), 0)
+    what = "work in the clone" if holds_work(clone) else "dispatched, no branch yet"
+    return False, (f"led by {owner.user} ({what}, last sent {minutes} min ago): "
+                   f"ask them, or {retry} with force to take it over")
+
+
 def verdict(owner, me, clone, now, force=False):
     """Что делать с `send` от me. owner -- domain.Owner или None.
     -> (действие, причина).
 
     действие: "pass" -- слать, аренду не трогать (отправитель не назвался:
     папет пишет соседу); "take" -- слать и записать me владельцем;
-    "refuse" -- не слать. Причина -- для отказа и для отобранной аренды."""
+    "refuse" -- не слать. Причина -- для отказа и для отобранной аренды.
+    Решает may_touch (#40): send отличается только тем, что пишет аренду."""
     if not me:
         return "pass", None
-    if not owner or owner.user == me:
-        return "take", None
-    if force:
-        return "take", f"taken from {owner.user}"
-    if not live(owner, clone, now):
-        return "take", None
-    minutes = max(int((now - owner.at) // 60), 0)
-    what = "work in the clone" if holds_work(clone) else "dispatched, no branch yet"
-    return "refuse", (f"led by {owner.user} ({what}, last sent {minutes} min ago): "
-                      f"ask them, or send with force to take it over")
+    ok, why = may_touch(owner, me, clone, now, force, retry="send")
+    return ("take" if ok else "refuse"), why

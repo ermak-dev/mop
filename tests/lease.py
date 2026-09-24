@@ -84,6 +84,46 @@ def main():
     check("not live: stale on clean", lease.live(rec("olga", lease.WINDOW + 1), CLEAN, NOW), False)
     check("not live: no record", lease.live(None, DIRTY, NOW), False)
 
+    # ── ворота владения (#40) ─────────────────────────────────────────
+    # HYPOTHESIS: владельца сверяет только send; slash/type, wipe, restart,
+    # update, delete, recycle пускают любого мастера проекта к папету,
+    # которого ведёт другой, и убивают его работу посреди тикета.
+    # SOLUTION: одна чистая функция lease.may_touch на все изменяющие
+    # действия; verdict send'а -- поверх неё, и решение одно.
+    # STATUS: FIXED — see #40
+    fn = getattr(lease, "may_touch", None)
+    if fn is None:
+        check("lease.may_touch exists", False, True)
+    else:
+        def touch(owner, me, clone, force=False, operator=False):
+            return fn(owner, me, clone, NOW, force=force, operator=operator)
+
+        check("touch: nobody's", touch(None, "anton", CLEAN)[0], True)
+        check("touch: nobody's, anonymous", touch(None, None, DIRTY)[0], True)
+        check("touch: own with work", touch(rec("anton", 9999), "anton", DIRTY)[0], True)
+        for what, clone in (("branch", ON_BRANCH), ("dirty", DIRTY), ("ahead", AHEAD),
+                            ("unknown clone", None)):
+            ok, why = touch(rec("olga", 9999), "anton", clone)
+            check(f"touch: foreign with work ({what}) refused", ok, False)
+            check(f"touch: refusal names the owner ({what})",
+                  "olga" in (why or "") and "force" in (why or ""), True)
+        check("touch: foreign inside the dispatch window refused",
+              touch(rec("olga", lease.WINDOW - 1), "anton", CLEAN)[0], False)
+        check("touch: foreign expired on a clean clone",
+              touch(rec("olga", lease.WINDOW + 1), "anton", CLEAN), (True, None))
+        # Безымянный вызывающий к чужой живой аренде -- отказ: иначе ворота
+        # обходятся тем, что не назваться.
+        check("touch: anonymous against a live lease refused",
+              touch(rec("olga", 5), None, DIRTY)[0], False)
+        ok, why = touch(rec("olga", 5), "anton", DIRTY, force=True)
+        check("touch: force passes", ok, True)
+        check("touch: force names whom", "olga" in (why or ""), True)
+        # Оператор (gc, doctor, wipe) не упирается никогда.
+        check("touch: operator passes a foreign lease with work",
+              touch(rec("olga", 5), "anton", DIRTY, operator=True)[0], True)
+        check("touch: operator passes anonymously",
+              touch(rec("olga", 5), None, DIRTY, operator=True)[0], True)
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 

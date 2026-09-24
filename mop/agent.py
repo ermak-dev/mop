@@ -412,6 +412,33 @@ async def _unclaim(name, undo):
     return why(out, code) if code != 0 else None
 
 
+async def _gate(name, req):
+    """Ворота владения (#40) изменяющего глагола. -> (отказ|None, заметка|None).
+
+    Та же lease.may_touch, что за send: чужая живая аренда -- отказ с именем
+    владельца. Оператор -- субъект admin, а не поле тела. Зовут под
+    _owner_locks: между проверкой и действием чужой claim не вклинится."""
+    clone = await clone_facts(name)
+    owner = Owner.from_dict((clone or {}).get("owner"))
+    ok, note = lease.may_touch(owner, req.get("owner"), clone, time.time(),
+                               bool(req.get("force")),
+                               req.get("_project") == busnames.ADMIN)
+    return (None, note) if ok else (f"{name}: {note}", None)
+
+
+async def _gated(name, req, act):
+    """act() под замком папета, если ворота пустили. Заметка о забранной
+    аренде -- полем owner_note, как у send."""
+    async with _owner_locks.setdefault(name, asyncio.Lock()):
+        refused, note = await _gate(name, req)
+        if refused:
+            return {"error": refused}
+        out = await act()
+    if note and not out.get("error"):
+        out["owner_note"] = note
+    return out
+
+
 async def v_send(conn, req):
     """Сообщение в сессию папета. -> {msg_id} либо {error}.
 
@@ -538,11 +565,15 @@ async def v_wipe(conn, req):
     name = req["name"]
     if not driver.valid_name(name):
         return {"error": driver.bad_name(name)}
-    if await tmux_alive(name):
-        return {"error": f"{name}: tmux session is alive — stop the job first"}
-    # Событие до сноса: после него origin клона спрашивать уже не у кого.
-    await _event(conn, "wipe", name)
-    return await DRIVER.destroy(name)
+
+    async def act():
+        if await tmux_alive(name):
+            return {"error": f"{name}: tmux session is alive — stop the job first"}
+        # Событие до сноса: после него origin клона спрашивать уже не у кого.
+        await _event(conn, "wipe", name)
+        return await DRIVER.destroy(name)
+    # Замок держится весь снос: send в сносимый клон всё равно не доехал бы.
+    return await _gated(name, req, act)
 
 
 async def v_type(conn, req):
@@ -560,6 +591,11 @@ async def v_type(conn, req):
     # и отказ назвал бы не ту причину (#171).
     if not driver.valid_name(name):
         return {"error": driver.bad_name(name)}
+    return await _gated(name, req, lambda: _type(conn, name, command))
+
+
+async def _type(conn, name, command):
+    """Ввод в пейн, когда ворота уже пустили."""
     if command in KEYS_ALLOWED:
         # Голая клавиша: ни очистки строки, ни Enter следом — Escape снимает
         # диалог, а Enter после него отправил бы пустой ход.
@@ -579,6 +615,13 @@ async def v_type(conn, req):
         return {"error": out.strip() or f"tmux exit {code}"}
     await _event(conn, "type", name, text=command)
     return {"screen": out}
+
+
+async def v_clone(_conn, req):
+    """Факты клона папета, и при мёртвой сессии тоже (#40): по ним сервис
+    кластера решает, можно ли рестарт, update, delete. state их не даёт,
+    пока tmux не жив, -- а работа в клоне от этого не пропадает."""
+    return {"clone": await clone_facts(req["name"])}
 
 
 async def v_write(_conn, req):
@@ -735,6 +778,7 @@ VERBS = {
     "wipe":   Verb(v_wipe,   MASTER, True),
     "usage":  Verb(v_usage,  MASTER, False),
     "junk":   Verb(v_junk,   NODE,   False),
+    "clone":  Verb(v_clone,  MASTER, True),
 }
 # Прежние наборы -- выводом из таблицы, для тех, кто их читает.
 PUBLIC_VERBS = tuple(v for v, d in VERBS.items() if d.scope == PUBLIC)

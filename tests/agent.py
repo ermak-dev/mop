@@ -33,14 +33,17 @@ OLD_NAMED = ("state", "send", "tail", "type", "wipe")
 
 
 def old_decision(verb, public, project, name, mine):
-    """Отказ, как его давал handle до #150, либо None -- глагол исполняется."""
-    if verb not in OLD_VERBS:
-        return f"no such verb {verb}; available: {', '.join(sorted(OLD_VERBS))}"
+    """Отказ, как его давал handle до #150, либо None -- глагол исполняется.
+    Правила прежние; таблица -- с добавленными после (ADDED, ниже): они
+    мастерские и именующие."""
+    verbs, named = OLD_VERBS + ADDED, OLD_NAMED + ADDED
+    if verb not in verbs:
+        return f"no such verb {verb}; available: {', '.join(sorted(verbs))}"
     if public and verb not in OLD_PUBLIC:
         return f"verb {verb} is available to the master only"
     if verb in OLD_ADMIN and project != busnames.ADMIN:
         return f"verb {verb} is node-level, not given to project {project}"
-    if verb in OLD_NAMED and not mine:
+    if verb in named and not mine:
         return f"puppet {name} is not in project {project}"
     return None
 
@@ -53,13 +56,19 @@ def new_decision(verb, public, project, name, mine):
     return why
 
 
+# После #150 -- глаголы, добавленные с тех пор, в конце таблицы: clone --
+# факты клона для ворот сервиса кластера (#40), мастерский и именующий.
+ADDED = ("clone",)
+
+
 def check_sets():
-    """Прежние четыре набора выводятся из таблицы -- те же и в том же порядке."""
+    """Прежние четыре набора выводятся из таблицы -- те же и в том же порядке;
+    добавленные после (ADDED) -- в конце."""
     out = []
-    for got, want, what in ((tuple(agent.VERBS), OLD_VERBS, "VERBS"),
+    for got, want, what in ((tuple(agent.VERBS), OLD_VERBS + ADDED, "VERBS"),
                             (agent.PUBLIC_VERBS, OLD_PUBLIC, "PUBLIC_VERBS"),
                             (agent.ADMIN_VERBS, OLD_ADMIN, "ADMIN_VERBS"),
-                            (agent.NAMED_VERBS, OLD_NAMED, "NAMED_VERBS")):
+                            (agent.NAMED_VERBS, OLD_NAMED + ADDED, "NAMED_VERBS")):
         if tuple(got) != want:
             out.append(f"{what} -> {tuple(got)}, wanted {want}")
     return out
@@ -70,7 +79,7 @@ def check_decisions():
     (admin / проект) x папет свой или чужой: тот же ответ, что до #150.
     Отказ, ставший допуском, -- смена прав, а не рефакторинг."""
     out = []
-    for verb in OLD_VERBS + ("nosuch", None, ""):
+    for verb in OLD_VERBS + ADDED + ("nosuch", None, ""):
         for public in (True, False):
             for project in (busnames.ADMIN, "mop"):
                 for mine in (True, False):
@@ -443,11 +452,84 @@ def check_unclaim_race_189():
     return out
 
 
+def check_gates_40():
+    """HYPOTHESIS (#40): владельца сверяет только send; type (slash) и wipe
+    пускают любого мастера проекта к папету, которого ведёт другой.
+    SOLUTION: те же ворота (lease.may_touch) под тем же замком на папета,
+    что у send; оператор (субъект admin) проходит всегда, force -- называя,
+    у кого. Глагол clone отдаёт факты клона и при мёртвой сессии: по ним
+    решает сервис кластера.
+    STATUS: FIXED — see #40"""
+    import asyncio
+    import time
+    from mop.domain import Owner
+    out = []
+    olga = Owner("olga", int(time.time()) - 60).to_dict()
+    clone = {"cur": "bug/1-x", "def": "master", "dirty": 2, "ahead": 0, "owner": olga}
+    shelled, destroyed = [], []
+    saved = (agent.bsh, agent.clone_facts, agent.tmux_alive, agent.DRIVER, agent._event)
+
+    async def bsh(name, script, timeout=20):
+        shelled.append(script)
+        return "", 0
+
+    async def facts(name):
+        return dict(clone)
+
+    async def dead(name):
+        return False
+
+    async def no_event(*a, **k):
+        return None
+
+    class Driver:
+        async def destroy(self, name):
+            destroyed.append(name)
+            return {"target": "gone"}
+    try:
+        agent.bsh, agent.clone_facts, agent.tmux_alive = bsh, facts, dead
+        agent.DRIVER, agent._event = Driver(), no_event
+        base = {"name": "pu-mop-1", "_project": "mop"}
+        for verb, fn, extra, touched in (("type", agent.v_type, {"command": "/status"}, shelled),
+                                         ("wipe", agent.v_wipe, {}, destroyed)):
+            for who, more, allowed in (("another master", {"owner": "anton"}, False),
+                                       ("anonymous", {}, False),
+                                       ("the owner", {"owner": "olga"}, True),
+                                       ("force", {"owner": "anton", "force": True}, True),
+                                       ("the operator", {"owner": "anton", "_project": "admin"}, True)):
+                touched.clear()
+                got = asyncio.run(fn(None, {**base, **extra, **more}))
+                if allowed and (got.get("error") or not touched):
+                    out.append(f"{verb} by {who} must pass: {got!r}")
+                if not allowed and ("olga" not in (got.get("error") or "") or touched):
+                    out.append(f"{verb} by {who} must be refused naming olga, "
+                               f"touching nothing: {got!r}, {touched}")
+                if who == "force" and "olga" not in (got.get("owner_note") or ""):
+                    out.append(f"{verb} with force must name whom: {got!r}")
+        # Ничей -- как до #40: запрос без owner проходит.
+        clone["owner"] = None
+        shelled.clear()
+        got = asyncio.run(agent.v_type(None, {**base, "command": "/status"}))
+        if got.get("error") or not shelled:
+            out.append(f"type on nobody's puppet must pass as before: {got!r}")
+        fn = getattr(agent, "v_clone", None)
+        if fn is None:
+            out.append("agent.v_clone is missing")
+        else:
+            got = asyncio.run(fn(None, dict(base)))
+            if got != {"clone": clone}:
+                out.append(f"clone must return the clone's facts: {got!r}")
+    finally:
+        (agent.bsh, agent.clone_facts, agent.tmux_alive, agent.DRIVER, agent._event) = saved
+    return out
+
+
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
                   check_timeouts_171, check_unclaim_181, check_intake,
-                  check_main_169, check_subject_173, check_unclaim_race_189):
+                  check_main_169, check_subject_173, check_unclaim_race_189,
+                  check_gates_40):
         try:
             failed += check()
         except Exception as e:
