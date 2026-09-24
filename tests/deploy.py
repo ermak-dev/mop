@@ -471,6 +471,107 @@ def check_include_loop_var(check):
           sorted(found))
 
 
+# ── reload nats -- по файлу, а не по тексту (#199) ───────────────────────
+# Наблюдение (mop.corp.ermak.dev): новый узел wate-wsl, deploy переписал
+# /etc/nats/users.conf, а nats не перезагружался с 23.09 -- агент узла
+# получил «Authorization Violation», deploy упал на «Confirm the agent is
+# connected».
+# HYPOTHESIS: задача `mop cluster users` решала о changed по «, changed» в
+# выводе, а #182 сделал команду молчащей на успехе: changed не бывает
+# никогда, хендлер reload nats не зовётся.
+# SOLUTION: решает файл: stat users.conf с контрольной суммой до команды и
+# после, changed у второго stat -- суммы разошлись, notify reload nats там же.
+# Сама команда changed не объявляет. Остальные читатели вывода командлетов --
+# только pve-facts (JSON, #159/#179/#182 его не трогали), список закреплён.
+# RESULT: до правки красные 5 из 8 (включая закреплённый список: в нём был
+# cluster users). Живой прогон трёх задач в песочнице (ansible-core 2.21.4,
+# файл вместо /etc/nats/users.conf): файл сменился -- changed и хендлер,
+# не сменился -- ok без хендлера, файла не было -- хендлер, --check -- ok.
+# STATUS: FIXED — see #199
+TOUCHED = ("cluster users", "driver build", "sweep", "update", "llm", "doctor",
+           "gc", "restart", "node drain", "node forget", "master", "setup", "mcp")
+
+
+def mop_command(t):
+    """Команда `bin/mop ...` задачи словами после bin/mop, или None."""
+    for mod in ("ansible.builtin.command", "ansible.builtin.shell", "command", "shell"):
+        arg = t.get(mod)
+        if arg is None:
+            continue
+        if isinstance(arg, dict):
+            words = [str(w) for w in arg.get("argv") or []] or \
+                str(arg.get("cmd", "")).split()
+        else:
+            words = str(arg).split()
+        for i, w in enumerate(words):
+            if w.endswith("bin/mop") or w.endswith("bin/mop'"):
+                return " ".join(x for x in words[i + 1:i + 3] if not x.startswith("-"))
+    return None
+
+
+def stdout_readers():
+    """Задачи, читающие вывод командлета: [(файл, команда, регистр)]."""
+    text = "\n".join(l for f in deploy_files() if f.endswith(".yml")
+                     for l in open(f).read().splitlines()
+                     if not l.lstrip().startswith("#"))
+    out = []
+    for f, t in all_tasks():
+        cmd, reg = mop_command(t), t.get("register")
+        if cmd and reg and re.search(rf"\b{reg}\s*(\.|\[')stdout", text):
+            out.append((os.path.relpath(f, DEPLOY), cmd, reg))
+    return sorted(out)
+
+
+def check_users_reload_199(check):
+    """users.conf менялся -- nats перезагружается; решает контрольная сумма."""
+    # Кто ещё читает вывод командлета: список закреплён. pve-facts печатает
+    # JSON -- данные, не отчёт, и выводом #159/#179/#182 не тронут.
+    found = stdout_readers()
+    check("#199: commandlet output read only by the pinned tasks", found == [
+        ("pve-build.yml", "driver pve-facts", "build_facts"),
+        ("pve-build.yml", "driver pve-facts", "node_facts"),
+        ("roles/pve/tasks/main.yml", "driver pve-facts", "node_facts")], found)
+    check("#199: no task reads the output of a commandlet made quiet",
+          not [x for x in found if x[1] in TOUCHED], found)
+    check("#199: mop_command sees cluster users, cluster check, bootstrap check",
+          {"cluster users", "cluster check", "bootstrap check"} <=
+          {mop_command(t) for _, t in all_tasks()},
+          sorted({c for c in (mop_command(t) for _, t in all_tasks()) if c}))
+
+    f = os.path.join(DEPLOY, "roles", "bus", "tasks", "projects.yml")
+    tasks = yaml.safe_load(open(f)) or []
+    at = [i for i, t in enumerate(tasks) if mop_command(t) == "cluster users"]
+    check("#199: one task runs mop cluster users", len(at) == 1, at)
+    if len(at) != 1:
+        return
+    i, run = at[0], tasks[at[0]]
+    check("#199: its changed does not read the command's output",
+          "stdout" not in str(run.get("changed_when", "")), run.get("changed_when"))
+
+    def stat_of(t):
+        st = t.get("ansible.builtin.stat") or {}
+        return st if str(st.get("path", "")).endswith("/etc/nats/users.conf") \
+            and st.get("get_checksum", True) is not False else None
+    before = [t for t in tasks[:i] if stat_of(t) and t.get("register")]
+    after = [t for t in tasks[i + 1:] if stat_of(t) and t.get("register")]
+    check("#199: users.conf is stat'ed before the command", len(before) == 1,
+          [t.get("name") for t in before])
+    check("#199: and after it", len(after) == 1, [t.get("name") for t in after])
+    if len(before) != 1 or len(after) != 1:
+        return
+    b, a = before[0]["register"], after[0]["register"]
+    decide = [t for t in tasks[i + 1:] if "reload nats" in str(t.get("notify", ""))]
+    check("#199: one task after the command notifies reload nats", len(decide) == 1,
+          [t.get("name") for t in decide])
+    check("#199: the command itself notifies nothing", not run.get("notify"),
+          run.get("notify"))
+    if decide:
+        cw = str(decide[0].get("changed_when", ""))
+        check("#199: changed is the checksums before and after differing",
+              f"{b}.stat.checksum" in cw and f"{a}.stat.checksum" in cw
+              and "!=" in cw and "stdout" not in cw, cw)
+
+
 def main():
     cases = bad = 0
 
@@ -709,6 +810,7 @@ def main():
     check_probes(check)
     check_body_sizes(check, can_render)
     check_include_loop_var(check)
+    check_users_reload_199(check)
 
     print(f"deploy: {cases - bad}/{cases}" + (" FAILED" if bad else " ok"))
     return 1 if bad else 0
