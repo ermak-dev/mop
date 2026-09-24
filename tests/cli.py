@@ -850,6 +850,7 @@ def check_output_rest():
         failed += 1
         print(f"FAIL driver build echoes on success: {out!r} code {code!r}")
     failed += check_output_179()
+    failed += check_output_182()
     return failed
 
 
@@ -929,6 +930,80 @@ def check_output_179():
         lib.guard, bus.call_cluster, keys.push_llm_keys, lib.workspace_text = keep
     return failed
 
+
+
+def check_output_182():
+    """HYPOTHESIS (#182): после #179 `mop driver build` эхом печатал
+    содержимое манифеста («asks for k=v»), отчёт о пересозданных телах и
+    объявлении образа, а `mop cluster users` -- «changed/unchanged».
+    SOLUTION: сборка показывает шаги (lib.Progress: строка на терминале,
+    тишина не на терминале), факты -- шагами, а не отчётом; отказ подъёма
+    папета и объявления образа -- stderr с именем; users на успехе молчит.
+    STATUS: FIXED — see #182"""
+    from mop import bootstrap, image, natsconf, nomad, projects, spec
+    from mop.cli.cluster import users
+    from mop.cli.driver import build
+    failed = 0
+    undo = no_network()
+    through = lambda main, argv: silent_run(lambda a: cli.run(main, a), argv)
+    keep = (image.prepare, image.build, image.clear, image.bake, image.announce,
+            nomad.register, spec.job_spec, projects.read, natsconf.apply,
+            natsconf.reload)
+    try:
+        got = {"project": "p", "asks": {"MOP_CORES": "8"}, "alien": [], "legacy": []}
+        image.prepare = lambda origin, root: got
+        gone = [{"name": "pu-p-1", "origin": "git@h:g/p.git", "llm": "claude", "node": "hyper"}]
+        image.clear = lambda project, force=False: list(gone)
+        image.bake = lambda *a, **kw: 0
+        image.announce = lambda project: [("hyper", "announced, serves p"),
+                                          ("gpu", "not a container node"),
+                                          ("old", "already announced")]
+        spec.job_spec = lambda *a, **kw: {}
+        nomad.register = lambda job: None
+
+        # Успех не на терминале -- тишина: ни эха манифеста, ни отчёта.
+        out, err, code = through(build.main, ["git@h:g/p.git"])
+        if out or err or code:
+            failed += 1
+            print(f"FAIL driver build must be silent on success off a TTY: "
+                  f"out {out!r} err {err!r} code {code!r}")
+
+        # Папет не поднялся -- громко, с именем и причиной.
+        def refuse(job):
+            raise RuntimeError("Nomad said no")
+        nomad.register = refuse
+        out, err, code = through(build.main, ["git@h:g/p.git"])
+        if out or not code or "pu-p-1" not in err or "Nomad said no" not in err:
+            failed += 1
+            print(f"FAIL a failed re-raise must reach stderr with the puppet: "
+                  f"out {out!r} err {err!r} code {code!r}")
+        nomad.register = lambda job: None
+
+        # Узел, которому образ объявить не вышло (#175), -- stderr.
+        image.announce = lambda project: [("hyper", "announced, serves p"),
+                                          ("bad", "bad: unknown driver 'bogus'")]
+        out, err, code = through(build.main, ["git@h:g/p.git"])
+        if out or "bad: unknown driver 'bogus'" not in err or "hyper" in err:
+            failed += 1
+            print(f"FAIL a failed announcement must reach stderr alone: "
+                  f"out {out!r} err {err!r} code {code!r}")
+
+        # cluster users на успехе молчит -- и с --reload.
+        projects.read = lambda: ["git@h:g/p.git"]
+        natsconf.apply = lambda names, creds: (True, None)
+        natsconf.reload = lambda: None
+        for argv in ([], ["--reload"]):
+            out, err, code = through(users.main, argv)
+            if out or err or code:
+                failed += 1
+                print(f"FAIL cluster users {argv} must be silent on success: "
+                      f"out {out!r} err {err!r} code {code!r}")
+    finally:
+        (image.prepare, image.build, image.clear, image.bake, image.announce,
+         nomad.register, spec.job_spec, projects.read, natsconf.apply,
+         natsconf.reload) = keep
+        undo()
+    return failed
 
 
 def check_empty_llm():
