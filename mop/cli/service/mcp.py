@@ -195,7 +195,9 @@ def on_inbox(m):
     "and claude sessions on this machine. Fuller than the built-in "
     "ListAgents, which only sees this host. For a puppet it shows the true "
     "state (free/busy/HUNG/no model quota/unsaved work in the clone), "
-    "LLM profile, and repository; for a master, the address to reply to."))
+    "LLM profile, and repository; for a master, the address to reply to. "
+    "A master's address comes only from the masters table here or from the "
+    "envelope of a received message (from-name), never from `mop mcp --check`."))
 def agents(project: str = "") -> str:
     out = _roster(project) if MASTER else _roster_from_bus()
     out += _masters()
@@ -496,9 +498,12 @@ def main(argv=None):
         who = ("node" if not MASTER
                else "operator" if bus.PROJECT == bus.ADMIN
                else f"master of project {bus.PROJECT}")
+        # Ни адреса, ни инбокса (#226): --check -- отдельный процесс, и его
+        # pid не pid живого сервера сессии. Напечатанный адрес не слушал бы
+        # никто, а отданный папету увёл бы ответ в пустоту. Адрес мастера --
+        # только из таблицы мастеров в agents или из конверта письма.
         print(f"mop mcp: profile {who}, "
               f"{len(app._tool_manager.list_tools())} tools, bus {where}, "
-              f"address {me()}, inbox {MY_INBOX if MASTER else '(not a master)'}, "
               f"session: {channel.master_socket() or 'not found'}")
         return 0
     watch_inbox()
