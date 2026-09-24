@@ -20,6 +20,8 @@ import os
 import posixpath
 import re
 
+from . import fsutil
+
 ROOT = os.path.expanduser("~/.config/mop/project-secrets")
 # Файл едет одним сообщением шины (max_payload 1 МБ) в base64.
 MAX_BYTES = 512 * 1024
@@ -58,19 +60,12 @@ def project_dir(root, project):
     return os.path.join(root, project)
 
 
-def _mkdir(path):
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    os.chmod(path, 0o700)
+_mkdir = fsutil.make_private_dir
 
 
 def _write(path, data):
     _mkdir(os.path.dirname(path))
-    tmp = f"{path}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    fsutil.write_private(path, data)
 
 
 def _open_project(root, project):
@@ -113,21 +108,16 @@ def list_files(root, project):
 def _vars(root, project):
     try:
         with open(os.path.join(project_dir(root, project), VARS)) as f:
-            lines = f.read().splitlines()
+            text = f.read()
     except FileNotFoundError:
         return {}
-    out = {}
-    for line in lines:
-        k, sep, v = line.partition("=")
-        if sep:
-            out[k] = v
-    return out
+    # Байт в байт: значение с пробелами и кавычками обязано вернуться тем же.
+    return fsutil.read_kv(text, raw=True)
 
 
 def _write_vars(root, project, values):
     _open_project(root, project)
-    text = "".join(f"{k}={values[k]}\n" for k in sorted(values))
-    _write(os.path.join(project_dir(root, project), VARS), text.encode())
+    _write(os.path.join(project_dir(root, project), VARS), fsutil.write_kv(values))
 
 
 def set_var(root, project, key, value):

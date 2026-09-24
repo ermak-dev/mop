@@ -26,7 +26,7 @@
 import json
 import os
 
-from . import driver, puppets
+from . import driver, fsutil, puppets
 
 FILE = os.path.expanduser("~/.config/mop/projects")
 
@@ -121,8 +121,7 @@ def read_limits(path=LIMITS):
 
 def write_limits(limits, path=LIMITS):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(limits, f, sort_keys=True)
+    fsutil.write_atomic(path, json.dumps(limits, sort_keys=True))
 
 
 # ─── файл реестра ────────────────────────────────────────────────────────
@@ -137,8 +136,7 @@ def read(path=FILE):
 
 def write(lines, path=FILE):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write("".join(f"{s}\n" for s in sorted(lines)))
+    fsutil.write_atomic(path, "".join(f"{s}\n" for s in sorted(lines)))
 
 
 def for_deploy(answer, local):

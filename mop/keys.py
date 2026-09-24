@@ -13,7 +13,7 @@ import json
 import os
 import time
 
-from . import bus, config, llm, puppets
+from . import bus, config, fsutil, llm, puppets
 
 # Логин claude.ai управляющей машины — то, что раздаётся на узлы.
 CREDENTIALS = os.path.expanduser("~/.claude/.credentials.json")
@@ -82,7 +82,7 @@ def llm_keys_blob():
     note = f"{puppets.LOCAL_KEYS_FILE} is missing: {', '.join(missing)}" if missing else None
     if not found:
         return None, note
-    return "".join(f"{k}={v}\n" for k, v in sorted(found.items())), note
+    return fsutil.write_kv(found), note
 
 
 def _as_file(path, text_or_bytes):

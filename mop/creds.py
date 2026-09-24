@@ -29,7 +29,7 @@ import json
 import os
 import ssl
 
-from . import busnames, config
+from . import busnames, config, fsutil
 
 ROOT = os.path.expanduser("~/.config/mop/servers")
 # Кред оператора-человека (#84): один файл на машину, а не по паролю на
@@ -195,8 +195,7 @@ def write_cert(directory, der):
     """Закрепить сертификат в каталоге сервера. -> путь."""
     make_dir(directory)
     path = os.path.join(directory, CERT_FILE)
-    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-        f.write(ssl.DER_cert_to_PEM_cert(der))
+    fsutil.write_private(path, ssl.DER_cert_to_PEM_cert(der))
     return path
 
 
@@ -247,8 +246,7 @@ def write_operator(directory, user, password):
     """Положить кред оператора. Каталог и файл закрыты: там пароль."""
     make_dir(directory)
     path = os.path.join(directory, OPERATOR_FILE)
-    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-        json.dump({"user": user, "password": password}, f)
+    fsutil.write_private(path, json.dumps({"user": user, "password": password}))
     return path
 
 
@@ -276,9 +274,8 @@ def token(directory):
 def make_dir(dest):
     """Каталог сервера и его родитель закрыты от всех: там пароли. mode у
     makedirs действует только на последний уровень, поэтому явно."""
-    os.makedirs(dest, mode=0o700, exist_ok=True)
     for d in (os.path.dirname(dest), dest):
-        os.chmod(d, 0o700)
+        fsutil.make_private_dir(d)
 
 
 def pick(listing):

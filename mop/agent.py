@@ -39,7 +39,7 @@ try:
 except ImportError:
     sys.exit("bus library needed: pip install --user --break-system-packages nats-py")
 
-from . import bus, busnames, driver, lease, usage
+from . import bus, busnames, driver, fsutil, lease, usage
 from .driver import clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
@@ -183,7 +183,7 @@ async def clone_facts(name):
         f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
         f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"; '
         f'echo "owner=$(head -1 {lease.FILE} 2>/dev/null)"')
-    kv = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+    kv = fsutil.read_kv(out, raw=True)
     if "dirty" not in kv:
         return None
     try:
