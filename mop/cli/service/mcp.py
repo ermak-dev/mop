@@ -43,7 +43,7 @@ from mcp.server.mcpserver import MCPServer                     # noqa: E402
 from mcp.types import ToolAnnotations                          # noqa: E402
 from pydantic import Field                                     # noqa: E402
 
-from mop import bus, busnames, cli, session, puppets, state  # noqa: E402
+from mop import bus, busnames, channel, cli, session, puppets, state  # noqa: E402
 from mop.cli import lib                                   # noqa: E402
 from mop.render import table                              # noqa: E402
 
@@ -128,7 +128,6 @@ def master_tool(**kw):
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
 SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status", "Escape")
-MAX_WAIT = 600
 # Опрос мастеров короче обычного запроса: мастер отвечает из памяти, а ждёт
 # его каждый вызов agents — gather не знает, сколько ответов ему ждать, и
 # честно досиживает до таймаута.
@@ -136,73 +135,11 @@ MASTERS_WAIT = 2
 
 
 # ─── адресация ───────────────────────────────────────────────────────────
-def puppet_node(name):
-    """Узел папета — адрес на шине.
-
-    У мастера узел берётся из ростера пула. На узле ростера нет, и мы
-    спрашиваем сам пул: чей агент признаёт этот папет своим."""
-    if MASTER:
-        # Своей копии «аллокация должна работать» здесь больше нет (#146):
-        # она читала отказ сервиса как «не размещён» и теряла причину.
-        return puppets.running_alloc(name)["NodeName"]
-    for answer in bus.gather("local"):
-        if name in (answer.get("puppets") or {}):
-            return answer["node"]
-    raise LookupError(f"{name}: no pool agent claims this puppet as its own")
-
-
-def master_socket():
-    """Инбокс сессии, которая нас запустила, — для асинхронных уведомлений.
-
-    Основной путь — переменная окружения, которую claude кладёт потомкам.
-    Запасной нужен, если окружение вычистили: идём вверх по цепочке
-    родителей и ищем pid, у которого есть файл сессии."""
-    sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
-    if sock:
-        return sock
-    by_pid = {str(d.get("pid")): d for d in session.sessions()}
-    pid = os.getpid()
-    for _ in range(24):
-        try:
-            with open(f"/proc/{pid}/status") as f:
-                ppid = next(l.split()[1] for l in f if l.startswith("PPid:"))
-        except (OSError, StopIteration):
-            return None
-        if ppid in by_pid:
-            return by_pid[ppid]["messagingSocketPath"]
-        pid = int(ppid)
-        if pid <= 1:
-            return None
-    return None
-
-
-def my_session():
-    """Файл сессии, которая нас запустила: имя, каталог, pid."""
-    sock = master_socket()
-    if not sock:
-        return None
-    for d in session.sessions():
-        if d.get("messagingSocketPath") == sock:
-            return d
-    return None
-
-
-def my_name():
-    """Как я представляюсь адресату — и каким именем он мне ответит.
-
-    У мастера это его инбокс на шине (`MASTER_ID`): имя сессии claude адресом
-    быть не может — оно выводится из каталога, не уникально и шине неизвестно.
-    Оператор, спрашивавший «пингани их, пусть ответят», назвал папетам именно
-    имя сессии, и ответить по нему было некуда.
-
-    У папета это имя его джоба: оно же имя клона, им же папет адресуется в
-    send. Берём из каталога сессии, а не из cwd процесса: сервер запускают
-    откуда угодно, а сессия папета всегда стоит в своём клоне."""
-    if MASTER:
-        return MASTER_ID
-    cwd = (my_session() or {}).get("cwd") or os.getcwd()
-    base = os.path.basename(os.path.realpath(cwd))
-    return base if base.startswith(puppets.JOB_PREFIX) else MASTER_ID
+# Маршрут, своя сессия и доставка -- mop/channel.py (#148); здесь только
+# профиль процесса, от имени которого канал говорит.
+def me():
+    """Как этот процесс представляется адресату (channel.my_name)."""
+    return channel.my_name(MASTER, MASTER_ID)
 
 
 def on_inbox(m):
@@ -215,10 +152,10 @@ def on_inbox(m):
     `who` — единственный глагол, который не кладут в сессию: им спрашивают
     общий инбокс проекта, «кто из мастеров жив»."""
     if m.get("verb") == "who":
-        d = my_session() or {}
+        d = channel.my_session() or {}
         return {"master": MASTER_ID, "project": bus.PROJECT, "user": bus.login(),
                 "session": d.get("name"), "cwd": d.get("cwd")}
-    sock = master_socket()
+    sock = channel.master_socket()
     if not sock:
         return {"error": f"master {MASTER_ID} has no session — nowhere to deliver the note"}
     # priority по умолчанию later: так кладёт вести агент, и перебивать ход
@@ -325,101 +262,28 @@ def send(to: str, message: str, priority: str = "next",
         return f"priority must be one of {', '.join(session.PRIORITIES)}"
     if not message.strip():
         return "empty message, nothing to send"
-
-    # Три адреса, и порядок разбора не произвольный. Папет узнаётся префиксом
-    # джоба — это единственное имя, которое строит сам пул. Дальше пробуем свой
-    # хост: сессия рядом дешевле и не занимает шину. Всё остальное — мастер,
-    # потому что больше адресов не бывает, и «не нашёл здесь» обязано вести к
-    # нему, а не в LookupError: ровно этим отчёты папетов и терялись.
-    if to.startswith(puppets.JOB_PREFIX):
-        return _send_to_puppet(to, message, priority, notify_when_idle, wait_seconds,
-                               force)
-    here = _local_session(to)
-    if here:
-        return _send_locally(here, message, priority, wait_seconds)
-    return _send_to_master(to, message, priority)
-
-
-def _local_session(target):
-    """Сессия на этой машине или None, если её здесь нет.
-
-    `Ambiguous` не глушим и наверх пускаем: «здесь такой нет» разрешает искать
-    адресата дальше, на шине, а «их тут несколько» обязано остановить —
-    молча взять первую значит однажды написать не тому."""
+    kind, where = channel.route(to)
     try:
-        return session.find(target)
-    except session.Ambiguous:
-        raise
-    except LookupError:
-        return None
-
-
-def _send_to_master(name, message, priority):
-    """Обратный канал: папет -> мастер, в его инбокс на шине.
-
-    Адрес мастера папет не придумывает: он приезжает в конверте каждого
-    сообщения (from-name) и лежит в ростере. Ответа ждём — вердикт доставки
-    здесь важнее, чем где-либо ещё: отчёт папета и есть главный сигнал петли,
-    и «отправлено» вместо «доставлено» означало бы ровно то молчание, из-за
-    которого мастер идёт читать чужой экран глазами."""
-    try:
-        # from — поле, а не имя параметра: в питоне это ключевое слово.
-        r = bus.ask(name, "message", text=message, priority=priority,
-                    **{"from": my_name()})
+        if kind == "puppet":
+            node = channel.puppet_node(to, MASTER)
+            v = channel.send_to_puppet(
+                node, to, message, priority, wait_seconds, notify=notify_when_idle,
+                # Кто пишет. Едет в конверт полем from-name, и подсказка
+                # канала называет его папету как адрес для ответа: без этого
+                # «ответь мне» указывает в никуда.
+                from_name=me(),
+                # Владелец задания (#161): мастер называет себя логином,
+                # папет -- никем и аренды не берёт.
+                owner=bus.login() if MASTER else None,
+                force=force, reply_to=MY_INBOX)
+        elif kind == "local":
+            v = channel.send_local(where, message, priority, wait_seconds,
+                                   from_name=me())
+        else:
+            v = channel.send_to_master(to, message, priority, me())
     except bus.BusError as e:
-        return f"{name}: NOT DELIVERED — {e}"
-    if "error" in r:
-        return f"{name}: NOT DELIVERED — {r['error']}"
-    return f"{name}: delivered (msg_id={r.get('msg_id')})"
-
-
-def _send_to_puppet(name, message, priority, notify_when_idle, wait_seconds,
-                    force=False):
-    """Доставка через агента узла.
-
-    Ожидание простоя целиком уехало на узел: подписку держит агент рядом с
-    сокетом и, дождавшись, публикует в инбокс мастера. Здесь больше нет
-    фонового потока — он ждал внутри аллокации и умирал вместе с ней."""
-    wait = min(max(wait_seconds, 0), MAX_WAIT)
-    try:
-        result = bus.request(puppet_node(name), "send", name=name, message=message,
-                             priority=priority, wait=wait,
-                             notify=bool(notify_when_idle and not wait),
-                             # Кто пишет. Едет в конверт полем from-name, и
-                             # подсказка канала называет его папету как адрес
-                             # для ответа: без этого «ответь мне» указывает в
-                             # никуда, а папет узнаёт об этом уже отказом.
-                             from_name=my_name(),
-                             # Владелец задания (#161): мастер называет себя
-                             # логином, папет -- никем и аренды не берёт.
-                             owner=bus.login() if MASTER else None,
-                             force=force,
-                             reply_to=MY_INBOX, timeout=wait + bus.TIMEOUT)
-    except bus.BusError as e:
-        return f"{name}: NOT DELIVERED — {e}"
-    if "error" in result:
-        return f"{name}: NOT DELIVERED — {result['error']}"
-
-    verdict = f"{name}: delivered (msg_id={result['msg_id']})"
-    if result.get("owner_note"):
-        verdict += f"; {result['owner_note']}"
-    if wait:
-        verdict += f", idle: {result.get('idle') or 'did not wait it out in ' + str(wait) + 's'}"
-    if notify_when_idle and not wait:
-        verdict += "; will notify when it frees up"
-    return verdict
-
-
-def _send_locally(sess, message, priority, wait_seconds):
-    sock = sess["messagingSocketPath"]
-    if not session.socket_alive(sock):
-        return f"{sess.get('name')}: inbox not listening — session is dead"
-    r = session.send(sock, message, priority=priority, from_name=my_name(),
-                     wait_idle=min(max(wait_seconds, 0), MAX_WAIT))
-    verdict = f"{sess.get('name')}: delivered (msg_id={r['msg_id']})"
-    if wait_seconds:
-        verdict += f", idle: {(r['idle'] or {}).get('state') or 'did not wait it out'}"
-    return verdict
+        v = channel.undelivered(kind, to, e)
+    return channel.text(v)
 
 
 @tool(annotations=READ_ONLY, description=(
@@ -427,7 +291,7 @@ def _send_locally(sess, message, priority, wait_seconds):
     "the state: a held dialog for someone else's message, a login prompt, "
     "a quota complaint."))
 def tail(name: str, lines: int = 40, grep: str = "") -> str:
-    buf = puppets.pane_lines(puppet_node(name), name)
+    buf = puppets.pane_lines(channel.puppet_node(name, MASTER), name)
     if grep:
         buf = [l for l in buf if grep.lower() in l.lower()]
     return "\n".join(buf[-max(1, lines):]) or "(empty)"
@@ -443,7 +307,7 @@ def tail(name: str, lines: int = 40, grep: str = "") -> str:
 def slash(name: str, command: str) -> str:
     if not command.split()[0:1] or command.split()[0] not in SLASH_ALLOWED:
         return f"only allowed: {', '.join(SLASH_ALLOWED)}"
-    node = puppet_node(name)
+    node = channel.puppet_node(name, MASTER)
     if command.startswith("/model "):
         puppets.switch_model(node, name, command.split(None, 1)[1])
         return f"{name}: {command}"
@@ -470,7 +334,7 @@ def run_command(words, argv):
     origin и workspace командлет берёт из рабочей копии, в которой стоит
     мастер. Вывод отдаётся как есть, без разбора: он английский и читается
     моделью (CLAUDE.md), а цвета терминала снимаются."""
-    cwd = (my_session() or {}).get("cwd") or os.getcwd()
+    cwd = (channel.my_session() or {}).get("cwd") or os.getcwd()
     try:
         r = subprocess.run([MOP, *words, *argv], cwd=cwd, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
@@ -487,7 +351,7 @@ def run_in_background(words, argv):
     каким приезжают вести агентов (on_inbox)."""
     def go():
         text = f"mop {' '.join(words)}: {run_command(words, argv)}"
-        sock = master_socket()
+        sock = channel.master_socket()
         if sock:
             try:
                 session.send(sock, text, priority="later", from_name="mop")
@@ -556,7 +420,7 @@ def watch_inbox():
     Молчим, если сессии нет: мастер, которому некуда положить весть, не имеет
     права называться живым адресом — папет получит честное «нет на шине»
     вместо доставленного в никуда."""
-    if not MASTER or not master_socket():
+    if not MASTER or not channel.master_socket():
         return
     try:
         bus.subscribe(MY_INBOX, on_inbox)
@@ -579,8 +443,8 @@ def main(argv=None):
                else f"master of project {bus.PROJECT}")
         print(f"mop mcp: profile {who}, "
               f"{len(app._tool_manager.list_tools())} tools, bus {where}, "
-              f"address {my_name()}, inbox {MY_INBOX if MASTER else '(not a master)'}, "
-              f"session: {master_socket() or 'not found'}")
+              f"address {me()}, inbox {MY_INBOX if MASTER else '(not a master)'}, "
+              f"session: {channel.master_socket() or 'not found'}")
         return 0
     watch_inbox()
     app.run("stdio")
