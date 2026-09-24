@@ -133,6 +133,21 @@ DEFAULTS = {
     "MOP_AUTH_PROVIDER": "file",
     # Файл операторов провайдера file; пусто -- secrets/operators сервера.
     "MOP_OPERATORS_FILE": "",
+    # Провайдер ldap (#208, mop/ldapauth.py): каталог, служебная учётка,
+    # где искать людей и группы. Пароль служебной учётки -- в .env как
+    # MOP_LDAP_BIND_PASSWORD, но не здесь: настройки едут плейбукам.
+    "MOP_LDAP_URL": "",                    # ldaps://host или ldap://host со StartTLS
+    "MOP_LDAP_BIND_DN": "",
+    "MOP_LDAP_BASE": "",
+    "MOP_LDAP_LOGIN_ATTR": "uid",          # AD: sAMAccountName
+    "MOP_LDAP_NAME_ATTR": "displayName,cn",  # первый непустой
+    "MOP_LDAP_EMAIL_ATTR": "mail",
+    "MOP_LDAP_GROUP_BASE": "",             # пусто -- MOP_LDAP_BASE
+    "MOP_LDAP_GROUP_FILTER": "(|(member={dn})(uniqueMember={dn})(memberUid={login}))",
+    "MOP_LDAP_ADMIN_GROUP": "",            # DN группы admin; пусто -- admin'ов нет
+    "MOP_LDAP_PROJECT_GROUP": "mop-{project}",  # cn группы проекта
+    "MOP_LDAP_STARTTLS": "",
+    "MOP_LDAP_CA_FILE": "",                # пусто -- системное хранилище
     "MOP_NOMAD_RPC_PORT": "4647",   # RPC: туда дозваниваются клиенты Nomad
     "MOP_NATS_VERSION": "2.14.6",
     "MOP_PUPPET_MEM_MB": "8192",

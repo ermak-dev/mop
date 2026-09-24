@@ -215,10 +215,12 @@ def check_choice():
                            "MOP_OPERATORS_FILE": os.path.join(tmp, "operators")}, tmp)
     if not isinstance(p, identity.PlainFileProvider) or p.lookup("anton") is None:
         out.append(f"file must give the plain file provider over MOP_OPERATORS: {p}")
+    # nope -- нет такого провайдера; ldap без настроек каталога (#208) --
+    # тоже отказ, а не провайдер, который откажет каждому входу.
     for bad in ("ldap", "nope"):
         try:
             identity.provider({"MOP_AUTH_PROVIDER": bad}, tmp)
-            out.append(f"{bad!r} must be refused while there is no such provider")
+            out.append(f"{bad!r} must be refused: no such provider or no settings for it")
         except ValueError as e:
             if bad not in str(e):
                 out.append(f"the refusal must name the provider: {e}")

@@ -46,7 +46,13 @@ from . import operators
 SECRETS = os.path.expanduser("~/.config/mop/secrets")
 OPERATORS_FILE = "operators"
 # Настройки, из которых provider() собирает провайдера.
-SETTINGS = ("MOP_AUTH_PROVIDER", "MOP_OPERATORS", "MOP_OPERATORS_FILE")
+# Пароль LDAP среди них (#208): он не настройка config.SETTINGS и плейбукам
+# не едет, но провайдеру нужен.
+SETTINGS = ("MOP_AUTH_PROVIDER", "MOP_OPERATORS", "MOP_OPERATORS_FILE",
+            "MOP_LDAP_URL", "MOP_LDAP_BIND_DN", "MOP_LDAP_BIND_PASSWORD", "MOP_LDAP_BASE",
+            "MOP_LDAP_LOGIN_ATTR", "MOP_LDAP_NAME_ATTR", "MOP_LDAP_EMAIL_ATTR",
+            "MOP_LDAP_GROUP_BASE", "MOP_LDAP_GROUP_FILTER", "MOP_LDAP_ADMIN_GROUP",
+            "MOP_LDAP_PROJECT_GROUP", "MOP_LDAP_STARTTLS", "MOP_LDAP_CA_FILE")
 FIELDS = 6
 SCHEME = "scrypt"
 # Параметры scrypt для интерактивного входа; память -- 128 * N * r байт.
@@ -243,5 +249,9 @@ def provider(settings, secrets_dir=SECRETS):
     if kind == "file":
         path = settings.get("MOP_OPERATORS_FILE") or os.path.join(secrets_dir, OPERATORS_FILE)
         return PlainFileProvider(path, settings.get("MOP_OPERATORS", ""), secrets_dir)
-    raise ValueError(f"MOP_AUTH_PROVIDER={kind!r}: no such provider; "
-                     f"there is only 'file' (LDAP is #208)")
+    if kind == "ldap":
+        # Лениво: ldapauth -- поверх identity, а ldap3 -- только при вызове.
+        from . import ldapauth
+        cfg = ldapauth.settings(settings)
+        return ldapauth.LdapProvider(cfg, ldapauth.Ldap3Directory(cfg))
+    raise ValueError(f"MOP_AUTH_PROVIDER={kind!r}: no such provider; known: file, ldap")
