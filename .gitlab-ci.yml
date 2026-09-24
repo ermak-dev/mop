@@ -44,6 +44,7 @@ stages: [test]
     # Внутри контейнера, под root:
     #   git -- клоны во временных каталогах (agent, manifest); openssl --
     #   закреплённый сертификат (creds), без него проверка молча не идёт;
+    #   jq -- им врапер пишет файл хуков claude (spec, #223), как в теле;
     #   библиотеки mop -- одним списком из mop/deps.py, тем же, что ставит
     #   deploy, плюс jinja2, которым проверки рендерят шаблоны ролей;
     #   непривилегированный ci с пустым домом: проверки не видят ни root'а,
@@ -51,7 +52,7 @@ stages: [test]
     SETUP:
       value: |
         apt-get update -qq
-        apt-get install -y -qq --no-install-recommends git openssl >/dev/null
+        apt-get install -y -qq --no-install-recommends git openssl jq >/dev/null
         pip install -q --root-user-action=ignore --disable-pip-version-check jinja2 $(python3 -c "exec(open('mop/deps.py').read()); print(' '.join(PIP))")
         useradd --home-dir /tmp/ci-home ci
         install -d -o ci -m 0700 /tmp/ci-home
