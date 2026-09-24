@@ -47,7 +47,7 @@ import shlex
 import socket
 import time
 
-from . import bus, busnames, driver, fsutil, lease, usage
+from . import bus, busnames, driver, fsutil, lease, service, usage
 from .driver import clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
@@ -762,8 +762,8 @@ async def handle(conn, msg, public):
         # без ответа -- проситель ждал таймаут.
         return await msg.respond(
             json.dumps({"error": "request is not a JSON object"}).encode())
-    parts = msg.subject.split(".")
-    req["_project"] = parts[1] if len(parts) > 1 else ""
+    # Одно правило на всех (#173): mop.<проект>.node.<узел>.<канал>.
+    req["_project"] = service.project_from_subject(msg.subject)
 
     verb = req.get("verb")
     why = refusal(verb, public, req["_project"])

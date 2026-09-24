@@ -271,11 +271,38 @@ def check_main_169():
     return []
 
 
+def check_subject_173():
+    """HYPOTHESIS (#173): агент брал проект из субъекта своим правилом
+    (`parts[1] if len(parts) > 1`), а не service.project_from_subject (#149):
+    на его субъектах они сходятся, но это второе определение.
+    SOLUTION: агент зовёт общую функцию; на его субъектах ответ тот же.
+    STATUS: FIXED — see #173"""
+    from mop import service
+    out = []
+
+    def old(subject):
+        parts = subject.split(".")
+        return parts[1] if len(parts) > 1 else ""
+    for p in ("mop", busnames.ADMIN, "a-b_c"):
+        subs = [busnames.node(p, "hyper", "rpc"), busnames.node(p, "hyper", "msg"),
+                busnames.broadcast(p)]
+        for subj in subs:
+            if service.project_from_subject(subj) != old(subj) or old(subj) != p:
+                out.append(f"{subj}: shared {service.project_from_subject(subj)!r}, "
+                           f"old {old(subj)!r}, wanted {p!r}")
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                        "mop", "agent.py")
+    text = open(path).read()
+    if "parts[1]" in text or "service.project_from_subject(" not in text:
+        out.append("mop/agent.py must take the project via service.project_from_subject")
+    return out
+
+
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
                   check_timeouts_171, check_intake,
-                  check_main_169):
+                  check_main_169, check_subject_173):
         try:
             failed += check()
         except Exception as e:
