@@ -630,8 +630,143 @@ def main():
         bad += 1
         print("FAILED  driver.until_ok is missing")
 
+    c, b = check_pve_facts()
+    cases += c
+    bad += b
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
+
+
+# ── факты pve для плейбуков (#158) ───────────────────────────────────────
+# Три копии `python3 -c` в плейбуках, дословно как стояли до #158 (аудит
+# 5965bcd): характеристика. Ожидаемое считается ими самими, подпроцессом, с
+# базой в окружении -- ровно так, как их звал ansible.
+SNIPPET_IMAGE = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from mop.driver import pve
+print(pve.template_vmid(sys.argv[2]), pve.template_name(sys.argv[2]),
+      pve.GATEWAY, pve.PREFIXLEN, pve.template_address(sys.argv[2]))
+"""
+SNIPPET_STAGE = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from mop.driver import pve
+listing = pve.parse_list(sys.argv[3])
+v = pve.stage_vmid(sys.argv[2], listing)
+print(v, pve.stage_name(sys.argv[2]), pve.address_of_vmid(v))
+"""
+SNIPPET_ROUTES = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from mop.driver import pve
+print(" ".join(pve.routes_of(sys.argv[2], int(sys.argv[3]))))
+"""
+
+
+def _old(code, base, *args):
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    env = dict(os.environ, MOP_PVE_VMID_BASE=str(base))
+    return subprocess.run([sys.executable, "-c", code, root, *args], env=env,
+                          capture_output=True, text=True, check=True).stdout
+
+
+def _jinja_build(stdout_lines, tmpl_name, stage_name, project):
+    """Выражения jinja из deploy/pve-build.yml до #158, переписанные один в
+    один (ansible в клоне нет -- исполнить их нечем):
+      have_image: stdout_lines | select('search', ' ' ~ tmpl_name ~ ' ') | list | length > 0
+      have_stage: stdout_lines | select('search', ' ' ~ stage_name ~ ' ') | list | length > 0
+      project_bodies: stdout_lines | map('split') | map(attribute=1)
+                      | select('match', '^pu-' ~ (mop_project | regex_escape) ~ '-[0-9]+$') | list
+    """
+    import re
+    return {
+        "have_image": len([l for l in stdout_lines if re.search(" " + tmpl_name + " ", l)]) > 0,
+        "have_stage": len([l for l in stdout_lines if re.search(" " + stage_name + " ", l)]) > 0,
+        "project_bodies": [n for n in (l.split()[1] for l in stdout_lines)
+                           if re.match("^pu-" + re.escape(project) + "-[0-9]+$", n)],
+    }
+
+
+def check_pve_facts():
+    """HYPOTHESIS (#158): факты драйвера pve плейбуки добывали тремя копиями
+    `python3 -c` с sys.path и окружением, а список тел разбирали дважды --
+    pve.parse_list и jinja `search ' имя '`; длину префикса сети считал ещё и
+    jinja роли, а путь обёртки, ключи и VMID_MAX жили параллельно в pve.py и
+    YAML.
+    SOLUTION: pve.facts() -- чистая функция, `mop driver pve-facts` печатает
+    её JSON; плейбуки читают факты из него.
+    STATUS: FIXED — see #158"""
+    import json
+    import subprocess
+    cases = bad = 0
+
+    def check(what, got, want):
+        nonlocal cases, bad
+        cases += 1
+        if got != want:
+            bad += 1
+            print(f"FAILED  {what}: got {got!r}, want {want!r}")
+
+    pve = driver.module("pve")
+    if not hasattr(pve, "facts"):
+        print("FAILED  pve.facts is missing")
+        return 1, 1
+    subnet, gateway = config.get("MOP_PVE_SUBNET"), config.get("MOP_PVE_GATEWAY")
+    home = config.get("MOP_HOME")
+    for base in (9000, 12000):
+        # Роль pve: разбор сети jinja, VMID_MAX из vmid.yml, маршруты -- копией.
+        f = pve.facts(base)
+        check(f"network {base}", (f["network"], str(f["prefix"]), f["gateway"]),
+              (subnet.split("/")[0], subnet.split("/")[1], gateway))
+        check(f"vmid_max {base}", f["vmid_max"], base + 999)
+        check(f"routes {base}", f["routes"],
+              _old(SNIPPET_ROUTES, base, subnet, str(base)).split())
+        # Пути, которые YAML писал литералом.
+        check("wrapper", f["wrapper"], "/usr/local/sbin/mop-pve")
+        check("ssh_key", f["ssh_key"], f"{home}/.ssh/mop-body")
+        check("known_hosts", f["known_hosts"], f"{home}/.ssh/known_hosts-mop-body")
+        check("no project, no image", "image" in f, False)
+
+        for project in ("mop", "rugent", "ru.gent"):
+            tmpl = _old(SNIPPET_IMAGE, base, project).split()
+            tn = f"pu-tmpl-{project}"
+            for listing in (
+                    "",
+                    f"{base + 912} {tn} stopped\n{base + 3} pu-{project}-1 running\n"
+                    f"{base + 4} pu-{project}-12 stopped\n{base + 5} pu-{project}x-1 running\n"
+                    f"{base + 6} pu-other-2 running",
+                    f"{base + 999} pu-tmpl-other-build running\n"
+                    f"{base + 998} {tn}-build stopped\n{base + 912} {tn} stopped"):
+                stage = _old(SNIPPET_STAGE, base, project, listing).split()
+                lines = listing.splitlines()
+                jinja = _jinja_build(lines, tmpl[1], stage[1], project)
+                f = pve.facts(base, project=project, listing=listing)
+                what = f"facts({base}, {project}, {len(lines)} lines)"
+                check(f"{what} image", (str(f["image"]["vmid"]), f["image"]["name"],
+                                        f["gateway"], str(f["prefix"]), f["image"]["address"]),
+                      tuple(tmpl))
+                check(f"{what} stage", (str(f["stage"]["vmid"]), f["stage"]["name"],
+                                        f["stage"]["address"]), tuple(stage))
+                check(f"{what} present", (f["image"]["present"], f["stage"]["present"],
+                                          f["bodies"]),
+                      (jinja["have_image"], jinja["have_stage"], jinja["project_bodies"]))
+
+    # Командлет печатает ровно pve.facts() JSON'ом -- через диспетчер.
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    listing = "9912 pu-tmpl-mop stopped\n9003 pu-mop-1 running"
+    r = subprocess.run([os.path.join(root, "bin", "mop"), "driver", "pve-facts",
+                        "--base", "9000", "--project", "mop", "--listing", listing],
+                       capture_output=True, text=True)
+    try:
+        got = json.loads(r.stdout)
+    except ValueError:
+        got = (r.returncode, r.stdout, r.stderr)
+    check("mop driver pve-facts", got,
+          json.loads(json.dumps(pve.facts(9000, project="mop", listing=listing))))
+    return cases, bad
 
 
 if __name__ == "__main__":

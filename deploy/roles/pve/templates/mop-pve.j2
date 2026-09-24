@@ -20,7 +20,7 @@
 set -euo pipefail
 
 VMID_MIN={{ pve_vmid_min }}
-VMID_MAX={{ pve_vmid_max }}
+VMID_MAX={{ pve_facts.vmid_max }}
 POOL_USER={{ MOP_USER }}
 
 die() { echo "mop-pve: $*" >&2; exit 64; }

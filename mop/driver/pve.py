@@ -31,6 +31,7 @@
 import hashlib
 import ipaddress
 import os
+import re
 import time
 import shlex
 
@@ -63,8 +64,14 @@ SUBNET = config.get("MOP_PVE_SUBNET")
 # их обязательно: снос папета глаголом destroy иначе унёс бы образ проекта, и
 # заметили бы это на следующей сборке, а не сразу.
 _BASE = config.num("MOP_PVE_VMID_BASE")
-BODY_MIN, BODY_MAX = _BASE, _BASE + 899
-TMPL_MIN, TMPL_MAX = _BASE + 900, _BASE + 999
+
+
+def _ranges(base):
+    """(тела, шаблоны) гипервизора с этой базой: ((min, max), (min, max))."""
+    return (base, base + 899), (base + 900, base + 999)
+
+
+(BODY_MIN, BODY_MAX), (TMPL_MIN, TMPL_MAX) = _ranges(_BASE)
 
 _NET = ipaddress.ip_network(SUBNET)
 # Шлюз — первый адрес сети, он же адрес моста на самом гипервизоре: тела
@@ -111,9 +118,10 @@ def template_name(project):
     return f"{PREFIX}tmpl-{project}"
 
 
-def template_vmid(project):
+def template_vmid(project, base=_BASE):
+    lo, hi = _ranges(base)[1]
     h = int(hashlib.sha1(project.encode()).hexdigest()[:8], 16)
-    return TMPL_MIN + h % (TMPL_MAX - TMPL_MIN + 1)
+    return lo + h % (hi - lo + 1)
 
 
 def stage_name(project):
@@ -135,7 +143,7 @@ def parse_list(text):
     return out
 
 
-def stage_vmid(project, listing):
+def stage_vmid(project, listing, base=_BASE):
     """Номер сборочного тела по тому, что стоит на узле (parse_list).
 
     Не хеш, а свободный номер: сборочное тело живёт минуты, а хеш второго
@@ -145,20 +153,21 @@ def stage_vmid(project, listing):
     ней, а не заводить ещё одну. Иначе — старший свободный номер диапазона
     шаблонов, не совпадающий с номером образа: два номера одному проекту
     нужны одновременно, пока образ подменяется."""
-    mine = template_vmid(project)
+    mine = template_vmid(project, base)
+    lo, hi = _ranges(base)[1]
     taken = {}
     for vmid, name, _ in listing:
         taken[vmid] = name
         if name == stage_name(project):
             return vmid
-    for vmid in range(TMPL_MAX, TMPL_MIN - 1, -1):
+    for vmid in range(hi, lo - 1, -1):
         if vmid != mine and vmid not in taken:
             return vmid
     raise RuntimeError(f"no free vmid for a build body of {project} in "
-                       f"{TMPL_MIN}..{TMPL_MAX}: sweep old images (mop sweep)")
+                       f"{lo}..{hi}: sweep old images (mop sweep)")
 
 
-def address_of_vmid(vmid):
+def address_of_vmid(vmid, subnet=SUBNET):
     """Адрес тела по его VMID: сеть плюс АБСОЛЮТНЫЙ номер. Одна формула на
     живые тела и на сборочные: диапазоны VMID не пересекаются (BODY_* против
     TMPL_*), значит не пересекаются и адреса — и это свойство держится само,
@@ -176,10 +185,11 @@ def address_of_vmid(vmid):
 
     Номер, не влезающий в сеть, — отказ, а не адрес соседней сети: уехавший
     за подсеть адрес не отказывает, он просто не отвечает."""
-    if not 2 <= vmid < _NET.num_addresses - 1:
-        raise ValueError(f"vmid {vmid} does not fit the bodies' network {SUBNET}: "
+    net = _NET if subnet == SUBNET else ipaddress.ip_network(subnet)
+    if not 2 <= vmid < net.num_addresses - 1:
+        raise ValueError(f"vmid {vmid} does not fit the bodies' network {subnet}: "
                          f"lower MOP_PVE_VMID_BASE or widen MOP_PVE_SUBNET")
-    return str(_NET.network_address + vmid)
+    return str(net.network_address + vmid)
 
 
 def address_of(name):
@@ -237,6 +247,40 @@ def routes_of(subnet, base):
 def routes():
     """То же для этого узла."""
     return routes_of(SUBNET, _BASE)
+
+
+def facts(base, project=None, listing=""):
+    """Всё, что плейбукам нужно знать о драйвере pve на гипервизоре с этой
+    базой VMID. -> dict; `mop driver pve-facts` печатает его JSON'ом (#158).
+
+    Раньше плейбуки добывали это тремя копиями `python3 -c` и досчитывали
+    jinja: длину префикса, VMID_MAX, разбор списка тел поиском ' имя '. Второе
+    вычисление однажды разошлось бы с первым молча -- как адреса сборок
+    (template_address) и номера двух гипервизоров (#101).
+
+    База -- явный аргумент, а не настройка модуля: считается на управляющей
+    машине за КАЖДЫЙ гипервизор с ЕГО базой (строка хоста в инвентаре).
+    С project -- образ и сборочное тело проекта; listing -- вывод глагола
+    `list` обёртки на этом узле: по нему выбирается сборочный номер и видно,
+    что уже стоит."""
+    net = ipaddress.ip_network(SUBNET)
+    out = {"base": base, "vmid_max": _ranges(base)[1][1],
+           "network": str(net.network_address), "prefix": net.prefixlen,
+           "gateway": GATEWAY, "routes": routes_of(SUBNET, base),
+           "wrapper": WRAPPER, "ssh_key": SSH_KEY, "known_hosts": KNOWN_HOSTS}
+    if project is None:
+        return out
+    standing = parse_list(listing or "")
+    names = {name for _, name, _ in standing}
+    tmpl, stage = template_vmid(project, base), stage_vmid(project, standing, base)
+    bodies = re.compile(f"^{re.escape(PREFIX + project)}-[0-9]+$")
+    out.update(
+        image={"vmid": tmpl, "name": template_name(project),
+               "address": address_of_vmid(tmpl), "present": template_name(project) in names},
+        stage={"vmid": stage, "name": stage_name(project),
+               "address": address_of_vmid(stage), "present": stage_name(project) in names},
+        bodies=[name for _, name, _ in standing if bodies.match(name)])
+    return out
 
 
 # ─── доступ в тело ───────────────────────────────────────────────────────
