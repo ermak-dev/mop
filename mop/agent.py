@@ -371,7 +371,7 @@ async def _claim(name, req):
 
     Откат -- прежняя запись: не доехало сообщение -- возвращаем её, иначе
     неудачный `send` держал бы папета окно диспатча впустую."""
-    me = req.get("owner")
+    me = lease.caller(req)[0]
     if not me:
         return None, None, None
     clone = await clone_facts(name)
@@ -420,7 +420,7 @@ async def _gate(name, req):
     _owner_locks: между проверкой и действием чужой claim не вклинится."""
     clone = await clone_facts(name)
     owner = Owner.from_dict((clone or {}).get("owner"))
-    ok, note = lease.may_touch(owner, req.get("owner"), clone, time.time(),
+    ok, note = lease.may_touch(owner, lease.caller(req)[0], clone, time.time(),
                                bool(req.get("force")),
                                req.get("_project") == busnames.ADMIN)
     return (None, note) if ok else (f"{name}: {note}", None)
@@ -831,6 +831,14 @@ async def handle(conn, msg, public):
             json.dumps({"error": "request is not a JSON object"}).encode())
     # Одно правило на всех (#173): mop.<проект>.node.<узел>.<канал>.
     req["_project"] = service.project_from_subject(msg.subject)
+    # Кто просит (#207) -- из субъекта, поверх тела. Публичный канал --
+    # папетов: владельца он не несёт, и названный в теле не в счёт.
+    req.pop("_caller", None)
+    caller = None if public else busnames.caller(msg.subject)
+    if caller:
+        req["_caller"] = caller
+    if public:
+        req.pop("owner", None)
 
     verb = req.get("verb")
     why = refusal(verb, public, req["_project"])

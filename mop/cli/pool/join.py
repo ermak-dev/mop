@@ -79,7 +79,9 @@ def serving(origin):
     for d in sorted(glob.glob(os.path.join(creds.ROOT, "*"))):
         host = os.path.basename(d)
         try:
-            ans = bus.ask_once(bus.server_config(host), bus.cluster_subject(bus.ADMIN),
+            c = bus.server_config(host)
+            # Логин -- тех кредов, которыми спрашиваем (#207), а не этой машины.
+            ans = bus.ask_once(c, bus.cluster_subject(bus.ADMIN, as_login=c.get("user")),
                                "projects")
         except Exception:
             continue

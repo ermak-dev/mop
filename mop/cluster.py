@@ -323,7 +323,7 @@ def gate(name, req, facts, now):
                 f"repeat with force if you know it is free"), None
     clone = (facts or {}).get("clone")
     owner = Owner.from_dict((clone or {}).get("owner"))
-    ok, note = lease.may_touch(owner, req.get("owner"), clone, now, force)
+    ok, note = lease.may_touch(owner, lease.caller(req)[0], clone, now, force)
     return (None, note) if ok else (f"{name}: {note}", None)
 
 
@@ -684,7 +684,9 @@ def _landing(project, req):
         return {"ok": True, "project": project, "token": landing.read().get(project)}
     if action not in ("take", "give"):
         return {"error": f"landing: no such action {action}; take, give or show"}
-    who = req.get("holder")
+    # Держатель -- вызывающий (#207): логин из субъекта, на прежнем
+    # субъекте -- названный телом.
+    who = lease.caller(req)[0]
     if not who:
         return {"error": "landing: no holder — the token is taken by a person's "
                          "login on the bus"}
@@ -785,9 +787,13 @@ def answer(project, req):
 # ─── подписчик ───────────────────────────────────────────────────────────
 def journal(project, req, out):
     """Строки журнала на один ответ."""
-    who = (req.get("name") or req.get("node") or req.get("origin")
-           or req.get("puppet") or "")
-    return [f"{project}.{req.get('verb')} {who}: {out.get('error') or 'ok'}"]
+    what = (req.get("name") or req.get("node") or req.get("origin")
+            or req.get("puppet") or "")
+    # Кто просил (#207): логин из субъекта -- как есть; названный телом на
+    # прежнем субъекте -- с пометкой, пока переход не убран.
+    login, verified = lease.caller(req)
+    by = "" if not login else f" by {login}" + ("" if verified else " (self-declared)")
+    return [f"{project}.{req.get('verb')} {what}{by}: {out.get('error') or 'ok'}"]
 
 
 def banner(subject, nomad_addr):
@@ -797,6 +803,7 @@ def banner(subject, nomad_addr):
 async def serve(log):
     """Подписчик сервера. Креды — оператора (admin): сервис слушает все
     проекты, а разделяет их проверкой проекта из субъекта."""
-    subj = bus.cluster_subject(busnames.ANY)
+    # Оба субъекта (#207): с логином вызывающего и прежний, до уборки.
+    subj = [busnames.cluster(busnames.ANY), busnames.cluster(busnames.ANY, login=busnames.ANY)]
     await service.serve("mop-cluster", subj, lambda project, req, _send: answer(project, req),
-                        log, journal, lambda: banner(subj, nomad.ADDR))
+                        log, journal, lambda: banner(", ".join(subj), nomad.ADDR))

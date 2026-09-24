@@ -291,9 +291,16 @@ def ask_once(c, subj, verb, timeout=5, **fields):
     async def once():
         nc = await nats.connect(**auth(c), name="mop-join", error_cb=quiet,
                                 allow_reconnect=False, connect_timeout=timeout)
+        data = json.dumps({"verb": verb, **fields}).encode()
         try:
-            msg = await nc.request(subj, json.dumps({"verb": verb, **fields}).encode(),
-                                   timeout=timeout)
+            try:
+                msg = await nc.request(subj, data, timeout=timeout)
+            except NoRespondersError:
+                # Переход (#207): сервер до раскатки слушает прежний субъект.
+                if busnames.without_caller(subj) == subj:
+                    raise
+                msg = await nc.request(busnames.without_caller(subj), data,
+                                       timeout=timeout)
             return json.loads(msg.data.decode())
         finally:
             await nc.close()
@@ -337,7 +344,10 @@ def close():
 
 # ─── субъекты ────────────────────────────────────────────────────────────
 def subject(node, channel="rpc", project=None):
-    return busnames.node(project or PROJECT, node, channel)
+    """Агент узла. Человек спрашивает rpc со своим логином в субъекте (#207):
+    публиковать туда NATS даёт только ему, и агент берёт вызывающего оттуда.
+    Машина (login() -- None) спрашивает прежним субъектом."""
+    return busnames.node(project or PROJECT, node, channel, login=login())
 
 
 def broadcast(project=None):
@@ -363,15 +373,18 @@ def events(project=None):
     return busnames.events(project or PROJECT)
 
 
-def cluster_subject(project=None):
+def cluster_subject(project=None, as_login=None):
     """Сервис кластера как адресат (#80): Nomad за шиной.
 
     Свой субъект, а не `server.rpc`: в субъект сервера имеет право писать
     агент узла (bootstrap песочницы), и глаголы над Nomad там означали бы,
     что джобы регистрирует и снимает любой узел. Здесь прав ни у кого не
     прибавляется: у `master-<проект>` уже есть весь `mop.<проект>.>`, а у
-    папета и узла его нет."""
-    return busnames.cluster(project or PROJECT)
+    папета и узла его нет.
+
+    Логин человека -- токеном субъекта (#207), как у агента; as_login --
+    чужие креды (`mop join` спрашивает другие серверы)."""
+    return busnames.cluster(project or PROJECT, login=as_login or login())
 
 
 def build_subject():
@@ -411,7 +424,15 @@ def _ask(subj, who, dead, verb, timeout, **fields):
                        f"({len(payload)} > {MAX_PAYLOAD} bytes)")
     nc = connect()
     try:
-        msg = _call(nc.request(subj, payload, timeout=timeout), timeout)
+        try:
+            msg = _call(nc.request(subj, payload, timeout=timeout), timeout)
+        except NoRespondersError:
+            # Переход (#207): адресат ещё не слушает субъект с логином --
+            # агент или сервис до раскатки. Прежний субъект; уходит с уборкой.
+            if busnames.without_caller(subj) == subj:
+                raise
+            msg = _call(nc.request(busnames.without_caller(subj), payload,
+                                   timeout=timeout), timeout)
     except NoRespondersError:
         raise BusError(dead, no_responders=True)
     except asyncio.TimeoutError:
@@ -516,10 +537,16 @@ async def _one(nc, node, req, timeout, channel, project):
     Общая часть request_many и request_stream: ошибка возвращается, а не
     бросается — один молчащий узел не должен уносить с собой картину по
     остальным."""
+    subj = subject(node, channel, project)
+    data = json.dumps(req, ensure_ascii=False).encode()
     try:
-        msg = await nc.request(
-            subject(node, channel, project),
-            json.dumps(req, ensure_ascii=False).encode(), timeout=timeout)
+        try:
+            msg = await nc.request(subj, data, timeout=timeout)
+        except NoRespondersError:
+            # Переход (#207): агент до раскатки не слушает субъект с логином.
+            if busnames.without_caller(subj) == subj:
+                raise
+            msg = await nc.request(busnames.without_caller(subj), data, timeout=timeout)
         return json.loads(msg.data.decode())
     except NoRespondersError:
         return BusError(f"node agent {node} is not subscribed")
