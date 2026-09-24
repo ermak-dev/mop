@@ -48,7 +48,8 @@ import subprocess
 import sys
 import time
 
-from . import bus, busnames, config, creds, driver, playvars, project_secrets, service
+from . import (bus, busnames, config, creds, driver, fsutil, playvars,
+               project_secrets, service)
 
 # На сервере: файлы проектов и ключ к телам.
 ROOT = os.path.expanduser("~/.config/mop/bootstrap")
@@ -102,7 +103,8 @@ def store(root, project, text):
     asks, mine, alien = manifest.parts(mvars)
     alien = sorted(set(alien) | set(asks))
     import yaml
-    os.makedirs(root, mode=0o700, exist_ok=True)
+    # 0700 и лежащему (#170): makedirs с mode не трогает уже существующий.
+    fsutil.make_private_dir(root)
     for path, what in ((tasks_path, tasks), (vars_path, mine)):
         if what:
             with open(path, "w") as f:
