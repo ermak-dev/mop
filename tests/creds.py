@@ -296,6 +296,9 @@ def main():
         if len(cas) != 1:
             bad += 1
             print(f"FAILED  a pinned certificate must be the only trust: {len(cas)} CAs")
+    else:
+        # Без openssl проверка молчала вовсе (#229): теперь это пропуск.
+        hermetic.skip("the pinned certificate check", "no openssl on this machine")
 
     # Сертификат едет оператору вместе с паролями: без него wss на
     # самоподписанный не поднимется ни у join по ssh, ни у контроллера.
@@ -386,7 +389,7 @@ def check_no_human_over_nats_219():
         check("a person's bus config (the server directory) is wss",
               c["url"].startswith("wss://") and c["user"] == "anton", c)
     except ImportError as e:
-        print(f"SKIPPED the wss check of bus.server_config: {e}")
+        hermetic.skip("the wss check of bus.server_config", str(e))
     finally:
         if keep is None:
             os.environ.pop("MOP_SERVER_DIR", None)

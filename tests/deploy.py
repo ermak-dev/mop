@@ -8,8 +8,8 @@
     роли common байт в байт такими, какими их рендерили свои шаблоны до
     #157 (PINNED -- вывод модуля template ansible-core 2.21 на старых
     шаблонах с набором VARS ниже). Рендер нужен jinja2; в клоне его нет --
-    тогда проверка рендера НЕ ИДЁТ и об этом печатается строка SKIPPED, а
-    не зелёный итог;
+    тогда проверка рендера НЕ ИДЁТ, и это пропуск hermetic.skip (#229):
+    строка в выводе, а при MOP_TESTS_STRICT=1 -- провал файла;
   * у каждой общей вещи одно определение: список исключений пакета (и .env
     в нём -- .env не едет на узлы), синк, pip, регистрация MCP, загрузка
     nomad, пароль через stdin, secrets_dir и projects.
@@ -711,8 +711,8 @@ def main():
         can_render = True
     except ImportError:
         can_render = False
-        print("SKIPPED rendering of the units: no jinja2 on this machine — "
-              "only the structure below is checked")
+        hermetic.skip("rendering of the units",
+                      "no jinja2 on this machine — only the structure below is checked")
     # ── кому что из настроек (#176) ───────────────────────────────────────
     scoped = getattr(config, "SERVER_SCOPED", {})
     check("config.SERVER_SCOPED names every server unit",

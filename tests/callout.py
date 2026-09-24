@@ -80,8 +80,8 @@ def main():
     except ImportError as e:
         # Как jinja2 у tests/deploy.py: библиотеки ставит MOP_PIP_DEPS, и на
         # машине до `mop deploy` их может не быть. Громко, не молча.
-        print(f"SKIPPED the callout checks: {e} -- pip install nkeys pynacl "
-              f"(MOP_PIP_DEPS brings them with mop deploy)")
+        hermetic.skip("the callout checks", f"{e} -- pip install nkeys pynacl "
+                      f"(MOP_PIP_DEPS brings them with mop deploy)")
         print("callout: ok (skipped)")
         return 0
     try:
