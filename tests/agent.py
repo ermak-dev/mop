@@ -185,6 +185,54 @@ def check_timeouts_171():
     return out
 
 
+# ── откат владельца -- с результатом (#181) ──────────────────────────────
+# HYPOTHESIS: _unclaim пишет прежнего владельца назад (или rm -f) и код
+# шелла не смотрит: на таймауте (#171) или ошибке аренда остаётся за
+# мастером, чей send не доехал, и следующему мастеру send отказывает,
+# называя не того владельца -- а отказ первого об этом молчит.
+# SOLUTION: _unclaim отдаёт причину неудачи (driver.why, как в #171), и
+# отказ v_send дописывает «owner not restored: <причина>»; удачный откат
+# текст не меняет.
+# STATUS: FIXED — see #181
+def check_unclaim_181():
+    import asyncio
+    out = []
+    saved = agent.bsh, agent.clone_facts, agent.session_json
+    delivery = {"error": "pu-mop-1: no live session"}
+
+    def fake(rollback):
+        calls = []
+
+        async def bsh(name, script, timeout=20):
+            calls.append(script)
+            # Первый шелл -- запись аренды, второй -- откат.
+            return ("", 0) if len(calls) == 1 else rollback
+        return bsh, calls
+
+    async def facts(name):
+        return {"owner": None, "dirty": 0, "ahead": 0}
+
+    async def session_json(name, cmd, timeout=20):
+        return dict(delivery)
+    try:
+        agent.clone_facts, agent.session_json = facts, session_json
+        for rollback, want in ((("", None), delivery["error"] + "; owner not restored: timed out"),
+                               (("rm: Permission denied", 1),
+                                delivery["error"] + "; owner not restored: rm: Permission denied"),
+                               (("", 0), delivery["error"])):
+            agent.bsh, calls = fake(rollback)
+            got = asyncio.run(agent.v_send(None, {"name": "pu-mop-1", "owner": "m-1",
+                                                  "message": "hi"}))
+            if len(calls) != 2 or "rm -f" not in calls[-1]:
+                out.append(f"send refused, rollback {rollback}: no rollback shell ({calls})")
+            if got.get("error") != want:
+                out.append(f"send refused, rollback {rollback}: {got.get('error')!r}, "
+                           f"wanted {want!r}")
+    finally:
+        agent.bsh, agent.clone_facts, agent.session_json = saved
+    return out
+
+
 def check_intake():
     """HYPOTHESIS (#168): тело-JSON не объект (`[1]`, `"x"`) роняет задачу
     handle на req["_project"], а нехэшируемый глагол (`{"verb": [1]}`) -- на
@@ -301,7 +349,7 @@ def check_subject_173():
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
-                  check_timeouts_171, check_intake,
+                  check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173):
         try:
             failed += check()

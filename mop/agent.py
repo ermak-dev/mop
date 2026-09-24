@@ -389,10 +389,16 @@ async def _claim(name, req):
 
 
 async def _unclaim(name, undo):
+    """Вернуть прежнюю аренду. -> причина неудачи | None.
+
+    Не вернули (таймаут, #171, или ошибка) -- аренда осталась за мастером,
+    чей send не доехал, и следующему откажут, назвав не того владельца (#181):
+    звавший обязан это сказать."""
     path, owner = undo
     body = lease.render(owner["user"], owner["at"]) if owner else ""
-    await bsh(name, f"printf %s {shlex.quote(body)} > {shlex.quote(path)}"
-                    if body else f"rm -f {shlex.quote(path)}")
+    out, code = await bsh(name, f"printf %s {shlex.quote(body)} > {shlex.quote(path)}"
+                                if body else f"rm -f {shlex.quote(path)}")
+    return why(out, code) if code != 0 else None
 
 
 async def v_send(conn, req):
@@ -416,8 +422,9 @@ async def v_send(conn, req):
         "--from-name", req.get("from_name", "mop"),
         "--wait", wait), timeout=wait + 20)
     if out.get("error"):
-        if undo:
-            await _unclaim(name, undo)
+        failed = await _unclaim(name, undo) if undo else None
+        if failed:
+            out["error"] += f"; owner not restored: {failed}"
         return out
     if note:
         out["owner_note"] = note
