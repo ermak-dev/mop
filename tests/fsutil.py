@@ -204,6 +204,28 @@ def main():
         bad += 1
         print(f"FAILED  file primitives copied outside fsutil: {extra}")
 
+    # HYPOTHESIS (#170): natsconf.passwords и bootstrap.store заводят каталог
+    # makedirs(..., 0o700): mode действует только на НОВЫЙ каталог, и уже
+    # лежащий шире (0755) остаётся как был -- пароли шины и workspace
+    # проектов читаются чужими.
+    # SOLUTION: оба через fsutil.make_private_dir -- он доводит и лежащий.
+    # STATUS: FIXED — see #170
+    from mop import bootstrap
+    consumers = (
+        ("natsconf.passwords", lambda root: natsconf.passwords(["mop"], root)),
+        ("bootstrap.store", lambda root: bootstrap.store(root, "mop", "- hosts: all\n  tasks: []\n")),
+    )
+    for what, run in consumers:
+        with tempfile.TemporaryDirectory() as d:
+            old = os.path.join(d, "old")
+            os.makedirs(old)
+            os.chmod(old, 0o755)
+            run(old)
+            check(f"{what}: an existing 0755 directory is tightened", mode(old), 0o700)
+            new = os.path.join(d, "new")
+            run(new)
+            check(f"{what}: a new directory is 0700", mode(new), 0o700)
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 
