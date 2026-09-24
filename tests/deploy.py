@@ -115,7 +115,6 @@ CLUSTER_READS = ("mop/cluster.py", "mop/nomad.py", "mop/spec.py", "mop/llm/__ini
 VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "10.0.0.1",
         "MOP_NATS_PORT": "4222", "MOP_HTTPS_PORT": "443", "MOP_NOMAD_PORT": "4646",
         "MOP_POOL_DC": "home", "MOP_WEB_PORT": "8080", "MOP_WEB_BIND": "0.0.0.0",
-        "MOP_GIT_NAME": "Pool Bot", "MOP_GIT_EMAIL": "bot@example.dev",
         "MOP_NATS_MONITOR_PORT": "8222", "MOP_AUTH_CALLOUT": "off",
         "MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS": "anton:admin; ivan:user:rugent"}
 # Значения, которые юнит обязан донести целиком (#185): пробел, кавычки,
@@ -134,8 +133,6 @@ EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml"]
 ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          "MOP_MEM_MB", "MOP_PUPPET_SEED", "MOP_PUPPET_PATH",
                          "MOP_DEFAULT_LLM",
-                         # git identity папета (#167): её кладёт в спеку job_spec.
-                         "MOP_GIT_NAME", "MOP_GIT_EMAIL",
                          # reload шины с проверкой (#211): /varz на петле.
                          "MOP_NATS_MONITOR_PORT",
                          # callout или статический users.conf (#206).

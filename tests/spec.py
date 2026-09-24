@@ -50,9 +50,6 @@ from mop import config, spec  # noqa: E402
 # него -- так спеку видит установка, где deploy просьб ещё не привозил.
 spec.ASKS_FILE = os.path.join(os.path.dirname(SNAPSHOT), "no-such-project-asks.json")
 
-# Git identity (#167) слепок снимает НЕ заданной: так спеку видит установка
-# без этих настроек. .env и node.env машины проверке не видны (hermetic, #209).
-GIT_KEYS = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")
 
 ORIGIN = "git@git.example.dev:someone/mop.git"
 
@@ -352,59 +349,42 @@ def check_wrapper_paths():
 
 
 def check_git_identity():
-    """HYPOTHESIS (#167): в клоне папета нет git identity -- ни в спеке, ни в
-    образе, ни в ~/.gitconfig тела, и коммит падает на «Author identity
-    unknown». SOLUTION: identity установки -- MOP_GIT_NAME и MOP_GIT_EMAIL;
-    обе заданы -- job_spec кладёт четыре GIT_* в окружение задачи, а PU_CARRY
-    (ключи самой спеки, #155) переливает их в тело. Не заданы или задана одна
-    -- ни одного GIT_*: половину отвергает `mop deploy`, а спека не падает,
-    потому что через task_env идёт current_version ростера, и падение там
-    читалось бы «спека свежая» (#174). STATUS: FIXED — see #167"""
+    """HYPOTHESIS (#167): в клоне папета нет git identity. Промежуточная форма
+    (7f9c2a8) -- identity установки: MOP_GIT_NAME и MOP_GIT_EMAIL, четыре GIT_*
+    в окружении задачи. Оператор решил иначе: автор коммита -- человек,
+    прошедший проверку на шине, а не установка. GIT_* в окружении старше
+    любого git config, и identity владельца в клоне они бы перебили.
+    SOLUTION: настроек нет вовсе, спека не несёт ни одного GIT_* ни при каком
+    окружении; identity ставит агент узла в клон по проверенному владельцу
+    задания. Версия шаблона (#174) -- та же, что без настроек: на обеих
+    установках они были пусты, набор ключей спеки не менялся, и перерегистрации
+    не будет. STATUS: FIXED — see #167"""
     bad, cases = 0, 0
     inputs = SPEC_INPUTS[0]
     unset = spec.current_version()
-    # Без настроек -- ни одного GIT_* (и слепок выше совпадает байт в байт).
     cases += 1
-    env = spec.job_spec(*inputs[:3])["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
-    if [k for k in env if k.startswith("GIT_")]:
+    gone = [k for k in ("MOP_GIT_NAME", "MOP_GIT_EMAIL")
+            if k in config.SETTINGS or k in config.SERVER_SCOPED["mop-cluster"]]
+    if gone:
         bad += 1
-        print(f"FAILED  git identity unset: no GIT_* expected, got "
-              f"{[k for k in env if k.startswith('GIT_')]}")
-    want = {"GIT_AUTHOR_NAME": "Pool Bot", "GIT_AUTHOR_EMAIL": "bot@example.dev",
-            "GIT_COMMITTER_NAME": "Pool Bot", "GIT_COMMITTER_EMAIL": "bot@example.dev"}
-    for given, expect in (({"MOP_GIT_NAME": "Pool Bot", "MOP_GIT_EMAIL": "bot@example.dev"}, want),
-                          ({"MOP_GIT_NAME": "Pool Bot"}, {}),
-                          ({"MOP_GIT_EMAIL": "bot@example.dev"}, {})):
-        os.environ.update(given)
-        try:
-            env = spec.job_spec(*inputs[:3])["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
-            version = spec.current_version()
-        finally:
-            for k in given:
-                del os.environ[k]
-        got = {k: v for k, v in env.items() if k.startswith("GIT_")}
-        cases += 1
-        if got != expect:
-            bad += 1
-            print(f"FAILED  git identity {sorted(given)}: GIT_* {got}, wanted {expect}")
-        carried = (env.get("PU_CARRY") or "").split(",")
-        cases += 1
-        if [k for k in expect if k not in carried]:
-            bad += 1
-            print(f"FAILED  git identity {sorted(given)}: PU_CARRY misses "
-                  f"{[k for k in expect if k not in carried]}")
-        # Набор ключей -- часть версии шаблона (#174): спека с identity
-        # свежая для mop с той же identity, а прежние (без неё) -- нет, и
-        # doctor один раз перерегистрирует свободных. Так и задумано.
-        cases += 1
-        if version != spec.template_version(env):
-            bad += 1
-            print(f"FAILED  git identity {sorted(given)}: current_version disagrees with the spec")
-        cases += 1
-        if (version != unset) != bool(expect):
-            bad += 1
-            print(f"FAILED  git identity {sorted(given)}: the template version must change "
-                  f"exactly when GIT_* appear")
+        print(f"FAILED  the installation-wide git identity must be gone: {gone}")
+    given = {"MOP_GIT_NAME": "Pool Bot", "MOP_GIT_EMAIL": "bot@example.dev"}
+    os.environ.update(given)
+    try:
+        env = spec.job_spec(*inputs[:3])["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
+        version = spec.current_version()
+    finally:
+        for k in given:
+            del os.environ[k]
+    cases += 1
+    got = [k for k in env if k.startswith("GIT_")]
+    if got:
+        bad += 1
+        print(f"FAILED  the spec must carry no GIT_*, even with MOP_GIT_* in the environment: {got}")
+    cases += 1
+    if version != unset:
+        bad += 1
+        print("FAILED  MOP_GIT_* must not move the template version")
     return bad, cases
 
 
