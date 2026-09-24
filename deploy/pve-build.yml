@@ -253,35 +253,18 @@
     # в любом исходе.
     - name: Create the build body
       when: build_from == 'base'
-      block:
-        - name: A file to hand the root password over by
-          ansible.builtin.tempfile:
-            state: file
-            prefix: mop-body-pw.
-          register: body_pw
-
-        - name: The password itself
-          ansible.builtin.copy:
-            content: "{{ mop_body_root_password | default('') }}"
-            dest: "{{ body_pw.path }}"
-            mode: "0600"
-          no_log: true
-
-        - name: The build body, a container from the base image
-          ansible.builtin.shell:
-            cmd: >-
-              {{ pve }} create {{ stage_vmid }} {{ stage_name }} {{ MOP_PVE_TEMPLATE }}
-              {{ MOP_PVE_STORAGE }} {{ body_cores }} {{ body_mem }}
-              {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ stage_ip }}/{{ pve_cidr }}
-              {{ pve_gw }} {{ pve_facts.ssh_key }}.pub
-              < {{ body_pw.path | quote }}
-          changed_when: true
-      always:
-        - name: The password file goes away whatever happened
-          ansible.builtin.file:
-            path: "{{ body_pw.path }}"
-            state: absent
-          when: body_pw.path is defined
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: secret_stdin
+      vars:
+        secret_value: "{{ mop_body_root_password | default('') }}"
+        secret_prefix: mop-body-pw.
+        secret_step: The build body, a container from the base image
+        secret_cmd: >-
+          {{ pve }} create {{ stage_vmid }} {{ stage_name }} {{ MOP_PVE_TEMPLATE }}
+          {{ MOP_PVE_STORAGE }} {{ body_cores }} {{ body_mem }}
+          {{ body_disk }} {{ MOP_PVE_BRIDGE }} {{ stage_ip }}/{{ pve_cidr }}
+          {{ pve_gw }} {{ pve_facts.ssh_key }}.pub
 
     # Пересозданное тело приезжает с новым ключом хоста, и accept-new тут не
     # лечит: запись под этим адресом уже есть, и ssh читает смену ключа как
@@ -309,34 +292,16 @@
     # только на записи файла. Здесь молчание стоило бы дороже — задача идёт с
     # двенадцатью повторами, и стойкий отказ молчал бы минуту.
     - name: Bring the body up to what a node is
-      block:
-        - name: A file to hand the user password over by
-          ansible.builtin.tempfile:
-            state: file
-            prefix: mop-user-pw.
-          register: user_pw
-
-        - name: The password itself
-          ansible.builtin.copy:
-            content: "{{ mop_body_user_password | default('') }}"
-            dest: "{{ user_pw.path }}"
-            mode: "0600"
-          no_log: true
-
-        - name: The pool user, sshd, sudo and a lingering session bus
-          ansible.builtin.shell:
-            cmd: "{{ pve }} bootstrap {{ stage_vmid }} < {{ user_pw.path | quote }}"
-          register: boot
-          until: boot.rc == 0
-          retries: 12
-          delay: 5
-          changed_when: true
-      always:
-        - name: The password file goes away whatever happened
-          ansible.builtin.file:
-            path: "{{ user_pw.path }}"
-            state: absent
-          when: user_pw.path is defined
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: secret_stdin
+      vars:
+        secret_value: "{{ mop_body_user_password | default('') }}"
+        secret_prefix: mop-user-pw.
+        secret_step: The pool user, sshd, sudo and a lingering session bus
+        secret_cmd: "{{ pve }} bootstrap {{ stage_vmid }}"
+        secret_retries: 12
+        secret_delay: 5
 
     - name: Let both the node and this build machine in
       ansible.builtin.shell:
@@ -433,12 +398,11 @@
     #
     - name: Pack the mop package up
       ansible.builtin.command:
-        # .env никогда не уезжает с управляющей машины: там креды GitLab,
-        # которым в пуле делать нечего, а в теле папета — тем более.
+        # Откуда и без чего -- deploy/group_vars/all.yml, как у синка на узел
+        # и сервер: .env не уезжает с управляющей машины никуда.
         cmd: >-
-          tar czf {{ mop_tgz }} -C {{ lookup('env', 'HOME') }}/mop
-          --exclude=.git --exclude=__pycache__ --exclude=.env
-          --exclude=inventory.ini --exclude=inventory.yaml .
+          tar czf {{ mop_tgz }} -C {{ mop_source | quote }}
+          {{ mop_package_excludes | map('regex_replace', '^', '--exclude=') | join(' ') }} .
       delegate_to: localhost
       changed_when: true
 
@@ -502,25 +466,16 @@
       run_once: true
 
     # Список один на узел, тело и `mop setup` (mop/deps.py), приезжает
-    # --extra-vars от `mop deploy`.
-    - name: Python dependencies of a puppet
-      ansible.builtin.pip:
-        name: "{{ MOP_PIP_DEPS.split(',') }}"
-        extra_args: --user --break-system-packages
-        state: present
+    # --extra-vars от `mop deploy`. В теле ansible и так под пользователем пула.
+    - ansible.builtin.include_role:
+        name: common
+        tasks_from: pip
 
-    # Свой MCP-сервер -- часть продукта: без него папет без инструментов.
-    # Регистрирует сам claude (`claude mcp add` пишет ~/.claude.json). На узлах
-    # это делает deploy/setup.yml; в теле -- здесь, потому что ~/.claude.json
-    # у тела свой.
-    - name: Register the pool MCP server for claude inside the body
-      ansible.builtin.shell:
-        cmd: |
-          claude mcp remove -s user mop >/dev/null 2>&1 || true
-          exec claude mcp add -s user mop -- '{{ MOP_HOME }}/mop/bin/mop' mcp
-      environment:
-        PATH: "{{ MOP_PUPPET_PATH | replace('{HOME}', MOP_HOME) }}"
-      changed_when: false
+    # Свой MCP-сервер: на узлах его регистрирует deploy/setup.yml, в теле --
+    # здесь, потому что ~/.claude.json у тела свой.
+    - ansible.builtin.include_role:
+        name: common
+        tasks_from: mcp
 
 
 # Тулчейн, базы, env-файлы, скиллы и свои MCP-серверы -- дело установки, не

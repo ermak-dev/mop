@@ -1,0 +1,29 @@
+# Бинарь nomad: один на оба лица кластера -- клиент (роль nomad, main.yml) и
+# сервер (server.yml). Раньше загрузка стояла в обоих файлах с оговоркой, что
+# дублировать её -- две версии в двух местах; теперь место одно (#157).
+#
+# Версия и зеркало -- config.SETTINGS через --extra-vars.
+- name: Where nomad comes from
+  ansible.builtin.set_fact:
+    nomad_version: "{{ MOP_NOMAD_VERSION }}"
+    nomad_zip: "{{ MOP_NOMAD_MIRROR }}/nomad/{{ MOP_NOMAD_VERSION }}/nomad_{{ MOP_NOMAD_VERSION }}_linux_amd64.zip"
+
+- name: Ensure unzip is present
+  become: yes
+  ansible.builtin.apt:
+    name: unzip
+    state: present
+
+- name: Download nomad {{ nomad_version }}
+  ansible.builtin.get_url:
+    url: "{{ nomad_zip }}"
+    dest: "/tmp/nomad_{{ nomad_version }}.zip"
+    mode: '0644'
+
+- name: Install nomad binary
+  become: yes
+  ansible.builtin.unarchive:
+    src: "/tmp/nomad_{{ nomad_version }}.zip"
+    dest: /usr/local/bin
+    remote_src: yes
+    mode: '0755'

@@ -57,9 +57,26 @@
 - name: Systemd unit
   become: yes
   ansible.builtin.template:
-    src: mop-bootstrap.service.j2
+    src: "{{ role_path }}/../common/templates/service.j2"
     dest: /etc/systemd/system/mop-bootstrap.service
     mode: "0644"
+  vars:
+    unit:
+      description: "mop-bootstrap (bootstrap песочниц: играет .mop/bootstrap.yaml проекта при каждом старте папета)"
+      after: network-online.target nats.service
+      env:
+        - |-
+          # .env на сервер не едет: всё, что подписчику и прогону нужно знать об
+          # установке, приезжает юнитом. MOP_HOME и MOP_USER -- те, что у узлов: их
+          # читают задачи bootstrap'а как переменные прогона, и дефолт сервера
+          # (его собственный дом) здесь был бы неправдой.
+        - MOP_SERVER_LAN
+        - MOP_NATS_PORT
+        - "# Каталог сервера ходит на шину через TLS-прокси (#97)."
+        - MOP_HTTPS_PORT
+        - MOP_HOME
+        - MOP_USER
+      command: bootstrap serve
   notify: restart mop-bootstrap
 
 - name: Enable and start

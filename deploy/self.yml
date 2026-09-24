@@ -41,11 +41,9 @@
         state: present
 
     # Тот же список, что у узла и тела: MOP_PIP_DEPS из mop/deps.py.
-    - name: Python libraries of mop
-      ansible.builtin.pip:
-        name: "{{ MOP_PIP_DEPS.split(',') }}"
-        extra_args: --user --break-system-packages
-        state: present
+    - ansible.builtin.include_role:
+        name: common
+        tasks_from: pip
 
     - name: Is ansible.posix here
       ansible.builtin.command: ansible-galaxy collection list ansible.posix

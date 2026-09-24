@@ -4,42 +4,28 @@
 # больше не играет: второй синк ничего не менял бы, а результат первого
 # (mop_server_package) переписал бы на «без изменений», и сервисы остались
 # бы на старом коде.
-- name: Ensure python3-pip
-  become: yes
-  ansible.builtin.apt:
-    name: python3-pip
-    state: present
+# Зависимости и пакет -- общими задачами (роль common, #157); пакет --
+# пользователю пула, кем бы ни зашёл ansible (#108).
+- ansible.builtin.include_role:
+    name: common
+    tasks_from: pip
+  vars:
+    pip_pool_user: true
 
-# Под пользователем пула, как у узла (deploy/roles/bus): --user от root'а
-# клал библиотеки в /root/.local, где mop-web их не видит (#108).
-- name: Python dependencies of mop
-  become: yes
-  become_user: "{{ MOP_USER }}"
-  ansible.builtin.pip:
-    name: "{{ MOP_PIP_DEPS.split(',') }}"
-    extra_args: --user --break-system-packages
-    state: present
+- ansible.builtin.include_role:
+    name: common
+    tasks_from: package
+  vars:
+    package_dest: "{{ MOP_HOME }}/mop"
+    package_chown: true
 
-# Те же исключения, что у узла (deploy/roles/bus): .env с кредами GitLab на
-# сервер не едет, всё нужное дашборду приходит юнитом и каталогом кредов.
-- name: Sync the mop package from the control machine
-  become: no
-  ansible.posix.synchronize:
-    src: "{{ lookup('env', 'HOME') }}/mop/"
-    dest: "{{ MOP_HOME }}/mop/"
-    delete: yes
-    recursive: yes
-    rsync_opts:
-      - "--exclude=.git"
-      - "--exclude=__pycache__"
-      - "--exclude=.env"
-      - "--exclude=inventory.ini"
-      - "--exclude=inventory.yaml"
-      # Пакет -- пользователю пула, кем бы ни зашёл ansible (#108).
-      - "--chown={{ MOP_USER }}:{{ MOP_USER }}"
-  # Результат синка переживает игру: по нему перезапускается и второй процесс
-  # сервера, mop-bootstrap (роль bootstrap) -- тот же пакет в том же каталоге.
-  register: mop_server_package
+# Результат синка переживает игру: по нему перезапускаются сервисы сервера,
+# и mop-bootstrap тоже (роль bootstrap) -- тот же пакет в том же каталоге.
+# Своим именем: на машине, которая и сервер, и узел, синк агента писал бы
+# в тот же mop_package.
+- name: Remember what the server's sync did
+  ansible.builtin.set_fact:
+    mop_server_package: "{{ mop_package }}"
 
 # Синк -- не единственный признак нового кода (#122). Там, где контроллер --
 # сам сервер под пользователем пула, источник и цель синка -- один каталог,
@@ -54,7 +40,7 @@
     cmd: >-
       { git rev-parse HEAD; git status --porcelain; git diff HEAD; }
       | sha256sum | cut -d' ' -f1
-    chdir: "{{ lookup('env', 'HOME') }}/mop"
+    chdir: "{{ mop_source }}"
   register: mop_package_fingerprint
   changed_when: false
 
