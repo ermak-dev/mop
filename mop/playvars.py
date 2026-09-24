@@ -4,7 +4,7 @@
 настроек знал о правах шины. Здесь -- над config: настройки плюс списки,
 которые живут в коде одним местом.
 """
-from . import config, deps, operators
+from . import config, deps, identity
 
 
 def playbook_vars():
@@ -28,7 +28,5 @@ def playbook_vars():
     # Права операторов — субъектами, уже разобранные: шаблон конфига NATS
     # не должен разбирать настройку второй раз, иначе два разбора разойдутся
     # молча, и разойдутся они В ПРАВАХ.
-    out["MOP_OPERATOR_SUBJECTS"] = {
-        name: operators.permissions(op)
-        for name, op in operators.parse(out.get("MOP_OPERATORS", "")).items()}
+    out["MOP_OPERATOR_SUBJECTS"] = identity.subjects(out.get("MOP_OPERATORS", ""))
     return out

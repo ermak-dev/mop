@@ -96,11 +96,15 @@ def permissions(op):
     `_INBOX.>` обязателен всем, иначе request-reply молча не работает -- на
     этом однажды стоял целый вечер разбора (docs/BUS.md). user на весь пул
     получает mop.> без mop.admin.>: иначе вместе с проектами ему достались
-    бы узлы -- disk, drain, forget."""
-    if ALL in op["projects"]:
-        deny = [] if op["role"] == ADMIN else [busnames.everything(busnames.ADMIN)]
+    бы узлы -- disk, drain, forget.
+
+    op -- identity.Identity (#205) или словарь разбора {role, projects}."""
+    role, projects = ((op["role"], op["projects"]) if isinstance(op, dict)
+                      else (op.role, op.projects))
+    if ALL in projects:
+        deny = [] if role == ADMIN else [busnames.everything(busnames.ADMIN)]
         return {"allow": [busnames.everything(), busnames.INBOX], "deny": deny}
-    return {"allow": [busnames.everything(p) for p in sorted(op["projects"])]
+    return {"allow": [busnames.everything(p) for p in sorted(projects)]
             + [busnames.INBOX], "deny": []}
 
 
