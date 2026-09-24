@@ -27,13 +27,15 @@ BASE = {
 }
 
 # Снимок users.conf до #144: имена субъектов и пользователей собраны в одно
-# определение, и рефакторинг обязан не сдвинуть в файле ни байта.
+# определение, и рефакторинг обязан не сдвинуть в файле ни байта. Снят заново
+# в #207 намеренно: публикация людей -- явным списком с логином в rpc, у
+# сервиса -- deny на субъекты с логином; подписка, папеты и узлы -- прежние.
 OPERATORS = "anton:admin; ivan:user:rugent,cloudpub; olga:user:*"
 USERS_CONF = """users = [
   {
     user: "service", password: "svc-pass"
     permissions: {
-      publish:   { allow: ["mop.>", "_INBOX.>"] }
+      publish:   { allow: ["mop.>", "_INBOX.>"], deny: ["mop.*.node.*.rpc.*", "mop.*.cluster.rpc.*"] }
       subscribe: { allow: ["mop.>", "_INBOX.>"] }
     }
   }
@@ -41,7 +43,7 @@ USERS_CONF = """users = [
     user: "anton", password: "anton-pass"
     allowed_connection_types: ["WEBSOCKET"]
     permissions: {
-      publish:   { allow: ["mop.>", "_INBOX.>"] }
+      publish:   { allow: ["mop.*.node.*.rpc.anton", "mop.*.cluster.rpc.anton", "mop.*.node.*.rpc", "mop.*.cluster.rpc", "mop.*.node.*.msg", "mop.*.all.msg", "mop.*.master.>", "mop.*.events", "mop.*.server.rpc", "mop.admin.build.rpc", "_INBOX.>"] }
       subscribe: { allow: ["mop.>", "_INBOX.>"] }
     }
   }
@@ -49,7 +51,7 @@ USERS_CONF = """users = [
     user: "ivan", password: "ivan-pass"
     allowed_connection_types: ["WEBSOCKET"]
     permissions: {
-      publish:   { allow: ["mop.cloudpub.>", "mop.rugent.>", "_INBOX.>"] }
+      publish:   { allow: ["mop.cloudpub.node.*.rpc.ivan", "mop.cloudpub.cluster.rpc.ivan", "mop.cloudpub.node.*.rpc", "mop.cloudpub.cluster.rpc", "mop.cloudpub.node.*.msg", "mop.cloudpub.all.msg", "mop.cloudpub.master.>", "mop.cloudpub.events", "mop.cloudpub.server.rpc", "mop.rugent.node.*.rpc.ivan", "mop.rugent.cluster.rpc.ivan", "mop.rugent.node.*.rpc", "mop.rugent.cluster.rpc", "mop.rugent.node.*.msg", "mop.rugent.all.msg", "mop.rugent.master.>", "mop.rugent.events", "mop.rugent.server.rpc", "_INBOX.>"] }
       subscribe: { allow: ["mop.cloudpub.>", "mop.rugent.>", "_INBOX.>"] }
     }
   }
@@ -57,7 +59,7 @@ USERS_CONF = """users = [
     user: "olga", password: "olga-pass"
     allowed_connection_types: ["WEBSOCKET"]
     permissions: {
-      publish:   { allow: ["mop.>", "_INBOX.>"], deny: ["mop.admin.>"] }
+      publish:   { allow: ["mop.*.node.*.rpc.olga", "mop.*.cluster.rpc.olga", "mop.*.node.*.rpc", "mop.*.cluster.rpc", "mop.*.node.*.msg", "mop.*.all.msg", "mop.*.master.>", "mop.*.events", "mop.*.server.rpc", "_INBOX.>"], deny: ["mop.admin.>"] }
       subscribe: { allow: ["mop.>", "_INBOX.>"], deny: ["mop.admin.>"] }
     }
   }
