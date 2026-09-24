@@ -20,7 +20,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
-from mop import bus, config, web
+from mop import bus, busnames, config, web
 
 PAGE = os.path.join(config.PROJECT, "web", "index.html")
 LOGO = os.path.join(config.PROJECT, "docs", "logo.png")   # фавикон и шапка
@@ -108,7 +108,7 @@ def listen_events():
     """Журнал проекта с шины: под кредами admin видны все проекты. Шина легла —
     дашборд живёт опросом, а причина видна в снимке."""
     try:
-        bus.subscribe("mop.*.events", lambda msg: COLLECTOR.event(web.journal_entry(msg)))
+        bus.subscribe(bus.events(busnames.ANY), lambda msg: COLLECTOR.event(web.journal_entry(msg)))
     except bus.BusError as e:
         with COLLECTOR._cond:
             COLLECTOR.errors["events"] = str(e)

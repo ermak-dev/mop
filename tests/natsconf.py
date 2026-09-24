@@ -14,7 +14,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import natsconf  # noqa: E402
+from mop import natsconf, operators  # noqa: E402
 
 BASE = {
     "service": "svc-pass",
@@ -24,6 +24,93 @@ BASE = {
                            "deny": []}},
     "nodes": {"hyper": "node-pass"},
 }
+
+# Снимок users.conf до #144: имена субъектов и пользователей собраны в одно
+# определение, и рефакторинг обязан не сдвинуть в файле ни байта.
+OPERATORS = "anton:admin; ivan:user:rugent,cloudpub; olga:user:*"
+USERS_CONF = """users = [
+  {
+    user: "service", password: "svc-pass"
+    permissions: {
+      publish:   { allow: ["mop.>", "_INBOX.>"] }
+      subscribe: { allow: ["mop.>", "_INBOX.>"] }
+    }
+  }
+  {
+    user: "anton", password: "anton-pass"
+    allowed_connection_types: ["WEBSOCKET"]
+    permissions: {
+      publish:   { allow: ["mop.>", "_INBOX.>"] }
+      subscribe: { allow: ["mop.>", "_INBOX.>"] }
+    }
+  }
+  {
+    user: "ivan", password: "ivan-pass"
+    allowed_connection_types: ["WEBSOCKET"]
+    permissions: {
+      publish:   { allow: ["mop.cloudpub.>", "mop.rugent.>", "_INBOX.>"] }
+      subscribe: { allow: ["mop.cloudpub.>", "mop.rugent.>", "_INBOX.>"] }
+    }
+  }
+  {
+    user: "olga", password: "olga-pass"
+    allowed_connection_types: ["WEBSOCKET"]
+    permissions: {
+      publish:   { allow: ["mop.>", "_INBOX.>"], deny: ["mop.admin.>"] }
+      subscribe: { allow: ["mop.>", "_INBOX.>"], deny: ["mop.admin.>"] }
+    }
+  }
+  {
+    user: "puppet-mop", password: "pu-pass"
+    permissions: {
+      publish:   { allow: ["mop.mop.node.*.msg", "mop.mop.all.msg", "mop.mop.master.>", "mop.mop.events", "_INBOX.>"] }
+      subscribe: { allow: ["_INBOX.>"] }
+    }
+  }
+  {
+    user: "puppet-rugent", password: "ru-pass"
+    permissions: {
+      publish:   { allow: ["mop.rugent.node.*.msg", "mop.rugent.all.msg", "mop.rugent.master.>", "mop.rugent.events", "_INBOX.>"] }
+      subscribe: { allow: ["_INBOX.>"] }
+    }
+  }
+  {
+    user: "node-hyper", password: "hy-pass"
+    permissions: {
+      publish:   { allow: ["mop.*.master.>", "mop.*.events", "mop.*.node.hyper.msg", "mop.*.server.rpc", "_INBOX.>"] }
+      subscribe: { allow: ["mop.*.node.hyper.>", "mop.*.all.msg", "_INBOX.>"] }
+    }
+  }
+  {
+    user: "node-mini", password: "mi-pass"
+    permissions: {
+      publish:   { allow: ["mop.*.master.>", "mop.*.events", "mop.*.node.mini.msg", "mop.*.server.rpc", "_INBOX.>"] }
+      subscribe: { allow: ["mop.*.node.mini.>", "mop.*.all.msg", "_INBOX.>"] }
+    }
+  }
+]
+"""
+
+
+def covers(allow, subject):
+    """Разрешает ли маска прав allow подписку subject (сама может быть маской).
+
+    Семантика NATS: `*` -- ровно один токен, `>` -- один и больше в хвосте.
+    Подписка на маску разрешена, только если маска прав накрывает её целиком."""
+    a, s = allow.split("."), subject.split(".")
+    for i, tok in enumerate(a):
+        if tok == ">":
+            return len(s) > i
+        if i >= len(s) or s[i] == ">":
+            return False
+        if tok != "*" and (tok != s[i]):
+            return False
+    return len(a) == len(s)
+
+
+def permitted(allow, subject, deny=()):
+    return (any(covers(a, subject) for a in allow)
+            and not any(covers(d, subject) or covers(subject, d) for d in deny))
 
 
 def main():
@@ -71,6 +158,52 @@ def main():
     except ValueError as e:
         if "mop" not in str(e):
             failed.append(f"the refusal must name the project: {e}")
+
+    # HYPOTHESIS (#144): субъекты и имена пользователей набраны руками в шести
+    # модулях; переименование в одном месте молча разводит права и подписки.
+    # SOLUTION: одно определение (mop/busnames.py), из него строятся и права,
+    # и подписки. Характеризация: файл пользователей тот же байт в байт.
+    ops = operators.parse(OPERATORS)
+    base = {"service": "svc-pass",
+            "operators": {n: {"password": f"{n}-pass", **operators.permissions(o)}
+                          for n, o in ops.items()},
+            "nodes": {"hyper": "hy-pass", "mini": "mi-pass"}}
+    got = natsconf.render(base, {"mop": "pu-pass", "rugent": "ru-pass"})
+    if got != USERS_CONF:
+        failed.append("users.conf drifted from its snapshot:\n" + got)
+
+    # Свойство (#144): всё, на что подписываются агент и сервисы, разрешено
+    # правами их пользователя. Подписки и права строятся из busnames, и
+    # проверка ловит расхождение до пула, где отказ прав молчит (error_cb).
+    from mop import busnames
+    if covers("_INBOX.>", "_INBOX") or not covers("mop.*.node.x.>", "mop.*.node.x.rpc") \
+            or covers("mop.a.>", "mop.*.events") or not covers("mop.>", "mop.*.all.msg"):
+        failed.append("covers() does not follow NATS wildcard semantics")
+    reply = "_INBOX.abc.1"          # ответ на request: подписка на свой инбокс
+    for node in ("hyper", "mini"):
+        perms = natsconf.node_permissions(node)
+        subs = busnames.agent_subscriptions(node)
+        for subj in subs["rpc"] + subs["msg"] + [reply]:
+            if not permitted(perms["subscribe"], subj):
+                failed.append(f"{busnames.node_user(node)} may not subscribe to {subj}")
+        if not subs["rpc"] or not subs["msg"]:
+            failed.append(f"the agent must listen on rpc and msg: {subs}")
+    for subj in busnames.service_subscriptions() + [reply]:
+        if not permitted(natsconf.SERVICE_PERMISSIONS, subj):
+            failed.append(f"{busnames.SERVICE} may not subscribe to {subj}")
+    for p in ("mop", "rugent"):
+        allow = natsconf.puppet_permissions(p)["subscribe"]
+        if not permitted(allow, reply):
+            failed.append(f"{busnames.puppet_user(p)} may not subscribe to its reply inbox")
+    # Мастер слушает свой инбокс и опрос `who`: оператор с проектом, admin
+    # -- за псевдопроект admin, user:* -- за любой проект.
+    for name, project in (("ivan", "rugent"), ("anton", busnames.ADMIN), ("olga", "mop")):
+        perms = operators.permissions(ops[name])
+        for subj in (busnames.inbox(project, "host-1"),
+                     busnames.inbox(project, busnames.ALL_MASTERS), reply):
+            if not permitted(perms["allow"], subj, perms["deny"]):
+                failed.append(f"{name} may not subscribe to {subj}")
+    # STATUS: FIXED — see #144
 
     # Пароли папетов рождаются на сервере: недостающий заводится, имеющийся
     # не меняется -- иначе живые папеты отвалились бы от шины.

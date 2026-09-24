@@ -39,7 +39,7 @@ try:
 except ImportError:
     sys.exit("bus library needed: pip install --user --break-system-packages nats-py")
 
-from . import bus, driver, lease, usage
+from . import bus, busnames, driver, lease, usage
 from .driver import clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
@@ -719,13 +719,15 @@ async def serve():
         asyncio.create_task(handle(msg, public=True))
 
     # Маска по проекту: агент обслуживает всех жильцов узла, а кто из какого
-    # проекта — решает уже проверка в handle.
-    await _conn.subscribe(f"mop.*.node.{node}.rpc", cb=on_rpc)
-    await _conn.subscribe(f"mop.*.node.{node}.msg", cb=on_msg)
-    # Общий субъект: сюда спрашивают те, кто не знает состава пула.
-    await _conn.subscribe("mop.*.all.msg", cb=on_msg)
-    print(f"mop-agent: node {node}, subscribed to mop.*.node.{node}.rpc|msg "
-          f"and mop.*.all.msg", flush=True)
+    # проекта — решает уже проверка в handle. Общий all.msg — для тех, кто не
+    # знает состава пула. Те же субъекты, что в правах узла (natsconf, #144).
+    subs = busnames.agent_subscriptions(node)
+    for subj in subs["rpc"]:
+        await _conn.subscribe(subj, cb=on_rpc)
+    for subj in subs["msg"]:
+        await _conn.subscribe(subj, cb=on_msg)
+    print(f"mop-agent: node {node}, subscribed to "
+          f"{', '.join(subs['rpc'] + subs['msg'])}", flush=True)
     await _event("up", text=f"agent on {node}")
     await asyncio.Event().wait()
 

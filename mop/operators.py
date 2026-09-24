@@ -21,14 +21,17 @@
 Прежняя запись без роли (`имя:*`, `имя:проект,проект`) читается так, как
 работала до #106: `*` давал весь mop.>, то есть admin.
 """
+from . import busnames
+
 # Имена, которыми на шине зовутся роли. Человек с таким именем — не второй
 # оператор, а тихая подмена роли: права роли и права человека сложились бы в
 # одного пользователя, и понять по конфигу, чьи они, стало бы нельзя.
-RESERVED = ("admin", "service")
-RESERVED_PREFIXES = ("master-", "puppet-", "node-")
+RESERVED = busnames.RESERVED
+RESERVED_PREFIXES = busnames.RESERVED_PREFIXES
 ALL = "*"
 
 
+# Роль, а не псевдопроект busnames.ADMIN: совпадает только написание.
 ADMIN, USER = "admin", "user"
 ROLES = (ADMIN, USER)
 
@@ -95,12 +98,12 @@ def permissions(op):
     получает mop.> без mop.admin.>: иначе вместе с проектами ему достались
     бы узлы -- disk, drain, forget."""
     if ALL in op["projects"]:
-        deny = [] if op["role"] == ADMIN else ["mop.admin.>"]
-        return {"allow": ["mop.>", "_INBOX.>"], "deny": deny}
-    return {"allow": [f"mop.{p}.>" for p in sorted(op["projects"])] + ["_INBOX.>"],
-            "deny": []}
+        deny = [] if op["role"] == ADMIN else [busnames.everything(busnames.ADMIN)]
+        return {"allow": [busnames.everything(), busnames.INBOX], "deny": deny}
+    return {"allow": [busnames.everything(p) for p in sorted(op["projects"])]
+            + [busnames.INBOX], "deny": []}
 
 
 def pass_file(name):
     """Имя файла пароля оператора в secrets/ — как у всех остальных."""
-    return f"nats-op-{name}.pass"
+    return busnames.operator_pass_file(name)

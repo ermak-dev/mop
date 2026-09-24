@@ -29,20 +29,20 @@ import json
 import os
 import ssl
 
-from . import config
+from . import busnames, config
 
 ROOT = os.path.expanduser("~/.config/mop/servers")
 # Кред оператора-человека (#84): один файл на машину, а не по паролю на
 # проект. Пользователь тут один — сам человек, — и от проекта он не зависит:
 # проект живёт в СУБЪЕКТЕ, права на субъект проверяет сервер NATS.
 OPERATOR_FILE = "operator.json"
-ADMIN = "admin"          # псевдопроект оператора: проекта нет
+ADMIN = busnames.ADMIN   # псевдопроект оператора: проекта нет
 # Машинный пользователь сервисов сервера (#104): mop-web, mop-bootstrap,
 # mop-cluster. Раньше они ходили под admin, и его пароль был общим с людьми.
 # Лежит у сервера как operator.json -- «кто эта машина на шине», -- а
 # оператору не отдаётся никогда (pick).
-SERVICE = "service"
-SERVICE_PASS_FILE = "nats-service.pass"
+SERVICE = busnames.SERVICE
+SERVICE_PASS_FILE = busnames.SERVICE_PASS_FILE
 TOKEN_FILE = "bootstrap.json"
 # Сертификат TLS-прокси сервера, закреплённый у клиента (#97). Только
 # самоподписанный: настоящий проверяется системным доверием, и закреплять
@@ -64,24 +64,24 @@ def server_dir(host=None):
 
 def user_of(project):
     """Пользователь NATS по проекту: нет проекта — оператор."""
-    return ADMIN if not project or project == ADMIN else f"master-{project}"
+    return ADMIN if not project or project == ADMIN else busnames.master_user(project)
 
 
 def pass_file(project):
     """Имя файла пароля — такое же, как в secrets/ сервера."""
-    return f"nats-{user_of(project)}.pass"
+    return busnames.pass_file(user_of(project))
 
 
 def puppet_user(project):
     """Пользователь NATS папета. Отдельно от user_of: тот отвечает про
     мастера, и молча получить master-<проект> там, где нужен puppet-<проект>,
     значит выдать папету права мастера."""
-    return f"puppet-{project}"
+    return busnames.puppet_user(project)
 
 
 def puppet_pass_file(project):
     """Имя файла пароля папета — как в secrets/ сервера."""
-    return f"nats-{puppet_user(project)}.pass"
+    return busnames.pass_file(puppet_user(project))
 
 
 def bus_config(host, port, project, password, user=None):

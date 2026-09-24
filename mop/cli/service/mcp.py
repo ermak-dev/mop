@@ -43,7 +43,7 @@ from mcp.server.mcpserver import MCPServer                     # noqa: E402
 from mcp.types import ToolAnnotations                          # noqa: E402
 from pydantic import Field                                     # noqa: E402
 
-from mop import bus, cli, session, puppets                # noqa: E402
+from mop import bus, busnames, cli, session, puppets      # noqa: E402
 from mop.cli import lib                                   # noqa: E402
 from mop.render import table                              # noqa: E402
 
@@ -81,7 +81,7 @@ def is_master():
     тоже можно, но это секунды на старте каждого папета и отказ прав в логе
     на ровном месте — а ответ уже лежит в кредах, локально."""
     try:
-        return not bus.config()["user"].startswith("puppet-")
+        return not busnames.is_puppet(bus.config()["user"])
     except Exception:
         return False
 
