@@ -59,14 +59,15 @@ async def destroy(name):
                     (s.strip() for s in config.get("MOP_PUPPET_SEED").split(",")) if p)
     out, code = await sh(f"git -C {d} reset --hard HEAD && "
                          f"git -C {d} clean -xdff {excl}")
-    if code not in (0, None):
+    # Таймаут -- отказ, а не успех (#171): здесь это недоделанный reset.
+    if code != 0:
         return {"error": f"git in {d}: {why(out, code)}"}
     target = target_dir(name)
     # Долго: сотни тысяч inode. Таймаут шире офисного — обычный убил бы rm на
     # полпути и оставил каталог наполовину снесённым.
     _, code = await sh(f"rm -rf {target}", timeout=600)
-    if code not in (0, None):
-        return {"error": f"rm {target}: exit {code}"}
+    if code != 0:
+        return {"error": f"rm {target}: {why('', code, 600)}"}
     return {"reset": True, "target": target}
 
 

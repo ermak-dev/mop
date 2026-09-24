@@ -128,9 +128,60 @@ def check_quiet():
     return out
 
 
+# ── таймаут шелла -- не успех (#171) ─────────────────────────────────────
+# HYPOTHESIS: bsh() на таймауте отдаёт ("", None), а мутирующие глаголы
+# агента читали это как успех: запись владельца «прошла», type и Escape
+# «напечатаны» и возвращали экран.
+# SOLUTION: для записи владельца и type None -- отказ «timed out». Пробы
+# только для чтения (буфер пейна, проба сессии) -- как были.
+# STATUS: FIXED — see #171
+def check_timeouts_171():
+    import asyncio
+    out = []
+    saved = agent.bsh, agent.clone_facts
+
+    def fake(code):
+        async def bsh(name, script, timeout=20):
+            return "", code
+        return bsh
+
+    async def facts(name):
+        return {"owner": None, "dirty": 0, "ahead": 0}
+    try:
+        agent.clone_facts = facts
+        for code in (None, 0):
+            agent.bsh = fake(code)
+            for cmd in ("/status", "Escape"):
+                got = asyncio.run(agent.v_type(None, {"name": "pu-mop-1", "command": cmd}))
+                if code is None and "timed out" not in (got.get("error") or ""):
+                    out.append(f"type {cmd}, timeout -> {got!r}")
+                if code == 0 and got != {"screen": ""}:
+                    out.append(f"type {cmd}, success -> {got!r}")
+            refused, undo, _ = asyncio.run(agent._claim("pu-mop-1", {"owner": "m-1"}))
+            if code is None and "timed out" not in (refused or ""):
+                out.append(f"owner write, timeout -> {refused!r}")
+            if code == 0 and (refused or not undo):
+                out.append(f"owner write, success -> {refused!r} {undo!r}")
+        # Кривое имя до шелла не доходит: bsh отдал бы None, и это прочиталось
+        # бы как таймаут, а то и как успех.
+        got = asyncio.run(agent.v_type(None, {"name": "pu-x; rm", "command": "/status"}))
+        if "doesn't look like" not in (got.get("error") or ""):
+            out.append(f"type with a bad name -> {got!r}")
+        # Пробы только для чтения: ответ прежний.
+        agent.bsh = fake(None)
+        if asyncio.run(agent.pane_lines("pu-mop-1")) != []:
+            out.append("pane_lines must tolerate a timeout")
+        if asyncio.run(agent.session_probe("pu-mop-1")) != "none":
+            out.append("session_probe must read a timeout as none")
+    finally:
+        agent.bsh, agent.clone_facts = saved
+    return out
+
+
 def main():
     failed = []
-    for check in (check_sets, check_decisions, check_tmux, check_quiet):
+    for check in (check_sets, check_decisions, check_tmux, check_quiet,
+                  check_timeouts_171):
         try:
             failed += check()
         except Exception as e:

@@ -786,8 +786,153 @@ def main():
         print(f"FAILED  check_contract_151: {type(e).__name__}: {e}")
     cases, bad = cases + c, bad + b
 
+    try:
+        c, b = check_timeouts_171()
+    except Exception as e:
+        c, b = 1, 1
+        print(f"FAILED  check_timeouts_171: {type(e).__name__}: {e}")
+    cases, bad = cases + c, bad + b
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
+
+
+# ── таймаут шелла -- не успех (#171) ─────────────────────────────────────
+# HYPOTHESIS: sh() на таймауте отдаёт ("", None) -- намеренно отдельно от
+# ненулевого кода, -- а мутирующие глаголы проверяли `code not in (0, None)`
+# и читали «не успел» как «сделал»: host.destroy по недоделанному
+# `rm -rf target` отвечал {"reset": True}, ensure поднимал тело, которое не
+# стартовало.
+# SOLUTION: мутирующие глаголы считают None отказом, причина -- why(),
+# которая для None говорит «timed out after Ns». Пробы только для чтения
+# (перечисление тел, шаблоны, ёмкость) остаются как были. Имя контейнера --
+# проба, но по ней ensure решает, клонировать ли: таймаут там -- отказ ensure,
+# а не клон поверх занятого vmid.
+# STATUS: FIXED — see #171
+def check_timeouts_171():
+    import asyncio
+    from mop.driver import host, pve
+
+    cases = bad = 0
+
+    def check(what, got, want):
+        nonlocal cases, bad
+        cases += 1
+        if not want(got):
+            bad += 1
+            print(f"FAILED  #171 {what}: got {got!r}")
+
+    def fake_sh(fail=None, everything=False):
+        """sh, у которого «не успевает» команда с этим словом (или любая)."""
+        async def sh(script, timeout=20, prefix=()):
+            words = script.split()
+            if everything or (fail and fail in words):
+                return "", None
+            return "", 0
+        return sh
+
+    timed_out = lambda r: isinstance(r, dict) and "timed out" in (r.get("error") or "")
+    saved = (host.sh, pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname)
+    name = "pu-mop-1"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            key = os.path.join(d, "mop-body")
+            with open(key + ".pub", "w") as f:
+                f.write("ssh-ed25519 AAAA node\n")
+            seed = os.path.join(d, "seed")
+            with open(seed, "w") as f:
+                f.write("x")
+            pve.SSH_KEY = key
+            pve._seed_files = lambda: [(seed, "600")]
+            vmid = pve.vmid_of(name)
+
+            # host.destroy: и git, и rm -rf target.
+            host.sh = fake_sh("reset")
+            r = asyncio.run(host.destroy(name))
+            check("host.destroy, git timed out", r, timed_out)
+            host.sh = fake_sh("-rf")
+            r = asyncio.run(host.destroy(name))
+            check("host.destroy, rm timed out", r, timed_out)
+            check("host.destroy, rm: the timeout is named", r,
+                  lambda r: "600s" in (r.get("error") or ""))
+            host.sh = fake_sh()
+            r = asyncio.run(host.destroy(name))
+            check("host.destroy, success as before", r,
+                  lambda r: r.get("reset") is True)
+
+            # pve: каждый мутирующий шаг по отдельности.
+            async def standing(_v):
+                return name
+
+            async def empty(_v):
+                return ""
+            for what, fail, stand, fn in (
+                    ("ensure: clone", "clone", empty, lambda: pve.ensure(name)),
+                    ("ensure: net", "net", standing, lambda: pve.ensure(name)),
+                    ("ensure: start", "start", standing, lambda: pve.ensure(name)),
+                    ("ensure: package push", "push", standing,
+                     lambda: pve._sync_package(name, vmid)),
+                    ("ensure: package unpack", "exec", standing,
+                     lambda: pve._sync_package(name, vmid)),
+                    ("ensure: seed", "push", standing, lambda: pve._seed(name, vmid)),
+                    ("admit", "keys", standing, lambda: pve.admit(name, False)),
+                    ("push_many", "unpack", standing,
+                     lambda: pve.push_many(name, [(f"{pve.HOME}/.claude.json", b"{}")])),
+                    ("destroy", "destroy", standing, lambda: pve.destroy(name))):
+                pve._hostname = stand
+                pve.sh = fake_sh(fail)
+                check(f"pve.{what} timed out", asyncio.run(fn()), timed_out)
+
+            pve._hostname = standing
+            pve.sh = fake_sh()
+            check("pve.ensure, success as before", asyncio.run(pve.ensure(name)),
+                  lambda r: r.get("body") == vmid and not r.get("error"))
+            check("pve.destroy, success as before", asyncio.run(pve.destroy(name)),
+                  lambda r: r.get("destroyed") == vmid)
+            check("pve.admit, success as before", asyncio.run(pve.admit(name, False)),
+                  lambda r: r == {"admitted": False})
+
+            # Пробы только для чтения -- ответ прежний (характеризация до правки).
+            pve._hostname = saved[4]
+            pve.sh = fake_sh(everything=True)
+            check("pve.bodies tolerates", asyncio.run(pve.bodies()), lambda r: r == [])
+            check("pve.templates tolerates", asyncio.run(pve.templates()),
+                  lambda r: r == [])
+            # _hostname кормит мутирующее решение ensure (клонировать или
+            # поднять стоящее): таймаут -- «не знаю» (None), а не «пусто».
+            check("pve._hostname: timeout is unknown, not absent",
+                  asyncio.run(pve._hostname(vmid)), lambda r: r is None)
+            calls = []
+
+            async def list_times_out(script, timeout=20, prefix=()):
+                calls.append(script.split())
+                return ("", None) if "list" in script.split() else ("", 0)
+            pve.sh = list_times_out
+            r = asyncio.run(pve.ensure(name))
+            check("pve.ensure: list timed out -> refusal", r, timed_out)
+            check("pve.ensure: list timed out -> no clone", calls,
+                  lambda c: not any("clone" in w for w in c))
+
+            async def list_fails(script, timeout=20, prefix=()):
+                return ("", 1) if "list" in script.split() else ("", 0)
+            pve.sh = list_fails
+            check("pve._hostname: non-zero exit is absent, as before",
+                  asyncio.run(pve._hostname(vmid)), lambda r: r == "")
+            pve.sh = fake_sh(everything=True)
+            check("pve.capacity is an error, as before", asyncio.run(pve.capacity()),
+                  lambda r: bool(r.get("error")))
+            host.sh = fake_sh(everything=True)
+            check("host.capacity is an error, as before", asyncio.run(host.capacity()),
+                  lambda r: bool(r.get("error")))
+
+            # why(): ненулевой код -- как было, None -- «timed out».
+            check("why: output wins", driver.why(" boom \n", 1), lambda r: r == "boom")
+            check("why: exit code", driver.why("", 2), lambda r: r == "exit 2")
+            check("why: timeout with N", driver.why("", None, 30),
+                  lambda r: r == "timed out after 30s")
+    finally:
+        host.sh, pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname = saved
+    return cases, bad
 
 
 # ── факты pve для плейбуков (#158) ───────────────────────────────────────
