@@ -16,9 +16,7 @@ def main(argv):
     # Предохранитель считает сервис кластера: он же и снимает узел, и решение
     # с проверкой не должны жить на разных машинах — иначе между ними успеет
     # приехать папет (mop/nomad.py, forget_refusal).
-    got = bus.ask_cluster("forget", node=name, timeout=30)
-    if got.get("error"):
-        lib.usage(got["error"])
+    bus.call_cluster("forget", node=name, timeout=30)
     print(f"{name} is out of the roster. Take it out of the inventory too, "
           f"or the next deploy will configure it again.")
 

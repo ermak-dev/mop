@@ -37,7 +37,7 @@ def show_sessions():
 def to_puppet(a, body):
     """Через шину: сокет папета host-local, до него дотягивается агент узла."""
     wait = min(a.wait or 0, MAX_WAIT)
-    r = bus.request(lib.running_node(a.target), "send", name=a.target, message=body,
+    r = bus.request(puppets.running_alloc(a.target)["NodeName"], "send", name=a.target, message=body,
                     priority=a.priority, wait=wait, owner=bus.login(),
                     force=a.force, timeout=wait + bus.TIMEOUT)
     if "error" in r:

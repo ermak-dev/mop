@@ -46,7 +46,7 @@ def parse(argv):
 def main(argv):
     name, lines, follow = parse(argv)
     lib.guard(name)
-    node = lib.running_node(name)
+    node = puppets.running_alloc(name)["NodeName"]
     buf = puppets.pane_lines(node, name)
     for line in buf[-lines:]:
         print(line, flush=True)
@@ -58,7 +58,7 @@ def main(argv):
             cur = puppets.pane_lines(node, name)
         except Exception:
             # папет мог перезапуститься или переехать — перецепляемся
-            node = lib.running_node(name)
+            node = puppets.running_alloc(name)["NodeName"]
             continue
         for line in appended_since(buf, cur):
             print(line, flush=True)

@@ -297,6 +297,7 @@ def main():
     # STATUS: FIXED — see #111
 
     failed += check_mcp_declarations()
+    failed += check_refusals()
 
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0
@@ -420,6 +421,147 @@ def check_mcp_declarations():
             except ValueError as e:
                 failed += 1
                 print(f"FAIL {os.path.relpath(path)}: {e}")
+    return failed
+
+
+def check_refusals():
+    """#146: отказ сервиса кластера -- исключение, а не поле, которое каждый
+    командлет проверял сам.
+
+    HYPOTHESIS: около двадцати мест делали `got = bus.ask_cluster(...); if
+    got.get("error")` и сообщали отказ четырьмя способами; lib.require_job,
+    alloc_of, running_alloc выходили из процесса, и MCP держал свою копию
+    «аллокация должна работать» -- mcp.puppet_alloc, которая отказ сервиса
+    («не твой папет», «нет такого») читала как «не размещён» и теряла причину.
+    SOLUTION: bus.Refused и строгий bus.call_cluster; puppets.running_alloc
+    бросает LookupError с причиной; диспетчер и loud в MCP превращают
+    исключение в одну строку.
+    RESULT: командлеты зовут bus.call_cluster и puppets.running_alloc,
+    lib.guard спрашивает шину один раз и отдаёт спеку.
+    STATUS: FIXED — see #146"""
+    import contextlib
+    import io
+    from mop import bus, puppets
+
+    failed = 0
+    reason = "pu-mop-9 belongs to project other, not to mop"
+
+    # Строгий вызов: отказ -- Refused с причиной как есть, ответ -- как есть.
+    keep = bus.ask_cluster
+    try:
+        bus.ask_cluster = lambda verb, **kw: {"error": reason}
+        try:
+            got = bus.call_cluster("alloc", name="pu-mop-9")
+            failed += 1
+            print(f"FAIL call_cluster must raise Refused on a refusal, got {got!r}")
+        except bus.Refused as e:
+            if str(e) != reason:
+                failed += 1
+                print(f"FAIL call_cluster lost the reason: {e!r}")
+        if not issubclass(bus.Refused, RuntimeError):
+            failed += 1
+            print("FAIL Refused must be a RuntimeError: callers catch that already")
+        bus.ask_cluster = lambda verb, **kw: {"ok": True, "verb": verb, **kw}
+        got = bus.call_cluster("spec", name="pu-mop-9")
+        if got != {"ok": True, "verb": "spec", "name": "pu-mop-9",
+                   "timeout": bus.TIMEOUT, "project": None}:
+            failed += 1
+            print(f"FAIL call_cluster must pass the answer through: {got!r}")
+
+        # running_alloc: отказ сервиса доходит причиной, а не «не размещён».
+        bus.ask_cluster = lambda verb, **kw: {"error": reason}
+        try:
+            puppets.running_alloc("pu-mop-9")
+            failed += 1
+            print("FAIL running_alloc must raise on a refusal")
+        except LookupError:
+            failed += 1
+            print("FAIL running_alloc read a refusal as a missing allocation")
+        except bus.Refused as e:
+            if str(e) != reason:
+                failed += 1
+                print(f"FAIL running_alloc lost the reason: {e!r}")
+        # Не работает -- LookupError, у падающего -- с причиной падения.
+        task = {"state": "pending", "failed": False, "restarts": 3, "exit": 1,
+                "next_s": 20}
+        for alloc, want in ((None, "pu-mop-9 not running"),
+                            ({"ClientStatus": "pending", "NodeName": "n1", "task": task,
+                              "reason": "no bus credentials"},
+                             "pu-mop-9: FAILED: no bus credentials")):
+            bus.ask_cluster = lambda verb, a=alloc, **kw: {"ok": True, "alloc": a}
+            try:
+                got = puppets.running_alloc("pu-mop-9")
+                failed += 1
+                print(f"FAIL running_alloc({alloc!r}) must raise, got {got!r}")
+            except LookupError as e:
+                if not str(e).startswith(want):
+                    failed += 1
+                    print(f"FAIL running_alloc: {e!r}, want {want!r}...")
+        live = {"ClientStatus": "running", "NodeName": "n1"}
+        bus.ask_cluster = lambda verb, **kw: {"ok": True, "alloc": live}
+        if puppets.running_alloc("pu-mop-9") != live:
+            failed += 1
+            print("FAIL running_alloc must return the running allocation")
+
+        # guard: один вопрос шине, и его ответ -- вызывающему, а не второй
+        # такой же запрос следом (update спрашивал spec дважды).
+        asked = []
+        spec = {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
+        bus.ask_cluster = lambda verb, **kw: asked.append(verb) or spec
+        keep_project, bus.PROJECT = bus.PROJECT, "mop"
+        try:
+            got = lib.guard("pu-mop-9")
+        finally:
+            bus.PROJECT = keep_project
+        if asked != ["spec"] or got != spec:
+            failed += 1
+            print(f"FAIL guard: asked {asked}, returned {got!r}")
+    finally:
+        bus.ask_cluster = keep
+
+    # Диспетчер: отказ -- ровно одна строка в stderr с причиной, ненулевой
+    # выход, в stdout ничего: stdout модель читает как ответ команды.
+    for exc in (bus.Refused(reason), LookupError(reason)):
+        def fn(_argv, exc=exc):
+            raise exc
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                cli.run(fn, [])
+            except SystemExit as e:
+                code = e.code
+        name = type(exc).__name__
+        if not isinstance(code, int) or code == 0:
+            failed += 1
+            print(f"FAIL run({name}): exit {code!r}, want a non-zero int")
+        if err.getvalue() != reason + "\n":
+            failed += 1
+            print(f"FAIL run({name}): stderr {err.getvalue()!r}, want one line")
+        if out.getvalue():
+            failed += 1
+            print(f"FAIL run({name}): stdout {out.getvalue()!r}")
+
+    # Своих копий больше нет: помощники, выходившие из процесса, и ручные
+    # проверки поля error у сервиса кластера в командлетах.
+    for gone in ("require_job", "alloc_of", "running_alloc", "running_node"):
+        if hasattr(lib, gone):
+            failed += 1
+            print(f"FAIL lib.{gone} must be gone: puppets.running_alloc / bus.call_cluster")
+    # Два исключения: у ping в cluster check поле error рядом с ok -- это
+    # «сервис жив, Nomad нет», а не отказ; deploy отдаёт ответ целиком
+    # projects.for_deploy, и отказ там -- заметка, а не конец прогона.
+    allowed = {os.path.join("cluster", "check.py"), os.path.join("pool", "deploy.py")}
+    for root, _, files in os.walk(cli.PACKAGE):
+        for f in files:
+            path = os.path.join(root, f)
+            rel = os.path.relpath(path, cli.PACKAGE)
+            if not f.endswith(".py") or rel in allowed:
+                continue
+            with open(path) as fh:
+                if "bus.ask_cluster(" in fh.read():
+                    failed += 1
+                    print(f"FAIL {rel}: bus.ask_cluster by hand, use bus.call_cluster")
     return failed
 
 

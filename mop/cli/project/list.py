@@ -12,10 +12,7 @@ def main(argv):
     want_origins = "--origins" in argv
     if [a for a in argv if a != "--origins"]:
         lib.usage(__doc__)
-    ans = bus.ask_cluster("projects", project=bus.ADMIN)
-    if ans.get("error"):
-        lib.fail(ans["error"])
-        return 1
+    ans = bus.call_cluster("projects", project=bus.ADMIN)
     for n in ans.get("origins" if want_origins else "names") or []:
         print(n)
     return 0

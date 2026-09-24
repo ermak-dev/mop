@@ -517,10 +517,7 @@ def _cluster(verb, project=None, timeout=bus.TIMEOUT, **fields):
     Ошибка сервиса — это исключение здесь, а не поле в ответе: вызывающие в
     этом модуле — библиотечные функции, и молча вернуть половину ответа
     значит показать половину пула как целый."""
-    got = bus.ask_cluster(verb, project=project, timeout=timeout, **fields)
-    if got.get("error"):
-        raise RuntimeError(got["error"])
-    return got
+    return bus.call_cluster(verb, project=project, timeout=timeout, **fields)
 
 
 # Поля аллокации, которые читает клиент. Возим их, а не аллокацию целиком:
@@ -1051,6 +1048,40 @@ def failing_row(alloc_status, task, reason):
     when = "gave up" if gave_up else (f"next in {_human(task['next_s'])}"
                                       if task["next_s"] else "restarting")
     return "failing", f"FAILED: {why} ({task['restarts']} restarts, {when})"
+
+
+def failing(alloc):
+    """Строка состояния падающего папета из ответа `alloc`, либо None (#126)."""
+    a = alloc or {}
+    row = failing_row(a.get("ClientStatus"), a.get("task"), a.get("reason"))
+    return row[1] if row else None
+
+
+def not_running(name, alloc):
+    """Почему к папету нельзя подключиться: падает (с причиной) или не
+    запущен. alloc -- из ответа `alloc` сервиса кластера либо None."""
+    why = failing(alloc)
+    return f"{name}: {why}" if why else f"{name} not running"
+
+
+def running(name):
+    """Работающая аллокация папета и драйвер её узла, одним запросом.
+    -> (alloc, драйвер) | LookupError | bus.Refused.
+
+    Одна на командлеты и MCP (#146): у MCP была своя копия, и отказ сервиса
+    («не твой папет») она читала как «не размещён» -- модель видела ошибку
+    без причины. Отказ сервиса едет Refused как есть, неработающий папет --
+    LookupError, у падающего с причиной падения."""
+    got = _cluster("alloc", name=name)
+    a = got.get("alloc")
+    if not a or a.get("ClientStatus") != "running":
+        raise LookupError(not_running(name, a))
+    return a, got.get("driver")
+
+
+def running_alloc(name):
+    """Работающая аллокация папета (см. running)."""
+    return running(name)[0]
 
 
 def roster(stale=False):

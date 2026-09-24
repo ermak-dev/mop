@@ -60,11 +60,10 @@ def _add(origin, name, mode, p):
     got = manifest.fetch(origin)
 
     p.step("registering on the bus")
-    ans = bus.ask_cluster("project_add", project=bus.ADMIN, origin=origin)
-    if ans.get("error"):
-        p.clear()
-        lib.fail(f"{name}: {ans['error']}")
-        return 1
+    try:
+        bus.call_cluster("project_add", project=bus.ADMIN, origin=origin)
+    except bus.Refused as e:
+        raise bus.Refused(f"{name}: {e}")
 
     p.step("image")
     for ev in bus.ask_stream(bus.build_subject(), "image builder", "build",

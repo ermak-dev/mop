@@ -48,25 +48,21 @@ def _add(origin, project, profile, named, p):
     # workspace папета (#133) едет с регистрацией: рабочая копия проекта,
     # вне её -- origin; нет файла -- у папета workspace нет.
     p.step("registering")
-    got = bus.ask_cluster("add", origin=origin, profile=profile, timeout=30,
-                          workspace=lib.workspace_text(origin))
-    if got.get("error"):
-        p.clear()
-        lib.fail(got["error"])
-        return 1
+    got = bus.call_cluster("add", origin=origin, profile=profile, timeout=30,
+                           workspace=lib.workspace_text(origin))
     name = got["name"]
 
     p.step(f"{name}: waiting for a node")
     node = None
     for _ in range(120):
-        a, _ = lib.alloc_of(name)
+        a = bus.call_cluster("alloc", name=name).get("alloc")
         if a:
             node = a["NodeName"]
             if a["ClientStatus"] == "running":
                 return 0
-            if a["ClientStatus"] == "failed" or lib.failing(a):
+            if a["ClientStatus"] == "failed" or puppets.failing(a):
                 p.clear()
-                lib.fail(f"{name} on {node}: {lib.failing(a) or 'failed to start'}")
+                lib.fail(f"{name} on {node}: {puppets.failing(a) or 'failed to start'}")
                 return 1
             p.step(f"{name}: starting on {node}")
         time.sleep(1)

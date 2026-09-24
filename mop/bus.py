@@ -95,6 +95,13 @@ class BusError(RuntimeError):
         self.no_responders = no_responders
 
 
+class Refused(RuntimeError):
+    """Сервис ответил, и ответ -- отказ (поле `error`, #146). Не BusError:
+    шина довезла, и лечится это не у агента, а там, куда отказ показывает.
+    RuntimeError -- чтобы диспетчер и loud в MCP сделали из него одну строку
+    без отдельного знания о нём."""
+
+
 def _load(path):
     """Файл кредов как его рендерит плейбук: {url, user, password}."""
     try:
@@ -478,6 +485,18 @@ def ask_cluster(verb, timeout=TIMEOUT, project=None, **fields):
                 "no cluster service is subscribed — the mop-cluster unit is "
                 "not running on the server",
                 verb, timeout, **fields)
+
+
+def call_cluster(verb, timeout=TIMEOUT, project=None, **fields):
+    """Глагол сервису кластера с громким отказом. -> ответ | Refused.
+
+    Отказ -- исключение, а не поле: около двадцати мест проверяли его сами и
+    сообщали четырьмя способами, а MCP держал свою копию, в которой причина
+    терялась (#146)."""
+    got = ask_cluster(verb, timeout=timeout, project=project, **fields)
+    if got.get("error"):
+        raise Refused(got["error"])
+    return got
 
 
 def ask_server(verb, timeout=TIMEOUT, project=None, **fields):

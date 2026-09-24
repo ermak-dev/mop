@@ -25,10 +25,7 @@ MCP = {"annotations": "destructive", "args": [
 
 def main(argv):
     if not argv:
-        ans = bus.ask_cluster("projects", project=bus.ADMIN)
-        if ans.get("error"):
-            lib.fail(ans["error"])
-            return 1
+        ans = bus.call_cluster("projects", project=bus.ADMIN)
         for n in ans.get("names") or []:
             print(f"{n}\t{(ans.get('limits') or {}).get(n, 'none')}")
         return 0
@@ -39,10 +36,10 @@ def main(argv):
         value = projects.parse_limit(argv[1])
     except ValueError as e:
         lib.usage(f"{e}\n{__doc__}")
-    ans = bus.ask_cluster("project_limit", project=bus.ADMIN, name=name, value=value)
-    if ans.get("error"):
-        lib.fail(f"{name}: {ans['error']}")
-        return 1
+    try:
+        bus.call_cluster("project_limit", project=bus.ADMIN, name=name, value=value)
+    except bus.Refused as e:
+        raise bus.Refused(f"{name}: {e}")
     return 0
 
 

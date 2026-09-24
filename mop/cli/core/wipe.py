@@ -4,10 +4,8 @@ The clone is reset to HEAD (unsaved and untracked changes are gone), the
 target directory is removed entirely. The agent refuses if the tmux session
 is alive: a bare wipe is for a stopped puppet — the full cycle is mop recycle.
 """
-import sys
-
 from mop.cli import lib
-from mop import puppets
+from mop import bus, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -20,9 +18,9 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     lib.guard(name)
-    alloc, _ = lib.alloc_of(name)
+    alloc = bus.call_cluster("alloc", name=name).get("alloc")
     if not alloc:
-        sys.exit(f"{name}: no allocation — node unknown")
+        raise LookupError(f"{name}: no allocation — node unknown")
     r = puppets.wipe(alloc["NodeName"], name)
     print(f"{name}: clone reset to HEAD, target wiped ({r['target']})")
 

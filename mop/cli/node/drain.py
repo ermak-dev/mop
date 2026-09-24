@@ -17,9 +17,7 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     print(f"draining {name}: puppets leave, no new ones arrive...")
-    got = bus.ask_cluster("drain", node=name, timeout=60)
-    if got.get("error"):
-        lib.usage(got["error"])
+    bus.call_cluster("drain", node=name, timeout=60)
     print(f"{name} is closed to the scheduler. Watch them land: mop list")
 
 

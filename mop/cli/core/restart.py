@@ -4,7 +4,7 @@ The clone and branch survive a restart — the wrapper comes up on the same
 directory.
 """
 from mop.cli import lib
-from mop import bus
+from mop import bus, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -17,13 +17,13 @@ def main(argv):
         lib.usage(__doc__)
     name = argv[0]
     lib.guard(name)
-    a = lib.running_alloc(name)
+    a = puppets.running_alloc(name)
     print(f"restarting {name} on {a['NodeName']}...")
-    got = bus.ask_cluster("restart", name=name)
-    if got.get("error"):
-        print(f"restart failed: {got['error']}")
-        print(f"Alternative: mop delete {name} && mop add <origin>")
-        return 1
+    try:
+        bus.call_cluster("restart", name=name)
+    except bus.Refused as e:
+        raise bus.Refused(f"restart failed: {e}\n"
+                          f"Alternative: mop delete {name} && mop add <origin>")
     print("puppet is restarting")
 
 
