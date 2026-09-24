@@ -49,8 +49,8 @@ SAME = [
     ("http://h/g/p.git/", ("h", "g/p"), [], True, ""),
     ("https://h/g/p/", ("h", "g/p"), [], True, ""),
     ("git@h:p.git", ("h", "p"), ["h"], True, "git@h:p"),
-    # git+ssh:// ключа хоста по-прежнему не получает: схема не ssh.
-    ("git+ssh://git@h/g/p.git", ("h", "g/p"), [], True, "p"),
+    # git+ssh:// -- тоже ssh, ключ хоста нужен (#166; до него -- пусто).
+    ("git+ssh://git@h/g/p.git", ("h", "g/p"), ["h"], True, "p"),
     ("mop", ("", ""), [], False, "mop"),
     ("", ("", ""), [], False, ""),
     ("  ", ("", ""), [], False, "  "),
