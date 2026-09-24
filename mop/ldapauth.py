@@ -236,6 +236,17 @@ class LdapProvider:
             raise identity.Refused(f"{login}: wrong password")
         return self._identity(login, dn, attrs)
 
+    def knows(self, login):
+        """Есть ли в каталоге запись логина -- для цепочки (#232). Запись без
+        доступа -- тоже знает: решать ей, и она откажет; иначе одноимённая
+        учётка ниже по цепочке стала бы вторым паролем. Две записи -- знает."""
+        if not LOGIN.fullmatch(login or ""):
+            return False
+        try:
+            return self._entry(login) is not None
+        except identity.Refused:
+            return True
+
     def lookup(self, login):
         """Без пароля, служебной учёткой. Нет доступа -- не оператор: None."""
         if not LOGIN.fullmatch(login or ""):

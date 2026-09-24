@@ -23,7 +23,7 @@ import shutil
 import subprocess
 import sys
 
-from mop import bus, config, creds, keys, llm, playvars, puppets  # noqa: E402
+from mop import bus, config, creds, identity, keys, llm, playvars, puppets  # noqa: E402
 
 
 # Каталоги установки: корень проекта и bin/ с единственным исполняемым
@@ -260,11 +260,11 @@ def play_vars(projects, manifests=None, limits=None, git_hosts=None, inventory_h
 def play_env(get):
     """Окружение процесса ansible сверх своего. -> {имя: значение}.
 
-    Пароль служебной учётки LDAP (#214) -- только при провайдере ldap, и
+    Пароль служебной учётки LDAP (#214) -- только когда ldap в цепочке (#232), и
     окружением, а не --extra-vars: argv виден в списке процессов, а
     настройки едут плейбукам все. Плейбук берёт его lookup('env') и кладёт
     файлом 0600 в /etc/nats/identity."""
-    if (get("MOP_AUTH_PROVIDER") or "file") != "ldap":
+    if "ldap" not in identity.links(get("MOP_AUTH_PROVIDER")):
         return {}
     return {"MOP_LDAP_BIND_PASSWORD": get("MOP_LDAP_BIND_PASSWORD") or ""}
 

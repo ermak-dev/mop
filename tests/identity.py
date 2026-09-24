@@ -246,10 +246,217 @@ def check_deploy():
     return out
 
 
+# ── #232: цепочка провайдеров -- файл операторов поверх LDAP ─────────────
+# HYPOTHESIS: у установки ровно один провайдер (identity.provider выбирает
+# file или ldap); на rumop оператору нужен прежний локальный логин ermak из
+# файла, а всем остальным -- AD, и одно исключает другое.
+# SOLUTION: MOP_AUTH_PROVIDER -- список через запятую, порядок -- старшинство
+# (identity.links); ChainProvider спрашивает звенья по порядку, и первое,
+# которое ЗНАЕТ логин (knows), решает за всех: неверный локальный пароль до
+# LDAP не доходит, одноимённая учётка AD второго пароля не даёт.
+# STATUS: FIXED — see #232
+LDAP = {"MOP_LDAP_URL": "ldaps://ldap.example.dev",
+        "MOP_LDAP_BIND_DN": "cn=mop,ou=services,dc=example,dc=dev",
+        "MOP_LDAP_BIND_PASSWORD": "svc-pw", "MOP_LDAP_BASE": "dc=example,dc=dev",
+        "MOP_LDAP_ADMIN_GROUP": "cn=mop admins,ou=groups,dc=example,dc=dev"}
+
+
+class Untouchable:
+    """Звено, которое нельзя спрашивать: любой вызов -- провал проверки."""
+
+    def __getattr__(self, name):
+        def called(*a, **kw):
+            raise AssertionError(f"LDAP was asked: {name}{a}")
+        return called
+
+
+class Directory:
+    """Звено-заглушка каталога: {логин: (Identity, пароль)}; пишет, кого спросили."""
+
+    def __init__(self, people):
+        self.people, self.asked = people, []
+
+    def knows(self, login):
+        self.asked.append(("knows", login))
+        return login in self.people
+
+    def lookup(self, login):
+        self.asked.append(("lookup", login))
+        return self.people[login][0] if login in self.people else None
+
+    def authenticate(self, login, password):
+        self.asked.append(("authenticate", login))
+        if login not in self.people:
+            raise identity.Refused(f"{login}: unknown login")
+        who, pw = self.people[login]
+        if pw != password:
+            raise identity.Refused(f"{login}: wrong password")
+        return who
+
+
+def check_chain_232():
+    out = []
+    Chain = getattr(identity, "ChainProvider", None)
+    links = getattr(identity, "links", None)
+    if Chain is None or links is None:
+        return ["identity.ChainProvider and identity.links are missing"]
+    tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
+    ermak = Identity("ermak", "admin", ("*",), "Local Ermak")
+    local = provider(tmp, identity.format_line(ermak, identity.hash_password("local-pw")) + "\n")
+    # Файл знает логин -- решает он один, LDAP не спрошен вовсе: ни при
+    # верном пароле, ни при неверном (ни bind'а, ни счётчика неудач AD).
+    chain = Chain([local, Untouchable()])
+    if not isinstance(chain, identity.AuthProvider):
+        out.append("ChainProvider must satisfy AuthProvider")
+    try:
+        if chain.authenticate("ermak", "local-pw") != ermak:
+            out.append("a file hit with the right password must give the file's identity")
+    except AssertionError as e:
+        out.append(f"right local password: {e}")
+    try:
+        chain.authenticate("ermak", "ad-pw")
+        out.append("a wrong local password must be refused")
+    except identity.Refused as e:
+        if "wrong password" not in str(e):
+            out.append(f"wrong local password: the reason must say so: {e}")
+    except AssertionError as e:
+        out.append(f"wrong local password: {e}")
+    try:
+        if chain.lookup("ermak") != ermak:
+            out.append("lookup of a file login must give the file's identity")
+    except AssertionError as e:
+        out.append(f"lookup of a file login: {e}")
+    # Одноимённая учётка каталога -- не второй пароль локальной.
+    ad_ermak = Identity("ermak", "admin", ("*",), "AD Ermak")
+    olga = Identity("olga", "user", ("*",), "Olga")
+    ad = Directory({"ermak": (ad_ermak, "ad-pw"), "olga": (olga, "olga-pw")})
+    chain = Chain([local, ad])
+    try:
+        chain.authenticate("ermak", "ad-pw")
+        out.append("the AD password of a same-named account must not open the local one")
+    except identity.Refused:
+        pass
+    if any(login == "ermak" for _, login in ad.asked):
+        out.append(f"a login the file knows must never reach LDAP: {ad.asked}")
+    # Логин, которого файл не знает, -- к LDAP.
+    if chain.authenticate("olga", "olga-pw") != olga or chain.lookup("olga") != olga:
+        out.append("a login unknown to the file must go to LDAP")
+    try:
+        chain.authenticate("olga", "nope")
+        out.append("LDAP's wrong password must be refused")
+    except identity.Refused:
+        pass
+    if chain.lookup("nobody") is not None:
+        out.append("a login nobody knows: lookup -> None")
+    try:
+        chain.authenticate("nobody", "x")
+        out.append("a login nobody knows must be refused")
+    except identity.Refused as e:
+        if "unknown login" not in str(e):
+            out.append(f"a login nobody knows: the reason must say so: {e}")
+    # Обратный порядок -- старшинство у LDAP: ermak решает каталог.
+    back = Chain([ad, local])
+    if back.authenticate("ermak", "ad-pw") != ad_ermak:
+        out.append("ldap,file: the directory decides a login it knows")
+    try:
+        back.authenticate("ermak", "local-pw")
+        out.append("ldap,file: the local password must not open a login the directory knows")
+    except identity.Refused:
+        pass
+    if back.lookup("ermak") != ad_ermak:
+        out.append("ldap,file: lookup of a login the directory knows")
+    # Разбор настройки: порядок -- старшинство; одно имя -- как было.
+    for value, want in (("file,ldap", ("file", "ldap")), ("ldap, file", ("ldap", "file")),
+                        ("file", ("file",)), ("ldap", ("ldap",)), ("", ("file",)),
+                        (None, ("file",))):
+        try:
+            if links(value) != want:
+                out.append(f"links({value!r}) -> {links(value)}, want {want}")
+        except ValueError as e:
+            out.append(f"links({value!r}) refused: {e}")
+    for bad, name in (("file,nope", "nope"), ("file,ldap,file", "file"),
+                      ("ldap,ldap", "ldap"), ("file,", "''")):
+        try:
+            links(bad)
+            out.append(f"{bad!r} must be refused")
+        except ValueError as e:
+            if name not in str(e) or "MOP_AUTH_PROVIDER" not in str(e):
+                out.append(f"{bad!r}: the refusal must name {name}: {e}")
+        try:
+            identity.provider({"MOP_AUTH_PROVIDER": bad, **LDAP}, tmp)
+            out.append(f"provider must refuse {bad!r}")
+        except ValueError:
+            pass
+    # provider(): одно имя -- само звено; список -- цепочка в его порядке.
+    from mop import ldapauth
+    p = identity.provider({"MOP_AUTH_PROVIDER": "file,ldap", "MOP_OPERATORS_FILE": local.path,
+                           **LDAP}, tmp)
+    if not isinstance(p, Chain) or [type(l) for l in p.links] != [
+            identity.PlainFileProvider, ldapauth.LdapProvider]:
+        out.append(f"file,ldap must give a chain of the file, then LDAP: {p}")
+    elif p.links[0].path != local.path:
+        out.append(f"the chain's file link reads MOP_OPERATORS_FILE: {p.links[0].path}")
+    if not isinstance(identity.provider({"MOP_AUTH_PROVIDER": "ldap", **LDAP}, tmp),
+                      ldapauth.LdapProvider):
+        out.append("a single ldap stays a plain LdapProvider")
+    # Звено ldap -- как одно ldap: без настроек каталога отказ.
+    try:
+        identity.provider({"MOP_AUTH_PROVIDER": "file,ldap"}, tmp)
+        out.append("file,ldap without LDAP settings must be refused")
+    except ValueError:
+        pass
+    return out
+
+
+def check_deploy_chain_232():
+    """Отказы deploy -- по звеньям. Пустой файл операторов -- отказ, только
+    когда кроме файла впускать некому: при file,ldap людей даёт LDAP. Дубль
+    и битая строка -- отказ всегда: звено file сломано, в каком бы порядке
+    оно ни стояло. Звено ldap без настроек -- отказ, как одно ldap.
+    Пароль LDAP едет прогону и берётся сервисом, когда ldap -- звено цепочки."""
+    out = []
+    from mop.cli import lib
+    from mop.cli.pool import deploy
+    tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
+    empty = os.path.join(tmp, "empty")
+    open(empty, "w").close()
+    for chain in ("file,ldap", "ldap,file"):
+        s = {"MOP_AUTH_PROVIDER": chain, "MOP_OPERATORS_FILE": empty, **LDAP}
+        if deploy.operator_refusals(s, tmp):
+            out.append(f"{chain}: an empty operators file must not stop deploy, LDAP admits "
+                       f"people: {deploy.operator_refusals(s, tmp)}")
+        got = deploy.operator_refusals({"MOP_AUTH_PROVIDER": chain, "MOP_OPERATORS_FILE": empty}, tmp)
+        if len(got) != 1 or "MOP_LDAP_URL" not in got[0]:
+            out.append(f"{chain}: the ldap link without its settings must stop deploy: {got}")
+        dup = os.path.join(tmp, "dup")
+        line = identity.format_line(Identity("olga", "user", ("mop",)), identity.hash_password("x"))
+        with open(dup, "w") as f:
+            f.write(line + "\n" + line + "\n")
+        got = deploy.operator_refusals({**s, "MOP_OPERATORS_FILE": dup}, tmp)
+        if got != [f"login olga is defined twice in {dup}"]:
+            out.append(f"{chain}: a duplicate in the file link must stop deploy: {got}")
+        with open(dup, "a") as f:
+            f.write("broken line\n")
+        if not deploy.operator_refusals({**s, "MOP_OPERATORS_FILE": dup}, tmp):
+            out.append(f"{chain}: a broken operators file must stop deploy")
+        if lib.play_env({**s}.get).get("MOP_LDAP_BIND_PASSWORD") != "svc-pw":
+            out.append(f"{chain}: the play's env must carry the bind password")
+        unit = {k: v for k, v in s.items() if k != "MOP_LDAP_BIND_PASSWORD"}
+        try:
+            identity.service_settings(unit.get, tmp)
+            out.append(f"{chain}: the service without the bind password file must be refused")
+        except ValueError:
+            pass
+    got = deploy.operator_refusals({"MOP_AUTH_PROVIDER": "file,nope"}, tmp)
+    if len(got) != 1 or "nope" not in got[0]:
+        out.append(f"an unknown link must stop deploy, naming it: {got}")
+    return out
+
+
 def main():
     failed = []
     for check in (check_identity, check_hash, check_provider, check_one_source_219, check_choice,
-                  check_deploy):
+                  check_deploy, check_chain_232, check_deploy_chain_232):
         try:
             lines = check()
         except Exception as e:  # noqa: BLE001 -- падение проверки -- тоже провал
