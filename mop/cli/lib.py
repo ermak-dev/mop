@@ -253,7 +253,7 @@ def play_vars(projects, manifests=None, limits=None, git_hosts=None):
     return out
 
 
-def play(playbook, projects, manifests=None, git_hosts=None):
+def play(playbook, projects, manifests=None, git_hosts=None, check=False):
     """Прогон плейбука установки. -> код возврата ansible.
 
     Один вход для полной игры (site.yml) и для узкого прогона проектов
@@ -264,6 +264,9 @@ def play(playbook, projects, manifests=None, git_hosts=None):
     `--extra-vars mop_projects=[...]` ansible принимает как строку, и цикл в
     шаблоне честно проходится по её символам, порождая пользователей
     `master-[`, `master-"` и так далее.
+
+    check=True -- прогон без изменений (#177): ansible --check --diff, и
+    вывод прогона -- это разница, которую внёс бы настоящий.
     """
     if not shutil.which("ansible-playbook"):
         raise RuntimeError("no ansible-playbook on this machine -- run mop setup")
@@ -284,7 +287,8 @@ def play(playbook, projects, manifests=None, git_hosts=None):
              + play_vars(projects, manifests, git_hosts=git_hosts))
     return subprocess.call(
         ["ansible-playbook", "-i", inventory, os.path.join(PROJECT, playbook),
-         *sum((["--extra-vars", v] for v in extra), [])])
+         *sum((["--extra-vars", v] for v in extra), []),
+         *(["--check", "--diff"] if check else [])])
 
 
 def project_ready(project):

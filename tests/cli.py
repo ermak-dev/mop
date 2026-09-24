@@ -302,6 +302,7 @@ def main():
     failed += check_refusals()
     failed += check_output_rules()
     failed += check_empty_llm()
+    failed += check_deploy_check()
 
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0
@@ -850,6 +851,72 @@ def check_empty_llm():
     if not code or not err.startswith("no LLM profile no-such; available: "):
         failed += 1
         print(f"FAIL an unknown profile keeps its refusal: {err!r} {code!r}")
+    return failed
+
+
+def check_deploy_check():
+    """HYPOTHESIS (#177): доказать, что правка deploy/ не меняет узлы, было
+    нечем — `mop deploy` аргументов не берёт, и #157 подкладывал на PATH
+    обёртку ansible-playbook. А после плейбука deploy пишет файлы
+    (creds.collect). SOLUTION: `mop deploy --check` — --check --diff каждому
+    ansible-playbook, и ничего пишущего после плейбука. STATUS: FIXED — see #177"""
+    import shutil
+    import subprocess
+    from mop import bus, config, creds, playvars, projects
+    from mop.cli.pool import deploy
+    failed = 0
+    d = tempfile.mkdtemp(prefix="mop-test-deploy-check-")
+    inventory, key = os.path.join(d, "inventory.yaml"), os.path.join(d, "id")
+    for f in (inventory, key, key + ".pub"):
+        open(f, "w").close()
+    calls, collected, checked = [], [], []
+    keep = (shutil.which, config.require, subprocess.call, playvars.playbook_vars,
+            deploy.missing_extras, deploy.link, deploy.manifests, deploy.check,
+            bus.ask_cluster, projects.for_deploy, projects.read, creds.collect,
+            creds.operator, dict(os.environ))
+    try:
+        shutil.which = lambda cmd: f"/usr/bin/{cmd}"
+        config.require = lambda *a: None
+        subprocess.call = lambda argv, **kw: calls.append(argv) or 0
+        playvars.playbook_vars = lambda: {"MOP_OPERATOR_SUBJECTS": ["x"]}
+        deploy.missing_extras = lambda setting, root: []
+        deploy.link = lambda name, target: None
+        deploy.manifests = lambda origins: {}
+        deploy.check = lambda: checked.append(1)
+        bus.ask_cluster = lambda *a, **kw: {"ok": True, "projects": []}
+        projects.for_deploy = lambda answer, local: ([], None)
+        projects.read = lambda: []
+        creds.collect = lambda *a, **kw: collected.append(1) or []
+        creds.operator = lambda dest: "anton"
+        os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key})
+        for argv, dry in (([], False), (["--check"], True)):
+            calls.clear(), collected.clear(), checked.clear()
+            out, err, code = silent_run(deploy.main, argv)
+            plays = [c for c in calls if c and c[0] == "ansible-playbook"]
+            flags = {"--check", "--diff"} & {a for c in plays for a in c}
+            if code or not plays or flags != ({"--check", "--diff"} if dry else set()):
+                failed += 1
+                print(f"FAIL deploy {argv}: code {code!r}, plays {plays!r}, err {err!r}")
+            if dry and collected:
+                failed += 1
+                print("FAIL deploy --check must not collect server credentials (it writes)")
+            if not dry and not collected:
+                failed += 1
+                print("FAIL deploy without --check must still collect server credentials")
+        # Прочие аргументы — по-прежнему отказ, и до плейбука.
+        for argv in (["pool"], ["git@h:g/p.git"], ["--check", "extra"], ["--diff"]):
+            calls.clear()
+            out, err, code = silent_run(deploy.main, argv)
+            if not code or calls:
+                failed += 1
+                print(f"FAIL deploy {argv} must be refused before any playbook: code {code!r}")
+    finally:
+        (shutil.which, config.require, subprocess.call, playvars.playbook_vars,
+         deploy.missing_extras, deploy.link, deploy.manifests, deploy.check,
+         bus.ask_cluster, projects.for_deploy, projects.read, creds.collect,
+         creds.operator, env) = keep
+        os.environ.clear()
+        os.environ.update(env)
     return failed
 
 if __name__ == "__main__":
