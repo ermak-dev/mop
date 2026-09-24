@@ -329,6 +329,9 @@ async def facts(name):
     с тех пор, как она жила поверх exec."""
     if not await tmux_alive(name):
         return {"present": False}
+    # screen вердикт больше не читает (#235), но ключ остаётся на переход:
+    # мастер со старой библиотекой без него читает папета свободным. Убрать,
+    # когда библиотека каждого мастера несёт вердикт без экрана.
     scr, (sess, st), clone = await asyncio.gather(
         screen(name), session_state(name), clone_facts(name))
     got = {"present": True, "screen": scr, "session": sess, "clone": clone}

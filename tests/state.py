@@ -43,8 +43,11 @@ FREE_CASES = [
 ]
 
 
-def facts(session, clone=CLEAN, screen="Herding bytes"):
-    return {"present": True, "screen": screen, "session": session, "clone": clone}
+def facts(session, clone=CLEAN, screen=None):
+    """Факты с узла. screen — только чтобы показать, что вердикт его не читает
+    (#235): агент пока шлёт пейн ради мастеров со старой библиотекой."""
+    got = {"present": True, "session": session, "clone": clone}
+    return got if screen is None else {**got, "screen": screen}
 
 
 CASES = [
@@ -54,8 +57,6 @@ CASES = [
     ("agent returned an error",
      {"error": "tmux not responding"}, "HUNG (tmux not responding)"),
     ("agent knows nothing about the puppet", None, "HUNG (no answer)"),
-    ("empty pane — puppet just came up",
-     facts("idle 1 1", screen="   \n\n"), "free"),
 
     # Сокет = живость, файл = активность. Сочетания разбираются здесь.
     ("session alive and working", facts("busy 1 1", WORK), "busy: bug/1063"),
@@ -86,118 +87,52 @@ CASES = [
      facts("idle 1 1", {**WORK, "dirty": 3, "ahead": 2}),
      "idle: bug/1063 (uncommitted: 3, unpushed: 2)"),
 
-    # Жалобы видны только на экране: сессия жива и отвечает, а ход выдать не может.
-    ("login expired",
-     facts("idle 1 1", WORK, "Login expired · Please run /login"),
-     "login expired: bug/1063"),
-    # Живая жалоба про логин стоит в статус-баре под рамкой ввода. Снято с
-    # живого папета 2026-08-31.
-    ("not logged in — жалоба в статус-баре",
-     facts("idle 1 1", CLEAN,
-           "\u203b recap: ticket landed, waiting for the master\n"
-           "\u276f \n  -- INSERT -- bypass permissions on \u00b7 2 agents\n"
-           "                    Not logged in \u00b7 Run /login"),
-     "not logged in"),
-    # А жалоба из прошлого приезжает вместе с историей обычной репликой посреди
-    # буфера — папет при этом залогинен и здоров.
-    ("восстановленная сессия принесла старую жалобу про логин",
-     facts("idle 1 1", CLEAN,
-           "\u25cf 502 on 127.0.0.1:2001 — backend did not come up\n"
-           "\u25cf Login expired \u00b7 Please run /login\n"
-           "\u273b Churned for 43m 17s \u00b7 done 4:42 PM\n"
-           "\u276f \n  -- INSERT -- bypass permissions on \u00b7 2 agents"),
-     "free (master)"),
-    ("not logged in at all",
-     facts("idle 1 1", CLEAN, "Not logged in · Run /login"), "not logged in"),
-    # Подъём истории спрашивает, чем поднимать длинную сессию. Файл сессии при
-    # этом здоров, и без экрана папет читался бы свободным.
-    ("stuck on the choice of how to resume history",
-     facts("idle 1 1", WORK,
-           "This session is 1h 30m old and 251.5k tokens.\n"
-           "  1. Resume from summary (recommended)\n"
-           "  2. Resume full session as-is\n  3. Don't ask me again\n"
-           "  Enter to confirm \u00b7 Esc to cancel"),
-     "needs action: resume prompt"),
-    ("any other dialog — by the footer, no need to know the question",
-     facts("idle 1 1", CLEAN,
-           "Do you want to proceed?\n  1. Yes\n  2. No\n"
-           "  Enter to confirm \u00b7 Esc to cancel"),
-     "needs action: dialog"),
-    ("footer scrolled up — the question's already answered",
-     facts("busy 1 1", CLEAN,
-           "  Enter to confirm \u00b7 Esc to cancel\n"
-           "Herding bytes\n  6 tasks (3 done)"), "busy: master"),
-    ("model quota ran out",
-     facts("idle 1 1", CLEAN, "You're out of usage credits. keep using Opus 4.5"),
-     "no model quota: Opus 4.5"),
-    ("quota was hit, but the model's already switched",
-     facts("busy 1 1", CLEAN,
-           "out of usage credits\nSet model to sonnet\nHerding bytes"), "busy: master"),
-    # Отказ провайдера: в таблицу едет средний блок скобок. Код (1308) и
-    # request id мастеру не говорят ничего, «Request rejected (429)» умалчивает
-    # время возврата квоты — а именно оно решает, ждать папета или переводить.
-    ("provider refused for quota, message wrapped by the renderer",
-     facts("idle 1 1", WORK,
-           "● API Error: Request rejected (429) · [1308][Usage limit reached for"
-           " 5 hour. Your limit will reset at 2026-08-31\n"
-           "  18:19:41][20260831150427d7cd9f9634d84ecc]\n"
-           "✻ Brewed for 57m 29s · done 2:04 PM\n"
-           "  6 tasks (3 done, 1 in progress, 2 open)"),
-     "error: Usage limit reached for 5 hour. Your limit will reset at"
-     " 2026-08-31 18:19:41"),
-    ("provider refusal without brackets — show what we have",
-     facts("idle 1 1", CLEAN, "● API Error: Connection error"),
-     "error: Connection error"),
-    # Пара снята с живого пула 2026-08-31: обе сессии несут в буфере один и тот
-    # же отказ, но первую восстановили вместе со скроллбэком, и она работает.
-    # Отличает их не жалоба, а то, что под ней.
-    ("restored session brought a refusal from history and is working",
-     facts("idle 1 1", WORK,
-           "● API Error: Request rejected (429) · [1308][Usage limit reached]\n"
-           "✻ Brewed for 57m 29s · done 2:04 PM\n"
-           "● Session model glm-5.3 could not be restored — using opus instead\n"
-           "❯ продолжай\n  \u23bf  4 skills available\n  Ran 3 shell commands"),
-     "free (bug/1063)"),
-    ("same complaint, but underneath is only a cut-off turn — the puppet really is stuck",
-     facts("idle 1 1", WORK,
-           "  Ran 2 shell commands\n"
-           "● API Error: Request rejected (429) · [1308][Usage limit reached]\n"
-           "✻ Baked for 49m 57s · done 2:04 PM\n"
-           "  2 tasks (0 done, 1 in progress, 1 open)\n"
-           "  \u25fc Add clo gitlab fetch-redemption"),
-     "error: Usage limit reached"),
-    ("there was a refusal, but the model's already switched",
-     facts("busy 1 1", CLEAN,
-           "● API Error: Request rejected (429) · [1308][Usage limit reached]\n"
-           "Set model to sonnet\nHerding bytes"), "busy: master"),
-
-    # Файла сессии нет (старый claude / нет python3) -> откаты.
-    ("no session file, but the pane says working",
-     facts("none", CLEAN, "Working... running tests"), "busy"),
-    ("no session file, pane is silent -> branch alone",
-     facts("none", WORK, "какой-то текст"), "busy: bug/1063"),
+    # Файла сессии нет (сессия ещё не поднялась) -> откат по клону.
+    ("no session file -> branch alone",
+     facts("none", WORK), "busy: bug/1063"),
     ("no session file, no clone either",
-     facts("none", None, "какой-то текст"), "unknown (no clone data)"),
+     facts("none", None), "unknown (no clone data)"),
 
     # Клон — последнее слово на каждом пути к «free», а не только на пути через
-    # файл сессии. Четвёрка ниже снята с бага 01.09 (pu-rugent-3): три дороги
-    # в обход клона и одна в обход самих данных.
+    # файл сессии. Строки ниже сняты с бага 01.09 (pu-rugent-3); дороги через
+    # экран ушли вместе с экраном (#235).
     ("no session file, work sits on the default branch — the fallback used to"
      " hide it, since it deliberately mutes the default branch name",
-     facts("none", {**CLEAN, "ahead": 2}, "какой-то текст"),
+     facts("none", {**CLEAN, "ahead": 2}),
      "idle: master (unpushed: 2)"),
-    ("empty pane over a dirty clone — the window right after a restart, where"
-     " unsaved work is exactly what's at stake",
-     facts("idle 1 1", {**CLEAN, "dirty": 3}, "   \n\n"),
+    ("idle session on the default branch over a dirty clone — the window right"
+     " after a restart, where unsaved work is exactly what's at stake",
+     facts("idle 1 1", {**CLEAN, "dirty": 3}),
      "idle: master (uncommitted: 3)"),
-    ("buffer scoring says idle, but the clone holds unpushed work",
-     facts("none", {**WORK, "ahead": 2}, "waiting in reserve"),
-     "idle: bug/1063 (unpushed: 2)"),
     ("session is idle and the clone probe brought nothing back",
      facts("idle 1 1", None), "unknown (no clone data)"),
     ("half a clone answer is no answer: a missing count is not a zero",
      facts("idle 1 1", {"cur": "master", "def": "master"}),
      "unknown (no clone data)"),
+]
+
+
+# ── #235: вердикт без экрана ─────────────────────────────────────────────────
+# HYPOTHESIS: разбор пейна слеп. Пикер модели (`/model` без аргумента) стоит
+# над футером «Enter to set as default · s to use this session only · Esc to
+# cancel», а _screen_complaint ищет «Enter to confirm»; 24.09 он же не увидел
+# «Login expired» посреди хода. Живой диалог ростер поймал только по
+# waitingFor (#224). Все папета mop несут хуки, так что экран больше не нужен.
+# SOLUTION: состояние — из статуса сессии, waitingFor и записи хода; без
+# записи хода — из одного статуса сессии. Экран остаётся для глаз (tail,
+# slash, attach), в факты он не входит. Папет без хуков — случай
+# перерегистрации, его показывает doctor, а не угадывает экран.
+# STATUS: FIXED — see #235
+SCREENLESS = [
+    ("no turn record, idle session: a login complaint on the screen is ignored",
+     facts("idle 1 1", CLEAN, "Not logged in · Run /login"), "free (master)"),
+    ("no turn record, idle session: a dialog footer on the screen is ignored",
+     facts("idle 1 1", CLEAN, "Do you want to proceed?\n"
+           "  Enter to confirm · Esc to cancel"), "free (master)"),
+    ("no session file: the clone decides, the pane's words do not",
+     facts("none", CLEAN, "Working... running tests"), "free"),
+    ("facts without a screen key: the session status decides",
+     {"present": True, "session": "idle 1 1", "clone": CLEAN}, "free (master)"),
 ]
 
 
@@ -298,16 +233,16 @@ HOOKED = [
      "error: unknown", False),
     ("a dead session: the failure record does not hide it",
      hooked("idle", FAILED_AUTH, alive=False, listen=False), "HUNG (not responding)", False),
-    # Без записи хода — прежний путь по экрану, со всеми его ограничениями.
-    ("no turn record: the screen path unchanged",
-     hooked("idle", None, CLEAN,
-            screen="❯ \n  -- INSERT --\n                    Not logged in · Run /login"),
-     "not logged in", False),
+    # Без записи хода — один статус сессии (#235), экран не читается.
+    ("no turn record: the session status alone, the complaint on screen ignored",
+     hooked("idle", None, CLEAN), "free (master)", True),
+    ("a model switch after a failure clears it",
+     hooked("idle", turn("Stop", hook_event_name="PostModelSwitch")), "free (bug/1063)", True),
     ("no session at all: {status: null} reads as no session file",
-     {**facts("none", {**WORK, "ahead": 2}, "waiting in reserve"),
+     {**facts("none", {**CLEAN, "ahead": 2}),
       "state": {"status": None, "waitingFor": None, "alive": False,
                 "listen": False, "turn": None}},
-     "idle: bug/1063 (unpushed: 2)", False),
+     "idle: master (unpushed: 2)", False),
 ]
 
 
@@ -345,27 +280,26 @@ TREATMENT = [
     ("free", False, True, "free"),
     ("free (master)", False, True, "free"),
     ("free (bug/1063)", False, True, "free"),
-    ("busy", False, False, "busy"),
     ("busy: bug/1063", False, False, "busy"),
     ("busy: master", False, False, "busy"),
     ("compacting: bug/1063", False, False, "busy"),
     ("compacting", False, False, "busy"),
     ("needs action", "restart", False, "sick"),
-    ("needs action: resume prompt", "restart", False, "sick"),
-    ("needs action: dialog", "restart", False, "sick"),
+    ("needs action: dialog open", "restart", False, "sick"),
     ("waiting for input", False, False, "busy"),
     ("idle: bug/1063 (uncommitted: 3)", False, False, "busy"),
     ("idle: bug/1063 (unpushed: 2)", False, False, "busy"),
     ("idle: bug/1063 (uncommitted: 3, unpushed: 2)", False, False, "busy"),
+    ("idle: bug/1063 (uncommitted: 2)", False, False, "busy"),
     ("idle: master (unpushed: 2)", False, False, "busy"),
     ("idle: master (uncommitted: 3)", False, False, "busy"),
     ("login expired: bug/1063", "login+restart", False, "sick"),
-    ("not logged in", "login+restart", False, "sick"),
-    ("no model quota: Opus 4.5", "model", False, "sick"),
-    ("error: Usage limit reached for 5 hour. Your limit will reset at"
-     " 2026-08-31 18:19:41", "model", False, "sick"),
-    ("error: Connection error", "model", False, "sick"),
-    ("error: Usage limit reached", "model", False, "sick"),
+    ("login expired", "login+restart", False, "sick"),
+    ("no model quota: Credit balance is too low", "model", False, "sick"),
+    (f"error: {RATE}", "model", False, "sick"),
+    ("error: " + HOOKS["fail"]["StopFailure"]["last_assistant_message"], "model", False, "sick"),
+    ("error: brand_new_code", "model", False, "sick"),
+    ("error: unknown", "model", False, "sick"),
     ("unknown (no clone data)", False, False, "busy"),
     ("AGENT SILENT (no responders)", None, False, "silent"),
     ("AGENT SILENT (nats: timeout)", None, False, "silent"),
@@ -395,7 +329,8 @@ def check_treatment():
     bad, cases = 0, 0
     table = {s: rest for s, *rest in TREATMENT}
     seen = set()
-    inputs = [given for _, given, _ in CASES] + [("silent", a) for a, _ in SILENT]
+    inputs = ([given for _, given, _ in CASES + SCREENLESS]
+              + [given for _, given, _, _ in HOOKED] + [("silent", a) for a, _ in SILENT])
     for given in inputs:
         cases += 1
         state, *got = judge(given)
@@ -622,6 +557,12 @@ def main():
             bad += 1
             print(f"FAILED  {what}\n  wanted:  {want!r}\n  got: {got!r}")
     cases = len(CASES)
+    for what, given, want in SCREENLESS:
+        got = str(verdict(given))
+        if got != want:
+            bad += 1
+            print(f"FAILED  #235 {what}\n  wanted:  {want!r}\n  got: {got!r}")
+    cases += len(SCREENLESS)
     hbad, hcases = check_hooked(HOOKED)
     bad += hbad
     cases += hcases
