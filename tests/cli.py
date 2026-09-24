@@ -11,7 +11,8 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, ROOT)
 
 from mop import cli  # noqa: E402
 from mop.cli import lib  # noqa: E402
@@ -299,6 +300,7 @@ def main():
 
     failed += check_mcp_declarations()
     failed += check_refusals()
+    failed += check_output_rules()
 
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0
@@ -563,6 +565,180 @@ def check_refusals():
                 if "bus.ask_cluster(" in fh.read():
                     failed += 1
                     print(f"FAIL {rel}: bus.ask_cluster by hand, use bus.call_cluster")
+    return failed
+
+
+# ── #159: правила вывода ──────────────────────────────────────────────────────
+# HYPOTHESIS: капс для выразительности (THIS IS THE ONLY CHANNEL, ONLY, FREE,
+# ORPHAN), эхо параметров («restarting X on Y...») и советы «run X» в успешном
+# выводе. Вывод читает модель через MCP: крик и советы — шум, а успешная быстрая
+# команда отвечает ей `done`.
+# SOLUTION: слова переписаны, быстрые команды на успехе молчат, отказ — в stderr.
+#
+# Капс допустим только для того, что заглавное буквально: статусы, протоколы,
+# идентификаторы, заголовки колонок, плейсхолдеры в usage. Список закрыт:
+# новое слово в нём — осознанное решение, а не молчаливое разрешение.
+CAPS_OK = {
+    # статусы, которые читают глазами и модель
+    "FAILED", "AGENT", "SILENT", "DELIVERED", "HUNG", "MUST", "SHOULD",
+    # протоколы, сигналы, литералы чужих программ
+    "JSON", "NATS", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
+    "PLAY", "RECAP",
+    # идентификаторы в тексте
+    "SECTIONS",
+    # плейсхолдеры в строках usage
+    "ADDRESS", "ADDR", "PROFILE", "TEXT", "VALUE", "LOGIN", "NAME",
+    # заголовки колонок, названные в тексте
+    "MASTER", "OWNER", "CACHE",
+}
+CAPS_WORD = r"(?<![A-Za-z0-9_$.{/-])[A-Z]{4,}(?![A-Za-z0-9_])(?!\.md)"
+
+
+def caps_hits(files):
+    """Слова капсом в пользовательских строках: литералы и докстринги модулей
+    (usage и описания инструментов MCP). Докстринги функций — русские
+    комментарии, строки без единой строчной буквы — заголовки таблиц и токены."""
+    import ast
+    import re
+    hits = []
+    for f in files:
+        with open(f) as fh:
+            tree = ast.parse(fh.read())
+        skip = set()
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.body \
+                    and isinstance(n.body[0], ast.Expr) \
+                    and isinstance(n.body[0].value, ast.Constant):
+                skip.add(id(n.body[0].value))
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Constant) and isinstance(n.value, str)) or id(n) in skip:
+                continue
+            if not re.search(r"[a-zа-я]", n.value):
+                continue
+            for m in re.finditer(CAPS_WORD, n.value):
+                if m.group() not in CAPS_OK:
+                    hits.append(f"{os.path.relpath(f, ROOT)}:{n.lineno}: {m.group()}")
+    return hits
+
+
+def silent_run(main, argv):
+    """(stdout, stderr, код) командлета."""
+    import contextlib
+    import io
+    out, err = io.StringIO(), io.StringIO()
+    code = 0
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = main(argv) or 0
+        except SystemExit as e:
+            code = e.code
+    return out.getvalue(), err.getvalue(), code
+
+
+def check_output_rules():
+    """STATUS: FIXED — see #159"""
+    import glob
+    import re
+    from mop import bus, keys, llm, puppets
+    failed = 0
+    files = sorted(glob.glob(os.path.join(ROOT, "mop", "cli", "**", "*.py"), recursive=True)) \
+        + [os.path.join(ROOT, "mop", "channel.py"), os.path.join(ROOT, "mop", "agent.py")]
+    for hit in caps_hits(files):
+        failed += 1
+        print(f"FAIL caps for emphasis: {hit}")
+
+    os.environ.setdefault("MOP_SERVER_LAN", "10.0.0.1")
+    keep = (bus.call_cluster, puppets.running_alloc, lib.guard, puppets.diagnose,
+            keys.llm_keys_blob, llm.profiles)
+    try:
+        bus.call_cluster = lambda verb, **kw: {"ok": True}
+        puppets.running_alloc = lambda name: {"ClientStatus": "running", "NodeName": "n1"}
+        lib.guard = lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
+        # Быстрая команда на успехе молчит: MCP ответит модели `done`.
+        from mop.cli.core import restart
+        from mop.cli.node import drain, forget
+        for what, main, argv in (("restart", restart.main, ["pu-mop-1"]),
+                                 ("node drain", drain.main, ["n1"]),
+                                 ("node forget", forget.main, ["n1"])):
+            out, err, code = silent_run(main, argv)
+            if out or err or code:
+                failed += 1
+                print(f"FAIL {what} must be silent on success: out {out!r} err {err!r} code {code!r}")
+        from mop.cli.pool import doctor
+        from mop.cli.pool import llm as llm_cmd
+        # Здоровый пул — одна строка результата, её и показываем.
+        puppets.diagnose = lambda: []
+        out, _, _ = silent_run(doctor.main, [])
+        if out != "pool is healthy: nothing stuck\n":
+            failed += 1
+            print(f"FAIL doctor on a healthy pool: {out!r}")
+        # Советов «run X» в успешном выводе нет: таблица уже говорит [restart].
+        puppets.diagnose = lambda: [{"name": "pu-mop-1", "alloc": {"NodeName": "n1"},
+                                     "diagnosis": "HUNG (not responding)", "action": "restart"}]
+        out, _, _ = silent_run(doctor.main, [])
+        keys.llm_keys_blob = lambda: ("", None)
+        llm.profiles = lambda: {"glm": {"key": "Z_AI_KEY", "doc": "", "env": {}}}
+        out2, _, _ = silent_run(llm_cmd.main, [])
+        for what, text in (("doctor", out), ("llm", out2)):
+            if re.search(r"\bmop [a-z]+", text):
+                failed += 1
+                print(f"FAIL {what} advises another command on success: {text!r}")
+    finally:
+        (bus.call_cluster, puppets.running_alloc, lib.guard, puppets.diagnose,
+         keys.llm_keys_blob, llm.profiles) = keep
+    failed += check_output_rest()
+    return failed
+
+
+def check_output_rest():
+    """Остаток #159: setup, sweep, driver build. STATUS: FIXED — see #159"""
+    import shutil
+    import subprocess
+    from mop import bus, image, playvars, puppets
+    from mop.cli.driver import build
+    from mop.cli.pool import setup, sweep
+    failed = 0
+
+    # setup: шаг установки — строка хода на терминале, не на терминале
+    # тишина; предупреждение про claude — в stderr, stdout пуст.
+    keep = (shutil.which, subprocess.run, playvars.playbook_vars)
+    ran = []
+    try:
+        shutil.which = lambda cmd: "/usr/bin/sudo" if cmd == "sudo" else None
+        subprocess.run = lambda args, **kw: ran.append(args) or subprocess.CompletedProcess(args, 0)
+        playvars.playbook_vars = lambda: {}
+        out, err, code = silent_run(setup.main, ["--operator"])
+    finally:
+        shutil.which, subprocess.run, playvars.playbook_vars = keep
+    if out or code or "claude is not in PATH" not in err or len(ran) != 3:
+        failed += 1
+        print(f"FAIL setup: stdout {out!r}, stderr {err!r}, code {code!r}, ran {len(ran)} commands")
+
+    # sweep: нечего убирать — успех, и он молчит.
+    keep = (puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk)
+    try:
+        puppets.ready_nodes = lambda: {"n1"}
+        bus.request_many = lambda asks, **kw: {"n1": {"bodies": [], "templates": []}}
+        puppets.jobs = lambda *a, **kw: [{"ID": "pu-a-1"}]
+        puppets.classify_junk = lambda answers, known: []
+        out, err, code = silent_run(sweep.main, [])
+    finally:
+        puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk = keep
+    if out or err or code:
+        failed += 1
+        print(f"FAIL sweep with nothing to sweep must be silent: {out!r} {err!r} {code!r}")
+
+    # driver build: без эха того, откуда прочитан .mop.
+    keep = (image.prepare, image.build)
+    try:
+        image.prepare = lambda origin, root: {"project": "p", "asks": {}, "alien": [], "legacy": []}
+        image.build = lambda origin, got, **kw: {"gone": [], "announced": [], "rc": 0}
+        out, err, code = silent_run(build.main, ["git@h:g/p.git"])
+    finally:
+        image.prepare, image.build = keep
+    if out or code:
+        failed += 1
+        print(f"FAIL driver build echoes on success: {out!r} code {code!r}")
     return failed
 
 

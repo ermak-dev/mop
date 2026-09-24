@@ -38,19 +38,29 @@ def elevate(uid=None):
     return [] if (os.getuid() if uid is None else uid) == 0 else ["sudo"]
 
 
+def _step(text):
+    """Шаг долгой команды (#159): строка на терминале, стёртая по завершении;
+    не на терминале -- тишина до ошибки. Своя, а не lib.Progress: lib тянет
+    клиент шины, а этот файл обязан подниматься без него (докстринг выше)."""
+    if sys.stderr.isatty():
+        sys.stderr.write("\r\033[K" + (f"setup: {text}" if text else ""))
+        sys.stderr.flush()
+
+
 def _setup(argv):
     if argv not in ([], ["--operator"]):
         sys.exit(__doc__.strip())
     role = "operator" if argv else "controller"
     if not shutil.which("ansible-playbook"):
-        print("installing ansible (apt)")
         root = elevate()
         if root and not shutil.which("sudo"):
             sys.exit("ansible is missing and this user cannot install it: "
                      "no sudo here. Install ansible, or run mop setup as root")
+        _step("installing ansible (apt)")
         subprocess.run([*root, "apt-get", "update", "-q"], check=True)
         subprocess.run([*root, "apt-get", "install", "-y", "-q", "ansible"],
                        check=True)
+        _step(None)
     settings = json.dumps(playvars.playbook_vars(), ensure_ascii=False)
     r = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local",
                         PLAYBOOK, "--extra-vars", settings,
@@ -58,7 +68,8 @@ def _setup(argv):
     if r.returncode:
         sys.exit(r.returncode)
     if role == "operator" and not shutil.which("claude"):
-        print("claude is not in PATH: install Claude Code before mop master")
+        print("claude is not in PATH: install Claude Code before mop master",
+              file=sys.stderr)
 
 
 def main(argv):

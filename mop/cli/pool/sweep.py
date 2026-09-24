@@ -8,9 +8,9 @@ Run this as the operator, not from a master shell: what stands on a node is
 a fact about every tenant, not about one project — the same reason `mop gc`
 and `mop disk` live outside a master's reach.
 
-Two kinds, deliberately of different weight. An ORPHAN is destroyed: its
-puppet is gone and the body cannot come back to anyone. A BUILD BODY is only
-named — a sealed image always stands still, so one that runs is either a
+Two kinds, deliberately of different weight. An `orphan` is destroyed: its
+puppet is gone and the body cannot come back to anyone. A `build body` is
+only named — a sealed image always stands still, so one that runs is either a
 build happening right now or a build that broke, and from here those two
 look the same. Destroying someone's running build costs more than leaving
 rubbish until the next sweep.
@@ -65,7 +65,8 @@ def main(argv):
 
     rows = puppets.classify_junk({n: answers[n] for n in heard}, known)
     if not rows:
-        print(f"nothing to sweep on {len(heard)} node(s)")
+        # Нечего убирать -- успех, и он молчит (#159). Промолчавшие узлы уже
+        # названы выше, и код выхода за них отвечает.
         return 1 if silent else 0
 
     out = [("NODE", "KIND", "NAME", "WHY")]

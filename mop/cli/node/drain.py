@@ -15,10 +15,7 @@ MCP = {"annotations": "destructive", "args": [
 def main(argv):
     if len(argv) != 1:
         lib.usage(__doc__)
-    name = argv[0]
-    print(f"draining {name}: puppets leave, no new ones arrive...")
-    bus.call_cluster("drain", node=name, timeout=60)
-    print(f"{name} is closed to the scheduler. Watch them land: mop list")
+    bus.call_cluster("drain", node=argv[0], timeout=60)
 
 
 main = lib.cluster(main)

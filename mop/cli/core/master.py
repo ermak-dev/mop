@@ -24,7 +24,7 @@ the server itself is named by MOP_SERVER_LAN (the environment outranks .env,
 so one variable retargets the master at another pool), and the /master skill
 is linked from here.
 
-The pool server arrives as an ARGUMENT, not from a directory config. The
+The pool server arrives as an argument, not from a directory config. The
 master sits in a working copy of its own project, while the `.mcp.json` that
 names the server lives in the mop repository — that is, anywhere except
 where masters actually run. The very first run in a foreign directory came up

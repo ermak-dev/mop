@@ -19,12 +19,11 @@ def main(argv):
         elif key in have:
             state = f"key {key}: present"
         else:
-            state = f"key {key}: MISSING from {puppets.LOCAL_KEYS_FILE}"
+            state = f"key {key}: missing from {puppets.LOCAL_KEYS_FILE}"
         base = prof["env"].get("ANTHROPIC_BASE_URL", "api.anthropic.com (default)")
         print(f"  {name:8}  {base:38}  {state}")
     if note:
         print(f"\n{note}")
-    print("\nmop add --llm <profile> [origin]   |   mop login pushes keys to nodes")
 
 
 

@@ -1,6 +1,6 @@
 """recycle free puppets on nodes low on space: mop gc [--dry]
 
-A node with less than MOP_GC_FREE_MIN_GB free gets its FREE puppets
+A node with less than MOP_GC_FREE_MIN_GB free gets its free puppets
 recycled (clone reset to HEAD, target wiped) — no more than
 MOP_GC_MAX_PER_RUN per run. Run this as the operator, not from a master
 shell: disk pressure on a node is a fact about every tenant, not one project.

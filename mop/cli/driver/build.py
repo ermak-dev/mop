@@ -36,8 +36,6 @@ def main(argv):
     # вызывающих, этот командлет и инструмент build в MCP. Здесь печать.
     got = image.prepare(origin, root)
     project = got["project"]
-    print(f"  {project}/.mop read from "
-          f"{'this working copy' if root else 'origin, default branch'}")
     for k, v in sorted(got["asks"].items()):
         print(f"  {project}/.mop/sandbox.yaml asks for {k}={v}")
     for k in got["alien"]:
