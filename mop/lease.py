@@ -20,21 +20,8 @@ FILE = ".git/mop-owner"
 # пусто. За это время папет заводит ветку, и дальше держит уже работа.
 WINDOW = 600
 
-
-def render(user, now):
-    """Запись для файла."""
-    return f"{user}\t{int(now)}\n"
-
-
-def parse(text):
-    """Строка файла -> {user, at} или None. Мусор -- не владелец."""
-    user, sep, at = (text or "").strip().partition("\t")
-    if not sep or not user.strip():
-        return None
-    try:
-        return {"user": user.strip(), "at": int(at)}
-    except ValueError:
-        return None
+# Сама запись -- значение domain.Owner (#204): строка файла -- его render и
+# parse, здесь только политика над ним.
 
 
 def holds_work(clone):
@@ -52,24 +39,25 @@ def live(owner, clone, now):
     """Держит ли аренда папета: в клоне работа или она моложе окна."""
     if not owner:
         return False
-    return holds_work(clone) or now - owner["at"] < WINDOW
+    return holds_work(clone) or now - owner.at < WINDOW
 
 
 def verdict(owner, me, clone, now, force=False):
-    """Что делать с `send` от me. -> (действие, причина).
+    """Что делать с `send` от me. owner -- domain.Owner или None.
+    -> (действие, причина).
 
     действие: "pass" -- слать, аренду не трогать (отправитель не назвался:
     папет пишет соседу); "take" -- слать и записать me владельцем;
     "refuse" -- не слать. Причина -- для отказа и для отобранной аренды."""
     if not me:
         return "pass", None
-    if not owner or owner["user"] == me:
+    if not owner or owner.user == me:
         return "take", None
     if force:
-        return "take", f"taken from {owner['user']}"
+        return "take", f"taken from {owner.user}"
     if not live(owner, clone, now):
         return "take", None
-    minutes = max(int((now - owner["at"]) // 60), 0)
+    minutes = max(int((now - owner.at) // 60), 0)
     what = "work in the clone" if holds_work(clone) else "dispatched, no branch yet"
-    return "refuse", (f"led by {owner['user']} ({what}, last sent {minutes} min ago): "
+    return "refuse", (f"led by {owner.user} ({what}, last sent {minutes} min ago): "
                       f"ask them, or send with force to take it over")

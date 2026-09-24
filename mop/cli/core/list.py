@@ -16,16 +16,15 @@ WIDTHS = (15, 7, 8, 46, 10, 7, 7)
 def place(row):
     """Колонка «место»: клон + target папета, обмер спросом (du без кэша).
     Прочерк — обмер не доехал: не ноль, ноль был бы «измерено и пусто»."""
-    kb = row.get("disk_kb")
+    kb = row.disk_kb
     if kb is None:
         return "-"
     return f"{kb / 2**20:.0f} GB" if kb >= 2**20 else f"{kb / 2**10:.0f} MB"
 
 
 def line(r):
-    cells = (r["name"], r["node"], r["alloc_status"], r["state"], r["owner"],
-             place(r), r["llm"])
-    return "  ".join(c.ljust(w) for c, w in zip(cells, WIDTHS)) + "  " + r["origin"]
+    cells = (r.name, r.node, r.alloc_status, r.state, r.owner, place(r), r.llm)
+    return "  ".join(c.ljust(w) for c, w in zip(cells, WIDTHS)) + "  " + r.origin
 
 
 def main(argv):

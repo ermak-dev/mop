@@ -24,7 +24,6 @@ bootstrap песочницы за папета). Положи туда глаг�
 Подписчик — mop-cluster, юнит на сервере; проверяется `mop cluster check`.
 Чистая часть (права) — tests/cluster.py.
 """
-import collections
 import json
 import os
 import threading
@@ -33,6 +32,7 @@ import base64
 
 from . import (bootstrap, bus, busnames, config, creds, natsconf, nodes, nomad,
                project_secrets, projects, puppets, service, spec, state)
+from .domain import Project, Verb
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
@@ -40,7 +40,6 @@ CHANNEL = "cluster"
 # Кому глагол дан -- одна таблица VERBS в конце модуля, рядом с обработчиками
 # (#173); прежние наборы выводятся из неё.
 PROJECT, SECRET, ADMIN = "project", "secret", "admin"
-Verb = collections.namedtuple("Verb", "fn scope named acting")
 
 
 def _row(verb):
@@ -291,12 +290,11 @@ def _add(project, req):
     # Лимит -- проекта из origin, а не просителя: оператор через admin
     # заводит папета тому же проекту и упирается в тот же потолок. Файл
     # читается на каждый запрос: правка лимита доезжает без рестарта.
-    target = puppets.project_of(origin)
-    why = over_limit(target, _live_count(target),
-                     projects.read_limits().get(target))
+    target = Project.of(origin, projects.read_limits())
+    why = over_limit(target.name, _live_count(target.name), target.limit)
     if why:
         return {"error": why}
-    name = next_name(target)
+    name = next_name(target.name)
     # workspace -- до регистрации: первый подъём обязан его увидеть.
     store_workspace(bootstrap.ROOT, name, req)
     nomad.register(spec.job_spec(name, origin, req.get("profile")))

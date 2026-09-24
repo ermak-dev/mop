@@ -16,6 +16,7 @@ SOLUTION: глаголы на шине, сервис сверяет проект
 как агент сверяет проект с origin клона.
 STATUS: FIXED — see #80
 """
+import dataclasses
 import os
 import sys
 
@@ -241,7 +242,7 @@ def check_verb_table_173():
     keep_table, keep_owner = dict(cluster.VERBS), cluster._owner
     try:
         for v, d in keep_table.items():
-            cluster.VERBS[v] = d._replace(fn=(lambda verb: lambda project, req: called.append(verb)
+            cluster.VERBS[v] = dataclasses.replace(d, fn=(lambda verb: lambda project, req: called.append(verb)
                                               or {"ok": True, "handled": verb})(v))
         for key, want in snap["refusal"].items():
             verb, project, state, new = json.loads(key)

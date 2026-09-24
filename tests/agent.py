@@ -15,6 +15,7 @@ SOLUTION: одна таблица {глагол: Verb(fn, scope, named)}, пре
 символ.
 STATUS: FIXED — see #150
 """
+import dataclasses
 import os
 import sys
 
@@ -261,7 +262,7 @@ def check_intake():
     keep = dict(agent.VERBS)
     try:
         for v, d in keep.items():
-            agent.VERBS[v] = d._replace(fn=spy(v))
+            agent.VERBS[v] = dataclasses.replace(d, fn=spy(v))
 
         def ask(body, subject="mop.admin.node.hyper.rpc"):
             called.clear()
@@ -360,6 +361,7 @@ def check_unclaim_race_189():
     import subprocess
     import tempfile
     from mop import lease
+    from mop.domain import Owner
     out = []
     root = tempfile.mkdtemp(prefix="mop-test-189-")
     os.makedirs(os.path.join(root, ".git"))
@@ -372,14 +374,15 @@ def check_unclaim_race_189():
 
     async def facts(name):
         text = open(path).read() if os.path.exists(path) else ""
-        return {"owner": lease.parse(text), "dirty": 0, "ahead": 0,
+        owner = Owner.parse(text)
+        return {"owner": owner and owner.to_dict(), "dirty": 0, "ahead": 0,
                 "cur": "master", "def": "master"}
 
     async def no_event(*a, **k):
         return None
 
     def owner_now():
-        return lease.parse(open(path).read()) if os.path.exists(path) else None
+        return Owner.parse(open(path).read()) if os.path.exists(path) else None
     try:
         agent.bsh, agent.clone_facts, agent._event = bsh, facts, no_event
         agent.clone_dir = lambda name: root
@@ -412,7 +415,7 @@ def check_unclaim_race_189():
         ra, rb = asyncio.run(race())
         if not ra.get("error") or rb.get("error"):
             out.append(f"race: a {ra!r}, b {rb!r} -- a must fail, b must deliver")
-        if (owner_now() or {}).get("user") != "bob":
+        if getattr(owner_now(), "user", None) != "bob":
             out.append(f"race: the lease must stay with bob, got {owner_now()!r}")
 
         # Одна неудачная доставка -- откат как прежде: к прежнему владельцу,
@@ -420,7 +423,7 @@ def check_unclaim_race_189():
         async def fail(name, cmd, timeout=20):
             return {"error": "not delivered"}
         agent.session_json = fail
-        stale = lease.render("carol", 1000)
+        stale = Owner("carol", 1000).render()
         for before, want in ((None, None), (stale, stale)):
             if before is None:
                 if os.path.exists(path):

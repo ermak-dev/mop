@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop import puppets  # noqa: E402
-from mop.state import (State, action_for, failing_row, failure_reason,  # noqa: E402
+from mop.state import (PuppetRow, State, action_for, failing_row, failure_reason,  # noqa: E402
                        is_free, silent, task_summary, verdict)
 
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
@@ -264,7 +264,7 @@ def judge(case):
     каждую строку дословно."""
     from mop import web
     v = silent(case[1]) if isinstance(case, tuple) else verdict(case)
-    row = {"alloc_status": "running", "state": str(v), "kind": v.kind}
+    row = PuppetRow("pu-x-1", "n", "running", str(v), v.kind, "-", "claude", "?")
     return str(v), action_for(v.kind), is_free(v.kind), web.classify(row)
 
 

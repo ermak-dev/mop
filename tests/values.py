@@ -16,7 +16,7 @@ to_dict/from_dict в одном месте на тип. Поведение не 
 Характеризация: tests/values_snapshot.json снят с кода ДО правки (--capture)
 -- всё, что уходит из процесса: ответы агента по шине (факты клона с
 владельцем, states), строка `.git/mop-owner` и откат аренды, ростер и строки
-мастера, снимок дашборда, строки `mop list`, ответы сервиса кластера про
+мастера, снимок дашборда, строки `mop list` и таблица MCP, ответы сервиса кластера про
 проекты и лимит. После правки -- байт в байт.
 STATUS: FIXED — see #204
 """
@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 from mop import agent, bus, cluster, puppets, projects, web  # noqa: E402
 from mop.cli.core import list as mop_list  # noqa: E402
+from mop.cli.service import mcp  # noqa: E402
 
 SNAPSHOT = os.path.join(HERE, "values_snapshot.json")
 NOW = 1_000_000.5
@@ -138,6 +139,7 @@ def roster_forms():
             "rows_sized": dump(puppets.puppet_rows()),
             "sizes": dump(sizes),
             "list": "\n".join(mop_list.line(r) for r in puppets.puppet_rows()),
+            "mcp": "\n".join(mcp._roster("") + mcp._roster("rugent")),
             "dashboard": dump(web.snapshot(
                 web.with_sizes(rows, sizes), [{"name": "mate"}], [], [],
                 [{"at": 1.0, "event": "send"}], ["states: x"], NOW)),
@@ -299,6 +301,106 @@ def check_characterization_204():
     return out
 
 
+# ─── сами типы ───────────────────────────────────────────────────────────
+def frozen(value, field):
+    """Присваивание полю замороженного значения бросает."""
+    import dataclasses
+    try:
+        setattr(value, field, None)
+    except dataclasses.FrozenInstanceError:
+        return True
+    return False
+
+
+def check_owner_204():
+    """Владелец: строка файла и словарь шины -- два вида одного значения,
+    и оба обратимы; мусор -- не владелец."""
+    from mop.domain import Owner
+    out = []
+    o = Owner("anton", 1000000)
+    if o.render() != "anton\t1000000\n":
+        out.append(f"Owner.render -> {o.render()!r}")
+    if Owner.parse(o.render()) != o:
+        out.append(f"Owner.parse(render) -> {Owner.parse(o.render())!r}, wanted {o!r}")
+    for junk in ("", None, "garbage", "\t5", "anton\tsoon", "  \t1"):
+        if Owner.parse(junk) is not None:
+            out.append(f"Owner.parse({junk!r}) must be None, got {Owner.parse(junk)!r}")
+    if o.to_dict() != {"user": "anton", "at": 1000000}:
+        out.append(f"Owner.to_dict -> {o.to_dict()!r}")
+    if Owner.from_dict(o.to_dict()) != o or Owner.from_dict(None) is not None:
+        out.append("Owner.from_dict must invert to_dict and keep None as None")
+    if not frozen(o, "user"):
+        out.append("Owner must be frozen")
+    return out
+
+
+def check_project_204():
+    """Проект: origin, имя по driver.project_of, лимит и просьбы -- одно
+    значение, а не три словаря по имени."""
+    from mop import driver
+    from mop.domain import Project
+    out = []
+    limits = {"mop": 2}
+    asks = {"mop": {"MOP_MEM_MB": "6144"}, "rugent": {}}
+    p = Project.of(MOP, limits, asks)
+    want = Project(MOP, 2, {"MOP_MEM_MB": "6144"})
+    if p != want:
+        out.append(f"Project.of -> {p!r}, wanted {want!r}")
+    if p.name != driver.project_of(MOP):
+        out.append(f"Project.name -> {p.name!r}")
+    bare = Project.of(RUGENT)
+    if (bare.limit, bare.asks, bare.name) != (None, {}, "rugent"):
+        out.append(f"Project.of without tables -> {bare!r}")
+    p.asks["MOP_CORES"] = "1"
+    if asks["mop"] != {"MOP_MEM_MB": "6144"}:
+        out.append("Project.of must copy the project's asks, not share the table's")
+    if not frozen(p, "limit"):
+        out.append("Project must be frozen")
+    return out
+
+
+def check_puppet_row_204():
+    """Строка ростера: поля и их порядок -- прежние ключи словаря; словарь
+    обратим; незнакомый ключ -- отказ, а не молча лишнее поле."""
+    from mop.state import PuppetRow
+    out = []
+    keys = ["name", "node", "alloc_status", "state", "kind", "owner", "llm",
+            "origin", "disk_kb"]
+    d = dict(zip(keys, ["pu-mop-1", "mate", "running", "free", "free", "-",
+                        "claude", MOP, 12]))
+    r = PuppetRow.from_dict(d)
+    if list(r.to_dict()) != keys or r.to_dict() != d:
+        out.append(f"PuppetRow.to_dict -> {r.to_dict()!r}, wanted {d!r}")
+    try:
+        PuppetRow.from_dict(dict(d, alloc="running"))
+        out.append("PuppetRow.from_dict must refuse an unknown key")
+    except TypeError:
+        pass
+    if not frozen(r, "state"):
+        out.append("PuppetRow must be frozen")
+    return out
+
+
+def check_one_verb_204():
+    """Один Verb на агента и сервис кластера; у агента acting не бывает."""
+    from mop import domain
+    out = []
+    if not (agent.Verb is cluster.Verb is domain.Verb):
+        out.append("agent.Verb and cluster.Verb must be domain.Verb")
+    fields = [f for f in getattr(domain.Verb, "__dataclass_fields__", {})]
+    if fields != ["fn", "scope", "named", "acting"]:
+        out.append(f"Verb fields -> {fields}")
+    if any(v.acting for v in agent.VERBS.values()):
+        out.append("no agent verb is acting")
+    if domain.Verb.__dataclass_params__.frozen is not True:
+        out.append("Verb must be frozen")
+    return out
+
+
+CHECKS = (check_characterization_204, check_owner_204, check_project_204,
+          check_puppet_row_204, check_one_verb_204)
+
+
 def main():
     if sys.argv[1:] == ["--capture"]:
         with open(SNAPSHOT, "w") as f:
@@ -306,7 +408,12 @@ def main():
             f.write("\n")
         print(f"captured {SNAPSHOT}")
         return 0
-    out = check_characterization_204()
+    out = []
+    for check in CHECKS:
+        try:
+            out += check()
+        except Exception as e:
+            out.append(f"{check.__name__}: {type(e).__name__}: {e}")
     for line in out:
         print(f"FAILED  {line}")
     print("values:", "FAILED" if out else "ok")
