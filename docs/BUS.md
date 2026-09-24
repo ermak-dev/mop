@@ -343,9 +343,19 @@ JWT пользователя без срока: срок закрывает со
 {"present": true,
  "screen": "…последние непустые строки пейна…",
  "session": "idle 1 1",
+ "state": {"status": "idle", "waitingFor": null, "alive": true, "listen": true,
+           "turn": {"event": "StopFailure", "at": "2026-09-24T10:23:56Z",
+                    "error": "authentication_failed", "detail": "Login expired · Please run /login"}},
  "clone": {"cur": "bug/1063", "def": "master", "dirty": 0, "ahead": 2,
            "owner": {"user": "anton", "at": 1790173372}}}
 ```
+
+`state` — ответ `session.py state` (#222): тот же статус, что у `probe`, плюс
+запись хода `turn`, которую пишут хуки. `session` агент собирает из него же:
+мастер со старой библиотекой читает только её. Старый `session.py` на узле
+глагола не знает — тогда `probe`, как раньше, и ключа `state` нет. Исход хода
+вердикт берёт из `turn` (провал хода посреди работы на экране виден репликой,
+а не в статус-баре, #224); без записи хода — прежний разбор экрана.
 
 Вердикт «free/busy/HUNG/AGENT SILENT» собирает мастер чистой функцией
 `state.verdict` (`mop/state.py`) — вся матрица проверяется `python3 tests/state.py` без

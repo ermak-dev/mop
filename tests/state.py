@@ -200,6 +200,108 @@ CASES = [
 ]
 
 
+# ── #224: исход хода — из хуков, а не с экрана ───────────────────────────────
+# HYPOTHESIS: 24.09 pu-mop-2 и pu-mop-3 умерли посреди хода на «Login expired ·
+# Please run /login» и полтора часа читались в ростере «idle: <ветка>
+# (uncommitted: N)». Жалоба нарисована репликой над рамкой ввода, а
+# _screen_complaint ищет логин только в трёх нижних строках (статус-бар) —
+# нарочно, чтобы не ловить старую жалобу из истории `--continue`. Экран — не
+# тот источник: исход хода claude сообщает хуком StopFailure с кодом ошибки.
+# SOLUTION: агент шлёт факт state (ответ `session.py state`, #222) с записью
+# хода turn; при ней вердикт решает по turn и статусу сессии, мимо экрана. Без
+# записи хода (папет не перерегистрирован с хуками, #223) — прежний путь.
+# RESULT: записи построены по контракту #222, настоящие захваченные payload'ы
+# лежат на его ветке и подменят эти при ребейзе.
+# STATUS: FIXED — see #224
+
+# Экран инцидента: жалоба — реплика над рамкой ввода, статус-бар чистый.
+MIDTURN = ("● Reading mop/cli/user.py\n"
+           "● Login expired · Please run /login\n"
+           "╭───╮\n│ ❯  │\n╰───╯\n"
+           "  -- INSERT -- bypass permissions on · 2 agents")
+
+
+def turn(event, error=None, detail=None):
+    return {"event": event, "at": "2026-09-24T10:23:56Z", "error": error, "detail": detail}
+
+
+def hooked(status, turn_rec, clone=WORK, waiting_for=None, screen=MIDTURN,
+           alive=True, listen=True):
+    st = {"status": status, "waitingFor": waiting_for, "alive": alive,
+          "listen": listen, "turn": turn_rec}
+    return {**facts(f"{status} {int(alive)} {int(listen)}", clone, screen), "state": st}
+
+
+FAILED_AUTH = turn("StopFailure", "authentication_failed",
+                   "Login expired · Please run /login")
+RATE = ("API Error: Request rejected (429) · Usage limit reached for 5 hour. "
+        "Your limit will reset at 2026-09-24 15:00:00")
+
+HOOKED = [
+    # (что случилось, факты, строка, свободен ли)
+    ("the incident: a mid-turn login failure over a dirty clone",
+     hooked("idle", FAILED_AUTH, {**WORK, "dirty": 2}),
+     "login expired: bug/1063", False),
+    ("a login failure on the default branch carries no branch, as today",
+     hooked("idle", FAILED_AUTH, CLEAN), "login expired", False),
+    ("a new turn is already running: busy beats the failure record",
+     hooked("busy", FAILED_AUTH), "busy: bug/1063", False),
+    ("a shell command is running: the same",
+     hooked("shell", FAILED_AUTH), "busy: bug/1063", False),
+    ("Stop after a failure: the turn went through, the clone decides",
+     hooked("idle", turn("Stop")), "free (bug/1063)", True),
+    ("Stop after a failure over a dirty clone",
+     hooked("idle", turn("Stop"), {**WORK, "dirty": 2}),
+     "idle: bug/1063 (uncommitted: 2)", False),
+    ("the screen still shows the old complaint, but a later turn cleared it",
+     hooked("idle", turn("UserPromptSubmit"), CLEAN), "free (master)", True),
+    # Решение оператора: до первого хода папет свободен, «Not logged in» в
+    # статус-баре поймает первый же ход. Запись хода — значит, экран не читаем.
+    ("not logged in before the first turn: free, the first turn catches it",
+     hooked("idle", turn("SessionStart"), CLEAN,
+            screen="❯ \n  -- INSERT --\n                    Not logged in · Run /login"),
+     "free (master)", True),
+    ("waiting on an open dialog",
+     hooked("waiting", turn("UserPromptSubmit"), waiting_for="dialog open"),
+     "needs action: dialog open", False),
+    ("waiting with no reason given — as today",
+     hooked("waiting", turn("Stop")), "waiting for input", False),
+    ("rate limit: the refusal text, not the code",
+     hooked("idle", turn("StopFailure", "rate_limit", RATE)), f"error: {RATE}", False),
+    ("billing error is the quota kind",
+     hooked("idle", turn("StopFailure", "billing_error", "Credit balance is too low")),
+     "no model quota: Credit balance is too low", False),
+    ("an unknown code is an error, never free",
+     hooked("idle", turn("StopFailure", "brand_new_code"), CLEAN),
+     "error: brand_new_code", False),
+    ("a failure recorded as unknown is still an error",
+     hooked("idle", turn("StopFailure", "unknown", ""), CLEAN), "error: unknown", False),
+    ("a dead session: the failure record does not hide it",
+     hooked("idle", FAILED_AUTH, alive=False, listen=False), "HUNG (not responding)", False),
+    # Без записи хода — прежний путь по экрану, со всеми его ограничениями.
+    ("no turn record: the screen path unchanged",
+     hooked("idle", None, CLEAN,
+            screen="❯ \n  -- INSERT --\n                    Not logged in · Run /login"),
+     "not logged in", False),
+    ("no session at all: {status: null} reads as no session file",
+     {**facts("none", {**WORK, "ahead": 2}, "waiting in reserve"),
+      "state": {"status": None, "waitingFor": None, "alive": False,
+                "listen": False, "turn": None}},
+     "idle: bug/1063 (unpushed: 2)", False),
+]
+
+
+def check_hooked(cases):
+    bad = 0
+    for what, given, want, free in cases:
+        got = verdict(given)
+        if str(got) != want or is_free(got.kind) != free:
+            bad += 1
+            print(f"FAILED  #224 {what}\n  wanted:  {want!r} free={free}\n"
+                  f"  got: {str(got)!r} free={is_free(got.kind)}")
+    return bad, len(cases)
+
+
 
 # ── #145: лечение и свобода по каждому состоянию ─────────────────────────────
 # HYPOTHESIS: вердикт папета — английская фраза, и её потребители (doctor,
@@ -500,6 +602,9 @@ def main():
             bad += 1
             print(f"FAILED  {what}\n  wanted:  {want!r}\n  got: {got!r}")
     cases = len(CASES)
+    hbad, hcases = check_hooked(HOOKED)
+    bad += hbad
+    cases += hcases
     vbad, vcases = check_visible(VISIBLE)
     sbad, scases = check_project_ids(PROJECT_IDS)
     bad += sbad

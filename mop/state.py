@@ -109,8 +109,9 @@ def silent(answer):
 # Сами строки состояния — по-английски: их читает не только человек, но и
 # модель (mop list, инструменты MCP), а промпты и скиллы пула англоязычны.
 # Нет файла (старый claude / нет python3) -> None, и мы откатываемся на
-# прежнюю tmux-эвристику. Детект протухшего логина остаётся на tmux — в файле
-# он не виден.
+# прежнюю tmux-эвристику. Исход хода (протухший логин, отказ провайдера) пишут
+# хуки в запись хода, агент везёт её фактом state (#224); у папета без хуков
+# он по-прежнему на tmux — в файле сессии его не видно.
 #
 # Пробник живёт в mop/session.py и исполняется агентом на узле: сокет папета
 # host-local, снаружи к нему не подключиться.
@@ -353,6 +354,38 @@ def _state_from_session(st, clone):
     return State("free", branch=(clone or {}).get("cur"))
 
 
+def _state_from_turn(f):
+    """Вердикт по записи хода, которую пишут хуки (#224), -> State или None.
+
+    Исход хода claude сообщает хуком StopFailure с кодом ошибки, а экран его
+    только рисует — и рисует репликой над рамкой ввода, где _screen_complaint
+    логин не ищет (там жалобы из истории). 24.09 pu-mop-2 и pu-mop-3 умерли
+    посреди хода на «Login expired» и полтора часа читались «idle» с
+    несохранённой работой: отчёта провал хода не шлёт, мастер ждал.
+
+    None — записи хода нет (папет не перерегистрирован с хуками, #223) или нет
+    сессии: тогда прежний путь по экрану. Экран остаётся переходным путём.
+
+    Занятая сессия бьёт запись: новый ход уже идёт, и старый провал к нему не
+    относится. Незнакомый код — ошибка, а не свобода: список кодов растёт с
+    версиями claude."""
+    st = f.get("state") or {}
+    rec = st.get("turn")
+    status = _session_state(f.get("session"))
+    if not rec or status is None:
+        return None
+    if status == "waiting" and st.get("waitingFor"):
+        return State("dialog", st["waitingFor"])
+    code = rec.get("error")
+    if status != "idle" or rec.get("event") != "StopFailure" or not code:
+        return _state_from_session(status, f.get("clone"))
+    if code == "authentication_failed":
+        return State("login", "login expired", _work_branch(f.get("clone")))
+    if code == "billing_error":
+        return State("quota", rec.get("detail") or None)
+    return State("error", rec.get("detail") or code)
+
+
 def _state_from_clone(clone):
     """Последний откат: одна лишь ветка клона.
 
@@ -384,6 +417,10 @@ def _verdict(f):
         return State("hung", (f or {}).get("error", "no answer")[:40])
     if not f.get("present"):
         return State("hung", "no tmux session")
+
+    hooked = _state_from_turn(f)
+    if hooked:
+        return hooked
 
     activity = f.get("screen") or ""
     if not activity.strip():
