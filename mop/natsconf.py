@@ -27,6 +27,13 @@ from . import busnames, config, fsutil
 DIR = "/etc/nats"
 BASE = os.path.join(DIR, "base-users.json")
 USERS = os.path.join(DIR, "users.conf")
+# Блок auth callout (#206) -- своим файлом: его смену nats перечитать не
+# умеет («config reload not supported for AuthCallout»), и deploy по его
+# контрольной сумме решает рестарт, а по users.conf -- reload.
+CALLOUT = os.path.join(DIR, "callout.conf")
+# Сколько сервер ждёт callout: у nats-py 2.16 рукопожатие короче, и при 5 с
+# connect() возвращался до вердикта (стенд #203) -- выше 2 не поднимать.
+CALLOUT_TIMEOUT = 2
 CONF = os.path.join(DIR, "nats-server.conf")
 UNIT = "nats"
 # Туда его ставит роль bus, и оттуда же его запускает юнит.
@@ -88,7 +95,49 @@ def node_permissions(node):
                           busnames.INBOX]}
 
 
-def render(base, projects):
+def callout_on(value):
+    """MOP_AUTH_CALLOUT -> bool. on или off, пусто -- off; иное -- отказ:
+    опечатка не должна молча выбрать, кто входит на шину."""
+    v = (value or "off").strip().lower()
+    if v not in ("on", "off"):
+        raise ValueError(f"MOP_AUTH_CALLOUT={value!r}: on or off")
+    return v == "on"
+
+
+# Пользователь callout (#206): отвечает на запросы авторизации и больше ничего
+# -- ответ сервер ждёт на $SYS._INBOX (стенд #206).
+CALLOUT_PERMISSIONS = {"publish": ["$SYS._INBOX.>"], "subscribe": ["$SYS.REQ.USER.AUTH"]}
+
+
+def _machines(base, callout):
+    """Машины шины -> [(имя, запись users.conf)]: при callout -- ровно те,
+    кого callout не спрашивает. Один список на статические записи и на
+    auth_users (render_callout): два набранных порознь разошлись бы, и машина
+    вне auth_users пошла бы в callout за отказом."""
+    out = []
+    if callout:
+        pw = base.get(busnames.CALLOUT)
+        if not pw:
+            raise ValueError(f"MOP_AUTH_CALLOUT=on, but {BASE} has no {busnames.CALLOUT} "
+                             f"password -- run mop deploy")
+        out.append((busnames.CALLOUT, _user(busnames.CALLOUT, pw, _perms(
+            CALLOUT_PERMISSIONS["publish"], sub_allow=CALLOUT_PERMISSIONS["subscribe"]))))
+    out.append((busnames.SERVICE, _user(busnames.SERVICE, base[busnames.SERVICE],
+                                        _perms(SERVICE_PERMISSIONS, SERVICE_PUBLISH_DENY,
+                                               sub_allow=SERVICE_PERMISSIONS))))
+    return out
+
+
+def _nodes(base):
+    out = []
+    for node, pw in sorted((base.get("nodes") or {}).items()):
+        perms = node_permissions(node)
+        out.append((busnames.node_user(node), _user(busnames.node_user(node), pw,
+                    _perms(perms["publish"], sub_allow=perms["subscribe"]))))
+    return out
+
+
+def render(base, projects, callout=False):
     """Базовые пользователи и папеты проектов -> текст `users.conf`.
 
     base -- {service: пароль, operators: {имя: {password, allow, deny}},
@@ -100,28 +149,55 @@ def render(base, projects):
         if not pw:
             raise ValueError(f"project {p} has no bus password")
     out = ["users = ["]
-    out.append(_user(busnames.SERVICE, base[busnames.SERVICE],
-                     _perms(SERVICE_PERMISSIONS, SERVICE_PUBLISH_DENY,
-                            sub_allow=SERVICE_PERMISSIONS)))
-    # Люди (#106): вход только через WebSocket (#105), права по роли.
-    # Публикация -- своим списком (#207); запись без него (base-users.json
-    # до #207) -- как прежде, одни права на обе стороны.
-    for name, op in sorted((base.get("operators") or {}).items()):
-        perms = (_perms(op["publish"], op.get("publish_deny"), sub_allow=op["allow"],
-                        sub_deny=op.get("deny"))
-                 if "publish" in op else _perms(op["allow"], op.get("deny")))
-        out.append(_user(name, op["password"], perms,
-                         '    allowed_connection_types: ["WEBSOCKET"]\n'))
-    for p in sorted(projects):
-        perms = puppet_permissions(p)
-        out.append(_user(busnames.puppet_user(p), projects[p],
-                         _perms(perms["publish"], sub_allow=perms["subscribe"])))
-    for node, pw in sorted((base.get("nodes") or {}).items()):
-        perms = node_permissions(node)
-        out.append(_user(busnames.node_user(node), pw,
-                         _perms(perms["publish"], sub_allow=perms["subscribe"])))
+    out += [entry for _, entry in _machines(base, callout)]
+    # С callout (#206) людей и папетов спрашивает сервис, а не этот список.
+    if not callout:
+        # Люди (#106): вход только через WebSocket (#105), права по роли.
+        # Публикация -- своим списком (#207); запись без него (base-users.json
+        # до #207) -- как прежде, одни права на обе стороны.
+        for name, op in sorted((base.get("operators") or {}).items()):
+            perms = (_perms(op["publish"], op.get("publish_deny"), sub_allow=op["allow"],
+                            sub_deny=op.get("deny"))
+                     if "publish" in op else _perms(op["allow"], op.get("deny")))
+            out.append(_user(name, op["password"], perms,
+                             '    allowed_connection_types: ["WEBSOCKET"]\n'))
+        for p in sorted(projects):
+            perms = puppet_permissions(p)
+            out.append(_user(busnames.puppet_user(p), projects[p],
+                             _perms(perms["publish"], sub_allow=perms["subscribe"])))
+    out += [entry for _, entry in _nodes(base)]
     out.append("]")
     return "\n".join(out) + "\n"
+
+
+CALLOUT_OFF = "# auth callout: off (MOP_AUTH_CALLOUT) -- people and puppets are in users.conf\n"
+
+
+def render_callout(base, issuer, xkey, callout=True):
+    """Текст callout.conf: блок auth_callout внутри authorization, либо
+    пустой (комментарий) -- include в основном конфиге есть всегда.
+
+    auth_users -- те же машины, что статические записи render(callout=True),
+    из одной функции."""
+    if not callout:
+        return CALLOUT_OFF
+    names = [n for n, _ in _machines(base, True) + _nodes(base)]
+    return (f"# auth callout (#206, MOP_AUTH_CALLOUT=on): people and puppets are asked\n"
+            f"# of mop-callout; the machines below log in from users.conf.\n"
+            f"timeout: {CALLOUT_TIMEOUT}\n"
+            f"auth_callout {{\n"
+            f"  issuer: {issuer}\n"
+            f"  auth_users: {_list(names)}\n"
+            f"  account: {_q('$G')}\n"
+            f"  xkey: {xkey}\n"
+            f"}}\n")
+
+
+def needs_restart(old, new):
+    """Смена callout.conf -- рестарт nats, а не reload: блок auth_callout
+    reload не перечитывает и валит весь reload (стенд #206). old None --
+    файла не было."""
+    return old != new
 
 
 # ─── сервер: пароли, файл, reload ────────────────────────────────────────
@@ -171,11 +247,29 @@ def write(text, path=USERS):
     return True
 
 
-def apply(names, creds_dir, path=USERS):
+def apply(names, creds_dir, path=USERS, callout=None):
     """Файл пользователей по реестру: пароли, текст, запись.
-    -> (изменился ли, {проект: пароль}). Reload -- дело вызывающего."""
+    -> (изменился ли, {проект: пароль}). Reload -- дело вызывающего.
+
+    Пароли папетов заводятся и при callout: их проверяет сервис на входе, и
+    новый проект с ним не трогает users.conf -- reload не нужен."""
+    if callout is None:
+        callout = callout_on(config.get("MOP_AUTH_CALLOUT"))
     pw = passwords(names, creds_dir)
-    return write(render(read_base(), pw), path), pw
+    return write(render(read_base(), pw, callout), path), pw
+
+
+def apply_callout(path=CALLOUT, callout=None):
+    """callout.conf по настройке и ключам сервиса. -> изменился ли. Пишет
+    только `mop cluster users` (deploy): смена требует рестарта, а рестарт
+    nats -- дело прогона, не сервиса."""
+    if callout is None:
+        callout = callout_on(config.get("MOP_AUTH_CALLOUT"))
+    if not callout:
+        return write(CALLOUT_OFF, path)
+    from . import callout as service   # nkeys -- только при on
+    keys = service.keys()
+    return write(render_callout(read_base(), keys.issuer, keys.xkey), path)
 
 
 def read_users(path=USERS):
