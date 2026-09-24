@@ -173,9 +173,38 @@ def check_snapshot():
     return failed
 
 
+def check_sick_in_project_210():
+    """HYPOTHESIS (#210): счётчик проекта считается по строкам, у которых
+    kind уже заменён корзиной, а classify("sick") отвечает busy: больной
+    папет попадает в проект занятым, хотя шапка считает верно -- оператор
+    видит здоровый проект, когда папет в нём залип.
+    SOLUTION: корзина проекта -- тот же classify по виду вердикта, что и
+    шапка; в строку страницы корзина кладётся только при сериализации.
+    STATUS: FIXED — see #210"""
+    failed = 0
+    rows = [row("pu-mop-1", MOP, State("hung", "not responding")),
+            row("pu-mop-2", MOP, State("busy", branch="feat/210"))]
+    snap = web.snapshot(rows=rows, nodes=[], usage=[], per_puppet=[], journal=[],
+                        errors=[], at=1.0)
+    want = {"puppets": 2, "free": 0, "busy": 1, "sick": 1, "silent": 0, "down": 0}
+    if snap["counts"] != want:
+        failed += 1
+        print(f"FAIL #210 header counts: {snap['counts']} != {want}")
+    got = snap["projects"][0]["counts"]
+    if got != want:
+        failed += 1
+        print(f"FAIL #210 project counts: {got} != {want}")
+    kinds = [p["kind"] for p in snap["projects"][0]["puppets"]]
+    if kinds != ["sick", "busy"]:
+        failed += 1
+        print(f"FAIL #210 bucket on rows: {kinds}")
+    return failed
+
+
 def main():
     failed = (check_classify() + check_projects() + check_sizes()
-              + check_journal() + check_usage() + check_snapshot())
+              + check_journal() + check_usage() + check_snapshot()
+              + check_sick_in_project_210())
     print("web: FAILED" if failed else "web: ok")
     return 1 if failed else 0
 
