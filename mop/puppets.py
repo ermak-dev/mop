@@ -43,7 +43,7 @@ LOCAL_KEYS_FILE = os.path.join(PROJECT, ".env")
 # Подмножество .env, которое уезжает на узлы: только ключи, названные
 # профилями. Секреты MCP-серверов установки едут иначе -- их прописывает
 # sandbox.yaml прямо в регистрацию сервера.
-SECRETS_FILE = f"{HOME}/.config/mop/secrets.env"    # копия на узле пула
+SECRETS_FILE = driver.SECRETS_FILE                 # копия на узле пула
 
 
 # Правило проекта -- у драйвера (#154): агент тоже его знает, а puppets

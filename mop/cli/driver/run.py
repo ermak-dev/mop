@@ -31,9 +31,23 @@ SSH_PROBE_TIMEOUT = 20
 # Что внешний врапер переливает внутрь тела. Список закрыт: открытый означал бы
 # дыру, через которую в тело уехало бы окружение узла целиком — вместе с тем,
 # чего папету видеть не положено.
-CARRY = ("PU_NAME", "PU_ORIGIN", "PU_PROJECT", "PU_PROJECT", "PU_SEED",
-         "PU_CONTINUE", "PU_LLM", "PU_LLM_ENV", "PU_LLM_KEY_VAR",
-         "PU_LLM_AUTH_VAR", "HOME", "PATH")
+#
+# Закрыт он самой спекой (#155): job_spec кладёт в PU_CARRY ключи своего же
+# окружения. Раньше список здесь перепечатывался руками и отставал от спеки —
+# новая переменная доезжала до задачи и молча не доезжала до тела. Импортировать
+# спеку отсюда нельзя: mop.spec тянет python-nomad, а на узле его нет.
+#
+# LEGACY_CARRY — список до #155, для спек, зарегистрированных раньше: их
+# папет обязан подняться после раскатки и до перерегистрации.
+LEGACY_CARRY = ("PU_NAME", "PU_ORIGIN", "PU_PROJECT", "PU_SEED", "PU_CONTINUE",
+                "PU_LLM", "PU_LLM_ENV", "PU_LLM_KEY_VAR", "PU_LLM_AUTH_VAR",
+                "HOME", "PATH")
+
+
+def carry(env):
+    """Ключи окружения задачи, которые едут в тело: список самой спеки."""
+    keys = env.get("PU_CARRY") or ""
+    return keys.split(",") if keys else list(LEGACY_CARRY)
 
 
 def _inner_script():
@@ -47,7 +61,7 @@ def _inner_script():
         sys.exit("no PU_WRAPPER in the task environment — this job spec predates "
                  "the wrapper split; re-register the puppet: mop recycle <name>")
     prelude = "".join(f"export {k}={shlex.quote(os.environ.get(k, ''))}\n"
-                      for k in CARRY)
+                      for k in carry(os.environ))
     return prelude + base64.b64decode(blob).decode()
 
 
@@ -93,7 +107,7 @@ def main(argv):
         sys.exit(f"bootstrap of {name} brought no bus credentials -- "
                  f"is the project registered? mop project add <origin>")
     project = driver.project_of_name(name)
-    path = f"{driver.HOME}/.config/mop/bus-{project}.json"
+    path = driver.project_creds(project)
     w = asyncio.run(d.push(name, path, json.dumps(b["bus"]).encode() + b"\n"))
     if w.get("error"):
         sys.exit(f"bus credentials did not reach the body of {name}: {w['error']}")
