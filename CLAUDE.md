@@ -69,7 +69,7 @@ Every one of them fails silently — hence a list, not "read the code".
  - **MUST** Address a puppet's session only through the freshest live one: files of dead sessions pile up, and the freshest may well be a corpse
  - **MUST** "free" means the clone holds no unsaved work, not that the session is silent: the dispatch decision rests on it
  - **MUST** Wrap MCP tool bodies in `loud`: an exception reaches the model as "Error executing tool [name]" — with no reason
- - **MUST** The master's address is its bus inbox (`[host]-[pid]`), not the claude session name: that name is derived from a directory, is not unique and is unknown to the bus
+ - **MUST** The master's address is its bus inbox (`[login].[host]-[pid]`, the login as its subject token, #213), not the claude session name: that name is derived from a directory, is not unique and is unknown to the bus
 
 ## Strict TDD Protocol
 
