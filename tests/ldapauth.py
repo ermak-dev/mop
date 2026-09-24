@@ -283,10 +283,81 @@ def check_ldap3():
     return out
 
 
+# HYPOTHESIS (#214): с MOP_AUTH_PROVIDER=ldap и callout сервис на сервере
+# (учётка пула) видит только окружение юнита (SERVER_SCOPED) и копию
+# личностей; MOP_LDAP_* до него не доезжают, а пароль служебной учётки
+# намеренно вне config.SETTINGS -- провайдер в сервисе не собирается.
+# SOLUTION: несекретные MOP_LDAP_* -- одним списком config.IDENTITY_SCOPED в
+# окружение mop-callout и mop-bootstrap; пароль -- файлом 0600 в
+# /etc/nats/identity (пишет deploy из .env), и identity.service_settings
+# берёт его оттуда, когда окружение его не несёт. На контроллере источник --
+# по-прежнему config.get.
+# STATUS: FIXED — see #214
+def check_service_settings_214():
+    import tempfile
+    from mop import config
+    out = []
+    fn = getattr(identity, "service_settings", None)
+    if fn is None:
+        return ["identity.service_settings is missing"]
+    unit = {k: v for k, v in SETTINGS.items() if k != "MOP_LDAP_BIND_PASSWORD"}
+    root = tempfile.mkdtemp(prefix="mop-test-ldap-")
+    path = os.path.join(root, identity.BIND_PASSWORD_FILE)
+    try:
+        fn(unit.get, root)
+        out.append("ldap without the bind password file must be refused")
+    except ValueError as e:
+        if path not in str(e):
+            out.append(f"the refusal must name the file {path}: {e}")
+    with open(path, "w") as f:
+        f.write("svc-pw\n")
+    got = fn(unit.get, root)
+    if ldapauth.settings(got).bind_password != "svc-pw":
+        out.append(f"the provider must take the bind password from the file: {got}")
+    if not isinstance(identity.provider(got, root), ldapauth.LdapProvider):
+        out.append("the service must build an LdapProvider from the unit env and the file")
+    on_controller = dict(SETTINGS, MOP_LDAP_BIND_PASSWORD="from-env")
+    if fn(on_controller.get, root)["MOP_LDAP_BIND_PASSWORD"] != "from-env":
+        out.append("where config.get has the password (the controller), it wins over the file")
+    plain = {"MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS": "anton:admin"}
+    try:
+        got = fn(plain.get, tempfile.mkdtemp())
+        if got.get("MOP_OPERATORS") != "anton:admin":
+            out.append(f"the file provider's settings must pass through: {got}")
+    except ValueError as e:
+        out.append(f"the file provider needs no LDAP password file: {e}")
+    # Один список несекретных настроек личности на оба сервиса сервера.
+    scoped = getattr(config, "IDENTITY_SCOPED", ())
+    want = {"MOP_AUTH_PROVIDER", "MOP_OPERATORS"} | (set(ldapauth.NAMES) - {"MOP_LDAP_BIND_PASSWORD"})
+    if set(scoped) != want:
+        out.append(f"config.IDENTITY_SCOPED must be the provider's non-secret settings: "
+                   f"{sorted(set(scoped) ^ want)} differ")
+    for unit_name in ("mop-callout", "mop-bootstrap"):
+        missing = set(scoped) - set(config.SERVER_SCOPED.get(unit_name, ()))
+        if not scoped or missing:
+            out.append(f"{unit_name} must get every identity setting: missing {sorted(missing)}")
+    for unit_name, names in config.SERVER_SCOPED.items():
+        if "MOP_LDAP_BIND_PASSWORD" in names:
+            out.append(f"{unit_name}: the LDAP password must never be in a unit's env")
+    # Как пароль едет прогону: окружением процесса ansible, не аргументом,
+    # и только когда провайдер -- ldap.
+    from mop.cli import lib
+    penv = getattr(lib, "play_env", None)
+    if penv is None:
+        out.append("lib.play_env is missing")
+    else:
+        if penv(SETTINGS.get).get("MOP_LDAP_BIND_PASSWORD") != "svc-pw":
+            out.append("with ldap, the play's env must carry the bind password")
+        if "MOP_LDAP_BIND_PASSWORD" in penv({"MOP_AUTH_PROVIDER": "file",
+                                             "MOP_LDAP_BIND_PASSWORD": "x"}.get):
+            out.append("without ldap, the bind password must not reach the play at all")
+    return out
+
+
 def main():
     failed = []
     for check in (check_authenticate, check_mapping, check_lookup, check_settings,
-                  check_choice, check_filters, check_ldap3):
+                  check_choice, check_filters, check_ldap3, check_service_settings_214):
         try:
             lines = check()
         except Exception as e:  # noqa: BLE001 -- падение проверки -- тоже провал

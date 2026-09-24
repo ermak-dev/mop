@@ -241,6 +241,35 @@ class PlainFileProvider:
         return who
 
 
+# Пароль служебной учётки LDAP на сервере (#214): файлом в копии личностей,
+# не окружением юнита -- юнит читаем всем.
+BIND_PASSWORD_FILE = "ldap-bind.pass"
+BIND_PASSWORD = "MOP_LDAP_BIND_PASSWORD"
+
+
+def service_settings(get, secrets_dir):
+    """Настройки провайдера для сервиса сервера. -> {настройка: значение}.
+
+    get -- config.get: несекретное приходит окружением юнита
+    (config.IDENTITY_SCOPED). Пароль LDAP -- из get, если он там есть (на
+    контроллере, из .env), иначе из файла secrets_dir/ldap-bind.pass, который
+    кладёт deploy. Провайдер ldap без обоих -- отказ с путём файла: сервис
+    без каталога -- вход, которого нет."""
+    out = {k: get(k) for k in SETTINGS}
+    if (out.get("MOP_AUTH_PROVIDER") or "file") != "ldap" or out.get(BIND_PASSWORD):
+        return out
+    path = os.path.join(secrets_dir, BIND_PASSWORD_FILE)
+    try:
+        with open(path) as f:
+            out[BIND_PASSWORD] = f.read().strip()
+    except FileNotFoundError:
+        out[BIND_PASSWORD] = ""
+    if not out[BIND_PASSWORD]:
+        raise ValueError(f"MOP_AUTH_PROVIDER=ldap, but {path} has no bind password "
+                         f"-- set MOP_LDAP_BIND_PASSWORD in .env and run mop deploy")
+    return out
+
+
 # ─── выбор провайдера ────────────────────────────────────────────────────
 def provider(settings, secrets_dir=SECRETS):
     """Настройки -> провайдер по MOP_AUTH_PROVIDER. Неизвестное имя -- отказ:

@@ -219,7 +219,8 @@ def humans_provider():
     (secrets/), куда пользователю пула хода нет; deploy кладёт копию сюда,
     0600. Секреты провайдера -- файлами там же, не окружением юнита: юнит
     читаем всем."""
-    settings = {k: config.get(k) for k in identity.SETTINGS}
+    # Пароль LDAP -- файлом из той же копии (#214), не окружением юнита.
+    settings = identity.service_settings(config.get, IDENTITY_DIR)
     settings["MOP_OPERATORS_FILE"] = os.path.join(IDENTITY_DIR, identity.OPERATORS_FILE)
     return identity.provider(settings, IDENTITY_DIR)
 

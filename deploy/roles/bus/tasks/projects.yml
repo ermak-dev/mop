@@ -162,6 +162,26 @@
         state: absent
       when: not operators_file.stat.exists
 
+    # Пароль служебной учётки LDAP (#214): в .env контроллера, плейбукам
+    # --extra-vars не едет; mop deploy отдаёт его окружением процесса
+    # ansible (lib.play_env), только при провайдере ldap. Файлом, не
+    # окружением юнита: юнит читаем всем.
+    - name: LDAP bind password for the identity copy
+      when: MOP_AUTH_PROVIDER == 'ldap'
+      ansible.builtin.copy:
+        content: "{{ lookup('env', 'MOP_LDAP_BIND_PASSWORD') }}\n"
+        dest: /etc/nats/identity/ldap-bind.pass
+        owner: "{{ MOP_USER }}"
+        group: "{{ MOP_USER }}"
+        mode: "0600"
+      no_log: true
+
+    - name: No LDAP bind password without the ldap provider
+      when: MOP_AUTH_PROVIDER != 'ldap'
+      ansible.builtin.file:
+        path: /etc/nats/identity/ldap-bind.pass
+        state: absent
+
 - name: No identity copy without the callout
   when: MOP_AUTH_CALLOUT != 'on'
   ansible.builtin.file:

@@ -410,10 +410,21 @@ NOT_NODE = ("MOP_MEM_MB",)
 # рукописные списки в задачах ролей разошлись с тем, что сервис читает, и
 # mop-cluster молча ходил на дефолтный порт и DC Nomad. Сверяет их с кодом
 # tests/deploy.py. Секретам здесь не место: юнит читаем всем на машине.
+# Несекретные настройки провайдера личностей (#205, #208) -- сервисам
+# сервера, которые его строят: mop-callout (#206) и глагол личности
+# mop-bootstrap (#167). Один список, иначе один сервис знал бы каталог, а
+# другой нет. Пароль служебной учётки LDAP сюда не входит: юнит читаем
+# всем, и он едет файлом 0600 в /etc/nats/identity (#214).
+IDENTITY_SCOPED = ("MOP_AUTH_PROVIDER", "MOP_OPERATORS",
+                   "MOP_LDAP_URL", "MOP_LDAP_BIND_DN", "MOP_LDAP_BASE",
+                   "MOP_LDAP_LOGIN_ATTR", "MOP_LDAP_NAME_ATTR", "MOP_LDAP_EMAIL_ATTR",
+                   "MOP_LDAP_GROUP_BASE", "MOP_LDAP_GROUP_FILTER", "MOP_LDAP_ADMIN_GROUP",
+                   "MOP_LDAP_PROJECT_GROUP", "MOP_LDAP_STARTTLS", "MOP_LDAP_CA_FILE")
+
 SERVER_SCOPED = {
     # MOP_HOME и MOP_USER -- узловые: их читают задачи bootstrap'а.
     "mop-bootstrap": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
-                      "MOP_HOME", "MOP_USER"),
+                      "MOP_HOME", "MOP_USER") + IDENTITY_SCOPED,
     # Nomad (NOMAD_ADDR выводится из адреса сервера и порта, плюс DC) и то,
     # что читает mop/spec.py: спецификацию папета собирает этот сервис, и
     # профиль LLM по умолчанию тоже решает он (create без --llm), как и git
@@ -431,8 +442,7 @@ SERVER_SCOPED = {
                     "MOP_AUTH_CALLOUT"),
     # Сервис auth callout (#206): шина на петле, провайдер личностей. Пароли
     # и сиды -- файлами 0600 в /etc/nats, не здесь: юнит читаем всем.
-    "mop-callout": ("MOP_NATS_PORT", "MOP_AUTH_CALLOUT", "MOP_AUTH_PROVIDER",
-                    "MOP_OPERATORS"),
+    "mop-callout": ("MOP_NATS_PORT", "MOP_AUTH_CALLOUT") + IDENTITY_SCOPED,
     "mop-web": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                 "MOP_NOMAD_PORT", "MOP_POOL_DC"),
 }
