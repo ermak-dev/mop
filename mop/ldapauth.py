@@ -19,6 +19,14 @@ MOP_LDAP_PROJECT_GROUP (`mop-{project}`), дают user на эти проект
 одной такой группы -- отказ: человек есть в каталоге, но доступа к пулу у
 него нет.
 
+Active Directory (#220): доступ там дают одной группой с вложенностью, а не
+группами по проектам. Член MOP_LDAP_ACCESS_GROUP (DN) -- user на все проекты
+(*). MOP_LDAP_NESTED=ad -- членство проверяется правилом in-chain
+(memberOf:1.2.840.113556.1.4.1941:=<DN группы>) поиском записи пользователя,
+по запросу на группу: admin, доступ, затем проектные группы, найденные по
+шаблону cn. Прямой список групп вложенных не видит. Пусто -- прямое
+членство, как было.
+
 Настройки -- в .env установки. Пароль служебной учётки -- секрет: его нет в
 config.SETTINGS, потому что настройки едут плейбукам --extra-vars, а ему
 там делать нечего; читается он config.get, как GITLAB_TOKEN.
@@ -38,13 +46,17 @@ from . import config, identity, operators
 
 # Настройки провайдера: обязательные без дефолта и все, что читает settings().
 REQUIRED = ("MOP_LDAP_URL", "MOP_LDAP_BIND_DN", "MOP_LDAP_BIND_PASSWORD", "MOP_LDAP_BASE")
-NAMES = REQUIRED + ("MOP_LDAP_LOGIN_ATTR", "MOP_LDAP_NAME_ATTR", "MOP_LDAP_EMAIL_ATTR",
+NAMES = REQUIRED + ("MOP_LDAP_ACCESS_GROUP", "MOP_LDAP_NESTED",
+                    "MOP_LDAP_LOGIN_ATTR", "MOP_LDAP_NAME_ATTR", "MOP_LDAP_EMAIL_ATTR",
                     "MOP_LDAP_GROUP_BASE", "MOP_LDAP_GROUP_FILTER", "MOP_LDAP_ADMIN_GROUP",
                     "MOP_LDAP_PROJECT_GROUP", "MOP_LDAP_STARTTLS", "MOP_LDAP_CA_FILE")
 # Логин -- имя пользователя шины и поле MOP_OPERATORS: без разделителей
 # разбора (: ; ,), масок субъектов (* >) и пробелов.
 LOGIN = re.compile(r"[A-Za-z0-9._@-]+")
 PROJECT = r"(?P<project>[A-Za-z0-9._-]+)"
+# Правило AD LDAP_MATCHING_RULE_IN_CHAIN: членство с вложенными группами.
+IN_CHAIN = "1.2.840.113556.1.4.1941"
+NESTED = ("", "ad")
 TIMEOUT = 10
 
 
@@ -60,6 +72,8 @@ class Settings:
     group_base: str
     group_filter: str
     admin_group: str
+    access_group: str
+    nested: str
     project_group: str
     starttls: bool
     ca_file: str
@@ -84,6 +98,10 @@ def settings(values):
     if pattern.count("{project}") != 1:
         raise ValueError(f"MOP_LDAP_PROJECT_GROUP={pattern!r} must hold {{project}} once, "
                          f"e.g. mop-{{project}}")
+    nested = get("MOP_LDAP_NESTED").lower()
+    if nested not in NESTED:
+        raise ValueError(f"MOP_LDAP_NESTED={nested!r}: expected empty (direct membership) "
+                         f"or ad (nested groups, Active Directory)")
     group_filter = get("MOP_LDAP_GROUP_FILTER")
     if "{dn}" not in group_filter and "{login}" not in group_filter:
         raise ValueError(f"MOP_LDAP_GROUP_FILTER={group_filter!r} must name the member "
@@ -95,6 +113,7 @@ def settings(values):
         email_attr=get("MOP_LDAP_EMAIL_ATTR"),
         group_base=get("MOP_LDAP_GROUP_BASE") or get("MOP_LDAP_BASE"),
         group_filter=group_filter, admin_group=get("MOP_LDAP_ADMIN_GROUP"),
+        access_group=get("MOP_LDAP_ACCESS_GROUP"), nested=nested,
         project_group=pattern, starttls=starttls, ca_file=get("MOP_LDAP_CA_FILE"))
 
 
@@ -134,16 +153,39 @@ def norm_dn(dn):
                     for rdn in dn.lower().split(","))
 
 
-def rights(cfg, groups):
-    """Группы [(dn, атрибуты)] -> поля MOP_OPERATORS ([admin] | [user, проекты])
-    или None -- доступа нет."""
-    if cfg.admin_group and any(norm_dn(dn) == norm_dn(cfg.admin_group) for dn, _ in groups):
+def in_chain_filter(login_attr, login, group_dn):
+    """Запись пользователя, если он член группы с учётом вложенности (AD)."""
+    return f"(&({login_attr}={escape(login)})(memberOf:{IN_CHAIN}:={escape(group_dn)}))"
+
+
+def project_groups_filter(pattern):
+    """Группы AD, чей cn подходит под шаблон проекта: кандидаты для in-chain."""
+    prefix, suffix = pattern.split("{project}")
+    return f"(&(objectClass=group)(cn={escape(prefix)}*{escape(suffix)}))"
+
+
+def decide(cfg, member, candidates):
+    """Кто человек пулу. member(DN группы) -> bool; candidates -- группы
+    [(dn, атрибуты)], чей cn может назвать проект. -> поля MOP_OPERATORS
+    ([admin] | [user, проекты] | [user, *]) или None -- доступа нет.
+
+    Порядок -- от широкого к узкому, и первое да решает: admin, затем
+    группа доступа (#220, все проекты), затем проектные группы."""
+    if cfg.admin_group and member(cfg.admin_group):
         return [operators.ADMIN]
+    if cfg.access_group and member(cfg.access_group):
+        return [operators.USER, operators.ALL]
     prefix, suffix = cfg.project_group.split("{project}")
     shape = re.compile(re.escape(prefix) + PROJECT + re.escape(suffix))
-    projects = sorted({m.group("project") for _, attrs in groups
-                       for m in [shape.fullmatch(first(attrs, "cn"))] if m})
+    projects = sorted({m.group("project") for dn, attrs in candidates
+                       for m in [shape.fullmatch(first(attrs, "cn"))] if m and member(dn)})
     return [operators.USER, ",".join(projects)] if projects else None
+
+
+def rights(cfg, groups):
+    """Прямое членство (#208): группы [(dn, атрибуты)] -> поля или None."""
+    mine = {norm_dn(dn) for dn, _ in groups}
+    return decide(cfg, lambda dn: norm_dn(dn) in mine, groups)
 
 
 # ─── провайдер ───────────────────────────────────────────────────────────
@@ -163,7 +205,14 @@ class LdapProvider:
 
     def _identity(self, login, dn, attrs):
         """-> Identity или Refused: нет групп пула, имя роли шины."""
-        fields = rights(self.cfg, self.directory.groups_of(dn, login))
+        if self.cfg.nested == "ad":
+            # Вложенность AD (#220): членство -- правилом in-chain, по группе
+            # на запрос; прямой список групп вложенных не видит.
+            d = self.directory
+            fields = decide(self.cfg, lambda group: d.member_of(login, group),
+                            d.project_groups())
+        else:
+            fields = rights(self.cfg, self.directory.groups_of(dn, login))
         if fields is None:
             raise identity.Refused(f"{login}: no access -- in none of the pool's LDAP groups")
         name = next((v for v in (first(attrs, a) for a in self.cfg.name_attrs) if v), "")
@@ -264,6 +313,16 @@ class Ldap3Directory:
 
     def groups_of(self, dn, login):
         return self._search(self.cfg.group_base, group_filter(self.cfg.group_filter, dn, login),
+                            ["cn"])
+
+    def member_of(self, login, group_dn):
+        """Член ли группы с учётом вложенности (AD in-chain, #220)."""
+        cfg = self.cfg
+        return bool(self._search(cfg.base, in_chain_filter(cfg.login_attr, login, group_dn),
+                                 [cfg.login_attr]))
+
+    def project_groups(self):
+        return self._search(self.cfg.group_base, project_groups_filter(self.cfg.project_group),
                             ["cn"])
 
     def check(self, dn, password):
