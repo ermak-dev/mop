@@ -314,6 +314,7 @@ def main():
     failed += check_deploy_check()
     failed += check_inventory_drivers()
     failed += check_pool_uniform()
+    failed += check_node_memory_197()
     failed += check_fallback_model_183()
     failed += check_bus_import_169()      # последними: перезагружают модули
     failed += check_nomad_import_187()
@@ -1153,6 +1154,74 @@ def check_inventory_drivers():
     return failed
 
 
+def check_node_memory_197():
+    """HYPOTHESIS (#197): строка mop_mem_mb в инвентаре не работает нигде:
+    на host-узле спеку строит сервер своим MOP_MEM_MB (и #190 отказывал),
+    на pve память тела шла из образа, то есть из `.mop`. SOLUTION: память --
+    свойство папета (дефолт -> .env -> `.mop`), строку deploy отвергает на
+    любом узле; потолок узла mop_body_mem_cap_mb остаётся узловым и едет в
+    meta Nomad, где `>=` сравнивает численно только целые -- поэтому потолок
+    не из одного целого числа тоже отказ.
+    STATUS: FIXED — see #197"""
+    from mop.cli.pool import deploy
+    failed = 0
+    undo = no_network()
+    try:
+        fn = getattr(deploy, "memory_refusals", None)
+        if fn is None:
+            print("FAIL no deploy.memory_refusals")
+            return 1
+
+        def listing(hostvars, groups=None):
+            out = {"_meta": {"hostvars": hostvars},
+                   "puppet": {"hosts": ["plain", "hyper", "odd"]}}
+            out.update(groups or {})
+            return out
+        cases = [
+            ("clean", listing({"hyper": {"mop_driver": "pve"}}), "32768", []),
+            ("mop_mem_mb on a host node", listing({"odd": {"mop_mem_mb": "12288"}}), "32768",
+             ["odd: mop_mem_mb"]),
+            ("mop_mem_mb on a pve node", listing({"hyper": {"mop_driver": "pve", "mop_mem_mb": 8192}}),
+             "32768", ["hyper: mop_mem_mb"]),
+            # Как на mop.corp.ermak.dev: строка в группе puppet. ansible-inventory
+            # --list сводит её в hostvars каждого хоста; --export оставил бы в
+            # vars группы -- отказ обязан видеть оба места.
+            ("mop_mem_mb in a group's vars",
+             listing({}, {"puppet": {"hosts": ["plain"], "vars": {"mop_mem_mb": "8192"}}}),
+             "32768", ["puppet: mop_mem_mb"]),
+            ("a node's cap is a node setting", listing({"hyper": {"mop_body_mem_cap_mb": "65536"}}),
+             "32768", []),
+            ("a node's cap from YAML as a number", listing({"hyper": {"mop_body_mem_cap_mb": 65536}}),
+             "32768", []),
+            ("a node's cap in gigabytes", listing({"hyper": {"mop_body_mem_cap_mb": "32G"}}),
+             "32768", ["hyper: mop_body_mem_cap_mb"]),
+            ("a node's cap with a space", listing({"hyper": {"mop_body_mem_cap_mb": " 32768"}}),
+             "32768", ["hyper: mop_body_mem_cap_mb"]),
+            ("a node's cap as a fraction", listing({"hyper": {"mop_body_mem_cap_mb": "1.5"}}),
+             "32768", ["hyper: mop_body_mem_cap_mb"]),
+            ("an empty cap", listing({"hyper": {"mop_body_mem_cap_mb": ""}}),
+             "32768", ["hyper: mop_body_mem_cap_mb"]),
+            # Потолок установки достаётся каждому хосту без своей строки.
+            ("the installation's cap is broken", listing({"hyper": {"mop_body_mem_cap_mb": "4096"}}),
+             "32G", ["MOP_BODY_MEM_CAP_MB"]),
+        ]
+        for what, lst, cap, want in cases:
+            got = fn(lst, cap)
+            heads = sorted(g.split("=")[0] for g in got)
+            if heads != sorted(want):
+                failed += 1
+                print(f"FAIL memory_refusals, {what}: {got!r}, wanted lines for {want}")
+        got = fn(listing({"odd": {"mop_mem_mb": "12288"}}), "32768")
+        text = " ".join(got)
+        if not ("not a node setting" in text and ".env" in text and ".mop" in text
+                and "remove the line" in text):
+            failed += 1
+            print(f"FAIL memory_refusals must say where memory comes from now: {got!r}")
+    finally:
+        undo()
+    return failed
+
+
 def check_pool_uniform():
     """HYPOTHESIS (#190): спеку папета строит сервер своими MOP_HOME,
     MOP_USER, MOP_PUPPET_SEED, MOP_MEM_MB, а агент и `mop driver run` на узле
@@ -1160,22 +1229,25 @@ def check_pool_uniform():
     любую из них, молча разводит врапер и агента: клон ложится туда, куда
     агент не смотрит. SOLUTION: config.POOL_UNIFORM и отказ deploy до
     плейбука, если хост задаёт им значение, отличное от установки.
-    STATUS: FIXED — see #190"""
+    STATUS: FIXED — see #190
+
+    MOP_MEM_MB здесь больше нет (#197): память -- свойство папета, не узла,
+    и строку mop_mem_mb в инвентаре отвергает check_node_memory_197 на любом
+    узле, с любым значением."""
     from mop import config
     from mop.cli.pool import deploy
     failed = 0
     undo = no_network()
     try:
         uniform = getattr(config, "POOL_UNIFORM", None)
-        host_only = getattr(config, "HOST_UNIFORM", None)
-        if set(uniform or ()) != {"MOP_HOME", "MOP_USER", "MOP_PUPPET_SEED"} \
-                or set(host_only or ()) != {"MOP_MEM_MB"}:
+        if set(uniform or ()) != {"MOP_HOME", "MOP_USER", "MOP_PUPPET_SEED"}:
             failed += 1
-            print(f"FAIL config.POOL_UNIFORM {uniform!r} / HOST_UNIFORM {host_only!r}: "
-                  f"paths and user on every host, MOP_MEM_MB on host-driver nodes")
+            print(f"FAIL config.POOL_UNIFORM {uniform!r}: paths and user on every host")
+        if hasattr(config, "HOST_UNIFORM"):
+            failed += 1
+            print("FAIL config.HOST_UNIFORM is gone with #197: MOP_MEM_MB is not a node setting")
         fn = getattr(deploy, "uniform_refusals", None)
-        installed = {n: config.get(n) for n in (uniform or ()) + (host_only or ())}
-        installed["MOP_MEM_MB"] = "12288"
+        installed = {n: config.get(n) for n in (uniform or ())}
 
         def listing(hostvars):
             return {"_meta": {"hostvars": hostvars},
@@ -1183,21 +1255,12 @@ def check_pool_uniform():
         cases = [
             ("an override", {"odd": {"mop_home": "/srv/elsewhere"}}, ["odd: mop_home"]),
             ("two settings on one host", {"odd": {"mop_user": "someone",
-                                                  "mop_mem_mb": 1}},
-             ["odd: mop_mem_mb", "odd: mop_user"]),
+                                                  "mop_home": "/srv/x"}},
+             ["odd: mop_home", "odd: mop_user"]),
             ("the same value", {"odd": {"mop_home": installed.get("MOP_HOME")}}, []),
-            # Из YAML число приезжает числом: 12288 и "12288" -- одно значение.
-            ("the same value as a number",
-             {"odd": {"mop_mem_mb": int(installed.get("MOP_MEM_MB") or 0)}}, []),
             ("no override", {"hyper": {"mop_driver": "pve"}}, []),
-            # MOP_MEM_MB -- MemoryMaxMB задачи. На host-узле задача и есть
-            # claude, и перекрытие расходится с сервером молча; на
-            # контейнерном задача -- врапер, а строка инвентаря -- размер тела
-            # (как на mop.corp.ermak.dev: группа puppet, mop_mem_mb "8192").
-            ("mop_mem_mb on a pve node", {"hyper": {"mop_driver": "pve", "mop_mem_mb": "8192"}}, []),
-            ("mop_mem_mb on a host node", {"odd": {"mop_mem_mb": "8192"}}, ["odd: mop_mem_mb"]),
-            ("mop_mem_mb on a host node, the installation's value",
-             {"odd": {"mop_mem_mb": "12288"}}, []),
+            # Память -- не этой проверки (#197): её отвергает своя.
+            ("mop_mem_mb is not a uniform setting", {"odd": {"mop_mem_mb": "8192"}}, []),
             # Пути и пользователь -- общие и для контейнерного узла.
             ("mop_home on a pve node", {"hyper": {"mop_driver": "pve", "mop_home": "/srv/x"}},
              ["hyper: mop_home"]),

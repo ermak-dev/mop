@@ -197,6 +197,13 @@ def main():
     # Список узловых настроек -- один: по нему deploy решает, что рендерить в
     # node.env. Разойдись он с тем, что читает узел, и настройка молча не
     # доедет -- ровно та беда, ради которой ярус и заводился.
+    # Память -- свойство папета, не узла (#197): в node.env ей не место,
+    # строка инвентаря mop_mem_mb -- отказ deploy. Потолок узла остаётся выше.
+    cases += 1
+    if "MOP_MEM_MB" in config.NODE_SCOPED:
+        bad += 1
+        print("FAILED  MOP_MEM_MB is the puppet's, not the node's: out of NODE_SCOPED (#197)")
+
     cases += 1
     unknown = [k for k in config.NODE_SCOPED if k not in config.SETTINGS]
     if unknown:
