@@ -15,6 +15,6 @@ def main(argv):
     for l in a.label:
         group = gitlab.check_label(l).split("::")[0]
         labels = [x for x in labels if not x.startswith(f"{group}::")] + [l]
-    (gitlab.reopen if a.status in gitlab.OPEN_STATUSES and i["state"] == "closed"
+    (gitlab.reopen if gitlab.relabel_action(i["state"], a.status) == "reopen"
      else gitlab.relabel)(a.iid, labels)
     print(f"#{a.iid}: {', '.join(labels)}")
