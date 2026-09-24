@@ -265,11 +265,54 @@ def check_verb_table_173():
     return out[:20] + ([f"... and {len(out) - 20} more"] if len(out) > 20 else [])
 
 
+def check_forget_summary_196():
+    """HYPOTHESIS (#196): _forget отдаёт forget_refusal имя узла (строку), а
+    та читает сводку -- node['Name'], node.get('Status'); AttributeError, и
+    forget с #80 не доходит до purge ни на одном узле.
+    SOLUTION: _forget берёт сводку узла (nomad.node_summary) и отдаёт её;
+    узла нет -- отказ с именем, без allocs и purge.
+    STATUS: FIXED — see #196"""
+    from mop import nomad
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from cli import no_network
+    out = []
+    touched = []
+    closed = {"Name": "mop-2", "ID": "n2", "Status": "ready",
+              "SchedulingEligibility": "ineligible"}
+    allocs = []
+    keep = (nomad.node_summary, nomad.node_allocs, nomad.node_forget)
+    undo = no_network()
+    try:
+        nomad.node_summary = lambda name: dict(closed) if name == "mop-2" else None
+        nomad.node_allocs = lambda name: touched.append("allocs") or list(allocs)
+        nomad.node_forget = lambda name: touched.append("forget")
+        got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
+        if not got.get("ok") or touched != ["allocs", "forget"]:
+            out.append(f"forget of a drained node must reach purge: {got!r}, {touched}")
+        touched.clear()
+        allocs[:] = [{"JobID": "pu-mop-1", "ClientStatus": "running"}]
+        got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
+        err = got.get("error") or ""
+        if "pu-mop-1" not in err or "drain" not in err or "forget" in touched:
+            out.append(f"forget of a node with a live alloc must refuse with the job: "
+                       f"{got!r}, {touched}")
+        touched.clear()
+        got = cluster.answer("admin", {"verb": "forget", "node": "ghost"})
+        if "ghost" not in (got.get("error") or "") or touched:
+            out.append(f"forget of an unknown node must refuse by name, touching "
+                       f"nothing: {got!r}, {touched}")
+    finally:
+        nomad.node_summary, nomad.node_allocs, nomad.node_forget = keep
+        undo()
+    return out
+
+
 def main():
     failed = []
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,
-                  check_secret_verbs, check_verb_table_173):
+                  check_secret_verbs, check_verb_table_173,
+                  check_forget_summary_196):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:

@@ -397,7 +397,11 @@ def _up(project, req):
 
 def _forget(project, req):
     node = req["node"]
-    why = nomad.forget_refusal(node, nomad.node_allocs(node))
+    # Предохранитель читает сводку узла (статус, планирование), а не имя (#196).
+    summary = nomad.node_summary(node)
+    if summary is None:
+        return {"error": f"no node {node} in the cluster"}
+    why = nomad.forget_refusal(summary, nomad.node_allocs(node))
     if why:
         return {"error": why}
     nomad.node_forget(node)
