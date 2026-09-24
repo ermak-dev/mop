@@ -506,6 +506,12 @@ def check_refusals_163():
         refusal("mop stat with no node answering", run(stat.main),
                 "no node answered:\n  n1: no response\n  n2: no response")
 
+        # Пустой пул без отказа сервиса -- не «никто не ответил» с пустым
+        # перечнем, а прямо: готовых узлов нет.
+        puppets.ready_nodes = lambda: set()
+        refusal("mop stat on an empty pool", run(stat.main),
+                "no ready nodes in the pool")
+
         # Обычный ответ -- вывод прежний, символ в символ.
         row = {"name": "hyper", "driver": "pve", "serves": "mop", "state": "ready",
                "free_mb": 40960, "total_mb": 65536, "slots": 5}
