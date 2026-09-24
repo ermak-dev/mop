@@ -114,11 +114,14 @@ There is no pipeline: code reaches the pool through a `mop deploy` run, and `mas
  - **MUST** One fix = one layer: touching the wrapper, a playbook and the library at once is an unrevertable, unmeasurable change
  - **MUST** A commit explains why: the diff already shows what changed, and the incident behind the fix is worth more than a list of files
  - **MUST** Reference the issue in the commit subject as a bare `#74`, never a closing keyword
- - **MUST** Land by local integration, one push: `git merge --no-ff` into a fresh `master`, then a single `git push`; one merge commit per issue keeps `git revert -m 1` as the rollback
+ - **MUST** Push the issue branch as soon as it is ready: work that lives only in a clone dies with the clone
+ - **MUST** Land by local integration, one push: `git merge --no-ff` into a fresh `origin/master`, every file in `tests/` on the merged tree, then a single `git push`; one merge commit per issue keeps `git revert -m 1` as the rollback
+ - **MUST** Landing takes no token here (#225): the whole check runs in about 20 seconds, and git itself refuses the losing push of a race. A rejected push means fetch, merge again, rerun `tests/`, push — never a force push. `mop landing` is for projects whose gate runs for tens of minutes
  - **MUST** If you touched what travels to the nodes (`mop/`, `deploy/`), roll it out with `mop deploy` and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives
  - **MUST** Close the issue right after the rollout: `mop bug close [iid] --comment "…"` naming the commit and what it was verified with
  - **MUST** In pool mode the tracker belongs to the MASTER: the executor runs no `mop bug` at all and sends the comment text instead, which the master pastes
  - **MUST** In pool mode the executor lands on the branch the MASTER named and never picks the target itself
+ - **MUST** In pool mode the executor lands only after the master accepted its report; an order between issues is the master's, named in the dispatch ("land only once #222 is in `origin/master`", checked with `git merge-base --is-ancestor`)
 
 ## Documentation
 
