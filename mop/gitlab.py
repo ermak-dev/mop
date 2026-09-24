@@ -119,7 +119,22 @@ def token():
 
 
 def call(method, path, payload=None, params=None):
-    url = base() + path + (("?" + urllib.parse.urlencode(params)) if params else "")
+    """Запрос к API проекта, ответ — разобранный JSON."""
+    raw = request(method, base() + path, path, payload, params)
+    return json.loads(raw) if raw else None
+
+
+def call_site(method, path, payload=None, params=None):
+    """Запрос к API инстанса, мимо проекта: /runners/<id> у GitLab не под
+    проектом, хотя раннер проекту и назначен."""
+    raw = request(method, f"https://{site()}/api/v4" + path, path, payload, params)
+    return json.loads(raw) if raw else None
+
+
+def request(method, url, path, payload=None, params=None):
+    """Запрос как есть -> тело байтами. Трасса джобы — текст, не JSON (#233).
+    path — чем назвать запрос в отказе: полный URL в нём был бы шумом."""
+    url += ("?" + urllib.parse.urlencode(params)) if params else ""
     req = urllib.request.Request(
         url, method=method,
         data=json.dumps(payload).encode() if payload is not None else None)
@@ -128,8 +143,7 @@ def call(method, path, payload=None, params=None):
         req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            raw = r.read()
-            return json.loads(raw) if raw else None
+            return r.read()
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"{method} {path} -> HTTP {e.code}: "
                            f"{e.read().decode(errors='replace')[:300]}")
@@ -218,6 +232,66 @@ def pipeline_verdict(pipeline, sha):
     if status in PIPELINE_WAIT:
         return f"wait for pipeline {url} ({status})"
     return f"pipeline {url} is {status}, not success: refusing"
+
+
+# ─── ci: пайплайны, джобы, раннеры (#233) ───────────────────────────────
+# Порт bin/ci из rugent: раньше «почему красный» здесь выяснялось разовым
+# скриптом к API, мимо mop — ровно тот обход, который CLAUDE.md запрещает.
+def pipelines(n=15):
+    """Последние n пайплайнов проекта, новые первыми."""
+    return call("GET", "/pipelines", params={"order_by": "id", "sort": "desc",
+                                             "per_page": n})
+
+
+def pipeline_by_id(pid):
+    """Пайплайн целиком: yaml_errors есть только здесь, не в списке."""
+    return call("GET", f"/pipelines/{int(pid)}")
+
+
+def jobs(pid):
+    """Джобы пайплайна в порядке стадий. Перезапущенные копии GitLab сам
+    прячет: показывается последняя попытка, та, что решает цвет."""
+    return sorted(_paged(f"/pipelines/{int(pid)}/jobs", {}), key=lambda j: j["id"])
+
+
+def job(jid):
+    return call("GET", f"/jobs/{int(jid)}")
+
+
+def trace(jid):
+    """Лог джобы текстом, как его показал бы терминал: у GitLab это не
+    JSON, а сырой вывод раннера с \r секций."""
+    raw = request("GET", base() + f"/jobs/{int(jid)}/trace", f"/jobs/{int(jid)}/trace")
+    return screen_lines(raw.decode(errors="replace")) if raw else ""
+
+
+def lint(content):
+    """POST /ci/lint проекта: include в .gitlab-ci.yml разрешаются от него."""
+    return call("POST", "/ci/lint", {"content": content, "include_jobs": True})
+
+
+def retry_job(jid):
+    return call("POST", f"/jobs/{int(jid)}/retry")
+
+
+def retry_pipeline(pid):
+    return call("POST", f"/pipelines/{int(pid)}/retry")
+
+
+def cancel_pipeline(pid):
+    return call("POST", f"/pipelines/{int(pid)}/cancel")
+
+
+def runners():
+    """Раннеры проекта с метками. Список метки не несёт — только карточка
+    раннера, а она у GitLab не под проектом."""
+    return [call_site("GET", f"/runners/{int(r['id'])}")
+            for r in _paged("/runners", {})]
+
+
+def running_jobs():
+    """Идущие сейчас джобы проекта, каждая — с раннером, который её держит."""
+    return _paged("/jobs", {"scope[]": "running"})
 
 
 def children(epic_iid):
@@ -313,3 +387,162 @@ def relabel_action(state, status):
     очереди молча сидит среди закрытых и пропадает из `mop bug list` (#202).
     Закрывать relabel не умеет: это `mop bug close`, с комментарием."""
     return "reopen" if status in OPEN_STATUSES and state == "closed" else "relabel"
+
+
+# ─── ci: чистое (tests/ci.py, #233) ──────────────────────────────────────
+# Метка — слово, а не значок: вывод читает модель через MCP, а у неё нет
+# глаз, чтобы отличить зелёную галку от красного крестика. Провал — капсом:
+# его и ищут в списке.
+MARKS = {"success": "ok", "failed": "FAILED"}
+# Законченные: отменять нечего. GitLab на отмену такого отвечает успехом и
+# не делает ничего — молчаливое «сделано» хуже отказа.
+PIPELINE_DONE = ("success", "failed", "canceled", "skipped")
+
+
+def mark(status):
+    return MARKS.get(status, status or "?")
+
+
+def duration(secs):
+    """Секунды GitLab -> "-" / "Ns" / "NmSSs". null — джоба не стартовала,
+    и ноль там был бы враньём."""
+    if secs is None:
+        return "-"
+    secs = int(secs)
+    return f"{secs}s" if secs < 60 else f"{secs // 60}m{secs % 60:02d}s"
+
+
+def tail(text, n):
+    """Последние n строк; None — всё. Перевод строки в конце трассы строкой
+    не считается: иначе «последние 60» были бы 59."""
+    lines = (text or "").rstrip("\n").splitlines()
+    return "\n".join(lines if n is None else lines[-n:] if n > 0 else [])
+
+
+def screen_lines(text):
+    """Трасса как её видит терминал: от строки — то, что после последнего \r.
+    GitLab пишет секции как «section_start:<t>:<имя>\r\x1b[0K<текст>»,
+    прогресс — через \r; без этого хвост лога — мусор маркеров. \r\n —
+    просто конец строки. Цвета остаются: их снимает тот, кто печатает."""
+    lines = (text or "").replace("\r\n", "\n").split("\n")
+    return "\n".join(line.rsplit("\r", 1)[-1] for line in lines)
+
+
+def is_failure(job):
+    """Провал, который валит пайплайн: failed без allow_failure. Терпимый
+    провал цвет не решает, и «почему красный» не должен звать его причиной."""
+    return job.get("status") == "failed" and not job.get("allow_failure")
+
+
+def _wait_refusal(kind, obj):
+    status = obj.get("status")
+    if status in PIPELINE_WAIT:
+        return f"{kind} {obj.get('id')} is {status}: wait for it to finish before retrying"
+    return None
+
+
+def retry_blocked(job):
+    """Отказ повтора идущей джобы либо None. GitLab ответил бы 403 без
+    объяснения, и искать пришлось бы по коду ответа."""
+    return _wait_refusal("job", job)
+
+
+def pipeline_retry_blocked(p):
+    return _wait_refusal("pipeline", p)
+
+
+def pipeline_cancel_blocked(p):
+    """Отказ отмены законченного пайплайна либо None: GitLab принял бы её
+    молча и ничего не сделал."""
+    status = p.get("status")
+    if status in PIPELINE_DONE:
+        return f"pipeline {p.get('id')} is {status}: nothing to cancel"
+    return None
+
+
+def pipeline_failure(p):
+    """Причина провала от самого пайплайна -> [строка]. Отвергнутый
+    .gitlab-ci.yml валит пайплайн без единой джобы (#230): смотреть на
+    джобы тогда бесполезно, причина лежит в пайплайне."""
+    out = []
+    if p.get("yaml_errors"):
+        out.append(f"yaml_errors: {p['yaml_errors']}")
+    if p.get("failure_reason"):
+        out.append(f"failure_reason: {p['failure_reason']}")
+    text = (p.get("detailed_status") or {}).get("text")
+    if text:
+        out.append(f"detailed_status: {text}")
+    return out
+
+
+def _when(stamp):
+    """2026-09-24T10:11:12.345Z -> 2026-09-24 10:11 (UTC, как отдаёт GitLab)."""
+    return stamp[:16].replace("T", " ") if stamp else "-"
+
+
+def pipeline_line(p):
+    return (mark(p.get("status")), str(p["id"]), (p.get("sha") or "")[:8] or "-",
+            p.get("ref") or "-", _when(p.get("created_at")), p.get("web_url") or "-")
+
+
+def job_line(j):
+    """Строка джобы. Терпимый провал — не капсом: пайплайн он не валил."""
+    allowed = j.get("status") == "failed" and j.get("allow_failure")
+    return ("failed" if allowed else mark(j.get("status")), str(j["id"]),
+            j.get("stage") or "-", j.get("name") or "-", duration(j.get("duration")),
+            "(allow_failure)" if j.get("allow_failure") else "")
+
+
+def runner_line(r):
+    """ON/OFF — принимает ли раннер работу; status — видит ли его GitLab.
+    Разные вещи: остановленный раннер бывает online, и джобы тогда стоят."""
+    on = r.get("active", True) and not r.get("paused", False)
+    return ("ON" if on else "OFF", str(r["id"]), r.get("description") or "-",
+            r.get("status") or "-", ",".join(r.get("tag_list") or []) or "-")
+
+
+def running_line(j):
+    runner = j.get("runner") or {}
+    held = (f"runner {runner['id']} {runner.get('description') or ''}".rstrip()
+            if runner.get("id") else "no runner")
+    return (str(j["id"]), j.get("stage") or "-", j.get("name") or "-",
+            j.get("ref") or "-", held)
+
+
+def lint_report(result):
+    """Ответ /ci/lint -> ([строка], годен ли)."""
+    if result.get("valid"):
+        names = [j.get("name", "?") for j in result.get("jobs") or []]
+        lines = [f"valid — {len(names)} job(s): {', '.join(names)}"]
+    else:
+        lines = ["invalid"] + [f"error: {e}" for e in result.get("errors") or []]
+    lines += [f"warning: {w}" for w in result.get("warnings") or []]
+    return lines, bool(result.get("valid"))
+
+
+def why_lines(p, jobs, tails):
+    """Почему пайплайн такой, какой есть -> [строка].
+
+    jobs — джобы пайплайна, tails — {id джобы: хвост трассы} провалившихся.
+    Терпимые провалы названы отдельно и прямо: иначе их красный цвет в
+    вебе принимают за причину. Без провалившихся джоб — причина самого
+    пайплайна: отвергнутый .gitlab-ci.yml джоб не заводит вовсе (#230)."""
+    status = p.get("status")
+    out = [f"pipeline {p['id']} {status}: {p.get('web_url')}"]
+    failed = [j for j in jobs if is_failure(j)]
+    tolerated = [j for j in jobs if j.get("status") == "failed" and j.get("allow_failure")]
+    for j in failed:
+        out += ["", f"job {j['id']} {j.get('stage')}/{j.get('name')} failed "
+                    f"({duration(j.get('duration'))}): {j.get('web_url')}"]
+        text = tails.get(j["id"])
+        out += text.splitlines() if text else ["(empty trace)"]
+    for j in tolerated:
+        out += ["", f"job {j['id']} {j.get('stage')}/{j.get('name')} failed "
+                    f"(allow_failure): did NOT fail the pipeline"]
+    if failed:
+        return out
+    if status == "failed":
+        reasons = pipeline_failure(p)
+        return out + (["no jobs failed; the pipeline itself says:"] + reasons if reasons
+                      else ["no jobs failed, and GitLab gives no reason"])
+    return out if tolerated else out + ["nothing failed"]
