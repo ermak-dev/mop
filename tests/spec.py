@@ -409,6 +409,79 @@ def check_git_identity():
     return bad, cases
 
 
+# ── #197: память папета -- его свойство ──────────────────────────────────────
+# HYPOTHESIS: у папета три несвязанных числа памяти. Резерв Nomad --
+# MOP_PUPPET_MEM_MB, потолок Nomad -- MOP_MEM_MB, оба только установки; на pve
+# настоящая память тела -- `pct --memory` из образа, то есть из `.mop` проекта
+# на момент сборки. Слоты врут, просьба проекта на host не действует вовсе.
+# SOLUTION: одна функция: потолок -- просьба проекта (MOP_MEM_MB его `.mop`),
+# иначе установки (.env поверх дефолта); резерв -- бюджет установки, но не
+# выше потолка. Применяет Nomad на обоих драйверах.
+# (просьбы проекта, потолок установки, бюджет установки, (резерв, потолок))
+MEMORY = [
+    ("no ask: the installation's ceiling", {}, 12288, 8192, (8192, 12288)),
+    ("the ask over the installation", {"MOP_MEM_MB": "16384"}, 12288, 8192, (8192, 16384)),
+    # Просьба ниже бюджета: резерв не выше потолка, иначе Nomad отвергнет
+    # спеку (MemoryMaxMB < MemoryMB), а слоты пообещали бы больше, чем тело.
+    ("an ask below the budget", {"MOP_MEM_MB": "6144"}, 12288, 8192, (6144, 6144)),
+    ("an int ask from YAML", {"MOP_MEM_MB": 4096}, 12288, 8192, (4096, 4096)),
+    ("other asks are not memory", {"MOP_DISK_GB": "50"}, 12288, 8192, (8192, 12288)),
+    ("an installation ceiling below its budget", {}, 4096, 8192, (4096, 4096)),
+]
+# Просьба, которую нельзя применить: громко, а не молчаливая подмена
+# значением установки -- проект просил другого.
+BAD_ASKS = ["lots", "", "0", "-512", "8G", "1.5"]
+
+
+def check_memory_197():
+    """Цепочка памяти папета: дефолт -> .env -> `.mop` проекта.
+    STATUS: FIXED — see #197"""
+    bad = cases = 0
+    for what, asks, ceiling, budget, want in MEMORY:
+        cases += 1
+        got = spec.memory(asks, ceiling, budget)
+        if got != want:
+            bad += 1
+            print(f"FAILED  memory, {what}: {got}, wanted {want}")
+    for ask in BAD_ASKS:
+        cases += 1
+        try:
+            got = spec.memory({"MOP_MEM_MB": ask}, 12288, 8192)
+        except ValueError as e:
+            if "MOP_MEM_MB" not in str(e):
+                bad += 1
+                print(f"FAILED  memory, ask {ask!r}: the refusal does not name MOP_MEM_MB: {e}")
+            continue
+        bad += 1
+        print(f"FAILED  memory, ask {ask!r}: took it as {got}, wanted a refusal")
+    return bad, cases
+
+
+def check_project_asks_197():
+    """Просьбы проектов на сервере: файл, который кладёт роль cluster из
+    манифестов `mop deploy`. Нет файла или нет проекта в нём -- значения
+    установки, без падения: это любой проект до первого прогона.
+    STATUS: FIXED — see #197"""
+    import tempfile
+    bad = cases = 0
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "project-asks.json")
+        cases += 1
+        if spec.project_asks("mop", path) != {}:
+            bad += 1
+            print("FAILED  project_asks without the file: wanted {}")
+        with open(path, "w") as f:
+            json.dump({"mop": {"MOP_MEM_MB": "6144", "MOP_CORES": "4"}}, f)
+        for project, want in (("mop", {"MOP_MEM_MB": "6144", "MOP_CORES": "4"}),
+                              ("rugent", {})):
+            cases += 1
+            got = spec.project_asks(project, path)
+            if got != want:
+                bad += 1
+                print(f"FAILED  project_asks({project!r}): {got}, wanted {want}")
+    return bad, cases
+
+
 # Спека собирается в подпроцессе с данным MOP_DRIVER: настройки читаются
 # при импорте, и сменить драйвер можно только свежим процессом. Сеть в нём
 # закрыта на уровне сокета до первого импорта.
@@ -483,6 +556,10 @@ def main():
     dbad, dcases = check_driver_free_183()
     bad += dbad
     cases += dcases
+    for check in (check_memory_197, check_project_asks_197):
+        cbad, ccases = check()
+        bad += cbad
+        cases += ccases
 
     for what, j, want in STALE:
         cases += 1

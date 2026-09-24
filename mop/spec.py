@@ -13,6 +13,7 @@ spec_is_stale видит у всего пула сразу. Поэтому пе�
 import base64
 import hashlib
 import json
+import os
 import re
 import time
 
@@ -20,7 +21,46 @@ from . import config, driver, llm, nomad
 
 # Значения этой установки — .env поверх дефолтов; см. mop/config.py.
 MEM = config.num("MOP_PUPPET_MEM_MB")   # бюджет папета, МБ: резерв планировщика и мера слотов
-MEM_MAX = config.num("MOP_MEM_MB")  # потолок, за которым cgroup всё-таки убивает
+MEM_MAX = config.num("MOP_MEM_MB")  # потолок, за которым cgroup всё-таки убивает, если проект не просил своего
+# Просьбы проектов (#197): {проект: {настройка: значение}} из их `.mop`. Файл
+# кладёт роль cluster из манифестов `mop deploy`: сервис строит спеку под
+# учёткой пула и файлов контроллера не видит.
+ASKS_FILE = os.path.expanduser("~/.config/mop/project-asks.json")
+
+
+def project_asks(project, path=None):
+    """Что проект просит в своём `.mop`. -> {настройка: значение}.
+
+    Нет файла или проекта в нём -- пусто, и папет получает значения
+    установки: так живёт любой проект до первого прогона deploy после его
+    заведения. Битый файл -- падение: его пишет ansible целиком, и
+    молчаливый откат на установку спрятал бы поломку прогона."""
+    try:
+        with open(path or ASKS_FILE) as f:
+            asks = json.load(f)
+    except FileNotFoundError:
+        return {}
+    return dict(asks.get(project) or {})
+
+
+def memory(asks, ceiling, budget):
+    """Память папета (#197). -> (резерв, потолок), МБ. Чистая функция.
+
+    Потолок -- просьба проекта (MOP_MEM_MB его `.mop`), иначе установки:
+    ceiling -- это MOP_MEM_MB, .env поверх дефолта. Резерв -- бюджет
+    установки (budget, MOP_PUPPET_MEM_MB), но не выше потолка: MemoryMaxMB
+    ниже MemoryMB Nomad отвергает, а слоты пообещали бы больше тела.
+
+    Просьба, которую нельзя применить, -- ValueError: подмена значением
+    установки молча дала бы проекту не то, что он просил."""
+    ask = asks.get("MOP_MEM_MB")
+    if ask is not None:
+        text = str(ask).strip()
+        if not text.isdigit() or int(text) <= 0:
+            raise ValueError(f"MOP_MEM_MB={ask!r} in the project's .mop is not "
+                             f"a whole number of megabytes")
+        ceiling = int(text)
+    return min(budget, ceiling), ceiling
 HOME = config.get("MOP_HOME")             # $HOME на узлах пула
 USER = config.get("MOP_USER")               # под кем идут задачи
 
