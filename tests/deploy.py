@@ -47,6 +47,24 @@ SOLUTION: Environment="K=V" с экранированием кавычки и о
 Нынешние юниты такого не содержат и остаются байт в байт. Проверка читает
 юнит по правилам systemd.
 STATUS: FIXED — see #185
+
+Ложные changed в `mop deploy --check` (#191), обе задачи роли common:
+
+  * загрузка nomad: зеркало на If-Modified-Since отвечает 200, а не 304, и
+    get_url без checksum в check mode шлёт HEAD, пустой временный файл
+    сравнивает по sha1 с настоящим -- changed всегда; настоящий прогон при
+    этом каждый раз качал zip целиком GET'ом, находил тот же sha1 и говорил ok;
+  * pip: модуль в check mode при любом extra_args отвечает changed=True, не
+    глядя (ansible-core 2.21, pip.py), а у нас --user --break-system-packages.
+
+HYPOTHESIS: оба changed -- семантика модулей в check mode, не дрейф.
+SOLUTION: nomad -- проба `nomad version` (check_mode: false, ничего не
+меняет); загрузка и распаковка -- только если стоит не та версия. pip --
+настоящая задача как была, но только вне check mode; в check mode её
+близнец без extra_args, и модуль честно смотрит pip list (все site, что видит
+пользователь пула; PIP_USER сузил бы список до user site и соврал бы про
+системный requests).
+STATUS: FIXED — see #191
 """
 import ast
 import os
@@ -387,6 +405,47 @@ def main():
             seen = environment(got)
             wrong = {n: seen.get(n) for n in ADDED[unit] if seen.get(n) != variables[n]}
             check(f"{unit}: every addition rendered", not wrong, wrong)
+
+    # ── check mode без ложных changed (#191) ─────────────────────────────
+    def tasks(name):
+        path = os.path.join(COMMON, "tasks", name)
+        return yaml.safe_load(open(path)) or [] if os.path.isfile(path) else []
+
+    def when(t):
+        w = t.get("when", [])
+        return " and ".join(w) if isinstance(w, list) else str(w)
+
+    nb = tasks("nomad_bin.yml")
+    probe = [t for t in nb if "nomad version" in str(t.get("ansible.builtin.command", ""))]
+    check("nomad_bin: a version probe", len(probe) == 1, [t.get("name") for t in probe])
+    if probe:
+        p = probe[0]
+        check("nomad_bin: the probe runs in check mode and changes nothing",
+              p.get("check_mode") is False and p.get("changed_when") is False
+              and p.get("failed_when") is False and p.get("register"), p)
+        reg = p.get("register", "")
+        for mod in ("ansible.builtin.get_url", "ansible.builtin.unarchive"):
+            t = [t for t in nb if mod in t]
+            check(f"nomad_bin: {mod} only when the version is not the wanted one",
+                  len(t) == 1 and reg in when(t[0]) and "nomad_version" in when(t[0]),
+                  [when(x) for x in t])
+    pp = [t for t in tasks("pip.yml") if "ansible.builtin.pip" in t]
+    real = [t for t in pp if t["ansible.builtin.pip"].get("extra_args")]
+    dry = [t for t in pp if not t["ansible.builtin.pip"].get("extra_args")]
+    check("pip: the real task keeps --user --break-system-packages, outside check mode",
+          len(real) == 1 and real[0]["ansible.builtin.pip"]["extra_args"] ==
+          "--user --break-system-packages" and when(real[0]) == "not ansible_check_mode",
+          [(t["ansible.builtin.pip"].get("extra_args"), when(t)) for t in real])
+    check("pip: a check-mode twin without extra_args", len(dry) == 1
+          and when(dry[0]) == "ansible_check_mode", [when(t) for t in dry])
+    if len(real) == 1 and len(dry) == 1:
+        a, b = real[0], dry[0]
+        same = ("become", "become_user")
+        check("pip: the twin asks as the same user about the same list",
+              all(a.get(k) == b.get(k) for k in same)
+              and {k: v for k, v in a["ansible.builtin.pip"].items() if k != "extra_args"}
+              == b["ansible.builtin.pip"],
+              (a, b))
 
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")
