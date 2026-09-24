@@ -62,7 +62,7 @@ from . import busnames, config as settings, creds  # noqa: E402
 
 # Файл кредов, если его подсунули: врапер папета через tmux -e, `mop master`
 # сессии мастера. Без него креды собирает config() из каталога сервера.
-FILE = os.environ.get("MOP_BUS_CONFIG")
+FILE = settings.get("MOP_BUS_CONFIG") or None
 # Креды агента узла: их кладёт плейбук, и агент читает только их — каталог
 # сервера с кредами мастера на машине в двух ролях ему не указ.
 NODE_FILE = os.path.expanduser("~/.config/mop/bus.json")
@@ -73,7 +73,7 @@ ALL_MASTERS = busnames.ALL_MASTERS   # псевдо-id мастера: отве�
 
 # Чей срез пула виден этому процессу. Ставит `mop master`, наследуют его
 # потомки — в том числе mop mcp, запущенный сессией мастера.
-PROJECT = os.environ.get("MOP_PROJECT") or ADMIN
+PROJECT = settings.get("MOP_PROJECT") or ADMIN
 
 _lock = threading.Lock()
 _loop = None

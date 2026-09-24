@@ -1,7 +1,8 @@
 """Манифест проекта: .mop/ в корне проекта, из его origin или из рабочей копии.
 
-Чистый разбор и его проверки живут в config (manifest, manifest_parts);
-здесь — дорога за ним: зеркало или каталог, файлы для ansible. Молчит и
+Здесь и чистый разбор (play, parts), и дорога за манифестом: зеркало или
+каталог, файлы для ansible. Разбор жил в config, но нужен только здесь и
+bootstrap'у, а config -- нижний слой (#156). Молчит и
 печатает вызывающий: библиотека возвращает данные.
 
 Два файла, и имена говорят, когда каждый играется (#61):
@@ -33,6 +34,60 @@ from . import config, puppets
 
 SANDBOX = ".mop/sandbox.yaml"
 BOOTSTRAP = ".mop/bootstrap.yaml"
+
+
+# ─── чистый разбор ───────────────────────────────────────────────────────
+def parts(mvars):
+    """vars манифеста -> (просьбы, конфигурация проекта, чужие имена).
+
+    Три судьбы у одного словаря: ключи PROJECT_SCOPED — просьба о размерах
+    (едет в образ числами); ключи, не являющиеся настройками mop, —
+    конфигурация самого проекта (едет контекстом его задачам); ключи,
+    совпадающие с настоящими настройками, — чужие: в контексте задач они
+    затёрли бы правду машины (MOP_USER, MOP_HOME), поэтому отбрасываются
+    громко, со списком.
+    """
+    asks = {k: str(v) for k, v in mvars.items() if k in config.PROJECT_SCOPED}
+    mine = {k: v for k, v in mvars.items() if k not in config.SETTINGS}
+    alien = sorted(k for k in mvars if k in config.SETTINGS and k not in config.PROJECT_SCOPED)
+    return asks, mine, alien
+
+
+def play(text):
+    """`mop.yaml` -> ({vars}, [tasks]).
+
+    Манифест проекта (#25): одна игра, где vars — и просьба (ключи
+    PROJECT_SCOPED), и конфигурация его окружения, а tasks — само окружение
+    сверх общего. Форма оговорена жёстко, и отход от неё — ValueError, а не
+    «прочиталось как получилось»: молча потерянные tasks означают образ без
+    окружения проекта, а молча потерянные vars — образ не тех размеров.
+
+    yaml импортируется лениво и только здесь: пакет ездит на узлы, где
+    pyyaml может не оказаться, а манифест читается исключительно на
+    управляющей машине.
+    """
+    import yaml
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise ValueError(f"mop.yaml is not YAML: {str(e).splitlines()[0]}")
+    if not isinstance(doc, list) or len(doc) != 1 or not isinstance(doc[0], dict):
+        raise ValueError("mop.yaml must be one play: a list of exactly one mapping")
+    play = doc[0]
+    # Отсутствие секции — нормально (нечего просить/ставить), но присутствие
+    # не той формы — ошибка: `tasks: {}` не «пустые задачи», а опечатка,
+    # из-за которой образ тихо остался бы без окружения проекта.
+    of_vars = play.get("vars")
+    tasks = play.get("tasks")
+    if of_vars is None:
+        of_vars = {}
+    if tasks is None:
+        tasks = []
+    if not isinstance(of_vars, dict):
+        raise ValueError("mop.yaml vars must be a mapping")
+    if not isinstance(tasks, list):
+        raise ValueError("mop.yaml tasks must be a list")
+    return of_vars, tasks
 # Переходные имена: читаются как sandbox, пока проекты не переехали.
 LEGACY = (".mop/node.yaml", ".mop/workspace.yaml")
 
@@ -128,7 +183,7 @@ def _collect(project, show):
         if path in LEGACY:
             out["legacy"].append(path)
         mvars, tasks = got
-        asks, mine, alien = config.manifest_parts(mvars)
+        asks, mine, alien = parts(mvars)
         out["asks"].update(asks)
         s_vars.update(mine)
         note_alien(alien)
@@ -145,7 +200,7 @@ def _collect(project, show):
     got = _parse(out["bootstrap_text"], project, BOOTSTRAP)
     if got is not None:
         bvars, btasks = got
-        asks, mine, alien = config.manifest_parts(bvars)
+        asks, mine, alien = parts(bvars)
         note_alien(sorted(set(alien) | set(asks)))
         if mine:
             out["bootstrap_vars"] = _write(base, project, "bootstrap-vars.yml", None, mine)
@@ -159,7 +214,7 @@ def _parse(text, project, path):
     if text is None:
         return None
     try:
-        return config.manifest(text)
+        return play(text)
     except ValueError as e:
         raise RuntimeError(f"{project}/{path}: {e}")
 

@@ -1,7 +1,7 @@
 """Python-библиотеки mop, одним списком.
 
 Их ставят три места, и все берут список отсюда через MOP_PIP_DEPS в
---extra-vars (config.playbook_vars): узел (deploy/roles/bus), тело
+--extra-vars (playvars.playbook_vars): узел (deploy/roles/bus), тело
 (deploy/pve-build.yml) и сама машина контроллера или оператора
 (deploy/self.yml, запускает `mop setup`). Пока список был записан в каждом
 плейбуке, новая библиотека доезжала до одной машины и не доезжала до

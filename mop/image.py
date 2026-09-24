@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 
-from . import config, driver, llm, manifest, nomad, puppets, spec, state
+from . import config, driver, llm, manifest, nomad, playvars, puppets, spec, state
 
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "pve-build.yml")
 
@@ -56,7 +56,7 @@ def bake(origin, got, out=None, fresh=False, on_line=None):
 
     on_line — вместо out: каждая строка вывода отдаётся вызывающему (сборщик
     на сервере показывает по ним шаг, #123)."""
-    settings = json.dumps(config.playbook_vars(), ensure_ascii=False)
+    settings = json.dumps(playvars.playbook_vars(), ensure_ascii=False)
     extra = extra_vars(origin, got)
     if fresh:
         extra["mop_fresh"] = True

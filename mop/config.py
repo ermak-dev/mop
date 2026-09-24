@@ -293,8 +293,21 @@ DERIVED = {
         __import__("ipaddress").ip_network(get("MOP_PVE_SUBNET")).network_address + 1),
 }
 
+# Настройки процесса (#156): их ставит родитель -- `mop master` сессии
+# мастера, врапер папету, юнит сборщика -- и читаются они только из
+# окружения. Файлы их не задают намеренно: строка MOP_PROJECT в .env молча
+# переключила бы срез шины, MOP_SERVER_DIR в node.env -- каталог кредов. В
+# плейбуки не едут: это про этот процесс, а не про установку. Пусто -- откат
+# остаётся у читающего (каталог сервера по адресу, псевдопроект admin).
+PROCESS_SCOPED = (
+    "MOP_SERVER_DIR",      # каталог кредов сервера, названный прямо (#123)
+    "MOP_BUS_CONFIG",      # файл кредов шины, если его подсунули
+    "MOP_PROJECT",         # чей срез пула виден этому процессу
+)
+
+
 SETTINGS = {**{k: "" for k in REQUIRED}, **{k: "" for k in DERIVED},
-            **DEFAULTS, **OPTIONAL}
+            **DEFAULTS, **OPTIONAL, **{k: "" for k in PROCESS_SCOPED}}
 
 
 # Настройки узла: те, что читаются на самом узле и могут у машин различаться.
@@ -351,83 +364,8 @@ PROJECT_SCOPED = (
 )
 
 
-def manifest_parts(mvars):
-    """vars манифеста -> (просьбы, конфигурация проекта, чужие имена).
-
-    Три судьбы у одного словаря: ключи PROJECT_SCOPED — просьба о размерах
-    (едет в образ числами); ключи, не являющиеся настройками mop, —
-    конфигурация самого проекта (едет контекстом его задачам); ключи,
-    совпадающие с настоящими настройками, — чужие: в контексте задач они
-    затёрли бы правду машины (MOP_USER, MOP_HOME), поэтому отбрасываются
-    громко, со списком.
-    """
-    asks = {k: str(v) for k, v in mvars.items() if k in PROJECT_SCOPED}
-    mine = {k: v for k, v in mvars.items() if k not in SETTINGS}
-    alien = sorted(k for k in mvars if k in SETTINGS and k not in PROJECT_SCOPED)
-    return asks, mine, alien
-
-
-def manifest(text):
-    """`mop.yaml` -> ({vars}, [tasks]).
-
-    Манифест проекта (#25): одна игра, где vars — и просьба (ключи
-    PROJECT_SCOPED), и конфигурация его окружения, а tasks — само окружение
-    сверх общего. Форма оговорена жёстко, и отход от неё — ValueError, а не
-    «прочиталось как получилось»: молча потерянные tasks означают образ без
-    окружения проекта, а молча потерянные vars — образ не тех размеров.
-
-    yaml импортируется лениво и только здесь: пакет ездит на узлы, где
-    pyyaml может не оказаться, а манифест читается исключительно на
-    управляющей машине.
-    """
-    import yaml
-    try:
-        doc = yaml.safe_load(text)
-    except yaml.YAMLError as e:
-        raise ValueError(f"mop.yaml is not YAML: {str(e).splitlines()[0]}")
-    if not isinstance(doc, list) or len(doc) != 1 or not isinstance(doc[0], dict):
-        raise ValueError("mop.yaml must be one play: a list of exactly one mapping")
-    play = doc[0]
-    # Отсутствие секции — нормально (нечего просить/ставить), но присутствие
-    # не той формы — ошибка: `tasks: {}` не «пустые задачи», а опечатка,
-    # из-за которой образ тихо остался бы без окружения проекта.
-    of_vars = play.get("vars")
-    tasks = play.get("tasks")
-    if of_vars is None:
-        of_vars = {}
-    if tasks is None:
-        tasks = []
-    if not isinstance(of_vars, dict):
-        raise ValueError("mop.yaml vars must be a mapping")
-    if not isinstance(tasks, list):
-        raise ValueError("mop.yaml tasks must be a list")
-    return of_vars, tasks
-
-
 class Missing(RuntimeError):
     """Обязательная настройка не заполнена."""
-
-
-def playbook_vars():
-    """Что едет плейбукам --extra-vars: настройки плюс списки, которые живут
-    в коде одним местом. Одна функция на `mop deploy` (через `mop config
-    --json`) и на сборку образа (mop/image.py): пока их было две, список
-    доезжал до узла и не доезжал до тела, молча.
-
-    MOP_NODE_SCOPED -- узловые настройки, по нему прогон рендерит node.env.
-    MOP_PIP_DEPS -- python-библиотеки mop (mop/deps.py) для узла, тела и
-    `mop setup`."""
-    from . import deps, operators
-    out = {k: v for k, (v, _) in effective().items()}
-    out["MOP_NODE_SCOPED"] = ",".join(NODE_SCOPED)
-    out["MOP_PIP_DEPS"] = ",".join(deps.PIP)
-    # Права операторов — субъектами, уже разобранные: шаблон конфига NATS
-    # не должен разбирать настройку второй раз, иначе два разбора разойдутся
-    # молча, и разойдутся они В ПРАВАХ.
-    out["MOP_OPERATOR_SUBJECTS"] = {
-        name: operators.permissions(op)
-        for name, op in operators.parse(out.get("MOP_OPERATORS", "")).items()}
-    return out
 
 
 def require(*names):
@@ -469,14 +407,27 @@ def _file(path):
 # Поля контекста команды (#131, mop/context.py): их значение, если контекст
 # его задал, старше файлов. Контекст уже учёл клон, окружение и командную
 # строку в своём порядке.
-CONTEXT_SCOPED = {"MOP_SERVER_LAN": "server"}
+#
+# Объявляет их context (FIELDS) и сам вписывает сюда при импорте (#156):
+# config -- нижний слой и сверху не читает ничего, а обратная копия полей
+# однажды разошлась бы с оригиналом. Пока context не импортирован,
+# контекста нет и быть не может: use() живёт там же.
+CONTEXT_SCOPED = {}
+_context_now = None
+
+
+def attach_context(scoped, now):
+    """{переменная: поле контекста}, функция текущего контекста. Зовёт
+    context при импорте; поля, не являющиеся настройками, не берутся."""
+    global _context_now
+    CONTEXT_SCOPED.update({v: f for v, f in scoped.items() if v in SETTINGS})
+    _context_now = now
 
 
 def _context(name):
-    if name not in CONTEXT_SCOPED:
+    if name not in CONTEXT_SCOPED or _context_now is None:
         return None
-    from . import context
-    return getattr(context.current(), CONTEXT_SCOPED[name])
+    return getattr(_context_now(), CONTEXT_SCOPED[name])
 
 
 def _load():
@@ -506,6 +457,8 @@ def get(name, default=None):
     Настройка описана в одном месте или ни в одном."""
     if default is None:
         default = SETTINGS.get(name, "")
+    if name in PROCESS_SCOPED:
+        return os.environ.get(name) or default
     value = (_context(name) or os.environ.get(name)
              or _node().get(name) or _load().get(name))
     if value:
@@ -518,11 +471,12 @@ def effective():
     out = {}
     for name, default in SETTINGS.items():
         if _context(name):
-            from . import context
-            out[name] = (_context(name), context.current().sources.get(
+            out[name] = (_context(name), _context_now().sources.get(
                 CONTEXT_SCOPED[name], "context"))
         elif os.environ.get(name):
             out[name] = (os.environ[name], "env")
+        elif name in PROCESS_SCOPED:
+            out[name] = (default, "default")
         elif _node().get(name):
             out[name] = (_node()[name], "node")
         elif _load().get(name):

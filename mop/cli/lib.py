@@ -23,7 +23,7 @@ import shutil
 import subprocess
 import sys
 
-from mop import bus, config, creds, keys, llm, puppets  # noqa: E402
+from mop import bus, config, creds, keys, llm, playvars, puppets  # noqa: E402
 
 
 # Каталоги установки: корень проекта и bin/ с единственным исполняемым
@@ -271,7 +271,7 @@ def play(playbook, projects, manifests=None, git_hosts=None):
     if not os.path.isfile(inventory):
         raise RuntimeError(f"no inventory {inventory} -- create it from the example: "
                            f"cp inventory.yaml.example inventory.yaml")
-    vars_ = config.playbook_vars()
+    vars_ = playvars.playbook_vars()
     # Без операторов на шину не войдёт ни один человек (#106): ролевых
     # admin и master-<проект> больше нет. Громкий отказ до прогона лучше,
     # чем установка, в которую никто не может войти.

@@ -24,7 +24,7 @@ import subprocess
 import sys
 
 
-from mop import config  # noqa: E402  (stdlib only)
+from mop import config, playvars  # noqa: E402  (stdlib only)
 
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "self.yml")
 
@@ -51,7 +51,7 @@ def _setup(argv):
         subprocess.run([*root, "apt-get", "update", "-q"], check=True)
         subprocess.run([*root, "apt-get", "install", "-y", "-q", "ansible"],
                        check=True)
-    settings = json.dumps(config.playbook_vars(), ensure_ascii=False)
+    settings = json.dumps(playvars.playbook_vars(), ensure_ascii=False)
     r = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local",
                         PLAYBOOK, "--extra-vars", settings,
                         "--extra-vars", json.dumps({"mop_role": role})])

@@ -10,7 +10,7 @@ things required in .env are secrets.
 import json
 
 from mop.cli import lib
-from mop import config
+from mop import config, playvars
 from mop.render import table
 
 
@@ -18,8 +18,8 @@ def main(argv):
     eff = config.effective()
     if argv == ["--json"]:
         # Так это уезжает в плейбуки: `mop deploy` отдаёт их --extra-vars.
-        # Состав -- config.playbook_vars(), тот же, что у сборки образа.
-        print(json.dumps(config.playbook_vars(), ensure_ascii=False))
+        # Состав -- playvars.playbook_vars(), тот же, что у сборки образа.
+        print(json.dumps(playvars.playbook_vars(), ensure_ascii=False))
         return
     if argv:
         lib.usage(__doc__)
