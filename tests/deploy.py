@@ -594,6 +594,22 @@ def main():
               == b["ansible.builtin.pip"],
               (a, b))
 
+    # ── хосты инвентаря -- файлом сервису кластера (#178) ─────────────────
+    # forget отказывает узлу, который deploy поставил бы снова; файла нет --
+    # отказа нет, поэтому разошедшееся имя файла ломало бы защиту молча.
+    from mop import cluster
+    want = "{{ MOP_HOME }}/.config/mop/" + os.path.basename(
+        getattr(cluster, "INVENTORY_HOSTS", "") or "?")
+    wrote = [t for f, t in site_tasks() if f.endswith("roles/cluster/tasks/main.yml")
+             and "mop_inventory_hosts" in str(t.get("ansible.builtin.copy", {}).get("content"))]
+    check("cluster: the role writes the inventory's hosts where the service reads them",
+          len(wrote) == 1 and wrote[0]["ansible.builtin.copy"].get("dest") == want
+          and wrote[0]["ansible.builtin.copy"].get("owner") == "{{ MOP_USER }}",
+          [t.get("ansible.builtin.copy") for t in wrote] or want)
+    check("cluster: the host list only when deploy sent one",
+          len(wrote) == 1 and "mop_inventory_hosts is defined" in when(wrote[0]),
+          [when(t) for t in wrote])
+
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")
     gv = yaml.safe_load(open(gv_path)) if os.path.isfile(gv_path) else {}

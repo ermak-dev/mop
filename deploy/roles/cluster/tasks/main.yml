@@ -17,6 +17,19 @@
   notify: restart mop-cluster
 
 
+# Хосты инвентаря (#178): инвентарь лежит у контроллера, куда учётке пула
+# хода нет, а forget обязан отказать узлу, который этот же прогон поставил
+# бы снова. Список шлёт mop deploy; сервис читает файл на каждый forget.
+- name: Hosts of the inventory, for forget
+  when: mop_inventory_hosts is defined
+  become: yes
+  ansible.builtin.copy:
+    content: "{{ mop_inventory_hosts | to_json }}\n"
+    dest: "{{ MOP_HOME }}/.config/mop/inventory-hosts.json"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0644"
+
 - name: Systemd unit
   become: yes
   ansible.builtin.template:
