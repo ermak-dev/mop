@@ -150,10 +150,10 @@
       const cc = sh.counts;
       const note = KINDS.filter(k => cc[k]).map(k => `${cc[k]} ${KIND_RU[k]}`).join(", ");
       return `<section><h2>${esc(sh.name)} <small>${esc(note)}</small></h2>`
-        + table(["папет", "узел", "аллокация", "состояние", "модель", "#место", "репозиторий"],
+        + table(["папет", "узел", "аллокация", "состояние", "пользователь", "модель", "#место", "репозиторий"],
           sh.puppets.map(p => ({kind: p.kind, cells: [
             {html: `<span class="dot"></span>${esc(p.name)}`}, p.node, p.alloc_status,
-            {html: esc(p.state), cls: "state"}, p.llm, gb(p.disk_kb), {html: `<code>${esc(p.origin)}</code>`}]})),
+            {html: esc(p.state), cls: "state"}, p.owner || "-", p.llm, gb(p.disk_kb), {html: `<code>${esc(p.origin)}</code>`}]})),
           (r) => r.kind)
         + `</section>`;
     }).join("") || '<section><div class="empty">папетов нет</div></section>';
