@@ -116,10 +116,17 @@ def check_quiet():
     out = []
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
                         "mop", "agent.py")
+    in_main = False
     with open(path) as f:
         for n, line in enumerate(f, 1):
+            # Переход (#150): блок __main__ -- вход `python3 -m mop.agent` из
+            # юнитов узлов; его строки -- программа, а не библиотека.
             if line.startswith('if __name__ == "__main__":'):
-                break       # переход (#150): `python3 -m mop.agent` в юнитах узлов
+                in_main = True
+                continue
+            if in_main and (line.startswith((" ", "\t")) or not line.strip()):
+                continue
+            in_main = False
             code = line.split("#")[0]
             if "print(" in code or "sys.exit(" in code:
                 out.append(f"mop/agent.py:{n}: {line.strip()}")
@@ -240,10 +247,35 @@ def check_intake():
     return out
 
 
+def check_main_169():
+    """HYPOTHESIS (#169): как только bus при импорте без nats-py бросает, а не
+    выходит, переходный вход юнитов `python3 -m mop.agent` печатал бы трассу:
+    импорты модуля идут раньше его блока __main__.
+    SOLUTION: блок __main__ -- до импортов пакета; командлет проверяет nats
+    первым и отказывает одной строкой.
+    STATUS: FIXED — see #169"""
+    import subprocess
+    import tempfile
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    shadow = tempfile.mkdtemp(prefix="mop-test-nonats-")
+    os.makedirs(os.path.join(shadow, "nats"))
+    with open(os.path.join(shadow, "nats", "__init__.py"), "w") as f:
+        f.write("raise ImportError('no nats')\n")
+    r = subprocess.run([sys.executable, "-m", "mop.agent", "--check"], cwd=root,
+                       env=dict(os.environ, PYTHONPATH=shadow),
+                       capture_output=True, text=True)
+    want = "bus library needed: pip install --user --break-system-packages nats-py\n"
+    if r.returncode != 1 or r.stdout or r.stderr != want:
+        return [f"python3 -m mop.agent without nats: code {r.returncode}, "
+                f"stdout {r.stdout!r}, stderr {r.stderr[-300:]!r}"]
+    return []
+
+
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
-                  check_timeouts_171, check_intake):
+                  check_timeouts_171, check_intake,
+                  check_main_169):
         try:
             failed += check()
         except Exception as e:

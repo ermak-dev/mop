@@ -28,14 +28,23 @@
 Здесь -- глаголы и решение о праве, данные без печати. Программа (подключение,
 петля, --check) -- командлет `mop agent`, mop/cli/service/agent.py (#150).
 """
-import asyncio
+import sys
+
+if __name__ == "__main__":
+    # Переход (#150): юниты узлов зовут `python3 -m mop.agent [--check]`, и
+    # звать будут, пока ExecStart не переедет на `mop agent` прогоном deploy.
+    # До импортов пакета (#169): без nats-py импорт шины бросает, и отказ
+    # обязан быть строкой командлета, а не трассой из импорта.
+    from mop.cli.service import agent as program
+    sys.exit(program.main(sys.argv[1:]))
+
+import asyncio  # noqa: E402
 import base64
 import collections
 import json
 import os
 import shlex
 import socket
-import sys
 import time
 
 from . import bus, busnames, driver, fsutil, lease, usage
@@ -799,9 +808,3 @@ async def attach(conn, node):
     await _event(conn, "up", text=f"agent on {node}")
     return subs["rpc"] + subs["msg"]
 
-
-if __name__ == "__main__":
-    # Переход (#150): юниты узлов зовут `python3 -m mop.agent [--check]`, и
-    # звать будут, пока ExecStart не переедет на `mop agent` прогоном deploy.
-    from mop.cli.service import agent as program
-    sys.exit(program.main(sys.argv[1:]))

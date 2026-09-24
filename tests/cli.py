@@ -302,6 +302,7 @@ def main():
     failed += check_refusals()
     failed += check_output_rules()
     failed += check_empty_llm()
+    failed += check_bus_import_169()      # последней: перезагружает модули
 
     print("cli: FAILED" if failed else "cli: ok")
     return 1 if failed else 0
@@ -851,6 +852,87 @@ def check_empty_llm():
         failed += 1
         print(f"FAIL an unknown profile keeps its refusal: {err!r} {code!r}")
     return failed
+
+def check_bus_import_169():
+    """HYPOTHESIS (#169): mop/bus.py при импорте без nats-py зовёт sys.exit --
+    библиотека кончает процесс сама, и тот, кто её импортировал, не может ни
+    перехватить отказ, ни сказать его своими словами (#150: `-m mop.agent`
+    печатал текст bus вместо своего).
+    SOLUTION: bus бросает ImportError с тем же текстом; диспетчер импортирует
+    командлет внутри cli.run, и run делает из ImportError одну строку в
+    stderr и код 1.
+    STATUS: FIXED — see #169"""
+    import importlib
+    import importlib.abc
+    failed = 0
+    text = "bus library required: pip install --user --break-system-packages nats-py"
+
+    class NoNats(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name == "nats" or name.startswith("nats."):
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+            return None
+
+    def evict(nats_too):
+        # Из sys.modules И из атрибутов пакета: `from mop import bus` берёт
+        # атрибут пакета, и без этого вернул бы прежний bus с настоящим nats.
+        for name in list(sys.modules):
+            if (nats_too and (name == "nats" or name.startswith("nats."))) or \
+                    (name.startswith("mop.") and name != "mop.cli"):
+                parent, _, child = name.rpartition(".")
+                if parent in sys.modules and getattr(sys.modules[parent], child, None) \
+                        is sys.modules[name]:
+                    delattr(sys.modules[parent], child)
+                del sys.modules[name]
+
+    keep = dict(sys.modules)
+    blocker = NoNats()
+    sys.meta_path.insert(0, blocker)
+    try:
+        evict(True)
+        try:
+            importlib.import_module("mop.bus")
+            failed += 1
+            print("FAIL importing mop.bus without nats must raise ImportError")
+        except ImportError as e:
+            if str(e) != text:
+                failed += 1
+                print(f"FAIL mop.bus without nats: {e!r}, wanted {text!r}")
+        except SystemExit as e:
+            failed += 1
+            print(f"FAIL mop.bus without nats ends the process: SystemExit({e.code!r})")
+        evict(False)
+        # Командлет, которому нужна шина, через диспетчер: одна строка, код 1.
+        # Без аргументов: если шина вдруг импортируется, командлет остановится
+        # на usage, а не пойдёт в сеть.
+        import contextlib
+        import io
+        err = io.StringIO()
+        code = "no exit"
+        with contextlib.redirect_stderr(err):
+            try:
+                cli.run(cli.command("mop.cli.core.restart"), [])
+            except SystemExit as e:
+                code = e.code
+            except BaseException as e:
+                code = f"escaped {type(e).__name__}"
+        if code != 1 or err.getvalue() != text + "\n":
+            failed += 1
+            print(f"FAIL a commandlet without nats through cli.run: code {code!r}, "
+                  f"stderr {err.getvalue()!r}")
+    finally:
+        sys.meta_path.remove(blocker)
+        sys.modules.clear()
+        sys.modules.update(keep)
+        # Пакеты держат подмодули и атрибутом: вернуть и их, иначе следующий
+        # `from mop import x` достал бы копию из этой проверки.
+        for name, mod in keep.items():
+            if "." in name:
+                parent, child = name.rsplit(".", 1)
+                if parent in keep:
+                    setattr(keep[parent], child, mod)
+    return failed
+
 
 if __name__ == "__main__":
     sys.exit(main())
