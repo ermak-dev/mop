@@ -123,58 +123,9 @@ set -e
 : "${PU_PROJECT_CREDS:?no PU_PROJECT_CREDS in the task environment}"
 : "${PU_SECRETS_DIR:?no PU_SECRETS_DIR in the task environment}"
 d="$PU_CLONE"
-# The old session dies first, before anything touches the directory. It used to
-# die at the very bottom, just before the new session was opened -- some 140
-# lines and one `npx playwright install` later -- so a retarget removed the
-# clone out from under a live claude.
-tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null || true
-
-# ...and whatever outlived it holding the directory as its cwd is killed too.
-# A puppet's own MCP server did exactly that (2026-08-31): orphaned by the
-# kill above, it kept answering `agents` from memory while every `send` failed
-# for the rest of the session, because its cwd pointed at an unlinked inode.
-# The same thing was behind the older "fatal: cannot change to '<clone>'".
-# The clone may already be gone (the disk sweep can remove it), and the kernel
-# marks such a cwd " (deleted)" -- match on the name with that suffix stripped.
-free_dir() {
-    local dir="$1" cwd pid
-    for p in /proc/[0-9]*; do
-        pid=${p##*/}
-        cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
-        cwd=${cwd% (deleted)}
-        case "$cwd" in
-            "$dir"|"$dir"/*) kill "$pid" 2>/dev/null || true ;;
-        esac
-    done
-}
-free_dir "$d"
-
-if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" != "$PU_ORIGIN" ]; then
-    rm -rf "$d"
-fi
-if [ ! -d "$d/.git" ]; then
-    mkdir -p "$(dirname "$d")"
-    # Зеркало проекта, если тело принесло его с образом: объекты берутся
-    # локально, а недостающее -- то, что появилось в origin после сборки
-    # образа, -- git дотягивает по сети сам. Клон остаётся полноценным и
-    # свежим, отставание зеркала лечится обычным fetch, а не пересборкой.
-    #
-    # --dissociate не ставим намеренно: он копирует объекты в клон и съедает
-    # весь выигрыш. Цена названа: клон зависит от зеркала, и снос зеркала
-    # оставит его с битыми alternates -- поэтому зеркало лежит в образе, то
-    # есть в том же теле и ровно столько же, сколько сам клон.
-    #
-    # Нет зеркала -- клонируем как раньше. У драйвера host его не бывает
-    # вовсе, и ветка обязана быть тихой: отказ здесь означал бы папета,
-    # который не поднимается на обычном узле.
-    mirror="$HOME/.cache/mop-mirror/$PU_PROJECT.git"
-    if [ -d "$mirror" ]; then
-        git clone -q --reference "$mirror" "$PU_ORIGIN" "$d"
-    else
-        git clone -q "$PU_ORIGIN" "$d"
-    fi
-fi
-# Отказ копирования -- отказ, а не тишина (#62): семя, которое не доехало,
+"""
+# --- подготовка клона: одна константа на врапер и на `mop driver run` (#247) ---
+WRAPPER = WRAPPER + driver.CLONE_SH + r"""# Отказ копирования -- отказ, а не тишина (#62): семя, которое не доехало,
 # это папет без .env, читающийся живым. Отсутствие файла при этом штатно --
 # у большинства проектов семени нет вовсе, и `[ -e ]` в списке && не роняет
 # скрипт; роняет только cp, который не смог.

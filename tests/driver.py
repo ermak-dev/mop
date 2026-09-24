@@ -844,9 +844,73 @@ def main():
         print(f"FAILED  check_ssh_port_201: {type(e).__name__}: {e}")
     cases, bad = cases + c, bad + b
 
+    try:
+        c, b = check_clone_before_bootstrap_247()
+    except Exception as e:
+        c, b = 1, 1
+        print(f"FAILED  check_clone_before_bootstrap_247: {type(e).__name__}: {e}")
+    cases, bad = cases + c, bad + b
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 
+
+# ── клон до bootstrap (#247) ────────────────────────────────────────────
+# HYPOTHESIS: `mop driver run` зовёт сервер играть bootstrap сразу после
+# ensure, а клон в теле делает внутренний врапер уже после ответа сервера.
+# На первом старте контейнерного тела клона ещё нет, и задача проекта с
+# chdir на mop_clone падает: «Unable to change directory» (pu-rudesktop-1).
+# На host-узле клон переживает папетов, поэтому там не всплывало.
+# SOLUTION: подготовка клона (снять старую сессию, освободить каталог,
+# перенацелить, клонировать с зеркалом) -- одна константа driver.CLONE_SH.
+# Её текст едет во врапере как раньше (слепок tests/spec.py не меняется), и
+# её же `mop driver run` исполняет в теле ДО bootstrap: run.clone_script --
+# прелюдия из окружения задачи, охрана пустого PU_CLONE, сниппет. Старая
+# спека продолжает работать: её врапер видит .git и клонировать не идёт.
+# RESULT: врапер несёт CLONE_SH дословно один раз, стадия run собирается из
+# прелюдии, охраны и того же сниппета, и в run.main стоит до bootstrap.run.
+# STATUS: FIXED — see #247
+def check_clone_before_bootstrap_247():
+    import inspect
+    from mop import spec
+    from mop.cli.driver import run
+
+    cases = bad = 0
+
+    def check(what, got, want):
+        nonlocal cases, bad
+        cases += 1
+        if not want(got):
+            bad += 1
+            print(f"FAILED  #247 {what}: got {got!r}")
+
+    snippet = driver.CLONE_SH
+    # Одно определение: врапер несёт сниппет дословно и один раз.
+    check("wrapper carries CLONE_SH verbatim, once", spec.WRAPPER.count(snippet),
+          lambda n: n == 1)
+    check("CLONE_SH clones with the mirror and retargets", snippet,
+          lambda s: "git clone -q --reference" in s and 'rm -rf "$d"' in s
+          and "kill-session" in s)
+    env = {"PU_CARRY": "PU_NAME,PU_ORIGIN,PU_PROJECT,PU_CLONE,HOME",
+           "PU_NAME": "pu-mop-1", "PU_ORIGIN": "git@h:o/mop.git",
+           "PU_PROJECT": "mop", "PU_CLONE": "/home/pool/puppets/pu-mop-1",
+           "HOME": "/home/pool", "PU_WRAPPER": "not-carried"}
+    stage = run.clone_script(env)
+    check("stage exports the task env, not the wrapper", stage,
+          lambda s: "export PU_ORIGIN=git@h:o/mop.git\n" in s
+          and "export PU_CLONE=/home/pool/puppets/pu-mop-1\n" in s
+          and "not-carried" not in s)
+    check("stage stops at the first failure", stage,
+          lambda s: "set -e" in s.split(snippet)[0])
+    check("stage refuses an empty PU_CLONE before any rm -rf", stage,
+          lambda s: "${PU_CLONE:?" in s and s.index("${PU_CLONE:?") < s.index('rm -rf "$d"'))
+    check("stage ends with CLONE_SH itself", stage, lambda s: s.endswith(snippet))
+    # Порядок в run.main: клон исполняется в теле до вызова сервера.
+    src = inspect.getsource(run.main)
+    check("run.main clones before bootstrap", src,
+          lambda s: "clone_script(" in s and "bootstrap.run(" in s
+          and s.index("clone_script(") < s.index("bootstrap.run("))
+    return cases, bad
 
 # ── адрес узла со стороны сервера -- из кредов шины узла (#200) ─────────
 # HYPOTHESIS: host.address выбирает маршрут к config.get("MOP_SERVER_LAN"), а
