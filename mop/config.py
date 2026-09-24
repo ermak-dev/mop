@@ -148,6 +148,12 @@ DEFAULTS = {
     "MOP_LDAP_PROJECT_GROUP": "mop-{project}",  # cn группы проекта
     "MOP_LDAP_STARTTLS": "",
     "MOP_LDAP_CA_FILE": "",                # пусто -- системное хранилище
+    # Кто решает, пускать ли на шину людей и папетов (#206). off -- статический
+    # users.conf, как было; on -- сервис mop-callout спрашивает провайдера
+    # личностей и файлы паролей папетов на каждом входе. Лежит сервис -- новых
+    # входов людей и папетов нет (живые соединения живут, узлы и сервисы не
+    # задеты); откат -- off и mop deploy.
+    "MOP_AUTH_CALLOUT": "off",
     "MOP_NOMAD_RPC_PORT": "4647",   # RPC: туда дозваниваются клиенты Nomad
     "MOP_NATS_VERSION": "2.14.6",
     "MOP_PUPPET_MEM_MB": "8192",
@@ -418,7 +424,15 @@ SERVER_SCOPED = {
                     "MOP_PUPPET_PATH", "MOP_DEFAULT_LLM",
                     "MOP_GIT_NAME", "MOP_GIT_EMAIL",
                     # reload шины с проверкой (#211): `mop project add/rm`
-                    "MOP_NATS_MONITOR_PORT"),
+                    "MOP_NATS_MONITOR_PORT",
+                    # users.conf при заводе проекта рендерится с callout или
+                    # без (#206): без настройки сервис вернул бы людей и
+                    # папетов в статический список
+                    "MOP_AUTH_CALLOUT"),
+    # Сервис auth callout (#206): шина на петле, провайдер личностей. Пароли
+    # и сиды -- файлами 0600 в /etc/nats, не здесь: юнит читаем всем.
+    "mop-callout": ("MOP_NATS_PORT", "MOP_AUTH_CALLOUT", "MOP_AUTH_PROVIDER",
+                    "MOP_OPERATORS"),
     "mop-web": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                 "MOP_NOMAD_PORT", "MOP_POOL_DC"),
 }

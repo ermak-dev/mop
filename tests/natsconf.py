@@ -423,6 +423,72 @@ def main():
     except AttributeError as e:
         failed.append(f"verified reload is missing: {e}")
 
+    # HYPOTHESIS (#206): с auth callout люди и папеты входят через сервис, а
+    # в статическом списке остаются только машины, которых callout не
+    # спрашивает (auth_users). Два списка, набранные порознь, разойдутся:
+    # машина вне auth_users пойдёт в callout и получит отказ, а изменить
+    # auth_users reload'ом nats не даёт (стенд #206: «config reload not
+    # supported for AuthCallout») -- только рестартом.
+    # SOLUTION: MOP_AUTH_CALLOUT (по умолчанию off -- users.conf байт в байт
+    # как был); on -- статические пользователи и auth_users из одного списка
+    # машин; блок callout -- своим файлом callout.conf, и его смена --
+    # рестарт, а не reload.
+    # STATUS: FIXED — see #206
+    import re
+    base = dict(BASE, callout="co-pass")
+    projects = {"mop": "pu-pass", "rugent": "ru-pass"}
+    try:
+        check_on = natsconf.callout_on
+        for value, want in (("on", True), ("off", False), ("", False)):
+            if check_on(value) is not want:
+                failed.append(f"callout_on({value!r}) must be {want}")
+        try:
+            check_on("yes")
+            failed.append("MOP_AUTH_CALLOUT=yes must be refused: on or off, nothing else")
+        except ValueError:
+            pass
+        if natsconf.render(base, projects, callout=False) != natsconf.render(BASE, projects):
+            failed.append("callout off: users.conf must be byte-identical to today's")
+        on = natsconf.render(base, projects, callout=True)
+        static = re.findall(r'user: "([^"]+)"', on)
+        if static != ["callout", "service", "node-hyper"]:
+            failed.append(f"callout on: static users are the machines only: {static}")
+        if 'allowed_connection_types' in on:
+            failed.append("callout on: no human entry may stay in users.conf")
+        cblock = on[on.index('user: "callout"'):on.index('user: "service"')]
+        if '"$SYS._INBOX.>"' not in cblock or '"$SYS.REQ.USER.AUTH"' not in cblock \
+                or '"mop.>"' in cblock:
+            failed.append(f"the callout user may only answer auth requests: {cblock!r}")
+        conf = natsconf.render_callout(base, "AISSUER", "XKEY")
+        auth_users = re.findall(r'"([^"]+)"', re.search(r"auth_users: \[([^]]*)\]", conf).group(1))
+        if auth_users != static:
+            failed.append(f"auth_users {auth_users} must be the static users {static}")
+        for want in ("auth_callout {", "issuer: AISSUER", 'account: "$G"', "xkey: XKEY",
+                     "timeout: 2"):
+            if want not in conf:
+                failed.append(f"callout.conf lacks {want!r}: {conf}")
+        # Не разойтись: новый узел попадает в оба списка сразу.
+        grown = dict(base, nodes=dict(base["nodes"], mini="mi-pass"))
+        s2 = re.findall(r'user: "([^"]+)"', natsconf.render(grown, projects, callout=True))
+        a2 = re.findall(r'"([^"]+)"', re.search(r"auth_users: \[([^]]*)\]",
+                                                natsconf.render_callout(grown, "A", "X")).group(1))
+        if s2 != a2 or "node-mini" not in a2:
+            failed.append(f"a new node must land in both lists: {s2} vs {a2}")
+        off = natsconf.render_callout(base, None, None, callout=False)
+        if "auth_callout" in off or "timeout" in off:
+            failed.append(f"callout off: callout.conf holds nothing for nats: {off!r}")
+        try:
+            natsconf.render(BASE, projects, callout=True)
+            failed.append("callout on without a callout password must be refused")
+        except ValueError:
+            pass
+        # Рестарт или reload: решает блок callout, а не users.conf.
+        if not natsconf.needs_restart(off, conf) or natsconf.needs_restart(conf, conf) \
+                or not natsconf.needs_restart(None, conf):
+            failed.append("a changed or new callout.conf needs a restart, an unchanged one not")
+    except AttributeError as e:
+        failed.append(f"auth callout rendering is missing: {e}")
+
     print("\n".join(f"FAIL {l}" for l in failed) if failed else "", end="\n" if failed else "")
     print("natsconf: FAILED" if failed else "natsconf: ok")
     return 1 if failed else 0

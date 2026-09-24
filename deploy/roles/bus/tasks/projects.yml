@@ -30,6 +30,7 @@
   ansible.builtin.copy:
     content: >-
       {{ {'service': lookup('password', secrets_dir + '/nats-service.pass length=32 chars=ascii_letters,digits'),
+          'callout': lookup('password', secrets_dir + '/nats-callout.pass length=32 chars=ascii_letters,digits'),
           'operators': mop_operators_base | default({}),
           'nodes': mop_nodes_base | default({})} | to_json }}
     dest: /etc/nats/base-users.json
@@ -70,6 +71,15 @@
     get_checksum: yes
   register: nats_users_before
 
+# Блок auth callout (#206) -- свой файл: его смену nats reload'ом не берёт
+# («config reload not supported for AuthCallout»), только рестартом.
+- name: Callout file of the bus, before
+  become: yes
+  ansible.builtin.stat:
+    path: /etc/nats/callout.conf
+    get_checksum: yes
+  register: nats_callout_before
+
 - name: Users file of the bus, written by the server
   become: yes
   become_user: "{{ MOP_USER }}"
@@ -77,7 +87,19 @@
   environment:
     MOP_SERVER_LAN: "{{ MOP_SERVER_LAN }}"
     MOP_NATS_PORT: "{{ MOP_NATS_PORT }}"
+    MOP_AUTH_CALLOUT: "{{ MOP_AUTH_CALLOUT }}"
   changed_when: false
+
+- name: Callout file of the bus, after
+  become: yes
+  ansible.builtin.stat:
+    path: /etc/nats/callout.conf
+    get_checksum: yes
+  register: nats_callout_after
+  changed_when: >-
+    nats_callout_after.stat.checksum | default('') !=
+    nats_callout_before.stat.checksum | default('')
+  notify: restart nats
 
 - name: Users file of the bus, after
   become: yes
@@ -89,3 +111,59 @@
     nats_users_after.stat.checksum | default('') !=
     nats_users_before.stat.checksum | default('')
   notify: reload nats
+
+# Люди для сервиса callout (#206). Провайдер личностей читает файл
+# операторов и переходные пароли из secrets/ контроллера, куда учётке пула
+# хода нет; сервис читает копию в /etc/nats/identity, 0600. Нового здесь
+# ничего: те же пароли уже лежат в base-users.json у того же пользователя.
+# Без callout копии нет и не остаётся.
+- name: Identity for the callout
+  when: MOP_AUTH_CALLOUT == 'on'
+  block:
+    - name: Identity dir of the callout
+      ansible.builtin.file:
+        path: /etc/nats/identity
+        state: directory
+        owner: "{{ MOP_USER }}"
+        group: "{{ MOP_USER }}"
+        mode: "0700"
+
+    - name: Transition passwords of the people (MOP_OPERATORS)
+      ansible.builtin.copy:
+        content: "{{ item.value.password }}\n"
+        dest: "/etc/nats/identity/nats-op-{{ item.key }}.pass"
+        owner: "{{ MOP_USER }}"
+        group: "{{ MOP_USER }}"
+        mode: "0600"
+      loop: "{{ mop_operators_base | default({}) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      no_log: true
+
+    - name: Operators file on the controller
+      ansible.builtin.stat:
+        path: "{{ MOP_OPERATORS_FILE or (secrets_dir + '/operators') }}"
+      delegate_to: localhost
+      become: no
+      register: operators_file
+
+    - name: Operators file for the callout
+      ansible.builtin.copy:
+        src: "{{ MOP_OPERATORS_FILE or (secrets_dir + '/operators') }}"
+        dest: /etc/nats/identity/operators
+        owner: "{{ MOP_USER }}"
+        group: "{{ MOP_USER }}"
+        mode: "0600"
+      when: operators_file.stat.exists
+
+    - name: No operators file on the controller, none for the callout
+      ansible.builtin.file:
+        path: /etc/nats/identity/operators
+        state: absent
+      when: not operators_file.stat.exists
+
+- name: No identity copy without the callout
+  when: MOP_AUTH_CALLOUT != 'on'
+  ansible.builtin.file:
+    path: /etc/nats/identity
+    state: absent
