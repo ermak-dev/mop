@@ -56,7 +56,10 @@ try:
     import nats
     from nats.errors import NoRespondersError
 except ImportError:
-    sys.exit("bus library required: pip install --user --break-system-packages nats-py")
+    # Отказ, а не выход (#169): библиотека не кончает процесс. Одну строку из
+    # него делает тот, кто её импортировал (cli.run, `mop agent`).
+    raise ImportError("bus library required: pip install --user "
+                      "--break-system-packages nats-py") from None
 
 from . import busnames, config as settings, creds  # noqa: E402
 

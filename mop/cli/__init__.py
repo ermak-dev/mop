@@ -267,7 +267,7 @@ def main(argv):
     # должен быть уже этой команды. Слои: клон < окружение < --server.
     with context.use(context.here({"server": server} if server else {})):
         environment()
-        return run(importlib.import_module(modname).main, rest)
+        return run(command(modname), rest)
 
 
 FALLBACK_LOCALE = "C.UTF-8"
@@ -337,6 +337,13 @@ def environment():
     os.environ["LC_ALL"] = run_locale(_config.get("MOP_LOCALE"))
 
 
+def command(modname):
+    """main командлета, импортируемый уже внутри run (#169): отказ импорта
+    (нет nats-py -- ImportError из mop/bus.py) ловится там же, где остальные
+    ожидаемые отказы, а не падает трассой до него."""
+    return lambda argv: importlib.import_module(modname).main(argv)
+
+
 def run(fn, argv):
     """Запустить команду, переведя ожидаемые отказы в понятную строку:
     трассировка в ответ на «нет связи с Nomad» — шум, за которым теряется
@@ -352,9 +359,10 @@ def run(fn, argv):
         # На новой машине это первое, обо что спотыкаются, и отказ обязан
         # читаться как инструкция, а не как трассировка.
         sys.exit(str(e))
-    except (ConnectionError, RuntimeError, LookupError) as e:
-        # Отказ сервиса (bus.Refused) и неработающий папет (LookupError) --
-        # здесь, а не в каждом командлете (#146): одна строка в stderr,
+    except (ConnectionError, RuntimeError, LookupError, ImportError) as e:
+        # Отказ сервиса (bus.Refused), неработающий папет (LookupError) и
+        # недостающая библиотека (ImportError, #169) -- здесь, а не в каждом
+        # командлете (#146): одна строка в stderr,
         # ненулевой выход. Печатаем сами, а не sys.exit(строка): так это
         # видно и проверке, а не только интерпретатору на выходе.
         print(e, file=sys.stderr, flush=True)
