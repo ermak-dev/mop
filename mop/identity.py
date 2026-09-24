@@ -303,6 +303,13 @@ def _index(lines, login):
 
 
 def _save(path, lines):
+    """Файл операторов: 0600, атомарно. Нет каталога -- заводится 0700
+    (#238): на свежем сервере secrets/ ещё нет, его иначе завёл бы только
+    mop deploy, а тот без людей отказывает. Лежащий каталог не трогается:
+    MOP_OPERATORS_FILE может назвать чужой."""
+    parent = os.path.dirname(path)
+    if parent and not os.path.isdir(parent):
+        fsutil.make_private_dir(parent)
     fsutil.write_private(path, "".join(l if l.endswith("\n") else l + "\n" for l in lines))
 
 
