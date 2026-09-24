@@ -1,9 +1,11 @@
-"""token usage across the pool, a bar per day: mop stat [--days N] [--puppets]
+"""token usage across the pool, a bar per day: mop stat [--days N] [--puppets|--users]
 
 Sums claude token counters (input, output, cache write, cache read) over
 every puppet on every ready node for the last N days (default 14), by the
 node's local date. --puppets breaks the same window down per puppet, the
-biggest spender first, instead of drawing the chart. Read off the puppets'
+biggest spender first, instead of drawing the chart; --users does it per
+person -- the login of the master whose message started each turn, "-" for
+spend nobody's message started, or a node whose agent does not attribute yet. Read off the puppets'
 own transcripts, so a puppet whose clone was removed no longer counts. In a
 master shell the picture is the project's, not the pool's.
 """
@@ -30,12 +32,15 @@ def human(n):
 
 
 def parse(argv):
-    """-> (дней, по папетам?)"""
-    days, by_puppet = DEFAULT_DAYS, False
+    """-> (дней, разбивка: None | "puppets" | "users")"""
+    days, split = DEFAULT_DAYS, None
     it = iter(argv)
     for a in it:
-        if a == "--puppets":
-            by_puppet = True
+        if a in ("--puppets", "--users"):
+            # Одна разбивка на окно: две таблицы разом -- два разных вопроса.
+            if split and split != a[2:]:
+                lib.usage(__doc__)
+            split = a[2:]
             continue
         if a == "--days":
             a = next(it, "")
@@ -49,7 +54,7 @@ def parse(argv):
             lib.usage(__doc__)
         if days < 1:
             lib.usage(__doc__)
-    return days, by_puppet
+    return days, split
 
 
 def chart(days, per_day):
@@ -78,21 +83,33 @@ def breakdown(per_puppet):
     print("\n".join(table(rows)))
 
 
+def by_users(per_user):
+    """Таблица по людям, от самого прожорливого (#245). per_user: {логин:
+    {kind: n}}; «-» -- неприписанный расход."""
+    rows = [("USER", "INPUT", "OUTPUT", "CACHE-W", "CACHE-R", "TOTAL")]
+    for login, t in sorted(per_user.items(), key=lambda kv: (-usage.total(kv[1]), kv[0])):
+        rows.append((login, human(t["input"]), human(t["output"]),
+                     human(t["cache_write"]), human(t["cache_read"]),
+                     human(usage.total(t))))
+    print("\n".join(table(rows)))
+
+
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
 MCP = {"annotations": "readonly", "args": [
     {"name": "days", "type": "integer", "flag": "--days", "help": "window in days, 14 by default"},
-    {"name": "puppets", "type": "boolean", "flag": "--puppets", "help": "per puppet instead of per day"}]}
+    {"name": "puppets", "type": "boolean", "flag": "--puppets", "help": "per puppet instead of per day"},
+    {"name": "users", "type": "boolean", "flag": "--users", "help": "per user (who started the turns) instead of per day"}]}
 
 
 def main(argv):
-    days, by_puppet = parse(argv)
+    days, split = parse(argv)
     nodes = sorted(puppets.ready_nodes())
     if not nodes:
         # Пустой пул -- не «никто не ответил» с пустым перечнем (#163).
         raise RuntimeError("no ready nodes in the pool")
     answers = bus.request_many({n: {"verb": "usage", "days": days} for n in nodes},
                                timeout=TIMEOUT)
-    per_day, per_puppet, failed = {}, {}, []
+    per_day, per_puppet, per_user, failed = {}, {}, {}, []
     for n in nodes:
         a = answers.get(n)
         why = bus.failure(a)
@@ -102,6 +119,7 @@ def main(argv):
         for name, rows in a.get("usage", {}).items():
             per_puppet[(name, n)] = usage.sum_days(rows)
             usage.merge(per_day, rows)
+        usage.add_users(per_user, usage.by_user(a))
     # Не `puppets`: так звали бы и модуль, из которого строкой выше берут
     # состав пула, и локальный счётчик — питон трактует такую функцию как
     # использующую локальную переменную до присваивания, и падает на первой
@@ -116,8 +134,10 @@ def main(argv):
     who = f"project {project}" if project else "whole pool"
     print(f"tokens per day, {who}, last {days} days: "
           f"{counted} puppets on {len(nodes) - len(failed)} nodes")
-    if by_puppet:
+    if split == "puppets":
         breakdown(per_puppet)
+    elif split == "users":
+        by_users(per_user)
     else:
         chart(days, per_day)
     grand = usage.sum_days(per_day)

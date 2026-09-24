@@ -538,6 +538,28 @@ def check_refusals_163():
         if got != want:
             failed += 1
             print(f"FAIL mop node on a normal answer: {got!r}")
+
+        # #245: stat --users -- по людям, от самого прожорливого; узел со
+        # старым агентом (без by_login) -- в «-». --puppets и --users разом --
+        # usage.
+        def u(i, o, w, r):
+            return {"input": i, "output": o, "cache_write": w, "cache_read": r}
+        puppets.ready_nodes = lambda: {"hyper", "gpu"}
+        bus.request_many = lambda reqs, **kw: {
+            "hyper": {"ok": True, "usage": {"pu-mop-1": {"2026-09-22": u(2000, 500, 0, 10000)}},
+                      "by_login": {"pu-mop-1": {"anton": {"2026-09-22": u(2000, 500, 0, 10000)}}}},
+            "gpu": {"ok": True, "usage": {"pu-mop-2": {"2026-09-22": u(10, 0, 0, 0)}}}}
+        out, err, code = run(stat.main, ["--users"])
+        want = ("USER   INPUT  OUTPUT  CACHE-W  CACHE-R  TOTAL\n"
+                "anton  2.0k   500     0        10k      12k\n"
+                "-      10     0       0        0        10\n")
+        if code or err or want not in out:
+            failed += 1
+            print(f"FAIL #245 mop stat --users: exit {code!r}, stderr {err!r}, stdout {out!r}")
+        out, err, code = run(stat.main, ["--puppets", "--users"])
+        if not code:
+            failed += 1
+            print(f"FAIL #245 --puppets with --users must be a usage error: {out!r}")
         puppets.ready_nodes = keep[4]
         if puppets.pool() != [row]:
             failed += 1

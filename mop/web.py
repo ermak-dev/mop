@@ -102,7 +102,21 @@ def usage_axis(per_day, days, now=None):
     return out
 
 
-def snapshot(rows, nodes, usage, per_puppet, journal, errors, at):
+def user_rows(answers):
+    """Ответы узлов на usage -> [{login, вид: n, total}] от самого
+    прожорливого (#245). Не ответивший узел в строки не входит -- его
+    отказ уже в ошибках круга; узел со старым агентом -- весь в «-»."""
+    acc = {}
+    for a in answers.values():
+        if bus.failure(a):
+            continue
+        usage.add_users(acc, usage.by_user(a))
+    rows = [{"login": login, **{k: t[k] for k in usage.KINDS}, "total": usage.total(t)}
+            for login, t in acc.items()]
+    return sorted(rows, key=lambda r: (-r["total"], r["login"]))
+
+
+def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at):
     """Один JSON на страницу и /api/pool. Набор ключей закреплён — страница
     читает их по имени.
 
@@ -111,7 +125,8 @@ def snapshot(rows, nodes, usage, per_puppet, journal, errors, at):
     остаётся за `mop doctor`; больной папет и так виден корзиной sick."""
     return {"at": at, "projects": projects(rows), "counts": counts(rows),
             "nodes": nodes, "usage": usage,
-            "per_puppet": per_puppet, "journal": journal, "errors": errors}
+            "per_puppet": per_puppet, "per_user": per_user,
+            "journal": journal, "errors": errors}
 
 
 # ─── сборщик ─────────────────────────────────────────────────────────────
@@ -127,7 +142,7 @@ class Collector:
         self._cond = threading.Condition()
         self.version = 0
         self.rows, self.sizes, self.nodes = [], {}, []
-        self.usage, self.per_puppet, self.journal = [], [], []
+        self.usage, self.per_puppet, self.per_user, self.journal = [], [], [], []
         self.errors = {}
         self.at = None
         self._kick = threading.Event()
@@ -136,7 +151,7 @@ class Collector:
     def current(self):
         with self._cond:
             return snapshot(with_sizes(self.rows, self.sizes), self.nodes,
-                            self.usage, self.per_puppet,
+                            self.usage, self.per_puppet, self.per_user,
                             self.journal, [f"{k}: {v}" for k, v in
                                            sorted(self.errors.items())],
                             self.at)
@@ -212,10 +227,11 @@ class Collector:
     def _usage(self):
         while True:
             try:
-                per_day, per_puppet = gather_usage()
+                per_day, per_puppet, per_user = gather_usage()
                 with self._cond:
                     self.usage = usage_axis(per_day, USAGE_DAYS)
                     self.per_puppet = per_puppet
+                    self.per_user = per_user
                     self._note("usage", None)
             except Exception as e:
                 with self._cond:
@@ -226,7 +242,8 @@ class Collector:
 
 def gather_usage(days=USAGE_DAYS):
     """Расход по узлам, как в `mop stat`: -> ({дата: {вид: n}},
-    [{name, node, total, вид: n}] от прожорливого к скромному)."""
+    [{name, node, total, вид: n}] от прожорливого к скромному,
+    [{login, вид: n, total}] по людям, #245)."""
     nodes = sorted(puppets.ready_nodes())
     answers = bus.request_many({n: {"verb": "usage", "days": days} for n in nodes},
                                timeout=USAGE_TIMEOUT)
@@ -244,7 +261,7 @@ def gather_usage(days=USAGE_DAYS):
     if nodes and len(failed) == len(nodes):
         raise RuntimeError("no node answered: " + "; ".join(failed))
     per_puppet.sort(key=lambda p: -p["total"])
-    return per_day, per_puppet
+    return per_day, per_puppet, user_rows(answers)
 
 
 def journal_entry(msg):

@@ -142,7 +142,7 @@ def roster_forms():
             "list": "\n".join(mop_list.line(r) for r in puppets.puppet_rows()),
             "mcp": "\n".join(mcp._roster("") + mcp._roster("rugent")),
             "dashboard": dump(web.snapshot(
-                web.with_sizes(rows, sizes), [{"name": "mate"}], [], [],
+                web.with_sizes(rows, sizes), [{"name": "mate"}], [], [], [],
                 [{"at": 1.0, "event": "send"}], ["states: x"], NOW)),
             "owner_of": dump([puppets.owner_of(STATES["mate"]["puppets"].get(n), NOW)
                               for n in ("pu-mop-1", "pu-mop-2", "pu-mop-3", "pu-mop-5")]
