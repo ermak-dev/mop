@@ -183,6 +183,43 @@ def reopen(iid, labels):
                                           "state_event": "reopen"})
 
 
+# ─── пайплайны ───────────────────────────────────────────────────────────
+# Ещё идущие: у GitLab это и created/pending/running, и промежуточные
+# waiting_for_resource/preparing — ответ «подожди», а не «красный».
+PIPELINE_WAIT = ("created", "waiting_for_resource", "preparing", "pending", "running")
+
+
+def has_credentials():
+    """Есть ли в .env чем представиться GitLab — тот же выбор, что auth_header."""
+    return bool(config.get("GITLAB_TOKEN")
+                or config.get("GITLAB_USER") and config.get("GITLAB_PASSWORD"))
+
+
+def pipeline(sha):
+    """Последний пайплайн коммита -> {status, web_url, ...} либо None."""
+    got = call("GET", "/pipelines", params={"sha": sha, "order_by": "id",
+                                            "sort": "desc", "per_page": 1})
+    return got[0] if got else None
+
+
+def pipeline_verdict(pipeline, sha):
+    """Можно ли катить коммит с таким пайплайном (#231). -> None либо отказ.
+
+    Катить можно только success. Неизвестный статус — отказ с его именем:
+    отменённый или пропущенный пайплайн ничего не говорит о том, зелёный ли
+    коммит, а молча принятый новый статус GitLab открыл бы дорогу красному."""
+    if pipeline is None:
+        return f"no pipeline for {sha}"
+    status, url = pipeline.get("status"), pipeline.get("web_url")
+    if status == "success":
+        return None
+    if status == "failed":
+        return f"pipeline failed for {sha[:12]}: {url}"
+    if status in PIPELINE_WAIT:
+        return f"wait for pipeline {url} ({status})"
+    return f"pipeline {url} is {status}, not success: refusing"
+
+
 def children(epic_iid):
     """Задачи эпика: те, у кого в первой строке тела стоит его маркер.
 

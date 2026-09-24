@@ -1,4 +1,4 @@
-"""deploy: mop deploy [--check]
+"""deploy: mop deploy [--check] [--skip-pipeline]
 
 The whole installation in one run: one playbook, site.yml, so there is one
 ansible process and one PLAY RECAP — a line per machine over every layer.
@@ -14,6 +14,10 @@ was a side effect of a full run, and there was no way to take one off at all.
 on the machines changes, and the output is the difference a real run would
 make. Nothing after the playbook runs: collecting the server credentials
 writes files, and the roster check is not the question a dry run answers.
+
+With MOP_DEPLOY_NEEDS_GREEN=1 in .env, deploy refuses unless the GitLab
+pipeline of the working copy's HEAD is success. --skip-pipeline is the
+emergency way past it, and says so. --check changes nothing and is not gated.
 """
 import json
 import os
@@ -22,7 +26,7 @@ import subprocess
 import sys
 
 from mop.cli import lib
-from mop import bus, config, creds, driver, identity, manifest, puppets, projects
+from mop import bus, config, creds, driver, gitlab, identity, manifest, puppets, projects
 
 # Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
 # больше нет, поэтому упавшего агента и битые креды чинят только отсюда — и
@@ -162,6 +166,38 @@ def operator_refusals(settings, secrets_dir=identity.SECRETS, leftover=""):
     return out
 
 
+def pipeline_refusals(setting, have_creds, sha, fetch):
+    """Отказ по пайплайну катимого коммита (#231). -> [строка].
+
+    setting -- MOP_DEPLOY_NEEDS_GREEN; have_creds -- есть ли чем спросить
+    GitLab; sha -- HEAD рабочей копии, пусто -- не назван; fetch(sha) ->
+    пайплайн либо None. Включённая проверка ни при чём не пропускается молча:
+    нет кредов, коммита или ответа GitLab -- отказ с причиной."""
+    if setting in ("", "0"):
+        return []
+    if setting != "1":
+        return [f"MOP_DEPLOY_NEEDS_GREEN={setting!r}: want 1 (check) or empty (no check)"]
+    if not have_creds:
+        return ["MOP_DEPLOY_NEEDS_GREEN=1 but no GitLab credentials in .env (GITLAB_TOKEN, "
+                "or GITLAB_USER and GITLAB_PASSWORD): cannot check the pipeline of the "
+                "commit being rolled out"]
+    if not sha:
+        return ["cannot name the commit being rolled out: git rev-parse HEAD failed"]
+    try:
+        got = fetch(sha)
+    except RuntimeError as e:
+        return [f"cannot read the pipeline for {sha}: {e}"]
+    why = gitlab.pipeline_verdict(got, sha)
+    return [why] if why else []
+
+
+def head_sha(root):
+    """HEAD рабочей копии, которую катит deploy; пусто -- не рабочая копия."""
+    r = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
 def inventory_listing(inventory):
     """Инвентарь глазами ansible. -> (listing | None, отказ | None)."""
     r = subprocess.run(["ansible-inventory", "-i", inventory, "--list"],
@@ -236,6 +272,8 @@ def main(argv):
     # Полный REQUIRED спрашивает только deploy: остальным хватает адреса
     # сервера, а MOP_GIT_HOST читают одни плейбуки.
     config.require()
+    skip_pipeline = "--skip-pipeline" in argv
+    argv = [a for a in argv if a != "--skip-pipeline"]
     dry = argv == ["--check"]
     if dry:
         argv = []
@@ -264,6 +302,15 @@ def main(argv):
                 + memory_refusals(listing, config.get("MOP_BODY_MEM_CAP_MB"))
                 + operator_refusals({n: config.get(n) for n in identity.SETTINGS},
                                     leftover=config.get("MOP_OPERATORS")))
+    # Пайплайн катимого коммита (#231) -- до плейбука, как и прочие отказы.
+    # Сухой прогон ничего не катит и не спрашивает.
+    if skip_pipeline:
+        print("  pipeline check skipped (--skip-pipeline): rolling out "
+              f"{head_sha(lib.PROJECT) or 'HEAD'} without asking GitLab", flush=True)
+    elif not dry:
+        refusals += pipeline_refusals(config.get("MOP_DEPLOY_NEEDS_GREEN"),
+                                      gitlab.has_credentials(), head_sha(lib.PROJECT),
+                                      gitlab.pipeline)
     for why in refusals:
         lib.fail(why)
     if refusals:
