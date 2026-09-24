@@ -51,15 +51,15 @@ STORAGE = config.get("MOP_PVE_STORAGE")
 TEMPLATE = config.get("MOP_PVE_TEMPLATE")
 BRIDGE = config.get("MOP_PVE_BRIDGE")
 SUBNET = config.get("MOP_PVE_SUBNET")
-# Память, ядра и диск тела драйвер не задаёт: тело наследует их от образа
-# проекта, а в образ их вписывает сборка — из `.mop` самого проекта, подрезанного
-# потолком узла. Носителем проектовых размеров становится образ, и на узел не
-# едет ни одного числа. Поставь их здесь — и значения установки затёрли бы
-# просьбу проекта.
+# Ядра и диск тела драйвер не задаёт: тело наследует их от образа проекта, а
+# в образ их вписывает сборка — из `.mop` самого проекта, подрезанного
+# потолком узла.
 #
-# Потолок памяти при этом всё равно стоит на теле, а не на задаче Nomad:
-# `pct` исполняется демоном, а не потомком задачи, поэтому cgroup задачи не
-# ограничивает ничего, а MemoryMB в спеке вырождается в бухгалтерию слотов.
+# Память -- другое дело (#197): она свойство папета, и её потолок приезжает
+# спекой (PU_MEM_MB), а ensure ставит его телу на каждом подъёме. Стоит он на
+# теле, а не на задаче Nomad: `pct` исполняется демоном, а не потомком
+# задачи, поэтому cgroup задачи не ограничивает ничего. Узел своё слово
+# говорит размещением: meta mop_mem_cap_mb против ограничения в спеке.
 
 # Диапазон VMID: первые 900 — тела, последние 100 — шаблоны проектов. Разводить
 # их обязательно: снос папета глаголом destroy иначе унёс бы образ проекта, и
@@ -515,6 +515,10 @@ async def ensure(name, params=None):
         return {"error": bad_name(name)}
     project = params.get("project") or project_of_name(name)
     vmid = vmid_of(name)
+    mem = params.get("mem")
+    if mem is not None and not (str(mem).isdigit() and int(mem) > 0):
+        return {"error": f"{name}: PU_MEM_MB={mem!r} in the job spec is not a "
+                         f"whole number of megabytes"}
 
     standing = await _hostname(vmid)
     if standing is None:
@@ -548,6 +552,16 @@ async def ensure(name, params=None):
                              f"{address_of(name)}: {why(out, code, 60)}"}
         if out.strip():
             await _forget_host_key(name)
+
+    if mem is not None:
+        # Память -- свойство папета (#197): потолок из спеки, на каждом
+        # подъёме и до start. Образ несёт память времён сборки, а стоящее
+        # тело -- времён своего клона; ни то ни другое не знает о сегодняшнем
+        # `.mop`. Ядра и диск остаются образу.
+        out, code = await _pve("memory", vmid, mem, timeout=60)
+        if code != 0:
+            return {"error": f"{name}: body {vmid} won't take {mem} MB of "
+                             f"memory: {why(out, code, 60)}"}
 
     out, code = await _pve("start", vmid, timeout=120)
     if code != 0:
