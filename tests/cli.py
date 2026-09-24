@@ -853,6 +853,48 @@ def check_empty_llm():
         print(f"FAIL an unknown profile keeps its refusal: {err!r} {code!r}")
     return failed
 
+class NetworkGuard(Exception):
+    """Проверка попыталась выйти в сеть."""
+
+
+def no_network():
+    """Предохранитель от живой шины для проверки, которая гоняет командлет
+    через cli.run (#169). Ниже mop, поэтому его не обходит ни перезагрузка
+    модулей, ни прежний bus в атрибуте пакета: socket.connect (им идёт и
+    asyncio-соединение nats-py) и nats.connect настоящего пакета бросают;
+    креды папета (MOP_BUS_CONFIG) убраны, сервер -- TEST-NET 192.0.2.1.
+    -> функция отката."""
+    import socket
+
+    def refuse(*a, **k):
+        raise NetworkGuard("the check tried to reach the network")
+
+    real_nats = sys.modules.get("nats")
+    saved = {"sock": socket.socket.connect, "sock_ex": socket.socket.connect_ex,
+             "nats": getattr(real_nats, "connect", None),
+             "env": {k: os.environ.get(k) for k in ("MOP_BUS_CONFIG", "MOP_SERVER_LAN",
+                                                      "MOP_SERVER_DIR")}}
+    socket.socket.connect = refuse
+    socket.socket.connect_ex = refuse
+    if real_nats is not None:
+        real_nats.connect = refuse
+    os.environ.pop("MOP_BUS_CONFIG", None)
+    os.environ.pop("MOP_SERVER_DIR", None)
+    os.environ["MOP_SERVER_LAN"] = "192.0.2.1"
+
+    def undo():
+        socket.socket.connect = saved["sock"]
+        socket.socket.connect_ex = saved["sock_ex"]
+        if real_nats is not None:
+            real_nats.connect = saved["nats"]
+        for k, v in saved["env"].items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return undo
+
+
 def check_bus_import_169():
     """HYPOTHESIS (#169): mop/bus.py при импорте без nats-py зовёт sys.exit --
     библиотека кончает процесс сама, и тот, кто её импортировал, не может ни
@@ -885,6 +927,18 @@ def check_bus_import_169():
                     delattr(sys.modules[parent], child)
                 del sys.modules[name]
 
+    # Предохранитель -- до всего: однажды неполное выселение модулей отправило
+    # из этой проверки настоящий restart на живую шину (отбит правами).
+    undo = no_network()
+    try:
+        import socket
+        socket.create_connection(("192.0.2.1", 4222), timeout=1)
+        failed += 1
+        print("FAIL the network guard did not hold")
+        undo()
+        return failed
+    except NetworkGuard:
+        pass
     keep = dict(sys.modules)
     blocker = NoNats()
     sys.meta_path.insert(0, blocker)
@@ -921,6 +975,7 @@ def check_bus_import_169():
             print(f"FAIL a commandlet without nats through cli.run: code {code!r}, "
                   f"stderr {err.getvalue()!r}")
     finally:
+        undo()
         sys.meta_path.remove(blocker)
         sys.modules.clear()
         sys.modules.update(keep)
