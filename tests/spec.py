@@ -621,6 +621,192 @@ def check_driver_free_183():
     return bad, cases
 
 
+# ── #223: хуки Claude Code — через --settings врапера ─────────────────────────
+# HYPOTHESIS: состояние папета угадывается по экрану tmux и промахивается
+# (24.09 pu-mop-2/3 умерли на «Login expired» посреди хода, ростер 1.5 часа
+# читал их `idle (uncommitted)`). session.py hook (#222) пишет исход хода, но
+# claude папета его не зовёт.
+# SOLUTION: врапер на каждом старте пишет файл хуков вне клона и отдаёт его
+# claude через --settings. Не ~/.claude/settings.json: на host-узле его делят
+# все claude машины, включая оператора и мастера.
+HOOK_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "StopFailure",
+               "PostModelSwitch"}
+HOOKS_BEGIN = "# --- claude hooks (#223) ---"
+HOOKS_END = "# --- end of claude hooks ---"
+
+
+def hooks_section():
+    """Кусок врапера, который пишет файл хуков, -- ровно тот текст, что едет."""
+    w = spec.WRAPPER
+    if HOOKS_BEGIN not in w or HOOKS_END not in w:
+        return None
+    return w[w.index(HOOKS_BEGIN):w.index(HOOKS_END)]
+
+
+def run_hooks_section(section, home, path):
+    """Кусок хуков -- как в теле: set -e, свой HOME, имя папета. -> процесс,
+    чей stdout -- корень пакета, путь файла и аргумент claude, по строке."""
+    import subprocess
+    script = ("set -e\n" + section
+              + '\nprintf "%s\\n%s\\n%s" "$mop_root" "$hooks" "$settings"\n')
+    return subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True,
+                          env={"HOME": home, "PU_NAME": "pu-mop-1", "PATH": path})
+
+
+def check_claude_hooks_223():
+    """STATUS: FIXED — see #223"""
+    import base64
+    import shutil
+    import subprocess
+    import tempfile
+    bad, cases = 0, 0
+    section = hooks_section()
+    cases += 1
+    if section is None:
+        print("FAILED  the wrapper has no claude hooks section")
+        return 1, cases
+    home = tempfile.mkdtemp()
+    try:
+        # Кусок исполняется как в теле: set -e, свой HOME, имя папета. Второй
+        # прогон -- поверх первого: так идёт каждый рестарт.
+        for _ in range(2):
+            r = run_hooks_section(section, home, os.environ["PATH"])
+        cases += 1
+        if r.returncode:
+            print(f"FAILED  the hooks section fails: {r.stderr.strip()}")
+            return bad + 1, cases
+        mop_root, hooks, settings = r.stdout.split("\n")
+        cases += 1
+        if settings != f"--settings {hooks}":
+            bad += 1
+            print(f"FAILED  a written hooks file must give claude --settings, got {settings!r}")
+        # (a) файл вне клона и вне общего ~/.claude/settings.json
+        cases += 1
+        if not hooks.startswith(home + "/.config/mop/") or "/.claude/" in hooks:
+            bad += 1
+            print(f"FAILED  the hooks file must live in mop's own config: {hooks}")
+        cases += 1
+        left = [f for f in os.listdir(os.path.dirname(hooks)) if f.endswith(".tmp")]
+        if left:
+            bad += 1
+            print(f"FAILED  the hooks file is written through a temp file, left: {left}")
+        # (b) валидный JSON, ровно пять событий, каждое -- охраняемый вызов
+        cases += 1
+        try:
+            with open(hooks) as f:
+                doc = json.load(f)
+            events = doc["hooks"]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            bad += 1
+            print(f"FAILED  the hooks file is not the settings JSON: {e}")
+            return bad, cases
+        cases += 1
+        if set(events) != HOOK_EVENTS:
+            bad += 1
+            print(f"FAILED  hook events {sorted(events)}, wanted {sorted(HOOK_EVENTS)}")
+        # session.py -- от того же корня, что и лаунчер mop во внешнем врапере:
+        # другая сторона соглашения -- driver.SESSION_PY обоих драйверов.
+        outer = re.search(r'exec "(.+)/bin/mop"', spec.OUTER)
+        session_py = mop_root.replace("$HOME", home) + "/mop/session.py"
+        cases += 1
+        if not outer or outer.group(1) != "$HOME/mop" or mop_root != home + "/mop":
+            bad += 1
+            print(f"FAILED  the hooks' package root {mop_root!r} and the launcher's "
+                  f"{outer and outer.group(1)!r} must be one root")
+        cmds = set()
+        for name, groups in events.items():
+            for g in groups:
+                for h in g.get("hooks", []):
+                    cmds.add((h.get("type"), h.get("command"), h.get("timeout")))
+        cases += 1
+        want = (f"python3 {session_py} hook >/dev/null 2>&1 || true")
+        if cmds != {("command", want, 5)} or \
+                any(len(g) != 1 or len(g[0].get("hooks", [])) != 1 for g in events.values()):
+            bad += 1
+            print(f"FAILED  every event must run exactly {want!r}, timeout 5; got {cmds}")
+        # (c) охрана держит против любого session.py на узле: старый без
+        # глагола hook выходит 2 (Stop продолжил бы ход вечно), болтливый
+        # попал бы в контекст модели, отсутствующий -- тоже ненулевой выход.
+        os.makedirs(os.path.dirname(session_py), exist_ok=True)
+        for what, body in (("an old session.py", "import sys\nprint('usage')\nsys.exit(2)\n"),
+                           ("a chatty session.py", "print('context!')\n"),
+                           ("no session.py", None)):
+            if body is None:
+                os.remove(session_py)
+            else:
+                with open(session_py, "w") as f:
+                    f.write(body)
+            for _, cmd, _ in cmds:
+                cases += 1
+                r = subprocess.run(["sh", "-c", cmd], input="{}", text=True,
+                                   capture_output=True)
+                if r.returncode or r.stdout or r.stderr:
+                    bad += 1
+                    print(f"FAILED  {what}: the hook must be silent and exit 0, got "
+                          f"{r.returncode} {r.stdout!r} {r.stderr!r}")
+    finally:
+        shutil.rmtree(home)
+    # (d) хуки -- наблюдение, а не условие подъёма: файл не записался --
+    # папет встаёт без --settings и говорит об этом, а не падает. Упавший
+    # врапер -- это папет, который не поднимается вовсе, из-за того, что
+    # должно было лишь сообщать о нём.
+    for what, broken in (("no jq in the body", "nojq"), ("~/.config/mop is a file", "file")):
+        home = tempfile.mkdtemp()
+        try:
+            path = os.environ["PATH"]
+            if broken == "nojq":
+                path = os.path.join(home, "bin")
+                os.makedirs(path)
+                for tool in ("mkdir", "dirname", "mv", "rm", "cat", "printf"):
+                    real = shutil.which(tool)
+                    if real:
+                        os.symlink(real, os.path.join(path, tool))
+            else:
+                os.makedirs(os.path.join(home, ".config"))
+                open(os.path.join(home, ".config", "mop"), "w").close()
+            r = run_hooks_section(section, home, path)
+            cases += 1
+            settings = r.stdout.split("\n")[-1] if r.stdout else None
+            leftovers = [os.path.join(dp, f) for dp, _, fs in os.walk(home)
+                         for f in fs if f.endswith(".tmp")]
+            if r.returncode or settings != "" or not r.stderr.strip() or leftovers:
+                bad += 1
+                print(f"FAILED  {what}: the puppet must start without --settings and say "
+                      f"so; got exit {r.returncode}, settings {settings!r}, "
+                      f"stderr {r.stderr.strip()!r}, temp files {leftovers}")
+        finally:
+            shutil.rmtree(home)
+    # (e) claude стартует с этим файлом, когда он есть
+    cases += 1
+    launch = re.search(r'^claude_args="([^"]*)"', spec.WRAPPER, re.M)
+    if not launch or "$settings" not in launch.group(1) \
+            or "$claude_args" not in spec.WRAPPER.split("tmux -L \"$PU_NAME\" new-session")[-1]:
+        bad += 1
+        print("FAILED  the claude launch line must carry $settings")
+    # (f) врапер едет base64 (#155): доллары одинарные, а в открытой части
+    # спеки нет ни JSON хуков, ни `${…}`, кроме меты узла.
+    cases += 1
+    if "$$" in spec.WRAPPER:
+        bad += 1
+        print("FAILED  the wrapper travels base64: a $$ in it would reach the body literally")
+    for inputs in SPEC_INPUTS:
+        job = spec.job_spec(*inputs[:3], cont=inputs[3])
+        env = job["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
+        cases += 1
+        if 'settings="--settings $hooks"' not in base64.b64decode(env["PU_WRAPPER"]).decode():
+            bad += 1
+            print(f"FAILED  {inputs[0]}: the wrapper in the spec has no hooks")
+        env["PU_WRAPPER"] = ""
+        plain = json.dumps(job)
+        cases += 1
+        subs = set(re.findall(r"\$\{[^}]*\}", plain))
+        if "hook" in plain or not subs <= {spec.PROJECTS_TARGET, spec.MEM_CAP_TARGET}:
+            bad += 1
+            print(f"FAILED  {inputs[0]}: hooks or substitutions outside the base64 "
+                  f"wrapper: {sorted(subs)}")
+    return bad, cases
+
+
 def main():
     if sys.argv[1:] == ["--snapshot"]:
         # Снять слепок заново: только осознанно, когда спека меняется нарочно
@@ -644,7 +830,7 @@ def main():
     bad += dbad
     cases += dcases
     for check in (check_memory_197, check_project_asks_197, check_spec_memory_197,
-                  check_nomad_order_197):
+                  check_nomad_order_197, check_claude_hooks_223):
         cbad, ccases = check()
         bad += cbad
         cases += ccases
