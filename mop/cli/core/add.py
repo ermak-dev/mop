@@ -9,7 +9,7 @@ import os
 import time
 
 from mop.cli import lib
-from mop import bus, config, puppets
+from mop import bus, llm, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -22,7 +22,7 @@ def main(argv):
     profile, args = lib.parse_llm(argv)
     if len(args) > 1:
         lib.usage(__doc__)
-    profile = profile or config.get("MOP_DEFAULT_LLM")
+    profile = llm.resolve(profile)
     origin = lib.origin(args[0] if args else None, __doc__)
     project = puppets.project_of(origin)
     # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS, и

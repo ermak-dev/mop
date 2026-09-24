@@ -13,7 +13,7 @@ to come back into the context it got stuck on.
 --fresh brings it up with a clean session.
 """
 from mop.cli import lib
-from mop import bus, config, llm
+from mop import bus, llm
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -33,12 +33,12 @@ def main(argv):
     name = args[0]
     lib.guard(name)
     meta = lib.require_job(name).get("meta") or {}
-    old, old_llm = meta.get("origin"), meta.get("llm", config.get("MOP_DEFAULT_LLM"))
+    old, old_llm = meta.get("origin"), llm.of_meta(meta)
     if not old:
         # Джоб без origin в Meta — не папет: ростер их и не показывает.
         lib.usage(f"{name}: no origin in the spec — this isn't a pool puppet")
     origin = args[1] if len(args) > 1 else old
-    profile = profile or (old_llm if llm.get(old_llm) else config.get("MOP_DEFAULT_LLM"))
+    profile = llm.resolve(profile, old_llm)
     lib.push_llm_keys(profile)
     # История каталога переживает только смену профиля: при смене репозитория
     # врапер пересоздаёт клон, а разговор остался от прежнего проекта — поднять

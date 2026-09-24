@@ -368,7 +368,7 @@ def job_spec(name, origin, profile=None, cont=False):
     По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
     нужен ровно там, где работу продолжают под другой моделью, а везде ещё
     (новый папет, рецикл, лечение) чистый старт — половина смысла операции."""
-    profile = profile or config.get("MOP_DEFAULT_LLM")
+    profile = llm.resolve(profile)
     prof = llm.get(profile)
     if prof is None:
         # Протухший Meta.llm у работающего джоба: профиль удалили из реестра,
@@ -1131,7 +1131,7 @@ def _row(item, disk_kb=None):
         "alloc_status": status,
         "state": state,
         "owner": item.get("owner") or "-",
-        "llm": meta.get("llm", config.get("MOP_DEFAULT_LLM")),
+        "llm": llm.of_meta(meta),
         "origin": meta.get("origin", "?"),
         "disk_kb": disk_kb,
     }
@@ -1550,7 +1550,7 @@ def recycle(name, workspace_of=None):
     origin = meta.get("origin")
     if not origin:
         raise RuntimeError(f"{name} has no origin in Meta — is this even a puppet?")
-    llm = meta.get("llm", config.get("MOP_DEFAULT_LLM"))
+    profile = llm.of_meta(meta)
     alloc = _cluster("alloc", name=name).get("alloc")
     node = alloc["NodeName"] if alloc else None
     if not node:
@@ -1564,7 +1564,7 @@ def recycle(name, workspace_of=None):
         raise RuntimeError(f"{e}; job is stopped — after fixing the node "
                            f"retry: mop recycle {name}")
     fields = {"workspace": workspace_of(origin)} if workspace_of else {}
-    _cluster("update", name=name, origin=origin, profile=llm, **fields)
+    _cluster("update", name=name, origin=origin, profile=profile, **fields)
     return {"node": node}
 
 

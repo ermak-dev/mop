@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 
-from . import config, driver, manifest, nomad, puppets
+from . import config, driver, llm, manifest, nomad, puppets
 
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "pve-build.yml")
 
@@ -131,7 +131,7 @@ def clear(project, force=False):
         puppets._wait_stopped(name)
         puppets.wipe(node, name)
         gone.append({"name": name, "origin": m.get("origin"),
-                     "llm": m.get("llm") or config.get("MOP_DEFAULT_LLM"),
+                     "llm": llm.resolve(m.get("llm")),
                      "node": node})
     return gone
 
