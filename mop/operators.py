@@ -104,8 +104,15 @@ def permissions(op, login=None):
     чужим логином человеку нельзя. Остальное, что люди публикуют, -- как
     было: публичный канал, all, инбоксы мастеров и опрос who, события,
     сервер, сборщик (admin). Прежние rpc без логина -- на время перехода,
-    уходят с уборкой. Подписка не менялась. Логин в субъекте -- токеном
-    busnames.login_token (anton.ermak -> anton%2Eermak).
+    уходят с уборкой. Логин в субъекте -- токеном busnames.login_token
+    (anton.ermak -> anton%2Eermak).
+
+    Подписка -- тоже явным списком (#212): подписанный на rpc агента или
+    сервиса кластера человек отвечал бы первым вместо них, и логин в
+    субъекте ничего бы не стоил. Клиент подписывается ровно на инбоксы
+    мастеров (свой и опрос who; master.>, а не master.*.inbox: адрес
+    <хост>-<pid>, и хост бывает с точками), события проекта (дашборд) и
+    _INBOX (ответы, поток сборщика).
 
     op -- identity.Identity (#205) или словарь разбора {role, projects};
     login -- логин, если op его не несёт (словарь)."""
@@ -119,11 +126,11 @@ def permissions(op, login=None):
                          f"control characters")
     if ALL in projects:
         deny = [] if role == ADMIN else [busnames.everything(busnames.ADMIN)]
-        allow, scope = [busnames.everything(), busnames.INBOX], [busnames.ANY]
+        scope = [busnames.ANY]
     else:
-        deny = []
-        allow = [busnames.everything(p) for p in sorted(projects)] + [busnames.INBOX]
-        scope = sorted(projects)
+        deny, scope = [], sorted(projects)
+    allow = [s for p in scope for s in (busnames.masters(p), busnames.events(p))]
+    allow.append(busnames.INBOX)
     publish = []
     for p in scope:
         publish += [busnames.node(p, "*", "rpc", login=login),

@@ -179,7 +179,7 @@ def check_login_in_subject_207():
     for subj in ("mop.rugent.node.hyper.rpc.alice", "mop.admin.node.hyper.rpc.alice",
                  "mop.admin.build.rpc", "mop.rugent.events"):
         expect("alice", subj, False)
-    # Подписка не сужалась: свой инбокс и ответы.
+    # Подписка: свой инбокс и ответы (список -- #212, check_subscribe_212).
     for subj in ("mop.mop.master.h-1.inbox", "mop.mop.master.all.inbox", "_INBOX.abc.1"):
         expect("alice", subj, True, "subscribe")
     # admin: весь пул, но логин -- свой.
@@ -221,6 +221,55 @@ def check_login_in_subject_207():
             out.append(f"login {bad!r} must be refused")
         except ValueError:
             pass
+    return out
+
+
+def check_subscribe_212():
+    """HYPOTHESIS (#212): после #207 человек публикует только со своим
+    логином, но подписан на весь mop.<p>.> (или mop.>): подписавшись на
+    rpc агента или сервиса кластера, он отвечает первым вместо них, и
+    проверенная личность вызывающего ничего не стоит.
+    SOLUTION: подписка человека -- явным списком того, на что подписывается
+    клиентский код: инбоксы мастеров (свой и опрос who, mop.<p>.master.>),
+    события проекта (дашборд под человеком) и _INBOX (ответы, поток
+    сборки). rpc агентов и сервисов, msg, all, server, build -- нет.
+    STATUS: FIXED — see #212"""
+    out = []
+    ops = operators.parse("alice:user:mop; anton:admin; olga:user:*")
+    base = {"service": "svc-pass",
+            "operators": {n: {"password": "p", **operators.permissions(o, n)}
+                          for n, o in ops.items()},
+            "nodes": {"hyper": "hy-pass"}}
+    got = rules(natsconf.render(base, {"mop": "pu-pass"}))
+
+    def expect(user, subj, want):
+        allow, deny = got[user]["subscribe"]
+        if permitted(allow, subj, deny) != want:
+            out.append(f"{user} {'may' if want else 'must not'} subscribe {subj}")
+
+    # Ответить вместо агента или сервиса -- нельзя: их субъекты не слушать.
+    for user, p in (("alice", "mop"), ("anton", "mop"), ("anton", "admin"), ("olga", "rugent")):
+        for subj in (f"mop.{p}.node.hyper.rpc.*", f"mop.{p}.node.hyper.rpc",
+                     f"mop.{p}.node.*.rpc.>", f"mop.{p}.node.hyper.msg",
+                     f"mop.{p}.cluster.rpc.*", f"mop.{p}.cluster.rpc",
+                     f"mop.{p}.server.rpc", f"mop.{p}.all.msg", f"mop.{p}.>"):
+            expect(user, subj, False)
+    for subj in ("mop.admin.build.rpc", "mop.>", "mop.*.cluster.rpc.*", "mop.*.node.*.rpc.*"):
+        expect("anton", subj, False)
+    # Всё, на что клиент подписывается сегодня: свой инбокс (адрес
+    # <хост>-<pid>, хост бывает с точками), опрос who, ответы и мультиплекс
+    # запросов nats-py, поток сборщика (новый _INBOX), события проекта.
+    for user, p in (("alice", "mop"), ("anton", "admin"), ("anton", "rugent"),
+                    ("olga", "rugent")):
+        for subj in (f"mop.{p}.master.wate-1.inbox", f"mop.{p}.master.all.inbox",
+                     f"mop.{p}.master.host.lan-7.inbox", f"mop.{p}.events",
+                     "_INBOX.abc", "_INBOX.abc.*"):
+            expect(user, subj, True)
+    # Дашборд под admin слушает события всех проектов разом.
+    expect("anton", "mop.*.events", True)
+    # Чужой проект и admin -- как было.
+    expect("alice", "mop.rugent.master.wate-1.inbox", False)
+    expect("olga", "mop.admin.master.wate-1.inbox", False)
     return out
 
 
@@ -317,6 +366,7 @@ def main():
     # STATUS: FIXED — see #144
 
     failed += check_login_in_subject_207()
+    failed += check_subscribe_212()
 
     # Пароли папетов рождаются на сервере: недостающий заводится, имеющийся
     # не меняется -- иначе живые папеты отвалились бы от шины.
