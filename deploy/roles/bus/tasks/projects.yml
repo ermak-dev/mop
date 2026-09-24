@@ -1,7 +1,8 @@
 # Пользователи шины на сервере (#116). Файл `/etc/nats/users.conf`, который
 # основной конфиг включает в authorization, пишет не шаблон, а сервер:
 # `mop cluster users` (mop/natsconf.py). Отсюда -- только то, что знает один
-# контроллер: люди, сервисы и узлы с их паролями, и реестр проектов.
+# контроллер: сервисы и узлы с их паролями, и реестр проектов. Людей в
+# файле нет (#219): их пускает auth callout по провайдеру личностей.
 #
 # Проекты заводит и снимает сервис кластера (#117) тем же `mop/natsconf.py`,
 # что и команда ниже: второго рендерера нет.
@@ -9,15 +10,6 @@
 # Пароли -- здесь, на контроллере: lookup('password') заводит файл при
 # первом прогоне и возвращает то же значение дальше. Словари -- set_fact в
 # цикле: строка с {% set %} внутри осталась бы строкой, а не словарём.
-- name: Operators of the bus, with their passwords
-  ansible.builtin.set_fact:
-    mop_operators_base: >-
-      {{ mop_operators_base | default({}) | combine({item.key: item.value | combine({
-           'password': lookup('password', secrets_dir + '/nats-op-' + item.key + '.pass length=32 chars=ascii_letters,digits'),
-           'deny': item.value.deny or []})}) }}
-  loop: "{{ MOP_OPERATOR_SUBJECTS | default({}) | dict2items }}"
-  no_log: true
-
 - name: Nodes of the bus, with their passwords
   ansible.builtin.set_fact:
     mop_nodes_base: >-
@@ -26,12 +18,11 @@
   loop: "{{ nats_nodes }}"
   no_log: true
 
-- name: Base users of the bus -- people, services, nodes
+- name: Base users of the bus -- services, nodes
   ansible.builtin.copy:
     content: >-
       {{ {'service': lookup('password', secrets_dir + '/nats-service.pass length=32 chars=ascii_letters,digits'),
           'callout': lookup('password', secrets_dir + '/nats-callout.pass length=32 chars=ascii_letters,digits'),
-          'operators': mop_operators_base | default({}),
           'nodes': mop_nodes_base | default({})} | to_json }}
     dest: /etc/nats/base-users.json
     owner: "{{ MOP_USER }}"
@@ -87,7 +78,6 @@
   environment:
     MOP_SERVER_LAN: "{{ MOP_SERVER_LAN }}"
     MOP_NATS_PORT: "{{ MOP_NATS_PORT }}"
-    MOP_AUTH_CALLOUT: "{{ MOP_AUTH_CALLOUT }}"
   changed_when: false
 
 - name: Callout file of the bus, after
@@ -114,13 +104,10 @@
 
 # Люди для сервисов сервера: callout (#206) и глагол identity у
 # mop-bootstrap (#167, имя и почта владельца задания для git identity
-# клона). Провайдер личностей читает файл операторов и переходные пароли из
-# secrets/ контроллера, куда учётке пула хода нет; сервисы читают копию в
-# /etc/nats/identity, 0600 (identity.server_provider). Нового здесь ничего:
-# те же пароли уже лежат в base-users.json у того же пользователя. Копия
-# есть при callout или при файле операторов -- имена и почты только в нём;
-# и при провайдере ldap (#216): пароль служебной учётки глаголу identity
-# (#167) нужен и без callout. Без всех трёх её нет и не остаётся.
+# клона). Провайдер личностей читает файл операторов из secrets/
+# контроллера, куда учётке пула хода нет; сервисы читают копию в
+# /etc/nats/identity, 0600 (identity.server_provider). Копия есть всегда
+# (#219): людей даёт только провайдер, а callout включён всегда.
 - name: Operators file on the controller
   ansible.builtin.stat:
     path: "{{ MOP_OPERATORS_FILE or (secrets_dir + '/operators') }}"
@@ -129,7 +116,6 @@
   register: operators_file
 
 - name: Identity for the server's services
-  when: MOP_AUTH_CALLOUT == 'on' or operators_file.stat.exists or MOP_AUTH_PROVIDER == 'ldap'
   block:
     - name: Identity dir of the server's services
       ansible.builtin.file:
@@ -138,18 +124,6 @@
         owner: "{{ MOP_USER }}"
         group: "{{ MOP_USER }}"
         mode: "0700"
-
-    - name: Transition passwords of the people (MOP_OPERATORS)
-      ansible.builtin.copy:
-        content: "{{ item.value.password }}\n"
-        dest: "/etc/nats/identity/nats-op-{{ item.key }}.pass"
-        owner: "{{ MOP_USER }}"
-        group: "{{ MOP_USER }}"
-        mode: "0600"
-      loop: "{{ mop_operators_base | default({}) | dict2items }}"
-      loop_control:
-        label: "{{ item.key }}"
-      no_log: true
 
     - name: Operators file for the server's services
       ansible.builtin.copy:
@@ -185,9 +159,3 @@
       ansible.builtin.file:
         path: /etc/nats/identity/ldap-bind.pass
         state: absent
-
-- name: No identity copy without the callout, the operators file and ldap
-  when: MOP_AUTH_CALLOUT != 'on' and not operators_file.stat.exists and MOP_AUTH_PROVIDER != 'ldap'
-  ansible.builtin.file:
-    path: /etc/nats/identity
-    state: absent

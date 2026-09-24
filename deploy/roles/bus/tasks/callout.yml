@@ -1,12 +1,11 @@
 # Сервис auth callout (#206, mop/callout.py): nats спрашивает его на каждом
-# входе человека и папета. Только при MOP_AUTH_CALLOUT=on; при off юнита нет
-# -- nats его и не спрашивает (callout.conf пуст).
+# входе человека и папета. Всегда (#219): людей в users.conf нет, и без него
+# на шину не вошёл бы никто, кроме машин.
 #
 # После шины: сервису нужен её пользователь callout, а до рестарта nats он
 # переподключается сам. Ключи издателя и xkey уже завёл `mop cluster users`
 # (projects.yml) -- рядом с конфигом nats, 0600.
 - name: Callout service
-  when: MOP_AUTH_CALLOUT == 'on'
   block:
     - name: Systemd unit of the callout
       become: yes
@@ -40,27 +39,3 @@
         enabled: yes
         state: started
         daemon_reload: yes
-
-# Выключенный callout -- юнит снят: оставленный, он переподключался бы к
-# шине, где его пользователя больше нет.
-- name: No callout service without the callout
-  when: MOP_AUTH_CALLOUT != 'on'
-  block:
-    - name: Is there a callout unit
-      ansible.builtin.stat:
-        path: /etc/systemd/system/mop-callout.service
-      register: callout_unit
-
-    - name: Stop and disable the callout
-      when: callout_unit.stat.exists
-      become: yes
-      ansible.builtin.systemd:
-        name: mop-callout
-        enabled: no
-        state: stopped
-
-    - name: Remove the callout unit
-      become: yes
-      ansible.builtin.file:
-        path: /etc/systemd/system/mop-callout.service
-        state: absent
