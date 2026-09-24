@@ -20,10 +20,8 @@ import argparse
 import sys
 
 from mop.cli import lib
-from mop import bus, session, puppets
+from mop import bus, channel, session, puppets
 from mop.render import table
-
-MAX_WAIT = 600
 
 
 def show_sessions():
@@ -35,43 +33,40 @@ def show_sessions():
 
 
 def to_puppet(a, body):
-    """Через шину: сокет папета host-local, до него дотягивается агент узла."""
-    wait = min(a.wait or 0, MAX_WAIT)
-    r = bus.request(puppets.running_alloc(a.target)["NodeName"], "send", name=a.target, message=body,
-                    priority=a.priority, wait=wait, owner=bus.login(),
-                    force=a.force, timeout=wait + bus.TIMEOUT)
-    if "error" in r:
-        sys.exit(f"{a.target}: NOT DELIVERED — {r['error']}")
+    """Через шину: сокет папета host-local, до него дотягивается агент узла.
+    Доставка -- mop/channel.py (#148), здесь только вывод."""
+    v = channel.send_to_puppet(puppets.running_alloc(a.target)["NodeName"], a.target,
+                               body, a.priority, a.wait, owner=bus.login(), force=a.force)
+    if channel.failure(v):
+        sys.exit(channel.failure(v))
     if a.quiet:
-        return 0 if (a.wait is None or r.get("idle")) else 2
-    print(f"-> {a.target} msg_id={r['msg_id']}"
-          + (f"; {r['owner_note']}" if r.get("owner_note") else ""))
+        return 0 if (a.wait is None or v["idle"]) else 2
+    print(f"-> {a.target} msg_id={v['msg_id']}"
+          + (f"; {v['owner_note']}" if v["owner_note"] else ""))
     if a.wait is None:
         return 0
-    if not r.get("idle"):
-        print(f"waited {wait}s — puppet never reported going free")
+    if not v["idle"]:
+        print(f"waited {v['wait']}s — puppet never reported going free")
         return 2
-    print(f"<- {r['idle']}")
+    print(f"<- {v['idle']}")
     return 0
 
 
 def to_session(a, body):
-    sess = session.find(a.target)
-    sock = sess["messagingSocketPath"]
-    if not session.socket_alive(sock):
-        sys.exit(f"{sess.get('name')}: inbox not listening — session is dead")
-    r = session.send(sock, body, priority=a.priority, mode=a.mode,
-                     from_name="mop", wait_idle=min(a.wait or 0, MAX_WAIT))
+    v = channel.send_local(session.find(a.target), body, a.priority, a.wait,
+                           mode=a.mode, from_name="mop")
+    if channel.failure(v):
+        sys.exit(channel.failure(v))
     if a.quiet:
-        return 0 if (a.wait is None or r["idle"]) else 2
-    print(f"-> {sess.get('name')} [{sess.get('pid')}] msg_id={r['msg_id']}")
+        return 0 if (a.wait is None or v["idle"]) else 2
+    print(f"-> {v['to']} [{v['pid']}] msg_id={v['msg_id']}")
     if a.wait is None:
         return 0
-    if r["idle"] is None:
+    if v["idle"] is None:
         print(f"waited {a.wait}s — session never reported going idle")
         return 2
-    detail = r["idle"].get("detail")
-    print(f"<- {r['idle'].get('state', '?')}" + (f": {detail}" if detail else ""))
+    detail = v["idle"].get("detail")
+    print(f"<- {v['idle'].get('state', '?')}" + (f": {detail}" if detail else ""))
     return 0
 
 
@@ -87,13 +82,13 @@ def main(argv):
     p.add_argument("--mode", choices=session.MODES, default="bypass")
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--force", action="store_true")
-    p.add_argument("--wait", nargs="?", type=int, const=MAX_WAIT, default=None)
+    p.add_argument("--wait", nargs="?", type=int, const=channel.MAX_WAIT, default=None)
     a = p.parse_args(argv)
 
     body = sys.stdin.read().rstrip("\n") if a.message == "-" else a.message
     if not body.strip():
         sys.exit("empty message — nothing to send")
-    if not a.target.startswith(puppets.JOB_PREFIX):
+    if not channel.is_puppet(a.target):
         return to_session(a, body)
     lib.guard(a.target)
     return to_puppet(a, body)
