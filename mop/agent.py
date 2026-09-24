@@ -373,7 +373,8 @@ async def _claim(name, req):
     path = f"{clone_dir(name)}/{lease.FILE}"
     out, code = await bsh(name, f"printf %s {shlex.quote(lease.render(me, time.time()))} "
                                 f"> {shlex.quote(path)}")
-    if code not in (0, None):
+    # Таймаут -- не записано (#171): иначе «владелец есть», а файла нет.
+    if code != 0:
         return f"{name}: owner not recorded: {why(out, code)}", None, None
     return None, (path, owner), note
 
@@ -523,17 +524,26 @@ async def v_type(conn, req):
     Перед вводом чистим строку (C-u): в пейне мог остаться недобитый текст,
     и тогда команда склеилась бы с ним в мусор."""
     name, command = req["name"], (req.get("command") or "").strip()
+    # Имя -- до шелла: bsh на кривом имени отдаёт тот же None, что таймаут,
+    # и отказ назвал бы не ту причину (#171).
+    if not driver.valid_name(name):
+        return {"error": driver.bad_name(name)}
     if command in KEYS_ALLOWED:
         # Голая клавиша: ни очистки строки, ни Enter следом — Escape снимает
         # диалог, а Enter после него отправил бы пустой ход.
         out, code = await bsh(name, Tmux(name).press(command))
-        return {"screen": out} if code in (0, None) else {"error": out.strip()}
+        if code is None:
+            # Таймаут -- не нажато (#171); ненулевой код отвечает как раньше.
+            return {"error": why(out, code)}
+        return {"screen": out} if code == 0 else {"error": out.strip()}
     if command.split()[0:1] and command.split()[0] not in SLASH_ALLOWED:
         return {"error": f"only allowed: {', '.join(SLASH_ALLOWED + KEYS_ALLOWED)}"}
     if "'" in command:
         return {"error": "quote in command: command goes to the shell as one line"}
     out, code = await bsh(name, Tmux(name).type(command))
-    if code not in (0, None):
+    if code is None:
+        return {"error": why(out, code)}
+    if code != 0:
         return {"error": out.strip() or f"tmux exit {code}"}
     await _event(conn, "type", name, text=command)
     return {"screen": out}

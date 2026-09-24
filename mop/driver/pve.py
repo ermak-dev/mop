@@ -475,8 +475,9 @@ async def ensure(name, params=None):
         src = template_vmid(project)
         out, code = await _pve("clone", src, vmid, name, STORAGE, cidr_of(name),
                                GATEWAY, BRIDGE)
-        if code not in (0, None):
-            return {"error": f"no body for {name}: {why(out, code)}; "
+        # Мутирующие шаги: таймаут -- отказ, не успех (#171).
+        if code != 0:
+            return {"error": f"no body for {name}: {why(out, code, 600)}; "
                              f"build the project's image: mop driver build {project}"}
         created = True
         await _forget_host_key(name)
@@ -489,16 +490,16 @@ async def ensure(name, params=None):
         # интерфейса, ни секунды.
         out, code = await _pve("net", vmid, cidr_of(name), GATEWAY, BRIDGE,
                                timeout=60)
-        if code not in (0, None):
+        if code != 0:
             return {"error": f"{name}: body {vmid} won't take its address "
-                             f"{address_of(name)}: {why(out, code)}"}
+                             f"{address_of(name)}: {why(out, code, 60)}"}
         if out.strip():
             await _forget_host_key(name)
 
     out, code = await _pve("start", vmid, timeout=120)
-    if code not in (0, None):
+    if code != 0:
         return {"error": f"{name}: body {vmid} won't start: "
-                         f"{why(out, code)}"}
+                         f"{why(out, code, 120)}"}
 
     r = await _sync_package(name, vmid)
     if r.get("error"):
@@ -532,9 +533,9 @@ async def _sync_package(name, vmid):
            f"--exclude=.git --exclude=__pycache__ --exclude=.env "
            f"--exclude=inventory.ini --exclude=inventory.yaml .")
     out, code = await sh(f"{tar} | {_pve_cmd('push', vmid, blob, '600')}", 300)
-    if code not in (0, None):
+    if code != 0:
         return {"error": f"{name}: the mop package did not reach the body: "
-                         f"{why(out, code)}"}
+                         f"{why(out, code, 300)}"}
     # Старую копию — в мусор, а не архив поверх неё: tar не удаляет то, чего
     # в пакете больше нет, и в теле копились бы файлы, снятые с узла
     # (поймано на переезде bin/ в mop/cli, #75: в теле остался весь старый
@@ -545,9 +546,9 @@ async def _sync_package(name, vmid):
         f"rm -rf {HOME}/mop && mkdir -p {HOME}/mop && tar xzf {blob} -C {HOME}/mop "
         f"&& rm -f {blob}",
         timeout=300)
-    if code not in (0, None):
+    if code != 0:
         return {"error": f"{name}: the mop package did not unpack in the body: "
-                         f"{why(out, code)}"}
+                         f"{why(out, code, 300)}"}
     return {}
 
 
@@ -580,9 +581,9 @@ async def _seed(name, vmid):
             continue
         out, code = await sh(
             f"{_pve_cmd('push', vmid, path, mode)} < {shlex.quote(path)}", 120)
-        if code not in (0, None):
+        if code != 0:
             return {"error": f"{name}: {path} did not reach the body: "
-                             f"{why(out, code)}"}
+                             f"{why(out, code, 120)}"}
     return {}
 
 
@@ -616,8 +617,8 @@ async def admit(name, let_in):
         text += pubkey.strip() + "\n"
     out, code = await sh(f"printf %s {shlex.quote(text)} | "
                          f"{_pve_cmd('keys', vmid_of(name))}", 60)
-    if code not in (0, None):
-        return {"error": f"{name}: keys: {why(out, code)}"}
+    if code != 0:
+        return {"error": f"{name}: keys: {why(out, code, 60)}"}
     return {"admitted": bool(pubkey)}
 
 
@@ -662,8 +663,8 @@ async def push_many(name, files):
             os.unlink(tmp)
         except OSError:
             pass
-    if code not in (0, None):
-        return {"error": f"{name}: unpack: {why(out, code)}"}
+    if code != 0:
+        return {"error": f"{name}: unpack: {why(out, code, 120)}"}
     return {"written": [p for p, _ in files]}
 
 
@@ -684,7 +685,7 @@ async def destroy(name):
         return {"error": bad_name(name)}
     vmid = vmid_of(name)
     out, code = await _pve("destroy", vmid, timeout=600)
-    if code not in (0, None):
-        return {"error": f"{name}: body {vmid} won't go: {why(out, code)}"}
+    if code != 0:
+        return {"error": f"{name}: body {vmid} won't go: {why(out, code, 600)}"}
     await _forget_host_key(name)
     return {"destroyed": vmid, "target": f"body {vmid}"}

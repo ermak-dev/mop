@@ -211,9 +211,17 @@ def project_secrets_dir(project):
     return f"{HOME}/.config/mop/project-secrets/{project}"
 
 
-def why(out, code):
-    """Причина отказа шелла одной строкой: вывод, а если он пуст — код."""
-    return out.strip() or f"exit {code}"
+def why(out, code, timeout=None):
+    """Причина отказа шелла одной строкой: вывод, а если он пуст — код.
+
+    Код None -- таймаут sh(), и он назван словами, со сроком, если звавший
+    его знает (#171): мутирующий глагол, прочитавший «не успел» как «сделал»,
+    отвечал успехом по наполовину снесённому каталогу."""
+    if out.strip():
+        return out.strip()
+    if code is None:
+        return "timed out" + (f" after {timeout}s" if timeout else "")
+    return f"exit {code}"
 
 
 def write_private(path, data):
