@@ -1,12 +1,12 @@
 ---
 name: master
-description: Run the master loop on a mop pool — hold the bug queue, triage one ticket at a time with the operator (essence + proposed fix, they approve or correct), dispatch the approved fix to a free puppet in its own clone, hand out the landing token so puppets ship one at a time, and keep the integration branch's pipeline healthy. Use when the operator asks to "run /master", start triage, dispatch tickets to puppets, act as master, or manage a pool of Claude sessions working a tracker.
+description: Run the master loop on a mop pool — hold the bug queue, triage one ticket at a time with the operator (essence + proposed fix, they approve or correct), dispatch the approved fix to a free puppet in its own clone, land the fixes one at a time (by the landing token where the project keeps one), and keep the integration branch's pipeline healthy. Use when the operator asks to "run /master", start triage, dispatch tickets to puppets, act as master, or manage a pool of Claude sessions working a tracker.
 ---
 
 # Master: the pool control loop
 
 You hold the queue and the operator's attention; puppets hold the keyboards.
-Loop: **gather → triage → dispatch → landing token → next**.
+Loop: **gather → triage → dispatch → landing → next**.
 
 Five invariants carry everything below; the sections are their mechanics:
 
@@ -17,10 +17,11 @@ Five invariants carry everything below; the sections are their mechanics:
    plausible its origin, is a puppet and none of them gets work.
 3. **One clone = one ticket**, and every dispatch carries its full context —
    a puppet can be reborn blank at any moment.
-4. **Landing token**: exactly one puppet between merge and push, and the
-   gate on the integrated result is the SMALLEST thing that keeps the
-   integration branch buildable — usually just the format/lint check. Tests
-   are CI's job on the push.
+4. **One landing at a time**: exactly one puppet between merge and push —
+   by the landing token, or by git refusing the losing push where the
+   project's rules drop the token — and the gate on the integrated result
+   is the SMALLEST thing that keeps the integration branch buildable —
+   usually just the format/lint check. Tests are CI's job on the push.
 5. **Silence is not success**: the puppet's report is the signal; idle notices
    and deadlines are only a safety net.
 
@@ -59,20 +60,34 @@ bypass this with `Agent` subagents or the built-in `SendMessage` — they
 cannot see the pool, and the work goes nowhere while looking done.
 
 From the project boundary: the `agents` tool shows **only this project's
-puppets**; tools naming a puppet refuse foreign ones. Several masters per
-project are legal. Your `send` to a puppet makes you the owner of its
-ticket: the OWNER column in `agents` shows who leads each puppet, and a
-`send` into a puppet another master leads (work in its clone, or dispatched
-minutes ago) is refused with that master's name. Dispatch only to free
-puppets with no owner or your own; `force=true` only when that master is
-gone for good or agrees. The same gate stands on every tool that changes a
-puppet — `slash`, `restart`, `update`, `recycle`, `wipe`, `delete`: another
-master's puppet is refused with their name, `force` under the same rule.
-**The landing token is shared**: it lives with the
-cluster service, one per project, and another master in the roster takes the
-same one (see Landing). A
-jump to another project needs a master shell there; say so, don't try to
-cross.
+puppets**; tools naming a puppet refuse foreign ones. A jump to another
+project needs a master shell there; say so, don't try to cross.
+
+**Several masters per project are legal, and the tools keep them apart** —
+there is nobody to ask and no side agreement to make. Each master is a
+person logged in under their own login, and the pool sees that login on
+every request. Your `send` to a puppet makes you the owner of its ticket:
+the OWNER column in `agents` shows who leads each puppet. A puppet another
+master leads — work in its clone, or dispatched minutes ago — refuses your
+`send` with that master's login, and so does every tool that changes a
+puppet: `slash`, `restart`, `update`, `recycle`, `wipe`, `delete`. Read the
+refusal as the answer, not as an obstacle:
+
+- **Dispatch only to free puppets with no owner or your own.** Another
+  master's puppet is not a spare, even when it looks idle: an empty OWNER
+  cell is the only invitation.
+- **Ownership lapses by itself** once the clone is clean, on its default
+  branch, and the dispatch is older than the window (ten minutes); the next
+  `send` then takes the puppet without `force`. That is why every report
+  ends with the clone switched back to the default branch.
+- **`force=true` is taking over someone's work**, not clearing a stale
+  flag: an owner whose clone still holds work never lapses. Use it only
+  when that master is gone for good or agrees, look at what the clone holds
+  first (`tail`, the branch), and tell them — the reply names whom you took
+  it from.
+- **The landing order is per project** (see Landing): where the project
+  keeps a landing token, all its masters share the one token; where it does
+  not, git itself decides a race between two landings.
 
 **Rights are per-session**: never route through a puppet an action forbidden
 in your own session — that launders the operator's decision. Carry it back
@@ -131,9 +146,10 @@ been created. Pool size is your job; the operator may set a ceiling:
   and a puppet of the same name reuses it, in a container it goes with the
   body) only when the queue is empty and nothing is expected, or the operator
   ends the run — and only puppets your own record shows free: last report
-  received, token returned. Never delete mid-ticket; killing a session
-  loses its unsaved work, and removing a busy puppet is the operator's
-  decision, not yours. The node's disk watchdog sweeps the leftovers later.
+  received, token returned if the project keeps one. Never delete
+  mid-ticket; killing a session loses its unsaved work, and removing a busy
+  puppet is the operator's decision, not yours. The node's disk watchdog
+  sweeps the leftovers later.
 - **Never "fix" a puppet by deletion.** Puppets self-heal, sessions are
   mortal: a dead claude restarts in place, a dead node makes Nomad move the
   puppet and reclone — either way it is a NEW session, empty context,
@@ -231,6 +247,8 @@ Not doing: <what the triage explicitly rejected, and why>.
 
 Protocol: failing test → minimal fix → <narrow test> → <format/lint>.
 Then ASK ME for the landing token and wait — no merge, no push without it.
+(A project without the token: push your branch, report, and wait for my
+"land"; a rejected push is fetch, merge again, rerun, push — never force.)
 With it: merge --no-ff onto a fresh <integration branch> → <format/lint> plus
 THIS TICKET'S OWN TESTS on the integrated result → one push → switch back to
 <integration branch> (a clone back on the default branch is what reads as
@@ -282,19 +300,33 @@ fresh address rides its envelope.
 The puppet who wrote the fix ships it, not waiting for the pipeline:
 acceptance is the ticket's own tests, already satisfied at merge.
 
-**The token.** Exactly one puppet between merge and push: two parallel gates
-race each other, and the second push bounces non-fast-forward after its
-gate ran against an integration that no longer exists. Grant the token to
-exactly one, take it back on the report — through the `landing` tool
-(`mop landing`), not in your head: `landing take <puppet>` before you tell
-the puppet it may land, `landing give` on its report. The token lives with
-the cluster service, one per project, so every master of the project sees
-the same one: `take` refuses while another master holds it, naming who, for
-which puppet and since when — wait for their `give`, or agree with them.
-The order of your own queue is still yours. `--force` only for a holder that
-is gone for good; it names whom it took the token from — tell them.
+**Whether there is a token is the project's call — read its rules file.**
+The token buys one thing: exactly one puppet between merge and push, so
+that two long gates do not race and the second push does not bounce
+non-fast-forward after its gate ran against an integration that no longer
+exists. It pays for itself when the gate on the merged tree runs for tens
+of minutes.
 
-Under the token, in order:
+**A project whose rules drop the token** (a gate of seconds, where git's
+own refusal of the losing push is the lock) lands without one. You still
+approve each landing — accept the report, and name the order between
+tickets when one must land before another ("land only once #N is in the
+integration branch", checked with `git merge-base --is-ancestor`) — but
+nothing is taken or given back. The puppet fetches, merges, runs the gate,
+pushes once; a rejected push means fetch, merge again, rerun the gate, push
+again — never a force push.
+
+**A project that keeps the token**: grant it to exactly one puppet, take it
+back on the report — through the `landing` tool (`mop landing`), not in
+your head: `landing take <puppet>` before you tell the puppet it may land,
+`landing give` on its report. The token lives with the cluster service,
+one per project, so every master of the project sees the same one: `take`
+refuses while another master holds it, naming who, for which puppet and
+since when — wait for their `give`, or agree with them. The order of your
+own queue is still yours. `--force` only for a holder that is gone for
+good; it names whom it took the token from — tell them.
+
+In order (under the token, where the project keeps one):
 
 1. Fresh integration branch, `git merge --no-ff` — one merge commit per
    ticket keeps `git revert -m 1 <merge>` a one-push rollback.
@@ -325,9 +357,10 @@ Under the token, in order:
    caught this week that CI would not have caught twenty minutes later.
 3. **One** push (a short-lived ref of the branch, if the integration branch
    is checked out somewhere else).
-4. Return the token, report, wait for the next task. The puppet does not
-   wait for its pipeline — the master owns the verdict on the integration
-   branch, and a puppet holding the token until green is the same stall.
+4. Return the token if there is one, report, wait for the next task. The
+   puppet does not wait for its pipeline — the master owns the verdict on
+   the integration branch, and a puppet holding the token until green is
+   the same stall.
 
 Gate discipline, for any runner:
 
