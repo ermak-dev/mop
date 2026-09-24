@@ -242,12 +242,51 @@ edit_json "$HOME/.claude.json" '.projects[$d].hasTrustDialogAccepted = true
     | .hasCompletedOnboarding = true
     | .resumeReturnDismissed = true
     | .theme = (.theme // "dark")' --arg d "$d"
+# --- claude hooks (#223) ---
+# Состояние папета -- исход хода из хуков Claude Code, а не догадка по экрану
+# tmux: 24.09 два папета умерли на "Login expired" посреди хода, и ростер
+# полтора часа читал их простаивающими. Хук зовёт `session.py hook` (#222).
+#
+# Корень пакета в теле -- тот же, откуда внешний врапер запускает `mop`
+# (OUTER); другая сторона этого соглашения -- driver.SESSION_PY обоих
+# драйверов. Разойдутся -- хуки молча замолчат: tests/spec.py сверяет корни.
+mop_root="$HOME/mop"
+# Свой файл, а не ~/.claude/settings.json: тот на host-узле делят все claude
+# машины, и хук стрелял бы в сессиях оператора и мастера.
+hooks="$HOME/.config/mop/claude-hooks.json"
+# Охрана не обсуждается: stdout хуков SessionStart/UserPromptSubmit уходит в
+# контекст модели, а выход 2 из Stop заставляет claude продолжить ход. Старый
+# session.py без глагола hook выходит 2 -- и папет крутился бы вечно.
+#
+# Пишем через свой временный файл и mv: на host-узле папеты делят $HOME и
+# стартуют вместе -- та же гонка, что трижды обнуляла конфиг (edit_json выше).
+# Замок не нужен: содержимое у всех одно, mv атомарен.
+#
+# Хуки -- наблюдение за папетом, а не условие его подъёма: не записался файл
+# -- claude встаёт без --settings, а врапер говорит об этом в лог задачи.
+# Упасть здесь значило бы уронить папета из-за того, что должно лишь сообщать
+# о нём. Внутри if set -e не срабатывает -- на этом и стоит развилка.
+settings=""
+if mkdir -p "$(dirname "$hooks")" \
+    && jq -n --arg cmd "python3 $mop_root/mop/session.py hook >/dev/null 2>&1 || true" '
+        {hooks: (["SessionStart", "UserPromptSubmit", "Stop", "StopFailure",
+                  "PostModelSwitch"]
+            | map({key: ., value: [{hooks: [{type: "command", command: $cmd,
+                                             timeout: 5}]}]})
+            | from_entries)}' > "$hooks.$PU_NAME.tmp" \
+    && mv "$hooks.$PU_NAME.tmp" "$hooks"; then
+    settings="--settings $hooks"
+else
+    rm -f "$hooks.$PU_NAME.tmp"
+    echo "claude hooks: could not write $hooks -- $PU_NAME starts without them" >&2
+fi
+# --- end of claude hooks ---
 # Свой MCP-сервер регистрируем через сам claude: он владелец ~/.claude.json,
 # и никаких ручных мерджей. add на существующей записи ошибается -- и это
 # устраивает: в записи нет секретов, наличие означает правильность, полную
 # сходимость (если сменился путь) делает deploy. Чужие сервера -- дело
 # установки (sandbox.yaml), врапер о них не знает.
-claude mcp add --scope user mop -- "$HOME/mop/bin/mop" mcp >/dev/null 2>&1 || true
+claude mcp add --scope user mop -- "$mop_root/bin/mop" mcp >/dev/null 2>&1 || true
 # playwright-mcp needs a browser on the node; install is idempotent and cached
 # in ~/.cache/ms-playwright, so every puppet boot just confirms it is there.
 npx -y playwright install chromium >/dev/null 2>&1 || true
@@ -332,7 +371,7 @@ fi
 # env must go through -e: a plain env prefix only reaches the tmux SERVER when
 # this wrapper happens to start it, and every later session inherits the first
 # wrapper's variables (all puppets ended up sharing one CARGO_TARGET_DIR)
-claude_args="--dangerously-skip-permissions"
+claude_args="--dangerously-skip-permissions${settings:+ $settings}"
 # Продолжение истории каталога -- ровно один подъём на перерегистрацию спеки.
 # Одноразовость здесь не прихоть: рестарт аллокации спеку не перечитывает, а
 # лечение залипшего папета -- это именно рестарт. Липкий --continue возвращал
