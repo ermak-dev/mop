@@ -116,7 +116,12 @@ VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "1
         "MOP_NATS_PORT": "4222", "MOP_HTTPS_PORT": "443", "MOP_NOMAD_PORT": "4646",
         "MOP_POOL_DC": "home", "MOP_WEB_PORT": "8080", "MOP_WEB_BIND": "0.0.0.0",
         "MOP_NATS_MONITOR_PORT": "8222", "MOP_AUTH_CALLOUT": "off",
-        "MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS": "anton:admin; ivan:user:rugent"}
+        "MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS": "anton:admin; ivan:user:rugent",
+        # Провайдер ldap (#208, #214): у пустых по умолчанию -- образцы.
+        "MOP_LDAP_URL": "ldaps://ldap.example.dev", "MOP_LDAP_BIND_DN": "cn=mop,ou=services,dc=example,dc=dev",
+        "MOP_LDAP_BASE": "dc=example,dc=dev", "MOP_LDAP_GROUP_BASE": "ou=groups,dc=example,dc=dev",
+        "MOP_LDAP_ADMIN_GROUP": "cn=mop admins,ou=groups,dc=example,dc=dev",
+        "MOP_LDAP_STARTTLS": "no", "MOP_LDAP_CA_FILE": "/etc/ssl/certs/corp-ca.pem"}
 # Значения, которые юнит обязан донести целиком (#185): пробел, кавычки,
 # обратный слеш. Подставляются вместо настройки из набора юнита.
 AWKWARD = ("Pool Bot", 'say "hi"', "a\\b", "tab\there", "it's", "100%", "%h")
@@ -136,11 +141,13 @@ ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          # reload шины с проверкой (#211): /varz на петле.
                          "MOP_NATS_MONITOR_PORT",
                          # callout или статический users.conf (#206).
-                         "MOP_AUTH_CALLOUT"),
-         # Глагол identity (#167): имя и почта владельца задания из провайдера
-         # личностей сервера -- те же настройки, что у mop-callout; файлы
-         # провайдера -- копией в /etc/nats/identity, не окружением юнита.
-         "mop-bootstrap": ("MOP_AUTH_PROVIDER", "MOP_OPERATORS")}
+                         "MOP_AUTH_CALLOUT")}
+# Несекретные настройки провайдера личностей (#214) -- сервисам, которые его
+# строят: callout и глагол личности bootstrap'а. Одним списком
+# (config.IDENTITY_SCOPED); что у юнита уже было, в добавки не входит.
+ADDED["mop-bootstrap"] = config.IDENTITY_SCOPED
+ADDED["mop-callout"] = tuple(n for n in config.IDENTITY_SCOPED
+                             if n not in ("MOP_AUTH_PROVIDER", "MOP_OPERATORS"))
 
 PINNED = {
     'mop-bootstrap': "[Unit]\nDescription=mop-bootstrap (bootstrap песочниц: играет .mop/bootstrap.yaml проекта при каждом старте папета)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет: всё, что подписчику и прогону нужно знать об\n# установке, приезжает юнитом. MOP_HOME и MOP_USER -- те, что у узлов: их\n# читают задачи bootstrap'а как переменные прогона, и дефолт сервера\n# (его собственный дом) здесь был бы неправдой.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_HOME=/home/mopuser\nEnvironment=MOP_USER=mopuser\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop bootstrap serve\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
@@ -640,23 +647,32 @@ def check_identity_copy_167(check, ptasks):
                     (t[mod] or {}).get("state")
         return None, None, None
 
-    for callout in ("on", "off"):
-        for exists in (True, False):
-            env = {"MOP_AUTH_CALLOUT": callout,
-                   "operators_file": types.SimpleNamespace(stat=types.SimpleNamespace(exists=exists))}
-            try:
-                done = [target(t) for t in ran(ptasks, env, [])]
-            except AssertionError as e:
-                check(f"bus identity copy, callout {callout}, file {exists}: conditions read", False, e)
-                continue
-            what = f"bus identity copy, callout {callout}, operators file {exists}"
-            laid = ("copy", "/etc/nats/identity/operators", None) in done
-            gone = ("file", "/etc/nats/identity", "absent") in done
-            check(f"{what}: the operators file is copied exactly when it exists", laid == exists, done)
-            check(f"{what}: the copy is removed only with neither callout nor file",
-                  gone == (callout != "on" and not exists), done)
-            check(f"{what}: the controller's operators file is looked at",
-                  any(k == "stat" and "operators" in str(p) for k, p, _ in done), done)
+    # Провайдер -- третье измерение (#214): пароль LDAP лежит в той же копии.
+    import itertools
+    for callout, exists, prov in itertools.product(("on", "off"), (True, False), ("file", "ldap")):
+        env = {"MOP_AUTH_CALLOUT": callout, "MOP_AUTH_PROVIDER": prov,
+               "operators_file": types.SimpleNamespace(stat=types.SimpleNamespace(exists=exists))}
+        try:
+            done = [target(t) for t in ran(ptasks, env, [])]
+        except AssertionError as e:
+            check(f"bus identity copy, callout {callout}, file {exists}, {prov}: conditions read",
+                  False, e)
+            continue
+        what = f"bus identity copy, callout {callout}, operators file {exists}, provider {prov}"
+        copy = callout == "on" or exists
+        bind = ("copy", "/etc/nats/identity/ldap-bind.pass", None) in done
+        unbind = ("file", "/etc/nats/identity/ldap-bind.pass", "absent") in done
+        check(f"{what}: the LDAP bind password is laid exactly with ldap and the copy",
+              bind == (copy and prov == "ldap"), done)
+        check(f"{what}: inside the copy, another provider leaves no bind password",
+              unbind == (copy and prov != "ldap"), done)
+        laid = ("copy", "/etc/nats/identity/operators", None) in done
+        gone = ("file", "/etc/nats/identity", "absent") in done
+        check(f"{what}: the operators file is copied exactly when it exists", laid == exists, done)
+        check(f"{what}: the copy is removed only with neither callout nor file",
+              gone == (callout != "on" and not exists), done)
+        check(f"{what}: the controller's operators file is looked at",
+              any(k == "stat" and "operators" in str(p) for k, p, _ in done), done)
 
 
 def main():
@@ -916,6 +932,39 @@ def main():
     conf = open(os.path.join(DEPLOY, "roles", "bus", "templates", "nats-server.conf.j2")).read()
     check("nats-server.conf includes callout.conf inside authorization",
           re.search(r"authorization \{[^}]*include \./callout\.conf", conf) is not None)
+
+    # ── пароль LDAP сервисам сервера -- файлом 0600 (#214) ───────────────
+    # Окружение юнита читаемо всем, поэтому секрет провайдера -- файлом рядом
+    # с копией личностей, и только когда провайдер -- ldap.
+    # STATUS: FIXED — see #214
+    def every(tasks):
+        for t in tasks or []:
+            yield t, t.get("when")
+            for sub in every((t or {}).get("block")):
+                yield sub[0], [t.get("when"), sub[1]]
+    bind = "/etc/nats/identity/ldap-bind.pass"
+    found = [(t, w) for t, w in every(ptasks)
+             if ((t.get("ansible.builtin.copy") or {}).get("dest") == bind)]
+    check("bus: one task writes the LDAP bind password file", len(found) == 1, len(found))
+    if found:
+        t, w = found[0]
+        cp = t["ansible.builtin.copy"]
+        check("bus: the bind password file is 0600, the pool user's",
+              cp.get("mode") == "0600" and cp.get("owner") == "{{ MOP_USER }}", cp)
+        check("bus: the bind password never reaches the log", t.get("no_log") is True, t)
+        check("bus: the bind password comes from the play's env, not extra-vars",
+              "lookup('env', 'MOP_LDAP_BIND_PASSWORD')" in str(cp.get("content")), cp.get("content"))
+        # Внутри блока копии личностей (#167: при callout или при файле
+        # операторов) -- файл пароля следует его условию, своего нет.
+        block = next((b for b in ptasks if b.get("name") == "Identity for the server's services"), {})
+        check("bus: the bind password file only with the ldap provider, inside the identity copy",
+              "MOP_AUTH_PROVIDER == 'ldap'" in str(w) and block.get("when") in (w or [None])
+              and t in (block.get("block") or []), w)
+    gone = [(t, w) for t, w in every(ptasks)
+            if (t.get("ansible.builtin.file") or {}).get("path") == bind
+            and (t.get("ansible.builtin.file") or {}).get("state") == "absent"]
+    check("bus: no bind password file without the ldap provider",
+          len(gone) == 1 and "MOP_AUTH_PROVIDER != 'ldap'" in str(gone[0][1]), gone)
 
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")

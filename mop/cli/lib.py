@@ -257,6 +257,18 @@ def play_vars(projects, manifests=None, limits=None, git_hosts=None, inventory_h
     return out
 
 
+def play_env(get):
+    """Окружение процесса ansible сверх своего. -> {имя: значение}.
+
+    Пароль служебной учётки LDAP (#214) -- только при провайдере ldap, и
+    окружением, а не --extra-vars: argv виден в списке процессов, а
+    настройки едут плейбукам все. Плейбук берёт его lookup('env') и кладёт
+    файлом 0600 в /etc/nats/identity."""
+    if (get("MOP_AUTH_PROVIDER") or "file") != "ldap":
+        return {}
+    return {"MOP_LDAP_BIND_PASSWORD": get("MOP_LDAP_BIND_PASSWORD") or ""}
+
+
 def play(playbook, projects, manifests=None, git_hosts=None, check=False,
          inventory_hosts=None):
     """Прогон плейбука установки. -> код возврата ansible.
@@ -294,7 +306,8 @@ def play(playbook, projects, manifests=None, git_hosts=None, check=False,
     return subprocess.call(
         ["ansible-playbook", "-i", inventory, os.path.join(PROJECT, playbook),
          *sum((["--extra-vars", v] for v in extra), []),
-         *(["--check", "--diff"] if check else [])])
+         *(["--check", "--diff"] if check else [])],
+        env={**os.environ, **play_env(config.get)})
 
 
 def project_ready(project):
