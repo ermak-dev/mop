@@ -10,6 +10,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import nodes  # noqa: E402
@@ -31,14 +32,10 @@ CASES = [
 
 
 def main():
-    failed = 0
+    c = Checks()
     for summary, meta, cap, want in CASES:
-        got = nodes.row(summary, meta, cap)
-        if got != want:
-            failed += 1
-            print(f"FAIL row({summary['Name']}): {got} != {want}")
-    print("nodes: FAILED" if failed else "nodes: ok")
-    return 1 if failed else 0
+        c.expect(f"row({summary['Name']})", nodes.row(summary, meta, cap), want)
+    return c.report("nodes")
 
 
 if __name__ == "__main__":

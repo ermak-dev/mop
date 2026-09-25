@@ -10,6 +10,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import gitlab  # noqa: E402
@@ -90,17 +91,15 @@ PIPELINE_VERDICT = [
 ]
 
 
-def check_deploy_gate():
-    """Настройка, отказ без кредов и флаг deploy (#231). -> [строка FAILED]."""
+def check_deploy_gate(c):
+    """Настройка, отказ без кредов и флаг deploy (#231)."""
     from mop.common import config
     from mop.cli.server import deploy
-    out = []
-    if config.SETTINGS.get("MOP_DEPLOY_NEEDS_GREEN", None) != "":
-        out.append(f"MOP_DEPLOY_NEEDS_GREEN default is "
-                   f"{config.SETTINGS.get('MOP_DEPLOY_NEEDS_GREEN')!r}, wanted '' (no check)")
+    c.expect("MOP_DEPLOY_NEEDS_GREEN default ('' is no check)",
+             config.SETTINGS.get("MOP_DEPLOY_NEEDS_GREEN", None), "")
     fn = getattr(deploy, "pipeline_refusals", None)
-    if fn is None:
-        return out + ["mop server deploy has no pipeline_refusals"]
+    if not c.check("mop server deploy has pipeline_refusals", fn is not None):
+        return
 
     def boom(sha):
         raise AssertionError("GitLab asked while the check is off")
@@ -155,9 +154,7 @@ def check_deploy_gate():
             got = fn(*args)
         except (AssertionError, TypeError) as e:
             got = [f"raised: {e}"]
-        if got != want:
-            out.append(f"pipeline_refusals{args[:3]} -> {got!r}, wanted {want!r}")
-    return out
+        c.expect(f"pipeline_refusals{args[:3]}", got, want)
 
 
 # #239: CI катит mop сам — джоба deploy по ssh с forced command зовёт
@@ -239,14 +236,14 @@ FROM_CI_DEFER = [
 ]
 
 
-def check_from_ci_sync():
-    """Настоящий git во временном каталоге: fetch и --ff-only (#239). -> [строка]."""
+def check_from_ci_sync(c):
+    """Настоящий git во временном каталоге: fetch и --ff-only (#239)."""
     import subprocess
     import tempfile
     from mop.cli.server import deploy
     fn = getattr(deploy, "ci_sync", None)
-    if fn is None:
-        return ["mop server deploy has no ci_sync"]
+    if not c.check("mop server deploy has ci_sync", fn is not None):
+        return
     tmp = tempfile.mkdtemp(prefix="mop-ci-sync-")
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
@@ -261,38 +258,30 @@ def check_from_ci_sync():
     git(other, "push", "-q", "origin", "master")
     subprocess.run(["git", "clone", "-q", origin, work], check=True, capture_output=True)
     old = git(work, "rev-parse", "HEAD")
-    out = []
     # Неотслеживаемое (.env, inventory.yaml, бэкапы) — не помеха.
     open(os.path.join(work, ".env"), "w").write("X=1\n")
-    got = fn(work)
-    if got != (old, old, None):
-        out.append(f"ci_sync at origin -> {got!r}, wanted ({old!r}, {old!r}, None)")
+    c.expect("ci_sync at origin", fn(work), (old, old, None))
     git(other, "commit", "-q", "--allow-empty", "-m", "two")
     git(other, "push", "-q", "origin", "master")
     new = git(other, "rev-parse", "HEAD")
-    got = fn(work)
-    if got != (old, new, None):
-        out.append(f"ci_sync behind origin -> {got!r}, wanted ({old!r}, {new!r}, None)")
+    c.expect("ci_sync behind origin", fn(work), (old, new, None))
     # Разошлась с origin — --ff-only отказывает, и отказ назван.
     git(work, "commit", "-q", "--allow-empty", "-m", "local")
     git(other, "commit", "-q", "--allow-empty", "-m", "three")
     git(other, "push", "-q", "origin", "master")
     got = fn(work)
-    if not (isinstance(got, tuple) and got[2] and got[2].startswith(
-            "--from-ci: master does not fast-forward to origin/master")):
-        out.append(f"ci_sync diverged -> {got!r}, wanted a fast-forward refusal")
+    c.check("ci_sync diverged: wanted a fast-forward refusal",
+            isinstance(got, tuple) and got[2] and got[2].startswith(
+                "--from-ci: master does not fast-forward to origin/master"), repr(got))
     # Ветка и грязь — из той же рабочей копии.
     state = getattr(deploy, "ci_state", None)
-    if state is None:
-        return out + ["mop server deploy has no ci_state"]
+    if not c.check("mop server deploy has ci_state", state is not None):
+        return
     open(os.path.join(work, "tracked"), "w").write("a\n")
     git(work, "add", "tracked")
     git(work, "commit", "-q", "-m", "tracked")
     open(os.path.join(work, "tracked"), "w").write("b\n")
-    got = state(work)
-    if got != ("master", "master", [" M tracked"]):
-        out.append(f"ci_state -> {got!r}, wanted ('master', 'master', [' M tracked'])")
-    return out
+    c.expect("ci_state", state(work), ("master", "master", [" M tracked"]))
 
 
 # Эпик — не сущность GitLab (она в платной редакции), а маркер в теле задачи:
@@ -316,128 +305,76 @@ EPIC_OF = [
 
 
 def main():
-    bad = cases = 0
+    c = Checks()
     for url, want in ORIGINS:
-        cases += 1
-        if gitlab._parse_origin(url) != want:
-            bad += 1
-            print(f"FAILED  origin {url!r} -> {gitlab._parse_origin(url)!r}, wanted {want!r}")
+        c.expect(f"origin {url!r}", gitlab._parse_origin(url), want)
 
     for labels, iid, slug, want in BRANCHES:
-        cases += 1
-        got = gitlab.branch_name(labels, iid, slug)
-        if got != want:
-            bad += 1
-            print(f"FAILED  branch {labels} #{iid} {slug!r} -> {got!r}, wanted {want!r}")
+        c.expect(f"branch {labels} #{iid} {slug!r}", gitlab.branch_name(labels, iid, slug), want)
 
     for labels, status, want in STATUS:
-        cases += 1
         got = gitlab.with_status(labels, status)
-        if sorted(got) != sorted(want):
-            bad += 1
-            print(f"FAILED  with_status({labels}, {status!r}) -> {got!r}, wanted {want!r}")
+        c.expect(f"with_status({labels}, {status!r}) (sorted)", sorted(got), sorted(want))
 
     for state, status, want in RELABEL_ACTION:
-        cases += 1
-        got = gitlab.relabel_action(state, status)
-        if got != want:
-            bad += 1
-            print(f"FAILED  relabel_action({state!r}, {status!r}) -> {got!r}, wanted {want!r}")
+        c.expect(f"relabel_action({state!r}, {status!r})",
+                 gitlab.relabel_action(state, status), want)
 
     # Закрыть «как отложенную» нельзя: отложенная открыта (#202).
-    cases += 1
-    if "parked" in gitlab.CLOSE_STATUSES or "parked" not in gitlab.OPEN_STATUSES:
-        bad += 1
-        print("FAILED  parked must be an open status, not a closing one")
+    c.check("parked must be an open status, not a closing one",
+            not ("parked" in gitlab.CLOSE_STATUSES or "parked" not in gitlab.OPEN_STATUSES))
 
     for pipeline, want in PIPELINE_VERDICT:
-        cases += 1
         fn = getattr(gitlab, "pipeline_verdict", None)
         got = fn(pipeline, SHA) if fn else "no gitlab.pipeline_verdict"
-        if got != want:
-            bad += 1
-            print(f"FAILED  pipeline_verdict({pipeline!r}) -> {got!r}, wanted {want!r}")
+        c.expect(f"pipeline_verdict({pipeline!r})", got, want)
 
     for pipeline, jobs, want in VERDICT_JOBS:
-        cases += 1
         try:
             got = gitlab.pipeline_verdict(pipeline, SHA, jobs)
         except TypeError as e:
             got = f"raised: {e}"
-        if got != want:
-            bad += 1
-            print(f"FAILED  pipeline_verdict({pipeline['status']}, {jobs!r}) -> {got!r}, "
-                  f"wanted {want!r}")
+        c.expect(f"pipeline_verdict({pipeline['status']}, {jobs!r})", got, want)
 
     from mop.cli.server import deploy
     for args, want in FROM_CI:
-        cases += 1
         fn = getattr(deploy, "from_ci_refusals", None)
         got = fn(*args) if fn else "no deploy.from_ci_refusals"
-        if got != want:
-            bad += 1
-            print(f"FAILED  from_ci_refusals{args} -> {got!r}, wanted {want!r}")
+        c.expect(f"from_ci_refusals{args}", got, want)
 
     for refusals, want in FROM_CI_DEFER:
-        cases += 1
         fn = getattr(deploy, "from_ci_deferred", None)
         got = fn(refusals, SHA) if fn else "no deploy.from_ci_deferred"
-        if got != want:
-            bad += 1
-            print(f"FAILED  from_ci_deferred({refusals!r}) -> {got!r}, wanted {want!r}")
+        c.expect(f"from_ci_deferred({refusals!r})", got, want)
 
-    cases += 1
-    sync = check_from_ci_sync()
-    if sync:
-        bad += 1
-        for line in sync:
-            print(f"FAILED  {line}")
+    check_from_ci_sync(c)
+    check_deploy_gate(c)
 
-    cases += 1
-    gate = check_deploy_gate()
-    if gate:
-        bad += 1
-        for line in gate:
-            print(f"FAILED  {line}")
-
-    cases += 1
     try:
         gitlab.with_status([], "partial")
-        bad += 1
-        print("FAILED  an unknown status must refuse, not pass through")
+        refused = False
     except RuntimeError:
-        pass
+        refused = True
+    c.check("an unknown status must refuse, not pass through", refused)
 
     for name in ("status::nope", "nope::live"):
-        cases += 1
         try:
             gitlab.check_label(name)
-            bad += 1
-            print(f"FAILED  check_label({name!r}) must refuse")
+            refused = False
         except RuntimeError:
-            pass
+            refused = True
+        c.check(f"check_label({name!r}) must refuse", refused)
 
     for body, iid, want in EPICS:
-        cases += 1
-        got = gitlab.with_epic(body, iid)
-        if got != want:
-            bad += 1
-            print(f"FAILED  with_epic({body!r}, {iid}) -> {got!r}, wanted {want!r}")
+        c.expect(f"with_epic({body!r}, {iid})", gitlab.with_epic(body, iid), want)
 
     for body, want in EPIC_OF:
-        cases += 1
-        got = gitlab.epic_of(body)
-        if got != want:
-            bad += 1
-            print(f"FAILED  epic_of({body!r}) -> {got!r}, wanted {want!r}")
+        c.expect(f"epic_of({body!r})", gitlab.epic_of(body), want)
 
-    cases += 1
-    if gitlab.check_label("component::bus") != "component::bus":
-        bad += 1
-        print("FAILED  a label from the vocabulary must pass")
+    c.expect("a label from the vocabulary must pass",
+             gitlab.check_label("component::bus"), "component::bus")
 
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+    return c.report("gitlab")
 
 
 if __name__ == "__main__":

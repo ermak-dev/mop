@@ -13,6 +13,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import nomad  # noqa: E402
@@ -48,26 +49,18 @@ CASES = [
 
 
 def main():
-    bad = 0
-    cases = 0
+    c = Checks()
     for what, n, a, want in CASES:
-        cases += 1
         why = nomad.forget_refusal(n, a)
-        if (why is None) != want:
-            bad += 1
-            print(f"FAILED  {what}: "
-                  f"{'разрешил' if why is None else 'отказал: ' + why}, "
-                  f"ждали {'разрешения' if want else 'отказа'}")
+        c.check(what, not ((why is None) != want),
+                f"{'разрешил' if why is None else 'отказал: ' + why}, "
+                f"ждали {'разрешения' if want else 'отказа'}")
     # Отказ обязан называть причину: «нельзя» без причины заставляет лезть в
     # Nomad руками, а руками тут и ошибаются.
-    cases += 1
     why = nomad.forget_refusal(node(), allocs("running"))
-    if not why or "pu-x-0" not in why:
-        bad += 1
-        print(f"FAILED  отказ должен называть, кто мешает: {why!r}")
-
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+    c.check("отказ должен называть, кто мешает", not (not why or "pu-x-0" not in why),
+            repr(why))
+    return c.report("node")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks, patched_env  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import config  # noqa: E402
@@ -22,10 +23,9 @@ except ImportError:
 
 
 def main():
-    failed = []
-    if context is None:
-        print("FAIL mop.context is missing\ncontext: FAILED")
-        return 1
+    c = Checks()
+    if not c.check("mop.context exists", context is not None):
+        return c.report("context")
     # HYPOTHESIS (#131): сервер клона знал только config.get, логин -- только
     # join, а --server был лишь у join. SOLUTION: один контекст по слоям для
     # всех команд. STATUS: FIXED — see #131
@@ -42,10 +42,11 @@ def main():
          ("cli.srv", "cli"), ("cloneuser", "clone")),
     ]
     for args, server, user in cases:
-        c = context.resolve(**args)
-        if (c.server, c.sources.get("server")) != server or \
-                (c.user, c.sources.get("user")) != user:
-            failed.append(f"resolve({args}) -> {c}, wanted server {server}, user {user}")
+        r = context.resolve(**args)
+        c.check(f"resolve({args})",
+                not ((r.server, r.sources.get("server")) != server or
+                     (r.user, r.sources.get("user")) != user),
+                f"-> {r}, wanted server {server}, user {user}")
 
     # Глобальная опция снимается с любого места, остальное argv -- как было.
     for argv, want in [
@@ -54,36 +55,30 @@ def main():
         (["secret", "file", "add", "--server", "a", ".env"], ("a", ["secret", "file", "add", ".env"])),
         (["list"], (None, ["list"])),
     ]:
-        got = context.strip_server(argv)
-        if got != want:
-            failed.append(f"strip_server({argv}) -> {got}, wanted {want}")
+        c.expect(f"strip_server({argv})", context.strip_server(argv), want)
     try:
         context.strip_server(["list", "--server"])
-        failed.append("a bare --server must be refused")
+        c.fail("a bare --server must be refused")
     except ValueError:
         pass
 
     # Менеджер ставит контекст и возвращает прежний, в том числе окружение
     # дочерних процессов; config.get видит сервер контекста.
-    saved = os.environ.pop("MOP_SERVER_LAN", None)
-    try:
+    with patched_env(MOP_SERVER_LAN=None):
         with context.use(context.resolve(cli={"server": "outer"}, env={}, clone={})):
-            if config.get("MOP_SERVER_LAN") != "outer" or os.environ.get("MOP_SERVER_LAN") != "outer":
-                failed.append("inside use() config.get and the environment must see the context")
+            c.check("inside use() config.get and the environment must see the context",
+                    not (config.get("MOP_SERVER_LAN") != "outer"
+                         or os.environ.get("MOP_SERVER_LAN") != "outer"))
             with context.use(context.resolve(cli={"server": "inner"}, env={}, clone={})):
-                if config.get("MOP_SERVER_LAN") != "inner":
-                    failed.append("a nested use() must win")
-            if config.get("MOP_SERVER_LAN") != "outer":
-                failed.append("leaving a nested use() must restore the outer context")
-        if "MOP_SERVER_LAN" in os.environ or context.current().server is not None:
-            failed.append("leaving use() must restore the environment and the context")
+                c.expect("a nested use() must win", config.get("MOP_SERVER_LAN"), "inner")
+            c.expect("leaving a nested use() must restore the outer context",
+                     config.get("MOP_SERVER_LAN"), "outer")
+        c.check("leaving use() must restore the environment and the context",
+                not ("MOP_SERVER_LAN" in os.environ or context.current().server is not None))
         # Пустой контекст не мешает файлам: дефолт установки -- из них.
         with context.use(context.resolve(cli={}, env={}, clone={})):
-            if "MOP_SERVER_LAN" in os.environ:
-                failed.append("an empty context must not export an empty server")
-    finally:
-        if saved is not None:
-            os.environ["MOP_SERVER_LAN"] = saved
+            c.check("an empty context must not export an empty server",
+                    "MOP_SERVER_LAN" not in os.environ)
 
     # ── интеграционная ветка per user (#249) ─────────────────────────────
     # HYPOTHESIS: ветку тикета `mop dev bug start` заводит от origin/HEAD, а
@@ -104,35 +99,24 @@ def main():
         # Поле независимое: ветка окружения не отменяет сервера и логина клона.
         (dict(cli={}, env={"MOP_BRANCH": "envdev"}, clone=clone_b), ("envdev", "env")),
     ]:
-        c = context.resolve(**args)
-        got = (getattr(c, "branch", "MISSING"), c.sources.get("branch"))
-        if got != want:
-            failed.append(f"#249 resolve({args}).branch -> {got}, wanted {want}")
-    c = context.resolve(cli={}, env={"MOP_BRANCH": "envdev"}, clone=clone_b)
-    if (c.server, c.user) != ("clone.srv", "cloneuser"):
-        failed.append(f"#249 the branch layer must leave server and user alone: {c}")
-    saved_b = os.environ.pop("MOP_BRANCH", None)
-    try:
+        r = context.resolve(**args)
+        got = (getattr(r, "branch", "MISSING"), r.sources.get("branch"))
+        c.expect(f"#249 resolve({args}).branch", got, want)
+    r = context.resolve(cli={}, env={"MOP_BRANCH": "envdev"}, clone=clone_b)
+    c.expect("#249 the branch layer must leave server and user alone",
+             (r.server, r.user), ("clone.srv", "cloneuser"))
+    with patched_env(MOP_BRANCH=None):
         from mop.cli import lib
         with context.use(context.resolve(cli={"branch": "dev"}, env={}, clone={})):
-            if os.environ.get("MOP_BRANCH") != "dev":
-                failed.append("#249 use() must export MOP_BRANCH to child processes")
-            if lib.default_branch() != "origin/dev":
-                failed.append(f"#249 default_branch under a branch context -> "
-                              f"{lib.default_branch()!r}, wanted 'origin/dev'")
-        if "MOP_BRANCH" in os.environ:
-            failed.append("#249 leaving use() must drop MOP_BRANCH")
+            c.expect("#249 use() must export MOP_BRANCH to child processes",
+                     os.environ.get("MOP_BRANCH"), "dev")
+            c.expect("#249 default_branch under a branch context",
+                     lib.default_branch(), "origin/dev")
+        c.check("#249 leaving use() must drop MOP_BRANCH", "MOP_BRANCH" not in os.environ)
         with context.use(context.resolve(cli={}, env={}, clone={})):
-            if not lib.default_branch().startswith("origin/"):
-                failed.append(f"#249 without a branch context default_branch must ask git: "
-                              f"{lib.default_branch()!r}")
-    finally:
-        if saved_b is not None:
-            os.environ["MOP_BRANCH"] = saved_b
-
-    print("\n".join(f"FAIL {l}" for l in failed) if failed else "", end="\n" if failed else "")
-    print("context: FAILED" if failed else "context: ok")
-    return 1 if failed else 0
+            c.check("#249 without a branch context default_branch must ask git",
+                    lib.default_branch().startswith("origin/"), repr(lib.default_branch()))
+    return c.report("context")
 
 
 if __name__ == "__main__":

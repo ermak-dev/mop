@@ -18,6 +18,8 @@ import tempfile
 import types
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import (Checks, canned, offline, patched, patched_env,  # noqa: E402
+                  restored, udp_socket)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import config  # noqa: E402
@@ -135,17 +137,11 @@ def old_toward_server():
         s.close()
 
 
-def check_contract_151():
+def check_contract_151(c):
     """#151: адрес, сборочные тела и тип узла -- в контракте, ветки по флагу
-    -- в драйверах. -> (случаев, провалов)."""
+    -- в драйверах."""
     import asyncio
     import re
-    cases = bad = 0
-
-    def fail(text):
-        nonlocal bad
-        bad += 1
-        print(f"FAILED  {text}")
 
     host, pve = driver.module("host"), driver.module("pve")
 
@@ -153,15 +149,13 @@ def check_contract_151():
     # драйвер это имеет: третий драйвер иначе проходит проверку и падает у
     # потребителя.
     used = consumed_names()
-    cases += 1
-    if not used or used - set(driver.CONSUMED):
-        fail(f"consumers call {sorted(used - set(driver.CONSUMED))} outside "
-             f"driver.CONSUMED {driver.CONSUMED}")
+    c.check("consumers call only what driver.CONSUMED declares",
+            not (not used or used - set(driver.CONSUMED)),
+            f"consumers call {sorted(used - set(driver.CONSUMED))} outside "
+            f"driver.CONSUMED {driver.CONSUMED}")
     for name, mod in (("host", host), ("pve", pve)):
         for attr in driver.CONSUMED:
-            cases += 1
-            if not hasattr(mod, attr):
-                fail(f"{name} has no {attr}, which consumers call")
+            c.check(f"{name} has {attr}, which consumers call", hasattr(mod, attr))
 
     # Флага и сравнения с драйвером по умолчанию вне mop/driver/ нет.
     for base, _, files in os.walk(os.path.join(ROOT, "mop")):
@@ -174,186 +168,123 @@ def check_contract_151():
                 code = line.split("#")[0]
                 if re.search(r"BODY_IS_NODE|IS_CONTAINER|address_of\(|getattr\(.*templates"
                              r"|[!=]= *driver\.DEFAULT", code):
-                    cases += 1
-                    fail(f"{os.path.relpath(os.path.join(base, f), ROOT)}:{n} "
-                         f"branches on the driver type: {line.strip()}")
+                    c.fail(f"{os.path.relpath(os.path.join(base, f), ROOT)}:{n} "
+                           f"branches on the driver type", line.strip())
 
     # Характеризация: ответы прежних веток. Адрес сервера у host с #200 -- из
     # url кредов шины узла, а не из настройки; сервер тот же.
-    keep = os.environ.get("MOP_SERVER_LAN"), host.NODE_FILE
-    os.environ["MOP_SERVER_LAN"] = "127.0.0.1"
-    tmp = tempfile.TemporaryDirectory()
-    host.NODE_FILE = os.path.join(tmp.name, "bus.json")
-    with open(host.NODE_FILE, "w") as f:
-        f.write('{"url": "nats://127.0.0.1:4222"}')
-    try:
-        cases += 1
-        if host.address("pu-mop-1") != old_toward_server():
-            fail(f"host.address -> {host.address('pu-mop-1')!r}, "
-                 f"wanted {old_toward_server()!r} (the node, seen from the server)")
-    finally:
-        host.NODE_FILE = keep[1]
-        tmp.cleanup()
-        if keep[0] is None:
-            os.environ.pop("MOP_SERVER_LAN", None)
-        else:
-            os.environ["MOP_SERVER_LAN"] = keep[0]
+    with tempfile.TemporaryDirectory() as tmp, \
+            patched_env(MOP_SERVER_LAN="127.0.0.1"), \
+            patched(host, NODE_FILE=os.path.join(tmp, "bus.json")):
+        with open(host.NODE_FILE, "w") as f:
+            f.write('{"url": "nats://127.0.0.1:4222"}')
+        c.expect("host.address: the node, seen from the server",
+                 host.address("pu-mop-1"), old_toward_server())
     for n in ("pu-mop-1", "pu-rugent-7"):
-        cases += 1
-        if pve.address(n) != pve.address_of(n):
-            fail(f"pve.address({n}) -> {pve.address(n)}, wanted {pve.address_of(n)}")
-    cases += 1
-    if asyncio.run(host.templates()) != []:
-        fail("host.templates() must be [] — a node-body driver builds no images")
-    cases += 1
-    if not asyncio.iscoroutinefunction(pve.templates):
-        fail("pve.templates must stay a coroutine")
+        c.expect(f"pve.address({n})", pve.address(n), pve.address_of(n))
+    c.expect("host.templates() must be [] — a node-body driver builds no images",
+             asyncio.run(host.templates()), [])
+    c.check("pve.templates must stay a coroutine",
+            asyncio.iscoroutinefunction(pve.templates))
     for name, want in (("host", False), ("pve", True)):
-        cases += 1
-        if driver.is_container(name) is not want:
-            fail(f"driver.is_container({name!r}) must be {want}")
+        c.check(f"driver.is_container({name!r}) must be {want}",
+                not (driver.is_container(name) is not want))
     # До #175 неизвестное и пустое имя были «контейнером» (builder и image
     # решали `!= DEFAULT`), а of_node оставлял пустое пустым. Теперь пустое
     # -- DEFAULT, неизвестное -- отказ (check_driver_rule_175).
     for name in ("", "nosuch"):
-        cases += 1
         try:
             driver.is_container(name)
-            fail(f"driver.is_container({name!r}) must refuse")
+            refused = False
         except RuntimeError:
-            pass
+            refused = True
+        c.check(f"driver.is_container({name!r}) must refuse", refused)
     for meta, want in (({}, driver.DEFAULT), ({"mop_driver": "pve"}, "pve"),
                        ({"mop_driver": ""}, driver.DEFAULT), (None, driver.DEFAULT)):
-        cases += 1
-        if driver.of_node(meta) != want:
-            fail(f"driver.of_node({meta!r}) -> {driver.of_node(meta)!r}, wanted {want!r}")
+        c.expect(f"driver.of_node({meta!r})", driver.of_node(meta), want)
 
     # Впуск ключа сервера (#62) -- полиморфный admit(name, open): host открывать
     # нечего, pve без ключа сервера на узле отказывает прежним текстом.
     for open_ in (True, False):
-        cases += 1
-        if asyncio.run(host.admit("pu-mop-1", open_)) != {}:
-            fail(f"host.admit(..., {open_}) must be a no-op")
-    cases += 1
-    if driver.SERVER_PUB != f"{driver.HOME}/.config/mop/bootstrap.pub":
-        fail(f"driver.SERVER_PUB moved: {driver.SERVER_PUB}")
+        c.expect(f"host.admit(..., {open_}) must be a no-op",
+                 asyncio.run(host.admit("pu-mop-1", open_)), {})
+    c.expect("driver.SERVER_PUB must not move", driver.SERVER_PUB,
+             f"{driver.HOME}/.config/mop/bootstrap.pub")
     missing = os.path.join(tempfile.mkdtemp(prefix="mop-test-driver-"), "bootstrap.pub")
-    keep_pub, pve.SERVER_PUB = pve.SERVER_PUB, missing
-    try:
-        cases += 1
+    with patched(pve, SERVER_PUB=missing):
         try:
             asyncio.run(pve.admit("pu-mop-1", True))
-            fail("pve.admit without the server key must refuse")
+            c.fail("pve.admit without the server key must refuse")
         except RuntimeError as e:
-            want = f"no server key on this node ({missing}) — run mop server deploy"
-            if str(e) != want:
-                fail(f"pve refusal without the server key: {str(e)!r}, wanted {want!r}")
-    finally:
-        pve.SERVER_PUB = keep_pub
-    return cases, bad
+            c.expect("pve refusal without the server key", str(e),
+                     f"no server key on this node ({missing}) — run mop server deploy")
 
 
 def main():
-    bad = 0
-    cases = 0
+    c = Checks()
 
     for what, mod, ok in CONTRACT:
-        cases += 1
         try:
             got = driver.contract("fake", mod)
             refused = False
         except RuntimeError:
             got, refused = None, True
-        if refused == ok:
-            bad += 1
-            print(f"FAILED  contract: {what} — "
-                  f"{'refused' if refused else 'accepted'}, wanted the opposite")
-        elif ok and got.get("doc") and not isinstance(got["doc"], str):
-            bad += 1
-            print(f"FAILED  contract: {what} — doc is not a string")
+        if c.check(f"contract: {what}", refused != ok,
+                   f"{'refused' if refused else 'accepted'}, wanted the opposite"):
+            c.check(f"contract: {what} — doc is a string",
+                    not (ok and got.get("doc") and not isinstance(got["doc"], str)))
 
-    cases += 1
-    if driver.contract("fake", plugin(__doc__="one\ntwo"))["doc"] != "one":
-        bad += 1
-        print("FAILED  contract: doc must be the first line of the docstring")
+    c.expect("contract: doc must be the first line of the docstring",
+             driver.contract("fake", plugin(__doc__="one\ntwo"))["doc"], "one")
 
     for name, ok in NAMES:
-        cases += 1
-        if driver.valid_name(name) != ok:
-            bad += 1
-            print(f"FAILED  valid_name({name!r}) must be {ok}")
+        c.expect(f"valid_name({name!r})", driver.valid_name(name), ok)
 
-    cases += 1
-    if not isinstance(driver.get("host"), dict):
-        bad += 1
-        print("FAILED  registry didn't find the host driver")
-    cases += 1
-    if driver.get("no-such") is not None:
-        bad += 1
-        print("FAILED  get() of an unknown name must return None")
-    cases += 1
+    c.check("registry finds the host driver", isinstance(driver.get("host"), dict))
+    c.check("get() of an unknown name must return None", driver.get("no-such") is None)
     try:
         driver.require("no-such")
-        bad += 1
-        print("FAILED  require() of an unknown name must refuse")
+        refused = False
     except RuntimeError:
-        pass
+        refused = True
+    c.check("require() of an unknown name must refuse", refused)
 
     # Драйвер узла, а не папета: значение приезжает в окружение агента юнитом,
     # и подставить его запросом с шины нельзя. Дефолт — host: узел, ничего про
     # драйвер не знающий, обязан вести себя как раньше.
     host = driver.module("host")
     for what, verb, want in HOST_ARGV:
-        cases += 1
-        got = getattr(host, verb)("pu-mop-1")
-        if got != want:
-            bad += 1
-            print(f"FAILED  host.{verb}: {what}\n  wanted: {want!r}\n  got: {got!r}")
+        c.expect(f"host.{verb}: {what}", getattr(host, verb)("pu-mop-1"), want)
 
     # Драйвер узла, а не папета, и спрашивают его двое с разным окружением:
     # агент из юнита systemd и внешний врапер из процесса задачи Nomad. Пока
     # значение жило строкой Environment= в юните, врапер его не видел и молча
     # поднимал папета драйвером host — на гипервизоре это значит «прямо на
     # гипервизоре, мимо тела». Поэтому источник правды — файл узла.
-    saved_env = os.environ.pop("MOP_DRIVER", None)
-    saved_file = config.NODE_ENV_FILE
     tmp = os.path.join(tempfile.mkdtemp(), "node.env")
     try:
-        config.NODE_ENV_FILE = tmp
-        config.forget()
-        cases += 1
-        if driver.current_name() != "host":
-            bad += 1
-            print("FAILED  a node that says nothing about a driver must be host")
-        cases += 1
-        with open(tmp, "w") as f:
-            f.write("MOP_DRIVER=pve\n")
-        config.forget()
-        if driver.current_name() != "pve":
-            bad += 1
-            print("FAILED  current_name() must read the node's file — an empty "
-                  "environment is the wrapper's normal case")
-        cases += 1
-        with open(tmp, "w") as f:
-            f.write("MOP_DRIVER=\n")
-        config.forget()
-        if driver.current_name() != "host":
-            bad += 1
-            print("FAILED  an empty file must mean host, not an empty driver name")
-        cases += 1
-        with open(tmp, "w") as f:
-            f.write("MOP_DRIVER=pve\n")
-        config.forget()
-        os.environ["MOP_DRIVER"] = "host"
-        if driver.current() is not host:
-            bad += 1
-            print("FAILED  MOP_DRIVER must outrank the node's file")
+        with patched_env(MOP_DRIVER=None), patched(config, NODE_ENV_FILE=tmp):
+            config.forget()
+            c.check("a node that says nothing about a driver must be host",
+                    driver.current_name() == "host")
+            with open(tmp, "w") as f:
+                f.write("MOP_DRIVER=pve\n")
+            config.forget()
+            c.check("current_name() must read the node's file — an empty "
+                    "environment is the wrapper's normal case",
+                    driver.current_name() == "pve")
+            with open(tmp, "w") as f:
+                f.write("MOP_DRIVER=\n")
+            config.forget()
+            c.check("an empty file must mean host, not an empty driver name",
+                    driver.current_name() == "host")
+            with open(tmp, "w") as f:
+                f.write("MOP_DRIVER=pve\n")
+            config.forget()
+            os.environ["MOP_DRIVER"] = "host"
+            c.check("MOP_DRIVER must outrank the node's file", driver.current() is host)
     finally:
-        config.NODE_ENV_FILE = saved_file
         config.forget()
-        os.environ.pop("MOP_DRIVER", None)
-        if saved_env is not None:
-            os.environ["MOP_DRIVER"] = saved_env
 
     # ── драйвер pve: всё выводится из имени ──────────────────────────────
     pve = driver.module("pve")
@@ -361,168 +292,119 @@ def main():
     # Раздача файла (`mop login`) идёт в узел И в каждое тело. У host второе
     # было бы той же записью в тот же файл по разу на папета — и, что хуже,
     # отчёт обещал бы запись в тела, которых нет.
-    cases += 1
-    if host.IS_CONTAINER is not False:
-        bad += 1
-        print("FAILED  host.IS_CONTAINER must be False — the body IS the node")
+    c.check("host.IS_CONTAINER must be False — the body IS the node",
+            host.IS_CONTAINER is False)
 
-    cases += 1
-    if not isinstance(driver.get("pve"), dict):
-        bad += 1
-        print("FAILED  registry didn't find the pve driver")
+    c.check("registry finds the pve driver", isinstance(driver.get("pve"), dict))
 
     # VMID в своём диапазоне и не пересекается с диапазоном шаблонов: шаблон
     # живёт рядом с телами и сносится теми же глаголами, так что налезь один
     # на другой — снос папета унёс бы образ проекта.
     seen = {}
     for name in PVE_NAMES:
-        cases += 1
         vmid = pve.vmid_of(name)
-        if not pve.BODY_MIN <= vmid <= pve.BODY_MAX:
-            bad += 1
-            print(f"FAILED  pve.vmid_of({name!r}) = {vmid}, outside "
-                  f"{pve.BODY_MIN}..{pve.BODY_MAX}")
-        if vmid in seen:
-            bad += 1
-            print(f"FAILED  pve.vmid_of: {name!r} and {seen[vmid]!r} collide on {vmid}")
+        c.check(f"pve.vmid_of({name!r}) within {pve.BODY_MIN}..{pve.BODY_MAX}",
+                pve.BODY_MIN <= vmid <= pve.BODY_MAX, f"got {vmid}")
+        c.check(f"pve.vmid_of: {name!r} collides with no other name", vmid not in seen,
+                f"{name!r} and {seen.get(vmid)!r} collide on {vmid}")
         seen[vmid] = name
 
-    cases += 1
-    if pve.vmid_of("pu-mop-1") != pve.vmid_of("pu-mop-1"):
-        bad += 1
-        print("FAILED  pve.vmid_of must be a function of the name, nothing else")
+    c.check("pve.vmid_of must be a function of the name, nothing else",
+            pve.vmid_of("pu-mop-1") == pve.vmid_of("pu-mop-1"))
 
     for project in ("mop", "rugent", "cloudpub"):
-        cases += 1
         t = pve.template_vmid(project)
-        if not pve.TMPL_MIN <= t <= pve.TMPL_MAX:
-            bad += 1
-            print(f"FAILED  pve.template_vmid({project!r}) = {t}, outside "
-                  f"{pve.TMPL_MIN}..{pve.TMPL_MAX}")
-        if pve.BODY_MIN <= t <= pve.BODY_MAX:
-            bad += 1
-            print(f"FAILED  template {t} lands in the body range — a wipe would "
-                  f"take the project's image with it")
-        cases += 1
+        c.check(f"pve.template_vmid({project!r}) within {pve.TMPL_MIN}..{pve.TMPL_MAX}",
+                pve.TMPL_MIN <= t <= pve.TMPL_MAX, f"got {t}")
+        c.check(f"template {t} stays out of the body range — a wipe would "
+                f"take the project's image with it", not (pve.BODY_MIN <= t <= pve.BODY_MAX))
         # Имя шаблона обязано быть под охраной префикса (root-обёртка на
         # гипервизоре пускает только pu-*), но не быть именем папета: иначе
         # ростер тел показал бы образ живым папетом.
         tn = pve.template_name(project)
-        if not tn.startswith("pu-") or driver.valid_name(tn):
-            bad += 1
-            print(f"FAILED  template name {tn!r} must start with pu- and not "
-                  f"look like a puppet name")
+        c.check(f"template name {tn!r} must start with pu- and not look like a puppet name",
+                not (not tn.startswith("pu-") or driver.valid_name(tn)))
 
     # Адрес выводится из VMID, а не хранится: хранимый однажды разойдётся с
     # тем, что реально стоит на контейнере.
     addrs = {}
     for name in PVE_NAMES:
-        cases += 1
         ip = pve.address_of(name)
-        if ip == pve.GATEWAY:
-            bad += 1
-            print(f"FAILED  pve.address_of({name!r}) is the gateway {ip}")
-        if not ip.startswith(pve.SUBNET.rsplit(".", 2)[0] + "."):
-            bad += 1
-            print(f"FAILED  pve.address_of({name!r}) = {ip}, outside {pve.SUBNET}")
-        if ip in addrs:
-            bad += 1
-            print(f"FAILED  pve.address_of: {name!r} and {addrs[ip]!r} share {ip}")
+        c.check(f"pve.address_of({name!r}) is not the gateway", ip != pve.GATEWAY, ip)
+        c.check(f"pve.address_of({name!r}) within {pve.SUBNET}",
+                ip.startswith(pve.SUBNET.rsplit(".", 2)[0] + "."), ip)
+        c.check(f"pve.address_of: {name!r} shares its address with no other name",
+                ip not in addrs, f"{name!r} and {addrs.get(ip)!r} share {ip}")
         addrs[ip] = name
 
-    cases += 1
-    if pve.IS_CONTAINER is not True:
-        bad += 1
-        print("FAILED  pve.IS_CONTAINER must be True — a body is a container")
+    c.check("pve.IS_CONTAINER must be True — a body is a container",
+            pve.IS_CONTAINER is True)
 
     # ssh, а не proxmox_pct_remote: ControlPersist держит соединение, и проба
     # состояния перестаёт платить рукопожатием.
-    cases += 1
     a = pve.argv("pu-mop-1")
     ip = pve.address_of("pu-mop-1")
-    if a[:1] != ["ssh"] or not any(x.endswith("@" + ip) for x in a):
-        bad += 1
-        print(f"FAILED  pve.argv must be ssh into {ip}: {a!r}")
-    cases += 1
-    if "ControlPersist=" not in " ".join(a):
-        bad += 1
-        print("FAILED  pve.argv without ControlPersist pays a handshake per probe")
-    cases += 1
-    if "BatchMode=yes" not in " ".join(a):
-        bad += 1
-        print("FAILED  pve.argv without BatchMode can stop on a password prompt")
+    c.check(f"pve.argv must be ssh into {ip}",
+            not (a[:1] != ["ssh"] or not any(x.endswith("@" + ip) for x in a)), repr(a))
+    c.check("pve.argv without ControlPersist pays a handshake per probe",
+            "ControlPersist=" in " ".join(a))
+    c.check("pve.argv without BatchMode can stop on a password prompt",
+            "BatchMode=yes" in " ".join(a))
 
     # Соединение врапера живёт столько же, сколько папет, и мультиплексировать
     # его нельзя. Поймано на живом папете: мастер-соединение, уходящее по
     # ControlPersist, уносит с собой сессию врапера — ssh отдаёт 255, Nomad
     # читает это как падение задачи и перезапускает папета на ровном месте.
-    cases += 1
     r = pve.run_argv("pu-mop-1")
     joined = " ".join(r)
-    if r[:1] != ["ssh"] or not any(x.endswith("@" + ip) for x in r):
-        bad += 1
-        print(f"FAILED  pve.run_argv must be ssh into {ip}: {r!r}")
-    cases += 1
-    if "ControlMaster=no" not in joined or "ControlPath=none" not in joined:
-        bad += 1
-        print("FAILED  pve.run_argv must not share a multiplexed connection — "
-              "the master's ControlPersist would take the puppet down with it")
+    c.check(f"pve.run_argv must be ssh into {ip}",
+            not (r[:1] != ["ssh"] or not any(x.endswith("@" + ip) for x in r)), repr(r))
+    c.check("pve.run_argv must not share a multiplexed connection — "
+            "the master's ControlPersist would take the puppet down with it",
+            not ("ControlMaster=no" not in joined or "ControlPath=none" not in joined))
     # ПОРЯДОК, а не присутствие: у ssh побеждает первая встреченная опция, и
     # `ControlMaster=no` после `auto` из общего списка не действует. Так
     # врапер молча становился клиентом мастер-сокета агента и умирал с ним
     # при каждом рестарте юнита — задача выходила кодом 255 (22.09, дважды).
     # HYPOTHESIS: переопределение стоит после _SSH_OPTS. SOLUTION: перед.
     # STATUS: FIXED — see #72
-    cases += 1
     masters = [x for x in r if x.startswith("ControlMaster=")]
     paths = [x for x in r if x.startswith("ControlPath=")]
-    if masters[:1] != ["ControlMaster=no"] or paths[:1] != ["ControlPath=none"]:
-        bad += 1
-        print(f"FAILED  pve.run_argv: the FIRST ControlMaster/ControlPath must be "
-              f"no/none — ssh takes the first value it sees: {masters} {paths}")
-    cases += 1
-    if "ServerAliveInterval" not in joined:
-        bad += 1
-        print("FAILED  pve.run_argv holds a connection for the puppet's whole "
-              "life; without a keepalive a silent NAT drop reads as a dead puppet")
+    c.check("pve.run_argv: the FIRST ControlMaster/ControlPath must be "
+            "no/none — ssh takes the first value it sees",
+            not (masters[:1] != ["ControlMaster=no"] or paths[:1] != ["ControlPath=none"]),
+            f"{masters} {paths}")
+    c.check("pve.run_argv holds a connection for the puppet's whole "
+            "life; without a keepalive a silent NAT drop reads as a dead puppet",
+            "ServerAliveInterval" in joined)
 
     # Аварийный путь — не ssh: он нужен ровно тогда, когда у тела сломана сеть,
     # sshd или права на authorized_keys.
-    cases += 1
     r = pve.repair_argv("pu-mop-1")
-    if not r or "ssh" in r[0]:
-        bad += 1
-        print(f"FAILED  pve.repair_argv must not go over ssh: {r!r}")
-    cases += 1
-    if str(pve.vmid_of("pu-mop-1")) not in r:
-        bad += 1
-        print(f"FAILED  pve.repair_argv must name the body's vmid: {r!r}")
+    c.check("pve.repair_argv must not go over ssh", not (not r or "ssh" in r[0]), repr(r))
+    c.check("pve.repair_argv must name the body's vmid",
+            str(pve.vmid_of("pu-mop-1")) in r, repr(r))
 
     # Человек входит в тело, а не на гипервизор: на гипервизоре tmux-сервера
     # папета нет вовсе.
-    cases += 1
     at = pve.attach_argv("pu-mop-1")
-    if at[:1] != ["ssh"] or "tmux" not in at:
-        bad += 1
-        print(f"FAILED  pve.attach_argv must ssh into the body and run tmux: {at!r}")
+    c.check("pve.attach_argv must ssh into the body and run tmux",
+            not (at[:1] != ["ssh"] or "tmux" not in at), repr(at))
 
     # Имя, не прошедшее valid_name, в шелл гипервизора не попадает вовсе.
     for bogus in ("pu-mop-1;id", "../etc", ""):
-        cases += 1
         try:
             pve.vmid_of(bogus)
-            bad += 1
-            print(f"FAILED  pve.vmid_of({bogus!r}) must refuse")
+            refused = False
         except ValueError:
-            pass
+            refused = True
+        c.check(f"pve.vmid_of({bogus!r}) must refuse", refused)
 
     # Транскрипты лежат внутри тела: считать их путём на гипервизоре значит
     # молча получить нулевой расход токенов у контейнерных папетов.
-    cases += 1
-    if pve.projects_dir("pu-mop-1") == host.projects_dir("pu-mop-1") \
-            and pve.HOME != host.HOME:
-        bad += 1
-        print("FAILED  pve.projects_dir must point inside the body")
+    c.check("pve.projects_dir must point inside the body",
+            not (pve.projects_dir("pu-mop-1") == host.projects_dir("pu-mop-1")
+                 and pve.HOME != host.HOME))
 
     # Адрес сборочного тела обязан быть СВОИМ у каждого проекта и не задевать
     # живые тела. Раньше он считался как «шлюз плюс один» одинаково для всех,
@@ -530,32 +412,24 @@ def main():
     # гипервизоре садились на один адрес, ssh уходил в чужой контейнер, обе
     # стороны оставались живыми и молчали (22.09, rugent против rudesktop).
     projects = ("rugent", "cloudpub", "mop", "rudesktop", "a", "zzz")
-    cases += 1
-    if len({pve.template_address(s) for s in projects}) != len(projects):
-        bad += 1
-        print("FAILED  two projects share one build address")
+    c.check("no two projects share one build address",
+            len({pve.template_address(s) for s in projects}) == len(projects))
 
     # Диапазоны не пересекаются по построению: VMID шаблонов идут выше VMID
     # тел, и адрес считается из VMID одной формулой. Проверяем края — именно
     # там прежний «шлюз плюс один» и совпадал с первым живым телом.
-    cases += 1
     body_addrs = {pve.address_of_vmid(v) for v in (pve.BODY_MIN, pve.BODY_MAX)}
     tmpl_addrs = {pve.address_of_vmid(v) for v in (pve.TMPL_MIN, pve.TMPL_MAX)}
-    if body_addrs & tmpl_addrs:
-        bad += 1
-        print("FAILED  build addresses overlap live bodies")
+    c.check("build addresses do not overlap live bodies", not (body_addrs & tmpl_addrs))
 
     # И адрес обязан быть настоящим адресом этой сети, не шлюзом: выехавший
     # за подсеть адрес не отказывает, он просто не отвечает.
     import ipaddress as _ip
     net = _ip.ip_network(pve.SUBNET)
     for sh in projects:
-        cases += 1
         addr = _ip.ip_address(pve.template_address(sh))
-        if addr not in net or str(addr) == pve.GATEWAY:
-            bad += 1
-            print(f"FAILED  build address of {sh} is {addr}, outside {net} "
-                  f"or equal to the gateway")
+        c.check(f"build address of {sh} is inside {net} and not the gateway",
+                not (addr not in net or str(addr) == pve.GATEWAY), str(addr))
 
     # Адрес считается от АБСОЛЮТНОГО VMID, а не от базы этого узла (#58).
     # База (MOP_PVE_VMID_BASE) узловая и у второго гипервизора своя, а
@@ -567,22 +441,17 @@ def main():
     # HYPOTHESIS: address_of_vmid = сеть + 2 + (vmid − BODY_MIN).
     # SOLUTION: сеть + vmid, без базы. STATUS: FIXED — see #58
     for v in (pve.BODY_MIN, pve.BODY_MIN + 828, pve.TMPL_MAX):
-        cases += 1
-        want = str(net.network_address + v)
-        if pve.address_of_vmid(v) != want:
-            bad += 1
-            print(f"FAILED  pve.address_of_vmid({v}) = {pve.address_of_vmid(v)}, "
-                  f"wanted {want}: the address must not depend on this node's base")
+        c.expect(f"pve.address_of_vmid({v}): the address must not depend on this "
+                 f"node's base", pve.address_of_vmid(v), str(net.network_address + v))
 
     # VMID, не влезающий в сеть тел, — громкий отказ, а не адрес соседней
     # сети: уехавший за подсеть адрес не отказывает, он просто не отвечает.
-    cases += 1
     try:
         pve.address_of_vmid(net.num_addresses + 5)
-        bad += 1
-        print("FAILED  pve.address_of_vmid past the subnet must refuse")
+        refused = False
     except ValueError:
-        pass
+        refused = True
+    c.check("pve.address_of_vmid past the subnet must refuse", refused)
 
     # Маршрут к телам этого узла (#59): сервер достаёт до тел только через
     # гипервизор, и кто-то обязан раздать ему маршрут. Кусок сети одного
@@ -592,36 +461,28 @@ def main():
     # HYPOTHESIS: маршрута нет вовсе, роль pve кончается мостом и NAT.
     # SOLUTION: pve.routes_of(subnet, base) — CIDR'ы, покрывающие ровно
     # [сеть+base, сеть+base+999]; проверяется без пула. STATUS: FIXED — see #59
-    cases += 1
     try:
         got = pve.routes_of(pve.SUBNET, 9000)
+        present = True
     except AttributeError:
-        got = None
-        bad += 1
-        print("FAILED  pve.routes_of is missing: nobody hands the server a route")
+        got, present = None, False
+    c.check("pve.routes_of exists: somebody hands the server a route", present)
     if got is not None:
-        nets = [_ip.ip_network(c) for c in got]
+        nets = [_ip.ip_network(n) for n in got]
         covered = set()
         for n in nets:
             covered |= set(n.hosts()) | {n.network_address, n.broadcast_address}
         want = {net.network_address + v for v in range(9000, 10000)}
-        cases += 1
-        if covered != want:
-            bad += 1
-            print(f"FAILED  routes_of covers {len(covered)} addresses, wanted "
-                  f"exactly the 1000 of vmids 9000..9999: {got}")
+        c.check("routes_of covers exactly the 1000 addresses of vmids 9000..9999",
+                covered == want, f"covers {len(covered)} addresses: {got}")
         # Второй гипервизор со своей базой не пересекается с первым ни одним
         # адресом — иначе маршрут неоднозначен, и ломается это молча.
-        cases += 1
-        other = [_ip.ip_network(c) for c in pve.routes_of(pve.SUBNET, 20000)]
-        if any(a.overlaps(b) for a in nets for b in other):
-            bad += 1
-            print("FAILED  routes of two bases overlap")
+        other = [_ip.ip_network(n) for n in pve.routes_of(pve.SUBNET, 20000)]
+        c.check("routes of two bases do not overlap",
+                not any(a.overlaps(b) for a in nets for b in other))
         # И это маршруты именно ЭТОЙ сети, а не соседней.
-        cases += 1
-        if any(not n.subnet_of(net) for n in nets + other):
-            bad += 1
-            print(f"FAILED  a route leaves the bodies' network {net}")
+        c.check(f"no route leaves the bodies' network {net}",
+                not any(not n.subnet_of(net) for n in nets + other))
 
     # Сборочное тело (#60). Пересборка больше не начинается со сноса образа:
     # шаблон полностью клонируется в сборочное тело, плейбук играется там
@@ -630,56 +491,44 @@ def main():
     # ПРОДОЛЖИТЬ одной командой: следующий прогон находит его по имени.
     # HYPOTHESIS: stage_name/stage_vmid/parse_list нет вовсе — образ сносится
     # первой задачей. SOLUTION: чистые функции ниже. STATUS: FIXED — see #60
-    cases += 1
     try:
         sn = pve.stage_name("mop")
-        if not sn.startswith("pu-tmpl-") or driver.valid_name(sn) \
-                or sn == pve.template_name("mop"):
-            bad += 1
-            print(f"FAILED  stage name {sn!r} must be a template-like name of its own")
+        c.check(f"stage name {sn!r} must be a template-like name of its own",
+                not (not sn.startswith("pu-tmpl-") or driver.valid_name(sn)
+                     or sn == pve.template_name("mop")))
     except AttributeError:
-        bad += 1
-        print("FAILED  pve.stage_name is missing")
+        c.fail("pve.stage_name is missing")
 
     listing = "9828 pu-rugent-1 running\n9988 pu-tmpl-rugent stopped\n"
-    cases += 1
     try:
         parsed = pve.parse_list(listing)
-        if parsed != [(9828, "pu-rugent-1", "running"),
-                      (9988, "pu-tmpl-rugent", "stopped")]:
-            bad += 1
-            print(f"FAILED  parse_list: {parsed!r}")
+        c.expect("parse_list", parsed, [(9828, "pu-rugent-1", "running"),
+                                        (9988, "pu-tmpl-rugent", "stopped")])
     except AttributeError:
         parsed = None
-        bad += 1
-        print("FAILED  pve.parse_list is missing")
+        c.fail("pve.parse_list is missing")
 
     if parsed is not None:
         # Оборванная сборка: её тело стоит под именем проекта — продолжаем в нём.
-        cases += 1
         left = parsed + [(9950, pve.stage_name("mop"), "stopped")]
-        if pve.stage_vmid("mop", left) != 9950:
-            bad += 1
-            print("FAILED  stage_vmid must resume the build body left by a previous run")
+        c.expect("stage_vmid must resume the build body left by a previous run",
+                 pve.stage_vmid("mop", left), 9950)
         # Иначе — свободный номер из диапазона шаблонов, не занятый и не
         # совпадающий с номером образа этого проекта.
-        cases += 1
         v = pve.stage_vmid("mop", parsed)
         taken = {vm for vm, _, _ in parsed}
-        if not pve.TMPL_MIN <= v <= pve.TMPL_MAX or v in taken \
-                or v == pve.template_vmid("mop"):
-            bad += 1
-            print(f"FAILED  stage_vmid({v}) must be a free template slot of its own")
+        c.check(f"stage_vmid({v}) must be a free template slot of its own",
+                not (not pve.TMPL_MIN <= v <= pve.TMPL_MAX or v in taken
+                     or v == pve.template_vmid("mop")))
         # Диапазон занят целиком — громко, а не номер чужого контейнера.
-        cases += 1
         full = [(vm, f"pu-tmpl-x{vm}", "stopped")
                 for vm in range(pve.TMPL_MIN, pve.TMPL_MAX + 1)]
         try:
             pve.stage_vmid("mop", full)
-            bad += 1
-            print("FAILED  stage_vmid with no free slot must refuse")
+            refused = False
         except RuntimeError:
-            pass
+            refused = True
+        c.check("stage_vmid with no free slot must refuse", refused)
 
     # Контракт драйвера — СЛОВАРЬ, и флаг в нём ключом, а не атрибутом.
     # Модуль с атрибутом IS_CONTAINER отдаёт только `current()`, и он про свой
@@ -688,31 +537,25 @@ def main():
     # джоб и падает уже ПОСЛЕ этого на AttributeError, оставляя тело сиротой
     # (поймано 22.09 живым прогоном, на двух телах сразу).
     for name in ("host", "pve"):
-        cases += 1
-        c = driver.require(name)
-        if not isinstance(c, dict) or "is_container" not in c:
-            bad += 1
-            print(f"FAILED  driver.require({name!r}) must be a mapping with "
-                  f"is_container, got {type(c).__name__}")
+        reg = driver.require(name)
+        c.check(f"driver.require({name!r}) must be a mapping with is_container",
+                not (not isinstance(reg, dict) or "is_container" not in reg),
+                f"got {type(reg).__name__}")
 
-    cases += 1
-    if driver.require("host")["is_container"] is not False \
-            or driver.require("pve")["is_container"] is not True:
-        bad += 1
-        print("FAILED  is_container must tell a node-body driver from a "
-              "container one — everything that decides what to destroy "
-              "hangs on it")
+    c.check("is_container must tell a node-body driver from a "
+            "container one — everything that decides what to destroy "
+            "hangs on it",
+            not (driver.require("host")["is_container"] is not False
+                 or driver.require("pve")["is_container"] is not True))
 
     # HYPOTHESIS (#114): pve-тело получает кред проекта копией файла с
     # гипервизора, а файл туда клал прогон; прогон его больше не кладёт.
     # SOLUTION: кред едет в тело только из ответа bootstrap (driver run), в
     # переливке с узла его нет. STATUS: FIXED — see #114
     from mop.driver import pve
-    cases += 1
-    if any("bus-" in path for path, _ in pve._seed_files()):
-        bad += 1
-        print("FAILED  pve seed must not copy the node's bus-<project>.json: "
-              "the credentials come from the bootstrap answer only")
+    c.check("pve seed must not copy the node's bus-<project>.json: "
+            "the credentials come from the bootstrap answer only",
+            not any("bus-" in path for path, _ in pve._seed_files()))
 
     # HYPOTHESIS (#137): файл в pve-тело стоил ~4 с (четыре pct на файл), и
     # агент писал в тела по очереди. SOLUTION: все файлы тела -- одним tar
@@ -720,38 +563,30 @@ def main():
     import io
     import tarfile
     from mop.driver import pve
-    cases += 1
     try:
         blob = pve.tar_of([(f"{pve.HOME}/.claude/.credentials.json", b"{}"),
                            (f"{pve.HOME}/.config/mop/secrets.env", b"K=v\n")], pve.HOME)
         with tarfile.open(fileobj=io.BytesIO(blob)) as t:
             got = {m.name: (m.mode, t.extractfile(m).read()) for m in t.getmembers()}
-        want = {".claude/.credentials.json": (0o600, b"{}"),
-                ".config/mop/secrets.env": (0o600, b"K=v\n")}
-        if got != want:
-            bad += 1
-            print(f"FAILED  tar_of must hold home-relative 0600 files: {got}")
+        c.expect("tar_of must hold home-relative 0600 files", got,
+                 {".claude/.credentials.json": (0o600, b"{}"),
+                  ".config/mop/secrets.env": (0o600, b"K=v\n")})
         # Время файла -- сейчас: tar без mtime распаковывается 1970-м годом.
         import time
         with tarfile.open(fileobj=io.BytesIO(blob)) as t:
-            if any(abs(m.mtime - time.time()) > 60 for m in t.getmembers()):
-                bad += 1
-                print("FAILED  tar_of must stamp the files with the current time")
+            c.check("tar_of must stamp the files with the current time",
+                    not any(abs(m.mtime - time.time()) > 60 for m in t.getmembers()))
     except AttributeError:
-        bad += 1
-        print("FAILED  pve.tar_of is missing")
+        c.fail("pve.tar_of is missing")
     for outside in ("/etc/passwd", f"{pve.HOME}/../x", "/tmp/x"):
-        cases += 1
         try:
             pve.tar_of([(outside, b"x")], pve.HOME)
-            bad += 1
-            print(f"FAILED  tar_of must refuse a path outside the home: {outside}")
+            refused = False
         except (ValueError, AttributeError):
-            pass
-    cases += 1
-    if "push_many" not in driver.VERBS:
-        bad += 1
-        print("FAILED  push_many must be a driver verb: the agent writes a body in one call")
+            refused = True
+        c.check(f"tar_of must refuse a path outside the home: {outside}", refused)
+    c.check("push_many must be a driver verb: the agent writes a body in one call",
+            "push_many" in driver.VERBS)
 
     # #73: первый ssh врапера в свежее тело ушёл в Connection timed out, а
     # повтор Nomad через 17 с вошёл сразу. HYPOTHESIS: сеть свежего клона
@@ -765,102 +600,71 @@ def main():
         def flaky(results):
             it = iter(results)
             return lambda: next(it)
-        cases += 1
         got = driver.until_ok(flaky([(False, "timed out"), (False, "timed out"),
                                      (True, None)]), 5, 2, slept.append)
-        if got != (True, None, 3) or slept != [2, 2]:
-            bad += 1
-            print(f"FAILED  until_ok must retry until the probe passes: {got}, slept {slept}")
-        cases += 1
+        c.check("until_ok must retry until the probe passes",
+                not (got != (True, None, 3) or slept != [2, 2]), f"{got}, slept {slept}")
         slept.clear()
         got = driver.until_ok(flaky([(True, None)]), 5, 2, slept.append)
-        if got != (True, None, 1) or slept:
-            bad += 1
-            print(f"FAILED  a healthy body must cost one probe and no pause: {got}, slept {slept}")
-        cases += 1
+        c.check("a healthy body must cost one probe and no pause",
+                not (got != (True, None, 1) or slept), f"{got}, slept {slept}")
         slept.clear()
         got = driver.until_ok(flaky([(False, f"try {i}") for i in range(3)]), 3, 2,
                               slept.append)
-        if got != (False, "try 2", 3):
-            bad += 1
-            print(f"FAILED  after the last try the refusal carries the last reason: {got}")
-        cases += 1
-        if slept != [2, 2]:
-            bad += 1
-            print(f"FAILED  no pause after the last try: slept {slept}")
+        c.expect("after the last try the refusal carries the last reason",
+                 got, (False, "try 2", 3))
+        c.expect("no pause after the last try", slept, [2, 2])
     except AttributeError:
-        bad += 1
-        print("FAILED  driver.until_ok is missing")
+        c.fail("driver.until_ok is missing")
 
-    c, b = check_pve_facts()
-    cases += c
-    bad += b
+    check_pve_facts(c)
 
     try:
-        c, b = check_contract_151()
+        check_contract_151(c)
     except Exception as e:
-        c, b = 1, 1
-        print(f"FAILED  check_contract_151: {type(e).__name__}: {e}")
-    cases, bad = cases + c, bad + b
+        c.fail("check_contract_151", f"{type(e).__name__}: {e}")
 
     try:
-        c, b = check_driver_rule_175()
+        check_driver_rule_175(c)
     except Exception as e:
-        c, b = 1, 1
-        print(f"FAILED  check_driver_rule_175: {type(e).__name__}: {e}")
-    cases, bad = cases + c, bad + b
+        c.fail("check_driver_rule_175", f"{type(e).__name__}: {e}")
 
     try:
-        c, b = check_timeouts_171()
+        check_timeouts_171(c)
     except Exception as e:
-        c, b = 1, 1
-        print(f"FAILED  check_timeouts_171: {type(e).__name__}: {e}")
-    cases, bad = cases + c, bad + b
+        c.fail("check_timeouts_171", f"{type(e).__name__}: {e}")
 
     try:
-        c, b = check_body_gone_267()
+        check_body_gone_267(c)
     except Exception as e:
-        c, b = 1, 1
-        print(f"FAILED  check_body_gone_267: {type(e).__name__}: {e}")
-    cases, bad = cases + c, bad + b
+        c.fail("check_body_gone_267", f"{type(e).__name__}: {e}")
 
     try:
-        c, b = check_clone_lock_195()
+        check_clone_lock_195(c)
     except Exception as e:
-        c, b = 1, 1
-        print(f"FAILED  check_clone_lock_195: {type(e).__name__}: {e}")
-    cases, bad = cases + c, bad + b
+        c.fail("check_clone_lock_195", f"{type(e).__name__}: {e}")
 
     try:
-        c, b = check_body_memory_197()
+        check_body_memory_197(c)
     except Exception as e:
-        c, b = 1, 1
-        print(f"FAILED  check_body_memory_197: {type(e).__name__}: {e}")
-    cases, bad = cases + c, bad + b
+        c.fail("check_body_memory_197", f"{type(e).__name__}: {e}")
 
     try:
-        c, b = check_host_address_200()
+        check_host_address_200(c)
     except Exception as e:
-        c, b = 1, 1
-        print(f"FAILED  check_host_address_200: {type(e).__name__}: {e}")
-    cases, bad = cases + c, bad + b
+        c.fail("check_host_address_200", f"{type(e).__name__}: {e}")
 
     try:
-        c, b = check_ssh_port_201()
+        check_ssh_port_201(c)
     except Exception as e:
-        c, b = 1, 1
-        print(f"FAILED  check_ssh_port_201: {type(e).__name__}: {e}")
-    cases, bad = cases + c, bad + b
+        c.fail("check_ssh_port_201", f"{type(e).__name__}: {e}")
 
     try:
-        c, b = check_clone_before_bootstrap_247()
+        check_clone_before_bootstrap_247(c)
     except Exception as e:
-        c, b = 1, 1
-        print(f"FAILED  check_clone_before_bootstrap_247: {type(e).__name__}: {e}")
-    cases, bad = cases + c, bad + b
+        c.fail("check_clone_before_bootstrap_247", f"{type(e).__name__}: {e}")
 
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+    return c.report("driver")
 
 
 # ── клон до bootstrap (#247) ────────────────────────────────────────────
@@ -878,77 +682,71 @@ def main():
 # RESULT: врапер несёт CLONE_SH дословно один раз, стадия run собирается из
 # прелюдии, охраны и того же сниппета, и в run.main стоит до bootstrap.run.
 # STATUS: FIXED — see #247
-def check_clone_before_bootstrap_247():
+def check_clone_before_bootstrap_247(c):
     import inspect
+    import subprocess
     from mop.server import spec
     from mop.cli.driver import run
 
-    cases = bad = 0
-
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if not want(got):
-            bad += 1
-            print(f"FAILED  #247 {what}: got {got!r}")
+    def valid_bash(s):
+        return subprocess.run(["bash", "-n"], input=s, text=True,
+                              capture_output=True).returncode == 0
 
     snippet = driver.CLONE_SH
     # Одно определение: врапер несёт сниппет дословно и один раз.
-    check("wrapper carries CLONE_SH verbatim, once", spec.WRAPPER.count(snippet),
-          lambda n: n == 1)
-    check("CLONE_SH clones with the mirror and retargets", snippet,
-          lambda s: "git clone -q --reference" in s and 'rm -rf "$d"' in s
-          and "kill-session" in s)
+    n = spec.WRAPPER.count(snippet)
+    c.check("#247 wrapper carries CLONE_SH verbatim, once", n == 1, f"got {n!r}")
+    c.check("#247 CLONE_SH clones with the mirror and retargets",
+            "git clone -q --reference" in snippet and 'rm -rf "$d"' in snippet
+            and "kill-session" in snippet, f"got {snippet!r}")
     env = {"PU_CARRY": "PU_NAME,PU_ORIGIN,PU_PROJECT,PU_CLONE,HOME",
            "PU_NAME": "pu-mop-1", "PU_ORIGIN": "git@h:o/mop.git",
            "PU_PROJECT": "mop", "PU_CLONE": "/home/pool/puppets/pu-mop-1",
            "HOME": "/home/pool", "PU_WRAPPER": "not-carried"}
     stage = run.clone_script(env)
-    check("stage exports the task env, not the wrapper", stage,
-          lambda s: "export PU_ORIGIN=git@h:o/mop.git\n" in s
-          and "export PU_CLONE=/home/pool/puppets/pu-mop-1\n" in s
-          and "not-carried" not in s)
-    check("stage stops at the first failure", stage,
-          lambda s: "set -e" in s.split(snippet)[0])
-    check("stage refuses an empty PU_CLONE before any rm -rf", stage,
-          lambda s: "${PU_CLONE:?" in s and s.index("${PU_CLONE:?") < s.index('rm -rf "$d"'))
+    c.check("#247 stage exports the task env, not the wrapper",
+            "export PU_ORIGIN=git@h:o/mop.git\n" in stage
+            and "export PU_CLONE=/home/pool/puppets/pu-mop-1\n" in stage
+            and "not-carried" not in stage, f"got {stage!r}")
+    c.check("#247 stage stops at the first failure",
+            "set -e" in stage.split(snippet)[0], f"got {stage!r}")
+    c.check("#247 stage refuses an empty PU_CLONE before any rm -rf",
+            "${PU_CLONE:?" in stage
+            and stage.index("${PU_CLONE:?") < stage.index('rm -rf "$d"'), f"got {stage!r}")
     # После сниппета -- только запись дома клона (#272).
-    check("stage carries CLONE_SH once, then only the home record", stage,
-          lambda s: s.count(snippet) == 1
-          and "mop.home" in s.split(snippet)[1] and "clone -q" not in s.split(snippet)[1])
+    c.check("#247 stage carries CLONE_SH once, then only the home record",
+            stage.count(snippet) == 1 and "mop.home" in stage.split(snippet)[1]
+            and "clone -q" not in stage.split(snippet)[1], f"got {stage!r}")
     # #256: ветка мастера из меты джоба (NOMAD_META_branch) -- checkout после
     # свежего клона; существующий клон не переключается, там может быть
     # работа; нет такой ветки в origin -- завести локально, мастер создаст
     # её первым landing. STATUS: FIXED — see #256
-    check("no branch, no checkout", stage, lambda s: "checkout" not in s)
+    c.check("#247 no branch, no checkout", "checkout" not in stage, f"got {stage!r}")
     with_b = run.clone_script(dict(env, NOMAD_META_branch="swarm"))
-    check("branch stage still carries CLONE_SH", with_b, lambda s: snippet in s)
-    check("branch stage exports PU_BRANCH", with_b,
-          lambda s: "export PU_BRANCH=swarm\n" in s)
-    check("checkout comes after the clone, for a fresh clone only", with_b,
-          lambda s: s.index("checkout") > s.index(snippet)
-          and "fresh" in s and 'git -C "$d" checkout -q "$PU_BRANCH"' in s
-          and 'checkout -q -b "$PU_BRANCH"' in s)
-    check("branch stage is valid bash", with_b, lambda s: __import__("subprocess").run(
-        ["bash", "-n"], input=s, text=True, capture_output=True).returncode == 0)
+    c.check("#247 branch stage still carries CLONE_SH", snippet in with_b, f"got {with_b!r}")
+    c.check("#247 branch stage exports PU_BRANCH", "export PU_BRANCH=swarm\n" in with_b,
+            f"got {with_b!r}")
+    c.check("#247 checkout comes after the clone, for a fresh clone only",
+            with_b.index("checkout") > with_b.index(snippet)
+            and "fresh" in with_b and 'git -C "$d" checkout -q "$PU_BRANCH"' in with_b
+            and 'checkout -q -b "$PU_BRANCH"' in with_b, f"got {with_b!r}")
+    c.check("#247 branch stage is valid bash", valid_bash(with_b), f"got {with_b!r}")
     # #272: дом клона пишется на каждом старте, не только у свежего клона:
     # существующий клон узнаёт его тоже. С веткой в мете -- она, без неё --
     # ветка по умолчанию из origin/HEAD. STATUS: FIXED — see #272
     tail = with_b.split(snippet)[1]
-    check("#272: branch stage records mop.home = PU_BRANCH on every start", tail,
-          lambda t: 'config mop.home "$PU_BRANCH"' in t
-          and t.index("mop.home") > t.index("fi\n"))
+    c.check("#247 #272: branch stage records mop.home = PU_BRANCH on every start",
+            'config mop.home "$PU_BRANCH"' in tail
+            and tail.index("mop.home") > tail.index("fi\n"), f"got {tail!r}")
     plain = stage.split(snippet)[1]
-    check("#272: no branch -- mop.home is the default branch from origin/HEAD", plain,
-          lambda t: "origin/HEAD" in t and "config mop.home" in t)
-    check("#272: plain stage is valid bash", stage, lambda s: __import__("subprocess").run(
-        ["bash", "-n"], input=s, text=True, capture_output=True).returncode == 0)
+    c.check("#247 #272: no branch -- mop.home is the default branch from origin/HEAD",
+            "origin/HEAD" in plain and "config mop.home" in plain, f"got {plain!r}")
+    c.check("#247 #272: plain stage is valid bash", valid_bash(stage), f"got {stage!r}")
     # Порядок в run.main: клон исполняется в теле до вызова сервера.
     src = inspect.getsource(run.main)
-    check("run.main clones before bootstrap", src,
-          lambda s: "clone_script(" in s and "bootstrap_sandbox(" in s
-          and s.index("clone_script(") < s.index("bootstrap_sandbox("))
-    return cases, bad
+    c.check("#247 run.main clones before bootstrap",
+            "clone_script(" in src and "bootstrap_sandbox(" in src
+            and src.index("clone_script(") < src.index("bootstrap_sandbox("), f"got {src!r}")
 
 # ── адрес узла со стороны сервера -- из кредов шины узла (#200) ─────────
 # HYPOTHESIS: host.address выбирает маршрут к config.get("MOP_SERVER_LAN"), а
@@ -965,46 +763,13 @@ def check_clone_before_bootstrap_247():
 # RESULT: маршрут выбирается к хосту из url файла шины; четыре отказа
 # называют файл, пятый -- имя, которое не резолвится.
 # STATUS: FIXED — see #200
-def check_host_address_200():
-    """-> (случаев, провалов)."""
-    import socket as real
-    from cli import no_network
+def check_host_address_200(c):
     from mop.driver import host
-    cases = bad = 0
 
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}\n  wanted: {want!r}\n  got: {got!r}")
-
-    targets = []
-
-    class Sock:
-        """UDP-сокет без сети: помнит, куда выбирали маршрут."""
-        def __init__(self, *a):
-            pass
-
-        def connect(self, addr):
-            if addr[0] == "nowhere.invalid":
-                raise real.gaierror(-2, "Name or service not known")
-            targets.append(addr)
-
-        def getsockname(self):
-            return ("192.0.2.77", 40000)
-
-        def close(self):
-            pass
-
-    stub = types.SimpleNamespace(socket=Sock, AF_INET=real.AF_INET,
-                                 SOCK_DGRAM=real.SOCK_DGRAM, gaierror=real.gaierror,
-                                 error=real.error)
-    undo = no_network()
-    saved = (host.socket, getattr(host, "NODE_FILE", None))
-    # Настройка на узле -- не тот сервер: ответ обязан прийти из файла шины.
-    os.environ["MOP_SERVER_LAN"] = "198.51.100.9"
-    try:
+    stub, targets = udp_socket("192.0.2.77", unresolvable=("nowhere.invalid",))
+    with offline(), restored(host, "socket", "NODE_FILE"):
+        # Настройка на узле -- не тот сервер: ответ обязан прийти из файла шины.
+        os.environ["MOP_SERVER_LAN"] = "198.51.100.9"
         host.socket = stub
         with tempfile.TemporaryDirectory() as tmp:
             def bus_file(body):
@@ -1015,28 +780,24 @@ def check_host_address_200():
                 return path
 
             def refusal(what, *words):
-                nonlocal cases, bad
-                cases += 1
                 try:
                     got = host.address("pu-mop-1")
                 except RuntimeError as e:
                     missing = [w for w in words if w not in str(e)]
-                    if missing:
-                        bad += 1
-                        print(f"FAILED  {what}: refusal {str(e)!r} doesn't name {missing}")
+                    c.check(f"{what}: the refusal names {list(words)}", not missing,
+                            f"refusal {str(e)!r} doesn't name {missing}")
                     return
-                bad += 1
-                print(f"FAILED  {what}: answered {got!r}, wanted a refusal")
+                c.fail(f"{what}: wanted a refusal", f"answered {got!r}")
 
             bus_file('{"url": "nats://192.0.2.1:4222", "user": "node", "password": "x"}')
             del targets[:]
-            check("address from the node's bus url", host.address("pu-mop-1"), "192.0.2.77")
-            check("route chosen toward the bus server", targets, [("192.0.2.1", 1)])
+            c.expect("address from the node's bus url", host.address("pu-mop-1"), "192.0.2.77")
+            c.expect("route chosen toward the bus server", targets, [("192.0.2.1", 1)])
 
             bus_file('{"url": "nats://server.example:4222", "user": "node", "password": "x"}')
             del targets[:]
             host.address("pu-mop-1")
-            check("a server name routes by name", targets, [("server.example", 1)])
+            c.expect("a server name routes by name", targets, [("server.example", 1)])
 
             path = os.path.join(tmp, "absent.json")
             host.NODE_FILE = path
@@ -1049,14 +810,6 @@ def check_host_address_200():
             refusal("unreadable bus file", path)
             path = bus_file('{"url": "nats://nowhere.invalid:4222"}')
             refusal("unresolvable server", path, "nowhere.invalid")
-    finally:
-        host.socket = saved[0]
-        if saved[1] is None:
-            host.__dict__.pop("NODE_FILE", None)
-        else:
-            host.NODE_FILE = saved[1]
-        undo()
-    return cases, bad
 
 
 # ── ssh-порт host-узла -- узловая настройка (#201) ──────────────────────
@@ -1067,76 +820,36 @@ def check_host_address_200():
 # инвентаря, по умолчанию 22). Не 22 -- адрес `адрес:порт`; 22 -- голый
 # адрес, как сегодня. Не порт -- отказ с именем настройки.
 # STATUS: FIXED — see #201
-def check_ssh_port_201():
-    """-> (случаев, провалов)."""
-    import socket as real
-    from cli import no_network
+def check_ssh_port_201(c):
     from mop.driver import host
-    cases = bad = 0
 
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}\n  wanted: {want!r}\n  got: {got!r}")
-
-    class Sock:
-        def __init__(self, *a):
-            pass
-
-        def connect(self, addr):
-            pass
-
-        def getsockname(self):
-            return ("192.168.1.37", 40000)
-
-        def close(self):
-            pass
-
-    stub = types.SimpleNamespace(socket=Sock, AF_INET=real.AF_INET,
-                                 SOCK_DGRAM=real.SOCK_DGRAM, gaierror=real.gaierror,
-                                 error=real.error)
-    undo = no_network()
-    saved = (host.socket, host.NODE_FILE, os.environ.get("MOP_SSH_PORT"))
-    try:
+    stub, _ = udp_socket("192.168.1.37")
+    with offline(), restored(host, "socket", "NODE_FILE"), patched_env(MOP_SSH_PORT=None):
         host.socket = stub
         with tempfile.TemporaryDirectory() as tmp:
             host.NODE_FILE = os.path.join(tmp, "bus.json")
             with open(host.NODE_FILE, "w") as f:
                 f.write('{"url": "nats://192.0.2.1:4222"}')
             os.environ.pop("MOP_SSH_PORT", None)
-            check("config: MOP_SSH_PORT defaults to 22",
-                  config.SETTINGS.get("MOP_SSH_PORT"), "22")
-            check("config: MOP_SSH_PORT reaches the node",
-                  "MOP_SSH_PORT" in config.NODE_SCOPED, True)
-            check("no port setting: the bare address, as today",
-                  host.address("pu-mop-1"), "192.168.1.37")
+            c.expect("config: MOP_SSH_PORT defaults to 22",
+                     config.SETTINGS.get("MOP_SSH_PORT"), "22")
+            c.expect("config: MOP_SSH_PORT reaches the node",
+                     "MOP_SSH_PORT" in config.NODE_SCOPED, True)
+            c.expect("no port setting: the bare address, as today",
+                     host.address("pu-mop-1"), "192.168.1.37")
             os.environ["MOP_SSH_PORT"] = "22"
-            check("port 22: the bare address", host.address("pu-mop-1"), "192.168.1.37")
+            c.expect("port 22: the bare address", host.address("pu-mop-1"), "192.168.1.37")
             os.environ["MOP_SSH_PORT"] = "2222"
-            check("port 2222: address:port", host.address("pu-mop-1"), "192.168.1.37:2222")
+            c.expect("port 2222: address:port", host.address("pu-mop-1"), "192.168.1.37:2222")
             for garbage in ("22x", "0", "70000", " "):
                 os.environ["MOP_SSH_PORT"] = garbage
-                cases += 1
                 try:
                     got = host.address("pu-mop-1")
                 except RuntimeError as e:
-                    if "MOP_SSH_PORT" not in str(e):
-                        bad += 1
-                        print(f"FAILED  port {garbage!r}: refusal {str(e)!r} "
-                              f"doesn't name MOP_SSH_PORT")
+                    c.check(f"port {garbage!r}: the refusal names MOP_SSH_PORT",
+                            "MOP_SSH_PORT" in str(e), f"refusal {str(e)!r}")
                     continue
-                bad += 1
-                print(f"FAILED  port {garbage!r}: answered {got!r}, wanted a refusal")
-    finally:
-        host.socket, host.NODE_FILE = saved[0], saved[1]
-        if saved[2] is None:
-            os.environ.pop("MOP_SSH_PORT", None)
-        else:
-            os.environ["MOP_SSH_PORT"] = saved[2]
-        undo()
-    return cases, bad
+                c.fail(f"port {garbage!r}: wanted a refusal", f"answered {got!r}")
 
 
 # ── память тела -- из спеки, на каждом подъёме (#197) ───────────────────
@@ -1148,19 +861,10 @@ def check_ssh_port_201():
 # и новому клону, и стоящему телу. Спека до #197 PU_MEM_MB не несёт: тогда
 # память тела не трогается, как было.
 # STATUS: FIXED — see #197
-def check_body_memory_197():
+def check_body_memory_197(c):
     import asyncio
     from mop.driver import pve
     from mop.cli.driver import run
-
-    cases = bad = 0
-
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if not want(got):
-            bad += 1
-            print(f"FAILED  #197 {what}: got {got!r}")
 
     name = "pu-mop-1"
     vmid = pve.vmid_of(name)
@@ -1190,63 +894,63 @@ def check_body_memory_197():
     async def empty(_v):
         return ""
 
-    saved = (pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname)
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            key = os.path.join(d, "mop-body")
-            with open(key + ".pub", "w") as f:
-                f.write("ssh-ed25519 AAAA node\n")
-            pve.SSH_KEY = key
-            pve._seed_files = lambda: []
+    with restored(pve, "sh", "SSH_KEY", "_seed_files", "_hostname"), \
+            tempfile.TemporaryDirectory() as d:
+        key = os.path.join(d, "mop-body")
+        with open(key + ".pub", "w") as f:
+            f.write("ssh-ed25519 AAAA node\n")
+        pve.SSH_KEY = key
+        pve._seed_files = lambda: []
 
-            for what, stand in (("a standing body", standing), ("a fresh clone", empty)):
-                pve._hostname = stand
-                pve.sh, calls = fake()
-                r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": "16384"}))
-                check(f"{what}: ensure succeeds", r, lambda r: not r.get("error"))
-                mem = [w for v, w in calls if v == "memory"]
-                check(f"{what}: memory is set once, to the spec's ceiling", mem,
-                      lambda m: len(m) == 1 and m[0][-2:] == [str(vmid), "16384"])
-                check(f"{what}: memory is set before start", verbs(calls),
-                      lambda v: "memory" in v and "start" in v
-                      and v.index("memory") < v.index("start"))
-
-            pve._hostname = standing
+        for what, stand in (("a standing body", standing), ("a fresh clone", empty)):
+            pve._hostname = stand
             pve.sh, calls = fake()
-            r = asyncio.run(pve.ensure(name, {"project": "mop"}))
-            check("a spec before #197: the body's memory is left alone", verbs(calls),
-                  lambda v: "memory" not in v and "start" in v)
-
-            pve.sh, calls = fake("memory")
             r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": "16384"}))
-            check("memory refused: ensure refuses, naming the body and the size", r,
-                  lambda r: str(vmid) in (r.get("error") or "")
-                  and "16384" in r["error"] and "no such thing" in r["error"])
-            check("memory refused: the body is not started", verbs(calls),
-                  lambda v: "start" not in v)
-            pve.sh, calls = fake("memory", None)
-            r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": "16384"}))
-            check("memory timed out: a refusal, not a success", r,
-                  lambda r: "timed out" in (r.get("error") or ""))
+            c.check(f"#197 {what}: ensure succeeds", not r.get("error"), f"got {r!r}")
+            mem = [w for v, w in calls if v == "memory"]
+            c.check(f"#197 {what}: memory is set once, to the spec's ceiling",
+                    len(mem) == 1 and mem[0][-2:] == [str(vmid), "16384"], f"got {mem!r}")
+            v = verbs(calls)
+            c.check(f"#197 {what}: memory is set before start",
+                    "memory" in v and "start" in v and v.index("memory") < v.index("start"),
+                    f"got {v!r}")
 
-            for bad_mem in ("lots", "0", "-1", "8G"):
-                pve.sh, calls = fake()
-                r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": bad_mem}))
-                check(f"mem {bad_mem!r}: refused before the hypervisor", (r, verbs(calls)),
-                      lambda rv: "PU_MEM_MB" in (rv[0].get("error") or "")
-                      and "memory" not in rv[1] and "start" not in rv[1])
-    finally:
-        pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname = saved
+        pve._hostname = standing
+        pve.sh, calls = fake()
+        r = asyncio.run(pve.ensure(name, {"project": "mop"}))
+        v = verbs(calls)
+        c.check("#197 a spec before #197: the body's memory is left alone",
+                "memory" not in v and "start" in v, f"got {v!r}")
+
+        pve.sh, calls = fake("memory")
+        r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": "16384"}))
+        c.check("#197 memory refused: ensure refuses, naming the body and the size",
+                str(vmid) in (r.get("error") or "")
+                and "16384" in r["error"] and "no such thing" in r["error"], f"got {r!r}")
+        v = verbs(calls)
+        c.check("#197 memory refused: the body is not started", "start" not in v,
+                f"got {v!r}")
+        pve.sh, calls = fake("memory", None)
+        r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": "16384"}))
+        c.check("#197 memory timed out: a refusal, not a success",
+                "timed out" in (r.get("error") or ""), f"got {r!r}")
+
+        for bad_mem in ("lots", "0", "-1", "8G"):
+            pve.sh, calls = fake()
+            r = asyncio.run(pve.ensure(name, {"project": "mop", "mem": bad_mem}))
+            v = verbs(calls)
+            c.check(f"#197 mem {bad_mem!r}: refused before the hypervisor",
+                    "PU_MEM_MB" in (r.get("error") or "")
+                    and "memory" not in v and "start" not in v, f"got {(r, v)!r}")
 
     # `mop driver run` отдаёт ensure потолок из окружения задачи.
-    check("run: params carry the spec's ceiling",
-          run.ensure_params(name, {"PU_MEM_MB": "16384"}),
-          lambda p: p == {"project": "mop", "mem": "16384"})
-    check("run: a spec before #197 carries no mem",
-          run.ensure_params(name, {}), lambda p: p == {"project": "mop"})
-    check("run: an empty PU_MEM_MB is no mem",
-          run.ensure_params(name, {"PU_MEM_MB": ""}), lambda p: p == {"project": "mop"})
-    return cases, bad
+    c.expect("#197 run: params carry the spec's ceiling",
+             run.ensure_params(name, {"PU_MEM_MB": "16384"}),
+             {"project": "mop", "mem": "16384"})
+    c.expect("#197 run: a spec before #197 carries no mem",
+             run.ensure_params(name, {}), {"project": "mop"})
+    c.expect("#197 run: an empty PU_MEM_MB is no mem",
+             run.ensure_params(name, {"PU_MEM_MB": ""}), {"project": "mop"})
 
 
 # ── имя драйвера узла -- одно правило (#175) ────────────────────────────
@@ -1258,16 +962,8 @@ def check_body_memory_197():
 # (узел, настроенный до поля), неизвестное -> громкий отказ с узлом и
 # значением. Остальные места -- через него.
 # STATUS: FIXED — see #175
-def check_driver_rule_175():
+def check_driver_rule_175(c):
     import re
-    cases = bad = 0
-
-    def check(what, ok):
-        nonlocal cases, bad
-        cases += 1
-        if not ok:
-            bad += 1
-            print(f"FAILED  #175 {what}")
 
     for meta, want in ((None, driver.DEFAULT), ({}, driver.DEFAULT),
                        ({"mop_driver": ""}, driver.DEFAULT),
@@ -1276,31 +972,24 @@ def check_driver_rule_175():
             got = driver.of_node(meta, "n1")
         except Exception as e:
             got = f"{type(e).__name__}: {e}"
-        check(f"of_node({meta!r}) -> {got!r}, wanted {want!r}", got == want)
-    check("is_container through of_node: empty is host",
-          driver.is_container(driver.of_node({"mop_driver": ""}, "n1")) is False)
-    check("is_container through of_node: pve is a container",
-          driver.is_container(driver.of_node({"mop_driver": "pve"}, "n1")) is True)
+        c.check(f"#175 of_node({meta!r}) -> {got!r}, wanted {want!r}", got == want)
+    c.check("#175 is_container through of_node: empty is host",
+            driver.is_container(driver.of_node({"mop_driver": ""}, "n1")) is False)
+    c.check("#175 is_container through of_node: pve is a container",
+            driver.is_container(driver.of_node({"mop_driver": "pve"}, "n1")) is True)
     try:
         driver.of_node({"mop_driver": "bogus"}, "hyper")
-        check("of_node of an unknown driver must refuse", False)
+        c.fail("#175 of_node of an unknown driver must refuse")
     except RuntimeError as e:
-        check(f"the refusal names the node and the value: {e}",
-              "hyper" in str(e) and "bogus" in str(e) and "\n" not in str(e))
+        c.check(f"#175 the refusal names the node and the value: {e}",
+                "hyper" in str(e) and "bogus" in str(e) and "\n" not in str(e))
     # Эта машина -- то же правило.
-    saved = os.environ.get("MOP_DRIVER")
-    try:
-        os.environ["MOP_DRIVER"] = "bogus"
+    with patched_env(MOP_DRIVER="bogus"):
         try:
             driver.current_name()
-            check("current_name of an unknown MOP_DRIVER must refuse", False)
+            c.fail("#175 current_name of an unknown MOP_DRIVER must refuse")
         except RuntimeError as e:
-            check("current_name names the value", "bogus" in str(e))
-    finally:
-        if saved is None:
-            os.environ.pop("MOP_DRIVER", None)
-        else:
-            os.environ["MOP_DRIVER"] = saved
+            c.check("#175 current_name names the value", "bogus" in str(e))
     # Правило одно: `or DEFAULT` для имени драйвера -- только в of_node.
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     found = []
@@ -1320,40 +1009,37 @@ def check_driver_rule_175():
     try:
         rows = [nodes.row(summary(n), metas[n], {}) for n in sorted(metas)]
         got = {r["name"]: r for r in rows}
-        check("nodes.row: the good node is visible",
-              got["hyper"]["driver"] == "pve" and not got["hyper"].get("error"))
-        check(f"nodes.row: the bad node is a row with the refusal: {got['bad']}",
-              "bad: unknown driver 'bogus'" in (got["bad"].get("error") or ""))
+        c.check("#175 nodes.row: the good node is visible",
+                got["hyper"]["driver"] == "pve" and not got["hyper"].get("error"))
+        c.check(f"#175 nodes.row: the bad node is a row with the refusal: {got['bad']}",
+                "bad: unknown driver 'bogus'" in (got["bad"].get("error") or ""))
     except Exception as e:
-        check(f"nodes.row with a bad node: {type(e).__name__}: {e}", False)
-    saved = (nomad.nodes_meta, nomad.node_dynamic_meta, nomad.set_node_meta)
-    try:
-        nomad.nodes_meta = lambda: metas
-        nomad.node_dynamic_meta = lambda n: {"mop_projects": "mop"}
-        nomad.set_node_meta = lambda n, m: None
+        c.fail(f"#175 nodes.row with a bad node: {type(e).__name__}: {e}")
+    with patched(nomad, nodes_meta=lambda: metas,
+                 node_dynamic_meta=lambda n: {"mop_projects": "mop"},
+                 set_node_meta=lambda n, m: None):
         try:
             refused = []
             serving = builder.serving_now(refused)
-            check(f"serving_now: the good node counts: {serving}", serving == {"hyper": ["mop"]})
-            check(f"serving_now: the bad node is reported: {refused}",
-                  any("bad: unknown driver 'bogus'" in r for r in refused))
+            c.check(f"#175 serving_now: the good node counts: {serving}",
+                    serving == {"hyper": ["mop"]})
+            c.check(f"#175 serving_now: the bad node is reported: {refused}",
+                    any("bad: unknown driver 'bogus'" in r for r in refused))
         except Exception as e:
-            check(f"serving_now with a bad node: {type(e).__name__}: {e}", False)
+            c.fail(f"#175 serving_now with a bad node: {type(e).__name__}: {e}")
         try:
             got = dict(image.announce("mop"))
-            check(f"announce: the good node answers: {got}", got.get("hyper") == "already announced")
-            check(f"announce: the bad node carries the refusal: {got}",
-                  "bad: unknown driver 'bogus'" in (got.get("bad") or ""))
+            c.check(f"#175 announce: the good node answers: {got}",
+                    got.get("hyper") == "already announced")
+            c.check(f"#175 announce: the bad node carries the refusal: {got}",
+                    "bad: unknown driver 'bogus'" in (got.get("bad") or ""))
         except Exception as e:
-            check(f"announce with a bad node: {type(e).__name__}: {e}", False)
-    finally:
-        nomad.nodes_meta, nomad.node_dynamic_meta, nomad.set_node_meta = saved
-    check(f"`or DEFAULT` outside of_node: {found}",
-          all(x.startswith("mop/driver/__init__.py") for x in found) and len(found) <= 1)
-    return cases, bad
+            c.fail(f"#175 announce with a bad node: {type(e).__name__}: {e}")
+    c.check(f"#175 `or DEFAULT` outside of_node: {found}",
+            all(x.startswith("mop/driver/__init__.py") for x in found) and len(found) <= 1)
 
 
-def check_body_gone_267():
+def check_body_gone_267(c):
     """HYPOTHESIS (#267): ответы драйверов разные по драйверу -- ensure: body
     None у host и vmid у pve; destroy: {reset, target} у host и {destroyed,
     target} у pve, -- и каждый читатель (driver run, sweep, wipe агента)
@@ -1365,69 +1051,57 @@ def check_body_gone_267():
     from mop.common import domain
     from mop.driver import host, pve
 
-    cases = bad = 0
-
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if got != want:
-            bad += 1
-            print(f"FAILED  #267 {what}: got {got!r}, want {want!r}")
-
     Body, Gone = getattr(domain, "Body", None), getattr(domain, "Gone", None)
-    if Body is None or Gone is None:
-        print("FAILED  #267 no domain.Body / domain.Gone")
-        return 1, 1
+    if not c.check("#267 domain.Body / domain.Gone exist", not (Body is None or Gone is None)):
+        return
 
-    async def ok_sh(script, timeout=20, prefix=()):
-        return "", 0
+    ok_sh = canned("", 0)
 
     name = "pu-mop-1"
 
     async def standing(_v):
         return name
-    saved = (host.sh, pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname)
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            key = os.path.join(d, "mop-body")
-            with open(key + ".pub", "w") as f:
-                f.write("ssh-ed25519 AAAA node\n")
-            pve.SSH_KEY, pve._seed_files, pve._hostname = key, (lambda: []), standing
-            host.sh = pve.sh = ok_sh
-            vmid = pve.vmid_of(name)
+    with restored(host, "sh"), restored(pve, "sh", "SSH_KEY", "_seed_files", "_hostname"), \
+            tempfile.TemporaryDirectory() as d:
+        key = os.path.join(d, "mop-body")
+        with open(key + ".pub", "w") as f:
+            f.write("ssh-ed25519 AAAA node\n")
+        pve.SSH_KEY, pve._seed_files, pve._hostname = key, (lambda: []), standing
+        host.sh = pve.sh = ok_sh
+        vmid = pve.vmid_of(name)
 
-            r = asyncio.run(host.ensure(name))
-            check("host.ensure wire", r, {"name": name, "body": None, "created": False,
-                                          "address": None})
-            check("host.ensure value", Body.from_dict(r), Body(name))
-            check("host.ensure round trip", Body.from_dict(r).to_dict(), r)
-            r = asyncio.run(pve.ensure(name))
-            b = Body.from_dict(r)
-            check("pve.ensure value", (b.name, b.vmid, b.created), (name, vmid, False))
-            check("pve.ensure round trip", b.to_dict(), r)
+        r = asyncio.run(host.ensure(name))
+        c.expect("#267 host.ensure wire", r, {"name": name, "body": None, "created": False,
+                                              "address": None})
+        c.expect("#267 host.ensure value", Body.from_dict(r), Body(name))
+        c.expect("#267 host.ensure round trip", Body.from_dict(r).to_dict(), r)
+        r = asyncio.run(pve.ensure(name))
+        b = Body.from_dict(r)
+        c.expect("#267 pve.ensure value", (b.name, b.vmid, b.created), (name, vmid, False))
+        c.expect("#267 pve.ensure round trip", b.to_dict(), r)
 
-            r = asyncio.run(host.destroy(name))
-            check("host.destroy wire keys", sorted(r), ["reset", "target"])
-            g = Gone.from_dict(r)
-            check("host.destroy value", (g.target, g.vmid, g.reset), (r["target"], None, True))
-            check("host.destroy round trip", g.to_dict(), r)
-            r = asyncio.run(pve.destroy(name))
-            check("pve.destroy wire", r, {"destroyed": vmid, "target": f"body {vmid}"})
-            g = Gone.from_dict(r)
-            check("pve.destroy value", (g.target, g.vmid, g.reset), (f"body {vmid}", vmid, False))
-            check("pve.destroy round trip", g.to_dict(), r)
-            check("a refusal is no value", (Body.from_dict({"error": "x"}),
-                                            Gone.from_dict({"error": "x"})), (None, None))
-    finally:
-        host.sh, pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname = saved
+        r = asyncio.run(host.destroy(name))
+        c.expect("#267 host.destroy wire keys", sorted(r), ["reset", "target"])
+        g = Gone.from_dict(r)
+        c.expect("#267 host.destroy value", (g.target, g.vmid, g.reset),
+                 (r["target"], None, True))
+        c.expect("#267 host.destroy round trip", g.to_dict(), r)
+        r = asyncio.run(pve.destroy(name))
+        c.expect("#267 pve.destroy wire", r, {"destroyed": vmid, "target": f"body {vmid}"})
+        g = Gone.from_dict(r)
+        c.expect("#267 pve.destroy value", (g.target, g.vmid, g.reset),
+                 (f"body {vmid}", vmid, False))
+        c.expect("#267 pve.destroy round trip", g.to_dict(), r)
+        c.expect("#267 a refusal is no value", (Body.from_dict({"error": "x"}),
+                                                Gone.from_dict({"error": "x"})), (None, None))
     # Драйверы строят значение, читатели читают его -- не ключи словаря.
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     for rel, needle in (("mop/driver/host.py", "Body("), ("mop/driver/host.py", "Gone("),
                         ("mop/driver/pve.py", "Body("), ("mop/driver/pve.py", "Gone("),
                         ("mop/cli/driver/run.py", "Body.from_dict("),
                         ("mop/cli/driver/sweep.py", "Gone.from_dict(")):
-        check(f"{rel} uses {needle}", needle in open(os.path.join(root, rel)).read(), True)
-    return cases, bad
+        c.expect(f"#267 {rel} uses {needle}",
+                 needle in open(os.path.join(root, rel)).read(), True)
 
 
 # ── таймаут шелла -- не успех (#171) ─────────────────────────────────────
@@ -1442,18 +1116,9 @@ def check_body_gone_267():
 # проба, но по ней ensure решает, клонировать ли: таймаут там -- отказ ensure,
 # а не клон поверх занятого vmid.
 # STATUS: FIXED — see #171
-def check_timeouts_171():
+def check_timeouts_171(c):
     import asyncio
     from mop.driver import host, pve
-
-    cases = bad = 0
-
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if not want(got):
-            bad += 1
-            print(f"FAILED  #171 {what}: got {got!r}")
 
     def fake_sh(fail=None, everything=False):
         """sh, у которого «не успевает» команда с этим словом (или любая)."""
@@ -1465,136 +1130,137 @@ def check_timeouts_171():
         return sh
 
     timed_out = lambda r: isinstance(r, dict) and "timed out" in (r.get("error") or "")
-    saved = (host.sh, pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname)
+    real_hostname = pve._hostname
     name = "pu-mop-1"
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            key = os.path.join(d, "mop-body")
-            with open(key + ".pub", "w") as f:
-                f.write("ssh-ed25519 AAAA node\n")
-            seed = os.path.join(d, "seed")
-            with open(seed, "w") as f:
-                f.write("x")
-            pve.SSH_KEY = key
-            pve._seed_files = lambda: [(seed, "600")]
-            vmid = pve.vmid_of(name)
+    with restored(host, "sh"), restored(pve, "sh", "SSH_KEY", "_seed_files", "_hostname"), \
+            tempfile.TemporaryDirectory() as d:
+        key = os.path.join(d, "mop-body")
+        with open(key + ".pub", "w") as f:
+            f.write("ssh-ed25519 AAAA node\n")
+        seed = os.path.join(d, "seed")
+        with open(seed, "w") as f:
+            f.write("x")
+        pve.SSH_KEY = key
+        pve._seed_files = lambda: [(seed, "600")]
+        vmid = pve.vmid_of(name)
 
-            # host.destroy: и git, и rm -rf target.
-            host.sh = fake_sh("reset")
-            r = asyncio.run(host.destroy(name))
-            check("host.destroy, git timed out", r, timed_out)
-            host.sh = fake_sh("-rf")
-            r = asyncio.run(host.destroy(name))
-            check("host.destroy, rm timed out", r, timed_out)
-            check("host.destroy, rm: the timeout is named", r,
-                  lambda r: "600s" in (r.get("error") or ""))
-            host.sh = fake_sh()
-            r = asyncio.run(host.destroy(name))
-            check("host.destroy, success as before", r,
-                  lambda r: r.get("reset") is True)
-            # #257: после сноса клон встаёт на ветку мастера, если её назвали:
-            # -B на origin/<ветка> после fetch, иначе локально от HEAD; без
-            # ветки -- как было, никакого checkout. STATUS: FIXED — see #257
-            ran = []
+        # host.destroy: и git, и rm -rf target.
+        host.sh = fake_sh("reset")
+        r = asyncio.run(host.destroy(name))
+        c.check("#171 host.destroy, git timed out", timed_out(r), f"got {r!r}")
+        host.sh = fake_sh("-rf")
+        r = asyncio.run(host.destroy(name))
+        c.check("#171 host.destroy, rm timed out", timed_out(r), f"got {r!r}")
+        c.check("#171 host.destroy, rm: the timeout is named",
+                "600s" in (r.get("error") or ""), f"got {r!r}")
+        host.sh = fake_sh()
+        r = asyncio.run(host.destroy(name))
+        c.check("#171 host.destroy, success as before", r.get("reset") is True, f"got {r!r}")
+        # #257: после сноса клон встаёт на ветку мастера, если её назвали:
+        # -B на origin/<ветка> после fetch, иначе локально от HEAD; без
+        # ветки -- как было, никакого checkout. STATUS: FIXED — see #257
+        ran = []
 
-            async def recording_sh(script, timeout=20, prefix=()):
-                ran.append(script)
-                return "", 0
-            host.sh = recording_sh
-            asyncio.run(host.destroy(name))
-            check("host.destroy without a branch runs no checkout", ran,
-                  lambda r: not any("checkout" in s for s in r))
-            ran.clear()
-            r = asyncio.run(host.destroy(name, branch="swarm"))
-            check("host.destroy with a branch checks it out after the reset", ran,
-                  lambda r: any("checkout -q -B swarm origin/swarm" in s for s in r)
-                  and any("|| git" in s and "checkout -q -B swarm" in s.split("||")[-1]
-                          and "origin/swarm" not in s.split("||")[-1] for s in r)
-                  and r.index(next(s for s in r if "checkout" in s))
-                  > r.index(next(s for s in r if "reset --hard" in s)))
-            # #272: wipe на ветку мастера пишет её же домом клона; без ветки
-            # дом не трогается. STATUS: FIXED — see #272
-            check("#272: host.destroy with a branch records mop.home", ran,
-                  lambda r: any("config mop.home swarm" in s for s in r))
-            ran.clear()
-            asyncio.run(host.destroy(name))
-            check("#272: host.destroy without a branch leaves mop.home alone", ran,
-                  lambda r: not any("mop.home" in s for s in r))
-            host.sh = fake_sh()
+        async def recording_sh(script, timeout=20, prefix=()):
+            ran.append(script)
+            return "", 0
+        host.sh = recording_sh
+        asyncio.run(host.destroy(name))
+        c.check("#171 host.destroy without a branch runs no checkout",
+                not any("checkout" in s for s in ran), f"got {ran!r}")
+        ran.clear()
+        r = asyncio.run(host.destroy(name, branch="swarm"))
+        c.check("#171 host.destroy with a branch checks it out after the reset",
+                any("checkout -q -B swarm origin/swarm" in s for s in ran)
+                and any("|| git" in s and "checkout -q -B swarm" in s.split("||")[-1]
+                        and "origin/swarm" not in s.split("||")[-1] for s in ran)
+                and ran.index(next(s for s in ran if "checkout" in s))
+                > ran.index(next(s for s in ran if "reset --hard" in s)), f"got {ran!r}")
+        # #272: wipe на ветку мастера пишет её же домом клона; без ветки
+        # дом не трогается. STATUS: FIXED — see #272
+        c.check("#171 #272: host.destroy with a branch records mop.home",
+                any("config mop.home swarm" in s for s in ran), f"got {ran!r}")
+        ran.clear()
+        asyncio.run(host.destroy(name))
+        c.check("#171 #272: host.destroy without a branch leaves mop.home alone",
+                not any("mop.home" in s for s in ran), f"got {ran!r}")
+        host.sh = fake_sh()
 
-            # pve: каждый мутирующий шаг по отдельности.
-            async def standing(_v):
-                return name
+        # pve: каждый мутирующий шаг по отдельности.
+        async def standing(_v):
+            return name
 
-            async def empty(_v):
-                return ""
-            for what, fail, stand, fn in (
-                    ("ensure: clone", "clone", empty, lambda: pve.ensure(name)),
-                    ("ensure: net", "net", standing, lambda: pve.ensure(name)),
-                    ("ensure: start", "start", standing, lambda: pve.ensure(name)),
-                    ("ensure: package push", "push", standing,
-                     lambda: pve._sync_package(name, vmid)),
-                    ("ensure: package unpack", "exec", standing,
-                     lambda: pve._sync_package(name, vmid)),
-                    ("ensure: seed", "push", standing, lambda: pve._seed(name, vmid)),
-                    ("admit", "keys", standing, lambda: pve.admit(name, False)),
-                    ("push_many", "unpack", standing,
-                     lambda: pve.push_many(name, [(f"{pve.HOME}/.claude.json", b"{}")])),
-                    ("destroy", "destroy", standing, lambda: pve.destroy(name))):
-                pve._hostname = stand
-                pve.sh = fake_sh(fail)
-                check(f"pve.{what} timed out", asyncio.run(fn()), timed_out)
+        async def empty(_v):
+            return ""
+        for what, fail, stand, fn in (
+                ("ensure: clone", "clone", empty, lambda: pve.ensure(name)),
+                ("ensure: net", "net", standing, lambda: pve.ensure(name)),
+                ("ensure: start", "start", standing, lambda: pve.ensure(name)),
+                ("ensure: package push", "push", standing,
+                 lambda: pve._sync_package(name, vmid)),
+                ("ensure: package unpack", "exec", standing,
+                 lambda: pve._sync_package(name, vmid)),
+                ("ensure: seed", "push", standing, lambda: pve._seed(name, vmid)),
+                ("admit", "keys", standing, lambda: pve.admit(name, False)),
+                ("push_many", "unpack", standing,
+                 lambda: pve.push_many(name, [(f"{pve.HOME}/.claude.json", b"{}")])),
+                ("destroy", "destroy", standing, lambda: pve.destroy(name))):
+            pve._hostname = stand
+            pve.sh = fake_sh(fail)
+            r = asyncio.run(fn())
+            c.check(f"#171 pve.{what} timed out", timed_out(r), f"got {r!r}")
 
-            pve._hostname = standing
-            pve.sh = fake_sh()
-            check("pve.ensure, success as before", asyncio.run(pve.ensure(name)),
-                  lambda r: r.get("body") == vmid and not r.get("error"))
-            check("pve.destroy, success as before", asyncio.run(pve.destroy(name)),
-                  lambda r: r.get("destroyed") == vmid)
-            check("pve.admit, success as before", asyncio.run(pve.admit(name, False)),
-                  lambda r: r == {"admitted": False})
+        pve._hostname = standing
+        pve.sh = fake_sh()
+        r = asyncio.run(pve.ensure(name))
+        c.check("#171 pve.ensure, success as before",
+                r.get("body") == vmid and not r.get("error"), f"got {r!r}")
+        r = asyncio.run(pve.destroy(name))
+        c.check("#171 pve.destroy, success as before", r.get("destroyed") == vmid,
+                f"got {r!r}")
+        c.expect("#171 pve.admit, success as before", asyncio.run(pve.admit(name, False)),
+                 {"admitted": False})
 
-            # Пробы только для чтения -- ответ прежний (характеризация до правки).
-            pve._hostname = saved[4]
-            pve.sh = fake_sh(everything=True)
-            check("pve.bodies tolerates", asyncio.run(pve.bodies()), lambda r: r == [])
-            check("pve.templates tolerates", asyncio.run(pve.templates()),
-                  lambda r: r == [])
-            # _hostname кормит мутирующее решение ensure (клонировать или
-            # поднять стоящее): таймаут -- «не знаю» (None), а не «пусто».
-            check("pve._hostname: timeout is unknown, not absent",
-                  asyncio.run(pve._hostname(vmid)), lambda r: r is None)
-            calls = []
+        # Пробы только для чтения -- ответ прежний (характеризация до правки).
+        pve._hostname = real_hostname
+        pve.sh = fake_sh(everything=True)
+        c.expect("#171 pve.bodies tolerates", asyncio.run(pve.bodies()), [])
+        c.expect("#171 pve.templates tolerates", asyncio.run(pve.templates()), [])
+        # _hostname кормит мутирующее решение ensure (клонировать или
+        # поднять стоящее): таймаут -- «не знаю» (None), а не «пусто».
+        r = asyncio.run(pve._hostname(vmid))
+        c.check("#171 pve._hostname: timeout is unknown, not absent", r is None,
+                f"got {r!r}")
+        calls = []
 
-            async def list_times_out(script, timeout=20, prefix=()):
-                calls.append(script.split())
-                return ("", None) if "list" in script.split() else ("", 0)
-            pve.sh = list_times_out
-            r = asyncio.run(pve.ensure(name))
-            check("pve.ensure: list timed out -> refusal", r, timed_out)
-            check("pve.ensure: list timed out -> no clone", calls,
-                  lambda c: not any("clone" in w for w in c))
+        async def list_times_out(script, timeout=20, prefix=()):
+            calls.append(script.split())
+            return ("", None) if "list" in script.split() else ("", 0)
+        pve.sh = list_times_out
+        r = asyncio.run(pve.ensure(name))
+        c.check("#171 pve.ensure: list timed out -> refusal", timed_out(r), f"got {r!r}")
+        c.check("#171 pve.ensure: list timed out -> no clone",
+                not any("clone" in w for w in calls), f"got {calls!r}")
 
-            async def list_fails(script, timeout=20, prefix=()):
-                return ("", 1) if "list" in script.split() else ("", 0)
-            pve.sh = list_fails
-            check("pve._hostname: non-zero exit is absent, as before",
-                  asyncio.run(pve._hostname(vmid)), lambda r: r == "")
-            pve.sh = fake_sh(everything=True)
-            check("pve.capacity is an error, as before", asyncio.run(pve.capacity()),
-                  lambda r: bool(r.get("error")))
-            host.sh = fake_sh(everything=True)
-            check("host.capacity is an error, as before", asyncio.run(host.capacity()),
-                  lambda r: bool(r.get("error")))
+        async def list_fails(script, timeout=20, prefix=()):
+            return ("", 1) if "list" in script.split() else ("", 0)
+        pve.sh = list_fails
+        c.expect("#171 pve._hostname: non-zero exit is absent, as before",
+                 asyncio.run(pve._hostname(vmid)), "")
+        pve.sh = fake_sh(everything=True)
+        r = asyncio.run(pve.capacity())
+        c.check("#171 pve.capacity is an error, as before", bool(r.get("error")),
+                f"got {r!r}")
+        host.sh = fake_sh(everything=True)
+        r = asyncio.run(host.capacity())
+        c.check("#171 host.capacity is an error, as before", bool(r.get("error")),
+                f"got {r!r}")
 
-            # why(): ненулевой код -- как было, None -- «timed out».
-            check("why: output wins", driver.why(" boom \n", 1), lambda r: r == "boom")
-            check("why: exit code", driver.why("", 2), lambda r: r == "exit 2")
-            check("why: timeout with N", driver.why("", None, 30),
-                  lambda r: r == "timed out after 30s")
-    finally:
-        host.sh, pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname = saved
-    return cases, bad
+        # why(): ненулевой код -- как было, None -- «timed out».
+        c.expect("#171 why: output wins", driver.why(" boom \n", 1), "boom")
+        c.expect("#171 why: exit code", driver.why("", 2), "exit 2")
+        c.expect("#171 why: timeout with N", driver.why("", None, 30),
+                 "timed out after 30s")
 
 
 # ── блокировка шаблона на время чужого клона (#195) ─────────────────────
@@ -1611,18 +1277,9 @@ def check_timeouts_171():
 # гипервизора; иной отказ -- своей причиной.
 # RESULT: до правки 7 из 13 проверок красные, после -- все зелёные.
 # STATUS: FIXED — see #195
-def check_clone_lock_195():
+def check_clone_lock_195(c):
     import asyncio
     from mop.driver import pve
-
-    cases = bad = 0
-
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if not want(got):
-            bad += 1
-            print(f"FAILED  #195 {what}: got {got!r}")
 
     name, project = "pu-mop-1", "mop"
     src = pve.template_vmid(project)
@@ -1650,81 +1307,67 @@ def check_clone_lock_195():
     async def sleep(s):
         slept.append(s)
 
-    saved = (pve.sh, pve.SSH_KEY, pve._seed_files, getattr(pve, "_sleep", None))
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            key = os.path.join(d, "mop-body")
-            with open(key + ".pub", "w") as f:
-                f.write("ssh-ed25519 AAAA node\n")
-            seed = os.path.join(d, "seed")
-            with open(seed, "w") as f:
-                f.write("x")
-            pve.SSH_KEY = key
-            pve._seed_files = lambda: [(seed, "600")]
-            pve._sleep = sleep
+    with restored(pve, "sh", "SSH_KEY", "_seed_files", "_sleep"), \
+            tempfile.TemporaryDirectory() as d:
+        key = os.path.join(d, "mop-body")
+        with open(key + ".pub", "w") as f:
+            f.write("ssh-ed25519 AAAA node\n")
+        seed = os.path.join(d, "seed")
+        with open(seed, "w") as f:
+            f.write("x")
+        pve.SSH_KEY = key
+        pve._seed_files = lambda: [(seed, "600")]
+        pve._sleep = sleep
 
-            # Блокировка дважды, потом клон проходит: тело поднято без рестарта.
-            pve.sh, calls = fake([(locked, 1), (locked, 1), (f"{src}\n", 0)])
-            r = asyncio.run(pve.ensure(name))
-            check("locked twice then ok -> body", r,
-                  lambda r: not r.get("error") and r.get("created") is True)
-            check("locked twice then ok -> three clones", len(calls),
-                  lambda n: n == 3)
-            check("locked twice then ok -> two pauses", len(slept),
-                  lambda n: n == 2)
+        # Блокировка дважды, потом клон проходит: тело поднято без рестарта.
+        pve.sh, calls = fake([(locked, 1), (locked, 1), (f"{src}\n", 0)])
+        r = asyncio.run(pve.ensure(name))
+        c.check("#195 locked twice then ok -> body",
+                not r.get("error") and r.get("created") is True, f"got {r!r}")
+        c.expect("#195 locked twice then ok -> three clones", len(calls), 3)
+        c.expect("#195 locked twice then ok -> two pauses", len(slept), 2)
 
-            # Второй текст отказа по блокировке -- файл конфига под замком.
-            slept.clear()
-            pve.sh, calls = fake([
-                ("can't lock file '/run/lock/lxc/pve-config-9001.lock' "
-                 "- got timeout\n", 1), (f"{src}\n", 0)])
-            r = asyncio.run(pve.ensure(name))
-            check("can't lock file -> retried", (r, len(calls)),
-                  lambda x: not x[0].get("error") and x[1] == 2)
+        # Второй текст отказа по блокировке -- файл конфига под замком.
+        slept.clear()
+        pve.sh, calls = fake([
+            ("can't lock file '/run/lock/lxc/pve-config-9001.lock' "
+             "- got timeout\n", 1), (f"{src}\n", 0)])
+        r = asyncio.run(pve.ensure(name))
+        c.check("#195 can't lock file -> retried",
+                not r.get("error") and len(calls) == 2, f"got {(r, len(calls))!r}")
 
-            # Блокировка не уходит: отказ называет блокировку, а не сборку, и
-            # ожидание ограничено.
-            slept.clear()
-            pve.sh, calls = fake([(locked, 1)])
-            r = asyncio.run(pve.ensure(name))
-            err = r.get("error") or ""
-            check("lock persists -> error", r, lambda r: bool(r.get("error")))
-            check("lock persists -> names the lock", err,
-                  lambda e: "locked" in e)
-            check("lock persists -> no build advice", err,
-                  lambda e: "mop driver build" not in e)
-            check("lock persists -> bounded wait", sum(slept),
-                  lambda t: 60 <= t <= 180)
+        # Блокировка не уходит: отказ называет блокировку, а не сборку, и
+        # ожидание ограничено.
+        slept.clear()
+        pve.sh, calls = fake([(locked, 1)])
+        r = asyncio.run(pve.ensure(name))
+        err = r.get("error") or ""
+        c.check("#195 lock persists -> error", bool(r.get("error")), f"got {r!r}")
+        c.check("#195 lock persists -> names the lock", "locked" in err, f"got {err!r}")
+        c.check("#195 lock persists -> no build advice", "mop driver build" not in err,
+                f"got {err!r}")
+        c.check("#195 lock persists -> bounded wait", 60 <= sum(slept) <= 180,
+                f"got {sum(slept)!r}")
 
-            # Шаблона нет: совет собрать образ, как сегодня.
-            slept.clear()
-            pve.sh, calls = fake([(f"mop-pve: no container {src}\n", 64)],
-                                 template=False)
-            r = asyncio.run(pve.ensure(name))
-            err = r.get("error") or ""
-            check("no template -> build advice", err,
-                  lambda e: f"mop driver build {project}" in e)
-            check("no template -> not retried", (len(calls), slept),
-                  lambda x: x == (1, []))
+        # Шаблона нет: совет собрать образ, как сегодня.
+        slept.clear()
+        pve.sh, calls = fake([(f"mop-pve: no container {src}\n", 64)],
+                             template=False)
+        r = asyncio.run(pve.ensure(name))
+        err = r.get("error") or ""
+        c.check("#195 no template -> build advice", f"mop driver build {project}" in err,
+                f"got {err!r}")
+        c.expect("#195 no template -> not retried", (len(calls), slept), (1, []))
 
-            # Иной отказ при стоящем шаблоне: его причина, без совета.
-            pve.sh, calls = fake([("storage 'local-lvm' is full\n", 255)])
-            r = asyncio.run(pve.ensure(name))
-            err = r.get("error") or ""
-            check("other error -> its reason", err,
-                  lambda e: "storage 'local-lvm' is full" in e)
-            check("other error -> no build advice", err,
-                  lambda e: "mop driver build" not in e)
-            check("other error -> not retried", (len(calls), slept),
-                  lambda x: x == (1, []))
-    finally:
-        pve.sh, pve.SSH_KEY, pve._seed_files = saved[:3]
-        if saved[3] is None:
-            if hasattr(pve, "_sleep"):
-                del pve._sleep
-        else:
-            pve._sleep = saved[3]
-    return cases, bad
+        # Иной отказ при стоящем шаблоне: его причина, без совета.
+        pve.sh, calls = fake([("storage 'local-lvm' is full\n", 255)])
+        r = asyncio.run(pve.ensure(name))
+        err = r.get("error") or ""
+        c.check("#195 other error -> its reason", "storage 'local-lvm' is full" in err,
+                f"got {err!r}")
+        c.check("#195 other error -> no build advice", "mop driver build" not in err,
+                f"got {err!r}")
+        c.expect("#195 other error -> not retried", (len(calls), slept), (1, []))
 
 
 # ── факты pve для плейбуков (#158) ───────────────────────────────────────
@@ -1779,7 +1422,7 @@ def _jinja_build(stdout_lines, tmpl_name, stage_name, project):
     }
 
 
-def check_pve_facts():
+def check_pve_facts(c):
     """HYPOTHESIS (#158): факты драйвера pve плейбуки добывали тремя копиями
     `python3 -c` с sys.path и окружением, а список тел разбирали дважды --
     pve.parse_list и jinja `search ' имя '`; длину префикса сети считал ещё и
@@ -1790,34 +1433,25 @@ def check_pve_facts():
     STATUS: FIXED — see #158"""
     import json
     import subprocess
-    cases = bad = 0
-
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}: got {got!r}, want {want!r}")
 
     pve = driver.module("pve")
-    if not hasattr(pve, "facts"):
-        print("FAILED  pve.facts is missing")
-        return 1, 1
+    if not c.check("pve.facts exists", hasattr(pve, "facts")):
+        return
     subnet, gateway = config.get("MOP_PVE_SUBNET"), config.get("MOP_PVE_GATEWAY")
     home = config.get("MOP_HOME")
     for base in (9000, 12000):
         # Роль pve: разбор сети jinja, VMID_MAX из vmid.yml, маршруты -- копией.
         f = pve.facts(base)
-        check(f"network {base}", (f["network"], str(f["prefix"]), f["gateway"]),
-              (subnet.split("/")[0], subnet.split("/")[1], gateway))
-        check(f"vmid_max {base}", f["vmid_max"], base + 999)
-        check(f"routes {base}", f["routes"],
-              _old(SNIPPET_ROUTES, base, subnet, str(base)).split())
+        c.expect(f"network {base}", (f["network"], str(f["prefix"]), f["gateway"]),
+                (subnet.split("/")[0], subnet.split("/")[1], gateway))
+        c.expect(f"vmid_max {base}", f["vmid_max"], base + 999)
+        c.expect(f"routes {base}", f["routes"],
+                _old(SNIPPET_ROUTES, base, subnet, str(base)).split())
         # Пути, которые YAML писал литералом.
-        check("wrapper", f["wrapper"], "/usr/local/sbin/mop-pve")
-        check("ssh_key", f["ssh_key"], f"{home}/.ssh/mop-body")
-        check("known_hosts", f["known_hosts"], f"{home}/.ssh/known_hosts-mop-body")
-        check("no project, no image", "image" in f, False)
+        c.expect("wrapper", f["wrapper"], "/usr/local/sbin/mop-pve")
+        c.expect("ssh_key", f["ssh_key"], f"{home}/.ssh/mop-body")
+        c.expect("known_hosts", f["known_hosts"], f"{home}/.ssh/known_hosts-mop-body")
+        c.expect("no project, no image", "image" in f, False)
 
         for project in ("mop", "rugent", "ru.gent"):
             tmpl = _old(SNIPPET_IMAGE, base, project).split()
@@ -1834,14 +1468,14 @@ def check_pve_facts():
                 jinja = _jinja_build(lines, tmpl[1], stage[1], project)
                 f = pve.facts(base, project=project, listing=listing)
                 what = f"facts({base}, {project}, {len(lines)} lines)"
-                check(f"{what} image", (str(f["image"]["vmid"]), f["image"]["name"],
-                                        f["gateway"], str(f["prefix"]), f["image"]["address"]),
-                      tuple(tmpl))
-                check(f"{what} stage", (str(f["stage"]["vmid"]), f["stage"]["name"],
-                                        f["stage"]["address"]), tuple(stage))
-                check(f"{what} present", (f["image"]["present"], f["stage"]["present"],
-                                          f["bodies"]),
-                      (jinja["have_image"], jinja["have_stage"], jinja["project_bodies"]))
+                c.expect(f"{what} image", (str(f["image"]["vmid"]), f["image"]["name"],
+                                          f["gateway"], str(f["prefix"]), f["image"]["address"]),
+                        tuple(tmpl))
+                c.expect(f"{what} stage", (str(f["stage"]["vmid"]), f["stage"]["name"],
+                                          f["stage"]["address"]), tuple(stage))
+                c.expect(f"{what} present", (f["image"]["present"], f["stage"]["present"],
+                                            f["bodies"]),
+                        (jinja["have_image"], jinja["have_stage"], jinja["project_bodies"]))
 
     # Командлет печатает ровно pve.facts() JSON'ом -- через диспетчер.
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -1853,9 +1487,8 @@ def check_pve_facts():
         got = json.loads(r.stdout)
     except ValueError:
         got = (r.returncode, r.stdout, r.stderr)
-    check("mop server pve-facts", got,
-          json.loads(json.dumps(pve.facts(9000, project="mop", listing=listing))))
-    return cases, bad
+    c.expect("mop server pve-facts", got,
+            json.loads(json.dumps(pve.facts(9000, project="mop", listing=listing))))
 
 
 if __name__ == "__main__":

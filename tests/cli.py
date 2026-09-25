@@ -13,6 +13,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import (Checks, NetworkGuard, no_network, offline, patched,  # noqa: E402,F401
+                  patched_env, restored, run_command)
 sys.path.insert(0, ROOT)
 
 from mop import cli  # noqa: E402
@@ -34,7 +36,7 @@ VERBS = {"driver": {"build": {}, "run": {}}, "bug": {},
 
 
 def main():
-    failed = 0
+    c = Checks()
     # HYPOTHESIS: каталога нет — диспетчер bash ищет файл по имени в bin/.
     # SOLUTION: catalog() из обхода пакета, resolve() по нему.
     # STATUS: FIXED — see #75
@@ -42,18 +44,13 @@ def main():
     want = {"add": "mop.cli.core.add", "list": "mop.cli.core.list",
             "deploy": "mop.cli.pool.deploy", "mcp": "mop.cli.service.mcp",
             "driver": "mop.cli.driver", "bug": "mop.cli.bug", "dev": "mop.cli.dev"}
-    if cat != want:
-        failed += 1
-        print(f"FAIL catalog: {cat}")
+    c.expect("catalog", cat, want)
     # Одно имя в двух секциях — отказ, а не «кто первый».
     try:
         cli.catalog(FOUND + [("pool", "add", False)])
-        failed += 1
-        print("FAIL catalog: a duplicate name must refuse")
+        c.fail("catalog: a duplicate name must refuse")
     except RuntimeError as e:
-        if "add" not in str(e):
-            failed += 1
-            print(f"FAIL catalog: the refusal must name the duplicate: {e}")
+        c.check(f"catalog: the refusal must name the duplicate: {e}", not ("add" not in str(e)))
 
     # Плоская команда: модуль и остаток argv.
     for argv, want in [
@@ -73,15 +70,9 @@ def main():
         (["dev", "x"], ("mop.cli.dev", ["x"])),
     ]:
         got = cli.resolve(argv, cat, VERBS)
-        if got != want:
-            failed += 1
-            print(f"FAIL resolve({argv}): {got} != {want}")
-    if cli.resolve(["nope"], cat, VERBS) is not None:
-        failed += 1
-        print("FAIL resolve of an unknown name must be None")
-    if cli.resolve([], cat, VERBS) is not None:
-        failed += 1
-        print("FAIL resolve of nothing must be None")
+        c.expect(f"resolve({argv})", got, want)
+    c.check("resolve of an unknown name must be None", not (cli.resolve(["nope"], cat, VERBS) is not None))
+    c.check("resolve of nothing must be None", not (cli.resolve([], cat, VERBS) is not None))
 
     # HYPOTHESIS (#140): строка хода одна, и строкам вывода сборки на
     # терминале негде жить. SOLUTION: frame() -- кадр из нескольких строк,
@@ -89,22 +80,14 @@ def main():
     # экрана, новые строки, обрезанные по ширине, чтобы перенос не сбил счёт.
     E = "\033"
     got = lib.frame(0, ["one", "two", "step"], 80)
-    if got != f"\r{E}[Jone\ntwo\nstep":
-        failed += 1
-        print(f"FAIL frame from nothing: {got!r}")
+    c.expect("frame from nothing", got, f"\r{E}[Jone\ntwo\nstep")
     got = lib.frame(3, ["step"], 80)
-    if got != f"\r{E}[2A{E}[Jstep":
-        failed += 1
-        print(f"FAIL frame over three rows: {got!r}")
-    if lib.frame(1, [], 80) != f"\r{E}[J":
-        failed += 1
-        print(f"FAIL frame to nothing erases: {lib.frame(1, [], 80)!r}")
+    c.expect("frame over three rows", got, f"\r{E}[2A{E}[Jstep")
+    c.expect("frame to nothing erases", lib.frame(1, [], 80), f"\r{E}[J")
     # Цвета и управляющие символы строки ansible не должны ни красить
     # кадр, ни сдвигать курсор; ширина -- по видимым символам.
     got = lib.frame(0, [f"{E}[0;32mok: [hyper]{E}[0m\tx\r", "abcdefghij"], 6)
-    if got != f"\r{E}[Jok: [\nabcde":
-        failed += 1
-        print(f"FAIL frame must strip escapes and cut to width: {got!r}")
+    c.expect("frame must strip escapes and cut to width", got, f"\r{E}[Jok: [\nabcde")
     # STATUS: FIXED — see #140
 
     # Описание — первая строка докстринга, прочитанная без импорта: импорт
@@ -113,14 +96,10 @@ def main():
     p = os.path.join(d, "x.py")
     with open(p, "w") as f:
         f.write('"""do a thing: mop x [--flag]\n\nmore text\n"""\nimport nothing_such\n')
-    if cli.describe(p) != "do a thing: mop x [--flag]":
-        failed += 1
-        print(f"FAIL describe: {cli.describe(p)!r}")
+    c.expect("describe", cli.describe(p), "do a thing: mop x [--flag]")
     with open(p, "w") as f:
         f.write("x = 1\n")
-    if cli.describe(p) != "":
-        failed += 1
-        print("FAIL describe of a module without a docstring must be empty")
+    c.expect("describe of a module without a docstring must be empty", cli.describe(p), "")
 
     # deploy на python (#76): чистое — отвергнутые старые цели, недостающие
     # файлы MOP_BODY_EXTRA, имена проектов из origin'ов и легаси, --extra-vars.
@@ -130,67 +109,49 @@ def main():
         from mop.cli.server import deploy
         from mop.common import projects
     except ImportError as e:
-        print(f"FAIL {e}")
-        return 1
+        c.fail(f"{e}")
+        return c.report("cli")
     for argv, want in [(["nomad"], "nomad"), (["pool"], "pool"), (["all"], "all"),
                        ([], None), (["git@h:g/x.git"], None), (["mop"], None)]:
-        if deploy.refused_target(argv) != want:
-            failed += 1
-            print(f"FAIL refused_target({argv}) != {want!r}")
+        c.expect(f"refused_target({argv})", deploy.refused_target(argv), want)
     root = tempfile.mkdtemp(prefix="mop-test-deploy-")
     open(os.path.join(root, "sandbox.yaml"), "w").close()
-    if deploy.missing_extras("sandbox.yaml, other.yaml,", root) != ["other.yaml"]:
-        failed += 1
-        print(f"FAIL missing_extras: {deploy.missing_extras('sandbox.yaml, other.yaml,', root)}")
-    if deploy.missing_extras("", root) != []:
-        failed += 1
-        print("FAIL missing_extras of an empty setting must be empty")
-    if projects.names({"git@h:g/proj.git", "git@h:g/mop.git"}, {"legacy"}) != ["legacy", "mop", "proj"]:
-        failed += 1
-        print(f"FAIL projects.names: {projects.names({'git@h:g/proj.git', 'git@h:g/mop.git'}, {'legacy'})}")
+    c.expect("missing_extras", deploy.missing_extras("sandbox.yaml, other.yaml,", root), ["other.yaml"])
+    c.expect("missing_extras of an empty setting must be empty", deploy.missing_extras("", root), [])
+    c.expect("projects.names", projects.names({"git@h:g/proj.git", "git@h:g/mop.git"}, {"legacy"}),
+             ["legacy", "mop", "proj"])
     # Списком, а не строкой: `--extra-vars mop_projects=[...]` ansible берёт как
     # строку и проходит по её символам, порождая пользователей `master-[`.
     ev = _play.play_vars(["mop", "proj"], {"proj": {"asks": {}}})
-    if json.loads(ev[0]) != {"mop_projects": ["mop", "proj"]} or json.loads(ev[1]) != {"mop_manifests": {"proj": {"asks": {}}}}:
-        failed += 1
-        print(f"FAIL play_vars: {ev}")
+    c.check(f"play_vars: {ev}", not (json.loads(ev[0]) != {"mop_projects": ["mop", "proj"]}
+                                     or json.loads(ev[1]) != {"mop_manifests": {"proj": {"asks": {}}}}))
     # Узкий прогон проектов (#79) идёт без манифестов: их читают слои узла и
     # тела, а не роль шины. Лишний --extra-vars пустым словарём стирал бы
     # манифесты, уже разложенные полной игрой.
-    if _play.play_vars(["mop"]) != [json.dumps({"mop_projects": ["mop"]})]:
-        failed += 1
-        print(f"FAIL play_vars without manifests: {_play.play_vars(['mop'])}")
+    c.expect("play_vars without manifests", _play.play_vars(["mop"]), [json.dumps({"mop_projects": ["mop"]})])
     # Лимиты папетов (#107) едут рядом с проектами, и пустые тоже: пустой
     # словарь -- правда контроллера «лимитов нет», и сервер обязан её
     # получить, иначе снятый лимит жил бы там дальше. Сама функция чистая:
     # файл читает play(), а не она.
     got = _play.play_vars(["mop"], limits={})
-    if got != [json.dumps({"mop_projects": ["mop"], "mop_limits": {}})]:
-        failed += 1
-        print(f"FAIL play_vars with empty limits: {got}")
+    c.expect("play_vars with empty limits", got, [json.dumps({"mop_projects": ["mop"], "mop_limits": {}})])
     got = _play.play_vars(["mop"], limits={"mop": 2})
-    if json.loads(got[0]).get("mop_limits") != {"mop": 2}:
-        failed += 1
-        print(f"FAIL play_vars with limits: {got}")
+    c.expect(f"play_vars with limits: {got}", json.loads(got[0]).get("mop_limits"), {"mop": 2})
     # STATUS: FIXED — see #107
     # Хосты форжей (#121) едут полной игре списком: роль узла доверяет ключу
     # каждого. Без них -- ключа нет вовсе, узкий прогон проектов их не
     # передаёт и роль узла не играет.
     got = _play.play_vars(["mop"], git_hosts=["dev.corp", "git.ermak.dev"])
-    if json.loads(got[0]).get("mop_git_hosts") != ["dev.corp", "git.ermak.dev"]:
-        failed += 1
-        print(f"FAIL play_vars with git hosts: {got}")
+    c.expect(f"play_vars with git hosts: {got}", json.loads(got[0]).get("mop_git_hosts"),
+             ["dev.corp", "git.ermak.dev"])
     # #178: хосты инвентаря -- списком, только когда их дали.
     got = _play.play_vars(["mop"], inventory_hosts=["a", "b"])
-    if json.loads(got[0]).get("mop_inventory_hosts") != ["a", "b"]:
-        failed += 1
-        print(f"FAIL play_vars with inventory hosts: {got}")
-    if "mop_inventory_hosts" in json.loads(_play.play_vars(["mop"])[0]):
-        failed += 1
-        print("FAIL play_vars without inventory hosts must not send an empty list")
-    if "mop_git_hosts" in json.loads(_play.play_vars(["mop"])[0]):
-        failed += 1
-        print("FAIL play_vars without git hosts must not send an empty list")
+    c.expect(f"play_vars with inventory hosts: {got}",
+             json.loads(got[0]).get("mop_inventory_hosts"), ["a", "b"])
+    c.check("play_vars without inventory hosts must not send an empty list",
+            not ("mop_inventory_hosts" in json.loads(_play.play_vars(["mop"])[0])))
+    c.check("play_vars without git hosts must not send an empty list",
+            not ("mop_git_hosts" in json.loads(_play.play_vars(["mop"])[0])))
     # STATUS: FIXED — see #121
 
     # Локаль прогонов (#92): ansible требует UTF-8 и берёт её из окружения, а
@@ -206,26 +167,19 @@ def main():
                          ("C", "C.UTF-8"),                 # не UTF-8 — запасная
                          ("", "C.UTF-8")]:
         got = cli.run_locale(wanted, usable=have.__contains__)
-        if got != want:
-            failed += 1
-            print(f"FAIL run_locale({wanted!r}) -> {got!r}, wanted {want!r}")
+        c.expect(f"run_locale({wanted!r})", got, want)
     # Запасная берётся, даже если и её на машине нет: сказать нечего, а
     # C.UTF-8 встроена в glibc и есть везде, где есть сам glibc.
-    if cli.run_locale("ru_RU.UTF-8", usable=lambda _: False) != "C.UTF-8":
-        failed += 1
-        print("FAIL run_locale must fall back to C.UTF-8")
+    c.expect("run_locale must fall back to C.UTF-8",
+             cli.run_locale("ru_RU.UTF-8", usable=lambda _: False), "C.UTF-8")
 
     # Чем запускать команду, которой нужны права root (#91). Под root —
     # ничем: повышать нечего, а на выделенном сервере ещё и нечем, там
     # `sudo` попросту не стоит, и команда падала трассировкой на первом же
     # шаге установки.
     from mop.cli.pool import _self as pool_setup   # общее двух setup (#259)
-    if pool_setup.elevate(uid=0) != []:
-        failed += 1
-        print(f"FAIL elevate as root: {pool_setup.elevate(uid=0)}")
-    if pool_setup.elevate(uid=1000) != ["sudo"]:
-        failed += 1
-        print(f"FAIL elevate as a user: {pool_setup.elevate(uid=1000)}")
+    c.expect("elevate as root", pool_setup.elevate(uid=0), [])
+    c.expect("elevate as a user", pool_setup.elevate(uid=1000), ["sudo"])
 
     # Группы разрезаны по глаголам (#77): каждый глагол из usage группы
     # (`  mop <группа> <глагол>`) — свой модуль, и диспетчер находит его по
@@ -241,12 +195,8 @@ def main():
         # Глагол бывает и через дефис: `mop server pve-facts` (#158).
         listed = set(re.findall(rf"^  mop {group} ([a-z][a-z-]*)", doc, re.M))
         missing = listed - set(have.get(group) or {})   # дерево (#253): глаголы -- ключи
-        if missing:
-            failed += 1
-            print(f"FAIL group {group}: verbs without a module: {sorted(missing)}")
-        if not listed:
-            failed += 1
-            print(f"FAIL group {group}: its docstring lists no verbs")
+        c.check(f"group {group}: verbs without a module: {sorted(missing)}", not (missing))
+        c.check(f"group {group}: its docstring lists no verbs", not (not listed))
 
     # Каждый модуль команды определяет `main` ровно один раз, и никакое имя
     # верхнего уровня не определяется дважды: второе определение молча
@@ -265,15 +215,12 @@ def main():
                 tree = _ast.parse(fh.read())
             defs = [n.name for n in tree.body if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef))]
             dup = sorted({d for d in defs if defs.count(d) > 1})
-            if dup:
-                failed += 1
-                print(f"FAIL {os.path.relpath(path)}: defined twice: {dup}")
+            c.check(f"{os.path.relpath(path)}: defined twice: {dup}", not (dup))
             is_section_init = f == "__init__.py" and os.path.basename(root) in cli.SECTIONS
-            if not is_section_init and "main" not in defs and not any(
-                    isinstance(n, _ast.Assign) and any(getattr(t, "id", "") == "main" for t in n.targets)
-                    for n in tree.body):
-                failed += 1
-                print(f"FAIL {os.path.relpath(path)}: no main(argv)")
+            c.check(f"{os.path.relpath(path)}: no main(argv)",
+                    not (not is_section_init and "main" not in defs and not any(
+                        isinstance(n, _ast.Assign) and any(getattr(t, "id", "") == "main" for t in n.targets)
+                        for n in tree.body)))
 
     # ── #111: origin из рабочей копии, одним механизмом ─────────────────
     # HYPOTHESIS: `mop project add` требовал origin всегда, а команды, что
@@ -284,25 +231,18 @@ def main():
     from mop.common import puppets
     for good in ("git@git.ermak.dev:ermak/mop.git", "https://h/g/mop.git",
                  "/srv/git/mop.git"):
-        if not puppets.looks_like_origin(good):
-            failed += 1
-            print(f"FAIL looks_like_origin({good!r}) must be true")
+        c.check(f"looks_like_origin({good!r}) must be true", not (not puppets.looks_like_origin(good)))
     # Голое имя и значение чужого флага, приехавшее позиционно, -- не origin.
     for bad in ("mop", "opus", "", "  "):
-        if puppets.looks_like_origin(bad):
-            failed += 1
-            print(f"FAIL looks_like_origin({bad!r}) must be false")
+        c.check(f"looks_like_origin({bad!r}) must be false", not (puppets.looks_like_origin(bad)))
 
     here = "git@git.ermak.dev:ermak/mop.git"
     other = "git@git.ermak.dev:rugent/rugent.git"
     # Явный аргумент старше рабочей копии.
-    if lib.pick_origin(other, here) != other:
-        failed += 1
-        print("FAIL pick_origin: an explicit origin must win over the working copy")
+    c.expect("pick_origin: an explicit origin must win over the working copy",
+             lib.pick_origin(other, here), other)
     # Нет аргумента -- рабочая копия.
-    if lib.pick_origin(None, here) != here:
-        failed += 1
-        print("FAIL pick_origin: without an argument the working copy's origin")
+    c.expect("pick_origin: without an argument the working copy's origin", lib.pick_origin(None, here), here)
     # Отказы -- ValueError с причиной, а не None: None дальше читался бы как
     # проект с пустым именем.
     for arg, cwd, why in (("opus", here, "doesn't look like a git-origin"),
@@ -310,42 +250,36 @@ def main():
         try:
             got = lib.pick_origin(arg, cwd)
         except ValueError as e:
-            if why not in str(e):
-                failed += 1
-                print(f"FAIL pick_origin({arg!r}, {cwd!r}) refused without the reason: {e}")
+            c.check(f"pick_origin({arg!r}, {cwd!r}) refused without the reason: {e}", not (why not in str(e)))
             continue
-        failed += 1
-        print(f"FAIL pick_origin({arg!r}, {cwd!r}) must refuse, got {got!r}")
+        c.fail(f"pick_origin({arg!r}, {cwd!r}) must refuse, got {got!r}")
     # Неверный явный аргумент не подменяется рабочей копией: опечатка иначе
     # молча завела бы не тот проект.
     # STATUS: FIXED — see #111
 
-    failed += check_mcp_declarations()
-    failed += check_refusals()
-    failed += check_refusals_163()
-    failed += check_output_rules()
-    failed += check_empty_llm()
-    failed += check_deploy_check()
-    failed += check_inventory_drivers()
-    failed += check_pool_uniform()
-    failed += check_node_memory_197()
-    failed += check_fallback_model_183()
-    failed += check_agent_on_node_172()
-    failed += check_bus_import_169()      # последними: перезагружают модули
-    failed += check_nomad_import_187()
-
-    print("cli: FAILED" if failed else "cli: ok")
-    return 1 if failed else 0
+    check_mcp_declarations(c)
+    check_refusals(c)
+    check_refusals_163(c)
+    check_output_rules(c)
+    check_empty_llm(c)
+    check_deploy_check(c)
+    check_inventory_drivers(c)
+    check_pool_uniform(c)
+    check_node_memory_197(c)
+    check_fallback_model_183(c)
+    check_agent_on_node_172(c)
+    check_bus_import_169(c)      # последними: перезагружают модули
+    check_nomad_import_187(c)
+    return c.report("cli")
 
 
-def check_mcp_declarations():
+def check_mcp_declarations(c):
     """#160: инструменты управления MCP -- объявления в самих командлетах.
 
     HYPOTHESIS: MCP держал вторую реализацию add/update/build руками, и она
     разошлась с командлетами (не слал workspace, собирал образ мимо сборщика).
     SOLUTION: командлет объявляет `MCP = {...}`; mop mcp находит объявления
     обходом пакета, читает их без импорта и зовёт сам командлет."""
-    failed = 0
     d = tempfile.mkdtemp(prefix="mop-test-mcp-")
     p = os.path.join(d, "x.py")
 
@@ -355,16 +289,12 @@ def check_mcp_declarations():
                 'MCP = {"annotations": "destructive", "args": ['
                 '{"name": "name", "type": "string", "required": True}]}\n')
     got = cli.declared(p)
-    if (got or {}).get("annotations") != "destructive" or \
-            [a["name"] for a in got.get("args", [])] != ["name"]:
-        failed += 1
-        print(f"FAIL declared: {got!r}")
+    c.check(f"declared: {got!r}", not ((got or {}).get("annotations") != "destructive" or
+                                       [a["name"] for a in got.get("args", [])] != ["name"]))
     # Без объявления команда в MCP не видна: attach, master, code, service.
     with open(p, "w") as f:
         f.write('"""x"""\n')
-    if cli.declared(p) is not None:
-        failed += 1
-        print("FAIL declared: a module without MCP must stay out of MCP")
+    c.check("declared: a module without MCP must stay out of MCP", not (cli.declared(p) is not None))
     # Кривое объявление -- громкий отказ, а не молча пропавший инструмент.
     for bad in ('MCP = {"args": [{"name": "fresh", "type": "boolean"}]}',  # без флага
                 'MCP = {"args": [{"name": "x", "type": "float", "flag": "--x"}]}',
@@ -379,21 +309,16 @@ def check_mcp_declarations():
             cli.declared(p)
         except ValueError:
             continue
-        failed += 1
-        print(f"FAIL declared must refuse: {bad}")
+        c.fail(f"declared must refuse: {bad}")
 
     # Описание инструмента -- докстринг командлета целиком: usage и смысл.
     with open(p, "w") as f:
         f.write('"""do x: mop x <name>\n\nmore text\n"""\nimport nothing_such\n')
-    if cli.docstring(p) != "do x: mop x <name>\n\nmore text":
-        failed += 1
-        print(f"FAIL docstring: {cli.docstring(p)!r}")
+    c.expect("docstring", cli.docstring(p), "do x: mop x <name>\n\nmore text")
     # Вывод командлета уходит модели без цветов терминала: lib.fail красит
     # всегда. Строки и табуляция остаются.
     got = lib.plain("\033[0;31mpu-mop-1: gone\033[0m\n\tnext\r")
-    if got != "pu-mop-1: gone\n\tnext":
-        failed += 1
-        print(f"FAIL plain: {got!r}")
+    c.expect("plain", got, "pu-mop-1: gone\n\tnext")
 
     # Имя инструмента -- слова команды через подчёркивание.
     found = [("core", "add", False), ("node", "", True), ("service", "mcp", False)]
@@ -401,9 +326,7 @@ def check_mcp_declarations():
     names = {n: words for n, words, _ in cli.tool_commands(found, group_verbs)}
     want = {"add": ["add"], "node": ["node"], "node_drain": ["node", "drain"],
             "node_up": ["node", "up"], "mcp": ["mcp"]}
-    if names != want:
-        failed += 1
-        print(f"FAIL tool_commands: {names}")
+    c.expect("tool_commands", names, want)
 
     # ── #253: вложенные группы -- дерево, имена по пути, приватное, прежние имена
     # HYPOTHESIS: диспетчер знает один уровень, `mop dev bug new` и
@@ -427,35 +350,24 @@ def check_mcp_declarations():
             "dev": (["dev"], "dev/__init__.py"),
             "dev_bug": (["dev", "bug"], "dev/bug/__init__.py"),
             "dev_bug_new": (["dev", "bug", "new"], "dev/bug/new.py")}
-    if got != want:
-        failed += 1
-        print(f"FAIL #253 nested tool_commands: {got}")
+    c.expect("#253 nested tool_commands", got, want)
     names = {n for n, _, _ in cli.tool_commands(nested, tree)}
-    if any(n.startswith("dev") for n in names) or "server_user_add" not in names:
-        failed += 1
-        print(f"FAIL #253 PRIVATE must hide dev from the tools and keep server: {sorted(names)}")
-    if "dev" not in cli.PRIVATE:
-        failed += 1
-        print(f"FAIL #253 dev must be private: {cli.PRIVATE}")
+    c.check(f"#253 PRIVATE must hide dev from the tools and keep server: {sorted(names)}",
+            not (any(n.startswith("dev") for n in names) or "server_user_add" not in names))
+    c.check(f"#253 dev must be private: {cli.PRIVATE}", not ("dev" not in cli.PRIVATE))
     table = {"bug": ("dev", "bug"), "web": ("server", "web")}
     for argv, want in [(["bug", "new", "t"], ["dev", "bug", "new", "t"]),
                        (["web", "--port", "1"], ["server", "web", "--port", "1"]),
                        (["list"], ["list"]), ([], [])]:
         got = cli.unalias(argv, table)
-        if got != want:
-            failed += 1
-            print(f"FAIL #253 unalias({argv}) = {got}, want {want}")
-    if not isinstance(cli.LEGACY, dict):
-        failed += 1
-        print("FAIL #253 LEGACY must be the alias table")
+        c.expect(f"#253 unalias({argv})", got, want)
+    c.check("#253 LEGACY must be the alias table", not (not isinstance(cli.LEGACY, dict)))
     # verbs() читает дерево с диска: подпакет группы -- подгруппа.
     d = tempfile.mkdtemp(prefix="mop-test-tree-")
     for rel in ("g/__init__.py", "g/a.py", "g/s/__init__.py", "g/s/b.py", "g/_hidden.py"):
         os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
         open(os.path.join(d, rel), "w").write('"""x"""\n')
-    if cli.verbs(d) != {"g": {"a": {}, "s": {"b": {}}}}:
-        failed += 1
-        print(f"FAIL #253 verbs tree: {cli.verbs(d)}")
+    c.expect("#253 verbs tree", cli.verbs(d), {"g": {"a": {}, "s": {"b": {}}}})
 
     # argv из значений инструмента: позиционные по порядку, флаги по имени.
     args = [{"name": "name", "type": "string", "required": True},
@@ -471,9 +383,7 @@ def check_mcp_declarations():
             ({"name": "pu-mop-1", "origin": "", "llm": "", "fresh": False,
               "days": None}, ["pu-mop-1"])):
         got = cli.tool_argv(args, values)
-        if got != want:
-            failed += 1
-            print(f"FAIL tool_argv({values}) = {got}, want {want}")
+        c.expect(f"tool_argv({values})", got, want)
     # Отказы: нет обязательного; позиционное, похожее на флаг, -- иначе
     # модель одним значением включала бы чужой флаг командлета.
     for values in ({}, {"name": ""}, {"name": "--fresh"},
@@ -482,15 +392,13 @@ def check_mcp_declarations():
             got = cli.tool_argv(args, values)
         except ValueError:
             continue
-        failed += 1
-        print(f"FAIL tool_argv({values}) must refuse, got {got}")
+        c.fail(f"tool_argv({values}) must refuse, got {got}")
     # Пропущенный необязательный позиционный, а за ним заданный -- сдвиг на
     # чужое место: отказ.
     two = [{"name": "a", "type": "string"}, {"name": "b", "type": "string"}]
     try:
         got = cli.tool_argv(two, {"b": "x"})
-        failed += 1
-        print(f"FAIL tool_argv must refuse a gap in positionals, got {got}")
+        c.fail(f"tool_argv must refuse a gap in positionals, got {got}")
     except ValueError:
         pass
     # STATUS: FIXED — see #160
@@ -501,12 +409,10 @@ def check_mcp_declarations():
         try:
             cli.declared(path)
         except ValueError as e:
-            failed += 1
-            print(f"FAIL {os.path.relpath(path)}: {e}")
-    return failed
+            c.fail(f"{os.path.relpath(path)}: {e}")
 
 
-def check_refusals_163():
+def check_refusals_163(c):
     """#163: отказ сервиса кластера на pool и nodes читался пустым списком.
 
     HYPOTHESIS: puppets.pool() и nodes.rows() делали
@@ -519,30 +425,18 @@ def check_refusals_163():
     ненулевой выход, stdout пуст. Узел с кривым драйвером (#175) -- строка
     с ошибкой, а не отказ списка: это другой случай.
     STATUS: FIXED — see #163"""
-    import contextlib
     import importlib
-    import io
     from mop.common import bus, puppets
 
-    failed = 0
     reason = "no rights for nodes: project mop"
 
     def run(fn, argv=()):
-        out, err = io.StringIO(), io.StringIO()
-        code = 0
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                cli.run(fn, list(argv))
-            except SystemExit as e:
-                code = e.code
-        return out.getvalue(), err.getvalue(), code
+        return run_command(fn, argv, via_cli=True)
 
     def refusal(what, got, text):
-        nonlocal failed
         out, err, code = got
-        if not isinstance(code, int) or code == 0 or out or err != text + "\n":
-            failed += 1
-            print(f"FAIL {what}: stdout {out!r}, stderr {err!r}, exit {code!r}")
+        c.check(f"{what}: stdout {out!r}, stderr {err!r}, exit {code!r}",
+                not (not isinstance(code, int) or code == 0 or out or err != text + "\n"))
 
     # Живой шине сюда хода нет: и соединение, и адрес -- заглушки.
     async def no_bus(*a, **k):
@@ -550,11 +444,10 @@ def check_refusals_163():
 
     def no_connect(*a, **k):
         raise AssertionError("a check reached the live bus")
-    keep = (bus.ask_cluster, bus.request_many, bus.connect, bus.nats.connect,
-            puppets.ready_nodes, os.environ.get("MOP_SERVER_LAN"))
-    try:
-        bus.connect, bus.nats.connect = no_connect, no_bus
-        os.environ["MOP_SERVER_LAN"] = "192.0.2.1"
+    real_ready_nodes = puppets.ready_nodes
+    with patched(bus, connect=no_connect), patched(bus.nats, connect=no_bus), \
+            restored(bus, "ask_cluster", "request_many"), restored(puppets, "ready_nodes"), \
+            patched_env(MOP_SERVER_LAN="192.0.2.1"):
         node = importlib.import_module("mop.cli.node")
         stat = importlib.import_module("mop.cli.core.stat")
 
@@ -563,17 +456,12 @@ def check_refusals_163():
         for fn in (puppets.pool, puppets.ready_nodes):
             try:
                 got = fn()
-                failed += 1
-                print(f"FAIL {fn.__name__} read a refusal as {got!r}")
+                c.fail(f"{fn.__name__} read a refusal as {got!r}")
             except bus.Refused as e:
-                if str(e) != reason:
-                    failed += 1
-                    print(f"FAIL {fn.__name__} lost the reason: {e!r}")
+                c.expect(f"{fn.__name__} lost the reason: {e!r}", str(e), reason)
         refusal("mop stat on a pool refusal", run(stat.main), reason)
         # Подвал `mop list`: причина видна, а не пустой пул.
-        if lib.pool_lines() != [f"  {reason}"]:
-            failed += 1
-            print(f"FAIL pool_lines on a refusal: {lib.pool_lines()!r}")
+        c.expect("pool_lines on a refusal", lib.pool_lines(), [f"  {reason}"])
 
         # stat: ни один узел не ответил -- тот же текст, что раньше, но
         # отказом: stderr, ненулевой выход, stdout пуст.
@@ -601,9 +489,7 @@ def check_refusals_163():
                 "hyper  pve     mop     ready  40 GB  64 GB  5/8\n"
                 "old    pve     mop     ready  40 GB  64 GB  5/-\n"
                 "mate   host    -       down   -      -      -\n", "", 0)
-        if got != want:
-            failed += 1
-            print(f"FAIL mop node on a normal answer: {got!r}")
+        c.expect("mop node on a normal answer", got, want)
         pool = [{"name": "gpu", "status": "ready", "free_mb": 2048, "total_mb": 40960,
                  "slots": 0, "slots_total": 5},
                 {"name": "old", "status": "ready", "free_mb": 2048, "total_mb": 40960,
@@ -612,9 +498,7 @@ def check_refusals_163():
         bus.ask_cluster = lambda verb, **kw: {"nodes": pool}
         want = ["  gpu: free 2/40 GB, slots 0/5", "  old: free 2/40 GB, slots 0/-",
                 "  off: down"]
-        if lib.pool_lines() != want:
-            failed += 1
-            print(f"FAIL pool_lines: {lib.pool_lines()!r}")
+        c.expect("pool_lines", lib.pool_lines(), want)
         bus.ask_cluster = lambda verb, **kw: {"nodes": [row]}
 
         # #245: stat --users -- по людям, от самого прожорливого; узел со
@@ -631,28 +515,15 @@ def check_refusals_163():
         want = ("USER   INPUT  OUTPUT  CACHE-W  CACHE-R  TOTAL\n"
                 "anton  2.0k   500     0        10k      12k\n"
                 "-      10     0       0        0        10\n")
-        if code or err or want not in out:
-            failed += 1
-            print(f"FAIL #245 mop stat --users: exit {code!r}, stderr {err!r}, stdout {out!r}")
+        c.check(f"#245 mop stat --users: exit {code!r}, stderr {err!r}, stdout {out!r}",
+                not (code or err or want not in out))
         out, err, code = run(stat.main, ["--puppets", "--users"])
-        if not code:
-            failed += 1
-            print(f"FAIL #245 --puppets with --users must be a usage error: {out!r}")
-        puppets.ready_nodes = keep[4]
-        if puppets.pool() != [domain.Node.from_pool(row)]:
-            failed += 1
-            print(f"FAIL pool on a normal answer: {puppets.pool()!r}")
-    finally:
-        (bus.ask_cluster, bus.request_many, bus.connect, bus.nats.connect,
-         puppets.ready_nodes) = keep[:5]
-        if keep[5] is None:
-            os.environ.pop("MOP_SERVER_LAN", None)
-        else:
-            os.environ["MOP_SERVER_LAN"] = keep[5]
-    return failed
+        c.check(f"#245 --puppets with --users must be a usage error: {out!r}", not (not code))
+        puppets.ready_nodes = real_ready_nodes
+        c.expect("pool on a normal answer", puppets.pool(), [domain.Node.from_pool(row)])
 
 
-def check_refusals():
+def check_refusals(c):
     """#146: отказ сервиса кластера -- исключение, а не поле, которое каждый
     командлет проверял сам.
 
@@ -667,48 +538,35 @@ def check_refusals():
     RESULT: командлеты зовут bus.call_cluster и puppets.running_alloc,
     lib.guard спрашивает шину один раз и отдаёт спеку.
     STATUS: FIXED — see #146"""
-    import contextlib
-    import io
     from mop.common import bus, puppets
 
-    failed = 0
     reason = "pu-mop-9 belongs to project other, not to mop"
 
     # Строгий вызов: отказ -- Refused с причиной как есть, ответ -- как есть.
-    keep = bus.ask_cluster
-    try:
+    with restored(bus, "ask_cluster"):
         bus.ask_cluster = lambda verb, **kw: {"error": reason}
         try:
             got = bus.call_cluster("alloc", name="pu-mop-9")
-            failed += 1
-            print(f"FAIL call_cluster must raise Refused on a refusal, got {got!r}")
+            c.fail(f"call_cluster must raise Refused on a refusal, got {got!r}")
         except bus.Refused as e:
-            if str(e) != reason:
-                failed += 1
-                print(f"FAIL call_cluster lost the reason: {e!r}")
-        if not issubclass(bus.Refused, RuntimeError):
-            failed += 1
-            print("FAIL Refused must be a RuntimeError: callers catch that already")
+            c.expect(f"call_cluster lost the reason: {e!r}", str(e), reason)
+        c.check("Refused must be a RuntimeError: callers catch that already",
+                not (not issubclass(bus.Refused, RuntimeError)))
         bus.ask_cluster = lambda verb, **kw: {"ok": True, "verb": verb, **kw}
         got = bus.call_cluster("spec", name="pu-mop-9")
-        if got != {"ok": True, "verb": "spec", "name": "pu-mop-9",
-                   "timeout": bus.TIMEOUT, "project": None}:
-            failed += 1
-            print(f"FAIL call_cluster must pass the answer through: {got!r}")
+        c.expect("call_cluster must pass the answer through", got,
+                 {"ok": True, "verb": "spec", "name": "pu-mop-9",
+                  "timeout": bus.TIMEOUT, "project": None})
 
         # running_alloc: отказ сервиса доходит причиной, а не «не размещён».
         bus.ask_cluster = lambda verb, **kw: {"error": reason}
         try:
             puppets.running_alloc("pu-mop-9")
-            failed += 1
-            print("FAIL running_alloc must raise on a refusal")
+            c.fail("running_alloc must raise on a refusal")
         except LookupError:
-            failed += 1
-            print("FAIL running_alloc read a refusal as a missing allocation")
+            c.fail("running_alloc read a refusal as a missing allocation")
         except bus.Refused as e:
-            if str(e) != reason:
-                failed += 1
-                print(f"FAIL running_alloc lost the reason: {e!r}")
+            c.expect(f"running_alloc lost the reason: {e!r}", str(e), reason)
         # Не работает -- LookupError, у падающего -- с причиной падения.
         task = {"state": "pending", "failed": False, "restarts": 3, "exit": 1,
                 "next_s": 20}
@@ -719,63 +577,40 @@ def check_refusals():
             bus.ask_cluster = lambda verb, a=alloc, **kw: {"ok": True, "alloc": a}
             try:
                 got = puppets.running_alloc("pu-mop-9")
-                failed += 1
-                print(f"FAIL running_alloc({alloc!r}) must raise, got {got!r}")
+                c.fail(f"running_alloc({alloc!r}) must raise, got {got!r}")
             except LookupError as e:
-                if not str(e).startswith(want):
-                    failed += 1
-                    print(f"FAIL running_alloc: {e!r}, want {want!r}...")
+                c.check(f"running_alloc: {e!r}, want {want!r}...", not (not str(e).startswith(want)))
         live = {"ClientStatus": "running", "NodeName": "n1"}
         bus.ask_cluster = lambda verb, **kw: {"ok": True, "alloc": live}
-        if puppets.running_alloc("pu-mop-9") != live:
-            failed += 1
-            print("FAIL running_alloc must return the running allocation")
+        c.expect("running_alloc must return the running allocation",
+                 puppets.running_alloc("pu-mop-9"), live)
 
         # guard: один вопрос шине, и его ответ -- вызывающему, а не второй
         # такой же запрос следом (update спрашивал spec дважды).
         asked = []
         spec = {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
         bus.ask_cluster = lambda verb, **kw: asked.append(verb) or spec
-        keep_project, bus.PROJECT = bus.PROJECT, "mop"
-        try:
+        with patched(bus, PROJECT="mop"):
             got = lib.guard("pu-mop-9")
-        finally:
-            bus.PROJECT = keep_project
-        if asked != ["spec"] or got != spec:
-            failed += 1
-            print(f"FAIL guard: asked {asked}, returned {got!r}")
-    finally:
-        bus.ask_cluster = keep
+        c.check(f"guard: asked {asked}, returned {got!r}", not (asked != ["spec"] or got != spec))
 
     # Диспетчер: отказ -- ровно одна строка в stderr с причиной, ненулевой
     # выход, в stdout ничего: stdout модель читает как ответ команды.
     for exc in (bus.Refused(reason), LookupError(reason)):
         def fn(_argv, exc=exc):
             raise exc
-        out, err = io.StringIO(), io.StringIO()
-        code = None
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                cli.run(fn, [])
-            except SystemExit as e:
-                code = e.code
+        out, err, code = run_command(fn, [], via_cli=True)
         name = type(exc).__name__
-        if not isinstance(code, int) or code == 0:
-            failed += 1
-            print(f"FAIL run({name}): exit {code!r}, want a non-zero int")
-        if err.getvalue() != reason + "\n":
-            failed += 1
-            print(f"FAIL run({name}): stderr {err.getvalue()!r}, want one line")
-        if out.getvalue():
-            failed += 1
-            print(f"FAIL run({name}): stdout {out.getvalue()!r}")
+        c.check(f"run({name}): exit {code!r}, want a non-zero int",
+                not (not isinstance(code, int) or code == 0))
+        c.expect(f"run({name}): stderr must be one line", err, reason + "\n")
+        c.check(f"run({name}): stdout {out!r}", not (out))
 
     # Своих копий больше нет: помощники, выходившие из процесса, и ручные
     # проверки поля error у сервиса кластера в командлетах.
     for gone in ("require_job", "alloc_of", "running_alloc", "running_node"):
-        if hasattr(lib, gone):
-            failed += 1
-            print(f"FAIL lib.{gone} must be gone: puppets.running_alloc / bus.call_cluster")
+        c.check(f"lib.{gone} must be gone: puppets.running_alloc / bus.call_cluster",
+                not (hasattr(lib, gone)))
     # Два исключения: у ping в cluster check поле error рядом с ok -- это
     # «сервис жив, Nomad нет», а не отказ; deploy отдаёт ответ целиком
     # projects.for_deploy, и отказ там -- заметка, а не конец прогона.
@@ -787,10 +622,8 @@ def check_refusals():
             if not f.endswith(".py") or rel in allowed:
                 continue
             with open(path) as fh:
-                if "bus.ask_cluster(" in fh.read():
-                    failed += 1
-                    print(f"FAIL {rel}: bus.ask_cluster by hand, use bus.call_cluster")
-    return failed
+                c.check(f"{rel}: bus.ask_cluster by hand, use bus.call_cluster",
+                        not ("bus.ask_cluster(" in fh.read()))
 
 
 # ── #159: правила вывода ──────────────────────────────────────────────────────
@@ -846,37 +679,20 @@ def caps_hits(files):
     return hits
 
 
-def silent_run(main, argv):
-    """(stdout, stderr, код) командлета."""
-    import contextlib
-    import io
-    out, err = io.StringIO(), io.StringIO()
-    code = 0
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        try:
-            code = main(argv) or 0
-        except SystemExit as e:
-            code = e.code
-    return out.getvalue(), err.getvalue(), code
-
-
-def check_output_rules():
+def check_output_rules(c):
     """STATUS: FIXED — see #159"""
     import glob
     import re
     from mop.common import bus, llm, puppets
     from mop.client import keys
-    failed = 0
     files = sorted(glob.glob(os.path.join(ROOT, "mop", "cli", "**", "*.py"), recursive=True)) \
         + [os.path.join(ROOT, "mop", "client", "channel.py"), os.path.join(ROOT, "mop", "node", "agent.py")]
     for hit in caps_hits(files):
-        failed += 1
-        print(f"FAIL caps for emphasis: {hit}")
+        c.fail(f"caps for emphasis: {hit}")
 
     os.environ.setdefault("MOP_SERVER_LAN", "10.0.0.1")
-    keep = (bus.call_cluster, puppets.running_alloc, lib.guard, puppets.diagnose,
-            keys.llm_keys_blob, llm.profiles)
-    try:
+    with restored(bus, "call_cluster"), restored(puppets, "running_alloc", "diagnose"), \
+            restored(lib, "guard"), restored(keys, "llm_keys_blob"), restored(llm, "profiles"):
         bus.call_cluster = lambda verb, **kw: {"ok": True}
         puppets.running_alloc = lambda name: {"ClientStatus": "running", "NodeName": "n1"}
         lib.guard = lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
@@ -886,37 +702,29 @@ def check_output_rules():
         for what, main, argv in (("restart", restart.main, ["pu-mop-1"]),
                                  ("node drain", drain.main, ["n1"]),
                                  ("node forget", forget.main, ["n1"])):
-            out, err, code = silent_run(main, argv)
-            if out or err or code:
-                failed += 1
-                print(f"FAIL {what} must be silent on success: out {out!r} err {err!r} code {code!r}")
+            out, err, code = run_command(main, argv)
+            c.check(f"{what} must be silent on success: out {out!r} err {err!r} code {code!r}",
+                    not (out or err or code))
         from mop.cli.pool import doctor
         from mop.cli.pool import llm as llm_cmd
         # Здоровый пул — одна строка результата, её и показываем.
         puppets.diagnose = lambda: []
-        out, _, _ = silent_run(doctor.main, [])
-        if out != "pool is healthy: nothing stuck\n":
-            failed += 1
-            print(f"FAIL doctor on a healthy pool: {out!r}")
+        out, _, _ = run_command(doctor.main, [])
+        c.expect("doctor on a healthy pool", out, "pool is healthy: nothing stuck\n")
         # Советов «run X» в успешном выводе нет: таблица уже говорит [restart].
         puppets.diagnose = lambda: [{"name": "pu-mop-1", "alloc": {"NodeName": "n1"},
                                      "diagnosis": "HUNG (not responding)", "action": "restart"}]
-        out, _, _ = silent_run(doctor.main, [])
+        out, _, _ = run_command(doctor.main, [])
         keys.llm_keys_blob = lambda: ("", None)
         llm.profiles = lambda: {"glm": {"key": "Z_AI_KEY", "doc": "", "env": {}}}
-        out2, _, _ = silent_run(llm_cmd.main, [])
+        out2, _, _ = run_command(llm_cmd.main, [])
         for what, text in (("doctor", out), ("llm", out2)):
-            if re.search(r"\bmop [a-z]+", text):
-                failed += 1
-                print(f"FAIL {what} advises another command on success: {text!r}")
-    finally:
-        (bus.call_cluster, puppets.running_alloc, lib.guard, puppets.diagnose,
-         keys.llm_keys_blob, llm.profiles) = keep
-    failed += check_output_rest()
-    return failed
+            c.check(f"{what} advises another command on success: {text!r}",
+                    not (re.search(r"\bmop [a-z]+", text)))
+    check_output_rest(c)
 
 
-def check_output_rest():
+def check_output_rest(c):
     """Остаток #159: setup, sweep, driver build. STATUS: FIXED — see #159"""
     import shutil
     import subprocess
@@ -924,69 +732,47 @@ def check_output_rest():
     from mop.server import image, playvars
     from mop.cli.driver import build
     from mop.cli.pool import setup, sweep
-    failed = 0
 
     # setup: шаг установки — строка хода на терминале, не на терминале
     # тишина; предупреждение про claude — в stderr, stdout пуст.
-    keep = (shutil.which, subprocess.run, playvars.playbook_vars)
     ran = []
-    try:
+    with restored(shutil, "which"), restored(subprocess, "run"), restored(playvars, "playbook_vars"):
         shutil.which = lambda cmd: "/usr/bin/sudo" if cmd == "sudo" else None
         subprocess.run = lambda args, **kw: ran.append(args) or subprocess.CompletedProcess(args, 0)
         playvars.playbook_vars = lambda: {}
-        out, err, code = silent_run(setup.main, [])
+        out, err, code = run_command(setup.main, [])
         # #259: mop setup -- машина оператора, флаг ушёл; контроллер --
         # mop server setup, с ролью controller и без слова про claude.
-        _, _, refused = silent_run(setup.main, ["--operator"])
+        _, _, refused = run_command(setup.main, ["--operator"])
         from mop.cli.server import setup as server_setup
         ran_before = len(ran)
-        s_out, s_err, s_code = silent_run(server_setup.main, [])
+        s_out, s_err, s_code = run_command(server_setup.main, [])
         server_role = [a for a in ran[ran_before:] if "ansible-playbook" in a]
-    finally:
-        shutil.which, subprocess.run, playvars.playbook_vars = keep
-    if out or code or "claude is not in PATH" not in err or len(ran) - 3 != 3:
-        failed += 1
-        print(f"FAIL setup: stdout {out!r}, stderr {err!r}, code {code!r}, ran {len(ran)} commands")
-    if not refused:
-        failed += 1
-        print("FAIL #259 mop setup --operator must be a usage refusal: the flag is gone")
-    if s_code or s_out or "claude" in s_err or not server_role \
-            or '{"mop_role": "controller"}' not in server_role[0]:
-        failed += 1
-        print(f"FAIL #259 mop server setup: code {s_code!r}, stderr {s_err!r}, ran {server_role!r}")
+    c.check(f"setup: stdout {out!r}, stderr {err!r}, code {code!r}, ran {len(ran)} commands",
+            not (out or code or "claude is not in PATH" not in err or len(ran) - 3 != 3))
+    c.check("#259 mop setup --operator must be a usage refusal: the flag is gone", not (not refused))
+    c.check(f"#259 mop server setup: code {s_code!r}, stderr {s_err!r}, ran {server_role!r}",
+            not (s_code or s_out or "claude" in s_err or not server_role
+                 or '{"mop_role": "controller"}' not in server_role[0]))
 
     # sweep: нечего убирать — успех, и он молчит.
-    keep = (puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk)
-    try:
-        puppets.ready_nodes = lambda: {"n1"}
-        bus.request_many = lambda verb, nodes, **kw: {"n1": {"bodies": [], "templates": []}}
-        puppets.jobs = lambda *a, **kw: [{"ID": "pu-a-1"}]
-        puppets.classify_junk = lambda answers, known: []
-        out, err, code = silent_run(sweep.main, [])
-    finally:
-        puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk = keep
-    if out or err or code:
-        failed += 1
-        print(f"FAIL sweep with nothing to sweep must be silent: {out!r} {err!r} {code!r}")
+    with patched(puppets, ready_nodes=lambda: {"n1"}, jobs=lambda *a, **kw: [{"ID": "pu-a-1"}],
+                 classify_junk=lambda answers, known: []), \
+            patched(bus, request_many=lambda verb, nodes, **kw: {"n1": {"bodies": [], "templates": []}}):
+        out, err, code = run_command(sweep.main, [])
+    c.check(f"sweep with nothing to sweep must be silent: {out!r} {err!r} {code!r}", not (out or err or code))
 
     # driver build: без эха того, откуда прочитан .mop.
-    keep = (image.prepare, image.build)
-    try:
-        image.prepare = lambda origin, root: {"project": "p", "asks": {}, "alien": [], "legacy": []}
-        image.build = lambda origin, got, **kw: {"gone": [], "announced": [], "rc": 0}
-        out, err, code = silent_run(build.main, ["git@h:g/p.git"])
-    finally:
-        image.prepare, image.build = keep
-    if out or code:
-        failed += 1
-        print(f"FAIL driver build echoes on success: {out!r} code {code!r}")
-    failed += check_output_179()
-    failed += check_output_182()
-    failed += check_restore_all_188()
-    return failed
+    with patched(image, prepare=lambda origin, root: {"project": "p", "asks": {}, "alien": [], "legacy": []},
+                 build=lambda origin, got, **kw: {"gone": [], "announced": [], "rc": 0}):
+        out, err, code = run_command(build.main, ["git@h:g/p.git"])
+    c.check(f"driver build echoes on success: {out!r} code {code!r}", not (out or code))
+    check_output_179(c)
+    check_output_182(c)
+    check_restore_all_188(c)
 
 
-def check_output_179():
+def check_output_179(c):
     """HYPOTHESIS (#179): после #159 остались отказы `mop sweep` в stdout (а
     «no ready nodes» ещё и с кодом 0 -- отказ читался успехом),
     предупреждения `mop driver build` в stdout и эхо `mop update` на успехе.
@@ -999,28 +785,25 @@ def check_output_179():
     from mop.cli.core import update
     from mop.cli.driver import build
     from mop.cli.pool import sweep
-    failed = 0
 
-    def expect(what, got, text, nonzero):
-        nonlocal failed
+    def in_stderr(got, text, nonzero):
+        """Отказ только в stderr, с text и нужным кодом. -> (ok, подробность)."""
         out, err, code = got
-        if out or text not in err or (bool(code) != nonzero):
-            failed += 1
-            print(f"FAIL {what}: stdout {out!r}, stderr {err!r}, code {code!r}")
+        return (not (out or text not in err or (bool(code) != nonzero)),
+                f"stdout {out!r}, stderr {err!r}, code {code!r}")
 
-    keep = (puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk)
-    try:
+    with restored(puppets, "ready_nodes", "jobs", "classify_junk"), restored(bus, "request_many"):
         puppets.ready_nodes = lambda: set()
-        expect("sweep with no ready nodes", silent_run(sweep.main, []),
-               "no ready nodes", True)
+        c.check("sweep with no ready nodes",
+                *in_stderr(run_command(sweep.main, []), "no ready nodes", True))
         puppets.ready_nodes = lambda: {"n1"}
         bus.request_many = lambda verb, nodes, **kw: {"n1": None}
-        expect("sweep where no node answered", silent_run(sweep.main, []),
-               "no node answered", True)
+        c.check("sweep where no node answered",
+                *in_stderr(run_command(sweep.main, []), "no node answered", True))
         bus.request_many = lambda verb, nodes, **kw: {"n1": {"bodies": [], "templates": []}}
         puppets.jobs = lambda *a, **kw: []
-        expect("sweep where Nomad lists no puppets", silent_run(sweep.main, []),
-               "Nomad lists no puppets", True)
+        c.check("sweep where Nomad lists no puppets",
+                *in_stderr(run_command(sweep.main, []), "Nomad lists no puppets", True))
         # Промолчавший узел при ответившем соседе: отказ по нему -- тоже в
         # stderr, а код выхода за него отвечает.
         bus.request_many = lambda verb, nodes, **kw: {"n1": {"bodies": [], "templates": []},
@@ -1028,45 +811,31 @@ def check_output_179():
         puppets.ready_nodes = lambda: {"n1", "n2"}
         puppets.jobs = lambda *a, **kw: [{"ID": "pu-a-1"}]
         puppets.classify_junk = lambda answers, known: []
-        expect("sweep with one silent node", silent_run(sweep.main, []),
-               "n2: no response", True)
-    finally:
-        puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk = keep
+        c.check("sweep with one silent node",
+                *in_stderr(run_command(sweep.main, []), "n2: no response", True))
 
-    keep = (image.prepare, image.build)
-    try:
-        image.prepare = lambda origin, root: {"project": "p", "asks": {},
-                                              "alien": ["MOP_X"], "legacy": [".mop.yaml"]}
-        image.build = lambda origin, got, **kw: {"gone": [], "announced": [], "rc": 0}
-        out, err, code = silent_run(build.main, ["git@h:g/p.git"])
-    finally:
-        image.prepare, image.build = keep
-    if out or code or "MOP_X is not a project's to set — ignored" not in err \
-            or "read as .mop/sandbox.yaml for the transition" not in err:
-        failed += 1
-        print(f"FAIL driver build warnings must go to stderr: {out!r} {err!r} {code!r}")
+    with patched(image, prepare=lambda origin, root: {"project": "p", "asks": {},
+                                                      "alien": ["MOP_X"], "legacy": [".mop.yaml"]},
+                 build=lambda origin, got, **kw: {"gone": [], "announced": [], "rc": 0}):
+        out, err, code = run_command(build.main, ["git@h:g/p.git"])
+    c.check(f"driver build warnings must go to stderr: {out!r} {err!r} {code!r}",
+            not (out or code or "MOP_X is not a project's to set — ignored" not in err
+                 or "read as .mop/sandbox.yaml for the transition" not in err))
 
     calls = []
-    keep = (lib.guard, bus.call_cluster, keys.push_llm_keys, _common.workspace_text)
-    try:
-        lib.guard = lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
-        bus.call_cluster = lambda verb, **kw: calls.append(verb) or {"ok": True}
-        keys.push_llm_keys = lambda profile: None
-        _common.workspace_text = lambda origin: ""
+    with patched(lib, guard=lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}), \
+            patched(bus, call_cluster=lambda verb, **kw: calls.append(verb) or {"ok": True}), \
+            patched(keys, push_llm_keys=lambda profile: None), \
+            patched(_common, workspace_text=lambda origin: ""):
         for argv in (["pu-mop-1"], ["pu-mop-1", "--fresh"], ["pu-mop-1", "git@h:g/other.git"]):
             calls.clear()
-            out, err, code = silent_run(update.main, argv)
-            if out or err or code or calls != ["update"]:
-                failed += 1
-                print(f"FAIL update {argv} must be silent on success: out {out!r} "
-                      f"err {err!r} code {code!r} calls {calls}")
-    finally:
-        lib.guard, bus.call_cluster, keys.push_llm_keys, _common.workspace_text = keep
-    return failed
+            out, err, code = run_command(update.main, argv)
+            c.check(f"update {argv} must be silent on success: out {out!r} "
+                    f"err {err!r} code {code!r} calls {calls}",
+                    not (out or err or code or calls != ["update"]))
 
 
-
-def check_output_182():
+def check_output_182(c):
     """HYPOTHESIS (#182): после #179 `mop driver build` эхом печатал
     содержимое манифеста («asks for k=v»), отчёт о пересозданных телах и
     объявлении образа, а `mop server cluster users` -- «changed/unchanged».
@@ -1078,13 +847,11 @@ def check_output_182():
     from mop.common import projects
     from mop.cli.server.cluster import users
     from mop.cli.driver import build
-    failed = 0
-    undo = no_network()
-    through = lambda main, argv: silent_run(lambda a: cli.run(main, a), argv)
-    keep = (image.prepare, image.build, image.clear, image.bake, image.announce,
-            nomad.register, spec.job_spec, projects.read, natsconf.apply,
-            natsconf.reload, natsconf.apply_callout)
-    try:
+    def through(main, argv):
+        return run_command(main, argv, via_cli=True)
+    with offline(), restored(image, "prepare", "build", "clear", "bake", "announce"), \
+            restored(nomad, "register"), restored(spec, "job_spec"), restored(projects, "read"), \
+            restored(natsconf, "apply", "reload", "apply_callout"):
         got = {"project": "p", "asks": {"MOP_CORES": "8"}, "alien": [], "legacy": []}
         image.prepare = lambda origin, root: got
         gone = [{"name": "pu-p-1", "origin": "git@h:g/p.git", "llm": "claude", "node": "hyper"}]
@@ -1098,30 +865,26 @@ def check_output_182():
 
         # Успех не на терминале -- тишина: ни эха манифеста, ни отчёта.
         out, err, code = through(build.main, ["git@h:g/p.git"])
-        if out or err or code:
-            failed += 1
-            print(f"FAIL driver build must be silent on success off a TTY: "
-                  f"out {out!r} err {err!r} code {code!r}")
+        c.check(f"driver build must be silent on success off a TTY: "
+                f"out {out!r} err {err!r} code {code!r}", not (out or err or code))
 
         # Папет не поднялся -- громко, с именем и причиной.
         def refuse(job):
             raise RuntimeError("Nomad said no")
         nomad.register = refuse
         out, err, code = through(build.main, ["git@h:g/p.git"])
-        if out or not code or "pu-p-1" not in err or "Nomad said no" not in err:
-            failed += 1
-            print(f"FAIL a failed re-raise must reach stderr with the puppet: "
-                  f"out {out!r} err {err!r} code {code!r}")
+        c.check(f"a failed re-raise must reach stderr with the puppet: "
+                f"out {out!r} err {err!r} code {code!r}",
+                not (out or not code or "pu-p-1" not in err or "Nomad said no" not in err))
         nomad.register = lambda job: None
 
         # Узел, которому образ объявить не вышло (#175), -- stderr.
         image.announce = lambda project: [("hyper", "announced, serves p"),
                                           ("bad", "bad: unknown driver 'bogus'")]
         out, err, code = through(build.main, ["git@h:g/p.git"])
-        if out or "bad: unknown driver 'bogus'" not in err or "hyper" in err:
-            failed += 1
-            print(f"FAIL a failed announcement must reach stderr alone: "
-                  f"out {out!r} err {err!r} code {code!r}")
+        c.check(f"a failed announcement must reach stderr alone: "
+                f"out {out!r} err {err!r} code {code!r}",
+                not (out or "bad: unknown driver 'bogus'" not in err or "hyper" in err))
 
         # cluster users на успехе молчит -- и с --reload.
         projects.read = lambda: ["git@h:g/p.git"]
@@ -1131,19 +894,11 @@ def check_output_182():
         natsconf.apply_callout = lambda: False
         for argv in ([], ["--reload"]):
             out, err, code = through(users.main, argv)
-            if out or err or code:
-                failed += 1
-                print(f"FAIL cluster users {argv} must be silent on success: "
-                      f"out {out!r} err {err!r} code {code!r}")
-    finally:
-        (image.prepare, image.build, image.clear, image.bake, image.announce,
-         nomad.register, spec.job_spec, projects.read, natsconf.apply,
-         natsconf.reload, natsconf.apply_callout) = keep
-        undo()
-    return failed
+            c.check(f"cluster users {argv} must be silent on success: "
+                    f"out {out!r} err {err!r} code {code!r}", not (out or err or code))
 
 
-def check_restore_all_188():
+def check_restore_all_188(c):
     """HYPOTHESIS (#188): image.restore поднимал папетов до первого отказа
     Nomad; остальные снятые в `gone` не пробовались вовсе, и об этом не
     говорил никто -- пересборка оставляла их лежать.
@@ -1151,12 +906,9 @@ def check_restore_all_188():
     по строке на папета («<папет> on <узел>: not raised again: <причина>»).
     STATUS: FIXED — see #188"""
     from mop.server import image, nomad, spec
-    failed = 0
-    undo = no_network()
-    keep = (nomad.register, spec.job_spec)
     gone = [{"name": f"pu-p-{i}", "origin": "git@h:g/p.git", "llm": "claude",
              "node": "hyper"} for i in (1, 2, 3)]
-    try:
+    with offline(), restored(nomad, "register"), restored(spec, "job_spec"):
         spec.job_spec = lambda name, origin, llm, **kw: {"ID": name}
         for refused in ({"pu-p-1"}, {"pu-p-1", "pu-p-3"}, set()):
             registered = []
@@ -1172,57 +924,38 @@ def check_restore_all_188():
             except RuntimeError as e:
                 err = str(e)
             want = [p["name"] for p in gone if p["name"] not in refused]
-            if registered != want:
-                failed += 1
-                print(f"FAIL restore with {sorted(refused)} refused registered "
-                      f"{registered}, wanted {want}")
+            c.expect(f"restore with {sorted(refused)} refused: registered", registered, want)
             if not refused:
-                if err is not None:
-                    failed += 1
-                    print(f"FAIL restore with nothing refused raised: {err!r}")
+                c.check(f"restore with nothing refused raised: {err!r}", not (err is not None))
                 continue
             lines = (err or "").splitlines()
             want_lines = [f"{n} on hyper: not raised again: Nomad refused {n}"
                           for n in sorted(refused)]
-            if lines != want_lines:
-                failed += 1
-                print(f"FAIL restore with {sorted(refused)} refused: {err!r}, "
-                      f"wanted {want_lines}")
-    finally:
-        nomad.register, spec.job_spec = keep
-        undo()
-    return failed
+            c.expect(f"restore with {sorted(refused)} refused: {err!r}", lines, want_lines)
 
 
-def check_empty_llm():
+def check_empty_llm(c):
     """HYPOTHESIS (#164): `--llm` без значения давал профиль "", и отказ
     llm.require звучал как «no LLM profile (empty)» — не про флаг, который
     забыли заполнить. SOLUTION: пустое значение — ошибка использования в
     parse_llm, до реестра профилей. STATUS: FIXED — see #164"""
-    failed = 0
 
     def through_dispatcher(argv):
-        return silent_run(lambda a: cli.run(lambda x: _common.parse_llm(x) and None, a), argv)
+        return run_command(lambda x: _common.parse_llm(x) and None, argv, via_cli=True)
     for argv in (["--llm", ""], ["pu-mop-1", "--llm"], ["--llm="], ["--llm", "--fresh"]):
         out, err, code = through_dispatcher(argv)
         lines = err.strip().splitlines()
-        if out or not code or len(lines) != 1 or "Traceback" in err \
-                or not lines[0].startswith("--llm needs a profile name"):
-            failed += 1
-            print(f"FAIL parse_llm({argv}): out {out!r} err {err!r} code {code!r}")
+        c.check(f"parse_llm({argv}): out {out!r} err {err!r} code {code!r}",
+                not (out or not code or len(lines) != 1 or "Traceback" in err
+                     or not lines[0].startswith("--llm needs a profile name")))
     got = _common.parse_llm(["pu-mop-1", "--llm", "claude"])
-    if got != ("claude", ["pu-mop-1"]):
-        failed += 1
-        print(f"FAIL parse_llm with a profile: {got!r}")
-    if _common.parse_llm(["pu-mop-1"]) != (None, ["pu-mop-1"]):
-        failed += 1
-        print("FAIL parse_llm without --llm must leave the profile unset")
+    c.expect("parse_llm with a profile", got, ("claude", ["pu-mop-1"]))
+    c.expect("parse_llm without --llm must leave the profile unset",
+             _common.parse_llm(["pu-mop-1"]), (None, ["pu-mop-1"]))
     # Неизвестный профиль — прежний отказ, слово в слово.
     out, err, code = through_dispatcher(["--llm", "no-such"])
-    if not code or not err.startswith("no LLM profile no-such; available: "):
-        failed += 1
-        print(f"FAIL an unknown profile keeps its refusal: {err!r} {code!r}")
-    return failed
+    c.check(f"an unknown profile keeps its refusal: {err!r} {code!r}",
+            not (not code or not err.startswith("no LLM profile no-such; available: ")))
 
 
 # ── #186: драйвер узла из инвентаря — до плейбука ────────────────────────────
@@ -1248,36 +981,29 @@ INVENTORY_CLEAN = {**INVENTORY_TYPO, "_meta": {"hostvars": {
     **INVENTORY_TYPO["_meta"]["hostvars"], "typo": {"mop_driver": "pve"}}}}
 
 
-def check_inventory_drivers():
+def check_inventory_drivers(c):
     """HYPOTHESIS (#186): опечатка в mop_driver инвентаря доезжала до meta
     Nomad, и ловили её только читатели (driver.of_node, #175). SOLUTION: deploy
     прогоняет драйвер каждого хоста через of_node до плейбука.
     STATUS: FIXED — see #186"""
     from mop.cli.server import deploy
-    failed = 0
     fn = getattr(deploy, "driver_refusals", None)
     got = fn(INVENTORY_TYPO, "host") if fn else None
-    if got is None or len(got) != 1 or not got[0].startswith("typo: unknown driver 'pvee'"):
-        failed += 1
-        print(f"FAIL driver_refusals: {got!r}, wanted one refusal for typo/pvee")
-    if fn and fn(INVENTORY_CLEAN, "host"):
-        failed += 1
-        print(f"FAIL a clean inventory refused: {fn(INVENTORY_CLEAN, 'host')!r}")
+    c.check(f"driver_refusals: {got!r}, wanted one refusal for typo/pvee",
+            not (got is None or len(got) != 1 or not got[0].startswith("typo: unknown driver 'pvee'")))
+    clean = fn(INVENTORY_CLEAN, "host") if fn else None
+    c.check(f"a clean inventory refused: {clean!r}", not (fn and clean))
     # Пусто и нет ключа -- драйвер по умолчанию, как у of_node; а битый
     # MOP_DRIVER ловится на тех, кому он достаётся.
     if fn:
         bad = fn(INVENTORY_CLEAN, "pvee")
-        if sorted(r.split(":")[0] for r in bad) != ["localhost", "plain"]:
-            failed += 1
-            print(f"FAIL a broken MOP_DRIVER must name the hosts that inherit it: {bad!r}")
+        c.expect(f"a broken MOP_DRIVER must name the hosts that inherit it: {bad!r}",
+                 sorted(r.split(":")[0] for r in bad), ["localhost", "plain"])
         empty = {**INVENTORY_CLEAN, "_meta": {"hostvars": {"plain": {"mop_driver": ""}}}}
-        if fn(empty, "host"):
-            failed += 1
-            print("FAIL an empty mop_driver is the default driver, not a refusal")
-    return failed
+        c.check("an empty mop_driver is the default driver, not a refusal", not (fn(empty, "host")))
 
 
-def check_node_memory_197():
+def check_node_memory_197(c):
     """HYPOTHESIS (#197): строка mop_mem_mb в инвентаре не работает нигде:
     на host-узле спеку строит сервер своим MOP_MEM_MB (и #190 отказывал),
     на pve память тела шла из образа, то есть из `.mop`. SOLUTION: память --
@@ -1287,13 +1013,10 @@ def check_node_memory_197():
     не из одного целого числа тоже отказ.
     STATUS: FIXED — see #197"""
     from mop.cli.server import deploy
-    failed = 0
-    undo = no_network()
-    try:
+    with offline():
         fn = getattr(deploy, "memory_refusals", None)
-        if fn is None:
-            print("FAIL no deploy.memory_refusals")
-            return 1
+        if not c.check("no deploy.memory_refusals", fn is not None):
+            return
 
         def listing(hostvars, groups=None):
             out = {"_meta": {"hostvars": hostvars},
@@ -1331,21 +1054,15 @@ def check_node_memory_197():
         for what, lst, cap, want in cases:
             got = fn(lst, cap)
             heads = sorted(g.split("=")[0] for g in got)
-            if heads != sorted(want):
-                failed += 1
-                print(f"FAIL memory_refusals, {what}: {got!r}, wanted lines for {want}")
+            c.expect(f"memory_refusals, {what}: {got!r}", heads, sorted(want))
         got = fn(listing({"odd": {"mop_mem_mb": "12288"}}), "32768")
         text = " ".join(got)
-        if not ("not a node setting" in text and ".env" in text and ".mop" in text
-                and "remove the line" in text):
-            failed += 1
-            print(f"FAIL memory_refusals must say where memory comes from now: {got!r}")
-    finally:
-        undo()
-    return failed
+        c.check(f"memory_refusals must say where memory comes from now: {got!r}",
+                not (not ("not a node setting" in text and ".env" in text and ".mop" in text
+                          and "remove the line" in text)))
 
 
-def check_pool_uniform():
+def check_pool_uniform(c):
     """HYPOTHESIS (#190): спеку папета строит сервер своими MOP_HOME,
     MOP_USER, MOP_PUPPET_SEED, MOP_MEM_MB, а агент и `mop driver run` на узле
     читают их из node.env этого узла. Строка хоста в инвентаре, перекрывшая
@@ -1359,16 +1076,12 @@ def check_pool_uniform():
     узле, с любым значением."""
     from mop.common import config
     from mop.cli.server import deploy
-    failed = 0
-    undo = no_network()
-    try:
+    with offline():
         uniform = getattr(config, "POOL_UNIFORM", None)
-        if set(uniform or ()) != {"MOP_HOME", "MOP_USER", "MOP_PUPPET_SEED"}:
-            failed += 1
-            print(f"FAIL config.POOL_UNIFORM {uniform!r}: paths and user on every host")
-        if hasattr(config, "HOST_UNIFORM"):
-            failed += 1
-            print("FAIL config.HOST_UNIFORM is gone with #197: MOP_MEM_MB is not a node setting")
+        c.expect("config.POOL_UNIFORM: paths and user on every host",
+                 set(uniform or ()), {"MOP_HOME", "MOP_USER", "MOP_PUPPET_SEED"})
+        c.check("config.HOST_UNIFORM is gone with #197: MOP_MEM_MB is not a node setting",
+                not (hasattr(config, "HOST_UNIFORM")))
         fn = getattr(deploy, "uniform_refusals", None)
         installed = {n: config.get(n) for n in (uniform or ())}
 
@@ -1391,15 +1104,10 @@ def check_pool_uniform():
         for what, hv, want in cases:
             got = fn(listing(hv), installed, "host") if fn else None
             heads = sorted(g.split("=")[0] for g in got) if got is not None else None
-            if heads != want:
-                failed += 1
-                print(f"FAIL uniform_refusals, {what}: {got!r}, wanted lines for {want}")
-    finally:
-        undo()
-    return failed
+            c.expect(f"uniform_refusals, {what}: {got!r}", heads, want)
 
 
-def check_deploy_check():
+def check_deploy_check(c):
     """HYPOTHESIS (#177): доказать, что правка deploy/ не меняет узлы, было
     нечем — `mop server deploy` аргументов не берёт, и #157 подкладывал на PATH
     обёртку ansible-playbook. А после плейбука deploy пишет файлы
@@ -1410,7 +1118,6 @@ def check_deploy_check():
     from mop.common import bus, config, creds, projects
     from mop.server import playvars
     from mop.cli.server import deploy
-    failed = 0
     d = tempfile.mkdtemp(prefix="mop-test-deploy-check-")
     inventory, key = os.path.join(d, "inventory.yaml"), os.path.join(d, "id")
     for f in (inventory, key, key + ".pub"):
@@ -1423,138 +1130,80 @@ def check_deploy_check():
                                      identity.hash_password("x")) + "\n")
     calls, collected, checked = [], [], []
     listing = [INVENTORY_CLEAN]
-    undo = no_network()
-    keep = (shutil.which, config.require, subprocess.call, subprocess.run, playvars.playbook_vars,
-            deploy.missing_extras, deploy.link, deploy.manifests, deploy.check,
-            bus.ask_cluster, projects.for_deploy, projects.read, creds.collect,
-            creds.operator, dict(os.environ))
+    # Окружение -- снимком до предохранителя: после проверки оно целиком
+    # прежнее, без MOP_SERVER_LAN предохранителя и без INVENTORY здесь.
+    env = dict(os.environ)
     try:
-        shutil.which = lambda cmd: f"/usr/bin/{cmd}"
-        config.require = lambda *a: None
-        subprocess.call = lambda argv, **kw: calls.append(argv) or 0
-        subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(
-            argv, 0, json.dumps(listing[0]), "")
-        playvars.playbook_vars = lambda: {}
-        deploy.missing_extras = lambda setting, root: []
-        deploy.link = lambda name, target: None
-        deploy.manifests = lambda origins: {}
-        deploy.check = lambda: checked.append(1)
-        bus.ask_cluster = lambda *a, **kw: {"ok": True, "projects": []}
-        projects.for_deploy = lambda answer, local: ([], None)
-        projects.read = lambda: []
-        creds.collect = lambda *a, **kw: collected.append(1) or []
-        creds.operator = lambda dest: "anton"
-        os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key,
-                           "MOP_OPERATORS_FILE": people})
-        for argv, dry in (([], False), (["--check"], True)):
-            calls.clear(), collected.clear(), checked.clear()
-            out, err, code = silent_run(deploy.main, argv)
-            plays = [c for c in calls if c and c[0] == "ansible-playbook"]
-            flags = {"--check", "--diff"} & {a for c in plays for a in c}
-            if code or not plays or flags != ({"--check", "--diff"} if dry else set()):
-                failed += 1
-                print(f"FAIL deploy {argv}: code {code!r}, plays {plays!r}, err {err!r}")
-            # #178: хосты инвентаря едут плейбуку -- их файлом кладёт роль
-            # cluster, и по нему forget отказывает узлу, который deploy
-            # поставил бы снова.
-            sent = [json.loads(c[i + 1]) for c in plays for i, a in enumerate(c)
-                    if a == "--extra-vars"]
-            hosts = [v["mop_inventory_hosts"] for v in sent if "mop_inventory_hosts" in v]
-            if hosts != [["explicit", "hyper", "localhost", "plain", "typo"]]:
-                failed += 1
-                print(f"FAIL deploy {argv} must send the inventory's hosts to the "
-                      f"playbook (#178): {hosts!r}")
-            if dry and collected:
-                failed += 1
-                print("FAIL deploy --check must not collect server credentials (it writes)")
-            if not dry and not collected:
-                failed += 1
-                print("FAIL deploy without --check must still collect server credentials")
-        # Прочие аргументы — по-прежнему отказ, и до плейбука.
-        for argv in (["pool"], ["git@h:g/p.git"], ["--check", "extra"], ["--diff"]):
-            calls.clear()
-            out, err, code = silent_run(deploy.main, argv)
-            if not code or calls:
-                failed += 1
-                print(f"FAIL deploy {argv} must be refused before any playbook: code {code!r}")
-        # #190: перекрытая на хосте настройка, из которой сервер строит спеку.
-        listing[0] = {**INVENTORY_CLEAN, "_meta": {"hostvars": {
-            **INVENTORY_CLEAN["_meta"]["hostvars"], "plain": {"mop_home": "/srv/elsewhere"}}}}
-        for argv in ([], ["--check"]):
-            calls.clear(), collected.clear()
-            out, err, code = silent_run(deploy.main, argv)
-            plays = [c for c in calls if c and c[0] == "ansible-playbook"]
-            lines = [lib.plain(l) for l in err.strip().splitlines()]
-            if code != 1 or plays or len(lines) != 1 or not lines[0].startswith("plain: mop_home="):
-                failed += 1
-                print(f"FAIL deploy {argv} over a host override of MOP_HOME: code {code!r}, "
-                      f"plays {plays!r}, err {err!r}")
-        # #186: опечатка в драйвере хоста — отказ до плейбука, строка на хост.
-        listing[0] = INVENTORY_TYPO
-        for argv in ([], ["--check"]):
-            calls.clear(), collected.clear()
-            out, err, code = silent_run(deploy.main, argv)
-            plays = [c for c in calls if c and c[0] == "ansible-playbook"]
-            lines = [lib.plain(l) for l in err.strip().splitlines()]
-            if code != 1 or plays or collected or len(lines) != 1 \
-                    or not lines[0].startswith("typo: unknown driver 'pvee'"):
-                failed += 1
-                print(f"FAIL deploy {argv} over a driver typo: code {code!r}, "
-                      f"plays {plays!r}, err {err!r}")
+        with offline(), \
+                patched(shutil, which=lambda cmd: f"/usr/bin/{cmd}"), \
+                patched(config, require=lambda *a: None), \
+                patched(subprocess, call=lambda argv, **kw: calls.append(argv) or 0,
+                        run=lambda argv, **kw: subprocess.CompletedProcess(
+                            argv, 0, json.dumps(listing[0]), "")), \
+                patched(playvars, playbook_vars=lambda: {}), \
+                patched(deploy, missing_extras=lambda setting, root: [],
+                        link=lambda name, target: None, manifests=lambda origins: {},
+                        check=lambda: checked.append(1)), \
+                patched(bus, ask_cluster=lambda *a, **kw: {"ok": True, "projects": []}), \
+                patched(projects, for_deploy=lambda answer, local: ([], None), read=lambda: []), \
+                patched(creds, collect=lambda *a, **kw: collected.append(1) or [],
+                        operator=lambda dest: "anton"):
+            os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key,
+                               "MOP_OPERATORS_FILE": people})
+            for argv, dry in (([], False), (["--check"], True)):
+                calls.clear(), collected.clear(), checked.clear()
+                out, err, code = run_command(deploy.main, argv)
+                plays = [cmd for cmd in calls if cmd and cmd[0] == "ansible-playbook"]
+                flags = {"--check", "--diff"} & {a for cmd in plays for a in cmd}
+                c.check(f"deploy {argv}: code {code!r}, plays {plays!r}, err {err!r}",
+                        not (code or not plays or flags != ({"--check", "--diff"} if dry else set())))
+                # #178: хосты инвентаря едут плейбуку -- их файлом кладёт роль
+                # cluster, и по нему forget отказывает узлу, который deploy
+                # поставил бы снова.
+                sent = [json.loads(cmd[i + 1]) for cmd in plays for i, a in enumerate(cmd)
+                        if a == "--extra-vars"]
+                hosts = [v["mop_inventory_hosts"] for v in sent if "mop_inventory_hosts" in v]
+                c.expect(f"deploy {argv} must send the inventory's hosts to the playbook (#178)",
+                         hosts, [["explicit", "hyper", "localhost", "plain", "typo"]])
+                c.check("deploy --check must not collect server credentials (it writes)",
+                        not (dry and collected))
+                c.check("deploy without --check must still collect server credentials",
+                        not (not dry and not collected))
+            # Прочие аргументы — по-прежнему отказ, и до плейбука.
+            for argv in (["pool"], ["git@h:g/p.git"], ["--check", "extra"], ["--diff"]):
+                calls.clear()
+                out, err, code = run_command(deploy.main, argv)
+                c.check(f"deploy {argv} must be refused before any playbook: code {code!r}",
+                        not (not code or calls))
+            # #190: перекрытая на хосте настройка, из которой сервер строит спеку.
+            listing[0] = {**INVENTORY_CLEAN, "_meta": {"hostvars": {
+                **INVENTORY_CLEAN["_meta"]["hostvars"], "plain": {"mop_home": "/srv/elsewhere"}}}}
+            for argv in ([], ["--check"]):
+                calls.clear(), collected.clear()
+                out, err, code = run_command(deploy.main, argv)
+                plays = [cmd for cmd in calls if cmd and cmd[0] == "ansible-playbook"]
+                lines = [lib.plain(l) for l in err.strip().splitlines()]
+                c.check(f"deploy {argv} over a host override of MOP_HOME: code {code!r}, "
+                        f"plays {plays!r}, err {err!r}",
+                        not (code != 1 or plays or len(lines) != 1
+                             or not lines[0].startswith("plain: mop_home=")))
+            # #186: опечатка в драйвере хоста — отказ до плейбука, строка на хост.
+            listing[0] = INVENTORY_TYPO
+            for argv in ([], ["--check"]):
+                calls.clear(), collected.clear()
+                out, err, code = run_command(deploy.main, argv)
+                plays = [cmd for cmd in calls if cmd and cmd[0] == "ansible-playbook"]
+                lines = [lib.plain(l) for l in err.strip().splitlines()]
+                c.check(f"deploy {argv} over a driver typo: code {code!r}, "
+                        f"plays {plays!r}, err {err!r}",
+                        not (code != 1 or plays or collected or len(lines) != 1
+                             or not lines[0].startswith("typo: unknown driver 'pvee'")))
     finally:
-        undo()
-        (shutil.which, config.require, subprocess.call, subprocess.run, playvars.playbook_vars,
-         deploy.missing_extras, deploy.link, deploy.manifests, deploy.check,
-         bus.ask_cluster, projects.for_deploy, projects.read, creds.collect,
-         creds.operator, env) = keep
         os.environ.clear()
         os.environ.update(env)
-    return failed
 
 
-class NetworkGuard(Exception):
-    """Проверка попыталась выйти в сеть."""
-
-
-def no_network():
-    """Предохранитель от живой шины для проверки, которая гоняет командлет
-    через cli.run (#169). Ниже mop, поэтому его не обходит ни перезагрузка
-    модулей, ни прежний bus в атрибуте пакета: socket.connect (им идёт и
-    asyncio-соединение nats-py) и nats.connect настоящего пакета бросают;
-    креды папета (MOP_BUS_CONFIG) убраны, сервер -- TEST-NET 192.0.2.1.
-    -> функция отката."""
-    import socket
-
-    def refuse(*a, **k):
-        raise NetworkGuard("the check tried to reach the network")
-
-    real_nats = sys.modules.get("nats")
-    saved = {"sock": socket.socket.connect, "sock_ex": socket.socket.connect_ex,
-             "nats": getattr(real_nats, "connect", None),
-             "env": {k: os.environ.get(k) for k in ("MOP_BUS_CONFIG", "MOP_SERVER_LAN",
-                                                      "MOP_SERVER_DIR")}}
-    socket.socket.connect = refuse
-    socket.socket.connect_ex = refuse
-    if real_nats is not None:
-        real_nats.connect = refuse
-    os.environ.pop("MOP_BUS_CONFIG", None)
-    os.environ.pop("MOP_SERVER_DIR", None)
-    os.environ["MOP_SERVER_LAN"] = "192.0.2.1"
-
-    def undo():
-        socket.socket.connect = saved["sock"]
-        socket.socket.connect_ex = saved["sock_ex"]
-        if real_nats is not None:
-            real_nats.connect = saved["nats"]
-        for k, v in saved["env"].items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-    return undo
-
-
-def check_agent_on_node_172():
+def check_agent_on_node_172(c):
     """#172: юнит агента переезжает с `python3 -m mop.agent` на `mop agent`,
     а на узле .env нет -- только node.env. Считалось, что диспетчер откажет
     там на REQUIRED; не отказывает: require зовёт только lib.cluster, а
@@ -1580,14 +1229,12 @@ def check_agent_on_node_172():
                        cwd="/", env=env, capture_output=True, text=True, timeout=60)
     out = r.stdout + r.stderr
     reached = "no bus credentials" in out or "bus library needed" in out
-    if "required settings not filled" in out or not reached:
-        print(f"FAIL mop agent --check on a node with node.env and no .env must reach "
-              f"the agent: rc {r.returncode}, {out.strip()!r}")
-        return 1
-    return 0
+    c.check("mop agent --check on a node with node.env and no .env must reach the agent",
+            not ("required settings not filled" in out or not reached),
+            f"rc {r.returncode}, {out.strip()!r}")
 
 
-def check_bus_import_169():
+def check_bus_import_169(c):
     """HYPOTHESIS (#169): mop/common/bus.py при импорте без nats-py зовёт sys.exit --
     библиотека кончает процесс сама, и тот, кто её импортировал, не может ни
     перехватить отказ, ни сказать его своими словами (#150: `-m mop.agent`
@@ -1596,11 +1243,11 @@ def check_bus_import_169():
     командлет внутри cli.run, и run делает из ImportError одну строку в
     stderr и код 1.
     STATUS: FIXED — see #169"""
-    return missing_library("nats", "mop.common.bus", "bus library required: pip install --user "
+    missing_library(c, "nats", "mop.common.bus", "bus library required: pip install --user "
                            "--break-system-packages nats-py")
 
 
-def check_nomad_import_187():
+def check_nomad_import_187(c):
     """HYPOTHESIS (#187): mop/server/nomad.py при импорте без python-nomad зовёт
     sys.exit -- тот же дефект, что у bus в #169: библиотека кончает процесс
     сама.
@@ -1609,18 +1256,17 @@ def check_nomad_import_187():
     STATUS: FIXED — see #187"""
     # Команда мастер-шелла python-nomad больше не импортирует (#81, слои
     # #258: nomad -- сервер), поэтому пробуем командой контроллера.
-    return missing_library("nomad", "mop.server.nomad", "API library required: pip install --user "
+    missing_library(c, "nomad", "mop.server.nomad", "API library required: pip install --user "
                            "--break-system-packages python-nomad",
                            command="mop.cli.driver.build", argv=["--nope"])
 
 
-def missing_library(lib, module, text, command="mop.cli.core.restart", argv=()):
+def missing_library(c, lib, module, text, command="mop.cli.core.restart", argv=()):
     """Импорт module без библиотеки lib -- ImportError с текстом text, а
     командлет command, которому module нужен, через cli.run -- одна строка в
     stderr и код 1. Модули перезагружаются: проверка идёт последней."""
     import importlib
     import importlib.abc
-    failed = 0
 
     class NoLib(importlib.abc.MetaPathFinder):
         def find_spec(self, name, path=None, target=None):
@@ -1646,10 +1292,9 @@ def missing_library(lib, module, text, command="mop.cli.core.restart", argv=()):
     try:
         import socket
         socket.create_connection(("192.0.2.1", 4222), timeout=1)
-        failed += 1
-        print("FAIL the network guard did not hold")
+        c.fail("the network guard did not hold")
         undo()
-        return failed
+        return
     except NetworkGuard:
         pass
     keep = dict(sys.modules)
@@ -1659,34 +1304,21 @@ def missing_library(lib, module, text, command="mop.cli.core.restart", argv=()):
         evict(True)
         try:
             importlib.import_module(module)
-            failed += 1
-            print(f"FAIL importing {module} without {lib} must raise ImportError")
+            c.fail(f"importing {module} without {lib} must raise ImportError")
         except ImportError as e:
-            if str(e) != text:
-                failed += 1
-                print(f"FAIL {module} without {lib}: {e!r}, wanted {text!r}")
+            c.expect(f"{module} without {lib}: the ImportError text", str(e), text)
         except SystemExit as e:
-            failed += 1
-            print(f"FAIL {module} without {lib} ends the process: SystemExit({e.code!r})")
+            c.fail(f"{module} without {lib} ends the process: SystemExit({e.code!r})")
         evict(False)
         # Командлет, которому нужна шина, через диспетчер: одна строка, код 1.
         # Без аргументов: если шина вдруг импортируется, командлет остановится
         # на usage, а не пойдёт в сеть.
-        import contextlib
-        import io
-        err = io.StringIO()
-        code = "no exit"
-        with contextlib.redirect_stderr(err):
-            try:
-                cli.run(cli.command(command), list(argv))
-            except SystemExit as e:
-                code = e.code
-            except BaseException as e:
-                code = f"escaped {type(e).__name__}"
-        if code != 1 or err.getvalue() != text + "\n":
-            failed += 1
-            print(f"FAIL a commandlet without {lib} through cli.run: code {code!r}, "
-                  f"stderr {err.getvalue()!r}")
+        try:
+            _, err, code = run_command(cli.command(command), argv, via_cli=True)
+        except BaseException as e:  # noqa: BLE001 -- ушедшее мимо cli.run и есть дефект
+            err, code = "", f"escaped {type(e).__name__}"
+        c.check(f"a commandlet without {lib} through cli.run: code {code!r}, stderr {err!r}",
+                not (code != 1 or err != text + "\n"))
     finally:
         undo()
         sys.meta_path.remove(blocker)
@@ -1699,10 +1331,9 @@ def missing_library(lib, module, text, command="mop.cli.core.restart", argv=()):
                 parent, child = name.rsplit(".", 1)
                 if parent in keep:
                     setattr(keep[parent], child, mod)
-    return failed
 
 
-def check_fallback_model_183():
+def check_fallback_model_183(c):
     """HYPOTHESIS (#183): puppets.py читал MOP_FALLBACK_MODEL на уровне модуля,
     и всякий, кто импортирует puppets (сервис кластера), считался читающим
     эту настройку, хотя применяет её один treat() -- `mop doctor --fix` на
@@ -1711,33 +1342,21 @@ def check_fallback_model_183():
     STATUS: FIXED — see #183"""
     import ast
     from mop.common import puppets
-    failed = 0
     tree = ast.parse(open(os.path.join(ROOT, "mop", "common", "puppets.py")).read())
     top = [n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
                                                         ast.ClassDef))]
-    if any("MOP_FALLBACK_MODEL" in ast.unparse(n) for n in top):
-        failed += 1
-        print("FAIL puppets.py reads MOP_FALLBACK_MODEL at import, not in treat()")
+    c.check("puppets.py reads MOP_FALLBACK_MODEL at import, not in treat()",
+            not (any("MOP_FALLBACK_MODEL" in ast.unparse(n) for n in top)))
     typed = []
-    undo = no_network()
-    keep = (puppets.switch_model, os.environ.get("MOP_FALLBACK_MODEL"))
-    try:
-        # force -- лечение проходит ворота владения (#40).
-        puppets.switch_model = lambda node, name, model, force=False: typed.append(model)
-        os.environ["MOP_FALLBACK_MODEL"] = "sonnet-for-183"
+    # force -- лечение проходит ворота владения (#40).
+    with offline(), \
+            patched(puppets, switch_model=lambda node, name, model, force=False: typed.append(model)), \
+            patched_env(MOP_FALLBACK_MODEL="sonnet-for-183"):
         got = puppets.treat({"action": "model", "name": "pu-mop-1",
                              "alloc": {"NodeName": "n1"}})
-    finally:
-        puppets.switch_model = keep[0]
-        if keep[1] is None:
-            os.environ.pop("MOP_FALLBACK_MODEL", None)
-        else:
-            os.environ["MOP_FALLBACK_MODEL"] = keep[1]
-        undo()
-    if got != "/model sonnet-for-183" or typed != ["sonnet-for-183"]:
-        failed += 1
-        print(f"FAIL treat(model) must use MOP_FALLBACK_MODEL as it is at the call: "
-              f"{got!r}, typed {typed}")
+    c.check(f"treat(model) must use MOP_FALLBACK_MODEL as it is at the call: "
+            f"{got!r}, typed {typed}",
+            not (got != "/model sonnet-for-183" or typed != ["sonnet-for-183"]))
     # ── #251: отвергнутый вход не оставляет мусора aiohttp ──────────────
     # HYPOTHESIS: bus.check / ask_once / connect зовут nats.connect(), который
     # при отказе (allow_reconnect=False) бросает до закрытия транспорта;
@@ -1760,30 +1379,20 @@ def check_fallback_model_183():
         async def close(self):
             closed.append(True)
 
-    real_nats = sys.modules.get("nats")
-    kept = (getattr(real_nats, "NATS", None), getattr(real_nats, "connect", None))
-
     def refuse(*a, **k):
         raise OSError("nats.connect must not be used: the client must be closable")
-    real_nats.NATS, real_nats.connect = FakeNATS, refuse
-    try:
-        c = {"url": "wss://192.0.2.1:443/nats", "user": "u", "password": "p"}
-        for what, call in (("check", lambda: _bus.check(c)),
-                           ("ask_once", lambda: _bus.ask_once(c, "s", "ping", timeout=1))):
+    with patched(sys.modules.get("nats"), NATS=FakeNATS, connect=refuse):
+        conn = {"url": "wss://192.0.2.1:443/nats", "user": "u", "password": "p"}
+        for what, call in (("check", lambda: _bus.check(conn)),
+                           ("ask_once", lambda: _bus.ask_once(conn, "s", "ping", timeout=1))):
             closed.clear()
             try:
                 call()
-                failed += 1
-                print(f"FAIL #251 {what}: a refused connect must raise")
+                c.fail(f"#251 {what}: a refused connect must raise")
             except Exception as e:
-                if not isinstance(e, RuntimeError):
-                    failed += 1
-                    print(f"FAIL #251 {what}: must raise a RuntimeError, got {type(e).__name__}: {e}")
-            if closed != [True]:
-                failed += 1
-                print(f"FAIL #251 {what}: the client must be closed once on refusal, got {closed}")
-    finally:
-        real_nats.NATS, real_nats.connect = kept
+                c.check(f"#251 {what}: must raise a RuntimeError, got {type(e).__name__}: {e}",
+                        not (not isinstance(e, RuntimeError)))
+            c.expect(f"#251 {what}: the client must be closed once on refusal", closed, [True])
     # ── #252: сообщения наружу без номеров тикетов ──────────────────────
     # HYPOTHESIS: строки, которые видит человек в терминале или модель через
     # MCP, несли «(#82)», «before #211», «(#61)»: довод, которому место в
@@ -1826,9 +1435,7 @@ def check_fallback_model_183():
                         for text in _consts(a):
                             if ticket.search(text):
                                 spoken.append(f"{os.path.relpath(path, root)}:{node.lineno}: {text.strip()[:60]!r}")
-    if spoken:
-        failed += 1
-        print("FAIL #252 messages must not cite tickets:\n  " + "\n  ".join(spoken))
+    c.check("#252 messages must not cite tickets", not (spoken), "\n  " + "\n  ".join(spoken))
     # #255: докстринг командлета -- usage, строка help и описание инструмента
     # MCP, то есть тоже сообщение наружу. `epic #12` в примере -- формат
     # номера, а не ссылка.
@@ -1841,9 +1448,7 @@ def check_fallback_model_183():
                 for i, line in enumerate(cli.docstring(path).splitlines(), 1):
                     if ticket.search(_re.sub(r"epic #\d+", "", line)):
                         told.append(f"{os.path.relpath(path, cli.PACKAGE)}:{i}: {line.strip()[:60]!r}")
-    if told:
-        failed += 1
-        print("FAIL #255 usage and help must not cite tickets:\n  " + "\n  ".join(told))
+    c.check("#255 usage and help must not cite tickets", not (told), "\n  " + "\n  ".join(told))
 
     # ── #254: bug и ci -- в пространстве dev, без MCP ────────────────────
     # HYPOTHESIS: трекер и CI проекта -- команды разработчика, а лежат среди
@@ -1852,36 +1457,28 @@ def check_fallback_model_183():
     # STATUS: FIXED — see #254
     tree = cli.verbs()
     # bug и ci -- в dev; сам dev растёт (#271 -- test), поэтому «содержит».
-    if not {"bug", "ci"} <= set(tree.get("dev") or {}):
-        failed += 1
-        print(f"FAIL #254 dev must hold bug and ci: {sorted(tree.get('dev') or {})}")
+    c.check(f"#254 dev must hold bug and ci: {sorted(tree.get('dev') or {})}",
+            not (not {"bug", "ci"} <= set(tree.get("dev") or {})))
     top = cli.catalog(cli.scan())
-    if "bug" in top or "ci" in top:
-        failed += 1
-        print("FAIL #254 bug and ci must not stay top-level commands")
-    if cli.LEGACY.get("bug") != ("dev", "bug") or cli.LEGACY.get("ci") != ("dev", "ci"):
-        failed += 1
-        print(f"FAIL #254 LEGACY must map bug and ci into dev: {cli.LEGACY}")
+    c.check("#254 bug and ci must not stay top-level commands", not ("bug" in top or "ci" in top))
+    c.check(f"#254 LEGACY must map bug and ci into dev: {cli.LEGACY}",
+            not (cli.LEGACY.get("bug") != ("dev", "bug") or cli.LEGACY.get("ci") != ("dev", "ci")))
     for name, words, path in cli.tool_commands(cli.scan(), tree, private=()):
-        if words[0] == "dev" and cli.declared(path) is not None:
-            failed += 1
-            print(f"FAIL #254 {' '.join(words)} must not declare MCP")
-    if any(n.startswith("dev") or n.startswith("ci_") for n, _, _ in
-           cli.tool_commands(cli.scan(), tree)):
-        failed += 1
-        print("FAIL #254 no dev tool may reach MCP")
+        c.check(f"#254 {' '.join(words)} must not declare MCP",
+                not (words[0] == "dev" and cli.declared(path) is not None))
+    c.check("#254 no dev tool may reach MCP",
+            not (any(n.startswith("dev") or n.startswith("ci_") for n, _, _ in
+                     cli.tool_commands(cli.scan(), tree))))
     got = cli.resolve(cli.unalias(["bug", "list"]), top, tree)
-    if got != ("mop.cli.dev.bug.list", []):
-        failed += 1
-        print(f"FAIL #254 `mop dev bug list` must still resolve through LEGACY: {got}")
+    c.expect("#254 `mop dev bug list` must still resolve through LEGACY", got,
+             ("mop.cli.dev.bug.list", []))
 
-    failed += check_server_namespace_259()
-    failed += check_named_263()
-    failed += check_body_file_270()
-    return failed
+    check_server_namespace_259(c)
+    check_named_263(c)
+    check_body_file_270(c)
 
 
-def check_server_namespace_259():
+def check_server_namespace_259(c):
     """HYPOTHESIS (#259): команды контроллера -- deploy, config, setup
     контроллера, user, cluster, bootstrap, web, callout, pve-facts -- лежат
     среди команд пула и оператора, и что из них делается только на сервере,
@@ -1891,44 +1488,30 @@ def check_server_namespace_259():
     зовут их до своего тикета. `mop driver pve-facts` -- двухсловный ключ
     LEGACY: driver как целое не псевдоним, run/list/sweep/build в нём.
     STATUS: FIXED — see #259"""
-    failed = 0
     want = {"deploy", "config", "setup", "user", "cluster", "bootstrap", "web",
             "callout", "pve-facts"}
     tree = cli.verbs()
     got = set(tree.get("server") or {})
-    if got != want:
-        failed += 1
-        print(f"FAIL #259 server must hold exactly {sorted(want)}: {sorted(got)}")
+    c.expect("#259 server must hold exactly its verbs", sorted(got), sorted(want))
     top = cli.catalog(cli.scan())
     stay = sorted((want - {"setup"}) & set(top))
-    if stay:
-        failed += 1
-        print(f"FAIL #259 must not stay top-level: {stay}")
-    if "setup" not in top:
-        failed += 1
-        print("FAIL #259 mop setup stays top-level, for the operator's machine")
-    if set(tree.get("driver") or {}) != {"run", "list", "sweep", "build"}:
-        failed += 1
-        print(f"FAIL #259 driver keeps run/list/sweep/build: {sorted(tree.get('driver') or {})}")
+    c.check(f"#259 must not stay top-level: {stay}", not (stay))
+    c.check("#259 mop setup stays top-level, for the operator's machine", not ("setup" not in top))
+    c.expect("#259 driver keeps run/list/sweep/build",
+             set(tree.get("driver") or {}), {"run", "list", "sweep", "build"})
     for old in ("deploy", "config", "user", "cluster", "bootstrap", "web", "callout"):
-        if cli.LEGACY.get(old) != ("server", old):
-            failed += 1
-            print(f"FAIL #259 LEGACY must map {old} into server: {cli.LEGACY.get(old)}")
+        c.expect(f"#259 LEGACY must map {old} into server", cli.LEGACY.get(old), ("server", old))
     for argv, want_argv in [(["driver", "pve-facts", "--base", "1"],
                              ["server", "pve-facts", "--base", "1"]),
                             (["driver", "run", "x"], ["driver", "run", "x"]),
                             (["cluster", "users"], ["server", "cluster", "users"])]:
-        if cli.unalias(argv) != want_argv:
-            failed += 1
-            print(f"FAIL #259 unalias({argv}) = {cli.unalias(argv)}, want {want_argv}")
+        c.expect(f"#259 unalias({argv})", cli.unalias(argv), want_argv)
     for argv, mod in [(["deploy"], ("mop.cli.server.deploy", [])),
                       (["cluster", "users", "--reload"], ("mop.cli.server.cluster.users", ["--reload"])),
                       (["driver", "pve-facts", "--base", "9"], ("mop.cli.server.pve-facts", ["--base", "9"])),
                       (["server", "user", "add", "x"], ("mop.cli.server.user.add", ["x"]))]:
         got = cli.resolve(cli.unalias(argv), top, tree)
-        if got != mod:
-            failed += 1
-            print(f"FAIL #259 {argv} must resolve to {mod}: {got}")
+        c.expect(f"#259 {argv} must resolve to {mod}", got, mod)
     # ── #271: mop dev test -- прогон tests/ одной командой ──────────────
     # HYPOTHESIS: проверки гоняли шелл-циклом `for t in tests/*.py`, у
     # каждого свой (CI, папеты, мастер), с разным разбором итога. SOLUTION:
@@ -1938,46 +1521,33 @@ def check_server_namespace_259():
         from mop.cli.dev import test as dev_test
     except ImportError:
         dev_test = None
-    if dev_test is None or not hasattr(dev_test, "plan") or not hasattr(dev_test, "summary"):
-        failed += 1
-        print("FAIL #271 mop.cli.dev.test with plan() and summary() is missing")
-    else:
+    if c.check("#271 mop.cli.dev.test with plan() and summary() is missing",
+               not (dev_test is None or not hasattr(dev_test, "plan") or not hasattr(dev_test, "summary"))):
         listing = ["cli.py", "agent.py", "_lib.py", "README", "hermetic.py", "spec_snapshot.json"]
         for names, want in (([], ["agent.py", "cli.py", "hermetic.py"]),
                             (["cli"], ["cli.py"]),
                             (["tests/agent.py", "cli.py", "agent"], ["agent.py", "cli.py"])):
             got = dev_test.plan(names, listing)
-            if got != want:
-                failed += 1
-                print(f"FAIL #271 plan({names}) = {got}, want {want}")
+            c.expect(f"#271 plan({names})", got, want)
         for bad in (["nope"], ["_lib"], ["spec_snapshot.json"]):
             try:
                 dev_test.plan(bad, listing)
-                failed += 1
-                print(f"FAIL #271 plan({bad}) must refuse")
+                c.fail(f"#271 plan({bad}) must refuse")
             except ValueError as e:
-                if "tests/" not in str(e):
-                    failed += 1
-                    print(f"FAIL #271 plan({bad}) refusal must name the file: {e}")
+                c.check(f"#271 plan({bad}) refusal must name the file: {e}",
+                        not ("tests/" not in str(e)))
         lines, ok = dev_test.summary([("agent.py", 0, "agent: ok\n", 1.0),
                                       ("cli.py", 1, "FAIL x\ncli: FAILED\n", 2.0)])
-        if ok or lines[0] != "FAILED tests/cli.py (exit 1)" or "FAIL x" not in lines \
-                or lines[-1] != "1/2 ok, failed: cli.py":
-            failed += 1
-            print(f"FAIL #271 summary of a red run: {ok} {lines}")
+        c.check(f"#271 summary of a red run: {ok} {lines}",
+                not (ok or lines[0] != "FAILED tests/cli.py (exit 1)" or "FAIL x" not in lines
+                     or lines[-1] != "1/2 ok, failed: cli.py"))
         lines, ok = dev_test.summary([("agent.py", 0, "agent: ok\n", 1.0)])
-        if not ok or lines != ["1/1 ok"]:
-            failed += 1
-            print(f"FAIL #271 summary of a green run: {ok} {lines}")
-        if "dev" not in cli.PRIVATE or "test" not in (cli.verbs().get("dev") or {}):
-            failed += 1
-            print("FAIL #271 test must be a verb of the private dev namespace")
-
-    return failed
+        c.check(f"#271 summary of a green run: {ok} {lines}", not (not ok or lines != ["1/1 ok"]))
+        c.check("#271 test must be a verb of the private dev namespace",
+                not ("dev" not in cli.PRIVATE or "test" not in (cli.verbs().get("dev") or {})))
 
 
-
-def check_named_263():
+def check_named_263(c):
     """HYPOTHESIS (#263): delete, recycle, restart, wipe и update каждый
     повторяют разбор --force, проверку одного имени с usage, перила guard и
     печать owner_note; --dry -- в gc и двух sweep; фабрика argparse -- в
@@ -1987,54 +1557,40 @@ def check_named_263():
     характеризация ниже, снятая с кода до переделки.
     STATUS: FIXED — see #263"""
     import importlib
-    import io
-    import contextlib
     from mop.cli import lib
     from mop.common import bus, puppets
     from mop.cli.core import _common as core_common
-    failed = 0
 
     # ── помощник: разбор имени и --force ──────────────────────────────────
     doc = "do a thing: mop thing <name> [--force]"
     fn = getattr(lib, "named", None)
-    if fn is None:
-        print("FAIL #263 lib.named is missing")
-        return 1
+    if not c.check("#263 lib.named is missing", fn is not None):
+        return
     for argv, want in [(["pu-mop-1"], ("pu-mop-1", False)),
                        (["--force", "pu-mop-1"], ("pu-mop-1", True)),
                        (["pu-mop-1", "--force"], ("pu-mop-1", True))]:
         got = fn(argv, doc)
-        if got != want:
-            failed += 1
-            print(f"FAIL #263 named({argv}) = {got}, want {want}")
+        c.expect(f"#263 named({argv})", got, want)
     for argv in ([], ["a", "b"], ["--force"]):
         try:
             fn(argv, doc)
-            failed += 1
-            print(f"FAIL #263 named({argv}) must refuse through usage")
+            c.fail(f"#263 named({argv}) must refuse through usage")
         except SystemExit as e:
-            if str(e.code) != doc:
-                failed += 1
-                print(f"FAIL #263 named({argv}) must exit with the usage: {e.code!r}")
-    if lib.parse_named(["x", "git@h:o.git", "--force"], doc, most=2) != (["x", "git@h:o.git"], True):
-        failed += 1
-        print("FAIL #263 parse_named with most=2")
+            c.expect(f"#263 named({argv}) must exit with the usage", str(e.code), doc)
+    c.expect("#263 parse_named with most=2",
+             lib.parse_named(["x", "git@h:o.git", "--force"], doc, most=2), (["x", "git@h:o.git"], True))
     for argv, want in (([], False), (["--dry"], True)):
-        if lib.dry(argv, doc) is not want:
-            failed += 1
-            print(f"FAIL #263 dry({argv})")
+        c.check(f"#263 dry({argv})", not (lib.dry(argv, doc) is not want))
     try:
         lib.dry(["--wet"], doc)
-        failed += 1
-        print("FAIL #263 dry(['--wet']) must refuse through usage")
+        c.fail("#263 dry(['--wet']) must refuse through usage")
     except SystemExit:
         pass
     from mop.cli.dev.bug import _common as bug_c
     from mop.cli.dev.ci import _common as ci_c
-    if bug_c.parser("new").prog != "mop dev bug new" or ci_c.parser("log").prog != "mop dev ci log" \
-            or bug_c.parser("new").add_help:
-        failed += 1
-        print("FAIL #263 the argparse factory keeps prog and no built-in help")
+    c.check("#263 the argparse factory keeps prog and no built-in help",
+            not (bug_c.parser("new").prog != "mop dev bug new" or ci_c.parser("log").prog != "mop dev ci log"
+                 or bug_c.parser("new").add_help))
 
     # ── характеризация пяти команд: вывод тот же, что до переделки ────────
     calls = []
@@ -2047,31 +1603,21 @@ def check_named_263():
         if verb == "spec":
             return {"meta": {"origin": "git@h:g/mop.git"}}
         return dict(note)
-    keep = (bus.call_cluster, bus.login, puppets.delete, puppets.recycle, puppets.wipe,
-            puppets.running_alloc, core_common.push_llm_keys, core_common.workspace_text,
-            lib.in_project, os.environ.get("MOP_SERVER_LAN"))
-
     def run(module, argv):
         mod = importlib.import_module(f"mop.cli.core.{module}")
-        out, err = io.StringIO(), io.StringIO()
-        code = 0
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                cli.run(mod.main, list(argv))
-            except SystemExit as e:
-                code = e.code
-        return out.getvalue(), err.getvalue(), code, mod.__doc__.strip()
-    try:
-        os.environ["MOP_SERVER_LAN"] = "192.0.2.1"
-        lib.in_project = lambda: None
-        bus.call_cluster, bus.login = call_cluster, lambda: "anton"
-        puppets.delete = lambda name, force=False: calls.append(("delete", force)) or \
-            {**note, "body": "destroyed", "node": "hyper"}
-        puppets.recycle = lambda name, workspace_of=None, force=False: calls.append(("recycle", force)) or dict(note)
-        puppets.wipe = lambda node, name, force=False: calls.append(("wipe", force)) or {**note, "target": "/t"}
-        puppets.running_alloc = lambda name: {"NodeName": "hyper"}
-        core_common.push_llm_keys = lambda p: None
-        core_common.workspace_text = lambda o: None
+        return (*run_command(mod.main, argv, via_cli=True), mod.__doc__.strip())
+    with patched_env(MOP_SERVER_LAN="192.0.2.1"), \
+            patched(lib, in_project=lambda: None), \
+            patched(bus, call_cluster=call_cluster, login=lambda: "anton"), \
+            patched(puppets,
+                    delete=lambda name, force=False: calls.append(("delete", force)) or
+                    {**note, "body": "destroyed", "node": "hyper"},
+                    recycle=lambda name, workspace_of=None, force=False:
+                    calls.append(("recycle", force)) or dict(note),
+                    wipe=lambda node, name, force=False:
+                    calls.append(("wipe", force)) or {**note, "target": "/t"},
+                    running_alloc=lambda name: {"NodeName": "hyper"}), \
+            patched(core_common, push_llm_keys=lambda p: None, workspace_text=lambda o: None):
         line = "pu-mop-1: was olga's: taken with --force\n"
         want = {
             "delete": line + "deleted pu-mop-1 (body gone from hyper)\n",
@@ -2083,28 +1629,17 @@ def check_named_263():
             calls.clear()
             out, err, code, usage = run(module, ["pu-mop-1", "--force"])
             forced = [f for v, f in calls if v in ("delete", "recycle", "wipe", "restart", "update")]
-            if (out, err, code) != (out_want, "", 0) or forced != [True]:
-                failed += 1
-                print(f"FAIL #263 mop {module} pu-mop-1 --force: {(out, err, code)!r}, force {forced}")
+            c.check(f"#263 mop {module} pu-mop-1 --force: {(out, err, code)!r}, force {forced}",
+                    not ((out, err, code) != (out_want, "", 0) or forced != [True]))
             for bad in ([], ["a", "b", "c"]) if module == "update" else ([], ["a", "b"]):
                 out, err, code, usage = run(module, bad)
                 # usage -- SystemExit(докстринг): в процессе он -- код выхода,
                 # печатает его интерпретатор на выходе (stderr, код 1).
-                if (out, err, code) != ("", "", usage):
-                    failed += 1
-                    print(f"FAIL #263 mop {module} {bad}: must exit with its usage: {(out, err, str(code)[:60])!r}")
-    finally:
-        (bus.call_cluster, bus.login, puppets.delete, puppets.recycle, puppets.wipe,
-         puppets.running_alloc, core_common.push_llm_keys, core_common.workspace_text,
-         lib.in_project) = keep[:9]
-        if keep[9] is None:
-            os.environ.pop("MOP_SERVER_LAN", None)
-        else:
-            os.environ["MOP_SERVER_LAN"] = keep[9]
-    return failed
+                c.check(f"#263 mop {module} {bad}: must exit with its usage",
+                        not ((out, err, code) != ("", "", usage)), repr((out, err, str(code)[:60])))
 
 
-def check_body_file_270():
+def check_body_file_270(c):
     """HYPOTHESIS (#270): `mop dev bug new --body-file -` и любой
     несуществующий путь падают трассировкой FileNotFoundError в read_body:
     `-` читался как имя файла, а отсутствие файла не ловил никто.
@@ -2114,42 +1649,30 @@ def check_body_file_270():
     import io
     import tempfile
     from mop.cli.dev.bug import _common as bug_common
-    failed = 0
-    keep = sys.stdin
     try:
-        sys.stdin = io.StringIO("тело из stdin\n")
-        got = bug_common.read_body(None, "-")
-        if got != "тело из stdin":
-            failed += 1
-            print(f"FAIL #270 --body-file - must read stdin: {got!r}")
+        with patched(sys, stdin=io.StringIO("тело из stdin\n")):
+            got = bug_common.read_body(None, "-")
+        c.expect("#270 --body-file - must read stdin", got, "тело из stdin")
     except BaseException as e:  # noqa: BLE001 -- трассировка и есть дефект
-        failed += 1
-        print(f"FAIL #270 --body-file - must read stdin, raised {type(e).__name__}: {e}")
-    finally:
-        sys.stdin = keep
+        c.fail(f"#270 --body-file - must read stdin, raised {type(e).__name__}: {e}")
     missing = os.path.join(tempfile.mkdtemp(prefix="mop-test-270-"), "no-such.md")
     for path in (missing, tempfile.mkdtemp(prefix="mop-test-270-")):
         try:
             bug_common.read_body(None, path)
-            failed += 1
-            print(f"FAIL #270 --body-file {path} must be refused")
+            c.fail(f"#270 --body-file {path} must be refused")
         except SystemExit as e:
             text = str(e.code)
-            if path not in text or "\n" in text.strip() or "Traceback" in text:
-                failed += 1
-                print(f"FAIL #270 the refusal must be one line naming the path: {text!r}")
+            c.check(f"#270 the refusal must be one line naming the path: {text!r}",
+                    not (path not in text or "\n" in text.strip() or "Traceback" in text))
         except BaseException as e:  # noqa: BLE001
-            failed += 1
-            print(f"FAIL #270 --body-file {path}: a traceback ({type(e).__name__}), "
-                  f"not a one-line refusal")
+            c.fail(f"#270 --body-file {path}: a traceback ({type(e).__name__}), "
+                   f"not a one-line refusal")
     # Как было: файл -- его текст, аргумент -- он сам.
     ok = os.path.join(tempfile.mkdtemp(prefix="mop-test-270-"), "body.md")
     with open(ok, "w", encoding="utf-8") as f:
         f.write("  тело  \n")
-    if bug_common.read_body(None, ok) != "тело" or bug_common.read_body(" x ", None) != "x":
-        failed += 1
-        print("FAIL #270 a readable file and a text argument must work as before")
-    return failed
+    c.check("#270 a readable file and a text argument must work as before",
+            not (bug_common.read_body(None, ok) != "тело" or bug_common.read_body(" x ", None) != "x"))
 
 
 if __name__ == "__main__":

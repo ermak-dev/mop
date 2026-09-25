@@ -14,6 +14,7 @@ import pwd
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks, patched, patched_env  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import config, manifest  # noqa: E402
@@ -22,8 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
 def main():
-    bad = 0
-    cases = 0
+    c = Checks()
     me = pwd.getpwuid(os.getuid()).pw_name
 
     # Защемлено живым отказом (2026-09-17, первый контейнерный папет).
@@ -32,24 +32,14 @@ def main():
     # поэтому драйвер собрал `ssh root@<тело>` и получил «Permission denied»
     # при совершенно исправном ключе. uid процесса — факт, $USER — всего лишь
     # утверждение, и верить надо факту.
-    saved = os.environ.get("USER")
-    try:
-        os.environ["USER"] = "root-from-the-nomad-client"
-        cases += 1
-        if config.pool_user() != me:
-            bad += 1
-            print(f"FAILED  pool_user() believed $USER over the real uid: "
-                  f"{config.pool_user()!r}, wanted {me!r}")
+    with patched_env(USER="root-from-the-nomad-client"):
+        c.check("pool_user() believed $USER over the real uid",
+                not (config.pool_user() != me),
+                f"{config.pool_user()!r}, wanted {me!r}")
         os.environ.pop("USER", None)
-        cases += 1
-        if config.pool_user() != me:
-            bad += 1
-            print("FAILED  pool_user() must work with no $USER at all — that is "
-                  "exactly a Nomad task's environment")
-    finally:
-        os.environ.pop("USER", None)
-        if saved is not None:
-            os.environ["USER"] = saved
+        c.check("pool_user() must work with no $USER at all — that is "
+                "exactly a Nomad task's environment",
+                not (config.pool_user() != me))
 
     # ── старшинство источников ───────────────────────────────────────────
     # Окружение > node.env > .env > дефолт. Ярус node.env появился потому, что
@@ -59,60 +49,44 @@ def main():
     # доезжало до узла: сборка образа клала тело на одно хранилище, драйвер на
     # узле искал его на другом, и не жаловался никто.
     node = os.path.join(tempfile.mkdtemp(), "node.env")
-    saved_node, saved_env = config.NODE_ENV_FILE, config.ENV_FILE
     envf = os.path.join(tempfile.mkdtemp(), ".env")
     with open(envf, "w") as f:
         f.write("MOP_PVE_STORAGE=from-env-file\nMOP_CORES=2\n")
     try:
-        config.NODE_ENV_FILE, config.ENV_FILE = node, envf
-        config.forget()
-        cases += 1
-        if config.get("MOP_PVE_STORAGE") != "from-env-file":
-            bad += 1
-            print("FAILED  .env must outrank the default when there is no node file")
+        with patched(config, NODE_ENV_FILE=node, ENV_FILE=envf):
+            config.forget()
+            c.check(".env must outrank the default when there is no node file",
+                    not (config.get("MOP_PVE_STORAGE") != "from-env-file"))
 
-        with open(node, "w") as f:
-            f.write("# узловое, положено прогоном deploy\n"
-                    "MOP_PVE_STORAGE=from-node\n")
-        config.forget()
-        cases += 1
-        if config.get("MOP_PVE_STORAGE") != "from-node":
-            bad += 1
-            print("FAILED  node.env must outrank .env — that is the whole point")
-        cases += 1
-        if config.num("MOP_CORES") != 2:
-            bad += 1
-            print("FAILED  a setting absent from node.env must still come from .env")
+            with open(node, "w") as f:
+                f.write("# узловое, положено прогоном deploy\n"
+                        "MOP_PVE_STORAGE=from-node\n")
+            config.forget()
+            c.check("node.env must outrank .env — that is the whole point",
+                    not (config.get("MOP_PVE_STORAGE") != "from-node"))
+            c.check("a setting absent from node.env must still come from .env",
+                    not (config.num("MOP_CORES") != 2))
 
-        os.environ["MOP_PVE_STORAGE"] = "from-environment"
-        cases += 1
-        if config.get("MOP_PVE_STORAGE") != "from-environment":
-            bad += 1
-            print("FAILED  the environment must outrank node.env — a one-off run "
-                  "has to keep working")
-        os.environ.pop("MOP_PVE_STORAGE", None)
+            os.environ["MOP_PVE_STORAGE"] = "from-environment"
+            c.check("the environment must outrank node.env — a one-off run "
+                    "has to keep working",
+                    not (config.get("MOP_PVE_STORAGE") != "from-environment"))
+            os.environ.pop("MOP_PVE_STORAGE", None)
 
-        os.unlink(node)
-        config.forget()
-        cases += 1
-        if config.get("MOP_PVE_STORAGE") != "from-env-file":
-            bad += 1
-            print("FAILED  a missing node.env is the normal case on the control "
-                  "machine, not an error")
-        cases += 1
-        if config.effective()["MOP_CORES"][1] != ".env":
-            bad += 1
-            print("FAILED  effective() must name where a value came from")
-        with open(node, "w") as f:
-            f.write("MOP_CORES=8\n")
-        config.forget()
-        cases += 1
-        if config.effective()["MOP_CORES"] != ("8", "node"):
-            bad += 1
-            print(f"FAILED  effective() must call the node file by its name: "
-                  f"{config.effective()['MOP_CORES']!r}")
+            os.unlink(node)
+            config.forget()
+            c.check("a missing node.env is the normal case on the control "
+                    "machine, not an error",
+                    not (config.get("MOP_PVE_STORAGE") != "from-env-file"))
+            c.check("effective() must name where a value came from",
+                    not (config.effective()["MOP_CORES"][1] != ".env"))
+            with open(node, "w") as f:
+                f.write("MOP_CORES=8\n")
+            config.forget()
+            c.check("effective() must call the node file by its name",
+                    not (config.effective()["MOP_CORES"] != ("8", "node")),
+                    f"{config.effective()['MOP_CORES']!r}")
     finally:
-        config.NODE_ENV_FILE, config.ENV_FILE = saved_node, saved_env
         config.forget()
 
     # mop.yaml: манифест проекта (#26). Одна игра: vars — просьба и
@@ -128,17 +102,14 @@ def main():
         ("пустой vars", """- name: x\n  vars: {}\n  tasks: []\n""", {}, []),
     ]
     for what, text, want_vars, want_tasks in MANIFEST:
-        cases += 1
         try:
             got_vars, got_tasks = manifest.play(text)
         except ValueError as e:
-            bad += 1
-            print(f"FAILED  mop.yaml, {what}: поднялся ValueError {e}")
+            c.fail(f"mop.yaml, {what}", f"поднялся ValueError {e}")
             continue
-        if got_vars != want_vars or got_tasks != want_tasks:
-            bad += 1
-            print(f"FAILED  mop.yaml, {what}\n  wanted: {want_vars!r} / {want_tasks!r}"
-                  f"\n  got: {got_vars!r} / {got_tasks!r}")
+        c.check(f"mop.yaml, {what}",
+                not (got_vars != want_vars or got_tasks != want_tasks),
+                f"wanted: {want_vars!r} / {want_tasks!r}; got: {got_vars!r} / {got_tasks!r}")
 
     # HYPOTHESIS: отход от формы — не список игр, две игры, игра не словарь,
     # пустой файл — обязан валиться ValueError: у манифеста один хозяин и
@@ -151,13 +122,12 @@ def main():
         ("vars не словарь", "- name: x\n  vars: 5\n"),
         ("tasks не список", "- name: x\n  tasks: {}\n"),
     ]:
-        cases += 1
         try:
             manifest.play(text)
+            refused = False
         except ValueError:
-            continue
-        bad += 1
-        print(f"FAILED  mop.yaml, {what}: должен был отказаться ValueError")
+            refused = True
+        c.check(f"mop.yaml, {what}: должен был отказаться ValueError", refused)
 
     # Расщепление vars манифеста (#26): просьбы (PROJECT_SCOPED) идут в размеры
     # образа, остальное не-настройочное — конфигурация самого проекта и едет
@@ -172,67 +142,46 @@ def main():
         ("пусто", {}, {}, {}, []),
     ]
     for what, mvars, want_asks, want_mine, want_alien in PARTS:
-        cases += 1
         asks, mine, alien = manifest.parts(mvars)
-        if (asks != want_asks or mine != want_mine or sorted(alien) != want_alien):
-            bad += 1
-            print(f"FAILED  parts, {what}\n  wanted: {want_asks!r}/{want_mine!r}/{want_alien!r}"
-                  f"\n  got: {asks!r}/{mine!r}/{alien!r}")
+        c.check(f"parts, {what}",
+                not (asks != want_asks or mine != want_mine or sorted(alien) != want_alien),
+                f"wanted: {want_asks!r}/{want_mine!r}/{want_alien!r}; "
+                f"got: {asks!r}/{mine!r}/{alien!r}")
 
     # Всё, что проект вправе просить, обязано быть настройкой: иначе оно
     # никуда не доедет, а отказа не будет.
-    cases += 1
     unknown = [k for k in config.PROJECT_SCOPED if k not in config.SETTINGS]
-    if unknown:
-        bad += 1
-        print(f"FAILED  PROJECT_SCOPED names settings that do not exist: {unknown}")
+    c.check("PROJECT_SCOPED names settings that do not exist", not (unknown), unknown)
 
     # Потолок — узловой: чужой проект просит, машина решает. Без потолка mop.yaml
     # это способ занять гипервизор, а не настройка.
     for cap in ("MOP_BODY_MEM_CAP_MB", "MOP_BODY_DISK_CAP_GB", "MOP_BODY_CORES_CAP"):
-        cases += 1
-        if cap not in config.NODE_SCOPED:
-            bad += 1
-            print(f"FAILED  {cap} must be node-scoped — the machine has the last word")
+        c.check(f"{cap} must be node-scoped — the machine has the last word",
+                not (cap not in config.NODE_SCOPED))
 
     # Список узловых настроек -- один: по нему deploy решает, что рендерить в
     # node.env. Разойдись он с тем, что читает узел, и настройка молча не
     # доедет -- ровно та беда, ради которой ярус и заводился.
     # Память -- свойство папета, не узла (#197): в node.env ей не место,
     # строка инвентаря mop_mem_mb -- отказ deploy. Потолок узла остаётся выше.
-    cases += 1
-    if "MOP_MEM_MB" in config.NODE_SCOPED:
-        bad += 1
-        print("FAILED  MOP_MEM_MB is the puppet's, not the node's: out of NODE_SCOPED (#197)")
+    c.check("MOP_MEM_MB is the puppet's, not the node's: out of NODE_SCOPED (#197)",
+            not ("MOP_MEM_MB" in config.NODE_SCOPED))
 
-    cases += 1
     unknown = [k for k in config.NODE_SCOPED if k not in config.SETTINGS]
-    if unknown:
-        bad += 1
-        print(f"FAILED  NODE_SCOPED names settings that do not exist: {unknown}")
+    c.check("NODE_SCOPED names settings that do not exist", not (unknown), unknown)
 
     # Настройка старше дефолта: установка, где пользователь пула не совпадает
     # с тем, под кем крутится mop, вписывает его в .env.
-    cases += 1
-    os.environ["MOP_USER"] = "someone-else"
-    try:
-        if config.get("MOP_USER") != "someone-else":
-            bad += 1
-            print("FAILED  MOP_USER from the environment must outrank the default")
-    finally:
-        os.environ.pop("MOP_USER", None)
+    with patched_env(MOP_USER="someone-else"):
+        c.check("MOP_USER from the environment must outrank the default",
+                not (config.get("MOP_USER") != "someone-else"))
 
     # Шлюз сети тел считается из подсети: два места для одного адреса разошлись
     # бы молча — мост встал бы, а тела просто не достучались.
-    cases += 1
-    os.environ["MOP_PVE_SUBNET"] = "192.168.250.0/24"
-    try:
-        if config.get("MOP_PVE_GATEWAY") != "192.168.250.1":
-            bad += 1
-            print(f"FAILED  gateway must be derived from the subnet: "
-                  f"{config.get('MOP_PVE_GATEWAY')!r}")
-    finally:
-        os.environ.pop("MOP_PVE_SUBNET", None)
+    with patched_env(MOP_PVE_SUBNET="192.168.250.0/24"):
+        c.check("gateway must be derived from the subnet",
+                not (config.get("MOP_PVE_GATEWAY") != "192.168.250.1"),
+                f"{config.get('MOP_PVE_GATEWAY')!r}")
 
     # Ключ пула к git: первый существующий из стандартных имён контроллера, а
     # не зашитый id_rsa. HYPOTHESIS (#66): на хосте с одним id_ed25519 deploy
@@ -240,49 +189,31 @@ def main():
     keys = tempfile.mkdtemp()
     ed = os.path.join(keys, "id_ed25519")
     rsa = os.path.join(keys, "id_rsa")
-    cases += 1
-    if config.git_key([ed, rsa]) != "":
-        bad += 1
-        print("FAILED  no key at all must be empty, so deploy can refuse up front")
+    c.check("no key at all must be empty, so deploy can refuse up front",
+            not (config.git_key([ed, rsa]) != ""))
     open(rsa, "w").close()
-    cases += 1
-    if config.git_key([ed, rsa]) != rsa:
-        bad += 1
-        print(f"FAILED  the only key present must win: {config.git_key([ed, rsa])!r}")
+    c.check("the only key present must win", not (config.git_key([ed, rsa]) != rsa),
+            f"{config.git_key([ed, rsa])!r}")
     open(ed, "w").close()
-    cases += 1
-    if config.git_key([ed, rsa]) != ed:
-        bad += 1
-        print("FAILED  with both present the first candidate wins, and it is ed25519")
-    cases += 1
-    os.environ["MOP_GIT_KEY"] = "/elsewhere/pool-key"
-    try:
-        if config.get("MOP_GIT_KEY") != "/elsewhere/pool-key":
-            bad += 1
-            print("FAILED  MOP_GIT_KEY from the environment must outrank the derived default")
-    finally:
-        os.environ.pop("MOP_GIT_KEY", None)
+    c.check("with both present the first candidate wins, and it is ed25519",
+            not (config.git_key([ed, rsa]) != ed))
+    with patched_env(MOP_GIT_KEY="/elsewhere/pool-key"):
+        c.check("MOP_GIT_KEY from the environment must outrank the derived default",
+                not (config.get("MOP_GIT_KEY") != "/elsewhere/pool-key"))
 
     # HYPOTHESIS (#125): сервер -- один на машину (окружение или .env), и
     # второй сервер требовал MOP_SERVER_LAN=... в каждой команде.
     # SOLUTION: привязка клона; с #131 -- через контекст команды, который
     # старше файлов. STATUS: FIXED — see #125, #131
     from mop.common import context
-    cases += 1
-    saved = os.environ.pop("MOP_SERVER_LAN", None)
-    try:
+    with patched_env(MOP_SERVER_LAN=None):
         with context.use(context.resolve({}, {}, {"server": "bound.example"})):
-            if config.get("MOP_SERVER_LAN") != "bound.example":
-                bad += 1
-                print("FAILED  the context's server must be MOP_SERVER_LAN")
+            c.check("the context's server must be MOP_SERVER_LAN",
+                    not (config.get("MOP_SERVER_LAN") != "bound.example"))
             # Контекст задаёт только свои поля.
-            if config.get("MOP_NATS_PORT") != config.SETTINGS["MOP_NATS_PORT"] \
-                    and not os.environ.get("MOP_NATS_PORT"):
-                bad += 1
-                print("FAILED  a context must not set settings other than the server")
-    finally:
-        if saved is not None:
-            os.environ["MOP_SERVER_LAN"] = saved
+            c.check("a context must not set settings other than the server",
+                    not (config.get("MOP_NATS_PORT") != config.SETTINGS["MOP_NATS_PORT"]
+                         and not os.environ.get("MOP_NATS_PORT")))
 
     # HYPOTHESIS (#156): config -- нижний слой, а тянул вверх operators и
     # deps (playbook_vars), держал разбор манифеста и копию полей контекста;
@@ -297,63 +228,42 @@ def main():
              "if m in sys.modules))" % ROOT)
     got = subprocess.run([sys.executable, "-c", probe], capture_output=True,
                          text=True).stdout.strip()
-    cases += 1
-    if got != "[]":
-        bad += 1
-        print(f"FAILED  import mop.config loads modules from above: {got}")
+    c.check("import mop.config loads modules from above", not (got != "[]"), got)
 
-    cases += 1
-    if context.FIELDS and config.CONTEXT_SCOPED != {"MOP_SERVER_LAN": "server"}:
-        bad += 1
-        print(f"FAILED  CONTEXT_SCOPED -> {config.CONTEXT_SCOPED!r}")
+    c.check("CONTEXT_SCOPED",
+            not (context.FIELDS and config.CONTEXT_SCOPED != {"MOP_SERVER_LAN": "server"}),
+            f"{config.CONTEXT_SCOPED!r}")
 
     PROCESS = ("MOP_SERVER_DIR", "MOP_BUS_CONFIG", "MOP_PROJECT")
-    cases += 1
-    if getattr(config, "PROCESS_SCOPED", None) != PROCESS:
-        bad += 1
-        print(f"FAILED  PROCESS_SCOPED -> {getattr(config, 'PROCESS_SCOPED', None)!r}")
+    c.check("PROCESS_SCOPED", not (getattr(config, "PROCESS_SCOPED", None) != PROCESS),
+            f"{getattr(config, 'PROCESS_SCOPED', None)!r}")
     listed = config.effective()
-    saved = {k: os.environ.pop(k, None) for k in PROCESS}
     try:
-        # Файлы не переключают проект и каталог кредов: только окружение.
-        config._cache[config.ENV_FILE] = {k: "from-env-file" for k in PROCESS}
-        config._cache[config.NODE_ENV_FILE] = {k: "from-node-env" for k in PROCESS}
-        for k in PROCESS:
-            cases += 1
-            if k not in listed or config.SETTINGS.get(k) != "":
-                bad += 1
-                print(f"FAILED  {k} must be a setting with default '' listed by mop server config")
-            cases += 1
-            if config.get(k) != "":
-                bad += 1
-                print(f"FAILED  {k} read from a file: {config.get(k)!r}")
-            os.environ[k] = "set"
-            cases += 1
-            if config.get(k) != "set" or config.effective()[k] != ("set", "env"):
-                bad += 1
-                print(f"FAILED  {k} must come from the environment")
-        try:
-            from mop.server import playvars
-            pv = playvars.playbook_vars()
-        except ImportError as e:
-            pv = {"import": str(e)}
-        cases += 1
-        want = (set(config.SETTINGS) - set(PROCESS)) | {
-            "MOP_NODE_SCOPED", "MOP_SERVER_SCOPED", "MOP_PIP_DEPS"}
-        if set(pv) != want:
-            bad += 1
-            print(f"FAILED  playbook_vars keys differ: extra {sorted(set(pv) - want)}, "
-                  f"missing {sorted(want - set(pv))}")
+        with patched_env(**{k: None for k in PROCESS}):
+            # Файлы не переключают проект и каталог кредов: только окружение.
+            config._cache[config.ENV_FILE] = {k: "from-env-file" for k in PROCESS}
+            config._cache[config.NODE_ENV_FILE] = {k: "from-node-env" for k in PROCESS}
+            for k in PROCESS:
+                c.check(f"{k} must be a setting with default '' listed by mop server config",
+                        not (k not in listed or config.SETTINGS.get(k) != ""))
+                c.check(f"{k} read from a file", not (config.get(k) != ""),
+                        f"{config.get(k)!r}")
+                os.environ[k] = "set"
+                c.check(f"{k} must come from the environment",
+                        not (config.get(k) != "set" or config.effective()[k] != ("set", "env")))
+            try:
+                from mop.server import playvars
+                pv = playvars.playbook_vars()
+            except ImportError as e:
+                pv = {"import": str(e)}
+            want = (set(config.SETTINGS) - set(PROCESS)) | {
+                "MOP_NODE_SCOPED", "MOP_SERVER_SCOPED", "MOP_PIP_DEPS"}
+            c.check("playbook_vars keys differ", not (set(pv) != want),
+                    f"extra {sorted(set(pv) - want)}, missing {sorted(want - set(pv))}")
     finally:
         config.forget()
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+    return c.report("config")
 
 
 if __name__ == "__main__":

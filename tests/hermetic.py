@@ -110,8 +110,10 @@ _isolate()
 
 # ─── запуском: изоляция есть и держит ────────────────────────────────────
 def files():
+    """Файлы проверок: как у `mop dev test`, помощники (_*.py) -- не проверки
+    (#269), и сам hermetic -- тоже."""
     return sorted(os.path.join(TESTS, f) for f in os.listdir(TESTS)
-                  if f.endswith(".py") and f != "hermetic.py")
+                  if f.endswith(".py") and not f.startswith("_") and f != "hermetic.py")
 
 
 def mop_imports(tree):
@@ -120,9 +122,8 @@ def mop_imports(tree):
             or isinstance(n, ast.Import) and any(a.name.split(".")[0] == "mop" for a in n.names)]
 
 
-def check_imports():
+def check_imports(c):
     """Каждый файл с mop импортирует hermetic на верхнем уровне и раньше."""
-    out = []
     for f in files():
         tree = ast.parse(open(f).read())
         uses = mop_imports(tree)
@@ -130,10 +131,8 @@ def check_imports():
             continue
         guard = [n.lineno for n in tree.body if isinstance(n, ast.Import)
                  and any(a.name == "hermetic" for a in n.names)]
-        if not guard or guard[0] > min(uses):
-            out.append(f"{os.path.basename(f)}: import hermetic before the first mop import "
-                       f"(line {min(uses)})")
-    return out
+        c.check(f"check_imports: {os.path.basename(f)}: import hermetic before the first "
+                f"mop import (line {min(uses)})", guard and guard[0] <= min(uses))
 
 
 def hostile_home():
@@ -163,31 +162,26 @@ def hostile_repo(values):
     return root
 
 
-def check_children():
+def check_children(c):
     """Изоляция доходит до дочернего процесса (#217): командлет, запущенный
     проверкой через bin/mop, видит тот же пустой .env, что и она."""
-    out = []
     got = subprocess.run(
         [sys.executable, "-c", "from mop.common import config; print(config.ENV_FILE)"],
         env={**os.environ, "PYTHONPATH": ROOT}, capture_output=True, text=True, cwd=ROOT)
     from mop.common import config
-    if got.stdout.strip() != config.ENV_FILE:
-        out.append(f"a child reads .env {got.stdout.strip() or got.stderr.strip()!r}, "
-                   f"the check reads {config.ENV_FILE!r}")
-    if config.ENV_FILE.startswith(ROOT + os.sep):
-        out.append(f"the check reads the repository's own .env: {config.ENV_FILE}")
+    c.check(f"check_children: a child reads .env {got.stdout.strip() or got.stderr.strip()!r}, "
+            f"the check reads {config.ENV_FILE!r}", got.stdout.strip() == config.ENV_FILE)
+    c.check(f"check_children: the check reads the repository's own .env: {config.ENV_FILE}",
+            not config.ENV_FILE.startswith(ROOT + os.sep))
     from mop.common import puppets
-    if puppets.LOCAL_KEYS_FILE != config.ENV_FILE:
-        out.append(f"LLM keys come from {puppets.LOCAL_KEYS_FILE}, not the .env the "
-                   f"check sees ({config.ENV_FILE})")
-    return out
+    c.check(f"check_children: LLM keys come from {puppets.LOCAL_KEYS_FILE}, not the .env "
+            f"the check sees ({config.ENV_FILE})", puppets.LOCAL_KEYS_FILE == config.ENV_FILE)
 
 
-def check_skip_strict():
+def check_skip_strict(c):
     """Пропуск проверки (#229): обычно -- строка SKIPPED и файл идёт дальше,
     с MOP_TESTS_STRICT=1 -- файл падает с ненулевым кодом и именем пропуска.
     Пропуск, читавшийся зелёным, однажды уже отправил #220 в master красным."""
-    out = []
     code = ("import sys; sys.path.insert(0, %r); import hermetic; "
             "hermetic.skip('the widget check', 'no widget library'); print('after the skip')"
             % TESTS)
@@ -199,46 +193,42 @@ def check_skip_strict():
         lines = (r.stdout + r.stderr).splitlines()
         went_on = "after the skip" in r.stdout.splitlines()
         if not strict:
-            if r.returncode != 0 or "SKIPPED the widget check: no widget library" not in lines \
-                    or not went_on:
-                out.append(f"normal mode: a skip is a SKIPPED line and the file goes on: "
-                           f"exit {r.returncode}, {lines}")
-        elif r.returncode == 0 or went_on or not any(
-                "the widget check" in l and "MOP_TESTS_STRICT" in l for l in lines):
-            out.append(f"MOP_TESTS_STRICT=1: a skip must fail the file, naming it: "
-                       f"exit {r.returncode}, {lines}")
-    return out
+            c.check(f"check_skip_strict: normal mode: a skip is a SKIPPED line and the file "
+                    f"goes on: exit {r.returncode}, {lines}",
+                    r.returncode == 0 and "SKIPPED the widget check: no widget library" in lines
+                    and went_on)
+        else:
+            c.check(f"check_skip_strict: MOP_TESTS_STRICT=1: a skip must fail the file, "
+                    f"naming it: exit {r.returncode}, {lines}",
+                    not (r.returncode == 0 or went_on or not any(
+                        "the widget check" in l and "MOP_TESTS_STRICT" in l for l in lines)))
 
 
-def check_own_skips():
+def check_own_skips(c):
     """Ни один файл не печатает свой SKIPPED: все пропуски -- через skip()."""
-    out = []
     for f in files():
-        for n, line in enumerate(open(f), 1):
-            if "SKIPPED" in line:
-                out.append(f"{os.path.basename(f)}:{n}: its own skip -- use hermetic.skip()")
-    return out
+        own = [n for n, line in enumerate(open(f), 1) if "SKIPPED" in line]
+        c.check(f"check_own_skips: {os.path.basename(f)}:{own}: its own skip -- "
+                f"use hermetic.skip()", not own)
 
 
-def check_strict_children():
+def check_strict_children(c):
     """Строгий режим доходит до дочерних прогонов (#229): изоляция убирает
     MOP_* из окружения, и без явной передачи дети проверяли бы мягко."""
-    out = []
     child_env_ = globals().get("child_env")
-    if child_env_ is None:
-        return ["hermetic has no child_env(): the children's environment is built ad hoc"]
+    if not c.check("check_strict_children: hermetic has no child_env(): the children's "
+                   "environment is built ad hoc", child_env_ is not None):
+        return
     env = child_env_({}, strict=True)
-    if env.get("MOP_TESTS_STRICT") != "1":
-        out.append(f"children of a strict run must be strict: {env.get('MOP_TESTS_STRICT')!r}")
-    if "MOP_TESTS_STRICT" in child_env_({}, strict=False):
-        out.append("children of a normal run must not be strict")
-    return out
+    c.check(f"check_strict_children: children of a strict run must be strict: "
+            f"{env.get('MOP_TESTS_STRICT')!r}", env.get("MOP_TESTS_STRICT") == "1")
+    c.check("check_strict_children: children of a normal run must not be strict",
+            "MOP_TESTS_STRICT" not in child_env_({}, strict=False))
 
 
-def check_runs():
+def check_runs(c):
     """Все файлы зелёные с пустым HOME и с враждебным -- во втором случае из
     копии репозитория с враждебным .env (#217)."""
-    out = []
     # PYTHONUSERBASE здесь уже задан импортом: без него смена HOME прятала
     # бы nats-py самого файла проверок, а не машину.
     hostile, values = hostile_home()
@@ -254,21 +244,19 @@ def check_runs():
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=root)))
     for label, f, p in runs:
         text = p.communicate()[0]
-        if p.returncode != 0:
-            tail = "\n    ".join(text.strip().splitlines()[-8:])
-            out.append(f"{os.path.basename(f)} with a {label} HOME: exit {p.returncode}\n    {tail}")
-    return out
+        tail = "\n    ".join(text.strip().splitlines()[-8:])
+        c.check(f"check_runs: {os.path.basename(f)} with a {label} HOME: exit {p.returncode}"
+                f"\n    {tail}", p.returncode == 0)
 
 
 def main():
-    failed = []
+    # Лениво: при импорте hermetic -- изоляция, и больше ничего (#269).
+    from _lib import Checks
+    c = Checks()
     for check in (check_imports, check_children, check_skip_strict, check_own_skips,
                   check_strict_children, check_runs):
-        failed += [f"FAIL {check.__name__}: {line}" for line in check()]
-    if failed:
-        print("\n".join(failed))
-    print("hermetic: FAILED" if failed else "hermetic: ok")
-    return 1 if failed else 0
+        check(c)
+    return c.report("hermetic")
 
 
 if __name__ == "__main__":

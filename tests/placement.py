@@ -24,6 +24,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import puppets  # noqa: E402
@@ -42,62 +43,54 @@ def node(meta, status="ready", eligible=True):
 
 
 def main():
-    cases = bad = 0
-
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}: got {got!r}, want {want!r}")
+    c = Checks()
 
     # Узлы, которые проект обслуживают, — тем же выражением, что и в Nomad.
-    check("pve node with the image", spec.unserved("mop", [node({"mop_projects": "rugent,mop"})]), False)
-    check("host node serves any", spec.unserved("mop", [node({"mop_projects": "any"})]), False)
+    c.expect("pve node with the image", spec.unserved("mop", [node({"mop_projects": "rugent,mop"})]), False)
+    c.expect("host node serves any", spec.unserved("mop", [node({"mop_projects": "any"})]), False)
     # Свидетельство #118: pve-узлы без образа, SERVES `-`.
-    check("pve nodes without images", spec.unserved("mop", [node({}), node({"mop_projects": ""})]), True)
-    check("other project's image only", spec.unserved("mop", [node({"mop_projects": "mop2"})]), True)
+    c.expect("pve nodes without images", spec.unserved("mop", [node({}), node({"mop_projects": ""})]), True)
+    c.expect("other project's image only", spec.unserved("mop", [node({"mop_projects": "mop2"})]), True)
     # Узел с образом, на который Nomad не ставит, — не спасает.
-    check("serving node is down", spec.unserved("mop", [node({"mop_projects": "mop"}, status="down")]), True)
-    check("serving node is closed", spec.unserved("mop", [node({"mop_projects": "mop"}, eligible=False)]), True)
-    check("no nodes at all", spec.unserved("mop", []), True)
+    c.expect("serving node is down", spec.unserved("mop", [node({"mop_projects": "mop"}, status="down")]), True)
+    c.expect("serving node is closed", spec.unserved("mop", [node({"mop_projects": "mop"}, eligible=False)]), True)
+    c.expect("no nodes at all", spec.unserved("mop", []), True)
 
     # Диагноз: без узла — про образ, с узлом — про слоты.
     d = puppets._placement_issue(queued_job(), None, unserved=True)["diagnosis"]
-    check("unserved diagnosis names the image", "no free slots" not in d and "image" in d and "mop" in d, True)
-    check("unserved diagnosis names the cure", "mop project add" in d, True)
+    c.expect("unserved diagnosis names the image", "no free slots" not in d and "image" in d and "mop" in d, True)
+    c.expect("unserved diagnosis names the cure", "mop project add" in d, True)
     d = puppets._placement_issue(queued_job(), None, unserved=False)["diagnosis"]
-    check("served but queued is about slots", d, "queued — no free slots in the pool")
+    c.expect("served but queued is about slots", d, "queued — no free slots in the pool")
 
     # ── #197: потолок узла против потолка папета ─────────────────────────
     # Спека несёт ограничение `${meta.mop_mem_cap_mb} >= потолок`; очередь,
     # которую держит оно, -- не образ и не слоты, и диагноз обязан это сказать.
     both = {"mop_projects": "mop"}
-    check("cap above the ceiling", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "32768"})], 16384), False)
-    check("cap equal to the ceiling", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "16384"})], 16384), False)
-    check("cap below the ceiling", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "8192"})], 16384), "memory")
+    c.expect("cap above the ceiling", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "32768"})], 16384), False)
+    c.expect("cap equal to the ceiling", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "16384"})], 16384), False)
+    c.expect("cap below the ceiling", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "8192"})], 16384), "memory")
     # Численно, как Nomad: лексически "9000" >= "12288".
-    check("cap compared as a number", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "9000"})], 12288), "memory")
+    c.expect("cap compared as a number", spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "9000"})], 12288), "memory")
     # Узел без ключа ограничение не проходит (Nomad: lFound=false).
-    check("serving node without a cap", spec.placement_gap("mop", [node(both)], 8192), "memory")
-    check("one of the serving nodes is big enough",
+    c.expect("serving node without a cap", spec.placement_gap("mop", [node(both)], 8192), "memory")
+    c.expect("one of the serving nodes is big enough",
           spec.placement_gap("mop", [node({**both, "mop_mem_cap_mb": "4096"}),
                                 node({**both, "mop_mem_cap_mb": "65536"})], 16384), False)
     # Большой потолок у узла, который проекта не обслуживает, не в счёт.
-    check("the big node has no image",
+    c.expect("the big node has no image",
           spec.placement_gap("mop", [node({"mop_projects": "rugent", "mop_mem_cap_mb": "65536"}),
                                 node({**both, "mop_mem_cap_mb": "4096"})], 16384), "memory")
-    check("unserved stays a yes/no over both", spec.unserved("mop", [node({**both, "mop_mem_cap_mb": "8192"})], 16384), True)
-    check("no image still reads as the image", spec.placement_gap("mop", [node({"mop_mem_cap_mb": "65536"})], 16384), "image")
+    c.expect("unserved stays a yes/no over both", spec.unserved("mop", [node({**both, "mop_mem_cap_mb": "8192"})], 16384), True)
+    c.expect("no image still reads as the image", spec.placement_gap("mop", [node({"mop_mem_cap_mb": "65536"})], 16384), "image")
     # Спека до #197 потолка узла не спрашивает.
-    check("a spec without a ceiling", spec.placement_gap("mop", [node(both)], None), False)
+    c.expect("a spec without a ceiling", spec.placement_gap("mop", [node(both)], None), False)
     d = puppets._placement_issue(queued_job(), None, unserved="memory", ceiling=16384)["diagnosis"]
-    check(f"memory diagnosis names the ceiling and the node's cap ({d})",
+    c.expect(f"memory diagnosis names the ceiling and the node's cap ({d})",
           "16384" in d and "mop_mem_cap_mb" in d and "image" not in d and "no free slots" not in d, True)
-    check(f"memory diagnosis names the project's ask ({d})", "MOP_MEM_MB" in d and "mop" in d, True)
+    c.expect(f"memory diagnosis names the project's ask ({d})", "MOP_MEM_MB" in d and "mop" in d, True)
 
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+    return c.report("placement")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import gitlab  # noqa: E402
@@ -40,10 +41,9 @@ def pipe(**kw):
     return {**base, **kw}
 
 
-def cases():
-    """-> [(что, получено, ожидалось)]."""
+def check_cases(c):
+    """Каждый случай -- c.expect(что, получено, ожидалось)."""
     g = gitlab
-    out = []
 
     def fn(name):
         f = getattr(g, name, None)
@@ -56,7 +56,7 @@ def cases():
             got = thunk()
         except Exception as e:  # noqa: BLE001 -- отказ тоже ответ проверки
             got = f"raised {type(e).__name__}: {e}"
-        out.append((what, got, want))
+        c.expect(what, got, want)
 
     # Метка статуса — слово, а не значок: вывод читает модель через MCP.
     # Провал пайплайна — капсом, он и есть то, что ищут глазами в списке.
@@ -186,56 +186,42 @@ def cases():
         [f"pipeline 42 failed: {URL}", "no jobs failed, and GitLab gives no reason"])
     add("why_lines green", lambda: fn("why_lines")(pipe(status="success"), [job()], {}),
         [f"pipeline 42 success: {URL}", "nothing failed"])
-    return out
 
 
-def check_group():
+def check_group(c):
     """`mop dev ci` — группа с глаголами; MCP только у читающих (#233)."""
     from mop import cli
-    out = []
     verbs = set((cli.verbs().get("dev") or {}).get("ci") or {})   # дерево (#253): глаголы -- ключи
     want = {"list", "show", "log", "why", "lint", "retry", "cancel", "runners"}
-    if verbs != want:
-        return [f"mop dev ci verbs {sorted(verbs or ())}, wanted {sorted(want)}"]
+    if not c.check("mop dev ci verbs", not (verbs != want),
+                   f"{sorted(verbs or ())}, wanted {sorted(want)}"):
+        return
     # #233 давал читающим глаголам MCP; #254 снимает его со всех: dev --
     # внутренние команды разработчика, мастер зовёт их из шелла, и
     # пространство целиком закрыто для инструментов (cli.PRIVATE).
     for verb in sorted(want):
         decl = cli.declared(os.path.join(cli.PACKAGE, "dev", "ci", f"{verb}.py"))
-        if decl is not None:
-            out.append(f"mop dev ci {verb} must stay out of MCP: {decl!r}")
-    if cli.declared(os.path.join(cli.PACKAGE, "dev", "ci", "__init__.py")) is not None:
-        out.append("mop dev ci itself must stay out of MCP: its verbs are the tools")
+        c.check(f"mop dev ci {verb} must stay out of MCP", decl is None, repr(decl))
+    c.check("mop dev ci itself must stay out of MCP: its verbs are the tools",
+            not (cli.declared(os.path.join(cli.PACKAGE, "dev", "ci", "__init__.py")) is not None))
     # Без глагола — список, с числом — пайплайн: разбирает сама группа.
     route = getattr(__import__("mop.cli.dev.ci", fromlist=["route"]), "route", None)
-    if route is None:
-        return out + ["mop.cli.dev.ci has no route"]
+    if not c.check("mop.cli.dev.ci has route", route is not None):
+        return
     for argv, want_route in (([], ("list", [])), (["42"], ("show", ["42"])),
                              (["42", "--failed"], ("show", ["42", "--failed"])),
                              (["nope"], None)):
-        if route(argv) != want_route:
-            out.append(f"route({argv}) -> {route(argv)!r}, wanted {want_route!r}")
-    return out
+        c.expect(f"route({argv})", route(argv), want_route)
 
 
 def main():
-    bad = total = 0
-    for what, got, want in cases():
-        total += 1
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what} -> {got!r}, wanted {want!r}")
-    total += 1
+    c = Checks()
+    check_cases(c)
     try:
-        group = check_group()
+        check_group(c)
     except Exception as e:  # noqa: BLE001
-        group = [f"raised {type(e).__name__}: {e}"]
-    if group:
-        bad += 1
-        for line in group:
-            print(f"FAILED  {line}")
-    print(f"{total - bad}/{total} matched")
-    return 1 if bad else 0
+        c.fail("mop dev ci group", f"raised {type(e).__name__}: {e}")
+    return c.report("ci")
 
 
 if __name__ == "__main__":

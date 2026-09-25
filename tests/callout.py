@@ -24,6 +24,7 @@ import sys
 import tempfile
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import busnames  # noqa: E402
@@ -32,12 +33,6 @@ from mop.server.identity import Identity, Refused  # noqa: E402
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 V = json.load(open(os.path.join(HERE, "callout_vectors.json")))
-failed = []
-
-
-def check(what, ok, detail=""):
-    if not ok:
-        failed.append(f"{what}" + (f": {detail}" if detail else ""))
 
 
 def body(token):
@@ -75,6 +70,7 @@ class Humans:
 
 
 def main():
+    c = Checks()
     try:
         import nacl  # noqa: F401
         import nkeys  # noqa: F401
@@ -88,16 +84,15 @@ def main():
     try:
         from mop.server import callout, nkjwt
     except ImportError as e:
-        print(f"FAIL the callout modules are missing: {e}")
-        print("callout: FAILED")
-        return 1
+        c.fail("the callout modules are missing", e)
+        return c.report("callout")
 
     # ── JWT: подпись сервера, формат, подделка ───────────────────────────
     req = nkjwt.decode(V["request"])
-    check("a request signed by the real server decodes",
-          req["nats"]["type"] == "authorization_request", req.get("nats", {}).get("type"))
-    check("the request is signed by the server it names",
-          req["iss"] == req["nats"]["server_id"]["id"], req["iss"])
+    c.check("a request signed by the real server decodes",
+            req["nats"]["type"] == "authorization_request", req.get("nats", {}).get("type"))
+    c.check("the request is signed by the server it names",
+            req["iss"] == req["nats"]["server_id"]["id"], req["iss"])
     head, payload, sig = V["request"].split(".")
     forged = body(V["request"])
     forged["nats"]["connect_opts"]["user"] = "anton"
@@ -105,7 +100,7 @@ def main():
         json.dumps(forged).encode()).rstrip(b"=").decode()
     try:
         nkjwt.decode(f"{head}.{forged_payload}.{sig}")
-        check("a forged request must be refused", False)
+        c.fail("a forged request must be refused")
     except ValueError:
         pass
     # Ответ, который сервер принял на стенде: наш encode обязан повторить
@@ -116,22 +111,22 @@ def main():
                                 ("user claim", resp["nats"]["jwt"], user)):
         again = nkjwt.encode({k: v for k, v in claims.items() if k not in ("iss", "iat", "jti")},
                              V["issuer_seed"], now=claims["iat"])
-        check(f"encode reproduces the {what} the server accepted", again == token,
-              f"\n  got  {again}\n  want {token}")
-    check("public key of the issuer seed", nkjwt.public_of(V["issuer_seed"]) == V["issuer"])
-    check("public key of the xkey seed", nkjwt.public_of(V["xkey_seed"]) == V["xkey"])
+        c.check(f"encode reproduces the {what} the server accepted", again == token,
+                f"\n  got  {again}\n  want {token}")
+    c.check("public key of the issuer seed", nkjwt.public_of(V["issuer_seed"]) == V["issuer"])
+    c.check("public key of the xkey seed", nkjwt.public_of(V["xkey_seed"]) == V["xkey"])
 
     # ── xkey: ящик сервера и круг ────────────────────────────────────────
     opened = nkjwt.xkey_open(V["xkey_seed"], V["server_xkey"],
                              base64.b64decode(V["sealed_request"]))
-    check("the server's sealed request opens with our xkey", opened.decode() == V["request"])
+    c.check("the server's sealed request opens with our xkey", opened.decode() == V["request"])
     a_seed, a_pub = nkjwt.new_xkey()
     b_seed, b_pub = nkjwt.new_xkey()
-    check("xkey round trip", nkjwt.xkey_open(b_seed, a_pub,
-                                             nkjwt.xkey_seal(a_seed, b_pub, b"hi")) == b"hi")
+    c.check("xkey round trip", nkjwt.xkey_open(b_seed, a_pub,
+                                               nkjwt.xkey_seal(a_seed, b_pub, b"hi")) == b"hi")
     try:
         nkjwt.xkey_open(b_seed, a_pub, b"not a box")
-        check("garbage must not open", False)
+        c.fail("garbage must not open")
     except ValueError:
         pass
 
@@ -150,16 +145,16 @@ def main():
     def refused(what, r, words):
         out, claim = answer(r)
         err = out["nats"].get("error", "")
-        check(f"{what}: refused", claim is None and err, out["nats"])
+        c.check(f"{what}: refused", claim is None and err, out["nats"])
         for w in words:
-            check(f"{what}: the reason names {w!r}", w in err, err)
+            c.check(f"{what}: the reason names {w!r}", w in err, err)
 
     r = request("anton", "a-pw")
     out, claim = answer(r)
-    check("human: answered to this server and this connection",
-          (out["aud"], out["sub"], out["iss"], out["nats"]["type"]) ==
-          (r["nats"]["server_id"]["id"], r["nats"]["user_nkey"], V["issuer"],
-           "authorization_response"), out)
+    c.check("human: answered to this server and this connection",
+            (out["aud"], out["sub"], out["iss"], out["nats"]["type"]) ==
+            (r["nats"]["server_id"]["id"], r["nats"]["user_nkey"], V["issuer"],
+             "authorization_response"), out)
     # Две стороны с #207: публикация -- явным списком с логином вызывающего,
     # подписка -- прежние маски. Той же функцией, что рендерит users.conf.
     rights = operators.permissions(Humans.PEOPLE["anton"][1])
@@ -168,26 +163,26 @@ def main():
         return {"allow": allow, **({"deny": deny} if deny else {})}
     want_pub = side(rights["publish"], rights["publish_deny"])
     want_sub = side(rights["allow"], rights["deny"])
-    check("human: the claim is for this connection, in $G, by name",
-          claim and (claim["sub"], claim["aud"], claim["name"], claim["iss"]) ==
-          (r["nats"]["user_nkey"], "$G", "anton", V["issuer"]), claim)
-    check("human: publish rights are operators.permissions' publish side",
-          claim and claim["nats"]["pub"] == want_pub, claim and claim["nats"].get("pub"))
-    check("human: subscribe rights are operators.permissions' subscribe side",
-          claim and claim["nats"]["sub"] == want_sub, claim and claim["nats"].get("sub"))
+    c.check("human: the claim is for this connection, in $G, by name",
+            claim and (claim["sub"], claim["aud"], claim["name"], claim["iss"]) ==
+            (r["nats"]["user_nkey"], "$G", "anton", V["issuer"]), claim)
+    c.check("human: publish rights are operators.permissions' publish side",
+            claim and claim["nats"]["pub"] == want_pub, claim and claim["nats"].get("pub"))
+    c.check("human: subscribe rights are operators.permissions' subscribe side",
+            claim and claim["nats"]["sub"] == want_sub, claim and claim["nats"].get("sub"))
     # exp закрывает соединение в срок (стенд #206): при лежащем callout
     # человек не вернулся бы, а «живые соединения живут» -- обещание перехода.
-    check("human: the claim never expires", claim and "exp" not in claim, claim)
+    c.check("human: the claim never expires", claim and "exp" not in claim, claim)
     out, claim = answer(request("ivan", "i-pw"))
     rights = operators.permissions(Humans.PEOPLE["ivan"][1])
-    check("user role: rights of its projects, deny omitted when empty",
-          claim and claim["nats"]["pub"] == {"allow": rights["publish"]}
-          and claim["nats"]["sub"] == {"allow": rights["allow"]}, claim and claim["nats"])
+    c.check("user role: rights of its projects, deny omitted when empty",
+            claim and claim["nats"]["pub"] == {"allow": rights["publish"]}
+            and claim["nats"]["sub"] == {"allow": rights["allow"]}, claim and claim["nats"])
     # #207: логин -- токен субъекта; писать от чужого имени нельзя.
     pub = (claim or {}).get("nats", {}).get("pub", {}).get("allow", [])
-    check("user role: publishes rpc under its own login only",
-          busnames.node("rugent", "*", "rpc", login="ivan") in pub
-          and busnames.node("rugent", "*", "rpc", login="anton") not in pub, pub)
+    c.check("user role: publishes rpc under its own login only",
+            busnames.node("rugent", "*", "rpc", login="ivan") in pub
+            and busnames.node("rugent", "*", "rpc", login="anton") not in pub, pub)
     refused("human over plain nats (#105: WebSocket only)", request("anton", "a-pw", "nats"),
             ["WebSocket"])
     refused("human with a wrong password", request("anton", "nope"), ["anton", "wrong password"])
@@ -197,12 +192,12 @@ def main():
     r = request("puppet-mop", "pu-pass", "nats")
     out, claim = answer(r)
     perms = natsconf.puppet_permissions("mop")
-    check("puppet: its project's rights (natsconf.puppet_permissions)",
-          claim and claim["nats"]["pub"] == {"allow": perms["publish"]}
-          and claim["nats"]["sub"] == {"allow": perms["subscribe"]}, claim and claim["nats"])
-    check("puppet: in $G, by name, no expiry",
-          claim and (claim["aud"], claim["name"], "exp" in claim) == ("$G", "puppet-mop", False),
-          claim)
+    c.check("puppet: its project's rights (natsconf.puppet_permissions)",
+            claim and claim["nats"]["pub"] == {"allow": perms["publish"]}
+            and claim["nats"]["sub"] == {"allow": perms["subscribe"]}, claim and claim["nats"])
+    c.check("puppet: in $G, by name, no expiry",
+            claim and (claim["aud"], claim["name"], "exp" in claim) == ("$G", "puppet-mop", False),
+            claim)
     refused("puppet with a wrong password", request("puppet-mop", "nope", "nats"),
             ["puppet-mop", "wrong password"])
     refused("puppet of a project without a password file", request("puppet-rugent", "x", "nats"),
@@ -219,13 +214,11 @@ def main():
     sealed = nkjwt.xkey_seal(server_seed, V["xkey"], V["request"].encode())
     answered = callout.answer(sealed, server_pub, keys, Humans(), puppets)
     reply = nkjwt.decode(nkjwt.xkey_open(server_seed, V["xkey"], answered).decode())
-    check("sealed round trip: the reply opens with the server's key and answers it",
-          reply["aud"] == req["nats"]["server_id"]["id"] and reply["nats"]["type"] ==
-          "authorization_response", reply)
+    c.check("sealed round trip: the reply opens with the server's key and answers it",
+            reply["aud"] == req["nats"]["server_id"]["id"] and reply["nats"]["type"] ==
+            "authorization_response", reply)
 
-    print("\n".join(f"FAIL {line}" for line in failed) if failed else "", end="\n" if failed else "")
-    print("callout: FAILED" if failed else "callout: ok")
-    return 1 if failed else 0
+    return c.report("callout")
 
 
 if __name__ == "__main__":

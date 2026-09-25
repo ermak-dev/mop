@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import manifest  # noqa: E402
@@ -98,8 +99,7 @@ def run(*argv, cwd=None):
     subprocess.run(argv, cwd=cwd, check=True, capture_output=True)
 
 
-def fetch_is_shallow_and_blobless():
-    """-> список отказов."""
+def fetch_is_shallow_and_blobless(c):
     src = tree({".mop/bootstrap.yaml": BOOTSTRAP, "heavy.bin": "x" * 100000})
     run("git", "init", "-q", "-b", "master", cwd=src)
     run("git", "config", "uploadpack.allowFilter", "true", cwd=src)
@@ -124,19 +124,12 @@ def fetch_is_shallow_and_blobless():
             seen["missing"] = sum(1 for l in objs.splitlines() if l.startswith("?"))
         return r
 
-    manifest.subprocess.run = spy
-    try:
+    with patched(manifest.subprocess, run=spy):
         got = manifest.fetch(f"file://{src}")
-    finally:
-        manifest.subprocess.run = real
-    bad = []
-    if got.get("bootstrap_text") != BOOTSTRAP:
-        bad.append(f"bootstrap must read through the clone: {got.get('bootstrap_text')!r}")
-    if seen.get("commits") != "1":
-        bad.append(f"clone must carry one commit, carries {seen.get('commits')}")
-    if not seen.get("missing"):
-        bad.append("clone must not carry the blobs it doesn't read (heavy.bin, history.txt)")
-    return bad
+    c.expect("fetch: bootstrap must read through the clone", got.get("bootstrap_text"), BOOTSTRAP)
+    c.expect("fetch: clone must carry one commit", seen.get("commits"), "1")
+    c.check("fetch: clone must not carry the blobs it doesn't read (heavy.bin, history.txt)",
+            seen.get("missing"))
 
 
 # #141: сервер не знал ключа хоста форжа, и origin не читался нигде на
@@ -147,94 +140,64 @@ def fetch_is_shallow_and_blobless():
 # новый ключ хоста сам (accept-new) и по-прежнему отказывает сменившемуся;
 # выбранный оператором ssh (GIT_SSH_COMMAND, GIT_SSH) не трогаем.
 # STATUS: FIXED — see #141
-def clone_env_accepts_new_host_keys():
-    """-> список отказов."""
-    bad = []
+def clone_env_accepts_new_host_keys(c):
     env = manifest.clone_env({"PATH": "/bin"})
-    if "StrictHostKeyChecking=accept-new" not in env.get("GIT_SSH_COMMAND", ""):
-        bad.append(f"a new host key must be accepted: {env.get('GIT_SSH_COMMAND')!r}")
-    if env.get("PATH") != "/bin":
-        bad.append("the rest of the environment must pass through")
+    c.check("clone env: a new host key must be accepted",
+            "StrictHostKeyChecking=accept-new" in env.get("GIT_SSH_COMMAND", ""),
+            repr(env.get("GIT_SSH_COMMAND")))
+    c.expect("clone env: the rest of the environment must pass through", env.get("PATH"), "/bin")
     for mine in ({"GIT_SSH_COMMAND": "ssh -i k"}, {"GIT_SSH": "/usr/bin/plink"}):
-        env = manifest.clone_env(dict(mine))
-        if env != mine:
-            bad.append(f"an operator's own ssh must stay as it is: {mine} -> {env}")
-    return bad
+        c.expect(f"clone env: an operator's own ssh must stay as it is: {mine}",
+                 manifest.clone_env(dict(mine)), mine)
 
 
 def main():
-    failed = 0
+    c = Checks()
     got = manifest.fetch_tree(tree({".mop/sandbox.yaml": SANDBOX,
                                     ".mop/bootstrap.yaml": BOOTSTRAP}), "proj")
-    if got["project"] != "proj" or got["asks"] != {"MOP_MEM_MB": "2048"}:
-        failed += 1
-        print(f"FAIL asks: {got}")
+    c.check("asks", not (got["project"] != "proj" or got["asks"] != {"MOP_MEM_MB": "2048"}), got)
     # Чужое имя в sandbox и просьба о размере в bootstrap — оба не на месте,
     # и оба названы, а не проглочены.
-    if got["alien"] != ["MOP_DISK_GB", "MOP_SERVER_LAN"]:
-        failed += 1
-        print(f"FAIL alien: {got['alien']}")
-    if got["legacy"]:
-        failed += 1
-        print(f"FAIL legacy must be empty for the new names: {got['legacy']}")
+    c.expect("alien", got["alien"], ["MOP_DISK_GB", "MOP_SERVER_LAN"])
+    c.check("legacy must be empty for the new names", not got["legacy"], got["legacy"])
     for k in ("sandbox_vars", "sandbox_tasks", "bootstrap_vars", "bootstrap_tasks"):
-        if not (got.get(k) and os.path.exists(got[k])):
-            failed += 1
-            print(f"FAIL {k}: {got.get(k)!r}")
+        c.check(k, got.get(k) and os.path.exists(got[k]), repr(got.get(k)))
     # HYPOTHESIS (#124): `mop project add` советовал запустить deploy, чтобы
     # bootstrap проекта попал на сервер, хотя сервер принимает его глаголом
     # `put` текстом. SOLUTION: манифест отдаёт и сырой текст bootstrap.yaml.
     # STATUS: FIXED — see #124
-    if got.get("bootstrap_text") != BOOTSTRAP:
-        failed += 1
-        print(f"FAIL bootstrap_text must be the file as it lies: {got.get('bootstrap_text')!r}")
+    c.expect("bootstrap_text must be the file as it lies", got.get("bootstrap_text"), BOOTSTRAP)
     # Старые имена: node.yaml + workspace.yaml читаются как sandbox — просьбы,
     # конфигурация и задачи обоих, — и об этом сказано.
     got = manifest.fetch_tree(tree({".mop/node.yaml": NODE,
                                     ".mop/workspace.yaml": WS}), "old")
-    if got["asks"] != {"MOP_MEM_MB": "2048"} or got["alien"] != ["MOP_SERVER_LAN"]:
-        failed += 1
-        print(f"FAIL legacy asks/alien: {got}")
-    if sorted(got["legacy"]) != [".mop/node.yaml", ".mop/workspace.yaml"]:
-        failed += 1
-        print(f"FAIL legacy names: {got['legacy']}")
+    c.check("legacy asks/alien",
+            not (got["asks"] != {"MOP_MEM_MB": "2048"} or got["alien"] != ["MOP_SERVER_LAN"]),
+            got)
+    c.expect("legacy names", sorted(got["legacy"]), [".mop/node.yaml", ".mop/workspace.yaml"])
     for k in ("sandbox_vars", "sandbox_tasks"):
-        if not (got.get(k) and os.path.exists(got[k])):
-            failed += 1
-            print(f"FAIL legacy {k}: {got.get(k)!r}")
-    if got["bootstrap_tasks"] or got["bootstrap_vars"]:
-        failed += 1
-        print("FAIL legacy files must not become a bootstrap: nothing played "
-              "them at start before, nothing should now")
+        c.check(f"legacy {k}", got.get(k) and os.path.exists(got[k]), repr(got.get(k)))
+    c.check("legacy files must not become a bootstrap: nothing played "
+            "them at start before, nothing should now",
+            not (got["bootstrap_tasks"] or got["bootstrap_vars"]))
     if got["sandbox_tasks"]:
         import yaml
         with open(got["sandbox_tasks"]) as f:
             names = [t["name"] for t in yaml.safe_load(f)]
-        if names != ["node task", "ws task"]:
-            failed += 1
-            print(f"FAIL legacy tasks must merge into the sandbox, node first: {names}")
+        c.expect("legacy tasks must merge into the sandbox, node first",
+                 names, ["node task", "ws task"])
     # Без .mop вовсе — общего хватает, все половины None.
     got = manifest.fetch_tree(tree({}), "bare")
-    if got != EMPTY:
-        failed += 1
-        print(f"FAIL bare: {got}")
+    c.expect("bare", got, EMPTY)
     # Кривая форма — громко и с именем файла, а не «прочиталось как получилось».
     try:
         manifest.fetch_tree(tree({".mop/sandbox.yaml": "vars: {}\n"}), "bad")
-        failed += 1
-        print("FAIL malformed: no error")
+        c.fail("malformed: no error")
     except RuntimeError as e:
-        if "bad/.mop/sandbox.yaml" not in str(e):
-            failed += 1
-            print(f"FAIL malformed message: {e}")
-    for why in clone_env_accepts_new_host_keys():
-        failed += 1
-        print(f"FAIL clone env: {why}")
-    for why in fetch_is_shallow_and_blobless():
-        failed += 1
-        print(f"FAIL fetch: {why}")
-    print("manifest: FAILED" if failed else "manifest: ok")
-    return 1 if failed else 0
+        c.check("malformed message names the file", "bad/.mop/sandbox.yaml" in str(e), e)
+    clone_env_accepts_new_host_keys(c)
+    fetch_is_shallow_and_blobless(c)
+    return c.report("manifest")
 
 
 if __name__ == "__main__":

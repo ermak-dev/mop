@@ -18,6 +18,8 @@ import ast
 import os
 import sys
 
+from _lib import Checks  # noqa: E402 -- без hermetic: проверка лишь читает исходники
+
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 PKG = os.path.join(ROOT, "mop")
 
@@ -125,29 +127,24 @@ def imports_of(path, name, known):
     return {m for m in out if m in known and m != name}
 
 
-def violations(mods):
-    out = []
+def violations(c, mods):
     for name, path in sorted(mods.items()):
         parts = name.split(".")
-        if len(parts) > 1 and parts[1] not in LAYER_DIRS + ROOT_PARTS:
-            # Слой -- каталог (#260): модуль или пакет в корне mop/ слоя не
-            # называет. Корень держит только session и usage (их пути знают
-            # спека, хуки и агент), реестр драйверов и командлеты.
-            out.append(f"{name}: not in a layer directory")
+        # Слой -- каталог (#260): модуль или пакет в корне mop/ слоя не
+        # называет. Корень держит только session и usage (их пути знают
+        # спека, хуки и агент), реестр драйверов и командлеты.
+        if not c.check(f"{name}: not in a layer directory",
+                       not (len(parts) > 1 and parts[1] not in LAYER_DIRS + ROOT_PARTS)):
             continue
         me = layer_of(name)
-        if me is None:
-            out.append(f"{name}: no layer in tests/layers.py")
+        if not c.check(f"{name}: no layer in tests/layers.py", not (me is None)):
             continue
         for dep in sorted(imports_of(path, name, mods) | DYNAMIC.get(name, set())):
             if dep.startswith("mop.cli") and name in ("mop.cli", "mop.cli.__main__"):
                 continue
             it = layer_of(dep)
-            if it is None:
-                out.append(f"{dep}: no layer in tests/layers.py")
-            elif it not in SEES[me]:
-                out.append(f"{name} ({me}) imports {dep} ({it})")
-    return out
+            if c.check(f"{dep}: no layer in tests/layers.py", not (it is None)):
+                c.check(f"{name} ({me}) imports {dep} ({it})", not (it not in SEES[me]))
 
 
 def bound_names(path, name, known):
@@ -176,7 +173,7 @@ def bound_names(path, name, known):
     return out
 
 
-def dangling(mods):
+def dangling(c, mods):
     """Обращения `m.attr` к модулю пакета, у которого такого атрибута нет
     (#261): после переноса функции между модулями поиск по тексту не видит
     псевдонима (`from . import nodes as pool_nodes`), а проверка слоёв --
@@ -193,7 +190,7 @@ def dangling(mods):
             loaded[name] = importlib.import_module(name)
         except Exception:
             loaded[name] = None
-    out = []
+    seen = set()
     for name, path in sorted(mods.items()):
         names = bound_names(path, name, mods)
         if not names:
@@ -215,10 +212,12 @@ def dangling(mods):
                 if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
                         and n.value.id in names and n.value.id not in local:
                     target = loaded.get(names[n.value.id])
-                    if target is not None and not hasattr(target, n.attr):
-                        out.append(f"{name}:{n.lineno}: {n.value.id}.{n.attr} -- "
-                                   f"{names[n.value.id]} has no such attribute")
-    return sorted(set(out))
+                    msg = (f"{name}:{n.lineno}: {n.value.id}.{n.attr} -- "
+                           f"{names[n.value.id]} has no such attribute")
+                    if msg in seen:       # одно обращение -- одна строка, как прежний set
+                        continue
+                    seen.add(msg)
+                    c.check(msg, not (target is not None and not hasattr(target, n.attr)))
 
 
 # ── #268: одно написание на константу, мёртвого кода нет ─────────────────
@@ -270,8 +269,7 @@ def _strings(tree):
                 yield "tmux -L", owner.get(id(n)), n.lineno
 
 
-def one_spelling():
-    out = []
+def one_spelling(c):
     for dp, _, fs in os.walk(PKG):
         for f in fs:
             if not f.endswith(".py"):
@@ -285,30 +283,29 @@ def one_spelling():
                 for needle, allowed in OWNERS.items():
                     if needle not in text:
                         continue
-                    if rel in allowed and allowed[rel] in (None, owner):
-                        continue
-                    out.append(f"{rel}:{line}: {needle!r} spelled out -- use its constant")
+                    c.check(f"{rel}:{line}: {needle!r} spelled out -- use its constant",
+                            rel in allowed and allowed[rel] in (None, owner))
             # Таймаут вызова -- именем: why(out, code, 600) рядом с timeout=600
             # однажды разойдутся.
             for n in ast.walk(tree):
                 if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "why" \
                         and len(n.args) > 2 and isinstance(n.args[2], ast.Constant):
-                    out.append(f"{rel}:{n.lineno}: why(..., {n.args[2].value}) -- name the timeout")
+                    c.fail(f"{rel}:{n.lineno}: why(..., {n.args[2].value}) -- name the timeout")
             top = {t.id for n in tree.body if isinstance(n, ast.Assign) for t in n.targets
                    if isinstance(t, ast.Name)} | {n.name for n in tree.body
                                                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
             for name in DEAD.get(rel, ()):
-                if name in top:
-                    out.append(f"{rel}: {name} is dead code -- delete it")
-    return out
+                c.check(f"{rel}: {name} is dead code -- delete it", not (name in top))
 
 
 def main():
+    c = Checks()
     mods = modules()
-    bad = violations(mods) + dangling(mods) + one_spelling()
-    print("\n".join(f"FAIL {b}" for b in bad))
-    print(f"layers: {len(mods)} modules, {len(bad)} violations" + (" FAILED" if bad else " ok"))
-    return 1 if bad else 0
+    violations(c, mods)
+    dangling(c, mods)
+    one_spelling(c)
+    print(f"layers: {len(mods)} modules, {c.failed} violations")
+    return c.report("layers")
 
 
 if __name__ == "__main__":

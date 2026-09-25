@@ -17,6 +17,7 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
+from _lib import Checks, patched  # noqa: E402
 from mop.common import puppets  # noqa: E402
 from mop import session  # noqa: E402
 from mop.common.state import PuppetRow, State, action_for, failing_row, failure_reason, is_free, silent, task_summary, verdict
@@ -255,15 +256,11 @@ HOOKED = [
 ]
 
 
-def check_hooked(cases):
-    bad = 0
+def check_hooked(c, cases):
     for what, given, want, free in cases:
         got = verdict(given)
-        if str(got) != want or is_free(got.kind) != free:
-            bad += 1
-            print(f"FAILED  #224 {what}\n  wanted:  {want!r} free={free}\n"
-                  f"  got: {str(got)!r} free={is_free(got.kind)}")
-    return bad, len(cases)
+        c.check(f"#224 {what}", not (str(got) != want or is_free(got.kind) != free),
+                f"wanted {want!r} free={free}, got {str(got)!r} free={is_free(got.kind)}")
 
 
 
@@ -335,27 +332,20 @@ def judge(case):
     return str(v), action_for(v.kind), is_free(v.kind), web.classify(row)
 
 
-def check_treatment():
-    bad, cases = 0, 0
+def check_treatment(c):
     table = {s: rest for s, *rest in TREATMENT}
     seen = set()
     inputs = ([given for _, given, _ in CASES + SCREENLESS]
               + [given for _, given, _, _ in HOOKED] + [("silent", a) for a, _ in SILENT])
     for given in inputs:
-        cases += 1
         state, *got = judge(given)
         seen.add(state)
-        if state not in table:
-            bad += 1
-            print(f"FAILED  treatment: {state!r} is not in the table")
-        elif list(table[state]) != got:
-            bad += 1
-            print(f"FAILED  treatment of {state!r}: wanted {table[state]}, got {got}")
+        if c.check(f"treatment: {state!r} is in the table", state in table):
+            c.expect(f"treatment of {state!r}", got, list(table[state]))
     # Таблица без лишних строк: каждая её строка кем-то произведена.
-    for state in set(table) - seen:
-        bad += 1
-        print(f"FAILED  treatment: nobody produces {state!r}")
-    return bad, cases + 1
+    unproduced = set(table) - seen
+    c.check("treatment: every table row is produced", not unproduced,
+            f"nobody produces {sorted(unproduced)!r}")
 
 
 # ── #174: устаревшая спека и лечение ─────────────────────────────────────────
@@ -373,41 +363,29 @@ SPEC_ACTION = [
 ]
 
 
-def check_stale_spec():
+def check_stale_spec(c):
     """STATUS: FIXED — see #174"""
     from mop.common import state
-    bad, cases = 0, 0
     fn = getattr(state, "spec_action", None)
     for kind, want in SPEC_ACTION:
-        cases += 1
         got = fn(kind) if fn else "missing"
-        if got != want:
-            bad += 1
-            print(f"FAILED  spec_action({kind!r}) -> {got!r}, wanted {want!r}")
+        c.expect(f"spec_action({kind!r})", got, want)
     # doctor целиком: roster подменён, лечение — из diagnose.
     run = {"ClientStatus": "running", "NodeName": "n1"}
 
     def item(name, kind, st, stale=True, alloc=run):
         return {"job": {"ID": name}, "alloc": alloc, "stale": stale,
                 "state": st, "kind": kind, "task": None, "reason": None}
-    keep = puppets.roster
-    try:
-        puppets.roster = lambda stale=False: [
+    with patched(puppets, roster=lambda stale=False: [
             item("pu-a-1", "free", "free (master)"),
             item("pu-a-2", "busy", "busy: feat/7"),
             item("pu-a-3", "hung", "HUNG (not responding)"),
             item("pu-a-4", "free", "free (master)", stale=False),
-        ]
+    ]):
         got = [(i["name"], i["action"]) for i in puppets.diagnose()]
-    finally:
-        puppets.roster = keep
     want = [("pu-a-1", "update"), ("pu-a-2", None), ("pu-a-3", None),
             ("pu-a-3", "restart")]
-    cases += 1
-    if got != want:
-        bad += 1
-        print(f"FAILED  diagnose over stale specs: {got}, wanted {want}")
-    return bad, cases
+    c.expect("diagnose over stale specs", got, want)
 
 # ── ростер глазами одного проекта (#29) ──────────────────────────────────────
 # HYPOTHESIS: джоба-папет без origin в Meta (старая регистрация) невидима
@@ -426,14 +404,11 @@ def _job(name, jtype="service", origin=None):
 # вот имя в origin не разворачивается), но строки-имена от легаси-времён
 # терять нельзя: их origin уже не узнать, а потеря имени молча выписывает
 # проекта из конфига NATS при следующем deploy.
-def check_project_ids(cases):
-    bad = 0
+def check_project_ids(c, cases):
     for what, lines, want_o, want_n in cases:
         got_o, got_n = puppets.project_ids(lines)
-        if got_o != want_o or got_n != want_n:
-            bad += 1
-            print(f"FAILED  project_ids, {what}: origins {got_o!r} names {got_n!r}")
-    return bad, len(cases)
+        c.check(f"project_ids, {what}", not (got_o != want_o or got_n != want_n),
+                f"origins {got_o!r} names {got_n!r}")
 
 
 PROJECT_IDS = [
@@ -445,15 +420,12 @@ PROJECT_IDS = [
 ]
 
 
-def check_visible(cases):
-    bad = 0
+def check_visible(c, cases):
     for what, listing, project, want in cases:
         got = puppets.visible(listing, project)
         got_ids = [j["ID"] for j in got]
-        if sorted(got_ids) != sorted(want):
-            bad += 1
-            print(f"FAILED  visible, {what}: wanted {want}, got {got_ids}")
-    return bad, len(cases)
+        c.check(f"visible, {what}", not (sorted(got_ids) != sorted(want)),
+                f"wanted {want}, got {got_ids}")
 
 
 VISIBLE = [
@@ -499,108 +471,60 @@ ALLOC = {"ClientStatus": "pending", "TaskStates": {"claude": {
                 "Time": 1_000_000_000_000}]}}}
 
 
-def check_failing():
+def check_failing(c):
     """HYPOTHESIS (#126): ростер читал только ClientStatus. SOLUTION: сводка
     задачи и причина из stderr. STATUS: FIXED — see #126"""
-    bad, cases = 0, 0
-    cases += 1
     t = task_summary(ALLOC, now=1000)
     want = {"state": "pending", "restarts": 4, "exit": 1, "next_s": 1576, "failed": False}
-    if t != want:
-        bad += 1
-        print(f"FAILED  task_summary -> {t}, wanted {want}")
+    c.expect("task_summary", t, want)
     # Срок -- оставшийся, а не задержка на момент события: через десять минут
     # «next in 26m» было бы неправдой.
-    cases += 1
     later = task_summary(ALLOC, now=1000 + 600)
-    if later["next_s"] != 976:
-        bad += 1
-        print(f"FAILED  next_s must count down from the event: {later['next_s']}")
-    cases += 1
-    if task_summary(ALLOC, now=1000 + 99999)["next_s"] != 0:
-        bad += 1
-        print("FAILED  a passed deadline is 0, not negative")
+    c.expect("next_s must count down from the event", later["next_s"], 976)
+    c.expect("a passed deadline is 0, not negative",
+             task_summary(ALLOC, now=1000 + 99999)["next_s"], 0)
     # Причина -- из последней попытки, первая ошибка после строки врапера.
-    cases += 1
     got = failure_reason(STDERR)
     want = "bootstrap: Could not find or access '~/rugent/.env-prod' on the Ansible Controller."
-    if got != want:
-        bad += 1
-        print(f"FAILED  failure_reason -> {got!r}, wanted {want!r}")
+    c.expect("failure_reason", got, want)
     # Без знакомых строк -- последняя непустая, а пусто -- None.
-    cases += 1
-    if failure_reason("x\nsomething broke\n\n") != "something broke" \
-            or failure_reason("") is not None:
-        bad += 1
-        print("FAILED  failure_reason must fall back to the last line, and None on empty")
+    c.check("failure_reason must fall back to the last line, and None on empty",
+            not (failure_reason("x\nsomething broke\n\n") != "something broke"
+                 or failure_reason("") is not None))
     # Строка ростера: падающий -- failing с причиной и сроком, а не pending.
-    cases += 1
     fn = failing_row
     got = fn("pending", t, "bootstrap: no file") if fn else None
     want = ("failing", "FAILED: bootstrap: no file (4 restarts, next in 26m)")
-    if got != want:
-        bad += 1
-        print(f"FAILED  failing_row -> {got}, wanted {want}")
+    c.expect("failing_row", got, want)
     # Работающая задача и задача без падений -- не failing.
     for task in ({"state": "running", "restarts": 4, "exit": 1, "next_s": None, "failed": False},
                  {"state": "pending", "restarts": 0, "exit": None, "next_s": None, "failed": False},
                  None):
-        cases += 1
-        if fn and fn("pending", task, None) is not None:
-            bad += 1
-            print(f"FAILED  failing_row must be None for {task}")
+        c.check(f"failing_row must be None for {task}",
+                not (fn and fn("pending", task, None) is not None))
     # Задача исчерпала попытки -- тоже failing, без срока.
-    cases += 1
     dead = {"state": "dead", "restarts": 9, "exit": 1, "next_s": None, "failed": True}
     got = fn("failed", dead, "boom") if fn else None
-    if got != ("failing", "FAILED: boom (9 restarts, gave up)"):
-        bad += 1
-        print(f"FAILED  failing_row for a task that gave up -> {got}")
-    return bad, cases
+    c.expect("failing_row for a task that gave up", got,
+             ("failing", "FAILED: boom (9 restarts, gave up)"))
 
 
 def main():
-    bad = 0
+    c = Checks()
     for what, given, want in CASES:
-        got = str(verdict(given))
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}\n  wanted:  {want!r}\n  got: {got!r}")
-    cases = len(CASES)
+        c.expect(what, str(verdict(given)), want)
     for what, given, want in SCREENLESS:
-        got = str(verdict(given))
-        if got != want:
-            bad += 1
-            print(f"FAILED  #235 {what}\n  wanted:  {want!r}\n  got: {got!r}")
-    cases += len(SCREENLESS)
-    hbad, hcases = check_hooked(HOOKED)
-    bad += hbad
-    cases += hcases
-    vbad, vcases = check_visible(VISIBLE)
-    sbad, scases = check_project_ids(PROJECT_IDS)
-    bad += sbad
-    cases += scases
-    bad += vbad
-    cases += vcases
-    fbad, fcases = check_failing()
-    bad += fbad
-    cases += fcases
-    tbad, tcases = check_treatment()
-    sbad2, scases2 = check_stale_spec()
-    bad += sbad2
-    cases += scases2
-    bad += tbad
-    cases += tcases
-    abad, acases = check_clone_agreement()
-    bad += abad
-    cases += acases
+        c.expect(f"#235 {what}", str(verdict(given)), want)
+    check_hooked(c, HOOKED)
+    check_visible(c, VISIBLE)
+    check_project_ids(c, PROJECT_IDS)
+    check_failing(c)
+    check_treatment(c)
+    check_stale_spec(c)
+    check_clone_agreement(c)
     for state, want in FREE_CASES:
-        cases += 1
-        if is_free(state and state.kind) != want:
-            bad += 1
-            print(f"FAILED  is_free({state!r})")
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+        c.expect(f"is_free({state!r})", is_free(state and state.kind), want)
+    return c.report("state")
 
 
 # Таблица клонов: (что, факты клона агента, держит ли работу).
@@ -617,7 +541,7 @@ CLONE_TABLE = [
 ]
 
 
-def check_clone_agreement():
+def check_clone_agreement(c):
     """«В клоне работа» -- одно правило на всех потребителей (#266).
 
     HYPOTHESIS: правило записано трижды: lease.holds_work считал работой и
@@ -632,7 +556,6 @@ def check_clone_agreement():
     from mop.server import cluster
     now = 1_000_000
     stale = Owner("olga", now - lease.WINDOW - 1).to_dict()
-    bad = cases = 0
     for what, clone, holds in CLONE_TABLE:
         wire = {**clone, "owner": stale}
         got = {
@@ -644,11 +567,7 @@ def check_clone_agreement():
             "gate": cluster.gate("pu-x-1", {"_caller": "anton"}, {"clone": wire}, now)[0] is not None,
         }
         for who, says in got.items():
-            cases += 1
-            if says != holds:
-                bad += 1
-                print(f"FAILED  #266 {who} on {what}: holds work {says}, want {holds}")
-    return bad, cases
+            c.expect(f"#266 {who} on {what}: holds work", says, holds)
 
 
 if __name__ == "__main__":
