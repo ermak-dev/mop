@@ -47,7 +47,7 @@ def token():
     # команды пула идут через сервис кластера.
     raise LookupError(f"no Nomad token: {creds.server_dir()}/{creds.TOKEN_FILE} — "
                       f"it lives on the server and nowhere else. The "
-                      f"controller's first mop deploy fetches it; a master's "
+                      f"controller's first mop server deploy fetches it; a master's "
                       f"machine does not need it, because pool commands go "
                       f"through the cluster service (docs/CLUSTER.md)")
 
@@ -264,7 +264,7 @@ def node_meta(node_name):
     Здесь лежит драйвер узла: мастеру он нужен, чтобы знать, чем входить в
     тело папета (`mop attach`), а спрашивать об этом сам узел нельзя — ответ
     пришёл бы по той же шине, которой может и не быть, когда как раз и
-    понадобился аварийный вход. Значение кладёт `mop deploy` из той же
+    понадобился аварийный вход. Значение кладёт `mop server deploy` из той же
     переменной инвентаря, что и в юнит агента."""
     nid = node_id(node_name)
     return (client().node.get_node(nid).get("Meta") or {}) if nid else {}

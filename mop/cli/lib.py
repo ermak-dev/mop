@@ -32,7 +32,7 @@ PROJECT = config.PROJECT
 BIN = os.path.join(PROJECT, "bin")
 
 
-# Цвета терминала — для `mop deploy`, у которого прогон длинный и заголовки
+# Цвета терминала — для `mop server deploy`, у которого прогон длинный и заголовки
 # разделов нужны глазу. Печатает только cli.
 _RED, _GREEN, _BOLD, _NC = "\033[0;31m", "\033[0;32m", "\033[1m", "\033[0m"
 
@@ -136,7 +136,7 @@ def cluster(fn):
     def wrap(argv):
         # Один адрес, а не весь REQUIRED: MOP_GIT_HOST читают плейбуки, и на
         # машине оператора его не с чего заполнять. Полный список спрашивает
-        # `mop deploy`.
+        # `mop server deploy`.
         config.require("MOP_SERVER_LAN")
         return fn(argv)
     return wrap

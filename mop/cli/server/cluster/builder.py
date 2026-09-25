@@ -1,4 +1,4 @@
-"""mop cluster builder: the server's image builder (unit mop-builder)
+"""mop server cluster builder: the server's image builder (unit mop-builder)
 
 Listens on mop.admin.build.rpc and builds a project's image on the
 hypervisors when an operator asks, streaming the build's steps back. Runs as

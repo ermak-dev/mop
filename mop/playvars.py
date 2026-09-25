@@ -9,7 +9,7 @@ from . import config, deps
 
 def playbook_vars():
     """Что едет плейбукам --extra-vars: настройки плюс списки, которые живут
-    в коде одним местом. Одна функция на `mop deploy` (через `mop config
+    в коде одним местом. Одна функция на `mop server deploy` (через `mop server config
     --json`) и на сборку образа (mop/image.py): пока их было две, список
     доезжал до узла и не доезжал до тела, молча.
 
@@ -17,7 +17,7 @@ def playbook_vars():
     MOP_SERVER_SCOPED -- {юнит: настройки}, по нему рендерится env юнитов
     сервисов сервера (#176).
     MOP_PIP_DEPS -- python-библиотеки mop (mop/deps.py) для узла, тела и
-    `mop setup`."""
+    `mop setup` и `mop server setup`."""
     # Настройки процесса (PROCESS_SCOPED) не едут: они про этот процесс, а не
     # про установку -- MOP_PROJECT из шелла мастера ansible ни к чему.
     out = {k: v for k, (v, _) in config.effective().items()

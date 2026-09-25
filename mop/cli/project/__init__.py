@@ -14,8 +14,8 @@ set up"; every subcommand is an operator's verb of the cluster service,
 so it works from any machine with the admin role, not only from the
 controller. Operators reach a project by their role in the server's identity provider.
 
-Registering used to be a side effect of `mop deploy <origin>` and there was
-no way to take a project off. `mop deploy` no longer takes origins.
+Registering used to be a side effect of `mop server deploy <origin>` and there was
+no way to take a project off. `mop server deploy` no longer takes origins.
 """
 from mop.cli import lib
 from mop.cli.project import list as _list

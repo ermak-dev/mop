@@ -4,8 +4,8 @@ Refuses while anything still runs there — a node dropped from under a live
 puppet keeps working and the master never hears of it again.
 
 Refuses as well while the node is in the controller's inventory: the next
-mop deploy would configure it again. Take it out of the inventory and run
-mop deploy first.
+mop server deploy would configure it again. Take it out of the inventory and run
+mop server deploy first.
 """
 from mop.cli import lib
 from mop import bus

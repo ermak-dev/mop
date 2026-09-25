@@ -269,7 +269,7 @@ def check_verb_table_173():
 
 def check_forget_inventory_178():
     """HYPOTHESIS (#178): forget снимает узел с ростера Nomad, а в инвентаре
-    контроллера он остаётся, и следующий `mop deploy` молча ставит его снова.
+    контроллера он остаётся, и следующий `mop server deploy` молча ставит его снова.
     Предупреждение об этом осталось одной строкой в usage (#159).
     SOLUTION: deploy кладёт список хостов инвентаря файлом рядом с сервисом
     кластера (cluster.INVENTORY_HOSTS), и forget отказывает по нему ДО
@@ -283,7 +283,7 @@ def check_forget_inventory_178():
     if fn is None:
         return ["cluster.inventory_refusal(node, hosts) is missing"]
     why = fn("mop-2", ["localhost", "mop-2", "mop-3"])
-    if not why or "mop-2" not in why or "mop deploy" not in why:
+    if not why or "mop-2" not in why or "mop server deploy" not in why:
         out.append(f"a node in the inventory must be refused by name: {why!r}")
     if fn("gone", ["localhost", "mop-2"]) is not None:
         out.append("a node out of the inventory must not be refused by it")

@@ -1,4 +1,4 @@
-"""mop driver pve-facts --base N [--project P --listing TEXT]: what the playbooks know of the pve driver, as JSON
+"""mop server pve-facts --base N [--project P --listing TEXT]: what the playbooks know of the pve driver, as JSON
 
 The facts of one hypervisor, from its VMID base (the host's line in the
 inventory): the bodies' network, gateway and prefix, the routes to its

@@ -139,7 +139,7 @@ def config(file=None):
         try:
             return _load(path)
         except FileNotFoundError:
-            raise BusError(f"no bus credentials: {path} — run mop deploy")
+            raise BusError(f"no bus credentials: {path} — run mop server deploy")
     return server_config(settings.get("MOP_SERVER_LAN"))
 
 

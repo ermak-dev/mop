@@ -1,15 +1,15 @@
-"""set a person's password: mop user passwd <login> [--stdin]
+"""set a person's password: mop server user passwd <login> [--stdin]
 
 The password is asked twice without echo, or read as one line from stdin
 with --stdin; the rest of the person's line stays. A login still in
-MOP_OPERATORS is refused: mop user import moves it into the file first.
+MOP_OPERATORS is refused: mop server user import moves it into the file first.
 Silent when all goes well.
 """
 from getpass import getpass
 
 from mop import identity
 from mop.cli import lib
-from mop.cli.user import _common
+from mop.cli.server.user import _common
 
 
 def main(argv):

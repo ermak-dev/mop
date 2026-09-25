@@ -94,14 +94,29 @@ PRIVATE = ("dev",)
 # не ломает юниты, спеку и запущенных мастеров до раскатки и перезапуска.
 # Молча: это не отказ и не совет, а переход на один релиз, после которого
 # таблица пустеет отдельным тикетом.
-LEGACY = {"bug": ("dev", "bug"), "ci": ("dev", "ci")}   # #254
+#
+# Ключ -- одно слово или кортеж слов (#259): `mop driver pve-facts` переехал
+# в server, а driver целиком псевдонимом не сделать -- run, list, sweep и
+# build в нём остаются. Длинный ключ проверяется первым.
+LEGACY = {"bug": ("dev", "bug"), "ci": ("dev", "ci"),   # #254
+          # Команды контроллера (#259): юниты и роли зовут прежние имена
+          # до своего тикета.
+          "deploy": ("server", "deploy"), "config": ("server", "config"),
+          "user": ("server", "user"), "cluster": ("server", "cluster"),
+          "bootstrap": ("server", "bootstrap"), "web": ("server", "web"),
+          "callout": ("server", "callout"),
+          ("driver", "pve-facts"): ("server", "pve-facts")}
 
 
 def unalias(argv, table=None):
-    """argv с прежним именем команды -> argv с новыми словами. Чистая функция."""
+    """argv с прежним именем команды -> argv с новыми словами. Чистая функция.
+    Ключ таблицы -- слово или кортеж слов; самый длинный совпавший -- первым."""
     table = LEGACY if table is None else table
-    if argv and argv[0] in table:
-        return list(table[argv[0]]) + list(argv[1:])
+    keys = sorted(table, key=lambda k: -(len(k) if isinstance(k, tuple) else 1))
+    for key in keys:
+        words = key if isinstance(key, tuple) else (key,)
+        if tuple(argv[:len(words)]) == words:
+            return list(table[key]) + list(argv[len(words):])
     return list(argv)
 
 
@@ -362,7 +377,7 @@ def environment():
     роли продукта. Раньше это ставил bin/common для bash-командлетов;
     теперь здесь, потому что их читают и ansible, и библиотека
     (image.bake — INVENTORY), а зовут из любого каталога. setdefault:
-    разовое `INVENTORY=… mop deploy` обязано продолжать работать."""
+    разовое `INVENTORY=… mop server deploy` обязано продолжать работать."""
     os.environ.setdefault("INVENTORY", os.path.join(PROJECT, "inventory.yaml"))
     # Свой ansible.cfg ansible ищет относительно текущего каталога; роли —
     # переменной, а не строкой в ansible.cfg: относительные пути там от
@@ -393,7 +408,7 @@ def run(fn, argv):
     трассировка в ответ на «нет связи с Nomad» — шум, за которым теряется
     единственное, что оператору нужно знать.
 
-    Только stdlib и config: `mop setup` ставит зависимости, и падать до
+    Только stdlib и config: `mop setup` и `mop server setup` ставят зависимости, и падать до
     него на импорте шины нельзя. BusError — подкласс RuntimeError, ловится
     вместе с ним."""
     from .. import config

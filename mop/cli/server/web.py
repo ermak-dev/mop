@@ -1,4 +1,4 @@
-"""pool dashboard on the web: mop web [--port N] [--bind ADDR]
+"""pool dashboard on the web: mop server web [--port N] [--bind ADDR]
 
 The same picture as `mop list`, `mop node` and `mop stat` on one page,
 refreshed in place (docs/WEB.md):

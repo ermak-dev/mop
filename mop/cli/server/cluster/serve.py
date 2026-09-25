@@ -1,4 +1,4 @@
-"""mop cluster serve: the server's subscriber (unit mop-cluster)
+"""mop server cluster serve: the server's subscriber (unit mop-cluster)
 
 Listens on mop.*.cluster.rpc and answers the pool's verbs over Nomad —
 the roster, a puppet's life cycle, the nodes. The job spec is built here,
