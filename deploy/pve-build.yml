@@ -337,14 +337,21 @@
     # Тело за NAT узла, и дорога к нему у управляющей машины одна — через сам
     # узел. ProxyJump, а не proxmox_pct_remote: pct-транспорт платит запуском
     # lxc-attach за каждый модуль, и сборка на нём идёт минутами дольше.
+    # add_host обходит цикл по хостам (BYPASS_HOST_LOOP у его action-плагина):
+    # выполняется один раз на игру, с фактами первого хоста. На двух
+    # гипервизорах в mop_building попадало только тело первого, а второму
+    # запечатывали голое тело сразу после bootstrap, с кодом 0 (#278).
+    # Поэтому -- своим циклом по хостам игры, и всё из hostvars хоста цикла,
+    # ни одного факта текущего хоста. Узел без контейнеров вышел из игры до
+    # stage_name -- его и пропускаем.
     - name: Take the body into the inventory for the rest of the run
       ansible.builtin.add_host:
-        name: "{{ stage_name }}"
+        name: "{{ hostvars[item].stage_name }}"
         groups: mop_building
-        ansible_host: "{{ stage_ip }}"
+        ansible_host: "{{ hostvars[item].stage_ip }}"
         ansible_user: "{{ MOP_USER }}"
         ansible_python_interpreter: /usr/bin/python3
-        ansible_ssh_private_key_file: "{{ build_key }}"
+        ansible_ssh_private_key_file: "{{ hostvars[item].build_key }}"
         # IdentitiesOnly: без него ssh сперва предъявляет каждый ключ из
         # агента, и тело успевает отказать столько раз, что включает штраф за
         # источник — после чего роняет и верный ключ тоже.
@@ -373,15 +380,16 @@
           -o PreferredAuthentications=publickey
           -o StrictHostKeyChecking=accept-new
           -o UserKnownHostsFile={{ lookup('env', 'HOME') }}/.ssh/known_hosts-mop-body
-        mop_body_of: "{{ inventory_hostname }}"
-        mop_body_vmid: "{{ stage_vmid }}"
+        mop_body_of: "{{ item }}"
+        mop_body_vmid: "{{ hostvars[item].stage_vmid }}"
+      loop: "{{ ansible_play_hosts_all }}"
+      when: hostvars[item].stage_name is defined
       vars:
         jump: >-
-          {{ (ansible_user ~ '@') if ansible_user is defined else '' -}}
-          {{ ansible_host | default(inventory_hostname) -}}
-          {{ (':' ~ ansible_port) if ansible_port is defined else '' }}
+          {{ (hostvars[item].ansible_user ~ '@') if hostvars[item].ansible_user is defined else '' -}}
+          {{ hostvars[item].ansible_host | default(item) -}}
+          {{ (':' ~ hostvars[item].ansible_port) if hostvars[item].ansible_port is defined else '' }}
       changed_when: false
-
 
 - name: What the image must contain
   hosts: mop_building
