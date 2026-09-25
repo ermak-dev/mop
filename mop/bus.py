@@ -258,8 +258,28 @@ async def _on_error(e):
 ERROR_LISTENERS = []
 
 
+async def _open(**opts):
+    """Соединение, которое при отказе закрывается само (#251).
+
+    nats.connect() при отказе с allow_reconnect=False бросает до закрытия
+    транспорта; websocket-транспорт nats-py держит aiohttp.ClientSession, и
+    при выходе процесса сборщик печатал «Unclosed client session» -- после
+    запроса пароля `mop join` успех был неотличим от ошибки. Клиент
+    заводится здесь, и закрыть его есть кому в любом исходе."""
+    nc = nats.NATS()
+    try:
+        await nc.connect(**opts)
+    except BaseException:
+        try:
+            await nc.close()
+        except Exception:
+            pass
+        raise
+    return nc
+
+
 async def _aconnect(file=None):
-    return await nats.connect(
+    return await _open(
         **auth(config(file)), name="mop", error_cb=_on_error,
         # Молча копить неотправленное в ожидании сервера — худший вид отказа:
         # вызывающий получит успех, которого не было.
@@ -280,8 +300,8 @@ def check(c):
         seen.append(str(e))   # причина отказа (#130); в stderr -- шум
 
     async def once():
-        nc = await nats.connect(**auth(c), name="mop-join", error_cb=quiet,
-                                allow_reconnect=False, connect_timeout=5)
+        nc = await _open(**auth(c), name="mop-join", error_cb=quiet,
+                         allow_reconnect=False, connect_timeout=5)
         await nc.close()
     try:
         _call(once(), 15)
@@ -300,8 +320,8 @@ def ask_once(c, subj, verb, timeout=5, **fields):
         pass
 
     async def once():
-        nc = await nats.connect(**auth(c), name="mop-join", error_cb=quiet,
-                                allow_reconnect=False, connect_timeout=timeout)
+        nc = await _open(**auth(c), name="mop-join", error_cb=quiet,
+                         allow_reconnect=False, connect_timeout=timeout)
         data = json.dumps({"verb": verb, **fields}).encode()
         try:
             try:
@@ -315,7 +335,14 @@ def ask_once(c, subj, verb, timeout=5, **fields):
             return json.loads(msg.data.decode())
         finally:
             await nc.close()
-    return _call(once(), timeout * 3)
+    try:
+        return _call(once(), timeout * 3)
+    except BusError:
+        raise
+    except Exception as e:
+        # Отказ -- одной строкой с причиной, как у check (#251): сырое
+        # исключение nats-py читалось бы трассой.
+        raise BusError(_why_not(c, str(e)))
 
 
 def connect(file=None):
@@ -497,10 +524,10 @@ def can_login(user, password, port, host="127.0.0.1", tries=10):
     async def once():
         async def quiet(_e):
             pass
-        nc = await nats.connect(servers=[f"nats://{host}:{port}"], user=user,
-                                password=password, connect_timeout=2,
-                                allow_reconnect=False, max_reconnect_attempts=0,
-                                error_cb=quiet)
+        nc = await _open(servers=[f"nats://{host}:{port}"], user=user,
+                         password=password, connect_timeout=2,
+                         allow_reconnect=False, max_reconnect_attempts=0,
+                         error_cb=quiet)
         await nc.close()
 
     last = None
