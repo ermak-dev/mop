@@ -637,7 +637,9 @@ async def v_wipe(conn, req):
             return {"error": f"{name}: tmux session is alive — stop the job first"}
         # Событие до сноса: после него origin клона спрашивать уже не у кого.
         await _event(conn, "wipe", name)
-        return await DRIVER.destroy(name)
+        # Ветка мастера (#257): host-клон после сноса встаёт на неё, у
+        # контейнерного драйвера её поставит свежий клон по мете джоба.
+        return await DRIVER.destroy(name, branch=req.get("branch"))
     # Замок держится весь снос: send в сносимый клон всё равно не доехал бы.
     return await _gated(name, req, act)
 

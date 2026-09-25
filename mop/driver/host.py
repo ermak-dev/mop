@@ -15,6 +15,7 @@ tmux-сокет в `/tmp/tmux-<uid>`, файл сессии в `~/.claude/sessio
 """
 import json
 import os
+import shlex
 import socket
 from urllib.parse import urlparse
 
@@ -48,7 +49,7 @@ async def ensure(name, params=None):
     return {"name": name, "body": None, "created": False, "address": None}
 
 
-async def destroy(name):
+async def destroy(name, branch=None):
     """Снести тело. Узел снести нельзя — сносится всё, что папет в нём нажил.
 
     Клон не переклонируется — дорого и незачем: reset откатывает
@@ -69,6 +70,17 @@ async def destroy(name):
     # Таймаут -- отказ, а не успех (#171): здесь это недоделанный reset.
     if code != 0:
         return {"error": f"git in {d}: {why(out, code)}"}
+    # Ветка мастера (#257): чистая рабочая копия начинает с неё. На origin
+    # есть -- ровно её вершина (-B после fetch), нет -- завести локально от
+    # HEAD, мастер создаст её первым landing. Клон не переклонируется, и
+    # без этого шага он оставался бы на том, что застал.
+    if branch:
+        b = shlex.quote(branch)
+        out, code = await sh(f"(git -C {d} fetch -q origin {b} && "
+                             f"git -C {d} checkout -q -B {b} origin/{b}) || "
+                             f"git -C {d} checkout -q -B {b}", timeout=120)
+        if code != 0:
+            return {"error": f"git checkout {branch} in {d}: {why(out, code, 120)}"}
     target = target_dir(name)
     # Долго: сотни тысяч inode. Таймаут шире офисного — обычный убил бы rm на
     # полпути и оставил каталог наполовину снесённым.
