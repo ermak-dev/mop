@@ -83,7 +83,7 @@ edits.
 1. **Write a failing check first** in `tests/[module].py`, named for the defect or the property.
 2. **Verify it fails** for the right reason (`python3 tests/[module].py`). If it passes, the check is wrong.
 3. **Implement the minimal fix.** Track reasoning in test-file comments (`HYPOTHESIS:`, `SOLUTION:`, `RESULT:`) and undo every wrong-hypothesis change.
-4. **Verify green** — run every file in `tests/` and leave `STATUS: FIXED — see #123` in the check.
+4. **Verify green** — `mop dev test` (every file in `tests/`) and leave `STATUS: FIXED — see #123` in the check.
 
  - **MUST** Stop and ask if you truly cannot write the check
  - **MUST NOT** Never implement a fix before the failing check
@@ -109,7 +109,7 @@ Work lives in GitLab issues. The coordinates come from the working copy's git or
 
 ## Delivery
 
-CI (`.gitlab-ci.yml`) runs every file in `tests/` on every push, in Docker, on Python 3.12 and 3.13, with `MOP_TESTS_STRICT=1` (#228). Code reaches the pool through `mop server deploy`, and `master` is the branch it is rolled out from: on an installation whose CI deploy variables are set, a green `master` pipeline runs it by itself (`deploy:mop`, a forced-command `mop deploy --from-ci` on the server, #239/#240); elsewhere it is run by hand. `mop dev ci` reads pipelines, job logs and runners, and `mop dev ci lint` checks `.gitlab-ci.yml` before a push.
+CI (`.gitlab-ci.yml`) runs `mop dev test` on every push, in Docker, on Python 3.12 and 3.13, with `MOP_TESTS_STRICT=1` (#228). Code reaches the pool through `mop server deploy`, and `master` is the branch it is rolled out from: on an installation whose CI deploy variables are set, a green `master` pipeline runs it by itself (`deploy:mop`, a forced-command `mop deploy --from-ci` on the server, #239/#240); elsewhere it is run by hand. `mop dev ci` reads pipelines, job logs and runners, and `mop dev ci lint` checks `.gitlab-ci.yml` before a push.
 
  - **MUST** Every task is a ticket first, and its branch carries the ticket number and a description: `[type]/[iid]-[slug]` (`mop dev bug start`), off a fresh integration branch
  - **MUST** A task that belongs to an epic integrates into the epic's branch `epic/[iid]-[slug]`, never straight into `master`: the executor lands there (the master names it as the landing target; `git config mop.branch` / `MOP_BRANCH` makes `mop dev bug start` base on it), CI runs `tests/` on every push, and the epic is tested in its branch until every task is done. Then the epic branch lands into the integration branch by one `merge --no-ff`, and only that merge is rolled out
@@ -117,7 +117,7 @@ CI (`.gitlab-ci.yml`) runs every file in `tests/` on every push, in Docker, on P
  - **MUST** A commit explains why: the diff already shows what changed, and the incident behind the fix is worth more than a list of files
  - **MUST** Reference the issue in the commit subject as a bare `#74`, never a closing keyword
  - **MUST** Push the issue branch as soon as it is ready: work that lives only in a clone dies with the clone
- - **MUST** Land by local integration, one push: `git merge --no-ff` into a fresh `origin/master` (or your own branch when `git config mop.branch` / `MOP_BRANCH` names one, #249), every file in `tests/` on the merged tree, then a single `git push`; one merge commit per issue keeps `git revert -m 1` as the rollback
+ - **MUST** Land by local integration, one push: `git merge --no-ff` into a fresh `origin/master` (or your own branch when `git config mop.branch` / `MOP_BRANCH` names one, #249), `mop dev test` on the merged tree, then a single `git push`; one merge commit per issue keeps `git revert -m 1` as the rollback
  - **MUST** Landing takes no token here (#225): the whole check runs in about 20 seconds, and git itself refuses the losing push of a race. A rejected push means fetch, merge again, rerun `tests/`, push — never a force push. `mop landing` is for projects whose gate runs for tens of minutes
  - **MUST** If you touched what travels to the nodes (`mop/`, `deploy/`), make sure it is rolled out and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives. Where CI deploys, watch the `master` pipeline's `deploy:mop` job in `mop dev ci` instead of running `mop server deploy` by hand — a manual deploy races the CI one; elsewhere run `mop server deploy` yourself
  - **MUST** Close the issue right after the rollout: `mop dev bug close [iid] --comment "…"` naming the commit and what it was verified with
