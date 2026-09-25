@@ -684,7 +684,7 @@ def check_add_host_loop_278(c):
     var = (t.get("loop_control") or {}).get("loop_var") or "item"
     body = yaml.safe_dump({"ansible.builtin.add_host": t["ansible.builtin.add_host"],
                            "vars": t.get("vars") or {}})
-    facts = ("stage_name", "stage_ip", "stage_vmid", "build_key",
+    facts = ("stage_name", "stage_ip", "stage_vmid",
              "ansible_user", "ansible_host", "ansible_port", "inventory_hostname")
     for fact in facts:
         # Голая ссылка -- та, перед которой не стоит hostvars[...].: оба
@@ -695,6 +695,12 @@ def check_add_host_loop_278(c):
               not bare, body)
     c.check(f"pve-build: add_host reads hostvars of the loop's host, {var}",
           f"hostvars[{var}]" in body, body)
+    # build_key -- переменная игры (vars: плейбука), не факт хоста: в hostvars
+    # её нет, и hostvars[item].build_key уронил живую сборку на rumop
+    # («HostVarsVars has no attribute build_key»). Переменные игры одни на
+    # всех хостов и читаются как есть.
+    c.check("pve-build: add_host reads the play's build_key bare, not through hostvars",
+          "build_key" in body and f"hostvars[{var}].build_key" not in body, body)
 
 
 def check_users_reload_199(c):

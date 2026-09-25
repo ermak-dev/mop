@@ -350,8 +350,9 @@
     # гипервизорах в mop_building попадало только тело первого, а второму
     # запечатывали голое тело сразу после bootstrap, с кодом 0 (#278).
     # Поэтому -- своим циклом по хостам игры, и всё из hostvars хоста цикла,
-    # ни одного факта текущего хоста. Узел без контейнеров вышел из игры до
-    # stage_name -- его и пропускаем.
+    # ни одного факта текущего хоста; переменные игры (build_key, MOP_USER)
+    # одни на всех и читаются как есть -- в hostvars их нет. Узел без
+    # контейнеров вышел из игры до stage_name -- его и пропускаем.
     - name: Take the body into the inventory for the rest of the run
       ansible.builtin.add_host:
         name: "{{ hostvars[item].stage_name }}"
@@ -359,7 +360,7 @@
         ansible_host: "{{ hostvars[item].stage_ip }}"
         ansible_user: "{{ MOP_USER }}"
         ansible_python_interpreter: /usr/bin/python3
-        ansible_ssh_private_key_file: "{{ hostvars[item].build_key }}"
+        ansible_ssh_private_key_file: "{{ build_key }}"
         # IdentitiesOnly: без него ssh сперва предъявляет каждый ключ из
         # агента, и тело успевает отказать столько раз, что включает штраф за
         # источник — после чего роняет и верный ключ тоже.
