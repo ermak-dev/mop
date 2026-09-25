@@ -855,9 +855,9 @@ def check_output_182(c):
         got = {"project": "p", "asks": {"MOP_CORES": "8"}, "alien": [], "legacy": []}
         image.prepare = lambda origin, root: got
         gone = [{"name": "pu-p-1", "origin": "git@h:g/p.git", "llm": "claude", "node": "hyper"}]
-        image.clear = lambda project, force=False: list(gone)
+        image.clear = lambda project, force=False, api=None: list(gone)
         image.bake = lambda *a, **kw: 0
-        image.announce = lambda project: [("hyper", "announced, serves p"),
+        image.announce = lambda project, api=None: [("hyper", "announced, serves p"),
                                           ("gpu", "not a container node"),
                                           ("old", "already announced")]
         spec.job_spec = lambda *a, **kw: {}
@@ -879,7 +879,7 @@ def check_output_182(c):
         nomad.register = lambda job: None
 
         # Узел, которому образ объявить не вышло (#175), -- stderr.
-        image.announce = lambda project: [("hyper", "announced, serves p"),
+        image.announce = lambda project, api=None: [("hyper", "announced, serves p"),
                                           ("bad", "bad: unknown driver 'bogus'")]
         out, err, code = through(build.main, ["git@h:g/p.git"])
         c.check(f"a failed announcement must reach stderr alone: "

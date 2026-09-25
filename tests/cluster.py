@@ -21,7 +21,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, offline, patched, restored, GATE_NOW, gate_table_267  # noqa: E402
+from _lib import Checks, FakeNomad, offline, patched, restored, GATE_NOW, gate_table_267  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import cluster  # noqa: E402
@@ -414,24 +414,26 @@ def check_gates_40(c):
                     not (got.get("error") or not changed), repr(got))
 
     # Факты -- у агента узла аллокации, через шину, глаголом clone.
-    with offline(), restored(nomad, "latest_alloc"), restored(bus, "request"):
+    # Nomad -- поддельный, параметром (#275).
+    placed = FakeNomad(allocs={"pu-mop-1": {"ID": "a1", "NodeName": "n1"}})
+    with offline(), restored(bus, "request"):
         calls = []
-        nomad.latest_alloc = lambda name: {"ID": "a1", "NodeName": "n1"}
         bus.request = lambda node, verb, **k: calls.append((node, verb, k.get("name"))) \
             or {"clone": None}
-        got = cluster._clone_of("pu-mop-1")
+        with cluster.using(placed):
+            got = cluster._clone_of("pu-mop-1")
         c.check("_clone_of must ask the node's agent",
                 not (got != {"clone": None} or calls != [("n1", "clone", "pu-mop-1")]),
                 f"{got!r}, {calls}")
-        nomad.latest_alloc = lambda name: None
-        c.check("_clone_of without an allocation must be None",
-                not (cluster._clone_of("pu-mop-1") is not None))
+        with cluster.using(FakeNomad()):
+            c.check("_clone_of without an allocation must be None",
+                    not (cluster._clone_of("pu-mop-1") is not None))
 
         def silent(node, verb, **k):
             raise bus.BusError("node agent n1 is not subscribed")
-        nomad.latest_alloc = lambda name: {"ID": "a1", "NodeName": "n1"}
         bus.request = silent
-        got = cluster._clone_of("pu-mop-1")
+        with cluster.using(placed):
+            got = cluster._clone_of("pu-mop-1")
         c.check("_clone_of with a silent agent must say so",
                 not ("n1" not in ((got or {}).get("error") or "")), repr(got))
 
@@ -560,18 +562,22 @@ def check_slots_total_243(c):
 # которое перерегистрация обязана сохранять. STATUS: FIXED — see #257
 def check_update_keeps_branch_257(c):
     calls = []
-    with restored(cluster.nomad, "get_job", "register"), restored(cluster.spec, "job_spec"), \
-            restored(cluster, "store_workspace"):
-        cluster.nomad.get_job = lambda name: {"ID": name, "Meta": {"origin": "git@h:g/mop.git",
-                                                                   "llm": "claude", "branch": "swarm"}}
-        cluster.nomad.register = lambda job: None
+    # Nomad -- поддельный, параметром (#275).
+    job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
+                                      "branch": "swarm"}}
+    with restored(cluster.spec, "job_spec"), restored(cluster, "store_workspace"):
         cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None: \
             calls.append(branch) or {"Job": {"ID": name}}
         cluster.store_workspace = lambda root, name, req: None
-        cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
-        cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git", "branch": "dev"})
-        cluster.nomad.get_job = lambda name: None
-        cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
+        # register фейка кладёт пустой джоб на место прежнего: мету каждый
+        # вызов берёт из своего фейка.
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": job})):
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": job})):
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
+                                    "branch": "dev"})
+        with cluster.using(FakeNomad()):
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
     c.expect("update must keep the meta branch unless the request names one",
              calls, ["swarm", "dev", None])
 
@@ -656,6 +662,69 @@ def check_node_267(c):
                      or [n.to_row() for n in got] != rows), repr(got))
 
 
+# ── #275: Nomad за интерфейсом ───────────────────────────────────────────
+# HYPOTHESIS: сервис кластера зовёт nomad.* в 38 местах, сборка образа -- в
+# шести, и проверки подменяют Nomad только атрибутами модуля: зависимость на
+# конкретный HTTP-клиент, а не на интерфейс.
+# SOLUTION: typing.Protocol nomad.NomadApi -- ровно то, что читают cluster и
+# image; живой модуль ему удовлетворяет как есть. Сервис берёт api
+# параметром (cluster.using, answer/serve(api=...)), по умолчанию -- живой;
+# image.clear/restore/build -- тоже. Чистые помощники (describe_error,
+# forget_refusal) и константы (ADDR, POOL_DC) остаются у модуля.
+# STATUS: FIXED — see #275
+PURE_NOMAD = {"ADDR", "POOL_DC", "describe_error", "forget_refusal"}
+
+
+def check_nomad_api_275(c):
+    import ast
+    from mop.server import image, nomad
+    api = getattr(nomad, "NomadApi", None)
+    c.check("nomad.NomadApi exists", api is not None)
+    if api is None:
+        return
+    c.check("the live module satisfies NomadApi as it is", isinstance(nomad, api))
+    fake = FakeNomad(jobs={"pu-mop-1": {"ID": "pu-mop-1", "Status": "running", "Meta": {
+        "origin": "git@h:g/mop.git", "llm": "claude", "branch": "swarm"}}})
+    c.check("a fake satisfies NomadApi", isinstance(fake, api))
+    # Глагол через api, без подмены атрибутов модуля nomad.
+    keep = {n: getattr(nomad, n) for n in dir(nomad) if not n.startswith("_")}
+    got = cluster.answer("mop", {"verb": "spec", "name": "pu-mop-1"}, api=fake)
+    c.expect("spec answers from the injected api",
+             (got.get("ok"), (got.get("meta") or {}).get("branch")), (True, "swarm"))
+    with cluster.using(fake):
+        cluster.store_workspace, saved = (lambda root, name, req: None), cluster.store_workspace
+        try:
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
+        finally:
+            cluster.store_workspace = saved
+    reg = [a[1] for a in fake.calls if a[0] == "register"]
+    c.expect("update registers through the injected api, keeping the branch",
+             [(r["Job"]["ID"], r["Job"]["Meta"].get("branch")) for r in reg], [("pu-mop-1", "swarm")])
+    c.check("nothing on the nomad module was replaced",
+            all(getattr(nomad, n) is v for n, v in keep.items()))
+    # Сборка образа: снять и поднять -- через тот же api.
+    fake2 = FakeNomad(jobs=dict(fake.jobs))
+    with restored(image, "project_rows"), restored(image.puppets, "_wait_stopped", "wipe"):
+        job = fake.jobs["pu-mop-1"]
+        image.project_rows = lambda project, api=None: [
+            {"name": "pu-mop-1", "node": "n1", "job": job, "container": True,
+             "state": "free", "kind": None}]
+        image.puppets._wait_stopped = lambda name: None
+        image.puppets.wipe = lambda node, name, *a, **k: None
+        gone = image.clear("mop", force=True, api=fake2)
+        image.restore(gone, api=fake2)
+    c.expect("image.clear/restore go through the injected api",
+             [a[0] for a in fake2.calls], ["deregister", "register"])
+    # Структурно: cluster и image касаются Nomad только через api.
+    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    for rel in ("mop/server/cluster.py", "mop/server/image.py"):
+        tree = ast.parse(open(os.path.join(here, rel)).read())
+        bare = sorted({f"{n.attr}:{n.lineno}" for n in ast.walk(tree)
+                       if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                       and n.value.id == "nomad" and n.attr not in PURE_NOMAD})
+        c.expect(f"{rel} reaches Nomad only through the injected api", bare, [])
+
+
 def main():
     c = Checks()
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
@@ -664,7 +733,7 @@ def main():
                   check_forget_inventory_178, check_forget_summary_196,
                   check_gates_40, check_caller_207, check_slots_total_243,
                   check_update_keeps_branch_257, check_owner_gate_267,
-                  check_node_267):
+                  check_node_267, check_nomad_api_275):
         check(c)
     return c.report("cluster")
 

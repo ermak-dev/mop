@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(HERE))
 
-from _lib import Checks, bash, patched, restored  # noqa: E402
+from _lib import Checks, FakeNomad, bash, patched, restored  # noqa: E402
 from mop.node import agent  # noqa: E402
 from mop.common import bus, puppets, projects  # noqa: E402
 from mop.server import cluster, web  # noqa: E402
@@ -232,13 +232,12 @@ def project_forms():
     out = {}
     d = tempfile.mkdtemp(prefix="mop-test-204-")
     reg, lim = os.path.join(d, "projects"), os.path.join(d, "limits.json")
-    registered = []
     with restored(projects, "FILE", "LIMITS"), \
             restored(projects.read, "__defaults__"), restored(projects.write, "__defaults__"), \
             restored(projects.read_limits, "__defaults__"), \
             restored(projects.write_limits, "__defaults__"), \
             restored(cluster, "_live_count", "next_name", "store_workspace"), \
-            restored(cluster.nomad, "register"), restored(cluster.spec, "job_spec"):
+            restored(cluster.spec, "job_spec"):
         projects.read.__defaults__ = projects.write.__defaults__ = (reg,)
         projects.read_limits.__defaults__ = projects.write_limits.__defaults__ = (lim,)
         projects.write({MOP, RUGENT, "legacy"})
@@ -255,11 +254,15 @@ def project_forms():
         cluster._live_count = lambda target: 5
         cluster.next_name = lambda target: f"pu-{target}-6"
         cluster.store_workspace = lambda root, name, req: None
-        cluster.nomad.register = registered.append
         cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None: \
             {"Job": {"ID": name, "origin": origin}}
-        out["add_over"] = dump(cluster._add("rugent", {"origin": RUGENT}))
-        out["add_free"] = dump(cluster._add("mop", {"origin": MOP}))
+        # Nomad -- поддельный, параметром (#275): что зарегистрировано, видно
+        # по его вызовам.
+        fake = FakeNomad()
+        with cluster.using(fake):
+            out["add_over"] = dump(cluster._add("rugent", {"origin": RUGENT}))
+            out["add_free"] = dump(cluster._add("mop", {"origin": MOP}))
+        registered = [call[1] for call in fake.calls if call[0] == "register"]
         out["registered"] = dump(registered)
     return out
 

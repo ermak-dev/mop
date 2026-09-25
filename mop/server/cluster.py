@@ -24,6 +24,8 @@ bootstrap песочницы за папета). Положи туда глаг�
 Подписчик — mop-cluster, юнит на сервере; проверяется `mop server cluster check`.
 Чистая часть (права) — tests/cluster.py.
 """
+import contextlib
+import contextvars
 import json
 import os
 import threading
@@ -35,6 +37,27 @@ from . import bootstrap, natsconf, nodes, nomad, spec
 from ..common import (bus, busnames, config, creds, domain, landing, lease, paths, project_secrets,
                       projects, puppets, service, state)
 from ..common.domain import CloneFacts, JobMeta, Node, Project, Verb
+
+# Nomad за интерфейсом (#275): глаголы читают его через _api(), а не модуль
+# nomad напрямую. По умолчанию -- живой модуль; проверки дают свою
+# реализацию NomadApi через using() или answer(api=...). Контекстная
+# переменная, а не глобальная: ответы идут в потоках сервиса.
+_API = contextvars.ContextVar("nomad_api", default=nomad)
+
+
+def _api():
+    return _API.get()
+
+
+@contextlib.contextmanager
+def using(api):
+    """Глаголы внутри блока ходят в Nomad через api (nomad.NomadApi)."""
+    token = _API.set(api)
+    try:
+        yield api
+    finally:
+        _API.reset(token)
+
 
 # Кому глагол дан -- одна таблица VERBS в конце модуля, рядом с обработчиками
 # (#173); прежние наборы выводятся из неё.
@@ -137,7 +160,7 @@ ALLOC_FIELDS = ("ID", "JobID", "NodeName", "ClientStatus", "DesiredStatus")
 def nomad_jobs(project=None):
     """Джобы папетов из Nomad. Зовёт это только сервис кластера: он один
     говорит с Nomad от чужого имени (docs/CLUSTER.md)."""
-    listing = nomad.client().jobs.get_jobs(prefix=puppets.JOB_PREFIX, meta=True)
+    listing = _api().get_jobs(puppets.JOB_PREFIX, meta=True)
     return puppets.visible(listing, project)
 
 
@@ -150,7 +173,7 @@ def task_and_reason(alloc):
     if state.failing_row(alloc.get("ClientStatus"), task, None):
         try:
             reason = state.failure_reason(
-                nomad.alloc_stderr(alloc["ID"], state.task_name(alloc)))
+                _api().alloc_stderr(alloc["ID"], state.task_name(alloc)))
         except Exception:
             pass
     return task, reason
@@ -166,7 +189,7 @@ def nomad_items(project=None, stale=False):
     for j in sorted(nomad_jobs(project), key=lambda j: j["ID"]):
         alloc, err, task, reason = None, None, None, None
         try:
-            got = nomad.latest_alloc(j["ID"])
+            got = _api().latest_alloc(j["ID"])
             alloc = {k: got.get(k) for k in ALLOC_FIELDS} if got else None
             if got:
                 task, reason = task_and_reason(got)
@@ -181,7 +204,7 @@ def nomad_items(project=None, stale=False):
             # Потолок папета -- из его зарегистрированной спеки (#197): её и
             # размещает Nomad, а не ту, что собрал бы сегодняшний .mop.
             try:
-                item["ceiling"] = spec.ceiling_of(nomad.get_job(j["ID"]))
+                item["ceiling"] = spec.ceiling_of(_api().get_job(j["ID"]))
             except Exception:
                 item["ceiling"] = None
             item["unserved"] = spec.placement_gap(
@@ -191,7 +214,7 @@ def nomad_items(project=None, stale=False):
             # Полный джоб, а не заглушка из списка: врапер и ограничение
             # размещения лежат в спеке, а её get_jobs не отдаёт.
             try:
-                item["stale"] = spec.spec_is_stale(nomad.get_job(j["ID"]))
+                item["stale"] = spec.spec_is_stale(_api().get_job(j["ID"]))
             except Exception:
                 item["stale"] = False
         items.append(item)
@@ -201,13 +224,13 @@ def nomad_items(project=None, stale=False):
 def _placement_nodes():
     """Узлы пула для unserved(): состояние из nomad_pool, meta -- по узлу.
     Только на сервере."""
-    metas = nomad.nodes_meta()
+    metas = _api().nodes_meta()
     return [dict(n, meta=metas.get(n["name"], {})) for n in nomad_pool()]
 
 
 def next_name(project):
     prefix = puppets.JOB_PREFIX
-    taken = {j["ID"] for j in nomad.client().jobs.get_jobs(prefix=f"{prefix}{project}-")}
+    taken = {j["ID"] for j in _api().get_jobs(f"{prefix}{project}-")}
     n = 1
     while f"{prefix}{project}-{n}" in taken:
         n += 1
@@ -224,14 +247,14 @@ def nomad_pool():
     пообещать то, чего планировщик не даст: управляляющая машина в control
     однажды так светилась тремя слотами, пока два папета стояли в queued."""
     out = []
-    for n in nomad.client().nodes.get_nodes():
+    for n in _api().get_nodes():
         if n.get("Datacenter") != nomad.POOL_DC:
             continue
         if n["Status"] != "ready":
             out.append(Node(n["Name"], n["Status"]).to_pool())
             continue
         try:
-            free, total = nomad.node_capacity(n)
+            free, total = _api().node_capacity(n)
             out.append(Node(n["Name"], "ready", free_mb=free, total_mb=total,
                             slots=free // spec.MEM, slots_total=total // spec.MEM,
                             # Закрытый для планирования узел остаётся ready и
@@ -248,7 +271,7 @@ def _owner(name):
     """(origin джоба, есть ли джоб). Разные исходы у «нет джоба» и «джоб без
     метки» — на них по-разному отвечает refusal()."""
     try:
-        job = nomad.get_job(name)
+        job = _api().get_job(name)
     except Exception:
         return None, False
     if not job:
@@ -261,7 +284,7 @@ def _ping(project, req):
     отличить «сервис лёг» от «Nomad не отвечает», не имея ни того, ни другого
     под рукой."""
     try:
-        seen = len(nomad.client().nodes.get_nodes())
+        seen = len(_api().get_nodes())
         cluster_ok, why = True, None
     except Exception as e:
         seen, cluster_ok, why = 0, False, nomad.describe_error(e)
@@ -273,7 +296,7 @@ def _ping(project, req):
 def _live_count(target):
     """Сколько джобов проекта живо. По префиксу имени: имена `pu-<проект>-<n>`
     строятся из того же basename, что и проект (next_name)."""
-    got = nomad.client().jobs.get_jobs(prefix=f"{puppets.JOB_PREFIX}{target}-")
+    got = _api().get_jobs(f"{puppets.JOB_PREFIX}{target}-")
     return sum(1 for j in got if j.get("Status") != "dead")
 
 
@@ -296,7 +319,7 @@ GATE_TIMEOUT = 15
 def _clone_of(name):
     """Факты клона от агента узла, где стоит папет.
     -> None (аллокации нет) | {"clone": ...} | {"error": ...}."""
-    alloc = nomad.latest_alloc(name)
+    alloc = _api().latest_alloc(name)
     if not alloc or not alloc.get("NodeName"):
         return None
     try:
@@ -350,7 +373,7 @@ def _add(project, req):
     name = next_name(target.name)
     # workspace -- до регистрации: первый подъём обязан его увидеть.
     store_workspace(bootstrap.ROOT, name, req)
-    nomad.register(spec.job_spec(name, origin, req.get("profile"),
+    _api().register(spec.job_spec(name, origin, req.get("profile"),
                                  branch=req.get("branch")))
     return {"ok": True, "name": name, "origin": origin}
 
@@ -360,7 +383,7 @@ def _kept_branch(name):
     # Чтение по возможности: нет джоба или Nomad молчит -- нет и ветки, а о
     # самом Nomad скажет register следом.
     try:
-        job = nomad.get_job(name)
+        job = _api().get_job(name)
     except Exception:
         return None
     return JobMeta.from_job(job).branch
@@ -374,24 +397,24 @@ def _update(project, req):
     # Ветка -- свойство папета (#257): запрос без неё (recycle, gc, лечение
     # doctor'а) не стирает ту, с которой папет заведён.
     branch = req.get("branch") or _kept_branch(name)
-    nomad.register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch),
+    _api().register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch),
                                cont=bool(req.get("cont"))))
     return {"ok": True, "name": name}
 
 
 def _restart(project, req):
-    alloc = nomad.latest_alloc(req["name"])
+    alloc = _api().latest_alloc(req["name"])
     if not alloc:
         return {"error": f"{req['name']} has no allocation to restart"}
-    nomad.alloc_restart(alloc["ID"])
+    _api().alloc_restart(alloc["ID"])
     return {"ok": True, "alloc": alloc["ID"], "node": alloc.get("NodeName")}
 
 
 def _stop(project, req):
-    alloc = nomad.latest_alloc(req["name"])
+    alloc = _api().latest_alloc(req["name"])
     if not alloc:
         return {"error": f"{req['name']} has no allocation to stop"}
-    nomad.alloc_stop(alloc["ID"])
+    _api().alloc_stop(alloc["ID"])
     return {"ok": True, "alloc": alloc["ID"]}
 
 
@@ -399,7 +422,7 @@ def _delete(project, req):
     """Снять джоб. purge=False оставляет его в истории остановленным — так
     работает рецикл: джоб останавливается, рабочая копия сносится, и та же
     спека поднимается обратно."""
-    nomad.deregister(req["name"], purge=bool(req.get("purge", True)))
+    _api().deregister(req["name"], purge=bool(req.get("purge", True)))
     # Снятый насовсем папет уносит свой workspace (#133); рецикл (purge=False)
     # его сохраняет -- update следом положит свежий.
     if req.get("purge", True):
@@ -414,7 +437,7 @@ def _alloc(project, req):
     две вещи вместе — где папет стоит и чем в него входят, — и второй запрос
     по сети ради одного поля меты был бы платой ни за что."""
     try:
-        alloc = nomad.latest_alloc(req["name"])
+        alloc = _api().latest_alloc(req["name"])
     except Exception:
         # Джоба уже нет — это ответ, а не отказ: так `puppets.delete` ждёт,
         # пока снятый джоб перестанет быть running.
@@ -425,12 +448,12 @@ def _alloc(project, req):
     # Падает ли задача и почему (#126): `mop attach` и `mop add` говорят это
     # вместо «not running» и двух минут ожидания.
     slim["task"], slim["reason"] = task_and_reason(alloc)
-    meta = nomad.node_meta(alloc["NodeName"]) or {}
+    meta = _api().node_meta(alloc["NodeName"]) or {}
     return {"ok": True, "alloc": slim, "driver": meta.get("mop_driver")}
 
 
 def _spec(project, req):
-    job = nomad.get_job(req["name"])
+    job = _api().get_job(req["name"])
     if not job:
         return {"error": f"no job {req['name']}"}
     return {"ok": True, "meta": domain.raw(job),
@@ -460,12 +483,12 @@ def _nodes(project, req):
 
 
 def _drain(project, req):
-    nomad.node_drain(req["node"], int(req.get("deadline") or 300))
+    _api().node_drain(req["node"], int(req.get("deadline") or 300))
     return {"ok": True, "node": req["node"]}
 
 
 def _up(project, req):
-    nomad.node_eligibility(req["node"], True)
+    _api().node_eligibility(req["node"], True)
     return {"ok": True, "node": req["node"]}
 
 
@@ -503,19 +526,19 @@ def _forget(project, req):
     if why:
         return {"error": why}
     # Предохранитель читает сводку узла (статус, планирование), а не имя (#196).
-    summary = nomad.node_summary(node)
+    summary = _api().node_summary(node)
     if summary is None:
         return {"error": f"no node {node} in the cluster"}
-    why = nomad.forget_refusal(summary, nomad.node_allocs(node))
+    why = nomad.forget_refusal(summary, _api().node_allocs(node))
     if why:
         return {"error": why}
-    nomad.node_forget(node)
+    _api().node_forget(node)
     return {"ok": True, "node": node}
 
 
 def _meta(project, req):
-    nomad.set_node_meta(req["node"], req.get("updates") or {})
-    return {"ok": True, "node": req["node"], "meta": nomad.node_meta(req["node"])}
+    _api().set_node_meta(req["node"], req.get("updates") or {})
+    return {"ok": True, "node": req["node"], "meta": _api().node_meta(req["node"])}
 
 
 # ─── глаголы: проекты (#117) ─────────────────────────────────────────────
@@ -763,12 +786,20 @@ NAMED_VERBS = tuple(v for v, d in VERBS.items() if d.named)
 ACTING_VERBS = tuple(v for v, d in VERBS.items() if d.acting)
 
 
-def answer(project, req):
+def answer(project, req, api=None):
     """Запрос от имени проекта -> ответ (dict). Синхронно: зовут в потоке.
+    api -- nomad.NomadApi (#275); без него -- тот, что в контексте (живой).
 
     Владельца джоба узнаём ДО проверки и проверяем по нему, а не по имени:
     имя `pu-<проект>-<n>` собирается из того же basename, но правду о том,
     чей это папет, несёт только Meta.origin."""
+    if api is not None:
+        with using(api):
+            return _answer(project, req)
+    return _answer(project, req)
+
+
+def _answer(project, req):
     verb = req.get("verb")
     name = req.get("name")
     spec = _row(verb)
@@ -808,10 +839,11 @@ def banner(subject, nomad_addr):
     return f"mop-cluster: subscribed to {subject}, Nomad at {nomad_addr}"
 
 
-async def serve(log):
+async def serve(log, api=nomad):
     """Подписчик сервера. Креды — оператора (admin): сервис слушает все
-    проекты, а разделяет их проверкой проекта из субъекта."""
+    проекты, а разделяет их проверкой проекта из субъекта. api -- Nomad
+    (#275), по умолчанию живой."""
     # Оба субъекта (#207): с логином вызывающего и прежний, до уборки.
     subj = [busnames.cluster(busnames.ANY), busnames.cluster(busnames.ANY, login=busnames.ANY)]
-    await service.serve("mop-cluster", subj, lambda project, req, _send: answer(project, req),
+    await service.serve("mop-cluster", subj, lambda project, req, _send: answer(project, req, api=api),
                         log, journal, lambda: banner(", ".join(subj), nomad.ADDR))
