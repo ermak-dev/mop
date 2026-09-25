@@ -26,6 +26,7 @@ is exactly what serves as the source of truth for keys.
 import os
 
 from mop.cli import lib
+from mop.cli.core import _common
 from mop import llm
 
 
@@ -34,12 +35,12 @@ def main(argv):
     # кроме --llm, уезжает claude дословно. Отсюда же отсутствие обязательного
     # `--` из `mop master`: там он отделял origin от значения чужого флага,
     # здесь отделять не от чего.
-    profile, passthru = lib.parse_llm(argv)
+    profile, passthru = _common.parse_llm(argv)
     profile = llm.resolve(profile)
 
     # Тот же источник ключа, что у мастера: местный .env, а не узловой
-    # secrets.env — общее в lib.session_env.
-    _, session = lib.session_env(profile)
+    # secrets.env — общее в _common.session_env.
+    _, session = _common.session_env(profile)
     env = dict(os.environ, **session)
     # flush до exec: буфер stdout не переживает execvpe, и строка о профиле
     # пропадала бы везде, где вывод не в терминал.

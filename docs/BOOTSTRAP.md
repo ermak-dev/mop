@@ -5,9 +5,10 @@
 Вторая половина манифеста — `.mop/sandbox.yaml` — печётся в образ один раз
 ([DRIVER.md](DRIVER.md), #61).
 
-Библиотека — `mop/bootstrap.py` (обе половины в одном файле, как у драйвера),
-командлет — `mop bootstrap`, плейбук прогона — `deploy/bootstrap.yml`, роль
-сервера — `deploy/roles/bootstrap`.
+Библиотека — `mop/bootstrap.py` (хранение и серверная половина), узловая
+половина — `bootstrap_sandbox` в `mop driver run` (слои по машине,
+`tests/layers.py`), командлет — `mop bootstrap`, плейбук прогона —
+`deploy/bootstrap.yml`, роль сервера — `deploy/roles/bootstrap`.
 
 ## Зачем
 

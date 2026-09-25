@@ -12,7 +12,7 @@ master never hears of it again — and while the node is in the inventory,
 which the next deploy would configure it from again.
 """
 from mop.cli import lib
-from mop import nodes
+from mop import puppets
 from mop.render import ratio, table
 
 
@@ -25,7 +25,7 @@ def main(argv):
         lib.usage(__doc__)
     """Узлы пула как таблица. То же, что видно в подвале `mop list`, плюс то,
     чего там нет: драйвер, чьи проекты узел умеет и состояние планирования."""
-    got = nodes.rows()
+    got = puppets.nodes()
     rows = [("NODE", "DRIVER", "SERVES", "STATE", "FREE", "TOTAL", "SLOTS")]
     for r in got:
         rows.append((

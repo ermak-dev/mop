@@ -48,8 +48,8 @@ import subprocess
 import sys
 import time
 
-from . import (bus, busnames, config, creds, driver, fsutil, identity, playvars,
-               project_secrets, service)
+from . import (bus, busnames, config, creds, driver, fsutil, identity, manifest,
+               playvars, project_secrets, service)
 
 # На сервере: файлы проектов и ключ к телам.
 ROOT = os.path.expanduser("~/.config/mop/bootstrap")
@@ -62,11 +62,11 @@ PUPPET_CREDS = os.path.expanduser("~/.config/mop/puppets")
 KEY = os.path.expanduser("~/.ssh/mop-bootstrap")
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "bootstrap.yml")
 # Файл рабочей копии, из которого `mop add|update|recycle` шлют workspace.
-FILE = ".mop/bootstrap.yaml"
+FILE = manifest.BOOTSTRAP_FILE
 # Сколько узел ждёт сервер. Больше «секунд», чтобы прогон с загрузкой не
 # срывался на ровном месте; меньше — чтобы висящий сервер читался отказом,
 # а не молчащим папетом.
-TIMEOUT = 300
+TIMEOUT = busnames.BOOTSTRAP_TIMEOUT
 
 
 # ─── хранение на сервере ─────────────────────────────────────────────────
@@ -307,33 +307,6 @@ async def serve(log):
     subj = bus.server_subject(busnames.ANY)
     await service.serve("mop-bootstrap", subj, answer, log, journal,
                         lambda: banner(subj, ROOT, _puppets_here()))
-
-
-# ─── узел ────────────────────────────────────────────────────────────────
-def run(d, name, project):
-    """Bootstrap песочницы папета с этого узла: впустить сервер, позвать,
-    дождаться, выпустить. -> ответ сервера; отказ — RuntimeError/BusError.
-
-    Зовётся из `mop driver run` до внутреннего врапера. Дверь закрывается в
-    любом исходе: ключ сервера в теле живёт ровно столько, сколько идёт
-    bootstrap. Где сервер найдёт тело и надо ли его впускать, решает драйвер
-    (#151): у host тело — сам узел, и дорога туда есть всегда."""
-    address = d.address(name)
-    r = asyncio.run(d.admit(name, True))
-    if r.get("error"):
-        raise RuntimeError(f"cannot let the server into the body: {r['error']}")
-    try:
-        bus.connect(bus.NODE_FILE)
-        out = bus.ask_server("bootstrap", timeout=TIMEOUT, project=project,
-                             name=name, address=address)
-    finally:
-        asyncio.run(d.admit(name, False))
-    if out.get("error"):
-        raise RuntimeError(out["error"])
-    if not out.get("ok"):
-        raise RuntimeError(f"bootstrap failed (ansible exit {out.get('rc')}):\n"
-                           f"{out.get('tail', '')}")
-    return out
 
 
 # ─── мастер ──────────────────────────────────────────────────────────────

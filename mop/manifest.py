@@ -230,3 +230,7 @@ def _write(base, project, name, tasks=None, of_vars=None):
     with open(path, "w") as f:
         yaml.safe_dump(what, f, allow_unicode=True, default_flow_style=False)
     return path
+
+# Вторая половина манифеста (#62): что сервер играет в песочницу при каждом
+# старте папета. Путь один на мастера (workspace), сервер и docs/BOOTSTRAP.md.
+BOOTSTRAP_FILE = ".mop/bootstrap.yaml"

@@ -416,6 +416,7 @@ def check_deploy_chain_232():
     Пароль LDAP едет прогону и берётся сервисом, когда ldap -- звено цепочки."""
     out = []
     from mop.cli import lib
+    from mop.cli.pool import _play
     from mop.cli.pool import deploy
     tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
     empty = os.path.join(tmp, "empty")
@@ -439,7 +440,7 @@ def check_deploy_chain_232():
             f.write("broken line\n")
         if not deploy.operator_refusals({**s, "MOP_OPERATORS_FILE": dup}, tmp):
             out.append(f"{chain}: a broken operators file must stop deploy")
-        if lib.play_env({**s}.get).get("MOP_LDAP_BIND_PASSWORD") != "svc-pw":
+        if _play.play_env({**s}.get).get("MOP_LDAP_BIND_PASSWORD") != "svc-pw":
             out.append(f"{chain}: the play's env must carry the bind password")
         unit = {k: v for k, v in s.items() if k != "MOP_LDAP_BIND_PASSWORD"}
         try:

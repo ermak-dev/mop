@@ -17,6 +17,8 @@ sys.path.insert(0, ROOT)
 
 from mop import cli  # noqa: E402
 from mop.cli import lib  # noqa: E402
+from mop.cli.core import _common  # noqa: E402
+from mop.cli.pool import _play  # noqa: E402
 
 # (каталог, имя, подпакет?) — то, что находит обход mop/cli.
 FOUND = [
@@ -147,25 +149,25 @@ def main():
         print(f"FAIL projects.names: {projects.names({'git@h:g/proj.git', 'git@h:g/mop.git'}, {'legacy'})}")
     # Списком, а не строкой: `--extra-vars mop_projects=[...]` ansible берёт как
     # строку и проходит по её символам, порождая пользователей `master-[`.
-    ev = lib.play_vars(["mop", "proj"], {"proj": {"asks": {}}})
+    ev = _play.play_vars(["mop", "proj"], {"proj": {"asks": {}}})
     if json.loads(ev[0]) != {"mop_projects": ["mop", "proj"]} or json.loads(ev[1]) != {"mop_manifests": {"proj": {"asks": {}}}}:
         failed += 1
         print(f"FAIL play_vars: {ev}")
     # Узкий прогон проектов (#79) идёт без манифестов: их читают слои узла и
     # тела, а не роль шины. Лишний --extra-vars пустым словарём стирал бы
     # манифесты, уже разложенные полной игрой.
-    if lib.play_vars(["mop"]) != [json.dumps({"mop_projects": ["mop"]})]:
+    if _play.play_vars(["mop"]) != [json.dumps({"mop_projects": ["mop"]})]:
         failed += 1
-        print(f"FAIL play_vars without manifests: {lib.play_vars(['mop'])}")
+        print(f"FAIL play_vars without manifests: {_play.play_vars(['mop'])}")
     # Лимиты папетов (#107) едут рядом с проектами, и пустые тоже: пустой
     # словарь -- правда контроллера «лимитов нет», и сервер обязан её
     # получить, иначе снятый лимит жил бы там дальше. Сама функция чистая:
     # файл читает play(), а не она.
-    got = lib.play_vars(["mop"], limits={})
+    got = _play.play_vars(["mop"], limits={})
     if got != [json.dumps({"mop_projects": ["mop"], "mop_limits": {}})]:
         failed += 1
         print(f"FAIL play_vars with empty limits: {got}")
-    got = lib.play_vars(["mop"], limits={"mop": 2})
+    got = _play.play_vars(["mop"], limits={"mop": 2})
     if json.loads(got[0]).get("mop_limits") != {"mop": 2}:
         failed += 1
         print(f"FAIL play_vars with limits: {got}")
@@ -173,19 +175,19 @@ def main():
     # Хосты форжей (#121) едут полной игре списком: роль узла доверяет ключу
     # каждого. Без них -- ключа нет вовсе, узкий прогон проектов их не
     # передаёт и роль узла не играет.
-    got = lib.play_vars(["mop"], git_hosts=["dev.corp", "git.ermak.dev"])
+    got = _play.play_vars(["mop"], git_hosts=["dev.corp", "git.ermak.dev"])
     if json.loads(got[0]).get("mop_git_hosts") != ["dev.corp", "git.ermak.dev"]:
         failed += 1
         print(f"FAIL play_vars with git hosts: {got}")
     # #178: хосты инвентаря -- списком, только когда их дали.
-    got = lib.play_vars(["mop"], inventory_hosts=["a", "b"])
+    got = _play.play_vars(["mop"], inventory_hosts=["a", "b"])
     if json.loads(got[0]).get("mop_inventory_hosts") != ["a", "b"]:
         failed += 1
         print(f"FAIL play_vars with inventory hosts: {got}")
-    if "mop_inventory_hosts" in json.loads(lib.play_vars(["mop"])[0]):
+    if "mop_inventory_hosts" in json.loads(_play.play_vars(["mop"])[0]):
         failed += 1
         print("FAIL play_vars without inventory hosts must not send an empty list")
-    if "mop_git_hosts" in json.loads(lib.play_vars(["mop"])[0]):
+    if "mop_git_hosts" in json.loads(_play.play_vars(["mop"])[0]):
         failed += 1
         print("FAIL play_vars without git hosts must not send an empty list")
     # STATUS: FIXED — see #121
@@ -1026,12 +1028,12 @@ def check_output_179():
         print(f"FAIL driver build warnings must go to stderr: {out!r} {err!r} {code!r}")
 
     calls = []
-    keep = (lib.guard, bus.call_cluster, keys.push_llm_keys, lib.workspace_text)
+    keep = (lib.guard, bus.call_cluster, keys.push_llm_keys, _common.workspace_text)
     try:
         lib.guard = lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
         bus.call_cluster = lambda verb, **kw: calls.append(verb) or {"ok": True}
         keys.push_llm_keys = lambda profile: None
-        lib.workspace_text = lambda origin: ""
+        _common.workspace_text = lambda origin: ""
         for argv in (["pu-mop-1"], ["pu-mop-1", "--fresh"], ["pu-mop-1", "git@h:g/other.git"]):
             calls.clear()
             out, err, code = silent_run(update.main, argv)
@@ -1040,7 +1042,7 @@ def check_output_179():
                 print(f"FAIL update {argv} must be silent on success: out {out!r} "
                       f"err {err!r} code {code!r} calls {calls}")
     finally:
-        lib.guard, bus.call_cluster, keys.push_llm_keys, lib.workspace_text = keep
+        lib.guard, bus.call_cluster, keys.push_llm_keys, _common.workspace_text = keep
     return failed
 
 
@@ -1180,7 +1182,7 @@ def check_empty_llm():
     failed = 0
 
     def through_dispatcher(argv):
-        return silent_run(lambda a: cli.run(lambda x: lib.parse_llm(x) and None, a), argv)
+        return silent_run(lambda a: cli.run(lambda x: _common.parse_llm(x) and None, a), argv)
     for argv in (["--llm", ""], ["pu-mop-1", "--llm"], ["--llm="], ["--llm", "--fresh"]):
         out, err, code = through_dispatcher(argv)
         lines = err.strip().splitlines()
@@ -1188,11 +1190,11 @@ def check_empty_llm():
                 or not lines[0].startswith("--llm needs a profile name"):
             failed += 1
             print(f"FAIL parse_llm({argv}): out {out!r} err {err!r} code {code!r}")
-    got = lib.parse_llm(["pu-mop-1", "--llm", "claude"])
+    got = _common.parse_llm(["pu-mop-1", "--llm", "claude"])
     if got != ("claude", ["pu-mop-1"]):
         failed += 1
         print(f"FAIL parse_llm with a profile: {got!r}")
-    if lib.parse_llm(["pu-mop-1"]) != (None, ["pu-mop-1"]):
+    if _common.parse_llm(["pu-mop-1"]) != (None, ["pu-mop-1"]):
         failed += 1
         print("FAIL parse_llm without --llm must leave the profile unset")
     # Неизвестный профиль — прежний отказ, слово в слово.
@@ -1584,14 +1586,17 @@ def check_nomad_import_187():
     SOLUTION: как в #169 -- ImportError с тем же текстом, одну строку из него
     делает cli.run.
     STATUS: FIXED — see #187"""
+    # Команда мастер-шелла python-nomad больше не импортирует (#81, слои
+    # #258: nomad -- сервер), поэтому пробуем командой контроллера.
     return missing_library("nomad", "mop.nomad", "API library required: pip install --user "
-                           "--break-system-packages python-nomad")
+                           "--break-system-packages python-nomad",
+                           command="mop.cli.driver.build", argv=["--nope"])
 
 
-def missing_library(lib, module, text):
+def missing_library(lib, module, text, command="mop.cli.core.restart", argv=()):
     """Импорт module без библиотеки lib -- ImportError с текстом text, а
-    командлет, которому module нужен, через cli.run -- одна строка в stderr и
-    код 1. Модули перезагружаются: проверка идёт последней."""
+    командлет command, которому module нужен, через cli.run -- одна строка в
+    stderr и код 1. Модули перезагружаются: проверка идёт последней."""
     import importlib
     import importlib.abc
     failed = 0
@@ -1652,7 +1657,7 @@ def missing_library(lib, module, text):
         code = "no exit"
         with contextlib.redirect_stderr(err):
             try:
-                cli.run(cli.command("mop.cli.core.restart"), [])
+                cli.run(cli.command(command), list(argv))
             except SystemExit as e:
                 code = e.code
             except BaseException as e:

@@ -10,6 +10,16 @@ import re
 import time
 from dataclasses import asdict, dataclass
 
+# Имена внутри спеки, которые читает и ростер: группа задач папета -- по ней
+# JobSummary считает Queued. Одно место на спеку (сервер) и вердикты (все).
+GROUP = "puppets"
+
+
+def queued(job):
+    """Сколько аллокаций джоба ждёт места у планировщика."""
+    return (job.get("JobSummary", {}).get("Summary", {}).get(GROUP) or {}).get("Queued", 0)
+
+
 
 @dataclass(frozen=True)
 class State:

@@ -176,7 +176,7 @@ def nomad_items(project=None, stale=False):
         except Exception as e:
             err = nomad.describe_error(e)
         item = {"job": j, "alloc": alloc, "error": err, "task": task, "reason": reason}
-        if not alloc and not err and spec.queued(j):
+        if not alloc and not err and state.queued(j):
             # Очередь без узла, который служит проекту, -- не нехватка мест
             # (#118). Узлы -- один раз на ростер и только если есть очередь.
             if placement is None:

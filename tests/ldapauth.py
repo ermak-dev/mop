@@ -343,9 +343,10 @@ def check_service_settings_214():
     # Как пароль едет прогону: окружением процесса ansible, не аргументом,
     # и только когда провайдер -- ldap.
     from mop.cli import lib
-    penv = getattr(lib, "play_env", None)
+    from mop.cli.pool import _play
+    penv = getattr(_play, "play_env", None)
     if penv is None:
-        out.append("lib.play_env is missing")
+        out.append("_play.play_env is missing")
     else:
         if penv(SETTINGS.get).get("MOP_LDAP_BIND_PASSWORD") != "svc-pw":
             out.append("with ldap, the play's env must carry the bind password")

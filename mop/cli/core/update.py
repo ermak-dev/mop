@@ -16,6 +16,7 @@ Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
+from mop.cli.core import _common
 from mop import bus, context, llm
 
 
@@ -30,7 +31,7 @@ MCP = {"annotations": "destructive", "args": [
 
 
 def main(argv):
-    profile, args = lib.parse_llm(argv)
+    profile, args = _common.parse_llm(argv)
     fresh, force = "--fresh" in args, "--force" in args
     args = [a for a in args if a not in ("--fresh", "--force")]
     if not 1 <= len(args) <= 2:
@@ -44,7 +45,7 @@ def main(argv):
         lib.usage(f"{name}: no origin in the spec — this isn't a pool puppet")
     origin = args[1] if len(args) > 1 else old
     profile = llm.resolve(profile, old_llm)
-    lib.push_llm_keys(profile)
+    _common.push_llm_keys(profile)
     # История каталога переживает только смену профиля: при смене репозитория
     # врапер пересоздаёт клон, а разговор остался от прежнего проекта — поднять
     # его в чужом репозитории значит выдать папету чужой контекст за свой.
@@ -54,7 +55,7 @@ def main(argv):
     # строку. Решение «что меняем» остаётся здесь, сборка — там.
     got = bus.call_cluster("update", name=name, origin=origin, profile=profile,
                            cont=cont, new_origin=origin if origin != old else None,
-                           workspace=lib.workspace_text(origin),
+                           workspace=_common.workspace_text(origin),
                            owner=bus.login(), force=force,
                            branch=context.current().branch)
     # На успехе молчим (#179), как restart: MCP ответит модели `done`, а эхо

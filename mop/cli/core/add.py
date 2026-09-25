@@ -9,6 +9,7 @@ import os
 import time
 
 from mop.cli import lib
+from mop.cli.core import _common
 from mop import bus, context, llm, puppets
 
 
@@ -19,7 +20,7 @@ MCP = {"annotations": "destructive", "args": [
 
 
 def main(argv):
-    profile, args = lib.parse_llm(argv)
+    profile, args = _common.parse_llm(argv)
     if len(args) > 1:
         lib.usage(__doc__)
     profile = llm.resolve(profile)
@@ -42,7 +43,7 @@ def _add(origin, project, profile, named, p):
     """Долгая команда (#124): на терминале -- текущий шаг, при успехе --
     ничего; отказ и не вставший папет -- ошибкой."""
     p.step("LLM keys to the nodes")
-    lib.push_llm_keys(profile)
+    _common.push_llm_keys(profile)
     # Имя выбирает сервис кластера вместе с регистрацией: спека собирается
     # там же (#80), а выбор имени и есть первая её строка.
     # workspace папета (#133) едет с регистрацией: рабочая копия проекта,
@@ -51,7 +52,7 @@ def _add(origin, project, profile, named, p):
     # Ветка мастера (#256): свежий клон папета встаёт на неё, а не на
     # origin/HEAD. Из контекста команды (git config mop.branch, MOP_BRANCH).
     got = bus.call_cluster("add", origin=origin, profile=profile, timeout=30,
-                           workspace=lib.workspace_text(origin),
+                           workspace=_common.workspace_text(origin),
                            branch=context.current().branch)
     name = got["name"]
 

@@ -22,6 +22,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - `/web` — the dashboard page, served by `mop web`; no build step, no dependencies
  - `/docs` — one file per subsystem
  - `/tests` — checks of pure functions, not a framework
+ - The package has four layers by machine — common, client (operator's machine and master shell), server (controller), node — and imports go downward only; the map and the rule live in `tests/layers.py`, and a new module is placed in a layer there deliberately
 
 ## Project environment
 
