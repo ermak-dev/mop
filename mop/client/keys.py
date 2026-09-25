@@ -13,7 +13,7 @@ import json
 import os
 import time
 
-from ..common import bus, config, fsutil, llm, puppets
+from ..common import bus, config, fsutil, llm, paths, puppets
 
 # Логин claude.ai управляющей машины — то, что раздаётся на узлы.
 CREDENTIALS = os.path.expanduser("~/.claude/.credentials.json")
@@ -102,7 +102,7 @@ def push_llm_keys(profile):
     blob, note = llm_keys_blob()
     if not blob or key not in blob:
         raise RuntimeError(f"profile {profile}: {note}")
-    return distribute([_as_file(puppets.SECRETS_FILE, blob)])
+    return distribute([_as_file(paths.NODE_SECRETS, blob)])
 
 
 def credentials():
@@ -137,11 +137,14 @@ def push_login():
     даёт ту же связь правами по субъектам, поэтому полномочия узлам больше не
     нужны. Старую копию файла с узлов сносит плейбук nats: перестать раздавать
     значит оставить лежать."""
-    files = [_as_file(f"{puppets.HOME}/.claude/.credentials.json", credentials())]
+    # Имена -- относительно дома пула (#279): дом знает узел, а не оператор.
+    # С MOP_HOME своей установки в пути `mop login` на чужой сервер отбивался
+    # по каждому узлу.
+    files = [_as_file(paths.CREDENTIALS, credentials())]
     what = ["claude.ai credentials"]
     blob, note = llm_keys_blob()
     if blob:
-        files.append(_as_file(puppets.SECRETS_FILE, blob))
+        files.append(_as_file(paths.NODE_SECRETS, blob))
         what.append("node secrets (" + ", ".join(
             l.split("=")[0] for l in blob.splitlines()) + ")")
     return distribute(files), what, note

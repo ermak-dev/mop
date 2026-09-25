@@ -12,8 +12,46 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.common import bus  # noqa: E402
+from mop.common import bus, paths, puppets  # noqa: E402
 from mop.client import keys  # noqa: E402
+
+
+# ── дом пула не едет в глаголе write (#279) ──────────────────────────────
+# HYPOTHESIS: push_login и push_llm_keys собирают путь из puppets.HOME --
+# MOP_HOME установки оператора; на чужом сервере (rumop, дом /home/mop) агент
+# отказывал по каждому узлу. SOLUTION: клиент шлёт имена из paths.WRITABLE,
+# относительно дома; дом подставляет агент. STATUS: FIXED — see #279
+def check_no_home_279(c):
+    sent = {}
+
+    def request_many(verb, nodes, timeout=None, **kw):
+        sent["verb"], sent["files"] = verb, kw.get("files")
+        return {n: {"written": []} for n in nodes}
+    saved = (bus.request_many, puppets.ready_nodes, keys.credentials, keys.llm_keys_blob)
+    try:
+        bus.request_many = request_many
+        puppets.ready_nodes = lambda: {"n1"}
+        keys.credentials = lambda: b"{}"
+        keys.llm_keys_blob = lambda: ("K=v\n", None)
+        results, _what, _note = keys.push_login()
+        c.expect("push_login: every node OK", results, {"n1": "OK"})
+        got = sorted(f[0] for f in sent.get("files") or [])
+        c.expect("push_login sends the relative names, no home",
+                 got, sorted(paths.WRITABLE))
+        for p in got:
+            c.check(f"push_login: {p} is relative", not os.path.isabs(p))
+        from mop.common import llm
+        saved_get = llm.get
+        try:
+            llm.get = lambda _p: {"key": "K"}
+            keys.push_llm_keys("prof")
+        finally:
+            llm.get = saved_get
+        got = [f[0] for f in sent.get("files") or []]
+        c.expect("push_llm_keys sends the relative secrets name", got,
+                 [getattr(paths, "NODE_SECRETS", ".config/mop/secrets.env")])
+    finally:
+        bus.request_many, puppets.ready_nodes, keys.credentials, keys.llm_keys_blob = saved
 
 
 def main():
@@ -42,6 +80,7 @@ def main():
     for gone in ("_push_via_sysbatch", "push_spec", "push_script", "LOGIN_JOB"):
         c.check(f"keys.{gone} must be gone: there is no fallback past the agent",
                 not hasattr(keys, gone))
+    check_no_home_279(c)
     return c.report("keys")
 
 
