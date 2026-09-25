@@ -905,6 +905,21 @@ def check_clone_before_bootstrap_247():
     check("stage refuses an empty PU_CLONE before any rm -rf", stage,
           lambda s: "${PU_CLONE:?" in s and s.index("${PU_CLONE:?") < s.index('rm -rf "$d"'))
     check("stage ends with CLONE_SH itself", stage, lambda s: s.endswith(snippet))
+    # #256: ветка мастера из меты джоба (NOMAD_META_branch) -- checkout после
+    # свежего клона; существующий клон не переключается, там может быть
+    # работа; нет такой ветки в origin -- завести локально, мастер создаст
+    # её первым landing. STATUS: FIXED — see #256
+    check("no branch, no checkout", stage, lambda s: "checkout" not in s)
+    with_b = run.clone_script(dict(env, NOMAD_META_branch="swarm"))
+    check("branch stage still carries CLONE_SH", with_b, lambda s: snippet in s)
+    check("branch stage exports PU_BRANCH", with_b,
+          lambda s: "export PU_BRANCH=swarm\n" in s)
+    check("checkout comes after the clone, for a fresh clone only", with_b,
+          lambda s: s.index("checkout") > s.index(snippet)
+          and "fresh" in s and 'git -C "$d" checkout -q "$PU_BRANCH"' in s
+          and 'checkout -q -b "$PU_BRANCH"' in s)
+    check("branch stage is valid bash", with_b, lambda s: __import__("subprocess").run(
+        ["bash", "-n"], input=s, text=True, capture_output=True).returncode == 0)
     # Порядок в run.main: клон исполняется в теле до вызова сервера.
     src = inspect.getsource(run.main)
     check("run.main clones before bootstrap", src,

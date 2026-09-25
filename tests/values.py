@@ -269,7 +269,7 @@ def project_forms():
         cluster.next_name = lambda target: f"pu-{target}-6"
         cluster.store_workspace = lambda root, name, req: None
         cluster.nomad.register = registered.append
-        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False: \
+        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None: \
             {"Job": {"ID": name, "origin": origin}}
         out["add_over"] = dump(cluster._add("rugent", {"origin": RUGENT}))
         out["add_free"] = dump(cluster._add("mop", {"origin": MOP}))

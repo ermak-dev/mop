@@ -75,9 +75,24 @@ def clone_script(environ):
     функция. Прелюдия из окружения задачи, отказ на первой ошибке, охрана
     пустого PU_CLONE (rm -rf в сниппете над пустой строкой снёс бы тело),
     затем driver.CLONE_SH -- тот же текст, что стоит во врапере спеки."""
-    return (_prelude(environ) + "set -e\n"
+    head = (_prelude(environ) + "set -e\n"
             ': "${PU_CLONE:?no PU_CLONE in the task environment}"\n'
-            'd="$PU_CLONE"\n' + driver.CLONE_SH)
+            'd="$PU_CLONE"\n')
+    # Ветка мастера (#256) -- из меты джоба: Nomad отдаёт Meta задаче как
+    # NOMAD_META_<ключ>. Checkout только у свежего клона (не было .git или
+    # origin сменился и сниппет снесёт каталог): существующий клон не
+    # переключается, там может быть работа. Нет такой ветки в origin --
+    # завести локально: мастер создаст её на origin первым landing.
+    branch = (environ.get("NOMAD_META_branch") or "").strip()
+    if not branch:
+        return head + driver.CLONE_SH
+    return (head + f"export PU_BRANCH={shlex.quote(branch)}\n"
+            'fresh=1\n'
+            'if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" = "$PU_ORIGIN" ]; then fresh=0; fi\n'
+            + driver.CLONE_SH +
+            'if [ "$fresh" = 1 ]; then\n'
+            '    git -C "$d" checkout -q "$PU_BRANCH" 2>/dev/null || git -C "$d" checkout -q -b "$PU_BRANCH"\n'
+            'fi\n')
 
 
 def ensure_params(name, environ):

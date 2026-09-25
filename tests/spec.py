@@ -896,6 +896,29 @@ def main():
         bad += 1
         print(f"FAILED  the wrapper is not valid bash: {r.stderr.strip()}")
 
+    # ── #256: ветка мастера едет метой джоба, не окружением ───────────────
+    # HYPOTHESIS: свежий папет стоит на origin/HEAD (beta3.1 у rudesktop):
+    # ветка человека (#249) до регистрации не доезжает. SOLUTION: job_spec
+    # берёт branch и кладёт в Meta -- Nomad отдаёт её задаче как
+    # NOMAD_META_branch, и `mop driver run` делает checkout после свежего
+    # клона. Именно метой, а не Env: окружение задачи и врапер не меняются,
+    # версия шаблона та же, ни одна зарегистрированная спека не устаревает.
+    # STATUS: FIXED — see #256
+    cases += 1
+    with_b = spec.job_spec("pu-mop-1", ORIGIN, "claude", branch="swarm")["Job"]
+    without = spec.job_spec("pu-mop-1", ORIGIN, "claude")["Job"]
+    if with_b["Meta"].get("branch") != "swarm" or "branch" in without["Meta"]:
+        bad += 1
+        print(f"FAILED  #256 branch must ride in Meta only when given: "
+              f"{with_b['Meta']} / {without['Meta']}")
+    cases += 1
+    env_b = with_b["TaskGroups"][0]["Tasks"][0]["Env"]
+    env_0 = without["TaskGroups"][0]["Tasks"][0]["Env"]
+    if env_b != env_0 or with_b["Meta"][spec.SPEC_META] != without["Meta"][spec.SPEC_META] \
+            or spec.spec_is_stale(with_b):
+        bad += 1
+        print("FAILED  #256 the branch must not touch the task env or the template version")
+
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
 
