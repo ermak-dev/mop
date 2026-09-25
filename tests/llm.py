@@ -14,6 +14,7 @@ import sys
 import types
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import config, llm  # noqa: E402
@@ -45,34 +46,23 @@ CASES = [
 
 
 def main():
-    bad = 0
-    cases = 0
+    c = Checks()
     for what, mod, want in CASES:
-        cases += 1
         try:
             got = llm.contract("fake", mod)
         except RuntimeError:
             got = None
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}\n  wanted:  {want!r}\n  got: {got!r}")
+        c.expect(what, got, want)
 
     for name in ("claude", "glm"):
-        cases += 1
-        if not isinstance(llm.get(name), dict):
-            bad += 1
-            print(f"FAILED  registry didn't find profile {name}")
-    cases += 1
-    if llm.get("no-such") is not None:
-        bad += 1
-        print("FAILED  get() of an unknown name must return None")
-    cases += 1
+        c.check(f"registry must find profile {name}", isinstance(llm.get(name), dict))
+    c.expect("get() of an unknown name must return None", llm.get("no-such"), None)
     try:
         llm.require("no-such")
-        bad += 1
-        print("FAILED  require() of an unknown name must refuse")
+        refused = False
     except RuntimeError:
-        pass
+        refused = True
+    c.check("require() of an unknown name must refuse", refused)
 
     # Правило выбора профиля (#147): одно на все места, где его раньше
     # набирали руками. Умолчание берём из настройки, а не литералом: .env
@@ -105,17 +95,12 @@ def main():
          lambda: of_meta({"llm": ""}), ""),
     ]
     for what, run, want in RULE:
-        cases += 1
         try:
             got = run()
         except Exception as e:
             got = f"{type(e).__name__}: {e}"
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}\n  wanted:  {want!r}\n  got: {got!r}")
-
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+        c.expect(what, got, want)
+    return c.report("llm")
 
 
 if __name__ == "__main__":

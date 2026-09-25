@@ -19,6 +19,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import lease  # noqa: E402
@@ -42,55 +43,48 @@ def rec(user, age):
 
 
 def main():
-    cases = bad = 0
-
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}: got {got!r}, want {want!r}")
+    c = Checks()
 
     def act(owner, me, clone, force=False):
         return lease.verdict(owner, me, CloneFacts.from_dict(clone), NOW, force=force)[0]
 
     # Запись: туда и обратно, мусор -- не владелец.
     # Строка файла -- Owner.render/parse (#204).
-    check("render/parse", Owner.parse(Owner("anton", NOW).render()), Owner("anton", NOW))
+    c.expect("render/parse", Owner.parse(Owner("anton", NOW).render()), Owner("anton", NOW))
     for junk in ("", "anton", "anton\tnot-a-time", "\t123", None):
-        check(f"parse junk {junk!r}", Owner.parse(junk), None)
+        c.expect(f"parse junk {junk!r}", Owner.parse(junk), None)
 
     # Отправитель не назвался (папет соседу) -- аренда не трогается.
-    check("anonymous sender passes", act(rec("olga", 5), None, ON_BRANCH), "pass")
+    c.expect("anonymous sender passes", act(rec("olga", 5), None, ON_BRANCH), "pass")
     # Ничей -- берём; свой -- берём (продлеваем).
-    check("nobody's is taken", act(None, "anton", CLEAN), "take")
-    check("own is refreshed", act(rec("anton", 5), "anton", DIRTY), "take")
+    c.expect("nobody's is taken", act(None, "anton", CLEAN), "take")
+    c.expect("own is refreshed", act(rec("anton", 5), "anton", DIRTY), "take")
 
     # Чужой: держит, пока в клоне работа...
     for what, clone in (("dirty", DIRTY), ("ahead", AHEAD)):
-        check(f"foreign with work ({what}) refuses", act(rec("olga", 9999), "anton", clone), "refuse")
+        c.expect(f"foreign with work ({what}) refuses", act(rec("olga", 9999), "anton", clone), "refuse")
     # ...и пока аренда моложе окна: папет ещё не завёл ветку.
-    check("foreign fresh on a clean clone refuses",
+    c.expect("foreign fresh on a clean clone refuses",
           act(rec("olga", lease.WINDOW - 1), "anton", CLEAN), "refuse")
     # Окно прошло, работы нет -- аренда истекла.
-    check("foreign stale on a clean clone is taken",
+    c.expect("foreign stale on a clean clone is taken",
           act(rec("olga", lease.WINDOW + 1), "anton", CLEAN), "take")
     # Клон неизвестен -- не значит «пусто».
-    check("unknown clone holds", act(rec("olga", 9999), "anton", None), "refuse")
+    c.expect("unknown clone holds", act(rec("olga", 9999), "anton", None), "refuse")
     # force забирает и называет, у кого.
     got = lease.verdict(rec("olga", 5), "anton", CloneFacts.from_dict(DIRTY), NOW, force=True)
-    check("force takes", got[0], "take")
-    check("force names the displaced", "olga" in (got[1] or ""), True)
+    c.expect("force takes", got[0], "take")
+    c.expect("force names the displaced", "olga" in (got[1] or ""), True)
     why = lease.verdict(rec("olga", 60), "anton", CloneFacts.from_dict(DIRTY), NOW)[1] or ""
-    check("refusal names the owner and force", "olga" in why and "force" in why, True)
+    c.expect("refusal names the owner and force", "olga" in why and "force" in why, True)
 
     # Ростер показывает только живую аренду.
     def live(owner, clone):
         return lease.live(owner, CloneFacts.from_dict(clone), NOW)
-    check("live: foreign with work", live(rec("olga", 9999), DIRTY), True)
-    check("live: fresh on clean", live(rec("olga", 5), CLEAN), True)
-    check("not live: stale on clean", live(rec("olga", lease.WINDOW + 1), CLEAN), False)
-    check("not live: no record", live(None, DIRTY), False)
+    c.expect("live: foreign with work", live(rec("olga", 9999), DIRTY), True)
+    c.expect("live: fresh on clean", live(rec("olga", 5), CLEAN), True)
+    c.expect("not live: stale on clean", live(rec("olga", lease.WINDOW + 1), CLEAN), False)
+    c.expect("not live: no record", live(None, DIRTY), False)
 
     # ── ворота владения (#40) ─────────────────────────────────────────
     # HYPOTHESIS: владельца сверяет только send; slash/type, wipe, restart,
@@ -100,36 +94,34 @@ def main():
     # действия; verdict send'а -- поверх неё, и решение одно.
     # STATUS: FIXED — see #40
     fn = getattr(lease, "may_touch", None)
-    if fn is None:
-        check("lease.may_touch exists", False, True)
-    else:
+    if c.check("lease.may_touch exists", fn is not None):
         def touch(owner, me, clone, force=False, operator=False):
             return fn(owner, me, CloneFacts.from_dict(clone), NOW, force=force,
                       operator=operator)
 
-        check("touch: nobody's", touch(None, "anton", CLEAN)[0], True)
-        check("touch: nobody's, anonymous", touch(None, None, DIRTY)[0], True)
-        check("touch: own with work", touch(rec("anton", 9999), "anton", DIRTY)[0], True)
+        c.expect("touch: nobody's", touch(None, "anton", CLEAN)[0], True)
+        c.expect("touch: nobody's, anonymous", touch(None, None, DIRTY)[0], True)
+        c.expect("touch: own with work", touch(rec("anton", 9999), "anton", DIRTY)[0], True)
         for what, clone in (("dirty", DIRTY), ("ahead", AHEAD), ("unknown clone", None)):
             ok, why = touch(rec("olga", 9999), "anton", clone)
-            check(f"touch: foreign with work ({what}) refused", ok, False)
-            check(f"touch: refusal names the owner ({what})",
+            c.expect(f"touch: foreign with work ({what}) refused", ok, False)
+            c.expect(f"touch: refusal names the owner ({what})",
                   "olga" in (why or "") and "force" in (why or ""), True)
-        check("touch: foreign inside the dispatch window refused",
+        c.expect("touch: foreign inside the dispatch window refused",
               touch(rec("olga", lease.WINDOW - 1), "anton", CLEAN)[0], False)
-        check("touch: foreign expired on a clean clone",
+        c.expect("touch: foreign expired on a clean clone",
               touch(rec("olga", lease.WINDOW + 1), "anton", CLEAN), (True, None))
         # Безымянный вызывающий к чужой живой аренде -- отказ: иначе ворота
         # обходятся тем, что не назваться.
-        check("touch: anonymous against a live lease refused",
+        c.expect("touch: anonymous against a live lease refused",
               touch(rec("olga", 5), None, DIRTY)[0], False)
         ok, why = touch(rec("olga", 5), "anton", DIRTY, force=True)
-        check("touch: force passes", ok, True)
-        check("touch: force names whom", "olga" in (why or ""), True)
+        c.expect("touch: force passes", ok, True)
+        c.expect("touch: force names whom", "olga" in (why or ""), True)
         # Оператор (gc, doctor, wipe) не упирается никогда.
-        check("touch: operator passes a foreign lease with work",
+        c.expect("touch: operator passes a foreign lease with work",
               touch(rec("olga", 5), "anton", DIRTY, operator=True)[0], True)
-        check("touch: operator passes anonymously",
+        c.expect("touch: operator passes anonymously",
               touch(rec("olga", 5), None, DIRTY, operator=True)[0], True)
 
     # ── ветка не по умолчанию -- не работа (#266) ────────────────────
@@ -146,14 +138,14 @@ def main():
     # С #272 «ветка мастера» -- это дом клона (home): папет #256 стоит на нём.
     ON_MASTERS = dict(ON_BRANCH, home=ON_BRANCH["cur"])
     stale = rec("olga", lease.WINDOW + 1)
-    check("#266: clean on the master's branch with a stale owner may be touched",
+    c.expect("#266: clean on the master's branch with a stale owner may be touched",
           lease.may_touch(stale, "anton", CloneFacts.from_dict(ON_MASTERS), NOW), (True, None))
-    check("#266: clean on the master's branch with a stale owner is not live",
+    c.expect("#266: clean on the master's branch with a stale owner is not live",
           lease.live(stale, CloneFacts.from_dict(ON_MASTERS), NOW), False)
     for what, clone in (("dirty", dict(ON_MASTERS, dirty=1)), ("ahead", dict(ON_MASTERS, ahead=1))):
-        check(f"#266: master's branch with work ({what}) still refused",
+        c.expect(f"#266: master's branch with work ({what}) still refused",
               lease.may_touch(stale, "anton", CloneFacts.from_dict(clone), NOW)[0], False)
-    check("#266: clean master's branch inside the dispatch window still refused",
+    c.expect("#266: clean master's branch inside the dispatch window still refused",
           lease.may_touch(rec("olga", lease.WINDOW - 1), "anton",
                           CloneFacts.from_dict(ON_MASTERS), NOW)[0], False)
 
@@ -168,25 +160,25 @@ def main():
     # STATUS: FIXED — see #272
     waiting = {"cur": "bug/272-x", "def": "master", "home": "master", "dirty": 0, "ahead": 0}
     ok, why = lease.may_touch(stale, "anton", CloneFacts.from_dict(waiting), NOW)
-    check("#272: a puppet waiting for accept refuses another master", ok, False)
-    check("#272: the refusal names the ticket branch and the owner",
+    c.expect("#272: a puppet waiting for accept refuses another master", ok, False)
+    c.expect("#272: the refusal names the ticket branch and the owner",
           "bug/272-x" in (why or "") and "olga" in (why or ""), True)
     home = {"cur": "swarm", "def": "master", "home": "swarm", "dirty": 0, "ahead": 0}
-    check("#272: clean on its home (the master's branch) with a stale owner is takeable",
+    c.expect("#272: clean on its home (the master's branch) with a stale owner is takeable",
           lease.may_touch(stale, "anton", CloneFacts.from_dict(home), NOW), (True, None))
-    check("#272: off its home even on the default branch holds",
+    c.expect("#272: off its home even on the default branch holds",
           lease.may_touch(stale, "anton", CloneFacts.from_dict(dict(home, cur="master")),
                           NOW)[0], False)
     old = {"cur": "bug/272-x", "def": "master", "dirty": 0, "ahead": 0}
-    check("#272: old agent (no home) off the default branch holds",
+    c.expect("#272: old agent (no home) off the default branch holds",
           lease.may_touch(stale, "anton", CloneFacts.from_dict(old), NOW)[0], False)
-    check("#272: old agent (no home) on the default branch is takeable",
+    c.expect("#272: old agent (no home) on the default branch is takeable",
           lease.may_touch(stale, "anton", CloneFacts.from_dict(dict(old, cur="master")),
                           NOW), (True, None))
-    check("#272: no home recorded -- home is the default branch",
+    c.expect("#272: no home recorded -- home is the default branch",
           CloneFacts.from_dict(dict(old, home=None)).home_branch, "master")
     fresh = lease.may_touch(rec("olga", 60), "anton", CloneFacts.from_dict(home), NOW)[1] or ""
-    check("#272: inside the window the refusal says nothing is committed yet",
+    c.expect("#272: inside the window the refusal says nothing is committed yet",
           "nothing committed yet" in fresh and "no branch" not in fresh, True)
 
     # Провод не двигается: факты агента туда и обратно -- байт в байт, и
@@ -196,12 +188,11 @@ def main():
                        ("no home recorded (old agent)",
                         {k: v for k, v in WIRE.items() if k != "home"})):
         back = CloneFacts.from_dict(wire).to_dict()
-        check(f"#266: CloneFacts round-trips the agent's dict ({what})",
+        c.expect(f"#266: CloneFacts round-trips the agent's dict ({what})",
               (back, list(back)), (wire, list(wire)))
-    check("#266: no clone data is no CloneFacts", CloneFacts.from_dict(None), None)
+    c.expect("#266: no clone data is no CloneFacts", CloneFacts.from_dict(None), None)
 
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+    return c.report("lease")
 
 
 if __name__ == "__main__":

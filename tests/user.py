@@ -11,14 +11,13 @@ SOLUTION: группа `mop server user` -- add, passwd, delete и перехо�
 обновляет сама, когда может, иначе одной строкой просит mop server deploy.
 STATUS: FIXED — see #218
 """
-import contextlib
-import io
 import os
 import stat
 import sys
 import tempfile
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks, run_command  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 import importlib  # noqa: E402
@@ -30,7 +29,6 @@ FILE = os.path.join(identity.SECRETS, identity.OPERATORS_FILE)
 INVENTORY = os.path.join(ROOT, "inventory.yaml")
 NATS = os.path.join(ROOT, "nats")
 COPY = os.path.join(NATS, "identity", identity.OPERATORS_FILE)
-failed = []
 
 
 def verb(name):
@@ -39,32 +37,16 @@ def verb(name):
 
 def run(name, argv, stdin="", typed=()):
     """Командлет в процессе. -> (код, stdout, stderr). typed -- что человек
-    набирает в getpass, по очереди."""
+    набирает в getpass, по очереди. Выход текстом (sys.exit("...")) --
+    код 1 и этот текст в stderr, как у настоящего запуска."""
     module = verb(name)
-    answers = list(typed)
-    keep = (sys.stdin, getattr(module, "getpass", None))
-    out, err = io.StringIO(), io.StringIO()
-    sys.stdin = io.StringIO(stdin)
-    if keep[1] is not None:
-        module.getpass = lambda prompt="": answers.pop(0)
-    try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                code = module.main(list(argv))
-            except SystemExit as e:
-                code = e.code if isinstance(e.code, int) else 1
-                if not isinstance(e.code, int) and e.code:
-                    err.write(str(e.code))
-    finally:
-        sys.stdin = keep[0]
-        if keep[1] is not None:
-            module.getpass = keep[1]
-    return code, out.getvalue(), err.getvalue()
-
-
-def check(what, ok, detail=""):
-    if not ok:
-        failed.append(f"{what}" + (f": {detail}" if detail else ""))
+    out, err, code = run_command(module.main, argv, stdin=stdin, typed=typed,
+                                 module=module)
+    if not isinstance(code, int):
+        if code:
+            err += str(code)
+        code = 1
+    return code, out, err
 
 
 def provider():
@@ -84,6 +66,7 @@ def authenticates(login, password):
 
 
 def main():
+    c = Checks()
     for k in ("MOP_OPERATORS", "MOP_OPERATORS_FILE", "MOP_AUTH_PROVIDER"):
         os.environ.pop(k, None)
     os.environ["INVENTORY"] = INVENTORY
@@ -99,10 +82,10 @@ def main():
     # STATUS: FIXED — see #238
     open(INVENTORY, "w").write("all: {}\n")
     code, out, err = run("add", ["root", "--role", "admin", "--stdin"], "pw-r\n")
-    check("fresh server: add without secrets/ succeeds", code == 0, (code, out, err))
-    check("fresh server: secrets/ is made 0700", os.path.isdir(identity.SECRETS)
+    c.check("fresh server: add without secrets/ succeeds", code == 0, (code, out, err))
+    c.check("fresh server: secrets/ is made 0700", os.path.isdir(identity.SECRETS)
           and stat.S_IMODE(os.stat(identity.SECRETS).st_mode) == 0o700)
-    check("fresh server: the operators file is 0600 with the person",
+    c.check("fresh server: the operators file is 0600 with the person",
           content() is not None and stat.S_IMODE(os.stat(FILE).st_mode) == 0o600
           and authenticates("root", "pw-r") is not None, content())
     # Дальше проверки ждут чистый дом: ни файла, ни secrets/, ни инвентаря.
@@ -112,12 +95,12 @@ def main():
 
     # ── не сервер: ни secrets/, ни инвентаря ─────────────────────────────
     code, out, err = run("add", ["alice", "--role", "admin", "--stdin"], "pw\n")
-    check("off the server: refused", code != 0 and "server" in err and content() is None,
+    c.check("off the server: refused", code != 0 and "server" in err and content() is None,
           (code, out, err))
-    check("off the server: the refusal names the inventory", "inventory.yaml" in err, err)
+    c.check("off the server: the refusal names the inventory", "inventory.yaml" in err, err)
     os.makedirs(identity.SECRETS)
     code, out, err = run("add", ["alice", "--role", "admin", "--stdin"], "pw\n")
-    check("secrets/ but no inventory: still not the server",
+    c.check("secrets/ but no inventory: still not the server",
           code != 0 and "server" in err and content() is None, (code, out, err))
     open(INVENTORY, "w").write("all: {}\n")
     os.makedirs(NATS)
@@ -127,33 +110,33 @@ def main():
                                  "--name", "Alice Liddell", "--email", "alice@example.dev",
                                  "--stdin"], "pw-a1\n")
     who = authenticates("alice", "pw-a1")
-    check("add: silent success", code == 0 and not out and not err, (code, out, err))
-    check("add: the login authenticates with its password",
+    c.check("add: silent success", code == 0 and not out and not err, (code, out, err))
+    c.check("add: the login authenticates with its password",
           who == identity.Identity("alice", "user", ("mop", "web"), "Alice Liddell",
                                    "alice@example.dev"), who)
-    check("add: the file is 0600", content() is not None
+    c.check("add: the file is 0600", content() is not None
           and stat.S_IMODE(os.stat(FILE).st_mode) == 0o600)
-    check("add: the services' copy follows",
+    c.check("add: the services' copy follows",
           os.path.exists(COPY) and open(COPY).read() == content()
           and stat.S_IMODE(os.stat(COPY).st_mode) == 0o600)
     with open(FILE, "a") as f:
         f.write("# a comment the operator wrote\n")
     before = content()
     code, out, err = run("add", ["alice", "--role", "admin", "--stdin"], "x\n")
-    check("add: an existing login is refused", code != 0 and "alice" in err
+    c.check("add: an existing login is refused", code != 0 and "alice" in err
           and content() == before, (code, err))
 
     code, out, err = run("add", ["bob", "--role", "admin"], typed=("pw-b", "pw-b"))
-    check("add: the password asked twice", code == 0 and authenticates("bob", "pw-b")
+    c.check("add: the password asked twice", code == 0 and authenticates("bob", "pw-b")
           and authenticates("bob", "pw-b").role == "admin", (code, out, err))
     code, out, err = run("add", ["carol", "--role", "admin"], typed=("one", "two"))
-    check("add: two different passwords are refused",
+    c.check("add: two different passwords are refused",
           code != 0 and provider().lookup("carol") is None, (code, err))
     code, out, err = run("add", ["carol", "--role", "admin", "--stdin"], "\n")
-    check("add: an empty password is refused",
+    c.check("add: an empty password is refused",
           code != 0 and provider().lookup("carol") is None, (code, err))
     code, out, err = run("add", ["dora", "--role", "user", "--projects", "*", "--stdin"], "pw\n")
-    check("add: user on every project", code == 0
+    c.check("add: user on every project", code == 0
           and provider().lookup("dora").projects == ("*",), (code, err))
 
     for argv, why in ((["carol", "--role", "root"], "an unknown role"),
@@ -167,30 +150,30 @@ def main():
                       (["carol", "--role", "admin", "--frobnicate"], "an unknown flag")):
         before = content()
         code, out, err = run("add", argv + ["--stdin"], "pw\n")
-        check(f"add: {why} is refused", code != 0 and content() == before, (code, out, err))
-    check("add: the comment survives", "# a comment the operator wrote" in content())
+        c.check(f"add: {why} is refused", code != 0 and content() == before, (code, out, err))
+    c.check("add: the comment survives", "# a comment the operator wrote" in content())
 
     # ── passwd ───────────────────────────────────────────────────────────
     code, out, err = run("passwd", ["alice", "--stdin"], "pw-a2\n")
-    check("passwd: silent success", code == 0 and not out and not err, (code, out, err))
-    check("passwd: the new password works, the old one does not",
+    c.check("passwd: silent success", code == 0 and not out and not err, (code, out, err))
+    c.check("passwd: the new password works, the old one does not",
           authenticates("alice", "pw-a2") and not authenticates("alice", "pw-a1"))
-    check("passwd: the rest of the line stays",
+    c.check("passwd: the rest of the line stays",
           provider().lookup("alice") == identity.Identity(
               "alice", "user", ("mop", "web"), "Alice Liddell", "alice@example.dev"))
     code, out, err = run("passwd", ["bob"], typed=("pw-b2", "pw-b2"))
-    check("passwd: asked twice", code == 0 and authenticates("bob", "pw-b2"), (code, err))
+    c.check("passwd: asked twice", code == 0 and authenticates("bob", "pw-b2"), (code, err))
     code, out, err = run("passwd", ["nobody", "--stdin"], "x\n")
-    check("passwd: an unknown login is refused", code != 0 and "nobody" in err, (code, err))
+    c.check("passwd: an unknown login is refused", code != 0 and "nobody" in err, (code, err))
 
     # ── delete ───────────────────────────────────────────────────────────
     code, out, err = run("delete", ["bob"])
-    check("delete: silent success", code == 0 and not out and not err, (code, out, err))
-    check("delete: the login is gone", provider().lookup("bob") is None
+    c.check("delete: silent success", code == 0 and not out and not err, (code, out, err))
+    c.check("delete: the login is gone", provider().lookup("bob") is None
           and provider().lookup("alice") is not None)
-    check("delete: the copy follows", open(COPY).read() == content())
+    c.check("delete: the copy follows", open(COPY).read() == content())
     code, out, err = run("delete", ["bob"])
-    check("delete: an unknown login is refused", code != 0 and "bob" in err, (code, err))
+    c.check("delete: an unknown login is refused", code != 0 and "bob" in err, (code, err))
 
     # ── import: MOP_OPERATORS с нынешними паролями ───────────────────────
     for login, pw in (("dan", "old-d"), ("eve", "old-e")):
@@ -199,30 +182,30 @@ def main():
     os.environ["MOP_OPERATORS"] = "dan:admin; eve:user:mop,web; zed:admin"
     before = content()
     code, out, err = run("import", [])
-    check("import: a login without a password refuses everything",
+    c.check("import: a login without a password refuses everything",
           code != 0 and "zed" in err and content() == before, (code, err))
     os.environ["MOP_OPERATORS"] = "dan:admin; eve:user:mop,web"
     code, out, err = run("add", ["dan", "--role", "admin", "--stdin"], "x\n")
-    check("add: a login of MOP_OPERATORS is refused", code != 0 and "MOP_OPERATORS" in err
+    c.check("add: a login of MOP_OPERATORS is refused", code != 0 and "MOP_OPERATORS" in err
           and content() == before, (code, err))
     code, out, err = run("import", [])
-    check("import: says to drop MOP_OPERATORS, in one line",
+    c.check("import: says to drop MOP_OPERATORS, in one line",
           code == 0 and "MOP_OPERATORS" in out and len(out.strip().splitlines()) == 1
           and not err, (code, out, err))
     code, out, err = run("import", [])
-    check("import: logins already in the file are refused", code != 0 and "dan" in err,
+    c.check("import: logins already in the file are refused", code != 0 and "dan" in err,
           (code, err))
     del os.environ["MOP_OPERATORS"]
     dan, eve = authenticates("dan", "old-d"), authenticates("eve", "old-e")
-    check("import: the old password works, role and projects kept",
+    c.check("import: the old password works, role and projects kept",
           dan == identity.Identity("dan", "admin", ("*",))
           and eve == identity.Identity("eve", "user", ("mop", "web")), (dan, eve))
-    check("import: the others stay", provider().lookup("alice") is not None)
+    c.check("import: the others stay", provider().lookup("alice") is not None)
 
     # ── копию не обновить -- одна строка про deploy ──────────────────────
     natsconf.IDENTITY_DIR = os.path.join(ROOT, "absent", "identity")
     code, out, err = run("add", ["fay", "--role", "admin", "--stdin"], "pw\n")
-    check("add: no way to the copy -- one line asking for mop server deploy",
+    c.check("add: no way to the copy -- one line asking for mop server deploy",
           code == 0 and "mop server deploy" in out and len(out.strip().splitlines()) == 1
           and authenticates("fay", "pw"), (code, out, err))
     natsconf.IDENTITY_DIR = os.path.join(NATS, "identity")
@@ -234,7 +217,7 @@ def main():
                               ("passwd", ["alice", "--stdin"], "pw\n"),
                               ("delete", ["alice"], ""), ("import", [], "")):
         code, out, err = run(name, argv, stdin)
-        check(f"{name}: refused with the ldap provider",
+        c.check(f"{name}: refused with the ldap provider",
               code != 0 and "LDAP" in err and content() == before, (code, err))
     # ── #232: file,ldap -- файл в цепочке, mop server user его правит ───────────
     # HYPOTHESIS: отказ «people live in LDAP» -- по одному провайдеру ldap;
@@ -244,17 +227,17 @@ def main():
         os.environ["MOP_AUTH_PROVIDER"] = chain
         login = "ivy" if chain == "file,ldap" else "jon"
         code, out, err = run("add", [login, "--role", "admin", "--stdin"], "pw\n")
-        check(f"add: works with {chain}", code == 0 and authenticates(login, "pw"),
+        c.check(f"add: works with {chain}", code == 0 and authenticates(login, "pw"),
               (code, out, err))
         code, out, err = run("passwd", [login, "--stdin"], "pw2\n")
-        check(f"passwd: works with {chain}", code == 0 and authenticates(login, "pw2"),
+        c.check(f"passwd: works with {chain}", code == 0 and authenticates(login, "pw2"),
               (code, out, err))
         code, out, err = run("delete", [login])
-        check(f"delete: works with {chain}", code == 0 and provider().lookup(login) is None,
+        c.check(f"delete: works with {chain}", code == 0 and provider().lookup(login) is None,
               (code, out, err))
     os.environ["MOP_AUTH_PROVIDER"] = "ldap,nope"
     code, out, err = run("add", ["kit", "--role", "admin", "--stdin"], "pw\n")
-    check("add: an unknown link is refused, named", code != 0 and "nope" in err
+    c.check("add: an unknown link is refused, named", code != 0 and "nope" in err
           and provider().lookup("kit") is None, (code, out, err))
     del os.environ["MOP_AUTH_PROVIDER"]
 
@@ -262,13 +245,11 @@ def main():
     elsewhere = os.path.join(ROOT, "ops")
     os.environ["MOP_OPERATORS_FILE"] = elsewhere
     code, out, err = run("add", ["hal", "--role", "admin", "--stdin"], "pw\n")
-    check("add: MOP_OPERATORS_FILE names the file", code == 0 and os.path.exists(elsewhere)
+    c.check("add: MOP_OPERATORS_FILE names the file", code == 0 and os.path.exists(elsewhere)
           and provider().lookup("hal") is None, (code, err))
     del os.environ["MOP_OPERATORS_FILE"]
 
-    print("\n".join(f"FAIL {l}" for l in failed) if failed else "", end="\n" if failed else "")
-    print("user: FAILED" if failed else "user: ok")
-    return 1 if failed else 0
+    return c.report("user")
 
 
 if __name__ == "__main__":

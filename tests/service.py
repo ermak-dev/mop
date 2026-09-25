@@ -19,6 +19,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import busnames  # noqa: E402
@@ -57,28 +58,26 @@ def old_builder_line(req, out):
             f"{out.get('error') or ('skipped' if out.get('skipped') else 'ok')}")
 
 
-def check_project():
+def check_project(c):
     """Проект -- второй токен субъекта для каждой формы, что сервисы
     получают сегодня. Субъекты -- из busnames, как у подписок."""
     from mop.common import service
-    out = []
     for p in ("rugent", "mop", busnames.ADMIN, "a-b_c"):
         for subj, old in ((busnames.cluster(p), old_cluster_project),
                           (busnames.server(p), old_bootstrap_project)):
             got = service.project_from_subject(subj)
-            if got != p or got != old(subj):
-                out.append(f"project_from_subject({subj}) -> {got!r}, "
-                           f"wanted {p!r} (today {old(subj)!r})")
-    if service.project_from_subject(busnames.build()) != busnames.ADMIN:
-        out.append(f"the build subject is the operator's: {busnames.build()}")
+            c.check(f"project_from_subject({subj}) -> {got!r}, "
+                    f"wanted {p!r} (today {old(subj)!r})",
+                    not (got != p or got != old(subj)))
+    c.check(f"the build subject is the operator's: {busnames.build()}",
+            not (service.project_from_subject(busnames.build()) != busnames.ADMIN))
     # Где прежние правила расходились: субъект из двух токенов. Подписки
     # `mop.*.cluster.rpc` и `mop.*.server.rpc` ловят ровно четыре токена, так
     # что такой субъект не доходит ни до одного сервиса, и ответ не меняется.
     # Правило одно -- как у cluster: нет третьего токена -- нет проекта.
     for subj in ("mop.x", "mop", "", None):
-        if service.project_from_subject(subj) != "":
-            out.append(f"project_from_subject({subj!r}) must be empty")
-    return out
+        c.check(f"project_from_subject({subj!r}) must be empty",
+                not (service.project_from_subject(subj) != ""))
 
 
 REQS = [
@@ -100,23 +99,20 @@ OUTS = [
 ]
 
 
-def check_journal():
+def check_journal(c):
     """Строка журнала из ответа -- та же символ в символ, что до #149."""
     from mop.server import bootstrap, builder, cluster
-    out = []
     for req in REQS:
         for o in OUTS:
             got, want = cluster.journal("mop", req, o), [old_cluster_line("mop", req, o)]
-            if got != want:
-                out.append(f"cluster.journal({req}, {o}) -> {got!r}, wanted {want!r}")
+            c.check(f"cluster.journal({req}, {o}) -> {got!r}, wanted {want!r}", not (got != want))
             breq = {**req, "verb": "bootstrap"}
             got, want = bootstrap.journal("mop", breq, o), old_bootstrap_lines("mop", breq, o)
-            if got != want:
-                out.append(f"bootstrap.journal({breq}, {o}) -> {got!r}, wanted {want!r}")
+            c.check(f"bootstrap.journal({breq}, {o}) -> {got!r}, wanted {want!r}",
+                    not (got != want))
             qreq = {**req, "verb": "build", "mode": "update"}
             got, want = builder.journal("admin", qreq, {**o, "done": True}), [old_builder_line(qreq, o)]
-            if got != want:
-                out.append(f"builder.journal({qreq}, {o}) -> {got!r}, wanted {want!r}")
+            c.check(f"builder.journal({qreq}, {o}) -> {got!r}, wanted {want!r}", not (got != want))
     # Образцы глазами: так строки выглядят в journalctl.
     for got, want in (
             (cluster.journal("rugent", {"verb": "restart", "name": "pu-rugent-2"}, {"ok": True}),
@@ -134,15 +130,12 @@ def check_journal():
             (builder.journal("admin", {"verb": "build", "origin": "git@x:a/mop.git", "mode": "missing"},
                              {"ok": True, "skipped": True, "done": True}),
              ["build git@x:a/mop.git missing: skipped"])):
-        if got != want:
-            out.append(f"journal -> {got!r}, wanted {want!r}")
-    return out
+        c.check(f"journal -> {got!r}, wanted {want!r}", not (got != want))
 
 
-def check_banner():
+def check_banner(c):
     """Строка старта -- та же, что печатал прежний serve."""
     from mop.server import bootstrap, builder, cluster
-    out = []
     for got, want in (
             (cluster.banner("mop.*.cluster.rpc", "http://10.0.0.1:4646"),
              "mop-cluster: subscribed to mop.*.cluster.rpc, Nomad at http://10.0.0.1:4646"),
@@ -152,23 +145,19 @@ def check_banner():
              "mop-bootstrap: subscribed to mop.*.server.rpc, workspaces in /srv/ws: none"),
             (builder.banner("mop.admin.build.rpc"),
              "mop-builder: subscribed to mop.admin.build.rpc")):
-        if got != want:
-            out.append(f"banner -> {got!r}, wanted {want!r}")
-    return out
+        c.check(f"banner -> {got!r}, wanted {want!r}", not (got != want))
 
 
-def check_silent():
+def check_silent(c):
     """Библиотека не печатает: печатает командлет (CLAUDE.md)."""
-    out = []
     for name in ("common/service", "server/cluster", "server/bootstrap", "server/builder"):
         with open(os.path.join(ROOT, "mop", f"{name}.py")) as f:
             for n, line in enumerate(f, 1):
                 if "print(" in line.split("#")[0]:
-                    out.append(f"mop/{name}.py:{n} prints: {line.strip()}")
-    return out
+                    c.fail(f"mop/{name}.py:{n} prints: {line.strip()}")
 
 
-def check_errors():
+def check_errors(c):
     """HYPOTHESIS (#162): обработчик, бросивший вне своего try (cluster.refusal
     при лежащем Nomad), и тело-JSON не объект (`[1]` -> req.get на списке)
     роняют задачу serve: ответа нет, проситель ждёт таймаут и видит молчание,
@@ -179,7 +168,6 @@ def check_errors():
     STATUS: FIXED — see #162"""
     import asyncio
     from mop.common import service
-    out = []
     lines, called = [], []
 
     def journal(project, req, reply):
@@ -197,15 +185,15 @@ def check_errors():
 
     got = ask(boom, b'{"verb": "restart", "name": "pu-mop-1"}')
     err = got.get("error") or ""
-    if "Nomad unreachable" not in err or "ConnectionError" not in err \
-            or not err.startswith("mop-test"):
-        out.append(f"a raising handler must answer its reason, got {got!r}")
-    if len(lines) != 1 or "Nomad unreachable" not in lines[0]:
-        out.append(f"a raising handler must leave exactly one journal line, got {lines!r}")
+    c.check(f"a raising handler must answer its reason, got {got!r}",
+            not ("Nomad unreachable" not in err or "ConnectionError" not in err
+                 or not err.startswith("mop-test")))
+    c.check(f"a raising handler must leave exactly one journal line, got {lines!r}",
+            not (len(lines) != 1 or "Nomad unreachable" not in lines[0]))
     # Ответ каркаса -- последний: проситель потока (сборщик, bus.ask_stream)
     # узнаёт итог только по done, без него причина ушла бы в таймаут 120 с.
-    if got.get("done") is not True:
-        out.append(f"the skeleton's own error must be final (done), got {got!r}")
+    c.check(f"the skeleton's own error must be final (done), got {got!r}",
+            not (got.get("done") is not True))
 
     def fine(project, req, send):
         called.append(req)
@@ -213,36 +201,31 @@ def check_errors():
 
     for body in (b"[1]", b'"x"', b"7", b"null"):
         got = ask(fine, body)
-        if got != {"error": "request is not a JSON object", "done": True}:
-            out.append(f"body {body!r} must be refused as not an object, got {got!r}")
-        if called:
-            out.append(f"body {body!r} must not reach the handler")
-        if len(lines) != 1:
-            out.append(f"body {body!r} must leave one journal line, got {lines!r}")
+        c.check(f"body {body!r} must be refused as not an object, got {got!r}",
+                not (got != {"error": "request is not a JSON object", "done": True}))
+        c.check(f"body {body!r} must not reach the handler", not (called))
+        c.check(f"body {body!r} must leave one journal line, got {lines!r}", not (len(lines) != 1))
 
     # Прежнее поведение не меняется: обычный запрос -- ответ обработчика как
     # есть; не-JSON вовсе -- пустой запрос в обработчик, как было до #162.
     got = ask(fine, b'{"verb": "projects"}')
-    if got != {"ok": True, "p": "mop"} or called != [{"verb": "projects"}] \
-            or lines != ["mop.projects: ok"]:
-        out.append(f"a normal request must answer as before, got {got!r}, {lines!r}")
+    c.check(f"a normal request must answer as before, got {got!r}, {lines!r}",
+            not (got != {"ok": True, "p": "mop"} or called != [{"verb": "projects"}]
+                 or lines != ["mop.projects: ok"]))
     got = ask(fine, b"not json")
-    if got != {"ok": True, "p": "mop"} or called != [{}]:
-        out.append(f"a non-JSON body must still reach the handler as {{}}, got {got!r}")
-    return out
+    c.check(f"a non-JSON body must still reach the handler as {{}}, got {got!r}",
+            not (got != {"ok": True, "p": "mop"} or called != [{}]))
 
 
 def main():
-    failed = []
-    for check in (check_project, check_journal, check_banner, check_silent,
-                  check_errors):
+    c = Checks()
+    for fn in (check_project, check_journal, check_banner, check_silent,
+               check_errors):
         try:
-            failed += check()
+            fn(c)
         except Exception as e:
-            failed.append(f"{check.__name__}: {type(e).__name__}: {e}")
-    print("\n".join(f"FAIL {l}" for l in failed) if failed else "", end="\n" if failed else "")
-    print("service: FAILED" if failed else "service: ok")
-    return 1 if failed else 0
+            c.fail(fn.__name__, f"{type(e).__name__}: {e}")
+    return c.report("service")
 
 
 if __name__ == "__main__":

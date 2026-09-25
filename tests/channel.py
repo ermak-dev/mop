@@ -20,6 +20,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks, Msg, patched, patched_env, restored, run_command  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 os.environ.setdefault("MOP_SERVER_LAN", "127.0.0.1")
 
@@ -37,20 +38,20 @@ SESS = {"name": "s1", "pid": 123, "messagingSocketPath": "/run/user/1000/cc-sock
 
 
 class Stubs:
-    """Заглушки шины, сокета и ростера. Что спросили -- в calls, что ответить
-    -- в answers по пути."""
+    """Заглушки шины, сокета и ростера на время блока with. Что спросили --
+    в calls, что ответить -- в answers по пути."""
 
     def __init__(self):
         self.calls = []
         self.answers = {}
         self.alive = True
-        self.saved = []
+        self.stack = contextlib.ExitStack()
 
     def put(self, mod, name, fn):
-        self.saved.append((mod, name, getattr(mod, name)))
-        setattr(mod, name, fn)
+        """Подменить ещё один атрибут до конца блока."""
+        self.stack.enter_context(patched(mod, **{name: fn}))
 
-    def install(self):
+    def __enter__(self):
         def request(node, verb, **kw):
             self.calls.append(("request", node, verb, kw))
             return self._answer("request")
@@ -91,29 +92,20 @@ class Stubs:
             raise a
         return a
 
-    def restore(self):
-        for mod, name, value in reversed(self.saved):
-            setattr(mod, name, value)
+    def __exit__(self, *exc):
+        self.stack.close()
 
 
 def cli(argv):
     """`mop send` -> (код, stdout, stderr). sys.exit(строка) -- как у
     интерпретатора: строка в stderr, код 1."""
-    out, err = io.StringIO(), io.StringIO()
-    code = 0
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        try:
-            code = cli_send.main(argv) or 0
-        except SystemExit as e:
-            if isinstance(e.code, str):
-                print(e.code, file=sys.stderr)
-                code = 1
-            else:
-                code = e.code or 0
-    return code, out.getvalue(), err.getvalue()
+    out, err, code = run_command(cli_send.main, argv)
+    if isinstance(code, str):
+        err, code = err + code + "\n", 1
+    return code or 0, out, err
 
 
-def check_bus_envelope_264():
+def check_bus_envelope_264(c):
     """HYPOTHESIS (#264): конверт запроса `{"verb": ..., **поля}` собирался
     в bus.py четырежды (у ask_once -- без ensure_ascii=False), переход на
     прежний субъект при NoRespondersError (#207) был записан трижды (ask_once,
@@ -129,12 +121,7 @@ def check_bus_envelope_264():
     прежний -- эхом того, что пришло."""
     import json
     from mop.client import keys
-    out = []
-    saved = (bus.connect, bus.login, bus._open)
-
-    class Msg:
-        def __init__(self, data):
-            self.data = data
+    failed_before = c.failed
 
     class Conn:
         def __init__(self):
@@ -144,7 +131,7 @@ def check_bus_envelope_264():
             self.seen.append((subj, data))
             if busnames.caller(subj):
                 raise bus.NoRespondersError()
-            return Msg(json.dumps({"subj": subj, "got": json.loads(data.decode())},
+            return Msg(data=json.dumps({"subj": subj, "got": json.loads(data.decode())},
                                   ensure_ascii=False).encode())
 
         async def close(self):
@@ -161,7 +148,7 @@ def check_bus_envelope_264():
         subs = [s for s, _ in conn.seen]
         return all(busnames.node("mop", n, "rpc", login="alice") in subs
                    and busnames.node("mop", n, "rpc") in subs for n in nodes)
-    try:
+    with restored(bus, "connect", "login", "_open"):
         bus.login = lambda: "alice"
         # request
         conn = Conn()
@@ -172,8 +159,7 @@ def check_bus_envelope_264():
                 fell_back(conn, ["n1"]) and utf8(conn)
         except Exception as e:
             ok, got = False, e
-        if not ok:
-            out.append(f"request: fallback subject and UTF-8 envelope, got {got!r}, {conn.seen}")
+        c.check("request: fallback subject and UTF-8 envelope", ok, f"got {got!r}, {conn.seen}")
         # request_many: общий глагол и общие поля
         conn = Conn()
         try:
@@ -183,8 +169,7 @@ def check_bus_envelope_264():
                 fell_back(conn, ["n1", "n2"]) and utf8(conn)
         except Exception as e:
             ok, got = False, e
-        if not ok:
-            out.append(f"request_many(verb, nodes, **fields): got {got!r}")
+        c.check("request_many(verb, nodes, **fields)", ok, f"got {got!r}")
         # request_many: поля у каждого узла свои, общие -- поверх
         conn = Conn()
         try:
@@ -195,8 +180,7 @@ def check_bus_envelope_264():
                 "n2": {"verb": "states", "why": word, "names": [word]}}
         except Exception as e:
             ok, got = False, e
-        if not ok:
-            out.append(f"request_many per-node fields: got {got!r}")
+        c.check("request_many per-node fields", ok, f"got {got!r}")
         # request_stream
         conn = Conn()
         try:
@@ -206,8 +190,7 @@ def check_bus_envelope_264():
                 fell_back(conn, ["n1"]) and utf8(conn)
         except Exception as e:
             ok, got = False, e
-        if not ok:
-            out.append(f"request_stream(verb, {{key: (node, fields)}}): got {got!r}")
+        c.check("request_stream(verb, {key: (node, fields)})", ok, f"got {got!r}")
         # ask_once -- своё соединение, тот же конверт и переход
         conn = Conn()
 
@@ -223,17 +206,13 @@ def check_bus_envelope_264():
                                                busnames.cluster("mop")] and utf8(conn)
         except Exception as e:
             ok, got = False, e
-        if not ok:
-            out.append(f"ask_once: fallback subject and UTF-8 envelope, got {got!r}, {conn.seen}")
-    finally:
-        bus.connect, bus.login, bus._open = saved
+        c.check("ask_once: fallback subject and UTF-8 envelope", ok, f"got {got!r}, {conn.seen}")
 
     # Конверт -- в одном месте: json.dumps в bus.py один, {"verb" -- нигде
     # в mop/, кроме него.
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     src = open(os.path.join(root, "mop", "common", "bus.py")).read()
-    if src.count("json.dumps(") != 1:
-        out.append(f"bus.py must encode in one place: {src.count('json.dumps(')} json.dumps")
+    c.expect("bus.py must encode in one place (json.dumps count)", src.count("json.dumps("), 1)
     by_hand = []
     for d, _, files in os.walk(os.path.join(root, "mop")):
         for f in files:
@@ -242,8 +221,7 @@ def check_bus_envelope_264():
                 for n, line in enumerate(open(p), 1):
                     if '{"verb":' in line and "mop/common/bus.py" not in p:
                         by_hand.append(f"{os.path.relpath(p, root)}:{n}")
-    if by_hand:
-        out.append(f"envelopes built by hand: {by_hand}")
+    c.check("no envelopes built by hand", not by_hand, repr(by_hand))
 
     # Разбор ответа узла -- одна функция на bus.failure и keys.results_from,
     # и тексты у обоих прежние.
@@ -251,202 +229,178 @@ def check_bus_envelope_264():
     want_keys = {"n1": "NOT REACHED: down", "n2": "NOT REACHED: no answer",
                  "n3": "FAILED: nope", "n4": "OK"}
     want_failure = {"n1": "down", "n2": "no response", "n3": "nope", "n4": None}
-    if keys.results_from(list(cases), cases) != want_keys:
-        out.append(f"keys.results_from changed: {keys.results_from(list(cases), cases)}")
-    if {n: bus.failure(a) for n, a in cases.items()} != want_failure:
-        out.append("bus.failure changed")
+    c.expect("keys.results_from unchanged", keys.results_from(list(cases), cases), want_keys)
+    c.expect("bus.failure unchanged", {n: bus.failure(a) for n, a in cases.items()}, want_failure)
     verdict = getattr(bus, "verdict", None)
-    if verdict is None:
-        out.append("no bus.verdict: the three-way check lives in two places")
-    else:
+    if c.check("bus.verdict exists: the three-way check lives in one place", verdict is not None):
         for name in ("results_from",):
-            if "verdict(" not in open(os.path.join(root, "mop", "client", "keys.py")).read():
-                out.append(f"keys.{name} must classify through bus.verdict")
-    return out
+            c.check(f"keys.{name} must classify through bus.verdict",
+                    "verdict(" in open(os.path.join(root, "mop", "client", "keys.py")).read())
+    return c.failed == failed_before
 
 
 def main():
-    cases = bad = 0
-
-    def check(what, got, want):
-        nonlocal cases, bad
-        cases += 1
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}:\n   got {got!r}\n  want {want!r}")
+    c = Checks()
 
     # ─── характеристика: MCP ──────────────────────────────────────────────
-    s = Stubs().install()
-    try:
+    with Stubs() as s:
         mcp_request = {"name": PUPPET, "message": "hi", "priority": "next", "wait": 0,
                        "notify": False, "from_name": "host-77", "owner": "anton",
                        "force": False, "reply_to": "mop.mop.master.host-77.inbox",
                        "timeout": bus.TIMEOUT}
         s.answers["request"] = {"msg_id": "m1"}
-        check("mcp puppet delivered", mcp.send(PUPPET, "hi"), "pu-mop-9: delivered (msg_id=m1)")
-        check("mcp puppet request", s.calls[-1], ("request", "n1", "send", mcp_request))
+        c.expect("mcp puppet delivered", mcp.send(PUPPET, "hi"), "pu-mop-9: delivered (msg_id=m1)")
+        c.expect("mcp puppet request", s.calls[-1], ("request", "n1", "send", mcp_request))
 
         s.answers["request"] = {"msg_id": "m1", "owner_note": NOTE}
-        check("mcp owner note", mcp.send(PUPPET, "hi"),
-              f"pu-mop-9: delivered (msg_id=m1); {NOTE}")
+        c.expect("mcp owner note", mcp.send(PUPPET, "hi"),
+                 f"pu-mop-9: delivered (msg_id=m1); {NOTE}")
 
         s.answers["request"] = {"error": OWNED}
-        check("mcp owner refusal", mcp.send(PUPPET, "hi"), f"pu-mop-9: NOT DELIVERED — {OWNED}")
+        c.expect("mcp owner refusal", mcp.send(PUPPET, "hi"), f"pu-mop-9: NOT DELIVERED — {OWNED}")
         s.answers["request"] = {"msg_id": "m1"}
         mcp.send(PUPPET, "hi", force=True)
-        check("mcp force travels", s.calls[-1][3]["force"], True)
+        c.expect("mcp force travels", s.calls[-1][3]["force"], True)
 
         s.answers["request"] = bus.BusError("node agent n1 did not answer in 20s")
-        check("mcp bus error", mcp.send(PUPPET, "hi"),
-              "pu-mop-9: NOT DELIVERED — node agent n1 did not answer in 20s")
+        c.expect("mcp bus error", mcp.send(PUPPET, "hi"),
+                 "pu-mop-9: NOT DELIVERED — node agent n1 did not answer in 20s")
 
         s.answers["request"] = {"msg_id": "m1", "idle": "went idle after 12s"}
-        check("mcp wait idle", mcp.send(PUPPET, "hi", wait_seconds=30),
-              "pu-mop-9: delivered (msg_id=m1), idle: went idle after 12s")
-        check("mcp wait request", (s.calls[-1][3]["wait"], s.calls[-1][3]["notify"],
-                                   s.calls[-1][3]["timeout"]), (30, False, 30 + bus.TIMEOUT))
+        c.expect("mcp wait idle", mcp.send(PUPPET, "hi", wait_seconds=30),
+                 "pu-mop-9: delivered (msg_id=m1), idle: went idle after 12s")
+        c.expect("mcp wait request", (s.calls[-1][3]["wait"], s.calls[-1][3]["notify"],
+                                      s.calls[-1][3]["timeout"]), (30, False, 30 + bus.TIMEOUT))
         s.answers["request"] = {"msg_id": "m1"}
-        check("mcp wait not idle", mcp.send(PUPPET, "hi", wait_seconds=30),
-              "pu-mop-9: delivered (msg_id=m1), idle: did not wait it out in 30s")
+        c.expect("mcp wait not idle", mcp.send(PUPPET, "hi", wait_seconds=30),
+                 "pu-mop-9: delivered (msg_id=m1), idle: did not wait it out in 30s")
         mcp.send(PUPPET, "hi", wait_seconds=9999)
-        check("mcp wait clamped", s.calls[-1][3]["wait"], 600)
+        c.expect("mcp wait clamped", s.calls[-1][3]["wait"], 600)
         mcp.send(PUPPET, "hi", wait_seconds=-5)
-        check("mcp negative wait", s.calls[-1][3]["wait"], 0)
+        c.expect("mcp negative wait", s.calls[-1][3]["wait"], 0)
 
-        check("mcp notify", mcp.send(PUPPET, "hi", notify_when_idle=True),
-              "pu-mop-9: delivered (msg_id=m1); will notify when it frees up")
-        check("mcp notify request", s.calls[-1][3]["notify"], True)
+        c.expect("mcp notify", mcp.send(PUPPET, "hi", notify_when_idle=True),
+                 "pu-mop-9: delivered (msg_id=m1); will notify when it frees up")
+        c.expect("mcp notify request", s.calls[-1][3]["notify"], True)
         # С ожиданием подписку держать незачем: ответ и так дождётся.
         mcp.send(PUPPET, "hi", notify_when_idle=True, wait_seconds=5)
-        check("mcp notify with wait", s.calls[-1][3]["notify"], False)
+        c.expect("mcp notify with wait", s.calls[-1][3]["notify"], False)
 
         # Локальная сессия.
         s.answers["session.send"] = {"msg_id": "m2", "idle": None}
-        check("mcp local delivered", mcp.send("s1", "hi"), "s1: delivered (msg_id=m2)")
-        check("mcp local call", s.calls[-1],
-              ("session.send", SESS["messagingSocketPath"], "hi",
-               {"priority": "next", "from_name": "host-77", "wait_idle": 0}))
+        c.expect("mcp local delivered", mcp.send("s1", "hi"), "s1: delivered (msg_id=m2)")
+        c.expect("mcp local call", s.calls[-1],
+                 ("session.send", SESS["messagingSocketPath"], "hi",
+                  {"priority": "next", "from_name": "host-77", "wait_idle": 0}))
         s.answers["session.send"] = {"msg_id": "m2", "idle": {"state": "idle"}}
-        check("mcp local idle", mcp.send("123", "hi", wait_seconds=5),
-              "s1: delivered (msg_id=m2), idle: idle")
+        c.expect("mcp local idle", mcp.send("123", "hi", wait_seconds=5),
+                 "s1: delivered (msg_id=m2), idle: idle")
         s.answers["session.send"] = {"msg_id": "m2", "idle": None}
-        check("mcp local not idle", mcp.send("s1", "hi", wait_seconds=5),
-              "s1: delivered (msg_id=m2), idle: did not wait it out")
+        c.expect("mcp local not idle", mcp.send("s1", "hi", wait_seconds=5),
+                 "s1: delivered (msg_id=m2), idle: did not wait it out")
         s.alive = False
-        check("mcp local dead", mcp.send("s1", "hi"), "s1: inbox not listening — session is dead")
+        c.expect("mcp local dead", mcp.send("s1", "hi"), "s1: inbox not listening — session is dead")
         s.alive = True
         # Несколько сессий с одним именем -- стоп, а не мастер: молча взять
         # первую значит однажды написать не тому.
-        check("mcp local ambiguous", mcp.send("twins", "hi"),
-              "send: 'twins' matches several sessions: twins[1], twins[2] — specify pid")
+        c.expect("mcp local ambiguous", mcp.send("twins", "hi"),
+                 "send: 'twins' matches several sessions: twins[1], twins[2] — specify pid")
 
         # Мастер -- всё остальное.
         s.answers["ask"] = {"msg_id": "m3"}
-        check("mcp master delivered", mcp.send("host-1", "hi", priority="now"),
-              "host-1: delivered (msg_id=m3)")
-        check("mcp master call", s.calls[-1],
-              ("ask", "host-1", "message", {"text": "hi", "priority": "now", "from": "host-77"}))
+        c.expect("mcp master delivered", mcp.send("host-1", "hi", priority="now"),
+                 "host-1: delivered (msg_id=m3)")
+        c.expect("mcp master call", s.calls[-1],
+                 ("ask", "host-1", "message", {"text": "hi", "priority": "now", "from": "host-77"}))
         s.answers["ask"] = {"error": "master host-1 has no session — nowhere to deliver the note"}
-        check("mcp master refusal", mcp.send("host-1", "hi"),
-              "host-1: NOT DELIVERED — master host-1 has no session — nowhere to deliver the note")
+        c.expect("mcp master refusal", mcp.send("host-1", "hi"),
+                 "host-1: NOT DELIVERED — master host-1 has no session — nowhere to deliver the note")
         s.answers["ask"] = bus.BusError("master host-1 is not on the bus")
-        check("mcp master bus error", mcp.send("host-1", "hi"),
-              "host-1: NOT DELIVERED — master host-1 is not on the bus")
+        c.expect("mcp master bus error", mcp.send("host-1", "hi"),
+                 "host-1: NOT DELIVERED — master host-1 is not on the bus")
 
-        check("mcp bad priority", mcp.send(PUPPET, "hi", priority="asap"),
-              "priority must be one of now, next, later")
-        check("mcp empty", mcp.send(PUPPET, "  "), "empty message, nothing to send")
+        c.expect("mcp bad priority", mcp.send(PUPPET, "hi", priority="asap"),
+                 "priority must be one of now, next, later")
+        c.expect("mcp empty", mcp.send(PUPPET, "  "), "empty message, nothing to send")
 
         # ─── характеристика: mop send ─────────────────────────────────────
         cli_request = {"name": PUPPET, "message": "hi", "priority": "next", "wait": 0,
                        "owner": "anton", "force": False, "timeout": bus.TIMEOUT}
         s.answers["request"] = {"msg_id": "m1"}
-        check("cli puppet delivered", cli([PUPPET, "hi"]), (0, "-> pu-mop-9 msg_id=m1\n", ""))
-        check("cli puppet request", s.calls[-1], ("request", "n1", "send", cli_request))
+        c.expect("cli puppet delivered", cli([PUPPET, "hi"]), (0, "-> pu-mop-9 msg_id=m1\n", ""))
+        c.expect("cli puppet request", s.calls[-1], ("request", "n1", "send", cli_request))
         s.answers["request"] = {"msg_id": "m1", "owner_note": NOTE}
-        check("cli owner note", cli([PUPPET, "hi"]), (0, f"-> pu-mop-9 msg_id=m1; {NOTE}\n", ""))
+        c.expect("cli owner note", cli([PUPPET, "hi"]), (0, f"-> pu-mop-9 msg_id=m1; {NOTE}\n", ""))
         s.answers["request"] = {"error": OWNED}
-        check("cli owner refusal", cli([PUPPET, "hi"]),
-              (1, "", f"pu-mop-9: NOT DELIVERED — {OWNED}\n"))
+        c.expect("cli owner refusal", cli([PUPPET, "hi"]),
+                 (1, "", f"pu-mop-9: NOT DELIVERED — {OWNED}\n"))
         s.answers["request"] = {"msg_id": "m1"}
         cli([PUPPET, "hi", "--force"])
-        check("cli force travels", s.calls[-1][3]["force"], True)
+        c.expect("cli force travels", s.calls[-1][3]["force"], True)
         s.answers["request"] = {"msg_id": "m1", "idle": "went idle after 12s"}
-        check("cli wait idle", cli([PUPPET, "hi", "--wait=30"]),
-              (0, "-> pu-mop-9 msg_id=m1\n<- went idle after 12s\n", ""))
-        check("cli wait request", (s.calls[-1][3]["wait"], s.calls[-1][3]["timeout"]),
-              (30, 30 + bus.TIMEOUT))
+        c.expect("cli wait idle", cli([PUPPET, "hi", "--wait=30"]),
+                 (0, "-> pu-mop-9 msg_id=m1\n<- went idle after 12s\n", ""))
+        c.expect("cli wait request", (s.calls[-1][3]["wait"], s.calls[-1][3]["timeout"]),
+                 (30, 30 + bus.TIMEOUT))
         s.answers["request"] = {"msg_id": "m1"}
-        check("cli wait not idle", cli([PUPPET, "hi", "--wait", "30"]),
-              (2, "-> pu-mop-9 msg_id=m1\nwaited 30s — puppet never reported going free\n", ""))
+        c.expect("cli wait not idle", cli([PUPPET, "hi", "--wait", "30"]),
+                 (2, "-> pu-mop-9 msg_id=m1\nwaited 30s — puppet never reported going free\n", ""))
         cli([PUPPET, "hi", "--wait=9999"])
-        check("cli wait clamped", s.calls[-1][3]["wait"], 600)
+        c.expect("cli wait clamped", s.calls[-1][3]["wait"], 600)
         cli([PUPPET, "hi", "--wait"])
-        check("cli bare --wait", s.calls[-1][3]["wait"], 600)
-        check("cli quiet", cli([PUPPET, "hi", "--quiet"]), (0, "", ""))
-        check("cli quiet not idle", cli([PUPPET, "hi", "--quiet", "--wait=3"]), (2, "", ""))
+        c.expect("cli bare --wait", s.calls[-1][3]["wait"], 600)
+        c.expect("cli quiet", cli([PUPPET, "hi", "--quiet"]), (0, "", ""))
+        c.expect("cli quiet not idle", cli([PUPPET, "hi", "--quiet", "--wait=3"]), (2, "", ""))
 
         s.answers["session.send"] = {"msg_id": "m2", "idle": None}
-        check("cli local delivered", cli(["s1", "hi"]), (0, "-> s1 [123] msg_id=m2\n", ""))
-        check("cli local call", s.calls[-1],
-              ("session.send", SESS["messagingSocketPath"], "hi",
-               {"priority": "next", "mode": "bypass", "from_name": "mop", "wait_idle": 0}))
+        c.expect("cli local delivered", cli(["s1", "hi"]), (0, "-> s1 [123] msg_id=m2\n", ""))
+        c.expect("cli local call", s.calls[-1],
+                 ("session.send", SESS["messagingSocketPath"], "hi",
+                  {"priority": "next", "mode": "bypass", "from_name": "mop", "wait_idle": 0}))
         cli(["s1", "hi", "--mode", "prompting", "--wait=9999"])
-        check("cli local mode, clamp", (s.calls[-1][3]["mode"], s.calls[-1][3]["wait_idle"]),
-              ("prompting", 600))
+        c.expect("cli local mode, clamp", (s.calls[-1][3]["mode"], s.calls[-1][3]["wait_idle"]),
+                 ("prompting", 600))
         s.answers["session.send"] = {"msg_id": "m2", "idle": {"state": "idle", "detail": "done"}}
-        check("cli local idle", cli(["s1", "hi", "--wait=5"]),
-              (0, "-> s1 [123] msg_id=m2\n<- idle: done\n", ""))
+        c.expect("cli local idle", cli(["s1", "hi", "--wait=5"]),
+                 (0, "-> s1 [123] msg_id=m2\n<- idle: done\n", ""))
         s.answers["session.send"] = {"msg_id": "m2", "idle": None}
-        check("cli local not idle", cli(["s1", "hi", "--wait=5"]),
-              (2, "-> s1 [123] msg_id=m2\nwaited 5s — session never reported going idle\n", ""))
+        c.expect("cli local not idle", cli(["s1", "hi", "--wait=5"]),
+                 (2, "-> s1 [123] msg_id=m2\nwaited 5s — session never reported going idle\n", ""))
         s.alive = False
-        check("cli local dead", cli(["s1", "hi"]),
-              (1, "", "s1: inbox not listening — session is dead\n"))
+        c.expect("cli local dead", cli(["s1", "hi"]),
+                 (1, "", "s1: inbox not listening — session is dead\n"))
         s.alive = True
-    finally:
-        s.restore()
 
     # ─── сам канал ────────────────────────────────────────────────────────
     try:
         from mop.client import channel
     except ImportError as e:
-        print(f"FAILED  mop/client/channel.py: {e}")
-        return 1
+        c.fail("mop/client/channel.py", str(e))
+        return c.report("channel")
 
-    check("MAX_WAIT", channel.MAX_WAIT, 600)
+    c.expect("MAX_WAIT", channel.MAX_WAIT, 600)
     for raw, want in ((None, 0), (0, 0), (30, 30), (9999, 600), (-5, 0)):
-        check(f"clamp_wait({raw})", channel.clamp_wait(raw), want)
+        c.expect(f"clamp_wait({raw})", channel.clamp_wait(raw), want)
 
     # Путь по адресу: папет -- префиксом джоба, дальше своя сессия этого
     # хоста, всё остальное -- инбокс мастера. Ambiguous наверх, не мастеру.
-    s = Stubs().install()
-    try:
-        check("route puppet", channel.route("pu-mop-1"), ("puppet", "pu-mop-1"))
-        check("route local by name", channel.route("s1"), ("local", SESS))
-        check("route local by pid", channel.route("123"), ("local", SESS))
-        check("route master", channel.route("host-1"), ("master", "host-1"))
+    with Stubs() as s:
+        c.expect("route puppet", channel.route("pu-mop-1"), ("puppet", "pu-mop-1"))
+        c.expect("route local by name", channel.route("s1"), ("local", SESS))
+        c.expect("route local by pid", channel.route("123"), ("local", SESS))
+        c.expect("route master", channel.route("host-1"), ("master", "host-1"))
         try:
             got = channel.route("twins")
-            check("route ambiguous must raise", got, "Ambiguous")
+            c.expect("route ambiguous must raise", got, "Ambiguous")
         except session.Ambiguous:
             pass
 
         # Своё имя: мастер -- инбокс, папет -- имя клона из каталога сессии.
-        keep = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
-        os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = SESS["messagingSocketPath"]
-        try:
-            check("my_session", channel.my_session(), SESS)
-            check("my_name master", channel.my_name(True, "host-77"), "host-77")
+        with patched_env(CLAUDE_CODE_MESSAGING_SOCKET=SESS["messagingSocketPath"]):
+            c.expect("my_session", channel.my_session(), SESS)
+            c.expect("my_name master", channel.my_name(True, "host-77"), "host-77")
             s.put(session, "sessions", lambda: [dict(SESS, cwd="/home/u/puppets/pu-mop-4")])
-            check("my_name puppet", channel.my_name(False, "host-77"), "pu-mop-4")
-        finally:
-            if keep is None:
-                os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
-            else:
-                os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = keep
-    finally:
-        s.restore()
+            c.expect("my_name puppet", channel.my_name(False, "host-77"), "pu-mop-4")
 
     # Вердикт -> текст: доставлено, отказ агента (в том числе владельца),
     # мёртвый инбокс. Отказ -- одна и та же строка у обоих фронтендов.
@@ -464,10 +418,10 @@ def main():
              "s1: delivered (msg_id=m2), idle: idle"),
             ({"kind": "master", "to": "host-1", "msg_id": "m3"}, "host-1: delivered (msg_id=m3)"),
             ({"kind": "master", "to": "host-1", "error": "gone"}, "host-1: NOT DELIVERED — gone")):
-        check(f"text {v}", channel.text(v), want)
-    check("failure of delivered", channel.failure({"kind": "puppet", "to": PUPPET, "msg_id": "m1"}), None)
-    check("failure of refused", channel.failure({"kind": "puppet", "to": PUPPET, "error": OWNED}),
-          f"pu-mop-9: NOT DELIVERED — {OWNED}")
+        c.expect(f"text {v}", channel.text(v), want)
+    c.expect("failure of delivered", channel.failure({"kind": "puppet", "to": PUPPET, "msg_id": "m1"}), None)
+    c.expect("failure of refused", channel.failure({"kind": "puppet", "to": PUPPET, "error": OWNED}),
+             f"pu-mop-9: NOT DELIVERED — {OWNED}")
 
     # Копий во фронтендах больше нет: потолок, тексты отказа, своя сессия.
     here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -477,7 +431,7 @@ def main():
         for copy in ("MAX_WAIT = ", "NOT DELIVERED", "inbox not listening",
                      "def master_socket", "def my_session", "def my_name",
                      "def _send_to_", "def _send_locally"):
-            check(f"{rel} has no copy of {copy!r}", copy in src, False)
+            c.expect(f"{rel} has no copy of {copy!r}", copy in src, False)
     # STATUS: FIXED — see #148
 
     # ── #213: адрес мастера несёт логин ──────────────────────────────────
@@ -488,31 +442,28 @@ def main():
     from mop.common import busnames
     from mop.server import operators
     local = f"{os.uname().nodename}-{os.getpid()}"
-    check("master_id of a person", mcp.master_id("anton.ermak"), f"anton%2Eermak.{local}")
-    check("master_id of the server's service", mcp.master_id("service"), f"service.{local}")
-    check("master_id without creds", mcp.master_id(None), local)
+    c.expect("master_id of a person", mcp.master_id("anton.ermak"), f"anton%2Eermak.{local}")
+    c.expect("master_id of the server's service", mcp.master_id("service"), f"service.{local}")
+    c.expect("master_id without creds", mcp.master_id(None), local)
     mine = bus.inbox(mcp.master_id("anton.ermak"), "mop")
     perms = operators.permissions({"role": "user", "projects": ["mop"]}, "anton.ermak")
-    check("the master's inbox is its own to subscribe",
-          [m for m in perms["allow"] if ".master." in m and m.endswith(".>")],
-          ["mop.mop.master.anton%2Eermak.>"])
-    check("the inbox lies under it", mine.startswith("mop.mop.master.anton%2Eermak."), True)
-    s = Stubs().install()
-    try:
+    c.expect("the master's inbox is its own to subscribe",
+             [m for m in perms["allow"] if ".master." in m and m.endswith(".>")],
+             ["mop.mop.master.anton%2Eermak.>"])
+    c.expect("the inbox lies under it", mine.startswith("mop.mop.master.anton%2Eermak."), True)
+    with Stubs() as s:
         addr = "anton%2Eermak.wate.lan-7"
-        check("route a new-form address", channel.route(addr), ("master", addr))
+        c.expect("route a new-form address", channel.route(addr), ("master", addr))
         s.put(mcp, "MASTER_ID", "bob.host-77")
         s.put(mcp, "MY_INBOX", "mop.mop.master.bob.host-77.inbox")
         s.answers["ask"] = {"msg_id": "m4"}
         mcp.send(addr, "report")
-        check("the reply goes to the envelope's address", s.calls[-1][:2], ("ask", addr))
-        check("and names the sender by its full address", s.calls[-1][3]["from"], "bob.host-77")
+        c.expect("the reply goes to the envelope's address", s.calls[-1][:2], ("ask", addr))
+        c.expect("and names the sender by its full address", s.calls[-1][3]["from"], "bob.host-77")
         s.answers["request"] = {"msg_id": "m5"}
         mcp.send(PUPPET, "go", notify_when_idle=True)
-        check("agents get the new-form inbox as reply_to", s.calls[-1][3]["reply_to"],
-              "mop.mop.master.bob.host-77.inbox")
-    finally:
-        s.restore()
+        c.expect("agents get the new-form inbox as reply_to", s.calls[-1][3]["reply_to"],
+                 "mop.mop.master.bob.host-77.inbox")
 
     # Отказ шины в подписке на свой инбокс -- громко: строка в сессию и в
     # stderr MCP-сервера. Прочие ошибки и чужие субъекты -- мимо.
@@ -523,32 +474,22 @@ def main():
             ('nats: permissions violation for subscription to "mop.mop.events"', None),
             (f'nats: permissions violation for publish to "{mine}"', None),
             ("nats: unexpected EOF", None)):
-        check(f"refused_inbox {text!r}", mcp.refused_inbox(text, (mine, who)), want)
-    s = Stubs().install()
-    try:
+        c.expect(f"refused_inbox {text!r}", mcp.refused_inbox(text, (mine, who)), want)
+    with Stubs() as s:
         s.put(mcp, "MASTER_ID", "bob.h-1")
         s.put(mcp, "MY_INBOX", mine)
-        keep = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
-        os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = SESS["messagingSocketPath"]
         err = io.StringIO()
-        try:
-            with contextlib.redirect_stderr(err):
-                mcp.on_bus_error(f'nats: permissions violation for subscription to "{mine}"')
-                mcp.on_bus_error(f'nats: permissions violation for subscription to "{mine}"')
-                mcp.on_bus_error("nats: unexpected EOF")
-        finally:
-            if keep is None:
-                os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
-            else:
-                os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = keep
-        pushed = [c for c in s.calls if c[0] == "session.send"]
-        check("the refusal is pushed into the session once", len(pushed), 1)
+        with patched_env(CLAUDE_CODE_MESSAGING_SOCKET=SESS["messagingSocketPath"]), \
+                contextlib.redirect_stderr(err):
+            mcp.on_bus_error(f'nats: permissions violation for subscription to "{mine}"')
+            mcp.on_bus_error(f'nats: permissions violation for subscription to "{mine}"')
+            mcp.on_bus_error("nats: unexpected EOF")
+        pushed = [call for call in s.calls if call[0] == "session.send"]
+        c.expect("the refusal is pushed into the session once", len(pushed), 1)
         line = pushed[0][2] if pushed else ""
-        check("it names the inbox and the cure",
-              mine in line and "restart the mop MCP server" in line, True)
-        check("the same line goes to stderr", err.getvalue().strip(), line.strip())
-    finally:
-        s.restore()
+        c.expect("it names the inbox and the cure",
+                 mine in line and "restart the mop MCP server" in line, True)
+        c.expect("the same line goes to stderr", err.getvalue().strip(), line.strip())
     # STATUS: FIXED — see #213
 
     # ─── #226: --check не выдаёт свой адрес за адрес живого сервера ─────────
@@ -559,25 +500,18 @@ def main():
     # сессии -- и ничего похожего на адрес. Адрес мастера берётся только из
     # таблицы мастеров в agents или из конверта письма.
     import re
-    keep = mcp.MASTER
-    mcp.MASTER = True
-    try:
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = mcp.main(["--check"])
-    finally:
-        mcp.MASTER = keep
-    text = out.getvalue()
-    check("--check succeeds", code, 0)
-    check("--check still names the profile and the session",
-          "profile " in text and "session: " in text, True)
-    check("--check prints no <login>.<host>-<pid> address",
-          re.findall(r"\b[\w-]+\.[\w-]+-\d+\b", text), [])
-    check("--check prints no .inbox subject", ".inbox" in text, False)
-    check("--check does not print its own MASTER_ID", mcp.MASTER_ID in text, False)
+    with patched(mcp, MASTER=True):
+        text, _, code = run_command(mcp.main, ["--check"])
+    c.expect("--check succeeds", code, 0)
+    c.expect("--check still names the profile and the session",
+             "profile " in text and "session: " in text, True)
+    c.expect("--check prints no <login>.<host>-<pid> address",
+             re.findall(r"\b[\w-]+\.[\w-]+-\d+\b", text), [])
+    c.expect("--check prints no .inbox subject", ".inbox" in text, False)
+    c.expect("--check does not print its own MASTER_ID", mcp.MASTER_ID in text, False)
     described = {t.name: t.description for t in mcp.app._tool_manager.list_tools()}
-    check("agents says where a master's address comes from",
-          "only from the masters table" in (described.get("agents") or ""), True)
+    c.expect("agents says where a master's address comes from",
+             "only from the masters table" in (described.get("agents") or ""), True)
     # RESULT: красный на старом --check (адрес master.<хост>-<pid> и .inbox в
     # выводе), зелёный после.
     # STATUS: FIXED — see #226
@@ -595,21 +529,20 @@ def main():
     # STATUS: FIXED — see #250
     plain = mcp.instructions({"MOP_PROJECT": "rudesktop"})
     mine = mcp.instructions({"MOP_PROJECT": "rudesktop", "MOP_BRANCH": "swarm"})
-    check("#250 no branch, no branch talk", "integration branch" in plain.lower(), False)
-    check("#250 the branch is named", "`swarm`" in mine, True)
-    check("#250 named as the integration branch",
-          "integration branch" in mine.lower(), True)
-    check("#250 the default branch does not decide",
-          "default branch" in mine.lower(), True)
-    check("#250 base of ticket branches and landing target",
-          "origin/swarm" in mine and "land" in mine.lower(), True)
-    check("#250 the plain text is kept verbatim in front", mine.startswith(plain), True)
+    c.expect("#250 no branch, no branch talk", "integration branch" in plain.lower(), False)
+    c.expect("#250 the branch is named", "`swarm`" in mine, True)
+    c.expect("#250 named as the integration branch",
+             "integration branch" in mine.lower(), True)
+    c.expect("#250 the default branch does not decide",
+             "default branch" in mine.lower(), True)
+    c.expect("#250 base of ticket branches and landing target",
+             "origin/swarm" in mine and "land" in mine.lower(), True)
+    c.expect("#250 the plain text is kept verbatim in front", mine.startswith(plain), True)
 
-    check("#264 one envelope, one fallback, request_many(verb, nodes)",
-          check_bus_envelope_264(), [])
+    c.check("#264 one envelope, one fallback, request_many(verb, nodes)",
+            check_bus_envelope_264(c))
 
-    print(f"channel: {cases - bad}/{cases}" + (" FAILED" if bad else " ok"))
-    return 1 if bad else 0
+    return c.report("channel")
 
 
 if __name__ == "__main__":

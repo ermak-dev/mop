@@ -12,6 +12,7 @@ import tempfile
 from datetime import datetime, timedelta
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop import usage  # noqa: E402
@@ -83,11 +84,10 @@ def spawn(msg_id, ts, tool_id, out=10):
     return json.dumps(d)
 
 
-def check_by_login():
-    out = []
+def check_by_login(c):
     fn = getattr(usage, "scan_all", None)
-    if fn is None:
-        return ["usage.scan_all is missing"]
+    if not c.check("usage.scan_all exists", fn is not None):
+        return
     day = NOW.date().isoformat()
     t = NOW.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -126,31 +126,25 @@ def check_by_login():
             "anton": {day: add(row(10), row(20), row(40))},
             "olga": {day: add(row(30), row(7))},
             "carol": {day: row(9)}}
-    if by != want:
-        out.append(f"by_login:\n  got  {by}\n  want {want}")
+    c.expect("by_login", by, want)
     # Инвариант: сумма по логинам за папет и день — прежняя строка usage.
     summed = {}
     for rows in by.values():
         usage.merge(summed, rows)
-    if summed != total:
-        out.append(f"sum(by_login) {summed} != usage {total}")
+    c.expect("sum(by_login) == usage", summed, total)
     with tempfile.TemporaryDirectory() as d:
         write(d, "s1.jsonl", [env_user("anton.mate-1", t), rec("m1", t)])
-        if usage.scan(d, 14, now=NOW) != fn(d, 14, now=NOW)[0]:
-            out.append("scan must equal scan_all's first half")
+        c.check("scan must equal scan_all's first half",
+                not (usage.scan(d, 14, now=NOW) != fn(d, 14, now=NOW)[0]))
     for addr, want in (("anton.mate-722140", "anton"), ("mate-722140", "-"),
                        ("mop", "-"), ("", "-"), (".x-1", "-")):
         got = usage.login_of(addr) if hasattr(usage, "login_of") else None
-        if got != want:
-            out.append(f"login_of({addr!r}) -> {got!r}, want {want!r}")
-    return out
+        c.expect(f"login_of({addr!r})", got, want)
 
 
 def main():
-    failed = 0
-    for line in check_by_login():
-        failed += 1
-        print(f"FAIL {line}")
+    c = Checks()
+    check_by_login(c)
     with tempfile.TemporaryDirectory() as d:
         today = NOW.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         old = (NOW - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -168,18 +162,11 @@ def main():
         got = usage.scan(d, 14, now=NOW)
         day = NOW.date().isoformat()
         want = {"input": 3, "output": 22, "cache_write": 300, "cache_read": 3000}
-        if got != {day: want}:
-            failed += 1
-            print(f"FAIL scan: {got} != {{{day!r}: {want}}}")
-    if usage.slug("/home/u/puppets/pu-a.b_1") != "-home-u-puppets-pu-a-b-1":
-        failed += 1
-        print("FAIL slug")
+        c.expect("scan", got, {day: want})
+    c.expect("slug", usage.slug("/home/u/puppets/pu-a.b_1"), "-home-u-puppets-pu-a-b-1")
     axis = usage.days_back(3, now=NOW)
-    if axis != ["2026-09-06", "2026-09-07", "2026-09-08"]:
-        failed += 1
-        print(f"FAIL days_back: {axis}")
-    print("usage: FAILED" if failed else "usage: ok")
-    return 1 if failed else 0
+    c.expect("days_back", axis, ["2026-09-06", "2026-09-07", "2026-09-08"])
+    return c.report("usage")
 
 
 if __name__ == "__main__":

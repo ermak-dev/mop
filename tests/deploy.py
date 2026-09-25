@@ -104,6 +104,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DEPLOY = os.path.join(ROOT, "deploy")
 COMMON = os.path.join(DEPLOY, "roles", "common")
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, ROOT)
 from mop.common import config  # noqa: E402
 # Что сервис кластера читает сам (#176): его код, клиент Nomad и спецификация,
@@ -347,7 +348,7 @@ def site_tasks():
     return out
 
 
-def check_probes(check):
+def check_probes(c):
     """STATUS: FIXED — see #184"""
     tasks = site_tasks()
     # Общее свойство: command/shell, чей результат читает другая задача,
@@ -358,23 +359,23 @@ def check_probes(check):
             continue
         readers = [o.get("name") for _, o in tasks if o is not t
                    and re.search(r"\b" + re.escape(reg) + r"\b", yaml.safe_dump(o))]
-        check(f"{os.path.relpath(f, DEPLOY)}: {t.get('name')!r} registers {reg}, read by "
+        c.check(f"{os.path.relpath(f, DEPLOY)}: {t.get('name')!r} registers {reg}, read by "
               f"{readers}: it must run in check mode", not readers)
     # Семь проб поимённо: только читают, в настоящем прогоне не «changed».
     by = {(os.path.relpath(f, os.path.join(DEPLOY, "roles")), t.get("name")): t for f, t in tasks}
     for path, name, reg, commands in PROBES:
         t = by.get((path, name))
         if t is None:
-            check(f"probe {path}: {name!r} exists", False)
+            c.check(f"probe {path}: {name!r} exists", False)
             continue
         mod = next(k for k in t if k in CMD_MODULES)
         text = t[mod]["cmd"] if isinstance(t[mod], dict) else t[mod]
-        check(f"probe {name!r}: register {reg}", t.get("register") == reg, t.get("register"))
-        check(f"probe {name!r}: check_mode: false", t.get("check_mode") is False)
-        check(f"probe {name!r}: changed_when: false", t.get("changed_when") is False)
+        c.check(f"probe {name!r}: register {reg}", t.get("register") == reg, t.get("register"))
+        c.check(f"probe {name!r}: check_mode: false", t.get("check_mode") is False)
+        c.check(f"probe {name!r}: changed_when: false", t.get("changed_when") is False)
         missing = [c for c in commands if c not in " ".join(text.split())]
-        check(f"probe {name!r}: runs {commands}", not missing, missing)
-        check(f"probe {name!r}: changes nothing", not WRITES.search(text), WRITES.search(text))
+        c.check(f"probe {name!r}: runs {commands}", not missing, missing)
+        c.check(f"probe {name!r}: changes nothing", not WRITES.search(text), WRITES.search(text))
 
 
 # ── #192: размеры тела при сборке — строка хоста раньше установки ─────────────
@@ -397,7 +398,7 @@ NODE_RULE = "hostvars[inventory_hostname][item | lower] | default(lookup('vars',
 # правилу node.env в свой факт node_storage до первой задачи, которая его
 # берёт; ни одной голой подстановки MOP_PVE_STORAGE в pve-build.yml.
 # STATUS: FIXED — see #227
-def check_pve_storage_227(check, can_render):
+def check_pve_storage_227(c, can_render):
     plays = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))
 
     def flat(ts):
@@ -410,13 +411,13 @@ def check_pve_storage_227(check, can_render):
     names = [t.get("name") for t in tasks]
     node = next((t for t in tasks if "node_storage" in
                  ((t.get("ansible.builtin.set_fact") or {}))), None)
-    check("pve-build: the node's storage is read in its own task", node is not None)
+    c.check("pve-build: the node's storage is read in its own task", node is not None)
     if node is None:
         return
     fact = str((node.get("ansible.builtin.set_fact") or {}).get("node_storage", ""))
     rule = NODE_RULE.replace("item | lower", "'mop_pve_storage'").replace(
         "lookup('vars', item)", "MOP_PVE_STORAGE")
-    check("pve-build: the node's storage is read the way node.env reads it",
+    c.check("pve-build: the node's storage is read the way node.env reads it",
           rule in " ".join(fact.split()), fact)
     # Строки команд -- в том числе secret_cmd включённой роли.
     def commands(t):
@@ -424,14 +425,14 @@ def check_pve_storage_227(check, can_render):
         out.append(str((t.get("vars") or {}).get("secret_cmd", "")))
         return " ".join(out)
     users = [i for i, t in enumerate(tasks) if "node_storage" in commands(t)]
-    check("pve-build: all three storage uses take the node's storage",
+    c.check("pve-build: all three storage uses take the node's storage",
           len(users) == 3, [names[i] for i in users])
     if users:
-        check("pve-build: the storage is read before its first use",
+        c.check("pve-build: the storage is read before its first use",
               names.index(node["name"]) < min(users), (node["name"], names[min(users)]))
     for t in tasks:
         bare = re.findall(r"(?<![.'\w])MOP_PVE_STORAGE(?!')", commands(t))
-        check(f"pve-build: {t.get('name')}: no installation storage past the host's",
+        c.check(f"pve-build: {t.get('name')}: no installation storage past the host's",
               not bare, commands(t).strip()[:160])
     if not can_render:
         return
@@ -445,37 +446,37 @@ def check_pve_storage_227(check, can_render):
             got = env.from_string(fact).render(**v)
         except Exception as e:  # noqa: BLE001 -- проверка, не код пула
             got = f"{type(e).__name__}: {e}"
-        check(f"pve-build: node_storage is {what}", got == want, got)
+        c.check(f"pve-build: node_storage is {what}", got == want, got)
 
 
-def check_body_sizes(check, can_render):
+def check_body_sizes(c, can_render):
     """STATUS: FIXED — see #192"""
     play = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))[0]
     by = {t.get("name"): t for t in play["tasks"]}
     sizes = by.get("How big a body of this project may be here")
     node = by.get("What this node says about the size of its bodies")
-    check("pve-build: the body's size task exists", sizes is not None)
-    check("pve-build: the node's own sizes are read in one task", node is not None)
+    c.check("pve-build: the body's size task exists", sizes is not None)
+    c.check("pve-build: the node's own sizes are read in one task", node is not None)
     if sizes is None:
         return
     exprs = sizes.get("ansible.builtin.set_fact") or {}
     for k in ("body_disk", "body_cores"):
         bare = re.findall(r"(?<![.'\w])MOP_[A-Z_]+(?!')", exprs.get(k, ""))
-        check(f"pve-build: {k} takes no installation setting past the host's", not bare, bare)
-    check("pve-build: body_mem takes nothing of the node (#197)",
+        c.check(f"pve-build: {k} takes no installation setting past the host's", not bare, bare)
+    c.check("pve-build: body_mem takes nothing of the node (#197)",
           "node_body" not in exprs.get("body_mem", "") and "hostvars" not in exprs.get("body_mem", ""),
           exprs.get("body_mem"))
     if node is None:
         return
     names = [t.get("name") for t in play["tasks"]]
-    check("pve-build: the node's sizes are read before they are used",
+    c.check("pve-build: the node's sizes are read before they are used",
           names.index(node["name"]) < names.index(sizes["name"]))
-    check("pve-build: every body setting is read, and only those",
+    c.check("pve-build: every body setting is read, and only those",
           sorted(node.get("loop") or []) == sorted(BODY_KNOBS), node.get("loop"))
-    check("pve-build: every body setting is node-scoped",
+    c.check("pve-build: every body setting is node-scoped",
           set(BODY_KNOBS) <= set(config.NODE_SCOPED))
     fact = (node.get("ansible.builtin.set_fact") or {}).get("node_body", "")
-    check("pve-build: the node's sizes are read the way node.env reads them",
+    c.check("pve-build: the node's sizes are read the way node.env reads them",
           NODE_RULE in " ".join(fact.split()), fact)
     if not can_render:
         return
@@ -515,7 +516,7 @@ def check_body_sizes(check, can_render):
             got = build(host, asks)
         except Exception as e:  # noqa: BLE001 -- проверка, не код пула
             got = f"{type(e).__name__}: {e}"
-        check(f"pve-build: {what}", got == want, got)
+        c.check(f"pve-build: {what}", got == want, got)
 
 
 # ── #194: include-цикл чужих файлов не занимает item ─────────────────────────
@@ -543,7 +544,7 @@ def all_tasks():
     return out
 
 
-def check_include_loop_var(check):
+def check_include_loop_var(c):
     """STATUS: FIXED — see #194"""
     found = []
     for f, t in all_tasks():
@@ -558,14 +559,14 @@ def check_include_loop_var(check):
         where = f"{os.path.relpath(f, DEPLOY)}: {t.get('name')!r}"
         found.append(where)
         var = (t.get("loop_control") or {}).get("loop_var")
-        check(f"{where}: has its own loop_var", var not in (None, "item"), var)
-        check(f"{where}: does not refer to item",
+        c.check(f"{where}: has its own loop_var", var not in (None, "item"), var)
+        c.check(f"{where}: does not refer to item",
               not re.search(r"\bitem\b", yaml.safe_dump(t)), yaml.safe_dump(t))
     # Проверка не пустая: три известных include чужих файлов на месте.
     want = ["body.yml: 'Sandbox tasks of each project that has any'",
             "body.yml: 'What this installation adds to a body'",
             "pve-build.yml: 'Task files this installation names'"]
-    check("the include loops over foreign files are the known three", sorted(found) == want,
+    c.check("the include loops over foreign files are the known three", sorted(found) == want,
           sorted(found))
 
 
@@ -620,18 +621,18 @@ def stdout_readers():
     return sorted(out)
 
 
-def check_users_reload_199(check):
+def check_users_reload_199(c):
     """users.conf менялся -- nats перезагружается; решает контрольная сумма."""
     # Кто ещё читает вывод командлета: список закреплён. pve-facts печатает
     # JSON -- данные, не отчёт, и выводом #159/#179/#182 не тронут.
     found = stdout_readers()
-    check("#199: commandlet output read only by the pinned tasks", found == [
+    c.check("#199: commandlet output read only by the pinned tasks", found == [
         ("pve-build.yml", "driver pve-facts", "build_facts"),
         ("pve-build.yml", "driver pve-facts", "node_facts"),
         ("roles/pve/tasks/main.yml", "driver pve-facts", "node_facts")], found)
-    check("#199: no task reads the output of a commandlet made quiet",
+    c.check("#199: no task reads the output of a commandlet made quiet",
           not [x for x in found if x[1] in TOUCHED], found)
-    check("#199: mop_command sees cluster users, cluster check, bootstrap check",
+    c.check("#199: mop_command sees cluster users, cluster check, bootstrap check",
           {"cluster users", "cluster check", "bootstrap check"} <=
           {mop_command(t) for _, t in all_tasks()},
           sorted({c for c in (mop_command(t) for _, t in all_tasks()) if c}))
@@ -639,11 +640,11 @@ def check_users_reload_199(check):
     f = os.path.join(DEPLOY, "roles", "bus", "tasks", "projects.yml")
     tasks = yaml.safe_load(open(f)) or []
     at = [i for i, t in enumerate(tasks) if mop_command(t) == "cluster users"]
-    check("#199: one task runs mop cluster users", len(at) == 1, at)
+    c.check("#199: one task runs mop cluster users", len(at) == 1, at)
     if len(at) != 1:
         return
     i, run = at[0], tasks[at[0]]
-    check("#199: its changed does not read the command's output",
+    c.check("#199: its changed does not read the command's output",
           "stdout" not in str(run.get("changed_when", "")), run.get("changed_when"))
 
     def stat_of(t):
@@ -652,25 +653,25 @@ def check_users_reload_199(check):
             and st.get("get_checksum", True) is not False else None
     before = [t for t in tasks[:i] if stat_of(t) and t.get("register")]
     after = [t for t in tasks[i + 1:] if stat_of(t) and t.get("register")]
-    check("#199: users.conf is stat'ed before the command", len(before) == 1,
+    c.check("#199: users.conf is stat'ed before the command", len(before) == 1,
           [t.get("name") for t in before])
-    check("#199: and after it", len(after) == 1, [t.get("name") for t in after])
+    c.check("#199: and after it", len(after) == 1, [t.get("name") for t in after])
     if len(before) != 1 or len(after) != 1:
         return
     b, a = before[0]["register"], after[0]["register"]
     decide = [t for t in tasks[i + 1:] if "reload nats" in str(t.get("notify", ""))]
-    check("#199: one task after the command notifies reload nats", len(decide) == 1,
+    c.check("#199: one task after the command notifies reload nats", len(decide) == 1,
           [t.get("name") for t in decide])
-    check("#199: the command itself notifies nothing", not run.get("notify"),
+    c.check("#199: the command itself notifies nothing", not run.get("notify"),
           run.get("notify"))
     if decide:
         cw = str(decide[0].get("changed_when", ""))
-        check("#199: changed is the checksums before and after differing",
+        c.check("#199: changed is the checksums before and after differing",
               f"{b}.stat.checksum" in cw and f"{a}.stat.checksum" in cw
               and "!=" in cw and "stdout" not in cw, cw)
 
 
-def check_identity_copy_167(check, ptasks):
+def check_identity_copy_167(c, ptasks):
     """HYPOTHESIS (#167): глагол identity (mop-bootstrap) читает файл
     операторов копией в /etc/nats/identity -- secrets/ контроллера пользователю
     пула закрыт.
@@ -727,26 +728,26 @@ def check_identity_copy_167(check, ptasks):
         try:
             done = [target(t) for t in ran(ptasks, env, [])]
         except AssertionError as e:
-            check(f"bus identity copy, file {exists}, {prov}: conditions read", False, e)
+            c.check(f"bus identity copy, file {exists}, {prov}: conditions read", False, e)
             continue
         what = f"bus identity copy, operators file {exists}, provider {prov}"
-        check(f"{what}: the copy's directory is always laid (#219)",
+        c.check(f"{what}: the copy's directory is always laid (#219)",
               ("file", "/etc/nats/identity", "directory") in done, done)
-        check(f"{what}: the copy is never removed as a whole (#219)",
+        c.check(f"{what}: the copy is never removed as a whole (#219)",
               ("file", "/etc/nats/identity", "absent") not in done, done)
-        check(f"{what}: the operators file is copied exactly when it exists",
+        c.check(f"{what}: the operators file is copied exactly when it exists",
               (("copy", "/etc/nats/identity/operators", None) in done) == exists, done)
         with_ldap = "ldap" in prov
-        check(f"{what}: the LDAP bind password is laid exactly with ldap in the chain",
+        c.check(f"{what}: the LDAP bind password is laid exactly with ldap in the chain",
               (("copy", "/etc/nats/identity/ldap-bind.pass", None) in done) == with_ldap, done)
-        check(f"{what}: a chain without ldap leaves no bind password",
+        c.check(f"{what}: a chain without ldap leaves no bind password",
               (("file", "/etc/nats/identity/ldap-bind.pass", "absent") in done) != with_ldap,
               done)
-        check(f"{what}: the controller's operators file is looked at",
+        c.check(f"{what}: the controller's operators file is looked at",
               any(k == "stat" and "operators" in str(p) for k, p, _ in done), done)
 
 
-def check_agent_unit_172(check, can_render):
+def check_agent_unit_172(c, can_render):
     """HYPOTHESIS (#172): юнит агента и проверка deploy зовут переходный
     `python3 -m mop.agent` (#150), а не командлет. Считалось, что на узле
     диспетчер откажет без .env (REQUIRED); не отказывает -- проверено на
@@ -758,28 +759,28 @@ def check_agent_unit_172(check, can_render):
     STATUS: FIXED — see #172"""
     unit = os.path.join(DEPLOY, "roles", "bus", "templates", "mop-agent.service.j2")
     text = open(unit).read()
-    check("mop-agent unit: no python3 -m mop.agent (#172)", "-m mop.agent" not in text)
+    c.check("mop-agent unit: no python3 -m mop.agent (#172)", "-m mop.agent" not in text)
     if can_render:
         got = render(text, {"MOP_USER": "mopuser", "mop_home": "/home/mopuser/mop",
                             "inventory_hostname": "hyper", "mop_uid": 1000,
                             "MOP_PUPPET_SEED": ".env*"})
         execs = [l for l in got.splitlines() if l.startswith("ExecStart=")]
-        check("mop-agent unit: ExecStart is the commandlet (#172)",
+        c.check("mop-agent unit: ExecStart is the commandlet (#172)",
               execs == ["ExecStart=/home/mopuser/mop/bin/mop agent"], execs)
     tasks = [t for f, t in all_tasks() if f.endswith("roles/bus/tasks/main.yml")
              and t.get("name") == "Confirm the agent is connected"]
-    check("bus role: one agent check task (#172)", len(tasks) == 1, len(tasks))
+    c.check("bus role: one agent check task (#172)", len(tasks) == 1, len(tasks))
     for t in tasks:
-        check("agent check: runs the commandlet (#172)",
+        c.check("agent check: runs the commandlet (#172)",
               t.get("ansible.builtin.command") == "{{ mop_home }}/bin/mop agent --check",
               t.get("ansible.builtin.command"))
-        check("agent check: same chdir and node name (#172)",
+        c.check("agent check: same chdir and node name (#172)",
               (t.get("args") or {}).get("chdir") == "{{ mop_home }}"
               and (t.get("environment") or {}).get("MOP_NODE") == "{{ inventory_hostname }}",
               (t.get("args"), t.get("environment")))
 
 
-def check_one_source_219(check):
+def check_one_source_219(c):
     """HYPOTHESIS (#219): deploy заводит людям пароли (nats-op-*.pass),
     кладёт их в base-users.json и копию личностей, а выключатель
     MOP_AUTH_CALLOUT держит вторую дорогу -- статических людей.
@@ -790,22 +791,15 @@ def check_one_source_219(check):
         for gone in ("MOP_AUTH_CALLOUT", "MOP_OPERATORS ", "MOP_OPERATORS\n", "MOP_OPERATORS'",
                      'MOP_OPERATORS"', "MOP_OPERATORS}", "MOP_OPERATOR_SUBJECTS", "nats-op-",
                      "mop_operators_base"):
-            check(f"{os.path.relpath(path, DEPLOY)}: no {gone.strip()!r} (#219)", gone not in text)
+            c.check(f"{os.path.relpath(path, DEPLOY)}: no {gone.strip()!r} (#219)", gone not in text)
 
 
 def main():
-    cases = bad = 0
-
-    def check(what, ok, detail=""):
-        nonlocal cases, bad
-        cases += 1
-        if not ok:
-            bad += 1
-            print(f"FAILED  {what}" + (f": {detail}" if detail else ""))
+    c = Checks()
 
     # ── юниты из общего шаблона ───────────────────────────────────────────
     template = os.path.join(COMMON, "templates", "service.j2")
-    check("common unit template exists", os.path.isfile(template))
+    c.check("common unit template exists", os.path.isfile(template))
     try:
         import jinja2  # noqa: F401
         can_render = True
@@ -815,18 +809,18 @@ def main():
                       "no jinja2 on this machine — only the structure below is checked")
     # ── кому что из настроек (#176) ───────────────────────────────────────
     scoped = getattr(config, "SERVER_SCOPED", {})
-    check("config.SERVER_SCOPED names every server unit",
+    c.check("config.SERVER_SCOPED names every server unit",
           sorted(scoped) == sorted(UNITS), sorted(scoped))
     reads = set().union(*(settings_read(p) for p in CLUSTER_READS))
     missing = sorted(unit_env(reads) - set(scoped.get("mop-cluster", ())))
-    check("mop-cluster gets every setting its code reads", not missing, missing)
+    c.check("mop-cluster gets every setting its code reads", not missing, missing)
     for unit, names in scoped.items():
-        check(f"{unit}: settings, not secrets, in the unit",
+        c.check(f"{unit}: settings, not secrets, in the unit",
               not [n for n in names if re.search(r"TOKEN|PASS|SECRET", n)], names)
-        check(f"{unit}: every name is a setting",
+        c.check(f"{unit}: every name is a setting",
               all(n in config.SETTINGS for n in names), names)
     from mop.server import playvars
-    check("playvars exports SERVER_SCOPED",
+    c.check("playvars exports SERVER_SCOPED",
           playvars.playbook_vars().get("MOP_SERVER_SCOPED") ==
           {u: list(v) for u, v in scoped.items()})
     variables = {**{k: v for k, v in config.SETTINGS.items() if v}, **VARS,
@@ -834,22 +828,22 @@ def main():
 
     for unit, role in UNITS.items():
         tmpl, uvars = unit_task(role, unit)
-        check(f"{unit}: the role installs it", tmpl is not None)
+        c.check(f"{unit}: the role installs it", tmpl is not None)
         if tmpl is None:
             continue
-        check(f"{unit}: from the common template",
+        c.check(f"{unit}: from the common template",
               tmpl.get("src", "").endswith("common/templates/service.j2"), tmpl.get("src"))
         own = os.path.join(DEPLOY, "roles", role, "templates", f"{unit}.service.j2")
-        check(f"{unit}: its own template is gone", not os.path.exists(own))
+        c.check(f"{unit}: its own template is gone", not os.path.exists(own))
         # Набор env -- из config.SERVER_SCOPED, не рукописным списком задачи
         # (#176); тот же, что был, плюс добавленное этим тикетом.
-        check(f"{unit}: no hand-typed env list in the task",
+        c.check(f"{unit}: no hand-typed env list in the task",
               "env" not in (uvars.get("unit") or {}), (uvars.get("unit") or {}).get("env"))
         # И в кавычках (#185): значение с пробелом systemd иначе разрезал бы.
         was = re.findall(r'^Environment="?([A-Z_]+)=', PINNED[unit], re.M)
         now = list(scoped.get(unit, ())) + ["PYTHONUNBUFFERED"]
         want = was + list(ADDED.get(unit, ()))
-        check(f"{unit}: the env set as before plus the additions",
+        c.check(f"{unit}: the env set as before plus the additions",
               sorted(now) == sorted(want), f"{sorted(now)} != {sorted(want)}")
         if can_render and os.path.isfile(template):
             got = render(open(template).read(), {**variables, **uvars})
@@ -863,10 +857,10 @@ def main():
                                               {**variables, **uvars, name: value}))
                 except ValueError as e:  # незакрытая кавычка: строку не разобрать
                     seen = {name: f"unparsable: {e}"}
-                check(f"{unit}: systemd reads {value!r} whole", seen.get(name) == value,
+                c.check(f"{unit}: systemd reads {value!r} whole", seen.get(name) == value,
                       seen.get(name))
             if unit not in ADDED:
-                check(f"{unit}: rendered byte for byte as before", got == PINNED[unit],
+                c.check(f"{unit}: rendered byte for byte as before", got == PINNED[unit],
                       "\n" + "\n".join(f"  -{a!r}\n  +{b!r}" for a, b in
                                        zip(PINNED[unit].splitlines(), got.splitlines()) if a != b))
                 continue
@@ -878,12 +872,12 @@ def main():
                 return line.startswith("Environment=") and \
                     set(environment(line)) & set(ADDED[unit])
             bare = [l for l in got.splitlines() if not l.startswith("#")]
-            check(f"{unit}: as before but for the added lines",
+            c.check(f"{unit}: as before but for the added lines",
                   [l for l in bare if not named(l)] ==
                   [l for l in PINNED[unit].splitlines() if not l.startswith("#")])
             seen = environment(got)
             wrong = {n: seen.get(n) for n in ADDED[unit] if seen.get(n) != variables[n]}
-            check(f"{unit}: every addition rendered", not wrong, wrong)
+            c.check(f"{unit}: every addition rendered", not wrong, wrong)
 
     # ── check mode без ложных changed (#191) ─────────────────────────────
     def tasks(name):
@@ -896,31 +890,31 @@ def main():
 
     nb = tasks("nomad_bin.yml")
     probe = [t for t in nb if "nomad version" in str(t.get("ansible.builtin.command", ""))]
-    check("nomad_bin: a version probe", len(probe) == 1, [t.get("name") for t in probe])
+    c.check("nomad_bin: a version probe", len(probe) == 1, [t.get("name") for t in probe])
     if probe:
         p = probe[0]
-        check("nomad_bin: the probe runs in check mode and changes nothing",
+        c.check("nomad_bin: the probe runs in check mode and changes nothing",
               p.get("check_mode") is False and p.get("changed_when") is False
               and p.get("failed_when") is False and p.get("register"), p)
         reg = p.get("register", "")
         for mod in ("ansible.builtin.get_url", "ansible.builtin.unarchive"):
             t = [t for t in nb if mod in t]
-            check(f"nomad_bin: {mod} only when the version is not the wanted one",
+            c.check(f"nomad_bin: {mod} only when the version is not the wanted one",
                   len(t) == 1 and reg in when(t[0]) and "nomad_version" in when(t[0]),
                   [when(x) for x in t])
     pp = [t for t in tasks("pip.yml") if "ansible.builtin.pip" in t]
     real = [t for t in pp if t["ansible.builtin.pip"].get("extra_args")]
     dry = [t for t in pp if not t["ansible.builtin.pip"].get("extra_args")]
-    check("pip: the real task keeps --user --break-system-packages, outside check mode",
+    c.check("pip: the real task keeps --user --break-system-packages, outside check mode",
           len(real) == 1 and real[0]["ansible.builtin.pip"]["extra_args"] ==
           "--user --break-system-packages" and when(real[0]) == "not ansible_check_mode",
           [(t["ansible.builtin.pip"].get("extra_args"), when(t)) for t in real])
-    check("pip: a check-mode twin without extra_args", len(dry) == 1
+    c.check("pip: a check-mode twin without extra_args", len(dry) == 1
           and when(dry[0]) == "ansible_check_mode", [when(t) for t in dry])
     if len(real) == 1 and len(dry) == 1:
         a, b = real[0], dry[0]
         same = ("become", "become_user")
-        check("pip: the twin asks as the same user about the same list",
+        c.check("pip: the twin asks as the same user about the same list",
               all(a.get(k) == b.get(k) for k in same)
               and {k: v for k, v in a["ansible.builtin.pip"].items() if k != "extra_args"}
               == b["ansible.builtin.pip"],
@@ -934,11 +928,11 @@ def main():
         getattr(cluster, "INVENTORY_HOSTS", "") or "?")
     wrote = [t for f, t in site_tasks() if f.endswith("roles/cluster/tasks/main.yml")
              and "mop_inventory_hosts" in str(t.get("ansible.builtin.copy", {}).get("content"))]
-    check("cluster: the role writes the inventory's hosts where the service reads them",
+    c.check("cluster: the role writes the inventory's hosts where the service reads them",
           len(wrote) == 1 and wrote[0]["ansible.builtin.copy"].get("dest") == want
           and wrote[0]["ansible.builtin.copy"].get("owner") == "{{ MOP_USER }}",
           [t.get("ansible.builtin.copy") for t in wrote] or want)
-    check("cluster: the host list only when deploy sent one",
+    c.check("cluster: the host list only when deploy sent one",
           len(wrote) == 1 and "mop_inventory_hosts is defined" in when(wrote[0]),
           [when(t) for t in wrote])
 
@@ -950,11 +944,11 @@ def main():
     want = "{{ MOP_HOME }}/.config/mop/" + os.path.basename(spec.ASKS_FILE)
     wrote = [t for f, t in site_tasks() if f.endswith("roles/cluster/tasks/main.yml")
              and "mop_manifests" in str(t.get("ansible.builtin.copy", {}).get("content"))]
-    check("cluster: the role writes the projects' asks where the spec reads them",
+    c.check("cluster: the role writes the projects' asks where the spec reads them",
           len(wrote) == 1 and wrote[0]["ansible.builtin.copy"].get("dest") == want
           and wrote[0]["ansible.builtin.copy"].get("owner") == "{{ MOP_USER }}",
           [t.get("ansible.builtin.copy") for t in wrote] or want)
-    check("cluster: the asks only when deploy sent the manifests",
+    c.check("cluster: the asks only when deploy sent the manifests",
           len(wrote) == 1 and "mop_manifests is defined" in when(wrote[0]),
           [when(t) for t in wrote])
     if can_render and len(wrote) == 1:
@@ -969,7 +963,7 @@ def main():
                              .render(mop_manifests=manifests))
         except Exception as e:  # noqa: BLE001 -- проверка, не код пула
             got = f"{type(e).__name__}: {e}"
-        check("cluster: the asks file is {project: asks}, nothing else of the manifest",
+        c.check("cluster: the asks file is {project: asks}, nothing else of the manifest",
               got == {"mop": {"MOP_MEM_MB": "6144"}, "rugent": {}}, got)
 
     # ── потолок памяти узла -- в meta Nomad (#197) ───────────────────────
@@ -980,7 +974,7 @@ def main():
     from mop.server import spec
     hcl_path = os.path.join(DEPLOY, "roles", "nomad", "templates", "client.hcl.j2")
     hcl = open(hcl_path).read()
-    check("client.hcl: the node's memory cap is in its meta under the spec's key",
+    c.check("client.hcl: the node's memory cap is in its meta under the spec's key",
           re.search(r"^\s*" + re.escape(spec.META_MEM_CAP) + r"\s*=", hcl, re.M) is not None,
           spec.META_MEM_CAP)
     if can_render:
@@ -995,7 +989,7 @@ def main():
                 got = re.findall(r'^\s*' + re.escape(spec.META_MEM_CAP) + r'\s*=\s*"([^"]*)"', out, re.M)
             except Exception as e:  # noqa: BLE001 -- проверка, не код пула
                 got = f"{type(e).__name__}: {e}"
-            check(f"client.hcl: {what}", got == [want], got)
+            c.check(f"client.hcl: {what}", got == [want], got)
 
     # ── ssh-порт узла -- из ansible_port инвентаря (#201) ────────────────
     # Порт, которым сервер ходит на узел, знал только ssh config root'а на
@@ -1006,7 +1000,7 @@ def main():
     bus_tasks = yaml.safe_load(open(os.path.join(DEPLOY, "roles", "bus", "tasks", "main.yml")))
     node_env = next((t for t in bus_tasks
                      if t.get("name") == "What this node knows about itself"), None)
-    check("bus: the node.env task is found", node_env is not None)
+    c.check("bus: the node.env task is found", node_env is not None)
     if can_render and node_env is not None:
         content = node_env["ansible.builtin.copy"]["content"]
         scoped = ",".join(config.NODE_SCOPED)
@@ -1024,7 +1018,7 @@ def main():
                 got = (lines.get("MOP_SSH_PORT"), lines.get("MOP_DRIVER"))
             except Exception as e:  # noqa: BLE001 -- проверка, не код пула
                 got = f"{type(e).__name__}: {e}"
-            check(f"node.env: MOP_SSH_PORT from {what}", got ==
+            c.check(f"node.env: MOP_SSH_PORT from {what}", got ==
                   (want, host.get("mop_driver", installed.get("MOP_DRIVER"))), got)
 
     # ── callout.conf -- рестарт, users.conf -- reload (#206) ────────────
@@ -1034,21 +1028,21 @@ def main():
     ptasks = yaml.safe_load(open(os.path.join(DEPLOY, "roles", "bus", "tasks", "projects.yml")))
     by = {t.get("name"): t for t in ptasks}
     after = by.get("Callout file of the bus, after") or {}
-    check("bus: a changed callout.conf restarts nats",
+    c.check("bus: a changed callout.conf restarts nats",
           (after.get("ansible.builtin.stat") or {}).get("path") == "/etc/nats/callout.conf"
           and after.get("notify") == "restart nats", after)
-    check("bus: a changed users.conf still reloads nats",
+    c.check("bus: a changed users.conf still reloads nats",
           (by.get("Users file of the bus, after") or {}).get("notify") == "reload nats")
     users_task = by.get("Users file of the bus, written by the server") or {}
     names = [t.get("name") for t in ptasks]
-    check("bus: the callout file is read before and after mop cluster users",
+    c.check("bus: the callout file is read before and after mop cluster users",
           names.index("Callout file of the bus, before") < names.index(users_task.get("name"))
           < names.index("Callout file of the bus, after") if after and users_task else False)
-    check_identity_copy_167(check, ptasks)
-    check_one_source_219(check)
-    check_agent_unit_172(check, can_render)
+    check_identity_copy_167(c, ptasks)
+    check_one_source_219(c)
+    check_agent_unit_172(c, can_render)
     conf = open(os.path.join(DEPLOY, "roles", "bus", "templates", "nats-server.conf.j2")).read()
-    check("nats-server.conf includes callout.conf inside authorization",
+    c.check("nats-server.conf includes callout.conf inside authorization",
           re.search(r"authorization \{[^}]*include \./callout\.conf", conf) is not None)
 
     # ── пароль LDAP сервисам сервера -- файлом 0600 (#214) ───────────────
@@ -1063,39 +1057,39 @@ def main():
     bind = "/etc/nats/identity/ldap-bind.pass"
     found = [(t, w) for t, w in every(ptasks)
              if ((t.get("ansible.builtin.copy") or {}).get("dest") == bind)]
-    check("bus: one task writes the LDAP bind password file", len(found) == 1, len(found))
+    c.check("bus: one task writes the LDAP bind password file", len(found) == 1, len(found))
     if found:
         t, w = found[0]
         cp = t["ansible.builtin.copy"]
-        check("bus: the bind password file is 0600, the pool user's",
+        c.check("bus: the bind password file is 0600, the pool user's",
               cp.get("mode") == "0600" and cp.get("owner") == "{{ MOP_USER }}", cp)
-        check("bus: the bind password never reaches the log", t.get("no_log") is True, t)
-        check("bus: the bind password comes from the play's env, not extra-vars",
+        c.check("bus: the bind password never reaches the log", t.get("no_log") is True, t)
+        c.check("bus: the bind password comes from the play's env, not extra-vars",
               "lookup('env', 'MOP_LDAP_BIND_PASSWORD')" in str(cp.get("content")), cp.get("content"))
         # Внутри блока копии личностей (#167: при callout или при файле
         # операторов) -- файл пароля следует его условию, своего нет.
         block = next((b for b in ptasks if b.get("name") == "Identity for the server's services"), {})
-        check("bus: the bind password file only with the ldap provider, inside the identity copy",
+        c.check("bus: the bind password file only with the ldap provider, inside the identity copy",
               "'ldap' in MOP_AUTH_PROVIDER.replace(' ', '').split(',')" in str(w)
               and block.get("when") in (w or [None])
               and t in (block.get("block") or []), w)
     gone = [(t, w) for t, w in every(ptasks)
             if (t.get("ansible.builtin.file") or {}).get("path") == bind
             and (t.get("ansible.builtin.file") or {}).get("state") == "absent"]
-    check("bus: no bind password file without the ldap provider",
+    c.check("bus: no bind password file without the ldap provider",
           len(gone) == 1
           and "'ldap' not in MOP_AUTH_PROVIDER.replace(' ', '').split(',')" in str(gone[0][1]), gone)
 
     # ── одно определение у каждой общей вещи ─────────────────────────────
     gv_path = os.path.join(DEPLOY, "group_vars", "all.yml")
     gv = yaml.safe_load(open(gv_path)) if os.path.isfile(gv_path) else {}
-    check("group_vars: package excludes, .env among them",
+    c.check("group_vars: package excludes, .env among them",
           gv.get("mop_package_excludes") == EXCLUDES, gv.get("mop_package_excludes"))
-    check("group_vars: secrets_dir", gv.get("secrets_dir") ==
+    c.check("group_vars: secrets_dir", gv.get("secrets_dir") ==
           "{{ lookup('env', 'HOME') }}/.config/mop/secrets", gv.get("secrets_dir"))
-    check("group_vars: projects", gv.get("projects") == "{{ mop_projects | default([]) }}",
+    c.check("group_vars: projects", gv.get("projects") == "{{ mop_projects | default([]) }}",
           gv.get("projects"))
-    check("group_vars: the package's source is the playbook's tree",
+    c.check("group_vars: the package's source is the playbook's tree",
           "playbook_dir" in str(gv.get("mop_source")), gv.get("mop_source"))
 
     only = {
@@ -1116,16 +1110,15 @@ def main():
                        if needle in "\n".join(l for l in open(f).read().splitlines()
                                               if not l.lstrip().startswith("#")))
         want = [home] if home else []
-        check(f"{needle!r} lives only in {home or 'no file'}", where == want, where)
+        c.check(f"{needle!r} lives only in {home or 'no file'}", where == want, where)
 
-    check_probes(check)
-    check_body_sizes(check, can_render)
-    check_pve_storage_227(check, can_render)
-    check_include_loop_var(check)
-    check_users_reload_199(check)
+    check_probes(c)
+    check_body_sizes(c, can_render)
+    check_pve_storage_227(c, can_render)
+    check_include_loop_var(c)
+    check_users_reload_199(c)
 
-    print(f"deploy: {cases - bad}/{cases}" + (" FAILED" if bad else " ok"))
-    return 1 if bad else 0
+    return c.report("deploy")
 
 
 if __name__ == "__main__":
