@@ -365,13 +365,27 @@ def _add(project, req):
     return {"ok": True, "name": name, "origin": origin}
 
 
+def _kept_branch(name):
+    """Ветка мастера из меты джоба (#256), если она там есть."""
+    # Чтение по возможности: нет джоба или Nomad молчит -- нет и ветки, а о
+    # самом Nomad скажет register следом.
+    try:
+        job = nomad.get_job(name)
+    except Exception:
+        return None
+    return ((job or {}).get("Meta") or {}).get("branch")
+
+
 def _update(project, req):
     # Спеку собирает сервер: `register(spec)` глаголом не бывает, иначе
     # проситель кладёт на узел что хочет (докстринг модуля).
     name = req["name"]
     store_workspace(bootstrap.ROOT, name, req)
+    # Ветка -- свойство папета (#257): запрос без неё (recycle, gc, лечение
+    # doctor'а) не стирает ту, с которой папет заведён.
+    branch = req.get("branch") or _kept_branch(name)
     nomad.register(spec.job_spec(name, req.get("origin"), req.get("profile"),
-                                 cont=bool(req.get("cont")), branch=req.get("branch")))
+                                 cont=bool(req.get("cont")), branch=branch))
     return {"ok": True, "name": name}
 
 

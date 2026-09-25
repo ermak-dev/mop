@@ -1392,6 +1392,27 @@ def check_timeouts_171():
             r = asyncio.run(host.destroy(name))
             check("host.destroy, success as before", r,
                   lambda r: r.get("reset") is True)
+            # #257: после сноса клон встаёт на ветку мастера, если её назвали:
+            # -B на origin/<ветка> после fetch, иначе локально от HEAD; без
+            # ветки -- как было, никакого checkout. STATUS: FIXED — see #257
+            ran = []
+
+            async def recording_sh(script, timeout=20, prefix=()):
+                ran.append(script)
+                return "", 0
+            host.sh = recording_sh
+            asyncio.run(host.destroy(name))
+            check("host.destroy without a branch runs no checkout", ran,
+                  lambda r: not any("checkout" in s for s in r))
+            ran.clear()
+            r = asyncio.run(host.destroy(name, branch="swarm"))
+            check("host.destroy with a branch checks it out after the reset", ran,
+                  lambda r: any("checkout -q -B swarm origin/swarm" in s for s in r)
+                  and any("|| git" in s and "checkout -q -B swarm" in s.split("||")[-1]
+                          and "origin/swarm" not in s.split("||")[-1] for s in r)
+                  and r.index(next(s for s in r if "checkout" in s))
+                  > r.index(next(s for s in r if "reset --hard" in s)))
+            host.sh = fake_sh()
 
             # pve: каждый мутирующий шаг по отдельности.
             async def standing(_v):

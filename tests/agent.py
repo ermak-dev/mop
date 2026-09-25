@@ -481,13 +481,18 @@ def check_gates_40():
         return None
 
     class Driver:
-        async def destroy(self, name):
-            destroyed.append(name)
+        async def destroy(self, name, branch=None):
+            destroyed.append(name if branch is None else (name, branch))
             return {"target": "gone"}
     try:
         agent.bsh, agent.clone_facts, agent.tmux_alive = bsh, facts, dead
         agent.DRIVER, agent._event = Driver(), no_event
         base = {"name": "pu-mop-1", "_project": "mop"}
+        # #257: ветка мастера едет глаголом wipe до драйвера. STATUS: FIXED — see #257
+        destroyed.clear()
+        got = asyncio.run(agent.v_wipe(None, {**base, "owner": "olga", "branch": "swarm"}))
+        if got.get("error") or destroyed != [("pu-mop-1", "swarm")]:
+            out.append(f"#257 wipe must hand the branch to the driver: {got} {destroyed}")
         for verb, fn, extra, touched in (("type", agent.v_type, {"command": "/status"}, shelled),
                                          ("wipe", agent.v_wipe, {}, destroyed)):
             for who, more, allowed in (("another master", {"owner": "anton"}, False),

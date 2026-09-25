@@ -624,13 +624,44 @@ def check_slots_total_243():
     return out
 
 
+# ── #257: перерегистрация без ветки в запросе сохраняет ветку меты ────────
+# HYPOTHESIS: `mop recycle`, `mop gc`, лечение doctor'а перерегистрируют
+# спеку глаголом update без branch, и мета теряет ветку мастера (#256):
+# свежее тело клонирует origin/HEAD. SOLUTION: _update берёт branch из
+# запроса, а без него -- из текущей меты джоба; ветка -- свойство папета,
+# которое перерегистрация обязана сохранять. STATUS: FIXED — see #257
+def check_update_keeps_branch_257():
+    out = []
+    saved = (cluster.nomad.get_job, cluster.nomad.register, cluster.spec.job_spec,
+             cluster.store_workspace)
+    calls = []
+    try:
+        cluster.nomad.get_job = lambda name: {"ID": name, "Meta": {"origin": "git@h:g/mop.git",
+                                                                   "llm": "claude", "branch": "swarm"}}
+        cluster.nomad.register = lambda job: None
+        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None: \
+            calls.append(branch) or {"Job": {"ID": name}}
+        cluster.store_workspace = lambda root, name, req: None
+        cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
+        cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git", "branch": "dev"})
+        cluster.nomad.get_job = lambda name: None
+        cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
+    finally:
+        (cluster.nomad.get_job, cluster.nomad.register, cluster.spec.job_spec,
+         cluster.store_workspace) = saved
+    if calls != ["swarm", "dev", None]:
+        out.append(f"update must keep the meta branch unless the request names one: {calls}")
+    return out
+
+
 def main():
     failed = []
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,
                   check_secret_verbs, check_verb_table_173,
                   check_forget_inventory_178, check_forget_summary_196,
-                  check_gates_40, check_caller_207, check_slots_total_243):
+                  check_gates_40, check_caller_207, check_slots_total_243,
+                  check_update_keeps_branch_257):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:

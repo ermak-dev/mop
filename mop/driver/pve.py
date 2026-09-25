@@ -742,7 +742,7 @@ async def push(name, path, data):
     return r if r.get("error") else {"written": path}
 
 
-async def destroy(name):
+async def destroy(name, branch=None):
     """Снести тело целиком. Следующий `ensure` сделает новое из шаблона.
 
     У host на этом месте чистка клона — узел снести нельзя. Здесь можно, и

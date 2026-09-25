@@ -492,13 +492,13 @@ def _note(reply):
 
 
 # ─── рецикл ───────────────────────────────────────────────────────────────
-def wipe(node, name, force=False):
+def wipe(node, name, force=False, branch=None):
     """Глагол wipe напрямую, без остановки джоба. Агент сам откажет, если
     tmux-сессия жива: голый wipe — для уже остановленного папета, полный
     цикл (стоп → снос → подъём) — recycle. Чужой папет -- отказ агента с
     именем владельца (#40), force его проходит."""
     r = bus.request(node, "wipe", name=name, owner=bus.login(), force=force,
-                    timeout=600)
+                    branch=branch, timeout=600)
     if "error" in r:
         raise RuntimeError(r["error"])
     return r
@@ -655,16 +655,21 @@ def recycle(name, workspace_of=None, force=False):
     if not node:
         raise RuntimeError(f"{name} has no allocation — nothing to recycle")
 
+    # Ветка мастера (#257): из контекста команды, иначе та, с которой папет
+    # заведён (мета джоба) -- рецикл без рабочей копии (gc) её не теряет.
+    from . import context
+    branch = context.current().branch or meta.get("branch")
     me = {"owner": bus.login(), "force": force}
     note = _cluster("delete", name=name, purge=False, **me).get("owner_note")
     _wait_stopped(name)
     try:
-        wipe(node, name, force)
+        wipe(node, name, force, branch=branch)
     except RuntimeError as e:
         raise RuntimeError(f"{e}; job is stopped — after fixing the node "
                            f"retry: mop recycle {name}")
     fields = {"workspace": workspace_of(origin)} if workspace_of else {}
-    _cluster("update", name=name, origin=origin, profile=profile, **me, **fields)
+    _cluster("update", name=name, origin=origin, profile=profile, branch=branch,
+             **me, **fields)
     return {"node": node, "owner_note": note}
 
 
