@@ -86,7 +86,7 @@ def main():
             os.environ["MOP_SERVER_LAN"] = saved
 
     # ── интеграционная ветка per user (#249) ─────────────────────────────
-    # HYPOTHESIS: ветку тикета `mop bug start` заводит от origin/HEAD, а
+    # HYPOTHESIS: ветку тикета `mop dev bug start` заводит от origin/HEAD, а
     # мастер называет папету цель landing по правилам проекта; «мою» ветку
     # задать негде: ветка по умолчанию в GitLab одна на репозиторий.
     # SOLUTION: третье поле контекста -- branch: git config mop.branch клона

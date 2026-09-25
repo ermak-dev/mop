@@ -1,19 +1,19 @@
 """pipelines, job logs, lint and runners: GitLab CI from the terminal
 
-  mop ci                           the latest 15 pipelines
-  mop ci list [-n N]               the same, N of them
-  mop ci <id> [--failed]           a pipeline's jobs; --failed: only real failures
-  mop ci show <id> [--failed]      the same
-  mop ci why <id>                  why it failed: failing jobs with their log tails
-  mop ci log <job> [--lines N] [--full]
+  mop dev ci                           the latest 15 pipelines
+  mop dev ci list [-n N]               the same, N of them
+  mop dev ci <id> [--failed]           a pipeline's jobs; --failed: only real failures
+  mop dev ci show <id> [--failed]      the same
+  mop dev ci why <id>                  why it failed: failing jobs with their log tails
+  mop dev ci log <job> [--lines N] [--full]
                                    a job's log, the last 60 lines by default
-  mop ci lint [file]               check a .gitlab-ci.yml, the working copy's by default
-  mop ci retry <job>               run a finished job again
-  mop ci retry --pipeline <id>     rerun a pipeline's failed jobs
-  mop ci cancel <id>               cancel a pipeline that is still going
-  mop ci runners                   the project's runners and what each is running
+  mop dev ci lint [file]               check a .gitlab-ci.yml, the working copy's by default
+  mop dev ci retry <job>               run a finished job again
+  mop dev ci retry --pipeline <id>     rerun a pipeline's failed jobs
+  mop dev ci cancel <id>               cancel a pipeline that is still going
+  mop dev ci runners                   the project's runners and what each is running
 
-Coordinates and credentials are those of `mop bug`: the working copy's git
+Coordinates and credentials are those of `mop dev bug`: the working copy's git
 origin, GITLAB_TOKEN (or GITLAB_USER + GITLAB_PASSWORD) in .env.
 """
 import importlib
@@ -38,4 +38,4 @@ def main(argv):
     if found is None:
         lib.usage(__doc__)
     verb, rest = found
-    return importlib.import_module(f"mop.cli.ci.{verb}").main(rest)
+    return importlib.import_module(f"mop.cli.dev.ci.{verb}").main(rest)

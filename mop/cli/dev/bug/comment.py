@@ -1,7 +1,7 @@
-"""mop bug comment <iid> "текст" | - | --body-file F: comment on an issue
+"""mop dev bug comment <iid> "текст" | - | --body-file F: comment on an issue
 """
 from mop import gitlab
-from mop.cli.bug._common import parser, read_body
+from mop.cli.dev.bug._common import parser, read_body
 
 
 def main(argv):

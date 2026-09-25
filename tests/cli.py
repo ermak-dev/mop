@@ -1804,6 +1804,35 @@ def check_fallback_model_183():
         failed += 1
         print("FAIL #252 messages must not cite tickets:\n  " + "\n  ".join(spoken))
 
+    # ── #254: bug и ci -- в пространстве dev, без MCP ────────────────────
+    # HYPOTHESIS: трекер и CI проекта -- команды разработчика, а лежат среди
+    # команд пула и торчат в MCP инструментами ci_*. SOLUTION: mop/cli/dev/
+    # {bug,ci}, группа dev в PRIVATE, прежние имена -- через LEGACY один релиз.
+    # STATUS: FIXED — see #254
+    tree = cli.verbs()
+    if set(tree.get("dev") or {}) != {"bug", "ci"}:
+        failed += 1
+        print(f"FAIL #254 dev must hold bug and ci: {sorted(tree.get('dev') or {})}")
+    top = cli.catalog(cli.scan())
+    if "bug" in top or "ci" in top:
+        failed += 1
+        print("FAIL #254 bug and ci must not stay top-level commands")
+    if cli.LEGACY.get("bug") != ("dev", "bug") or cli.LEGACY.get("ci") != ("dev", "ci"):
+        failed += 1
+        print(f"FAIL #254 LEGACY must map bug and ci into dev: {cli.LEGACY}")
+    for name, words, path in cli.tool_commands(cli.scan(), tree, private=()):
+        if words[0] == "dev" and cli.declared(path) is not None:
+            failed += 1
+            print(f"FAIL #254 {' '.join(words)} must not declare MCP")
+    if any(n.startswith("dev") or n.startswith("ci_") for n, _, _ in
+           cli.tool_commands(cli.scan(), tree)):
+        failed += 1
+        print("FAIL #254 no dev tool may reach MCP")
+    got = cli.resolve(cli.unalias(["bug", "list"]), top, tree)
+    if got != ("mop.cli.dev.bug.list", []):
+        failed += 1
+        print(f"FAIL #254 `mop dev bug list` must still resolve through LEGACY: {got}")
+
     return failed
 
 

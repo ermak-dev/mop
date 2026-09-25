@@ -1,4 +1,4 @@
-"""mop ci lint [file]: check a .gitlab-ci.yml against the project
+"""mop dev ci lint [file]: check a .gitlab-ci.yml against the project
 
 The file is the working copy's .gitlab-ci.yml by default. Prints
 "valid — N job(s): ..." or "invalid" with the errors (exit 1), then warnings.
@@ -7,7 +7,7 @@ Includes resolve against the project, as they would in a pipeline.
 import os
 
 from mop import config, gitlab
-from mop.cli.ci._common import parser
+from mop.cli.dev.ci._common import parser
 
 
 def main(argv):

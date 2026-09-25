@@ -96,30 +96,30 @@ edits.
 
 Work lives in GitLab issues. The coordinates come from the working copy's git origin, the credentials from `.env`.
 
- - **MUST** Use `mop bug` for every interaction with the tracker, never the API directly
- - **MUST** If a capability is missing, add it to `mop/cli/bug` plus a check of its pure logic in `tests/gitlab.py`
+ - **MUST** Use `mop dev bug` for every interaction with the tracker, never the API directly
+ - **MUST** If a capability is missing, add it to `mop/cli/dev/bug` plus a check of its pure logic in `tests/gitlab.py`
  - **MUST** Issue titles, bodies and comments are in Russian; code, branch names and commits stay English
  - **MUST** Every unit of work is an issue before the fix, in the fixed report shape: steps to reproduce, expected result, actual result, evidence, the root cause (only when confirmed) and what to do
- - **MUST** Exactly one label from each group `status::`, `sev::`, `component::` — a second of the same group silently replaces the first; `mop bug labels` prints the vocabulary
+ - **MUST** Exactly one label from each group `status::`, `sev::`, `component::` — a second of the same group silently replaces the first; `mop dev bug labels` prints the vocabulary
  - **MUST** One issue = one defect: split a compound one and cross-link the parts
- - **MUST** Search for a duplicate before opening (`mop bug list --all -t ...`): the test is the fix, not the wording — if one change closes both, it is one issue
+ - **MUST** Search for a duplicate before opening (`mop dev bug list --all -t ...`): the test is the fix, not the wording — if one change closes both, it is one issue
  - **MUST NOT** The pool and its nodes are not tracker subjects: a dead node, a stale login, a full disk are an action on a machine, not a diff
- - **MUST NOT** Never set or clear `status::wip` by hand: `mop bug start` stamps it, `close` strips it; a stale wip is the only signal that work died
+ - **MUST NOT** Never set or clear `status::wip` by hand: `mop dev bug start` stamps it, `close` strips it; a stale wip is the only signal that work died
 
 ## Delivery
 
-CI (`.gitlab-ci.yml`) runs every file in `tests/` on every push, in Docker, on Python 3.12 and 3.13, with `MOP_TESTS_STRICT=1` (#228). Code reaches the pool through `mop deploy`, and `master` is the branch it is rolled out from: on an installation whose CI deploy variables are set, a green `master` pipeline runs it by itself (`deploy:mop`, a forced-command `mop deploy --from-ci` on the server, #239/#240); elsewhere it is run by hand. `mop ci` reads pipelines, job logs and runners, and `mop ci lint` checks `.gitlab-ci.yml` before a push.
+CI (`.gitlab-ci.yml`) runs every file in `tests/` on every push, in Docker, on Python 3.12 and 3.13, with `MOP_TESTS_STRICT=1` (#228). Code reaches the pool through `mop deploy`, and `master` is the branch it is rolled out from: on an installation whose CI deploy variables are set, a green `master` pipeline runs it by itself (`deploy:mop`, a forced-command `mop deploy --from-ci` on the server, #239/#240); elsewhere it is run by hand. `mop dev ci` reads pipelines, job logs and runners, and `mop dev ci lint` checks `.gitlab-ci.yml` before a push.
 
- - **MUST** Every issue lives on its own branch `[type]/[iid][-slug]` off a fresh `origin/master` (`mop bug start`)
+ - **MUST** Every issue lives on its own branch `[type]/[iid][-slug]` off a fresh `origin/master` (`mop dev bug start`)
  - **MUST** One fix = one layer: touching the wrapper, a playbook and the library at once is an unrevertable, unmeasurable change
  - **MUST** A commit explains why: the diff already shows what changed, and the incident behind the fix is worth more than a list of files
  - **MUST** Reference the issue in the commit subject as a bare `#74`, never a closing keyword
  - **MUST** Push the issue branch as soon as it is ready: work that lives only in a clone dies with the clone
  - **MUST** Land by local integration, one push: `git merge --no-ff` into a fresh `origin/master` (or your own branch when `git config mop.branch` / `MOP_BRANCH` names one, #249), every file in `tests/` on the merged tree, then a single `git push`; one merge commit per issue keeps `git revert -m 1` as the rollback
  - **MUST** Landing takes no token here (#225): the whole check runs in about 20 seconds, and git itself refuses the losing push of a race. A rejected push means fetch, merge again, rerun `tests/`, push — never a force push. `mop landing` is for projects whose gate runs for tens of minutes
- - **MUST** If you touched what travels to the nodes (`mop/`, `deploy/`), make sure it is rolled out and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives. Where CI deploys, watch the `master` pipeline's `deploy:mop` job in `mop ci` instead of running `mop deploy` by hand — a manual deploy races the CI one; elsewhere run `mop deploy` yourself
- - **MUST** Close the issue right after the rollout: `mop bug close [iid] --comment "…"` naming the commit and what it was verified with
- - **MUST** In pool mode the tracker belongs to the MASTER: the executor runs no `mop bug` at all and sends the comment text instead, which the master pastes
+ - **MUST** If you touched what travels to the nodes (`mop/`, `deploy/`), make sure it is rolled out and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives. Where CI deploys, watch the `master` pipeline's `deploy:mop` job in `mop dev ci` instead of running `mop deploy` by hand — a manual deploy races the CI one; elsewhere run `mop deploy` yourself
+ - **MUST** Close the issue right after the rollout: `mop dev bug close [iid] --comment "…"` naming the commit and what it was verified with
+ - **MUST** In pool mode the tracker belongs to the MASTER: the executor runs no `mop dev bug` at all and sends the comment text instead, which the master pastes
  - **MUST** In pool mode the executor lands on the branch the MASTER named and never picks the target itself
  - **MUST** In pool mode the executor lands only after the master accepted its report; an order between issues is the master's, named in the dispatch ("land only once #222 is in `origin/master`", checked with `git merge-base --is-ancestor`)
 

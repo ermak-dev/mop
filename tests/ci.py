@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Чистая логика `mop ci` без GitLab: python3 tests/ci.py
+"""Чистая логика `mop dev ci` без GitLab: python3 tests/ci.py
 
 #233: пайплайны mop покраснели (#230), и увидеть почему можно было только
 разовым скриптом к API (OAuth-токен, /projects/39/jobs/<id>/trace) — ровно
 тот обход снаружи, который CLAUDE.md запрещает. Порт `bin/ci` из rugent:
-библиотека в mop/gitlab.py, командлеты — группа mop/cli/ci.
+библиотека в mop/gitlab.py, командлеты — группа mop/cli/dev/ci.
 
 HYPOTHESIS: у mop нет ни одного глагола про пайплайны, кроме pipeline(sha)
 для deploy (#231), и отказы/строки, которые решают, что показать модели,
@@ -190,26 +190,26 @@ def cases():
 
 
 def check_group():
-    """`mop ci` — группа с глаголами; MCP только у читающих (#233)."""
+    """`mop dev ci` — группа с глаголами; MCP только у читающих (#233)."""
     from mop import cli
     out = []
-    verbs = set(cli.verbs().get("ci") or {})   # дерево (#253): глаголы -- ключи
+    verbs = set((cli.verbs().get("dev") or {}).get("ci") or {})   # дерево (#253): глаголы -- ключи
     want = {"list", "show", "log", "why", "lint", "retry", "cancel", "runners"}
     if verbs != want:
-        return [f"mop ci verbs {sorted(verbs or ())}, wanted {sorted(want)}"]
+        return [f"mop dev ci verbs {sorted(verbs or ())}, wanted {sorted(want)}"]
+    # #233 давал читающим глаголам MCP; #254 снимает его со всех: dev --
+    # внутренние команды разработчика, мастер зовёт их из шелла, и
+    # пространство целиком закрыто для инструментов (cli.PRIVATE).
     for verb in sorted(want):
-        decl = cli.declared(os.path.join(cli.PACKAGE, "ci", f"{verb}.py"))
-        readonly = verb in ("list", "show", "log", "why", "runners")
-        if readonly and (decl or {}).get("annotations") != "readonly":
-            out.append(f"mop ci {verb} must be a readonly MCP tool: {decl!r}")
-        if not readonly and decl is not None:
-            out.append(f"mop ci {verb} must stay out of MCP: {decl!r}")
-    if cli.declared(os.path.join(cli.PACKAGE, "ci", "__init__.py")) is not None:
-        out.append("mop ci itself must stay out of MCP: its verbs are the tools")
+        decl = cli.declared(os.path.join(cli.PACKAGE, "dev", "ci", f"{verb}.py"))
+        if decl is not None:
+            out.append(f"mop dev ci {verb} must stay out of MCP: {decl!r}")
+    if cli.declared(os.path.join(cli.PACKAGE, "dev", "ci", "__init__.py")) is not None:
+        out.append("mop dev ci itself must stay out of MCP: its verbs are the tools")
     # Без глагола — список, с числом — пайплайн: разбирает сама группа.
-    route = getattr(__import__("mop.cli.ci", fromlist=["route"]), "route", None)
+    route = getattr(__import__("mop.cli.dev.ci", fromlist=["route"]), "route", None)
     if route is None:
-        return out + ["mop.cli.ci has no route"]
+        return out + ["mop.cli.dev.ci has no route"]
     for argv, want_route in (([], ("list", [])), (["42"], ("show", ["42"])),
                              (["42", "--failed"], ("show", ["42", "--failed"])),
                              (["nope"], None)):

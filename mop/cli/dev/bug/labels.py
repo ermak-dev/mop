@@ -1,4 +1,4 @@
-"""mop bug labels: the label vocabulary
+"""mop dev bug labels: the label vocabulary
 """
 from mop import gitlab
 from mop.render import table

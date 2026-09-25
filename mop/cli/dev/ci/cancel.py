@@ -1,10 +1,10 @@
-"""mop ci cancel <id>: cancel a pipeline that is still going
+"""mop dev ci cancel <id>: cancel a pipeline that is still going
 
 Refused for a pipeline that already finished (success, failed, canceled,
 skipped), naming its state: GitLab would accept that and do nothing.
 """
 from mop import gitlab
-from mop.cli.ci._common import parser
+from mop.cli.dev.ci._common import parser
 
 
 def main(argv):

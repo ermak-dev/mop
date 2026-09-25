@@ -1,6 +1,6 @@
 """Трекер проекта: issues GitLab.
 
-Модуль возвращает данные и ничего не печатает — печатает `mop bug` (mop/cli/bug).
+Модуль возвращает данные и ничего не печатает — печатает `mop dev bug` (mop/cli/dev/bug).
 
 Координаты берутся из ORIGIN рабочей копии, а не из настройки: проект в
 трекере и проект в git — это один проект, и записывать его вторым местом
@@ -37,7 +37,7 @@ VOCAB = {
 }
 # Незакрытые состояния: задача в очереди (live), взята в работу (wip) либо
 # отложена (parked) — отложенная открыта, но не в работе; закрытая отложенная
-# пропадает из `mop bug list` и выглядит сделанной (#202).
+# пропадает из `mop dev bug list` и выглядит сделанной (#202).
 OPEN_STATUSES = ("live", "wip", "parked")
 CLOSE_STATUSES = ("fixed", "noise", "dup")
 SEV_ORDER = {"sev::high": 0, "sev::med": 1, "sev::low": 2}
@@ -319,7 +319,7 @@ def children(epic_iid):
     """Задачи эпика: те, у кого в первой строке тела стоит его маркер.
 
     Выборкой по телу, а не по связям GitLab: связи — платная редакция, а
-    маркер виден и в вебе, и в выводе `mop bug show`."""
+    маркер виден и в вебе, и в выводе `mop dev bug show`."""
     return [i for i in issues(state="all") if epic_of(i.get("description")) == int(epic_iid)]
 
 
@@ -402,11 +402,11 @@ def with_status(existing, status):
 
 
 def relabel_action(state, status):
-    """Чем `mop bug relabel` меняет задачу: "reopen" либо "relabel".
+    """Чем `mop dev bug relabel` меняет задачу: "reopen" либо "relabel".
 
     Открытый статус на закрытой задаче открывает её — иначе задача с меткой
-    очереди молча сидит среди закрытых и пропадает из `mop bug list` (#202).
-    Закрывать relabel не умеет: это `mop bug close`, с комментарием."""
+    очереди молча сидит среди закрытых и пропадает из `mop dev bug list` (#202).
+    Закрывать relabel не умеет: это `mop dev bug close`, с комментарием."""
     return "reopen" if status in OPEN_STATUSES and state == "closed" else "relabel"
 
 

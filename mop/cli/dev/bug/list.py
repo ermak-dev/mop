@@ -1,8 +1,8 @@
-"""mop bug list [--all] [--label L] [-t TEXT]: open issues, worst first
+"""mop dev bug list [--all] [--label L] [-t TEXT]: open issues, worst first
 """
 from mop import gitlab
 from mop.render import table
-from mop.cli.bug._common import parser
+from mop.cli.dev.bug._common import parser
 
 
 def main(argv):
