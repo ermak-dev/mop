@@ -499,7 +499,7 @@ def check_refusals_163(c):
         want = ["  gpu: free 2/40 GB, slots 0/5", "  old: free 2/40 GB, slots 0/-",
                 "  off: down"]
         c.expect("pool_lines", lib.pool_lines(), want)
-        bus.ask_cluster = lambda verb, **kw: {"nodes": [row]}
+        bus.ask_cluster = lambda verb, **kw: {"nodes": [pool[0]]}
 
         # #245: stat --users -- по людям, от самого прожорливого; узел со
         # старым агентом (без by_login) -- в «-». --puppets и --users разом --
@@ -520,7 +520,9 @@ def check_refusals_163(c):
         out, err, code = run(stat.main, ["--puppets", "--users"])
         c.check(f"#245 --puppets with --users must be a usage error: {out!r}", not (not code))
         puppets.ready_nodes = real_ready_nodes
-        c.expect("pool on a normal answer", puppets.pool(), [domain.Node.from_pool(row)])
+        # #277: ответ глагола pool -- форма pool, а не строка nodes: у той нет
+        # статуса, и PoolNode её не примет.
+        c.expect("pool on a normal answer", puppets.pool(), [domain.PoolNode.from_pool(pool[0])])
 
 
 def check_refusals(c):

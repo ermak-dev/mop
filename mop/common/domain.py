@@ -218,39 +218,57 @@ def holds_work(clone):
 
 # ─── узел ────────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
-class Node:
-    """Узел пула (#267). По шине он ходит двумя формами, и провод не
-    двигается -- страница и командлеты читают ключи по имени, снимки
-    закреплены:
-      глагол pool  (cluster.nomad_pool): {name, status} у неготового,
-                   {name, status, error} у сломанного, у готового -- ёмкость
-                   {free_mb, total_mb, slots, slots_total, eligible};
-      глагол nodes (nodes.row): {name, driver, [error], serves, state,
-                   free_mb, total_mb, slots, slots_total} -- всегда все,
-                   ёмкость None у узла вне пула.
-    Каждая форма -- своя пара from_/to_; читатели идут через значение."""
+class PoolNode:
+    """Узел в ответе глагола pool (cluster.nomad_pool), #267, #277.
+
+    Три формы, и форма названа (form), а не угадана по заполненным полям:
+      down   -- не готов: {name, status};
+      broken -- готов, но ёмкость не прочитать: {name, status, error};
+      ready  -- {name, status, free_mb, total_mb, slots, slots_total, eligible}.
+    Ёмкость у готового обязательна, у остальных её нет: одиннадцать
+    необязательных полей на один класс собирали молча и готовый узел без
+    памяти, и неготовый с ней (#277). Провод прежний, байт в байт."""
     name: str
-    status: str = None
+    status: str
     free_mb: int = None
     total_mb: int = None
     slots: int = None
     slots_total: int = None
     eligible: bool = True
     error: str = None
-    driver: str = None
-    serves: str = None
-    state: str = None
+
+    CAPACITY = ("free_mb", "total_mb", "slots", "slots_total")
+    # Без slots_total готовый узел читается: сервис старше #243 его не шлёт,
+    # и отказ здесь отнял бы пул у мастера на время раската.
+    REQUIRED = ("free_mb", "total_mb", "slots")
+
+    def __post_init__(self):
+        if self.status != "ready" and self.error is not None:
+            raise ValueError(f"node {self.name}: error on a node that is {self.status}")
+        ready = self.form == "ready"
+        for f in self.CAPACITY:
+            value = getattr(self, f)
+            if ready and value is None and f in self.REQUIRED:
+                raise ValueError(f"node {self.name} (ready): {f} missing")
+            if not ready and value is not None:
+                raise ValueError(f"node {self.name} ({self.form}): {f} must be absent")
+
+    @property
+    def form(self):
+        if self.status != "ready":
+            return "down"
+        return "broken" if self.error else "ready"
 
     @property
     def placeable(self):
-        """Станет ли Nomad что-то сюда ставить: готов и открыт планированию."""
+        """Станет ли Nomad что-то сюда ставить: готов и открыт планированию.
+        Сломанный (broken) -- готов, и eligible у него по умолчанию: как было."""
         return self.status == "ready" and self.eligible
 
-    # ── форма глагола pool ──
     def to_pool(self):
-        if self.status != "ready":
+        if self.form == "down":
             return {"name": self.name, "status": self.status}
-        if self.error:
+        if self.form == "broken":
             return {"name": self.name, "status": self.status, "error": self.error}
         return {"name": self.name, "status": self.status, "free_mb": self.free_mb,
                 "total_mb": self.total_mb, "slots": self.slots,
@@ -262,7 +280,24 @@ class Node:
                    d.get("slots"), d.get("slots_total"), d.get("eligible", True),
                    d.get("error"))
 
-    # ── форма глагола nodes ──
+
+@dataclass(frozen=True)
+class NodeRow:
+    """Строка узла в ответе глагола nodes (nodes.row), #267, #277:
+    {name, driver, [error], serves, state, free_mb, total_mb, slots,
+    slots_total} -- всегда все, ёмкость None у узла вне пула, error -- только
+    у узла с отказом (#175). Статуса в ней нет: состояние планирования --
+    строка state, и в форму pool строку не превратить."""
+    name: str
+    driver: str
+    serves: str
+    state: str
+    free_mb: int = None
+    total_mb: int = None
+    slots: int = None
+    slots_total: int = None
+    error: str = None
+
     def to_row(self):
         # Поле error -- только у узла с отказом (#175): строка исправного прежняя.
         return {"name": self.name, "driver": self.driver,
@@ -273,10 +308,9 @@ class Node:
 
     @classmethod
     def from_row(cls, d):
-        return cls(d["name"], free_mb=d.get("free_mb"), total_mb=d.get("total_mb"),
-                   slots=d.get("slots"), slots_total=d.get("slots_total"),
-                   error=d.get("error"), driver=d.get("driver"),
-                   serves=d.get("serves"), state=d.get("state"))
+        return cls(d["name"], d.get("driver"), d.get("serves"), d.get("state"),
+                   d.get("free_mb"), d.get("total_mb"), d.get("slots"),
+                   d.get("slots_total"), d.get("error"))
 
 
 # ─── тело папета: ответы драйвера ────────────────────────────────────────
