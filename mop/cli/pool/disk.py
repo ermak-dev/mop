@@ -13,7 +13,7 @@ def main(argv):
     if len(argv) > 1:
         lib.usage(__doc__)
     nodes = [argv[0]] if argv else sorted(puppets.ready_nodes())
-    answers = bus.request_many({n: {"verb": "disk"} for n in nodes})
+    answers = bus.request_many("disk", nodes)
     rows = [("NODE", "FS", "FREE", "TOTAL")]
     for n in nodes:
         a = answers.get(n)

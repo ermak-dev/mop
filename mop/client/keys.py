@@ -25,15 +25,13 @@ def results_from(nodes, answers):
     отсылки к токену Nomad и контроллеру."""
     out = {}
     for node in nodes:
-        a = answers.get(node)
-        if isinstance(a, Exception):
-            out[node] = f"NOT REACHED: {a}"
-        elif a is None:
-            out[node] = "NOT REACHED: no answer"
-        elif a.get("error"):
-            out[node] = f"FAILED: {str(a['error'])[:120]}"
-        else:
+        got = bus.verdict(answers.get(node))
+        if got is None:
             out[node] = "OK"
+        elif got[0] == bus.UNREACHED:
+            out[node] = f"NOT REACHED: {got[1] or 'no answer'}"
+        else:
+            out[node] = f"FAILED: {got[1][:120]}"
     return out
 
 
@@ -53,9 +51,8 @@ def distribute(files):
     if not nodes:
         raise RuntimeError("no ready nodes in the pool")
     try:
-        answers = bus.request_many(
-            {n: {"verb": "write", "files": [list(f) for f in files]} for n in nodes},
-            timeout=WRITE_TIMEOUT)
+        answers = bus.request_many("write", nodes, timeout=WRITE_TIMEOUT,
+                                   files=[list(f) for f in files])
     except bus.BusError as e:
         answers = {n: e for n in nodes}
     return results_from(nodes, answers)

@@ -15,7 +15,7 @@ def main(argv):
     cap = config.num("MOP_GC_MAX_PER_RUN")
     rows = puppets.puppet_rows()
     nodes = sorted({r.node for r in rows if r.node != "-"})
-    disks = bus.request_many({n: {"verb": "disk"} for n in nodes})
+    disks = bus.request_many("disk", nodes)
 
     # Давление и кандидаты: узлы от самого тесного, внутри узла — от самого
     # жирного (место папета уже спрослено глаголом sizes, дополнительных

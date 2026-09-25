@@ -112,11 +112,11 @@ def fake_bus():
     """Ростер и узлы без шины. -> функция отката."""
     saved = (puppets.items, puppets.time.time, bus.request_many, bus.request_stream)
 
-    def request_many(asked, timeout=None):
+    def request_many(verb, asked, timeout=None, **fields):
         return {n: (bus.BusError(STATES[n]) if isinstance(STATES[n], str)
                     else copy.deepcopy(STATES[n])) for n in asked}
 
-    def request_stream(asked, timeout=None):
+    def request_stream(verb, asked, timeout=None, **fields):
         for name in asked:
             got = SIZES.get(name)
             yield name, (Exception(got) if isinstance(got, str) else copy.deepcopy(got))

@@ -458,8 +458,8 @@ async def owner_profile(conn, name, login):
     узла на server.rpc -- по любому проекту, а журнал сервера так читается."""
     subject = busnames.server(await puppet_project(name))
     try:
-        msg = await conn.request(subject, json.dumps({"verb": "identity", "login": login}).encode(),
-                                 timeout=IDENTITY_WAIT)
+        msg = await bus.arequest(conn, subject, bus.envelope("identity", login=login),
+                                 IDENTITY_WAIT)
         got = json.loads(msg.data.decode())
     except Exception as e:
         return None, f"the server did not answer ({type(e).__name__})"

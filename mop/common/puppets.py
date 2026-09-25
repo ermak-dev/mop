@@ -192,8 +192,8 @@ def roster(stale=False):
     # к шине отношения не имеет; уронить `list` вместе с ней значит оставить
     # мастера без единственной картины пула ровно тогда, когда что-то сломалось.
     try:
-        answers = bus.request_many({
-            node: {"verb": "states", "names": [i["job"]["ID"] for i in its]}
+        answers = bus.request_many("states", {
+            node: {"names": [i["job"]["ID"] for i in its]}
             for node, its in by_node.items()})
     except bus.BusError as e:
         answers = {node: bus.BusError(str(e)) for node in by_node}
@@ -275,8 +275,7 @@ def puppet_rows_stream():
     for i in items:
         alloc = i["alloc"]
         if alloc and alloc["ClientStatus"] == "running":
-            asked[i["job"]["ID"]] = (alloc["NodeName"],
-                                     {"verb": "sizes", "names": [i["job"]["ID"]]})
+            asked[i["job"]["ID"]] = (alloc["NodeName"], {"names": [i["job"]["ID"]]})
         else:
             rest.append(i)
     by_name = {i["job"]["ID"]: i for i in items}
@@ -285,7 +284,7 @@ def puppet_rows_stream():
     for i in rest:
         yield _row(i)
     try:
-        for name, answer in bus.request_stream(asked, timeout=45):
+        for name, answer in bus.request_stream("sizes", asked, timeout=45):
             sizes = ({} if isinstance(answer, Exception)
                      else ((answer or {}).get("sizes") or {}))
             yield _row(by_name[name], sizes.get(name))
@@ -318,10 +317,10 @@ def puppet_sizes(rows, timeout=45):
     asked = {}
     for r in rows:
         if r.alloc_status == "running" and r.node != "-":
-            asked[r.name] = (r.node, {"verb": "sizes", "names": [r.name]})
+            asked[r.name] = (r.node, {"names": [r.name]})
     out = {}
     try:
-        for name, answer in bus.request_stream(asked, timeout=timeout):
+        for name, answer in bus.request_stream("sizes", asked, timeout=timeout):
             if isinstance(answer, Exception):
                 continue
             kb = ((answer or {}).get("sizes") or {}).get(name)
