@@ -24,9 +24,7 @@ def main(argv):
     достучаться, о своём клоне ничего не скажет. Поэтому молчащее тело
     оставляем — сироту уберёт следующий прогон, а снесённая работа не
     вернётся."""
-    dry = argv == ["--dry"]
-    if argv and not dry:
-        lib.usage(__doc__)
+    dry = lib.dry(argv, __doc__)
     d = driver.current()
     if not driver.is_container(driver.current_name()):
         print("bodies here are the node itself — the disk watchdog sweeps clones")

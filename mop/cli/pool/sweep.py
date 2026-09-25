@@ -28,9 +28,7 @@ from mop.common.render import table
 
 
 def main(argv):
-    dry = argv == ["--dry"]
-    if argv and not dry:
-        lib.usage(__doc__)
+    dry = lib.dry(argv, __doc__)
 
     nodes = sorted(puppets.ready_nodes())
     if not nodes:

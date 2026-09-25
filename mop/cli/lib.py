@@ -146,6 +146,37 @@ def usage(doc):
     sys.exit(doc.strip())
 
 
+def parse_named(argv, doc, most=1):
+    """`<имя> [ещё...] [--force]` -> ([имя, ещё...], force). Чистая функция.
+    --force где угодно; имён от одного до most, иначе usage(doc)."""
+    force = "--force" in argv
+    args = [a for a in argv if a != "--force"]
+    if not 1 <= len(args) <= most:
+        usage(doc)
+    return args, force
+
+
+def named(argv, doc):
+    """Команда над одним папетом (delete, recycle, restart, wipe, #263):
+    разбор `<имя> [--force]` и перила guard. -> (имя, force)."""
+    args, force = parse_named(argv, doc)
+    guard(args[0])
+    return args[0], force
+
+
+def note(name, reply):
+    """Чью аренду прошёл --force (#40): строкой «имя: ...», если ответ её несёт."""
+    if reply.get("owner_note"):
+        print(f"{name}: {reply['owner_note']}")
+
+
+def dry(argv, doc):
+    """`[--dry]` -> bool; иное -- usage(doc) (gc, sweep, driver sweep)."""
+    if argv and argv != ["--dry"]:
+        usage(doc)
+    return argv == ["--dry"]
+
+
 def cwd_origin():
     """origin текущей рабочей копии, либо None: не рабочая копия или у неё
     нет origin. Отказывать -- дело вызывающего: только он знает, как себя

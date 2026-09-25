@@ -1875,6 +1875,7 @@ def check_fallback_model_183():
         print(f"FAIL #254 `mop dev bug list` must still resolve through LEGACY: {got}")
 
     failed += check_server_namespace_259()
+    failed += check_named_263()
     return failed
 
 
@@ -1970,6 +1971,134 @@ def check_server_namespace_259():
             failed += 1
             print("FAIL #271 test must be a verb of the private dev namespace")
 
+    return failed
+
+
+
+def check_named_263():
+    """HYPOTHESIS (#263): delete, recycle, restart, wipe и update каждый
+    повторяют разбор --force, проверку одного имени с usage, перила guard и
+    печать owner_note; --dry -- в gc и двух sweep; фабрика argparse -- в
+    bug и ci. Пять копий разойдутся на первой же правке одной.
+    SOLUTION: lib.named / lib.parse_named, lib.note, lib.dry, одна фабрика
+    parser в dev/_common. Вывод, usage и коды выхода -- те же: их держит
+    характеризация ниже, снятая с кода до переделки.
+    STATUS: FIXED — see #263"""
+    import importlib
+    import io
+    import contextlib
+    from mop.cli import lib
+    from mop.common import bus, puppets
+    from mop.cli.core import _common as core_common
+    failed = 0
+
+    # ── помощник: разбор имени и --force ──────────────────────────────────
+    doc = "do a thing: mop thing <name> [--force]"
+    fn = getattr(lib, "named", None)
+    if fn is None:
+        print("FAIL #263 lib.named is missing")
+        return 1
+    for argv, want in [(["pu-mop-1"], ("pu-mop-1", False)),
+                       (["--force", "pu-mop-1"], ("pu-mop-1", True)),
+                       (["pu-mop-1", "--force"], ("pu-mop-1", True))]:
+        got = fn(argv, doc)
+        if got != want:
+            failed += 1
+            print(f"FAIL #263 named({argv}) = {got}, want {want}")
+    for argv in ([], ["a", "b"], ["--force"]):
+        try:
+            fn(argv, doc)
+            failed += 1
+            print(f"FAIL #263 named({argv}) must refuse through usage")
+        except SystemExit as e:
+            if str(e.code) != doc:
+                failed += 1
+                print(f"FAIL #263 named({argv}) must exit with the usage: {e.code!r}")
+    if lib.parse_named(["x", "git@h:o.git", "--force"], doc, most=2) != (["x", "git@h:o.git"], True):
+        failed += 1
+        print("FAIL #263 parse_named with most=2")
+    for argv, want in (([], False), (["--dry"], True)):
+        if lib.dry(argv, doc) is not want:
+            failed += 1
+            print(f"FAIL #263 dry({argv})")
+    try:
+        lib.dry(["--wet"], doc)
+        failed += 1
+        print("FAIL #263 dry(['--wet']) must refuse through usage")
+    except SystemExit:
+        pass
+    from mop.cli.dev.bug import _common as bug_c
+    from mop.cli.dev.ci import _common as ci_c
+    if bug_c.parser("new").prog != "mop dev bug new" or ci_c.parser("log").prog != "mop dev ci log" \
+            or bug_c.parser("new").add_help:
+        failed += 1
+        print("FAIL #263 the argparse factory keeps prog and no built-in help")
+
+    # ── характеризация пяти команд: вывод тот же, что до переделки ────────
+    calls = []
+    note = {"owner_note": "was olga's: taken with --force"}
+
+    def call_cluster(verb, **kw):
+        calls.append((verb, kw.get("force")))
+        if verb == "alloc":
+            return {"alloc": {"NodeName": "hyper"}}
+        if verb == "spec":
+            return {"meta": {"origin": "git@h:g/mop.git"}}
+        return dict(note)
+    keep = (bus.call_cluster, bus.login, puppets.delete, puppets.recycle, puppets.wipe,
+            puppets.running_alloc, core_common.push_llm_keys, core_common.workspace_text,
+            lib.in_project, os.environ.get("MOP_SERVER_LAN"))
+
+    def run(module, argv):
+        mod = importlib.import_module(f"mop.cli.core.{module}")
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                cli.run(mod.main, list(argv))
+            except SystemExit as e:
+                code = e.code
+        return out.getvalue(), err.getvalue(), code, mod.__doc__.strip()
+    try:
+        os.environ["MOP_SERVER_LAN"] = "192.0.2.1"
+        lib.in_project = lambda: None
+        bus.call_cluster, bus.login = call_cluster, lambda: "anton"
+        puppets.delete = lambda name, force=False: calls.append(("delete", force)) or \
+            {**note, "body": "destroyed", "node": "hyper"}
+        puppets.recycle = lambda name, workspace_of=None, force=False: calls.append(("recycle", force)) or dict(note)
+        puppets.wipe = lambda node, name, force=False: calls.append(("wipe", force)) or {**note, "target": "/t"}
+        puppets.running_alloc = lambda name: {"NodeName": "hyper"}
+        core_common.push_llm_keys = lambda p: None
+        core_common.workspace_text = lambda o: None
+        line = "pu-mop-1: was olga's: taken with --force\n"
+        want = {
+            "delete": line + "deleted pu-mop-1 (body gone from hyper)\n",
+            "recycle": line, "restart": line,
+            "wipe": line + "pu-mop-1: clone reset to HEAD, target wiped (/t)\n",
+            "update": line,
+        }
+        for module, out_want in want.items():
+            calls.clear()
+            out, err, code, usage = run(module, ["pu-mop-1", "--force"])
+            forced = [f for v, f in calls if v in ("delete", "recycle", "wipe", "restart", "update")]
+            if (out, err, code) != (out_want, "", 0) or forced != [True]:
+                failed += 1
+                print(f"FAIL #263 mop {module} pu-mop-1 --force: {(out, err, code)!r}, force {forced}")
+            for bad in ([], ["a", "b", "c"]) if module == "update" else ([], ["a", "b"]):
+                out, err, code, usage = run(module, bad)
+                # usage -- SystemExit(докстринг): в процессе он -- код выхода,
+                # печатает его интерпретатор на выходе (stderr, код 1).
+                if (out, err, code) != ("", "", usage):
+                    failed += 1
+                    print(f"FAIL #263 mop {module} {bad}: must exit with its usage: {(out, err, str(code)[:60])!r}")
+    finally:
+        (bus.call_cluster, bus.login, puppets.delete, puppets.recycle, puppets.wipe,
+         puppets.running_alloc, core_common.push_llm_keys, core_common.workspace_text,
+         lib.in_project) = keep[:9]
+        if keep[9] is None:
+            os.environ.pop("MOP_SERVER_LAN", None)
+        else:
+            os.environ["MOP_SERVER_LAN"] = keep[9]
     return failed
 
 

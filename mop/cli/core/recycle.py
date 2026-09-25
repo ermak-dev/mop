@@ -21,12 +21,7 @@ MCP = {"annotations": "destructive", "args": [
 
 
 def main(argv):
-    force = "--force" in argv
-    argv = [a for a in argv if a != "--force"]
-    if len(argv) != 1:
-        lib.usage(__doc__)
-    name = argv[0]
-    lib.guard(name)
+    name, force = lib.named(argv, __doc__)
     # workspace -- из рабочей копии, откуда зовут (#133): удалённый файл
     # снимается и на сервере.
     p = lib.Progress(name)
@@ -35,8 +30,7 @@ def main(argv):
         r = puppets.recycle(name, workspace_of=_common.workspace_text, force=force)
     finally:
         p.clear()
-    if r.get("owner_note"):
-        print(f"{name}: {r['owner_note']}")
+    lib.note(name, r)
     return 0
 
 
