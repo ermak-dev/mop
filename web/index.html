@@ -100,8 +100,6 @@
       <div id="usage"></div>
     </section>
     <section>
-      <h2>Кто сколько тратит <small>за окно, от самого прожорливого</small></h2>
-      <div id="spenders"></div>
       <h2>Кто сколько тратит — по пользователям <small>чьё сообщение начало ход; «-» — неприписанное</small></h2>
       <div id="users"></div>
     </section>
@@ -169,10 +167,6 @@
     $("usage").innerHTML = days.length
       ? `<div class="bars">${days.map(d => `<span class="d">${esc(d.date)}</span><span class="b"><i style="width:${(100 * d.total / peak).toFixed(1)}%"></i></span><span class="n">${d.total ? human(d.total) : "-"}</span>`).join("")}</div>`
       : '<div class="empty">расход появится после первого разбора транскриптов</div>';
-
-    $("spenders").innerHTML = table(["папет", "узел", "#вход", "#выход", "#кэш зап.", "#кэш чт.", "#всего"],
-      (s.per_puppet || []).slice(0, 12).map(p => ({cells: [p.name, p.node, human(p.input), human(p.output),
-        human(p.cache_write), human(p.cache_read), human(p.total)]})));
 
     const u = s.per_user || [];
     $("users").innerHTML = u.length
