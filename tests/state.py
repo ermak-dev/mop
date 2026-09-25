@@ -22,7 +22,10 @@ from mop import session  # noqa: E402
 from mop.common.state import PuppetRow, State, action_for, failing_row, failure_reason, is_free, silent, task_summary, verdict
 
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
-WORK = {"cur": "bug/1063", "def": "master", "dirty": 0, "ahead": 0}
+# Папет на ветке своего мастера (#256): она и дом клона (#272).
+WORK = {"cur": "bug/1063", "def": "master", "home": "bug/1063", "dirty": 0, "ahead": 0}
+# Тот же клон у старого агента: ключа home нет, дом -- ветка по умолчанию.
+OLD_WORK = {k: v for k, v in WORK.items() if k != "home"}
 
 
 # Свобода стоит под выбором жертв в mop gc: снести чужую работу из-за
@@ -77,7 +80,13 @@ CASES = [
 
     # Свободен = в клоне нечего терять. На этом стоит решение о диспатче.
     ("clean and everything's on origin", facts("idle 1 1", CLEAN), "free (master)"),
-    ("foreign branch, but everything's pushed",
+    # #272: чистый клон не на доме держит тикет (папет ждёт приёма отчёта);
+    # дом -- ветка мастера из меты, у старого агента -- ветка по умолчанию.
+    ("foreign branch, everything's pushed, but off its home -- holds a ticket",
+     facts("idle 1 1", {**WORK, "home": "master"}), "idle: bug/1063 (off home master)"),
+    ("the same from an old agent: no home key, home is the default branch",
+     facts("idle 1 1", OLD_WORK), "idle: bug/1063 (off home master)"),
+    ("the master's branch is its home, everything's pushed",
      facts("idle 1 1", WORK), "free (bug/1063)"),
     ("uncommitted files",
      facts("idle 1 1", {**WORK, "dirty": 3}), "idle: bug/1063 (uncommitted: 3)"),
@@ -290,6 +299,7 @@ TREATMENT = [
     ("idle: bug/1063 (uncommitted: 3)", False, False, "busy"),
     ("idle: bug/1063 (unpushed: 2)", False, False, "busy"),
     ("idle: bug/1063 (uncommitted: 3, unpushed: 2)", False, False, "busy"),
+    ("idle: bug/1063 (off home master)", False, False, "busy"),
     ("idle: bug/1063 (uncommitted: 2)", False, False, "busy"),
     ("idle: master (unpushed: 2)", False, False, "busy"),
     ("idle: master (uncommitted: 3)", False, False, "busy"),
@@ -596,7 +606,11 @@ def main():
 # Таблица клонов: (что, факты клона агента, держит ли работу).
 CLONE_TABLE = [
     ("clean on the default branch", CLEAN, False),
-    ("clean on the master's branch", WORK, False),
+    ("clean on the master's branch (its home)", WORK, False),
+    # #272: дом клона -- ветка мастера или ветка по умолчанию.
+    ("clean off its home: waiting for accept", {**WORK, "home": "master"}, True),
+    ("clean off its home, old agent (no home key)", OLD_WORK, True),
+    ("clean on the default branch, home elsewhere", {**CLEAN, "home": "swarm"}, True),
     ("uncommitted on the default branch", {**CLEAN, "dirty": 2}, True),
     ("unpushed on a branch", {**WORK, "ahead": 1}, True),
     ("both on a branch", {**WORK, "dirty": 1, "ahead": 3}, True),
