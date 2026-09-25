@@ -1701,6 +1701,51 @@ def check_fallback_model_183():
                 print(f"FAIL #251 {what}: the client must be closed once on refusal, got {closed}")
     finally:
         real_nats.NATS, real_nats.connect = kept
+    # ── #252: сообщения наружу без номеров тикетов ──────────────────────
+    # HYPOTHESIS: строки, которые видит человек в терминале или модель через
+    # MCP, несли «(#82)», «before #211», «(#61)»: довод, которому место в
+    # комментарии рядом с кодом, а не в сообщении. SOLUTION: разбор AST всего
+    # mop/ -- строковые константы в аргументах print / sys.exit / lib.fail /
+    # lib.usage / конструкторов исключений не содержат `#<число>`.
+    # STATUS: FIXED — see #252
+    import ast as _ast2
+    import re as _re
+    ticket = _re.compile(r"#\d{2,}")
+    SPEAK = {"print", "exit", "fail", "usage", "ok", "section"}
+
+    def _consts(node):
+        if isinstance(node, _ast2.Constant) and isinstance(node.value, str):
+            yield node.value
+        elif isinstance(node, _ast2.JoinedStr):
+            for v in node.values:
+                yield from _consts(v)
+        elif isinstance(node, _ast2.BinOp):
+            yield from _consts(node.left)
+            yield from _consts(node.right)
+
+    def _speaks(call):
+        f = call.func
+        name = f.id if isinstance(f, _ast2.Name) else f.attr if isinstance(f, _ast2.Attribute) else ""
+        return name in SPEAK or name.endswith(("Error", "Exception", "Refused", "Missing"))
+
+    root = os.path.dirname(cli.PACKAGE)
+    spoken = []
+    for d, _, files in os.walk(root):
+        for f in files:
+            if not f.endswith(".py"):
+                continue
+            path = os.path.join(d, f)
+            with open(path) as fh:
+                tree = _ast2.parse(fh.read())
+            for node in _ast2.walk(tree):
+                if isinstance(node, _ast2.Call) and _speaks(node):
+                    for a in node.args:
+                        for text in _consts(a):
+                            if ticket.search(text):
+                                spoken.append(f"{os.path.relpath(path, root)}:{node.lineno}: {text.strip()[:60]!r}")
+    if spoken:
+        failed += 1
+        print("FAIL #252 messages must not cite tickets:\n  " + "\n  ".join(spoken))
 
     return failed
 

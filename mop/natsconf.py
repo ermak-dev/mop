@@ -267,7 +267,7 @@ def reload_verdict(check, running):
     if running is None:
         return (f"nats monitoring (/varz on 127.0.0.1:{config.get('MOP_NATS_MONITOR_PORT')}) "
                 f"did not answer: cannot tell whether nats took {want} -- "
-                f"a nats started before #211 has no monitoring: restart nats")
+                f"a nats started without monitoring needs a restart")
     if running == want:
         return None
     return (f"nats kept its old config {running}, the file is {want}: the change "

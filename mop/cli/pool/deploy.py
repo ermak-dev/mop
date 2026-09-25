@@ -347,8 +347,8 @@ def manifests(origins):
         for k in got["alien"]:
             print(f"  {got['project']}/.mop: {k} is not a project's to set — ignored", flush=True)
         for old in got["legacy"]:
-            print(f"  {got['project']}/{old}: read as .mop/sandbox.yaml for the transition "
-                  f"(#61) — rename it, the old name will stop being read", flush=True)
+            print(f"  {got['project']}/{old}: read as .mop/sandbox.yaml for the transition — "
+                  f"rename it, the old name will stop being read", flush=True)
     return out
 
 

@@ -43,8 +43,10 @@ def token():
     t = os.environ.get("NOMAD_TOKEN") or creds.token(creds.server_dir())
     if t:
         return t
+    # Токен живёт только на сервере (#82); машине мастера он не нужен,
+    # команды пула идут через сервис кластера.
     raise LookupError(f"no Nomad token: {creds.server_dir()}/{creds.TOKEN_FILE} — "
-                      f"it lives on the server and nowhere else (#82). The "
+                      f"it lives on the server and nowhere else. The "
                       f"controller's first mop deploy fetches it; a master's "
                       f"machine does not need it, because pool commands go "
                       f"through the cluster service (docs/CLUSTER.md)")
