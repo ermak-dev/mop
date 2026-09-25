@@ -54,6 +54,14 @@
       ansible.builtin.meta: end_host
       when: mop_driver | default(MOP_DRIVER) != 'pve'
 
+    # Сборка на одном узле (#280): образ на одном гипервизоре испорчен, а на
+    # другом папеты проекта заняты и образ цел. Узел -- переменной прогона,
+    # а не --limit: хост, добавленный add_host, может попасть под
+    # ограничение подмножества, и решение плейбука проверяемо без пула.
+    - name: Only the named node builds, when one is named
+      ansible.builtin.meta: end_host
+      when: mop_node is defined and inventory_hostname != mop_node
+
     - name: A project must be named
       ansible.builtin.assert:
         that: mop_project | default('') | length > 0
@@ -600,6 +608,10 @@
     - name: Nothing to seal where bodies are not containers
       ansible.builtin.meta: end_host
       when: mop_driver | default(MOP_DRIVER) != 'pve'
+
+    - name: Only the named node seals, when one is named
+      ansible.builtin.meta: end_host
+      when: mop_node is defined and inventory_hostname != mop_node
 
     # Ключ сборки снимается до того, как образ станет шаблоном: иначе он
     # размножился бы в каждое тело и стал второй постоянной дорогой к папету —

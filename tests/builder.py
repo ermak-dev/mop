@@ -50,6 +50,29 @@ def main():
     except ValueError as e:
         c.check("the refusal must name the mode", "fresh" in str(e), e)
 
+    # Сборка на одном узле (#280): missing смотрит только на названный узел,
+    # а узел, которого среди контейнерных нет, -- отказ, не «собирать
+    # нечего» молча.
+    # HYPOTHESIS: needs_build не знает узла и решает по всем узлам.
+    # SOLUTION: node= сужает serving до одного узла; неизвестный -- ValueError.
+    # STATUS: FIXED — see #280
+    both = {"agent1": ["rugent"], "agent2": []}
+    try:
+        c.expect("needs_build(missing, node with the image)",
+                 builder.needs_build("missing", both, "rugent", node="agent1"), False)
+        c.expect("needs_build(missing, node without)",
+                 builder.needs_build("missing", both, "rugent", node="agent2"), True)
+        c.expect("needs_build(update, node)",
+                 builder.needs_build("update", both, "rugent", node="agent1"), True)
+        try:
+            builder.needs_build("missing", both, "rugent", node="hyper")
+            c.fail("a node that is not a container node must be refused")
+        except ValueError as e:
+            c.check("the refusal names the node and the candidates",
+                    "hyper" in str(e) and "agent1" in str(e), e)
+    except TypeError as e:
+        c.fail(f"needs_build takes no node: {e}")
+
     # HYPOTHESIS (#140): клиент видел только имя задачи; строки ansible
     # доходили лишь хвостом при отказе. SOLUTION: Batch копит строки и
     # отдаёт пачкой -- по времени (не publish на строку) или по размеру

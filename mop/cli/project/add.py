@@ -1,4 +1,4 @@
-"""make a project ready: mop project add [--update|--rebuild] [-v] [git-origin]
+"""make a project ready: mop project add [--update|--rebuild] [--node NAME] [-v] [git-origin]
 
 Without origin, the origin of the current working copy is used.
 
@@ -8,6 +8,8 @@ any of them. Afterwards `mop add` can place a puppet right away.
 
   --update    build the image even if it exists, incrementally
   --rebuild   build it from the base image
+  --node NAME build on this node only: its puppets alone are stopped and
+              raised again, the other nodes keep their image and their work
   -v          print every line of the build's output, not only on a terminal
 
 Idempotent: run it again after changing the project's .mop. Silent when all
@@ -24,15 +26,23 @@ from mop.common import bus, manifest, puppets
 MCP = {"annotations": "destructive", "background": True, "args": [
     {"name": "origin", "type": "string", "help": "git origin; without it, the origin of the master's working copy"},
     {"name": "update", "type": "boolean", "flag": "--update", "help": "build the image even if it exists, incrementally"},
-    {"name": "rebuild", "type": "boolean", "flag": "--rebuild", "help": "build the image from the base image"}]}
+    {"name": "rebuild", "type": "boolean", "flag": "--rebuild", "help": "build the image from the base image"},
+    {"name": "node", "type": "string", "flag": "--node", "help": "build on this node only"}]}
 
 
 def main(argv):
     mode = "missing"
     verbose = False
+    node = None
     args = []
-    for a in argv:
-        if a in ("-v", "--verbose"):
+    rest = list(argv)
+    while rest:
+        a = rest.pop(0)
+        if a == "--node":
+            if not rest or node:
+                lib.usage(__doc__)
+            node = rest.pop(0)
+        elif a in ("-v", "--verbose"):
             verbose = True
         elif a in ("--update", "--rebuild"):
             if mode != "missing":
@@ -48,12 +58,12 @@ def main(argv):
     name = puppets.project_of(origin)
     p = lib.Progress(name, verbose)
     try:
-        return _add(origin, name, mode, p)
+        return _add(origin, name, mode, p, node)
     finally:
         p.clear()
 
 
-def _add(origin, name, mode, p):
+def _add(origin, name, mode, p, node=None):
     # Недоступный origin валит команду до сервера: заведённый проект обязан
     # существовать. Читает его машина оператора -- у неё и есть доступ.
     p.step("reading .mop")
@@ -67,7 +77,7 @@ def _add(origin, name, mode, p):
 
     p.step("image")
     for ev in bus.ask_stream(bus.build_subject(), "image builder", "build",
-                             origin=origin, mode=mode):
+                             origin=origin, mode=mode, **({"node": node} if node else {})):
         if ev.get("done"):
             if ev.get("error") or not ev.get("ok"):
                 p.clear()
