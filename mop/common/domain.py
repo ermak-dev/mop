@@ -16,6 +16,22 @@ from dataclasses import dataclass, field
 from .. import driver
 
 
+# ─── инварианты (#273) ───────────────────────────────────────────────────
+def _refuse(value, field, rule):
+    """Отказ значения одним местом: ValueError с именем поля. Замороженное
+    значение без инварианта строилось молча, и каждый читатель проверял сам."""
+    raise ValueError(f"{type(value).__name__}.{field}={getattr(value, field)!r}: {rule}")
+
+
+def _count(v):
+    """Счётчик клона: неотрицательное целое (bool -- не число)."""
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def _optional_str(v):
+    return v is None or isinstance(v, str)
+
+
 # ─── проект ──────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Project:
@@ -66,6 +82,14 @@ class JobMeta:
     llm: str
     branch: str = None
     spec_version: str = None
+
+    def __post_init__(self):
+        # origin -- None (джоб без Meta: законно, это «ничей») либо
+        # непустая строка; пустая -- ни то ни другое (#273).
+        if not (self.origin is None or (isinstance(self.origin, str) and self.origin)):
+            _refuse(self, "origin", "None or a non-empty string")
+        if not _optional_str(self.llm):
+            _refuse(self, "llm", "None or a string")
 
     @property
     def project(self):
@@ -155,6 +179,17 @@ class CloneFacts:
     dirty: int = None
     ahead: int = None
     owner: Owner = None
+
+    def __post_init__(self):
+        # Оба числа или ни одного (#273): полусобранный объект не «известен»
+        # наполовину, а сломан.
+        if (self.dirty is None) != (self.ahead is None):
+            missing = "ahead" if self.ahead is None else "dirty"
+            _refuse(self, missing, "dirty and ahead come together, or neither")
+        for f in ("dirty", "ahead"):
+            v = getattr(self, f)
+            if v is not None and not _count(v):
+                _refuse(self, f, "a non-negative integer")
 
     @property
     def known(self):
@@ -327,16 +362,25 @@ class Body:
     address: str = None
     created: bool = False
 
+    def __post_init__(self):
+        if not driver.valid_name(self.name):
+            _refuse(self, "name", "a puppet name, pu-<project>-<n>")
+        if not (self.vmid is None or (isinstance(self.vmid, int) and not isinstance(self.vmid, bool))):
+            _refuse(self, "vmid", "None (the node itself) or an integer")
+        if not isinstance(self.created, bool):
+            _refuse(self, "created", "a boolean")
+
     def to_dict(self):
         return {"name": self.name, "body": self.vmid, "created": self.created,
                 "address": self.address}
 
     @classmethod
     def from_dict(cls, d):
-        """Ответ ensure -> Body; отказ ({error}) или пусто -- None."""
+        """Ответ ensure -> Body; отказ ({error}) или пусто -- None. Нет
+        created (старый агент) -- False; мусор вместо него -- отказ (#273)."""
         if not d or d.get("error"):
             return None
-        return cls(d["name"], d.get("body"), d.get("address"), bool(d.get("created")))
+        return cls(d["name"], d.get("body"), d.get("address"), d.get("created", False))
 
     def describe(self):
         """Строка `mop driver run`: чем стало тело и где оно."""
@@ -352,6 +396,10 @@ class Gone:
     Провод прежний: host -- {reset, target}, pve -- {destroyed, target}."""
     target: str
     vmid: object = None
+
+    def __post_init__(self):
+        if not (isinstance(self.target, str) and self.target):
+            _refuse(self, "target", "a non-empty string: what was destroyed")
 
     @property
     def reset(self):
