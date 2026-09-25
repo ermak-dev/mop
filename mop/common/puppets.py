@@ -11,7 +11,7 @@ import time
 
 from . import bus, config, lease, llm, state
 from .. import driver
-from .domain import Owner
+from .domain import CloneFacts, holds_work
 from .state import PuppetRow, action_for, failing_row, silent, spec_action, verdict
 
 PROJECT = config.PROJECT
@@ -222,8 +222,8 @@ def _judge(item, state):
 
 def owner_of(facts, now):
     """Кто ведёт задание папета (#161), если аренда живая; иначе None."""
-    clone = ((facts or {}).get("clone")) or None
-    owner = Owner.from_dict((clone or {}).get("owner"))
+    clone = CloneFacts.from_dict((facts or {}).get("clone"))
+    owner = clone and clone.owner
     return owner.user if lease.live(owner, clone, now) else None
 
 
@@ -559,17 +559,19 @@ def classify_junk(answers, known):
         for name in sorted(a.get("bodies") or []):
             if name in known:
                 continue
-            w = work.get(name) or {}
-            dirty, ahead = w.get("dirty") or 0, w.get("ahead") or 0
-            if dirty or ahead:
+            # Строки work нет -- у тела нет клона (агент его не нашёл), и
+            # спасать нечего: сносится, как и до #266. Есть -- решает одно
+            # правило на всех, domain.holds_work.
+            w = CloneFacts.from_dict(work.get(name))
+            if w and holds_work(w):
                 # Сирота с несохранённой работой остаётся. Джоба у неё нет,
                 # значит вернуть её к делу уже нельзя, — но снесённое не
                 # возвращается вовсе, а лежащий контейнер стоит только места.
                 # Размен очевиден в одну сторону.
                 out.append({
                     "node": node, "kind": "orphan", "name": name,
-                    "detail": f"holds work: {dirty} uncommitted, {ahead} "
-                              f"unpushed on {w.get('cur') or '(detached)'}",
+                    "detail": f"holds work: {w.dirty or 0} uncommitted, {w.ahead or 0} "
+                              f"unpushed on {w.branch or '(detached)'}",
                     "sweepable": False})
                 continue
             out.append({"node": node, "kind": "orphan", "name": name,

@@ -22,13 +22,19 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import lease  # noqa: E402
-from mop.common.domain import Owner  # noqa: E402
+from mop.common.domain import CloneFacts, Owner  # noqa: E402
 
 NOW = 1_000_000
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
 ON_BRANCH = dict(CLEAN, cur="bug/118-x")
 DIRTY = dict(CLEAN, dirty=3)
 AHEAD = dict(CLEAN, ahead=1)
+
+# Факты клона в том виде, в каком их шлёт агент по шине (#266): ключи
+# cur/def/... -- провод, их держат агенты обеих версий во время раската.
+WIRE = {"cur": "bug/118-x", "def": "master",
+        "origin": "git@git.example.dev:someone/mop.git",
+        "dirty": 2, "ahead": 1, "owner": {"user": "olga", "at": NOW}}
 
 
 def rec(user, age):
@@ -46,7 +52,7 @@ def main():
             print(f"FAILED  {what}: got {got!r}, want {want!r}")
 
     def act(owner, me, clone, force=False):
-        return lease.verdict(owner, me, clone, NOW, force=force)[0]
+        return lease.verdict(owner, me, CloneFacts.from_dict(clone), NOW, force=force)[0]
 
     # Запись: туда и обратно, мусор -- не владелец.
     # Строка файла -- Owner.render/parse (#204).
@@ -61,7 +67,7 @@ def main():
     check("own is refreshed", act(rec("anton", 5), "anton", DIRTY), "take")
 
     # Чужой: держит, пока в клоне работа...
-    for what, clone in (("branch", ON_BRANCH), ("dirty", DIRTY), ("ahead", AHEAD)):
+    for what, clone in (("dirty", DIRTY), ("ahead", AHEAD)):
         check(f"foreign with work ({what}) refuses", act(rec("olga", 9999), "anton", clone), "refuse")
     # ...и пока аренда моложе окна: папет ещё не завёл ветку.
     check("foreign fresh on a clean clone refuses",
@@ -72,17 +78,19 @@ def main():
     # Клон неизвестен -- не значит «пусто».
     check("unknown clone holds", act(rec("olga", 9999), "anton", None), "refuse")
     # force забирает и называет, у кого.
-    got = lease.verdict(rec("olga", 5), "anton", DIRTY, NOW, force=True)
+    got = lease.verdict(rec("olga", 5), "anton", CloneFacts.from_dict(DIRTY), NOW, force=True)
     check("force takes", got[0], "take")
     check("force names the displaced", "olga" in (got[1] or ""), True)
-    why = lease.verdict(rec("olga", 60), "anton", DIRTY, NOW)[1] or ""
+    why = lease.verdict(rec("olga", 60), "anton", CloneFacts.from_dict(DIRTY), NOW)[1] or ""
     check("refusal names the owner and force", "olga" in why and "force" in why, True)
 
     # Ростер показывает только живую аренду.
-    check("live: foreign with work", lease.live(rec("olga", 9999), ON_BRANCH, NOW), True)
-    check("live: fresh on clean", lease.live(rec("olga", 5), CLEAN, NOW), True)
-    check("not live: stale on clean", lease.live(rec("olga", lease.WINDOW + 1), CLEAN, NOW), False)
-    check("not live: no record", lease.live(None, DIRTY, NOW), False)
+    def live(owner, clone):
+        return lease.live(owner, CloneFacts.from_dict(clone), NOW)
+    check("live: foreign with work", live(rec("olga", 9999), DIRTY), True)
+    check("live: fresh on clean", live(rec("olga", 5), CLEAN), True)
+    check("not live: stale on clean", live(rec("olga", lease.WINDOW + 1), CLEAN), False)
+    check("not live: no record", live(None, DIRTY), False)
 
     # ── ворота владения (#40) ─────────────────────────────────────────
     # HYPOTHESIS: владельца сверяет только send; slash/type, wipe, restart,
@@ -96,13 +104,13 @@ def main():
         check("lease.may_touch exists", False, True)
     else:
         def touch(owner, me, clone, force=False, operator=False):
-            return fn(owner, me, clone, NOW, force=force, operator=operator)
+            return fn(owner, me, CloneFacts.from_dict(clone), NOW, force=force,
+                      operator=operator)
 
         check("touch: nobody's", touch(None, "anton", CLEAN)[0], True)
         check("touch: nobody's, anonymous", touch(None, None, DIRTY)[0], True)
         check("touch: own with work", touch(rec("anton", 9999), "anton", DIRTY)[0], True)
-        for what, clone in (("branch", ON_BRANCH), ("dirty", DIRTY), ("ahead", AHEAD),
-                            ("unknown clone", None)):
+        for what, clone in (("dirty", DIRTY), ("ahead", AHEAD), ("unknown clone", None)):
             ok, why = touch(rec("olga", 9999), "anton", clone)
             check(f"touch: foreign with work ({what}) refused", ok, False)
             check(f"touch: refusal names the owner ({what})",
@@ -123,6 +131,38 @@ def main():
               touch(rec("olga", 5), "anton", DIRTY, operator=True)[0], True)
         check("touch: operator passes anonymously",
               touch(rec("olga", 5), None, DIRTY, operator=True)[0], True)
+
+    # ── ветка не по умолчанию -- не работа (#266) ────────────────────
+    # HYPOTHESIS: «в клоне работа» записано трижды, и копии расходятся:
+    # lease.holds_work считал работой ветку не по умолчанию, а state и
+    # classify_junk -- только dirty/ahead. С #256 папет намеренно стоит на
+    # ветке своего мастера (mop.branch), и для аренды такой папет держит
+    # работу вечно: другой мастер не берёт его без --force, хотя ростер
+    # зовёт его free.
+    # SOLUTION: domain.CloneFacts и один предикат domain.holds_work =
+    # dirty или ahead (клон неизвестен -- держит); ветку свежего диспатча
+    # по-прежнему защищает окно lease.WINDOW.
+    # STATUS: FIXED — see #266
+    stale = rec("olga", lease.WINDOW + 1)
+    check("#266: clean foreign branch with a stale owner may be touched",
+          lease.may_touch(stale, "anton", CloneFacts.from_dict(ON_BRANCH), NOW), (True, None))
+    check("#266: clean foreign branch with a stale owner is not live",
+          lease.live(stale, CloneFacts.from_dict(ON_BRANCH), NOW), False)
+    for what, clone in (("dirty", dict(ON_BRANCH, dirty=1)), ("ahead", dict(ON_BRANCH, ahead=1))):
+        check(f"#266: foreign branch with work ({what}) still refused",
+              lease.may_touch(stale, "anton", CloneFacts.from_dict(clone), NOW)[0], False)
+    check("#266: clean branch inside the dispatch window still refused",
+          lease.may_touch(rec("olga", lease.WINDOW - 1), "anton",
+                          CloneFacts.from_dict(ON_BRANCH), NOW)[0], False)
+
+    # Провод не двигается: факты агента туда и обратно -- байт в байт, и
+    # ключи в том же порядке (JSON снимка их сравнивает строкой).
+    for what, wire in (("full", WIRE), ("no owner", dict(WIRE, owner=None)),
+                       ("detached, no default", dict(WIRE, cur="(detached)", **{"def": None}))):
+        back = CloneFacts.from_dict(wire).to_dict()
+        check(f"#266: CloneFacts round-trips the agent's dict ({what})",
+              (back, list(back)), (wire, list(wire)))
+    check("#266: no clone data is no CloneFacts", CloneFacts.from_dict(None), None)
 
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0

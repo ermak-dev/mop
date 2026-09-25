@@ -1,4 +1,4 @@
-"""Доменные значения пула: проект, владелец задания, глагол (#204). Данные,
+"""Доменные значения пула: проект, владелец задания, факты клона, глагол (#204). Данные,
 без печати и без ввода-вывода.
 
 Раньше это были словари и кортежи: строковые ключи расходились молча --
@@ -77,6 +77,56 @@ class Owner:
     def from_dict(cls, d):
         """Словарь с шины -> Owner; нет записи -- None."""
         return cls(d["user"], d["at"]) if d else None
+
+
+# ─── факты клона ─────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class CloneFacts:
+    """Что держит клон папета (#266): ветка, несохранённое, неотправленное,
+    владелец задания. Собирает агент узла (agent.clone_facts), решают мастер,
+    сервис кластера и сам агент.
+
+    По шине -- словарём с прежними ключами cur/def/...: во время раската
+    агенты обеих версий говорят друг с другом, и провод не двигается.
+    dirty/ahead -- None, если агент их не прислал: «не знаю», а не ноль."""
+    branch: str = None
+    default_branch: str = None
+    origin: str = None
+    dirty: int = None
+    ahead: int = None
+    owner: Owner = None
+
+    @property
+    def known(self):
+        """Есть ли оба числа: без них про работу в клоне сказать нечего."""
+        return self.dirty is not None and self.ahead is not None
+
+    def to_dict(self):
+        return {"cur": self.branch, "def": self.default_branch, "origin": self.origin,
+                "dirty": self.dirty, "ahead": self.ahead,
+                "owner": self.owner and self.owner.to_dict()}
+
+    @classmethod
+    def from_dict(cls, d):
+        """Словарь с шины -> CloneFacts; нет данных -- None. Неполный словарь
+        (строка work у du) -- то, что в нём есть."""
+        if not d:
+            return None
+        return cls(d.get("cur"), d.get("def"), d.get("origin"), d.get("dirty"),
+                   d.get("ahead"), Owner.from_dict(d.get("owner")))
+
+
+def holds_work(clone):
+    """Есть ли в клоне работа: несохранённое или неотправленное (#266).
+
+    Одно правило на всех: вердикт ростера, аренду, уборку сирот и ворота
+    кластера. Ветка не по умолчанию -- не работа: с #256 папет стоит на
+    ветке своего мастера намеренно, и считай её работой -- аренда держала бы
+    его вечно. Свежий диспатч без коммитов бережёт окно lease.WINDOW.
+    Клон неизвестен или без чисел -- держит: «не знаю» не значит «пусто»."""
+    if clone is None or not clone.known:
+        return True
+    return bool(clone.dirty or clone.ahead)
 
 
 # ─── глагол ──────────────────────────────────────────────────────────────
