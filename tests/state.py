@@ -509,6 +509,68 @@ def check_failing(c):
              ("failing", "FAILED: boom (9 restarts, gave up)"))
 
 
+def check_row_none_274(c):
+    """HYPOTHESIS (#274): «здесь ничего» в строке ростера зашито строками при
+    сборке -- puppets._row пишет node "-" без аллокации, owner "-", origin
+    "?", state "-", -- и решения сравнивают строки (puppet_sizes и gc:
+    `r.node != "-"`). Прочерк для человека стал данными для решения.
+    SOLUTION: PuppetRow держит None; прочерк и вопрос появляются только при
+    показе -- render(), он же to_dict (провод дашборда, страница читает по
+    имени). Решения сравнивают с None. STATUS: FIXED — see #274"""
+    import ast
+    import inspect
+    from mop.common import bus, puppets
+    from mop.cli.core import list as cli_list
+    empty = PuppetRow("pu-x-1", None, "pending", None, None, None, "claude", None)
+    old = {"name": "pu-x-1", "node": "-", "alloc_status": "pending", "state": "-",
+           "kind": None, "owner": "-", "llm": "claude", "origin": "?", "disk_kb": None}
+    render = getattr(empty, "render", None)
+    c.expect("#274 None renders as the old strings", render and render(), old)
+    c.expect("#274 to_dict is the rendered wire form", empty.to_dict(), old)
+    c.expect("#274 mop list line: None as before",
+             cli_list.line(empty), cli_list.line(PuppetRow(**{**old})))
+    # Сборка: без аллокации, владельца и origin -- None, не строки.
+    item = {"job": {"ID": "pu-x-1", "Status": "pending", "Meta": {}}, "alloc": None,
+            "error": None, "state": None, "kind": None, "owner": None}
+    row = puppets._row(item)
+    c.expect("#274 _row holds None for nothing",
+             (row.node, row.state, row.owner, row.origin), (None, None, None, None))
+    c.expect("#274 _row renders as before", row.to_dict()["node"] + row.to_dict()["state"]
+             + row.to_dict()["owner"] + row.to_dict()["origin"], "---?")
+    # Решение по None -- то же, что по "-": обмер не спрашивает узел, которого нет.
+    asked = []
+
+    def stream(verb, asks, **kw):
+        asked.append(dict(asks))
+        return iter(())
+    keep = bus.request_stream
+    try:
+        bus.request_stream = stream
+        running = PuppetRow("pu-x-2", None, "running", "free", "free", None, "claude", None)
+        placed = PuppetRow("pu-x-3", "n1", "running", "free", "free", None, "claude", None)
+        puppets.puppet_sizes([running, placed])
+    finally:
+        bus.request_stream = keep
+    c.expect("#274 sizes skip a row without a node", asked,
+             [{"pu-x-3": ("n1", {"names": ["pu-x-3"]})}])
+    # _row больше не пишет прочерки в строку, решения их не сравнивают.
+    tree = ast.parse(inspect.getsource(puppets._row))
+    call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and getattr(n.func, "id", None) == "PuppetRow")
+    written = sorted(k.arg for k in call.keywords for x in ast.walk(k.value)
+                     if isinstance(x, ast.Constant) and x.value in ("-", "?")
+                     and k.arg != "alloc_status")
+    c.expect("#274 _row writes no sentinel into node/state/owner/origin", written, [])
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    compared = []
+    for rel in ("mop/common/puppets.py", "mop/cli/pool/gc.py", "mop/server/web.py"):
+        for n, line in enumerate(open(os.path.join(root, rel)), 1):
+            if any(f'.{f} {op} "{s}"' in line for f in ("node", "owner", "origin", "state")
+                   for op in ("==", "!=") for s in ("-", "?")):
+                compared.append(f"{rel}:{n}")
+    c.expect("#274 decisions compare with None, not the dash", compared, [])
+
+
 def main():
     c = Checks()
     for what, given, want in CASES:
@@ -522,6 +584,7 @@ def main():
     check_treatment(c)
     check_stale_spec(c)
     check_clone_agreement(c)
+    check_row_none_274(c)
     for state, want in FREE_CASES:
         c.expect(f"is_free({state!r})", is_free(state and state.kind), want)
     return c.report("state")

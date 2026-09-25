@@ -46,7 +46,12 @@ class PuppetRow:
     плюс target, None -- обмер не доехал (прочерк, а не ноль).
 
     Порядок полей -- порядок ключей прежнего словаря: to_dict уходит в
-    снимок дашборда, и страница читает его по имени."""
+    снимок дашборда, и страница читает его по имени.
+
+    «Здесь ничего» -- None (#274): узла нет без аллокации, владельца -- без
+    живой аренды, origin -- без ключа в мете, состояния -- без ответа.
+    Прочерк и вопрос -- только показ (render, SHOWN): раньше их писала
+    сборка строки, и решения сравнивали строку `"-"`."""
     name: str
     node: str
     alloc_status: str
@@ -57,13 +62,29 @@ class PuppetRow:
     origin: str
     disk_kb: int = None
 
+    def render(self):
+        """Строка для человека, модели и страницы: None -- прежним прочерком
+        или вопросом. Байт в байт то, что раньше лежало в самой строке."""
+        out = asdict(self)
+        for field, shown in SHOWN.items():
+            if out[field] is None:
+                out[field] = shown
+        return out
+
     def to_dict(self):
-        return asdict(self)
+        """Провод дашборда -- показанная строка: страница читает прочерки."""
+        return self.render()
 
     @classmethod
     def from_dict(cls, d):
-        """Незнакомый ключ -- TypeError: молча лишнее поле и было болезнью."""
-        return cls(**d)
+        """Провод -> строка; показанное «ничего» -- обратно None. Незнакомый
+        ключ -- TypeError: молча лишнее поле и было болезнью."""
+        return cls(**{k: (None if SHOWN.get(k) is not None and v == SHOWN[k] else v)
+                      for k, v in d.items()})
+
+
+# Как показывается «ничего» в строке ростера (#274): поле -> текст.
+SHOWN = {"node": "-", "state": "-", "owner": "-", "origin": "?"}
 
 
 def _tail(head, sep, tail):

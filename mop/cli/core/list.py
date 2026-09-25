@@ -23,8 +23,10 @@ def place(row):
 
 
 def line(r):
-    cells = (r.name, r.node, r.alloc_status, r.state, r.owner, place(r), r.llm)
-    return "  ".join(c.ljust(w) for c, w in zip(cells, WIDTHS)) + "  " + r.origin
+    s = r.render()
+    cells = (s["name"], s["node"], s["alloc_status"], s["state"], s["owner"], place(r),
+             s["llm"])
+    return "  ".join(c.ljust(w) for c, w in zip(cells, WIDTHS)) + "  " + s["origin"]
 
 
 def main(argv):

@@ -14,7 +14,7 @@ def main(argv):
     limit = config.num("MOP_GC_FREE_MIN_GB")
     cap = config.num("MOP_GC_MAX_PER_RUN")
     rows = puppets.puppet_rows()
-    nodes = sorted({r.node for r in rows if r.node != "-"})
+    nodes = sorted({r.node for r in rows if r.node is not None})
     disks = bus.request_many("disk", nodes)
 
     # Давление и кандидаты: узлы от самого тесного, внутри узла — от самого

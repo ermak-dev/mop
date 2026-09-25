@@ -70,8 +70,8 @@ def projects(rows):
     место на весь снимок."""
     by = {}
     for r in rows:
-        origin = r.origin or "?"
-        project = puppets.project_of(origin) if origin != "?" else "?"
+        # Без origin -- проект «?», как и показ строки (PuppetRow.render).
+        project = puppets.project_of(r.origin) if r.origin else "?"
         by.setdefault(project, []).append(r)
     # Счётчик проекта -- тот же counts по виду вердикта, что и в шапке
     # (#210): считать по строке, где kind уже заменён корзиной, значило
