@@ -50,7 +50,7 @@ import time
 
 from ..common import bus, busnames, fsutil, lease, service
 from .. import driver, usage
-from ..common.domain import Owner, Verb
+from ..common.domain import CloneFacts, Owner, Verb
 from ..driver import clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
@@ -201,14 +201,12 @@ async def clone_facts(name):
         dirty, ahead = int(kv.get("dirty") or 0), int(kv.get("ahead") or 0)
     except ValueError:
         return None
-    owner = Owner.parse(kv.get("owner"))
-    return {"cur": kv.get("cur") or "(detached)",
-            "def": (kv.get("def") or "").rsplit("/", 1)[-1] or None,
-            "origin": kv.get("origin") or None,
-            "dirty": dirty, "ahead": ahead,
-            # Кто ведёт задание (#161): сырая запись, живость считает мастер.
-            # По шине -- словарём (#204), обратно его читает Owner.from_dict.
-            "owner": owner and owner.to_dict()}
+    # Кто ведёт задание (#161): сырая запись, живость считает мастер. По
+    # шине -- словарём (#204, #266), обратно его читает CloneFacts.from_dict.
+    return CloneFacts(kv.get("cur") or "(detached)",
+                      (kv.get("def") or "").rsplit("/", 1)[-1] or None,
+                      kv.get("origin") or None, dirty, ahead,
+                      Owner.parse(kv.get("owner"))).to_dict()
 
 
 async def du_kb(name):
@@ -383,8 +381,8 @@ async def _claim(name, req):
     me = lease.caller(req)[0]
     if not me:
         return None, None, None
-    clone = await clone_facts(name)
-    owner = Owner.from_dict((clone or {}).get("owner"))
+    clone = CloneFacts.from_dict(await clone_facts(name))
+    owner = clone and clone.owner
     act, note = lease.verdict(owner, me, clone, time.time(), bool(req.get("force")))
     if act == "refuse":
         return f"{name}: {note}", None, None
@@ -427,9 +425,8 @@ async def _gate(name, req):
     Та же lease.may_touch, что за send: чужая живая аренда -- отказ с именем
     владельца. Оператор -- субъект admin, а не поле тела. Зовут под
     _owner_locks: между проверкой и действием чужой claim не вклинится."""
-    clone = await clone_facts(name)
-    owner = Owner.from_dict((clone or {}).get("owner"))
-    ok, note = lease.may_touch(owner, lease.caller(req)[0], clone, time.time(),
+    clone = CloneFacts.from_dict(await clone_facts(name))
+    ok, note = lease.may_touch(clone and clone.owner, lease.caller(req)[0], clone, time.time(),
                                bool(req.get("force")),
                                req.get("_project") == busnames.ADMIN)
     return (None, note) if ok else (f"{name}: {note}", None)

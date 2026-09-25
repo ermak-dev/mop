@@ -33,7 +33,7 @@ import base64
 
 from . import bootstrap, natsconf, nodes, nomad, spec
 from ..common import bus, busnames, config, creds, landing, lease, project_secrets, projects, puppets, service, state
-from ..common.domain import Owner, Project, Verb
+from ..common.domain import CloneFacts, Project, Verb
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
@@ -323,9 +323,8 @@ def gate(name, req, facts, now):
             return None, f"owner unknown: {facts['error']}"
         return (f"{name}: cannot tell who leads it — {facts['error']}; "
                 f"repeat with force if you know it is free"), None
-    clone = (facts or {}).get("clone")
-    owner = Owner.from_dict((clone or {}).get("owner"))
-    ok, note = lease.may_touch(owner, lease.caller(req)[0], clone, now, force)
+    clone = CloneFacts.from_dict((facts or {}).get("clone"))
+    ok, note = lease.may_touch(clone and clone.owner, lease.caller(req)[0], clone, now, force)
     return (None, note) if ok else (f"{name}: {note}", None)
 
 

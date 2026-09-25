@@ -581,6 +581,9 @@ def main():
     cases += scases2
     bad += tbad
     cases += tcases
+    abad, acases = check_clone_agreement()
+    bad += abad
+    cases += acases
     for state, want in FREE_CASES:
         cases += 1
         if is_free(state and state.kind) != want:
@@ -588,6 +591,50 @@ def main():
             print(f"FAILED  is_free({state!r})")
     print(f"{cases - bad}/{cases} matched")
     return 1 if bad else 0
+
+
+# Таблица клонов: (что, факты клона агента, держит ли работу).
+CLONE_TABLE = [
+    ("clean on the default branch", CLEAN, False),
+    ("clean on the master's branch", WORK, False),
+    ("uncommitted on the default branch", {**CLEAN, "dirty": 2}, True),
+    ("unpushed on a branch", {**WORK, "ahead": 1}, True),
+    ("both on a branch", {**WORK, "dirty": 1, "ahead": 3}, True),
+]
+
+
+def check_clone_agreement():
+    """«В клоне работа» -- одно правило на всех потребителей (#266).
+
+    HYPOTHESIS: правило записано трижды: lease.holds_work считал работой и
+    ветку не по умолчанию, state._clone_veto и classify_junk -- только
+    dirty/ahead. Папет на ветке мастера (#256) ростер звал free, а аренда
+    держала его вечно.
+    SOLUTION: domain.CloneFacts и domain.holds_work; state, lease,
+    classify_junk и cluster.gate решают им.
+    STATUS: FIXED — see #266"""
+    from mop.common import lease
+    from mop.common.domain import CloneFacts, Owner
+    from mop.server import cluster
+    now = 1_000_000
+    stale = Owner("olga", now - lease.WINDOW - 1).to_dict()
+    bad = cases = 0
+    for what, clone, holds in CLONE_TABLE:
+        wire = {**clone, "owner": stale}
+        got = {
+            "state": not is_free(verdict(facts("idle 1 1", wire)).kind),
+            "lease": not lease.may_touch(Owner.from_dict(stale), "anton",
+                                         CloneFacts.from_dict(wire), now)[0],
+            "sweep": not puppets.classify_junk(
+                {"n": {"bodies": ["pu-x-1"], "work": {"pu-x-1": wire}}}, set())[0]["sweepable"],
+            "gate": cluster.gate("pu-x-1", {"_caller": "anton"}, {"clone": wire}, now)[0] is not None,
+        }
+        for who, says in got.items():
+            cases += 1
+            if says != holds:
+                bad += 1
+                print(f"FAILED  #266 {who} on {what}: holds work {says}, want {holds}")
+    return bad, cases
 
 
 if __name__ == "__main__":
