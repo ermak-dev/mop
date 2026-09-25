@@ -2,9 +2,16 @@
 
 Слои, каждый следующий перекрывает предыдущий по своему полю:
 
-    рабочая копия   git config mop.server / mop.user -- привязка клона (#125)
-    окружение       MOP_SERVER_LAN / MOP_BUS_USER
+    рабочая копия   git config mop.server / mop.user / mop.branch -- привязка
+                    клона (#125, #249); `--global` -- все клоны человека
+    окружение       MOP_SERVER_LAN / MOP_BUS_USER / MOP_BRANCH
     командная строка  глобальный --server у любой команды, логин у join
+
+Ветка (#249) -- интеграционная ветка человека, а не проекта: ветка по
+умолчанию репозитория в GitLab одна на всех, а работать в свою `dev`,
+оставив `master` веткой выкладки, нужно каждому по отдельности. Читает её
+lib.default_branch (база ветки тикета у `mop bug start`), а сессия мастера
+видит MOP_BRANCH и называет её папету целью landing.
 
 Ни одного слоя -- поле пусто, и config.get берёт дефолт установки из файлов
 (node.env, .env). Пароли в контекст не входят: они у человека на сервере, в
@@ -25,13 +32,15 @@ from . import config
 
 # Поле контекста -> (ключ git config, переменная окружения).
 FIELDS = {"server": ("mop.server", "MOP_SERVER_LAN"),
-          "user": ("mop.user", "MOP_BUS_USER")}
+          "user": ("mop.user", "MOP_BUS_USER"),
+          "branch": ("mop.branch", "MOP_BRANCH")}
 
 
 @dataclass(frozen=True)
 class Context:
     server: str = None
     user: str = None
+    branch: str = None     # интеграционная ветка человека (#249), без origin/
     # поле -> откуда взято: "clone", "env", "cli"
     sources: dict = field(default_factory=dict)
 
@@ -50,7 +59,7 @@ def resolve(cli, env, clone):
             if value:
                 values[name], sources[name] = value, source
     return Context(server=values.get("server"), user=values.get("user"),
-                   sources=sources)
+                   branch=values.get("branch"), sources=sources)
 
 
 def strip_server(argv):
