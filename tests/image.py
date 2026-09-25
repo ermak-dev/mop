@@ -58,6 +58,52 @@ def main():
         c.expect("plan_clear(free only)", image.plan_clear(rows[:1]), ["pu-proj-1"])
     except AttributeError:
         c.fail("image.plan_clear is missing")
+    # Сборка на одном узле (#280): на rumop образ на agent2 запечатался голым
+    # (#278), а на agent1 папеты проекта заняты работой. Пересборка всего
+    # проекта отбивалась бы по занятым (или --force убил бы их работу), хотя
+    # образ agent1 цел. С названным узлом считаются только его тела: чужой
+    # занятый папет не блокирует, снимаются только свои, плейбук получает
+    # mop_node и играет только там.
+    # HYPOTHESIS: plan_clear и bake не знают узла -- сборка всегда над всеми
+    # контейнерными узлами. SOLUTION: node= у plan_clear/clear/bake/announce/
+    # build, mop_node в extra-vars плейбука, end_host на чужих узлах.
+    # STATUS: FIXED — see #280
+    both = [
+        {"name": "pu-proj-1", "node": "agent1", "container": True, "kind": "busy"},
+        {"name": "pu-proj-2", "node": "agent2", "container": True, "kind": "failing"},
+        {"name": "pu-proj-3", "node": "agent2", "container": True, "kind": "free"},
+    ]
+    try:
+        try:
+            c.expect("plan_clear(node): a busy puppet elsewhere does not block",
+                     image.plan_clear(both, node="agent2", force=True),
+                     ["pu-proj-2", "pu-proj-3"])
+        except RuntimeError as e:
+            c.fail(f"plan_clear(node): refused by another node's puppet: {e}")
+        try:
+            image.plan_clear(both, node="agent2")
+            c.fail("plan_clear(node): a not-free puppet on the node must still refuse")
+        except RuntimeError as e:
+            c.check("plan_clear(node): the refusal names only the node's puppets",
+                    "pu-proj-2" in str(e) and "pu-proj-1" not in str(e), e)
+        c.expect("plan_clear(node): only the node's puppets are cleared",
+                 image.plan_clear(both, node="agent1", force=True), ["pu-proj-1"])
+        c.expect("plan_clear(no node): everyone, as before",
+                 image.plan_clear(both, force=True),
+                 ["pu-proj-1", "pu-proj-2", "pu-proj-3"])
+    except TypeError as e:
+        c.fail(f"plan_clear takes no node: {e}")
+    try:
+        c.check("play_extra: no node -> no mop_node",
+                "mop_node" not in image.play_extra("git@h:g/proj.git", GOT, False, None))
+        got = image.play_extra("git@h:g/proj.git", GOT, True, "agent2")
+        c.expect("play_extra: node -> mop_node", got.get("mop_node"), "agent2")
+        c.expect("play_extra: fresh still travels", got.get("mop_fresh"), True)
+        c.expect("play_extra: the manifest half is extra_vars",
+                 {k: v for k, v in got.items() if k not in ("mop_node", "mop_fresh")},
+                 image.extra_vars("git@h:g/proj.git", GOT))
+    except AttributeError:
+        c.fail("image.play_extra is missing")
     return c.report("image")
 
 

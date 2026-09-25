@@ -45,7 +45,19 @@ def extra_vars(origin, got):
     return extra
 
 
-def bake(origin, got, out=None, fresh=False, on_line=None):
+def play_extra(origin, got, fresh=False, node=None):
+    """Переменные прогона: манифест плюс то, что сказали ключами. Чистая
+    половина bake (#280): mop_fresh и mop_node едут только когда названы --
+    плейбук спрашивает `is defined`, и null ему не то же, что отсутствие."""
+    extra = extra_vars(origin, got)
+    if fresh:
+        extra["mop_fresh"] = True
+    if node:
+        extra["mop_node"] = node
+    return extra
+
+
+def bake(origin, got, out=None, fresh=False, on_line=None, node=None):
     """Прогнать плейбук сборки. -> код возврата ansible.
 
     out — куда писать вывод плейбука: файл (MCP пишет в журнал и присылает
@@ -58,11 +70,12 @@ def bake(origin, got, out=None, fresh=False, on_line=None):
     чего в плейбуке уже нет, в образе останется — за этим и остаётся fresh.
 
     on_line — вместо out: каждая строка вывода отдаётся вызывающему (сборщик
-    на сервере показывает по ним шаг, #123)."""
+    на сервере показывает по ним шаг, #123).
+
+    node — только этот узел (#280): остальные выходят из игры сами
+    (end_host по mop_node), а не через --limit."""
     settings = json.dumps(playvars.playbook_vars(), ensure_ascii=False)
-    extra = extra_vars(origin, got)
-    if fresh:
-        extra["mop_fresh"] = True
+    extra = play_extra(origin, got, fresh, node)
     argv = ["ansible-playbook", "-i", os.environ["INVENTORY"], PLAYBOOK,
             "--extra-vars", settings, "--extra-vars", json.dumps(extra)]
     if on_line is None:
@@ -83,15 +96,19 @@ def bake(origin, got, out=None, fresh=False, on_line=None):
 # «пересозданный» папет приходил с прежними пакетами. Цена названа: снос
 # теряет прогретые target (35 ГБ и 329 с на папета), поэтому занятый папет
 # — отказ, если не сказано force.
-def plan_clear(rows, force=False):
+def plan_clear(rows, force=False, node=None):
     """Кого сносить перед сборкой. rows: [{name, node, container, kind}]
     -> [имя]; RuntimeError с именами, если кто-то занят и не force.
+
+    node -- только тела этого узла (#280): чужой занятый папет не блокирует
+    и не снимается, его образ не трогают.
 
     Тела на узлах, где тело равно узлу, сборки не касаются. Свободен —
     только тот, о ком это сказано прямо (state.is_free): молчащий агент
     и папет без состояния читаются как занятые, потому что снос под живой
     работой хуже отказа."""
-    mine = [r for r in rows if r.get("container")]
+    mine = [r for r in rows if r.get("container")
+            and (node is None or r.get("node") == node)]
     busy = [r["name"] for r in mine if not state.is_free(r.get("kind"))]
     if busy and not force:
         raise RuntimeError(
@@ -120,15 +137,16 @@ def project_rows(project, api=None):
     return rows
 
 
-def clear(project, force=False, api=None):
+def clear(project, force=False, api=None, node=None):
     """Остановить папетов проекта на контейнерных узлах и снести их тела.
     -> [{name, origin, llm, node}] — кого поднять заново после сборки.
-    Отказ по занятым — RuntimeError из plan_clear, до первого останова."""
+    Отказ по занятым — RuntimeError из plan_clear, до первого останова.
+    node -- только на этом узле (#280)."""
     api = api or nomad
     rows = project_rows(project, api=api)
     jobs = {r["name"]: (r["job"], r["node"]) for r in rows}
     gone = []
-    for name in plan_clear(rows, force):
+    for name in plan_clear(rows, force, node):
         job, node = jobs[name]
         m = JobMeta.from_job(job)
         api.deregister(name, purge=False)
@@ -163,9 +181,14 @@ def restore(gone, api=None):
 
 
 def build(origin, got, out=None, fresh=False, force=False, on_line=None,
-          on_step=None, api=None):
+          on_step=None, api=None, node=None):
     """Вся сборка как операция над проектом: снять тела → плейбук → поднять
     папетов заново → объявить образ. -> {rc, gone, announced}.
+
+    node -- сборка на одном узле (#280): снимаются тела проекта только там,
+    плейбук играет только там, образ объявляется только ему. Узел, которого
+    в пуле нет или чьи тела не контейнеры, -- RuntimeError до первого
+    останова.
 
     Одна дорога на оба фронтенда (`mop driver build`, инструмент build в
     MCP). Папеты поднимаются заново при ЛЮБОМ исходе плейбука: при отказе
@@ -175,23 +198,43 @@ def build(origin, got, out=None, fresh=False, force=False, on_line=None,
     on_step — имя этапа вызывающему (сборщик шлёт его просителю, #123).
     api — Nomad (nomad.NomadApi, #275), по умолчанию живой."""
     step = on_step or (lambda _s: None)
+    if node:
+        container_nodes(api or nomad, node)
     step("stopping the project's bodies")
-    gone = clear(got["project"], force, api=api)
+    gone = clear(got["project"], force, api=api, node=node)
     try:
-        rc = bake(origin, got, out, fresh, on_line)
+        rc = bake(origin, got, out, fresh, on_line, node=node)
     finally:
         if gone:
             step("raising the project's puppets again")
         restore(gone, api=api)
     if rc == 0:
         step("announcing the image to the nodes")
-    announced = announce(got["project"], api=api) if rc == 0 else []
+    announced = announce(got["project"], api=api, node=node) if rc == 0 else []
     return {"rc": rc, "gone": gone, "announced": announced}
 
 
-def announce(project, api=None):
+def container_nodes(api, node=None):
+    """Контейнерные узлы пула по мете Nomad -> {узел: мета}. С node --
+    только он, и RuntimeError, если такого узла нет или его тела не
+    контейнеры (#280): образ строится и объявляется только там, где тело --
+    клон шаблона."""
+    meta = api.nodes_meta()
+    if node is not None:
+        if node not in meta:
+            raise RuntimeError(f"no node {node} in the pool: "
+                               f"{', '.join(sorted(meta)) or 'none'}")
+        if not driver.is_container(driver.of_node(meta[node], node)):
+            raise RuntimeError(f"{node}: its bodies are not containers, "
+                               f"there is no image to build there")
+        return {node: meta[node]}
+    return meta
+
+
+def announce(project, api=None, node=None):
     """Сказать кластеру, что образ этого проекта на узлах собран.
     -> [(узел, 'announced'|'already announced'|'not a container node')].
+    node -- только ему (#280): на остальных образ не собирали.
 
     Без этого планировщик про образ не знает, и папет проекта на узел не
     сядет — ограничение в спеке смотрит именно на этот перечень. Отдельным
@@ -204,7 +247,7 @@ def announce(project, api=None):
     заводилось."""
     api = api or nomad
     out = []
-    for name, meta in sorted(api.nodes_meta().items()):
+    for name, meta in sorted(container_nodes(api, node).items()):
         # Неизвестный драйвер -- строка с отказом, остальные узлы дальше (#175).
         try:
             container = driver.is_container(driver.of_node(meta, name))

@@ -86,14 +86,22 @@ class Batch:
         return out or None
 
 
-def needs_build(mode, serving, project):
+def needs_build(mode, serving, project, node=None):
     """Собирать ли образ. serving -- {контейнерный узел: [проекты с образом]}.
 
     missing -- только если образа нет хотя бы на одном контейнерном узле;
     update и rebuild -- всегда. Контейнерных узлов нет -- собирать нечего:
-    на host-узле тело и есть узел."""
+    на host-узле тело и есть узел.
+
+    node -- решение только по нему (#280); узла нет среди контейнерных --
+    ValueError, а не молчаливое «собирать нечего»."""
     if mode not in MODES:
         raise ValueError(f"no build mode {mode}; modes: {', '.join(MODES)}")
+    if node is not None and serving:
+        if node not in serving:
+            raise ValueError(f"{node} is not a container node of the pool; "
+                             f"those are: {', '.join(sorted(serving))}")
+        serving = {node: serving[node]}
     if not serving:
         return False
     if mode == "missing":
@@ -143,6 +151,7 @@ def run(req, send):
     -> итог (dict), без done: его ставит answer."""
     origin = req.get("origin") or ""
     mode = req.get("mode") or "missing"
+    node = req.get("node") or None
     if not puppets.looks_like_origin(origin):
         return {"error": f"{origin!r} doesn't look like a git-origin"}
     project = puppets.project_of(origin)
@@ -160,8 +169,11 @@ def run(req, send):
         serving = serving_now(refused)
         for why in refused:
             send(step=f"skipping {why}")
-        if not needs_build(mode, serving, project):
-            return {"ok": True, "skipped": True, "project": project}
+        try:
+            if not needs_build(mode, serving, project, node):
+                return {"ok": True, "skipped": True, "project": project}
+        except ValueError as e:
+            return {"error": str(e)}
         state = {"step": "starting", "since": time.time(), "alive": True}
         tail = collections.deque(maxlen=TAIL)
 
@@ -200,7 +212,8 @@ def run(req, send):
         threading.Thread(target=beat, daemon=True).start()
         try:
             r = image.build(origin, got, fresh=(mode == "rebuild"),
-                            force=bool(req.get("force")), on_line=line, on_step=step)
+                            force=bool(req.get("force")), on_line=line, on_step=step,
+                            node=node)
         finally:
             state["alive"] = False
             lines(batch.take)

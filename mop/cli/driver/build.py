@@ -1,10 +1,12 @@
-"""mop driver build [project|origin] [--fresh] [--force]: bake the project's image
+"""mop driver build [project|origin] [--fresh] [--force] [--node NAME]: bake the project's image
 
 On the hypervisors, from the control machine. No argument: this working
 copy, .mop as it lies. Incremental by default: a copy of the image
 takes what changed; --fresh builds from the base image anew. The project's
 puppets on container nodes are stopped, their bodies destroyed and raised
 again from the new image; a busy puppet refuses unless --force.
+--node NAME: on that node only — its puppets alone are stopped, the others'
+image and work are left as they are.
 """
 import sys
 
@@ -27,6 +29,13 @@ def main(argv):
     origin, как в deploy: там нет рабочей копии, которая сказала бы иначе."""
     fresh, force = "--fresh" in argv, "--force" in argv
     argv = [a for a in argv if a not in ("--fresh", "--force")]
+    node = None
+    if "--node" in argv:
+        i = argv.index("--node")
+        if i + 1 >= len(argv):
+            lib.usage(__doc__)
+        node = argv[i + 1]
+        del argv[i:i + 2]
     if len(argv) > 1:
         lib.usage(__doc__)
     if argv:
@@ -56,7 +65,8 @@ def main(argv):
     # узлах снимаются до плейбука и поднимаются заново после, при любом
     # исходе. Занятый папет — отказ до первого останова, если не --force.
     try:
-        r = image.build(origin, got, fresh=fresh, force=force, on_step=p.step)
+        r = image.build(origin, got, fresh=fresh, force=force, on_step=p.step,
+                        node=node)
     finally:
         p.clear()
     for node, what in r["announced"]:

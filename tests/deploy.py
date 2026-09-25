@@ -544,6 +544,42 @@ def all_tasks():
     return out
 
 
+# ── сборка на одном узле (#280) ──────────────────────────────────────────
+# HYPOTHESIS: pve-build.yml играет на всех хостах puppet, и узел ограничить
+# нечем: на rumop образ agent2 запечатался голым (#278), а на agent1 папеты
+# проекта заняты -- пересборка либо отбивается по ним, либо (--force) убивает
+# их работу, хотя образ agent1 цел. --limit ansible не годится: хост,
+# добавленный add_host, может попасть под ограничение подмножества.
+# SOLUTION: extra-var mop_node; в первой игре и в «Seal the image» -- end_host
+# на всяком узле, кроме названного, рядом с end_host для неконтейнерных.
+# STATUS: FIXED — see #280
+def check_one_node_280(c):
+    plays = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))
+    guarded = [p for p in plays if p.get("hosts") == "puppet"]
+    c.check("pve-build: two plays run on the puppet group", len(guarded) == 2,
+            [p.get("name") for p in guarded])
+    for p in guarded:
+        tasks = p.get("tasks") or []
+        ends = [t for t in tasks if "ansible.builtin.meta" in t
+                and t["ansible.builtin.meta"] == "end_host"
+                and "mop_node" in str(t.get("when", ""))]
+        c.check(f"pve-build: {p.get('name')}: leaves every node but mop_node",
+                len(ends) == 1, [t.get("name") for t in tasks[:4]])
+        if not ends:
+            continue
+        when = " ".join(str(ends[0]["when"]).split())
+        c.check(f"pve-build: {p.get('name')}: the guard is off when no node is named",
+                "mop_node is defined" in when, when)
+        c.check(f"pve-build: {p.get('name')}: the guard compares the host's own name",
+                "inventory_hostname != mop_node" in when, when)
+        # До первой задачи, которая что-то делает на узле: снос и запечатывание
+        # чужого узла -- ровно то, от чего заводился флаг.
+        doing = next((i for i, t in enumerate(tasks)
+                      if "ansible.builtin.meta" not in t), len(tasks))
+        c.check(f"pve-build: {p.get('name')}: the guard stands before any work",
+                tasks.index(ends[0]) < doing, (tasks.index(ends[0]), doing))
+
+
 def check_include_loop_var(c):
     """STATUS: FIXED — see #194"""
     found = []
@@ -1117,6 +1153,7 @@ def main():
     check_pve_storage_227(c, can_render)
     check_include_loop_var(c)
     check_users_reload_199(c)
+    check_one_node_280(c)
 
     return c.report("deploy")
 
