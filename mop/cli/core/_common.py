@@ -5,14 +5,15 @@
 import os
 
 from mop.cli import lib
-from mop import config, keys, llm, manifest, puppets
+from mop.common import config, llm, manifest, puppets
+from mop.client import keys
 
 
 def workspace_text(origin):
     """workspace папета (#133): .mop/bootstrap.yaml рабочей копии проекта,
     если команда идёт из неё, иначе из origin (ветка по умолчанию). Нет
     файла -- пустой текст: сервер снимает копию папета, и удаление доходит."""
-    from mop import manifest
+    from mop.common import manifest
     if lib.cwd_origin() == origin:
         top = lib.git("rev-parse", "--show-toplevel")
         try:
@@ -47,7 +48,7 @@ def parse_llm(args):
         llm.require(profile)
     return profile, rest
 def session_env(profile):
-    """Окружение сессии claude на профиле из mop/llm/: статическая часть
+    """Окружение сессии claude на профиле из mop/common/llm/: статическая часть
     профиля плюс ключ. -> (профиль, {переменные}).
 
     Источник ключа — местный .env, а не узловой secrets.env: на управляющей

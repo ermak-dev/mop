@@ -7,7 +7,7 @@ Silent when all goes well.
 """
 from getpass import getpass
 
-from mop import identity
+from mop.server import identity
 from mop.cli import lib
 from mop.cli.server.user import _common
 

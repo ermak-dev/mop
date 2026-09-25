@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 # байт в байт, а не «по смыслу».
 #
 # Всё, что спека читает из установки, прибито окружением ДО импорта mop
-# (окружение старше .env и node.env, см. mop/config.py): иначе слепок совпадал
+# (окружение старше .env и node.env, см. mop/common/config.py): иначе слепок совпадал
 # бы только на машине, где его сняли. Время — единственный недетерминизм
 # (PU_CONTINUE) — заморожено тем же способом.
 PINNED = {
@@ -44,7 +44,8 @@ os.environ.update(PINNED)
 time.time = lambda: 1_790_000_000.0
 SNAPSHOT = os.path.join(os.path.dirname(os.path.realpath(__file__)), "spec_snapshot.json")
 
-from mop import config, spec  # noqa: E402
+from mop.common import config  # noqa: E402
+from mop.server import spec  # noqa: E402
 
 # Просьбы проектов (#197) спека читает файлом сервера: слепок снимается без
 # него -- так спеку видит установка, где deploy просьб ещё не привозил.
@@ -443,7 +444,7 @@ def check_project_asks_197():
     Просьбы проекта -- Project.of над таблицей read_asks (#204).
     STATUS: FIXED — see #197"""
     import tempfile
-    from mop.domain import Project
+    from mop.common.domain import Project
     bad = cases = 0
 
     def project_asks(project, path):
@@ -577,7 +578,7 @@ def refuse(*a, **k):
     raise RuntimeError("the check tried to reach the network")
 socket.socket.connect = socket.socket.connect_ex = refuse
 sys.path.insert(0, sys.argv[1])
-from mop import spec
+from mop.server import spec
 spec.ASKS_FILE = "/nonexistent/project-asks.json"
 print(json.dumps(spec.job_spec("pu-mop-1", "git@h:g/mop.git"), sort_keys=True))
 """

@@ -22,7 +22,7 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import projects  # noqa: E402
+from mop.common import projects  # noqa: E402
 
 RU = "git@git.ermak.dev:ermak/rudesktop.git"
 MOP = "git@git.ermak.dev:ermak/mop.git"

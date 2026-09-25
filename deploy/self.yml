@@ -40,7 +40,7 @@
         name: "{{ apt_packages[role] }}"
         state: present
 
-    # Тот же список, что у узла и тела: MOP_PIP_DEPS из mop/deps.py.
+    # Тот же список, что у узла и тела: MOP_PIP_DEPS из mop/common/deps.py.
     - ansible.builtin.include_role:
         name: common
         tasks_from: pip

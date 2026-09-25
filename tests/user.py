@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 import importlib  # noqa: E402
 
-from mop import identity, natsconf  # noqa: E402
+from mop.server import identity, natsconf  # noqa: E402
 
 ROOT = tempfile.mkdtemp(prefix="mop-test-user-")
 FILE = os.path.join(identity.SECRETS, identity.OPERATORS_FILE)

@@ -16,8 +16,8 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import web  # noqa: E402
-from mop.state import PuppetRow, State, silent  # noqa: E402
+from mop.server import web  # noqa: E402
+from mop.common.state import PuppetRow, State, silent  # noqa: E402
 
 FREE = State("free", branch="master")
 

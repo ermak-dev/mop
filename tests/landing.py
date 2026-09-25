@@ -25,10 +25,10 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
-from mop import cluster  # noqa: E402
+from mop.server import cluster  # noqa: E402
 
 try:
-    from mop import landing  # noqa: E402
+    from mop.common import landing  # noqa: E402
 except ImportError:
     landing = None
 

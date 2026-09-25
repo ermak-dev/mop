@@ -1,7 +1,7 @@
 """mop dev bug start <iid> [slug] [--no-branch] [--worker W]: claim an issue — status::wip plus a branch
 """
 from mop.cli import lib
-from mop import gitlab
+from mop.common import gitlab
 from mop.cli.dev.bug._common import parser
 
 

@@ -1,6 +1,6 @@
 """mop dev bug show <iid>: the full body of an issue
 """
-from mop import gitlab
+from mop.common import gitlab
 from mop.cli.dev.bug._common import parser
 
 

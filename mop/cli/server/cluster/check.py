@@ -2,7 +2,7 @@
 """
 import sys
 
-from mop import bus
+from mop.common import bus
 
 
 def main(_argv):

@@ -15,7 +15,7 @@ import tempfile
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import natsconf, operators  # noqa: E402
+from mop.server import natsconf, operators  # noqa: E402
 
 BASE = {
     "service": "svc-pass",
@@ -125,7 +125,7 @@ def check_login_in_subject_207():
     Подписка -- как была. Машины логин человека не публикуют: у сервиса --
     deny на субъекты с логином, у узлов и папетов их нет в списке.
     STATUS: FIXED — see #207"""
-    from mop import busnames
+    from mop.common import busnames
     out = []
     ops = operators.parse("alice:user:mop; bob:user:mop; anton:admin; olga:user:*; "
                           "anton.ermak:user:mop")
@@ -272,7 +272,7 @@ def check_inbox_login_213():
             out.append(f"{user} {'may' if want else 'must not'} publish {subj}")
 
     # Адрес: логин токеном впереди, хост с точками -- после.
-    from mop import busnames
+    from mop.common import busnames
     addr = busnames.master_address("anton.ermak", "wate.lan-7")
     if addr != "anton%2Eermak.wate.lan-7":
         out.append(f"master_address -> {addr!r}")
@@ -336,7 +336,7 @@ def main():
 
     # HYPOTHESIS (#144): субъекты и имена пользователей набраны руками в шести
     # модулях; переименование в одном месте молча разводит права и подписки.
-    # SOLUTION: одно определение (mop/busnames.py), из него строятся и права,
+    # SOLUTION: одно определение (mop/common/busnames.py), из него строятся и права,
     # и подписки. Характеризация: файл пользователей тот же байт в байт.
     ops = operators.parse(OPERATORS)
     got = natsconf.render({"service": "svc-pass", "callout": "co-pass",
@@ -347,7 +347,7 @@ def main():
     # Свойство (#144): всё, на что подписываются агент и сервисы, разрешено
     # правами их пользователя. Подписки и права строятся из busnames, и
     # проверка ловит расхождение до пула, где отказ прав молчит (error_cb).
-    from mop import busnames
+    from mop.common import busnames
     if covers("_INBOX.>", "_INBOX") or not covers("mop.*.node.x.>", "mop.*.node.x.rpc") \
             or covers("mop.a.>", "mop.*.events") or not covers("mop.>", "mop.*.all.msg"):
         failed.append("covers() does not follow NATS wildcard semantics")

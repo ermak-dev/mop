@@ -1,6 +1,6 @@
 """mop dev bug comment <iid> "текст" | - | --body-file F: comment on an issue
 """
-from mop import gitlab
+from mop.common import gitlab
 from mop.cli.dev.bug._common import parser, read_body
 
 

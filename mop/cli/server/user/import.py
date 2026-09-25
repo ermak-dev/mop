@@ -11,7 +11,7 @@ Afterwards remove MOP_OPERATORS from .env and run mop server deploy: until then
 each moved login is defined twice and refused. Goes away together with
 MOP_OPERATORS.
 """
-from mop import identity
+from mop.server import identity
 from mop.cli import lib
 from mop.cli.server.user import _common
 

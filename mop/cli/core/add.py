@@ -10,7 +10,7 @@ import time
 
 from mop.cli import lib
 from mop.cli.core import _common
-from mop import bus, context, llm, puppets
+from mop.common import bus, context, llm, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.

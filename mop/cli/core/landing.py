@@ -18,7 +18,7 @@ holder is your login on the bus. There is no expiry: a holder that went away
 is released with --force.
 """
 from mop.cli import lib
-from mop import bus, landing, puppets
+from mop.common import bus, landing, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.

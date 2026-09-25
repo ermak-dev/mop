@@ -2,7 +2,7 @@
 
 The last 60 lines by default, terminal colors stripped.
 """
-from mop import gitlab
+from mop.common import gitlab
 from mop.cli import lib
 from mop.cli.dev.ci._common import parser
 

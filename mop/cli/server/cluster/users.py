@@ -12,7 +12,8 @@ refuses rather than fire a reload nats would reject.
 import sys
 
 from mop.cli import lib
-from mop import bootstrap, natsconf, projects, puppets
+from mop.server import bootstrap, natsconf
+from mop.common import projects, puppets
 
 
 def main(argv):

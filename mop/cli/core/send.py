@@ -20,8 +20,10 @@ import argparse
 import sys
 
 from mop.cli import lib
-from mop import bus, channel, session, puppets
-from mop.render import table
+from mop.common import bus, puppets
+from mop.client import channel
+from mop import session
+from mop.common.render import table
 
 
 def show_sessions():
@@ -34,7 +36,7 @@ def show_sessions():
 
 def to_puppet(a, body):
     """Через шину: сокет папета host-local, до него дотягивается агент узла.
-    Доставка -- mop/channel.py (#148), здесь только вывод."""
+    Доставка -- mop/client/channel.py (#148), здесь только вывод."""
     v = channel.send_to_puppet(puppets.running_alloc(a.target)["NodeName"], a.target,
                                body, a.priority, a.wait, owner=bus.login(), force=a.force)
     if channel.failure(v):

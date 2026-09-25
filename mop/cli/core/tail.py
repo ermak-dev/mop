@@ -6,7 +6,7 @@
 import time
 
 from mop.cli import lib
-from mop import puppets
+from mop.common import puppets
 
 
 def appended_since(prev, cur):

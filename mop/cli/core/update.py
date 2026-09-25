@@ -17,7 +17,7 @@ refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
 from mop.cli.core import _common
-from mop import bus, context, llm
+from mop.common import bus, context, llm
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.

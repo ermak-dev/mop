@@ -127,7 +127,7 @@ def main():
     # SOLUTION: mop.cli.pool.deploy поверх библиотеки. STATUS: FIXED — see #76
     try:
         from mop.cli.server import deploy
-        from mop import projects
+        from mop.common import projects
     except ImportError as e:
         print(f"FAIL {e}")
         return 1
@@ -280,7 +280,7 @@ def main():
     # проверка на вид origin'а у master, свой запасной путь у driver build,
     # отказ cwd_origin всегда называл `mop add`.
     # SOLUTION: lib.pick_origin -- чистое решение, lib.origin -- git и отказ.
-    from mop import puppets
+    from mop.common import puppets
     for good in ("git@git.ermak.dev:ermak/mop.git", "https://h/g/mop.git",
                  "/srv/git/mop.git"):
         if not puppets.looks_like_origin(good):
@@ -521,7 +521,7 @@ def check_refusals_163():
     import contextlib
     import importlib
     import io
-    from mop import bus, puppets
+    from mop.common import bus, puppets
 
     failed = 0
     reason = "no rights for nodes: project mop"
@@ -668,7 +668,7 @@ def check_refusals():
     STATUS: FIXED — see #146"""
     import contextlib
     import io
-    from mop import bus, puppets
+    from mop.common import bus, puppets
 
     failed = 0
     reason = "pu-mop-9 belongs to project other, not to mop"
@@ -863,10 +863,11 @@ def check_output_rules():
     """STATUS: FIXED — see #159"""
     import glob
     import re
-    from mop import bus, keys, llm, puppets
+    from mop.common import bus, llm, puppets
+    from mop.client import keys
     failed = 0
     files = sorted(glob.glob(os.path.join(ROOT, "mop", "cli", "**", "*.py"), recursive=True)) \
-        + [os.path.join(ROOT, "mop", "channel.py"), os.path.join(ROOT, "mop", "agent.py")]
+        + [os.path.join(ROOT, "mop", "client", "channel.py"), os.path.join(ROOT, "mop", "node", "agent.py")]
     for hit in caps_hits(files):
         failed += 1
         print(f"FAIL caps for emphasis: {hit}")
@@ -918,7 +919,8 @@ def check_output_rest():
     """Остаток #159: setup, sweep, driver build. STATUS: FIXED — see #159"""
     import shutil
     import subprocess
-    from mop import bus, image, playvars, puppets
+    from mop.common import bus, puppets
+    from mop.server import image, playvars
     from mop.cli.driver import build
     from mop.cli.pool import setup, sweep
     failed = 0
@@ -990,7 +992,9 @@ def check_output_179():
     SOLUTION: отказы и предупреждения -- в stderr теми же словами, «no ready
     nodes» -- код 1, update на успехе молчит (MCP ответит done, как restart).
     STATUS: FIXED — see #179"""
-    from mop import bus, image, keys, llm, puppets
+    from mop.common import bus, llm, puppets
+    from mop.server import image
+    from mop.client import keys
     from mop.cli.core import update
     from mop.cli.driver import build
     from mop.cli.pool import sweep
@@ -1069,7 +1073,8 @@ def check_output_182():
     тишина не на терминале), факты -- шагами, а не отчётом; отказ подъёма
     папета и объявления образа -- stderr с именем; users на успехе молчит.
     STATUS: FIXED — see #182"""
-    from mop import bootstrap, image, natsconf, nomad, projects, spec
+    from mop.server import bootstrap, image, natsconf, nomad, spec
+    from mop.common import projects
     from mop.cli.server.cluster import users
     from mop.cli.driver import build
     failed = 0
@@ -1144,7 +1149,7 @@ def check_restore_all_188():
     SOLUTION: пробовать каждого, отказы собрать и бросить одним исключением,
     по строке на папета («<папет> on <узел>: not raised again: <причина>»).
     STATUS: FIXED — see #188"""
-    from mop import image, nomad, spec
+    from mop.server import image, nomad, spec
     failed = 0
     undo = no_network()
     keep = (nomad.register, spec.job_spec)
@@ -1351,7 +1356,7 @@ def check_pool_uniform():
     MOP_MEM_MB здесь больше нет (#197): память -- свойство папета, не узла,
     и строку mop_mem_mb в инвентаре отвергает check_node_memory_197 на любом
     узле, с любым значением."""
-    from mop import config
+    from mop.common import config
     from mop.cli.server import deploy
     failed = 0
     undo = no_network()
@@ -1401,7 +1406,8 @@ def check_deploy_check():
     ansible-playbook, и ничего пишущего после плейбука. STATUS: FIXED — see #177"""
     import shutil
     import subprocess
-    from mop import bus, config, creds, playvars, projects
+    from mop.common import bus, config, creds, projects
+    from mop.server import playvars
     from mop.cli.server import deploy
     failed = 0
     d = tempfile.mkdtemp(prefix="mop-test-deploy-check-")
@@ -1409,7 +1415,7 @@ def check_deploy_check():
     for f in (inventory, key, key + ".pub"):
         open(f, "w").close()
     # Один человек в файле операторов: без людей deploy отказывает (#219).
-    from mop import identity
+    from mop.server import identity
     people = os.path.join(d, "operators")
     with open(people, "w") as f:
         f.write(identity.format_line(identity.Identity("anton", "admin", ("*",)),
@@ -1581,7 +1587,7 @@ def check_agent_on_node_172():
 
 
 def check_bus_import_169():
-    """HYPOTHESIS (#169): mop/bus.py при импорте без nats-py зовёт sys.exit --
+    """HYPOTHESIS (#169): mop/common/bus.py при импорте без nats-py зовёт sys.exit --
     библиотека кончает процесс сама, и тот, кто её импортировал, не может ни
     перехватить отказ, ни сказать его своими словами (#150: `-m mop.agent`
     печатал текст bus вместо своего).
@@ -1589,12 +1595,12 @@ def check_bus_import_169():
     командлет внутри cli.run, и run делает из ImportError одну строку в
     stderr и код 1.
     STATUS: FIXED — see #169"""
-    return missing_library("nats", "mop.bus", "bus library required: pip install --user "
+    return missing_library("nats", "mop.common.bus", "bus library required: pip install --user "
                            "--break-system-packages nats-py")
 
 
 def check_nomad_import_187():
-    """HYPOTHESIS (#187): mop/nomad.py при импорте без python-nomad зовёт
+    """HYPOTHESIS (#187): mop/server/nomad.py при импорте без python-nomad зовёт
     sys.exit -- тот же дефект, что у bus в #169: библиотека кончает процесс
     сама.
     SOLUTION: как в #169 -- ImportError с тем же текстом, одну строку из него
@@ -1602,7 +1608,7 @@ def check_nomad_import_187():
     STATUS: FIXED — see #187"""
     # Команда мастер-шелла python-nomad больше не импортирует (#81, слои
     # #258: nomad -- сервер), поэтому пробуем командой контроллера.
-    return missing_library("nomad", "mop.nomad", "API library required: pip install --user "
+    return missing_library("nomad", "mop.server.nomad", "API library required: pip install --user "
                            "--break-system-packages python-nomad",
                            command="mop.cli.driver.build", argv=["--nope"])
 
@@ -1703,9 +1709,9 @@ def check_fallback_model_183():
     SOLUTION: treat() читает её при вызове; на уровне модуля чтения нет.
     STATUS: FIXED — see #183"""
     import ast
-    from mop import puppets
+    from mop.common import puppets
     failed = 0
-    tree = ast.parse(open(os.path.join(ROOT, "mop", "puppets.py")).read())
+    tree = ast.parse(open(os.path.join(ROOT, "mop", "common", "puppets.py")).read())
     top = [n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
                                                         ast.ClassDef))]
     if any("MOP_FALLBACK_MODEL" in ast.unparse(n) for n in top):
@@ -1740,7 +1746,7 @@ def check_fallback_model_183():
     # SOLUTION: одна точка соединения bus._open: клиент nats.NATS(), connect
     # в try, при отказе nc.close() (закрывает транспорт) и исключение дальше.
     # STATUS: FIXED — see #251
-    from mop import bus as _bus
+    from mop.common import bus as _bus
     closed = []
 
     class FakeNATS:

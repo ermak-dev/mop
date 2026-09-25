@@ -22,7 +22,8 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import agent, busnames  # noqa: E402
+from mop.node import agent  # noqa: E402
+from mop.common import busnames  # noqa: E402
 
 # ─── до #150: наборы и логика handle, переписанные дословно ──────────────
 OLD_VERBS = ("ping", "local", "state", "states", "sizes", "send", "tail",
@@ -124,7 +125,7 @@ def check_quiet():
     `mop agent` (mop/cli/service/agent.py)."""
     out = []
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                        "mop", "agent.py")
+                        "mop", "node", "agent.py")
     in_main = False
     with open(path) as f:
         for n, line in enumerate(f, 1):
@@ -138,9 +139,9 @@ def check_quiet():
             in_main = False
             code = line.split("#")[0]
             if "print(" in code or "sys.exit(" in code:
-                out.append(f"mop/agent.py:{n}: {line.strip()}")
+                out.append(f"mop/node/agent.py:{n}: {line.strip()}")
     if hasattr(agent, "_conn"):
-        out.append("mop/agent.py keeps a global connection: pass it explicitly")
+        out.append("mop/node/agent.py keeps a global connection: pass it explicitly")
     return out
 
 
@@ -318,12 +319,12 @@ def check_main_169():
     os.makedirs(os.path.join(shadow, "nats"))
     with open(os.path.join(shadow, "nats", "__init__.py"), "w") as f:
         f.write("raise ImportError('no nats')\n")
-    r = subprocess.run([sys.executable, "-m", "mop.agent", "--check"], cwd=root,
+    r = subprocess.run([sys.executable, "-m", "mop.node.agent", "--check"], cwd=root,
                        env=dict(os.environ, PYTHONPATH=shadow),
                        capture_output=True, text=True)
     want = "bus library needed: pip install --user --break-system-packages nats-py\n"
     if r.returncode != 1 or r.stdout or r.stderr != want:
-        return [f"python3 -m mop.agent without nats: code {r.returncode}, "
+        return [f"python3 -m mop.node.agent without nats: code {r.returncode}, "
                 f"stdout {r.stdout!r}, stderr {r.stderr[-300:]!r}"]
     return []
 
@@ -334,7 +335,7 @@ def check_subject_173():
     на его субъектах они сходятся, но это второе определение.
     SOLUTION: агент зовёт общую функцию; на его субъектах ответ тот же.
     STATUS: FIXED — see #173"""
-    from mop import service
+    from mop.common import service
     out = []
 
     def old(subject):
@@ -348,10 +349,10 @@ def check_subject_173():
                 out.append(f"{subj}: shared {service.project_from_subject(subj)!r}, "
                            f"old {old(subj)!r}, wanted {p!r}")
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                        "mop", "agent.py")
+                        "mop", "node", "agent.py")
     text = open(path).read()
     if "parts[1]" in text or "service.project_from_subject(" not in text:
-        out.append("mop/agent.py must take the project via service.project_from_subject")
+        out.append("mop/node/agent.py must take the project via service.project_from_subject")
     return out
 
 
@@ -368,8 +369,8 @@ def check_unclaim_race_189():
     import asyncio
     import subprocess
     import tempfile
-    from mop import lease
-    from mop.domain import Owner
+    from mop.common import lease
+    from mop.common.domain import Owner
     out = []
     root = tempfile.mkdtemp(prefix="mop-test-189-")
     os.makedirs(os.path.join(root, ".git"))
@@ -460,7 +461,7 @@ def check_gates_40():
     STATUS: FIXED — see #40"""
     import asyncio
     import time
-    from mop.domain import Owner
+    from mop.common.domain import Owner
     out = []
     olga = Owner("olga", int(time.time()) - 60).to_dict()
     clone = {"cur": "bug/1-x", "def": "master", "dirty": 2, "ahead": 0, "owner": olga}
@@ -539,7 +540,7 @@ def check_caller_207():
     STATUS: FIXED — see #207"""
     import asyncio
     import json
-    from mop import bus, lease
+    from mop.common import bus, lease
     out = []
     got = {s: busnames.caller(s) for s in (
         "mop.mop.node.hyper.rpc.alice", "mop.mop.node.hyper.rpc",
@@ -668,8 +669,8 @@ def check_git_identity_167():
     import json
     import subprocess
     import tempfile
-    from mop import lease
-    from mop.domain import Owner
+    from mop.common import lease
+    from mop.common.domain import Owner
     out = []
     profiles = {"olga": {"name": "Ольга Петрова", "email": "olga@example.dev"},
                 "petr": {"name": "Pyotr O'Neil", "email": "petr@example.dev"}}
@@ -871,7 +872,7 @@ def check_state_fact_224():
 def check_no_screen_fact_236():
     import asyncio
     import json
-    from mop.state import verdict
+    from mop.common.state import verdict
     out = []
     saved = (agent.bsh, agent.clone_facts)
     scripts = []

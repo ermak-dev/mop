@@ -98,7 +98,7 @@ def _isolate():
     os.environ["MOP_ENV_FILE"] = os.path.join(HOME, "no-such.env")
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
-    from mop import config, context
+    from mop.common import config, context
     config.ENV_FILE = os.environ["MOP_ENV_FILE"]
     config.NODE_ENV_FILE = os.path.join(HOME, ".config", "mop", "node.env")
     config.forget()
@@ -138,7 +138,7 @@ def check_imports():
 
 def hostile_home():
     """Дом, где всё не так: node.env и ~/.gitconfig с чужими значениями."""
-    from mop import config
+    from mop.common import config
     home = tempfile.mkdtemp(prefix="mop-test-hostile-")
     os.makedirs(os.path.join(home, ".config", "mop"))
     values = {k: "hostile-209" for k in config.SETTINGS}
@@ -168,15 +168,15 @@ def check_children():
     проверкой через bin/mop, видит тот же пустой .env, что и она."""
     out = []
     got = subprocess.run(
-        [sys.executable, "-c", "from mop import config; print(config.ENV_FILE)"],
+        [sys.executable, "-c", "from mop.common import config; print(config.ENV_FILE)"],
         env={**os.environ, "PYTHONPATH": ROOT}, capture_output=True, text=True, cwd=ROOT)
-    from mop import config
+    from mop.common import config
     if got.stdout.strip() != config.ENV_FILE:
         out.append(f"a child reads .env {got.stdout.strip() or got.stderr.strip()!r}, "
                    f"the check reads {config.ENV_FILE!r}")
     if config.ENV_FILE.startswith(ROOT + os.sep):
         out.append(f"the check reads the repository's own .env: {config.ENV_FILE}")
-    from mop import puppets
+    from mop.common import puppets
     if puppets.LOCAL_KEYS_FILE != config.ENV_FILE:
         out.append(f"LLM keys come from {puppets.LOCAL_KEYS_FILE}, not the .env the "
                    f"check sees ({config.ENV_FILE})")

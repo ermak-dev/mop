@@ -5,7 +5,7 @@
   mop secret var remove VAR...
 """
 from mop.cli import lib
-from mop import project_secrets
+from mop.common import project_secrets
 from mop.cli.secret import _common
 
 

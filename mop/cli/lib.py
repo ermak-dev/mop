@@ -7,7 +7,7 @@
 Командлет пользуется этим так:
 
     from mop.cli import lib
-    from mop import puppets
+    from mop.common import puppets
 
     def main(argv):
         ...
@@ -23,7 +23,7 @@ import shutil
 import subprocess
 import sys
 
-from mop import bus, config, creds, puppets, render  # noqa: E402
+from mop.common import bus, config, creds, puppets, render  # noqa: E402
 
 
 # Каталоги установки: корень проекта и bin/ с единственным исполняемым
@@ -203,7 +203,7 @@ def default_branch():
     origin. origin/HEAD выставлен не в каждом клоне — откат на master, потому
     что отказ здесь означал бы «не могу завести ветку» там, где ветку
     завести можно."""
-    from mop import context
+    from mop.common import context
     mine = context.current().branch
     if mine:
         return f"origin/{mine}"

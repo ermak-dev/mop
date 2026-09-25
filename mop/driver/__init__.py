@@ -51,7 +51,7 @@ import importlib
 import os
 import re
 
-from .. import config, fsutil, plugins
+from ..common import config, fsutil, plugins
 
 # Глаголы контракта. Список закрыт и проверяется громко при загрузке: агент
 # зовёт их из петли, и отсутствующий argv прочитается там как «узел молчит».

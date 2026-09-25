@@ -14,7 +14,7 @@ import tempfile
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import project_secrets as ps  # noqa: E402
+from mop.common import project_secrets as ps  # noqa: E402
 
 
 def main():

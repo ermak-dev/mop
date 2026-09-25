@@ -8,7 +8,7 @@ not answer is not reached: there is no way past the agent.
 import sys
 
 from mop.cli import lib
-from mop import keys
+from mop.client import keys
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.

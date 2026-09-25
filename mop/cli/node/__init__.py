@@ -12,8 +12,8 @@ master never hears of it again — and while the node is in the inventory,
 which the next deploy would configure it from again.
 """
 from mop.cli import lib
-from mop import puppets
-from mop.render import ratio, table
+from mop.common import puppets
+from mop.common.render import ratio, table
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.

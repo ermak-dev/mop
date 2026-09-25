@@ -9,7 +9,7 @@
 The only thing on the installation that talks to Nomad on someone else's
 behalf. A master and an operator ask a verb on mop.<project>.cluster.rpc;
 the service checks whether they may and only then calls the API, so the
-management token stays on the server (mop/cluster.py).
+management token stays on the server (mop/server/cluster.py).
 """
 from mop.cli import lib
 from mop.cli.server.cluster import check as _check

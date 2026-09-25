@@ -20,7 +20,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
-from mop import bus, busnames, config, web
+from mop.common import bus, busnames, config
+from mop.server import web
 
 PAGE = os.path.join(config.PROJECT, "web", "index.html")
 LOGO = os.path.join(config.PROJECT, "docs", "logo.png")   # фавикон и шапка

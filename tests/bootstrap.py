@@ -14,7 +14,7 @@ import tempfile
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import bootstrap  # noqa: E402
+from mop.server import bootstrap  # noqa: E402
 
 TEXT = """
 - name: bootstrap of proj
@@ -43,7 +43,7 @@ def check_identity_167():
     callout (identity.server_provider), и читает копию deploy'я в
     natsconf.IDENTITY_DIR, а не MOP_OPERATORS_FILE.
     STATUS: FIXED — see #167"""
-    from mop import identity, natsconf
+    from mop.server import identity, natsconf
     failed = 0
     tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
     path = os.path.join(tmp, "operators")
@@ -255,7 +255,8 @@ def main():
     # дорогами; удаление из рабочей копии не доходило, и старт играл
     # проектную копию из origin. SOLUTION: workspace -- файл папета, старт
     # играет копию своего папета. STATUS: FIXED — see #133
-    from mop import cluster, project_secrets
+    from mop.server import cluster
+    from mop.common import project_secrets
     root = tempfile.mkdtemp(prefix="mop-test-ws-")
     saved = (bootstrap.ROOT, project_secrets.ROOT)
     bootstrap.ROOT, project_secrets.ROOT = root, os.path.join(root, "no-secrets")

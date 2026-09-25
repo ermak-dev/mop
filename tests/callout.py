@@ -26,8 +26,9 @@ import tempfile
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import busnames, natsconf, operators  # noqa: E402
-from mop.identity import Identity, Refused  # noqa: E402
+from mop.common import busnames  # noqa: E402
+from mop.server import natsconf, operators  # noqa: E402
+from mop.server.identity import Identity, Refused  # noqa: E402
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 V = json.load(open(os.path.join(HERE, "callout_vectors.json")))
@@ -85,7 +86,7 @@ def main():
         print("callout: ok (skipped)")
         return 0
     try:
-        from mop import callout, nkjwt
+        from mop.server import callout, nkjwt
     except ImportError as e:
         print(f"FAIL the callout modules are missing: {e}")
         print("callout: FAILED")

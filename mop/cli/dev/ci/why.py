@@ -5,7 +5,7 @@ job with allow_failure is named as one that did NOT fail the pipeline. With
 no failed job at all, what the pipeline itself says (yaml_errors,
 failure_reason, detailed status): a rejected .gitlab-ci.yml fails with no jobs.
 """
-from mop import gitlab
+from mop.common import gitlab
 from mop.cli import lib
 from mop.cli.dev.ci._common import parser
 

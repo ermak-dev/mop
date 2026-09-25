@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Проверка вердикта папета (mop/state.py) без пула: python3 tests/state.py
+"""Проверка вердикта папета (mop/common/state.py) без пула: python3 tests/state.py
 
 Пока состояние собиралось поверх alloc exec, проверить его можно было только
 на живом папете — и регрессия однажды спряталась именно здесь: пробник сессии
@@ -17,9 +17,9 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import puppets, session  # noqa: E402
-from mop.state import (PuppetRow, State, action_for, failing_row, failure_reason,  # noqa: E402
-                       is_free, silent, task_summary, verdict)
+from mop.common import puppets  # noqa: E402
+from mop import session  # noqa: E402
+from mop.common.state import PuppetRow, State, action_for, failing_row, failure_reason, is_free, silent, task_summary, verdict
 
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
 WORK = {"cur": "bug/1063", "def": "master", "dirty": 0, "ahead": 0}
@@ -262,7 +262,7 @@ def check_hooked(cases):
 # HYPOTHESIS: вердикт папета — английская фраза, и её потребители (doctor,
 # is_free, корзина дашборда, отчёт deploy) решают по префиксу. Переформулировка
 # сообщения молча меняет лечение и решение «свободен», на котором стоит диспатч.
-# SOLUTION: тип State(kind, detail, branch) в mop/state.py; потребители смотрят
+# SOLUTION: тип State(kind, detail, branch) в mop/common/state.py; потребители смотрят
 # в kind, а строка — только для показа.
 #
 # Характеризация: таблица ниже снята с ТЕКУЩИХ функций до переезда (строка ->
@@ -319,7 +319,7 @@ def judge(case):
     TREATMENT была зелёной на них. После переезда решения берутся из вида, а
     строка — из str(State): так таблица проверяет заодно, что str() воспроизводит
     каждую строку дословно."""
-    from mop import web
+    from mop.server import web
     v = silent(case[1]) if isinstance(case, tuple) else verdict(case)
     row = PuppetRow("pu-x-1", "n", "running", str(v), v.kind, "-", "claude", "?")
     return str(v), action_for(v.kind), is_free(v.kind), web.classify(row)
@@ -365,7 +365,7 @@ SPEC_ACTION = [
 
 def check_stale_spec():
     """STATUS: FIXED — see #174"""
-    from mop import state
+    from mop.common import state
     bad, cases = 0, 0
     fn = getattr(state, "spec_action", None)
     for kind, want in SPEC_ACTION:

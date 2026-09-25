@@ -10,7 +10,7 @@ NATS, через провайдера с плоским файлом и LDAP.
 HYPOTHESIS: личности как значения нет -- есть словарь из разбора настройки,
 и проверка пароля живёт только в конфиге NATS; подключить второй источник
 некуда.
-SOLUTION: mop/identity.py -- Identity (frozen dataclass), AuthProvider
+SOLUTION: mop/server/identity.py -- Identity (frozen dataclass), AuthProvider
 (Protocol: authenticate, lookup) и PlainFileProvider: файл операторов на
 сервере со scrypt-хешем пароля плюс переход -- сегодняшние MOP_OPERATORS и
 сгенерированные файлы паролей, чтобы каждый нынешний логин работал как был.
@@ -25,8 +25,8 @@ import tempfile
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import identity, natsconf, operators  # noqa: E402
-from mop.identity import Identity  # noqa: E402
+from mop.server import identity, natsconf, operators  # noqa: E402
+from mop.server.identity import Identity  # noqa: E402
 
 # Все формы сегодняшней настройки, включая запись без роли (до #106).
 SETTINGS = ("anton:admin; ivan:user:rugent,cloudpub; olga:user:*",
@@ -160,7 +160,8 @@ def check_one_source_219():
     MOP_OPERATORS уходит из настроек, провайдера и плейбуков.
     STATUS: FIXED — see #219"""
     out = []
-    from mop import config, playvars
+    from mop.common import config
+    from mop.server import playvars
     for where, names in (("config.SETTINGS", config.SETTINGS), ("identity.SETTINGS", identity.SETTINGS),
                          ("config.IDENTITY_SCOPED", config.IDENTITY_SCOPED)):
         if "MOP_OPERATORS" in names:
@@ -181,7 +182,7 @@ def check_one_source_219():
 def check_choice():
     """Провайдер выбирает настройка; дефолт -- файл операторов."""
     out = []
-    from mop import config
+    from mop.common import config
     if config.SETTINGS.get("MOP_AUTH_PROVIDER") != "file":
         out.append("MOP_AUTH_PROVIDER must default to file")
     tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
@@ -388,7 +389,7 @@ def check_chain_232():
         except ValueError:
             pass
     # provider(): одно имя -- само звено; список -- цепочка в его порядке.
-    from mop import ldapauth
+    from mop.server import ldapauth
     p = identity.provider({"MOP_AUTH_PROVIDER": "file,ldap", "MOP_OPERATORS_FILE": local.path,
                            **LDAP}, tmp)
     if not isinstance(p, Chain) or [type(l) for l in p.links] != [

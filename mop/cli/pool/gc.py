@@ -6,7 +6,7 @@ MOP_GC_MAX_PER_RUN per run. Run this as the operator, not from a master
 shell: disk pressure on a node is a fact about every tenant, not one project.
 """
 from mop.cli import lib
-from mop import bus, config, puppets, state
+from mop.common import bus, config, puppets, state
 
 
 def main(argv):

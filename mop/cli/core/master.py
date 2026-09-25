@@ -17,7 +17,7 @@ an inbox is addressed by master, not by project, so they never get confused.
 All this command does is work out the project, check its credentials, and exec
 into claude. From there the slice is inherited: mop mcp, spawned by this
 session as a child, sees MOP_PROJECT, builds the project's bus credentials from
-the server's directory (mop/creds.py) and subscribes to its project's inbox.
+the server's directory (mop/common/creds.py) and subscribes to its project's inbox.
 
 No ansible on this machine: the credentials arrive with `mop join --user`,
 the server itself is named by MOP_SERVER_LAN (the environment outranks .env,
@@ -41,7 +41,7 @@ automatic on exactly its main signal. The price is named up front: the
 master holds the Nomad token, pushes, and talks to the tracker, and it will
 no longer ask about any of that.
 
---llm brings the master's session up on a profile from mop/llm/ — the same
+--llm brings the master's session up on a profile from mop/common/llm/ — the same
 set puppets run on. Without the flag, the installation's MOP_DEFAULT_LLM
 applies. The profile's static env goes into the session whole, while the key
 itself is read from the master machine's .env: there's no node secrets.env
@@ -53,7 +53,7 @@ import os
 
 from mop.cli import lib
 from mop.cli.core import _common
-from mop import config, llm, puppets
+from mop.common import config, llm, puppets
 
 SKILL = os.path.join(config.PROJECT,
                      "skills", "master")

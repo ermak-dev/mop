@@ -21,8 +21,8 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import lease  # noqa: E402
-from mop.domain import Owner  # noqa: E402
+from mop.common import lease  # noqa: E402
+from mop.common.domain import Owner  # noqa: E402
 
 NOW = 1_000_000
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}

@@ -36,7 +36,7 @@ import re
 import time
 import shlex
 
-from .. import config
+from ..common import config
 from . import HOME, PREFIX, SERVER_PUB, bad_name, sh, project_of_name, valid_name, why
 
 USER = config.get("MOP_USER")

@@ -9,7 +9,7 @@ mop: конфиг шины из адреса, порта, проекта и па
 
 HYPOTHESIS (#51): креды мастера запечены плейбуком в bus-master-*.json одной
 управляющей машины, и мастер вне неё либо со вторым сервером не поднимается.
-SOLUTION: mop/creds.py собирает конфиг на лету из ~/.config/mop/servers/<адрес>/.
+SOLUTION: mop/common/creds.py собирает конфиг на лету из ~/.config/mop/servers/<адрес>/.
 STATUS: FIXED — see #51
 """
 import hashlib
@@ -24,7 +24,7 @@ import tempfile
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import creds  # noqa: E402
+from mop.common import creds  # noqa: E402
 
 # (проект, пользователь NATS, файл пароля). Имена файлов совпадают с тем, что
 # lookup('password') заводит в secrets/ сервера: копия без переименования.
@@ -384,7 +384,7 @@ def check_no_human_over_nats_219():
     keep = os.environ.get("MOP_SERVER_DIR")
     os.environ["MOP_SERVER_DIR"] = d
     try:
-        from mop import bus
+        from mop.common import bus
         c = bus.server_config("10.0.0.1")
         check("a person's bus config (the server directory) is wss",
               c["url"].startswith("wss://") and c["user"] == "anton", c)
@@ -411,11 +411,11 @@ def check_no_human_over_nats_219():
         for m in re.finditer(r"can_login\(([^)]*)", text):
             call = m.group(1)
             check(f"{path}: can_login (plain nats://) only for a puppet or the service",
-                  "puppet_user" in call or "SERVICE" in call or path == "mop/bus.py", call[:120])
+                  "puppet_user" in call or "SERVICE" in call or path == "mop/common/bus.py", call[:120])
         literal = [l for l in text.splitlines() if 'f"nats://' in l and "#" not in l.split('f"nats://')[0]]
         for line in literal:
             check(f"{path}: a nats:// URL only for machines (bus_config, can_login, callout)",
-                  path in ("mop/creds.py", "mop/bus.py", "mop/callout.py"), line.strip())
+                  path in ("mop/common/creds.py", "mop/common/bus.py", "mop/server/callout.py"), line.strip())
     join = sources.get(os.path.join("mop", "cli", "pool", "join.py"), "")
     check("mop join reads no transition password (secrets/nats-op-*.pass)",
           "nats-op" not in join and "pass_file(" not in join)

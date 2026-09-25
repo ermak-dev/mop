@@ -2,7 +2,7 @@
 """Файловые примитивы без пула: python3 tests/fsutil.py
 
 Запись приватного файла была скопирована пять раз, KEY=VALUE разбирался
-тремя правилами (#153). Здесь -- одна реализация (mop/fsutil.py) и ответы
+тремя правилами (#153). Здесь -- одна реализация (mop/common/fsutil.py) и ответы
 прежних разборщиков, снятые до правки: рефакторинг обязан их сохранить.
 
 Это не фреймворк и не прогон всего проекта: остальное по-прежнему добывается
@@ -17,10 +17,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, ROOT)
 
-from mop import config, creds, natsconf, project_secrets, projects  # noqa: E402
+from mop.common import config, creds, project_secrets, projects  # noqa: E402
+from mop.server import natsconf  # noqa: E402
 
 try:
-    from mop import fsutil  # noqa: E402
+    from mop.common import fsutil  # noqa: E402
 except ImportError:
     fsutil = None
 
@@ -28,7 +29,7 @@ except ImportError:
 # не атомарно (обрыв посреди записи -- усечённый файл кредов), creds не
 # чинит права уже лежащего файла, driver кладёт временный файл по umask.
 # Разборщиков KEY=VALUE три, и правила у них разные.
-# SOLUTION: mop/fsutil.py -- write_private/write_atomic (временный рядом,
+# SOLUTION: mop/common/fsutil.py -- write_private/write_atomic (временный рядом,
 # fsync, rename; 0600 до первого байта), make_private_dir, read_kv, write_kv.
 # Диалекта KEY=VALUE два, и оба нужны: .env (комментарии, кавычки, пробелы)
 # и сырой -- vars.env, который мы пишем сами и обязаны прочитать байт в байт.
@@ -199,7 +200,7 @@ def main():
                     copies.append(os.path.relpath(path, ROOT))
     # pve.py пишет в tar-поток тела, не на диск; session.py едет исходником
     # и пакета не импортирует; parse_var -- разбор аргумента, не файла.
-    allowed = {"mop/driver/pve.py", "mop/session.py", "mop/project_secrets.py"}
+    allowed = {"mop/driver/pve.py", "mop/session.py", "mop/common/project_secrets.py"}
     extra = sorted(set(copies) - allowed)
     if extra:
         bad += 1
@@ -211,7 +212,7 @@ def main():
     # проектов читаются чужими.
     # SOLUTION: оба через fsutil.make_private_dir -- он доводит и лежащий.
     # STATUS: FIXED — see #170
-    from mop import bootstrap
+    from mop.server import bootstrap
     consumers = (
         ("natsconf.passwords", lambda root: natsconf.passwords(["mop"], root)),
         ("bootstrap.store", lambda root: bootstrap.store(root, "mop", "- hosts: all\n  tasks: []\n")),

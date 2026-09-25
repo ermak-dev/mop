@@ -9,7 +9,8 @@ again from the new image; a busy puppet refuses unless --force.
 import sys
 
 from mop.cli import lib
-from mop import bus, image, puppets
+from mop.common import bus, puppets
+from mop.server import image
 
 def main(argv):
     """Собрать образ проекта на узлах с контейнерным драйвером.
@@ -32,7 +33,7 @@ def main(argv):
     else:
         origin = lib.origin(None, __doc__)
         root = lib.git("rev-parse", "--show-toplevel")
-    # Дорога сборки живёт в библиотеке (mop/image.py): у неё двое
+    # Дорога сборки живёт в библиотеке (mop/server/image.py): у неё двое
     # вызывающих, этот командлет и инструмент build в MCP. Здесь печать.
     got = image.prepare(origin, root)
     project = got["project"]

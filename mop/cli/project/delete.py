@@ -11,7 +11,7 @@ with no one able to hear them. Delete them first (mop delete <name>).
 The repository is not touched: this is about the pool, not about the code.
 """
 from mop.cli import lib
-from mop import bus
+from mop.common import bus
 
 
 def main(argv):

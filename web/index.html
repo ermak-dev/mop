@@ -10,7 +10,7 @@
   в deploy/ нет node-тулчейна, и npm-сборка ради статуса была бы именно им.
   Данные приходят снимком из /events (SSE); отвалился поток — опрос /api/pool.
   Ничего здесь не решается второй раз: корзина папета (kind) и счётчики
-  посчитаны в mop/web.py, страница только красит.
+  посчитаны в mop/server/web.py, страница только красит.
 -->
 <style>
   :root {
@@ -121,7 +121,7 @@
   const human = (n) => { for (const [u, d] of [["G", 1e9], ["M", 1e6], ["k", 1e3]]) if (n >= d) { const v = n / d; return (v < 10 ? v.toFixed(1) : v.toFixed(0)) + u; } return String(n); };
   const hhmm = (ts) => ts ? new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : "-";
   const KINDS = ["free", "busy", "sick", "silent", "down"];
-  // Корзины считает mop/web.py, здесь только их имена для человека.
+  // Корзины считает mop/server/web.py, здесь только их имена для человека.
   const KIND_RU = {free: "свободен", busy: "занят", sick: "болен", silent: "агент молчит", down: "не работает"};
   // Та же запись, что render.ratio в питоне (#243): страница его не импортирует.
   const ratio = (free, total) => free == null && total == null ? "-" : (free == null ? "-" : free) + "/" + (total == null ? "-" : total);

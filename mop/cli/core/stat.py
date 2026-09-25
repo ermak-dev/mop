@@ -12,8 +12,9 @@ master shell the picture is the project's, not the pool's.
 import shutil
 
 from mop.cli import lib
-from mop import bus, usage, puppets
-from mop.render import table
+from mop.common import bus, puppets
+from mop import usage
+from mop.common.render import table
 
 DEFAULT_DAYS = 14
 # Разбор транскриптов — не мгновенный: у узла десяток папетов, у каждого

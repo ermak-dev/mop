@@ -3,7 +3,7 @@
 Body from --body-file or stdin; --epic makes it a child of that epic. A
 status label is added when none is given: status::live.
 """
-from mop import gitlab
+from mop.common import gitlab
 from mop.cli.dev.bug._common import parser, read_body
 
 

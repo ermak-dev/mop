@@ -11,8 +11,9 @@ clone.
 import sys
 
 from mop.cli import lib
-from mop import keys, puppets
-from mop.render import table
+from mop.client import keys
+from mop.common import puppets
+from mop.common.render import table
 
 
 def _login():

@@ -3,7 +3,7 @@
 Takes the person's line out of the operators file; the next connection is
 refused. Connections already open live on. Silent when all goes well.
 """
-from mop import identity
+from mop.server import identity
 from mop.cli import lib
 from mop.cli.server.user import _common
 

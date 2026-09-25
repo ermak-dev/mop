@@ -5,8 +5,8 @@ This is a node-level verb: it refuses in a master shell — host space is
 the operator's to see.
 """
 from mop.cli import lib
-from mop import bus, puppets
-from mop.render import table
+from mop.common import bus, puppets
+from mop.common.render import table
 
 
 def main(argv):

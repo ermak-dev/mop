@@ -8,7 +8,7 @@ mop server deploy would configure it again. Take it out of the inventory and run
 mop server deploy first.
 """
 from mop.cli import lib
-from mop import bus
+from mop.common import bus
 
 
 def main(argv):
@@ -19,7 +19,7 @@ def main(argv):
     name = argv[0]
     # Предохранитель считает сервис кластера: он же и снимает узел, и решение
     # с проверкой не должны жить на разных машинах — иначе между ними успеет
-    # приехать папет (mop/nomad.py, forget_refusal).
+    # приехать папет (mop/server/nomad.py, forget_refusal).
     bus.call_cluster("forget", node=name, timeout=30)
 
 

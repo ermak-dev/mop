@@ -4,12 +4,12 @@
 #233: пайплайны mop покраснели (#230), и увидеть почему можно было только
 разовым скриптом к API (OAuth-токен, /projects/39/jobs/<id>/trace) — ровно
 тот обход снаружи, который CLAUDE.md запрещает. Порт `bin/ci` из rugent:
-библиотека в mop/gitlab.py, командлеты — группа mop/cli/dev/ci.
+библиотека в mop/common/gitlab.py, командлеты — группа mop/cli/dev/ci.
 
 HYPOTHESIS: у mop нет ни одного глагола про пайплайны, кроме pipeline(sha)
 для deploy (#231), и отказы/строки, которые решают, что показать модели,
 некуда проверить без сети.
-SOLUTION: чистые помощники в mop/gitlab.py (mark, duration, tail, screen_lines,
+SOLUTION: чистые помощники в mop/common/gitlab.py (mark, duration, tail, screen_lines,
 is_failure,
 retry_blocked, pipeline_retry_blocked, pipeline_cancel_blocked,
 pipeline_failure, pipeline_line, job_line, runner_line, running_line,
@@ -22,7 +22,7 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import gitlab  # noqa: E402
+from mop.common import gitlab  # noqa: E402
 
 URL = "https://git.example.dev/group/proj/-/pipelines/42"
 JOB_URL = "https://git.example.dev/group/proj/-/jobs/7"

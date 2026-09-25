@@ -6,7 +6,7 @@ Includes resolve against the project, as they would in a pipeline.
 """
 import os
 
-from mop import config, gitlab
+from mop.common import config, gitlab
 from mop.cli.dev.ci._common import parser
 
 

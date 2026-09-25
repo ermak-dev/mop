@@ -9,7 +9,7 @@ reason, not a silent success.
 import sys
 
 from mop.cli import lib
-from mop import natsconf
+from mop.server import natsconf
 
 
 def main(argv):

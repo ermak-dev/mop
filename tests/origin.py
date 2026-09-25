@@ -17,7 +17,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, ROOT)
 
-from mop import driver, gitlab, projects, puppets  # noqa: E402
+from mop import driver  # noqa: E402
+from mop.common import gitlab, projects, puppets  # noqa: E402
 
 # HYPOTHESIS: три разборщика хоста с разными правилами дают разные ответы на
 # одном origin'е. Характеризация до правки показала: на формах, что бывают

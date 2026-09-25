@@ -1,6 +1,6 @@
 """Общее у `mop secret file` и `mop secret var`: проект рабочей копии и глагол."""
 from mop.cli import lib
-from mop import bus, puppets
+from mop.common import bus, puppets
 
 
 def project(doc):

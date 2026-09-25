@@ -8,7 +8,7 @@ Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
-from mop import bus, puppets
+from mop.common import bus, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
