@@ -259,8 +259,3 @@ def address(name):
     finally:
         s.close()
     return here if port == 22 else f"{here}:{port}"
-
-
-async def templates():
-    """Сборочных тел у host не бывает: образ собирать не во что."""
-    return []
