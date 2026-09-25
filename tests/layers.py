@@ -150,9 +150,80 @@ def violations(mods):
     return out
 
 
+def bound_names(path, name, known):
+    """{локальное имя: модуль пакета} по импортам файла, с псевдонимами
+    `import ... as`: по ним код и обращается к атрибутам."""
+    tree = ast.parse(open(path).read())
+    pkg = name if os.path.basename(path) == "__init__.py" else name.rsplit(".", 1)[0]
+    out = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            if n.level:
+                base = ".".join(pkg.split(".")[:len(pkg.split(".")) - n.level + 1])
+                base = base + ("." + n.module if n.module else "")
+            elif n.module and n.module.startswith("mop"):
+                base = n.module
+            else:
+                continue
+            for a in n.names:
+                full = f"{base}.{a.name}"
+                if full in known:
+                    out[a.asname or a.name] = full
+        elif isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name in known:
+                    out[a.asname or a.name.split(".")[0]] = a.name
+    return out
+
+
+def dangling(mods):
+    """Обращения `m.attr` к модулю пакета, у которого такого атрибута нет
+    (#261): после переноса функции между модулями поиск по тексту не видит
+    псевдонима (`from . import nodes as pool_nodes`), а проверка слоёв --
+    атрибутов. Модуль, который не импортируется без своей библиотеки,
+    пропускается: его атрибуты проверит строгий прогон CI."""
+    import importlib
+    sys.path.insert(0, ROOT)
+    loaded = {}
+    for name in mods:
+        if name.endswith("__main__"):     # исполняется при импорте
+            loaded[name] = None
+            continue
+        try:
+            loaded[name] = importlib.import_module(name)
+        except Exception:
+            loaded[name] = None
+    out = []
+    for name, path in sorted(mods.items()):
+        names = bound_names(path, name, mods)
+        if not names:
+            continue
+        tree = ast.parse(open(path).read())
+        # Локальное имя, совпавшее с модулем (`spec = VERBS[verb]`,
+        # `state` в цикле), -- не модуль: обращения в его области не считаются.
+        for scope in [tree] + [n for n in ast.walk(tree)
+                               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            local = set()
+            if not isinstance(scope, ast.Module):
+                a = scope.args
+                local |= {x.arg for x in a.args + a.kwonlyargs + a.posonlyargs}
+                local |= {x.arg for x in (a.vararg, a.kwarg) if x}
+            for n in ast.walk(scope):
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                    local.add(n.id)
+            for n in ast.walk(scope):
+                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
+                        and n.value.id in names and n.value.id not in local:
+                    target = loaded.get(names[n.value.id])
+                    if target is not None and not hasattr(target, n.attr):
+                        out.append(f"{name}:{n.lineno}: {n.value.id}.{n.attr} -- "
+                                   f"{names[n.value.id]} has no such attribute")
+    return sorted(set(out))
+
+
 def main():
     mods = modules()
-    bad = violations(mods)
+    bad = violations(mods) + dangling(mods)
     print("\n".join(f"FAIL {b}" for b in bad))
     print(f"layers: {len(mods)} modules, {len(bad)} violations" + (" FAILED" if bad else " ok"))
     return 1 if bad else 0
