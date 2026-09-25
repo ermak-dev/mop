@@ -24,6 +24,7 @@ import subprocess
 import sys
 
 from mop.common import bus, config, creds, puppets, render  # noqa: E402
+from mop.common.domain import JobMeta  # noqa: E402
 
 
 # Каталоги установки: корень проекта и bin/ с единственным исполняемым
@@ -272,8 +273,7 @@ def guard(name):
     if project is None:
         return None
     spec = bus.call_cluster("spec", name=name)
-    meta = spec.get("meta") or {}
-    owner = puppets.project_of(meta.get("origin", ""))
+    owner = JobMeta.from_meta(spec.get("meta")).project
     if owner != project:
         sys.exit(f"{name} — project {owner}, but this master runs {project}. "
                  f"Leave the master shell or run mop master for {owner}.")

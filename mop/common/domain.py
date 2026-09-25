@@ -1,5 +1,5 @@
-"""Доменные значения пула: проект, владелец задания, факты клона, глагол (#204). Данные,
-без печати и без ввода-вывода.
+"""Доменные значения пула: проект, мета джоба (#265), владелец задания, факты
+клона, глагол (#204). Данные, без печати и без ввода-вывода.
 
 Раньше это были словари и кортежи: строковые ключи расходились молча --
 тот же класс дефектов, что закрыли State (#145) и разбор origin (#154).
@@ -42,6 +42,60 @@ class Project:
         limits = {} if limits is None else limits
         asks = {} if asks is None else asks
         return cls(origin, limits.get(name), dict(asks.get(name) or {}))
+
+
+# ─── мета джоба ──────────────────────────────────────────────────────────
+# Ключи Meta джоба папета (#265). Пишет их spec.job_spec (через to_meta),
+# читают все, кто по джобу решает, чей это папет, на каком он профиле и
+# ветке и свежа ли его спека.
+SPEC_META = "mop_spec"
+
+
+@dataclass(frozen=True)
+class JobMeta:
+    """Meta джоба папета: origin, профиль LLM, ветка мастера (#256), версия
+    шаблона спеки (#174).
+
+    Раньше её читали сырым .get в семи модулях с разными умолчаниями ("",
+    None, "?"), а перерегистрацию по ней писали четыре места -- и они
+    разошлись: сборка образа теряла ветку (#265). Отсутствующий ключ здесь --
+    None; умолчания показа (ростер: "?") и профиля (llm.of_meta) -- у
+    читателя, одно на каждое. Имя проекта не хранится -- выводится из origin
+    одним правилом driver.project_of."""
+    origin: str
+    llm: str
+    branch: str = None
+    spec_version: str = None
+
+    @property
+    def project(self):
+        return driver.project_of(self.origin or "")
+
+    @classmethod
+    def from_meta(cls, meta):
+        """Словарь Meta (из джоба или из ответа глагола spec) -> JobMeta."""
+        m = meta or {}
+        return cls(m.get("origin"), m.get("llm"), m.get("branch") or None, m.get(SPEC_META))
+
+    @classmethod
+    def from_job(cls, job):
+        return cls.from_meta(raw(job))
+
+    def to_meta(self):
+        """Словарь для Nomad -- в порядке ключей, каким его писал job_spec:
+        origin, llm, ветка (только если есть), версия шаблона."""
+        out = {"origin": self.origin, "llm": self.llm}
+        if self.branch:
+            out["branch"] = self.branch
+        if self.spec_version is not None:
+            out[SPEC_META] = self.spec_version
+        return out
+
+
+def raw(job):
+    """Meta джоба как есть, словарём: для ответа глагола spec по шине, где
+    форма -- то, что отдал Nomad."""
+    return (job or {}).get("Meta") or {}
 
 
 # ─── владелец задания ────────────────────────────────────────────────────

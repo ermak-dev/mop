@@ -32,8 +32,9 @@ import time
 import base64
 
 from . import bootstrap, natsconf, nodes, nomad, spec
-from ..common import bus, busnames, config, creds, landing, lease, project_secrets, projects, puppets, service, state
-from ..common.domain import CloneFacts, Project, Verb
+from ..common import (bus, busnames, config, creds, domain, landing, lease, project_secrets,
+                      projects, puppets, service, state)
+from ..common.domain import CloneFacts, JobMeta, Project, Verb
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
@@ -187,7 +188,7 @@ def nomad_items(project=None, stale=False):
             except Exception:
                 item["ceiling"] = None
             item["unserved"] = spec.placement_gap(
-                puppets.project_of((j.get("Meta") or {}).get("origin", "")), placement,
+                JobMeta.from_job(j).project, placement,
                 item["ceiling"])
         if stale:
             # Полный джоб, а не заглушка из списка: врапер и ограничение
@@ -257,7 +258,7 @@ def _owner(name):
         return None, False
     if not job:
         return None, False
-    return ((job.get("Meta") or {}).get("origin") or None), True
+    return (JobMeta.from_job(job).origin or None), True
 
 
 def _ping(project, req):
@@ -371,7 +372,7 @@ def _kept_branch(name):
         job = nomad.get_job(name)
     except Exception:
         return None
-    return ((job or {}).get("Meta") or {}).get("branch")
+    return JobMeta.from_job(job).branch
 
 
 def _update(project, req):
@@ -382,8 +383,8 @@ def _update(project, req):
     # Ветка -- свойство папета (#257): запрос без неё (recycle, gc, лечение
     # doctor'а) не стирает ту, с которой папет заведён.
     branch = req.get("branch") or _kept_branch(name)
-    nomad.register(spec.job_spec(name, req.get("origin"), req.get("profile"),
-                                 cont=bool(req.get("cont")), branch=branch))
+    nomad.register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch),
+                               cont=bool(req.get("cont"))))
     return {"ok": True, "name": name}
 
 
@@ -441,7 +442,7 @@ def _spec(project, req):
     job = nomad.get_job(req["name"])
     if not job:
         return {"error": f"no job {req['name']}"}
-    return {"ok": True, "meta": job.get("Meta") or {},
+    return {"ok": True, "meta": domain.raw(job),
             "status": job.get("Status"), "stale": spec.spec_is_stale(job)}
 
 
@@ -599,7 +600,7 @@ def _project_delete(project, req):
         lines = projects.read()
         new, dropped = projects.without_project(name, lines)
         alive = [j["ID"] for j in nomad_jobs(bus.ADMIN)
-                 if puppets.project_of((j.get("Meta") or {}).get("origin", "")) == name]
+                 if JobMeta.from_job(j).project == name]
         why = delete_refusal(name, dropped, alive)
         if why:
             return {"error": why}

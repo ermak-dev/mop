@@ -828,6 +828,118 @@ def check_claude_hooks_223():
     return bad, cases
 
 
+# ── #265: мета джоба -- одно значение, JobMeta ───────────────────────────
+# HYPOTHESIS: Meta джоба (origin, llm, branch, mop_spec) читают сырым .get в
+# семи модулях с разными умолчаниями, профиль -- тремя путями, а
+# перерегистрацию по мете пишут четыре места, и они разошлись: image.clear
+# и image.restore теряли Meta.branch, и после сборки образа папет мастера в
+# своей ветке (#256) поднимался на origin/HEAD.
+# SOLUTION: JobMeta (mop/common/domain.py) -- from_job/from_meta/to_meta в
+# порядке ключей job_spec; читатели -- через него; профиль -- одна функция
+# llm.of_meta; перерегистрация на сервере -- spec.respec, и clear записывает
+# ветку, а restore и лечение её несут.
+# STATUS: FIXED — see #265
+BRANCHED = ("pu-mop-3", "git@git.example.dev:someone/mop.git", "claude", False, "feat/256-x")
+
+
+def check_job_meta_265():
+    bad = cases = 0
+
+    def fail(msg):
+        nonlocal bad
+        bad += 1
+        print(f"FAILED  {msg}")
+
+    from mop.common import domain
+    JobMeta = getattr(domain, "JobMeta", None)
+    if JobMeta is None:
+        fail("mop.common.domain has no JobMeta")
+    # Круг без потерь, байт в байт и в том же порядке ключей.
+    for name, origin, profile, cont, *branch in (SPEC_INPUTS + [BRANCHED]) if JobMeta else []:
+        cases += 1
+        meta = spec.job_spec(name, origin, profile, cont=cont,
+                             branch=branch[0] if branch else None)["Job"]["Meta"]
+        m = JobMeta.from_meta(meta)
+        back = m.to_meta()
+        if json.dumps(back) != json.dumps(meta):
+            fail(f"JobMeta round trip for {name}: {back} != {meta}")
+        if JobMeta.from_job({"Meta": meta}) != m:
+            fail(f"from_job and from_meta disagree for {name}")
+        if m.project != spec.driver.project_of(origin):
+            fail(f"JobMeta.project for {name}: {m.project!r}")
+    cases += 1
+    empty = JobMeta.from_job({}) if JobMeta else None
+    if empty is not None and (empty.origin, empty.llm, empty.branch, empty.spec_version,
+                              empty.project) != (None, None, None, None, ""):
+        fail(f"a job without Meta: {empty}")
+    if JobMeta is not None:
+        try:
+            JobMeta.from_meta({"origin": "o", "llm": "l"}).__setattr__("llm", "x")
+            fail("JobMeta must be frozen")
+        except AttributeError:
+            pass
+
+    # Сборка образа снимает папетов и поднимает их с веткой мастера.
+    from mop.server import image, nomad
+    from mop.common import puppets
+    cases += 1
+    job = spec.job_spec(*BRANCHED[:3], branch=BRANCHED[4])["Job"]
+    keep = (image.project_rows, nomad.deregister, nomad.register, puppets._wait_stopped,
+            puppets.wipe, spec.job_spec)
+    called = []
+    try:
+        image.project_rows = lambda project: [{"name": job["ID"], "node": "n1", "job": job,
+                                               "container": True, "state": "free", "kind": None}]
+        nomad.deregister = lambda name, purge=False: None
+        nomad.register = lambda job_: None
+        puppets._wait_stopped = lambda name: None
+        puppets.wipe = lambda node, name, *a, **k: None
+        real = spec.job_spec
+        spec.job_spec = lambda *a, **k: called.append((a, k)) or real(*a, **k)
+        gone = image.clear("mop", force=True)
+        image.restore(gone)
+    finally:
+        (image.project_rows, nomad.deregister, nomad.register, puppets._wait_stopped,
+         puppets.wipe, spec.job_spec) = keep
+    got = [k.get("branch", a[4] if len(a) > 4 else None) for a, k in called]
+    if got != [BRANCHED[4]]:
+        fail(f"image.restore must raise the puppet on its branch: job_spec calls {called}")
+
+    # Лечение doctor'а (update) несёт ветку папета.
+    cases += 1
+    sent = []
+    keep = puppets._cluster
+    try:
+        puppets._cluster = lambda verb, **kw: sent.append((verb, kw)) or (
+            {"meta": job["Meta"]} if verb == "spec" else {})
+        puppets.treat({"action": "update", "alloc": None, "name": job["ID"]})
+    finally:
+        puppets._cluster = keep
+    upd = [kw for verb, kw in sent if verb == "update"]
+    if not upd or upd[0].get("branch") != BRANCHED[4] or upd[0].get("origin") != BRANCHED[1]:
+        fail(f"treat must re-register with the puppet's branch: {sent}")
+
+    # Мету читают только через JobMeta: сырых чтений её ключей нет нигде, кроме
+    # domain.py (node Meta в nomad.py -- мета узлов, не джоба).
+    cases += 1
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    raw = re.compile(r'get\("Meta"\)|\b(meta|m)\.get\("(origin|llm|branch|mop_spec)"'
+                     r'|\.get\(SPEC_META\)')
+    found = []
+    for dp, _, fs in os.walk(os.path.join(root, "mop")):
+        for f in fs:
+            path = os.path.join(dp, f)
+            rel = os.path.relpath(path, root)
+            if not f.endswith(".py") or rel in ("mop/common/domain.py", "mop/server/nomad.py"):
+                continue
+            for n, line in enumerate(open(path), 1):
+                if raw.search(line.split("#")[0]):
+                    found.append(f"{rel}:{n}: {line.strip()}")
+    if found:
+        fail("raw reads of job Meta outside JobMeta:\n    " + "\n    ".join(found))
+    return bad, cases
+
+
 def main():
     if sys.argv[1:] == ["--snapshot"]:
         # Снять слепок заново: только осознанно, когда спека меняется нарочно
@@ -851,7 +963,7 @@ def main():
     bad += dbad
     cases += dcases
     for check in (check_memory_197, check_project_asks_197, check_spec_memory_197,
-                  check_nomad_order_197, check_claude_hooks_223):
+                  check_nomad_order_197, check_claude_hooks_223, check_job_meta_265):
         cbad, ccases = check()
         bad += cbad
         cases += ccases

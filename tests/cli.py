@@ -1156,7 +1156,7 @@ def check_restore_all_188():
     gone = [{"name": f"pu-p-{i}", "origin": "git@h:g/p.git", "llm": "claude",
              "node": "hyper"} for i in (1, 2, 3)]
     try:
-        spec.job_spec = lambda name, origin, llm: {"ID": name}
+        spec.job_spec = lambda name, origin, llm, **kw: {"ID": name}
         for refused in ({"pu-p-1"}, {"pu-p-1", "pu-p-3"}, set()):
             registered = []
 

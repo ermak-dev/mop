@@ -10,6 +10,7 @@ import sys
 
 from mop.cli import lib
 from mop.common import bus, puppets
+from mop.common.domain import JobMeta
 from mop.server import image
 
 def main(argv):
@@ -82,7 +83,7 @@ def origin_of(arg):
     if puppets.looks_like_origin(arg):
         return arg                      # это и есть origin
     for job in puppets.jobs(project=bus.ADMIN):
-        o = (job.get("Meta") or {}).get("origin") or ""
+        o = JobMeta.from_job(job).origin or ""
         if o and puppets.project_of(o) == arg:
             return o
     here = lib.cwd_origin()

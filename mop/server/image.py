@@ -13,6 +13,7 @@ import os
 import subprocess
 
 from ..common import config, llm, manifest, puppets, state
+from ..common.domain import JobMeta
 from .. import driver
 from . import nomad, playvars, spec
 
@@ -107,7 +108,7 @@ def project_rows(project):
     rows = []
     for item in puppets.roster():
         job = item["job"]
-        if puppets.project_of((job.get("Meta") or {}).get("origin") or "") != project:
+        if JobMeta.from_job(job).project != project:
             continue
         node = item["alloc"]["NodeName"] if item["alloc"] else None
         if not node:
@@ -128,13 +129,14 @@ def clear(project, force=False):
     gone = []
     for name in plan_clear(rows, force):
         job, node = jobs[name]
-        m = job.get("Meta") or {}
+        m = JobMeta.from_job(job)
         nomad.deregister(name, purge=False)
         puppets._wait_stopped(name)
         puppets.wipe(node, name)
-        gone.append({"name": name, "origin": m.get("origin"),
-                     "llm": llm.resolve(m.get("llm")),
-                     "node": node})
+        # Ветка мастера (#256) едет с остальной метой (#265): без неё папет
+        # после сборки поднимался на origin/HEAD, а не на своей ветке.
+        gone.append({"name": name, "origin": m.origin, "llm": llm.of_meta(m),
+                     "branch": m.branch, "node": node})
     return gone
 
 
@@ -150,7 +152,8 @@ def restore(gone):
     failed = []
     for p in gone:
         try:
-            nomad.register(spec.job_spec(p["name"], p["origin"], p["llm"]))
+            nomad.register(spec.respec(p["name"], JobMeta(p["origin"], p["llm"],
+                                                          p.get("branch"))))
         except Exception as e:
             failed.append(f"{p['name']} on {p.get('node') or '?'}: "
                           f"not raised again: {e}")
