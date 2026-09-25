@@ -28,7 +28,7 @@ bridge-сессии, а папета пула живут на других уз�
 мастер читал молчание и шёл смотреть чужой экран глазами.
 
 Сокет сессии host-local, поэтому до него дотягивается агент, который на том же
-узле и живёт (mop/agent.py). Протокол канала — CHANNEL.md, субъекты шины —
+узле и живёт (mop/node/agent.py). Протокол канала — CHANNEL.md, субъекты шины —
 BUS.md, устройство сервера — MCP.md.
 """
 import functools
@@ -45,9 +45,11 @@ from mcp.server.mcpserver import MCPServer                     # noqa: E402
 from mcp.types import ToolAnnotations                          # noqa: E402
 from pydantic import Field                                     # noqa: E402
 
-from mop import bus, busnames, channel, cli, session, puppets, state  # noqa: E402
+from mop.common import bus, busnames, puppets, state  # noqa: E402
+from mop.client import channel  # noqa: E402
+from mop import cli, session  # noqa: E402
 from mop.cli import lib                                   # noqa: E402
-from mop.render import table                              # noqa: E402
+from mop.common.render import table                              # noqa: E402
 
 INSTRUCTIONS = (
         "Pool of claude puppets on top of Nomad.\n\n"
@@ -177,7 +179,7 @@ MASTERS_WAIT = 2
 
 
 # ─── адресация ───────────────────────────────────────────────────────────
-# Маршрут, своя сессия и доставка -- mop/channel.py (#148); здесь только
+# Маршрут, своя сессия и доставка -- mop/client/channel.py (#148); здесь только
 # профиль процесса, от имени которого канал говорит.
 def me():
     """Как этот процесс представляется адресату (channel.my_name)."""

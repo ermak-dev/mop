@@ -2,7 +2,8 @@
 import os
 import sys
 
-from mop import config, identity
+from mop.common import config
+from mop.server import identity
 from mop.cli import lib
 
 

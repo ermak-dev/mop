@@ -14,7 +14,7 @@ def main(argv):
     if argv:
         lib.usage(__doc__)
     try:
-        from mop import callout
+        from mop.server import callout
     except ImportError as e:
         sys.exit(f"mop callout needs {e.name}: pip install nkeys pynacl (MOP_PIP_DEPS)")
     try:

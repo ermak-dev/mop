@@ -17,7 +17,7 @@ the build's output, and erases both when done.
 import sys
 
 from mop.cli import lib
-from mop import bus, manifest, puppets
+from mop.common import bus, manifest, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.

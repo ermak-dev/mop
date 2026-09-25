@@ -26,7 +26,8 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import puppets, spec  # noqa: E402
+from mop.common import puppets  # noqa: E402
+from mop.server import spec  # noqa: E402
 
 ORIGIN = "git@git.example.dev:someone/mop.git"
 

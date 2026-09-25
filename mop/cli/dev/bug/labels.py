@@ -1,7 +1,7 @@
 """mop dev bug labels: the label vocabulary
 """
-from mop import gitlab
-from mop.render import table
+from mop.common import gitlab
+from mop.common.render import table
 
 
 def main(_argv):

@@ -7,7 +7,8 @@ import os
 import shlex
 
 from mop.cli import lib
-from mop import driver, puppets
+from mop import driver
+from mop.common import puppets
 
 
 def main(argv):

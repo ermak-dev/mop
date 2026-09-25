@@ -1,6 +1,6 @@
 """mop dev bug close <iid> [--comment "..."] [--status S]: close an issue, status::fixed by default
 """
-from mop import gitlab
+from mop.common import gitlab
 from mop.cli.dev.bug._common import parser
 
 

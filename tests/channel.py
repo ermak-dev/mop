@@ -4,13 +4,13 @@
 Две части. Первая -- характеристика: оба фронтенда (`mop send` и инструмент
 `send` в MCP) прогоняются на заглушках шины и сокета, и их тексты и запросы
 агенту приколоты байт в байт такими, какими они были до #148. Вторая --
-сам канал (mop/channel.py): выбор пути по адресу, потолок ожидания, вердикт
+сам канал (mop/client/channel.py): выбор пути по адресу, потолок ожидания, вердикт
 -> текст.
 
 HYPOTHESIS (#148): маршрутизация трёх путей и поиск своей сессии жили во
 фронтенде MCP, а MAX_WAIT, обрезка ожидания и тексты «NOT DELIVERED — » и
 «inbox not listening — session is dead» -- ещё и копией в cli/core/send.py.
-SOLUTION: mop/channel.py -- send_to_puppet, send_local, send_to_master,
+SOLUTION: mop/client/channel.py -- send_to_puppet, send_local, send_to_master,
 MAX_WAIT, своя сессия; возвращает вердикт (данные), не печатает. Фронтенды
 только рисуют.
 """
@@ -23,7 +23,8 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 os.environ.setdefault("MOP_SERVER_LAN", "127.0.0.1")
 
-from mop import bus, puppets, session  # noqa: E402
+from mop.common import bus, puppets  # noqa: E402
+from mop import session  # noqa: E402
 from mop.cli import lib  # noqa: E402
 from mop.cli.core import send as cli_send  # noqa: E402
 from mop.cli.service import mcp  # noqa: E402
@@ -256,9 +257,9 @@ def main():
 
     # ─── сам канал ────────────────────────────────────────────────────────
     try:
-        from mop import channel
+        from mop.client import channel
     except ImportError as e:
-        print(f"FAILED  mop/channel.py: {e}")
+        print(f"FAILED  mop/client/channel.py: {e}")
         return 1
 
     check("MAX_WAIT", channel.MAX_WAIT, 600)
@@ -332,7 +333,8 @@ def main():
     # инбокс не сузить до своего логина -- любой мастер проекта слушает все.
     # SOLUTION: адрес -- <токен логина>.<хост>-<pid>; папет отвечает на адрес
     # из конверта (from-name), агент -- в reply_to, и оба уже нового вида.
-    from mop import busnames, operators
+    from mop.common import busnames
+    from mop.server import operators
     local = f"{os.uname().nodename}-{os.getpid()}"
     check("master_id of a person", mcp.master_id("anton.ermak"), f"anton%2Eermak.{local}")
     check("master_id of the server's service", mcp.master_id("service"), f"service.{local}")

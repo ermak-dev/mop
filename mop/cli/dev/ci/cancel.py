@@ -3,7 +3,7 @@
 Refused for a pipeline that already finished (success, failed, canceled,
 skipped), naming its state: GitLab would accept that and do nothing.
 """
-from mop import gitlab
+from mop.common import gitlab
 from mop.cli.dev.ci._common import parser
 
 

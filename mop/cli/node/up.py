@@ -1,7 +1,7 @@
 """mop node up <name>: open the node to the scheduler again
 """
 from mop.cli import lib
-from mop import bus
+from mop.common import bus
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.

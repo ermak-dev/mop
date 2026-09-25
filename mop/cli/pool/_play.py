@@ -6,7 +6,8 @@ import os
 import shutil
 import subprocess
 
-from mop import config, identity, playvars
+from mop.common import config
+from mop.server import identity, playvars
 
 # Код ansible «часть машин не ответила». Отличать его от настоящего отказа
 # обязательно: выключенный узел — не сломанная команда, и сказать про него

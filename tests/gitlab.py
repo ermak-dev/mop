@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Чистая логика трекера без GitLab: python3 tests/gitlab.py
 
-Переходы меток и имена веток — единственное в `mop/gitlab.py`, что можно
+Переходы меток и имена веток — единственное в `mop/common/gitlab.py`, что можно
 проверить без сети, и единственное, где ошибка молчит: лишняя метка одной
 группы не отказ, GitLab оставит одну из двух и не скажет какую, а задача
 выпадет из выборки, которой её ищут.
@@ -12,7 +12,7 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import gitlab  # noqa: E402
+from mop.common import gitlab  # noqa: E402
 
 ORIGINS = [
     ("git@git.example.dev:group/proj.git", ("git.example.dev", "group/proj")),
@@ -92,7 +92,7 @@ PIPELINE_VERDICT = [
 
 def check_deploy_gate():
     """Настройка, отказ без кредов и флаг deploy (#231). -> [строка FAILED]."""
-    from mop import config
+    from mop.common import config
     from mop.cli.pool import deploy
     out = []
     if config.SETTINGS.get("MOP_DEPLOY_NEEDS_GREEN", None) != "":
@@ -216,8 +216,8 @@ FROM_CI = [
      ["--from-ci: the working copy is on HEAD, not master"]),
     (("1", False, False, "master", "", []),
      ["--from-ci: cannot name origin's default branch -- run git remote set-head origin --auto"]),
-    (("1", False, False, "master", "master", [" M mop/config.py", "M  deploy/site.yml"]),
-     ["--from-ci: tracked files are modified: mop/config.py, deploy/site.yml"]),
+    (("1", False, False, "master", "master", [" M mop/common/config.py", "M  deploy/site.yml"]),
+     ["--from-ci: tracked files are modified: mop/common/config.py, deploy/site.yml"]),
 ]
 
 

@@ -289,7 +289,7 @@ def usage(found=None):
 # ─── запуск ──────────────────────────────────────────────────────────────
 def main(argv):
     # Глобальная опция (#131): сервер для любой команды, с любого места argv.
-    from mop import context
+    from mop.common import context
     try:
         server, argv = context.strip_server(argv)
     except ValueError as e:
@@ -369,7 +369,7 @@ def environment():
     # текущего каталога, а абсолютные были бы литералом конкретной машины.
     os.environ.setdefault("ANSIBLE_CONFIG", os.path.join(PROJECT, "ansible.cfg"))
     os.environ.setdefault("ANSIBLE_ROLES_PATH", os.path.join(PROJECT, "deploy", "roles"))
-    from .. import config as _config
+    from ..common import config as _config
     # Замер времени задач — только по просьбе установки (#103): он нужен при
     # разборе раскатки и мешает во всех остальных прогонах.
     if _config.get("MOP_ANSIBLE_PROFILE"):
@@ -383,7 +383,7 @@ def environment():
 
 def command(modname):
     """main командлета, импортируемый уже внутри run (#169): отказ импорта
-    (нет nats-py -- ImportError из mop/bus.py) ловится там же, где остальные
+    (нет nats-py -- ImportError из mop/common/bus.py) ловится там же, где остальные
     ожидаемые отказы, а не падает трассой до него."""
     return lambda argv: importlib.import_module(modname).main(argv)
 
@@ -396,7 +396,7 @@ def run(fn, argv):
     Только stdlib и config: `mop setup` ставит зависимости, и падать до
     него на импорте шины нельзя. BusError — подкласс RuntimeError, ловится
     вместе с ним."""
-    from .. import config
+    from ..common import config
     try:
         sys.exit(fn(argv) or 0)
     except config.Missing as e:

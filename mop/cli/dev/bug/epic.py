@@ -1,7 +1,7 @@
 """mop dev bug epic <iid>: the epic's children and progress
 """
-from mop import gitlab
-from mop.render import table
+from mop.common import gitlab
+from mop.common.render import table
 from mop.cli.dev.bug._common import parser
 
 

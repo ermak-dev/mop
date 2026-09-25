@@ -23,8 +23,8 @@ machine that holds the register.
 import sys
 
 from mop.cli import lib
-from mop import bus, puppets
-from mop.render import table
+from mop.common import bus, puppets
+from mop.common.render import table
 
 
 def main(argv):

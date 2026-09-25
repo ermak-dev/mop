@@ -20,7 +20,8 @@ import types
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import config, driver  # noqa: E402
+from mop.common import config  # noqa: E402
+from mop import driver  # noqa: E402
 
 
 def plugin(**attrs):
@@ -872,7 +873,7 @@ def main():
 # STATUS: FIXED — see #247
 def check_clone_before_bootstrap_247():
     import inspect
-    from mop import spec
+    from mop.server import spec
     from mop.cli.driver import run
 
     cases = bad = 0
@@ -1291,7 +1292,7 @@ def check_driver_rule_175():
     # Списки не слепнут от чужой опечатки: узел с неизвестным драйвером --
     # строка с отказом, остальные видны. Операции над ним (delete, attach,
     # build на нём) отказывают громко -- это of_node выше.
-    from mop import builder, image, nodes, nomad
+    from mop.server import builder, image, nodes, nomad
     metas = {"bad": {"mop_driver": "bogus"}, "hyper": {"mop_driver": "pve"}}
     summary = lambda n: {"Name": n, "Status": "ready"}
     try:

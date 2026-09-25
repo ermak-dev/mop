@@ -17,7 +17,7 @@ of the command is to get to work on a provider without ceremony, and
 answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
---llm brings the session up on a profile from mop/llm/ — the same set puppets
+--llm brings the session up on a profile from mop/common/llm/ — the same set puppets
 run on. Without the flag, the installation's MOP_DEFAULT_LLM applies. The
 profile's static env goes into the session whole, while the key itself is read
 from this machine's .env: there's no node secrets.env here, and the local .env
@@ -27,7 +27,7 @@ import os
 
 from mop.cli import lib
 from mop.cli.core import _common
-from mop import llm
+from mop.common import llm
 
 
 def main(argv):

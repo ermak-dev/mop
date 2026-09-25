@@ -24,7 +24,8 @@ import subprocess
 import sys
 
 
-from mop import config, playvars  # noqa: E402  (stdlib only)
+from mop.common import config  # noqa: E402  (stdlib only)
+from mop.server import playvars  # noqa: E402  (stdlib only)
 
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "self.yml")
 

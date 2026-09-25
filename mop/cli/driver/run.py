@@ -15,7 +15,8 @@ import sys
 import time
 
 from mop.cli import lib
-from mop import bus, busnames, config, driver
+from mop.common import bus, busnames, config
+from mop import driver
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
 # /tmp в теле бывает общим или вычищаемым, а этот файл обязан прожить ровно

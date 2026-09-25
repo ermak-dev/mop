@@ -10,8 +10,8 @@ puppets, web, mcp и cli; владелец -- строка файла и сло�
 
 HYPOTHESIS: словарь без схемы не ловит опечатку ключа -- ни при записи, ни
 при чтении; два `Verb` расходятся полями.
-SOLUTION: frozen dataclass на каждую сущность (mop/domain.py: Project, Owner,
-Verb; PuppetRow -- рядом с State в mop/state.py), JSON наружу -- через
+SOLUTION: frozen dataclass на каждую сущность (mop/common/domain.py: Project, Owner,
+Verb; PuppetRow -- рядом с State в mop/common/state.py), JSON наружу -- через
 to_dict/from_dict в одном месте на тип. Поведение не меняется.
 Характеризация: tests/values_snapshot.json снят с кода ДО правки (--capture)
 -- всё, что уходит из процесса: ответы агента по шине (факты клона с
@@ -32,7 +32,9 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(HERE))
 
-from mop import agent, bus, cluster, puppets, projects, web  # noqa: E402
+from mop.node import agent  # noqa: E402
+from mop.common import bus, puppets, projects  # noqa: E402
+from mop.server import cluster, web  # noqa: E402
 from mop.cli.core import list as mop_list  # noqa: E402
 from mop.cli.service import mcp  # noqa: E402
 
@@ -314,7 +316,7 @@ def frozen(value, field):
 def check_owner_204():
     """Владелец: строка файла и словарь шины -- два вида одного значения,
     и оба обратимы; мусор -- не владелец."""
-    from mop.domain import Owner
+    from mop.common.domain import Owner
     out = []
     o = Owner("anton", 1000000)
     if o.render() != "anton\t1000000\n":
@@ -337,7 +339,7 @@ def check_project_204():
     """Проект: origin, имя по driver.project_of, лимит и просьбы -- одно
     значение, а не три словаря по имени."""
     from mop import driver
-    from mop.domain import Project
+    from mop.common.domain import Project
     out = []
     limits = {"mop": 2}
     asks = {"mop": {"MOP_MEM_MB": "6144"}, "rugent": {}}
@@ -361,7 +363,7 @@ def check_project_204():
 def check_puppet_row_204():
     """Строка ростера: поля и их порядок -- прежние ключи словаря; словарь
     обратим; незнакомый ключ -- отказ, а не молча лишнее поле."""
-    from mop.state import PuppetRow
+    from mop.common.state import PuppetRow
     out = []
     keys = ["name", "node", "alloc_status", "state", "kind", "owner", "llm",
             "origin", "disk_kb"]
@@ -382,7 +384,7 @@ def check_puppet_row_204():
 
 def check_one_verb_204():
     """Один Verb на агента и сервис кластера; у агента acting не бывает."""
-    from mop import domain
+    from mop.common import domain
     out = []
     if not (agent.Verb is cluster.Verb is domain.Verb):
         out.append("agent.Verb and cluster.Verb must be domain.Verb")

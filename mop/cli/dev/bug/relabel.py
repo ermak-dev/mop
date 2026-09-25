@@ -1,6 +1,6 @@
 """mop dev bug relabel <iid> [--status S] [--label L ...]: change labels, reopen when the status is an open one
 """
-from mop import gitlab
+from mop.common import gitlab
 from mop.cli.dev.bug._common import parser
 
 

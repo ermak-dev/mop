@@ -10,8 +10,9 @@ things required in .env are secrets.
 import json
 
 from mop.cli import lib
-from mop import config, playvars
-from mop.render import table
+from mop.common import config
+from mop.server import playvars
+from mop.common.render import table
 
 
 def main(argv):

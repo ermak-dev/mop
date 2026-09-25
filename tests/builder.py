@@ -12,7 +12,7 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import builder  # noqa: E402
+from mop.server import builder  # noqa: E402
 
 
 def main():
@@ -88,7 +88,7 @@ def main():
     # rudesktop: Nomad connection error: cannot read rudesktop: Host key
     # verification failed». SOLUTION: failure() -- RuntimeError (манифест,
     # занятые тела) как есть, Nomad -- через describe_error; имя ставит клиент.
-    from mop import nomad
+    from mop.server import nomad
     got = builder.failure(RuntimeError("cannot read rudesktop: Host key verification failed."))
     if got != "cannot read rudesktop: Host key verification failed.":
         failed.append(f"a manifest refusal must go as it is: {got!r}")

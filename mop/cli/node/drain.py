@@ -4,7 +4,7 @@ Graceful: the wrapper takes its session down on TERM, so a puppet leaves
 with its clone intact.
 """
 from mop.cli import lib
-from mop import bus
+from mop.common import bus
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.

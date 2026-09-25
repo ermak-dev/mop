@@ -4,8 +4,8 @@ The pipeline's line, then one line per job: status, id, stage, name,
 duration, and "(allow_failure)" for a job whose failure does not fail the
 pipeline. --failed shows only the failures that do.
 """
-from mop import gitlab
-from mop.render import table
+from mop.common import gitlab
+from mop.common.render import table
 from mop.cli.dev.ci._common import parser
 
 def main(argv):

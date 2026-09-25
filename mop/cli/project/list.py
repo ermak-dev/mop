@@ -5,7 +5,7 @@ the origins themselves; without it, project names — the same names the bus
 users are built from.
 """
 from mop.cli import lib
-from mop import bus
+from mop.common import bus
 
 
 def main(argv):

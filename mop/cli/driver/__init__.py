@@ -17,7 +17,7 @@ node that owns it. Each verb is a module of this package.
 """
 from mop.cli import lib
 from mop import driver
-from mop.render import table
+from mop.common.render import table
 
 
 def main(argv):

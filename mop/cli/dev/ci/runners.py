@@ -4,8 +4,8 @@ A runner per line: ON/OFF (takes work or paused), id, description, status
 (whether GitLab sees it), tags. Then each running job with the runner that
 holds it.
 """
-from mop import gitlab
-from mop.render import table
+from mop.common import gitlab
+from mop.common.render import table
 
 def main(argv):
     if argv:

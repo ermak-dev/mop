@@ -3,7 +3,7 @@
 Refused while the job or pipeline is still going, naming its state. Prints
 the new job's id and url; a pipeline retry prints the pipeline's.
 """
-from mop import gitlab
+from mop.common import gitlab
 from mop.cli.dev.ci._common import parser
 
 

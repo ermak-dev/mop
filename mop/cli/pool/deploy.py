@@ -37,7 +37,9 @@ import sys
 
 from mop.cli import lib
 from mop.cli.pool import _play
-from mop import bus, config, creds, driver, gitlab, identity, manifest, puppets, projects
+from mop.common import bus, config, creds, gitlab, manifest, puppets, projects
+from mop import driver
+from mop.server import identity
 
 # Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
 # больше нет, поэтому упавшего агента и битые креды чинят только отсюда — и

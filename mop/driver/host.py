@@ -19,7 +19,7 @@ import shlex
 import socket
 from urllib.parse import urlparse
 
-from .. import busnames, config
+from ..common import busnames, config
 from . import (HOME, PREFIX, bad_name, clone_dir, sh, target_dir, valid_name,
                why, write_private)
 

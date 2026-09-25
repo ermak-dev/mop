@@ -9,7 +9,7 @@
 HYPOTHESIS: каркас скопирован, и копии уже разошлись -- в разборе проекта
 (cluster хотел больше двух токенов, bootstrap -- больше одного) и в том, кто
 печатает (библиотека, вопреки правилу проекта).
-SOLUTION: mop/service.py -- один serve и один project_from_subject; строку
+SOLUTION: mop/common/service.py -- один serve и один project_from_subject; строку
 журнала сервис отдаёт данными (journal, banner), печатает командлет.
 Характеризация: строки журнала те же символ в символ, что до правки --
 образцы ниже переписаны из прежних print.
@@ -21,7 +21,7 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import busnames  # noqa: E402
+from mop.common import busnames  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
@@ -60,7 +60,7 @@ def old_builder_line(req, out):
 def check_project():
     """Проект -- второй токен субъекта для каждой формы, что сервисы
     получают сегодня. Субъекты -- из busnames, как у подписок."""
-    from mop import service
+    from mop.common import service
     out = []
     for p in ("rugent", "mop", busnames.ADMIN, "a-b_c"):
         for subj, old in ((busnames.cluster(p), old_cluster_project),
@@ -102,7 +102,7 @@ OUTS = [
 
 def check_journal():
     """Строка журнала из ответа -- та же символ в символ, что до #149."""
-    from mop import bootstrap, builder, cluster
+    from mop.server import bootstrap, builder, cluster
     out = []
     for req in REQS:
         for o in OUTS:
@@ -141,7 +141,7 @@ def check_journal():
 
 def check_banner():
     """Строка старта -- та же, что печатал прежний serve."""
-    from mop import bootstrap, builder, cluster
+    from mop.server import bootstrap, builder, cluster
     out = []
     for got, want in (
             (cluster.banner("mop.*.cluster.rpc", "http://10.0.0.1:4646"),
@@ -160,7 +160,7 @@ def check_banner():
 def check_silent():
     """Библиотека не печатает: печатает командлет (CLAUDE.md)."""
     out = []
-    for name in ("service", "cluster", "bootstrap", "builder"):
+    for name in ("common/service", "server/cluster", "server/bootstrap", "server/builder"):
         with open(os.path.join(ROOT, "mop", f"{name}.py")) as f:
             for n, line in enumerate(f, 1):
                 if "print(" in line.split("#")[0]:
@@ -178,7 +178,7 @@ def check_errors():
     строка журнала.
     STATUS: FIXED — see #162"""
     import asyncio
-    from mop import service
+    from mop.common import service
     out = []
     lines, called = [], []
 

@@ -30,7 +30,7 @@ import subprocess
 import sys
 
 from mop.cli import lib
-from mop import bus, config, context, creds
+from mop.common import bus, config, context, creds
 
 
 def parse(argv):

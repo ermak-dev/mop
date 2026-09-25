@@ -13,7 +13,7 @@ MOCK_SYNC, если ldap3 есть на машине, иначе пропуск 
 
 HYPOTHESIS: подключить каталог организации некуда -- личности есть только в
 файле операторов и MOP_OPERATORS.
-SOLUTION: mop/ldapauth.py -- LdapProvider (search-then-bind: служебная
+SOLUTION: mop/server/ldapauth.py -- LdapProvider (search-then-bind: служебная
 учётка находит запись по атрибуту логина, пароль проверяет bind под DN
 пользователя), имя и почта из настраиваемых атрибутов, роль и проекты из
 групп (группа admin по DN, проектные -- по шаблону cn). MOP_AUTH_PROVIDER=ldap
@@ -28,8 +28,8 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import identity, ldapauth  # noqa: E402
-from mop.identity import Identity  # noqa: E402
+from mop.server import identity, ldapauth  # noqa: E402
+from mop.server.identity import Identity  # noqa: E402
 
 BASE = "dc=example,dc=dev"
 ADMINS = "cn=mop-admins,ou=groups,dc=example,dc=dev"
@@ -200,7 +200,8 @@ def check_settings():
             ("uid", ("displayName", "cn"), "mail", BASE):
         out.append(f"defaults: uid, displayName then cn, mail, groups under the base: {cfg}")
     # Пароль служебной учётки -- секрет .env: плейбукам он не едет.
-    from mop import config, playvars
+    from mop.common import config
+    from mop.server import playvars
     if "MOP_LDAP_BIND_PASSWORD" in config.SETTINGS:
         out.append("MOP_LDAP_BIND_PASSWORD must not be a setting: settings ride to the playbooks")
     if "MOP_LDAP_BIND_PASSWORD" not in identity.SETTINGS:
@@ -221,7 +222,7 @@ def check_choice():
         out.append(f"deploy must refuse incomplete LDAP settings: {got}")
     if deploy.operator_refusals(SETTINGS):
         out.append(f"complete LDAP settings must not stop deploy: {deploy.operator_refusals(SETTINGS)}")
-    from mop import deps
+    from mop.common import deps
     if "ldap3" not in deps.PIP:
         out.append("ldap3 must be in MOP_PIP_DEPS")
     return out
@@ -295,7 +296,7 @@ def check_ldap3():
 # STATUS: FIXED — see #214
 def check_service_settings_214():
     import tempfile
-    from mop import config
+    from mop.common import config
     out = []
     fn = getattr(identity, "service_settings", None)
     if fn is None:

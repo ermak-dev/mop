@@ -25,26 +25,23 @@ COMMON, CLIENT, SERVER, NODE = "common", "client", "server", "node"
 SEES = {COMMON: {COMMON}, CLIENT: {COMMON, CLIENT}, NODE: {COMMON, NODE},
         SERVER: {COMMON, SERVER}}
 
-# Карта слоёв. Пакет `mop.cli` -- по командам: команда лежит в слое той
-# машины, где её зовут. Группы -- их __init__ и общее (_common) тоже.
+# Слой -- каталог (#260): mop/common, mop/client, mop/server, mop/node, и
+# модуль mop.<слой>.* лежит в своём слое без записи здесь. Карта -- только
+# для того, что из каталога не выводится:
+#   корень пакета, session и usage -- общее, лежат в корне: едут в тело
+#   файлом по путям, которые знают спека, хуки и агент;
+#   mop.driver -- общий пакет путей и реестра, а сами драйверы -- узел;
+#   mop.cli -- по командам: команда лежит в слое той машины, где её зовут
+#   (пространства имён cli своё место называют и так). Группы -- их
+#   __init__ и общее (_common) тоже.
+LAYER_DIRS = (COMMON, CLIENT, SERVER, NODE)
 LAYERS = {
-    # общее
-    "mop": COMMON, "mop.bus": COMMON, "mop.busnames": COMMON, "mop.config": COMMON,
-    "mop.context": COMMON, "mop.creds": COMMON, "mop.fsutil": COMMON,
-    "mop.render": COMMON, "mop.domain": COMMON, "mop.driver": COMMON,
-    "mop.puppets": COMMON, "mop.session": COMMON, "mop.deps": COMMON,
+    "mop": COMMON, "mop.session": COMMON, "mop.usage": COMMON,
+    "mop.driver": COMMON, "mop.driver.host": NODE, "mop.driver.pve": NODE,
+    # cli: общее
     "mop.cli": COMMON, "mop.cli.lib": COMMON, "mop.cli.__main__": COMMON,
-    # Чистые функции и то, что читают обе стороны шины: вердикты, аренда,
-    # профили LLM и их реестр плагинов, манифест проекта, реестр проектов,
-    # секреты (хранение на сервере, разбор у всех), GitLab, учёт токенов,
-    # подписчик сервиса, токен landing.
-    "mop.state": COMMON, "mop.lease": COMMON, "mop.llm": COMMON,
-    "mop.llm.claude": COMMON, "mop.llm.glm": COMMON, "mop.plugins": COMMON,
-    "mop.manifest": COMMON, "mop.projects": COMMON, "mop.project_secrets": COMMON,
-    "mop.gitlab": COMMON, "mop.usage": COMMON, "mop.service": COMMON,
-    "mop.landing": COMMON, "mop.cli.driver": COMMON,
-    # клиент
-    "mop.channel": CLIENT, "mop.keys": CLIENT,
+    "mop.cli.driver": COMMON,
+    # cli: клиент
     "mop.cli.core": CLIENT, "mop.cli.project": CLIENT, "mop.cli.secret": CLIENT,
     "mop.cli.node": CLIENT, "mop.cli.dev": CLIENT, "mop.cli.service.mcp": CLIENT,
     "mop.cli.pool.join": CLIENT, "mop.cli.pool.doctor": CLIENT,
@@ -52,13 +49,7 @@ LAYERS = {
     "mop.cli.pool.disk": CLIENT, "mop.cli.pool.gc": CLIENT,
     "mop.cli.pool.sweep": CLIENT,
     "mop.cli.pool": CLIENT, "mop.cli.service": CLIENT,
-    # сервер
-    "mop.cluster": SERVER, "mop.spec": SERVER, "mop.nomad": SERVER,
-    "mop.callout": SERVER, "mop.identity": SERVER, "mop.ldapauth": SERVER,
-    "mop.operators": SERVER, "mop.nkjwt": SERVER, "mop.natsconf": SERVER,
-    "mop.playvars": SERVER, "mop.builder": SERVER, "mop.image": SERVER,
-    "mop.web": SERVER, "mop.nodes": SERVER, "mop.bootstrap": SERVER,
-    # Образ печёт контроллер: ansible по гипервизорам, как deploy.
+    # cli: сервер. Образ печёт контроллер: ansible по гипервизорам, как deploy.
     "mop.cli.driver.build": SERVER,
     "mop.cli.pool.deploy": SERVER, "mop.cli.pool.config": SERVER,
     "mop.cli.pool.setup": SERVER, "mop.cli.user": SERVER,
@@ -66,18 +57,19 @@ LAYERS = {
     "mop.cli.cluster": SERVER, "mop.cli.bootstrap": SERVER,
     "mop.cli.service.callout": SERVER, "mop.cli.service.web": SERVER,
     "mop.cli.driver.pve-facts": SERVER,
-    # узел
-    "mop.agent": NODE, "mop.driver.host": NODE, "mop.driver.pve": NODE,
+    # cli: узел
     "mop.cli.service.agent": NODE, "mop.cli.driver.run": NODE,
     "mop.cli.driver.list": NODE, "mop.cli.driver.sweep": NODE,
 }
+# Что вправе лежать в корне пакета, кроме каталогов слоёв.
+ROOT_PARTS = ("session", "usage", "driver", "cli")
 
 # Рёбра, которых в тексте нет: importlib по имени.
 # Реестр драйверов (mop.driver -> host, pve) сюда не входит намеренно: он
 # читается только на узле (driver.current), а пути и разбор имён из того же
 # модуля нужны всем. Драйверы проверяются как модули узла сами по себе.
 DYNAMIC = {
-    "mop.llm": {"mop.llm.claude", "mop.llm.glm"},             # профили LLM
+    "mop.common.llm": {"mop.common.llm.claude", "mop.common.llm.glm"},   # профили LLM
 }
 
 
@@ -94,8 +86,14 @@ def modules():
 
 
 def layer_of(name):
-    """Слой модуля: сам, иначе ближайший родитель в карте."""
+    """Слой модуля: каталог слоя (mop.<слой>.*), иначе сам или ближайший
+    родитель в карте. Модуль корня вне карты слоя не получает: иначе новый
+    mop/x.py молча унаследовал бы слой корня пакета."""
     parts = name.split(".")
+    if len(parts) > 1 and parts[1] in LAYER_DIRS:
+        return parts[1]
+    if len(parts) > 1 and parts[1] not in ROOT_PARTS:
+        return None
     while parts:
         n = ".".join(parts)
         if n in LAYERS:
@@ -130,6 +128,13 @@ def imports_of(path, name, known):
 def violations(mods):
     out = []
     for name, path in sorted(mods.items()):
+        parts = name.split(".")
+        if len(parts) > 1 and parts[1] not in LAYER_DIRS + ROOT_PARTS:
+            # Слой -- каталог (#260): модуль или пакет в корне mop/ слоя не
+            # называет. Корень держит только session и usage (их пути знают
+            # спека, хуки и агент), реестр драйверов и командлеты.
+            out.append(f"{name}: not in a layer directory")
+            continue
         me = layer_of(name)
         if me is None:
             out.append(f"{name}: no layer in tests/layers.py")

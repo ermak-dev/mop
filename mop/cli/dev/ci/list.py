@@ -2,8 +2,8 @@
 
 One line each: status, id, short sha, ref, created (UTC), web url.
 """
-from mop import gitlab
-from mop.render import table
+from mop.common import gitlab
+from mop.common.render import table
 from mop.cli.dev.ci._common import parser
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.

@@ -4,7 +4,8 @@ A profile changes exactly one thing — where a puppet goes for tokens.
 Everything else (tmux, state, stuck detection) is the same for every profile.
 """
 from mop.cli import lib
-from mop import fsutil, keys, llm, puppets
+from mop.common import fsutil, llm, puppets
+from mop.client import keys
 
 
 def main(argv):

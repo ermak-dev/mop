@@ -54,7 +54,8 @@ def main(argv):
         import nats
     except ImportError:
         sys.exit(NATS_MISSING)
-    from mop import agent, bus
+    from mop.node import agent
+    from mop.common import bus
     if "--check" in argv:
         try:
             asyncio.run(check(nats, agent, bus))

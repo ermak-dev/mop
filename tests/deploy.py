@@ -24,7 +24,7 @@ STATUS: FIXED — see #157
 Кому что из настроек (#176): .env на сервер не едет, и сервис сервера видит
 установку только окружением своего юнита. Набор env у юнитов был набран
 руками, и mop-cluster не получал MOP_NOMAD_PORT и MOP_POOL_DC, которые сам же
-читает (NOMAD_ADDR и датацентр в mop/nomad.py): при недефолтных значениях
+читает (NOMAD_ADDR и датацентр в mop/server/nomad.py): при недефолтных значениях
 сервис шёл на дефолтный порт и в дефолтный DC, молча.
 
 HYPOTHESIS: env юнитов -- рукописные списки в vars задач, и с тем, что
@@ -32,7 +32,7 @@ HYPOTHESIS: env юнитов -- рукописные списки в vars зад
 SOLUTION: config.SERVER_SCOPED -- {юнит: настройки}, playvars везёт его
 плейбукам как MOP_SERVER_SCOPED, шаблон юнита рендерит env из него;
 комментарии остаются в задаче (unit.notes, перед своей настройкой). Проверка
-ниже выводит то, что читают mop/cluster.py, mop/nomad.py и mop/spec.py
+ниже выводит то, что читают mop/server/cluster.py, mop/server/nomad.py и mop/server/spec.py
 (спецификацию собирает сервис кластера), из AST, а не руками.
 STATUS: FIXED — see #176
 
@@ -105,12 +105,12 @@ DEPLOY = os.path.join(ROOT, "deploy")
 COMMON = os.path.join(DEPLOY, "roles", "common")
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, ROOT)
-from mop import config  # noqa: E402
+from mop.common import config  # noqa: E402
 # Что сервис кластера читает сам (#176): его код, клиент Nomad и спецификация,
 # а с ней профиль LLM -- job_spec зовёт llm.resolve, и create без --llm
 # приходит с profile=None, то есть с умолчанием установки.
-CLUSTER_READS = ("mop/cluster.py", "mop/nomad.py", "mop/spec.py", "mop/llm/__init__.py",
-                 "mop/natsconf.py")
+CLUSTER_READS = ("mop/server/cluster.py", "mop/server/nomad.py", "mop/server/spec.py", "mop/common/llm/__init__.py",
+                 "mop/server/natsconf.py")
 
 VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "10.0.0.1",
         "MOP_NATS_PORT": "4222", "MOP_HTTPS_PORT": "443", "MOP_NOMAD_PORT": "4646",
@@ -135,7 +135,7 @@ UNITS = {"mop-bootstrap": "bootstrap", "mop-cluster": "cluster", "mop-web": "web
 EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml"]
 # Что #176 добавляет в юнит mop-cluster: всё это сервис читает, а юнит не
 # передавал. Порт и DC Nomad -- из тикета; объём, потолок, посев и PATH папета
-# нашла проверка ниже (их читает mop/spec.py, а спецификацию теперь собирает
+# нашла проверка ниже (их читает mop/server/spec.py, а спецификацию теперь собирает
 # сервис кластера, не машина оператора с её .env), как и профиль LLM по
 # умолчанию (llm.resolve из job_spec).
 ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
@@ -177,7 +177,7 @@ def settings_read(path):
 def derived_inputs():
     """{выводимая настройка: из каких она выводится} -- по get("...") в
     лямбдах config.DERIVED."""
-    tree = ast.parse(open(os.path.join(ROOT, "mop", "config.py")).read())
+    tree = ast.parse(open(os.path.join(ROOT, "mop", "common", "config.py")).read())
     for n in tree.body:
         if isinstance(n, ast.Assign) and [getattr(t, "id", "") for t in n.targets] == ["DERIVED"]:
             return {k.value: {c.args[0].value for c in ast.walk(v)
@@ -753,7 +753,7 @@ def check_agent_unit_172(check, can_render):
     hyper, `cd / && ~/mop/bin/mop agent --check` с одним node.env, и в
     tests/cli.py (check_agent_on_node_172).
     SOLUTION: ExecStart и задача проверки -- `{{ mop_home }}/bin/mop agent`,
-    лаунчер пакета узла; __main__ в mop/agent.py живёт до раскатки на обе
+    лаунчер пакета узла; __main__ в mop/node/agent.py живёт до раскатки на обе
     установки.
     STATUS: FIXED — see #172"""
     unit = os.path.join(DEPLOY, "roles", "bus", "templates", "mop-agent.service.j2")
@@ -825,7 +825,7 @@ def main():
               not [n for n in names if re.search(r"TOKEN|PASS|SECRET", n)], names)
         check(f"{unit}: every name is a setting",
               all(n in config.SETTINGS for n in names), names)
-    from mop import playvars
+    from mop.server import playvars
     check("playvars exports SERVER_SCOPED",
           playvars.playbook_vars().get("MOP_SERVER_SCOPED") ==
           {u: list(v) for u, v in scoped.items()})
@@ -929,7 +929,7 @@ def main():
     # ── хосты инвентаря -- файлом сервису кластера (#178) ─────────────────
     # forget отказывает узлу, который deploy поставил бы снова; файла нет --
     # отказа нет, поэтому разошедшееся имя файла ломало бы защиту молча.
-    from mop import cluster
+    from mop.server import cluster
     want = "{{ MOP_HOME }}/.config/mop/" + os.path.basename(
         getattr(cluster, "INVENTORY_HOSTS", "") or "?")
     wrote = [t for f, t in site_tasks() if f.endswith("roles/cluster/tasks/main.yml")
@@ -946,7 +946,7 @@ def main():
     # Спеку строит сервис под учёткой пула, а `.mop` проектов читает deploy на
     # контроллере. Файла нет -- у каждого проекта память установки, поэтому
     # разошедшееся имя файла отменило бы просьбы молча.
-    from mop import spec
+    from mop.server import spec
     want = "{{ MOP_HOME }}/.config/mop/" + os.path.basename(spec.ASKS_FILE)
     wrote = [t for f, t in site_tasks() if f.endswith("roles/cluster/tasks/main.yml")
              and "mop_manifests" in str(t.get("ansible.builtin.copy", {}).get("content"))]
@@ -977,7 +977,7 @@ def main():
     # на узле нет, ограничение не проходит, а имя, разошедшееся со спекой,
     # закрыло бы пул целиком. Значение -- по правилу node.env: строка хоста,
     # иначе установка.
-    from mop import spec
+    from mop.server import spec
     hcl_path = os.path.join(DEPLOY, "roles", "nomad", "templates", "client.hcl.j2")
     hcl = open(hcl_path).read()
     check("client.hcl: the node's memory cap is in its meta under the spec's key",

@@ -23,7 +23,8 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import cluster, service  # noqa: E402
+from mop.server import cluster  # noqa: E402
+from mop.common import service  # noqa: E402
 
 RUGENT = "git@git.ermak.dev:rugent/rugent.git"
 MOP = "git@git.ermak.dev:ermak/mop.git"
@@ -277,7 +278,7 @@ def check_forget_inventory_178():
     STATUS: FIXED — see #178"""
     import json
     import tempfile
-    from mop import nomad
+    from mop.server import nomad
     out = []
     fn = getattr(cluster, "inventory_refusal", None)
     if fn is None:
@@ -334,7 +335,7 @@ def check_forget_summary_196():
     SOLUTION: _forget берёт сводку узла (nomad.node_summary) и отдаёт её;
     узла нет -- отказ с именем, без allocs и purge.
     STATUS: FIXED — see #196"""
-    from mop import nomad
+    from mop.server import nomad
     sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     from cli import no_network
     out = []
@@ -382,8 +383,9 @@ def check_gates_40():
     нечего: проходит.
     STATUS: FIXED — see #40"""
     import time
-    from mop import bootstrap, bus, nomad, spec
-    from mop.domain import Owner
+    from mop.server import bootstrap, nomad, spec
+    from mop.common import bus
+    from mop.common.domain import Owner
     sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     from cli import no_network
     out = []
@@ -500,8 +502,9 @@ def check_caller_207():
     import json
     import tempfile
     import time
-    from mop import busnames, landing, lease, nomad
-    from mop.domain import Owner
+    from mop.common import busnames, landing, lease
+    from mop.server import nomad
+    from mop.common.domain import Owner
     sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     from cli import no_network
     out = []
@@ -592,7 +595,7 @@ def check_slots_total_243():
     сколько папетов берёт пустой узел, не видно никому.
     SOLUTION: рядом со slots -- slots_total = total_mb // spec.MEM; slots
     прежний, его читают другие. STATUS: FIXED — see #243"""
-    from mop import nomad, spec
+    from mop.server import nomad, spec
     out = []
 
     class Nodes:
@@ -617,7 +620,7 @@ def check_slots_total_243():
     if "slots_total" in got.get("off", {}) or "ctl" in got:
         out.append(f"a node not ready has no capacity, another dc is not listed: {got}")
     # Строка `mop node` несёт его дальше.
-    from mop import nodes
+    from mop.server import nodes
     row = nodes.row({"Name": "gpu", "Status": "ready"}, {}, gpu)
     if row.get("slots_total") != 5:
         out.append(f"nodes.row must carry slots_total: {row}")

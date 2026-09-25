@@ -4,7 +4,7 @@
 the dispatch decision rests on this.
 """
 from mop.cli import lib
-from mop import puppets
+from mop.common import puppets
 
 # Ширины фиксированные, и это плата за потоковый вывод: выровнять по самой
 # длинной строке можно только собрав их все, то есть промолчав до конца обмера.

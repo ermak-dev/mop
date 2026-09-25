@@ -14,7 +14,7 @@ Kept on the server and set by the operator's verb project_limit; the
 service reads it on every add, so no restart is needed.
 """
 from mop.cli import lib
-from mop import bus, projects
+from mop.common import bus, projects
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.

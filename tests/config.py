@@ -16,7 +16,7 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop import config, manifest  # noqa: E402
+from mop.common import config, manifest  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
@@ -267,7 +267,7 @@ def main():
     # второй сервер требовал MOP_SERVER_LAN=... в каждой команде.
     # SOLUTION: привязка клона; с #131 -- через контекст команды, который
     # старше файлов. STATUS: FIXED — see #125, #131
-    from mop import context
+    from mop.common import context
     cases += 1
     saved = os.environ.pop("MOP_SERVER_LAN", None)
     try:
@@ -291,9 +291,9 @@ def main():
     # поля контекста объявляет context и сам вписывает их в config; три
     # переменные -- PROCESS_SCOPED: в SETTINGS, но только из окружения.
     # STATUS: FIXED — see #156
-    probe = ("import sys; sys.path.insert(0, %r); import mop.config as c; "
+    probe = ("import sys; sys.path.insert(0, %r); import mop.common.config as c; "
              "c.get('MOP_SERVER_LAN'); c.effective(); "
-             "print(sorted(m for m in ('mop.operators', 'mop.deps', 'mop.context') "
+             "print(sorted(m for m in ('mop.server.operators', 'mop.common.deps', 'mop.common.context') "
              "if m in sys.modules))" % ROOT)
     got = subprocess.run([sys.executable, "-c", probe], capture_output=True,
                          text=True).stdout.strip()
@@ -333,7 +333,7 @@ def main():
                 bad += 1
                 print(f"FAILED  {k} must come from the environment")
         try:
-            from mop import playvars
+            from mop.server import playvars
             pv = playvars.playbook_vars()
         except ImportError as e:
             pv = {"import": str(e)}
