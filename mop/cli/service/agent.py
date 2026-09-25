@@ -11,7 +11,6 @@ Runs on a node: nothing here may import what a node does not have
 (python-nomad, the installation's .env) -- hence no mop.cli.lib.
 """
 import asyncio
-import json
 import sys
 
 NATS_MISSING = "bus library needed: pip install --user --break-system-packages nats-py"
@@ -40,8 +39,8 @@ async def check(nats, agent, bus):
     nc = await nats.connect(**bus.auth(c), name="mop-agent/check",
                             allow_reconnect=False, connect_timeout=5)
     try:
-        msg = await nc.request(bus.subject(agent.node_name(), "msg", project=bus.ADMIN),
-                               json.dumps({"verb": "ping"}).encode(), timeout=5)
+        msg = await bus.arequest(nc, bus.subject(agent.node_name(), "msg", project=bus.ADMIN),
+                                 bus.envelope("ping"), 5)
         print(f"subscribed: {msg.data.decode()}")
     finally:
         await nc.close()

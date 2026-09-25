@@ -37,7 +37,7 @@ def main(argv):
         # Отказ, а не «чисто» (#179): осмотра не было.
         print("no ready nodes", file=sys.stderr)
         return 1
-    answers = bus.request_many({n: {"verb": "junk"} for n in nodes})
+    answers = bus.request_many("junk", nodes)
 
     # Узел, который не ответил, — не пустой узел. Промолчавший считался бы
     # «без тел», и его сироты уехали бы из отчёта молча, а молчание здесь

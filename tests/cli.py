@@ -577,7 +577,7 @@ def check_refusals_163():
         # stat: ни один узел не ответил -- тот же текст, что раньше, но
         # отказом: stderr, ненулевой выход, stdout пуст.
         puppets.ready_nodes = lambda: {"n1", "n2"}
-        bus.request_many = lambda reqs, **kw: {}
+        bus.request_many = lambda verb, nodes, **kw: {}
         refusal("mop stat with no node answering", run(stat.main),
                 "no node answered:\n  n1: no response\n  n2: no response")
 
@@ -622,7 +622,7 @@ def check_refusals_163():
         def u(i, o, w, r):
             return {"input": i, "output": o, "cache_write": w, "cache_read": r}
         puppets.ready_nodes = lambda: {"hyper", "gpu"}
-        bus.request_many = lambda reqs, **kw: {
+        bus.request_many = lambda verb, nodes, **kw: {
             "hyper": {"ok": True, "usage": {"pu-mop-1": {"2026-09-22": u(2000, 500, 0, 10000)}},
                       "by_login": {"pu-mop-1": {"anton": {"2026-09-22": u(2000, 500, 0, 10000)}}}},
             "gpu": {"ok": True, "usage": {"pu-mop-2": {"2026-09-22": u(10, 0, 0, 0)}}}}
@@ -958,7 +958,7 @@ def check_output_rest():
     keep = (puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk)
     try:
         puppets.ready_nodes = lambda: {"n1"}
-        bus.request_many = lambda asks, **kw: {"n1": {"bodies": [], "templates": []}}
+        bus.request_many = lambda verb, nodes, **kw: {"n1": {"bodies": [], "templates": []}}
         puppets.jobs = lambda *a, **kw: [{"ID": "pu-a-1"}]
         puppets.classify_junk = lambda answers, known: []
         out, err, code = silent_run(sweep.main, [])
@@ -1013,16 +1013,16 @@ def check_output_179():
         expect("sweep with no ready nodes", silent_run(sweep.main, []),
                "no ready nodes", True)
         puppets.ready_nodes = lambda: {"n1"}
-        bus.request_many = lambda asks, **kw: {"n1": None}
+        bus.request_many = lambda verb, nodes, **kw: {"n1": None}
         expect("sweep where no node answered", silent_run(sweep.main, []),
                "no node answered", True)
-        bus.request_many = lambda asks, **kw: {"n1": {"bodies": [], "templates": []}}
+        bus.request_many = lambda verb, nodes, **kw: {"n1": {"bodies": [], "templates": []}}
         puppets.jobs = lambda *a, **kw: []
         expect("sweep where Nomad lists no puppets", silent_run(sweep.main, []),
                "Nomad lists no puppets", True)
         # Промолчавший узел при ответившем соседе: отказ по нему -- тоже в
         # stderr, а код выхода за него отвечает.
-        bus.request_many = lambda asks, **kw: {"n1": {"bodies": [], "templates": []},
+        bus.request_many = lambda verb, nodes, **kw: {"n1": {"bodies": [], "templates": []},
                                                "n2": None}
         puppets.ready_nodes = lambda: {"n1", "n2"}
         puppets.jobs = lambda *a, **kw: [{"ID": "pu-a-1"}]

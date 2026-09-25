@@ -108,8 +108,7 @@ def main(argv):
     if not nodes:
         # Пустой пул -- не «никто не ответил» с пустым перечнем (#163).
         raise RuntimeError("no ready nodes in the pool")
-    answers = bus.request_many({n: {"verb": "usage", "days": days} for n in nodes},
-                               timeout=TIMEOUT)
+    answers = bus.request_many("usage", nodes, days=days, timeout=TIMEOUT)
     per_day, per_puppet, per_user, failed = {}, {}, {}, []
     for n in nodes:
         a = answers.get(n)

@@ -113,6 +113,158 @@ def cli(argv):
     return code, out.getvalue(), err.getvalue()
 
 
+def check_bus_envelope_264():
+    """HYPOTHESIS (#264): конверт запроса `{"verb": ..., **поля}` собирался
+    в bus.py четырежды (у ask_once -- без ensure_ascii=False), переход на
+    прежний субъект при NoRespondersError (#207) был записан трижды (ask_once,
+    _ask, _one), а request_many/request_stream заставляли девять мест
+    собирать {"verb": ...} руками; keys.results_from и bus.failure разбирали
+    ответ узла одной и той же тройной проверкой каждый сам.
+    SOLUTION: один конверт (bus.envelope), одна корутина запроса с переходом
+    (bus.arequest) на всех путях; request_many(verb, узлы, **поля) и
+    request_stream(verb, {ключ: (узел, поля)}, **поля) -- той же формы, что
+    request; разбор ответа -- bus.verdict. STATUS: FIXED — see #264
+
+    Соединение -- заглушка: субъект с логином отвечает NoRespondersError,
+    прежний -- эхом того, что пришло."""
+    import json
+    from mop.client import keys
+    out = []
+    saved = (bus.connect, bus.login, bus._open)
+
+    class Msg:
+        def __init__(self, data):
+            self.data = data
+
+    class Conn:
+        def __init__(self):
+            self.seen = []
+
+        async def request(self, subj, data, timeout=None):
+            self.seen.append((subj, data))
+            if busnames.caller(subj):
+                raise bus.NoRespondersError()
+            return Msg(json.dumps({"subj": subj, "got": json.loads(data.decode())},
+                                  ensure_ascii=False).encode())
+
+        async def close(self):
+            pass
+
+    from mop.common import busnames
+    word = "Ωмега"
+    raw = word.encode()
+
+    def utf8(conn):
+        return all(raw in d and b"\\u" not in d for _, d in conn.seen)
+
+    def fell_back(conn, nodes):
+        subs = [s for s, _ in conn.seen]
+        return all(busnames.node("mop", n, "rpc", login="alice") in subs
+                   and busnames.node("mop", n, "rpc") in subs for n in nodes)
+    try:
+        bus.login = lambda: "alice"
+        # request
+        conn = Conn()
+        bus.connect = lambda *a, **k: conn
+        try:
+            got = bus.request("n1", "state", project="mop", name=word)
+            ok = got.get("got") == {"verb": "state", "name": word} and \
+                fell_back(conn, ["n1"]) and utf8(conn)
+        except Exception as e:
+            ok, got = False, e
+        if not ok:
+            out.append(f"request: fallback subject and UTF-8 envelope, got {got!r}, {conn.seen}")
+        # request_many: общий глагол и общие поля
+        conn = Conn()
+        try:
+            got = bus.request_many("states", ["n1", "n2"], project="mop", names=[word])
+            ok = {n: a.get("got") for n, a in got.items()} == \
+                {n: {"verb": "states", "names": [word]} for n in ("n1", "n2")} and \
+                fell_back(conn, ["n1", "n2"]) and utf8(conn)
+        except Exception as e:
+            ok, got = False, e
+        if not ok:
+            out.append(f"request_many(verb, nodes, **fields): got {got!r}")
+        # request_many: поля у каждого узла свои, общие -- поверх
+        conn = Conn()
+        try:
+            got = bus.request_many("states", {"n1": {"names": ["a"]}, "n2": {"names": [word]}},
+                                   project="mop", why=word)
+            ok = {n: a.get("got") for n, a in got.items()} == {
+                "n1": {"verb": "states", "why": word, "names": ["a"]},
+                "n2": {"verb": "states", "why": word, "names": [word]}}
+        except Exception as e:
+            ok, got = False, e
+        if not ok:
+            out.append(f"request_many per-node fields: got {got!r}")
+        # request_stream
+        conn = Conn()
+        try:
+            got = dict(bus.request_stream("sizes", {"k": ("n1", {"names": [word]})},
+                                          project="mop"))
+            ok = got["k"].get("got") == {"verb": "sizes", "names": [word]} and \
+                fell_back(conn, ["n1"]) and utf8(conn)
+        except Exception as e:
+            ok, got = False, e
+        if not ok:
+            out.append(f"request_stream(verb, {{key: (node, fields)}}): got {got!r}")
+        # ask_once -- своё соединение, тот же конверт и переход
+        conn = Conn()
+
+        async def opened(**kw):
+            return conn
+        bus._open = opened
+        try:
+            got = bus.ask_once({"user": "alice", "password": "pw", "url": "nats://127.0.0.1:4222"},
+                               busnames.cluster("mop", login="alice"),
+                               "ping", who=word)
+            ok = got.get("got") == {"verb": "ping", "who": word} and \
+                [s for s, _ in conn.seen] == [busnames.cluster("mop", login="alice"),
+                                               busnames.cluster("mop")] and utf8(conn)
+        except Exception as e:
+            ok, got = False, e
+        if not ok:
+            out.append(f"ask_once: fallback subject and UTF-8 envelope, got {got!r}, {conn.seen}")
+    finally:
+        bus.connect, bus.login, bus._open = saved
+
+    # Конверт -- в одном месте: json.dumps в bus.py один, {"verb" -- нигде
+    # в mop/, кроме него.
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    src = open(os.path.join(root, "mop", "common", "bus.py")).read()
+    if src.count("json.dumps(") != 1:
+        out.append(f"bus.py must encode in one place: {src.count('json.dumps(')} json.dumps")
+    by_hand = []
+    for d, _, files in os.walk(os.path.join(root, "mop")):
+        for f in files:
+            if f.endswith(".py"):
+                p = os.path.join(d, f)
+                for n, line in enumerate(open(p), 1):
+                    if '{"verb":' in line and "mop/common/bus.py" not in p:
+                        by_hand.append(f"{os.path.relpath(p, root)}:{n}")
+    if by_hand:
+        out.append(f"envelopes built by hand: {by_hand}")
+
+    # Разбор ответа узла -- одна функция на bus.failure и keys.results_from,
+    # и тексты у обоих прежние.
+    cases = {"n1": RuntimeError("down"), "n2": None, "n3": {"error": "nope"}, "n4": {"ok": 1}}
+    want_keys = {"n1": "NOT REACHED: down", "n2": "NOT REACHED: no answer",
+                 "n3": "FAILED: nope", "n4": "OK"}
+    want_failure = {"n1": "down", "n2": "no response", "n3": "nope", "n4": None}
+    if keys.results_from(list(cases), cases) != want_keys:
+        out.append(f"keys.results_from changed: {keys.results_from(list(cases), cases)}")
+    if {n: bus.failure(a) for n, a in cases.items()} != want_failure:
+        out.append("bus.failure changed")
+    verdict = getattr(bus, "verdict", None)
+    if verdict is None:
+        out.append("no bus.verdict: the three-way check lives in two places")
+    else:
+        for name in ("results_from",):
+            if "verdict(" not in open(os.path.join(root, "mop", "client", "keys.py")).read():
+                out.append(f"keys.{name} must classify through bus.verdict")
+    return out
+
+
 def main():
     cases = bad = 0
 
@@ -452,6 +604,9 @@ def main():
     check("#250 base of ticket branches and landing target",
           "origin/swarm" in mine and "land" in mine.lower(), True)
     check("#250 the plain text is kept verbatim in front", mine.startswith(plain), True)
+
+    check("#264 one envelope, one fallback, request_many(verb, nodes)",
+          check_bus_envelope_264(), [])
 
     print(f"channel: {cases - bad}/{cases}" + (" FAILED" if bad else " ok"))
     return 1 if bad else 0

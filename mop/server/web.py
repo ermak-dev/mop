@@ -245,8 +245,7 @@ def gather_usage(days=USAGE_DAYS):
     [{name, node, total, вид: n}] от прожорливого к скромному,
     [{login, вид: n, total}] по людям, #245)."""
     nodes = sorted(puppets.ready_nodes())
-    answers = bus.request_many({n: {"verb": "usage", "days": days} for n in nodes},
-                               timeout=USAGE_TIMEOUT)
+    answers = bus.request_many("usage", nodes, days=days, timeout=USAGE_TIMEOUT)
     per_day, per_puppet, failed = {}, [], []
     for n in nodes:
         a = answers.get(n)

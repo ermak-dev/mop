@@ -46,6 +46,7 @@ LookupError и не доезжали никуда.
 проверенным ни в одном.
 """
 import asyncio
+import contextlib
 import json
 import os
 import queue
@@ -190,6 +191,52 @@ def auth(c):
     return out
 
 
+# ─── конверт и запрос: одно место (#264) ──────────────────────────────────
+# Конверт {"verb": ..., **поля} собирался в пяти местах, и одно (ask_once)
+# потеряло ensure_ascii=False; переход на прежний субъект (#207) был записан
+# трижды. Здесь -- по одному разу на всех.
+FLUSH = 5            # сколько ждать, пока публикация уйдёт на сервер
+
+
+def encode(obj):
+    """Тело сообщения шины: JSON в UTF-8, без \\u-экранирования."""
+    return json.dumps(obj, ensure_ascii=False).encode()
+
+
+def envelope(verb, **fields):
+    """Конверт запроса к агенту или сервису: {"verb": глагол, **поля}."""
+    return encode({"verb": verb, **fields})
+
+
+async def arequest(nc, subj, data, timeout):
+    """Запрос-ответ с переходом (#207): адресат ещё не слушает субъект с
+    логином -- агент или сервис до раскатки, -- тогда прежний субъект.
+    Уходит с уборкой перехода. -> сообщение; исключения nats -- как есть."""
+    try:
+        return await nc.request(subj, data, timeout=timeout)
+    except NoRespondersError:
+        if busnames.without_caller(subj) == subj:
+            raise
+        return await nc.request(busnames.without_caller(subj), data, timeout=timeout)
+
+
+async def _quiet(_e):
+    """error_cb разового соединения: отказ придёт исключением, stderr -- шум."""
+
+
+@contextlib.contextmanager
+def _connect_failure(c, error=lambda e: str(e)):
+    """Отказ подключения -- BusError одной строкой с причиной (#130, #251):
+    сырое исключение nats-py читалось бы трассой. c -- креды или функция,
+    которая их достанет; error(e) -- текст ошибки для диагноза."""
+    try:
+        yield
+    except BusError:
+        raise
+    except Exception as e:
+        raise BusError(_why_not(c() if callable(c) else c, error(e)))
+
+
 def _ensure_loop():
     global _loop
     if _loop is not None:
@@ -303,12 +350,8 @@ def check(c):
         nc = await _open(**auth(c), name="mop-join", error_cb=quiet,
                          allow_reconnect=False, connect_timeout=5)
         await nc.close()
-    try:
+    with _connect_failure(c, lambda e: (seen[-1] if seen else "") or str(e)):
         _call(once(), 15)
-    except BusError:
-        raise
-    except Exception as e:
-        raise BusError(_why_not(c, (seen[-1] if seen else "") or str(e)))
 
 
 def ask_once(c, subj, verb, timeout=5, **fields):
@@ -316,33 +359,16 @@ def ask_once(c, subj, verb, timeout=5, **fields):
 
     Для серверов, которые не текущие: общее соединение процесса привязано к
     одному серверу, а `mop join` спрашивает все, где у машины есть вход."""
-    async def quiet(_e):
-        pass
-
     async def once():
-        nc = await _open(**auth(c), name="mop-join", error_cb=quiet,
+        nc = await _open(**auth(c), name="mop-join", error_cb=_quiet,
                          allow_reconnect=False, connect_timeout=timeout)
-        data = json.dumps({"verb": verb, **fields}).encode()
         try:
-            try:
-                msg = await nc.request(subj, data, timeout=timeout)
-            except NoRespondersError:
-                # Переход (#207): сервер до раскатки слушает прежний субъект.
-                if busnames.without_caller(subj) == subj:
-                    raise
-                msg = await nc.request(busnames.without_caller(subj), data,
-                                       timeout=timeout)
+            msg = await arequest(nc, subj, envelope(verb, **fields), timeout)
             return json.loads(msg.data.decode())
         finally:
             await nc.close()
-    try:
+    with _connect_failure(c):
         return _call(once(), timeout * 3)
-    except BusError:
-        raise
-    except Exception as e:
-        # Отказ -- одной строкой с причиной, как у check (#251): сырое
-        # исключение nats-py читалось бы трассой.
-        raise BusError(_why_not(c, str(e)))
 
 
 def connect(file=None):
@@ -356,16 +382,13 @@ def connect(file=None):
     with _lock:
         if _conn is not None and not _conn.is_closed:
             return _conn
-        try:
-            _conn = _call(_aconnect(file), 10)
-        except BusError:
-            raise
-        except Exception as e:
+        def creds_or_nothing():
             try:
-                c = config(file)
+                return config(file)
             except Exception:
-                c = {}
-            raise BusError(_why_not(c, _last_error or str(e)))
+                return {}
+        with _connect_failure(creds_or_nothing, lambda e: _last_error or str(e)):
+            _conn = _call(_aconnect(file), 10)
         return _conn
 
 
@@ -456,21 +479,13 @@ def _ask(subj, who, dead, verb, timeout, **fields):
     смысл его молчания (`dead`) приезжают параметрами. Разница не косметическая:
     «юнит mop-agent не работает» и «мастер закрыл сессию» лечатся по-разному, а
     единственное, что их различает, — субъект, в который спрашивали."""
-    payload = json.dumps({"verb": verb, **fields}, ensure_ascii=False).encode()
+    payload = envelope(verb, **fields)
     if len(payload) > MAX_PAYLOAD:
         raise BusError(f"request {verb} exceeds the bus limit "
                        f"({len(payload)} > {MAX_PAYLOAD} bytes)")
     nc = connect()
     try:
-        try:
-            msg = _call(nc.request(subj, payload, timeout=timeout), timeout)
-        except NoRespondersError:
-            # Переход (#207): адресат ещё не слушает субъект с логином --
-            # агент или сервис до раскатки. Прежний субъект; уходит с уборкой.
-            if busnames.without_caller(subj) == subj:
-                raise
-            msg = _call(nc.request(busnames.without_caller(subj), payload,
-                                   timeout=timeout), timeout)
+        msg = _call(arequest(nc, subj, payload, timeout), timeout)
     except NoRespondersError:
         raise BusError(dead, no_responders=True)
     except asyncio.TimeoutError:
@@ -522,12 +537,10 @@ def can_login(user, password, port, host="127.0.0.1", tries=10):
     import nats
 
     async def once():
-        async def quiet(_e):
-            pass
         nc = await _open(servers=[f"nats://{host}:{port}"], user=user,
                          password=password, connect_timeout=2,
                          allow_reconnect=False, max_reconnect_attempts=0,
-                         error_cb=quiet)
+                         error_cb=_quiet)
         await nc.close()
 
     last = None
@@ -569,22 +582,14 @@ def ask_server(verb, timeout=TIMEOUT, project=None, **fields):
                 verb, timeout, **fields)
 
 
-async def _one(nc, node, req, timeout, channel, project):
+async def _one(nc, node, data, timeout, channel, project):
     """Один запрос узлу внутри цикла. -> ответ | BusError.
 
     Общая часть request_many и request_stream: ошибка возвращается, а не
     бросается — один молчащий узел не должен уносить с собой картину по
     остальным."""
-    subj = subject(node, channel, project)
-    data = json.dumps(req, ensure_ascii=False).encode()
     try:
-        try:
-            msg = await nc.request(subj, data, timeout=timeout)
-        except NoRespondersError:
-            # Переход (#207): агент до раскатки не слушает субъект с логином.
-            if busnames.without_caller(subj) == subj:
-                raise
-            msg = await nc.request(busnames.without_caller(subj), data, timeout=timeout)
+        msg = await arequest(nc, subject(node, channel, project), data, timeout)
         return json.loads(msg.data.decode())
     except NoRespondersError:
         return BusError(f"node agent {node} is not subscribed")
@@ -594,41 +599,69 @@ async def _one(nc, node, req, timeout, channel, project):
         return BusError(f"{node}: {e}")
 
 
+UNREACHED, FAILED = "unreached", "failed"
+
+
+def verdict(answer):
+    """Ответ узла из request_many -> (UNREACHED, причина | None) -- до агента
+    не доехали или он промолчал, (FAILED, причина) -- агент отказал полем
+    error, None -- ответ есть. Одна тройная проверка на всех: её держали
+    bus.failure и keys.results_from каждый у себя (#264)."""
+    if isinstance(answer, Exception):
+        return UNREACHED, str(answer)
+    if answer is None:
+        return UNREACHED, None
+    if answer.get("error"):
+        return FAILED, str(answer["error"])
+    return None
+
+
 def failure(answer):
     """Почему ответ узла не годится: текст либо None, если ответ есть.
 
     Три исхода у каждого ответа request_many — исключение шины, пустота,
-    поле error от агента, — и каждый командлет разбирал их сам."""
-    if isinstance(answer, Exception):
-        return str(answer)
-    if not answer:
-        return "no response"
-    return answer.get("error") or None
+    поле error от агента, — и каждый командлет разбирал их сам. Пустой
+    ответ ({}) здесь -- тоже молчание, как было."""
+    got = verdict(answer)
+    if got:
+        return got[1] or "no response"
+    return None if answer else "no response"
 
 
-def request_many(requests, timeout=TIMEOUT, channel="rpc", project=None):
-    """Разные запросы разным узлам, параллельно по одному соединению.
+def _per_node(nodes, fields):
+    """Узлы request_many -> {узел: поля}: список -- общие поля всем,
+    словарь {узел: свои поля} -- свои поверх общих."""
+    if isinstance(nodes, dict):
+        return {n: {**fields, **(own or {})} for n, own in nodes.items()}
+    return {n: dict(fields) for n in nodes}
+
+
+def request_many(verb, nodes, timeout=TIMEOUT, channel="rpc", project=None, **fields):
+    """Один глагол многим узлам, параллельно по одному соединению.
 
     Ради этого всё и затевалось: раньше состояние пула стоило по четыре
-    рукопожатия exec'а на папета подряд. Запрос у каждого узла свой — он
-    спрашивается о своих папетах, — поэтому на входе {узел: {verb, **поля}},
-    а не общий глагол.
+    рукопожатия exec'а на папета подряд. Форма та же, что у request (#264):
+    глагол и поля. nodes -- список узлов (поля общие), либо {узел: свои
+    поля}, когда каждого спрашивают о своём (states -- о своих папетах);
+    общие поля идут всем, свои -- поверх.
 
     -> {узел: ответ | BusError}. Ошибка возвращается, а не бросается: один
     молчащий узел не должен уносить с собой картину по остальным."""
-    if not requests:
+    asks = _per_node(nodes, fields)
+    if not asks:
         return {}
     nc = connect()
-    nodes = list(requests)
+    names = list(asks)
 
     async def all_of():
         return await asyncio.gather(
-            *(_one(nc, n, requests[n], timeout, channel, project) for n in nodes))
+            *(_one(nc, n, envelope(verb, **asks[n]), timeout, channel, project)
+              for n in names))
 
-    return dict(zip(nodes, _call(all_of(), timeout)))
+    return dict(zip(names, _call(all_of(), timeout)))
 
 
-def request_stream(requests, timeout=TIMEOUT, channel="rpc", project=None):
+def request_stream(verb, asks, timeout=TIMEOUT, channel="rpc", project=None, **fields):
     """Как request_many, но пары (ключ, ответ) отдаются по мере готовности.
 
     Нужен там, где ответ показывают сразу, а не собирают в таблицу: обмер
@@ -637,24 +670,26 @@ def request_stream(requests, timeout=TIMEOUT, channel="rpc", project=None):
     к одному узлу может быть несколько, по одному на папета, а request_many
     ключуется узлом и такого не умеет.
 
-    requests: {ключ: (узел, запрос)}. -> генератор (ключ, ответ | BusError).
-    Ошибка приезжает значением, а не броском: один молчащий узел не должен
-    уносить с собой картину по остальным.
+    asks: {ключ: (узел, свои поля)}; общие поля -- всем, свои поверх.
+    -> генератор (ключ, ответ | BusError). Ошибка приезжает значением, а не
+    броском: один молчащий узел не должен уносить с собой картину по
+    остальным.
     """
-    if not requests:
+    if not asks:
         return
     nc = connect()
     done = queue.Queue()
 
-    async def one(key, node, req):
-        done.put((key, await _one(nc, node, req, timeout, channel, project)))
+    async def one(key, node, own):
+        data = envelope(verb, **{**fields, **(own or {})})
+        done.put((key, await _one(nc, node, data, timeout, channel, project)))
 
     async def all_of():
-        await asyncio.gather(*(one(k, n, r) for k, (n, r) in requests.items()))
+        await asyncio.gather(*(one(k, n, own) for k, (n, own) in asks.items()))
 
     fut = asyncio.run_coroutine_threadsafe(all_of(), _ensure_loop())
     try:
-        for _ in range(len(requests)):
+        for _ in range(len(asks)):
             yield done.get(timeout=timeout + 5)
     finally:
         # Генератор могли бросить недочитанным (Ctrl-C, `| head`) — фоновые
@@ -673,7 +708,7 @@ def ask_stream(subj, who, verb, first=10, idle=120, **fields):
     событиями: ответчик шлёт сердцебиение, и тишина значит, что он умер."""
     nc = connect()
     got = queue.Queue()
-    payload = json.dumps({"verb": verb, **fields}, ensure_ascii=False).encode()
+    payload = envelope(verb, **fields)
 
     async def start():
         inbox = nc.new_inbox()
@@ -685,7 +720,7 @@ def ask_stream(subj, who, verb, first=10, idle=120, **fields):
                 pass
         sub = await nc.subscribe(inbox, cb=on_msg)
         await nc.publish(subj, payload, reply=inbox)
-        await nc.flush(timeout=5)
+        await nc.flush(timeout=FLUSH)
         return sub
 
     sub = _call(start(), 10)
@@ -719,13 +754,13 @@ def gather(verb, timeout=5, subj=None, **fields):
     узлов, здесь неизвестно принципиально — в этом и смысл вызова."""
     subj = subj or broadcast()
     nc = connect()
-    payload = json.dumps({"verb": verb, **fields}, ensure_ascii=False).encode()
+    payload = envelope(verb, **fields)
 
     async def run():
         inbox = nc.new_inbox()
         sub = await nc.subscribe(inbox)
         await nc.publish(subj, payload, reply=inbox)
-        await nc.flush(timeout=5)
+        await nc.flush(timeout=FLUSH)
         out, deadline = [], asyncio.get_running_loop().time() + timeout
         while True:
             left = deadline - asyncio.get_running_loop().time()
@@ -747,8 +782,8 @@ def gather(verb, timeout=5, subj=None, **fields):
 
 def publish(subj, **fields):
     nc = connect()
-    _call(nc.publish(subj, json.dumps(fields, ensure_ascii=False).encode()), 5)
-    _call(nc.flush(timeout=5), 5)
+    _call(nc.publish(subj, encode(fields)), FLUSH)
+    _call(nc.flush(timeout=FLUSH), FLUSH)
 
 
 def subscribe(subj, handler):
@@ -772,7 +807,7 @@ def subscribe(subj, handler):
         if not msg.reply:
             return
         try:
-            await msg.respond(json.dumps(out or {}, ensure_ascii=False).encode())
+            await msg.respond(encode(out or {}))
         except Exception:
             pass
 
