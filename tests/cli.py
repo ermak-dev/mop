@@ -1850,7 +1850,8 @@ def check_fallback_model_183():
     # {bug,ci}, группа dev в PRIVATE, прежние имена -- через LEGACY один релиз.
     # STATUS: FIXED — see #254
     tree = cli.verbs()
-    if set(tree.get("dev") or {}) != {"bug", "ci"}:
+    # bug и ci -- в dev; сам dev растёт (#271 -- test), поэтому «содержит».
+    if not {"bug", "ci"} <= set(tree.get("dev") or {}):
         failed += 1
         print(f"FAIL #254 dev must hold bug and ci: {sorted(tree.get('dev') or {})}")
     top = cli.catalog(cli.scan())
@@ -1925,6 +1926,50 @@ def check_server_namespace_259():
         if got != mod:
             failed += 1
             print(f"FAIL #259 {argv} must resolve to {mod}: {got}")
+    # ── #271: mop dev test -- прогон tests/ одной командой ──────────────
+    # HYPOTHESIS: проверки гоняли шелл-циклом `for t in tests/*.py`, у
+    # каждого свой (CI, папеты, мастер), с разным разбором итога. SOLUTION:
+    # `mop dev test [имя ...] [--strict]`; план и итог -- чистые функции.
+    # STATUS: FIXED — see #271
+    try:
+        from mop.cli.dev import test as dev_test
+    except ImportError:
+        dev_test = None
+    if dev_test is None or not hasattr(dev_test, "plan") or not hasattr(dev_test, "summary"):
+        failed += 1
+        print("FAIL #271 mop.cli.dev.test with plan() and summary() is missing")
+    else:
+        listing = ["cli.py", "agent.py", "_lib.py", "README", "hermetic.py", "spec_snapshot.json"]
+        for names, want in (([], ["agent.py", "cli.py", "hermetic.py"]),
+                            (["cli"], ["cli.py"]),
+                            (["tests/agent.py", "cli.py", "agent"], ["agent.py", "cli.py"])):
+            got = dev_test.plan(names, listing)
+            if got != want:
+                failed += 1
+                print(f"FAIL #271 plan({names}) = {got}, want {want}")
+        for bad in (["nope"], ["_lib"], ["spec_snapshot.json"]):
+            try:
+                dev_test.plan(bad, listing)
+                failed += 1
+                print(f"FAIL #271 plan({bad}) must refuse")
+            except ValueError as e:
+                if "tests/" not in str(e):
+                    failed += 1
+                    print(f"FAIL #271 plan({bad}) refusal must name the file: {e}")
+        lines, ok = dev_test.summary([("agent.py", 0, "agent: ok\n", 1.0),
+                                      ("cli.py", 1, "FAIL x\ncli: FAILED\n", 2.0)])
+        if ok or lines[0] != "FAILED tests/cli.py (exit 1)" or "FAIL x" not in lines \
+                or lines[-1] != "1/2 ok, failed: cli.py":
+            failed += 1
+            print(f"FAIL #271 summary of a red run: {ok} {lines}")
+        lines, ok = dev_test.summary([("agent.py", 0, "agent: ok\n", 1.0)])
+        if not ok or lines != ["1/1 ok"]:
+            failed += 1
+            print(f"FAIL #271 summary of a green run: {ok} {lines}")
+        if "dev" not in cli.PRIVATE or "test" not in (cli.verbs().get("dev") or {}):
+            failed += 1
+            print("FAIL #271 test must be a verb of the private dev namespace")
+
     return failed
 
 
