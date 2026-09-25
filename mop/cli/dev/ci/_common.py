@@ -1,7 +1,7 @@
 """Общее глаголам CI: разбор аргументов."""
-import argparse
+import functools
 
+from mop.cli.dev import _common as dev_common
 
-def parser(verb):
-    """argparse глагола без встроенной справки: usage — докстринг модуля."""
-    return argparse.ArgumentParser(prog=f"mop dev ci {verb}", add_help=False)
+# Одна фабрика на обе группы (#263): prog -- `mop dev ci <глагол>`.
+parser = functools.partial(dev_common.parser, "ci")

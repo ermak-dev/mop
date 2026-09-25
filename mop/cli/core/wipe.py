@@ -19,18 +19,12 @@ MCP = {"annotations": "destructive", "args": [
 
 
 def main(argv):
-    force = "--force" in argv
-    argv = [a for a in argv if a != "--force"]
-    if len(argv) != 1:
-        lib.usage(__doc__)
-    name = argv[0]
-    lib.guard(name)
+    name, force = lib.named(argv, __doc__)
     alloc = bus.call_cluster("alloc", name=name).get("alloc")
     if not alloc:
         raise LookupError(f"{name}: no allocation — node unknown")
     r = puppets.wipe(alloc["NodeName"], name, force=force)
-    if r.get("owner_note"):
-        print(f"{name}: {r['owner_note']}")
+    lib.note(name, r)
     print(f"{name}: clone reset to HEAD, target wiped ({r['target']})")
 
 

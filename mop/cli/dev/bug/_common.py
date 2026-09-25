@@ -1,6 +1,8 @@
 """Общее глаголам трекера: тело задачи и разбор аргументов."""
-import argparse
+import functools
 import sys
+
+from mop.cli.dev import _common as dev_common
 
 
 def read_body(text, path):
@@ -18,6 +20,5 @@ def read_body(text, path):
     return sys.stdin.read().strip()
 
 
-def parser(verb):
-    """argparse глагола без встроенной справки: usage — докстринг модуля."""
-    return argparse.ArgumentParser(prog=f"mop dev bug {verb}", add_help=False)
+# Одна фабрика на обе группы (#263): prog -- `mop dev bug <глагол>`.
+parser = functools.partial(dev_common.parser, "bug")

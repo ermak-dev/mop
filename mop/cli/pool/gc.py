@@ -10,9 +10,7 @@ from mop.common import bus, config, puppets, state
 
 
 def main(argv):
-    dry = argv == ["--dry"]
-    if argv and not dry:
-        lib.usage(__doc__)
+    dry = lib.dry(argv, __doc__)
     limit = config.num("MOP_GC_FREE_MIN_GB")
     cap = config.num("MOP_GC_MAX_PER_RUN")
     rows = puppets.puppet_rows()
