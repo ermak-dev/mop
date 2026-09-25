@@ -20,9 +20,9 @@ import os
 import posixpath
 import re
 
-from . import fsutil
+from . import fsutil, paths
 
-ROOT = os.path.expanduser("~/.config/mop/project-secrets")
+ROOT = paths.local("project-secrets")
 # Файл едет одним сообщением шины (max_payload 1 МБ) в base64.
 MAX_BYTES = 512 * 1024
 VARS = "vars.env"

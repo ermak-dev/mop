@@ -52,15 +52,6 @@ def token():
                       f"through the cluster service (docs/CLUSTER.md)")
 
 
-def token_or_none():
-    """Токен, либо None: у вызывающего есть запасной путь и он обязан о нём
-    сказать, а не упасть трассировкой (mop/client/keys.py)."""
-    try:
-        return token()
-    except LookupError:
-        return None
-
-
 def client():
     global _client
     if _client is None:
@@ -111,17 +102,6 @@ def latest_alloc(job_id):
         return None
     run = [a for a in allocs if a["DesiredStatus"] == "run"] or allocs
     return max(run, key=lambda a: a["CreateIndex"]) if run else None
-
-
-def ready_nodes(datacenter=POOL_DC):
-    """Имена узлов, на которые Nomad вообще станет что-то ставить.
-
-    По умолчанию только рабочий пул: раздавать креды и ключи на управляющую
-    машину не надо — она их источник."""
-    return {n["Name"] for n in client().nodes.get_nodes()
-            if n["Status"] == "ready"
-            and n.get("SchedulingEligibility") != "ineligible"
-            and (datacenter is None or n.get("Datacenter") == datacenter)}
 
 
 def node_capacity(node_summary):

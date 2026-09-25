@@ -780,12 +780,6 @@ def gather(verb, timeout=5, subj=None, **fields):
     return _call(run(), timeout)
 
 
-def publish(subj, **fields):
-    nc = connect()
-    _call(nc.publish(subj, encode(fields)), FLUSH)
-    _call(nc.flush(timeout=FLUSH), FLUSH)
-
-
 def subscribe(subj, handler):
     """Постоянная подписка. handler(dict) -> ответ|None.
 

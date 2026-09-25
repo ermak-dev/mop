@@ -1877,6 +1877,7 @@ def check_fallback_model_183():
 
     failed += check_server_namespace_259()
     failed += check_named_263()
+    failed += check_body_file_270()
     return failed
 
 
@@ -2100,6 +2101,54 @@ def check_named_263():
             os.environ.pop("MOP_SERVER_LAN", None)
         else:
             os.environ["MOP_SERVER_LAN"] = keep[9]
+    return failed
+
+
+def check_body_file_270():
+    """HYPOTHESIS (#270): `mop dev bug new --body-file -` и любой
+    несуществующий путь падают трассировкой FileNotFoundError в read_body:
+    `-` читался как имя файла, а отсутствие файла не ловил никто.
+    SOLUTION: `-` в --body-file -- stdin, как у текста комментария; файла нет
+    или он не читается -- отказ одной строкой с путём.
+    STATUS: FIXED — see #270"""
+    import io
+    import tempfile
+    from mop.cli.dev.bug import _common as bug_common
+    failed = 0
+    keep = sys.stdin
+    try:
+        sys.stdin = io.StringIO("тело из stdin\n")
+        got = bug_common.read_body(None, "-")
+        if got != "тело из stdin":
+            failed += 1
+            print(f"FAIL #270 --body-file - must read stdin: {got!r}")
+    except BaseException as e:  # noqa: BLE001 -- трассировка и есть дефект
+        failed += 1
+        print(f"FAIL #270 --body-file - must read stdin, raised {type(e).__name__}: {e}")
+    finally:
+        sys.stdin = keep
+    missing = os.path.join(tempfile.mkdtemp(prefix="mop-test-270-"), "no-such.md")
+    for path in (missing, tempfile.mkdtemp(prefix="mop-test-270-")):
+        try:
+            bug_common.read_body(None, path)
+            failed += 1
+            print(f"FAIL #270 --body-file {path} must be refused")
+        except SystemExit as e:
+            text = str(e.code)
+            if path not in text or "\n" in text.strip() or "Traceback" in text:
+                failed += 1
+                print(f"FAIL #270 the refusal must be one line naming the path: {text!r}")
+        except BaseException as e:  # noqa: BLE001
+            failed += 1
+            print(f"FAIL #270 --body-file {path}: a traceback ({type(e).__name__}), "
+                  f"not a one-line refusal")
+    # Как было: файл -- его текст, аргумент -- он сам.
+    ok = os.path.join(tempfile.mkdtemp(prefix="mop-test-270-"), "body.md")
+    with open(ok, "w", encoding="utf-8") as f:
+        f.write("  тело  \n")
+    if bug_common.read_body(None, ok) != "тело" or bug_common.read_body(" x ", None) != "x":
+        failed += 1
+        print("FAIL #270 a readable file and a text argument must work as before")
     return failed
 
 

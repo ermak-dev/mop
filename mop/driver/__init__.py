@@ -51,7 +51,7 @@ import importlib
 import os
 import re
 
-from ..common import config, fsutil, plugins
+from ..common import config, fsutil, paths, plugins
 
 # Глаголы контракта. Список закрыт и проверяется громко при загрузке: агент
 # зовёт их из петли, и отсутствующий argv прочитается там как «узел молчит».
@@ -189,12 +189,12 @@ def project_of_name(name):
 # своих путей не собирает, job_spec отдаёт ему эти в окружении задачи (#155).
 HOME = config.get("MOP_HOME")
 # Ключи LLM-профилей на узле: подмножество .env, которое раздаёт `mop login`.
-SECRETS_FILE = f"{HOME}/.config/mop/secrets.env"
+SECRETS_FILE = paths.under(HOME, paths.SECRETS_ENV)
 
 
 # Публичный ключ сервера на узле: его впускают в тело на время bootstrap'а
 # (#62). Кладёт `mop server deploy` (роль bus).
-SERVER_PUB = f"{HOME}/.config/mop/bootstrap.pub"
+SERVER_PUB = paths.under(HOME, "bootstrap.pub")
 
 
 def clone_dir(name):
@@ -271,12 +271,60 @@ def target_dir(name):
 
 def project_creds(project):
     """Кред шины проекта в теле: его кладёт `mop driver run` на подъёме."""
-    return f"{HOME}/.config/mop/bus-{project}.json"
+    return paths.under(HOME, f"bus-{project}.json")
 
 
 def project_secrets_dir(project):
     """Секреты проекта в теле (#127): их кладёт bootstrap при каждом старте."""
-    return f"{HOME}/.config/mop/project-secrets/{project}"
+    return paths.under(HOME, "project-secrets", project)
+
+
+class Tmux:
+    """Строки скрипта для tmux папета: и сервер (-L), и сессия (-t) зовутся
+    его именем. Только строки -- исполняет вызывающий, и имя до шелла доходит
+    лишь после valid_name.
+
+    Одно место на соглашение `tmux -L <имя> ... -t <имя>` (#268): его знали
+    агент, sweep узла, `mop driver run` и оба драйвера, каждый своей строкой.
+    Врапер спеки пишет его сам -- он едет в тело текстом."""
+
+    def __init__(self, name):
+        self.name = name
+        self.base = f"tmux -L {name}"
+
+    def alive(self):
+        return f"{self.base} has-session -t {self.name} 2>/dev/null"
+
+    def kill(self):
+        return f"{self.base} kill-session -t {self.name}"
+
+    def attach_argv(self):
+        """Чем человек входит в сессию -- argv, не строка: его исполняют
+        без шелла (`mop attach`)."""
+        return ["tmux", "-L", self.name, "attach", "-t", self.name]
+
+    def buffer(self):
+        """Весь буфер, с историей."""
+        return f"{self.base} capture-pane -p -t {self.name} -S -"
+
+    def visible(self):
+        return f"{self.base} capture-pane -p -t {self.name}"
+
+    def keys(self, keys):
+        return f"{self.base} send-keys -t {self.name} {keys}"
+
+    def press(self, key):
+        """Голая клавиша и экран после неё."""
+        return f"{self.keys(key)}; sleep 1; {self.visible()}"
+
+    def type(self, command):
+        """Очистить строку, напечатать команду, Enter, экран. Кавычку в
+        команде отбивает вызывающий: команда идёт в шелл одной строкой."""
+        quoted = f"'{command}'"
+        keys = (f"{self.keys('C-u')}; sleep 0.3; "
+                f"{self.keys(quoted)}; sleep 0.3; ") if command else ""
+        return keys + f"{self.keys('Enter')}; sleep 2; {self.visible()}"
+
 
 
 def why(out, code, timeout=None):

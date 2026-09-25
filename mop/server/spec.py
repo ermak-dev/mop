@@ -18,7 +18,7 @@ import os
 import re
 import time
 
-from ..common import config, domain, llm, state
+from ..common import config, domain, llm, paths, state
 from .. import driver
 from . import nomad
 from ..common.domain import JobMeta, Project
@@ -32,7 +32,7 @@ USER = config.get("MOP_USER")               # под кем идут задач�
 # Просьбы проектов (#197): {проект: {настройка: значение}} из их `.mop`. Файл
 # кладёт роль cluster из манифестов `mop server deploy`: сервис строит спеку под
 # учёткой пула и файлов контроллера не видит.
-ASKS_FILE = os.path.expanduser("~/.config/mop/project-asks.json")
+ASKS_FILE = paths.local("project-asks.json")
 
 
 def read_asks(path=None):
@@ -585,9 +585,6 @@ def placement_gap(project, nodes, ceiling=None):
             for n in serving):
         return "memory"
     return False
-
-
-queued = state.queued   # прежнее имя; вердикты читают state.queued
 
 
 # Версия шаблона спеки в Meta джоба (#174). Врапер живёт в спеке, и джоб,

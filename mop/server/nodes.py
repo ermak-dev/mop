@@ -4,7 +4,7 @@
 Модуль возвращает данные и ничего не печатает.
 """
 from .. import driver
-from . import nomad
+from . import nomad, spec
 from ..common.domain import Node
 
 
@@ -32,7 +32,7 @@ def row(summary, meta, cap):
                 # mop_projects — ключ меты УЗЛА, прежнее имя (#85): его
                 # объявляет клиент Nomad, и переименование оставило бы старые
                 # спеки без узлов, которые их принимают.
-                serves=meta.get("mop_projects") or "-", state=state,
+                serves=meta.get(spec.META_PROJECTS) or "-", state=state,
                 free_mb=cap.get("free_mb"), total_mb=cap.get("total_mb"),
                 slots=cap.get("slots"), slots_total=cap.get("slots_total")).to_row()
 

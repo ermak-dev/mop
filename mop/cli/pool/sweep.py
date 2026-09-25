@@ -87,7 +87,7 @@ def main(argv):
 
     gone = 0
     for r in doomed:
-        a = bus.request(r["node"], "wipe", name=r["name"], timeout=600)
+        a = bus.request(r["node"], "wipe", name=r["name"], timeout=puppets.WIPE_TIMEOUT)
         why = a.get("error")
         print(f"  {r['name']}: {why or 'destroyed'}")
         gone += 0 if why else 1

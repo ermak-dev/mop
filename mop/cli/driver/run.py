@@ -245,7 +245,7 @@ def main(argv):
 
     def stop(_sig, _frm):
         state["asked"] = True
-        subprocess.run(inside(probe, f"tmux -L {name} kill-session -t {name}"),
+        subprocess.run(inside(probe, driver.Tmux(name).kill()),
                        capture_output=True)
         if state["child"]:
             state["child"].terminate()
