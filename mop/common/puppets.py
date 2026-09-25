@@ -11,7 +11,7 @@ import time
 
 from . import bus, config, lease, llm, state
 from .. import driver
-from .domain import Owner
+from .domain import JobMeta, Owner
 from .state import PuppetRow, action_for, failing_row, silent, spec_action, verdict
 
 PROJECT = config.PROJECT
@@ -89,7 +89,7 @@ def visible(listing, project):
     for j in listing:
         if not j.get("ID", "").startswith(JOB_PREFIX) or j.get("Type") != "service":
             continue
-        origin = (j.get("Meta") or {}).get("origin")
+        origin = JobMeta.from_job(j).origin
         if project == bus.ADMIN:
             out.append(j)
         elif origin and project_of(origin) == project:
@@ -234,7 +234,7 @@ def rows_from(items):
 
 def _row(item, disk_kb=None):
     job, alloc = item["job"], item["alloc"]
-    meta = job.get("Meta") or {}
+    meta = JobMeta.from_job(job)
     status = item["error"] or (alloc["ClientStatus"] if alloc else job.get("Status", "?"))
     state, kind = item["state"] or "-", item.get("kind")
     # Падающий на старте -- failing с причиной, а не pending (#126).
@@ -250,7 +250,8 @@ def _row(item, disk_kb=None):
         kind=kind,
         owner=item.get("owner") or "-",
         llm=llm.of_meta(meta),
-        origin=meta.get("origin", "?"),
+        # Показ без origin -- «?» (нет ключа в мете), как было до #265.
+        origin=meta.origin if meta.origin is not None else "?",
         disk_kb=disk_kb,
     )
 
@@ -431,7 +432,7 @@ def _placement_issue(job, alloc, unserved=False, ceiling=None):
     if state.queued(job) and unserved == "memory":
         # Просьба проекта больше, чем готова дать любая машина с его образом:
         # ни ожидание, ни сборка образа не помогут.
-        project = project_of((job.get("Meta") or {}).get("origin") or "")
+        project = JobMeta.from_job(job).project
         return {"name": name, "alloc": None, "action": None,
                 "diagnosis": f"queued — no ready node of {project} takes a "
                              f"{ceiling} MB puppet (node meta mop_mem_cap_mb): "
@@ -440,7 +441,7 @@ def _placement_issue(job, alloc, unserved=False, ceiling=None):
     if state.queued(job) and unserved:
         # Слоты тут ни при чём: ограничение размещения по образу (#10) не
         # пускает никуда, и ожидание не вылечит ничего.
-        origin = (job.get("Meta") or {}).get("origin") or "<origin>"
+        origin = JobMeta.from_job(job).origin or "<origin>"
         return {"name": name, "alloc": None, "action": None,
                 "diagnosis": f"queued — no ready node has an image of "
                              f"{project_of(origin)}: mop project add {origin}"}
@@ -482,9 +483,13 @@ def treat(issue):
             # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
             # аллокации поднял бы ту же старую. Клон переживает — меняется
             # только спека.
-            meta = _cluster("spec", name=name).get("meta") or {}
-            got = _cluster("update", name=name, origin=meta["origin"],
-                           profile=meta.get("llm"), **me)
+            # Ветка -- с остальной метой (#265): лечение не ставит папета
+            # мастера обратно на origin/HEAD.
+            meta = JobMeta.from_meta(_cluster("spec", name=name).get("meta"))
+            if not meta.origin:
+                raise RuntimeError(f"{name} has no origin in Meta")
+            got = _cluster("update", name=name, origin=meta.origin,
+                           profile=llm.of_meta(meta), branch=meta.branch, **me)
             return ("spec re-registered — the puppet comes up with the new wrapper"
                     + _note(got))
         got = _cluster("restart", name=name, **me)
@@ -653,8 +658,8 @@ def recycle(name, workspace_of=None, force=False):
     Ворота владения (#40) -- на первом шаге, останове: чужой папет
     отказывает до того, как что-то остановлено; force идёт во все три
     шага."""
-    meta = _cluster("spec", name=name).get("meta") or {}
-    origin = meta.get("origin")
+    meta = JobMeta.from_meta(_cluster("spec", name=name).get("meta"))
+    origin = meta.origin
     if not origin:
         raise RuntimeError(f"{name} has no origin in Meta — is this even a puppet?")
     profile = llm.of_meta(meta)
@@ -666,7 +671,7 @@ def recycle(name, workspace_of=None, force=False):
     # Ветка мастера (#257): из контекста команды, иначе та, с которой папет
     # заведён (мета джоба) -- рецикл без рабочей копии (gc) её не теряет.
     from . import context
-    branch = context.current().branch or meta.get("branch")
+    branch = context.current().branch or meta.branch
     me = {"owner": bus.login(), "force": force}
     note = _cluster("delete", name=name, purge=False, **me).get("owner_note")
     _wait_stopped(name)

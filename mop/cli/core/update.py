@@ -18,6 +18,7 @@ refused with that master's name; --force acts anyway and says whose it was.
 from mop.cli import lib
 from mop.cli.core import _common
 from mop.common import bus, context, llm
+from mop.common.domain import JobMeta
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -38,8 +39,8 @@ def main(argv):
         lib.usage(__doc__)
     name = args[0]
     spec = lib.guard(name) or bus.call_cluster("spec", name=name)
-    meta = spec.get("meta") or {}
-    old, old_llm = meta.get("origin"), llm.of_meta(meta)
+    meta = JobMeta.from_meta(spec.get("meta"))
+    old, old_llm = meta.origin, llm.of_meta(meta)
     if not old:
         # Джоб без origin в Meta — не папет: ростер их и не показывает.
         lib.usage(f"{name}: no origin in the spec — this isn't a pool puppet")

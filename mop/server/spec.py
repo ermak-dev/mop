@@ -11,16 +11,17 @@ spec_is_stale видит у всего пула сразу. Поэтому пе�
 байт в байт: tests/spec.py.
 """
 import base64
+import dataclasses
 import hashlib
 import json
 import os
 import re
 import time
 
-from ..common import config, llm, state
+from ..common import config, domain, llm, state
 from .. import driver
 from . import nomad
-from ..common.domain import Project
+from ..common.domain import JobMeta, Project
 
 # Значения этой установки — .env поверх дефолтов; см. mop/common/config.py.
 MEM = config.num("MOP_PUPPET_MEM_MB")   # бюджет папета, МБ: резерв планировщика и мера слотов
@@ -434,20 +435,19 @@ def job_spec(name, origin, profile=None, cont=False, branch=None):
         # именно не перерегистрируется, придётся по трассе.
         raise RuntimeError(f"{name}: no LLM profile {profile}; available: "
                            f"{', '.join(llm.profiles())} (mop llm)")
-    meta = {"origin": origin, "llm": profile}
     # Ветка мастера (#249, #256) -- метой, не окружением: Nomad отдаёт её
     # задаче как NOMAD_META_branch, `mop driver run` ставит на неё свежий
     # клон. Окружение задачи и врапер при этом те же, версия шаблона та же,
-    # и ни одна зарегистрированная спека не устаревает.
-    if branch:
-        meta["branch"] = branch
+    # и ни одна зарегистрированная спека не устаревает. Мету собирает одно
+    # значение (#265): тот же порядок ключей, что читают все остальные.
+    meta = JobMeta(origin, profile, branch)
     project = Project.of(origin, asks=read_asks())
     try:
         reserve, ceiling = memory(project.asks, MEM_MAX, MEM)
     except ValueError as e:
         raise RuntimeError(f"{name}: {e} ({project.name})")
     env = task_env(name, origin, profile, prof, cont, ceiling)
-    meta[SPEC_META] = template_version(env)
+    meta = dataclasses.replace(meta, spec_version=template_version(env)).to_meta()
     return {"Job": {
         "ID": name,
         "Name": name,
@@ -482,6 +482,14 @@ def job_spec(name, origin, profile=None, cont=False, branch=None):
 # контейнеры, перечисляет проекты поимённо — те, чьи образы на нём собраны.
 ANY_PROJECT = "any"
 
+
+def respec(name, meta, cont=False):
+    """Спека по мете джоба (JobMeta): одна дорога перерегистрации на сервере
+    (#265). Её берут глагол update сервиса кластера (перерегистрация,
+    рецикл, лечение doctor'а) и сборка образа, поднимающая снятых папетов.
+    Пока дорог было несколько, одна из них теряла ветку мастера (#256):
+    после сборки образа папет поднимался на origin/HEAD."""
+    return job_spec(name, meta.origin, meta.llm, cont=cont, branch=meta.branch)
 
 def project_constraint(project):
     """Ограничение размещения: узел обязан уметь обслужить этот проект.
@@ -586,7 +594,7 @@ queued = state.queued   # прежнее имя; вердикты читают s
 # зарегистрированный прежним mop, работает прежним врапером до перерегистрации
 # (CLAUDE.md) — а обе проверки spec_is_stale ниже он проходит. После #155 так
 # жил пятый папет чужого проекта, и ничто его не выдавало.
-SPEC_META = "mop_spec"
+SPEC_META = domain.SPEC_META
 
 
 def template_version(env):
@@ -625,7 +633,7 @@ def spec_is_stale(job):
     Поймано на pu-cloudpub-1, лечится `mop update <имя>`.
 
     И спека прежнего шаблона (#174): без версии в Meta или с другой."""
-    if (job.get("Meta") or {}).get(SPEC_META) != current_version():
+    if JobMeta.from_job(job).spec_version != current_version():
         return True
     task = job["TaskGroups"][0]["Tasks"][0]
     script = (task.get("Config") or {}).get("args") or ["", ""]
