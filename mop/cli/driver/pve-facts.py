@@ -8,7 +8,7 @@ address, whether it stands) and the project's bodies standing there;
 --listing is the output of the wrapper's `list` on that node.
 
 Run by deploy/pve-build.yml and the pve role on the controller; one
-computation in mop/driver/pve.py instead of copies in the playbooks (#158).
+computation in mop/driver/pve.py instead of copies in the playbooks.
 """
 import argparse
 import json

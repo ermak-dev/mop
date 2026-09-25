@@ -9,7 +9,7 @@ people's machines keeps working, no new mop join.
 
 Afterwards remove MOP_OPERATORS from .env and run mop deploy: until then
 each moved login is defined twice and refused. Goes away together with
-MOP_OPERATORS (#219).
+MOP_OPERATORS.
 """
 from mop import identity
 from mop.cli import lib

@@ -1,7 +1,7 @@
 """take a project off the bus: mop project delete <name>
 
-Asks the cluster service on the server (operator's verb project_delete,
-#117): the project leaves the server's registry, its NATS user and bus
+Asks the cluster service on the server (operator's verb project_delete):
+the project leaves the server's registry, its NATS user and bus
 password go, and so does its puppet limit.
 
 Refuses while the project still has puppets: a master whose puppets are

@@ -3,7 +3,7 @@
 The `write` verb to every node's agent at once: the node keeps a copy for
 bodies raised later, and every live body gets it now. Silent when every node
 took them; otherwise the nodes that did not, and why. A node whose agent does
-not answer is not reached: there is no way past the agent (#135).
+not answer is not reached: there is no way past the agent.
 """
 import sys
 

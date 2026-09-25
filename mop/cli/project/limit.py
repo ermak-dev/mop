@@ -10,7 +10,7 @@ project a request is about, not who sent it. It is checked by the add verb
 (mop add), against the project's jobs that are not dead; puppets already
 running above a newly lowered limit are left alone.
 
-Kept on the server and set by the operator's verb project_limit (#117); the
+Kept on the server and set by the operator's verb project_limit; the
 service reads it on every add, so no restart is needed.
 """
 from mop.cli import lib

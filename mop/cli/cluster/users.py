@@ -4,7 +4,7 @@ On the server, as the pool user. Reads the people, services and nodes that
 mop deploy put into /etc/nats/base-users.json, the projects from the
 server's registry (~/.config/mop/projects), gives a project without a bus
 password a new one, and writes /etc/nats/users.conf (the machines) and
-/etc/nats/callout.conf with the auth callout's keys (#206).
+/etc/nats/callout.conf with the auth callout's keys.
 --reload sends nats-server SIGHUP when users.conf changed and checks that
 nats took it; a changed callout.conf needs a restart instead, and --reload
 refuses rather than fire a reload nats would reject.

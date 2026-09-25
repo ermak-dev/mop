@@ -1,6 +1,6 @@
 """log in to a server's bus as yourself: mop join [--server ADDRESS] [LOGIN]
 
-What is not named comes from the command's context (#131): the working
+What is not named comes from the command's context: the working
 copy's binding (git config mop.server, mop.user), over it the environment
 (MOP_SERVER_LAN, MOP_BUS_USER), over it the command line (--server, LOGIN).
 With no server in any of them: the one server you are already logged in to

@@ -1,10 +1,10 @@
 """mop driver build [project|origin] [--fresh] [--force]: bake the project's image
 
 On the hypervisors, from the control machine. No argument: this working
-copy, .mop as it lies (#46). Incremental by default: a copy of the image
+copy, .mop as it lies. Incremental by default: a copy of the image
 takes what changed; --fresh builds from the base image anew. The project's
 puppets on container nodes are stopped, their bodies destroyed and raised
-again from the new image; a busy puppet refuses unless --force (#60).
+again from the new image; a busy puppet refuses unless --force.
 """
 import sys
 

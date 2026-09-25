@@ -12,7 +12,7 @@ else is a local session, reached directly through its uds inbox.
   --priority now|next|later   where in the recipient's queue (default next)
   --mode bypass|prompting     which permission mode to present as (bypass)
   --quiet                     silent, exit code only
-  --force                     take over a puppet another master leads (#161)
+  --force                     take over a puppet another master leads
 
 Channel protocol — CHANNEL.md, bus subjects — BUS.md.
 """

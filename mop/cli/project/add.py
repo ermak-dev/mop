@@ -2,8 +2,8 @@
 
 Without origin, the origin of the current working copy is used.
 
-Registers the project on the server (operator's verb project_add, #117)
-and builds its image from .mop/sandbox.yaml on the container nodes through the server's builder (#123) when it is missing on
+Registers the project on the server (operator's verb project_add)
+and builds its image from .mop/sandbox.yaml on the container nodes through the server's builder when it is missing on
 any of them. Afterwards `mop add` can place a puppet right away.
 
   --update    build the image even if it exists, incrementally
