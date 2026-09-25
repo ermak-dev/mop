@@ -1,7 +1,7 @@
-"""mop bug show <iid>: the full body of an issue
+"""mop dev bug show <iid>: the full body of an issue
 """
 from mop import gitlab
-from mop.cli.bug._common import parser
+from mop.cli.dev.bug._common import parser
 
 
 def main(argv):

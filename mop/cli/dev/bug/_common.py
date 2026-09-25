@@ -20,4 +20,4 @@ def read_body(text, path):
 
 def parser(verb):
     """argparse глагола без встроенной справки: usage — докстринг модуля."""
-    return argparse.ArgumentParser(prog=f"mop bug {verb}", add_help=False)
+    return argparse.ArgumentParser(prog=f"mop dev bug {verb}", add_help=False)

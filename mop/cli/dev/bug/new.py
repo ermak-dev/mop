@@ -1,10 +1,10 @@
-"""mop bug new "Заголовок" [--label L ...] [--body-file F] [--epic N]: open an issue
+"""mop dev bug new "Заголовок" [--label L ...] [--body-file F] [--epic N]: open an issue
 
 Body from --body-file or stdin; --epic makes it a child of that epic. A
 status label is added when none is given: status::live.
 """
 from mop import gitlab
-from mop.cli.bug._common import parser, read_body
+from mop.cli.dev.bug._common import parser, read_body
 
 
 def main(argv):

@@ -94,7 +94,7 @@ PRIVATE = ("dev",)
 # не ломает юниты, спеку и запущенных мастеров до раскатки и перезапуска.
 # Молча: это не отказ и не совет, а переход на один релиз, после которого
 # таблица пустеет отдельным тикетом.
-LEGACY = {}
+LEGACY = {"bug": ("dev", "bug"), "ci": ("dev", "ci")}   # #254
 
 
 def unalias(argv, table=None):
@@ -324,7 +324,7 @@ def locale_usable(name):
     «C»: от локали процесса зависит кодировка, которую питон берёт для
     open() без явного encoding. Возврат в «C» превращал её в ascii, и первое
     же чтение русского файла падало UnicodeDecodeError — поймано на
-    `mop bug new --body-file`."""
+    `mop dev bug new --body-file`."""
     import locale as loc
     keep = loc.setlocale(loc.LC_ALL)
     try:

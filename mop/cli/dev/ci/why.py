@@ -1,4 +1,4 @@
-"""mop ci why <id>: why a pipeline failed
+"""mop dev ci why <id>: why a pipeline failed
 
 Each job that failed the pipeline, with the last lines of its log. A failed
 job with allow_failure is named as one that did NOT fail the pipeline. With
@@ -7,15 +7,11 @@ failure_reason, detailed status): a rejected .gitlab-ci.yml fails with no jobs.
 """
 from mop import gitlab
 from mop.cli import lib
-from mop.cli.ci._common import parser
+from mop.cli.dev.ci._common import parser
 
 # Хвост короче, чем у `log`: провалившихся джоб бывает несколько, а
-# подробности одной — это уже `mop ci log`.
+# подробности одной — это уже `mop dev ci log`.
 LINES = 30
-
-MCP = {"annotations": "readonly", "args": [
-    {"name": "id", "type": "string", "required": True, "help": "pipeline id"}]}
-
 
 def main(argv):
     p = parser("why")

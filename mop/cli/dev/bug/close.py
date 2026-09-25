@@ -1,7 +1,7 @@
-"""mop bug close <iid> [--comment "..."] [--status S]: close an issue, status::fixed by default
+"""mop dev bug close <iid> [--comment "..."] [--status S]: close an issue, status::fixed by default
 """
 from mop import gitlab
-from mop.cli.bug._common import parser
+from mop.cli.dev.bug._common import parser
 
 
 def main(argv):

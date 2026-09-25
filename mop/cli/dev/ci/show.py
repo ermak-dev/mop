@@ -1,4 +1,4 @@
-"""mop ci show <id> [--failed]: a pipeline's jobs
+"""mop dev ci show <id> [--failed]: a pipeline's jobs
 
 The pipeline's line, then one line per job: status, id, stage, name,
 duration, and "(allow_failure)" for a job whose failure does not fail the
@@ -6,13 +6,7 @@ pipeline. --failed shows only the failures that do.
 """
 from mop import gitlab
 from mop.render import table
-from mop.cli.ci._common import parser
-
-MCP = {"annotations": "readonly", "args": [
-    {"name": "id", "type": "string", "required": True, "help": "pipeline id"},
-    {"name": "failed", "type": "boolean", "flag": "--failed",
-     "help": "only the jobs that failed the pipeline"}]}
-
+from mop.cli.dev.ci._common import parser
 
 def main(argv):
     p = parser("show")
