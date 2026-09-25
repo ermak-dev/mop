@@ -134,6 +134,35 @@ def check_quiet(c):
             not (hasattr(agent, "_conn")))
 
 
+# ── write: дом подставляет узел (#279) ───────────────────────────────────
+# HYPOTHESIS: v_write сверял присланный абсолютный путь с белым списком под
+# своим домом; клиент с чужой установки слал путь со своим MOP_HOME и
+# получал отказ. SOLUTION: paths.writable(HOME, path): относительное имя
+# из белого списка ложится под дом агента; чужой дом -- отказ как прежде.
+# STATUS: FIXED — see #279
+def check_write_home_279(c):
+    import asyncio
+    import base64
+    written = []
+
+    async def bodies_apart(_drv):
+        return []
+    from mop import driver
+    with restored(driver, "write_private", "bodies_apart"):
+        driver.write_private = lambda path, data: written.append((path, data))
+        driver.bodies_apart = bodies_apart
+        b64 = base64.b64encode(b"{}").decode()
+        got = asyncio.run(agent.v_write(None, {"files": [[".claude/.credentials.json", b64]]}))
+        c.expect("write: a relative name lands under the agent's home",
+                 written, [(os.path.join(agent.HOME, ".claude/.credentials.json"), b"{}")])
+        c.expect("write: the answer names the node's file",
+                 got.get("written"), [os.path.join(agent.HOME, ".claude/.credentials.json")])
+        written.clear()
+        got = asyncio.run(agent.v_write(None, {"files": [["/home/nobody/.claude/.credentials.json", b64]]}))
+        c.check("write: another home is refused", "not allowed to write" in (got.get("error") or ""), got)
+        c.check("write: nothing written on refusal", written == [])
+
+
 # ── таймаут шелла -- не успех (#171) ─────────────────────────────────────
 # HYPOTHESIS: bsh() на таймауте отдаёт ("", None), а мутирующие глаголы
 # агента читали это как успех: запись владельца «прошла», type и Escape
@@ -929,7 +958,7 @@ def check_junk_without_templates_276(c):
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
-                  check_timeouts_171, check_unclaim_181, check_intake,
+                  check_write_home_279, check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
                   check_gates_40, check_caller_207, check_git_identity_167,
                   check_state_fact_224, check_no_screen_fact_236,

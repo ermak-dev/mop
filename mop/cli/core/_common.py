@@ -5,7 +5,7 @@
 import os
 
 from mop.cli import lib
-from mop.common import config, llm, manifest, puppets
+from mop.common import config, llm, manifest, paths, puppets
 from mop.client import keys
 
 
@@ -72,4 +72,4 @@ def push_llm_keys(llm):
         return
     bad = [f"{n}: {r}" for n, r in sorted(results.items()) if r != "OK"]
     if bad:
-        lib.fail(f"{puppets.SECRETS_FILE} did not reach every node: " + "; ".join(bad))
+        lib.fail(f"{paths.NODE_SECRETS} did not reach every node: " + "; ".join(bad))

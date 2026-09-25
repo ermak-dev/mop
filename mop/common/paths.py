@@ -27,6 +27,16 @@ BOOTSTRAP = "bootstrap"                      # файлы bootstrap'а у сер
 PROJECTS = "projects"                        # реестр проектов сервера
 NODE_ENV = "node.env"                        # что узел знает о себе
 
+# Что глагол `write` агента имеет право положить, относительно дома пула
+# (#279). Дом здесь не пишется: его знает узел, а не тот, кто шлёт. Раньше
+# клиент слал абсолютный путь из MOP_HOME своей установки, и на чужом
+# сервере (дом /home/mop против /home/ermak оператора) агент отказывал по
+# каждому узлу -- `mop login` с машины оператора не работал никуда, кроме
+# своей установки.
+CREDENTIALS = ".claude/.credentials.json"    # логин claude.ai
+NODE_SECRETS = f"{DIR}/{SECRETS_ENV}"        # ключи LLM
+WRITABLE = (CREDENTIALS, NODE_SECRETS)
+
 
 def local(*parts):
     """Путь в ~/.config/mop этого процесса. Дом -- на момент вызова, как у
@@ -38,3 +48,19 @@ def local(*parts):
 def under(home, *parts):
     """Путь в .config/mop чужого дома (дом пула в теле, на узле)."""
     return os.path.join(home, DIR, *parts)
+
+
+def writable(home, path):
+    """Абсолютный путь файла белого списка под домом `home`, либо None.
+
+    Принимаются относительное имя из WRITABLE (клиенты с #279) и та же
+    вещь абсолютно, с домом самого узла в префиксе (клиенты до #279, пока
+    все не обновились). Сравнение -- по нормализованной строке: обход через
+    `..` и любой другой файл дают None, и агент отказывает."""
+    if not path or not home:
+        return None
+    for name in WRITABLE:
+        full = os.path.join(home, name)
+        if os.path.normpath(path) in (name, full):
+            return full
+    return None

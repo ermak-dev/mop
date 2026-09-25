@@ -71,12 +71,10 @@ DRIVER = driver.current()
 SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status")
 KEYS_ALLOWED = ("Escape",)
 
-# Куда `write` имеет право писать. Токена Nomad в списке нет и не будет: узлы
-# лишились его вместе с переездом на шину.
-WRITABLE = (
-    f"{HOME}/.claude/.credentials.json",
-    paths.under(HOME, paths.SECRETS_ENV),
-)
+# Куда `write` имеет право писать -- paths.WRITABLE под домом ЭТОГО узла
+# (#279): клиент называет файл относительно дома пула, дом подставляет
+# агент. Токена Nomad в списке нет и не будет: узлы лишились его вместе с
+# переездом на шину.
 
 # Ростер тел перечисляет драйвер (у host — по сокетам tmux в /tmp/tmux-<uid>):
 # на гипервизоре этот каталог пуст, и знать о нём агенту незачем. Соглашение
@@ -664,9 +662,10 @@ async def v_write(_conn, req):
     исполнение кода через ~/.bashrc."""
     files = []
     for path, b64 in req.get("files") or []:
-        if path not in WRITABLE:
+        full = paths.writable(HOME, path)
+        if not full:
             return {"error": f"agent is not allowed to write to {path}"}
-        files.append((path, base64.b64decode(b64)))
+        files.append((full, base64.b64decode(b64)))
 
     # На узел — всегда: отсюда драйвер сеет файл в каждое новое тело при
     # подъёме, и узел обязан держать свежую копию, даже когда тел сейчас нет.
