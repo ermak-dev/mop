@@ -22,7 +22,6 @@ import time
 from datetime import datetime
 
 from . import bus, puppets, state, usage
-from . import nodes as pool_nodes
 
 STATES_EVERY = 15      # с: ростер Nomad + состояния с узлов
 SIZES_EVERY = 120      # с: обмер du — тяжёлый IO, nice, но всё же
@@ -192,7 +191,7 @@ class Collector:
         while True:
             try:
                 rows = puppets.puppet_rows(sizes=False)
-                nodes = pool_nodes.rows()
+                nodes = puppets.nodes()
                 with self._cond:
                     self.rows, self.nodes = rows, nodes
                     self.at = time.time()
