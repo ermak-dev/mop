@@ -428,6 +428,29 @@ def main():
     # выводе), зелёный после.
     # STATUS: FIXED — see #226
 
+    # ─── интеграционная ветка мастера в инструкциях MCP (#250) ────────────
+    # HYPOTHESIS: #249 отдал ветку человека сессии мастера переменной
+    # MOP_BRANCH и одной фразой в шаге 0 скилла; мастер rudesktop, стартовав
+    # с MOP_BRANCH=swarm, всё равно вывел ветку по origin/HEAD и истории
+    # merge и назвал beta3.1. Инструкции сервера `mop mcp` сессия читает при
+    # каждом старте без всякого скилла, и о ветке они молчали.
+    # SOLUTION: mcp.instructions(environ) -- чистая функция текста; с
+    # MOP_BRANCH в нём абзац, называющий ветку базой веток тикетов, целью
+    # landing и тем, что мастер называет в диспатче, и что ветка по умолчанию
+    # репозитория тут не голосует. Без переменной -- прежний текст.
+    # STATUS: FIXED — see #250
+    plain = mcp.instructions({"MOP_PROJECT": "rudesktop"})
+    mine = mcp.instructions({"MOP_PROJECT": "rudesktop", "MOP_BRANCH": "swarm"})
+    check("#250 no branch, no branch talk", "integration branch" in plain.lower(), False)
+    check("#250 the branch is named", "`swarm`" in mine, True)
+    check("#250 named as the integration branch",
+          "integration branch" in mine.lower(), True)
+    check("#250 the default branch does not decide",
+          "default branch" in mine.lower(), True)
+    check("#250 base of ticket branches and landing target",
+          "origin/swarm" in mine and "land" in mine.lower(), True)
+    check("#250 the plain text is kept verbatim in front", mine.startswith(plain), True)
+
     print(f"channel: {cases - bad}/{cases}" + (" FAILED" if bad else " ok"))
     return 1 if bad else 0
 

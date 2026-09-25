@@ -49,9 +49,7 @@ from mop import bus, busnames, channel, cli, session, puppets, state  # noqa: E4
 from mop.cli import lib                                   # noqa: E402
 from mop.render import table                              # noqa: E402
 
-app = MCPServer(
-    "mop",
-    instructions=(
+INSTRUCTIONS = (
         "Pool of claude puppets on top of Nomad.\n\n"
         "This is the only channel to the pool: to message a puppet or find out "
         "who's free, use `send` and `agents` from here. The built-in "
@@ -67,8 +65,30 @@ app = MCPServer(
         "The other tools are the mop commands themselves, run from this "
         "session's working copy: their output is the answer, and a command "
         "that succeeds quietly answers `done` — the result shows in `agents`."
-    ),
 )
+
+
+def instructions(environ):
+    """Текст инструкций сервера. Чистая функция (#250).
+
+    Интеграционная ветка человека (#249) приезжает сессии мастера в
+    MOP_BRANCH, и одной фразы в скилле оказалось мало: мастер вывел ветку по
+    origin/HEAD и истории merge. Инструкции сервера сессия читает при каждом
+    старте, до всякого скилла, -- поэтому ветка названа здесь, и названа так,
+    чтобы косвенные признаки не голосовали."""
+    branch = (environ.get("MOP_BRANCH") or "").strip()
+    if not branch:
+        return INSTRUCTIONS
+    return INSTRUCTIONS + (
+        f"\n\nThe integration branch of this master is `{branch}` (MOP_BRANCH, "
+        f"from `git config mop.branch` of the operator's working copy). It is "
+        f"the base of every ticket branch (`origin/{branch}`), the target of "
+        f"every landing, and the branch you name in every dispatch. The "
+        f"repository's default branch, origin/HEAD and where the team's merges "
+        f"go do not decide this: the operator did.")
+
+
+app = MCPServer("mop", instructions=instructions(os.environ))
 
 def is_master():
     """Есть ли у нас право управлять пулом. Смотрим, ЧЬИ У НАС КРЕДЫ.

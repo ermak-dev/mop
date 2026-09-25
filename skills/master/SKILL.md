@@ -32,8 +32,10 @@ older than this skill wherever they disagree, and is read first.
 
 From the project's rules file, stated back to the operator in your first
 message so a wrong assumption dies before it reaches a puppet: the
-integration branch — `$MOP_BRANCH` in this shell when it is set (the
-operator's own branch, `git config mop.branch`, #249), else the one the
+integration branch — run `echo "$MOP_BRANCH"` FIRST: a non-empty value is
+the operator's own branch (`git config mop.branch`, #249) and it IS the
+integration branch, whatever origin/HEAD, the repository's default branch
+or the team's merge history suggest; only when it is empty, the one the
 rules name; the tracker and the exact commands to read, comment,
 take and transfer tickets — **all run in YOUR session, never in a puppet's**;
 what the landing gate is and what the project leaves to CI; the format
