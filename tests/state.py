@@ -522,6 +522,7 @@ def main():
     check_treatment(c)
     check_stale_spec(c)
     check_clone_agreement(c)
+    check_invariants_273(c)
     for state, want in FREE_CASES:
         c.expect(f"is_free({state!r})", is_free(state and state.kind), want)
     return c.report("state")
@@ -568,6 +569,75 @@ def check_clone_agreement(c):
         }
         for who, says in got.items():
             c.expect(f"#266 {who} on {what}: holds work", says, holds)
+
+
+
+def check_invariants_273(c):
+    """HYPOTHESIS (#273): доменные значения заморожены, но без инвариантов:
+    CloneFacts(dirty=-1), Body(vmid="abc"), JobMeta(origin="") строятся
+    молча, и CloneFacts.known пропускает полусобранный объект -- каждый
+    читатель проверяет сам.
+    SOLUTION: __post_init__ отказывает ValueError с именем поля, одним
+    местом; from_dict терпит провод старого агента (нет ключа -- None), но
+    не мусор (не тот тип -- ValueError).
+    STATUS: FIXED — see #273"""
+    from mop.common.domain import Body, CloneFacts, Gone, JobMeta
+
+    def refused(what, build, field):
+        try:
+            got = build()
+        except ValueError as e:
+            c.check(f"#273 {what}: the refusal names {field}", field in str(e), str(e))
+            return
+        c.fail(f"#273 {what} must be refused", repr(got))
+
+    def fine(what, build):
+        try:
+            build()
+            c.check(f"#273 {what} builds", True)
+        except ValueError as e:
+            c.fail(f"#273 {what} must build", str(e))
+
+    for what, build, field in [
+            ("CloneFacts(dirty=-1)", lambda: CloneFacts(dirty=-1, ahead=0), "dirty"),
+            ("CloneFacts(ahead=-2)", lambda: CloneFacts(dirty=0, ahead=-2), "ahead"),
+            ("CloneFacts(dirty='3')", lambda: CloneFacts(dirty="3", ahead=0), "dirty"),
+            ("CloneFacts(dirty=True)", lambda: CloneFacts(dirty=True, ahead=0), "dirty"),
+            ("CloneFacts half-built (dirty only)", lambda: CloneFacts(dirty=1), "ahead"),
+            ("CloneFacts half-built (ahead only)", lambda: CloneFacts(ahead=1), "dirty"),
+            ("Body(vmid='abc')", lambda: Body("pu-mop-1", vmid="abc"), "vmid"),
+            ("Body(vmid=True)", lambda: Body("pu-mop-1", vmid=True), "vmid"),
+            ("Body(created='yes')", lambda: Body("pu-mop-1", created="yes"), "created"),
+            ("Body(name='nope')", lambda: Body("nope"), "name"),
+            ("Body(name='pu-mop-1; id')", lambda: Body("pu-mop-1; id"), "name"),
+            ("Gone(target='')", lambda: Gone(""), "target"),
+            ("Gone(target=None)", lambda: Gone(None), "target"),
+            ("JobMeta(origin='')", lambda: JobMeta("", "claude"), "origin"),
+            ("JobMeta(origin=5)", lambda: JobMeta(5, "claude"), "origin"),
+            ("JobMeta(llm=7)", lambda: JobMeta("git@h:g/mop.git", 7), "llm"),
+            ("CloneFacts.from_dict garbage", lambda: CloneFacts.from_dict({"dirty": "x", "ahead": 0}), "dirty"),
+            ("Body.from_dict garbage created", lambda: Body.from_dict({"name": "pu-mop-1", "created": "yes"}), "created"),
+            ("Gone.from_dict without target", lambda: Gone.from_dict({"reset": True}), "target")]:
+        refused(what, build, field)
+    for what, build in [
+            ("CloneFacts() (nothing known)", lambda: CloneFacts()),
+            ("CloneFacts(dirty=0, ahead=0)", lambda: CloneFacts(dirty=0, ahead=0)),
+            ("CloneFacts(dirty=3, ahead=1)", lambda: CloneFacts(dirty=3, ahead=1)),
+            ("Body host", lambda: Body("pu-mop-1")),
+            ("Body pve", lambda: Body("pu-mop-1", 9003, "10.77.35.59", True)),
+            ("Gone host", lambda: Gone("/home/u/puppets/pu-mop-1/target")),
+            ("Gone pve", lambda: Gone("body 9003", 9003)),
+            ("JobMeta full", lambda: JobMeta("git@h:g/mop.git", "claude", "feat/1", "3")),
+            ("JobMeta without origin (a job without meta)", lambda: JobMeta(None, None)),
+            ("JobMeta.from_meta({})", lambda: JobMeta.from_meta({})),
+            ("Body.from_dict of an old agent (no created)", lambda: Body.from_dict({"name": "pu-mop-1", "body": None}))]:
+        fine(what, build)
+    old = CloneFacts.from_dict({"cur": "master", "def": "master", "origin": "git@h:g/mop.git",
+                                "owner": None})
+    c.check("#273 an old agent's clone without dirty/ahead reads, and is not known",
+            old is not None and old.known is False, repr(old))
+    c.expect("#273 Body.from_dict of an old agent: created is False",
+             Body.from_dict({"name": "pu-mop-1", "body": None}).created, False)
 
 
 if __name__ == "__main__":

@@ -286,8 +286,12 @@ def gate_table_267():
     table = []
     for owner in owners:
         for w in work:
-            clone = CloneFacts("master", "master", "git@x:a/mop.git",
-                               w.get("dirty"), w.get("ahead"), owner)
+            # По именам (#273): позиционный вызов пережил вставку поля home
+            # (#272) и с тех пор клал origin в home, dirty в origin и
+            # владельца в ahead -- таблица сверяла обе стороны на мусоре.
+            clone = CloneFacts(branch="master", default_branch="master",
+                               origin="git@x:a/mop.git", dirty=w.get("dirty"),
+                               ahead=w.get("ahead"), owner=owner)
             for caller in ("alice", "bob", None):
                 for force in (False, True):
                     table.append(("pu-mop-1", clone, caller, force))
