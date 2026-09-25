@@ -20,6 +20,7 @@ import socket
 from urllib.parse import urlparse
 
 from ..common import busnames, config
+from ..common.domain import Body, Gone
 from . import (HOME, PREFIX, bad_name, clone_dir, sh, target_dir, valid_name,
                why, write_private)
 
@@ -46,7 +47,7 @@ async def ensure(name, params=None):
     это и есть ответ драйвера host на вопрос «в чём живёт папет»."""
     if not valid_name(name):
         return {"error": bad_name(name)}
-    return {"name": name, "body": None, "created": False, "address": None}
+    return Body(name).to_dict()
 
 
 async def destroy(name, branch=None):
@@ -87,7 +88,7 @@ async def destroy(name, branch=None):
     _, code = await sh(f"rm -rf {target}", timeout=600)
     if code != 0:
         return {"error": f"rm {target}: {why('', code, 600)}"}
-    return {"reset": True, "target": target}
+    return Gone(target).to_dict()
 
 
 def _server_alive(path):

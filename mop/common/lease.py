@@ -89,3 +89,22 @@ def verdict(owner, me, clone, now, force=False):
         return "pass", None
     ok, why = may_touch(owner, me, clone, now, force, retry="send")
     return ("take" if ok else "refuse"), why
+
+
+def gate(name, clone, me, now, force=False, operator=False):
+    """Ворота изменяющего глагола над папетом name (#40). -> (отказ | None,
+    заметка | None). clone -- domain.CloneFacts или None, его owner -- аренда.
+
+    Одна функция на обе стороны (#267): сервис кластера (restart, stop,
+    update, delete) и агент узла (type, wipe) писали её каждый у себя.
+    Сторона держит только своё: откуда факты клона и что отвечать."""
+    ok, note = may_touch(clone and clone.owner, me, clone, now, force, operator)
+    return (None, note) if ok else (f"{name}: {note}", None)
+
+
+def noted(out, note):
+    """Ответ глагола с заметкой о забранной аренде (owner_note, как у send):
+    только у удачного ответа и только если заметка есть. -> новый словарь."""
+    if note and not out.get("error"):
+        return dict(out, owner_note=note)
+    return out

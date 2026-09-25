@@ -818,6 +818,13 @@ def main():
     cases, bad = cases + c, bad + b
 
     try:
+        c, b = check_body_gone_267()
+    except Exception as e:
+        c, b = 1, 1
+        print(f"FAILED  check_body_gone_267: {type(e).__name__}: {e}")
+    cases, bad = cases + c, bad + b
+
+    try:
         c, b = check_clone_lock_195()
     except Exception as e:
         c, b = 1, 1
@@ -1328,6 +1335,83 @@ def check_driver_rule_175():
         nomad.nodes_meta, nomad.node_dynamic_meta, nomad.set_node_meta = saved
     check(f"`or DEFAULT` outside of_node: {found}",
           all(x.startswith("mop/driver/__init__.py") for x in found) and len(found) <= 1)
+    return cases, bad
+
+
+def check_body_gone_267():
+    """HYPOTHESIS (#267): ответы драйверов разные по драйверу -- ensure: body
+    None у host и vmid у pve; destroy: {reset, target} у host и {destroyed,
+    target} у pve, -- и каждый читатель (driver run, sweep, wipe агента)
+    разбирает словарь своими ключами.
+    SOLUTION: domain.Body(name, vmid, address, created) и domain.Gone(target,
+    vmid, reset) -- одно значение на оба драйвера; драйвер строит его, а по
+    шине и в ответе уходит прежний словарь (to_dict). STATUS: FIXED — see #267"""
+    import asyncio
+    from mop.common import domain
+    from mop.driver import host, pve
+
+    cases = bad = 0
+
+    def check(what, got, want):
+        nonlocal cases, bad
+        cases += 1
+        if got != want:
+            bad += 1
+            print(f"FAILED  #267 {what}: got {got!r}, want {want!r}")
+
+    Body, Gone = getattr(domain, "Body", None), getattr(domain, "Gone", None)
+    if Body is None or Gone is None:
+        print("FAILED  #267 no domain.Body / domain.Gone")
+        return 1, 1
+
+    async def ok_sh(script, timeout=20, prefix=()):
+        return "", 0
+
+    name = "pu-mop-1"
+
+    async def standing(_v):
+        return name
+    saved = (host.sh, pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            key = os.path.join(d, "mop-body")
+            with open(key + ".pub", "w") as f:
+                f.write("ssh-ed25519 AAAA node\n")
+            pve.SSH_KEY, pve._seed_files, pve._hostname = key, (lambda: []), standing
+            host.sh = pve.sh = ok_sh
+            vmid = pve.vmid_of(name)
+
+            r = asyncio.run(host.ensure(name))
+            check("host.ensure wire", r, {"name": name, "body": None, "created": False,
+                                          "address": None})
+            check("host.ensure value", Body.from_dict(r), Body(name))
+            check("host.ensure round trip", Body.from_dict(r).to_dict(), r)
+            r = asyncio.run(pve.ensure(name))
+            b = Body.from_dict(r)
+            check("pve.ensure value", (b.name, b.vmid, b.created), (name, vmid, False))
+            check("pve.ensure round trip", b.to_dict(), r)
+
+            r = asyncio.run(host.destroy(name))
+            check("host.destroy wire keys", sorted(r), ["reset", "target"])
+            g = Gone.from_dict(r)
+            check("host.destroy value", (g.target, g.vmid, g.reset), (r["target"], None, True))
+            check("host.destroy round trip", g.to_dict(), r)
+            r = asyncio.run(pve.destroy(name))
+            check("pve.destroy wire", r, {"destroyed": vmid, "target": f"body {vmid}"})
+            g = Gone.from_dict(r)
+            check("pve.destroy value", (g.target, g.vmid, g.reset), (f"body {vmid}", vmid, False))
+            check("pve.destroy round trip", g.to_dict(), r)
+            check("a refusal is no value", (Body.from_dict({"error": "x"}),
+                                            Gone.from_dict({"error": "x"})), (None, None))
+    finally:
+        host.sh, pve.sh, pve.SSH_KEY, pve._seed_files, pve._hostname = saved
+    # Драйверы строят значение, читатели читают его -- не ключи словаря.
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    for rel, needle in (("mop/driver/host.py", "Body("), ("mop/driver/host.py", "Gone("),
+                        ("mop/driver/pve.py", "Body("), ("mop/driver/pve.py", "Gone("),
+                        ("mop/cli/driver/run.py", "Body.from_dict("),
+                        ("mop/cli/driver/sweep.py", "Gone.from_dict(")):
+        check(f"{rel} uses {needle}", needle in open(os.path.join(root, rel)).read(), True)
     return cases, bad
 
 

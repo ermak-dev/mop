@@ -16,6 +16,7 @@ import time
 
 from mop.cli import lib
 from mop.common import bus, busnames, config
+from mop.common.domain import Body
 from mop import driver
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
@@ -150,10 +151,10 @@ def main(argv):
     d = driver.current()
 
     r = asyncio.run(d.ensure(name, ensure_params(name, os.environ)))
-    if r.get("error"):
-        sys.exit(f"no body for {name}: {r['error']}")
-    print(f"{name}: body {r.get('body') or 'the node itself'}"
-          + (f" at {r['address']}" if r.get("address") else ""), flush=True)
+    body = Body.from_dict(r)
+    if body is None:
+        sys.exit(f"no body for {name}: {r.get('error')}")
+    print(f"{name}: {body.describe()}", flush=True)
 
     # Врапер идёт своим соединением (run_argv), а гашение сессии — обычным
     # (argv): первое живёт столько же, сколько папет, и мультиплексировать его

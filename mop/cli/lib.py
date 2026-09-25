@@ -284,14 +284,14 @@ def pool_lines():
     try:
         out = []
         for n in puppets.pool():
-            if n["status"] != "ready":
-                out.append(f"  {n['name']}: {n['status']}")
-            elif "error" in n:
-                out.append(f"  {n['name']}: {n['error']}")
+            if n.status != "ready":
+                out.append(f"  {n.name}: {n.status}")
+            elif n.error:
+                out.append(f"  {n.name}: {n.error}")
             else:
-                out.append(f"  {n['name']}: free {n['free_mb'] / 1024:.0f}/"
-                           f"{n['total_mb'] / 1024:.0f} GB, "
-                           f"slots {render.ratio(n['slots'], n.get('slots_total'))}")
+                out.append(f"  {n.name}: free {n.free_mb / 1024:.0f}/"
+                           f"{n.total_mb / 1024:.0f} GB, "
+                           f"slots {render.ratio(n.slots, n.slots_total)}")
         return out
     except Exception as e:
         return [f"  {e}"]

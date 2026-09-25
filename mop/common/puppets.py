@@ -11,7 +11,7 @@ import time
 
 from . import bus, config, lease, llm, state
 from .. import driver
-from .domain import CloneFacts, JobMeta, holds_work
+from .domain import CloneFacts, JobMeta, Node, holds_work
 from .state import PuppetRow, action_for, failing_row, silent, spec_action, verdict
 
 PROJECT = config.PROJECT
@@ -343,21 +343,20 @@ def pool():
     Отказ сервиса -- bus.Refused с его текстом, а не пустой пул (#163):
     пустота читалась как «узлов нет», и по ней работало всё, что идёт через
     ready_nodes."""
-    return bus.call_cluster("pool").get("nodes") or []
+    return [Node.from_pool(n) for n in bus.call_cluster("pool").get("nodes") or []]
 
 
 def nodes():
     """Узлы пула через шину -- для всех, кроме сервера. Глагол оператора:
     строка узла говорит, чьи образы на нём собраны и кто его делит.
     Отказ сервиса -- Refused, а не пустая таблица (#163)."""
-    return bus.call_cluster("nodes").get("nodes") or []
+    return [Node.from_row(n) for n in bus.call_cluster("nodes").get("nodes") or []]
 
 
 def ready_nodes():
     """Имена узлов, на которые Nomad вообще станет что-то ставить. Через шину:
     тот же ответ, что раньше давал nomad.ready_nodes() на машине оператора."""
-    return {n["name"] for n in pool()
-            if n.get("status") == "ready" and n.get("eligible", True)}
+    return {n.name for n in pool() if n.placeable}
 
 
 # ─── диагностика ─────────────────────────────────────────────────────────

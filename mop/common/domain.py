@@ -183,6 +183,127 @@ def holds_work(clone):
     return bool(clone.dirty or clone.ahead)
 
 
+# ─── узел ────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class Node:
+    """Узел пула (#267). По шине он ходит двумя формами, и провод не
+    двигается -- страница и командлеты читают ключи по имени, снимки
+    закреплены:
+      глагол pool  (cluster.nomad_pool): {name, status} у неготового,
+                   {name, status, error} у сломанного, у готового -- ёмкость
+                   {free_mb, total_mb, slots, slots_total, eligible};
+      глагол nodes (nodes.row): {name, driver, [error], serves, state,
+                   free_mb, total_mb, slots, slots_total} -- всегда все,
+                   ёмкость None у узла вне пула.
+    Каждая форма -- своя пара from_/to_; читатели идут через значение."""
+    name: str
+    status: str = None
+    free_mb: int = None
+    total_mb: int = None
+    slots: int = None
+    slots_total: int = None
+    eligible: bool = True
+    error: str = None
+    driver: str = None
+    serves: str = None
+    state: str = None
+
+    @property
+    def placeable(self):
+        """Станет ли Nomad что-то сюда ставить: готов и открыт планированию."""
+        return self.status == "ready" and self.eligible
+
+    # ── форма глагола pool ──
+    def to_pool(self):
+        if self.status != "ready":
+            return {"name": self.name, "status": self.status}
+        if self.error:
+            return {"name": self.name, "status": self.status, "error": self.error}
+        return {"name": self.name, "status": self.status, "free_mb": self.free_mb,
+                "total_mb": self.total_mb, "slots": self.slots,
+                "slots_total": self.slots_total, "eligible": self.eligible}
+
+    @classmethod
+    def from_pool(cls, d):
+        return cls(d["name"], d.get("status"), d.get("free_mb"), d.get("total_mb"),
+                   d.get("slots"), d.get("slots_total"), d.get("eligible", True),
+                   d.get("error"))
+
+    # ── форма глагола nodes ──
+    def to_row(self):
+        # Поле error -- только у узла с отказом (#175): строка исправного прежняя.
+        return {"name": self.name, "driver": self.driver,
+                **({"error": self.error} if self.error else {}),
+                "serves": self.serves, "state": self.state,
+                "free_mb": self.free_mb, "total_mb": self.total_mb,
+                "slots": self.slots, "slots_total": self.slots_total}
+
+    @classmethod
+    def from_row(cls, d):
+        return cls(d["name"], free_mb=d.get("free_mb"), total_mb=d.get("total_mb"),
+                   slots=d.get("slots"), slots_total=d.get("slots_total"),
+                   error=d.get("error"), driver=d.get("driver"),
+                   serves=d.get("serves"), state=d.get("state"))
+
+
+# ─── тело папета: ответы драйвера ────────────────────────────────────────
+@dataclass(frozen=True)
+class Body:
+    """В чём живёт папет -- ответ ensure драйвера (#267). vmid None -- тело
+    это сам узел (host), иначе номер тела гипервизора (pve).
+
+    По шине и из драйвера -- прежний словарь {name, body, created, address}:
+    раньше host отдавал body None, pve -- vmid, и каждый читатель разбирал
+    ключи сам."""
+    name: str
+    vmid: object = None
+    address: str = None
+    created: bool = False
+
+    def to_dict(self):
+        return {"name": self.name, "body": self.vmid, "created": self.created,
+                "address": self.address}
+
+    @classmethod
+    def from_dict(cls, d):
+        """Ответ ensure -> Body; отказ ({error}) или пусто -- None."""
+        if not d or d.get("error"):
+            return None
+        return cls(d["name"], d.get("body"), d.get("address"), bool(d.get("created")))
+
+    def describe(self):
+        """Строка `mop driver run`: чем стало тело и где оно."""
+        return (f"body {self.vmid or 'the node itself'}"
+                + (f" at {self.address}" if self.address else ""))
+
+
+@dataclass(frozen=True)
+class Gone:
+    """Что снёс destroy драйвера (#267): target -- что именно, vmid -- тело
+    гипервизора целиком (pve) либо None -- сброшен клон на самом узле (host).
+
+    Провод прежний: host -- {reset, target}, pve -- {destroyed, target}."""
+    target: str
+    vmid: object = None
+
+    @property
+    def reset(self):
+        """Клон сброшен на месте, а тело осталось: узел снести нельзя."""
+        return self.vmid is None
+
+    def to_dict(self):
+        if self.reset:
+            return {"reset": True, "target": self.target}
+        return {"destroyed": self.vmid, "target": self.target}
+
+    @classmethod
+    def from_dict(cls, d):
+        """Ответ destroy -> Gone; отказ ({error}) или пусто -- None."""
+        if not d or d.get("error"):
+            return None
+        return cls(d.get("target"), d.get("destroyed"))
+
+
 # ─── глагол ──────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Verb:

@@ -192,7 +192,9 @@ class Collector:
         while True:
             try:
                 rows = puppets.puppet_rows(sizes=False)
-                nodes = puppets.nodes()
+                # Страница читает ключи строки nodes по имени: наружу --
+                # прежняя форма провода (#267).
+                nodes = [n.to_row() for n in puppets.nodes()]
                 with self._cond:
                     self.rows, self.nodes = rows, nodes
                     self.at = time.time()

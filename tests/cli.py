@@ -19,6 +19,7 @@ from mop import cli  # noqa: E402
 from mop.cli import lib  # noqa: E402
 from mop.cli.core import _common  # noqa: E402
 from mop.cli.server import _play  # noqa: E402
+from mop.common import domain  # noqa: E402
 
 # (каталог, имя, подпакет?) — то, что находит обход mop/cli.
 FOUND = [
@@ -638,7 +639,7 @@ def check_refusals_163():
             failed += 1
             print(f"FAIL #245 --puppets with --users must be a usage error: {out!r}")
         puppets.ready_nodes = keep[4]
-        if puppets.pool() != [row]:
+        if puppets.pool() != [domain.Node.from_pool(row)]:
             failed += 1
             print(f"FAIL pool on a normal answer: {puppets.pool()!r}")
     finally:

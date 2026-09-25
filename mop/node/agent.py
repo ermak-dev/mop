@@ -422,14 +422,13 @@ async def _unclaim(name, undo):
 async def _gate(name, req):
     """Ворота владения (#40) изменяющего глагола. -> (отказ|None, заметка|None).
 
-    Та же lease.may_touch, что за send: чужая живая аренда -- отказ с именем
-    владельца. Оператор -- субъект admin, а не поле тела. Зовут под
-    _owner_locks: между проверкой и действием чужой claim не вклинится."""
-    clone = CloneFacts.from_dict(await clone_facts(name))
-    ok, note = lease.may_touch(clone and clone.owner, lease.caller(req)[0], clone, time.time(),
-                               bool(req.get("force")),
-                               req.get("_project") == busnames.ADMIN)
-    return (None, note) if ok else (f"{name}: {note}", None)
+    Та же lease.gate, что у сервиса кластера (#267), и та же may_touch, что
+    за send: чужая живая аренда -- отказ с именем владельца. Оператор --
+    субъект admin, а не поле тела. Зовут под _owner_locks: между проверкой и
+    действием чужой claim не вклинится."""
+    return lease.gate(name, CloneFacts.from_dict(await clone_facts(name)),
+                      lease.caller(req)[0], time.time(), bool(req.get("force")),
+                      req.get("_project") == busnames.ADMIN)
 
 
 async def _gated(name, req, act):
@@ -440,9 +439,7 @@ async def _gated(name, req, act):
         if refused:
             return {"error": refused}
         out = await act()
-    if note and not out.get("error"):
-        out["owner_note"] = note
-    return out
+    return lease.noted(out, note)
 
 
 # ─── git identity владельца (#167) ───────────────────────────────────────
