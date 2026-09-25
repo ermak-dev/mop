@@ -193,7 +193,7 @@ def check_group():
     """`mop ci` — группа с глаголами; MCP только у читающих (#233)."""
     from mop import cli
     out = []
-    verbs = cli.verbs().get("ci")
+    verbs = set(cli.verbs().get("ci") or {})   # дерево (#253): глаголы -- ключи
     want = {"list", "show", "log", "why", "lint", "retry", "cancel", "runners"}
     if verbs != want:
         return [f"mop ci verbs {sorted(verbs or ())}, wanted {sorted(want)}"]

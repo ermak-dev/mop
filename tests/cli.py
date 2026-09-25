@@ -22,8 +22,12 @@ from mop.cli import lib  # noqa: E402
 FOUND = [
     ("core", "add", False), ("core", "list", False), ("pool", "deploy", False),
     ("service", "mcp", False), ("driver", "", True), ("bug", "", True),
+    ("dev", "", True),
 ]
-VERBS = {"driver": {"build", "run"}, "bug": set()}
+# Дерево глаголов (#253): модуль -- {}, подгруппа -- её дерево. Множество
+# прежнего контракта сюда не годится: у подгруппы есть свои глаголы.
+VERBS = {"driver": {"build": {}, "run": {}}, "bug": {},
+         "dev": {"bug": {"new": {}, "list": {}}, "ci": {"list": {}}}}
 
 
 def main():
@@ -34,7 +38,7 @@ def main():
     cat = cli.catalog(FOUND)
     want = {"add": "mop.cli.core.add", "list": "mop.cli.core.list",
             "deploy": "mop.cli.pool.deploy", "mcp": "mop.cli.service.mcp",
-            "driver": "mop.cli.driver", "bug": "mop.cli.bug"}
+            "driver": "mop.cli.driver", "bug": "mop.cli.bug", "dev": "mop.cli.dev"}
     if cat != want:
         failed += 1
         print(f"FAIL catalog: {cat}")
@@ -58,6 +62,12 @@ def main():
         # так переезжают группы, пока их не разрезали (#77).
         (["bug", "new", "t"], ("mop.cli.bug", ["new", "t"])),
         (["driver"], ("mop.cli.driver", [])),
+        # Вложенные группы (#253): спуск по дереву, пока следующий argv --
+        # глагол; подгруппа без глагола отвечает сама, чужое слово -- ей же.
+        (["dev", "bug", "new", "t"], ("mop.cli.dev.bug.new", ["t"])),
+        (["dev", "bug"], ("mop.cli.dev.bug", [])),
+        (["dev", "bug", "nope"], ("mop.cli.dev.bug", ["nope"])),
+        (["dev", "x"], ("mop.cli.dev", ["x"])),
     ]:
         got = cli.resolve(argv, cat, VERBS)
         if got != want:
@@ -227,7 +237,7 @@ def main():
             doc = f.read()
         # Глагол бывает и через дефис: `mop driver pve-facts` (#158).
         listed = set(re.findall(rf"^  mop {group} ([a-z][a-z-]*)", doc, re.M))
-        missing = listed - have.get(group, set())
+        missing = listed - set(have.get(group) or {})   # дерево (#253): глаголы -- ключи
         if missing:
             failed += 1
             print(f"FAIL group {group}: verbs without a module: {sorted(missing)}")
@@ -384,13 +394,65 @@ def check_mcp_declarations():
 
     # Имя инструмента -- слова команды через подчёркивание.
     found = [("core", "add", False), ("node", "", True), ("service", "mcp", False)]
-    group_verbs = {"node": {"drain", "up"}}
+    group_verbs = {"node": {"drain": {}, "up": {}}}
     names = {n: words for n, words, _ in cli.tool_commands(found, group_verbs)}
     want = {"add": ["add"], "node": ["node"], "node_drain": ["node", "drain"],
             "node_up": ["node", "up"], "mcp": ["mcp"]}
     if names != want:
         failed += 1
         print(f"FAIL tool_commands: {names}")
+
+    # ── #253: вложенные группы -- дерево, имена по пути, приватное, прежние имена
+    # HYPOTHESIS: диспетчер знает один уровень, `mop dev bug new` и
+    # `mop server user add` некуда положить. SOLUTION: verbs() -- дерево,
+    # tool_commands спускается по нему и именует инструмент словами через
+    # подчёркивание; пространства из PRIVATE (dev) в MCP не выдаются --
+    # внутренние команды разработчика модели не нужны; unalias переписывает
+    # прежнее имя по таблице LEGACY молча, на один релиз.
+    # STATUS: FIXED — see #253
+    nested = [("core", "add", False), ("server", "", True), ("dev", "", True)]
+    tree = {"server": {"deploy": {}, "user": {"add": {}, "passwd": {}}},
+            "dev": {"bug": {"new": {}}}}
+    got = {n: (words, os.path.relpath(path, cli.PACKAGE))
+           for n, words, path in cli.tool_commands(nested, tree, private=())}
+    want = {"add": (["add"], "core/add.py"),
+            "server": (["server"], "server/__init__.py"),
+            "server_deploy": (["server", "deploy"], "server/deploy.py"),
+            "server_user": (["server", "user"], "server/user/__init__.py"),
+            "server_user_add": (["server", "user", "add"], "server/user/add.py"),
+            "server_user_passwd": (["server", "user", "passwd"], "server/user/passwd.py"),
+            "dev": (["dev"], "dev/__init__.py"),
+            "dev_bug": (["dev", "bug"], "dev/bug/__init__.py"),
+            "dev_bug_new": (["dev", "bug", "new"], "dev/bug/new.py")}
+    if got != want:
+        failed += 1
+        print(f"FAIL #253 nested tool_commands: {got}")
+    names = {n for n, _, _ in cli.tool_commands(nested, tree)}
+    if any(n.startswith("dev") for n in names) or "server_user_add" not in names:
+        failed += 1
+        print(f"FAIL #253 PRIVATE must hide dev from the tools and keep server: {sorted(names)}")
+    if "dev" not in cli.PRIVATE:
+        failed += 1
+        print(f"FAIL #253 dev must be private: {cli.PRIVATE}")
+    table = {"bug": ("dev", "bug"), "web": ("server", "web")}
+    for argv, want in [(["bug", "new", "t"], ["dev", "bug", "new", "t"]),
+                       (["web", "--port", "1"], ["server", "web", "--port", "1"]),
+                       (["list"], ["list"]), ([], [])]:
+        got = cli.unalias(argv, table)
+        if got != want:
+            failed += 1
+            print(f"FAIL #253 unalias({argv}) = {got}, want {want}")
+    if not isinstance(cli.LEGACY, dict):
+        failed += 1
+        print("FAIL #253 LEGACY must be the alias table")
+    # verbs() читает дерево с диска: подпакет группы -- подгруппа.
+    d = tempfile.mkdtemp(prefix="mop-test-tree-")
+    for rel in ("g/__init__.py", "g/a.py", "g/s/__init__.py", "g/s/b.py", "g/_hidden.py"):
+        os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
+        open(os.path.join(d, rel), "w").write('"""x"""\n')
+    if cli.verbs(d) != {"g": {"a": {}, "s": {"b": {}}}}:
+        failed += 1
+        print(f"FAIL #253 verbs tree: {cli.verbs(d)}")
 
     # argv из значений инструмента: позиционные по порядку, флаги по имени.
     args = [{"name": "name", "type": "string", "required": True},
@@ -432,17 +494,12 @@ def check_mcp_declarations():
 
     # Каждое объявление в дереве разбирается: кривое уронило бы mop mcp
     # целиком на старте мастера.
-    for section, name, is_pkg in cli.scan():
-        paths = [cli._path_of(section, name, is_pkg)]
-        if is_pkg:
-            paths += [os.path.join(cli.PACKAGE, section, f"{v}.py")
-                      for v in sorted(cli.verbs().get(section, ()))]
-        for path in paths:
-            try:
-                cli.declared(path)
-            except ValueError as e:
-                failed += 1
-                print(f"FAIL {os.path.relpath(path)}: {e}")
+    for _, _, path in cli.tool_commands(cli.scan(), cli.verbs(), private=()):
+        try:
+            cli.declared(path)
+        except ValueError as e:
+            failed += 1
+            print(f"FAIL {os.path.relpath(path)}: {e}")
     return failed
 
 
