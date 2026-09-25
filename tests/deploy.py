@@ -621,6 +621,46 @@ def stdout_readers():
     return sorted(out)
 
 
+# ── add_host в pve-build.yml -- на каждый узел, а не на первый (#278) ─────
+# HYPOTHESIS: задача «Take the body into the inventory for the rest of the
+# run» -- ansible.builtin.add_host, а его action-плагин обходит цикл по
+# хостам (BYPASS_HOST_LOOP = True): выполняется один раз на игру, с фактами
+# первого хоста. На rumop (proxmox-agent1, proxmox-agent2) в mop_building
+# попало только тело agent1; игры сборки на agent2 не игрались, а «Seal the
+# image» идёт по группе puppet и запечатала голое тело сразу после
+# bootstrap -- без git, с кодом 0. На установке с одним контейнерным узлом
+# дефект не виден.
+# SOLUTION: add_host циклом по хостам игры (ansible_play_hosts_all), все поля
+# и прыжок -- из hostvars[<хост цикла>], ни одной голой ссылки на факт
+# текущего хоста.
+# STATUS: FIXED — see #278
+def check_add_host_loop_278(c):
+    plays = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))
+    tasks = [t for p in plays for t in (p.get("tasks") or [])]
+    add = [t for t in tasks if "ansible.builtin.add_host" in t]
+    c.check("pve-build: one add_host task", len(add) == 1, [t.get("name") for t in add])
+    if len(add) != 1:
+        return
+    t = add[0]
+    loop = str(t.get("loop") or "")
+    c.check("pve-build: add_host loops over the play's hosts (it bypasses the host loop)",
+          "ansible_play_hosts" in loop, loop or "no loop")
+    var = (t.get("loop_control") or {}).get("loop_var") or "item"
+    body = yaml.safe_dump({"ansible.builtin.add_host": t["ansible.builtin.add_host"],
+                           "vars": t.get("vars") or {}})
+    facts = ("stage_name", "stage_ip", "stage_vmid", "build_key",
+             "ansible_user", "ansible_host", "ansible_port", "inventory_hostname")
+    for fact in facts:
+        # Голая ссылка -- та, перед которой не стоит hostvars[...].: оба
+        # написания, точкой и скобкой.
+        bare = [m.group(0) for m in re.finditer(
+            r"(?<![\w\['.])%s\b(?!:)" % fact, body)]
+        c.check(f"pve-build: add_host reads {fact} only through hostvars[{var}]",
+              not bare, body)
+    c.check(f"pve-build: add_host reads hostvars of the loop's host, {var}",
+          f"hostvars[{var}]" in body, body)
+
+
 def check_users_reload_199(c):
     """users.conf менялся -- nats перезагружается; решает контрольная сумма."""
     # Кто ещё читает вывод командлета: список закреплён. pve-facts печатает
@@ -1116,6 +1156,7 @@ def main():
     check_body_sizes(c, can_render)
     check_pve_storage_227(c, can_render)
     check_include_loop_var(c)
+    check_add_host_loop_278(c)
     check_users_reload_199(c)
 
     return c.report("deploy")
