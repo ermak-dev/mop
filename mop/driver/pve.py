@@ -37,6 +37,7 @@ import time
 import shlex
 
 from ..common import config
+from ..common.domain import Body, Gone
 from . import HOME, PREFIX, SERVER_PUB, bad_name, sh, project_of_name, valid_name, why
 
 USER = config.get("MOP_USER")
@@ -574,8 +575,7 @@ async def ensure(name, params=None):
     r = await _seed(name, vmid)
     if r.get("error"):
         return r
-    return {"name": name, "body": vmid, "created": created,
-            "address": address_of(name)}
+    return Body(name, vmid, address_of(name), created).to_dict()
 
 
 # Где на узле лежит пакет mop, который надо продублировать в тело: каталог
@@ -755,4 +755,4 @@ async def destroy(name, branch=None):
     if code != 0:
         return {"error": f"{name}: body {vmid} won't go: {why(out, code, 600)}"}
     await _forget_host_key(name)
-    return {"destroyed": vmid, "target": f"body {vmid}"}
+    return Gone(f"body {vmid}", vmid).to_dict()

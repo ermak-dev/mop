@@ -27,18 +27,18 @@ def main(argv):
     чего там нет: драйвер, чьи проекты узел умеет и состояние планирования."""
     got = puppets.nodes()
     rows = [("NODE", "DRIVER", "SERVES", "STATE", "FREE", "TOTAL", "SLOTS")]
-    for r in got:
+    for n in got:
         rows.append((
-            r["name"], r["driver"], r["serves"], r["state"],
-            f"{r['free_mb'] // 1024} GB" if r["free_mb"] is not None else "-",
-            f"{r['total_mb'] // 1024} GB" if r["total_mb"] is not None else "-",
-            ratio(r["slots"], r.get("slots_total")),
+            n.name, n.driver, n.serves, n.state,
+            f"{n.free_mb // 1024} GB" if n.free_mb is not None else "-",
+            f"{n.total_mb // 1024} GB" if n.total_mb is not None else "-",
+            ratio(n.slots, n.slots_total),
         ))
     print("\n".join(table(rows)))
     # Узел с неизвестным драйвером -- в таблице с «?», причина строкой ниже.
-    for r in got:
-        if r.get("error"):
-            print(r["error"])
+    for n in got:
+        if n.error:
+            print(n.error)
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).

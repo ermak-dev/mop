@@ -9,6 +9,7 @@ refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
 from mop.common import bus, puppets
+from mop.common.domain import Gone
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -25,7 +26,7 @@ def main(argv):
         raise LookupError(f"{name}: no allocation — node unknown")
     r = puppets.wipe(alloc["NodeName"], name, force=force)
     lib.note(name, r)
-    print(f"{name}: clone reset to HEAD, target wiped ({r['target']})")
+    print(f"{name}: clone reset to HEAD, target wiped ({Gone.from_dict(r).target})")
 
 
 

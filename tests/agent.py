@@ -959,6 +959,45 @@ def check_usage_by_login_244():
     return out
 
 
+def check_owner_gate_267():
+    """HYPOTHESIS (#267): ворота владения агента (_gate) -- вторая копия
+    cluster.gate: свой вызов lease.may_touch, своя сборка отказа, своя
+    owner_note. SOLUTION: обе стороны -- lease.gate и lease.noted; агент
+    держит только своё: факты клона из тела и оператора по субъекту.
+    Проверка: по той же таблице, что tests/cluster.py, агент отвечает ровно
+    lease.gate. STATUS: FIXED — see #267"""
+    import asyncio
+    from mop.common import lease
+    from cluster import GATE_NOW, gate_table_267
+    out = []
+    gate = getattr(lease, "gate", None)
+    if gate is None:
+        return ["no lease.gate: the gate is written on each side"]
+    saved = (agent.clone_facts, agent.time.time)
+    try:
+        agent.time.time = lambda: GATE_NOW
+        for name, clone, caller, force in gate_table_267():
+            async def facts(_n, clone=clone):
+                return clone.to_dict()
+            agent.clone_facts = facts
+            for project, operator in (("mop", False), (busnames.ADMIN, True)):
+                req = {"name": name, "_project": project,
+                       **({"_caller": caller} if caller else {}),
+                       **({"force": True} if force else {})}
+                got = asyncio.run(agent._gate(name, req))
+                want = gate(name, clone, caller, GATE_NOW, force, operator)
+                if got != want:
+                    out.append(f"agent._gate {caller} over {clone.owner} (force {force}, "
+                               f"{project}): {got!r}, lease.gate {want!r}")
+    finally:
+        agent.clone_facts, agent.time.time = saved
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    src = open(os.path.join(root, "mop", "node", "agent.py")).read()
+    if "lease.may_touch(" in src or "lease.gate(" not in src or "lease.noted(" not in src:
+        out.append("agent.py must gate through lease.gate and note through lease.noted")
+    return out
+
+
 def main():
     failed = []
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
@@ -966,7 +1005,7 @@ def main():
                   check_main_169, check_subject_173, check_unclaim_race_189,
                   check_gates_40, check_caller_207, check_git_identity_167,
                   check_state_fact_224, check_no_screen_fact_236,
-                  check_usage_by_login_244):
+                  check_usage_by_login_244, check_owner_gate_267):
         try:
             failed += check()
         except Exception as e:

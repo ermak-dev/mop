@@ -34,7 +34,7 @@ import base64
 from . import bootstrap, natsconf, nodes, nomad, spec
 from ..common import (bus, busnames, config, creds, domain, landing, lease, project_secrets,
                       projects, puppets, service, state)
-from ..common.domain import CloneFacts, JobMeta, Project, Verb
+from ..common.domain import CloneFacts, JobMeta, Node, Project, Verb
 
 # Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
 CHANNEL = "cluster"
@@ -231,20 +231,18 @@ def nomad_pool():
         if n.get("Datacenter") != nomad.POOL_DC:
             continue
         if n["Status"] != "ready":
-            out.append({"name": n["Name"], "status": n["Status"]})
+            out.append(Node(n["Name"], n["Status"]).to_pool())
             continue
         try:
             free, total = nomad.node_capacity(n)
-            out.append({"name": n["Name"], "status": "ready", "free_mb": free,
-                        "total_mb": total, "slots": free // spec.MEM,
-                        "slots_total": total // spec.MEM,
-                        # Закрытый для планирования узел остаётся ready и место
-                        # на нём показывает честно, но ставить туда Nomad не
-                        # станет — и раздавать креды туда незачем.
-                        "eligible": n.get("SchedulingEligibility") != "ineligible"})
+            out.append(Node(n["Name"], "ready", free_mb=free, total_mb=total,
+                            slots=free // spec.MEM, slots_total=total // spec.MEM,
+                            # Закрытый для планирования узел остаётся ready и
+                            # место на нём показывает честно, но ставить туда
+                            # Nomad не станет — и раздавать креды туда незачем.
+                            eligible=n.get("SchedulingEligibility") != "ineligible").to_pool())
         except Exception as e:
-            out.append({"name": n["Name"], "status": "ready",
-                        "error": nomad.describe_error(e)})
+            out.append(Node(n["Name"], "ready", error=nomad.describe_error(e)).to_pool())
     return out
 
 
@@ -317,16 +315,15 @@ def gate(name, req, facts, now):
     facts -- ответ _clone_of. Аллокации нет -- спросить некого и убивать
     нечего: проходит. Агент не ответил -- «не знаю» не значит «ничей»
     (AGENT SILENT: папет может работать): отказ с причиной, force его
-    снимает. Остальное решает lease.may_touch, как у агента."""
+    снимает. Остальное решает lease.gate, как у агента (#267)."""
     force = bool(req.get("force"))
     if facts and facts.get("error"):
         if force:
             return None, f"owner unknown: {facts['error']}"
         return (f"{name}: cannot tell who leads it — {facts['error']}; "
                 f"repeat with force if you know it is free"), None
-    clone = CloneFacts.from_dict((facts or {}).get("clone"))
-    ok, note = lease.may_touch(clone and clone.owner, lease.caller(req)[0], clone, now, force)
-    return (None, note) if ok else (f"{name}: {note}", None)
+    return lease.gate(name, CloneFacts.from_dict((facts or {}).get("clone")),
+                      lease.caller(req)[0], now, force)
 
 
 def _gated(fn):
@@ -339,10 +336,7 @@ def _gated(fn):
             why, note = gate(req["name"], req, _clone_of(req["name"]), time.time())
             if why:
                 return {"error": why}
-        out = fn(project, req)
-        if note and not out.get("error"):
-            out = dict(out, owner_note=note)
-        return out
+        return lease.noted(fn(project, req), note)
     run.__name__ = fn.__name__
     return run
 

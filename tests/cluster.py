@@ -657,6 +657,116 @@ def check_update_keeps_branch_257():
     return out
 
 
+GATE_NOW = 1_800_000_000
+
+
+def gate_table_267():
+    """Таблица ворот (#267): (владелец, вызывающий, клон, force) -> все
+    сочетания. -> [(name, clone, caller, force)]. Общая для tests/cluster.py
+    и tests/agent.py: обе стороны сверяются с одной функцией."""
+    from mop.common.domain import CloneFacts, Owner
+    owners = (None, Owner("alice", GATE_NOW - 10), Owner("alice", GATE_NOW - 100_000))
+    work = ({"dirty": 0, "ahead": 0}, {"dirty": 2, "ahead": 0}, {})
+    out = []
+    for owner in owners:
+        for w in work:
+            clone = CloneFacts("master", "master", "git@x:a/mop.git",
+                               w.get("dirty"), w.get("ahead"), owner)
+            for caller in ("alice", "bob", None):
+                for force in (False, True):
+                    out.append(("pu-mop-1", clone, caller, force))
+    return out
+
+
+def check_owner_gate_267():
+    """HYPOTHESIS (#267): ворота владения написаны дважды -- cluster.gate и
+    agent._gate, каждая сама зовёт lease.may_touch и сама собирает
+    (None, заметка) | (f"{name}: {заметка}", None), а заметку owner_note
+    каждая прикладывает по-своему.
+    SOLUTION: одна чистая lease.gate и одна lease.noted; сторона держит только
+    своё -- откуда факты клона и как выглядит ответ. STATUS: FIXED — see #267"""
+    from mop.common import lease
+    out = []
+    gate = getattr(lease, "gate", None)
+    if gate is None:
+        return ["no lease.gate: the gate is written on each side"]
+    for name, clone, caller, force in gate_table_267():
+        want = gate(name, clone, caller, GATE_NOW, force)
+        req = {"name": name, **({"_caller": caller} if caller else {}),
+               **({"force": True} if force else {})}
+        got = cluster.gate(name, req, {"clone": clone.to_dict()}, GATE_NOW)
+        if got != want:
+            out.append(f"cluster.gate {caller} over {clone.owner} (force {force}): "
+                       f"{got!r}, lease.gate {want!r}")
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                            "mop", "server", "cluster.py")).read()
+    if "may_touch(" in src or "lease.gate(" not in src:
+        out.append("cluster.py must decide through lease.gate, not may_touch")
+    noted = getattr(lease, "noted", None)
+    if noted is None:
+        out.append("no lease.noted: owner_note is attached on each side")
+    else:
+        for o, note, want in (({"ok": True}, "taken from bob", {"ok": True, "owner_note": "taken from bob"}),
+                              ({"ok": True}, None, {"ok": True}),
+                              ({"error": "x"}, "taken", {"error": "x"})):
+            if noted(o, note) != want:
+                out.append(f"lease.noted({o}, {note!r}) -> {noted(o, note)!r}, wanted {want!r}")
+    return out
+
+
+def check_node_267():
+    """HYPOTHESIS (#267): узел приходит двумя формами словаря -- глагол pool
+    (nomad_pool: {name, status, ...} по-разному по статусу) и глагол nodes
+    (nodes.row: {name, driver, serves, state, ...}), -- и читатели (ready_nodes,
+    pool_lines, mop node, дашборд) разбирают их строковыми ключами каждый сам.
+    SOLUTION: domain.Node -- одно значение, каждая форма провода -- своей
+    парой from_/to_, ключи и их порядок прежние (снимки те же); читатели
+    идут через него. STATUS: FIXED — see #267"""
+    import json
+    from mop.common import domain, puppets, bus
+    from mop.server import nodes
+    out = []
+    Node = getattr(domain, "Node", None)
+    if Node is None:
+        return ["no domain.Node"]
+    pool = [{"name": "a", "status": "down"},
+            {"name": "b", "status": "ready", "error": "meta: boom"},
+            {"name": "c", "status": "ready", "free_mb": 8192, "total_mb": 16384,
+             "slots": 1, "slots_total": 2, "eligible": True},
+            {"name": "d", "status": "ready", "free_mb": 0, "total_mb": 4096,
+             "slots": 0, "slots_total": 0, "eligible": False}]
+    for d in pool:
+        back = Node.from_pool(d).to_pool()
+        if json.dumps(back) != json.dumps(d):
+            out.append(f"pool form round trip: {d} -> {back}")
+    summaries = [({"Name": "c", "Status": "ready"}, {"mop_projects": "mop"}, pool[2]),
+                 ({"Name": "e", "Status": "ready", "Drain": True}, {}, {}),
+                 ({"Name": "f", "Status": "ready"}, {"mop_driver": "no-such"}, {})]
+    for summary, meta, cap in summaries:
+        row = nodes.row(summary, meta, cap)
+        back = Node.from_row(row).to_row()
+        if json.dumps(back) != json.dumps(row):
+            out.append(f"nodes form round trip: {row} -> {back}")
+    keep = bus.call_cluster
+    try:
+        bus.call_cluster = lambda verb, **kw: {"ok": True, "nodes": pool}
+        got = puppets.pool()
+        if not all(isinstance(n, Node) for n in got):
+            out.append(f"puppets.pool must give Node values: {got!r}")
+        # Как было: ready и не закрытый планированию; у сломанного (error)
+        # eligible нет, и он -- по умолчанию открыт.
+        if puppets.ready_nodes() != {"b", "c"}:
+            out.append(f"ready_nodes: ready and not closed, got {puppets.ready_nodes()}")
+        rows = [nodes.row(*x) for x in summaries]
+        bus.call_cluster = lambda verb, **kw: {"ok": True, "nodes": rows}
+        got = puppets.nodes()
+        if not all(isinstance(n, Node) for n in got) or [n.to_row() for n in got] != rows:
+            out.append(f"puppets.nodes must give Node values of the same rows: {got!r}")
+    finally:
+        bus.call_cluster = keep
+    return out
+
+
 def main():
     failed = []
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
@@ -664,7 +774,8 @@ def main():
                   check_secret_verbs, check_verb_table_173,
                   check_forget_inventory_178, check_forget_summary_196,
                   check_gates_40, check_caller_207, check_slots_total_243,
-                  check_update_keeps_branch_257):
+                  check_update_keeps_branch_257, check_owner_gate_267,
+                  check_node_267):
         for line in check():
             failed.append(f"FAIL {check.__name__}: {line}")
     if failed:

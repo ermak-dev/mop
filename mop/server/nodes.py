@@ -5,6 +5,7 @@
 """
 from .. import driver
 from . import nomad
+from ..common.domain import Node
 
 
 def row(summary, meta, cap):
@@ -23,22 +24,17 @@ def row(summary, meta, cap):
     # списка (#175): список отвечает «что где стоит», и чужая опечатка не
     # должна отнимать ответ. Операции над таким узлом отказывают громко.
     try:
-        drv, error = driver.of_node(meta, summary["Name"]), {}
+        drv, error = driver.of_node(meta, summary["Name"]), None
     except RuntimeError as e:
         # Поле error -- только у такого узла: строка исправного прежняя.
-        drv, error = "?", {"error": str(e)}
-    return {"name": summary["Name"],
-            "driver": drv,
-            **error,
-            # mop_projects — ключ меты УЗЛА, прежнее имя (#85): его объявляет
-            # клиент Nomad, и переименование оставило бы старые спеки без
-            # узлов, которые их принимают.
-            "serves": meta.get("mop_projects") or "-",
-            "state": state,
-            "free_mb": cap.get("free_mb"),
-            "total_mb": cap.get("total_mb"),
-            "slots": cap.get("slots"),
-            "slots_total": cap.get("slots_total")}
+        drv, error = "?", str(e)
+    return Node(summary["Name"], driver=drv, error=error,
+                # mop_projects — ключ меты УЗЛА, прежнее имя (#85): его
+                # объявляет клиент Nomad, и переименование оставило бы старые
+                # спеки без узлов, которые их принимают.
+                serves=meta.get("mop_projects") or "-", state=state,
+                free_mb=cap.get("free_mb"), total_mb=cap.get("total_mb"),
+                slots=cap.get("slots"), slots_total=cap.get("slots_total")).to_row()
 
 
 def nomad_rows(pool):

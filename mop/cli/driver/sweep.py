@@ -9,6 +9,7 @@ import sys
 
 from mop.cli import lib
 from mop import driver
+from mop.common.domain import Gone
 
 def main(argv):
     """Собрать брошенные тела: [--dry].
@@ -57,8 +58,9 @@ def main(argv):
             print(f"  would destroy {name}: no session")
             continue
         r = asyncio.run(d.destroy(name))
-        print(f"  {name}: {r.get('error') or 'destroyed'}")
-        gone += 0 if r.get("error") else 1
+        done = Gone.from_dict(r)
+        print(f"  {name}: {'destroyed' if done else r.get('error')}")
+        gone += 1 if done else 0
     if not dry:
         print(f"{gone} orphaned bod{'y' if gone == 1 else 'ies'} destroyed")
     return 0
