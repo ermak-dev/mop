@@ -34,7 +34,7 @@ import base64
 from . import bootstrap, natsconf, nodes, nomad, spec
 from ..common import (bus, busnames, config, creds, domain, landing, lease, paths, project_secrets,
                       projects, puppets, service, state)
-from ..common.domain import CloneFacts, JobMeta, Node, Project, Verb
+from ..common.domain import CloneFacts, JobMeta, PoolNode, Project, Verb
 
 # Кому глагол дан -- одна таблица VERBS в конце модуля, рядом с обработчиками
 # (#173); прежние наборы выводятся из неё.
@@ -228,18 +228,18 @@ def nomad_pool():
         if n.get("Datacenter") != nomad.POOL_DC:
             continue
         if n["Status"] != "ready":
-            out.append(Node(n["Name"], n["Status"]).to_pool())
+            out.append(PoolNode(n["Name"], n["Status"]).to_pool())
             continue
         try:
             free, total = nomad.node_capacity(n)
-            out.append(Node(n["Name"], "ready", free_mb=free, total_mb=total,
+            out.append(PoolNode(n["Name"], "ready", free_mb=free, total_mb=total,
                             slots=free // spec.MEM, slots_total=total // spec.MEM,
                             # Закрытый для планирования узел остаётся ready и
                             # место на нём показывает честно, но ставить туда
                             # Nomad не станет — и раздавать креды туда незачем.
                             eligible=n.get("SchedulingEligibility") != "ineligible").to_pool())
         except Exception as e:
-            out.append(Node(n["Name"], "ready", error=nomad.describe_error(e)).to_pool())
+            out.append(PoolNode(n["Name"], "ready", error=nomad.describe_error(e)).to_pool())
     return out
 
 

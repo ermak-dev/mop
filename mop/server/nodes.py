@@ -5,7 +5,7 @@
 """
 from .. import driver
 from . import nomad, spec
-from ..common.domain import Node
+from ..common.domain import NodeRow
 
 
 def row(summary, meta, cap):
@@ -28,7 +28,7 @@ def row(summary, meta, cap):
     except RuntimeError as e:
         # Поле error -- только у такого узла: строка исправного прежняя.
         drv, error = "?", str(e)
-    return Node(summary["Name"], driver=drv, error=error,
+    return NodeRow(summary["Name"], driver=drv, error=error,
                 # mop_projects — ключ меты УЗЛА, прежнее имя (#85): его
                 # объявляет клиент Nomad, и переименование оставило бы старые
                 # спеки без узлов, которые их принимают.

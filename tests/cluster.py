@@ -613,14 +613,16 @@ def check_node_267(c):
     (nomad_pool: {name, status, ...} по-разному по статусу) и глагол nodes
     (nodes.row: {name, driver, serves, state, ...}), -- и читатели (ready_nodes,
     pool_lines, mop node, дашборд) разбирают их строковыми ключами каждый сам.
-    SOLUTION: domain.Node -- одно значение, каждая форма провода -- своей
-    парой from_/to_, ключи и их порядок прежние (снимки те же); читатели
-    идут через него. STATUS: FIXED — see #267"""
+    SOLUTION: значение узла, каждая форма провода -- своей парой from_/to_,
+    ключи и их порядок прежние (снимки те же); читатели идут через него.
+    С #277 форм -- два значения: PoolNode (глагол pool) и NodeRow (nodes).
+    STATUS: FIXED — see #267"""
     import json
     from mop.common import domain, puppets, bus
     from mop.server import nodes
-    Node = getattr(domain, "Node", None)
-    if not c.check("domain.Node exists", not (Node is None)):
+    PoolNode, NodeRow = getattr(domain, "PoolNode", None), getattr(domain, "NodeRow", None)
+    if not c.check("domain.PoolNode and domain.NodeRow exist",
+                   not (PoolNode is None or NodeRow is None)):
         return
     pool = [{"name": "a", "status": "down"},
             {"name": "b", "status": "ready", "error": "meta: boom"},
@@ -629,7 +631,7 @@ def check_node_267(c):
             {"name": "d", "status": "ready", "free_mb": 0, "total_mb": 4096,
              "slots": 0, "slots_total": 0, "eligible": False}]
     for d in pool:
-        back = Node.from_pool(d).to_pool()
+        back = PoolNode.from_pool(d).to_pool()
         c.check("pool form round trip", not (json.dumps(back) != json.dumps(d)),
                 f"{d} -> {back}")
     summaries = [({"Name": "c", "Status": "ready"}, {"mop_projects": "mop"}, pool[2]),
@@ -637,23 +639,94 @@ def check_node_267(c):
                  ({"Name": "f", "Status": "ready"}, {"mop_driver": "no-such"}, {})]
     for summary, meta, cap in summaries:
         row = nodes.row(summary, meta, cap)
-        back = Node.from_row(row).to_row()
+        back = NodeRow.from_row(row).to_row()
         c.check("nodes form round trip", not (json.dumps(back) != json.dumps(row)),
                 f"{row} -> {back}")
     with restored(bus, "call_cluster"):
         bus.call_cluster = lambda verb, **kw: {"ok": True, "nodes": pool}
         got = puppets.pool()
-        c.check("puppets.pool must give Node values",
-                not (not all(isinstance(n, Node) for n in got)), repr(got))
+        c.check("puppets.pool must give PoolNode values",
+                not (not all(isinstance(n, PoolNode) for n in got)), repr(got))
         # Как было: ready и не закрытый планированию; у сломанного (error)
         # eligible нет, и он -- по умолчанию открыт.
         c.expect("ready_nodes: ready and not closed", puppets.ready_nodes(), {"b", "c"})
         rows = [nodes.row(*x) for x in summaries]
         bus.call_cluster = lambda verb, **kw: {"ok": True, "nodes": rows}
         got = puppets.nodes()
-        c.check("puppets.nodes must give Node values of the same rows",
-                not (not all(isinstance(n, Node) for n in got)
+        c.check("puppets.nodes must give NodeRow values of the same rows",
+                not (not all(isinstance(n, NodeRow) for n in got)
                      or [n.to_row() for n in got] != rows), repr(got))
+
+
+def check_node_forms_277(c):
+    """HYPOTHESIS (#277): domain.Node -- один класс с одиннадцатью
+    необязательными полями на две разные формы провода (pool и nodes), и
+    «какая это форма» читается по тому, какие поля заполнены. Готовый узел
+    без памяти и неготовый с памятью собирались молча, и to_pool отдавал
+    то None в ёмкости, то тихо терял поля.
+    SOLUTION: два значения, PoolNode и NodeRow; у PoolNode форма названа
+    (form: down / broken / ready), и __post_init__ требует своё: у готового
+    ёмкость обязательна, у неготового и сломанного её нет -- ValueError с
+    именем поля. Провод прежний байт в байт.
+    STATUS: FIXED — see #277"""
+    import json
+    from mop.common import domain
+    from mop.server import nodes
+    PoolNode, NodeRow = getattr(domain, "PoolNode", None), getattr(domain, "NodeRow", None)
+    if not c.check("#277 PoolNode and NodeRow exist", not (PoolNode is None or NodeRow is None)):
+        return
+    c.check("#277 the one-class Node is gone", not hasattr(domain, "Node"))
+
+    def refused(what, make, field):
+        try:
+            got = make()
+        except ValueError as e:
+            c.check(f"#277 {what}: the refusal names {field!r}, got {e}", field in str(e))
+            return
+        c.check(f"#277 {what} must be refused, got {got!r}", False)
+
+    cap = {"free_mb": 8192, "total_mb": 16384, "slots": 1, "slots_total": 2}
+    for field in ("free_mb", "total_mb", "slots"):
+        refused(f"a ready node without {field}",
+                lambda: PoolNode("c", "ready", **dict(cap, **{field: None})), field)
+    # slots_total у готового необязателен: сервис старше #243 его не шлёт, и
+    # во время раската его ответ читается («slots 0/-»), а не отказывает.
+    old = PoolNode.from_pool({"name": "o", "status": "ready", "free_mb": 1, "total_mb": 2,
+                              "slots": 0, "eligible": True})
+    c.expect("#277 a ready node from a service older than #243 (no slots_total)",
+             (old.form, old.slots_total), ("ready", None))
+    for field in cap:
+        refused(f"a not-ready node with {field}",
+                lambda: PoolNode("a", "down", **{field: cap[field]}), field)
+        refused(f"a broken node with {field}",
+                lambda: PoolNode("b", "ready", error="boom", **{field: cap[field]}), field)
+    refused("a not-ready node with an error", lambda: PoolNode("a", "down", error="boom"),
+            "error")
+    refused("a ready pool dict without memory",
+            lambda: PoolNode.from_pool({"name": "c", "status": "ready", "slots": 1,
+                                        "slots_total": 2, "eligible": True}), "free_mb")
+    # Форма названа, а не угадана по заполненным полям.
+    forms = [(PoolNode("a", "down"), "down"), (PoolNode("b", "ready", error="boom"), "broken"),
+             (PoolNode("c", "ready", **cap), "ready")]
+    for n, want in forms:
+        c.expect(f"#277 form of {n.name}", n.form, want)
+    # Провод байт в байт: обе формы, все их варианты.
+    pool = [{"name": "a", "status": "initializing"},
+            {"name": "b", "status": "ready", "error": "meta: boom"},
+            {"name": "c", "status": "ready", **cap, "eligible": False}]
+    for d in pool:
+        back = PoolNode.from_pool(d).to_pool()
+        c.check(f"#277 pool form byte for byte: {d} -> {back}", json.dumps(back) == json.dumps(d))
+    for summary, meta, cp in (({"Name": "c", "Status": "ready"}, {"mop_projects": "mop"}, cap),
+                              ({"Name": "e", "Status": "down"}, {}, {}),
+                              ({"Name": "f", "Status": "ready"}, {"mop_driver": "no-such"}, {})):
+        row = nodes.row(summary, meta, cp)
+        back = NodeRow.from_row(row).to_row()
+        c.check(f"#277 nodes form byte for byte: {row} -> {back}",
+                json.dumps(back) == json.dumps(row))
+    # Строка nodes -- не узел pool: у неё нет статуса, и в pool её не отдать.
+    c.check("#277 a NodeRow has no pool form", not hasattr(NodeRow, "to_pool"))
+    c.check("#277 a PoolNode has no nodes form", not hasattr(PoolNode, "to_row"))
 
 
 def main():
@@ -664,7 +737,7 @@ def main():
                   check_forget_inventory_178, check_forget_summary_196,
                   check_gates_40, check_caller_207, check_slots_total_243,
                   check_update_keeps_branch_257, check_owner_gate_267,
-                  check_node_267):
+                  check_node_267, check_node_forms_277):
         check(c)
     return c.report("cluster")
 
