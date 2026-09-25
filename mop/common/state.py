@@ -214,18 +214,15 @@ def _clone_veto(clone):
     if not clone or not clone.known:
         return State("unknown", "no clone data")
     # Работа ли это -- решает одно правило на всех (#266): аренда и уборка
-    # сирот спрашивают его же, и ветка не по умолчанию работой не считается.
+    # сирот спрашивают его же. Ветка работа только вне дома клона (#272).
     if not holds_work(clone):
         return None
-    dirty, ahead = clone.dirty, clone.ahead
     # idle, а не busy: сессия здесь стоит, занят только клон. Одним словом
     # на оба случая мастер читал «работает» там, где на деле лежит брошенная
     # посреди тикета работа, — а это разные разговоры: первого ждут, второго
     # спасают. Диспатчу оба одинаково запрещены, и это решает не слово, а
     # вид: свободен только вид free.
-    what = ", ".join(p for p in (f"uncommitted: {dirty}" if dirty else "",
-                                 f"unpushed: {ahead}" if ahead else "") if p)
-    return State("idle", what, clone.branch)
+    return State("idle", ", ".join(clone.work()), clone.branch)
 
 
 def _state_from_session(st, clone):

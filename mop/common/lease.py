@@ -22,7 +22,8 @@ FILE = ".git/mop-owner"
 
 # Окно диспатча: столько чужая аренда держит папета, у которого в клоне ещё
 # пусто. За это время папет делает первую правку, и дальше держит уже работа.
-# Ветка работой не считается (#266): на ветке мастера папет стоит и чистым.
+# Ветка держит только вне дома клона (#266, #272): на ветке мастера папет
+# стоит и чистым, а запушенный тикет ждёт приёма отчёта.
 WINDOW = 600
 
 # Сама запись -- значение domain.Owner (#204): строка файла -- его render и
@@ -72,7 +73,12 @@ def may_touch(owner, me, clone, now, force=False, operator=False, retry="repeat"
     if not live(owner, clone, now):
         return True, None
     minutes = max(int((now - owner.at) // 60), 0)
-    what = "work in the clone" if holds_work(clone) else "dispatched, no branch yet"
+    if not holds_work(clone):
+        what = "dispatched, nothing committed yet"
+    elif clone and clone.known:
+        what = f"work in the clone on {clone.branch}: {', '.join(clone.work())}"
+    else:
+        what = "work in the clone"
     return False, (f"led by {owner.user} ({what}, last sent {minutes} min ago): "
                    f"ask them, or {retry} with force to take it over")
 

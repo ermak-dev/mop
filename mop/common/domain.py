@@ -142,9 +142,15 @@ class CloneFacts:
 
     По шине -- словарём с прежними ключами cur/def/...: во время раската
     агенты обеих версий говорят друг с другом, и провод не двигается.
-    dirty/ahead -- None, если агент их не прислал: «не знаю», а не ноль."""
+    dirty/ahead -- None, если агент их не прислал: «не знаю», а не ноль.
+
+    home -- дом клона (#272), `git config mop.home`: ветка мастера из меты
+    джоба, иначе ветка по умолчанию; его пишет стадия клона `mop driver run`
+    и wipe. Ключа нет (старый агент) или записи нет -- дом это ветка по
+    умолчанию (home_branch), и версии во время раската решают одинаково."""
     branch: str = None
     default_branch: str = None
+    home: str = None
     origin: str = None
     dirty: int = None
     ahead: int = None
@@ -155,10 +161,35 @@ class CloneFacts:
         """Есть ли оба числа: без них про работу в клоне сказать нечего."""
         return self.dirty is not None and self.ahead is not None
 
+    @property
+    def home_branch(self):
+        """Дом клона: записанный, иначе ветка по умолчанию."""
+        return self.home or self.default_branch
+
+    def work(self):
+        """Что в клоне держит работу, для показа: пусто -- ничего (#272).
+        Одно перечисление на правило (holds_work), строку ростера и отказ
+        аренды: иначе причина в отказе разошлась бы с самим решением."""
+        out = []
+        if self.dirty:
+            out.append(f"uncommitted: {self.dirty}")
+        if self.ahead:
+            out.append(f"unpushed: {self.ahead}")
+        home = self.home_branch
+        if self.branch and home and self.branch != home:
+            out.append(f"off home {home}")
+        return out
+
     def to_dict(self):
-        return {"cur": self.branch, "def": self.default_branch, "origin": self.origin,
-                "dirty": self.dirty, "ahead": self.ahead,
-                "owner": self.owner and self.owner.to_dict()}
+        """Ключ home -- только когда дом записан: без записи клон шлёт те
+        же байты, что старый агент, и отсутствие ключа значит одно и то же
+        в обе стороны (#272)."""
+        d = {"cur": self.branch, "def": self.default_branch}
+        if self.home:
+            d["home"] = self.home
+        d.update(origin=self.origin, dirty=self.dirty, ahead=self.ahead,
+                 owner=self.owner and self.owner.to_dict())
+        return d
 
     @classmethod
     def from_dict(cls, d):
@@ -166,21 +197,23 @@ class CloneFacts:
         (строка work у du) -- то, что в нём есть."""
         if not d:
             return None
-        return cls(d.get("cur"), d.get("def"), d.get("origin"), d.get("dirty"),
-                   d.get("ahead"), Owner.from_dict(d.get("owner")))
+        return cls(d.get("cur"), d.get("def"), d.get("home"), d.get("origin"),
+                   d.get("dirty"), d.get("ahead"), Owner.from_dict(d.get("owner")))
 
 
 def holds_work(clone):
-    """Есть ли в клоне работа: несохранённое или неотправленное (#266).
+    """Есть ли в клоне работа: несохранённое, неотправленное или клон не на
+    своём доме (#266, #272).
 
     Одно правило на всех: вердикт ростера, аренду, уборку сирот и ворота
-    кластера. Ветка не по умолчанию -- не работа: с #256 папет стоит на
-    ветке своего мастера намеренно, и считай её работой -- аренда держала бы
-    его вечно. Свежий диспатч без коммитов бережёт окно lease.WINDOW.
+    кластера. Ветка сама по себе -- не работа: с #256 папет стоит на ветке
+    своего мастера намеренно, и она его дом. Чистый клон не на доме держит
+    тикет: папет запушил и ждёт приёма отчёта, и через окно его брал бы
+    другой мастер. Свежий диспатч без коммитов бережёт окно lease.WINDOW.
     Клон неизвестен или без чисел -- держит: «не знаю» не значит «пусто»."""
     if clone is None or not clone.known:
         return True
-    return bool(clone.dirty or clone.ahead)
+    return bool(clone.work())
 
 
 # ─── глагол ──────────────────────────────────────────────────────────────

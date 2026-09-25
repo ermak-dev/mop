@@ -73,12 +73,14 @@ async def destroy(name, branch=None):
     # Ветка мастера (#257): чистая рабочая копия начинает с неё. На origin
     # есть -- ровно её вершина (-B после fetch), нет -- завести локально от
     # HEAD, мастер создаст её первым landing. Клон не переклонируется, и
-    # без этого шага он оставался бы на том, что застал.
+    # без этого шага он оставался бы на том, что застал. Она же -- дом
+    # клона (#272): чистый клон на ней свободен, вне её держит тикет.
     if branch:
         b = shlex.quote(branch)
-        out, code = await sh(f"(git -C {d} fetch -q origin {b} && "
+        out, code = await sh(f"((git -C {d} fetch -q origin {b} && "
                              f"git -C {d} checkout -q -B {b} origin/{b}) || "
-                             f"git -C {d} checkout -q -B {b}", timeout=120)
+                             f"git -C {d} checkout -q -B {b}) && "
+                             f"git -C {d} config mop.home {b}", timeout=120)
         if code != 0:
             return {"error": f"git checkout {branch} in {d}: {why(out, code, 120)}"}
     target = target_dir(name)

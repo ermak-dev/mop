@@ -190,6 +190,7 @@ async def clone_facts(name):
         f'cd {d} 2>/dev/null || exit 0; '
         f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
         f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
+        f'echo "home=$(git config mop.home 2>/dev/null)"; '
         f'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
         f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
         f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"; '
@@ -203,10 +204,13 @@ async def clone_facts(name):
         return None
     # Кто ведёт задание (#161): сырая запись, живость считает мастер. По
     # шине -- словарём (#204, #266), обратно его читает CloneFacts.from_dict.
-    return CloneFacts(kv.get("cur") or "(detached)",
-                      (kv.get("def") or "").rsplit("/", 1)[-1] or None,
-                      kv.get("origin") or None, dirty, ahead,
-                      Owner.parse(kv.get("owner"))).to_dict()
+    # Дом клона (#272) пишет стадия клона; нет записи -- None, и дом тогда
+    # ветка по умолчанию (CloneFacts.home_branch).
+    return CloneFacts(branch=kv.get("cur") or "(detached)",
+                      default_branch=(kv.get("def") or "").rsplit("/", 1)[-1] or None,
+                      home=kv.get("home") or None,
+                      origin=kv.get("origin") or None, dirty=dirty, ahead=ahead,
+                      owner=Owner.parse(kv.get("owner"))).to_dict()
 
 
 async def du_kb(name):

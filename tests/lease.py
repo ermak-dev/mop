@@ -32,7 +32,7 @@ AHEAD = dict(CLEAN, ahead=1)
 
 # Факты клона в том виде, в каком их шлёт агент по шине (#266): ключи
 # cur/def/... -- провод, их держат агенты обеих версий во время раската.
-WIRE = {"cur": "bug/118-x", "def": "master",
+WIRE = {"cur": "bug/118-x", "def": "master", "home": "master",
         "origin": "git@git.example.dev:someone/mop.git",
         "dirty": 2, "ahead": 1, "owner": {"user": "olga", "at": NOW}}
 
@@ -143,22 +143,58 @@ def main():
     # dirty или ahead (клон неизвестен -- держит); ветку свежего диспатча
     # по-прежнему защищает окно lease.WINDOW.
     # STATUS: FIXED — see #266
+    # С #272 «ветка мастера» -- это дом клона (home): папет #256 стоит на нём.
+    ON_MASTERS = dict(ON_BRANCH, home=ON_BRANCH["cur"])
     stale = rec("olga", lease.WINDOW + 1)
-    check("#266: clean foreign branch with a stale owner may be touched",
-          lease.may_touch(stale, "anton", CloneFacts.from_dict(ON_BRANCH), NOW), (True, None))
-    check("#266: clean foreign branch with a stale owner is not live",
-          lease.live(stale, CloneFacts.from_dict(ON_BRANCH), NOW), False)
-    for what, clone in (("dirty", dict(ON_BRANCH, dirty=1)), ("ahead", dict(ON_BRANCH, ahead=1))):
-        check(f"#266: foreign branch with work ({what}) still refused",
+    check("#266: clean on the master's branch with a stale owner may be touched",
+          lease.may_touch(stale, "anton", CloneFacts.from_dict(ON_MASTERS), NOW), (True, None))
+    check("#266: clean on the master's branch with a stale owner is not live",
+          lease.live(stale, CloneFacts.from_dict(ON_MASTERS), NOW), False)
+    for what, clone in (("dirty", dict(ON_MASTERS, dirty=1)), ("ahead", dict(ON_MASTERS, ahead=1))):
+        check(f"#266: master's branch with work ({what}) still refused",
               lease.may_touch(stale, "anton", CloneFacts.from_dict(clone), NOW)[0], False)
-    check("#266: clean branch inside the dispatch window still refused",
+    check("#266: clean master's branch inside the dispatch window still refused",
           lease.may_touch(rec("olga", lease.WINDOW - 1), "anton",
-                          CloneFacts.from_dict(ON_BRANCH), NOW)[0], False)
+                          CloneFacts.from_dict(ON_MASTERS), NOW)[0], False)
+
+    # ── дом клона (#272) ──────────────────────────────────────────────
+    # HYPOTHESIS: после #266 папет, закончивший тикет (запушено, чисто, ждёт
+    # приёма отчёта), через lease.WINDOW без send'ов берёт другой мастер без
+    # --force: ветку тикета правило больше не видит.
+    # SOLUTION: у клона есть дом -- ветка мастера из меты джоба, иначе
+    # ветка по умолчанию; стадия клона пишет её в `git config mop.home`,
+    # агент отдаёт ключом home. Чистый клон не на доме держит тикет. Старый
+    # агент ключа не шлёт -- дом его клона ветка по умолчанию.
+    # STATUS: FIXED — see #272
+    waiting = {"cur": "bug/272-x", "def": "master", "home": "master", "dirty": 0, "ahead": 0}
+    ok, why = lease.may_touch(stale, "anton", CloneFacts.from_dict(waiting), NOW)
+    check("#272: a puppet waiting for accept refuses another master", ok, False)
+    check("#272: the refusal names the ticket branch and the owner",
+          "bug/272-x" in (why or "") and "olga" in (why or ""), True)
+    home = {"cur": "swarm", "def": "master", "home": "swarm", "dirty": 0, "ahead": 0}
+    check("#272: clean on its home (the master's branch) with a stale owner is takeable",
+          lease.may_touch(stale, "anton", CloneFacts.from_dict(home), NOW), (True, None))
+    check("#272: off its home even on the default branch holds",
+          lease.may_touch(stale, "anton", CloneFacts.from_dict(dict(home, cur="master")),
+                          NOW)[0], False)
+    old = {"cur": "bug/272-x", "def": "master", "dirty": 0, "ahead": 0}
+    check("#272: old agent (no home) off the default branch holds",
+          lease.may_touch(stale, "anton", CloneFacts.from_dict(old), NOW)[0], False)
+    check("#272: old agent (no home) on the default branch is takeable",
+          lease.may_touch(stale, "anton", CloneFacts.from_dict(dict(old, cur="master")),
+                          NOW), (True, None))
+    check("#272: no home recorded -- home is the default branch",
+          CloneFacts.from_dict(dict(old, home=None)).home_branch, "master")
+    fresh = lease.may_touch(rec("olga", 60), "anton", CloneFacts.from_dict(home), NOW)[1] or ""
+    check("#272: inside the window the refusal says nothing is committed yet",
+          "nothing committed yet" in fresh and "no branch" not in fresh, True)
 
     # Провод не двигается: факты агента туда и обратно -- байт в байт, и
     # ключи в том же порядке (JSON снимка их сравнивает строкой).
     for what, wire in (("full", WIRE), ("no owner", dict(WIRE, owner=None)),
-                       ("detached, no default", dict(WIRE, cur="(detached)", **{"def": None}))):
+                       ("detached, no default", dict(WIRE, cur="(detached)", **{"def": None})),
+                       ("no home recorded (old agent)",
+                        {k: v for k, v in WIRE.items() if k != "home"})):
         back = CloneFacts.from_dict(wire).to_dict()
         check(f"#266: CloneFacts round-trips the agent's dict ({what})",
               (back, list(back)), (wire, list(wire)))

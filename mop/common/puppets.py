@@ -575,7 +575,10 @@ def classify_junk(answers, known):
                 out.append({
                     "node": node, "kind": "orphan", "name": name,
                     "detail": f"holds work: {w.dirty or 0} uncommitted, {w.ahead or 0} "
-                              f"unpushed on {w.branch or '(detached)'}",
+                              f"unpushed on {w.branch or '(detached)'}"
+                              + (f", off home {w.home_branch}"
+                                 if w.branch and w.home_branch
+                                 and w.branch != w.home_branch else ""),
                     "sweepable": False})
                 continue
             out.append({"node": node, "kind": "orphan", "name": name,

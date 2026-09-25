@@ -905,7 +905,10 @@ def check_clone_before_bootstrap_247():
           lambda s: "set -e" in s.split(snippet)[0])
     check("stage refuses an empty PU_CLONE before any rm -rf", stage,
           lambda s: "${PU_CLONE:?" in s and s.index("${PU_CLONE:?") < s.index('rm -rf "$d"'))
-    check("stage ends with CLONE_SH itself", stage, lambda s: s.endswith(snippet))
+    # После сниппета -- только запись дома клона (#272).
+    check("stage carries CLONE_SH once, then only the home record", stage,
+          lambda s: s.count(snippet) == 1
+          and "mop.home" in s.split(snippet)[1] and "clone -q" not in s.split(snippet)[1])
     # #256: ветка мастера из меты джоба (NOMAD_META_branch) -- checkout после
     # свежего клона; существующий клон не переключается, там может быть
     # работа; нет такой ветки в origin -- завести локально, мастер создаст
@@ -920,6 +923,18 @@ def check_clone_before_bootstrap_247():
           and "fresh" in s and 'git -C "$d" checkout -q "$PU_BRANCH"' in s
           and 'checkout -q -b "$PU_BRANCH"' in s)
     check("branch stage is valid bash", with_b, lambda s: __import__("subprocess").run(
+        ["bash", "-n"], input=s, text=True, capture_output=True).returncode == 0)
+    # #272: дом клона пишется на каждом старте, не только у свежего клона:
+    # существующий клон узнаёт его тоже. С веткой в мете -- она, без неё --
+    # ветка по умолчанию из origin/HEAD. STATUS: FIXED — see #272
+    tail = with_b.split(snippet)[1]
+    check("#272: branch stage records mop.home = PU_BRANCH on every start", tail,
+          lambda t: 'config mop.home "$PU_BRANCH"' in t
+          and t.index("mop.home") > t.index("fi\n"))
+    plain = stage.split(snippet)[1]
+    check("#272: no branch -- mop.home is the default branch from origin/HEAD", plain,
+          lambda t: "origin/HEAD" in t and "config mop.home" in t)
+    check("#272: plain stage is valid bash", stage, lambda s: __import__("subprocess").run(
         ["bash", "-n"], input=s, text=True, capture_output=True).returncode == 0)
     # Порядок в run.main: клон исполняется в теле до вызова сервера.
     src = inspect.getsource(run.main)
@@ -1413,6 +1428,14 @@ def check_timeouts_171():
                           and "origin/swarm" not in s.split("||")[-1] for s in r)
                   and r.index(next(s for s in r if "checkout" in s))
                   > r.index(next(s for s in r if "reset --hard" in s)))
+            # #272: wipe на ветку мастера пишет её же домом клона; без ветки
+            # дом не трогается. STATUS: FIXED — see #272
+            check("#272: host.destroy with a branch records mop.home", ran,
+                  lambda r: any("config mop.home swarm" in s for s in r))
+            ran.clear()
+            asyncio.run(host.destroy(name))
+            check("#272: host.destroy without a branch leaves mop.home alone", ran,
+                  lambda r: not any("mop.home" in s for s in r))
             host.sh = fake_sh()
 
             # pve: каждый мутирующий шаг по отдельности.
