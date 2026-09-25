@@ -65,14 +65,44 @@ def scan(package=PACKAGE):
 
 
 def verbs(package=PACKAGE):
-    """{группа: {глагол}} — модули внутри подпакетов-групп."""
+    """{группа: дерево} -- глаголы групп (#253). Модуль -- {}, подпакет
+    внутри группы -- подгруппа со своим деревом: `mop dev bug new`,
+    `mop server user add`. Служебное (_*) -- не глаголы."""
+    return {section: _tree(os.path.join(package, section))
+            for section, _, is_pkg in scan(package) if is_pkg}
+
+
+def _tree(path):
     out = {}
-    for section, _, is_pkg in scan(package):
-        if is_pkg:
-            path = os.path.join(package, section)
-            out[section] = {m[:-3] for m in os.listdir(path)
-                            if m.endswith(".py") and not m.startswith("_")}
+    for entry in sorted(os.listdir(path)):
+        if entry.startswith("_"):
+            continue
+        full = os.path.join(path, entry)
+        if entry.endswith(".py"):
+            out[entry[:-3]] = {}
+        elif os.path.isdir(full) and os.path.exists(os.path.join(full, "__init__.py")):
+            out[entry] = _tree(full)
     return out
+
+
+# Пространства команд, которых нет в MCP (#253): внутренние команды
+# разработчика (трекер, CI) модель зовёт из шелла мастера, инструментами
+# они не нужны.
+PRIVATE = ("dev",)
+
+# Прежние имена команд -> новые слова (#253): переезд команды в пространство
+# не ломает юниты, спеку и запущенных мастеров до раскатки и перезапуска.
+# Молча: это не отказ и не совет, а переход на один релиз, после которого
+# таблица пустеет отдельным тикетом.
+LEGACY = {}
+
+
+def unalias(argv, table=None):
+    """argv с прежним именем команды -> argv с новыми словами. Чистая функция."""
+    table = LEGACY if table is None else table
+    if argv and argv[0] in table:
+        return list(table[argv[0]]) + list(argv[1:])
+    return list(argv)
 
 
 def catalog(found):
@@ -101,9 +131,10 @@ def resolve(argv, cat, group_verbs):
     mod = cat.get(name)
     if mod is None:
         return None
-    rest = list(argv[1:])
-    if rest and rest[0] in group_verbs.get(name, ()):
-        return f"{mod}.{rest[0]}", rest[1:]
+    rest, tree = list(argv[1:]), group_verbs.get(name) or {}
+    # Спуск по дереву (#253): подгруппа -- ещё один уровень, модуль -- дно.
+    while rest and rest[0] in tree:
+        mod, tree, rest = f"{mod}.{rest[0]}", tree[rest[0]] or {}, rest[1:]
     return mod, rest
 
 
@@ -176,18 +207,29 @@ def declared(path):
     return decl
 
 
-def tool_commands(found, group_verbs):
+def tool_commands(found, group_verbs, private=PRIVATE):
     """[(каталог, имя, подпакет?)] -> [(имя инструмента, слова команды,
-    путь модуля)]. Группа -- сама и каждый её глагол: `node_drain`."""
+    путь модуля)]. Группа -- сама и каждый её глагол, вглубь (#253):
+    `node_drain`, `server_user_add`. Пространства из private пропускаются."""
     out = []
     for section, name, is_pkg in found:
         if not is_pkg:
             out.append((name, [name], _path_of(section, name, False)))
-            continue
-        out.append((section, [section], _path_of(section, "", True)))
-        for verb in sorted(group_verbs.get(section, ())):
-            out.append((f"{section}_{verb}", [section, verb],
-                        os.path.join(PACKAGE, section, f"{verb}.py")))
+        elif section not in private:
+            out += _tools_of([section], group_verbs.get(section) or {}, True)
+    return out
+
+
+def _tools_of(words, tree, group):
+    """Инструменты группы или глагола и всего под ним. group -- это пакет
+    (сама группа или подгруппа), а не модуль."""
+    base = os.path.join(PACKAGE, *words)
+    path = os.path.join(base, "__init__.py") if group else base + ".py"
+    out = [("_".join(words), list(words), path)]
+    for verb in sorted(tree):
+        sub = tree[verb] or {}
+        out += _tools_of(words + [verb], sub,
+                         bool(sub) or os.path.isdir(os.path.join(base, verb)))
     return out
 
 
@@ -255,6 +297,7 @@ def main(argv):
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(usage())
         return 0
+    argv = unalias(argv)
     try:
         found = resolve(argv, catalog(scan()), verbs())
     except RuntimeError as e:
