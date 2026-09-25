@@ -230,7 +230,7 @@ def _row(item, disk_kb=None):
     job, alloc = item["job"], item["alloc"]
     meta = JobMeta.from_job(job)
     status = item["error"] or (alloc["ClientStatus"] if alloc else job.get("Status", "?"))
-    state, kind = item["state"] or "-", item.get("kind")
+    state, kind = item["state"] or None, item.get("kind")
     # Падающий на старте -- failing с причиной, а не pending (#126).
     failing = failing_row(status, item.get("task"), item.get("reason"))
     if failing and not item["error"]:
@@ -238,14 +238,14 @@ def _row(item, disk_kb=None):
         kind = "failing"
     return PuppetRow(
         name=job["ID"],
-        node=alloc["NodeName"] if alloc else "-",
+        node=alloc["NodeName"] if alloc else None,
         alloc_status=status,
         state=state,
         kind=kind,
-        owner=item.get("owner") or "-",
+        owner=item.get("owner") or None,
         llm=llm.of_meta(meta),
-        # Показ без origin -- «?» (нет ключа в мете), как было до #265.
-        origin=meta.origin if meta.origin is not None else "?",
+        # Нет ключа в мете -- None; «?» рисует показ (PuppetRow.render, #274).
+        origin=meta.origin,
         disk_kb=disk_kb,
     )
 
@@ -315,7 +315,7 @@ def puppet_sizes(rows, timeout=SIZES_TIMEOUT):
     здесь не главное, а состояние уже показано."""
     asked = {}
     for r in rows:
-        if r.alloc_status == "running" and r.node != "-":
+        if r.alloc_status == "running" and r.node is not None:
             asked[r.name] = (r.node, {"names": [r.name]})
     out = {}
     try:
