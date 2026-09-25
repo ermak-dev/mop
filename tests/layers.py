@@ -221,9 +221,91 @@ def dangling(mods):
     return sorted(set(out))
 
 
+# ── #268: одно написание на константу, мёртвого кода нет ─────────────────
+# HYPOTHESIS: ~/.config/mop набран руками в двадцати местах, ключ меты узла
+# mop_projects -- литералом рядом с spec.META_PROJECTS, канал сервиса
+# кластера -- второй копией в cluster.CHANNEL, соглашение `tmux -L <имя>
+# ... -t <имя>` -- в пяти местах мимо класса Tmux агента, таймаут вызова
+# перепечатан в why(out, code, N); и мёртвые имена пережили #263-#267.
+# SOLUTION: mop/common/paths.py (каталог и пути рядом с ним), META_PROJECTS
+# и PROJECTS_VAR, busnames.CLUSTER_CHANNEL, driver.Tmux, таймауты -- именами
+# у своего вызова; мёртвое удалено. Литералы врапера (spec.WRAPPER) и
+# докстринги (текст помощи) остаются: врапер -- перерегистрация всего пула.
+# STATUS: FIXED — see #268
+CONFIG_HOME = ".config/mop"
+DEAD = {"mop/common/puppets.py": ("facts", "project_of_name"),
+        "mop/server/nomad.py": ("token_or_none", "ready_nodes"),
+        "mop/server/spec.py": ("queued",), "mop/driver/pve.py": ("routes",),
+        "mop/common/bus.py": ("publish",), "mop/server/cluster.py": ("CHANNEL",)}
+# Где литерал -- определение, а не повтор: {файл: имя присваивания}.
+OWNERS = {".config/mop": {"mop/common/paths.py": None},
+          "mop_projects": {"mop/server/spec.py": "META_PROJECTS",
+                           "mop/cli/server/_play.py": "PROJECTS_VAR"},
+          "tmux -L": {"mop/driver/__init__.py": None}}
+
+
+def _strings(tree):
+    """(строка, узел-владелец присваивания или None, lineno) всех строковых
+    литералов, кроме докстрингов. f-строки -- по их литеральным кускам."""
+    docs = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                and n.body and isinstance(n.body[0], ast.Expr) \
+                and isinstance(n.body[0].value, ast.Constant) and isinstance(n.body[0].value.value, str):
+            docs.add(id(n.body[0].value))
+    owner = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign):
+            names = [t.id for t in n.targets if isinstance(t, ast.Name)]
+            for sub in ast.walk(n):
+                owner[id(sub)] = names[0] if names else None
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs:
+            yield n.value, owner.get(id(n)), n.lineno
+    # Список аргументов ["tmux", "-L", ...] -- то же соглашение, что строка.
+    for n in ast.walk(tree):
+        if isinstance(n, ast.List):
+            vals = [e.value for e in n.elts if isinstance(e, ast.Constant)]
+            if vals[:2] == ["tmux", "-L"]:
+                yield "tmux -L", owner.get(id(n)), n.lineno
+
+
+def one_spelling():
+    out = []
+    for dp, _, fs in os.walk(PKG):
+        for f in fs:
+            if not f.endswith(".py"):
+                continue
+            path = os.path.join(dp, f)
+            rel = os.path.relpath(path, ROOT)
+            tree = ast.parse(open(path).read())
+            for text, owner, line in _strings(tree):
+                if rel == "mop/server/spec.py" and owner in ("WRAPPER", "OUTER"):
+                    continue
+                for needle, allowed in OWNERS.items():
+                    if needle not in text:
+                        continue
+                    if rel in allowed and allowed[rel] in (None, owner):
+                        continue
+                    out.append(f"{rel}:{line}: {needle!r} spelled out -- use its constant")
+            # Таймаут вызова -- именем: why(out, code, 600) рядом с timeout=600
+            # однажды разойдутся.
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "why" \
+                        and len(n.args) > 2 and isinstance(n.args[2], ast.Constant):
+                    out.append(f"{rel}:{n.lineno}: why(..., {n.args[2].value}) -- name the timeout")
+            top = {t.id for n in tree.body if isinstance(n, ast.Assign) for t in n.targets
+                   if isinstance(t, ast.Name)} | {n.name for n in tree.body
+                                                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            for name in DEAD.get(rel, ()):
+                if name in top:
+                    out.append(f"{rel}: {name} is dead code -- delete it")
+    return out
+
+
 def main():
     mods = modules()
-    bad = violations(mods) + dangling(mods)
+    bad = violations(mods) + dangling(mods) + one_spelling()
     print("\n".join(f"FAIL {b}" for b in bad))
     print(f"layers: {len(mods)} modules, {len(bad)} violations" + (" FAILED" if bad else " ok"))
     return 1 if bad else 0

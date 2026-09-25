@@ -48,10 +48,10 @@ import shlex
 import socket
 import time
 
-from ..common import bus, busnames, fsutil, lease, service
+from ..common import bus, busnames, fsutil, lease, paths, service
 from .. import driver, usage
 from ..common.domain import CloneFacts, Owner, Verb
-from ..driver import clone_dir, target_dir, why
+from ..driver import Tmux, clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
 
@@ -75,7 +75,7 @@ KEYS_ALLOWED = ("Escape",)
 # лишились его вместе с переездом на шину.
 WRITABLE = (
     f"{HOME}/.claude/.credentials.json",
-    f"{HOME}/.config/mop/secrets.env",
+    paths.under(HOME, paths.SECRETS_ENV),
 )
 
 # Ростер тел перечисляет драйвер (у host — по сокетам tmux в /tmp/tmux-<uid>):
@@ -123,41 +123,6 @@ async def bsh(name, script, timeout=20):
     if not driver.valid_name(name):
         return "", None
     return await driver.sh(script, timeout, prefix=DRIVER.argv(name))
-
-
-class Tmux:
-    """Строки скрипта для tmux папета: и сервер (-L), и сессия (-t) зовутся
-    его именем. Только строки -- исполняет bsh, и имя до шелла доходит лишь
-    после driver.valid_name."""
-
-    def __init__(self, name):
-        self.name = name
-        self.base = f"tmux -L {name}"
-
-    def alive(self):
-        return f"{self.base} has-session -t {self.name} 2>/dev/null"
-
-    def buffer(self):
-        """Весь буфер, с историей."""
-        return f"{self.base} capture-pane -p -t {self.name} -S -"
-
-    def visible(self):
-        return f"{self.base} capture-pane -p -t {self.name}"
-
-    def keys(self, keys):
-        return f"{self.base} send-keys -t {self.name} {keys}"
-
-    def press(self, key):
-        """Голая клавиша и экран после неё."""
-        return f"{self.keys(key)}; sleep 1; {self.visible()}"
-
-    def type(self, command):
-        """Очистить строку, напечатать команду, Enter, экран. Кавычку в
-        команде отбивает вызывающий: команда идёт в шелл одной строкой."""
-        quoted = f"'{command}'"
-        keys = (f"{self.keys('C-u')}; sleep 0.3; "
-                f"{self.keys(quoted)}; sleep 0.3; ") if command else ""
-        return keys + f"{self.keys('Enter')}; sleep 2; {self.visible()}"
 
 
 async def tmux_alive(name):

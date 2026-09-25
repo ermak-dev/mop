@@ -29,9 +29,9 @@ import json
 import os
 import ssl
 
-from . import busnames, config, fsutil
+from . import busnames, config, fsutil, paths
 
-ROOT = os.path.expanduser("~/.config/mop/servers")
+ROOT = paths.local(paths.SERVERS)
 # Кред оператора-человека (#84): один файл на машину, а не по паролю на
 # проект. Пользователь тут один — сам человек, — и от проекта он не зависит:
 # проект живёт в СУБЪЕКТЕ, права на субъект проверяет сервер NATS.

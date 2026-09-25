@@ -41,10 +41,10 @@ import os
 import secrets
 import typing
 
-from ..common import busnames, fsutil
+from ..common import busnames, fsutil, paths
 from . import operators
 
-SECRETS = os.path.expanduser("~/.config/mop/secrets")
+SECRETS = paths.local(paths.SECRETS)
 OPERATORS_FILE = "operators"
 # Настройки, из которых provider() собирает провайдера.
 # Пароль LDAP среди них (#208): он не настройка config.SETTINGS и плейбукам

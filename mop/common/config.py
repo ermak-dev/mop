@@ -33,7 +33,7 @@ GitLab, которым в пуле делать нечего. Всё, что н�
 import os
 import pwd
 
-from . import fsutil
+from . import fsutil, paths
 
 # Корень клона: mop/common/config.py -- на три уровня вниз (#260).
 PROJECT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -58,7 +58,7 @@ ENV_FILE = os.environ.get("MOP_ENV_FILE") or os.path.join(PROJECT, ".env")
 # Там, где это уже кусало, лечили по разу каждую: MOP_PUPPET_SEED ездил строкой
 # Environment= в юните агента, MOP_DRIVER — отдельным файлом. Здесь они
 # сходятся в один механизм.
-NODE_ENV_FILE = os.path.expanduser("~/.config/mop/node.env")
+NODE_ENV_FILE = paths.local(paths.NODE_ENV)
 
 
 def pool_user():
@@ -268,7 +268,7 @@ DEFAULTS = {
     # Ключ проекта сюда не входит: его имя зависит от проекта, и кладёт его
     # драйвер отдельно, в момент ensure, когда проект известен.
     "MOP_BODY_SEED": ".ssh/id_rsa,.ssh/id_ed25519,.ssh/known_hosts,"
-                     ".config/mop/secrets.env,.claude/.credentials.json",
+                     f"{paths.DIR}/{paths.SECRETS_ENV},.claude/.credentials.json",
 }
 
 # Пусто = такой функциональности нет. Проверять надо пустоту, а не отсутствие

@@ -30,7 +30,7 @@ import subprocess
 import sys
 
 from mop.cli import lib
-from mop.common import bus, config, context, creds
+from mop.common import bus, config, context, creds, paths
 
 
 def parse(argv):
@@ -185,7 +185,7 @@ def _login(host, user, dest):
     # знает или они здесь не нужны, а лежащие -- это секрет без пользы.
     gone = creds.legacy(os.listdir(dest))
     if os.path.exists(os.path.join(dest, creds.TOKEN_FILE)) and \
-            not os.path.isdir(os.path.expanduser("~/.config/mop/secrets")):
+            not os.path.isdir(paths.local(paths.SECRETS)):
         gone.append(creds.TOKEN_FILE)
     for n in gone:
         os.remove(os.path.join(dest, n))

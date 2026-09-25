@@ -24,7 +24,7 @@ import time
 
 from ..common import bus, puppets, service
 from .. import driver
-from . import image, nomad
+from . import image, nomad, spec
 
 MODES = ("missing", "update", "rebuild")
 HEARTBEAT = 15
@@ -133,7 +133,7 @@ def serving_now(refused=None):
             continue
         if not container:
             continue
-        have = nomad.node_dynamic_meta(name).get("mop_projects") or ""
+        have = nomad.node_dynamic_meta(name).get(spec.META_PROJECTS) or ""
         out[name] = [s for s in have.split(",") if s]
     return out
 

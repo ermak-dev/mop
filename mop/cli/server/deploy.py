@@ -37,7 +37,7 @@ import sys
 
 from mop.cli import lib
 from mop.cli.server import _play
-from mop.common import bus, config, creds, gitlab, manifest, puppets, projects
+from mop.common import bus, config, creds, gitlab, manifest, paths, puppets, projects
 from mop import driver
 from mop.server import identity
 
@@ -510,7 +510,7 @@ def main(argv):
     # из secrets/ и bootstrap.json. Самоподписанный сертификат закрепляется,
     # настоящий -- нет (#97); ролевые пароли до #106 снимаются.
     dest = creds.server_dir()
-    got = creds.collect(os.path.expanduser("~/.config/mop/secrets"), dest,
+    got = creds.collect(paths.local(paths.SECRETS), dest,
                         pin=not config.get("MOP_TLS_CERT"))
     print(f"  server credentials: {', '.join(got) or 'nothing to pin'} in {dest}")
     if creds.operator(dest) is None:

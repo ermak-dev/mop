@@ -32,12 +32,9 @@ import time
 import base64
 
 from . import bootstrap, natsconf, nodes, nomad, spec
-from ..common import (bus, busnames, config, creds, domain, landing, lease, project_secrets,
+from ..common import (bus, busnames, config, creds, domain, landing, lease, paths, project_secrets,
                       projects, puppets, service, state)
 from ..common.domain import CloneFacts, JobMeta, Node, Project, Verb
-
-# Токен субъекта. Не "server": туда пишет узел, см. докстринг модуля.
-CHANNEL = "cluster"
 
 # Кому глагол дан -- одна таблица VERBS в конце модуля, рядом с обработчиками
 # (#173); прежние наборы выводятся из неё.
@@ -474,7 +471,7 @@ def _up(project, req):
 
 # Хосты инвентаря контроллера (#178): кладёт `mop server deploy` (роль cluster),
 # инвентарь сам лежит у контроллера, куда учётке пула хода нет.
-INVENTORY_HOSTS = os.path.expanduser("~/.config/mop/inventory-hosts.json")
+INVENTORY_HOSTS = paths.local("inventory-hosts.json")
 
 
 def inventory_refusal(node, hosts):

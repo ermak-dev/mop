@@ -36,7 +36,7 @@ def main(argv):
         alive = []
         for n in names:
             _, code = await driver.sh(
-                f"tmux -L {n} has-session -t {n} 2>/dev/null", 20, d.argv(n))
+                driver.Tmux(n).alive(), 20, d.argv(n))
             alive.append(code == 0)
         return names, alive
 

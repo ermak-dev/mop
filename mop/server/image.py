@@ -213,10 +213,10 @@ def announce(project):
             continue
         # Перечень берём с узла: серверная копия отстаёт на секунды, и
         # дописать к устаревшей значит стереть ранее объявленные образы.
-        have = [s for s in (nomad.node_dynamic_meta(name).get("mop_projects") or "").split(",") if s]
+        have = [s for s in (nomad.node_dynamic_meta(name).get(spec.META_PROJECTS) or "").split(",") if s]
         if project in have:
             out.append((name, "already announced"))
             continue
-        nomad.set_node_meta(name, {"mop_projects": ",".join(sorted(have + [project]))})
+        nomad.set_node_meta(name, {spec.META_PROJECTS: ",".join(sorted(have + [project]))})
         out.append((name, f"announced, serves {', '.join(sorted(have + [project]))}"))
     return out

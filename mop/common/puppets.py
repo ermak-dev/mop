@@ -22,7 +22,6 @@ HOME = driver.HOME                         # $HOME на узлах пула
 # драйверов: это единственный stdlib-модуль, который читают и мастер, и узел.
 # Здесь — только имена, под которыми его знает мастер.
 JOB_PREFIX = driver.PREFIX
-project_of_name = driver.project_of_name
 clone_dir = driver.clone_dir
 
 # ─── LLM-профили ─────────────────────────────────────────────────────────
@@ -120,11 +119,6 @@ def jobs(project=None):
     и мастер проекта перестаёт видеть чужих папетов уже здесь, в ростере.
     Кто виден кому — visible(): #29."""
     return [i["job"] for i in items(project)]
-
-
-def facts(node, name):
-    """Факты об одном папете с его узла."""
-    return bus.request(node, "state", name=name)
 
 
 # ─── сводки для фронтендов ───────────────────────────────────────────────
@@ -256,6 +250,10 @@ def _row(item, disk_kb=None):
     )
 
 
+# Обмер места на узлах (sizes): и потоком ростера, и отдельным обмером (#268).
+SIZES_TIMEOUT = 45
+
+
 def puppet_rows_stream():
     """Папета как данные, но строки отдаются по мере готовности.
 
@@ -285,7 +283,7 @@ def puppet_rows_stream():
     for i in rest:
         yield _row(i)
     try:
-        for name, answer in bus.request_stream("sizes", asked, timeout=45):
+        for name, answer in bus.request_stream("sizes", asked, timeout=SIZES_TIMEOUT):
             sizes = ({} if isinstance(answer, Exception)
                      else ((answer or {}).get("sizes") or {}))
             yield _row(by_name[name], sizes.get(name))
@@ -310,7 +308,7 @@ def puppet_rows(sizes=True):
     return sorted(puppet_rows_stream(), key=lambda r: r.name)
 
 
-def puppet_sizes(rows, timeout=45):
+def puppet_sizes(rows, timeout=SIZES_TIMEOUT):
     """Обмер места по строкам puppet_rows: {имя: КБ}. Спрашиваются только
     те, у кого бежит аллокация; кого не обмерили — в ответе нет, и это
     прочерк у вызывающего. Легла шина — пустой ответ, не исключение: место
@@ -503,13 +501,18 @@ def _note(reply):
 
 
 # ─── рецикл ───────────────────────────────────────────────────────────────
+# Снос клона и target на узле: сотни тысяч inode. Одно число на всех, кто
+# зовёт глагол wipe (#268): recycle отсюда и sweep пула.
+WIPE_TIMEOUT = 600
+
+
 def wipe(node, name, force=False, branch=None):
     """Глагол wipe напрямую, без остановки джоба. Агент сам откажет, если
     tmux-сессия жива: голый wipe — для уже остановленного папета, полный
     цикл (стоп → снос → подъём) — recycle. Чужой папет -- отказ агента с
     именем владельца (#40), force его проходит."""
     r = bus.request(node, "wipe", name=name, owner=bus.login(), force=force,
-                    branch=branch, timeout=600)
+                    branch=branch, timeout=WIPE_TIMEOUT)
     if "error" in r:
         raise RuntimeError(r["error"])
     return r
