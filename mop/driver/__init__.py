@@ -17,7 +17,8 @@ Nomad решает, где стоит папет, шина — как с ним 
 рядом с агентом, а агенту Nomad не нужен вовсе — в этом половина смысла
 переезда на шину. Импорт `python-nomad` отсюда потянул бы его на каждый узел.
 
-Контракт (docs/DRIVER.md), две половины в одном файле — узел и его тела:
+Контракт (docs/DRIVER.md), две половины в одном файле — узел и его тела;
+глаголы гипервизора требуются только от драйвера с отдельными телами (#276):
 
     ensure(name, params)   поднять тело: клон шаблона, лимиты, адрес, старт
     destroy(name)          снести тело
@@ -35,7 +36,8 @@ Nomad решает, где стоит папет, шина — как с ним 
                            там лежит постоянно
     address(name)          где сервер найдёт тело: у host — сам узел, у
                            контейнера — адрес тела (#151)
-    templates()            сборочные тела и образы узла; у host их нет (#151)
+    templates()            сборочные тела и образы узла; только у драйвера с
+                           отдельными телами, у host глагола нет (#151, #276)
     SESSION_PY             путь к session.py внутри тела
     IS_CONTAINER           тела — отдельные объекты, а не сам узел (False у host)
 
@@ -53,14 +55,28 @@ import re
 
 from ..common import config, fsutil, paths, plugins
 
-# Глаголы контракта. Список закрыт и проверяется громко при загрузке: агент
+# Глаголы контракта. Списки закрыты и проверяются громко при загрузке: агент
 # зовёт их из петли, и отсутствующий argv прочитается там как «узел молчит».
-VERBS = ("ensure", "destroy", "bodies", "capacity", "argv", "run_argv", "push",
-         "push_many", "projects_dir", "attach_argv", "repair_argv", "admit",
-         "address", "templates")
-# Всё, что потребители берут у модуля драйвера: глаголы и два значения.
-# tests/driver.py выводит этот список из кода потребителей и сверяет.
-CONSUMED = VERBS + ("SESSION_PY", "IS_CONTAINER")
+#
+# Контракт разрезан по тому, кому вопрос задан (#276). Один толстый список
+# требовал от host глагол, смысла для него не имеющий, и host держал пустую
+# заглушку ради одного вызова в агенте.
+#   BODY_VERBS        тело: поднять, снести, войти, положить файл -- все драйверы
+#   NODE_VERBS        узел: что на нём стоит и сколько места -- все драйверы,
+#                     у host узел и есть хранилище тел
+#   HYPERVISOR_VERBS  сборочные тела и образы -- только драйвер с отдельными
+#                     телами (IS_CONTAINER); потребитель берёт их через
+#                     hypervisor_verb и без них отвечает как host
+BODY_VERBS = ("ensure", "destroy", "argv", "run_argv", "push", "push_many",
+              "projects_dir", "attach_argv", "repair_argv", "admit", "address")
+NODE_VERBS = ("bodies", "capacity")
+HYPERVISOR_VERBS = ("templates",)
+VERBS = BODY_VERBS + NODE_VERBS + HYPERVISOR_VERBS
+# Всё, что потребители берут у модуля драйвера напрямую: глаголы, которые есть
+# у каждого, и два значения. Глаголы гипервизора сюда не входят -- их зовут
+# только через hypervisor_verb. tests/driver.py выводит этот список из кода
+# потребителей и сверяет.
+CONSUMED = BODY_VERBS + NODE_VERBS + ("SESSION_PY", "IS_CONTAINER")
 
 DEFAULT = config.SETTINGS["MOP_DRIVER"]
 
@@ -355,11 +371,6 @@ def contract(name, mod):
     Отдельная от загрузки функция, потому что проверяема без пула
     (tests/driver.py): ошибка контракта обязана находиться до живых папетов."""
     where = f"mop/driver/{name}.py"
-    for verb in VERBS:
-        fn = getattr(mod, verb, None)
-        if not callable(fn):
-            raise RuntimeError(f"{where}: no {verb}() — the contract is "
-                               f"{', '.join(VERBS)} (docs/DRIVER.md)")
     # Одно тело на узел или много — это разные вопросы к одному драйверу, и
     # спрашивать «пустой ли argv» вместо ответа значит выводить свойство из
     # побочного признака. Раздача файлов (`mop login`) на этом стоит: у host
@@ -368,6 +379,14 @@ def contract(name, mod):
     if not isinstance(getattr(mod, "IS_CONTAINER", None), bool):
         raise RuntimeError(f"{where}: IS_CONTAINER — False when the body is the "
                            f"node itself, True when it is a thing of its own")
+    # Какие глаголы требовать, решает тип тел: сборочные тела бывают только
+    # там, где тела отдельны от узла. Поэтому IS_CONTAINER проверен раньше.
+    demanded = BODY_VERBS + NODE_VERBS + (HYPERVISOR_VERBS if mod.IS_CONTAINER else ())
+    for verb in demanded:
+        fn = getattr(mod, verb, None)
+        if not callable(fn):
+            raise RuntimeError(f"{where}: no {verb}() — the contract is "
+                               f"{', '.join(demanded)} (docs/DRIVER.md)")
     session_py = getattr(mod, "SESSION_PY", None)
     # Абсолютный, потому что исполняется внутри тела и из чужого каталога:
     # относительный там молча соберётся в `python3 session.py`, которого нет,
@@ -432,6 +451,20 @@ async def bodies_apart(mod):
     (`mop login`). У host тело — сам узел, и второй записи не бывает: это тот
     же файл, а отчёт обещал бы запись в тела, которых нет."""
     return await mod.bodies() if mod.IS_CONTAINER else []
+
+
+def hypervisor_verb(mod, verb):
+    """Глагол гипервизора у модуля драйвера -> функция либо None (#276).
+
+    Контракт требует его только от драйвера с отдельными телами; у host его
+    нет, и потребитель на None отвечает так, как отвечал host: сборочных тел
+    нет. Имя проверяется по списку, чтобы сюда не просочился глагол, который
+    обязан быть у всех, -- его зовут напрямую."""
+    if verb not in HYPERVISOR_VERBS:
+        raise ValueError(f"{verb} is not a hypervisor verb; those are "
+                         f"{', '.join(HYPERVISOR_VERBS)}")
+    fn = getattr(mod, verb, None)
+    return fn if callable(fn) else None
 
 
 def module(name):

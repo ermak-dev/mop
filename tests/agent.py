@@ -900,6 +900,32 @@ def check_owner_gate_267(c):
                  or "lease.noted(" not in src))
 
 
+def check_junk_without_templates_276(c):
+    """HYPOTHESIS (#276): v_junk звал DRIVER.templates() у любого драйвера, и
+    host держал пустой глагол только ради этого вызова. SOLUTION: глагол
+    гипервизора берётся через driver.hypervisor_verb; драйвер без него
+    отвечает прежним [] -- ответ по шине тот же. STATUS: FIXED — see #276"""
+    import asyncio
+    import types
+
+    async def bodies():
+        return ["pu-mop-1"]
+
+    async def facts(_n):
+        return {}
+    bare = types.SimpleNamespace(bodies=bodies)
+    with restored(agent, "DRIVER", "clone_facts", "node_name"):
+        agent.DRIVER, agent.clone_facts = bare, facts
+        agent.node_name = lambda: "n1"
+        try:
+            got = asyncio.run(agent.v_junk(None, {}))
+        except AttributeError as e:
+            got = {"raised": str(e)}
+    c.expect("junk from a driver without templates: the old reply",
+             {k: got.get(k) for k in ("bodies", "work", "templates", "raised")},
+             {"bodies": ["pu-mop-1"], "work": {}, "templates": [], "raised": None})
+
+
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
@@ -907,7 +933,8 @@ def main():
                   check_main_169, check_subject_173, check_unclaim_race_189,
                   check_gates_40, check_caller_207, check_git_identity_167,
                   check_state_fact_224, check_no_screen_fact_236,
-                  check_usage_by_login_244, check_owner_gate_267):
+                  check_usage_by_login_244, check_owner_gate_267,
+                  check_junk_without_templates_276):
         try:
             check(c)
         except Exception as e:

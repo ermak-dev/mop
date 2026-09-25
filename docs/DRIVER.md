@@ -53,7 +53,9 @@ def attach_argv(name)         # чем входит человек
 def repair_argv(name)         # аварийный путь, когда основной молчит
 def admit(name, let_in)       # впустить ключ сервера на время bootstrap'а (BOOTSTRAP.md)
 def address(name)             # где сервер найдёт тело: у host — сам узел
-async def templates()         # сборочные тела и образы; у host — []
+
+# ── гипервизор: только у драйвера с отдельными телами (IS_CONTAINER) ──
+async def templates()         # сборочные тела и образы; у host глагола нет
 
 IS_CONTAINER = True           # тела — отдельные объекты; False у host
 SESSION_PY = "/…/session.py"  # путь к session.py внутри тела
@@ -65,6 +67,12 @@ SESSION_PY = "/…/session.py"  # путь к session.py внутри тела
 берут у модуля, перечислено в `driver.CONSUMED`; `tests/driver.py` выводит этот
 список из их кода и сверяет с каждым драйвером. Тип чужого узла по его meta —
 `driver.is_container(driver.of_node(meta))`.
+
+Контракт разрезан по тому, кому задан вопрос (#276): `BODY_VERBS` (тело) и
+`NODE_VERBS` (`bodies`, `capacity`) обязаны все драйверы, `HYPERVISOR_VERBS`
+(`templates`) — только драйвер с отдельными телами. Такой глагол потребитель
+берёт через `driver.hypervisor_verb(mod, verb)` и на `None` отвечает так, как
+отвечает узел без сборочных тел: пустым списком, ответ по шине не меняется.
 
 Две половины в одном файле: узел и его тела — одно решение, а не два. Развести
 их по двум реестрам значит получить решётку «узел × тело» и те же два места с

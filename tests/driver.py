@@ -63,6 +63,19 @@ CONTRACT = [
     # проходил проверку и падал у потребителя (bootstrap, junk).
     ("no address", plugin(address=None), False),
     ("no templates", plugin(templates=None), False),
+    # #276: один толстый контракт требовал от host глагол, смысла для него не
+    # имеющий. templates -- вопрос гипервизора: драйвер с отдельными телами
+    # обязан его иметь, драйвер «тело = узел» -- нет. Глаголы тела обязаны все.
+    ("pve without templates -> refused",
+     plugin(IS_CONTAINER=True, templates=None), False),
+    ("host without templates -> fine",
+     plugin(IS_CONTAINER=False, templates=None), True),
+    ("host without ensure -> refused",
+     plugin(IS_CONTAINER=False, ensure=None), False),
+    ("host without bodies -> refused",
+     plugin(IS_CONTAINER=False, bodies=None), False),
+    ("host without capacity -> refused",
+     plugin(IS_CONTAINER=False, capacity=None), False),
     ("no SESSION_PY", plugin(SESSION_PY=None), False),
     ("empty SESSION_PY", plugin(SESSION_PY=""), False),
     ("SESSION_PY is not a path", plugin(SESSION_PY="session.py"), False),
@@ -182,8 +195,19 @@ def check_contract_151(c):
                  host.address("pu-mop-1"), old_toward_server())
     for n in ("pu-mop-1", "pu-rugent-7"):
         c.expect(f"pve.address({n})", pve.address(n), pve.address_of(n))
-    c.expect("host.templates() must be [] — a node-body driver builds no images",
-             asyncio.run(host.templates()), [])
+    # #276: у host глагола templates нет вовсе -- контракт его не требует, а
+    # потребитель берёт его через driver.hypervisor_verb и без него отвечает
+    # прежним [] (agent.v_junk).
+    # STATUS: FIXED — see #276
+    c.check("host must not carry templates: a node-body driver builds no images",
+            not hasattr(host, "templates"))
+    c.check("driver.hypervisor_verb(host, 'templates') must be None",
+            getattr(driver, "hypervisor_verb", lambda m, v: "missing")(host, "templates") is None)
+    c.check("driver.hypervisor_verb(pve, 'templates') must be pve.templates",
+            getattr(driver, "hypervisor_verb", lambda m, v: None)(pve, "templates") is pve.templates)
+    c.check("templates must not be demanded of every driver",
+            "templates" not in getattr(driver, "BODY_VERBS", ("templates",))
+            + getattr(driver, "NODE_VERBS", ()))
     c.check("pve.templates must stay a coroutine",
             asyncio.iscoroutinefunction(pve.templates))
     for name, want in (("host", False), ("pve", True)):

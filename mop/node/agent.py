@@ -710,9 +710,10 @@ async def v_junk(_conn, req):
     про чужие проекты тоже, а сопоставлять с Nomad всё равно некому, кроме
     управляющей машины.
 
-    `templates` у host пуст: сборочных тел там не бывает вовсе, и пустой
-    список честнее выдуманного."""
+    `templates` у host пуст: сборочных тел там не бывает вовсе, глагола у
+    драйвера нет (#276), и пустой список честнее выдуманного."""
     names = await DRIVER.bodies()
+    templates = driver.hypervisor_verb(DRIVER, "templates")
     # Работу в клоне спрашиваем ЗДЕСЬ, а не оставляем решать по имени. Тело
     # без tmux-сессии `facts` описывает как {present: False} и про клон молчит
     # — верно для узла, до которого не достучаться, но сирота на гипервизоре
@@ -729,7 +730,7 @@ async def v_junk(_conn, req):
             "driver": driver.current_name(),
             "bodies": names,
             "work": work,
-            "templates": await DRIVER.templates()}
+            "templates": await templates() if templates else []}
 
 
 async def v_usage(_conn, req):
