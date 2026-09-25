@@ -113,7 +113,7 @@
   environment:
     NOMAD_ADDR: http://127.0.0.1:{{ MOP_NOMAD_PORT }}
 
-# Сразу в каталог сервера (mop/creds.py): оттуда его читает mop на
+# Сразу в каталог сервера (mop/common/creds.py): оттуда его читает mop на
 # контроллере, и оттуда же `mop join` везёт его оператору. Отдельного
 # ~/.config/nomad больше нет: у mop один каталог кредов на сервер.
 - name: Fetch the management token to the controller

@@ -1,6 +1,6 @@
 # Всё, что нужно самому mop: клиент шины, MCP-сервер и то, что он
 # импортирует. Список один на узел, сервер, тело и `mop setup`
-# (MOP_PIP_DEPS из mop/deps.py, приезжает --extra-vars).
+# (MOP_PIP_DEPS из mop/common/deps.py, приезжает --extra-vars).
 #
 # pip_pool_user: ставить под пользователем пула, кем бы ansible ни зашёл. На
 # Proxmox ansible заходит как root, и --user клал библиотеки в /root/.local,
