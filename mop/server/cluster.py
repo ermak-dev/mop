@@ -21,7 +21,7 @@ bootstrap песочницы за папета). Положи туда глаг�
 не `register(spec)`: приняв готовую спеку, сервис отдал бы исполнение кода на
 узлах любому, кто дотянулся до шины, и токен на сервере не защищал бы ничего.
 
-Подписчик — mop-cluster, юнит на сервере; проверяется `mop cluster check`.
+Подписчик — mop-cluster, юнит на сервере; проверяется `mop server cluster check`.
 Чистая часть (права) — tests/cluster.py.
 """
 import json
@@ -478,7 +478,7 @@ def _up(project, req):
     return {"ok": True, "node": req["node"]}
 
 
-# Хосты инвентаря контроллера (#178): кладёт `mop deploy` (роль cluster),
+# Хосты инвентаря контроллера (#178): кладёт `mop server deploy` (роль cluster),
 # инвентарь сам лежит у контроллера, куда учётке пула хода нет.
 INVENTORY_HOSTS = os.path.expanduser("~/.config/mop/inventory-hosts.json")
 
@@ -486,13 +486,13 @@ INVENTORY_HOSTS = os.path.expanduser("~/.config/mop/inventory-hosts.json")
 def inventory_refusal(node, hosts):
     """Почему узел нельзя забыть по инвентарю; None -- можно (#178).
 
-    Узел, оставшийся в инвентаре, следующий `mop deploy` молча ставит снова,
+    Узел, оставшийся в инвентаре, следующий `mop server deploy` молча ставит снова,
     и forget оказывается не решением, а паузой до прогона. hosts=None --
     списка нет (сервер развёрнут до #178): не отказ, иначе оператор упёрся
     бы в файл, которого ему никто не клал."""
     if hosts is not None and node in hosts:
         return (f"{node} is still in the inventory — take it out and run "
-                f"mop deploy first, or the next deploy configures it again")
+                f"mop server deploy first, or the next deploy configures it again")
     return None
 
 

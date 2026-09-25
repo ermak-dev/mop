@@ -4,7 +4,7 @@ Same profile machinery as `mop master`, none of the pool. No project, no bus
 credentials, no mop MCP server: this is an ordinary claude session that just
 happens to come up on a chosen provider. Use it where the pool has nothing to
 do with the job — a scratch checkout, someone else's repository, a shell on
-a machine that never got `mop deploy`.
+a machine that never got `mop server deploy`.
 
 Only --llm belongs to this command; everything else goes to claude as-is
 (`mop code --continue` resumes the last session here). The command won't

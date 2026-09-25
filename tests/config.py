@@ -286,7 +286,7 @@ def main():
 
     # HYPOTHESIS (#156): config -- нижний слой, а тянул вверх operators и
     # deps (playbook_vars), держал разбор манифеста и копию полей контекста;
-    # три настройки процесса читались мимо config и в `mop config` не видны.
+    # три настройки процесса читались мимо config и в `mop server config` не видны.
     # SOLUTION: разбор манифеста -- в manifest, playbook_vars -- в playvars,
     # поля контекста объявляет context и сам вписывает их в config; три
     # переменные -- PROCESS_SCOPED: в SETTINGS, но только из окружения.
@@ -322,7 +322,7 @@ def main():
             cases += 1
             if k not in listed or config.SETTINGS.get(k) != "":
                 bad += 1
-                print(f"FAILED  {k} must be a setting with default '' listed by mop config")
+                print(f"FAILED  {k} must be a setting with default '' listed by mop server config")
             cases += 1
             if config.get(k) != "":
                 bad += 1

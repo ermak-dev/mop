@@ -173,7 +173,7 @@ been created. Pool size is your job; the operator may set a ceiling:
 | `waiting for input` | no — may just be between turns; deliberately not auto-treated, the operator decides |
 | `HUNG (not responding)` | no — `puppet(action="restart")` |
 | `HUNG (no tmux session)` | no — the wrapper never reached a working state; `mcp__mop__tail` and `doctor()` |
-| `AGENT SILENT (…)` | no, and do NOT touch the puppet — the node's agent is silent while the puppet may be working fine; a restart kills live work. Cured by the operator with `mop deploy` |
+| `AGENT SILENT (…)` | no, and do NOT touch the puppet — the node's agent is silent while the puppet may be working fine; a restart kills live work. Cured by the operator with `mop server deploy` |
 | `not logged in`, `login expired` | no — the `login` tool, then a restart (`doctor(fix=true)` does both) |
 | `no model quota: <model>` | no — a restart will NOT help: switch the model (`mcp__mop__slash(name, "/model <m>")`) or top up |
 | `error: <provider message>` | no — the provider refused the turn; the message carries the reason and, for a quota, when it resets. A restart will NOT help: switch the model or wait it out |

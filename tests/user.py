@@ -4,11 +4,11 @@
 HYPOTHESIS (#218): у файла операторов (#205) нет правящей его команды:
 человека в нём заводят руками, хеш -- кодом из питона, и MOP_OPERATORS
 убрать нельзя, пока в файл нечем перенести её логины с их паролями.
-SOLUTION: группа `mop user` -- add, passwd, delete и переходный import
+SOLUTION: группа `mop server user` -- add, passwd, delete и переходный import
 (MOP_OPERATORS с нынешними паролями -> файл). Только на сервере, где лежит
 файл; при провайдере ldap -- отказ, люди там в LDAP. Правка файла --
 атомарно, 0600; копию для сервисов сервера (/etc/nats/identity) команда
-обновляет сама, когда может, иначе одной строкой просит mop deploy.
+обновляет сама, когда может, иначе одной строкой просит mop server deploy.
 STATUS: FIXED — see #218
 """
 import contextlib
@@ -34,7 +34,7 @@ failed = []
 
 
 def verb(name):
-    return importlib.import_module(f"mop.cli.user.{name}")
+    return importlib.import_module(f"mop.cli.server.user.{name}")
 
 
 def run(name, argv, stdin="", typed=()):
@@ -91,10 +91,10 @@ def main():
 
     # ── свежий сервер: инвентарь есть, secrets/ ещё нет (#238) ───────────
     # HYPOTHESIS: refusal() узнаёт сервер по двум признакам сразу -- secrets/
-    # и инвентарь. secrets/ заводит только mop deploy, а тот без людей
-    # отказывает (#219): на свежем сервере mop user add и mop deploy
+    # и инвентарь. secrets/ заводит только mop server deploy, а тот без людей
+    # отказывает (#219): на свежем сервере mop server user add и mop server deploy
     # отказывают друг из-за друга.
-    # SOLUTION: сервер узнаётся по инвентарю; secrets/ (0700) mop user
+    # SOLUTION: сервер узнаётся по инвентарю; secrets/ (0700) mop server user
     # заводит сам, там же, где пишет файл операторов.
     # STATUS: FIXED — see #238
     open(INVENTORY, "w").write("all: {}\n")
@@ -222,8 +222,8 @@ def main():
     # ── копию не обновить -- одна строка про deploy ──────────────────────
     natsconf.IDENTITY_DIR = os.path.join(ROOT, "absent", "identity")
     code, out, err = run("add", ["fay", "--role", "admin", "--stdin"], "pw\n")
-    check("add: no way to the copy -- one line asking for mop deploy",
-          code == 0 and "mop deploy" in out and len(out.strip().splitlines()) == 1
+    check("add: no way to the copy -- one line asking for mop server deploy",
+          code == 0 and "mop server deploy" in out and len(out.strip().splitlines()) == 1
           and authenticates("fay", "pw"), (code, out, err))
     natsconf.IDENTITY_DIR = os.path.join(NATS, "identity")
 
@@ -236,7 +236,7 @@ def main():
         code, out, err = run(name, argv, stdin)
         check(f"{name}: refused with the ldap provider",
               code != 0 and "LDAP" in err and content() == before, (code, err))
-    # ── #232: file,ldap -- файл в цепочке, mop user его правит ───────────
+    # ── #232: file,ldap -- файл в цепочке, mop server user его правит ───────────
     # HYPOTHESIS: отказ «people live in LDAP» -- по одному провайдеру ldap;
     # при цепочке file,ldap локальных людей было бы нечем завести.
     # SOLUTION: отказ -- только когда file нет в цепочке. STATUS: FIXED — see #232

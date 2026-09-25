@@ -1,11 +1,11 @@
-"""remove a person: mop user delete <login>
+"""remove a person: mop server user delete <login>
 
 Takes the person's line out of the operators file; the next connection is
 refused. Connections already open live on. Silent when all goes well.
 """
 from mop.server import identity
 from mop.cli import lib
-from mop.cli.user import _common
+from mop.cli.server.user import _common
 
 
 def main(argv):

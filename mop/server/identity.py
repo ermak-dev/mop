@@ -29,9 +29,9 @@ pbkdf2_hmac, но требует памяти (~16 МБ на попытку), и
 ломая старые записи.
 
 Источник людей один (#219): провайдер. Переходный MOP_OPERATORS с паролями,
-которые заводил deploy, ушёл -- людей переносит `mop user import`. Логин,
+которые заводил deploy, ушёл -- людей переносит `mop server user import`. Логин,
 определённый в файле дважды, -- отказ этому логину, остальные входят;
-громкий отказ всего -- у mop deploy, до плейбука.
+громкий отказ всего -- у mop server deploy, до плейбука.
 """
 import base64
 import dataclasses
@@ -185,14 +185,14 @@ class PlainFileProvider:
     def _one(self, login):
         """-> (Identity, хеш) или None. Логин, определённый дважды, -- Refused:
         отказ бьёт по нему одному, а не по провайдеру (#205); громкий отказ
-        всего -- в mop deploy, по conflicts()."""
+        всего -- в mop server deploy, по conflicts()."""
         records, twice = self._records()
         if login in twice:
             raise Refused(_conflict(login, twice[login]))
         return records.get(login)
 
     def conflicts(self):
-        """-> [строка на логин, определённый дважды]; для mop deploy."""
+        """-> [строка на логин, определённый дважды]; для mop server deploy."""
         return [_conflict(login, sources) for login, sources in sorted(self._records()[1].items())]
 
     def identities(self):
@@ -257,12 +257,12 @@ def service_settings(get, secrets_dir):
         out[BIND_PASSWORD] = ""
     if not out[BIND_PASSWORD]:
         raise ValueError(f"MOP_AUTH_PROVIDER has ldap, but {path} has no bind password "
-                         f"-- set MOP_LDAP_BIND_PASSWORD in .env and run mop deploy")
+                         f"-- set MOP_LDAP_BIND_PASSWORD in .env and run mop server deploy")
     return out
 
 
 # ─── правка файла операторов (#218) ──────────────────────────────────────
-# Команда `mop user` на сервере. Файл правится строкой на человека: чужие
+# Команда `mop server user` на сервере. Файл правится строкой на человека: чужие
 # строки и комментарии остаются как были, запись -- атомарно и 0600. Отказы
 # -- ValueError с причиной, до записи: наполовину правленого файла не бывает.
 def operators_path(settings, secrets_dir=SECRETS):
@@ -306,7 +306,7 @@ def _index(lines, login):
 def _save(path, lines):
     """Файл операторов: 0600, атомарно. Нет каталога -- заводится 0700
     (#238): на свежем сервере secrets/ ещё нет, его иначе завёл бы только
-    mop deploy, а тот без людей отказывает. Лежащий каталог не трогается:
+    mop server deploy, а тот без людей отказывает. Лежащий каталог не трогается:
     MOP_OPERATORS_FILE может назвать чужой."""
     parent = os.path.dirname(path)
     if parent and not os.path.isdir(parent):
@@ -317,7 +317,7 @@ def _save(path, lines):
 def _in_setting(login, setting):
     if login in operators.parse(setting):
         return (f"{login} is in MOP_OPERATORS, not in the file: "
-                f"mop user import moves it there with its password")
+                f"mop server user import moves it there with its password")
     return None
 
 
@@ -389,7 +389,7 @@ def import_setting(path, setting, secrets_dir=SECRETS):
         add.append(format_line(who, hash_password(password)))
     if missing:
         raise ValueError(f"no password in {secrets_dir} for {', '.join(missing)}: "
-                         f"their password is made by mop deploy")
+                         f"their password is made by mop server deploy")
     _save(path, lines + add)
     return [w.login for w in people]
 
@@ -403,12 +403,12 @@ def _owner(path):
 def refresh_copy(path, folder=None):
     """Копия файла операторов для сервисов сервера (natsconf.IDENTITY_DIR,
     её же кладёт deploy). -> None, если записана, иначе строка: почему нет и
-    что копию обновит mop deploy. Каталог над копией -- /etc/nats
+    что копию обновит mop server deploy. Каталог над копией -- /etc/nats
     пользователя пула: писать туда может только он (или root); не может (не
     сервер шины, другой пользователь) -- строка.
 
     Копия -- владельца своего каталога, не вызвавшего (#234): его задаёт
-    deploy, и от его имени её читают сервисы. `mop user` от root оставлял
+    deploy, и от его имени её читают сервисы. `mop server user` от root оставлял
     файл root:root 0600, и callout отказывал каждому входу. Не выходит
     отдать владельцу каталога (не root и не он) -- отказ, прежняя копия
     остаётся: устаревшая лучше нечитаемой. Каталог, которого ещё нет,
@@ -416,7 +416,7 @@ def refresh_copy(path, folder=None):
     from . import natsconf   # лениво: как у server_provider
     folder = folder or natsconf.IDENTITY_DIR
     copy = os.path.join(folder, OPERATORS_FILE)
-    later = "the server's services read a copy of the operators file: run mop deploy"
+    later = "the server's services read a copy of the operators file: run mop server deploy"
     parent = os.path.dirname(folder)
     if not os.path.isdir(parent) or not os.access(parent, os.W_OK | os.X_OK):
         return later
@@ -435,7 +435,7 @@ def refresh_copy(path, folder=None):
             fsutil.write_private(copy, f.read(), owner=owner)
     except PermissionError as e:
         return (f"{copy}: cannot hand it to the owner of {folder} ({e.strerror}), "
-                f"the services would not read it: run mop deploy")
+                f"the services would not read it: run mop server deploy")
     except OSError:
         return later
     return None

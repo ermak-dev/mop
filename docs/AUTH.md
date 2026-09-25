@@ -10,7 +10,7 @@
 
 Люди берутся из провайдера личностей — и только из него. Провайдер
 выбирает настройка `MOP_AUTH_PROVIDER` в `.env`: `file` (по умолчанию) —
-файл операторов на сервере, который ведёт `mop user`; `ldap` — каталог
+файл операторов на сервере, который ведёт `mop server user`; `ldap` — каталог
 организации (OpenLDAP или Active Directory); `file,ldap` — цепочка: люди из
 файла поверх каталога. Провайдер отвечает на два вопроса: верен ли пароль
 и кто этот человек — логин, имя, почта, роль и проекты.
@@ -28,15 +28,15 @@ TLS-прокси сервера — так ходит `mop join` и всё, чт
 
 ## Провайдер file: люди в файле операторов
 
-Людей заводят командой `mop user` на сервере — там, где лежит инвентарь
+Людей заводят командой `mop server user` на сервере — там, где лежит инвентарь
 установки; на машине оператора она откажет. Делать это нужно до первого
-`mop deploy`: без единого человека в файле он откажет — на шину не вошёл бы
+`mop server deploy`: без единого человека в файле он откажет — на шину не вошёл бы
 никто.
 
 ```
-mop user add anton --role admin --name "Антон Ермак" --email anton@example.dev
-mop user add ivan --role user --projects rugent,cloudpub --name "Иван" --email ivan@example.dev
-mop user add olga --role user --projects '*'
+mop server user add anton --role admin --name "Антон Ермак" --email anton@example.dev
+mop server user add ivan --role user --projects rugent,cloudpub --name "Иван" --email ivan@example.dev
+mop server user add olga --role user --projects '*'
 ```
 
 - `--role admin|user` — обязательна. `admin` проектов не принимает: у него
@@ -45,13 +45,13 @@ mop user add olga --role user --projects '*'
   этого человека (владелец задания, #167). Без них папет коммитит без
   личности владельца, и мастеру придётся коммитить с `git -c`.
 - Пароль спрашивается дважды без эха. `--stdin` — одной строкой со
-  стандартного ввода, для скриптов: `printf '%s\n' "$PW" | mop user add ... --stdin`.
+  стандартного ввода, для скриптов: `printf '%s\n' "$PW" | mop server user add ... --stdin`.
 
 Сменить пароль и убрать человека:
 
 ```
-mop user passwd ivan            # или --stdin
-mop user delete ivan
+mop server user passwd ivan            # или --stdin
+mop server user delete ivan
 ```
 
 На успехе команды молчат. Логин, который уже есть в файле, `add` не
@@ -66,8 +66,8 @@ anton:admin::Антон Ермак:anton@example.dev:scrypt$16384$8$1$<соль>
 ```
 
 Сервисы сервера (callout и глагол владельца задания) читают копию файла в
-`/etc/nats/identity/`. `mop user` обновляет её сам, если может писать в
-`/etc/nats`; иначе одной строкой просит `mop deploy` — до него новый
+`/etc/nats/identity/`. `mop server user` обновляет её сам, если может писать в
+`/etc/nats`; иначе одной строкой просит `mop server deploy` — до него новый
 человек не войдёт.
 
 ## Провайдер ldap: люди в каталоге
@@ -158,17 +158,17 @@ MOP_LDAP_NESTED=ad
 решает первое звено, которое знает логин: логин из файла проверяется
 только файлом, до каталога дело не доходит — одноимённая учётка в каталоге
 не становится вторым паролем к нему. Логин, которого нет в файле, решает
-каталог. Файл при этом ведёт тот же `mop user`; при одном `ldap` он
+каталог. Файл при этом ведёт тот же `mop server user`; при одном `ldap` он
 откажет — люди живут в каталоге.
 
-## Применение: mop deploy
+## Применение: mop server deploy
 
-После любой смены настроек провайдера — `mop deploy`: он раскладывает их
+После любой смены настроек провайдера — `mop server deploy`: он раскладывает их
 сервисам сервера, а пароль служебной учётки LDAP — файлом рядом с копией
-людей (не в окружение юнита). Правка самих людей в файле `mop deploy` не
-требует, если `mop user` смог обновить копию сам.
+людей (не в окружение юнита). Правка самих людей в файле `mop server deploy` не
+требует, если `mop server user` смог обновить копию сам.
 
-`mop deploy` отказывает до плейбука, если:
+`mop server deploy` отказывает до плейбука, если:
 
 - в файле операторов нет ни одного человека (провайдер `file`);
 - логин записан в файле дважды;
@@ -181,15 +181,15 @@ MOP_LDAP_NESTED=ad
 ### Переход со старой установки
 
 Раньше люди задавались строкой `MOP_OPERATORS` в `.env`, а их пароли
-заводил `mop deploy`. Эта строка больше не работает, и `mop deploy`
+заводил `mop server deploy`. Эта строка больше не работает, и `mop server deploy`
 отказывает, пока она лежит в `.env`. Перенести людей в файл операторов с их
 нынешними паролями:
 
 ```
-mop user import
+mop server user import
 ```
 
-затем удалить строку `MOP_OPERATORS` из `.env` и прогнать `mop deploy`. Имени
+затем удалить строку `MOP_OPERATORS` из `.env` и прогнать `mop server deploy`. Имени
 и почты у перенесённых нет — их можно дописать, удалив человека и заведя
 заново, или правкой строки файла. `operator.json` на машинах людей после
 переноса работает без нового `mop join`: пароль тот же.
@@ -219,7 +219,7 @@ openssl x509 -noout -fingerprint -sha256 -in ~/.config/mop/secrets/tls.pem
 
 ## Отзыв доступа
 
-- Файл: `mop user delete <логин>`.
+- Файл: `mop server user delete <логин>`.
 - LDAP: убрать человека из групп пула (или отключить учётку в каталоге).
 
 Отзыв действует со следующего подключения: уже открытые соединения живут
@@ -242,12 +242,12 @@ journalctl -u mop-callout -n 50
 
 | Причина в журнале | Что делать |
 |---|---|
-| `<логин>: unknown login` | нет в файле (`mop user add`) или в каталоге под `MOP_LDAP_BASE` / `MOP_LDAP_LOGIN_ATTR` |
-| `<логин>: wrong password` | неверный пароль; в файле — `mop user passwd` |
+| `<логин>: unknown login` | нет в файле (`mop server user add`) или в каталоге под `MOP_LDAP_BASE` / `MOP_LDAP_LOGIN_ATTR` |
+| `<логин>: wrong password` | неверный пароль; в файле — `mop server user passwd` |
 | `people connect over WebSocket only` | человек пришёл на порт шины напрямую; входить надо через `mop join` (wss через прокси) |
 | `no access -- in none of the pool's LDAP groups` | человек есть в каталоге, но не в группах пула: `MOP_LDAP_ADMIN_GROUP`, `MOP_LDAP_ACCESS_GROUP`, `mop-<проект>` |
 | `ambiguous login, N entries in LDAP` | логину соответствуют несколько записей: сузить `MOP_LDAP_BASE` или сменить `MOP_LDAP_LOGIN_ATTR` |
-| `LDAP service bind as ... failed` | неверные `MOP_LDAP_BIND_DN` / `MOP_LDAP_BIND_PASSWORD`; после правки — `mop deploy` |
+| `LDAP service bind as ... failed` | неверные `MOP_LDAP_BIND_DN` / `MOP_LDAP_BIND_PASSWORD`; после правки — `mop server deploy` |
 | `LDAP ldaps://...: ...`, `LDAP StartTLS failed` | каталог недоступен или сертификат не проверился: `MOP_LDAP_CA_FILE` |
 
 Если в журнале нет строки о входе вовсе — сервис не ответил:

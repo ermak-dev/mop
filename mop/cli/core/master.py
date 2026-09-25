@@ -121,7 +121,7 @@ def main(argv):
         lib.usage(f"no bus credentials on this machine.\n"
                   f"Log in as yourself: mop join <login>. The project "
                   f"must be registered (mop project add {origin}) and yours "
-                  f"in the server's identity provider (mop user, or the directory)")
+                  f"in the server's identity provider (mop server user, or the directory)")
     link_skill()
 
     # Профиль тот же, что у папетов, но источник ключа другой: не узловой

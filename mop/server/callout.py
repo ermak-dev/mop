@@ -26,7 +26,7 @@ JWT пользователя без exp: срок закрывает соеди�
 обещает, что живые соединения живут. Отзыв доступа действует со
 следующего входа.
 
-Данные, без печати: печатает `mop callout serve`.
+Данные, без печати: печатает `mop server callout serve`.
 """
 import asyncio
 import os
@@ -214,6 +214,6 @@ async def run(log):
     from . import bootstrap   # PUPPET_CREDS: пароли папетов пишет natsconf
     password = natsconf.read_base().get(USER)
     if not password:
-        raise RuntimeError(f"{natsconf.BASE} has no {USER} password -- run mop deploy")
+        raise RuntimeError(f"{natsconf.BASE} has no {USER} password -- run mop server deploy")
     await serve(f"nats://127.0.0.1:{config.get('MOP_NATS_PORT')}", password, keys(),
                 identity.server_provider(), PuppetProvider(bootstrap.PUPPET_CREDS), log)

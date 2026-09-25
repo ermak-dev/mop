@@ -51,12 +51,12 @@ LAYERS = {
     "mop.cli.pool": CLIENT, "mop.cli.service": CLIENT,
     # cli: сервер. Образ печёт контроллер: ansible по гипервизорам, как deploy.
     "mop.cli.driver.build": SERVER,
-    "mop.cli.pool.deploy": SERVER, "mop.cli.pool.config": SERVER,
-    "mop.cli.pool.setup": SERVER, "mop.cli.user": SERVER,
-    "mop.cli.pool._play": SERVER,
-    "mop.cli.cluster": SERVER, "mop.cli.bootstrap": SERVER,
-    "mop.cli.service.callout": SERVER, "mop.cli.service.web": SERVER,
-    "mop.cli.driver.pve-facts": SERVER,
+    # Пространство контроллера (#259): deploy, config, setup, user,
+    # cluster, bootstrap, web, callout, pve-facts и _play -- одним ключом.
+    "mop.cli.server": SERVER,
+    # mop setup наверху -- машина оператора, но играет self.yml с настройками
+    # установки (playvars) -- как и до #259, когда оба варианта жили в нём.
+    "mop.cli.pool.setup": SERVER, "mop.cli.pool._self": SERVER,
     # cli: узел
     "mop.cli.service.agent": NODE, "mop.cli.driver.run": NODE,
     "mop.cli.driver.list": NODE, "mop.cli.driver.sweep": NODE,

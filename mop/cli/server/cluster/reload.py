@@ -1,4 +1,4 @@
-"""mop cluster reload: make nats-server reread its config, and check it took
+"""mop server cluster reload: make nats-server reread its config, and check it took
 
 On the server, as the pool user. Checks the file with `nats-server -t`,
 sends SIGHUP, then compares the running config's digest (/varz on the

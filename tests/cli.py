@@ -18,7 +18,7 @@ sys.path.insert(0, ROOT)
 from mop import cli  # noqa: E402
 from mop.cli import lib  # noqa: E402
 from mop.cli.core import _common  # noqa: E402
-from mop.cli.pool import _play  # noqa: E402
+from mop.cli.server import _play  # noqa: E402
 
 # (каталог, имя, подпакет?) — то, что находит обход mop/cli.
 FOUND = [
@@ -123,10 +123,10 @@ def main():
 
     # deploy на python (#76): чистое — отвергнутые старые цели, недостающие
     # файлы MOP_BODY_EXTRA, имена проектов из origin'ов и легаси, --extra-vars.
-    # HYPOTHESIS: deploy на bash, зовёт mop config/projects/list подпроцессом.
+    # HYPOTHESIS: deploy на bash, зовёт mop server config/projects/list подпроцессом.
     # SOLUTION: mop.cli.pool.deploy поверх библиотеки. STATUS: FIXED — see #76
     try:
-        from mop.cli.pool import deploy
+        from mop.cli.server import deploy
         from mop.common import projects
     except ImportError as e:
         print(f"FAIL {e}")
@@ -194,7 +194,7 @@ def main():
 
     # Локаль прогонов (#92): ansible требует UTF-8 и берёт её из окружения, а
     # свежая машина несёт LANG=C. Ставит её диспетчер, потому что зовут
-    # прогон и `mop setup`, и `mop deploy`, и сборка образа.
+    # прогон и `mop setup`, и `mop server deploy`, и сборка образа.
     # Локаль прогона считается от локали УСТАНОВКИ, а не от унаследованного
     # окружения. Окружение как раз и бывает сломано: ssh привозит LC_* с
     # машины оператора, и на сервере такой локали нет — ansible тогда не
@@ -218,7 +218,7 @@ def main():
     # ничем: повышать нечего, а на выделенном сервере ещё и нечем, там
     # `sudo` попросту не стоит, и команда падала трассировкой на первом же
     # шаге установки.
-    from mop.cli.pool import setup as pool_setup
+    from mop.cli.pool import _self as pool_setup   # общее двух setup (#259)
     if pool_setup.elevate(uid=0) != []:
         failed += 1
         print(f"FAIL elevate as root: {pool_setup.elevate(uid=0)}")
@@ -237,7 +237,7 @@ def main():
         path = os.path.join(cli.PACKAGE, group, "__init__.py")
         with open(path) as f:
             doc = f.read()
-        # Глагол бывает и через дефис: `mop driver pve-facts` (#158).
+        # Глагол бывает и через дефис: `mop server pve-facts` (#158).
         listed = set(re.findall(rf"^  mop {group} ([a-z][a-z-]*)", doc, re.M))
         missing = listed - set(have.get(group) or {})   # дерево (#253): глаголы -- ключи
         if missing:
@@ -778,7 +778,7 @@ def check_refusals():
     # Два исключения: у ping в cluster check поле error рядом с ok -- это
     # «сервис жив, Nomad нет», а не отказ; deploy отдаёт ответ целиком
     # projects.for_deploy, и отказ там -- заметка, а не конец прогона.
-    allowed = {os.path.join("cluster", "check.py"), os.path.join("pool", "deploy.py")}
+    allowed = {os.path.join("server", "cluster", "check.py"), os.path.join("server", "deploy.py")}
     for root, _, files in os.walk(cli.PACKAGE):
         for f in files:
             path = os.path.join(root, f)
@@ -933,12 +933,26 @@ def check_output_rest():
         shutil.which = lambda cmd: "/usr/bin/sudo" if cmd == "sudo" else None
         subprocess.run = lambda args, **kw: ran.append(args) or subprocess.CompletedProcess(args, 0)
         playvars.playbook_vars = lambda: {}
-        out, err, code = silent_run(setup.main, ["--operator"])
+        out, err, code = silent_run(setup.main, [])
+        # #259: mop setup -- машина оператора, флаг ушёл; контроллер --
+        # mop server setup, с ролью controller и без слова про claude.
+        _, _, refused = silent_run(setup.main, ["--operator"])
+        from mop.cli.server import setup as server_setup
+        ran_before = len(ran)
+        s_out, s_err, s_code = silent_run(server_setup.main, [])
+        server_role = [a for a in ran[ran_before:] if "ansible-playbook" in a]
     finally:
         shutil.which, subprocess.run, playvars.playbook_vars = keep
-    if out or code or "claude is not in PATH" not in err or len(ran) != 3:
+    if out or code or "claude is not in PATH" not in err or len(ran) - 3 != 3:
         failed += 1
         print(f"FAIL setup: stdout {out!r}, stderr {err!r}, code {code!r}, ran {len(ran)} commands")
+    if not refused:
+        failed += 1
+        print("FAIL #259 mop setup --operator must be a usage refusal: the flag is gone")
+    if s_code or s_out or "claude" in s_err or not server_role \
+            or '{"mop_role": "controller"}' not in server_role[0]:
+        failed += 1
+        print(f"FAIL #259 mop server setup: code {s_code!r}, stderr {s_err!r}, ran {server_role!r}")
 
     # sweep: нечего убирать — успех, и он молчит.
     keep = (puppets.ready_nodes, bus.request_many, puppets.jobs, puppets.classify_junk)
@@ -1054,14 +1068,14 @@ def check_output_179():
 def check_output_182():
     """HYPOTHESIS (#182): после #179 `mop driver build` эхом печатал
     содержимое манифеста («asks for k=v»), отчёт о пересозданных телах и
-    объявлении образа, а `mop cluster users` -- «changed/unchanged».
+    объявлении образа, а `mop server cluster users` -- «changed/unchanged».
     SOLUTION: сборка показывает шаги (lib.Progress: строка на терминале,
     тишина не на терминале), факты -- шагами, а не отчётом; отказ подъёма
     папета и объявления образа -- stderr с именем; users на успехе молчит.
     STATUS: FIXED — see #182"""
     from mop.server import bootstrap, image, natsconf, nomad, spec
     from mop.common import projects
-    from mop.cli.cluster import users
+    from mop.cli.server.cluster import users
     from mop.cli.driver import build
     failed = 0
     undo = no_network()
@@ -1238,7 +1252,7 @@ def check_inventory_drivers():
     Nomad, и ловили её только читатели (driver.of_node, #175). SOLUTION: deploy
     прогоняет драйвер каждого хоста через of_node до плейбука.
     STATUS: FIXED — see #186"""
-    from mop.cli.pool import deploy
+    from mop.cli.server import deploy
     failed = 0
     fn = getattr(deploy, "driver_refusals", None)
     got = fn(INVENTORY_TYPO, "host") if fn else None
@@ -1271,7 +1285,7 @@ def check_node_memory_197():
     meta Nomad, где `>=` сравнивает численно только целые -- поэтому потолок
     не из одного целого числа тоже отказ.
     STATUS: FIXED — see #197"""
-    from mop.cli.pool import deploy
+    from mop.cli.server import deploy
     failed = 0
     undo = no_network()
     try:
@@ -1343,7 +1357,7 @@ def check_pool_uniform():
     и строку mop_mem_mb в инвентаре отвергает check_node_memory_197 на любом
     узле, с любым значением."""
     from mop.common import config
-    from mop.cli.pool import deploy
+    from mop.cli.server import deploy
     failed = 0
     undo = no_network()
     try:
@@ -1386,15 +1400,15 @@ def check_pool_uniform():
 
 def check_deploy_check():
     """HYPOTHESIS (#177): доказать, что правка deploy/ не меняет узлы, было
-    нечем — `mop deploy` аргументов не берёт, и #157 подкладывал на PATH
+    нечем — `mop server deploy` аргументов не берёт, и #157 подкладывал на PATH
     обёртку ansible-playbook. А после плейбука deploy пишет файлы
-    (creds.collect). SOLUTION: `mop deploy --check` — --check --diff каждому
+    (creds.collect). SOLUTION: `mop server deploy --check` — --check --diff каждому
     ansible-playbook, и ничего пишущего после плейбука. STATUS: FIXED — see #177"""
     import shutil
     import subprocess
     from mop.common import bus, config, creds, projects
     from mop.server import playvars
-    from mop.cli.pool import deploy
+    from mop.cli.server import deploy
     failed = 0
     d = tempfile.mkdtemp(prefix="mop-test-deploy-check-")
     inventory, key = os.path.join(d, "inventory.yaml"), os.path.join(d, "id")
@@ -1859,6 +1873,58 @@ def check_fallback_model_183():
         failed += 1
         print(f"FAIL #254 `mop dev bug list` must still resolve through LEGACY: {got}")
 
+    failed += check_server_namespace_259()
+    return failed
+
+
+def check_server_namespace_259():
+    """HYPOTHESIS (#259): команды контроллера -- deploy, config, setup
+    контроллера, user, cluster, bootstrap, web, callout, pve-facts -- лежат
+    среди команд пула и оператора, и что из них делается только на сервере,
+    по имени не видно.
+    SOLUTION: пространство mop server; `mop setup` наверху -- только машина
+    оператора. Прежние имена -- через LEGACY один релиз: юниты и роли
+    зовут их до своего тикета. `mop driver pve-facts` -- двухсловный ключ
+    LEGACY: driver как целое не псевдоним, run/list/sweep/build в нём.
+    STATUS: FIXED — see #259"""
+    failed = 0
+    want = {"deploy", "config", "setup", "user", "cluster", "bootstrap", "web",
+            "callout", "pve-facts"}
+    tree = cli.verbs()
+    got = set(tree.get("server") or {})
+    if got != want:
+        failed += 1
+        print(f"FAIL #259 server must hold exactly {sorted(want)}: {sorted(got)}")
+    top = cli.catalog(cli.scan())
+    stay = sorted((want - {"setup"}) & set(top))
+    if stay:
+        failed += 1
+        print(f"FAIL #259 must not stay top-level: {stay}")
+    if "setup" not in top:
+        failed += 1
+        print("FAIL #259 mop setup stays top-level, for the operator's machine")
+    if set(tree.get("driver") or {}) != {"run", "list", "sweep", "build"}:
+        failed += 1
+        print(f"FAIL #259 driver keeps run/list/sweep/build: {sorted(tree.get('driver') or {})}")
+    for old in ("deploy", "config", "user", "cluster", "bootstrap", "web", "callout"):
+        if cli.LEGACY.get(old) != ("server", old):
+            failed += 1
+            print(f"FAIL #259 LEGACY must map {old} into server: {cli.LEGACY.get(old)}")
+    for argv, want_argv in [(["driver", "pve-facts", "--base", "1"],
+                             ["server", "pve-facts", "--base", "1"]),
+                            (["driver", "run", "x"], ["driver", "run", "x"]),
+                            (["cluster", "users"], ["server", "cluster", "users"])]:
+        if cli.unalias(argv) != want_argv:
+            failed += 1
+            print(f"FAIL #259 unalias({argv}) = {cli.unalias(argv)}, want {want_argv}")
+    for argv, mod in [(["deploy"], ("mop.cli.server.deploy", [])),
+                      (["cluster", "users", "--reload"], ("mop.cli.server.cluster.users", ["--reload"])),
+                      (["driver", "pve-facts", "--base", "9"], ("mop.cli.server.pve-facts", ["--base", "9"])),
+                      (["server", "user", "add", "x"], ("mop.cli.server.user.add", ["x"]))]:
+        got = cli.resolve(cli.unalias(argv), top, tree)
+        if got != mod:
+            failed += 1
+            print(f"FAIL #259 {argv} must resolve to {mod}: {got}")
     return failed
 
 

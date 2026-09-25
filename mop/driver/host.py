@@ -197,7 +197,7 @@ def projects_dir(name):
 
 async def admit(name, let_in):
     """Серверу в узел дорога есть всегда: его ключ кладёт в authorized_keys
-    пользователя пула `mop deploy` (роль bus). Открывать и закрывать нечего."""
+    пользователя пула `mop server deploy` (роль bus). Открывать и закрывать нечего."""
     return {}
 
 
@@ -213,14 +213,14 @@ def _server():
             url = json.load(f).get("url") or ""
     except (OSError, ValueError, AttributeError) as e:
         raise RuntimeError(f"no server address: {NODE_FILE} is unreadable "
-                           f"({e}) — run mop deploy")
+                           f"({e}) — run mop server deploy")
     try:
         server = urlparse(url).hostname
     except ValueError:
         server = None
     if not server:
         raise RuntimeError(f"no server address: {NODE_FILE} has no host in its "
-                           f"url {url!r} — run mop deploy")
+                           f"url {url!r} — run mop server deploy")
     return server
 
 
@@ -229,7 +229,7 @@ def _ssh_port():
     raw = config.get("MOP_SSH_PORT").strip()
     if not raw.isdigit() or not 0 < int(raw) < 65536:
         raise RuntimeError(f"MOP_SSH_PORT={raw!r} in node.env is not a port — "
-                           f"fix ansible_port in the inventory and run mop deploy")
+                           f"fix ansible_port in the inventory and run mop server deploy")
     return int(raw)
 
 

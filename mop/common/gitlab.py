@@ -11,7 +11,7 @@
 
 Секреты (`GITLAB_TOKEN` либо `GITLAB_USER` с `GITLAB_PASSWORD`) читаются из
 `.env` через config.get, но в `config.SETTINGS` не объявлены намеренно: список настроек
-уезжает в ansible через --extra-vars и печатается `mop config`, а паролю не
+уезжает в ansible через --extra-vars и печатается `mop server config`, а паролю не
 место ни там, ни там.
 """
 import json
@@ -220,7 +220,7 @@ def pipeline(sha):
 # Стадия, в которой CI катит сам себя (#239): пока её джоба идёт, пайплайн
 # running, и о зелёности коммита говорят только джобы остальных стадий.
 DEPLOY_STAGE = "deploy"
-# Начало ответа «жди». Одно место: по нему `mop deploy --from-ci` отличает
+# Начало ответа «жди». Одно место: по нему `mop server deploy --from-ci` отличает
 # «коммит ещё тестируется» от прочих отказов (#239).
 WAIT = "wait for pipeline "
 

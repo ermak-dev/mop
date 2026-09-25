@@ -156,7 +156,7 @@ def check_provider():
 def check_one_source_219():
     """HYPOTHESIS (#219): людей два источника -- файл операторов и переходный
     MOP_OPERATORS с паролями deploy'я (#205); оператор хочет один.
-    SOLUTION: люди только из провайдера (файл через `mop user`, или LDAP);
+    SOLUTION: люди только из провайдера (файл через `mop server user`, или LDAP);
     MOP_OPERATORS уходит из настроек, провайдера и плейбуков.
     STATUS: FIXED — see #219"""
     out = []
@@ -209,11 +209,11 @@ def check_choice():
 
 
 def check_deploy():
-    """mop deploy отказывает до плейбука: логин определён дважды, провайдер не
+    """mop server deploy отказывает до плейбука: логин определён дважды, провайдер не
     читается, людей нет вовсе (#219: войти было бы некому) или в .env ещё
-    лежит MOP_OPERATORS (#219: людей переносят `mop user import`)."""
+    лежит MOP_OPERATORS (#219: людей переносят `mop server user import`)."""
     out = []
-    from mop.cli.pool import deploy
+    from mop.cli.server import deploy
     tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
     path = os.path.join(tmp, "operators")
     with open(path, "w") as f:
@@ -222,16 +222,16 @@ def check_deploy():
     base = {"MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS_FILE": path}
     fn = getattr(deploy, "operator_refusals", None)
     if fn is None:
-        return ["mop deploy has no operator_refusals"]
+        return ["mop server deploy has no operator_refusals"]
     if fn(base, tmp):
         out.append(f"one person, no duplicates: deploy goes on: {fn(base, tmp)}")
-    gone = "MOP_OPERATORS is gone: move people with `mop user import` on the server, then remove the line"
+    gone = "MOP_OPERATORS is gone: move people with `mop server user import` on the server, then remove the line"
     if fn(base, tmp, leftover="anton:admin") != [gone]:
         out.append(f"MOP_OPERATORS left in .env must stop deploy: {fn(base, tmp, leftover='anton:admin')}")
     empty = os.path.join(tmp, "empty")
     open(empty, "w").close()
     got = fn({**base, "MOP_OPERATORS_FILE": empty}, tmp)
-    if len(got) != 1 or "mop user add" not in got[0] or empty not in got[0]:
+    if len(got) != 1 or "mop server user add" not in got[0] or empty not in got[0]:
         out.append(f"nobody in the operators file must stop deploy: {got}")
     if not fn({**base, "MOP_AUTH_PROVIDER": "ldap"}, tmp):
         out.append("ldap without its settings must stop deploy")
@@ -417,8 +417,8 @@ def check_deploy_chain_232():
     Пароль LDAP едет прогону и берётся сервисом, когда ldap -- звено цепочки."""
     out = []
     from mop.cli import lib
-    from mop.cli.pool import _play
-    from mop.cli.pool import deploy
+    from mop.cli.server import _play
+    from mop.cli.server import deploy
     tmp = tempfile.mkdtemp(prefix="mop-test-identity-")
     empty = os.path.join(tmp, "empty")
     open(empty, "w").close()
@@ -456,13 +456,13 @@ def check_deploy_chain_232():
 
 
 # ── #234: копия личностей -- владельца каталога, не вызвавшего ───────────
-# HYPOTHESIS: `mop user` от root обновлял /etc/nats/identity/operators сам
+# HYPOTHESIS: `mop server user` от root обновлял /etc/nats/identity/operators сам
 # (refresh_copy, #218), и файл выходил root:root 0600 в каталоге ermak:ermak
 # 0700: сервисы пула (callout, identity) его не читали, и на шину не входил
 # никто, пока файлу не вернули владельца руками.
 # SOLUTION: копия получает uid:gid каталога копии (его задаёт deploy); не
 # выходит отдать ей этого владельца -- отказ одной строкой с путём и
-# «run mop deploy», прежняя копия остаётся как была.
+# «run mop server deploy», прежняя копия остаётся как была.
 # Без настоящего root владелец подменяется: identity._owner (кто владеет
 # каталогом) заменён заглушкой с чужим uid:gid. Настоящий fchown от
 # непривилегированного пользователя тогда падает EPERM -- это случай «не
@@ -494,9 +494,9 @@ def check_copy_owner_234():
         if (st.st_uid, st.st_gid) != foreign and open(copy).read() != "old\n":
             out.append(f"a caller that is not the directory's owner left the copy owned by "
                        f"{st.st_uid}:{st.st_gid}, the directory is {foreign[0]}:{foreign[1]}")
-        if not isinstance(why, str) or copy not in why or "mop deploy" not in why \
+        if not isinstance(why, str) or copy not in why or "mop server deploy" not in why \
                 or "\n" in why:
-            out.append(f"the refusal must be one line naming {copy} and mop deploy: {why!r}")
+            out.append(f"the refusal must be one line naming {copy} and mop server deploy: {why!r}")
         if open(copy).read() != "old\n":
             out.append("a refused refresh must leave the old copy as it was")
         if [n for n in os.listdir(folder) if n != identity.OPERATORS_FILE]:
@@ -523,7 +523,7 @@ def check_copy_owner_234():
         why = identity.refresh_copy(src, fresh)
         if os.path.exists(fresh) and os.stat(fresh).st_uid != foreign[0]:
             out.append("a directory made by the refresh must not stay the caller's")
-        if not isinstance(why, str) or "mop deploy" not in why:
+        if not isinstance(why, str) or "mop server deploy" not in why:
             out.append(f"a directory the caller cannot give away: refusal: {why!r}")
         # Свой каталог -- как прежде: успех, None.
         identity._owner = lambda path: me

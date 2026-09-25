@@ -245,7 +245,7 @@ def check_contract_151():
             asyncio.run(pve.admit("pu-mop-1", True))
             fail("pve.admit without the server key must refuse")
         except RuntimeError as e:
-            want = f"no server key on this node ({missing}) — run mop deploy"
+            want = f"no server key on this node ({missing}) — run mop server deploy"
             if str(e) != want:
                 fail(f"pve refusal without the server key: {str(e)!r}, wanted {want!r}")
     finally:
@@ -1678,7 +1678,7 @@ def check_pve_facts():
     pve.parse_list и jinja `search ' имя '`; длину префикса сети считал ещё и
     jinja роли, а путь обёртки, ключи и VMID_MAX жили параллельно в pve.py и
     YAML.
-    SOLUTION: pve.facts() -- чистая функция, `mop driver pve-facts` печатает
+    SOLUTION: pve.facts() -- чистая функция, `mop server pve-facts` печатает
     её JSON; плейбуки читают факты из него.
     STATUS: FIXED — see #158"""
     import json
@@ -1746,7 +1746,7 @@ def check_pve_facts():
         got = json.loads(r.stdout)
     except ValueError:
         got = (r.returncode, r.stdout, r.stderr)
-    check("mop driver pve-facts", got,
+    check("mop server pve-facts", got,
           json.loads(json.dumps(pve.facts(9000, project="mop", listing=listing))))
     return cases, bad
 

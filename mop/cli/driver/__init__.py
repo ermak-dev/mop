@@ -7,8 +7,6 @@
   mop driver build [project|origin] [--fresh] [--force]
                                  bake the project's image on the hypervisors;
                                  no argument: this working copy, .mop as it lies
-  mop driver pve-facts --base N [--project P --listing TEXT]
-                                 what the playbooks know of the pve driver, JSON
 
 `run` is what the job spec calls. The outer wrapper is driver-agnostic because
 Nomad picks the node only after the spec is registered, so the master cannot

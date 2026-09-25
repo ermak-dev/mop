@@ -11,7 +11,7 @@ The password is asked for (or read from MOP_BUS_PASSWORD) and checked by
 connecting before anything is written; if you are already logged in to that
 server under that login, nothing is asked. Who you are and what you may
 reach is decided by the server's identity provider: its operators file
-(mop user) or its directory.
+(mop server user) or its directory.
 
 The bus is reached through the server's TLS proxy (wss://<server>/nats); a
 self-signed certificate is pinned on first login, before the password is

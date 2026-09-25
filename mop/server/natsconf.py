@@ -2,7 +2,7 @@
 
 Список пользователей собирает один код (#116). Раньше его рендерил шаблон
 ansible на контроллере, и завести проект мог только прогон под root. Теперь
-файл пишет сервер: люди, сервисы и узлы приходят базовым JSON от `mop deploy`
+файл пишет сервер: люди, сервисы и узлы приходят базовым JSON от `mop server deploy`
 (`base-users.json` -- их пароли знает только контроллер), папеты -- из
 реестра сервера, с паролями, которые сервер заводит сам.
 
@@ -10,7 +10,7 @@ ansible на контроллере, и завести проект мог то�
 умеет (`nats-server -t`: ошибка разбора на include), а второй блок
 authorization не сливается с первым.
 
-Данные, без печати: печатает `mop cluster users`.
+Данные, без печати: печатает `mop server cluster users`.
 """
 import json
 import os
@@ -112,7 +112,7 @@ def _machines(base):
     pw = base.get(busnames.CALLOUT)
     if not pw:
         # Без callout на шину не войдёт ни человек, ни папет (#219).
-        raise ValueError(f"{BASE} has no {busnames.CALLOUT} password -- run mop deploy")
+        raise ValueError(f"{BASE} has no {busnames.CALLOUT} password -- run mop server deploy")
     return [(busnames.CALLOUT, _user(busnames.CALLOUT, pw, _perms(
                 CALLOUT_PERMISSIONS["publish"], sub_allow=CALLOUT_PERMISSIONS["subscribe"]))),
             (busnames.SERVICE, _user(busnames.SERVICE, base[busnames.SERVICE],

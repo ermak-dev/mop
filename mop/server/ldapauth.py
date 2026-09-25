@@ -278,7 +278,7 @@ class Ldap3Directory:
             import ldap3
         except ImportError:
             raise identity.Refused("LDAP provider needs ldap3: pip install --user "
-                                   "--break-system-packages ldap3 (mop setup)") from None
+                                   "--break-system-packages ldap3 (mop server setup)") from None
         return ldap3
 
     def _server(self, ldap3):

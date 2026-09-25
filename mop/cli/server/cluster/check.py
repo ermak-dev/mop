@@ -1,4 +1,4 @@
-"""mop cluster check: is the service answering on the bus, and does it see Nomad
+"""mop server cluster check: is the service answering on the bus, and does it see Nomad
 """
 import sys
 

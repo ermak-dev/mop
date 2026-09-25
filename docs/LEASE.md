@@ -17,7 +17,7 @@ tests/lease.py`), запись и ворота — агент узла (`mop/nod
 (`mop/server/callout.py`, #206) через провайдер личностей, выбранный настройкой
 `MOP_AUTH_PROVIDER`:
 
-* `file` (дефолт) — файл операторов на сервере, который ведёт `mop user
+* `file` (дефолт) — файл операторов на сервере, который ведёт `mop server user
   add|passwd|delete|import` (#218);
 * `ldap` — каталог LDAP или Active Directory: доступ по группе
   (`MOP_LDAP_ACCESS_GROUP`), вложенные группы AD при `MOP_LDAP_NESTED=ad`
@@ -129,7 +129,7 @@ MCP-сервера (#213), инбокс `mop.<проект>.master.<адрес>.
 сервис `mop-bootstrap`) и ставит в клон repo-local `user.name` и
 `user.email`. Сервер отвечает из того же провайдера, что у callout
 (`identity.server_provider`), и только именем и почтой: из файла операторов
-— поля имени и почты (`mop user add --name … --email …`), из LDAP —
+— поля имени и почты (`mop server user add --name … --email …`), из LDAP —
 атрибуты `MOP_LDAP_NAME_ATTR` и `MOP_LDAP_EMAIL_ATTR`.
 
 Правило одно: после проверенной аренды в клоне identity нового владельца

@@ -1,7 +1,7 @@
-"""mop cluster users [--reload]: write the bus users file from the server's registry
+"""mop server cluster users [--reload]: write the bus users file from the server's registry
 
 On the server, as the pool user. Reads the people, services and nodes that
-mop deploy put into /etc/nats/base-users.json, the projects from the
+mop server deploy put into /etc/nats/base-users.json, the projects from the
 server's registry (~/.config/mop/projects), gives a project without a bus
 password a new one, and writes /etc/nats/users.conf (the machines) and
 /etc/nats/callout.conf with the auth callout's keys.
@@ -23,7 +23,7 @@ def main(argv):
     try:
         changed, _ = natsconf.apply(names, bootstrap.PUPPET_CREDS)
     except (OSError, ValueError) as e:
-        sys.exit(f"no base users ({e}) -- mop deploy writes {natsconf.BASE}")
+        sys.exit(f"no base users ({e}) -- mop server deploy writes {natsconf.BASE}")
     try:
         restart = natsconf.apply_callout()
     except ImportError as e:
@@ -35,7 +35,7 @@ def main(argv):
     # nats не перезапускает.
     if restart and "--reload" in argv:
         sys.exit(f"{natsconf.CALLOUT} changed: nats takes it only by a restart "
-                 f"(systemctl restart {natsconf.UNIT}, or mop deploy)")
+                 f"(systemctl restart {natsconf.UNIT}, or mop server deploy)")
     if changed and "--reload" in argv:
         try:
             natsconf.reload()
