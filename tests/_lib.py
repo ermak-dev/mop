@@ -296,3 +296,97 @@ def gate_table_267():
                 for force in (False, True):
                     table.append(("pu-mop-1", clone, caller, force))
     return table
+
+
+# ─── поддельный Nomad (#275) ─────────────────────────────────────────────
+class FakeNomad:
+    """nomad.NomadApi без сети: таблицы вместо кластера, вызовы -- в calls.
+
+    Передаётся сервису кластера и сборке образа параметром (cluster.using,
+    answer(api=...), image.clear/restore(api=...)), а не подменой атрибутов
+    модуля nomad. Каждая функция протокола здесь есть: isinstance с
+    runtime_checkable протоколом смотрит именно на это."""
+
+    def __init__(self, jobs=None, allocs=None, nodes=None, meta=None):
+        self.jobs = dict(jobs or {})          # {ID: job}
+        self.allocs = dict(allocs or {})      # {job ID: последняя аллокация}
+        self.nodes = list(nodes or [])        # сводки узлов, как get_nodes
+        self.meta = dict(meta or {})          # {узел: мета}
+        self.calls = []
+
+    def _call(self, *what):
+        self.calls.append(what)
+
+    # джобы
+    def get_job(self, job_id):
+        self._call("get_job", job_id)
+        return self.jobs.get(job_id)
+
+    def get_jobs(self, prefix, meta=False):
+        self._call("get_jobs", prefix)
+        return [j for i, j in sorted(self.jobs.items()) if i.startswith(prefix)]
+
+    def register(self, spec):
+        self._call("register", spec)
+        job = spec.get("Job") or spec
+        self.jobs[job.get("ID")] = job
+
+    def deregister(self, job_id, purge=True):
+        self._call("deregister", job_id, purge)
+
+    # аллокации
+    def latest_alloc(self, job_id):
+        self._call("latest_alloc", job_id)
+        return self.allocs.get(job_id)
+
+    def alloc_restart(self, alloc_id):
+        self._call("alloc_restart", alloc_id)
+
+    def alloc_stderr(self, alloc_id, task, tail=8000):
+        self._call("alloc_stderr", alloc_id, task)
+        return ""
+
+    def alloc_stop(self, alloc_id):
+        self._call("alloc_stop", alloc_id)
+
+    # узлы
+    def get_nodes(self):
+        self._call("get_nodes")
+        return list(self.nodes)
+
+    def node_capacity(self, node_summary):
+        self._call("node_capacity", node_summary.get("Name"))
+        return 0, 0
+
+    def node_allocs(self, node_name):
+        self._call("node_allocs", node_name)
+        return []
+
+    def node_drain(self, node_name, deadline=300):
+        self._call("node_drain", node_name)
+
+    def node_eligibility(self, node_name, eligible):
+        self._call("node_eligibility", node_name, eligible)
+
+    def node_forget(self, node_name):
+        self._call("node_forget", node_name)
+
+    def node_summary(self, node_name):
+        self._call("node_summary", node_name)
+        return next((n for n in self.nodes if n.get("Name") == node_name), None)
+
+    def node_meta(self, node_name):
+        self._call("node_meta", node_name)
+        return dict(self.meta.get(node_name) or {})
+
+    def nodes_meta(self):
+        self._call("nodes_meta")
+        return {n: dict(m) for n, m in self.meta.items()}
+
+    def node_dynamic_meta(self, node_name):
+        self._call("node_dynamic_meta", node_name)
+        return dict(self.meta.get(node_name) or {})
+
+    def set_node_meta(self, node_name, updates):
+        self._call("set_node_meta", node_name, dict(updates))
+        self.meta.setdefault(node_name, {}).update(updates)

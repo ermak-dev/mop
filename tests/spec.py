@@ -17,7 +17,7 @@ import sys
 import time
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, patched, patched_env  # noqa: E402
+from _lib import Checks, FakeNomad, patched, patched_env  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 # ── #152: слепок спеки ────────────────────────────────────────────────────────
@@ -741,21 +741,21 @@ def check_job_meta_265(c):
             pass
 
     # Сборка образа снимает папетов и поднимает их с веткой мастера.
-    from mop.server import image, nomad
+    from mop.server import image
     from mop.common import puppets
     job = spec.job_spec(*BRANCHED[:3], branch=BRANCHED[4])["Job"]
     called = []
     real = spec.job_spec
-    with patched(image, project_rows=lambda project: [{"name": job["ID"], "node": "n1",
-                                                       "job": job, "container": True,
-                                                       "state": "free", "kind": None}]), \
-            patched(nomad, deregister=lambda name, purge=False: None,
-                    register=lambda job_: None), \
+    # Nomad -- поддельный, параметром (#275), а не подменой атрибутов модуля.
+    fake = FakeNomad()
+    with patched(image, project_rows=lambda project, api=None: [
+                {"name": job["ID"], "node": "n1", "job": job, "container": True,
+                 "state": "free", "kind": None}]), \
             patched(puppets, _wait_stopped=lambda name: None,
                     wipe=lambda node, name, *a, **k: None), \
             patched(spec, job_spec=lambda *a, **k: called.append((a, k)) or real(*a, **k)):
-        gone = image.clear("mop", force=True)
-        image.restore(gone)
+        gone = image.clear("mop", force=True, api=fake)
+        image.restore(gone, api=fake)
     got = [k.get("branch", a[4] if len(a) > 4 else None) for a, k in called]
     c.check("image.restore must raise the puppet on its branch",
             not (got != [BRANCHED[4]]), f"job_spec calls {called}")

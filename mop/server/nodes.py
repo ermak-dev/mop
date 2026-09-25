@@ -48,5 +48,5 @@ def nomad_rows(pool):
     cap = {n["name"]: n for n in pool}
     metas = nomad.nodes_meta()
     return [row(n, metas.get(n["Name"], {}), cap.get(n["Name"], {}))
-            for n in sorted(nomad.client().nodes.get_nodes(), key=lambda n: n["Name"])]
+            for n in sorted(nomad.get_nodes(), key=lambda n: n["Name"])]
 
