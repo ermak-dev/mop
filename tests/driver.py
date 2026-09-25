@@ -923,8 +923,8 @@ def check_clone_before_bootstrap_247():
     # Порядок в run.main: клон исполняется в теле до вызова сервера.
     src = inspect.getsource(run.main)
     check("run.main clones before bootstrap", src,
-          lambda s: "clone_script(" in s and "bootstrap.run(" in s
-          and s.index("clone_script(") < s.index("bootstrap.run("))
+          lambda s: "clone_script(" in s and "bootstrap_sandbox(" in s
+          and s.index("clone_script(") < s.index("bootstrap_sandbox("))
     return cases, bad
 
 # ── адрес узла со стороны сервера -- из кредов шины узла (#200) ─────────

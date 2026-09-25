@@ -23,7 +23,7 @@ import shutil
 import subprocess
 import sys
 
-from mop import bus, config, creds, identity, keys, llm, playvars, puppets, render  # noqa: E402
+from mop import bus, config, creds, puppets, render  # noqa: E402
 
 
 # Каталоги установки: корень проекта и bin/ с единственным исполняемым
@@ -158,21 +158,6 @@ def cwd_origin():
         return None
 
 
-def workspace_text(origin):
-    """workspace папета (#133): .mop/bootstrap.yaml рабочей копии проекта,
-    если команда идёт из неё, иначе из origin (ветка по умолчанию). Нет
-    файла -- пустой текст: сервер снимает копию папета, и удаление доходит."""
-    from mop import bootstrap, manifest
-    if cwd_origin() == origin:
-        top = git("rev-parse", "--show-toplevel")
-        try:
-            with open(os.path.join(top, bootstrap.FILE)) as f:
-                return f.read()
-        except FileNotFoundError:
-            return ""
-    return manifest.fetch(origin)["bootstrap_text"] or ""
-
-
 def pick_origin(arg, here):
     """Какой origin взять команде. Чистая функция (#111).
 
@@ -227,88 +212,6 @@ def default_branch():
     return r.stdout.strip() if r.returncode == 0 else "origin/master"
 
 
-# Код ansible «часть машин не ответила». Отличать его от настоящего отказа
-# обязательно: выключенный узел — не сломанная команда, и сказать про него
-# «проект, возможно, не на шине» значит отправить оператора искать поломку
-# там, где её нет.
-UNREACHABLE = 4
-
-
-def play_vars(projects, manifests=None, limits=None, git_hosts=None, inventory_hosts=None):
-    """Списки плейбуку как --extra-vars, JSON'ом. -> [строки].
-
-    Объектом, а не парой ключ=значение: `--extra-vars mop_projects=[...]`
-    ansible принимает как строку, и цикл в шаблоне честно проходится по её
-    символам, порождая пользователей `master-[`, `master-"` и так далее.
-
-    Манифесты — только у полной игры: узкому прогону проектов (bus) они не
-    нужны, их читают слои узла и тела."""
-    # Лимиты папетов (#107) едут рядом с проектами, и пустые тоже: сервис
-    # кластера на сервере читает их файлом, и узкий прогон `mop project`
-    # обязан класть его так же, как полный. Файл читает play(), не эта
-    # функция: она чистая.
-    head = {"mop_projects": list(projects)}
-    if limits is not None:
-        head["mop_limits"] = limits
-    # Хосты форжей (#121) -- только полной игре: их читает роль узла.
-    if git_hosts is not None:
-        head["mop_git_hosts"] = list(git_hosts)
-    # Хосты инвентаря (#178) -- только полной игре: роль cluster кладёт их
-    # файлом, и по нему forget отказывает узлу, который deploy поставит снова.
-    if inventory_hosts is not None:
-        head["mop_inventory_hosts"] = list(inventory_hosts)
-    out = [json.dumps(head)]
-    if manifests is not None:
-        out.append(json.dumps({"mop_manifests": manifests}, ensure_ascii=False))
-    return out
-
-
-def play_env(get):
-    """Окружение процесса ansible сверх своего. -> {имя: значение}.
-
-    Пароль служебной учётки LDAP (#214) -- только когда ldap в цепочке (#232), и
-    окружением, а не --extra-vars: argv виден в списке процессов, а
-    настройки едут плейбукам все. Плейбук берёт его lookup('env') и кладёт
-    файлом 0600 в /etc/nats/identity."""
-    if "ldap" not in identity.links(get("MOP_AUTH_PROVIDER")):
-        return {}
-    return {"MOP_LDAP_BIND_PASSWORD": get("MOP_LDAP_BIND_PASSWORD") or ""}
-
-
-def play(playbook, projects, manifests=None, git_hosts=None, check=False,
-         inventory_hosts=None):
-    """Прогон плейбука установки. -> код возврата ansible.
-
-    Один вход для полной игры (site.yml) и для узкого прогона проектов
-    (до #117): списки, которые едут плейбуку, собираются одним
-    местом, иначе узкий прогон заводил бы проект не так, как полный.
-
-    Списки едут --extra-vars ОБЪЕКТОМ, а не парой ключ=значение:
-    `--extra-vars mop_projects=[...]` ansible принимает как строку, и цикл в
-    шаблоне честно проходится по её символам, порождая пользователей
-    `master-[`, `master-"` и так далее.
-
-    check=True -- прогон без изменений (#177): ansible --check --diff, и
-    вывод прогона -- это разница, которую внёс бы настоящий.
-    """
-    if not shutil.which("ansible-playbook"):
-        raise RuntimeError("no ansible-playbook on this machine -- run mop setup")
-    inventory = os.environ["INVENTORY"]
-    if not os.path.isfile(inventory):
-        raise RuntimeError(f"no inventory {inventory} -- create it from the example: "
-                           f"cp inventory.yaml.example inventory.yaml")
-    vars_ = playvars.playbook_vars()
-    # Лимиты (#107) больше не едут: их держит и правит сервер (#117).
-    extra = ([json.dumps(vars_, ensure_ascii=False)]
-             + play_vars(projects, manifests, git_hosts=git_hosts,
-                         inventory_hosts=inventory_hosts))
-    return subprocess.call(
-        ["ansible-playbook", "-i", inventory, os.path.join(PROJECT, playbook),
-         *sum((["--extra-vars", v] for v in extra), []),
-         *(["--check", "--diff"] if check else [])],
-        env={**os.environ, **play_env(config.get)})
-
-
 def project_ready(project):
     """Есть ли у этой машины чем представиться шине за этот проект.
 
@@ -344,63 +247,6 @@ def guard(name):
         sys.exit(f"{name} — project {owner}, but this master runs {project}. "
                  f"Leave the master shell or run mop master for {owner}.")
     return spec
-
-
-def parse_llm(args):
-    """Выкусить --llm PROFILE (или --llm=PROFILE) откуда угодно в аргументах.
-    -> (профиль | None, остальные аргументы)."""
-    profile, rest, it = None, [], iter(args)
-    for a in it:
-        if a == "--llm":
-            profile = next(it, "")
-            # Следом флаг, а не имя: `--llm --fresh` съедал бы соседний флаг
-            # как профиль и отказывал про профиль «--fresh».
-            if profile.startswith("-"):
-                rest.append(profile)
-                profile = ""
-        elif a.startswith("--llm="):
-            profile = a.split("=", 1)[1]
-        else:
-            rest.append(a)
-    if profile == "":
-        # Забытое значение -- ошибка использования, а не «нет профиля ''»
-        # (#164). RuntimeError: диспетчер делает из него одну строку в
-        # stderr, как из любого отказа (#146).
-        raise RuntimeError(f"--llm needs a profile name; available: "
-                           f"{', '.join(llm.profiles())}")
-    if profile is not None:
-        llm.require(profile)
-    return profile, rest
-
-
-def session_env(profile):
-    """Окружение сессии claude на профиле из mop/llm/: статическая часть
-    профиля плюс ключ. -> (профиль, {переменные}).
-
-    Источник ключа — местный .env, а не узловой secrets.env: на управляющей
-    машине узел ничего не выдавал. Отказ, а не тишина: сессия без ключа
-    отбивает каждый ход 401-й, а читается живой. Так поднимаются и мастер,
-    и `mop code`."""
-    prof = llm.require(profile)
-    env = dict(prof["env"])
-    if prof["key"]:
-        key = config.get(prof["key"])
-        if not key:
-            usage(f"profile {profile}: no {prof['key']} in "
-                  f"{puppets.LOCAL_KEYS_FILE} — add it and retry")
-        env[prof["auth_var"]] = key
-    return prof, env
-
-
-def push_llm_keys(llm):
-    """Ключи профиля на узлы. При успехе молчит (#124); не дошедшие --
-    ошибкой, с узлами."""
-    results = keys.push_llm_keys(llm)
-    if results is None:
-        return
-    bad = [f"{n}: {r}" for n, r in sorted(results.items()) if r != "OK"]
-    if bad:
-        fail(f"{puppets.SECRETS_FILE} did not reach every node: " + "; ".join(bad))
 
 
 def pool_lines():

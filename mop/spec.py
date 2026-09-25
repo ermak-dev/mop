@@ -17,7 +17,7 @@ import os
 import re
 import time
 
-from . import config, driver, llm, nomad
+from . import config, driver, llm, nomad, state
 from .domain import Project
 
 # Значения этой установки — .env поверх дефолтов; см. mop/config.py.
@@ -70,7 +70,7 @@ def memory(asks, ceiling, budget):
 # Имена внутри спеки. Каждое читается и снаружи — Nomad отдаёт по ним сводку
 # группы и задачи, — поэтому литералом в двух местах им не место: разъедутся
 # молча, и ростер перестанет видеть очередь.
-GROUP = "puppets"        # группа задач папета: по ней JobSummary считает Queued
+GROUP = state.GROUP     # группа задач папета: по ней JobSummary считает Queued (state.queued)
 TASK = "claude"          # имя задачи внутри группы папета
 # Ключ меты УЗЛА. Остался прежним при переименовании (#85): его объявляет
 # клиент Nomad, и переименовать значит оставить всякую уже
@@ -577,9 +577,7 @@ def placement_gap(project, nodes, ceiling=None):
     return False
 
 
-def queued(job):
-    """Сколько аллокаций джоба ждёт места у планировщика."""
-    return (job.get("JobSummary", {}).get("Summary", {}).get(GROUP) or {}).get("Queued", 0)
+queued = state.queued   # прежнее имя; вердикты читают state.queued
 
 
 # Версия шаблона спеки в Meta джоба (#174). Врапер живёт в спеке, и джоб,

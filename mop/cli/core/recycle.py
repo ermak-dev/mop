@@ -9,6 +9,7 @@ Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
+from mop.cli.core import _common
 from mop import puppets
 
 
@@ -31,7 +32,7 @@ def main(argv):
     p = lib.Progress(name)
     p.step("stopping, resetting the clone, wiping target")
     try:
-        r = puppets.recycle(name, workspace_of=lib.workspace_text, force=force)
+        r = puppets.recycle(name, workspace_of=_common.workspace_text, force=force)
     finally:
         p.clear()
     if r.get("owner_note"):

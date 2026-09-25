@@ -36,6 +36,7 @@ import subprocess
 import sys
 
 from mop.cli import lib
+from mop.cli.pool import _play
 from mop import bus, config, creds, driver, gitlab, identity, manifest, puppets, projects
 
 # Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
@@ -482,19 +483,19 @@ def main(argv):
     origins, legacy = puppets.project_ids(lines)
 
     lib.section("ansible: site.yml")
-    rc = lib.play(SITE, projects.names(origins, legacy), manifests(origins),
+    rc = _play.play(SITE, projects.names(origins, legacy), manifests(origins),
                   projects.git_hosts(origins, config.get("MOP_GIT_HOST")), check=dry,
                   inventory_hosts=inventory_hosts(listing))
     if dry:
         # Всё ниже пишет (creds.collect) или отвечает на другой вопрос
         # (ростер): прогон без изменений кончается на плейбуке (#177).
         return rc
-    if rc and rc != lib.UNREACHABLE:
+    if rc and rc != _play.UNREACHABLE:
         # Сборка кредов и проверка ростера не идут после красного прогона, и
         # это сказано, а не проглочено.
         lib.fail(f"ansible exited {rc}; server credentials and the roster check skipped")
         return rc
-    if rc == lib.UNREACHABLE:
+    if rc == _play.UNREACHABLE:
         # Выключенная машина — не красный прогон: на всех, кто ответил, слои
         # разложены. Остановиться здесь значило бы не собрать креды и не
         # показать ростер до тех пор, пока узел не вернут, — а именно тогда

@@ -52,6 +52,7 @@ import json
 import os
 
 from mop.cli import lib
+from mop.cli.core import _common
 from mop import config, llm, puppets
 
 SKILL = os.path.join(config.PROJECT,
@@ -99,7 +100,7 @@ def claude_args(args):
 
 
 def main(argv):
-    profile, args = lib.parse_llm(argv)
+    profile, args = _common.parse_llm(argv)
     profile = llm.resolve(profile)
     mine, passthru = claude_args(args)
     if len(mine) > 1:
@@ -124,8 +125,8 @@ def main(argv):
     link_skill()
 
     # Профиль тот же, что у папетов, но источник ключа другой: не узловой
-    # secrets.env, а местный .env — общее с `mop code`, в lib.session_env.
-    _, session = lib.session_env(profile)
+    # secrets.env, а местный .env — общее с `mop code`, в _common.session_env.
+    _, session = _common.session_env(profile)
     env = dict(os.environ, MOP_PROJECT=project, **session)
     print(f"master of project {project} ({origin}) [{profile}]"
           + (f" + claude {' '.join(passthru)}" if passthru else ""))

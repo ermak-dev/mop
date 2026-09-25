@@ -53,10 +53,3 @@ def nomad_rows(pool):
     return [row(n, metas.get(n["Name"], {}), cap.get(n["Name"], {}))
             for n in sorted(nomad.client().nodes.get_nodes(), key=lambda n: n["Name"])]
 
-
-def rows():
-    """То же через шину — для всех, кроме сервера. Глагол оператора: строка
-    узла говорит, чьи образы на нём собраны и кто его делит."""
-    from . import bus
-    # Отказ сервиса -- Refused, а не пустая таблица (#163).
-    return bus.call_cluster("nodes").get("nodes") or []

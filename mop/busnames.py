@@ -212,3 +212,7 @@ def operator_pass_file(name):
 
 
 SERVICE_PASS_FILE = pass_file(SERVICE)
+
+# Сколько узел ждёт от сервера ответа на bootstrap песочницы (#62): одна
+# цифра на обе стороны, иначе сервер играл бы дольше, чем узел ждёт.
+BOOTSTRAP_TIMEOUT = 300

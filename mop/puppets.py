@@ -9,14 +9,14 @@
 import os
 import time
 
-from . import bus, config, driver, lease, llm, spec
+from . import bus, config, driver, lease, llm, state
 from .domain import Owner
 from .state import PuppetRow, action_for, failing_row, silent, spec_action, verdict
 
 PROJECT = config.PROJECT
 
 # Значения этой установки — .env поверх дефолтов; см. mop/config.py.
-HOME = spec.HOME                           # $HOME на узлах пула
+HOME = driver.HOME                         # $HOME на узлах пула
 # Соглашение об имени папета (префикс, разбор, каталоги) живёт в реестре
 # драйверов: это единственный stdlib-модуль, который читают и мастер, и узел.
 # Здесь — только имена, под которыми его знает мастер.
@@ -345,6 +345,13 @@ def pool():
     return bus.call_cluster("pool").get("nodes") or []
 
 
+def nodes():
+    """Узлы пула через шину -- для всех, кроме сервера. Глагол оператора:
+    строка узла говорит, чьи образы на нём собраны и кто его делит.
+    Отказ сервиса -- Refused, а не пустая таблица (#163)."""
+    return bus.call_cluster("nodes").get("nodes") or []
+
+
 def ready_nodes():
     """Имена узлов, на которые Nomad вообще станет что-то ставить. Через шину:
     тот же ответ, что раньше давал nomad.ready_nodes() на машине оператора."""
@@ -420,7 +427,7 @@ def _placement_issue(job, alloc, unserved=False, ceiling=None):
     if alloc:
         return {"name": name, "alloc": alloc, "action": "stop",
                 "diagnosis": f"allocation {alloc['ClientStatus']}"}
-    if spec.queued(job) and unserved == "memory":
+    if state.queued(job) and unserved == "memory":
         # Просьба проекта больше, чем готова дать любая машина с его образом:
         # ни ожидание, ни сборка образа не помогут.
         project = project_of((job.get("Meta") or {}).get("origin") or "")
@@ -429,14 +436,14 @@ def _placement_issue(job, alloc, unserved=False, ceiling=None):
                              f"{ceiling} MB puppet (node meta mop_mem_cap_mb): "
                              f"lower MOP_MEM_MB in {project}'s .mop or raise "
                              f"mop_body_mem_cap_mb of a node"}
-    if spec.queued(job) and unserved:
+    if state.queued(job) and unserved:
         # Слоты тут ни при чём: ограничение размещения по образу (#10) не
         # пускает никуда, и ожидание не вылечит ничего.
         origin = (job.get("Meta") or {}).get("origin") or "<origin>"
         return {"name": name, "alloc": None, "action": None,
                 "diagnosis": f"queued — no ready node has an image of "
                              f"{project_of(origin)}: mop project add {origin}"}
-    if spec.queued(job):
+    if state.queued(job):
         return {"name": name, "alloc": None, "action": None,
                 "diagnosis": "queued — no free slots in the pool"}
     return {"name": name, "alloc": None, "action": None, "diagnosis": "no allocation"}

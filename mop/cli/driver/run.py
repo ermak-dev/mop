@@ -15,7 +15,7 @@ import sys
 import time
 
 from mop.cli import lib
-from mop import bootstrap, bus, config, driver
+from mop import bus, busnames, config, driver
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
 # /tmp в теле бывает общим или вычищаемым, а этот файл обязан прожить ровно
@@ -93,6 +93,33 @@ def clone_script(environ):
             'if [ "$fresh" = 1 ]; then\n'
             '    git -C "$d" checkout -q "$PU_BRANCH" 2>/dev/null || git -C "$d" checkout -q -b "$PU_BRANCH"\n'
             'fi\n')
+
+
+# ─── узел ────────────────────────────────────────────────────────────────
+def bootstrap_sandbox(d, name, project):
+    """Bootstrap песочницы папета с этого узла: впустить сервер, позвать,
+    дождаться, выпустить. -> ответ сервера; отказ — RuntimeError/BusError.
+
+    Зовётся из `mop driver run` до внутреннего врапера. Дверь закрывается в
+    любом исходе: ключ сервера в теле живёт ровно столько, сколько идёт
+    bootstrap. Где сервер найдёт тело и надо ли его впускать, решает драйвер
+    (#151): у host тело — сам узел, и дорога туда есть всегда."""
+    address = d.address(name)
+    r = asyncio.run(d.admit(name, True))
+    if r.get("error"):
+        raise RuntimeError(f"cannot let the server into the body: {r['error']}")
+    try:
+        bus.connect(bus.NODE_FILE)
+        out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT, project=project,
+                             name=name, address=address)
+    finally:
+        asyncio.run(d.admit(name, False))
+    if out.get("error"):
+        raise RuntimeError(out["error"])
+    if not out.get("ok"):
+        raise RuntimeError(f"bootstrap failed (ansible exit {out.get('rc')}):\n"
+                           f"{out.get('tail', '')}")
+    return out
 
 
 def ensure_params(name, environ):
@@ -174,7 +201,7 @@ def main(argv):
     # ненулём, Nomad перезапускает, ростер показывает падение. Папет не
     # поднимается «наполовину» с окружением, которого нет.
     try:
-        b = bootstrap.run(d, name, driver.project_of_name(name))
+        b = bootstrap_sandbox(d, name, driver.project_of_name(name))
     except (RuntimeError, bus.BusError) as e:
         sys.exit(f"bootstrap of {name} failed: {e}")
     print(f"{name}: bootstrap "
