@@ -229,7 +229,8 @@ def usage(found=None):
              "", "  mop [--server ADDRESS] <command> [arguments]",
              "", "  the server and the login come from the working copy (git config",
              "  mop.server, mop.user), then MOP_SERVER_LAN / MOP_BUS_USER, then",
-             "  --server; with none of them, from .env"]
+             "  --server; with none of them, from .env. Your integration branch,",
+             "  if not the repository's default: git config mop.branch, or MOP_BRANCH"]
     groups = [(s, n, p) for s, n, p in found if p]
     for section in SECTIONS:
         rows = [(n, describe(_path_of(section, n, False)))

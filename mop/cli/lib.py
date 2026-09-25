@@ -213,9 +213,15 @@ def git(*args):
 
 
 def default_branch():
-    """Ветка по умолчанию у origin. origin/HEAD выставлен не в каждом клоне —
-    откат на master, потому что отказ здесь означал бы «не могу завести ветку»
-    там, где ветку завести можно."""
+    """Интеграционная ветка как `origin/<имя>`: ветка человека из контекста
+    (#249: git config mop.branch, MOP_BRANCH), иначе ветка по умолчанию у
+    origin. origin/HEAD выставлен не в каждом клоне — откат на master, потому
+    что отказ здесь означал бы «не могу завести ветку» там, где ветку
+    завести можно."""
+    from mop import context
+    mine = context.current().branch
+    if mine:
+        return f"origin/{mine}"
     r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
                        capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else "origin/master"

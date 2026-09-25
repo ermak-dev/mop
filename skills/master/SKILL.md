@@ -32,7 +32,9 @@ older than this skill wherever they disagree, and is read first.
 
 From the project's rules file, stated back to the operator in your first
 message so a wrong assumption dies before it reaches a puppet: the
-integration branch; the tracker and the exact commands to read, comment,
+integration branch — `$MOP_BRANCH` in this shell when it is set (the
+operator's own branch, `git config mop.branch`, #249), else the one the
+rules name; the tracker and the exact commands to read, comment,
 take and transfer tickets — **all run in YOUR session, never in a puppet's**;
 what the landing gate is and what the project leaves to CI; the format
 check; the fast narrow test; branch naming;
