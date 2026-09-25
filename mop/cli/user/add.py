@@ -4,7 +4,7 @@ Refuses a login already in the operators file or in MOP_OPERATORS. The role
 and projects follow MOP_OPERATORS: admin is the whole pool and takes no
 projects; user takes a list, or * for every project. The password is asked
 twice without echo, or read as one line from stdin with --stdin. Name and
-email sign the person's puppet commits (#167). Silent when all goes well.
+email sign the person's puppet commits. Silent when all goes well.
 """
 from getpass import getpass
 

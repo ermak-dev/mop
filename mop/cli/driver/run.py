@@ -1,7 +1,7 @@
 """mop driver run <name>: raise the body and run the puppet inside it
 
 What the job spec calls (the outer wrapper). Runs on the node that owns the
-puppet: ensure the body, bootstrap the sandbox through the server (#62),
+puppet: ensure the body, bootstrap the sandbox through the server,
 push the inner wrapper in and hold its session until it ends.
 """
 import asyncio

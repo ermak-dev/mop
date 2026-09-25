@@ -7,7 +7,7 @@ remembering which target owned it.
 
 Machines, not projects. Which projects the pool serves is the registry
 (~/.config/mop/projects) and `mop project add|delete`; deploy reads it and
-takes no arguments (#79). While it accepted an origin, registering a project
+takes no arguments. While it accepted an origin, registering a project
 was a side effect of a full run, and there was no way to take one off at all.
 
 --check runs the same playbook in ansible's check mode with --diff: nothing

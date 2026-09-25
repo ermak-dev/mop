@@ -13,7 +13,7 @@
 `run` is what the job spec calls. The outer wrapper is driver-agnostic because
 Nomad picks the node only after the spec is registered, so the master cannot
 know what the body will be; everything about the body happens here, on the
-node that owns it. Each verb is a module of this package (#77).
+node that owns it. Each verb is a module of this package.
 """
 from mop.cli import lib
 from mop import driver

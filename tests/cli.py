@@ -1803,6 +1803,21 @@ def check_fallback_model_183():
     if spoken:
         failed += 1
         print("FAIL #252 messages must not cite tickets:\n  " + "\n  ".join(spoken))
+    # #255: докстринг командлета -- usage, строка help и описание инструмента
+    # MCP, то есть тоже сообщение наружу. `epic #12` в примере -- формат
+    # номера, а не ссылка.
+    # STATUS: FIXED — see #255
+    told = []
+    for d, _, files in os.walk(cli.PACKAGE):
+        for f in files:
+            if f.endswith(".py") and (not f.startswith("_") or f == "__init__.py"):
+                path = os.path.join(d, f)
+                for i, line in enumerate(cli.docstring(path).splitlines(), 1):
+                    if ticket.search(_re.sub(r"epic #\d+", "", line)):
+                        told.append(f"{os.path.relpath(path, cli.PACKAGE)}:{i}: {line.strip()[:60]!r}")
+    if told:
+        failed += 1
+        print("FAIL #255 usage and help must not cite tickets:\n  " + "\n  ".join(told))
 
     # ── #254: bug и ci -- в пространстве dev, без MCP ────────────────────
     # HYPOTHESIS: трекер и CI проекта -- команды разработчика, а лежат среди
