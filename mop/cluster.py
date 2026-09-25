@@ -360,7 +360,8 @@ def _add(project, req):
     name = next_name(target.name)
     # workspace -- до регистрации: первый подъём обязан его увидеть.
     store_workspace(bootstrap.ROOT, name, req)
-    nomad.register(spec.job_spec(name, origin, req.get("profile")))
+    nomad.register(spec.job_spec(name, origin, req.get("profile"),
+                                 branch=req.get("branch")))
     return {"ok": True, "name": name, "origin": origin}
 
 
@@ -370,7 +371,7 @@ def _update(project, req):
     name = req["name"]
     store_workspace(bootstrap.ROOT, name, req)
     nomad.register(spec.job_spec(name, req.get("origin"), req.get("profile"),
-                                 cont=bool(req.get("cont"))))
+                                 cont=bool(req.get("cont")), branch=req.get("branch")))
     return {"ok": True, "name": name}
 
 

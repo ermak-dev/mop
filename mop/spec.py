@@ -417,7 +417,7 @@ def task_env(name, origin, profile, prof, cont=False, mem=0):
     return env
 
 
-def job_spec(name, origin, profile=None, cont=False):
+def job_spec(name, origin, profile=None, cont=False, branch=None):
     """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
     историю каталога (`claude --continue`).
 
@@ -433,6 +433,12 @@ def job_spec(name, origin, profile=None, cont=False):
         raise RuntimeError(f"{name}: no LLM profile {profile}; available: "
                            f"{', '.join(llm.profiles())} (mop llm)")
     meta = {"origin": origin, "llm": profile}
+    # Ветка мастера (#249, #256) -- метой, не окружением: Nomad отдаёт её
+    # задаче как NOMAD_META_branch, `mop driver run` ставит на неё свежий
+    # клон. Окружение задачи и врапер при этом те же, версия шаблона та же,
+    # и ни одна зарегистрированная спека не устаревает.
+    if branch:
+        meta["branch"] = branch
     project = Project.of(origin, asks=read_asks())
     try:
         reserve, ceiling = memory(project.asks, MEM_MAX, MEM)

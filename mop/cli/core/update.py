@@ -16,7 +16,7 @@ Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
-from mop import bus, llm
+from mop import bus, context, llm
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -55,7 +55,8 @@ def main(argv):
     got = bus.call_cluster("update", name=name, origin=origin, profile=profile,
                            cont=cont, new_origin=origin if origin != old else None,
                            workspace=lib.workspace_text(origin),
-                           owner=bus.login(), force=force)
+                           owner=bus.login(), force=force,
+                           branch=context.current().branch)
     # На успехе молчим (#179), как restart: MCP ответит модели `done`, а эхо
     # параметров повторяло то, что человек только что набрал сам. Чью аренду
     # прошёл force -- называем (#40).

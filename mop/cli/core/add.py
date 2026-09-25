@@ -9,7 +9,7 @@ import os
 import time
 
 from mop.cli import lib
-from mop import bus, llm, puppets
+from mop import bus, context, llm, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -48,8 +48,11 @@ def _add(origin, project, profile, named, p):
     # workspace папета (#133) едет с регистрацией: рабочая копия проекта,
     # вне её -- origin; нет файла -- у папета workspace нет.
     p.step("registering")
+    # Ветка мастера (#256): свежий клон папета встаёт на неё, а не на
+    # origin/HEAD. Из контекста команды (git config mop.branch, MOP_BRANCH).
     got = bus.call_cluster("add", origin=origin, profile=profile, timeout=30,
-                           workspace=lib.workspace_text(origin))
+                           workspace=lib.workspace_text(origin),
+                           branch=context.current().branch)
     name = got["name"]
 
     p.step(f"{name}: waiting for a node")
