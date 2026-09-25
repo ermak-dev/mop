@@ -14,15 +14,15 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 
 ## Overall structure
 
- - `/mop` — the library: returns data, prints nothing
- - `/bin` — one file, the `mop` launcher; the commandlets are modules of `/mop/cli`, one subcommand per module, in sections (`core`, `pool`, `service`) and groups (`driver`, `bug`, `node`, `bootstrap`); they are the only thing that prints
+ - `/mop` — the library: returns data, prints nothing; laid out by layers (#260): `mop/common` (everyone), `mop/client` (operator's machine and master shell), `mop/server` (controller), `mop/node` (agent); `mop/session.py` and `mop/usage.py` stay in the root (they travel to bodies by path), `mop/driver` is common with the node drivers inside, `mop/cli` holds the commands
+ - `/bin` — one file, the `mop` launcher; the commandlets are modules of `/mop/cli`, one subcommand per module, in sections (`core`, `pool`, `service`) and groups (`driver`, `node`, `project`, `secret`, `dev`, `server`); they are the only thing that prints
  - `/deploy` — the product's installation: Nomad, the bus, the agent, the disk watchdog
  - `/sandbox.yaml.example` — the puppet environment example: an installation copies it to `sandbox.yaml`, which git ignores like `.env` and `inventory.yaml`
  - `/skills/master` — the master session's skill, symlinked from outside
- - `/web` — the dashboard page, served by `mop web`; no build step, no dependencies
+ - `/web` — the dashboard page, served by `mop server web`; no build step, no dependencies
  - `/docs` — one file per subsystem
  - `/tests` — checks of pure functions, not a framework
- - The package has four layers by machine — common, client (operator's machine and master shell), server (controller), node — and imports go downward only; the map and the rule live in `tests/layers.py`, and a new module is placed in a layer there deliberately
+ - Imports go downward only, common ← client / node / server; `tests/layers.py` derives the layer from the directory and refuses a module outside one, so a new module is placed in a layer deliberately
 
 ## Project environment
 
@@ -39,7 +39,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 ## Boundaries
 
  - **MUST** `mop/`, `docs/`, `skills/`, `deploy/` know no concrete host: anything installation-specific is a setting in `config.SETTINGS` or a line in `.env`
- - **MUST** Three sources, one question each: `.env` answers for the installation, the inventory for the machine, `config.SETTINGS` holds the defaults. `.env` never reaches a node — what the node must know is listed in `config.NODE_SCOPED` and rendered by `mop deploy` into `~/.config/mop/node.env`. A node-side setting written anywhere else silently does not arrive
+ - **MUST** Three sources, one question each: `.env` answers for the installation, the inventory for the machine, `config.SETTINGS` holds the defaults. `.env` never reaches a node — what the node must know is listed in `config.NODE_SCOPED` and rendered by `mop server deploy` into `~/.config/mop/node.env`. A node-side setting written anywhere else silently does not arrive
  - **MUST** A value specific to this machine is a setting whose default equals today's value, never a literal in the code
  - **MUST** A required setting with no sensible default goes in `config.REQUIRED`: silently walking into someone else's LAN is worse than a loud refusal
  - **MUST NOT** Nothing a specific project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is the installation's own `sandbox.yaml` and the projects' `.mop/sandbox.yaml` (baked) and `.mop/bootstrap.yaml` (played at every start)
@@ -62,7 +62,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 
 Every one of them fails silently — hence a list, not "read the code".
 
- - **MUST** The wrapper lives in the job spec: editing `mop/spec.py` does not reach a running puppet through an allocation restart, it needs a re-registration
+ - **MUST** The wrapper lives in the job spec: editing `mop/server/spec.py` does not reach a running puppet through an allocation restart, it needs a re-registration
  - **MUST** Escape curly substitutions with a double dollar — Nomad runs the spec through hcl2 and parses the whole line, **comments included**
  - **MUST** The node agent lives outside the job spec, under systemd, one per node: otherwise every edit to it would re-register every job, and it must answer precisely while a puppet is restarting
  - **MUST** The agent's unit needs `XDG_RUNTIME_DIR=/run/user/1000`: without it `session.py` misses the socket directory and live puppets read as dead
@@ -109,7 +109,7 @@ Work lives in GitLab issues. The coordinates come from the working copy's git or
 
 ## Delivery
 
-CI (`.gitlab-ci.yml`) runs every file in `tests/` on every push, in Docker, on Python 3.12 and 3.13, with `MOP_TESTS_STRICT=1` (#228). Code reaches the pool through `mop deploy`, and `master` is the branch it is rolled out from: on an installation whose CI deploy variables are set, a green `master` pipeline runs it by itself (`deploy:mop`, a forced-command `mop deploy --from-ci` on the server, #239/#240); elsewhere it is run by hand. `mop dev ci` reads pipelines, job logs and runners, and `mop dev ci lint` checks `.gitlab-ci.yml` before a push.
+CI (`.gitlab-ci.yml`) runs every file in `tests/` on every push, in Docker, on Python 3.12 and 3.13, with `MOP_TESTS_STRICT=1` (#228). Code reaches the pool through `mop server deploy`, and `master` is the branch it is rolled out from: on an installation whose CI deploy variables are set, a green `master` pipeline runs it by itself (`deploy:mop`, a forced-command `mop deploy --from-ci` on the server, #239/#240); elsewhere it is run by hand. `mop dev ci` reads pipelines, job logs and runners, and `mop dev ci lint` checks `.gitlab-ci.yml` before a push.
 
  - **MUST** Every issue lives on its own branch `[type]/[iid][-slug]` off a fresh `origin/master` (`mop dev bug start`)
  - **MUST** One fix = one layer: touching the wrapper, a playbook and the library at once is an unrevertable, unmeasurable change
@@ -118,7 +118,7 @@ CI (`.gitlab-ci.yml`) runs every file in `tests/` on every push, in Docker, on P
  - **MUST** Push the issue branch as soon as it is ready: work that lives only in a clone dies with the clone
  - **MUST** Land by local integration, one push: `git merge --no-ff` into a fresh `origin/master` (or your own branch when `git config mop.branch` / `MOP_BRANCH` names one, #249), every file in `tests/` on the merged tree, then a single `git push`; one merge commit per issue keeps `git revert -m 1` as the rollback
  - **MUST** Landing takes no token here (#225): the whole check runs in about 20 seconds, and git itself refuses the losing push of a race. A rejected push means fetch, merge again, rerun `tests/`, push — never a force push. `mop landing` is for projects whose gate runs for tens of minutes
- - **MUST** If you touched what travels to the nodes (`mop/`, `deploy/`), make sure it is rolled out and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives. Where CI deploys, watch the `master` pipeline's `deploy:mop` job in `mop dev ci` instead of running `mop deploy` by hand — a manual deploy races the CI one; elsewhere run `mop deploy` yourself
+ - **MUST** If you touched what travels to the nodes (`mop/`, `deploy/`), make sure it is rolled out and check `mop list`: the nodes hold a COPY of the package, and an unshipped edit silently never arrives. Where CI deploys, watch the `master` pipeline's `deploy:mop` job in `mop dev ci` instead of running `mop server deploy` by hand — a manual deploy races the CI one; elsewhere run `mop server deploy` yourself
  - **MUST** Close the issue right after the rollout: `mop dev bug close [iid] --comment "…"` naming the commit and what it was verified with
  - **MUST** In pool mode the tracker belongs to the MASTER: the executor runs no `mop dev bug` at all and sends the comment text instead, which the master pastes
  - **MUST** In pool mode the executor lands on the branch the MASTER named and never picks the target itself
