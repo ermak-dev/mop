@@ -111,7 +111,8 @@ Work lives in GitLab issues. The coordinates come from the working copy's git or
 
 CI (`.gitlab-ci.yml`) runs every file in `tests/` on every push, in Docker, on Python 3.12 and 3.13, with `MOP_TESTS_STRICT=1` (#228). Code reaches the pool through `mop server deploy`, and `master` is the branch it is rolled out from: on an installation whose CI deploy variables are set, a green `master` pipeline runs it by itself (`deploy:mop`, a forced-command `mop deploy --from-ci` on the server, #239/#240); elsewhere it is run by hand. `mop dev ci` reads pipelines, job logs and runners, and `mop dev ci lint` checks `.gitlab-ci.yml` before a push.
 
- - **MUST** Every issue lives on its own branch `[type]/[iid][-slug]` off a fresh `origin/master` (`mop dev bug start`)
+ - **MUST** Every task is a ticket first, and its branch carries the ticket number and a description: `[type]/[iid]-[slug]` (`mop dev bug start`), off a fresh integration branch
+ - **MUST** A task that belongs to an epic integrates into the epic's branch `epic/[iid]-[slug]`, never straight into `master`: the executor lands there (the master names it as the landing target; `git config mop.branch` / `MOP_BRANCH` makes `mop dev bug start` base on it), CI runs `tests/` on every push, and the epic is tested in its branch until every task is done. Then the epic branch lands into the integration branch by one `merge --no-ff`, and only that merge is rolled out
  - **MUST** One fix = one layer: touching the wrapper, a playbook and the library at once is an unrevertable, unmeasurable change
  - **MUST** A commit explains why: the diff already shows what changed, and the incident behind the fix is worth more than a list of files
  - **MUST** Reference the issue in the commit subject as a bare `#74`, never a closing keyword
