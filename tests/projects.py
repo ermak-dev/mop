@@ -20,6 +20,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import projects  # noqa: E402
@@ -29,19 +30,16 @@ MOP = "git@git.ermak.dev:ermak/mop.git"
 OTHER = "https://example.org/team/rudesktop.git"
 
 
-def check_add():
+def check_add(c):
     """with_origin: что реестр принимает."""
-    out = []
-
     got, added = projects.with_origin(MOP, {RU})
-    if got != {RU, MOP} or not added:
-        out.append(f"new origin not added: {got}, added={added}")
+    c.check(f"new origin not added: {got}, added={added}", not (got != {RU, MOP} or not added))
 
     # Повтор — не ошибка и не изменение: `mop project add` идемпотентен,
     # иначе повторный завод проекта читался бы как отказ.
     got, added = projects.with_origin(RU, {RU})
-    if got != {RU} or added:
-        out.append(f"duplicate origin changed the registry: {got}, added={added}")
+    c.check(f"duplicate origin changed the registry: {got}, added={added}",
+            not (got != {RU} or added))
 
     # Голое имя отвергается: origin — единственная правда о проекте, из
     # имени его не развернуть, а deploy режет манифест именно из origin.
@@ -49,56 +47,49 @@ def check_add():
     for bad in ("rudesktop", "", "   "):
         try:
             projects.with_origin(bad, set())
+            refused = False
         except RuntimeError:
-            continue
-        out.append(f"bare name {bad!r} accepted as an origin")
-    return out
+            refused = True
+        c.check(f"bare name {bad!r} accepted as an origin", refused)
 
 
-def check_delete():
+def check_delete(c):
     """without_project: что реестр теряет."""
-    out = []
-
     got, dropped = projects.without_project("rudesktop", {RU, MOP})
-    if got != {MOP} or dropped != [RU]:
-        out.append(f"delete by project name: {got}, dropped={dropped}")
+    c.check(f"delete by project name: {got}, dropped={dropped}",
+            not (got != {MOP} or dropped != [RU]))
 
     # Имя проекта — basename origin'а, и оно же имя пользователя NATS.
     # Два origin'а с одним basename — один проект: снимать надо оба, иначе
     # реестр помнит проект, которого на шине уже нет.
     got, dropped = projects.without_project("rudesktop", {RU, OTHER, MOP})
-    if got != {MOP} or dropped != sorted([RU, OTHER]):
-        out.append(f"two origins of one project: {got}, dropped={dropped}")
+    c.check(f"two origins of one project: {got}, dropped={dropped}",
+            not (got != {MOP} or dropped != sorted([RU, OTHER])))
 
     # Легаси-строка — имя без origin'а: снимается по себе самой.
     got, dropped = projects.without_project("oldproject", {"oldproject", MOP})
-    if got != {MOP} or dropped != ["oldproject"]:
-        out.append(f"legacy name not dropped: {got}, dropped={dropped}")
+    c.check(f"legacy name not dropped: {got}, dropped={dropped}",
+            not (got != {MOP} or dropped != ["oldproject"]))
 
     # Неизвестный проект — пустой вердикт, а не молчаливое «сделано»:
     # опечатка в имени иначе читалась бы как успешное снятие.
     got, dropped = projects.without_project("nosuch", {RU})
-    if got != {RU} or dropped != []:
-        out.append(f"unknown project reported as dropped: {got}, dropped={dropped}")
-    return out
+    c.check(f"unknown project reported as dropped: {got}, dropped={dropped}",
+            not (got != {RU} or dropped != []))
 
 
-def check_names():
+def check_names(c):
     """names: имена проектов для плейбука — basename'ы плюс легаси."""
-    out = []
     got = projects.names({RU, MOP}, {"oldproject"})
-    if got != ["mop", "oldproject", "rudesktop"]:
-        out.append(f"names: {got}")
+    c.check(f"names: {got}", not (got != ["mop", "oldproject", "rudesktop"]))
     # Два origin'а одного проекта дают ОДНО имя: пользователь в конфиге
     # NATS заводится по имени, и дубль в цикле плейбука — второй lookup
     # того же пароля.
     got = projects.names({RU, OTHER}, set())
-    if got != ["rudesktop"]:
-        out.append(f"duplicate basenames: {got}")
-    return out
+    c.check(f"duplicate basenames: {got}", not (got != ["rudesktop"]))
 
 
-def check_limits():
+def check_limits(c):
     """Потолок папетов проекта (#107): что принимается и как снимается.
 
     HYPOTHESIS: лимитов нет, проект занимает пул, пока не кончатся слоты.
@@ -106,48 +97,43 @@ def check_limits():
     сервис кластера сверяет с ним `add`.
     STATUS: FIXED — see #107
     """
-    out = []
     # Число и снятие. 0 законен: «новых папетов не заводить» -- заморозка.
     for text, want in (("3", 3), ("0", 0), ("none", None)):
         try:
             got = projects.parse_limit(text)
         except ValueError as e:
-            out.append(f"parse_limit({text!r}) refused: {e}")
+            c.fail(f"parse_limit({text!r}) refused: {e}")
             continue
-        if got != want:
-            out.append(f"parse_limit({text!r}) -> {got!r}, wanted {want!r}")
+        c.check(f"parse_limit({text!r}) -> {got!r}, wanted {want!r}", not (got != want))
     # Мусор -- отказ, а не «без лимита»: опечатка снимала бы потолок молча.
     for bad in ("", "-1", "three", "2.5"):
         try:
             projects.parse_limit(bad)
+            refused = False
         except ValueError:
-            continue
-        out.append(f"parse_limit({bad!r}) must be refused")
+            refused = True
+        c.check(f"parse_limit({bad!r}) must be refused", refused)
 
     got = projects.with_limit({"mop": 2}, "rugent", 5)
-    if got != {"mop": 2, "rugent": 5}:
-        out.append(f"with_limit set -> {got}")
+    c.check(f"with_limit set -> {got}", not (got != {"mop": 2, "rugent": 5}))
     got = projects.with_limit({"mop": 2, "rugent": 5}, "rugent", None)
-    if got != {"mop": 2}:
-        out.append(f"with_limit clear -> {got}")
+    c.check(f"with_limit clear -> {got}", not (got != {"mop": 2}))
     # Исходный словарь не трогаем: чистая функция.
     src = {"mop": 2}
     projects.with_limit(src, "mop", None)
-    if src != {"mop": 2}:
-        out.append("with_limit must not change its argument")
-    return out
+    c.check("with_limit must not change its argument", not (src != {"mop": 2}))
 
 
-def check_git_hosts():
+def check_git_hosts(c):
     """HYPOTHESIS (#121): узел доверял ключу хоста одного MOP_GIT_HOST, и
     папет проекта с другого форжа падал на клоне: Host key verification
     failed. SOLUTION: хосты для known_hosts -- MOP_GIT_HOST плюс ssh-хосты
     origin'ов реестра. STATUS: FIXED — see #121"""
-    out = []
     try:
         fn = projects.git_hosts
     except AttributeError:
-        return ["projects.git_hosts is missing"]
+        c.fail("projects.git_hosts is missing")
+        return
     cases = [
         # Проект на форже установки -- один хост, без дубля.
         (["git@dev.corp:rud/app.git"], "dev.corp", ["dev.corp"]),
@@ -183,44 +169,38 @@ def check_git_hosts():
     ]
     for origins, default, want in cases:
         got = fn(origins, default)
-        if got != want:
-            out.append(f"git_hosts({origins!r}, {default!r}) -> {got!r}, wanted {want!r}")
-    return out
+        c.check(f"git_hosts({origins!r}, {default!r}) -> {got!r}, wanted {want!r}",
+                not (got != want))
 
 
-def check_for_deploy():
+def check_for_deploy(c):
     """HYPOTHESIS (#117): `mop server deploy` читал реестр контроллера, а правда о
     проектах теперь -- реестр сервера, который правят глаголы сервиса.
     SOLUTION: deploy спрашивает сервер; нет ответа (чистая установка: шины
     ещё нет) -- берёт копию этой машины и говорит об этом.
     STATUS: FIXED — see #117"""
-    out = []
     try:
         fn = projects.for_deploy
     except AttributeError:
-        return ["projects.for_deploy is missing"]
+        c.fail("projects.for_deploy is missing")
+        return
     lines, note = fn({"ok": True, "lines": ["git@h:g/mop.git", "legacy"]}, {"git@h:g/old.git"})
-    if lines != {"git@h:g/mop.git", "legacy"} or note:
-        out.append(f"a server answer must win silently: {lines} {note!r}")
+    c.check(f"a server answer must win silently: {lines} {note!r}",
+            not (lines != {"git@h:g/mop.git", "legacy"} or note))
     lines, note = fn({"error": "no cluster service"}, {"git@h:g/old.git"})
-    if lines != {"git@h:g/old.git"} or not note or "no cluster service" not in note:
-        out.append(f"without the server the local copy is used, and said so: {lines} {note!r}")
+    c.check(f"without the server the local copy is used, and said so: {lines} {note!r}",
+            not (lines != {"git@h:g/old.git"} or not note or "no cluster service" not in note))
     # Пустой ответ сервера -- правда (проектов нет), а не повод взять копию.
     lines, note = fn({"ok": True, "lines": []}, {"git@h:g/old.git"})
-    if lines != set():
-        out.append(f"an empty server registry is the truth: {lines}")
-    return out
+    c.check(f"an empty server registry is the truth: {lines}", not (lines != set()))
 
 
 def main():
-    failed = []
-    for check in (check_add, check_delete, check_names, check_limits,
-                  check_git_hosts, check_for_deploy):
-        for line in check():
-            failed.append(f"FAIL {check.__name__}: {line}")
-    print("\n".join(failed) if failed else "", end="\n" if failed else "")
-    print("projects: FAILED" if failed else "projects: ok")
-    return 1 if failed else 0
+    c = Checks()
+    for fn in (check_add, check_delete, check_names, check_limits,
+               check_git_hosts, check_for_deploy):
+        fn(c)
+    return c.report("projects")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import sys
 
 from mop.cli import lib
 from mop import driver
+from mop.common.domain import Gone
 
 def main(argv):
     """Собрать брошенные тела: [--dry].
@@ -24,9 +25,7 @@ def main(argv):
     достучаться, о своём клоне ничего не скажет. Поэтому молчащее тело
     оставляем — сироту уберёт следующий прогон, а снесённая работа не
     вернётся."""
-    dry = argv == ["--dry"]
-    if argv and not dry:
-        lib.usage(__doc__)
+    dry = lib.dry(argv, __doc__)
     d = driver.current()
     if not driver.is_container(driver.current_name()):
         print("bodies here are the node itself — the disk watchdog sweeps clones")
@@ -37,7 +36,7 @@ def main(argv):
         alive = []
         for n in names:
             _, code = await driver.sh(
-                f"tmux -L {n} has-session -t {n} 2>/dev/null", 20, d.argv(n))
+                driver.Tmux(n).alive(), 20, d.argv(n))
             alive.append(code == 0)
         return names, alive
 
@@ -59,8 +58,9 @@ def main(argv):
             print(f"  would destroy {name}: no session")
             continue
         r = asyncio.run(d.destroy(name))
-        print(f"  {name}: {r.get('error') or 'destroyed'}")
-        gone += 0 if r.get("error") else 1
+        done = Gone.from_dict(r)
+        print(f"  {name}: {'destroyed' if done else r.get('error')}")
+        gone += 1 if done else 0
     if not dry:
         print(f"{gone} orphaned bod{'y' if gone == 1 else 'ies'} destroyed")
     return 0

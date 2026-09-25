@@ -70,8 +70,8 @@ def projects(rows):
     место на весь снимок."""
     by = {}
     for r in rows:
-        origin = r.origin or "?"
-        project = puppets.project_of(origin) if origin != "?" else "?"
+        # Без origin -- проект «?», как и показ строки (PuppetRow.render).
+        project = puppets.project_of(r.origin) if r.origin else "?"
         by.setdefault(project, []).append(r)
     # Счётчик проекта -- тот же counts по виду вердикта, что и в шапке
     # (#210): считать по строке, где kind уже заменён корзиной, значило
@@ -192,7 +192,9 @@ class Collector:
         while True:
             try:
                 rows = puppets.puppet_rows(sizes=False)
-                nodes = puppets.nodes()
+                # Страница читает ключи строки nodes по имени: наружу --
+                # прежняя форма провода (#267).
+                nodes = [n.to_row() for n in puppets.nodes()]
                 with self._cond:
                     self.rows, self.nodes = rows, nodes
                     self.at = time.time()
@@ -245,8 +247,7 @@ def gather_usage(days=USAGE_DAYS):
     [{name, node, total, вид: n}] от прожорливого к скромному,
     [{login, вид: n, total}] по людям, #245)."""
     nodes = sorted(puppets.ready_nodes())
-    answers = bus.request_many({n: {"verb": "usage", "days": days} for n in nodes},
-                               timeout=USAGE_TIMEOUT)
+    answers = bus.request_many("usage", nodes, days=days, timeout=USAGE_TIMEOUT)
     per_day, per_puppet, failed = {}, [], []
     for n in nodes:
         a = answers.get(n)

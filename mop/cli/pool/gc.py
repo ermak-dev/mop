@@ -10,14 +10,12 @@ from mop.common import bus, config, puppets, state
 
 
 def main(argv):
-    dry = argv == ["--dry"]
-    if argv and not dry:
-        lib.usage(__doc__)
+    dry = lib.dry(argv, __doc__)
     limit = config.num("MOP_GC_FREE_MIN_GB")
     cap = config.num("MOP_GC_MAX_PER_RUN")
     rows = puppets.puppet_rows()
-    nodes = sorted({r.node for r in rows if r.node != "-"})
-    disks = bus.request_many({n: {"verb": "disk"} for n in nodes})
+    nodes = sorted({r.node for r in rows if r.node is not None})
+    disks = bus.request_many("disk", nodes)
 
     # Давление и кандидаты: узлы от самого тесного, внутри узла — от самого
     # жирного (место папета уже спрослено глаголом sizes, дополнительных

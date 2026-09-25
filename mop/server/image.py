@@ -13,6 +13,7 @@ import os
 import subprocess
 
 from ..common import config, llm, manifest, puppets, state
+from ..common.domain import JobMeta
 from .. import driver
 from . import nomad, playvars, spec
 
@@ -99,15 +100,15 @@ def plan_clear(rows, force=False):
     return [r["name"] for r in mine]
 
 
-def project_rows(project):
+def project_rows(project, api=None):
     """Папеты проекта, как их видит plan_clear: [{name, node, container,
     state, kind, job}]. Не размещённые (без аллокации) не считаются: тела у них
     нет, снимать нечего."""
-    meta = nomad.nodes_meta()
+    meta = (api or nomad).nodes_meta()
     rows = []
     for item in puppets.roster():
         job = item["job"]
-        if puppets.project_of((job.get("Meta") or {}).get("origin") or "") != project:
+        if JobMeta.from_job(job).project != project:
             continue
         node = item["alloc"]["NodeName"] if item["alloc"] else None
         if not node:
@@ -119,26 +120,28 @@ def project_rows(project):
     return rows
 
 
-def clear(project, force=False):
+def clear(project, force=False, api=None):
     """Остановить папетов проекта на контейнерных узлах и снести их тела.
     -> [{name, origin, llm, node}] — кого поднять заново после сборки.
     Отказ по занятым — RuntimeError из plan_clear, до первого останова."""
-    rows = project_rows(project)
+    api = api or nomad
+    rows = project_rows(project, api=api)
     jobs = {r["name"]: (r["job"], r["node"]) for r in rows}
     gone = []
     for name in plan_clear(rows, force):
         job, node = jobs[name]
-        m = job.get("Meta") or {}
-        nomad.deregister(name, purge=False)
+        m = JobMeta.from_job(job)
+        api.deregister(name, purge=False)
         puppets._wait_stopped(name)
         puppets.wipe(node, name)
-        gone.append({"name": name, "origin": m.get("origin"),
-                     "llm": llm.resolve(m.get("llm")),
-                     "node": node})
+        # Ветка мастера (#256) едет с остальной метой (#265): без неё папет
+        # после сборки поднимался на origin/HEAD, а не на своей ветке.
+        gone.append({"name": name, "origin": m.origin, "llm": llm.of_meta(m),
+                     "branch": m.branch, "node": node})
     return gone
 
 
-def restore(gone):
+def restore(gone, api=None):
     """Поднять снесённых заново — той же спекой, из нового образа. Зовётся
     и после неудачной сборки: старый образ на месте, папетам есть из чего
     клонироваться.
@@ -150,7 +153,8 @@ def restore(gone):
     failed = []
     for p in gone:
         try:
-            nomad.register(spec.job_spec(p["name"], p["origin"], p["llm"]))
+            (api or nomad).register(spec.respec(p["name"], JobMeta(p["origin"], p["llm"],
+                                                          p.get("branch"))))
         except Exception as e:
             failed.append(f"{p['name']} on {p.get('node') or '?'}: "
                           f"not raised again: {e}")
@@ -159,7 +163,7 @@ def restore(gone):
 
 
 def build(origin, got, out=None, fresh=False, force=False, on_line=None,
-          on_step=None):
+          on_step=None, api=None):
     """Вся сборка как операция над проектом: снять тела → плейбук → поднять
     папетов заново → объявить образ. -> {rc, gone, announced}.
 
@@ -168,23 +172,24 @@ def build(origin, got, out=None, fresh=False, force=False, on_line=None,
     старый образ на месте, и оставить их снятыми значило бы наказать проект
     за неудачную сборку дважды. Объявление — только после успеха.
 
-    on_step — имя этапа вызывающему (сборщик шлёт его просителю, #123)."""
+    on_step — имя этапа вызывающему (сборщик шлёт его просителю, #123).
+    api — Nomad (nomad.NomadApi, #275), по умолчанию живой."""
     step = on_step or (lambda _s: None)
     step("stopping the project's bodies")
-    gone = clear(got["project"], force)
+    gone = clear(got["project"], force, api=api)
     try:
         rc = bake(origin, got, out, fresh, on_line)
     finally:
         if gone:
             step("raising the project's puppets again")
-        restore(gone)
+        restore(gone, api=api)
     if rc == 0:
         step("announcing the image to the nodes")
-    announced = announce(got["project"]) if rc == 0 else []
+    announced = announce(got["project"], api=api) if rc == 0 else []
     return {"rc": rc, "gone": gone, "announced": announced}
 
 
-def announce(project):
+def announce(project, api=None):
     """Сказать кластеру, что образ этого проекта на узлах собран.
     -> [(узел, 'announced'|'already announced'|'not a container node')].
 
@@ -197,8 +202,9 @@ def announce(project):
     Только после успешной сборки: объявить образ, которого нет, — это
     папет, висящий pending, и ровно тот отказ, от которого ограничение и
     заводилось."""
+    api = api or nomad
     out = []
-    for name, meta in sorted(nomad.nodes_meta().items()):
+    for name, meta in sorted(api.nodes_meta().items()):
         # Неизвестный драйвер -- строка с отказом, остальные узлы дальше (#175).
         try:
             container = driver.is_container(driver.of_node(meta, name))
@@ -210,10 +216,10 @@ def announce(project):
             continue
         # Перечень берём с узла: серверная копия отстаёт на секунды, и
         # дописать к устаревшей значит стереть ранее объявленные образы.
-        have = [s for s in (nomad.node_dynamic_meta(name).get("mop_projects") or "").split(",") if s]
+        have = [s for s in (api.node_dynamic_meta(name).get(spec.META_PROJECTS) or "").split(",") if s]
         if project in have:
             out.append((name, "already announced"))
             continue
-        nomad.set_node_meta(name, {"mop_projects": ",".join(sorted(have + [project]))})
+        api.set_node_meta(name, {spec.META_PROJECTS: ",".join(sorted(have + [project]))})
         out.append((name, f"announced, serves {', '.join(sorted(have + [project]))}"))
     return out

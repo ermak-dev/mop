@@ -20,15 +20,9 @@ MCP = {"annotations": "destructive", "args": [
 
 
 def main(argv):
-    force = "--force" in argv
-    argv = [a for a in argv if a != "--force"]
-    if len(argv) != 1:
-        lib.usage(__doc__)
-    name = argv[0]
-    lib.guard(name)
+    name, force = lib.named(argv, __doc__)
     r = puppets.delete(name, force=force)
-    if r.get("owner_note"):
-        print(f"{name}: {r['owner_note']}")
+    lib.note(name, r)
     if r["body"] == "destroyed":
         print(f"deleted {name} (body gone from {r['node']})")
     elif r["body"] == "kept":

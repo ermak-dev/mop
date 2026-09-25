@@ -48,18 +48,19 @@ import subprocess
 import sys
 import time
 
-from ..common import bus, busnames, config, creds, fsutil, manifest, project_secrets, service
+from ..common import (bus, busnames, config, creds, fsutil, manifest, paths, project_secrets,
+                      service)
 from .. import driver
 from . import identity, playvars
 
 # На сервере: файлы проектов и ключ к телам.
-ROOT = os.path.expanduser("~/.config/mop/bootstrap")
+ROOT = paths.local(paths.BOOTSTRAP)
 # На сервере: пароли папетов, по одному на проект. Их заводит сам сервер
 # (`mop server cluster users`, #116) и раздаёт в ответе на bootstrap: узел
 # перестаёт хранить кред проекта, у которого на нём сейчас никто не живёт
 # (#83). Каталог отдельный от servers/<адрес>/ намеренно — тот про то, что
 # держит ОПЕРАТОР, и пароль папета оператору не положен (creds.pick).
-PUPPET_CREDS = os.path.expanduser("~/.config/mop/puppets")
+PUPPET_CREDS = paths.local("puppets")
 KEY = os.path.expanduser("~/.ssh/mop-bootstrap")
 PLAYBOOK = os.path.join(config.PROJECT, "deploy", "bootstrap.yml")
 # Файл рабочей копии, из которого `mop add|update|recycle` шлют workspace.

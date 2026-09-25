@@ -1,5 +1,5 @@
-"""Доменные значения пула: проект, владелец задания, глагол (#204). Данные,
-без печати и без ввода-вывода.
+"""Доменные значения пула: проект, мета джоба (#265), владелец задания, факты
+клона, глагол (#204). Данные, без печати и без ввода-вывода.
 
 Раньше это были словари и кортежи: строковые ключи расходились молча --
 тот же класс дефектов, что закрыли State (#145) и разбор origin (#154).
@@ -14,6 +14,22 @@
 from dataclasses import dataclass, field
 
 from .. import driver
+
+
+# ─── инварианты (#273) ───────────────────────────────────────────────────
+def _refuse(value, field, rule):
+    """Отказ значения одним местом: ValueError с именем поля. Замороженное
+    значение без инварианта строилось молча, и каждый читатель проверял сам."""
+    raise ValueError(f"{type(value).__name__}.{field}={getattr(value, field)!r}: {rule}")
+
+
+def _count(v):
+    """Счётчик клона: неотрицательное целое (bool -- не число)."""
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def _optional_str(v):
+    return v is None or isinstance(v, str)
 
 
 # ─── проект ──────────────────────────────────────────────────────────────
@@ -42,6 +58,68 @@ class Project:
         limits = {} if limits is None else limits
         asks = {} if asks is None else asks
         return cls(origin, limits.get(name), dict(asks.get(name) or {}))
+
+
+# ─── мета джоба ──────────────────────────────────────────────────────────
+# Ключи Meta джоба папета (#265). Пишет их spec.job_spec (через to_meta),
+# читают все, кто по джобу решает, чей это папет, на каком он профиле и
+# ветке и свежа ли его спека.
+SPEC_META = "mop_spec"
+
+
+@dataclass(frozen=True)
+class JobMeta:
+    """Meta джоба папета: origin, профиль LLM, ветка мастера (#256), версия
+    шаблона спеки (#174).
+
+    Раньше её читали сырым .get в семи модулях с разными умолчаниями ("",
+    None, "?"), а перерегистрацию по ней писали четыре места -- и они
+    разошлись: сборка образа теряла ветку (#265). Отсутствующий ключ здесь --
+    None; умолчания показа (ростер: "?") и профиля (llm.of_meta) -- у
+    читателя, одно на каждое. Имя проекта не хранится -- выводится из origin
+    одним правилом driver.project_of."""
+    origin: str
+    llm: str
+    branch: str = None
+    spec_version: str = None
+
+    def __post_init__(self):
+        # origin -- None (джоб без Meta: законно, это «ничей») либо
+        # непустая строка; пустая -- ни то ни другое (#273).
+        if not (self.origin is None or (isinstance(self.origin, str) and self.origin)):
+            _refuse(self, "origin", "None or a non-empty string")
+        if not _optional_str(self.llm):
+            _refuse(self, "llm", "None or a string")
+
+    @property
+    def project(self):
+        return driver.project_of(self.origin or "")
+
+    @classmethod
+    def from_meta(cls, meta):
+        """Словарь Meta (из джоба или из ответа глагола spec) -> JobMeta."""
+        m = meta or {}
+        return cls(m.get("origin"), m.get("llm"), m.get("branch") or None, m.get(SPEC_META))
+
+    @classmethod
+    def from_job(cls, job):
+        return cls.from_meta(raw(job))
+
+    def to_meta(self):
+        """Словарь для Nomad -- в порядке ключей, каким его писал job_spec:
+        origin, llm, ветка (только если есть), версия шаблона."""
+        out = {"origin": self.origin, "llm": self.llm}
+        if self.branch:
+            out["branch"] = self.branch
+        if self.spec_version is not None:
+            out[SPEC_META] = self.spec_version
+        return out
+
+
+def raw(job):
+    """Meta джоба как есть, словарём: для ответа глагола spec по шине, где
+    форма -- то, что отдал Nomad."""
+    return (job or {}).get("Meta") or {}
 
 
 # ─── владелец задания ────────────────────────────────────────────────────
@@ -77,6 +155,268 @@ class Owner:
     def from_dict(cls, d):
         """Словарь с шины -> Owner; нет записи -- None."""
         return cls(d["user"], d["at"]) if d else None
+
+
+# ─── факты клона ─────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class CloneFacts:
+    """Что держит клон папета (#266): ветка, несохранённое, неотправленное,
+    владелец задания. Собирает агент узла (agent.clone_facts), решают мастер,
+    сервис кластера и сам агент.
+
+    По шине -- словарём с прежними ключами cur/def/...: во время раската
+    агенты обеих версий говорят друг с другом, и провод не двигается.
+    dirty/ahead -- None, если агент их не прислал: «не знаю», а не ноль.
+
+    home -- дом клона (#272), `git config mop.home`: ветка мастера из меты
+    джоба, иначе ветка по умолчанию; его пишет стадия клона `mop driver run`
+    и wipe. Ключа нет (старый агент) или записи нет -- дом это ветка по
+    умолчанию (home_branch), и версии во время раската решают одинаково."""
+    branch: str = None
+    default_branch: str = None
+    home: str = None
+    origin: str = None
+    dirty: int = None
+    ahead: int = None
+    owner: Owner = None
+
+    def __post_init__(self):
+        # Оба числа или ни одного (#273): полусобранный объект не «известен»
+        # наполовину, а сломан.
+        if (self.dirty is None) != (self.ahead is None):
+            missing = "ahead" if self.ahead is None else "dirty"
+            _refuse(self, missing, "dirty and ahead come together, or neither")
+        for f in ("dirty", "ahead"):
+            v = getattr(self, f)
+            if v is not None and not _count(v):
+                _refuse(self, f, "a non-negative integer")
+
+    @property
+    def known(self):
+        """Есть ли оба числа: без них про работу в клоне сказать нечего."""
+        return self.dirty is not None and self.ahead is not None
+
+    @property
+    def home_branch(self):
+        """Дом клона: записанный, иначе ветка по умолчанию."""
+        return self.home or self.default_branch
+
+    def work(self):
+        """Что в клоне держит работу, для показа: пусто -- ничего (#272).
+        Одно перечисление на правило (holds_work), строку ростера и отказ
+        аренды: иначе причина в отказе разошлась бы с самим решением."""
+        out = []
+        if self.dirty:
+            out.append(f"uncommitted: {self.dirty}")
+        if self.ahead:
+            out.append(f"unpushed: {self.ahead}")
+        home = self.home_branch
+        if self.branch and home and self.branch != home:
+            out.append(f"off home {home}")
+        return out
+
+    def to_dict(self):
+        """Ключ home -- только когда дом записан: без записи клон шлёт те
+        же байты, что старый агент, и отсутствие ключа значит одно и то же
+        в обе стороны (#272)."""
+        d = {"cur": self.branch, "def": self.default_branch}
+        if self.home:
+            d["home"] = self.home
+        d.update(origin=self.origin, dirty=self.dirty, ahead=self.ahead,
+                 owner=self.owner and self.owner.to_dict())
+        return d
+
+    @classmethod
+    def from_dict(cls, d):
+        """Словарь с шины -> CloneFacts; нет данных -- None. Неполный словарь
+        (строка work у du) -- то, что в нём есть."""
+        if not d:
+            return None
+        return cls(d.get("cur"), d.get("def"), d.get("home"), d.get("origin"),
+                   d.get("dirty"), d.get("ahead"), Owner.from_dict(d.get("owner")))
+
+
+def holds_work(clone):
+    """Есть ли в клоне работа: несохранённое, неотправленное или клон не на
+    своём доме (#266, #272).
+
+    Одно правило на всех: вердикт ростера, аренду, уборку сирот и ворота
+    кластера. Ветка сама по себе -- не работа: с #256 папет стоит на ветке
+    своего мастера намеренно, и она его дом. Чистый клон не на доме держит
+    тикет: папет запушил и ждёт приёма отчёта, и через окно его брал бы
+    другой мастер. Свежий диспатч без коммитов бережёт окно lease.WINDOW.
+    Клон неизвестен или без чисел -- держит: «не знаю» не значит «пусто»."""
+    if clone is None or not clone.known:
+        return True
+    return bool(clone.work())
+
+
+# ─── узел ────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class PoolNode:
+    """Узел в ответе глагола pool (cluster.nomad_pool), #267, #277.
+
+    Три формы, и форма названа (form), а не угадана по заполненным полям:
+      down   -- не готов: {name, status};
+      broken -- готов, но ёмкость не прочитать: {name, status, error};
+      ready  -- {name, status, free_mb, total_mb, slots, slots_total, eligible}.
+    Ёмкость у готового обязательна, у остальных её нет: одиннадцать
+    необязательных полей на один класс собирали молча и готовый узел без
+    памяти, и неготовый с ней (#277). Провод прежний, байт в байт."""
+    name: str
+    status: str
+    free_mb: int = None
+    total_mb: int = None
+    slots: int = None
+    slots_total: int = None
+    eligible: bool = True
+    error: str = None
+
+    CAPACITY = ("free_mb", "total_mb", "slots", "slots_total")
+    # Без slots_total готовый узел читается: сервис старше #243 его не шлёт,
+    # и отказ здесь отнял бы пул у мастера на время раската.
+    REQUIRED = ("free_mb", "total_mb", "slots")
+
+    def __post_init__(self):
+        if self.status != "ready" and self.error is not None:
+            raise ValueError(f"node {self.name}: error on a node that is {self.status}")
+        ready = self.form == "ready"
+        for f in self.CAPACITY:
+            value = getattr(self, f)
+            if ready and value is None and f in self.REQUIRED:
+                raise ValueError(f"node {self.name} (ready): {f} missing")
+            if not ready and value is not None:
+                raise ValueError(f"node {self.name} ({self.form}): {f} must be absent")
+
+    @property
+    def form(self):
+        if self.status != "ready":
+            return "down"
+        return "broken" if self.error else "ready"
+
+    @property
+    def placeable(self):
+        """Станет ли Nomad что-то сюда ставить: готов и открыт планированию.
+        Сломанный (broken) -- готов, и eligible у него по умолчанию: как было."""
+        return self.status == "ready" and self.eligible
+
+    def to_pool(self):
+        if self.form == "down":
+            return {"name": self.name, "status": self.status}
+        if self.form == "broken":
+            return {"name": self.name, "status": self.status, "error": self.error}
+        return {"name": self.name, "status": self.status, "free_mb": self.free_mb,
+                "total_mb": self.total_mb, "slots": self.slots,
+                "slots_total": self.slots_total, "eligible": self.eligible}
+
+    @classmethod
+    def from_pool(cls, d):
+        return cls(d["name"], d.get("status"), d.get("free_mb"), d.get("total_mb"),
+                   d.get("slots"), d.get("slots_total"), d.get("eligible", True),
+                   d.get("error"))
+
+
+@dataclass(frozen=True)
+class NodeRow:
+    """Строка узла в ответе глагола nodes (nodes.row), #267, #277:
+    {name, driver, [error], serves, state, free_mb, total_mb, slots,
+    slots_total} -- всегда все, ёмкость None у узла вне пула, error -- только
+    у узла с отказом (#175). Статуса в ней нет: состояние планирования --
+    строка state, и в форму pool строку не превратить."""
+    name: str
+    driver: str
+    serves: str
+    state: str
+    free_mb: int = None
+    total_mb: int = None
+    slots: int = None
+    slots_total: int = None
+    error: str = None
+
+    def to_row(self):
+        # Поле error -- только у узла с отказом (#175): строка исправного прежняя.
+        return {"name": self.name, "driver": self.driver,
+                **({"error": self.error} if self.error else {}),
+                "serves": self.serves, "state": self.state,
+                "free_mb": self.free_mb, "total_mb": self.total_mb,
+                "slots": self.slots, "slots_total": self.slots_total}
+
+    @classmethod
+    def from_row(cls, d):
+        return cls(d["name"], d.get("driver"), d.get("serves"), d.get("state"),
+                   d.get("free_mb"), d.get("total_mb"), d.get("slots"),
+                   d.get("slots_total"), d.get("error"))
+
+
+# ─── тело папета: ответы драйвера ────────────────────────────────────────
+@dataclass(frozen=True)
+class Body:
+    """В чём живёт папет -- ответ ensure драйвера (#267). vmid None -- тело
+    это сам узел (host), иначе номер тела гипервизора (pve).
+
+    По шине и из драйвера -- прежний словарь {name, body, created, address}:
+    раньше host отдавал body None, pve -- vmid, и каждый читатель разбирал
+    ключи сам."""
+    name: str
+    vmid: object = None
+    address: str = None
+    created: bool = False
+
+    def __post_init__(self):
+        if not driver.valid_name(self.name):
+            _refuse(self, "name", "a puppet name, pu-<project>-<n>")
+        if not (self.vmid is None or (isinstance(self.vmid, int) and not isinstance(self.vmid, bool))):
+            _refuse(self, "vmid", "None (the node itself) or an integer")
+        if not isinstance(self.created, bool):
+            _refuse(self, "created", "a boolean")
+
+    def to_dict(self):
+        return {"name": self.name, "body": self.vmid, "created": self.created,
+                "address": self.address}
+
+    @classmethod
+    def from_dict(cls, d):
+        """Ответ ensure -> Body; отказ ({error}) или пусто -- None. Нет
+        created (старый агент) -- False; мусор вместо него -- отказ (#273)."""
+        if not d or d.get("error"):
+            return None
+        return cls(d["name"], d.get("body"), d.get("address"), d.get("created", False))
+
+    def describe(self):
+        """Строка `mop driver run`: чем стало тело и где оно."""
+        return (f"body {self.vmid or 'the node itself'}"
+                + (f" at {self.address}" if self.address else ""))
+
+
+@dataclass(frozen=True)
+class Gone:
+    """Что снёс destroy драйвера (#267): target -- что именно, vmid -- тело
+    гипервизора целиком (pve) либо None -- сброшен клон на самом узле (host).
+
+    Провод прежний: host -- {reset, target}, pve -- {destroyed, target}."""
+    target: str
+    vmid: object = None
+
+    def __post_init__(self):
+        if not (isinstance(self.target, str) and self.target):
+            _refuse(self, "target", "a non-empty string: what was destroyed")
+
+    @property
+    def reset(self):
+        """Клон сброшен на месте, а тело осталось: узел снести нельзя."""
+        return self.vmid is None
+
+    def to_dict(self):
+        if self.reset:
+            return {"reset": True, "target": self.target}
+        return {"destroyed": self.vmid, "target": self.target}
+
+    @classmethod
+    def from_dict(cls, d):
+        """Ответ destroy -> Gone; отказ ({error}) или пусто -- None."""
+        if not d or d.get("error"):
+            return None
+        return cls(d.get("target"), d.get("destroyed"))
 
 
 # ─── глагол ──────────────────────────────────────────────────────────────

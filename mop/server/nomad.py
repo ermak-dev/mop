@@ -10,6 +10,7 @@ attach, ради живого терминала.
 узел. Шина сняла и то и другое: ничего из этого в коде больше нет.
 """
 import os
+import typing
 
 try:
     import nomad as _nomad
@@ -50,15 +51,6 @@ def token():
                       f"controller's first mop server deploy fetches it; a master's "
                       f"machine does not need it, because pool commands go "
                       f"through the cluster service (docs/CLUSTER.md)")
-
-
-def token_or_none():
-    """Токен, либо None: у вызывающего есть запасной путь и он обязан о нём
-    сказать, а не упасть трассировкой (mop/client/keys.py)."""
-    try:
-        return token()
-    except LookupError:
-        return None
 
 
 def client():
@@ -113,17 +105,6 @@ def latest_alloc(job_id):
     return max(run, key=lambda a: a["CreateIndex"]) if run else None
 
 
-def ready_nodes(datacenter=POOL_DC):
-    """Имена узлов, на которые Nomad вообще станет что-то ставить.
-
-    По умолчанию только рабочий пул: раздавать креды и ключи на управляющую
-    машину не надо — она их источник."""
-    return {n["Name"] for n in client().nodes.get_nodes()
-            if n["Status"] == "ready"
-            and n.get("SchedulingEligibility") != "ineligible"
-            and (datacenter is None or n.get("Datacenter") == datacenter)}
-
-
 def node_capacity(node_summary):
     """(свободно МБ, всего МБ) на узле. Reserved — память, отрезанная под
     остальных жильцов хоста, в бюджет пула она не входит."""
@@ -146,6 +127,17 @@ def deregister(job_id, purge=True):
 
 def get_job(job_id):
     return client().job.get_job(job_id)
+
+
+def get_jobs(prefix, meta=False):
+    """Джобы по префиксу имени (#275): тот же запрос, что сервис кластера
+    делал клиентом python-nomad напрямую; meta -- только когда просят."""
+    return client().jobs.get_jobs(prefix=prefix, **({"meta": True} if meta else {}))
+
+
+def get_nodes():
+    """Сводки всех узлов кластера (#275), как их отдаёт python-nomad."""
+    return client().nodes.get_nodes()
 
 
 # ─── жизненный цикл узла ─────────────────────────────────────────────────
@@ -277,3 +269,35 @@ def nodes_meta():
     c = client()
     return {n["Name"]: (c.node.get_node(n["ID"]).get("Meta") or {})
             for n in c.nodes.get_nodes()}
+
+
+# ─── интерфейс (#275) ────────────────────────────────────────────────────
+@typing.runtime_checkable
+class NomadApi(typing.Protocol):
+    """То, что сервис кластера и сборка образа читают у Nomad -- и ничего
+    сверх (#275). Живой модуль удовлетворяет ему как есть; проверки дают
+    свою реализацию параметром (tests/_lib.FakeNomad), а не подменой
+    атрибутов модуля.
+
+    Чистые помощники (describe_error, forget_refusal) и константы (ADDR,
+    POOL_DC) -- не ввод-вывод, в протокол не входят и читаются у модуля."""
+
+    def get_job(self, job_id): ...
+    def get_jobs(self, prefix, meta=False): ...
+    def register(self, spec): ...
+    def deregister(self, job_id, purge=True): ...
+    def latest_alloc(self, job_id): ...
+    def alloc_restart(self, alloc_id): ...
+    def alloc_stderr(self, alloc_id, task, tail=8000): ...
+    def alloc_stop(self, alloc_id): ...
+    def get_nodes(self): ...
+    def node_capacity(self, node_summary): ...
+    def node_allocs(self, node_name): ...
+    def node_drain(self, node_name, deadline=300): ...
+    def node_eligibility(self, node_name, eligible): ...
+    def node_forget(self, node_name): ...
+    def node_summary(self, node_name): ...
+    def node_meta(self, node_name): ...
+    def nodes_meta(self): ...
+    def node_dynamic_meta(self, node_name): ...
+    def set_node_meta(self, node_name, updates): ...

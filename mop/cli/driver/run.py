@@ -16,6 +16,7 @@ import time
 
 from mop.cli import lib
 from mop.common import bus, busnames, config
+from mop.common.domain import Body
 from mop import driver
 
 # Куда внешний врапер кладёт внутренний внутри тела. В $HOME, а не в /tmp:
@@ -84,16 +85,27 @@ def clone_script(environ):
     # origin сменился и сниппет снесёт каталог): существующий клон не
     # переключается, там может быть работа. Нет такой ветки в origin --
     # завести локально: мастер создаст её на origin первым landing.
+    #
+    # Дом клона (#272) -- на каждом старте, не только у свежего клона:
+    # существующий клон узнаёт его тоже. Ветка мастера, а без неё ветка по
+    # умолчанию из origin/HEAD; не вычислить -- записи нет, и дом тогда
+    # решает агент по той же ветке по умолчанию. Живёт здесь, а не в
+    # driver.CLONE_SH: тот едет во врапере, и правка его -- перерегистрация
+    # всего пула.
     branch = (environ.get("NOMAD_META_branch") or "").strip()
     if not branch:
-        return head + driver.CLONE_SH
+        return (head + driver.CLONE_SH
+                + 'home=$(git -C "$d" rev-parse --abbrev-ref origin/HEAD 2>/dev/null || true)\n'
+                'if [ -n "$home" ]; then git -C "$d" config mop.home "${home#origin/}"\n'
+                'else git -C "$d" config --unset mop.home || true; fi\n')
     return (head + f"export PU_BRANCH={shlex.quote(branch)}\n"
             'fresh=1\n'
             'if [ -d "$d/.git" ] && [ "$(git -C "$d" remote get-url origin)" = "$PU_ORIGIN" ]; then fresh=0; fi\n'
             + driver.CLONE_SH +
             'if [ "$fresh" = 1 ]; then\n'
             '    git -C "$d" checkout -q "$PU_BRANCH" 2>/dev/null || git -C "$d" checkout -q -b "$PU_BRANCH"\n'
-            'fi\n')
+            'fi\n'
+            'git -C "$d" config mop.home "$PU_BRANCH"\n')
 
 
 # ─── узел ────────────────────────────────────────────────────────────────
@@ -150,10 +162,10 @@ def main(argv):
     d = driver.current()
 
     r = asyncio.run(d.ensure(name, ensure_params(name, os.environ)))
-    if r.get("error"):
-        sys.exit(f"no body for {name}: {r['error']}")
-    print(f"{name}: body {r.get('body') or 'the node itself'}"
-          + (f" at {r['address']}" if r.get("address") else ""), flush=True)
+    body = Body.from_dict(r)
+    if body is None:
+        sys.exit(f"no body for {name}: {r.get('error')}")
+    print(f"{name}: {body.describe()}", flush=True)
 
     # Врапер идёт своим соединением (run_argv), а гашение сессии — обычным
     # (argv): первое живёт столько же, сколько папет, и мультиплексировать его
@@ -233,7 +245,7 @@ def main(argv):
 
     def stop(_sig, _frm):
         state["asked"] = True
-        subprocess.run(inside(probe, f"tmux -L {name} kill-session -t {name}"),
+        subprocess.run(inside(probe, driver.Tmux(name).kill()),
                        capture_output=True)
         if state["child"]:
             state["child"].terminate()

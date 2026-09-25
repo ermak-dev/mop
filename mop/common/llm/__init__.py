@@ -26,6 +26,7 @@
 import re
 
 from .. import config, plugins
+from ..domain import JobMeta
 
 _VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_AUTH_VAR = "ANTHROPIC_AUTH_TOKEN"
@@ -89,8 +90,12 @@ def of_meta(meta):
     Реестр не спрашиваем: протухшее имя обязано остаться видным (ростер,
     отказ job_spec по имени папета). Пустое значение отдаём как есть --
     так было во всех местах, читавших Meta этим путём; tests/llm.py это
-    фиксирует."""
-    return (meta or {}).get("llm", config.get("MOP_DEFAULT_LLM"))
+    фиксирует.
+
+    Единственное чтение профиля из меты (#265): meta -- JobMeta или словарь
+    Meta; нет ключа -- умолчание установки."""
+    m = meta if isinstance(meta, JobMeta) else JobMeta.from_meta(meta)
+    return m.llm if m.llm is not None else config.get("MOP_DEFAULT_LLM")
 
 
 def require(name):

@@ -11,6 +11,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import image  # noqa: E402
@@ -24,17 +25,13 @@ GOT = {"project": "proj", "asks": {"MOP_MEM_MB": "2048"}, "alien": [], "legacy":
 
 
 def main():
-    failed = 0
+    c = Checks()
     extra = image.extra_vars("git@h:g/proj.git", GOT)
     want = {"mop_project": "proj", "mop_origin": "git@h:g/proj.git",
             "mop_project_asks": {"MOP_MEM_MB": "2048"},
             "mop_project_tasks": "/tmp/x/sandbox-tasks.yml"}
-    if extra != want:
-        failed += 1
-        print(f"FAIL extra_vars: {extra} != {want}")
-    if "mop_project_vars" in extra:
-        failed += 1
-        print("FAIL extra_vars: a None half must be absent, not null")
+    c.expect("extra_vars", extra, want)
+    c.check("extra_vars: a None half must be absent, not null", "mop_project_vars" not in extra)
     # Пересборка — операция над ПРОЕКТОМ (#60): тела проекта на контейнерных
     # узлах сносятся до сборки (у шаблона с живым клоном не отнять место), и
     # занятый папет — отказ, если не сказано --force. Тела на узлах, где тело
@@ -50,30 +47,18 @@ def main():
     try:
         try:
             image.plan_clear(rows)
-            failed += 1
-            print("FAIL plan_clear: a busy puppet on a container node must refuse")
+            c.fail("plan_clear: a busy puppet on a container node must refuse")
         except RuntimeError as e:
             for who in ("pu-proj-2", "pu-proj-4"):
-                if who not in str(e):
-                    failed += 1
-                    print(f"FAIL plan_clear: the refusal must name {who}: {e}")
-            if "pu-proj-3" in str(e) or "pu-proj-1" in str(e):
-                failed += 1
-                print(f"FAIL plan_clear: the refusal names a puppet that does not block: {e}")
-        got = image.plan_clear(rows, force=True)
-        if got != ["pu-proj-1", "pu-proj-2", "pu-proj-4"]:
-            failed += 1
-            print(f"FAIL plan_clear(force): {got}")
-        got = image.plan_clear(rows[:1])
-        if got != ["pu-proj-1"]:
-            failed += 1
-            print(f"FAIL plan_clear(free only): {got}")
+                c.check(f"plan_clear: the refusal must name {who}", who in str(e), e)
+            c.check("plan_clear: the refusal names a puppet that does not block",
+                    not ("pu-proj-3" in str(e) or "pu-proj-1" in str(e)), e)
+        c.expect("plan_clear(force)", image.plan_clear(rows, force=True),
+                 ["pu-proj-1", "pu-proj-2", "pu-proj-4"])
+        c.expect("plan_clear(free only)", image.plan_clear(rows[:1]), ["pu-proj-1"])
     except AttributeError:
-        failed += 1
-        print("FAIL image.plan_clear is missing")
-
-    print("image: FAILED" if failed else "image: ok")
-    return 1 if failed else 0
+        c.fail("image.plan_clear is missing")
+    return c.report("image")
 
 
 if __name__ == "__main__":

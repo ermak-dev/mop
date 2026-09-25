@@ -20,6 +20,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks, Msg, bash, canned, restored, GATE_NOW, gate_table_267  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.node import agent  # noqa: E402
@@ -62,42 +63,34 @@ def new_decision(verb, public, project, name, mine):
 ADDED = ("clone",)
 
 
-def check_sets():
+def check_sets(c):
     """Прежние четыре набора выводятся из таблицы -- те же и в том же порядке;
     добавленные после (ADDED) -- в конце."""
-    out = []
     for got, want, what in ((tuple(agent.VERBS), OLD_VERBS + ADDED, "VERBS"),
                             (agent.PUBLIC_VERBS, OLD_PUBLIC, "PUBLIC_VERBS"),
                             (agent.ADMIN_VERBS, OLD_ADMIN, "ADMIN_VERBS"),
                             (agent.NAMED_VERBS, OLD_NAMED + ADDED, "NAMED_VERBS")):
-        if tuple(got) != want:
-            out.append(f"{what} -> {tuple(got)}, wanted {want}")
-    return out
+        c.expect(what, tuple(got), want)
 
 
-def check_decisions():
+def check_decisions(c):
     """Каждый глагол x субъект (публичный .msg / мастерский .rpc) x проект
     (admin / проект) x папет свой или чужой: тот же ответ, что до #150.
     Отказ, ставший допуском, -- смена прав, а не рефакторинг."""
-    out = []
     for verb in OLD_VERBS + ADDED + ("nosuch", None, ""):
         for public in (True, False):
             for project in (busnames.ADMIN, "mop"):
                 for mine in (True, False):
                     want = old_decision(verb, public, project, "pu-mop-1", mine)
                     got = new_decision(verb, public, project, "pu-mop-1", mine)
-                    if got != want:
-                        out.append(f"{verb} public={public} project={project} mine={mine}: "
-                                   f"{got!r}, wanted {want!r}")
-    return out
+                    c.expect(f"{verb} public={public} project={project} mine={mine}", got, want)
 
 
-def check_tmux():
+def check_tmux(c):
     """Места адресации tmux -- те же строки, что до #150. Снимок экрана для
     фактов ушёл вместе с ключом screen (#236)."""
     n = "pu-mop-1"
     t = agent.Tmux(n)
-    out = []
     for got, want in (
             # tmux_alive
             (t.alive(), f"tmux -L {n} has-session -t {n} 2>/dev/null"),
@@ -115,15 +108,12 @@ def check_tmux():
             # v_type: пустая команда -- только Enter и экран
             (t.type(""), f"tmux -L {n} send-keys -t {n} Enter; "
                          f"sleep 2; tmux -L {n} capture-pane -p -t {n}")):
-        if got != want:
-            out.append(f"tmux -> {got!r}, wanted {want!r}")
-    return out
+        c.expect("tmux", got, want)
 
 
-def check_quiet():
+def check_quiet(c):
     """Библиотека не печатает и не выходит: программа -- командлет
     `mop agent` (mop/cli/service/agent.py)."""
-    out = []
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
                         "mop", "node", "agent.py")
     in_main = False
@@ -139,10 +129,9 @@ def check_quiet():
             in_main = False
             code = line.split("#")[0]
             if "print(" in code or "sys.exit(" in code:
-                out.append(f"mop/node/agent.py:{n}: {line.strip()}")
-    if hasattr(agent, "_conn"):
-        out.append("mop/node/agent.py keeps a global connection: pass it explicitly")
-    return out
+                c.fail(f"mop/node/agent.py:{n} prints or exits", line.strip())
+    c.check("mop/node/agent.py keeps no global connection: pass it explicitly",
+            not (hasattr(agent, "_conn")))
 
 
 # ── таймаут шелла -- не успех (#171) ─────────────────────────────────────
@@ -152,47 +141,40 @@ def check_quiet():
 # SOLUTION: для записи владельца и type None -- отказ «timed out». Пробы
 # только для чтения (буфер пейна, проба сессии) -- как были.
 # STATUS: FIXED — see #171
-def check_timeouts_171():
+def check_timeouts_171(c):
     import asyncio
-    out = []
-    saved = agent.bsh, agent.clone_facts
-
-    def fake(code):
-        async def bsh(name, script, timeout=20):
-            return "", code
-        return bsh
 
     async def facts(name):
         return {"owner": None, "dirty": 0, "ahead": 0}
-    try:
+    with restored(agent, "bsh", "clone_facts"):
         agent.clone_facts = facts
         for code in (None, 0):
-            agent.bsh = fake(code)
+            agent.bsh = canned("", code)
             for cmd in ("/status", "Escape"):
                 got = asyncio.run(agent.v_type(None, {"name": "pu-mop-1", "command": cmd}))
-                if code is None and "timed out" not in (got.get("error") or ""):
-                    out.append(f"type {cmd}, timeout -> {got!r}")
-                if code == 0 and got != {"screen": ""}:
-                    out.append(f"type {cmd}, success -> {got!r}")
+                if code is None:
+                    c.check(f"type {cmd}, timeout", not ("timed out" not in (got.get("error") or "")),
+                            repr(got))
+                if code == 0:
+                    c.check(f"type {cmd}, success", not (got != {"screen": ""}), repr(got))
             refused, undo, _ = asyncio.run(agent._claim("pu-mop-1", {"owner": "m-1"}))
-            if code is None and "timed out" not in (refused or ""):
-                out.append(f"owner write, timeout -> {refused!r}")
-            if code == 0 and (refused or not undo):
-                out.append(f"owner write, success -> {refused!r} {undo!r}")
+            if code is None:
+                c.check("owner write, timeout", not ("timed out" not in (refused or "")),
+                        repr(refused))
+            if code == 0:
+                c.check("owner write, success", not (refused or not undo),
+                        f"{refused!r} {undo!r}")
         # Кривое имя до шелла не доходит: bsh отдал бы None, и это прочиталось
         # бы как таймаут, а то и как успех.
         got = asyncio.run(agent.v_type(None, {"name": "pu-x; rm", "command": "/status"}))
-        if "doesn't look like" not in (got.get("error") or ""):
-            out.append(f"type with a bad name -> {got!r}")
+        c.check("type with a bad name", not ("doesn't look like" not in (got.get("error") or "")),
+                repr(got))
         # Пробы только для чтения: ответ прежний.
-        agent.bsh = fake(None)
-        if asyncio.run(agent.pane_lines("pu-mop-1")) != []:
-            out.append("pane_lines must tolerate a timeout")
-        if asyncio.run(agent.session_probe("pu-mop-1")) != "none":
-            out.append("session_probe must read a timeout as none")
-    finally:
-        agent.bsh, agent.clone_facts = saved
-    return out
+        agent.bsh = canned("", None)
+        c.check("pane_lines must tolerate a timeout",
+                not (asyncio.run(agent.pane_lines("pu-mop-1")) != []))
+        c.check("session_probe must read a timeout as none",
+                not (asyncio.run(agent.session_probe("pu-mop-1")) != "none"))
 
 
 # ── откат владельца -- с результатом (#181) ──────────────────────────────
@@ -204,10 +186,8 @@ def check_timeouts_171():
 # отказ v_send дописывает «owner not restored: <причина>»; удачный откат
 # текст не меняет.
 # STATUS: FIXED — see #181
-def check_unclaim_181():
+def check_unclaim_181(c):
     import asyncio
-    out = []
-    saved = agent.bsh, agent.clone_facts, agent.session_json
     delivery = {"error": "pu-mop-1: no live session"}
 
     def fake(rollback):
@@ -224,7 +204,7 @@ def check_unclaim_181():
 
     async def session_json(name, cmd, timeout=20):
         return dict(delivery)
-    try:
+    with restored(agent, "bsh", "clone_facts", "session_json"):
         agent.clone_facts, agent.session_json = facts, session_json
         for rollback, want in ((("", None), delivery["error"] + "; owner not restored: timed out"),
                                (("rm: Permission denied", 1),
@@ -233,17 +213,12 @@ def check_unclaim_181():
             agent.bsh, calls = fake(rollback)
             got = asyncio.run(agent.v_send(None, {"name": "pu-mop-1", "owner": "m-1",
                                                   "message": "hi"}))
-            if len(calls) != 2 or "rm -f" not in calls[-1]:
-                out.append(f"send refused, rollback {rollback}: no rollback shell ({calls})")
-            if got.get("error") != want:
-                out.append(f"send refused, rollback {rollback}: {got.get('error')!r}, "
-                           f"wanted {want!r}")
-    finally:
-        agent.bsh, agent.clone_facts, agent.session_json = saved
-    return out
+            c.check(f"send refused, rollback {rollback}: a rollback shell",
+                    not (len(calls) != 2 or "rm -f" not in calls[-1]), calls)
+            c.expect(f"send refused, rollback {rollback}: error", got.get("error"), want)
 
 
-def check_intake():
+def check_intake(c):
     """HYPOTHESIS (#168): тело-JSON не объект (`[1]`, `"x"`) роняет задачу
     handle на req["_project"], а нехэшируемый глагол (`{"verb": [1]}`) -- на
     поиске в таблице внутри refusal(): ответа нет, проситель ждёт таймаут.
@@ -253,14 +228,7 @@ def check_intake():
     STATUS: FIXED — see #168"""
     import asyncio
     import json
-    out, called = [], []
-
-    class Msg:
-        def __init__(self, data, subject):
-            self.subject, self.data, self.replies = subject, data, []
-
-        async def respond(self, data):
-            self.replies.append(json.loads(data))
+    called = []
 
     def spy(verb):
         async def fn(conn, req):
@@ -275,37 +243,37 @@ def check_intake():
 
         def ask(body, subject="mop.admin.node.hyper.rpc"):
             called.clear()
-            msg = Msg(body, subject)
+            msg = Msg(subject, body)
             asyncio.run(agent.handle(None, msg, public=subject.endswith(".msg")))
             return msg.replies
 
         for body in (b"[1]", b'"x"', b"7", b"null"):
             got = ask(body)
-            if got != [{"error": "request is not a JSON object"}] or called:
-                out.append(f"body {body!r}: replies {got!r}, verbs called {called}")
+            c.check(f"body {body!r}: refused before any verb",
+                    not (got != [{"error": "request is not a JSON object"}] or called),
+                    f"replies {got!r}, verbs called {called}")
 
         def unknown(v):
             return f"no such verb {v}; available: {', '.join(sorted(keep))}"
         for verb in ([1], {}, 7, True):
             got = ask(json.dumps({"verb": verb}).encode())
-            if got != [{"error": unknown(verb)}] or called:
-                out.append(f"verb {verb!r}: replies {got!r}, wanted the unknown-verb "
-                           f"refusal, verbs called {called}")
+            c.check(f"verb {verb!r}: the unknown-verb refusal",
+                    not (got != [{"error": unknown(verb)}] or called),
+                    f"replies {got!r}, verbs called {called}")
         # Прежнее не меняется: не-JSON, неизвестная строка, обычный запрос.
-        if ask(b"junk") != [{"error": "request is not JSON"}]:
-            out.append("a non-JSON body must keep its old refusal")
-        if ask(b'{"verb": "nosuch"}') != [{"error": unknown("nosuch")}]:
-            out.append("an unknown string verb must keep its refusal")
+        c.expect("a non-JSON body must keep its old refusal",
+                 ask(b"junk"), [{"error": "request is not JSON"}])
+        c.expect("an unknown string verb must keep its refusal",
+                 ask(b'{"verb": "nosuch"}'), [{"error": unknown("nosuch")}])
         got = ask(b'{"verb": "ping"}', "mop.mop.node.hyper.msg")
-        if got != [{"verb": "ping"}] or called != ["ping"]:
-            out.append(f"a well-formed ping must reach its verb: {got!r}, {called}")
+        c.check("a well-formed ping must reach its verb",
+                not (got != [{"verb": "ping"}] or called != ["ping"]), f"{got!r}, {called}")
     finally:
         agent.VERBS.clear()
         agent.VERBS.update(keep)
-    return out
 
 
-def check_main_169():
+def check_main_169(c):
     """HYPOTHESIS (#169): как только bus при импорте без nats-py бросает, а не
     выходит, переходный вход юнитов `python3 -m mop.agent` печатал бы трассу:
     импорты модуля идут раньше его блока __main__.
@@ -323,20 +291,18 @@ def check_main_169():
                        env=dict(os.environ, PYTHONPATH=shadow),
                        capture_output=True, text=True)
     want = "bus library needed: pip install --user --break-system-packages nats-py\n"
-    if r.returncode != 1 or r.stdout or r.stderr != want:
-        return [f"python3 -m mop.node.agent without nats: code {r.returncode}, "
-                f"stdout {r.stdout!r}, stderr {r.stderr[-300:]!r}"]
-    return []
+    c.check("python3 -m mop.node.agent without nats refuses in one line",
+            not (r.returncode != 1 or r.stdout or r.stderr != want),
+            f"code {r.returncode}, stdout {r.stdout!r}, stderr {r.stderr[-300:]!r}")
 
 
-def check_subject_173():
+def check_subject_173(c):
     """HYPOTHESIS (#173): агент брал проект из субъекта своим правилом
     (`parts[1] if len(parts) > 1`), а не service.project_from_subject (#149):
     на его субъектах они сходятся, но это второе определение.
     SOLUTION: агент зовёт общую функцию; на его субъектах ответ тот же.
     STATUS: FIXED — see #173"""
     from mop.common import service
-    out = []
 
     def old(subject):
         parts = subject.split(".")
@@ -345,18 +311,18 @@ def check_subject_173():
         subs = [busnames.node(p, "hyper", "rpc"), busnames.node(p, "hyper", "msg"),
                 busnames.broadcast(p)]
         for subj in subs:
-            if service.project_from_subject(subj) != old(subj) or old(subj) != p:
-                out.append(f"{subj}: shared {service.project_from_subject(subj)!r}, "
-                           f"old {old(subj)!r}, wanted {p!r}")
+            c.check(f"{subj}: the shared project rule",
+                    not (service.project_from_subject(subj) != old(subj) or old(subj) != p),
+                    f"shared {service.project_from_subject(subj)!r}, "
+                    f"old {old(subj)!r}, wanted {p!r}")
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
                         "mop", "node", "agent.py")
     text = open(path).read()
-    if "parts[1]" in text or "service.project_from_subject(" not in text:
-        out.append("mop/node/agent.py must take the project via service.project_from_subject")
-    return out
+    c.check("mop/node/agent.py must take the project via service.project_from_subject",
+            not ("parts[1]" in text or "service.project_from_subject(" not in text))
 
 
-def check_unclaim_race_189():
+def check_unclaim_race_189(c):
     """HYPOTHESIS (#189): v_send ставит аренду под _owner_locks, а откат
     неудачной доставки делает ВНЕ замка и не глядя: второй мастер (force)
     успевает взять папета, пока первый ждёт доставки, и откат первого
@@ -367,19 +333,12 @@ def check_unclaim_race_189():
     Шелл настоящий: bsh исполняет скрипт агента bash'ем над временным
     клоном, так что сравнение-и-запись проверяется как есть, а не заглушкой."""
     import asyncio
-    import subprocess
     import tempfile
     from mop.common import lease
     from mop.common.domain import Owner
-    out = []
     root = tempfile.mkdtemp(prefix="mop-test-189-")
     os.makedirs(os.path.join(root, ".git"))
     path = os.path.join(root, lease.FILE)
-    saved = (agent.bsh, agent.clone_facts, agent.clone_dir, agent.session_json, agent._event)
-
-    async def bsh(name, script, timeout=20):
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-        return r.stdout + r.stderr, r.returncode
 
     async def facts(name):
         text = open(path).read() if os.path.exists(path) else ""
@@ -392,8 +351,8 @@ def check_unclaim_race_189():
 
     def owner_now():
         return Owner.parse(open(path).read()) if os.path.exists(path) else None
-    try:
-        agent.bsh, agent.clone_facts, agent._event = bsh, facts, no_event
+    with restored(agent, "bsh", "clone_facts", "clone_dir", "session_json", "_event"):
+        agent.bsh, agent.clone_facts, agent._event = bash, facts, no_event
         agent.clone_dir = lambda name: root
 
         # Гонка: A взял аренду и ждёт доставки; B берёт с force и доставляет;
@@ -422,16 +381,16 @@ def check_unclaim_race_189():
                 return got
             return await asyncio.gather(a(), b())
         ra, rb = asyncio.run(race())
-        if not ra.get("error") or rb.get("error"):
-            out.append(f"race: a {ra!r}, b {rb!r} -- a must fail, b must deliver")
-        if getattr(owner_now(), "user", None) != "bob":
-            out.append(f"race: the lease must stay with bob, got {owner_now()!r}")
+        c.check("race: a must fail, b must deliver",
+                not (not ra.get("error") or rb.get("error")), f"a {ra!r}, b {rb!r}")
+        c.check("race: the lease must stay with bob",
+                not (getattr(owner_now(), "user", None) != "bob"), repr(owner_now()))
 
         # Одна неудачная доставка -- откат как прежде: к прежнему владельцу,
         # а без него файл снимается.
-        async def fail(name, cmd, timeout=20):
+        async def undelivered(name, cmd, timeout=20):
             return {"error": "not delivered"}
-        agent.session_json = fail
+        agent.session_json = undelivered
         stale = Owner("carol", 1000).render()
         for before, want in ((None, None), (stale, stale)):
             if before is None:
@@ -442,16 +401,12 @@ def check_unclaim_race_189():
             got = asyncio.run(agent.v_send(None, {"name": "pu-mop-1", "message": "z",
                                                   "owner": "dave", "from_name": "d"}))
             now = open(path).read() if os.path.exists(path) else None
-            if not got.get("error") or now != want:
-                out.append(f"single failed send over {before!r}: {got!r}, file {now!r}, "
-                           f"wanted {want!r}")
-    finally:
-        (agent.bsh, agent.clone_facts, agent.clone_dir, agent.session_json,
-         agent._event) = saved
-    return out
+            c.check(f"single failed send over {before!r}",
+                    not (not got.get("error") or now != want),
+                    f"{got!r}, file {now!r}, wanted {want!r}")
 
 
-def check_gates_40():
+def check_gates_40(c):
     """HYPOTHESIS (#40): владельца сверяет только send; type (slash) и wipe
     пускают любого мастера проекта к папету, которого ведёт другой.
     SOLUTION: те же ворота (lease.may_touch) под тем же замком на папета,
@@ -462,15 +417,9 @@ def check_gates_40():
     import asyncio
     import time
     from mop.common.domain import Owner
-    out = []
     olga = Owner("olga", int(time.time()) - 60).to_dict()
     clone = {"cur": "bug/1-x", "def": "master", "dirty": 2, "ahead": 0, "owner": olga}
     shelled, destroyed = [], []
-    saved = (agent.bsh, agent.clone_facts, agent.tmux_alive, agent.DRIVER, agent._event)
-
-    async def bsh(name, script, timeout=20):
-        shelled.append(script)
-        return "", 0
 
     async def facts(name):
         return dict(clone)
@@ -485,15 +434,16 @@ def check_gates_40():
         async def destroy(self, name, branch=None):
             destroyed.append(name if branch is None else (name, branch))
             return {"target": "gone"}
-    try:
-        agent.bsh, agent.clone_facts, agent.tmux_alive = bsh, facts, dead
+    with restored(agent, "bsh", "clone_facts", "tmux_alive", "DRIVER", "_event"):
+        agent.bsh, agent.clone_facts, agent.tmux_alive = canned(calls=shelled), facts, dead
         agent.DRIVER, agent._event = Driver(), no_event
         base = {"name": "pu-mop-1", "_project": "mop"}
         # #257: ветка мастера едет глаголом wipe до драйвера. STATUS: FIXED — see #257
         destroyed.clear()
         got = asyncio.run(agent.v_wipe(None, {**base, "owner": "olga", "branch": "swarm"}))
-        if got.get("error") or destroyed != [("pu-mop-1", "swarm")]:
-            out.append(f"#257 wipe must hand the branch to the driver: {got} {destroyed}")
+        c.check("#257 wipe must hand the branch to the driver",
+                not (got.get("error") or destroyed != [("pu-mop-1", "swarm")]),
+                f"{got} {destroyed}")
         for verb, fn, extra, touched in (("type", agent.v_type, {"command": "/status"}, shelled),
                                          ("wipe", agent.v_wipe, {}, destroyed)):
             for who, more, allowed in (("another master", {"owner": "anton"}, False),
@@ -503,32 +453,29 @@ def check_gates_40():
                                        ("the operator", {"owner": "anton", "_project": "admin"}, True)):
                 touched.clear()
                 got = asyncio.run(fn(None, {**base, **extra, **more}))
-                if allowed and (got.get("error") or not touched):
-                    out.append(f"{verb} by {who} must pass: {got!r}")
-                if not allowed and ("olga" not in (got.get("error") or "") or touched):
-                    out.append(f"{verb} by {who} must be refused naming olga, "
-                               f"touching nothing: {got!r}, {touched}")
-                if who == "force" and "olga" not in (got.get("owner_note") or ""):
-                    out.append(f"{verb} with force must name whom: {got!r}")
+                if allowed:
+                    c.check(f"{verb} by {who} must pass",
+                            not (got.get("error") or not touched), repr(got))
+                if not allowed:
+                    c.check(f"{verb} by {who} must be refused naming olga, touching nothing",
+                            not ("olga" not in (got.get("error") or "") or touched),
+                            f"{got!r}, {touched}")
+                if who == "force":
+                    c.check(f"{verb} with force must name whom",
+                            not ("olga" not in (got.get("owner_note") or "")), repr(got))
         # Ничей -- как до #40: запрос без owner проходит.
         clone["owner"] = None
         shelled.clear()
         got = asyncio.run(agent.v_type(None, {**base, "command": "/status"}))
-        if got.get("error") or not shelled:
-            out.append(f"type on nobody's puppet must pass as before: {got!r}")
+        c.check("type on nobody's puppet must pass as before",
+                not (got.get("error") or not shelled), repr(got))
         fn = getattr(agent, "v_clone", None)
-        if fn is None:
-            out.append("agent.v_clone is missing")
-        else:
+        if c.check("agent.v_clone exists", not (fn is None)):
             got = asyncio.run(fn(None, dict(base)))
-            if got != {"clone": clone}:
-                out.append(f"clone must return the clone's facts: {got!r}")
-    finally:
-        (agent.bsh, agent.clone_facts, agent.tmux_alive, agent.DRIVER, agent._event) = saved
-    return out
+            c.expect("clone must return the clone's facts", got, {"clone": clone})
 
 
-def check_caller_207():
+def check_caller_207(c):
     """HYPOTHESIS (#207): агент видит из субъекта только проект, а кто
     просит -- поле owner в теле, которое пишет сам отправитель; ворота (#40)
     и аренда send (#161) стоят на названном, а не на проверенном.
@@ -539,9 +486,7 @@ def check_caller_207():
     до уборки; публичный msg (папеты) владельца не несёт вовсе.
     STATUS: FIXED — see #207"""
     import asyncio
-    import json
     from mop.common import bus, lease
-    out = []
     got = {s: busnames.caller(s) for s in (
         "mop.mop.node.hyper.rpc.alice", "mop.mop.node.hyper.rpc",
         "mop.mop.node.hyper.msg", "mop.mop.cluster.rpc.alice", "mop.mop.cluster.rpc",
@@ -555,36 +500,31 @@ def check_caller_207():
             "mop.mop.node.hyper.rpc.anton%2Eermak": "anton.ermak",
             "mop.mop.cluster.rpc.anton%2Eermak": "anton.ermak",
             "mop.mop.node.hyper.rpc.a%2eb": None, "mop.mop.node.hyper.rpc.*": None}
-    if got != want:
-        out.append(f"busnames.caller -> {got}, wanted {want}")
+    c.expect("busnames.caller", got, want)
     # Логин -- любой, кроме пустого и управляющих символов: в LDAP/AD
     # anton.ermak -- норма (#208). В токен субъекта он кодируется обратимо.
     for bad in ("", None, "a\tb", "a\nb", "a\x00b", "a\x7fb"):
-        if busnames.valid_login(bad):
-            out.append(f"{bad!r} must not be a login")
+        c.check(f"{bad!r} must not be a login", not (busnames.valid_login(bad)))
     for fine in ("anton", "ivan_p-2", "anton.ermak", "a b", "a*", "a>", "a%b", "Антон"):
-        if not busnames.valid_login(fine):
-            out.append(f"{fine!r} must be a login")
+        c.check(f"{fine!r} must be a login", not (not busnames.valid_login(fine)))
     for login, token in (("anton", "anton"), ("anton.ermak", "anton%2Eermak"),
                          ("a b", "a%20b"), ("a*>", "a%2A%3E"), ("50%", "50%25"),
-                         ("Антон", "Антон"), ("a\u00a0b", "a%C2%A0b")):
-        got = busnames.login_token(login)
-        if got != token:
-            out.append(f"login_token({login!r}) -> {got!r}, wanted {token!r}")
-        if busnames.login_of(token) != login:
-            out.append(f"login_of({token!r}) -> {busnames.login_of(token)!r}, wanted {login!r}")
-        if any(c in token for c in ".*> ") or any(c.isspace() for c in token):
-            out.append(f"token {token!r} is not a single literal NATS token")
+                         ("Антон", "Антон"), ("a b", "a%C2%A0b")):
+        c.expect(f"login_token({login!r})", busnames.login_token(login), token)
+        c.expect(f"login_of({token!r})", busnames.login_of(token), login)
+        c.check(f"token {token!r} is a single literal NATS token",
+                not (any(ch in token for ch in ".*> ") or any(ch.isspace() for ch in token)))
     # Инъективно: «a.b» и буквальное «a%2Eb» -- разные токены.
-    if busnames.login_token("a.b") == busnames.login_token("a%2Eb"):
-        out.append("two logins must never share a token: a.b vs a%2Eb")
+    c.check("two logins must never share a token: a.b vs a%2Eb",
+            not (busnames.login_token("a.b") == busnames.login_token("a%2Eb")))
     # Неканоничный токен -- не логин: иначе один логин читался бы из двух.
     for token in ("a%2eb", "a%41", "a%", "a%zz", "*"):
-        if busnames.login_of(token) is not None:
-            out.append(f"login_of({token!r}) must be None: not a canonical token")
+        c.check(f"login_of({token!r}) must be None: not a canonical token",
+                not (busnames.login_of(token) is not None))
     subs = busnames.agent_subscriptions("hyper")
-    if "mop.*.node.hyper.rpc.*" not in subs["rpc"] or "mop.*.node.hyper.rpc" not in subs["rpc"]:
-        out.append(f"the agent must listen on both the login and the old rpc: {subs}")
+    c.check("the agent must listen on both the login and the old rpc",
+            not ("mop.*.node.hyper.rpc.*" not in subs["rpc"]
+                 or "mop.*.node.hyper.rpc" not in subs["rpc"]), subs)
 
     # Разбор в handle: глагол-заглушка отдаёт то, что видят ворота.
     seen = []
@@ -593,62 +533,50 @@ def check_caller_207():
         seen.append(lease.caller(req))
         return {"ok": True}
 
-    class Msg:
-        def __init__(self, subject, body):
-            self.subject, self.data = subject, json.dumps(body).encode()
-
-        async def respond(self, data):
-            pass
-
     async def mine(name):
         return "mop"
-    saved = (dict(agent.VERBS), agent.puppet_project)
-    try:
-        agent.VERBS["send"] = dataclasses.replace(agent.VERBS["send"], fn=probe)
-        agent.puppet_project = mine
-        body = {"verb": "send", "name": "pu-mop-1", "owner": "bob", "_caller": "bob"}
-        for subj, public, want in (
-                ("mop.mop.node.hyper.rpc.alice", False, ("alice", True)),
-                ("mop.mop.node.hyper.rpc", False, ("bob", False)),
-                ("mop.mop.node.hyper.msg", True, (None, False))):
-            seen.clear()
-            asyncio.run(agent.handle(None, Msg(subj, body), public))
-            if seen != [want]:
-                out.append(f"caller over {subj} with a forged body -> {seen}, wanted {want}")
-    finally:
-        agent.VERBS.clear()
-        agent.VERBS.update(saved[0])
-        agent.puppet_project = saved[1]
+    keep = dict(agent.VERBS)
+    with restored(agent, "puppet_project"):
+        try:
+            agent.VERBS["send"] = dataclasses.replace(agent.VERBS["send"], fn=probe)
+            agent.puppet_project = mine
+            body = {"verb": "send", "name": "pu-mop-1", "owner": "bob", "_caller": "bob"}
+            for subj, public, want in (
+                    ("mop.mop.node.hyper.rpc.alice", False, ("alice", True)),
+                    ("mop.mop.node.hyper.rpc", False, ("bob", False)),
+                    ("mop.mop.node.hyper.msg", True, (None, False))):
+                seen.clear()
+                asyncio.run(agent.handle(None, Msg(subj, body=body), public))
+                c.expect(f"caller over {subj} with a forged body", seen, [want])
+        finally:
+            agent.VERBS.clear()
+            agent.VERBS.update(keep)
 
     # Клиент: человек спрашивает по субъекту со своим логином, машина -- без.
-    keep = bus.login
-    try:
+    with restored(bus, "login"):
         bus.login = lambda: "alice"
-        if bus.subject("hyper", project="mop") != "mop.mop.node.hyper.rpc.alice":
-            out.append(f"a human's rpc subject must carry the login: {bus.subject('hyper', project='mop')}")
-        if bus.subject("hyper", "msg", project="mop") != "mop.mop.node.hyper.msg":
-            out.append("msg carries no login")
-        if bus.cluster_subject("mop") != "mop.mop.cluster.rpc.alice":
-            out.append(f"a human's cluster subject must carry the login: {bus.cluster_subject('mop')}")
+        c.expect("a human's rpc subject must carry the login",
+                 bus.subject("hyper", project="mop"), "mop.mop.node.hyper.rpc.alice")
+        c.check("msg carries no login",
+                not (bus.subject("hyper", "msg", project="mop") != "mop.mop.node.hyper.msg"))
+        c.expect("a human's cluster subject must carry the login",
+                 bus.cluster_subject("mop"), "mop.mop.cluster.rpc.alice")
         bus.login = lambda: "anton.ermak"
-        if bus.subject("hyper", project="mop") != "mop.mop.node.hyper.rpc.anton%2Eermak" \
-                or bus.cluster_subject("mop") != "mop.mop.cluster.rpc.anton%2Eermak":
-            out.append("a dotted login must travel encoded")
+        c.check("a dotted login must travel encoded",
+                not (bus.subject("hyper", project="mop") != "mop.mop.node.hyper.rpc.anton%2Eermak"
+                     or bus.cluster_subject("mop") != "mop.mop.cluster.rpc.anton%2Eermak"))
         bus.login = lambda: None
-        if bus.subject("hyper", project="mop") != "mop.mop.node.hyper.rpc" \
-                or bus.cluster_subject("mop") != "mop.mop.cluster.rpc":
-            out.append("a machine asks without a login token")
-    finally:
-        bus.login = keep
-    if busnames.without_caller("mop.mop.node.hyper.rpc.alice") != "mop.mop.node.hyper.rpc" \
-            or busnames.without_caller("mop.mop.cluster.rpc.alice") != "mop.mop.cluster.rpc" \
-            or busnames.without_caller("mop.mop.events") != "mop.mop.events":
-        out.append("without_caller must strip exactly the login token (the fallback to "
-                   "an agent from before #207)")
-    return out
+        c.check("a machine asks without a login token",
+                not (bus.subject("hyper", project="mop") != "mop.mop.node.hyper.rpc"
+                     or bus.cluster_subject("mop") != "mop.mop.cluster.rpc"))
+    c.check("without_caller must strip exactly the login token (the fallback to "
+            "an agent from before #207)",
+            not (busnames.without_caller("mop.mop.node.hyper.rpc.alice") != "mop.mop.node.hyper.rpc"
+                 or busnames.without_caller("mop.mop.cluster.rpc.alice") != "mop.mop.cluster.rpc"
+                 or busnames.without_caller("mop.mop.events") != "mop.mop.events"))
 
 
-def check_git_identity_167():
+def check_git_identity_167(c):
     """HYPOTHESIS (#167): в клоне папета нет user.name/user.email, и пул
     коммитит разовым `git -c`, который назвал мастер; оператор решил, что
     автор коммита -- человек, прошедший проверку на шине.
@@ -671,7 +599,6 @@ def check_git_identity_167():
     import tempfile
     from mop.common import lease
     from mop.common.domain import Owner
-    out = []
     profiles = {"olga": {"name": "Ольга Петрова", "email": "olga@example.dev"},
                 "petr": {"name": "Pyotr O'Neil", "email": "petr@example.dev"}}
     asked = []
@@ -689,12 +616,6 @@ def check_git_identity_167():
             return Reply({"login": req["login"], **profiles.get(req["login"], {})})
 
     root = tempfile.mkdtemp(prefix="mop-test-167-")
-    saved = (agent.bsh, agent.clone_facts, agent.clone_dir, agent.session_json,
-             agent._event, agent.puppet_project)
-
-    async def bsh(name, script, timeout=20):
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-        return r.stdout + r.stderr, r.returncode
 
     def clone():
         """Свежий клон: git init, без identity."""
@@ -738,8 +659,9 @@ def check_git_identity_167():
             req["force"] = True
         return asyncio.run(agent.v_send(Conn(), req))
 
-    try:
-        agent.bsh, agent.clone_facts, agent.session_json = bsh, facts, delivered
+    with restored(agent, "bsh", "clone_facts", "clone_dir", "session_json",
+                  "_event", "puppet_project"):
+        agent.bsh, agent.clone_facts, agent.session_json = bash, facts, delivered
         agent._event, agent.puppet_project = no_event, project
         agent.clone_dir = lambda name: state["clone"]
 
@@ -747,49 +669,51 @@ def check_git_identity_167():
         # сервер своего проекта его логином.
         state["clone"] = clone()
         got = send(caller="olga")
-        if ident() != profiles["olga"]:
-            out.append(f"verified owner: identity {ident()}, wanted {profiles['olga']}")
-        if asked != [("mop.mop.server.rpc", {"verb": "identity", "login": "olga"})]:
-            out.append(f"verified owner: asked {asked}, wanted the server's identity verb")
-        if "olga@example.dev" not in (got.get("owner_note") or ""):
-            out.append(f"verified owner: the reply must name the identity, got {got}")
+        c.expect("verified owner: identity", ident(), profiles["olga"])
+        c.expect("verified owner: the server's identity verb asked",
+                 asked, [("mop.mop.server.rpc", {"verb": "identity", "login": "olga"})])
+        c.check("verified owner: the reply must name the identity",
+                not ("olga@example.dev" not in (got.get("owner_note") or "")), got)
 
         # Названный телом (прежний субъект) -- identity не трогаем, сервер
         # не спрашиваем.
         state["clone"], asked[:] = clone(), []
         got = send(owner="bob")
-        if ident() or asked or got.get("error"):
-            out.append(f"self-declared: identity {ident()}, asked {asked}, reply {got}")
+        c.check("self-declared: identity untouched, server not asked",
+                not (ident() or asked or got.get("error")),
+                f"identity {ident()}, asked {asked}, reply {got}")
 
         # Профиля нет -- identity не ставится, заметка велит -c.
         state["clone"] = clone()
         got = send(caller="ivan")
         note = got.get("owner_note") or ""
-        if ident() or got.get("error") or "ivan" not in note or "git -c" not in note:
-            out.append(f"no profile: identity {ident()}, reply {got}")
+        c.check("no profile: no identity, the note says git -c",
+                not (ident() or got.get("error") or "ivan" not in note or "git -c" not in note),
+                f"identity {ident()}, reply {got}")
 
         # Сервер не ответил -- доставка не страдает, identity нет, заметка.
         state["clone"] = clone()
         got = send(caller="down")
-        if ident() or got.get("error") or "git -c" not in (got.get("owner_note") or ""):
-            out.append(f"server silent: identity {ident()}, reply {got}")
+        c.check("server silent: no identity, the note says git -c",
+                not (ident() or got.get("error") or "git -c" not in (got.get("owner_note") or "")),
+                f"identity {ident()}, reply {got}")
 
         # force: аренда olga (работа в клоне) переходит к petr -- и identity.
         state["clone"] = clone()
         send(caller="olga")
         got = send(caller="petr", force=True)
-        if ident() != profiles["petr"]:
-            out.append(f"force: identity {ident()}, wanted {profiles['petr']}; reply {got}")
+        c.check("force: identity moves to petr",
+                not (ident() != profiles["petr"]),
+                f"identity {ident()}, wanted {profiles['petr']}; reply {got}")
         # ...к ivan без профиля -- identity olga'и снята, не оставлена ему.
         send(caller="olga", force=True)
         got = send(caller="ivan", force=True)
-        if ident():
-            out.append(f"force to a login without a profile: the old identity stays {ident()}")
+        c.check("force to a login without a profile: the old identity is removed",
+                not (ident()), f"stays {ident()}")
         # Названный телом с force -- identity не трогает.
         send(caller="olga", force=True)
         send(owner="bob", force=True)
-        if ident() != profiles["olga"]:
-            out.append(f"self-declared force: identity must stay, got {ident()}")
+        c.expect("self-declared force: identity must stay", ident(), profiles["olga"])
 
         # Доставка не удалась -- аренда откатывается, identity прежняя.
         state["clone"] = clone()
@@ -797,12 +721,9 @@ def check_git_identity_167():
         state["fail"] = True
         got = send(caller="petr", force=True)
         state["fail"] = False
-        if not got.get("error") or ident() != profiles["olga"]:
-            out.append(f"failed delivery: identity {ident()}, reply {got}")
-    finally:
-        (agent.bsh, agent.clone_facts, agent.clone_dir, agent.session_json,
-         agent._event, agent.puppet_project) = saved
-    return out
+        c.check("failed delivery: identity stays",
+                not (not got.get("error") or ident() != profiles["olga"]),
+                f"identity {ident()}, reply {got}")
 
 
 # ── факт state: исход хода едет мастеру (#224) ───────────────────────────
@@ -815,17 +736,16 @@ def check_git_identity_167():
 # старой библиотекой читает только session. Старый session.py на узле (state
 # не отвечает) — откат на probe ровно как раньше, без ключа state.
 # STATUS: FIXED — see #224
-def check_state_fact_224():
+def check_state_fact_224(c):
     import asyncio
     import json
-    out = []
-    saved = (agent.bsh, agent.clone_facts, agent.tmux_alive)
     rec = {"status": "idle", "waitingFor": None, "alive": True, "listen": False,
            "turn": {"event": "StopFailure", "at": 1790245436,
                     "error": "authentication_failed", "detail": "Login expired"}}
     none = {"status": None, "waitingFor": None, "alive": False, "listen": False, "turn": None}
     calls = []
 
+    # Своя заглушка: отвечает по глаголу session.py, а не одним ответом.
     def fake(answers):
         async def bsh(name, script, timeout=20):
             verb = script.split()[2]
@@ -838,7 +758,7 @@ def check_state_fact_224():
 
     async def clone(name):
         return {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
-    try:
+    with restored(agent, "bsh", "clone_facts", "tmux_alive"):
         agent.clone_facts, agent.tmux_alive = clone, alive
         for what, answers, want_session, want_state, want_calls in (
                 ("new session.py", {"state": ("banner\n" + json.dumps(rec), 0)},
@@ -853,12 +773,10 @@ def check_state_fact_224():
             calls.clear()
             agent.bsh = fake(answers)
             got = asyncio.run(agent.facts("pu-mop-1"))
-            if got.get("session") != want_session or got.get("state") != want_state \
-                    or ("state" in got) != (want_state is not None) or calls != want_calls:
-                out.append(f"facts, {what} -> {got!r}, calls {calls}")
-    finally:
-        (agent.bsh, agent.clone_facts, agent.tmux_alive) = saved
-    return out
+            c.check(f"facts, {what}",
+                    not (got.get("session") != want_session or got.get("state") != want_state
+                         or ("state" in got) != (want_state is not None) or calls != want_calls),
+                    f"{got!r}, calls {calls}")
 
 
 # ── факты без экрана (#236) ──────────────────────────────────────────────
@@ -869,12 +787,10 @@ def check_state_fact_224():
 # SOLUTION: facts не снимает экран и не шлёт ключ screen; вердикт по тем же
 # фактам прежний. tail/slash/attach снимают пейн своими глаголами.
 # STATUS: FIXED — see #236
-def check_no_screen_fact_236():
+def check_no_screen_fact_236(c):
     import asyncio
     import json
     from mop.common.state import verdict
-    out = []
-    saved = (agent.bsh, agent.clone_facts)
     scripts = []
     rec = {"status": "idle", "waitingFor": None, "alive": True, "listen": True,
            "turn": {"event": "Stop", "at": 1790245436, "error": None, "detail": None}}
@@ -889,19 +805,17 @@ def check_no_screen_fact_236():
 
     async def clone(name):
         return {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
-    try:
+    with restored(agent, "bsh", "clone_facts"):
         agent.bsh, agent.clone_facts = bsh, clone
         got = asyncio.run(agent.facts("pu-mop-1"))
-        if "screen" in got:
-            out.append(f"facts must carry no screen key: {got!r}")
-        if any("capture-pane" in s for s in scripts):
-            out.append(f"facts must not capture the pane: {scripts!r}")
+        c.check("facts must carry no screen key", not ("screen" in got), repr(got))
+        c.check("facts must not capture the pane",
+                not (any("capture-pane" in s for s in scripts)), repr(scripts))
         with_screen = {**got, "screen": "Not logged in · Run /login"}
-        if str(verdict(got)) != "free (master)" or str(verdict(with_screen)) != str(verdict(got)):
-            out.append(f"verdict must not change: {verdict(got)} vs {verdict(with_screen)}")
-    finally:
-        agent.bsh, agent.clone_facts = saved
-    return out
+        c.check("verdict must not change",
+                not (str(verdict(got)) != "free (master)"
+                     or str(verdict(with_screen)) != str(verdict(got))),
+                f"{verdict(got)} vs {verdict(with_screen)}")
 
 
 # ── расход по логину в глаголе usage (#244) ───────────────────────────────
@@ -913,11 +827,9 @@ def check_no_screen_fact_236():
 # тогда весь расход папета за «-»: инвариант (сумма по логинам == usage)
 # держится, а приписать его некому.
 # STATUS: FIXED — see #244
-def check_usage_by_login_244():
+def check_usage_by_login_244(c):
     import asyncio
     import json
-    out = []
-    saved = (agent.bsh, agent.DRIVER, agent._mine)
     row = {"input": 1, "output": 2, "cache_write": 3, "cache_read": 4}
     new = {"usage": {"2026-09-24": row},
            "by_login": {"anton": {"2026-09-24": row}}}
@@ -941,39 +853,93 @@ def check_usage_by_login_244():
 
     async def yes(*a, **k):
         return True
-    try:
+    with restored(agent, "bsh", "DRIVER", "_mine"):
         agent.bsh, agent.DRIVER, agent._mine = bsh, Driver(), yes
         got = asyncio.run(agent.v_usage(None, {"days": 7}))
-    finally:
-        agent.bsh, agent.DRIVER, agent._mine = saved
     want_usage = {"pu-mop-1": {"2026-09-24": row}, "pu-mop-2": {"2026-09-24": row},
                   "pu-mop-3": {}}
     want_by = {"pu-mop-1": {"anton": {"2026-09-24": row}},
                "pu-mop-2": {"-": {"2026-09-24": row}}, "pu-mop-3": {}}
-    if got.get("usage") != want_usage:
-        out.append(f"usage must stay as it was: {got.get('usage')!r}")
-    if got.get("by_login") != want_by:
-        out.append(f"by_login: {got.get('by_login')!r}")
-    if not all(s.endswith(" 7 --by-login") for s in scripts):
-        out.append(f"usage.py must be asked --by-login: {scripts!r}")
-    return out
+    c.expect("usage must stay as it was", got.get("usage"), want_usage)
+    c.expect("by_login", got.get("by_login"), want_by)
+    c.check("usage.py must be asked --by-login",
+            not (not all(s.endswith(" 7 --by-login") for s in scripts)), repr(scripts))
+
+
+def check_owner_gate_267(c):
+    """HYPOTHESIS (#267): ворота владения агента (_gate) -- вторая копия
+    cluster.gate: свой вызов lease.may_touch, своя сборка отказа, своя
+    owner_note. SOLUTION: обе стороны -- lease.gate и lease.noted; агент
+    держит только своё: факты клона из тела и оператора по субъекту.
+    Проверка: по той же таблице, что tests/cluster.py, агент отвечает ровно
+    lease.gate. STATUS: FIXED — see #267"""
+    import asyncio
+    from mop.common import lease
+    gate = getattr(lease, "gate", None)
+    if not c.check("lease.gate exists (else the gate is written on each side)",
+                   not (gate is None)):
+        return
+    with restored(agent, "clone_facts"), restored(agent.time, "time"):
+        agent.time.time = lambda: GATE_NOW
+        for name, clone, caller, force in gate_table_267():
+            async def facts(_n, clone=clone):
+                return clone.to_dict()
+            agent.clone_facts = facts
+            for project, operator in (("mop", False), (busnames.ADMIN, True)):
+                req = {"name": name, "_project": project,
+                       **({"_caller": caller} if caller else {}),
+                       **({"force": True} if force else {})}
+                got = asyncio.run(agent._gate(name, req))
+                want = gate(name, clone, caller, GATE_NOW, force, operator)
+                c.expect(f"agent._gate {caller} over {clone.owner} (force {force}, "
+                         f"{project}) vs lease.gate", got, want)
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    src = open(os.path.join(root, "mop", "node", "agent.py")).read()
+    c.check("agent.py must gate through lease.gate and note through lease.noted",
+            not ("lease.may_touch(" in src or "lease.gate(" not in src
+                 or "lease.noted(" not in src))
+
+
+def check_junk_without_templates_276(c):
+    """HYPOTHESIS (#276): v_junk звал DRIVER.templates() у любого драйвера, и
+    host держал пустой глагол только ради этого вызова. SOLUTION: глагол
+    гипервизора берётся через driver.hypervisor_verb; драйвер без него
+    отвечает прежним [] -- ответ по шине тот же. STATUS: FIXED — see #276"""
+    import asyncio
+    import types
+
+    async def bodies():
+        return ["pu-mop-1"]
+
+    async def facts(_n):
+        return {}
+    bare = types.SimpleNamespace(bodies=bodies)
+    with restored(agent, "DRIVER", "clone_facts", "node_name"):
+        agent.DRIVER, agent.clone_facts = bare, facts
+        agent.node_name = lambda: "n1"
+        try:
+            got = asyncio.run(agent.v_junk(None, {}))
+        except AttributeError as e:
+            got = {"raised": str(e)}
+    c.expect("junk from a driver without templates: the old reply",
+             {k: got.get(k) for k in ("bodies", "work", "templates", "raised")},
+             {"bodies": ["pu-mop-1"], "work": {}, "templates": [], "raised": None})
 
 
 def main():
-    failed = []
+    c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
                   check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
                   check_gates_40, check_caller_207, check_git_identity_167,
                   check_state_fact_224, check_no_screen_fact_236,
-                  check_usage_by_login_244):
+                  check_usage_by_login_244, check_owner_gate_267,
+                  check_junk_without_templates_276):
         try:
-            failed += check()
+            check(c)
         except Exception as e:
-            failed.append(f"{check.__name__}: {type(e).__name__}: {e}")
-    print("\n".join(f"FAIL {l}" for l in failed) if failed else "", end="\n" if failed else "")
-    print("agent: FAILED" if failed else "agent: ok")
-    return 1 if failed else 0
+            c.fail(f"{check.__name__} raised", f"{type(e).__name__}: {e}")
+    return c.report("agent")
 
 
 if __name__ == "__main__":

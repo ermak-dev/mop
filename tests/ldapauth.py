@@ -26,6 +26,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import identity, ldapauth  # noqa: E402
@@ -96,17 +97,14 @@ def refused(call, *args):
     return None
 
 
-def check_authenticate():
-    out = []
+def check_authenticate(c):
     p = provider()
-    if not isinstance(p, identity.AuthProvider):
-        out.append("LdapProvider must satisfy AuthProvider")
-    got = p.authenticate("anton", "a-pw")
-    if got != Identity("anton", "admin", ("*",), "Антон Ермак", "anton@example.dev"):
-        out.append(f"admin group -> admin, displayName before cn, mail: {got}")
-    got = p.authenticate("ivan", "i-pw")
-    if got != Identity("ivan", "user", ("cloudpub", "rugent"), "Иван Петров", "ivan@example.dev"):
-        out.append(f"project groups -> user of those projects, cn as name: {got}")
+    c.check("LdapProvider must satisfy AuthProvider", isinstance(p, identity.AuthProvider))
+    c.expect("admin group -> admin, displayName before cn, mail", p.authenticate("anton", "a-pw"),
+             Identity("anton", "admin", ("*",), "Антон Ермак", "anton@example.dev"))
+    c.expect("project groups -> user of those projects, cn as name",
+             p.authenticate("ivan", "i-pw"),
+             Identity("ivan", "user", ("cloudpub", "rugent"), "Иван Петров", "ivan@example.dev"))
     for login, pw, why in (("ivan", "wrong", "wrong password"),
                            ("nobody", "x", "unknown login"),
                            # Пустой пароль в simple bind -- анонимный вход, и
@@ -116,139 +114,114 @@ def check_authenticate():
                            # Учётка каталога с именем роли шины -- не человек.
                            ("service", "s-pw", "role on the bus")):
         e = refused(p.authenticate, login, pw)
-        if e is None or why not in e:
-            out.append(f"{login}/{pw!r} must be refused with {why!r}, got {e!r}")
+        c.check(f"{login}/{pw!r} must be refused with {why!r}", not (e is None or why not in e),
+                f"got {e!r}")
     stub = Stub(dict(USERS), dict(GROUPS))
     ldapauth.LdapProvider(ldapauth.settings(SETTINGS), stub).authenticate("ivan", "i-pw")
-    if stub.checked != [udn("ivan")]:
-        out.append(f"the password is checked by a bind as the user's own DN: {stub.checked}")
+    c.expect("the password is checked by a bind as the user's own DN", stub.checked, [udn("ivan")])
     stub = Stub(dict(USERS), dict(GROUPS))
     refused(ldapauth.LdapProvider(ldapauth.settings(SETTINGS), stub).authenticate, "ivan", "")
-    if stub.checked:
-        out.append("an empty password must never reach the directory")
+    c.check("an empty password must never reach the directory", not (stub.checked))
     # Два пользователя на один логин -- отказ, а не первый попавшийся.
     twin = Stub({"ivan": USERS["ivan"]}, dict(GROUPS))
     twin.find_user = lambda login: [(udn("ivan"), {}), (f"uid=ivan,ou=other,{BASE}", {})]
     e = refused(ldapauth.LdapProvider(ldapauth.settings(SETTINGS), twin).authenticate, "ivan", "i-pw")
-    if e is None or "ambiguous" not in e:
-        out.append(f"two entries for one login must be refused: {e!r}")
+    c.check("two entries for one login must be refused", not (e is None or "ambiguous" not in e),
+            repr(e))
     # Логин с символами разбора (MOP_OPERATORS, субъекты) -- отказ до каталога.
     for bad in ("a:b", "a;b", "a,b", "*", "a b", ""):
-        if refused(p.authenticate, bad, "x") is None:
-            out.append(f"login {bad!r} must be refused")
-    return out
+        c.check(f"login {bad!r} must be refused", not (refused(p.authenticate, bad, "x") is None))
 
 
-def check_mapping():
-    out = []
+def check_mapping(c):
     # Атрибуты и шаблон групп настраиваются.
     p = provider(MOP_LDAP_NAME_ATTR="cn", MOP_LDAP_EMAIL_ATTR="mail",
                  MOP_LDAP_PROJECT_GROUP="pool-{project}-users", MOP_LDAP_ADMIN_GROUP="")
     stub = p.directory
     stub.groups[udn("ivan")] = [group("pool-mop-users"), group("mop-rugent")]
-    got = p.authenticate("ivan", "i-pw")
-    if got != Identity("ivan", "user", ("mop",), "Иван Петров", "ivan@example.dev"):
-        out.append(f"project pattern pool-{{project}}-users: {got}")
+    c.expect("project pattern pool-{project}-users", p.authenticate("ivan", "i-pw"),
+             Identity("ivan", "user", ("mop",), "Иван Петров", "ivan@example.dev"))
     # Без группы admin в настройках admin не бывает никто.
     stub.groups[udn("anton")] = [group("mop-admins")]
-    if refused(p.authenticate, "anton", "a-pw") is None:
-        out.append("without MOP_LDAP_ADMIN_GROUP nobody is admin, and no project is no access")
-    return out
+    c.check("without MOP_LDAP_ADMIN_GROUP nobody is admin, and no project is no access",
+            not (refused(p.authenticate, "anton", "a-pw") is None))
 
 
-def check_lookup():
-    out = []
+def check_lookup(c):
     p = provider()
-    if p.lookup("ivan") != Identity("ivan", "user", ("cloudpub", "rugent"),
-                                    "Иван Петров", "ivan@example.dev"):
-        out.append(f"lookup -> {p.lookup('ivan')}")
-    if p.lookup("nobody") is not None:
-        out.append("lookup of an unknown login -> None")
-    if p.lookup("olga") is not None:
-        out.append("lookup of a user with no access -> None: not an operator")
-    if p.directory.checked:
-        out.append("lookup must not bind as the user")
-    return out
+    c.expect("lookup", p.lookup("ivan"), Identity("ivan", "user", ("cloudpub", "rugent"),
+                                                  "Иван Петров", "ivan@example.dev"))
+    c.check("lookup of an unknown login -> None", not (p.lookup("nobody") is not None))
+    c.check("lookup of a user with no access -> None: not an operator",
+            not (p.lookup("olga") is not None))
+    c.check("lookup must not bind as the user", not (p.directory.checked))
 
 
-def check_settings():
+def check_settings(c):
     """Неполные настройки -- громкий отказ с именами; TLS обязателен."""
-    out = []
     try:
         ldapauth.settings({"MOP_AUTH_PROVIDER": "ldap"})
-        out.append("empty ldap settings must be refused")
+        c.fail("empty ldap settings must be refused")
     except ValueError as e:
         for name in ("MOP_LDAP_URL", "MOP_LDAP_BIND_DN", "MOP_LDAP_BIND_PASSWORD", "MOP_LDAP_BASE"):
-            if name not in str(e):
-                out.append(f"the refusal must name {name}: {e}")
+            c.check(f"the refusal must name {name}", not (name not in str(e)), e)
     for over, why in (({"MOP_LDAP_URL": "ldap://ldap.example.dev"}, "in clear"),
                       ({"MOP_LDAP_URL": "http://ldap.example.dev"}, "ldaps://"),
                       ({"MOP_LDAP_PROJECT_GROUP": "mop-users"}, "{project}"),
                       ({"MOP_LDAP_GROUP_FILTER": "(member=x)"}, "{dn}")):
         try:
             ldapauth.settings({**SETTINGS, **over})
-            out.append(f"{over} must be refused")
+            c.fail(f"{over} must be refused")
         except ValueError as e:
-            if why not in str(e):
-                out.append(f"{over}: the refusal must say {why!r}: {e}")
+            c.check(f"{over}: the refusal must say {why!r}", not (why not in str(e)), e)
     cfg = ldapauth.settings({**SETTINGS, "MOP_LDAP_URL": "ldap://ldap.example.dev",
                              "MOP_LDAP_STARTTLS": "yes"})
-    if not cfg.starttls:
-        out.append("ldap:// with StartTLS is accepted")
+    c.check("ldap:// with StartTLS is accepted", not (not cfg.starttls))
     cfg = ldapauth.settings(SETTINGS)
-    if (cfg.login_attr, cfg.name_attrs, cfg.email_attr, cfg.group_base) != \
-            ("uid", ("displayName", "cn"), "mail", BASE):
-        out.append(f"defaults: uid, displayName then cn, mail, groups under the base: {cfg}")
+    c.expect("defaults: uid, displayName then cn, mail, groups under the base",
+             (cfg.login_attr, cfg.name_attrs, cfg.email_attr, cfg.group_base),
+             ("uid", ("displayName", "cn"), "mail", BASE))
     # Пароль служебной учётки -- секрет .env: плейбукам он не едет.
     from mop.common import config
     from mop.server import playvars
-    if "MOP_LDAP_BIND_PASSWORD" in config.SETTINGS:
-        out.append("MOP_LDAP_BIND_PASSWORD must not be a setting: settings ride to the playbooks")
-    if "MOP_LDAP_BIND_PASSWORD" not in identity.SETTINGS:
-        out.append("the provider must be built with the LDAP password too")
-    if "MOP_LDAP_BIND_PASSWORD" in playvars.playbook_vars():
-        out.append("the LDAP password must not reach --extra-vars")
-    return out
+    c.check("MOP_LDAP_BIND_PASSWORD must not be a setting: settings ride to the playbooks",
+            not ("MOP_LDAP_BIND_PASSWORD" in config.SETTINGS))
+    c.check("the provider must be built with the LDAP password too",
+            not ("MOP_LDAP_BIND_PASSWORD" not in identity.SETTINGS))
+    c.check("the LDAP password must not reach --extra-vars",
+            not ("MOP_LDAP_BIND_PASSWORD" in playvars.playbook_vars()))
 
 
-def check_choice():
-    out = []
+def check_choice(c):
     p = identity.provider(SETTINGS)
-    if not isinstance(p, ldapauth.LdapProvider):
-        out.append(f"MOP_AUTH_PROVIDER=ldap must give LdapProvider: {p}")
+    c.check("MOP_AUTH_PROVIDER=ldap must give LdapProvider",
+            not (not isinstance(p, ldapauth.LdapProvider)), p)
     from mop.cli.server import deploy
     got = deploy.operator_refusals({"MOP_AUTH_PROVIDER": "ldap"})
-    if len(got) != 1 or "MOP_LDAP_URL" not in got[0]:
-        out.append(f"deploy must refuse incomplete LDAP settings: {got}")
-    if deploy.operator_refusals(SETTINGS):
-        out.append(f"complete LDAP settings must not stop deploy: {deploy.operator_refusals(SETTINGS)}")
+    c.check("deploy must refuse incomplete LDAP settings",
+            not (len(got) != 1 or "MOP_LDAP_URL" not in got[0]), got)
+    c.check("complete LDAP settings must not stop deploy",
+            not (deploy.operator_refusals(SETTINGS)), deploy.operator_refusals(SETTINGS))
     from mop.common import deps
-    if "ldap3" not in deps.PIP:
-        out.append("ldap3 must be in MOP_PIP_DEPS")
-    return out
+    c.check("ldap3 must be in MOP_PIP_DEPS", not ("ldap3" not in deps.PIP))
 
 
-def check_filters():
+def check_filters(c):
     """Фильтры строятся с экранированием (RFC 4515): логин -- не фильтр."""
-    out = []
-    got = ldapauth.user_filter("uid", "a*)(uid=b")
-    if got != "(uid=a\\2a\\29\\28uid=b)":
-        out.append(f"user filter must escape: {got}")
+    c.expect("user filter must escape", ldapauth.user_filter("uid", "a*)(uid=b"),
+             "(uid=a\\2a\\29\\28uid=b)")
     got = ldapauth.group_filter("(|(member={dn})(memberUid={login}))", "uid=x\\,y,dc=z", "x")
-    if got != "(|(member=uid=x\\5c,y,dc=z)(memberUid=x))":
-        out.append(f"group filter must escape: {got}")
-    return out
+    c.expect("group filter must escape", got, "(|(member=uid=x\\5c,y,dc=z)(memberUid=x))")
 
 
-def check_ldap3():
+def check_ldap3(c):
     """Переходник на ldap3 -- на MOCK_SYNC: поиск, группы, bind."""
     try:
         import ldap3
     except ImportError:
         hermetic.skip("the ldap3 adapter", "no ldap3 on this machine -- "
                       "only the provider over a stub directory is checked")
-        return []
-    out = []
+        return
     server = ldap3.Server("mock")
     cfg = ldapauth.settings(SETTINGS)
     d = ldapauth.Ldap3Directory(cfg, server=server, strategy=ldap3.MOCK_SYNC)
@@ -265,23 +238,19 @@ def check_ldap3():
                                                "memberUid": "ivan"})
     add(ADMINS, {"objectClass": "groupOfNames", "cn": "mop-admins", "member": [udn("anton")]})
     p = ldapauth.LdapProvider(cfg, d)
-    got = p.authenticate("ivan", "i-pw")
-    if got != Identity("ivan", "user", ("cloudpub", "rugent"), "Иван Петров", "ivan@example.dev"):
-        out.append(f"ldap3: ivan -> {got}")
-    if p.authenticate("anton", "a-pw") != Identity("anton", "admin", ("*",), "Антон Ермак"):
-        out.append(f"ldap3: anton -> {p.lookup('anton')}")
+    c.expect("ldap3: ivan", p.authenticate("ivan", "i-pw"),
+             Identity("ivan", "user", ("cloudpub", "rugent"), "Иван Петров", "ivan@example.dev"))
+    c.expect("ldap3: anton", p.authenticate("anton", "a-pw"),
+             Identity("anton", "admin", ("*",), "Антон Ермак"))
     for login, pw in (("ivan", "wrong"), ("nobody", "x")):
-        if refused(p.authenticate, login, pw) is None:
-            out.append(f"ldap3: {login}/{pw} must be refused")
-    if p.lookup("ivan") is None or p.lookup("nobody") is not None:
-        out.append("ldap3: lookup")
+        c.check(f"ldap3: {login}/{pw} must be refused",
+                not (refused(p.authenticate, login, pw) is None))
+    c.check("ldap3: lookup", not (p.lookup("ivan") is None or p.lookup("nobody") is not None))
     # Служебная учётка с чужим паролем -- отказ с причиной, не «нет логина».
     bad = ldapauth.LdapProvider(cfg, ldapauth.Ldap3Directory(
         dataclasses.replace(cfg, bind_password="no"), server=server, strategy=ldap3.MOCK_SYNC))
     e = refused(bad.authenticate, "ivan", "i-pw")
-    if e is None or "service" not in e:
-        out.append(f"a broken service bind must say so: {e!r}")
-    return out
+    c.check("a broken service bind must say so", not (e is None or "service" not in e), repr(e))
 
 
 # HYPOTHESIS (#214): с MOP_AUTH_PROVIDER=ldap и callout сервис на сервере
@@ -294,67 +263,61 @@ def check_ldap3():
 # берёт его оттуда, когда окружение его не несёт. На контроллере источник --
 # по-прежнему config.get.
 # STATUS: FIXED — see #214
-def check_service_settings_214():
+def check_service_settings_214(c):
     import tempfile
     from mop.common import config
-    out = []
     fn = getattr(identity, "service_settings", None)
-    if fn is None:
-        return ["identity.service_settings is missing"]
+    if not c.check("identity.service_settings exists", fn is not None):
+        return
     unit = {k: v for k, v in SETTINGS.items() if k != "MOP_LDAP_BIND_PASSWORD"}
     root = tempfile.mkdtemp(prefix="mop-test-ldap-")
     path = os.path.join(root, identity.BIND_PASSWORD_FILE)
     try:
         fn(unit.get, root)
-        out.append("ldap without the bind password file must be refused")
+        c.fail("ldap without the bind password file must be refused")
     except ValueError as e:
-        if path not in str(e):
-            out.append(f"the refusal must name the file {path}: {e}")
+        c.check(f"the refusal must name the file {path}", not (path not in str(e)), e)
     with open(path, "w") as f:
         f.write("svc-pw\n")
     got = fn(unit.get, root)
-    if ldapauth.settings(got).bind_password != "svc-pw":
-        out.append(f"the provider must take the bind password from the file: {got}")
-    if not isinstance(identity.provider(got, root), ldapauth.LdapProvider):
-        out.append("the service must build an LdapProvider from the unit env and the file")
+    c.check("the provider must take the bind password from the file",
+            not (ldapauth.settings(got).bind_password != "svc-pw"), got)
+    c.check("the service must build an LdapProvider from the unit env and the file",
+            not (not isinstance(identity.provider(got, root), ldapauth.LdapProvider)))
     on_controller = dict(SETTINGS, MOP_LDAP_BIND_PASSWORD="from-env")
-    if fn(on_controller.get, root)["MOP_LDAP_BIND_PASSWORD"] != "from-env":
-        out.append("where config.get has the password (the controller), it wins over the file")
+    c.expect("where config.get has the password (the controller), it wins over the file",
+             fn(on_controller.get, root)["MOP_LDAP_BIND_PASSWORD"], "from-env")
     plain = {"MOP_AUTH_PROVIDER": "file", "MOP_OPERATORS_FILE": "/srv/operators"}
     try:
         got = fn(plain.get, tempfile.mkdtemp())
-        if got.get("MOP_OPERATORS_FILE") != "/srv/operators":
-            out.append(f"the file provider's settings must pass through: {got}")
+        c.check("the file provider's settings must pass through",
+                not (got.get("MOP_OPERATORS_FILE") != "/srv/operators"), got)
     except ValueError as e:
-        out.append(f"the file provider needs no LDAP password file: {e}")
+        c.fail("the file provider needs no LDAP password file", e)
     # Один список несекретных настроек личности на оба сервиса сервера.
     scoped = getattr(config, "IDENTITY_SCOPED", ())
     # MOP_OPERATORS ушёл (#219): людей даёт только провайдер.
     want = {"MOP_AUTH_PROVIDER"} | (set(ldapauth.NAMES) - {"MOP_LDAP_BIND_PASSWORD"})
-    if set(scoped) != want:
-        out.append(f"config.IDENTITY_SCOPED must be the provider's non-secret settings: "
-                   f"{sorted(set(scoped) ^ want)} differ")
+    c.check("config.IDENTITY_SCOPED must be the provider's non-secret settings",
+            not (set(scoped) != want), f"{sorted(set(scoped) ^ want)} differ")
     for unit_name in ("mop-callout", "mop-bootstrap"):
         missing = set(scoped) - set(config.SERVER_SCOPED.get(unit_name, ()))
-        if not scoped or missing:
-            out.append(f"{unit_name} must get every identity setting: missing {sorted(missing)}")
+        c.check(f"{unit_name} must get every identity setting", not (not scoped or missing),
+                f"missing {sorted(missing)}")
     for unit_name, names in config.SERVER_SCOPED.items():
-        if "MOP_LDAP_BIND_PASSWORD" in names:
-            out.append(f"{unit_name}: the LDAP password must never be in a unit's env")
+        c.check(f"{unit_name}: the LDAP password must never be in a unit's env",
+                not ("MOP_LDAP_BIND_PASSWORD" in names))
     # Как пароль едет прогону: окружением процесса ansible, не аргументом,
     # и только когда провайдер -- ldap.
     from mop.cli import lib
     from mop.cli.server import _play
     penv = getattr(_play, "play_env", None)
-    if penv is None:
-        out.append("_play.play_env is missing")
-    else:
-        if penv(SETTINGS.get).get("MOP_LDAP_BIND_PASSWORD") != "svc-pw":
-            out.append("with ldap, the play's env must carry the bind password")
-        if "MOP_LDAP_BIND_PASSWORD" in penv({"MOP_AUTH_PROVIDER": "file",
-                                             "MOP_LDAP_BIND_PASSWORD": "x"}.get):
-            out.append("without ldap, the bind password must not reach the play at all")
-    return out
+    if c.check("_play.play_env exists", not (penv is None)):
+        c.expect("with ldap, the play's env must carry the bind password",
+                 penv(SETTINGS.get).get("MOP_LDAP_BIND_PASSWORD"), "svc-pw")
+        c.check("without ldap, the bind password must not reach the play at all",
+                not ("MOP_LDAP_BIND_PASSWORD" in penv({"MOP_AUTH_PROVIDER": "file",
+                                                       "MOP_LDAP_BIND_PASSWORD": "x"}.get)))
 
 
 # ── #220: AD -- группа доступа ко всем проектам и вложенные группы ────────
@@ -392,8 +355,7 @@ class AdStub(Stub):
         return list(self.projects)
 
 
-def check_ad_groups_220():
-    out = []
+def check_ad_groups_220(c):
     # Прямое членство (дефолт): группа доступа -- все проекты; с admin --
     # admin; с проектными -- всё равно все.
     p = provider(MOP_LDAP_ACCESS_GROUP=ACCESS)
@@ -404,11 +366,10 @@ def check_ad_groups_220():
                             ("ivan", "i-pw", ("user", ("*",))),
                             ("anton", "a-pw", ("admin", ("*",)))):
         got = p.authenticate(login, pw)
-        if (got.role, got.projects) != want:
-            out.append(f"direct: {login} -> {got.role} {got.projects}, wanted {want}")
+        c.expect(f"direct: {login}", (got.role, got.projects), want)
     # Без группы доступа в настройках -- как в #208: olga без доступа.
-    if refused(provider().authenticate, "olga", "o-pw") is None:
-        out.append("without MOP_LDAP_ACCESS_GROUP, staff alone is still no access")
+    c.check("without MOP_LDAP_ACCESS_GROUP, staff alone is still no access",
+            not (refused(provider().authenticate, "olga", "o-pw") is None))
 
     # Вложенность AD: членство спрашивается in-chain, прямой список не читается.
     ad = {**SETTINGS, "MOP_LDAP_NESTED": "ad", "MOP_LDAP_ACCESS_GROUP": ACCESS,
@@ -425,43 +386,37 @@ def check_ad_groups_220():
                             ("petr", "p-pw", ("user", ("rugent",)))):
         try:
             got = pa.authenticate(login, pw)
-            if (got.role, got.projects) != want:
-                out.append(f"ad: {login} -> {got.role} {got.projects}, wanted {want}")
+            c.expect(f"ad: {login}", (got.role, got.projects), want)
         except Exception as e:  # noqa: BLE001
-            out.append(f"ad: {login} -> {type(e).__name__}: {e}")
+            c.fail(f"ad: {login}", f"{type(e).__name__}: {e}")
     e = refused(pa.authenticate, "olga", "o-pw")
-    if e is None or "no access" not in e:
-        out.append(f"ad: in no group is no access, got {e!r}")
-    if pa.lookup("ivan") is None or pa.lookup("olga") is not None:
-        out.append("ad: lookup follows the same membership")
+    c.check("ad: in no group is no access", not (e is None or "no access" not in e), f"got {e!r}")
+    c.check("ad: lookup follows the same membership",
+            not (pa.lookup("ivan") is None or pa.lookup("olga") is not None))
     # admin решает первым: при admin группу доступа не спрашиваем.
     stub.asked.clear()
     pa.authenticate("anton", "a-pw")
-    if stub.asked != [AD_ADMINS]:
-        out.append(f"ad: admin first, nothing after it: asked {stub.asked}")
+    c.expect("ad: admin first, nothing after it: asked", stub.asked, [AD_ADMINS])
 
     # Настройки: неизвестный режим вложенности -- отказ с именем значения.
     try:
         ldapauth.settings({**SETTINGS, "MOP_LDAP_NESTED": "deep"})
-        out.append("MOP_LDAP_NESTED=deep must be refused")
+        c.fail("MOP_LDAP_NESTED=deep must be refused")
     except ValueError as e:
-        if "deep" not in str(e) or "ad" not in str(e):
-            out.append(f"the refusal must name the value and the choice: {e}")
+        c.check("the refusal must name the value and the choice",
+                not ("deep" not in str(e) or "ad" not in str(e)), e)
     cfg = ldapauth.settings(SETTINGS)
-    if (cfg.access_group, cfg.nested) != ("", ""):
-        out.append(f"defaults: no access group, direct membership: {cfg}")
+    c.expect("defaults: no access group, direct membership", (cfg.access_group, cfg.nested),
+             ("", ""))
 
     # Фильтры: in-chain по записи пользователя, DN и логин экранированы.
     got = ldapauth.in_chain_filter("sAMAccountName", "a*b", "CN=mop (all),OU=G,DC=x")
     want = "(&(sAMAccountName=a\\2ab)(memberOf:1.2.840.113556.1.4.1941:=CN=mop \\28all\\29,OU=G,DC=x))"
-    if got != want:
-        out.append(f"in_chain_filter -> {got}, wanted {want}")
+    c.expect("in_chain_filter", got, want)
     for pattern, want in (("mop-{project}", "(&(objectClass=group)(cn=mop-*))"),
                           ("pool-{project}-users", "(&(objectClass=group)(cn=pool-*-users))"),
                           ("a*{project}", "(&(objectClass=group)(cn=a\\2a*))")):
-        if ldapauth.project_groups_filter(pattern) != want:
-            out.append(f"project_groups_filter({pattern}) -> "
-                       f"{ldapauth.project_groups_filter(pattern)}, wanted {want}")
+        c.expect(f"project_groups_filter({pattern})", ldapauth.project_groups_filter(pattern), want)
 
     # Переходник: какие поиски он шлёт (mock правило in-chain не исполняет).
     acfg = ldapauth.settings({**ad, "MOP_LDAP_GROUP_BASE": f"OU=G,{BASE}"})
@@ -469,45 +424,37 @@ def check_ad_groups_220():
     sent = []
     d._search = lambda base, filt, attrs: sent.append((base, filt)) or (
         [("CN=x", {})] if "Pool Users" in filt else [])
-    if d.member_of("ivan", ACCESS) is not True or d.member_of("ivan", AD_ADMINS) is not False:
-        out.append("adapter member_of: an entry found is membership, none is not")
-    if sent[0] != (BASE, ldapauth.in_chain_filter("sAMAccountName", "ivan", ACCESS)):
-        out.append(f"adapter member_of searches the user under the base: {sent[0]}")
+    c.check("adapter member_of: an entry found is membership, none is not",
+            not (d.member_of("ivan", ACCESS) is not True
+                 or d.member_of("ivan", AD_ADMINS) is not False))
+    c.expect("adapter member_of searches the user under the base", sent[0],
+             (BASE, ldapauth.in_chain_filter("sAMAccountName", "ivan", ACCESS)))
     sent.clear()
     d.project_groups()
-    if sent != [(f"OU=G,{BASE}", "(&(objectClass=group)(cn=mop-*))")]:
-        out.append(f"adapter project_groups searches the group base: {sent}")
-    return out
+    c.expect("adapter project_groups searches the group base", sent,
+             [(f"OU=G,{BASE}", "(&(objectClass=group)(cn=mop-*))")])
 
 
-def check_knows_232():
+def check_knows_232(c):
     """Звено цепочки (#232): знает логин -- в каталоге есть его запись, даже
     без доступа (иначе одноимённая учётка ниже стала бы вторым паролем).
     STATUS: FIXED — see #232"""
-    out = []
     p = provider()
     for login, want in (("anton", True), ("olga", True), ("nobody", False), ("a*", False)):
-        if p.knows(login) is not want:
-            out.append(f"knows({login!r}) must be {want}")
-    if p.directory.checked:
-        out.append(f"knows must never bind as the user: {p.directory.checked}")
-    return out
+        c.check(f"knows({login!r}) must be {want}", not (p.knows(login) is not want))
+    c.check("knows must never bind as the user", not (p.directory.checked), p.directory.checked)
 
 
 def main():
-    failed = []
-    for check in (check_authenticate, check_mapping, check_lookup, check_settings,
-                  check_choice, check_filters, check_ldap3, check_service_settings_214,
-                  check_ad_groups_220, check_knows_232):
+    c = Checks()
+    for fn in (check_authenticate, check_mapping, check_lookup, check_settings,
+               check_choice, check_filters, check_ldap3, check_service_settings_214,
+               check_ad_groups_220, check_knows_232):
         try:
-            lines = check()
+            fn(c)
         except Exception as e:  # noqa: BLE001 -- падение проверки -- тоже провал
-            lines = [f"raised {type(e).__name__}: {e}"]
-        failed += [f"FAIL {check.__name__}: {l}" for l in lines]
-    if failed:
-        print("\n".join(failed))
-    print("ldapauth: FAILED" if failed else "ldapauth: ok")
-    return 1 if failed else 0
+            c.fail(fn.__name__, f"raised {type(e).__name__}: {e}")
+    return c.report("ldapauth")
 
 
 if __name__ == "__main__":

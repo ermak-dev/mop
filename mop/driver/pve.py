@@ -37,7 +37,8 @@ import time
 import shlex
 
 from ..common import config
-from . import HOME, PREFIX, SERVER_PUB, bad_name, sh, project_of_name, valid_name, why
+from ..common.domain import Body, Gone
+from . import HOME, PREFIX, SERVER_PUB, Tmux, bad_name, sh, project_of_name, valid_name, why
 
 USER = config.get("MOP_USER")
 # Тело — вещь сама по себе: у него свой $HOME, свои процессы и свой ssh.
@@ -250,11 +251,6 @@ def routes_of(subnet, base):
     return [str(n) for n in ipaddress.summarize_address_range(first, last)]
 
 
-def routes():
-    """То же для этого узла."""
-    return routes_of(SUBNET, _BASE)
-
-
 def facts(base, project=None, listing=""):
     """Всё, что плейбукам нужно знать о драйвере pve на гипервизоре с этой
     базой VMID. -> dict; `mop server pve-facts` печатает его JSON'ом (#158).
@@ -359,7 +355,7 @@ def attach_argv(name):
     дальше это — второй ssh, уже внутрь тела: на гипервизоре tmux-сервера
     папета нет вовсе."""
     return ["ssh", "-t", *_SSH_OPTS, f"{USER}@{address_of(name)}",
-            "tmux", "-L", name, "attach", "-t", name]
+            *Tmux(name).attach_argv()]
 
 
 def projects_dir(name):
@@ -378,7 +374,11 @@ def _pve_cmd(verb, *args):
     return " ".join(shlex.quote(str(x)) for x in (*SUDO, verb, *args))
 
 
-async def _pve(verb, *args, timeout=600):
+# Глагол обёртки по умолчанию -- клон и прочее тяжёлое (#268).
+PVE_TIMEOUT = 600
+
+
+async def _pve(verb, *args, timeout=PVE_TIMEOUT):
     """Тот же глагол, исполненный. -> (вывод, код)."""
     return await sh(_pve_cmd(verb, *args), timeout)
 
@@ -391,12 +391,16 @@ async def _forget_host_key(name):
              f"-f {shlex.quote(KNOWN_HOSTS)} >/dev/null 2>&1 || true")
 
 
+# Опрос обёртки (list, capacity): быстрый. Одно число на вызов и на его why (#268).
+LIST_TIMEOUT = 60
+
+
 async def bodies():
     """Тела, стоящие на этом гипервизоре: [имя]. Ростер без Nomad.
 
     Каталог /tmp/tmux-<uid> на гипервизоре пуст — tmux-сервера папетов живут в
     телах, — поэтому перечисляет контейнеры сам гипервизор."""
-    out, code = await _pve("list", timeout=60)
+    out, code = await _pve("list", timeout=LIST_TIMEOUT)
     if code not in (0, None):
         return []
     return sorted(n for _, n, _ in parse_list(out) if valid_name(n))
@@ -411,7 +415,7 @@ async def templates():
     тело с именем шаблона — это либо сборка прямо сейчас, либо сборка,
     которую оборвали. Различить их отсюда нечем, поэтому глагол только
     перечисляет; решает тот, кто знает, идёт ли сборка."""
-    out, code = await _pve("list", timeout=60)
+    out, code = await _pve("list", timeout=LIST_TIMEOUT)
     if code not in (0, None):
         return []
     found = [{"name": n, "vmid": str(v), "running": st == "running"}
@@ -425,7 +429,7 @@ async def capacity():
     `df $HOME` здесь не значит ничего: тела лежат не в домашнем каталоге, а на
     томе хранилища, и подменить одно другим значит дать `mop gc` число, к делу
     не относящееся."""
-    out, code = await _pve("capacity", STORAGE, timeout=60)
+    out, code = await _pve("capacity", STORAGE, timeout=LIST_TIMEOUT)
     if code not in (0, None) or not out.strip():
         return {"error": f"mop-pve capacity: {why(out, code)}"}
     try:
@@ -443,7 +447,7 @@ async def _hostname(vmid):
 
     Таймаут -- «не знаю», а не «нет» (#171): по этому ответу ensure решает,
     клонировать ли, и пустота на таймауте вела к клону поверх занятого vmid."""
-    out, code = await _pve("list", timeout=60)
+    out, code = await _pve("list", timeout=LIST_TIMEOUT)
     if code is None:
         return None
     if code != 0:
@@ -488,7 +492,7 @@ async def _clone_refusal(name, project, src, out, code):
     """Причина отказа клона. Совет собрать образ -- только когда образа
     действительно нет: иначе он шлёт оператора пересобирать исправный образ
     (#195)."""
-    reason = why(out, code, 600)
+    reason = why(out, code, PVE_TIMEOUT)
     if code is not None and clone_locked(out):
         return (f"no body for {name}: template {src} stayed locked for "
                 f"{sum(CLONE_PAUSES)}s: {reason}; if no clone or build is "
@@ -497,6 +501,12 @@ async def _clone_refusal(name, project, src, out, code):
         return (f"no body for {name}: {reason}; "
                 f"build the project's image: mop driver build {project}")
     return f"no body for {name}: {reason}"
+
+
+# Подъём тела (#268): адрес, память, старт.
+NET_TIMEOUT = 60
+MEMORY_TIMEOUT = 60
+START_TIMEOUT = 120
 
 
 async def ensure(name, params=None):
@@ -522,7 +532,7 @@ async def ensure(name, params=None):
 
     standing = await _hostname(vmid)
     if standing is None:
-        return {"error": f"{name}: mop-pve list: {why('', None, 60)}; "
+        return {"error": f"{name}: mop-pve list: {why('', None, LIST_TIMEOUT)}; "
                          f"not cloning over a body that may stand"}
     if standing and standing != name:
         # Столкновение хешей либо чужой жилец в нашем диапазоне. Громко:
@@ -546,10 +556,10 @@ async def ensure(name, params=None):
         # разницу, так что здоровому телу это не стоит ни переподключения
         # интерфейса, ни секунды.
         out, code = await _pve("net", vmid, cidr_of(name), GATEWAY, BRIDGE,
-                               timeout=60)
+                               timeout=NET_TIMEOUT)
         if code != 0:
             return {"error": f"{name}: body {vmid} won't take its address "
-                             f"{address_of(name)}: {why(out, code, 60)}"}
+                             f"{address_of(name)}: {why(out, code, NET_TIMEOUT)}"}
         if out.strip():
             await _forget_host_key(name)
 
@@ -558,15 +568,15 @@ async def ensure(name, params=None):
         # подъёме и до start. Образ несёт память времён сборки, а стоящее
         # тело -- времён своего клона; ни то ни другое не знает о сегодняшнем
         # `.mop`. Ядра и диск остаются образу.
-        out, code = await _pve("memory", vmid, mem, timeout=60)
+        out, code = await _pve("memory", vmid, mem, timeout=MEMORY_TIMEOUT)
         if code != 0:
             return {"error": f"{name}: body {vmid} won't take {mem} MB of "
-                             f"memory: {why(out, code, 60)}"}
+                             f"memory: {why(out, code, MEMORY_TIMEOUT)}"}
 
-    out, code = await _pve("start", vmid, timeout=120)
+    out, code = await _pve("start", vmid, timeout=START_TIMEOUT)
     if code != 0:
         return {"error": f"{name}: body {vmid} won't start: "
-                         f"{why(out, code, 120)}"}
+                         f"{why(out, code, START_TIMEOUT)}"}
 
     r = await _sync_package(name, vmid)
     if r.get("error"):
@@ -574,13 +584,16 @@ async def ensure(name, params=None):
     r = await _seed(name, vmid)
     if r.get("error"):
         return r
-    return {"name": name, "body": vmid, "created": created,
-            "address": address_of(name)}
+    return Body(name, vmid, address_of(name), created).to_dict()
 
 
 # Где на узле лежит пакет mop, который надо продублировать в тело: каталог
 # проекта, от самого себя. Тот же, что привозит на узел `mop server deploy`.
 PACKAGE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# Пакет mop в тело: и перелив, и распаковка (#268).
+PACKAGE_TIMEOUT = 300
 
 
 async def _sync_package(name, vmid):
@@ -599,10 +612,10 @@ async def _sync_package(name, vmid):
     tar = (f"tar czf - -C {shlex.quote(PACKAGE)} "
            f"--exclude=.git --exclude=__pycache__ --exclude=.env "
            f"--exclude=inventory.ini --exclude=inventory.yaml .")
-    out, code = await sh(f"{tar} | {_pve_cmd('push', vmid, blob, '600')}", 300)
+    out, code = await sh(f"{tar} | {_pve_cmd('push', vmid, blob, '600')}", PACKAGE_TIMEOUT)
     if code != 0:
         return {"error": f"{name}: the mop package did not reach the body: "
-                         f"{why(out, code, 300)}"}
+                         f"{why(out, code, PACKAGE_TIMEOUT)}"}
     # Старую копию — в мусор, а не архив поверх неё: tar не удаляет то, чего
     # в пакете больше нет, и в теле копились бы файлы, снятые с узла
     # (поймано на переезде bin/ в mop/cli, #75: в теле остался весь старый
@@ -612,10 +625,10 @@ async def _sync_package(name, vmid):
         "exec", vmid,
         f"rm -rf {HOME}/mop && mkdir -p {HOME}/mop && tar xzf {blob} -C {HOME}/mop "
         f"&& rm -f {blob}",
-        timeout=300)
+        timeout=PACKAGE_TIMEOUT)
     if code != 0:
         return {"error": f"{name}: the mop package did not unpack in the body: "
-                         f"{why(out, code, 300)}"}
+                         f"{why(out, code, PACKAGE_TIMEOUT)}"}
     return {}
 
 
@@ -639,6 +652,10 @@ def _seed_files():
     return out
 
 
+# Перелив файла посева в тело (#268).
+SEED_TIMEOUT = 120
+
+
 async def _seed(name, vmid):
     """Перелить в тело то, без чего папет поднимется и будет молчать."""
     for path, mode in _seed_files():
@@ -647,11 +664,15 @@ async def _seed(name, vmid):
             # ключ узла зовётся то id_rsa, то id_ed25519.
             continue
         out, code = await sh(
-            f"{_pve_cmd('push', vmid, path, mode)} < {shlex.quote(path)}", 120)
+            f"{_pve_cmd('push', vmid, path, mode)} < {shlex.quote(path)}", SEED_TIMEOUT)
         if code != 0:
             return {"error": f"{name}: {path} did not reach the body: "
-                             f"{why(out, code, 120)}"}
+                             f"{why(out, code, SEED_TIMEOUT)}"}
     return {}
+
+
+# Ключи входа в тело (#268).
+KEYS_TIMEOUT = 60
 
 
 async def admit(name, let_in):
@@ -683,9 +704,9 @@ async def admit(name, let_in):
     if pubkey:
         text += pubkey.strip() + "\n"
     out, code = await sh(f"printf %s {shlex.quote(text)} | "
-                         f"{_pve_cmd('keys', vmid_of(name))}", 60)
+                         f"{_pve_cmd('keys', vmid_of(name))}", KEYS_TIMEOUT)
     if code != 0:
-        return {"error": f"{name}: keys: {why(out, code, 60)}"}
+        return {"error": f"{name}: keys: {why(out, code, KEYS_TIMEOUT)}"}
     return {"admitted": bool(pubkey)}
 
 
@@ -707,6 +728,10 @@ def tar_of(files, home):
     return buf.getvalue()
 
 
+# Файлы в тело одним архивом (#268).
+PUSH_TIMEOUT = 120
+
+
 async def push_many(name, files):
     """Положить файлы в тело одним вызовом обёртки (#137): tar через
     `mop-pve unpack` -- один pct exec от пользователя пула, а не четыре pct на
@@ -724,14 +749,14 @@ async def push_many(name, files):
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(blob)
-        out, code = await sh(f"{_pve_cmd('unpack', vmid_of(name))} < {shlex.quote(tmp)}", 120)
+        out, code = await sh(f"{_pve_cmd('unpack', vmid_of(name))} < {shlex.quote(tmp)}", PUSH_TIMEOUT)
     finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
     if code != 0:
-        return {"error": f"{name}: unpack: {why(out, code, 120)}"}
+        return {"error": f"{name}: unpack: {why(out, code, PUSH_TIMEOUT)}"}
     return {"written": [p for p, _ in files]}
 
 
@@ -740,6 +765,10 @@ async def push(name, path, data):
     push_many."""
     r = await push_many(name, [(path, data)])
     return r if r.get("error") else {"written": path}
+
+
+# Снос тела: долгий, как клон (#268).
+DESTROY_TIMEOUT = 600
 
 
 async def destroy(name, branch=None):
@@ -751,8 +780,8 @@ async def destroy(name, branch=None):
     if not valid_name(name):
         return {"error": bad_name(name)}
     vmid = vmid_of(name)
-    out, code = await _pve("destroy", vmid, timeout=600)
+    out, code = await _pve("destroy", vmid, timeout=DESTROY_TIMEOUT)
     if code != 0:
-        return {"error": f"{name}: body {vmid} won't go: {why(out, code, 600)}"}
+        return {"error": f"{name}: body {vmid} won't go: {why(out, code, DESTROY_TIMEOUT)}"}
     await _forget_host_key(name)
-    return {"destroyed": vmid, "target": f"body {vmid}"}
+    return Gone(f"body {vmid}", vmid).to_dict()

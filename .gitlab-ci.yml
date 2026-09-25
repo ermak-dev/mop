@@ -36,19 +36,11 @@ stages: [test, deploy]
   tags: [docker]
   variables:
     MOP_TESTS_STRICT: "1"
-    # Каждый файл tests/ (hermetic.py среди них) -- отдельно; упавшие
-    # перечисляются, и задача падает, если упал хоть один. Текстом в
-    # переменной, чтобы тот же скрипт гонялся и вне раннера. expand: false --
-    # $f и $failed -- переменные шелла, GitLab их раскрывать не должен.
+    # Каждый файл tests/ (hermetic.py среди них) -- той же командой, что у
+    # людей и папетов (#271): упавшие -- с выводом, итог строкой, код 1 при
+    # любом красном. -v -- строка на файл в журнале задачи.
     TESTS:
-      value: |
-        failed=""
-        for f in tests/*.py; do
-          echo "=== $f"
-          python3 "$f" || failed="$failed $f"
-        done
-        if [ -n "$failed" ]; then echo "FAILED:$failed"; exit 1; fi
-        echo "every file in tests/ is green"
+      value: bin/mop dev test -v
       expand: false
     # Внутри контейнера, под root:
     #   git -- клоны во временных каталогах (agent, manifest); openssl --

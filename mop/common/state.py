@@ -10,6 +10,8 @@ import re
 import time
 from dataclasses import asdict, dataclass
 
+from .domain import CloneFacts, holds_work
+
 # Имена внутри спеки, которые читает и ростер: группа задач папета -- по ней
 # JobSummary считает Queued. Одно место на спеку (сервер) и вердикты (все).
 GROUP = "puppets"
@@ -44,7 +46,12 @@ class PuppetRow:
     плюс target, None -- обмер не доехал (прочерк, а не ноль).
 
     Порядок полей -- порядок ключей прежнего словаря: to_dict уходит в
-    снимок дашборда, и страница читает его по имени."""
+    снимок дашборда, и страница читает его по имени.
+
+    «Здесь ничего» -- None (#274): узла нет без аллокации, владельца -- без
+    живой аренды, origin -- без ключа в мете, состояния -- без ответа.
+    Прочерк и вопрос -- только показ (render, SHOWN): раньше их писала
+    сборка строки, и решения сравнивали строку `"-"`."""
     name: str
     node: str
     alloc_status: str
@@ -55,13 +62,29 @@ class PuppetRow:
     origin: str
     disk_kb: int = None
 
+    def render(self):
+        """Строка для человека, модели и страницы: None -- прежним прочерком
+        или вопросом. Байт в байт то, что раньше лежало в самой строке."""
+        out = asdict(self)
+        for field, shown in SHOWN.items():
+            if out[field] is None:
+                out[field] = shown
+        return out
+
     def to_dict(self):
-        return asdict(self)
+        """Провод дашборда -- показанная строка: страница читает прочерки."""
+        return self.render()
 
     @classmethod
     def from_dict(cls, d):
-        """Незнакомый ключ -- TypeError: молча лишнее поле и было болезнью."""
-        return cls(**d)
+        """Провод -> строка; показанное «ничего» -- обратно None. Незнакомый
+        ключ -- TypeError: молча лишнее поле и было болезнью."""
+        return cls(**{k: (None if SHOWN.get(k) is not None and v == SHOWN[k] else v)
+                      for k, v in d.items()})
+
+
+# Как показывается «ничего» в строке ростера (#274): поле -> текст.
+SHOWN = {"node": "-", "state": "-", "owner": "-", "origin": "?"}
 
 
 def _tail(head, sep, tail):
@@ -159,6 +182,16 @@ def _session_state(line):
     return status
 
 
+def _clone(f):
+    """Факты клона из фактов узла -> domain.CloneFacts или None (#266)."""
+    return CloneFacts.from_dict((f or {}).get("clone"))
+
+
+def _branch(clone):
+    """Ветка клона, любая, в том числе дефолтная, — или None."""
+    return clone.branch if clone else None
+
+
 def _work_branch(clone):
     """Ветка папета, если она не дефолтная, — иначе None.
 
@@ -166,8 +199,8 @@ def _work_branch(clone):
     показать человеку, где папет сидит."""
     if not clone:
         return None
-    cur, default = clone.get("cur"), clone.get("def")
-    return cur if cur and cur != default else None
+    cur = clone.branch
+    return cur if cur and cur != clone.default_branch else None
 
 
 def _clone_veto(clone):
@@ -199,19 +232,18 @@ def _clone_veto(clone):
     # Неполные данные — те же «нет данных»: агент отдаёт оба числа всегда или
     # не отдаёт клон вовсе, так что дырой это не станет, а `or 0` на пропуске
     # тихо превращал незнание в ноль, то есть в свободу.
-    if not clone or clone.get("dirty") is None or clone.get("ahead") is None:
+    if not clone or not clone.known:
         return State("unknown", "no clone data")
-    dirty, ahead = clone["dirty"], clone["ahead"]
-    if not (dirty or ahead):
+    # Работа ли это -- решает одно правило на всех (#266): аренда и уборка
+    # сирот спрашивают его же. Ветка работа только вне дома клона (#272).
+    if not holds_work(clone):
         return None
     # idle, а не busy: сессия здесь стоит, занят только клон. Одним словом
     # на оба случая мастер читал «работает» там, где на деле лежит брошенная
     # посреди тикета работа, — а это разные разговоры: первого ждут, второго
     # спасают. Диспатчу оба одинаково запрещены, и это решает не слово, а
     # вид: свободен только вид free.
-    what = ", ".join(p for p in (f"uncommitted: {dirty}" if dirty else "",
-                                 f"unpushed: {ahead}" if ahead else "") if p)
-    return State("idle", what, clone.get("cur"))
+    return State("idle", ", ".join(clone.work()), clone.branch)
 
 
 def _state_from_session(st, clone):
@@ -232,13 +264,13 @@ def _state_from_session(st, clone):
     # называет («free (master)»), и молчание у занятого читалось как «ветки
     # нет вообще», хотя папет просто работал на дефолтной.
     if st in ("busy", "shell"):
-        return State("busy", branch=(clone or {}).get("cur"))
+        return State("busy", branch=_branch(clone))
     # Незнакомый статус — не повод считать место свободным. Показываем как есть:
     # так новое слово claude видно сразу, а не прячется за угадыванием.
     if st != "idle":
         return State("other", st, _work_branch(clone))
 
-    return State("free", branch=(clone or {}).get("cur"))
+    return State("free", branch=_branch(clone))
 
 
 def _state_from_turn(f):
@@ -265,9 +297,9 @@ def _state_from_turn(f):
         return State("dialog", st["waitingFor"])
     code = rec.get("error")
     if status != "idle" or rec.get("event") != "StopFailure" or not code:
-        return _state_from_session(status, f.get("clone"))
+        return _state_from_session(status, _clone(f))
     if code == "authentication_failed":
-        return State("login", "login expired", _work_branch(f.get("clone")))
+        return State("login", "login expired", _work_branch(_clone(f)))
     if code == "billing_error":
         return State("quota", rec.get("detail") or None)
     return State("error", rec.get("detail") or code)
@@ -295,7 +327,7 @@ def verdict(f):
     state = _verdict(f)
     if not is_free(state.kind):
         return state
-    return _clone_veto(f.get("clone")) or state
+    return _clone_veto(_clone(f)) or state
 
 
 def _verdict(f):
@@ -311,9 +343,9 @@ def _verdict(f):
 
     st = _session_state(f.get("session"))
     if st is not None:
-        return _state_from_session(st, f.get("clone"))
+        return _state_from_session(st, _clone(f))
 
-    return _state_from_clone(f.get("clone"))
+    return _state_from_clone(_clone(f))
 
 
 def is_free(kind):

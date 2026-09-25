@@ -17,6 +17,7 @@ import sys
 import time
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks, FakeNomad, patched, patched_env  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 # ── #152: слепок спеки ────────────────────────────────────────────────────────
@@ -159,51 +160,33 @@ STALE = [
 ]
 
 
-def check_template_version():
+def check_template_version(c):
     """HYPOTHESIS (#174): spec_is_stale смотрел только на внешний врапер и
     ограничение размещения, и спека прежнего шаблона читалась свежей.
     SOLUTION: версия шаблона в Meta — хеш того, что общее у спек всех
     папетов, без значений конкретного папета. STATUS: FIXED — see #174"""
-    bad, cases = 0, 0
-    versions = {(spec.job_spec(n, o, p, cont=c)["Job"].get("Meta") or {}).get("mop_spec")
-                for n, o, p, c in SPEC_INPUTS}
-    cases += 1
-    if len(versions) != 1 or None in versions:
-        bad += 1
-        print(f"FAILED  the template version must be one for every puppet: {versions}")
+    versions = {(spec.job_spec(n, o, p, cont=cont)["Job"].get("Meta") or {}).get("mop_spec")
+                for n, o, p, cont in SPEC_INPUTS}
+    c.check("the template version must be one for every puppet",
+            not (len(versions) != 1 or None in versions), versions)
     # Одна строка врапера — другая версия: иначе правка врапера снова
     # прошла бы мимо doctor.
-    cases += 1
-    keep = spec.WRAPPER
-    try:
-        spec.WRAPPER = keep + "\n# one more line\n"
+    with patched(spec, WRAPPER=spec.WRAPPER + "\n# one more line\n"):
         other = (spec.job_spec(*SPEC_INPUTS[0][:3])["Job"].get("Meta") or {}).get("mop_spec")
-    finally:
-        spec.WRAPPER = keep
-    if other in versions or other is None:
-        bad += 1
-        print("FAILED  a changed wrapper line must change the template version")
+    c.check("a changed wrapper line must change the template version",
+            not (other in versions or other is None))
     # Версия не зависит от реестра профилей: удалённый MOP_DEFAULT_LLM иначе
     # ронял spec_is_stale, а ростер глотал падение как «спека свежая» —
     # ровно та тихая ошибка, которую закрывает #174.
-    cases += 1
-    keep = os.environ["MOP_DEFAULT_LLM"]
-    try:
-        os.environ["MOP_DEFAULT_LLM"] = "no-such-profile"
-        got = spec.current_version()
-    except Exception as e:
-        got = f"raised {e!r}"
-    finally:
-        os.environ["MOP_DEFAULT_LLM"] = keep
-    if got not in versions:
-        bad += 1
-        print(f"FAILED  current_version with a removed default profile: {got!r}, "
-              f"wanted {versions}")
-    cases += 1
-    if spec.current_version() not in versions:
-        bad += 1
-        print("FAILED  current_version must equal the version job_spec puts in Meta")
-    return bad, cases
+    with patched_env(MOP_DEFAULT_LLM="no-such-profile"):
+        try:
+            got = spec.current_version()
+        except Exception as e:
+            got = f"raised {e!r}"
+    c.check("current_version with a removed default profile", not (got not in versions),
+            f"{got!r}, wanted {versions}")
+    c.check("current_version must equal the version job_spec puts in Meta",
+            not (spec.current_version() not in versions))
 
 
 # (имя, origin, профиль, cont): оба профиля (без ключа и с ключом и картой
@@ -224,25 +207,20 @@ def render(name, origin, profile, cont):
                       ensure_ascii=False, indent=1)
 
 
-def check_snapshot():
+def check_snapshot(c):
     """Спека для закреплённых входов совпадает со слепком байт в байт, а
     спека со слепка не читается устаревшей. STATUS: FIXED — see #152"""
     with open(SNAPSHOT) as f:
         want = json.load(f)
-    bad = 0
     for inputs in SPEC_INPUTS:
         key = " ".join(str(x) for x in inputs)
         got = render(*inputs)
-        if got != want.get(key):
-            bad += 1
-            print(f"FAILED  rendered spec for {key} differs from the snapshot")
-        elif spec.spec_is_stale(json.loads(want[key])["Job"]):
-            bad += 1
-            print(f"FAILED  the snapshot spec for {key} reads as stale")
-    if set(want) != {" ".join(str(x) for x in i) for i in SPEC_INPUTS}:
-        bad += 1
-        print("FAILED  the snapshot and SPEC_INPUTS disagree on the cases")
-    return bad, len(SPEC_INPUTS) + 1
+        if c.check(f"rendered spec for {key} differs from the snapshot",
+                   not (got != want.get(key))):
+            c.check(f"the snapshot spec for {key} reads as stale",
+                    not (spec.spec_is_stale(json.loads(want[key])["Job"])))
+    c.check("the snapshot and SPEC_INPUTS disagree on the cases",
+            not (set(want) != {" ".join(str(x) for x in i) for i in SPEC_INPUTS}))
 
 
 # ── #155: пути узла — переменными спеки ───────────────────────────────────────
@@ -275,11 +253,10 @@ def expand(template, env):
     return re.sub(r"\$(HOME|PU_NAME|PU_PROJECT)\b", lambda m: env[m.group(1)], template)
 
 
-def check_wrapper_paths():
+def check_wrapper_paths(c):
     """STATUS: FIXED — see #155"""
     from mop import driver
     from mop.cli.driver import run
-    bad, cases = 0, 0
     for name, origin, profile, cont in SPEC_INPUTS:
         env = spec.job_spec(name, origin, profile, cont=cont)["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
         project = env.get("PU_PROJECT")
@@ -292,64 +269,48 @@ def check_wrapper_paths():
                    "PU_PROJECT_CREDS": getattr(driver, "project_creds", lambda p: None)(project),
                    "PU_SECRETS_DIR": getattr(driver, "project_secrets_dir", lambda p: None)(project)}
         for k in OLD_PATHS:
-            cases += 1
-            if env.get(k) != want[k] or same_as[k] != want[k]:
-                bad += 1
-                print(f"FAILED  {k} for {name}: spec {env.get(k)!r}, driver {same_as[k]!r}, "
-                      f"the old wrapper {want[k]!r}")
+            c.check(f"{k} for {name}", not (env.get(k) != want[k] or same_as[k] != want[k]),
+                    f"spec {env.get(k)!r}, driver {same_as[k]!r}, the old wrapper {want[k]!r}")
         # (c) в тело едут ровно ключи спеки, кроме самого врапера.
-        cases += 1
         body = [k for k in env if k not in ("PU_WRAPPER", "PU_CARRY")]
         got = getattr(run, "carry", lambda e: None)(env)
-        if (env.get("PU_CARRY") or "").split(",") != body or got != body:
-            bad += 1
-            print(f"FAILED  carry for {name}: PU_CARRY {env.get('PU_CARRY')!r}, "
-                  f"run.carry {got!r}, spec keys {body!r}")
+        c.check(f"carry for {name}",
+                not ((env.get("PU_CARRY") or "").split(",") != body or got != body),
+                f"PU_CARRY {env.get('PU_CARRY')!r}, run.carry {got!r}, spec keys {body!r}")
         # (a) всё, что врапер читает, в спеке есть и в тело доезжает.
-        cases += 1
         reads = set(re.findall(r"\$\{?(PU_[A-Z_]+)", spec.WRAPPER))
         missing = sorted(reads - set(body))
-        if missing:
-            bad += 1
-            print(f"FAILED  the wrapper reads {missing}, which the spec does not carry into the body")
+        c.check("the wrapper reads only what the spec carries into the body", not (missing),
+                f"the wrapper reads {missing}, which the spec does not carry into the body")
     # Спека старше #155 едет старым списком: иначе папет падает на первом же
     # рестарте между раскаткой и перерегистрацией.
-    cases += 1
     old_env = {k: "x" for k in LEGACY_CARRY}
-    if getattr(run, "carry", lambda e: None)(old_env) != LEGACY_CARRY:
-        bad += 1
-        print("FAILED  a spec without PU_CARRY must carry the pre-#155 list")
+    c.check("a spec without PU_CARRY must carry the pre-#155 list",
+            not (getattr(run, "carry", lambda e: None)(old_env) != LEGACY_CARRY))
     # Врапер путей узла больше не собирает.
     for pattern in ("$HOME/puppets", "target-$PU_NAME", "secrets.env",
                     "project-secrets", "bus-$PU_PROJECT"):
-        cases += 1
-        if pattern in spec.WRAPPER:
-            bad += 1
-            print(f"FAILED  the wrapper still builds a node path itself: {pattern}")
+        c.check(f"the wrapper still builds a node path itself: {pattern}",
+                not (pattern in spec.WRAPPER))
     # Пустой путь — отказ до первой команды: `rm -rf "$d"` и free_dir над
     # пустой строкой задели бы всё, что есть в теле.
-    cases += 1
     for k in OLD_PATHS:
-        if f'${{{k}:?' not in spec.WRAPPER:
-            bad += 1
-            print(f"FAILED  the wrapper must refuse an empty {k} before touching anything")
+        if not c.check(f"the wrapper must refuse an empty {k} before touching anything",
+                       not (f'${{{k}:?' not in spec.WRAPPER)):
             break
     # Дубль PU_PROJECT в литерале словаря — молчаливый: второй перетирает
     # первый, и правка одного из них ничего не значит.
-    cases += 1
     import ast
     tree = ast.parse(open(spec.__file__).read())
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
             keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
-            if len(keys) != len(set(keys)):
-                bad += 1
-                print(f"FAILED  duplicate keys in a dict literal of spec.py: {keys}")
+            if not c.check("duplicate keys in a dict literal of spec.py",
+                           not (len(keys) != len(set(keys))), keys):
                 break
-    return bad, cases
 
 
-def check_git_identity():
+def check_git_identity(c):
     """HYPOTHESIS (#167): в клоне папета нет git identity. Промежуточная форма
     (7f9c2a8) -- identity установки: MOP_GIT_NAME и MOP_GIT_EMAIL, четыре GIT_*
     в окружении задачи. Оператор решил иначе: автор коммита -- человек,
@@ -360,33 +321,20 @@ def check_git_identity():
     задания. Версия шаблона (#174) -- та же, что без настроек: на обеих
     установках они были пусты, набор ключей спеки не менялся, и перерегистрации
     не будет. STATUS: FIXED — see #167"""
-    bad, cases = 0, 0
     inputs = SPEC_INPUTS[0]
     unset = spec.current_version()
-    cases += 1
     gone = [k for k in ("MOP_GIT_NAME", "MOP_GIT_EMAIL")
             if k in config.SETTINGS or k in config.SERVER_SCOPED["mop-cluster"]]
-    if gone:
-        bad += 1
-        print(f"FAILED  the installation-wide git identity must be gone: {gone}")
-    given = {"MOP_GIT_NAME": "Pool Bot", "MOP_GIT_EMAIL": "bot@example.dev"}
-    os.environ.update(given)
-    try:
+    c.check("the installation-wide git identity must be gone", not (gone), gone)
+    # Прежний код снимал обе переменные после блока безусловно (del), а не
+    # возвращал прежние: до блока их нет -- patched_env даёт то же.
+    with patched_env(MOP_GIT_NAME="Pool Bot", MOP_GIT_EMAIL="bot@example.dev"):
         env = spec.job_spec(*inputs[:3])["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
         version = spec.current_version()
-    finally:
-        for k in given:
-            del os.environ[k]
-    cases += 1
     got = [k for k in env if k.startswith("GIT_")]
-    if got:
-        bad += 1
-        print(f"FAILED  the spec must carry no GIT_*, even with MOP_GIT_* in the environment: {got}")
-    cases += 1
-    if version != unset:
-        bad += 1
-        print("FAILED  MOP_GIT_* must not move the template version")
-    return bad, cases
+    c.check("the spec must carry no GIT_*, even with MOP_GIT_* in the environment",
+            not (got), got)
+    c.check("MOP_GIT_* must not move the template version", not (version != unset))
 
 
 # ── #197: память папета -- его свойство ──────────────────────────────────────
@@ -413,31 +361,22 @@ MEMORY = [
 BAD_ASKS = ["lots", "", "0", "-512", "8G", "1.5"]
 
 
-def check_memory_197():
+def check_memory_197(c):
     """Цепочка памяти папета: дефолт -> .env -> `.mop` проекта.
     STATUS: FIXED — see #197"""
-    bad = cases = 0
     for what, asks, ceiling, budget, want in MEMORY:
-        cases += 1
-        got = spec.memory(asks, ceiling, budget)
-        if got != want:
-            bad += 1
-            print(f"FAILED  memory, {what}: {got}, wanted {want}")
+        c.expect(f"memory, {what}", spec.memory(asks, ceiling, budget), want)
     for ask in BAD_ASKS:
-        cases += 1
         try:
             got = spec.memory({"MOP_MEM_MB": ask}, 12288, 8192)
         except ValueError as e:
-            if "MOP_MEM_MB" not in str(e):
-                bad += 1
-                print(f"FAILED  memory, ask {ask!r}: the refusal does not name MOP_MEM_MB: {e}")
+            c.check(f"memory, ask {ask!r}: the refusal does not name MOP_MEM_MB",
+                    not ("MOP_MEM_MB" not in str(e)), e)
             continue
-        bad += 1
-        print(f"FAILED  memory, ask {ask!r}: took it as {got}, wanted a refusal")
-    return bad, cases
+        c.fail(f"memory, ask {ask!r}", f"took it as {got}, wanted a refusal")
 
 
-def check_project_asks_197():
+def check_project_asks_197(c):
     """Просьбы проектов на сервере: файл, который кладёт роль cluster из
     манифестов `mop server deploy`. Нет файла или нет проекта в нём -- значения
     установки, без падения: это любой проект до первого прогона.
@@ -445,26 +384,17 @@ def check_project_asks_197():
     STATUS: FIXED — see #197"""
     import tempfile
     from mop.common.domain import Project
-    bad = cases = 0
 
     def project_asks(project, path):
         return Project.of(f"git@h:g/{project}.git", asks=spec.read_asks(path)).asks
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "project-asks.json")
-        cases += 1
-        if project_asks("mop", path) != {}:
-            bad += 1
-            print("FAILED  project_asks without the file: wanted {}")
+        c.expect("project_asks without the file", project_asks("mop", path), {})
         with open(path, "w") as f:
             json.dump({"mop": {"MOP_MEM_MB": "6144", "MOP_CORES": "4"}}, f)
         for project, want in (("mop", {"MOP_MEM_MB": "6144", "MOP_CORES": "4"}),
                               ("rugent", {})):
-            cases += 1
-            got = project_asks(project, path)
-            if got != want:
-                bad += 1
-                print(f"FAILED  project_asks({project!r}): {got}, wanted {want}")
-    return bad, cases
+            c.expect(f"project_asks({project!r})", project_asks(project, path), want)
 
 
 def memory_constraint(rendered):
@@ -476,7 +406,7 @@ def memory_constraint(rendered):
     return None
 
 
-def check_spec_memory_197():
+def check_spec_memory_197(c):
     """Спека применяет память папета (#197): резерв и потолок Nomad -- из
     spec.memory для проекта папета, потолок едет в окружение задачи
     (PU_MEM_MB, его читает `mop driver run` pve), и узел берёт папета, только
@@ -484,53 +414,42 @@ def check_spec_memory_197():
     Бюджет и потолок установки -- PINNED: 4096 и 8192.
     STATUS: FIXED — see #197"""
     import tempfile
-    bad = cases = 0
-
-    def expect(what, ok, detail=""):
-        nonlocal bad, cases
-        cases += 1
-        if not ok:
-            bad += 1
-            print(f"FAILED  spec memory, {what}" + (f": {detail}" if detail else ""))
-
-    saved = spec.ASKS_FILE
-    with tempfile.TemporaryDirectory() as d:
-        spec.ASKS_FILE = os.path.join(d, "project-asks.json")
+    what = "spec memory, "
+    with tempfile.TemporaryDirectory() as d, \
+            patched(spec, ASKS_FILE=os.path.join(d, "project-asks.json")):
         with open(spec.ASKS_FILE, "w") as f:
             json.dump({"big": {"MOP_MEM_MB": "16384"}, "small": {"MOP_MEM_MB": "2048"},
                        "odd": {"MOP_MEM_MB": "8G"}, "plain": {"MOP_CORES": "8"}}, f)
+        for project, want in (("big", (4096, 16384)), ("small", (2048, 2048)),
+                              ("plain", (4096, 8192)), ("absent", (4096, 8192))):
+            j = spec.job_spec(f"pu-{project}-1", f"git@git.example.dev:someone/{project}.git")
+            task = j["Job"]["TaskGroups"][0]["Tasks"][0]
+            res = task["Resources"]
+            c.check(f"{what}{project}: MemoryMB/MemoryMaxMB",
+                    (res.get("MemoryMB"), res.get("MemoryMaxMB")) == want, res)
+            c.check(f"{what}{project}: PU_MEM_MB is the ceiling",
+                    task["Env"].get("PU_MEM_MB") == str(want[1]), task["Env"].get("PU_MEM_MB"))
+            c.check(f"{what}{project}: PU_MEM_MB is carried into the body",
+                    "PU_MEM_MB" in task["Env"].get("PU_CARRY", "").split(","))
+            cap = memory_constraint(j)
+            c.check(f"{what}{project}: the node's cap constraint",
+                    cap == {"LTarget": "${meta.mop_mem_cap_mb}", "Operand": ">=",
+                            "RTarget": str(want[1])}, cap)
+            c.check(f"{what}{project}: the project constraint stays",
+                    project_constraint(j) is not None)
+            c.check(f"{what}{project}: the ceiling reads back from the spec",
+                    spec.ceiling_of(j["Job"]) == want[1], spec.ceiling_of(j["Job"]))
+            c.check(f"{what}{project}: a fresh spec is not stale",
+                    not spec.spec_is_stale(j["Job"]))
         try:
-            for project, want in (("big", (4096, 16384)), ("small", (2048, 2048)),
-                                  ("plain", (4096, 8192)), ("absent", (4096, 8192))):
-                j = spec.job_spec(f"pu-{project}-1", f"git@git.example.dev:someone/{project}.git")
-                task = j["Job"]["TaskGroups"][0]["Tasks"][0]
-                res = task["Resources"]
-                expect(f"{project}: MemoryMB/MemoryMaxMB",
-                       (res.get("MemoryMB"), res.get("MemoryMaxMB")) == want, res)
-                expect(f"{project}: PU_MEM_MB is the ceiling",
-                       task["Env"].get("PU_MEM_MB") == str(want[1]), task["Env"].get("PU_MEM_MB"))
-                expect(f"{project}: PU_MEM_MB is carried into the body",
-                       "PU_MEM_MB" in task["Env"].get("PU_CARRY", "").split(","))
-                c = memory_constraint(j)
-                expect(f"{project}: the node's cap constraint",
-                       c == {"LTarget": "${meta.mop_mem_cap_mb}", "Operand": ">=",
-                             "RTarget": str(want[1])}, c)
-                expect(f"{project}: the project constraint stays", project_constraint(j) is not None)
-                expect(f"{project}: the ceiling reads back from the spec",
-                       spec.ceiling_of(j["Job"]) == want[1], spec.ceiling_of(j["Job"]))
-                expect(f"{project}: a fresh spec is not stale", not spec.spec_is_stale(j["Job"]))
-            try:
-                spec.job_spec("pu-odd-1", "git@git.example.dev:someone/odd.git")
-                expect("odd: an ask that cannot be applied is refused", False)
-            except RuntimeError as e:
-                expect("odd: the refusal names the puppet and the ask",
-                       "pu-odd-1" in str(e) and "MOP_MEM_MB" in str(e), e)
-        finally:
-            spec.ASKS_FILE = saved
+            spec.job_spec("pu-odd-1", "git@git.example.dev:someone/odd.git")
+            c.check(f"{what}odd: an ask that cannot be applied is refused", False)
+        except RuntimeError as e:
+            c.check(f"{what}odd: the refusal names the puppet and the ask",
+                    "pu-odd-1" in str(e) and "MOP_MEM_MB" in str(e), e)
     # Спека до #197: ни ограничения, ни потолка в нём.
-    expect("a spec without the cap constraint has no ceiling",
-           spec.ceiling_of({"Constraints": [{"LTarget": "${meta.mop_projects}"}]}) is None)
-    return bad, cases
+    c.check(f"{what}a spec without the cap constraint has no ceiling",
+            spec.ceiling_of({"Constraints": [{"LTarget": "${meta.mop_projects}"}]}) is None)
 
 
 # Как Nomad 1.10 сравнивает `>=` (scheduler/feasible.go, checkOrder): обе
@@ -556,17 +475,11 @@ ORDER = [
 ]
 
 
-def check_nomad_order_197():
+def check_nomad_order_197(c):
     """Зеркало checkOrder Nomad для диагноза unserved: он обязан отвечать
     ровно как планировщик. STATUS: FIXED — see #197"""
-    bad = cases = 0
     for left, right, want in ORDER:
-        cases += 1
-        got = spec.nomad_order(">=", left, right)
-        if got != want:
-            bad += 1
-            print(f"FAILED  nomad_order({left!r} >= {right!r}): {got}, wanted {want}")
-    return bad, cases
+        c.expect(f"nomad_order({left!r} >= {right!r})", spec.nomad_order(">=", left, right), want)
 
 
 # Спека собирается в подпроцессе с данным MOP_DRIVER: настройки читаются
@@ -584,7 +497,7 @@ print(json.dumps(spec.job_spec("pu-mop-1", "git@h:g/mop.git"), sort_keys=True))
 """
 
 
-def check_driver_free_183():
+def check_driver_free_183(c):
     """HYPOTHESIS (#183): спеку строит сервис кластера на сервере, а пути в её
     окружении (#155) берутся из mop/driver -- не зависят ли они от драйвера
     машины, которая строит спеку, а не узла, куда встанет папет?
@@ -595,7 +508,6 @@ def check_driver_free_183():
     слоя deploy (#186).
     STATUS: FIXED — see #183"""
     import subprocess
-    bad = cases = 0
     got = {}
     for drv in ("host", "pve", "no-such-driver"):
         env = dict(os.environ, MOP_DRIVER=drv, MOP_SERVER_LAN="192.0.2.1",
@@ -604,22 +516,16 @@ def check_driver_free_183():
         root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         r = subprocess.run([sys.executable, "-c", _SPEC_UNDER_DRIVER, root], env=env,
                            capture_output=True, text=True)
-        cases += 1
-        if r.returncode:
-            bad += 1
-            print(f"FAILED  job_spec under MOP_DRIVER={drv}: {r.stderr[-300:]}")
+        if not c.check(f"job_spec under MOP_DRIVER={drv}", not (r.returncode), r.stderr[-300:]):
             continue
         got[drv] = json.loads(r.stdout)
     for drv in ("pve", "no-such-driver"):
-        cases += 1
         if drv in got and "host" in got:
             spec_host = got["host"]
             # PU_CONTINUE -- время; при cont=False оно пустое и равно.
-            if got[drv] != spec_host:
-                bad += 1
-                print(f"FAILED  job_spec differs under MOP_DRIVER={drv} from host: "
-                      f"the spec is built on the server, not on the puppet's node")
-    return bad, cases
+            c.check(f"job_spec differs under MOP_DRIVER={drv} from host",
+                    not (got[drv] != spec_host),
+                    "the spec is built on the server, not on the puppet's node")
 
 
 # ── #223: хуки Claude Code — через --settings врапера ─────────────────────────
@@ -654,72 +560,54 @@ def run_hooks_section(section, home, path):
                           env={"HOME": home, "PU_NAME": "pu-mop-1", "PATH": path})
 
 
-def _hooks_written(section):
-    """(a)-(c) проверки #223: файл хуков, который пишет врапер. Нужен jq.
-    -> (bad, cases)."""
+def _hooks_written(c, section):
+    """(a)-(c) проверки #223: файл хуков, который пишет врапер. Нужен jq."""
     import shutil
     import subprocess
     import tempfile
-    bad, cases = 0, 0
     home = tempfile.mkdtemp()
     try:
         # Кусок исполняется как в теле: set -e, свой HOME, имя папета. Второй
         # прогон -- поверх первого: так идёт каждый рестарт.
         for _ in range(2):
             r = run_hooks_section(section, home, os.environ["PATH"])
-        cases += 1
-        if r.returncode:
-            print(f"FAILED  the hooks section fails: {r.stderr.strip()}")
-            return bad + 1, cases
+        if not c.check("the hooks section fails", not (r.returncode), r.stderr.strip()):
+            return
         mop_root, hooks, settings = r.stdout.split("\n")
-        cases += 1
-        if settings != f"--settings {hooks}":
-            bad += 1
-            print(f"FAILED  a written hooks file must give claude --settings, got {settings!r}")
+        c.check("a written hooks file must give claude --settings",
+                not (settings != f"--settings {hooks}"), f"got {settings!r}")
         # (a) файл вне клона и вне общего ~/.claude/settings.json
-        cases += 1
-        if not hooks.startswith(home + "/.config/mop/") or "/.claude/" in hooks:
-            bad += 1
-            print(f"FAILED  the hooks file must live in mop's own config: {hooks}")
-        cases += 1
+        c.check("the hooks file must live in mop's own config",
+                not (not hooks.startswith(home + "/.config/mop/") or "/.claude/" in hooks), hooks)
         left = [f for f in os.listdir(os.path.dirname(hooks)) if f.endswith(".tmp")]
-        if left:
-            bad += 1
-            print(f"FAILED  the hooks file is written through a temp file, left: {left}")
+        c.check("the hooks file is written through a temp file", not (left), f"left: {left}")
         # (b) валидный JSON, ровно пять событий, каждое -- охраняемый вызов
-        cases += 1
         try:
             with open(hooks) as f:
                 doc = json.load(f)
             events = doc["hooks"]
         except (OSError, ValueError, KeyError, TypeError) as e:
-            bad += 1
-            print(f"FAILED  the hooks file is not the settings JSON: {e}")
-            return bad, cases
-        cases += 1
-        if set(events) != HOOK_EVENTS:
-            bad += 1
-            print(f"FAILED  hook events {sorted(events)}, wanted {sorted(HOOK_EVENTS)}")
+            c.fail("the hooks file is not the settings JSON", e)
+            return
+        c.check("hook events", not (set(events) != HOOK_EVENTS),
+                f"{sorted(events)}, wanted {sorted(HOOK_EVENTS)}")
         # session.py -- от того же корня, что и лаунчер mop во внешнем врапере:
         # другая сторона соглашения -- driver.SESSION_PY обоих драйверов.
         outer = re.search(r'exec "(.+)/bin/mop"', spec.OUTER)
         session_py = mop_root.replace("$HOME", home) + "/mop/session.py"
-        cases += 1
-        if not outer or outer.group(1) != "$HOME/mop" or mop_root != home + "/mop":
-            bad += 1
-            print(f"FAILED  the hooks' package root {mop_root!r} and the launcher's "
-                  f"{outer and outer.group(1)!r} must be one root")
+        c.check("the hooks' package root and the launcher's must be one root",
+                not (not outer or outer.group(1) != "$HOME/mop" or mop_root != home + "/mop"),
+                f"{mop_root!r} and {outer and outer.group(1)!r}")
         cmds = set()
         for name, groups in events.items():
             for g in groups:
                 for h in g.get("hooks", []):
                     cmds.add((h.get("type"), h.get("command"), h.get("timeout")))
-        cases += 1
         want = (f"python3 {session_py} hook >/dev/null 2>&1 || true")
-        if cmds != {("command", want, 5)} or \
-                any(len(g) != 1 or len(g[0].get("hooks", [])) != 1 for g in events.values()):
-            bad += 1
-            print(f"FAILED  every event must run exactly {want!r}, timeout 5; got {cmds}")
+        c.check(f"every event must run exactly {want!r}, timeout 5",
+                not (cmds != {("command", want, 5)} or
+                     any(len(g) != 1 or len(g[0].get("hooks", [])) != 1 for g in events.values())),
+                f"got {cmds}")
         # (c) охрана держит против любого session.py на узле: старый без
         # глагола hook выходит 2 (Stop продолжил бы ход вечно), болтливый
         # попал бы в контекст модели, отсутствующий -- тоже ненулевой выход.
@@ -733,38 +621,31 @@ def _hooks_written(section):
                 with open(session_py, "w") as f:
                     f.write(body)
             for _, cmd, _ in cmds:
-                cases += 1
                 r = subprocess.run(["sh", "-c", cmd], input="{}", text=True,
                                    capture_output=True)
-                if r.returncode or r.stdout or r.stderr:
-                    bad += 1
-                    print(f"FAILED  {what}: the hook must be silent and exit 0, got "
-                          f"{r.returncode} {r.stdout!r} {r.stderr!r}")
+                c.check(f"{what}: the hook must be silent and exit 0",
+                        not (r.returncode or r.stdout or r.stderr),
+                        f"got {r.returncode} {r.stdout!r} {r.stderr!r}")
     finally:
         shutil.rmtree(home)
-    return bad, cases
 
 
-def check_claude_hooks_223():
+def check_claude_hooks_223(c):
     """STATUS: FIXED — see #223"""
     import base64
     import shutil
-    import subprocess
+    import subprocess  # noqa: F401
     import tempfile
-    bad, cases = 0, 0
     section = hooks_section()
-    cases += 1
-    if section is None:
-        print("FAILED  the wrapper has no claude hooks section")
-        return 1, cases
+    if not c.check("the wrapper has no claude hooks section", not (section is None)):
+        return
     # (a)-(c) пишет файл хуков врапер, и пишет его jq (он в теле: edit_json).
     # Без jq на машине проверок врапер честно уходит в ветку «без хуков»,
     # и эти проверки читались бы поломкой (#230: python:3.x-slim). Пропуск --
     # громкий и в конце: (d)-(f), в том числе ветка без jq, идут всегда.
     no_jq = shutil.which("jq", path=os.environ["PATH"]) is None
     if not no_jq:
-        got = _hooks_written(section)
-        bad, cases = bad + got[0], cases + got[1]
+        _hooks_written(c, section)
     # (d) хуки -- наблюдение, а не условие подъёма: файл не записался --
     # папет встаёт без --settings и говорит об этом, а не падает. Упавший
     # врапер -- это папет, который не поднимается вовсе, из-за того, что
@@ -784,48 +665,128 @@ def check_claude_hooks_223():
                 os.makedirs(os.path.join(home, ".config"))
                 open(os.path.join(home, ".config", "mop"), "w").close()
             r = run_hooks_section(section, home, path)
-            cases += 1
             settings = r.stdout.split("\n")[-1] if r.stdout else None
             leftovers = [os.path.join(dp, f) for dp, _, fs in os.walk(home)
                          for f in fs if f.endswith(".tmp")]
-            if r.returncode or settings != "" or not r.stderr.strip() or leftovers:
-                bad += 1
-                print(f"FAILED  {what}: the puppet must start without --settings and say "
-                      f"so; got exit {r.returncode}, settings {settings!r}, "
-                      f"stderr {r.stderr.strip()!r}, temp files {leftovers}")
+            c.check(f"{what}: the puppet must start without --settings and say so",
+                    not (r.returncode or settings != "" or not r.stderr.strip() or leftovers),
+                    f"got exit {r.returncode}, settings {settings!r}, "
+                    f"stderr {r.stderr.strip()!r}, temp files {leftovers}")
         finally:
             shutil.rmtree(home)
     # (e) claude стартует с этим файлом, когда он есть
-    cases += 1
     launch = re.search(r'^claude_args="([^"]*)"', spec.WRAPPER, re.M)
-    if not launch or "$settings" not in launch.group(1) \
-            or "$claude_args" not in spec.WRAPPER.split("tmux -L \"$PU_NAME\" new-session")[-1]:
-        bad += 1
-        print("FAILED  the claude launch line must carry $settings")
+    c.check("the claude launch line must carry $settings",
+            not (not launch or "$settings" not in launch.group(1)
+                 or "$claude_args" not in spec.WRAPPER.split("tmux -L \"$PU_NAME\" new-session")[-1]))
     # (f) врапер едет base64 (#155): доллары одинарные, а в открытой части
     # спеки нет ни JSON хуков, ни `${…}`, кроме меты узла.
-    cases += 1
-    if "$$" in spec.WRAPPER:
-        bad += 1
-        print("FAILED  the wrapper travels base64: a $$ in it would reach the body literally")
+    c.check("the wrapper travels base64: a $$ in it would reach the body literally",
+            not ("$$" in spec.WRAPPER))
     for inputs in SPEC_INPUTS:
         job = spec.job_spec(*inputs[:3], cont=inputs[3])
         env = job["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
-        cases += 1
-        if 'settings="--settings $hooks"' not in base64.b64decode(env["PU_WRAPPER"]).decode():
-            bad += 1
-            print(f"FAILED  {inputs[0]}: the wrapper in the spec has no hooks")
+        c.check(f"{inputs[0]}: the wrapper in the spec has no hooks",
+                not ('settings="--settings $hooks"' not in
+                     base64.b64decode(env["PU_WRAPPER"]).decode()))
         env["PU_WRAPPER"] = ""
         plain = json.dumps(job)
-        cases += 1
         subs = set(re.findall(r"\$\{[^}]*\}", plain))
-        if "hook" in plain or not subs <= {spec.PROJECTS_TARGET, spec.MEM_CAP_TARGET}:
-            bad += 1
-            print(f"FAILED  {inputs[0]}: hooks or substitutions outside the base64 "
-                  f"wrapper: {sorted(subs)}")
+        c.check(f"{inputs[0]}: hooks or substitutions outside the base64 wrapper",
+                not ("hook" in plain or not subs <= {spec.PROJECTS_TARGET, spec.MEM_CAP_TARGET}),
+                sorted(subs))
     if no_jq:
         hermetic.skip("the claude hooks wrapper block", "no jq on this machine")
-    return bad, cases
+
+
+# ── #265: мета джоба -- одно значение, JobMeta ───────────────────────────
+# HYPOTHESIS: Meta джоба (origin, llm, branch, mop_spec) читают сырым .get в
+# семи модулях с разными умолчаниями, профиль -- тремя путями, а
+# перерегистрацию по мете пишут четыре места, и они разошлись: image.clear
+# и image.restore теряли Meta.branch, и после сборки образа папет мастера в
+# своей ветке (#256) поднимался на origin/HEAD.
+# SOLUTION: JobMeta (mop/common/domain.py) -- from_job/from_meta/to_meta в
+# порядке ключей job_spec; читатели -- через него; профиль -- одна функция
+# llm.of_meta; перерегистрация на сервере -- spec.respec, и clear записывает
+# ветку, а restore и лечение её несут.
+# STATUS: FIXED — see #265
+BRANCHED = ("pu-mop-3", "git@git.example.dev:someone/mop.git", "claude", False, "feat/256-x")
+
+
+def check_job_meta_265(c):
+    from mop.common import domain
+    JobMeta = getattr(domain, "JobMeta", None)
+    c.check("mop.common.domain has no JobMeta", not (JobMeta is None))
+    # Круг без потерь, байт в байт и в том же порядке ключей.
+    for name, origin, profile, cont, *branch in (SPEC_INPUTS + [BRANCHED]) if JobMeta else []:
+        meta = spec.job_spec(name, origin, profile, cont=cont,
+                             branch=branch[0] if branch else None)["Job"]["Meta"]
+        m = JobMeta.from_meta(meta)
+        back = m.to_meta()
+        c.check(f"JobMeta round trip for {name}", not (json.dumps(back) != json.dumps(meta)),
+                f"{back} != {meta}")
+        c.check(f"from_job and from_meta disagree for {name}",
+                not (JobMeta.from_job({"Meta": meta}) != m))
+        c.check(f"JobMeta.project for {name}",
+                not (m.project != spec.driver.project_of(origin)), repr(m.project))
+    empty = JobMeta.from_job({}) if JobMeta else None
+    c.check("a job without Meta",
+            not (empty is not None and (empty.origin, empty.llm, empty.branch, empty.spec_version,
+                                        empty.project) != (None, None, None, None, "")), empty)
+    if JobMeta is not None:
+        try:
+            JobMeta.from_meta({"origin": "o", "llm": "l"}).__setattr__("llm", "x")
+            c.fail("JobMeta must be frozen")
+        except AttributeError:
+            pass
+
+    # Сборка образа снимает папетов и поднимает их с веткой мастера.
+    from mop.server import image
+    from mop.common import puppets
+    job = spec.job_spec(*BRANCHED[:3], branch=BRANCHED[4])["Job"]
+    called = []
+    real = spec.job_spec
+    # Nomad -- поддельный, параметром (#275), а не подменой атрибутов модуля.
+    fake = FakeNomad()
+    with patched(image, project_rows=lambda project, api=None: [
+                {"name": job["ID"], "node": "n1", "job": job, "container": True,
+                 "state": "free", "kind": None}]), \
+            patched(puppets, _wait_stopped=lambda name: None,
+                    wipe=lambda node, name, *a, **k: None), \
+            patched(spec, job_spec=lambda *a, **k: called.append((a, k)) or real(*a, **k)):
+        gone = image.clear("mop", force=True, api=fake)
+        image.restore(gone, api=fake)
+    got = [k.get("branch", a[4] if len(a) > 4 else None) for a, k in called]
+    c.check("image.restore must raise the puppet on its branch",
+            not (got != [BRANCHED[4]]), f"job_spec calls {called}")
+
+    # Лечение doctor'а (update) несёт ветку папета.
+    sent = []
+    with patched(puppets, _cluster=lambda verb, **kw: sent.append((verb, kw)) or (
+            {"meta": job["Meta"]} if verb == "spec" else {})):
+        puppets.treat({"action": "update", "alloc": None, "name": job["ID"]})
+    upd = [kw for verb, kw in sent if verb == "update"]
+    c.check("treat must re-register with the puppet's branch",
+            not (not upd or upd[0].get("branch") != BRANCHED[4]
+                 or upd[0].get("origin") != BRANCHED[1]), sent)
+
+    # Мету читают только через JobMeta: сырых чтений её ключей нет нигде, кроме
+    # domain.py (node Meta в nomad.py -- мета узлов, не джоба).
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    raw = re.compile(r'get\("Meta"\)|\b(meta|m)\.get\("(origin|llm|branch|mop_spec)"'
+                     r'|\.get\(SPEC_META\)')
+    found = []
+    for dp, _, fs in os.walk(os.path.join(root, "mop")):
+        for f in fs:
+            path = os.path.join(dp, f)
+            rel = os.path.relpath(path, root)
+            if not f.endswith(".py") or rel in ("mop/common/domain.py", "mop/server/nomad.py"):
+                continue
+            for n, line in enumerate(open(path), 1):
+                if raw.search(line.split("#")[0]):
+                    found.append(f"{rel}:{n}: {line.strip()}")
+    c.check("raw reads of job Meta outside JobMeta", not (found),
+            "\n    " + "\n    ".join(found))
 
 
 def main():
@@ -837,65 +798,39 @@ def main():
                       f, ensure_ascii=False, indent=1)
             f.write("\n")
         return 0
-    bad, cases = check_snapshot()
-    vbad, vcases = check_template_version()
-    bad += vbad
-    cases += vcases
-    pbad, pcases = check_wrapper_paths()
-    bad += pbad
-    cases += pcases
-    gbad, gcases = check_git_identity()
-    bad += gbad
-    cases += gcases
-    dbad, dcases = check_driver_free_183()
-    bad += dbad
-    cases += dcases
-    for check in (check_memory_197, check_project_asks_197, check_spec_memory_197,
-                  check_nomad_order_197, check_claude_hooks_223):
-        cbad, ccases = check()
-        bad += cbad
-        cases += ccases
+    c = Checks()
+    for fn in (check_snapshot, check_template_version, check_wrapper_paths,
+               check_git_identity, check_driver_free_183,
+               check_memory_197, check_project_asks_197, check_spec_memory_197,
+               check_nomad_order_197, check_claude_hooks_223, check_job_meta_265):
+        fn(c)
 
     for what, j, want in STALE:
-        cases += 1
-        if spec.spec_is_stale(j) != want:
-            bad += 1
-            print(f"FAILED  {what}: спека "
-                  f"{'признана устаревшей' if not want else 'признана свежей'}, "
-                  f"ждали обратного")
+        c.check(f"{what}: спека "
+                f"{'признана устаревшей' if not want else 'признана свежей'}, "
+                f"ждали обратного", not (spec.spec_is_stale(j) != want))
 
     for project, meta, want in CASES:
-        cases += 1
-        got = serves(project, meta)
-        if got != want:
-            bad += 1
-            print(f"FAILED  project {project!r} on a node announcing {meta!r}: "
-                  f"got {got}, wanted {want}")
+        c.expect(f"project {project!r} on a node announcing {meta!r}",
+                 serves(project, meta), want)
 
     # Ограничение обязано быть в каждой спеке: папет без него садится куда
     # угодно, и вся проверка становится украшением.
-    cases += 1
-    if project_constraint(spec.job_spec("pu-mop-1", ORIGIN)) is None:
-        bad += 1
-        print("FAILED  a job spec without the project constraint schedules anywhere")
+    c.check("a job spec without the project constraint schedules anywhere",
+            not (project_constraint(spec.job_spec("pu-mop-1", ORIGIN)) is None))
 
     # Проект берётся из ORIGIN, а не из имени: имя — производное, и разойтись
     # они могут только при ручной регистрации, где ошибка и опаснее всего.
-    cases += 1
-    c = project_constraint(spec.job_spec("pu-anything-7", ORIGIN))
-    if not re.search(c["RTarget"], "mop"):
-        bad += 1
-        print("FAILED  the constraint must follow the origin's project, not the name")
+    con = project_constraint(spec.job_spec("pu-anything-7", ORIGIN))
+    c.check("the constraint must follow the origin's project, not the name",
+            not (not re.search(con["RTarget"], "mop")))
 
     # Врапер -- шелл в base64 спеки, и синтаксическая ошибка в нём видна
     # только на узле, падением каждого подъёма. bash -n ловит её здесь.
-    cases += 1
     import subprocess
     r = subprocess.run(["bash", "-n"], input=spec.WRAPPER, text=True,
                        capture_output=True)
-    if r.returncode:
-        bad += 1
-        print(f"FAILED  the wrapper is not valid bash: {r.stderr.strip()}")
+    c.check("the wrapper is not valid bash", not (r.returncode), r.stderr.strip())
 
     # ── #256: ветка мастера едет метой джоба, не окружением ───────────────
     # HYPOTHESIS: свежий папет стоит на origin/HEAD (beta3.1 у rudesktop):
@@ -905,24 +840,18 @@ def main():
     # клона. Именно метой, а не Env: окружение задачи и врапер не меняются,
     # версия шаблона та же, ни одна зарегистрированная спека не устаревает.
     # STATUS: FIXED — see #256
-    cases += 1
     with_b = spec.job_spec("pu-mop-1", ORIGIN, "claude", branch="swarm")["Job"]
     without = spec.job_spec("pu-mop-1", ORIGIN, "claude")["Job"]
-    if with_b["Meta"].get("branch") != "swarm" or "branch" in without["Meta"]:
-        bad += 1
-        print(f"FAILED  #256 branch must ride in Meta only when given: "
-              f"{with_b['Meta']} / {without['Meta']}")
-    cases += 1
+    c.check("#256 branch must ride in Meta only when given",
+            not (with_b["Meta"].get("branch") != "swarm" or "branch" in without["Meta"]),
+            f"{with_b['Meta']} / {without['Meta']}")
     env_b = with_b["TaskGroups"][0]["Tasks"][0]["Env"]
     env_0 = without["TaskGroups"][0]["Tasks"][0]["Env"]
-    if env_b != env_0 or with_b["Meta"][spec.SPEC_META] != without["Meta"][spec.SPEC_META] \
-            or spec.spec_is_stale(with_b):
-        bad += 1
-        print("FAILED  #256 the branch must not touch the task env or the template version")
+    c.check("#256 the branch must not touch the task env or the template version",
+            not (env_b != env_0 or with_b["Meta"][spec.SPEC_META] != without["Meta"][spec.SPEC_META]
+                 or spec.spec_is_stale(with_b)))
 
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
-
+    return c.report("spec")
 
 if __name__ == "__main__":
     sys.exit(main())

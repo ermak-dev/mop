@@ -1,6 +1,7 @@
 """Владелец задания: кто сейчас ведёт папета (#161). Данные, без печати.
 
-Только stdlib: модуль читает и агент узла, и мастер.
+Модуль читает и агент узла, и мастер: из пакета -- только domain, узловой
+так же.
 
 Владеет не папетом, а заданием. Папет принадлежит проекту, и свободного
 отдать другому ничего не стоит: «free» и значит, что в клоне нет
@@ -15,14 +16,19 @@
 NATS не даёт. На прежних субъектах без логина -- переход, логин там по
 прежнему называет тело.
 """
+from .domain import holds_work
+
 FILE = ".git/mop-owner"
 
 # Окно диспатча: столько чужая аренда держит папета, у которого в клоне ещё
-# пусто. За это время папет заводит ветку, и дальше держит уже работа.
+# пусто. За это время папет делает первую правку, и дальше держит уже работа.
+# Ветка держит только вне дома клона (#266, #272): на ветке мастера папет
+# стоит и чистым, а запушенный тикет ждёт приёма отчёта.
 WINDOW = 600
 
 # Сама запись -- значение domain.Owner (#204): строка файла -- его render и
-# parse, здесь только политика над ним.
+# parse, здесь только политика над ним. Факты клона -- domain.CloneFacts, и
+# «в клоне работа» -- domain.holds_work, одно на всех (#266).
 
 
 def caller(req):
@@ -38,19 +44,9 @@ def caller(req):
     return (req.get("owner") or req.get("holder") or None), False
 
 
-def holds_work(clone):
-    """Есть ли в клоне работа: несохранённое, неотправленное или ветка не
-    по умолчанию. Клон неизвестен -- держит: «не знаю» не значит «пусто»."""
-    if not clone:
-        return True
-    if clone.get("dirty") or clone.get("ahead"):
-        return True
-    cur, default = clone.get("cur"), clone.get("def")
-    return bool(cur and default and cur != default)
-
-
 def live(owner, clone, now):
-    """Держит ли аренда папета: в клоне работа или она моложе окна."""
+    """Держит ли аренда папета: в клоне работа или она моложе окна.
+    clone -- domain.CloneFacts или None."""
     if not owner:
         return False
     return holds_work(clone) or now - owner.at < WINDOW
@@ -77,7 +73,12 @@ def may_touch(owner, me, clone, now, force=False, operator=False, retry="repeat"
     if not live(owner, clone, now):
         return True, None
     minutes = max(int((now - owner.at) // 60), 0)
-    what = "work in the clone" if holds_work(clone) else "dispatched, no branch yet"
+    if not holds_work(clone):
+        what = "dispatched, nothing committed yet"
+    elif clone and clone.known:
+        what = f"work in the clone on {clone.branch}: {', '.join(clone.work())}"
+    else:
+        what = "work in the clone"
     return False, (f"led by {owner.user} ({what}, last sent {minutes} min ago): "
                    f"ask them, or {retry} with force to take it over")
 
@@ -94,3 +95,22 @@ def verdict(owner, me, clone, now, force=False):
         return "pass", None
     ok, why = may_touch(owner, me, clone, now, force, retry="send")
     return ("take" if ok else "refuse"), why
+
+
+def gate(name, clone, me, now, force=False, operator=False):
+    """Ворота изменяющего глагола над папетом name (#40). -> (отказ | None,
+    заметка | None). clone -- domain.CloneFacts или None, его owner -- аренда.
+
+    Одна функция на обе стороны (#267): сервис кластера (restart, stop,
+    update, delete) и агент узла (type, wipe) писали её каждый у себя.
+    Сторона держит только своё: откуда факты клона и что отвечать."""
+    ok, note = may_touch(clone and clone.owner, me, clone, now, force, operator)
+    return (None, note) if ok else (f"{name}: {note}", None)
+
+
+def noted(out, note):
+    """Ответ глагола с заметкой о забранной аренде (owner_note, как у send):
+    только у удачного ответа и только если заметка есть. -> новый словарь."""
+    if note and not out.get("error"):
+        return dict(out, owner_note=note)
+    return out

@@ -17,12 +17,16 @@ import sys
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
+from _lib import Checks, patched  # noqa: E402
 from mop.common import puppets  # noqa: E402
 from mop import session  # noqa: E402
 from mop.common.state import PuppetRow, State, action_for, failing_row, failure_reason, is_free, silent, task_summary, verdict
 
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
-WORK = {"cur": "bug/1063", "def": "master", "dirty": 0, "ahead": 0}
+# Папет на ветке своего мастера (#256): она и дом клона (#272).
+WORK = {"cur": "bug/1063", "def": "master", "home": "bug/1063", "dirty": 0, "ahead": 0}
+# Тот же клон у старого агента: ключа home нет, дом -- ветка по умолчанию.
+OLD_WORK = {k: v for k, v in WORK.items() if k != "home"}
 
 
 # Свобода стоит под выбором жертв в mop gc: снести чужую работу из-за
@@ -77,7 +81,13 @@ CASES = [
 
     # Свободен = в клоне нечего терять. На этом стоит решение о диспатче.
     ("clean and everything's on origin", facts("idle 1 1", CLEAN), "free (master)"),
-    ("foreign branch, but everything's pushed",
+    # #272: чистый клон не на доме держит тикет (папет ждёт приёма отчёта);
+    # дом -- ветка мастера из меты, у старого агента -- ветка по умолчанию.
+    ("foreign branch, everything's pushed, but off its home -- holds a ticket",
+     facts("idle 1 1", {**WORK, "home": "master"}), "idle: bug/1063 (off home master)"),
+    ("the same from an old agent: no home key, home is the default branch",
+     facts("idle 1 1", OLD_WORK), "idle: bug/1063 (off home master)"),
+    ("the master's branch is its home, everything's pushed",
      facts("idle 1 1", WORK), "free (bug/1063)"),
     ("uncommitted files",
      facts("idle 1 1", {**WORK, "dirty": 3}), "idle: bug/1063 (uncommitted: 3)"),
@@ -246,15 +256,11 @@ HOOKED = [
 ]
 
 
-def check_hooked(cases):
-    bad = 0
+def check_hooked(c, cases):
     for what, given, want, free in cases:
         got = verdict(given)
-        if str(got) != want or is_free(got.kind) != free:
-            bad += 1
-            print(f"FAILED  #224 {what}\n  wanted:  {want!r} free={free}\n"
-                  f"  got: {str(got)!r} free={is_free(got.kind)}")
-    return bad, len(cases)
+        c.check(f"#224 {what}", not (str(got) != want or is_free(got.kind) != free),
+                f"wanted {want!r} free={free}, got {str(got)!r} free={is_free(got.kind)}")
 
 
 
@@ -290,6 +296,7 @@ TREATMENT = [
     ("idle: bug/1063 (uncommitted: 3)", False, False, "busy"),
     ("idle: bug/1063 (unpushed: 2)", False, False, "busy"),
     ("idle: bug/1063 (uncommitted: 3, unpushed: 2)", False, False, "busy"),
+    ("idle: bug/1063 (off home master)", False, False, "busy"),
     ("idle: bug/1063 (uncommitted: 2)", False, False, "busy"),
     ("idle: master (unpushed: 2)", False, False, "busy"),
     ("idle: master (uncommitted: 3)", False, False, "busy"),
@@ -325,27 +332,20 @@ def judge(case):
     return str(v), action_for(v.kind), is_free(v.kind), web.classify(row)
 
 
-def check_treatment():
-    bad, cases = 0, 0
+def check_treatment(c):
     table = {s: rest for s, *rest in TREATMENT}
     seen = set()
     inputs = ([given for _, given, _ in CASES + SCREENLESS]
               + [given for _, given, _, _ in HOOKED] + [("silent", a) for a, _ in SILENT])
     for given in inputs:
-        cases += 1
         state, *got = judge(given)
         seen.add(state)
-        if state not in table:
-            bad += 1
-            print(f"FAILED  treatment: {state!r} is not in the table")
-        elif list(table[state]) != got:
-            bad += 1
-            print(f"FAILED  treatment of {state!r}: wanted {table[state]}, got {got}")
+        if c.check(f"treatment: {state!r} is in the table", state in table):
+            c.expect(f"treatment of {state!r}", got, list(table[state]))
     # Таблица без лишних строк: каждая её строка кем-то произведена.
-    for state in set(table) - seen:
-        bad += 1
-        print(f"FAILED  treatment: nobody produces {state!r}")
-    return bad, cases + 1
+    unproduced = set(table) - seen
+    c.check("treatment: every table row is produced", not unproduced,
+            f"nobody produces {sorted(unproduced)!r}")
 
 
 # ── #174: устаревшая спека и лечение ─────────────────────────────────────────
@@ -363,41 +363,29 @@ SPEC_ACTION = [
 ]
 
 
-def check_stale_spec():
+def check_stale_spec(c):
     """STATUS: FIXED — see #174"""
     from mop.common import state
-    bad, cases = 0, 0
     fn = getattr(state, "spec_action", None)
     for kind, want in SPEC_ACTION:
-        cases += 1
         got = fn(kind) if fn else "missing"
-        if got != want:
-            bad += 1
-            print(f"FAILED  spec_action({kind!r}) -> {got!r}, wanted {want!r}")
+        c.expect(f"spec_action({kind!r})", got, want)
     # doctor целиком: roster подменён, лечение — из diagnose.
     run = {"ClientStatus": "running", "NodeName": "n1"}
 
     def item(name, kind, st, stale=True, alloc=run):
         return {"job": {"ID": name}, "alloc": alloc, "stale": stale,
                 "state": st, "kind": kind, "task": None, "reason": None}
-    keep = puppets.roster
-    try:
-        puppets.roster = lambda stale=False: [
+    with patched(puppets, roster=lambda stale=False: [
             item("pu-a-1", "free", "free (master)"),
             item("pu-a-2", "busy", "busy: feat/7"),
             item("pu-a-3", "hung", "HUNG (not responding)"),
             item("pu-a-4", "free", "free (master)", stale=False),
-        ]
+    ]):
         got = [(i["name"], i["action"]) for i in puppets.diagnose()]
-    finally:
-        puppets.roster = keep
     want = [("pu-a-1", "update"), ("pu-a-2", None), ("pu-a-3", None),
             ("pu-a-3", "restart")]
-    cases += 1
-    if got != want:
-        bad += 1
-        print(f"FAILED  diagnose over stale specs: {got}, wanted {want}")
-    return bad, cases
+    c.expect("diagnose over stale specs", got, want)
 
 # ── ростер глазами одного проекта (#29) ──────────────────────────────────────
 # HYPOTHESIS: джоба-папет без origin в Meta (старая регистрация) невидима
@@ -416,14 +404,11 @@ def _job(name, jtype="service", origin=None):
 # вот имя в origin не разворачивается), но строки-имена от легаси-времён
 # терять нельзя: их origin уже не узнать, а потеря имени молча выписывает
 # проекта из конфига NATS при следующем deploy.
-def check_project_ids(cases):
-    bad = 0
+def check_project_ids(c, cases):
     for what, lines, want_o, want_n in cases:
         got_o, got_n = puppets.project_ids(lines)
-        if got_o != want_o or got_n != want_n:
-            bad += 1
-            print(f"FAILED  project_ids, {what}: origins {got_o!r} names {got_n!r}")
-    return bad, len(cases)
+        c.check(f"project_ids, {what}", not (got_o != want_o or got_n != want_n),
+                f"origins {got_o!r} names {got_n!r}")
 
 
 PROJECT_IDS = [
@@ -435,15 +420,12 @@ PROJECT_IDS = [
 ]
 
 
-def check_visible(cases):
-    bad = 0
+def check_visible(c, cases):
     for what, listing, project, want in cases:
         got = puppets.visible(listing, project)
         got_ids = [j["ID"] for j in got]
-        if sorted(got_ids) != sorted(want):
-            bad += 1
-            print(f"FAILED  visible, {what}: wanted {want}, got {got_ids}")
-    return bad, len(cases)
+        c.check(f"visible, {what}", not (sorted(got_ids) != sorted(want)),
+                f"wanted {want}, got {got_ids}")
 
 
 VISIBLE = [
@@ -489,105 +471,236 @@ ALLOC = {"ClientStatus": "pending", "TaskStates": {"claude": {
                 "Time": 1_000_000_000_000}]}}}
 
 
-def check_failing():
+def check_failing(c):
     """HYPOTHESIS (#126): ростер читал только ClientStatus. SOLUTION: сводка
     задачи и причина из stderr. STATUS: FIXED — see #126"""
-    bad, cases = 0, 0
-    cases += 1
     t = task_summary(ALLOC, now=1000)
     want = {"state": "pending", "restarts": 4, "exit": 1, "next_s": 1576, "failed": False}
-    if t != want:
-        bad += 1
-        print(f"FAILED  task_summary -> {t}, wanted {want}")
+    c.expect("task_summary", t, want)
     # Срок -- оставшийся, а не задержка на момент события: через десять минут
     # «next in 26m» было бы неправдой.
-    cases += 1
     later = task_summary(ALLOC, now=1000 + 600)
-    if later["next_s"] != 976:
-        bad += 1
-        print(f"FAILED  next_s must count down from the event: {later['next_s']}")
-    cases += 1
-    if task_summary(ALLOC, now=1000 + 99999)["next_s"] != 0:
-        bad += 1
-        print("FAILED  a passed deadline is 0, not negative")
+    c.expect("next_s must count down from the event", later["next_s"], 976)
+    c.expect("a passed deadline is 0, not negative",
+             task_summary(ALLOC, now=1000 + 99999)["next_s"], 0)
     # Причина -- из последней попытки, первая ошибка после строки врапера.
-    cases += 1
     got = failure_reason(STDERR)
     want = "bootstrap: Could not find or access '~/rugent/.env-prod' on the Ansible Controller."
-    if got != want:
-        bad += 1
-        print(f"FAILED  failure_reason -> {got!r}, wanted {want!r}")
+    c.expect("failure_reason", got, want)
     # Без знакомых строк -- последняя непустая, а пусто -- None.
-    cases += 1
-    if failure_reason("x\nsomething broke\n\n") != "something broke" \
-            or failure_reason("") is not None:
-        bad += 1
-        print("FAILED  failure_reason must fall back to the last line, and None on empty")
+    c.check("failure_reason must fall back to the last line, and None on empty",
+            not (failure_reason("x\nsomething broke\n\n") != "something broke"
+                 or failure_reason("") is not None))
     # Строка ростера: падающий -- failing с причиной и сроком, а не pending.
-    cases += 1
     fn = failing_row
     got = fn("pending", t, "bootstrap: no file") if fn else None
     want = ("failing", "FAILED: bootstrap: no file (4 restarts, next in 26m)")
-    if got != want:
-        bad += 1
-        print(f"FAILED  failing_row -> {got}, wanted {want}")
+    c.expect("failing_row", got, want)
     # Работающая задача и задача без падений -- не failing.
     for task in ({"state": "running", "restarts": 4, "exit": 1, "next_s": None, "failed": False},
                  {"state": "pending", "restarts": 0, "exit": None, "next_s": None, "failed": False},
                  None):
-        cases += 1
-        if fn and fn("pending", task, None) is not None:
-            bad += 1
-            print(f"FAILED  failing_row must be None for {task}")
+        c.check(f"failing_row must be None for {task}",
+                not (fn and fn("pending", task, None) is not None))
     # Задача исчерпала попытки -- тоже failing, без срока.
-    cases += 1
     dead = {"state": "dead", "restarts": 9, "exit": 1, "next_s": None, "failed": True}
     got = fn("failed", dead, "boom") if fn else None
-    if got != ("failing", "FAILED: boom (9 restarts, gave up)"):
-        bad += 1
-        print(f"FAILED  failing_row for a task that gave up -> {got}")
-    return bad, cases
+    c.expect("failing_row for a task that gave up", got,
+             ("failing", "FAILED: boom (9 restarts, gave up)"))
+
+
+def check_row_none_274(c):
+    """HYPOTHESIS (#274): «здесь ничего» в строке ростера зашито строками при
+    сборке -- puppets._row пишет node "-" без аллокации, owner "-", origin
+    "?", state "-", -- и решения сравнивают строки (puppet_sizes и gc:
+    `r.node != "-"`). Прочерк для человека стал данными для решения.
+    SOLUTION: PuppetRow держит None; прочерк и вопрос появляются только при
+    показе -- render(), он же to_dict (провод дашборда, страница читает по
+    имени). Решения сравнивают с None. STATUS: FIXED — see #274"""
+    import ast
+    import inspect
+    from mop.common import bus, puppets
+    from mop.cli.core import list as cli_list
+    empty = PuppetRow("pu-x-1", None, "pending", None, None, None, "claude", None)
+    old = {"name": "pu-x-1", "node": "-", "alloc_status": "pending", "state": "-",
+           "kind": None, "owner": "-", "llm": "claude", "origin": "?", "disk_kb": None}
+    render = getattr(empty, "render", None)
+    c.expect("#274 None renders as the old strings", render and render(), old)
+    c.expect("#274 to_dict is the rendered wire form", empty.to_dict(), old)
+    c.expect("#274 mop list line: None as before",
+             cli_list.line(empty), cli_list.line(PuppetRow(**{**old})))
+    # Сборка: без аллокации, владельца и origin -- None, не строки.
+    item = {"job": {"ID": "pu-x-1", "Status": "pending", "Meta": {}}, "alloc": None,
+            "error": None, "state": None, "kind": None, "owner": None}
+    row = puppets._row(item)
+    c.expect("#274 _row holds None for nothing",
+             (row.node, row.state, row.owner, row.origin), (None, None, None, None))
+    c.expect("#274 _row renders as before", row.to_dict()["node"] + row.to_dict()["state"]
+             + row.to_dict()["owner"] + row.to_dict()["origin"], "---?")
+    # Решение по None -- то же, что по "-": обмер не спрашивает узел, которого нет.
+    asked = []
+
+    def stream(verb, asks, **kw):
+        asked.append(dict(asks))
+        return iter(())
+    keep = bus.request_stream
+    try:
+        bus.request_stream = stream
+        running = PuppetRow("pu-x-2", None, "running", "free", "free", None, "claude", None)
+        placed = PuppetRow("pu-x-3", "n1", "running", "free", "free", None, "claude", None)
+        puppets.puppet_sizes([running, placed])
+    finally:
+        bus.request_stream = keep
+    c.expect("#274 sizes skip a row without a node", asked,
+             [{"pu-x-3": ("n1", {"names": ["pu-x-3"]})}])
+    # _row больше не пишет прочерки в строку, решения их не сравнивают.
+    tree = ast.parse(inspect.getsource(puppets._row))
+    call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and getattr(n.func, "id", None) == "PuppetRow")
+    written = sorted(k.arg for k in call.keywords for x in ast.walk(k.value)
+                     if isinstance(x, ast.Constant) and x.value in ("-", "?")
+                     and k.arg != "alloc_status")
+    c.expect("#274 _row writes no sentinel into node/state/owner/origin", written, [])
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    compared = []
+    for rel in ("mop/common/puppets.py", "mop/cli/pool/gc.py", "mop/server/web.py"):
+        for n, line in enumerate(open(os.path.join(root, rel)), 1):
+            if any(f'.{f} {op} "{s}"' in line for f in ("node", "owner", "origin", "state")
+                   for op in ("==", "!=") for s in ("-", "?")):
+                compared.append(f"{rel}:{n}")
+    c.expect("#274 decisions compare with None, not the dash", compared, [])
 
 
 def main():
-    bad = 0
+    c = Checks()
     for what, given, want in CASES:
-        got = str(verdict(given))
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}\n  wanted:  {want!r}\n  got: {got!r}")
-    cases = len(CASES)
+        c.expect(what, str(verdict(given)), want)
     for what, given, want in SCREENLESS:
-        got = str(verdict(given))
-        if got != want:
-            bad += 1
-            print(f"FAILED  #235 {what}\n  wanted:  {want!r}\n  got: {got!r}")
-    cases += len(SCREENLESS)
-    hbad, hcases = check_hooked(HOOKED)
-    bad += hbad
-    cases += hcases
-    vbad, vcases = check_visible(VISIBLE)
-    sbad, scases = check_project_ids(PROJECT_IDS)
-    bad += sbad
-    cases += scases
-    bad += vbad
-    cases += vcases
-    fbad, fcases = check_failing()
-    bad += fbad
-    cases += fcases
-    tbad, tcases = check_treatment()
-    sbad2, scases2 = check_stale_spec()
-    bad += sbad2
-    cases += scases2
-    bad += tbad
-    cases += tcases
+        c.expect(f"#235 {what}", str(verdict(given)), want)
+    check_hooked(c, HOOKED)
+    check_visible(c, VISIBLE)
+    check_project_ids(c, PROJECT_IDS)
+    check_failing(c)
+    check_treatment(c)
+    check_stale_spec(c)
+    check_clone_agreement(c)
+    check_row_none_274(c)
+    check_invariants_273(c)
     for state, want in FREE_CASES:
-        cases += 1
-        if is_free(state and state.kind) != want:
-            bad += 1
-            print(f"FAILED  is_free({state!r})")
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+        c.expect(f"is_free({state!r})", is_free(state and state.kind), want)
+    return c.report("state")
+
+
+# Таблица клонов: (что, факты клона агента, держит ли работу).
+CLONE_TABLE = [
+    ("clean on the default branch", CLEAN, False),
+    ("clean on the master's branch (its home)", WORK, False),
+    # #272: дом клона -- ветка мастера или ветка по умолчанию.
+    ("clean off its home: waiting for accept", {**WORK, "home": "master"}, True),
+    ("clean off its home, old agent (no home key)", OLD_WORK, True),
+    ("clean on the default branch, home elsewhere", {**CLEAN, "home": "swarm"}, True),
+    ("uncommitted on the default branch", {**CLEAN, "dirty": 2}, True),
+    ("unpushed on a branch", {**WORK, "ahead": 1}, True),
+    ("both on a branch", {**WORK, "dirty": 1, "ahead": 3}, True),
+]
+
+
+def check_clone_agreement(c):
+    """«В клоне работа» -- одно правило на всех потребителей (#266).
+
+    HYPOTHESIS: правило записано трижды: lease.holds_work считал работой и
+    ветку не по умолчанию, state._clone_veto и classify_junk -- только
+    dirty/ahead. Папет на ветке мастера (#256) ростер звал free, а аренда
+    держала его вечно.
+    SOLUTION: domain.CloneFacts и domain.holds_work; state, lease,
+    classify_junk и cluster.gate решают им.
+    STATUS: FIXED — see #266"""
+    from mop.common import lease
+    from mop.common.domain import CloneFacts, Owner
+    from mop.server import cluster
+    now = 1_000_000
+    stale = Owner("olga", now - lease.WINDOW - 1).to_dict()
+    for what, clone, holds in CLONE_TABLE:
+        wire = {**clone, "owner": stale}
+        got = {
+            "state": not is_free(verdict(facts("idle 1 1", wire)).kind),
+            "lease": not lease.may_touch(Owner.from_dict(stale), "anton",
+                                         CloneFacts.from_dict(wire), now)[0],
+            "sweep": not puppets.classify_junk(
+                {"n": {"bodies": ["pu-x-1"], "work": {"pu-x-1": wire}}}, set())[0]["sweepable"],
+            "gate": cluster.gate("pu-x-1", {"_caller": "anton"}, {"clone": wire}, now)[0] is not None,
+        }
+        for who, says in got.items():
+            c.expect(f"#266 {who} on {what}: holds work", says, holds)
+
+
+
+def check_invariants_273(c):
+    """HYPOTHESIS (#273): доменные значения заморожены, но без инвариантов:
+    CloneFacts(dirty=-1), Body(vmid="abc"), JobMeta(origin="") строятся
+    молча, и CloneFacts.known пропускает полусобранный объект -- каждый
+    читатель проверяет сам.
+    SOLUTION: __post_init__ отказывает ValueError с именем поля, одним
+    местом; from_dict терпит провод старого агента (нет ключа -- None), но
+    не мусор (не тот тип -- ValueError).
+    STATUS: FIXED — see #273"""
+    from mop.common.domain import Body, CloneFacts, Gone, JobMeta
+
+    def refused(what, build, field):
+        try:
+            got = build()
+        except ValueError as e:
+            c.check(f"#273 {what}: the refusal names {field}", field in str(e), str(e))
+            return
+        c.fail(f"#273 {what} must be refused", repr(got))
+
+    def fine(what, build):
+        try:
+            build()
+            c.check(f"#273 {what} builds", True)
+        except ValueError as e:
+            c.fail(f"#273 {what} must build", str(e))
+
+    for what, build, field in [
+            ("CloneFacts(dirty=-1)", lambda: CloneFacts(dirty=-1, ahead=0), "dirty"),
+            ("CloneFacts(ahead=-2)", lambda: CloneFacts(dirty=0, ahead=-2), "ahead"),
+            ("CloneFacts(dirty='3')", lambda: CloneFacts(dirty="3", ahead=0), "dirty"),
+            ("CloneFacts(dirty=True)", lambda: CloneFacts(dirty=True, ahead=0), "dirty"),
+            ("CloneFacts half-built (dirty only)", lambda: CloneFacts(dirty=1), "ahead"),
+            ("CloneFacts half-built (ahead only)", lambda: CloneFacts(ahead=1), "dirty"),
+            ("Body(vmid='abc')", lambda: Body("pu-mop-1", vmid="abc"), "vmid"),
+            ("Body(vmid=True)", lambda: Body("pu-mop-1", vmid=True), "vmid"),
+            ("Body(created='yes')", lambda: Body("pu-mop-1", created="yes"), "created"),
+            ("Body(name='nope')", lambda: Body("nope"), "name"),
+            ("Body(name='pu-mop-1; id')", lambda: Body("pu-mop-1; id"), "name"),
+            ("Gone(target='')", lambda: Gone(""), "target"),
+            ("Gone(target=None)", lambda: Gone(None), "target"),
+            ("JobMeta(origin='')", lambda: JobMeta("", "claude"), "origin"),
+            ("JobMeta(origin=5)", lambda: JobMeta(5, "claude"), "origin"),
+            ("JobMeta(llm=7)", lambda: JobMeta("git@h:g/mop.git", 7), "llm"),
+            ("CloneFacts.from_dict garbage", lambda: CloneFacts.from_dict({"dirty": "x", "ahead": 0}), "dirty"),
+            ("Body.from_dict garbage created", lambda: Body.from_dict({"name": "pu-mop-1", "created": "yes"}), "created"),
+            ("Gone.from_dict without target", lambda: Gone.from_dict({"reset": True}), "target")]:
+        refused(what, build, field)
+    for what, build in [
+            ("CloneFacts() (nothing known)", lambda: CloneFacts()),
+            ("CloneFacts(dirty=0, ahead=0)", lambda: CloneFacts(dirty=0, ahead=0)),
+            ("CloneFacts(dirty=3, ahead=1)", lambda: CloneFacts(dirty=3, ahead=1)),
+            ("Body host", lambda: Body("pu-mop-1")),
+            ("Body pve", lambda: Body("pu-mop-1", 9003, "10.77.35.59", True)),
+            ("Gone host", lambda: Gone("/home/u/puppets/pu-mop-1/target")),
+            ("Gone pve", lambda: Gone("body 9003", 9003)),
+            ("JobMeta full", lambda: JobMeta("git@h:g/mop.git", "claude", "feat/1", "3")),
+            ("JobMeta without origin (a job without meta)", lambda: JobMeta(None, None)),
+            ("JobMeta.from_meta({})", lambda: JobMeta.from_meta({})),
+            ("Body.from_dict of an old agent (no created)", lambda: Body.from_dict({"name": "pu-mop-1", "body": None}))]:
+        fine(what, build)
+    old = CloneFacts.from_dict({"cur": "master", "def": "master", "origin": "git@h:g/mop.git",
+                                "owner": None})
+    c.check("#273 an old agent's clone without dirty/ahead reads, and is not known",
+            old is not None and old.known is False, repr(old))
+    c.expect("#273 Body.from_dict of an old agent: created is False",
+             Body.from_dict({"name": "pu-mop-1", "body": None}).created, False)
 
 
 if __name__ == "__main__":

@@ -13,11 +13,11 @@ non-fast-forward, прогнав гейт по интеграции, котор�
 import json
 import os
 
-from . import fsutil
+from . import fsutil, paths
 
 # Файл сервиса кластера на сервере, рядом с limits.json. Не прогона: deploy
 # его не кладёт и не трогает, иначе прогон посреди посадки ронял бы токен.
-FILE = os.path.expanduser("~/.config/mop/landing.json")
+FILE = paths.local("landing.json")
 
 
 def holder():

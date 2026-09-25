@@ -15,6 +15,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, ROOT)
 
 from mop import driver  # noqa: E402
@@ -106,41 +107,27 @@ def consumers(url):
 
 
 def main():
-    bad = cases = 0
-
-    def fail(msg):
-        nonlocal bad
-        bad += 1
-        print(f"FAILED  {msg}")
-
+    c = Checks()
     for url, gl, hosts, looks, proj in SAME:
         want = {"gitlab": gl, "git_hosts": hosts, "looks_like": looks,
                 "project_of": proj}
         got = consumers(url)
         for k in want:
-            cases += 1
-            if got[k] != want[k]:
-                fail(f"{k}({url!r}) -> {got[k]!r}, wanted {want[k]!r}")
+            c.expect(f"{k}({url!r})", got[k], want[k])
 
     for url, who, was, now in CHANGED:
-        cases += 1
-        got = consumers(url)[who]
-        if got != now:
-            fail(f"{who}({url!r}) -> {got!r}, wanted {now!r} (was {was!r})")
+        c.expect(f"{who}({url!r}) (was {was!r})", consumers(url)[who], now)
 
     parse = getattr(driver, "parse_origin", None)
+    c.check("driver.parse_origin exists", parse is not None)
     for url, want in PARSE:
-        cases += 1
         got = parse(url) if parse else "no driver.parse_origin"
-        if got != want:
-            fail(f"parse_origin({url!r}) -> {got!r}, wanted {want!r}")
+        c.expect(f"parse_origin({url!r})", got, want)
 
     # Правило проекта -- одно, у драйвера: агент puppets импортировать не
     # может, и раньше держал копию.
-    cases += 1
-    if getattr(driver, "project_of", None) is not puppets.project_of:
-        fail("puppets.project_of must be driver.project_of")
-    cases += 1
+    c.check("puppets.project_of must be driver.project_of",
+            not (getattr(driver, "project_of", None) is not puppets.project_of))
     copies = []
     for top, _, files in os.walk(os.path.join(ROOT, "mop")):
         for f in files:
@@ -149,8 +136,9 @@ def main():
                 with open(path) as fh:
                     if 'removesuffix(".git")' in fh.read():
                         copies.append(os.path.relpath(path, ROOT))
-    if copies != [os.path.join("mop", "driver", "__init__.py")]:
-        fail(f"project rule must live only in mop/driver/__init__.py, found in {copies}")
+    c.check("project rule must live only in mop/driver/__init__.py",
+            not (copies != [os.path.join("mop", "driver", "__init__.py")]),
+            f"found in {copies}")
 
     # HYPOTHESIS (#165): project_of брал basename всей строки, и на
     # вырожденных формах выходил мусор: scp без группы -- «git@h:p», хвостовой
@@ -161,17 +149,11 @@ def main():
     for url, want in (("git@h:p.git", "p"), ("git@h:p", "p"),
                       ("https://h/g/p/", "p"), ("ssh://git@h:2222/g/p.git/", "p"),
                       ("x:", "x:"), ("mop", "mop"), ("", "")):
-        cases += 1
-        if driver.project_of(url) != want:
-            fail(f"project_of({url!r}) -> {driver.project_of(url)!r}, wanted {want!r}")
+        c.expect(f"project_of({url!r})", driver.project_of(url), want)
     # Прежний мусор именем папета не становился: valid_name его не пускает.
     for n in ("pu-git@h:p-1", "pu--1"):
-        cases += 1
-        if driver.valid_name(n):
-            fail(f"valid_name({n!r}) accepted an old garbage name")
-
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+        c.check(f"valid_name({n!r}) must refuse an old garbage name", not driver.valid_name(n))
+    return c.report("origin")
 
 
 if __name__ == "__main__":

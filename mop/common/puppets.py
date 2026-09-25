@@ -11,7 +11,7 @@ import time
 
 from . import bus, config, lease, llm, state
 from .. import driver
-from .domain import Owner
+from .domain import CloneFacts, JobMeta, NodeRow, PoolNode, holds_work
 from .state import PuppetRow, action_for, failing_row, silent, spec_action, verdict
 
 PROJECT = config.PROJECT
@@ -22,7 +22,6 @@ HOME = driver.HOME                         # $HOME на узлах пула
 # драйверов: это единственный stdlib-модуль, который читают и мастер, и узел.
 # Здесь — только имена, под которыми его знает мастер.
 JOB_PREFIX = driver.PREFIX
-project_of_name = driver.project_of_name
 clone_dir = driver.clone_dir
 
 # ─── LLM-профили ─────────────────────────────────────────────────────────
@@ -89,7 +88,7 @@ def visible(listing, project):
     for j in listing:
         if not j.get("ID", "").startswith(JOB_PREFIX) or j.get("Type") != "service":
             continue
-        origin = (j.get("Meta") or {}).get("origin")
+        origin = JobMeta.from_job(j).origin
         if project == bus.ADMIN:
             out.append(j)
         elif origin and project_of(origin) == project:
@@ -120,11 +119,6 @@ def jobs(project=None):
     и мастер проекта перестаёт видеть чужих папетов уже здесь, в ростере.
     Кто виден кому — visible(): #29."""
     return [i["job"] for i in items(project)]
-
-
-def facts(node, name):
-    """Факты об одном папете с его узла."""
-    return bus.request(node, "state", name=name)
 
 
 # ─── сводки для фронтендов ───────────────────────────────────────────────
@@ -192,8 +186,8 @@ def roster(stale=False):
     # к шине отношения не имеет; уронить `list` вместе с ней значит оставить
     # мастера без единственной картины пула ровно тогда, когда что-то сломалось.
     try:
-        answers = bus.request_many({
-            node: {"verb": "states", "names": [i["job"]["ID"] for i in its]}
+        answers = bus.request_many("states", {
+            node: {"names": [i["job"]["ID"] for i in its]}
             for node, its in by_node.items()})
     except bus.BusError as e:
         answers = {node: bus.BusError(str(e)) for node in by_node}
@@ -222,8 +216,8 @@ def _judge(item, state):
 
 def owner_of(facts, now):
     """Кто ведёт задание папета (#161), если аренда живая; иначе None."""
-    clone = ((facts or {}).get("clone")) or None
-    owner = Owner.from_dict((clone or {}).get("owner"))
+    clone = CloneFacts.from_dict((facts or {}).get("clone"))
+    owner = clone and clone.owner
     return owner.user if lease.live(owner, clone, now) else None
 
 
@@ -234,9 +228,9 @@ def rows_from(items):
 
 def _row(item, disk_kb=None):
     job, alloc = item["job"], item["alloc"]
-    meta = job.get("Meta") or {}
+    meta = JobMeta.from_job(job)
     status = item["error"] or (alloc["ClientStatus"] if alloc else job.get("Status", "?"))
-    state, kind = item["state"] or "-", item.get("kind")
+    state, kind = item["state"] or None, item.get("kind")
     # Падающий на старте -- failing с причиной, а не pending (#126).
     failing = failing_row(status, item.get("task"), item.get("reason"))
     if failing and not item["error"]:
@@ -244,15 +238,20 @@ def _row(item, disk_kb=None):
         kind = "failing"
     return PuppetRow(
         name=job["ID"],
-        node=alloc["NodeName"] if alloc else "-",
+        node=alloc["NodeName"] if alloc else None,
         alloc_status=status,
         state=state,
         kind=kind,
-        owner=item.get("owner") or "-",
+        owner=item.get("owner") or None,
         llm=llm.of_meta(meta),
-        origin=meta.get("origin", "?"),
+        # Нет ключа в мете -- None; «?» рисует показ (PuppetRow.render, #274).
+        origin=meta.origin,
         disk_kb=disk_kb,
     )
+
+
+# Обмер места на узлах (sizes): и потоком ростера, и отдельным обмером (#268).
+SIZES_TIMEOUT = 45
 
 
 def puppet_rows_stream():
@@ -275,8 +274,7 @@ def puppet_rows_stream():
     for i in items:
         alloc = i["alloc"]
         if alloc and alloc["ClientStatus"] == "running":
-            asked[i["job"]["ID"]] = (alloc["NodeName"],
-                                     {"verb": "sizes", "names": [i["job"]["ID"]]})
+            asked[i["job"]["ID"]] = (alloc["NodeName"], {"names": [i["job"]["ID"]]})
         else:
             rest.append(i)
     by_name = {i["job"]["ID"]: i for i in items}
@@ -285,7 +283,7 @@ def puppet_rows_stream():
     for i in rest:
         yield _row(i)
     try:
-        for name, answer in bus.request_stream(asked, timeout=45):
+        for name, answer in bus.request_stream("sizes", asked, timeout=SIZES_TIMEOUT):
             sizes = ({} if isinstance(answer, Exception)
                      else ((answer or {}).get("sizes") or {}))
             yield _row(by_name[name], sizes.get(name))
@@ -310,18 +308,18 @@ def puppet_rows(sizes=True):
     return sorted(puppet_rows_stream(), key=lambda r: r.name)
 
 
-def puppet_sizes(rows, timeout=45):
+def puppet_sizes(rows, timeout=SIZES_TIMEOUT):
     """Обмер места по строкам puppet_rows: {имя: КБ}. Спрашиваются только
     те, у кого бежит аллокация; кого не обмерили — в ответе нет, и это
     прочерк у вызывающего. Легла шина — пустой ответ, не исключение: место
     здесь не главное, а состояние уже показано."""
     asked = {}
     for r in rows:
-        if r.alloc_status == "running" and r.node != "-":
-            asked[r.name] = (r.node, {"verb": "sizes", "names": [r.name]})
+        if r.alloc_status == "running" and r.node is not None:
+            asked[r.name] = (r.node, {"names": [r.name]})
     out = {}
     try:
-        for name, answer in bus.request_stream(asked, timeout=timeout):
+        for name, answer in bus.request_stream("sizes", asked, timeout=timeout):
             if isinstance(answer, Exception):
                 continue
             kb = ((answer or {}).get("sizes") or {}).get(name)
@@ -343,21 +341,20 @@ def pool():
     Отказ сервиса -- bus.Refused с его текстом, а не пустой пул (#163):
     пустота читалась как «узлов нет», и по ней работало всё, что идёт через
     ready_nodes."""
-    return bus.call_cluster("pool").get("nodes") or []
+    return [PoolNode.from_pool(n) for n in bus.call_cluster("pool").get("nodes") or []]
 
 
 def nodes():
     """Узлы пула через шину -- для всех, кроме сервера. Глагол оператора:
     строка узла говорит, чьи образы на нём собраны и кто его делит.
     Отказ сервиса -- Refused, а не пустая таблица (#163)."""
-    return bus.call_cluster("nodes").get("nodes") or []
+    return [NodeRow.from_row(n) for n in bus.call_cluster("nodes").get("nodes") or []]
 
 
 def ready_nodes():
     """Имена узлов, на которые Nomad вообще станет что-то ставить. Через шину:
     тот же ответ, что раньше давал nomad.ready_nodes() на машине оператора."""
-    return {n["name"] for n in pool()
-            if n.get("status") == "ready" and n.get("eligible", True)}
+    return {n.name for n in pool() if n.placeable}
 
 
 # ─── диагностика ─────────────────────────────────────────────────────────
@@ -431,7 +428,7 @@ def _placement_issue(job, alloc, unserved=False, ceiling=None):
     if state.queued(job) and unserved == "memory":
         # Просьба проекта больше, чем готова дать любая машина с его образом:
         # ни ожидание, ни сборка образа не помогут.
-        project = project_of((job.get("Meta") or {}).get("origin") or "")
+        project = JobMeta.from_job(job).project
         return {"name": name, "alloc": None, "action": None,
                 "diagnosis": f"queued — no ready node of {project} takes a "
                              f"{ceiling} MB puppet (node meta mop_mem_cap_mb): "
@@ -440,7 +437,7 @@ def _placement_issue(job, alloc, unserved=False, ceiling=None):
     if state.queued(job) and unserved:
         # Слоты тут ни при чём: ограничение размещения по образу (#10) не
         # пускает никуда, и ожидание не вылечит ничего.
-        origin = (job.get("Meta") or {}).get("origin") or "<origin>"
+        origin = JobMeta.from_job(job).origin or "<origin>"
         return {"name": name, "alloc": None, "action": None,
                 "diagnosis": f"queued — no ready node has an image of "
                              f"{project_of(origin)}: mop project add {origin}"}
@@ -482,9 +479,13 @@ def treat(issue):
             # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
             # аллокации поднял бы ту же старую. Клон переживает — меняется
             # только спека.
-            meta = _cluster("spec", name=name).get("meta") or {}
-            got = _cluster("update", name=name, origin=meta["origin"],
-                           profile=meta.get("llm"), **me)
+            # Ветка -- с остальной метой (#265): лечение не ставит папета
+            # мастера обратно на origin/HEAD.
+            meta = JobMeta.from_meta(_cluster("spec", name=name).get("meta"))
+            if not meta.origin:
+                raise RuntimeError(f"{name} has no origin in Meta")
+            got = _cluster("update", name=name, origin=meta.origin,
+                           profile=llm.of_meta(meta), branch=meta.branch, **me)
             return ("spec re-registered — the puppet comes up with the new wrapper"
                     + _note(got))
         got = _cluster("restart", name=name, **me)
@@ -500,13 +501,18 @@ def _note(reply):
 
 
 # ─── рецикл ───────────────────────────────────────────────────────────────
+# Снос клона и target на узле: сотни тысяч inode. Одно число на всех, кто
+# зовёт глагол wipe (#268): recycle отсюда и sweep пула.
+WIPE_TIMEOUT = 600
+
+
 def wipe(node, name, force=False, branch=None):
     """Глагол wipe напрямую, без остановки джоба. Агент сам откажет, если
     tmux-сессия жива: голый wipe — для уже остановленного папета, полный
     цикл (стоп → снос → подъём) — recycle. Чужой папет -- отказ агента с
     именем владельца (#40), force его проходит."""
     r = bus.request(node, "wipe", name=name, owner=bus.login(), force=force,
-                    branch=branch, timeout=600)
+                    branch=branch, timeout=WIPE_TIMEOUT)
     if "error" in r:
         raise RuntimeError(r["error"])
     return r
@@ -559,17 +565,22 @@ def classify_junk(answers, known):
         for name in sorted(a.get("bodies") or []):
             if name in known:
                 continue
-            w = work.get(name) or {}
-            dirty, ahead = w.get("dirty") or 0, w.get("ahead") or 0
-            if dirty or ahead:
+            # Строки work нет -- у тела нет клона (агент его не нашёл), и
+            # спасать нечего: сносится, как и до #266. Есть -- решает одно
+            # правило на всех, domain.holds_work.
+            w = CloneFacts.from_dict(work.get(name))
+            if w and holds_work(w):
                 # Сирота с несохранённой работой остаётся. Джоба у неё нет,
                 # значит вернуть её к делу уже нельзя, — но снесённое не
                 # возвращается вовсе, а лежащий контейнер стоит только места.
                 # Размен очевиден в одну сторону.
                 out.append({
                     "node": node, "kind": "orphan", "name": name,
-                    "detail": f"holds work: {dirty} uncommitted, {ahead} "
-                              f"unpushed on {w.get('cur') or '(detached)'}",
+                    "detail": f"holds work: {w.dirty or 0} uncommitted, {w.ahead or 0} "
+                              f"unpushed on {w.branch or '(detached)'}"
+                              + (f", off home {w.home_branch}"
+                                 if w.branch and w.home_branch
+                                 and w.branch != w.home_branch else ""),
                     "sweepable": False})
                 continue
             out.append({"node": node, "kind": "orphan", "name": name,
@@ -653,8 +664,8 @@ def recycle(name, workspace_of=None, force=False):
     Ворота владения (#40) -- на первом шаге, останове: чужой папет
     отказывает до того, как что-то остановлено; force идёт во все три
     шага."""
-    meta = _cluster("spec", name=name).get("meta") or {}
-    origin = meta.get("origin")
+    meta = JobMeta.from_meta(_cluster("spec", name=name).get("meta"))
+    origin = meta.origin
     if not origin:
         raise RuntimeError(f"{name} has no origin in Meta — is this even a puppet?")
     profile = llm.of_meta(meta)
@@ -666,7 +677,7 @@ def recycle(name, workspace_of=None, force=False):
     # Ветка мастера (#257): из контекста команды, иначе та, с которой папет
     # заведён (мета джоба) -- рецикл без рабочей копии (gc) её не теряет.
     from . import context
-    branch = context.current().branch or meta.get("branch")
+    branch = context.current().branch or meta.branch
     me = {"owner": bus.login(), "force": force}
     note = _cluster("delete", name=name, purge=False, **me).get("owner_note")
     _wait_stopped(name)

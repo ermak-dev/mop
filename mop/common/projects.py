@@ -27,9 +27,9 @@ import json
 import os
 
 from .. import driver
-from . import fsutil, puppets
+from . import fsutil, paths, puppets
 
-FILE = os.path.expanduser("~/.config/mop/projects")
+FILE = paths.local(paths.PROJECTS)
 
 
 # ─── чистое: что реестр принимает, что теряет ────────────────────────────
@@ -90,7 +90,7 @@ def git_hosts(origins, default):
 # origin'а: иначе поменялся бы разбор реестра всюду, где читают origin.
 # Правит его `mop project limit` на контроллере, на сервер его кладёт прогон
 # (deploy/roles/cluster), а сверяет сервис кластера в глаголе `add`.
-LIMITS = os.path.expanduser("~/.config/mop/limits.json")
+LIMITS = paths.local("limits.json")
 
 
 def parse_limit(text):

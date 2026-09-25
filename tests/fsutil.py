@@ -15,6 +15,7 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks  # noqa: E402
 sys.path.insert(0, ROOT)
 
 from mop.common import config, creds, project_secrets, projects  # noqa: E402
@@ -69,38 +70,31 @@ def mode(path):
 
 
 def main():
-    bad = cases = 0
-
-    def check(what, got, want):
-        nonlocal bad, cases
-        cases += 1
-        if got != want:
-            bad += 1
-            print(f"FAILED  {what}\n  wanted:  {want!r}\n  got: {got!r}")
+    c = Checks()
 
     # ── характеризация прежних потребителей: держится до и после ─────────
     with tempfile.TemporaryDirectory() as d:
         env = os.path.join(d, ".env")
         with open(env, "w") as f:
             f.write(ENV_TEXT)
-        check("config.read_env: .env dialect", config.read_env(env), ENV_WANT)
-        check("config.read_env: no file", config.read_env(os.path.join(d, "no")), {})
+        c.expect("config.read_env: .env dialect", config.read_env(env), ENV_WANT)
+        c.expect("config.read_env: no file", config.read_env(os.path.join(d, "no")), {})
 
         os.makedirs(os.path.join(d, "proj"))
         with open(os.path.join(d, "proj", project_secrets.VARS), "w") as f:
             f.write(RAW_TEXT)
-        check("project_secrets vars.env: raw dialect",
+        c.expect("project_secrets vars.env: raw dialect",
               project_secrets._vars(d, "proj"), RAW_WANT)
-        check("agent probe: raw dialect",
+        c.expect("agent probe: raw dialect",
               dict(l.split("=", 1) for l in RAW_TEXT.splitlines() if "=" in l),
               RAW_WANT)
         # Круг: set_var пишет, _vars читает то же, пробелы и кавычки целы.
         project_secrets.set_var(d, "rt", "Z", ' "a b" ')
         project_secrets.set_var(d, "rt", "Y", "#x")
-        check("vars.env round trip", project_secrets._vars(d, "rt"),
+        c.expect("vars.env round trip", project_secrets._vars(d, "rt"),
               {"Z": ' "a b" ', "Y": "#x"})
         with open(os.path.join(d, "rt", project_secrets.VARS)) as f:
-            check("vars.env layout: sorted KEY=VALUE lines", f.read(),
+            c.expect("vars.env layout: sorted KEY=VALUE lines", f.read(),
                   'Y=#x\nZ= "a b" \n')
 
     # ── права и атомарность при распахнутом umask ────────────────────────
@@ -110,10 +104,10 @@ def main():
             # Потребители: каждый обязан оставить 0600 и 0700.
             sub = os.path.join(d, "srv", "addr")
             creds.write_operator(sub, "u", "p")
-            check("creds.write_operator: file 0600",
+            c.expect("creds.write_operator: file 0600",
                   mode(os.path.join(sub, creds.OPERATOR_FILE)), 0o600)
-            check("creds.make_dir: dir 0700", mode(sub), 0o700)
-            check("creds.make_dir: parent 0700", mode(os.path.dirname(sub)), 0o700)
+            c.expect("creds.make_dir: dir 0700", mode(sub), 0o700)
+            c.expect("creds.make_dir: parent 0700", mode(os.path.dirname(sub)), 0o700)
             # Лежащий с чужими правами файл закрывается, а не наследует их.
             cert = os.path.join(sub, creds.CERT_FILE)
             with open(cert, "w") as f:
@@ -122,41 +116,39 @@ def main():
             import ssl
             der = ssl.PEM_cert_to_DER_cert(_PEM)
             creds.write_cert(sub, der)
-            check("creds.write_cert over a 0644 file: 0600", mode(cert), 0o600)
+            c.expect("creds.write_cert over a 0644 file: 0600", mode(cert), 0o600)
 
             nats = os.path.join(d, "users.conf")
             natsconf.write("x", nats)
-            check("natsconf.write: 0600", mode(nats), 0o600)
+            c.expect("natsconf.write: 0600", mode(nats), 0o600)
 
             project_secrets.put_file(d, "p", "a/b.key", b"k")
-            check("project_secrets file: 0600",
+            c.expect("project_secrets file: 0600",
                   mode(os.path.join(d, "p", "files", "a", "b.key")), 0o600)
-            check("project_secrets dir: 0700",
+            c.expect("project_secrets dir: 0700",
                   mode(os.path.join(d, "p", "files", "a")), 0o700)
 
             reg = os.path.join(d, "cfg", "projects")
             projects.write({"b", "a"}, reg)
             with open(reg) as f:
-                check("projects.write: content", f.read(), "a\nb\n")
-            check("projects.write: temp not left behind",
+                c.expect("projects.write: content", f.read(), "a\nb\n")
+            c.expect("projects.write: temp not left behind",
                   sorted(os.listdir(os.path.dirname(reg))), ["projects"])
 
-            if fsutil is None:
-                check("mop.fsutil exists", False, True)
-            else:
+            if c.check("mop.fsutil exists", fsutil is not None):
                 p = os.path.join(d, "priv", "f")
                 fsutil.make_private_dir(os.path.dirname(p))
-                check("make_private_dir: 0700", mode(os.path.dirname(p)), 0o700)
+                c.expect("make_private_dir: 0700", mode(os.path.dirname(p)), 0o700)
                 fsutil.write_private(p, "one")
-                check("write_private: 0600 under umask 0", mode(p), 0o600)
+                c.expect("write_private: 0600 under umask 0", mode(p), 0o600)
                 # Атомарность: пишем поверх, а открытый дескриптор старого
                 # файла видит старое целиком -- файл заменён, а не усечён.
                 with open(p) as old:
                     fsutil.write_private(p, b"two")
-                    check("write_private: old file not truncated", old.read(), "one")
+                    c.expect("write_private: old file not truncated", old.read(), "one")
                 with open(p) as f:
-                    check("write_private: new content", f.read(), "two")
-                check("write_private: no temp left",
+                    c.expect("write_private: new content", f.read(), "two")
+                c.expect("write_private: no temp left",
                       sorted(os.listdir(os.path.dirname(p))), ["f"])
 
                 # Обрыв посреди записи: прежний файл цел, временного нет.
@@ -167,28 +159,27 @@ def main():
                 except Exception:
                     pass
                 with open(p) as f:
-                    check("write_private: failed write keeps old file", f.read(), "two")
-                check("write_private: failed write leaves no temp",
+                    c.expect("write_private: failed write keeps old file", f.read(), "two")
+                c.expect("write_private: failed write leaves no temp",
                       sorted(os.listdir(os.path.dirname(p))), ["f"])
 
                 # write_atomic -- права по umask, как было у реестра.
                 os.umask(0o022)
                 q = os.path.join(d, "priv", "reg")
                 fsutil.write_atomic(q, "x")
-                check("write_atomic: mode by umask", mode(q), 0o644)
+                c.expect("write_atomic: mode by umask", mode(q), 0o644)
     finally:
         os.umask(old_umask)
 
     if fsutil is not None:
-        check("read_kv: .env dialect", fsutil.read_kv(ENV_TEXT), ENV_WANT)
-        check("read_kv raw: vars.env dialect", fsutil.read_kv(RAW_TEXT, raw=True),
+        c.expect("read_kv: .env dialect", fsutil.read_kv(ENV_TEXT), ENV_WANT)
+        c.expect("read_kv raw: vars.env dialect", fsutil.read_kv(RAW_TEXT, raw=True),
               RAW_WANT)
-        check("write_kv: sorted KEY=VALUE lines",
+        c.expect("write_kv: sorted KEY=VALUE lines",
               fsutil.write_kv({"b": "2", "a": " 1 "}), "a= 1 \nb=2\n")
-        check("write_kv: empty", fsutil.write_kv({}), "")
+        c.expect("write_kv: empty", fsutil.write_kv({}), "")
 
     # Копии живут только в fsutil.
-    cases += 1
     copies = []
     for top, _, files in os.walk(os.path.join(ROOT, "mop")):
         for f in files:
@@ -202,9 +193,7 @@ def main():
     # и пакета не импортирует; parse_var -- разбор аргумента, не файла.
     allowed = {"mop/driver/pve.py", "mop/session.py", "mop/common/project_secrets.py"}
     extra = sorted(set(copies) - allowed)
-    if extra:
-        bad += 1
-        print(f"FAILED  file primitives copied outside fsutil: {extra}")
+    c.check("file primitives copied outside fsutil", not (extra), extra)
 
     # HYPOTHESIS (#170): natsconf.passwords и bootstrap.store заводят каталог
     # makedirs(..., 0o700): mode действует только на НОВЫЙ каталог, и уже
@@ -223,13 +212,12 @@ def main():
             os.makedirs(old)
             os.chmod(old, 0o755)
             run(old)
-            check(f"{what}: an existing 0755 directory is tightened", mode(old), 0o700)
+            c.expect(f"{what}: an existing 0755 directory is tightened", mode(old), 0o700)
             new = os.path.join(d, "new")
             run(new)
-            check(f"{what}: a new directory is 0700", mode(new), 0o700)
+            c.expect(f"{what}: a new directory is 0700", mode(new), 0o700)
 
-    print(f"{cases - bad}/{cases} matched")
-    return 1 if bad else 0
+    return c.report("fsutil")
 
 
 _PEM = """-----BEGIN CERTIFICATE-----

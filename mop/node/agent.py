@@ -48,10 +48,10 @@ import shlex
 import socket
 import time
 
-from ..common import bus, busnames, fsutil, lease, service
+from ..common import bus, busnames, fsutil, lease, paths, service
 from .. import driver, usage
-from ..common.domain import Owner, Verb
-from ..driver import clone_dir, target_dir, why
+from ..common.domain import CloneFacts, Owner, Verb
+from ..driver import Tmux, clone_dir, target_dir, why
 
 HOME = os.path.expanduser("~")
 
@@ -75,7 +75,7 @@ KEYS_ALLOWED = ("Escape",)
 # лишились его вместе с переездом на шину.
 WRITABLE = (
     f"{HOME}/.claude/.credentials.json",
-    f"{HOME}/.config/mop/secrets.env",
+    paths.under(HOME, paths.SECRETS_ENV),
 )
 
 # Ростер тел перечисляет драйвер (у host — по сокетам tmux в /tmp/tmux-<uid>):
@@ -125,41 +125,6 @@ async def bsh(name, script, timeout=20):
     return await driver.sh(script, timeout, prefix=DRIVER.argv(name))
 
 
-class Tmux:
-    """Строки скрипта для tmux папета: и сервер (-L), и сессия (-t) зовутся
-    его именем. Только строки -- исполняет bsh, и имя до шелла доходит лишь
-    после driver.valid_name."""
-
-    def __init__(self, name):
-        self.name = name
-        self.base = f"tmux -L {name}"
-
-    def alive(self):
-        return f"{self.base} has-session -t {self.name} 2>/dev/null"
-
-    def buffer(self):
-        """Весь буфер, с историей."""
-        return f"{self.base} capture-pane -p -t {self.name} -S -"
-
-    def visible(self):
-        return f"{self.base} capture-pane -p -t {self.name}"
-
-    def keys(self, keys):
-        return f"{self.base} send-keys -t {self.name} {keys}"
-
-    def press(self, key):
-        """Голая клавиша и экран после неё."""
-        return f"{self.keys(key)}; sleep 1; {self.visible()}"
-
-    def type(self, command):
-        """Очистить строку, напечатать команду, Enter, экран. Кавычку в
-        команде отбивает вызывающий: команда идёт в шелл одной строкой."""
-        quoted = f"'{command}'"
-        keys = (f"{self.keys('C-u')}; sleep 0.3; "
-                f"{self.keys(quoted)}; sleep 0.3; ") if command else ""
-        return keys + f"{self.keys('Enter')}; sleep 2; {self.visible()}"
-
-
 async def tmux_alive(name):
     _, code = await bsh(name, Tmux(name).alive())
     return code == 0
@@ -190,6 +155,7 @@ async def clone_facts(name):
         f'cd {d} 2>/dev/null || exit 0; '
         f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
         f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
+        f'echo "home=$(git config mop.home 2>/dev/null)"; '
         f'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
         f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
         f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"; '
@@ -201,14 +167,15 @@ async def clone_facts(name):
         dirty, ahead = int(kv.get("dirty") or 0), int(kv.get("ahead") or 0)
     except ValueError:
         return None
-    owner = Owner.parse(kv.get("owner"))
-    return {"cur": kv.get("cur") or "(detached)",
-            "def": (kv.get("def") or "").rsplit("/", 1)[-1] or None,
-            "origin": kv.get("origin") or None,
-            "dirty": dirty, "ahead": ahead,
-            # Кто ведёт задание (#161): сырая запись, живость считает мастер.
-            # По шине -- словарём (#204), обратно его читает Owner.from_dict.
-            "owner": owner and owner.to_dict()}
+    # Кто ведёт задание (#161): сырая запись, живость считает мастер. По
+    # шине -- словарём (#204, #266), обратно его читает CloneFacts.from_dict.
+    # Дом клона (#272) пишет стадия клона; нет записи -- None, и дом тогда
+    # ветка по умолчанию (CloneFacts.home_branch).
+    return CloneFacts(branch=kv.get("cur") or "(detached)",
+                      default_branch=(kv.get("def") or "").rsplit("/", 1)[-1] or None,
+                      home=kv.get("home") or None,
+                      origin=kv.get("origin") or None, dirty=dirty, ahead=ahead,
+                      owner=Owner.parse(kv.get("owner"))).to_dict()
 
 
 async def du_kb(name):
@@ -383,8 +350,8 @@ async def _claim(name, req):
     me = lease.caller(req)[0]
     if not me:
         return None, None, None
-    clone = await clone_facts(name)
-    owner = Owner.from_dict((clone or {}).get("owner"))
+    clone = CloneFacts.from_dict(await clone_facts(name))
+    owner = clone and clone.owner
     act, note = lease.verdict(owner, me, clone, time.time(), bool(req.get("force")))
     if act == "refuse":
         return f"{name}: {note}", None, None
@@ -424,15 +391,13 @@ async def _unclaim(name, undo):
 async def _gate(name, req):
     """Ворота владения (#40) изменяющего глагола. -> (отказ|None, заметка|None).
 
-    Та же lease.may_touch, что за send: чужая живая аренда -- отказ с именем
-    владельца. Оператор -- субъект admin, а не поле тела. Зовут под
-    _owner_locks: между проверкой и действием чужой claim не вклинится."""
-    clone = await clone_facts(name)
-    owner = Owner.from_dict((clone or {}).get("owner"))
-    ok, note = lease.may_touch(owner, lease.caller(req)[0], clone, time.time(),
-                               bool(req.get("force")),
-                               req.get("_project") == busnames.ADMIN)
-    return (None, note) if ok else (f"{name}: {note}", None)
+    Та же lease.gate, что у сервиса кластера (#267), и та же may_touch, что
+    за send: чужая живая аренда -- отказ с именем владельца. Оператор --
+    субъект admin, а не поле тела. Зовут под _owner_locks: между проверкой и
+    действием чужой claim не вклинится."""
+    return lease.gate(name, CloneFacts.from_dict(await clone_facts(name)),
+                      lease.caller(req)[0], time.time(), bool(req.get("force")),
+                      req.get("_project") == busnames.ADMIN)
 
 
 async def _gated(name, req, act):
@@ -443,9 +408,7 @@ async def _gated(name, req, act):
         if refused:
             return {"error": refused}
         out = await act()
-    if note and not out.get("error"):
-        out["owner_note"] = note
-    return out
+    return lease.noted(out, note)
 
 
 # ─── git identity владельца (#167) ───────────────────────────────────────
@@ -461,8 +424,8 @@ async def owner_profile(conn, name, login):
     узла на server.rpc -- по любому проекту, а журнал сервера так читается."""
     subject = busnames.server(await puppet_project(name))
     try:
-        msg = await conn.request(subject, json.dumps({"verb": "identity", "login": login}).encode(),
-                                 timeout=IDENTITY_WAIT)
+        msg = await bus.arequest(conn, subject, bus.envelope("identity", login=login),
+                                 IDENTITY_WAIT)
         got = json.loads(msg.data.decode())
     except Exception as e:
         return None, f"the server did not answer ({type(e).__name__})"
@@ -747,9 +710,10 @@ async def v_junk(_conn, req):
     про чужие проекты тоже, а сопоставлять с Nomad всё равно некому, кроме
     управляющей машины.
 
-    `templates` у host пуст: сборочных тел там не бывает вовсе, и пустой
-    список честнее выдуманного."""
+    `templates` у host пуст: сборочных тел там не бывает вовсе, глагола у
+    драйвера нет (#276), и пустой список честнее выдуманного."""
     names = await DRIVER.bodies()
+    templates = driver.hypervisor_verb(DRIVER, "templates")
     # Работу в клоне спрашиваем ЗДЕСЬ, а не оставляем решать по имени. Тело
     # без tmux-сессии `facts` описывает как {present: False} и про клон молчит
     # — верно для узла, до которого не достучаться, но сирота на гипервизоре
@@ -766,7 +730,7 @@ async def v_junk(_conn, req):
             "driver": driver.current_name(),
             "bodies": names,
             "work": work,
-            "templates": await DRIVER.templates()}
+            "templates": await templates() if templates else []}
 
 
 async def v_usage(_conn, req):

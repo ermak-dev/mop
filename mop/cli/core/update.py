@@ -18,6 +18,7 @@ refused with that master's name; --force acts anyway and says whose it was.
 from mop.cli import lib
 from mop.cli.core import _common
 from mop.common import bus, context, llm
+from mop.common.domain import JobMeta
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -32,14 +33,12 @@ MCP = {"annotations": "destructive", "args": [
 
 def main(argv):
     profile, args = _common.parse_llm(argv)
-    fresh, force = "--fresh" in args, "--force" in args
-    args = [a for a in args if a not in ("--fresh", "--force")]
-    if not 1 <= len(args) <= 2:
-        lib.usage(__doc__)
+    fresh = "--fresh" in args
+    args, force = lib.parse_named([a for a in args if a != "--fresh"], __doc__, most=2)
     name = args[0]
     spec = lib.guard(name) or bus.call_cluster("spec", name=name)
-    meta = spec.get("meta") or {}
-    old, old_llm = meta.get("origin"), llm.of_meta(meta)
+    meta = JobMeta.from_meta(spec.get("meta"))
+    old, old_llm = meta.origin, llm.of_meta(meta)
     if not old:
         # Джоб без origin в Meta — не папет: ростер их и не показывает.
         lib.usage(f"{name}: no origin in the spec — this isn't a pool puppet")
@@ -61,8 +60,7 @@ def main(argv):
     # На успехе молчим (#179), как restart: MCP ответит модели `done`, а эхо
     # параметров повторяло то, что человек только что набрал сам. Чью аренду
     # прошёл force -- называем (#40).
-    if got.get("owner_note"):
-        print(f"{name}: {got['owner_note']}")
+    lib.note(name, got)
 
 
 

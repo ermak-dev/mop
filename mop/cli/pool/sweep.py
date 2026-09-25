@@ -28,16 +28,14 @@ from mop.common.render import table
 
 
 def main(argv):
-    dry = argv == ["--dry"]
-    if argv and not dry:
-        lib.usage(__doc__)
+    dry = lib.dry(argv, __doc__)
 
     nodes = sorted(puppets.ready_nodes())
     if not nodes:
         # Отказ, а не «чисто» (#179): осмотра не было.
         print("no ready nodes", file=sys.stderr)
         return 1
-    answers = bus.request_many({n: {"verb": "junk"} for n in nodes})
+    answers = bus.request_many("junk", nodes)
 
     # Узел, который не ответил, — не пустой узел. Промолчавший считался бы
     # «без тел», и его сироты уехали бы из отчёта молча, а молчание здесь
@@ -89,7 +87,7 @@ def main(argv):
 
     gone = 0
     for r in doomed:
-        a = bus.request(r["node"], "wipe", name=r["name"], timeout=600)
+        a = bus.request(r["node"], "wipe", name=r["name"], timeout=puppets.WIPE_TIMEOUT)
         why = a.get("error")
         print(f"  {r['name']}: {why or 'destroyed'}")
         gone += 0 if why else 1

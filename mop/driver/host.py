@@ -20,7 +20,8 @@ import socket
 from urllib.parse import urlparse
 
 from ..common import busnames, config
-from . import (HOME, PREFIX, bad_name, clone_dir, sh, target_dir, valid_name,
+from ..common.domain import Body, Gone
+from . import (HOME, PREFIX, Tmux, bad_name, clone_dir, sh, target_dir, valid_name,
                why, write_private)
 
 # Тело и узел — одна машина: исполнять «в теле» здесь значит исполнять на узле.
@@ -46,7 +47,12 @@ async def ensure(name, params=None):
     это и есть ответ драйвера host на вопрос «в чём живёт папет»."""
     if not valid_name(name):
         return {"error": bad_name(name)}
-    return {"name": name, "body": None, "created": False, "address": None}
+    return Body(name).to_dict()
+
+
+# Ветка клона и снос target (#268): одно число на вызов и на его why.
+CHECKOUT_TIMEOUT = 120
+RM_TIMEOUT = 600
 
 
 async def destroy(name, branch=None):
@@ -73,21 +79,23 @@ async def destroy(name, branch=None):
     # Ветка мастера (#257): чистая рабочая копия начинает с неё. На origin
     # есть -- ровно её вершина (-B после fetch), нет -- завести локально от
     # HEAD, мастер создаст её первым landing. Клон не переклонируется, и
-    # без этого шага он оставался бы на том, что застал.
+    # без этого шага он оставался бы на том, что застал. Она же -- дом
+    # клона (#272): чистый клон на ней свободен, вне её держит тикет.
     if branch:
         b = shlex.quote(branch)
-        out, code = await sh(f"(git -C {d} fetch -q origin {b} && "
+        out, code = await sh(f"((git -C {d} fetch -q origin {b} && "
                              f"git -C {d} checkout -q -B {b} origin/{b}) || "
-                             f"git -C {d} checkout -q -B {b}", timeout=120)
+                             f"git -C {d} checkout -q -B {b}) && "
+                             f"git -C {d} config mop.home {b}", timeout=CHECKOUT_TIMEOUT)
         if code != 0:
-            return {"error": f"git checkout {branch} in {d}: {why(out, code, 120)}"}
+            return {"error": f"git checkout {branch} in {d}: {why(out, code, CHECKOUT_TIMEOUT)}"}
     target = target_dir(name)
     # Долго: сотни тысяч inode. Таймаут шире офисного — обычный убил бы rm на
     # полпути и оставил каталог наполовину снесённым.
-    _, code = await sh(f"rm -rf {target}", timeout=600)
+    _, code = await sh(f"rm -rf {target}", timeout=RM_TIMEOUT)
     if code != 0:
-        return {"error": f"rm {target}: {why('', code, 600)}"}
-    return {"reset": True, "target": target}
+        return {"error": f"rm {target}: {why('', code, RM_TIMEOUT)}"}
+    return Gone(target).to_dict()
 
 
 def _server_alive(path):
@@ -166,7 +174,7 @@ def attach_argv(name):
     """Чем человек входит в сессию папета — изнутри узла.
 
     `mop attach` доводит человека до узла своим ssh и дальше исполняет это."""
-    return ["tmux", "-L", name, "attach", "-t", name]
+    return Tmux(name).attach_argv()
 
 
 async def push(name, path, data):
@@ -251,8 +259,3 @@ def address(name):
     finally:
         s.close()
     return here if port == 22 else f"{here}:{port}"
-
-
-async def templates():
-    """Сборочных тел у host не бывает: образ собирать не во что."""
-    return []

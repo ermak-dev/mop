@@ -9,6 +9,11 @@ import subprocess
 from mop.common import config
 from mop.server import identity, playvars
 
+# Переменная плейбука со списком проектов (deploy/group_vars, роль bootstrap).
+# Пишется как ключ меты узла spec.META_PROJECTS, но это другое: там -- что
+# узел обслуживает, здесь -- какие проекты заведены.
+PROJECTS_VAR = "mop_projects"
+
 # Код ansible «часть машин не ответила». Отличать его от настоящего отказа
 # обязательно: выключенный узел — не сломанная команда, и сказать про него
 # «проект, возможно, не на шине» значит отправить оператора искать поломку
@@ -29,7 +34,7 @@ def play_vars(projects, manifests=None, limits=None, git_hosts=None, inventory_h
     # кластера на сервере читает их файлом, и узкий прогон `mop project`
     # обязан класть его так же, как полный. Файл читает play(), не эта
     # функция: она чистая.
-    head = {"mop_projects": list(projects)}
+    head = {PROJECTS_VAR: list(projects)}
     if limits is not None:
         head["mop_limits"] = limits
     # Хосты форжей (#121) -- только полной игре: их читает роль узла.

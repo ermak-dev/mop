@@ -21,6 +21,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks, FakeNomad, offline, patched, restored, GATE_NOW, gate_table_267  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import cluster  # noqa: E402
@@ -30,95 +31,84 @@ RUGENT = "git@git.ermak.dev:rugent/rugent.git"
 MOP = "git@git.ermak.dev:ermak/mop.git"
 
 
-def check_subject():
+def check_subject(c):
     """Проект — первый токен субъекта, и никогда не поле запроса."""
-    out = []
     for subj, want in [("mop.rugent.cluster.rpc", "rugent"),
                        ("mop.admin.cluster.rpc", "admin"),
                        ("mop.mop.cluster.rpc", "mop")]:
-        got = service.project_from_subject(subj)
-        if got != want:
-            out.append(f"project_of({subj}) -> {got!r}, wanted {want!r}")
-    return out
+        c.expect(f"project_of({subj})", service.project_from_subject(subj), want)
 
 
-def check_verbs():
+def check_verbs(c):
     """Набор закрыт, и узловые глаголы — только оператору."""
-    out = []
-    if cluster.refusal("rugent", "nosuchverb") is None:
-        out.append("an unknown verb must be refused, not attempted")
+    c.check("an unknown verb must be refused, not attempted",
+            not (cluster.refusal("rugent", "nosuchverb") is None))
 
     # Узел общий для всех жильцов: увести чужого папета с машины или выкинуть
     # её из ростера — не дело мастера проекта.
     for verb in ("drain", "up", "forget", "meta", "nodes"):
-        if cluster.refusal("rugent", verb) is None:
-            out.append(f"{verb} must be an operator's verb, refused for a project")
-        if cluster.refusal("admin", verb) is not None:
-            out.append(f"{verb} must work for the operator: "
-                       f"{cluster.refusal('admin', verb)}")
+        c.check(f"{verb} must be an operator's verb, refused for a project",
+                not (cluster.refusal("rugent", verb) is None))
+        c.check(f"{verb} must work for the operator",
+                not (cluster.refusal("admin", verb) is not None),
+                cluster.refusal("admin", verb))
 
     # ping отвечает всем: мастеру надо уметь отличить «сервис лёг» от
     # «Nomad не отвечает», не имея под рукой ни того, ни другого.
     for who in ("rugent", "admin"):
-        if cluster.refusal(who, "ping") is not None:
-            out.append(f"ping must answer {who}")
+        c.check(f"ping must answer {who}", not (cluster.refusal(who, "ping") is not None))
 
     # Оператор делает и проектные глаголы: он и сегодня удаляет любого папета.
-    if cluster.refusal("admin", "delete", origin=RUGENT) is not None:
-        out.append("the operator must reach any project's puppet")
-    return out
+    c.check("the operator must reach any project's puppet",
+            not (cluster.refusal("admin", "delete", origin=RUGENT) is not None))
 
 
-def check_ownership():
+def check_ownership(c):
     """Дыра, ради которой заводился сервис: чужой джоб."""
-    out = []
     # Мастер rugent просит снять джоб проекта mop — origin джоба говорит, чей
     # он, и это единственная правда (Meta.origin, как в lib.guard).
     why = cluster.refusal("rugent", "delete", origin=MOP, name="pu-mop-1")
-    if why is None:
-        out.append("a master must NOT reach another project's job")
-    elif "mop" not in why:
-        out.append(f"the refusal must name the owner: {why!r}")
+    if c.check("a master must NOT reach another project's job", not (why is None)):
+        c.check("the refusal must name the owner", not ("mop" not in why), repr(why))
 
-    if cluster.refusal("rugent", "delete", origin=RUGENT, name="pu-rugent-1") is not None:
-        out.append("a master must reach its own job")
+    c.check("a master must reach its own job",
+            not (cluster.refusal("rugent", "delete", origin=RUGENT, name="pu-rugent-1") is not None))
 
     # Завод папета: проект считается из origin, и подсунуть чужой нельзя —
     # иначе мастер rugent заводил бы папетов в проекте mop.
-    if cluster.refusal("rugent", "add", origin=MOP) is None:
-        out.append("add with another project's origin must be refused")
-    if cluster.refusal("rugent", "add", origin=RUGENT) is not None:
-        out.append("add with its own origin must be allowed")
+    c.check("add with another project's origin must be refused",
+            not (cluster.refusal("rugent", "add", origin=MOP) is None))
+    c.check("add with its own origin must be allowed",
+            not (cluster.refusal("rugent", "add", origin=RUGENT) is not None))
 
     # Смена репозитория — тоже в границах проекта. Иначе мастер rugent
     # переводит своего папета на чужой origin и читает чужой репозиторий
     # ключом пула: креды на шине остаются его, а клон уже не его.
-    if cluster.refusal("rugent", "update", origin=RUGENT, name="pu-rugent-1",
-                       new_origin=MOP) is None:
-        out.append("update onto another project's origin must be refused")
-    if cluster.refusal("rugent", "update", origin=RUGENT, name="pu-rugent-1",
-                       new_origin=RUGENT) is not None:
-        out.append("update within its own project must be allowed")
-    if cluster.refusal("admin", "update", origin=RUGENT, name="pu-rugent-1",
-                       new_origin=MOP) is not None:
-        out.append("the operator may move a puppet between projects")
+    c.check("update onto another project's origin must be refused",
+            not (cluster.refusal("rugent", "update", origin=RUGENT, name="pu-rugent-1",
+                                 new_origin=MOP) is None))
+    c.check("update within its own project must be allowed",
+            not (cluster.refusal("rugent", "update", origin=RUGENT, name="pu-rugent-1",
+                                 new_origin=RUGENT) is not None))
+    c.check("the operator may move a puppet between projects",
+            not (cluster.refusal("admin", "update", origin=RUGENT, name="pu-rugent-1",
+                                 new_origin=MOP) is not None))
 
     # Джоба нет вовсе — это не отказ прав, а отсутствие джоба: разные ответы,
     # иначе опечатка в имени читается как «нет прав».
-    if cluster.refusal("rugent", "restart", name="pu-rugent-9") is not None:
-        out.append("a missing job is not a permission refusal")
+    c.check("a missing job is not a permission refusal",
+            not (cluster.refusal("rugent", "restart", name="pu-rugent-9") is not None))
 
     # Джоб есть, а метки нет: спека старой регистрации, которую никогда не
     # перерегистрировали (puppets.visible). Чей он — из него самого не узнать,
     # поэтому мастеру проекта он не отдаётся; оператору отдаётся, как в ростере.
-    if cluster.refusal("rugent", "delete", name="pu-old-1", job_exists=True) is None:
-        out.append("an unmarked job must not be reachable by a project master")
-    if cluster.refusal("admin", "delete", name="pu-old-1", job_exists=True) is not None:
-        out.append("an unmarked job must stay reachable by the operator")
-    return out
+    c.check("an unmarked job must not be reachable by a project master",
+            not (cluster.refusal("rugent", "delete", name="pu-old-1", job_exists=True) is None))
+    c.check("an unmarked job must stay reachable by the operator",
+            not (cluster.refusal("admin", "delete", name="pu-old-1", job_exists=True) is not None))
 
 
-def check_gone_job():
+def check_gone_job(c):
     """Снятый джоб: читающий глагол отвечает, действующий отказывает.
 
     HYPOTHESIS (#89): `alloc` отвечал «no job … in the cluster» на любой
@@ -128,91 +118,84 @@ def check_gone_job():
     глаголов, которые что-то делают.
     STATUS: FIXED — see #89
     """
-    out = []
     gone = {"verb": "alloc", "name": "pu-rugent-9"}
     got = cluster.answer("admin", gone)
-    if got.get("error") or "alloc" not in got:
-        out.append(f"alloc of a job that is gone must answer, not refuse: {got}")
-    elif got["alloc"] is not None:
-        out.append(f"alloc of a job that is gone must be None: {got}")
+    if c.check("alloc of a job that is gone must answer, not refuse",
+               not (got.get("error") or "alloc" not in got), got):
+        c.check("alloc of a job that is gone must be None",
+                not (got["alloc"] is not None), got)
 
     for verb in ("restart", "stop", "delete", "update"):
         got = cluster.answer("admin", {"verb": verb, "name": "pu-rugent-9"})
-        if not got.get("error"):
-            out.append(f"{verb} of a job that is gone must refuse: {got}")
-    return out
+        c.check(f"{verb} of a job that is gone must refuse", not (not got.get("error")), got)
 
 
-def check_limit():
+def check_limit(c):
     """Потолок папетов проекта (#107): add сверх него -- отказ.
 
     STATUS: FIXED — see #107
     """
-    out = []
-    if cluster.over_limit("rugent", 2, None) is not None:
-        out.append("no limit must never refuse")
-    if cluster.over_limit("rugent", 2, 3) is not None:
-        out.append("below the limit add must pass")
+    c.check("no limit must never refuse",
+            not (cluster.over_limit("rugent", 2, None) is not None))
+    c.check("below the limit add must pass",
+            not (cluster.over_limit("rugent", 2, 3) is not None))
     why = cluster.over_limit("rugent", 3, 3)
     # Отказ называет проект, счёт и потолок: иначе «не заводится» ищут в
     # Nomad и в слотах узлов.
-    if not why or "rugent" not in why or "3" not in why:
-        out.append(f"at the limit add must be refused with numbers: {why!r}")
+    c.check("at the limit add must be refused with numbers",
+            not (not why or "rugent" not in why or "3" not in why), repr(why))
     # 0 -- заморозка: новых не заводить вовсе.
-    if cluster.over_limit("rugent", 0, 0) is None:
-        out.append("limit 0 must refuse every add")
-    return out
+    c.check("limit 0 must refuse every add",
+            not (cluster.over_limit("rugent", 0, 0) is None))
 
 
-def check_project_verbs():
+def check_project_verbs(c):
     """HYPOTHESIS (#117): проекты заводил только прогон ansible на
     контроллере, и с машины оператора `mop project add` падал.
     SOLUTION: глаголы проектов у сервиса кластера -- только оператору: мастер
     проекта не заводит чужих проектов и не поднимает себе лимит.
     STATUS: FIXED — see #117"""
-    out = []
     for verb in ("projects", "project_add", "project_delete", "project_limit"):
-        if verb not in cluster.ADMIN_VERBS:
-            out.append(f"{verb} must be an operator's verb")
+        if not c.check(f"{verb} must be an operator's verb",
+                       not (verb not in cluster.ADMIN_VERBS)):
             continue
-        if cluster.refusal("rugent", verb) is None:
-            out.append(f"a project's master must not get {verb}")
-        if cluster.refusal("admin", verb) is not None:
-            out.append(f"the operator must get {verb}")
+        c.check(f"a project's master must not get {verb}",
+                not (cluster.refusal("rugent", verb) is None))
+        c.check(f"the operator must get {verb}",
+                not (cluster.refusal("admin", verb) is not None))
     try:
         why = cluster.delete_refusal("ghost", [], [])
     except AttributeError:
-        return out + ["cluster.delete_refusal is missing"]
+        c.fail("cluster.delete_refusal is missing")
+        return
     # Нет в реестре -- отказ с именем: опечатка иначе читалась бы снятием.
-    if not why or "ghost" not in why:
-        out.append(f"deleting an unknown project must be refused by name: {why!r}")
+    c.check("deleting an unknown project must be refused by name",
+            not (not why or "ghost" not in why), repr(why))
     # Живые папеты -- отказ с их именами: мастер потерял бы шину под ними.
     why = cluster.delete_refusal("rugent", ["git@h:g/rugent.git"], ["pu-rugent-2", "pu-rugent-1"])
-    if not why or "pu-rugent-1" not in why:
-        out.append(f"deleting a project with puppets must name them: {why!r}")
-    if cluster.delete_refusal("rugent", ["git@h:g/rugent.git"], []) is not None:
-        out.append("a registered project without puppets must be deletable")
-    return out
+    c.check("deleting a project with puppets must name them",
+            not (not why or "pu-rugent-1" not in why), repr(why))
+    c.check("a registered project without puppets must be deletable",
+            not (cluster.delete_refusal("rugent", ["git@h:g/rugent.git"], []) is not None))
 
 
-def check_secret_verbs():
+def check_secret_verbs(c):
     """HYPOTHESIS (#127): секреты проекта класть было некуда. SOLUTION:
     глаголы сервиса на субъекте проекта -- мастеру своего проекта и
     оператору от имени проекта; у псевдопроекта admin секретов нет.
     STATUS: FIXED — see #127"""
-    out = []
     for verb in ("secret_put", "secret_list", "secret_remove"):
-        if verb not in cluster.PROJECT_VERBS:
-            out.append(f"{verb} must be a project's verb")
+        if not c.check(f"{verb} must be a project's verb",
+                       not (verb not in cluster.PROJECT_VERBS)):
             continue
-        if cluster.refusal("rugent", verb) is not None:
-            out.append(f"a project's master must get {verb}: {cluster.refusal('rugent', verb)}")
-        if cluster.refusal("admin", verb) is None:
-            out.append(f"{verb} on the admin pseudo-project must be refused: secrets belong to a project")
-    return out
+        c.check(f"a project's master must get {verb}",
+                not (cluster.refusal("rugent", verb) is not None),
+                cluster.refusal("rugent", verb))
+        c.check(f"{verb} on the admin pseudo-project must be refused: secrets belong to a project",
+                not (cluster.refusal("admin", verb) is None))
 
 
-def check_verb_table_173():
+def check_verb_table_173(c):
     """HYPOTHESIS (#173): права глаголов сервиса кластера -- в пяти
     параллельных наборах (PROJECT_VERBS, SECRET_VERBS, ADMIN_VERBS,
     NAMED_VERBS, ACTING_VERBS) плюс HANDLERS; новый глагол правится в
@@ -224,51 +207,42 @@ def check_verb_table_173():
     нет/свой/чужой/без метки x смена origin; после правки -- байт в байт.
     STATUS: FIXED — see #173"""
     import json
-    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-    from cli import no_network
-    out = []
     here = os.path.dirname(os.path.realpath(__file__))
     with open(os.path.join(here, "cluster_verbs_snapshot.json")) as f:
         snap = json.load(f)
     for name, want in snap["sets"].items():
-        got = list(getattr(cluster, name))
-        if got != want:
-            out.append(f"{name} -> {got}, wanted {want}")
-    if not isinstance(cluster.VERBS, dict):
-        return out + ["cluster.VERBS must be the one table {verb: Verb(...)}"]
+        c.expect(name, list(getattr(cluster, name)), want)
+    if not c.check("cluster.VERBS must be the one table {verb: Verb(...)}",
+                   not (not isinstance(cluster.VERBS, dict))):
+        return
     own, foreign = "git@h:g/mop.git", "git@h:g/rugent.git"
     states = {"none": (None, False), "own": (own, True), "foreign": (foreign, True),
               "unlabeled": (None, True)}
     called = []
-    undo = no_network()
-    keep_table, keep_owner = dict(cluster.VERBS), cluster._owner
-    try:
-        for v, d in keep_table.items():
-            cluster.VERBS[v] = dataclasses.replace(d, fn=(lambda verb: lambda project, req: called.append(verb)
-                                              or {"ok": True, "handled": verb})(v))
-        for key, want in snap["refusal"].items():
-            verb, project, state, new = json.loads(key)
-            origin, exists = states[state]
-            got = cluster.refusal(project, verb, origin=origin, name="pu-x-1",
-                                  job_exists=exists, new_origin=new)
-            if got != want:
-                out.append(f"refusal {key}: {got!r}, wanted {want!r}")
-            cluster._owner = lambda name, o=origin, e=exists: (o, e)
-            called.clear()
-            got = {"reply": cluster.answer(project, {"verb": verb, "name": "pu-x-1",
-                                                     "new_origin": new}),
-                   "called": list(called)}
-            if got != snap["answer"][key]:
-                out.append(f"answer {key}: {got!r}, wanted {snap['answer'][key]!r}")
-    finally:
-        cluster.VERBS.clear()
-        cluster.VERBS.update(keep_table)
-        cluster._owner = keep_owner
-        undo()
-    return out[:20] + ([f"... and {len(out) - 20} more"] if len(out) > 20 else [])
+    keep_table = dict(cluster.VERBS)
+    with offline(), restored(cluster, "_owner"):
+        try:
+            for v, d in keep_table.items():
+                cluster.VERBS[v] = dataclasses.replace(d, fn=(lambda verb: lambda project, req: called.append(verb)
+                                                  or {"ok": True, "handled": verb})(v))
+            for key, want in snap["refusal"].items():
+                verb, project, state, new = json.loads(key)
+                origin, exists = states[state]
+                got = cluster.refusal(project, verb, origin=origin, name="pu-x-1",
+                                      job_exists=exists, new_origin=new)
+                c.expect(f"refusal {key}", got, want)
+                cluster._owner = lambda name, o=origin, e=exists: (o, e)
+                called.clear()
+                got = {"reply": cluster.answer(project, {"verb": verb, "name": "pu-x-1",
+                                                         "new_origin": new}),
+                       "called": list(called)}
+                c.expect(f"answer {key}", got, snap["answer"][key])
+        finally:
+            cluster.VERBS.clear()
+            cluster.VERBS.update(keep_table)
 
 
-def check_forget_inventory_178():
+def check_forget_inventory_178(c):
     """HYPOTHESIS (#178): forget снимает узел с ростера Nomad, а в инвентаре
     контроллера он остаётся, и следующий `mop server deploy` молча ставит его снова.
     Предупреждение об этом осталось одной строкой в usage (#159).
@@ -279,56 +253,49 @@ def check_forget_inventory_178():
     import json
     import tempfile
     from mop.server import nomad
-    out = []
     fn = getattr(cluster, "inventory_refusal", None)
-    if fn is None:
-        return ["cluster.inventory_refusal(node, hosts) is missing"]
+    if not c.check("cluster.inventory_refusal(node, hosts) exists", not (fn is None)):
+        return
     why = fn("mop-2", ["localhost", "mop-2", "mop-3"])
-    if not why or "mop-2" not in why or "mop server deploy" not in why:
-        out.append(f"a node in the inventory must be refused by name: {why!r}")
-    if fn("gone", ["localhost", "mop-2"]) is not None:
-        out.append("a node out of the inventory must not be refused by it")
-    if fn("mop-2", None) is not None:
-        out.append("no host list (a server deployed before #178) must not refuse")
+    c.check("a node in the inventory must be refused by name",
+            not (not why or "mop-2" not in why or "mop server deploy" not in why), repr(why))
+    c.check("a node out of the inventory must not be refused by it",
+            not (fn("gone", ["localhost", "mop-2"]) is not None))
+    c.check("no host list (a server deployed before #178) must not refuse",
+            not (fn("mop-2", None) is not None))
 
     # Через глагол: отказ -- до Nomad; файла нет -- как прежде. Сводка узла
     # (#196) -- тоже вызов Nomad, и при отказе её не спрашивают.
-    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-    from cli import no_network
     d = tempfile.mkdtemp(prefix="mop-test-forget-")
     path = os.path.join(d, "inventory-hosts.json")
     touched = []
-    keep = (getattr(cluster, "INVENTORY_HOSTS", None), nomad.node_summary,
-            nomad.node_allocs, nomad.forget_refusal, nomad.node_forget)
-    undo = no_network()
-    try:
-        cluster.INVENTORY_HOSTS = path
-        nomad.node_summary = lambda node: touched.append("summary") or {"Name": node}
-        nomad.node_allocs = lambda node: touched.append("allocs") or []
-        nomad.forget_refusal = lambda node, allocs: None
-        nomad.node_forget = lambda node: touched.append("forget")
+    with offline(), \
+            patched(cluster, INVENTORY_HOSTS=path), \
+            patched(nomad,
+                    node_summary=lambda node: touched.append("summary") or {"Name": node},
+                    node_allocs=lambda node: touched.append("allocs") or [],
+                    forget_refusal=lambda node, allocs: None,
+                    node_forget=lambda node: touched.append("forget")):
         with open(path, "w") as f:
             json.dump(["localhost", "mop-2"], f)
         got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
-        if "mop-2" not in (got.get("error") or "") or touched:
-            out.append(f"forget of an inventory host: {got!r}, Nomad touched: {touched}")
+        c.check("forget of an inventory host",
+                not ("mop-2" not in (got.get("error") or "") or touched),
+                f"{got!r}, Nomad touched: {touched}")
         touched.clear()
         got = cluster.answer("admin", {"verb": "forget", "node": "gone"})
-        if not got.get("ok") or touched != ["summary", "allocs", "forget"]:
-            out.append(f"forget of a host out of the inventory: {got!r}, {touched}")
+        c.check("forget of a host out of the inventory",
+                not (not got.get("ok") or touched != ["summary", "allocs", "forget"]),
+                f"{got!r}, {touched}")
         os.remove(path)
         touched.clear()
         got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
-        if not got.get("ok") or touched != ["summary", "allocs", "forget"]:
-            out.append(f"forget with no host list must work as before: {got!r}, {touched}")
-    finally:
-        (cluster.INVENTORY_HOSTS, nomad.node_summary, nomad.node_allocs,
-         nomad.forget_refusal, nomad.node_forget) = keep
-        undo()
-    return out
+        c.check("forget with no host list must work as before",
+                not (not got.get("ok") or touched != ["summary", "allocs", "forget"]),
+                f"{got!r}, {touched}")
 
 
-def check_forget_summary_196():
+def check_forget_summary_196(c):
     """HYPOTHESIS (#196): _forget отдаёт forget_refusal имя узла (строку), а
     та читает сводку -- node['Name'], node.get('Status'); AttributeError, и
     forget с #80 не доходит до purge ни на одном узле.
@@ -336,41 +303,33 @@ def check_forget_summary_196():
     узла нет -- отказ с именем, без allocs и purge.
     STATUS: FIXED — see #196"""
     from mop.server import nomad
-    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-    from cli import no_network
-    out = []
     touched = []
     closed = {"Name": "mop-2", "ID": "n2", "Status": "ready",
               "SchedulingEligibility": "ineligible"}
     allocs = []
-    keep = (nomad.node_summary, nomad.node_allocs, nomad.node_forget)
-    undo = no_network()
-    try:
-        nomad.node_summary = lambda name: dict(closed) if name == "mop-2" else None
-        nomad.node_allocs = lambda name: touched.append("allocs") or list(allocs)
-        nomad.node_forget = lambda name: touched.append("forget")
+    with offline(), patched(nomad,
+                            node_summary=lambda name: dict(closed) if name == "mop-2" else None,
+                            node_allocs=lambda name: touched.append("allocs") or list(allocs),
+                            node_forget=lambda name: touched.append("forget")):
         got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
-        if not got.get("ok") or touched != ["allocs", "forget"]:
-            out.append(f"forget of a drained node must reach purge: {got!r}, {touched}")
+        c.check("forget of a drained node must reach purge",
+                not (not got.get("ok") or touched != ["allocs", "forget"]),
+                f"{got!r}, {touched}")
         touched.clear()
         allocs[:] = [{"JobID": "pu-mop-1", "ClientStatus": "running"}]
         got = cluster.answer("admin", {"verb": "forget", "node": "mop-2"})
         err = got.get("error") or ""
-        if "pu-mop-1" not in err or "drain" not in err or "forget" in touched:
-            out.append(f"forget of a node with a live alloc must refuse with the job: "
-                       f"{got!r}, {touched}")
+        c.check("forget of a node with a live alloc must refuse with the job",
+                not ("pu-mop-1" not in err or "drain" not in err or "forget" in touched),
+                f"{got!r}, {touched}")
         touched.clear()
         got = cluster.answer("admin", {"verb": "forget", "node": "ghost"})
-        if "ghost" not in (got.get("error") or "") or touched:
-            out.append(f"forget of an unknown node must refuse by name, touching "
-                       f"nothing: {got!r}, {touched}")
-    finally:
-        nomad.node_summary, nomad.node_allocs, nomad.node_forget = keep
-        undo()
-    return out
+        c.check("forget of an unknown node must refuse by name, touching nothing",
+                not ("ghost" not in (got.get("error") or "") or touched),
+                f"{got!r}, {touched}")
 
 
-def check_gates_40():
+def check_gates_40(c):
     """HYPOTHESIS (#40): владельца сверяет только send агента; restart, stop,
     update, delete (и recycle, собранный из delete+update) сервис кластера
     исполняет для любого мастера проекта, и работа другого мастера умирает
@@ -386,30 +345,25 @@ def check_gates_40():
     from mop.server import bootstrap, nomad, spec
     from mop.common import bus
     from mop.common.domain import Owner
-    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-    from cli import no_network
-    out = []
-    if not hasattr(cluster, "_clone_of"):
-        return ["cluster._clone_of(name) is missing"]
+    if not c.check("cluster._clone_of(name) exists", not (not hasattr(cluster, "_clone_of"))):
+        return
     olga = Owner("olga", int(time.time()) - 60).to_dict()
     work = {"clone": {"cur": "bug/1-x", "def": "master", "dirty": 1, "ahead": 0,
                       "owner": olga}}
     changed, asked = [], []
     answer = {"now": work}
-    keep = (cluster._clone_of, cluster._owner, nomad.latest_alloc, nomad.alloc_restart,
-            nomad.alloc_stop, nomad.register, nomad.deregister, spec.job_spec,
-            bootstrap.store)
-    undo = no_network()
-    try:
-        cluster._clone_of = lambda name: asked.append(name) or answer["now"]
-        cluster._owner = lambda name: (MOP, True)
-        nomad.latest_alloc = lambda name: {"ID": "a1", "NodeName": "n1"}
-        nomad.alloc_restart = lambda alloc: changed.append("restart")
-        nomad.alloc_stop = lambda alloc: changed.append("stop")
-        nomad.register = lambda job: changed.append("register")
-        nomad.deregister = lambda name, purge=True: changed.append("deregister")
-        spec.job_spec = lambda *a, **k: {"Job": "x"}
-        bootstrap.store = lambda *a, **k: changed.append("store")
+    with offline(), \
+            patched(cluster,
+                    _clone_of=lambda name: asked.append(name) or answer["now"],
+                    _owner=lambda name: (MOP, True)), \
+            patched(nomad,
+                    latest_alloc=lambda name: {"ID": "a1", "NodeName": "n1"},
+                    alloc_restart=lambda alloc: changed.append("restart"),
+                    alloc_stop=lambda alloc: changed.append("stop"),
+                    register=lambda job: changed.append("register"),
+                    deregister=lambda name, purge=True: changed.append("deregister")), \
+            patched(spec, job_spec=lambda *a, **k: {"Job": "x"}), \
+            patched(bootstrap, store=lambda *a, **k: changed.append("store")):
         verbs = {"restart": {}, "stop": {}, "update": {"origin": MOP},
                  "delete": {}, "recycle": {"purge": False}}
         for label, extra in verbs.items():
@@ -422,74 +376,69 @@ def check_gates_40():
                                                 **extra, **more})
             answer["now"] = work
             got = ask("mop", owner="anton")
-            if "olga" not in (got.get("error") or "") or changed:
-                out.append(f"{label} by another master must be refused naming olga "
-                           f"before any Nomad change: {got!r}, {changed}")
+            c.check(f"{label} by another master must be refused naming olga "
+                    f"before any Nomad change",
+                    not ("olga" not in (got.get("error") or "") or changed),
+                    f"{got!r}, {changed}")
             got = ask("mop")
-            if not got.get("error") or changed:
-                out.append(f"{label} by an anonymous caller must be refused: {got!r}, {changed}")
+            c.check(f"{label} by an anonymous caller must be refused",
+                    not (not got.get("error") or changed), f"{got!r}, {changed}")
             got = ask("mop", owner="olga")
-            if got.get("error") or not changed:
-                out.append(f"{label} by the owner must pass: {got!r}, {changed}")
+            c.check(f"{label} by the owner must pass",
+                    not (got.get("error") or not changed), f"{got!r}, {changed}")
             got = ask("mop", owner="anton", force=True)
-            if got.get("error") or not changed or "olga" not in (got.get("owner_note") or ""):
-                out.append(f"{label} with force must pass naming olga: {got!r}, {changed}")
+            c.check(f"{label} with force must pass naming olga",
+                    not (got.get("error") or not changed
+                         or "olga" not in (got.get("owner_note") or "")),
+                    f"{got!r}, {changed}")
             got = ask("admin", owner="anton")
-            if got.get("error") or not changed or asked:
-                out.append(f"{label} by the operator must pass without asking: "
-                           f"{got!r}, {changed}, asked {asked}")
+            c.check(f"{label} by the operator must pass without asking",
+                    not (got.get("error") or not changed or asked),
+                    f"{got!r}, {changed}, asked {asked}")
             # Ничей и без owner -- как до #40.
             answer["now"] = {"clone": dict(work["clone"], owner=None)}
             got = ask("mop")
-            if got.get("error") or not changed:
-                out.append(f"{label} of nobody's puppet must pass as before: {got!r}")
+            c.check(f"{label} of nobody's puppet must pass as before",
+                    not (got.get("error") or not changed), repr(got))
             answer["now"] = None
             got = ask("mop", owner="anton")
-            if got.get("error") or not changed:
-                out.append(f"{label} with no allocation must pass: {got!r}")
+            c.check(f"{label} with no allocation must pass",
+                    not (got.get("error") or not changed), repr(got))
             answer["now"] = {"error": "node agent n1 is not subscribed"}
             got = ask("mop", owner="anton")
-            if "n1" not in (got.get("error") or "") or changed:
-                out.append(f"{label} with a silent agent must be refused with the "
-                           f"reason: {got!r}, {changed}")
+            c.check(f"{label} with a silent agent must be refused with the reason",
+                    not ("n1" not in (got.get("error") or "") or changed),
+                    f"{got!r}, {changed}")
             got = ask("mop", owner="anton", force=True)
-            if got.get("error") or not changed:
-                out.append(f"{label} with a silent agent and force must pass: {got!r}")
-    finally:
-        (cluster._clone_of, cluster._owner, nomad.latest_alloc, nomad.alloc_restart,
-         nomad.alloc_stop, nomad.register, nomad.deregister, spec.job_spec,
-         bootstrap.store) = keep
-        undo()
+            c.check(f"{label} with a silent agent and force must pass",
+                    not (got.get("error") or not changed), repr(got))
 
     # Факты -- у агента узла аллокации, через шину, глаголом clone.
-    keep = (nomad.latest_alloc, bus.request)
-    undo = no_network()
-    try:
+    # Nomad -- поддельный, параметром (#275).
+    placed = FakeNomad(allocs={"pu-mop-1": {"ID": "a1", "NodeName": "n1"}})
+    with offline(), restored(bus, "request"):
         calls = []
-        nomad.latest_alloc = lambda name: {"ID": "a1", "NodeName": "n1"}
         bus.request = lambda node, verb, **k: calls.append((node, verb, k.get("name"))) \
             or {"clone": None}
-        got = cluster._clone_of("pu-mop-1")
-        if got != {"clone": None} or calls != [("n1", "clone", "pu-mop-1")]:
-            out.append(f"_clone_of must ask the node's agent: {got!r}, {calls}")
-        nomad.latest_alloc = lambda name: None
-        if cluster._clone_of("pu-mop-1") is not None:
-            out.append("_clone_of without an allocation must be None")
+        with cluster.using(placed):
+            got = cluster._clone_of("pu-mop-1")
+        c.check("_clone_of must ask the node's agent",
+                not (got != {"clone": None} or calls != [("n1", "clone", "pu-mop-1")]),
+                f"{got!r}, {calls}")
+        with cluster.using(FakeNomad()):
+            c.check("_clone_of without an allocation must be None",
+                    not (cluster._clone_of("pu-mop-1") is not None))
 
         def silent(node, verb, **k):
             raise bus.BusError("node agent n1 is not subscribed")
-        nomad.latest_alloc = lambda name: {"ID": "a1", "NodeName": "n1"}
         bus.request = silent
-        got = cluster._clone_of("pu-mop-1")
-        if "n1" not in ((got or {}).get("error") or ""):
-            out.append(f"_clone_of with a silent agent must say so: {got!r}")
-    finally:
-        nomad.latest_alloc, bus.request = keep
-        undo()
-    return out
+        with cluster.using(placed):
+            got = cluster._clone_of("pu-mop-1")
+        c.check("_clone_of with a silent agent must say so",
+                not ("n1" not in ((got or {}).get("error") or "")), repr(got))
 
 
-def check_caller_207():
+def check_caller_207(c):
     """HYPOTHESIS (#207): сервис кластера видит из субъекта только проект;
     владелец для ворот (#40) и держатель токена посадки (#42) -- поля тела,
     которые пишет сам проситель.
@@ -505,12 +454,9 @@ def check_caller_207():
     from mop.common import busnames, landing, lease
     from mop.server import nomad
     from mop.common.domain import Owner
-    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-    from cli import no_network
-    out = []
     subs = busnames.service_subscriptions()
-    if "mop.*.cluster.rpc.*" not in subs or "mop.*.cluster.rpc" not in subs:
-        out.append(f"the services must listen on both cluster subjects: {subs}")
+    c.check("the services must listen on both cluster subjects",
+            not ("mop.*.cluster.rpc.*" not in subs or "mop.*.cluster.rpc" not in subs), subs)
 
     # Каркас: вызывающий -- из субъекта, тело его не подделает.
     got = []
@@ -526,77 +472,64 @@ def check_caller_207():
                                        lambda *a: [], lambda line: None, None,
                                        caller=caller))
         except TypeError as e:
-            return out + [f"service.answer must take the caller: {e}"]
-        if got != [want]:
-            out.append(f"service.answer with caller {caller!r} and a forged body -> "
-                       f"{got}, wanted {want!r}")
+            c.fail("service.answer must take the caller", e)
+            return
+        c.expect(f"service.answer with caller {caller!r} and a forged body", got, [want])
 
     # Ворота (#40): решает вызывающий из субъекта, а не owner тела.
     olga = Owner("olga", int(time.time()) - 60).to_dict()
     work = {"clone": {"cur": "bug/1-x", "def": "master", "dirty": 1, "ahead": 0,
                       "owner": olga}}
     changed = []
-    keep = (cluster._clone_of, cluster._owner, nomad.latest_alloc, nomad.alloc_restart)
-    undo = no_network()
-    try:
-        cluster._clone_of = lambda name: work
-        cluster._owner = lambda name: (MOP, True)
-        nomad.latest_alloc = lambda name: {"ID": "a1", "NodeName": "n1"}
-        nomad.alloc_restart = lambda alloc: changed.append("restart")
+    with offline(), \
+            patched(cluster, _clone_of=lambda name: work, _owner=lambda name: (MOP, True)), \
+            patched(nomad, latest_alloc=lambda name: {"ID": "a1", "NodeName": "n1"},
+                    alloc_restart=lambda alloc: changed.append("restart")):
         req = {"verb": "restart", "name": "pu-mop-1"}
         got = cluster.answer("mop", dict(req, _caller="anton", owner="olga"))
-        if "olga" not in (got.get("error") or "") or changed:
-            out.append(f"a forged body owner must not pass the gate: {got!r}")
+        c.check("a forged body owner must not pass the gate",
+                not ("olga" not in (got.get("error") or "") or changed), repr(got))
         got = cluster.answer("mop", dict(req, _caller="olga", owner="anton"))
-        if got.get("error") or changed != ["restart"]:
-            out.append(f"the subject's caller must be the one the gate sees: {got!r}")
+        c.check("the subject's caller must be the one the gate sees",
+                not (got.get("error") or changed != ["restart"]), repr(got))
         changed.clear()
         # Прежний субъект: логин из тела, как до #207.
         got = cluster.answer("mop", dict(req, _caller=None, owner="olga"))
-        if got.get("error") or changed != ["restart"]:
-            out.append(f"the old subject must keep today's self-declared owner: {got!r}")
-    finally:
-        cluster._clone_of, cluster._owner, nomad.latest_alloc, nomad.alloc_restart = keep
-        undo()
+        c.check("the old subject must keep today's self-declared owner",
+                not (got.get("error") or changed != ["restart"]), repr(got))
 
     # Токен посадки (#42): держатель -- тот же вызывающий.
     d = tempfile.mkdtemp(prefix="mop-test-207-")
-    keep_file = landing.FILE
-    try:
-        landing.FILE = os.path.join(d, "landing.json")
+    with patched(landing, FILE=os.path.join(d, "landing.json")):
         got = cluster.answer("mop", {"verb": "landing", "action": "take", "puppet": "pu-mop-1",
                                      "_caller": "alice", "holder": "bob"})
         held = (landing.read().get("mop") or {}).get("holder")
-        if not got.get("ok") or held != "alice":
-            out.append(f"landing's holder must be the subject's caller: {got!r}, {held!r}")
+        c.check("landing's holder must be the subject's caller",
+                not (not got.get("ok") or held != "alice"), f"{got!r}, {held!r}")
         got = cluster.answer("mop", {"verb": "landing", "action": "give",
                                      "_caller": None, "holder": "alice"})
-        if not got.get("ok"):
-            out.append(f"the old subject must keep today's self-declared holder: {got!r}")
-    finally:
-        landing.FILE = keep_file
+        c.check("the old subject must keep today's self-declared holder",
+                not (not got.get("ok")), repr(got))
 
     # Журнал помечает названное телом: переход виден, пока он есть.
     line = " ".join(cluster.journal("mop", {"verb": "restart", "name": "pu-mop-1",
                                             "_caller": None, "owner": "olga"}, {"ok": True}))
-    if "self-declared" not in line:
-        out.append(f"the journal must mark a self-declared caller: {line!r}")
+    c.check("the journal must mark a self-declared caller",
+            not ("self-declared" not in line), repr(line))
     line = " ".join(cluster.journal("mop", {"verb": "restart", "name": "pu-mop-1",
                                             "_caller": "olga"}, {"ok": True}))
-    if "self-declared" in line or "olga" not in line:
-        out.append(f"the journal must name a subject's caller plainly: {line!r}")
-    if lease.caller({"_caller": "alice", "owner": "bob"}) != ("alice", True):
-        out.append("lease.caller must prefer the subject")
-    return out
+    c.check("the journal must name a subject's caller plainly",
+            not ("self-declared" in line or "olga" not in line), repr(line))
+    c.check("lease.caller must prefer the subject",
+            not (lease.caller({"_caller": "alice", "owner": "bob"}) != ("alice", True)))
 
 
-def check_slots_total_243():
+def check_slots_total_243(c):
     """HYPOTHESIS (#243): nomad_pool отдаёт только свободные слоты, и
     сколько папетов берёт пустой узел, не видно никому.
     SOLUTION: рядом со slots -- slots_total = total_mb // spec.MEM; slots
     прежний, его читают другие. STATUS: FIXED — see #243"""
     from mop.server import nomad, spec
-    out = []
 
     class Nodes:
         def get_nodes(self):
@@ -607,24 +540,18 @@ def check_slots_total_243():
     class Client:
         nodes = Nodes()
 
-    keep = (nomad.client, nomad.node_capacity)
-    try:
-        nomad.client = lambda: Client()
-        nomad.node_capacity = lambda n: (2 * spec.MEM + 1, 5 * spec.MEM + spec.MEM // 2)
+    with patched(nomad, client=lambda: Client(),
+                 node_capacity=lambda n: (2 * spec.MEM + 1, 5 * spec.MEM + spec.MEM // 2)):
         got = {n["name"]: n for n in cluster.nomad_pool()}
-    finally:
-        nomad.client, nomad.node_capacity = keep
     gpu = got.get("gpu", {})
-    if gpu.get("slots") != 2 or gpu.get("slots_total") != 5:
-        out.append(f"gpu: slots 2 of 5 total, got {gpu}")
-    if "slots_total" in got.get("off", {}) or "ctl" in got:
-        out.append(f"a node not ready has no capacity, another dc is not listed: {got}")
+    c.check("gpu: slots 2 of 5 total",
+            not (gpu.get("slots") != 2 or gpu.get("slots_total") != 5), gpu)
+    c.check("a node not ready has no capacity, another dc is not listed",
+            not ("slots_total" in got.get("off", {}) or "ctl" in got), got)
     # Строка `mop node` несёт его дальше.
     from mop.server import nodes
     row = nodes.row({"Name": "gpu", "Status": "ready"}, {}, gpu)
-    if row.get("slots_total") != 5:
-        out.append(f"nodes.row must carry slots_total: {row}")
-    return out
+    c.check("nodes.row must carry slots_total", not (row.get("slots_total") != 5), row)
 
 
 # ── #257: перерегистрация без ветки в запросе сохраняет ветку меты ────────
@@ -633,44 +560,256 @@ def check_slots_total_243():
 # свежее тело клонирует origin/HEAD. SOLUTION: _update берёт branch из
 # запроса, а без него -- из текущей меты джоба; ветка -- свойство папета,
 # которое перерегистрация обязана сохранять. STATUS: FIXED — see #257
-def check_update_keeps_branch_257():
-    out = []
-    saved = (cluster.nomad.get_job, cluster.nomad.register, cluster.spec.job_spec,
-             cluster.store_workspace)
+def check_update_keeps_branch_257(c):
     calls = []
-    try:
-        cluster.nomad.get_job = lambda name: {"ID": name, "Meta": {"origin": "git@h:g/mop.git",
-                                                                   "llm": "claude", "branch": "swarm"}}
-        cluster.nomad.register = lambda job: None
+    # Nomad -- поддельный, параметром (#275).
+    job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
+                                      "branch": "swarm"}}
+    with restored(cluster.spec, "job_spec"), restored(cluster, "store_workspace"):
         cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None: \
             calls.append(branch) or {"Job": {"ID": name}}
         cluster.store_workspace = lambda root, name, req: None
-        cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
-        cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git", "branch": "dev"})
-        cluster.nomad.get_job = lambda name: None
-        cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
-    finally:
-        (cluster.nomad.get_job, cluster.nomad.register, cluster.spec.job_spec,
-         cluster.store_workspace) = saved
-    if calls != ["swarm", "dev", None]:
-        out.append(f"update must keep the meta branch unless the request names one: {calls}")
-    return out
+        # register фейка кладёт пустой джоб на место прежнего: мету каждый
+        # вызов берёт из своего фейка.
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": job})):
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": job})):
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
+                                    "branch": "dev"})
+        with cluster.using(FakeNomad()):
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
+    c.expect("update must keep the meta branch unless the request names one",
+             calls, ["swarm", "dev", None])
+
+
+def check_owner_gate_267(c):
+    """HYPOTHESIS (#267): ворота владения написаны дважды -- cluster.gate и
+    agent._gate, каждая сама зовёт lease.may_touch и сама собирает
+    (None, заметка) | (f"{name}: {заметка}", None), а заметку owner_note
+    каждая прикладывает по-своему.
+    SOLUTION: одна чистая lease.gate и одна lease.noted; сторона держит только
+    своё -- откуда факты клона и как выглядит ответ. STATUS: FIXED — see #267"""
+    from mop.common import lease
+    gate = getattr(lease, "gate", None)
+    if not c.check("lease.gate exists (else the gate is written on each side)",
+                   not (gate is None)):
+        return
+    for name, clone, caller, force in gate_table_267():
+        want = gate(name, clone, caller, GATE_NOW, force)
+        req = {"name": name, **({"_caller": caller} if caller else {}),
+               **({"force": True} if force else {})}
+        got = cluster.gate(name, req, {"clone": clone.to_dict()}, GATE_NOW)
+        c.expect(f"cluster.gate {caller} over {clone.owner} (force {force}) vs lease.gate",
+                 got, want)
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                            "mop", "server", "cluster.py")).read()
+    c.check("cluster.py must decide through lease.gate, not may_touch",
+            not ("may_touch(" in src or "lease.gate(" not in src))
+    noted = getattr(lease, "noted", None)
+    if c.check("lease.noted exists (else owner_note is attached on each side)",
+               not (noted is None)):
+        for o, note, want in (({"ok": True}, "taken from bob", {"ok": True, "owner_note": "taken from bob"}),
+                              ({"ok": True}, None, {"ok": True}),
+                              ({"error": "x"}, "taken", {"error": "x"})):
+            c.expect(f"lease.noted({o}, {note!r})", noted(o, note), want)
+
+
+def check_node_267(c):
+    """HYPOTHESIS (#267): узел приходит двумя формами словаря -- глагол pool
+    (nomad_pool: {name, status, ...} по-разному по статусу) и глагол nodes
+    (nodes.row: {name, driver, serves, state, ...}), -- и читатели (ready_nodes,
+    pool_lines, mop node, дашборд) разбирают их строковыми ключами каждый сам.
+    SOLUTION: значение узла, каждая форма провода -- своей парой from_/to_,
+    ключи и их порядок прежние (снимки те же); читатели идут через него.
+    С #277 форм -- два значения: PoolNode (глагол pool) и NodeRow (nodes).
+    STATUS: FIXED — see #267"""
+    import json
+    from mop.common import domain, puppets, bus
+    from mop.server import nodes
+    PoolNode, NodeRow = getattr(domain, "PoolNode", None), getattr(domain, "NodeRow", None)
+    if not c.check("domain.PoolNode and domain.NodeRow exist",
+                   not (PoolNode is None or NodeRow is None)):
+        return
+    pool = [{"name": "a", "status": "down"},
+            {"name": "b", "status": "ready", "error": "meta: boom"},
+            {"name": "c", "status": "ready", "free_mb": 8192, "total_mb": 16384,
+             "slots": 1, "slots_total": 2, "eligible": True},
+            {"name": "d", "status": "ready", "free_mb": 0, "total_mb": 4096,
+             "slots": 0, "slots_total": 0, "eligible": False}]
+    for d in pool:
+        back = PoolNode.from_pool(d).to_pool()
+        c.check("pool form round trip", not (json.dumps(back) != json.dumps(d)),
+                f"{d} -> {back}")
+    summaries = [({"Name": "c", "Status": "ready"}, {"mop_projects": "mop"}, pool[2]),
+                 ({"Name": "e", "Status": "ready", "Drain": True}, {}, {}),
+                 ({"Name": "f", "Status": "ready"}, {"mop_driver": "no-such"}, {})]
+    for summary, meta, cap in summaries:
+        row = nodes.row(summary, meta, cap)
+        back = NodeRow.from_row(row).to_row()
+        c.check("nodes form round trip", not (json.dumps(back) != json.dumps(row)),
+                f"{row} -> {back}")
+    with restored(bus, "call_cluster"):
+        bus.call_cluster = lambda verb, **kw: {"ok": True, "nodes": pool}
+        got = puppets.pool()
+        c.check("puppets.pool must give PoolNode values",
+                not (not all(isinstance(n, PoolNode) for n in got)), repr(got))
+        # Как было: ready и не закрытый планированию; у сломанного (error)
+        # eligible нет, и он -- по умолчанию открыт.
+        c.expect("ready_nodes: ready and not closed", puppets.ready_nodes(), {"b", "c"})
+        rows = [nodes.row(*x) for x in summaries]
+        bus.call_cluster = lambda verb, **kw: {"ok": True, "nodes": rows}
+        got = puppets.nodes()
+        c.check("puppets.nodes must give NodeRow values of the same rows",
+                not (not all(isinstance(n, NodeRow) for n in got)
+                     or [n.to_row() for n in got] != rows), repr(got))
+
+
+def check_node_forms_277(c):
+    """HYPOTHESIS (#277): domain.Node -- один класс с одиннадцатью
+    необязательными полями на две разные формы провода (pool и nodes), и
+    «какая это форма» читается по тому, какие поля заполнены. Готовый узел
+    без памяти и неготовый с памятью собирались молча, и to_pool отдавал
+    то None в ёмкости, то тихо терял поля.
+    SOLUTION: два значения, PoolNode и NodeRow; у PoolNode форма названа
+    (form: down / broken / ready), и __post_init__ требует своё: у готового
+    ёмкость обязательна, у неготового и сломанного её нет -- ValueError с
+    именем поля. Провод прежний байт в байт.
+    STATUS: FIXED — see #277"""
+    import json
+    from mop.common import domain
+    from mop.server import nodes
+    PoolNode, NodeRow = getattr(domain, "PoolNode", None), getattr(domain, "NodeRow", None)
+    if not c.check("#277 PoolNode and NodeRow exist", not (PoolNode is None or NodeRow is None)):
+        return
+    c.check("#277 the one-class Node is gone", not hasattr(domain, "Node"))
+
+    def refused(what, make, field):
+        try:
+            got = make()
+        except ValueError as e:
+            c.check(f"#277 {what}: the refusal names {field!r}, got {e}", field in str(e))
+            return
+        c.check(f"#277 {what} must be refused, got {got!r}", False)
+
+    cap = {"free_mb": 8192, "total_mb": 16384, "slots": 1, "slots_total": 2}
+    for field in ("free_mb", "total_mb", "slots"):
+        refused(f"a ready node without {field}",
+                lambda: PoolNode("c", "ready", **dict(cap, **{field: None})), field)
+    # slots_total у готового необязателен: сервис старше #243 его не шлёт, и
+    # во время раската его ответ читается («slots 0/-»), а не отказывает.
+    old = PoolNode.from_pool({"name": "o", "status": "ready", "free_mb": 1, "total_mb": 2,
+                              "slots": 0, "eligible": True})
+    c.expect("#277 a ready node from a service older than #243 (no slots_total)",
+             (old.form, old.slots_total), ("ready", None))
+    for field in cap:
+        refused(f"a not-ready node with {field}",
+                lambda: PoolNode("a", "down", **{field: cap[field]}), field)
+        refused(f"a broken node with {field}",
+                lambda: PoolNode("b", "ready", error="boom", **{field: cap[field]}), field)
+    refused("a not-ready node with an error", lambda: PoolNode("a", "down", error="boom"),
+            "error")
+    refused("a ready pool dict without memory",
+            lambda: PoolNode.from_pool({"name": "c", "status": "ready", "slots": 1,
+                                        "slots_total": 2, "eligible": True}), "free_mb")
+    # Форма названа, а не угадана по заполненным полям.
+    forms = [(PoolNode("a", "down"), "down"), (PoolNode("b", "ready", error="boom"), "broken"),
+             (PoolNode("c", "ready", **cap), "ready")]
+    for n, want in forms:
+        c.expect(f"#277 form of {n.name}", n.form, want)
+    # Провод байт в байт: обе формы, все их варианты.
+    pool = [{"name": "a", "status": "initializing"},
+            {"name": "b", "status": "ready", "error": "meta: boom"},
+            {"name": "c", "status": "ready", **cap, "eligible": False}]
+    for d in pool:
+        back = PoolNode.from_pool(d).to_pool()
+        c.check(f"#277 pool form byte for byte: {d} -> {back}", json.dumps(back) == json.dumps(d))
+    for summary, meta, cp in (({"Name": "c", "Status": "ready"}, {"mop_projects": "mop"}, cap),
+                              ({"Name": "e", "Status": "down"}, {}, {}),
+                              ({"Name": "f", "Status": "ready"}, {"mop_driver": "no-such"}, {})):
+        row = nodes.row(summary, meta, cp)
+        back = NodeRow.from_row(row).to_row()
+        c.check(f"#277 nodes form byte for byte: {row} -> {back}",
+                json.dumps(back) == json.dumps(row))
+    # Строка nodes -- не узел pool: у неё нет статуса, и в pool её не отдать.
+    c.check("#277 a NodeRow has no pool form", not hasattr(NodeRow, "to_pool"))
+    c.check("#277 a PoolNode has no nodes form", not hasattr(PoolNode, "to_row"))
+
+
+# ── #275: Nomad за интерфейсом ───────────────────────────────────────────
+# HYPOTHESIS: сервис кластера зовёт nomad.* в 38 местах, сборка образа -- в
+# шести, и проверки подменяют Nomad только атрибутами модуля: зависимость на
+# конкретный HTTP-клиент, а не на интерфейс.
+# SOLUTION: typing.Protocol nomad.NomadApi -- ровно то, что читают cluster и
+# image; живой модуль ему удовлетворяет как есть. Сервис берёт api
+# параметром (cluster.using, answer/serve(api=...)), по умолчанию -- живой;
+# image.clear/restore/build -- тоже. Чистые помощники (describe_error,
+# forget_refusal) и константы (ADDR, POOL_DC) остаются у модуля.
+# STATUS: FIXED — see #275
+PURE_NOMAD = {"ADDR", "POOL_DC", "describe_error", "forget_refusal"}
+
+
+def check_nomad_api_275(c):
+    import ast
+    from mop.server import image, nomad
+    api = getattr(nomad, "NomadApi", None)
+    c.check("nomad.NomadApi exists", api is not None)
+    if api is None:
+        return
+    c.check("the live module satisfies NomadApi as it is", isinstance(nomad, api))
+    fake = FakeNomad(jobs={"pu-mop-1": {"ID": "pu-mop-1", "Status": "running", "Meta": {
+        "origin": "git@h:g/mop.git", "llm": "claude", "branch": "swarm"}}})
+    c.check("a fake satisfies NomadApi", isinstance(fake, api))
+    # Глагол через api, без подмены атрибутов модуля nomad.
+    keep = {n: getattr(nomad, n) for n in dir(nomad) if not n.startswith("_")}
+    got = cluster.answer("mop", {"verb": "spec", "name": "pu-mop-1"}, api=fake)
+    c.expect("spec answers from the injected api",
+             (got.get("ok"), (got.get("meta") or {}).get("branch")), (True, "swarm"))
+    with cluster.using(fake):
+        cluster.store_workspace, saved = (lambda root, name, req: None), cluster.store_workspace
+        try:
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
+        finally:
+            cluster.store_workspace = saved
+    reg = [a[1] for a in fake.calls if a[0] == "register"]
+    c.expect("update registers through the injected api, keeping the branch",
+             [(r["Job"]["ID"], r["Job"]["Meta"].get("branch")) for r in reg], [("pu-mop-1", "swarm")])
+    c.check("nothing on the nomad module was replaced",
+            all(getattr(nomad, n) is v for n, v in keep.items()))
+    # Сборка образа: снять и поднять -- через тот же api.
+    fake2 = FakeNomad(jobs=dict(fake.jobs))
+    with restored(image, "project_rows"), restored(image.puppets, "_wait_stopped", "wipe"):
+        job = fake.jobs["pu-mop-1"]
+        image.project_rows = lambda project, api=None: [
+            {"name": "pu-mop-1", "node": "n1", "job": job, "container": True,
+             "state": "free", "kind": None}]
+        image.puppets._wait_stopped = lambda name: None
+        image.puppets.wipe = lambda node, name, *a, **k: None
+        gone = image.clear("mop", force=True, api=fake2)
+        image.restore(gone, api=fake2)
+    c.expect("image.clear/restore go through the injected api",
+             [a[0] for a in fake2.calls], ["deregister", "register"])
+    # Структурно: cluster и image касаются Nomad только через api.
+    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    for rel in ("mop/server/cluster.py", "mop/server/image.py"):
+        tree = ast.parse(open(os.path.join(here, rel)).read())
+        bare = sorted({f"{n.attr}:{n.lineno}" for n in ast.walk(tree)
+                       if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                       and n.value.id == "nomad" and n.attr not in PURE_NOMAD})
+        c.expect(f"{rel} reaches Nomad only through the injected api", bare, [])
 
 
 def main():
-    failed = []
+    c = Checks()
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,
                   check_secret_verbs, check_verb_table_173,
                   check_forget_inventory_178, check_forget_summary_196,
                   check_gates_40, check_caller_207, check_slots_total_243,
-                  check_update_keeps_branch_257):
-        for line in check():
-            failed.append(f"FAIL {check.__name__}: {line}")
-    if failed:
-        print("\n".join(failed))
-    print("cluster: FAILED" if failed else "cluster: ok")
-    return 1 if failed else 0
+                  check_update_keeps_branch_257, check_owner_gate_267,
+                  check_node_267, check_node_forms_277,
+                  check_nomad_api_275):
+        check(c)
+    return c.report("cluster")
 
 
 if __name__ == "__main__":
