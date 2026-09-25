@@ -1,4 +1,4 @@
-"""mop callout: the bus's auth callout (unit mop-callout)
+"""mop server callout: the bus's auth callout (unit mop-callout)
 
 On the server, as the pool user. nats-server asks it at every connect of
 someone not in auth_users: people are checked by the identity provider and
@@ -16,8 +16,8 @@ def main(argv):
     try:
         from mop import callout
     except ImportError as e:
-        sys.exit(f"mop callout needs {e.name}: pip install nkeys pynacl (MOP_PIP_DEPS)")
+        sys.exit(f"mop server callout needs {e.name}: pip install nkeys pynacl (MOP_PIP_DEPS)")
     try:
         return lib.serve(callout.run)
     except (RuntimeError, OSError, ValueError) as e:
-        sys.exit(f"mop callout: {e}")
+        sys.exit(f"mop server callout: {e}")

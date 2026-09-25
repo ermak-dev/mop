@@ -1,4 +1,4 @@
-"""mop bootstrap check: is the service answering on the bus, and for which puppets it holds a workspace
+"""mop server bootstrap check: is the service answering on the bus, and for which puppets it holds a workspace
 """
 import sys
 

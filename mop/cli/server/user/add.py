@@ -1,4 +1,4 @@
-"""add a person: mop user add <login> --role admin|user [--projects a,b|*] [--name "..."] [--email ...] [--stdin]
+"""add a person: mop server user add <login> --role admin|user [--projects a,b|*] [--name "..."] [--email ...] [--stdin]
 
 Refuses a login already in the operators file or in MOP_OPERATORS. The role
 and projects follow MOP_OPERATORS: admin is the whole pool and takes no
@@ -10,7 +10,7 @@ from getpass import getpass
 
 from mop import identity
 from mop.cli import lib
-from mop.cli.user import _common
+from mop.cli.server.user import _common
 
 
 def main(argv):

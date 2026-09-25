@@ -1,4 +1,4 @@
-"""deploy: mop deploy [--check] [--skip-pipeline] [--from-ci]
+"""deploy: mop server deploy [--check] [--skip-pipeline] [--from-ci]
 
 The whole installation in one run: one playbook, site.yml, so there is one
 ansible process and one PLAY RECAP — a line per machine over every layer.
@@ -36,7 +36,7 @@ import subprocess
 import sys
 
 from mop.cli import lib
-from mop.cli.pool import _play
+from mop.cli.server import _play
 from mop import bus, config, creds, driver, gitlab, identity, manifest, puppets, projects
 
 # Это единственная дорога на узел мимо шины. Дороги через неё (alloc exec)
@@ -46,7 +46,7 @@ from mop import bus, config, creds, driver, gitlab, identity, manifest, puppets,
 
 SITE = "site.yml"
 # Прежние цели запуска. Отвергаем, а не молча трактуем как имя проекта: старая
-# привычка `mop deploy pool` завела бы на шине пользователя master-pool, и
+# привычка `mop server deploy pool` завела бы на шине пользователя master-pool, и
 # разбирались бы с этим уже по симптомам.
 RUN_TARGETS = ("nomad", "pool", "homelab", "claude", "nats", "all")
 
@@ -152,7 +152,7 @@ def driver_refusals(listing, default):
 
 
 # Отказ, пока в .env лежит прежний второй источник людей (#219).
-OPERATORS_GONE = ("MOP_OPERATORS is gone: move people with `mop user import` on the server, "
+OPERATORS_GONE = ("MOP_OPERATORS is gone: move people with `mop server user import` on the server, "
                   "then remove the line")
 
 
@@ -177,7 +177,7 @@ def operator_refusals(settings, secrets_dir=identity.SECRETS, leftover=""):
         return [str(e)]
     if isinstance(source, identity.PlainFileProvider) and not out and not source.identities():
         out.append(f"no people in {source.path}: nobody could log in to the bus -- "
-                   f"add someone with mop user add <login> on the server")
+                   f"add someone with mop server user add <login> on the server")
     return out
 
 
@@ -215,7 +215,7 @@ def pipeline_refusals(setting, have_creds, sha, fetch, fetch_jobs=None):
 
 # ─── --from-ci (#239) ────────────────────────────────────────────────────
 # CI катит установку сам: ключ джобы на сервере с forced command, и что бы
-# клиент ни прислал, сервер выполнит `mop deploy --from-ci`. Украденный ключ
+# клиент ни прислал, сервер выполнит `mop server deploy --from-ci`. Украденный ключ
 # поэтому умеет одно -- катить зелёный master, и держат это отказы ниже.
 def from_ci_refusals(setting, skip_pipeline, dry, branch, default, dirty):
     """Можно ли катить из CI. -> [строка].
@@ -357,7 +357,7 @@ def ci_pull(skip_pipeline, dry):
     """--from-ci до прогона (#239): отказы, fetch, --ff-only. -> можно ли
     катить дальше. Строки хода печатаются: они и есть лог джобы CI.
 
-    Сдвинувшийся HEAD -- перезапуск `mop deploy --from-ci` уже на новом коде:
+    Сдвинувшийся HEAD -- перезапуск `mop server deploy --from-ci` уже на новом коде:
     этот процесс держит в памяти старый пакет, а катить обязан тот, что
     приехал. Второй проход fetch не сдвигает и идёт дальше сам."""
     branch, default, dirty = ci_state(lib.PROJECT)
@@ -393,10 +393,10 @@ def check():
 
 
 def main(argv):
-    # До первого сетевого вызова: зависимости контроллера ставит mop setup,
+    # До первого сетевого вызова: зависимости контроллера ставит mop server setup,
     # и отказ его называет.
     if not shutil.which("ansible-playbook"):
-        lib.fail("no ansible-playbook on this machine -- run mop setup")
+        lib.fail("no ansible-playbook on this machine -- run mop server setup")
         return 1
     # Полный REQUIRED спрашивает только deploy: остальным хватает адреса
     # сервера, а MOP_GIT_HOST читают одни плейбуки.
@@ -408,11 +408,11 @@ def main(argv):
     if dry:
         argv = []
     if refused_target(argv):
-        lib.fail("run targets are gone: mop deploy takes no arguments")
+        lib.fail("run targets are gone: mop server deploy takes no arguments")
         return 1
     if argv:
         # Origin в аргументах заводил проект побочным эффектом прогона (#79).
-        lib.fail(f"mop deploy takes no arguments; {argv[0]} looks like a project.\n"
+        lib.fail(f"mop server deploy takes no arguments; {argv[0]} looks like a project.\n"
                  f"Register it: mop project add {argv[0]}")
         return 1
     if from_ci and not ci_pull(skip_pipeline, dry):
@@ -502,7 +502,7 @@ def main(argv):
         # они и нужны. Машине по возвращении нужен свой прогон, и это
         # сказано.
         lib.fail("some machines did not answer; everything that did is "
-                 "configured. Run mop deploy again when they are back")
+                 "configured. Run mop server deploy again when they are back")
 
     # Контроллер — тоже машина оператора: его каталог сервера собирается здесь
     # из secrets/ и bootstrap.json. Самоподписанный сертификат закрепляется,
@@ -516,7 +516,7 @@ def main(argv):
         # человек входит своим именем, и выбрать его за оператора deploy не
         # может. Громко, а не красной проверкой с непонятной причиной.
         lib.fail(f"installed, but this machine is nobody on the bus yet: "
-                 f"log in with mop join <login> (a person from mop user, or "
+                 f"log in with mop join <login> (a person from mop server user, or "
                  f"from the directory), then mop list")
         return 1
 

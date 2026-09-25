@@ -93,14 +93,14 @@ PIPELINE_VERDICT = [
 def check_deploy_gate():
     """Настройка, отказ без кредов и флаг deploy (#231). -> [строка FAILED]."""
     from mop import config
-    from mop.cli.pool import deploy
+    from mop.cli.server import deploy
     out = []
     if config.SETTINGS.get("MOP_DEPLOY_NEEDS_GREEN", None) != "":
         out.append(f"MOP_DEPLOY_NEEDS_GREEN default is "
                    f"{config.SETTINGS.get('MOP_DEPLOY_NEEDS_GREEN')!r}, wanted '' (no check)")
     fn = getattr(deploy, "pipeline_refusals", None)
     if fn is None:
-        return out + ["mop deploy has no pipeline_refusals"]
+        return out + ["mop server deploy has no pipeline_refusals"]
 
     def boom(sha):
         raise AssertionError("GitLab asked while the check is off")
@@ -161,7 +161,7 @@ def check_deploy_gate():
 
 
 # #239: CI катит mop сам — джоба deploy по ssh с forced command зовёт
-# `mop deploy --from-ci`. Пока она идёт, пайплайн running, и гейт #231
+# `mop server deploy --from-ci`. Пока она идёт, пайплайн running, и гейт #231
 # отвечал «wait» самому деплою. Обход --skip-pipeline открыл бы украденному
 # ключу красный master.
 # HYPOTHESIS: гейт знает только статус пайплайна, не его джобы.
@@ -243,10 +243,10 @@ def check_from_ci_sync():
     """Настоящий git во временном каталоге: fetch и --ff-only (#239). -> [строка]."""
     import subprocess
     import tempfile
-    from mop.cli.pool import deploy
+    from mop.cli.server import deploy
     fn = getattr(deploy, "ci_sync", None)
     if fn is None:
-        return ["mop deploy has no ci_sync"]
+        return ["mop server deploy has no ci_sync"]
     tmp = tempfile.mkdtemp(prefix="mop-ci-sync-")
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
@@ -284,7 +284,7 @@ def check_from_ci_sync():
     # Ветка и грязь — из той же рабочей копии.
     state = getattr(deploy, "ci_state", None)
     if state is None:
-        return out + ["mop deploy has no ci_state"]
+        return out + ["mop server deploy has no ci_state"]
     open(os.path.join(work, "tracked"), "w").write("a\n")
     git(work, "add", "tracked")
     git(work, "commit", "-q", "-m", "tracked")
@@ -369,7 +369,7 @@ def main():
             print(f"FAILED  pipeline_verdict({pipeline['status']}, {jobs!r}) -> {got!r}, "
                   f"wanted {want!r}")
 
-    from mop.cli.pool import deploy
+    from mop.cli.server import deploy
     for args, want in FROM_CI:
         cases += 1
         fn = getattr(deploy, "from_ci_refusals", None)

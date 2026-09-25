@@ -257,7 +257,7 @@ def routes():
 
 def facts(base, project=None, listing=""):
     """Всё, что плейбукам нужно знать о драйвере pve на гипервизоре с этой
-    базой VMID. -> dict; `mop driver pve-facts` печатает его JSON'ом (#158).
+    базой VMID. -> dict; `mop server pve-facts` печатает его JSON'ом (#158).
 
     Раньше плейбуки добывали это тремя копиями `python3 -c` и досчитывали
     jinja: длину префикса, VMID_MAX, разбор списка тел поиском ' имя '. Второе
@@ -579,7 +579,7 @@ async def ensure(name, params=None):
 
 
 # Где на узле лежит пакет mop, который надо продублировать в тело: каталог
-# проекта, от самого себя. Тот же, что привозит на узел `mop deploy`.
+# проекта, от самого себя. Тот же, что привозит на узел `mop server deploy`.
 PACKAGE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -588,7 +588,7 @@ async def _sync_package(name, vmid):
 
     Без этого правка session.py или usage.py доезжала бы до тела только со
     сборкой образа, то есть ловушка «правка логики тела доезжает прогоном
-    mop deploy» (docs/DRIVER.md) была бы неправдой — молча. Поймано на
+    mop server deploy» (docs/DRIVER.md) была бы неправдой — молча. Поймано на
     `mop stat`: в теле лежал пакет времён сборки образа, у usage.py в нём ещё
     не было CLI, и расход контейнерного папета читался как ровный ноль —
     неотличимо от «папет ничего не потратил».
@@ -672,14 +672,14 @@ async def admit(name, let_in):
                 pubkey = f.read().strip()
         except FileNotFoundError:
             raise RuntimeError(f"no server key on this node ({SERVER_PUB}) — "
-                               f"run mop deploy")
+                               f"run mop server deploy")
     if not valid_name(name):
         return {"error": bad_name(name)}
     try:
         with open(f"{SSH_KEY}.pub") as f:
             text = f.read().strip() + "\n"
     except FileNotFoundError:
-        return {"error": f"no node key {SSH_KEY}.pub — run mop deploy"}
+        return {"error": f"no node key {SSH_KEY}.pub — run mop server deploy"}
     if pubkey:
         text += pubkey.strip() + "\n"
     out, code = await sh(f"printf %s {shlex.quote(text)} | "

@@ -215,7 +215,7 @@ def check_choice():
     p = identity.provider(SETTINGS)
     if not isinstance(p, ldapauth.LdapProvider):
         out.append(f"MOP_AUTH_PROVIDER=ldap must give LdapProvider: {p}")
-    from mop.cli.pool import deploy
+    from mop.cli.server import deploy
     got = deploy.operator_refusals({"MOP_AUTH_PROVIDER": "ldap"})
     if len(got) != 1 or "MOP_LDAP_URL" not in got[0]:
         out.append(f"deploy must refuse incomplete LDAP settings: {got}")
@@ -343,7 +343,7 @@ def check_service_settings_214():
     # Как пароль едет прогону: окружением процесса ansible, не аргументом,
     # и только когда провайдер -- ldap.
     from mop.cli import lib
-    from mop.cli.pool import _play
+    from mop.cli.server import _play
     penv = getattr(_play, "play_env", None)
     if penv is None:
         out.append("_play.play_env is missing")

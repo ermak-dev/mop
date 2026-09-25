@@ -27,7 +27,7 @@ HOME = config.get("MOP_HOME")             # $HOME на узлах пула
 USER = config.get("MOP_USER")               # под кем идут задачи
 
 # Просьбы проектов (#197): {проект: {настройка: значение}} из их `.mop`. Файл
-# кладёт роль cluster из манифестов `mop deploy`: сервис строит спеку под
+# кладёт роль cluster из манифестов `mop server deploy`: сервис строит спеку под
 # учёткой пула и файлов контроллера не видит.
 ASKS_FILE = os.path.expanduser("~/.config/mop/project-asks.json")
 
@@ -80,7 +80,7 @@ META_PROJECTS = "mop_projects"
 # именно такой, одним долларом, — это ссылка на мету узла, а не текст.
 PROJECTS_TARGET = "${meta." + META_PROJECTS + "}"
 # Потолок памяти, который узел готов дать одному папету (#197): его
-# MOP_BODY_MEM_CAP_MB, которую `mop deploy` рендерит в meta client.hcl.
+# MOP_BODY_MEM_CAP_MB, которую `mop server deploy` рендерит в meta client.hcl.
 META_MEM_CAP = "mop_mem_cap_mb"
 MEM_CAP_TARGET = "${meta." + META_MEM_CAP + "}"
 
@@ -110,7 +110,7 @@ exec "$HOME/mop/bin/mop" driver run "$PU_NAME"
 # контейнерного папета упал на этом: «syntax error near unexpected token `(`».
 #
 # Обе ловушки при этом остаются верными и разъезжаются по механизмам: правка
-# логики тела доезжает прогоном `mop deploy`, правка логики сессии по-прежнему
+# логики тела доезжает прогоном `mop server deploy`, правка логики сессии по-прежнему
 # требует перерегистрации джоба.
 WRAPPER = r"""
 set -e

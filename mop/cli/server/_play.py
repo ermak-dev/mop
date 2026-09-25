@@ -69,7 +69,7 @@ def play(playbook, projects, manifests=None, git_hosts=None, check=False,
     вывод прогона -- это разница, которую внёс бы настоящий.
     """
     if not shutil.which("ansible-playbook"):
-        raise RuntimeError("no ansible-playbook on this machine -- run mop setup")
+        raise RuntimeError("no ansible-playbook on this machine -- run mop server setup")
     inventory = os.environ["INVENTORY"]
     if not os.path.isfile(inventory):
         raise RuntimeError(f"no inventory {inventory} -- create it from the example: "

@@ -1,7 +1,7 @@
 """sandbox bootstrap: what the server plays at every start of a sandbox
 
-  mop bootstrap serve            the server's subscriber (unit mop-bootstrap)
-  mop bootstrap check            is the service answering on the bus, and for
+  mop server bootstrap serve            the server's subscriber (unit mop-bootstrap)
+  mop server bootstrap check            is the service answering on the bus, and for
                                  which puppets it holds a workspace
 
 A puppet's workspace (.mop/bootstrap.yaml) is played by the server into its
