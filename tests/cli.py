@@ -1655,6 +1655,53 @@ def check_fallback_model_183():
         failed += 1
         print(f"FAIL treat(model) must use MOP_FALLBACK_MODEL as it is at the call: "
               f"{got!r}, typed {typed}")
+    # ── #251: отвергнутый вход не оставляет мусора aiohttp ──────────────
+    # HYPOTHESIS: bus.check / ask_once / connect зовут nats.connect(), который
+    # при отказе (allow_reconnect=False) бросает до закрытия транспорта;
+    # websocket-транспорт nats-py 2.15 держит aiohttp.ClientSession, и при
+    # выходе процесса сборщик печатает «Unclosed client session» -- после
+    # запроса пароля mop join успех неотличим от ошибки.
+    # SOLUTION: одна точка соединения bus._open: клиент nats.NATS(), connect
+    # в try, при отказе nc.close() (закрывает транспорт) и исключение дальше.
+    # STATUS: FIXED — see #251
+    from mop import bus as _bus
+    closed = []
+
+    class FakeNATS:
+        def __init__(self):
+            self.is_closed = False
+
+        async def connect(self, **kw):
+            raise OSError("refused by the check")
+
+        async def close(self):
+            closed.append(True)
+
+    real_nats = sys.modules.get("nats")
+    kept = (getattr(real_nats, "NATS", None), getattr(real_nats, "connect", None))
+
+    def refuse(*a, **k):
+        raise OSError("nats.connect must not be used: the client must be closable")
+    real_nats.NATS, real_nats.connect = FakeNATS, refuse
+    try:
+        c = {"url": "wss://192.0.2.1:443/nats", "user": "u", "password": "p"}
+        for what, call in (("check", lambda: _bus.check(c)),
+                           ("ask_once", lambda: _bus.ask_once(c, "s", "ping", timeout=1))):
+            closed.clear()
+            try:
+                call()
+                failed += 1
+                print(f"FAIL #251 {what}: a refused connect must raise")
+            except Exception as e:
+                if not isinstance(e, RuntimeError):
+                    failed += 1
+                    print(f"FAIL #251 {what}: must raise a RuntimeError, got {type(e).__name__}: {e}")
+            if closed != [True]:
+                failed += 1
+                print(f"FAIL #251 {what}: the client must be closed once on refusal, got {closed}")
+    finally:
+        real_nats.NATS, real_nats.connect = kept
+
     return failed
 
 
