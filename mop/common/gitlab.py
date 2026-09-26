@@ -188,6 +188,12 @@ def relabel(iid, labels):
     return call("PUT", f"/issues/{iid}", {"labels": ",".join(labels)})
 
 
+def edit(iid, title=None, body=None):
+    """Заголовок и/или тело задачи (#288). Что не названо, не трогается:
+    в запросе нет такого поля вовсе, а не пустое значение."""
+    return call("PUT", f"/issues/{iid}", edit_payload(title, body))
+
+
 def close(iid, labels):
     return call("PUT", f"/issues/{iid}", {"labels": ",".join(labels),
                                           "state_event": "close"})
@@ -367,6 +373,48 @@ def with_epic(body, iid):
         body = "\n".join(rest).lstrip("\n")
     marker = f"**Эпик:** #{iid}"
     return f"{marker}\n\n{body}" if body else marker
+
+
+# Маркер эпика при правке тела (#288): оставить старый, поставить новый,
+# снять. Сентинел, а не None: None -- это и есть «снять».
+KEEP = object()
+
+
+def replace_body(old, new, epic=KEEP):
+    """Новое тело задачи вместо старого с учётом родства. Маркер эпика живёт
+    первой строкой тела, и правка тела целиком молча уводила бы задачу
+    из-под эпика. Новое тело со своим маркером -- как есть; без него -- под
+    старым родителем, если epic не сказал иначе: число ставит другой эпик,
+    None снимает."""
+    new = (new or "").strip()
+    if epic is None:
+        return bare_body(new)       # снять: и тот маркер, что принесло новое тело
+    if epic is not KEEP:
+        return with_epic(new, epic)
+    if epic_of(new) is not None:
+        return new
+    parent = epic_of(old)
+    return with_epic(new, parent) if parent is not None else new
+
+
+def bare_body(body):
+    """Тело без маркера эпика первой строкой."""
+    if epic_of(body) is None:
+        return body
+    return "\n".join(body.splitlines()[1:]).lstrip("\n")
+
+
+def edit_payload(title, body):
+    """Поля запроса правки: только названные. Ничего не названо -- ValueError:
+    пустая правка означала бы ошибку в аргументах, а не «ничего не менять»."""
+    payload = {}
+    if title:
+        payload["title"] = title
+    if body is not None:
+        payload["description"] = body
+    if not payload:
+        raise ValueError("nothing to edit: name --title or --body-file")
+    return payload
 
 
 def slugify(s):

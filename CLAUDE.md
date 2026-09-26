@@ -99,6 +99,7 @@ Work lives in GitLab issues. The coordinates come from the working copy's git or
 
  - **MUST** Use `mop dev bug` for every interaction with the tracker, never the API directly
  - **MUST** If a capability is missing, add it to `mop/cli/dev/bug` plus a check of its pure logic in `tests/gitlab.py`
+ - **MUST** Extend the commandlet the moment it falls short, before going on: a comment instead of an edit, a curl instead of a verb, is the signal that a commandlet is missing, not a way around it (#288)
  - **MUST** Issue titles, bodies and comments are in Russian; code, branch names and commits stay English
  - **MUST** Every unit of work is an issue before the fix, in the fixed report shape: steps to reproduce, expected result, actual result, evidence, the root cause (only when confirmed) and what to do
  - **MUST** Exactly one label from each group `status::`, `sev::`, `component::` — a second of the same group silently replaces the first; `mop dev bug labels` prints the vocabulary
