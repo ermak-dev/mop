@@ -374,6 +374,35 @@ def main():
     c.expect("a label from the vocabulary must pass",
              gitlab.check_label("component::bus"), "component::bus")
 
+    # Правка тела задачи (#288): `mop dev bug edit` заменяет тело целиком, а
+    # маркер эпика живёт первой строкой тела -- и терялся бы с каждой правкой,
+    # уводя задачу из-под эпика молча. HYPOTHESIS: глагола edit нет, объём
+    # задачи фиксируется комментарием, и описание расходится с решением.
+    # SOLUTION: gitlab.replace_body(old, new, epic) -- KEEP держит старый
+    # маркер, число ставит другой, None снимает. STATUS: FIXED — see #288
+    old = "**Эпик:** #281\n\nстарое тело"
+    for new, epic, want in [
+        ("новое тело", gitlab.KEEP, "**Эпик:** #281\n\nновое тело"),
+        ("новое тело", 7, "**Эпик:** #7\n\nновое тело"),
+        ("новое тело", None, "новое тело"),
+        ("**Эпик:** #9\n\nсвоё", gitlab.KEEP, "**Эпик:** #9\n\nсвоё"),
+        ("**Эпик:** #9\n\nсвоё", None, "своё"),
+    ]:
+        c.expect(f"replace_body(old, {new!r}, {epic!r})",
+                 gitlab.replace_body(old, new, epic), want)
+    c.expect("replace_body without an epic keeps the body bare",
+             gitlab.replace_body("голое тело", "новое", gitlab.KEEP), "новое")
+    # Только заголовок -- в запросе нет description: тело не трогается.
+    c.expect("edit_payload(title only)", gitlab.edit_payload("Заголовок", None),
+             {"title": "Заголовок"})
+    c.expect("edit_payload(body only)", gitlab.edit_payload(None, "тело"),
+             {"description": "тело"})
+    try:
+        gitlab.edit_payload(None, None)
+        c.fail("edit_payload with nothing to change must refuse")
+    except ValueError:
+        pass
+
     return c.report("gitlab")
 
 
