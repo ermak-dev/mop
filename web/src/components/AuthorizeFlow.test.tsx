@@ -29,7 +29,9 @@ test("the tab is opened before the server is asked and pointed at the url after"
   vi.stubGlobal("fetch", fetch);
   wrap();
   fireEvent.click(screen.getByTestId("auth-ermak"));
-  await waitFor(() => expect(screen.getByText("открыть страницу входа")).toBeInTheDocument());
+  // Кнопки -- иконки (#304): ищем по aria-label, текста на них нет.
+  await waitFor(() => expect(screen.getByLabelText("открыть страницу входа")).toBeInTheDocument());
+  expect(screen.queryByText("открыть страницу входа")).toBeNull();
   expect(order).toEqual(["open", "fetch"]);
   expect(tab.location.href).toBe("https://claude.com/x");
   expect(screen.getByRole("link")).toHaveAttribute("href", "https://claude.com/x");
@@ -58,9 +60,17 @@ test("the code is posted with the name and the outcome is announced", async () =
   fireEvent.click(screen.getByTestId("auth-ermak"));
   const input = await screen.findByLabelText("код для ermak");
   fireEvent.change(input, { target: { value: "abc#state" } });
-  fireEvent.click(screen.getByText("Отправить код"));
+  fireEvent.click(screen.getByLabelText("отправить код"));
   await waitFor(() => expect(show).toHaveBeenCalled());
   expect(calls[1]).toEqual({ url: "/api/creds/login/code", body: { name: "ermak", code: "abc#state" } });
   expect(show.mock.calls[0][0]).toMatchObject({ color: "green", message: "вошёл как anton@example.dev" });
   expect(screen.getByTestId("auth-ermak")).toBeInTheDocument();
+});
+
+test("the start button is an icon with a label, not a text button (#304)", () => {
+  wrap();
+  const b = screen.getByLabelText("авторизоваться");
+  expect(b).toBe(screen.getByTestId("auth-ermak"));
+  expect(b.textContent).toBe("");
+  expect(b.querySelector("svg")).not.toBeNull();
 });
