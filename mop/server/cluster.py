@@ -419,12 +419,8 @@ def _cred_for(profile, wanted, kept=None):
         return wanted, None
     if kept:
         return kept, None
-    return credreg_pick(profile), None
-
-
-def credreg_pick(profile):
-    """Первый активный кредит профиля по реестру либо None."""
-    return common_credreg.pick(profile, credreg.all())
+    # Первый активный кредит профиля по реестру либо None.
+    return common_credreg.pick(profile, credreg.all()), None
 
 
 def _kept_meta(name):
@@ -802,8 +798,7 @@ def _cred_push(project, req):
 
 def _cred_list(project, req):
     # Держатели аренды (#284) -- отдельным полем: запись едет как лежит.
-    return {"ok": True, "creds": credreg.all(),
-            "holders": {c: sorted(h) for c, h in credreg.holders(_api()).items()}}
+    return {"ok": True, "creds": credreg.all(), "holders": credreg.holder_names(_api())}
 
 
 def _cred_status(project, req):
@@ -812,8 +807,7 @@ def _cred_status(project, req):
         recs = [credreg.probe(name)]
     else:
         recs = credreg.probe_all()
-    return {"ok": True, "creds": recs,
-            "holders": {c: sorted(h) for c, h in credreg.holders(_api()).items()}}
+    return {"ok": True, "creds": recs, "holders": credreg.holder_names(_api())}
 
 
 def _cred_login_start(project, req):

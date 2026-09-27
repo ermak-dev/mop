@@ -60,15 +60,6 @@ def merge_status(rec, status, now):
                               "probed_at": int(now)}}
 
 
-def status_of(rec):
-    """CredStatus из записи либо None, если пробы не было."""
-    st = (rec or {}).get("status")
-    if not st:
-        return None
-    return CredStatus(st.get("kind", "needs_login"), resets_at=st.get("resets_at"),
-                      percent=st.get("percent"), detail=st.get("detail") or "")
-
-
 def span(secs):
     """Промежуток по-человечески: 0m, 59m, 3h, 3d."""
     secs = max(0, int(secs))

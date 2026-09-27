@@ -398,12 +398,14 @@ def check_creds_knowledge_317(c):
         rec = {"name": "x", "status": None, "added_at": added}
         c.expect(f"#317 age of added_at={added}: list and page agree",
                  (credreg.row(rec, NOW)[7], web.cred_rows([rec], NOW)[0]["age"]), (want, want))
+    probed = (("b", "glm", "active"), ("a", "glm", "active"),
+              ("c", "glm", "needs_login"), ("d", "claude", "active"))
     recs = [credreg.merge_status(credreg.record(n, p, "key", now=NOW), CredStatus(k), NOW)
-            for n, p, k in (("b", "glm", "active"), ("a", "glm", "active"),
-                            ("c", "glm", "needs_login"), ("d", "claude", "active"))]
+            for n, p, k in probed]
     recs.append(credreg.record("e", "glm", "key", now=NOW))
-    pairs = {r["name"]: (r["profile"], credreg.status_of(r) or CredStatus("needs_login"))
-             for r in recs}
+    # Вход tiers -- те же статусы, собранные напрямую (status_of снят #318:
+    # вне этой проверки его не звал никто); без пробы -- needs_login.
+    pairs = {n: (p, CredStatus(k)) for n, p, k in probed + (("e", "glm", "needs_login"),)}
     c.expect("#317 usable: pick and tiers agree -- active, by name",
              (credreg.pick("glm", recs), tiers._alive(pairs, "glm"),
               credreg.pick("zai", recs)), ("a", ["a", "b"], None))

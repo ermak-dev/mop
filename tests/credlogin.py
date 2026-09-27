@@ -152,7 +152,8 @@ def check_register_307(c):
     import importlib
     from mop.server import credreg
     cmd = importlib.import_module("mop.cli.cred.login")
-    reg = getattr(cmd, "registration", None)
+    # Правило записи переехало в реестр (#318): один путь с сервисом.
+    reg = getattr(credreg, "registration", None)
     if c.check("#307 login.registration exists", reg is not None):
         c.expect("#307 login: the email is the owner", reg("login", {"email": "anton@example.dev"}),
                  {"kind": "login", "owner": "anton@example.dev"})
@@ -168,6 +169,7 @@ def check_register_307(c):
 
         def __init__(self, home, mode):
             os.makedirs(home, exist_ok=True)
+            self.mode = mode                  # как у настоящего Login (#318)
             self.url, self.error, self.result = "https://claude.ai/oauth/authorize?scope=x", "bad code", \
                 "sk-ant-oat01-" + "y" * 40
 

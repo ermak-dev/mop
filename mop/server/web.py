@@ -24,6 +24,7 @@ import time
 
 from ..common import bus, credreg as credrows, puppets, state
 from .. import usage
+from . import credlogin
 
 STATES_EVERY = 15      # с: ростер Nomad + состояния с узлов
 SIZES_EVERY = 120      # с: обмер du — тяжёлый IO, nice, но всё же
@@ -208,7 +209,7 @@ def cache_control(url):
 CRED_WORDS = {"active": "активен", "quota_wait": "ждёт квоты",
               "needs_login": "ждёт ручной авторизации"}
 CRED_FIELDS = ("name", "profile", "kind", "owner", "status", "resets_at", "percent", "age")
-LOGIN_MODES = ("login", "setup-token")
+LOGIN_MODES = tuple(credlogin.MODES)
 
 
 def cred_status_word(st):
