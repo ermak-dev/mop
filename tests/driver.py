@@ -244,8 +244,72 @@ def check_contract_151(c):
                      f"no server key on this node ({missing}) — run mop server deploy")
 
 
+# ── #345: врапер и сдавшийся bootstrap ──────────────────────────────────
+# HYPOTHESIS: ответ gave_up (третий провал того же workspace) врапер
+# печатал бы как обычный провал -- без «сдался» и без того, что делать; а
+# стоп джоба, пришедший посреди bootstrap, убил бы процесс SIGTERM'ом до
+# finally, и ключ сервера остался бы в теле.
+# SOLUTION: refusal называет сдачу и лечение; bootstrap_sandbox на время
+# разговора ставит обработчик SIGTERM, который бросает SystemExit, так что
+# дверь закрывается в любом исходе, и возвращает прежний обработчик.
+# STATUS: FIXED — see #345
+def check_gave_up_wrapper_345(c):
+    import os
+    import signal
+    import time
+    from mop.common import bus
+    from mop.cli.driver import run
+    reply = {"ok": False, "played": True, "rc": 2, "tail": "TASK [bootstrap : sync]\nfatal: ...",
+             "task": "bootstrap : sync", "message": "Group `cloud` is not defined",
+             "gave_up": True, "failures": 3}
+    c.expect("#345 the wrapper names the give-up and the cure",
+             run.refusal("pu-rudesktop-8", run.BootstrapFailed(reply)),
+             "bootstrap of pu-rudesktop-8 gave up after 3 attempts at task «bootstrap : sync»: "
+             "Group `cloud` is not defined — fix .mop/bootstrap.yaml, then mop update\n"
+             "TASK [bootstrap : sync]\nfatal: ...")
+    c.expect("#345 a replay-less gave-up reply reads the same way",
+             run.refusal("pu-x-1", run.BootstrapFailed({**reply, "played": False, "tail": "t"})),
+             "bootstrap of pu-x-1 gave up after 3 attempts at task «bootstrap : sync»: "
+             "Group `cloud` is not defined — fix .mop/bootstrap.yaml, then mop update\nt")
+
+    doors = []
+
+    class D:
+        def address(self, name):
+            return "10.0.0.5"
+
+        async def admit(self, name, on):
+            doors.append(on)
+            return {}
+
+    def stopped(*a, **kw):
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(1)
+        return {"ok": True}
+    # Свой безобидный обработчик на время проверки: без защиты во врапере
+    # SIGTERM не убьёт прогон проверок, а покажет, что bootstrap не прервался.
+    seen = []
+
+    def before(_sig, _frm):
+        seen.append(1)
+    saved = signal.signal(signal.SIGTERM, before)
+    try:
+        with patched(bus, connect=lambda *a, **kw: None, ask_server=stopped):
+            try:
+                run.bootstrap_sandbox(D(), "pu-x-1", "x")
+                c.fail("#345 a SIGTERM during bootstrap must end the wrapper")
+            except SystemExit:
+                pass
+        c.expect("#345 a stop during bootstrap still closes the door", doors, [True, False])
+        c.check("#345 the previous SIGTERM handler is back",
+                signal.getsignal(signal.SIGTERM) is before)
+    finally:
+        signal.signal(signal.SIGTERM, saved)
+
+
 def main():
     c = Checks()
+    check_gave_up_wrapper_345(c)
 
     for what, mod, ok in CONTRACT:
         try:
