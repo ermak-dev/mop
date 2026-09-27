@@ -93,8 +93,8 @@ MCP = {"annotations": "destructive", "args": [
   инструментом не отдать), `master`, `code`, службы.
 
 Сейчас объявлены: `add`, `delete`, `restart`, `update`, `recycle`, `wipe`,
-`stat`, `doctor`, `login`, `node`, `node drain`, `node up`, `project add`,
-`project limit`. Список — `mop mcp --check` в числе инструментов, а
+`landing`, `stat`, `doctor`, `login`, `node`, `node drain`, `node up`,
+`project add`, `project limit`. Список — `mop mcp --check` в числе инструментов, а
 поимённо — у клиента.
 
 Аннотации не косметика: по ним Claude Code решает, спрашивать ли разрешение.
