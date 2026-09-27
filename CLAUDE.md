@@ -15,7 +15,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 ## Overall structure
 
  - `/mop` — the library: returns data, prints nothing; laid out by layers (#260): `mop/common` (everyone), `mop/client` (operator's machine and master shell), `mop/server` (controller), `mop/node` (agent); `mop/session.py` and `mop/usage.py` stay in the root (they travel to bodies by path), `mop/driver` is common with the node drivers inside, `mop/cli` holds the commands
- - `/bin` — one file, the `mop` launcher; the commandlets are modules of `/mop/cli`, one subcommand per module, in sections (`core`, `pool`, `service`) and groups (`driver`, `node`, `project`, `secret`, `dev`, `server`); they are the only thing that prints
+ - `/bin` — one file, the `mop` launcher; the commandlets are modules of `/mop/cli`, one subcommand per module, in sections (`core`, `pool`, `service`) and groups (`cred`, `driver`, `node`, `project`, `secret`, `dev`, `server`); they are the only thing that prints
  - `/deploy` — the product's installation: Nomad, the bus, the agent, the disk watchdog
  - `/sandbox.yaml.example` — the puppet environment example: an installation copies it to `sandbox.yaml`, which git ignores like `.env` and `inventory.yaml`
  - `/skills/master` — the master session's skill, symlinked from outside
@@ -56,7 +56,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** No secrets in a Nomad job spec: it is visible in the UI and stays in the cluster's state; keys go to the nodes as a file, the spec carries only variable names
  - **MUST** A puppet reaches the bus under its project's credentials, not the node's: the agent sees who is being asked about, never who is asking
  - **MUST** Nodes are given nothing beyond their subjects: a new need is an agent verb, not a privilege
- - **MUST** The node-level verb `disk` lives in the `admin` pseudo-project only. `write` was taken out of that list deliberately — otherwise a project's master cannot `mop login` its own puppets; that is safe exactly while both `WRITABLE` files are assembled from the machine, not from the master's project
+ - **MUST** The node-level verb `disk` lives in the `admin` pseudo-project only. `write` was taken out of that list deliberately — otherwise a project's master cannot `mop login` its own puppets; that is safe exactly while the `WRITABLE` files are assembled from the machine, not from the master's project — true for the claude login and `secrets.env`, not yet for the credential mark, which any master can overwrite (#308)
 
 ## Traps that cost debugging
 
@@ -110,7 +110,7 @@ Work lives in GitLab issues. The coordinates come from the working copy's git or
 
 ## Delivery
 
-CI (`.gitlab-ci.yml`) runs `mop dev test` on every push, in Docker, on Python 3.12 and 3.13, with `MOP_TESTS_STRICT=1` (#228). Code reaches the pool through `mop server deploy`, and `master` is the branch it is rolled out from: on an installation whose CI deploy variables are set, a green `master` pipeline runs it by itself (`deploy:mop`, a forced-command `mop deploy --from-ci` on the server, #239/#240); elsewhere it is run by hand. `mop dev ci` reads pipelines, job logs and runners, and `mop dev ci lint` checks `.gitlab-ci.yml` before a push.
+CI (`.gitlab-ci.yml`) runs `mop dev test` on every push, in Docker, on Python 3.12 and 3.13, with `MOP_TESTS_STRICT=1` (#228), and `web:dist` rebuilds the dashboard with `mop dev web build --check` against the committed `web/dist` (#297): an edit to `web/src` ships with its rebuilt `web/dist` in the same commit, or the pipeline is red. Code reaches the pool through `mop server deploy`, and `master` is the branch it is rolled out from: on an installation whose CI deploy variables are set, a green `master` pipeline runs it by itself (`deploy:mop`, a forced-command `mop deploy --from-ci` on the server, #239/#240; it needs both test jobs and `web:dist`); elsewhere it is run by hand. `mop dev ci` reads pipelines, job logs and runners, and `mop dev ci lint` checks `.gitlab-ci.yml` before a push.
 
  - **MUST** Every task is a ticket first, and its branch carries the ticket number and a description: `[type]/[iid]-[slug]` (`mop dev bug start`), off a fresh integration branch
  - **MUST** A task that belongs to an epic integrates into the epic's branch `epic/[iid]-[slug]`, never straight into `master`: the executor lands there (the master names it as the landing target; `git config mop.branch` / `MOP_BRANCH` makes `mop dev bug start` base on it), CI runs `tests/` on every push, and the epic is tested in its branch until every task is done. Then the epic branch lands into the integration branch by one `merge --no-ff`, and only that merge is rolled out
