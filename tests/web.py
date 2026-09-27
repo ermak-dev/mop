@@ -136,8 +136,9 @@ def check_snapshot(c):
     # per_user -- расход по людям (#245).
     # creds -- реестр кредитов (#285).
     want = {"at", "projects", "counts", "nodes", "usage", "per_puppet", "per_user",
-            "journal", "errors", "creds", "masters"}
-    # masters -- живые мастера по опросу who (#305).
+            "journal", "errors", "creds", "masters", "masters_every"}
+    # masters -- живые мастера по опросу who (#305); masters_every -- период
+    # этого опроса (#325): страница его не выдумывает.
     c.check("snapshot keys", not (set(snap) != want), sorted(set(snap) ^ want))
     c.check("snapshot body",
             not (snap["counts"]["puppets"] != 5 or snap["errors"] != ["bus: down"]),
@@ -244,8 +245,10 @@ def check_creds_285(c):
     c.check("#285 no secret reaches the page",
             not any(k in r for r in rows for k in ("key", "token", "secret", "detail_raw")),
             rows)
+    # status_kind -- вид статуса рядом со словом (#325).
     c.expect("#285 columns", sorted(rows[0]),
-             sorted(["name", "profile", "kind", "owner", "status", "resets_at", "percent", "age", "holders"]))
+             sorted(["name", "profile", "kind", "owner", "status", "status_kind", "resets_at",
+                     "percent", "age", "holders"]))
     snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=[], journal=[],
                         errors=[], at=1.0, creds=rows)
     c.expect("#285 snapshot carries creds", snap.get("creds"), rows)
@@ -415,12 +418,68 @@ def check_login_start_no_default_339(c):
             web.parse_login_start({"name": "old", "mode": "x"})[0] is None)
 
 
+# ── #325: снимок несёт виды статусов и период опроса ───────────────────
+# HYPOTHESIS: страница выводит правила сервера заново по словам: цвет
+# кредита -- по началу русского слова (CRED_WORDS), корзину узла -- регэкспами
+# по строке state (nodes.row), период опроса мастеров -- «every 30 s» в
+# Masters.tsx против MASTERS_EVERY; сменится слово -- бейдж молча серый.
+# SOLUTION: строка кредита несёт status_kind (active / quota_wait /
+# needs_login / unknown) рядом со словом, строка узла -- kind (free / busy /
+# down, те же корзины, что страница считает сегодня), снимок -- masters_every.
+# Добавочно: прежние ключи на месте. STATUS: FIXED — see #325
+def check_kinds_325(c):
+    from mop.server import nodes
+    # Кредиты: вид -- из статуса записи, а не из слова.
+    base = {"name": "x", "profile": "claude", "kind": "login", "added_at": 1}
+    cases = [({"kind": "active"}, "активен", "active"),
+             ({"kind": "quota_wait", "resets_at": 5}, "ждёт квоты", "quota_wait"),
+             ({"kind": "needs_login", "detail": "login expired"},
+              "ждёт ручной авторизации: login expired", "needs_login"),
+             (None, "не проверялся", "unknown"),
+             ({}, "не проверялся", "unknown")]
+    for st, word, kind in cases:
+        row = web.cred_rows([{**base, "status": st}], now=10)[0]
+        c.expect(f"#325 cred status {st}: the word stays, status_kind added",
+                 (row.get("status"), row.get("status_kind"), row.get("kind")),
+                 (word, kind, "login"))
+
+    # Узлы: каждое состояние, которое собирает nodes.row, -> корзина.
+    # Корзины -- те, что страница считает сегодня (format.ts nodeKind):
+    # ready без приписки -- free, draining/closed -- busy, прочее -- down.
+    want = {("ready", False, "eligible"): ("ready", "free"),
+            ("ready", True, "eligible"): ("ready, draining", "busy"),
+            ("ready", False, "ineligible"): ("ready, closed", "busy"),
+            ("ready", True, "ineligible"): ("ready, draining", "busy"),
+            ("down", False, "eligible"): ("down", "down"),
+            ("down", True, "eligible"): ("down, draining", "busy"),
+            ("down", False, "ineligible"): ("down, closed", "busy"),
+            ("initializing", False, "eligible"): ("initializing", "down"),
+            ("initializing", False, "ineligible"): ("initializing, closed", "busy"),
+            ("disconnected", False, "eligible"): ("disconnected", "down"),
+            ("disconnected", True, "eligible"): ("disconnected, draining", "busy")}
+    fn = getattr(web, "node_rows", None)
+    if not c.check("#325 web.node_rows exists", fn is not None):
+        return
+    for (status, drain, elig), (state, kind) in want.items():
+        row = nodes.row({"Name": "n1", "Status": status, "Drain": drain,
+                         "SchedulingEligibility": elig}, {"mop_driver": "host"}, {})
+        got = fn([row])[0]
+        c.expect(f"#325 node {status}, drain {drain}, {elig}: state and kind",
+                 (got.get("state"), got.get("kind")), (state, kind))
+        c.expect(f"#325 node {state}: the old keys stay", {k: got[k] for k in row}, row)
+
+    snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=[], journal=[],
+                        errors=[], at=1.0)
+    c.expect("#325 the snapshot carries the masters' poll period",
+             snap.get("masters_every"), web.MASTERS_EVERY)
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
                check_creds_285, check_row_button_294, check_holders_301, check_masters_305, check_dist_297,
-               check_reset_time_331, check_login_start_no_default_339):
+               check_reset_time_331, check_login_start_no_default_339, check_kinds_325):
         fn(c)
     return c.report("web")
 

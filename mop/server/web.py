@@ -24,6 +24,7 @@ import time
 
 from ..common import bus, credreg as credrows, puppets, state
 from .. import usage
+from . import nodes as node_facts
 
 STATES_EVERY = 15      # с: ростер Nomad + состояния с узлов
 SIZES_EVERY = 120      # с: обмер du — тяжёлый IO, nice, но всё же
@@ -162,7 +163,17 @@ def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at, cred
             "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "per_user": per_user,
             "journal": journal, "errors": errors, "creds": list(creds),
-            "masters": list(masters)}
+            "masters": list(masters),
+            # Период опроса мастеров (#325): страница пишет «раз в N с» по
+            # нему, а не своей копией числа.
+            "masters_every": MASTERS_EVERY}
+
+
+def node_rows(rows):
+    """Строки узлов для снимка: прежние ключи плюс kind -- корзина
+    free / busy / down (#325) по правилу nodes.bucket, чтобы страница не
+    разбирала строку state регэкспами."""
+    return [{**r, "kind": node_facts.bucket(r.get("state") or "")} for r in rows]
 
 
 # ─── собранное приложение (#297) ─────────────────────────────────────────
@@ -207,7 +218,8 @@ def cache_control(url):
 # строка собирается из перечисленных полей, а не копией записи.
 CRED_WORDS = {"active": "активен", "quota_wait": "ждёт квоты",
               "needs_login": "ждёт ручной авторизации"}
-CRED_FIELDS = ("name", "profile", "kind", "owner", "status", "resets_at", "percent", "age")
+CRED_FIELDS = ("name", "profile", "kind", "owner", "status", "status_kind", "resets_at",
+               "percent", "age")
 LOGIN_MODES = ("login", "setup-token")
 
 
@@ -221,6 +233,14 @@ def cred_status_word(st):
     в пять утра». resets_at едет в строке числом, и «до …» пишет страница в
     поясе браузера."""
     return credrows.status_word(st, CRED_WORDS, "не проверялся")
+
+
+def cred_status_kind(st):
+    """Вид статуса кредита для страницы (#325): active / quota_wait /
+    needs_login, иначе unknown -- в том числе «не проверялся». Цвет бейджа
+    страница берёт по нему, а не по началу слова."""
+    kind = (st or {}).get("kind")
+    return kind if kind in CRED_WORDS else "unknown"
 
 
 def cred_rows(records, now, holders=None):
@@ -238,7 +258,8 @@ def cred_rows(records, now, holders=None):
         name = rec.get("name") or "-"
         out.append({"name": name, "profile": rec.get("profile") or "-",
                     "kind": rec.get("kind") or "-", "owner": rec.get("owner") or "",
-                    "status": cred_status_word(st), "resets_at": st.get("resets_at"),
+                    "status": cred_status_word(st), "status_kind": cred_status_kind(st),
+                    "resets_at": st.get("resets_at"),
                     "percent": st.get("percent"),
                     "age": credrows.age(rec, now),
                     "holders": sorted(holders.get(name) or {})})
@@ -363,7 +384,7 @@ class Collector:
                 rows = puppets.puppet_rows(sizes=False)
                 # Страница читает ключи строки nodes по имени: наружу --
                 # прежняя форма провода (#267).
-                nodes = [n.to_row() for n in puppets.nodes()]
+                nodes = node_rows(n.to_row() for n in puppets.nodes())
                 with self._cond:
                     self.rows, self.nodes = rows, nodes
                     self.at = time.time()

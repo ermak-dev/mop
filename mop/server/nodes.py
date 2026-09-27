@@ -8,6 +8,20 @@ from . import nomad, spec
 from ..common.domain import NodeRow
 
 
+# Приписки к статусу Nomad в строке state: их собирает row, по ним же
+# корзину берёт bucket (#325) -- одно знание, а не два.
+DRAINING, CLOSED = ", draining", ", closed"
+
+
+def bucket(state):
+    """Строка state из row -> корзина для дашборда: free -- ready без
+    приписки, busy -- draining или closed (узел уводят или закрыли), down --
+    прочее. Те же корзины, что страница считала регэкспами (#325)."""
+    if state.endswith(DRAINING) or state.endswith(CLOSED):
+        return "busy"
+    return "free" if state == "ready" else "down"
+
+
 def row(summary, meta, cap):
     """Сводка узла из ростера + его meta + ёмкость (cluster.nomad_pool) -> строка.
 
@@ -17,9 +31,9 @@ def row(summary, meta, cap):
     meta — host: так ведёт себя узел, до которого deploy не доходил."""
     state = summary["Status"]
     if summary.get("Drain"):
-        state += ", draining"
+        state += DRAINING
     elif summary.get("SchedulingEligibility") == "ineligible":
-        state += ", closed"
+        state += CLOSED
     # Опечатка в драйвере одного узла -- строка с отказом, а не отказ всего
     # списка (#175): список отвечает «что где стоит», и чужая опечатка не
     # должна отнимать ответ. Операции над таким узлом отказывают громко.
