@@ -269,6 +269,25 @@ def check_creds_285(c):
 # странице решить, где ставить кнопку.
 # SOLUTION: маршрут и разбор добавления убраны, разборы входа остались,
 # cred_rows несёт profile. STATUS: FIXED — see #294
+# Вкладка claude открывается сама (#294, просьба оператора 27.09): окно
+# заводится в момент клика, пока жест пользователя жив, иначе блокировщик
+# всплывающих окон отбросит окно, открытое через двадцать секунд после
+# нажатия, когда сервер вернёт ссылку; адрес подставляется в него потом.
+# HYPOTHESIS: обработчик клика ждёт ответа сервера и только показывает
+# ссылку. SOLUTION: window.open("", "_blank") до post(login/start), затем
+# w.location = url; ссылка в строке остаётся запасной.
+# STATUS: FIXED — see #294
+def check_open_tab_294(c):
+    page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                             "web", "index.html"), encoding="utf-8").read()
+    handler = page[page.find("if (start) {"):page.find("} else if (send)")]
+    opened = handler.find("window.open(")
+    posted = handler.find('post("/api/creds/login/start"')
+    c.check("the start click opens a tab before asking the server", 0 <= opened < posted,
+            (opened, posted))
+    c.check("the tab is pointed at the url once it arrives", ".location" in handler, handler[:200])
+
+
 def check_row_button_294(c):
     c.check("#294 parse_cred_add is gone", not hasattr(web, "parse_cred_add"))
     from mop.cli.server import web as webcli
@@ -294,7 +313,7 @@ def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
-               check_creds_285, check_row_button_294):
+               check_creds_285, check_row_button_294, check_open_tab_294):
         fn(c)
     return c.report("web")
 
