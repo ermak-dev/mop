@@ -743,8 +743,12 @@ def write_targets(project, requested, live, owners, marks, carries_mark, is_cont
         foreign_ = [n for n in requested if not admin and owners.get(n) != project]
         if foreign_:
             return [], False, foreign(foreign_[0], project), []
-        return ([n for n in requested if n in live] if is_container else [],
-                not is_container, None, [n for n in requested if n not in live])
+        if not is_container:
+            # У host тело -- сам узел: копия узла и есть его файл, и до tmux
+            # (bootstrap) папет обслужен ею, хоть и не «живой».
+            return [], True, None, []
+        return [n for n in requested if n in live], False, None, [
+            n for n in requested if n not in live]
     if admin and carries_mark:
         # ПЕРЕХОД (#312): раздача кредита от сервера до #312 -- без `bodies`,
         # с меткой. Пишется, как было; уходит, когда сервер и все агенты

@@ -389,6 +389,38 @@ def distribute(name, api=None, now=None):
     return out
 
 
+# Адресная запись на пути подъёма (#312): короче раздачи -- её ждёт
+# bootstrap, а он держит подъём папета (45 с на весь cred_push).
+PUSH_TIMEOUT = 30
+
+
+def push(name, node, bodies):
+    """Кредит name -- адресной записью (`bodies`, #312) в тела bodies на узле
+    node. -> "OK" | "FAILED: …" | "NOT REACHED: …".
+
+    Узел называет вызывающий, и только из своей правды (Nomad), не из
+    чужого запроса. Отказ одного тела агент кладёт строкой в written, а не в
+    error: без её разбора непришедшая аренда читалась бы OK."""
+    try:
+        files = materialize(name)
+    except ValueError as e:
+        return f"FAILED: {str(e)[:120]}"
+    # Кодировка -- одним местом (#315): та же пара [путь, b64], что у distribute.
+    payload = [bus.as_file(p, d) for p, d in files]
+    try:
+        got = bus.request(node, "write", timeout=PUSH_TIMEOUT, project=bus.ADMIN,
+                          files=payload, bodies=list(bodies))
+    except bus.BusError as e:
+        return f"NOT REACHED: {e}"
+    bad = bus.verdict(got)
+    if bad:
+        return (f"NOT REACHED: {bad[1] or 'no answer'}" if bad[0] == bus.UNREACHED
+                else f"FAILED: {bad[1][:120]}")
+    missed = [w for w in got.get("written") or []
+              if " FAILED — " in w or w.endswith(" NOT LIVE")]
+    return f"FAILED: {missed[0][:120]}" if missed else "OK"
+
+
 def add_login_file(name, text, owner="", now=None):
     """Логин claude файлом кредов (то, что оператор раздаёт `mop login`) --
     кредит вида login: дом с `.claude/.credentials.json`, refresh-токен

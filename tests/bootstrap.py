@@ -238,6 +238,88 @@ def check_failed_task_333(c):
              {"ok": True, "task": None, "message": None})
 
 
+def bus_timeout(module):
+    from mop.common import busnames
+    return busnames.BOOTSTRAP_TIMEOUT
+
+
+def check_lease_push_312(c):
+    """HYPOTHESIS (#312): кредит в тело нового держателя не приезжал на
+    подъёме -- только раздачей при смене кредита; тело жило на копии узла.
+    SOLUTION: после прогона и до ответа bootstrap зовёт cred_push сервиса
+    кластера (узел и аренда -- там, из Nomad). Отказ или молчание -- строка
+    журнала и lease_note в ответе, подъём идёт дальше (на копии узла, как
+    прежде). Упал прогон -- не зовёт: папет не поднимется. STATUS: FIXED — see #312"""
+    from mop.common import bus
+    asked = []
+
+    def ask(reply):
+        def ask_cluster(verb, timeout=None, project=None, **fields):
+            asked.append((verb, project, fields.get("name"), timeout))
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        return ask_cluster
+    req = {"verb": "bootstrap", "name": "pu-mop-1", "address": ""}
+    played = {"ok": True, "played": False, "text": "no bootstrap for mop"}
+    with patched(bootstrap, refusal=lambda req, project: None, play=lambda req, project: dict(played),
+                 puppet_creds=lambda project: {"url": "nats://x"}):
+        for reply, note in (
+                ({"ok": True, "lease": "anton", "node": "hyper", "result": "OK"}, None),
+                ({"ok": True, "lease": None}, None),
+                ({"ok": True, "lease": "anton", "node": "hyper",
+                  "result": "NOT REACHED: node agent hyper did not answer in 60s"},
+                 "lease anton not pushed: NOT REACHED: node agent hyper did not answer in 60s"),
+                ({"error": "no such verb cred_push"},
+                 "lease not pushed: no such verb cred_push"),
+                (bus.BusError("cluster service did not answer in 45s"),
+                 "lease not pushed: cluster service did not answer in 45s")):
+            asked.clear()
+            with patched(bus, ask_cluster=ask(reply)):
+                got = bootstrap.answer("mop", dict(req))
+            c.expect(f"#312 bootstrap after {reply!r}: ok, and the note",
+                     (got.get("ok"), got.get("lease_note")), (True, note))
+            c.expect("#312 bootstrap asks cred_push as the operator, by name, 45 s",
+                     asked, [("cred_push", bus.ADMIN, "pu-mop-1", 45)])
+            if note:
+                c.check("#312 the journal names the lease note",
+                        any(note in l for l in bootstrap.journal("mop", req, got)),
+                        bootstrap.journal("mop", req, got))
+    # Бюджет (#312): узел ждёт ответ bootstrap не дольше BOOTSTRAP_TIMEOUT
+    # (300 с), прогон может занять до 290 с. Раздача аренды -- в остаток
+    # минус запас на ответ; остатка нет -- не зовём, говорим.
+    budget = getattr(bootstrap, "lease_budget", None)
+    if budget is None:
+        c.fail("#312 no bootstrap.lease_budget: the lease push can overrun the node's wait")
+        return
+    c.expect("#312 lease budget: 45 s when the play was quick", budget(3), 45)
+    c.expect("#312 lease budget: the rest minus the reply's margin",
+             budget(260), bus_timeout(bootstrap) - bootstrap.REPLY_MARGIN - 260)
+    c.expect("#312 lease budget: none left near the limit",
+             budget(bus_timeout(bootstrap) - bootstrap.REPLY_MARGIN - 0.5), None)
+    for elapsed, want_asked, want_timeout, want_note in (
+            (260, True, bus_timeout(bootstrap) - bootstrap.REPLY_MARGIN - 260, None),
+            (296, False, None, "no time left for the lease push")):
+        clock = iter([1000.0, 1000.0 + elapsed])
+        asked.clear()
+        with patched(bootstrap, refusal=lambda req, project: None,
+                     play=lambda req, project: dict(played),
+                     puppet_creds=lambda project: {"url": "nats://x"},
+                     _clock=lambda: next(clock)), \
+                patched(bus, ask_cluster=ask({"ok": True, "lease": "anton", "result": "OK"})):
+            got = bootstrap.answer("mop", dict(req))
+        c.expect(f"#312 after a {elapsed} s play: asked, timeout, note",
+                 (bool(asked), asked[0][3] if asked else None, got.get("lease_note")),
+                 (want_asked, want_timeout, want_note))
+    failed = {"ok": False, "played": True, "rc": 2, "tail": "t", "task": None, "message": None}
+    with patched(bootstrap, refusal=lambda req, project: None, play=lambda req, project: dict(failed),
+                 puppet_creds=lambda project: {"url": "nats://x"}), \
+            patched(bus, ask_cluster=ask({"ok": True, "lease": None})):
+        asked.clear()
+        bootstrap.answer("mop", dict(req))
+        c.expect("#312 a failed play: no lease push", asked, [])
+
+
 def main():
     c = Checks()
     check_result_334(c)
@@ -397,6 +479,7 @@ def main():
 
     check_identity_167(c)
     check_failed_task_333(c)
+    check_lease_push_312(c)
     return c.report("bootstrap")
 
 
