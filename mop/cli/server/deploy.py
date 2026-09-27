@@ -47,17 +47,6 @@ from mop.server import identity
 # библиотечные вызовы здесь ходят в Nomad и по файлам, но не на шину.
 
 SITE = "site.yml"
-# Прежние цели запуска. Отвергаем, а не молча трактуем как имя проекта: старая
-# привычка `mop server deploy pool` завела бы на шине пользователя master-pool, и
-# разбирались бы с этим уже по симптомам.
-RUN_TARGETS = ("nomad", "pool", "homelab", "claude", "nats", "all")
-
-
-def refused_target(argv):
-    """Старая цель запуска в аргументах либо None."""
-    return argv[0] if argv and argv[0] in RUN_TARGETS else None
-
-
 def inventory_hosts(listing):
     """Все хосты `ansible-inventory --list`: у хоста без своих переменных
     нет строки в _meta.hostvars, он есть только в списке группы."""
@@ -318,22 +307,6 @@ def missing_extras(setting, root):
             if p.strip() and not os.path.isfile(os.path.join(root, p.strip()))]
 
 
-def link(name, target):
-    """Симлинк ~/etc/<name> -> каталог плейбука. Плейбуки находятся по одному
-    лишь соглашению о пути (`net setup <имя>` -> ~/etc/<имя>/setup.yml),
-    таблицы имён нигде нет: симлинки и есть эта таблица, поэтому deploy
-    заводит их сам, а не требует от оператора."""
-    want = os.path.join(lib.PROJECT, target)
-    path = os.path.expanduser(f"~/etc/{name}")
-    if os.path.realpath(path) == os.path.realpath(want):
-        return
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if os.path.lexists(path):
-        os.remove(path)
-    os.symlink(want, path)
-    lib.ok(f"  symlink ~/etc/{name} -> {want}")
-
-
 def manifests(origins):
     """Манифесты проектов (#25, #61): режутся из ORIGIN библиотечным разбором
     здесь, на управляющей машине. Плейбук получает готовые пути и не
@@ -409,9 +382,6 @@ def main(argv):
     dry = argv == ["--check"]
     if dry:
         argv = []
-    if refused_target(argv):
-        lib.fail("run targets are gone: mop server deploy takes no arguments")
-        return 1
     if argv:
         # Origin в аргументах заводил проект побочным эффектом прогона (#79).
         lib.fail(f"mop server deploy takes no arguments; {argv[0]} looks like a project.\n"
@@ -466,11 +436,6 @@ def main(argv):
                  f"-- make one: ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519, "
                  f"register its .pub on MOP_GIT_HOST, or name yours in .env")
         return 1
-
-    # Цель симлинка может меняться, имя — нет: ~/etc/site.yml импортирует
-    # ~/etc/nomad/setup.yml по этому пути и о переезде каталога не знает.
-    link("nomad", "deploy/nomad")
-    link("nats", "deploy")
 
     # Проекты: реестр сервера, и только он (#117). Пользователей NATS по нему
     # заводит сам сервер; прогону он нужен ради манифестов и хостов форжей.
