@@ -397,9 +397,14 @@ def _update(project, req):
     # Ветка -- свойство папета (#257): запрос без неё (recycle, gc, лечение
     # doctor'а) не стирает ту, с которой папет заведён.
     branch = req.get("branch") or _kept_branch(name)
+    # Узел -- из аллокации (#289): стоящий папет перерегистрируется на своём
+    # узле, где его тело с клоном; неразмещённый (нет аллокации) -- куда
+    # поставит Nomad, как при подъёме.
+    alloc = _api().latest_alloc(name)
+    node = (alloc or {}).get("NodeName") or None
     _api().register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch),
-                               cont=bool(req.get("cont"))))
-    return {"ok": True, "name": name}
+                               cont=bool(req.get("cont")), node=node))
+    return {"ok": True, "name": name, "node": node}
 
 
 def _restart(project, req):

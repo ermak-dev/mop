@@ -566,8 +566,8 @@ def check_update_keeps_branch_257(c):
     job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
                                       "branch": "swarm"}}
     with restored(cluster.spec, "job_spec"), restored(cluster, "store_workspace"):
-        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None: \
-            calls.append(branch) or {"Job": {"ID": name}}
+        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None, \
+            node=None: calls.append(branch) or {"Job": {"ID": name}}
         cluster.store_workspace = lambda root, name, req: None
         # register фейка кладёт пустой джоб на место прежнего: мету каждый
         # вызов берёт из своего фейка.
@@ -580,6 +580,27 @@ def check_update_keeps_branch_257(c):
             cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
     c.expect("update must keep the meta branch unless the request names one",
              calls, ["swarm", "dev", None])
+
+
+# ── #289: update держит папета на узле его аллокации ─────────────────────
+# HYPOTHESIS: _update регистрирует спеку без узла, и Nomad вправе разместить
+# папета заново где угодно -- тело с клоном остаётся на старом узле.
+# SOLUTION: _update берёт узел из последней аллокации и отдаёт его respec;
+# без аллокации (папет ещё не размещён) привязки нет. STATUS: FIXED — see #289
+def check_update_pins_node_289(c):
+    seen = []
+    job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
+    with restored(cluster.spec, "respec"), restored(cluster, "store_workspace"):
+        cluster.spec.respec = lambda name, meta, cont=False, node=None: \
+            seen.append(node) or {"Job": {"ID": name}}
+        cluster.store_workspace = lambda root, name, req: None
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": job},
+                                     allocs={"pu-mop-1": {"ID": "a1", "NodeName": "hyper"}})):
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": job})):
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
+    c.expect("update pins the puppet to its allocation's node, none without one",
+             seen, ["hyper", None])
 
 
 def check_owner_gate_267(c):
@@ -805,7 +826,8 @@ def main():
                   check_secret_verbs, check_verb_table_173,
                   check_forget_inventory_178, check_forget_summary_196,
                   check_gates_40, check_caller_207, check_slots_total_243,
-                  check_update_keeps_branch_257, check_owner_gate_267,
+                  check_update_keeps_branch_257, check_update_pins_node_289,
+                  check_owner_gate_267,
                   check_node_267, check_node_forms_277,
                   check_nomad_api_275):
         check(c)
