@@ -313,6 +313,26 @@ def owner_identity(req):
     return identity.profile(identity.server_provider(), login)
 
 
+# Сколько подъём ждёт аренду (#312): cred_push -- Nomad и запись в тело.
+LEASE_TIMEOUT = 45
+
+
+def lease_note(name):
+    """Аренду папета -- в тело до tmux (#312): cred_push сервиса кластера,
+    у которого Nomad. -> заметка при неудаче либо None. Неудача не роняет
+    подъём: папет встаёт на копии узла, как до #312, а журнал и ответ это
+    называют."""
+    try:
+        got = bus.ask_cluster("cred_push", timeout=LEASE_TIMEOUT, project=bus.ADMIN, name=name)
+    except bus.BusError as e:
+        return f"lease not pushed: {e}"
+    if got.get("error"):
+        return f"lease not pushed: {got['error']}"
+    if not got.get("lease") or got.get("result") == "OK":
+        return None
+    return f"lease {got['lease']} not pushed: {got.get('result')}"
+
+
 def answer(project, req, _send=None):
     """Ответ на один запрос. Зовётся в отдельном потоке (service.serve):
     прогон идёт секунды, а петля обязана отвечать остальным."""
@@ -326,7 +346,12 @@ def answer(project, req, _send=None):
                 return {"error": why}
             # Кред папета едет тем же ответом: узел уже позвал нас, и
             # второго разговора ради одного файла не нужно.
-            return with_creds(play(req, project), puppet_creds(project), project)
+            out = with_creds(play(req, project), puppet_creds(project), project)
+            if out.get("ok"):
+                note = lease_note(req.get("name"))
+                if note:
+                    out["lease_note"] = note
+            return out
         if verb == "identity":
             return owner_identity(req)
         # `put` снят (#133): workspace кладут глаголы жизненного цикла
@@ -340,7 +365,8 @@ def journal(project, req, out):
     """Строки журнала на один ответ; у проваленного прогона -- ещё и его хвост."""
     lines = [f"{project}.{req.get('verb')} {req.get('name', '')}: "
              f"{out.get('error') or ('ok' if out.get('ok') else out)}"
-             + (f" in {out['seconds']}s" if out.get("seconds") is not None else "")]
+             + (f" in {out['seconds']}s" if out.get("seconds") is not None else "")
+             + (f"; {out['lease_note']}" if out.get("lease_note") else "")]
     if not out.get("ok", True):
         lines.append(f"{out.get('tail', '')}")
     return lines

@@ -155,6 +155,57 @@ def check_failed_task_333(c):
              (True, None, None))
 
 
+def check_lease_push_312(c):
+    """HYPOTHESIS (#312): кредит в тело нового держателя не приезжал на
+    подъёме -- только раздачей при смене кредита; тело жило на копии узла.
+    SOLUTION: после прогона и до ответа bootstrap зовёт cred_push сервиса
+    кластера (узел и аренда -- там, из Nomad). Отказ или молчание -- строка
+    журнала и lease_note в ответе, подъём идёт дальше (на копии узла, как
+    прежде). Упал прогон -- не зовёт: папет не поднимется. STATUS: FIXED — see #312"""
+    from mop.common import bus
+    asked = []
+
+    def ask(reply):
+        def ask_cluster(verb, timeout=None, project=None, **fields):
+            asked.append((verb, project, fields.get("name"), timeout))
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        return ask_cluster
+    req = {"verb": "bootstrap", "name": "pu-mop-1", "address": ""}
+    played = {"ok": True, "played": False, "text": "no bootstrap for mop"}
+    with patched(bootstrap, refusal=lambda req, project: None, play=lambda req, project: dict(played),
+                 puppet_creds=lambda project: {"url": "nats://x"}):
+        for reply, note in (
+                ({"ok": True, "lease": "anton", "node": "hyper", "result": "OK"}, None),
+                ({"ok": True, "lease": None}, None),
+                ({"ok": True, "lease": "anton", "node": "hyper",
+                  "result": "NOT REACHED: node agent hyper did not answer in 60s"},
+                 "lease anton not pushed: NOT REACHED: node agent hyper did not answer in 60s"),
+                ({"error": "no such verb cred_push"},
+                 "lease not pushed: no such verb cred_push"),
+                (bus.BusError("cluster service did not answer in 45s"),
+                 "lease not pushed: cluster service did not answer in 45s")):
+            asked.clear()
+            with patched(bus, ask_cluster=ask(reply)):
+                got = bootstrap.answer("mop", dict(req))
+            c.expect(f"#312 bootstrap after {reply!r}: ok, and the note",
+                     (got.get("ok"), got.get("lease_note")), (True, note))
+            c.expect("#312 bootstrap asks cred_push as the operator, by name, 45 s",
+                     asked, [("cred_push", bus.ADMIN, "pu-mop-1", 45)])
+            if note:
+                c.check("#312 the journal names the lease note",
+                        any(note in l for l in bootstrap.journal("mop", req, got)),
+                        bootstrap.journal("mop", req, got))
+    failed = {"ok": False, "played": True, "rc": 2, "tail": "t", "task": None, "message": None}
+    with patched(bootstrap, refusal=lambda req, project: None, play=lambda req, project: dict(failed),
+                 puppet_creds=lambda project: {"url": "nats://x"}), \
+            patched(bus, ask_cluster=ask({"ok": True, "lease": None})):
+        asked.clear()
+        bootstrap.answer("mop", dict(req))
+        c.expect("#312 a failed play: no lease push", asked, [])
+
+
 def main():
     c = Checks()
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
@@ -313,6 +364,7 @@ def main():
 
     check_identity_167(c)
     check_failed_task_333(c)
+    check_lease_push_312(c)
     return c.report("bootstrap")
 
 
