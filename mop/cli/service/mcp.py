@@ -338,7 +338,14 @@ def send(to: str, message: str, priority: str = "next",
     "the state: a held dialog for someone else's message, a login prompt, "
     "a quota complaint."))
 def tail(name: str, lines: int = 40, grep: str = "") -> str:
-    buf = puppets.pane_lines(channel.puppet_node(name, MASTER), name)
+    try:
+        buf = puppets.pane_lines(channel.puppet_node(name, MASTER), name)
+    except (LookupError, RuntimeError) as e:
+        # Сессии нет (#333) -- тот же текст, что у `mop tail`: stderr
+        # аллокации. Спросить сервис кластера может только мастер.
+        if not MASTER:
+            raise
+        return "\n".join(lib.stderr_text(name, e, puppets.alloc_stderr(name, lines)))
     if grep:
         buf = [l for l in buf if grep.lower() in l.lower()]
     return "\n".join(buf[-max(1, lines):]) or "(empty)"

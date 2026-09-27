@@ -33,21 +33,9 @@ PROJECT = config.PROJECT
 BIN = os.path.join(PROJECT, "bin")
 
 
-# Цвета терминала — для `mop server deploy`, у которого прогон длинный и заголовки
-# разделов нужны глазу. Печатает только cli.
-_RED, _GREEN, _BOLD, _NC = "\033[0;31m", "\033[0;32m", "\033[1m", "\033[0m"
-
-
-def section(text):
-    print(f"\n{_BOLD}{text}{_NC}", flush=True)
-
-
-def fail(text):
-    print(f"{_RED}{text}{_NC}", file=sys.stderr, flush=True)
-
-
-def ok(text):
-    print(f"{_GREEN}{text}{_NC}", flush=True)
+# Цвета и отказ строкой -- в mop.cli.term (#320): их берёт и сборка
+# страницы, которой lib с шиной не поднять (#302).
+from mop.cli.term import fail, ok, section, usage  # noqa: E402,F401
 
 
 # Управляющие последовательности и символы строки чужого вывода: в кадре
@@ -143,8 +131,31 @@ def cluster(fn):
     return wrap
 
 
-def usage(doc):
-    sys.exit(doc.strip())
+def parse_value(args, flag, once=False):
+    """Выкусить `flag VALUE` (или `flag=VALUE`) откуда угодно в аргументах
+    -> (значение | None, остальные). Повтор -- последнее значение, с once --
+    отказ. RuntimeError: диспетчер делает из него одну строку в stderr (#146)."""
+    value, rest, it = None, [], iter(args)
+    for a in it:
+        if a == flag or a.startswith(flag + "="):
+            if once and value is not None:
+                raise RuntimeError(f"{flag} given twice")
+            if a == flag:
+                value = next(it, "")
+                # Следом флаг, а не значение: `--llm --fresh` съедал бы
+                # соседний флаг как значение (#164).
+                if value.startswith("-"):
+                    rest.append(value)
+                    value = ""
+            else:
+                value = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+    if value == "":
+        # Забытое значение -- ошибка использования, а не «флага нет»: иначе
+        # `--cred` без имени молча заводил папета на первой аренде (#327).
+        raise RuntimeError(f"{flag} needs a value")
+    return value, rest
 
 
 def parse_named(argv, doc, most=1):
@@ -278,6 +289,17 @@ def guard(name):
         sys.exit(f"{name} — project {owner}, but this master runs {project}. "
                  f"Leave the master shell or run mop master for {owner}.")
     return spec
+
+
+def stderr_text(name, why, lines):
+    """Хвост stderr аллокации вместо пейна (#333) -> строки вывода: сначала
+    -- что это stderr и почему не пейн (первая строка причины), затем сам
+    хвост. Один текст на `mop tail` и инструмент MCP `tail`."""
+    reason = (str(why).splitlines() or [""])[0]
+    head = f"{name}: no tmux session ({reason}); the allocation's stderr"
+    if not lines:
+        return [f"{head} is empty"]
+    return [f"{head}, last {len(lines)} lines:", *lines]
 
 
 def pool_lines():

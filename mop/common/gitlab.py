@@ -216,10 +216,16 @@ def has_credentials():
                 or config.get("GITLAB_USER") and config.get("GITLAB_PASSWORD"))
 
 
-def pipeline(sha):
-    """Последний пайплайн коммита -> {status, web_url, ...} либо None."""
-    got = call("GET", "/pipelines", params={"sha": sha, "order_by": "id",
-                                            "sort": "desc", "per_page": 1})
+def pipeline(sha, ref=None):
+    """Последний пайплайн коммита -> {status, web_url, ...} либо None.
+
+    ref -- только на этой ветке (#335): у коммита бывают пайплайны разных
+    веток, и ветка эпика, созданная на коммите master, иначе заслоняла бы
+    пайплайн master своим. Без ref -- на любой ветке, как было."""
+    params = {"sha": sha, "order_by": "id", "sort": "desc", "per_page": 1}
+    if ref:
+        params["ref"] = ref
+    got = call("GET", "/pipelines", params=params)
     return got[0] if got else None
 
 

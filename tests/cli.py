@@ -269,6 +269,11 @@ def main():
     check_refusals_163(c)
     check_output_rules(c)
     check_empty_llm(c)
+    check_empty_value(c)
+    check_probe_words(c)
+    check_node_flag_320(c)
+    check_one_parser_320(c)
+    check_node_flag_340(c)
     check_deploy_check(c)
     check_inventory_drivers(c)
     check_pool_uniform(c)
@@ -967,6 +972,166 @@ def check_empty_llm(c):
             not (not code or not err.startswith("no LLM profile no-such; available: ")))
 
 
+
+def check_empty_value(c):
+    """HYPOTHESIS (#327): parse_value сворачивал пустое значение в None --
+    тот же ответ, что «флага нет»: `mop add --cred` без имени молча
+    заводил папета на первой активной аренде профиля. SOLUTION: пустое
+    значение -- ошибка использования, как у --llm (#164).
+    RESULT: четыре пустых формы отказывают одной строкой через диспетчер.
+    STATUS: FIXED — see #327"""
+
+    def through_dispatcher(argv):
+        return run_command(lambda x: lib.parse_value(x, "--cred") and None,
+                           argv, via_cli=True)
+    for argv in (["pu-mop-1", "--cred"], ["--cred="], ["--cred", ""],
+                 ["--cred", "--fresh"]):
+        out, err, code = through_dispatcher(argv)
+        lines = err.strip().splitlines()
+        c.check(f"parse_value({argv}): out {out!r} err {err!r} code {code!r}",
+                not (out or not code or len(lines) != 1 or "Traceback" in err
+                     or lines[0] != "--cred needs a value"))
+    c.expect("parse_value with a value",
+             lib.parse_value(["pu-mop-1", "--cred", "alice", "--fresh"], "--cred"),
+             ("alice", ["pu-mop-1", "--fresh"]))
+    c.expect("parse_value with flag=value",
+             lib.parse_value(["--cred=alice", "pu-mop-1"], "--cred"),
+             ("alice", ["pu-mop-1"]))
+    c.expect("parse_value without the flag must leave the value unset",
+             lib.parse_value(["pu-mop-1", "--fresh"], "--cred"),
+             (None, ["pu-mop-1", "--fresh"]))
+
+
+def check_probe_words(c):
+    """HYPOTHESIS (#332): `mop llm --probe` печатал вид кредита сырым
+    (`quota_wait: …`), а `mop cred list` -- словом (`quota wait`): одно
+    состояние двумя написаниями рядом. SOLUTION: status_line берёт слово
+    из credreg.WORDS с тем же откатом на вид, что у row().
+    RESULT: слова --probe совпадают с `mop cred list`. STATUS: FIXED — see #332"""
+    from mop.cli.pool import llm as llm_cmd
+    St = domain.CredStatus
+    for kind, want in (("quota_wait", "quota wait: 5h 100%"),
+                       ("needs_login", "needs login: 5h 100%"),
+                       ("active", "active: 5h 100%")):
+        c.expect(f"status_line({kind})", llm_cmd.status_line(St(kind, detail="5h 100%")), want)
+    # CredStatus сам отказывает незнакомому виду; откат на вид -- страховка
+    # на случай нового вида раньше нового слова, проверяется подставкой.
+    from types import SimpleNamespace
+    odd = SimpleNamespace(kind="strange", detail="5h 100%", resets_at=None)
+    c.expect("status_line(unknown kind) passes through", llm_cmd.status_line(odd),
+             "strange: 5h 100%")
+    got = llm_cmd.status_line(St("quota_wait", resets_at=86400 * 365, detail="5h 100%"))
+    c.check(f"status_line keeps the reset time: {got!r}",
+            not (not got.startswith("quota wait: 5h 100%, resets ")))
+
+
+def node_flag_sites():
+    """Два командлета с --node: argv -> то, что дошло до работы, либо текст
+    usage. Сеть и сборка подменены: проверяется только разбор."""
+    from mop.cli.driver import build
+    from mop.cli.project import add as project_add
+    from mop.server import image
+
+    def run_build(argv):
+        seen = {}
+        got = {"project": "p", "asks": {}, "alien": [], "legacy": []}
+
+        def fake_build(origin, g, fresh, force, on_step, node):
+            seen.update(origin=origin, fresh=fresh, force=force, node=node)
+            return {"announced": [], "rc": 0}
+        with patched(build, origin_of=lambda a: f"origin:{a}"), \
+                patched(lib, origin=lambda a, doc: "origin:here", git=lambda *a: "/top"), \
+                patched(image, prepare=lambda origin, root: got, build=fake_build):
+            _, _, code = run_command(build.main, argv)
+        return seen if not code else code
+
+    def run_project(argv):
+        seen = {}
+
+        def fake_add(origin, name, mode, p, node=None):
+            seen.update(origin=origin, mode=mode, node=node)
+        with patched(project_add, _add=fake_add), \
+                patched(lib, origin=lambda a, doc: f"origin:{a}"):
+            _, _, code = run_command(project_add.main, argv)
+        return seen if not code else code
+    return (("driver build", run_build, build.__doc__.strip()),
+            ("project add", run_project, project_add.__doc__.strip()))
+
+
+def check_node_flag_320(c):
+    """Характеристика --node до и после общего разборщика (#320): значение,
+    флаг в середине, флага нет -- как было; забытое значение и повтор --
+    usage, как было."""
+    (b_name, run_build, b_doc), (p_name, run_project, p_doc) = node_flag_sites()
+    c.expect(f"{b_name} --node n1", run_build(["--node", "n1"]),
+             {"origin": "origin:here", "fresh": False, "force": False, "node": "n1"})
+    c.expect(f"{b_name} --node in the middle", run_build(["--fresh", "--node", "n1", "proj"]),
+             {"origin": "origin:proj", "fresh": True, "force": False, "node": "n1"})
+    c.expect(f"{b_name} without --node", run_build(["proj", "--force"]),
+             {"origin": "origin:proj", "fresh": False, "force": True, "node": None})
+    c.expect(f"{p_name} --node n1", run_project(["--node", "n1"]),
+             {"origin": "origin:None", "mode": "missing", "node": "n1"})
+    c.expect(f"{p_name} --node in the middle",
+             run_project(["-v", "--node", "n1", "--update", "git@h:g/p.git"]),
+             {"origin": "origin:git@h:g/p.git", "mode": "update", "node": "n1"})
+    c.expect(f"{p_name} without --node", run_project(["--rebuild", "git@h:g/p.git"]),
+             {"origin": "origin:git@h:g/p.git", "mode": "rebuild", "node": None})
+    for name, run, doc in node_flag_sites():
+        for argv in (["--node"], ["proj", "--node"],
+                     ["--node", "a", "--node", "b"], ["--node", "a", "proj", "--node", "b"]):
+            c.expect(f"{name} {argv} answers with usage", run(argv), doc)
+
+
+def check_one_parser_320(c):
+    """#320: разбор «флаг со значением» и красная строка отказа -- по одному
+    разу. Вывод -- характеристика (зелёная и до переноса); тождество
+    функций -- сам перенос."""
+    from mop.cli.dev.web import build as web_build
+    E = "\033"
+    for name, fn in (("lib.fail", lib.fail), ("web build fail", web_build.fail)):
+        out, err, code = run_command(lambda a, fn=fn: fn("broken"), [])
+        c.expect(f"{name} output", (out, err, code), ("", f"{E}[0;31mbroken{E}[0m\n", 0))
+    out, _, _ = run_command(lambda a: lib.ok("fine"), [])
+    c.expect("lib.ok output", out, f"{E}[0;32mfine{E}[0m\n")
+    out, _, _ = run_command(lambda a: lib.section("Head"), [])
+    c.expect("lib.section output", out, f"\n{E}[1mHead{E}[0m\n")
+    _, _, code = run_command(lambda a: lib.usage("  doc text\n"), [])
+    c.expect("lib.usage exits with the stripped doc", code, "doc text")
+    _, _, code = run_command(web_build.main, ["--nope"])
+    c.expect("web build usage", code, web_build.__doc__.strip())
+    # Перенос: одно определение.
+    c.check("web build fail is lib's fail", web_build.fail is lib.fail)
+    c.check("parse_value lives in lib only",
+            hasattr(lib, "parse_value") and not hasattr(_common, "parse_value"))
+    # Повтор: без once -- последнее значение (--cred, --llm как были), с
+    # once -- отказ; флаг в середине и `=` -- одинаково.
+    c.expect("parse_value repeated: the last one wins",
+             lib.parse_value(["--cred", "a", "x", "--cred=b"], "--cred"), ("b", ["x"]))
+    for argv in (["--node", "a", "--node", "b"], ["--node=a", "x", "--node", "b"]):
+        try:
+            got = lib.parse_value(argv, "--node", once=True)
+        except RuntimeError as e:
+            got = str(e)
+        c.expect(f"parse_value once {argv}", got, "--node given twice")
+    c.expect("parse_value once, a single flag in the middle",
+             lib.parse_value(["x", "--node", "a", "y"], "--node", once=True), ("a", ["x", "y"]))
+
+
+def check_node_flag_340(c):
+    """HYPOTHESIS (#340): --node разбирался руками: `--node ""` и `--node -x`
+    брали пустое или флаг за имя узла -- `mop project add --node ""` молча
+    собирал на всех узлах, как --cred до #327; `--node=NAME` не понимался.
+    SOLUTION: оба места -- lib.parse_value(once=True), отказ -- usage.
+    RESULT: пустое и флаг вместо имени -- usage, `--node=NAME` понят.
+    STATUS: FIXED — see #340"""
+    for name, run, doc in node_flag_sites():
+        for argv in (["--node", ""], ["--node", "", "proj"], ["--node", "-x", "proj"],
+                     ["--node="], ["--node=", "proj"]):
+            c.expect(f"{name} {argv} answers with usage", run(argv), doc)
+        got = run(["--node=n1", "proj"])
+        c.check(f"{name} --node=n1 reaches the work with n1: {got!r}",
+                isinstance(got, dict) and got.get("node") == "n1")
+
 # ── #186: драйвер узла из инвентаря — до плейбука ────────────────────────────
 # Вывод настоящего `ansible-inventory --list` (ansible-core 2.21) на инвентаре:
 #   puppet: plain (без переменной), explicit (mop_driver: host), hyper,
@@ -1178,6 +1343,25 @@ def check_deploy_check(c):
                         not (dry and collected))
                 c.check("deploy without --check must still collect server credentials",
                         not (not dry and not collected))
+            # #335: гейт спрашивает пайплайн коммита на ветке раскатки --
+            # ветке origin по умолчанию, а не последний на любой ветке (там
+            # 27.09 оказался идущий пайплайн эпика на том же коммите).
+            from mop.common import gitlab
+            asked, real_get = [], config.get
+
+            def pipeline(sha, ref=None):
+                asked.append((sha, ref))
+                return {"id": 1, "status": "success", "web_url": "u"}
+            with patched(config, get=lambda name, default=None: "1"
+                         if name == "MOP_DEPLOY_NEEDS_GREEN" else real_get(name, default)), \
+                    patched(gitlab, has_credentials=lambda: True, pipeline=pipeline,
+                            jobs=lambda pid: []), \
+                    patched(deploy, head_sha=lambda root: "5b92b440c952",
+                            ci_state=lambda root: ("feature", "master", [])):
+                calls.clear(), collected.clear()
+                out, err, code = run_command(deploy.main, [])
+                c.expect(f"#335 deploy gate asks the default branch's pipeline (err {err!r})",
+                         (code, asked), (0, [("5b92b440c952", "master")]))
             # Прочие аргументы — по-прежнему отказ, и до плейбука.
             for argv in (["pool"], ["git@h:g/p.git"], ["--check", "extra"], ["--diff"]):
                 calls.clear()
@@ -1485,6 +1669,7 @@ def check_fallback_model_183(c):
     check_server_namespace_259(c)
     check_named_263(c)
     check_body_file_270(c)
+    check_tail_stderr_333(c)
 
 
 def check_server_namespace_259(c):
@@ -1682,6 +1867,64 @@ def check_body_file_270(c):
         f.write("  тело  \n")
     c.check("#270 a readable file and a text argument must work as before",
             not (bug_common.read_body(None, ok) != "тело" or bug_common.read_body(" x ", None) != "x"))
+
+
+def check_tail_stderr_333(c):
+    """HYPOTHESIS (#333): `mop tail` папета, у которого нет tmux (bootstrap
+    падает до сессии), не показывает ничего полезного: running_alloc
+    отказывает «not running», пейна нет, а причина живёт в stderr аллокации.
+    SOLUTION: нет сессии (папет не running или пейн не читается) -- хвост
+    stderr аллокации глаголом `stderr` сервиса кластера, под строкой, что это
+    именно он (lib.stderr_text). Инструмент MCP `tail` -- тот же текст.
+    STATUS: FIXED — see #333"""
+    from mop.cli.core import tail
+    from mop.cli.service import mcp
+    from mop.common import puppets
+    text = getattr(lib, "stderr_text", None)
+    if text is None or not hasattr(puppets, "alloc_stderr"):
+        c.fail("#333 no lib.stderr_text / puppets.alloc_stderr: no fallback to stderr")
+        return
+    why = "pu-mop-1 is not running: FAILED: bootstrap task «a : b» failed: no file\nmore"
+    c.expect("#333 stderr text: a header naming the source, then the lines",
+             text("pu-mop-1", why, ["l1", "l2"]),
+             ["pu-mop-1: no tmux session (pu-mop-1 is not running: FAILED: bootstrap task "
+              "«a : b» failed: no file); the allocation's stderr, last 2 lines:", "l1", "l2"])
+    c.expect("#333 stderr text: nothing there is said",
+             text("pu-mop-1", "why", []),
+             ["pu-mop-1: no tmux session (why); the allocation's stderr is empty"])
+    asked = []
+
+    def stderr(name, lines):
+        asked.append((name, lines))
+        return ["l1", "l2"]
+
+    def not_running(name):
+        raise LookupError(why)
+
+    def no_pane(node, name):
+        raise RuntimeError("tmux in pu-mop-1: no server running")
+    want = "\n".join(text("pu-mop-1", why, ["l1", "l2"])) + "\n"
+    with patched(puppets, running_alloc=not_running, alloc_stderr=stderr):
+        out, err, code = run_command(tail.main, ["pu-mop-1", "-n", "2"])
+    c.expect("#333 mop tail, not running: the allocation's stderr", (out, code), (want, 0))
+    c.expect("#333 mop tail asks for as many lines as -n", asked, [("pu-mop-1", 2)])
+    with patched(puppets, running_alloc=lambda name: {"NodeName": "hyper"},
+                 pane_lines=no_pane, alloc_stderr=stderr):
+        out, err, code = run_command(tail.main, ["pu-mop-1", "-n", "2"])
+    c.check("#333 mop tail, running without a pane: the allocation's stderr",
+            code == 0 and out.startswith("pu-mop-1: no tmux session (tmux in pu-mop-1: "
+                                         "no server running)") and out.endswith("l1\nl2\n"),
+            (out, err, code))
+    with patched(puppets, running_alloc=lambda name: {"NodeName": "hyper"},
+                 pane_lines=lambda node, name: ["a", "b", "c"], alloc_stderr=stderr):
+        asked.clear()
+        out, err, code = run_command(tail.main, ["pu-mop-1", "-n", "2"])
+    c.expect("#333 mop tail with a pane: as before, stderr not asked",
+             (out, asked), ("b\nc\n", []))
+    with patched(puppets, running_alloc=not_running, alloc_stderr=stderr), \
+            patched(mcp, MASTER=True):
+        got = mcp.tail("pu-mop-1", lines=2)
+    c.expect("#333 MCP tail: the same text", got, want.rstrip("\n"))
 
 
 if __name__ == "__main__":
