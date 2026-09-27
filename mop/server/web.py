@@ -276,9 +276,10 @@ def parse_login_start(body):
         credrows.check_name(name)
     except ValueError as e:
         return None, f"name: {e}"
+    # Без режима -- None: режим решает вид кредита в login_start (#339).
     mode, _ = _field(body, "mode", required=False)
-    mode = mode or "login"
-    if mode not in LOGIN_MODES:
+    mode = mode or None
+    if mode is not None and mode not in LOGIN_MODES:
         return None, f"mode: one of {', '.join(LOGIN_MODES)}"
     return {"name": name, "mode": mode}, None
 

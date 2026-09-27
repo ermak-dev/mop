@@ -11,7 +11,9 @@ home (.claude/.credentials.json), a setup-token in creds/<name>/token.
 usage endpoint needs); a setup-token is inference-only. The code is
 single-use and the exchange takes up to two minutes. A successful login
 registers the credential (its cred.json): an `auth login` with the account's
-email as the owner, a setup-token without one.
+email as the owner, a setup-token without one. An existing credential logs
+in by its kind (login or token); --setup-token on a login credential is
+refused.
 """
 import os
 import sys
@@ -45,7 +47,11 @@ def main(argv):
     except ValueError as e:
         lib.fail(str(e))
         return 1
-    mode = "setup-token" if setup else "login"
+    # Есть запись -- режим решает её вид (#339), до адреса и pty.
+    mode, refusal = credreg.login_mode(credreg.load(name), "setup-token" if setup else None)
+    if refusal:
+        lib.fail(refusal)
+        return 1
     try:
         login = credlogin.Login.start(home, mode)
     except (RuntimeError, OSError) as e:
@@ -61,7 +67,7 @@ def main(argv):
     # Запись кредита (#307): без неё дом виден в `mop cred list`, но цикл
     # сервиса, probe_all, `mop cred status`, --cred и кнопка страницы его
     # пропускают. Переавторизация сохраняет прежнюю запись (register_login).
-    if setup:
+    if mode == "setup-token":
         path = os.path.join(home, "token")
         fsutil.write_private(path, login.result + "\n")
         credreg.register_login(name, **registration(mode, {}))

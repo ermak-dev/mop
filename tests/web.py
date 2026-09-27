@@ -250,8 +250,9 @@ def check_creds_285(c):
                         errors=[], at=1.0, creds=rows)
     c.expect("#285 snapshot carries creds", snap.get("creds"), rows)
 
+    # Без режима -- None: режим решает вид кредита в login_start (#339).
     c.expect("#285 parse_login_start", web.parse_login_start({"name": "anton"}),
-             ({"name": "anton", "mode": "login"}, None))
+             ({"name": "anton", "mode": None}, None))
     c.expect("#285 parse_login_start setup-token", web.parse_login_start({"name": "a", "mode": "setup-token"}),
              ({"name": "a", "mode": "setup-token"}, None))
     c.check("#285 parse_login_start refuses a strange mode",
@@ -286,7 +287,7 @@ def check_row_button_294(c):
     c.expect("#294 rows carry the profile for the button",
              [r["profile"] for r in rows], ["claude", "glm", "claude", "claude"])
     c.expect("#294 parse_login_start still validates",
-             web.parse_login_start({"name": "anton"}), ({"name": "anton", "mode": "login"}, None))
+             web.parse_login_start({"name": "anton"}), ({"name": "anton", "mode": None}, None))
     c.check("#294 parse_login_code still refuses an empty code",
             web.parse_login_code({"name": "a", "code": ""})[0] is None)
 
@@ -398,12 +399,28 @@ def check_reset_time_331(c):
     c.check("#331 human_time is gone: nothing else read it", not hasattr(web, "human_time"))
 
 
+def check_login_start_no_default_339(c):
+    """HYPOTHESIS (#339): parse_login_start подставляет режим login, и
+    login_start не отличает «не спросили» от «спросили login»: кредит вида
+    token входил `claude auth login`. SOLUTION: без режима -- None, режим
+    выводит login_start из записи; явный режим по-прежнему проверяется.
+    STATUS: FIXED — see #339"""
+    c.expect("#339 parse_login_start without a mode gives None",
+             web.parse_login_start({"name": "old"}), ({"name": "old", "mode": None}, None))
+    c.expect("#339 an empty mode is no mode", web.parse_login_start({"name": "old", "mode": " "}),
+             ({"name": "old", "mode": None}, None))
+    c.expect("#339 an explicit mode passes through",
+             web.parse_login_start({"name": "old", "mode": "login"}), ({"name": "old", "mode": "login"}, None))
+    c.check("#339 a strange mode is still refused",
+            web.parse_login_start({"name": "old", "mode": "x"})[0] is None)
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
                check_creds_285, check_row_button_294, check_holders_301, check_masters_305, check_dist_297,
-               check_reset_time_331):
+               check_reset_time_331, check_login_start_no_default_339):
         fn(c)
     return c.report("web")
 
