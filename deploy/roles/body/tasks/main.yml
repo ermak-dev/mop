@@ -37,32 +37,12 @@
 # creates, а не state=latest: ставим один раз, дальше claude обновляет себя
 # сам, и прогон deploy не имеет права подменить версию под работающим папетом.
 #
-# pipefail и проверка результата — не перестраховка. `shell` исполняет строку
-# через /bin/sh без pipefail, и код возврата конвейера `curl | bash` — это код
-# bash: оборванная загрузка даёт ему пустой ввод, он выходит нулём, и задача
-# зелёная. Тело уезжает в шаблон без claude, а папет в таком теле не поднимется
-# никогда. Поймано на сборке образа cloudpub: отказ всплыл восемью задачами
-# позже, в другой игре, как `exec: claude: not found`.
-#
-# `creates` от этого не спасает и не для того: оно решает, надо ли запускать, а
-# не удалось ли.
-# retries: загрузка -- сто метров через NAT тела, и транзитный обрыв TLS
-# (SSL_read eof) ронял всю сборку, хотя путь рабочий: три образа через него
-# уже прошли. Повторы переживают обрыв; отказ после них остаётся громким.
-- name: Install the claude CLI
-  become: yes
-  become_user: "{{ MOP_USER }}"
-  ansible.builtin.shell: |
-    set -o pipefail
-    curl -fsSL https://claude.ai/install.sh | bash
-    test -x "{{ MOP_HOME }}/.local/bin/claude"
-  args:
-    creates: "{{ MOP_HOME }}/.local/bin/claude"
-    executable: /bin/bash
-  register: claude_cli
-  retries: 4
-  delay: 15
-  until: claude_cli is success
+# Клиент claude -- общей задачей (roles/common/tasks/claude_cli.yml, #293):
+# то же определение ставит его на контроллер для реестра кредитов, и ловушка
+# кода bash из #11 живёт в одном месте.
+- ansible.builtin.include_role:
+    name: common
+    tasks_from: claude_cli
 
 # /tmp в теле — tmpfs, и её размер systemd просит у ядра процентами
 # (`size=50%` в /usr/lib/systemd/system/tmp.mount). Проценты считает ядро, от
