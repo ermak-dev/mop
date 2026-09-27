@@ -10,14 +10,64 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import builder  # noqa: E402
 
 
+# ── #321: путь сборщика с --node -- та же проверка узла, что у image ────
+# Характеристика: что получает проситель (`mop project add --node`) за
+# чужой, host- и неизвестный узел и дошло ли дело до сборки.
+# STATUS: FIXED — see #321
+def check_builder_node_321(c):
+    from mop.server import image, nomad
+    pool = {"agent1": {"mop_driver": "pve", "mop_projects": "rugent"},
+            "agent2": {"mop_driver": "pve"}, "host1": {"mop_driver": "host"},
+            "weird": {"mop_driver": "pvee"}}
+    built = []
+
+    def build(origin, got, node=None, **kw):
+        built.append(node)
+        return {"rc": 0, "gone": [], "announced": []}
+    with patched(nomad, nodes_meta=lambda: {n: dict(m) for n, m in pool.items()},
+                 node_dynamic_meta=lambda n: dict(pool.get(n) or {})), \
+            patched(image, prepare=lambda origin: {"project": "rugent"}, build=build):
+        for node, mode, want in NODE_CASES_321:
+            built.clear()
+            got = builder.run({"origin": "git@h:g/rugent.git", "mode": mode, "node": node},
+                              lambda **ev: None)
+            c.expect(f"#321 builder run --node {node} ({mode}): reply and whether it built",
+                     (got.get("error"), got.get("skipped"), built), want)
+        # Пул без контейнерных узлов: раньше --node молча давал skipped
+        # (serving пуст -- узел не сверялся), теперь -- отказ image.
+        for n in ("agent1", "agent2", "weird"):
+            pool.pop(n)
+        built.clear()
+        got = builder.run({"origin": "git@h:g/rugent.git", "mode": "missing", "node": "host1"},
+                          lambda **ev: None)
+        c.expect("#321 builder run --node on a pool with no container node: refused, not skipped",
+                 (got.get("error"), got.get("skipped"), built),
+                 ("host1: its bodies are not containers, there is no image to build there",
+                  None, []))
+
+
+# (узел, режим, (отказ, skipped, собирали ли на узле)).
+NODE_CASES_321 = [
+    ("agent1", "missing", (None, True, [])),
+    ("agent2", "missing", (None, None, ["agent2"])),
+    ("agent1", "update", (None, None, ["agent1"])),
+    ("ghost", "missing", ("no node ghost in the pool: agent1, agent2, host1, weird", None, [])),
+    ("host1", "missing",
+     ("host1: its bodies are not containers, there is no image to build there", None, [])),
+    ("weird", "missing",
+     ("weird: unknown driver 'pvee'; available: host, pve (docs/DRIVER.md)", None, [])),
+]
+
+
 def main():
     c = Checks()
+    check_builder_node_321(c)
     # HYPOTHESIS (#123): собрать образ можно было только на контроллере, и
     # вывод был полным логом ansible. SOLUTION: сборщик на сервере шлёт шаг --
     # имя задачи ansible. STATUS: FIXED — see #123
@@ -64,12 +114,11 @@ def main():
                  builder.needs_build("missing", both, "rugent", node="agent2"), True)
         c.expect("needs_build(update, node)",
                  builder.needs_build("update", both, "rugent", node="agent1"), True)
-        try:
-            builder.needs_build("missing", both, "rugent", node="hyper")
-            c.fail("a node that is not a container node must be refused")
-        except ValueError as e:
-            c.check("the refusal names the node and the candidates",
-                    "hyper" in str(e) and "agent1" in str(e), e)
+        # С #321 отказ по узлу -- у image.container_nodes, одной проверкой
+        # для сборщика и build; сборщик зовёт её до needs_build (его путь --
+        # check_builder_node_321). Здесь узел без записи -- узел без образа.
+        c.expect("needs_build(missing, node without a record): build",
+                 builder.needs_build("missing", both, "rugent", node="agent3"), True)
     except TypeError as e:
         c.fail(f"needs_build takes no node: {e}")
 

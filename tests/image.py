@@ -11,7 +11,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, FakeNomad, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import image  # noqa: E402
@@ -24,8 +24,69 @@ GOT = {"project": "proj", "asks": {"MOP_MEM_MB": "2048"}, "alien": [], "legacy":
        "bootstrap_tasks": "/tmp/x/bootstrap-tasks.yml"}
 
 
+# ── #321: «контейнерный ли узел пула» -- одним определением ────────────
+# Характеристика до переезда: тексты и типы отказов image, строки announce
+# на смешанном пуле (контейнер, host, неизвестный драйвер), build с узлом
+# и без. Зелёная на старом коде и на новом. STATUS: FIXED — see #321
+POOL_321 = {"agent1": {"mop_driver": "pve"}, "host1": {"mop_driver": "host"},
+            "weird": {"mop_driver": "pvee"}}
+
+
+def check_node_check_321(c):
+    def api():
+        return FakeNomad(meta={n: dict(m) for n, m in POOL_321.items()})
+    for node, want in (
+            ("ghost", "no node ghost in the pool: agent1, host1, weird"),
+            ("host1", "host1: its bodies are not containers, there is no image to build there"),
+            ("weird", "weird: unknown driver 'pvee'; available: host, pve (docs/DRIVER.md)")):
+        try:
+            image.container_nodes(api(), node)
+            c.fail(f"#321 container_nodes({node!r}) must refuse")
+        except RuntimeError as e:
+            c.expect(f"#321 container_nodes({node!r}): RuntimeError text", str(e), want)
+    c.expect("#321 container_nodes(agent1): only it",
+             image.container_nodes(api(), "agent1"), {"agent1": {"mop_driver": "pve"}})
+    c.expect("#321 container_nodes(): every node, as today",
+             sorted(image.container_nodes(api())), ["agent1", "host1", "weird"])
+
+    a = api()
+    c.expect("#321 announce on a mixed pool: a row per node, host and bad driver named",
+             image.announce("proj", api=a),
+             [("agent1", "announced, serves proj"), ("host1", "not a container node"),
+              ("weird", "weird: unknown driver 'pvee'; available: host, pve (docs/DRIVER.md)")])
+    c.expect("#321 announce(node): only it", image.announce("other", api=api(), node="agent1"),
+             [("agent1", "announced, serves other")])
+
+    calls = []
+    with patched(image, clear=lambda project, force=False, api=None, node=None:
+                 calls.append(("clear", node)) or [],
+                 bake=lambda *a, node=None, **kw: calls.append(("bake", node)) or 0,
+                 restore=lambda gone, api=None: None):
+        a = api()
+        got = image.build("git@h:g/proj.git", {"project": "proj"}, api=a, node="agent1")
+        c.expect("#321 build(node): clears and bakes there, announces only there",
+                 (calls, got["announced"]),
+                 ([("clear", "agent1"), ("bake", "agent1")],
+                  [("agent1", "announced, serves proj")]))
+        c.expect("#321 build(node): the pool's meta read once, not once per check",
+                 sum(1 for x in a.calls if x[0] == "nodes_meta"), 1)
+        for node in ("host1", "ghost"):
+            calls.clear()
+            try:
+                image.build("git@h:g/proj.git", {"project": "proj"}, api=api(), node=node)
+                c.fail(f"#321 build({node}) must refuse")
+            except RuntimeError:
+                c.expect(f"#321 build({node}): refused before the first stop", calls, [])
+        calls.clear()
+        got = image.build("git@h:g/proj.git", {"project": "proj"}, api=api())
+        c.expect("#321 build(): every node's row, as today",
+                 (calls, [n for n, _ in got["announced"]]),
+                 ([("clear", None), ("bake", None)], ["agent1", "host1", "weird"]))
+
+
 def main():
     c = Checks()
+    check_node_check_321(c)
     extra = image.extra_vars("git@h:g/proj.git", GOT)
     want = {"mop_project": "proj", "mop_origin": "git@h:g/proj.git",
             "mop_project_asks": {"MOP_MEM_MB": "2048"},
