@@ -4,6 +4,8 @@
 import { Badge, Container, Group, Stack, Text, Title, Alert } from "@mantine/core";
 import { usePool } from "./usePool";
 import { KINDS, type Counts, type Kind } from "./types";
+import { UsageChart } from "./components/UsageChart";
+import { UsageByUser } from "./components/UsageByUser";
 
 export const KIND_RU: Record<Kind, string> = {
   free: "свободны", busy: "заняты", sick: "больны", silent: "агент молчит", down: "не подняты",
@@ -45,6 +47,9 @@ export default function App() {
         {snapshot && snapshot.errors.length > 0 && (
           <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join("\n")}</Alert>
         )}
+        {/* расход (#299) */}
+        {snapshot && <UsageChart days={snapshot.usage} />}
+        {snapshot && <UsageByUser users={snapshot.per_user} />}
         <Text c="dimmed" size="sm">
           {live ? "поток событий" : "опрос"} · без входа, LAN доверенная · действия над папетами остаются в mop ·{" "}
           <a href="/api/pool">JSON</a>
