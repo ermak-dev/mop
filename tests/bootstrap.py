@@ -110,11 +110,15 @@ def check_result_334(c):
 
     ok = {"ok": True, "played": True, "rc": 0, "seconds": 41.6, "tail": "a\nPLAY RECAP ok=3\n"}
     bootstrap.note_result(root, name, ok, now=1_790_500_060)
+    # С #345 в записи ещё key/failures/gave_up (их проверяет check_give_up_345).
+    got = bootstrap.read_result(root, name)
     c.expect("#334 result after an ok play: fields, marker and commit of what was sent",
-             bootstrap.read_result(root, name),
+             {k: v for k, v in got.items() if k not in ("key", "failures", "gave_up")},
              {"ok": True, "played": True, "seconds": 41.6, "rc": 0, "task": None,
               "message": None, "last": "PLAY RECAP ok=3", "at": 1_790_500_060,
               "sent": again, "commit": "5b92b440c952fad2"})
+    c.expect("#345 an ok play: no failures, not given up",
+             (got.get("failures"), got.get("gave_up")), (0, False))
     failed = {"ok": False, "played": True, "rc": 2, "seconds": 3.0, "tail": "x\nfatal",
               "task": "env file", "message": "Could not find ~/proj/.env"}
     bootstrap.note_result(root, name, failed, now=1_790_500_070)
@@ -330,6 +334,85 @@ def check_lease_push_312(c):
         c.expect("#312 a failed play: no lease push", asked, [])
 
 
+# ── #345: bootstrap сдаётся после трёх провалов одного и того же ────────
+# HYPOTHESIS: RestartPolicy папета безгранична (Mode delay) ради переживания
+# лежащего сервера, и детерминированно падающий bootstrap (rumop,
+# pu-rudesktop-8: нет группы uv `cloud`) перезапускается вечно -- 20+
+# прогонов ansible, 8 ГБ резерва на узле без места.
+# SOLUTION: сервер считает подряд идущие провалы прогона (rc 2 с названной
+# задачей) одного ключа (метка отправленного #334 + sha хранимых файлов);
+# на третьем -- gave_up в ответе и, через GIVE_UP_GRACE после ответа,
+# глагол give_up сервиса кластера (он и останавливает джоб). Следующий
+# запрос того же ключа -- gave_up без прогона. Преходящее (rc 3, таймаут,
+# кред, аренда) не считается. STATUS: FIXED — see #345
+def check_give_up_345(c):
+    root = tempfile.mkdtemp(prefix="mop-test-bootstrap-345-")
+    name = "pu-proj-1"
+    if not c.check("#345 bootstrap.GIVE_UP_AFTER is 3", getattr(bootstrap, "GIVE_UP_AFTER", None) == 3):
+        return
+    prov = {"source": "origin", "commit": "abc", "dirty": False, "tasks": 1, "present": True}
+    bootstrap.store(root, name, TEXT)
+    bootstrap.note_sent(root, name, prov, now=1)
+    failed = {"ok": False, "played": True, "rc": 2, "seconds": 3.0, "tail": "x\nfatal",
+              "task": "bootstrap : env file", "message": "no group cloud"}
+    unreachable = {"ok": False, "played": True, "rc": 3, "seconds": 9.0, "tail": "UNREACHABLE!",
+                   "task": None, "message": None}
+    timeout = {"ok": False, "played": True, "rc": None, "seconds": 290.0, "tail": "did not finish",
+               "task": None, "message": None}
+    ok = {"ok": True, "played": True, "rc": 0, "seconds": 4.0, "tail": "ok", "task": None,
+          "message": None}
+
+    def note(out):
+        r = bootstrap.note_result(root, name, out, now=2)
+        return (r["failures"], r["gave_up"])
+    c.expect("#345 a failed task counts 1", note(failed), (1, False))
+    c.expect("#345 unreachable does not count", note(unreachable), (1, False))
+    c.expect("#345 a timeout does not count", note(timeout), (1, False))
+    c.expect("#345 second failed task", note(failed), (2, False))
+    c.expect("#345 rc 2 without a named task does not count", note({**failed, "task": None}), (2, False))
+    c.expect("#345 third failed task: gave up", note(failed), (3, True))
+    c.expect("#345 an ok play resets", note(ok), (0, False))
+    note(failed), note(failed)
+    bootstrap.note_sent(root, name, prov, now=3)          # mop update: новая метка
+    c.expect("#345 a new marker (update/recycle) starts over", note(failed), (1, False))
+    note(failed)
+    bootstrap.store(root, name, TEXT.replace("env file", "env file 2"))   # другой файл
+    c.expect("#345 a changed stored workspace starts over", note(failed), (1, False))
+
+    # Через answer: третий провал -- gave_up в ответе и одна отложенная
+    # просьба give_up; четвёртый запрос того же ключа -- без прогона.
+    bootstrap.note_sent(root, name, prov, now=4)
+    plays, later = [], []
+
+    def play(req, project):
+        plays.append(req["name"])
+        return dict(failed)
+    with patched(bootstrap, ROOT=root, play=play, puppet_creds=lambda project: None,
+                 _later=lambda delay, fn: later.append((delay, fn))):
+        replies = [bootstrap.answer("proj", {"verb": "bootstrap", "name": name}) for _ in range(4)]
+    c.expect("#345 three plays, the fourth request plays nothing", len(plays), 3)
+    c.expect("#345 replies: gave_up only from the third on",
+             [bool(r.get("gave_up")) for r in replies], [False, False, True, True])
+    c.check("#345 a gave-up reply is a failure the wrapper refuses on, naming the task",
+            all(not r.get("ok") and r.get("task") == "bootstrap : env file"
+                and r.get("failures") == 3 for r in replies[2:]), replies[2:])
+    c.expect("#345 the stop is asked after the grace, once per gave-up reply",
+             [d for d, _ in later], [bootstrap.GIVE_UP_GRACE, bootstrap.GIVE_UP_GRACE])
+    asked = []
+    with patched(bootstrap.bus, ask_cluster=lambda verb, **kw: asked.append((verb, kw)) or {"ok": True}):
+        later[0][1]()
+    c.expect("#345 the deferred ask is give_up on the operator's subject for this puppet",
+             [(v, kw.get("project"), kw.get("name")) for v, kw in asked],
+             [("give_up", bootstrap.bus.ADMIN, name)])
+    with patched(bootstrap.bus, ask_cluster=lambda verb, **kw: (_ for _ in ()).throw(
+            bootstrap.bus.BusError("no cluster"))):
+        try:
+            later[0][1]()
+            c.check("#345 a failing give_up ask does not raise in the timer thread", True)
+        except Exception as e:
+            c.fail(f"#345 the deferred ask raised: {e}")
+
+
 # ── #344: провал команды -- причина из её вывода ──────────────────────
 # HYPOTHESIS: failed_task (#333) берёт msg из `FAILED! => {...}`, а у
 # command/shell-задачи msg всегда «non-zero return code»: FAILED, строка
@@ -382,6 +465,7 @@ def check_command_message_344(c):
 
 def main():
     c = Checks()
+    check_give_up_345(c)
     check_result_334(c)
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
 

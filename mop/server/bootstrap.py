@@ -41,12 +41,14 @@
 — одно решение. Узловая половина живёт stdlib'ом плюс шиной.
 """
 import asyncio
+import hashlib
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 
 from ..common import (bus, busnames, config, creds, fsutil, manifest, paths, project_secrets,
@@ -121,16 +123,76 @@ def note_sent(root, name, prov, now=None):
     return marker
 
 
+# Сдаться (#345): столько подряд провалов прогона одного и того же
+# workspace -- и джоб останавливается, а не перезапускается вечно. Провал
+# прогона детерминирован (задача проекта упала), в отличие от лежащего
+# сервера или ssh: те не считаются и живут прежним delay.
+GIVE_UP_AFTER = 3
+# Через сколько после ответа узлу просить сервис кластера остановить джоб:
+# узел сперва закрывает дверь в тело (admit False), и стоп посреди bootstrap
+# оставил бы в теле ключ сервера. Рестарт Nomad -- через 15 с, стоп успевает.
+GIVE_UP_GRACE = 5
+# ansible-playbook: 2 -- упала задача на хосте (3 -- хост недоступен).
+TASK_FAILED_RC = 2
+
+
+def workspace_key(root, name):
+    """Ключ «того же workspace» (#345): метка регистрации (#334) и sha
+    хранимых файлов -- новая регистрация или другой файл начинают счёт
+    заново, в том числе у клиента без происхождения."""
+    h = hashlib.sha256()
+    for path in files_of(root, name):
+        try:
+            with open(path, "rb") as f:
+                h.update(f.read())
+        except (OSError, TypeError):
+            pass
+        h.update(b"\0")
+    return [(read_sent(root, name) or {}).get("marker"), h.hexdigest()]
+
+
+def counts_as_failure(out):
+    """Прогон дошёл до конца и назвал упавшую задачу -- провал, который
+    повторится (#345). Недоступный хост, таймаут, отказы до и после прогона
+    -- нет: они проходят сами."""
+    return bool(out.get("played") and not out.get("ok")
+                and out.get("rc") == TASK_FAILED_RC and out.get("task"))
+
+
+def gave_up_of(root, name):
+    """Строка «сдался» для ростера и `alloc` (#345) либо None: запись итога
+    говорит gave_up, и ключ -- текущий (update/recycle его сменили бы)."""
+    rec = read_result(root, name) or {}
+    if not rec.get("gave_up") or rec.get("key") != workspace_key(root, name):
+        return None
+    where = f" at task «{rec['task']}»" if rec.get("task") else ""
+    why = f": {rec['message']}" if rec.get("message") else ""
+    return (f"bootstrap gave up after {rec.get('failures')} attempts{where}{why}"
+            f" — fix {FILE}, then mop update")
+
+
 def note_result(root, name, out, now=None):
     """Итог прогона папета -- рядом с отправленным (#334): метка и коммит
-    того, что уехало, плюс task/message, если прогон их назвал (#333)."""
+    того, что уехало, плюс task/message, если прогон их назвал (#333).
+    failures -- подряд идущие провалы этого ключа, gave_up -- их хватило
+    (#345): удачный прогон обнуляет, преходящий провал счёт не трогает."""
     sent = read_sent(root, name) or {}
+    key = workspace_key(root, name)
+    prev = read_result(root, name) or {}
+    before = (prev.get("failures") or 0) if prev.get("key") == key else 0
+    if out.get("ok"):
+        failures = 0
+    elif counts_as_failure(out):
+        failures = before + 1
+    else:
+        failures = before
     lines = [l for l in (out.get("tail") or "").splitlines() if l.strip()]
     record = {"ok": bool(out.get("ok")), "played": bool(out.get("played")),
               "seconds": out.get("seconds"), "rc": out.get("rc"),
               "task": out.get("task"), "message": out.get("message"),
               "last": lines[-1] if lines else None, "at": int(now or time.time()),
-              "sent": sent.get("marker"), "commit": sent.get("commit")}
+              "sent": sent.get("marker"), "commit": sent.get("commit"),
+              "key": key, "failures": failures, "gave_up": failures >= GIVE_UP_AFTER}
     fsutil.make_private_dir(root)
     fsutil.write_private(_result_path(root, name), json.dumps(record))
     return record
@@ -428,6 +490,35 @@ def lease_note(name, timeout=LEASE_TIMEOUT):
     return f"lease {got['lease']} not pushed: {got.get('result')}"
 
 
+def _later(delay, fn):
+    """Отложенный вызов своим потоком; шов для проверок (#345)."""
+    t = threading.Timer(delay, fn)
+    t.daemon = True
+    t.start()
+
+
+def ask_give_up(name):
+    """Попросить сервис кластера остановить сдавшийся джоб (#345). Глагол
+    оператора, как cred_push (#312): Nomad -- у него. Не вышло -- следующий
+    подъём того же ключа ответит gave_up без прогона и попросит снова."""
+    def ask():
+        try:
+            bus.ask_cluster("give_up", timeout=bus.TIMEOUT, project=bus.ADMIN, name=name)
+        except Exception:
+            pass
+    _later(GIVE_UP_GRACE, ask)
+
+
+def gave_up_reply(rec):
+    """Ответ узлу по сдавшемуся ключу без прогона (#345): отказ с той же
+    задачей и сообщением, что у последнего провала."""
+    return {"ok": False, "played": False, "gave_up": True, "rc": rec.get("rc"),
+            "task": rec.get("task"), "message": rec.get("message"),
+            "failures": rec.get("failures"), "seconds": None,
+            "tail": f"not replayed: bootstrap gave up after {rec.get('failures')} "
+                    f"failed plays of this workspace"}
+
+
 def answer(project, req, _send=None):
     """Ответ на один запрос. Зовётся в отдельном потоке (service.serve):
     прогон идёт секунды, а петля обязана отвечать остальным."""
@@ -440,13 +531,22 @@ def answer(project, req, _send=None):
             why = refusal(req, project)
             if why:
                 return {"error": why}
+            # Сдавшийся ключ (#345) -- без прогона: ansible не переигрывается,
+            # а стоп просится снова (прежний мог не дойти).
+            prev = read_result(ROOT, req["name"]) or {}
+            if prev.get("gave_up") and prev.get("key") == workspace_key(ROOT, req["name"]):
+                ask_give_up(req["name"])
+                return gave_up_reply(prev)
             out = play(req, project)
             # Итог -- рядом с отправленным (#334): `mop update` ждёт его. Не
             # записался -- подсказка пропала, а прогон и кред важнее.
             try:
-                note_result(ROOT, req["name"], out)
+                rec = note_result(ROOT, req["name"], out)
             except OSError:
-                pass
+                rec = {}
+            if rec.get("gave_up"):
+                ask_give_up(req["name"])
+                return {**out, "gave_up": True, "failures": rec["failures"]}
             # Кред папета едет тем же ответом: узел уже позвал нас, и
             # второго разговора ради одного файла не нужно.
             out = with_creds(out, puppet_creds(project), project)

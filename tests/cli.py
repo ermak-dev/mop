@@ -234,8 +234,51 @@ def check_bootstrap_outcome_334(c):
                   "bootstrap_result" in seen),
                  (want_out, want_err, want_code, want_asked))
 
+# ── #345: сдавшийся bootstrap в `mop list` и `mop tail` ────────────────
+# HYPOTHESIS: у остановленного джоба нет работающей аллокации, а после GC
+# Nomad -- никакой: failing_row по stderr аллокации ничего не скажет, и
+# папет читался бы «dead» без причины.
+# SOLUTION: сервис кластера кладёт gave_up (строку из записи итога) в
+# элемент ростера и в ответ alloc; строка ростера -- FAILED с ней, без
+# хвоста «(N restarts, …)» Nomad; `mop tail`/attach говорят то же.
+# STATUS: FIXED — see #345
+def check_gave_up_rows_345(c):
+    from mop.common import bus, puppets
+    from mop.common.state import State
+    text = ("bootstrap gave up after 3 attempts at task «bootstrap : sync»: "
+            "Group `cloud` is not defined — fix .mop/bootstrap.yaml, then mop update")
+    job = {"ID": "pu-rudesktop-8", "Type": "service", "Status": "dead",
+           "Meta": {"origin": "git@h:g/rudesktop.git", "llm": "claude"}}
+    stopped = {"ID": "a1", "JobID": job["ID"], "NodeName": "agent1",
+               "ClientStatus": "complete", "DesiredStatus": "stop"}
+    for alloc in (None, stopped):
+        item = {"job": job, "alloc": alloc, "error": None, "task": None, "reason": None,
+                "state": None, "kind": None, "gave_up": text}
+        row = puppets.rows_from([item])[0]
+        c.expect(f"#345 a gave-up puppet's row (alloc {alloc and alloc['ClientStatus']})",
+                 (row.alloc_status, row.state, row.kind),
+                 ("failed", str(State("failing", text)), "failing"))
+        c.check("#345 the row reads FAILED: bootstrap gave up …",
+                row.state.startswith("FAILED: bootstrap gave up after 3 attempts"), row.state)
+        with patched(bus, call_cluster=lambda verb, **kw: {"ok": True, "alloc": alloc,
+                                                            "driver": None, "gave_up": text}):
+            try:
+                puppets.running(job["ID"])
+                c.fail("#345 running() of a gave-up puppet must refuse")
+            except LookupError as e:
+                c.expect("#345 mop tail/attach name the give-up",
+                         str(e), f"{job['ID']}: {State('failing', text)}")
+        # doctor: диагноз без действия -- ни stop, ни restart аллокации.
+        with patched(puppets, roster=lambda stale=False: [dict(item)]):
+            got = [i for i in puppets.diagnose() if i["name"] == job["ID"]]
+        c.expect(f"#345 doctor names the give-up with no action (alloc {alloc and 'stopped'})",
+                 [(i["diagnosis"], i["action"]) for i in got],
+                 [(str(State("failing", text)), None)])
+
+
 def main():
     c = Checks()
+    check_gave_up_rows_345(c)
     check_bootstrap_outcome_334(c)
     check_bootstrap_sent_334(c)
     # HYPOTHESIS: каталога нет — диспетчер bash ищет файл по имени в bin/.

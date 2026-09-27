@@ -198,6 +198,11 @@ def nomad_items(project=None, stale=False):
         except Exception as e:
             err = nomad.describe_error(e)
         item = {"job": j, "alloc": alloc, "error": err, "task": task, "reason": reason}
+        # Сдавшийся bootstrap (#345): джоб остановлен, аллокации может не
+        # быть вовсе -- причина из записи итога на этом же сервере.
+        gave_up = bootstrap.gave_up_of(bootstrap.ROOT, j["ID"])
+        if gave_up:
+            item["gave_up"] = gave_up
         if not alloc and not err and state.queued(j):
             # Очередь без узла, который служит проекту, -- не нехватка мест
             # (#118). Узлы -- один раз на ростер и только если есть очередь.
@@ -519,14 +524,29 @@ def _alloc(project, req):
         # Джоба уже нет — это ответ, а не отказ: так `puppets.delete` ждёт,
         # пока снятый джоб перестанет быть running.
         alloc = None
+    # Сдавшийся bootstrap (#345) -- ответом, с аллокацией или без.
+    gave_up = bootstrap.gave_up_of(bootstrap.ROOT, req["name"])
+    extra = {"gave_up": gave_up} if gave_up else {}
     if not alloc:
-        return {"ok": True, "alloc": None, "driver": None}
+        return {"ok": True, "alloc": None, "driver": None, **extra}
     slim = {k: alloc.get(k) for k in ALLOC_FIELDS}
     # Падает ли задача и почему (#126): `mop attach` и `mop add` говорят это
     # вместо «not running» и двух минут ожидания.
     slim["task"], slim["reason"] = task_and_reason(alloc)
     meta = _api().node_meta(alloc["NodeName"]) or {}
-    return {"ok": True, "alloc": slim, "driver": meta.get("mop_driver")}
+    return {"ok": True, "alloc": slim, "driver": meta.get("mop_driver"), **extra}
+
+
+def _give_up(project, req):
+    """Остановить джоб, чей bootstrap сдался (#345). Зовёт mop-bootstrap
+    после ответа узлу, как cred_push (#312); просителю не верим -- запись
+    итога перечитывается, и стоп только если сдался текущий ключ. Стоп, а не
+    снос (purge False): клон и тело на месте, `mop update` поднимает снова."""
+    name = req["name"]
+    if not bootstrap.gave_up_of(bootstrap.ROOT, name):
+        return {"error": f"{name}: its bootstrap has not given up on the current workspace"}
+    _api().deregister(name, purge=False)
+    return {"ok": True, "name": name, "stopped": True}
 
 
 STDERR_LINES, STDERR_MAX = 40, 500
@@ -985,6 +1005,8 @@ VERBS = {
     "cred_status":     Verb(_cred_status,     ADMIN,   False, False),
     "cred_login_start": Verb(_cred_login_start, ADMIN, False, False),
     "cred_login_code": Verb(_cred_login_code, ADMIN,   False, False),
+    # Сдавшийся bootstrap (#345): просит mop-bootstrap, стоп -- здесь.
+    "give_up":         Verb(_give_up,         ADMIN,   False, False),
 }
 # Прежние наборы -- выводом из таблицы.
 PROJECT_VERBS = tuple(v for v, d in VERBS.items() if d.scope in (PROJECT, SECRET))

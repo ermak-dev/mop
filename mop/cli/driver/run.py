@@ -116,6 +116,8 @@ class BootstrapFailed(RuntimeError):
 
     def __init__(self, reply):
         self.task, self.message = reply.get("task"), reply.get("message")
+        # Сервер сдался (#345): столько провалов того же workspace подряд.
+        self.gave_up, self.failures = bool(reply.get("gave_up")), reply.get("failures")
         self.tail = reply.get("tail", "")
         super().__init__(f"bootstrap failed (ansible exit {reply.get('rc')}):\n{self.tail}")
 
@@ -124,6 +126,13 @@ def refusal(name, error):
     """Строка отказа врапера на stderr. Чистая. Задача названа --
     «failed at task «…»: сообщение», затем хвост, как всегда; её читает
     state.failure_reason для FAILED в `mop list`."""
+    if isinstance(error, BootstrapFailed) and error.gave_up:
+        # Сдался (#345): джоб сейчас остановит сервер, и строка говорит, что
+        # делать -- рестарт тут не поможет.
+        where = f" at task «{error.task}»" if error.task else ""
+        why = f": {error.message}" if error.message else ""
+        return (f"bootstrap of {name} gave up after {error.failures} attempts{where}{why}"
+                f" — fix .mop/bootstrap.yaml, then mop update\n{error.tail}")
     if isinstance(error, BootstrapFailed) and error.task:
         return (f"bootstrap of {name} failed at task «{error.task}»: {error.message}\n"
                 f"{error.tail}")
@@ -139,15 +148,24 @@ def bootstrap_sandbox(d, name, project):
     bootstrap. Где сервер найдёт тело и надо ли его впускать, решает драйвер
     (#151): у host тело — сам узел, и дорога туда есть всегда."""
     address = d.address(name)
-    r = asyncio.run(d.admit(name, True))
-    if r.get("error"):
-        raise RuntimeError(f"cannot let the server into the body: {r['error']}")
+
+    # Стоп джоба посреди разговора (#345: сервер сдался и просит стоп) --
+    # SIGTERM. По умолчанию он убил бы процесс мимо finally, и ключ сервера
+    # остался бы в теле; исключение же закрывает дверь, как любой исход.
+    def stopped(_sig, _frm):
+        raise SystemExit(f"{name}: stopped during bootstrap")
+    before = signal.signal(signal.SIGTERM, stopped)
     try:
+        r = asyncio.run(d.admit(name, True))
+        if r.get("error"):
+            raise RuntimeError(f"cannot let the server into the body: {r['error']}")
         bus.connect(bus.NODE_FILE)
         out = bus.ask_server("bootstrap", timeout=busnames.BOOTSTRAP_TIMEOUT, project=project,
                              name=name, address=address)
     finally:
+        # Закрыть -- и после неудачного впуска: стоп мог прийти посреди него.
         asyncio.run(d.admit(name, False))
+        signal.signal(signal.SIGTERM, before)
     if out.get("error"):
         raise RuntimeError(out["error"])
     if not out.get("ok"):
