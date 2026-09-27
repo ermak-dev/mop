@@ -6,12 +6,19 @@ import { hhmm } from "./format";
 
 export const EMPTY = "событий пока нет — агенты пишут send, idle, type, wipe и свой запуск";
 
+// Сколько событий рисует страница (#303, просьба оператора 27.09). Сервис
+// помнит больше (EVENTS_CAP в mop/server/web.py) и отдаёт их в /api/pool.
+export const JOURNAL_LIMIT = 25;
+
 export function Journal({ journal }: { journal: JournalEntry[] }) {
-  const items = journal.slice().reverse();
+  const items = journal.slice(-JOURNAL_LIMIT).reverse();
+  const note = journal.length > JOURNAL_LIMIT
+    ? `события шины, новые сверху; ${JOURNAL_LIMIT} из ${journal.length}`
+    : "события шины, новые сверху";
   return (
     <div data-testid="journal">
       <Title order={3}>
-        Журнал <Text span c="dimmed" size="sm" fw={400}>события шины, новые сверху</Text>
+        Журнал <Text span c="dimmed" size="sm" fw={400}>{note}</Text>
       </Title>
       {items.length ? (
         <Stack gap={2}>
