@@ -27,6 +27,7 @@
 или журналируется, проходит через mask(). Только stdlib и fsutil.
 """
 import fcntl
+import getpass
 import json
 import os
 import pty
@@ -48,6 +49,33 @@ WIDE = 4000                   # ширина pty: гиперссылка одн�
 
 MODES = {"login": ["claude", "auth", "login"],
          "setup-token": ["claude", "setup-token"]}
+
+
+# ─── клиент на сервере (#292) ─────────────────────────────────────────────
+# Юниты (mop-web, mop-cluster) живут с PATH systemd, а install.sh кладёт
+# клиента в ~/.local/bin пользователя пула. Голое имя в execvp дочернего
+# процесса pty падало молча: родитель читал закрытую трубу (BrokenPipe), а
+# страница показывала «[Errno 2] No such file or directory» -- 27.09 на
+# обоих контроллерах, где клиента вовсе не было. Поэтому поиск один на все
+# вызовы и отказ до fork'а, с именем пользователя, для которого ставить.
+def client_path(path_env, home, exists=os.path.exists):
+    """Абсолютный путь клиента: первый в PATH, затем <home>/.local/bin/claude,
+    иначе None. Чистая: exists подставляется проверкой."""
+    for d in (path_env or "").split(os.pathsep):
+        if d and exists(os.path.join(d, "claude")):
+            return os.path.join(d, "claude")
+    local = os.path.join(home, ".local", "bin", "claude")
+    return local if exists(local) else None
+
+
+def client():
+    """Путь клиента этого процесса либо RuntimeError: клиент не стоит --
+    его ставит `mop server deploy` для пользователя пула (#293)."""
+    path = client_path(os.environ.get("PATH", ""), os.path.expanduser("~"))
+    if not path:
+        raise RuntimeError(f"claude is not installed on the server for {getpass.getuser()}: "
+                           "run mop server deploy")
+    return path
 
 _AUTHORIZE = r"https://claude\.com/cai/oauth/authorize\?"
 # Гиперссылка OSC 8: \x1b]8;<params>;<url>(\x07|\x1b\\). У auth login params
@@ -157,10 +185,10 @@ def prepare_home(home):
 def auth_status(home):
     """`claude auth status --json` в доме кредита -> dict (пустой при отказе)."""
     try:
-        out = subprocess.run(["claude", "auth", "status", "--json"], capture_output=True,
+        out = subprocess.run([client(), "auth", "status", "--json"], capture_output=True,
                              text=True, timeout=60, env=_env(home)).stdout
         return json.loads(out) if out.strip() else {}
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         return {}
 
 
@@ -190,11 +218,12 @@ class Login:
     @classmethod
     def start(cls, home, mode="login"):
         self = cls(home, mode)
+        binary = client()                               # отказ -- до fork'а (#292)
         prepare_home(home)
         pid, fd = pty.fork()
         if pid == 0:                                    # клиент
             os.environ.update(_env(home))
-            os.execvp("claude", MODES[mode])
+            os.execv(binary, [binary] + MODES[mode][1:])
         self.pid, self.fd = pid, fd
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, WIDE, 0, 0))
         raw = self._read(URL_TIMEOUT, until=lambda b: authorize_url(b) is not None)

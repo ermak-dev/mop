@@ -202,8 +202,11 @@ def keepalive(name, rec=None, now=None, force=False):
         return "not due"
     env = credlogin._env(home(name))
     try:
-        r = subprocess.run(["claude", "-p", KEEPALIVE_PROMPT, "--model", KEEPALIVE_MODEL],
+        # Клиент -- абсолютным путём, найденным один раз на все вызовы (#292).
+        r = subprocess.run([credlogin.client(), "-p", KEEPALIVE_PROMPT, "--model", KEEPALIVE_MODEL],
                            capture_output=True, text=True, timeout=KEEPALIVE_TIMEOUT, env=env)
+    except RuntimeError as e:
+        return f"failed: {e}"
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"failed: {type(e).__name__}"
     if r.returncode != 0:

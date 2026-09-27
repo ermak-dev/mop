@@ -14,7 +14,7 @@ mop cred add z1 --profile glm --key-file - --owner ivan@example.dev < key.txt
 mop cred rm z1
 ```
 
-Дом кредита на сервере: `~/.config/mop/creds/<имя>/`, 0700. Рядом с
+Дом кредита на сервере: `~/.config/mop/creds/<имя>/`, 0700. Клиент `claude` при этом нужен на самом контроллере, для пользователя пула (PATH юнита или `~/.local/bin`): его ставит `mop server deploy` (#293), а без него логин, продление токена и `auth status` отказывают словами «claude is not installed on the server», не трассой (#292). Рядом с
 секретом лежит `cred.json`: `name`, `profile`, `kind`, `owner`,
 `added_at`, `status`. Секрет — по виду кредита:
 
