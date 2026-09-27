@@ -58,6 +58,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _json(self, code, body):
+        """JSON-ответ страницы -- одним местом (#319): не-ASCII -- UTF-8, без
+        экранирования, как у снимка. Два ответа об ошибке прежде шли без
+        ensure_ascii=False; их тексты -- ASCII, и байты у них те же."""
+        return self._send(code, json.dumps(body, ensure_ascii=False))
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/":
@@ -79,7 +85,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(LOGO, "rb") as f:
                 return self._send(200, f.read(), "image/png")
         if path == "/api/pool":
-            return self._send(200, json.dumps(COLLECTOR.current(), ensure_ascii=False))
+            return self._json(200, COLLECTOR.current())
         if path == "/healthz":
             if COLLECTOR.at is None:
                 return self._send(503, "no snapshot yet\n", "text/plain")
@@ -101,27 +107,28 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         route = self.ROUTES.get(path)
         if route is None:
-            return self._send(404, json.dumps({"error": "no such path"}))
+            return self._json(404, {"error": "no such path"})
         parse, action = route
         try:
             size = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(size) or b"{}")
         except (ValueError, TypeError):
-            return self._send(400, json.dumps({"error": "body: JSON is expected"}))
+            return self._json(400, {"error": "body: JSON is expected"})
         fields, err = parse(body)
         if err:
-            return self._send(400, json.dumps({"error": err}, ensure_ascii=False))
+            return self._json(400, {"error": err})
         try:
             got = self._cred(action, fields)
         except Exception as e:
             # Причина -- странице, без трассы; ключ и код в тексте отказов не бывают.
-            return self._send(500, json.dumps({"error": str(e) or type(e).__name__}, ensure_ascii=False))
+            return self._json(500, {"error": web.error_text(e)})
         code = 400 if got.get("error") else 200
         if code == 200:
-            COLLECTOR.event({"event": f"cred {action}", "name": fields["name"], "node": "-",
-                             "project": "-", "text": got.get("owner") or ""})
+            # Запись -- через journal_entry (#319): узел и проект -- его прочерки.
+            COLLECTOR.event(web.journal_entry({"event": f"cred {action}", "name": fields["name"],
+                                               "text": got.get("owner") or ""}))
             COLLECTOR.refresh_creds()
-        return self._send(code, json.dumps(got, ensure_ascii=False))
+        return self._json(code, got)
 
     @staticmethod
     def _cred(action, f):

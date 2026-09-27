@@ -461,3 +461,33 @@ class Verb:
     scope: str
     named: bool
     acting: bool = False
+
+
+# ─── ответ мастера на who (#319) ─────────────────────────────────────────
+# Сколько ждать ответов who: мастер отвечает из памяти, а gather не знает,
+# сколько ответов ждать, и честно досиживает до таймаута. Одно число на
+# инструмент agents (mcp) и сборщик дашборда (web).
+WHO_WAIT = 2
+
+
+@dataclass(frozen=True)
+class MasterAnswer:
+    """Ответ мастера на опрос who: адрес для send, проект, логин, сессия,
+    каталог. Пишет его mcp.on_inbox, читают инструмент agents и сборщик
+    дашборда -- прежде каждый по своим строковым ключам.
+
+    Поля -- как пришли: None -- поля не было. Умолчание показа («-», проект
+    спрошенного инбокса) -- у читателя, у каждого своё."""
+    master: object = None
+    project: object = None
+    user: object = None
+    session: object = None
+    cwd: object = None
+
+    def to_dict(self):
+        return {"master": self.master, "project": self.project, "user": self.user,
+                "session": self.session, "cwd": self.cwd}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(d.get("master"), d.get("project"), d.get("user"), d.get("session"), d.get("cwd"))
