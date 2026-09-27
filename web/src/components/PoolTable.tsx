@@ -1,7 +1,7 @@
 // Папеты по проектам (#298): секция на проект с заголовком-счётчиком и
 // таблицей в тех же колонках, что на старой странице. Строка красится по
 // корзине, которую посчитал сервер.
-import { Badge, Code, Stack, Table, Text, Title, Tooltip } from "@mantine/core";
+import { Badge, Code, Group, Stack, Table, Text, Title, Tooltip } from "@mantine/core";
 import type { Counts, Project, Puppet } from "../types";
 import { KINDS } from "../types";
 import { gb, KIND_COLOR, KIND_ONE } from "./format";
@@ -17,8 +17,12 @@ function Row({ p }: { p: Puppet }) {
   return (
     <Table.Tr data-kind={p.kind}>
       <Table.Td>
-        <Badge size="xs" circle color={color} mr={6} />
-        {p.name}
+        {/* точка корзины перед именем, в одну строку: узкая колонка иначе
+            переносила имя под точку */}
+        <Group gap={6} wrap="nowrap">
+          <Badge size="xs" circle color={color} />
+          <Text span size="sm" style={{ whiteSpace: "nowrap" }}>{p.name}</Text>
+        </Group>
       </Table.Td>
       <Table.Td>{p.node}</Table.Td>
       <Table.Td>{p.alloc_status}</Table.Td>
