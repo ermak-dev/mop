@@ -33,7 +33,7 @@ import time
 
 import base64
 
-from . import bootstrap, natsconf, nodes, nomad, spec
+from . import bootstrap, credreg, natsconf, nodes, nomad, spec
 from ..common import (bus, busnames, config, creds, domain, landing, lease, paths, project_secrets,
                       projects, puppets, service, state)
 from ..common.domain import CloneFacts, JobMeta, PoolNode, Project, Verb
@@ -653,6 +653,45 @@ def _project_limit(project, req):
     return {"ok": True, "name": name, "limit": value}
 
 
+# ─── глаголы: реестр кредитов (#283) ─────────────────────────────────────
+# Оператору: кредит -- авторизация у провайдера LLM на всю установку, а не
+# на проект. Секрет едет по шине один раз, внутрь (cred_add), и наружу не
+# возвращается ни одним глаголом: строки списка -- без него.
+def _cred_add(project, req):
+    rec = credreg.add_key(req["name"], req["profile"], req.get("key"),
+                          owner=req.get("owner") or "")
+    return {"ok": True, "name": rec["name"], "profile": rec["profile"]}
+
+
+def _cred_rm(project, req):
+    name = req["name"]
+    if not credreg.remove(name):
+        return {"error": f"no credential {name}"}
+    return {"ok": True, "name": name}
+
+
+def _cred_list(project, req):
+    return {"ok": True, "creds": credreg.all()}
+
+
+def _cred_status(project, req):
+    name = req.get("name")
+    if name:
+        recs = [credreg.probe(name)]
+    else:
+        recs = credreg.probe_all()
+    return {"ok": True, "creds": recs}
+
+
+def _cred_login_start(project, req):
+    return {"ok": True, "url": credreg.login_start(req["name"], req.get("mode") or "login")}
+
+
+def _cred_login_code(project, req):
+    got = credreg.login_code(req["name"], req.get("code") or "", owner=req.get("owner") or "")
+    return got if got.get("error") else {**got, "name": req["name"]}
+
+
 # ─── глаголы: секреты проекта (#127) ─────────────────────────────────────
 def _registered(project):
     """Отказ по незаведённому проекту: опечатка в имени завела бы секреты
@@ -777,6 +816,13 @@ VERBS = {
     "project_add":    Verb(_project_add,    ADMIN,   False, False),
     "project_delete": Verb(_project_delete, ADMIN,   False, False),
     "project_limit":  Verb(_project_limit,  ADMIN,   False, False),
+    # Реестр кредитов (#283): на всю установку, оператору.
+    "cred_add":        Verb(_cred_add,        ADMIN,   False, False),
+    "cred_rm":         Verb(_cred_rm,         ADMIN,   False, False),
+    "cred_list":       Verb(_cred_list,       ADMIN,   False, False),
+    "cred_status":     Verb(_cred_status,     ADMIN,   False, False),
+    "cred_login_start": Verb(_cred_login_start, ADMIN, False, False),
+    "cred_login_code": Verb(_cred_login_code, ADMIN,   False, False),
 }
 # Прежние наборы -- выводом из таблицы.
 PROJECT_VERBS = tuple(v for v, d in VERBS.items() if d.scope in (PROJECT, SECRET))

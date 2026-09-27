@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import config, llm  # noqa: E402
 from mop.common.domain import CredStatus  # noqa: E402
-from mop.common.llm import glm  # noqa: E402
+from mop.common.llm import claude, glm  # noqa: E402
 
 
 def plugin(**attrs):
@@ -104,6 +104,54 @@ STATUS = [
 ]
 
 
+# Ответ `GET api.anthropic.com/api/oauth/usage` токеном интерактивного
+# логина (26.09.2026): пятичасовое окно на 29 %, недельное на 33 %. Лишние
+# поля срезаны, форма настоящая.
+USAGE = {"five_hour": {"utilization": 29.0, "resets_at": "2026-09-26T11:10:00.078381+00:00",
+                       "limit_dollars": None, "locked_reason": None},
+         "seven_day": {"utilization": 33.0, "resets_at": "2026-09-28T05:00:00.078400+00:00"},
+         "limits": [{"kind": "session", "percent": 29, "severity": "normal",
+                     "resets_at": "2026-09-26T11:10:00.078381+00:00", "is_active": False},
+                    {"kind": "weekly_all", "percent": 33, "severity": "normal",
+                     "resets_at": "2026-09-28T05:00:00.078400+00:00", "is_active": False}],
+         "extra_usage": {"is_enabled": False}}
+
+
+def usage(five, seven):
+    """Тот же ответ с другой загрузкой окон (проценты)."""
+    u = {k: dict(v) for k, v in USAGE.items() if isinstance(v, dict)}
+    u["five_hour"]["utilization"], u["seven_day"]["utilization"] = five, seven
+    return u
+
+
+# Статус кредита claude из ручки usage (#283): те же три исхода, что у GLM.
+# HYPOTHESIS: у профиля claude нет пробы, и реестр видит логин claude.ai
+# только по провалу хода. SOLUTION: хуки probe/usage у claude.py, чистая
+# status_of над ответом usage; 403 без области user:profile (setup-token) --
+# не мёртвый кредит, а «статус неизвестен». STATUS: FIXED — see #283
+CLAUDE_STATUS = [
+    ("nothing exhausted -> active with the worst window",
+     USAGE, CredStatus("active", percent=33, detail="5h 29%, weekly 33%")),
+    ("5h window at 100 -> quota_wait until its reset",
+     usage(100, 40), CredStatus("quota_wait", resets_at=1790421000, percent=100,
+                                detail="5h window exhausted, weekly 40%")),
+    ("both exhausted -> the earliest reset",
+     usage(100, 100), CredStatus("quota_wait", resets_at=1790421000, percent=100,
+                                 detail="5h window exhausted, weekly window exhausted")),
+    ("403 without the profile scope -> active, status unknown (setup-token)",
+     {"error": "HTTP 403", "body": {"type": "error", "error": {
+         "type": "permission_error", "details": {"error_code": "oauth_scope_insufficient"}}}},
+     CredStatus("active", detail="no profile scope: status unknown")),
+    ("401 -> needs_login", {"error": "HTTP 401"}, CredStatus("needs_login", detail="HTTP 401")),
+    ("403 for another reason -> needs_login",
+     {"error": "HTTP 403", "body": {"error": {"type": "permission_error"}}},
+     CredStatus("needs_login", detail="HTTP 403")),
+    ("garbage -> needs_login, not a crash", None, CredStatus("needs_login", detail="no answer")),
+    ("answer without windows -> needs_login", {"foo": 1},
+     CredStatus("needs_login", detail="no usage windows in the answer")),
+]
+
+
 def main():
     c = Checks()
     for what, mod, want in CASES:
@@ -166,6 +214,17 @@ def main():
         except Exception as e:
             got = f"{type(e).__name__}: {e}"
         c.expect(f"glm.status_of: {what}", got, want)
+    for what, payload, want in CLAUDE_STATUS:
+        try:
+            got = claude.status_of(payload)
+        except Exception as e:
+            got = f"{type(e).__name__}: {e}"
+        c.expect(f"claude.status_of: {what}", got, want)
+    c.check("claude profile declares probe and usage",
+            callable(getattr(claude, "probe", None)) and callable(getattr(claude, "usage", None)))
+    c.expect("claude.reset_epoch: ISO with offset and microseconds -> seconds",
+             claude.reset_epoch("2026-09-26T11:10:00.078381+00:00"), 1790421000)
+    c.expect("claude.reset_epoch: garbage -> None", claude.reset_epoch("soon"), None)
     c.expect("glm.host_of strips the path off ANTHROPIC_BASE_URL",
              glm.host_of({"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"}),
              "https://api.z.ai")
