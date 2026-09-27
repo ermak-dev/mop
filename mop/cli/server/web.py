@@ -8,9 +8,17 @@ refreshed in place (docs/WEB.md):
   /api/pool    the current snapshot as JSON
   /events      the same snapshot pushed as server-sent events
   /healthz     200 once the first snapshot is in
+  /api/creds/add          post {name, profile, key, owner?}: a provider key as a credential
+  /api/creds/login/start  post {name, mode?}: start a claude login, answers {url}
+  /api/creds/login/code   post {name, code}: finish it, answers {ok, owner} or {error}
 
-Read-only by design: the page has no login, and a restart from a button
-would kill the work in a puppet's clone. Actions stay with `mop`.
+No login on the page (the LAN is trusted, operator's decision 2026-09-26;
+authorization comes later). The pool itself stays read-only here: a restart
+from a button would kill the work in a puppet's clone, and puppet actions
+stay with `mop`. The credential registry (docs/CRED.md) is the one thing the
+page writes: adding a key and driving a claude login. Secrets never come
+back: the snapshot carries names, owners and statuses only, and the journal
+never sees a key or a code.
 Port and bind address default to MOP_WEB_PORT (9000) and MOP_WEB_BIND
 (127.0.0.1): outside the server the page is reached through the TLS proxy.
 """
@@ -21,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
 from mop.common import bus, busnames, config
-from mop.server import web
+from mop.server import credreg, web
 
 PAGE = os.path.join(config.PROJECT, "web", "index.html")
 LOGO = os.path.join(config.PROJECT, "docs", "logo.png")   # фавикон и шапка
@@ -65,6 +73,50 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/events":
             return self.stream()
         self._send(404, "no such path\n", "text/plain")
+
+    # ── реестр кредитов (#285) ──
+    # Прямо в реестр на сервере, а не глаголом кластера: машинный
+    # пользователь service не пишет в rpc сервиса (#104, docs/BUS.md), а
+    # реестр -- файлы того же пользователя пула на этой же машине.
+    ROUTES = {"/api/creds/add": (web.parse_cred_add, "add"),
+              "/api/creds/login/start": (web.parse_login_start, "login_start"),
+              "/api/creds/login/code": (web.parse_login_code, "login_code")}
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        route = self.ROUTES.get(path)
+        if route is None:
+            return self._send(404, json.dumps({"error": "no such path"}))
+        parse, action = route
+        try:
+            size = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(size) or b"{}")
+        except (ValueError, TypeError):
+            return self._send(400, json.dumps({"error": "body: JSON is expected"}))
+        fields, err = parse(body)
+        if err:
+            return self._send(400, json.dumps({"error": err}, ensure_ascii=False))
+        try:
+            got = self._cred(action, fields)
+        except Exception as e:
+            # Причина -- странице, без трассы; ключ и код в тексте отказов не бывают.
+            return self._send(500, json.dumps({"error": str(e) or type(e).__name__}, ensure_ascii=False))
+        code = 400 if got.get("error") else 200
+        if code == 200:
+            COLLECTOR.event({"event": f"cred {action}", "name": fields["name"], "node": "-",
+                             "project": "-", "text": got.get("owner") or ""})
+            COLLECTOR.refresh_creds()
+        return self._send(code, json.dumps(got, ensure_ascii=False))
+
+    @staticmethod
+    def _cred(action, f):
+        if action == "add":
+            rec = credreg.add_key(f["name"], f["profile"], f["key"], owner=f["owner"])
+            return {"ok": True, "name": rec["name"], "profile": rec["profile"]}
+        if action == "login_start":
+            return {"ok": True, "url": credreg.login_start(f["name"], f["mode"])}
+        got = credreg.login_code(f["name"], f["code"])
+        return got if got.get("error") else {**got, "name": f["name"]}
 
     def stream(self):
         """SSE: снимок при подключении и на каждое изменение, пинг в тишине.
