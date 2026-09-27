@@ -54,3 +54,14 @@ test("#331 the status cell adds the reset time to the bare quota word only", () 
   // Сервер до #331 сам вписывал время: второго «до» не будет.
   expect(credStatusText("ждёт квоты до 05:00:00", at(2026, 9, 30, 2, 0), NOW, msk)).toBe("ждёт квоты до 05:00:00");
 });
+
+// Свободная память узла (#329): вниз, как `mop node` и строка пула. Узел с
+// 1536 МБ -- «1 GB»: папет резервирует 8 ГБ, и показать места больше, чем
+// есть, значит обещать то, чего планировщик не даст.
+test("#329 gbOfMb floors: never more GB than there are", () => {
+  expect(gbOfMb(1536)).toBe("1 GB");
+  expect(gbOfMb(2047)).toBe("1 GB");
+  expect(gbOfMb(2048)).toBe("2 GB");
+  expect(gbOfMb(64511)).toBe("62 GB");
+  expect(gbOfMb(null)).toBe("-");
+});
