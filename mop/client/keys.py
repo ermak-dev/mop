@@ -8,7 +8,6 @@
 шины» устарел: креды шины узлу кладёт `mop server deploy`. Молчащий агент — отказ с
 причиной; лечится он юнитом на узле, а не раздачей в обход.
 """
-import base64
 import json
 import os
 import time
@@ -17,27 +16,6 @@ from ..common import bus, config, fsutil, llm, paths, puppets
 
 # Логин claude.ai управляющей машины — то, что раздаётся на узлы.
 CREDENTIALS = os.path.expanduser("~/.claude/.credentials.json")
-
-
-def results_from(nodes, answers):
-    """Ответы агентов -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"}.
-    Чистая функция (#135): молчание агента называется молчанием, без
-    отсылки к токену Nomad и контроллеру."""
-    out = {}
-    for node in nodes:
-        got = bus.verdict(answers.get(node))
-        if got is None:
-            out[node] = "OK"
-        elif got[0] == bus.UNREACHED:
-            out[node] = f"NOT REACHED: {got[1] or 'no answer'}"
-        else:
-            out[node] = f"FAILED: {got[1][:120]}"
-    return out
-
-
-# Запись в тела pve-узла идёт секундами на тело (#136, #137): таймаут --
-# с запасом, иначе живой агент читался бы молчащим.
-WRITE_TIMEOUT = 60
 
 
 def distribute(files):
@@ -51,11 +29,11 @@ def distribute(files):
     if not nodes:
         raise RuntimeError("no ready nodes in the pool")
     try:
-        answers = bus.request_many("write", nodes, timeout=WRITE_TIMEOUT,
+        answers = bus.request_many("write", nodes, timeout=bus.WRITE_TIMEOUT,
                                    files=[list(f) for f in files])
     except bus.BusError as e:
         answers = {n: e for n in nodes}
-    return results_from(nodes, answers)
+    return bus.results_from(nodes, answers)
 
 
 def llm_keys_blob():
@@ -82,11 +60,6 @@ def llm_keys_blob():
     return fsutil.write_kv(found), note
 
 
-def _as_file(path, text_or_bytes):
-    raw = text_or_bytes.encode() if isinstance(text_or_bytes, str) else text_or_bytes
-    return (path, base64.b64encode(raw).decode())
-
-
 def push_llm_keys(profile):
     """Ключ профиля обязан лежать на узле раньше папета: без него врапер
     валится, а Nomad уводит папет в restart-backoff. Узел заранее неизвестен
@@ -102,7 +75,7 @@ def push_llm_keys(profile):
     blob, note = llm_keys_blob()
     if not blob or key not in blob:
         raise RuntimeError(f"profile {profile}: {note}")
-    return distribute([_as_file(paths.NODE_SECRETS, blob)])
+    return distribute([bus.as_file(paths.NODE_SECRETS, blob)])
 
 
 def credentials():
@@ -141,11 +114,11 @@ def push_login():
     # С MOP_HOME своей установки в пути `mop login` на чужой сервер отбивался
     # по каждому узлу.
     raw = credentials()
-    files = [_as_file(paths.CREDENTIALS, raw)]
+    files = [bus.as_file(paths.CREDENTIALS, raw)]
     what = ["claude.ai credentials"]
     blob, note = llm_keys_blob()
     if blob:
-        files.append(_as_file(paths.NODE_SECRETS, blob))
+        files.append(bus.as_file(paths.NODE_SECRETS, blob))
         what.append("node secrets (" + ", ".join(
             l.split("=")[0] for l in blob.splitlines()) + ")")
     results = distribute(files)

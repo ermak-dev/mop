@@ -41,7 +41,6 @@ if __name__ == "__main__":
     sys.exit(program.main(sys.argv[1:]))
 
 import asyncio  # noqa: E402
-import base64
 import json
 import os
 import shlex
@@ -723,7 +722,7 @@ async def v_write(_conn, req):
         full = paths.writable(HOME, path)
         if not full:
             return {"error": f"agent is not allowed to write to {path}"}
-        files.append((full, base64.b64decode(b64)))
+        files.append((full, bus.file_data(b64)))
 
     # На узел — всегда: отсюда драйвер сеет файл в каждое новое тело при
     # подъёме, и узел обязан держать свежую копию, даже когда тел сейчас нет.

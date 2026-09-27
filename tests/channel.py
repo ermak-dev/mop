@@ -223,19 +223,21 @@ def check_bus_envelope_264(c):
                         by_hand.append(f"{os.path.relpath(p, root)}:{n}")
     c.check("no envelopes built by hand", not by_hand, repr(by_hand))
 
-    # Разбор ответа узла -- одна функция на bus.failure и keys.results_from,
+    # Разбор ответа узла -- одна функция на bus.failure и bus.results_from
+    # (до #315 -- keys.results_from),
     # и тексты у обоих прежние.
     cases = {"n1": RuntimeError("down"), "n2": None, "n3": {"error": "nope"}, "n4": {"ok": 1}}
     want_keys = {"n1": "NOT REACHED: down", "n2": "NOT REACHED: no answer",
                  "n3": "FAILED: nope", "n4": "OK"}
     want_failure = {"n1": "down", "n2": "no response", "n3": "nope", "n4": None}
-    c.expect("keys.results_from unchanged", keys.results_from(list(cases), cases), want_keys)
+    c.expect("bus.results_from unchanged", bus.results_from(list(cases), cases), want_keys)
     c.expect("bus.failure unchanged", {n: bus.failure(a) for n, a in cases.items()}, want_failure)
     verdict = getattr(bus, "verdict", None)
     if c.check("bus.verdict exists: the three-way check lives in one place", verdict is not None):
-        for name in ("results_from",):
-            c.check(f"keys.{name} must classify through bus.verdict",
-                    "verdict(" in open(os.path.join(root, "mop", "client", "keys.py")).read())
+        import inspect
+        fn = getattr(bus, "results_from", None)
+        c.check("bus.results_from must classify through bus.verdict",
+                fn is not None and "verdict(" in inspect.getsource(fn))
     return c.failed == failed_before
 
 

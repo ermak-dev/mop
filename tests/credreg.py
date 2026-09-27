@@ -19,7 +19,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, Msg, patched  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mop.common import credreg  # noqa: E402
@@ -148,8 +148,95 @@ def check_foreign_mark_308(c):
              srv.distribute) = saved
 
 
+# ── #315: глагол write -- одно определение в bus ──────────────────────
+# HYPOTHESIS: разбор ответов write (OK / NOT REACHED / FAILED), кодировка
+# [путь, b64] и WRITE_TIMEOUT живут копиями в server/credreg и client/keys,
+# а distribute и turns_of обходят узлы руками вместо bus.request_many.
+# Характеристика до переезда: что уходит агенту и какие строки выходят,
+# снятая на уровне arequest -- его зовут оба пути, request и request_many.
+# SOLUTION: bus.results_from, bus.as_file/from_file, bus.WRITE_TIMEOUT;
+# distribute и turns_of -- через request_many. STATUS: FIXED — see #315
+def check_write_fanout_315(c):
+    import asyncio
+    import base64
+    import json
+    import tempfile
+    from nats.errors import NoRespondersError
+    from mop.common import bus
+    from mop.server import credreg as srv
+
+    long_error = "agent is not allowed to write to " + "x" * 200
+    sent = []
+
+    async def arequest(_nc, subj, data, timeout):
+        body = json.loads(data)
+        sent.append((subj, body, timeout))
+        node = next(n for n in ("n1", "n2", "n3", "n4") if subj.split(".").count(n))
+        if body["verb"] == "write":
+            if node == "n1":
+                return Msg(body={"written": ["x"]})
+            if node == "n2":
+                return Msg(body={"error": long_error})
+            if node == "n3":
+                raise asyncio.TimeoutError()
+            raise NoRespondersError()
+        if node == "n1":
+            return Msg(body={"puppets": {
+                "pu-a-1": {"state": {"turn": {"cred": "anton", "at": NOW}}},
+                "pu-a-2": {"state": {"turn": "not a dict"}},
+                "pu-x-9": {"state": {}}}})
+        if node == "n2":
+            return Msg(body={"error": "no such verb"})
+        raise asyncio.TimeoutError()
+
+    files = [("a/b.json", b"{}"), ("c/d", b"key\n")]
+    with tempfile.TemporaryDirectory() as tmp, \
+            patched(bus, connect=lambda *a, **k: object(), arequest=arequest), \
+            patched(srv, ROOT=tmp, materialize=lambda name, rec=None: files,
+                    holders=lambda api=None: {"anton": {"pu-a-1": "n1", "pu-a-2": "n2",
+                                                        "pu-a-3": "n3", "pu-a-4": "n4",
+                                                        "pu-a-5": None, "pu-a-6": "n1"}}):
+        srv.save(credreg.record("anton", "glm", "key", now=NOW - 100))
+        got = srv.distribute("anton", now=NOW)
+        c.expect("#315 distribute: OK, FAILED (cut at 120), NOT REACHED on silence",
+                 {n: got.get(n) for n in ("n1", "n2", "n3")},
+                 {"n1": "OK", "n2": "FAILED: " + long_error[:120],
+                  "n3": "NOT REACHED: node agent n3 did not answer in 60s"})
+        c.check("#315 distribute: no responders -> NOT REACHED naming the node",
+                str(got.get("n4")).startswith("NOT REACHED: node agent n4 is not subscribed"),
+                got.get("n4"))
+        c.expect("#315 distribute: one answer per holding node", sorted(got), ["n1", "n2", "n3", "n4"])
+        writes = [(s, b, t) for s, b, t in sent if b["verb"] == "write"]
+        c.expect("#315 distribute: every node asked once, admin project, WRITE_TIMEOUT",
+                 sorted((s, t) for s, _, t in writes),
+                 sorted((bus.subject(n, "rpc", bus.ADMIN), 60) for n in ("n1", "n2", "n3", "n4")))
+        c.expect("#315 distribute: files go as [path, b64]",
+                 [b["files"] for _, b, _ in writes][0],
+                 [[p, base64.b64encode(d).decode()] for p, d in files])
+        c.expect("#315 distribute: the push is stamped in the record",
+                 (srv.load("anton").get("pushed") or {}).get("nodes"), got)
+
+        sent.clear()
+        got = srv.turns_of({"pu-a-1": "n1", "pu-a-6": "n1", "pu-a-2": "n2",
+                            "pu-a-3": "n3", "pu-a-5": None})
+        c.expect("#315 turns_of: only dict turns, silent and failing nodes skipped",
+                 got, {"pu-a-1": {"cred": "anton", "at": NOW}})
+        c.expect("#315 turns_of: each node asked once for its own puppets",
+                 sorted((s, b["verb"], b.get("names"), t) for s, b, t in sent),
+                 sorted([(bus.subject("n1", "rpc", bus.ADMIN), "states", ["pu-a-1", "pu-a-6"], 20),
+                         (bus.subject("n2", "rpc", bus.ADMIN), "states", ["pu-a-2"], 20),
+                         (bus.subject("n3", "rpc", bus.ADMIN), "states", ["pu-a-3"], 20)]))
+
+    with patched(srv, holders=lambda api=None: {}, materialize=lambda name, rec=None: files), \
+            tempfile.TemporaryDirectory() as tmp, patched(srv, ROOT=tmp):
+        srv.save(credreg.record("anton", "glm", "key", now=NOW - 100))
+        c.expect("#315 distribute: no holders -> {} and nothing stamped",
+                 (srv.distribute("anton", now=NOW), srv.load("anton").get("pushed")), ({}, None))
+
+
 def main():
     c = Checks()
+    check_write_fanout_315(c)
     check_login_start_registry_295(c)
     check_foreign_mark_308(c)
 

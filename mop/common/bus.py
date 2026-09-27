@@ -46,6 +46,7 @@ LookupError и не доезжали никуда.
 проверенным ни в одном.
 """
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -606,7 +607,8 @@ def verdict(answer):
     """Ответ узла из request_many -> (UNREACHED, причина | None) -- до агента
     не доехали или он промолчал, (FAILED, причина) -- агент отказал полем
     error, None -- ответ есть. Одна тройная проверка на всех: её держали
-    bus.failure и keys.results_from каждый у себя (#264)."""
+    bus.failure и keys.results_from (ныне bus.results_from) каждый у себя
+    (#264)."""
     if isinstance(answer, Exception):
         return UNREACHED, str(answer)
     if answer is None:
@@ -614,6 +616,40 @@ def verdict(answer):
     if answer.get("error"):
         return FAILED, str(answer["error"])
     return None
+
+
+def results_from(nodes, answers):
+    """Ответы агентов на `write` -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"}.
+    Чистая функция (#135): молчание агента называется молчанием, без
+    отсылки к токену Nomad и контроллеру. Одна на клиента и сервер (#315):
+    копии держали client/keys.py и server/credreg.py."""
+    out = {}
+    for node in nodes:
+        got = verdict(answers.get(node))
+        if got is None:
+            out[node] = "OK"
+        elif got[0] == UNREACHED:
+            out[node] = f"NOT REACHED: {got[1] or 'no answer'}"
+        else:
+            out[node] = f"FAILED: {got[1][:120]}"
+    return out
+
+
+# Запись в тела pve-узла идёт секундами на тело (#136, #137): таймаут --
+# с запасом, иначе живой агент читался бы молчащим.
+WRITE_TIMEOUT = 60
+
+
+def as_file(path, text_or_bytes):
+    """Файл для глагола `write`: (путь, содержимое в base64 строкой) -- JSON
+    байтов не везёт. Обратная сторона -- file_data у агента (#315)."""
+    raw = text_or_bytes.encode() if isinstance(text_or_bytes, str) else text_or_bytes
+    return (path, base64.b64encode(raw).decode())
+
+
+def file_data(b64):
+    """Содержимое файла из глагола `write` -> байты (пара к as_file)."""
+    return base64.b64decode(b64)
 
 
 def failure(answer):
