@@ -205,10 +205,8 @@ def operator(directory):
     None — не отказ: пока установка не перевела операторов на собственные
     имена, рядом живёт прежний путь (пароль роли `master-<проект>`), и пустой
     файл означает просто «этот путь не выбран»."""
-    try:
-        with open(os.path.join(directory, OPERATOR_FILE)) as f:
-            got = json.load(f)
-    except (OSError, ValueError):
+    got = fsutil.read_json(os.path.join(directory, OPERATOR_FILE))
+    if got is None:
         return None
     if not got.get("user") or not got.get("password"):
         return None

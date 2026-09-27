@@ -7,6 +7,7 @@
 Только STDLIB, без импортов из пакета: этим пользуются и config (которого
 импортирует всё остальное), и агент на узле.
 """
+import json
 import os
 import secrets
 
@@ -94,6 +95,16 @@ def read_kv(text, raw=False):
         else:
             out[k.strip()] = v.strip().strip('"').strip("'")
     return out
+
+
+def read_json(path, default=None):
+    """JSON файла либо default: файла нет, не читается или не JSON (#317).
+    Форму (словарь, нужные ключи) проверяет вызывающий -- у каждого своя."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
 
 
 def write_kv(values):

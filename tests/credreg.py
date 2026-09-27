@@ -22,7 +22,7 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 from _lib import Checks, Msg, patched  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-from mop.common import credreg  # noqa: E402
+from mop.common import credreg, fsutil  # noqa: E402
 from mop.common.domain import CredStatus  # noqa: E402
 
 NOW = 1_790_500_000
@@ -234,11 +234,143 @@ def check_write_fanout_315(c):
                  (srv.distribute("anton", now=NOW), srv.load("anton").get("pushed")), ({}, None))
 
 
+# ── #317: знание о кредитах -- в common, одним местом ─────────────────
+# HYPOTHESIS (DRY после #262): путь файла кредов claude записан тремя
+# написаниями (paths.CREDENTIALS, keys.CREDENTIALS, credlogin.credentials_path),
+# его схема (claudeAiOauth/accessToken/expiresAt в мс) -- в common/credreg,
+# server/credreg и keys; каталог реестра "creds" -- строкой в двух местах;
+# правило слова статуса (не проверялся, needs_login с подробностью) -- в
+# credreg.row и web.cred_status_word; возраст -- дважды; «годен = активен,
+# равные по имени» -- в credreg.pick и tiers._alive; «логинится только
+# claude» -- в трёх; «прочесть JSON или умолчание» -- в семи.
+# SOLUTION: common держит одно место на каждое: paths.CREDS, помощники
+# файла кредов в common/credreg, status_word с таблицей слов параметром,
+# age, usable, LOGIN_PROFILE, fsutil.read_json; вызывающие только
+# переключаются. Первая половина проверки -- характеристика: выходы те же
+# до и после. STATUS: FIXED — see #317
+def check_creds_knowledge_317(c):
+    import json
+    import tempfile
+    from mop.common import creds, fsutil, landing, paths, projects, tiers
+    from mop.common.domain import CredStatus
+    from mop.client import keys
+    from mop.server import credlogin, credreg as srv, web
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+    # ── характеристика: выходы до и после одни ──
+    sts = {"never": None, "active": {"kind": "active"},
+           "quota": {"kind": "quota_wait", "resets_at": NOW + 7200},
+           "login": {"kind": "needs_login"},
+           "login+": {"kind": "needs_login", "detail": "token expired"},
+           "odd": {"kind": "weird"}}
+    c.expect("#317 list: status words as before",
+             {k: credreg.row({"name": "x", "status": v, "added_at": NOW - 90000}, NOW)[4]
+              for k, v in sts.items()},
+             {"never": "unknown", "active": "active", "quota": "quota wait",
+              "login": "needs login", "login+": "needs login: token expired", "odd": "weird"})
+    c.expect("#317 page: status words as before",
+             {k: web.cred_status_word(v) for k, v in sts.items()},
+             {"never": "не проверялся", "active": "активен",
+              "quota": f"ждёт квоты до {web.human_time(NOW + 7200)}",
+              "login": "ждёт ручной авторизации",
+              "login+": "ждёт ручной авторизации: token expired", "odd": "weird"})
+    for added, want in ((NOW - 90000, "1d"), (NOW - 120, "2m"), (0, "0m"), (None, "0m")):
+        rec = {"name": "x", "status": None, "added_at": added}
+        c.expect(f"#317 age of added_at={added}: list and page agree",
+                 (credreg.row(rec, NOW)[7], web.cred_rows([rec], NOW)[0]["age"]), (want, want))
+    recs = [credreg.merge_status(credreg.record(n, p, "key", now=NOW), CredStatus(k), NOW)
+            for n, p, k in (("b", "glm", "active"), ("a", "glm", "active"),
+                            ("c", "glm", "needs_login"), ("d", "claude", "active"))]
+    recs.append(credreg.record("e", "glm", "key", now=NOW))
+    pairs = {r["name"]: (r["profile"], credreg.status_of(r) or CredStatus("needs_login"))
+             for r in recs}
+    c.expect("#317 usable: pick and tiers agree -- active, by name",
+             (credreg.pick("glm", recs), tiers._alive(pairs, "glm"),
+              credreg.pick("zai", recs)), ("a", ["a", "b"], None))
+    c.expect("#317 the secrets line (fsutil.write_kv) as before",
+             fsutil.write_kv({"Z_AI_KEY": "k1"}), "Z_AI_KEY=k1\n")
+    home = os.path.expanduser("~")
+    c.expect("#317 the credentials file: one path in every spelling",
+             {keys.CREDENTIALS, os.path.join(home, paths.CREDENTIALS),
+              credreg.credentials_file(home)},
+             {os.path.join(home, ".claude", ".credentials.json")})
+    with tempfile.TemporaryDirectory() as d:
+        missing, bad, listed = (os.path.join(d, n) for n in ("missing", "bad", "list"))
+        open(bad, "w").write("{not json")
+        open(listed, "w").write("[1, 2]")
+        c.expect("#317 landing.read: missing, broken, not a dict -> no tokens",
+                 [landing.read(p) for p in (missing, bad, listed)], [{}, {}, {}])
+        lim = os.path.join(d, "limits")
+        open(lim, "w").write('{"a": "x"}')
+        c.expect("#317 read_limits: missing, broken, bad value -> no limits",
+                 [projects.read_limits(p) for p in (missing, bad, lim)], [{}, {}, {}])
+        c.expect("#317 operator creds: none in an empty directory",
+                 creds.operator(d), None)
+        keep_root, keep_cred = srv.ROOT, keys.CREDENTIALS
+        try:
+            srv.ROOT = d
+            os.makedirs(os.path.join(d, "x"))
+            open(os.path.join(d, "x", srv.RECORD), "w").write('{"name": "y"}')
+            c.expect("#317 server load: missing, foreign name -> None",
+                     (srv.load("nope"), srv.load("x")), (None, None))
+            c.expect("#317 server credentials: no file -> {}", srv.credentials("x"), {})
+            keys.CREDENTIALS = os.path.join(d, "cred.json")
+            got = [keys.credentials_fresh()]
+            for body in ("{bad", json.dumps({"claudeAiOauth": {"expiresAt": 1000}}),
+                         json.dumps({"claudeAiOauth": {"expiresAt": (NOW + 10**6) * 1000}})):
+                open(keys.CREDENTIALS, "w").write(body)
+                got.append(keys.credentials_fresh())
+            c.expect("#317 credentials_fresh: missing, broken, expired, fresh",
+                     got, [False, False, False, True])
+        finally:
+            srv.ROOT, keys.CREDENTIALS = keep_root, keep_cred
+
+    # ── одно место на каждое знание ──
+    for mod, name in ((paths, "CREDS"), (credreg, "credentials_file"),
+                      (credreg, "access_token"), (credreg, "is_login_file"),
+                      (credreg, "status_word"), (credreg, "age"), (credreg, "usable"),
+                      (credreg, "LOGIN_PROFILE"), (fsutil, "read_json")):
+        c.check(f"#317 one place: {mod.__name__}.{name}", hasattr(mod, name))
+
+    import inspect
+    import re as re_
+
+    def text(rel):
+        return open(os.path.join(root, rel)).read()
+    # Путь -- строковый литерал, который сам путь к файлу кредов (проза в
+    # докстрингах и тексте отказа -- не путь).
+    path_literal = re_.compile(r"""["'][^"'\s]*(\.credentials\.json|\.claude)["']""")
+    for rel in ("mop/client/keys.py", "mop/server/credlogin.py", "mop/server/credreg.py"):
+        c.check(f"#317 {rel} spells no credentials path", not path_literal.search(text(rel)),
+                path_literal.findall(text(rel)))
+    for rel in ("mop/client/keys.py", "mop/server/credreg.py"):
+        c.check(f"#317 {rel} knows no credentials schema",
+                '"claudeAiOauth"' not in text(rel) and '"expiresAt"' not in text(rel)
+                and '"accessToken"' not in text(rel))
+    for rel in ("mop/server/credreg.py", "mop/cli/cred/login.py"):
+        c.check(f'#317 {rel} spells no "creds" directory', 'local("creds"' not in text(rel))
+    for rel in ("mop/server/credreg.py", "mop/client/keys.py"):
+        c.check(f'#317 {rel} spells no login profile', 'profile="claude"' not in text(rel)
+                and 'credreg.record(name, "claude"' not in text(rel))
+    for fn in (srv.load, srv.credentials, credlogin.prepare_home, landing.read, creds.operator,
+               keys.credentials_fresh, projects.read_limits):
+        src = inspect.getsource(fn)
+        c.check(f"#317 {fn.__module__}.{fn.__name__} reads JSON through fsutil.read_json",
+                "read_json(" in src and "json.load(" not in src)
+    c.check("#317 web and tiers use the shared rules",
+            "credrows.age(" in text("mop/server/web.py")
+            and "status_word(" in text("mop/server/web.py")
+            and "usable(" in text("mop/common/tiers.py")
+            and "secrets_line" not in text("mop/server/credreg.py")
+            and not hasattr(credreg, "secrets_line"))
+
+
 def main():
     c = Checks()
     check_write_fanout_315(c)
     check_login_start_registry_295(c)
     check_foreign_mark_308(c)
+    check_creds_knowledge_317(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
     rec = credreg.record("anton", "claude", "login", owner="anton@example.dev", now=NOW)
@@ -338,7 +470,8 @@ def main():
              {"claudeAiOauth": {"accessToken": "sk-ant-oat-x", "expiresAt": 1790425418306,
                                 "scopes": ["user:inference"], "subscriptionType": "max"}})
     c.check("without_refresh: the input is untouched", "refreshToken" in full["claudeAiOauth"])
-    c.expect("secrets_line", credreg.secrets_line("Z_AI_KEY", "abc"), "Z_AI_KEY=abc\n")
+    c.expect("secrets line (fsutil.write_kv, #317)", fsutil.write_kv({"Z_AI_KEY": "abc"}),
+             "Z_AI_KEY=abc\n")
 
     c.expect("reset_time_of: the rate_limit text (UTC assumed)", credreg.reset_time_of(
         "API Error: Request rejected (429) · Usage limit reached for 5 hour. "

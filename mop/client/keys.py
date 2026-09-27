@@ -12,10 +12,10 @@ import json
 import os
 import time
 
-from ..common import bus, config, fsutil, llm, paths, puppets
+from ..common import bus, config, credreg, fsutil, llm, paths, puppets
 
 # Логин claude.ai управляющей машины — то, что раздаётся на узлы.
-CREDENTIALS = os.path.expanduser("~/.claude/.credentials.json")
+CREDENTIALS = credreg.credentials_file(os.path.expanduser("~"))
 
 
 def distribute(files):
@@ -93,12 +93,8 @@ def credentials():
 
 def credentials_fresh():
     """Годятся ли локальные креды: валидный JSON, expiresAt в будущем."""
-    try:
-        with open(CREDENTIALS) as f:
-            c = json.load(f)
-        return ((c.get("claudeAiOauth") or {}).get("expiresAt") or 0) / 1000 > time.time()
-    except Exception:
-        return False
+    exp = credreg.expires_at(fsutil.read_json(CREDENTIALS))
+    return exp is not None and exp > time.time()
 
 
 def push_login():
@@ -139,7 +135,8 @@ def register_login(raw):
     if not name:
         return "registry: no bus login, the credential was not registered"
     try:
-        got = bus.call_cluster("cred_add", project=bus.ADMIN, name=name, profile="claude",
+        got = bus.call_cluster("cred_add", project=bus.ADMIN, name=name,
+                               profile=credreg.LOGIN_PROFILE,
                                credentials=raw.decode() if isinstance(raw, bytes) else raw)
     except (bus.BusError, bus.Refused) as e:
         return f"registry: not registered — {str(e)[:120]}"

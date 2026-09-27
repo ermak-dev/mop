@@ -27,6 +27,7 @@ from _lib import Checks, patched, run_command  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import credlogin  # noqa: E402
+from mop.common import credreg  # noqa: E402
 
 URL = ("https://claude.com/cai/oauth/authorize?code=true"
        "&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code"
@@ -87,7 +88,8 @@ def main():
             c.check(f"prepare_home: {k}", flags.get(k) is True, flags)
         credlogin.prepare_home(home)          # повторно -- без потери своего
         c.check("prepare_home is idempotent", os.path.exists(os.path.join(home, ".claude.json")))
-        c.expect("credentials_path", credlogin.credentials_path(home),
+        # Путь файла кредов -- одно место, common/credreg (#317).
+        c.expect("credentials_file", credreg.credentials_file(home),
                  os.path.join(home, ".claude", ".credentials.json"))
 
     # Итог `claude auth status --json` -> строка для человека, без секретов.
