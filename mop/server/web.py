@@ -17,6 +17,7 @@ inode, расход токенов — разбор транскриптов в 
 Модуль возвращает данные и ничего не печатает; HTTP живёт в bin/web.
 """
 import dataclasses
+import os
 import threading
 import time
 from datetime import datetime
@@ -129,6 +130,42 @@ def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at, cred
             "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "per_user": per_user,
             "journal": journal, "errors": errors, "creds": list(creds)}
+
+
+# ─── собранное приложение (#297) ─────────────────────────────────────────
+# Страница -- React-приложение, собранное Vite в web/dist и закоммиченное:
+# на серверах node нет, а rumop раскатывается с сервера вручную. Сервис
+# отдаёт index.html и файлы под assets/ с именами, в которых хеш содержимого,
+# поэтому ассеты кэшируются на год, а индекс -- никогда (он и называет
+# свежие хеши). Из каталога отдаётся ровно одно плоское имя: ни подкаталогов,
+# ни `..`, ни скрытых файлов -- обход каталога здесь невозможен по построению.
+ASSETS = "/assets/"
+CONTENT_TYPES = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+                 ".svg": "image/svg+xml", ".woff2": "font/woff2", ".woff": "font/woff",
+                 ".png": "image/png", ".map": "application/json",
+                 ".json": "application/json; charset=utf-8", ".ico": "image/x-icon"}
+
+
+def asset_path(url, root):
+    """Путь файла ассета под root по пути запроса, либо None: только
+    /assets/<имя> с одним плоским именем без точки в начале и без слешей."""
+    if not url.startswith(ASSETS):
+        return None
+    name = url[len(ASSETS):]
+    if not name or "/" in name or "\\" in name or "%" in name or name.startswith(".") \
+            or name in (".", ".."):
+        return None
+    return os.path.join(root, "assets", name)
+
+
+def content_type(name):
+    """Тип по расширению; незнакомое -- поток байтов."""
+    return CONTENT_TYPES.get(os.path.splitext(name)[1].lower(), "application/octet-stream")
+
+
+def cache_control(url):
+    """Ассеты с хешем в имени -- на год, всё остальное (индекс) -- не кэшировать."""
+    return "public, max-age=31536000, immutable" if url.startswith(ASSETS) else "no-cache"
 
 
 # ─── реестр кредитов на странице (#285) ──────────────────────────────────

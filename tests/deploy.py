@@ -133,7 +133,9 @@ UNITS = {"mop-bootstrap": "bootstrap", "mop-cluster": "cluster", "mop-web": "web
          # auth callout (#206): часть шины, ставит роль bus.
          "mop-callout": "bus"}
 # Исключения синка пакета до #157, во всех четырёх копиях одни и те же.
-EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml"]
+# web/node_modules -- тулчейн разработчика (#297): на серверы и в тела едет
+# только собранный web/dist.
+EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml", "web/node_modules"]
 # Что #176 добавляет в юнит mop-cluster: всё это сервис читает, а юнит не
 # передавал. Порт и DC Nomad -- из тикета; объём, потолок, посев и PATH папета
 # нашла проверка ниже (их читает mop/server/spec.py, а спецификацию теперь собирает

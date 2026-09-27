@@ -85,12 +85,35 @@ test:py3.13:
   variables:
     PYTHON_IMAGE: python:3.13-slim
 
+# Дашборд (#297): собранный web/dist лежит в репозитории, потому что на
+# серверах node нет и rumop раскатывается с сервера вручную. Задача собирает
+# приложение заново и сравнивает с закоммиченным байт в байт: разошедшийся с
+# исходниками dist -- красное, а не молчание. Образ node несёт python3 (для
+# диспетчера mop) и npm; кэш npm -- том docker, как кэш pip у проверок.
+web:dist:
+  stage: test
+  tags: [docker]
+  variables:
+    NODE_IMAGE: node:22-bookworm
+    CHECK:
+      value: bin/mop dev web build --check
+      expand: false
+  script:
+    - >-
+      docker run --rm
+      -v "$CI_PROJECT_DIR:/io" -w /io
+      -v mop-ci-npm:/root/.npm
+      -e CHECK
+      "$NODE_IMAGE" bash -euc "$CHECK"
+  after_script:
+    - docker run --rm -v "$CI_PROJECT_DIR:/io" alpine chown -R "$(id -u):$(id -g)" /io
+
 deploy:mop:
   stage: deploy
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $MOP_DEPLOY_TARGET
   tags: [docker]
-  needs: [test:py3.12, test:py3.13]
+  needs: [test:py3.12, test:py3.13, web:dist]
   # Одна выкладка за раз: два master'а подряд не раскатываются внахлёст.
   resource_group: mop-deploy
   variables:
