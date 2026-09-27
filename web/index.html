@@ -64,6 +64,15 @@
   .free .dot { background: var(--free); } .busy .dot { background: var(--busy); }
   .sick .dot { background: var(--sick); } .silent .dot { background: var(--silent); }
   .empty { color: var(--mute); padding: 6px 0; }
+  .forms { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 10px; }
+  .cred-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .cred-form b { width: 100%; font-weight: 500; color: var(--mute); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+  .cred-form input { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--ink); min-width: 160px; }
+  .cred-form button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--line); color: var(--ink); cursor: pointer; }
+  .cred-form .note { font-size: 13px; }
+  .cred-form .note.good { color: var(--free); }
+  .cred-form .note.bad { color: var(--sick); }
+  #cred-login-step { width: 100%; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .bars { display: grid; grid-template-columns: max-content 1fr max-content; gap: 3px 10px; align-items: center; }
   .bars .d { color: var(--mute); font-variant-numeric: tabular-nums; font-size: 12px; }
   .bars .b { height: 12px; background: var(--bar-dim); border-radius: 3px; overflow: hidden; }
@@ -105,12 +114,40 @@
     </section>
   </div>
 
+  <section>
+    <h2>Кредиты <small id="creds-note">авторизации у провайдеров LLM; реестр на сервере, секреты страница не видит</small></h2>
+    <div id="creds"></div>
+    <div class="forms">
+      <form id="cred-add" class="cred-form" autocomplete="off">
+        <b>Добавить ключ</b>
+        <input name="name" placeholder="имя (латиница, цифры, .-_)" required>
+        <input name="profile" placeholder="профиль, например glm" required list="cred-profiles">
+        <datalist id="cred-profiles"></datalist>
+        <input name="key" type="password" placeholder="ключ API" required>
+        <input name="owner" placeholder="владелец (почта), необязательно">
+        <button type="submit">Добавить</button>
+        <span class="note" id="cred-add-note"></span>
+      </form>
+      <form id="cred-login" class="cred-form" autocomplete="off">
+        <b>Войти в claude</b>
+        <input name="name" placeholder="имя кредита" required>
+        <button type="submit">Получить ссылку</button>
+        <span class="note" id="cred-login-note"></span>
+        <div id="cred-login-step" hidden>
+          <a id="cred-login-url" target="_blank" rel="noopener">открыть страницу входа</a>
+          <input name="code" placeholder="код со страницы">
+          <button type="button" id="cred-login-send">Отправить код</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
   <section class="journal">
     <h2>Журнал <small>события шины, новые сверху</small></h2>
     <div id="journal"></div>
   </section>
 
-  <footer>только чтение · действия остаются в <code>mop</code> · <a href="/api/pool">JSON</a></footer>
+  <footer>без входа, LAN доверенная · действия над папетами остаются в <code>mop</code> · <a href="/api/pool">JSON</a></footer>
 </main>
 
 <script>
@@ -175,11 +212,59 @@
             human(p.cache_write), human(p.cache_read), human(p.total)]})))
       : '<div class="empty">расход по пользователям появится после первого разбора транскриптов</div>';
 
+    const cr = s.creds || [];
+    $("creds").innerHTML = cr.length
+      ? table(["имя", "провайдер", "вид", "владелец", "статус", "#использовано", "возраст"],
+          cr.map(k => ({kind: /авторизации/.test(k.status) ? "sick" : /квоты/.test(k.status) ? "busy" : /активен/.test(k.status) ? "free" : "",
+            cells: [k.name, k.profile, k.kind, k.owner || "-", {html: esc(k.status), cls: "state"},
+              k.percent == null ? "-" : k.percent + "%", k.age]})),
+          (r) => r.kind)
+      : '<div class="empty">кредитов нет — добавьте ключ или войдите в claude</div>';
+    $("cred-profiles").innerHTML = [...new Set(cr.map(k => k.profile))].map(p => `<option value="${esc(p)}">`).join("");
+
     const j = (s.journal || []).slice().reverse();
     $("journal").innerHTML = j.length
       ? `<ul>${j.map(e => `<li><span class="t">${hhmm(e.at)}</span><span class="e">${esc(e.event)}</span>${esc(e.name)} <span class="t">на ${esc(e.node)}, проект ${esc(e.project)}</span> ${esc(e.text)}</li>`).join("")}</ul>`
       : '<div class="empty">событий пока нет — агенты пишут send, idle, type, wipe и свой запуск</div>';
   }
+
+  // Формы реестра (#285): JSON на POST, ответ в строку рядом. Ключ и код
+  // уходят только в запрос; страница их не хранит.
+  const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})
+    .then(r => r.json().then(j => ({ok: r.ok && !j.error, ...j})))
+    .catch(() => ({ok: false, error: "сервер не ответил"}));
+  const say = (id, msg, bad) => { const el = $(id); el.textContent = msg; el.className = "note " + (bad ? "bad" : "good"); };
+  const fields = (form) => Object.fromEntries(new FormData(form).entries());
+
+  $("cred-add").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = fields(e.target);
+    say("cred-add-note", "…");
+    post("/api/creds/add", f).then(r => {
+      if (r.ok) { say("cred-add-note", `добавлен ${r.name} (${r.profile})`); e.target.reset(); }
+      else say("cred-add-note", r.error || "отказ", true);
+    });
+  });
+  $("cred-login").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = fields(e.target);
+    say("cred-login-note", "…");
+    $("cred-login-step").hidden = true;
+    post("/api/creds/login/start", {name: f.name}).then(r => {
+      if (!r.ok) return say("cred-login-note", r.error || "отказ", true);
+      $("cred-login-url").href = r.url;
+      $("cred-login-step").hidden = false;
+      say("cred-login-note", "откройте ссылку, войдите, вставьте код");
+    });
+  });
+  $("cred-login-send").addEventListener("click", () => {
+    const form = $("cred-login"), f = fields(form);
+    say("cred-login-note", "…");
+    post("/api/creds/login/code", {name: f.name, code: f.code}).then(r => {
+      if (r.ok) { say("cred-login-note", r.owner ? `вошёл как ${r.owner}` : "вошёл"); form.reset(); $("cred-login-step").hidden = true; }
+      else say("cred-login-note", r.error || "отказ", true);
+    });
+  });
 
   // SSE, а при обрыве — опрос: EventSource сам переподключается, но пока
   // сервер лежит, страница обязана хоть что-то показывать.

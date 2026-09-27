@@ -35,7 +35,11 @@ NODE_ENV = "node.env"                        # что узел знает о с�
 # своей установки.
 CREDENTIALS = ".claude/.credentials.json"    # логин claude.ai
 NODE_SECRETS = f"{DIR}/{SECRETS_ENV}"        # ключи LLM
-WRITABLE = (CREDENTIALS, NODE_SECRETS)
+# Метка кредита (#284): имя кредита, которым работает тело. Рядом с записями
+# ходов (session.py: stdlib, без импорта отсюда), а не в .config/mop.
+STATE = ".local/state/mop"
+CRED_MARK = f"{STATE}/cred"
+WRITABLE = (CREDENTIALS, NODE_SECRETS, CRED_MARK)
 
 
 def local(*parts):

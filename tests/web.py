@@ -134,8 +134,9 @@ def check_snapshot(c):
                         usage=[], per_puppet=[], per_user=[], journal=[], errors=["bus: down"],
                         at=1_000_000.0)
     # per_user -- расход по людям (#245).
+    # creds -- реестр кредитов (#285).
     want = {"at", "projects", "counts", "nodes", "usage", "per_puppet", "per_user",
-            "journal", "errors"}
+            "journal", "errors", "creds"}
     c.check("snapshot keys", not (set(snap) != want), sorted(set(snap) ^ want))
     c.check("snapshot body",
             not (snap["counts"]["puppets"] != 5 or snap["errors"] != ["bus: down"]),
@@ -206,10 +207,75 @@ def check_sick_in_project_210(c):
              ["sick", "busy"])
 
 
+# ── реестр кредитов на странице (#285) ──────────────────────────────────
+# Секция «Кредиты» без входа (решение оператора 26.09: LAN доверенная).
+# HYPOTHESIS: снимок не несёт реестра, у страницы нет строк кредитов и
+# нет разбора тел POST-запросов -- ключ мог бы уехать в снимок или в журнал.
+# SOLUTION: web.cred_rows -- строки без секретов со статусом по-русски и
+# временем сброса; ключ `creds` в снимке; чистые разборы parse_cred_add,
+# parse_login_start, parse_login_code. STATUS: FIXED — see #285
+CREDS = [
+    {"name": "anton", "profile": "claude", "kind": "login", "owner": "a@x.dev",
+     "added_at": 1_000_000 - 7200, "key": "sk-ant-secret",
+     "status": {"kind": "active", "resets_at": None, "percent": 46,
+                "detail": "5h 26%, weekly 46%", "probed_at": 1_000_000}},
+    {"name": "team", "profile": "glm", "kind": "key", "owner": "",
+     "added_at": 1_000_000 - 3 * 86400,
+     "status": {"kind": "quota_wait", "resets_at": 1_000_000 + 1800, "percent": 100,
+                "detail": "5h 100%", "probed_at": 1_000_000}},
+    {"name": "old", "profile": "claude", "kind": "token", "owner": "b@x.dev",
+     "added_at": 1_000_000 - 60,
+     "status": {"kind": "needs_login", "resets_at": None, "percent": None,
+                "detail": "HTTP 401", "probed_at": 1_000_000}},
+    {"name": "fresh", "profile": "claude", "kind": "login", "owner": "",
+     "added_at": 1_000_000, "status": None},
+]
+
+
+def check_creds_285(c):
+    rows = web.cred_rows(CREDS, now=1_000_000)
+    c.expect("#285 cred names", [r["name"] for r in rows], ["anton", "team", "old", "fresh"])
+    c.expect("#285 status words", [r["status"] for r in rows],
+             ["активен", "ждёт квоты до " + web.human_time(1_000_000 + 1800),
+              "ждёт ручной авторизации: HTTP 401", "не проверялся"])
+    c.expect("#285 percent and age", [(r["percent"], r["age"]) for r in rows],
+             [(46, "2h"), (100, "3d"), (None, "1m"), (None, "0m")])
+    c.check("#285 no secret reaches the page",
+            not any(k in r for r in rows for k in ("key", "token", "secret", "detail_raw")),
+            rows)
+    c.expect("#285 columns", sorted(rows[0]),
+             sorted(["name", "profile", "kind", "owner", "status", "resets_at", "percent", "age"]))
+    snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=[], journal=[],
+                        errors=[], at=1.0, creds=rows)
+    c.expect("#285 snapshot carries creds", snap.get("creds"), rows)
+
+    ok, err = web.parse_cred_add({"name": "team2", "profile": "glm", "key": "k", "owner": "x"})
+    c.expect("#285 parse_cred_add", (ok, err),
+             ({"name": "team2", "profile": "glm", "key": "k", "owner": "x"}, None))
+    for body, why in [({"profile": "glm", "key": "k"}, "name"),
+                      ({"name": "bad name", "profile": "glm", "key": "k"}, "name"),
+                      ({"name": "t", "key": "k"}, "profile"),
+                      ({"name": "t", "profile": "glm"}, "key"),
+                      ("not a dict", "body")]:
+        ok, err = web.parse_cred_add(body)
+        c.check(f"#285 parse_cred_add refuses {why}", ok is None and why in (err or ""), (ok, err))
+    c.expect("#285 parse_login_start", web.parse_login_start({"name": "anton"}),
+             ({"name": "anton", "mode": "login"}, None))
+    c.expect("#285 parse_login_start setup-token", web.parse_login_start({"name": "a", "mode": "setup-token"}),
+             ({"name": "a", "mode": "setup-token"}, None))
+    c.check("#285 parse_login_start refuses a strange mode",
+            web.parse_login_start({"name": "a", "mode": "x"})[0] is None)
+    c.expect("#285 parse_login_code", web.parse_login_code({"name": "a", "code": " c#s "}),
+             ({"name": "a", "code": "c#s"}, None))
+    c.check("#285 parse_login_code refuses an empty code",
+            web.parse_login_code({"name": "a", "code": " "})[0] is None)
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
-               check_snapshot, check_sick_in_project_210, check_by_user_245):
+               check_snapshot, check_sick_in_project_210, check_by_user_245,
+               check_creds_285):
         fn(c)
     return c.report("web")
 

@@ -22,6 +22,23 @@ def workspace_text(origin):
         except FileNotFoundError:
             return ""
     return manifest.fetch(origin)["bootstrap_text"] or ""
+def parse_value(args, flag):
+    """Выкусить `flag VALUE` (или `flag=VALUE`) откуда угодно в аргументах
+    -> (значение | None, остальные). Тот же разбор, что у --llm (#284)."""
+    value, rest, it = None, [], iter(args)
+    for a in it:
+        if a == flag:
+            value = next(it, "")
+            if value.startswith("-"):
+                rest.append(value)
+                value = ""
+        elif a.startswith(flag + "="):
+            value = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+    return (value or None), rest
+
+
 def parse_llm(args):
     """Выкусить --llm PROFILE (или --llm=PROFILE) откуда угодно в аргументах.
     -> (профиль | None, остальные аргументы)."""

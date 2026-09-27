@@ -45,13 +45,16 @@ def check_turn_record(c):
                           ("Stop", OK["Stop"]),
                           ("PostModelSwitch", dict(OK["Stop"], hook_event_name="PostModelSwitch"))):
         got = fn(payload, NOW)
-        want = {"event": name, "at": NOW, "error": None, "detail": None}
+        # Метка кредита (#284): всегда в записи, None без аренды.
+        want = {"event": name, "at": NOW, "error": None, "detail": None, "cred": None}
         c.check(f"{name} -> {got!r}, wanted {want!r}", not (got != want))
     # Ход кончился ошибкой API: код и текст, который видел бы человек.
     got = fn(FAIL["StopFailure"], NOW)
     want = {"event": "StopFailure", "at": NOW, "error": "model_not_found",
-            "detail": FAIL["StopFailure"]["last_assistant_message"]}
+            "detail": FAIL["StopFailure"]["last_assistant_message"], "cred": None}
     c.check(f"StopFailure -> {got!r}, wanted {want!r}", not (got != want))
+    c.expect("the cred marker lands in the record (#284)",
+             (fn(FAIL["StopFailure"], NOW, cred="anton") or {}).get("cred"), "anton")
     long = dict(FAIL["StopFailure"], last_assistant_message="x" * 1000)
     c.check("the detail must be cut to 300 characters",
             not (len((fn(long, NOW) or {}).get("detail") or "") != 300))

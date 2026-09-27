@@ -155,7 +155,7 @@ def clear(project, force=False, api=None, node=None):
         # Ветка мастера (#256) едет с остальной метой (#265): без неё папет
         # после сборки поднимался на origin/HEAD, а не на своей ветке.
         gone.append({"name": name, "origin": m.origin, "llm": llm.of_meta(m),
-                     "branch": m.branch, "node": node})
+                     "branch": m.branch, "cred": m.cred, "node": node})
     return gone
 
 
@@ -172,7 +172,7 @@ def restore(gone, api=None):
     for p in gone:
         try:
             (api or nomad).register(spec.respec(p["name"], JobMeta(p["origin"], p["llm"],
-                                                          p.get("branch"))))
+                                                          p.get("branch"), cred=p.get("cred"))))
         except Exception as e:
             failed.append(f"{p['name']} on {p.get('node') or '?'}: "
                           f"not raised again: {e}")
