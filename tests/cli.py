@@ -1939,8 +1939,9 @@ def check_server_namespace_259(c):
     stay = sorted((want - {"setup"}) & set(top))
     c.check(f"#259 must not stay top-level: {stay}", not (stay))
     c.check("#259 mop setup stays top-level, for the operator's machine", not ("setup" not in top))
-    c.expect("#259 driver keeps run/list/sweep/build",
-             set(tree.get("driver") or {}), {"run", "list", "sweep", "build"})
+    # clone-work (#347) -- глагол узла для сторожа, тоже в driver.
+    c.expect("#259 driver keeps run/list/sweep/build/clone-work",
+             set(tree.get("driver") or {}), {"run", "list", "sweep", "build", "clone-work"})
     for old in ("deploy", "config", "user", "cluster", "bootstrap", "web", "callout"):
         c.expect(f"#259 LEGACY must map {old} into server", cli.LEGACY.get(old), ("server", old))
     for argv, want_argv in [(["driver", "pve-facts", "--base", "1"],

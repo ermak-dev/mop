@@ -134,6 +134,47 @@ def check_quiet(c):
             not (hasattr(agent, "_conn")))
 
 
+
+# ── #347: проба клона -- одна на агента и сторожа host-узла ──────────────
+# Характеристика: clone_facts(name) шлёт в тело ровно этот скрипт и читает
+# его вывод в те же факты. Снято со старого кода; зелёная до разделения
+# пробы на скрипт и разбор и после.
+CLONE_PROBE_347 = (
+    'cd <HOME>/puppets/pu-mop-3 2>/dev/null || exit 0; '
+    'echo "cur=$(git branch --show-current 2>/dev/null)"; '
+    'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
+    'echo "home=$(git config mop.home 2>/dev/null)"; '
+    'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
+    'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
+    'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"; '
+    'echo "owner=$(head -1 .git/mop-owner 2>/dev/null)"')
+CLONE_OUT_347 = [
+    ("a clone", "cur=fix/7-x\ndef=origin/master\nhome=master\norigin=git@h:g/mop.git\n"
+                "dirty=2\nahead=1\nowner=anton\t5\n",
+     {"cur": "fix/7-x", "def": "master", "home": "master", "origin": "git@h:g/mop.git",
+      "dirty": 2, "ahead": 1, "owner": {"user": "anton", "at": 5}}),
+    ("detached, nothing else", "cur=\ndef=\nhome=\norigin=\ndirty=0\nahead=\nowner=\n",
+     {"cur": "(detached)", "def": None, "origin": None, "dirty": 0, "ahead": 0, "owner": None}),
+    ("no clone dir", "", None),
+    ("counts unreadable", "cur=master\ndirty=lots\nahead=0\n", None),
+]
+
+
+def check_clone_probe_347(c):
+    import asyncio
+    for what, out, want in CLONE_OUT_347:
+        sent = []
+
+        async def bsh(name, script, timeout=20, out=out):
+            sent.append(script)
+            return out, 0
+        with restored(agent, "bsh"):
+            agent.bsh = bsh
+            got = asyncio.run(agent.clone_facts("pu-mop-3"))
+        c.expect(f"#347 clone_facts sends the same probe ({what})",
+                 [s.replace(agent.HOME, "<HOME>") for s in sent], [CLONE_PROBE_347])
+        c.expect(f"#347 clone_facts reads the same facts ({what})", got, want)
+
 # ── write: дом подставляет узел (#279) ───────────────────────────────────
 # HYPOTHESIS: v_write сверял присланный абсолютный путь с белым списком под
 # своим домом; клиент с чужой установки слал путь со своим MOP_HOME и
@@ -1200,7 +1241,7 @@ def check_owner_hook_313(c):
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
-                  check_write_home_279, check_addressed_write_312, check_timeouts_171, check_unclaim_181, check_intake,
+                  check_write_home_279, check_addressed_write_312, check_clone_probe_347, check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
                   check_gates_40, check_caller_207, check_git_identity_167,
                   check_state_fact_224, check_no_screen_fact_236,

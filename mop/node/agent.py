@@ -139,24 +139,27 @@ async def pane_lines(name):
     return lines
 
 
-async def clone_facts(name):
-    """Что клон держит: ветка, несохранённое, неотправленное.
+def clone_probe(d):
+    """Шелл-проба клона в каталоге d -> скрипт; вывод читает clone_facts_of.
+    Одна на агента и сторожа host-узла (#347): правило работы в клоне
+    решает по этим числам, и второй набор проб разошёлся бы с первым.
 
-    Пробы переехали с `alloc exec` слово в слово, и `--not --remotes` здесь не
-    случайность: upstream рабочей ветки бывает прибит к origin/master, и тогда
-    `@{u}..` считает влитое неотправленным. На этих числах стоит решение
-    мастера о диспатче, переписывать их вместе с транспортом нельзя."""
-    d = clone_dir(name)
-    out, _ = await bsh(
-        name,
-        f'cd {d} 2>/dev/null || exit 0; '
-        f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
-        f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
-        f'echo "home=$(git config mop.home 2>/dev/null)"; '
-        f'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
-        f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
-        f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"; '
-        f'echo "owner=$(head -1 {lease.FILE} 2>/dev/null)"')
+    `--not --remotes` здесь не случайность: upstream рабочей ветки бывает
+    прибит к origin/master, и тогда `@{u}..` считает влитое неотправленным.
+    На этих числах стоит решение мастера о диспатче."""
+    return (f'cd {d} 2>/dev/null || exit 0; '
+            f'echo "cur=$(git branch --show-current 2>/dev/null)"; '
+            f'echo "def=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)"; '
+            f'echo "home=$(git config mop.home 2>/dev/null)"; '
+            f'echo "origin=$(git remote get-url origin 2>/dev/null)"; '
+            f'echo "dirty=$(git status --porcelain 2>/dev/null | wc -l)"; '
+            f'echo "ahead=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"; '
+            f'echo "owner=$(head -1 {lease.FILE} 2>/dev/null)"')
+
+
+def clone_facts_of(out):
+    """Вывод clone_probe -> CloneFacts.to_dict() либо None (клона нет или
+    числа не прочитались)."""
     kv = fsutil.read_kv(out, raw=True)
     if "dirty" not in kv:
         return None
@@ -173,6 +176,15 @@ async def clone_facts(name):
                       home=kv.get("home") or None,
                       origin=kv.get("origin") or None, dirty=dirty, ahead=ahead,
                       owner=Owner.parse(kv.get("owner"))).to_dict()
+
+
+async def clone_facts(name):
+    """Что клон держит: ветка, несохранённое, неотправленное.
+
+    Пробы переехали с `alloc exec` слово в слово, и переписывать их вместе с
+    транспортом нельзя."""
+    out, _ = await bsh(name, clone_probe(clone_dir(name)))
+    return clone_facts_of(out)
 
 
 async def du_kb(name):

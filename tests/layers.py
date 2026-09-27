@@ -65,6 +65,7 @@ LAYERS = {
     # cli: узел
     "mop.cli.service.agent": NODE, "mop.cli.driver.run": NODE,
     "mop.cli.driver.list": NODE, "mop.cli.driver.sweep": NODE,
+    "mop.cli.driver.clone-work": NODE,
 }
 # Что вправе лежать в корне пакета, кроме каталогов слоёв.
 ROOT_PARTS = ("session", "usage", "driver", "cli")
