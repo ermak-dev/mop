@@ -7,8 +7,10 @@ Node and npm are the developer's and CI's: the servers get the built dist
 with the package and never run node. `--check` is what CI runs on every
 push, so a dist that drifted from its sources is red, not silent.
 """
-from mop.cli import lib
 
 
 def main(argv):
+    # lib -- здесь, а не на уровне модуля (#302): пакет импортирует и
+    # `mop dev web build`, которому библиотека шины не нужна, а lib её тянет.
+    from mop.cli import lib
     lib.usage(__doc__)

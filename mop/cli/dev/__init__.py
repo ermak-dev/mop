@@ -9,8 +9,10 @@ Run from a working copy of the project: the coordinates come from its git
 origin, the credentials from .env. Not in MCP: the master runs them from
 its shell.
 """
-from mop.cli import lib
 
 
 def main(argv):
+    # lib -- здесь, а не на уровне модуля (#302): пакет импортирует и
+    # `mop dev web build`, которому библиотека шины не нужна, а lib её тянет.
+    from mop.cli import lib
     lib.usage(__doc__)

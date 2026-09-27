@@ -16,7 +16,15 @@ import sys
 import tempfile
 
 from mop.common import config
-from mop.cli import lib
+
+# Без mop.cli.lib (#302): lib на верхнем уровне импортирует шину, а задача
+# web:dist идёт в образе node, где питонских библиотек нет. Отказ -- той же
+# красной строкой в stderr, что у lib.
+_RED, _NC = "\033[0;31m", "\033[0m"
+
+
+def fail(text):
+    print(f"{_RED}{text}{_NC}", file=sys.stderr, flush=True)
 
 WEB = os.path.join(config.PROJECT, "web")
 DIST = os.path.join(WEB, "dist")
@@ -45,7 +53,7 @@ def tool(name):
     бессмысленна, и трасса «No such file» сказала бы меньше."""
     path = shutil.which(name)
     if not path:
-        lib.fail(f"{name} is not installed: the dashboard build needs node and npm")
+        fail(f"{name} is not installed: the dashboard build needs node and npm")
         sys.exit(1)
     return path
 
@@ -55,7 +63,7 @@ def run(argv, cwd):
     got = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
     if got.returncode:
         sys.stderr.write(got.stdout + got.stderr)
-        lib.fail(f"{' '.join(os.path.basename(a) for a in argv[:2])} failed with exit {got.returncode}")
+        fail(f"{' '.join(os.path.basename(a) for a in argv[:2])} failed with exit {got.returncode}")
         sys.exit(1)
 
 
@@ -67,7 +75,7 @@ def build(out_dir):
 
 def main(argv):
     if set(argv) - {"--check"}:
-        lib.usage(__doc__)
+        sys.exit(__doc__.strip())
     if "--check" not in argv:
         build(DIST)
         return 0
@@ -75,7 +83,7 @@ def main(argv):
         build(tmp)
         diff = diff_trees(tmp, DIST)
     if diff:
-        lib.fail("web/dist differs from a fresh build; rebuild it with mop dev web build:\n  "
+        fail("web/dist differs from a fresh build; rebuild it with mop dev web build:\n  "
                  + "\n  ".join(diff))
         return 1
     return 0
