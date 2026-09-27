@@ -463,8 +463,68 @@ def check_command_message_344(c):
              ("a : b", "fatal: [h]: FAILED! => [1, 2]"))
 
 
+# Кред проекта с метками: ни одна не должна попасть в журнал (#349).
+SENTINEL_BUS = {"url": "nats://sentinel-host-349:4222", "user": "sentinel-user-349",
+                "password": "sentinel-password-349"}
+UV_TASK = "Python environment of the site (uv sync)"
+UV_MESSAGE = "error: Group `cloud` is not defined (rc 2)"
+
+
+def check_journal_no_secrets_349(c):
+    """HYPOTHESIS (#349): journal() на проваленном прогоне пишет в строку весь
+    ответ (`out.get('error') or ('ok' if ok else out)`: у упавшего прогона
+    error нет), а with_creds к нему уже приклеил `bus` -- пароль шины
+    проекта уходил в journald сервера на каждом упавшем старте.
+    SOLUTION: строка собирается только из известных полей; словарь ответа
+    не форматируется никогда.
+    STATUS: FIXED — see #349"""
+    req = {"verb": "bootstrap", "name": "pu-proj-1"}
+    bus_ = {"bus": SENTINEL_BUS}
+    outcomes = {
+        "ok": {"ok": True, "played": True, "rc": 0, "seconds": 12.3, "tail": "done",
+               "task": None, "message": None, "lease_note": "lease: kept", **bus_},
+        "failed play with a task": {
+            "ok": False, "played": True, "rc": 2, "seconds": 40.1, "tail": "TAIL-349",
+            "task": UV_TASK, "message": UV_MESSAGE, **bus_},
+        "failed play without a task": {
+            "ok": False, "played": True, "rc": 4, "seconds": 7.5, "tail": "TAIL-349",
+            "task": None, "message": None, **bus_},
+        "timed-out play": {
+            "ok": False, "played": True, "rc": None, "seconds": 890.0,
+            "tail": "bootstrap of pu-proj-1 did not finish in 890s", **bus_},
+        "error": {"error": "no bus password for project proj on the server", **bus_},
+        "gave up": {"ok": False, "played": False, "gave_up": True, "rc": 2, "task": UV_TASK,
+                    "message": UV_MESSAGE, "failures": 3, "seconds": None,
+                    "tail": "not replayed", **bus_},
+        "not played": {"ok": True, "played": False, "text": "no bootstrap for proj", **bus_},
+    }
+    lines = {k: "\n".join(bootstrap.journal("proj", req, out)) for k, out in outcomes.items()}
+    for k, text in lines.items():
+        leaked = [v for v in SENTINEL_BUS.values() if v in text]
+        c.check(f"#349 the journal of a {k} reply carries no bus credentials",
+                not leaked and "'bus'" not in text, text)
+    failed = lines["failed play with a task"]
+    c.check("#349 a failed play's journal names its task, message, rc and seconds",
+            all(s in failed for s in (UV_TASK, UV_MESSAGE, "rc 2", "40.1s", "TAIL-349")),
+            failed)
+    c.check("#349 the exit code is named once, not again after #344's message",
+            failed.count("(rc 2)") == 1, failed)
+    bare = lines["failed play without a task"]
+    c.check("#349 a failed play without a task still reads as failed, with rc and seconds",
+            all(s in bare for s in ("failed", "rc 4", "7.5s")), bare)
+    c.check("#349 a timed-out play keeps its tail",
+            "did not finish" in lines["timed-out play"], lines["timed-out play"])
+    c.check("#349 an error reply names the error",
+            "no bus password for project proj" in lines["error"], lines["error"])
+    c.check("#349 a gave-up reply names the task and the failure count",
+            all(s in lines["gave up"] for s in (UV_TASK, "gave up", "3")), lines["gave up"])
+    c.check("#349 an ok reply reads ok with its seconds and lease note",
+            all(s in lines["ok"] for s in ("ok", "12.3s", "lease: kept")), lines["ok"])
+
+
 def main():
     c = Checks()
+    check_journal_no_secrets_349(c)
     check_give_up_345(c)
     check_result_334(c)
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
@@ -543,6 +603,17 @@ def main():
         got = bootstrap.with_creds({"error": "play failed"}, creds, "proj")
         c.check("with_creds must keep the play's error",
                 not (got.get("bus") or got.get("error") != "play failed"), got)
+        # HYPOTHESIS (#349): упавший прогон несёт ok False, а не error, и
+        # with_creds клеил к нему кред вопреки своему docstring'у -- а
+        # journal() печатал ответ целиком. SOLUTION: кред -- только ok True;
+        # упавший старт шину не открывает (узел выходит на not ok раньше,
+        # чем читает bus). STATUS: FIXED — see #349
+        failed = {"ok": False, "played": True, "rc": 2, "tail": "fatal"}
+        got = bootstrap.with_creds(failed, creds, "proj")
+        c.expect("#349 with_creds: a failed play gets no credentials", got, failed)
+        got = bootstrap.with_creds(failed, None, "proj")
+        c.expect("#349 with_creds: a failed play without a project password stays the "
+                 "play's failure", got, failed)
     except AttributeError:
         c.fail("bootstrap.with_creds is missing")
 
