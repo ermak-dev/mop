@@ -211,7 +211,28 @@ def keepalive_all(now=None):
 
 
 # ─── логин через шину (#283): диалог с клиентом по имени кредита ──────────
-def login_start(name, mode="login"):
+MODE_OF_KIND = {"login": "login", "token": "setup-token"}
+
+
+def login_mode(rec, asked):
+    """Режим входа -> (режим, None) либо (None, отказ). Чистая функция.
+
+    Есть запись -- режим решает её вид (#339): вход другого режима сообщал
+    успех, а register_login сохранял прежний вид, и новый секрет лежал мимо
+    secret(), продления и раздачи. Записи нет (новый кредит `mop cred login`)
+    -- спрошенный режим, по умолчанию login."""
+    if rec is None:
+        return asked or "login", None
+    kind = rec.get("kind")
+    mode = MODE_OF_KIND.get(kind)
+    if mode is None:
+        return None, f"credential {rec.get('name')} is a {kind}: it has no claude login"
+    if asked and asked != mode:
+        return None, f"credential {rec.get('name')} is a {kind}: log it in with {mode}"
+    return mode, None
+
+
+def login_start(name, mode=None):
     """Начать логин: клиент в pty, -> адрес авторизации. Прежний
     незавершённый логин того же имени снимается.
 
@@ -231,6 +252,9 @@ def login_start(name, mode="login"):
     if rec.get("profile") != "claude":
         raise RuntimeError(f"credential {name} is a {rec.get('profile')} credential: "
                            f"only claude credentials log in")
+    mode, refusal = login_mode(rec, mode)
+    if refusal:
+        raise RuntimeError(refusal)
     with _logins_lock:
         old = _logins.pop(name, None)
     if old:

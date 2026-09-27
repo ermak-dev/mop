@@ -123,6 +123,76 @@ def check_login_start_profile_330(c):
             srv._logins.clear()
 
 
+# ── #339: режим входа решает вид кредита, а не вызывающий ─────────────
+# HYPOTHESIS: страница шлёт только имя, parse_login_start и глагол
+# cred_login_start подставляют режим login до того, как login_start видит
+# запись; у кредита вида token вход `claude auth login` сообщает успех, а
+# запись остаётся token, secret() читает прежний файл, новый
+# .credentials.json не продлевается и не раздаётся. Зеркально -- setup-token
+# в доме login.
+# SOLUTION: чистое правило login_mode(запись, режим): есть запись -- режим
+# по виду (login -> login, token -> setup-token), явный противоречащий --
+# отказ; записи нет -- спрошенный, по умолчанию login. login_start берёт
+# режим из него, вызывающие больше не подставляют умолчание. STATUS: FIXED — see #339
+def check_login_mode_339(c):
+    import tempfile
+    from mop.server import credreg as srv
+    rule = getattr(srv, "login_mode", None)
+    if c.check("#339 credreg.login_mode exists", rule is not None):
+        tok = credreg.record("old", "claude", "token", now=NOW)
+        log = credreg.record("anton", "claude", "login", now=NOW)
+        c.expect("#339 a token record logs in with setup-token", rule(tok, None), ("setup-token", None))
+        c.expect("#339 a login record logs in with login", rule(log, None), ("login", None))
+        c.expect("#339 the matching mode is accepted", rule(tok, "setup-token"), ("setup-token", None))
+        mode, refusal = rule(tok, "login")
+        c.check("#339 a contradicting mode is refused, naming the right one",
+                mode is None and "old is a token" in (refusal or "") and "setup-token" in refusal,
+                (mode, refusal))
+        mode, refusal = rule(log, "setup-token")
+        c.check("#339 the mirror is refused too",
+                mode is None and "anton is a login" in (refusal or ""), (mode, refusal))
+        c.expect("#339 no record: the asked mode", rule(None, "setup-token"), ("setup-token", None))
+        c.expect("#339 no record, nothing asked: login", rule(None, None), ("login", None))
+
+    started, closed = [], []
+
+    class FakeLogin:
+        url = "https://claude.com/x"
+
+        @classmethod
+        def start(cls, home, mode):
+            started.append((os.path.basename(home), mode))
+            return cls()
+
+        def close(self):
+            closed.append(self)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        old_root, old_start = srv.ROOT, srv.credlogin.Login.start
+        srv.ROOT = tmp
+        srv.credlogin.Login.start = FakeLogin.start
+        try:
+            srv.save(credreg.record("old", "claude", "token", now=NOW))
+            srv.save(credreg.record("anton", "claude", "login", now=NOW))
+            srv.login_start("old")
+            srv.login_start("anton")
+            c.expect("#339 login_start without a mode follows the kind", started,
+                     [("old", "setup-token"), ("anton", "login")])
+            started.clear()
+            closed.clear()
+            pending = srv._logins["old"]
+            try:
+                srv.login_start("old", "login")
+                c.fail("#339 login_start must refuse login for a token credential")
+            except RuntimeError as e:
+                c.check("#339 the refusal names the kind", "is a token" in str(e), str(e))
+            c.expect("#339 no client is started on a refused mode", started, [])
+            c.check("#339 a pending login of that name is left alone",
+                    closed == [] and srv._logins.get("old") is pending, (closed, srv._logins))
+        finally:
+            srv.ROOT, srv.credlogin.Login.start = old_root, old_start
+            srv._logins.clear()
+
 # ── #308: метка кредита -- подсказка, правда -- аренда ─────────────────
 # HYPOTHESIS: метку `.local/state/mop/cred` пишет глагол `write`, который
 # доступен мастеру любого проекта; note_turn берёт имя кредита из записи
@@ -420,6 +490,7 @@ def main():
     check_write_fanout_315(c)
     check_login_start_registry_295(c)
     check_login_start_profile_330(c)
+    check_login_mode_339(c)
     check_foreign_mark_308(c)
     check_creds_knowledge_317(c)
 
