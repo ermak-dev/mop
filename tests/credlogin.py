@@ -23,7 +23,7 @@ import sys
 import tempfile
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import credlogin  # noqa: E402
@@ -95,6 +95,41 @@ def main():
              credlogin.status_line({"loggedIn": True, "email": "a@b.c", "subscriptionType": "max"}),
              "logged in as a@b.c (max)")
     c.expect("status_line(not logged in)", credlogin.status_line({"loggedIn": False}), None)
+
+    # Клиент на сервере (#292). Юниты зовут `claude` голым именем, а на
+    # контроллерах его нет: дочерний процесс pty умирал на execvp, родитель
+    # читал закрытую трубу, и страница показывала «[Errno 2] No such file
+    # or directory» -- на mop и rumop 27.09. HYPOTHESIS: нет ни поиска
+    # клиента, ни отказа до fork'а. SOLUTION: client_path -- PATH процесса,
+    # затем ~/.local/bin/claude (туда его ставит install.sh); client()
+    # отказывает RuntimeError с именем пользователя до fork'а, и все три
+    # вызова клиента идут по абсолютному пути. STATUS: FIXED — see #292
+    have = {"/opt/bin/claude", "/home/pool/.local/bin/claude"}
+    exists = lambda p: p in have
+    c.expect("client_path: the first PATH entry that has the client",
+             credlogin.client_path("/usr/bin:/opt/bin", "/home/pool", exists), "/opt/bin/claude")
+    c.expect("client_path: ~/.local/bin when PATH has none",
+             credlogin.client_path("/usr/bin", "/home/pool", exists),
+             "/home/pool/.local/bin/claude")
+    c.expect("client_path: None when nothing exists",
+             credlogin.client_path("/usr/bin", "/home/nobody", exists), None)
+    c.expect("client_path: empty PATH still finds ~/.local/bin",
+             credlogin.client_path("", "/home/pool", exists), "/home/pool/.local/bin/claude")
+    with patched(credlogin, client_path=lambda path_env, home, exists=None: None), \
+            patched(credlogin.pty, fork=lambda: c.fail("Login.start forked without a client")):
+        try:
+            credlogin.Login.start("/nonexistent/home", "login")
+            c.fail("Login.start without a client must refuse")
+        except RuntimeError as e:
+            c.check("Login.start refuses before forking, naming deploy",
+                    "not installed" in str(e) and "mop server deploy" in str(e), e)
+        try:
+            credlogin.client()
+            c.fail("client() without a client must refuse")
+        except RuntimeError as e:
+            c.check("client() names the user", " for " in str(e), e)
+    with patched(credlogin, client_path=lambda path_env, home, exists=None: "/opt/bin/claude"):
+        c.expect("client() returns the found path", credlogin.client(), "/opt/bin/claude")
     return c.report("credlogin")
 
 
