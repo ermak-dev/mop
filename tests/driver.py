@@ -403,10 +403,150 @@ def check_sweep_keeps_work_346(c):
             destroyed == [] and code == 1 and "refusing to sweep" in err, (out, err, code))
 
 
+
+# ── #347: host-ярус сторожа -- то же правило работы, что и контейнерный ──────
+# HYPOTHESIS: tier 1 pu-sweep.sh решал «можно ли снести клон без сессии»
+# своей shell-функцией holds_work: грязный или неотправленный -- и всё. Клон
+# не на своём доме (чистый, запушенный) уходил под снос, хотя общее правило
+# (domain.holds_work) его держит; клон, который git не прочитал, читался
+# пустым.
+# SOLUTION: одно решение -- `mop driver clone-work <dir>`: проба клона агента
+# по пути, domain.holds_work, причины sweep.plan. Выход 0 -- можно сносить,
+# 3 -- оставить; прочее -- проверка сломалась, скрипт называет это отдельно.
+# STATUS: FIXED — see #347
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def _clone_work():
+    import importlib
+    try:
+        return importlib.import_module("mop.cli.driver.clone-work")
+    except ImportError:
+        return None
+
+
+CLONE_VERDICT = [
+    ("clean -> removable", _clone(), True, (True, "no session, clean clone")),
+    ("uncommitted -> kept", _clone(dirty=1), True,
+     (False, "no session, clone holds work (uncommitted: 1)")),
+    ("unpushed -> kept", _clone(ahead=2), True,
+     (False, "no session, clone holds work (unpushed: 2)")),
+    ("clean but off its home -> kept (was removable)", _clone(branch="fix/1-x"), True,
+     (False, "no session, clone holds work (off home master)")),
+    ("unreadable -> kept", None, True, (False, "no session, clone unreadable")),
+    ("no .git -> removable, no clone", None, False, (True, "no session, no clone")),
+]
+
+
+def _git(*args, cwd=None):
+    import subprocess
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd,
+                   check=True, capture_output=True)
+
+
+def _host_home(tmp):
+    """Дом host-узла: bare origin, клоны в ~/puppets, лаунчер mop."""
+    home = os.path.join(tmp, "home")
+    puppets = os.path.join(home, "puppets")
+    os.makedirs(os.path.join(home, "mop", "bin"))
+    os.makedirs(puppets)
+    origin = os.path.join(tmp, "origin.git")
+    seed = os.path.join(tmp, "seed")
+    _git("init", "-q", "--bare", "-b", "master", origin)
+    _git("init", "-q", "-b", "master", seed)
+    with open(os.path.join(seed, "f"), "w") as f:
+        f.write("x\n")
+    _git("add", "f", cwd=seed)
+    _git("commit", "-q", "-m", "seed", cwd=seed)
+    _git("push", "-q", origin, "master", cwd=seed)
+
+    def clone(name, pad=True):
+        d = os.path.join(puppets, name)
+        _git("clone", "-q", origin, d)
+        if pad:        # rm_path не трогает меньше мегабайта; вне дерева git
+            with open(os.path.join(d, ".git", "pad"), "wb") as f:
+                f.write(b"\0" * 2 * 1024 * 1024)
+        return d
+    clone("pu-a-1")                                            # живой
+    clone("pu-a-2")                                            # чистый
+    with open(os.path.join(clone("pu-a-3"), "wip"), "w") as f:   # несохранённое
+        f.write("wip\n")
+    d = clone("pu-a-4")                                        # не на своём доме
+    _git("checkout", "-q", "-b", "fix/1-x", cwd=d)
+    _git("push", "-q", "origin", "fix/1-x", cwd=d)
+    plain = os.path.join(puppets, "pu-a-5")                    # без .git
+    os.makedirs(plain)
+    with open(os.path.join(plain, "pad"), "wb") as f:
+        f.write(b"\0" * 2 * 1024 * 1024)
+    return home
+
+
+def _run_sweep(home, launcher):
+    """pu-sweep.sh целиком на этом доме: tmux жив только у pu-a-1."""
+    import subprocess
+    bin_dir = os.path.join(os.path.dirname(home), "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    with open(os.path.join(bin_dir, "tmux"), "w") as f:
+        f.write('#!/bin/sh\n[ "$2" = pu-a-1 ] && exit 0; exit 1\n')
+    os.chmod(os.path.join(bin_dir, "tmux"), 0o755)
+    mop = os.path.join(home, "mop", "bin", "mop")
+    with open(mop, "w") as f:
+        f.write(launcher)
+    os.chmod(mop, 0o755)
+    env = dict(os.environ, HOME=home, PATH=bin_dir + ":" + os.environ["PATH"],
+               MOP_SWEEP_FREE_MIN_GB="0")
+    env.pop("MOP_SWEEP_DRY", None)
+    return subprocess.run(["bash", os.path.join(REPO, "deploy/roles/bus/files/pu-sweep.sh")],
+                          env=env, capture_output=True, text=True, timeout=120)
+
+
+def check_host_sweep_rule_347(c):
+    import shutil
+    import tempfile
+    cw = _clone_work()
+    if c.check("#347 there is `mop driver clone-work`", cw is not None):
+        for what, clone, has_git, want in CLONE_VERDICT:
+            c.expect(f"#347 clone-work verdict: {what}", cw.verdict(clone, has_git), want)
+        home = "/home/u"
+        for path, ok in (("/home/u/puppets/pu-a-1", True), ("/home/u/slaves/sl-x-1", True),
+                         ("/home/u/wk/wk-x-1", True), ("/home/u/puppets/../.ssh", False),
+                         ("/home/u/puppets", False), ("/home/u/.ssh", False),
+                         ("puppets/pu-a-1", False), ("/etc/puppets/pu-a-1", False),
+                         ("/home/u/puppets/pu-a-1/sub", False), ("/home/u/puppets/.git", False)):
+            c.expect(f"#347 clone-work accepts {path}: {ok}", cw.refusal(path, home) is None, ok)
+    if shutil.which("git") is None:
+        hermetic.skip("#347 the host sweep over real clones", "no git on this machine")
+        return
+    tmp = tempfile.mkdtemp(prefix="mop-test-347-")
+    try:
+        home = _host_home(tmp)
+        r = _run_sweep(home, f'#!/bin/sh\nexec {REPO}/bin/mop "$@"\n')
+        left = sorted(os.listdir(os.path.join(home, "puppets")))
+        c.expect("#347 host sweep removes the clean clone and the dir without .git",
+                 left, ["pu-a-1", "pu-a-3", "pu-a-4"])
+        c.check("#347 host sweep names why it keeps",
+                "pu-a-3: no session, clone holds work (uncommitted: 1), kept" in r.stdout
+                and "pu-a-4: no session, clone holds work (off home master), kept" in r.stdout,
+                (r.stdout, r.stderr[-500:]))
+        # Сломанная проверка -- не «работа в клоне»: оставить и сказать об этом.
+        home = _host_home(os.path.join(tmp, "broken"))
+        r = _run_sweep(home, "#!/bin/sh\necho boom >&2\nexit 1\n")
+        left = sorted(os.listdir(os.path.join(home, "puppets")))
+        c.expect("#347 a failing clone check removes nothing", left,
+                 ["pu-a-1", "pu-a-2", "pu-a-3", "pu-a-4", "pu-a-5"])
+        c.check("#347 a failing clone check is named as such",
+                "pu-a-2: clone check failed (exit 1): boom, kept" in r.stdout, r.stdout)
+    finally:
+        shutil.rmtree(tmp)
+    with open(os.path.join(REPO, "deploy/roles/bus/files/pu-sweep.sh")) as f:
+        script = f.read()
+    c.check("#347 pu-sweep.sh has no rule of its own", "holds_work()" not in script)
+
 def main():
     c = Checks()
     check_gave_up_wrapper_345(c)
     check_sweep_keeps_work_346(c)
+    check_host_sweep_rule_347(c)
 
     for what, mod, ok in CONTRACT:
         try:
