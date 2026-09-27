@@ -46,8 +46,12 @@ def main():
     c.expect("a name that merely starts like a listed one is refused",
              fn(home, ".claude/.credentials.json.bak"), None)
     names = getattr(paths, "WRITABLE", ())
-    c.expect("the white list is the two relative names, no home in them",
-             sorted(names), [".claude/.credentials.json", ".config/mop/secrets.env"])
+    # Метка кредита (#284): третье имя белого списка.
+    c.expect("the white list is the three relative names, no home in them",
+             sorted(names), [".claude/.credentials.json", ".config/mop/secrets.env",
+                             ".local/state/mop/cred"])
+    c.expect("the cred marker resolves under the node's home",
+             fn(home, ".local/state/mop/cred"), "/home/mop/.local/state/mop/cred")
     return c.report("paths")
 
 

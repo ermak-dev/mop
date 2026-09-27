@@ -254,8 +254,8 @@ def project_forms():
         cluster._live_count = lambda target: 5
         cluster.next_name = lambda target: f"pu-{target}-6"
         cluster.store_workspace = lambda root, name, req: None
-        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None: \
-            {"Job": {"ID": name, "origin": origin}}
+        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None, \
+            cred=None: {"Job": {"ID": name, "origin": origin}}
         # Nomad -- поддельный, параметром (#275): что зарегистрировано, видно
         # по его вызовам.
         fake = FakeNomad()

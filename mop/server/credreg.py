@@ -19,6 +19,8 @@ claude обновляет токен сам при запросе, поэтом�
 адрес, code вводит код. Незавершённые логины держатся в памяти сервиса по
 имени кредита и умирают по TTL драйвера.
 """
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -26,12 +28,15 @@ import subprocess
 import threading
 import time
 
-from ..common import credreg, fsutil, llm, paths
-from ..common.domain import CredStatus
-from . import credlogin
+from ..common import bus, credreg, fsutil, llm, paths, puppets
+from ..common.domain import CredStatus, JobMeta
+from . import credlogin, nomad
 
 ROOT = paths.local("creds")
 RECORD = "cred.json"
+WRITE_TIMEOUT = 60           # раздача: агент пишет в узел и в каждое тело (#137)
+STATES_TIMEOUT = 20
+TICK = 300                   # цикл сервиса (#284): пробы, продление, раздача
 KEEPALIVE_PROMPT = "reply with one word: ok"
 KEEPALIVE_MODEL = "haiku"
 KEEPALIVE_TIMEOUT = 120
@@ -257,3 +262,212 @@ def login_forget_expired():
         for n in gone:
             _logins.pop(n).close()
     return gone
+
+
+# ─── аренда (#284): что уезжает в тело и кому ────────────────────────────
+# Тело работает кредитом, а не логином оператора: в него уезжает access-токен
+# без refresh (обновляет сервер в доме кредита) и метка `.local/state/mop/cred`
+# с именем кредита -- по ней хук приписывает провал хода кредиту.
+#
+# Ограничение этого шага: глагол `write` кладёт файлы в узел и во ВСЕ его
+# живые тела, поэтому все тела узла получают один и тот же файл. Двум
+# кредитам одного профиля на одном узле пока не жить; адресная запись в
+# одно тело -- следующий шаг (глагол write с именем тела).
+def materialize(name, rec=None):
+    """Файлы кредита для тела -> [(относительное имя, байты)]. ValueError,
+    если нести нечего: setup-token нужен окружением при старте claude и
+    этим шагом не раздаётся."""
+    rec = rec or load(name)
+    if rec is None:
+        raise ValueError(f"no credential {name}")
+    mark = (paths.CRED_MARK, (name + "\n").encode())
+    kind = rec.get("kind")
+    if kind == "login":
+        creds = credentials(name)
+        if not creds:
+            raise ValueError(f"credential {name}: no credentials file in its home")
+        return [(paths.CREDENTIALS, json.dumps(credreg.without_refresh(creds)).encode()), mark]
+    if kind == "key":
+        var = (llm.require(rec.get("profile")) or {}).get("key")
+        key = secret(name, rec)
+        if not var or not key:
+            raise ValueError(f"credential {name}: no key to distribute")
+        # Ключ уезжает в secrets.env целиком: на узле с двумя ключевыми
+        # профилями последняя раздача побеждает (ограничение выше).
+        return [(paths.NODE_SECRETS, credreg.secrets_line(var, key).encode()), mark]
+    raise ValueError(f"credential {name} is a {kind}: not distributable "
+                     f"(a setup-token needs the environment at claude start)")
+
+
+def files_sha(files):
+    """Отпечаток раздачи: что именно уехало, чтобы не гонять то же самое."""
+    h = hashlib.sha256()
+    for path, data in files:
+        h.update(path.encode() + b"\0" + data + b"\0")
+    return h.hexdigest()
+
+
+def holders(api=None):
+    """Кто держит аренду: {кредит: {папет: узел|None}} по мете джобов."""
+    api = api or nomad
+    out = {}
+    for job in api.get_jobs(puppets.JOB_PREFIX, meta=True):
+        cred = JobMeta.from_job(job).cred
+        if not cred:
+            continue
+        try:
+            alloc = api.latest_alloc(job["ID"])
+        except Exception:
+            alloc = None
+        out.setdefault(cred, {})[job["ID"]] = (alloc or {}).get("NodeName")
+    return out
+
+
+def _changed_at(name, rec):
+    """mtime секрета кредита: менялся ли дом после провала хода."""
+    kind = rec.get("kind")
+    path = credlogin.credentials_path(home(name)) if kind == "login" \
+        else os.path.join(home(name), "token" if kind == "token" else "key")
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def distribute(name, api=None, now=None):
+    """Раздать кредит держателям: глагол `write` агенту каждого узла, где
+    стоит папет с этой арендой. -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"};
+    пусто -- держателей нет. Отпечаток раздачи -- в записи."""
+    rec = load(name)
+    if rec is None:
+        raise ValueError(f"no credential {name}")
+    files = materialize(name, rec)
+    nodes = sorted({n for n in (holders(api).get(name) or {}).values() if n})
+    out = {}
+    payload = [[p, base64.b64encode(d).decode()] for p, d in files]
+    for node in nodes:
+        try:
+            got = bus.verdict(bus.request(node, "write", timeout=WRITE_TIMEOUT,
+                                          project=bus.ADMIN, files=payload))
+        except bus.BusError as e:
+            got = (bus.UNREACHED, str(e))
+        if got is None:
+            out[node] = "OK"
+        elif got[0] == bus.UNREACHED:
+            out[node] = f"NOT REACHED: {got[1] or 'no answer'}"
+        else:
+            out[node] = f"FAILED: {got[1][:120]}"
+    if nodes:
+        save({**rec, "pushed": {"sha": files_sha(files), "at": int(now or time.time()),
+                               "nodes": out}})
+    return out
+
+
+def add_login_file(name, text, owner="", now=None):
+    """Логин claude файлом кредов (то, что оператор раздаёт `mop login`) --
+    кредит вида login: дом с `.claude/.credentials.json`, refresh-токен
+    остаётся здесь. Существующий кредит того же имени обновляется файлом."""
+    try:
+        creds = json.loads(text)
+        assert isinstance(creds, dict) and creds.get("claudeAiOauth")
+    except (ValueError, AssertionError):
+        raise ValueError("credentials: not a claude .credentials.json")
+    rec = load(name)
+    if rec is not None and rec.get("kind") != "login":
+        raise ValueError(f"credential {name} is a {rec.get('kind')}, not a login")
+    fsutil.make_private_dir(home(name))
+    path = credlogin.credentials_path(home(name))
+    fsutil.make_private_dir(os.path.dirname(path))
+    fsutil.write_private(path, json.dumps(creds))
+    return register_login(name, kind="login", owner=owner, now=now)
+
+
+# ─── приписывание провалов и цикл сервиса (#284) ──────────────────────────
+def note_turn(record, now=None, api=None):
+    """Запись хода папета с меткой кредита -> что сделано строкой либо None.
+    Логин протух, а дом с тех пор обновился -- раздать свежее, не хоронить."""
+    name = (record or {}).get("cred")
+    if not name:
+        return None
+    rec = load(name)
+    if rec is None:
+        return None
+    if int(record.get("at") or 0) <= int(rec.get("noted_at") or 0):
+        return None
+    now = now or time.time()
+    status = credreg.turn_status(record, _changed_at(name, rec))
+    if status is not None:
+        save({**credreg.merge_status(rec, status, now), "noted_at": int(record["at"])})
+        return f"{name}: {status.kind} ({status.detail})"
+    if record.get("error") == "authentication_failed":
+        save({**rec, "noted_at": int(record["at"])})
+        got = distribute(name, api, now)
+        return f"{name}: re-distributed after a stale login: " + ", ".join(
+            f"{n} {r}" for n, r in sorted(got.items()))
+    return None
+
+
+def turns_of(holding, api=None):
+    """Записи ходов держателей: {папет: запись} через `states` агентов."""
+    by_node = {}
+    for puppet, node in holding.items():
+        if node:
+            by_node.setdefault(node, []).append(puppet)
+    out = {}
+    for node, names in by_node.items():
+        try:
+            got = bus.request(node, "states", timeout=STATES_TIMEOUT, project=bus.ADMIN,
+                              names=names)
+        except bus.BusError:
+            continue
+        for puppet, facts in (got.get("puppets") or {}).items():
+            turn = ((facts or {}).get("state") or {}).get("turn")
+            if isinstance(turn, dict):
+                out[puppet] = turn
+    return out
+
+
+def tick(api=None, now=None, log=None):
+    """Один круг цикла сервиса -> [строки журнала]: снять протухшие логины,
+    продлить токены, пробы, раздать изменившееся держателям, приписать
+    провалы ходов кредитам."""
+    now = now or time.time()
+    lines = []
+    for gone in login_forget_expired():
+        lines.append(f"cred {gone}: login abandoned (ttl)")
+    held = holders(api)
+    for rec in all():
+        name = rec["name"]
+        if load(name) is None:
+            continue
+        try:
+            if rec.get("kind") == "login":
+                got = keepalive(name, now=now)
+                if got not in ("not due", "not a login"):
+                    lines.append(f"cred {name}: keepalive {got}")
+            probe(name, now)
+            if name in held:
+                files = materialize(name)
+                if files_sha(files) != (load(name).get("pushed") or {}).get("sha"):
+                    got = distribute(name, api, now)
+                    lines.append(f"cred {name}: distributed: " + ", ".join(
+                        f"{n} {r}" for n, r in sorted(got.items())))
+                for puppet, turn in turns_of(held[name], api).items():
+                    if turn.get("cred") == name:
+                        got = note_turn(turn, now, api)
+                        if got:
+                            lines.append(f"cred {got} (from {puppet})")
+        except Exception as e:
+            lines.append(f"cred {name}: {credlogin.mask(str(e))[:160]}")
+    return lines
+
+
+def ticker(log, api=None, every=TICK):
+    """Поток цикла: раз в every секунд, ошибки -- в журнал, не наружу."""
+    while True:
+        try:
+            for line in tick(api):
+                log(f"mop-cluster: {line}")
+        except Exception as e:
+            log(f"mop-cluster: cred tick failed: {credlogin.mask(str(e))[:160]}")
+        time.sleep(every)

@@ -27,17 +27,32 @@ def check_no_home_279(c):
     def request_many(verb, nodes, timeout=None, **kw):
         sent["verb"], sent["files"] = verb, kw.get("files")
         return {n: {"written": []} for n in nodes}
-    saved = (bus.request_many, puppets.ready_nodes, keys.credentials, keys.llm_keys_blob)
+    registered = {}
+
+    def call_cluster(verb, timeout=None, project=None, **kw):
+        registered["verb"], registered["fields"] = verb, kw
+        return {"ok": True}
+    saved = (bus.request_many, puppets.ready_nodes, keys.credentials, keys.llm_keys_blob,
+             bus.call_cluster, bus.login)
     try:
         bus.request_many = request_many
+        bus.call_cluster = call_cluster
+        bus.login = lambda: "anton"
         puppets.ready_nodes = lambda: {"n1"}
         keys.credentials = lambda: b"{}"
         keys.llm_keys_blob = lambda: ("K=v\n", None)
         results, _what, _note = keys.push_login()
         c.expect("push_login: every node OK", results, {"n1": "OK"})
         got = sorted(f[0] for f in sent.get("files") or [])
+        # Логин и ключи -- два имени из белого списка; метка кредита (#284)
+        # в нём третья, но её кладёт сервер при раздаче кредита, не login.
         c.expect("push_login sends the relative names, no home",
-                 got, sorted(paths.WRITABLE))
+                 got, sorted([paths.CREDENTIALS, paths.NODE_SECRETS]))
+        # Переход к реестру (#284): тот же файл -- кредитом под именем логина.
+        c.expect("push_login registers the login as a credential named after the bus login",
+                 (registered.get("verb"), (registered.get("fields") or {}).get("name"),
+                  (registered.get("fields") or {}).get("credentials")),
+                 ("cred_add", "anton", "{}"))
         for p in got:
             c.check(f"push_login: {p} is relative", not os.path.isabs(p))
         from mop.common import llm
@@ -51,7 +66,8 @@ def check_no_home_279(c):
         c.expect("push_llm_keys sends the relative secrets name", got,
                  [getattr(paths, "NODE_SECRETS", ".config/mop/secrets.env")])
     finally:
-        bus.request_many, puppets.ready_nodes, keys.credentials, keys.llm_keys_blob = saved
+        (bus.request_many, puppets.ready_nodes, keys.credentials, keys.llm_keys_blob,
+         bus.call_cluster, bus.login) = saved
 
 
 def main():

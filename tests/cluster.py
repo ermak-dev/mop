@@ -566,8 +566,9 @@ def check_update_keeps_branch_257(c):
     job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
                                       "branch": "swarm"}}
     with restored(cluster.spec, "job_spec"), restored(cluster, "store_workspace"):
-        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None: \
-            calls.append(branch) or {"Job": {"ID": name}}
+        # cred=None -- та же сигнатура, что у настоящей job_spec (#284).
+        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None, \
+            cred=None: calls.append(branch) or {"Job": {"ID": name}}
         cluster.store_workspace = lambda root, name, req: None
         # register фейка кладёт пустой джоб на место прежнего: мету каждый
         # вызов берёт из своего фейка.
@@ -580,6 +581,50 @@ def check_update_keeps_branch_257(c):
             cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git"})
     c.expect("update must keep the meta branch unless the request names one",
              calls, ["swarm", "dev", None])
+
+
+# ── #284: аренда кредита -- в мете джоба, проверяется сервером ─────────
+# HYPOTHESIS: add/update не знают о кредитах: спека без Meta.cred, чужое или
+# несуществующее имя кредита прошло бы молча, а без имени папет не получил
+# бы ни одного кредита реестра.
+# SOLUTION: cluster._add/_update валидируют req.cred по реестру (имя и
+# профиль), без него берут credreg.pick, update держит мету как ветку.
+# STATUS: FIXED — see #284
+def check_cred_lease_284(c):
+    calls = []
+    recs = [{"name": "anton", "profile": "claude", "kind": "login", "owner": "",
+             "added_at": 0, "status": {"kind": "active", "resets_at": None, "percent": 1,
+                                       "detail": "", "probed_at": 0}},
+            {"name": "z1", "profile": "glm", "kind": "key", "owner": "", "added_at": 0,
+             "status": {"kind": "active", "resets_at": None, "percent": 1, "detail": "",
+                        "probed_at": 0}}]
+    by = {r["name"]: r for r in recs}
+    job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
+                                      "cred": "anton"}}
+    with restored(cluster.spec, "job_spec"), restored(cluster, "store_workspace"), \
+            patched(cluster.credreg, load=lambda name: by.get(name), all=lambda: recs):
+        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None, \
+            cred=None: calls.append(cred) or {"Job": {"ID": name}}
+        cluster.store_workspace = lambda root, name, req: None
+        with cluster.using(FakeNomad()):
+            got = cluster._add("mop", {"origin": "git@h:g/mop.git", "profile": "claude",
+                                       "cred": "nope"})
+            c.check("add: an unknown cred is refused", "nope" in str(got.get("error")), got)
+            got = cluster._add("mop", {"origin": "git@h:g/mop.git", "profile": "claude",
+                                       "cred": "z1"})
+            c.check("add: a cred of another profile is refused",
+                    "glm" in str(got.get("error")) or "profile" in str(got.get("error")), got)
+            cluster._add("mop", {"origin": "git@h:g/mop.git", "profile": "claude", "cred": "anton"})
+            cluster._add("mop", {"origin": "git@h:g/mop.git", "profile": "glm"})
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": job})):
+            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
+                                    "profile": "claude"})
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": job})):
+            got = cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
+                                          "profile": "claude", "cred": "z1"})
+            c.check("update: a cred of another profile is refused", got.get("error"), got)
+    c.expect("add names the cred, picks one by profile, update keeps the meta cred",
+             calls, ["anton", "z1", "anton"])
 
 
 def check_owner_gate_267(c):
@@ -805,7 +850,7 @@ def main():
                   check_secret_verbs, check_verb_table_173,
                   check_forget_inventory_178, check_forget_summary_196,
                   check_gates_40, check_caller_207, check_slots_total_243,
-                  check_update_keeps_branch_257, check_owner_gate_267,
+                  check_update_keeps_branch_257, check_cred_lease_284, check_owner_gate_267,
                   check_node_267, check_node_forms_277,
                   check_nomad_api_275):
         check(c)

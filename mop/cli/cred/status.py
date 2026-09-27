@@ -18,7 +18,8 @@ def main(argv):
         lib.usage(__doc__)
     fields = {"name": argv[0]} if argv else {}
     ans = bus.call_cluster("cred_status", project=bus.ADMIN, timeout=180, **fields)
-    print("\n".join(table(credreg.rows(ans.get("creds") or [], time.time()))))
+    print("\n".join(table(credreg.rows(ans.get("creds") or [], time.time(),
+                                       ans.get("holders") or {}))))
     return 0
 
 

@@ -420,9 +420,10 @@ def task_env(name, origin, profile, prof, cont=False, mem=0):
     return env
 
 
-def job_spec(name, origin, profile=None, cont=False, branch=None):
+def job_spec(name, origin, profile=None, cont=False, branch=None, cred=None):
     """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
-    историю каталога (`claude --continue`).
+    историю каталога (`claude --continue`). cred -- аренда кредита (#284),
+    метой, как ветка: окружение и врапер те же.
 
     По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
     нужен ровно там, где работу продолжают под другой моделью, а везде ещё
@@ -440,7 +441,7 @@ def job_spec(name, origin, profile=None, cont=False, branch=None):
     # клон. Окружение задачи и врапер при этом те же, версия шаблона та же,
     # и ни одна зарегистрированная спека не устаревает. Мету собирает одно
     # значение (#265): тот же порядок ключей, что читают все остальные.
-    meta = JobMeta(origin, profile, branch)
+    meta = JobMeta(origin, profile, branch, cred=cred)
     project = Project.of(origin, asks=read_asks())
     try:
         reserve, ceiling = memory(project.asks, MEM_MAX, MEM)
@@ -489,7 +490,7 @@ def respec(name, meta, cont=False):
     рецикл, лечение doctor'а) и сборка образа, поднимающая снятых папетов.
     Пока дорог было несколько, одна из них теряла ветку мастера (#256):
     после сборки образа папет поднимался на origin/HEAD."""
-    return job_spec(name, meta.origin, meta.llm, cont=cont, branch=meta.branch)
+    return job_spec(name, meta.origin, meta.llm, cont=cont, branch=meta.branch, cred=meta.cred)
 
 def project_constraint(project):
     """Ограничение размещения: узел обязан уметь обслужить этот проект.
