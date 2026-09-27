@@ -309,11 +309,42 @@ def check_row_button_294(c):
     c.check("#294 the page has the row button", "Авторизоваться" in page)
 
 
+# ── #297: страница -- собранное React-приложение из web/dist ─────────────
+# HYPOTHESIS: сервис отдаёт web/index.html и не умеет статику: у собранного
+# приложения скрипт и стили лежат в web/dist/assets/ под именами с хешем, и
+# без маршрута /assets/<имя> страница пуста. SOLUTION: PAGE -- web/dist/
+# index.html, чистые asset_path (только /assets/<имя> без обхода каталога) и
+# content_type (по расширению), cache_control (index -- no-cache, ассеты с
+# хешем -- на год). STATUS: FIXED — see #297
+def check_dist_297(c):
+    root = "/srv/web/dist"
+    c.expect("asset_path: a js file under assets", web.asset_path("/assets/index-Ab12.js", root),
+             "/srv/web/dist/assets/index-Ab12.js")
+    for bad in ("/assets/../index.html", "/assets/", "/assets/a/b.js", "/index.html",
+                "/assets/x.js/..", "/assets/.hidden", "/assets/a%2f..%2fb.js"):
+        c.check(f"asset_path refuses {bad}", web.asset_path(bad, root) is None, web.asset_path(bad, root))
+    c.expect("content_type js", web.content_type("index-Ab12.js"), "text/javascript; charset=utf-8")
+    c.expect("content_type css", web.content_type("index-Ab12.css"), "text/css; charset=utf-8")
+    c.expect("content_type svg", web.content_type("logo.svg"), "image/svg+xml")
+    c.expect("content_type woff2", web.content_type("f.woff2"), "font/woff2")
+    c.expect("content_type png", web.content_type("a.png"), "image/png")
+    c.expect("content_type map", web.content_type("index.js.map"), "application/json")
+    c.expect("content_type unknown", web.content_type("a.exe"), "application/octet-stream")
+    c.expect("cache_control index", web.cache_control("/"), "no-cache")
+    c.expect("cache_control assets", web.cache_control("/assets/index-Ab12.js"),
+             "public, max-age=31536000, immutable")
+    from mop.cli.server import web as webcli
+    c.check("the service serves web/dist/index.html, not the old page",
+            webcli.PAGE.endswith(os.path.join("web", "dist", "index.html")), webcli.PAGE)
+    c.check("the committed dist has an index and assets",
+            os.path.isfile(webcli.PAGE) and os.path.isdir(os.path.join(os.path.dirname(webcli.PAGE), "assets")))
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
-               check_creds_285, check_row_button_294, check_open_tab_294):
+               check_creds_285, check_row_button_294, check_open_tab_294, check_dist_297):
         fn(c)
     return c.report("web")
 

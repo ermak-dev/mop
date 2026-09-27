@@ -3,7 +3,8 @@
 The same picture as `mop list`, `mop node` and `mop stat` on one page,
 refreshed in place (docs/WEB.md):
 
-  /            the page
+  /            the page: the built application, web/dist/index.html
+  /assets/N    the application's files from web/dist/assets (hashed names)
   /logo.png    the logo (docs/logo.png), also the favicon
   /api/pool    the current snapshot as JSON
   /events      the same snapshot pushed as server-sent events
@@ -31,7 +32,10 @@ from mop.cli import lib
 from mop.common import bus, busnames, config
 from mop.server import credreg, web
 
-PAGE = os.path.join(config.PROJECT, "web", "index.html")
+# Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
+# исходниками (docs/WEB.md); собирает `mop dev web build`, сверяет CI.
+DIST = os.path.join(config.PROJECT, "web", "dist")
+PAGE = os.path.join(DIST, "index.html")
 LOGO = os.path.join(config.PROJECT, "docs", "logo.png")   # фавикон и шапка
 PING_EVERY = 15      # с: пустой кадр SSE, чтобы прокси и браузер не рвали тишину
 
@@ -45,22 +49,32 @@ class Handler(BaseHTTPRequestHandler):
         """Молчим про каждый запрос: под systemd журнал забился бы SSE-пингами.
         Ошибки печатает log_error, и он остаётся."""
 
-    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+    def _send(self, code, body, ctype="application/json; charset=utf-8", cache="no-store"):
         data = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.end_headers()
         self.wfile.write(data)
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/":
-            # Читается на каждый запрос: правка страницы видна без рестарта,
-            # а стоит это одного файла в page cache.
+            # Читается на каждый запрос: свежая раскатка видна без рестарта,
+            # а стоит это одного файла в page cache. Индекс не кэшируется:
+            # он называет ассеты по хешам, и старый индекс просил бы файлы,
+            # которых после раскатки уже нет.
             with open(PAGE, "rb") as f:
-                return self._send(200, f.read(), "text/html; charset=utf-8")
+                return self._send(200, f.read(), "text/html; charset=utf-8", web.cache_control(path))
+        asset = web.asset_path(path, DIST)
+        if asset is not None:
+            try:
+                with open(asset, "rb") as f:
+                    data = f.read()
+            except OSError:
+                return self._send(404, "no such asset\n", "text/plain")
+            return self._send(200, data, web.content_type(asset), web.cache_control(path))
         if path == "/logo.png":
             with open(LOGO, "rb") as f:
                 return self._send(200, f.read(), "image/png")
