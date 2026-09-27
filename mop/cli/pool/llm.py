@@ -1,19 +1,32 @@
-"""LLM profiles: mop llm [--probe] — what a puppet can run on and whether the key is there
+"""LLM profiles: mop llm [--probe] [--tiers] — what a puppet can run on and whether the key is there
 
 A profile changes exactly one thing — where a puppet goes for tokens.
 Everything else (tmux, state, stuck detection) is the same for every profile.
 --probe asks each provider that can answer (a profile with a probe hook and
 a key at hand) whether the key is alive and how much quota is left.
+--tiers prints the installation's tier order (MOP_LLM_TIERS): strongest
+first, the order the policy walks when a credential runs out.
 """
 import time
 
 from mop.cli import lib
-from mop.common import fsutil, llm, puppets
+from mop.common import fsutil, llm, puppets, tiers
 from mop.client import keys
 
 
 def main(argv):
     probe = "--probe" in argv
+    if "--tiers" in argv:
+        # Разбор со сверкой по реестру: незнакомый профиль в настройке --
+        # громкий отказ здесь, а не молчаливый пропуск яруса в политике.
+        try:
+            listed = tiers.default(llm.profiles())
+        except ValueError as e:
+            lib.fail(str(e))
+            return 1
+        for i, t in enumerate(listed, 1):
+            print(f"  {i}. {t.profile}" + (f":{t.model}" if t.model else ""))
+        return
     if [a for a in argv if a != "--probe"]:
         lib.usage(__doc__)
     blob, note = keys.llm_keys_blob()
