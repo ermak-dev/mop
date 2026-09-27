@@ -12,7 +12,7 @@ import time
 from . import bus, config, lease, llm, state
 from .. import driver
 from .domain import CloneFacts, JobMeta, NodeRow, PoolNode, holds_work
-from .state import PuppetRow, action_for, failing_row, silent, spec_action, verdict
+from .state import PuppetRow, State, action_for, failing_row, silent, spec_action, verdict
 
 PROJECT = config.PROJECT
 
@@ -140,6 +140,9 @@ def running(name):
     LookupError, у падающего с причиной падения."""
     got = _cluster("alloc", name=name)
     a = got.get("alloc")
+    if got.get("gave_up"):
+        # Сдавшийся bootstrap (#345): джоб остановлен, причина -- у сервера.
+        raise LookupError(f"{name}: {State('failing', got['gave_up'])}")
     if not a or a.get("ClientStatus") != "running":
         raise LookupError(not_running(name, a))
     return a, got.get("driver")
@@ -230,6 +233,11 @@ def _row(item, disk_kb=None):
     if failing and not item["error"]:
         status, state = failing
         kind = "failing"
+    # Сдавшийся bootstrap (#345): джоб остановлен сервером, причина -- из
+    # записи итога, а не из stderr (аллокации может не быть вовсе) и без
+    # хвоста «(N restarts, …)»: считал не Nomad, а сервер.
+    if item.get("gave_up") and not item["error"]:
+        status, state, kind = "failed", str(State("failing", item["gave_up"])), "failing"
     return PuppetRow(
         name=job["ID"],
         node=alloc["NodeName"] if alloc else None,
@@ -368,6 +376,13 @@ def diagnose():
     issues = []
     for item in roster(stale=True):
         job, alloc = item["job"], item["alloc"]
+        # Сдавшийся bootstrap (#345): стоп -- решение сервера, лечится правкой
+        # .mop/bootstrap.yaml и `mop update`; автолечения нет. Раньше вердикта
+        # о спеке: перерегистрация по кругу doctor'а дала бы тот же провал.
+        if item.get("gave_up"):
+            issues.append({"name": job["ID"], "alloc": alloc, "action": None,
+                           "diagnosis": str(State("failing", item["gave_up"]))})
+            continue
         # Спека проверяется раньше состояния: папет со старой спекой может
         # выглядеть совершенно здоровым ровно до первого перепланирования.
         # Вердикт считает сервис кластера: спека лежит в Nomad, а сюда её
