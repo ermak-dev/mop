@@ -9,6 +9,7 @@ import { Journal } from "./components/Journal";
 import { KINDS, type Counts, type Kind } from "./types";
 import { UsageChart } from "./components/UsageChart";
 import { UsageByUser } from "./components/UsageByUser";
+import { Credentials } from "./components/Credentials";
 
 export const KIND_RU: Record<Kind, string> = {
   free: "свободны", busy: "заняты", sick: "больны", silent: "агент молчит", down: "не подняты",
@@ -57,7 +58,8 @@ export default function App() {
             {/* расход (#299) */}
             <UsageChart days={snapshot.usage} />
             <UsageByUser users={snapshot.per_user} />
-            {/* кредиты (#300): Credentials */}
+            {/* кредиты (#300) */}
+            <Credentials creds={snapshot.creds} />
             <Journal journal={snapshot.journal} />
           </>
         )}
