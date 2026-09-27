@@ -3,6 +3,9 @@
 // встают в Stack ниже по мере переноса.
 import { Badge, Container, Group, Stack, Text, Title, Alert } from "@mantine/core";
 import { usePool } from "./usePool";
+import { PoolTable } from "./components/PoolTable";
+import { NodesPanel } from "./components/NodesPanel";
+import { Journal } from "./components/Journal";
 import { KINDS, type Counts, type Kind } from "./types";
 
 export const KIND_RU: Record<Kind, string> = {
@@ -44,6 +47,15 @@ export default function App() {
         </Group>
         {snapshot && snapshot.errors.length > 0 && (
           <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join("\n")}</Alert>
+        )}
+        {snapshot && (
+          <>
+            <PoolTable projects={snapshot.projects} />
+            <NodesPanel nodes={snapshot.nodes} />
+            {/* расход (#299): UsageChart и UsageByUser */}
+            {/* кредиты (#300): Credentials */}
+            <Journal journal={snapshot.journal} />
+          </>
         )}
         <Text c="dimmed" size="sm">
           {live ? "поток событий" : "опрос"} · без входа, LAN доверенная · действия над папетами остаются в mop ·{" "}
