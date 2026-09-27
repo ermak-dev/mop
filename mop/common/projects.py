@@ -119,9 +119,8 @@ def with_limit(limits, name, value):
 def read_limits(path=LIMITS):
     """{проект: потолок}; нет файла -- лимитов нет."""
     try:
-        with open(path) as f:
-            return {k: int(v) for k, v in json.load(f).items()}
-    except (OSError, ValueError, AttributeError):
+        return {k: int(v) for k, v in fsutil.read_json(path, {}).items()}
+    except (ValueError, AttributeError):
         return {}
 
 

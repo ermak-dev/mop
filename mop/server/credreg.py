@@ -32,7 +32,7 @@ from ..common import bus, credreg, fsutil, llm, paths, puppets
 from ..common.domain import CredStatus, JobMeta
 from . import credlogin, nomad
 
-ROOT = paths.local("creds")
+ROOT = paths.local(paths.CREDS)
 RECORD = "cred.json"
 WRITE_TIMEOUT = 60           # раздача: агент пишет в узел и в каждое тело (#137)
 STATES_TIMEOUT = 20
@@ -55,11 +55,7 @@ def _record_path(name):
 
 def load(name):
     """Запись кредита либо None, если дома или записи нет."""
-    try:
-        with open(_record_path(name)) as f:
-            rec = json.load(f)
-    except (OSError, ValueError):
-        return None
+    rec = fsutil.read_json(_record_path(name))
     return rec if isinstance(rec, dict) and rec.get("name") == name else None
 
 
@@ -87,7 +83,7 @@ def all():
         rec = load(name)
         if rec is None:
             kind = "token" if os.path.exists(os.path.join(ROOT, name, "token")) else "login"
-            rec = credreg.record(name, "claude", kind,
+            rec = credreg.record(name, credreg.LOGIN_PROFILE, kind,
                                  now=os.path.getmtime(os.path.join(ROOT, name)))
         out.append(rec)
     return out
@@ -110,7 +106,7 @@ def add_key(name, profile, key, owner="", now=None):
     return save(rec)
 
 
-def register_login(name, profile="claude", kind="login", owner="", now=None):
+def register_login(name, profile=credreg.LOGIN_PROFILE, kind="login", owner="", now=None):
     """Запись для дома, который наполнил логин (#282): сам логин записи не
     пишет, её кладёт тот, кто его вёл."""
     rec = load(name) or credreg.record(name, profile, kind, owner=owner,
@@ -131,11 +127,7 @@ def remove(name):
 
 def credentials(name):
     """Разобранный .credentials.json дома логина либо {}."""
-    try:
-        with open(credlogin.credentials_path(home(name))) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    return fsutil.read_json(credreg.credentials_file(home(name)), {})
 
 
 def secret(name, rec=None):
@@ -146,7 +138,7 @@ def secret(name, rec=None):
         return None
     kind = rec.get("kind")
     if kind == "login":
-        return (credentials(name).get("claudeAiOauth") or {}).get("accessToken")
+        return credreg.access_token(credentials(name))
     fname = "token" if kind == "token" else "key"
     try:
         with open(os.path.join(home(name), fname)) as f:
@@ -307,7 +299,7 @@ def materialize(name, rec=None):
             raise ValueError(f"credential {name}: no key to distribute")
         # Ключ уезжает в secrets.env целиком: на узле с двумя ключевыми
         # профилями последняя раздача побеждает (ограничение выше).
-        return [(paths.NODE_SECRETS, credreg.secrets_line(var, key).encode()), mark]
+        return [(paths.NODE_SECRETS, fsutil.write_kv({var: key}).encode()), mark]
     raise ValueError(f"credential {name} is a {kind}: not distributable "
                      f"(a setup-token needs the environment at claude start)")
 
@@ -339,7 +331,7 @@ def holders(api=None):
 def _changed_at(name, rec):
     """mtime секрета кредита: менялся ли дом после провала хода."""
     kind = rec.get("kind")
-    path = credlogin.credentials_path(home(name)) if kind == "login" \
+    path = credreg.credentials_file(home(name)) if kind == "login" \
         else os.path.join(home(name), "token" if kind == "token" else "key")
     try:
         return os.path.getmtime(path)
@@ -382,14 +374,15 @@ def add_login_file(name, text, owner="", now=None):
     остаётся здесь. Существующий кредит того же имени обновляется файлом."""
     try:
         creds = json.loads(text)
-        assert isinstance(creds, dict) and creds.get("claudeAiOauth")
-    except (ValueError, AssertionError):
+    except ValueError:
+        creds = None
+    if not credreg.is_login_file(creds):
         raise ValueError("credentials: not a claude .credentials.json")
     rec = load(name)
     if rec is not None and rec.get("kind") != "login":
         raise ValueError(f"credential {name} is a {rec.get('kind')}, not a login")
     fsutil.make_private_dir(home(name))
-    path = credlogin.credentials_path(home(name))
+    path = credreg.credentials_file(home(name))
     fsutil.make_private_dir(os.path.dirname(path))
     fsutil.write_private(path, json.dumps(creds))
     return register_login(name, kind="login", owner=owner, now=now)

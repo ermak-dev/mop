@@ -38,7 +38,7 @@ def main(argv):
     if len(args) != 1 or args[0].startswith("-") or "/" in args[0]:
         lib.usage(__doc__)
     name = args[0]
-    home = paths.local("creds", name)
+    home = paths.local(paths.CREDS, name)
     mode = "setup-token" if setup else "login"
     try:
         login = credlogin.Login.start(home, mode)

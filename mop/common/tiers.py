@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import re
 import time
 
-from . import config
+from . import config, credreg
 
 SETTING = "MOP_LLM_TIERS"
 _ITEM = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)(?::([A-Za-z][A-Za-z0-9_.\[\]-]*))?$")
@@ -107,8 +107,7 @@ def _index(tiers, profile, model):
 
 def _alive(creds, profile):
     """Живые кредиты профиля, по имени: детерминизм при равных."""
-    return sorted(name for name, (p, st) in creds.items()
-                  if p == profile and st.kind == "active")
+    return credreg.usable(profile, ((n, p, st.kind) for n, (p, st) in creds.items()))
 
 
 def choose(current, creds, tiers, busy, model_failed=False, now=None):

@@ -16,9 +16,11 @@ GLM, токен `setup-token`), которую сервер выдаёт пап�
 дома, здесь -- что лежит в файле и как это показать.
 """
 import calendar
+import os
 import re
 import time
 
+from . import paths
 from .domain import CredStatus
 
 KINDS = ("login", "token", "key")
@@ -29,6 +31,9 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 KEEPALIVE_AHEAD = 2 * 3600
 HEADER = ("name", "profile", "kind", "owner", "status", "resets", "used", "age", "holders")
 WORDS = {"active": "active", "quota_wait": "quota wait", "needs_login": "needs login"}
+# Логинится только claude (#317): кредит вида login и дом без записи --
+# этого профиля; у остальных ключ.
+LOGIN_PROFILE = "claude"
 
 
 def check_name(name):
@@ -74,24 +79,36 @@ def span(secs):
     return f"{secs // 86400}d"
 
 
+def status_word(st, words, unknown):
+    """Статус кредита словом: пробы не было -- unknown, needs_login несёт
+    подробность, остальное -- слово таблицы words (или вид как есть). Правило
+    одно (#317), таблица -- у фронтенда: `mop cred list` по-английски,
+    страница по-русски."""
+    kind = (st or {}).get("kind")
+    if not kind:
+        return unknown
+    word = words.get(kind, kind)
+    if kind == "needs_login" and st.get("detail"):
+        return f"{word}: {st['detail']}"
+    return word
+
+
+def age(rec, now):
+    """Возраст кредита по записи: с added_at до now, коротко (span)."""
+    return span(now - int(rec.get("added_at") or now))
+
+
 def row(rec, now, holders=()):
     """Строка `mop cred list` по записи; holders -- папеты с арендой (#284)."""
     st = rec.get("status") or {}
-    kind = st.get("kind")
-    if not kind:
-        word = "unknown"
-    elif kind == "needs_login" and st.get("detail"):
-        word = f"needs login: {st['detail']}"
-    else:
-        word = WORDS.get(kind, kind)
+    word = status_word(st, WORDS, "unknown")
     resets = "-"
     if st.get("resets_at"):
         left = int(st["resets_at"]) - now
         resets = "now" if left <= 0 else f"in {span(left)}"
     used = f"{st['percent']}%" if st.get("percent") is not None else "-"
     return (rec["name"], rec.get("profile") or "-", rec.get("kind") or "-",
-            rec.get("owner") or "-", word, resets, used,
-            span(now - int(rec.get("added_at") or now)),
+            rec.get("owner") or "-", word, resets, used, age(rec, now),
             ",".join(sorted(holders)) if holders else "-")
 
 
@@ -110,6 +127,22 @@ def needs_keepalive(expires_at, now):
     return int(expires_at) - int(now) < KEEPALIVE_AHEAD
 
 
+# ─── файл кредов claude (#317): путь и схема -- здесь одни ──────────────
+def credentials_file(home):
+    """Где лежит файл кредов claude в доме home (дом кредита, тела, свой)."""
+    return os.path.join(home, paths.CREDENTIALS)
+
+
+def is_login_file(credentials):
+    """Похоже ли разобранное на файл кредов claude: словарь с claudeAiOauth."""
+    return isinstance(credentials, dict) and bool(credentials.get("claudeAiOauth"))
+
+
+def access_token(credentials):
+    """Access-токен из разобранного файла кредов либо None."""
+    return ((credentials or {}).get("claudeAiOauth") or {}).get("accessToken")
+
+
 def expires_at(credentials):
     """Срок access-токена из .credentials.json (expiresAt в мс) -> секунды|None."""
     try:
@@ -125,9 +158,16 @@ def pick(profile, records):
     профиля, либо None -- тогда папет живёт логином оператора, как прежде.
     Непробованный не считается: активность -- утверждение пробы, а не
     отсутствие плохих вестей."""
-    fit = [r for r in records if r.get("profile") == profile
-           and (r.get("status") or {}).get("kind") == "active"]
-    return sorted(r["name"] for r in fit)[0] if fit else None
+    names = usable(profile, ((r["name"], r.get("profile"), (r.get("status") or {}).get("kind"))
+                             for r in records))
+    return names[0] if names else None
+
+
+def usable(profile, entries):
+    """Годные кредиты профиля: пробой подтверждённые active, по имени --
+    детерминизм при равных. entries -- (имя, профиль, вид статуса). Одно
+    правило на выбор аренды (pick) и ярусы (tiers, #317)."""
+    return sorted(n for n, p, kind in entries if p == profile and kind == "active")
 
 
 def without_refresh(credentials):
@@ -140,11 +180,6 @@ def without_refresh(credentials):
             v = {kk: vv for kk, vv in v.items() if kk != "refreshToken"}
         out[k] = v
     return out
-
-
-def secrets_line(var, key):
-    """Строка secrets.env для ключа профиля."""
-    return f"{var}={key}\n"
 
 
 _RESET = re.compile(r"reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")

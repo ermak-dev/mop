@@ -25,6 +25,7 @@ SECRETS_ENV = "secrets.env"                  # ключи LLM на узле и �
 SERVERS = "servers"                          # креды серверов у оператора
 BOOTSTRAP = "bootstrap"                      # файлы bootstrap'а у сервера
 PROJECTS = "projects"                        # реестр проектов сервера
+CREDS = "creds"                              # реестр кредитов сервера (#283)
 NODE_ENV = "node.env"                        # что узел знает о себе
 
 # Что глагол `write` агента имеет право положить, относительно дома пула

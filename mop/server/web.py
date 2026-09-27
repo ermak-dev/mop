@@ -214,14 +214,10 @@ LOGIN_MODES = ("login", "setup-token")
 
 def cred_status_word(st):
     """Статус кредита по-русски для страницы: три исхода плюс «не проверялся»."""
-    if not st or not st.get("kind"):
-        return "не проверялся"
-    word = CRED_WORDS.get(st["kind"], st["kind"])
-    if st["kind"] == "quota_wait" and st.get("resets_at"):
-        return f"{word} до {human_time(st['resets_at'])}"
-    if st["kind"] == "needs_login" and st.get("detail"):
-        return f"{word}: {st['detail']}"
-    return word
+    # Время сброса -- только страница: у `mop cred list` для него колонка.
+    if st and st.get("kind") == "quota_wait" and st.get("resets_at"):
+        return f"{CRED_WORDS['quota_wait']} до {human_time(st['resets_at'])}"
+    return credrows.status_word(st, CRED_WORDS, "не проверялся")
 
 
 def cred_rows(records, now, holders=None):
@@ -241,7 +237,7 @@ def cred_rows(records, now, holders=None):
                     "kind": rec.get("kind") or "-", "owner": rec.get("owner") or "",
                     "status": cred_status_word(st), "resets_at": st.get("resets_at"),
                     "percent": st.get("percent"),
-                    "age": credrows.span(now - int(rec.get("added_at") or now)),
+                    "age": credrows.age(rec, now),
                     "holders": sorted(holders.get(name) or {})})
     return out
 

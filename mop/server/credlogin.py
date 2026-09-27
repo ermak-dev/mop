@@ -39,7 +39,7 @@ import subprocess
 import termios
 import time
 
-from ..common import fsutil
+from ..common import credreg, fsutil
 
 TTL = 600                     # сколько живёт логин без кода
 CODE_PAUSE = 2                # пауза между кодом и Enter (#282)
@@ -150,10 +150,6 @@ def mask(text):
     return _SECRET.sub("<masked>", text or "")
 
 
-def credentials_path(home):
-    return os.path.join(home, ".claude", ".credentials.json")
-
-
 def status_line(status):
     """`claude auth status --json` -> строка для человека либо None, если не
     вошли. Без секретов: почта и тип подписки."""
@@ -171,15 +167,11 @@ def prepare_home(home):
     токена) не встал на экране, где нажать некому. Своё в файле не теряется."""
     fsutil.make_private_dir(home)
     path = os.path.join(home, ".claude.json")
-    try:
-        with open(path) as f:
-            flags = json.load(f)
-    except (OSError, ValueError):
-        flags = {}
+    flags = fsutil.read_json(path, {})
     flags.update({"hasCompletedOnboarding": True, "resumeReturnDismissed": True})
     flags.setdefault("theme", "dark")
     fsutil.write_private(path, json.dumps(flags))
-    fsutil.make_private_dir(os.path.join(home, ".claude"))
+    fsutil.make_private_dir(os.path.dirname(credreg.credentials_file(home)))
 
 
 def auth_status(home):
@@ -255,9 +247,9 @@ class Login:
                     self.result = tok
                     break
             else:
-                if os.path.exists(credentials_path(self.home)) and \
+                if os.path.exists(credreg.credentials_file(self.home)) and \
                         auth_status(self.home).get("loggedIn"):
-                    self.result = credentials_path(self.home)
+                    self.result = credreg.credentials_file(self.home)
                     break
             if not chunk and self._dead():
                 break
