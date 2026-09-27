@@ -201,6 +201,10 @@ def check_addressed_write_312(c):
          pick("mop", ["pu-mop-1"]), (["pu-mop-1"], False, None, [])),
         ("addressed, host: the node copy is the body",
          pick("admin", ["pu-mop-2"], carries=True, container=False), ([], True, None, [])),
+        # На host тело -- сам узел: до tmux папета «не живой» (bootstrap), а
+        # копия узла его уже обслужила -- «NOT LIVE» был бы неправдой.
+        ("addressed, host, before its tmux: served by the node copy, not reported",
+         pick("admin", ["pu-mop-9"], carries=True, container=False), ([], True, None, [])),
         ("plain, a project: its own bodies without a lease, never the node copy",
          pick("mop"), (["pu-mop-1"], False, None, [])),
         ("plain, admin: the node copy and the bodies without a lease",
