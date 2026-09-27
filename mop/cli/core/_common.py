@@ -36,7 +36,11 @@ def parse_value(args, flag):
             value = a.split("=", 1)[1]
         else:
             rest.append(a)
-    return (value or None), rest
+    if value == "":
+        # Забытое значение -- ошибка использования, а не «флага нет»: иначе
+        # `--cred` без имени молча заводил папета на первой аренде (#327).
+        raise RuntimeError(f"{flag} needs a value")
+    return value, rest
 
 
 def parse_llm(args):
