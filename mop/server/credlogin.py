@@ -47,8 +47,10 @@ SUBMIT_TIMEOUT = 120          # сколько ждать обмена кода 
 URL_TIMEOUT = 30              # сколько ждать адреса после запуска
 WIDE = 4000                   # ширина pty: гиперссылка одной строкой
 
-MODES = {"login": ["claude", "auth", "login"],
-         "setup-token": ["claude", "setup-token"]}
+# Одна таблица режимов (#318): аргументы клиента и вид кредита, который
+# режим наполняет. Реестр (вид -> режим) и страница (список) читают её.
+MODES = {"login": {"args": ["auth", "login"], "kind": "login"},
+         "setup-token": {"args": ["setup-token"], "kind": "token"}}
 
 
 # ─── клиент на сервере (#292) ─────────────────────────────────────────────
@@ -150,6 +152,11 @@ def mask(text):
     return _SECRET.sub("<masked>", text or "")
 
 
+def mask_error(e):
+    """Исключение строкой журнала: без секретов и не длиннее 160."""
+    return mask(str(e))[:160]
+
+
 def status_line(status):
     """`claude auth status --json` -> строка для человека либо None, если не
     вошли. Без секретов: почта и тип подписки."""
@@ -174,11 +181,17 @@ def prepare_home(home):
     fsutil.make_private_dir(os.path.dirname(credreg.credentials_file(home)))
 
 
+def run(home, *args, timeout):
+    """Клиент с аргументами args в доме кредита -> CompletedProcess (текст).
+    RuntimeError -- клиента нет (#292); OSError и TimeoutExpired -- наружу."""
+    return subprocess.run([client(), *args], capture_output=True, text=True,
+                          timeout=timeout, env=_env(home))
+
+
 def auth_status(home):
     """`claude auth status --json` в доме кредита -> dict (пустой при отказе)."""
     try:
-        out = subprocess.run([client(), "auth", "status", "--json"], capture_output=True,
-                             text=True, timeout=60, env=_env(home)).stdout
+        out = run(home, "auth", "status", "--json", timeout=60).stdout
         return json.loads(out) if out.strip() else {}
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         return {}
@@ -215,7 +228,7 @@ class Login:
         pid, fd = pty.fork()
         if pid == 0:                                    # клиент
             os.environ.update(_env(home))
-            os.execv(binary, [binary] + MODES[mode][1:])
+            os.execv(binary, [binary] + MODES[mode]["args"])
         self.pid, self.fd = pid, fd
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, WIDE, 0, 0))
         raw = self._read(URL_TIMEOUT, until=lambda b: authorize_url(b) is not None)
@@ -278,10 +291,6 @@ class Login:
             except OSError:
                 pass
             self.fd = None
-
-    def log(self):
-        """Экран клиента для журнала, без секретов."""
-        return mask(plain(self._log))
 
     # ── внутреннее ──
     def _dead(self):

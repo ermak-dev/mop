@@ -25,6 +25,7 @@ import time
 from ..common import bus, credreg as credrows, puppets, state
 from ..common.domain import WHO_WAIT, MasterAnswer
 from .. import usage
+from . import credlogin
 from . import nodes as node_facts
 
 STATES_EVERY = 15      # с: ростер Nomad + состояния с узлов
@@ -228,7 +229,7 @@ def cache_control(url):
 # строка собирается из перечисленных полей, а не копией записи.
 CRED_WORDS = {"active": "активен", "quota_wait": "ждёт квоты",
               "needs_login": "ждёт ручной авторизации"}
-LOGIN_MODES = ("login", "setup-token")
+LOGIN_MODES = tuple(credlogin.MODES)
 
 
 def cred_status_word(st):

@@ -7,19 +7,15 @@ window's usage, age, and the puppets holding a lease on it. Secrets
 never appear. `mop cred status` probes
 the providers now; this prints what the server already knows.
 """
-import time
-
 from mop.cli import lib
-from mop.common import bus, credreg
-from mop.common.render import table
+from mop.cli.cred import _common
+from mop.common import bus
 
 
 def main(argv):
     if argv:
         lib.usage(__doc__)
-    ans = bus.call_cluster("cred_list", project=bus.ADMIN)
-    print("\n".join(table(credreg.rows(ans.get("creds") or [], time.time(),
-                                       ans.get("holders") or {}))))
+    _common.print_creds(bus.call_cluster("cred_list", project=bus.ADMIN))
     return 0
 
 
