@@ -1095,8 +1095,68 @@ def check_host_refusal_312(c):
                 "$HOME" in (got.get("error") or "") and registered == [], (got, registered))
 
 
+# ── #345: сдавшийся bootstrap останавливает джоб и виден в ростере ──────
+# HYPOTHESIS: остановить джоб может только сервис кластера (Nomad у него), а
+# ростер и `alloc` берут причину из stderr аллокации -- у остановленного
+# джоба её нет, а после GC Nomad нет и аллокации.
+# SOLUTION: глагол оператора give_up (bootstrap просит его после ответа
+# узлу) перечитывает запись итога и останавливает джоб (purge False: клон и
+# тело на месте) только если сдался текущий ключ; nomad_items и alloc несут
+# gave_up -- строку из записи. STATUS: FIXED — see #345
+def check_give_up_345(c):
+    from mop.server import bootstrap
+    row = cluster.VERBS.get("give_up")
+    if not c.check("#345 give_up is a verb", row is not None):
+        return
+    c.expect("#345 give_up is the operator's verb, not named (the bootstrap service asks it)",
+             (row.scope, row.named, row.acting), (cluster.ADMIN, False, False))
+    root = tempfile.mkdtemp(prefix="mop-test-cluster-345-")
+    name = "pu-mop-1"
+    text = "- name: b\n  tasks:\n    - name: t\n      ansible.builtin.command: \"true\"\n"
+    failed = {"ok": False, "played": True, "rc": 2, "seconds": 3.0, "tail": "fatal",
+              "task": "bootstrap : sync", "message": "Group `cloud` is not defined"}
+    job = {"ID": name, "Type": "service", "Status": "running",
+           "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
+    want = ("bootstrap gave up after 3 attempts at task «bootstrap : sync»: "
+            "Group `cloud` is not defined — fix .mop/bootstrap.yaml, then mop update")
+    with patched(bootstrap, ROOT=root):
+        bootstrap.store(root, name, text)
+        bootstrap.note_sent(root, name, {"present": True}, now=1)
+        api = FakeNomad(jobs={name: dict(job)})
+        with cluster.using(api):
+            got = cluster.answer("admin", {"verb": "give_up", "name": name})
+        c.check("#345 give_up refuses while bootstrap has not given up",
+                got.get("error") and not [x for x in api.calls if x[0] == "deregister"], got)
+        for _ in range(3):
+            bootstrap.note_result(root, name, failed, now=2)
+        api = FakeNomad(jobs={name: dict(job)})
+        with cluster.using(api):
+            got = cluster.answer("admin", {"verb": "give_up", "name": name})
+            c.expect("#345 give_up stops the job, keeping it (purge False)",
+                     (got.get("ok"), [x for x in api.calls if x[0] == "deregister"]),
+                     (True, [("deregister", name, False)]))
+            got = cluster.answer("mop", {"verb": "give_up", "name": name})
+            c.check("#345 give_up is refused on a project's subject",
+                    "operator's verb" in (got.get("error") or ""), got)
+            items = cluster.nomad_items("mop")
+            c.expect("#345 the roster item carries the gave-up line",
+                     [i.get("gave_up") for i in items if i["job"]["ID"] == name], [want])
+            c.expect("#345 the alloc reply carries it too, with no allocation",
+                     cluster.answer("mop", {"verb": "alloc", "name": name}).get("gave_up"), want)
+        # Новая регистрация (update) -- ключ другой, джоб не сдавшийся.
+        bootstrap.note_sent(root, name, {"present": True}, now=3)
+        api = FakeNomad(jobs={name: dict(job)})
+        with cluster.using(api):
+            got = cluster.answer("admin", {"verb": "give_up", "name": name})
+            c.check("#345 after a new registration give_up refuses: the key moved on",
+                    got.get("error") and not [x for x in api.calls if x[0] == "deregister"], got)
+            c.expect("#345 ... and the roster shows no gave-up line",
+                     [i.get("gave_up") for i in cluster.nomad_items("mop")], [None])
+
+
 def main():
     c = Checks()
+    check_give_up_345(c)
     check_bootstrap_334(c)
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,

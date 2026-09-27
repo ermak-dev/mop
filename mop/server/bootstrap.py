@@ -159,6 +159,18 @@ def counts_as_failure(out):
                 and out.get("rc") == TASK_FAILED_RC and out.get("task"))
 
 
+def gave_up_of(root, name):
+    """Строка «сдался» для ростера и `alloc` (#345) либо None: запись итога
+    говорит gave_up, и ключ -- текущий (update/recycle его сменили бы)."""
+    rec = read_result(root, name) or {}
+    if not rec.get("gave_up") or rec.get("key") != workspace_key(root, name):
+        return None
+    where = f" at task «{rec['task']}»" if rec.get("task") else ""
+    why = f": {rec['message']}" if rec.get("message") else ""
+    return (f"bootstrap gave up after {rec.get('failures')} attempts{where}{why}"
+            f" — fix {FILE}, then mop update")
+
+
 def note_result(root, name, out, now=None):
     """Итог прогона папета -- рядом с отправленным (#334): метка и коммит
     того, что уехало, плюс task/message, если прогон их назвал (#333).
