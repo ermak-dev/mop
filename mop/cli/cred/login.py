@@ -9,14 +9,27 @@ home (.claude/.credentials.json), a setup-token in creds/<name>/token.
 
 `auth login` grants the full scope set (user:profile among them, which the
 usage endpoint needs); a setup-token is inference-only. The code is
-single-use and the exchange takes up to two minutes.
+single-use and the exchange takes up to two minutes. A successful login
+registers the credential (its cred.json): an `auth login` with the account's
+email as the owner, a setup-token without one.
 """
 import os
 import sys
 
 from mop.cli import lib
 from mop.common import fsutil, paths
-from mop.server import credlogin
+from mop.server import credlogin, credreg
+
+
+def registration(mode, status):
+    """Итог входа -> аргументы записи кредита (#307). Чистая функция.
+
+    auth login -- вид login, владелец -- email из `claude auth status`;
+    setup-token -- вид token без владельца: его область -- user:inference,
+    профиля (а с ним и почты) у него нет."""
+    if mode == "setup-token":
+        return {"kind": "token", "owner": ""}
+    return {"kind": "login", "owner": (status or {}).get("email") or ""}
 
 
 def main(argv):
@@ -39,11 +52,17 @@ def main(argv):
     if not login.submit(code):
         lib.fail(f"{name}: {login.error}")
         return 1
+    # Запись кредита (#307): без неё дом виден в `mop cred list`, но цикл
+    # сервиса, probe_all, `mop cred status`, --cred и кнопка страницы его
+    # пропускают. Переавторизация сохраняет прежнюю запись (register_login).
     if setup:
         path = os.path.join(home, "token")
         fsutil.write_private(path, login.result + "\n")
+        credreg.register_login(name, **registration(mode, {}))
         print(f"{name}: token stored in {path}")
         return 0
-    line = credlogin.status_line(credlogin.auth_status(home))
+    status = credlogin.auth_status(home)
+    credreg.register_login(name, **registration(mode, status))
+    line = credlogin.status_line(status)
     print(f"{name}: {line or 'logged in'}")
     return 0
