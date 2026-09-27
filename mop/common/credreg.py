@@ -162,6 +162,25 @@ def usable(profile, entries):
     return sorted(n for n, p, kind in entries if p == profile and kind == "active")
 
 
+def host_conflict(puppet, lease, on_node, profiles, node):
+    """Можно ли папету аренду lease на host-узле node (#312). Чистая.
+    -> отказ строкой | None.
+
+    На host тела -- сам узел, $HOME один на всех: две аренды одного профиля
+    писали бы один и тот же файл, и держатель одной работал бы на чужом
+    аккаунте. on_node -- {папет узла: его аренда|None}; profiles --
+    {кредит: профиль}. Тот же кредит, другой профиль, сам папет -- можно.
+    Папеты без аренды на таком узле делят файл аренды неизбежно: это
+    свойство общего $HOME, а не отказ."""
+    profile = profiles.get(lease)
+    for other, theirs in sorted(on_node.items()):
+        if other != puppet and theirs and theirs != lease and profiles.get(theirs) == profile:
+            return (f"host node {node} already runs credential {theirs} of profile {profile} "
+                    f"for {other}; puppets there share $HOME -- lease {theirs} here too, "
+                    f"or place {puppet} on a container node")
+    return None
+
+
 def without_refresh(credentials):
     """Файл кредов claude без refreshToken -- то, что уезжает в тело.
     Обновляет токен сервер в доме кредита, тела не обновляют ничего:
