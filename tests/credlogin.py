@@ -135,6 +135,7 @@ def main():
     check_register_307(c)
     check_name_first_328(c)
     check_mode_by_kind_339(c)
+    check_cli_318(c)
     return c.report("credlogin")
 
 
@@ -278,6 +279,64 @@ def check_mode_by_kind_339(c):
         c.expect("#339 the kind decides the mode; a new name keeps the flag", started,
                  [("old", "setup-token"), ("old", "setup-token"), ("anton", "login"),
                   ("newcomer", "login"), ("fresh", "setup-token")])
+
+
+def check_cli_318(c):
+    """Характеристика до переезда (#318, эпик #314): `mop cred login`
+    завершает вход тем же путём, что и сервис -- запись, владелец, секрет по
+    виду, строка итога; `mop cred list` и `status` печатают одну таблицу."""
+    import importlib
+    from mop.common import bus
+    from mop.common.render import table
+    from mop.server import credreg as srv
+    login = importlib.import_module("mop.cli.cred.login")
+
+    class Fake:
+        def __init__(self, home, mode):
+            self.mode, self.error = mode, None
+            self.url = "https://claude.com/cai/oauth/authorize?scope=user%3Ainference"
+            self.result = "sk-ant-oat01-" + "t" * 40 if mode == "setup-token" else "x"
+
+        @classmethod
+        def start(cls, home, mode):
+            os.makedirs(home, exist_ok=True)
+            return cls(home, mode)
+
+        def submit(self, code):
+            return True
+    with tempfile.TemporaryDirectory() as tmp, patched(srv, ROOT=tmp), \
+            patched(credlogin, Login=Fake,
+                    auth_status=lambda home: {"loggedIn": True, "email": "e@x", "subscriptionType": "pro"}):
+        out, err, code = run_command(login.main, ["tok", "--setup-token"], stdin="c\n")
+        path = os.path.join(tmp, "tok", "token")
+        c.expect("#318 cli setup-token: the output", (code, out.splitlines()[-1]),
+                 (0, f"tok: token stored in {path}"))
+        with open(path) as f:
+            c.expect("#318 cli setup-token: the token file", f.read(), "sk-ant-oat01-" + "t" * 40 + "\n")
+        c.expect("#318 cli setup-token: the record",
+                 {k: srv.load("tok")[k] for k in ("profile", "kind", "owner")},
+                 {"profile": "claude", "kind": "token", "owner": ""})
+        out, err, code = run_command(login.main, ["anton"], stdin="c\n")
+        c.expect("#318 cli login: the output", (code, out.splitlines()),
+                 (0, [Fake.start(os.path.join(tmp, "x"), "login").url, "anton: logged in as e@x (pro)"]))
+        c.expect("#318 cli login: the record",
+                 {k: srv.load("anton")[k] for k in ("profile", "kind", "owner")},
+                 {"profile": "claude", "kind": "login", "owner": "e@x"})
+
+    ans = {"creds": [{"name": "a", "profile": "glm", "kind": "key", "owner": "", "added_at": 0,
+                      "status": None}], "holders": {"a": ["pu-x-1"]}}
+    calls = []
+    want = None
+    import time as _time
+    from _lib import patched_env
+    with patched(bus, call_cluster=lambda verb, **kw: calls.append(verb) or ans), \
+            patched(_time, time=lambda: 100.0), patched_env(MOP_SERVER_LAN="10.0.0.1"):
+        want = "\n".join(table(credreg.rows(ans["creds"], 100.0, ans["holders"]))) + "\n"
+        for name in ("list", "status"):
+            cmd = importlib.import_module(f"mop.cli.cred.{name}")
+            out, err, code = run_command(cmd.main, [])
+            c.expect(f"#318 mop cred {name} prints the table", (code, out), (0, want))
+    c.expect("#318 the verbs", calls, ["cred_list", "cred_status"])
 
 
 if __name__ == "__main__":

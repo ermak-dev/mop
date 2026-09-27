@@ -539,6 +539,195 @@ def check_push_312(c):
                      ("FAILED: credential anton: no key to distribute", []))
 
 
+# ── #318: внутренности реестра на сервере -- одно место на каждое ─────
+# Характеристика до переезда (эпик #314): что видят снаружи завершение
+# входа (login_code), путь секрета по виду, запуск клиента в доме
+# (auth_status, keepalive), таблица режимов, «только настоящие записи» в
+# probe_all и tick, строки раздачи и маскированные ошибки цикла. Поведение
+# сохраняется: проверки зелёные и до, и после.
+def check_internals_318(c):
+    import subprocess
+    import tempfile
+    from _lib import patched
+    from mop.server import credlogin, credreg as srv, web
+
+    class Done:
+        def __init__(self, mode, result=None):
+            self.mode, self.result, self.error = mode, result, None
+
+        def expired(self):
+            return False
+
+        def submit(self, code):
+            return True
+
+        def close(self):
+            pass
+
+    def read(path):
+        with open(path) as f:
+            return f.read()
+
+    with tempfile.TemporaryDirectory() as tmp, patched(srv, ROOT=tmp), \
+            patched(credlogin, auth_status=lambda home: {"email": "a@b.c", "subscriptionType": "max"}):
+        # Завершение входа сервисом: запись, владелец, секрет по виду.
+        srv.save(credreg.record("tok", "claude", "token", now=NOW))
+        srv.save(credreg.record("anton", "claude", "login", now=NOW))
+        srv._logins["tok"] = Done("setup-token", "sk-ant-oat01-T")
+        c.expect("#318 login_code(setup-token): answer", srv.login_code("tok", "c"),
+                 {"ok": True, "owner": ""})
+        c.expect("#318 login_code(setup-token): the token file", read(os.path.join(tmp, "tok", "token")),
+                 "sk-ant-oat01-T\n")
+        c.expect("#318 login_code(setup-token): the record",
+                 {k: srv.load("tok")[k] for k in ("kind", "owner")}, {"kind": "token", "owner": ""})
+        srv._logins["tok"] = Done("setup-token", "sk-ant-oat01-U")
+        c.expect("#318 login_code(setup-token) with an owner", srv.login_code("tok", "c", owner="o@x"),
+                 {"ok": True, "owner": "o@x"})
+        srv._logins["anton"] = Done("login")
+        c.expect("#318 login_code(login): answer", srv.login_code("anton", "c"),
+                 {"ok": True, "owner": "a@b.c", "subscription": "max"})
+        c.expect("#318 login_code(login): the record",
+                 {k: srv.load("anton")[k] for k in ("kind", "owner")}, {"kind": "login", "owner": "a@b.c"})
+        srv._logins["anton"] = Done("login")
+        c.expect("#318 login_code(login): an owner wins over the email",
+                 srv.login_code("anton", "c", owner="boss@x")["owner"], "boss@x")
+        srv._logins["fresh"] = Done("login")
+        srv.login_code("fresh", "c")
+        c.expect("#318 login_code on a new name registers a claude login",
+                 {k: srv.load("fresh")[k] for k in ("profile", "kind", "owner")},
+                 {"profile": "claude", "kind": "login", "owner": "a@b.c"})
+
+    with tempfile.TemporaryDirectory() as tmp, patched(srv, ROOT=tmp):
+        # Где лежит секрет по виду: чтение (secret) и время смены (_changed_at).
+        srv.add_key("zai", "glm", "K", now=NOW)
+        srv.save(credreg.record("tok", "claude", "token", now=NOW))
+        with open(os.path.join(tmp, "tok", "token"), "w") as f:
+            f.write("T\n")
+        srv.add_login_file("anton", '{"claudeAiOauth": {"accessToken": "A"}}', now=NOW)
+        c.expect("#318 the key file", read(os.path.join(tmp, "zai", "key")), "K\n")
+        c.expect("#318 the login file",
+                 read(os.path.join(tmp, "anton", ".claude", ".credentials.json")),
+                 '{"claudeAiOauth": {"accessToken": "A"}}')
+        c.expect("#318 secret per kind", [srv.secret(n) for n in ("zai", "tok", "anton")], ["K", "T", "A"])
+        for n, rel, t in (("zai", "key", 1001), ("tok", "token", 1002),
+                          ("anton", os.path.join(".claude", ".credentials.json"), 1003)):
+            os.utime(os.path.join(tmp, n, rel), (t, t))
+        c.expect("#318 _changed_at per kind",
+                 [srv._changed_at(n, srv.load(n)) for n in ("zai", "tok", "anton")], [1001, 1002, 1003])
+        os.makedirs(os.path.join(tmp, "bare"))
+        c.expect("#318 a bare home reads as a login without a record",
+                 [(r["name"], r["kind"]) for r in srv.all()],
+                 [("anton", "login"), ("bare", "login"), ("tok", "token"), ("zai", "key")])
+
+        # Клиент в доме кредита: auth_status и keepalive -- одним запуском.
+        runs = []
+
+        def run(args, **kw):
+            runs.append((list(args), kw["env"]["HOME"], kw["env"].get("BROWSER"), kw["timeout"]))
+            return subprocess.CompletedProcess(args, 0, stdout='{"loggedIn": true}', stderr="")
+        with patched(credlogin, client=lambda: "/c/claude"), patched(subprocess, run=run):
+            c.expect("#318 auth_status parses the client's json", credlogin.auth_status("/h"),
+                     {"loggedIn": True})
+            c.expect("#318 keepalive(force) on a login", srv.keepalive("anton", force=True), "not refreshed")
+        c.expect("#318 the client runs in the credential's home", runs,
+                 [(["/c/claude", "auth", "status", "--json"], "/h", "/bin/false", 60),
+                  (["/c/claude", "-p", srv.KEEPALIVE_PROMPT, "--model", srv.KEEPALIVE_MODEL],
+                   os.path.join(tmp, "anton"), "/bin/false", srv.KEEPALIVE_TIMEOUT)])
+
+        def no_client():
+            raise RuntimeError("claude is not installed")
+
+        def slow(args, **kw):
+            raise subprocess.TimeoutExpired(args, 1)
+        with patched(credlogin, client=no_client):
+            c.expect("#318 keepalive without a client", srv.keepalive("anton", force=True),
+                     "failed: claude is not installed")
+            c.expect("#318 auth_status without a client", credlogin.auth_status("/h"), {})
+        with patched(credlogin, client=lambda: "/c/claude"), patched(subprocess, run=slow):
+            c.expect("#318 keepalive on a timeout", srv.keepalive("anton", force=True),
+                     "failed: TimeoutExpired")
+        c.expect("#318 keepalive of a key", srv.keepalive("zai", force=True), "not a login")
+
+        # Только настоящие записи: дом без cred.json не пробуется.
+        probed = []
+        with patched(srv, probe=lambda name, now=None: probed.append(name) or name):
+            c.expect("#318 probe_all skips a home without a record", srv.probe_all(NOW),
+                     ["anton", "tok", "zai"])
+            with patched(srv, holders=lambda api=None: {}, keepalive=lambda *a, **k: "not due"):
+                probed.clear()
+                srv.tick(now=NOW)
+                c.expect("#318 tick skips a home without a record", probed, ["anton", "tok", "zai"])
+
+        # Строки раздачи и маскированная ошибка круга.
+        got = {"n2": "OK", "n1": "FAILED: x"}
+        with patched(srv, holders=lambda api=None: {"zai": {"pu-1": "n1"}},
+                     keepalive=lambda *a, **k: "not due", probe=lambda name, now=None: None,
+                     materialize=lambda name, rec=None: [("f", name.encode())],
+                     distribute=lambda name, api=None, now=None: got,
+                     turns_of=lambda holding, api=None: {}):
+            lines = srv.tick(now=NOW)
+        c.check("#318 tick names the distribution by node",
+                "cred zai: distributed: n1 FAILED: x, n2 OK" in lines, lines)
+        os.utime(os.path.join(tmp, "zai", "key"), (NOW + 100, NOW + 100))
+        with patched(srv, distribute=lambda name, api=None, now=None: got):
+            c.expect("#318 note_turn names the re-distribution by node",
+                     srv.note_turn("zai", {"event": "StopFailure", "at": NOW + 5, "cred": "zai",
+                                           "error": "authentication_failed"}, NOW + 6),
+                     "zai: re-distributed after a stale login: n1 FAILED: x, n2 OK")
+        boom = "boom sk-ant-api03-secret " + "y" * 300
+
+        def explode(*a, **k):
+            raise Exception(boom)
+        with patched(srv, holders=lambda api=None: {}, keepalive=lambda *a, **k: "not due",
+                     probe=explode):
+            lines = srv.tick(now=NOW)
+        want = "cred zai: " + credlogin.mask(boom)[:160]
+        c.check("#318 a failed credential is masked and cut in the journal",
+                want in lines and "sk-ant-" not in "".join(lines), lines)
+
+        class Stop(BaseException):
+            pass
+
+        def stop(secs):
+            raise Stop()
+        logged = []
+        with patched(srv, tick=explode), patched(srv.time, sleep=stop):
+            try:
+                srv.ticker(logged.append)
+            except Stop:
+                pass
+        c.expect("#318 a failed round is masked and cut in the journal", logged,
+                 ["mop-cluster: cred tick failed: " + credlogin.mask(boom)[:160]])
+
+    # Таблица режимов, как её видят страница, реестр и сам клиент.
+    c.expect("#318 the page's modes", tuple(web.LOGIN_MODES), ("login", "setup-token"))
+    c.expect("#318 the registry's mode per kind", dict(srv.MODE_OF_KIND),
+             {"login": "login", "token": "setup-token"})
+    for mode, want in (("login", ["/c/claude", "auth", "login"]),
+                       ("setup-token", ["/c/claude", "setup-token"])):
+        argv = []
+
+        class Exec(BaseException):
+            pass
+
+        def execv(binary, args):
+            argv.append(list(args))
+            raise Exec()
+        with tempfile.TemporaryDirectory() as tmp, patched(credlogin, client=lambda: "/c/claude"), \
+                patched(credlogin.pty, fork=lambda: (0, None)), \
+                patched(credlogin.os, execv=execv, environ=dict(os.environ)):
+            try:
+                credlogin.Login.start(os.path.join(tmp, "h"), mode)
+            except Exec:
+                pass
+        c.expect(f"#318 the client's argv for {mode}", argv, [want])
+    try:
+        credlogin.Login("/h", "nope")
+        c.fail("#318 an unknown mode must be refused")
+    except ValueError as e:
+        c.check("#318 an unknown mode names the modes", "login, setup-token" in str(e), str(e))
+
+
 def main():
     c = Checks()
     check_write_fanout_315(c)
@@ -548,6 +737,7 @@ def main():
     check_foreign_mark_308(c)
     check_creds_knowledge_317(c)
     check_push_312(c)
+    check_internals_318(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
     rec = credreg.record("anton", "claude", "login", owner="anton@example.dev", now=NOW)
