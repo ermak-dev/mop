@@ -1178,6 +1178,25 @@ def check_deploy_check(c):
                         not (dry and collected))
                 c.check("deploy without --check must still collect server credentials",
                         not (not dry and not collected))
+            # #335: гейт спрашивает пайплайн коммита на ветке раскатки --
+            # ветке origin по умолчанию, а не последний на любой ветке (там
+            # 27.09 оказался идущий пайплайн эпика на том же коммите).
+            from mop.common import gitlab
+            asked, real_get = [], config.get
+
+            def pipeline(sha, ref=None):
+                asked.append((sha, ref))
+                return {"id": 1, "status": "success", "web_url": "u"}
+            with patched(config, get=lambda name, default=None: "1"
+                         if name == "MOP_DEPLOY_NEEDS_GREEN" else real_get(name, default)), \
+                    patched(gitlab, has_credentials=lambda: True, pipeline=pipeline,
+                            jobs=lambda pid: []), \
+                    patched(deploy, head_sha=lambda root: "5b92b440c952",
+                            ci_state=lambda root: ("feature", "master", [])):
+                calls.clear(), collected.clear()
+                out, err, code = run_command(deploy.main, [])
+                c.expect(f"#335 deploy gate asks the default branch's pipeline (err {err!r})",
+                         (code, asked), (0, [("5b92b440c952", "master")]))
             # Прочие аргументы — по-прежнему отказ, и до плейбука.
             for argv in (["pool"], ["git@h:g/p.git"], ["--check", "extra"], ["--diff"]):
                 calls.clear()
