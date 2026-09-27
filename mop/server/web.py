@@ -32,6 +32,8 @@ USAGE_EVERY = 600      # с: разбор транскриптов в телах
 USAGE_DAYS = 14        # окно расхода, как у `mop stat`
 USAGE_TIMEOUT = 90     # как у `mop stat`: разбор небыстрый
 CREDS_EVERY = 60       # с: реестр кредитов -- чтение файлов на сервере (#285)
+MASTERS_EVERY = 30     # с: опрос who по проектам -- живые мастера (#305)
+MASTERS_WAIT = 2       # с: сколько ждать ответов who на проект
 EVENTS_CAP = 100       # сколько событий помнит журнал
 DEBOUNCE = 1.0         # с: пачка событий — один круг, а не по кругу на каждое
 
@@ -119,18 +121,49 @@ def user_rows(answers):
     return sorted(rows, key=lambda r: (-r["total"], r["login"]))
 
 
-def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at, creds=()):
+def master_rows(answers, rows):
+    """Ответы who по проектам -> строки секции «Мастера» (#305). Чистая.
+
+    answers -- {проект: [ответ who]}, ответ -- то, что отдаёт mcp.on_inbox:
+    {master, project, user, session, cwd}. Реестра мастеров нет намеренно
+    (mcp._masters): живой -- тот, кто отозвался. Папеты -- проекта, чья
+    аренда (owner строки ростера) на логине мастера: так видно, кто чем
+    правит. Один мастер, ответивший дважды, -- одна строка."""
+    by_owner = {}
+    for r in rows:
+        project = puppets.project_of(r.origin) if r.origin else "?"
+        if r.owner:
+            by_owner.setdefault((project, r.owner), []).append(r.name)
+    seen, out = set(), []
+    for asked, found in answers.items():
+        for d in found or []:
+            project = d.get("project") or asked
+            address = str(d.get("master") or "-")
+            if (project, address) in seen:
+                continue
+            seen.add((project, address))
+            user = d.get("user") or "-"
+            out.append({"project": project, "master": address, "user": user,
+                        "session": d.get("session") or "-", "cwd": d.get("cwd") or "-",
+                        "puppets": sorted(by_owner.get((project, user), []))})
+    return sorted(out, key=lambda m: (m["project"], m["user"], m["master"]))
+
+
+def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at, creds=(),
+             masters=()):
     """Один JSON на страницу и /api/pool. Набор ключей закреплён — страница
     читает их по имени.
 
     Диагностики здесь нет (решение оператора 2026-09-22): она стоила
     запроса к Nomad на каждого папета каждым кругом, а лечение всё равно
     остаётся за `mop doctor`; больной папет и так виден корзиной sick.
-    creds -- строки реестра кредитов (#285), уже без секретов (cred_rows)."""
+    creds -- строки реестра кредитов (#285), уже без секретов (cred_rows);
+    masters -- живые мастера по опросу who (#305, master_rows)."""
     return {"at": at, "projects": projects(rows), "counts": counts(rows),
             "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "per_user": per_user,
-            "journal": journal, "errors": errors, "creds": list(creds)}
+            "journal": journal, "errors": errors, "creds": list(creds),
+            "masters": list(masters)}
 
 
 # ─── собранное приложение (#297) ─────────────────────────────────────────
@@ -277,6 +310,7 @@ class Collector:
         self.rows, self.sizes, self.nodes = [], {}, []
         self.usage, self.per_puppet, self.per_user, self.journal = [], [], [], []
         self.creds = []
+        self.masters = []
         self.errors = {}
         self.at = None
         self._kick = threading.Event()
@@ -288,7 +322,7 @@ class Collector:
                             self.usage, self.per_puppet, self.per_user,
                             self.journal, [f"{k}: {v}" for k, v in
                                            sorted(self.errors.items())],
-                            self.at, self.creds)
+                            self.at, self.creds, self.masters)
 
     def wait(self, version, timeout):
         """-> (версия, снимок) — новая версия, либо та же по таймауту."""
@@ -313,7 +347,7 @@ class Collector:
         self._kick.set()
 
     def start(self):
-        for fn in (self._states, self._sizes, self._usage, self._creds):
+        for fn in (self._states, self._sizes, self._usage, self._creds, self._masters):
             threading.Thread(target=fn, daemon=True, name=f"mop-web-{fn.__name__}").start()
 
     def _note(self, kind, error):
@@ -383,6 +417,31 @@ class Collector:
         while True:
             self.refresh_creds()
             time.sleep(CREDS_EVERY)
+
+    def _masters(self):
+        # Живые мастера (#305): опрос who в общий инбокс каждого проекта --
+        # тот же, которым их находит инструмент agents. Проекты -- реестр
+        # сервера (и проекты без папетов) плюс проекты ростера. service
+        # публиковать туда вправе (mop.> без rpc), ответы -- в _INBOX.
+        from ..common import busnames, projects as registry
+        while True:
+            try:
+                with self._cond:
+                    rows = list(self.rows)
+                names = set(registry.names(*puppets.project_ids(registry.read())))
+                names |= {puppets.project_of(r.origin) for r in rows if r.origin}
+                answers = {p: bus.gather("who", timeout=MASTERS_WAIT,
+                                         subj=busnames.inbox(p, busnames.ALL_MASTERS))
+                           for p in sorted(names)}
+                found = master_rows(answers, rows)
+                with self._cond:
+                    self.masters = found
+                    self._note("masters", None)
+            except Exception as e:
+                with self._cond:
+                    self._note("masters", str(e) or type(e).__name__)
+            self._bump()
+            time.sleep(MASTERS_EVERY)
 
     def refresh_creds(self):
         """Перечитать реестр сейчас: после добавления или логина со страницы

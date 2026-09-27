@@ -4,6 +4,7 @@ import { Badge, Container, Group, Stack, Text, Title, Alert } from "@mantine/cor
 import { usePool } from "./usePool";
 import { PoolTable } from "./components/PoolTable";
 import { NodesPanel } from "./components/NodesPanel";
+import { Masters } from "./components/Masters";
 import { Journal } from "./components/Journal";
 import { KINDS, type Counts, type Kind } from "./types";
 import { UsageChart } from "./components/UsageChart";
@@ -56,6 +57,8 @@ export default function App() {
         {snapshot && (
           <>
             <PoolTable projects={snapshot.projects} />
+            {/* живые мастера (#305) */}
+            <Masters masters={snapshot.masters ?? []} />
             <NodesPanel nodes={snapshot.nodes} />
             {/* расход (#299) */}
             <UsageChart days={snapshot.usage} />

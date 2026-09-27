@@ -39,4 +39,16 @@ export interface Snapshot {
   journal: JournalEntry[];
   errors: string[];
   creds: Cred[];
+  masters: Master[];
+}
+
+/** Живой мастер по опросу who (#305): адрес для send, логин, сессия, каталог
+ *  и папеты проекта, чья аренда на этом логине. */
+export interface Master {
+  project: string;
+  master: string;
+  user: string;
+  session: string;
+  cwd: string;
+  puppets: string[];
 }

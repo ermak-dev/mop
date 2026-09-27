@@ -15,7 +15,7 @@ class FakeSource {
   frame(data: unknown) { this.listeners["snapshot"]({ data: JSON.stringify(data) } as MessageEvent); }
 }
 
-const snap = (n: number) => ({ at: n, projects: [], nodes: [], usage: [], per_puppet: {}, per_user: [], journal: [], errors: [], creds: [],
+const snap = (n: number) => ({ at: n, projects: [], nodes: [], usage: [], per_puppet: {}, per_user: [], journal: [], errors: [], creds: [], masters: [],
   counts: { puppets: n, free: n, busy: 0, sick: 0, silent: 0, down: 0 } });
 
 beforeEach(() => {
