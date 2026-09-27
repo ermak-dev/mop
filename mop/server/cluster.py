@@ -791,7 +791,7 @@ def _cred_status(project, req):
 
 
 def _cred_login_start(project, req):
-    return {"ok": True, "url": credreg.login_start(req["name"], req.get("mode") or "login")}
+    return {"ok": True, "url": credreg.login_start(req["name"], req.get("mode") or None)}
 
 
 def _cred_login_code(project, req):
