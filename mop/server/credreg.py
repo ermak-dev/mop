@@ -27,6 +27,7 @@ import subprocess
 import threading
 import time
 
+from .. import session
 from ..common import bus, credreg, fsutil, llm, paths, puppets
 from ..common.domain import CredStatus, JobMeta
 from . import credlogin, nomad
@@ -467,7 +468,7 @@ def note_turn(name, record, now=None, api=None):
     if status is not None:
         save({**credreg.merge_status(rec, status, now), "noted_at": int(record["at"])})
         return f"{name}: {status.kind} ({status.detail})"
-    if record.get("error") == "authentication_failed":
+    if record.get("error") == session.AUTH_FAILED:
         save({**rec, "noted_at": int(record["at"])})
         got = distribute(name, api, now)
         return f"{name}: re-distributed after a stale login: " + ", ".join(

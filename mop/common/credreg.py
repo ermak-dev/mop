@@ -20,6 +20,7 @@ import os
 import re
 import time
 
+from .. import session
 from . import paths
 from .domain import CredStatus
 
@@ -205,15 +206,15 @@ def turn_status(record, changed_at):
     менялся после хода (changed_at -- mtime секрета либо None); менялся --
     None, вызывающий раздаёт свежее. rate_limit -- ждать сброса из текста,
     billing_error -- ждать без времени. Остальное кредита не касается."""
-    if not record or record.get("event") != "StopFailure":
+    if not record or record.get("event") != session.FAILURE:
         return None
     code, detail = record.get("error"), record.get("detail") or ""
-    if code == "authentication_failed":
+    if code == session.AUTH_FAILED:
         if changed_at is not None and int(changed_at) > int(record.get("at") or 0):
             return None
         return CredStatus("needs_login", detail="login expired")
-    if code == "rate_limit":
+    if code == session.RATE_LIMIT:
         return CredStatus("quota_wait", resets_at=reset_time_of(detail), detail=detail[:120])
-    if code == "billing_error":
+    if code == session.BILLING_ERROR:
         return CredStatus("quota_wait", detail=detail[:120])
     return None

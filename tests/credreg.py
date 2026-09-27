@@ -539,8 +539,72 @@ def check_push_312(c):
                      ("FAILED: credential anton: no key to distribute", []))
 
 
+
+# ── #322: словарь провала хода -- одно определение ────────────────────
+# Характеристика того, что код провала говорит о кредите: common.credreg.
+# turn_status и ветка протухшего логина в server.credreg.note_turn. Значения
+# сняты со старого кода; соответствие кодов своё у credreg и у state
+# (rate_limit здесь quota_wait, там error) -- общие только сами коды.
+RESET_TEXT = "Your limit will reset at 2026-09-24 15:00:00"
+
+
+def failed(error, detail="", at=NOW, event="StopFailure"):
+    return {"event": event, "at": at, "error": error, "detail": detail, "cred": "anton"}
+
+
+TURN_STATUS = [
+    ("no record", None, None, None),
+    ("a clearing event", failed(None, event="Stop"), None, None),
+    ("authentication_failed, home unchanged", failed("authentication_failed"), None,
+     CredStatus("needs_login", detail="login expired")),
+    ("authentication_failed, home older than the turn", failed("authentication_failed"),
+     NOW - 1, CredStatus("needs_login", detail="login expired")),
+    ("authentication_failed, home changed at the turn", failed("authentication_failed"),
+     NOW, CredStatus("needs_login", detail="login expired")),
+    ("authentication_failed, home changed after the turn", failed("authentication_failed"),
+     NOW + 1, None),
+    ("rate_limit with a reset time", failed("rate_limit", RESET_TEXT), None,
+     CredStatus("quota_wait", resets_at=1790262000, detail=RESET_TEXT)),
+    ("rate_limit, a long text is cut", failed("rate_limit", "x" * 300), None,
+     CredStatus("quota_wait", detail="x" * 120)),
+    ("billing_error", failed("billing_error", "no credits"), None,
+     CredStatus("quota_wait", detail="no credits")),
+    ("another code", failed("model_not_found", "gone"), None, None),
+    ("unknown", failed("unknown"), None, None),
+]
+
+
+def check_turn_vocabulary_322(c):
+    for what, record, changed_at, want in TURN_STATUS:
+        c.expect(f"#322 turn_status: {what}", credreg.turn_status(record, changed_at), want)
+    import tempfile
+    from mop.server import credreg as srv
+    with tempfile.TemporaryDirectory() as tmp:
+        with patched(srv, ROOT=tmp, _changed_at=lambda name, rec: NOW + 5,
+                     distribute=lambda name, api=None, now=None: {"pu-a-1": "OK"}):
+            srv.save(credreg.record("anton", "claude", "login", now=NOW - 100))
+            got = srv.note_turn("anton", failed("authentication_failed"), NOW + 10)
+            c.expect("#322 note_turn: a stale login after a fresh home is re-distributed",
+                     got, "anton: re-distributed after a stale login: pu-a-1 OK")
+            c.expect("#322 note_turn: the stale turn is noted",
+                     srv.load("anton").get("noted_at"), NOW)
+            c.expect("#322 note_turn: another code the credential ignores",
+                     srv.note_turn("anton", failed("model_not_found", at=NOW + 1), NOW + 10),
+                     None)
+    # Одно определение: имя события и коды -- из mop/session.py, литералов
+    # в разборщиках нет.
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    for rel in ("mop/common/state.py", "mop/common/credreg.py", "mop/server/credreg.py"):
+        with open(os.path.join(root, rel)) as f:
+            code = [l for l in f if not l.lstrip().startswith("#")]
+        body = "".join(code)
+        left = [w for w in ('"StopFailure"', '"authentication_failed"', '"rate_limit"',
+                            '"billing_error"') if w in body]
+        c.expect(f"#322 {rel} spells no turn-failure literal", left, [])
+
 def main():
     c = Checks()
+    check_turn_vocabulary_322(c)
     check_write_fanout_315(c)
     check_login_start_registry_295(c)
     check_login_start_profile_330(c)

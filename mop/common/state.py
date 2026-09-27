@@ -10,6 +10,7 @@ import re
 import time
 from dataclasses import asdict, dataclass
 
+from .. import session
 from .domain import CloneFacts, holds_work
 
 # Имена внутри спеки, которые читает и ростер: группа задач папета -- по ней
@@ -296,11 +297,11 @@ def _state_from_turn(f):
     if status == "waiting" and st.get("waitingFor"):
         return State("dialog", st["waitingFor"])
     code = rec.get("error")
-    if status != "idle" or rec.get("event") != "StopFailure" or not code:
+    if status != "idle" or rec.get("event") != session.FAILURE or not code:
         return _state_from_session(status, _clone(f))
-    if code == "authentication_failed":
+    if code == session.AUTH_FAILED:
         return State("login", "login expired", _work_branch(_clone(f)))
-    if code == "billing_error":
+    if code == session.BILLING_ERROR:
         return State("quota", rec.get("detail") or None)
     return State("error", rec.get("detail") or code)
 

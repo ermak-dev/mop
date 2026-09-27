@@ -187,9 +187,24 @@ def check_state(c):
                      or json.loads(lines[0]).get("status") != "busy"))
 
 
+
+def check_state_paths_322(c):
+    """#322: каталог состояния назван дважды -- в session.py (stdlib, едет в
+    тело исходником и пакет не импортирует) и в paths. Связи нет, кроме
+    этой проверки: метку кредита кладёт `write` по paths.CRED_MARK, хук
+    читает её по session.CRED_MARK, pve._seed стирает её по paths (#312)."""
+    from mop.common import paths
+    home = os.path.expanduser("~")
+    state = os.path.join(home, paths.STATE)
+    c.expect("session.CRED_MARK is paths.CRED_MARK in this home",
+             session.CRED_MARK, os.path.join(home, paths.CRED_MARK))
+    c.expect("session.TURNS lies in paths.STATE", session.TURNS, os.path.join(state, "turns"))
+    c.expect("the mark lies in paths.STATE", os.path.dirname(session.CRED_MARK), state)
+    c.expect("session.STATE is paths.STATE in this home", getattr(session, "STATE", None), state)
+
 def main():
     c = Checks()
-    for fn in (check_turn_record, check_hook_cli, check_state):
+    for fn in (check_turn_record, check_hook_cli, check_state, check_state_paths_322):
         try:
             fn(c)
         except Exception as e:
