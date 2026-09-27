@@ -46,7 +46,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** A project has one definition: `driver.project_of`, the origin's basename without `.git`; puppet names are built from it too. The word «shard» is gone (#85)
  - **MUST** Two layers: Nomad decides where a puppet stands, the bus decides how to talk to it. The Nomad token lives on the server and, through `mop join`, on operators' machines; it never reaches a node
  - **MUST** The server is the ansible controller and the operator's machine is not in the inventory: it gets the server's credentials with `mop join` into `~/.config/mop/servers/[address]/`, and `MOP_SERVER_LAN` in the environment retargets a master at another server
- - **MUST** Symlinks pointing in from outside are interfaces: `~/bin/mop`, `~/etc/nomad`, `~/etc/nats`, `~/.claude/skills/master`; a playbook is found by the path `~/etc/[name]/setup.yml`, and there is no name table anywhere
+ - **MUST** Symlinks pointing in from outside are interfaces: `~/bin/mop`, `~/.claude/skills/master`; deploy plays `deploy/site.yml` from the repository and writes nothing under `~/etc` (#311)
  - Terminology: **master** is the controlling side, **puppet** the working one; `free (master)` in a state string is a git branch, not a role
 
 ## Secrets

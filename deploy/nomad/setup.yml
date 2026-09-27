@@ -16,10 +16,7 @@
 # оператору. На узлы пула он не едет.
 #
 # Запуск:  mop deploy
-#
-# Симлинк ~/etc/nomad обязателен, как и ~/etc/nats: `net setup <имя>` и
-# ~/etc/site.yml находят плейбук по одному лишь пути ~/etc/<имя>/setup.yml,
-# таблицы имён нигде нет. Симлинк и есть эта таблица; заводит его `mop deploy`.
+
 
 - name: Nomad server
   hosts: server

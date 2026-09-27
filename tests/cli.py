@@ -111,9 +111,16 @@ def main():
     except ImportError as e:
         c.fail(f"{e}")
         return c.report("cli")
-    for argv, want in [(["nomad"], "nomad"), (["pool"], "pool"), (["all"], "all"),
-                       ([], None), (["git@h:g/x.git"], None), (["mop"], None)]:
-        c.expect(f"refused_target({argv})", deploy.refused_target(argv), want)
+    # Деплой не трогает ~/etc (#311): ссылки ~/etc/nomad и ~/etc/nats были
+    # стыком с личным инструментом автора (net setup) и никем больше не
+    # читаются; старые цели запуска отвергает общий отказ «takes no
+    # arguments» (#79). HYPOTHESIS: deploy.link заводит ссылки каждым
+    # прогоном, RUN_TARGETS дублирует общий отказ. SOLUTION: оба удалены.
+    # STATUS: FIXED — see #311
+    src = open(deploy.__file__, encoding="utf-8").read()
+    c.check("#311 deploy knows nothing of ~/etc", "~/etc" not in src and not hasattr(deploy, "link"))
+    c.check("#311 no run-target table besides the generic refusal",
+            not hasattr(deploy, "RUN_TARGETS") and not hasattr(deploy, "refused_target"))
     root = tempfile.mkdtemp(prefix="mop-test-deploy-")
     open(os.path.join(root, "sandbox.yaml"), "w").close()
     c.expect("missing_extras", deploy.missing_extras("sandbox.yaml, other.yaml,", root), ["other.yaml"])

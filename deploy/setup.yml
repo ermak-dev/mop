@@ -21,9 +21,7 @@
 # (~/.config/mop/servers/<адрес>/), и join везёт ровно этот каталог.
 #
 # Запуск:  mop deploy
-#
-# Симлинк ~/etc/nats обязателен, как и ~/etc/nomad: таблицы «имя -> плейбук»
-# нигде нет, путь и есть таблица.
+
 
 # Имя узла в Nomad и имя в инвентаре — одно и то же имя: клиент Nomad
 # объявляется как `name = inventory_hostname` (deploy/nomad/client.hcl.j2).
