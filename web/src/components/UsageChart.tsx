@@ -2,9 +2,10 @@
 // (все дни окна, включая пустые -- их даёт сервер, usage_axis). Заголовок
 // несёт сумму за окно, как на прежней странице: «за 14 дней, всего 836M».
 import { BarChart } from "@mantine/charts";
-import { Paper, Text, Title } from "@mantine/core";
+import { Paper } from "@mantine/core";
 import type { UsageDay } from "../types";
 import { human, plural } from "./format";
+import { EmptyNote, SectionTitle } from "./Section";
 
 export function usageNote(days: UsageDay[]): string {
   if (!days.length) return "ещё не собрано";
@@ -15,9 +16,7 @@ export function usageNote(days: UsageDay[]): string {
 export function UsageChart({ days }: { days: UsageDay[] }) {
   return (
     <Paper withBorder p="md" radius="md" data-testid="usage-chart">
-      <Title order={4}>
-        Токены по дням <Text span c="dimmed" size="sm" fw={400}>{usageNote(days)}</Text>
-      </Title>
+      <SectionTitle order={4} title="Токены по дням" note={usageNote(days)} />
       {days.length ? (
         <BarChart
           h={220}
@@ -30,7 +29,7 @@ export function UsageChart({ days }: { days: UsageDay[] }) {
           gridAxis="y"
         />
       ) : (
-        <Text c="dimmed" size="sm" mt="sm">расход появится после первого разбора транскриптов</Text>
+        <EmptyNote size="sm" mt="sm">расход появится после первого разбора транскриптов</EmptyNote>
       )}
     </Paper>
   );

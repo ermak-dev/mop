@@ -1,7 +1,7 @@
 // Узлы (#298): колонки, счётчик в заголовке, корзина по состоянию.
 import { screen } from "@testing-library/react";
-import { renderUi } from "../test-utils";
-import { NodesPanel } from "./NodesPanel";
+import { expectHead, renderUi } from "../test-utils";
+import { COLS, NodesPanel } from "./NodesPanel";
 import type { Node } from "../types";
 
 const NODES: Node[] = [
@@ -12,9 +12,7 @@ const NODES: Node[] = [
 test("the nodes table with the old page's columns", () => {
   renderUi(<NodesPanel nodes={NODES} />);
   expect(screen.getByRole("heading", { name: /Узлы/ })).toHaveTextContent("2 в кластере");
-  for (const h of ["узел", "драйвер", "проекты", "состояние", "свободно", "всего", "слоты"]) {
-    expect(screen.getByRole("columnheader", { name: h })).toBeInTheDocument();
-  }
+  expectHead(Object.values(COLS));
   const rows = screen.getAllByRole("row").slice(1);
   expect(rows[0]).toHaveAttribute("data-kind", "free");
   expect(rows[0]).toHaveTextContent("0 GB");

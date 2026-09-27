@@ -5,6 +5,16 @@ import type { Cred } from "../types";
 import { AuthorizeFlow } from "./AuthorizeFlow";
 import { canAuthorize } from "./creds-api";
 import { listOrDash, percentText, statusColor } from "./format";
+import { align } from "./TableHead";
+
+// Колонки реестра (#324): подписи и выравнивание -- одной записью на заголовок
+// и ячейку. «использовано» справа и там и там (прежде заголовок был слева).
+export const CRED_COLS = {
+  name: { label: "имя" }, profile: { label: "провайдер" }, kind: { label: "вид" },
+  owner: { label: "владелец" }, status: { label: "статус" },
+  used: { label: "использовано", right: true }, age: { label: "возраст" },
+  holders: { label: "держатели" }, auth: { label: "" },
+};
 
 export function CredentialRow({ cred }: { cred: Cred }) {
   return (
@@ -14,7 +24,7 @@ export function CredentialRow({ cred }: { cred: Cred }) {
       <Table.Td>{cred.kind}</Table.Td>
       <Table.Td>{cred.owner || "-"}</Table.Td>
       <Table.Td><Badge variant="light" color={statusColor(cred.status)}>{cred.status}</Badge></Table.Td>
-      <Table.Td ta="right">{percentText(cred.percent)}</Table.Td>
+      <Table.Td ta={align(CRED_COLS.used)}>{percentText(cred.percent)}</Table.Td>
       <Table.Td>{cred.age}</Table.Td>
       <Table.Td>{listOrDash(cred.holders)}</Table.Td>
       <Table.Td>{canAuthorize(cred) ? <AuthorizeFlow name={cred.name} /> : null}</Table.Td>
