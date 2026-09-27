@@ -420,10 +420,11 @@ def task_env(name, origin, profile, prof, cont=False, mem=0):
     return env
 
 
-def job_spec(name, origin, profile=None, cont=False, branch=None, cred=None):
+def job_spec(name, origin, profile=None, cont=False, branch=None, cred=None, node=None):
     """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
     историю каталога (`claude --continue`). cred -- аренда кредита (#284),
-    метой, как ветка: окружение и врапер те же.
+    метой, как ветка: окружение и врапер те же. node — узел, к которому спека
+    привязана (#289): перерегистрация стоящего папета, см. node_constraint.
 
     По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
     нужен ровно там, где работу продолжают под другой моделью, а везде ещё
@@ -455,7 +456,8 @@ def job_spec(name, origin, profile=None, cont=False, branch=None, cred=None):
         "Datacenters": [nomad.POOL_DC],
         "Type": "service",
         "Meta": meta,
-        "Constraints": [project_constraint(project.name), memory_constraint(ceiling)],
+        "Constraints": [project_constraint(project.name), memory_constraint(ceiling)]
+                       + ([node_constraint(node)] if node else []),
         "TaskGroups": [{
             "Name": GROUP,
             "Count": 1,
@@ -484,13 +486,29 @@ def job_spec(name, origin, profile=None, cont=False, branch=None, cred=None):
 ANY_PROJECT = "any"
 
 
-def respec(name, meta, cont=False):
+def respec(name, meta, cont=False, node=None):
     """Спека по мете джоба (JobMeta): одна дорога перерегистрации на сервере
     (#265). Её берут глагол update сервиса кластера (перерегистрация,
     рецикл, лечение doctor'а) и сборка образа, поднимающая снятых папетов.
     Пока дорог было несколько, одна из них теряла ветку мастера (#256):
-    после сборки образа папет поднимался на origin/HEAD."""
-    return job_spec(name, meta.origin, meta.llm, cont=cont, branch=meta.branch, cred=meta.cred)
+    после сборки образа папет поднимался на origin/HEAD.
+
+    node — узел стоящего папета (#289): update держит его на месте. Сборка
+    образа узла не называет: тела снесены, держать некого."""
+    return job_spec(name, meta.origin, meta.llm, cont=cont, branch=meta.branch,
+                    cred=meta.cred, node=node)
+
+
+def node_constraint(node):
+    """Ограничение размещения: ровно этот узел (#289).
+
+    Перерегистрация -- новое размещение, и без узла в спеке Nomad ставит
+    папета по свободной памяти: 26.09 `mop update pu-mop-6` увёз его с hyper
+    на gpu, а тело с клоном и разговором осталось на hyper бесхозным (так же
+    возникли бесхозные pu-mop-4/5). У папета на контейнерном узле переезд --
+    потеря несохранённой работы. Отказ Nomad по месту на этом узле -- папет
+    читается `pending` с причиной в mop list, а не тихо переезжает."""
+    return {"LTarget": "${node.unique.name}", "Operand": "=", "RTarget": node}
 
 def project_constraint(project):
     """Ограничение размещения: узел обязан уметь обслужить этот проект.

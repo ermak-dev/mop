@@ -300,8 +300,13 @@ TREATMENT = [
     ("idle: bug/1063 (uncommitted: 2)", False, False, "busy"),
     ("idle: master (unpushed: 2)", False, False, "busy"),
     ("idle: master (uncommitted: 3)", False, False, "busy"),
-    ("login expired: bug/1063", "login+restart", False, "sick"),
-    ("login expired", "login+restart", False, "sick"),
+    # Протухший логин лечится без рестарта (#290): claude перечитывает
+    # креды на каждом ходу, а рестарт поднимает сессию начисто и стирает
+    # разговор папета (26.09: три папета rugent). HYPOTHESIS: карта лечений
+    # держит login+restart. SOLUTION: login+nudge -- раздать креды и
+    # разбудить сообщением «продолжай». STATUS: FIXED — see #290
+    ("login expired: bug/1063", "login+nudge", False, "sick"),
+    ("login expired", "login+nudge", False, "sick"),
     ("no model quota: Credit balance is too low", "model", False, "sick"),
     (f"error: {RATE}", "model", False, "sick"),
     ("error: " + HOOKS["fail"]["StopFailure"]["last_assistant_message"], "model", False, "sick"),

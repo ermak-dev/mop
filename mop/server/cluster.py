@@ -434,10 +434,15 @@ def _update(project, req):
                           kept.cred if kept.llm == llm.resolve(req.get("profile")) else None)
     if why:
         return {"error": why}
+    # Узел -- из аллокации (#289): стоящий папет перерегистрируется на своём
+    # узле, где его тело с клоном; неразмещённый (нет аллокации) -- куда
+    # поставит Nomad, как при подъёме.
+    alloc = _api().latest_alloc(name)
+    node = (alloc or {}).get("NodeName") or None
     _api().register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch,
                                               cred=cred),
-                               cont=bool(req.get("cont"))))
-    return {"ok": True, "name": name, **({"cred": cred} if cred else {})}
+                               cont=bool(req.get("cont")), node=node))
+    return {"ok": True, "name": name, "node": node, **({"cred": cred} if cred else {})}
 
 
 def _restart(project, req):
