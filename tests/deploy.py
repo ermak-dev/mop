@@ -915,6 +915,45 @@ def check_claude_cli_293(c):
           where == ["roles/common/tasks/claude_cli.yml"], where)
 
 
+# ── #348: остановленный джоб живёт, пока его читают ────────────────────
+# HYPOTHESIS: папета, сдавшегося на bootstrap (#345), снимают без purge, и
+# ростер пишет «FAILED: bootstrap gave up … -- fix .mop/bootstrap.yaml, then
+# mop update». Но Nomad собирает мёртвые джобы через job_gc_threshold (по
+# умолчанию 4 ч; server.hcl.j2 его не задавал): папет пропадал из mop list,
+# из known у sweep, а mop update отказывал «no job» -- отчёт о провале
+# испарялся.
+# SOLUTION: job_gc_threshold сервера -- настройка MOP_NOMAD_JOB_GC (дефолт
+# 720h) в server.hcl.j2; остальная уборка Nomad (eval, deployment) -- как
+# была. STATUS: FIXED — see #348
+def check_job_gc_348(c, can_render):
+    from mop.server import playvars
+    c.expect("#348 MOP_NOMAD_JOB_GC: a setting, 720h by default",
+             config.SETTINGS.get("MOP_NOMAD_JOB_GC"), "720h")
+    c.check("#348 the playbooks get it", playvars.playbook_vars().get("MOP_NOMAD_JOB_GC") == "720h",
+            playvars.playbook_vars().get("MOP_NOMAD_JOB_GC"))
+    path = os.path.join(DEPLOY, "roles", "nomad", "templates", "server.hcl.j2")
+    hcl = open(path).read()
+    block = re.search(r"^server \{(.*?)^\}", hcl, re.M | re.S)
+    c.check("#348 server.hcl: job_gc_threshold inside the server block, from the setting",
+            block is not None and re.search(r'^\s*job_gc_threshold\s*=\s*"\{\{ MOP_NOMAD_JOB_GC \}\}"\s*$',
+                                            block.group(1), re.M) is not None,
+            block and block.group(1))
+    c.check("#348 server.hcl: no other GC threshold is touched",
+            not re.search(r"eval_gc_threshold|deployment_gc_threshold|node_gc_threshold", hcl))
+    if not can_render:
+        return
+    base = {"MOP_POOL_DC": "pool", "MOP_NOMAD_DATA": "/d", "MOP_NOMAD_PORT": "4646",
+            "MOP_NOMAD_RPC_PORT": "4647", "MOP_NOMAD_HTTP_BIND": "0.0.0.0",
+            "nomad_advertise": "10.0.0.1"}
+    for value in ("720h", "48h"):
+        try:
+            out = render(hcl, {**base, "MOP_NOMAD_JOB_GC": value})
+            got = re.findall(r'^\s*job_gc_threshold\s*=\s*"([^"]*)"', out, re.M)
+        except Exception as e:  # noqa: BLE001 -- проверка, не код пула
+            got = f"{type(e).__name__}: {e}"
+        c.check(f"#348 server.hcl renders job_gc_threshold = {value}", got == [value], got)
+
+
 def main():
     c = Checks()
 
@@ -1242,6 +1281,7 @@ def main():
     check_users_reload_199(c)
     check_one_node_280(c)
 
+    check_job_gc_348(c, can_render)
     return c.report("deploy")
 
 

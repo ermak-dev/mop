@@ -48,6 +48,10 @@ advertise {
 server {
   enabled          = true
   bootstrap_expect = 1
+  # Остановленный джоб живёт MOP_NOMAD_JOB_GC (#348), а не 4 ч по умолчанию:
+  # сдавшийся на bootstrap папет -- это отчёт оператору, и он обязан
+  # дожить до `mop list` и `mop update`. Уборка eval и deployment -- как была.
+  job_gc_threshold = "{{ MOP_NOMAD_JOB_GC }}"
 }
 
 acl {
