@@ -65,7 +65,13 @@ def main(argv):
     # Чью аренду прошёл force -- называем (#40); что уехало в bootstrap --
     # тоже (#334): это оператор набрать не мог.
     lib.note(name, got)
-    print(_common.sent_line(sent))
+    print(_common.sent_line(sent), flush=True)
+    # Чем кончился прогон этой регистрации (#334) -- ждём и называем.
+    p = lib.Progress(name)
+    try:
+        _common.report_bootstrap(name, got, p)
+    finally:
+        p.clear()
 
 
 

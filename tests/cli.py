@@ -136,8 +136,92 @@ def check_bootstrap_sent_334(c):
         os.chdir(here)
 
 
+# ── #334: add/update ждут итог своей регистрации и называют его ──────────
+# HYPOTHESIS: чем кончился прогон bootstrap'а после `mop update`, видно
+# только в `mop list`, журнале сервиса или stderr аллокации.
+# SOLUTION: ответ регистрации несёт метку (bootstrap_marker); клиент ждёт
+# итог с этой меткой глаголом bootstrap_result и печатает строку; спека не
+# изменилась (replaced False) -- говорит, что прогона не будет, и не ждёт.
+# STATUS: FIXED — see #334
+def check_bootstrap_outcome_334(c):
+    from mop.common import bus
+    from mop.client import keys
+    line = getattr(_common, "outcome_line", None)
+    if not c.check("#334 _common.outcome_line exists", line is not None):
+        return
+    rec = {"ok": True, "played": True, "seconds": 41.6, "rc": 0, "task": None,
+           "message": None, "last": "PLAY RECAP", "sent": 7, "commit": "abc"}
+    cases = [
+        (rec, "bootstrap ok in 42s"),
+        ({**rec, "ok": False, "rc": 2, "task": "env file",
+          "message": "Could not find ~/proj/.env"},
+         "bootstrap failed at task «env file»: Could not find ~/proj/.env"),
+        ({**rec, "ok": False, "rc": 2, "last": "fatal: [host]: UNREACHABLE!"},
+         "bootstrap failed (rc 2): fatal: [host]: UNREACHABLE!"),
+        ({**rec, "ok": False, "rc": None, "seconds": 290.0,
+          "last": "bootstrap of pu-mop-1 did not finish in 290s"},
+         "bootstrap failed: bootstrap of pu-mop-1 did not finish in 290s"),
+        (None, "bootstrap result not seen in 420s — mop list"),
+        ({**rec, "played": False, "seconds": None, "rc": None, "last": None}, None),
+    ]
+    for record, want in cases:
+        c.expect(f"#334 outcome_line {record and (record['ok'], record['played'], record['task'])}",
+                 line(record, 420), want)
+
+    # Ожидание: чужая (старая) метка и пустота -- ждать дальше; своя -- итог.
+    answers = [{"ok": True, "result": {**rec, "sent": 6}}, {"ok": True, "result": None},
+               {"ok": True, "result": rec}]
+    asked, now = [], [0.0]
+
+    def call_cluster(verb, **kw):
+        asked.append((verb, kw.get("name")))
+        return answers[min(len(asked) - 1, len(answers) - 1)]
+
+    def sleep(sec):
+        now[0] += sec
+    with patched(bus, call_cluster=call_cluster):
+        got = _common.wait_bootstrap("pu-mop-1", 7, lib.Progress("t"), 60,
+                                     sleep=sleep, clock=lambda: now[0])
+    c.expect("#334 wait_bootstrap returns the record of its own marker",
+             (got, asked[-1]), (rec, ("bootstrap_result", "pu-mop-1")))
+    answers[:] = [{"ok": True, "result": {**rec, "sent": 6}}]
+    asked.clear(), now.__setitem__(0, 0.0)
+    with patched(bus, call_cluster=call_cluster):
+        got = _common.wait_bootstrap("pu-mop-1", 7, lib.Progress("t"), 60,
+                                     sleep=sleep, clock=lambda: now[0])
+    c.check("#334 wait_bootstrap gives up after its timeout with None",
+            got is None and now[0] >= 60 and len(asked) > 1, (got, now, len(asked)))
+
+    # update целиком: метка в ответе -- ждёт и печатает итог; replaced False --
+    # говорит, что прогона не будет, и итог не спрашивает; без метки (старый
+    # сервер) -- ничего сверх строки «что уехало».
+    from mop.cli.core import update
+    for reply, result, want_tail, want_asked in (
+            ({"ok": True, "bootstrap_marker": 7, "replaced": True},
+             {"ok": True, "result": rec}, ["bootstrap ok in 42s"], True),
+            ({"ok": True, "bootstrap_marker": 7, "replaced": False}, None,
+             ["bootstrap not played: the spec is unchanged, "
+              "Nomad kept the running allocation"], False),
+            ({"ok": True}, None, [], False)):
+        seen = []
+
+        def cc(verb, **kw):
+            seen.append(verb)
+            return reply if verb == "update" else result
+        with patched_env(MOP_SERVER_LAN="192.0.2.1"), \
+                patched(lib, guard=lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}), \
+                patched(bus, call_cluster=cc, login=lambda: "anton"), \
+                patched(keys, push_llm_keys=lambda profile: None), \
+                patched(_common, workspace_text=lambda origin: ("", NOFILE_334)):
+            out, err, code = run_command(update.main, ["pu-mop-1"])
+        c.expect(f"#334 update with reply {reply}: lines and whether it asked",
+                 (out.splitlines(), code, "bootstrap_result" in seen),
+                 ([_common.sent_line(NOFILE_334)] + want_tail, 0, want_asked))
+
+
 def main():
     c = Checks()
+    check_bootstrap_outcome_334(c)
     check_bootstrap_sent_334(c)
     # HYPOTHESIS: каталога нет — диспетчер bash ищет файл по имени в bin/.
     # SOLUTION: catalog() из обхода пакета, resolve() по нему.

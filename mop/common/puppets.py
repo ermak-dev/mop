@@ -707,9 +707,11 @@ def recycle(name, workspace_of=None, force=False):
     if workspace_of:
         text, sent = workspace_of(origin)
         fields = {"workspace": text, "bootstrap_sent": sent}
-    _cluster("update", name=name, origin=origin, profile=profile, branch=branch,
-             **me, **fields)
-    return {"node": node, "owner_note": note, "bootstrap_sent": sent}
+    got = _cluster("update", name=name, origin=origin, profile=profile, branch=branch,
+                   **me, **fields)
+    # Метка регистрации (#334): командлет ждёт итог прогона по ней.
+    return {"node": node, "owner_note": note, "bootstrap_sent": sent,
+            **{k: got[k] for k in ("bootstrap_marker", "replaced") if k in got}}
 
 
 # ─── ввод в TUI папета ───────────────────────────────────────────────────

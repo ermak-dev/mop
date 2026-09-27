@@ -70,6 +70,8 @@ def _add(origin, project, profile, named, p, cred=None):
         if a:
             node = a["NodeName"]
             if a["ClientStatus"] == "running":
+                # Задача поднялась -- врапер зовёт bootstrap до tmux (#334).
+                _common.report_bootstrap(name, got, p)
                 return 0
             if a["ClientStatus"] == "failed" or puppets.failing(a):
                 p.clear()

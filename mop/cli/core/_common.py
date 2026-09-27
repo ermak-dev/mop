@@ -3,9 +3,10 @@
 импортирует каждый командлет на каждой машине, и ключи с профилями ей
 тянуть за собой незачем."""
 import os
+import time
 
 from mop.cli import lib
-from mop.common import config, llm, manifest, paths, puppets
+from mop.common import bus, busnames, config, llm, manifest, paths, puppets
 from mop.client import keys
 
 
@@ -60,6 +61,59 @@ def sent_line(prov):
     if tasks is not None:
         line += f", {tasks} task" + ("" if tasks == 1 else "s")
     return line
+# Сколько ждать итога bootstrap'а (#334): прогон на сервере плюс подъём
+# тела до вызова -- тот же запас, что у `mop add` на подъём.
+BOOTSTRAP_WAIT = busnames.BOOTSTRAP_TIMEOUT + 120
+NOT_REPLACED = ("bootstrap not played: the spec is unchanged, "
+                "Nomad kept the running allocation")
+
+
+def outcome_line(record, waited):
+    """Итог прогона -> строка либо None (#334). Чистая функция. Прогона не
+    было (нечего играть) -- ничего сверх; итога нет -- так и сказать."""
+    if record is None:
+        return f"bootstrap result not seen in {waited}s — mop list"
+    if not record.get("played"):
+        return None
+    if record.get("ok"):
+        return f"bootstrap ok in {round(record.get('seconds') or 0)}s"
+    if record.get("task"):
+        line = f"bootstrap failed at task «{record['task']}»"
+        return line + (f": {record['message']}" if record.get("message") else "")
+    line = "bootstrap failed" + (f" (rc {record['rc']})" if record.get("rc") is not None else "")
+    return line + (f": {record['last']}" if record.get("last") else "")
+
+
+def wait_bootstrap(name, marker, p, timeout, sleep=time.sleep, clock=time.time):
+    """Итог прогона с меткой своей регистрации -> запись либо None по
+    таймауту. Итог с другой меткой -- прежний прогон, а не наш: ждём дальше."""
+    p.step(f"{name}: bootstrap playing")
+    deadline = clock() + timeout
+    while True:
+        got = (bus.call_cluster("bootstrap_result", name=name) or {}).get("result")
+        if got and got.get("sent") == marker:
+            return got
+        if clock() >= deadline:
+            return None
+        sleep(2)
+
+
+def report_bootstrap(name, got, p):
+    """Ответ регистрации -> строка итога на stdout (#334). Без метки (старый
+    сервер, клиент без происхождения) -- тишина, как было."""
+    marker = got.get("bootstrap_marker")
+    if not marker:
+        return
+    if got.get("replaced") is False:
+        print(NOT_REPLACED, flush=True)
+        return
+    record = wait_bootstrap(name, marker, p, BOOTSTRAP_WAIT)
+    p.clear()
+    line = outcome_line(record, BOOTSTRAP_WAIT)
+    if line:
+        print(line, flush=True)
+
+
 def parse_value(args, flag):
     """Выкусить `flag VALUE` (или `flag=VALUE`) откуда угодно в аргументах
     -> (значение | None, остальные). Тот же разбор, что у --llm (#284)."""
