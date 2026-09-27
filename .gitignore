@@ -8,3 +8,4 @@ sandbox.yaml
 setup.yaml
 # тулчейн дашборда (#297): только у разработчика и в CI, собранный web/dist коммитится
 web/node_modules/
+web/src/node_modules/
