@@ -21,7 +21,7 @@ import threading
 import time
 from datetime import datetime
 
-from ..common import bus, puppets, state
+from ..common import bus, credreg as credrows, puppets, state
 from .. import usage
 
 STATES_EVERY = 15      # с: ростер Nomad + состояния с узлов
@@ -29,6 +29,7 @@ SIZES_EVERY = 120      # с: обмер du — тяжёлый IO, nice, но в�
 USAGE_EVERY = 600      # с: разбор транскриптов в телах
 USAGE_DAYS = 14        # окно расхода, как у `mop stat`
 USAGE_TIMEOUT = 90     # как у `mop stat`: разбор небыстрый
+CREDS_EVERY = 60       # с: реестр кредитов -- чтение файлов на сервере (#285)
 EVENTS_CAP = 100       # сколько событий помнит журнал
 DEBOUNCE = 1.0         # с: пачка событий — один круг, а не по кругу на каждое
 
@@ -116,17 +117,123 @@ def user_rows(answers):
     return sorted(rows, key=lambda r: (-r["total"], r["login"]))
 
 
-def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at):
+def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at, creds=()):
     """Один JSON на страницу и /api/pool. Набор ключей закреплён — страница
     читает их по имени.
 
     Диагностики здесь нет (решение оператора 2026-09-22): она стоила
     запроса к Nomad на каждого папета каждым кругом, а лечение всё равно
-    остаётся за `mop doctor`; больной папет и так виден корзиной sick."""
+    остаётся за `mop doctor`; больной папет и так виден корзиной sick.
+    creds -- строки реестра кредитов (#285), уже без секретов (cred_rows)."""
     return {"at": at, "projects": projects(rows), "counts": counts(rows),
             "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "per_user": per_user,
-            "journal": journal, "errors": errors}
+            "journal": journal, "errors": errors, "creds": list(creds)}
+
+
+# ─── реестр кредитов на странице (#285) ──────────────────────────────────
+# Секция без входа: решение оператора 26.09, LAN доверенная, авторизация
+# действий -- позже отдельным тикетом. Секреты в снимок не попадают никогда:
+# строка собирается из перечисленных полей, а не копией записи.
+CRED_WORDS = {"active": "активен", "quota_wait": "ждёт квоты",
+              "needs_login": "ждёт ручной авторизации"}
+CRED_FIELDS = ("name", "profile", "kind", "owner", "status", "resets_at", "percent", "age")
+LOGIN_MODES = ("login", "setup-token")
+
+
+def cred_status_word(st):
+    """Статус кредита по-русски для страницы: три исхода плюс «не проверялся»."""
+    if not st or not st.get("kind"):
+        return "не проверялся"
+    word = CRED_WORDS.get(st["kind"], st["kind"])
+    if st["kind"] == "quota_wait" and st.get("resets_at"):
+        return f"{word} до {human_time(st['resets_at'])}"
+    if st["kind"] == "needs_login" and st.get("detail"):
+        return f"{word}: {st['detail']}"
+    return word
+
+
+def cred_rows(records, now):
+    """Записи реестра -> строки страницы: имя, профиль, вид, владелец, статус
+    словами, время сброса, процент худшего окна, возраст. Ключ, токен и
+    прочее содержимое записи сюда не переписываются."""
+    out = []
+    for rec in records:
+        st = rec.get("status") or {}
+        out.append({"name": rec.get("name") or "-", "profile": rec.get("profile") or "-",
+                    "kind": rec.get("kind") or "-", "owner": rec.get("owner") or "",
+                    "status": cred_status_word(st), "resets_at": st.get("resets_at"),
+                    "percent": st.get("percent"),
+                    "age": credrows.span(now - int(rec.get("added_at") or now))})
+    return out
+
+
+def _body(body):
+    """Тело POST -> (dict, None) либо (None, причина)."""
+    if not isinstance(body, dict):
+        return None, "body: a JSON object is expected"
+    return body, None
+
+
+def _field(body, name, required=True):
+    """Строковое поле тела, обрезанное; пустое обязательное -- отказ именем поля."""
+    v = body.get(name)
+    v = v.strip() if isinstance(v, str) else ""
+    if required and not v:
+        return None, f"{name}: required"
+    return v, None
+
+
+def parse_cred_add(body):
+    """Тело /api/creds/add -> ({name, profile, key, owner}, None) либо (None, причина).
+    Имя -- по правилу реестра (credreg.check_name), ключ обязателен."""
+    body, err = _body(body)
+    if err:
+        return None, err
+    out = {}
+    for name, required in (("name", True), ("profile", True), ("key", True), ("owner", False)):
+        v, err = _field(body, name, required)
+        if err:
+            return None, err
+        out[name] = v
+    try:
+        credrows.check_name(out["name"])
+    except ValueError as e:
+        return None, f"name: {e}"
+    return out, None
+
+
+def parse_login_start(body):
+    """Тело /api/creds/login/start -> ({name, mode}, None) либо (None, причина)."""
+    body, err = _body(body)
+    if err:
+        return None, err
+    name, err = _field(body, "name")
+    if err:
+        return None, err
+    try:
+        credrows.check_name(name)
+    except ValueError as e:
+        return None, f"name: {e}"
+    mode, _ = _field(body, "mode", required=False)
+    mode = mode or "login"
+    if mode not in LOGIN_MODES:
+        return None, f"mode: one of {', '.join(LOGIN_MODES)}"
+    return {"name": name, "mode": mode}, None
+
+
+def parse_login_code(body):
+    """Тело /api/creds/login/code -> ({name, code}, None) либо (None, причина)."""
+    body, err = _body(body)
+    if err:
+        return None, err
+    name, err = _field(body, "name")
+    if err:
+        return None, err
+    code, err = _field(body, "code")
+    if err:
+        return None, err
+    return {"name": name, "code": code}, None
 
 
 # ─── сборщик ─────────────────────────────────────────────────────────────
@@ -143,6 +250,7 @@ class Collector:
         self.version = 0
         self.rows, self.sizes, self.nodes = [], {}, []
         self.usage, self.per_puppet, self.per_user, self.journal = [], [], [], []
+        self.creds = []
         self.errors = {}
         self.at = None
         self._kick = threading.Event()
@@ -154,7 +262,7 @@ class Collector:
                             self.usage, self.per_puppet, self.per_user,
                             self.journal, [f"{k}: {v}" for k, v in
                                            sorted(self.errors.items())],
-                            self.at)
+                            self.at, self.creds)
 
     def wait(self, version, timeout):
         """-> (версия, снимок) — новая версия, либо та же по таймауту."""
@@ -179,7 +287,7 @@ class Collector:
         self._kick.set()
 
     def start(self):
-        for fn in (self._states, self._sizes, self._usage):
+        for fn in (self._states, self._sizes, self._usage, self._creds):
             threading.Thread(target=fn, daemon=True, name=f"mop-web-{fn.__name__}").start()
 
     def _note(self, kind, error):
@@ -240,6 +348,30 @@ class Collector:
                     self._note("usage", str(e) or type(e).__name__)
             self._bump()
             time.sleep(USAGE_EVERY)
+
+
+    def _creds(self):
+        # Реестр лежит на сервере рядом с сервисом, и читается напрямую
+        # (mop/server/credreg.py), а не глаголом кластера: машинный
+        # пользователь service не пишет в rpc сервиса (#104, docs/BUS.md).
+        while True:
+            self.refresh_creds()
+            time.sleep(CREDS_EVERY)
+
+    def refresh_creds(self):
+        """Перечитать реестр сейчас: после добавления или логина со страницы
+        строка обязана появиться без минуты ожидания."""
+        try:
+            from . import credreg
+            credreg.login_forget_expired()
+            rows = cred_rows(credreg.all(), time.time())
+            with self._cond:
+                self.creds = rows
+                self._note("creds", None)
+        except Exception as e:
+            with self._cond:
+                self._note("creds", str(e) or type(e).__name__)
+        self._bump()
 
 
 def gather_usage(days=USAGE_DAYS):
