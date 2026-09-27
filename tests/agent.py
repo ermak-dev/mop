@@ -20,7 +20,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, Msg, bash, canned, restored, GATE_NOW, gate_table_267  # noqa: E402
+from _lib import Checks, Msg, bash, canned, patched, restored, GATE_NOW, gate_table_267  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.node import agent  # noqa: E402
@@ -143,14 +143,17 @@ def check_quiet(c):
 def check_write_home_279(c):
     import asyncio
     import base64
+    import types
     written = []
 
-    async def bodies_apart(_drv):
+    # Узел без отдельных тел и без живых папетов: v_write пишет одну копию
+    # узла. Подменён ровно тот драйвер, который зовёт v_write (#342).
+    async def no_bodies():
         return []
+    node = types.SimpleNamespace(IS_CONTAINER=False, bodies=no_bodies)
     from mop import driver
-    with restored(driver, "write_private", "bodies_apart"):
+    with restored(driver, "write_private"), patched(agent, DRIVER=node):
         driver.write_private = lambda path, data: written.append((path, data))
-        driver.bodies_apart = bodies_apart
         b64 = base64.b64encode(b"{}").decode()
         got = asyncio.run(agent.v_write(None, {"_project": "admin",
                                                "files": [[".claude/.credentials.json", b64]]}))
