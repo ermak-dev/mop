@@ -69,7 +69,7 @@ def main(argv):
     # Чем кончился прогон этой регистрации (#334) -- ждём и называем.
     p = lib.Progress(name)
     try:
-        _common.report_bootstrap(name, got, p)
+        return _common.report_bootstrap(name, got, p)
     finally:
         p.clear()
 

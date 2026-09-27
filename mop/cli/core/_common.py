@@ -99,19 +99,27 @@ def wait_bootstrap(name, marker, p, timeout, sleep=time.sleep, clock=time.time):
 
 
 def report_bootstrap(name, got, p):
-    """Ответ регистрации -> строка итога на stdout (#334). Без метки (старый
-    сервер, клиент без происхождения) -- тишина, как было."""
+    """Ответ регистрации -> строка итога (#334) и код выхода. Без метки
+    (старый сервер, клиент без происхождения) -- тишина, как было.
+
+    Провал прогона -- провал команды: с этим bootstrap'ом папет работать не
+    будет, так же `mop add` падает, когда папет не встаёт (stderr, 1).
+    Итог не увиден -- не известный провал, а неизвестность: stdout, 0."""
     marker = got.get("bootstrap_marker")
     if not marker:
-        return
+        return 0
     if got.get("replaced") is False:
         print(NOT_REPLACED, flush=True)
-        return
+        return 0
     record = wait_bootstrap(name, marker, p, BOOTSTRAP_WAIT)
     p.clear()
     line = outcome_line(record, BOOTSTRAP_WAIT)
+    if record and record.get("played") and not record.get("ok"):
+        lib.fail(line)
+        return 1
     if line:
         print(line, flush=True)
+    return 0
 
 
 def parse_value(args, flag):

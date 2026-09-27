@@ -196,13 +196,26 @@ def check_bootstrap_outcome_334(c):
     # говорит, что прогона не будет, и итог не спрашивает; без метки (старый
     # сервер) -- ничего сверх строки «что уехало».
     from mop.cli.core import update
-    for reply, result, want_tail, want_asked in (
+    # Поток и код выхода по исходу (решение мастера 27.09): провал прогона --
+    # провал команды (stderr, 1), как не вставший папет у `mop add`; итог не
+    # увиден и прогона не будет -- stdout, 0.
+    failed = {**rec, "ok": False, "rc": 2, "task": "env file", "message": "no .env"}
+    sent = _common.sent_line(NOFILE_334)
+    for reply, result, want_out, want_err, want_code, want_asked in (
             ({"ok": True, "bootstrap_marker": 7, "replaced": True},
-             {"ok": True, "result": rec}, ["bootstrap ok in 42s"], True),
+             {"ok": True, "result": rec}, [sent, "bootstrap ok in 42s"], [], 0, True),
+            ({"ok": True, "bootstrap_marker": 7, "replaced": True},
+             {"ok": True, "result": failed}, [sent],
+             ["bootstrap failed at task «env file»: no .env"], 1, True),
+            ({"ok": True, "bootstrap_marker": 7, "replaced": True},
+             {"ok": True, "result": None},
+             [sent, "bootstrap result not seen in 0s — mop list"], [], 0, True),
+            ({"ok": True, "bootstrap_marker": 7, "replaced": True},
+             {"ok": True, "result": {**rec, "played": False}}, [sent], [], 0, True),
             ({"ok": True, "bootstrap_marker": 7, "replaced": False}, None,
-             ["bootstrap not played: the spec is unchanged, "
-              "Nomad kept the running allocation"], False),
-            ({"ok": True}, None, [], False)):
+             [sent, "bootstrap not played: the spec is unchanged, "
+                    "Nomad kept the running allocation"], [], 0, False),
+            ({"ok": True}, None, [sent], [], 0, False)):
         seen = []
 
         def cc(verb, **kw):
@@ -212,12 +225,14 @@ def check_bootstrap_outcome_334(c):
                 patched(lib, guard=lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}), \
                 patched(bus, call_cluster=cc, login=lambda: "anton"), \
                 patched(keys, push_llm_keys=lambda profile: None), \
-                patched(_common, workspace_text=lambda origin: ("", NOFILE_334)):
+                patched(_common, workspace_text=lambda origin: ("", NOFILE_334),
+                        BOOTSTRAP_WAIT=0):
             out, err, code = run_command(update.main, ["pu-mop-1"])
-        c.expect(f"#334 update with reply {reply}: lines and whether it asked",
-                 (out.splitlines(), code, "bootstrap_result" in seen),
-                 ([_common.sent_line(NOFILE_334)] + want_tail, 0, want_asked))
-
+        c.expect(f"#334 update, reply {reply}, result {result and result.get('result')}: "
+                 f"stdout, stderr, exit code, asked",
+                 (out.splitlines(), [lib.plain(l) for l in err.splitlines()], code,
+                  "bootstrap_result" in seen),
+                 (want_out, want_err, want_code, want_asked))
 
 def main():
     c = Checks()
