@@ -666,6 +666,10 @@ def main():
         check_bootstrap_refusal_333(c)
     except Exception as e:
         c.fail("check_bootstrap_refusal_333", f"{type(e).__name__}: {e}")
+    try:
+        check_seed_clears_mark_312(c)
+    except Exception as e:
+        c.fail("check_seed_clears_mark_312", f"{type(e).__name__}: {e}")
 
     try:
         check_clone_lock_195(c)
@@ -1162,6 +1166,49 @@ def check_bootstrap_refusal_333(c):
              "bootstrap of pu-x-1 failed: cannot let the server into the body: no key")
     c.check("#333 BootstrapFailed is still a RuntimeError",
             issubclass(run.BootstrapFailed, RuntimeError))
+
+
+# ── #312: метка аренды -- только от удачной раздачи этого подъёма ──────
+# HYPOTHESIS: тело pve переживает рестарт вместе с меткой аренды
+# (.local/state/mop/cred). Аренду сняли (`mop update` без --cred) -- метка
+# осталась, и операторский `mop login` без адреса (#312, слой 1) обходит это
+# тело: протухший логин лечится только рестартом, то есть ценой разговора.
+# SOLUTION: _seed на каждом подъёме снимает метку в теле ДО bootstrap'а;
+# cred_push после прогона кладёт файлы и метку заново, если аренда есть.
+# Инвариант: метка есть тогда и только тогда, когда раздача этого подъёма
+# удалась. У host метку узла на подъёме не трогаем: $HOME общий (слой 4).
+# STATUS: FIXED — see #312
+def check_seed_clears_mark_312(c):
+    import asyncio
+    from mop.common import paths
+    from mop.driver import pve
+    clear = getattr(pve, "_seed_clear", None)
+    if clear is None:
+        c.fail("#312 no pve._seed_clear: the lease mark outlives a dropped lease")
+        return
+    mark = os.path.join(pve.HOME, paths.CRED_MARK)
+    c.expect("#312 seed plan: the lease mark is cleared in the body", clear(), [mark])
+    ran = []
+
+    async def sh(script, timeout=20, prefix=()):
+        ran.append(script)
+        return "", 0
+    with restored(pve, "sh", "_seed_files"):
+        pve.sh = sh
+        pve._seed_files = lambda: []
+        got = asyncio.run(pve._seed("pu-mop-1", 9001))
+    removed = [s for s in ran if "exec" in s and "rm -f" in s and mark in s]
+    c.check("#312 seed: rm -f of the mark inside body 9001, and the seed succeeds",
+            got == {} and len(removed) == 1 and "9001" in removed[0], (got, ran))
+
+    async def refusing(script, timeout=20, prefix=()):
+        return "no such body", 1
+    with restored(pve, "sh", "_seed_files"):
+        pve.sh = refusing
+        pve._seed_files = lambda: []
+        got = asyncio.run(pve._seed("pu-mop-1", 9001))
+    c.check("#312 seed: a mark that cannot be cleared refuses the start, naming it",
+            "cred" in (got.get("error") or ""), got)
 
 
 # ── таймаут шелла -- не успех (#171) ─────────────────────────────────────

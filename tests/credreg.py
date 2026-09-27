@@ -19,7 +19,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mop.common import credreg  # noqa: E402
@@ -267,12 +267,66 @@ def check_foreign_mark_308(c):
              srv.distribute) = saved
 
 
+# ── #312: адресная раздача одному телу ─────────────────────────────────
+# HYPOTHESIS: у раздачи нет адреса: `write` уходил узлу без тел, и агент
+# писал во все тела узла. Ответ агента на отказ тела -- строка в written, а
+# не error: чтение по одному verdict приняло бы непришедшую аренду за OK.
+# SOLUTION: credreg.push(кредит, узел, тела) -- materialize и адресная
+# запись (`bodies`); итог -- OK, FAILED с причиной (в том числе тело FAILED
+# или NOT LIVE в written) либо NOT REACHED. STATUS: FIXED — see #312
+def check_push_312(c):
+    import tempfile
+    from mop.common import bus
+    from mop.server import credreg as srv
+    push = getattr(srv, "push", None)
+    if push is None:
+        c.fail("#312 no credreg.push: no addressed delivery")
+        return
+    sent = []
+
+    def answer(reply):
+        def request(node, verb, timeout=None, project=None, **fields):
+            sent.append((node, verb, project, fields.get("bodies"),
+                         [f[0] for f in fields.get("files") or []]))
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        return request
+    with tempfile.TemporaryDirectory() as tmp, patched(srv, ROOT=tmp):
+        srv.save(credreg.record("anton", "glm", "key", now=NOW))
+        with patched(srv, materialize=lambda name, rec=None: [("a/b", b"x"), ("m", b"anton\n")]):
+            for reply, want in (
+                    ({"written": ["pu-mop-1:a/b", "pu-mop-1:m"]}, "OK"),
+                    ({"written": ["pu-mop-1 FAILED — body 9001 is stopped"]},
+                     "FAILED: pu-mop-1 FAILED — body 9001 is stopped"),
+                    ({"written": ["pu-mop-1 NOT LIVE"]}, "FAILED: pu-mop-1 NOT LIVE"),
+                    ({"error": "puppet pu-mop-1 is not in project x"},
+                     "FAILED: puppet pu-mop-1 is not in project x"),
+                    (bus.BusError("node agent hyper did not answer in 60s"),
+                     "NOT REACHED: node agent hyper did not answer in 60s")):
+                sent.clear()
+                with patched(bus, request=answer(reply)):
+                    got = push("anton", "hyper", ["pu-mop-1"])
+                c.expect(f"#312 push result for {reply!r}", got, want)
+            c.expect("#312 push: one addressed write, admin, to that node and body",
+                     sent, [("hyper", "write", bus.ADMIN, ["pu-mop-1"], ["a/b", "m"])])
+
+        def nothing(name, rec=None):
+            raise ValueError("credential anton: no key to distribute")
+        with patched(srv, materialize=nothing), patched(bus, request=answer({"written": []})):
+            sent.clear()
+            c.expect("#312 push: nothing to carry -> FAILED, no write",
+                     (push("anton", "hyper", ["pu-mop-1"]), sent),
+                     ("FAILED: credential anton: no key to distribute", []))
+
+
 def main():
     c = Checks()
     check_login_start_registry_295(c)
     check_login_start_profile_330(c)
     check_login_mode_339(c)
     check_foreign_mark_308(c)
+    check_push_312(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
     rec = credreg.record("anton", "claude", "login", owner="anton@example.dev", now=NOW)

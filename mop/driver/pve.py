@@ -36,7 +36,7 @@ import re
 import time
 import shlex
 
-from ..common import config
+from ..common import config, paths
 from ..common.domain import Body, Gone
 from . import HOME, PREFIX, SERVER_PUB, Tmux, bad_name, sh, project_of_name, valid_name, why
 
@@ -656,8 +656,23 @@ def _seed_files():
 SEED_TIMEOUT = 120
 
 
+def _seed_clear():
+    """Что снимается в теле на каждом подъёме (#312): метка аренды кредита.
+    Она ставится только раздачей этого подъёма (cred_push после bootstrap):
+    тело переживает рестарт, и метка снятой аренды иначе осталась бы, а
+    `mop login` оператора обходил бы тело -- лечение только рестартом."""
+    return [f"{HOME}/{paths.CRED_MARK}"]
+
+
 async def _seed(name, vmid):
-    """Перелить в тело то, без чего папет поднимется и будет молчать."""
+    """Перелить в тело то, без чего папет поднимется и будет молчать, и
+    снять метку аренды прошлого подъёма (_seed_clear)."""
+    for path in _seed_clear():
+        out, code = await _pve("exec", vmid, f"rm -f {shlex.quote(path)}",
+                               timeout=SEED_TIMEOUT)
+        if code != 0:
+            return {"error": f"{name}: {path} could not be cleared in the body: "
+                             f"{why(out, code, SEED_TIMEOUT)}"}
     for path, mode in _seed_files():
         if not os.path.exists(path):
             # Нет — не отказ: ключей LLM у профиля claude не бывает вовсе, а
