@@ -36,7 +36,7 @@ export function Chips({ counts }: { counts: Counts }) {
 }
 
 export default function App() {
-  const { snapshot, live } = usePool();
+  const { snapshot } = usePool();
   return (
     <Container size="xl" py="md">
       <Stack gap="md">
@@ -65,10 +65,6 @@ export default function App() {
             <Journal journal={snapshot.journal} />
           </>
         )}
-        <Text c="dimmed" size="sm">
-          {live ? "поток событий" : "опрос"} · без входа, LAN доверенная · действия над папетами остаются в mop ·{" "}
-          <a href="/api/pool">JSON</a>
-        </Text>
       </Stack>
     </Container>
   );
