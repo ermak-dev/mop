@@ -23,7 +23,7 @@ import sys
 import tempfile
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, patched  # noqa: E402
+from _lib import Checks, patched, run_command  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import credlogin  # noqa: E402
@@ -130,7 +130,66 @@ def main():
             c.check("client() names the user", " for " in str(e), e)
     with patched(credlogin, client_path=lambda path_env, home, exists=None: "/opt/bin/claude"):
         c.expect("client() returns the found path", credlogin.client(), "/opt/bin/claude")
+    check_register_307(c)
     return c.report("credlogin")
+
+
+def check_register_307(c):
+    """HYPOTHESIS (#307): `mop cred login <имя>` кладёт секрет в дом кредита,
+    но записи cred.json не пишет: реестр видит дом, а цикл сервиса,
+    probe_all, `mop cred status`, `--cred` и кнопка страницы (login_start
+    требует запись) его пропускают или отвергают; владелец не сохраняется.
+    SOLUTION: после удачного входа командлет зовёт credreg.register_login:
+    вид -- login или token, владелец -- email из `claude auth status` для
+    login; у setup-token (user:inference, без профиля) владельца нет.
+    Запись, что уже есть (переавторизация), сохраняется и дополняется.
+    STATUS: FIXED — see #307"""
+    import importlib
+    from mop.server import credreg
+    cmd = importlib.import_module("mop.cli.cred.login")
+    reg = getattr(cmd, "registration", None)
+    if c.check("#307 login.registration exists", reg is not None):
+        c.expect("#307 login: the email is the owner", reg("login", {"email": "anton@example.dev"}),
+                 {"kind": "login", "owner": "anton@example.dev"})
+        c.expect("#307 login without an email: no owner", reg("login", {}),
+                 {"kind": "login", "owner": ""})
+        c.expect("#307 setup-token: a token, no owner (no profile scope)",
+                 reg("setup-token", {"email": "anton@example.dev"}), {"kind": "token", "owner": ""})
+
+    calls = []
+
+    class FakeLogin:
+        ok = True
+
+        def __init__(self, home, mode):
+            os.makedirs(home, exist_ok=True)
+            self.url, self.error, self.result = "https://claude.ai/oauth/authorize?scope=x", "bad code", \
+                "sk-ant-oat01-" + "y" * 40
+
+        @classmethod
+        def start(cls, home, mode):
+            return cls(home, mode)
+
+        def submit(self, code):
+            return FakeLogin.ok
+
+    def register(name, profile="claude", kind="login", owner="", now=None):
+        calls.append((name, kind, owner))
+        return {"name": name}
+    with patched(credlogin, Login=FakeLogin, auth_status=lambda home: {"email": "anton@example.dev"},
+                 status_line=lambda st: "logged in as anton@example.dev"), \
+            patched(credreg, register_login=register):
+        out, err, code = run_command(cmd.main, ["alice"], stdin="the-code\n")
+        c.check("#307 a login registers the credential with its owner",
+                code == 0 and calls == [("alice", "login", "anton@example.dev")], (code, calls, err))
+        calls.clear()
+        out, err, code = run_command(cmd.main, ["bob", "--setup-token"], stdin="the-code\n")
+        c.check("#307 a setup-token registers a token without an owner",
+                code == 0 and calls == [("bob", "token", "")], (code, calls, err))
+        calls.clear()
+        FakeLogin.ok = False
+        out, err, code = run_command(cmd.main, ["carol"], stdin="the-code\n")
+        c.check("#307 a failed login registers nothing", code == 1 and calls == [], (code, calls))
 
 
 if __name__ == "__main__":
