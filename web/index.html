@@ -228,10 +228,16 @@
   $("creds").addEventListener("click", (e) => {
     const start = e.target.dataset.auth, send = e.target.dataset.send;
     if (start) {
+      // Вкладка под страницу входа открывается сейчас, пока жест клика жив:
+      // окно, открытое через двадцать секунд, когда сервер вернёт адрес,
+      // блокировщик всплывающих окон отбросит. Адрес подставляется потом;
+      // ссылка в строке остаётся, если вкладку закрыли.
+      const tab = window.open("", "_blank");
       auth[start] = {note: "…"};
       redraw();
       post("/api/creds/login/start", {name: start}).then(r => {
-        auth[start] = r.ok ? {url: r.url, note: "откройте ссылку, войдите, вставьте код"} : {note: r.error || "отказ", bad: true};
+        auth[start] = r.ok ? {url: r.url, note: "войдите на открывшейся странице, вставьте код"} : {note: r.error || "отказ", bad: true};
+        if (r.ok && tab) tab.location = r.url; else if (tab) tab.close();
         if (!r.ok) setTimeout(() => { delete auth[start]; redraw(); }, 8000);
         redraw();
       });
