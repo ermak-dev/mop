@@ -1763,6 +1763,7 @@ def check_fallback_model_183(c):
     check_named_263(c)
     check_body_file_270(c)
     check_tail_stderr_333(c)
+    check_free_floor_329(c)
 
 
 def check_server_namespace_259(c):
@@ -1961,6 +1962,35 @@ def check_body_file_270(c):
         f.write("  тело  \n")
     c.check("#270 a readable file and a text argument must work as before",
             not (bug_common.read_body(None, ok) != "тело" or bug_common.read_body(" x ", None) != "x"))
+
+
+def check_free_floor_329(c):
+    """HYPOTHESIS (#329): свободная память узла писалась по трём правилам:
+    `mop node` делил нацело (1536 МБ -- «1 GB»), а строка пула
+    (lib.pool_lines: `mop list`, проверка `mop server deploy`) и страница
+    округляли (то же -- «2 GB»). Папет резервирует 8 ГБ, и оператор, решая,
+    влезет ли ещё один, читал про один узел два разных числа.
+    SOLUTION: вниз везде -- свободного не бывает больше, чем есть; всего --
+    по тому же правилу.
+    STATUS: FIXED — see #329"""
+    from mop.cli import node
+    from mop.common import bus
+    nodes = [{"name": "hyper", "driver": "pve", "serves": "mop", "state": "ready",
+              "free_mb": 1536, "total_mb": 64511, "slots": 0, "slots_total": 7}]
+    pool = [{"name": "hyper", "status": "ready", "free_mb": 1536, "total_mb": 64511,
+             "slots": 0, "slots_total": 7}]
+
+    def no_connect(*a, **k):
+        raise AssertionError("a check reached the live bus")
+    with patched(bus, connect=no_connect), restored(bus, "ask_cluster"), \
+            patched_env(MOP_SERVER_LAN="192.0.2.1"):
+        bus.ask_cluster = lambda verb, **kw: {"nodes": nodes if verb == "nodes" else pool}
+        c.expect("#329 mop node floors free and total (the reference rule)",
+                 run_command(node.main, (), via_cli=True),
+                 ("NODE   DRIVER  SERVES  STATE  FREE  TOTAL  SLOTS\n"
+                  "hyper  pve     mop     ready  1 GB  62 GB  0/7\n", "", 0))
+        c.expect("#329 the pool line floors like mop node", lib.pool_lines(),
+                 ["  hyper: free 1/62 GB, slots 0/7"])
 
 
 def check_tail_stderr_333(c):

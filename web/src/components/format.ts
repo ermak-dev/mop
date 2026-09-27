@@ -17,9 +17,10 @@ export function gb(kb: number | null | undefined): string {
   return kb >= 1048576 ? `${(kb / 1048576).toFixed(0)} GB` : `${(kb / 1024).toFixed(0)} MB`;
 }
 
-/** МБ -> "N GB", "-" без данных. */
+/** МБ -> "N GB" вниз, "-" без данных. Вниз, как `mop node` и строка пула
+ *  (#329): свободного не бывает больше, чем есть -- 1536 МБ это «1 GB». */
 export function gbOfMb(mb: number | null | undefined): string {
-  return mb == null ? "-" : `${(mb / 1024).toFixed(0)} GB`;
+  return mb == null ? "-" : `${Math.floor(mb / 1024)} GB`;
 }
 
 /** Токены коротко: 1.2k, 15M, 2.3G. */
