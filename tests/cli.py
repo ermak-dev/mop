@@ -269,6 +269,7 @@ def main():
     check_refusals_163(c)
     check_output_rules(c)
     check_empty_llm(c)
+    check_empty_value(c)
     check_deploy_check(c)
     check_inventory_drivers(c)
     check_pool_uniform(c)
@@ -966,6 +967,35 @@ def check_empty_llm(c):
     c.check(f"an unknown profile keeps its refusal: {err!r} {code!r}",
             not (not code or not err.startswith("no LLM profile no-such; available: ")))
 
+
+
+def check_empty_value(c):
+    """HYPOTHESIS (#327): parse_value сворачивал пустое значение в None --
+    тот же ответ, что «флага нет»: `mop add --cred` без имени молча
+    заводил папета на первой активной аренде профиля. SOLUTION: пустое
+    значение -- ошибка использования, как у --llm (#164).
+    RESULT: четыре пустых формы отказывают одной строкой через диспетчер.
+    STATUS: FIXED — see #327"""
+
+    def through_dispatcher(argv):
+        return run_command(lambda x: _common.parse_value(x, "--cred") and None,
+                           argv, via_cli=True)
+    for argv in (["pu-mop-1", "--cred"], ["--cred="], ["--cred", ""],
+                 ["--cred", "--fresh"]):
+        out, err, code = through_dispatcher(argv)
+        lines = err.strip().splitlines()
+        c.check(f"parse_value({argv}): out {out!r} err {err!r} code {code!r}",
+                not (out or not code or len(lines) != 1 or "Traceback" in err
+                     or lines[0] != "--cred needs a value"))
+    c.expect("parse_value with a value",
+             _common.parse_value(["pu-mop-1", "--cred", "alice", "--fresh"], "--cred"),
+             ("alice", ["pu-mop-1", "--fresh"]))
+    c.expect("parse_value with flag=value",
+             _common.parse_value(["--cred=alice", "pu-mop-1"], "--cred"),
+             ("alice", ["pu-mop-1"]))
+    c.expect("parse_value without the flag must leave the value unset",
+             _common.parse_value(["pu-mop-1", "--fresh"], "--cred"),
+             (None, ["pu-mop-1", "--fresh"]))
 
 # ── #186: драйвер узла из инвентаря — до плейбука ────────────────────────────
 # Вывод настоящего `ansible-inventory --list` (ansible-core 2.21) на инвентаре:
