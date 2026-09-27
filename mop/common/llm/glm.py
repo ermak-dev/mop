@@ -16,7 +16,7 @@ ENV = {
 }
 
 
-# ─── проба квоты и расход (#287) ─────────────────────────────────────────
+# ─── проба квоты (#287) ──────────────────────────────────────────────────
 # Ручки страницы z.ai/manage-apikey/coding-plan/personal/usage отвечают самому
 # ключу API, без сессии браузера; те же вызовы делает официальный плагин
 # glm-plan-usage. Документации нет, поэтому разбор терпим к форме: окна
@@ -29,7 +29,6 @@ import urllib.request
 
 TIMEOUT = 15
 QUOTA_PATH = "/api/monitor/usage/quota/limit"
-ACTIVITY_PATH = "/api/monitor/credit-usage/activity"
 # Окна: (unit, number) -> имя. 3 -- часы, 6 -- недели.
 WINDOWS = {(3, 5): "5h", (6, 1): "weekly"}
 
@@ -100,11 +99,3 @@ def status_of(payload):
 def probe(key):
     """Жив ли ключ и что с квотой -> CredStatus."""
     return status_of(_get(key, QUOTA_PATH))
-
-
-def usage(key, start, end):
-    """Расход за период [start, end] (epoch-секунды) -> ответ activity как
-    есть: summary (токены, streak) и series по дням (кредиты, токены, MCP)."""
-    import datetime
-    fmt = lambda t: datetime.datetime.utcfromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
-    return _get(key, ACTIVITY_PATH, {"startTime": fmt(start), "endTime": fmt(end), "type": 1})

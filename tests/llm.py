@@ -29,8 +29,9 @@ def plugin(**attrs):
     return mod
 
 
+# Контракт знает один хук, probe (#310): usage не звал никто, и он снят.
 DEF = {"key": None, "auth_var": "ANTHROPIC_AUTH_TOKEN", "env": {}, "doc": "",
-       "probe": None, "usage": None}
+       "probe": None}
 
 CASES = [
     # (что проверяем, модуль, ожидание: контракт | None = громкий отказ)
@@ -47,7 +48,9 @@ CASES = [
     ("AUTH_VAR not a variable name", plugin(AUTH_VAR="1bad"), None),
     # Пробы провайдера (#287) -- необязательны: плагин без них проходит
     # контракт как прежде, с ними -- контракт их называет; не функция -- отказ.
-    ("probe/usage absent -> None", plugin(ENV={}), DEF),
+    ("probe absent -> None", plugin(ENV={}), DEF),
+    # usage у плагина (#310) -- не хук: контракт его не читает и не несёт.
+    ("a usage attribute is not a hook", plugin(ENV={}, usage=lambda k, s, e: {}), DEF),
     ("probe not callable", plugin(ENV={}, probe="yes"), None),
 ]
 
@@ -220,8 +223,8 @@ def main():
         except Exception as e:
             got = f"{type(e).__name__}: {e}"
         c.expect(f"claude.status_of: {what}", got, want)
-    c.check("claude profile declares probe and usage",
-            callable(getattr(claude, "probe", None)) and callable(getattr(claude, "usage", None)))
+    c.check("claude profile declares probe and no usage hook (#310)",
+            callable(getattr(claude, "probe", None)) and not hasattr(claude, "usage"))
     c.expect("claude.reset_epoch: ISO with offset and microseconds -> seconds",
              claude.reset_epoch("2026-09-26T11:10:00.078381+00:00"), 1790421000)
     c.expect("claude.reset_epoch: garbage -> None", claude.reset_epoch("soon"), None)
@@ -231,10 +234,11 @@ def main():
     c.expect("glm.host_of without a base url -> z.ai",
              glm.host_of({}), "https://api.z.ai")
     got = llm.contract("fake", plugin(ENV={}, probe=lambda k: None, usage=lambda k, s, e: {}))
-    c.check("contract names the hooks a plugin has",
-            callable(got["probe"]) and callable(got["usage"]), got)
-    c.check("the glm profile declares probe and usage",
-            callable(llm.get("glm")["probe"]) and callable(llm.get("glm")["usage"]))
+    c.check("contract names probe, and only probe (#310)",
+            callable(got["probe"]) and "usage" not in got, got)
+    c.check("the glm profile declares probe and no usage hook (#310)",
+            callable(llm.get("glm")["probe"]) and "usage" not in llm.get("glm")
+            and not hasattr(glm, "usage"))
     return c.report("llm")
 
 

@@ -303,9 +303,9 @@ def banner(subject, root, puppets):
 
 
 async def serve(log):
-    """Подписчик сервера. Креды — оператора (admin): сервер слушает все
-    проекты, и своего файла кредов у него нет — тот же каталог, что у
-    дашборда (mop/common/creds.py)."""
+    """Подписчик сервера. Креды — машинного пользователя service (#104), не
+    оператора: сервер слушает все проекты, и своего файла кредов у него нет —
+    тот же каталог, что у дашборда (mop/common/creds.py)."""
     subj = bus.server_subject(busnames.ANY)
     await service.serve("mop-bootstrap", subj, answer, log, journal,
                         lambda: banner(subj, ROOT, _puppets_here()))
