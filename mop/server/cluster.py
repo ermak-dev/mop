@@ -304,9 +304,25 @@ def _live_count(target):
 def store_workspace(root, name, req):
     """workspace папета из запроса add/update (#133). Текст -- положить,
     пусто -- снять (в рабочей копии файла нет), нет поля -- не трогать:
-    так перерегистрация без рабочей копии не стирает положенное."""
-    if "workspace" in req:
-        bootstrap.store(root, name, req["workspace"] or "")
+    так перерегистрация без рабочей копии не стирает положенное.
+
+    -> метка регистрации либо None (#334): с полем bootstrap_sent рядом
+    кладётся происхождение, и итог прогона сверяется с этой меткой. Без поля
+    (старый клиент) -- ничего нового."""
+    if "workspace" not in req:
+        return None
+    bootstrap.store(root, name, req["workspace"] or "")
+    if "bootstrap_sent" in req:
+        return bootstrap.note_sent(root, name, req["bootstrap_sent"])
+    return None
+
+
+def _version(name):
+    """Версия джоба в Nomad либо None: не прочиталась -- не знаем."""
+    try:
+        return (_api().get_job(name) or {}).get("Version")
+    except Exception:
+        return None
 
 
 # ─── ворота владения (#40) ───────────────────────────────────────────────
@@ -378,11 +394,13 @@ def _add(project, req):
     if why:
         return {"error": why}
     # workspace -- до регистрации: первый подъём обязан его увидеть.
-    store_workspace(bootstrap.ROOT, name, req)
+    marker = store_workspace(bootstrap.ROOT, name, req)
     _api().register(spec.job_spec(name, origin, req.get("profile"),
                                  branch=req.get("branch"), cred=cred))
-    # cred -- только когда аренда есть: ответ без неё байт в байт прежний.
-    return {"ok": True, "name": name, "origin": origin, **({"cred": cred} if cred else {})}
+    # cred -- только когда аренда есть, метка (#334) -- только когда клиент
+    # прислал происхождение: без них ответ байт в байт прежний.
+    return {"ok": True, "name": name, "origin": origin, **({"cred": cred} if cred else {}),
+            **({"bootstrap_marker": marker} if marker else {})}
 
 
 def _cred_for(profile, wanted, kept=None):
@@ -424,7 +442,10 @@ def _update(project, req):
     # Спеку собирает сервер: `register(spec)` глаголом не бывает, иначе
     # проситель кладёт на узел что хочет (докстринг модуля).
     name = req["name"]
-    store_workspace(bootstrap.ROOT, name, req)
+    marker = store_workspace(bootstrap.ROOT, name, req)
+    # Спека без изменений -- Nomad не переразмещает, прогона не будет (#334):
+    # клиент должен услышать это, а не ждать итога до таймаута.
+    before = _version(name) if marker else None
     # Ветка -- свойство папета (#257): запрос без неё (recycle, gc, лечение
     # doctor'а) не стирает ту, с которой папет заведён. Аренда кредита
     # (#284) -- так же, и профиль сверяется с реестром.
@@ -442,7 +463,18 @@ def _update(project, req):
     _api().register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch,
                                               cred=cred),
                                cont=bool(req.get("cont")), node=node))
-    return {"ok": True, "name": name, "node": node, **({"cred": cred} if cred else {})}
+    out = {"ok": True, "name": name, "node": node, **({"cred": cred} if cred else {})}
+    if marker:
+        out.update(bootstrap_marker=marker,
+                   replaced=before is None or _version(name) != before)
+    return out
+
+
+def _bootstrap_result(project, req):
+    """Итог последнего прогона bootstrap'а папета (#334): запись либо None.
+    `mop add|update` ждут в ней метку своей регистрации."""
+    return {"ok": True, "name": req["name"],
+            "result": bootstrap.read_result(bootstrap.ROOT, req["name"])}
 
 
 def _restart(project, req):
@@ -785,7 +817,7 @@ def _cred_status(project, req):
 
 
 def _cred_login_start(project, req):
-    return {"ok": True, "url": credreg.login_start(req["name"], req.get("mode") or "login")}
+    return {"ok": True, "url": credreg.login_start(req["name"], req.get("mode") or None)}
 
 
 def _cred_login_code(project, req):
@@ -909,6 +941,8 @@ VERBS = {
     "secret_list":    Verb(_secret_list,    SECRET,  False, False),
     "secret_remove":  Verb(_secret_remove,  SECRET,  False, False),
     "landing":        Verb(_landing,        PROJECT, False, False),
+    # Итог прогона bootstrap'а (#334): читает, но называет джоба -- как spec.
+    "bootstrap_result": Verb(_bootstrap_result, PROJECT, True, True),
     "nodes":          Verb(_nodes,          ADMIN,   False, False),
     "drain":          Verb(_drain,          ADMIN,   False, False),
     "up":             Verb(_up,             ADMIN,   False, False),

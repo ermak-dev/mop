@@ -237,7 +237,7 @@ def check_creds_285(c):
     rows = web.cred_rows(CREDS, now=1_000_000)
     c.expect("#285 cred names", [r["name"] for r in rows], ["anton", "team", "old", "fresh"])
     c.expect("#285 status words", [r["status"] for r in rows],
-             ["активен", "ждёт квоты до " + web.human_time(1_000_000 + 1800),
+             ["активен", "ждёт квоты",
               "ждёт ручной авторизации: HTTP 401", "не проверялся"])
     c.expect("#285 percent and age", [(r["percent"], r["age"]) for r in rows],
              [(46, "2h"), (100, "3d"), (None, "1m"), (None, "0m")])
@@ -250,8 +250,9 @@ def check_creds_285(c):
                         errors=[], at=1.0, creds=rows)
     c.expect("#285 snapshot carries creds", snap.get("creds"), rows)
 
+    # Без режима -- None: режим решает вид кредита в login_start (#339).
     c.expect("#285 parse_login_start", web.parse_login_start({"name": "anton"}),
-             ({"name": "anton", "mode": "login"}, None))
+             ({"name": "anton", "mode": None}, None))
     c.expect("#285 parse_login_start setup-token", web.parse_login_start({"name": "a", "mode": "setup-token"}),
              ({"name": "a", "mode": "setup-token"}, None))
     c.check("#285 parse_login_start refuses a strange mode",
@@ -286,7 +287,7 @@ def check_row_button_294(c):
     c.expect("#294 rows carry the profile for the button",
              [r["profile"] for r in rows], ["claude", "glm", "claude", "claude"])
     c.expect("#294 parse_login_start still validates",
-             web.parse_login_start({"name": "anton"}), ({"name": "anton", "mode": "login"}, None))
+             web.parse_login_start({"name": "anton"}), ({"name": "anton", "mode": None}, None))
     c.check("#294 parse_login_code still refuses an empty code",
             web.parse_login_code({"name": "a", "code": ""})[0] is None)
 
@@ -378,11 +379,48 @@ def check_dist_297(c):
             os.path.isfile(webcli.PAGE) and os.path.isdir(os.path.join(os.path.dirname(webcli.PAGE), "assets")))
 
 
+# ── #331: время сброса -- не в слове статуса ─────────────────────────────
+# HYPOTHESIS: cred_status_word вшивал в слово human_time(resets_at) --
+# «%H:%M:%S» в поясе сервера, без даты: недельное окно, которое сбросится
+# через три дня, читалось как «сегодня в 5 утра». resets_at и так едет в
+# снимке числом.
+# SOLUTION: слово quota_wait -- голое «ждёт квоты», время собирает страница
+# из resets_at в поясе браузера (web/src/components/format.ts); human_time
+# ушёл. needs_login и active не меняются.
+# STATUS: FIXED — see #331
+def check_reset_time_331(c):
+    c.expect("#331 quota_wait carries no time, only the word",
+             web.cred_status_word({"kind": "quota_wait", "resets_at": 1_790_000_000}), "ждёт квоты")
+    c.expect("#331 quota_wait without a reset time: the same word",
+             web.cred_status_word({"kind": "quota_wait", "resets_at": None}), "ждёт квоты")
+    c.expect("#331 needs_login keeps its detail",
+             web.cred_status_word({"kind": "needs_login", "detail": "HTTP 401"}), "ждёт ручной авторизации: HTTP 401")
+    c.expect("#331 active unchanged", web.cred_status_word({"kind": "active"}), "активен")
+    c.check("#331 human_time is gone: nothing else read it", not hasattr(web, "human_time"))
+
+
+def check_login_start_no_default_339(c):
+    """HYPOTHESIS (#339): parse_login_start подставляет режим login, и
+    login_start не отличает «не спросили» от «спросили login»: кредит вида
+    token входил `claude auth login`. SOLUTION: без режима -- None, режим
+    выводит login_start из записи; явный режим по-прежнему проверяется.
+    STATUS: FIXED — see #339"""
+    c.expect("#339 parse_login_start without a mode gives None",
+             web.parse_login_start({"name": "old"}), ({"name": "old", "mode": None}, None))
+    c.expect("#339 an empty mode is no mode", web.parse_login_start({"name": "old", "mode": " "}),
+             ({"name": "old", "mode": None}, None))
+    c.expect("#339 an explicit mode passes through",
+             web.parse_login_start({"name": "old", "mode": "login"}), ({"name": "old", "mode": "login"}, None))
+    c.check("#339 a strange mode is still refused",
+            web.parse_login_start({"name": "old", "mode": "x"})[0] is None)
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
-               check_creds_285, check_row_button_294, check_holders_301, check_masters_305, check_dist_297):
+               check_creds_285, check_row_button_294, check_holders_301, check_masters_305, check_dist_297,
+               check_reset_time_331, check_login_start_no_default_339):
         fn(c)
     return c.report("web")
 

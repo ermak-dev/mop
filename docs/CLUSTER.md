@@ -48,6 +48,7 @@ mop.<проект>.cluster.rpc            без логина: машины (ser
 | `drain`, `up`, `forget` | оператору | жизненный цикл узла |
 | `meta` | оператору | динамическая meta узла |
 | `secret_put`, `secret_list`, `secret_remove` | проекту | секреты проекта: файлы и переменные (#127, [BOOTSTRAP.md](BOOTSTRAP.md)) |
+| `bootstrap_result` | проекту | итог последнего прогона bootstrap'а папета: метка регистрации, коммит, ok/задача/сообщение (#334, docs/BOOTSTRAP.md) |
 | `landing` | проекту | токен посадки: `take`/`give`/`show`, `(action, holder, puppet, force)` (#42) |
 | `projects` | оператору | реестр проектов и их лимиты |
 | `project_add` | оператору | завести проект: `(origin)` |

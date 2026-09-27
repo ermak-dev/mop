@@ -120,9 +120,22 @@ def read_limits(path=LIMITS):
     """{проект: потолок}; нет файла -- лимитов нет."""
     try:
         with open(path) as f:
-            return {k: int(v) for k, v in json.load(f).items()}
-    except (OSError, ValueError, AttributeError):
+            got = json.load(f)
+    except (OSError, ValueError):
         return {}
+    if not isinstance(got, dict):
+        return {}
+    # По записи, не по файлу (#337): потолок защищает, и одна плохая строка
+    # (null, список, bool) не должна ни ронять глагол, ни снимать остальные.
+    out = {}
+    for k, v in got.items():
+        if isinstance(v, bool):
+            continue
+        try:
+            out[k] = int(v)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return out
 
 
 def write_limits(limits, path=LIMITS):

@@ -671,8 +671,9 @@ def recycle(name, workspace_of=None, force=False):
     сессии гарантированно нет. Перерегистрация, а не alloc_restart: врапер
     живёт в спеке джоба, рестарт аллокации поднял бы старую.
 
-    workspace_of(origin) -> текст workspace папета (#133); None -- сервер
-    оставляет положенный (рецикл без рабочей копии, `mop gc`).
+    workspace_of(origin) -> (текст workspace папета, происхождение) (#133,
+    #334); None -- сервер оставляет положенный (рецикл без рабочей копии,
+    `mop gc`).
 
     Ворота владения (#40) -- на первом шаге, останове: чужой папет
     отказывает до того, как что-то остановлено; force идёт во все три
@@ -699,10 +700,18 @@ def recycle(name, workspace_of=None, force=False):
     except RuntimeError as e:
         raise RuntimeError(f"{e}; job is stopped — after fixing the node "
                            f"retry: mop recycle {name}")
-    fields = {"workspace": workspace_of(origin)} if workspace_of else {}
-    _cluster("update", name=name, origin=origin, profile=profile, branch=branch,
-             **me, **fields)
-    return {"node": node, "owner_note": note}
+    # workspace_of -> (текст, происхождение) (#334): происхождение едет
+    # рядом и возвращается -- командлет называет, что уехало.
+    sent = None
+    fields = {}
+    if workspace_of:
+        text, sent = workspace_of(origin)
+        fields = {"workspace": text, "bootstrap_sent": sent}
+    got = _cluster("update", name=name, origin=origin, profile=profile, branch=branch,
+                   **me, **fields)
+    # Метка регистрации (#334): командлет ждёт итог прогона по ней.
+    return {"node": node, "owner_note": note, "bootstrap_sent": sent,
+            **{k: got[k] for k in ("bootstrap_marker", "replaced") if k in got}}
 
 
 # ─── ввод в TUI папета ───────────────────────────────────────────────────

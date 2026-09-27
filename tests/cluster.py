@@ -19,6 +19,7 @@ STATUS: FIXED — see #80
 import dataclasses
 import os
 import sys
+import tempfile
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 from _lib import Checks, FakeNomad, offline, patched, restored, GATE_NOW, gate_table_267  # noqa: E402
@@ -864,6 +865,88 @@ def check_nomad_api_275(c):
         c.expect(f"{rel} reaches Nomad only through the injected api", bare, [])
 
 
+# ── #334: ответ add/update несёт метку отправленного, итог -- глаголом ──
+# HYPOTHESIS: store_workspace кладёт только текст; чем кончился прогон,
+# клиент узнаёт из `mop list` или журнала -- глагола нет.
+# SOLUTION: с полем bootstrap_sent сервис кладёт происхождение с меткой
+# регистрации и отдаёт метку в ответе (bootstrap_marker), update -- ещё и
+# replaced: перерегистрация без изменения спеки Nomad не переразмещает, и
+# прогона не будет. Без поля -- байт в байт как было. Глагол
+# bootstrap_result отдаёт итог прогона. STATUS: FIXED — see #334
+def check_bootstrap_334(c):
+    from mop.server import bootstrap
+    row = cluster.VERBS.get("bootstrap_result")
+    if not c.check("#334 bootstrap_result is a verb", row is not None):
+        return
+    c.expect("#334 bootstrap_result: project scope, named and acting like spec",
+             (row.scope, row.named, row.acting), (cluster.PROJECT, True, True))
+    root = tempfile.mkdtemp(prefix="mop-test-cluster-334-")
+    prov = {"source": "origin", "commit": "5b92b440c952fad2", "dirty": False,
+            "tasks": 2, "present": True}
+    text = "- name: b\n  tasks:\n    - name: t\n      ansible.builtin.command: \"true\"\n"
+    own = {"ID": "pu-mop-1", "Version": 3, "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
+    with patched(bootstrap, ROOT=root), \
+            patched(cluster.spec, job_spec=lambda *a, **kw: {"Job": {"ID": a[0]}},
+                    respec=lambda name, meta, cont=False, node=None: {"Job": {"ID": name}}), \
+            patched(cluster, _live_count=lambda target: 0, next_name=lambda target: "pu-mop-1",
+                    _cred_for=lambda *a, **kw: (None, None)):
+        with cluster.using(FakeNomad()):
+            got = cluster._add("mop", {"origin": "git@h:g/mop.git", "workspace": text,
+                                       "bootstrap_sent": prov})
+        sent = bootstrap.read_sent(root, "pu-mop-1") or {}
+        c.check("#334 add stores the provenance and returns its marker",
+                got.get("bootstrap_marker") and got["bootstrap_marker"] == sent.get("marker")
+                and sent.get("commit") == prov["commit"], (got, sent))
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": dict(own)})):
+            got = cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
+                                          "workspace": text, "bootstrap_sent": prov})
+        sent = bootstrap.read_sent(root, "pu-mop-1") or {}
+        c.check("#334 update returns the new marker and says the job was replaced",
+                got.get("bootstrap_marker") == sent.get("marker") and got.get("replaced") is True,
+                (got, sent))
+        # Спека не изменилась -- Nomad держит прежнюю аллокацию, прогона нет.
+        same = FakeNomad(jobs={"pu-mop-1": dict(own)})
+        same.register = lambda spec: same._call("register", spec)
+        with cluster.using(same):
+            got = cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
+                                          "workspace": text, "bootstrap_sent": prov})
+        c.expect("#334 update with an unchanged spec says it was not replaced",
+                 got.get("replaced"), False)
+        # Без поля -- как сегодня: ни файла, ни новых полей ответа.
+        bootstrap.store(root, "pu-mop-1", "")
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": dict(own)})):
+            got = cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
+                                          "workspace": text})
+        c.expect("#334 update without provenance: today's reply, nothing stored",
+                 (got, bootstrap.read_sent(root, "pu-mop-1")),
+                 ({"ok": True, "name": "pu-mop-1", "node": None}, None))
+        with cluster.using(FakeNomad()):
+            got = cluster._add("mop", {"origin": "git@h:g/mop.git", "workspace": text})
+        c.expect("#334 add without provenance: today's reply, nothing stored",
+                 (got, bootstrap.read_sent(root, "pu-mop-1")),
+                 ({"ok": True, "name": "pu-mop-1", "origin": "git@h:g/mop.git"}, None))
+
+        # Глагол: свой папет -- запись, чужой -- отказ.
+        bootstrap.note_result(root, "pu-mop-1", {"ok": True, "played": True, "rc": 0,
+                                                 "seconds": 4.0, "tail": "done"}, now=5)
+        want = bootstrap.read_result(root, "pu-mop-1")
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": dict(own)})):
+            got = cluster.answer("mop", {"verb": "bootstrap_result", "name": "pu-mop-1"})
+            c.expect("#334 bootstrap_result answers the record of a named own puppet",
+                     got, {"ok": True, "name": "pu-mop-1", "result": want})
+            got = cluster.answer("rugent", {"verb": "bootstrap_result", "name": "pu-mop-1"})
+            c.check("#334 bootstrap_result refuses a foreign project's puppet",
+                    "belongs to project mop" in (got.get("error") or ""), got)
+            got = cluster.answer("mop", {"verb": "bootstrap_result", "name": "pu-mop-2"})
+            c.check("#334 bootstrap_result of a missing job is a refusal",
+                    "no job pu-mop-2" in (got.get("error") or ""), got)
+        bootstrap.store(root, "pu-mop-1", "")
+        with cluster.using(FakeNomad(jobs={"pu-mop-1": dict(own)})):
+            got = cluster.answer("mop", {"verb": "bootstrap_result", "name": "pu-mop-1"})
+        c.expect("#334 bootstrap_result without a record: result None",
+                 got, {"ok": True, "name": "pu-mop-1", "result": None})
+
+
 def check_stderr_verb_333(c):
     """HYPOTHESIS (#333): у папета без tmux (bootstrap падает до сессии)
     `mop tail` не показывает ничего: хвост пейна пуст, а хвост stderr
@@ -948,6 +1031,7 @@ def check_cred_push_312(c):
 
 def main():
     c = Checks()
+    check_bootstrap_334(c)
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
                   check_limit, check_project_verbs,
                   check_secret_verbs, check_verb_table_173,

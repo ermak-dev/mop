@@ -81,6 +81,61 @@ def files_of(root, project):
             of_vars if os.path.exists(of_vars) else None)
 
 
+def _sent_path(root, name):
+    return os.path.join(root, f"{name}-sent.json")
+
+
+def _result_path(root, name):
+    return os.path.join(root, f"{name}-result.json")
+
+
+def _read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def read_sent(root, name):
+    """Что уехало последней регистрацией папета (#334) либо None."""
+    return _read_json(_sent_path(root, name))
+
+
+def read_result(root, name):
+    """Итог последнего прогона папета (#334) либо None."""
+    return _read_json(_result_path(root, name))
+
+
+def note_sent(root, name, prov, now=None):
+    """Положить происхождение workspace рядом с ним (#334). -> метка.
+
+    Метка -- регистрации, по часам сервера, а не клиента: итог прогона
+    несёт её, и клиент ждёт итог именно своей регистрации. Строго больше
+    прежней: две регистрации в одну наносекунду не сливаются."""
+    before = (read_sent(root, name) or {}).get("marker") or 0
+    marker = max(time.time_ns(), before + 1)
+    fsutil.make_private_dir(root)
+    fsutil.write_private(_sent_path(root, name), json.dumps(
+        {**(prov or {}), "marker": marker, "at": int(now or time.time())}))
+    return marker
+
+
+def note_result(root, name, out, now=None):
+    """Итог прогона папета -- рядом с отправленным (#334): метка и коммит
+    того, что уехало, плюс task/message, если прогон их назвал (#333)."""
+    sent = read_sent(root, name) or {}
+    lines = [l for l in (out.get("tail") or "").splitlines() if l.strip()]
+    record = {"ok": bool(out.get("ok")), "played": bool(out.get("played")),
+              "seconds": out.get("seconds"), "rc": out.get("rc"),
+              "task": out.get("task"), "message": out.get("message"),
+              "last": lines[-1] if lines else None, "at": int(now or time.time()),
+              "sent": sent.get("marker"), "commit": sent.get("commit")}
+    fsutil.make_private_dir(root)
+    fsutil.write_private(_result_path(root, name), json.dumps(record))
+    return record
+
+
 def store(root, project, text):
     """Положить bootstrap проекта: text — содержимое .mop/bootstrap.yaml, пусто
     — снять (проект убрал файл, сервер не должен играть вчерашний).
@@ -91,7 +146,10 @@ def store(root, project, text):
     tasks_path = os.path.join(root, f"{project}-tasks.yml")
     vars_path = os.path.join(root, f"{project}-vars.yml")
     if not text.strip():
-        for p in (tasks_path, vars_path):
+        # С файлом уходят и отправленное с итогом (#334): их папета больше нет
+        # на сервере, и чужой старый итог не должен прочитаться своим.
+        for p in (tasks_path, vars_path, _sent_path(root, project),
+                  _result_path(root, project)):
             try:
                 os.unlink(p)
             except FileNotFoundError:
@@ -344,9 +402,16 @@ def answer(project, req, _send=None):
             why = refusal(req, project)
             if why:
                 return {"error": why}
+            out = play(req, project)
+            # Итог -- рядом с отправленным (#334): `mop update` ждёт его. Не
+            # записался -- подсказка пропала, а прогон и кред важнее.
+            try:
+                note_result(ROOT, req["name"], out)
+            except OSError:
+                pass
             # Кред папета едет тем же ответом: узел уже позвал нас, и
             # второго разговора ради одного файла не нужно.
-            out = with_creds(play(req, project), puppet_creds(project), project)
+            out = with_creds(out, puppet_creds(project), project)
             if out.get("ok"):
                 note = lease_note(req.get("name"))
                 if note:

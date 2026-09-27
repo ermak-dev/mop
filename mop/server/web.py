@@ -21,7 +21,6 @@ import dataclasses
 import os
 import threading
 import time
-from datetime import datetime
 
 from ..common import bus, credreg as credrows, puppets, state
 from .. import usage
@@ -213,12 +212,15 @@ LOGIN_MODES = ("login", "setup-token")
 
 
 def cred_status_word(st):
-    """Статус кредита по-русски для страницы: три исхода плюс «не проверялся»."""
+    """Статус кредита по-русски для страницы: три исхода плюс «не проверялся».
+
+    Время сброса квоты в слово не входит (#331): здесь оно было бы в поясе
+    сервера и без даты, и недельное окно через три дня читалось как «сегодня
+    в пять утра». resets_at едет в строке числом, и «до …» пишет страница в
+    поясе браузера."""
     if not st or not st.get("kind"):
         return "не проверялся"
     word = CRED_WORDS.get(st["kind"], st["kind"])
-    if st["kind"] == "quota_wait" and st.get("resets_at"):
-        return f"{word} до {human_time(st['resets_at'])}"
     if st["kind"] == "needs_login" and st.get("detail"):
         return f"{word}: {st['detail']}"
     return word
@@ -274,9 +276,10 @@ def parse_login_start(body):
         credrows.check_name(name)
     except ValueError as e:
         return None, f"name: {e}"
+    # Без режима -- None: режим решает вид кредита в login_start (#339).
     mode, _ = _field(body, "mode", required=False)
-    mode = mode or "login"
-    if mode not in LOGIN_MODES:
+    mode = mode or None
+    if mode is not None and mode not in LOGIN_MODES:
         return None, f"mode: one of {', '.join(LOGIN_MODES)}"
     return {"name": name, "mode": mode}, None
 
@@ -499,5 +502,3 @@ def journal_entry(msg):
             "text": msg.get("text") or ""}
 
 
-def human_time(ts):
-    return datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "-"

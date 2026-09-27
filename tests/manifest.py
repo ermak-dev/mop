@@ -128,6 +128,10 @@ def fetch_is_shallow_and_blobless(c):
         got = manifest.fetch(f"file://{src}")
     c.expect("fetch: bootstrap must read through the clone", got.get("bootstrap_text"), BOOTSTRAP)
     c.expect("fetch: clone must carry one commit", seen.get("commits"), "1")
+    # #334: коммит манифеста -- HEAD того же клона, без второго.
+    c.expect("fetch: names the commit it read (#334)", got.get("commit"),
+             real(["git", "-C", src, "rev-parse", "HEAD"], capture_output=True,
+                  text=True).stdout.strip())
     c.check("fetch: clone must not carry the blobs it doesn't read (heavy.bin, history.txt)",
             seen.get("missing"))
 
