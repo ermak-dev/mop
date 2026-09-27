@@ -198,8 +198,8 @@ def build(origin, got, out=None, fresh=False, force=False, on_line=None,
     on_step — имя этапа вызывающему (сборщик шлёт его просителю, #123).
     api — Nomad (nomad.NomadApi, #275), по умолчанию живой."""
     step = on_step or (lambda _s: None)
-    if node:
-        container_nodes(api or nomad, node)
+    # Проверка узла -- один раз (#321): её же итог объявляет образ ниже.
+    nodes = container_nodes(api or nomad, node) if node else None
     step("stopping the project's bodies")
     gone = clear(got["project"], force, api=api, node=node)
     try:
@@ -210,15 +210,19 @@ def build(origin, got, out=None, fresh=False, force=False, on_line=None,
         restore(gone, api=api)
     if rc == 0:
         step("announcing the image to the nodes")
-    announced = announce(got["project"], api=api, node=node) if rc == 0 else []
+    announced = announce(got["project"], api=api, node=node, nodes=nodes) if rc == 0 else []
     return {"rc": rc, "gone": gone, "announced": announced}
 
 
 def container_nodes(api, node=None):
-    """Контейнерные узлы пула по мете Nomad -> {узел: мета}. С node --
-    только он, и RuntimeError, если такого узла нет или его тела не
-    контейнеры (#280): образ строится и объявляется только там, где тело --
-    клон шаблона."""
+    """Узлы пула по мете Nomad -> {узел: мета}: без node -- все (announce
+    отбирает сам и называет прочие строкой). С node -- только он, и
+    RuntimeError, если такого узла нет или его тела не контейнеры (#280):
+    образ строится и объявляется только там, где тело -- клон шаблона.
+
+    Единственная проверка «контейнерный ли узел пула» (#321): её зовут и
+    build, и сборщик (`mop project add --node`) -- у него была своя, с
+    другими словами и ValueError."""
     meta = api.nodes_meta()
     if node is not None:
         if node not in meta:
@@ -231,10 +235,11 @@ def container_nodes(api, node=None):
     return meta
 
 
-def announce(project, api=None, node=None):
+def announce(project, api=None, node=None, nodes=None):
     """Сказать кластеру, что образ этого проекта на узлах собран.
     -> [(узел, 'announced'|'already announced'|'not a container node')].
-    node -- только ему (#280): на остальных образ не собирали.
+    node -- только ему (#280): на остальных образ не собирали; nodes --
+    итог container_nodes, если он уже есть.
 
     Без этого планировщик про образ не знает, и папет проекта на узел не
     сядет — ограничение в спеке смотрит именно на этот перечень. Отдельным
@@ -247,7 +252,9 @@ def announce(project, api=None, node=None):
     заводилось."""
     api = api or nomad
     out = []
-    for name, meta in sorted(container_nodes(api, node).items()):
+    # nodes -- уже проверенные build'ом (#321): второй раз не спрашиваем.
+    for name, meta in sorted((nodes if nodes is not None
+                              else container_nodes(api, node)).items()):
         # Неизвестный драйвер -- строка с отказом, остальные узлы дальше (#175).
         try:
             container = driver.is_container(driver.of_node(meta, name))

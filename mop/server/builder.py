@@ -93,15 +93,13 @@ def needs_build(mode, serving, project, node=None):
     update и rebuild -- всегда. Контейнерных узлов нет -- собирать нечего:
     на host-узле тело и есть узел.
 
-    node -- решение только по нему (#280); узла нет среди контейнерных --
-    ValueError, а не молчаливое «собирать нечего»."""
+    node -- решение только по нему (#280). Контейнерный ли он узел пула,
+    решает image.container_nodes до этого вызова (#321): здесь узел без
+    записи в serving -- узел без образа."""
     if mode not in MODES:
         raise ValueError(f"no build mode {mode}; modes: {', '.join(MODES)}")
-    if node is not None and serving:
-        if node not in serving:
-            raise ValueError(f"{node} is not a container node of the pool; "
-                             f"those are: {', '.join(sorted(serving))}")
-        serving = {node: serving[node]}
+    if node is not None:
+        serving = {node: serving.get(node) or []}
     if not serving:
         return False
     if mode == "missing":
@@ -169,6 +167,12 @@ def run(req, send):
         serving = serving_now(refused)
         for why in refused:
             send(step=f"skipping {why}")
+        if node:
+            # Контейнерный ли узел пула -- одна проверка, у image (#321).
+            try:
+                image.container_nodes(nomad, node)
+            except RuntimeError as e:
+                return {"error": str(e)}
         try:
             if not needs_build(mode, serving, project, node):
                 return {"ok": True, "skipped": True, "project": project}
