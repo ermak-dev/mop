@@ -13,6 +13,7 @@ SOLUTION: diff_trees(a, b) -> отличающиеся относительны�
 STATUS: FIXED — see #297
 """
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -29,6 +30,25 @@ def tree(root, files):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(data)
+
+
+# ── #302: сборка страницы без библиотеки шины ─────────────────────────
+# HYPOTHESIS: задача web:dist в образе node падает «bus library required»:
+# пакет mop.cli.dev импортирует mop.cli.lib, а тот на верхнем уровне --
+# mop.common.bus, которому нужен nats; в образе node его нет.
+# SOLUTION: mop.cli.dev, mop.cli.dev.web и build берут lib только внутри
+# функций, отказы сборки -- своей строкой. Проверка -- в чистом процессе:
+# импорт build не заводит mop.common.bus. STATUS: FIXED — see #302
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def check_no_bus_302(c):
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); "
+             "import mop.cli.dev.web.build; "
+             "print(sorted(m for m in sys.modules if m in ('mop.common.bus', 'mop.cli.lib', 'nats')))")
+    got = subprocess.run([sys.executable, "-c", probe, ROOT], capture_output=True, text=True)
+    c.check("#302 the web build imports without the bus",
+            got.returncode == 0 and got.stdout.strip() == "[]", (got.stdout.strip(), got.stderr[-300:]))
 
 
 def main():
@@ -49,6 +69,7 @@ def main():
         c.expect("a missing tree is every file of the other",
                  build.diff_trees(a, os.path.join(d, "none")),
                  ["assets/x.js", "assets/y.css", "assets/z.svg", "index.html"])
+    check_no_bus_302(c)
     return c.report("webbuild")
 
 
