@@ -74,6 +74,55 @@ def check_login_start_registry_295(c):
             srv._logins.clear()
 
 
+# ── #330: вход claude -- только для кредита профиля claude ────────────
+# HYPOTHESIS: login_start сверяет имя и наличие записи (#295), но не её
+# профиль: страница прячет кнопку у GLM сама (canAuthorize), а сервер по
+# /api/creds/login/start и глаголу cred_login_start запускает `claude auth
+# login` в доме кредита glm, и удачный код кладёт туда .credentials.json.
+# SOLUTION: login_start отказывает записи не профиля claude -- до клиента и
+# до снятия прежнего незавершённого логина того же имени. STATUS: FIXED — see #330
+def check_login_start_profile_330(c):
+    import tempfile
+    from mop.server import credreg as srv
+    started, closed = [], []
+
+    class FakeLogin:
+        url = "https://claude.com/x"
+
+        @classmethod
+        def start(cls, home, mode):
+            started.append((os.path.basename(home), mode))
+            return cls()
+
+        def close(self):
+            closed.append(self)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        old_root, old_start = srv.ROOT, srv.credlogin.Login.start
+        srv.ROOT = tmp
+        srv.credlogin.Login.start = FakeLogin.start
+        try:
+            srv.save(credreg.record("zai", "glm", "key", now=NOW))
+            pending = FakeLogin()
+            srv._logins["zai"] = pending
+            try:
+                srv.login_start("zai")
+                c.fail("#330 login_start must refuse a glm credential")
+            except RuntimeError as e:
+                c.check("#330 the refusal names the profile",
+                        "is a glm credential" in str(e) and "only claude" in str(e), str(e))
+            c.expect("#330 no client is started for a glm credential", started, [])
+            c.check("#330 a pending login of that name is left alone",
+                    closed == [] and srv._logins.get("zai") is pending, (closed, srv._logins))
+            srv.save(credreg.record("anton", "claude", "login", now=NOW))
+            c.expect("#330 a claude credential still logs in",
+                     srv.login_start("anton"), "https://claude.com/x")
+            c.expect("#330 the client runs in its home", started, [("anton", "login")])
+        finally:
+            srv.ROOT, srv.credlogin.Login.start = old_root, old_start
+            srv._logins.clear()
+
+
 # ── #308: метка кредита -- подсказка, правда -- аренда ─────────────────
 # HYPOTHESIS: метку `.local/state/mop/cred` пишет глагол `write`, который
 # доступен мастеру любого проекта; note_turn берёт имя кредита из записи
@@ -151,6 +200,7 @@ def check_foreign_mark_308(c):
 def main():
     c = Checks()
     check_login_start_registry_295(c)
+    check_login_start_profile_330(c)
     check_foreign_mark_308(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
