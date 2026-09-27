@@ -4,6 +4,7 @@
 import { Badge, Container, Group, Stack, Text, Title, Alert } from "@mantine/core";
 import { usePool } from "./usePool";
 import { KINDS, type Counts, type Kind } from "./types";
+import { Credentials } from "./components/Credentials";
 
 export const KIND_RU: Record<Kind, string> = {
   free: "свободны", busy: "заняты", sick: "больны", silent: "агент молчит", down: "не подняты",
@@ -45,6 +46,9 @@ export default function App() {
         {snapshot && snapshot.errors.length > 0 && (
           <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join("\n")}</Alert>
         )}
+        {/* слот расхода (#299) */}
+        {snapshot && <Credentials creds={snapshot.creds} />}
+        {/* слот журнала (#298) */}
         <Text c="dimmed" size="sm">
           {live ? "поток событий" : "опрос"} · без входа, LAN доверенная · действия над папетами остаются в mop ·{" "}
           <a href="/api/pool">JSON</a>
