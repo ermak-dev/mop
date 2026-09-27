@@ -72,6 +72,56 @@ def uses_lib(tree):
                for n in ast.walk(tree))
 
 
+# ── #338: проверки не оставляют временных каталогов ──────────────────────
+# HYPOTHESIS: tempfile.mkdtemp в проверках (дом hermetic, копия репозитория с
+# web/node_modules, каталоги самих проверок) никто не удаляет: прогон на теле
+# папета оставлял 276 каталогов и 376 МБ, и tmpfs в 2 ГБ заполнялся за
+# несколько прогонов; на mate их набралось 45936.
+# SOLUTION: _lib заводит один временный корень на процесс проверки,
+# направляет в него tempfile.tempdir и TMPDIR (туда же попадают дети) и
+# удаляет его при выходе; hermetic импортирует _lib первым, до своего дома.
+# Копия репозитория не несёт web/node_modules.
+# STATUS: FIXED — see #338
+PROBE = """
+import os, subprocess, sys, tempfile
+sys.path.insert(0, %r)
+import hermetic  # noqa: F401 -- как любой файл проверок
+AT_IMPORT = tempfile.mkdtemp(prefix="mop-test-probe-")
+def check():
+    inner = tempfile.mkdtemp(prefix="mop-test-probe-")
+    child = subprocess.run([sys.executable, "-c",
+        "import tempfile; print(tempfile.NamedTemporaryFile(prefix='mop-test-child-', delete=False).name)"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    return inner, child
+inner, child = check()
+print("\\n".join([hermetic.HOME, AT_IMPORT, inner, child]))
+"""
+
+
+def check_tmp_cleanup_338(c):
+    import subprocess
+    import tempfile
+    watch = os.path.realpath(tempfile.mkdtemp(prefix="mop-test-watch-"))
+    src = tempfile.mkdtemp(prefix="mop-test-probe-src-")
+    probe = os.path.join(src, "probe.py")
+    with open(probe, "w") as f:
+        f.write(PROBE % TESTS)
+    r = subprocess.run([sys.executable, probe], env=dict(os.environ, TMPDIR=watch),
+                       capture_output=True, text=True)
+    made = [p for p in r.stdout.splitlines() if p.strip()]
+    c.expect("#338 the probe ran: hermetic's home, two mkdtemps, a child's tempfile",
+             (r.returncode, len(made)), (0, 4))
+    c.check(f"#338 everything the probe made was under its TMPDIR: {made}",
+            all(os.path.realpath(p).startswith(watch + os.sep) for p in made))
+    c.expect("#338 nothing is left in TMPDIR after the check process exits",
+             sorted(os.listdir(watch)), [])
+    # Копия репозитория (hermetic.hostile_repo, #217) -- без web/node_modules:
+    # с ним каждый прогон писал в /tmp 370 МБ.
+    copy = hermetic.hostile_repo({})
+    c.check("#338 the repository copy carries no web/node_modules",
+            not os.path.exists(os.path.join(copy, "web", "node_modules")))
+
+
 def main():
     c = Checks()
     lib_path = os.path.join(TESTS, "_lib.py")
@@ -92,6 +142,7 @@ def main():
         other = cross_imports(tree, stems)
         c.check(f"{f}: imports no other check", not other, other)
         c.check(f"{f}: stands on tests/_lib.py", uses_lib(tree))
+    check_tmp_cleanup_338(c)
     return c.report("tests_lib")
 
 
