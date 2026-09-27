@@ -28,8 +28,55 @@ from mop.common.domain import CredStatus  # noqa: E402
 NOW = 1_790_500_000
 
 
+# ── #295: вход со страницы -- только для кредита из реестра ───────────
+# HYPOTHESIS: credreg.login_start проверяет лишь синтаксис имени: для имени
+# вне реестра заводит дом и клиента, а удачный код через register_login
+# заводит новый кредит -- добавление мимо `mop cred` (решение 27.09, #294);
+# брошенный вход оставляет каталог, который реестр показывает строкой.
+# SOLUTION: login_start отказывает, если записи нет, до дома и клиента;
+# новый кредит claude заводит только `mop cred login` на сервере, который
+# ведёт драйвер сам и сюда не ходит. STATUS: FIXED — see #295
+def check_login_start_registry_295(c):
+    import tempfile
+    from mop.server import credreg as srv
+    started = []
+
+    class FakeLogin:
+        url = "https://claude.com/x"
+
+        @classmethod
+        def start(cls, home, mode):
+            started.append((os.path.basename(home), mode))
+            return cls()
+
+        def close(self):
+            pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        old_root, old_start = srv.ROOT, srv.credlogin.Login.start
+        srv.ROOT = tmp
+        srv.credlogin.Login.start = FakeLogin.start
+        try:
+            try:
+                srv.login_start("nobody")
+                c.fail("#295 login_start must refuse a name outside the registry")
+            except RuntimeError as e:
+                c.check("#295 the refusal names the command that adds one",
+                        "mop cred login" in str(e), str(e))
+            c.expect("#295 no home is created for an unknown name", sorted(os.listdir(tmp)), [])
+            c.expect("#295 no client is started for an unknown name", started, [])
+            srv.save(credreg.record("anton", "claude", "login", now=NOW))
+            c.expect("#295 a registered credential still logs in",
+                     srv.login_start("anton"), "https://claude.com/x")
+            c.expect("#295 the client runs in that credential's home", started, [("anton", "login")])
+        finally:
+            srv.ROOT, srv.credlogin.Login.start = old_root, old_start
+            srv._logins.clear()
+
+
 def main():
     c = Checks()
+    check_login_start_registry_295(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
     rec = credreg.record("anton", "claude", "login", owner="anton@example.dev", now=NOW)
