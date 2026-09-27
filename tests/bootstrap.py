@@ -311,6 +311,16 @@ def check_lease_push_312(c):
         c.expect(f"#312 after a {elapsed} s play: asked, timeout, note",
                  (bool(asked), asked[0][3] if asked else None, got.get("lease_note")),
                  (want_asked, want_timeout, want_note))
+    # Отказ host-узла (#312): второй кредит профиля на общем $HOME -- подъём
+    # отказывает с этим текстом, а не идёт на чужом аккаунте.
+    why = "host node box already runs credential anton of profile claude for pu-mop-2"
+    with patched(bootstrap, refusal=lambda req, project: None, play=lambda req, project: dict(played),
+                 puppet_creds=lambda project: {"url": "nats://x"}), \
+            patched(bus, ask_cluster=ask({"ok": True, "lease": "ermak", "node": "box",
+                                          "refused": why})):
+        got = bootstrap.answer("mop", dict(req))
+    c.expect("#312 a host refusal from cred_push fails the start with its text",
+             (got.get("ok"), got.get("error")), (None, why))
     failed = {"ok": False, "played": True, "rc": 2, "tail": "t", "task": None, "message": None}
     with patched(bootstrap, refusal=lambda req, project: None, play=lambda req, project: dict(failed),
                  puppet_creds=lambda project: {"url": "nats://x"}), \

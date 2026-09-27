@@ -34,6 +34,7 @@ import time
 import base64
 
 from ..common import credreg as common_credreg
+from .. import driver
 from . import bootstrap, credreg, natsconf, nodes, nomad, spec
 from ..common import (bus, busnames, config, creds, domain, landing, lease, llm, paths, project_secrets,
                       projects, puppets, service, state)
@@ -460,6 +461,11 @@ def _update(project, req):
     # поставит Nomad, как при подъёме.
     alloc = _api().latest_alloc(name)
     node = (alloc or {}).get("NodeName") or None
+    # Узел закреплён (#289) -- правило host проверяется до регистрации (#312).
+    if cred and node:
+        refused = host_refusal(name, cred, node)
+        if refused:
+            return {"error": refused}
     _api().register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch,
                                               cred=cred),
                                cont=bool(req.get("cont")), node=node))
@@ -774,6 +780,27 @@ def _cred_rm(project, req):
     return {"ok": True, "name": name}
 
 
+def host_refusal(name, lease, node):
+    """Правило host_conflict над Nomad (#312): драйвер узла из его меты,
+    аренды папетов узла из мет джобов. Узел не host или мета не читается --
+    None: контейнерные тела отдельны, а сомнение не повод не пустить."""
+    try:
+        meta = _api().node_meta(node) or {}
+    except Exception:
+        return None
+    try:
+        if driver.is_container(driver.of_node(meta, node)):
+            return None
+    except RuntimeError:
+        # Неизвестный драйвер в мете (#175): о нём скажут операции над
+        # узлом громко; аренду не держим.
+        return None
+    held = credreg.holders(_api())
+    on_node = {p: cred for cred, ps in held.items() for p, n in ps.items() if n == node}
+    profiles = {c: (credreg.load(c) or {}).get("profile") for c in {*on_node.values(), lease} if c}
+    return common_credreg.host_conflict(name, lease, on_node, profiles, node)
+
+
 def _cred_push(project, req):
     """Аренду папета -- в его тело, на каждом подъёме (#312). Зовёт
     bootstrap после прогона, до ответа узлу: так кредит в теле раньше tmux.
@@ -796,6 +823,10 @@ def _cred_push(project, req):
     if not node:
         return {"ok": True, "lease": lease, "node": None,
                 "result": f"NOT REACHED: {name} has no allocation"}
+    # На подъёме -- и ворота host (#312): у add узел выбрал Nomad только что.
+    refused = host_refusal(name, lease, node)
+    if refused:
+        return {"ok": True, "lease": lease, "node": node, "refused": refused}
     return {"ok": True, "lease": lease, "node": node,
             "result": credreg.push(lease, node, [name])}
 

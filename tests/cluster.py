@@ -1029,6 +1029,52 @@ def check_cred_push_312(c):
                 got)
 
 
+def check_host_refusal_312(c):
+    """HYPOTHESIS (#312): на host-узле два кредита одного профиля делят один
+    $HOME, и сервис кластера это позволял. SOLUTION: правило host_conflict --
+    в update (узел закреплён аллокацией) и в cred_push на подъёме (для add
+    узел выбирает Nomad позже): отказ вместо записи. STATUS: FIXED — see #312"""
+    import tempfile
+    from mop.common import credreg as common
+    from mop.server import credreg as srv
+    job = lambda name, cred: {"ID": name, "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
+                                                   "cred": cred}}
+    jobs = {"pu-mop-1": job("pu-mop-1", "ermak"), "pu-mop-2": job("pu-mop-2", "anton")}
+    allocs = {"pu-mop-1": {"ID": "a-1", "NodeName": "box"},
+              "pu-mop-2": {"ID": "a-2", "NodeName": "box"}}
+    pushed = []
+    with tempfile.TemporaryDirectory() as tmp, \
+            patched(srv, ROOT=tmp, push=lambda n, node, b, timeout=None: pushed.append(n) or "OK"):
+        for name in ("anton", "ermak"):
+            srv.save(common.record(name, "claude", "login", now=1))
+        for driver_name, refused in (("host", True), ("pve", False)):
+            api = FakeNomad(jobs=jobs, allocs=allocs, meta={"box": {"mop_driver": driver_name}})
+            pushed.clear()
+            got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
+            c.check(f"#312 cred_push on a {driver_name} node shared with another claude lease",
+                    bool(got.get("refused")) == refused and (pushed == []) == refused, (got, pushed))
+            with cluster.using(api):
+                why = cluster.host_refusal("pu-mop-1", "ermak", "box")
+            c.check(f"#312 host_refusal on {driver_name}", bool(why) == refused, why)
+        api = FakeNomad(jobs=dict(jobs, **{"pu-mop-2": job("pu-mop-2", "ermak")}), allocs=allocs,
+                        meta={"box": {"mop_driver": "host"}})
+        got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
+        c.check("#312 cred_push on host: the same credential on the node is fine",
+                not got.get("refused") and got.get("result") == "OK", got)
+        # update: узел закреплён аллокацией -- отказ до регистрации.
+        registered = []
+        api = FakeNomad(jobs=jobs, allocs=allocs, meta={"box": {"mop_driver": "host"}})
+        api.register = lambda spec: registered.append(spec)
+        with restored(cluster, "store_workspace"), restored(cluster.spec, "respec"):
+            cluster.store_workspace = lambda root, name, req: None
+            cluster.spec.respec = lambda *a, **k: {"Job": {"ID": "pu-mop-1"}}
+            with cluster.using(api):
+                got = cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
+                                              "profile": "claude", "cred": "ermak"})
+        c.check("#312 update on host with another claude lease there: refused, not registered",
+                "$HOME" in (got.get("error") or "") and registered == [], (got, registered))
+
+
 def main():
     c = Checks()
     check_bootstrap_334(c)
@@ -1040,7 +1086,8 @@ def main():
                   check_update_keeps_branch_257, check_cred_lease_284,
                   check_update_pins_node_289, check_owner_gate_267,
                   check_node_267, check_node_forms_277,
-                  check_nomad_api_275, check_stderr_verb_333, check_cred_push_312):
+                  check_nomad_api_275, check_stderr_verb_333, check_cred_push_312,
+                  check_host_refusal_312):
         check(c)
     return c.report("cluster")
 
