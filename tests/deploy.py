@@ -876,6 +876,43 @@ def check_one_source_219(c):
             c.check(f"{os.path.relpath(path, DEPLOY)}: no {gone.strip()!r} (#219)", gone not in text)
 
 
+# ── клиент claude на контроллере (#293) ──────────────────────────────────
+# HYPOTHESIS: установщик claude (`curl … install.sh | bash`, #11) живёт
+# задачей только в роли body, а контроллер его не получает; реестр кредитов
+# (#281) водит `claude auth login`, `auth status` и keep-alive на сервере,
+# и «Получить ссылку» на дашборде падало на execvp (#292).
+# SOLUTION: одно определение в roles/common/tasks/claude_cli.yml, включённое
+# и в роль тела, и в роль web (она владеет пользователем пула на
+# контроллере и идёт первой из серверных); второй строки install.sh в
+# deploy/ нет. STATUS: FIXED — see #293
+def check_claude_cli_293(c):
+    shared = os.path.join(COMMON, "tasks", "claude_cli.yml")
+    c.check("common/tasks/claude_cli.yml exists", os.path.isfile(shared))
+    if os.path.isfile(shared):
+        text = open(shared).read()
+        c.check("claude_cli: the #11 trap stays (pipefail + test -x)",
+              "pipefail" in text and "test -x" in text)
+
+    def flat(ts):
+        for t in ts or []:
+            yield t
+            yield from flat((t or {}).get("block"))
+
+    def includes(role):
+        path = os.path.join(DEPLOY, "roles", role, "tasks", "main.yml")
+        tasks = yaml.safe_load(open(path)) or []
+        return [(t.get("ansible.builtin.include_role") or t.get("include_role") or {})
+                for t in flat(tasks)]
+
+    for role in ("body", "web"):
+        c.check(f"{role}: includes common/claude_cli",
+              any(i.get("name") == "common" and i.get("tasks_from") == "claude_cli"
+                  for i in includes(role)), includes(role))
+    where = [os.path.relpath(p, DEPLOY) for p in deploy_files() if "install.sh" in open(p).read()]
+    c.check("install.sh is named once, in common/tasks/claude_cli.yml",
+          where == ["roles/common/tasks/claude_cli.yml"], where)
+
+
 def main():
     c = Checks()
 
@@ -1122,6 +1159,7 @@ def main():
           < names.index("Callout file of the bus, after") if after and users_task else False)
     check_identity_copy_167(c, ptasks)
     check_one_source_219(c)
+    check_claude_cli_293(c)
     check_agent_unit_172(c, can_render)
     conf = open(os.path.join(DEPLOY, "roles", "bus", "templates", "nats-server.conf.j2")).read()
     c.check("nats-server.conf includes callout.conf inside authorization",
