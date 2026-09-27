@@ -744,6 +744,12 @@ def switch_model(node, name, model, force=False):
         raise RuntimeError("model switch dialog did not close")
 
 
+def alloc_stderr(name, lines):
+    """Хвост stderr задачи аллокации папета глаголом `stderr` (#333):
+    [строки], пусто -- аллокации нет или stderr пуст."""
+    return _cluster("stderr", name=name, lines=lines).get("lines") or []
+
+
 def pane_lines(node, name):
     """Весь буфер tmux-пейна папета (история + экран)."""
     r = bus.request(node, "tail", name=name)

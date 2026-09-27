@@ -864,6 +864,46 @@ def check_nomad_api_275(c):
         c.expect(f"{rel} reaches Nomad only through the injected api", bare, [])
 
 
+def check_stderr_verb_333(c):
+    """HYPOTHESIS (#333): у папета без tmux (bootstrap падает до сессии)
+    `mop tail` не показывает ничего: хвост пейна пуст, а хвост stderr
+    аллокации сервис кластера читает только для строки FAILED.
+    SOLUTION: глагол `stderr` -- проектный, называет папета, только чтение
+    (без ворот владения): хвост stderr задачи последней аллокации тем же
+    alloc_stderr, N строк. STATUS: FIXED — see #333"""
+    job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
+    alloc = {"ID": "a-1", "ClientStatus": "pending", "NodeName": "hyper",
+             "TaskStates": {"claude": {"State": "pending"}}}
+    text = "".join(f"line {i}\n" for i in range(1, 11))
+
+    class Nomad(FakeNomad):
+        def alloc_stderr(self, alloc_id, task, tail=8000):
+            self._call("alloc_stderr", alloc_id, task)
+            return text
+    v = cluster.VERBS.get("stderr")
+    c.check("#333 stderr: a project verb that names a puppet and acts on nothing",
+            v is not None and v.scope == cluster.PROJECT and v.named and not v.acting, v)
+    if v is None:
+        return
+    api = Nomad(jobs={"pu-mop-1": job}, allocs={"pu-mop-1": alloc})
+    got = cluster.answer("mop", {"verb": "stderr", "name": "pu-mop-1", "lines": 3}, api=api)
+    c.expect("#333 stderr: the last N lines of the allocation's task",
+             got, {"ok": True, "alloc": "a-1", "status": "pending",
+                   "lines": ["line 8", "line 9", "line 10"]})
+    c.check("#333 stderr: read with the allocation's task name",
+            ("alloc_stderr", "a-1", "claude") in api.calls, api.calls)
+    got = cluster.answer("mop", {"verb": "stderr", "name": "pu-mop-1"}, api=api)
+    c.expect("#333 stderr: 40 lines by default", len(got.get("lines") or []), 10)
+    got = cluster.answer("mop", {"verb": "stderr", "name": "pu-mop-1", "lines": 0}, api=api)
+    c.expect("#333 stderr: at least one line", got.get("lines"), ["line 10"])
+    got = cluster.answer("mop", {"verb": "stderr", "name": "pu-mop-1"},
+                         api=Nomad(jobs={"pu-mop-1": job}))
+    c.expect("#333 stderr: no allocation -- none, not a failure",
+             got, {"ok": True, "alloc": None, "status": None, "lines": []})
+    got = cluster.answer("rugent", {"verb": "stderr", "name": "pu-mop-1"}, api=api)
+    c.check("#333 stderr: another project's puppet is refused", bool(got.get("error")), got)
+
+
 def main():
     c = Checks()
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
@@ -874,7 +914,7 @@ def main():
                   check_update_keeps_branch_257, check_cred_lease_284,
                   check_update_pins_node_289, check_owner_gate_267,
                   check_node_267, check_node_forms_277,
-                  check_nomad_api_275):
+                  check_nomad_api_275, check_stderr_verb_333):
         check(c)
     return c.report("cluster")
 

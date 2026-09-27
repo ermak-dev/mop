@@ -10,7 +10,7 @@ first, the order the policy walks when a credential runs out.
 import time
 
 from mop.cli import lib
-from mop.common import fsutil, llm, puppets, tiers
+from mop.common import credreg, fsutil, llm, puppets, tiers
 from mop.client import keys
 
 
@@ -53,7 +53,7 @@ def status_line(st):
     """CredStatus -> строка колонки: вид, загрузка, окна и время сброса."""
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.resets_at)) if st.resets_at else ""
     tail = f", resets {when}" if when else ""
-    return f"{st.kind}: {st.detail}{tail}"
+    return f"{credreg.WORDS.get(st.kind, st.kind)}: {st.detail}{tail}"
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).

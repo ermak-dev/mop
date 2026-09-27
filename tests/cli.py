@@ -269,6 +269,8 @@ def main():
     check_refusals_163(c)
     check_output_rules(c)
     check_empty_llm(c)
+    check_empty_value(c)
+    check_probe_words(c)
     check_deploy_check(c)
     check_inventory_drivers(c)
     check_pool_uniform(c)
@@ -967,6 +969,58 @@ def check_empty_llm(c):
             not (not code or not err.startswith("no LLM profile no-such; available: ")))
 
 
+
+def check_empty_value(c):
+    """HYPOTHESIS (#327): parse_value сворачивал пустое значение в None --
+    тот же ответ, что «флага нет»: `mop add --cred` без имени молча
+    заводил папета на первой активной аренде профиля. SOLUTION: пустое
+    значение -- ошибка использования, как у --llm (#164).
+    RESULT: четыре пустых формы отказывают одной строкой через диспетчер.
+    STATUS: FIXED — see #327"""
+
+    def through_dispatcher(argv):
+        return run_command(lambda x: _common.parse_value(x, "--cred") and None,
+                           argv, via_cli=True)
+    for argv in (["pu-mop-1", "--cred"], ["--cred="], ["--cred", ""],
+                 ["--cred", "--fresh"]):
+        out, err, code = through_dispatcher(argv)
+        lines = err.strip().splitlines()
+        c.check(f"parse_value({argv}): out {out!r} err {err!r} code {code!r}",
+                not (out or not code or len(lines) != 1 or "Traceback" in err
+                     or lines[0] != "--cred needs a value"))
+    c.expect("parse_value with a value",
+             _common.parse_value(["pu-mop-1", "--cred", "alice", "--fresh"], "--cred"),
+             ("alice", ["pu-mop-1", "--fresh"]))
+    c.expect("parse_value with flag=value",
+             _common.parse_value(["--cred=alice", "pu-mop-1"], "--cred"),
+             ("alice", ["pu-mop-1"]))
+    c.expect("parse_value without the flag must leave the value unset",
+             _common.parse_value(["pu-mop-1", "--fresh"], "--cred"),
+             (None, ["pu-mop-1", "--fresh"]))
+
+
+def check_probe_words(c):
+    """HYPOTHESIS (#332): `mop llm --probe` печатал вид кредита сырым
+    (`quota_wait: …`), а `mop cred list` -- словом (`quota wait`): одно
+    состояние двумя написаниями рядом. SOLUTION: status_line берёт слово
+    из credreg.WORDS с тем же откатом на вид, что у row().
+    RESULT: слова --probe совпадают с `mop cred list`. STATUS: FIXED — see #332"""
+    from mop.cli.pool import llm as llm_cmd
+    St = domain.CredStatus
+    for kind, want in (("quota_wait", "quota wait: 5h 100%"),
+                       ("needs_login", "needs login: 5h 100%"),
+                       ("active", "active: 5h 100%")):
+        c.expect(f"status_line({kind})", llm_cmd.status_line(St(kind, detail="5h 100%")), want)
+    # CredStatus сам отказывает незнакомому виду; откат на вид -- страховка
+    # на случай нового вида раньше нового слова, проверяется подставкой.
+    from types import SimpleNamespace
+    odd = SimpleNamespace(kind="strange", detail="5h 100%", resets_at=None)
+    c.expect("status_line(unknown kind) passes through", llm_cmd.status_line(odd),
+             "strange: 5h 100%")
+    got = llm_cmd.status_line(St("quota_wait", resets_at=86400 * 365, detail="5h 100%"))
+    c.check(f"status_line keeps the reset time: {got!r}",
+            not (not got.startswith("quota wait: 5h 100%, resets ")))
+
 # ── #186: драйвер узла из инвентаря — до плейбука ────────────────────────────
 # Вывод настоящего `ansible-inventory --list` (ansible-core 2.21) на инвентаре:
 #   puppet: plain (без переменной), explicit (mop_driver: host), hyper,
@@ -1178,6 +1232,25 @@ def check_deploy_check(c):
                         not (dry and collected))
                 c.check("deploy without --check must still collect server credentials",
                         not (not dry and not collected))
+            # #335: гейт спрашивает пайплайн коммита на ветке раскатки --
+            # ветке origin по умолчанию, а не последний на любой ветке (там
+            # 27.09 оказался идущий пайплайн эпика на том же коммите).
+            from mop.common import gitlab
+            asked, real_get = [], config.get
+
+            def pipeline(sha, ref=None):
+                asked.append((sha, ref))
+                return {"id": 1, "status": "success", "web_url": "u"}
+            with patched(config, get=lambda name, default=None: "1"
+                         if name == "MOP_DEPLOY_NEEDS_GREEN" else real_get(name, default)), \
+                    patched(gitlab, has_credentials=lambda: True, pipeline=pipeline,
+                            jobs=lambda pid: []), \
+                    patched(deploy, head_sha=lambda root: "5b92b440c952",
+                            ci_state=lambda root: ("feature", "master", [])):
+                calls.clear(), collected.clear()
+                out, err, code = run_command(deploy.main, [])
+                c.expect(f"#335 deploy gate asks the default branch's pipeline (err {err!r})",
+                         (code, asked), (0, [("5b92b440c952", "master")]))
             # Прочие аргументы — по-прежнему отказ, и до плейбука.
             for argv in (["pool"], ["git@h:g/p.git"], ["--check", "extra"], ["--diff"]):
                 calls.clear()
@@ -1485,6 +1558,7 @@ def check_fallback_model_183(c):
     check_server_namespace_259(c)
     check_named_263(c)
     check_body_file_270(c)
+    check_tail_stderr_333(c)
 
 
 def check_server_namespace_259(c):
@@ -1682,6 +1756,64 @@ def check_body_file_270(c):
         f.write("  тело  \n")
     c.check("#270 a readable file and a text argument must work as before",
             not (bug_common.read_body(None, ok) != "тело" or bug_common.read_body(" x ", None) != "x"))
+
+
+def check_tail_stderr_333(c):
+    """HYPOTHESIS (#333): `mop tail` папета, у которого нет tmux (bootstrap
+    падает до сессии), не показывает ничего полезного: running_alloc
+    отказывает «not running», пейна нет, а причина живёт в stderr аллокации.
+    SOLUTION: нет сессии (папет не running или пейн не читается) -- хвост
+    stderr аллокации глаголом `stderr` сервиса кластера, под строкой, что это
+    именно он (lib.stderr_text). Инструмент MCP `tail` -- тот же текст.
+    STATUS: FIXED — see #333"""
+    from mop.cli.core import tail
+    from mop.cli.service import mcp
+    from mop.common import puppets
+    text = getattr(lib, "stderr_text", None)
+    if text is None or not hasattr(puppets, "alloc_stderr"):
+        c.fail("#333 no lib.stderr_text / puppets.alloc_stderr: no fallback to stderr")
+        return
+    why = "pu-mop-1 is not running: FAILED: bootstrap task «a : b» failed: no file\nmore"
+    c.expect("#333 stderr text: a header naming the source, then the lines",
+             text("pu-mop-1", why, ["l1", "l2"]),
+             ["pu-mop-1: no tmux session (pu-mop-1 is not running: FAILED: bootstrap task "
+              "«a : b» failed: no file); the allocation's stderr, last 2 lines:", "l1", "l2"])
+    c.expect("#333 stderr text: nothing there is said",
+             text("pu-mop-1", "why", []),
+             ["pu-mop-1: no tmux session (why); the allocation's stderr is empty"])
+    asked = []
+
+    def stderr(name, lines):
+        asked.append((name, lines))
+        return ["l1", "l2"]
+
+    def not_running(name):
+        raise LookupError(why)
+
+    def no_pane(node, name):
+        raise RuntimeError("tmux in pu-mop-1: no server running")
+    want = "\n".join(text("pu-mop-1", why, ["l1", "l2"])) + "\n"
+    with patched(puppets, running_alloc=not_running, alloc_stderr=stderr):
+        out, err, code = run_command(tail.main, ["pu-mop-1", "-n", "2"])
+    c.expect("#333 mop tail, not running: the allocation's stderr", (out, code), (want, 0))
+    c.expect("#333 mop tail asks for as many lines as -n", asked, [("pu-mop-1", 2)])
+    with patched(puppets, running_alloc=lambda name: {"NodeName": "hyper"},
+                 pane_lines=no_pane, alloc_stderr=stderr):
+        out, err, code = run_command(tail.main, ["pu-mop-1", "-n", "2"])
+    c.check("#333 mop tail, running without a pane: the allocation's stderr",
+            code == 0 and out.startswith("pu-mop-1: no tmux session (tmux in pu-mop-1: "
+                                         "no server running)") and out.endswith("l1\nl2\n"),
+            (out, err, code))
+    with patched(puppets, running_alloc=lambda name: {"NodeName": "hyper"},
+                 pane_lines=lambda node, name: ["a", "b", "c"], alloc_stderr=stderr):
+        asked.clear()
+        out, err, code = run_command(tail.main, ["pu-mop-1", "-n", "2"])
+    c.expect("#333 mop tail with a pane: as before, stderr not asked",
+             (out, asked), ("b\nc\n", []))
+    with patched(puppets, running_alloc=not_running, alloc_stderr=stderr), \
+            patched(mcp, MASTER=True):
+        got = mcp.tail("pu-mop-1", lines=2)
+    c.expect("#333 MCP tail: the same text", got, want.rstrip("\n"))
 
 
 if __name__ == "__main__":

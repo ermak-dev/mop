@@ -10,7 +10,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import gitlab  # noqa: E402
@@ -101,19 +101,19 @@ def check_deploy_gate(c):
     if not c.check("mop server deploy has pipeline_refusals", fn is not None):
         return
 
-    def boom(sha):
+    def boom(sha, ref=None):
         raise AssertionError("GitLab asked while the check is off")
 
-    def green(sha):
+    def green(sha, ref=None):
         return {"status": "success", "web_url": URL}
 
-    def red(sha):
+    def red(sha, ref=None):
         return {"status": "failed", "web_url": URL}
 
-    def down(sha):
+    def down(sha, ref=None):
         raise RuntimeError("GET /pipelines -> HTTP 502: bad gateway")
 
-    def running(sha):
+    def running(sha, ref=None):
         return {"id": 42, "status": "running", "web_url": URL}
 
     def jobs_down(pid):
@@ -155,6 +155,64 @@ def check_deploy_gate(c):
         except (AssertionError, TypeError) as e:
             got = [f"raised: {e}"]
         c.expect(f"pipeline_refusals{args[:3]}", got, want)
+
+
+
+# ── #335: пайплайн коммита -- на ветке раскатки ─────────────────────────
+# HYPOTHESIS: 27.09 epic/314-dry создана на том же коммите, что master
+# (5b92b44). deploy:mop пайплайна master отработал 6 с и сказал «5b92b440c952
+# is still being tested; its own pipeline's deploy job rolls it out»:
+# gitlab.pipeline(sha) берёт последний пайплайн коммита на любой ветке, и
+# гейт увидел идущий пайплайн эпика, у которого джобы deploy нет. Сервер
+# встал на 5b92b44, плейбук не прогнан, агенты остались на старом коде.
+# SOLUTION: gitlab.pipeline(sha, ref=None) фильтрует по ветке, когда её
+# назвали; гейт deploy спрашивает пайплайн ветки раскатки -- ветки origin
+# по умолчанию; не названа -- отказ, а не любой ветки. STATUS: FIXED — see #335
+def check_pipeline_by_ref_335(c):
+    from mop.cli.server import deploy
+    asked = []
+
+    def call(method, path, payload=None, params=None):
+        asked.append((method, path, params))
+        return [{"id": 7, "status": "success", "web_url": URL}]
+    old = {"sha": SHA, "order_by": "id", "sort": "desc", "per_page": 1}
+    with patched(gitlab, call=call):
+        try:
+            gitlab.pipeline(SHA, ref="master")
+        except TypeError as e:
+            c.fail(f"#335 gitlab.pipeline takes ref: {e}")
+        c.expect("#335 pipeline(sha, ref=...) sends ref in the query",
+                 asked[-1:], [("GET", "/pipelines", {**old, "ref": "master"})])
+        asked.clear()
+        gitlab.pipeline(SHA)
+        c.expect("#335 pipeline(sha) without ref keeps today's query",
+                 asked, [("GET", "/pipelines", old)])
+
+    fetched = []
+
+    def green(sha, ref=None):
+        fetched.append((sha, ref))
+        return {"status": "success", "web_url": URL}
+    try:
+        got = deploy.pipeline_refusals("1", True, SHA, green, ref="master")
+    except TypeError as e:
+        got = [f"raised: {e}"]
+    c.expect("#335 gate asks the pipeline of the rollout branch",
+             (got, fetched), ([], [(SHA, "master")]))
+    fetched.clear()
+    try:
+        got = deploy.pipeline_refusals("1", True, SHA, green, ref="")
+    except TypeError as e:
+        got = [f"raised: {e}"]
+    c.expect("#335 gate with no nameable rollout branch refuses, asks nobody",
+             (got, fetched),
+             (["cannot name origin's default branch, the pipeline of the rollout branch "
+               "is unknown -- run git remote set-head origin --auto"], []))
+    try:
+        got = deploy.pipeline_refusals("", True, SHA, green, ref="")
+    except TypeError as e:
+        got = [f"raised: {e}"]
+    c.expect("#335 gate off: no branch needed, nothing asked", (got, fetched), ([], []))
 
 
 # #239: CI катит mop сам — джоба deploy по ssh с forced command зовёт
@@ -349,6 +407,7 @@ def main():
 
     check_from_ci_sync(c)
     check_deploy_gate(c)
+    check_pipeline_by_ref_335(c)
 
     try:
         gitlab.with_status([], "partial")

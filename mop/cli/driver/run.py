@@ -109,6 +109,27 @@ def clone_script(environ):
 
 
 # ─── узел ────────────────────────────────────────────────────────────────
+class BootstrapFailed(RuntimeError):
+    """Прогон bootstrap'а упал (#333). Текст -- прежний: код выхода ansible
+    и хвост; поверх -- упавшая задача и её сообщение, если сервер их назвал
+    (сервер до #333 их не шлёт)."""
+
+    def __init__(self, reply):
+        self.task, self.message = reply.get("task"), reply.get("message")
+        self.tail = reply.get("tail", "")
+        super().__init__(f"bootstrap failed (ansible exit {reply.get('rc')}):\n{self.tail}")
+
+
+def refusal(name, error):
+    """Строка отказа врапера на stderr. Чистая. Задача названа --
+    «failed at task «…»: сообщение», затем хвост, как всегда; её читает
+    state.failure_reason для FAILED в `mop list`."""
+    if isinstance(error, BootstrapFailed) and error.task:
+        return (f"bootstrap of {name} failed at task «{error.task}»: {error.message}\n"
+                f"{error.tail}")
+    return f"bootstrap of {name} failed: {error}"
+
+
 def bootstrap_sandbox(d, name, project):
     """Bootstrap песочницы папета с этого узла: впустить сервер, позвать,
     дождаться, выпустить. -> ответ сервера; отказ — RuntimeError/BusError.
@@ -130,8 +151,7 @@ def bootstrap_sandbox(d, name, project):
     if out.get("error"):
         raise RuntimeError(out["error"])
     if not out.get("ok"):
-        raise RuntimeError(f"bootstrap failed (ansible exit {out.get('rc')}):\n"
-                           f"{out.get('tail', '')}")
+        raise BootstrapFailed(out)
     return out
 
 
@@ -216,7 +236,7 @@ def main(argv):
     try:
         b = bootstrap_sandbox(d, name, driver.project_of_name(name))
     except (RuntimeError, bus.BusError) as e:
-        sys.exit(f"bootstrap of {name} failed: {e}")
+        sys.exit(refusal(name, e))
     print(f"{name}: bootstrap "
           + (f"played in {b.get('seconds')}s" if b.get("played")
              else "none for the project"), flush=True)

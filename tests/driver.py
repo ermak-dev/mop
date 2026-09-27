@@ -662,6 +662,10 @@ def main():
         check_body_gone_267(c)
     except Exception as e:
         c.fail("check_body_gone_267", f"{type(e).__name__}: {e}")
+    try:
+        check_bootstrap_refusal_333(c)
+    except Exception as e:
+        c.fail("check_bootstrap_refusal_333", f"{type(e).__name__}: {e}")
 
     try:
         check_clone_lock_195(c)
@@ -1126,6 +1130,38 @@ def check_body_gone_267(c):
                         ("mop/cli/driver/sweep.py", "Gone.from_dict(")):
         c.expect(f"#267 {rel} uses {needle}",
                  needle in open(os.path.join(root, rel)).read(), True)
+
+
+# ── #333: отказ врапера называет упавшую задачу bootstrap ─────────────
+# HYPOTHESIS: `mop driver run` печатает «bootstrap of <папет> failed:
+# bootstrap failed (ansible exit N):» и хвост -- без задачи, хотя ответ
+# сервера её теперь несёт.
+# SOLUTION: BootstrapFailed(ответ) и чистая refusal(имя, ошибка): задача
+# есть -- «bootstrap of <имя> failed at task «<задача>»: <сообщение>», затем
+# хвост, как сегодня; нет -- прежний текст. STATUS: FIXED — see #333
+def check_bootstrap_refusal_333(c):
+    from mop.cli.driver import run
+    if not hasattr(run, "refusal") or not hasattr(run, "BootstrapFailed"):
+        c.fail("#333 no run.refusal / run.BootstrapFailed")
+        return
+    reply = {"ok": False, "played": True, "rc": 2, "tail": "TASK [bootstrap : env file]\nfatal: ...",
+             "task": "bootstrap : env file", "message": "Could not find '.env-prod'"}
+    c.expect("#333 a named task", run.refusal("pu-rugent-3", run.BootstrapFailed(reply)),
+             "bootstrap of pu-rugent-3 failed at task «bootstrap : env file»: "
+             "Could not find '.env-prod'\nTASK [bootstrap : env file]\nfatal: ...")
+    old = dict(reply, task=None, message=None)
+    c.expect("#333 no task: the text as before",
+             run.refusal("pu-rugent-3", run.BootstrapFailed(old)),
+             "bootstrap of pu-rugent-3 failed: bootstrap failed (ansible exit 2):\n"
+             "TASK [bootstrap : env file]\nfatal: ...")
+    c.expect("#333 a server from before #333 (no keys): as before",
+             run.refusal("pu-x-1", run.BootstrapFailed({"ok": False, "rc": 4, "tail": "t"})),
+             "bootstrap of pu-x-1 failed: bootstrap failed (ansible exit 4):\nt")
+    c.expect("#333 any other refusal: as before",
+             run.refusal("pu-x-1", RuntimeError("cannot let the server into the body: no key")),
+             "bootstrap of pu-x-1 failed: cannot let the server into the body: no key")
+    c.check("#333 BootstrapFailed is still a RuntimeError",
+            issubclass(run.BootstrapFailed, RuntimeError))
 
 
 # ── таймаут шелла -- не успех (#171) ─────────────────────────────────────
