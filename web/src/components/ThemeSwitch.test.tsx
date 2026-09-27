@@ -12,8 +12,14 @@ test("the switch changes the colour scheme of the page", () => {
   localStorage.clear();
   render(<MantineProvider defaultColorScheme={DEFAULT_SCHEME}><ThemeSwitch /></MantineProvider>);
   expect(document.documentElement.getAttribute("data-mantine-color-scheme")).toBe("light");
-  fireEvent.click(screen.getByText("тёмная"));
+  fireEvent.click(screen.getByLabelText("тёмная тема"));
   expect(document.documentElement.getAttribute("data-mantine-color-scheme")).toBe("dark");
-  fireEvent.click(screen.getByText("светлая"));
+  fireEvent.click(screen.getByLabelText("светлая тема"));
   expect(document.documentElement.getAttribute("data-mantine-color-scheme")).toBe("light");
+});
+
+test("the switch is icons, not words (#304)", () => {
+  render(<MantineProvider defaultColorScheme={DEFAULT_SCHEME}><ThemeSwitch /></MantineProvider>);
+  expect(screen.queryByText("тёмная")).toBeNull();
+  expect(screen.getByLabelText("как в системе").querySelector("svg")).not.toBeNull();
 });
