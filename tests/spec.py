@@ -789,6 +789,41 @@ def check_job_meta_265(c):
             "\n    " + "\n    ".join(found))
 
 
+# ── #289: перерегистрация держит папета на его узле ──────────────────────
+# HYPOTHESIS: в спеке только ограничения по проекту и памяти, узел не
+# назван; `mop update` (и лечение update) регистрирует джоб заново, и Nomad
+# размещает его по свободной памяти. 26.09 pu-mop-6 уехал с hyper на gpu,
+# тело с клоном и разговором осталось на hyper бесхозным (так же pu-mop-4/5).
+# SOLUTION: node_constraint(узел) -- ${node.unique.name} = узел; job_spec и
+# respec берут node и добавляют его к ограничениям; без узла спека та же,
+# что и была (слепок не меняется), и версия шаблона от узла не зависит.
+# STATUS: FIXED — see #289
+def check_node_pin_289(c):
+    from mop.common.domain import JobMeta
+    pin = getattr(spec, "node_constraint", None)
+    if not c.check("spec.node_constraint exists", pin is not None):
+        return
+    c.expect("node_constraint('hyper')", pin("hyper"),
+             {"LTarget": "${node.unique.name}", "Operand": "=", "RTarget": "hyper"})
+    bare = spec.job_spec("pu-mop-1", ORIGIN)["Job"]
+    pinned = spec.job_spec("pu-mop-1", ORIGIN, node="hyper")["Job"]
+    c.expect("without a node the constraints are the project's and the memory's only",
+             sorted(x["LTarget"] for x in bare["Constraints"]),
+             ["${meta.mop_mem_cap_mb}", "${meta.mop_projects}"])
+    c.expect("with a node exactly one constraint is added, the node's",
+             [x for x in pinned["Constraints"] if x not in bare["Constraints"]],
+             [pin("hyper")])
+    c.expect("the node does not change the template version",
+             pinned["Meta"].get("mop_spec"), bare["Meta"].get("mop_spec"))
+    meta = JobMeta(ORIGIN, "claude", "swarm")
+    c.expect("respec passes the node through",
+             [x for x in spec.respec("pu-mop-1", meta, node="gpu")["Job"]["Constraints"]
+              if x.get("LTarget") == "${node.unique.name}"], [pin("gpu")])
+    c.check("respec without a node adds no pin",
+            not any(x.get("LTarget") == "${node.unique.name}"
+                    for x in spec.respec("pu-mop-1", meta)["Job"]["Constraints"]))
+
+
 def main():
     if sys.argv[1:] == ["--snapshot"]:
         # Снять слепок заново: только осознанно, когда спека меняется нарочно
@@ -802,7 +837,8 @@ def main():
     for fn in (check_snapshot, check_template_version, check_wrapper_paths,
                check_git_identity, check_driver_free_183,
                check_memory_197, check_project_asks_197, check_spec_memory_197,
-               check_nomad_order_197, check_claude_hooks_223, check_job_meta_265):
+               check_nomad_order_197, check_claude_hooks_223, check_job_meta_265,
+               check_node_pin_289):
         fn(c)
 
     for what, j, want in STALE:
