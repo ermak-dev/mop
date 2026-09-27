@@ -44,9 +44,10 @@ export function gb(kb: number | null | undefined): string {
   return kb >= 1048576 ? `${(kb / 1048576).toFixed(0)} GB` : `${(kb / 1024).toFixed(0)} MB`;
 }
 
-/** МБ -> "N GB", "-" без данных. */
+/** МБ -> "N GB" вниз, "-" без данных. Вниз, как `mop node` и строка пула
+ *  (#329): свободного не бывает больше, чем есть -- 1536 МБ это «1 GB». */
 export function gbOfMb(mb: number | null | undefined): string {
-  return mb == null ? "-" : `${(mb / 1024).toFixed(0)} GB`;
+  return mb == null ? "-" : `${Math.floor(mb / 1024)} GB`;
 }
 
 /** Токены коротко: 1.2k, 15M, 2.3G -- меньше десяти единиц с одним знаком. */
@@ -86,3 +87,33 @@ export function statusColor(status: string): string {
 
 /** Процент худшего окна кредита, "-" без данных. */
 export const percentText = (p: number | null) => (p == null ? "-" : `${p}%`);
+
+// Время сброса квоты (#331) -- в поясе смотрящего. Сервер прежде вписывал
+// его в слово статуса сам: «%H:%M:%S» в поясе сервера и без даты, и недельное
+// окно через три дня читалось как «сегодня в пять утра». Теперь слово голое,
+// а resets_at (эпоха, секунды) пишется здесь: «до чч:мм» сегодня и
+// «до дд.мм чч:мм» в другой день; секунды не нужны. timeZone -- для проверок,
+// страница его не передаёт, и пояс -- браузера.
+function wallClock(ts: number, timeZone?: string): Record<string, string> {
+  const fmt = new Intl.DateTimeFormat("ru-RU", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  });
+  return Object.fromEntries(fmt.formatToParts(new Date(ts * 1000)).map((p) => [p.type, p.value]));
+}
+
+/** «до чч:мм» или «до дд.мм чч:мм»; "" без времени сброса. */
+export function untilText(resetsAt: number | null, now: number = Date.now() / 1000, timeZone?: string): string {
+  if (resetsAt == null) return "";
+  const r = wallClock(resetsAt, timeZone), n = wallClock(now, timeZone);
+  const today = r.year === n.year && r.month === n.month && r.day === n.day;
+  return today ? `до ${r.hour}:${r.minute}` : `до ${r.day}.${r.month} ${r.hour}:${r.minute}`;
+}
+
+/** Статус кредита для ячейки: к голому «ждёт квоты» -- время сброса.
+ *  Только к голому: слово сервера до #331 уже несёт своё «до …». */
+export function credStatusText(status: string, resetsAt: number | null,
+                               now: number = Date.now() / 1000, timeZone?: string): string {
+  const until = status === "ждёт квоты" ? untilText(resetsAt, now, timeZone) : "";
+  return until ? `${status} ${until}` : status;
+}

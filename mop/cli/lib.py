@@ -311,8 +311,10 @@ def pool_lines():
             elif n.error:
                 out.append(f"  {n.name}: {n.error}")
             else:
-                out.append(f"  {n.name}: free {n.free_mb / 1024:.0f}/"
-                           f"{n.total_mb / 1024:.0f} GB, "
+                # Вниз, как `mop node` и страница (#329): свободного не бывает
+                # больше, чем есть, -- округлённые 1536 МБ читались как «2 GB».
+                out.append(f"  {n.name}: free {n.free_mb // 1024}/"
+                           f"{n.total_mb // 1024} GB, "
                            f"slots {render.ratio(n.slots, n.slots_total)}")
         return out
     except Exception as e:

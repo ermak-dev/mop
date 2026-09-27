@@ -140,7 +140,13 @@ def fetch(origin):
                                  capture_output=True, text=True,
                                  env=clone_env(os.environ))
             return got.stdout if got.returncode == 0 else None
-        return _collect(project, show)
+        out = _collect(project, show)
+        # Коммит прочитанного (#334): `mop update` называет, из какого
+        # коммита origin уехал bootstrap. Тот же клон, второго не нужно.
+        head = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
+                              capture_output=True, text=True, env=clone_env(os.environ))
+        out["commit"] = head.stdout.strip() if head.returncode == 0 else None
+        return out
     finally:
         subprocess.run(["rm", "-rf", with_dir], capture_output=True)
 

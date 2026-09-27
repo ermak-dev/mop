@@ -211,7 +211,28 @@ def keepalive_all(now=None):
 
 
 # ─── логин через шину (#283): диалог с клиентом по имени кредита ──────────
-def login_start(name, mode="login"):
+MODE_OF_KIND = {"login": "login", "token": "setup-token"}
+
+
+def login_mode(rec, asked):
+    """Режим входа -> (режим, None) либо (None, отказ). Чистая функция.
+
+    Есть запись -- режим решает её вид (#339): вход другого режима сообщал
+    успех, а register_login сохранял прежний вид, и новый секрет лежал мимо
+    secret(), продления и раздачи. Записи нет (новый кредит `mop cred login`)
+    -- спрошенный режим, по умолчанию login."""
+    if rec is None:
+        return asked or "login", None
+    kind = rec.get("kind")
+    mode = MODE_OF_KIND.get(kind)
+    if mode is None:
+        return None, f"credential {rec.get('name')} is a {kind}: it has no claude login"
+    if asked and asked != mode:
+        return None, f"credential {rec.get('name')} is a {kind}: log it in with {mode}"
+    return mode, None
+
+
+def login_start(name, mode=None):
     """Начать логин: клиент в pty, -> адрес авторизации. Прежний
     незавершённый логин того же имени снимается.
 
@@ -222,9 +243,18 @@ def login_start(name, mode="login"):
     брошенный вход оставлял бы дом строкой «не проверялся». Новый кредит
     claude заводит `mop cred login` на сервере: он ведёт драйвер сам."""
     credreg.check_name(name)
-    if load(name) is None:
+    rec = load(name)
+    if rec is None:
         raise RuntimeError(f"no such credential {name}: a new claude credential is added "
                            f"with mop cred login on the server")
+    # Профиль сверяет сервер (#330): кнопка страницы -- её собственное
+    # правило, а глагол и /api/creds/login/start принимают любое имя.
+    if rec.get("profile") != "claude":
+        raise RuntimeError(f"credential {name} is a {rec.get('profile')} credential: "
+                           f"only claude credentials log in")
+    mode, refusal = login_mode(rec, mode)
+    if refusal:
+        raise RuntimeError(refusal)
     with _logins_lock:
         old = _logins.pop(name, None)
     if old:
@@ -357,6 +387,40 @@ def distribute(name, api=None, now=None):
         save({**rec, "pushed": {"sha": files_sha(files), "at": int(now or time.time()),
                                "nodes": out}})
     return out
+
+
+# Адресная запись на пути подъёма (#312): короче раздачи -- её ждёт
+# bootstrap, а он держит подъём папета (45 с на весь cred_push).
+PUSH_TIMEOUT = 30
+
+
+def push(name, node, bodies):
+    """Кредит name -- адресной записью (`bodies`, #312) в тела bodies на узле
+    node. -> "OK" | "FAILED: …" | "NOT REACHED: …".
+
+    Узел называет вызывающий, и только из своей правды (Nomad), не из
+    чужого запроса. Отказ одного тела агент кладёт строкой в written, а не в
+    error: без её разбора непришедшая аренда читалась бы OK."""
+    try:
+        files = materialize(name)
+    except ValueError as e:
+        return f"FAILED: {str(e)[:120]}"
+    # Запись и разбор ответа -- через bus (#315): request_many одному узлу и
+    # results_from, те же OK / FAILED / NOT REACHED, что у distribute.
+    try:
+        answers = bus.request_many("write", [node], timeout=PUSH_TIMEOUT, project=bus.ADMIN,
+                                   files=[bus.as_file(p, d) for p, d in files],
+                                   bodies=list(bodies))
+    except bus.BusError as e:
+        answers = {node: e}
+    got = bus.results_from([node], answers)[node]
+    if got != "OK":
+        return got
+    # Сверх результата узла (#312): отказ одного тела агент кладёт строкой в
+    # written, и без её разбора непришедшая аренда читалась бы OK.
+    missed = [w for w in answers[node].get("written") or []
+              if " FAILED — " in w or w.endswith(" NOT LIVE")]
+    return f"FAILED: {missed[0][:120]}" if missed else "OK"
 
 
 def add_login_file(name, text, owner="", now=None):

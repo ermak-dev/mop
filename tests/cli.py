@@ -35,8 +35,209 @@ VERBS = {"driver": {"build": {}, "run": {}}, "bug": {},
          "dev": {"bug": {"new": {}, "list": {}}, "ci": {"list": {}}}}
 
 
+# ── #334: mop add/update/recycle говорят, какой bootstrap отправлен ────
+# HYPOTHESIS: workspace_text возвращает голый текст -- откуда он (рабочая
+# копия или origin, какой коммит, правлен ли), теряется, и `mop update`
+# молчит сразу после регистрации: оператор не знает, какой файл уехал.
+# SOLUTION: workspace_text -> (текст, происхождение {source, commit, dirty,
+# tasks, present}); происхождение едет полем bootstrap_sent рядом с
+# workspace, строку «bootstrap sent: …» печатает командлет.
+# STATUS: FIXED — see #334
+NOFILE_334 = {"source": "working copy", "commit": "5b92b440c952fad2", "dirty": False,
+              "tasks": 0, "present": False}
+BOOT_334 = """
+- name: bootstrap
+  tasks:
+    - name: one
+      ansible.builtin.command: "true"
+    - name: two
+      ansible.builtin.command: "true"
+"""
+
+
+def check_bootstrap_sent_334(c):
+    import subprocess
+    sent_line = getattr(_common, "sent_line", None)
+    if not c.check("#334 _common.sent_line exists", sent_line is not None):
+        return
+    sha = "5b92b440c952fad2fcded7a39d6e9f82b9d982a0"
+    cases = [
+        ({"source": "working copy", "commit": sha, "dirty": False, "tasks": 4, "present": True},
+         "bootstrap sent: .mop/bootstrap.yaml from the working copy at 5b92b440c952, 4 tasks"),
+        ({"source": "working copy", "commit": sha, "dirty": True, "tasks": 4, "present": True},
+         "bootstrap sent: .mop/bootstrap.yaml from the working copy at 5b92b440c952 "
+         "(+ uncommitted), 4 tasks"),
+        ({"source": "origin", "commit": sha, "dirty": False, "tasks": 1, "present": True},
+         "bootstrap sent: .mop/bootstrap.yaml from origin at 5b92b440c952, 1 task"),
+        ({"source": "working copy", "commit": sha, "dirty": True, "tasks": 0, "present": False},
+         "bootstrap not sent: no .mop/bootstrap.yaml, the server copy is removed"),
+        ({"source": "origin", "commit": sha, "dirty": False, "tasks": 0, "present": False},
+         "bootstrap not sent: no .mop/bootstrap.yaml, the server copy is removed"),
+        # Не разобрался -- без счёта: отказ по форме скажет сервер.
+        ({"source": "working copy", "commit": sha, "dirty": False, "tasks": None,
+          "present": True},
+         "bootstrap sent: .mop/bootstrap.yaml from the working copy at 5b92b440c952"),
+    ]
+    for prov, want in cases:
+        c.expect(f"#334 sent_line {prov['source']}, dirty {prov['dirty']}, "
+                 f"present {prov['present']}", sent_line(prov), want)
+
+    # Рабочая копия: коммит HEAD, правка считается только у самого файла.
+    d = tempfile.mkdtemp(prefix="mop-test-334-")
+
+    def git(*a):
+        return subprocess.run(["git", "-C", d, *a], capture_output=True, text=True,
+                              check=True).stdout.strip()
+    git("init", "-q")
+    os.makedirs(os.path.join(d, ".mop"))
+    boot = os.path.join(d, ".mop", "bootstrap.yaml")
+    with open(boot, "w") as f:
+        f.write(BOOT_334)
+    with open(os.path.join(d, "other"), "w") as f:
+        f.write("x")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c")
+    head = git("rev-parse", "HEAD")
+    here = os.getcwd()
+    origin = "git@example.dev:g/proj.git"
+    try:
+        os.chdir(d)
+        with patched(lib, cwd_origin=lambda: origin):
+            with open(os.path.join(d, "other"), "w") as f:
+                f.write("changed")                    # правка не bootstrap'а
+            got = _common.workspace_text(origin)
+            c.expect("#334 working copy, clean file: text and provenance", got,
+                     (BOOT_334, {"source": "working copy", "commit": head, "dirty": False,
+                                 "tasks": 2, "present": True}))
+            with open(boot, "a") as f:
+                f.write("    - name: three\n      ansible.builtin.command: \"true\"\n")
+            text, prov = _common.workspace_text(origin)
+            c.expect("#334 working copy, edited file: dirty, the edit counted",
+                     (prov["dirty"], prov["tasks"]), (True, 3))
+            os.unlink(boot)
+            c.expect("#334 working copy, no file: empty text, not present",
+                     _common.workspace_text(origin),
+                     ("", {"source": "working copy", "commit": head, "dirty": True,
+                           "tasks": 0, "present": False}))
+        # origin: коммит -- HEAD того же клона, что читает манифест.
+        from mop.common import manifest
+        with patched(lib, cwd_origin=lambda: "git@example.dev:g/other.git"), \
+                patched(manifest, fetch=lambda o: {"bootstrap_text": BOOT_334, "commit": head}):
+            c.expect("#334 origin: text and provenance", _common.workspace_text(origin),
+                     (BOOT_334, {"source": "origin", "commit": head, "dirty": False,
+                                 "tasks": 2, "present": True}))
+        with patched(lib, cwd_origin=lambda: None), \
+                patched(manifest, fetch=lambda o: {"bootstrap_text": None, "commit": head}):
+            c.expect("#334 origin without the file: empty text, not present",
+                     _common.workspace_text(origin),
+                     ("", {"source": "origin", "commit": head, "dirty": False,
+                           "tasks": 0, "present": False}))
+    finally:
+        os.chdir(here)
+
+
+# ── #334: add/update ждут итог своей регистрации и называют его ──────────
+# HYPOTHESIS: чем кончился прогон bootstrap'а после `mop update`, видно
+# только в `mop list`, журнале сервиса или stderr аллокации.
+# SOLUTION: ответ регистрации несёт метку (bootstrap_marker); клиент ждёт
+# итог с этой меткой глаголом bootstrap_result и печатает строку; спека не
+# изменилась (replaced False) -- говорит, что прогона не будет, и не ждёт.
+# STATUS: FIXED — see #334
+def check_bootstrap_outcome_334(c):
+    from mop.common import bus
+    from mop.client import keys
+    line = getattr(_common, "outcome_line", None)
+    if not c.check("#334 _common.outcome_line exists", line is not None):
+        return
+    rec = {"ok": True, "played": True, "seconds": 41.6, "rc": 0, "task": None,
+           "message": None, "last": "PLAY RECAP", "sent": 7, "commit": "abc"}
+    cases = [
+        (rec, "bootstrap ok in 42s"),
+        ({**rec, "ok": False, "rc": 2, "task": "env file",
+          "message": "Could not find ~/proj/.env"},
+         "bootstrap failed at task «env file»: Could not find ~/proj/.env"),
+        ({**rec, "ok": False, "rc": 2, "last": "fatal: [host]: UNREACHABLE!"},
+         "bootstrap failed (rc 2): fatal: [host]: UNREACHABLE!"),
+        ({**rec, "ok": False, "rc": None, "seconds": 290.0,
+          "last": "bootstrap of pu-mop-1 did not finish in 290s"},
+         "bootstrap failed: bootstrap of pu-mop-1 did not finish in 290s"),
+        (None, "bootstrap result not seen in 420s — mop list"),
+        ({**rec, "played": False, "seconds": None, "rc": None, "last": None}, None),
+    ]
+    for record, want in cases:
+        c.expect(f"#334 outcome_line {record and (record['ok'], record['played'], record['task'])}",
+                 line(record, 420), want)
+
+    # Ожидание: чужая (старая) метка и пустота -- ждать дальше; своя -- итог.
+    answers = [{"ok": True, "result": {**rec, "sent": 6}}, {"ok": True, "result": None},
+               {"ok": True, "result": rec}]
+    asked, now = [], [0.0]
+
+    def call_cluster(verb, **kw):
+        asked.append((verb, kw.get("name")))
+        return answers[min(len(asked) - 1, len(answers) - 1)]
+
+    def sleep(sec):
+        now[0] += sec
+    with patched(bus, call_cluster=call_cluster):
+        got = _common.wait_bootstrap("pu-mop-1", 7, lib.Progress("t"), 60,
+                                     sleep=sleep, clock=lambda: now[0])
+    c.expect("#334 wait_bootstrap returns the record of its own marker",
+             (got, asked[-1]), (rec, ("bootstrap_result", "pu-mop-1")))
+    answers[:] = [{"ok": True, "result": {**rec, "sent": 6}}]
+    asked.clear(), now.__setitem__(0, 0.0)
+    with patched(bus, call_cluster=call_cluster):
+        got = _common.wait_bootstrap("pu-mop-1", 7, lib.Progress("t"), 60,
+                                     sleep=sleep, clock=lambda: now[0])
+    c.check("#334 wait_bootstrap gives up after its timeout with None",
+            got is None and now[0] >= 60 and len(asked) > 1, (got, now, len(asked)))
+
+    # update целиком: метка в ответе -- ждёт и печатает итог; replaced False --
+    # говорит, что прогона не будет, и итог не спрашивает; без метки (старый
+    # сервер) -- ничего сверх строки «что уехало».
+    from mop.cli.core import update
+    # Поток и код выхода по исходу (решение мастера 27.09): провал прогона --
+    # провал команды (stderr, 1), как не вставший папет у `mop add`; итог не
+    # увиден и прогона не будет -- stdout, 0.
+    failed = {**rec, "ok": False, "rc": 2, "task": "env file", "message": "no .env"}
+    sent = _common.sent_line(NOFILE_334)
+    for reply, result, want_out, want_err, want_code, want_asked in (
+            ({"ok": True, "bootstrap_marker": 7, "replaced": True},
+             {"ok": True, "result": rec}, [sent, "bootstrap ok in 42s"], [], 0, True),
+            ({"ok": True, "bootstrap_marker": 7, "replaced": True},
+             {"ok": True, "result": failed}, [sent],
+             ["bootstrap failed at task «env file»: no .env"], 1, True),
+            ({"ok": True, "bootstrap_marker": 7, "replaced": True},
+             {"ok": True, "result": None},
+             [sent, "bootstrap result not seen in 0s — mop list"], [], 0, True),
+            ({"ok": True, "bootstrap_marker": 7, "replaced": True},
+             {"ok": True, "result": {**rec, "played": False}}, [sent], [], 0, True),
+            ({"ok": True, "bootstrap_marker": 7, "replaced": False}, None,
+             [sent, "bootstrap not played: the spec is unchanged, "
+                    "Nomad kept the running allocation"], [], 0, False),
+            ({"ok": True}, None, [sent], [], 0, False)):
+        seen = []
+
+        def cc(verb, **kw):
+            seen.append(verb)
+            return reply if verb == "update" else result
+        with patched_env(MOP_SERVER_LAN="192.0.2.1"), \
+                patched(lib, guard=lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}), \
+                patched(bus, call_cluster=cc, login=lambda: "anton"), \
+                patched(keys, push_llm_keys=lambda profile: None), \
+                patched(_common, workspace_text=lambda origin: ("", NOFILE_334),
+                        BOOTSTRAP_WAIT=0):
+            out, err, code = run_command(update.main, ["pu-mop-1"])
+        c.expect(f"#334 update, reply {reply}, result {result and result.get('result')}: "
+                 f"stdout, stderr, exit code, asked",
+                 (out.splitlines(), [lib.plain(l) for l in err.splitlines()], code,
+                  "bootstrap_result" in seen),
+                 (want_out, want_err, want_code, want_asked))
+
 def main():
     c = Checks()
+    check_bootstrap_outcome_334(c)
+    check_bootstrap_sent_334(c)
     # HYPOTHESIS: каталога нет — диспетчер bash ищет файл по имени в bin/.
     # SOLUTION: catalog() из обхода пакета, resolve() по нему.
     # STATUS: FIXED — see #75
@@ -840,13 +1041,16 @@ def check_output_179(c):
     with patched(lib, guard=lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}), \
             patched(bus, call_cluster=lambda verb, **kw: calls.append(verb) or {"ok": True}), \
             patched(keys, push_llm_keys=lambda profile: None), \
-            patched(_common, workspace_text=lambda origin: ""):
+            patched(_common, workspace_text=lambda origin: ("", NOFILE_334)):
+        # Эха параметров нет; единственная строка -- что уехало в bootstrap
+        # (#334): её оператор сам не набирал.
         for argv in (["pu-mop-1"], ["pu-mop-1", "--fresh"], ["pu-mop-1", "git@h:g/other.git"]):
             calls.clear()
             out, err, code = run_command(update.main, argv)
-            c.check(f"update {argv} must be silent on success: out {out!r} "
+            c.check(f"update {argv} must print only what bootstrap was sent: out {out!r} "
                     f"err {err!r} code {code!r} calls {calls}",
-                    not (out or err or code or calls != ["update"]))
+                    not (out != _common.sent_line(NOFILE_334) + "\n" or err or code
+                         or calls != ["update"]))
 
 
 def check_output_182(c):
@@ -1670,6 +1874,7 @@ def check_fallback_model_183(c):
     check_named_263(c)
     check_body_file_270(c)
     check_tail_stderr_333(c)
+    check_free_floor_329(c)
 
 
 def check_server_namespace_259(c):
@@ -1811,13 +2016,14 @@ def check_named_263(c):
                     wipe=lambda node, name, force=False:
                     calls.append(("wipe", force)) or {**note, "target": "/t"},
                     running_alloc=lambda name: {"NodeName": "hyper"}), \
-            patched(core_common, push_llm_keys=lambda p: None, workspace_text=lambda o: None):
+            patched(core_common, push_llm_keys=lambda p: None,
+                    workspace_text=lambda o: ("", NOFILE_334)):
         line = "pu-mop-1: was olga's: taken with --force\n"
         want = {
             "delete": line + "deleted pu-mop-1 (body gone from hyper)\n",
             "recycle": line, "restart": line,
             "wipe": line + "pu-mop-1: clone reset to HEAD, target wiped (/t)\n",
-            "update": line,
+            "update": line + core_common.sent_line(NOFILE_334) + "\n",
         }
         for module, out_want in want.items():
             calls.clear()
@@ -1867,6 +2073,35 @@ def check_body_file_270(c):
         f.write("  тело  \n")
     c.check("#270 a readable file and a text argument must work as before",
             not (bug_common.read_body(None, ok) != "тело" or bug_common.read_body(" x ", None) != "x"))
+
+
+def check_free_floor_329(c):
+    """HYPOTHESIS (#329): свободная память узла писалась по трём правилам:
+    `mop node` делил нацело (1536 МБ -- «1 GB»), а строка пула
+    (lib.pool_lines: `mop list`, проверка `mop server deploy`) и страница
+    округляли (то же -- «2 GB»). Папет резервирует 8 ГБ, и оператор, решая,
+    влезет ли ещё один, читал про один узел два разных числа.
+    SOLUTION: вниз везде -- свободного не бывает больше, чем есть; всего --
+    по тому же правилу.
+    STATUS: FIXED — see #329"""
+    from mop.cli import node
+    from mop.common import bus
+    nodes = [{"name": "hyper", "driver": "pve", "serves": "mop", "state": "ready",
+              "free_mb": 1536, "total_mb": 64511, "slots": 0, "slots_total": 7}]
+    pool = [{"name": "hyper", "status": "ready", "free_mb": 1536, "total_mb": 64511,
+             "slots": 0, "slots_total": 7}]
+
+    def no_connect(*a, **k):
+        raise AssertionError("a check reached the live bus")
+    with patched(bus, connect=no_connect), restored(bus, "ask_cluster"), \
+            patched_env(MOP_SERVER_LAN="192.0.2.1"):
+        bus.ask_cluster = lambda verb, **kw: {"nodes": nodes if verb == "nodes" else pool}
+        c.expect("#329 mop node floors free and total (the reference rule)",
+                 run_command(node.main, (), via_cli=True),
+                 ("NODE   DRIVER  SERVES  STATE  FREE  TOTAL  SLOTS\n"
+                  "hyper  pve     mop     ready  1 GB  62 GB  0/7\n", "", 0))
+        c.expect("#329 the pool line floors like mop node", lib.pool_lines(),
+                 ["  hyper: free 1/62 GB, slots 0/7"])
 
 
 def check_tail_stderr_333(c):

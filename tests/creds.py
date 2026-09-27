@@ -268,7 +268,37 @@ def main():
     # STATUS: FIXED — see #97
 
     check_no_human_over_nats_219(c)
+    check_operator_not_object_336(c)
     return c.report("creds")
+
+
+def check_operator_not_object_336(c):
+    """HYPOTHESIS (#336): operator() зовёт .get на том, что вернул
+    json.load: operator.json с валидным JSON не-объектом (список, строка,
+    null, число) роняет любую команду оператора AttributeError вместо
+    «файла нет», как у отсутствующего или битого файла.
+    SOLUTION: не-объект и объект, где user/password не строки, читаются
+    как None -- тем же рубежом, что OSError/ValueError.
+    STATUS: FIXED — see #336"""
+    d = tempfile.mkdtemp(prefix="mop-test-creds-336-")
+    try:
+        path = os.path.join(d, creds.OPERATOR_FILE)
+        c.expect("#336 a missing operator file reads as None", creds.operator(d), None)
+        for text in ("[]", '"x"', "null", "1", '{"user": 1, "password": "p"}',
+                     '{"user": "u", "password": ["p"]}', "{broken"):
+            with open(path, "w") as f:
+                f.write(text)
+            try:
+                got = creds.operator(d)
+            except Exception as e:
+                got = f"raised {type(e).__name__}: {e}"
+            c.expect(f"#336 operator.json {text} reads as None", got, None)
+        with open(path, "w") as f:
+            json.dump({"user": "anton", "password": "pw"}, f)
+        c.expect("#336 a proper operator file still reads", creds.operator(d),
+                 {"user": "anton", "password": "pw"})
+    finally:
+        shutil.rmtree(d)
 
 
 def check_no_human_over_nats_219(c):

@@ -80,6 +80,80 @@ def check_identity_167(c):
                 not ("identity" not in bootstrap.answer("mop", {"verb": "nope"}).get("error", "")))
 
 
+# ── #334: итог прогона -- рядом с отправленным ──────────────────────────
+# HYPOTHESIS: play() отдаёт {ok, played, rc, seconds, tail} узлу и ничего не
+# хранит, journal() только пишет в журнал: чем кончился прогон после
+# `mop update`, клиенту узнать неоткуда. Что уехало, сервер тоже не помнит.
+# SOLUTION: сервис кластера кладёт происхождение рядом с workspace
+# (<папет>-sent.json, с меткой регистрации по часам сервера), bootstrap
+# после каждого прогона -- итог (<папет>-result.json) с меткой и коммитом
+# отправленного; store("") снимает оба. STATUS: FIXED — see #334
+def check_result_334(c):
+    root = tempfile.mkdtemp(prefix="mop-test-bootstrap-334-")
+    name = "pu-proj-1"
+    for fn in ("note_sent", "note_result", "read_result", "read_sent"):
+        if not c.check(f"#334 bootstrap.{fn} exists", hasattr(bootstrap, fn)):
+            return
+    prov = {"source": "working copy", "commit": "5b92b440c952fad2", "dirty": True,
+            "tasks": 1, "present": True}
+    bootstrap.store(root, name, TEXT)
+    marker = bootstrap.note_sent(root, name, prov, now=1_790_500_000.5)
+    c.check("#334 note_sent: the marker is the server's, not empty", marker)
+    sent = bootstrap.read_sent(root, name)
+    c.expect("#334 sent record: provenance plus the marker",
+             sent, {**prov, "marker": marker, "at": 1_790_500_000})
+    path = os.path.join(root, f"{name}-sent.json")
+    c.expect("#334 sent file is 0600", oct(os.stat(path).st_mode & 0o777), oct(0o600))
+    again = bootstrap.note_sent(root, name, prov, now=1_790_500_000.5)
+    c.check("#334 two registrations in the same second get different markers",
+            again != marker, (marker, again))
+
+    ok = {"ok": True, "played": True, "rc": 0, "seconds": 41.6, "tail": "a\nPLAY RECAP ok=3\n"}
+    bootstrap.note_result(root, name, ok, now=1_790_500_060)
+    c.expect("#334 result after an ok play: fields, marker and commit of what was sent",
+             bootstrap.read_result(root, name),
+             {"ok": True, "played": True, "seconds": 41.6, "rc": 0, "task": None,
+              "message": None, "last": "PLAY RECAP ok=3", "at": 1_790_500_060,
+              "sent": again, "commit": "5b92b440c952fad2"})
+    failed = {"ok": False, "played": True, "rc": 2, "seconds": 3.0, "tail": "x\nfatal",
+              "task": "env file", "message": "Could not find ~/proj/.env"}
+    bootstrap.note_result(root, name, failed, now=1_790_500_070)
+    got = bootstrap.read_result(root, name)
+    c.expect("#334 result after a failed play carries #333's task and message",
+             (got["ok"], got["rc"], got["task"], got["message"], got["last"]),
+             (False, 2, "env file", "Could not find ~/proj/.env", "fatal"))
+    bootstrap.note_result(root, name, {"ok": True, "played": False, "text": "no bootstrap"},
+                          now=1_790_500_080)
+    got = bootstrap.read_result(root, name)
+    c.expect("#334 result without a play: played False, nothing else invented",
+             (got["ok"], got["played"], got["rc"], got["seconds"], got["last"]),
+             (True, False, None, None, None))
+
+    # Прогон по запросу узла пишет итог сам -- и когда кред не нашёлся:
+    # прогон уже был.
+    with patched(bootstrap, ROOT=root, play=lambda req, project: dict(failed),
+                 puppet_creds=lambda project: None):
+        bootstrap.answer("proj", {"verb": "bootstrap", "name": name})
+    c.expect("#334 answer(bootstrap) writes the result of its play",
+             (bootstrap.read_result(root, name) or {}).get("task"), "env file")
+    with patched(bootstrap, ROOT=root, play=lambda req, project: dict(ok),
+                 puppet_creds=lambda project: None):
+        bootstrap.answer("other", {"verb": "bootstrap", "name": name})
+    c.expect("#334 a refused request (foreign project) plays nothing and writes nothing",
+             (bootstrap.read_result(root, name) or {}).get("task"), "env file")
+
+    # Нет отправленного (старый клиент) -- итог без метки и коммита.
+    bootstrap.store(root, name, "")
+    c.expect("#334 store('') removes the sent and result files",
+             sorted(f for f in os.listdir(root) if f.startswith(name)), [])
+    bootstrap.note_result(root, name, ok, now=1_790_500_090)
+    got = bootstrap.read_result(root, name)
+    c.expect("#334 result with nothing sent: no marker, no commit",
+             (got["sent"], got["commit"]), (None, None))
+    c.expect("#334 read_result of an unknown puppet is None",
+             bootstrap.read_result(root, "pu-proj-9"), None)
+
+
 # ── #333: упавшая задача bootstrap -- по имени, с сообщением ────────────
 # HYPOTHESIS: ответ bootstrap -- {ok, played, rc, seconds, tail} с 25
 # строками хвоста; какая задача упала, не говорит никто, и FAILED в
@@ -153,10 +227,102 @@ def check_failed_task_333(c):
     c.expect("#333 a good run: task and message are None, the keys are there",
              (ok["ok"], "task" in ok and ok["task"], "message" in ok and ok["message"]),
              (True, None, None))
+    # #334: итог, который хранит сервер, несёт task/message из этого ответа.
+    root = tempfile.mkdtemp(prefix="mop-test-bootstrap-333-334-")
+    rec = bootstrap.note_result(root, "pu-proj-1", got, now=1)
+    c.expect("#334 the stored result carries #333's task and message",
+             (rec["task"], rec["message"]), (got["task"], got["message"]))
+    c.expect("#334 the stored result of a good run: task and message None",
+             {k: bootstrap.note_result(root, "pu-proj-1", ok, now=2)[k]
+              for k in ("ok", "task", "message")},
+             {"ok": True, "task": None, "message": None})
+
+
+def bus_timeout(module):
+    from mop.common import busnames
+    return busnames.BOOTSTRAP_TIMEOUT
+
+
+def check_lease_push_312(c):
+    """HYPOTHESIS (#312): кредит в тело нового держателя не приезжал на
+    подъёме -- только раздачей при смене кредита; тело жило на копии узла.
+    SOLUTION: после прогона и до ответа bootstrap зовёт cred_push сервиса
+    кластера (узел и аренда -- там, из Nomad). Отказ или молчание -- строка
+    журнала и lease_note в ответе, подъём идёт дальше (на копии узла, как
+    прежде). Упал прогон -- не зовёт: папет не поднимется. STATUS: FIXED — see #312"""
+    from mop.common import bus
+    asked = []
+
+    def ask(reply):
+        def ask_cluster(verb, timeout=None, project=None, **fields):
+            asked.append((verb, project, fields.get("name"), timeout))
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        return ask_cluster
+    req = {"verb": "bootstrap", "name": "pu-mop-1", "address": ""}
+    played = {"ok": True, "played": False, "text": "no bootstrap for mop"}
+    with patched(bootstrap, refusal=lambda req, project: None, play=lambda req, project: dict(played),
+                 puppet_creds=lambda project: {"url": "nats://x"}):
+        for reply, note in (
+                ({"ok": True, "lease": "anton", "node": "hyper", "result": "OK"}, None),
+                ({"ok": True, "lease": None}, None),
+                ({"ok": True, "lease": "anton", "node": "hyper",
+                  "result": "NOT REACHED: node agent hyper did not answer in 60s"},
+                 "lease anton not pushed: NOT REACHED: node agent hyper did not answer in 60s"),
+                ({"error": "no such verb cred_push"},
+                 "lease not pushed: no such verb cred_push"),
+                (bus.BusError("cluster service did not answer in 45s"),
+                 "lease not pushed: cluster service did not answer in 45s")):
+            asked.clear()
+            with patched(bus, ask_cluster=ask(reply)):
+                got = bootstrap.answer("mop", dict(req))
+            c.expect(f"#312 bootstrap after {reply!r}: ok, and the note",
+                     (got.get("ok"), got.get("lease_note")), (True, note))
+            c.expect("#312 bootstrap asks cred_push as the operator, by name, 45 s",
+                     asked, [("cred_push", bus.ADMIN, "pu-mop-1", 45)])
+            if note:
+                c.check("#312 the journal names the lease note",
+                        any(note in l for l in bootstrap.journal("mop", req, got)),
+                        bootstrap.journal("mop", req, got))
+    # Бюджет (#312): узел ждёт ответ bootstrap не дольше BOOTSTRAP_TIMEOUT
+    # (300 с), прогон может занять до 290 с. Раздача аренды -- в остаток
+    # минус запас на ответ; остатка нет -- не зовём, говорим.
+    budget = getattr(bootstrap, "lease_budget", None)
+    if budget is None:
+        c.fail("#312 no bootstrap.lease_budget: the lease push can overrun the node's wait")
+        return
+    c.expect("#312 lease budget: 45 s when the play was quick", budget(3), 45)
+    c.expect("#312 lease budget: the rest minus the reply's margin",
+             budget(260), bus_timeout(bootstrap) - bootstrap.REPLY_MARGIN - 260)
+    c.expect("#312 lease budget: none left near the limit",
+             budget(bus_timeout(bootstrap) - bootstrap.REPLY_MARGIN - 0.5), None)
+    for elapsed, want_asked, want_timeout, want_note in (
+            (260, True, bus_timeout(bootstrap) - bootstrap.REPLY_MARGIN - 260, None),
+            (296, False, None, "no time left for the lease push")):
+        clock = iter([1000.0, 1000.0 + elapsed])
+        asked.clear()
+        with patched(bootstrap, refusal=lambda req, project: None,
+                     play=lambda req, project: dict(played),
+                     puppet_creds=lambda project: {"url": "nats://x"},
+                     _clock=lambda: next(clock)), \
+                patched(bus, ask_cluster=ask({"ok": True, "lease": "anton", "result": "OK"})):
+            got = bootstrap.answer("mop", dict(req))
+        c.expect(f"#312 after a {elapsed} s play: asked, timeout, note",
+                 (bool(asked), asked[0][3] if asked else None, got.get("lease_note")),
+                 (want_asked, want_timeout, want_note))
+    failed = {"ok": False, "played": True, "rc": 2, "tail": "t", "task": None, "message": None}
+    with patched(bootstrap, refusal=lambda req, project: None, play=lambda req, project: dict(failed),
+                 puppet_creds=lambda project: {"url": "nats://x"}), \
+            patched(bus, ask_cluster=ask({"ok": True, "lease": None})):
+        asked.clear()
+        bootstrap.answer("mop", dict(req))
+        c.expect("#312 a failed play: no lease push", asked, [])
 
 
 def main():
     c = Checks()
+    check_result_334(c)
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
 
     # HYPOTHESIS: механизма нет вовсе — ничто не играет манифест при старте.
@@ -313,6 +479,7 @@ def main():
 
     check_identity_167(c)
     check_failed_task_333(c)
+    check_lease_push_312(c)
     return c.report("bootstrap")
 
 

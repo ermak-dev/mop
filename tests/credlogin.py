@@ -134,6 +134,7 @@ def main():
         c.expect("client() returns the found path", credlogin.client(), "/opt/bin/claude")
     check_register_307(c)
     check_name_first_328(c)
+    check_mode_by_kind_339(c)
     return c.report("credlogin")
 
 
@@ -231,6 +232,52 @@ def check_name_first_328(c):
             pass
         c.expect("#328 a valid name reaches Login.start with the registry's home",
                  homes, [credreg.home("good-name")])
+
+
+def check_mode_by_kind_339(c):
+    """HYPOTHESIS (#339): `mop cred login <имя> [--setup-token]` берёт режим
+    только из флага; для существующего кредита другого вида удачный вход
+    ничего не меняет -- register_login сохраняет прежний вид, а новый
+    секрет лежит мимо. SOLUTION: есть запись -- режим решает
+    credreg.login_mode до Login.start: противоречащий флаг -- отказ одной
+    строкой, без флага -- режим вида; новое имя -- как прежде.
+    STATUS: FIXED — see #339"""
+    import importlib
+    import tempfile
+    from mop.common import credreg as rows
+    from mop.server import credreg
+    cmd = importlib.import_module("mop.cli.cred.login")
+    started = []
+
+    class Stop(Exception):
+        pass
+
+    def start(home, mode):
+        started.append((os.path.basename(home), mode))
+        raise Stop()
+
+    def run(argv):
+        try:
+            return run_command(cmd.main, argv, stdin="the-code\n")
+        except Stop:
+            return "", "", "started"
+    with tempfile.TemporaryDirectory() as tmp, patched(credreg, ROOT=tmp), \
+            patched(credlogin, Login=type("L", (), {"start": staticmethod(start)})):
+        credreg.save(rows.record("anton", "claude", "login", now=1))
+        credreg.save(rows.record("old", "claude", "token", now=1))
+        out, err, code = run(["anton", "--setup-token"])
+        c.check("#339 --setup-token on a login credential is refused before Login.start",
+                started == [] and code == 1 and "is a login" in err
+                and len(err.strip().splitlines()) == 1 and out == "", (started, code, out, err))
+        started.clear()
+        run(["old", "--setup-token"])
+        run(["old"])
+        run(["anton"])
+        run(["newcomer"])
+        run(["fresh", "--setup-token"])
+        c.expect("#339 the kind decides the mode; a new name keeps the flag", started,
+                 [("old", "setup-token"), ("old", "setup-token"), ("anton", "login"),
+                  ("newcomer", "login"), ("fresh", "setup-token")])
 
 
 if __name__ == "__main__":
