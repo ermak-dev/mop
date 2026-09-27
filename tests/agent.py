@@ -955,6 +955,129 @@ def check_junk_without_templates_276(c):
              {"bodies": ["pu-mop-1"], "work": {}, "templates": [], "raised": None})
 
 
+def check_owner_hook_313(c):
+    """HYPOTHESIS (#313): агент ставит в клон identity владельца (#167), но
+    `git -c user.name=… -c user.email=…` старше .git/config, и ничто этому
+    не мешает: 27.09 коммиты #307 ушли как Claude <noreply@anthropic.com>,
+    #308/#310 -- как anton@ermak.us, в master 46 коммитов Claude с 25.09;
+    сам mop советовал «commit with git -c».
+    SOLUTION: вместе с identity агент ставит в клон хуки pre-commit и
+    pre-merge-commit (чистое слияние pre-commit не зовёт): есть локальная
+    почта клона (`git config --local`, -c её не видит), а у автора или
+    коммитера (`git var`, видит -c) другая -- отказ с подсказкой. Нет
+    локальной identity -- пропуск: владелец без профиля коммитит с -c.
+    Хук помечен второй строкой (первая -- shebang); чужой хук без метки не
+    перезаписывается, и заметка это говорит; снятие identity снимает только
+    свои хуки. STATUS: FIXED — see #313
+
+    git и bash настоящие: хук ставит identity_script во временный клон, и
+    решает он на настоящих коммитах и слиянии."""
+    import asyncio
+    import subprocess
+    import tempfile
+    hook = getattr(agent, "owner_hook", None)
+    if hook is None:
+        c.fail("#313 no agent.owner_hook: the owner's identity is not enforced")
+        return
+    text = hook()
+    c.expect("#313 hook: shebang first, the marker second",
+             text.splitlines()[:2], ["#!/bin/sh", agent.OWNER_GUARD])
+    root = tempfile.mkdtemp(prefix="mop-test-313-")
+    olga = {"name": "Ольга Петрова", "email": "olga@example.dev"}
+
+    def repo(own_hook=None, hooks_path=None):
+        d = tempfile.mkdtemp(dir=root)
+        subprocess.run(["git", "init", "-q", "-b", "master", d], check=True)
+        if own_hook:
+            with open(os.path.join(d, ".git", "hooks", "pre-commit"), "w") as f:
+                f.write(own_hook)
+            os.chmod(os.path.join(d, ".git", "hooks", "pre-commit"), 0o755)
+        if hooks_path:
+            subprocess.run(["git", "-C", d, "config", "core.hooksPath", hooks_path], check=True)
+        lease_file = os.path.join(d, ".git", "mop-owner")
+        with open(lease_file, "w") as f:
+            f.write("olga\t1\n")
+        return d, lease_file
+
+    def install(d, lease_file, profile):
+        r = subprocess.run(["bash", "-c", agent.identity_script(d, lease_file, "olga\t1\n",
+                                                                profile)],
+                           capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    def git(d, *args):
+        r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    def hooks(d):
+        h = os.path.join(d, ".git", "hooks")
+        return sorted(f for f in os.listdir(h) if not f.endswith(".sample"))
+
+    d, lf = repo()
+    code, out = install(d, lf, olga)
+    c.expect("#313 install: both hooks in the clone", (code, hooks(d)),
+             (0, ["pre-commit", "pre-merge-commit"]))
+    code, out = git(d, "commit", "-q", "--allow-empty", "-m", "plain")
+    c.expect("#313 a plain commit (the owner's identity) passes", (code, out), (0, ""))
+    code, out = git(d, "-c", "user.name=Claude", "-c", "user.email=noreply@anthropic.com",
+                    "commit", "-q", "--allow-empty", "-m", "forged")
+    c.check("#313 git -c user.* is refused, naming the owner",
+            code != 0 and "drop -c user.*" in out and "olga@example.dev" in out, (code, out))
+    code, out = git(d, "-c", "user.email=olga@example.dev", "commit", "-q", "--allow-empty",
+                    "-m", "same")
+    c.expect("#313 -c with the owner's own email passes", (code, out), (0, ""))
+    # Слияние без конфликтов pre-commit не зовёт: его держит pre-merge-commit.
+    git(d, "checkout", "-q", "-b", "side")
+    git(d, "commit", "-q", "--allow-empty", "-m", "side")
+    git(d, "checkout", "-q", "master")
+    code, out = git(d, "-c", "user.email=noreply@anthropic.com", "merge", "-q", "--no-ff",
+                    "side", "-m", "forged merge")
+    c.check("#313 a merge with -c user.* is refused", code != 0 and "drop -c user.*" in out,
+            (code, out))
+    git(d, "merge", "--abort")
+    code, out = git(d, "merge", "-q", "--no-ff", "side", "-m", "merge")
+    c.expect("#313 a plain merge passes", (code, out), (0, ""))
+
+    # Снятие identity снимает свои хуки; без локальной почты -c снова можно.
+    code, out = install(d, lf, None)
+    c.expect("#313 unset: our hooks are gone", (code, hooks(d)), (0, []))
+    code, out = git(d, "-c", "user.name=X", "-c", "user.email=x@y.z", "commit", "-q",
+                    "--allow-empty", "-m", "no owner")
+    c.expect("#313 no local identity: git -c passes (owner without a profile)", (code, out), (0, ""))
+
+    # Свой хук проекта не перезаписывается, и заметка это говорит.
+    own = "#!/bin/sh\n# the project's own\nexit 0\n"
+    d, lf = repo(own_hook=own)
+    code, out = install(d, lf, olga)
+    c.expect("#313 a project's pre-commit is kept",
+             open(os.path.join(d, ".git", "hooks", "pre-commit")).read(), own)
+    c.check("#313 the skip is said", code == 0 and "pre-commit" in out and "skipped" in out,
+            (code, out))
+    c.expect("#313 the merge hook still goes in", hooks(d), ["pre-commit", "pre-merge-commit"])
+    code, out = install(d, lf, None)
+    c.expect("#313 unset keeps the project's hook", hooks(d), ["pre-commit"])
+
+    # core.hooksPath: .git/hooks git не читает -- ставить туда незачем, сказать.
+    d, lf = repo(hooks_path=".githooks")
+    code, out = install(d, lf, olga)
+    c.check("#313 core.hooksPath: nothing written, the skip is said",
+            code == 0 and hooks(d) == [] and "hooksPath" in out
+            and not os.path.exists(os.path.join(d, ".githooks")), (code, out, hooks(d)))
+
+    # Заметка мастеру называет пропуск.
+    d, lf = repo(own_hook=own)
+
+    async def profile(conn, name, login):
+        return olga, None
+    with restored(agent, "bsh", "owner_profile", "clone_dir"):
+        agent.bsh, agent.owner_profile = bash, profile
+        agent.clone_dir = lambda name: d
+        note = asyncio.run(agent._follow_owner(None, "pu-mop-1", "olga",
+                                               (lf, None, "olga\t1\n")))
+    c.check("#313 the master's note names the skipped guard",
+            "olga@example.dev" in note and "skipped" in note, note)
+
+
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
@@ -963,7 +1086,7 @@ def main():
                   check_gates_40, check_caller_207, check_git_identity_167,
                   check_state_fact_224, check_no_screen_fact_236,
                   check_usage_by_login_244, check_owner_gate_267,
-                  check_junk_without_templates_276):
+                  check_junk_without_templates_276, check_owner_hook_313):
         try:
             check(c)
         except Exception as e:
