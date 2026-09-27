@@ -46,8 +46,16 @@ def parse(argv):
 def main(argv):
     name, lines, follow = parse(argv)
     lib.guard(name)
-    node = puppets.running_alloc(name)["NodeName"]
-    buf = puppets.pane_lines(node, name)
+    try:
+        node = puppets.running_alloc(name)["NodeName"]
+        buf = puppets.pane_lines(node, name)
+    except (LookupError, RuntimeError) as e:
+        # Сессии нет (#333): папет не running или пейн не читается --
+        # bootstrap упал до tmux. Причина -- в stderr аллокации; следить
+        # (-f) там не за чем.
+        for line in lib.stderr_text(name, e, puppets.alloc_stderr(name, lines)):
+            print(line, flush=True)
+        return
     for line in buf[-lines:]:
         print(line, flush=True)
     if not follow:

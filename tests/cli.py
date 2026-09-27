@@ -1485,6 +1485,7 @@ def check_fallback_model_183(c):
     check_server_namespace_259(c)
     check_named_263(c)
     check_body_file_270(c)
+    check_tail_stderr_333(c)
 
 
 def check_server_namespace_259(c):
@@ -1682,6 +1683,64 @@ def check_body_file_270(c):
         f.write("  тело  \n")
     c.check("#270 a readable file and a text argument must work as before",
             not (bug_common.read_body(None, ok) != "тело" or bug_common.read_body(" x ", None) != "x"))
+
+
+def check_tail_stderr_333(c):
+    """HYPOTHESIS (#333): `mop tail` папета, у которого нет tmux (bootstrap
+    падает до сессии), не показывает ничего полезного: running_alloc
+    отказывает «not running», пейна нет, а причина живёт в stderr аллокации.
+    SOLUTION: нет сессии (папет не running или пейн не читается) -- хвост
+    stderr аллокации глаголом `stderr` сервиса кластера, под строкой, что это
+    именно он (lib.stderr_text). Инструмент MCP `tail` -- тот же текст.
+    STATUS: FIXED — see #333"""
+    from mop.cli.core import tail
+    from mop.cli.service import mcp
+    from mop.common import puppets
+    text = getattr(lib, "stderr_text", None)
+    if text is None or not hasattr(puppets, "alloc_stderr"):
+        c.fail("#333 no lib.stderr_text / puppets.alloc_stderr: no fallback to stderr")
+        return
+    why = "pu-mop-1 is not running: FAILED: bootstrap task «a : b» failed: no file\nmore"
+    c.expect("#333 stderr text: a header naming the source, then the lines",
+             text("pu-mop-1", why, ["l1", "l2"]),
+             ["pu-mop-1: no tmux session (pu-mop-1 is not running: FAILED: bootstrap task "
+              "«a : b» failed: no file); the allocation's stderr, last 2 lines:", "l1", "l2"])
+    c.expect("#333 stderr text: nothing there is said",
+             text("pu-mop-1", "why", []),
+             ["pu-mop-1: no tmux session (why); the allocation's stderr is empty"])
+    asked = []
+
+    def stderr(name, lines):
+        asked.append((name, lines))
+        return ["l1", "l2"]
+
+    def not_running(name):
+        raise LookupError(why)
+
+    def no_pane(node, name):
+        raise RuntimeError("tmux in pu-mop-1: no server running")
+    want = "\n".join(text("pu-mop-1", why, ["l1", "l2"])) + "\n"
+    with patched(puppets, running_alloc=not_running, alloc_stderr=stderr):
+        out, err, code = run_command(tail.main, ["pu-mop-1", "-n", "2"])
+    c.expect("#333 mop tail, not running: the allocation's stderr", (out, code), (want, 0))
+    c.expect("#333 mop tail asks for as many lines as -n", asked, [("pu-mop-1", 2)])
+    with patched(puppets, running_alloc=lambda name: {"NodeName": "hyper"},
+                 pane_lines=no_pane, alloc_stderr=stderr):
+        out, err, code = run_command(tail.main, ["pu-mop-1", "-n", "2"])
+    c.check("#333 mop tail, running without a pane: the allocation's stderr",
+            code == 0 and out.startswith("pu-mop-1: no tmux session (tmux in pu-mop-1: "
+                                         "no server running)") and out.endswith("l1\nl2\n"),
+            (out, err, code))
+    with patched(puppets, running_alloc=lambda name: {"NodeName": "hyper"},
+                 pane_lines=lambda node, name: ["a", "b", "c"], alloc_stderr=stderr):
+        asked.clear()
+        out, err, code = run_command(tail.main, ["pu-mop-1", "-n", "2"])
+    c.expect("#333 mop tail with a pane: as before, stderr not asked",
+             (out, asked), ("b\nc\n", []))
+    with patched(puppets, running_alloc=not_running, alloc_stderr=stderr), \
+            patched(mcp, MASTER=True):
+        got = mcp.tail("pu-mop-1", lines=2)
+    c.expect("#333 MCP tail: the same text", got, want.rstrip("\n"))
 
 
 if __name__ == "__main__":
