@@ -6,7 +6,8 @@ healthy until the scheduler moves it to a hypervisor.
 
 --fix treats what's treatable; a silent node agent is not on this list — the
 puppet may well be working fine, and a restart would kill that work in the
-clone.
+clone. An expired login is treated without a restart: fresh credentials are
+handed out and the puppet is nudged to go on, so its conversation survives.
 """
 import sys
 
@@ -54,7 +55,7 @@ def main(argv):
         return
 
     print()
-    if any(i["action"] == "login+restart" for i in issues):
+    if any(i["action"] == "login+nudge" for i in issues):
         if not keys.credentials_fresh():
             sys.exit("local credentials are stale or broken — log in to claude "
                      "on this machine first, then mop doctor --fix")

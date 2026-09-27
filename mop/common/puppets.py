@@ -441,6 +441,12 @@ def _placement_issue(job, alloc, unserved=False, ceiling=None):
     return {"name": name, "alloc": None, "action": None, "diagnosis": "no allocation"}
 
 
+# Чем будят папета после раздачи кредов (#290): слово оператора, ход
+# продолжается с места обрыва. Не «resume»: так папет читал бы это как
+# просьбу восстановить сессию.
+NUDGE = "продолжай"
+
+
 def treat(issue):
     """Применить лечение к одной проблеме из diagnose. -> что вышло, строкой.
 
@@ -448,7 +454,8 @@ def treat(issue):
     пока лечение жило в каждом своём, они разошлись — CLI перерегистрировал
     спеку по диагнозу `update`, а MCP на тот же диагноз делал рестарт, то есть
     поднимал ту же старую спеку (#47). Гейт «креды доехали?» перед
-    login+restart остаётся у вызывающего: раздача — его дело.
+    login+nudge остаётся у вызывающего: раздача — его дело, здесь только
+    побудка (#290).
 
     Ворота владения (#40) лечение проходит (force): diagnose выбирает его по
     состоянию, и каждое леченое состояние -- то, в котором сессия не работает
@@ -469,6 +476,18 @@ def treat(issue):
             model = config.get("MOP_FALLBACK_MODEL")
             switch_model(alloc["NodeName"], name, model, force=True)
             return f"/model {model}"
+        if action == "login+nudge":
+            # Свежие креды уже на узле (гейт вызывающего). Ход, оборванный
+            # отказом API, сам не продолжается: будим сообщением тем же
+            # глаголом send, что и `mop send`, -- адрес ответа мастера, ворота
+            # владения агент проходит по force (#290). Не рестарт: он
+            # поднимает claude начисто и стирает разговор.
+            r = bus.request(alloc["NodeName"], "send", name=name, message=NUDGE,
+                            priority="next", wait=0, owner=bus.login(), force=True,
+                            timeout=bus.TIMEOUT)
+            if "error" in r:
+                raise RuntimeError(r["error"])
+            return f"credentials pushed, nudged: {NUDGE}" + _note(r)
         if action == "update":
             # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
             # аллокации поднял бы ту же старую. Клон переживает — меняется
