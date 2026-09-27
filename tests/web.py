@@ -237,7 +237,7 @@ def check_creds_285(c):
     rows = web.cred_rows(CREDS, now=1_000_000)
     c.expect("#285 cred names", [r["name"] for r in rows], ["anton", "team", "old", "fresh"])
     c.expect("#285 status words", [r["status"] for r in rows],
-             ["активен", "ждёт квоты до " + web.human_time(1_000_000 + 1800),
+             ["активен", "ждёт квоты",
               "ждёт ручной авторизации: HTTP 401", "не проверялся"])
     c.expect("#285 percent and age", [(r["percent"], r["age"]) for r in rows],
              [(46, "2h"), (100, "3d"), (None, "1m"), (None, "0m")])
@@ -378,11 +378,32 @@ def check_dist_297(c):
             os.path.isfile(webcli.PAGE) and os.path.isdir(os.path.join(os.path.dirname(webcli.PAGE), "assets")))
 
 
+# ── #331: время сброса -- не в слове статуса ─────────────────────────────
+# HYPOTHESIS: cred_status_word вшивал в слово human_time(resets_at) --
+# «%H:%M:%S» в поясе сервера, без даты: недельное окно, которое сбросится
+# через три дня, читалось как «сегодня в 5 утра». resets_at и так едет в
+# снимке числом.
+# SOLUTION: слово quota_wait -- голое «ждёт квоты», время собирает страница
+# из resets_at в поясе браузера (web/src/components/format.ts); human_time
+# ушёл. needs_login и active не меняются.
+# STATUS: FIXED — see #331
+def check_reset_time_331(c):
+    c.expect("#331 quota_wait carries no time, only the word",
+             web.cred_status_word({"kind": "quota_wait", "resets_at": 1_790_000_000}), "ждёт квоты")
+    c.expect("#331 quota_wait without a reset time: the same word",
+             web.cred_status_word({"kind": "quota_wait", "resets_at": None}), "ждёт квоты")
+    c.expect("#331 needs_login keeps its detail",
+             web.cred_status_word({"kind": "needs_login", "detail": "HTTP 401"}), "ждёт ручной авторизации: HTTP 401")
+    c.expect("#331 active unchanged", web.cred_status_word({"kind": "active"}), "активен")
+    c.check("#331 human_time is gone: nothing else read it", not hasattr(web, "human_time"))
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
-               check_creds_285, check_row_button_294, check_holders_301, check_masters_305, check_dist_297):
+               check_creds_285, check_row_button_294, check_holders_301, check_masters_305, check_dist_297,
+               check_reset_time_331):
         fn(c)
     return c.report("web")
 
