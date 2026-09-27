@@ -16,15 +16,10 @@ import sys
 import tempfile
 
 from mop.common import config
-
 # Без mop.cli.lib (#302): lib на верхнем уровне импортирует шину, а задача
-# web:dist идёт в образе node, где питонских библиотек нет. Отказ -- той же
-# красной строкой в stderr, что у lib.
-_RED, _NC = "\033[0;31m", "\033[0m"
-
-
-def fail(text):
-    print(f"{_RED}{text}{_NC}", file=sys.stderr, flush=True)
+# web:dist идёт в образе node, где питонских библиотек нет. Отказ -- та же
+# красная строка, что у lib: одна на двоих в mop.common.term (#320).
+from mop.common.term import fail, usage
 
 WEB = os.path.join(config.PROJECT, "web")
 DIST = os.path.join(WEB, "dist")
@@ -75,7 +70,7 @@ def build(out_dir):
 
 def main(argv):
     if set(argv) - {"--check"}:
-        sys.exit(__doc__.strip())
+        usage(__doc__)
     if "--check" not in argv:
         build(DIST)
         return 0
