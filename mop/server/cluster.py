@@ -742,6 +742,32 @@ def _cred_rm(project, req):
     return {"ok": True, "name": name}
 
 
+def _cred_push(project, req):
+    """Аренду папета -- в его тело, на каждом подъёме (#312). Зовёт
+    bootstrap после прогона, до ответа узлу: так кредит в теле раньше tmux.
+
+    Узел -- последней аллокации по Nomad, аренда -- мета джоба; из запроса
+    берётся только имя, поэтому поддельный запрос может разве что ещё раз
+    отдать аренду её же держателю. Раньше новый держатель получал кредит
+    только когда tick замечал смену кредита (sha по кредиту, не по узлу), а
+    до того жил на копии узла -- чужом логине оператора."""
+    name = req.get("name") or ""
+    job = _api().get_job(name)
+    lease = JobMeta.from_job(job).cred if job else None
+    if not lease:
+        return {"ok": True, "lease": None}
+    try:
+        alloc = _api().latest_alloc(name)
+    except Exception:
+        alloc = None
+    node = (alloc or {}).get("NodeName")
+    if not node:
+        return {"ok": True, "lease": lease, "node": None,
+                "result": f"NOT REACHED: {name} has no allocation"}
+    return {"ok": True, "lease": lease, "node": node,
+            "result": credreg.push(lease, node, [name])}
+
+
 def _cred_list(project, req):
     # Держатели аренды (#284) -- отдельным полем: запись едет как лежит.
     return {"ok": True, "creds": credreg.all(),
@@ -896,6 +922,7 @@ VERBS = {
     "cred_add":        Verb(_cred_add,        ADMIN,   False, False),
     "cred_rm":         Verb(_cred_rm,         ADMIN,   False, False),
     "cred_list":       Verb(_cred_list,       ADMIN,   False, False),
+    "cred_push":       Verb(_cred_push,       ADMIN,   False, False),
     "cred_status":     Verb(_cred_status,     ADMIN,   False, False),
     "cred_login_start": Verb(_cred_login_start, ADMIN, False, False),
     "cred_login_code": Verb(_cred_login_code, ADMIN,   False, False),

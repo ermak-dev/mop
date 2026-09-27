@@ -904,6 +904,48 @@ def check_stderr_verb_333(c):
     c.check("#333 stderr: another project's puppet is refused", bool(got.get("error")), got)
 
 
+def check_cred_push_312(c):
+    """HYPOTHESIS (#312): новый держатель аренды получал кредит только когда
+    tick замечал смену кредита (sha по кредиту, не по узлу): поднятый позже --
+    на копии узла, то есть на чужом логине оператора.
+    SOLUTION: глагол оператора cred_push {name}: сервис кластера берёт из
+    Nomad узел последней аллокации и аренду из меты джоба и отдаёт кредит
+    адресной записью (credreg.push) в тело этого папета. Узел -- из Nomad,
+    никогда из запроса. Зовёт его bootstrap на каждом подъёме.
+    STATUS: FIXED — see #312"""
+    from mop.server import credreg as srv
+    v = cluster.VERBS.get("cred_push")
+    c.check("#312 cred_push: an operator verb, naming no project puppet, acting on nothing",
+            v is not None and v.scope == cluster.ADMIN and not v.named and not v.acting, v)
+    if v is None:
+        return
+    leased = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
+                                         "cred": "anton"}}
+    plain = {"ID": "pu-mop-2", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
+    allocs = {"pu-mop-1": {"ID": "a-1", "NodeName": "hyper"},
+              "pu-mop-2": {"ID": "a-2", "NodeName": "hyper"}}
+    pushed = []
+    api = FakeNomad(jobs={"pu-mop-1": leased, "pu-mop-2": plain, "pu-mop-3": leased},
+                    allocs=allocs)
+    with patched(srv, push=lambda name, node, bodies: pushed.append((name, node, bodies)) or "OK"):
+        got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-1",
+                                       "node": "forged"}, api=api)
+        c.expect("#312 cred_push: the lease to the alloc's node from Nomad, the request's node ignored",
+                 (got, pushed), ({"ok": True, "lease": "anton", "node": "hyper", "result": "OK"},
+                                 [("anton", "hyper", ["pu-mop-1"])]))
+        pushed.clear()
+        got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-2"}, api=api)
+        c.expect("#312 cred_push: no lease -> nothing pushed", (got, pushed),
+                 ({"ok": True, "lease": None}, []))
+        got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-3"}, api=api)
+        c.expect("#312 cred_push: no allocation -> not reached, nothing pushed", (got, pushed),
+                 ({"ok": True, "lease": "anton", "node": None,
+                   "result": "NOT REACHED: pu-mop-3 has no allocation"}, []))
+        got = cluster.answer("mop", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
+        c.check("#312 cred_push: a project may not ask it", bool(got.get("error")) and not pushed,
+                got)
+
+
 def main():
     c = Checks()
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
@@ -914,7 +956,7 @@ def main():
                   check_update_keeps_branch_257, check_cred_lease_284,
                   check_update_pins_node_289, check_owner_gate_267,
                   check_node_267, check_node_forms_277,
-                  check_nomad_api_275, check_stderr_verb_333):
+                  check_nomad_api_275, check_stderr_verb_333, check_cred_push_312):
         check(c)
     return c.report("cluster")
 
