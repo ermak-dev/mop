@@ -10,7 +10,7 @@ comes from `ls`, commands from `mop` with no arguments, the reason behind a
 particular decision from the comment next to the code, subsystems from `docs/`:
 [BUS](docs/BUS.md), [CHANNEL](docs/CHANNEL.md), [MCP](docs/MCP.md),
 [GC](docs/GC.md), [DRIVER](docs/DRIVER.md), [WEB](docs/WEB.md),
-[BOOTSTRAP](docs/BOOTSTRAP.md), [CLUSTER](docs/CLUSTER.md), [LEASE](docs/LEASE.md), [AUTH](docs/AUTH.md).
+[BOOTSTRAP](docs/BOOTSTRAP.md), [CLUSTER](docs/CLUSTER.md), [LEASE](docs/LEASE.md), [AUTH](docs/AUTH.md), [CRED](docs/CRED.md).
 
 ## Overall structure
 
