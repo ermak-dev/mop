@@ -8,10 +8,10 @@ import { CRED_COLS } from "./CredentialRow";
 import type { Cred } from "../types";
 
 const CREDS: Cred[] = [
-  { name: "ermak", profile: "claude", kind: "login", owner: "anton@example.dev", status: "активен",
+  { name: "ermak", profile: "claude", kind: "login", owner: "anton@example.dev", status: "активен", status_kind: "active",
     resets_at: null, percent: 51, age: "1h", holders: ["pu-mop-6"] },
   // Слово -- голое (#331): время сброса страница берёт из resets_at.
-  { name: "z1", profile: "glm", kind: "key", owner: "", status: "ждёт квоты",
+  { name: "z1", profile: "glm", kind: "key", owner: "", status: "ждёт квоты", status_kind: "quota_wait",
     resets_at: 1790425418, percent: 100, age: "5m", holders: [] },
 ];
 

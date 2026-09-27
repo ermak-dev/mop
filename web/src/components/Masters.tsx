@@ -14,9 +14,12 @@ export const COLS = [
   { label: "каталог" }, { label: "адрес" }, { label: "папеты" },
 ];
 
-const POLL = "опрос who раз в 30 с";
+// Период -- из снимка (masters_every, #325/#326), а не своей копией числа;
+// снимок без него -- без числа, а не с выдуманным.
+const poll = (every?: number) => (every ? `опрос who раз в ${every} с` : "опрос who");
 
-export function Masters({ masters }: { masters: Master[] }) {
+export function Masters({ masters, every }: { masters: Master[]; every?: number }) {
+  const POLL = poll(every);
   return (
     <div data-testid="masters">
       <SectionTitle title="Мастера" note={masters.length ? `${masters.length} на шине; ${POLL}` : POLL} />

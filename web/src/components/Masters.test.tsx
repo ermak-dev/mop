@@ -22,6 +22,17 @@ test("a row per master with its address and puppets", () => {
   expect(screen.getByText(/2 на шине/)).toBeInTheDocument();
 });
 
+// #326: период опроса -- из снимка (masters_every, #325), не своей копией.
+test("#326 the poll period comes from the snapshot", () => {
+  renderUi(<Masters masters={M} every={45} />);
+  expect(screen.getByText(/опрос who раз в 45 с/)).toBeInTheDocument();
+});
+
+test("#326 a snapshot without the period: no invented number", () => {
+  renderUi(<Masters masters={[]} />);
+  expect(screen.getByText("опрос who")).toBeInTheDocument();
+});
+
 test("no masters: says so", () => {
   renderUi(<Masters masters={[]} />);
   expect(screen.getByText(EMPTY)).toBeInTheDocument();

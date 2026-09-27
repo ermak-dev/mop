@@ -1,6 +1,6 @@
 // Строка реестра (#300): те же колонки, что у `mop cred list` и старой
-// страницы; статус словами уже собран сервером, здесь только цвет и время
-// сброса квоты (#331).
+// страницы; статус словами и его вид уже собраны сервером (#325), здесь
+// только цвет по виду и время сброса квоты (#331, #326).
 import { Badge, Table, Text } from "@mantine/core";
 import type { Cred } from "../types";
 import { AuthorizeFlow } from "./AuthorizeFlow";
@@ -25,8 +25,8 @@ export function CredentialRow({ cred }: { cred: Cred }) {
       <Table.Td>{cred.kind}</Table.Td>
       <Table.Td>{cred.owner || "-"}</Table.Td>
       {/* время сброса -- в поясе браузера, из resets_at (#331) */}
-      <Table.Td><Badge variant="light" color={statusColor(cred.status)}>
-        {credStatusText(cred.status, cred.resets_at)}
+      <Table.Td><Badge variant="light" color={statusColor(cred.status_kind)}>
+        {credStatusText(cred.status, cred.status_kind, cred.resets_at)}
       </Badge></Table.Td>
       <Table.Td ta={align(CRED_COLS.used)}>{percentText(cred.percent)}</Table.Td>
       <Table.Td>{cred.age}</Table.Td>

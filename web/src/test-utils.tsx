@@ -16,7 +16,7 @@ export function renderUi(ui: ReactElement, providerProps?: Omit<MantineProviderP
 export function emptySnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
   return {
     at: null, projects: [], nodes: [], usage: [], per_puppet: [], per_user: [], journal: [],
-    errors: [], creds: [], masters: [],
+    errors: [], creds: [], masters: [], masters_every: 30,
     counts: { puppets: 0, free: 0, busy: 0, sick: 0, silent: 0, down: 0 },
     ...overrides,
   };
