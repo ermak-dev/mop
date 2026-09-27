@@ -190,18 +190,25 @@ def cred_status_word(st):
     return word
 
 
-def cred_rows(records, now):
+def cred_rows(records, now, holders=None):
     """Записи реестра -> строки страницы: имя, профиль, вид, владелец, статус
-    словами, время сброса, процент худшего окна, возраст. Ключ, токен и
-    прочее содержимое записи сюда не переписываются."""
+    словами, время сброса, процент худшего окна, возраст и держатели аренды.
+    Ключ, токен и прочее содержимое записи сюда не переписываются.
+
+    holders -- {кредит: {папет: узел}} из credreg.holders() (#301): та же
+    аренда, что у `mop cred list`. Нет карты -- у каждой строки пустой
+    список, а не отсутствие ключа: странице не надо гадать."""
+    holders = holders or {}
     out = []
     for rec in records:
         st = rec.get("status") or {}
-        out.append({"name": rec.get("name") or "-", "profile": rec.get("profile") or "-",
+        name = rec.get("name") or "-"
+        out.append({"name": name, "profile": rec.get("profile") or "-",
                     "kind": rec.get("kind") or "-", "owner": rec.get("owner") or "",
                     "status": cred_status_word(st), "resets_at": st.get("resets_at"),
                     "percent": st.get("percent"),
-                    "age": credrows.span(now - int(rec.get("added_at") or now))})
+                    "age": credrows.span(now - int(rec.get("added_at") or now)),
+                    "holders": sorted(holders.get(name) or {})})
     return out
 
 
@@ -382,7 +389,14 @@ class Collector:
         try:
             from . import credreg
             credreg.login_forget_expired()
-            rows = cred_rows(credreg.all(), time.time())
+            # Аренда -- из меты джобов, тем же токеном Nomad пользователя
+            # пула, что у сервиса кластера. Не прочиталась -- строки без
+            # держателей, реестр всё равно показываем.
+            try:
+                held = credreg.holders()
+            except Exception:
+                held = {}
+            rows = cred_rows(credreg.all(), time.time(), held)
             with self._cond:
                 self.creds = rows
                 self._note("creds", None)

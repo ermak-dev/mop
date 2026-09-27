@@ -269,23 +269,9 @@ def check_creds_285(c):
 # странице решить, где ставить кнопку.
 # SOLUTION: маршрут и разбор добавления убраны, разборы входа остались,
 # cred_rows несёт profile. STATUS: FIXED — see #294
-# Вкладка claude открывается сама (#294, просьба оператора 27.09): окно
-# заводится в момент клика, пока жест пользователя жив, иначе блокировщик
-# всплывающих окон отбросит окно, открытое через двадцать секунд после
-# нажатия, когда сервер вернёт ссылку; адрес подставляется в него потом.
-# HYPOTHESIS: обработчик клика ждёт ответа сервера и только показывает
-# ссылку. SOLUTION: window.open("", "_blank") до post(login/start), затем
-# w.location = url; ссылка в строке остаётся запасной.
-# STATUS: FIXED — see #294
-def check_open_tab_294(c):
-    page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                             "web", "index.html"), encoding="utf-8").read()
-    handler = page[page.find("if (start) {"):page.find("} else if (send)")]
-    opened = handler.find("window.open(")
-    posted = handler.find('post("/api/creds/login/start"')
-    c.check("the start click opens a tab before asking the server", 0 <= opened < posted,
-            (opened, posted))
-    c.check("the tab is pointed at the url once it arrives", ".location" in handler, handler[:200])
+# Вкладка claude открывается сама (#294): порядок «окно до запроса» с #300
+# держит Vitest (web/src/components/AuthorizeFlow.test.tsx) -- страница
+# стала React-приложением, и старый web/index.html с #301 удалён.
 
 
 def check_row_button_294(c):
@@ -302,11 +288,25 @@ def check_row_button_294(c):
              web.parse_login_start({"name": "anton"}), ({"name": "anton", "mode": "login"}, None))
     c.check("#294 parse_login_code still refuses an empty code",
             web.parse_login_code({"name": "a", "code": ""})[0] is None)
-    page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                             "web", "index.html"), encoding="utf-8").read()
-    c.check("#294 the page has no add form", 'id="cred-add"' not in page and "/api/creds/add" not in page)
-    c.check("#294 the page has no login form", 'id="cred-login"' not in page)
-    c.check("#294 the page has the row button", "Авторизоваться" in page)
+
+
+# ── #301: держатели аренды в строках страницы ─────────────────────────
+# HYPOTHESIS: cred_rows не несёт holders, и колонка «держатели» на странице
+# пуста, хотя `mop cred list` их показывает: сервис читает реестр, но не
+# аренду из меты джобов.
+# SOLUTION: cred_rows(records, now, holders) -- {кредит: {папет: узел}}
+# из credreg.holders(), имена папетов по алфавиту; без карты -- пустой
+# список, строка не падает. STATUS: FIXED — see #301
+def check_holders_301(c):
+    held = {"anton": {"pu-mop-6": "gpu", "pu-mop-1": None}, "team": {"pu-rudesktop-8": "a2"}}
+    rows = {r["name"]: r for r in web.cred_rows(CREDS, now=1_000_000, holders=held)}
+    c.expect("#301 holders sorted by puppet", rows["anton"].get("holders"),
+             ["pu-mop-1", "pu-mop-6"])
+    c.expect("#301 a glm key has its holder", rows["team"].get("holders"), ["pu-rudesktop-8"])
+    c.expect("#301 no lease -- an empty list", rows["old"].get("holders"), [])
+    bare = web.cred_rows(CREDS, now=1_000_000)
+    c.check("#301 without a holders map every row has an empty list",
+            all(r.get("holders") == [] for r in bare), bare)
 
 
 # ── #297: страница -- собранное React-приложение из web/dist ─────────────
@@ -344,7 +344,7 @@ def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
-               check_creds_285, check_row_button_294, check_open_tab_294, check_dist_297):
+               check_creds_285, check_row_button_294, check_holders_301, check_dist_297):
         fn(c)
     return c.report("web")
 
