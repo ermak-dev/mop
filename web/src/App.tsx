@@ -10,6 +10,7 @@ import { UsageChart } from "./components/UsageChart";
 import { UsageByUser } from "./components/UsageByUser";
 import { Credentials } from "./components/Credentials";
 import { KIND_COLOR } from "./components/format";
+import { ThemeSwitch } from "./components/ThemeSwitch";
 
 export const KIND_RU: Record<Kind, string> = {
   free: "свободны", busy: "заняты", sick: "больны", silent: "агент молчит", down: "не подняты",
@@ -44,7 +45,10 @@ export default function App() {
             <img src="/logo.png" alt="" width={28} height={28} />
             <Title order={2}>Master Of Puppet</Title>
           </Group>
-          {snapshot ? <Chips counts={snapshot.counts} /> : <Text c="dimmed">снимок ещё не пришёл</Text>}
+          <Group gap="md">
+            {snapshot ? <Chips counts={snapshot.counts} /> : <Text c="dimmed">снимок ещё не пришёл</Text>}
+            <ThemeSwitch />
+          </Group>
         </Group>
         {snapshot && snapshot.errors.length > 0 && (
           <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join("\n")}</Alert>

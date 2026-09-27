@@ -54,6 +54,9 @@ CSS.
 | `Credentials`, `CredentialRow`, `AuthorizeFlow` | реестр кредитов и вход claude из строки |
 | `Journal` | события шины, новые сверху |
 
+Тема по умолчанию светлая, переключатель в шапке — светлая, тёмная или как в
+системе; выбор Mantine хранит в `localStorage` браузера (`ThemeSwitch`).
+
 Общая запись чисел и цвета корзин — одна на страницу:
 `web/src/components/format.ts`. Запись свободного из всего `N/M` та же, что
 `render.ratio` у CLI (#243): случаи сверяют `format.test.ts` и
