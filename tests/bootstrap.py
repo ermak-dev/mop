@@ -80,8 +80,83 @@ def check_identity_167(c):
                 not ("identity" not in bootstrap.answer("mop", {"verb": "nope"}).get("error", "")))
 
 
+# ── #334: итог прогона -- рядом с отправленным ──────────────────────────
+# HYPOTHESIS: play() отдаёт {ok, played, rc, seconds, tail} узлу и ничего не
+# хранит, journal() только пишет в журнал: чем кончился прогон после
+# `mop update`, клиенту узнать неоткуда. Что уехало, сервер тоже не помнит.
+# SOLUTION: сервис кластера кладёт происхождение рядом с workspace
+# (<папет>-sent.json, с меткой регистрации по часам сервера), bootstrap
+# после каждого прогона -- итог (<папет>-result.json) с меткой и коммитом
+# отправленного; store("") снимает оба. STATUS: FIXED — see #334
+def check_result_334(c):
+    root = tempfile.mkdtemp(prefix="mop-test-bootstrap-334-")
+    name = "pu-proj-1"
+    for fn in ("note_sent", "note_result", "read_result", "read_sent"):
+        if not c.check(f"#334 bootstrap.{fn} exists", hasattr(bootstrap, fn)):
+            return
+    prov = {"source": "working copy", "commit": "5b92b440c952fad2", "dirty": True,
+            "tasks": 1, "present": True}
+    bootstrap.store(root, name, TEXT)
+    marker = bootstrap.note_sent(root, name, prov, now=1_790_500_000.5)
+    c.check("#334 note_sent: the marker is the server's, not empty", marker)
+    sent = bootstrap.read_sent(root, name)
+    c.expect("#334 sent record: provenance plus the marker",
+             sent, {**prov, "marker": marker, "at": 1_790_500_000})
+    path = os.path.join(root, f"{name}-sent.json")
+    c.expect("#334 sent file is 0600", oct(os.stat(path).st_mode & 0o777), oct(0o600))
+    again = bootstrap.note_sent(root, name, prov, now=1_790_500_000.5)
+    c.check("#334 two registrations in the same second get different markers",
+            again != marker, (marker, again))
+
+    ok = {"ok": True, "played": True, "rc": 0, "seconds": 41.6, "tail": "a\nPLAY RECAP ok=3\n"}
+    bootstrap.note_result(root, name, ok, now=1_790_500_060)
+    c.expect("#334 result after an ok play: fields, marker and commit of what was sent",
+             bootstrap.read_result(root, name),
+             {"ok": True, "played": True, "seconds": 41.6, "rc": 0, "task": None,
+              "message": None, "last": "PLAY RECAP ok=3", "at": 1_790_500_060,
+              "sent": again, "commit": "5b92b440c952fad2"})
+    failed = {"ok": False, "played": True, "rc": 2, "seconds": 3.0, "tail": "x\nfatal",
+              "task": "env file", "message": "Could not find ~/proj/.env"}
+    bootstrap.note_result(root, name, failed, now=1_790_500_070)
+    got = bootstrap.read_result(root, name)
+    c.expect("#334 result after a failed play carries #333's task and message",
+             (got["ok"], got["rc"], got["task"], got["message"], got["last"]),
+             (False, 2, "env file", "Could not find ~/proj/.env", "fatal"))
+    bootstrap.note_result(root, name, {"ok": True, "played": False, "text": "no bootstrap"},
+                          now=1_790_500_080)
+    got = bootstrap.read_result(root, name)
+    c.expect("#334 result without a play: played False, nothing else invented",
+             (got["ok"], got["played"], got["rc"], got["seconds"], got["last"]),
+             (True, False, None, None, None))
+
+    # Прогон по запросу узла пишет итог сам -- и когда кред не нашёлся:
+    # прогон уже был.
+    with patched(bootstrap, ROOT=root, play=lambda req, project: dict(failed),
+                 puppet_creds=lambda project: None):
+        bootstrap.answer("proj", {"verb": "bootstrap", "name": name})
+    c.expect("#334 answer(bootstrap) writes the result of its play",
+             (bootstrap.read_result(root, name) or {}).get("task"), "env file")
+    with patched(bootstrap, ROOT=root, play=lambda req, project: dict(ok),
+                 puppet_creds=lambda project: None):
+        bootstrap.answer("other", {"verb": "bootstrap", "name": name})
+    c.expect("#334 a refused request (foreign project) plays nothing and writes nothing",
+             (bootstrap.read_result(root, name) or {}).get("task"), "env file")
+
+    # Нет отправленного (старый клиент) -- итог без метки и коммита.
+    bootstrap.store(root, name, "")
+    c.expect("#334 store('') removes the sent and result files",
+             sorted(f for f in os.listdir(root) if f.startswith(name)), [])
+    bootstrap.note_result(root, name, ok, now=1_790_500_090)
+    got = bootstrap.read_result(root, name)
+    c.expect("#334 result with nothing sent: no marker, no commit",
+             (got["sent"], got["commit"]), (None, None))
+    c.expect("#334 read_result of an unknown puppet is None",
+             bootstrap.read_result(root, "pu-proj-9"), None)
+
+
 def main():
     c = Checks()
+    check_result_334(c)
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
 
     # HYPOTHESIS: механизма нет вовсе — ничто не играет манифест при старте.
