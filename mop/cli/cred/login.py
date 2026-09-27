@@ -17,7 +17,7 @@ import os
 import sys
 
 from mop.cli import lib
-from mop.common import fsutil, paths
+from mop.common import fsutil
 from mop.server import credlogin, credreg
 
 
@@ -35,10 +35,15 @@ def registration(mode, status):
 def main(argv):
     setup = "--setup-token" in argv
     args = [a for a in argv if a != "--setup-token"]
-    if len(args) != 1 or args[0].startswith("-") or "/" in args[0]:
+    if len(args) != 1 or args[0].startswith("-"):
         lib.usage(__doc__)
     name = args[0]
-    home = paths.local("creds", name)
+    # Имя -- до входа (#328): код одноразовый, и отказ реестра после обмена
+    # оставлял сессию в доме, которого реестр не знает.
+    try:
+        home = credreg.home(name)
+    except ValueError as e:
+        sys.exit(str(e))
     mode = "setup-token" if setup else "login"
     try:
         login = credlogin.Login.start(home, mode)

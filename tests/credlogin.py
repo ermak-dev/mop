@@ -131,6 +131,7 @@ def main():
     with patched(credlogin, client_path=lambda path_env, home, exists=None: "/opt/bin/claude"):
         c.expect("client() returns the found path", credlogin.client(), "/opt/bin/claude")
     check_register_307(c)
+    check_name_first_328(c)
     return c.report("credlogin")
 
 
@@ -190,6 +191,44 @@ def check_register_307(c):
         FakeLogin.ok = False
         out, err, code = run_command(cmd.main, ["carol"], stdin="the-code\n")
         c.check("#307 a failed login registers nothing", code == 1 and calls == [], (code, calls))
+
+
+def check_name_first_328(c):
+    """HYPOTHESIS (#328): `mop cred login "my acct"` проверяет только `/`
+    и строит дом сам (paths.local), а правило имени реестра
+    (credreg.check_name) срабатывает лишь в register_login -- после входа:
+    одноразовый код потрачен, сессия лежит в доме, которого реестр не знает.
+    SOLUTION: дом берётся из credreg.home(name), и его ValueError --
+    отказ в одну строку до Login.start: ни адреса, ни pty.
+    STATUS: FIXED — see #328"""
+    import importlib
+    from mop.server import credreg
+    cmd = importlib.import_module("mop.cli.cred.login")
+    homes = []
+
+    class Refused(Exception):
+        pass
+
+    def start(home, mode):
+        homes.append(home)
+        raise Refused()
+    with patched(credlogin, Login=type("L", (), {"start": staticmethod(start)})):
+        for bad in ("bad name", "a:b", "имя", "a/b"):
+            homes.clear()
+            try:
+                out, err, code = run_command(cmd.main, [bad], stdin="the-code\n")
+            except Refused:
+                out, code = "", 0
+            c.check(f"#328 {bad!r} is refused before Login.start",
+                    homes == [] and code not in (0, None) and "credential name" in str(code)
+                    and "\n" not in str(code).strip() and out == "", (homes, code, out))
+        homes.clear()
+        try:
+            run_command(cmd.main, ["good-name"], stdin="the-code\n")
+        except Refused:
+            pass
+        c.expect("#328 a valid name reaches Login.start with the registry's home",
+                 homes, [credreg.home("good-name")])
 
 
 if __name__ == "__main__":
