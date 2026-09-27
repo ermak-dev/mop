@@ -1,8 +1,8 @@
 // Расход по пользователям (#299): те же колонки, что на прежней странице,
 // порядок строк -- порядок сервера, числа -- человеческие.
 import { screen, within } from "@testing-library/react";
-import { renderUi } from "../test-utils";
-import { UsageByUser, USER_COLUMNS } from "./UsageByUser";
+import { expectHead, renderUi } from "../test-utils";
+import { UsageByUser, USER_COLS } from "./UsageByUser";
 import type { UsageUser } from "../types";
 
 const USERS: UsageUser[] = [
@@ -12,8 +12,7 @@ const USERS: UsageUser[] = [
 
 test("the table has the old page's columns in order", () => {
   renderUi(<UsageByUser users={USERS} />);
-  const heads = screen.getAllByRole("columnheader").map((h) => h.textContent);
-  expect(heads).toEqual([...USER_COLUMNS]);
+  expectHead(Object.values(USER_COLS));
 });
 
 test("rows keep the server's order and human numbers", () => {

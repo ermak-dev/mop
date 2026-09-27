@@ -1,7 +1,7 @@
 // Папеты по проектам (#298): секция на проект, колонки и корзины со старой страницы.
 import { screen, within } from "@testing-library/react";
-import { renderUi } from "../test-utils";
-import { PoolTable, projectNote } from "./PoolTable";
+import { expectHead, renderUi } from "../test-utils";
+import { COLS, PoolTable, projectNote } from "./PoolTable";
 import type { Project } from "../types";
 
 const PROJECTS: Project[] = [{
@@ -23,9 +23,7 @@ test("projectNote names the buckets in order", () => {
 test("a section per project with the old page's columns and buckets", () => {
   renderUi(<PoolTable projects={PROJECTS} />);
   expect(screen.getByRole("heading", { name: /mop/ })).toHaveTextContent("1 свободен, 1 занят");
-  for (const h of ["папет", "узел", "аллокация", "состояние", "пользователь", "модель", "место", "репозиторий"]) {
-    expect(screen.getByRole("columnheader", { name: h })).toBeInTheDocument();
-  }
+  expectHead(Object.values(COLS));
   const rows = screen.getAllByRole("row").slice(1);
   expect(rows).toHaveLength(2);
   expect(rows[0]).toHaveAttribute("data-kind", "free");

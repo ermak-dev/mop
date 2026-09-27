@@ -1,8 +1,8 @@
 // Живые мастера (#305): строка на мастера -- проект, логин, сессия, каталог,
 // адрес для send и папеты, чья аренда на его логине.
 import { screen } from "@testing-library/react";
-import { renderUi } from "../test-utils";
-import { EMPTY, Masters } from "./Masters";
+import { expectHead, renderUi } from "../test-utils";
+import { COLS, EMPTY, Masters } from "./Masters";
 import type { Master } from "../types";
 
 const M: Master[] = [
@@ -13,6 +13,7 @@ const M: Master[] = [
 
 test("a row per master with its address and puppets", () => {
   renderUi(<Masters masters={M} />);
+  expectHead(COLS);
   expect(screen.getByText("ermak.mate-7")).toBeInTheDocument();
   expect(screen.getByText("mop-ab")).toBeInTheDocument();
   expect(screen.getByText("/home/ermak/mop")).toBeInTheDocument();

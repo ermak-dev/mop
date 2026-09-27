@@ -1,28 +1,28 @@
 // Живые мастера (#305). Реестра мастеров нет намеренно: сборщик сервиса
 // опрашивает who в общий инбокс каждого проекта, как инструмент agents, и
 // живой -- тот, кто отозвался. Адрес -- тот, по которому мастеру пишут send.
-import { Code, Table, Text, Title } from "@mantine/core";
+import { Code, Table, Text } from "@mantine/core";
 import type { Master } from "../types";
 import { listOrDash } from "./format";
+import { EmptyNote, SectionTitle } from "./Section";
+import { TableHead } from "./TableHead";
 
 export const EMPTY = "мастеров на шине нет — мастер отвечает, пока жив его MCP-сервер mop";
 
-export const HEAD = ["проект", "пользователь", "сессия", "каталог", "адрес", "папеты"];
+export const COLS = [
+  { label: "проект" }, { label: "пользователь" }, { label: "сессия" },
+  { label: "каталог" }, { label: "адрес" }, { label: "папеты" },
+];
+
+const POLL = "опрос who раз в 30 с";
 
 export function Masters({ masters }: { masters: Master[] }) {
   return (
     <div data-testid="masters">
-      <Title order={3}>
-        Мастера{" "}
-        <Text span c="dimmed" size="sm" fw={400}>
-          {masters.length ? `${masters.length} на шине; опрос who раз в 30 с` : "опрос who раз в 30 с"}
-        </Text>
-      </Title>
+      <SectionTitle title="Мастера" note={masters.length ? `${masters.length} на шине; ${POLL}` : POLL} />
       {masters.length ? (
         <Table striped withTableBorder fz="sm" mt="xs">
-          <Table.Thead>
-            <Table.Tr>{HEAD.map((h) => <Table.Th key={h}>{h}</Table.Th>)}</Table.Tr>
-          </Table.Thead>
+          <TableHead cols={COLS} />
           <Table.Tbody>
             {masters.map((m) => (
               <Table.Tr key={`${m.project}/${m.master}`}>
@@ -36,7 +36,7 @@ export function Masters({ masters }: { masters: Master[] }) {
             ))}
           </Table.Tbody>
         </Table>
-      ) : <Text c="dimmed" size="sm">{EMPTY}</Text>}
+      ) : <EmptyNote size="sm">{EMPTY}</EmptyNote>}
     </div>
   );
 }

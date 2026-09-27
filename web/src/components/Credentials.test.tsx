@@ -1,8 +1,9 @@
 // Реестр на странице (#300): кнопка входа только у claude, пустой реестр --
 // подсказка про команды.
 import { screen } from "@testing-library/react";
-import { renderUi } from "../test-utils";
+import { expectHead, renderUi } from "../test-utils";
 import { Credentials } from "./Credentials";
+import { CRED_COLS } from "./CredentialRow";
 import type { Cred } from "../types";
 
 const CREDS: Cred[] = [
@@ -24,4 +25,13 @@ test("the authorize button is on claude rows only", () => {
 test("an empty registry points at the commands", () => {
   renderUi(<Credentials creds={[]} />);
   expect(screen.getByText(/mop cred add/)).toBeInTheDocument();
+});
+
+// Колонки -- одной записью на заголовок и ячейку (#324): «использовано»
+// справа и в заголовке, как его ячейка (прежде заголовок был слева).
+test("headers follow the column spec, «использовано» right like its cell", () => {
+  renderUi(<Credentials creds={CREDS} />);
+  expectHead(Object.values(CRED_COLS));
+  expect(screen.getByRole("columnheader", { name: "использовано" })).toHaveStyle({ textAlign: "right" });
+  expect(screen.getByText("51%").closest("td")).toHaveStyle({ textAlign: "right" });
 });
