@@ -603,6 +603,17 @@ def main():
         got = bootstrap.with_creds({"error": "play failed"}, creds, "proj")
         c.check("with_creds must keep the play's error",
                 not (got.get("bus") or got.get("error") != "play failed"), got)
+        # HYPOTHESIS (#349): упавший прогон несёт ok False, а не error, и
+        # with_creds клеил к нему кред вопреки своему docstring'у -- а
+        # journal() печатал ответ целиком. SOLUTION: кред -- только ok True;
+        # упавший старт шину не открывает (узел выходит на not ok раньше,
+        # чем читает bus). STATUS: FIXED — see #349
+        failed = {"ok": False, "played": True, "rc": 2, "tail": "fatal"}
+        got = bootstrap.with_creds(failed, creds, "proj")
+        c.expect("#349 with_creds: a failed play gets no credentials", got, failed)
+        got = bootstrap.with_creds(failed, None, "proj")
+        c.expect("#349 with_creds: a failed play without a project password stays the "
+                 "play's failure", got, failed)
     except AttributeError:
         c.fail("bootstrap.with_creds is missing")
 
