@@ -342,7 +342,8 @@ def failed_task(output):
     """Вывод ansible-playbook -> (задача, сообщение) | (None, None) (#333).
 
     Задача -- последний заголовок `TASK [...]` перед первой строкой провала;
-    сообщение -- msg из `=> {...}`, если разбирается, иначе сама строка,
+    сообщение -- из результата `=> {...}` (_result_message: у команды -- её
+    вывод, #344), если разбирается, иначе сама строка,
     одной строкой (она уходит в строку stderr врапера) и до MESSAGE_MAX.
     Провала нет или он до первой задачи (синтаксис, модуль) -- (None, None):
     тогда говорит хвост."""
@@ -362,12 +363,28 @@ def failed_task(output):
         if sep:
             try:
                 got = json.loads(result)
-                message = got.get("msg") if isinstance(got, dict) else None
+                message = _result_message(got) if isinstance(got, dict) else None
             except ValueError:
                 pass
-        message = " ".join(str(message or line).split())
-        return task, message[:MESSAGE_MAX]
+        message = message or " ".join(line.split())[:MESSAGE_MAX]
+        return task, message
     return None, None
+
+
+def _result_message(result):
+    """Причина провала из результата задачи ansible -> строка | None (#344).
+
+    У command/shell msg всегда «non-zero return code»: причина -- в выводе.
+    Есть rc и вывод -- последняя непустая строка stderr (иначе stdout) и код
+    выхода; вывода нет -- msg. Одна строка, до MESSAGE_MAX, код не срезается."""
+    msg = result.get("msg")
+    if result.get("rc") is not None:
+        for lines in (result.get("stderr_lines"), result.get("stdout_lines")):
+            said = [" ".join(str(l).split()) for l in lines or [] if str(l).strip()]
+            if said:
+                code = f" (rc {result['rc']})"
+                return said[-1][:MESSAGE_MAX - len(code)] + code
+    return " ".join(str(msg).split())[:MESSAGE_MAX] if msg else None
 
 
 def outcome(rc, output, seconds):

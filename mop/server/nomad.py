@@ -89,7 +89,11 @@ def alloc_stderr(alloc_id, task, tail=8000):
     r = _raw("GET", f"/v1/client/fs/logs/{alloc_id}",
              params={"task": task, "type": "stderr", "origin": "end",
                      "offset": tail, "plain": "true"})
-    return r.text
+    # Байты, не r.text (#343): plain-логи Nomad идут без charset, и requests
+    # читал их как ISO-8859-1 -- «» приходили «Â«…Â»», и failure_reason не
+    # узнавал строку врапера. replace -- хвост от конца может начаться
+    # посреди многобайтного символа.
+    return r.content.decode("utf-8", errors="replace")
 
 
 def alloc_stop(alloc_id):
