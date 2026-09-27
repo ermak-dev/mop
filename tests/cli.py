@@ -273,6 +273,7 @@ def main():
     check_probe_words(c)
     check_node_flag_320(c)
     check_one_parser_320(c)
+    check_node_flag_340(c)
     check_deploy_check(c)
     check_inventory_drivers(c)
     check_pool_uniform(c)
@@ -1114,6 +1115,22 @@ def check_one_parser_320(c):
         c.expect(f"parse_value once {argv}", got, "--node given twice")
     c.expect("parse_value once, a single flag in the middle",
              lib.parse_value(["x", "--node", "a", "y"], "--node", once=True), ("a", ["x", "y"]))
+
+
+def check_node_flag_340(c):
+    """HYPOTHESIS (#340): --node разбирался руками: `--node ""` и `--node -x`
+    брали пустое или флаг за имя узла -- `mop project add --node ""` молча
+    собирал на всех узлах, как --cred до #327; `--node=NAME` не понимался.
+    SOLUTION: оба места -- lib.parse_value(once=True), отказ -- usage.
+    RESULT: пустое и флаг вместо имени -- usage, `--node=NAME` понят.
+    STATUS: FIXED — see #340"""
+    for name, run, doc in node_flag_sites():
+        for argv in (["--node", ""], ["--node", "", "proj"], ["--node", "-x", "proj"],
+                     ["--node="], ["--node=", "proj"]):
+            c.expect(f"{name} {argv} answers with usage", run(argv), doc)
+        got = run(["--node=n1", "proj"])
+        c.check(f"{name} --node=n1 reaches the work with n1: {got!r}",
+                isinstance(got, dict) and got.get("node") == "n1")
 
 # ── #186: драйвер узла из инвентаря — до плейбука ────────────────────────────
 # Вывод настоящего `ansible-inventory --list` (ansible-core 2.21) на инвентаре:

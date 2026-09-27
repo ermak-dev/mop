@@ -33,16 +33,16 @@ MCP = {"annotations": "destructive", "background": True, "args": [
 def main(argv):
     mode = "missing"
     verbose = False
-    node = None
     args = []
-    rest = list(argv)
+    try:
+        node, rest = lib.parse_value(argv, "--node", once=True)
+    except RuntimeError:
+        # Пустое или флаг вместо имени узла -- usage, а не сборка на всех
+        # узлах (#340); повтор -- usage, как было.
+        lib.usage(__doc__)
     while rest:
         a = rest.pop(0)
-        if a == "--node":
-            if not rest or node:
-                lib.usage(__doc__)
-            node = rest.pop(0)
-        elif a in ("-v", "--verbose"):
+        if a in ("-v", "--verbose"):
             verbose = True
         elif a in ("--update", "--rebuild"):
             if mode != "missing":
