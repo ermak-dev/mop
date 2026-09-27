@@ -223,8 +223,18 @@ def keepalive_all(now=None):
 # ─── логин через шину (#283): диалог с клиентом по имени кредита ──────────
 def login_start(name, mode="login"):
     """Начать логин: клиент в pty, -> адрес авторизации. Прежний
-    незавершённый логин того же имени снимается."""
+    незавершённый логин того же имени снимается.
+
+    Только для кредита из реестра (#295): этим путём ходят страница и глагол
+    cred_login_start, а они переавторизуют, не добавляют (решение 27.09,
+    #294). Без сверки удачный код заводил бы новый кредит через
+    register_login -- любой в LAN мог бы подложить пулу свой аккаунт, -- а
+    брошенный вход оставлял бы дом строкой «не проверялся». Новый кредит
+    claude заводит `mop cred login` на сервере: он ведёт драйвер сам."""
     credreg.check_name(name)
+    if load(name) is None:
+        raise RuntimeError(f"no such credential {name}: a new claude credential is added "
+                           f"with mop cred login on the server")
     with _logins_lock:
         old = _logins.pop(name, None)
     if old:
