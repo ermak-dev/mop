@@ -14,7 +14,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import web  # noqa: E402
@@ -474,12 +474,226 @@ def check_kinds_325(c):
              snap.get("masters_every"), web.MASTERS_EVERY)
 
 
+# ── #319: круг сборщика, запись журнала, схема who (характеристика) ────────
+# HYPOTHESIS (DRY после #262): круг сборщика (try → запись под замком →
+# _note(вид, None) / except → _note(вид, str(e) or type(e).__name__) →
+# _bump) написан пять раз; текст ошибки -- ещё раз в cli/server/web.py; запись
+# журнала о кредите там собрана руками, хотя web.journal_entry заполняет
+# умолчания; проект строки («?» без origin) -- дважды; схема ответа who и
+# MASTERS_WAIT -- у производителя (mcp) и двух читателей; JSON-ответы
+# страницы -- шесть раз руками; CRED_FIELDS -- мёртвый.
+# SOLUTION: Collector._round, web.error_text, journal_entry в обработчике,
+# row_project, domain.MasterAnswer и одна константа ожидания, _json у
+# обработчика. Первая половина -- характеристика, снятая ДО переезда: заметки
+# кругов, запись журнала, чтение who и байты ответов те же после.
+# STATUS: FIXED — see #319
+class _Stop(Exception):
+    pass
+
+
+def _stop(*a, **k):
+    raise _Stop()
+
+
+def _one_pass(col, round_):
+    """Один проход бесконечного круга: пауза в его конце обрывает цикл."""
+    import threading
+    col._kick = type("K", (), {"wait": staticmethod(_stop), "is_set": lambda self: False,
+                               "clear": lambda self: None, "set": lambda self: None})()
+    with patched(web.time, sleep=_stop):
+        try:
+            round_()
+        except _Stop:
+            pass
+
+
+def check_rounds_319(c):
+    from mop.common import projects as registry
+    from mop.server import credreg
+    boom, empty = RuntimeError("boom"), RuntimeError()
+
+    def raising(e):
+        def raise_(*a, **k):
+            raise e
+        return raise_
+    cases = {
+        "states": (lambda col: col._states,
+                   {"puppet_rows": lambda sizes=False: [], "nodes": lambda: []}, "puppet_rows"),
+        "sizes": (lambda col: col._sizes, {"puppet_sizes": lambda rows: {"pu-a-1": 7}}, "puppet_sizes"),
+        "masters": (lambda col: col._masters,
+                    {"project_ids": lambda reg: ((), ())}, "project_ids"),
+    }
+    for kind, (method, ok_patch, failing) in cases.items():
+        for label, patch, want in (("success", ok_patch, None),
+                                   ("failure", {**ok_patch, failing: raising(boom)}, "boom"),
+                                   ("failure, empty message", {**ok_patch, failing: raising(empty)},
+                                    "RuntimeError")):
+            col = web.Collector()
+            col.rows = [PuppetRow("pu-a-1", "n1", "running", "free", "free", "-", "claude",
+                                  "git@h:g/a.git")]
+            col.errors = {kind: "stale"} if want is None else {}
+            before = col.version
+            with patched(web.puppets, **patch), patched(registry, read=lambda: set(),
+                                                         names=lambda *a: []), \
+                    patched(web.bus, gather=lambda *a, **k: []):
+                _one_pass(col, method(col))
+            c.expect(f"#319 round {kind} {label}: the note", col.errors.get(kind), want)
+            c.expect(f"#319 round {kind} {label}: one bump", col.version - before, 1)
+            if kind == "states":
+                c.check(f"#319 round states {label}: at is set", col.at is not None)
+    # sizes без строк -- круга нет: ни заметки, ни версии.
+    col = web.Collector()
+    with patched(web.puppets, puppet_sizes=raising(boom)):
+        _one_pass(col, col._sizes)
+    c.expect("#319 round sizes without rows: nothing", (col.errors, col.version), ({}, 0))
+    # usage -- через gather_usage.
+    for label, gu, want in (("success", lambda: ({}, [], []), None), ("failure", raising(boom), "boom")):
+        col = web.Collector()
+        with patched(web, gather_usage=gu):
+            _one_pass(col, col._usage)
+        c.expect(f"#319 round usage {label}: note and one bump",
+                 (col.errors.get("usage"), col.version), (want, 1))
+    # creds -- refresh_creds, один вызов.
+    for label, forget, want in (("success", lambda: None, None), ("failure", raising(boom), "boom"),
+                                ("failure, empty message", raising(empty), "RuntimeError")):
+        col = web.Collector()
+        with patched(credreg, login_forget_expired=forget, holders=lambda: {}, all=lambda: []):
+            col.refresh_creds()
+        c.expect(f"#319 round creds {label}: note and one bump",
+                 (col.errors.get("creds"), col.version), (want, 1))
+
+
+def _fake_handler(webcli, method, path, body=b""):
+    import io
+    h = webcli.Handler.__new__(webcli.Handler)
+    h.path, h.headers = path, {"Content-Length": str(len(body))}
+    h.rfile, h.wfile, h.sent = io.BytesIO(body), io.BytesIO(), []
+    h.send_response = lambda code, msg=None: h.sent.append(("status", code))
+    h.send_header = lambda k, v: h.sent.append((k, v))
+    h.end_headers = lambda: None
+    getattr(h, "do_" + method)()
+    return h.sent, h.wfile.getvalue()
+
+
+def check_replies_319(c):
+    import json
+    from mop.cli.server import web as webcli
+
+    class Col:
+        def __init__(self):
+            self.events, self.refreshed = [], 0
+
+        def event(self, e):
+            self.events.append(e)
+
+        def refresh_creds(self):
+            self.refreshed += 1
+
+        def current(self):
+            return {"название": "пул", "n": 1}
+
+    def head(code, n):
+        return [("status", code), ("Content-Type", "application/json; charset=utf-8"),
+                ("Content-Length", str(n)), ("Cache-Control", "no-store")]
+    col = Col()
+    login = json.dumps({"name": "anton", "code": "c"}).encode()
+    with patched(webcli, COLLECTOR=col), \
+            patched(webcli.credreg, login_code=lambda name, code: {"ok": True, "owner": "anton@ex.dev"}):
+        for what, got, want in (
+                ("GET /api/pool", _fake_handler(webcli, "GET", "/api/pool"),
+                 (head(200, 38), '{"название": "пул", "n": 1}'.encode())),
+                ("404", _fake_handler(webcli, "POST", "/nope", b"{}"),
+                 (head(404, 25), b'{"error": "no such path"}')),
+                ("400 not JSON", _fake_handler(webcli, "POST", "/api/creds/login/start", b"{not json"),
+                 (head(400, 35), b'{"error": "body: JSON is expected"}')),
+                ("400 refused", _fake_handler(webcli, "POST", "/api/creds/login/start",
+                                              json.dumps({"name": ""}).encode()),
+                 (head(400, 27), b'{"error": "name: required"}')),
+                ("200", _fake_handler(webcli, "POST", "/api/creds/login/code", login),
+                 (head(200, 54), b'{"ok": true, "owner": "anton@ex.dev", "name": "anton"}'))):
+            c.expect(f"#319 reply {what}: status, headers and bytes", got, want)
+        for msg, want in (("сбой", '{"error": "сбой"}'.encode()), ("", b'{"error": "RuntimeError"}')):
+            with patched(webcli.Handler, _cred=staticmethod(
+                    lambda a, f, m=msg: (_ for _ in ()).throw(RuntimeError(m)))):
+                got = _fake_handler(webcli, "POST", "/api/creds/login/start",
+                                    json.dumps({"name": "anton"}).encode())
+            c.expect(f"#319 reply 500 {msg or 'empty'}: bytes", got, (head(500, len(want)), want))
+    c.expect("#319 the cred journal record: the same fields as journal_entry fills",
+             col.events, [{"event": "cred login_code", "name": "anton", "node": "-",
+                           "project": "-", "text": "anton@ex.dev"}])
+    c.expect("#319 one refresh after a successful action", col.refreshed, 1)
+    c.expect("#319 journal_entry fills the defaults", web.journal_entry({}),
+             {"event": "?", "node": "-", "name": "-", "project": "-", "text": ""})
+
+
+def check_who_319(c):
+    """Чтение ответа who: страница (master_rows) и инструмент agents (mcp)."""
+    from mop.cli.service import mcp
+    answer = {"master": "anton.mate-7", "project": "mop", "user": "anton", "session": "s-1",
+              "cwd": "/w"}
+    bare = {"master": None, "user": None, "session": None, "cwd": None}
+    rows = [PuppetRow("pu-mop-1", "n1", "running", "busy", "busy", "anton", "claude",
+                      "git@h:g/mop.git")]
+    c.expect("#319 page: a who answer as a masters row",
+             web.master_rows({"mop": [answer, bare]}, rows),
+             [{"project": "mop", "master": "-", "user": "-", "session": "-", "cwd": "-", "puppets": []},
+              {"project": "mop", "master": "anton.mate-7", "user": "anton", "session": "s-1",
+               "cwd": "/w", "puppets": ["pu-mop-1"]}])
+    with patched(mcp.bus, gather=lambda *a, **k: [answer, bare]), patched(mcp, MASTER_ID="anton.mate-7"):
+        got = mcp._masters()
+    c.expect("#319 agents: the masters table from the same answers", got,
+             ["", "masters of project:",
+              "MASTER (address for send)  USER   SESSION           DIRECTORY",
+              "None                       -      -                 -",
+              "anton.mate-7               anton  s-1 (this is me)  /w"])
+
+
+def check_shape_319(c):
+    """Одно место на каждое: круг, текст ошибки, запись журнала, проект строки,
+    схема who с её ожиданием, JSON-ответ."""
+    import ast
+    from mop.common import domain
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+    def text(rel):
+        return open(os.path.join(root, rel)).read()
+    srv, cli, mcp_src = (text("mop/server/web.py"), text("mop/cli/server/web.py"),
+                         text("mop/cli/service/mcp.py"))
+    c.check("#319 Collector._round: one round for five", hasattr(web.Collector, "_round"))
+    c.check("#319 web.error_text: one error text", hasattr(web, "error_text"))
+    c.expect("#319 `str(e) or type(e).__name__` is written once",
+             (srv + cli).count("type(e).__name__"), 1)
+    c.expect("#319 the collector notes only inside _round",
+             srv.count("self._note("), 2)
+    c.check("#319 the handler builds no journal record by hand",
+            '"node": "-"' not in cli and "journal_entry(" in cli)
+    c.check("#319 row_project: one project-of-row", hasattr(web, "row_project"))
+    c.expect('#319 `if r.origin else "?"` is written once', srv.count('if r.origin else "?"'), 1)
+    ma = getattr(domain, "MasterAnswer", None)
+    c.check("#319 domain.MasterAnswer: the who schema", ma is not None
+            and hasattr(ma, "from_dict") and hasattr(ma, "to_dict"))
+    c.check("#319 one wait for who: domain.WHO_WAIT", getattr(domain, "WHO_WAIT", None) == 2)
+    for rel, src in (("mop/server/web.py", srv), ("mop/cli/service/mcp.py", mcp_src)):
+        c.check(f"#319 {rel}: no MASTERS_WAIT of its own", "MASTERS_WAIT =" not in src)
+    tree = ast.parse(cli)
+    own = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_json"), None)
+    inside = {id(x) for x in ast.walk(own)} if own else set()
+    inline = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call) and id(n) not in inside
+              and getattr(n.func, "attr", None) == "_send"
+              and any(isinstance(a, ast.Call) and getattr(a.func, "attr", None) == "dumps"
+                      for a in n.args)]
+    c.check("#319 Handler._json: one JSON reply", own is not None)
+    c.expect("#319 no JSON reply is dumped by hand outside _json", inline, [])
+    c.check("#319 CRED_FIELDS is gone: nothing read it", not hasattr(web, "CRED_FIELDS"))
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
                check_creds_285, check_row_button_294, check_holders_301, check_masters_305, check_dist_297,
-               check_reset_time_331, check_login_start_no_default_339, check_kinds_325):
+               check_reset_time_331, check_login_start_no_default_339, check_kinds_325,
+               check_rounds_319, check_replies_319, check_who_319, check_shape_319):
         fn(c)
     return c.report("web")
 

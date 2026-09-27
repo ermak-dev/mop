@@ -23,6 +23,7 @@ import threading
 import time
 
 from ..common import bus, credreg as credrows, puppets, state
+from ..common.domain import WHO_WAIT, MasterAnswer
 from .. import usage
 from . import nodes as node_facts
 
@@ -33,7 +34,6 @@ USAGE_DAYS = 14        # окно расхода, как у `mop stat`
 USAGE_TIMEOUT = 90     # как у `mop stat`: разбор небыстрый
 CREDS_EVERY = 60       # с: реестр кредитов -- чтение файлов на сервере (#285)
 MASTERS_EVERY = 30     # с: опрос who по проектам -- живые мастера (#305)
-MASTERS_WAIT = 2       # с: сколько ждать ответов who на проект
 EVENTS_CAP = 100       # сколько событий помнит журнал
 DEBOUNCE = 1.0         # с: пачка событий — один круг, а не по кругу на каждое
 
@@ -67,6 +67,18 @@ def counts(rows):
     return out
 
 
+def row_project(r):
+    """Проект строки ростера; без origin -- «?», как и показ строки
+    (PuppetRow.render). Одно место на снимок и секцию мастеров (#319)."""
+    return puppets.project_of(r.origin) if r.origin else "?"
+
+
+def error_text(e):
+    """Исключение -> строка для страницы: текст, а пустой -- имя типа. Одна
+    на круги сборщика и отказы обработчика страницы (#319)."""
+    return str(e) or type(e).__name__
+
+
 def projects(rows):
     """Строки по проектам: [{name, puppets, counts}], проекты и папеты по имени.
     Корзина кладётся в строку (`kind`) поверх вида вердикта, чтобы страница
@@ -75,9 +87,7 @@ def projects(rows):
     место на весь снимок."""
     by = {}
     for r in rows:
-        # Без origin -- проект «?», как и показ строки (PuppetRow.render).
-        project = puppets.project_of(r.origin) if r.origin else "?"
-        by.setdefault(project, []).append(r)
+        by.setdefault(row_project(r), []).append(r)
     # Счётчик проекта -- тот же counts по виду вердикта, что и в шапке
     # (#210): считать по строке, где kind уже заменён корзиной, значило
     # отвечать classify("sick") -> busy, и залипший папет прятался в занятых.
@@ -131,20 +141,20 @@ def master_rows(answers, rows):
     правит. Один мастер, ответивший дважды, -- одна строка."""
     by_owner = {}
     for r in rows:
-        project = puppets.project_of(r.origin) if r.origin else "?"
         if r.owner:
-            by_owner.setdefault((project, r.owner), []).append(r.name)
+            by_owner.setdefault((row_project(r), r.owner), []).append(r.name)
     seen, out = set(), []
     for asked, found in answers.items():
         for d in found or []:
-            project = d.get("project") or asked
-            address = str(d.get("master") or "-")
+            a = MasterAnswer.from_dict(d)
+            project = a.project or asked
+            address = str(a.master or "-")
             if (project, address) in seen:
                 continue
             seen.add((project, address))
-            user = d.get("user") or "-"
+            user = a.user or "-"
             out.append({"project": project, "master": address, "user": user,
-                        "session": d.get("session") or "-", "cwd": d.get("cwd") or "-",
+                        "session": a.session or "-", "cwd": a.cwd or "-",
                         "puppets": sorted(by_owner.get((project, user), []))})
     return sorted(out, key=lambda m: (m["project"], m["user"], m["master"]))
 
@@ -218,8 +228,6 @@ def cache_control(url):
 # строка собирается из перечисленных полей, а не копией записи.
 CRED_WORDS = {"active": "активен", "quota_wait": "ждёт квоты",
               "needs_login": "ждёт ручной авторизации"}
-CRED_FIELDS = ("name", "profile", "kind", "owner", "status", "status_kind", "resets_at",
-               "percent", "age")
 LOGIN_MODES = ("login", "setup-token")
 
 
@@ -378,22 +386,37 @@ class Collector:
         else:
             self.errors[kind] = error
 
+    def _round(self, kind, compute, apply, failed=None):
+        """Один круг сборщика (#319): compute() -- вне замка (шина, Nomad,
+        секунды), apply(что вышло) и заметка -- под замком; отказ -- заметка
+        с текстом ошибки и failed() под тем же замком; версия -- после.
+        Прежде это было написано пять раз, и заметка у каждого круга своя."""
+        try:
+            got = compute()
+            with self._cond:
+                apply(got)
+                self._note(kind, None)
+        except Exception as e:
+            with self._cond:
+                self._note(kind, error_text(e))
+                if failed:
+                    failed()
+        self._bump()
+
     def _states(self):
+        def compute():
+            # Страница читает ключи строки nodes по имени: наружу --
+            # прежняя форма провода (#267).
+            return puppets.puppet_rows(sizes=False), node_rows(n.to_row() for n in puppets.nodes())
+
+        def apply(got):
+            self.rows, self.nodes = got
+            self.at = time.time()
+
+        def failed():
+            self.at = self.at or time.time()
         while True:
-            try:
-                rows = puppets.puppet_rows(sizes=False)
-                # Страница читает ключи строки nodes по имени: наружу --
-                # прежняя форма провода (#267).
-                nodes = node_rows(n.to_row() for n in puppets.nodes())
-                with self._cond:
-                    self.rows, self.nodes = rows, nodes
-                    self.at = time.time()
-                    self._note("states", None)
-            except Exception as e:
-                with self._cond:
-                    self._note("states", str(e) or type(e).__name__)
-                    self.at = self.at or time.time()
-            self._bump()
+            self._round("states", compute, apply, failed)
             # Событие будит раньше срока; пачку событий гасим одной паузой.
             self._kick.wait(STATES_EVERY)
             if self._kick.is_set():
@@ -405,30 +428,16 @@ class Collector:
             with self._cond:
                 rows = list(self.rows)
             if rows:
-                try:
-                    sizes = puppets.puppet_sizes(rows)
-                    with self._cond:
-                        self.sizes = sizes
-                        self._note("sizes", None)
-                except Exception as e:
-                    with self._cond:
-                        self._note("sizes", str(e) or type(e).__name__)
-                self._bump()
+                self._round("sizes", lambda: puppets.puppet_sizes(rows),
+                            lambda sizes: setattr(self, "sizes", sizes))
             time.sleep(SIZES_EVERY if rows else STATES_EVERY)
 
     def _usage(self):
+        def apply(got):
+            per_day, self.per_puppet, self.per_user = got
+            self.usage = usage_axis(per_day, USAGE_DAYS)
         while True:
-            try:
-                per_day, per_puppet, per_user = gather_usage()
-                with self._cond:
-                    self.usage = usage_axis(per_day, USAGE_DAYS)
-                    self.per_puppet = per_puppet
-                    self.per_user = per_user
-                    self._note("usage", None)
-            except Exception as e:
-                with self._cond:
-                    self._note("usage", str(e) or type(e).__name__)
-            self._bump()
+            self._round("usage", gather_usage, apply)
             time.sleep(USAGE_EVERY)
 
 
@@ -447,29 +456,24 @@ class Collector:
         # сервера (и проекты без папетов) плюс проекты ростера. service
         # публиковать туда вправе (mop.> без rpc), ответы -- в _INBOX.
         from ..common import busnames, projects as registry
+
+        def compute():
+            with self._cond:
+                rows = list(self.rows)
+            names = set(registry.names(*puppets.project_ids(registry.read())))
+            names |= {puppets.project_of(r.origin) for r in rows if r.origin}
+            answers = {p: bus.gather("who", timeout=WHO_WAIT,
+                                     subj=busnames.inbox(p, busnames.ALL_MASTERS))
+                       for p in sorted(names)}
+            return master_rows(answers, rows)
         while True:
-            try:
-                with self._cond:
-                    rows = list(self.rows)
-                names = set(registry.names(*puppets.project_ids(registry.read())))
-                names |= {puppets.project_of(r.origin) for r in rows if r.origin}
-                answers = {p: bus.gather("who", timeout=MASTERS_WAIT,
-                                         subj=busnames.inbox(p, busnames.ALL_MASTERS))
-                           for p in sorted(names)}
-                found = master_rows(answers, rows)
-                with self._cond:
-                    self.masters = found
-                    self._note("masters", None)
-            except Exception as e:
-                with self._cond:
-                    self._note("masters", str(e) or type(e).__name__)
-            self._bump()
+            self._round("masters", compute, lambda found: setattr(self, "masters", found))
             time.sleep(MASTERS_EVERY)
 
     def refresh_creds(self):
         """Перечитать реестр сейчас: после добавления или логина со страницы
         строка обязана появиться без минуты ожидания."""
-        try:
+        def compute():
             from . import credreg
             credreg.login_forget_expired()
             # Аренда -- из меты джобов, тем же токеном Nomad пользователя
@@ -479,14 +483,8 @@ class Collector:
                 held = credreg.holders()
             except Exception:
                 held = {}
-            rows = cred_rows(credreg.all(), time.time(), held)
-            with self._cond:
-                self.creds = rows
-                self._note("creds", None)
-        except Exception as e:
-            with self._cond:
-                self._note("creds", str(e) or type(e).__name__)
-        self._bump()
+            return cred_rows(credreg.all(), time.time(), held)
+        self._round("creds", compute, lambda rows: setattr(self, "creds", rows))
 
 
 def gather_usage(days=USAGE_DAYS):

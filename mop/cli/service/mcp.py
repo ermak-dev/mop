@@ -46,6 +46,7 @@ from mcp.types import ToolAnnotations                          # noqa: E402
 from pydantic import Field                                     # noqa: E402
 
 from mop.common import bus, busnames, puppets, state  # noqa: E402
+from mop.common.domain import WHO_WAIT, MasterAnswer  # noqa: E402
 from mop.client import channel  # noqa: E402
 from mop import cli, session  # noqa: E402
 from mop.cli import lib                                   # noqa: E402
@@ -172,10 +173,8 @@ def master_tool(**kw):
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
 SLASH_ALLOWED = ("/model", "/clear", "/compact", "/rc", "/status", "Escape")
-# Опрос мастеров короче обычного запроса: мастер отвечает из памяти, а ждёт
-# его каждый вызов agents — gather не знает, сколько ответов ему ждать, и
-# честно досиживает до таймаута.
-MASTERS_WAIT = 2
+# Опрос мастеров короче обычного запроса -- domain.WHO_WAIT (#319): одно число
+# на agents и сборщик дашборда.
 
 
 # ─── адресация ───────────────────────────────────────────────────────────
@@ -197,8 +196,8 @@ def on_inbox(m):
     общий инбокс проекта, «кто из мастеров жив»."""
     if m.get("verb") == "who":
         d = channel.my_session() or {}
-        return {"master": MASTER_ID, "project": bus.PROJECT, "user": bus.login(),
-                "session": d.get("name"), "cwd": d.get("cwd")}
+        # Схема ответа -- одна (#319): domain.MasterAnswer.
+        return MasterAnswer(MASTER_ID, bus.PROJECT, bus.login(), d.get("name"), d.get("cwd")).to_dict()
     sock = channel.master_socket()
     if not sock:
         return {"error": f"master {MASTER_ID} has no session — nowhere to deliver the note"}
@@ -275,17 +274,16 @@ def _masters():
     угодно, но раздавать задачи вдвоём, не зная друг о друге, нельзя: два пинга
     одному папету в один вечер как раз этим и кончились."""
     try:
-        found = bus.gather("who", timeout=MASTERS_WAIT,
+        found = bus.gather("who", timeout=WHO_WAIT,
                            subj=bus.inbox(bus.ALL_MASTERS))
     except bus.BusError as e:
         return ["", f"masters of project {bus.PROJECT}: bus unavailable ({e})"]
     if not found:
         return ["", f"no masters of project {bus.PROJECT} on the bus"]
     rows = [("MASTER (address for send)", "USER", "SESSION", "DIRECTORY")]
-    for d in sorted(found, key=lambda d: str(d.get("master"))):
-        mine = " (this is me)" if d.get("master") == MASTER_ID else ""
-        rows.append((str(d.get("master")), d.get("user") or "-",
-                     (d.get("session") or "-") + mine, d.get("cwd") or "-"))
+    for a in sorted((MasterAnswer.from_dict(d) for d in found), key=lambda a: str(a.master)):
+        mine = " (this is me)" if a.master == MASTER_ID else ""
+        rows.append((str(a.master), a.user or "-", (a.session or "-") + mine, a.cwd or "-"))
     return ["", "masters of project:", *table(rows)]
 
 
