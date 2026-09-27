@@ -366,6 +366,8 @@ def is_free(kind):
 # кластера (у него Nomad), вердикт -- здесь.
 _WRAPPER_FAIL = re.compile(r"^(\S+) of pu-\S+ (?:failed|brought no )|did not reach the body")
 _ANSIBLE_NOISE = ("[ERROR]: ", "Task failed: ", "Unexpected AnsibleActionFail error: ")
+# Строка врапера с упавшей задачей bootstrap'а (#333, run.refusal).
+_TASK_FAIL = re.compile(r"^bootstrap of pu-\S+ failed at task «(.+?)»: (.*)$")
 
 
 def task_name(alloc):
@@ -405,7 +407,8 @@ def failure_reason(stderr):
 
     В stderr копятся все попытки, поэтому -- последняя: строка врапера
     («bootstrap of pu-x failed: …») и первая ошибка ansible после неё, она
-    и есть корень. Незнакомый вывод -- последняя непустая строка."""
+    и есть корень. Врапер назвал упавшую задачу (#333) -- она и её
+    сообщение. Незнакомый вывод -- последняя непустая строка."""
     lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
     if not lines:
         return None
@@ -418,6 +421,9 @@ def failure_reason(stderr):
     marks = [i for i, l in enumerate(lines) if _WRAPPER_FAIL.search(l)]
     if marks:
         i = marks[-1]
+        task = _TASK_FAIL.match(lines[i])
+        if task:
+            return f"bootstrap task «{task.group(1)}» failed: {task.group(2)}"[:200]
         m = _WRAPPER_FAIL.match(lines[i])
         errors = [l for l in lines[i + 1:] if l.startswith("[ERROR]: ")]
         if errors and m:

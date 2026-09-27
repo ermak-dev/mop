@@ -80,6 +80,81 @@ def check_identity_167(c):
                 not ("identity" not in bootstrap.answer("mop", {"verb": "nope"}).get("error", "")))
 
 
+# ── #333: упавшая задача bootstrap -- по имени, с сообщением ────────────
+# HYPOTHESIS: ответ bootstrap -- {ok, played, rc, seconds, tail} с 25
+# строками хвоста; какая задача упала, не говорит никто, и FAILED в
+# `mop list` называет лишь первую строку [ERROR] без задачи.
+# SOLUTION: чистая failed_task(вывод) -> (задача, сообщение): последний
+# заголовок `TASK [...]` перед первой строкой `fatal:`/`failed:`, сообщение
+# -- msg из `FAILED! => {...}`, иначе сама строка ошибки, до 200 знаков.
+# Ответ (outcome) несёт task и message рядом с tail -- поля стабильны, их
+# читает #334. STATUS: FIXED — see #333
+PLAYED = """
+PLAY [bootstrap of pu-rugent-3] ************************************************
+
+TASK [Gathering Facts] *********************************************************
+ok: [10.77.38.103]
+
+TASK [bootstrap : project secrets] *********************************************
+changed: [10.77.38.103] => (item=.env)
+
+TASK [bootstrap : env file] ****************************************************
+fatal: [10.77.38.103]: FAILED! => {"changed": false, "msg": "Could not find or access '~/rugent/.env-prod' on the Ansible Controller.\\nIf you are using a module and expect the file to exist on the remote, see the remote_src option"}
+
+PLAY RECAP *********************************************************************
+10.77.38.103               : ok=2    changed=1    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0
+"""
+
+
+def check_failed_task_333(c):
+    fn = getattr(bootstrap, "failed_task", None)
+    if fn is None:
+        c.fail("#333 no bootstrap.failed_task: the failed task is not named")
+        return
+    c.expect("#333 fatal: the task and the msg",
+             fn(PLAYED), ("bootstrap : env file",
+                          ("Could not find or access '~/rugent/.env-prod' on the Ansible "
+                           "Controller. If you are using a module and expect the file to "
+                           "exist on the remote, see the remote_src option")[:200]))
+    c.check("#333 the message is one line: it goes into a line of stderr",
+            "\n" not in (fn(PLAYED)[1] or "\n"))
+    loop = ("TASK [bootstrap : packages] ***\n"
+            "ok: [h] => (item=git)\n"
+            'failed: [h] (item=nope) => {"ansible_loop_var": "item", "item": "nope", '
+            '"msg": "No package matching \'nope\' is available"}\n'
+            "PLAY RECAP ***\nh : ok=1 failed=1\n")
+    c.expect("#333 a loop item failed: the task and its msg", fn(loop),
+             ("bootstrap : packages", "No package matching 'nope' is available"))
+    garbled = "TASK [x : y] ***\nfatal: [h]: FAILED! => {not json at all\n"
+    c.expect("#333 an unparsable result: the error line as the message", fn(garbled),
+             ("x : y", "fatal: [h]: FAILED! => {not json at all"))
+    long = "TASK [x : y] ***\nfatal: [h]: FAILED! => " + json.dumps({"msg": "z" * 500}) + "\n"
+    c.expect("#333 the message is cut", len(fn(long)[1]), 200)
+    c.expect("#333 a clean run: nothing failed",
+             fn("TASK [a : b] ***\nok: [h]\nPLAY RECAP ***\nh : ok=1 failed=0\n"), (None, None))
+    c.expect("#333 an error before any task: no task named",
+             fn("[ERROR]: couldn't resolve module/action 'nope'\n"), (None, None))
+    c.expect("#333 the recap's failed=1 is not a failure line",
+             fn("TASK [a : b] ***\nok: [h]\nPLAY RECAP ***\nh : ok=1 failed=1\n"),
+             (None, None))
+    out = getattr(bootstrap, "outcome", None)
+    if out is None:
+        c.fail("#333 no bootstrap.outcome: the reply is built inline")
+        return
+    got = out(2, PLAYED, 3.21)
+    c.expect("#333 the failed reply: task and message next to tail",
+             {k: got.get(k) for k in ("ok", "played", "rc", "seconds", "task")},
+             {"ok": False, "played": True, "rc": 2, "seconds": 3.2,
+              "task": "bootstrap : env file"})
+    c.check("#333 the failed reply keeps its tail of 25 lines",
+            got.get("tail") == "\n".join(PLAYED.splitlines()[-25:])
+            and got.get("message", "").startswith("Could not find"), got)
+    ok = out(0, "TASK [a : b] ***\nok: [h]\n", 1.0)
+    c.expect("#333 a good run: task and message are None, the keys are there",
+             (ok["ok"], "task" in ok and ok["task"], "message" in ok and ok["message"]),
+             (True, None, None))
+
+
 def main():
     c = Checks()
     root = tempfile.mkdtemp(prefix="mop-test-bootstrap-")
@@ -237,6 +312,7 @@ def main():
             c.fail("workspace per puppet", e)
 
     check_identity_167(c)
+    check_failed_task_333(c)
     return c.report("bootstrap")
 
 
