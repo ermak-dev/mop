@@ -16,8 +16,9 @@ make. Nothing after the playbook runs: collecting the server credentials
 writes files, and the roster check is not the question a dry run answers.
 
 With MOP_DEPLOY_NEEDS_GREEN=1 in .env, deploy refuses unless the GitLab
-pipeline of the working copy's HEAD is success, or still running with every
-job outside stage deploy green (CI rolling itself out). --skip-pipeline is
+pipeline of the working copy's HEAD on origin's default branch is success,
+or still running with every job outside stage deploy green (CI rolling
+itself out); another branch's pipeline of the same commit does not count. --skip-pipeline is
 the emergency way past it, and says so. --check changes nothing and is not
 gated.
 
@@ -172,14 +173,15 @@ def operator_refusals(settings, secrets_dir=identity.SECRETS, leftover=""):
     return out
 
 
-def pipeline_refusals(setting, have_creds, sha, fetch, fetch_jobs=None):
+def pipeline_refusals(setting, have_creds, sha, fetch, fetch_jobs=None, ref=None):
     """Отказ по пайплайну катимого коммита (#231). -> [строка].
 
     setting -- MOP_DEPLOY_NEEDS_GREEN; have_creds -- есть ли чем спросить
-    GitLab; sha -- HEAD рабочей копии, пусто -- не назван; fetch(sha) ->
-    пайплайн либо None; fetch_jobs(id) -> его джобы, спрашиваются только у
-    идущего (#239). Включённая проверка ни при чём не пропускается молча:
-    нет кредов, коммита или ответа GitLab -- отказ с причиной."""
+    GitLab; sha -- HEAD рабочей копии, пусто -- не назван; fetch(sha, ref)
+    -> пайплайн либо None; fetch_jobs(id) -> его джобы, спрашиваются только у
+    идущего (#239); ref -- ветка раскатки (#335), "" -- назвать её не вышло,
+    None -- любая ветка. Включённая проверка ни при чём не пропускается
+    молча: нет кредов, коммита, ветки или ответа GitLab -- отказ с причиной."""
     if setting in ("", "0"):
         return []
     if setting != "1":
@@ -190,8 +192,11 @@ def pipeline_refusals(setting, have_creds, sha, fetch, fetch_jobs=None):
                 "commit being rolled out"]
     if not sha:
         return ["cannot name the commit being rolled out: git rev-parse HEAD failed"]
+    if ref == "":
+        return ["cannot name origin's default branch, the pipeline of the rollout branch "
+                "is unknown -- run git remote set-head origin --auto"]
     try:
-        got = fetch(sha)
+        got = fetch(sha, ref=ref)
     except RuntimeError as e:
         return [f"cannot read the pipeline for {sha}: {e}"]
     jobs = None
@@ -413,8 +418,13 @@ def main(argv):
               f"{head_sha(lib.PROJECT) or 'HEAD'} without asking GitLab", flush=True)
     elif not dry:
         sha = head_sha(lib.PROJECT)
+        # Пайплайн коммита -- на ветке раскатки, origin по умолчанию (#335):
+        # последний на любой ветке мог оказаться идущим пайплайном эпика на
+        # том же коммите, и --from-ci отложил бы раскатку, которую никто не
+        # сделает -- джобы deploy у ветки эпика нет.
         gate = pipeline_refusals(config.get("MOP_DEPLOY_NEEDS_GREEN"),
-                                 gitlab.has_credentials(), sha, gitlab.pipeline, gitlab.jobs)
+                                 gitlab.has_credentials(), sha, gitlab.pipeline, gitlab.jobs,
+                                 ref=ci_state(lib.PROJECT)[1])
         deferred = from_ci and not refusals and from_ci_deferred(gate, sha)
         if deferred:
             print(deferred, flush=True)
