@@ -238,6 +238,11 @@ def check_failed_task_333(c):
              {"ok": True, "task": None, "message": None})
 
 
+def bus_timeout(module):
+    from mop.common import busnames
+    return busnames.BOOTSTRAP_TIMEOUT
+
+
 def check_lease_push_312(c):
     """HYPOTHESIS (#312): кредит в тело нового держателя не приезжал на
     подъёме -- только раздачей при смене кредита; тело жило на копии узла.
@@ -280,6 +285,32 @@ def check_lease_push_312(c):
                 c.check("#312 the journal names the lease note",
                         any(note in l for l in bootstrap.journal("mop", req, got)),
                         bootstrap.journal("mop", req, got))
+    # Бюджет (#312): узел ждёт ответ bootstrap не дольше BOOTSTRAP_TIMEOUT
+    # (300 с), прогон может занять до 290 с. Раздача аренды -- в остаток
+    # минус запас на ответ; остатка нет -- не зовём, говорим.
+    budget = getattr(bootstrap, "lease_budget", None)
+    if budget is None:
+        c.fail("#312 no bootstrap.lease_budget: the lease push can overrun the node's wait")
+        return
+    c.expect("#312 lease budget: 45 s when the play was quick", budget(3), 45)
+    c.expect("#312 lease budget: the rest minus the reply's margin",
+             budget(260), bus_timeout(bootstrap) - bootstrap.REPLY_MARGIN - 260)
+    c.expect("#312 lease budget: none left near the limit",
+             budget(bus_timeout(bootstrap) - bootstrap.REPLY_MARGIN - 0.5), None)
+    for elapsed, want_asked, want_timeout, want_note in (
+            (260, True, bus_timeout(bootstrap) - bootstrap.REPLY_MARGIN - 260, None),
+            (296, False, None, "no time left for the lease push")):
+        clock = iter([1000.0, 1000.0 + elapsed])
+        asked.clear()
+        with patched(bootstrap, refusal=lambda req, project: None,
+                     play=lambda req, project: dict(played),
+                     puppet_creds=lambda project: {"url": "nats://x"},
+                     _clock=lambda: next(clock)), \
+                patched(bus, ask_cluster=ask({"ok": True, "lease": "anton", "result": "OK"})):
+            got = bootstrap.answer("mop", dict(req))
+        c.expect(f"#312 after a {elapsed} s play: asked, timeout, note",
+                 (bool(asked), asked[0][3] if asked else None, got.get("lease_note")),
+                 (want_asked, want_timeout, want_note))
     failed = {"ok": False, "played": True, "rc": 2, "tail": "t", "task": None, "message": None}
     with patched(bootstrap, refusal=lambda req, project: None, play=lambda req, project: dict(failed),
                  puppet_creds=lambda project: {"url": "nats://x"}), \

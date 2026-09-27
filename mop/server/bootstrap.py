@@ -373,15 +373,31 @@ def owner_identity(req):
 
 # Сколько подъём ждёт аренду (#312): cred_push -- Nomad и запись в тело.
 LEASE_TIMEOUT = 45
+# Запас на сам ответ узлу: узел ждёт весь bootstrap не дольше
+# busnames.BOOTSTRAP_TIMEOUT (run.py), и раздача не вправе его съесть.
+REPLY_MARGIN = 5
+_clock = time.time
 
 
-def lease_note(name):
+def lease_budget(elapsed):
+    """Сколько секунд дать cred_push после прогона, шедшего elapsed. Чистая.
+    -> секунды | None, если не осталось: прогон может занять до TIMEOUT-10,
+    и раздача сверху сорвала бы подъём, который прогон пропустил."""
+    left = busnames.BOOTSTRAP_TIMEOUT - REPLY_MARGIN - elapsed
+    if left < 1:
+        return None
+    return min(LEASE_TIMEOUT, int(left))
+
+
+def lease_note(name, timeout=LEASE_TIMEOUT):
     """Аренду папета -- в тело до tmux (#312): cred_push сервиса кластера,
     у которого Nomad. -> заметка при неудаче либо None. Неудача не роняет
     подъём: папет встаёт на копии узла, как до #312, а журнал и ответ это
-    называют."""
+    называют. timeout None -- времени не осталось (lease_budget)."""
+    if timeout is None:
+        return "no time left for the lease push"
     try:
-        got = bus.ask_cluster("cred_push", timeout=LEASE_TIMEOUT, project=bus.ADMIN, name=name)
+        got = bus.ask_cluster("cred_push", timeout=timeout, project=bus.ADMIN, name=name)
     except bus.BusError as e:
         return f"lease not pushed: {e}"
     if got.get("error"):
@@ -399,6 +415,7 @@ def answer(project, req, _send=None):
         if verb == "ping":
             return {"ok": True, "puppets": _puppets_here()}
         if verb == "bootstrap":
+            started = _clock()
             why = refusal(req, project)
             if why:
                 return {"error": why}
@@ -413,7 +430,7 @@ def answer(project, req, _send=None):
             # второго разговора ради одного файла не нужно.
             out = with_creds(out, puppet_creds(project), project)
             if out.get("ok"):
-                note = lease_note(req.get("name"))
+                note = lease_note(req.get("name"), lease_budget(_clock() - started))
                 if note:
                     out["lease_note"] = note
             return out
