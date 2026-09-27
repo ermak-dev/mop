@@ -244,7 +244,7 @@ def check_creds_285(c):
             not any(k in r for r in rows for k in ("key", "token", "secret", "detail_raw")),
             rows)
     c.expect("#285 columns", sorted(rows[0]),
-             sorted(["name", "profile", "kind", "owner", "status", "resets_at", "percent", "age"]))
+             sorted(["name", "profile", "kind", "owner", "status", "resets_at", "percent", "age", "holders"]))
     snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=[], journal=[],
                         errors=[], at=1.0, creds=rows)
     c.expect("#285 snapshot carries creds", snap.get("creds"), rows)
