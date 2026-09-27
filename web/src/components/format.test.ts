@@ -1,5 +1,5 @@
 // Запись чисел и корзин как на старой странице (#298).
-import { credStatusText, gb, gbOfMb, hhmmss, human, listOrDash, nodeKind, percentText, plural,
+import { credStatusText, gb, gbOfMb, hhmmss, human, listOrDash, percentText, plural,
   presentKinds, ratio, statusColor, untilText } from "./format";
 
 test("gb: kilobytes to GB or MB, dash without data", () => {
@@ -17,7 +17,7 @@ test("human: short token counts", () => {
   expect(human(2_300_000_000)).toBe("2.3G");
 });
 
-test("ratio and node kind follow the old page", () => {
+test("ratio follows the old page", () => {
   expect(ratio(null, null)).toBe("-");
   expect(ratio(2, 7)).toBe("2/7");
   expect(ratio(null, 7)).toBe("-/7");
@@ -26,9 +26,6 @@ test("ratio and node kind follow the old page", () => {
   expect(ratio(5, 5)).toBe("5/5");
   expect(ratio(0, 0)).toBe("0/0");
   expect(ratio(2, null)).toBe("2/-");
-  expect(nodeKind("ready")).toBe("free");
-  expect(nodeKind("ineligible draining")).toBe("busy");
-  expect(nodeKind("down")).toBe("down");
   expect(hhmmss(null)).toBe("-");
 });
 
@@ -61,10 +58,6 @@ test("present kinds, list or dash, credential status and percent", () => {
   expect(presentKinds({ puppets: 3, free: 1, busy: 0, sick: 2, silent: 0, down: 0 })).toEqual(["free", "sick"]);
   expect(listOrDash([])).toBe("-");
   expect(listOrDash(["pu-mop-1", "pu-mop-3"])).toBe("pu-mop-1, pu-mop-3");
-  expect(statusColor("активен")).toBe("green");
-  expect(statusColor("ждёт квоты до 20:23")).toBe("yellow");
-  expect(statusColor("ждёт ручной авторизации")).toBe("red");
-  expect(statusColor("?")).toBe("gray");
   expect(percentText(null)).toBe("-");
   expect(percentText(51)).toBe("51%");
 });
@@ -84,13 +77,27 @@ test("#331 the reset time reads in the viewer's zone, with a date when not today
   expect(untilText(null, NOW, msk)).toBe("");
 });
 
-test("#331 the status cell adds the reset time to the bare quota word only", () => {
+// #326: виды -- из снимка (#325), а не из слов. Цвет бейджа -- по
+// status_kind, время сброса -- только к quota_wait. Снимок сервера до #325
+// видов не несёт: бейдж серый, слово как есть, без «до …».
+test("#326 the credential badge colour comes from status_kind", () => {
+  expect(statusColor("active")).toBe("green");
+  expect(statusColor("quota_wait")).toBe("yellow");
+  expect(statusColor("needs_login")).toBe("red");
+  expect(statusColor("unknown")).toBe("gray");
+  expect(statusColor(undefined)).toBe("gray");
+});
+
+test("#326 the reset time goes only to quota_wait, whatever the word", () => {
   const msk = "Europe/Moscow";
-  expect(credStatusText("ждёт квоты", at(2026, 9, 30, 2, 0), NOW, msk)).toBe("ждёт квоты до 30.09 05:00");
-  expect(credStatusText("ждёт квоты", null, NOW, msk)).toBe("ждёт квоты");
-  expect(credStatusText("активен", at(2026, 9, 30, 2, 0), NOW, msk)).toBe("активен");
-  // Сервер до #331 сам вписывал время: второго «до» не будет.
-  expect(credStatusText("ждёт квоты до 05:00:00", at(2026, 9, 30, 2, 0), NOW, msk)).toBe("ждёт квоты до 05:00:00");
+  const reset = at(2026, 9, 30, 2, 0);
+  expect(credStatusText("ждёт квоты", "quota_wait", reset, NOW, msk)).toBe("ждёт квоты до 30.09 05:00");
+  // Слово сменилось -- время на месте: страница держится вида, не слова.
+  expect(credStatusText("квота кончилась", "quota_wait", reset, NOW, msk)).toBe("квота кончилась до 30.09 05:00");
+  expect(credStatusText("ждёт квоты", "quota_wait", null, NOW, msk)).toBe("ждёт квоты");
+  expect(credStatusText("активен", "active", reset, NOW, msk)).toBe("активен");
+  // Снимок без status_kind (сервер до #325, у которого до #331 время уже в слове).
+  expect(credStatusText("ждёт квоты до 05:00:00", undefined, reset, NOW, msk)).toBe("ждёт квоты до 05:00:00");
 });
 
 // Свободная память узла (#329): вниз, как `mop node` и строка пула. Узел с

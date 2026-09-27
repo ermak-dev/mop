@@ -17,9 +17,15 @@ export interface Puppet {
 
 export interface Project { name: string; puppets: Puppet[]; counts: Counts }
 
-/** Узел; error -- только у узла с отказом (NodeRow.to_row на сервере). */
+/** Корзина узла, которую считает сервер (#325, nodes.bucket). */
+export type NodeKind = "free" | "busy" | "down";
+/** Вид статуса кредита (#325, web.cred_status_kind). */
+export type CredStatusKind = "active" | "quota_wait" | "needs_login" | "unknown";
+
+/** Узел; error -- только у узла с отказом (NodeRow.to_row на сервере); kind
+ *  -- корзина от сервера (#325), у снимка до #325 её нет. */
 export interface Node {
-  name: string; driver: string; serves: string; state: string; error?: string;
+  name: string; driver: string; serves: string; state: string; error?: string; kind?: NodeKind;
   free_mb: number | null; total_mb: number | null; slots: number | null; slots_total: number | null;
 }
 
@@ -33,6 +39,8 @@ export interface JournalEntry { at: number; event: string; name: string; node: s
 /** Строка реестра кредитов; holders -- всегда список, пустой без аренды. */
 export interface Cred {
   name: string; profile: string; kind: string; owner: string; status: string;
+  /** вид статуса (#325); kind выше -- вид самого кредита (login/token/key) */
+  status_kind?: CredStatusKind;
   resets_at: number | null; percent: number | null; age: string; holders: string[];
 }
 
@@ -48,6 +56,8 @@ export interface Snapshot {
   errors: string[];
   creds: Cred[];
   masters: Master[];
+  /** период опроса who в секундах (#325, MASTERS_EVERY) */
+  masters_every?: number;
 }
 
 /** Живой мастер по опросу who (#305): адрес для send, логин, сессия, каталог

@@ -49,7 +49,7 @@ export default function App() {
           <>
             <PoolTable projects={snapshot.projects} />
             {/* живые мастера (#305) */}
-            <Masters masters={snapshot.masters} />
+            <Masters masters={snapshot.masters} every={snapshot.masters_every} />
             <NodesPanel nodes={snapshot.nodes} />
             {/* расход (#299) */}
             <UsageChart days={snapshot.usage} />

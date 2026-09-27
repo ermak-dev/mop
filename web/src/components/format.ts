@@ -4,7 +4,7 @@
 //
 // Одно место на запись (#323): склонение, короткие числа, слова корзин и
 // цвет статуса кредита жили копиями в App, usage-format и creds-api.
-import { KINDS, type Counts, type Kind } from "../types";
+import { KINDS, type Counts, type CredStatusKind, type Kind } from "../types";
 
 // Слова корзин: one -- у одного папета (подпись проекта), many -- у
 // счётчика в шапке. Слова прежние, как были в двух таблицах.
@@ -69,20 +69,15 @@ export function hhmmss(ts: number | null | undefined): string {
   return ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "-";
 }
 
-/** Корзина узла по строке состояния, как на старой странице. */
-export function nodeKind(state: string): Kind {
-  if (/ready$/.test(state)) return "free";
-  if (/draining|closed/.test(state)) return "busy";
-  return "down";
-}
+// Цвет Badge по виду статуса кредита из снимка (#326, status_kind с #325):
+// слово -- для человека, цвет -- по виду, и смена слова его не гасит. Вида
+// нет (снимок сервера до #325) или он незнаком -- серый.
+export const CRED_COLOR: Record<CredStatusKind, string> = {
+  active: "green", quota_wait: "yellow", needs_login: "red", unknown: "gray",
+};
 
-// Цвет Badge по слову статуса, которое сервер уже собрал (cred_status_word):
-// страница не разбирает статус второй раз, только красит.
-export function statusColor(status: string): string {
-  if (status.startsWith("активен")) return "green";
-  if (status.startsWith("ждёт квоты")) return "yellow";
-  if (status.startsWith("ждёт ручной авторизации")) return "red";
-  return "gray";
+export function statusColor(kind: string | undefined): string {
+  return CRED_COLOR[kind as CredStatusKind] ?? "gray";
 }
 
 /** Процент худшего окна кредита, "-" без данных. */
@@ -110,10 +105,11 @@ export function untilText(resetsAt: number | null, now: number = Date.now() / 10
   return today ? `до ${r.hour}:${r.minute}` : `до ${r.day}.${r.month} ${r.hour}:${r.minute}`;
 }
 
-/** Статус кредита для ячейки: к голому «ждёт квоты» -- время сброса.
- *  Только к голому: слово сервера до #331 уже несёт своё «до …». */
-export function credStatusText(status: string, resetsAt: number | null,
+/** Статус кредита для ячейки: к quota_wait -- время сброса (#326: по виду,
+ *  не по слову). Снимок без вида (сервер до #325, у которого до #331 время
+ *  уже в слове) -- слово как есть. */
+export function credStatusText(status: string, kind: string | undefined, resetsAt: number | null,
                                now: number = Date.now() / 1000, timeZone?: string): string {
-  const until = status === "ждёт квоты" ? untilText(resetsAt, now, timeZone) : "";
+  const until = kind === "quota_wait" ? untilText(resetsAt, now, timeZone) : "";
   return until ? `${status} ${until}` : status;
 }

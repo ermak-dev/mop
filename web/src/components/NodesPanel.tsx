@@ -1,9 +1,9 @@
 // Узлы кластера (#298): те же колонки, что на старой странице; строка
-// красится по состоянию узла (ready — свободен, draining/closed — занят,
-// прочее — не работает).
+// красится по корзине узла, которую считает сервер (kind, #325/#326):
+// строку state страница не разбирает.
 import { Table, Text } from "@mantine/core";
 import type { Node } from "../types";
-import { gbOfMb, KIND_COLOR, nodeKind, ratio } from "./format";
+import { gbOfMb, KIND_COLOR, ratio } from "./format";
 import { EmptyNote, SectionTitle } from "./Section";
 import { align, TableHead } from "./TableHead";
 
@@ -22,13 +22,13 @@ export function NodesPanel({ nodes }: { nodes: Node[] }) {
           <TableHead cols={Object.values(COLS)} />
           <Table.Tbody>
             {nodes.map((n) => {
-              const kind = nodeKind(n.state);
+              const kind = n.kind;
               return (
                 <Table.Tr key={n.name} data-kind={kind}>
                   <Table.Td>{n.name}</Table.Td>
                   <Table.Td>{n.driver}</Table.Td>
                   <Table.Td>{n.serves}</Table.Td>
-                  <Table.Td><Text span c={KIND_COLOR[kind]}>{n.state}</Text></Table.Td>
+                  <Table.Td><Text span c={kind && KIND_COLOR[kind]}>{n.state}</Text></Table.Td>
                   <Table.Td ta={align(COLS.free)}>{gbOfMb(n.free_mb)}</Table.Td>
                   <Table.Td ta={align(COLS.total)}>{gbOfMb(n.total_mb)}</Table.Td>
                   <Table.Td ta={align(COLS.slots)}>{ratio(n.slots, n.slots_total)}</Table.Td>
