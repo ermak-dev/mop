@@ -45,8 +45,11 @@ def old_cluster_line(project, req, out):
 
 def old_bootstrap_lines(project, req, out):
     verb = req.get("verb")
+    # Словарь ответа в строку больше не идёт (#349): с ним уходил `bus`,
+    # пароль шины проекта. Где до #349 стоял ответ целиком -- «failed» у
+    # упавшего прогона и «ok» у ответа без ok (ping, identity).
     lines = [f"{project}.{verb} {req.get('name', '')}: "
-             f"{out.get('error') or ('ok' if out.get('ok') else out)}"
+             f"{out.get('error') or ('failed' if out.get('ok') is False else 'ok')}"
              + (f" in {out['seconds']}s" if out.get("seconds") is not None else "")]
     if not out.get("ok", True):
         lines.append(f"{out.get('tail', '')}")

@@ -568,9 +568,23 @@ def answer(project, req, _send=None):
 
 
 def journal(project, req, out):
-    """Строки журнала на один ответ; у проваленного прогона -- ещё и его хвост."""
-    lines = [f"{project}.{req.get('verb')} {req.get('name', '')}: "
-             f"{out.get('error') or ('ok' if out.get('ok') else out)}"
+    """Строки журнала на один ответ; у проваленного прогона -- ещё и его хвост.
+
+    Только из известных полей (#349): словарь ответа сюда не форматируется
+    никогда. Упавший прогон error не несёт, и прежде строка печатала ответ
+    целиком -- вместе с `bus`, паролем шины проекта, в journald сервера."""
+    if out.get("error"):
+        what = out["error"]
+    elif out.get("ok") is False:
+        # Сообщение #344 уже кончается «(rc N)» -- код не повторяем.
+        what = "failed" + (f" at task «{out['task']}»" if out.get("task") else "") \
+            + (f": {out['message']}" if out.get("message") else "") \
+            + (f" (rc {out['rc']})" if out.get("rc") is not None
+               and f"(rc {out['rc']})" not in (out.get("message") or "") else "") \
+            + (f"; gave up after {out.get('failures')} failures" if out.get("gave_up") else "")
+    else:
+        what = "ok"
+    lines = [f"{project}.{req.get('verb')} {req.get('name', '')}: {what}"
              + (f" in {out['seconds']}s" if out.get("seconds") is not None else "")
              + (f"; {out['lease_note']}" if out.get("lease_note") else "")]
     if not out.get("ok", True):
