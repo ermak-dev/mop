@@ -18,6 +18,8 @@ from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import config, llm  # noqa: E402
+from mop.common.domain import CredStatus  # noqa: E402
+from mop.common.llm import glm  # noqa: E402
 
 
 def plugin(**attrs):
@@ -27,7 +29,8 @@ def plugin(**attrs):
     return mod
 
 
-DEF = {"key": None, "auth_var": "ANTHROPIC_AUTH_TOKEN", "env": {}, "doc": ""}
+DEF = {"key": None, "auth_var": "ANTHROPIC_AUTH_TOKEN", "env": {}, "doc": "",
+       "probe": None, "usage": None}
 
 CASES = [
     # (что проверяем, модуль, ожидание: контракт | None = громкий отказ)
@@ -42,6 +45,62 @@ CASES = [
     ("ENV with a non-string value", plugin(ENV={"A": 5}), None),
     ("KEY not a variable name", plugin(KEY="плохое-имя"), None),
     ("AUTH_VAR not a variable name", plugin(AUTH_VAR="1bad"), None),
+    # Пробы провайдера (#287) -- необязательны: плагин без них проходит
+    # контракт как прежде, с ними -- контракт их называет; не функция -- отказ.
+    ("probe/usage absent -> None", plugin(ENV={}), DEF),
+    ("probe not callable", plugin(ENV={}, probe="yes"), None),
+]
+
+# Ответ z.ai `GET /api/monitor/usage/quota/limit` (26.09.2026, ключ установки):
+# пятичасовое окно исчерпано, недельное на 53 %. Числа настоящие.
+QUOTA = {"code": 200, "msg": "Operation successful", "success": True, "data": {
+    "level": "max", "limits": [
+        {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "usage": 28000,
+         "currentValue": 28052, "remaining": 0, "percentage": 100,
+         "nextResetTime": 1790425418306},
+        {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 140000,
+         "currentValue": 75249, "remaining": 64750, "percentage": 53,
+         "nextResetTime": 1790864188983}]}}
+
+
+def quota(per_window):
+    """Тот же ответ с другими окнами: {(unit, number): (percentage, remaining)}."""
+    limits = []
+    for (unit, number), (pct, remaining) in per_window.items():
+        limits.append({"type": "TOKENS_LIMIT", "unit": unit, "number": number,
+                       "usage": 100, "currentValue": 100 - remaining,
+                       "remaining": remaining, "percentage": pct,
+                       "nextResetTime": 1790425418306 + unit * 1000})
+    return {"code": 200, "success": True, "data": {"level": "pro", "limits": limits}}
+
+
+# Статус кредита GLM из ответа квоты (#287): три исхода, которые видит
+# оператор. HYPOTHESIS: у плагина нет пробы, и реестр кредитов узнал бы об
+# исчерпанной квоте только по провалу хода. SOLUTION: чистая status_of над
+# ответом квоты, probe/usage -- необязательные хуки контракта.
+# STATUS: FIXED — see #287
+STATUS = [
+    ("5h window exhausted -> quota_wait until its reset",
+     QUOTA, CredStatus("quota_wait", resets_at=1790425418, percent=100,
+                       detail="5h window exhausted, weekly 53%")),
+    ("nothing exhausted -> active with the worst window",
+     quota({(3, 5): (29, 71), (6, 1): (33, 67)}),
+     CredStatus("active", resets_at=None, percent=33, detail="5h 29%, weekly 33%")),
+    ("TOKENS_LIMIT with remaining 0 -> quota_wait (older plans)",
+     quota({(3, 5): (40, 60), (6, 1): (100, 0)}),
+     CredStatus("quota_wait", resets_at=1790425424, percent=100,
+                detail="weekly window exhausted, 5h 40%")),
+    ("two exhausted windows -> the earliest reset",
+     quota({(6, 1): (100, 0), (3, 5): (100, 0)}),
+     CredStatus("quota_wait", resets_at=1790425421, percent=100,
+                detail="5h window exhausted, weekly window exhausted")),
+    ("success false -> needs_login",
+     {"code": 401, "success": False, "msg": "invalid api key"},
+     CredStatus("needs_login", detail="invalid api key")),
+    ("HTTP error marker -> needs_login",
+     {"error": "HTTP 401"}, CredStatus("needs_login", detail="HTTP 401")),
+    ("garbage -> needs_login, not a crash",
+     None, CredStatus("needs_login", detail="no answer")),
 ]
 
 
@@ -100,6 +159,23 @@ def main():
         except Exception as e:
             got = f"{type(e).__name__}: {e}"
         c.expect(what, got, want)
+
+    for what, payload, want in STATUS:
+        try:
+            got = glm.status_of(payload)
+        except Exception as e:
+            got = f"{type(e).__name__}: {e}"
+        c.expect(f"glm.status_of: {what}", got, want)
+    c.expect("glm.host_of strips the path off ANTHROPIC_BASE_URL",
+             glm.host_of({"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"}),
+             "https://api.z.ai")
+    c.expect("glm.host_of without a base url -> z.ai",
+             glm.host_of({}), "https://api.z.ai")
+    got = llm.contract("fake", plugin(ENV={}, probe=lambda k: None, usage=lambda k, s, e: {}))
+    c.check("contract names the hooks a plugin has",
+            callable(got["probe"]) and callable(got["usage"]), got)
+    c.check("the glm profile declares probe and usage",
+            callable(llm.get("glm")["probe"]) and callable(llm.get("glm")["usage"]))
     return c.report("llm")
 
 
