@@ -27,7 +27,7 @@
 
 | Слой | Где | Что делает |
 |---|---|---|
-| снимок | `mop/server/web.py` | чистые функции: корзина папета, группы по проектам, счётчики, ось расхода |
+| снимок | `mop/server/web.py` | чистые функции: корзина папета, группы по проектам, счётчики, ось расхода; виды для страницы (#325) — `status_kind` кредита, `kind` узла (`nodes.bucket`), период опроса мастеров `masters_every`: страница красит по ним, а не по словам |
 | сборщик | `mop/server/web.py`, `Collector` | пять потоков с пятью расписаниями (ниже) держат снимок и версию |
 | HTTP | `mop/cli/server/web.py` | stdlib `http.server`: `/`, `/assets/<имя>`, `/logo.png`, `/api/pool`, `/events` (SSE), `/healthz`; POST `/api/creds/login/start`, `/api/creds/login/code` (#285, #294) |
 | страница | `web/src/` → `web/dist/` | React-приложение (Vite + React 19 + TypeScript + Mantine): читает снимок и красит |

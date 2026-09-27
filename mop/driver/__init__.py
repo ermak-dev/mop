@@ -453,13 +453,6 @@ def separate_bodies(mod):
     return bool(mod.IS_CONTAINER)
 
 
-async def bodies_apart(mod):
-    """Тела, отдельные от узла: куда файл кладётся вторым ходом после узла
-    (`mop login`). У host тело — сам узел, и второй записи не бывает: это тот
-    же файл, а отчёт обещал бы запись в тела, которых нет."""
-    return await mod.bodies() if mod.IS_CONTAINER else []
-
-
 def hypervisor_verb(mod, verb):
     """Глагол гипервизора у модуля драйвера -> функция либо None (#276).
 

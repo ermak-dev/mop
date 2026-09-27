@@ -41,7 +41,6 @@ if __name__ == "__main__":
     sys.exit(program.main(sys.argv[1:]))
 
 import asyncio  # noqa: E402
-import base64
 import json
 import os
 import shlex
@@ -782,7 +781,7 @@ async def v_write(_conn, req):
         full = paths.writable(HOME, path)
         if not full:
             return {"error": f"agent is not allowed to write to {path}"}
-        files.append((full, base64.b64decode(b64)))
+        files.append((full, bus.file_data(b64)))
     mark_path = paths.writable(HOME, paths.CRED_MARK)
     carries_mark = any(p == mark_path for p, _ in files)
     requested = req.get("bodies")

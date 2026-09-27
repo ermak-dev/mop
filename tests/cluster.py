@@ -1029,6 +1029,26 @@ def check_cred_push_312(c):
                 got)
 
 
+# ── #318: держатели в ответах cred_list и cred_status -- одна форма ─────
+# Характеристика до переезда (эпик #314): имена папетов по алфавиту, узел
+# не едет; cred_status с именем пробует один кредит, без имени -- все.
+def check_cred_holders_318(c):
+    recs = [{"name": "a"}, {"name": "b"}]
+    probed = []
+    with patched(cluster.credreg, all=lambda: recs,
+                 holders=lambda api=None: {"a": {"pu-x-2": "n1", "pu-x-1": None}, "b": {}},
+                 probe=lambda name, now=None: probed.append(name) or {"name": name},
+                 probe_all=lambda now=None: probed.append("*") or recs), \
+            cluster.using(FakeNomad()):
+        want = {"a": ["pu-x-1", "pu-x-2"], "b": []}
+        c.expect("#318 cred_list", cluster._cred_list("admin", {}),
+                 {"ok": True, "creds": recs, "holders": want})
+        c.expect("#318 cred_status of one", cluster._cred_status("admin", {"name": "a"}),
+                 {"ok": True, "creds": [{"name": "a"}], "holders": want})
+        c.expect("#318 cred_status of all", cluster._cred_status("admin", {}),
+                 {"ok": True, "creds": recs, "holders": want})
+    c.expect("#318 which probe ran", probed, ["a", "*"])
+
 def check_host_refusal_312(c):
     """HYPOTHESIS (#312): на host-узле два кредита одного профиля делят один
     $HOME, и сервис кластера это позволял. SOLUTION: правило host_conflict --
@@ -1087,6 +1107,7 @@ def main():
                   check_update_pins_node_289, check_owner_gate_267,
                   check_node_267, check_node_forms_277,
                   check_nomad_api_275, check_stderr_verb_333, check_cred_push_312,
+                  check_cred_holders_318,
                   check_host_refusal_312):
         check(c)
     return c.report("cluster")

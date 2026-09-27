@@ -47,6 +47,7 @@ SNAPSHOT = os.path.join(os.path.dirname(os.path.realpath(__file__)), "spec_snaps
 
 from mop.common import config  # noqa: E402
 from mop.server import spec  # noqa: E402
+from mop import session  # noqa: E402
 
 # Просьбы проектов (#197) спека читает файлом сервера: слепок снимается без
 # него -- так спеку видит установка, где deploy просьб ещё не привозил.
@@ -536,8 +537,8 @@ def check_driver_free_183(c):
 # SOLUTION: врапер на каждом старте пишет файл хуков вне клона и отдаёт его
 # claude через --settings. Не ~/.claude/settings.json: на host-узле его делят
 # все claude машины, включая оператора и мастера.
-HOOK_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "StopFailure",
-               "PostModelSwitch"}
+# События -- те, что разбирает session.py, а не третья копия списка (#341).
+HOOK_EVENTS = set(session.CLEARING) | {session.FAILURE}
 HOOKS_BEGIN = "# --- claude hooks (#223) ---"
 HOOKS_END = "# --- end of claude hooks ---"
 
@@ -629,6 +630,30 @@ def _hooks_written(c, section):
     finally:
         shutil.rmtree(home)
 
+
+
+def wrapper_hook_events(job):
+    """События, на которые врапер из спеки ставит хуки: массив, который
+    jq превращает в ключи объекта hooks. Без jq: разбор текста врапера."""
+    import base64
+    env = job["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
+    wrapper = base64.b64decode(env["PU_WRAPPER"]).decode()
+    m = re.search(r"\{hooks: \((\[[^\]]*\])\s*\|\s*map\(", wrapper)
+    return json.loads(m.group(1)) if m else None
+
+
+def check_hook_events_341(c):
+    """#341: врапер ставит хуки списком литералов, а session.py разбирает
+    исход хода по CLEARING и FAILURE. Новое событие в session.py без правки
+    врапера в теле не сработало бы никогда, и молча. Порядок не важен: jq
+    собирает из списка объект (from_entries). Врапер не правится -- правка
+    перерегистрирует каждый джоб; связь держит эта проверка."""
+    want = HOOK_EVENTS
+    for inputs in SPEC_INPUTS:
+        got = wrapper_hook_events(spec.job_spec(*inputs[:3], cont=inputs[3]))
+        c.check(f"{inputs[0]}: the wrapper hooks exactly session's events",
+                got is not None and len(got) == len(set(got)) and set(got) == want,
+                f"wrapper {got}, session {sorted(want)}")
 
 def check_claude_hooks_223(c):
     """STATUS: FIXED — see #223"""
@@ -848,7 +873,8 @@ def main():
     for fn in (check_snapshot, check_template_version, check_wrapper_paths,
                check_git_identity, check_driver_free_183,
                check_memory_197, check_project_asks_197, check_spec_memory_197,
-               check_nomad_order_197, check_claude_hooks_223, check_job_meta_265,
+               check_nomad_order_197, check_claude_hooks_223, check_hook_events_341,
+               check_job_meta_265,
                check_node_pin_289):
         fn(c)
 

@@ -23,7 +23,7 @@ MCP = {"annotations": "destructive", "args": [
 
 def main(argv):
     profile, args = _common.parse_llm(argv)
-    cred, args = _common.parse_value(args, "--cred")
+    cred, args = lib.parse_value(args, "--cred")
     if len(args) > 1:
         lib.usage(__doc__)
     profile = llm.resolve(profile)

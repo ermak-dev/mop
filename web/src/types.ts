@@ -3,10 +3,12 @@
 // tests/web.py; страница читает их по имени и ничего не решает второй раз:
 // корзина папета (kind) и счётчики считаются на сервере.
 
-export type Kind = "free" | "busy" | "sick" | "silent" | "down";
-export const KINDS: Kind[] = ["free", "busy", "sick", "silent", "down"];
+// Корзины -- одним списком (#323): тип и счётчики выводятся из него, а не
+// перечисляются второй раз.
+export const KINDS = ["free", "busy", "sick", "silent", "down"] as const;
+export type Kind = (typeof KINDS)[number];
 
-export interface Counts { puppets: number; free: number; busy: number; sick: number; silent: number; down: number }
+export type Counts = { puppets: number } & Record<Kind, number>;
 
 export interface Puppet {
   name: string; node: string; alloc_status: string; state: string; kind: Kind;
@@ -15,17 +17,31 @@ export interface Puppet {
 
 export interface Project { name: string; puppets: Puppet[]; counts: Counts }
 
+/** Корзина узла, которую считает сервер (#325, nodes.bucket). */
+export type NodeKind = "free" | "busy" | "down";
+/** Вид статуса кредита (#325, web.cred_status_kind). */
+export type CredStatusKind = "active" | "quota_wait" | "needs_login" | "unknown";
+
+/** Узел; error -- только у узла с отказом (NodeRow.to_row на сервере); kind
+ *  -- корзина от сервера (#325), у снимка до #325 её нет. */
 export interface Node {
-  name: string; driver: string; serves: string; state: string;
+  name: string; driver: string; serves: string; state: string; error?: string; kind?: NodeKind;
   free_mb: number | null; total_mb: number | null; slots: number | null; slots_total: number | null;
 }
 
-export interface UsageDay { date: string; total: number; input: number; output: number; cache_write: number; cache_read: number }
-export interface UsageUser { login: string; total: number; input: number; output: number; cache_write: number; cache_read: number }
-export interface JournalEntry { at?: number; time?: string; event: string; name: string; node: string; project: string; text: string }
+/** Токены одной строки расхода: общее у дня, папета и пользователя. */
+export interface Tokens { total: number; input: number; output: number; cache_write: number; cache_read: number }
+export interface UsageDay extends Tokens { date: string }
+export interface UsageUser extends Tokens { login: string }
+export interface PuppetUsage extends Tokens { name: string; node: string }
+/** Событие журнала: метку at ставит сборщик каждому (Collector.event). */
+export interface JournalEntry { at: number; event: string; name: string; node: string; project: string; text: string }
+/** Строка реестра кредитов; holders -- всегда список, пустой без аренды. */
 export interface Cred {
   name: string; profile: string; kind: string; owner: string; status: string;
-  resets_at: number | null; percent: number | null; age: string; holders?: string[];
+  /** вид статуса (#325); kind выше -- вид самого кредита (login/token/key) */
+  status_kind?: CredStatusKind;
+  resets_at: number | null; percent: number | null; age: string; holders: string[];
 }
 
 export interface Snapshot {
@@ -34,12 +50,14 @@ export interface Snapshot {
   counts: Counts;
   nodes: Node[];
   usage: UsageDay[];
-  per_puppet: Record<string, unknown>;
+  per_puppet: PuppetUsage[];
   per_user: UsageUser[];
   journal: JournalEntry[];
   errors: string[];
   creds: Cred[];
   masters: Master[];
+  /** период опроса who в секундах (#325, MASTERS_EVERY) */
+  masters_every?: number;
 }
 
 /** Живой мастер по опросу who (#305): адрес для send, логин, сессия, каталог

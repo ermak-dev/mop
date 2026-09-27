@@ -9,12 +9,16 @@
 Это не фреймворк и не прогон всего проекта: остальное по-прежнему добывается
 на живом пуле.
 """
+import io
+import json
 import os
 import sys
 import types
+import urllib.error
+import urllib.request
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import config, llm  # noqa: E402
@@ -155,6 +159,142 @@ CLAUDE_STATUS = [
 ]
 
 
+
+# ── #316: пробы через HTTP целиком, до и после общего _probe ───────────────
+# Характеристика: тот же ответ сервера -> тот же CredStatus (вид, подробность,
+# сброс, загрузка) и тот же запрос (адрес, заголовки, таймаут). urlopen
+# подменён: ответ -- (код, тело) либо исключение сети.
+def probe_through_http(mod, answer):
+    """probe(mod) над подменённым urlopen -> (CredStatus, запрос)."""
+    seen = {}
+
+    class Body(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def urlopen(req, timeout=None):
+        seen.update(url=req.full_url, headers=dict(req.header_items()), timeout=timeout)
+        if isinstance(answer, Exception):
+            raise answer
+        code, body = answer
+        if code != 200:
+            raise urllib.error.HTTPError(req.full_url, code, "refused", {}, io.BytesIO(body))
+        return Body(body)
+    with patched(urllib.request, urlopen=urlopen):
+        return mod.probe("tok"), seen
+
+
+def _json(obj):
+    return json.dumps(obj).encode()
+
+
+SCOPE_BODY = {"type": "error", "error": {"type": "permission_error",
+                                         "details": {"error_code": "oauth_scope_insufficient"}}}
+NEEDS = lambda detail: CredStatus("needs_login", detail=detail)  # noqa: E731
+# Ответы, одинаковые для обоих провайдеров, и что из них выходит у каждого.
+HTTP_SHARED = [
+    ("401", (401, _json({"error": {"type": "authentication_error"}})),
+     NEEDS("HTTP 401"), NEEDS("HTTP 401")),
+    ("403 for another reason", (403, _json({"error": {"type": "permission_error"}})),
+     NEEDS("HTTP 403"), NEEDS("HTTP 403")),
+    ("403 oauth_scope_insufficient", (403, _json(SCOPE_BODY)),
+     CredStatus("active", detail="no profile scope: status unknown"), NEEDS("HTTP 403")),
+    ("500 with a non-JSON body", (500, b"<html>"), NEEDS("HTTP 500"), NEEDS("HTTP 500")),
+    ("URLError", urllib.error.URLError("down"),
+     NEEDS("URLError: <urlopen error down>"), NEEDS("URLError: <urlopen error down>")),
+    ("timeout", TimeoutError("timed out"),
+     NEEDS("TimeoutError: timed out"), NEEDS("TimeoutError: timed out")),
+    ("non-JSON body", (200, b"<html>"),
+     NEEDS("JSONDecodeError: Expecting value: line 1 column 1 (char 0)"),
+     NEEDS("JSONDecodeError: Expecting value: line 1 column 1 (char 0)")),
+    ("non-dict body", (200, b"[1, 2]"), NEEDS("no answer"), NEEDS("no answer")),
+]
+HTTP_CLAUDE = [
+    ("two windows", (200, _json(USAGE)),
+     CredStatus("active", percent=33, detail="5h 29%, weekly 33%")),
+    ("5h exhausted", (200, _json(usage(100, 40))),
+     CredStatus("quota_wait", resets_at=1790421000, percent=100,
+                detail="5h window exhausted, weekly 40%")),
+    # Порядок окон у claude -- свой, исчерпанное вперёд не выходит.
+    ("weekly exhausted", (200, _json(usage(40, 100))),
+     CredStatus("quota_wait", resets_at=1790571600, percent=100,
+                detail="5h 40%, weekly window exhausted")),
+    ("both exhausted -> the nearest reset", (200, _json(usage(100, 100))),
+     CredStatus("quota_wait", resets_at=1790421000, percent=100,
+                detail="5h window exhausted, weekly window exhausted")),
+    ("no windows", (200, _json({"foo": 1})), NEEDS("no usage windows in the answer")),
+]
+HTTP_GLM = [
+    ("two windows", (200, _json(quota({(3, 5): (29, 71), (6, 1): (33, 67)}))),
+     CredStatus("active", percent=33, detail="5h 29%, weekly 33%")),
+    ("5h exhausted", (200, _json(QUOTA)),
+     CredStatus("quota_wait", resets_at=1790425418, percent=100,
+                detail="5h window exhausted, weekly 53%")),
+    # У glm исчерпанное окно -- первым.
+    ("weekly exhausted", (200, _json(quota({(3, 5): (40, 60), (6, 1): (100, 0)}))),
+     CredStatus("quota_wait", resets_at=1790425424, percent=100,
+                detail="weekly window exhausted, 5h 40%")),
+    ("both exhausted -> the nearest reset",
+     (200, _json(quota({(6, 1): (100, 0), (3, 5): (100, 0)}))),
+     CredStatus("quota_wait", resets_at=1790425421, percent=100,
+                detail="5h window exhausted, weekly window exhausted")),
+    ("success false", (200, _json({"code": 401, "success": False, "msg": "invalid api key"})),
+     NEEDS("invalid api key")),
+]
+HTTP_REQUEST = {
+    "claude": {"url": "https://api.anthropic.com/api/oauth/usage", "timeout": 15,
+               "headers": {"Authorization": "Bearer tok", "Anthropic-beta": "oauth-2025-04-20",
+                           "Accept": "application/json"}},
+    "glm": {"url": "https://api.z.ai/api/monitor/usage/quota/limit", "timeout": 15,
+            "headers": {"Authorization": "Bearer tok", "Accept": "application/json",
+                        "Accept-language": "en-US,en"}},
+}
+
+
+def _limits(*lims):
+    return {"code": 200, "success": True, "data": {"limits": [
+        {"unit": u, "number": n, "percentage": pct, "remaining": rem, "nextResetTime": at}
+        for u, n, pct, rem, at in lims]}}
+
+
+# Порядок строки glm при равенстве (исчерпанность и ранг одни) -- по тексту
+# окна, как у прежней сортировки кортежей; пустой список окон -- active без
+# подробности. Значения сняты со старого кода.
+GLM_ORDER = [
+    ("unknown windows tie -> by text",
+     _limits((3, 9, 10, 90, 0), (3, 2, 20, 80, 0)),
+     CredStatus("active", percent=20, detail="2x3 20%, 9x3 10%")),
+    ("unknown windows both exhausted -> by text, the nearest reset",
+     _limits((3, 9, 100, 0, 5000), (3, 2, 100, 0, 9000)),
+     CredStatus("quota_wait", resets_at=5, percent=100,
+                detail="2x3 window exhausted, 9x3 window exhausted")),
+    ("one window twice -> by text", _limits((3, 5, 7, 1, 0), (3, 5, 30, 1, 0)),
+     CredStatus("active", percent=30, detail="5h 30%, 5h 7%")),
+    ("no limits -> active, nothing to say", _limits(),
+     CredStatus("active", percent=0, detail="")),
+]
+
+
+def check_probe_http_316(c):
+    for what, payload, want in GLM_ORDER:
+        c.expect(f"glm.status_of: {what}", glm.status_of(payload), want)
+    cases = {"claude": [(w, a, want) for w, a, want in HTTP_CLAUDE]
+             + [(w, a, cl) for w, a, cl, _ in HTTP_SHARED],
+             "glm": [(w, a, want) for w, a, want in HTTP_GLM]
+             + [(w, a, gl) for w, a, _, gl in HTTP_SHARED]}
+    for name, mod in (("claude", claude), ("glm", glm)):
+        for what, answer, want in cases[name]:
+            try:
+                got, seen = probe_through_http(mod, answer)
+            except Exception as e:
+                got, seen = f"{type(e).__name__}: {e}", {}
+            c.expect(f"{name}.probe over HTTP: {what}", got, want)
+            c.expect(f"{name}.probe request: {what}", seen, HTTP_REQUEST[name])
+
+
 def main():
     c = Checks()
     for what, mod, want in CASES:
@@ -228,17 +368,17 @@ def main():
     c.expect("claude.reset_epoch: ISO with offset and microseconds -> seconds",
              claude.reset_epoch("2026-09-26T11:10:00.078381+00:00"), 1790421000)
     c.expect("claude.reset_epoch: garbage -> None", claude.reset_epoch("soon"), None)
-    c.expect("glm.host_of strips the path off ANTHROPIC_BASE_URL",
-             glm.host_of({"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"}),
-             "https://api.z.ai")
-    c.expect("glm.host_of without a base url -> z.ai",
-             glm.host_of({}), "https://api.z.ai")
+    # host_of(env) звался только с ENV самого модуля (#316): адрес ручки --
+    # константа из ANTHROPIC_BASE_URL профиля без пути.
+    c.expect("glm.QUOTA_URL is the host of ANTHROPIC_BASE_URL without its path",
+             glm.QUOTA_URL, "https://api.z.ai/api/monitor/usage/quota/limit")
     got = llm.contract("fake", plugin(ENV={}, probe=lambda k: None, usage=lambda k, s, e: {}))
     c.check("contract names probe, and only probe (#310)",
             callable(got["probe"]) and "usage" not in got, got)
     c.check("the glm profile declares probe and no usage hook (#310)",
             callable(llm.get("glm")["probe"]) and "usage" not in llm.get("glm")
             and not hasattr(glm, "usage"))
+    check_probe_http_316(c)
     return c.report("llm")
 
 

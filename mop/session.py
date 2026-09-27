@@ -24,12 +24,16 @@ import time
 import uuid
 
 SESSIONS = os.path.expanduser("~/.claude/sessions")
+# Каталог состояния тела. Пакет зовёт его paths.STATE, но отсюда paths не
+# импортировать: этот файл едет в тело исходником, только stdlib. Что оба
+# называют одно, держит tests/session.py (#322).
+STATE = os.path.expanduser("~/.local/state/mop")
 # Записи исхода хода (#222): их пишет хук claude, читает `state`.
-TURNS = os.path.expanduser("~/.local/state/mop/turns")
+TURNS = os.path.join(STATE, "turns")
 # Метка кредита (#284): имя кредита реестра, которым работает это тело;
 # кладёт сервер вместе с кредами (paths.CRED_MARK), хук вписывает в запись
 # хода, и провал хода приписывается кредиту, а не только папету.
-CRED_MARK = os.path.expanduser("~/.local/state/mop/cred")
+CRED_MARK = os.path.join(STATE, "cred")
 CONNECT_TIMEOUT = 5
 PRIORITIES = ("now", "next", "later")
 MODES = ("bypass", "prompting")
@@ -178,6 +182,11 @@ def probe(cwd):
 # не говорит, когда диалог закрылся, -- живой диалог в waitingFor файла.
 CLEARING = ("SessionStart", "UserPromptSubmit", "Stop", "PostModelSwitch")
 FAILURE = "StopFailure"
+# Коды провала, на которых решают разборщики пакета (state, credreg): здесь,
+# где словарь claude принимают, один раз. Что код значит -- у каждого своё.
+AUTH_FAILED = "authentication_failed"
+RATE_LIMIT = "rate_limit"
+BILLING_ERROR = "billing_error"
 DETAIL_MAX = 300
 TURN_TTL = 7 * 86400
 

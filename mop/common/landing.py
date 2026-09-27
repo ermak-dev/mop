@@ -71,11 +71,7 @@ def give(tokens, project, who, force=False):
 def read(path=None):
     """{проект: {holder, puppet, since}}; нет файла или он битый -- токенов
     нет: глагол не должен падать на файле, который пишет он сам."""
-    try:
-        with open(path or FILE) as f:
-            got = json.load(f)
-    except (OSError, ValueError):
-        return {}
+    got = fsutil.read_json(path or FILE, {})
     return got if isinstance(got, dict) else {}
 
 

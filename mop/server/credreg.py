@@ -19,7 +19,6 @@ claude обновляет токен сам при запросе, поэтом�
 адрес, code вводит код. Незавершённые логины держатся в памяти сервиса по
 имени кредита и умирают по TTL драйвера.
 """
-import base64
 import hashlib
 import json
 import os
@@ -28,13 +27,13 @@ import subprocess
 import threading
 import time
 
+from .. import session
 from ..common import bus, credreg, fsutil, llm, paths, puppets
 from ..common.domain import CredStatus, JobMeta
 from . import credlogin, nomad
 
-ROOT = paths.local("creds")
+ROOT = paths.local(paths.CREDS)
 RECORD = "cred.json"
-WRITE_TIMEOUT = 60           # раздача: агент пишет в узел и в каждое тело (#137)
 STATES_TIMEOUT = 20
 TICK = 300                   # цикл сервиса (#284): пробы, продление, раздача
 KEEPALIVE_PROMPT = "reply with one word: ok"
@@ -55,11 +54,7 @@ def _record_path(name):
 
 def load(name):
     """Запись кредита либо None, если дома или записи нет."""
-    try:
-        with open(_record_path(name)) as f:
-            rec = json.load(f)
-    except (OSError, ValueError):
-        return None
+    rec = fsutil.read_json(_record_path(name))
     return rec if isinstance(rec, dict) and rec.get("name") == name else None
 
 
@@ -86,11 +81,31 @@ def all():
             continue
         rec = load(name)
         if rec is None:
-            kind = "token" if os.path.exists(os.path.join(ROOT, name, "token")) else "login"
-            rec = credreg.record(name, "claude", kind,
+            kind = "token" if os.path.exists(secret_path(name, "token")) else "login"
+            rec = credreg.record(name, credreg.LOGIN_PROFILE, kind,
                                  now=os.path.getmtime(os.path.join(ROOT, name)))
         out.append(rec)
     return out
+
+
+def secret_path(name, kind):
+    """Где лежит секрет кредита по виду: файл кредов клиента у login, файл
+    `token` у token, иначе `key` (#318: чтение, запись и время смены)."""
+    if kind == "login":
+        return credreg.credentials_file(home(name))
+    return os.path.join(home(name), "token" if kind == "token" else "key")
+
+
+def _write_secret(name, kind, text):
+    """Секрет вида token или key -- строкой в дом кредита (0700/0600)."""
+    fsutil.make_private_dir(home(name))
+    fsutil.write_private(secret_path(name, kind), text + "\n")
+
+
+def _records():
+    """Только настоящие записи: дом без cred.json (all() показывает его
+    строкой) не пробуется и не раздаётся."""
+    return [r for r in all() if load(r["name"]) is not None]
 
 
 def add_key(name, profile, key, owner="", now=None):
@@ -105,12 +120,11 @@ def add_key(name, profile, key, owner="", now=None):
     if load(name) is not None:
         raise ValueError(f"credential {name} exists — mop cred rm first")
     rec = credreg.record(name, profile, "key", owner=owner, now=now or time.time())
-    fsutil.make_private_dir(home(name))
-    fsutil.write_private(os.path.join(home(name), "key"), key + "\n")
+    _write_secret(name, "key", key)
     return save(rec)
 
 
-def register_login(name, profile="claude", kind="login", owner="", now=None):
+def register_login(name, profile=credreg.LOGIN_PROFILE, kind="login", owner="", now=None):
     """Запись для дома, который наполнил логин (#282): сам логин записи не
     пишет, её кладёт тот, кто его вёл."""
     rec = load(name) or credreg.record(name, profile, kind, owner=owner,
@@ -131,11 +145,7 @@ def remove(name):
 
 def credentials(name):
     """Разобранный .credentials.json дома логина либо {}."""
-    try:
-        with open(credlogin.credentials_path(home(name))) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    return fsutil.read_json(credreg.credentials_file(home(name)), {})
 
 
 def secret(name, rec=None):
@@ -146,10 +156,9 @@ def secret(name, rec=None):
         return None
     kind = rec.get("kind")
     if kind == "login":
-        return (credentials(name).get("claudeAiOauth") or {}).get("accessToken")
-    fname = "token" if kind == "token" else "key"
+        return credreg.access_token(credentials(name))
     try:
-        with open(os.path.join(home(name), fname)) as f:
+        with open(secret_path(name, kind)) as f:
             return f.read().strip() or None
     except OSError:
         return None
@@ -188,7 +197,7 @@ def probe(name, now=None):
 
 
 def probe_all(now=None):
-    return [probe(r["name"], now) for r in all() if load(r["name"]) is not None]
+    return [probe(r["name"], now) for r in _records()]
 
 
 def keepalive(name, rec=None, now=None, force=False):
@@ -200,11 +209,10 @@ def keepalive(name, rec=None, now=None, force=False):
     exp = expires_at(name, rec)
     if not force and not credreg.needs_keepalive(exp, now or time.time()):
         return "not due"
-    env = credlogin._env(home(name))
     try:
         # Клиент -- абсолютным путём, найденным один раз на все вызовы (#292).
-        r = subprocess.run([credlogin.client(), "-p", KEEPALIVE_PROMPT, "--model", KEEPALIVE_MODEL],
-                           capture_output=True, text=True, timeout=KEEPALIVE_TIMEOUT, env=env)
+        r = credlogin.run(home(name), "-p", KEEPALIVE_PROMPT, "--model", KEEPALIVE_MODEL,
+                          timeout=KEEPALIVE_TIMEOUT)
     except RuntimeError as e:
         return f"failed: {e}"
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -215,13 +223,8 @@ def keepalive(name, rec=None, now=None, force=False):
     return "refreshed" if new and (exp is None or new > exp) else "not refreshed"
 
 
-def keepalive_all(now=None):
-    """Обход домов логинов: {имя: исход}."""
-    return {r["name"]: keepalive(r["name"], r, now) for r in all() if r.get("kind") == "login"}
-
-
 # ─── логин через шину (#283): диалог с клиентом по имени кредита ──────────
-MODE_OF_KIND = {"login": "login", "token": "setup-token"}
+MODE_OF_KIND = {m["kind"]: mode for mode, m in credlogin.MODES.items()}
 
 
 def login_mode(rec, asked):
@@ -275,6 +278,32 @@ def login_start(name, mode=None):
     return login.url
 
 
+def registration(mode, status, owner=""):
+    """Итог входа -> аргументы записи кредита (#307). Чистая функция.
+
+    Вид -- по режиму (credlogin.MODES). auth login -- владелец названный
+    либо email из `claude auth status`; setup-token -- только названный: его
+    область -- user:inference, профиля (а с ним и почты) у него нет."""
+    kind = credlogin.MODES[mode]["kind"]
+    if kind == "token":
+        return {"kind": kind, "owner": owner or ""}
+    return {"kind": kind, "owner": owner or (status or {}).get("email") or ""}
+
+
+def finish_login(name, login, owner=""):
+    """Удачный вход -> (запись, `claude auth status` | {}). Один путь для
+    `mop cred login` и сервиса (#318): токен setup-token -- в файл `token`,
+    сессию auth login клиент уже положил сам; затем запись (#307).
+    Переавторизация сохраняет прежнюю запись (register_login)."""
+    if login.mode == "setup-token":
+        _write_secret(name, "token", login.result)
+        status = {}
+    else:
+        status = credlogin.auth_status(home(name))
+    rec = register_login(name, **registration(login.mode, status, owner))
+    return rec, status
+
+
 def login_code(name, code, owner=""):
     """Ввести код логина. -> {"ok": True, "owner": почта|""} либо {"error"}."""
     with _logins_lock:
@@ -286,14 +315,9 @@ def login_code(name, code, owner=""):
         return {"error": f"login for {name} expired — start it again"}
     if not login.submit(code):
         return {"error": login.error or "login failed"}
+    rec, status = finish_login(name, login, owner)
     if login.mode == "setup-token":
-        fsutil.make_private_dir(home(name))
-        fsutil.write_private(os.path.join(home(name), "token"), login.result + "\n")
-        rec = register_login(name, kind="token", owner=owner)
         return {"ok": True, "owner": rec.get("owner") or ""}
-    status = credlogin.auth_status(home(name))
-    who = owner or status.get("email") or ""
-    rec = register_login(name, kind="login", owner=who)
     return {"ok": True, "owner": rec.get("owner") or "",
             "subscription": status.get("subscriptionType") or ""}
 
@@ -337,7 +361,7 @@ def materialize(name, rec=None):
             raise ValueError(f"credential {name}: no key to distribute")
         # Ключ уезжает в secrets.env целиком: на узле с двумя ключевыми
         # профилями последняя раздача побеждает (ограничение выше).
-        return [(paths.NODE_SECRETS, credreg.secrets_line(var, key).encode()), mark]
+        return [(paths.NODE_SECRETS, fsutil.write_kv({var: key}).encode()), mark]
     raise ValueError(f"credential {name} is a {kind}: not distributable "
                      f"(a setup-token needs the environment at claude start)")
 
@@ -348,6 +372,11 @@ def files_sha(files):
     for path, data in files:
         h.update(path.encode() + b"\0" + data + b"\0")
     return h.hexdigest()
+
+
+def holder_names(api=None):
+    """Держатели для ответа: {кредит: [папет, …]} по алфавиту, без узлов."""
+    return {c: sorted(h) for c, h in holders(api).items()}
 
 
 def holders(api=None):
@@ -368,18 +397,15 @@ def holders(api=None):
 
 def _changed_at(name, rec):
     """mtime секрета кредита: менялся ли дом после провала хода."""
-    kind = rec.get("kind")
-    path = credlogin.credentials_path(home(name)) if kind == "login" \
-        else os.path.join(home(name), "token" if kind == "token" else "key")
     try:
-        return os.path.getmtime(path)
+        return os.path.getmtime(secret_path(name, rec.get("kind")))
     except OSError:
         return None
 
 
 def distribute(name, api=None, now=None):
-    """Раздать кредит держателям: на каждый узел, где стоит папет с этой
-    арендой, -- адресная запись (push) в тела ЕГО держателей (#312).
+    """Раздать кредит держателям: одной рассылкой на узлы, где стоят папеты
+    с этой арендой, адресно -- в тела ЕГО держателей на каждом (#312).
     -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"}; пусто -- держателей нет.
     Отпечаток раздачи -- в записи.
 
@@ -395,10 +421,18 @@ def distribute(name, api=None, now=None):
     for puppet, node in sorted((holders(api).get(name) or {}).items()):
         if node:
             by_node.setdefault(node, []).append(puppet)
-    # Не путь подъёма: таймаут раздачи прежний (#137), а не PUSH_TIMEOUT.
-    out = {node: push(name, node, bodies, timeout=WRITE_TIMEOUT)
-           for node, bodies in sorted(by_node.items())}
-    if by_node:
+    nodes = sorted(by_node)
+    # Одна рассылка на все узлы (#315), у каждого узла свои тела (#312):
+    # только его держатели этого кредита. Не путь подъёма: таймаут раздачи
+    # прежний (#137), а не PUSH_TIMEOUT.
+    try:
+        answers = bus.request_many("write", {n: {"bodies": by_node[n]} for n in nodes},
+                                   timeout=bus.WRITE_TIMEOUT, project=bus.ADMIN,
+                                   files=[bus.as_file(p, d) for p, d in files])
+    except bus.BusError as e:
+        answers = {n: e for n in nodes}
+    out = _outcome(nodes, answers)
+    if nodes:
         save({**rec, "pushed": {"sha": files_sha(files), "at": int(now or time.time()),
                                "nodes": out}})
     return out
@@ -420,19 +454,32 @@ def push(name, node, bodies, timeout=PUSH_TIMEOUT):
         files = materialize(name)
     except ValueError as e:
         return f"FAILED: {str(e)[:120]}"
-    payload = [[p, base64.b64encode(d).decode()] for p, d in files]
+    # Запись и разбор ответа -- через bus (#315): request_many одному узлу и
+    # results_from, те же OK / FAILED / NOT REACHED, что у distribute.
     try:
-        got = bus.request(node, "write", timeout=timeout, project=bus.ADMIN,
-                          files=payload, bodies=list(bodies))
+        answers = bus.request_many("write", [node], timeout=timeout, project=bus.ADMIN,
+                                   files=[bus.as_file(p, d) for p, d in files],
+                                   bodies=list(bodies))
     except bus.BusError as e:
-        return f"NOT REACHED: {e}"
-    bad = bus.verdict(got)
-    if bad:
-        return (f"NOT REACHED: {bad[1] or 'no answer'}" if bad[0] == bus.UNREACHED
-                else f"FAILED: {bad[1][:120]}")
-    missed = [w for w in got.get("written") or []
-              if " FAILED — " in w or w.endswith(" NOT LIVE")]
-    return f"FAILED: {missed[0][:120]}" if missed else "OK"
+        answers = {node: e}
+    return _outcome([node], answers)[node]
+
+
+def _outcome(nodes, answers):
+    """Ответы агентов на адресный `write` -> {узел: "OK" | "FAILED: …" |
+    "NOT REACHED: …"}: bus.results_from (#315) и сверх него (#312) -- отказ
+    одного тела агент кладёт строкой в written, а не в error, и без её
+    разбора непришедшая аренда читалась бы OK."""
+    out = bus.results_from(nodes, answers)
+    for node in nodes:
+        answer = answers.get(node)
+        if out[node] != "OK" or not isinstance(answer, dict):
+            continue
+        missed = [w for w in answer.get("written") or []
+                  if " FAILED — " in w or w.endswith(" NOT LIVE")]
+        if missed:
+            out[node] = f"FAILED: {missed[0][:120]}"
+    return out
 
 
 def add_login_file(name, text, owner="", now=None):
@@ -441,14 +488,15 @@ def add_login_file(name, text, owner="", now=None):
     остаётся здесь. Существующий кредит того же имени обновляется файлом."""
     try:
         creds = json.loads(text)
-        assert isinstance(creds, dict) and creds.get("claudeAiOauth")
-    except (ValueError, AssertionError):
+    except ValueError:
+        creds = None
+    if not credreg.is_login_file(creds):
         raise ValueError("credentials: not a claude .credentials.json")
     rec = load(name)
     if rec is not None and rec.get("kind") != "login":
         raise ValueError(f"credential {name} is a {rec.get('kind')}, not a login")
     fsutil.make_private_dir(home(name))
-    path = credlogin.credentials_path(home(name))
+    path = secret_path(name, "login")
     fsutil.make_private_dir(os.path.dirname(path))
     fsutil.write_private(path, json.dumps(creds))
     return register_login(name, kind="login", owner=owner, now=now)
@@ -478,12 +526,16 @@ def note_turn(name, record, now=None, api=None):
     if status is not None:
         save({**credreg.merge_status(rec, status, now), "noted_at": int(record["at"])})
         return f"{name}: {status.kind} ({status.detail})"
-    if record.get("error") == "authentication_failed":
+    if record.get("error") == session.AUTH_FAILED:
         save({**rec, "noted_at": int(record["at"])})
         got = distribute(name, api, now)
-        return f"{name}: re-distributed after a stale login: " + ", ".join(
-            f"{n} {r}" for n, r in sorted(got.items()))
+        return f"{name}: re-distributed after a stale login: {_by_node(got)}"
     return None
+
+
+def _by_node(got):
+    """Итог раздачи строкой журнала: «узел итог» по имени узла."""
+    return ", ".join(f"{n} {r}" for n, r in sorted(got.items()))
 
 
 def turns_of(holding, api=None):
@@ -491,15 +543,17 @@ def turns_of(holding, api=None):
     by_node = {}
     for puppet, node in holding.items():
         if node:
-            by_node.setdefault(node, []).append(puppet)
+            by_node.setdefault(node, {"names": []})["names"].append(puppet)
     out = {}
-    for node, names in by_node.items():
-        try:
-            got = bus.request(node, "states", timeout=STATES_TIMEOUT, project=bus.ADMIN,
-                              names=names)
-        except bus.BusError:
+    try:
+        answers = bus.request_many("states", by_node, timeout=STATES_TIMEOUT,
+                                   project=bus.ADMIN)
+    except bus.BusError:
+        return out
+    for got in answers.values():
+        if isinstance(got, Exception):
             continue
-        for puppet, facts in (got.get("puppets") or {}).items():
+        for puppet, facts in ((got or {}).get("puppets") or {}).items():
             turn = ((facts or {}).get("state") or {}).get("turn")
             if isinstance(turn, dict):
                 out[puppet] = turn
@@ -520,10 +574,8 @@ def tick(api=None, now=None, log=None):
     for gone in login_forget_expired():
         lines.append(f"cred {gone}: login abandoned (ttl)")
     held = holders(api)
-    for rec in all():
+    for rec in _records():
         name = rec["name"]
-        if load(name) is None:
-            continue
         try:
             if rec.get("kind") == "login":
                 got = keepalive(name, now=now)
@@ -534,8 +586,7 @@ def tick(api=None, now=None, log=None):
                 files = materialize(name)
                 if files_sha(files) != (load(name).get("pushed") or {}).get("sha"):
                     got = distribute(name, api, now)
-                    lines.append(f"cred {name}: distributed: " + ", ".join(
-                        f"{n} {r}" for n, r in sorted(got.items())))
+                    lines.append(f"cred {name}: distributed: {_by_node(got)}")
                 for puppet, turn in turns_of(held[name], api).items():
                     got = note_turn(name, turn, now, api)
                     if got and turn.get("cred") != name:
@@ -548,7 +599,7 @@ def tick(api=None, now=None, log=None):
                     if got:
                         lines.append(f"cred {got} (from {puppet})")
         except Exception as e:
-            lines.append(f"cred {name}: {credlogin.mask(str(e))[:160]}")
+            lines.append(f"cred {name}: {credlogin.mask_error(e)}")
     return lines
 
 
@@ -559,5 +610,5 @@ def ticker(log, api=None, every=TICK):
             for line in tick(api):
                 log(f"mop-cluster: {line}")
         except Exception as e:
-            log(f"mop-cluster: cred tick failed: {credlogin.mask(str(e))[:160]}")
+            log(f"mop-cluster: cred tick failed: {credlogin.mask_error(e)}")
         time.sleep(every)

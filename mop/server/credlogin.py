@@ -39,7 +39,7 @@ import subprocess
 import termios
 import time
 
-from ..common import fsutil
+from ..common import credreg, fsutil
 
 TTL = 600                     # сколько живёт логин без кода
 CODE_PAUSE = 2                # пауза между кодом и Enter (#282)
@@ -47,8 +47,10 @@ SUBMIT_TIMEOUT = 120          # сколько ждать обмена кода 
 URL_TIMEOUT = 30              # сколько ждать адреса после запуска
 WIDE = 4000                   # ширина pty: гиперссылка одной строкой
 
-MODES = {"login": ["claude", "auth", "login"],
-         "setup-token": ["claude", "setup-token"]}
+# Одна таблица режимов (#318): аргументы клиента и вид кредита, который
+# режим наполняет. Реестр (вид -> режим) и страница (список) читают её.
+MODES = {"login": {"args": ["auth", "login"], "kind": "login"},
+         "setup-token": {"args": ["setup-token"], "kind": "token"}}
 
 
 # ─── клиент на сервере (#292) ─────────────────────────────────────────────
@@ -150,8 +152,9 @@ def mask(text):
     return _SECRET.sub("<masked>", text or "")
 
 
-def credentials_path(home):
-    return os.path.join(home, ".claude", ".credentials.json")
+def mask_error(e):
+    """Исключение строкой журнала: без секретов и не длиннее 160."""
+    return mask(str(e))[:160]
 
 
 def status_line(status):
@@ -171,22 +174,24 @@ def prepare_home(home):
     токена) не встал на экране, где нажать некому. Своё в файле не теряется."""
     fsutil.make_private_dir(home)
     path = os.path.join(home, ".claude.json")
-    try:
-        with open(path) as f:
-            flags = json.load(f)
-    except (OSError, ValueError):
-        flags = {}
+    flags = fsutil.read_json(path, {})
     flags.update({"hasCompletedOnboarding": True, "resumeReturnDismissed": True})
     flags.setdefault("theme", "dark")
     fsutil.write_private(path, json.dumps(flags))
-    fsutil.make_private_dir(os.path.join(home, ".claude"))
+    fsutil.make_private_dir(os.path.dirname(credreg.credentials_file(home)))
+
+
+def run(home, *args, timeout):
+    """Клиент с аргументами args в доме кредита -> CompletedProcess (текст).
+    RuntimeError -- клиента нет (#292); OSError и TimeoutExpired -- наружу."""
+    return subprocess.run([client(), *args], capture_output=True, text=True,
+                          timeout=timeout, env=_env(home))
 
 
 def auth_status(home):
     """`claude auth status --json` в доме кредита -> dict (пустой при отказе)."""
     try:
-        out = subprocess.run([client(), "auth", "status", "--json"], capture_output=True,
-                             text=True, timeout=60, env=_env(home)).stdout
+        out = run(home, "auth", "status", "--json", timeout=60).stdout
         return json.loads(out) if out.strip() else {}
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         return {}
@@ -223,7 +228,7 @@ class Login:
         pid, fd = pty.fork()
         if pid == 0:                                    # клиент
             os.environ.update(_env(home))
-            os.execv(binary, [binary] + MODES[mode][1:])
+            os.execv(binary, [binary] + MODES[mode]["args"])
         self.pid, self.fd = pid, fd
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, WIDE, 0, 0))
         raw = self._read(URL_TIMEOUT, until=lambda b: authorize_url(b) is not None)
@@ -255,9 +260,9 @@ class Login:
                     self.result = tok
                     break
             else:
-                if os.path.exists(credentials_path(self.home)) and \
+                if os.path.exists(credreg.credentials_file(self.home)) and \
                         auth_status(self.home).get("loggedIn"):
-                    self.result = credentials_path(self.home)
+                    self.result = credreg.credentials_file(self.home)
                     break
             if not chunk and self._dead():
                 break
@@ -286,10 +291,6 @@ class Login:
             except OSError:
                 pass
             self.fd = None
-
-    def log(self):
-        """Экран клиента для журнала, без секретов."""
-        return mask(plain(self._log))
 
     # ── внутреннее ──
     def _dead(self):

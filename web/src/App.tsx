@@ -6,31 +6,22 @@ import { PoolTable } from "./components/PoolTable";
 import { NodesPanel } from "./components/NodesPanel";
 import { Masters } from "./components/Masters";
 import { Journal } from "./components/Journal";
-import { KINDS, type Counts, type Kind } from "./types";
+import type { Counts } from "./types";
 import { UsageChart } from "./components/UsageChart";
 import { UsageByUser } from "./components/UsageByUser";
 import { Credentials } from "./components/Credentials";
-import { KIND_COLOR } from "./components/format";
+import { KIND_COLOR, KIND_WORD, plural, presentKinds } from "./components/format";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 
-export const KIND_RU: Record<Kind, string> = {
-  free: "свободны", busy: "заняты", sick: "больны", silent: "агент молчит", down: "не подняты",
-};
-// Цвета корзин -- одна таблица на страницу (#301): components/format.ts.
-
-export function plural(n: number, one: string, few: string, many: string): string {
-  const m10 = n % 10, m100 = n % 100;
-  if (m10 === 1 && m100 !== 11) return `${n} ${one}`;
-  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return `${n} ${few}`;
-  return `${n} ${many}`;
-}
+// Слова, цвета корзин и склонение -- одна таблица на страницу (#301, #323):
+// components/format.ts.
 
 export function Chips({ counts }: { counts: Counts }) {
   return (
     <Group gap="xs" data-testid="chips">
       <Badge size="lg" variant="light" color="gray">{plural(counts.puppets, "папет", "папета", "папетов")}</Badge>
-      {KINDS.filter((k) => counts[k]).map((k) => (
-        <Badge key={k} size="lg" variant="light" color={KIND_COLOR[k]}>{counts[k]} {KIND_RU[k]}</Badge>
+      {presentKinds(counts).map((k) => (
+        <Badge key={k} size="lg" variant="light" color={KIND_COLOR[k]}>{counts[k]} {KIND_WORD[k].many}</Badge>
       ))}
     </Group>
   );
@@ -58,7 +49,7 @@ export default function App() {
           <>
             <PoolTable projects={snapshot.projects} />
             {/* живые мастера (#305) */}
-            <Masters masters={snapshot.masters ?? []} />
+            <Masters masters={snapshot.masters} every={snapshot.masters_every} />
             <NodesPanel nodes={snapshot.nodes} />
             {/* расход (#299) */}
             <UsageChart days={snapshot.usage} />

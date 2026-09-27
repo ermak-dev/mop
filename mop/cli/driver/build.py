@@ -29,13 +29,12 @@ def main(argv):
     origin, как в deploy: там нет рабочей копии, которая сказала бы иначе."""
     fresh, force = "--fresh" in argv, "--force" in argv
     argv = [a for a in argv if a not in ("--fresh", "--force")]
-    node = None
-    if "--node" in argv:
-        i = argv.index("--node")
-        if i + 1 >= len(argv):
-            lib.usage(__doc__)
-        node = argv[i + 1]
-        del argv[i:i + 2]
+    try:
+        node, argv = lib.parse_value(argv, "--node", once=True)
+    except RuntimeError:
+        # Пустое или флаг вместо имени узла -- usage, а не сборка на всех
+        # узлах (#340); повтор -- usage, как было.
+        lib.usage(__doc__)
     if len(argv) > 1:
         lib.usage(__doc__)
     if argv:

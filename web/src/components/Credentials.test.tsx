@@ -1,23 +1,22 @@
 // Реестр на странице (#300): кнопка входа только у claude, пустой реестр --
 // подсказка про команды.
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { vi } from "vitest";
-import { MantineProvider } from "@mantine/core";
+import { expectHead, renderUi } from "../test-utils";
 import { Credentials } from "./Credentials";
+import { CRED_COLS } from "./CredentialRow";
 import type { Cred } from "../types";
 
 const CREDS: Cred[] = [
-  { name: "ermak", profile: "claude", kind: "login", owner: "anton@example.dev", status: "активен",
+  { name: "ermak", profile: "claude", kind: "login", owner: "anton@example.dev", status: "активен", status_kind: "active",
     resets_at: null, percent: 51, age: "1h", holders: ["pu-mop-6"] },
   // Слово -- голое (#331): время сброса страница берёт из resets_at.
-  { name: "z1", profile: "glm", kind: "key", owner: "", status: "ждёт квоты",
-    resets_at: 1790425418, percent: 100, age: "5m" },
+  { name: "z1", profile: "glm", kind: "key", owner: "", status: "ждёт квоты", status_kind: "quota_wait",
+    resets_at: 1790425418, percent: 100, age: "5m", holders: [] },
 ];
 
-const wrap = (ui: React.ReactElement) => render(<MantineProvider>{ui}</MantineProvider>);
-
 test("the authorize button is on claude rows only", () => {
-  wrap(<Credentials creds={CREDS} />);
+  renderUi(<Credentials creds={CREDS} />);
   expect(screen.getByTestId("auth-ermak")).toBeInTheDocument();
   expect(screen.queryByTestId("auth-z1")).toBeNull();
   expect(screen.getByText("pu-mop-6")).toBeInTheDocument();
@@ -26,8 +25,17 @@ test("the authorize button is on claude rows only", () => {
 });
 
 test("an empty registry points at the commands", () => {
-  wrap(<Credentials creds={[]} />);
+  renderUi(<Credentials creds={[]} />);
   expect(screen.getByText(/mop cred add/)).toBeInTheDocument();
+});
+
+// Колонки -- одной записью на заголовок и ячейку (#324): «использовано»
+// справа и в заголовке, как его ячейка (прежде заголовок был слева).
+test("headers follow the column spec, «использовано» right like its cell", () => {
+  renderUi(<Credentials creds={CREDS} />);
+  expectHead(Object.values(CRED_COLS));
+  expect(screen.getByRole("columnheader", { name: "использовано" })).toHaveStyle({ textAlign: "right" });
+  expect(screen.getByText("51%").closest("td")).toHaveStyle({ textAlign: "right" });
 });
 
 // #331: ячейка статуса дописывает время сброса из resets_at -- с датой, если
@@ -37,7 +45,7 @@ test("#331 the quota cell reads «до дд.мм чч:мм» from resets_at when
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date((1790425418 - 3 * 86400) * 1000));   // за трое суток до сброса
   try {
-    wrap(<Credentials creds={CREDS} />);
+    renderUi(<Credentials creds={CREDS} />);
     expect(screen.getByText(/^ждёт квоты до \d\d\.\d\d \d\d:\d\d$/)).toBeInTheDocument();
   } finally {
     vi.useRealTimers();

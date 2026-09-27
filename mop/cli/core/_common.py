@@ -122,49 +122,16 @@ def report_bootstrap(name, got, p):
     return 0
 
 
-def parse_value(args, flag):
-    """Выкусить `flag VALUE` (или `flag=VALUE`) откуда угодно в аргументах
-    -> (значение | None, остальные). Тот же разбор, что у --llm (#284)."""
-    value, rest, it = None, [], iter(args)
-    for a in it:
-        if a == flag:
-            value = next(it, "")
-            if value.startswith("-"):
-                rest.append(value)
-                value = ""
-        elif a.startswith(flag + "="):
-            value = a.split("=", 1)[1]
-        else:
-            rest.append(a)
-    if value == "":
-        # Забытое значение -- ошибка использования, а не «флага нет»: иначе
-        # `--cred` без имени молча заводил папета на первой аренде (#327).
-        raise RuntimeError(f"{flag} needs a value")
-    return value, rest
-
-
 def parse_llm(args):
     """Выкусить --llm PROFILE (или --llm=PROFILE) откуда угодно в аргументах.
     -> (профиль | None, остальные аргументы)."""
-    profile, rest, it = None, [], iter(args)
-    for a in it:
-        if a == "--llm":
-            profile = next(it, "")
-            # Следом флаг, а не имя: `--llm --fresh` съедал бы соседний флаг
-            # как профиль и отказывал про профиль «--fresh».
-            if profile.startswith("-"):
-                rest.append(profile)
-                profile = ""
-        elif a.startswith("--llm="):
-            profile = a.split("=", 1)[1]
-        else:
-            rest.append(a)
-    if profile == "":
+    try:
+        profile, rest = lib.parse_value(args, "--llm")
+    except RuntimeError:
         # Забытое значение -- ошибка использования, а не «нет профиля ''»
-        # (#164). RuntimeError: диспетчер делает из него одну строку в
-        # stderr, как из любого отказа (#146).
+        # (#164); здесь и список профилей, чтобы было из чего выбрать.
         raise RuntimeError(f"--llm needs a profile name; available: "
-                           f"{', '.join(llm.profiles())}")
+                           f"{', '.join(llm.profiles())}") from None
     if profile is not None:
         llm.require(profile)
     return profile, rest

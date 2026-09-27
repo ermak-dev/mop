@@ -41,7 +41,8 @@ LAYERS = {
     "mop": COMMON, "mop.session": COMMON, "mop.usage": COMMON,
     "mop.driver": COMMON, "mop.driver.host": NODE, "mop.driver.pve": NODE,
     # cli: общее
-    "mop.cli": COMMON, "mop.cli.lib": COMMON, "mop.cli.__main__": COMMON,
+    "mop.cli": COMMON, "mop.cli.lib": COMMON, "mop.cli.term": COMMON,
+    "mop.cli.__main__": COMMON,
     "mop.cli.driver": COMMON,
     # cli: клиент
     "mop.cli.core": CLIENT, "mop.cli.project": CLIENT, "mop.cli.secret": CLIENT,

@@ -35,7 +35,7 @@ MCP = {"annotations": "destructive", "args": [
 
 def main(argv):
     profile, args = _common.parse_llm(argv)
-    cred, args = _common.parse_value(args, "--cred")
+    cred, args = lib.parse_value(args, "--cred")
     fresh = "--fresh" in args
     args, force = lib.parse_named([a for a in args if a != "--fresh"], __doc__, most=2)
     name = args[0]

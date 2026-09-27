@@ -15,23 +15,10 @@ email as the owner, a setup-token without one. An existing credential logs
 in by its kind (login or token); --setup-token on a login credential is
 refused.
 """
-import os
 import sys
 
 from mop.cli import lib
-from mop.common import fsutil
 from mop.server import credlogin, credreg
-
-
-def registration(mode, status):
-    """Итог входа -> аргументы записи кредита (#307). Чистая функция.
-
-    auth login -- вид login, владелец -- email из `claude auth status`;
-    setup-token -- вид token без владельца: его область -- user:inference,
-    профиля (а с ним и почты) у него нет."""
-    if mode == "setup-token":
-        return {"kind": "token", "owner": ""}
-    return {"kind": "login", "owner": (status or {}).get("email") or ""}
 
 
 def main(argv):
@@ -66,15 +53,11 @@ def main(argv):
         return 1
     # Запись кредита (#307): без неё дом виден в `mop cred list`, но цикл
     # сервиса, probe_all, `mop cred status`, --cred и кнопка страницы его
-    # пропускают. Переавторизация сохраняет прежнюю запись (register_login).
+    # пропускают. Путь один с сервисом (#318).
+    _, status = credreg.finish_login(name, login)
     if mode == "setup-token":
-        path = os.path.join(home, "token")
-        fsutil.write_private(path, login.result + "\n")
-        credreg.register_login(name, **registration(mode, {}))
-        print(f"{name}: token stored in {path}")
+        print(f"{name}: token stored in {credreg.secret_path(name, 'token')}")
         return 0
-    status = credlogin.auth_status(home)
-    credreg.register_login(name, **registration(mode, status))
     line = credlogin.status_line(status)
     print(f"{name}: {line or 'logged in'}")
     return 0

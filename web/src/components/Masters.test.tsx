@@ -1,8 +1,8 @@
 // Живые мастера (#305): строка на мастера -- проект, логин, сессия, каталог,
 // адрес для send и папеты, чья аренда на его логине.
-import { render, screen } from "@testing-library/react";
-import { MantineProvider } from "@mantine/core";
-import { EMPTY, Masters } from "./Masters";
+import { screen } from "@testing-library/react";
+import { expectHead, renderUi } from "../test-utils";
+import { COLS, EMPTY, Masters } from "./Masters";
 import type { Master } from "../types";
 
 const M: Master[] = [
@@ -12,7 +12,8 @@ const M: Master[] = [
 ];
 
 test("a row per master with its address and puppets", () => {
-  render(<MantineProvider><Masters masters={M} /></MantineProvider>);
+  renderUi(<Masters masters={M} />);
+  expectHead(COLS);
   expect(screen.getByText("ermak.mate-7")).toBeInTheDocument();
   expect(screen.getByText("mop-ab")).toBeInTheDocument();
   expect(screen.getByText("/home/ermak/mop")).toBeInTheDocument();
@@ -21,7 +22,18 @@ test("a row per master with its address and puppets", () => {
   expect(screen.getByText(/2 на шине/)).toBeInTheDocument();
 });
 
+// #326: период опроса -- из снимка (masters_every, #325), не своей копией.
+test("#326 the poll period comes from the snapshot", () => {
+  renderUi(<Masters masters={M} every={45} />);
+  expect(screen.getByText(/опрос who раз в 45 с/)).toBeInTheDocument();
+});
+
+test("#326 a snapshot without the period: no invented number", () => {
+  renderUi(<Masters masters={[]} />);
+  expect(screen.getByText("опрос who")).toBeInTheDocument();
+});
+
 test("no masters: says so", () => {
-  render(<MantineProvider><Masters masters={[]} /></MantineProvider>);
+  renderUi(<Masters masters={[]} />);
   expect(screen.getByText(EMPTY)).toBeInTheDocument();
 });
