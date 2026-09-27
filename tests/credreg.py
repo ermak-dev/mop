@@ -74,9 +74,84 @@ def check_login_start_registry_295(c):
             srv._logins.clear()
 
 
+# ── #308: метка кредита -- подсказка, правда -- аренда ─────────────────
+# HYPOTHESIS: метку `.local/state/mop/cred` пишет глагол `write`, который
+# доступен мастеру любого проекта; note_turn берёт имя кредита из записи
+# хода (turn["cred"]), и чужое имя в метке пометило бы чужой кредит
+# needs_login или quota_wait.
+# RESULT: через tick так не выходит и до правки -- tick с #284 зовёт
+# note_turn только для записи, чья метка совпала с кредитом, держателей
+# которого он перебирает. Дыра -- в самой note_turn (любой другой вызов
+# верил бы записи) и в молчании: несовпавшая запись пропадала без следа, а
+# `write` кладёт метку во ВСЕ тела узла, так что метку соседа папет получает
+# и законной раздачей.
+# SOLUTION: note_turn(name, запись) -- имя кредита даёт аренда, запись с
+# другой меткой игнорируется и называется строкой журнала.
+# STATUS: FIXED — see #308
+def check_foreign_mark_308(c):
+    import tempfile
+    from mop.server import credreg as srv
+
+    def turn(cred):
+        return {"event": "StopFailure", "at": NOW, "error": "billing_error",
+                "detail": "no credits", "cred": cred}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        saved = (srv.ROOT, srv.holders, srv.turns_of, srv.probe, srv.materialize,
+                 srv.distribute)
+        srv.ROOT = tmp
+        try:
+            for name in ("anton", "other"):
+                srv.save(credreg.record(name, "glm", "key", now=NOW - 100))
+            srv.holders = lambda api=None: {"anton": {"pu-a-1": "n1"}}
+            srv.probe = lambda name, now=None: None
+            srv.materialize = lambda name, rec=None: []
+            srv.distribute = lambda name, api=None, now=None: {}
+
+            def status(name):
+                return (srv.load(name).get("status") or {}).get("kind")
+
+            # Через tick: держатель "anton", метка хода -- "other".
+            srv.turns_of = lambda holding, api=None: {"pu-a-1": turn("other")}
+            lines = srv.tick(now=NOW + 10)
+            c.expect("#308 tick: a foreign mark leaves the holder's credential alone",
+                     status("anton"), None)
+            c.expect("#308 tick: a foreign mark does not reach the named credential",
+                     status("other"), None)
+            c.check("#308 tick: the ignored turn is named in the journal",
+                    any("pu-a-1" in l and "other" in l and "ignored" in l for l in lines),
+                    lines)
+            # Запись хода живёт до следующего хода: называть её каждый круг --
+            # шум в журнале, одного раза хватит.
+            again = srv.tick(now=NOW + 70)
+            c.check("#308 tick: the same ignored turn is named once, not every round",
+                    not any("ignored" in l for l in again), again)
+            # Прямо note_turn: имя кредита -- аргумент, не поле записи.
+            try:
+                got = srv.note_turn("anton", turn("other"), NOW + 10)
+                c.check("#308 note_turn: a foreign mark is ignored, not attributed",
+                        status("anton") is None and status("other") is None
+                        and "ignored" in (got or ""), (got, status("anton"), status("other")))
+                got = srv.note_turn("anton", turn("anton"), NOW + 10)
+                c.expect("#308 note_turn: the holder's own mark lands as before",
+                         status("anton"), "quota_wait")
+            except (TypeError, AttributeError) as e:
+                c.fail(f"#308 note_turn must take the credential's name from the lease: {e}")
+            # Через tick, своя метка -- как раньше.
+            srv.save(credreg.record("anton", "glm", "key", now=NOW - 100))
+            srv.turns_of = lambda holding, api=None: {"pu-a-1": turn("anton")}
+            srv.tick(now=NOW + 20)
+            c.expect("#308 tick: the holder's own mark lands as before",
+                     status("anton"), "quota_wait")
+        finally:
+            (srv.ROOT, srv.holders, srv.turns_of, srv.probe, srv.materialize,
+             srv.distribute) = saved
+
+
 def main():
     c = Checks()
     check_login_start_registry_295(c)
+    check_foreign_mark_308(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
     rec = credreg.record("anton", "claude", "login", owner="anton@example.dev", now=NOW)

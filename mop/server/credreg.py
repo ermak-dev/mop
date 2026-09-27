@@ -396,12 +396,19 @@ def add_login_file(name, text, owner="", now=None):
 
 
 # ─── приписывание провалов и цикл сервиса (#284) ──────────────────────────
-def note_turn(record, now=None, api=None):
-    """Запись хода папета с меткой кредита -> что сделано строкой либо None.
-    Логин протух, а дом с тех пор обновился -- раздать свежее, не хоронить."""
-    name = (record or {}).get("cred")
-    if not name:
+def note_turn(name, record, now=None, api=None):
+    """Запись хода держателя кредита name -> что сделано строкой либо None.
+    Логин протух, а дом с тех пор обновился -- раздать свежее, не хоронить.
+
+    Имя кредита даёт аренда (держатели name, мета джобов), а не запись: метку
+    `.local/state/mop/cred` кладёт глагол `write`, который доступен мастеру
+    любого проекта и пишет во все тела узла (#308). Запись с другой меткой
+    -- подсказка, которая разошлась с правдой: игнорируется и называется."""
+    mark = (record or {}).get("cred")
+    if not mark:
         return None
+    if mark != name:
+        return f"{name}: turn names {mark}, ignored"
     rec = load(name)
     if rec is None:
         return None
@@ -440,6 +447,11 @@ def turns_of(holding, api=None):
     return out
 
 
+# Уже названные записи ходов с чужой меткой (#308): (кредит, папет, at).
+# В памяти сервиса: в реестр кредита чужое не пишется.
+_ignored = set()
+
+
 def tick(api=None, now=None, log=None):
     """Один круг цикла сервиса -> [строки журнала]: снять протухшие логины,
     продлить токены, пробы, раздать изменившееся держателям, приписать
@@ -466,10 +478,16 @@ def tick(api=None, now=None, log=None):
                     lines.append(f"cred {name}: distributed: " + ", ".join(
                         f"{n} {r}" for n, r in sorted(got.items())))
                 for puppet, turn in turns_of(held[name], api).items():
-                    if turn.get("cred") == name:
-                        got = note_turn(turn, now, api)
-                        if got:
-                            lines.append(f"cred {got} (from {puppet})")
+                    got = note_turn(name, turn, now, api)
+                    if got and turn.get("cred") != name:
+                        # Запись хода живёт до следующего хода: чужую метку
+                        # называем раз, а не каждый круг (#308).
+                        seen = (name, puppet, turn.get("at"))
+                        if seen in _ignored:
+                            continue
+                        _ignored.add(seen)
+                    if got:
+                        lines.append(f"cred {got} (from {puppet})")
         except Exception as e:
             lines.append(f"cred {name}: {credlogin.mask(str(e))[:160]}")
     return lines
