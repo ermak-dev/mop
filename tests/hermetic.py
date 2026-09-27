@@ -51,6 +51,8 @@ import subprocess
 import sys
 import tempfile
 
+import _lib  # noqa: F401,E402 -- первым: временный корень процесса раньше HOME (#338)
+
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 TESTS = os.path.join(ROOT, "tests")
 MACHINE = ("MOP_", "NOMAD_", "PU_")
@@ -156,7 +158,10 @@ def hostile_repo(values):
     import shutil
     root = tempfile.mkdtemp(prefix="mop-test-repo-")
     shutil.copytree(ROOT, root, dirs_exist_ok=True, symlinks=True,
-                    ignore=shutil.ignore_patterns(".git", "__pycache__", ".env"))
+                    ignore=shutil.ignore_patterns(".git", "__pycache__", ".env",
+                                                  # 370 МБ пакетов страницы (#338):
+                                                  # проверкам ни к чему
+                                                  "node_modules"))
     with open(os.path.join(root, ".env"), "w") as f:
         f.write("".join(f"{k}={v}\n" for k, v in values.items()))
     return root
