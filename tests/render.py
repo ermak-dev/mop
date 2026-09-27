@@ -6,7 +6,8 @@ HYPOTHESIS (#243): слоты печатались одним числом св�
 сколько папетов берёт пустой узел, не видел никто.
 SOLUTION: render.ratio(свободно, всего) -> «N/M» -- одна запись дроби на
 фронтенды CLI; неизвестная часть -- «-», обе неизвестны -- «-». Страница
-питон не импортирует: её ratio в web/index.html держится той же записи.
+питон не импортирует: её ratio (web/src/components/format.ts) держится
+той же записи, случаи сверяет format.test.ts.
 STATUS: FIXED — see #243
 """
 import os
@@ -35,11 +36,17 @@ def main():
     if c.check("render.ratio exists", fn is not None):
         for args, want in CASES:
             c.expect(f"ratio{args}", fn(*args), want)
-    # Страница держится той же записи: своя ratio с прочерками.
-    page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                             "web", "index.html")).read()
-    c.check("web/index.html: one слоты column through its own ratio, N/M",
-            "const ratio" in page and "n.slots_total" in page and "#слотов" not in page)
+    # Страница держится той же записи: своя ratio с прочерками (#243). С #301
+    # страница -- React: ratio в components/format.ts, случаи те же, что
+    # CASES, сверяет Vitest (format.test.ts); здесь -- что колонка слотов
+    # идёт через неё одна.
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                       "web", "src", "components")
+    fmt = open(os.path.join(src, "format.ts"), encoding="utf-8").read()
+    panel = open(os.path.join(src, "NodesPanel.tsx"), encoding="utf-8").read()
+    c.check("format.ts: the page's own ratio, N/M", "export function ratio" in fmt)
+    c.check("NodesPanel: one слоты column through ratio",
+            "ratio(n.slots, n.slots_total)" in panel and "#слотов" not in panel)
     return c.report("render")
 
 if __name__ == "__main__":

@@ -1,6 +1,5 @@
-// Скелет приложения (#297): шапка, счётчики корзин, ошибки сборщика.
-// Секции пула, узлов и журнала (#298), расхода (#299) и кредитов (#300)
-// встают в Stack ниже по мере переноса.
+// Приложение дашборда (#296): шапка со счётчиками корзин, ошибки сборщика и
+// секции -- пул и узлы (#298), расход (#299), кредиты (#300), журнал (#298).
 import { Badge, Container, Group, Stack, Text, Title, Alert } from "@mantine/core";
 import { usePool } from "./usePool";
 import { PoolTable } from "./components/PoolTable";
@@ -10,13 +9,12 @@ import { KINDS, type Counts, type Kind } from "./types";
 import { UsageChart } from "./components/UsageChart";
 import { UsageByUser } from "./components/UsageByUser";
 import { Credentials } from "./components/Credentials";
+import { KIND_COLOR } from "./components/format";
 
 export const KIND_RU: Record<Kind, string> = {
   free: "свободны", busy: "заняты", sick: "больны", silent: "агент молчит", down: "не подняты",
 };
-export const KIND_COLOR: Record<Kind, string> = {
-  free: "green", busy: "blue", sick: "red", silent: "yellow", down: "gray",
-};
+// Цвета корзин -- одна таблица на страницу (#301): components/format.ts.
 
 export function plural(n: number, one: string, few: string, many: string): string {
   const m10 = n % 10, m100 = n % 100;
