@@ -3,13 +3,12 @@
 // корзине, которую посчитал сервер.
 import { Badge, Code, Group, Stack, Table, Text, Title, Tooltip } from "@mantine/core";
 import type { Counts, Project, Puppet } from "../types";
-import { KINDS } from "../types";
-import { gb, KIND_COLOR, KIND_ONE } from "./format";
+import { gb, KIND_COLOR, KIND_WORD, presentKinds } from "./format";
 
 export const HEAD = ["папет", "узел", "аллокация", "состояние", "пользователь", "модель", "место", "репозиторий"];
 
 export function projectNote(counts: Counts): string {
-  return KINDS.filter((k) => counts[k]).map((k) => `${counts[k]} ${KIND_ONE[k]}`).join(", ");
+  return presentKinds(counts).map((k) => `${counts[k]} ${KIND_WORD[k].one}`).join(", ");
 }
 
 function Row({ p }: { p: Puppet }) {

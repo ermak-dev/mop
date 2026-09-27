@@ -1,6 +1,6 @@
 // Узлы (#298): колонки, счётчик в заголовке, корзина по состоянию.
-import { render, screen } from "@testing-library/react";
-import { MantineProvider } from "@mantine/core";
+import { screen } from "@testing-library/react";
+import { renderUi } from "../test-utils";
 import { NodesPanel } from "./NodesPanel";
 import type { Node } from "../types";
 
@@ -10,7 +10,7 @@ const NODES: Node[] = [
 ];
 
 test("the nodes table with the old page's columns", () => {
-  render(<MantineProvider><NodesPanel nodes={NODES} /></MantineProvider>);
+  renderUi(<NodesPanel nodes={NODES} />);
   expect(screen.getByRole("heading", { name: /Узлы/ })).toHaveTextContent("2 в кластере");
   for (const h of ["узел", "драйвер", "проекты", "состояние", "свободно", "всего", "слоты"]) {
     expect(screen.getByRole("columnheader", { name: h })).toBeInTheDocument();
@@ -25,7 +25,7 @@ test("the nodes table with the old page's columns", () => {
 });
 
 test("no nodes: empty note and no counter", () => {
-  render(<MantineProvider><NodesPanel nodes={[]} /></MantineProvider>);
+  renderUi(<NodesPanel nodes={[]} />);
   expect(screen.getByText("пусто")).toBeInTheDocument();
   expect(screen.queryByText(/в кластере/)).toBeNull();
 });

@@ -1,7 +1,7 @@
 // Расход по пользователям (#299): те же колонки, что на прежней странице,
 // порядок строк -- порядок сервера, числа -- человеческие.
-import { render, screen, within } from "@testing-library/react";
-import { MantineProvider } from "@mantine/core";
+import { screen, within } from "@testing-library/react";
+import { renderUi } from "../test-utils";
 import { UsageByUser, USER_COLUMNS } from "./UsageByUser";
 import type { UsageUser } from "../types";
 
@@ -11,13 +11,13 @@ const USERS: UsageUser[] = [
 ];
 
 test("the table has the old page's columns in order", () => {
-  render(<MantineProvider><UsageByUser users={USERS} /></MantineProvider>);
+  renderUi(<UsageByUser users={USERS} />);
   const heads = screen.getAllByRole("columnheader").map((h) => h.textContent);
   expect(heads).toEqual([...USER_COLUMNS]);
 });
 
 test("rows keep the server's order and human numbers", () => {
-  render(<MantineProvider><UsageByUser users={USERS} /></MantineProvider>);
+  renderUi(<UsageByUser users={USERS} />);
   const rows = screen.getAllByRole("row").slice(1);
   expect(rows).toHaveLength(2);
   expect(within(rows[0]).getAllByRole("cell").map((c) => c.textContent))
@@ -26,7 +26,7 @@ test("rows keep the server's order and human numbers", () => {
 });
 
 test("no rows: a hint instead of a table", () => {
-  render(<MantineProvider><UsageByUser users={[]} /></MantineProvider>);
+  renderUi(<UsageByUser users={[]} />);
   expect(screen.getByText("расход по пользователям появится после первого разбора транскриптов")).toBeInTheDocument();
   expect(screen.queryByRole("table")).toBeNull();
 });

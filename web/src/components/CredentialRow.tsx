@@ -3,7 +3,8 @@
 import { Badge, Table, Text } from "@mantine/core";
 import type { Cred } from "../types";
 import { AuthorizeFlow } from "./AuthorizeFlow";
-import { canAuthorize, percentText, statusColor } from "./creds-api";
+import { canAuthorize } from "./creds-api";
+import { listOrDash, percentText, statusColor } from "./format";
 
 export function CredentialRow({ cred }: { cred: Cred }) {
   return (
@@ -15,7 +16,7 @@ export function CredentialRow({ cred }: { cred: Cred }) {
       <Table.Td><Badge variant="light" color={statusColor(cred.status)}>{cred.status}</Badge></Table.Td>
       <Table.Td ta="right">{percentText(cred.percent)}</Table.Td>
       <Table.Td>{cred.age}</Table.Td>
-      <Table.Td>{cred.holders && cred.holders.length ? cred.holders.join(", ") : "-"}</Table.Td>
+      <Table.Td>{listOrDash(cred.holders)}</Table.Td>
       <Table.Td>{canAuthorize(cred) ? <AuthorizeFlow name={cred.name} /> : null}</Table.Td>
     </Table.Tr>
   );

@@ -7,10 +7,11 @@
 // вкладку закрыли. Начатый вход живёт в состоянии компонента, а не в DOM,
 // и переживает перерисовку снимка.
 import { useState } from "react";
-import { ActionIcon, Group, Loader, Text, TextInput, Tooltip } from "@mantine/core";
+import { Group, Loader, Text, TextInput } from "@mantine/core";
 import { IconExternalLink, IconLogin2, IconSend } from "@tabler/icons-react";
 import { notifications } from "@mantine/notifications";
-import { loginCode, loginStart } from "./creds-api";
+import { loginCode, loginStart, type Reply } from "./creds-api";
+import { IconButton } from "./IconButton";
 
 interface Started { url: string }
 
@@ -18,6 +19,8 @@ export function AuthorizeFlow({ name }: { name: string }) {
   const [busy, setBusy] = useState(false);
   const [started, setStarted] = useState<Started | null>(null);
   const [code, setCode] = useState("");
+  // Отказ сервера -- одним уведомлением у старта и у кода.
+  const refused = (r: Reply) => notifications.show({ color: "red", title: name, message: r.error || "отказ" });
 
   async function start() {
     const tab = window.open("", "_blank");        // до запроса, см. выше
@@ -29,7 +32,7 @@ export function AuthorizeFlow({ name }: { name: string }) {
       setStarted({ url: r.url });
     } else {
       tab?.close();
-      notifications.show({ color: "red", title: name, message: r.error || "отказ" });
+      refused(r);
     }
   }
 
@@ -42,7 +45,7 @@ export function AuthorizeFlow({ name }: { name: string }) {
       setStarted(null);
       setCode("");
     } else {
-      notifications.show({ color: "red", title: name, message: r.error || "отказ" });
+      refused(r);
     }
   }
 
@@ -50,29 +53,22 @@ export function AuthorizeFlow({ name }: { name: string }) {
     // Кнопки -- иконки с подсказкой (#304): текстовая кнопка рядом с
     // бейджем статуса читалась как ещё один бейдж.
     return (
-      <Tooltip label="авторизоваться" withArrow>
-        <ActionIcon variant="subtle" size="md" onClick={start} loading={busy}
-          aria-label="авторизоваться" data-testid={`auth-${name}`}>
-          <IconLogin2 size={18} stroke={1.8} />
-        </ActionIcon>
-      </Tooltip>
+      <IconButton label="авторизоваться" variant="subtle" size="md" onClick={start} loading={busy}
+        data-testid={`auth-${name}`}>
+        <IconLogin2 size={18} stroke={1.8} />
+      </IconButton>
     );
   }
   return (
     <Group gap="xs" wrap="nowrap">
-      <Tooltip label="открыть страницу входа" withArrow>
-        <ActionIcon component="a" href={started.url} target="_blank" rel="noopener" variant="subtle" size="md"
-          aria-label="открыть страницу входа">
-          <IconExternalLink size={18} stroke={1.8} />
-        </ActionIcon>
-      </Tooltip>
+      <IconButton label="открыть страницу входа" href={started.url} variant="subtle" size="md">
+        <IconExternalLink size={18} stroke={1.8} />
+      </IconButton>
       <TextInput size="xs" placeholder="код со страницы" value={code} onChange={(e) => setCode(e.currentTarget.value)}
         aria-label={`код для ${name}`} onKeyDown={(e) => { if (e.key === "Enter" && code.trim() && !busy) submit(); }} />
-      <Tooltip label="отправить код" withArrow>
-        <ActionIcon variant="filled" size="md" onClick={submit} disabled={!code.trim() || busy} aria-label="отправить код">
-          <IconSend size={16} stroke={1.8} />
-        </ActionIcon>
-      </Tooltip>
+      <IconButton label="отправить код" variant="filled" size="md" onClick={submit} disabled={!code.trim() || busy}>
+        <IconSend size={16} stroke={1.8} />
+      </IconButton>
       {busy ? <Loader size="xs" /> : <Text size="xs" c="dimmed">войдите на открывшейся странице, вставьте код</Text>}
     </Group>
   );

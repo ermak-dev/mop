@@ -3,6 +3,7 @@
 // живой -- тот, кто отозвался. Адрес -- тот, по которому мастеру пишут send.
 import { Code, Table, Text, Title } from "@mantine/core";
 import type { Master } from "../types";
+import { listOrDash } from "./format";
 
 export const EMPTY = "мастеров на шине нет — мастер отвечает, пока жив его MCP-сервер mop";
 
@@ -30,7 +31,7 @@ export function Masters({ masters }: { masters: Master[] }) {
                 <Table.Td>{m.session}</Table.Td>
                 <Table.Td><Text span size="sm" c="dimmed">{m.cwd}</Text></Table.Td>
                 <Table.Td><Code>{m.master}</Code></Table.Td>
-                <Table.Td>{m.puppets.length ? m.puppets.join(", ") : "-"}</Table.Td>
+                <Table.Td>{listOrDash(m.puppets)}</Table.Td>
               </Table.Tr>
             ))}
           </Table.Tbody>
