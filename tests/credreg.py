@@ -358,6 +358,34 @@ def check_distribute_bodies_312(c):
                 (srv.load("anton").get("pushed") or {}).get("nodes") == got, srv.load("anton"))
 
 
+# ── #312: host-узел -- один кредит профиля ─────────────────────────────
+# HYPOTHESIS: у драйвера host тела делят один $HOME: две аренды одного
+# профиля на одном host-узле пишут один и тот же файл, и держатель одной
+# работает на чужом аккаунте -- адресная запись этого не лечит.
+# SOLUTION: одно чистое правило host_conflict: на host-узле папету нельзя
+# аренду кредита профиля p, если другой папет того же узла держит ДРУГОЙ
+# кредит профиля p. Тот же кредит, другой профиль, свой же папет -- можно.
+# STATUS: FIXED — see #312
+def check_host_conflict_312(c):
+    rule = getattr(credreg, "host_conflict", None)
+    if rule is None:
+        c.fail("#312 no credreg.host_conflict: two credentials share one $HOME")
+        return
+    profiles = {"anton": "claude", "ermak": "claude", "z1": "glm"}
+    on = {"pu-a-1": "anton", "pu-b-1": None, "pu-z-1": "z1"}
+    for what, args, refused in (
+            ("another credential of the profile on the node", ("pu-x-1", "ermak", on), True),
+            ("the same credential", ("pu-x-1", "anton", on), False),
+            ("a credential of another profile", ("pu-x-1", "z1", dict(on, **{"pu-z-1": None})), False),
+            ("the only lease there is the puppet's own", ("pu-a-1", "ermak", on), False),
+            ("no leases on the node", ("pu-x-1", "ermak", {"pu-b-1": None}), False)):
+        got = rule(*args, profiles, "hyper")
+        c.check(f"#312 host_conflict: {what}", bool(got) == refused, got)
+    got = rule("pu-x-1", "ermak", on, profiles, "hyper")
+    c.check("#312 host_conflict names the node, the credential, its holder and why",
+            all(w in (got or "") for w in ("hyper", "anton", "pu-a-1", "$HOME")), got)
+
+
 def main():
     c = Checks()
     check_login_start_registry_295(c)
@@ -366,6 +394,7 @@ def main():
     check_foreign_mark_308(c)
     check_push_312(c)
     check_distribute_bodies_312(c)
+    check_host_conflict_312(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
     rec = credreg.record("anton", "claude", "login", owner="anton@example.dev", now=NOW)
