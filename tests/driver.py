@@ -19,7 +19,7 @@ import types
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 from _lib import (Checks, canned, offline, patched, patched_env,  # noqa: E402
-                  restored, udp_socket)
+                  restored, run_command, udp_socket)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import config  # noqa: E402
@@ -244,8 +244,104 @@ def check_contract_151(c):
                      f"no server key on this node ({missing}) — run mop server deploy")
 
 
+
+# ── #346: сторож контейнерных узлов не сносит работу ─────────────────────────
+# HYPOTHESIS: `mop driver sweep` сносил каждое тело без живой tmux-сессии
+# вместе с клоном -- и папета на подъёме, и папета с падающим bootstrap'ом,
+# у которых сессии нет часами, а работа в клоне есть. Тело, до которого не
+# достучаться (ssh 255, таймаут), тоже шло под снос: живым считался только
+# код 0, хотя докстринг обещал «молчащее тело оставляем».
+# SOLUTION: план из фактов тела. Снос -- только «нет сессии» (tmux ответил 1)
+# и клон без работы по domain.holds_work, либо клона нет вовсе; клон с
+# работой и непрочитанный клон -- оставить с причиной; недостижимое тело --
+# оставить. Предохранитель «ноль живых -- отказ» прежний.
+# STATUS: FIXED — see #346
+def _clone(dirty=0, ahead=0, branch="master", default="master"):
+    from mop.common.domain import CloneFacts
+    return CloneFacts(branch=branch, default_branch=default, dirty=dirty, ahead=ahead).to_dict()
+
+
+SWEEP_PLAN = [
+    ("no session, clean clone -> destroyed", ("pu-x-1", 1, _clone(), None),
+     ("destroy", "no session, clean clone")),
+    ("no session, uncommitted -> kept", ("pu-x-2", 1, _clone(dirty=3), None),
+     ("keep", "no session, clone holds work (uncommitted: 3)")),
+    ("no session, unpushed -> kept", ("pu-x-3", 1, _clone(ahead=2), None),
+     ("keep", "no session, clone holds work (unpushed: 2)")),
+    ("no session, both -> kept", ("pu-x-4", 1, _clone(dirty=1, ahead=1), None),
+     ("keep", "no session, clone holds work (uncommitted: 1, unpushed: 1)")),
+    ("no session, clean but off its home -> kept", ("pu-x-5", 1, _clone(branch="fix/7-x"), None),
+     ("keep", "no session, clone holds work (off home master)")),
+    ("no session, clone unreadable -> kept", ("pu-x-6", 1, None, 0),
+     ("keep", "no session, clone unreadable")),
+    ("no session, clone probe unanswered -> kept", ("pu-x-7", 1, None, None),
+     ("keep", "no session, clone unreadable")),
+    ("no session, no clone at all -> destroyed", ("pu-x-8", 1, None, 1),
+     ("destroy", "no session, no clone")),
+    ("body unreachable (ssh) -> kept", ("pu-x-9", 255, None, None),
+     ("keep", "body unreachable (tmux check: exit 255)")),
+    ("body silent (timeout) -> kept", ("pu-x-10", None, None, None),
+     ("keep", "body unreachable (tmux check: timeout)")),
+]
+
+
+def check_sweep_keeps_work_346(c):
+    from mop.cli.driver import sweep
+    plan = getattr(sweep, "plan", None)
+    if c.check("#346 sweep has a plan over body facts", callable(plan)):
+        for what, facts, want in SWEEP_PLAN:
+            c.expect(f"#346 sweep plan: {what}", plan(*facts), want)
+    # Командлет целиком: драйвер, tmux и клоны подменены.
+    from mop.node import agent
+    codes = {"pu-a-1": 0, "pu-a-2": 1, "pu-a-3": 1, "pu-a-4": 255, "pu-a-5": 1}
+    clones = {"pu-a-2": _clone(), "pu-a-3": _clone(dirty=2, ahead=1), "pu-a-5": None}
+    destroyed = []
+
+    def fake_driver(names):
+        async def bodies():
+            return list(names)
+
+        async def destroy(name, branch=None):
+            destroyed.append(name)
+            return {"destroyed": 101, "target": f"body 101 ({name})"}
+        return types.SimpleNamespace(IS_CONTAINER=True, bodies=bodies, destroy=destroy,
+                                     argv=lambda n: ["body", n])
+
+    async def sh(script, timeout=20, prefix=()):
+        name = prefix[-1]
+        if "has-session" in script:
+            return "", codes[name]
+        return "", 1                                  # test -d: клона нет
+
+    async def clone_facts(name):
+        return clones.get(name)
+
+    def run(names, argv):
+        destroyed.clear()
+        d = fake_driver(names)
+        with patched(driver, current=lambda: d, current_name=lambda: "pve",
+                     is_container=lambda n: True, sh=sh), \
+                patched(agent, clone_facts=clone_facts):
+            return run_command(sweep.main, argv)
+    out, err, code = run(list(codes), [])
+    c.expect("#346 sweep destroys only the clean and the clone-less", sorted(destroyed),
+             ["pu-a-2", "pu-a-5"])
+    c.check("#346 sweep names what it keeps and why",
+            "kept pu-a-3: no session, clone holds work (uncommitted: 2, unpushed: 1)" in out
+            and "kept pu-a-4: body unreachable (tmux check: exit 255)" in out, out)
+    c.expect("#346 sweep exit", code, 0)
+    out, err, code = run(list(codes), ["--dry"])
+    c.check("#346 --dry destroys nothing and still names the kept",
+            destroyed == [] and "would destroy pu-a-2" in out and "kept pu-a-3" in out, out)
+    # Предохранитель: ни одной живой сессии -- отказ, ничего не снесено.
+    codes.update({"pu-a-1": 1})
+    out, err, code = run(list(codes), [])
+    c.check("#346 zero live sessions: refused, nothing destroyed",
+            destroyed == [] and code == 1 and "refusing to sweep" in err, (out, err, code))
+
 def main():
     c = Checks()
+    check_sweep_keeps_work_346(c)
 
     for what, mod, ok in CONTRACT:
         try:
