@@ -17,6 +17,11 @@
               secrets.env, и только названное явно.
     AUTH_VAR  куда врапер подставит ключ (дефолт ANTHROPIC_AUTH_TOKEN)
     ENV       статические переменные сессии папета, dict[str, str]
+    probe     необязательно (#287): probe(key) -> domain.CredStatus --
+              спросить провайдера, жив ли ключ и что с квотой. Только
+              stdlib и с таймаутом: зовёт сервер по расписанию.
+    usage     необязательно: usage(key, start, end) -> dict -- расход за
+              период, как его отдаёт провайдер; форма за плагином.
 
 Контракт проверяется громко и с именем файла: KEY уезжает в sed-шаблон
 врапера на узле, и кривое имя там молча совпадёт нигде — папет умрёт с
@@ -52,8 +57,14 @@ def contract(name, mod):
         raise RuntimeError(f"{where}: KEY — .env variable name or None")
     if not isinstance(auth_var, str) or not _VAR.match(auth_var):
         raise RuntimeError(f"{where}: AUTH_VAR — environment variable name")
+    hooks = {}
+    for hook in ("probe", "usage"):
+        fn = getattr(mod, hook, None)
+        if fn is not None and not callable(fn):
+            raise RuntimeError(f"{where}: {hook} must be a function or absent")
+        hooks[hook] = fn
     return {"key": key, "auth_var": auth_var, "env": env,
-            "doc": doc[0].strip() if doc else ""}
+            "doc": doc[0].strip() if doc else "", **hooks}
 
 
 def profiles():
