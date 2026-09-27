@@ -19,7 +19,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - `/deploy` — the product's installation: Nomad, the bus, the agent, the disk watchdog
  - `/sandbox.yaml.example` — the puppet environment example: an installation copies it to `sandbox.yaml`, which git ignores like `.env` and `inventory.yaml`
  - `/skills/master` — the master session's skill, symlinked from outside
- - `/web` — the dashboard page, served by `mop server web`; no build step, no dependencies
+ - `/web` — the dashboard, a React app (Vite + TypeScript + Mantine) in `web/src`, built into the committed `web/dist` by `mop dev web build`; served by `mop server web`, node never reaches the servers
  - `/docs` — one file per subsystem
  - `/tests` — checks of pure functions, not a framework
  - Imports go downward only, common ← client / node / server; `tests/layers.py` derives the layer from the directory and refuses a module outside one, so a new module is placed in a layer deliberately

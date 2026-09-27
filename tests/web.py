@@ -244,7 +244,7 @@ def check_creds_285(c):
             not any(k in r for r in rows for k in ("key", "token", "secret", "detail_raw")),
             rows)
     c.expect("#285 columns", sorted(rows[0]),
-             sorted(["name", "profile", "kind", "owner", "status", "resets_at", "percent", "age"]))
+             sorted(["name", "profile", "kind", "owner", "status", "resets_at", "percent", "age", "holders"]))
     snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=[], journal=[],
                         errors=[], at=1.0, creds=rows)
     c.expect("#285 snapshot carries creds", snap.get("creds"), rows)
@@ -269,23 +269,9 @@ def check_creds_285(c):
 # странице решить, где ставить кнопку.
 # SOLUTION: маршрут и разбор добавления убраны, разборы входа остались,
 # cred_rows несёт profile. STATUS: FIXED — see #294
-# Вкладка claude открывается сама (#294, просьба оператора 27.09): окно
-# заводится в момент клика, пока жест пользователя жив, иначе блокировщик
-# всплывающих окон отбросит окно, открытое через двадцать секунд после
-# нажатия, когда сервер вернёт ссылку; адрес подставляется в него потом.
-# HYPOTHESIS: обработчик клика ждёт ответа сервера и только показывает
-# ссылку. SOLUTION: window.open("", "_blank") до post(login/start), затем
-# w.location = url; ссылка в строке остаётся запасной.
-# STATUS: FIXED — see #294
-def check_open_tab_294(c):
-    page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                             "web", "index.html"), encoding="utf-8").read()
-    handler = page[page.find("if (start) {"):page.find("} else if (send)")]
-    opened = handler.find("window.open(")
-    posted = handler.find('post("/api/creds/login/start"')
-    c.check("the start click opens a tab before asking the server", 0 <= opened < posted,
-            (opened, posted))
-    c.check("the tab is pointed at the url once it arrives", ".location" in handler, handler[:200])
+# Вкладка claude открывается сама (#294): порядок «окно до запроса» с #300
+# держит Vitest (web/src/components/AuthorizeFlow.test.tsx) -- страница
+# стала React-приложением, и старый web/index.html с #301 удалён.
 
 
 def check_row_button_294(c):
@@ -302,18 +288,63 @@ def check_row_button_294(c):
              web.parse_login_start({"name": "anton"}), ({"name": "anton", "mode": "login"}, None))
     c.check("#294 parse_login_code still refuses an empty code",
             web.parse_login_code({"name": "a", "code": ""})[0] is None)
-    page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                             "web", "index.html"), encoding="utf-8").read()
-    c.check("#294 the page has no add form", 'id="cred-add"' not in page and "/api/creds/add" not in page)
-    c.check("#294 the page has no login form", 'id="cred-login"' not in page)
-    c.check("#294 the page has the row button", "Авторизоваться" in page)
+
+
+# ── #301: держатели аренды в строках страницы ─────────────────────────
+# HYPOTHESIS: cred_rows не несёт holders, и колонка «держатели» на странице
+# пуста, хотя `mop cred list` их показывает: сервис читает реестр, но не
+# аренду из меты джобов.
+# SOLUTION: cred_rows(records, now, holders) -- {кредит: {папет: узел}}
+# из credreg.holders(), имена папетов по алфавиту; без карты -- пустой
+# список, строка не падает. STATUS: FIXED — see #301
+def check_holders_301(c):
+    held = {"anton": {"pu-mop-6": "gpu", "pu-mop-1": None}, "team": {"pu-rudesktop-8": "a2"}}
+    rows = {r["name"]: r for r in web.cred_rows(CREDS, now=1_000_000, holders=held)}
+    c.expect("#301 holders sorted by puppet", rows["anton"].get("holders"),
+             ["pu-mop-1", "pu-mop-6"])
+    c.expect("#301 a glm key has its holder", rows["team"].get("holders"), ["pu-rudesktop-8"])
+    c.expect("#301 no lease -- an empty list", rows["old"].get("holders"), [])
+    bare = web.cred_rows(CREDS, now=1_000_000)
+    c.check("#301 without a holders map every row has an empty list",
+            all(r.get("holders") == [] for r in bare), bare)
+
+
+# ── #297: страница -- собранное React-приложение из web/dist ─────────────
+# HYPOTHESIS: сервис отдаёт web/index.html и не умеет статику: у собранного
+# приложения скрипт и стили лежат в web/dist/assets/ под именами с хешем, и
+# без маршрута /assets/<имя> страница пуста. SOLUTION: PAGE -- web/dist/
+# index.html, чистые asset_path (только /assets/<имя> без обхода каталога) и
+# content_type (по расширению), cache_control (index -- no-cache, ассеты с
+# хешем -- на год). STATUS: FIXED — see #297
+def check_dist_297(c):
+    root = "/srv/web/dist"
+    c.expect("asset_path: a js file under assets", web.asset_path("/assets/index-Ab12.js", root),
+             "/srv/web/dist/assets/index-Ab12.js")
+    for bad in ("/assets/../index.html", "/assets/", "/assets/a/b.js", "/index.html",
+                "/assets/x.js/..", "/assets/.hidden", "/assets/a%2f..%2fb.js"):
+        c.check(f"asset_path refuses {bad}", web.asset_path(bad, root) is None, web.asset_path(bad, root))
+    c.expect("content_type js", web.content_type("index-Ab12.js"), "text/javascript; charset=utf-8")
+    c.expect("content_type css", web.content_type("index-Ab12.css"), "text/css; charset=utf-8")
+    c.expect("content_type svg", web.content_type("logo.svg"), "image/svg+xml")
+    c.expect("content_type woff2", web.content_type("f.woff2"), "font/woff2")
+    c.expect("content_type png", web.content_type("a.png"), "image/png")
+    c.expect("content_type map", web.content_type("index.js.map"), "application/json")
+    c.expect("content_type unknown", web.content_type("a.exe"), "application/octet-stream")
+    c.expect("cache_control index", web.cache_control("/"), "no-cache")
+    c.expect("cache_control assets", web.cache_control("/assets/index-Ab12.js"),
+             "public, max-age=31536000, immutable")
+    from mop.cli.server import web as webcli
+    c.check("the service serves web/dist/index.html, not the old page",
+            webcli.PAGE.endswith(os.path.join("web", "dist", "index.html")), webcli.PAGE)
+    c.check("the committed dist has an index and assets",
+            os.path.isfile(webcli.PAGE) and os.path.isdir(os.path.join(os.path.dirname(webcli.PAGE), "assets")))
 
 
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
-               check_creds_285, check_row_button_294, check_open_tab_294):
+               check_creds_285, check_row_button_294, check_holders_301, check_dist_297):
         fn(c)
     return c.report("web")
 
