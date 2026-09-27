@@ -28,3 +28,11 @@ test("the header shows the counters and the collector's errors", () => {
   expect(screen.queryByText(/больны/)).toBeNull();
   expect(screen.getByText("nomad: no connection")).toBeInTheDocument();
 });
+
+// Подвала нет (просьба оператора 27.09, #301): строка «поток событий · без
+// входа… · JSON» убрана со страницы.
+test("no footer line", () => {
+  render(<MantineProvider><App /></MantineProvider>);
+  expect(screen.queryByText(/без входа, LAN доверенная/)).toBeNull();
+  expect(screen.queryByText("JSON")).toBeNull();
+});
