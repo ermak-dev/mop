@@ -33,8 +33,9 @@ import time
 
 import base64
 
+from ..common import credreg as common_credreg
 from . import bootstrap, credreg, natsconf, nodes, nomad, spec
-from ..common import (bus, busnames, config, creds, domain, landing, lease, paths, project_secrets,
+from ..common import (bus, busnames, config, creds, domain, landing, lease, llm, paths, project_secrets,
                       projects, puppets, service, state)
 from ..common.domain import CloneFacts, JobMeta, PoolNode, Project, Verb
 
@@ -371,22 +372,52 @@ def _add(project, req):
     if why:
         return {"error": why}
     name = next_name(target.name)
+    # Аренда кредита (#284): названный -- по реестру, без него -- первый
+    # активный кредит профиля, либо ничего (логин оператора, как прежде).
+    cred, why = _cred_for(req.get("profile"), req.get("cred"))
+    if why:
+        return {"error": why}
     # workspace -- до регистрации: первый подъём обязан его увидеть.
     store_workspace(bootstrap.ROOT, name, req)
     _api().register(spec.job_spec(name, origin, req.get("profile"),
-                                 branch=req.get("branch")))
-    return {"ok": True, "name": name, "origin": origin}
+                                 branch=req.get("branch"), cred=cred))
+    # cred -- только когда аренда есть: ответ без неё байт в байт прежний.
+    return {"ok": True, "name": name, "origin": origin, **({"cred": cred} if cred else {})}
 
 
-def _kept_branch(name):
-    """Ветка мастера из меты джоба (#256), если она там есть."""
-    # Чтение по возможности: нет джоба или Nomad молчит -- нет и ветки, а о
+def _cred_for(profile, wanted, kept=None):
+    """Кредит папету -> (имя | None, отказ | None). Названный обязан быть в
+    реестре и того же профиля -- иначе отказ, а не молчаливый подъём без
+    кредита; без названного держится прежний (update), иначе выбирается
+    первый активный профиля."""
+    profile = llm.resolve(profile)
+    if wanted:
+        rec = credreg.load(wanted)
+        if rec is None:
+            return None, f"no credential {wanted} in the registry (mop cred list)"
+        if rec.get("profile") != profile:
+            return None, (f"credential {wanted} is for profile {rec.get('profile')}, "
+                          f"the puppet runs {profile}")
+        return wanted, None
+    if kept:
+        return kept, None
+    return credreg_pick(profile), None
+
+
+def credreg_pick(profile):
+    """Первый активный кредит профиля по реестру либо None."""
+    return common_credreg.pick(profile, credreg.all())
+
+
+def _kept_meta(name):
+    """Мета джоба (#256, #284): ветка и кредит, с которыми папет заведён."""
+    # Чтение по возможности: нет джоба или Nomad молчит -- нет и меты, а о
     # самом Nomad скажет register следом.
     try:
         job = _api().get_job(name)
     except Exception:
-        return None
-    return JobMeta.from_job(job).branch
+        return JobMeta(None, None)
+    return JobMeta.from_job(job)
 
 
 def _update(project, req):
@@ -395,11 +426,18 @@ def _update(project, req):
     name = req["name"]
     store_workspace(bootstrap.ROOT, name, req)
     # Ветка -- свойство папета (#257): запрос без неё (recycle, gc, лечение
-    # doctor'а) не стирает ту, с которой папет заведён.
-    branch = req.get("branch") or _kept_branch(name)
-    _api().register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch),
+    # doctor'а) не стирает ту, с которой папет заведён. Аренда кредита
+    # (#284) -- так же, и профиль сверяется с реестром.
+    kept = _kept_meta(name)
+    branch = req.get("branch") or kept.branch
+    cred, why = _cred_for(req.get("profile"), req.get("cred"),
+                          kept.cred if kept.llm == llm.resolve(req.get("profile")) else None)
+    if why:
+        return {"error": why}
+    _api().register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch,
+                                              cred=cred),
                                cont=bool(req.get("cont"))))
-    return {"ok": True, "name": name}
+    return {"ok": True, "name": name, **({"cred": cred} if cred else {})}
 
 
 def _restart(project, req):
@@ -658,8 +696,14 @@ def _project_limit(project, req):
 # на проект. Секрет едет по шине один раз, внутрь (cred_add), и наружу не
 # возвращается ни одним глаголом: строки списка -- без него.
 def _cred_add(project, req):
-    rec = credreg.add_key(req["name"], req["profile"], req.get("key"),
-                          owner=req.get("owner") or "")
+    # Ключ провайдера -- add_key; файл кредов claude (`mop login`, #284) --
+    # add_login_file: дом логина, refresh-токен остаётся на сервере.
+    if req.get("credentials"):
+        rec = credreg.add_login_file(req["name"], req["credentials"],
+                                     owner=req.get("owner") or "")
+    else:
+        rec = credreg.add_key(req["name"], req["profile"], req.get("key"),
+                              owner=req.get("owner") or "")
     return {"ok": True, "name": rec["name"], "profile": rec["profile"]}
 
 
@@ -671,7 +715,9 @@ def _cred_rm(project, req):
 
 
 def _cred_list(project, req):
-    return {"ok": True, "creds": credreg.all()}
+    # Держатели аренды (#284) -- отдельным полем: запись едет как лежит.
+    return {"ok": True, "creds": credreg.all(),
+            "holders": {c: sorted(h) for c, h in credreg.holders(_api()).items()}}
 
 
 def _cred_status(project, req):
@@ -680,7 +726,8 @@ def _cred_status(project, req):
         recs = [credreg.probe(name)]
     else:
         recs = credreg.probe_all()
-    return {"ok": True, "creds": recs}
+    return {"ok": True, "creds": recs,
+            "holders": {c: sorted(h) for c, h in credreg.holders(_api()).items()}}
 
 
 def _cred_login_start(project, req):
@@ -891,5 +938,9 @@ async def serve(log, api=nomad):
     (#275), по умолчанию живой."""
     # Оба субъекта (#207): с логином вызывающего и прежний, до уборки.
     subj = [busnames.cluster(busnames.ANY), busnames.cluster(busnames.ANY, login=busnames.ANY)]
+    # Цикл кредитов (#284): пробы, продление токенов, раздача держателям и
+    # приписывание провалов -- своим потоком, шина его не ждёт.
+    threading.Thread(target=credreg.ticker, args=(log, api), daemon=True,
+                     name="cred-ticker").start()
     await service.serve("mop-cluster", subj, lambda project, req, _send: answer(project, req, api=api),
                         log, journal, lambda: banner(", ".join(subj), nomad.ADDR))

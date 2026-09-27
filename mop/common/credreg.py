@@ -15,7 +15,9 @@ GLM, токен `setup-token`), которую сервер выдаёт пап�
 Только stdlib и без сети: сервер (mop/server/credreg.py) читает и пишет
 дома, здесь -- что лежит в файле и как это показать.
 """
+import calendar
 import re
+import time
 
 from .domain import CredStatus
 
@@ -25,7 +27,7 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # За сколько до истечения токена продлевать (#283): claude обновляет его
 # сам при запросе, и сервер зовёт `claude -p` в доме кредита заранее.
 KEEPALIVE_AHEAD = 2 * 3600
-HEADER = ("name", "profile", "kind", "owner", "status", "resets", "used", "age")
+HEADER = ("name", "profile", "kind", "owner", "status", "resets", "used", "age", "holders")
 WORDS = {"active": "active", "quota_wait": "quota wait", "needs_login": "needs login"}
 
 
@@ -72,8 +74,8 @@ def span(secs):
     return f"{secs // 86400}d"
 
 
-def row(rec, now):
-    """Строка `mop cred list` по записи."""
+def row(rec, now, holders=()):
+    """Строка `mop cred list` по записи; holders -- папеты с арендой (#284)."""
     st = rec.get("status") or {}
     kind = st.get("kind")
     if not kind:
@@ -89,12 +91,15 @@ def row(rec, now):
     used = f"{st['percent']}%" if st.get("percent") is not None else "-"
     return (rec["name"], rec.get("profile") or "-", rec.get("kind") or "-",
             rec.get("owner") or "-", word, resets, used,
-            span(now - int(rec.get("added_at") or now)))
+            span(now - int(rec.get("added_at") or now)),
+            ",".join(sorted(holders)) if holders else "-")
 
 
-def rows(records, now):
-    """Заголовок и строка на кредит -- для render.table."""
-    return [HEADER] + [row(r, now) for r in records]
+def rows(records, now, holders=None):
+    """Заголовок и строка на кредит -- для render.table. holders --
+    {кредит: [папеты]} (#284)."""
+    holders = holders or {}
+    return [HEADER] + [row(r, now, holders.get(r["name"]) or ()) for r in records]
 
 
 def needs_keepalive(expires_at, now):
@@ -112,3 +117,68 @@ def expires_at(credentials):
         return int(ms) // 1000
     except (KeyError, TypeError, ValueError):
         return None
+
+
+# ─── аренда (#284) ────────────────────────────────────────────────────────
+def pick(profile, records):
+    """Кредит папету без явного --cred: первый по имени активный кредит
+    профиля, либо None -- тогда папет живёт логином оператора, как прежде.
+    Непробованный не считается: активность -- утверждение пробы, а не
+    отсутствие плохих вестей."""
+    fit = [r for r in records if r.get("profile") == profile
+           and (r.get("status") or {}).get("kind") == "active"]
+    return sorted(r["name"] for r in fit)[0] if fit else None
+
+
+def without_refresh(credentials):
+    """Файл кредов claude без refreshToken -- то, что уезжает в тело.
+    Обновляет токен сервер в доме кредита, тела не обновляют ничего:
+    провайдер ротирует refresh-токен, и вторая копия умирала бы."""
+    out = {}
+    for k, v in (credentials or {}).items():
+        if k == "claudeAiOauth" and isinstance(v, dict):
+            v = {kk: vv for kk, vv in v.items() if kk != "refreshToken"}
+        out[k] = v
+    return out
+
+
+def secrets_line(var, key):
+    """Строка secrets.env для ключа профиля."""
+    return f"{var}={key}\n"
+
+
+_RESET = re.compile(r"reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+
+def reset_time_of(text):
+    """Время сброса из текста провала `rate_limit` («Your limit will reset
+    at 2026-09-24 15:00:00») -> epoch либо None. Пояс в тексте не назван,
+    и часы узла неизвестны: считаем UTC и говорим об этом здесь."""
+    m = _RESET.search(text or "")
+    if not m:
+        return None
+    try:
+        return calendar.timegm(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return None
+
+
+def turn_status(record, changed_at):
+    """Что провал хода говорит о кредите (#284) -> CredStatus либо None.
+
+    authentication_failed -- логин протух: needs_login, если дом кредита не
+    менялся после хода (changed_at -- mtime секрета либо None); менялся --
+    None, вызывающий раздаёт свежее. rate_limit -- ждать сброса из текста,
+    billing_error -- ждать без времени. Остальное кредита не касается."""
+    if not record or record.get("event") != "StopFailure":
+        return None
+    code, detail = record.get("error"), record.get("detail") or ""
+    if code == "authentication_failed":
+        if changed_at is not None and int(changed_at) > int(record.get("at") or 0):
+            return None
+        return CredStatus("needs_login", detail="login expired")
+    if code == "rate_limit":
+        return CredStatus("quota_wait", resets_at=reset_time_of(detail), detail=detail[:120])
+    if code == "billing_error":
+        return CredStatus("quota_wait", detail=detail[:120])
+    return None

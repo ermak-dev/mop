@@ -1,4 +1,4 @@
-"""create a puppet: mop add [--llm PROFILE] [git-origin]
+"""create a puppet: mop add [--llm PROFILE] [--cred NAME] [git-origin]
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>. Nomad decides placement — a puppet
@@ -16,11 +16,14 @@ from mop.common import bus, context, llm, puppets
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
 MCP = {"annotations": "destructive", "args": [
     {"name": "origin", "type": "string", "help": "git origin; without it, the origin of the master's working copy"},
-    {"name": "llm", "type": "string", "flag": "--llm", "help": "LLM profile"}]}
+    {"name": "llm", "type": "string", "flag": "--llm", "help": "LLM profile"},
+    {"name": "cred", "type": "string", "flag": "--cred",
+     "help": "registry credential to lease; without it the first active one of the profile"}]}
 
 
 def main(argv):
     profile, args = _common.parse_llm(argv)
+    cred, args = _common.parse_value(args, "--cred")
     if len(args) > 1:
         lib.usage(__doc__)
     profile = llm.resolve(profile)
@@ -34,12 +37,12 @@ def main(argv):
                   f"Register it on the server: mop project add {origin}")
     p = lib.Progress(project)
     try:
-        return _add(origin, project, profile, bool(args), p)
+        return _add(origin, project, profile, bool(args), p, cred)
     finally:
         p.clear()
 
 
-def _add(origin, project, profile, named, p):
+def _add(origin, project, profile, named, p, cred=None):
     """Долгая команда (#124): на терминале -- текущий шаг, при успехе --
     ничего; отказ и не вставший папет -- ошибкой."""
     p.step("LLM keys to the nodes")
@@ -53,7 +56,7 @@ def _add(origin, project, profile, named, p):
     # origin/HEAD. Из контекста команды (git config mop.branch, MOP_BRANCH).
     got = bus.call_cluster("add", origin=origin, profile=profile, timeout=30,
                            workspace=_common.workspace_text(origin),
-                           branch=context.current().branch)
+                           branch=context.current().branch, cred=cred)
     name = got["name"]
 
     p.step(f"{name}: waiting for a node")

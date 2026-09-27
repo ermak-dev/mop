@@ -140,11 +140,36 @@ def push_login():
     # Имена -- относительно дома пула (#279): дом знает узел, а не оператор.
     # С MOP_HOME своей установки в пути `mop login` на чужой сервер отбивался
     # по каждому узлу.
-    files = [_as_file(paths.CREDENTIALS, credentials())]
+    raw = credentials()
+    files = [_as_file(paths.CREDENTIALS, raw)]
     what = ["claude.ai credentials"]
     blob, note = llm_keys_blob()
     if blob:
         files.append(_as_file(paths.NODE_SECRETS, blob))
         what.append("node secrets (" + ", ".join(
             l.split("=")[0] for l in blob.splitlines()) + ")")
-    return distribute(files), what, note
+    results = distribute(files)
+    # Переход к реестру (#284): тот же логин -- кредитом под именем логина
+    # оператора, чтобы папеты с арендой на него получали свежее от сервера.
+    # Папеты без аренды живут раздачей выше, как прежде. Старый сервер без
+    # глагола -- замечание, не отказ.
+    why = register_login(raw)
+    if why:
+        note = f"{note}; {why}" if note else why
+    return results, what, note
+
+
+def register_login(raw):
+    """Свой логин -- кредитом реестра под именем логина на шине (#284).
+    -> замечание строкой либо None."""
+    name = bus.login()
+    if not name:
+        return "registry: no bus login, the credential was not registered"
+    try:
+        got = bus.call_cluster("cred_add", project=bus.ADMIN, name=name, profile="claude",
+                               credentials=raw.decode() if isinstance(raw, bytes) else raw)
+    except (bus.BusError, bus.Refused) as e:
+        return f"registry: not registered — {str(e)[:120]}"
+    if got.get("error"):
+        return f"registry: not registered — {got['error'][:120]}"
+    return None
