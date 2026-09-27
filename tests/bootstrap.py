@@ -330,6 +330,56 @@ def check_lease_push_312(c):
         c.expect("#312 a failed play: no lease push", asked, [])
 
 
+# ── #344: провал команды -- причина из её вывода ──────────────────────
+# HYPOTHESIS: failed_task (#333) берёт msg из `FAILED! => {...}`, а у
+# command/shell-задачи msg всегда «non-zero return code»: FAILED, строка
+# врапера и итог `mop update` (#334) теряют настоящую причину (rumop,
+# pu-rudesktop-8: ошибка uv в stderr_lines).
+# SOLUTION: у результата с rc и выводом сообщение -- последняя непустая
+# строка stderr (иначе stdout) и код выхода; msg -- только когда вывода нет.
+# Одна строка, не длиннее 200 знаков, код не срезается. STATUS: FIXED — see #344
+UV_FAILED = (
+    "TASK [bootstrap : uv sync] *****************************************************\n"
+    'fatal: [10.77.35.145]: FAILED! => {"changed": true, "cmd": ["uv", "sync", "--group", '
+    '"cloud"], "delta": "0:00:00.021530", "end": "2026-09-28 11:02:14.402317", "msg": '
+    '"non-zero return code", "rc": 2, "start": "2026-09-28 11:02:14.380787", "stderr": '
+    '"Resolved 198 packages in 2ms\\nerror: Group `cloud` is not defined in the project\'s '
+    '`dependency-groups` table", "stderr_lines": ["Resolved 198 packages in 2ms", "error: '
+    'Group `cloud` is not defined in the project\'s `dependency-groups` table"], "stdout": '
+    '"", "stdout_lines": []}\n'
+    "PLAY RECAP *********************************************************************\n"
+    "10.77.35.145               : ok=4    changed=1    unreachable=0    failed=1\n")
+
+
+def _command(result):
+    return "TASK [bootstrap : run] ***\nfatal: [h]: FAILED! => " + json.dumps(result) + "\n"
+
+
+def check_command_message_344(c):
+    fn = bootstrap.failed_task
+    c.expect("#344 a command with stderr: its last line and the exit code",
+             fn(UV_FAILED), ("bootstrap : uv sync",
+                             "error: Group `cloud` is not defined in the project's "
+                             "`dependency-groups` table (rc 2)"))
+    c.expect("#344 a command with only stdout: stdout's last line",
+             fn(_command({"msg": "non-zero return code", "rc": 1, "stderr_lines": [],
+                          "stdout_lines": ["building", "FAIL: tests broke", ""]})),
+             ("bootstrap : run", "FAIL: tests broke (rc 1)"))
+    c.expect("#344 a command with no output: msg, as before",
+             fn(_command({"msg": "non-zero return code", "rc": 3, "stderr_lines": [],
+                          "stdout_lines": []})),
+             ("bootstrap : run", "non-zero return code"))
+    c.expect("#344 a module without rc: msg, as before",
+             fn(_command({"changed": False, "msg": "Could not find '.env-prod'"})),
+             ("bootstrap : run", "Could not find '.env-prod'"))
+    got = fn(_command({"msg": "non-zero return code", "rc": 7, "stderr_lines": ["x" * 400]}))[1]
+    c.check("#344 a long line is cut, the exit code kept, one line, 200 at most",
+            len(got) <= 200 and got.endswith(" (rc 7)") and "\n" not in got, got)
+    c.expect("#344 a result that is not an object: the line, as before",
+             fn("TASK [a : b] ***\nfatal: [h]: FAILED! => [1, 2]\n"),
+             ("a : b", "fatal: [h]: FAILED! => [1, 2]"))
+
+
 def main():
     c = Checks()
     check_result_334(c)
@@ -489,6 +539,7 @@ def main():
 
     check_identity_167(c)
     check_failed_task_333(c)
+    check_command_message_344(c)
     check_lease_push_312(c)
     return c.report("bootstrap")
 
