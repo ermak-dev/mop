@@ -527,6 +527,29 @@ def _alloc(project, req):
     return {"ok": True, "alloc": slim, "driver": meta.get("mop_driver")}
 
 
+STDERR_LINES, STDERR_MAX = 40, 500
+
+
+def _stderr(project, req):
+    """Хвост stderr задачи последней аллокации папета (#333): N строк.
+
+    Нужен там, где пейна нет -- папет падает до tmux (bootstrap), и `mop
+    tail` иначе не показал бы ничего; причина живёт только в stderr. Только
+    чтение, поэтому без ворот владения, как alloc. Аллокации нет -- пусто,
+    а не отказ: спрашивать некого."""
+    asked = req.get("lines")
+    n = min(max(int(STDERR_LINES if asked is None else asked), 1), STDERR_MAX)
+    try:
+        alloc = _api().latest_alloc(req["name"])
+    except Exception:
+        alloc = None
+    if not alloc:
+        return {"ok": True, "alloc": None, "status": None, "lines": []}
+    text = _api().alloc_stderr(alloc["ID"], state.task_name(alloc))
+    return {"ok": True, "alloc": alloc["ID"], "status": alloc.get("ClientStatus"),
+            "lines": (text or "").splitlines()[-n:]}
+
+
 def _spec(project, req):
     job = _api().get_job(req["name"])
     if not job:
@@ -886,6 +909,7 @@ VERBS = {
     "stop":           Verb(_gated(_stop), PROJECT, True,  True),
     "delete":         Verb(_gated(_delete), PROJECT, True,  True),
     "alloc":          Verb(_alloc,          PROJECT, True,  False),
+    "stderr":         Verb(_stderr,         PROJECT, True,  False),
     "spec":           Verb(_spec,           PROJECT, True,  True),
     "secret_put":     Verb(_secret_put,     SECRET,  False, False),
     "secret_list":    Verb(_secret_list,    SECRET,  False, False),

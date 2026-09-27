@@ -280,6 +280,17 @@ def guard(name):
     return spec
 
 
+def stderr_text(name, why, lines):
+    """Хвост stderr аллокации вместо пейна (#333) -> строки вывода: сначала
+    -- что это stderr и почему не пейн (первая строка причины), затем сам
+    хвост. Один текст на `mop tail` и инструмент MCP `tail`."""
+    reason = (str(why).splitlines() or [""])[0]
+    head = f"{name}: no tmux session ({reason}); the allocation's stderr"
+    if not lines:
+        return [f"{head} is empty"]
+    return [f"{head}, last {len(lines)} lines:", *lines]
+
+
 def pool_lines():
     try:
         out = []

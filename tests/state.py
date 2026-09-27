@@ -576,6 +576,31 @@ def check_row_none_274(c):
     c.expect("#274 decisions compare with None, not the dash", compared, [])
 
 
+def check_bootstrap_task_333(c):
+    """HYPOTHESIS (#333): FAILED в `mop list` у упавшего bootstrap'а -- строка
+    врапера и первая [ERROR] ansible, без задачи.
+    SOLUTION: врапер называет задачу («bootstrap of <папет> failed at task
+    «<задача>»: <сообщение>», run.refusal), failure_reason читает её в
+    «bootstrap task «<задача>» failed: <сообщение>». Прежние формы -- как
+    были: причина -- из последней попытки. STATUS: FIXED — see #333"""
+    new = ("pu-rugent-3: clone in /home/mop/w/pu-rugent-3\n"
+           "bootstrap of pu-rugent-3 failed at task «bootstrap : env file»: "
+           "Could not find or access '~/rugent/.env-prod' on the Ansible Controller.\n"
+           "TASK [bootstrap : env file] ***\n"
+           "fatal: [10.77.38.103]: FAILED! => {\"msg\": \"Could not find\"}\n"
+           "[ERROR]: Task failed: something else\n")
+    c.expect("#333 the named task, not the first [ERROR]", failure_reason(STDERR + new),
+             "bootstrap task «bootstrap : env file» failed: Could not find or access "
+             "'~/rugent/.env-prod' on the Ansible Controller.")
+    c.expect("#333 an older attempt after it: the last attempt speaks, the old way",
+             failure_reason(new + STDERR),
+             "bootstrap: Could not find or access '~/rugent/.env-prod' on the Ansible Controller.")
+    c.expect("#333 a long message is cut like any reason",
+             len(failure_reason("bootstrap of pu-x-1 failed at task «a : b»: " + "z" * 400)), 200)
+    c.expect("#333 old forms as before", failure_reason(STDERR),
+             "bootstrap: Could not find or access '~/rugent/.env-prod' on the Ansible Controller.")
+
+
 def main():
     c = Checks()
     for what, given, want in CASES:
@@ -586,6 +611,7 @@ def main():
     check_visible(c, VISIBLE)
     check_project_ids(c, PROJECT_IDS)
     check_failing(c)
+    check_bootstrap_task_333(c)
     check_treatment(c)
     check_stale_spec(c)
     check_clone_agreement(c)

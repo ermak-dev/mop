@@ -43,6 +43,7 @@
 import asyncio
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -264,9 +265,57 @@ def play(req, project):
                 "seconds": round(time.time() - t0, 1),
                 "tail": f"bootstrap of {name} did not finish in {TIMEOUT - 10}s — "
                         f"keep bootstrap.yaml in seconds, bake the heavy part into sandbox.yaml"}
-    tail = "\n".join((r.stdout + r.stderr).splitlines()[-25:])
-    return {"ok": r.returncode == 0, "played": True, "rc": r.returncode,
-            "seconds": round(time.time() - t0, 1), "tail": tail}
+    return outcome(r.returncode, r.stdout + r.stderr, time.time() - t0)
+
+
+# Строка провала задачи ansible: `fatal: [хост]: FAILED! => {...}` или, у
+# элемента цикла, `failed: [хост] (item=…) => {...}`. `failed=1` в PLAY
+# RECAP -- не она: там нет ни двоеточия, ни хоста в скобках.
+_FAILED_LINE = re.compile(r"^(?:fatal|failed): \[")
+_TASK = re.compile(r"^TASK \[(.+?)\] \**$")
+MESSAGE_MAX = 200
+
+
+def failed_task(output):
+    """Вывод ansible-playbook -> (задача, сообщение) | (None, None) (#333).
+
+    Задача -- последний заголовок `TASK [...]` перед первой строкой провала;
+    сообщение -- msg из `=> {...}`, если разбирается, иначе сама строка,
+    одной строкой (она уходит в строку stderr врапера) и до MESSAGE_MAX.
+    Провала нет или он до первой задачи (синтаксис, модуль) -- (None, None):
+    тогда говорит хвост."""
+    task = None
+    for line in (output or "").splitlines():
+        line = line.strip()
+        header = _TASK.match(line)
+        if header:
+            task = header.group(1)
+            continue
+        if not _FAILED_LINE.match(line):
+            continue
+        if task is None:
+            return None, None
+        _, sep, result = line.partition("=> ")
+        message = None
+        if sep:
+            try:
+                got = json.loads(result)
+                message = got.get("msg") if isinstance(got, dict) else None
+            except ValueError:
+                pass
+        message = " ".join(str(message or line).split())
+        return task, message[:MESSAGE_MAX]
+    return None, None
+
+
+def outcome(rc, output, seconds):
+    """Итог сыгранного прогона -> ответ bootstrap'а. Чистая. task и message
+    -- у каждого ответа (None, если провала нет): их читает `mop update`
+    (#334), поля стабильны."""
+    task, message = failed_task(output) if rc else (None, None)
+    return {"ok": rc == 0, "played": True, "rc": rc, "seconds": round(seconds, 1),
+            "tail": "\n".join((output or "").splitlines()[-25:]),
+            "task": task, "message": message}
 
 
 def _puppets_here():
