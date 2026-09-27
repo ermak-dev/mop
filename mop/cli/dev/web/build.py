@@ -18,8 +18,8 @@ import tempfile
 from mop.common import config
 # Без mop.cli.lib (#302): lib на верхнем уровне импортирует шину, а задача
 # web:dist идёт в образе node, где питонских библиотек нет. Отказ -- та же
-# красная строка, что у lib: одна на двоих в mop.common.term (#320).
-from mop.common.term import fail, usage
+# красная строка, что у lib: одна на двоих в mop.cli.term (#320).
+from mop.cli.term import fail, usage
 
 WEB = os.path.join(config.PROJECT, "web")
 DIST = os.path.join(WEB, "dist")

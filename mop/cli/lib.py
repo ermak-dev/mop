@@ -33,9 +33,9 @@ PROJECT = config.PROJECT
 BIN = os.path.join(PROJECT, "bin")
 
 
-# Цвета и отказ строкой -- в mop.common.term (#320): их берёт и сборка
+# Цвета и отказ строкой -- в mop.cli.term (#320): их берёт и сборка
 # страницы, которой lib с шиной не поднять (#302).
-from mop.common.term import fail, ok, section, usage  # noqa: E402,F401
+from mop.cli.term import fail, ok, section, usage  # noqa: E402,F401
 
 
 # Управляющие последовательности и символы строки чужого вывода: в кадре
