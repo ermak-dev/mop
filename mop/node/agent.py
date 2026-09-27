@@ -434,19 +434,74 @@ async def owner_profile(conn, name, login):
     return None, "no name/email in the profile"
 
 
+# Страж владельца (#313): `git -c user.*` старше .git/config, и identity
+# владельца в клоне ничего не стоила -- папеты по привычке подписывались
+# чужим именем. Хуки клона сверяют автора и коммитера с локальной почтой.
+# Вторая строка -- метка: свой хук узнаётся по ней, чужой не трогается.
+OWNER_GUARD = "# mop owner guard (#313)"
+GUARDED_HOOKS = ("pre-commit", "pre-merge-commit")   # чистое слияние pre-commit не зовёт
+
+
+def owner_hook():
+    """Текст хука-стража. Чистая. Локальная почта клона (`--local`: -c её не
+    видит) есть, а у автора или коммитера (`git var`: видит -c) другая --
+    отказ. Локальной нет -- пропуск: владелец без профиля коммитит с -c."""
+    return f"""#!/bin/sh
+{OWNER_GUARD}
+want=$(git config --local user.email 2>/dev/null)
+[ -n "$want" ] || exit 0
+for who in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+    got=$(git var "$who" 2>/dev/null | sed -n 's/.*<\\(.*\\)>.*/\\1/p')
+    if [ -n "$got" ] && [ "$got" != "$want" ]; then
+        echo "commit as the clone's owner: drop -c user.* — the owner's identity is in the clone ($(git config --local user.name) <$want>)" >&2
+        exit 1
+    fi
+done
+exit 0
+"""
+
+
+def _hooks_dir(clone):
+    """Шелл: каталог хуков клона в $hooks; клона нет -- выход без ошибки."""
+    return (f"hooks=$(git -C {shlex.quote(clone)} rev-parse --absolute-git-dir 2>/dev/null)"
+            f"/hooks; [ \"$hooks\" != /hooks ] || exit 0; ")
+
+
+def _ours(f):
+    """Шелл: условие «хук f -- наш» (метка второй строкой)."""
+    return f"sed -n 2p {f} | grep -qxF {shlex.quote(OWNER_GUARD)}"
+
+
 def identity_script(clone, path, mine, profile):
     """Скрипт: identity владельца в клон (repo-local) или снять её. Чистая.
 
     Только пока в файле аренды наша запись (как _unclaim, #189): пока шла
     доставка и вопрос серверу, аренду мог забрать другой, и его identity
-    перетирать нельзя. Снятие отсутствующего ключа -- не ошибка."""
+    перетирать нельзя. Снятие отсутствующего ключа -- не ошибка.
+
+    Вместе с identity -- страж владельца (#313), хуки GUARDED_HOOKS. Чужой
+    хук (без метки) не перезаписывается; core.hooksPath задан -- git
+    .git/hooks не читает, и ставить туда незачем. Оба пропуска -- строкой в
+    вывод: её несёт заметка мастеру. Снятие identity снимает только свои."""
     q = shlex.quote
     guard = f'[ "$(cat {q(path)} 2>/dev/null)" = {q(mine.rstrip(chr(10)))} ] || exit 0; '
     git = f"git -C {q(clone)} config --local"
     if profile:
+        install = "".join(
+            f'f="$hooks/{h}"; if [ -e "$f" ] && ! {_ours(chr(34) + "$f" + chr(34))}; then '
+            f'echo "owner guard skipped: the project has its own {h}"; else '
+            f'printf %s {q(owner_hook())} > "$f.mop" && chmod 755 "$f.mop" && '
+            f'mv -f "$f.mop" "$f" || exit 1; fi; ' for h in GUARDED_HOOKS)
         return guard + (f"{git} user.name {q(profile['name'])} && "
-                        f"{git} user.email {q(profile['email'])}")
-    return guard + f"{git} --unset-all user.name; {git} --unset-all user.email; exit 0"
+                        f"{git} user.email {q(profile['email'])} || exit 1; "
+                        + _hooks_dir(clone)
+                        + f'if [ -n "$(git -C {q(clone)} config core.hooksPath)" ]; then '
+                        f'echo "owner guard skipped: core.hooksPath is set"; exit 0; fi; '
+                        f'mkdir -p "$hooks"; ' + install + "exit 0")
+    remove = "".join(f'f="$hooks/{h}"; [ -f "$f" ] && {_ours(chr(34) + "$f" + chr(34))} '
+                     f'&& rm -f "$f"; ' for h in GUARDED_HOOKS)
+    return guard + (f"{git} --unset-all user.name; {git} --unset-all user.email; "
+                    + _hooks_dir(clone) + remove + "exit 0")
 
 
 async def _follow_owner(conn, name, login, undo):
@@ -458,7 +513,10 @@ async def _follow_owner(conn, name, login, undo):
     if code != 0:
         return f"git identity not set: {why(out, code)}"
     if profile:
-        return f"commits as {profile['name']} <{profile['email']}>"
+        # Пропуск стража (#313) -- тем же текстом, что сказал скрипт.
+        skipped = "; ".join(l.strip() for l in out.splitlines() if "skipped" in l)
+        return f"commits as {profile['name']} <{profile['email']}>" + (
+            f"; {skipped}" if skipped else "")
     return f"no git identity for {login} ({missing}): the clone has none, commit with git -c"
 
 
