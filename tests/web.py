@@ -136,7 +136,8 @@ def check_snapshot(c):
     # per_user -- расход по людям (#245).
     # creds -- реестр кредитов (#285).
     want = {"at", "projects", "counts", "nodes", "usage", "per_puppet", "per_user",
-            "journal", "errors", "creds"}
+            "journal", "errors", "creds", "masters"}
+    # masters -- живые мастера по опросу who (#305).
     c.check("snapshot keys", not (set(snap) != want), sorted(set(snap) ^ want))
     c.check("snapshot body",
             not (snap["counts"]["puppets"] != 5 or snap["errors"] != ["bus: down"]),
@@ -309,6 +310,43 @@ def check_holders_301(c):
             all(r.get("holders") == [] for r in bare), bare)
 
 
+# ── #305: живые мастера на странице ──────────────────────────────────
+# HYPOTHESIS: реестра мастеров нет (намеренно, mcp._masters), и дашборд их не
+# показывает вовсе; кто жив и кто чем правит, видно только из `agents`.
+# SOLUTION: сборщик опрашивает who по проектам, чистая master_rows собирает
+# ответы в строки: проект, адрес, логин, сессия, каталог и папеты проекта,
+# чья аренда на этом логине; ключ снимка masters. STATUS: FIXED — see #305
+def check_masters_305(c):
+    import dataclasses
+    rows = [dataclasses.replace(row("pu-mop-1", "git@h:g/mop.git"), owner="ermak"),
+            dataclasses.replace(row("pu-mop-2", "git@h:g/mop.git"), owner="ivan"),
+            dataclasses.replace(row("pu-mop-3", "git@h:g/mop.git"), owner="ermak"),
+            dataclasses.replace(row("pu-rugent-1", "git@h:g/rugent.git"), owner="ermak")]
+    answers = {
+        "mop": [{"master": "ermak.mate-7", "project": "mop", "user": "ermak",
+                 "session": "mop-ab", "cwd": "/home/ermak/mop"},
+                {"master": "ivan.box-3", "project": "mop", "user": "ivan",
+                 "session": None, "cwd": None},
+                # тот же мастер ответил дважды (две подписки) -- одна строка
+                {"master": "ermak.mate-7", "project": "mop", "user": "ermak",
+                 "session": "mop-ab", "cwd": "/home/ermak/mop"}],
+        "rugent": [],
+    }
+    got = web.master_rows(answers, rows)
+    c.expect("#305 one row per master, by project, user and address",
+             [(m["project"], m["user"], m["master"]) for m in got],
+             [("mop", "ermak", "ermak.mate-7"), ("mop", "ivan", "ivan.box-3")])
+    c.expect("#305 puppets of the project leased by that login",
+             [m["puppets"] for m in got], [["pu-mop-1", "pu-mop-3"], ["pu-mop-2"]])
+    c.expect("#305 empty session and directory read as a dash",
+             (got[1]["session"], got[1]["cwd"]), ("-", "-"))
+    c.expect("#305 a reply without a project falls under the asked one",
+             web.master_rows({"x": [{"master": "a.b-1", "user": "a"}]}, [])[0]["project"], "x")
+    snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=[], journal=[],
+                        errors=[], at=1.0, masters=got)
+    c.expect("#305 the snapshot carries the masters", len(snap["masters"]), 2)
+
+
 # ── #297: страница -- собранное React-приложение из web/dist ─────────────
 # HYPOTHESIS: сервис отдаёт web/index.html и не умеет статику: у собранного
 # приложения скрипт и стили лежат в web/dist/assets/ под именами с хешем, и
@@ -344,7 +382,7 @@ def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
-               check_creds_285, check_row_button_294, check_holders_301, check_dist_297):
+               check_creds_285, check_row_button_294, check_holders_301, check_masters_305, check_dist_297):
         fn(c)
     return c.report("web")
 

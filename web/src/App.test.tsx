@@ -6,7 +6,7 @@ import App, { plural } from "./App";
 import type { Snapshot } from "./types";
 
 const SNAP: Snapshot = {
-  at: 1, projects: [], nodes: [], usage: [], per_puppet: {}, per_user: [], journal: [], errors: ["nomad: no connection"], creds: [],
+  at: 1, projects: [], nodes: [], usage: [], per_puppet: {}, per_user: [], journal: [], errors: ["nomad: no connection"], creds: [], masters: [],
   counts: { puppets: 3, free: 1, busy: 2, sick: 0, silent: 0, down: 0 },
 };
 
