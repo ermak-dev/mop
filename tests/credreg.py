@@ -320,6 +320,44 @@ def check_push_312(c):
                      ("FAILED: credential anton: no key to distribute", []))
 
 
+# ── #312: раздача -- только телам держателей ───────────────────────────
+# HYPOTHESIS: distribute слал `write` узлу держателя без списка тел, и агент
+# писал кредит в копию узла и во все тела узла: держатель соседнего кредита
+# на том же узле работал на чужом аккаунте.
+# SOLUTION: на каждый узел -- адресная запись (credreg.push) с телами
+# держателей этого кредита на этом узле; копию узла раздача не пишет (новое
+# тело получает аренду на подъёме, cred_push). STATUS: FIXED — see #312
+def check_distribute_bodies_312(c):
+    import tempfile
+    from mop.server import credreg as srv
+    held = {"anton": {"pu-a-1": "n1", "pu-a-2": "n1", "pu-a-3": "n2", "pu-a-4": None},
+            "bob": {"pu-b-1": "n1"}}
+    pushed, timeouts = [], []
+
+    def push(name, node, bodies, timeout=None):
+        pushed.append((name, node, sorted(bodies)))
+        timeouts.append(timeout)
+        return "OK" if node == "n1" else "NOT REACHED: node agent n2 did not answer in 30s"
+    with tempfile.TemporaryDirectory() as tmp, \
+            patched(srv, ROOT=tmp, holders=lambda api=None: held, push=push,
+                    materialize=lambda name, rec=None: [("a/b", name.encode())]):
+        for name in ("anton", "bob"):
+            srv.save(credreg.record(name, "glm", "key", now=NOW))
+        got = srv.distribute("anton", now=NOW)
+        c.expect("#312 distribute: per node, only this credential's holders there",
+                 sorted(pushed), [("anton", "n1", ["pu-a-1", "pu-a-2"]), ("anton", "n2", ["pu-a-3"])])
+        c.expect("#312 distribute: a result per node", got,
+                 {"n1": "OK", "n2": "NOT REACHED: node agent n2 did not answer in 30s"})
+        pushed.clear()
+        srv.distribute("bob", now=NOW)
+        c.expect("#312 distribute: the neighbour's credential names only its own holder",
+                 pushed, [("bob", "n1", ["pu-b-1"])])
+        c.expect("#312 distribute keeps its own timeout, not the start path's",
+                 set(timeouts), {srv.WRITE_TIMEOUT})
+        c.check("#312 distribute: the record keeps its sha and per-node results",
+                (srv.load("anton").get("pushed") or {}).get("nodes") == got, srv.load("anton"))
+
+
 def main():
     c = Checks()
     check_login_start_registry_295(c)
@@ -327,6 +365,7 @@ def main():
     check_login_mode_339(c)
     check_foreign_mark_308(c)
     check_push_312(c)
+    check_distribute_bodies_312(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
     rec = credreg.record("anton", "claude", "login", owner="anton@example.dev", now=NOW)

@@ -378,29 +378,27 @@ def _changed_at(name, rec):
 
 
 def distribute(name, api=None, now=None):
-    """Раздать кредит держателям: глагол `write` агенту каждого узла, где
-    стоит папет с этой арендой. -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"};
-    пусто -- держателей нет. Отпечаток раздачи -- в записи."""
+    """Раздать кредит держателям: на каждый узел, где стоит папет с этой
+    арендой, -- адресная запись (push) в тела ЕГО держателей (#312).
+    -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"}; пусто -- держателей нет.
+    Отпечаток раздачи -- в записи.
+
+    Раньше `write` уходил узлу без тел, и агент клал кредит в копию узла и
+    во все тела: держатель соседнего кредита на том же узле работал на чужом
+    аккаунте. Копию узла раздача больше не пишет: новое тело держателя
+    получает аренду на подъёме (cred_push из bootstrap)."""
     rec = load(name)
     if rec is None:
         raise ValueError(f"no credential {name}")
     files = materialize(name, rec)
-    nodes = sorted({n for n in (holders(api).get(name) or {}).values() if n})
-    out = {}
-    payload = [[p, base64.b64encode(d).decode()] for p, d in files]
-    for node in nodes:
-        try:
-            got = bus.verdict(bus.request(node, "write", timeout=WRITE_TIMEOUT,
-                                          project=bus.ADMIN, files=payload))
-        except bus.BusError as e:
-            got = (bus.UNREACHED, str(e))
-        if got is None:
-            out[node] = "OK"
-        elif got[0] == bus.UNREACHED:
-            out[node] = f"NOT REACHED: {got[1] or 'no answer'}"
-        else:
-            out[node] = f"FAILED: {got[1][:120]}"
-    if nodes:
+    by_node = {}
+    for puppet, node in sorted((holders(api).get(name) or {}).items()):
+        if node:
+            by_node.setdefault(node, []).append(puppet)
+    # Не путь подъёма: таймаут раздачи прежний (#137), а не PUSH_TIMEOUT.
+    out = {node: push(name, node, bodies, timeout=WRITE_TIMEOUT)
+           for node, bodies in sorted(by_node.items())}
+    if by_node:
         save({**rec, "pushed": {"sha": files_sha(files), "at": int(now or time.time()),
                                "nodes": out}})
     return out
@@ -411,7 +409,7 @@ def distribute(name, api=None, now=None):
 PUSH_TIMEOUT = 30
 
 
-def push(name, node, bodies):
+def push(name, node, bodies, timeout=PUSH_TIMEOUT):
     """Кредит name -- адресной записью (`bodies`, #312) в тела bodies на узле
     node. -> "OK" | "FAILED: …" | "NOT REACHED: …".
 
@@ -424,7 +422,7 @@ def push(name, node, bodies):
         return f"FAILED: {str(e)[:120]}"
     payload = [[p, base64.b64encode(d).decode()] for p, d in files]
     try:
-        got = bus.request(node, "write", timeout=PUSH_TIMEOUT, project=bus.ADMIN,
+        got = bus.request(node, "write", timeout=timeout, project=bus.ADMIN,
                           files=payload, bodies=list(bodies))
     except bus.BusError as e:
         return f"NOT REACHED: {e}"
