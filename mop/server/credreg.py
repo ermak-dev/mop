@@ -19,7 +19,6 @@ claude обновляет токен сам при запросе, поэтом�
 адрес, code вводит код. Незавершённые логины держатся в памяти сервиса по
 имени кредита и умирают по TTL драйвера.
 """
-import base64
 import hashlib
 import json
 import os
@@ -34,7 +33,6 @@ from . import credlogin, nomad
 
 ROOT = paths.local("creds")
 RECORD = "cred.json"
-WRITE_TIMEOUT = 60           # раздача: агент пишет в узел и в каждое тело (#137)
 STATES_TIMEOUT = 20
 TICK = 300                   # цикл сервиса (#284): пробы, продление, раздача
 KEEPALIVE_PROMPT = "reply with one word: ok"
@@ -356,20 +354,13 @@ def distribute(name, api=None, now=None):
         raise ValueError(f"no credential {name}")
     files = materialize(name, rec)
     nodes = sorted({n for n in (holders(api).get(name) or {}).values() if n})
-    out = {}
-    payload = [[p, base64.b64encode(d).decode()] for p, d in files]
-    for node in nodes:
-        try:
-            got = bus.verdict(bus.request(node, "write", timeout=WRITE_TIMEOUT,
-                                          project=bus.ADMIN, files=payload))
-        except bus.BusError as e:
-            got = (bus.UNREACHED, str(e))
-        if got is None:
-            out[node] = "OK"
-        elif got[0] == bus.UNREACHED:
-            out[node] = f"NOT REACHED: {got[1] or 'no answer'}"
-        else:
-            out[node] = f"FAILED: {got[1][:120]}"
+    try:
+        answers = bus.request_many("write", nodes, timeout=bus.WRITE_TIMEOUT,
+                                   project=bus.ADMIN,
+                                   files=[bus.as_file(p, d) for p, d in files])
+    except bus.BusError as e:
+        answers = {n: e for n in nodes}
+    out = bus.results_from(nodes, answers)
     if nodes:
         save({**rec, "pushed": {"sha": files_sha(files), "at": int(now or time.time()),
                                "nodes": out}})
@@ -432,15 +423,17 @@ def turns_of(holding, api=None):
     by_node = {}
     for puppet, node in holding.items():
         if node:
-            by_node.setdefault(node, []).append(puppet)
+            by_node.setdefault(node, {"names": []})["names"].append(puppet)
     out = {}
-    for node, names in by_node.items():
-        try:
-            got = bus.request(node, "states", timeout=STATES_TIMEOUT, project=bus.ADMIN,
-                              names=names)
-        except bus.BusError:
+    try:
+        answers = bus.request_many("states", by_node, timeout=STATES_TIMEOUT,
+                                   project=bus.ADMIN)
+    except bus.BusError:
+        return out
+    for got in answers.values():
+        if isinstance(got, Exception):
             continue
-        for puppet, facts in (got.get("puppets") or {}).items():
+        for puppet, facts in ((got or {}).get("puppets") or {}).items():
             turn = ((facts or {}).get("state") or {}).get("turn")
             if isinstance(turn, dict):
                 out[puppet] = turn

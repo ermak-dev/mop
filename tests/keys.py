@@ -70,6 +70,45 @@ def check_no_home_279(c):
          bus.call_cluster, bus.login) = saved
 
 
+# ── #315: глагол write -- ответы, кодировка и таймаут в одном месте ─────
+# HYPOTHESIS: results_from, кодировка файла [путь, b64] и WRITE_TIMEOUT
+# держат копиями client/keys.py и server/credreg.py, декодер -- агент сам.
+# SOLUTION: bus.results_from, bus.as_file / bus.file_data, bus.WRITE_TIMEOUT;
+# вызывающие только переключились. STATUS: FIXED — see #315
+def check_write_in_bus_315(c):
+    import ast
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    for name in ("results_from", "as_file", "file_data", "WRITE_TIMEOUT"):
+        c.check(f"bus.{name} exists", hasattr(bus, name))
+    if hasattr(bus, "as_file") and hasattr(bus, "file_data"):
+        for data in ("K=v\n", b"\x00\xffbin"):
+            path, b64 = bus.as_file("p/q", data)
+            raw = data.encode() if isinstance(data, str) else data
+            c.expect(f"bus.as_file -> file_data round-trips {data!r}",
+                     (path, bus.file_data(b64)), ("p/q", raw))
+            c.check("bus.as_file: b64 is a str, it goes into JSON", isinstance(b64, str))
+    c.expect("bus.WRITE_TIMEOUT stays 60s", getattr(bus, "WRITE_TIMEOUT", None), 60)
+    for rel in ("mop/client/keys.py", "mop/server/credreg.py", "mop/node/agent.py"):
+        src = open(os.path.join(root, rel)).read()
+        tree = ast.parse(src)
+        own = sorted({n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                      and n.name in ("results_from", "_as_file", "as_file")}
+                     | {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                        for t in n.targets if isinstance(t, ast.Name) and t.id == "WRITE_TIMEOUT"})
+        c.check(f"{rel}: no own copy of the write helpers", not own, own)
+        c.check(f"{rel}: no base64 of its own, the encoding lives in bus", "base64" not in src)
+    for rel in ("mop/client/keys.py", "mop/server/credreg.py"):
+        # Строка-результат, а не упоминание в докстринге: f"NOT REACHED: …".
+        tree = ast.parse(open(os.path.join(root, rel)).read())
+        built = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)
+                 and any(isinstance(v, ast.Constant) and "NOT REACHED" in str(v.value)
+                         for v in n.values)]
+        c.check(f"{rel}: no answer mapping by hand (NOT REACHED lives in bus)", not built, built)
+    src = open(os.path.join(root, "mop/server/credreg.py")).read()
+    c.check("server/credreg.py: fan-out through bus.request_many, no bus.request loop",
+            "bus.request(" not in src and "bus.request_many(" in src)
+
+
 def main():
     c = Checks()
     # HYPOTHESIS (#135): неответ агента уводил в запасной путь через
@@ -77,8 +116,9 @@ def main():
     # the controller» -- при том что агент просто писал в тела дольше
     # таймаута. SOLUTION: запасного пути нет; неответ -- отказ с причиной.
     # STATUS: FIXED — see #135
-    fn = getattr(keys, "results_from", None)
-    if c.check("keys.results_from exists", fn is not None):
+    # С #315 разбор живёт в bus -- рядом с verdict, на котором стоит.
+    fn = getattr(bus, "results_from", None)
+    if c.check("bus.results_from exists", fn is not None):
         got = fn(["a", "b", "c", "d"], {
             "a": {"written": ["/x"]},
             "b": {"error": "agent is not allowed to write to /etc/passwd"},
@@ -97,6 +137,7 @@ def main():
         c.check(f"keys.{gone} must be gone: there is no fallback past the agent",
                 not hasattr(keys, gone))
     check_no_home_279(c)
+    check_write_in_bus_315(c)
     return c.report("keys")
 
 
