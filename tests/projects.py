@@ -195,9 +195,44 @@ def check_for_deploy(c):
     c.check(f"an empty server registry is the truth: {lines}", not (lines != set()))
 
 
+def check_read_limits_337(c):
+    """HYPOTHESIS (#337): read_limits зовёт int() на каждом значении и ловит
+    OSError, ValueError, AttributeError, но не TypeError: `null`, список или
+    объект в файле лимитов роняют глагол сервиса (add, снимок, `mop project
+    limit`) исключением -- одна плохая строка кладёт add всего пула.
+    SOLUTION: по записи, не по файлу -- значение, которое не целое (null,
+    список, объект, bool, нечисловая строка), пропускается, потолки
+    остальных проектов действуют: потолок защищает, и одна строка не должна
+    снимать все. STATUS: FIXED — see #337"""
+    import shutil
+    import tempfile
+    d = tempfile.mkdtemp(prefix="mop-test-limits-337-")
+    path = os.path.join(d, "limits.json")
+    try:
+        c.expect("#337 a missing limits file reads as {}", projects.read_limits(path), {})
+        for text, want in (('{"a": null, "b": 3}', {"b": 3}),
+                           ('{"a": [], "b": {}}', {}),
+                           ('{"a": true}', {}),
+                           ('{"a": "x", "b": 2}', {"b": 2}),
+                           ('{"a": "5"}', {"a": 5}),
+                           ('{"a": 5}', {"a": 5}),
+                           ('{"a": Infinity, "b": 1}', {"b": 1}),
+                           ('[1, 2]', {}),
+                           ('{broken', {})):
+            with open(path, "w") as f:
+                f.write(text)
+            try:
+                got = projects.read_limits(path)
+            except Exception as e:
+                got = f"raised {type(e).__name__}: {e}"
+            c.expect(f"#337 read_limits({text})", got, want)
+    finally:
+        shutil.rmtree(d)
+
+
 def main():
     c = Checks()
-    for fn in (check_add, check_delete, check_names, check_limits,
+    for fn in (check_add, check_delete, check_names, check_limits, check_read_limits_337,
                check_git_hosts, check_for_deploy):
         fn(c)
     return c.report("projects")
