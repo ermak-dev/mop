@@ -208,7 +208,9 @@ def operator(directory):
     got = fsutil.read_json(os.path.join(directory, OPERATOR_FILE))
     if got is None:
         return None
-    if not got.get("user") or not got.get("password"):
+    # Валидный JSON не-объект или не строки -- тот же «путь не выбран» (#336).
+    if not isinstance(got, dict) or not all(
+            isinstance(got.get(k), str) and got[k] for k in ("user", "password")):
         return None
     return {"user": got["user"], "password": got["password"]}
 

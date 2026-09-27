@@ -118,10 +118,21 @@ def with_limit(limits, name, value):
 
 def read_limits(path=LIMITS):
     """{проект: потолок}; нет файла -- лимитов нет."""
-    try:
-        return {k: int(v) for k, v in fsutil.read_json(path, {}).items()}
-    except (ValueError, AttributeError):
+    # Файл -- общим чтением (#317), записи -- по одной (#337).
+    got = fsutil.read_json(path, {})
+    if not isinstance(got, dict):
         return {}
+    # По записи, не по файлу (#337): потолок защищает, и одна плохая строка
+    # (null, список, bool) не должна ни ронять глагол, ни снимать остальные.
+    out = {}
+    for k, v in got.items():
+        if isinstance(v, bool):
+            continue
+        try:
+            out[k] = int(v)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return out
 
 
 def write_limits(limits, path=LIMITS):

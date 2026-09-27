@@ -152,15 +152,127 @@ def check_write_home_279(c):
         driver.write_private = lambda path, data: written.append((path, data))
         driver.bodies_apart = bodies_apart
         b64 = base64.b64encode(b"{}").decode()
-        got = asyncio.run(agent.v_write(None, {"files": [[".claude/.credentials.json", b64]]}))
+        got = asyncio.run(agent.v_write(None, {"_project": "admin",
+                                               "files": [[".claude/.credentials.json", b64]]}))
         c.expect("write: a relative name lands under the agent's home",
                  written, [(os.path.join(agent.HOME, ".claude/.credentials.json"), b"{}")])
         c.expect("write: the answer names the node's file",
                  got.get("written"), [os.path.join(agent.HOME, ".claude/.credentials.json")])
         written.clear()
-        got = asyncio.run(agent.v_write(None, {"files": [["/home/nobody/.claude/.credentials.json", b64]]}))
+        got = asyncio.run(agent.v_write(None, {"_project": "admin",
+                                               "files": [["/home/nobody/.claude/.credentials.json", b64]]}))
         c.check("write: another home is refused", "not allowed to write" in (got.get("error") or ""), got)
         c.check("write: nothing written on refusal", written == [])
+
+
+def check_addressed_write_312(c):
+    """HYPOTHESIS (#312): `write` кладёт файлы в копию узла и во ВСЕ живые
+    тела узла, кто бы ни просил и чьё бы ни было тело: раздача кредита a
+    перетирает кредит b у соседа, а `mop login` мастера проекта X -- кредит
+    в телах папетов проекта Y на том же узле.
+    SOLUTION: write_targets -- одна чистая выборка. С `bodies` (адресная
+    запись, раздача кредита) -- только эти тела, каждое -- папет проекта
+    просящего (ADMIN -- любое); копия узла -- только у host, где тело и есть
+    узел. Без `bodies` (`mop login`): проект -- только свои тела и не копия
+    узла; ADMIN -- копия узла и тела без метки аренды. ADMIN без `bodies`, но
+    с меткой -- раздача прежнего сервера: как было (переход).
+    STATUS: FIXED — see #312"""
+    import asyncio
+    import base64
+    from mop import driver
+    from mop.common import paths
+    wt = getattr(agent, "write_targets", None)
+    if wt is None:
+        c.fail("#312 no agent.write_targets: every write goes to every body")
+        return
+    own = {"pu-mop-1": "mop", "pu-mop-2": "mop", "pu-rug-1": "rug"}
+    live = ["pu-mop-1", "pu-mop-2", "pu-rug-1"]
+    marks = {"pu-mop-1": "", "pu-mop-2": "anton", "pu-rug-1": "ermak"}
+
+    def pick(project, requested=None, carries=False, container=True, node_mark=""):
+        return wt(project, requested, live, own, marks, carries, container, node_mark)
+    # (тела, копия узла, отказ, не живые)
+    for what, got, want in (
+        ("addressed, admin: only the named bodies, no node copy",
+         pick("admin", ["pu-mop-2", "pu-rug-1"], carries=True), (["pu-mop-2", "pu-rug-1"], False, None, [])),
+        ("addressed, a body not live: reported, the rest written",
+         pick("admin", ["pu-mop-2", "pu-mop-9"], carries=True), (["pu-mop-2"], False, None, ["pu-mop-9"])),
+        ("addressed, a project: its own bodies",
+         pick("mop", ["pu-mop-1"]), (["pu-mop-1"], False, None, [])),
+        ("addressed, host: the node copy is the body",
+         pick("admin", ["pu-mop-2"], carries=True, container=False), ([], True, None, [])),
+        ("plain, a project: its own bodies without a lease, never the node copy",
+         pick("mop"), (["pu-mop-1"], False, None, [])),
+        ("plain, admin: the node copy and the bodies without a lease",
+         pick("admin"), (["pu-mop-1"], True, None, [])),
+        ("transition: admin, no bodies, with a mark (an old server's distribute): as before",
+         pick("admin", carries=True), (live, True, None, [])),
+        ("plain, host, admin: no lease on the node -> the node copy",
+         pick("admin", container=False), ([], True, None, [])),
+        ("plain, host, admin: a lease on the node -> the node copy is kept",
+         pick("admin", container=False, node_mark="anton"), ([], False, None, [])),
+        ("plain, host, a project sharing the node with another -> no node copy",
+         pick("mop", container=False), ([], False, None, [])),
+    ):
+        c.expect(f"#312 {what}", got, want)
+    got = pick("mop", ["pu-rug-1"])
+    c.check("#312 addressed, a project naming another project's body: refused",
+            got[2] and "pu-rug-1" in got[2] and got[0] == [] and not got[1], got)
+    got = pick("admin", ["pu-mop-1; rm"])
+    c.check("#312 addressed, a bad name: refused", bool(got[2]) and got[0] == [], got)
+    solo = wt("mop", None, ["pu-mop-1"], {"pu-mop-1": "mop"}, {}, False, False, "")
+    c.expect("#312 plain, host, the node is all the project's: the node copy",
+             solo, ([], True, None, []))
+
+    # v_write целиком: что записано в копию узла и в какие тела.
+    class Drv:
+        IS_CONTAINER = True
+        SESSION_PY = agent.DRIVER.SESSION_PY
+
+        @staticmethod
+        async def bodies():
+            return list(live)
+
+        @staticmethod
+        async def push_many(name, files):
+            pushed.append(name)
+            return {"written": [p for p, _ in files]}
+
+        @staticmethod
+        def argv(name):
+            return []
+
+    async def project(name):
+        return own.get(name)
+
+    async def mark_bsh(name, script, timeout=20):
+        return marks.get(name, "") + "\n", 0
+    b64 = base64.b64encode(b"{}").decode()
+    cred = [paths.CREDENTIALS, b64]
+    mark = [paths.CRED_MARK, base64.b64encode(b"anton\n").decode()]
+    pushed, node = [], []
+    with restored(agent, "DRIVER", "puppet_project", "bsh"), restored(driver, "write_private"):
+        agent.DRIVER, agent.puppet_project, agent.bsh = Drv, project, mark_bsh
+        driver.write_private = lambda path, data: node.append(path)
+        for req, want_bodies, want_node in (
+                ({"_project": "admin", "files": [cred, mark], "bodies": ["pu-mop-2"]},
+                 ["pu-mop-2"], False),
+                ({"_project": "mop", "files": [cred]}, ["pu-mop-1"], False),
+                ({"_project": "admin", "files": [cred]}, ["pu-mop-1"], True),
+                ({"_project": "admin", "files": [cred, mark]}, live, True)):
+            pushed.clear()
+            node.clear()
+            got = asyncio.run(agent.v_write(None, req))
+            c.expect(f"#312 v_write {req['_project']} {sorted(req) }: bodies and node copy",
+                     (sorted(pushed), bool(node), bool(got.get("error"))),
+                     (sorted(want_bodies), want_node, False))
+        pushed.clear()
+        node.clear()
+        got = asyncio.run(agent.v_write(None, {"_project": "mop", "files": [cred],
+                                               "bodies": ["pu-rug-1"]}))
+        c.check("#312 v_write: another project's body is refused, nothing written",
+                "pu-rug-1" in (got.get("error") or "") and not node and not pushed,
+                (got, node, pushed))
 
 
 # ── таймаут шелла -- не успех (#171) ─────────────────────────────────────
@@ -1081,7 +1193,7 @@ def check_owner_hook_313(c):
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
-                  check_write_home_279, check_timeouts_171, check_unclaim_181, check_intake,
+                  check_write_home_279, check_addressed_write_312, check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
                   check_gates_40, check_caller_207, check_git_identity_167,
                   check_state_fact_224, check_no_screen_fact_236,

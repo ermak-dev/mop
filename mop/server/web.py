@@ -21,7 +21,6 @@ import dataclasses
 import os
 import threading
 import time
-from datetime import datetime
 
 from ..common import bus, credreg as credrows, puppets, state
 from .. import usage
@@ -213,10 +212,14 @@ LOGIN_MODES = ("login", "setup-token")
 
 
 def cred_status_word(st):
-    """Статус кредита по-русски для страницы: три исхода плюс «не проверялся»."""
-    # Время сброса -- только страница: у `mop cred list` для него колонка.
-    if st and st.get("kind") == "quota_wait" and st.get("resets_at"):
-        return f"{CRED_WORDS['quota_wait']} до {human_time(st['resets_at'])}"
+    """Статус кредита по-русски для страницы: три исхода плюс «не проверялся».
+    Правило одно на CLI и страницу (#317, credreg.status_word), таблица слов --
+    здесь.
+
+    Время сброса квоты в слово не входит (#331): здесь оно было бы в поясе
+    сервера и без даты, и недельное окно через три дня читалось как «сегодня
+    в пять утра». resets_at едет в строке числом, и «до …» пишет страница в
+    поясе браузера."""
     return credrows.status_word(st, CRED_WORDS, "не проверялся")
 
 
@@ -495,5 +498,3 @@ def journal_entry(msg):
             "text": msg.get("text") or ""}
 
 
-def human_time(ts):
-    return datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "-"

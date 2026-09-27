@@ -31,7 +31,13 @@ def main(argv):
     finally:
         p.clear()
     lib.note(name, r)
-    return 0
+    if r.get("bootstrap_sent"):
+        print(_common.sent_line(r["bootstrap_sent"]), flush=True)
+    p = lib.Progress(name)
+    try:
+        return _common.report_bootstrap(name, r, p)
+    finally:
+        p.clear()
 
 
 

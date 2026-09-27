@@ -222,9 +222,15 @@ def login_start(name, mode="login"):
     брошенный вход оставлял бы дом строкой «не проверялся». Новый кредит
     claude заводит `mop cred login` на сервере: он ведёт драйвер сам."""
     credreg.check_name(name)
-    if load(name) is None:
+    rec = load(name)
+    if rec is None:
         raise RuntimeError(f"no such credential {name}: a new claude credential is added "
                            f"with mop cred login on the server")
+    # Профиль сверяет сервер (#330): кнопка страницы -- её собственное
+    # правило, а глагол и /api/creds/login/start принимают любое имя.
+    if rec.get("profile") != "claude":
+        raise RuntimeError(f"credential {name} is a {rec.get('profile')} credential: "
+                           f"only claude credentials log in")
     with _logins_lock:
         old = _logins.pop(name, None)
     if old:
