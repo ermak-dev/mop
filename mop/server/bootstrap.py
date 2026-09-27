@@ -376,6 +376,8 @@ LEASE_TIMEOUT = 45
 # Запас на сам ответ узлу: узел ждёт весь bootstrap не дольше
 # busnames.BOOTSTRAP_TIMEOUT (run.py), и раздача не вправе его съесть.
 REPLY_MARGIN = 5
+# Отказ аренды на этом узле (#312, host): не заметка, а отказ подъёма.
+REFUSED = "refused: "
 _clock = time.time
 
 
@@ -402,6 +404,8 @@ def lease_note(name, timeout=LEASE_TIMEOUT):
         return f"lease not pushed: {e}"
     if got.get("error"):
         return f"lease not pushed: {got['error']}"
+    if got.get("refused"):
+        return REFUSED + got["refused"]
     if not got.get("lease") or got.get("result") == "OK":
         return None
     return f"lease {got['lease']} not pushed: {got.get('result')}"
@@ -431,6 +435,9 @@ def answer(project, req, _send=None):
             out = with_creds(out, puppet_creds(project), project)
             if out.get("ok"):
                 note = lease_note(req.get("name"), lease_budget(_clock() - started))
+                if note and note.startswith(REFUSED):
+                    # Отказ host-узла (#312): не подъём на чужом аккаунте.
+                    return {"error": note[len(REFUSED):]}
                 if note:
                     out["lease_note"] = note
             return out

@@ -793,6 +793,71 @@ def check_internals_318(c):
     except ValueError as e:
         c.check("#318 an unknown mode names the modes", "login, setup-token" in str(e), str(e))
 
+# ── #312: раздача -- только телам держателей ───────────────────────────
+# HYPOTHESIS: distribute слал `write` узлу держателя без списка тел, и агент
+# писал кредит в копию узла и во все тела узла: держатель соседнего кредита
+# на том же узле работал на чужом аккаунте.
+# SOLUTION: на каждый узел -- адресная запись (credreg.push) с телами
+# держателей этого кредита на этом узле; копию узла раздача не пишет (новое
+# тело получает аренду на подъёме, cred_push). STATUS: FIXED — see #312
+def check_distribute_bodies_312(c):
+    import tempfile
+    from mop.common import bus
+    from mop.server import credreg as srv
+    held = {"anton": {"pu-a-1": "n1", "pu-a-2": "n1", "pu-a-3": "n2", "pu-a-4": None},
+            "bob": {"pu-b-1": "n1"}}
+    asked = []
+
+    # Раздача -- одна рассылка (#315), у каждого узла свои тела (#312).
+    def request_many(verb, nodes, timeout=None, project=None, **fields):
+        asked.append((verb, {n: sorted(f["bodies"]) for n, f in nodes.items()}, timeout,
+                      project, [p for p, _ in fields.get("files") or []]))
+        return {"n1": {"written": [f"{b}:a/b" for b in nodes.get("n1", {}).get("bodies", [])]},
+                "n2": bus.BusError("node agent n2 did not answer in 60s"),
+                "n3": {"written": ["pu-a-9 FAILED — body 9009 is stopped"]}}
+    with tempfile.TemporaryDirectory() as tmp, \
+            patched(srv, ROOT=tmp, holders=lambda api=None: held,
+                    materialize=lambda name, rec=None: [("a/b", name.encode())]), \
+            patched(bus, request_many=request_many):
+        for name in ("anton", "bob"):
+            srv.save(credreg.record(name, "glm", "key", now=NOW))
+        got = srv.distribute("anton", now=NOW)
+        c.expect("#312 distribute: one fan-out, per node only this credential's holders there",
+                 asked, [("write", {"n1": ["pu-a-1", "pu-a-2"], "n2": ["pu-a-3"]},
+                          bus.WRITE_TIMEOUT, bus.ADMIN, ["a/b"])])
+        c.expect("#312 distribute: a result per node", got,
+                 {"n1": "OK", "n2": "NOT REACHED: node agent n2 did not answer in 60s"})
+        asked.clear()
+        srv.distribute("bob", now=NOW)
+        c.expect("#312 distribute: the neighbour's credential names only its own holder",
+                 [a[1] for a in asked], [{"n1": ["pu-b-1"]}])
+        c.check("#312 distribute: the record keeps its sha and per-node results",
+                (srv.load("anton").get("pushed") or {}).get("nodes") == got, srv.load("anton"))
+        held["anton"] = {"pu-a-9": "n3"}
+        c.expect("#312 distribute: a body refused inside a node's answer is FAILED, not OK",
+                 srv.distribute("anton", now=NOW),
+                 {"n3": "FAILED: pu-a-9 FAILED — body 9009 is stopped"})
+
+
+def check_host_conflict_312(c):
+    rule = getattr(credreg, "host_conflict", None)
+    if rule is None:
+        c.fail("#312 no credreg.host_conflict: two credentials share one $HOME")
+        return
+    profiles = {"anton": "claude", "ermak": "claude", "z1": "glm"}
+    on = {"pu-a-1": "anton", "pu-b-1": None, "pu-z-1": "z1"}
+    for what, args, refused in (
+            ("another credential of the profile on the node", ("pu-x-1", "ermak", on), True),
+            ("the same credential", ("pu-x-1", "anton", on), False),
+            ("a credential of another profile", ("pu-x-1", "z1", dict(on, **{"pu-z-1": None})), False),
+            ("the only lease there is the puppet's own", ("pu-a-1", "ermak", on), False),
+            ("no leases on the node", ("pu-x-1", "ermak", {"pu-b-1": None}), False)):
+        got = rule(*args, profiles, "hyper")
+        c.check(f"#312 host_conflict: {what}", bool(got) == refused, got)
+    got = rule("pu-x-1", "ermak", on, profiles, "hyper")
+    c.check("#312 host_conflict names the node, the credential, its holder and why",
+            all(w in (got or "") for w in ("hyper", "anton", "pu-a-1", "$HOME")), got)
+
 
 def main():
     c = Checks()
@@ -805,6 +870,8 @@ def main():
     check_creds_knowledge_317(c)
     check_push_312(c)
     check_internals_318(c)
+    check_distribute_bodies_312(c)
+    check_host_conflict_312(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
     rec = credreg.record("anton", "claude", "login", owner="anton@example.dev", now=NOW)

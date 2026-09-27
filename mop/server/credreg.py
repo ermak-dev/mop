@@ -404,21 +404,34 @@ def _changed_at(name, rec):
 
 
 def distribute(name, api=None, now=None):
-    """Раздать кредит держателям: глагол `write` агенту каждого узла, где
-    стоит папет с этой арендой. -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"};
-    пусто -- держателей нет. Отпечаток раздачи -- в записи."""
+    """Раздать кредит держателям: одной рассылкой на узлы, где стоят папеты
+    с этой арендой, адресно -- в тела ЕГО держателей на каждом (#312).
+    -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"}; пусто -- держателей нет.
+    Отпечаток раздачи -- в записи.
+
+    Раньше `write` уходил узлу без тел, и агент клал кредит в копию узла и
+    во все тела: держатель соседнего кредита на том же узле работал на чужом
+    аккаунте. Копию узла раздача больше не пишет: новое тело держателя
+    получает аренду на подъёме (cred_push из bootstrap)."""
     rec = load(name)
     if rec is None:
         raise ValueError(f"no credential {name}")
     files = materialize(name, rec)
-    nodes = sorted({n for n in (holders(api).get(name) or {}).values() if n})
+    by_node = {}
+    for puppet, node in sorted((holders(api).get(name) or {}).items()):
+        if node:
+            by_node.setdefault(node, []).append(puppet)
+    nodes = sorted(by_node)
+    # Одна рассылка на все узлы (#315), у каждого узла свои тела (#312):
+    # только его держатели этого кредита. Не путь подъёма: таймаут раздачи
+    # прежний (#137), а не PUSH_TIMEOUT.
     try:
-        answers = bus.request_many("write", nodes, timeout=bus.WRITE_TIMEOUT,
-                                   project=bus.ADMIN,
+        answers = bus.request_many("write", {n: {"bodies": by_node[n]} for n in nodes},
+                                   timeout=bus.WRITE_TIMEOUT, project=bus.ADMIN,
                                    files=[bus.as_file(p, d) for p, d in files])
     except bus.BusError as e:
         answers = {n: e for n in nodes}
-    out = bus.results_from(nodes, answers)
+    out = _outcome(nodes, answers)
     if nodes:
         save({**rec, "pushed": {"sha": files_sha(files), "at": int(now or time.time()),
                                "nodes": out}})
@@ -430,7 +443,7 @@ def distribute(name, api=None, now=None):
 PUSH_TIMEOUT = 30
 
 
-def push(name, node, bodies):
+def push(name, node, bodies, timeout=PUSH_TIMEOUT):
     """Кредит name -- адресной записью (`bodies`, #312) в тела bodies на узле
     node. -> "OK" | "FAILED: …" | "NOT REACHED: …".
 
@@ -444,19 +457,29 @@ def push(name, node, bodies):
     # Запись и разбор ответа -- через bus (#315): request_many одному узлу и
     # results_from, те же OK / FAILED / NOT REACHED, что у distribute.
     try:
-        answers = bus.request_many("write", [node], timeout=PUSH_TIMEOUT, project=bus.ADMIN,
+        answers = bus.request_many("write", [node], timeout=timeout, project=bus.ADMIN,
                                    files=[bus.as_file(p, d) for p, d in files],
                                    bodies=list(bodies))
     except bus.BusError as e:
         answers = {node: e}
-    got = bus.results_from([node], answers)[node]
-    if got != "OK":
-        return got
-    # Сверх результата узла (#312): отказ одного тела агент кладёт строкой в
-    # written, и без её разбора непришедшая аренда читалась бы OK.
-    missed = [w for w in answers[node].get("written") or []
-              if " FAILED — " in w or w.endswith(" NOT LIVE")]
-    return f"FAILED: {missed[0][:120]}" if missed else "OK"
+    return _outcome([node], answers)[node]
+
+
+def _outcome(nodes, answers):
+    """Ответы агентов на адресный `write` -> {узел: "OK" | "FAILED: …" |
+    "NOT REACHED: …"}: bus.results_from (#315) и сверх него (#312) -- отказ
+    одного тела агент кладёт строкой в written, а не в error, и без её
+    разбора непришедшая аренда читалась бы OK."""
+    out = bus.results_from(nodes, answers)
+    for node in nodes:
+        answer = answers.get(node)
+        if out[node] != "OK" or not isinstance(answer, dict):
+            continue
+        missed = [w for w in answer.get("written") or []
+                  if " FAILED — " in w or w.endswith(" NOT LIVE")]
+        if missed:
+            out[node] = f"FAILED: {missed[0][:120]}"
+    return out
 
 
 def add_login_file(name, text, owner="", now=None):
