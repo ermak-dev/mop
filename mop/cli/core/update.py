@@ -55,15 +55,17 @@ def main(argv):
     # Спеку собирает сервис кластера: сюда она больше не ездит (#80) —
     # иначе кто угодно с доступом к шине клал бы на узел свою командную
     # строку. Решение «что меняем» остаётся здесь, сборка — там.
+    text, sent = _common.workspace_text(origin)
     got = bus.call_cluster("update", name=name, origin=origin, profile=profile,
                            cont=cont, new_origin=origin if origin != old else None,
-                           workspace=_common.workspace_text(origin),
+                           workspace=text, bootstrap_sent=sent,
                            owner=bus.login(), force=force,
                            branch=context.current().branch, cred=cred)
-    # На успехе молчим (#179), как restart: MCP ответит модели `done`, а эхо
-    # параметров повторяло то, что человек только что набрал сам. Чью аренду
-    # прошёл force -- называем (#40).
+    # На успехе эха параметров нет (#179): человек их только что набрал сам.
+    # Чью аренду прошёл force -- называем (#40); что уехало в bootstrap --
+    # тоже (#334): это оператор набрать не мог.
     lib.note(name, got)
+    print(_common.sent_line(sent))
 
 
 

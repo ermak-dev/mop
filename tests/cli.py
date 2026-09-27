@@ -35,8 +35,110 @@ VERBS = {"driver": {"build": {}, "run": {}}, "bug": {},
          "dev": {"bug": {"new": {}, "list": {}}, "ci": {"list": {}}}}
 
 
+# ── #334: mop add/update/recycle говорят, какой bootstrap отправлен ────
+# HYPOTHESIS: workspace_text возвращает голый текст -- откуда он (рабочая
+# копия или origin, какой коммит, правлен ли), теряется, и `mop update`
+# молчит сразу после регистрации: оператор не знает, какой файл уехал.
+# SOLUTION: workspace_text -> (текст, происхождение {source, commit, dirty,
+# tasks, present}); происхождение едет полем bootstrap_sent рядом с
+# workspace, строку «bootstrap sent: …» печатает командлет.
+# STATUS: FIXED — see #334
+NOFILE_334 = {"source": "working copy", "commit": "5b92b440c952fad2", "dirty": False,
+              "tasks": 0, "present": False}
+BOOT_334 = """
+- name: bootstrap
+  tasks:
+    - name: one
+      ansible.builtin.command: "true"
+    - name: two
+      ansible.builtin.command: "true"
+"""
+
+
+def check_bootstrap_sent_334(c):
+    import subprocess
+    sent_line = getattr(_common, "sent_line", None)
+    if not c.check("#334 _common.sent_line exists", sent_line is not None):
+        return
+    sha = "5b92b440c952fad2fcded7a39d6e9f82b9d982a0"
+    cases = [
+        ({"source": "working copy", "commit": sha, "dirty": False, "tasks": 4, "present": True},
+         "bootstrap sent: .mop/bootstrap.yaml from the working copy at 5b92b440c952, 4 tasks"),
+        ({"source": "working copy", "commit": sha, "dirty": True, "tasks": 4, "present": True},
+         "bootstrap sent: .mop/bootstrap.yaml from the working copy at 5b92b440c952 "
+         "(+ uncommitted), 4 tasks"),
+        ({"source": "origin", "commit": sha, "dirty": False, "tasks": 1, "present": True},
+         "bootstrap sent: .mop/bootstrap.yaml from origin at 5b92b440c952, 1 task"),
+        ({"source": "working copy", "commit": sha, "dirty": True, "tasks": 0, "present": False},
+         "bootstrap not sent: no .mop/bootstrap.yaml, the server copy is removed"),
+        ({"source": "origin", "commit": sha, "dirty": False, "tasks": 0, "present": False},
+         "bootstrap not sent: no .mop/bootstrap.yaml, the server copy is removed"),
+        # Не разобрался -- без счёта: отказ по форме скажет сервер.
+        ({"source": "working copy", "commit": sha, "dirty": False, "tasks": None,
+          "present": True},
+         "bootstrap sent: .mop/bootstrap.yaml from the working copy at 5b92b440c952"),
+    ]
+    for prov, want in cases:
+        c.expect(f"#334 sent_line {prov['source']}, dirty {prov['dirty']}, "
+                 f"present {prov['present']}", sent_line(prov), want)
+
+    # Рабочая копия: коммит HEAD, правка считается только у самого файла.
+    d = tempfile.mkdtemp(prefix="mop-test-334-")
+
+    def git(*a):
+        return subprocess.run(["git", "-C", d, *a], capture_output=True, text=True,
+                              check=True).stdout.strip()
+    git("init", "-q")
+    os.makedirs(os.path.join(d, ".mop"))
+    boot = os.path.join(d, ".mop", "bootstrap.yaml")
+    with open(boot, "w") as f:
+        f.write(BOOT_334)
+    with open(os.path.join(d, "other"), "w") as f:
+        f.write("x")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c")
+    head = git("rev-parse", "HEAD")
+    here = os.getcwd()
+    origin = "git@example.dev:g/proj.git"
+    try:
+        os.chdir(d)
+        with patched(lib, cwd_origin=lambda: origin):
+            with open(os.path.join(d, "other"), "w") as f:
+                f.write("changed")                    # правка не bootstrap'а
+            got = _common.workspace_text(origin)
+            c.expect("#334 working copy, clean file: text and provenance", got,
+                     (BOOT_334, {"source": "working copy", "commit": head, "dirty": False,
+                                 "tasks": 2, "present": True}))
+            with open(boot, "a") as f:
+                f.write("    - name: three\n      ansible.builtin.command: \"true\"\n")
+            text, prov = _common.workspace_text(origin)
+            c.expect("#334 working copy, edited file: dirty, the edit counted",
+                     (prov["dirty"], prov["tasks"]), (True, 3))
+            os.unlink(boot)
+            c.expect("#334 working copy, no file: empty text, not present",
+                     _common.workspace_text(origin),
+                     ("", {"source": "working copy", "commit": head, "dirty": True,
+                           "tasks": 0, "present": False}))
+        # origin: коммит -- HEAD того же клона, что читает манифест.
+        from mop.common import manifest
+        with patched(lib, cwd_origin=lambda: "git@example.dev:g/other.git"), \
+                patched(manifest, fetch=lambda o: {"bootstrap_text": BOOT_334, "commit": head}):
+            c.expect("#334 origin: text and provenance", _common.workspace_text(origin),
+                     (BOOT_334, {"source": "origin", "commit": head, "dirty": False,
+                                 "tasks": 2, "present": True}))
+        with patched(lib, cwd_origin=lambda: None), \
+                patched(manifest, fetch=lambda o: {"bootstrap_text": None, "commit": head}):
+            c.expect("#334 origin without the file: empty text, not present",
+                     _common.workspace_text(origin),
+                     ("", {"source": "origin", "commit": head, "dirty": False,
+                           "tasks": 0, "present": False}))
+    finally:
+        os.chdir(here)
+
+
 def main():
     c = Checks()
+    check_bootstrap_sent_334(c)
     # HYPOTHESIS: каталога нет — диспетчер bash ищет файл по имени в bin/.
     # SOLUTION: catalog() из обхода пакета, resolve() по нему.
     # STATUS: FIXED — see #75
@@ -835,13 +937,16 @@ def check_output_179(c):
     with patched(lib, guard=lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}), \
             patched(bus, call_cluster=lambda verb, **kw: calls.append(verb) or {"ok": True}), \
             patched(keys, push_llm_keys=lambda profile: None), \
-            patched(_common, workspace_text=lambda origin: ""):
+            patched(_common, workspace_text=lambda origin: ("", NOFILE_334)):
+        # Эха параметров нет; единственная строка -- что уехало в bootstrap
+        # (#334): её оператор сам не набирал.
         for argv in (["pu-mop-1"], ["pu-mop-1", "--fresh"], ["pu-mop-1", "git@h:g/other.git"]):
             calls.clear()
             out, err, code = run_command(update.main, argv)
-            c.check(f"update {argv} must be silent on success: out {out!r} "
+            c.check(f"update {argv} must print only what bootstrap was sent: out {out!r} "
                     f"err {err!r} code {code!r} calls {calls}",
-                    not (out or err or code or calls != ["update"]))
+                    not (out != _common.sent_line(NOFILE_334) + "\n" or err or code
+                         or calls != ["update"]))
 
 
 def check_output_182(c):
@@ -1645,13 +1750,14 @@ def check_named_263(c):
                     wipe=lambda node, name, force=False:
                     calls.append(("wipe", force)) or {**note, "target": "/t"},
                     running_alloc=lambda name: {"NodeName": "hyper"}), \
-            patched(core_common, push_llm_keys=lambda p: None, workspace_text=lambda o: None):
+            patched(core_common, push_llm_keys=lambda p: None,
+                    workspace_text=lambda o: ("", NOFILE_334)):
         line = "pu-mop-1: was olga's: taken with --force\n"
         want = {
             "delete": line + "deleted pu-mop-1 (body gone from hyper)\n",
             "recycle": line, "restart": line,
             "wipe": line + "pu-mop-1: clone reset to HEAD, target wiped (/t)\n",
-            "update": line,
+            "update": line + core_common.sent_line(NOFILE_334) + "\n",
         }
         for module, out_want in want.items():
             calls.clear()

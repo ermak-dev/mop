@@ -31,6 +31,8 @@ def main(argv):
     finally:
         p.clear()
     lib.note(name, r)
+    if r.get("bootstrap_sent"):
+        print(_common.sent_line(r["bootstrap_sent"]))
     return 0
 
 

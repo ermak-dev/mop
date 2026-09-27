@@ -12,16 +12,54 @@ from mop.client import keys
 def workspace_text(origin):
     """workspace папета (#133): .mop/bootstrap.yaml рабочей копии проекта,
     если команда идёт из неё, иначе из origin (ветка по умолчанию). Нет
-    файла -- пустой текст: сервер снимает копию папета, и удаление доходит."""
-    from mop.common import manifest
+    файла -- пустой текст: сервер снимает копию папета, и удаление доходит.
+
+    -> (текст, происхождение) (#334): {source: "working copy" | "origin",
+    commit, dirty -- правлен ли сам файл, tasks -- сколько задач (None --
+    не разобрался, отказ скажет сервер), present -- есть ли файл}. Едет
+    полем bootstrap_sent рядом с workspace и печатается sent_line."""
     if lib.cwd_origin() == origin:
         top = lib.git("rev-parse", "--show-toplevel")
         try:
             with open(os.path.join(top, manifest.BOOTSTRAP_FILE)) as f:
-                return f.read()
+                text = f.read()
         except FileNotFoundError:
-            return ""
-    return manifest.fetch(origin)["bootstrap_text"] or ""
+            text = ""
+        # Правка -- только самого файла: чужие изменения рабочей копии на
+        # то, что уехало, не влияют.
+        dirty = bool(lib.git("status", "--porcelain", "--", manifest.BOOTSTRAP_FILE))
+        return text, _provenance(text, "working copy", lib.git("rev-parse", "HEAD"), dirty)
+    got = manifest.fetch(origin)
+    text = got["bootstrap_text"] or ""
+    return text, _provenance(text, "origin", got.get("commit"), False)
+
+
+def _provenance(text, source, commit, dirty):
+    present = bool(text.strip())
+    tasks = 0
+    if present:
+        try:
+            tasks = len(manifest.play(text)[1])
+        except ValueError:
+            tasks = None
+    return {"source": source, "commit": commit, "dirty": dirty, "tasks": tasks,
+            "present": present}
+
+
+def sent_line(prov):
+    """Происхождение workspace -> строка «что уехало» (#334). Чистая функция."""
+    if not prov.get("present"):
+        return f"bootstrap not sent: no {manifest.BOOTSTRAP_FILE}, the server copy is removed"
+    where = "the working copy" if prov.get("source") == "working copy" else "origin"
+    line = f"bootstrap sent: {manifest.BOOTSTRAP_FILE} from {where}"
+    if prov.get("commit"):
+        line += f" at {prov['commit'][:12]}"
+    if prov.get("dirty"):
+        line += " (+ uncommitted)"
+    tasks = prov.get("tasks")
+    if tasks is not None:
+        line += f", {tasks} task" + ("" if tasks == 1 else "s")
+    return line
 def parse_value(args, flag):
     """Выкусить `flag VALUE` (или `flag=VALUE`) откуда угодно в аргументах
     -> (значение | None, остальные). Тот же разбор, что у --llm (#284)."""

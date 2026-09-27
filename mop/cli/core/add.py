@@ -54,10 +54,14 @@ def _add(origin, project, profile, named, p, cred=None):
     p.step("registering")
     # Ветка мастера (#256): свежий клон папета встаёт на неё, а не на
     # origin/HEAD. Из контекста команды (git config mop.branch, MOP_BRANCH).
+    text, sent = _common.workspace_text(origin)
     got = bus.call_cluster("add", origin=origin, profile=profile, timeout=30,
-                           workspace=_common.workspace_text(origin),
+                           workspace=text, bootstrap_sent=sent,
                            branch=context.current().branch, cred=cred)
     name = got["name"]
+    # Что уехало в bootstrap (#334) -- строкой насовсем, над строкой шага.
+    p.clear()
+    print(_common.sent_line(sent), flush=True)
 
     p.step(f"{name}: waiting for a node")
     node = None
