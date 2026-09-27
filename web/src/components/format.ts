@@ -1,15 +1,42 @@
 // Общее для компонентов (#298): та же запись чисел и корзин, что была на
 // старой странице, чтобы перенос не менял вид. Корзину (kind) считает
 // сервер (mop/server/web.py), здесь только её имя и цвет для человека.
-import type { Kind } from "../types";
+//
+// Одно место на запись (#323): склонение, короткие числа, слова корзин и
+// цвет статуса кредита жили копиями в App, usage-format и creds-api.
+import { KINDS, type Counts, type Kind } from "../types";
 
-export const KIND_ONE: Record<Kind, string> = {
-  free: "свободен", busy: "занят", sick: "болен", silent: "агент молчит", down: "не работает",
+// Слова корзин: one -- у одного папета (подпись проекта), many -- у
+// счётчика в шапке. Слова прежние, как были в двух таблицах.
+export const KIND_WORD: Record<Kind, { one: string; many: string }> = {
+  free: { one: "свободен", many: "свободны" },
+  busy: { one: "занят", many: "заняты" },
+  sick: { one: "болен", many: "больны" },
+  silent: { one: "агент молчит", many: "агент молчит" },
+  down: { one: "не работает", many: "не подняты" },
 };
 // Цвета старой страницы: зелёный, янтарный, красный, фиолетовый, серый.
 export const KIND_COLOR: Record<Kind, string> = {
   free: "green", busy: "yellow", sick: "red", silent: "violet", down: "gray",
 };
+
+/** Корзины, в которых кто-то есть, в порядке KINDS. */
+export function presentKinds(counts: Counts): Kind[] {
+  return KINDS.filter((k) => counts[k]);
+}
+
+/** Склонение по числу: 1 папет, 3 папета, 11 папетов. */
+export function plural(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return `${n} ${one}`;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return `${n} ${few}`;
+  return `${n} ${many}`;
+}
+
+/** Список через запятую, "-" для пустого. */
+export function listOrDash(items: string[]): string {
+  return items.length ? items.join(", ") : "-";
+}
 
 /** Место клона: КБ -> "N GB" | "N MB", "-" без данных. */
 export function gb(kb: number | null | undefined): string {
@@ -22,7 +49,7 @@ export function gbOfMb(mb: number | null | undefined): string {
   return mb == null ? "-" : `${(mb / 1024).toFixed(0)} GB`;
 }
 
-/** Токены коротко: 1.2k, 15M, 2.3G. */
+/** Токены коротко: 1.2k, 15M, 2.3G -- меньше десяти единиц с одним знаком. */
 export function human(n: number): string {
   for (const [u, d] of [["G", 1e9], ["M", 1e6], ["k", 1e3]] as const) {
     if (n >= d) { const v = n / d; return (v < 10 ? v.toFixed(1) : v.toFixed(0)) + u; }
@@ -37,7 +64,7 @@ export function ratio(free: number | null | undefined, total: number | null | un
 }
 
 /** Время события журнала: чч:мм:сс по часам браузера, "-" без метки. */
-export function hhmm(ts: number | null | undefined): string {
+export function hhmmss(ts: number | null | undefined): string {
   return ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "-";
 }
 
@@ -47,3 +74,15 @@ export function nodeKind(state: string): Kind {
   if (/draining|closed/.test(state)) return "busy";
   return "down";
 }
+
+// Цвет Badge по слову статуса, которое сервер уже собрал (cred_status_word):
+// страница не разбирает статус второй раз, только красит.
+export function statusColor(status: string): string {
+  if (status.startsWith("активен")) return "green";
+  if (status.startsWith("ждёт квоты")) return "yellow";
+  if (status.startsWith("ждёт ручной авторизации")) return "red";
+  return "gray";
+}
+
+/** Процент худшего окна кредита, "-" без данных. */
+export const percentText = (p: number | null) => (p == null ? "-" : `${p}%`);

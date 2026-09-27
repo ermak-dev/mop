@@ -1,7 +1,7 @@
 // Поток входа (#300): вкладка открывается ДО запроса (блокировщик
 // всплывающих окон), код уходит с именем, отказы всплывают уведомлением.
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MantineProvider } from "@mantine/core";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { renderUi } from "../test-utils";
 import { vi } from "vitest";
 import { AuthorizeFlow } from "./AuthorizeFlow";
 
@@ -12,7 +12,7 @@ function reply(body: object, ok = true) {
   return Promise.resolve({ ok, json: () => Promise.resolve(body) } as Response);
 }
 
-const wrap = () => render(<MantineProvider><AuthorizeFlow name="ermak" /></MantineProvider>);
+const wrap = () => renderUi(<AuthorizeFlow name="ermak" />);
 
 beforeEach(() => { show.mockClear(); });
 

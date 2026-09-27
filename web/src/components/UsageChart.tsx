@@ -4,12 +4,12 @@
 import { BarChart } from "@mantine/charts";
 import { Paper, Text, Title } from "@mantine/core";
 import type { UsageDay } from "../types";
-import { human, pluralDays } from "./usage-format";
+import { human, plural } from "./format";
 
 export function usageNote(days: UsageDay[]): string {
   if (!days.length) return "ещё не собрано";
   const grand = days.reduce((a, d) => a + d.total, 0);
-  return `за ${pluralDays(days.length)}, всего ${human(grand)}`;
+  return `за ${plural(days.length, "день", "дня", "дней")}, всего ${human(grand)}`;
 }
 
 export function UsageChart({ days }: { days: UsageDay[] }) {

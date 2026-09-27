@@ -3,7 +3,7 @@
 // -- как на прежней странице; «-» -- неприписанный расход.
 import { Paper, Table, Text, Title } from "@mantine/core";
 import type { UsageUser } from "../types";
-import { human } from "./usage-format";
+import { human } from "./format";
 
 export const USER_COLUMNS = ["пользователь", "вход", "выход", "кэш зап.", "кэш чт.", "всего"] as const;
 

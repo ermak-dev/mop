@@ -8,11 +8,10 @@ import type { Snapshot } from "./types";
 
 export const POLL_MS = 10_000;
 
-export interface Pool { snapshot: Snapshot | null; live: boolean }
+export interface Pool { snapshot: Snapshot | null }
 
 export function usePool(): Pool {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [live, setLive] = useState(false);
 
   useEffect(() => {
     let polling: ReturnType<typeof setInterval> | null = null;
@@ -26,12 +25,11 @@ export function usePool(): Pool {
     es.addEventListener("snapshot", (e) => {
       if (closed) return;
       setSnapshot(JSON.parse((e as MessageEvent).data) as Snapshot);
-      setLive(true);
       stopPolling();
     });
-    es.onerror = () => { setLive(false); poll(); };
+    es.onerror = () => poll();
     return () => { closed = true; es.close(); stopPolling(); };
   }, []);
 
-  return { snapshot, live };
+  return { snapshot };
 }

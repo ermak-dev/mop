@@ -1,7 +1,7 @@
 // Живые мастера (#305): строка на мастера -- проект, логин, сессия, каталог,
 // адрес для send и папеты, чья аренда на его логине.
-import { render, screen } from "@testing-library/react";
-import { MantineProvider } from "@mantine/core";
+import { screen } from "@testing-library/react";
+import { renderUi } from "../test-utils";
 import { EMPTY, Masters } from "./Masters";
 import type { Master } from "../types";
 
@@ -12,7 +12,7 @@ const M: Master[] = [
 ];
 
 test("a row per master with its address and puppets", () => {
-  render(<MantineProvider><Masters masters={M} /></MantineProvider>);
+  renderUi(<Masters masters={M} />);
   expect(screen.getByText("ermak.mate-7")).toBeInTheDocument();
   expect(screen.getByText("mop-ab")).toBeInTheDocument();
   expect(screen.getByText("/home/ermak/mop")).toBeInTheDocument();
@@ -22,6 +22,6 @@ test("a row per master with its address and puppets", () => {
 });
 
 test("no masters: says so", () => {
-  render(<MantineProvider><Masters masters={[]} /></MantineProvider>);
+  renderUi(<Masters masters={[]} />);
   expect(screen.getByText(EMPTY)).toBeInTheDocument();
 });
