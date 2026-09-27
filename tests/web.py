@@ -212,8 +212,8 @@ def check_sick_in_project_210(c):
 # HYPOTHESIS: снимок не несёт реестра, у страницы нет строк кредитов и
 # нет разбора тел POST-запросов -- ключ мог бы уехать в снимок или в журнал.
 # SOLUTION: web.cred_rows -- строки без секретов со статусом по-русски и
-# временем сброса; ключ `creds` в снимке; чистые разборы parse_cred_add,
-# parse_login_start, parse_login_code. STATUS: FIXED — see #285
+# временем сброса; ключ `creds` в снимке; чистые разборы parse_login_start,
+# parse_login_code (разбор добавления ушёл с #294). STATUS: FIXED — see #285
 CREDS = [
     {"name": "anton", "profile": "claude", "kind": "login", "owner": "a@x.dev",
      "added_at": 1_000_000 - 7200, "key": "sk-ant-secret",
@@ -249,16 +249,6 @@ def check_creds_285(c):
                         errors=[], at=1.0, creds=rows)
     c.expect("#285 snapshot carries creds", snap.get("creds"), rows)
 
-    ok, err = web.parse_cred_add({"name": "team2", "profile": "glm", "key": "k", "owner": "x"})
-    c.expect("#285 parse_cred_add", (ok, err),
-             ({"name": "team2", "profile": "glm", "key": "k", "owner": "x"}, None))
-    for body, why in [({"profile": "glm", "key": "k"}, "name"),
-                      ({"name": "bad name", "profile": "glm", "key": "k"}, "name"),
-                      ({"name": "t", "key": "k"}, "profile"),
-                      ({"name": "t", "profile": "glm"}, "key"),
-                      ("not a dict", "body")]:
-        ok, err = web.parse_cred_add(body)
-        c.check(f"#285 parse_cred_add refuses {why}", ok is None and why in (err or ""), (ok, err))
     c.expect("#285 parse_login_start", web.parse_login_start({"name": "anton"}),
              ({"name": "anton", "mode": "login"}, None))
     c.expect("#285 parse_login_start setup-token", web.parse_login_start({"name": "a", "mode": "setup-token"}),
@@ -271,11 +261,40 @@ def check_creds_285(c):
             web.parse_login_code({"name": "a", "code": " "})[0] is None)
 
 
+# ── страница только показывает реестр и авторизует claude в строке (#294) ──
+# Решение оператора 27.09: добавление кредитов -- командами `mop cred`, на
+# странице -- кнопка «Авторизоваться» в строке кредита claude.
+# HYPOTHESIS: у страницы две формы (добавить ключ, войти в claude), маршрут
+# /api/creds/add и его разбор parse_cred_add; строка без профиля не даёт
+# странице решить, где ставить кнопку.
+# SOLUTION: маршрут и разбор добавления убраны, разборы входа остались,
+# cred_rows несёт profile. STATUS: FIXED — see #294
+def check_row_button_294(c):
+    c.check("#294 parse_cred_add is gone", not hasattr(web, "parse_cred_add"))
+    from mop.cli.server import web as webcli
+    routes = webcli.Handler.ROUTES
+    c.check("#294 /api/creds/add is not routed", "/api/creds/add" not in routes, sorted(routes))
+    c.expect("#294 login routes stay", sorted(routes),
+             ["/api/creds/login/code", "/api/creds/login/start"])
+    rows = web.cred_rows(CREDS, now=1_000_000)
+    c.expect("#294 rows carry the profile for the button",
+             [r["profile"] for r in rows], ["claude", "glm", "claude", "claude"])
+    c.expect("#294 parse_login_start still validates",
+             web.parse_login_start({"name": "anton"}), ({"name": "anton", "mode": "login"}, None))
+    c.check("#294 parse_login_code still refuses an empty code",
+            web.parse_login_code({"name": "a", "code": ""})[0] is None)
+    page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                             "web", "index.html"), encoding="utf-8").read()
+    c.check("#294 the page has no add form", 'id="cred-add"' not in page and "/api/creds/add" not in page)
+    c.check("#294 the page has no login form", 'id="cred-login"' not in page)
+    c.check("#294 the page has the row button", "Авторизоваться" in page)
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
-               check_creds_285):
+               check_creds_285, check_row_button_294):
         fn(c)
     return c.report("web")
 

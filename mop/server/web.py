@@ -184,25 +184,6 @@ def _field(body, name, required=True):
     return v, None
 
 
-def parse_cred_add(body):
-    """Тело /api/creds/add -> ({name, profile, key, owner}, None) либо (None, причина).
-    Имя -- по правилу реестра (credreg.check_name), ключ обязателен."""
-    body, err = _body(body)
-    if err:
-        return None, err
-    out = {}
-    for name, required in (("name", True), ("profile", True), ("key", True), ("owner", False)):
-        v, err = _field(body, name, required)
-        if err:
-            return None, err
-        out[name] = v
-    try:
-        credrows.check_name(out["name"])
-    except ValueError as e:
-        return None, f"name: {e}"
-    return out, None
-
-
 def parse_login_start(body):
     """Тело /api/creds/login/start -> ({name, mode}, None) либо (None, причина)."""
     body, err = _body(body)

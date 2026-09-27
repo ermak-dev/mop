@@ -64,15 +64,12 @@
   .free .dot { background: var(--free); } .busy .dot { background: var(--busy); }
   .sick .dot { background: var(--sick); } .silent .dot { background: var(--silent); }
   .empty { color: var(--mute); padding: 6px 0; }
-  .forms { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 10px; }
-  .cred-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .cred-form b { width: 100%; font-weight: 500; color: var(--mute); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
-  .cred-form input { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--ink); min-width: 160px; }
-  .cred-form button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--line); color: var(--ink); cursor: pointer; }
-  .cred-form .note { font-size: 13px; }
-  .cred-form .note.good { color: var(--free); }
-  .cred-form .note.bad { color: var(--sick); }
-  #cred-login-step { width: 100%; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .auth { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .auth input { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--ink); min-width: 160px; }
+  .auth button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--line); color: var(--ink); cursor: pointer; }
+  .auth .note { font-size: 13px; }
+  .auth .note.good { color: var(--free); }
+  .auth .note.bad { color: var(--sick); }
   .bars { display: grid; grid-template-columns: max-content 1fr max-content; gap: 3px 10px; align-items: center; }
   .bars .d { color: var(--mute); font-variant-numeric: tabular-nums; font-size: 12px; }
   .bars .b { height: 12px; background: var(--bar-dim); border-radius: 3px; overflow: hidden; }
@@ -117,29 +114,6 @@
   <section>
     <h2>Кредиты <small id="creds-note">авторизации у провайдеров LLM; реестр на сервере, секреты страница не видит</small></h2>
     <div id="creds"></div>
-    <div class="forms">
-      <form id="cred-add" class="cred-form" autocomplete="off">
-        <b>Добавить ключ</b>
-        <input name="name" placeholder="имя (латиница, цифры, .-_)" required>
-        <input name="profile" placeholder="профиль, например glm" required list="cred-profiles">
-        <datalist id="cred-profiles"></datalist>
-        <input name="key" type="password" placeholder="ключ API" required>
-        <input name="owner" placeholder="владелец (почта), необязательно">
-        <button type="submit">Добавить</button>
-        <span class="note" id="cred-add-note"></span>
-      </form>
-      <form id="cred-login" class="cred-form" autocomplete="off">
-        <b>Войти в claude</b>
-        <input name="name" placeholder="имя кредита" required>
-        <button type="submit">Получить ссылку</button>
-        <span class="note" id="cred-login-note"></span>
-        <div id="cred-login-step" hidden>
-          <a id="cred-login-url" target="_blank" rel="noopener">открыть страницу входа</a>
-          <input name="code" placeholder="код со страницы">
-          <button type="button" id="cred-login-send">Отправить код</button>
-        </div>
-      </form>
-    </div>
   </section>
 
   <section class="journal">
@@ -214,13 +188,12 @@
 
     const cr = s.creds || [];
     $("creds").innerHTML = cr.length
-      ? table(["имя", "провайдер", "вид", "владелец", "статус", "#использовано", "возраст"],
+      ? table(["имя", "провайдер", "вид", "владелец", "статус", "#использовано", "возраст", ""],
           cr.map(k => ({kind: /авторизации/.test(k.status) ? "sick" : /квоты/.test(k.status) ? "busy" : /активен/.test(k.status) ? "free" : "",
             cells: [k.name, k.profile, k.kind, k.owner || "-", {html: esc(k.status), cls: "state"},
-              k.percent == null ? "-" : k.percent + "%", k.age]})),
+              k.percent == null ? "-" : k.percent + "%", k.age, {html: authCell(k)}]})),
           (r) => r.kind)
-      : '<div class="empty">кредитов нет — добавьте ключ или войдите в claude</div>';
-    $("cred-profiles").innerHTML = [...new Set(cr.map(k => k.profile))].map(p => `<option value="${esc(p)}">`).join("");
+      : '<div class="empty">кредитов нет — mop cred add или mop cred login</div>';
 
     const j = (s.journal || []).slice().reverse();
     $("journal").innerHTML = j.length
@@ -228,42 +201,49 @@
       : '<div class="empty">событий пока нет — агенты пишут send, idle, type, wipe и свой запуск</div>';
   }
 
-  // Формы реестра (#285): JSON на POST, ответ в строку рядом. Ключ и код
-  // уходят только в запрос; страница их не хранит.
+  // Авторизация в claude из строки реестра (#294): кнопка только у кредитов
+  // профиля claude, добавление -- командами mop cred. JSON на POST, ответ --
+  // в ту же строку. Код уходит только в запрос; страница его не хранит.
+  // Начатый вход переживает перерисовку строки: его состояние лежит здесь,
+  // а не в DOM, и authCell рисует его заново.
+  const auth = {};
   const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})
     .then(r => r.json().then(j => ({ok: r.ok && !j.error, ...j})))
     .catch(() => ({ok: false, error: "сервер не ответил"}));
-  const say = (id, msg, bad) => { const el = $(id); el.textContent = msg; el.className = "note " + (bad ? "bad" : "good"); };
-  const fields = (form) => Object.fromEntries(new FormData(form).entries());
-
-  $("cred-add").addEventListener("submit", (e) => {
-    e.preventDefault();
-    const f = fields(e.target);
-    say("cred-add-note", "…");
-    post("/api/creds/add", f).then(r => {
-      if (r.ok) { say("cred-add-note", `добавлен ${r.name} (${r.profile})`); e.target.reset(); }
-      else say("cred-add-note", r.error || "отказ", true);
-    });
+  function authCell(k) {
+    if (k.profile !== "claude") return "";
+    const a = auth[k.name];
+    if (!a) return `<button type="button" data-auth="${esc(k.name)}">Авторизоваться</button>`;
+    const note = a.note ? `<span class="note ${a.bad ? "bad" : "good"}">${esc(a.note)}</span>` : "";
+    if (!a.url) return `<span class="auth">${note}</span>`;
+    return `<span class="auth"><a href="${esc(a.url)}" target="_blank" rel="noopener">открыть страницу входа</a>`
+      + `<input data-code="${esc(k.name)}" placeholder="код со страницы" value="${esc(a.code || "")}">`
+      + `<button type="button" data-send="${esc(k.name)}">Отправить код</button>${note}</span>`;
+  }
+  function redraw() { fetch("/api/pool").then(r => r.json()).then(render).catch(() => {}); }
+  $("creds").addEventListener("input", (e) => {
+    const name = e.target.dataset.code;
+    if (name && auth[name]) auth[name].code = e.target.value;
   });
-  $("cred-login").addEventListener("submit", (e) => {
-    e.preventDefault();
-    const f = fields(e.target);
-    say("cred-login-note", "…");
-    $("cred-login-step").hidden = true;
-    post("/api/creds/login/start", {name: f.name}).then(r => {
-      if (!r.ok) return say("cred-login-note", r.error || "отказ", true);
-      $("cred-login-url").href = r.url;
-      $("cred-login-step").hidden = false;
-      say("cred-login-note", "откройте ссылку, войдите, вставьте код");
-    });
-  });
-  $("cred-login-send").addEventListener("click", () => {
-    const form = $("cred-login"), f = fields(form);
-    say("cred-login-note", "…");
-    post("/api/creds/login/code", {name: f.name, code: f.code}).then(r => {
-      if (r.ok) { say("cred-login-note", r.owner ? `вошёл как ${r.owner}` : "вошёл"); form.reset(); $("cred-login-step").hidden = true; }
-      else say("cred-login-note", r.error || "отказ", true);
-    });
+  $("creds").addEventListener("click", (e) => {
+    const start = e.target.dataset.auth, send = e.target.dataset.send;
+    if (start) {
+      auth[start] = {note: "…"};
+      redraw();
+      post("/api/creds/login/start", {name: start}).then(r => {
+        auth[start] = r.ok ? {url: r.url, note: "откройте ссылку, войдите, вставьте код"} : {note: r.error || "отказ", bad: true};
+        if (!r.ok) setTimeout(() => { delete auth[start]; redraw(); }, 8000);
+        redraw();
+      });
+    } else if (send) {
+      const a = auth[send] || {};
+      a.note = "…"; a.bad = false; redraw();
+      post("/api/creds/login/code", {name: send, code: a.code || ""}).then(r => {
+        if (r.ok) { auth[send] = {note: r.owner ? `вошёл как ${r.owner}` : "вошёл"}; setTimeout(() => { delete auth[send]; redraw(); }, 8000); }
+        else { a.note = r.error || "отказ"; a.bad = true; }
+        redraw();
+      });
+    }
   });
 
   // SSE, а при обрыве — опрос: EventSource сам переподключается, но пока
