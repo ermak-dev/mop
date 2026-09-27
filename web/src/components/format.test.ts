@@ -20,6 +20,11 @@ test("ratio and node kind follow the old page", () => {
   expect(ratio(null, null)).toBe("-");
   expect(ratio(2, 7)).toBe("2/7");
   expect(ratio(null, 7)).toBe("-/7");
+  // те же случаи, что CASES в tests/render.py (#243)
+  expect(ratio(0, 5)).toBe("0/5");
+  expect(ratio(5, 5)).toBe("5/5");
+  expect(ratio(0, 0)).toBe("0/0");
+  expect(ratio(2, null)).toBe("2/-");
   expect(nodeKind("ready")).toBe("free");
   expect(nodeKind("ineligible draining")).toBe("busy");
   expect(nodeKind("down")).toBe("down");

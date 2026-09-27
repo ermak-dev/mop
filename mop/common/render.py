@@ -15,8 +15,9 @@ def table(rows):
 def ratio(free, total):
     """Свободно из всего -> «N/M» (#243): одна запись на фронтенды CLI.
     Неизвестная часть -- «-» (сервис кластера старше #243 всего не знает),
-    обе неизвестны -- «-». Панель (web/index.html) питон не импортирует: её
-    ratio держится той же записи, tests/render.py это сверяет."""
+    обе неизвестны -- «-». Панель питон не импортирует: её ratio
+    (web/src/components/format.ts) держится той же записи, tests/render.py
+    и format.test.ts это сверяют."""
     if free is None and total is None:
         return "-"
     return f"{'-' if free is None else free}/{'-' if total is None else total}"
