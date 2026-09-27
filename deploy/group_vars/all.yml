@@ -36,3 +36,6 @@ mop_package_excludes:
   # соседях не спрашивает, а всё своё берёт из node.env.
   - inventory.ini
   - inventory.yaml
+  # Тулчейн дашборда -- у разработчика и в CI (#297): на серверы и в тела
+  # едет только собранный web/dist, а node_modules весит сотни мегабайт.
+  - web/node_modules
