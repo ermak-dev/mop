@@ -56,7 +56,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** No secrets in a Nomad job spec: it is visible in the UI and stays in the cluster's state; keys go to the nodes as a file, the spec carries only variable names
  - **MUST** A puppet reaches the bus under its project's credentials, not the node's: the agent sees who is being asked about, never who is asking
  - **MUST** Nodes are given nothing beyond their subjects: a new need is an agent verb, not a privilege
- - **MUST** The node-level verb `disk` lives in the `admin` pseudo-project only. `write` was taken out of that list deliberately — otherwise a project's master cannot `mop login` its own puppets; that is safe exactly while the `WRITABLE` files are assembled from the machine, not from the master's project — true for the claude login and `secrets.env`, not yet for the credential mark, which any master can overwrite (#308)
+ - **MUST** The node-level verb `disk` lives in the `admin` pseudo-project only. `write` was taken out of that list deliberately — otherwise a project's master cannot `mop login` its own puppets; that is safe exactly while the `WRITABLE` files are assembled from the machine, not from the master's project — true for the claude login and `secrets.env`; the credential mark any master can overwrite, and it stays harmless because attribution trusts only the lease in the job meta, never the mark (#284, #308)
 
 ## Traps that cost debugging
 
