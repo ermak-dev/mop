@@ -218,10 +218,10 @@ def check_name_first_328(c):
             try:
                 out, err, code = run_command(cmd.main, [bad], stdin="the-code\n")
             except Refused:
-                out, code = "", 0
+                out, err, code = "", "", 0
             c.check(f"#328 {bad!r} is refused before Login.start",
-                    homes == [] and code not in (0, None) and "credential name" in str(code)
-                    and "\n" not in str(code).strip() and out == "", (homes, code, out))
+                    homes == [] and code == 1 and "credential name" in err
+                    and len(err.strip().splitlines()) == 1 and out == "", (homes, code, out, err))
         homes.clear()
         try:
             run_command(cmd.main, ["good-name"], stdin="the-code\n")

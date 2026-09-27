@@ -43,7 +43,8 @@ def main(argv):
     try:
         home = credreg.home(name)
     except ValueError as e:
-        sys.exit(str(e))
+        lib.fail(str(e))
+        return 1
     mode = "setup-token" if setup else "login"
     try:
         login = credlogin.Login.start(home, mode)
