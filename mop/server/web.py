@@ -413,8 +413,9 @@ class Collector:
 
     def _creds(self):
         # Реестр лежит на сервере рядом с сервисом, и читается напрямую
-        # (mop/server/credreg.py), а не глаголом кластера: машинный
-        # пользователь service не пишет в rpc сервиса (#104, docs/BUS.md).
+        # (mop/server/credreg.py), а не глаголом кластера. Ростер и узлы
+        # сборщик спрашивает у сервиса кластера по субъекту без логина --
+        # он service открыт намеренно; с логином -- закрыт (#309, docs/BUS.md).
         while True:
             self.refresh_creds()
             time.sleep(CREDS_EVERY)
