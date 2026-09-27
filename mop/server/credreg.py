@@ -405,18 +405,20 @@ def push(name, node, bodies):
         files = materialize(name)
     except ValueError as e:
         return f"FAILED: {str(e)[:120]}"
-    # Кодировка -- одним местом (#315): та же пара [путь, b64], что у distribute.
-    payload = [bus.as_file(p, d) for p, d in files]
+    # Запись и разбор ответа -- через bus (#315): request_many одному узлу и
+    # results_from, те же OK / FAILED / NOT REACHED, что у distribute.
     try:
-        got = bus.request(node, "write", timeout=PUSH_TIMEOUT, project=bus.ADMIN,
-                          files=payload, bodies=list(bodies))
+        answers = bus.request_many("write", [node], timeout=PUSH_TIMEOUT, project=bus.ADMIN,
+                                   files=[bus.as_file(p, d) for p, d in files],
+                                   bodies=list(bodies))
     except bus.BusError as e:
-        return f"NOT REACHED: {e}"
-    bad = bus.verdict(got)
-    if bad:
-        return (f"NOT REACHED: {bad[1] or 'no answer'}" if bad[0] == bus.UNREACHED
-                else f"FAILED: {bad[1][:120]}")
-    missed = [w for w in got.get("written") or []
+        answers = {node: e}
+    got = bus.results_from([node], answers)[node]
+    if got != "OK":
+        return got
+    # Сверх результата узла (#312): отказ одного тела агент кладёт строкой в
+    # written, и без её разбора непришедшая аренда читалась бы OK.
+    missed = [w for w in answers[node].get("written") or []
               if " FAILED — " in w or w.endswith(" NOT LIVE")]
     return f"FAILED: {missed[0][:120]}" if missed else "OK"
 

@@ -502,14 +502,15 @@ def check_push_312(c):
         return
     sent = []
 
+    # Запись -- через bus.request_many (#315): ответ -- {узел: ответ | ошибка},
+    # ошибка шины на узле возвращается, а не бросается.
     def answer(reply):
-        def request(node, verb, timeout=None, project=None, **fields):
-            sent.append((node, verb, project, fields.get("bodies"),
-                         [f[0] for f in fields.get("files") or []]))
-            if isinstance(reply, Exception):
-                raise reply
-            return reply
-        return request
+        def request_many(verb, nodes, timeout=None, project=None, **fields):
+            for node in nodes:
+                sent.append((node, verb, project, fields.get("bodies"),
+                             [f[0] for f in fields.get("files") or []]))
+            return {node: reply for node in nodes}
+        return request_many
     with tempfile.TemporaryDirectory() as tmp, patched(srv, ROOT=tmp):
         srv.save(credreg.record("anton", "glm", "key", now=NOW))
         with patched(srv, materialize=lambda name, rec=None: [("a/b", b"x"), ("m", b"anton\n")]):
@@ -523,7 +524,7 @@ def check_push_312(c):
                     (bus.BusError("node agent hyper did not answer in 60s"),
                      "NOT REACHED: node agent hyper did not answer in 60s")):
                 sent.clear()
-                with patched(bus, request=answer(reply)):
+                with patched(bus, request_many=answer(reply)):
                     got = push("anton", "hyper", ["pu-mop-1"])
                 c.expect(f"#312 push result for {reply!r}", got, want)
             c.expect("#312 push: one addressed write, admin, to that node and body",
@@ -531,7 +532,7 @@ def check_push_312(c):
 
         def nothing(name, rec=None):
             raise ValueError("credential anton: no key to distribute")
-        with patched(srv, materialize=nothing), patched(bus, request=answer({"written": []})):
+        with patched(srv, materialize=nothing), patched(bus, request_many=answer({"written": []})):
             sent.clear()
             c.expect("#312 push: nothing to carry -> FAILED, no write",
                      (push("anton", "hyper", ["pu-mop-1"]), sent),
