@@ -2,6 +2,7 @@
 
   mop dev bug   project tracker: GitLab issues, one issue per unit of work
   mop dev ci    pipelines, job logs, lint and runners: GitLab CI from the terminal
+  mop dev docs  regenerate docs/CLI.md, the CLI reference, from the docstrings
   mop dev test  run the checks in tests/, all or the named ones
   mop dev web   build the dashboard (web/dist) and check the committed build
 

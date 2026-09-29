@@ -1,4 +1,4 @@
-"""mop dev bug new "Заголовок" [--label L ...] [--body-file F] [--epic N]: open an issue
+"""mop dev bug new "<title>" [--label L ...] [--body-file F] [--epic N]: open an issue
 
 Body from --body-file or stdin; --epic makes it a child of that epic. A
 status label is added when none is given: status::live.
