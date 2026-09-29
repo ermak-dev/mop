@@ -90,10 +90,10 @@ mop server deploy
 1\. Поставить клиент пакетом из git одной командой: [uv](https://docs.astral.sh/uv/) заводит ему отдельное окружение со всеми библиотеками и кладёт `mop` в `PATH`. Нужен git-доступ к репозиторию mop.
 
 ```
-uv tool install git+ssh://<адрес>/ermak/mop.git
+uv tool install git+ssh://git@ssh.sourcecraft.dev/ermakdev/mop.git
 ```
 
-Вместо uv подойдёт `pipx install git+ssh://<адрес>/ermak/mop.git`. Клон с `mop setup` остаётся путём сервера и разработчика mop.
+Вместо uv подойдёт `pipx install git+ssh://git@ssh.sourcecraft.dev/ermakdev/mop.git`. Клон с `mop setup` остаётся путём сервера и разработчика mop.
 
 Клиент обновляется командой `uv tool upgrade mop` (или `pipx upgrade mop`), сервер раскатывает CI. Если клиент разошёлся с шиной сервера, лечится это обновлением клиента.
 
