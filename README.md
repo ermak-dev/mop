@@ -87,7 +87,7 @@ mop server deploy
 
 ### Клиент
 
-1\. Поставить клиент пакетом из git одной командой: [uv](https://docs.astral.sh/uv/) заводит ему отдельное окружение со всеми библиотеками и кладёт `mop` в `PATH`. Нужен git-доступ к репозиторию mop.
+1\. Поставить клиент пакетом из git одной командой: [uv](https://docs.astral.sh/uv/) заводит ему отдельное окружение со всеми библиотеками и кладёт `mop` в `PATH`. Нужен git-доступ к репозиторию mop. Самого uv нет — ставит одна команда: `curl -LsSf https://astral.sh/uv/install.sh | sh`, самодостаточный бинарник в `~/.local/bin`.
 
 ```
 uv tool install git+ssh://git@ssh.sourcecraft.dev/ermakdev/mop.git
