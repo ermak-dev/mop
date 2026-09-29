@@ -9,3 +9,6 @@ setup.yaml
 # тулчейн дашборда (#297): только у разработчика и в CI, собранный web/dist коммитится
 web/node_modules/
 web/src/node_modules/
+# сборка пакета (#351): pip и uv собирают здесь, в репозиторий не едет
+build/
+*.egg-info/

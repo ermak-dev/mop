@@ -50,13 +50,18 @@ keys.
 """
 import json
 import os
+import sys
 
 from mop.cli import lib
 from mop.cli.core import _common
 from mop.common import config, llm, puppets
 
-SKILL = os.path.join(config.PROJECT,
-                     "skills", "master")
+# Скилл едет в пакете (#351): у клиента, поставленного из git, config.PROJECT
+# -- site-packages, и skills/ рядом с ним нет. В клоне skills/master --
+# переходный симлинк сюда же, и прежние ссылки ~/.claude/skills/master
+# резолвятся в тот же файл.
+SKILL = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.realpath(__file__)))), "skills", "master")
 SKILL_LINK = os.path.expanduser("~/.claude/skills/master")
 
 
@@ -76,11 +81,23 @@ def link_skill():
 
 # --strict-mcp-config не добавляем: у оператора есть свои серверы, и мастер-шелл
 # не повод их отбирать.
+def mcp_command(bin_dir=lib.BIN, python=sys.executable):
+    """Чем мастер-сессия поднимает свой MCP-сервер -> (команда, аргументы).
+    Чистая функция (#351). У клона -- его bin/mop: сервер остаётся на дереве
+    той копии, из которой подняли мастера. У пакета bin/ нет, и его зовёт
+    тот же интерпретатор, что запустил mop, -- в venv пакета он и найдёт."""
+    launcher = os.path.join(bin_dir, "mop")
+    if os.path.exists(launcher):
+        return launcher, ["mcp"]
+    return python, ["-m", "mop.cli", "mcp"]
+
+
 def mcp_config():
+    command, args = mcp_command()
     return json.dumps({"mcpServers": {"mop": {
         "type": "stdio",
-        "command": os.path.join(lib.BIN, "mop"),
-        "args": ["mcp"],
+        "command": command,
+        "args": args,
     }}})
 
 

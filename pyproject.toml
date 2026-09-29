@@ -1,0 +1,25 @@
+# Клиент mop пакетом из git (#351): uv tool install git+ssh://<origin>/ermak/mop.git.
+# Сервер и разработчик живут с клона и bin/mop, как раньше.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mop"
+version = "0.1.0"
+description = "A pool of claude puppets on top of Nomad, a message bus on top of NATS"
+requires-python = ">=3.12"
+# Зависимости -- в setup.py из mop/common/deps.py: список один на узел,
+# тело, CI и клиента, второго здесь не заводим.
+dynamic = ["dependencies"]
+
+[project.scripts]
+mop = "mop.cli:console"
+
+# Явно mop*: flat-layout без include подобрал бы deploy/ и tests/.
+[tool.setuptools.packages.find]
+include = ["mop", "mop.*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+mop = ["skills/master/*"]

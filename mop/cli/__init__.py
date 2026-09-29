@@ -405,6 +405,12 @@ def main(argv):
         return run(command(modname), rest)
 
 
+def console():
+    """Вход пакета (#351): console_scripts зовёт функцию без аргументов,
+    а main берёт argv -- у клона его подаёт bin/mop через __main__."""
+    return main(sys.argv[1:])
+
+
 FALLBACK_LOCALE = "C.UTF-8"
 
 
