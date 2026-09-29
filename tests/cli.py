@@ -276,8 +276,96 @@ def check_gave_up_rows_345(c):
                  [(str(State("failing", text)), None)])
 
 
+# ── #350: справочник CLI из докстрингов командлетов ───────────────────
+# HYPOTHESIS: полного справочника подкоманд нет нигде: README держит десять
+# устаревших строк, `mop` без аргументов -- однострочники. Второй текст
+# рядом с кодом разошёлся бы с ним так же, как README.
+# SOLUTION: cli.render_reference -- чистая функция «[(каталог, слова,
+# докстринг)] -> Markdown» с частями клиент/сервер/служебное; cli.reference()
+# собирает её вход AST-разбором (docstring), без импорта командлетов;
+# `mop dev docs` пишет docs/CLI.md, проверка сверяет его с регенерацией.
+# Пустой докстринг -- отказ: новая команда без доки красит CI, а не молчит.
+# STATUS: FIXED — see #350
+ENTRIES_350 = [
+    ("core", ["add"], "create a puppet: mop add [origin]\n\n  --llm P   the profile"),
+    ("pool", ["doctor"], "pool diagnostics: mop doctor [--fix]"),
+    ("cred", ["cred"], "credentials of LLM providers"),
+    ("cred", ["cred", "add"], "add a key: mop cred add <name>"),
+    ("server", ["server"], "the installation's server"),
+    ("server", ["server", "deploy"], "deploy: mop server deploy [--check]\n\nRolls ```x``` out."),
+    ("service", ["agent"], "node agent: answers the bus"),
+]
+
+
+def check_reference_render_350(c):
+    render = getattr(cli, "render_reference", None)
+    if not c.check("#350 cli.render_reference exists", render is not None):
+        return
+    md = render(ENTRIES_350)
+    heads = [l for l in md.splitlines() if l.startswith("## ")]
+    c.expect("#350 parts: client, server, service, in this order",
+             heads, ["## Client", "## Server", "## Service"])
+    client, server, service = (md.split("\n## ")[i] for i in (1, 2, 3))
+    for part, words in [(client, "mop add"), (client, "mop doctor"),
+                        (client, "mop cred"), (client, "mop cred add"),
+                        (server, "mop server"), (server, "mop server deploy"),
+                        (service, "mop agent")]:
+        c.check(f"#350 {words} in its part", f"\n#### {words}\n" in part)
+    c.check("#350 the server group is not client", "mop server" not in client.replace(
+        "mop server deploy [--check]", ""))
+    for _, _, doc in ENTRIES_350:
+        c.check(f"#350 the whole docstring, verbatim: {doc[:30]!r}", doc in md)
+    # Три обратные кавычки внутри докстринга не закрывают блок раньше времени.
+    c.check("#350 a fence longer than any backtick run inside",
+            "\n````text\ndeploy: mop server deploy" in md)
+    c.expect("#350 the render is deterministic", render(ENTRIES_350), md)
+
+
+def check_reference_empty_350(c):
+    render = getattr(cli, "render_reference", None)
+    if not c.check("#350 cli.render_reference exists", render is not None):
+        return
+    try:
+        render(ENTRIES_350 + [("core", ["mute"], ""), ("dev", ["dev", "x"], "  ")])
+        c.fail("#350 an empty docstring must refuse, not render")
+    except ValueError as e:
+        c.check(f"#350 the refusal names every command: {e}",
+                "mop mute" in str(e) and "mop dev x" in str(e))
+
+
+def check_reference_committed_350(c):
+    reference = getattr(cli, "reference", None)
+    if not c.check("#350 cli.reference exists", reference is not None):
+        return
+    try:
+        md = reference()
+    except ValueError as e:
+        c.fail(f"#350 every commandlet needs a docstring: {e}")
+        return
+    path = os.path.join(ROOT, "docs", "CLI.md")
+    try:
+        with open(path) as f:
+            committed = f.read()
+    except OSError:
+        committed = None
+    c.check("#350 docs/CLI.md matches its regeneration: run `mop dev docs` and commit it",
+            committed == md)
+    # Реальный каталог -- целиком: каждая команда и глагол, и ни одного
+    # переходного имени из LEGACY.
+    for words in (["add"], ["tail"], ["server", "deploy"], ["server", "user", "add"],
+                  ["dev", "docs"], ["mcp"]):
+        c.check(f"#350 the reference holds mop {' '.join(words)}",
+                f"\n#### mop {' '.join(words)}\n" in md)
+    for key in cli.LEGACY:
+        words = " ".join(key) if isinstance(key, tuple) else key
+        c.check(f"#350 no legacy name mop {words}", f"\n#### mop {words}\n" not in md)
+
+
 def main():
     c = Checks()
+    check_reference_render_350(c)
+    check_reference_empty_350(c)
+    check_reference_committed_350(c)
     check_gave_up_rows_345(c)
     check_bootstrap_outcome_334(c)
     check_bootstrap_sent_334(c)
