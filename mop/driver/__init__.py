@@ -21,13 +21,15 @@ Nomad решает, где стоит папет, шина — как с ним 
 глаголы гипервизора требуются только от драйвера с отдельными телами (#276):
 
     ensure(name, params)   поднять тело: клон шаблона, лимиты, адрес, старт
-    destroy(name)          снести тело
+    destroy(name, branch=None)
+                           снести тело; branch -- что агент сохраняет из клона
     bodies()               что есть на этом узле — ростер без Nomad
     capacity()             память и место хранилища тел
     argv(name)             префикс команды: [] у host, ssh у контейнера
     run_argv(name)         чем узел запускает врапер в теле: соединение живёт
                            столько же, сколько папет
-    push(name, path, data) положить файл внутрь (mop login)
+    push(name, path, data) положить файл внутрь (mop driver run)
+    push_many(name, files) [(путь, байты)] разом -- глагол write (mop login)
     projects_dir(name)     где транскрипты — mop stat, usage
     attach_argv(name)      чем входит человек
     repair_argv(name)      аварийный путь, когда основной молчит
@@ -41,6 +43,13 @@ Nomad решает, где стоит папет, шина — как с ним 
     SESSION_PY             путь к session.py внутри тела
     IS_CONTAINER           тела — отдельные объекты, а не сам узел (False у host)
 
+Асинхронны ensure, destroy, push, push_many, admit, bodies, capacity, templates
+(ASYNC_VERBS), остальные глаголы -- обычные функции; сигнатуры сверяются с
+каноническими вызовами потребителей (CALLS, #374).
+
+Отказ тела -- ответ {"error": причина}; недокатанный узел (нет ключа сервера,
+кредов шины) -- RuntimeError с «run mop server deploy».
+
 Потребитель ветвится не по флагу, а зовёт контракт (#151): флаг, прочитанный
 вне драйвера, — это переключатель типа, и третий драйвер проходил проверку
 контракта, чтобы упасть у потребителя.
@@ -50,6 +59,7 @@ Nomad решает, где стоит папет, шина — как с ним 
 """
 import asyncio
 import importlib
+import inspect
 import os
 import re
 
@@ -77,6 +87,30 @@ VERBS = BODY_VERBS + NODE_VERBS + HYPERVISOR_VERBS
 # только через hypervisor_verb. tests/driver.py выводит этот список из кода
 # потребителей и сверяет.
 CONSUMED = BODY_VERBS + NODE_VERBS + ("SESSION_PY", "IS_CONTAINER")
+# Как глаголы зовут (#374): имя, которое есть, ещё не значит глагол, который
+# встанет в вызов. Эти потребители ждут (`await DRIVER.x(...)` в агенте,
+# asyncio.run(d.x(...)) в mop driver ...); остальные зовутся без await.
+ASYNC_VERBS = ("ensure", "destroy", "push", "push_many", "admit",
+               "bodies", "capacity", "templates")
+# Канонические вызовы -- ровно те формы, какими глагол зовут потребители,
+# парами (позиционные, именованные): destroy агент зовёт с branch=, а
+# mop driver sweep -- без него.
+CALLS = {
+    "ensure": [(("n", {}), {})],
+    "destroy": [(("n",), {}), (("n",), {"branch": None})],
+    "argv": [(("n",), {})],
+    "run_argv": [(("n",), {})],
+    "push": [(("n", "/path", b""), {})],
+    "push_many": [(("n", []), {})],
+    "projects_dir": [(("n",), {})],
+    "attach_argv": [(("n",), {})],
+    "repair_argv": [(("n",), {})],
+    "admit": [(("n", True), {})],
+    "address": [(("n",), {})],
+    "bodies": [((), {})],
+    "capacity": [((), {})],
+    "templates": [((), {})],
+}
 
 DEFAULT = config.SETTINGS["MOP_DRIVER"]
 
@@ -387,6 +421,21 @@ def contract(name, mod):
         if not callable(fn):
             raise RuntimeError(f"{where}: no {verb}() — the contract is "
                                f"{', '.join(demanded)} (docs/DRIVER.md)")
+        # Форма вызова -- тоже контракт (#374): синхронный push падает на
+        # asyncio.run у потребителя, destroy(name) без branch -- TypeError в
+        # агенте, и оба проходили проверку одного callable.
+        if inspect.iscoroutinefunction(fn) != (verb in ASYNC_VERBS):
+            raise RuntimeError(f"{where}: {verb}() must be "
+                               f"{'async' if verb in ASYNC_VERBS else 'a plain def'} "
+                               f"— its consumers call it that way (docs/DRIVER.md)")
+        for args, kwargs in CALLS[verb]:
+            try:
+                inspect.signature(fn).bind(*args, **kwargs)
+            except TypeError as e:
+                shown = ", ".join([repr(a) for a in args] +
+                                  [f"{k}={v!r}" for k, v in kwargs.items()])
+                raise RuntimeError(f"{where}: {verb}() cannot be called as "
+                                   f"{verb}({shown}): {e} (docs/DRIVER.md)")
     session_py = getattr(mod, "SESSION_PY", None)
     # Абсолютный, потому что исполняется внутри тела и из чужого каталога:
     # относительный там молча соберётся в `python3 session.py`, которого нет,
