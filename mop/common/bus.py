@@ -641,11 +641,19 @@ def results_from(nodes, answers):
     """Ответы агентов на `write` -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"}.
     Чистая функция (#135): молчание агента называется молчанием, без
     отсылки к токену Nomad и контроллеру. Одна на клиента и сервер (#315):
-    копии держали client/keys.py и server/credreg.py."""
+    копии держали client/keys.py и server/credreg.py.
+
+    Отказ тела агент отдаёт полем failed {тело: причина}, а не error (#366):
+    узел ответил, но записи нет. Такой узел -- FAILED с причиной первого
+    тела; строки в written не разбираются, их формулировка не контракт."""
     out = {}
     for node in nodes:
-        got = verdict(answers.get(node))
-        if got is None:
+        answer = answers.get(node)
+        got = verdict(answer)
+        if got is None and answer.get("failed"):
+            body, why = next(iter(answer["failed"].items()))
+            out[node] = f"FAILED: {body}: {why}"[:128]
+        elif got is None:
             out[node] = "OK"
         elif got[0] == UNREACHED:
             out[node] = f"NOT REACHED: {got[1] or 'no answer'}"
