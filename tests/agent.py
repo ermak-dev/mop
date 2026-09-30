@@ -20,7 +20,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, Msg, bash, canned, patched, restored, GATE_NOW, gate_table_267  # noqa: E402
+from _lib import Checks, Msg, bash, canned, patched, patched_env, restored, GATE_NOW, gate_table_267  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.node import agent  # noqa: E402
@@ -1307,6 +1307,57 @@ def check_sweep_bodies_363(c):
              rep(0, SWEEP_OUT, "", 60).get("bodies", "missing"), None)
 
 
+def check_hung_sweep_373(c):
+    """HYPOTHESIS (#373): v_sweep ждал pu-sweep голым proc.communicate() без
+    срока, держа _sweep_lock. Зависни pu-sweep (mop driver sweep ждёт
+    недоступный гипервизор) -- каждый следующий sweep отвечал «a sweep is
+    already running on this node» до рестарта юнита.
+    SOLUTION: v_sweep идёт через driver.sh (env=, раздельный stderr) со
+    сроком MOP_SWEEP_TIMEOUT -- меньше, чем клиент (doctor disk) ждёт ответа:
+    отказ агента доезжает до doctor, а не читается как «did not answer».
+    По сроку процесс убит, ответ {"error"}, замок отпущен.
+    STATUS: FIXED — see #373
+
+    Вместо pu-sweep -- скрипт, который висит; срок -- доли секунды. Внешний
+    wait_for держит проверку от зависания на старом коде."""
+    import asyncio
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        hung = os.path.join(tmp, "pu-sweep")
+        with open(hung, "w") as f:
+            f.write("#!/bin/sh\nexec sleep 30\n")
+        os.chmod(hung, 0o755)
+
+        async def twice():
+            first = await asyncio.wait_for(agent.v_sweep(None, {"dry": True}), 5)
+            second = await asyncio.wait_for(agent.v_sweep(None, {"dry": True}), 5)
+            return first, second
+        with patched(agent, SWEEP=hung, _sweep_lock=asyncio.Lock()), \
+                patched_env(MOP_SWEEP_TIMEOUT="0.3"):
+            try:
+                first, second = asyncio.run(twice())
+            except asyncio.TimeoutError:
+                first = second = {"error": "v_sweep did not return (outer 5s bound)"}
+    c.expect("#373 a hung pu-sweep is refused by the deadline",
+             first, {"error": "pu-sweep did not finish in 0.3s"})
+    c.check("#373 the next sweep is not «already running»",
+            "already running" not in str(second.get("error")), second)
+    c.check("#373 the node deadline is shorter than the client's wait",
+            float(agent.config.SETTINGS["MOP_SWEEP_TIMEOUT"]) < _doctor_sweep_timeout(),
+            agent.config.SETTINGS.get("MOP_SWEEP_TIMEOUT"))
+    c.check("#373 MOP_SWEEP_TIMEOUT reaches the node (NODE_SCOPED)",
+            "MOP_SWEEP_TIMEOUT" in agent.config.NODE_SCOPED)
+
+
+def _doctor_sweep_timeout():
+    """Сколько doctor disk ждёт ответа sweep -- из его кода: клиентский
+    модуль тянет шину, а проверке нужно одно число."""
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    src = open(os.path.join(root, "mop", "client", "doctor", "disk.py")).read()
+    return float(re.search(r"^SWEEP_TIMEOUT = (\d+)", src, re.M)[1])
+
+
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
@@ -1316,7 +1367,8 @@ def main():
                   check_state_fact_224, check_no_screen_fact_236,
                   check_usage_by_login_244, check_owner_gate_267,
                   check_junk_without_templates_276, check_owner_hook_313,
-                  check_sweep_report_358, check_sweep_bodies_363):
+                  check_sweep_report_358, check_sweep_bodies_363,
+                  check_hung_sweep_373):
         try:
             check(c)
         except Exception as e:

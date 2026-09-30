@@ -541,8 +541,11 @@ def current():
 
 
 # ─── исполнение ──────────────────────────────────────────────────────────
-async def sh(script, timeout=20, prefix=()):
-    """Шелл: на самом узле (пустой префикс) либо внутри тела. -> (вывод, код).
+async def sh(script, timeout=20, prefix=(), env=None, split=False):
+    """Шелл: на самом узле (пустой префикс) либо внутри тела. -> (вывод, код),
+    а с split=True -- (stdout, stderr, код): тому, кто разбирает вывод, нужны
+    потоки порознь (pu-sweep говорит предупреждениями в stderr, #373). env --
+    окружение процесса целиком, как у subprocess; None -- унаследованное.
 
     Скрипт всегда строка, а не список: префикс тела — это ssh, а ssh склеивает
     свои аргументы пробелом и отдаёт удалённому шеллу одной строкой. Список
@@ -552,17 +555,17 @@ async def sh(script, timeout=20, prefix=()):
     Возврат (вывод, None) на таймауте отличается от (вывод, код): «не успел» и
     «ответил ненулевым» ведут в разные стороны, и молчащее тело нельзя
     прочитать как отказ команды."""
+    pipes = {"stdout": asyncio.subprocess.PIPE, "env": env,
+             "stderr": asyncio.subprocess.PIPE if split else asyncio.subprocess.STDOUT}
     if prefix:
-        proc = await asyncio.create_subprocess_exec(
-            *prefix, script,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        proc = await asyncio.create_subprocess_exec(*prefix, script, **pipes)
     else:
-        proc = await asyncio.create_subprocess_shell(
-            script, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT)
+        proc = await asyncio.create_subprocess_shell(script, **pipes)
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except asyncio.TimeoutError:
         proc.kill()
-        return "", None
+        return ("", "", None) if split else ("", None)
+    if split:
+        return out.decode(errors="replace"), err.decode(errors="replace"), proc.returncode
     return out.decode(errors="replace"), proc.returncode

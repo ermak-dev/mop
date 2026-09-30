@@ -653,8 +653,31 @@ def check_container_sweep_driver_362(c):
         shutil.rmtree(tmp)
 
 
+def check_sh_split_env_373(c):
+    """HYPOTHESIS (#373): v_sweep обходил driver.sh -- тот сливал stderr в
+    stdout и не принимал env, а sweep_report нужны out и err раздельно, и
+    pu-sweep ждали без срока. SOLUTION: sh(..., env=, split=True) -> (out,
+    err, код); без них -- прежние (вывод, код) и слияние. STATUS: FIXED — see #373"""
+    import asyncio
+    script = "echo out; echo err >&2; echo $MOP_TEST_373"
+    c.expect("#373 sh without split keeps merging stderr, (out, code)",
+             asyncio.run(driver.sh("echo out; echo err >&2")), ("out\nerr\n", 0))
+    try:
+        got = asyncio.run(driver.sh(script, env={**os.environ, "MOP_TEST_373": "x"},
+                                    split=True))
+    except TypeError as e:
+        got = f"TypeError: {e}"
+    c.expect("#373 sh(split=True, env=) -> (out, err, code)", got, ("out\nx\n", "err\n", 0))
+    try:
+        got = asyncio.run(driver.sh("sleep 5", timeout=0.2, split=True))
+    except TypeError as e:
+        got = f"TypeError: {e}"
+    c.expect("#373 sh(split=True) on a timeout -> code None", got, ("", "", None))
+
+
 def main():
     c = Checks()
+    check_sh_split_env_373(c)
     check_gave_up_wrapper_345(c)
     check_sweep_keeps_work_346(c)
     check_host_sweep_rule_347(c)
