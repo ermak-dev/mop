@@ -650,28 +650,37 @@ SWEEP = "/usr/local/bin/pu-sweep"
 SWEEP_KNOBS = ("MOP_SWEEP_FREE_MIN_GB", "MOP_SWEEP_MAX_TARGET", "MOP_SWEEP_STALE_DAYS")
 # Последняя строка pu-sweep -- для машины, всё выше -- для человека.
 _SWEEP_TOTALS = re.compile(r"pu_sweep_freed_kb=(\d+) pu_sweep_free_gb=(\d+)")
+# Ярус 0 (тела-контейнеры) итоговой строки не даёт: сколько места вернёт снос
+# тела, с узла не видно. Зато видно, сколько тел уйдёт, -- этой строкой
+# заканчивает `mop driver sweep`, и без неё doctor не отличил бы узел с
+# брошенными телами от чистого (#363).
+SWEEP_BODIES = "pu_sweep_bodies"
+_SWEEP_BODIES = re.compile(SWEEP_BODIES + r"=(\d+)")
 # Одно подметание на узел за раз: два doctor подряд иначе мели бы одни и те
 # же пути наперегонки.
 _sweep_lock = asyncio.Lock()
 
 
 def sweep_report(rc, out, err, min_gb):
-    """Вывод pu-sweep -> {freed_kb, free_gb, min_gb, warnings} | {error}.
+    """Вывод pu-sweep -> {freed_kb, free_gb, min_gb, warnings, bodies} | {error}.
     Чистая функция (tests/agent.py).
 
     Итоговой строки нет у узла с телами-контейнерами (уходит после яруса 0)
     и у отказа сторожа (ecryptfs без монтирования): тогда цифры None --
-    «не знаю», а не ноль. Предупреждения -- строки stderr с «!»: ими скрипт
-    говорит об отказах внутри подметания."""
+    «не знаю», а не ноль. bodies -- сколько брошенных тел снесёт (снёс)
+    ярус 0; у host-узла и у отказа яруса 0 -- None. Предупреждения -- строки
+    stderr с «!»: ими скрипт говорит об отказах внутри подметания."""
     if rc != 0:
         last = (err.strip() or out.strip()).splitlines()[-1:] or ["no output"]
         return {"error": f"pu-sweep exit {rc}: {last[0].strip()}"}
     m = _SWEEP_TOTALS.search(out)
+    b = _SWEEP_BODIES.search(out)
     return {"freed_kb": int(m[1]) if m else None,
             "free_gb": int(m[2]) if m else None,
             "min_gb": min_gb,
             "warnings": [ln.strip()[1:].strip() for ln in err.splitlines()
-                         if ln.strip().startswith("!")]}
+                         if ln.strip().startswith("!")],
+            "bodies": int(b[1]) if b else None}
 
 
 async def v_sweep(_conn, req):

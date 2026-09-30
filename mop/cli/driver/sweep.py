@@ -84,6 +84,7 @@ def main(argv):
     names, codes = asyncio.run(survey())
     if not names:
         print("no bodies on this machine")
+        print(f"{agent.SWEEP_BODIES}=0")
         return 0
     live = sum(code == 0 for code in codes)
     print(f"bodies: {live}/{len(names)} with a live session")
@@ -101,6 +102,7 @@ def main(argv):
             continue
         if dry:
             print(f"  would destroy {name}: {why}")
+            gone += 1
             continue
         r = asyncio.run(d.destroy(name))
         done = Gone.from_dict(r)
@@ -108,4 +110,8 @@ def main(argv):
         gone += 1 if done else 0
     if not dry:
         print(f"{gone} orphaned bod{'y' if gone == 1 else 'ies'} destroyed")
+    # Последняя строка -- для машины (#363): её читает агент, и по ней doctor
+    # решает, мести ли узел. Всухую -- сколько снесло бы, иначе -- сколько
+    # снесено. У отказа выше её нет: там не ноль, а «не знаю».
+    print(f"{agent.SWEEP_BODIES}={gone}")
     return 0
