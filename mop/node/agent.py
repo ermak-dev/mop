@@ -897,14 +897,19 @@ async def v_write(_conn, req):
     # папета -- ценой его работы. Все тела разом и все файлы тела одним
     # вызовом (#137): по очереди это стоило ~4 с на файл.
     answers = await asyncio.gather(*(DRIVER.push_many(name, files) for name in bodies))
+    failed = {}
     for name, r in zip(bodies, answers):
         if r.get("error"):
             # Отказ по одному телу не отменяет остальных.
+            failed[name] = r["error"]
             written.append(f"{name} FAILED — {r['error']}")
         else:
             written += [f"{name}:{p}" for p in r.get("written") or []]
     written += [f"{name} NOT LIVE" for name in absent]
-    return {"written": written}
+    # Отказы тел -- полями (#366): по ним судят bus.results_from и реестр
+    # кредитов; строки в written остаются для старых клиентов, разбирать
+    # их текст нельзя -- правка формулировки молча сделала бы отказ успехом.
+    return {"written": written, "failed": failed, "absent": list(absent)}
 
 
 async def v_junk(_conn, req):
