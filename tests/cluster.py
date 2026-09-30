@@ -234,8 +234,13 @@ def check_verb_table_173(c):
                 c.expect(f"refusal {key}", got, want)
                 cluster._owner = lambda name, o=origin, e=exists: (o, e)
                 called.clear()
-                got = {"reply": cluster.answer(project, {"verb": verb, "name": "pu-x-1",
-                                                         "new_origin": new}),
+                # Клиент шлёт новый origin полем origin и дублирует его в
+                # new_origin; с #365 сервер решает по origin, поэтому
+                # просимый origin едет в обоих полях, как у настоящего клиента.
+                req = {"verb": verb, "name": "pu-x-1", "new_origin": new}
+                if new and verb == "update":
+                    req["origin"] = new
+                got = {"reply": cluster.answer(project, req),
                        "called": list(called)}
                 c.expect(f"answer {key}", got, snap["answer"][key])
         finally:
@@ -1067,6 +1072,99 @@ def check_cred_push_project_360(c):
                  (want, [("anton", "hyper", ["pu-mop-1"])]))
 
 
+# ── #365: update с чужим origin без поля new_origin ────────────────────
+# HYPOTHESIS: refusal проверяет смену репозитория update только по полю
+# new_origin, а его вычисляет клиент (mop/cli/core/update.py): запрос мастера
+# mop с origin=rugent и без new_origin проходит, и регистрируется спека с
+# Meta.origin=rugent на кредах проекта rugent. Граница проекта доверена полю,
+# которое присылает проверяемый.
+# SOLUTION: _answer сам сравнивает req["origin"] с origin джоба (_owner) и
+# при любом расхождении зовёт _foreign_origin; new_origin в решении не
+# участвует. Оператор проходит, как прежде.
+# STATUS: FIXED — see #365
+def check_update_origin_365(c):
+    own = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
+    rugent = "git@h:g/rugent.git"
+    registered = []
+
+    def api():
+        a = FakeNomad(jobs={"pu-mop-1": dict(own)})
+        a.register = lambda spec: registered.append(spec) or {}
+        return a
+    with patched(cluster.spec, respec=lambda name, meta, cont=False, node=None:
+                 {"Job": {"ID": name, "Meta": meta.to_meta()}}), \
+            patched(cluster, _cred_for=lambda *a, **kw: (None, None)), \
+            patched(cluster.credreg, all=lambda: []):
+        req = {"verb": "update", "name": "pu-mop-1", "origin": rugent, "profile": "claude"}
+        got = cluster.answer("mop", req, api=api())
+        c.expect("#365 a master's update onto another project's origin, no new_origin: refused",
+                 (got, registered),
+                 ({"error": cluster._foreign_origin("mop", rugent)}, []))
+        # new_origin в решении не участвует: подложенный «свой» не спасает.
+        registered.clear()
+        got = cluster.answer("mop", dict(req, new_origin="git@h:g/mop.git"), api=api())
+        c.check("#365 a forged own new_origin does not pass a foreign origin",
+                got.get("error") == cluster._foreign_origin("mop", rugent) and not registered, got)
+        registered.clear()
+        own_req = dict(req, origin="git@h:g/mop.git")
+        got = cluster.answer("mop", own_req, api=api())
+        c.check("#365 update with its own origin, no change: passes",
+                not got.get("error") and len(registered) == 1, got)
+        registered.clear()
+        got = cluster.answer("admin", req, api=api())
+        c.check("#365 the operator may move a puppet between projects",
+                not got.get("error") and len(registered) == 1, got)
+
+    # Второй симптом: владелец непомеченного джоба выводился из origin
+    # запроса (origin or req["origin"]), и мастер присваивал чужой джоб,
+    # подложив свой origin. Владелец -- только из джоба, если джоб есть.
+    bare = {"ID": "pu-rugent-1", "Meta": {"llm": "claude"}}
+    mine = "git@h:g/mop.git"
+    reached = []
+
+    def bare_api():
+        a = FakeNomad(jobs={"pu-rugent-1": dict(bare)})
+        a.register = lambda spec: registered.append(spec) or {}
+        return a
+    no_origin = "pu-rugent-1 carries no origin"
+    with patched(cluster.spec, respec=lambda name, meta, cont=False, node=None:
+                 {"Job": {"ID": name, "Meta": meta.to_meta()}}), \
+            patched(cluster, _cred_for=lambda *a, **kw: (None, None),
+                    _stop=lambda project, req: reached.append("stop") or {"ok": True}), \
+            patched(cluster.credreg, all=lambda: []):
+        cluster.VERBS["stop"], keep_stop = dataclasses.replace(
+            cluster.VERBS["stop"], fn=cluster._stop), cluster.VERBS["stop"]
+        try:
+            for verb in ("update", "stop"):
+                registered.clear()
+                reached.clear()
+                req = {"verb": verb, "name": "pu-rugent-1", "origin": mine, "profile": "claude"}
+                got = cluster.answer("mop", req, api=bare_api())
+                c.check(f"#365 {verb} of an unlabeled job with a planted own origin: refused",
+                        (got.get("error") or "").startswith(no_origin)
+                        and not registered and not reached, got)
+                got = cluster.answer("admin", req, api=bare_api())
+                c.check(f"#365 the operator reaches an unlabeled job by {verb}",
+                        not got.get("error") and (registered or reached), got)
+        finally:
+            cluster.VERBS["stop"] = keep_stop
+    # add -- джоба нет, origin из запроса и есть владелец: как прежде.
+    c.expect("#365 add of its own origin, no job: passes as before",
+             cluster.refusal("mop", "add", origin=mine), None)
+    with patched(cluster, _owner=lambda name: (None, False)):
+        seen = []
+        keep_add = cluster.VERBS["add"]
+        cluster.VERBS["add"] = dataclasses.replace(keep_add, fn=lambda project, req: seen.append(req) or {"ok": True})
+        try:
+            c.expect("#365 add through answer: its own origin passes",
+                     (cluster.answer("mop", {"verb": "add", "origin": mine}), len(seen)), ({"ok": True}, 1))
+            c.check("#365 add of another project's origin: refused",
+                    "belongs to project rugent" in (cluster.answer("mop", {"verb": "add", "origin":
+                                                                   "git@h:g/rugent.git"}).get("error") or ""))
+        finally:
+            cluster.VERBS["add"] = keep_add
+
+
 # ── #318: держатели в ответах cred_list и cred_status -- одна форма ─────
 # Характеристика до переезда (эпик #314): имена папетов по алфавиту, узел
 # не едет; cred_status с именем пробует один кредит, без имени -- все.
@@ -1204,7 +1302,7 @@ def main():
                   check_update_keeps_branch_257, check_cred_lease_284,
                   check_update_pins_node_289, check_owner_gate_267,
                   check_node_267, check_node_forms_277,
-                  check_nomad_api_275, check_stderr_verb_333, check_cred_push_312, check_cred_push_project_360,
+                  check_nomad_api_275, check_stderr_verb_333, check_cred_push_312, check_cred_push_project_360, check_update_origin_365,
                   check_cred_holders_318,
                   check_host_refusal_312):
         check(c)
