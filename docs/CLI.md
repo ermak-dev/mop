@@ -280,11 +280,15 @@ the operator's to see.
 #### mop doctor
 
 ```text
-pool diagnostics: mop doctor [--fix]
+pool diagnostics: mop doctor [group] [--fix]
 
 Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
 and a job spec older than the node driver — that last one looks perfectly
 healthy until the scheduler moves it to a hypervisor.
+
+The checks come in groups, a module each in mop/client/doctor/: `mop doctor`
+runs them all, `mop doctor <group>` runs one; a name that is not a group is
+refused with the list of groups.
 
 --fix treats what's treatable; a silent node agent is not on this list — the
 puppet may well be working fine, and a restart would kill that work in the

@@ -1,8 +1,12 @@
-"""pool diagnostics: mop doctor [--fix]
+"""pool diagnostics: mop doctor [group] [--fix]
 
 Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
 and a job spec older than the node driver — that last one looks perfectly
 healthy until the scheduler moves it to a hypervisor.
+
+The checks come in groups, a module each in mop/client/doctor/: `mop doctor`
+runs them all, `mop doctor <group>` runs one; a name that is not a group is
+refused with the list of groups.
 
 --fix treats what's treatable; a silent node agent is not on this list — the
 puppet may well be working fine, and a restart would kill that work in the
@@ -12,20 +16,8 @@ handed out and the puppet is nudged to go on, so its conversation survives.
 import sys
 
 from mop.cli import lib
-from mop.client import keys
-from mop.common import puppets
+from mop.client import doctor
 from mop.common.render import table
-
-
-def _login():
-    """Раздача кредов перед лечением. Зовём библиотеку, а не соседний
-    командлет: командлет разбирает аргументы и печатает, оболочкой друг для
-    друга они быть не должны. Показываем только узлы, куда креды не доехали
-    (#159): успех раздачи виден по лечению ниже, а не отчётом о каждом узле."""
-    results, what, _ = keys.push_login()
-    for node in sorted(results):
-        if results[node] != "OK":
-            print(f"  {node}: {' + '.join(what)} {results[node]}")
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -34,10 +26,16 @@ MCP = {"annotations": "destructive", "args": [
 
 
 def main(argv):
-    fix = "--fix" in argv
-    if set(argv) - {"--fix"}:
-        lib.usage(__doc__)
-    issues = puppets.diagnose()
+    try:
+        chosen, fix = doctor.select(list(doctor.groups()), argv)
+    except ValueError as e:
+        lib.usage(f"{e}\n\n{__doc__}")
+    # Группы (#356): каждая проблема помнит свою группу -- её и лечит.
+    found = []
+    for name in chosen:
+        check = doctor.module(name)
+        found += [(check, issue) for issue in check.diagnose()]
+    issues = [issue for _, issue in found]
     if not issues:
         print("pool is healthy: nothing stuck")
         return
@@ -55,14 +53,18 @@ def main(argv):
         return
 
     print()
-    if any(i["action"] == "login+nudge" for i in issues):
-        if not keys.credentials_fresh():
-            sys.exit("local credentials are stale or broken — log in to claude "
-                     "on this machine first, then mop doctor --fix")
-        _login()
-    for issue in issues:
+    # Подготовка группы до лечения (раздача кредов перед login+nudge):
+    # отказ любой из них останавливает --fix целиком, как и до шва.
+    for name in chosen:
+        check = doctor.module(name)
+        refusal, lines = check.prepare([i for c, i in found if c is check])
+        if refusal:
+            sys.exit(refusal)
+        for line in lines:
+            print(line)
+    for check, issue in found:
         if issue["action"]:
-            print(f"  {issue['name']}: {puppets.treat(issue)}")
+            print(f"  {issue['name']}: {check.treat(issue)}")
 
 
 
