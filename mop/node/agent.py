@@ -696,11 +696,16 @@ async def v_sweep(_conn, req):
         env.pop("MOP_SWEEP_DRY", None)
         if req.get("dry"):
             env["MOP_SWEEP_DRY"] = "1"
-        proc = await asyncio.create_subprocess_exec(
-            SWEEP, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
-        out, err = await proc.communicate()
-    return sweep_report(proc.returncode, out.decode(errors="replace"),
-                        err.decode(errors="replace"), int(config.get("MOP_SWEEP_FREE_MIN_GB")))
+        # Со сроком (#373): зависший pu-sweep держал замок до рестарта юнита,
+        # и каждый следующий sweep получал «already running». exec -- чтобы
+        # убит по сроку был сам pu-sweep, а не обёрточный sh: dash не
+        # подменяет себя последней командой, и сирота жил бы дальше.
+        timeout = float(config.get("MOP_SWEEP_TIMEOUT"))
+        out, err, rc = await driver.sh(f"exec {shlex.quote(SWEEP)}", timeout,
+                                       env=env, split=True)
+    if rc is None:
+        return {"error": f"pu-sweep did not finish in {config.get('MOP_SWEEP_TIMEOUT')}s"}
+    return sweep_report(rc, out, err, int(config.get("MOP_SWEEP_FREE_MIN_GB")))
 
 
 async def v_wipe(conn, req):
