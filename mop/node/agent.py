@@ -643,9 +643,9 @@ async def v_disk(_conn, _req):
 
 
 # Дисковый сторож узла (#358): скрипт кладёт на узел deploy (роль bus), его
-# пороги -- узловые настройки из node.env. Зовёт его doctor, а не только
-# periodic pu-cleanup: исполнение остаётся здесь, узел знает локальное --
-# tmux-сессии, клоны, тела.
+# пороги -- узловые настройки из node.env. Зовёт его doctor (по расписанию
+# -- таймер mop-doctor на сервере, #359; periodic pu-cleanup снят, #361):
+# исполнение остаётся здесь, узел знает локальное -- tmux-сессии, клоны, тела.
 SWEEP = "/usr/local/bin/pu-sweep"
 SWEEP_KNOBS = ("MOP_SWEEP_FREE_MIN_GB", "MOP_SWEEP_MAX_TARGET", "MOP_SWEEP_STALE_DAYS")
 # Последняя строка pu-sweep -- для машины, всё выше -- для человека.

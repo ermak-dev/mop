@@ -1,8 +1,8 @@
-# Дисковый сторож: периодический джоб Nomad, гоняющий pu-sweep по узлам.
+# Настройки планировщика Nomad, одна на кластер: играются с сервера.
 #
-# Регистрируется с сервера, а сам скрипт кладёт на узлы main.yml. Обязан
-# работать при выключенном мастере -- иначе теряется единственная уборка,
-# которой всё равно.
+# Жили в роли bus рядом с джобом pu-cleanup (tasks/watchdog.yml), который
+# #361 снял: единственный триггер подметания -- таймер mop-doctor (#359).
+
 # Пере-подписка памяти -- настройка планировщика, одна на кластер, и без
 # неё Nomad молча игнорирует MemoryMaxMB в спеке папета: бюджет снова
 # становится жёстким потолком, а всплеск сборки — OOM'ом. Тихо потерянная
@@ -37,30 +37,40 @@
   register: oversub
   changed_when: "'enabled' in oversub.stdout"
 
-# template, а не copy: спека несёт значения установки. ${...} для этого не
-# годится -- это интерполяция HCL, Nomad стал бы разрешать её сам и не
-# нашёл бы переменной.
-- name: Deploy the pu-cleanup job spec
-  ansible.builtin.template:
-    src: pu-cleanup.nomad.hcl.j2
-    dest: "{{ nomad_home }}/pu-cleanup.nomad.hcl"
-    mode: "0644"
-  register: cleanup_spec
-
-- name: Check the pu-cleanup job is registered
-  ansible.builtin.shell: >
-    NOMAD_ADDR=http://127.0.0.1:{{ MOP_NOMAD_PORT }}
+# Переход (#361): живой pu-cleanup и его периодические дети снимаются тем же
+# прогоном -- ручного шага на сервере нет. Префикс, а не одно имя: sysbatch-
+# ребёнок, застрявший pending на недоступном узле, -- отдельный джоб
+# pu-cleanup/periodic-<время>, и именно он с prohibit_overlap клинил
+# расписание. Джоба нет -- не ошибка; осталось что-то после purge -- отказ.
+- name: Retire the pu-cleanup job and its periodic children
+  ansible.builtin.shell: |
+    set -eu
+    export NOMAD_ADDR=http://127.0.0.1:{{ MOP_NOMAD_PORT }}
     NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
-    /usr/local/bin/nomad job status pu-cleanup
-  register: cleanup_status
-  failed_when: false
-  changed_when: false
-  # Только читает, и её результат нужен и прогону без изменений (#184).
-  check_mode: false
+    export NOMAD_TOKEN
+    python3 - <<'PY'
+    import json, os, urllib.parse, urllib.request
+    addr, tok = os.environ["NOMAD_ADDR"], os.environ["NOMAD_TOKEN"]
+    h = {"X-Nomad-Token": tok}
+    def jobs():
+        return [j["ID"] for j in json.load(urllib.request.urlopen(urllib.request.Request(
+            f"{addr}/v1/jobs?prefix=pu-cleanup", headers=h), timeout=10))
+            if j["ID"] == "pu-cleanup" or j["ID"].startswith("pu-cleanup/")]
+    found = jobs()
+    for job in found:
+        urllib.request.urlopen(urllib.request.Request(
+            f"{addr}/v1/job/{urllib.parse.quote(job, safe='')}?purge=true",
+            headers=h, method="DELETE"), timeout=10)
+    left = jobs()
+    if left:
+        print(f"left after purge: {left}")
+        raise SystemExit(1)
+    print(f"purged {len(found)}" if found else "absent")
+    PY
+  register: cleanup_retired
+  changed_when: "'purged' in cleanup_retired.stdout"
 
-- name: Register the pu-cleanup job
-  ansible.builtin.shell: >
-    NOMAD_ADDR=http://127.0.0.1:{{ MOP_NOMAD_PORT }}
-    NOMAD_TOKEN=$(python3 -c "import json; print(json.load(open('{{ nomad_home }}/bootstrap.json'))['SecretID'])")
-    /usr/local/bin/nomad job run {{ nomad_home }}/pu-cleanup.nomad.hcl
-  when: cleanup_spec.changed or cleanup_status.rc != 0
+- name: No pu-cleanup job spec on the server
+  ansible.builtin.file:
+    path: "{{ nomad_home }}/pu-cleanup.nomad.hcl"
+    state: absent
