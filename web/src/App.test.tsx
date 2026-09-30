@@ -21,6 +21,14 @@ test("the header shows the counters and the collector's errors", () => {
   expect(screen.getByText("nomad: no connection")).toBeInTheDocument();
 });
 
+// #378: одна строка бейджей (места и корзины) и полоса аллокаций под шапкой.
+test("#378 one row of badges and the allocation bar", () => {
+  renderUi(<App />);
+  expect(screen.getAllByTestId("chips")).toHaveLength(1);
+  expect(screen.getByText("всего 0 мест")).toBeInTheDocument();
+  expect(screen.getByTestId("load-bar")).toBeInTheDocument();
+});
+
 // Подвала нет (просьба оператора 27.09, #301): строка «поток событий · без
 // входа… · JSON» убрана со страницы.
 test("no footer line", () => {
