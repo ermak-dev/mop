@@ -131,7 +131,9 @@ VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "1
 AWKWARD = ("Pool Bot", 'say "hi"', "a\\b", "tab\there", "it's", "100%", "%h")
 UNITS = {"mop-bootstrap": "bootstrap", "mop-cluster": "cluster", "mop-web": "web",
          # auth callout (#206): часть шины, ставит роль bus.
-         "mop-callout": "bus"}
+         "mop-callout": "bus",
+         # Расписанный doctor (#359): oneshot под таймером, роль doctor.
+         "mop-doctor": "doctor"}
 # Исключения синка пакета до #157, во всех четырёх копиях одни и те же.
 # web/node_modules -- тулчейн разработчика (#297): на серверы и в тела едет
 # только собранный web/dist.
@@ -162,6 +164,22 @@ PINNED = {
 }
 # Юнит auth callout (#206) -- новый: снимок с его появления, байт в байт.
 PINNED["mop-callout"] = '[Unit]\nDescription=mop-callout (auth callout шины: кто входит, решает провайдер личностей)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# Шина на петле. Пароль пользователя callout, сиды издателя и xkey --\n# файлами 0600 в /etc/nats, не здесь: юнит читаем всем.\nEnvironment=MOP_NATS_PORT=4222\nEnvironment=MOP_AUTH_PROVIDER=file\nEnvironment=MOP_LDAP_URL=ldaps://ldap.example.dev\nEnvironment=MOP_LDAP_BIND_DN=cn=mop,ou=services,dc=example,dc=dev\nEnvironment=MOP_LDAP_BASE=dc=example,dc=dev\nEnvironment=MOP_LDAP_LOGIN_ATTR=uid\nEnvironment=MOP_LDAP_NAME_ATTR=displayName,cn\nEnvironment=MOP_LDAP_EMAIL_ATTR=mail\nEnvironment=MOP_LDAP_GROUP_BASE=ou=groups,dc=example,dc=dev\nEnvironment=MOP_LDAP_GROUP_FILTER=(|(member={dn})(uniqueMember={dn})(memberUid={login}))\nEnvironment="MOP_LDAP_ADMIN_GROUP=cn=mop admins,ou=groups,dc=example,dc=dev"\nEnvironment=MOP_LDAP_PROJECT_GROUP=mop-{project}\nEnvironment=MOP_LDAP_STARTTLS=no\nEnvironment=MOP_LDAP_CA_FILE=/etc/ssl/certs/corp-ca.pem\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop callout\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n'
+# #359: снят не со старого шаблона -- юнита не было. Oneshot под таймером:
+# без Restart= (systemd отвергает always у oneshot) и без [Install] --
+# включают таймер, а не сервис.
+PINNED["mop-doctor"] = ('[Unit]\nDescription=mop-doctor (doctor по расписанию: лечит только безопасное)\n'
+                        'After=network-online.target nats.service\nWants=network-online.target\n\n'
+                        '[Service]\nType=oneshot\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n'
+                        '# .env на сервер не едет, а адрес сервера обязателен: lib.cluster без\n'
+                        '# него отказывает. Окружение старше .env -- юнит и есть источник.\n'
+                        'Environment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n'
+                        '# Каталог сервера ходит на шину через TLS-прокси (#97).\n'
+                        'Environment=MOP_HTTPS_PORT=443\nEnvironment=PYTHONUNBUFFERED=1\n'
+                        '# Зависший прогон держал бы сервис active, и таймер молча не\n'
+                        '# запускал бы следующий: потолок -- меньше часа, до следующего срабатывания.\n'
+                        'TimeoutStartSec=50min\n'
+                        '# Через диспетчер: он ставит PYTHONPATH, без него командлет пакета не найдёт.\n'
+                        'ExecStart=/home/mopuser/mop/bin/mop doctor --fix --safe\n')
 # Снят заново в #219: окружение -- без MOP_AUTH_CALLOUT (callout всегда включён)
 # и без MOP_OPERATORS (людей даёт только провайдер).
 
@@ -954,6 +972,58 @@ def check_job_gc_348(c, can_render):
         c.check(f"#348 server.hcl renders job_gc_threshold = {value}", got == [value], got)
 
 
+# ── #359: doctor по расписанию -- systemd-таймер на сервере ──────────────
+# HYPOTHESIS: единственная периодика установки -- nomad periodic pu-cleanup;
+# doctor с --fix запускает только человек, и протухший логин или давление
+# на диск ждут его.
+# SOLUTION: роль doctor ставит mop-doctor.service (oneshot, `doctor --fix
+# --safe`, юнит из общего шаблона) и mop-doctor.timer (ежечасно, ритм
+# pu-cleanup); включается таймер, сервис -- нет; игра на сервере после
+# дашборда: креды сервера на шину кладёт роль web.
+# STATUS: FIXED — see #359
+def check_doctor_timer_359(c):
+    import configparser
+    role = os.path.join(DEPLOY, "roles", "doctor")
+    path = os.path.join(role, "files", "mop-doctor.timer")
+    if not c.check("#359 the timer file of the doctor role", os.path.isfile(path)):
+        return
+    ini = configparser.ConfigParser(strict=False, interpolation=None,
+                                    comment_prefixes=("#",), inline_comment_prefixes=None)
+    ini.optionxform = str
+    ini.read(path)
+    t = dict(ini["Timer"]) if ini.has_section("Timer") else {}
+    c.expect("#359 hourly, the rhythm of pu-cleanup", t.get("OnCalendar"), "hourly")
+    c.expect("#359 no catch-up after downtime: a boot run meets a pool still rising",
+             t.get("Persistent"), "false")
+    c.expect("#359 the timer starts the doctor", t.get("Unit"), "mop-doctor.service")
+    c.expect("#359 the timer is wanted by timers.target",
+             ini.get("Install", "WantedBy", fallback=None), "timers.target")
+    tasks = []
+    for f in os.listdir(os.path.join(role, "tasks")):
+        tasks += yaml.safe_load(open(os.path.join(role, "tasks", f))) or []
+    copies = [t for t in tasks if (t.get("ansible.builtin.copy") or {}).get("dest")
+              == "/etc/systemd/system/mop-doctor.timer"]
+    c.check("#359 the role installs the timer", len(copies) == 1, copies)
+    units = [t.get("ansible.builtin.systemd") or {} for t in tasks]
+    on = [u for u in units if u.get("name") == "mop-doctor.timer"]
+    c.check("#359 the timer is enabled and started, systemd reloaded first",
+            len(on) == 1 and on[0].get("enabled") is True and on[0].get("state") == "started"
+            and on[0].get("daemon_reload") is True, on)
+    c.check("#359 the service itself is not enabled: the timer drives it",
+            not [u for u in units if u.get("name") in ("mop-doctor", "mop-doctor.service")
+                 and u.get("enabled")], units)
+    plays = yaml.safe_load(open(os.path.join(DEPLOY, "setup.yml")))
+
+    def roles(p):
+        return [r if isinstance(r, str) else r.get("role") for r in p.get("roles") or []]
+    names = [(p.get("hosts"), roles(p)) for p in plays]
+    web = [i for i, (h, r) in enumerate(names) if h == "server" and "web" in r]
+    doc = [i for i, (h, r) in enumerate(names) if h == "server" and "doctor" in r]
+    c.check("#359 setup.yml plays the doctor role on the server", len(doc) == 1, names)
+    c.check("#359 after the dashboard: its bus credentials come from the web role",
+            doc and web and doc[0] > web[0], (web, doc))
+
+
 def main():
     c = Checks()
 
@@ -1282,6 +1352,7 @@ def main():
     check_one_node_280(c)
 
     check_job_gc_348(c, can_render)
+    check_doctor_timer_359(c)
     return c.report("deploy")
 
 

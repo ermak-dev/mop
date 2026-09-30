@@ -4,6 +4,10 @@ After={{ unit.after }}
 Wants=network-online.target
 
 [Service]
+{# Oneshot под таймером (#359): без Restart= и без [Install] -- включают таймер. #}
+{% if unit.oneshot | default(false) %}
+Type=oneshot
+{% endif %}
 User={{ MOP_USER }}
 WorkingDirectory={{ MOP_HOME }}/mop
 {# Набор -- config.SERVER_SCOPED (#176); комментарий задачи встаёт перед своей настройкой. #}
@@ -26,8 +30,10 @@ Environment=PYTHONUNBUFFERED=1
 {{ e }}
 {% endfor %}
 ExecStart={{ MOP_HOME }}/mop/bin/mop {{ unit.command }}
+{% if not (unit.oneshot | default(false)) %}
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+{% endif %}

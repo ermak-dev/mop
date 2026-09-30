@@ -67,13 +67,29 @@ def where(issue):
     return issue.get("node") or "-"
 
 
+# Что --fix --safe лечит (#359): расписанию -- только то, что не рвёт работу.
+# login+nudge -- аренда из реестра и побудка, разговор переживает (#357);
+# sweep -- у pu-sweep свои предохранители против сноса работы (#358).
+# Рестарт, alloc stop, /model и перерегистрация сбрасывают сессию или
+# решают за оператора -- их расписанный прогон только называет.
+SAFE = ("login+nudge", "sweep")
+
+
+def treats(issue, safe):
+    """Лечит ли --fix (с --safe или без) эту проблему. Чистая функция."""
+    return bool(issue["action"]) and (not safe or issue["action"] in SAFE)
+
+
 def select(names, argv):
-    """argv `mop doctor` -> ([группы], fix). Чистая функция. Без группы --
-    все; одна названная -- она; иное -- ValueError с перечнем групп."""
-    fix = "--fix" in argv
-    rest = [a for a in argv if a != "--fix"]
+    """argv `mop doctor` -> ([группы], fix, safe). Чистая функция. Без группы
+    -- все; одна названная -- она; иное -- ValueError с перечнем групп.
+    --safe сужает лечение и без --fix смысла не имеет -- отказ."""
+    fix, safe = "--fix" in argv, "--safe" in argv
+    if safe and not fix:
+        raise ValueError("--safe narrows --fix: mop doctor [group] --fix --safe")
+    rest = [a for a in argv if a not in ("--fix", "--safe")]
     if not rest:
-        return list(names), fix
+        return list(names), fix, safe
     if len(rest) == 1 and rest[0] in names:
-        return rest, fix
-    raise ValueError(f"mop doctor [group] [--fix]; the groups: {', '.join(names)}")
+        return rest, fix, safe
+    raise ValueError(f"mop doctor [group] [--fix [--safe]]; the groups: {', '.join(names)}")

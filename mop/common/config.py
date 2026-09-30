@@ -463,6 +463,9 @@ SERVER_SCOPED = {
     "mop-callout": ("MOP_NATS_PORT",) + IDENTITY_SCOPED,
     "mop-web": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                 "MOP_NOMAD_PORT", "MOP_POOL_DC"),
+    # doctor по расписанию (#359): клиент шины, как любой мастер -- адрес
+    # сервера и порты; Nomad он спрашивает через сервис кластера.
+    "mop-doctor": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT"),
 }
 
 # Что проект вправе просить себе сам — файлом `.mop` в корне своего

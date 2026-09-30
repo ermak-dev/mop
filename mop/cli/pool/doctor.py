@@ -1,4 +1,4 @@
-"""pool diagnostics: mop doctor [group] [--fix]
+"""pool diagnostics: mop doctor [group] [--fix [--safe]]
 
 Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
 and a job spec older than the node driver — that last one looks perfectly
@@ -16,6 +16,11 @@ clone. An expired login is treated without a restart: the puppet's lease is
 pushed to it again from the server's credential registry and the puppet is
 nudged to go on, so its conversation survives. A puppet without a lease is
 not treated: give it one with mop update --cred.
+
+--fix --safe treats only what cannot break work — login+nudge and the disk
+sweep — and names the rest without executing it: restarts, alloc stops,
+/model and spec updates stay the operator's call. The server runs it hourly
+(mop-doctor.timer), its output goes to the journal.
 """
 import sys
 
@@ -26,12 +31,14 @@ from mop.common.render import table
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
 MCP = {"annotations": "destructive", "args": [
-    {"name": "fix", "type": "boolean", "flag": "--fix", "help": "treat what is treatable"}]}
+    {"name": "fix", "type": "boolean", "flag": "--fix", "help": "treat what is treatable"},
+    {"name": "safe", "type": "boolean", "flag": "--safe",
+     "help": "with fix: treat only what cannot break work (login+nudge, sweep)"}]}
 
 
 def main(argv):
     try:
-        chosen, fix = doctor.select(list(doctor.groups()), argv)
+        chosen, fix, safe = doctor.select(list(doctor.groups()), argv)
     except ValueError as e:
         lib.usage(f"{e}\n\n{__doc__}")
     # Группы (#356): каждая проблема помнит свою группу -- её и лечит.
@@ -67,8 +74,12 @@ def main(argv):
         for line in lines:
             print(line)
     for check, issue in found:
-        if issue["action"]:
+        if doctor.treats(issue, safe):
             print(f"  {issue['name']}: {check.treat(issue)}")
+        elif issue["action"]:
+            # --safe (#359): небезопасное названо, но не исполнено.
+            print(f"  {issue['name']}: [{issue['action']}] not treated — "
+                  f"--safe treats only {', '.join(doctor.SAFE)}")
 
 
 

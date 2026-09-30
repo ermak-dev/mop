@@ -137,6 +137,17 @@
     - web
 
 
+# doctor по расписанию (#359): systemd-таймер на сервере. После дашборда --
+# креды сервера на шину кладёт роль web.
+- name: Scheduled doctor on the server
+  hosts: server
+  become: no
+  gather_facts: no
+
+  roles:
+    - doctor
+
+
 # Bootstrap песочниц (#62, docs/BOOTSTRAP.md): подписчик на сервере, который
 # играет .mop/bootstrap.yaml проекта при каждом старте папета. После дашборда:
 # пакет mop и креды оператора на сервер привозит роль web.

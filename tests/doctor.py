@@ -110,11 +110,12 @@ def check_registry_356(c, doctor):
 
 def check_select_356(c, doctor):
     names = ("disk", "puppets")
-    for argv, want in [([], (["disk", "puppets"], False)),
-                       (["--fix"], (["disk", "puppets"], True)),
-                       (["puppets"], (["puppets"], False)),
-                       (["puppets", "--fix"], (["puppets"], True)),
-                       (["--fix", "disk"], (["disk"], True))]:
+    # Третье -- безопасный режим (#359): без --safe всегда False.
+    for argv, want in [([], (["disk", "puppets"], False, False)),
+                       (["--fix"], (["disk", "puppets"], True, False)),
+                       (["puppets"], (["puppets"], False, False)),
+                       (["puppets", "--fix"], (["puppets"], True, False)),
+                       (["--fix", "disk"], (["disk"], True, False))]:
         c.expect(f"#356 select {argv}", doctor.select(names, argv), want)
     for argv in (["nope"], ["puppets", "disk"], ["--force"]):
         try:
@@ -364,6 +365,67 @@ def check_where_358(c, doctor):
     c.expect("#358 where: nowhere yet", doctor.where({"alloc": None}), "-")
 
 
+# ── #359: безопасный режим для расписания ───────────────────────────────
+# HYPOTHESIS: расписанный doctor --fix лечил бы всё actionable -- рестарты,
+# alloc stop, /model, перерегистрацию: без оператора рядом это рестарт
+# работающего папета каждый час, стоит ему показаться залипшим.
+# SOLUTION: `--fix --safe` лечит только SAFE -- login+nudge (аренда из
+# реестра, #357, разговор переживает) и sweep (#358, у pu-sweep свои
+# предохранители); остальное печатается строкой без исполнения. Фильтр --
+# чистая doctor.treats.
+# STATUS: FIXED — see #359
+OUT_SAFE = ("pu-mop-1  n1  HUNG (not responding)\n"
+            "pu-mop-2  n2  not logged in\n"
+            "pu-mop-3  -   queued — no free slots in the pool\n"
+            "\n"
+            "  pu-mop-1: [restart] not treated — --safe treats only login+nudge, sweep\n"
+            "  pu-mop-2: treated login+nudge\n")
+
+
+def check_safe_359(c, doctor):
+    names = ("disk", "puppets")
+    for argv, want in [(["--fix", "--safe"], (["disk", "puppets"], True, True)),
+                       (["--safe", "disk", "--fix"], (["disk"], True, True))]:
+        c.expect(f"#359 select {argv}", doctor.select(names, argv), want)
+    try:
+        doctor.select(names, ["--safe"])
+        c.fail("#359 --safe without --fix must refuse: it narrows the treatment")
+    except ValueError as e:
+        c.check(f"#359 the refusal names --fix: {e}", "--fix" in str(e))
+    c.expect("#359 the safe actions", tuple(doctor.SAFE), ("login+nudge", "sweep"))
+    for action, safe_too in [("login+nudge", True), ("sweep", True), ("restart", False),
+                             ("stop", False), ("model", False), ("update", False)]:
+        issue = {"name": "x", "alloc": None, "diagnosis": "d", "action": action}
+        c.expect(f"#359 --fix treats {action}", doctor.treats(issue, False), True)
+        c.expect(f"#359 --fix --safe treats {action}: {safe_too}",
+                 doctor.treats(issue, True), safe_too)
+    none = {"name": "x", "alloc": None, "diagnosis": "d", "action": None}
+    c.expect("#359 no action: nothing to treat, safe or not",
+             (doctor.treats(none, False), doctor.treats(none, True)), (False, False))
+    # Вывод: небезопасное названо строкой лечения и не исполнено.
+    from mop.cli.pool import doctor as cmd
+    treated = []
+    others = [doctor.module(n) for n in doctor.groups() if n != "puppets"]
+    saved = [(m, m.diagnose) for m in others]
+    for m in others:
+        m.diagnose = lambda: []
+    try:
+        with restored(puppets, "diagnose", "treat"), restored(bus, "call_cluster"):
+            puppets.diagnose = lambda: ISSUES
+            puppets.treat = lambda issue: treated.append(issue["action"]) or \
+                f"treated {issue['action']}"
+            bus.call_cluster = lambda verb, **kw: {"ok": True, "lease": "anton",
+                                                   "node": "n2", "result": "OK"}
+            out, err, code = run_command(cmd.main, ["--fix", "--safe"])
+    finally:
+        for m, fn in saved:
+            m.diagnose = fn
+    c.expect("#359 mop doctor --fix --safe: the output", (out, err, code), (OUT_SAFE, "", 0))
+    c.expect("#359 only the safe action was executed", treated, ["login+nudge"])
+    c.check("#359 the MCP tool offers --safe",
+            any(a.get("flag") == "--safe" for a in cmd.MCP["args"]), cmd.MCP["args"])
+
+
 def main():
     c = Checks()
     doctor = registry()
@@ -375,6 +437,7 @@ def main():
         check_where_358(c, doctor)
         check_disk_358(c, doctor)
         check_lease_357(c, doctor)
+        check_safe_359(c, doctor)
     else:
         # До шва: вывод сегодняшнего командлета -- тот, что шов обязан сохранить.
         check_output_356(c, [[]])

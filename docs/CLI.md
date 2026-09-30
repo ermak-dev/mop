@@ -280,7 +280,7 @@ the operator's to see.
 #### mop doctor
 
 ```text
-pool diagnostics: mop doctor [group] [--fix]
+pool diagnostics: mop doctor [group] [--fix [--safe]]
 
 Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
 and a job spec older than the node driver — that last one looks perfectly
@@ -298,6 +298,11 @@ clone. An expired login is treated without a restart: the puppet's lease is
 pushed to it again from the server's credential registry and the puppet is
 nudged to go on, so its conversation survives. A puppet without a lease is
 not treated: give it one with mop update --cred.
+
+--fix --safe treats only what cannot break work — login+nudge and the disk
+sweep — and names the rest without executing it: restarts, alloc stops,
+/model and spec updates stay the operator's call. The server runs it hourly
+(mop-doctor.timer), its output goes to the journal.
 ```
 
 #### mop gc
