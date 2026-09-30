@@ -109,6 +109,31 @@ def check_write_in_bus_315(c):
             "bus.request(" not in src and "bus.request_many(" in src)
 
 
+# ── #366: отказ тела в ответе write ─────────────────────────────────────
+# HYPOTHESIS: агент кладёт отказ тела строкой в written, поля error нет;
+# results_from решал только по error, и `mop login` печатал узел, где
+# запись во все тела упала, как OK.
+# SOLUTION: агент отдаёт failed {тело: причина} (#366, узловая половина);
+# results_from считает узел FAILED с причиной первого тела, если failed
+# непуст -- одно правило на клиента и сервер (#315).
+# STATUS: FIXED — see #366
+def check_body_refusal_366(c):
+    got = bus.results_from(["n1", "n2", "n3"], {
+        "n1": {"written": ["pu-a-1 FAILED — body 9001 is stopped",
+                           "pu-a-2 FAILED — body 9002 is stopped"],
+               "failed": {"pu-a-1": "body 9001 is stopped", "pu-a-2": "body 9002 is stopped"},
+               "absent": []},
+        "n2": {"written": ["pu-a-3:/x"], "failed": {}, "absent": []},
+        # Формулировка строки -- не контракт: судит поле.
+        "n3": {"written": ["pu-a-4 could not be written"],
+               "failed": {"pu-a-4": "ssh: connection refused"}, "absent": []}})
+    c.expect("#366 every body refused: FAILED with the first body's reason",
+             got.get("n1"), "FAILED: pu-a-1: body 9001 is stopped")
+    c.expect("#366 nothing refused: OK", got.get("n2"), "OK")
+    c.expect("#366 the field decides, not the wording of written",
+             got.get("n3"), "FAILED: pu-a-4: ssh: connection refused")
+
+
 def main():
     c = Checks()
     # HYPOTHESIS (#135): неответ агента уводил в запасной путь через
@@ -138,6 +163,7 @@ def main():
                 not hasattr(keys, gone))
     check_no_home_279(c)
     check_write_in_bus_315(c)
+    check_body_refusal_366(c)
     return c.report("keys")
 
 

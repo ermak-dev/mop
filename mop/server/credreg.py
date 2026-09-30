@@ -467,18 +467,18 @@ def push(name, node, bodies, timeout=PUSH_TIMEOUT):
 
 def _outcome(nodes, answers):
     """Ответы агентов на адресный `write` -> {узел: "OK" | "FAILED: …" |
-    "NOT REACHED: …"}: bus.results_from (#315) и сверх него (#312) -- отказ
-    одного тела агент кладёт строкой в written, а не в error, и без её
-    разбора непришедшая аренда читалась бы OK."""
+    "NOT REACHED: …"}: bus.results_from (#315), отказ тела там же -- полем
+    failed (#366). Сверх него (#312) -- названное тело, которого на узле нет
+    (absent): адресная запись не дошла, и непришедшая аренда читалась бы OK.
+    Поля, а не текст written: правка формулировки в агенте молча сделала
+    бы отказ успехом."""
     out = bus.results_from(nodes, answers)
     for node in nodes:
         answer = answers.get(node)
         if out[node] != "OK" or not isinstance(answer, dict):
             continue
-        missed = [w for w in answer.get("written") or []
-                  if " FAILED — " in w or w.endswith(" NOT LIVE")]
-        if missed:
-            out[node] = f"FAILED: {missed[0][:120]}"
+        if answer.get("absent"):
+            out[node] = f"FAILED: {answer['absent'][0]} NOT LIVE"
     return out
 
 

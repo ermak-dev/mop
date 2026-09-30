@@ -518,9 +518,19 @@ def check_push_312(c):
         with patched(srv, materialize=lambda name, rec=None: [("a/b", b"x"), ("m", b"anton\n")]):
             for reply, want in (
                     ({"written": ["pu-mop-1:a/b", "pu-mop-1:m"]}, "OK"),
-                    ({"written": ["pu-mop-1 FAILED — body 9001 is stopped"]},
-                     "FAILED: pu-mop-1 FAILED — body 9001 is stopped"),
-                    ({"written": ["pu-mop-1 NOT LIVE"]}, "FAILED: pu-mop-1 NOT LIVE"),
+                    # С #366 отказ тела -- полями ответа (failed, absent);
+                    # строки в written -- для старых клиентов, не контракт.
+                    ({"written": ["pu-mop-1 FAILED — body 9001 is stopped"],
+                      "failed": {"pu-mop-1": "body 9001 is stopped"}, "absent": []},
+                     "FAILED: pu-mop-1: body 9001 is stopped"),
+                    ({"written": ["pu-mop-1 NOT LIVE"], "failed": {}, "absent": ["pu-mop-1"]},
+                     "FAILED: pu-mop-1 NOT LIVE"),
+                    # #366: другая формулировка строки -- тот же отказ.
+                    ({"written": ["pu-mop-1 could not be written"],
+                      "failed": {"pu-mop-1": "ssh: connection refused"}, "absent": []},
+                     "FAILED: pu-mop-1: ssh: connection refused"),
+                    ({"written": ["pu-mop-1 is gone"], "failed": {}, "absent": ["pu-mop-1"]},
+                     "FAILED: pu-mop-1 NOT LIVE"),
                     ({"error": "puppet pu-mop-1 is not in project x"},
                      "FAILED: puppet pu-mop-1 is not in project x"),
                     (bus.BusError("node agent hyper did not answer in 60s"),
@@ -814,7 +824,8 @@ def check_distribute_bodies_312(c):
                       project, [p for p, _ in fields.get("files") or []]))
         return {"n1": {"written": [f"{b}:a/b" for b in nodes.get("n1", {}).get("bodies", [])]},
                 "n2": bus.BusError("node agent n2 did not answer in 60s"),
-                "n3": {"written": ["pu-a-9 FAILED — body 9009 is stopped"]}}
+                "n3": {"written": ["pu-a-9 FAILED — body 9009 is stopped"],
+                       "failed": {"pu-a-9": "body 9009 is stopped"}, "absent": []}}
     with tempfile.TemporaryDirectory() as tmp, \
             patched(srv, ROOT=tmp, holders=lambda api=None: held,
                     materialize=lambda name, rec=None: [("a/b", name.encode())]), \
@@ -836,7 +847,7 @@ def check_distribute_bodies_312(c):
         held["anton"] = {"pu-a-9": "n3"}
         c.expect("#312 distribute: a body refused inside a node's answer is FAILED, not OK",
                  srv.distribute("anton", now=NOW),
-                 {"n3": "FAILED: pu-a-9 FAILED — body 9009 is stopped"})
+                 {"n3": "FAILED: pu-a-9: body 9009 is stopped"})
 
 
 def check_host_conflict_312(c):
