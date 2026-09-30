@@ -8,7 +8,7 @@ Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
-from mop.common import bus, puppets
+from mop.common import puppets
 from mop.common.domain import Gone
 
 
@@ -21,10 +21,8 @@ MCP = {"annotations": "destructive", "args": [
 
 def main(argv):
     name, force = lib.named(argv, __doc__)
-    alloc = bus.call_cluster("alloc", name=name).get("alloc")
-    if not alloc:
-        raise LookupError(f"{name}: no allocation — node unknown")
-    r = puppets.wipe(alloc["NodeName"], name, force=force)
+    # Сносят остановленного: узел -- любой последней аллокации (#377).
+    r = puppets.wipe(puppets.node_of(name, running=False), name, force=force)
     lib.note(name, r)
     print(f"{name}: clone reset to HEAD, target wiped ({Gone.from_dict(r).target})")
 

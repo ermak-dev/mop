@@ -39,27 +39,42 @@ hostname. Второе имя для того же означало бы вто�
 # mop/driver/pve.py — "Proxmox: тело папета — контейнер LXC на узле-гипервизоре"
 
 # ── жизненный цикл тела: зовёт mop driver run (из врапера), recycle, gc ──
-def ensure(name, params)      # клон из шаблона проекта, лимиты, адрес, старт
-def destroy(name)             # снос тела
-def bodies() -> [name]        # что есть на этом узле — ростер без Nomad
-def capacity() -> {...}       # память и место хранилища тел
+async def ensure(name, params)          # клон из шаблона проекта, лимиты, адрес, старт
+async def destroy(name, branch=None)    # снос тела; branch — ветка, которую агент
+                                        # сохраняет из клона перед сносом
+async def bodies() -> [name]            # что есть на этом узле — ростер без Nomad
+async def capacity() -> {...}           # память и место хранилища тел
 
 # ── доступ в тело: зовут глаголы агента ──
-def argv(name) -> [...]       # префикс команды: [] у host, ssh у контейнера
-def run_argv(name) -> [...]   # чем узел запускает врапер в теле
-def push(name, path, data)    # положить файл внутрь (mop login)
-def projects_dir(name)        # где транскрипты — mop stat, usage
-def attach_argv(name)         # чем входит человек
-def repair_argv(name)         # аварийный путь, когда основной молчит
-def admit(name, let_in)       # впустить ключ сервера на время bootstrap'а (BOOTSTRAP.md)
-def address(name)             # где сервер найдёт тело: у host — сам узел
+def argv(name) -> [...]                 # префикс команды: [] у host, ssh у контейнера
+def run_argv(name) -> [...]             # чем узел запускает врапер в теле
+async def push(name, path, data)        # положить файл внутрь (mop driver run)
+async def push_many(name, files)        # [(путь, байты)] разом — глагол write (mop login)
+def projects_dir(name)                  # где транскрипты — mop stat, usage
+def attach_argv(name)                   # чем входит человек
+def repair_argv(name)                   # аварийный путь, когда основной молчит
+async def admit(name, let_in)           # впустить ключ сервера на время bootstrap'а (BOOTSTRAP.md)
+def address(name)                       # где сервер найдёт тело: у host — сам узел
 
 # ── гипервизор: только у драйвера с отдельными телами (IS_CONTAINER) ──
-async def templates()         # сборочные тела и образы; у host глагола нет
+async def templates()                   # сборочные тела и образы; у host глагола нет
 
-IS_CONTAINER = True           # тела — отдельные объекты; False у host
-SESSION_PY = "/…/session.py"  # путь к session.py внутри тела
+IS_CONTAINER = True                     # тела — отдельные объекты; False у host
+SESSION_PY = "/…/session.py"            # путь к session.py внутри тела
 ```
+
+Форма вызова — тоже контракт (#374). `async` стоит ровно у тех глаголов, которые
+потребители ждут (`driver.ASYNC_VERBS`), остальные — обычные функции; каждую
+сигнатуру `contract()` связывает с каноническими вызовами потребителей
+(`driver.CALLS`, `inspect.signature(fn).bind`). Синхронный `push` или
+`destroy(name)` без `branch` иначе проходили проверку имён и падали у
+потребителя.
+
+Соглашение об отказе одно. Отказ тела — ответ глагола с полем `{"error": причина}`:
+это ответ, и потребитель передаёт его дальше. Недокатанный узел (нет ключа
+сервера, нет кредов шины) — `RuntimeError` с подсказкой `run mop server deploy`:
+это не ответ про тело, а поломка узла. Сегодняшние отступления pve (`ValueError`
+у номера контейнера по кривому имени) записаны как долг, а не как образец.
 
 Потребитель не ветвится по типу драйвера, а зовёт контракт (#151): флаг,
 прочитанный вне `mop/driver/`, — это переключатель типа, и третий драйвер

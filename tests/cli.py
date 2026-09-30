@@ -2006,6 +2006,53 @@ def check_fallback_model_183(c):
     check_body_file_270(c)
     check_tail_stderr_333(c)
     check_free_floor_329(c)
+    check_add_failure_377(c)
+
+
+# ── #377: путь отказа `mop add` -- текст, а не трасса ────────────────────
+# HYPOTHESIS: с Alloc (#377) строка отказа add зовёт puppets.failing с уже
+# собранным значением, а failing ждёт сырой словарь аллокации: папет,
+# упавший на старте, ронял `mop add` AttributeError'ом вместо «<имя> on
+# <узел>: failed to start». Путь отказа add проверками не покрыт.
+# SOLUTION: failing получает сырой словарь, как в условии.
+# STATUS: FIXED — see #377
+def check_add_failure_377(c):
+    from mop.cli.core import add
+    from mop.common import bus, context, puppets
+    task = {"state": "dead", "failed": True, "restarts": 3, "exit": 1, "next_s": None}
+    cases = [
+        ("the allocation failed", {"ID": "a-9", "NodeName": "n1", "ClientStatus": "failed"},
+         "pu-mop-9 on n1: failed to start"),
+        ("the task summary says failing", {"ID": "a-9", "NodeName": "n1",
+                                           "ClientStatus": "pending", "task": task,
+                                           "reason": "clone failed: no route"},
+         "pu-mop-9 on n1: FAILED: clone failed: no route")]
+
+    class P:
+        def step(self, text):
+            pass
+
+        def clear(self):
+            pass
+    for what, alloc, want in cases:
+        said = []
+
+        def call_cluster(verb, alloc=alloc, **kw):
+            return {"name": "pu-mop-9"} if verb == "add" else {"alloc": alloc}
+        with patched(bus, call_cluster=call_cluster), \
+                patched(_common, push_llm_keys=lambda p: None,
+                        workspace_text=lambda o: ("", None), sent_line=lambda s: ""), \
+                patched(lib, fail=said.append), patched(add.time, sleep=lambda s: None), \
+                patched(context, current=lambda: type("Ctx", (), {"branch": None})()):
+            try:
+                code = add._add("git@h:g/mop.git", "mop", "claude", False, P())
+            except Exception as e:
+                c.fail(f"#377 mop add, {what}: a refusal, not a trace",
+                       f"{type(e).__name__}: {e}")
+                continue
+        c.expect(f"#377 mop add, {what}: exit 1", code, 1)
+        c.check(f"#377 mop add, {what}: says why: {said}",
+                len(said) == 1 and said[0].startswith(want), said)
 
 
 def check_server_namespace_259(c):
@@ -2143,7 +2190,7 @@ def check_named_263(c):
             patched(puppets,
                     delete=lambda name, force=False: calls.append(("delete", force)) or
                     {**note, "body": "destroyed", "node": "hyper"},
-                    recycle=lambda name, workspace_of=None, force=False:
+                    recycle=lambda name, workspace_of=None, force=False, branch=None:
                     calls.append(("recycle", force)) or dict(note),
                     wipe=lambda node, name, force=False:
                     calls.append(("wipe", force)) or {**note, "target": "/t"},

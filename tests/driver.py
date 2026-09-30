@@ -18,7 +18,7 @@ import tempfile
 import types
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import (Checks, canned, offline, patched, patched_env,  # noqa: E402
+from _lib import (Checks, FakeNomad, NoLiveNomad, canned, offline, patched, patched_env,  # noqa: E402
                   restored, run_command, udp_socket)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
@@ -26,15 +26,37 @@ from mop.common import config  # noqa: E402
 from mop import driver  # noqa: E402
 
 
+# Глаголы, которые потребители ждут (`await DRIVER.x(...)`, asyncio.run(d.x(...)))
+# -- mop/node/agent.py, mop/cli/driver/*. Остальные зовутся без await (#374).
+AWAITED = ("ensure", "destroy", "push", "push_many", "admit",
+           "bodies", "capacity", "templates")
+
+
 def plugin(**attrs):
     """Модуль-плагин с заданными атрибутами; остальное берёт контрактом."""
     mod = types.ModuleType("fake")
     for verb in driver.VERBS:
-        mod.__dict__[verb] = lambda *a, **k: None
+        if verb in AWAITED:
+            async def stub(*a, **k):
+                return None
+            mod.__dict__[verb] = stub
+        else:
+            mod.__dict__[verb] = lambda *a, **k: None
     mod.SESSION_PY = "/opt/mop/mop/session.py"
     mod.IS_CONTAINER = True
     mod.__dict__.update(attrs)
     return mod
+
+
+def _async(fn):
+    """Асинхронная обёртка с той же сигнатурой: заглушка глагола для
+    проверки контракта."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapped(*a, **k):
+        return fn(*a, **k)
+    return wrapped
 
 
 # ── контракт реестра ─────────────────────────────────────────────────────
@@ -79,6 +101,22 @@ CONTRACT = [
     ("no SESSION_PY", plugin(SESSION_PY=None), False),
     ("empty SESSION_PY", plugin(SESSION_PY=""), False),
     ("SESSION_PY is not a path", plugin(SESSION_PY="session.py"), False),
+    # HYPOTHESIS (#374): contract() проверял у глаголов только callable.
+    # Драйвер, написанный по шапке пакета и docs/DRIVER.md, проходил его и
+    # падал у потребителя: синхронный push -- на asyncio.run, destroy(name)
+    # без branch -- на TypeError в агенте (destroy(name, branch=...)).
+    # SOLUTION: contract() сверяет async/sync по кортежу ожидаемых глаголов и
+    # связывает канонические вызовы inspect.signature(fn).bind(...); шапка и
+    # DRIVER.md называют destroy(name, branch=None), push_many и соглашение
+    # об отказе. STATUS: FIXED — see #374
+    ("sync push", plugin(push=lambda name, path, data: None), False),
+    ("async argv", plugin(argv=_async(lambda name: None)), False),
+    ("destroy without branch", plugin(destroy=_async(lambda name: None)), False),
+    ("push_many without files", plugin(push_many=_async(lambda name: None)), False),
+    ("admit without let_in", plugin(admit=_async(lambda name: None)), False),
+    ("argv with a required extra", plugin(argv=lambda name, extra: None), False),
+    ("destroy(name, branch=None)",
+     plugin(destroy=_async(lambda name, branch=None: None)), True),
 ]
 
 # Имя папета склеивается в шелл — и у host, и у драйвера контейнеров. Проверка
@@ -615,8 +653,31 @@ def check_container_sweep_driver_362(c):
         shutil.rmtree(tmp)
 
 
+def check_sh_split_env_373(c):
+    """HYPOTHESIS (#373): v_sweep обходил driver.sh -- тот сливал stderr в
+    stdout и не принимал env, а sweep_report нужны out и err раздельно, и
+    pu-sweep ждали без срока. SOLUTION: sh(..., env=, split=True) -> (out,
+    err, код); без них -- прежние (вывод, код) и слияние. STATUS: FIXED — see #373"""
+    import asyncio
+    script = "echo out; echo err >&2; echo $MOP_TEST_373"
+    c.expect("#373 sh without split keeps merging stderr, (out, code)",
+             asyncio.run(driver.sh("echo out; echo err >&2")), ("out\nerr\n", 0))
+    try:
+        got = asyncio.run(driver.sh(script, env={**os.environ, "MOP_TEST_373": "x"},
+                                    split=True))
+    except TypeError as e:
+        got = f"TypeError: {e}"
+    c.expect("#373 sh(split=True, env=) -> (out, err, code)", got, ("out\nx\n", "err\n", 0))
+    try:
+        got = asyncio.run(driver.sh("sleep 5", timeout=0.2, split=True))
+    except TypeError as e:
+        got = f"TypeError: {e}"
+    c.expect("#373 sh(split=True) on a timeout -> code None", got, ("", "", None))
+
+
 def main():
     c = Checks()
+    check_sh_split_env_373(c)
     check_gave_up_wrapper_345(c)
     check_sweep_keeps_work_346(c)
     check_host_sweep_rule_347(c)
@@ -632,6 +693,19 @@ def main():
                    f"{'refused' if refused else 'accepted'}, wanted the opposite"):
             c.check(f"contract: {what} — doc is a string",
                     not (ok and got.get("doc") and not isinstance(got["doc"], str)))
+
+    # Живые драйверы пакета проходят свой же контракт (#374).
+    import importlib
+    for name in ("host", "pve"):
+        try:
+            driver.contract(name, importlib.import_module(f"mop.driver.{name}"))
+            refused = ""
+        except RuntimeError as e:
+            refused = str(e)
+        c.expect(f"contract: the {name} driver passes", refused, "")
+    # AWAITED выведен из потребителей; реестр обязан думать так же.
+    c.expect("contract: the awaited verbs are the registry's",
+             tuple(sorted(getattr(driver, "ASYNC_VERBS", ()))), tuple(sorted(AWAITED)))
 
     c.expect("contract: doc must be the first line of the docstring",
              driver.contract("fake", plugin(__doc__="one\ntwo"))["doc"], "one")
@@ -1410,7 +1484,7 @@ def check_driver_rule_175(c):
     # Списки не слепнут от чужой опечатки: узел с неизвестным драйвером --
     # строка с отказом, остальные видны. Операции над ним (delete, attach,
     # build на нём) отказывают громко -- это of_node выше.
-    from mop.server import builder, image, nodes, nomad
+    from mop.server import builder, image, nodes
     metas = {"bad": {"mop_driver": "bogus"}, "hyper": {"mop_driver": "pve"}}
     summary = lambda n: {"Name": n, "Status": "ready"}
     try:
@@ -1422,12 +1496,12 @@ def check_driver_rule_175(c):
                 "bad: unknown driver 'bogus'" in (got["bad"].get("error") or ""))
     except Exception as e:
         c.fail(f"#175 nodes.row with a bad node: {type(e).__name__}: {e}")
-    with patched(nomad, nodes_meta=lambda: metas,
-                 node_dynamic_meta=lambda n: {"mop_projects": "mop"},
-                 set_node_meta=lambda n, m: None):
+    # Nomad -- параметром api (#375), а не подменой атрибутов модуля.
+    api = FakeNomad(meta={n: dict(m, mop_projects="mop") for n, m in metas.items()})
+    with patched(builder, nomad=NoLiveNomad()), patched(image, nomad=NoLiveNomad()):
         try:
             refused = []
-            serving = builder.serving_now(refused)
+            serving = builder.serving_now(refused, api=api)
             c.check(f"#175 serving_now: the good node counts: {serving}",
                     serving == {"hyper": ["mop"]})
             c.check(f"#175 serving_now: the bad node is reported: {refused}",
@@ -1435,7 +1509,7 @@ def check_driver_rule_175(c):
         except Exception as e:
             c.fail(f"#175 serving_now with a bad node: {type(e).__name__}: {e}")
         try:
-            got = dict(image.announce("mop"))
+            got = dict(image.announce("mop", api=api))
             c.check(f"#175 announce: the good node answers: {got}",
                     got.get("hyper") == "already announced")
             c.check(f"#175 announce: the bad node carries the refusal: {got}",

@@ -696,11 +696,16 @@ async def v_sweep(_conn, req):
         env.pop("MOP_SWEEP_DRY", None)
         if req.get("dry"):
             env["MOP_SWEEP_DRY"] = "1"
-        proc = await asyncio.create_subprocess_exec(
-            SWEEP, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
-        out, err = await proc.communicate()
-    return sweep_report(proc.returncode, out.decode(errors="replace"),
-                        err.decode(errors="replace"), int(config.get("MOP_SWEEP_FREE_MIN_GB")))
+        # Со сроком (#373): зависший pu-sweep держал замок до рестарта юнита,
+        # и каждый следующий sweep получал «already running». exec -- чтобы
+        # убит по сроку был сам pu-sweep, а не обёрточный sh: dash не
+        # подменяет себя последней командой, и сирота жил бы дальше.
+        timeout = float(config.get("MOP_SWEEP_TIMEOUT"))
+        out, err, rc = await driver.sh(f"exec {shlex.quote(SWEEP)}", timeout,
+                                       env=env, split=True)
+    if rc is None:
+        return {"error": f"pu-sweep did not finish in {config.get('MOP_SWEEP_TIMEOUT')}s"}
+    return sweep_report(rc, out, err, int(config.get("MOP_SWEEP_FREE_MIN_GB")))
 
 
 async def v_wipe(conn, req):
@@ -897,14 +902,19 @@ async def v_write(_conn, req):
     # папета -- ценой его работы. Все тела разом и все файлы тела одним
     # вызовом (#137): по очереди это стоило ~4 с на файл.
     answers = await asyncio.gather(*(DRIVER.push_many(name, files) for name in bodies))
+    failed = {}
     for name, r in zip(bodies, answers):
         if r.get("error"):
             # Отказ по одному телу не отменяет остальных.
+            failed[name] = r["error"]
             written.append(f"{name} FAILED — {r['error']}")
         else:
             written += [f"{name}:{p}" for p in r.get("written") or []]
     written += [f"{name} NOT LIVE" for name in absent]
-    return {"written": written}
+    # Отказы тел -- полями (#366): по ним судят bus.results_from и реестр
+    # кредитов; строки в written остаются для старых клиентов, разбирать
+    # их текст нельзя -- правка формулировки молча сделала бы отказ успехом.
+    return {"written": written, "failed": failed, "absent": list(absent)}
 
 
 async def v_junk(_conn, req):
@@ -928,12 +938,15 @@ async def v_junk(_conn, req):
     # жива и отвечает по ssh. Без этого уборка сносила бы тела, не спросив,
     # есть ли в них несохранённое: 22.09 она так снесла два контейнера чужих
     # проектов, и повезло, что пустых.
+    #
+    # Факты -- целиком (#372): CloneFacts.to_dict() с def/home/owner. Урезанный
+    # {dirty, ahead, cur} терял дом клона, и правило «клон не на своей ветке
+    # -- работа» (#266, #272) у уборки не срабатывало никогда.
     work = {}
     for n in names:
         c = await clone_facts(n)
         if c:
-            work[n] = {"dirty": c.get("dirty"), "ahead": c.get("ahead"),
-                       "cur": c.get("cur")}
+            work[n] = c
     return {"node": node_name(),
             "driver": driver.current_name(),
             "bodies": names,

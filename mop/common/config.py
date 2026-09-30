@@ -207,6 +207,10 @@ DEFAULTS = {
     "MOP_SWEEP_FREE_MIN_GB": "60",
     "MOP_SWEEP_MAX_TARGET": "15GB",
     "MOP_SWEEP_STALE_DAYS": "14",
+    # Срок pu-sweep на узле, секунды (#373): зависший держал бы замок агента
+    # до рестарта юнита. Меньше SWEEP_TIMEOUT doctor disk (600): отказ по
+    # сроку обязан доехать до клиента, а не прочитаться «did not answer».
+    "MOP_SWEEP_TIMEOUT": "540",
     # Жёсткий порог: ниже него mop gc пересоздаёт свободных папетов. Обязан
     # быть заметно ниже MOP_SWEEP_FREE_MIN_GB — сначала должно отработать
     # дешёвое подрезание target-ов, и только если оно не помогло, дорогой рецикл.
@@ -406,6 +410,7 @@ NODE_SCOPED = (
     "MOP_SWEEP_FREE_MIN_GB",
     "MOP_SWEEP_MAX_TARGET",
     "MOP_SWEEP_STALE_DAYS",
+    "MOP_SWEEP_TIMEOUT",
 )
 
 

@@ -468,6 +468,47 @@ def check_safe_359(c, doctor):
             any(a.get("flag") == "--safe" for a in cmd.MCP["args"]), cmd.MCP["args"])
 
 
+# ── #370: неизвестное действие лечения -- отказ, а не рестарт ───────────
+# HYPOTHESIS: puppets.treat -- цепочка if по голым строкам, и всё, что не
+# совпало (новое действие, опечатка), уходило в безусловный рестарт: он
+# стирает разговор и может убить работу, опаснее любого отказа.
+# SOLUTION: действия -- константы рядом с state._ACTIONS (одно определение
+# на diagnose, treat и doctor), treat -- таблица {действие: функция}, restart
+# -- её явная строка; неизвестное -- "<action> failed: unknown action" без
+# вызова кластера.
+# STATUS: FIXED — see #370
+def check_unknown_action_370(c):
+    from mop.common import state
+    asked = []
+    issue = {"name": "pu-mop-1", "alloc": {"NodeName": "n1"}, "diagnosis": "d"}
+    with restored(puppets, "_cluster"), restored(bus, "login", "request"):
+        bus.login = lambda: "anton"
+        puppets._cluster = lambda verb, **kw: asked.append(verb) or {}
+        bus.request = lambda *a, **kw: asked.append(a[1]) or {}
+        got = puppets.treat(dict(issue, action="frobnicate"))
+        c.expect("#370 an unknown action is refused", got, "frobnicate failed: unknown action")
+        c.expect("#370 an unknown action reaches no cluster verb", asked, [])
+        asked.clear()
+        puppets.treat(dict(issue, action="restart"))
+        c.expect("#370 restart is an explicit row of the table", asked, ["restart"])
+    table = getattr(puppets, "TREAT", None)
+    declared = getattr(state, "ACTIONS", None)
+    if not c.check("#370 puppets.TREAT and state.ACTIONS exist",
+                   table is not None and declared is not None):
+        return
+    emitted = {a for a in state._ACTIONS.values() if a}
+    emitted |= {a for a in map(state.spec_action, (None, "free", "busy")) if a}
+    c.check(f"#370 every action _ACTIONS/spec_action emits is declared: {emitted}",
+            emitted <= set(declared))
+    c.expect("#370 treat has a row for every declared action",
+             sorted(table), sorted(declared))
+    # diagnose кладёт действие в словарь проблемы: голая строка там -- мимо
+    # объявления, её treat мог бы и не знать.
+    src = open(os.path.join(ROOT, "mop", "common", "puppets.py")).read()
+    c.expect("#370 diagnose names actions by constant, not by a bare string",
+             re.findall(r'"action": "[^"]*"', src), [])
+
+
 def main():
     c = Checks()
     doctor = registry()
@@ -481,6 +522,7 @@ def main():
         check_disk_bodies_363(c, doctor)
         check_lease_357(c, doctor)
         check_safe_359(c, doctor)
+        check_unknown_action_370(c)
     else:
         # До шва: вывод сегодняшнего командлета -- тот, что шов обязан сохранить.
         check_output_356(c, [[]])

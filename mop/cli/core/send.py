@@ -37,7 +37,7 @@ def show_sessions():
 def to_puppet(a, body):
     """Через шину: сокет папета host-local, до него дотягивается агент узла.
     Доставка -- mop/client/channel.py (#148), здесь только вывод."""
-    v = channel.send_to_puppet(puppets.running_alloc(a.target)["NodeName"], a.target,
+    v = channel.send_to_puppet(puppets.node_of(a.target), a.target,
                                body, a.priority, a.wait, owner=bus.login(), force=a.force)
     if channel.failure(v):
         sys.exit(channel.failure(v))

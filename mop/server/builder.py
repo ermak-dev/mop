@@ -123,14 +123,16 @@ def failure(e):
 
 
 # ─── сервер ──────────────────────────────────────────────────────────────
-def serving_now(refused=None):
+def serving_now(refused=None, api=None):
     """{контейнерный узел: [проекты, чей образ на нём объявлен]}.
 
     Узел с неизвестным драйвером в решение не входит, а отказ по нему
     дописывается в refused (#175): опечатка одного узла не останавливает
-    сборку для остальных."""
+    сборку для остальных. api -- Nomad (nomad.NomadApi, #275, #375), по
+    умолчанию живой."""
+    api = api or nomad
     out = {}
-    for name, meta in nomad.nodes_meta().items():
+    for name, meta in api.nodes_meta().items():
         try:
             container = driver.is_container(driver.of_node(meta, name))
         except RuntimeError as e:
@@ -139,14 +141,16 @@ def serving_now(refused=None):
             continue
         if not container:
             continue
-        have = nomad.node_dynamic_meta(name).get(spec.META_PROJECTS) or ""
+        have = api.node_dynamic_meta(name).get(spec.META_PROJECTS) or ""
         out[name] = [s for s in have.split(",") if s]
     return out
 
 
-def run(req, send):
+def run(req, send, api=None):
     """Одна сборка по запросу. send(**событие) -- шаг просителю.
-    -> итог (dict), без done: его ставит answer."""
+    -> итог (dict), без done: его ставит answer. api -- Nomad
+    (nomad.NomadApi, #275): один на весь прогон, до image.build (#375)."""
+    api = api or nomad
     origin = req.get("origin") or ""
     mode = req.get("mode") or "missing"
     node = req.get("node") or None
@@ -164,13 +168,13 @@ def run(req, send):
         send(step="reading the project's .mop")
         got = image.prepare(origin)
         refused = []
-        serving = serving_now(refused)
+        serving = serving_now(refused, api=api)
         for why in refused:
             send(step=f"skipping {why}")
         if node:
             # Контейнерный ли узел пула -- одна проверка, у image (#321).
             try:
-                image.container_nodes(nomad, node)
+                image.container_nodes(api, node)
             except RuntimeError as e:
                 return {"error": str(e)}
         try:
@@ -217,7 +221,7 @@ def run(req, send):
         try:
             r = image.build(origin, got, fresh=(mode == "rebuild"),
                             force=bool(req.get("force")), on_line=line, on_step=step,
-                            node=node)
+                            node=node, api=api)
         finally:
             state["alive"] = False
             lines(batch.take)

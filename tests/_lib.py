@@ -317,6 +317,18 @@ def gate_table_267():
 
 
 # ─── поддельный Nomad (#275) ─────────────────────────────────────────────
+class NoLiveNomad:
+    """Подмена модуля nomad, которая бросает на любом вызове (#375): путь,
+    обещавший ходить в Nomad через api, не должен дотянуться до живого
+    модуля. Исключения и константы модуля ей не нужны -- их зовут только на
+    отказе."""
+
+    def __getattr__(self, name):
+        def call(*a, **kw):
+            raise AssertionError(f"live nomad.{name} called past the api")
+        return call
+
+
 class FakeNomad:
     """nomad.NomadApi без сети: таблицы вместо кластера, вызовы -- в calls.
 

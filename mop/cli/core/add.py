@@ -11,6 +11,7 @@ import time
 from mop.cli import lib
 from mop.cli.core import _common
 from mop.common import bus, context, llm, puppets
+from mop.common.domain import Alloc
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -66,15 +67,16 @@ def _add(origin, project, profile, named, p, cred=None):
     p.step(f"{name}: waiting for a node")
     node = None
     for _ in range(120):
-        a = bus.call_cluster("alloc", name=name).get("alloc")
+        raw = bus.call_cluster("alloc", name=name).get("alloc")
+        a = Alloc.from_dict(raw)
         if a:
-            node = a["NodeName"]
-            if a["ClientStatus"] == "running":
+            node = a.node
+            if a.running:
                 # Задача поднялась -- врапер зовёт bootstrap до tmux (#334).
                 return _common.report_bootstrap(name, got, p)
-            if a["ClientStatus"] == "failed" or puppets.failing(a):
+            if a.client_status == "failed" or puppets.failing(raw):
                 p.clear()
-                lib.fail(f"{name} on {node}: {puppets.failing(a) or 'failed to start'}")
+                lib.fail(f"{name} on {node}: {puppets.failing(raw) or 'failed to start'}")
                 return 1
             p.step(f"{name}: starting on {node}")
         time.sleep(1)

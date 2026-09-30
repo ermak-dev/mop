@@ -241,6 +241,92 @@ def check_bus_envelope_264(c):
     return c.failed == failed_before
 
 
+def check_stale_permissions_error_369(c):
+    """HYPOTHESIS (#369): bus._last_error пишет только _on_error и не
+    сбрасывает никто, а _silence читает его при каждом таймауте. В
+    долгоживущем процессе (MCP мастера, mop-web) один давний отказ прав
+    выдаётся за причину каждого следующего таймаута любого узла, и диагноз
+    ведёт чинить права вместо молчащего агента.
+    SOLUTION: ошибка хранится вместе с моментом (bus._clock, монотонные
+    часы); таймаут запроса и отказ подключения объясняет только ошибка,
+    пришедшая после начала этого запроса или подключения. Тот же
+    закон -- у _one (request_many/request_stream). STATUS: FIXED — see #369
+
+    Часы и соединение -- заглушки: время двигает сам тест, без sleep."""
+    import asyncio
+    failed_before = c.failed
+    now = [100.0]
+    violation = "nats: permissions violation for publish to \"mop.mop.node.n1.rpc\""
+
+    class Conn:
+        def __init__(self, during=False):
+            self.during = during
+
+        async def request(self, subj, data, timeout=None):
+            if self.during:
+                now[0] += 1
+                await bus._on_error(Exception(violation))
+            raise asyncio.TimeoutError()
+
+    def timeout_text(conn):
+        bus.connect = lambda *a, **k: conn
+        try:
+            bus.request("n1", "state", timeout=3, project="mop")
+        except bus.BusError as e:
+            return str(e)
+        return "no BusError"
+
+    with restored(bus, "connect", "login", "_clock", "_last_error", "ERROR_LISTENERS"):
+        bus.login = lambda: None
+        bus._clock = lambda: now[0]
+        bus.ERROR_LISTENERS = []
+        # отказ прав давний: пришёл до начала запроса
+        asyncio.run(bus._on_error(Exception(violation)))
+        now[0] = 200.0
+        c.expect("#369 an old permissions error does not explain a later timeout",
+                 timeout_text(Conn()), "node agent n1 did not answer in 3s")
+        # отказ прав пришёл во время запроса -- он и есть причина
+        got = timeout_text(Conn(during=True))
+        c.check("#369 a permissions error during the request explains its timeout",
+                got.startswith("bus did not let the request through — node agent n1")
+                and "permissions violation" in got, got)
+        # тот же закон у request_many: его узлы спрашивает _one, а не _ask
+        now[0] = 300.0
+        bus.connect = lambda *a, **k: Conn()
+        got = bus.request_many("state", ["n1"], timeout=3, project="mop")["n1"]
+        c.expect("#369 request_many: an old permissions error does not explain a timeout",
+                 str(got), "node agent n1 did not answer in 3s")
+    return c.failed == failed_before
+
+
+def check_agents_project_371(c):
+    """HYPOTHESIS (#371): _roster фильтрует по подстроке отрендеренного
+    origin (`project not in s["origin"]`): проект mop -- подстрока
+    .../rumop.git, и agents(project="mop") показывает папетов rumop.
+    SOLUTION: сравнение по значению PuppetRow -- puppets.project_of(origin),
+    строка без origin -- «?», как row_project дашборда. Одно определение
+    проекта (CLAUDE.md). STATUS: FIXED — see #371"""
+    from mop.common.state import PuppetRow
+    failed_before = c.failed
+
+    def row(name, origin):
+        return PuppetRow(name=name, node="n1", alloc_status="running", state="free",
+                         kind="free", owner=None, llm="opus", origin=origin)
+    rows = [row("pu-mop-1", "git@git.example:ermak/mop.git"),
+            row("pu-rumop-1", "git@git.example:ermak/rumop.git"),
+            row("pu-none-1", None)]
+    with patched(puppets, puppet_rows=lambda *a, **k: rows):
+        got = "\n".join(mcp._roster("mop"))
+        c.check("#371 agents(project=mop) shows the mop puppet", "pu-mop-1" in got, got)
+        c.check("#371 agents(project=mop) hides the rumop puppet", "pu-rumop-1" not in got, got)
+        c.check("#371 agents(project=mop) hides a puppet without origin",
+                "pu-none-1" not in got, got)
+        got = "\n".join(mcp._roster(""))
+        c.check("#371 no project: every puppet",
+                all(n in got for n in ("pu-mop-1", "pu-rumop-1", "pu-none-1")), got)
+    return c.failed == failed_before
+
+
 def main():
     c = Checks()
 
@@ -543,6 +629,10 @@ def main():
 
     c.check("#264 one envelope, one fallback, request_many(verb, nodes)",
             check_bus_envelope_264(c))
+    c.check("#369 a stale permissions error does not explain a later timeout",
+            check_stale_permissions_error_369(c))
+    c.check("#371 agents(project) matches the project, not a substring of origin",
+            check_agents_project_371(c))
 
     return c.report("channel")
 

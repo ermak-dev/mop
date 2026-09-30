@@ -42,6 +42,31 @@ KEEPALIVE_TIMEOUT = 120
 
 _logins, _logins_lock = {}, threading.Lock()
 
+# Вид кредита -- одна таблица (#376), а не переключатель по строке в каждой
+# функции. Ключи -- ровно credreg.KINDS (запись другого не заводит):
+#   file     имя файла секрета в доме; None -- файл кредов клиента claude,
+#            секрет в нём -- access-токен
+#   renews   у секрета есть срок, и сервер его продлевает (keepalive)
+#   carries  что уезжает в тело: session -- креды без refresh, env -- ключ в
+#            secrets.env; None -- не раздаётся (setup-token нужен окружением
+#            при старте claude)
+#   email    владелец по умолчанию -- email из `claude auth status`; у
+#            setup-token профиля (а с ним и почты) нет
+KINDS = {
+    "login": {"file": None, "renews": True, "carries": "session", "email": True},
+    "token": {"file": "token", "renews": False, "carries": None, "email": False},
+    "key": {"file": "key", "renews": False, "carries": "env", "email": False},
+}
+
+
+def kind_spec(name, kind):
+    """Строка таблицы видов. Неизвестный вид -- ValueError с именем кредита:
+    прежде такой молча читал файл `key` и не имел срока."""
+    spec = KINDS.get(kind)
+    if spec is None:
+        raise ValueError(f"credential {name}: unknown kind {kind!r}")
+    return spec
+
 
 def home(name):
     credreg.check_name(name)
@@ -89,11 +114,12 @@ def all():
 
 
 def secret_path(name, kind):
-    """Где лежит секрет кредита по виду: файл кредов клиента у login, файл
-    `token` у token, иначе `key` (#318: чтение, запись и время смены)."""
-    if kind == "login":
+    """Где лежит секрет кредита по виду (KINDS, #376): файл кредов клиента
+    либо файл вида в доме (#318: чтение, запись и время смены)."""
+    file = kind_spec(name, kind)["file"]
+    if file is None:
         return credreg.credentials_file(home(name))
-    return os.path.join(home(name), "token" if kind == "token" else "key")
+    return os.path.join(home(name), file)
 
 
 def _write_secret(name, kind, text):
@@ -155,7 +181,7 @@ def secret(name, rec=None):
     if rec is None:
         return None
     kind = rec.get("kind")
-    if kind == "login":
+    if kind_spec(name, kind)["file"] is None:
         return credreg.access_token(credentials(name))
     try:
         with open(secret_path(name, kind)) as f:
@@ -167,7 +193,7 @@ def secret(name, rec=None):
 def expires_at(name, rec=None):
     """Срок access-токена дома логина; у ключа и токена срока нет."""
     rec = rec or load(name)
-    if not rec or rec.get("kind") != "login":
+    if not rec or not kind_spec(name, rec.get("kind"))["renews"]:
         return None
     return credreg.expires_at(credentials(name))
 
@@ -178,6 +204,12 @@ def probe(name, now=None):
     rec = load(name)
     if rec is None:
         raise ValueError(f"no credential {name}")
+    kind = rec.get("kind")
+    if kind not in KINDS:
+        # Отказ -- статусом этой записи (#376), а не исключением: probe_all
+        # (`mop cred status` без имени) не валится на одной битой записи.
+        status = CredStatus("needs_login", detail=f"unknown kind {kind!r}")
+        return save(credreg.merge_status(rec, status, now))
     prof = llm.get(rec.get("profile"))
     fn = (prof or {}).get("probe")
     sec = secret(name, rec)
@@ -187,7 +219,7 @@ def probe(name, now=None):
         status = CredStatus("active", detail=f"profile {rec.get('profile')} has no probe")
     else:
         exp = expires_at(name, rec)
-        if exp is not None and exp < now and rec.get("kind") == "login":
+        if exp is not None and exp < now:
             # Истёкший access-токен: проба ушла бы с ним и вернула 401;
             # сперва продление, потом проба свежим.
             keepalive(name, rec, force=True)
@@ -204,7 +236,7 @@ def keepalive(name, rec=None, now=None, force=False):
     """Продлить токен дома логина, если пора: `claude -p` в этом доме.
     -> "refreshed" | "not due" | "not a login" | "failed: …"."""
     rec = rec or load(name)
-    if not rec or rec.get("kind") != "login":
+    if not rec or not kind_spec(name, rec.get("kind"))["renews"]:
         return "not a login"
     exp = expires_at(name, rec)
     if not force and not credreg.needs_keepalive(exp, now or time.time()):
@@ -262,7 +294,7 @@ def login_start(name, mode=None):
                            f"with mop cred login on the server")
     # Профиль сверяет сервер (#330): кнопка страницы -- её собственное
     # правило, а глагол и /api/creds/login/start принимают любое имя.
-    if rec.get("profile") != "claude":
+    if rec.get("profile") != credreg.LOGIN_PROFILE:
         raise RuntimeError(f"credential {name} is a {rec.get('profile')} credential: "
                            f"only claude credentials log in")
     mode, refusal = login_mode(rec, mode)
@@ -285,7 +317,7 @@ def registration(mode, status, owner=""):
     либо email из `claude auth status`; setup-token -- только названный: его
     область -- user:inference, профиля (а с ним и почты) у него нет."""
     kind = credlogin.MODES[mode]["kind"]
-    if kind == "token":
+    if not KINDS[kind]["email"]:
         return {"kind": kind, "owner": owner or ""}
     return {"kind": kind, "owner": owner or (status or {}).get("email") or ""}
 
@@ -349,12 +381,13 @@ def materialize(name, rec=None):
         raise ValueError(f"no credential {name}")
     mark = (paths.CRED_MARK, (name + "\n").encode())
     kind = rec.get("kind")
-    if kind == "login":
+    carries = kind_spec(name, kind)["carries"]
+    if carries == "session":
         creds = credentials(name)
         if not creds:
             raise ValueError(f"credential {name}: no credentials file in its home")
         return [(paths.CREDENTIALS, json.dumps(credreg.without_refresh(creds)).encode()), mark]
-    if kind == "key":
+    if carries == "env":
         var = (llm.require(rec.get("profile")) or {}).get("key")
         key = secret(name, rec)
         if not var or not key:
@@ -467,18 +500,26 @@ def push(name, node, bodies, timeout=PUSH_TIMEOUT):
 
 def _outcome(nodes, answers):
     """Ответы агентов на адресный `write` -> {узел: "OK" | "FAILED: …" |
-    "NOT REACHED: …"}: bus.results_from (#315) и сверх него (#312) -- отказ
-    одного тела агент кладёт строкой в written, а не в error, и без её
-    разбора непришедшая аренда читалась бы OK."""
+    "NOT REACHED: …"}: bus.results_from (#315), отказ тела там же -- полем
+    failed (#366). Сверх него (#312) -- названное тело, которого на узле нет
+    (absent): адресная запись не дошла, и непришедшая аренда читалась бы OK.
+    Поля, а не текст written: правка формулировки в агенте молча сделала
+    бы отказ успехом."""
     out = bus.results_from(nodes, answers)
     for node in nodes:
         answer = answers.get(node)
         if out[node] != "OK" or not isinstance(answer, dict):
             continue
-        missed = [w for w in answer.get("written") or []
-                  if " FAILED — " in w or w.endswith(" NOT LIVE")]
-        if missed:
-            out[node] = f"FAILED: {missed[0][:120]}"
+        if "failed" not in answer:
+            # Переход #366: снять, когда все агенты на коде с полем failed.
+            # Агент, не раскатившийся при deploy (молчал, был недоступен),
+            # отвечает прежней формой -- отказ тела только строкой в written.
+            missed = [w for w in answer.get("written") or []
+                      if " FAILED — " in w or w.endswith(" NOT LIVE")]
+            if missed:
+                out[node] = f"FAILED: {missed[0][:120]}"
+        elif answer.get("absent"):
+            out[node] = f"FAILED: {answer['absent'][0]} NOT LIVE"
     return out
 
 
@@ -522,6 +563,11 @@ def note_turn(name, record, now=None, api=None):
     if int(record.get("at") or 0) <= int(rec.get("noted_at") or 0):
         return None
     now = now or time.time()
+    if rec.get("kind") not in KINDS:
+        # Ход назван один раз, и не исключением: секрета неизвестного вида
+        # нет -- ни времени смены, ни раздачи (#376).
+        save({**rec, "noted_at": int(record["at"])})
+        return f"{name}: unknown kind {rec.get('kind')!r}, turn not attributed"
     status = credreg.turn_status(record, _changed_at(name, rec))
     if status is not None:
         save({**credreg.merge_status(rec, status, now), "noted_at": int(record["at"])})
@@ -577,7 +623,7 @@ def tick(api=None, now=None, log=None):
     for rec in _records():
         name = rec["name"]
         try:
-            if rec.get("kind") == "login":
+            if kind_spec(name, rec.get("kind"))["renews"]:
                 got = keepalive(name, now=now)
                 if got not in ("not due", "not a login"):
                     lines.append(f"cred {name}: keepalive {got}")

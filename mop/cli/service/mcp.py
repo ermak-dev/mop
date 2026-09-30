@@ -249,9 +249,11 @@ def _roster(project):
     состояние аллокации, профиль LLM, репозиторий."""
     rows = [("PUPPET", "NODE", "ALLOC", "STATE", "OWNER", "LLM", "REPOSITORY")]
     for r in puppets.puppet_rows():
-        s = r.render()
-        if project and project not in s["origin"]:
+        # Проект -- одно определение (project_of), не подстрока origin: mop
+        # сидит внутри rumop (#371). Без origin -- «?», как row_project.
+        if project and (puppets.project_of(r.origin) if r.origin else "?") != project:
             continue
+        s = r.render()
         rows.append((s["name"], s["node"], s["alloc_status"], s["state"], s["owner"],
                      s["llm"], s["origin"]))
     return ["pool puppets:", *table(rows)] if len(rows) > 1 else ["pool puppets: none"]
@@ -386,7 +388,6 @@ def slash(name: str, command: str, force: bool = False) -> str:
 # каталога сессии мастера, ответ -- его вывод как есть. Своя копия add и
 # build здесь уже разошлась однажды с командлетами (workspace, сборщик);
 # копии нет -- расходиться нечему.
-MOP = os.path.join(cli.BIN, "mop")
 COMMAND_TIMEOUT = 600
 TYPES = {"string": str, "integer": int, "boolean": bool}
 HINTS = {"readonly": READ_ONLY, "destructive": DESTRUCTIVE}
@@ -401,7 +402,7 @@ def run_command(words, argv):
     моделью (CLAUDE.md), а цвета терминала снимаются."""
     cwd = (channel.my_session() or {}).get("cwd") or os.getcwd()
     try:
-        r = subprocess.run([MOP, *words, *argv], cwd=cwd, stdin=subprocess.DEVNULL,
+        r = subprocess.run([*lib.self_argv(), *words, *argv], cwd=cwd, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
     except subprocess.TimeoutExpired:
         return f"mop {' '.join(words)}: no answer in {COMMAND_TIMEOUT}s — still running"

@@ -10,7 +10,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, patched  # noqa: E402
+from _lib import Checks, FakeNomad, NoLiveNomad, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import builder  # noqa: E402
@@ -21,7 +21,7 @@ from mop.server import builder  # noqa: E402
 # чужой, host- и неизвестный узел и дошло ли дело до сборки.
 # STATUS: FIXED — see #321
 def check_builder_node_321(c):
-    from mop.server import image, nomad
+    from mop.server import image
     pool = {"agent1": {"mop_driver": "pve", "mop_projects": "rugent"},
             "agent2": {"mop_driver": "pve"}, "host1": {"mop_driver": "host"},
             "weird": {"mop_driver": "pvee"}}
@@ -30,26 +30,62 @@ def check_builder_node_321(c):
     def build(origin, got, node=None, **kw):
         built.append(node)
         return {"rc": 0, "gone": [], "announced": []}
-    with patched(nomad, nodes_meta=lambda: {n: dict(m) for n, m in pool.items()},
-                 node_dynamic_meta=lambda n: dict(pool.get(n) or {})), \
+    # Nomad -- параметром api (#375), а не подменой атрибутов модуля.
+    api = FakeNomad(meta=pool)
+    with patched(builder, nomad=NoLiveNomad()), \
             patched(image, prepare=lambda origin: {"project": "rugent"}, build=build):
         for node, mode, want in NODE_CASES_321:
             built.clear()
             got = builder.run({"origin": "git@h:g/rugent.git", "mode": mode, "node": node},
-                              lambda **ev: None)
+                              lambda **ev: None, api=api)
             c.expect(f"#321 builder run --node {node} ({mode}): reply and whether it built",
                      (got.get("error"), got.get("skipped"), built), want)
         # Пул без контейнерных узлов: раньше --node молча давал skipped
         # (serving пуст -- узел не сверялся), теперь -- отказ image.
         for n in ("agent1", "agent2", "weird"):
-            pool.pop(n)
+            api.meta.pop(n)
         built.clear()
         got = builder.run({"origin": "git@h:g/rugent.git", "mode": "missing", "node": "host1"},
-                          lambda **ev: None)
+                          lambda **ev: None, api=api)
         c.expect("#321 builder run --node on a pool with no container node: refused, not skipped",
                  (got.get("error"), got.get("skipped"), built),
                  ("host1: its bodies are not containers, there is no image to build there",
                   None, []))
+
+
+# ── #375: сборщик ходит в Nomad через api ─────────────────────────────
+# HYPOTHESIS: builder.serving_now и run зовут живые nomad.nodes_meta() и
+# node_dynamic_meta(), а image.build -- без api: сборка мимо интерфейса
+# #275, и проверки подменяют атрибуты модуля nomad.
+# SOLUTION: serving_now(refused, api) и run(req, send, api) с пробросом в
+# image.container_nodes и image.build; по умолчанию -- живой модуль.
+# STATUS: FIXED — see #375
+def check_builder_api_375(c):
+    from mop.server import image
+    fake = FakeNomad(meta={"agent1": {"mop_driver": "pve", "mop_projects": "rugent,mop"},
+                           "host1": {"mop_driver": "host"},
+                           "weird": {"mop_driver": "pvee"}})
+    seen = []
+
+    def build(origin, got, node=None, api=None, **kw):
+        seen.append(api)
+        return {"rc": 0, "gone": [], "announced": []}
+    with patched(builder, nomad=NoLiveNomad()), \
+            patched(image, prepare=lambda origin: {"project": "rugent"}, build=build):
+        try:
+            refused = []
+            got = builder.serving_now(refused, api=fake)
+        except (AssertionError, TypeError) as e:
+            got = str(e)
+        c.expect("#375 serving_now through api: the fake's container nodes",
+                 (got, len(refused)), ({"agent1": ["rugent", "mop"]}, 1))
+        try:
+            got = builder.run({"origin": "git@h:g/rugent.git", "mode": "update",
+                               "node": "agent1"}, lambda **ev: None, api=fake)
+        except (AssertionError, TypeError) as e:
+            got = {"error": str(e)}
+        c.check("#375 run through api: built, and image.build got the same api",
+                got.get("ok") and seen == [fake], (got, seen))
 
 
 # (узел, режим, (отказ, skipped, собирали ли на узле)).
@@ -67,6 +103,7 @@ NODE_CASES_321 = [
 
 def main():
     c = Checks()
+    check_builder_api_375(c)
     check_builder_node_321(c)
     # HYPOTHESIS (#123): собрать образ можно было только на контроллере, и
     # вывод был полным логом ansible. SOLUTION: сборщик на сервере шлёт шаг --

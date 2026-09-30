@@ -518,9 +518,28 @@ def check_push_312(c):
         with patched(srv, materialize=lambda name, rec=None: [("a/b", b"x"), ("m", b"anton\n")]):
             for reply, want in (
                     ({"written": ["pu-mop-1:a/b", "pu-mop-1:m"]}, "OK"),
+                    # С #366 отказ тела -- полями ответа (failed, absent);
+                    # строки в written -- для старых клиентов, не контракт.
+                    ({"written": ["pu-mop-1 FAILED — body 9001 is stopped"],
+                      "failed": {"pu-mop-1": "body 9001 is stopped"}, "absent": []},
+                     "FAILED: pu-mop-1: body 9001 is stopped"),
+                    ({"written": ["pu-mop-1 NOT LIVE"], "failed": {}, "absent": ["pu-mop-1"]},
+                     "FAILED: pu-mop-1 NOT LIVE"),
+                    # #366: другая формулировка строки -- тот же отказ.
+                    ({"written": ["pu-mop-1 could not be written"],
+                      "failed": {"pu-mop-1": "ssh: connection refused"}, "absent": []},
+                     "FAILED: pu-mop-1: ssh: connection refused"),
+                    ({"written": ["pu-mop-1 is gone"], "failed": {}, "absent": ["pu-mop-1"]},
+                     "FAILED: pu-mop-1 NOT LIVE"),
+                    # Переход #366: агент без поля failed (не раскатился) --
+                    # прежний разбор строк written, отказ остаётся отказом.
                     ({"written": ["pu-mop-1 FAILED — body 9001 is stopped"]},
                      "FAILED: pu-mop-1 FAILED — body 9001 is stopped"),
                     ({"written": ["pu-mop-1 NOT LIVE"]}, "FAILED: pu-mop-1 NOT LIVE"),
+                    # Поле есть -- судят только поля: строка, похожая на отказ,
+                    # при пустых failed и absent -- не отказ.
+                    ({"written": ["pu-mop-1:a/b", "pu-mop-1 FAILED — an old line"],
+                      "failed": {}, "absent": []}, "OK"),
                     ({"error": "puppet pu-mop-1 is not in project x"},
                      "FAILED: puppet pu-mop-1 is not in project x"),
                     (bus.BusError("node agent hyper did not answer in 60s"),
@@ -793,6 +812,108 @@ def check_internals_318(c):
     except ValueError as e:
         c.check("#318 an unknown mode names the modes", "login, setup-token" in str(e), str(e))
 
+# ── #376: вид кредита -- одна таблица, неизвестный вид -- громкий отказ ─
+# Характеристика до рефакторинга: раздача (materialize) и срок (expires_at)
+# по каждому виду -- то, чего #318 не закрепил. Путь секрета, чтение,
+# время смены, keepalive ключа и регистрация входа закреплены там.
+#
+# HYPOTHESIS: вид кредита -- строковый переключатель в десятке мест
+# server/credreg.py; secret_path отображает любой неизвестный вид в файл
+# `key`, и запись с чужим видом читала бы ключ, срока бы не имела и
+# продление бы молча пропускала.
+# SOLUTION: таблица KINDS (файл секрета, продление, что уезжает в тело,
+# владелец из auth status); ветвления читают её через kind_spec, а
+# неизвестный вид -- ValueError с именем кредита и вида. Отказ -- одного
+# кредита: probe отдаёт запись со статусом needs_login «unknown kind», а
+# note_turn называет ход строкой, не роняя probe_all и цикл по ходам.
+# STATUS: FIXED — see #376
+def check_kinds_376(c):
+    import json
+    import tempfile
+    from mop.common import llm, paths
+    from mop.server import credreg as srv
+
+    failed_before = c.failed
+    with tempfile.TemporaryDirectory() as tmp, patched(srv, ROOT=tmp):
+        srv.add_key("zai", "glm", "K", now=NOW)
+        srv.save(credreg.record("tok", "claude", "token", now=NOW))
+        with open(os.path.join(tmp, "tok", "token"), "w") as f:
+            f.write("T\n")
+        srv.add_login_file("anton", json.dumps({"claudeAiOauth": {
+            "accessToken": "A", "refreshToken": "R", "expiresAt": (NOW + 60) * 1000}}), now=NOW)
+
+        # Характеристика: что уезжает в тело по виду.
+        mark = (paths.CRED_MARK, b"anton\n")
+        c.expect("#376 materialize(login): the session without refresh, and the mark",
+                 srv.materialize("anton"),
+                 [(paths.CREDENTIALS, json.dumps(credreg.without_refresh(
+                     srv.credentials("anton"))).encode()), mark])
+        c.expect("#376 materialize(key): the key in secrets.env, and the mark",
+                 srv.materialize("zai"),
+                 [(paths.NODE_SECRETS, fsutil.write_kv({llm.require("glm")["key"]: "K"}).encode()),
+                  (paths.CRED_MARK, b"zai\n")])
+        try:
+            srv.materialize("tok")
+            c.fail("#376 materialize(token) must refuse")
+        except ValueError as e:
+            c.check("#376 materialize(token): not distributable", "not distributable" in str(e), str(e))
+        # Характеристика: срок есть только у логина.
+        c.expect("#376 expires_at per kind", [srv.expires_at(n) for n in ("anton", "tok", "zai")],
+                 [NOW + 60, None, None])
+
+        # Неизвестный вид: запись в обход credreg.record и файл key рядом --
+        # его прежний secret_path и читал.
+        srv.save({**credreg.record("odd", "claude", "login", now=NOW), "kind": "bogus"})
+        with open(os.path.join(tmp, "odd", "key"), "w") as f:
+            f.write("STOLEN\n")
+
+        def refuses(what, fn):
+            try:
+                got = fn()
+            except ValueError as e:
+                c.check(f"#376 {what}: the refusal names the credential and the kind",
+                        "odd" in str(e) and "bogus" in str(e), str(e))
+                return
+            c.fail(f"#376 {what}: an unknown kind must refuse", repr(got))
+        refuses("secret_path", lambda: srv.secret_path("odd", "bogus"))
+        refuses("secret", lambda: srv.secret("odd"))
+        refuses("expires_at", lambda: srv.expires_at("odd"))
+        refuses("keepalive", lambda: srv.keepalive("odd", force=True))
+        refuses("materialize", lambda: srv.materialize("odd"))
+        refuses("_changed_at", lambda: srv._changed_at("odd", srv.load("odd")))
+
+        # Проба -- заглушкой: без сети, и вид решает раньше неё.
+        with patched(srv, holders=lambda api=None: {}, keepalive=lambda *a, **k: "not due",
+                     probe=lambda name, now=None: None):
+            lines = srv.tick(now=NOW)
+        c.check("#376 tick names the unknown kind in the journal",
+                any(l.startswith("cred odd: ") and "bogus" in l for l in lines), lines)
+
+        # Отказ -- одного кредита, не реестра: probe_all (`mop cred status`
+        # без имени) не падает на битой записи, остальные пробуются.
+        probed = CredStatus("active", detail="probed")
+        try:
+            with patched(srv.llm, get=lambda profile: {"probe": lambda sec: probed}):
+                got = {r["name"]: r.get("status") or {} for r in srv.probe_all(NOW)}
+        except ValueError as e:
+            got = {}
+            c.fail("#376 probe_all must survive a record of an unknown kind", str(e))
+        c.expect("#376 probe_all: the unknown kind is a status of its own record",
+                 {k: (got.get("odd") or {}).get(k) for k in ("kind", "detail")},
+                 {"kind": "needs_login", "detail": "unknown kind 'bogus'"})
+        c.expect("#376 probe_all: the login next to it is probed",
+                 (got.get("anton") or {}).get("detail"), "probed")
+        try:
+            said = srv.note_turn("odd", {"event": "StopFailure", "at": NOW + 5, "cred": "odd",
+                                         "error": "authentication_failed"}, NOW + 6)
+            c.check("#376 note_turn names the unknown kind", "bogus" in (said or ""), said)
+        except ValueError as e:
+            c.fail("#376 note_turn must not raise on an unknown kind", str(e))
+    c.expect("#376 the table covers exactly the record's kinds",
+             sorted(getattr(srv, "KINDS", {})), sorted(credreg.KINDS))
+    return c.failed == failed_before
+
+
 # ── #312: раздача -- только телам держателей ───────────────────────────
 # HYPOTHESIS: distribute слал `write` узлу держателя без списка тел, и агент
 # писал кредит в копию узла и во все тела узла: держатель соседнего кредита
@@ -814,7 +935,8 @@ def check_distribute_bodies_312(c):
                       project, [p for p, _ in fields.get("files") or []]))
         return {"n1": {"written": [f"{b}:a/b" for b in nodes.get("n1", {}).get("bodies", [])]},
                 "n2": bus.BusError("node agent n2 did not answer in 60s"),
-                "n3": {"written": ["pu-a-9 FAILED — body 9009 is stopped"]}}
+                "n3": {"written": ["pu-a-9 FAILED — body 9009 is stopped"],
+                       "failed": {"pu-a-9": "body 9009 is stopped"}, "absent": []}}
     with tempfile.TemporaryDirectory() as tmp, \
             patched(srv, ROOT=tmp, holders=lambda api=None: held,
                     materialize=lambda name, rec=None: [("a/b", name.encode())]), \
@@ -836,7 +958,7 @@ def check_distribute_bodies_312(c):
         held["anton"] = {"pu-a-9": "n3"}
         c.expect("#312 distribute: a body refused inside a node's answer is FAILED, not OK",
                  srv.distribute("anton", now=NOW),
-                 {"n3": "FAILED: pu-a-9 FAILED — body 9009 is stopped"})
+                 {"n3": "FAILED: pu-a-9: body 9009 is stopped"})
 
 
 def check_host_conflict_312(c):
@@ -872,6 +994,7 @@ def main():
     check_internals_318(c)
     check_distribute_bodies_312(c)
     check_host_conflict_312(c)
+    check_kinds_376(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
     rec = credreg.record("anton", "claude", "login", owner="anton@example.dev", now=NOW)

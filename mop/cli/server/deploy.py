@@ -357,8 +357,8 @@ def ci_pull(skip_pipeline, dry):
         return True
     print(f"  from-ci: {branch} {old[:12]} -> {new[:12]}; restarting on the new code",
           flush=True)
-    launcher = os.path.join(lib.BIN, "mop")
-    os.execv(launcher, [launcher, "deploy", "--from-ci"])
+    argv = [*lib.self_argv(), "server", "deploy", "--from-ci"]
+    os.execv(argv[0], argv)
 
 
 def check():

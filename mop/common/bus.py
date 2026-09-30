@@ -53,6 +53,7 @@ import os
 import queue
 import sys
 import threading
+import time
 
 try:
     import nats
@@ -83,7 +84,12 @@ PROJECT = settings.get("MOP_PROJECT") or ADMIN
 _lock = threading.Lock()
 _loop = None
 _conn = None
+# Последний асинхронный отказ шины и момент, когда он пришёл (#369): в
+# долгоживущем процессе давний отказ прав иначе объяснял бы каждый следующий
+# таймаут любого узла. Часы -- атрибутом, чтобы проверка двигала время сама.
 _last_error = None
+_last_error_at = None
+_clock = time.monotonic
 
 
 class BusError(RuntimeError):
@@ -291,8 +297,8 @@ async def _on_error(e):
     не доставляет публикацию, и запрос честно висит до таймаута. Без этого
     «нет права писать в mop.node.X.rpc» читалось бы как «агент молчит 20с» —
     диагноз, ведущий чинить работающий узел."""
-    global _last_error
-    _last_error = str(e)
+    global _last_error, _last_error_at
+    _last_error, _last_error_at = str(e), _clock()
     for fn in list(ERROR_LISTENERS):
         try:
             fn(_last_error)
@@ -388,7 +394,8 @@ def connect(file=None):
                 return config(file)
             except Exception:
                 return {}
-        with _connect_failure(creds_or_nothing, lambda e: _last_error or str(e)):
+        since = _clock()
+        with _connect_failure(creds_or_nothing, lambda e: _error_since(since) or str(e)):
             _conn = _call(_aconnect(file), 10)
         return _conn
 
@@ -465,11 +472,21 @@ def server_subject(project=None):
 # ─── запросы ─────────────────────────────────────────────────────────────
 
 
-def _silence(who, timeout):
+def _error_since(since):
+    """Асинхронный отказ шины, пришедший не раньше since, иначе None (#369):
+    объяснять запрос может только то, что случилось во время него."""
+    if _last_error_at is not None and _last_error_at >= since:
+        return _last_error
+    return None
+
+
+def _silence(who, timeout, since):
     """Почему тихо. Отличать «нет прав» от «агент лёг» обязательно: лечение
-    у них разное и противоположное по стоимости ошибки."""
-    if _last_error and "permissions violation" in _last_error.lower():
-        return f"bus did not let the request through — {who}: {_last_error}"
+    у них разное и противоположное по стоимости ошибки. since -- начало
+    запроса: отказ прав, пришедший раньше, к этому таймауту отношения не имеет."""
+    error = _error_since(since)
+    if error and "permissions violation" in error.lower():
+        return f"bus did not let the request through — {who}: {error}"
     return f"{who} did not answer in {timeout}s"
 
 
@@ -485,12 +502,13 @@ def _ask(subj, who, dead, verb, timeout, **fields):
         raise BusError(f"request {verb} exceeds the bus limit "
                        f"({len(payload)} > {MAX_PAYLOAD} bytes)")
     nc = connect()
+    since = _clock()
     try:
         msg = _call(arequest(nc, subj, payload, timeout), timeout)
     except NoRespondersError:
         raise BusError(dead, no_responders=True)
     except asyncio.TimeoutError:
-        raise BusError(_silence(who, timeout))
+        raise BusError(_silence(who, timeout, since))
     except Exception as e:
         raise BusError(f"{who}: {e}")
     try:
@@ -589,13 +607,14 @@ async def _one(nc, node, data, timeout, channel, project):
     Общая часть request_many и request_stream: ошибка возвращается, а не
     бросается — один молчащий узел не должен уносить с собой картину по
     остальным."""
+    since = _clock()
     try:
         msg = await arequest(nc, subject(node, channel, project), data, timeout)
         return json.loads(msg.data.decode())
     except NoRespondersError:
         return BusError(f"node agent {node} is not subscribed")
     except asyncio.TimeoutError:
-        return BusError(_silence(f"node agent {node}", timeout))
+        return BusError(_silence(f"node agent {node}", timeout, since))
     except Exception as e:
         return BusError(f"{node}: {e}")
 
@@ -622,11 +641,19 @@ def results_from(nodes, answers):
     """Ответы агентов на `write` -> {узел: "OK" | "FAILED: …" | "NOT REACHED: …"}.
     Чистая функция (#135): молчание агента называется молчанием, без
     отсылки к токену Nomad и контроллеру. Одна на клиента и сервер (#315):
-    копии держали client/keys.py и server/credreg.py."""
+    копии держали client/keys.py и server/credreg.py.
+
+    Отказ тела агент отдаёт полем failed {тело: причина}, а не error (#366):
+    узел ответил, но записи нет. Такой узел -- FAILED с причиной первого
+    тела; строки в written не разбираются, их формулировка не контракт."""
     out = {}
     for node in nodes:
-        got = verdict(answers.get(node))
-        if got is None:
+        answer = answers.get(node)
+        got = verdict(answer)
+        if got is None and answer.get("failed"):
+            body, why = next(iter(answer["failed"].items()))
+            out[node] = f"FAILED: {body}: {why}"[:128]
+        elif got is None:
             out[node] = "OK"
         elif got[0] == UNREACHED:
             out[node] = f"NOT REACHED: {got[1] or 'no answer'}"

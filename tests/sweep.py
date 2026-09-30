@@ -18,6 +18,13 @@ from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import puppets  # noqa: E402
+from mop.common.domain import CloneFacts  # noqa: E402
+
+
+def facts(cur, dirty=0, ahead=0, home=None, default="master"):
+    """Факты клона в той форме, в какой их отдаёт агент (CloneFacts.to_dict)."""
+    return CloneFacts(branch=cur, default_branch=default, home=home,
+                      origin="git@h:g/a.git", dirty=dirty, ahead=ahead).to_dict()
 
 
 def main():
@@ -40,11 +47,14 @@ def main():
     # Сирота с несохранённой работой НЕ сносится. Это главный предохранитель:
     # джоба у неё нет и к делу её уже не вернуть, но снесённое не
     # возвращается вовсе, а лежащее тело стоит только места.
+    # С #372 -- полная форма фактов клона, как её отдаёт агент: прежняя
+    # урезанная {dirty, ahead, cur} закрепляла дефект (без def/home правило
+    # «не на своей ветке» не срабатывало никогда).
     answers_work = {"hyper": {
         "bodies": ["pu-a-1", "pu-b-2", "pu-c-3"],
-        "work": {"pu-a-1": {"dirty": 3, "ahead": 0, "cur": "bug/1"},
-                 "pu-b-2": {"dirty": 0, "ahead": 2, "cur": "feat/2"},
-                 "pu-c-3": {"dirty": 0, "ahead": 0, "cur": "master"}}}}
+        "work": {"pu-a-1": facts("bug/1", dirty=3, home="bug/1"),
+                 "pu-b-2": facts("feat/2", ahead=2, home="feat/2"),
+                 "pu-c-3": facts("master")}}}
     rows = puppets.classify_junk(answers_work, set())
     c.expect("uncommitted work is spared",
           [r["sweepable"] for r in rows if r["name"] == "pu-a-1"], [False])
@@ -91,7 +101,42 @@ def main():
           [(r["node"], r["name"]) for r in rows],
           [("a", "pu-m-3"), ("b", "pu-a-1"), ("b", "pu-z-9")])
 
+    check_v_junk_372(c)
     return c.report("sweep")
+
+
+# ── #372: уборка сирот видит правило «клон не на своей ветке» ──────────
+# HYPOTHESIS: v_junk агента отдаёт урезанные факты {dirty, ahead, cur} без
+# def/home/owner, хотя clone_facts уже возвращает полный CloneFacts; на
+# клиенте CloneFacts.from_dict получает клон без дома, и правило #266/#272
+# «клон не на своей ветке -- работа» не срабатывает: чистую запушенную
+# сироту на чужой ветке уборка сносит.
+# SOLUTION: v_junk отдаёт clone_facts как есть -- полный to_dict().
+# STATUS: FIXED — see #372
+def check_v_junk_372(c):
+    import asyncio
+    from _lib import patched, restored
+    from mop.node import agent
+
+    class Drv:
+        async def bodies(self):
+            return ["pu-a-1", "pu-a-2"]
+    probed = {"pu-a-1": facts("feat/9", home="master"),     # чистый, запушен, не дома
+              "pu-a-2": facts("master", home="master")}      # дома и чист
+
+    async def clone_facts(name):
+        return dict(probed[name])
+    with patched(agent, DRIVER=Drv()), restored(agent, "clone_facts"):
+        agent.clone_facts = clone_facts
+        reply = asyncio.run(agent.v_junk(None, {}))
+    c.expect("#372 v_junk carries the full clone facts",
+             reply["work"].get("pu-a-1"), probed["pu-a-1"])
+    rows = {r["name"]: r for r in puppets.classify_junk({"hyper": reply}, set())}
+    off = rows.get("pu-a-1") or {}
+    c.check(f"#372 a clean pushed orphan off its home branch is spared: {off}",
+            off.get("sweepable") is False and "off home master" in (off.get("detail") or ""))
+    c.expect("#372 a clean orphan at home is swept",
+             (rows.get("pu-a-2") or {}).get("sweepable"), True)
 
 
 if __name__ == "__main__":
