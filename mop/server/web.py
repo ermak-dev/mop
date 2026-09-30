@@ -68,6 +68,40 @@ def counts(rows):
     return out
 
 
+# Сегменты полосы аллокаций (#378), по порядку: места бегущих папетов по
+# корзинам, «прочее выделенное», свободные места. «down» мест не держит.
+HELD = ("busy", "free", "sick", "silent")
+SEGMENTS = (*HELD, "other", "vacant")
+
+
+def load(rows, nodes):
+    """Места пула и полоса аллокаций (#378). -> {total, allocated,
+    free_slots, segments: [{kind, slots}] в порядке SEGMENTS}.
+
+    Единица -- место, как в `mop node`: slots_total и slots узла (по
+    памяти, cluster.nomad_pool). Узел без мест (down, отказ -- None) в сумму
+    не входит. Места выделенного раздаются корзинам бегущих папетов по
+    порядку HELD, остаток -- «прочее» (чужие джобы, просьбы проектов о
+    памяти больше spec.MEM). Папетов больше, чем выделено мест (папет
+    попросил меньше spec.MEM, его узел без ёмкости), -- места кончаются по
+    порядку HELD, хвост не рисуется: сумма сегментов -- всего мест, а
+    честные числа корзин -- в counts."""
+    sized = [n for n in nodes
+             if isinstance(n.get("slots"), int) and isinstance(n.get("slots_total"), int)]
+    total = sum(n["slots_total"] for n in sized)
+    free_slots = sum(n["slots"] for n in sized)
+    allocated = total - free_slots
+    by = counts(rows)
+    left, segments = allocated, []
+    for k in HELD:
+        take = min(by[k], left)
+        segments.append({"kind": k, "slots": take})
+        left -= take
+    segments += [{"kind": "other", "slots": left}, {"kind": "vacant", "slots": free_slots}]
+    return {"total": total, "allocated": allocated, "free_slots": free_slots,
+            "segments": segments}
+
+
 def row_project(r):
     """Проект строки ростера; без origin -- «?», как и показ строки
     (PuppetRow.render). Одно место на снимок и секцию мастеров (#319)."""
@@ -169,7 +203,8 @@ def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at, cred
     запроса к Nomad на каждого папета каждым кругом, а лечение всё равно
     остаётся за `mop doctor`; больной папет и так виден корзиной sick.
     creds -- строки реестра кредитов (#285), уже без секретов (cred_rows);
-    masters -- живые мастера по опросу who (#305, master_rows)."""
+    masters -- живые мастера по опросу who (#305, master_rows); load --
+    места пула (#378) по nodes, строкам node_rows."""
     return {"at": at, "projects": projects(rows), "counts": counts(rows),
             "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "per_user": per_user,
@@ -177,7 +212,10 @@ def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at, cred
             "masters": list(masters),
             # Период опроса мастеров (#325): страница пишет «раз в N с» по
             # нему, а не своей копией числа.
-            "masters_every": MASTERS_EVERY}
+            "masters_every": MASTERS_EVERY,
+            # Места пула и полоса аллокаций (#378): суммы и сегменты
+            # считает сервер, страница только рисует.
+            "load": load(rows, nodes)}
 
 
 def node_rows(rows):
