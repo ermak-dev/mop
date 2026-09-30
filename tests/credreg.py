@@ -812,6 +812,85 @@ def check_internals_318(c):
     except ValueError as e:
         c.check("#318 an unknown mode names the modes", "login, setup-token" in str(e), str(e))
 
+# ── #376: вид кредита -- одна таблица, неизвестный вид -- громкий отказ ─
+# Характеристика до рефакторинга: раздача (materialize) и срок (expires_at)
+# по каждому виду -- то, чего #318 не закрепил. Путь секрета, чтение,
+# время смены, keepalive ключа и регистрация входа закреплены там.
+#
+# HYPOTHESIS: вид кредита -- строковый переключатель в десятке мест
+# server/credreg.py; secret_path отображает любой неизвестный вид в файл
+# `key`, и запись с чужим видом читала бы ключ, срока бы не имела и
+# продление бы молча пропускала.
+# SOLUTION: таблица KINDS (файл секрета, продление, что уезжает в тело,
+# владелец из auth status); ветвления читают её через kind_spec, а
+# неизвестный вид -- ValueError с именем кредита и вида.
+# STATUS: FIXED — see #376
+def check_kinds_376(c):
+    import json
+    import tempfile
+    from mop.common import llm, paths
+    from mop.server import credreg as srv
+
+    failed_before = c.failed
+    with tempfile.TemporaryDirectory() as tmp, patched(srv, ROOT=tmp):
+        srv.add_key("zai", "glm", "K", now=NOW)
+        srv.save(credreg.record("tok", "claude", "token", now=NOW))
+        with open(os.path.join(tmp, "tok", "token"), "w") as f:
+            f.write("T\n")
+        srv.add_login_file("anton", json.dumps({"claudeAiOauth": {
+            "accessToken": "A", "refreshToken": "R", "expiresAt": (NOW + 60) * 1000}}), now=NOW)
+
+        # Характеристика: что уезжает в тело по виду.
+        mark = (paths.CRED_MARK, b"anton\n")
+        c.expect("#376 materialize(login): the session without refresh, and the mark",
+                 srv.materialize("anton"),
+                 [(paths.CREDENTIALS, json.dumps(credreg.without_refresh(
+                     srv.credentials("anton"))).encode()), mark])
+        c.expect("#376 materialize(key): the key in secrets.env, and the mark",
+                 srv.materialize("zai"),
+                 [(paths.NODE_SECRETS, fsutil.write_kv({llm.require("glm")["key"]: "K"}).encode()),
+                  (paths.CRED_MARK, b"zai\n")])
+        try:
+            srv.materialize("tok")
+            c.fail("#376 materialize(token) must refuse")
+        except ValueError as e:
+            c.check("#376 materialize(token): not distributable", "not distributable" in str(e), str(e))
+        # Характеристика: срок есть только у логина.
+        c.expect("#376 expires_at per kind", [srv.expires_at(n) for n in ("anton", "tok", "zai")],
+                 [NOW + 60, None, None])
+
+        # Неизвестный вид: запись в обход credreg.record и файл key рядом --
+        # его прежний secret_path и читал.
+        srv.save({**credreg.record("odd", "claude", "login", now=NOW), "kind": "bogus"})
+        with open(os.path.join(tmp, "odd", "key"), "w") as f:
+            f.write("STOLEN\n")
+
+        def refuses(what, fn):
+            try:
+                got = fn()
+            except ValueError as e:
+                c.check(f"#376 {what}: the refusal names the credential and the kind",
+                        "odd" in str(e) and "bogus" in str(e), str(e))
+                return
+            c.fail(f"#376 {what}: an unknown kind must refuse", repr(got))
+        refuses("secret_path", lambda: srv.secret_path("odd", "bogus"))
+        refuses("secret", lambda: srv.secret("odd"))
+        refuses("expires_at", lambda: srv.expires_at("odd"))
+        refuses("keepalive", lambda: srv.keepalive("odd", force=True))
+        refuses("materialize", lambda: srv.materialize("odd"))
+        refuses("_changed_at", lambda: srv._changed_at("odd", srv.load("odd")))
+
+        # Проба -- заглушкой: без сети, и вид решает раньше неё.
+        with patched(srv, holders=lambda api=None: {}, keepalive=lambda *a, **k: "not due",
+                     probe=lambda name, now=None: None):
+            lines = srv.tick(now=NOW)
+        c.check("#376 tick names the unknown kind in the journal",
+                any(l.startswith("cred odd: ") and "bogus" in l for l in lines), lines)
+    c.expect("#376 the table covers exactly the record's kinds",
+             sorted(getattr(srv, "KINDS", {})), sorted(credreg.KINDS))
+    return c.failed == failed_before
+
+
 # ── #312: раздача -- только телам держателей ───────────────────────────
 # HYPOTHESIS: distribute слал `write` узлу держателя без списка тел, и агент
 # писал кредит в копию узла и во все тела узла: держатель соседнего кредита
@@ -892,6 +971,7 @@ def main():
     check_internals_318(c)
     check_distribute_bodies_312(c)
     check_host_conflict_312(c)
+    check_kinds_376(c)
 
     # Запись: форма закреплена -- её читают list, дашборд и политика.
     rec = credreg.record("anton", "claude", "login", owner="anton@example.dev", now=NOW)
