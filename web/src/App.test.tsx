@@ -36,3 +36,15 @@ test("no footer line", () => {
   expect(screen.queryByText(/без входа, LAN доверенная/)).toBeNull();
   expect(screen.queryByText("JSON")).toBeNull();
 });
+
+// #378: окно раскатки -- web/dist новый, а сервер ещё отдаёт снимок без
+// load. Шапка -- прежняя (папеты и корзины), полосы нет, страница не белая.
+test("#378 a snapshot without load keeps the old header and draws no bar", () => {
+  // Последняя проверка файла: мок usePool отдаёт этот же объект.
+  delete SNAP.load;
+  renderUi(<App />);
+  expect(screen.getByText("3 папета")).toBeInTheDocument();
+  expect(screen.getByText("2 заняты")).toBeInTheDocument();
+  expect(screen.queryByText(/мест/)).toBeNull();
+  expect(screen.queryByTestId("load-bar")).toBeNull();
+});

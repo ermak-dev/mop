@@ -35,7 +35,8 @@ export default function App() {
           </Group>
         </Group>
       </Container>
-      {snapshot && <Box w="100%"><LoadBar load={snapshot.load} /></Box>}
+      {/* снимок без load (сервер до #378) -- без полосы */}
+      {snapshot?.load && <Box w="100%"><LoadBar load={snapshot.load} /></Box>}
       <Container size="xl" pt="sm" pb="md">
         <Stack gap="md">
           {snapshot && snapshot.errors.length > 0 && (

@@ -21,17 +21,18 @@ export function segmentLabel(kind: LoadKind, n: number): string {
   return `${n} ${KIND_WORD[kind].many}`;
 }
 
-/** Бейджи шапки: папеты и места пула, корзины -- только непустые. */
-export function LoadBadges({ load, counts }: { load: Load; counts: Counts }) {
+/** Бейджи шапки: папеты и места пула, корзины -- только непустые. Снимок
+ *  без load (сервер до #378) -- прежняя шапка: папеты и корзины. */
+export function LoadBadges({ load, counts }: { load?: Load; counts: Counts }) {
   return (
     <Group gap="xs" data-testid="chips">
       <Badge size="lg" variant="light" color="gray">{plural(counts.puppets, "папет", "папета", "папетов")}</Badge>
-      <Badge size="lg" variant="light" color="gray">всего {plural(load.total, "место", "места", "мест")}</Badge>
-      <Badge size="lg" variant="light" color="gray">выделено {load.allocated}</Badge>
+      {load && <Badge size="lg" variant="light" color="gray">всего {plural(load.total, "место", "места", "мест")}</Badge>}
+      {load && <Badge size="lg" variant="light" color="gray">выделено {load.allocated}</Badge>}
       {presentKinds(counts).map((k) => (
         <Badge key={k} size="lg" variant="light" color={KIND_COLOR[k]}>{counts[k]} {KIND_WORD[k].many}</Badge>
       ))}
-      <Badge size="lg" variant="light" color="gray">{vacant(load.free_slots)}</Badge>
+      {load && <Badge size="lg" variant="light" color="gray">{vacant(load.free_slots)}</Badge>}
     </Group>
   );
 }
