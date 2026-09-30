@@ -44,6 +44,14 @@ export interface Cred {
   resets_at: number | null; percent: number | null; age: string; holders: string[];
 }
 
+/** Сегмент полосы аллокаций (#378): корзина бегущих папетов, «прочее
+ *  выделенное» (other) или свободные места (vacant) -- в порядке сервера. */
+export type LoadKind = "busy" | "free" | "sick" | "silent" | "other" | "vacant";
+export interface LoadSegment { kind: LoadKind; slots: number }
+/** Места пула (#378, web.load): всего, выделено, свободных и сегменты
+ *  полосы, сумма которых -- всего мест. Считает сервер. */
+export interface Load { total: number; allocated: number; free_slots: number; segments: LoadSegment[] }
+
 export interface Snapshot {
   at: number | null;
   projects: Project[];
@@ -58,6 +66,9 @@ export interface Snapshot {
   masters: Master[];
   /** период опроса who в секундах (#325, MASTERS_EVERY) */
   masters_every?: number;
+  /** места пула и полоса аллокаций (#378); у снимка до #378 его нет --
+   *  окно раскатки, когда web/dist новый, а сервер ещё старый */
+  load?: Load;
 }
 
 /** Живой мастер по опросу who (#305): адрес для send, логин, сессия, каталог

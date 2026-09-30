@@ -21,10 +21,30 @@ test("the header shows the counters and the collector's errors", () => {
   expect(screen.getByText("nomad: no connection")).toBeInTheDocument();
 });
 
+// #378: одна строка бейджей (места и корзины) и полоса аллокаций под шапкой.
+test("#378 one row of badges and the allocation bar", () => {
+  renderUi(<App />);
+  expect(screen.getAllByTestId("chips")).toHaveLength(1);
+  expect(screen.getByText("всего 0 мест")).toBeInTheDocument();
+  expect(screen.getByTestId("load-bar")).toBeInTheDocument();
+});
+
 // Подвала нет (просьба оператора 27.09, #301): строка «поток событий · без
 // входа… · JSON» убрана со страницы.
 test("no footer line", () => {
   renderUi(<App />);
   expect(screen.queryByText(/без входа, LAN доверенная/)).toBeNull();
   expect(screen.queryByText("JSON")).toBeNull();
+});
+
+// #378: окно раскатки -- web/dist новый, а сервер ещё отдаёт снимок без
+// load. Шапка -- прежняя (папеты и корзины), полосы нет, страница не белая.
+test("#378 a snapshot without load keeps the old header and draws no bar", () => {
+  // Последняя проверка файла: мок usePool отдаёт этот же объект.
+  delete SNAP.load;
+  renderUi(<App />);
+  expect(screen.getByText("3 папета")).toBeInTheDocument();
+  expect(screen.getByText("2 заняты")).toBeInTheDocument();
+  expect(screen.queryByText(/мест/)).toBeNull();
+  expect(screen.queryByTestId("load-bar")).toBeNull();
 });

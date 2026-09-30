@@ -18,6 +18,11 @@ export function emptySnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     at: null, projects: [], nodes: [], usage: [], per_puppet: [], per_user: [], journal: [],
     errors: [], creds: [], masters: [], masters_every: 30,
     counts: { puppets: 0, free: 0, busy: 0, sick: 0, silent: 0, down: 0 },
+    load: {
+      total: 0, allocated: 0, free_slots: 0,
+      segments: (["busy", "free", "sick", "silent", "other", "vacant"] as const)
+        .map((kind) => ({ kind, slots: 0 })),
+    },
     ...overrides,
   };
 }
