@@ -100,7 +100,9 @@
     - bus
 
 
-- name: Disk watchdog job
+# Настройки планировщика Nomad (пере-подписка памяти) и снятие pu-cleanup
+# (#361): подметание будит таймер mop-doctor (#359).
+- name: Nomad scheduler settings
   hosts: server
   gather_facts: no
 
@@ -108,8 +110,8 @@
     nomad_home: "{{ MOP_NOMAD_DATA | dirname }}"
   tasks:
     - ansible.builtin.include_role:
-        name: bus
-        tasks_from: watchdog
+        name: nomad
+        tasks_from: scheduler
 
 
 # TLS-прокси (#96): одна точка входа для людей -- дашборд в корне, шина по

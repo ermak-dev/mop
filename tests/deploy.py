@@ -310,8 +310,6 @@ PROBES = [
      ["ip -4 route get"]),
     ("web/tasks/package.yml", "Version of the package on the control machine",
      "mop_package_fingerprint", ["git rev-parse", "git status --porcelain", "git diff", "sha256sum"]),
-    ("bus/tasks/watchdog.yml", "Check the pu-cleanup job is registered", "cleanup_status",
-     ["nomad job status"]),
 ]
 # Чего в пробе быть не может: всё, что меняет машину.
 WRITES = re.compile(r"\b(rm|mv|cp|tee|install|mkdir|chmod|chown|systemctl|apt|apt-get|pip|"
@@ -1024,6 +1022,47 @@ def check_doctor_timer_359(c):
             doc and web and doc[0] > web[0], (web, doc))
 
 
+# ── #361: снятие pu-cleanup ─────────────────────────────────────────────
+# HYPOTHESIS: после #359 подметание будят двое -- таймер mop-doctor и nomad
+# periodic pu-cleanup; второй тащит за собой и ловушку sysbatch: ребёнок
+# pending на недоступном узле плюс prohibit_overlap клинят расписание.
+# SOLUTION: шаблона и регистрации нет; прогон на сервере снимает живой
+# pu-cleanup с детьми (stop + purge, «джоба нет» -- не ошибка) и падает,
+# если что-то с этим префиксом осталось. Пере-подписка памяти, жившая в том
+# же файле, переезжает в роль nomad и остаётся в прогоне.
+# STATUS: FIXED — see #361
+def check_pu_cleanup_gone_361(c):
+    c.check("#361 the pu-cleanup job template is gone",
+            not os.path.exists(os.path.join(DEPLOY, "roles", "bus", "templates",
+                                            "pu-cleanup.nomad.hcl.j2")))
+    tasks = site_tasks()
+    text = [(f, yaml.safe_dump(t, allow_unicode=True)) for f, t in tasks]
+    c.check("#361 nothing renders or registers pu-cleanup",
+            not [(f, t.get("name")) for f, t in tasks
+                 if "pu-cleanup.nomad.hcl.j2" in yaml.safe_dump(t)
+                 or re.search(r"nomad job run\S*.*pu-cleanup", yaml.safe_dump(t))],
+            [(f, t.get("name")) for f, t in tasks if "pu-cleanup" in yaml.safe_dump(t)])
+    plays = yaml.safe_load(open(os.path.join(DEPLOY, "setup.yml")))
+    c.check("#361 no «Disk watchdog job» play",
+            "Disk watchdog job" not in [p.get("name") for p in plays])
+    retire = [(f, t) for f, t in tasks if "pu-cleanup" in yaml.safe_dump(t)
+              and "purge" in yaml.safe_dump(t)]
+    if c.check("#361 the run retires the live pu-cleanup: stop with purge", len(retire) == 1,
+               [(f, t.get("name")) for f, t in retire]):
+        f, t = retire[0]
+        body = yaml.safe_dump(t)
+        c.check("#361 it takes the periodic children too: the prefix, not one ID",
+                "prefix=pu-cleanup" in body, t.get("name"))
+        c.check("#361 it fails if anything with the prefix is left after the purge",
+                "left" in body and ("exit(1)" in body or "SystemExit(1)" in body
+                                    or "failed_when" in body), t.get("name"))
+        c.check("#361 idempotent: a changed run only when something was purged",
+                "changed_when" in t, t.get("name"))
+        c.check("#361 on the server", f.endswith(os.path.join("nomad", "tasks", "scheduler.yml")), f)
+    over = [n for _, n in text if "MemoryOversubscriptionEnabled" in n]
+    c.check("#361 memory oversubscription is still set by the run", len(over) == 1, len(over))
+
+
 def main():
     c = Checks()
 
@@ -1353,6 +1392,7 @@ def main():
 
     check_job_gc_348(c, can_render)
     check_doctor_timer_359(c)
+    check_pu_cleanup_gone_361(c)
     return c.report("deploy")
 
 

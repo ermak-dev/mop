@@ -402,7 +402,7 @@ NODE_SCOPED = (
     "MOP_BODY_CORES_CAP",
     "MOP_SSH_PORT",        # в node.env из ansible_port инвентаря (#201)
     # Пороги pu-sweep (#358): его зовёт агент глаголом sweep, а агент читает
-    # node.env. Спека pu-cleanup несёт то же значение той же настройки.
+    # node.env. Значение -- одно: эта настройка.
     "MOP_SWEEP_FREE_MIN_GB",
     "MOP_SWEEP_MAX_TARGET",
     "MOP_SWEEP_STALE_DAYS",
