@@ -357,6 +357,48 @@ def check_disk_358(c, doctor):
              [(doctor.where(i), i["action"]) for i in got], [("n1", "sweep"), ("n2", None)])
 
 
+# ── #363: брошенные тела контейнерного узла -- проблема, и doctor их метёт ──
+# HYPOTHESIS: ярус 0 не даёт итоговой строки, freed_kb и free_gb -- None, и
+# issue() возвращает None: сухой ответ узла с брошенными телами не становится
+# проблемой, --fix (и таймер mop-doctor) не зовёт sweep. pu-mop-5 и pu-mop-6
+# стояли на hyper с 2026-09-18.
+# SOLUTION: issue() читает поле bodies ответа агента (узловая половина #363):
+# bodies > 0 -- «N orphaned bodies to sweep», action sweep; treat называет
+# снесённые тела.
+# STATUS: FIXED — see #363
+def bodies(n, warnings=()):
+    return dict(ok(None, None, warnings), bodies=n)
+
+
+DISK_BODIES = [
+    ("orphaned bodies", bodies(2), ("2 orphaned bodies to sweep", "sweep")),
+    ("one orphaned body", bodies(1), ("1 orphaned body to sweep", "sweep")),
+    ("a container node with nothing to sweep", bodies(0), None),
+    ("a tier-0 refusal: the operator's call",
+     bodies(None, ["0 live sessions -- tmux unreachable, not 8 orphans; refusing to sweep"]),
+     ("0 live sessions -- tmux unreachable, not 8 orphans; refusing to sweep", None)),
+]
+
+
+def check_disk_bodies_363(c, doctor):
+    disk = doctor.module("disk")
+    for what, answer, want in DISK_BODIES:
+        got = disk.issues(["n1"], {"n1": answer})
+        if want is None:
+            c.expect(f"#363 disk: {what}: no issue", got, [])
+            continue
+        c.expect(f"#363 disk: {what}", [(i["diagnosis"], i["action"]) for i in got], [want])
+    # Лечение -- настоящий sweep; строка называет, сколько тел снесено.
+    asked = []
+    with restored(bus, "request"):
+        bus.request = lambda node, verb, **kw: asked.append((node, verb, kw.get("dry"))) \
+            or bodies(2)
+        got = disk.treat({"node": "n1", "action": "sweep"})
+    c.expect("#363 disk treat: a real sweep of the node", asked, [("n1", "sweep", None)])
+    c.expect("#363 disk treat: names the bodies it destroyed", got,
+             "n1: destroyed 2 orphaned bodies")
+
+
 def check_where_358(c, doctor):
     c.expect("#358 where: a puppet's issue sits on its allocation's node",
              doctor.where({"alloc": {"NodeName": "n1"}}), "n1")
@@ -436,6 +478,7 @@ def main():
         check_output_356(c, [[], ["puppets"]])
         check_where_358(c, doctor)
         check_disk_358(c, doctor)
+        check_disk_bodies_363(c, doctor)
         check_lease_357(c, doctor)
         check_safe_359(c, doctor)
     else:

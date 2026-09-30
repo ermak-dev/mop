@@ -24,6 +24,12 @@ def human(kb):
     return f"{kb} KB"
 
 
+def orphans(n):
+    """Число брошенных тел -> «2 orphaned bodies» -- так же, как считает
+    `mop driver sweep`."""
+    return f"{n} orphaned bod{'y' if n == 1 else 'ies'}"
+
+
 def issue(node, answer):
     """Ответ глагола sweep (всухую) -> проблема узла | None. Чистая функция.
     Молчание агента -- проблема с причиной, а не пропуск (#163): узел,
@@ -36,6 +42,10 @@ def issue(node, answer):
         return {"name": NAME, "node": node, "alloc": None, "action": None,
                 "diagnosis": f"sweep FAILED: {got[1]}"}
     freed, free, floor = answer.get("freed_kb"), answer.get("free_gb"), answer.get("min_gb")
+    # Узел с телами-контейнерами места не считает (ярус 0 уходит без итоговой
+    # строки), он считает тела: без этого числа брошенные тела не становились
+    # проблемой и --fix их не мёл (#363).
+    bodies = answer.get("bodies")
     pressure = free is not None and floor is not None and free < floor
     parts = []
     if pressure:
@@ -44,9 +54,11 @@ def issue(node, answer):
         parts.append(f"{human(freed)} to sweep")
         if not pressure and free is not None:
             parts.append(f"{free} GB free")
+    if bodies:
+        parts.append(f"{orphans(bodies)} to sweep")
     # Под давлением ярус 3 подрежет живые target-ы и при пустом «to sweep»:
     # всухую он не считает, сколько снимет.
-    action = "sweep" if (freed or pressure) else None
+    action = "sweep" if (freed or pressure or bodies) else None
     text = "; ".join(p for p in (", ".join(parts), *(answer.get("warnings") or ())) if p)
     if not text:
         return None
@@ -81,6 +93,8 @@ def treat(issue):
     if got:
         return f"{node}: sweep FAILED: {got[1] or 'no answer'}"
     freed, free = answer.get("freed_kb"), answer.get("free_gb")
+    if answer.get("bodies") is not None:
+        return f"{node}: destroyed {orphans(answer['bodies'])}"
     if freed is None:
         return f"{node}: swept, no totals"
     return f"{node}: freed {human(freed)}, {free} GB free"
