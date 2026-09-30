@@ -170,6 +170,15 @@ def main():
     unknown = [k for k in config.NODE_SCOPED if k not in config.SETTINGS]
     c.check("NODE_SCOPED names settings that do not exist", not (unknown), unknown)
 
+    # #358: подметание зовёт агент узла (глагол sweep), а агент читает
+    # настройки из node.env -- .env туда не едет. Пороги ехали только в спеку
+    # pu-cleanup через --extra-vars, и агент их не увидел бы: pu-sweep
+    # молча мёл бы по своим зашитым дефолтам, а не по порогам установки.
+    # STATUS: FIXED — see #358
+    for knob in ("MOP_SWEEP_FREE_MIN_GB", "MOP_SWEEP_MAX_TARGET", "MOP_SWEEP_STALE_DAYS"):
+        c.check(f"#358 {knob} reaches the node agent: in NODE_SCOPED",
+                knob in config.NODE_SCOPED)
+
     # Настройка старше дефолта: установка, где пользователь пула не совпадает
     # с тем, под кем крутится mop, вписывает его в .env.
     with patched_env(MOP_USER="someone-else"):

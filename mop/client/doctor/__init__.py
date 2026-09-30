@@ -9,7 +9,9 @@
 Контракт группы -- модуль с докстрингом (первая строка -- строка группы в
 отказе usage) и тремя функциями, все возвращают данные и молчат:
   diagnose()        -> [{name, alloc, diagnosis, action}]: action None --
-                       лечения нет, решает оператор
+                       лечения нет, решает оператор; проблема узла, а не
+                       папета, несёт node вместо alloc (#358) -- колонку
+                       «где» даёт where()
   prepare(issues)   -> (отказ | None, [строки]): что сделать до лечения
                        (раздать креды); отказ останавливает --fix целиком
   treat(issue)      -> что вышло, строкой
@@ -55,6 +57,14 @@ def module(name):
     if name not in groups():
         raise LookupError(f"no doctor group {name}")
     return importlib.import_module(f".{name}", __package__)
+
+
+def where(issue):
+    """Колонка «где» строки doctor: узел аллокации у проблемы папета, node --
+    у проблемы самого узла (#358), иначе «-». Чистая функция."""
+    if issue.get("alloc"):
+        return issue["alloc"]["NodeName"]
+    return issue.get("node") or "-"
 
 
 def select(names, argv):

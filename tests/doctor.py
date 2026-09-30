@@ -150,6 +150,21 @@ OUT_NONE = ("pu-mop-3  -  queued — no free slots in the pool\n"
 
 def check_output_356(c, argvs):
     from mop.cli.pool import doctor as cmd
+    # Группы после шва (disk, #358) пусты: вывод до шва -- вывод группы
+    # puppets, и соседняя группа не должна ни ходить в шину, ни добавлять строк.
+    others = [cmd.doctor.module(n) for n in cmd.doctor.groups() if n != "puppets"] \
+        if hasattr(cmd.doctor, "groups") else []
+    saved = [(m, m.diagnose) for m in others]
+    for m in others:
+        m.diagnose = lambda: []
+    try:
+        _output_356(c, argvs, cmd)
+    finally:
+        for m, fn in saved:
+            m.diagnose = fn
+
+
+def _output_356(c, argvs, cmd):
     with restored(puppets, "diagnose", "treat"), \
             restored(keys, "credentials_fresh", "push_login"):
         puppets.treat = lambda issue: f"treated {issue['action']}"
@@ -176,6 +191,79 @@ def check_output_356(c, argvs):
                   "on this machine first, then mop doctor --fix"))
 
 
+# ── #358: группа disk -- подметание узлов через шину ──────────────────────
+# HYPOTHESIS: подметание диска запускает только nomad periodic pu-cleanup, и
+# его итог лежит в логах аллокаций: doctor не видит ни кто подмёл, ни кто
+# под давлением, ни кто отказал.
+# SOLUTION: группа mop/client/doctor/disk.py: diagnose спрашивает глагол
+# агента sweep у каждого готового узла всухую (MOP_SWEEP_DRY), treat метёт
+# по-настоящему -- `mop doctor` без --fix ничего не сносит, как и остальные
+# группы. Колонка «где» у проблемы -- поле node (узловая проблема) либо узел
+# аллокации (проблема папета): doctor.where.
+# STATUS: FIXED — see #358
+GB = 1024 * 1024
+
+
+def ok(freed_kb, free_gb, warnings=(), min_gb=60):
+    return {"freed_kb": freed_kb, "free_gb": free_gb, "min_gb": min_gb,
+            "warnings": list(warnings)}
+
+
+class Silent(Exception):
+    pass
+
+
+# (что, ответ узла, (диагноз, лечение) | None -- проблемы нет)
+DISK = [
+    ("nothing to sweep, room to spare", ok(0, 80), None),
+    ("orphans to sweep", ok(3 * GB // 2, 80), ("1.5 GB to sweep, 80 GB free", "sweep")),
+    ("pressure with nothing to sweep: tier 3 caps live targets",
+     ok(0, 41), ("disk pressure: 41 GB free < 60 GB", "sweep")),
+    ("pressure and orphans", ok(512 * 1024, 41),
+     ("disk pressure: 41 GB free < 60 GB, 512.0 MB to sweep", "sweep")),
+    ("a refusal inside the sweep: the operator's call",
+     ok(None, None, ["$HOME has no puppets/ (unmounted ecryptfs?) -- refusing to sweep"]),
+     ("$HOME has no puppets/ (unmounted ecryptfs?) -- refusing to sweep", None)),
+    ("a warning beside a sweep", ok(GB, 80, ["refusing tier 1; tiers 2-3 still run"]),
+     ("1.0 GB to sweep, 80 GB free; refusing tier 1; tiers 2-3 still run", "sweep")),
+    ("a body-driver node: no totals, no warnings", ok(None, None), None),
+    ("the agent refused", {"error": "pu-sweep exit 2: rm: Permission denied"},
+     ("sweep FAILED: pu-sweep exit 2: rm: Permission denied", None)),
+    ("the agent is silent (#163): a reason, not an empty list",
+     Silent("node agent n1 did not answer in 600s"),
+     ("agent silent, not swept: node agent n1 did not answer in 600s", None)),
+    ("no answer at all", None, ("agent silent, not swept: no answer", None)),
+]
+
+
+def check_disk_358(c, doctor):
+    groups = doctor.groups()
+    if not c.check(f"#358 the disk group is there: {sorted(groups)}", "disk" in groups):
+        return
+    disk = doctor.module("disk")
+    for what, answer, want in DISK:
+        got = disk.issues(["n1"], {"n1": answer})
+        if want is None:
+            c.expect(f"#358 disk: {what}: no issue", got, [])
+            continue
+        c.expect(f"#358 disk: {what}", [(i["diagnosis"], i["action"]) for i in got], [want])
+        c.expect(f"#358 disk: {what}: the row sits on its node",
+                 [doctor.where(i) for i in got], ["n1"])
+    # Узлы -- по порядку, каждый своей строкой, молчание одного не уносит
+    # остальных.
+    got = disk.issues(["n2", "n1", "n3"], {"n1": ok(GB, 80), "n3": ok(0, 80)})
+    c.expect("#358 disk: every node answers for itself, in order",
+             [(doctor.where(i), i["action"]) for i in got], [("n1", "sweep"), ("n2", None)])
+
+
+def check_where_358(c, doctor):
+    c.expect("#358 where: a puppet's issue sits on its allocation's node",
+             doctor.where({"alloc": {"NodeName": "n1"}}), "n1")
+    c.expect("#358 where: a node's issue names the node itself",
+             doctor.where({"alloc": None, "node": "n2"}), "n2")
+    c.expect("#358 where: nowhere yet", doctor.where({"alloc": None}), "-")
+
+
 def main():
     c = Checks()
     doctor = registry()
@@ -184,6 +272,8 @@ def main():
         check_registry_356(c, doctor)
         check_select_356(c, doctor)
         check_output_356(c, [[], ["puppets"]])
+        check_where_358(c, doctor)
+        check_disk_358(c, doctor)
     else:
         # До шва: вывод сегодняшнего командлета -- тот, что шов обязан сохранить.
         check_output_356(c, [[]])

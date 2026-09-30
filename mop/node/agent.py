@@ -43,11 +43,12 @@ if __name__ == "__main__":
 import asyncio  # noqa: E402
 import json
 import os
+import re
 import shlex
 import socket
 import time
 
-from ..common import bus, busnames, fsutil, lease, paths, service
+from ..common import bus, busnames, config, fsutil, lease, paths, service
 from .. import driver, usage
 from ..common.domain import CloneFacts, Owner, Verb
 from ..driver import Tmux, clone_dir, target_dir, why
@@ -641,6 +642,58 @@ async def v_disk(_conn, _req):
     return await DRIVER.capacity()
 
 
+# Дисковый сторож узла (#358): скрипт кладёт на узел deploy (роль bus), его
+# пороги -- узловые настройки из node.env. Зовёт его doctor, а не только
+# periodic pu-cleanup: исполнение остаётся здесь, узел знает локальное --
+# tmux-сессии, клоны, тела.
+SWEEP = "/usr/local/bin/pu-sweep"
+SWEEP_KNOBS = ("MOP_SWEEP_FREE_MIN_GB", "MOP_SWEEP_MAX_TARGET", "MOP_SWEEP_STALE_DAYS")
+# Последняя строка pu-sweep -- для машины, всё выше -- для человека.
+_SWEEP_TOTALS = re.compile(r"pu_sweep_freed_kb=(\d+) pu_sweep_free_gb=(\d+)")
+# Одно подметание на узел за раз: два doctor подряд иначе мели бы одни и те
+# же пути наперегонки.
+_sweep_lock = asyncio.Lock()
+
+
+def sweep_report(rc, out, err, min_gb):
+    """Вывод pu-sweep -> {freed_kb, free_gb, min_gb, warnings} | {error}.
+    Чистая функция (tests/agent.py).
+
+    Итоговой строки нет у узла с телами-контейнерами (уходит после яруса 0)
+    и у отказа сторожа (ecryptfs без монтирования): тогда цифры None --
+    «не знаю», а не ноль. Предупреждения -- строки stderr с «!»: ими скрипт
+    говорит об отказах внутри подметания."""
+    if rc != 0:
+        last = (err.strip() or out.strip()).splitlines()[-1:] or ["no output"]
+        return {"error": f"pu-sweep exit {rc}: {last[0].strip()}"}
+    m = _SWEEP_TOTALS.search(out)
+    return {"freed_kb": int(m[1]) if m else None,
+            "free_gb": int(m[2]) if m else None,
+            "min_gb": min_gb,
+            "warnings": [ln.strip()[1:].strip() for ln in err.splitlines()
+                         if ln.strip().startswith("!")]}
+
+
+async def v_sweep(_conn, req):
+    """Подмести диск узла: pu-sweep, ярусы и предохранители -- его. dry --
+    только отчёт, ничего не сносится (MOP_SWEEP_DRY).
+
+    Пороги -- из настроек узла, а не из запроса: сколько места держать
+    свободным, решает машина, а не просящий."""
+    if _sweep_lock.locked():
+        return {"error": "a sweep is already running on this node"}
+    async with _sweep_lock:
+        env = {**os.environ, "HOME": HOME, **{k: config.get(k) for k in SWEEP_KNOBS}}
+        env.pop("MOP_SWEEP_DRY", None)
+        if req.get("dry"):
+            env["MOP_SWEEP_DRY"] = "1"
+        proc = await asyncio.create_subprocess_exec(
+            SWEEP, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
+        out, err = await proc.communicate()
+    return sweep_report(proc.returncode, out.decode(errors="replace"),
+                        err.decode(errors="replace"), int(config.get("MOP_SWEEP_FREE_MIN_GB")))
+
+
 async def v_wipe(conn, req):
     """Снести рабочую копию папета и восстановить её из git; target — целиком.
 
@@ -971,6 +1024,7 @@ VERBS = {
     "usage":  Verb(v_usage,  MASTER, False),
     "junk":   Verb(v_junk,   NODE,   False),
     "clone":  Verb(v_clone,  MASTER, True),
+    "sweep":  Verb(v_sweep,  NODE,   False),
 }
 # Прежние наборы -- выводом из таблицы, для тех, кто их читает.
 PUBLIC_VERBS = tuple(v for v, d in VERBS.items() if d.scope == PUBLIC)
