@@ -823,7 +823,9 @@ def check_internals_318(c):
 # продление бы молча пропускала.
 # SOLUTION: таблица KINDS (файл секрета, продление, что уезжает в тело,
 # владелец из auth status); ветвления читают её через kind_spec, а
-# неизвестный вид -- ValueError с именем кредита и вида.
+# неизвестный вид -- ValueError с именем кредита и вида. Отказ -- одного
+# кредита: probe отдаёт запись со статусом needs_login «unknown kind», а
+# note_turn называет ход строкой, не роняя probe_all и цикл по ходам.
 # STATUS: FIXED — see #376
 def check_kinds_376(c):
     import json
@@ -886,6 +888,27 @@ def check_kinds_376(c):
             lines = srv.tick(now=NOW)
         c.check("#376 tick names the unknown kind in the journal",
                 any(l.startswith("cred odd: ") and "bogus" in l for l in lines), lines)
+
+        # Отказ -- одного кредита, не реестра: probe_all (`mop cred status`
+        # без имени) не падает на битой записи, остальные пробуются.
+        probed = CredStatus("active", detail="probed")
+        try:
+            with patched(srv.llm, get=lambda profile: {"probe": lambda sec: probed}):
+                got = {r["name"]: r.get("status") or {} for r in srv.probe_all(NOW)}
+        except ValueError as e:
+            got = {}
+            c.fail("#376 probe_all must survive a record of an unknown kind", str(e))
+        c.expect("#376 probe_all: the unknown kind is a status of its own record",
+                 {k: (got.get("odd") or {}).get(k) for k in ("kind", "detail")},
+                 {"kind": "needs_login", "detail": "unknown kind 'bogus'"})
+        c.expect("#376 probe_all: the login next to it is probed",
+                 (got.get("anton") or {}).get("detail"), "probed")
+        try:
+            said = srv.note_turn("odd", {"event": "StopFailure", "at": NOW + 5, "cred": "odd",
+                                         "error": "authentication_failed"}, NOW + 6)
+            c.check("#376 note_turn names the unknown kind", "bogus" in (said or ""), said)
+        except ValueError as e:
+            c.fail("#376 note_turn must not raise on an unknown kind", str(e))
     c.expect("#376 the table covers exactly the record's kinds",
              sorted(getattr(srv, "KINDS", {})), sorted(credreg.KINDS))
     return c.failed == failed_before

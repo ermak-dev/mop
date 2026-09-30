@@ -204,6 +204,12 @@ def probe(name, now=None):
     rec = load(name)
     if rec is None:
         raise ValueError(f"no credential {name}")
+    kind = rec.get("kind")
+    if kind not in KINDS:
+        # Отказ -- статусом этой записи (#376), а не исключением: probe_all
+        # (`mop cred status` без имени) не валится на одной битой записи.
+        status = CredStatus("needs_login", detail=f"unknown kind {kind!r}")
+        return save(credreg.merge_status(rec, status, now))
     prof = llm.get(rec.get("profile"))
     fn = (prof or {}).get("probe")
     sec = secret(name, rec)
@@ -557,6 +563,11 @@ def note_turn(name, record, now=None, api=None):
     if int(record.get("at") or 0) <= int(rec.get("noted_at") or 0):
         return None
     now = now or time.time()
+    if rec.get("kind") not in KINDS:
+        # Ход назван один раз, и не исключением: секрета неизвестного вида
+        # нет -- ни времени смены, ни раздачи (#376).
+        save({**rec, "noted_at": int(record["at"])})
+        return f"{name}: unknown kind {rec.get('kind')!r}, turn not attributed"
     status = credreg.turn_status(record, _changed_at(name, rec))
     if status is not None:
         save({**credreg.merge_status(rec, status, now), "noted_at": int(record["at"])})
