@@ -241,6 +241,64 @@ def check_bus_envelope_264(c):
     return c.failed == failed_before
 
 
+def check_stale_permissions_error_369(c):
+    """HYPOTHESIS (#369): bus._last_error пишет только _on_error и не
+    сбрасывает никто, а _silence читает его при каждом таймауте. В
+    долгоживущем процессе (MCP мастера, mop-web) один давний отказ прав
+    выдаётся за причину каждого следующего таймаута любого узла, и диагноз
+    ведёт чинить права вместо молчащего агента.
+    SOLUTION: ошибка хранится вместе с моментом (bus._clock, монотонные
+    часы); таймаут запроса и отказ подключения объясняет только ошибка,
+    пришедшая после начала этого запроса или подключения. Тот же
+    закон -- у _one (request_many/request_stream). STATUS: FIXED — see #369
+
+    Часы и соединение -- заглушки: время двигает сам тест, без sleep."""
+    import asyncio
+    failed_before = c.failed
+    now = [100.0]
+    violation = "nats: permissions violation for publish to \"mop.mop.node.n1.rpc\""
+
+    class Conn:
+        def __init__(self, during=False):
+            self.during = during
+
+        async def request(self, subj, data, timeout=None):
+            if self.during:
+                now[0] += 1
+                await bus._on_error(Exception(violation))
+            raise asyncio.TimeoutError()
+
+    def timeout_text(conn):
+        bus.connect = lambda *a, **k: conn
+        try:
+            bus.request("n1", "state", timeout=3, project="mop")
+        except bus.BusError as e:
+            return str(e)
+        return "no BusError"
+
+    with restored(bus, "connect", "login", "_clock", "_last_error", "ERROR_LISTENERS"):
+        bus.login = lambda: None
+        bus._clock = lambda: now[0]
+        bus.ERROR_LISTENERS = []
+        # отказ прав давний: пришёл до начала запроса
+        asyncio.run(bus._on_error(Exception(violation)))
+        now[0] = 200.0
+        c.expect("#369 an old permissions error does not explain a later timeout",
+                 timeout_text(Conn()), "node agent n1 did not answer in 3s")
+        # отказ прав пришёл во время запроса -- он и есть причина
+        got = timeout_text(Conn(during=True))
+        c.check("#369 a permissions error during the request explains its timeout",
+                got.startswith("bus did not let the request through — node agent n1")
+                and "permissions violation" in got, got)
+        # тот же закон у request_many: его узлы спрашивает _one, а не _ask
+        now[0] = 300.0
+        bus.connect = lambda *a, **k: Conn()
+        got = bus.request_many("state", ["n1"], timeout=3, project="mop")["n1"]
+        c.expect("#369 request_many: an old permissions error does not explain a timeout",
+                 str(got), "node agent n1 did not answer in 3s")
+    return c.failed == failed_before
+
+
 def main():
     c = Checks()
 
@@ -543,6 +601,8 @@ def main():
 
     c.check("#264 one envelope, one fallback, request_many(verb, nodes)",
             check_bus_envelope_264(c))
+    c.check("#369 a stale permissions error does not explain a later timeout",
+            check_stale_permissions_error_369(c))
 
     return c.report("channel")
 
