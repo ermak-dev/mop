@@ -101,6 +101,77 @@ def check_master_mcp_351(c):
     c.check("#351 mcp_config carries mcp_command", '"mcp"' in got)
 
 
+# ── #368: MCP-инструменты и перезапуск --from-ci зовут себя и из пакета ──
+# HYPOTHESIS: адаптер MCP зовёт командлеты как <cli.BIN>/mop, а ci_pull
+# перезапускает себя как <lib.BIN>/mop deploy --from-ci. У пакета bin/ нет:
+# каждый инструмент-командлет отдаёт модели [Errno 2], а перезапуск падает;
+# вдобавок ci_pull зовёт прежнее имя из LEGACY, которое уйдёт.
+# SOLUTION: lib.self_argv(bin_dir, python) по правилу #351 -- bin/mop клона,
+# если он есть, иначе [python, -m, mop.cli]; на ней стоят mcp_command,
+# mcp.run_command и ci_pull (каноническое `server deploy --from-ci`).
+# STATUS: FIXED — see #368
+def check_self_argv_368(c):
+    import tempfile
+    from _lib import patched
+    from mop.cli import lib
+    fn = getattr(lib, "self_argv", None)
+    if not c.check("#368 lib.self_argv exists", fn is not None):
+        return
+    from mop.cli.server import deploy
+    from mop.cli.service import mcp
+    from mop.client import channel
+    py = "/venv/bin/python"
+
+    def adapter_argv():
+        calls = []
+
+        class Done:
+            returncode, stdout, stderr = 0, "ok", ""
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return Done()
+        with patched(mcp.subprocess, run=run), \
+                patched(channel, my_session=lambda: {"cwd": d}):
+            mcp.run_command(["list"], ["--all"])
+        return calls[0] if calls else None
+
+    def restart_argv():
+        calls = []
+
+        def execv(path, argv):
+            calls.append((path, argv))
+        with patched(deploy, ci_state=lambda root: ("master", "master", False),
+                     from_ci_refusals=lambda *a: [],
+                     ci_sync=lambda root: ("a" * 40, "b" * 40, None)), \
+                patched(deploy.os, execv=execv):
+            deploy.ci_pull(False, False)
+        return calls[0] if calls else None
+
+    with tempfile.TemporaryDirectory() as d:
+        clone = os.path.join(d, "bin")
+        os.makedirs(clone)
+        launcher = os.path.join(clone, "mop")
+        open(launcher, "w").close()
+        nowhere = os.path.join(d, "nowhere")
+        c.expect("#368 a clone: its own bin/mop", fn(clone, py), [launcher])
+        c.expect("#368 a package: the interpreter that runs mop",
+                 fn(nowhere, py), [py, "-m", "mop.cli"])
+        with patched(sys, executable=py):
+            with patched(lib, BIN=nowhere):
+                c.expect("#368 package: the adapter runs mop via -m mop.cli",
+                         adapter_argv(), [py, "-m", "mop.cli", "list", "--all"])
+                c.expect("#368 package: ci_pull restarts via -m mop.cli, canonical name",
+                         restart_argv(),
+                         (py, [py, "-m", "mop.cli", "server", "deploy", "--from-ci"]))
+            with patched(lib, BIN=clone):
+                c.expect("#368 clone: the adapter runs its bin/mop",
+                         adapter_argv(), [launcher, "list", "--all"])
+                c.expect("#368 clone: ci_pull restarts its bin/mop, canonical name",
+                         restart_argv(),
+                         (launcher, [launcher, "server", "deploy", "--from-ci"]))
+
+
 def check_master_skill_351(c):
     from mop.cli.core import master
     pkg = os.path.join(ROOT, "mop")
@@ -118,6 +189,7 @@ def main():
     check_dependencies_351(c)
     check_console_351(c)
     check_master_mcp_351(c)
+    check_self_argv_368(c)
     check_master_skill_351(c)
     return c.report("packaging")
 
