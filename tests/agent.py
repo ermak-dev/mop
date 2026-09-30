@@ -1307,10 +1307,65 @@ def check_sweep_bodies_363(c):
              rep(0, SWEEP_OUT, "", 60).get("bodies", "missing"), None)
 
 
+# ── #366: отказ тела -- полем ответа write, а не строкой в written ────────
+# HYPOTHESIS: отказ записи в тело агент кладёт строкой в written
+# («<тело> FAILED — <причина>», «<тело> NOT LIVE»), поля error в ответе
+# нет; bus.results_from решает по error, и `mop login` печатал узел, где
+# запись во все тела упала, как OK.
+# SOLUTION: ответ write несёт failed {тело: причина} и absent [тело];
+# written прежний -- его печатают старые клиенты.
+# STATUS: FIXED — see #366
+def check_write_fields_366(c):
+    import asyncio
+    import base64
+    from mop import driver
+    from mop.common import paths
+
+    class Drv:
+        IS_CONTAINER = True
+        SESSION_PY = agent.DRIVER.SESSION_PY
+
+        @staticmethod
+        async def bodies():
+            return ["pu-mop-1", "pu-mop-2"]
+
+        @staticmethod
+        async def push_many(name, files):
+            if name == "pu-mop-2":
+                return {"error": "body 9002 is stopped"}
+            return {"written": [p for p, _ in files]}
+
+        @staticmethod
+        def argv(name):
+            return []
+
+    async def project(name):
+        return "mop"
+    cred = [paths.CREDENTIALS, base64.b64encode(b"{}").decode()]
+    mark = [paths.CRED_MARK, base64.b64encode(b"anton\n").decode()]
+    with restored(agent, "DRIVER", "puppet_project"), restored(driver, "write_private"):
+        agent.DRIVER, agent.puppet_project = Drv, project
+        driver.write_private = lambda path, data: None
+        got = asyncio.run(agent.v_write(None, {
+            "_project": "admin", "files": [cred, mark],
+            "bodies": ["pu-mop-1", "pu-mop-2", "pu-mop-9"]}))
+        c.expect("#366 write: a refused body is a field with its reason",
+                 got.get("failed"), {"pu-mop-2": "body 9002 is stopped"})
+        c.expect("#366 write: a body not live is a field", got.get("absent"), ["pu-mop-9"])
+        c.check("#366 write: written keeps the old lines for old clients",
+                "pu-mop-2 FAILED — body 9002 is stopped" in got.get("written", [])
+                and "pu-mop-9 NOT LIVE" in got.get("written", []), got.get("written"))
+        c.check("#366 write: no error field -- the node answered", "error" not in got, got)
+        got = asyncio.run(agent.v_write(None, {"_project": "admin", "files": [cred, mark],
+                                               "bodies": ["pu-mop-1"]}))
+        c.expect("#366 write: all written -- the fields are empty",
+                 (got.get("failed"), got.get("absent")), ({}, []))
+
+
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
-                  check_write_home_279, check_addressed_write_312, check_clone_probe_347, check_timeouts_171, check_unclaim_181, check_intake,
+                  check_write_home_279, check_addressed_write_312, check_write_fields_366, check_clone_probe_347, check_timeouts_171, check_unclaim_181, check_intake,
                   check_main_169, check_subject_173, check_unclaim_race_189,
                   check_gates_40, check_caller_207, check_git_identity_167,
                   check_state_fact_224, check_no_screen_fact_236,
