@@ -18,7 +18,7 @@ import tempfile
 import types
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import (Checks, canned, offline, patched, patched_env,  # noqa: E402
+from _lib import (Checks, FakeNomad, NoLiveNomad, canned, offline, patched, patched_env,  # noqa: E402
                   restored, run_command, udp_socket)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
@@ -1461,7 +1461,7 @@ def check_driver_rule_175(c):
     # Списки не слепнут от чужой опечатки: узел с неизвестным драйвером --
     # строка с отказом, остальные видны. Операции над ним (delete, attach,
     # build на нём) отказывают громко -- это of_node выше.
-    from mop.server import builder, image, nodes, nomad
+    from mop.server import builder, image, nodes
     metas = {"bad": {"mop_driver": "bogus"}, "hyper": {"mop_driver": "pve"}}
     summary = lambda n: {"Name": n, "Status": "ready"}
     try:
@@ -1473,12 +1473,12 @@ def check_driver_rule_175(c):
                 "bad: unknown driver 'bogus'" in (got["bad"].get("error") or ""))
     except Exception as e:
         c.fail(f"#175 nodes.row with a bad node: {type(e).__name__}: {e}")
-    with patched(nomad, nodes_meta=lambda: metas,
-                 node_dynamic_meta=lambda n: {"mop_projects": "mop"},
-                 set_node_meta=lambda n, m: None):
+    # Nomad -- параметром api (#375), а не подменой атрибутов модуля.
+    api = FakeNomad(meta={n: dict(m, mop_projects="mop") for n, m in metas.items()})
+    with patched(builder, nomad=NoLiveNomad()), patched(image, nomad=NoLiveNomad()):
         try:
             refused = []
-            serving = builder.serving_now(refused)
+            serving = builder.serving_now(refused, api=api)
             c.check(f"#175 serving_now: the good node counts: {serving}",
                     serving == {"hyper": ["mop"]})
             c.check(f"#175 serving_now: the bad node is reported: {refused}",
@@ -1486,7 +1486,7 @@ def check_driver_rule_175(c):
         except Exception as e:
             c.fail(f"#175 serving_now with a bad node: {type(e).__name__}: {e}")
         try:
-            got = dict(image.announce("mop"))
+            got = dict(image.announce("mop", api=api))
             c.check(f"#175 announce: the good node answers: {got}",
                     got.get("hyper") == "already announced")
             c.check(f"#175 announce: the bad node carries the refusal: {got}",

@@ -51,16 +51,18 @@ def row(summary, meta, cap):
                 slots=cap.get("slots"), slots_total=cap.get("slots_total")).to_row()
 
 
-def nomad_rows(pool):
+def nomad_rows(pool, api=None):
     """Все узлы кластера, по имени. Ёмкость есть только у ready-узлов пула,
     у остальных None — прочерк, а не ноль.
 
     Из Nomad, то есть только на сервере: зовёт это сервис кластера, глагол
     `nodes` (docs/CLUSTER.md). pool — ёмкость узлов пула (cluster.nomad_pool):
     аргументом, а не импортом, потому что сервис кластера сам импортирует этот
-    модуль (#152)."""
+    модуль (#152). api -- Nomad (nomad.NomadApi, #275): сервис кластера
+    передаёт свой, по умолчанию живой (#375)."""
+    api = api or nomad
     cap = {n["name"]: n for n in pool}
-    metas = nomad.nodes_meta()
+    metas = api.nodes_meta()
     return [row(n, metas.get(n["Name"], {}), cap.get(n["Name"], {}))
-            for n in sorted(nomad.get_nodes(), key=lambda n: n["Name"])]
+            for n in sorted(api.get_nodes(), key=lambda n: n["Name"])]
 
