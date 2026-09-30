@@ -139,10 +139,21 @@ echo
 # body itself, and only the driver knows how to list one and throw it away. Its
 # own safety gate mirrors tier 1's, for the same reason.
 #
-# Драйвер узла читаем из файла узла -- того же, по которому его узнают агент и
-# внешний врапер. Второе место, отвечающее на «в чём здесь живёт папет»,
-# разошлось бы с первым молча, и сторож начал бы мести не тот узел.
-MOP_NODE_DRIVER=$(cat "$HOME/.config/mop/driver" 2>/dev/null || echo host)
+# Драйвер узла читаем оттуда же, откуда агент и внешний врапер (config.get):
+# окружение, иначе node.env, иначе host. Второе место, отвечающее на «в чём
+# здесь живёт папет», разошлось бы с первым молча, и сторож начал бы мести не
+# тот узел -- так и было с #12 до #362: скрипт читал ~/.config/mop/driver,
+# который deploy снёс, переселив драйвер в node.env, и на каждом
+# pve-узле отказывался подметать. Формат node.env -- read_kv: последняя
+# строка ключа, пробелы и кавычки по краям значения срезаются.
+node_driver() {
+    local v=${MOP_DRIVER:-}
+    [ -n "$v" ] || v=$(sed -n 's/^[[:space:]]*MOP_DRIVER[[:space:]]*=//p' \
+        "$HOME/.config/mop/node.env" 2>/dev/null | tail -n 1 \
+        | sed "s/^[[:space:]]*//; s/[[:space:]]*\$//; s/^[\"']//; s/[\"']\$//")
+    echo "${v:-host}"
+}
+MOP_NODE_DRIVER=$(node_driver)
 if [ "$MOP_NODE_DRIVER" != host ]; then
     echo "tier 0: orphaned bodies (driver $MOP_NODE_DRIVER)"
     "$HOME/mop/bin/mop" driver sweep ${DRY:+--dry} 2>&1 | sed 's/^/  /' || true

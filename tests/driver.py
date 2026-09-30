@@ -542,11 +542,67 @@ def check_host_sweep_rule_347(c):
         script = f.read()
     c.check("#347 pu-sweep.sh has no rule of its own", "holds_work()" not in script)
 
+
+# ── #362: драйвер узла у сторожа -- из node.env, как у агента ───────────────
+# HYPOTHESIS: pu-sweep.sh берёт драйвер из $HOME/.config/mop/driver, а с #12
+# драйвер живёт в node.env (MOP_DRIVER), старый файл роль bus сносит. На
+# pve-узле скрипт читает host, в $HOME гипервизора нет puppets/, и срабатывает
+# предохранитель ecryptfs: ярус 0 не запускается никогда, брошенные тела
+# копятся (journal mop-doctor на hyper и proxmox-agent1/2, 2026-09-30).
+# SOLUTION: node_driver() в скрипте -- старшинство config.get: MOP_DRIVER
+# окружения, иначе строка из node.env (формат read_kv), иначе host.
+# RESULT: проверка падала отказом «$HOME has no puppets/» -- тем же, что в
+# journal на пуле; после правки ярус 0 зовёт `mop driver sweep`.
+# STATUS: FIXED — see #362
+def _container_home(tmp, node_env):
+    """Дом гипервизора: ни одного клона, только настройки узла и лаунчер mop,
+    записывающий, с чем его позвали."""
+    home = os.path.join(tmp, "home")
+    os.makedirs(os.path.join(home, "mop", "bin"))
+    os.makedirs(os.path.join(home, ".config", "mop"))
+    if node_env is not None:
+        with open(os.path.join(home, ".config", "mop", "node.env"), "w") as f:
+            f.write(node_env)
+    calls = os.path.join(tmp, "calls")
+    launcher = f'#!/bin/sh\necho "$@" >> {calls}\necho "bodies: 1/1 with a live session"\n'
+    return home, calls, launcher
+
+
+def check_container_sweep_driver_362(c):
+    import shutil
+    tmp = tempfile.mkdtemp(prefix="mop-test-362-")
+    try:
+        home, calls, launcher = _container_home(
+            os.path.join(tmp, "pve"), "# узловые\nMOP_USER=u\nMOP_DRIVER=pve\n")
+        with patched_env(MOP_DRIVER=None):
+            r = _run_sweep(home, launcher)
+        c.check("#362 a node whose node.env says pve sweeps its bodies (tier 0)",
+                "tier 0: orphaned bodies (driver pve)" in r.stdout
+                and "refusing to sweep" not in r.stderr, (r.stdout, r.stderr))
+        c.check("#362 tier 0 asks the driver, `mop driver sweep`",
+                os.path.exists(calls) and open(calls).read().strip() == "driver sweep")
+        # Старшинство то же, что у config.get: окружение выше node.env.
+        home, calls, launcher = _container_home(os.path.join(tmp, "env"), "MOP_DRIVER=pve\n")
+        with patched_env(MOP_DRIVER="host"):
+            r = _run_sweep(home, launcher)
+        c.check("#362 MOP_DRIVER in the environment outranks node.env",
+                "tier 0" not in r.stdout and not os.path.exists(calls), r.stdout)
+        # Узел без node.env -- host, как и раньше.
+        home, calls, launcher = _container_home(os.path.join(tmp, "none"), None)
+        with patched_env(MOP_DRIVER=None):
+            r = _run_sweep(home, launcher)
+        c.check("#362 a node with no node.env is host",
+                "tier 0" not in r.stdout and not os.path.exists(calls), r.stdout)
+    finally:
+        shutil.rmtree(tmp)
+
+
 def main():
     c = Checks()
     check_gave_up_wrapper_345(c)
     check_sweep_keeps_work_346(c)
     check_host_sweep_rule_347(c)
+    check_container_sweep_driver_362(c)
 
     for what, mod, ok in CONTRACT:
         try:
