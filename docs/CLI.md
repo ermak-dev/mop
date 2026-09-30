@@ -284,7 +284,9 @@ pool diagnostics: mop doctor [group] [--fix]
 
 Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
 and a job spec older than the node driver — that last one looks perfectly
-healthy until the scheduler moves it to a hypervisor.
+healthy until the scheduler moves it to a hypervisor. The disk group asks each
+node's agent what the disk watchdog would sweep there and who is under disk
+pressure; --fix sweeps for real.
 
 The checks come in groups, a module each in mop/client/doctor/: `mop doctor`
 runs them all, `mop doctor <group>` runs one; a name that is not a group is

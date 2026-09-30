@@ -38,12 +38,12 @@ def old_decision(verb, public, project, name, mine):
     """Отказ, как его давал handle до #150, либо None -- глагол исполняется.
     Правила прежние; таблица -- с добавленными после (ADDED, ниже): они
     мастерские и именующие."""
-    verbs, named = OLD_VERBS + ADDED, OLD_NAMED + ADDED
+    verbs, named = OLD_VERBS + ADDED + ADDED_NODE, OLD_NAMED + ADDED
     if verb not in verbs:
         return f"no such verb {verb}; available: {', '.join(sorted(verbs))}"
     if public and verb not in OLD_PUBLIC:
         return f"verb {verb} is available to the master only"
-    if verb in OLD_ADMIN and project != busnames.ADMIN:
+    if verb in OLD_ADMIN + ADDED_NODE and project != busnames.ADMIN:
         return f"verb {verb} is node-level, not given to project {project}"
     if verb in named and not mine:
         return f"puppet {name} is not in project {project}"
@@ -61,14 +61,18 @@ def new_decision(verb, public, project, name, mine):
 # После #150 -- глаголы, добавленные с тех пор, в конце таблицы: clone --
 # факты клона для ворот сервиса кластера (#40), мастерский и именующий.
 ADDED = ("clone",)
+# Узловые глаголы, добавленные после (#358): sweep -- подметание диска узла по
+# просьбе doctor. Место на диске -- факт про хост со всеми его жильцами, и
+# глагол, как disk, только оператору.
+ADDED_NODE = ("sweep",)
 
 
 def check_sets(c):
     """Прежние четыре набора выводятся из таблицы -- те же и в том же порядке;
     добавленные после (ADDED) -- в конце."""
-    for got, want, what in ((tuple(agent.VERBS), OLD_VERBS + ADDED, "VERBS"),
+    for got, want, what in ((tuple(agent.VERBS), OLD_VERBS + ADDED + ADDED_NODE, "VERBS"),
                             (agent.PUBLIC_VERBS, OLD_PUBLIC, "PUBLIC_VERBS"),
-                            (agent.ADMIN_VERBS, OLD_ADMIN, "ADMIN_VERBS"),
+                            (agent.ADMIN_VERBS, OLD_ADMIN + ADDED_NODE, "ADMIN_VERBS"),
                             (agent.NAMED_VERBS, OLD_NAMED + ADDED, "NAMED_VERBS")):
         c.expect(what, tuple(got), want)
 
@@ -77,7 +81,7 @@ def check_decisions(c):
     """Каждый глагол x субъект (публичный .msg / мастерский .rpc) x проект
     (admin / проект) x папет свой или чужой: тот же ответ, что до #150.
     Отказ, ставший допуском, -- смена прав, а не рефакторинг."""
-    for verb in OLD_VERBS + ADDED + ("nosuch", None, ""):
+    for verb in OLD_VERBS + ADDED + ADDED_NODE + ("nosuch", None, ""):
         for public in (True, False):
             for project in (busnames.ADMIN, "mop"):
                 for mine in (True, False):
@@ -1238,6 +1242,47 @@ def check_owner_hook_313(c):
             "olga@example.dev" in note and "skipped" in note, note)
 
 
+# ── #358: итог pu-sweep для doctor ───────────────────────────────────────
+# HYPOTHESIS: подметание дёргает только nomad periodic pu-cleanup, и его итог
+# лежит в логах аллокации -- doctor не может ни запустить его, ни прочесть.
+# SOLUTION: глагол узла sweep зовёт /usr/local/bin/pu-sweep и отдаёт итог
+# данными: последняя строка скрипта машиночитаема (pu_sweep_freed_kb=
+# pu_sweep_free_gb=), предупреждения -- строки stderr с «!». Сам запуск живёт
+# только на пуле; здесь -- разбор.
+# STATUS: FIXED — see #358
+SWEEP_OUT = ("=== disk before ===\n  /home/u  10G used of 100G\n\n"
+             "tier 1: orphaned puppet dirs (1/2 puppets live)\n"
+             "  orphaned clone pu-mop-3                        1.5 GB\n"
+             "freed 1.5 GB\n=== disk after ===\n"
+             "pu_sweep_freed_kb=1572864 pu_sweep_free_gb=41\n")
+SWEEP_WARN = ("  ! 2 clone(s), 0 live tmux servers -- tmux unreachable, not 2 orphans\n"
+              "  ! refusing tier 1; tiers 2-3 still run\n"
+              "some noise without a bang\n")
+
+
+def check_sweep_report_358(c):
+    rep = agent.sweep_report
+    c.expect("#358 a clean run: totals and the threshold",
+             rep(0, SWEEP_OUT, "", 60),
+             {"freed_kb": 1572864, "free_gb": 41, "min_gb": 60, "warnings": []})
+    c.expect("#358 warnings are the stderr lines with a bang, stripped",
+             rep(0, SWEEP_OUT, SWEEP_WARN, 60)["warnings"],
+             ["2 clone(s), 0 live tmux servers -- tmux unreachable, not 2 orphans",
+              "refusing tier 1; tiers 2-3 still run"])
+    # Узел с телами-контейнерами уходит после яруса 0, ecryptfs без монтирования
+    # -- после отказа: итоговой строки нет, и это не ноль, а «не знаю».
+    got = rep(0, "tier 0: orphaned bodies (driver pve)\n",
+              "  ! $HOME has no puppets/ (unmounted ecryptfs?) -- refusing to sweep\n", 60)
+    c.expect("#358 no totals line: None, not zero",
+             (got["freed_kb"], got["free_gb"]), (None, None))
+    c.expect("#358 the refusal survives as a warning", got["warnings"],
+             ["$HOME has no puppets/ (unmounted ecryptfs?) -- refusing to sweep"])
+    got = rep(2, "tier 1: …\n", "rm: cannot remove 'x': Permission denied\n", 60)
+    c.check(f"#358 a non-zero exit is an error naming the code and the last line: {got}",
+            "2" in got.get("error", "") and "Permission denied" in got.get("error", ""))
+    c.check("#358 the error carries no totals", "freed_kb" not in got)
+
+
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
@@ -1246,7 +1291,8 @@ def main():
                   check_gates_40, check_caller_207, check_git_identity_167,
                   check_state_fact_224, check_no_screen_fact_236,
                   check_usage_by_login_244, check_owner_gate_267,
-                  check_junk_without_templates_276, check_owner_hook_313):
+                  check_junk_without_templates_276, check_owner_hook_313,
+                  check_sweep_report_358):
         try:
             check(c)
         except Exception as e:
