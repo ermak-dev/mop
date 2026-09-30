@@ -1,0 +1,48 @@
+# doctor по расписанию на сервере (#359): `mop doctor --fix --safe` ежечасно.
+#
+# Сервер, а не узел и не машина оператора: он включён всегда, у него есть
+# креды шины (их кладёт роль web, игра идёт после неё) и реестр кредитов,
+# из которого лечится протухший логин (#357). --safe -- потому что рядом нет
+# оператора: рестарт, alloc stop и /model расписание только называет.
+# Вывод пишет в журнал сам systemd: journalctl -u mop-doctor.
+- name: Doctor unit
+  become: yes
+  ansible.builtin.template:
+    src: "{{ role_path }}/../common/templates/service.j2"
+    dest: /etc/systemd/system/mop-doctor.service
+    mode: "0644"
+  vars:
+    unit:
+      name: mop-doctor
+      description: "mop-doctor (doctor по расписанию: лечит только безопасное)"
+      after: network-online.target nats.service
+      oneshot: true
+      # Окружение -- config.SERVER_SCOPED (#176); здесь только комментарии к нему.
+      notes:
+        MOP_SERVER_LAN: |-
+          # .env на сервер не едет, а адрес сервера обязателен: lib.cluster без
+          # него отказывает. Окружение старше .env -- юнит и есть источник.
+        MOP_HTTPS_PORT: "# Каталог сервера ходит на шину через TLS-прокси (#97)."
+      before_exec:
+        - "# Зависший прогон держал бы сервис active, и таймер молча не"
+        - "# запускал бы следующий: потолок -- меньше часа, до следующего срабатывания."
+        - "TimeoutStartSec=50min"
+        - "# Через диспетчер: он ставит PYTHONPATH, без него командлет пакета не найдёт."
+      command: "doctor --fix --safe"
+
+- name: Doctor timer
+  become: yes
+  ansible.builtin.copy:
+    src: mop-doctor.timer
+    dest: /etc/systemd/system/mop-doctor.timer
+    mode: "0644"
+
+# Включается таймер, сервис -- нет: у oneshot нет [Install], его запускает
+# таймер. daemon_reload -- юнит и таймер только что легли.
+- name: Enable and start the timer
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-doctor.timer
+    enabled: yes
+    state: started
+    daemon_reload: yes
