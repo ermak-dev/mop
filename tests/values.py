@@ -267,8 +267,50 @@ def project_forms():
     return out
 
 
+# ─── аллокация на проводе сервиса кластера (#377) ────────────────────────
+# Снято с кода ДО Alloc: ответ глагола alloc (task/reason внутри аллокации),
+# restart/stop/stderr (id и статус) и элемент ростера из Nomad (task/reason
+# рядом с аллокацией). После правки -- байт в байт.
+def nomad_alloc(name, node, status, task_state="running", failed=False, restarts=0):
+    return {"ID": f"a-{name}", "JobID": name, "NodeName": node, "ClientStatus": status,
+            "DesiredStatus": "run", "Resources": {"MemoryMB": 4096},
+            "TaskStates": {"claude": {
+                "State": task_state, "Restarts": restarts, "Failed": failed,
+                "Events": [{"Type": "Terminated", "ExitCode": 1}] if restarts else []}}}
+
+
+class AllocNomad(FakeNomad):
+    def alloc_stderr(self, alloc_id, task, tail=8000):
+        self._call("alloc_stderr", alloc_id, task)
+        return "bootstrap of pu-rugent-2 failed: clone failed: no route\n"
+
+
+def alloc_forms():
+    allocs = {"pu-mop-1": nomad_alloc("pu-mop-1", "mate", "running"),
+              "pu-rugent-2": nomad_alloc("pu-rugent-2", "hyper", "pending", "dead",
+                                         failed=True, restarts=3)}
+    jobs = [dict(job(n, MOP if n.startswith("pu-mop") else RUGENT), Type="service")
+            for n in allocs]
+    fake = AllocNomad(jobs={j["ID"]: j for j in jobs}, allocs=allocs,
+                      meta={"mate": {"mop_driver": "host"}, "hyper": {"mop_driver": "pve"}})
+    fake.get_jobs = lambda prefix, meta=False: copy.deepcopy(jobs)
+    root = tempfile.mkdtemp(prefix="mop-test-377-")
+    out = {}
+    with cluster.using(fake), restored(cluster.bootstrap, "ROOT"):
+        cluster.bootstrap.ROOT = root
+        out["alloc_verb"] = dump([cluster._alloc("admin", {"name": n})
+                                  for n in ("pu-mop-1", "pu-rugent-2", "pu-none-1")])
+        out["alloc_ops"] = dump([cluster._restart("admin", {"name": "pu-mop-1"}),
+                                 cluster._stop("admin", {"name": "pu-mop-1"}),
+                                 cluster._restart("admin", {"name": "pu-none-1"}),
+                                 cluster._stderr("admin", {"name": "pu-rugent-2", "lines": 5}),
+                                 cluster._stderr("admin", {"name": "pu-none-1"})])
+        out["roster_nomad"] = dump(cluster.nomad_items("admin"))
+    return out
+
+
 def forms():
-    return {**roster_forms(), **agent_forms(), **project_forms()}
+    return {**roster_forms(), **agent_forms(), **project_forms(), **alloc_forms()}
 
 
 def check_characterization_204(c):
@@ -357,8 +399,53 @@ def check_one_verb_204(c):
     c.check("Verb must be frozen", not (domain.Verb.__dataclass_params__.frozen is not True))
 
 
+# ─── #377: Alloc -- провод тот же, чтения через значение ─────────────────
+# Ключи аллокации, которые разбирает только Alloc. Исключения названы: сырой
+# ответ API Nomad (server/nomad.py -- адаптер), реестр кредитов (#376
+# переделывает его отдельно).
+# "ID" не в счёт: тот же ключ у джоба, по нему не отличить аллокацию.
+ALLOC_KEYS = ("JobID", "NodeName", "ClientStatus", "DesiredStatus")
+RAW_ALLOC_OK = ("mop/common/domain.py", "mop/server/nomad.py", "mop/server/credreg.py")
+
+
+def check_alloc_377(c):
+    import ast
+    from mop.common import domain
+    Alloc = getattr(domain, "Alloc", None)
+    if not c.check("#377 domain.Alloc exists", Alloc is not None):
+        return
+    forms_ = json.load(open(SNAPSHOT))
+    roster = [i["alloc"] for i in json.loads(forms_["roster_nomad"])] + \
+        [i["alloc"] for i in ITEMS]
+    for d in filter(None, roster):
+        c.expect(f"#377 roster alloc round-trips byte for byte: {d['ID']}",
+                 json.dumps(Alloc.from_dict(d).to_dict()), json.dumps(d))
+    for answer in json.loads(forms_["alloc_verb"]):
+        d = answer["alloc"]
+        if d:
+            c.expect(f"#377 the alloc verb's alloc round-trips with task/reason: {d['ID']}",
+                     json.dumps(Alloc.from_dict(d).to_dict(task=True)), json.dumps(d))
+    # Чтения -- через значение: строковых ключей аллокации в пакете нет,
+    # кроме названных мест.
+    root = os.path.dirname(HERE)
+    found = []
+    for dirpath, _, files in os.walk(os.path.join(root, "mop")):
+        for f in files:
+            if not f.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, f)
+            rel = os.path.relpath(path, root)
+            if rel in RAW_ALLOC_OK:
+                continue
+            for n in ast.walk(ast.parse(open(path).read())):
+                if isinstance(n, ast.Constant) and n.value in ALLOC_KEYS:
+                    found.append(f"{rel}:{n.lineno} {n.value}")
+    c.check("#377 no module reads an allocation by its Nomad keys: Alloc does", not found,
+            found)
+
+
 CHECKS = (check_characterization_204, check_owner_204, check_project_204,
-          check_puppet_row_204, check_one_verb_204)
+          check_puppet_row_204, check_one_verb_204, check_alloc_377)
 
 
 def main():

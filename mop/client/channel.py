@@ -66,7 +66,7 @@ def puppet_node(name, master):
     У мастера узел берётся из ростера пула. На узле ростера нет, и мы
     спрашиваем сам пул: чей агент признаёт этот папет своим."""
     if master:
-        return puppets.running_alloc(name)["NodeName"]
+        return puppets.node_of(name)
     for answer in bus.gather("local"):
         if name in (answer.get("puppets") or {}):
             return answer["node"]

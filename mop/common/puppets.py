@@ -11,7 +11,7 @@ import time
 
 from . import bus, config, lease, llm, state
 from .. import driver
-from .domain import CloneFacts, JobMeta, NodeRow, PoolNode, holds_work
+from .domain import Alloc, CloneFacts, JobMeta, NodeRow, PoolNode, holds_work
 from .state import PuppetRow, State, action_for, failing_row, silent, spec_action, verdict
 
 PROJECT = config.PROJECT
@@ -118,8 +118,8 @@ def jobs(project=None):
 # ─── сводки для фронтендов ───────────────────────────────────────────────
 def failing(alloc):
     """Строка состояния падающего папета из ответа `alloc`, либо None (#126)."""
-    a = alloc or {}
-    row = failing_row(a.get("ClientStatus"), a.get("task"), a.get("reason"))
+    a = Alloc.from_dict(alloc) or Alloc()
+    row = failing_row(a.client_status, a.task, a.reason)
     return row[1] if row else None
 
 
@@ -143,7 +143,7 @@ def running(name):
     if got.get("gave_up"):
         # Сдавшийся bootstrap (#345): джоб остановлен, причина -- у сервера.
         raise LookupError(f"{name}: {State('failing', got['gave_up'])}")
-    if not a or a.get("ClientStatus") != "running":
+    if not (Alloc.from_dict(a) or Alloc()).running:
         raise LookupError(not_running(name, a))
     return a, got.get("driver")
 
@@ -151,6 +151,19 @@ def running(name):
 def running_alloc(name):
     """Работающая аллокация папета (см. running)."""
     return running(name)[0]
+
+
+def node_of(name, running=True):
+    """Узел папета -- одна на CLI и канал (#377): четыре командлета считали
+    его каждый по-своему. running -- узел работающего папета (tail, send,
+    channel: LookupError, если не бежит); иначе -- узел последней аллокации
+    в любом статусе (wipe: сносят как раз остановленного)."""
+    if running:
+        return Alloc.from_dict(running_alloc(name)).node
+    alloc = Alloc.from_dict(_cluster("alloc", name=name).get("alloc"))
+    if not alloc:
+        raise LookupError(f"{name}: no allocation — node unknown")
+    return alloc.node
 
 
 def roster(stale=False):
@@ -174,9 +187,9 @@ def roster(stale=False):
     for item in items(stale=stale):
         item["state"] = item["kind"] = None
         item["owner"] = None
-        alloc = item["alloc"]
-        if alloc and alloc["ClientStatus"] == "running":
-            by_node.setdefault(alloc["NodeName"], []).append(item)
+        alloc = Alloc.from_dict(item["alloc"])
+        if alloc and alloc.running:
+            by_node.setdefault(alloc.node, []).append(item)
         got.append(item)
 
     # Шина легла целиком — ростер всё равно показываем. Он приходит из Nomad и
@@ -224,9 +237,9 @@ def rows_from(items):
 
 
 def _row(item, disk_kb=None):
-    job, alloc = item["job"], item["alloc"]
+    job, alloc = item["job"], Alloc.from_dict(item["alloc"])
     meta = JobMeta.from_job(job)
-    status = item["error"] or (alloc["ClientStatus"] if alloc else job.get("Status", "?"))
+    status = item["error"] or (alloc.client_status if alloc else job.get("Status", "?"))
     state, kind = item["state"] or None, item.get("kind")
     # Падающий на старте -- failing с причиной, а не pending (#126).
     failing = failing_row(status, item.get("task"), item.get("reason"))
@@ -240,7 +253,7 @@ def _row(item, disk_kb=None):
         status, state, kind = "failed", str(State("failing", item["gave_up"])), "failing"
     return PuppetRow(
         name=job["ID"],
-        node=alloc["NodeName"] if alloc else None,
+        node=alloc.node if alloc else None,
         alloc_status=status,
         state=state,
         kind=kind,
@@ -274,9 +287,9 @@ def puppet_rows_stream():
     items = roster()
     asked, rest = {}, []
     for i in items:
-        alloc = i["alloc"]
-        if alloc and alloc["ClientStatus"] == "running":
-            asked[i["job"]["ID"]] = (alloc["NodeName"], {"names": [i["job"]["ID"]]})
+        alloc = Alloc.from_dict(i["alloc"])
+        if alloc and alloc.running:
+            asked[i["job"]["ID"]] = (alloc.node, {"names": [i["job"]["ID"]]})
         else:
             rest.append(i)
     by_name = {i["job"]["ID"]: i for i in items}
@@ -404,14 +417,14 @@ def diagnose():
                                         f"re-registered while {item['state']}"})
         # Падает на старте (#126): снять аллокацию -- только начать тот же круг
         # заново; лечится причина, поэтому без автолечения и с ней в диагнозе.
-        failing = failing_row(alloc and alloc["ClientStatus"], item.get("task"),
+        status = Alloc.from_dict(alloc)
+        failing = failing_row(status and status.client_status, item.get("task"),
                               item.get("reason"))
         if failing:
             issues.append({"name": job["ID"], "alloc": alloc,
                            "diagnosis": failing[1], "action": None})
             continue
-        if not alloc or alloc["ClientStatus"] in ("lost", "unknown", "failed",
-                                                  "pending"):
+        if not alloc or status.client_status in ("lost", "unknown", "failed", "pending"):
             issues.append(_placement_issue(job, alloc, item.get("unserved"),
                                            item.get("ceiling")))
             continue
@@ -431,12 +444,13 @@ def _placement_issue(job, alloc, unserved=False, ceiling=None):
     проект (#118) или, со значением "memory", потолок каждого из них ниже
     ceiling, потолка папета (#197)."""
     name = job["ID"]
-    if alloc and alloc["ClientStatus"] in ("pending", "failed"):
+    a = Alloc.from_dict(alloc)
+    if a and a.client_status in ("pending", "failed"):
         return {"name": name, "alloc": alloc, "action": state.STOP,
-                "diagnosis": f"allocation {alloc['ClientStatus']} (restart-backoff?)"}
-    if alloc:
+                "diagnosis": f"allocation {a.client_status} (restart-backoff?)"}
+    if a:
         return {"name": name, "alloc": alloc, "action": state.STOP,
-                "diagnosis": f"allocation {alloc['ClientStatus']}"}
+                "diagnosis": f"allocation {a.client_status}"}
     if state.queued(job) and unserved == "memory":
         # Просьба проекта больше, чем готова дать любая машина с его образом:
         # ни ожидание, ни сборка образа не помогут.
@@ -504,7 +518,7 @@ def _model(name, alloc, me):
     # импортирует puppets (сервис кластера), числился бы читающим
     # настройку, которую применяет один doctor --fix.
     model = config.get("MOP_FALLBACK_MODEL")
-    switch_model(alloc["NodeName"], name, model, force=True)
+    switch_model(Alloc.from_dict(alloc).node, name, model, force=True)
     return f"/model {model}"
 
 
@@ -514,7 +528,7 @@ def _login_nudge(name, alloc, me):
     # глаголом send, что и `mop send`, -- адрес ответа мастера, ворота
     # владения агент проходит по force (#290). Не рестарт: он
     # поднимает claude начисто и стирает разговор.
-    r = bus.request(alloc["NodeName"], "send", name=name, message=NUDGE,
+    r = bus.request(Alloc.from_dict(alloc).node, "send", name=name, message=NUDGE,
                     priority="next", wait=0, owner=bus.login(), force=True,
                     timeout=bus.TIMEOUT)
     if "error" in r:
@@ -580,8 +594,8 @@ def _wait_stopped(name):
     именно терминального статуса аллокации, а не «джоб dead» в API: между
     ними сидит остановка задачи на узле."""
     for _ in range(45):
-        alloc = _cluster("alloc", name=name).get("alloc")
-        if not alloc or alloc["ClientStatus"] != "running":
+        alloc = Alloc.from_dict(_cluster("alloc", name=name).get("alloc"))
+        if not alloc or not alloc.running:
             return
         time.sleep(2)
     raise RuntimeError(f"allocation {name} won't stop — is the node alive?")
@@ -670,9 +684,8 @@ def delete(name, force=False):
     драйвера уносит тело целиком, и он же откажет, если tmux-сессия ещё
     жива, — снос под живой сессией недопустим независимо от того, что решил
     мастер."""
-    got = _cluster("alloc", name=name)
-    alloc = got.get("alloc")
-    node = alloc["NodeName"] if alloc else None
+    alloc = Alloc.from_dict(_cluster("alloc", name=name).get("alloc"))
+    node = alloc.node if alloc else None
     # Ворота владения (#40) -- у сервиса, до снятия джоба.
     note = _cluster("delete", name=name, owner=bus.login(),
                     force=force).get("owner_note")
@@ -730,8 +743,8 @@ def recycle(name, workspace_of=None, force=False, branch=None):
     if not origin:
         raise RuntimeError(f"{name} has no origin in Meta — is this even a puppet?")
     profile = llm.of_meta(meta)
-    alloc = _cluster("alloc", name=name).get("alloc")
-    node = alloc["NodeName"] if alloc else None
+    alloc = Alloc.from_dict(_cluster("alloc", name=name).get("alloc"))
+    node = alloc.node if alloc else None
     if not node:
         raise RuntimeError(f"{name} has no allocation — nothing to recycle")
 

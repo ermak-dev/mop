@@ -9,6 +9,7 @@ import shlex
 from mop.cli import lib
 from mop import driver
 from mop.common import puppets
+from mop.common.domain import Alloc
 
 
 def main(argv):
@@ -17,7 +18,7 @@ def main(argv):
     name = argv[0]
     lib.guard(name)
     a, node_driver = puppets.running(name)
-    node = a["NodeName"]
+    node = Alloc.from_dict(a).node
     # Чем входят в тело, знает драйвер узла: у host это сразу tmux, у
     # контейнерного — ещё один ssh внутрь. Драйвер приезжает вместе с
     # аллокацией (глагол `alloc`), вторым запросом за ним не ходим; узел,

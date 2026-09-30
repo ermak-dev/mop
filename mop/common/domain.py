@@ -1,5 +1,5 @@
 """Доменные значения пула: проект, мета джоба (#265), владелец задания, факты
-клона, глагол (#204). Данные, без печати и без ввода-вывода.
+клона, аллокация Nomad (#377), глагол (#204). Данные, без печати и без ввода-вывода.
 
 Раньше это были словари и кортежи: строковые ключи расходились молча --
 тот же класс дефектов, что закрыли State (#145) и разбор origin (#154).
@@ -354,6 +354,59 @@ class NodeRow:
         return cls(d["name"], d.get("driver"), d.get("serves"), d.get("state"),
                    d.get("free_mb"), d.get("total_mb"), d.get("slots"),
                    d.get("slots_total"), d.get("error"))
+
+
+# ─── аллокация Nomad (#377) ──────────────────────────────────────────────
+@dataclass(frozen=True)
+class Alloc:
+    """Аллокация папета -- то, что о ней возит сервис кластера (#377).
+
+    Ходила по пакету сырым словарём: "NodeName" пятью идиомами в одиннадцати
+    файлах, `== "running"` в нескольких местах -- тот же класс дефектов, что
+    закрыли JobMeta (#265) и PoolNode (#277). Провод прежний, ключи Nomad байт
+    в байт: в элементе ростера task/reason лежат рядом с аллокацией
+    (to_dict()), в ответе глагола alloc -- внутри неё (to_dict(task=True)).
+
+    Все поля необязательны: у старого ответа и у фикстуры часть ключей
+    бывает не заполнена, и отсутствие -- None, а не отказ. Мусор (не тот тип)
+    -- отказ с именем поля."""
+    id: str = None
+    job: str = None
+    node: str = None
+    client_status: str = None
+    desired_status: str = None
+    # Сводка задачи (state.task_summary) и причина падения (#126).
+    task: dict = None
+    reason: str = None
+
+    KEYS = (("id", "ID"), ("job", "JobID"), ("node", "NodeName"),
+            ("client_status", "ClientStatus"), ("desired_status", "DesiredStatus"))
+
+    def __post_init__(self):
+        for f, _ in self.KEYS + (("reason", "reason"),):
+            if not _optional_str(getattr(self, f)):
+                _refuse(self, f, "a string or absent")
+        if not (self.task is None or isinstance(self.task, dict)):
+            _refuse(self, "task", "a task summary (dict) or absent")
+
+    @property
+    def running(self):
+        return self.client_status == "running"
+
+    def to_dict(self, task=False):
+        d = {key: getattr(self, f) for f, key in self.KEYS}
+        if task:
+            d.update(task=self.task, reason=self.reason)
+        return d
+
+    @classmethod
+    def from_dict(cls, d):
+        """Словарь аллокации (ответ API Nomad, элемент ростера, ответ глагола
+        alloc) -> Alloc | None. Лишние ключи Nomad не читаются."""
+        if d is None:
+            return None
+        return cls(**{f: d.get(key) for f, key in cls.KEYS},
+                   task=d.get("task"), reason=d.get("reason"))
 
 
 # ─── тело папета: ответы драйвера ────────────────────────────────────────
