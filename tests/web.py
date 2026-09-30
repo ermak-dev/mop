@@ -136,9 +136,10 @@ def check_snapshot(c):
     # per_user -- расход по людям (#245).
     # creds -- реестр кредитов (#285).
     want = {"at", "projects", "counts", "nodes", "usage", "per_puppet", "per_user",
-            "journal", "errors", "creds", "masters", "masters_every"}
+            "journal", "errors", "creds", "masters", "masters_every", "load"}
     # masters -- живые мастера по опросу who (#305); masters_every -- период
-    # этого опроса (#325): страница его не выдумывает.
+    # этого опроса (#325): страница его не выдумывает. load -- места пула и
+    # полоса аллокаций (#378).
     c.check("snapshot keys", not (set(snap) != want), sorted(set(snap) ^ want))
     c.check("snapshot body",
             not (snap["counts"]["puppets"] != 5 or snap["errors"] != ["bus: down"]),
@@ -687,13 +688,78 @@ def check_shape_319(c):
     c.check("#319 CRED_FIELDS is gone: nothing read it", not hasattr(web, "CRED_FIELDS"))
 
 
+# ── #378: места пула и полоса аллокаций ─────────────────────────────────
+# HYPOTHESIS: на странице не было общей картины загрузки пула: в шапке --
+# папеты по корзинам, места -- только по узлам в NodesPanel.
+# SOLUTION: снимок несёт load -- всего мест, выделено, свободных мест и
+# сегменты полосы в порядке busy, free, sick, silent, other, vacant. Считает
+# сервер: сумма сегментов -- всего мест. Узел без мест (down, отказ -- None)
+# в сумму не входит. Папетов по корзинам больше, чем выделено мест (папет
+# попросил меньше spec.MEM, или его узел без ёмкости), -- места раздаются по
+# порядку сегментов и кончаются; бейджи корзин остаются честными (counts).
+# STATUS: FIXED — see #378
+def node(slots, total):
+    return {"name": "n", "slots": slots, "slots_total": total}
+
+
+def segs(load):
+    return [(s["kind"], s["slots"]) for s in load["segments"]]
+
+
+def check_load_378(c):
+    fn = getattr(web, "load", None)
+    if not c.check("#378 web.load exists", fn is not None):
+        return
+    busy = row("pu-mop-3", MOP, State("busy"))
+    free = row("pu-mop-1", MOP, FREE)
+    sick = row("pu-mop-5", MOP, State("hung", "not responding"))
+    quiet = row("pu-mop-11", MOP, silent("no responders"))
+    gone = row("pu-mop-12", MOP, None, alloc="pending", node="-")
+    order = ["busy", "free", "sick", "silent", "other", "vacant"]
+
+    got = fn([], [])
+    c.expect("#378 empty pool: nothing anywhere",
+             (got["total"], got["allocated"], got["free_slots"], segs(got)),
+             (0, 0, 0, [(k, 0) for k in order]))
+
+    got = fn([], [node(3, 3), node(2, 2)])
+    c.expect("#378 every slot free: one vacant segment",
+             (got["total"], got["allocated"], got["free_slots"], segs(got)),
+             (5, 0, 5, [(k, 5 if k == "vacant" else 0) for k in order]))
+
+    # Узел down (None) и узел с отказом мест не держат и в сумму не входят;
+    # «не подняты» мест не держат вовсе.
+    got = fn([busy, busy, free, gone],
+             [node(1, 6), node(None, None), {"name": "x", "error": "boom",
+                                             "slots": None, "slots_total": None}])
+    c.expect("#378 other: slots held beyond the puppets counted in kinds",
+             (got["total"], got["allocated"], got["free_slots"], segs(got)),
+             (6, 5, 1, [("busy", 2), ("free", 1), ("sick", 0), ("silent", 0),
+                        ("other", 2), ("vacant", 1)]))
+
+    # Бегущих папетов больше, чем выделено мест: места кончаются по порядку
+    # сегментов, «прочего» нет, сумма -- всего мест.
+    got = fn([busy, free, free, sick, quiet], [node(1, 4)])
+    c.expect("#378 more puppets than slots: cut in segment order",
+             (got["total"], got["allocated"], got["free_slots"], segs(got)),
+             (4, 3, 1, [("busy", 1), ("free", 2), ("sick", 0), ("silent", 0),
+                        ("other", 0), ("vacant", 1)]))
+    c.expect("#378 the segments add up to every slot",
+             sum(n for _, n in segs(got)), got["total"])
+
+    snap = web.snapshot(rows=[busy], nodes=[node(1, 2)], usage=[], per_puppet=[],
+                        per_user=[], journal=[], errors=[], at=None)
+    c.expect("#378 the snapshot carries the load", snap.get("load"), fn([busy], [node(1, 2)]))
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
                check_creds_285, check_row_button_294, check_holders_301, check_masters_305, check_dist_297,
                check_reset_time_331, check_login_start_no_default_339, check_kinds_325,
-               check_rounds_319, check_replies_319, check_who_319, check_shape_319):
+               check_rounds_319, check_replies_319, check_who_319, check_shape_319,
+               check_load_378):
         fn(c)
     return c.report("web")
 
