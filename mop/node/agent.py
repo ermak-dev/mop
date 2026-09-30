@@ -938,12 +938,15 @@ async def v_junk(_conn, req):
     # жива и отвечает по ssh. Без этого уборка сносила бы тела, не спросив,
     # есть ли в них несохранённое: 22.09 она так снесла два контейнера чужих
     # проектов, и повезло, что пустых.
+    #
+    # Факты -- целиком (#372): CloneFacts.to_dict() с def/home/owner. Урезанный
+    # {dirty, ahead, cur} терял дом клона, и правило «клон не на своей ветке
+    # -- работа» (#266, #272) у уборки не срабатывало никогда.
     work = {}
     for n in names:
         c = await clone_facts(n)
         if c:
-            work[n] = {"dirty": c.get("dirty"), "ahead": c.get("ahead"),
-                       "cur": c.get("cur")}
+            work[n] = c
     return {"node": node_name(),
             "driver": driver.current_name(),
             "bodies": names,
