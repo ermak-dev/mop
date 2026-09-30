@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Шов проверок doctor без пула: python3 tests/doctor.py
+
+`mop doctor` -- группы проверок модулями mop/client/doctor/ (#356), по
+образцу драйверов узла и профилей LLM: один файл -- одна группа,
+обнаружение глобом каталога, контракт громко при загрузке, потребитель
+(mop/cli/pool/doctor.py) не ветвится по группе. Здесь -- контракт, имена
+групп, потребляемое против объявленного и вывод командлета байт в байт тот
+же, что до шва.
+"""
+import os
+import re
+import sys
+import types
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
+from _lib import Checks, restored, run_command  # noqa: E402
+sys.path.insert(0, ROOT)
+
+os.environ.setdefault("MOP_SERVER_LAN", "10.0.0.1")
+
+from mop.client import keys  # noqa: E402
+from mop.common import puppets  # noqa: E402
+
+CONSUMER = os.path.join(ROOT, "mop", "cli", "pool", "doctor.py")
+
+
+def registry():
+    try:
+        from mop.client import doctor
+        return doctor
+    except ImportError:
+        return None
+
+
+def plugin(**attrs):
+    """Модуль-подделка группы: полный контракт, поверх -- attrs (None
+    снимает атрибут)."""
+    mod = types.ModuleType("fake")
+    base = {"__doc__": "fake checks: what they catch",
+            "diagnose": lambda: [], "treat": lambda issue: "", "prepare": lambda issues: (None, [])}
+    for k, v in {**base, **attrs}.items():
+        if v is not None:
+            setattr(mod, k, v)
+    return mod
+
+
+# (что, модуль, принять ли)
+CONTRACT = [
+    ("the full contract", plugin(), True),
+    ("no diagnose()", plugin(diagnose=None), False),
+    ("no treat()", plugin(treat=None), False),
+    ("no prepare()", plugin(prepare=None), False),
+    ("diagnose is not callable", plugin(diagnose="x"), False),
+    ("no docstring: the group's line in usage", plugin(__doc__=None), False),
+    ("an empty docstring", plugin(__doc__="  \n"), False),
+]
+
+
+def consumed_names():
+    """Что потребитель берёт у модуля группы: `check.<имя>`, где check --
+    модуль из doctor.module()."""
+    text = open(CONSUMER).read()
+    return set(re.findall(r"\bcheck\.([A-Za-z_]+)", text))
+
+
+# ── #356: шов проверок doctor ───────────────────────────────────────────
+# HYPOTHESIS: `mop doctor` -- один вызов puppets.diagnose(); проверкам
+# эпика #355 (логины, диск, расписание) встать некуда, и каждая добавилась
+# бы веткой в командлет.
+# SOLUTION: реестр mop/client/doctor/ (plugins.discover, contract,
+# CONSUMED); первая группа puppets -- сегодняшние diagnose/treat целиком;
+# `mop doctor [group] [--fix]`, вывод тот же.
+# STATUS: FIXED — see #356
+def check_contract_356(c, doctor):
+    for what, mod, ok in CONTRACT:
+        try:
+            got = doctor.contract("fake", mod)
+            refused = False
+        except RuntimeError as e:
+            got, refused = None, True
+            c.check(f"#356 contract: the refusal names the file: {e}", "fake" in str(e))
+        c.check(f"#356 contract: {what}", refused != ok,
+                f"{'refused' if refused else 'accepted'}, wanted the opposite")
+    c.expect("#356 contract: doc is the first docstring line",
+             doctor.contract("fake", plugin(__doc__="one\ntwo"))["doc"], "one")
+
+
+def check_registry_356(c, doctor):
+    groups = doctor.groups()
+    c.check(f"#356 the puppets group is there: {sorted(groups)}", "puppets" in groups)
+    for name in groups:
+        c.check(f"#356 {name!r} is usable as a subcommand word",
+                re.fullmatch(r"[a-z][a-z0-9-]*", name) is not None)
+    c.expect("#356 the group names are unique", len(set(groups)), len(groups))
+    # Потребляемое -- объявлено, и у каждой группы есть.
+    used = consumed_names()
+    c.check(f"#356 the consumer calls only doctor.CONSUMED: {sorted(used)}",
+            used and not (used - set(doctor.CONSUMED)))
+    c.check(f"#356 CONSUMED has nothing the consumer does not call: {doctor.CONSUMED}",
+            not (set(doctor.CONSUMED) - used))
+    for name in groups:
+        mod = doctor.module(name)
+        for attr in doctor.CONSUMED:
+            c.check(f"#356 {name} has {attr}", callable(getattr(mod, attr, None)))
+    # Потребитель не ветвится по имени группы.
+    text = open(CONSUMER).read()
+    c.check("#356 the consumer names no group", not re.search(r"['\"]puppets['\"]", text))
+
+
+def check_select_356(c, doctor):
+    names = ("disk", "puppets")
+    for argv, want in [([], (["disk", "puppets"], False)),
+                       (["--fix"], (["disk", "puppets"], True)),
+                       (["puppets"], (["puppets"], False)),
+                       (["puppets", "--fix"], (["puppets"], True)),
+                       (["--fix", "disk"], (["disk"], True))]:
+        c.expect(f"#356 select {argv}", doctor.select(names, argv), want)
+    for argv in (["nope"], ["puppets", "disk"], ["--force"]):
+        try:
+            doctor.select(names, argv)
+            c.fail(f"#356 select {argv} must refuse")
+        except ValueError as e:
+            c.check(f"#356 the refusal of {argv} names the groups: {e}",
+                    "disk" in str(e) and "puppets" in str(e))
+
+
+# Вывод до шва, снятый с командлета до правки: байт в байт тот же.
+ISSUES = [{"name": "pu-mop-1", "alloc": {"NodeName": "n1"},
+           "diagnosis": "HUNG (not responding)", "action": "restart"},
+          {"name": "pu-mop-2", "alloc": {"NodeName": "n2"},
+           "diagnosis": "not logged in", "action": "login+nudge"},
+          {"name": "pu-mop-3", "alloc": None,
+           "diagnosis": "queued — no free slots in the pool", "action": None}]
+OUT_TABLE = ("pu-mop-1  n1  HUNG (not responding)               [restart]\n"
+             "pu-mop-2  n2  not logged in                       [login+nudge]\n"
+             "pu-mop-3  -   queued — no free slots in the pool\n")
+OUT_FIX = ("pu-mop-1  n1  HUNG (not responding)\n"
+           "pu-mop-2  n2  not logged in\n"
+           "pu-mop-3  -   queued — no free slots in the pool\n"
+           "\n"
+           "  n3: claude.ai login FAILED\n"
+           "  pu-mop-1: treated restart\n"
+           "  pu-mop-2: treated login+nudge\n")
+OUT_NONE = ("pu-mop-3  -  queued — no free slots in the pool\n"
+            "\n"
+            "no auto-treatment — operator's call\n")
+
+
+def check_output_356(c, argvs):
+    from mop.cli.pool import doctor as cmd
+    with restored(puppets, "diagnose", "treat"), \
+            restored(keys, "credentials_fresh", "push_login"):
+        puppets.treat = lambda issue: f"treated {issue['action']}"
+        keys.push_login = lambda: ({"n1": "OK", "n3": "FAILED"}, ["claude.ai login"], None)
+        keys.credentials_fresh = lambda: True
+        for pre in argvs:
+            for issues, argv, want in [([], [], "pool is healthy: nothing stuck\n"),
+                                       (ISSUES, [], OUT_TABLE),
+                                       (ISSUES, ["--fix"], OUT_FIX),
+                                       (ISSUES[2:], [], OUT_NONE)]:
+                puppets.diagnose = lambda issues=issues: issues
+                out, err, code = run_command(cmd.main, pre + argv)
+                c.expect(f"#356 mop doctor {' '.join(pre + argv)}: the same output",
+                         (out, err, code), (want, "", 0))
+        keys.credentials_fresh = lambda: False
+        puppets.diagnose = lambda: ISSUES
+        out, err, code = run_command(cmd.main, ["--fix"])
+        # sys.exit(текст): run_command отдаёт текст отказа кодом выхода.
+        c.expect("#356 stale local credentials: the same refusal", (out, err, code),
+                 ("pu-mop-1  n1  HUNG (not responding)\n"
+                  "pu-mop-2  n2  not logged in\n"
+                  "pu-mop-3  -   queued — no free slots in the pool\n\n", "",
+                  "local credentials are stale or broken — log in to claude "
+                  "on this machine first, then mop doctor --fix"))
+
+
+def main():
+    c = Checks()
+    doctor = registry()
+    if c.check("#356 mop.client.doctor, the registry of check groups", doctor is not None):
+        check_contract_356(c, doctor)
+        check_registry_356(c, doctor)
+        check_select_356(c, doctor)
+        check_output_356(c, [[], ["puppets"]])
+    else:
+        # До шва: вывод сегодняшнего командлета -- тот, что шов обязан сохранить.
+        check_output_356(c, [[]])
+    return c.report("doctor")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
