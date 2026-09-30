@@ -2143,7 +2143,7 @@ def check_named_263(c):
             patched(puppets,
                     delete=lambda name, force=False: calls.append(("delete", force)) or
                     {**note, "body": "destroyed", "node": "hyper"},
-                    recycle=lambda name, workspace_of=None, force=False:
+                    recycle=lambda name, workspace_of=None, force=False, branch=None:
                     calls.append(("recycle", force)) or dict(note),
                     wipe=lambda node, name, force=False:
                     calls.append(("wipe", force)) or {**note, "target": "/t"},

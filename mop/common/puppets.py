@@ -668,7 +668,7 @@ def delete(name, force=False):
     return {"node": node, "body": "destroyed", "owner_note": note}
 
 
-def recycle(name, workspace_of=None, force=False):
+def recycle(name, workspace_of=None, force=False, branch=None):
     """Пересоздать папета на чистой рабочей копии. -> {node, owner_note}.
 
     Клон не переклонируется: сбрасывается на месте глаголом wipe (reset
@@ -693,6 +693,12 @@ def recycle(name, workspace_of=None, force=False):
     #334); None -- сервер оставляет положенный (рецикл без рабочей копии,
     `mop gc`).
 
+    branch -- ветка мастера (#257), её знает командлет рабочей копии; None --
+    та, с которой папет заведён (мета джоба): рецикл без рабочей копии (gc)
+    её не теряет. Окружение процесса здесь не читается (#367): gc
+    операторский и рециклит папетов всех проектов, и git config mop.branch
+    или MOP_BRANCH оператора перекрыли бы ветку чужого папета.
+
     Ворота владения (#40) -- на первом шаге, останове: чужой папет
     отказывает до того, как что-то остановлено; force идёт во все три
     шага."""
@@ -706,10 +712,7 @@ def recycle(name, workspace_of=None, force=False):
     if not node:
         raise RuntimeError(f"{name} has no allocation — nothing to recycle")
 
-    # Ветка мастера (#257): из контекста команды, иначе та, с которой папет
-    # заведён (мета джоба) -- рецикл без рабочей копии (gc) её не теряет.
-    from . import context
-    branch = context.current().branch or meta.branch
+    branch = branch or meta.branch
     me = {"owner": bus.login(), "force": force}
     note = _cluster("delete", name=name, purge=False, **me).get("owner_note")
     _wait_stopped(name)
