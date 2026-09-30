@@ -294,8 +294,10 @@ refused with the list of groups.
 
 --fix treats what's treatable; a silent node agent is not on this list — the
 puppet may well be working fine, and a restart would kill that work in the
-clone. An expired login is treated without a restart: fresh credentials are
-handed out and the puppet is nudged to go on, so its conversation survives.
+clone. An expired login is treated without a restart: the puppet's lease is
+pushed to it again from the server's credential registry and the puppet is
+nudged to go on, so its conversation survives. A puppet without a lease is
+not treated: give it one with mop update --cred.
 ```
 
 #### mop gc
