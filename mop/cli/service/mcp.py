@@ -249,9 +249,11 @@ def _roster(project):
     состояние аллокации, профиль LLM, репозиторий."""
     rows = [("PUPPET", "NODE", "ALLOC", "STATE", "OWNER", "LLM", "REPOSITORY")]
     for r in puppets.puppet_rows():
-        s = r.render()
-        if project and project not in s["origin"]:
+        # Проект -- одно определение (project_of), не подстрока origin: mop
+        # сидит внутри rumop (#371). Без origin -- «?», как row_project.
+        if project and (puppets.project_of(r.origin) if r.origin else "?") != project:
             continue
+        s = r.render()
         rows.append((s["name"], s["node"], s["alloc_status"], s["state"], s["owner"],
                      s["llm"], s["origin"]))
     return ["pool puppets:", *table(rows)] if len(rows) > 1 else ["pool puppets: none"]

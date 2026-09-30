@@ -299,6 +299,34 @@ def check_stale_permissions_error_369(c):
     return c.failed == failed_before
 
 
+def check_agents_project_371(c):
+    """HYPOTHESIS (#371): _roster фильтрует по подстроке отрендеренного
+    origin (`project not in s["origin"]`): проект mop -- подстрока
+    .../rumop.git, и agents(project="mop") показывает папетов rumop.
+    SOLUTION: сравнение по значению PuppetRow -- puppets.project_of(origin),
+    строка без origin -- «?», как row_project дашборда. Одно определение
+    проекта (CLAUDE.md). STATUS: FIXED — see #371"""
+    from mop.common.state import PuppetRow
+    failed_before = c.failed
+
+    def row(name, origin):
+        return PuppetRow(name=name, node="n1", alloc_status="running", state="free",
+                         kind="free", owner=None, llm="opus", origin=origin)
+    rows = [row("pu-mop-1", "git@git.example:ermak/mop.git"),
+            row("pu-rumop-1", "git@git.example:ermak/rumop.git"),
+            row("pu-none-1", None)]
+    with patched(puppets, puppet_rows=lambda *a, **k: rows):
+        got = "\n".join(mcp._roster("mop"))
+        c.check("#371 agents(project=mop) shows the mop puppet", "pu-mop-1" in got, got)
+        c.check("#371 agents(project=mop) hides the rumop puppet", "pu-rumop-1" not in got, got)
+        c.check("#371 agents(project=mop) hides a puppet without origin",
+                "pu-none-1" not in got, got)
+        got = "\n".join(mcp._roster(""))
+        c.check("#371 no project: every puppet",
+                all(n in got for n in ("pu-mop-1", "pu-rumop-1", "pu-none-1")), got)
+    return c.failed == failed_before
+
+
 def main():
     c = Checks()
 
@@ -603,6 +631,8 @@ def main():
             check_bus_envelope_264(c))
     c.check("#369 a stale permissions error does not explain a later timeout",
             check_stale_permissions_error_369(c))
+    c.check("#371 agents(project) matches the project, not a substring of origin",
+            check_agents_project_371(c))
 
     return c.report("channel")
 
