@@ -1264,7 +1264,8 @@ def check_sweep_report_358(c):
     rep = agent.sweep_report
     c.expect("#358 a clean run: totals and the threshold",
              rep(0, SWEEP_OUT, "", 60),
-             {"freed_kb": 1572864, "free_gb": 41, "min_gb": 60, "warnings": []})
+             {"freed_kb": 1572864, "free_gb": 41, "min_gb": 60, "warnings": [],
+              "bodies": None})
     c.expect("#358 warnings are the stderr lines with a bang, stripped",
              rep(0, SWEEP_OUT, SWEEP_WARN, 60)["warnings"],
              ["2 clone(s), 0 live tmux servers -- tmux unreachable, not 2 orphans",
@@ -1283,6 +1284,29 @@ def check_sweep_report_358(c):
     c.check("#358 the error carries no totals", "freed_kb" not in got)
 
 
+# ── #363: сколько тел снимет ярус 0 ──────────────────────────────────────
+# HYPOTHESIS: у контейнерного узла в ответе sweep только freed_kb=None --
+# doctor не отличит узел с брошенными телами от узла без них.
+# SOLUTION: `mop driver sweep` заканчивает строкой pu_sweep_bodies=N, pu-sweep
+# пропускает её в stdout, sweep_report отдаёт поле bodies; нет строки -- None.
+# STATUS: FIXED — see #363
+TIER0_OUT = ("=== disk before ===\n  /home/u  5G used of 94G\n\n"
+             "tier 0: orphaned bodies (driver pve)\n"
+             "  bodies: 6/8 with a live session\n"
+             "    would destroy pu-mop-5: no session, clean clone\n"
+             "    would destroy pu-mop-6: no session, clean clone\n"
+             "  pu_sweep_bodies=2\n\n  /home/u  5G used of 94G\n")
+
+
+def check_sweep_bodies_363(c):
+    rep = agent.sweep_report
+    got = rep(0, TIER0_OUT, "", 60)
+    c.expect("#363 tier 0: the body count, the totals still unknown",
+             (got.get("bodies"), got["freed_kb"], got["free_gb"]), (2, None, None))
+    c.expect("#363 a host node's run has no body count",
+             rep(0, SWEEP_OUT, "", 60).get("bodies", "missing"), None)
+
+
 def main():
     c = Checks()
     for check in (check_sets, check_decisions, check_tmux, check_quiet,
@@ -1292,7 +1316,7 @@ def main():
                   check_state_fact_224, check_no_screen_fact_236,
                   check_usage_by_login_244, check_owner_gate_267,
                   check_junk_without_templates_276, check_owner_hook_313,
-                  check_sweep_report_358):
+                  check_sweep_report_358, check_sweep_bodies_363):
         try:
             check(c)
         except Exception as e:

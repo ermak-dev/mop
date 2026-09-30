@@ -396,11 +396,29 @@ def check_sweep_keeps_work_346(c):
     out, err, code = run(list(codes), ["--dry"])
     c.check("#346 --dry destroys nothing and still names the kept",
             destroyed == [] and "would destroy pu-a-2" in out and "kept pu-a-3" in out, out)
+
+    # ── #363: число тел -- машинной строкой, как итог pu-sweep ──────────────
+    # HYPOTHESIS: ярус 0 уходит из pu-sweep без итоговой строки, агент отдаёт
+    # freed_kb=None, и doctor не видит, что на узле есть брошенные тела: сухой
+    # ответ не становится проблемой, --fix не метёт (hyper, 2026-09-30).
+    # SOLUTION: командлет заканчивает строкой agent.SWEEP_BODIES=N -- всухую
+    # сколько снесло бы, иначе сколько снёс; у отказа строки нет.
+    # STATUS: FIXED — see #363
+    def tail(text):
+        return text.strip().splitlines()[-1:]
+    c.expect("#363 --dry ends with how many bodies it would destroy",
+             tail(run(list(codes), ["--dry"])[0]), ["pu_sweep_bodies=2"])
+    c.expect("#363 a real run ends with how many bodies it destroyed",
+             tail(run(list(codes), [])[0]), ["pu_sweep_bodies=2"])
+    c.expect("#363 a node with no bodies says zero, not nothing",
+             tail(run([], [])[0]), ["pu_sweep_bodies=0"])
+
     # Предохранитель: ни одной живой сессии -- отказ, ничего не снесено.
     codes.update({"pu-a-1": 1})
     out, err, code = run(list(codes), [])
     c.check("#346 zero live sessions: refused, nothing destroyed",
             destroyed == [] and code == 1 and "refusing to sweep" in err, (out, err, code))
+    c.check("#363 a refusal carries no count: not zero, unknown", "pu_sweep_bodies" not in out)
 
 
 
