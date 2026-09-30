@@ -76,7 +76,7 @@ def _add(origin, project, profile, named, p, cred=None):
                 return _common.report_bootstrap(name, got, p)
             if a.client_status == "failed" or puppets.failing(raw):
                 p.clear()
-                lib.fail(f"{name} on {node}: {puppets.failing(a) or 'failed to start'}")
+                lib.fail(f"{name} on {node}: {puppets.failing(raw) or 'failed to start'}")
                 return 1
             p.step(f"{name}: starting on {node}")
         time.sleep(1)
