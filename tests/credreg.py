@@ -531,6 +531,15 @@ def check_push_312(c):
                      "FAILED: pu-mop-1: ssh: connection refused"),
                     ({"written": ["pu-mop-1 is gone"], "failed": {}, "absent": ["pu-mop-1"]},
                      "FAILED: pu-mop-1 NOT LIVE"),
+                    # Переход #366: агент без поля failed (не раскатился) --
+                    # прежний разбор строк written, отказ остаётся отказом.
+                    ({"written": ["pu-mop-1 FAILED — body 9001 is stopped"]},
+                     "FAILED: pu-mop-1 FAILED — body 9001 is stopped"),
+                    ({"written": ["pu-mop-1 NOT LIVE"]}, "FAILED: pu-mop-1 NOT LIVE"),
+                    # Поле есть -- судят только поля: строка, похожая на отказ,
+                    # при пустых failed и absent -- не отказ.
+                    ({"written": ["pu-mop-1:a/b", "pu-mop-1 FAILED — an old line"],
+                      "failed": {}, "absent": []}, "OK"),
                     ({"error": "puppet pu-mop-1 is not in project x"},
                      "FAILED: puppet pu-mop-1 is not in project x"),
                     (bus.BusError("node agent hyper did not answer in 60s"),

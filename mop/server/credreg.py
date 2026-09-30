@@ -477,7 +477,15 @@ def _outcome(nodes, answers):
         answer = answers.get(node)
         if out[node] != "OK" or not isinstance(answer, dict):
             continue
-        if answer.get("absent"):
+        if "failed" not in answer:
+            # Переход #366: снять, когда все агенты на коде с полем failed.
+            # Агент, не раскатившийся при deploy (молчал, был недоступен),
+            # отвечает прежней формой -- отказ тела только строкой в written.
+            missed = [w for w in answer.get("written") or []
+                      if " FAILED — " in w or w.endswith(" NOT LIVE")]
+            if missed:
+                out[node] = f"FAILED: {missed[0][:120]}"
+        elif answer.get("absent"):
             out[node] = f"FAILED: {answer['absent'][0]} NOT LIVE"
     return out
 
