@@ -997,10 +997,10 @@ def check_cred_push_312(c):
     никогда из запроса. Зовёт его bootstrap на каждом подъёме.
     STATUS: FIXED — see #312"""
     from mop.server import credreg as srv
+    # Кому глагол дан, с #360 проверяет check_cred_push_project_360: мастер
+    # проекта отдаёт аренду своему папету, оператор -- как раньше.
     v = cluster.VERBS.get("cred_push")
-    c.check("#312 cred_push: an operator verb, naming no project puppet, acting on nothing",
-            v is not None and v.scope == cluster.ADMIN and not v.named and not v.acting, v)
-    if v is None:
+    if not c.check("#312 cred_push is a verb", v is not None):
         return
     leased = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
                                          "cred": "anton"}}
@@ -1024,9 +1024,47 @@ def check_cred_push_312(c):
         c.expect("#312 cred_push: no allocation -> not reached, nothing pushed", (got, pushed),
                  ({"ok": True, "lease": "anton", "node": None,
                    "result": "NOT REACHED: pu-mop-3 has no allocation"}, []))
+
+
+# ── #360: cred_push -- проектный глагол ────────────────────────────────
+# HYPOTHESIS: cred_push -- глагол оператора (#312), и мастер проекта не
+# может отдать своему папету его же аренду из реестра: doctor --fix (#357)
+# лечил бы протухший логин только из контекста оператора, а мастер,
+# который сегодня лечит его локальным файлом через write, это потерял бы.
+# SOLUTION: строка таблицы (PROJECT, named, acting), как bootstrap_result:
+# имя проверяется по origin джоба, чужой и непомеченный -- отказ, нет
+# джоба -- отказ; обработчик прежний. Оператор проходит как раньше.
+# STATUS: FIXED — see #360
+def check_cred_push_project_360(c):
+    from mop.server import credreg as srv
+    v = cluster.VERBS.get("cred_push")
+    c.expect("#360 cred_push: project scope, named and acting like bootstrap_result",
+             v and (v.scope, v.named, v.acting), (cluster.PROJECT, True, True))
+    leased = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
+                                         "cred": "anton"}}
+    bare = {"ID": "pu-mop-4", "Meta": {"llm": "claude", "cred": "anton"}}
+    api = FakeNomad(jobs={"pu-mop-1": leased, "pu-mop-4": bare},
+                    allocs={"pu-mop-1": {"ID": "a-1", "NodeName": "hyper"},
+                            "pu-mop-4": {"ID": "a-4", "NodeName": "hyper"}})
+    pushed = []
+    want = {"ok": True, "lease": "anton", "node": "hyper", "result": "OK"}
+    with patched(srv, push=lambda name, node, bodies: pushed.append((name, node, bodies)) or "OK"):
         got = cluster.answer("mop", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
-        c.check("#312 cred_push: a project may not ask it", bool(got.get("error")) and not pushed,
-                got)
+        c.expect("#360 a master pushes its own puppet's lease", (got, pushed),
+                 (want, [("anton", "hyper", ["pu-mop-1"])]))
+        pushed.clear()
+        got = cluster.answer("rugent", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
+        c.check("#360 another project's puppet is refused, nothing pushed",
+                "belongs to project mop" in (got.get("error") or "") and not pushed, got)
+        got = cluster.answer("mop", {"verb": "cred_push", "name": "pu-mop-4"}, api=api)
+        c.check("#360 a job without origin is refused to a master",
+                "carries no origin" in (got.get("error") or "") and not pushed, got)
+        got = cluster.answer("mop", {"verb": "cred_push", "name": "pu-mop-9"}, api=api)
+        c.check("#360 a missing job is a refusal",
+                "no job pu-mop-9" in (got.get("error") or "") and not pushed, got)
+        got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
+        c.expect("#360 the operator as before", (got, pushed),
+                 (want, [("anton", "hyper", ["pu-mop-1"])]))
 
 
 # ── #318: держатели в ответах cred_list и cred_status -- одна форма ─────
@@ -1166,7 +1204,7 @@ def main():
                   check_update_keeps_branch_257, check_cred_lease_284,
                   check_update_pins_node_289, check_owner_gate_267,
                   check_node_267, check_node_forms_277,
-                  check_nomad_api_275, check_stderr_verb_333, check_cred_push_312,
+                  check_nomad_api_275, check_stderr_verb_333, check_cred_push_312, check_cred_push_project_360,
                   check_cred_holders_318,
                   check_host_refusal_312):
         check(c)

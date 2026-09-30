@@ -1001,7 +1001,11 @@ VERBS = {
     "cred_add":        Verb(_cred_add,        ADMIN,   False, False),
     "cred_rm":         Verb(_cred_rm,         ADMIN,   False, False),
     "cred_list":       Verb(_cred_list,       ADMIN,   False, False),
-    "cred_push":       Verb(_cred_push,       ADMIN,   False, False),
+    # Аренда -- в тело своего папета (#360): мастеру проекта тоже, имя
+    # проверяется по origin джоба, как у bootstrap_result. Нового права нет:
+    # обработчик берёт из запроса одно имя, аренду -- из меты джоба, узел --
+    # из Nomad, и отдаёт папету свежую копию его же аренды.
+    "cred_push":       Verb(_cred_push,       PROJECT, True,  True),
     "cred_status":     Verb(_cred_status,     ADMIN,   False, False),
     "cred_login_start": Verb(_cred_login_start, ADMIN, False, False),
     "cred_login_code": Verb(_cred_login_code, ADMIN,   False, False),
