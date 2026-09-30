@@ -86,10 +86,8 @@ def mcp_command(bin_dir=lib.BIN, python=sys.executable):
     Чистая функция (#351). У клона -- его bin/mop: сервер остаётся на дереве
     той копии, из которой подняли мастера. У пакета bin/ нет, и его зовёт
     тот же интерпретатор, что запустил mop, -- в venv пакета он и найдёт."""
-    launcher = os.path.join(bin_dir, "mop")
-    if os.path.exists(launcher):
-        return launcher, ["mcp"]
-    return python, ["-m", "mop.cli", "mcp"]
+    argv = lib.self_argv(bin_dir, python)
+    return argv[0], [*argv[1:], "mcp"]
 
 
 def mcp_config():

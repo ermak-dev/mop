@@ -33,6 +33,17 @@ PROJECT = config.PROJECT
 BIN = os.path.join(PROJECT, "bin")
 
 
+def self_argv(bin_dir=None, python=None):
+    """Чем mop зовёт сам себя -> начало argv (#368, правило #351). У клона --
+    его bin/mop: команда идёт на дереве той же копии. У пакета bin/ нет, и
+    его зовёт тот же интерпретатор, что запустил mop, -- в venv пакета.
+    Умолчания читаются при вызове, а не при определении: BIN подменяют."""
+    launcher = os.path.join(BIN if bin_dir is None else bin_dir, "mop")
+    if os.path.exists(launcher):
+        return [launcher]
+    return [sys.executable if python is None else python, "-m", "mop.cli"]
+
+
 # Цвета и отказ строкой -- в mop.cli.term (#320): их берёт и сборка
 # страницы, которой lib с шиной не поднять (#302).
 from mop.cli.term import fail, ok, section, usage  # noqa: E402,F401
