@@ -10,7 +10,7 @@ refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
 from mop.cli.core import _common
-from mop.common import puppets
+from mop.common import context, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -23,11 +23,13 @@ MCP = {"annotations": "destructive", "args": [
 def main(argv):
     name, force = lib.named(argv, __doc__)
     # workspace -- из рабочей копии, откуда зовут (#133): удалённый файл
-    # снимается и на сервере.
+    # снимается и на сервере. Ветка мастера (#257) -- тоже её, из контекста
+    # команды (#367): библиотека окружение не читает.
     p = lib.Progress(name)
     p.step("stopping, resetting the clone, wiping target")
     try:
-        r = puppets.recycle(name, workspace_of=_common.workspace_text, force=force)
+        r = puppets.recycle(name, workspace_of=_common.workspace_text, force=force,
+                            branch=context.current().branch)
     finally:
         p.clear()
     lib.note(name, r)
