@@ -26,15 +26,37 @@ from mop.common import config  # noqa: E402
 from mop import driver  # noqa: E402
 
 
+# Глаголы, которые потребители ждут (`await DRIVER.x(...)`, asyncio.run(d.x(...)))
+# -- mop/node/agent.py, mop/cli/driver/*. Остальные зовутся без await (#374).
+AWAITED = ("ensure", "destroy", "push", "push_many", "admit",
+           "bodies", "capacity", "templates")
+
+
 def plugin(**attrs):
     """Модуль-плагин с заданными атрибутами; остальное берёт контрактом."""
     mod = types.ModuleType("fake")
     for verb in driver.VERBS:
-        mod.__dict__[verb] = lambda *a, **k: None
+        if verb in AWAITED:
+            async def stub(*a, **k):
+                return None
+            mod.__dict__[verb] = stub
+        else:
+            mod.__dict__[verb] = lambda *a, **k: None
     mod.SESSION_PY = "/opt/mop/mop/session.py"
     mod.IS_CONTAINER = True
     mod.__dict__.update(attrs)
     return mod
+
+
+def _async(fn):
+    """Асинхронная обёртка с той же сигнатурой: заглушка глагола для
+    проверки контракта."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapped(*a, **k):
+        return fn(*a, **k)
+    return wrapped
 
 
 # ── контракт реестра ─────────────────────────────────────────────────────
@@ -79,6 +101,22 @@ CONTRACT = [
     ("no SESSION_PY", plugin(SESSION_PY=None), False),
     ("empty SESSION_PY", plugin(SESSION_PY=""), False),
     ("SESSION_PY is not a path", plugin(SESSION_PY="session.py"), False),
+    # HYPOTHESIS (#374): contract() проверял у глаголов только callable.
+    # Драйвер, написанный по шапке пакета и docs/DRIVER.md, проходил его и
+    # падал у потребителя: синхронный push -- на asyncio.run, destroy(name)
+    # без branch -- на TypeError в агенте (destroy(name, branch=...)).
+    # SOLUTION: contract() сверяет async/sync по кортежу ожидаемых глаголов и
+    # связывает канонические вызовы inspect.signature(fn).bind(...); шапка и
+    # DRIVER.md называют destroy(name, branch=None), push_many и соглашение
+    # об отказе. STATUS: FIXED — see #374
+    ("sync push", plugin(push=lambda name, path, data: None), False),
+    ("async argv", plugin(argv=_async(lambda name: None)), False),
+    ("destroy without branch", plugin(destroy=_async(lambda name: None)), False),
+    ("push_many without files", plugin(push_many=_async(lambda name: None)), False),
+    ("admit without let_in", plugin(admit=_async(lambda name: None)), False),
+    ("argv with a required extra", plugin(argv=lambda name, extra: None), False),
+    ("destroy(name, branch=None)",
+     plugin(destroy=_async(lambda name, branch=None: None)), True),
 ]
 
 # Имя папета склеивается в шелл — и у host, и у драйвера контейнеров. Проверка
@@ -632,6 +670,19 @@ def main():
                    f"{'refused' if refused else 'accepted'}, wanted the opposite"):
             c.check(f"contract: {what} — doc is a string",
                     not (ok and got.get("doc") and not isinstance(got["doc"], str)))
+
+    # Живые драйверы пакета проходят свой же контракт (#374).
+    import importlib
+    for name in ("host", "pve"):
+        try:
+            driver.contract(name, importlib.import_module(f"mop.driver.{name}"))
+            refused = ""
+        except RuntimeError as e:
+            refused = str(e)
+        c.expect(f"contract: the {name} driver passes", refused, "")
+    # AWAITED выведен из потребителей; реестр обязан думать так же.
+    c.expect("contract: the awaited verbs are the registry's",
+             tuple(sorted(getattr(driver, "ASYNC_VERBS", ()))), tuple(sorted(AWAITED)))
 
     c.expect("contract: doc must be the first line of the docstring",
              driver.contract("fake", plugin(__doc__="one\ntwo"))["doc"], "one")
