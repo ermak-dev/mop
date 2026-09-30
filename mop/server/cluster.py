@@ -38,7 +38,7 @@ from .. import driver
 from . import bootstrap, credreg, natsconf, nodes, nomad, spec
 from ..common import (bus, busnames, config, creds, domain, landing, lease, llm, paths, project_secrets,
                       projects, puppets, service, state)
-from ..common.domain import CloneFacts, JobMeta, PoolNode, Project, Verb
+from ..common.domain import Alloc, CloneFacts, JobMeta, PoolNode, Project, Verb
 
 # Nomad за интерфейсом (#275): глаголы читают его через _api(), а не модуль
 # nomad напрямую. По умолчанию -- живой модуль; проверки дают свою
@@ -153,10 +153,9 @@ def _foreign_origin(project, origin):
 # ─── Nomad-половина ростера (#152) ───────────────────────────────────────
 # Жила в puppets.py рядом с клиентом шины мастера, хотя звал её только этот
 # сервис: он один говорит с Nomad от чужого имени (docs/CLUSTER.md).
-# Поля аллокации, которые читает клиент. Возим их, а не аллокацию целиком:
-# в ней TaskStates и события, и тринадцать таких ответов упираются в предел
-# сообщения шины на пустом месте.
-ALLOC_FIELDS = ("ID", "JobID", "NodeName", "ClientStatus", "DesiredStatus")
+# Аллокацию возим значением Alloc (#377) -- те поля, что читает клиент, а не
+# аллокацию целиком: в ней TaskStates и события, и тринадцать таких ответов
+# упираются в предел сообщения шины на пустом месте.
 
 
 def nomad_jobs(project=None):
@@ -172,10 +171,10 @@ def task_and_reason(alloc):
     клиенту Nomad на узле, и платить его за здоровых незачем."""
     task = state.task_summary(alloc)
     reason = None
-    if state.failing_row(alloc.get("ClientStatus"), task, None):
+    if state.failing_row(Alloc.from_dict(alloc).client_status, task, None):
         try:
             reason = state.failure_reason(
-                _api().alloc_stderr(alloc["ID"], state.task_name(alloc)))
+                _api().alloc_stderr(Alloc.from_dict(alloc).id, state.task_name(alloc)))
         except Exception:
             pass
     return task, reason
@@ -192,7 +191,7 @@ def nomad_items(project=None, stale=False):
         alloc, err, task, reason = None, None, None, None
         try:
             got = _api().latest_alloc(j["ID"])
-            alloc = {k: got.get(k) for k in ALLOC_FIELDS} if got else None
+            alloc = Alloc.from_dict(got).to_dict() if got else None
             if got:
                 task, reason = task_and_reason(got)
         except Exception as e:
@@ -342,11 +341,11 @@ GATE_TIMEOUT = 15
 def _clone_of(name):
     """Факты клона от агента узла, где стоит папет.
     -> None (аллокации нет) | {"clone": ...} | {"error": ...}."""
-    alloc = _api().latest_alloc(name)
-    if not alloc or not alloc.get("NodeName"):
+    alloc = Alloc.from_dict(_api().latest_alloc(name))
+    if not alloc or not alloc.node:
         return None
     try:
-        return bus.request(alloc["NodeName"], "clone", name=name,
+        return bus.request(alloc.node, "clone", name=name,
                            timeout=GATE_TIMEOUT, project=bus.ADMIN)
     except bus.BusError as e:
         return {"error": str(e)}
@@ -460,8 +459,8 @@ def _update(project, req):
     # Узел -- из аллокации (#289): стоящий папет перерегистрируется на своём
     # узле, где его тело с клоном; неразмещённый (нет аллокации) -- куда
     # поставит Nomad, как при подъёме.
-    alloc = _api().latest_alloc(name)
-    node = (alloc or {}).get("NodeName") or None
+    alloc = Alloc.from_dict(_api().latest_alloc(name))
+    node = (alloc.node if alloc else None) or None
     # Узел закреплён (#289) -- правило host проверяется до регистрации (#312).
     if cred and node:
         refused = host_refusal(name, cred, node)
@@ -485,19 +484,19 @@ def _bootstrap_result(project, req):
 
 
 def _restart(project, req):
-    alloc = _api().latest_alloc(req["name"])
+    alloc = Alloc.from_dict(_api().latest_alloc(req["name"]))
     if not alloc:
         return {"error": f"{req['name']} has no allocation to restart"}
-    _api().alloc_restart(alloc["ID"])
-    return {"ok": True, "alloc": alloc["ID"], "node": alloc.get("NodeName")}
+    _api().alloc_restart(alloc.id)
+    return {"ok": True, "alloc": alloc.id, "node": alloc.node}
 
 
 def _stop(project, req):
-    alloc = _api().latest_alloc(req["name"])
+    alloc = Alloc.from_dict(_api().latest_alloc(req["name"]))
     if not alloc:
         return {"error": f"{req['name']} has no allocation to stop"}
-    _api().alloc_stop(alloc["ID"])
-    return {"ok": True, "alloc": alloc["ID"]}
+    _api().alloc_stop(alloc.id)
+    return {"ok": True, "alloc": alloc.id}
 
 
 def _delete(project, req):
@@ -529,12 +528,14 @@ def _alloc(project, req):
     extra = {"gave_up": gave_up} if gave_up else {}
     if not alloc:
         return {"ok": True, "alloc": None, "driver": None, **extra}
-    slim = {k: alloc.get(k) for k in ALLOC_FIELDS}
     # Падает ли задача и почему (#126): `mop attach` и `mop add` говорят это
-    # вместо «not running» и двух минут ожидания.
-    slim["task"], slim["reason"] = task_and_reason(alloc)
-    meta = _api().node_meta(alloc["NodeName"]) or {}
-    return {"ok": True, "alloc": slim, "driver": meta.get("mop_driver"), **extra}
+    # вместо «not running» и двух минут ожидания. В ответе глагола они внутри
+    # аллокации -- to_dict(task=True).
+    task, reason = task_and_reason(alloc)
+    slim = Alloc.from_dict({**alloc, "task": task, "reason": reason})
+    meta = _api().node_meta(slim.node) or {}
+    return {"ok": True, "alloc": slim.to_dict(task=True), "driver": meta.get("mop_driver"),
+            **extra}
 
 
 def _give_up(project, req):
@@ -567,8 +568,9 @@ def _stderr(project, req):
         alloc = None
     if not alloc:
         return {"ok": True, "alloc": None, "status": None, "lines": []}
-    text = _api().alloc_stderr(alloc["ID"], state.task_name(alloc))
-    return {"ok": True, "alloc": alloc["ID"], "status": alloc.get("ClientStatus"),
+    a = Alloc.from_dict(alloc)
+    text = _api().alloc_stderr(a.id, state.task_name(alloc))
+    return {"ok": True, "alloc": a.id, "status": a.client_status,
             "lines": (text or "").splitlines()[-n:]}
 
 
@@ -832,10 +834,10 @@ def _cred_push(project, req):
     if not lease:
         return {"ok": True, "lease": None}
     try:
-        alloc = _api().latest_alloc(name)
+        alloc = Alloc.from_dict(_api().latest_alloc(name))
     except Exception:
         alloc = None
-    node = (alloc or {}).get("NodeName")
+    node = alloc.node if alloc else None
     if not node:
         return {"ok": True, "lease": lease, "node": None,
                 "result": f"NOT REACHED: {name} has no allocation"}

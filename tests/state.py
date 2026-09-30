@@ -601,6 +601,68 @@ def check_bootstrap_task_333(c):
              "bootstrap: Could not find or access '~/rugent/.env-prod' on the Ansible Controller.")
 
 
+# ── #377: аллокация Nomad как значение ──────────────────────────────────
+# HYPOTHESIS: ответ Nomad об аллокации ходит по пакету сырым словарём --
+# "NodeName" пятью идиомами в одиннадцати файлах, `== "running"` в
+# нескольких местах; узел папета CLI вычисляет четырьмя способами.
+# Строковые ключи расходятся молча -- класс #265 (JobMeta) и #277 (PoolNode).
+# SOLUTION: domain.Alloc (frozen, ключи Nomad на проводе прежние, running),
+# puppets.node_of -- одна функция «узел папета». Провод -- tests/values.py.
+# STATUS: FIXED — see #377
+def check_alloc_377(c):
+    from mop.common import domain
+    Alloc = getattr(domain, "Alloc", None)
+    if not c.check("#377 domain.Alloc exists", Alloc is not None):
+        return
+    a = Alloc.from_dict({"ID": "a1", "JobID": "pu-a-1", "NodeName": "n1",
+                         "ClientStatus": "running", "DesiredStatus": "run",
+                         "TaskStates": {"claude": {}}})
+    c.expect("#377 Alloc fields by name",
+             (a.id, a.job, a.node, a.client_status, a.desired_status, a.task, a.reason),
+             ("a1", "pu-a-1", "n1", "running", "run", None, None))
+    c.expect("#377 running", (a.running, Alloc.from_dict({"ClientStatus": "pending"}).running),
+             (True, False))
+    c.expect("#377 from_dict(None) is None", Alloc.from_dict(None), None)
+    # Фикстуры и старые ответы несут часть ключей: нет ключа -- None.
+    c.expect("#377 a partial answer reads", Alloc.from_dict({"NodeName": "n1"}).node, "n1")
+    try:
+        a.node = "n2"
+        c.fail("#377 Alloc must be frozen")
+    except Exception:
+        pass
+    for what, d, field in [("NodeName not a string", {"NodeName": 7}, "node"),
+                           ("ClientStatus not a string", {"ClientStatus": ["running"]},
+                            "client_status"),
+                           ("ID not a string", {"ID": 1}, "id"),
+                           ("task not a summary", {"task": "running"}, "task"),
+                           ("reason not a string", {"reason": 3}, "reason")]:
+        try:
+            got = Alloc.from_dict(d)
+            c.fail(f"#377 {what} must be refused", repr(got))
+        except ValueError as e:
+            c.check(f"#377 {what}: the refusal names {field}", f".{field}=" in str(e), str(e))
+
+    # Узел папета -- одна функция: работающий (tail, send, channel) либо
+    # любой аллокации (wipe).
+    node_of = getattr(puppets, "node_of", None)
+    if not c.check("#377 puppets.node_of exists", node_of is not None):
+        return
+    with patched(puppets, running_alloc=lambda name: {"NodeName": "n1",
+                                                        "ClientStatus": "running"}):
+        c.expect("#377 node_of: the running puppet's node", node_of("pu-a-1"), "n1")
+    answers = {"pu-a-1": {"alloc": {"NodeName": "n2", "ClientStatus": "pending"}},
+               "pu-a-2": {"alloc": None}}
+    with patched(puppets, _cluster=lambda verb, **kw: answers[kw["name"]]):
+        c.expect("#377 node_of(running=False): any allocation's node",
+                 node_of("pu-a-1", running=False), "n2")
+        try:
+            node_of("pu-a-2", running=False)
+            c.fail("#377 node_of without an allocation must refuse")
+        except LookupError as e:
+            c.check(f"#377 the refusal says the node is unknown: {e}",
+                    "no allocation" in str(e) and "pu-a-2" in str(e))
+
+
 def main():
     c = Checks()
     for what, given, want in CASES:
@@ -617,6 +679,7 @@ def main():
     check_clone_agreement(c)
     check_row_none_274(c)
     check_invariants_273(c)
+    check_alloc_377(c)
     for state, want in FREE_CASES:
         c.expect(f"is_free({state!r})", is_free(state and state.kind), want)
     return c.report("state")

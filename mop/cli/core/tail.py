@@ -47,7 +47,7 @@ def main(argv):
     name, lines, follow = parse(argv)
     lib.guard(name)
     try:
-        node = puppets.running_alloc(name)["NodeName"]
+        node = puppets.node_of(name)
         buf = puppets.pane_lines(node, name)
     except (LookupError, RuntimeError) as e:
         # Сессии нет (#333): папет не running или пейн не читается --
@@ -66,7 +66,7 @@ def main(argv):
             cur = puppets.pane_lines(node, name)
         except Exception:
             # папет мог перезапуститься или переехать — перецепляемся
-            node = puppets.running_alloc(name)["NodeName"]
+            node = puppets.node_of(name)
             continue
         for line in appended_since(buf, cur):
             print(line, flush=True)

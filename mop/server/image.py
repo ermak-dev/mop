@@ -13,7 +13,7 @@ import os
 import subprocess
 
 from ..common import config, llm, manifest, puppets, state
-from ..common.domain import JobMeta
+from ..common.domain import Alloc, JobMeta
 from .. import driver
 from . import nomad, playvars, spec
 
@@ -127,7 +127,8 @@ def project_rows(project, api=None):
         job = item["job"]
         if JobMeta.from_job(job).project != project:
             continue
-        node = item["alloc"]["NodeName"] if item["alloc"] else None
+        alloc = Alloc.from_dict(item["alloc"])
+        node = alloc.node if alloc else None
         if not node:
             continue
         drv = driver.of_node(meta.get(node), node)

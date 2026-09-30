@@ -22,6 +22,7 @@
 import importlib
 
 from mop.common import plugins, state
+from mop.common.domain import Alloc
 
 # Всё, что потребитель берёт у модуля группы. tests/doctor.py выводит этот
 # список из кода потребителя и сверяет в обе стороны.
@@ -63,7 +64,7 @@ def where(issue):
     """Колонка «где» строки doctor: узел аллокации у проблемы папета, node --
     у проблемы самого узла (#358), иначе «-». Чистая функция."""
     if issue.get("alloc"):
-        return issue["alloc"]["NodeName"]
+        return Alloc.from_dict(issue["alloc"]).node
     return issue.get("node") or "-"
 
 
