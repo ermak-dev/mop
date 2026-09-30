@@ -599,7 +599,7 @@ def _pool(project, req):
 
 
 def _nodes(project, req):
-    return {"ok": True, "nodes": nodes.nomad_rows(nomad_pool())}
+    return {"ok": True, "nodes": nodes.nomad_rows(nomad_pool(), api=_api())}
 
 
 def _drain(project, req):

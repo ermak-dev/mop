@@ -22,7 +22,7 @@ import sys
 import tempfile
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, FakeNomad, offline, patched, restored, GATE_NOW, gate_table_267  # noqa: E402
+from _lib import Checks, FakeNomad, NoLiveNomad, offline, patched, restored, GATE_NOW, gate_table_267  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import cluster  # noqa: E402
@@ -1067,6 +1067,30 @@ def check_cred_push_project_360(c):
                  (want, [("anton", "hyper", ["pu-mop-1"])]))
 
 
+# ── #375: глагол nodes ходит в Nomad через api ────────────────────────
+# HYPOTHESIS: nodes.nomad_rows зовёт живые nomad.nodes_meta()/get_nodes()
+# мимо cluster._api(): answer(api=FakeNomad) отдаёт узлы живого кластера, а
+# не фейка, и контракт #275 «Nomad за интерфейсом» протекает.
+# SOLUTION: nodes.nomad_rows(pool, api); cluster._nodes передаёт _api().
+# STATUS: FIXED — see #375
+def check_nodes_api_375(c):
+    from mop.server import nodes, nomad
+    fake = FakeNomad(nodes=[{"Name": "n2", "Status": "ready", "Datacenter": nomad.POOL_DC},
+                            {"Name": "n1", "Status": "down", "Datacenter": nomad.POOL_DC}],
+                     meta={"n1": {"mop_driver": "host"},
+                           "n2": {"mop_driver": "pve", "mop_projects": "mop"}})
+    with patched(nodes, nomad=NoLiveNomad()):
+        try:
+            got = cluster.answer("admin", {"verb": "nodes"}, api=fake)
+        except AssertionError as e:
+            got = {"error": str(e)}
+    c.expect("#375 nodes through api: the fake's nodes, by name",
+             [(r["name"], r["driver"], r["serves"]) for r in got.get("nodes") or []],
+             [("n1", "host", "-"), ("n2", "pve", "mop")])
+    c.check(f"#375 nodes asked the fake: {fake.calls}",
+            ("nodes_meta",) in fake.calls and ("get_nodes",) in fake.calls, got)
+
+
 # ── #318: держатели в ответах cred_list и cred_status -- одна форма ─────
 # Характеристика до переезда (эпик #314): имена папетов по алфавиту, узел
 # не едет; cred_status с именем пробует один кредит, без имени -- все.
@@ -1205,7 +1229,7 @@ def main():
                   check_update_pins_node_289, check_owner_gate_267,
                   check_node_267, check_node_forms_277,
                   check_nomad_api_275, check_stderr_verb_333, check_cred_push_312, check_cred_push_project_360,
-                  check_cred_holders_318,
+                  check_cred_holders_318, check_nodes_api_375,
                   check_host_refusal_312):
         check(c)
     return c.report("cluster")
