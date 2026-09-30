@@ -6336,7 +6336,7 @@
 "[\"update\", \"mop\", \"foreign\", \"git@h:g/rugent.git\"]": {
 "called": [],
 "reply": {
-"error": "git@h:g/rugent.git belongs to project rugent, not mop: a master works inside its own project only"
+"error": "pu-x-1 belongs to project rugent, not mop"
 }
 },
 "[\"update\", \"mop\", \"foreign\", null]": {

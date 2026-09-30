@@ -102,6 +102,8 @@ def refusal(project, verb, origin=None, name=None, job_exists=False,
     if verb == "update" and new_origin:
         # Смена репозитория — в границах проекта: иначе папет проекта клонирует
         # чужой репозиторий ключом пула, оставаясь на кредах своего проекта.
+        # new_origin сюда кладёт _answer, сравнив origin запроса с джобом
+        # (#365), а не клиент.
         why = _foreign_origin(project, new_origin)
         if why:
             return why
@@ -1042,8 +1044,18 @@ def _answer(project, req):
     origin, exists = (None, False)
     if spec and spec.named and name:
         origin, exists = _owner(name)
-    why = refusal(project, verb, origin=origin or req.get("origin"), name=name,
-                  job_exists=exists, new_origin=req.get("new_origin"))
+    # Смену репозитория update сервер считает сам (#365): origin запроса
+    # против origin джоба. Поле new_origin присылает клиент, то есть сам
+    # проверяемый, и границу проекта на нём держать нельзя.
+    new_origin = None
+    if verb == "update" and req.get("origin") and req.get("origin") != origin:
+        new_origin = req.get("origin")
+    # Владелец -- из джоба, если джоб есть (#365): origin запроса нужен
+    # только add, где джоба нет. Иначе непомеченный джоб доставался бы
+    # тому, кто подложил свой origin.
+    owner = origin if exists else req.get("origin")
+    why = refusal(project, verb, origin=owner, name=name,
+                  job_exists=exists, new_origin=new_origin)
     if why:
         return {"error": why}
     if spec.acting and name and not exists:
