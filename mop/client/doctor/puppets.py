@@ -7,7 +7,7 @@ mop/common/puppets.py. Протухший логин (#357) лечится ар�
 сервера doctor (#359) его и не имеет. Папет без аренды не лечится:
 назначить кредит -- дело `mop update --cred`, а не доктора.
 """
-from mop.common import bus, puppets
+from mop.common import bus, puppets, state
 
 NO_LEASE = "no lease — mop update --cred"
 
@@ -16,7 +16,7 @@ def diagnose():
     """Проблемы puppets.diagnose; login+nudge без аренды -- без лечения."""
     out = []
     for issue in puppets.diagnose():
-        if issue["action"] == "login+nudge" and not issue.get("lease"):
+        if issue["action"] == state.LOGIN_NUDGE and not issue.get("lease"):
             issue = dict(issue, action=None, diagnosis=f"{issue['diagnosis']}; {NO_LEASE}")
         out.append(issue)
     return out
@@ -43,7 +43,7 @@ def push_outcome(name, reply):
 def treat(issue):
     """login+nudge: аренду -- в тело, потом побудка (#290, без рестарта);
     не дошла -- причина вместо побудки. Остальное -- puppets.treat."""
-    if issue["action"] == "login+nudge":
+    if issue["action"] == state.LOGIN_NUDGE:
         # Из контекста вызывающего: мастер проекта -- своему папету (#360),
         # оператор -- любому.
         try:

@@ -432,10 +432,10 @@ def _placement_issue(job, alloc, unserved=False, ceiling=None):
     ceiling, потолка папета (#197)."""
     name = job["ID"]
     if alloc and alloc["ClientStatus"] in ("pending", "failed"):
-        return {"name": name, "alloc": alloc, "action": "stop",
+        return {"name": name, "alloc": alloc, "action": state.STOP,
                 "diagnosis": f"allocation {alloc['ClientStatus']} (restart-backoff?)"}
     if alloc:
-        return {"name": name, "alloc": alloc, "action": "stop",
+        return {"name": name, "alloc": alloc, "action": state.STOP,
                 "diagnosis": f"allocation {alloc['ClientStatus']}"}
     if state.queued(job) and unserved == "memory":
         # Просьба проекта больше, чем готова дать любая машина с его образом:
@@ -478,51 +478,74 @@ def treat(issue):
     Ворота владения (#40) лечение проходит (force): diagnose выбирает его по
     состоянию, и каждое леченое состояние -- то, в котором сессия не работает
     (HUNG, аллокация pending/failed/lost, кончилась квота, свободный со
-    старой спекой, #174). Чью аренду прошли -- в ответе."""
-    action, alloc, name = issue["action"], issue["alloc"], issue["name"]
-    me = {"owner": bus.login(), "force": True}
+    старой спекой, #174). Чью аренду прошли -- в ответе.
+
+    Действие без строки в TREAT -- отказ, а не рестарт (#370): рестарт стирает
+    разговор и может убить работу, опаснее любого отказа."""
+    action = issue["action"]
+    cure = TREAT.get(action)
+    if cure is None:
+        return f"{action} failed: unknown action"
     try:
-        if action == "stop":
-            got = _cluster("stop", name=name, **me)
-            return "alloc stop — Nomad will recreate it without backoff" + _note(got)
-        if action == "model":
-            # Куда переводить папет, у которого кончилась квота текущей
-            # модели (решение оператора 27.08: Fable → Opus). При вызове, а
-            # не при импорте (#183): иначе всякий, кто
-            # импортирует puppets (сервис кластера), числился бы читающим
-            # настройку, которую применяет один doctor --fix.
-            model = config.get("MOP_FALLBACK_MODEL")
-            switch_model(alloc["NodeName"], name, model, force=True)
-            return f"/model {model}"
-        if action == "login+nudge":
-            # Свежие креды уже на узле (гейт вызывающего). Ход, оборванный
-            # отказом API, сам не продолжается: будим сообщением тем же
-            # глаголом send, что и `mop send`, -- адрес ответа мастера, ворота
-            # владения агент проходит по force (#290). Не рестарт: он
-            # поднимает claude начисто и стирает разговор.
-            r = bus.request(alloc["NodeName"], "send", name=name, message=NUDGE,
-                            priority="next", wait=0, owner=bus.login(), force=True,
-                            timeout=bus.TIMEOUT)
-            if "error" in r:
-                raise RuntimeError(r["error"])
-            return f"credentials pushed, nudged: {NUDGE}" + _note(r)
-        if action == "update":
-            # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
-            # аллокации поднял бы ту же старую. Клон переживает — меняется
-            # только спека.
-            # Ветка -- с остальной метой (#265): лечение не ставит папета
-            # мастера обратно на origin/HEAD.
-            meta = JobMeta.from_meta(_cluster("spec", name=name).get("meta"))
-            if not meta.origin:
-                raise RuntimeError(f"{name} has no origin in Meta")
-            got = _cluster("update", name=name, origin=meta.origin,
-                           profile=llm.of_meta(meta), branch=meta.branch, **me)
-            return ("spec re-registered — the puppet comes up with the new wrapper"
-                    + _note(got))
-        got = _cluster("restart", name=name, **me)
-        return "restart" + _note(got)
+        return cure(issue["name"], issue["alloc"], {"owner": bus.login(), "force": True})
     except Exception as e:
         return f"{action} failed: {str(e)[:80]}"
+
+
+def _stop(name, alloc, me):
+    got = _cluster("stop", name=name, **me)
+    return "alloc stop — Nomad will recreate it without backoff" + _note(got)
+
+
+def _model(name, alloc, me):
+    # Куда переводить папет, у которого кончилась квота текущей
+    # модели (решение оператора 27.08: Fable → Opus). При вызове, а
+    # не при импорте (#183): иначе всякий, кто
+    # импортирует puppets (сервис кластера), числился бы читающим
+    # настройку, которую применяет один doctor --fix.
+    model = config.get("MOP_FALLBACK_MODEL")
+    switch_model(alloc["NodeName"], name, model, force=True)
+    return f"/model {model}"
+
+
+def _login_nudge(name, alloc, me):
+    # Свежие креды уже на узле (гейт вызывающего). Ход, оборванный
+    # отказом API, сам не продолжается: будим сообщением тем же
+    # глаголом send, что и `mop send`, -- адрес ответа мастера, ворота
+    # владения агент проходит по force (#290). Не рестарт: он
+    # поднимает claude начисто и стирает разговор.
+    r = bus.request(alloc["NodeName"], "send", name=name, message=NUDGE,
+                    priority="next", wait=0, owner=bus.login(), force=True,
+                    timeout=bus.TIMEOUT)
+    if "error" in r:
+        raise RuntimeError(r["error"])
+    return f"credentials pushed, nudged: {NUDGE}" + _note(r)
+
+
+def _update(name, alloc, me):
+    # Перерегистрация, а не рестарт: врапер живёт в спеке, и рестарт
+    # аллокации поднял бы ту же старую. Клон переживает — меняется
+    # только спека.
+    # Ветка -- с остальной метой (#265): лечение не ставит папета
+    # мастера обратно на origin/HEAD.
+    meta = JobMeta.from_meta(_cluster("spec", name=name).get("meta"))
+    if not meta.origin:
+        raise RuntimeError(f"{name} has no origin in Meta")
+    got = _cluster("update", name=name, origin=meta.origin,
+                   profile=llm.of_meta(meta), branch=meta.branch, **me)
+    return ("spec re-registered — the puppet comes up with the new wrapper"
+            + _note(got))
+
+
+def _restart(name, alloc, me):
+    got = _cluster("restart", name=name, **me)
+    return "restart" + _note(got)
+
+
+# Действие -> лечение (#370): (name, alloc, me) -> строка итога. Рестарт --
+# явная строка, а не ветка «всё прочее».
+TREAT = {state.STOP: _stop, state.MODEL: _model, state.LOGIN_NUDGE: _login_nudge,
+         state.UPDATE: _update, state.RESTART: _restart}
 
 
 def _note(reply):

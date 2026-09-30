@@ -21,7 +21,7 @@
 """
 import importlib
 
-from mop.common import plugins
+from mop.common import plugins, state
 
 # Всё, что потребитель берёт у модуля группы. tests/doctor.py выводит этот
 # список из кода потребителя и сверяет в обе стороны.
@@ -72,7 +72,7 @@ def where(issue):
 # sweep -- у pu-sweep свои предохранители против сноса работы (#358).
 # Рестарт, alloc stop, /model и перерегистрация сбрасывают сессию или
 # решают за оператора -- их расписанный прогон только называет.
-SAFE = ("login+nudge", "sweep")
+SAFE = (state.LOGIN_NUDGE, "sweep")
 
 
 def treats(issue, safe):
