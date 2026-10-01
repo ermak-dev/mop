@@ -1233,15 +1233,10 @@ refreshed in place (docs/WEB.md):
   /api/pool    the current snapshot as JSON
   /events      the same snapshot pushed as server-sent events
   /healthz     200 once the first snapshot is in
-  /api/creds/login/start  post {name, mode?}: start a claude login, answers {url}
-  /api/creds/login/code   post {name, code}: finish it, answers {ok, owner} or {error}
 
 No login on the page (the LAN is trusted, operator's decision 2026-09-26;
 authorization comes later). The pool itself stays read-only here: a restart
 from a button would kill the work in a puppet's clone, and puppet actions
-stay with `mop`. The credential registry (docs/CRED.md) is the one thing the
-page writes: re-authorizing a claude credential from its row; adding and
-removing credentials is `mop cred`. Secrets never come back: the
 snapshot carries names, owners and statuses only, and the journal never sees
 a code.
 Port and bind address default to MOP_WEB_PORT (9000) and MOP_WEB_BIND

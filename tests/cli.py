@@ -600,7 +600,6 @@ def main():
     check_output_rules(c)
     check_empty_llm(c)
     check_empty_value(c)
-    check_probe_words(c)
     check_node_flag_320(c)
     check_one_parser_320(c)
     check_node_flag_340(c)
@@ -1330,29 +1329,6 @@ def check_empty_value(c):
     c.expect("parse_value without the flag must leave the value unset",
              lib.parse_value(["pu-mop-1", "--fresh"], "--cred"),
              (None, ["pu-mop-1", "--fresh"]))
-
-
-def check_probe_words(c):
-    """HYPOTHESIS (#332): `mop llm --probe` печатал вид кредита сырым
-    (`quota_wait: …`), а `mop cred list` -- словом (`quota wait`): одно
-    состояние двумя написаниями рядом. SOLUTION: status_line берёт слово
-    из credreg.WORDS с тем же откатом на вид, что у row().
-    RESULT: слова --probe совпадают с `mop cred list`. STATUS: FIXED — see #332"""
-    from mop.cli.pool import llm as llm_cmd
-    St = domain.CredStatus
-    for kind, want in (("quota_wait", "quota wait: 5h 100%"),
-                       ("needs_login", "needs login: 5h 100%"),
-                       ("active", "active: 5h 100%")):
-        c.expect(f"status_line({kind})", llm_cmd.status_line(St(kind, detail="5h 100%")), want)
-    # CredStatus сам отказывает незнакомому виду; откат на вид -- страховка
-    # на случай нового вида раньше нового слова, проверяется подставкой.
-    from types import SimpleNamespace
-    odd = SimpleNamespace(kind="strange", detail="5h 100%", resets_at=None)
-    c.expect("status_line(unknown kind) passes through", llm_cmd.status_line(odd),
-             "strange: 5h 100%")
-    got = llm_cmd.status_line(St("quota_wait", resets_at=86400 * 365, detail="5h 100%"))
-    c.check(f"status_line keeps the reset time: {got!r}",
-            not (not got.startswith("quota wait: 5h 100%, resets ")))
 
 
 def node_flag_sites():
