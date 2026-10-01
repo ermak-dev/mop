@@ -35,7 +35,7 @@ import base64
 
 from ..common import credreg as common_credreg
 from .. import driver
-from . import bootstrap, credreg, natsconf, nodes, nomad, spec
+from . import bootstrap, credreg, natsconf, nodes, nomad, proxykey, spec
 from ..common import (bus, busnames, config, creds, domain, landing, lease, llm, paths, project_secrets,
                       projects, puppets, service, state)
 from ..common.domain import Alloc, CloneFacts, JobMeta, PoolNode, Project, Verb
@@ -1097,5 +1097,8 @@ async def serve(log, api=nomad):
     # приписывание провалов -- своим потоком, шина его не ждёт.
     threading.Thread(target=credreg.ticker, args=(log, api), daemon=True,
                      name="cred-ticker").start()
+    # Ключ LLM-прокси узлам (#391): клиентские пути раздачи умерли, владелец
+    # ключа -- сервер. Старт -- не тик: ключ обязан опередить первый папет.
+    proxykey.start(log)
     await service.serve("mop-cluster", subj, lambda project, req, _send: answer(project, req, api=api),
                         log, journal, lambda: banner(", ".join(subj), nomad.ADDR))

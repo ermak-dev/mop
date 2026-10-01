@@ -47,7 +47,6 @@ def main(argv):
         lib.usage(f"{name}: no origin in the spec — this isn't a pool puppet")
     origin = args[1] if len(args) > 1 else old
     profile = llm.resolve(profile, old_llm)
-    _common.push_llm_keys(profile)
     # История каталога переживает только смену профиля: при смене репозитория
     # врапер пересоздаёт клон, а разговор остался от прежнего проекта — поднять
     # его в чужом репозитории значит выдать папету чужой контекст за свой.
