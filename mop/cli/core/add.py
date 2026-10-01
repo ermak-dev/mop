@@ -1,4 +1,4 @@
-"""create a puppet: mop add [--llm PROFILE] [--cred NAME] [git-origin]
+"""create a puppet: mop add [--llm PROFILE] [git-origin]
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>. Nomad decides placement — a puppet
@@ -17,14 +17,11 @@ from mop.common.domain import Alloc
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
 MCP = {"annotations": "destructive", "args": [
     {"name": "origin", "type": "string", "help": "git origin; without it, the origin of the master's working copy"},
-    {"name": "llm", "type": "string", "flag": "--llm", "help": "LLM profile"},
-    {"name": "cred", "type": "string", "flag": "--cred",
-     "help": "registry credential to lease; without it the first active one of the profile"}]}
+    {"name": "llm", "type": "string", "flag": "--llm", "help": "LLM profile"}]}
 
 
 def main(argv):
     profile, args = _common.parse_llm(argv)
-    cred, args = lib.parse_value(args, "--cred")
     if len(args) > 1:
         lib.usage(__doc__)
     profile = llm.resolve(profile)
@@ -38,12 +35,12 @@ def main(argv):
                   f"Register it on the server: mop project add {origin}")
     p = lib.Progress(project)
     try:
-        return _add(origin, project, profile, bool(args), p, cred)
+        return _add(origin, project, profile, bool(args), p)
     finally:
         p.clear()
 
 
-def _add(origin, project, profile, named, p, cred=None):
+def _add(origin, project, profile, named, p):
     """Долгая команда (#124): на терминале -- текущий шаг, при успехе --
     ничего; отказ и не вставший папет -- ошибкой."""
     # Имя выбирает сервис кластера вместе с регистрацией: спека собирается
@@ -56,7 +53,7 @@ def _add(origin, project, profile, named, p, cred=None):
     text, sent = _common.workspace_text(origin)
     got = bus.call_cluster("add", origin=origin, profile=profile, timeout=30,
                            workspace=text, bootstrap_sent=sent,
-                           branch=context.current().branch, cred=cred)
+                           branch=context.current().branch)
     name = got["name"]
     # Что уехало в bootstrap (#334) -- строкой насовсем, над строкой шага.
     p.clear()
