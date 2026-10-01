@@ -269,7 +269,7 @@ def check_foreign_mark_308(c):
 
 # ── #315: глагол write -- одно определение в bus ──────────────────────
 # HYPOTHESIS: разбор ответов write (OK / NOT REACHED / FAILED), кодировка
-# [путь, b64] и WRITE_TIMEOUT живут копиями в server/credreg и client/keys,
+# [путь, b64] и WRITE_TIMEOUT жили копиями в server/credreg и client/keys,
 # а distribute и turns_of обходят узлы руками вместо bus.request_many.
 # Характеристика до переезда: что уходит агенту и какие строки выходят,
 # снятая на уровне arequest -- его зовут оба пути, request и request_many.
@@ -372,7 +372,6 @@ def check_creds_knowledge_317(c):
     import tempfile
     from mop.common import creds, fsutil, landing, paths, projects, tiers
     from mop.common.domain import CredStatus
-    from mop.client import keys
     from mop.server import credlogin, credreg as srv, web
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
@@ -413,8 +412,7 @@ def check_creds_knowledge_317(c):
              fsutil.write_kv({"Z_AI_KEY": "k1"}), "Z_AI_KEY=k1\n")
     home = os.path.expanduser("~")
     c.expect("#317 the credentials file: one path in every spelling",
-             {keys.CREDENTIALS, os.path.join(home, paths.CREDENTIALS),
-              credreg.credentials_file(home)},
+             {os.path.join(home, paths.CREDENTIALS), credreg.credentials_file(home)},
              {os.path.join(home, ".claude", ".credentials.json")})
     with tempfile.TemporaryDirectory() as d:
         missing, bad, listed = (os.path.join(d, n) for n in ("missing", "bad", "list"))
@@ -428,7 +426,7 @@ def check_creds_knowledge_317(c):
                  [projects.read_limits(p) for p in (missing, bad, lim)], [{}, {}, {}])
         c.expect("#317 operator creds: none in an empty directory",
                  creds.operator(d), None)
-        keep_root, keep_cred = srv.ROOT, keys.CREDENTIALS
+        keep_root = srv.ROOT
         try:
             srv.ROOT = d
             os.makedirs(os.path.join(d, "x"))
@@ -436,16 +434,9 @@ def check_creds_knowledge_317(c):
             c.expect("#317 server load: missing, foreign name -> None",
                      (srv.load("nope"), srv.load("x")), (None, None))
             c.expect("#317 server credentials: no file -> {}", srv.credentials("x"), {})
-            keys.CREDENTIALS = os.path.join(d, "cred.json")
-            got = [keys.credentials_fresh()]
-            for body in ("{bad", json.dumps({"claudeAiOauth": {"expiresAt": 1000}}),
-                         json.dumps({"claudeAiOauth": {"expiresAt": (NOW + 10**6) * 1000}})):
-                open(keys.CREDENTIALS, "w").write(body)
-                got.append(keys.credentials_fresh())
-            c.expect("#317 credentials_fresh: missing, broken, expired, fresh",
-                     got, [False, False, False, True])
         finally:
-            srv.ROOT, keys.CREDENTIALS = keep_root, keep_cred
+            srv.ROOT = keep_root
+
 
     # ── одно место на каждое знание ──
     for mod, name in ((paths, "CREDS"), (credreg, "credentials_file"),
@@ -462,20 +453,20 @@ def check_creds_knowledge_317(c):
     # Путь -- строковый литерал, который сам путь к файлу кредов (проза в
     # докстрингах и тексте отказа -- не путь).
     path_literal = re_.compile(r"""["'][^"'\s]*(\.credentials\.json|\.claude)["']""")
-    for rel in ("mop/client/keys.py", "mop/server/credlogin.py", "mop/server/credreg.py"):
+    for rel in ("mop/server/proxykey.py", "mop/server/credlogin.py", "mop/server/credreg.py"):
         c.check(f"#317 {rel} spells no credentials path", not path_literal.search(text(rel)),
                 path_literal.findall(text(rel)))
-    for rel in ("mop/client/keys.py", "mop/server/credreg.py"):
+    for rel in ("mop/server/proxykey.py", "mop/server/credreg.py"):
         c.check(f"#317 {rel} knows no credentials schema",
                 '"claudeAiOauth"' not in text(rel) and '"expiresAt"' not in text(rel)
                 and '"accessToken"' not in text(rel))
-    for rel in ("mop/server/credreg.py", "mop/cli/cred/login.py"):
+    for rel in ("mop/server/credreg.py", "mop/server/credlogin.py"):
         c.check(f'#317 {rel} spells no "creds" directory', 'local("creds"' not in text(rel))
-    for rel in ("mop/server/credreg.py", "mop/client/keys.py"):
+    for rel in ("mop/server/credreg.py",):
         c.check(f'#317 {rel} spells no login profile', 'profile="claude"' not in text(rel)
                 and 'credreg.record(name, "claude"' not in text(rel))
     for fn in (srv.load, srv.credentials, credlogin.prepare_home, landing.read, creds.operator,
-               keys.credentials_fresh, projects.read_limits):
+               projects.read_limits):
         src = inspect.getsource(fn)
         c.check(f"#317 {fn.__module__}.{fn.__name__} reads JSON through fsutil.read_json",
                 "read_json(" in src and "json.load(" not in src)

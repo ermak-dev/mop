@@ -7,7 +7,6 @@ import time
 
 from mop.cli import lib
 from mop.common import bus, busnames, config, llm, manifest, paths, puppets
-from mop.client import keys
 
 
 def workspace_text(origin):
@@ -152,12 +151,3 @@ def session_env(profile):
                   f"{puppets.LOCAL_KEYS_FILE} — add it and retry")
         env[prof["auth_var"]] = key
     return prof, env
-def push_llm_keys(llm):
-    """Ключи профиля на узлы. При успехе молчит (#124); не дошедшие --
-    ошибкой, с узлами."""
-    results = keys.push_llm_keys(llm)
-    if results is None:
-        return
-    bad = [f"{n}: {r}" for n, r in sorted(results.items()) if r != "OK"]
-    if bad:
-        lib.fail(f"{paths.NODE_SECRETS} did not reach every node: " + "; ".join(bad))

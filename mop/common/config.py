@@ -540,7 +540,7 @@ _cache = {}
 def read_env(path):
     """То же файлом. Отсутствие файла — штатный случай: на узле нет .env, на
     управляющей машине нет node.env. Публична, потому что тем же форматом
-    читаются и ключи LLM из .env (keys.llm_keys_blob)."""
+    читаются и ключи LLM из .env."""
     try:
         with open(path) as f:
             return fsutil.read_kv(f.read())

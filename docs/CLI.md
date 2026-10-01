@@ -358,17 +358,6 @@ a key at hand) whether the key is alive and how much quota is left.
 first, the order the policy walks when a credential runs out.
 ```
 
-#### mop login
-
-```text
-push claude.ai credentials and LLM keys to pool nodes: mop login
-
-The `write` verb to every node's agent at once: the node keeps a copy for
-bodies raised later, and every live body gets it now. Silent when every node
-took them; otherwise the nodes that did not, and why. A node whose agent does
-not answer is not reached: there is no way past the agent.
-```
-
 #### mop setup
 
 ```text
@@ -409,101 +398,6 @@ rubbish until the next sweep.
 nothing of Nomad, and judges by the absence of a tmux session. That is the
 right signal for a node left alone; this one is the right signal for the
 machine that holds the register.
-```
-
-### cred: credentials of LLM providers: the server's registry
-
-#### mop cred
-
-```text
-credentials of LLM providers: the server's registry
-
-  mop cred list                    what the server holds: status, resets, usage
-  mop cred status [name]           probe the providers now, then the same table
-  mop cred add <name> --profile P --key-file F|-   a provider key (GLM) as a credential
-  mop cred rm <name>               take a credential down with its secret
-  mop cred login <name>            log a claude.ai account in on the server
-                                   without a browser: prints the authorize
-                                   url, reads the code from stdin
-  mop cred login <name> --setup-token
-                                   a one-year token instead of a session
-                                   (inference scope only)
-
-list, status, add and rm go over the bus to the cluster service and work
-from any operator's machine; login drives the client in a pty and runs on
-the server.
-
-A credential is a named authorization of an LLM provider that the pool
-hands to puppets. Each one lives in its own home on the
-server, ~/.config/mop/creds/<name>/, and the login is done by the official
-`claude` client itself, driven in a pty — no OAuth of our own.
-```
-
-#### mop cred add
-
-```text
-add a provider key as a credential: mop cred add <name> --profile P --key-file F|- [--owner email]
-
-The key is read from the file (or stdin with -), never from an argument:
-a key in the command line lands in shell history and `ps`. It travels to
-the server once, over the bus, and never comes back: `mop cred list`
-shows the record without it. Silent on success.
-```
-
-#### mop cred list
-
-```text
-credentials the server holds: mop cred list
-
-One line per credential: name, profile, kind (login, token, key), owner,
-status as of the last probe (active, quota wait, needs login, or unknown
-before the first probe), when an exhausted window resets, the worst
-window's usage, age, and the puppets holding a lease on it. Secrets
-never appear. `mop cred status` probes
-the providers now; this prints what the server already knows.
-```
-
-#### mop cred login
-
-```text
-log a claude.ai account in on the server: mop cred login <name> [--setup-token]
-
-Runs the official client (`claude auth login`, or `claude setup-token`
-with --setup-token) in a pty with the credential's own home,
-~/.config/mop/creds/<name>/, prints the authorize url and waits for the
-code on stdin: open the url in any browser, sign in, paste the code the
-page shows. Silent about secrets: the session lands in the credential's
-home (.claude/.credentials.json), a setup-token in creds/<name>/token.
-
-`auth login` grants the full scope set (user:profile among them, which the
-usage endpoint needs); a setup-token is inference-only. The code is
-single-use and the exchange takes up to two minutes. A successful login
-registers the credential (its cred.json): an `auth login` with the account's
-email as the owner, a setup-token without one. An existing credential logs
-in by its kind (login or token); --setup-token on a login credential is
-refused.
-```
-
-#### mop cred rm
-
-```text
-remove a credential: mop cred rm <name>
-
-Takes the credential's home on the server down with its secret. Puppets
-holding it keep the copy they were given until the next hand-out.
-Silent on success.
-```
-
-#### mop cred status
-
-```text
-probe the providers now: mop cred status [name]
-
-Asks each provider (or the one named) about its credential — is it alive,
-how full are its windows, when do they reset — stores the answer on the
-server and prints the same table as `mop cred list`. A claude login whose
-access token has run out is refreshed first (the client does it itself,
-one tiny request).
 ```
 
 ### dev: the developer's own commands: the project's tracker, CI and checks, not the pool

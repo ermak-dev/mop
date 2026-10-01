@@ -145,7 +145,6 @@ def check_bootstrap_sent_334(c):
 # STATUS: FIXED — see #334
 def check_bootstrap_outcome_334(c):
     from mop.common import bus
-    from mop.client import keys
     line = getattr(_common, "outcome_line", None)
     if not c.check("#334 _common.outcome_line exists", line is not None):
         return
@@ -224,7 +223,6 @@ def check_bootstrap_outcome_334(c):
         with patched_env(MOP_SERVER_LAN="192.0.2.1"), \
                 patched(lib, guard=lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}), \
                 patched(bus, call_cluster=cc, login=lambda: "anton"), \
-                patched(keys, push_llm_keys=lambda profile: None), \
                 patched(_common, workspace_text=lambda origin: ("", NOFILE_334),
                         BOOTSTRAP_WAIT=0):
             out, err, code = run_command(update.main, ["pu-mop-1"])
@@ -1029,8 +1027,7 @@ def check_output_rules(c):
     """STATUS: FIXED — see #159"""
     import glob
     import re
-    from mop.common import bus, llm, puppets
-    from mop.client import keys
+    from mop.common import bus, config, llm, puppets
     files = sorted(glob.glob(os.path.join(ROOT, "mop", "cli", "**", "*.py"), recursive=True)) \
         + [os.path.join(ROOT, "mop", "client", "channel.py"), os.path.join(ROOT, "mop", "node", "agent.py")]
     for hit in caps_hits(files):
@@ -1038,7 +1035,7 @@ def check_output_rules(c):
 
     os.environ.setdefault("MOP_SERVER_LAN", "10.0.0.1")
     with restored(bus, "call_cluster"), restored(puppets, "running_alloc", "diagnose"), \
-            restored(lib, "guard"), restored(keys, "llm_keys_blob"), restored(llm, "profiles"):
+            restored(lib, "guard"), restored(config, "read_env"), restored(llm, "profiles"):
         bus.call_cluster = lambda verb, **kw: {"ok": True}
         puppets.running_alloc = lambda name: {"ClientStatus": "running", "NodeName": "n1"}
         lib.guard = lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
@@ -1061,7 +1058,7 @@ def check_output_rules(c):
         puppets.diagnose = lambda: [{"name": "pu-mop-1", "alloc": {"NodeName": "n1"},
                                      "diagnosis": "HUNG (not responding)", "action": "restart"}]
         out, _, _ = run_command(doctor.main, [])
-        keys.llm_keys_blob = lambda: ("", None)
+        config.read_env = lambda path: {"Z_AI_KEY": "k"}
         llm.profiles = lambda: {"glm": {"key": "Z_AI_KEY", "doc": "", "env": {}}}
         out2, _, _ = run_command(llm_cmd.main, [])
         for what, text in (("doctor", out), ("llm", out2)):
@@ -1127,7 +1124,6 @@ def check_output_179(c):
     STATUS: FIXED — see #179"""
     from mop.common import bus, llm, puppets
     from mop.server import image
-    from mop.client import keys
     from mop.cli.core import update
     from mop.cli.driver import build
     from mop.cli.pool import sweep
@@ -1171,7 +1167,6 @@ def check_output_179(c):
     calls = []
     with patched(lib, guard=lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}), \
             patched(bus, call_cluster=lambda verb, **kw: calls.append(verb) or {"ok": True}), \
-            patched(keys, push_llm_keys=lambda profile: None), \
             patched(_common, workspace_text=lambda origin: ("", NOFILE_334)):
         # Эха параметров нет; единственная строка -- что уехало в bootstrap
         # (#334): её оператор сам не набирал.
@@ -2040,7 +2035,7 @@ def check_add_failure_377(c):
         def call_cluster(verb, alloc=alloc, **kw):
             return {"name": "pu-mop-9"} if verb == "add" else {"alloc": alloc}
         with patched(bus, call_cluster=call_cluster), \
-                patched(_common, push_llm_keys=lambda p: None,
+                patched(_common,
                         workspace_text=lambda o: ("", None), sent_line=lambda s: ""), \
                 patched(lib, fail=said.append), patched(add.time, sleep=lambda s: None), \
                 patched(context, current=lambda: type("Ctx", (), {"branch": None})()):
@@ -2195,8 +2190,7 @@ def check_named_263(c):
                     wipe=lambda node, name, force=False:
                     calls.append(("wipe", force)) or {**note, "target": "/t"},
                     running_alloc=lambda name: {"NodeName": "hyper"}), \
-            patched(core_common, push_llm_keys=lambda p: None,
-                    workspace_text=lambda o: ("", NOFILE_334)):
+            patched(core_common, workspace_text=lambda o: ("", NOFILE_334)):
         line = "pu-mop-1: was olga's: taken with --force\n"
         want = {
             "delete": line + "deleted pu-mop-1 (body gone from hyper)\n",

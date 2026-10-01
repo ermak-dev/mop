@@ -10,8 +10,7 @@ first, the order the policy walks when a credential runs out.
 import time
 
 from mop.cli import lib
-from mop.common import credreg, fsutil, llm, puppets, tiers
-from mop.client import keys
+from mop.common import config, credreg, fsutil, llm, puppets, tiers
 
 
 def main(argv):
@@ -29,9 +28,10 @@ def main(argv):
         return
     if [a for a in argv if a != "--probe"]:
         lib.usage(__doc__)
-    blob, note = keys.llm_keys_blob()
-    found = fsutil.read_kv(blob or "", raw=True)
-    have = set(found)
+    # Ключ профиля читаем из локального .env: раздачей узлам занимается
+    # сервис (#391), а здесь ключ нужен самому мастеру для его сессий.
+    env = {k: v for k, v in config.read_env(puppets.LOCAL_KEYS_FILE).items() if v}
+    have = set(env)
     for name, prof in llm.profiles().items():
         key = prof.get("key")
         if not key:
@@ -42,10 +42,8 @@ def main(argv):
             state = f"key {key}: missing from {puppets.LOCAL_KEYS_FILE}"
         base = prof["env"].get("ANTHROPIC_BASE_URL", "api.anthropic.com (default)")
         if probe and prof.get("probe") and key in have:
-            state = status_line(prof["probe"](found[key]))
+            state = status_line(prof["probe"](env[key]))
         print(f"  {name:8}  {base:38}  {state}")
-    if note:
-        print(f"\n{note}")
 
 
 
