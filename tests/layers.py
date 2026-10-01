@@ -73,7 +73,7 @@ ROOT_PARTS = ("session", "usage", "driver", "cli")
 # читается только на узле (driver.current), а пути и разбор имён из того же
 # модуля нужны всем. Драйверы проверяются как модули узла сами по себе.
 DYNAMIC = {
-    "mop.common.llm": {"mop.common.llm.claude", "mop.common.llm.glm"},   # профили LLM
+   # профили LLM
 }
 
 

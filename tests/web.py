@@ -27,7 +27,7 @@ def row(name, origin, state=FREE, alloc="running", node="mate"):
     """Строка puppet_rows: вердикт State, либо None там, где спрашивать некого."""
     return PuppetRow(name=name, node=node, alloc_status=alloc,
                      state=str(state) if state else "-", kind=state and state.kind,
-                     owner="-", llm="claude", origin=origin, disk_kb=None)
+                     owner="-", origin=origin, disk_kb=None)
 
 
 MOP = "git@git.ermak.dev:ermak/mop.git"
@@ -442,7 +442,7 @@ def check_who_319(c):
     answer = {"master": "anton.mate-7", "project": "mop", "user": "anton", "session": "s-1",
               "cwd": "/w"}
     bare = {"master": None, "user": None, "session": None, "cwd": None}
-    rows = [PuppetRow("pu-mop-1", "n1", "running", "busy", "busy", "anton", "claude",
+    rows = [PuppetRow("pu-mop-1", "n1", "running", "busy", "busy", "anton",
                       "git@h:g/mop.git")]
     c.expect("#319 page: a who answer as a masters row",
              web.master_rows({"mop": [answer, bare]}, rows),

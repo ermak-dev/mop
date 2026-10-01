@@ -121,33 +121,14 @@ def report_bootstrap(name, got, p):
     return 0
 
 
-def parse_llm(args):
-    """Выкусить --llm PROFILE (или --llm=PROFILE) откуда угодно в аргументах.
-    -> (профиль | None, остальные аргументы)."""
-    try:
-        profile, rest = lib.parse_value(args, "--llm")
-    except RuntimeError:
-        # Забытое значение -- ошибка использования, а не «нет профиля ''»
-        # (#164); здесь и список профилей, чтобы было из чего выбрать.
-        raise RuntimeError(f"--llm needs a profile name; available: "
-                           f"{', '.join(llm.profiles())}") from None
-    if profile is not None:
-        llm.require(profile)
-    return profile, rest
-def session_env(profile):
-    """Окружение сессии claude на профиле из mop/common/llm/: статическая часть
-    профиля плюс ключ. -> (профиль, {переменные}).
-
-    Источник ключа — местный .env, а не узловой secrets.env: на управляющей
-    машине узел ничего не выдавал. Отказ, а не тишина: сессия без ключа
-    отбивает каждый ход 401-й, а читается живой. Так поднимаются и мастер,
-    и `mop code`."""
-    prof = llm.require(profile)
-    env = dict(prof["env"])
-    if prof["key"]:
-        key = config.get(prof["key"])
-        if not key:
-            lib.usage(f"profile {profile}: no {prof['key']} in "
-                  f"{puppets.LOCAL_KEYS_FILE} — add it and retry")
-        env[prof["auth_var"]] = key
-    return prof, env
+def session_env():
+    """Окружение сессии claude (#390): единственный сервер установки --
+    прокси. -> {переменные}. Ключ -- из местной .env (мастеру узел ничего
+    не выдавал); отказ, а не тишина: сессия без ключа отбивает каждый ход
+    401-м. Так поднимаются и мастер, и `mop code`. Окружение --
+    mop.common.llm, того же вида, что в спеке."""
+    env = dict(llm.env())
+    if not (key := config.get(llm.KEY)):
+        lib.usage(f"no {llm.KEY} in {puppets.LOCAL_KEYS_FILE} — add it and retry")
+    env[llm.AUTH_VAR] = key
+    return env

@@ -598,7 +598,6 @@ def main():
     check_refusals(c)
     check_refusals_163(c)
     check_output_rules(c)
-    check_empty_llm(c)
     check_empty_value(c)
     check_node_flag_320(c)
     check_one_parser_320(c)
@@ -1048,7 +1047,6 @@ def check_output_rules(c):
             c.check(f"{what} must be silent on success: out {out!r} err {err!r} code {code!r}",
                     not (out or err or code))
         from mop.cli.pool import doctor
-        from mop.cli.pool import llm as llm_cmd
         # Здоровый пул — одна строка результата, её и показываем.
         puppets.diagnose = lambda: []
         out, _, _ = run_command(doctor.main, [])
@@ -1057,10 +1055,7 @@ def check_output_rules(c):
         puppets.diagnose = lambda: [{"name": "pu-mop-1", "alloc": {"NodeName": "n1"},
                                      "diagnosis": "HUNG (not responding)", "action": "restart"}]
         out, _, _ = run_command(doctor.main, [])
-        config.read_env = lambda path: {"Z_AI_KEY": "k"}
-        llm.profiles = lambda: {"glm": {"key": "Z_AI_KEY", "doc": "", "env": {}}}
-        out2, _, _ = run_command(llm_cmd.main, [])
-        for what, text in (("doctor", out), ("llm", out2)):
+        for what, text in (("doctor", out),):
             c.check(f"{what} advises another command on success: {text!r}",
                     not (re.search(r"\bmop [a-z]+", text)))
     check_output_rest(c)
@@ -1249,10 +1244,10 @@ def check_restore_all_188(c):
     по строке на папета («<папет> on <узел>: not raised again: <причина>»).
     STATUS: FIXED — see #188"""
     from mop.server import image, nomad, spec
-    gone = [{"name": f"pu-p-{i}", "origin": "git@h:g/p.git", "llm": "claude",
+    gone = [{"name": f"pu-p-{i}", "origin": "git@h:g/p.git",
              "node": "hyper"} for i in (1, 2, 3)]
     with offline(), restored(nomad, "register"), restored(spec, "job_spec"):
-        spec.job_spec = lambda name, origin, llm, **kw: {"ID": name}
+        spec.job_spec = lambda name, origin, **kw: {"ID": name}
         for refused in ({"pu-p-1"}, {"pu-p-1", "pu-p-3"}, set()):
             registered = []
 
@@ -1275,30 +1270,6 @@ def check_restore_all_188(c):
             want_lines = [f"{n} on hyper: not raised again: Nomad refused {n}"
                           for n in sorted(refused)]
             c.expect(f"restore with {sorted(refused)} refused: {err!r}", lines, want_lines)
-
-
-def check_empty_llm(c):
-    """HYPOTHESIS (#164): `--llm` без значения давал профиль "", и отказ
-    llm.require звучал как «no LLM profile (empty)» — не про флаг, который
-    забыли заполнить. SOLUTION: пустое значение — ошибка использования в
-    parse_llm, до реестра профилей. STATUS: FIXED — see #164"""
-
-    def through_dispatcher(argv):
-        return run_command(lambda x: _common.parse_llm(x) and None, argv, via_cli=True)
-    for argv in (["--llm", ""], ["pu-mop-1", "--llm"], ["--llm="], ["--llm", "--fresh"]):
-        out, err, code = through_dispatcher(argv)
-        lines = err.strip().splitlines()
-        c.check(f"parse_llm({argv}): out {out!r} err {err!r} code {code!r}",
-                not (out or not code or len(lines) != 1 or "Traceback" in err
-                     or not lines[0].startswith("--llm needs a profile name")))
-    got = _common.parse_llm(["pu-mop-1", "--llm", "claude"])
-    c.expect("parse_llm with a profile", got, ("claude", ["pu-mop-1"]))
-    c.expect("parse_llm without --llm must leave the profile unset",
-             _common.parse_llm(["pu-mop-1"]), (None, ["pu-mop-1"]))
-    # Неизвестный профиль — прежний отказ, слово в слово.
-    out, err, code = through_dispatcher(["--llm", "no-such"])
-    c.check(f"an unknown profile keeps its refusal: {err!r} {code!r}",
-            not (not code or not err.startswith("no LLM profile no-such; available: ")))
 
 
 
@@ -2016,7 +1987,7 @@ def check_add_failure_377(c):
                 patched(lib, fail=said.append), patched(add.time, sleep=lambda s: None), \
                 patched(context, current=lambda: type("Ctx", (), {"branch": None})()):
             try:
-                code = add._add("git@h:g/mop.git", "mop", "claude", False, P())
+                code = add._add("git@h:g/mop.git", "mop", False, P())
             except Exception as e:
                 c.fail(f"#377 mop add, {what}: a refusal, not a trace",
                        f"{type(e).__name__}: {e}")

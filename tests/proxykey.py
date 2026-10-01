@@ -103,19 +103,17 @@ def main():
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и
-    # врапер умирает «no key». SOLUTION: рендерит и раздаёт сервер; переходный
-    # Z_AI_KEY едет рядом, пока есть в .env сервера (стендовые glm-папеты,
-    # #382), и исчезает из блоба сам, как только его уберут из .env.
-    # STATUS: FIXED — see #391
+    # врапер умирает «no key». SOLUTION: рендерит и раздаёт сервер.
+    # С #390 в блобе ровно один ключ: переходный Z_AI_KEY снят вместе с
+    # профилями -- glm-папеты перерегистрируются на прокси тем же ходом.
+    # STATUS: FIXED — see #391, #390
     c.expect("blob: the proxy key rides (#391)",
              proxykey.blob({"MOP_PROXY_KEY": "s1", "Z_AI_KEY": "z1"}),
-             "MOP_PROXY_KEY=s1\nZ_AI_KEY=z1\n")
-    c.expect("blob: no Z_AI_KEY in .env -> only the proxy key (#391)",
-             proxykey.blob({"MOP_PROXY_KEY": "s1"}), "MOP_PROXY_KEY=s1\n")
-    c.expect("blob: transition rides without the proxy key yet (#391)",
-             proxykey.blob({"Z_AI_KEY": "z1"}), "Z_AI_KEY=z1\n")
-    c.expect("blob: empty values are skipped (#391)",
-             proxykey.blob({"MOP_PROXY_KEY": "", "Z_AI_KEY": ""}), None)
+             "MOP_PROXY_KEY=s1\n")
+    c.expect("blob: no key at all -> nothing to ride (#391)",
+             proxykey.blob({"Z_AI_KEY": "z1"}), None)
+    c.expect("blob: an empty key is no key (#391)",
+             proxykey.blob({"MOP_PROXY_KEY": ""}), None)
 
     # ── пора ли раздавать (#391): по отпечатку, недошедшие не считаются ──
     c.expect("due: no state -> push", proxykey.due("b", None), True)

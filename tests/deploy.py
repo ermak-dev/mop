@@ -110,7 +110,7 @@ from mop.common import config  # noqa: E402
 # Что сервис кластера читает сам (#176): его код, клиент Nomad и спецификация,
 # а с ней профиль LLM -- job_spec зовёт llm.resolve, и create без --llm
 # приходит с profile=None, то есть с умолчанием установки.
-CLUSTER_READS = ("mop/server/cluster.py", "mop/server/nomad.py", "mop/server/spec.py", "mop/common/llm/__init__.py",
+CLUSTER_READS = ("mop/server/cluster.py", "mop/server/nomad.py", "mop/server/spec.py", "mop/common/llm.py",
                  "mop/server/natsconf.py")
 
 VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "10.0.0.1",
@@ -125,7 +125,9 @@ VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "1
         # Группа доступа и вложенность AD (#220): тоже пустые по умолчанию.
         "MOP_LDAP_ACCESS_GROUP": "CN=Pool Users,OU=Access,DC=example,DC=dev",
         "MOP_LDAP_NESTED": "ad",
-        "MOP_LDAP_STARTTLS": "no", "MOP_LDAP_CA_FILE": "/etc/ssl/certs/corp-ca.pem"}
+        "MOP_LDAP_STARTTLS": "no", "MOP_LDAP_CA_FILE": "/etc/ssl/certs/corp-ca.pem",
+        # LLM-прокси (#390): ключ пуст по умолчанию, образец -- как у LDAP.
+        "MOP_PROXY_URL": "http://proxy.example.dev:8317", "MOP_PROXY_KEY": "k1"}
 # Значения, которые юнит обязан донести целиком (#185): пробел, кавычки,
 # обратный слеш. Подставляются вместо настройки из набора юнита.
 AWKWARD = ("Pool Bot", 'say "hi"', "a\\b", "tab\there", "it's", "100%", "%h")
@@ -141,11 +143,11 @@ EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml", "w
 # Что #176 добавляет в юнит mop-cluster: всё это сервис читает, а юнит не
 # передавал. Порт и DC Nomad -- из тикета; объём, потолок, посев и PATH папета
 # нашла проверка ниже (их читает mop/server/spec.py, а спецификацию теперь собирает
-# сервис кластера, не машина оператора с её .env), как и профиль LLM по
-# умолчанию (llm.resolve из job_spec).
+# сервис кластера, не машина оператора с её .env); с #390 сюда же адрес
+# и ключ LLM-прокси -- их читают спека (mop.common.llm) и раздача (#391).
 ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          "MOP_MEM_MB", "MOP_PUPPET_SEED", "MOP_PUPPET_PATH",
-                         "MOP_DEFAULT_LLM",
+                         "MOP_PROXY_URL", "MOP_PROXY_KEY",
                          # reload шины с проверкой (#211): /varz на петле.
                          "MOP_NATS_MONITOR_PORT")}
 # Несекретные настройки провайдера личностей (#214) -- сервисам, которые его

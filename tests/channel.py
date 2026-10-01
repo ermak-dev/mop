@@ -311,7 +311,7 @@ def check_agents_project_371(c):
 
     def row(name, origin):
         return PuppetRow(name=name, node="n1", alloc_status="running", state="free",
-                         kind="free", owner=None, llm="opus", origin=origin)
+                         kind="free", owner=None, origin=origin)
     rows = [row("pu-mop-1", "git@git.example:ermak/mop.git"),
             row("pu-rumop-1", "git@git.example:ermak/rumop.git"),
             row("pu-none-1", None)]

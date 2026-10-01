@@ -56,8 +56,8 @@ def dump(value):
 
 
 # ─── ростер мастера ──────────────────────────────────────────────────────
-def job(name, origin="", status="running", llm="claude"):
-    meta = {"origin": origin, "llm": llm} if origin else None
+def job(name, origin="", status="running"):
+    meta = {"origin": origin} if origin else None
     return {"ID": name, "Status": status, "Meta": meta}
 
 
@@ -72,7 +72,7 @@ def item(j, a=None, error=None, task=None, reason=None):
 
 ITEMS = [
     item(job("pu-mop-1", MOP), alloc("pu-mop-1", "mate")),
-    item(job("pu-mop-2", MOP, llm="glm"), alloc("pu-mop-2", "mate")),
+    item(job("pu-mop-2", MOP), alloc("pu-mop-2", "mate")),
     item(job("pu-mop-3", MOP), alloc("pu-mop-3", "mate")),
     item(job("pu-mop-4", MOP), alloc("pu-mop-4", "gpu")),
     item(job("pu-mop-5", MOP), alloc("pu-mop-5", "mate")),
@@ -373,7 +373,7 @@ def check_puppet_row_204(c):
     """Строка ростера: поля и их порядок -- прежние ключи словаря; словарь
     обратим; незнакомый ключ -- отказ, а не молча лишнее поле."""
     from mop.common.state import PuppetRow
-    keys = ["name", "node", "alloc_status", "state", "kind", "owner", "llm",
+    keys = ["name", "node", "alloc_status", "state", "kind", "owner",
             "origin", "disk_kb"]
     d = dict(zip(keys, ["pu-mop-1", "mate", "running", "free", "free", "-",
                         "claude", MOP, 12]))

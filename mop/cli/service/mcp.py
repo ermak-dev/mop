@@ -255,7 +255,7 @@ def _roster(project):
             continue
         s = r.render()
         rows.append((s["name"], s["node"], s["alloc_status"], s["state"], s["owner"],
-                     s["llm"], s["origin"]))
+                     s["origin"]))
     return ["pool puppets:", *table(rows)] if len(rows) > 1 else ["pool puppets: none"]
 
 
