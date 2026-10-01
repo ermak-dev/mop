@@ -5,7 +5,6 @@ picked automatically: <project>-<number>. Nomad decides placement — a puppet
 reserves 8 GB from the pool. Silent when the puppet is running; on a
 terminal it shows the current step. The new puppet is in mop list.
 """
-import os
 import time
 
 from mop.cli import lib

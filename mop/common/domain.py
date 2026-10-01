@@ -471,27 +471,6 @@ class Gone:
         return cls(d.get("target"), d.get("destroyed"))
 
 
-# ─── кредит провайдера ───────────────────────────────────────────────────
-@dataclass(frozen=True)
-class CredStatus:
-    """Состояние кредита провайдера LLM (#287) -- три исхода, которые видит
-    оператор: `active` (активен), `quota_wait` (ждёт квоты до resets_at),
-    `needs_login` (ждёт ручной авторизации: ключ отозван, токен истёк).
-
-    resets_at -- epoch в секундах, когда откроется исчерпанное окно, либо
-    None; percent -- загрузка худшего окна; detail -- одна строка человеку."""
-    kind: str
-    resets_at: object = None
-    percent: object = None
-    detail: str = ""
-
-    KINDS = ("active", "quota_wait", "needs_login")
-
-    def __post_init__(self):
-        if self.kind not in self.KINDS:
-            _refuse(self, "kind", f"one of {', '.join(self.KINDS)}")
-
-
 # ─── глагол ──────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Verb:

@@ -16,9 +16,9 @@ import os
 import threading
 import time
 
-from ..common import bus, config, fsutil, paths, puppets
+from ..common import bus, config, paths, puppets
 
-TICK = 300                   # как цикл кредитов (#284): редко и предсказуемо
+TICK = 300                   # редко и предсказуемо; sha не нов -- ни одного запроса
 STATE = paths.local("proxy-key.json")
 
 
@@ -81,7 +81,7 @@ def push(env=None, nodes=None, now=None):
 
 def ticker(log, every=TICK):
     """Цикл раздачи: sha не нов -- ни одного запроса шине. Живёт рядом с
-    циклом кредитов до его снятия (#386)."""
+    никаким другим циклом."""
     while True:
         try:
             out = push()

@@ -16,7 +16,6 @@
 Диспетчер (mop/cli/__init__.py) зовёт `lib.run(main, argv)` сам.
 """
 import asyncio
-import json
 import os
 import re
 import shutil
@@ -153,8 +152,8 @@ def parse_value(args, flag, once=False):
                 raise RuntimeError(f"{flag} given twice")
             if a == flag:
                 value = next(it, "")
-                # Следом флаг, а не значение: `--llm --fresh` съедал бы
-                # соседний флаг как значение (#164).
+                # Следом флаг, а не значение: соседний флаг не съедается
+                # как значение (#164).
                 if value.startswith("-"):
                     rest.append(value)
                     value = ""

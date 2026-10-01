@@ -19,8 +19,6 @@ export interface Project { name: string; puppets: Puppet[]; counts: Counts }
 
 /** Корзина узла, которую считает сервер (#325, nodes.bucket). */
 export type NodeKind = "free" | "busy" | "down";
-/** Вид статуса кредита (#325, web.cred_status_kind). */
-
 /** Узел; error -- только у узла с отказом (NodeRow.to_row на сервере); kind
  *  -- корзина от сервера (#325), у снимка до #325 её нет. */
 export interface Node {

@@ -36,7 +36,7 @@ import re
 import time
 import shlex
 
-from ..common import config, paths
+from ..common import config
 from ..common.domain import Body, Gone
 from . import HOME, PREFIX, SERVER_PUB, Tmux, bad_name, sh, project_of_name, valid_name, why
 

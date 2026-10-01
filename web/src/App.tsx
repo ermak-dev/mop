@@ -1,5 +1,5 @@
 // Приложение дашборда (#296): шапка со счётчиками корзин, ошибки сборщика и
-// секции -- пул и узлы (#298), расход (#299), кредиты (#300), журнал (#298).
+// секции -- пул и узлы (#298), расход (#299), журнал (#298).
 import { Box, Container, Group, Stack, Text, Title, Alert } from "@mantine/core";
 import { usePool } from "./usePool";
 import { PoolTable } from "./components/PoolTable";

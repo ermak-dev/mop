@@ -40,14 +40,11 @@
 Обе половины в одном файле, как у драйвера: узел (run) и сервер (serve)
 — одно решение. Узловая половина живёт stdlib'ом плюс шиной.
 """
-import asyncio
 import hashlib
 import json
 import os
 import re
-import shlex
 import subprocess
-import sys
 import threading
 import time
 
@@ -461,7 +458,7 @@ def _later(delay, fn):
 
 def ask_give_up(name):
     """Попросить сервис кластера остановить сдавшийся джоб (#345). Глагол
-    оператора, как cred_push (#312): Nomad -- у него. Не вышло -- следующий
+    оператора: Nomad -- у него. Не вышло -- следующий
     подъём того же ключа ответит gave_up без прогона и попросит снова."""
     def ask():
         try:

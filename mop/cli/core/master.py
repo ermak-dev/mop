@@ -41,10 +41,9 @@ automatic on exactly its main signal. The price is named up front: the
 master holds the Nomad token, pushes, and talks to the tracker, and it will
 no longer ask about any of that.
 
-set puppets run on. Without the flag, the installation's MOP_DEFAULT_LLM
-itself is read from the master machine's .env: there's no node secrets.env
-here, and the local .env is exactly what serves as the source of truth for
-keys.
+The session runs on the installation's single LLM proxy; its key is read
+from the master machine's .env — there's no node secrets.env here, and the
+local .env is exactly what serves as the source of truth for keys.
 """
 import json
 import os

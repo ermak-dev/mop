@@ -1,10 +1,10 @@
-"""launch claude on an LLM profile, outside the pool: mop code [claude options]
+"""launch claude outside the pool: mop code [claude options]
 
-Same profile machinery as `mop master`, none of the pool. No project, no bus
-credentials, no mop MCP server: this is an ordinary claude session that just
-happens to come up on a chosen provider. Use it where the pool has nothing to
-do with the job — a scratch checkout, someone else's repository, a shell on
-a machine that never got `mop server deploy`.
+Same session environment as `mop master`, none of the pool. No project, no
+bus credentials, no mop MCP server: this is an ordinary claude session on
+the installation's LLM proxy. Use it where the pool has nothing to do with
+the job — a scratch checkout, someone else's repository, a shell on a
+machine that never got `mop server deploy`.
 
 Everything goes to claude as-is
 (`mop code --continue` resumes the last session here). The command won't
@@ -17,10 +17,9 @@ of the command is to get to work on a provider without ceremony, and
 answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
-The session runs on the installation's single LLM proxy (MOP_PROXY_URL). The
-profile's static env goes into the session whole, while the key itself is read
-from this machine's .env: there's no node secrets.env here, and the local .env
-is exactly what serves as the source of truth for keys.
+The session runs on the installation's single LLM proxy (MOP_PROXY_URL);
+the key is read from this machine's .env: there's no node secrets.env here,
+and the local .env is exactly what serves as the source of truth for keys.
 """
 import os
 
@@ -29,8 +28,8 @@ from mop.cli.core import _common
 
 
 def main(argv):
-    # Никакого разбора позиционных: своих аргументов у команды нет, и всё,
-    # кроме --llm, уезжает claude дословно. Отсюда же отсутствие обязательного
+    # Никакого разбора позиционных: своих аргументов у команды нет, и всё
+    # уезжает claude дословно. Отсюда же отсутствие обязательного
     # `--` из `mop master`: там он отделял origin от значения чужого флага,
     # здесь отделять не от чего.
     passthru = argv

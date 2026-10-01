@@ -302,7 +302,7 @@ if [ -n "$PU_LLM_KEY_VAR" ]; then
     if [ -z "$key" ]; then
         # Валимся громко: без ключа claude поднимется и будет отбивать каждый
         # ход 401-й, а папет будет читаться как живое и свободное.
-        echo "LLM profile $PU_LLM: node has no key $PU_LLM_KEY_VAR in $keyfile -- hand out: mop login" >&2
+        echo "no $PU_LLM_KEY_VAR in $keyfile -- the cluster service hands out the LLM proxy key" >&2
         exit 1
     fi
     llm_env+=(-e "$PU_LLM_AUTH_VAR=$key")
@@ -626,9 +626,9 @@ def template_version(env):
 
 
 def current_version():
-    """Версия шаблона, который собрал бы сегодняшний mop. Без реестра
-    профилей: удалённый MOP_DEFAULT_LLM иначе ронял бы spec_is_stale, а ростер
-    глотает падение как «спека свежая» — та самая тихая ошибка (#174)."""
+    """Версия шаблона, который собрал бы сегодняшний mop. Один набор
+    переменных для всех папетов (#390): окружение LLM не зависит от
+    профиля."""
     return template_version(task_env("pu-spec-1", "spec"))
 
 

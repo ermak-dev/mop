@@ -226,8 +226,8 @@ def on_inbox(m):
     "Who you can message: pool puppets on ALL nodes, masters of your project, "
     "and claude sessions on this machine. Fuller than the built-in "
     "ListAgents, which only sees this host. For a puppet it shows the true "
-    "state (free/busy/HUNG/no model quota/unsaved work in the clone), "
-    "LLM profile, and repository; for a master, the address to reply to. "
+    "state (free/busy/HUNG/no model quota/unsaved work in the clone) "
+    "and repository; for a master, the address to reply to. "
     "A master's address comes only from the masters table here or from the "
     "envelope of a received message (from-name), never from `mop mcp --check`."))
 def agents(project: str = "") -> str:

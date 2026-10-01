@@ -6,7 +6,7 @@ import os
 import time
 
 from mop.cli import lib
-from mop.common import bus, busnames, config, llm, manifest, paths, puppets
+from mop.common import bus, busnames, config, llm, manifest, puppets
 
 
 def workspace_text(origin):

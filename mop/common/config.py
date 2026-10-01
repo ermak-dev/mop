@@ -462,8 +462,8 @@ SERVER_SCOPED = {
     "mop-bootstrap": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                       "MOP_HOME", "MOP_USER") + IDENTITY_SCOPED,
     # Nomad (NOMAD_ADDR выводится из адреса сервера и порта, плюс DC) и то,
-    # что читает mop/server/spec.py: спецификацию папета собирает этот сервис, и
-    # профиль LLM по умолчанию тоже решает он (create без --llm).
+    # что читает mop/server/spec.py: спецификацию папета собирает этот сервис,
+    # и адрес LLM-прокси -- тоже он (#390).
     "mop-cluster": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                     "MOP_HOME", "MOP_USER", "MOP_NOMAD_PORT", "MOP_POOL_DC",
                     "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",

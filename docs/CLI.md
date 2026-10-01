@@ -33,13 +33,13 @@ isn't something a bus verb can hand over.
 #### mop code
 
 ```text
-launch claude on an LLM profile, outside the pool: mop code [claude options]
+launch claude outside the pool: mop code [claude options]
 
-Same profile machinery as `mop master`, none of the pool. No project, no bus
-credentials, no mop MCP server: this is an ordinary claude session that just
-happens to come up on a chosen provider. Use it where the pool has nothing to
-do with the job — a scratch checkout, someone else's repository, a shell on
-a machine that never got `mop server deploy`.
+Same session environment as `mop master`, none of the pool. No project, no
+bus credentials, no mop MCP server: this is an ordinary claude session on
+the installation's LLM proxy. Use it where the pool has nothing to do with
+the job — a scratch checkout, someone else's repository, a shell on a
+machine that never got `mop server deploy`.
 
 Everything goes to claude as-is
 (`mop code --continue` resumes the last session here). The command won't
@@ -52,10 +52,9 @@ of the command is to get to work on a provider without ceremony, and
 answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
-The session runs on the installation's single LLM proxy (MOP_PROXY_URL). The
-profile's static env goes into the session whole, while the key itself is read
-from this machine's .env: there's no node secrets.env here, and the local .env
-is exactly what serves as the source of truth for keys.
+The session runs on the installation's single LLM proxy (MOP_PROXY_URL);
+the key is read from this machine's .env: there's no node secrets.env here,
+and the local .env is exactly what serves as the source of truth for keys.
 ```
 
 #### mop delete
@@ -150,10 +149,9 @@ automatic on exactly its main signal. The price is named up front: the
 master holds the Nomad token, pushes, and talks to the tracker, and it will
 no longer ask about any of that.
 
-set puppets run on. Without the flag, the installation's MOP_DEFAULT_LLM
-itself is read from the master machine's .env: there's no node secrets.env
-here, and the local .env is exactly what serves as the source of truth for
-keys.
+The session runs on the installation's single LLM proxy; its key is read
+from the master machine's .env — there's no node secrets.env here, and the
+local .env is exactly what serves as the source of truth for keys.
 ```
 
 #### mop recycle
@@ -285,10 +283,8 @@ refused with the list of groups.
 
 --fix treats what's treatable; a silent node agent is not on this list — the
 puppet may well be working fine, and a restart would kill that work in the
-clone. An expired login is treated without a restart: the puppet's lease is
-pushed to it again from the server's credential registry and the puppet is
-nudged to go on, so its conversation survives. A puppet without a lease is
-not treated: give it one with mop update --cred.
+clone. An expired login is treated without a restart: the puppet is nudged
+to go on, so its conversation survives.
 
 --fix --safe treats only what cannot break work — login+nudge and the disk
 sweep — and names the rest without executing it: restarts, alloc stops,
