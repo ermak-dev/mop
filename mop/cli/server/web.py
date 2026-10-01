@@ -9,15 +9,10 @@ refreshed in place (docs/WEB.md):
   /api/pool    the current snapshot as JSON
   /events      the same snapshot pushed as server-sent events
   /healthz     200 once the first snapshot is in
-  /api/creds/login/start  post {name, mode?}: start a claude login, answers {url}
-  /api/creds/login/code   post {name, code}: finish it, answers {ok, owner} or {error}
 
 No login on the page (the LAN is trusted, operator's decision 2026-09-26;
 authorization comes later). The pool itself stays read-only here: a restart
 from a button would kill the work in a puppet's clone, and puppet actions
-stay with `mop`. The credential registry (docs/CRED.md) is the one thing the
-page writes: re-authorizing a claude credential from its row; adding and
-removing credentials is `mop cred`. Secrets never come back: the
 snapshot carries names, owners and statuses only, and the journal never sees
 a code.
 Port and bind address default to MOP_WEB_PORT (9000) and MOP_WEB_BIND
@@ -30,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
 from mop.common import bus, busnames, config
-from mop.server import credreg, web
+from mop.server import web
 
 # Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
 # исходниками (docs/WEB.md); собирает `mop dev web build`, сверяет CI.
@@ -94,48 +89,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.stream()
         self._send(404, "no such path\n", "text/plain")
 
-    # ── реестр кредитов (#285) ──
-    # Прямо в реестр на сервере, а не глаголом кластера: машинный
-    # пользователь service не зовёт сервис кластера от чужого имени --
-    # субъект с логином ему закрыт, а под service журнал записал бы действие
-    # безымянным (#104, #309, docs/BUS.md); реестр -- файлы того же
-    # пользователя пула на этой же машине.
-    ROUTES = {"/api/creds/login/start": (web.parse_login_start, "login_start"),
-              "/api/creds/login/code": (web.parse_login_code, "login_code")}
-
-    def do_POST(self):
-        path = self.path.split("?", 1)[0]
-        route = self.ROUTES.get(path)
-        if route is None:
-            return self._json(404, {"error": "no such path"})
-        parse, action = route
-        try:
-            size = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(size) or b"{}")
-        except (ValueError, TypeError):
-            return self._json(400, {"error": "body: JSON is expected"})
-        fields, err = parse(body)
-        if err:
-            return self._json(400, {"error": err})
-        try:
-            got = self._cred(action, fields)
-        except Exception as e:
-            # Причина -- странице, без трассы; ключ и код в тексте отказов не бывают.
-            return self._json(500, {"error": web.error_text(e)})
-        code = 400 if got.get("error") else 200
-        if code == 200:
-            # Запись -- через journal_entry (#319): узел и проект -- его прочерки.
-            COLLECTOR.event(web.journal_entry({"event": f"cred {action}", "name": fields["name"],
-                                               "text": got.get("owner") or ""}))
-            COLLECTOR.refresh_creds()
-        return self._json(code, got)
-
-    @staticmethod
-    def _cred(action, f):
-        if action == "login_start":
-            return {"ok": True, "url": credreg.login_start(f["name"], f["mode"])}
-        got = credreg.login_code(f["name"], f["code"])
-        return got if got.get("error") else {**got, "name": f["name"]}
 
     def stream(self):
         """SSE: снимок при подключении и на каждое изменение, пинг в тишине.

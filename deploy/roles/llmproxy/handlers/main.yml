@@ -1,0 +1,8 @@
+# Рестарт LLM-прокси: заказывают задачи роли через notify -- новый бинарь,
+# новый конфиг, новый юнит.
+- name: restart mop-llm-proxy
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-llm-proxy
+    state: restarted
+    daemon_reload: yes

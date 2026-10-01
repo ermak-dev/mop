@@ -57,8 +57,6 @@ LAYERS = {
     # Пространство контроллера (#259): deploy, config, setup, user,
     # cluster, bootstrap, web, callout, pve-facts и _play -- одним ключом.
     "mop.cli.server": SERVER,
-    # Кредиты (#282): логин ведётся клиентом claude в pty на сервере.
-    "mop.cli.cred": SERVER,
     # mop setup наверху -- машина оператора, но играет self.yml с настройками
     # установки (playvars) -- как и до #259, когда оба варианта жили в нём.
     "mop.cli.pool.setup": SERVER, "mop.cli.pool._self": SERVER,
@@ -75,7 +73,7 @@ ROOT_PARTS = ("session", "usage", "driver", "cli")
 # читается только на узле (driver.current), а пути и разбор имён из того же
 # модуля нужны всем. Драйверы проверяются как модули узла сами по себе.
 DYNAMIC = {
-    "mop.common.llm": {"mop.common.llm.claude", "mop.common.llm.glm"},   # профили LLM
+   # профили LLM
 }
 
 

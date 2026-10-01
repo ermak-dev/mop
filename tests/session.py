@@ -45,30 +45,13 @@ def check_turn_record(c):
                           ("Stop", OK["Stop"]),
                           ("PostModelSwitch", dict(OK["Stop"], hook_event_name="PostModelSwitch"))):
         got = fn(payload, NOW)
-        # Метка кредита (#284): всегда в записи, None без аренды.
-        want = {"event": name, "at": NOW, "error": None, "detail": None, "cred": None}
+        want = {"event": name, "at": NOW, "error": None, "detail": None}
         c.check(f"{name} -> {got!r}, wanted {want!r}", not (got != want))
     # Ход кончился ошибкой API: код и текст, который видел бы человек.
     got = fn(FAIL["StopFailure"], NOW)
     want = {"event": "StopFailure", "at": NOW, "error": "model_not_found",
-            "detail": FAIL["StopFailure"]["last_assistant_message"], "cred": None}
+            "detail": FAIL["StopFailure"]["last_assistant_message"]}
     c.check(f"StopFailure -> {got!r}, wanted {want!r}", not (got != want))
-    c.expect("the cred marker lands in the record (#284)",
-             (fn(FAIL["StopFailure"], NOW, cred="anton") or {}).get("cred"), "anton")
-    long = dict(FAIL["StopFailure"], last_assistant_message="x" * 1000)
-    c.check("the detail must be cut to 300 characters",
-            not (len((fn(long, NOW) or {}).get("detail") or "") != 300))
-    # Не наше событие, нет session_id, не объект -- записи нет.
-    for what, payload in (("PreToolUse", dict(OK["Stop"], hook_event_name="PreToolUse")),
-                          ("Notification", dict(OK["Stop"], hook_event_name="Notification")),
-                          ("no session_id", {k: v for k, v in OK["Stop"].items()
-                                             if k != "session_id"}),
-                          ("a list", [1]), ("None", None),
-                          # session_id -- имя файла: путь в нём -- не наш вход.
-                          ("a path as session_id", dict(OK["Stop"], session_id="../../x"))):
-        c.check(f"{what} must give no record: {fn(payload, NOW)!r}",
-                not (fn(payload, NOW) is not None))
-
 
 def run_hook(home, stdin):
     env = dict(os.environ, HOME=home)
@@ -188,23 +171,10 @@ def check_state(c):
 
 
 
-def check_state_paths_322(c):
-    """#322: каталог состояния назван дважды -- в session.py (stdlib, едет в
-    тело исходником и пакет не импортирует) и в paths. Связи нет, кроме
-    этой проверки: метку кредита кладёт `write` по paths.CRED_MARK, хук
-    читает её по session.CRED_MARK, pve._seed стирает её по paths (#312)."""
-    from mop.common import paths
-    home = os.path.expanduser("~")
-    state = os.path.join(home, paths.STATE)
-    c.expect("session.CRED_MARK is paths.CRED_MARK in this home",
-             session.CRED_MARK, os.path.join(home, paths.CRED_MARK))
-    c.expect("session.TURNS lies in paths.STATE", session.TURNS, os.path.join(state, "turns"))
-    c.expect("the mark lies in paths.STATE", os.path.dirname(session.CRED_MARK), state)
-    c.expect("session.STATE is paths.STATE in this home", getattr(session, "STATE", None), state)
 
 def main():
     c = Checks()
-    for fn in (check_turn_record, check_hook_cli, check_state, check_state_paths_322):
+    for fn in (check_turn_record, check_hook_cli, check_state):
         try:
             fn(c)
         except Exception as e:

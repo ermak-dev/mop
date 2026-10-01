@@ -13,7 +13,7 @@ Run on a client: an operator's machine or a master shell.
 #### mop add
 
 ```text
-create a puppet: mop add [--llm PROFILE] [--cred NAME] [git-origin]
+create a puppet: mop add [git-origin]
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>. Nomad decides placement — a puppet
@@ -33,15 +33,15 @@ isn't something a bus verb can hand over.
 #### mop code
 
 ```text
-launch claude on an LLM profile, outside the pool: mop code [--llm PROFILE] [claude options]
+launch claude outside the pool: mop code [claude options]
 
-Same profile machinery as `mop master`, none of the pool. No project, no bus
-credentials, no mop MCP server: this is an ordinary claude session that just
-happens to come up on a chosen provider. Use it where the pool has nothing to
-do with the job — a scratch checkout, someone else's repository, a shell on
-a machine that never got `mop server deploy`.
+Same session environment as `mop master`, none of the pool. No project, no
+bus credentials, no mop MCP server: this is an ordinary claude session on
+the installation's LLM proxy. Use it where the pool has nothing to do with
+the job — a scratch checkout, someone else's repository, a shell on a
+machine that never got `mop server deploy`.
 
-Only --llm belongs to this command; everything else goes to claude as-is
+Everything goes to claude as-is
 (`mop code --continue` resumes the last session here). The command won't
 mirror claude's own flags: there are dozens of them, and the list would drift
 the moment claude ships a new version.
@@ -52,11 +52,9 @@ of the command is to get to work on a provider without ceremony, and
 answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
---llm brings the session up on a profile from mop/common/llm/ — the same set puppets
-run on. Without the flag, the installation's MOP_DEFAULT_LLM applies. The
-profile's static env goes into the session whole, while the key itself is read
-from this machine's .env: there's no node secrets.env here, and the local .env
-is exactly what serves as the source of truth for keys.
+The session runs on the installation's single LLM proxy (MOP_PROXY_URL);
+the key is read from this machine's .env: there's no node secrets.env here,
+and the local .env is exactly what serves as the source of truth for keys.
 ```
 
 #### mop delete
@@ -108,13 +106,13 @@ the dispatch decision rests on this.
 #### mop master
 
 ```text
-launch claude as a project's master: mop master [--llm PROFILE] [git-origin] [claude options]
+launch claude as a project's master: mop master [git-origin] [claude options]
 
 Without an argument, the origin of the current working copy is used. One
 project — one project: a master sees and reaches only its own puppets; anyone
 else's don't exist for it.
 
-Only --llm and origin belong to this command; everything else goes to claude
+Only origin belongs to this command; everything else goes to claude
 as-is (`mop master --continue` resumes the master's last session). The
 command won't mirror claude's own flags: there are dozens of them, and the
 list would drift the moment claude ships a new version. Pass a flag that
@@ -151,12 +149,9 @@ automatic on exactly its main signal. The price is named up front: the
 master holds the Nomad token, pushes, and talks to the tracker, and it will
 no longer ask about any of that.
 
---llm brings the master's session up on a profile from mop/common/llm/ — the same
-set puppets run on. Without the flag, the installation's MOP_DEFAULT_LLM
-applies. The profile's static env goes into the session whole, while the key
-itself is read from the master machine's .env: there's no node secrets.env
-here, and the local .env is exactly what serves as the source of truth for
-keys.
+The session runs on the installation's single LLM proxy; its key is read
+from the master machine's .env — there's no node secrets.env here, and the
+local .env is exactly what serves as the source of truth for keys.
 ```
 
 #### mop recycle
@@ -234,19 +229,13 @@ tail of a puppet's tmux buffer: mop tail <name> [-n N] [-f]
 #### mop update
 
 ```text
-update a puppet: mop update <name> [git-origin] [--llm PROFILE] [--cred NAME] [--fresh] [--force]
+update a puppet: mop update <name> [git-origin] [--fresh] [--force]
 
 Changes what's named and keeps the rest: without origin the puppet stays on
-its repository, without --llm it stays on its profile. Switching the
-repository must not silently drop the profile back to default, and vice
-versa.
-
-By default the claude that comes up resumes the directory's last
-conversation, so switching profiles moves work already in progress onto a
-different model. That's a one-off allowance: an allocation restart doesn't
-reread the spec, and treatment is a restart — a treated puppet isn't obliged
-to come back into the context it got stuck on.
---fresh brings it up with a clean session.
+its repository. By default the claude that comes up resumes the directory's
+last conversation; --fresh brings it up with a clean session. An allocation
+restart doesn't reread the spec, and treatment is a restart — a treated
+puppet isn't obliged to come back into the context it got stuck on.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
@@ -294,10 +283,8 @@ refused with the list of groups.
 
 --fix treats what's treatable; a silent node agent is not on this list — the
 puppet may well be working fine, and a restart would kill that work in the
-clone. An expired login is treated without a restart: the puppet's lease is
-pushed to it again from the server's credential registry and the puppet is
-nudged to go on, so its conversation survives. A puppet without a lease is
-not treated: give it one with mop update --cred.
+clone. An expired login is treated without a restart: the puppet is nudged
+to go on, so its conversation survives.
 
 --fix --safe treats only what cannot break work — login+nudge and the disk
 sweep — and names the rest without executing it: restarts, alloc stops,
@@ -345,30 +332,6 @@ and the login (git config mop.server, mop.user, not committed), and every
 mop command run in it goes there. --user NAME is the old spelling of LOGIN.
 ```
 
-#### mop llm
-
-```text
-LLM profiles: mop llm [--probe] [--tiers] — what a puppet can run on and whether the key is there
-
-A profile changes exactly one thing — where a puppet goes for tokens.
-Everything else (tmux, state, stuck detection) is the same for every profile.
---probe asks each provider that can answer (a profile with a probe hook and
-a key at hand) whether the key is alive and how much quota is left.
---tiers prints the installation's tier order (MOP_LLM_TIERS): strongest
-first, the order the policy walks when a credential runs out.
-```
-
-#### mop login
-
-```text
-push claude.ai credentials and LLM keys to pool nodes: mop login
-
-The `write` verb to every node's agent at once: the node keeps a copy for
-bodies raised later, and every live body gets it now. Silent when every node
-took them; otherwise the nodes that did not, and why. A node whose agent does
-not answer is not reached: there is no way past the agent.
-```
-
 #### mop setup
 
 ```text
@@ -409,101 +372,6 @@ rubbish until the next sweep.
 nothing of Nomad, and judges by the absence of a tmux session. That is the
 right signal for a node left alone; this one is the right signal for the
 machine that holds the register.
-```
-
-### cred: credentials of LLM providers: the server's registry
-
-#### mop cred
-
-```text
-credentials of LLM providers: the server's registry
-
-  mop cred list                    what the server holds: status, resets, usage
-  mop cred status [name]           probe the providers now, then the same table
-  mop cred add <name> --profile P --key-file F|-   a provider key (GLM) as a credential
-  mop cred rm <name>               take a credential down with its secret
-  mop cred login <name>            log a claude.ai account in on the server
-                                   without a browser: prints the authorize
-                                   url, reads the code from stdin
-  mop cred login <name> --setup-token
-                                   a one-year token instead of a session
-                                   (inference scope only)
-
-list, status, add and rm go over the bus to the cluster service and work
-from any operator's machine; login drives the client in a pty and runs on
-the server.
-
-A credential is a named authorization of an LLM provider that the pool
-hands to puppets. Each one lives in its own home on the
-server, ~/.config/mop/creds/<name>/, and the login is done by the official
-`claude` client itself, driven in a pty — no OAuth of our own.
-```
-
-#### mop cred add
-
-```text
-add a provider key as a credential: mop cred add <name> --profile P --key-file F|- [--owner email]
-
-The key is read from the file (or stdin with -), never from an argument:
-a key in the command line lands in shell history and `ps`. It travels to
-the server once, over the bus, and never comes back: `mop cred list`
-shows the record without it. Silent on success.
-```
-
-#### mop cred list
-
-```text
-credentials the server holds: mop cred list
-
-One line per credential: name, profile, kind (login, token, key), owner,
-status as of the last probe (active, quota wait, needs login, or unknown
-before the first probe), when an exhausted window resets, the worst
-window's usage, age, and the puppets holding a lease on it. Secrets
-never appear. `mop cred status` probes
-the providers now; this prints what the server already knows.
-```
-
-#### mop cred login
-
-```text
-log a claude.ai account in on the server: mop cred login <name> [--setup-token]
-
-Runs the official client (`claude auth login`, or `claude setup-token`
-with --setup-token) in a pty with the credential's own home,
-~/.config/mop/creds/<name>/, prints the authorize url and waits for the
-code on stdin: open the url in any browser, sign in, paste the code the
-page shows. Silent about secrets: the session lands in the credential's
-home (.claude/.credentials.json), a setup-token in creds/<name>/token.
-
-`auth login` grants the full scope set (user:profile among them, which the
-usage endpoint needs); a setup-token is inference-only. The code is
-single-use and the exchange takes up to two minutes. A successful login
-registers the credential (its cred.json): an `auth login` with the account's
-email as the owner, a setup-token without one. An existing credential logs
-in by its kind (login or token); --setup-token on a login credential is
-refused.
-```
-
-#### mop cred rm
-
-```text
-remove a credential: mop cred rm <name>
-
-Takes the credential's home on the server down with its secret. Puppets
-holding it keep the copy they were given until the next hand-out.
-Silent on success.
-```
-
-#### mop cred status
-
-```text
-probe the providers now: mop cred status [name]
-
-Asks each provider (or the one named) about its credential — is it alive,
-how full are its windows, when do they reset — stores the answer on the
-server and prints the same table as `mop cred list`. A claude login whose
-access token has run out is refreshed first (the client does it itself,
-one tiny request).
 ```
 
 ### dev: the developer's own commands: the project's tracker, CI and checks, not the pool
@@ -1339,15 +1207,10 @@ refreshed in place (docs/WEB.md):
   /api/pool    the current snapshot as JSON
   /events      the same snapshot pushed as server-sent events
   /healthz     200 once the first snapshot is in
-  /api/creds/login/start  post {name, mode?}: start a claude login, answers {url}
-  /api/creds/login/code   post {name, code}: finish it, answers {ok, owner} or {error}
 
 No login on the page (the LAN is trusted, operator's decision 2026-09-26;
 authorization comes later). The pool itself stays read-only here: a restart
 from a button would kill the work in a puppet's clone, and puppet actions
-stay with `mop`. The credential registry (docs/CRED.md) is the one thing the
-page writes: re-authorizing a claude credential from its row; adding and
-removing credentials is `mop cred`. Secrets never come back: the
 snapshot carries names, owners and statuses only, and the journal never sees
 a code.
 Port and bind address default to MOP_WEB_PORT (9000) and MOP_WEB_BIND

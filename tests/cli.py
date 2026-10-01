@@ -145,7 +145,6 @@ def check_bootstrap_sent_334(c):
 # STATUS: FIXED — see #334
 def check_bootstrap_outcome_334(c):
     from mop.common import bus
-    from mop.client import keys
     line = getattr(_common, "outcome_line", None)
     if not c.check("#334 _common.outcome_line exists", line is not None):
         return
@@ -224,7 +223,6 @@ def check_bootstrap_outcome_334(c):
         with patched_env(MOP_SERVER_LAN="192.0.2.1"), \
                 patched(lib, guard=lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}), \
                 patched(bus, call_cluster=cc, login=lambda: "anton"), \
-                patched(keys, push_llm_keys=lambda profile: None), \
                 patched(_common, workspace_text=lambda origin: ("", NOFILE_334),
                         BOOTSTRAP_WAIT=0):
             out, err, code = run_command(update.main, ["pu-mop-1"])
@@ -600,9 +598,7 @@ def main():
     check_refusals(c)
     check_refusals_163(c)
     check_output_rules(c)
-    check_empty_llm(c)
     check_empty_value(c)
-    check_probe_words(c)
     check_node_flag_320(c)
     check_one_parser_320(c)
     check_node_flag_340(c)
@@ -1029,8 +1025,7 @@ def check_output_rules(c):
     """STATUS: FIXED — see #159"""
     import glob
     import re
-    from mop.common import bus, llm, puppets
-    from mop.client import keys
+    from mop.common import bus, config, llm, puppets
     files = sorted(glob.glob(os.path.join(ROOT, "mop", "cli", "**", "*.py"), recursive=True)) \
         + [os.path.join(ROOT, "mop", "client", "channel.py"), os.path.join(ROOT, "mop", "node", "agent.py")]
     for hit in caps_hits(files):
@@ -1038,7 +1033,7 @@ def check_output_rules(c):
 
     os.environ.setdefault("MOP_SERVER_LAN", "10.0.0.1")
     with restored(bus, "call_cluster"), restored(puppets, "running_alloc", "diagnose"), \
-            restored(lib, "guard"), restored(keys, "llm_keys_blob"), restored(llm, "profiles"):
+            restored(lib, "guard"), restored(config, "read_env"), restored(llm, "profiles"):
         bus.call_cluster = lambda verb, **kw: {"ok": True}
         puppets.running_alloc = lambda name: {"ClientStatus": "running", "NodeName": "n1"}
         lib.guard = lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}
@@ -1052,21 +1047,21 @@ def check_output_rules(c):
             c.check(f"{what} must be silent on success: out {out!r} err {err!r} code {code!r}",
                     not (out or err or code))
         from mop.cli.pool import doctor
-        from mop.cli.pool import llm as llm_cmd
-        # Здоровый пул — одна строка результата, её и показываем.
+        from mop.client.doctor import proxy as proxy_group
+        # Здоровый пул — одна строка результата, её и показываем. Прокси
+        # заглушен: его живость -- про контроллер, не про этот вывод.
         puppets.diagnose = lambda: []
+        proxy_group.diagnose = lambda: []
         out, _, _ = run_command(doctor.main, [])
         c.expect("doctor on a healthy pool", out, "pool is healthy: nothing stuck\n")
         # Советов «run X» в успешном выводе нет: таблица уже говорит [restart].
         puppets.diagnose = lambda: [{"name": "pu-mop-1", "alloc": {"NodeName": "n1"},
                                      "diagnosis": "HUNG (not responding)", "action": "restart"}]
         out, _, _ = run_command(doctor.main, [])
-        keys.llm_keys_blob = lambda: ("", None)
-        llm.profiles = lambda: {"glm": {"key": "Z_AI_KEY", "doc": "", "env": {}}}
-        out2, _, _ = run_command(llm_cmd.main, [])
-        for what, text in (("doctor", out), ("llm", out2)):
+        for what, text in (("doctor", out),):
             c.check(f"{what} advises another command on success: {text!r}",
                     not (re.search(r"\bmop [a-z]+", text)))
+        del proxy_group.diagnose
     check_output_rest(c)
 
 
@@ -1127,7 +1122,6 @@ def check_output_179(c):
     STATUS: FIXED — see #179"""
     from mop.common import bus, llm, puppets
     from mop.server import image
-    from mop.client import keys
     from mop.cli.core import update
     from mop.cli.driver import build
     from mop.cli.pool import sweep
@@ -1171,7 +1165,6 @@ def check_output_179(c):
     calls = []
     with patched(lib, guard=lambda name: {"ok": True, "meta": {"origin": "git@h:g/mop.git"}}), \
             patched(bus, call_cluster=lambda verb, **kw: calls.append(verb) or {"ok": True}), \
-            patched(keys, push_llm_keys=lambda profile: None), \
             patched(_common, workspace_text=lambda origin: ("", NOFILE_334)):
         # Эха параметров нет; единственная строка -- что уехало в bootstrap
         # (#334): её оператор сам не набирал.
@@ -1255,10 +1248,10 @@ def check_restore_all_188(c):
     по строке на папета («<папет> on <узел>: not raised again: <причина>»).
     STATUS: FIXED — see #188"""
     from mop.server import image, nomad, spec
-    gone = [{"name": f"pu-p-{i}", "origin": "git@h:g/p.git", "llm": "claude",
+    gone = [{"name": f"pu-p-{i}", "origin": "git@h:g/p.git",
              "node": "hyper"} for i in (1, 2, 3)]
     with offline(), restored(nomad, "register"), restored(spec, "job_spec"):
-        spec.job_spec = lambda name, origin, llm, **kw: {"ID": name}
+        spec.job_spec = lambda name, origin, **kw: {"ID": name}
         for refused in ({"pu-p-1"}, {"pu-p-1", "pu-p-3"}, set()):
             registered = []
 
@@ -1281,30 +1274,6 @@ def check_restore_all_188(c):
             want_lines = [f"{n} on hyper: not raised again: Nomad refused {n}"
                           for n in sorted(refused)]
             c.expect(f"restore with {sorted(refused)} refused: {err!r}", lines, want_lines)
-
-
-def check_empty_llm(c):
-    """HYPOTHESIS (#164): `--llm` без значения давал профиль "", и отказ
-    llm.require звучал как «no LLM profile (empty)» — не про флаг, который
-    забыли заполнить. SOLUTION: пустое значение — ошибка использования в
-    parse_llm, до реестра профилей. STATUS: FIXED — see #164"""
-
-    def through_dispatcher(argv):
-        return run_command(lambda x: _common.parse_llm(x) and None, argv, via_cli=True)
-    for argv in (["--llm", ""], ["pu-mop-1", "--llm"], ["--llm="], ["--llm", "--fresh"]):
-        out, err, code = through_dispatcher(argv)
-        lines = err.strip().splitlines()
-        c.check(f"parse_llm({argv}): out {out!r} err {err!r} code {code!r}",
-                not (out or not code or len(lines) != 1 or "Traceback" in err
-                     or not lines[0].startswith("--llm needs a profile name")))
-    got = _common.parse_llm(["pu-mop-1", "--llm", "claude"])
-    c.expect("parse_llm with a profile", got, ("claude", ["pu-mop-1"]))
-    c.expect("parse_llm without --llm must leave the profile unset",
-             _common.parse_llm(["pu-mop-1"]), (None, ["pu-mop-1"]))
-    # Неизвестный профиль — прежний отказ, слово в слово.
-    out, err, code = through_dispatcher(["--llm", "no-such"])
-    c.check(f"an unknown profile keeps its refusal: {err!r} {code!r}",
-            not (not code or not err.startswith("no LLM profile no-such; available: ")))
 
 
 
@@ -1335,29 +1304,6 @@ def check_empty_value(c):
     c.expect("parse_value without the flag must leave the value unset",
              lib.parse_value(["pu-mop-1", "--fresh"], "--cred"),
              (None, ["pu-mop-1", "--fresh"]))
-
-
-def check_probe_words(c):
-    """HYPOTHESIS (#332): `mop llm --probe` печатал вид кредита сырым
-    (`quota_wait: …`), а `mop cred list` -- словом (`quota wait`): одно
-    состояние двумя написаниями рядом. SOLUTION: status_line берёт слово
-    из credreg.WORDS с тем же откатом на вид, что у row().
-    RESULT: слова --probe совпадают с `mop cred list`. STATUS: FIXED — see #332"""
-    from mop.cli.pool import llm as llm_cmd
-    St = domain.CredStatus
-    for kind, want in (("quota_wait", "quota wait: 5h 100%"),
-                       ("needs_login", "needs login: 5h 100%"),
-                       ("active", "active: 5h 100%")):
-        c.expect(f"status_line({kind})", llm_cmd.status_line(St(kind, detail="5h 100%")), want)
-    # CredStatus сам отказывает незнакомому виду; откат на вид -- страховка
-    # на случай нового вида раньше нового слова, проверяется подставкой.
-    from types import SimpleNamespace
-    odd = SimpleNamespace(kind="strange", detail="5h 100%", resets_at=None)
-    c.expect("status_line(unknown kind) passes through", llm_cmd.status_line(odd),
-             "strange: 5h 100%")
-    got = llm_cmd.status_line(St("quota_wait", resets_at=86400 * 365, detail="5h 100%"))
-    c.check(f"status_line keeps the reset time: {got!r}",
-            not (not got.startswith("quota wait: 5h 100%, resets ")))
 
 
 def node_flag_sites():
@@ -2040,12 +1986,12 @@ def check_add_failure_377(c):
         def call_cluster(verb, alloc=alloc, **kw):
             return {"name": "pu-mop-9"} if verb == "add" else {"alloc": alloc}
         with patched(bus, call_cluster=call_cluster), \
-                patched(_common, push_llm_keys=lambda p: None,
+                patched(_common,
                         workspace_text=lambda o: ("", None), sent_line=lambda s: ""), \
                 patched(lib, fail=said.append), patched(add.time, sleep=lambda s: None), \
                 patched(context, current=lambda: type("Ctx", (), {"branch": None})()):
             try:
-                code = add._add("git@h:g/mop.git", "mop", "claude", False, P())
+                code = add._add("git@h:g/mop.git", "mop", False, P())
             except Exception as e:
                 c.fail(f"#377 mop add, {what}: a refusal, not a trace",
                        f"{type(e).__name__}: {e}")
@@ -2195,8 +2141,7 @@ def check_named_263(c):
                     wipe=lambda node, name, force=False:
                     calls.append(("wipe", force)) or {**note, "target": "/t"},
                     running_alloc=lambda name: {"NodeName": "hyper"}), \
-            patched(core_common, push_llm_keys=lambda p: None,
-                    workspace_text=lambda o: ("", NOFILE_334)):
+            patched(core_common, workspace_text=lambda o: ("", NOFILE_334)):
         line = "pu-mop-1: was olga's: taken with --force\n"
         want = {
             "delete": line + "deleted pu-mop-1 (body gone from hyper)\n",

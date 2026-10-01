@@ -1,33 +1,27 @@
-"""create a puppet: mop add [--llm PROFILE] [--cred NAME] [git-origin]
+"""create a puppet: mop add [git-origin]
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>. Nomad decides placement — a puppet
 reserves 8 GB from the pool. Silent when the puppet is running; on a
 terminal it shows the current step. The new puppet is in mop list.
 """
-import os
 import time
 
 from mop.cli import lib
 from mop.cli.core import _common
-from mop.common import bus, context, llm, puppets
+from mop.common import bus, context, puppets
 from mop.common.domain import Alloc
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
 MCP = {"annotations": "destructive", "args": [
     {"name": "origin", "type": "string", "help": "git origin; without it, the origin of the master's working copy"},
-    {"name": "llm", "type": "string", "flag": "--llm", "help": "LLM profile"},
-    {"name": "cred", "type": "string", "flag": "--cred",
-     "help": "registry credential to lease; without it the first active one of the profile"}]}
+    ]}
 
 
 def main(argv):
-    profile, args = _common.parse_llm(argv)
-    cred, args = lib.parse_value(args, "--cred")
     if len(args) > 1:
         lib.usage(__doc__)
-    profile = llm.resolve(profile)
     origin = lib.origin(args[0] if args else None, __doc__)
     project = puppets.project_of(origin)
     # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS, и
@@ -38,16 +32,14 @@ def main(argv):
                   f"Register it on the server: mop project add {origin}")
     p = lib.Progress(project)
     try:
-        return _add(origin, project, profile, bool(args), p, cred)
+        return _add(origin, project, bool(args), p)
     finally:
         p.clear()
 
 
-def _add(origin, project, profile, named, p, cred=None):
+def _add(origin, project, named, p):
     """Долгая команда (#124): на терминале -- текущий шаг, при успехе --
     ничего; отказ и не вставший папет -- ошибкой."""
-    p.step("LLM keys to the nodes")
-    _common.push_llm_keys(profile)
     # Имя выбирает сервис кластера вместе с регистрацией: спека собирается
     # там же (#80), а выбор имени и есть первая её строка.
     # workspace папета (#133) едет с регистрацией: рабочая копия проекта,
@@ -56,9 +48,9 @@ def _add(origin, project, profile, named, p, cred=None):
     # Ветка мастера (#256): свежий клон папета встаёт на неё, а не на
     # origin/HEAD. Из контекста команды (git config mop.branch, MOP_BRANCH).
     text, sent = _common.workspace_text(origin)
-    got = bus.call_cluster("add", origin=origin, profile=profile, timeout=30,
+    got = bus.call_cluster("add", origin=origin, timeout=30,
                            workspace=text, bootstrap_sent=sent,
-                           branch=context.current().branch, cred=cred)
+                           branch=context.current().branch)
     name = got["name"]
     # Что уехало в bootstrap (#334) -- строкой насовсем, над строкой шага.
     p.clear()

@@ -188,15 +188,13 @@ puppet per call): a surprising puppet gets `mcp__mop__tail` or `mop attach`,
 not guesswork.
 
 A quota wall has two exits, and they are not interchangeable.
-`mcp__mop__slash(name, "/model <m>")` picks another model **from the same
-provider** and leaves the session untouched — reach for it first, it costs
-nothing. `puppet(action="update", name, llm=<profile>)` moves the puppet to
-a **different provider** and restarts him, but he comes back on the same
-conversation, so a ticket in progress survives the move. Mid-ticket that is
-the whole point; add `fresh=true` only when the old context is what you want
-gone. `puppet(action="restart")` never keeps the conversation — that is
+`mcp__mop__slash(name, "/model <m>")` picks another model and leaves the
+session untouched — reach for it first, it costs nothing; models are served
+by the pool's single LLM proxy, so any name the proxy serves is one slash
+away. `puppet(action="restart")` never keeps the conversation — that is
 deliberate, since returning a stuck puppet to the context he stuck on would
-just reproduce the jam.
+just reproduce the jam. If the proxy itself is down or out of quota, that is
+the operator's to fix (the panel, `mop doctor`) — no puppet-side move helps.
 
 ## Clone discipline
 

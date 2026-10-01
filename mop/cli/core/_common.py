@@ -6,8 +6,7 @@ import os
 import time
 
 from mop.cli import lib
-from mop.common import bus, busnames, config, llm, manifest, paths, puppets
-from mop.client import keys
+from mop.common import bus, busnames, config, llm, manifest, puppets
 
 
 def workspace_text(origin):
@@ -122,42 +121,14 @@ def report_bootstrap(name, got, p):
     return 0
 
 
-def parse_llm(args):
-    """Выкусить --llm PROFILE (или --llm=PROFILE) откуда угодно в аргументах.
-    -> (профиль | None, остальные аргументы)."""
-    try:
-        profile, rest = lib.parse_value(args, "--llm")
-    except RuntimeError:
-        # Забытое значение -- ошибка использования, а не «нет профиля ''»
-        # (#164); здесь и список профилей, чтобы было из чего выбрать.
-        raise RuntimeError(f"--llm needs a profile name; available: "
-                           f"{', '.join(llm.profiles())}") from None
-    if profile is not None:
-        llm.require(profile)
-    return profile, rest
-def session_env(profile):
-    """Окружение сессии claude на профиле из mop/common/llm/: статическая часть
-    профиля плюс ключ. -> (профиль, {переменные}).
-
-    Источник ключа — местный .env, а не узловой secrets.env: на управляющей
-    машине узел ничего не выдавал. Отказ, а не тишина: сессия без ключа
-    отбивает каждый ход 401-й, а читается живой. Так поднимаются и мастер,
-    и `mop code`."""
-    prof = llm.require(profile)
-    env = dict(prof["env"])
-    if prof["key"]:
-        key = config.get(prof["key"])
-        if not key:
-            lib.usage(f"profile {profile}: no {prof['key']} in "
-                  f"{puppets.LOCAL_KEYS_FILE} — add it and retry")
-        env[prof["auth_var"]] = key
-    return prof, env
-def push_llm_keys(llm):
-    """Ключи профиля на узлы. При успехе молчит (#124); не дошедшие --
-    ошибкой, с узлами."""
-    results = keys.push_llm_keys(llm)
-    if results is None:
-        return
-    bad = [f"{n}: {r}" for n, r in sorted(results.items()) if r != "OK"]
-    if bad:
-        lib.fail(f"{paths.NODE_SECRETS} did not reach every node: " + "; ".join(bad))
+def session_env():
+    """Окружение сессии claude (#390): единственный сервер установки --
+    прокси. -> {переменные}. Ключ -- из местной .env (мастеру узел ничего
+    не выдавал); отказ, а не тишина: сессия без ключа отбивает каждый ход
+    401-м. Так поднимаются и мастер, и `mop code`. Окружение --
+    mop.common.llm, того же вида, что в спеке."""
+    env = dict(llm.env())
+    if not (key := config.get(llm.KEY)):
+        lib.usage(f"no {llm.KEY} in {puppets.LOCAL_KEYS_FILE} — add it and retry")
+    env[llm.AUTH_VAR] = key
+    return env

@@ -189,16 +189,14 @@ DEFAULTS = {
     # тулчейн стоит на узлах), а не продукта; {HOME} подставляется на месте.
     "MOP_PUPPET_PATH": "/usr/local/bin:/usr/bin:/bin:{HOME}/.local/bin:{HOME}/.cargo/bin:{HOME}/.nvm/versions/node/v22.12.0/bin",
     "MOP_FALLBACK_MODEL": "opus",
-    # Ярусы LLM (#286): profile[:model] через запятую, от сильного к
-    # слабому. По ним политика (mop/common/tiers.py) решает, куда переводить
-    # папета, когда кредит кончился или модель отказала: другой кредит того
-    # же провайдера (горячо), модель ниже (/model), другой поставщик
-    # (перерегистрация). Профили -- из mop/common/llm/, сверяет tiers.default.
-    "MOP_LLM_TIERS": "claude:opus,claude:sonnet,glm",
-    # Каким профилем из mop/common/llm/ поднимать сессию без явного --llm: папета
-    # или мастера. Выбор установки, а не продукта: контора на одном провайдере
-    # меняет дефолт, а не каждую команду.
-    "MOP_DEFAULT_LLM": "claude",
+    # Единственный LLM-сервер установки (#379): прокси на контроллере
+    # (deploy/roles/llmproxy, #380) кормит и папетов, и мастера. Адрес --
+    # свой у каждой установки, поэтому настройка, а не литерал в mop/.
+    "MOP_PROXY_URL": "http://mop.corp.ermak.dev:8317",
+    # Клиентский ключ прокси: им представляются все сессии пула. Значение
+    # сгенерировано на контроллере (secrets/llm-proxy-client.pass) и лежит
+    # в .env установки и мастерских копий.
+    "MOP_PROXY_KEY": "",
     # Что врапер подсеивает в клон из ~/puppet-env/<проект> — и ровно то же
     # глагол wipe щадит при git clean -x. Запятая, шаблоны gitignore-стиля;
     # второй список означал бы «посеяли одно, снесли другое» на первом же
@@ -235,6 +233,15 @@ DEFAULTS = {
     # работающего конфига reload проверяет, что nats принял новый файл (#211)
     # -- отвергнутый reload иначе виден лишь в журнале nats.
     "MOP_NATS_MONITOR_PORT": "8222",
+    # LLM-прокси на контроллере (deploy/roles/llmproxy, #380, эпик #379):
+    # один вход для всех профилей LLM -- подписки claude и codex и
+    # Anthropic-совместимые ключи (GLM) за одним /v1/messages, пул аккаунтов
+    # и ротация внутри прокси. Версия пиннуется, как у NATS: обновление --
+    # правка настройки и прогон роли.
+    "MOP_LLM_PROXY_VERSION": "8.0.8",
+    # Порт LLM API для узлов и тел; management API того же порта отвечает
+    # только с петли, наружу панель -- через TLS-прокси на /llm/ (#96).
+    "MOP_LLM_PROXY_PORT": "8317",
     # Порт sshd узла, которым сервер ходит на него сам -- bootstrap песочницы
     # host-папета (#201). Узловой: у узла на WSL sshd на 2222, и знал это
     # один ssh config root'а на контроллере. В node.env его рендерит
@@ -284,7 +291,7 @@ DEFAULTS = {
     # Ключ проекта сюда не входит: его имя зависит от проекта, и кладёт его
     # драйвер отдельно, в момент ensure, когда проект известен.
     "MOP_BODY_SEED": ".ssh/id_rsa,.ssh/id_ed25519,.ssh/known_hosts,"
-                     f"{paths.NODE_SECRETS},{paths.CREDENTIALS}",
+                     f"{paths.NODE_SECRETS}",
 }
 
 # Пусто = такой функциональности нет. Проверять надо пустоту, а не отсутствие
@@ -455,12 +462,12 @@ SERVER_SCOPED = {
     "mop-bootstrap": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                       "MOP_HOME", "MOP_USER") + IDENTITY_SCOPED,
     # Nomad (NOMAD_ADDR выводится из адреса сервера и порта, плюс DC) и то,
-    # что читает mop/server/spec.py: спецификацию папета собирает этот сервис, и
-    # профиль LLM по умолчанию тоже решает он (create без --llm).
+    # что читает mop/server/spec.py: спецификацию папета собирает этот сервис,
+    # и адрес LLM-прокси -- тоже он (#390).
     "mop-cluster": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                     "MOP_HOME", "MOP_USER", "MOP_NOMAD_PORT", "MOP_POOL_DC",
                     "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",
-                    "MOP_PUPPET_PATH", "MOP_DEFAULT_LLM",
+                    "MOP_PUPPET_PATH", "MOP_PROXY_URL", "MOP_PROXY_KEY",
                     # reload шины с проверкой (#211): `mop project add/rm`
                     "MOP_NATS_MONITOR_PORT"),
     # Сервис auth callout (#206): шина на петле, провайдер личностей. Пароли
@@ -523,7 +530,7 @@ _cache = {}
 def read_env(path):
     """То же файлом. Отсутствие файла — штатный случай: на узле нет .env, на
     управляющей машине нет node.env. Публична, потому что тем же форматом
-    читаются и ключи LLM из .env (keys.llm_keys_blob)."""
+    читаются и ключи LLM из .env."""
     try:
         with open(path) as f:
             return fsutil.read_kv(f.read())

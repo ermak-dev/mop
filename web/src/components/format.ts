@@ -4,7 +4,7 @@
 //
 // Одно место на запись (#323): склонение, короткие числа, слова корзин и
 // цвет статуса кредита жили копиями в App, usage-format и creds-api.
-import { KINDS, type Counts, type CredStatusKind, type Kind } from "../types";
+import { KINDS, type Counts, type Kind } from "../types";
 
 // Слова корзин: one -- у одного папета (подпись проекта), many -- у
 // счётчика в шапке. Слова прежние, как были в двух таблицах.
@@ -69,18 +69,6 @@ export function hhmmss(ts: number | null | undefined): string {
   return ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "-";
 }
 
-// Цвет Badge по виду статуса кредита из снимка (#326, status_kind с #325):
-// слово -- для человека, цвет -- по виду, и смена слова его не гасит. Вида
-// нет (снимок сервера до #325) или он незнаком -- серый.
-export const CRED_COLOR: Record<CredStatusKind, string> = {
-  active: "green", quota_wait: "yellow", needs_login: "red", unknown: "gray",
-};
-
-export function statusColor(kind: string | undefined): string {
-  return CRED_COLOR[kind as CredStatusKind] ?? "gray";
-}
-
-/** Процент худшего окна кредита, "-" без данных. */
 export const percentText = (p: number | null) => (p == null ? "-" : `${p}%`);
 
 // Время сброса квоты (#331) -- в поясе смотрящего. Сервер прежде вписывал
@@ -108,8 +96,3 @@ export function untilText(resetsAt: number | null, now: number = Date.now() / 10
 /** Статус кредита для ячейки: к quota_wait -- время сброса (#326: по виду,
  *  не по слову). Снимок без вида (сервер до #325, у которого до #331 время
  *  уже в слове) -- слово как есть. */
-export function credStatusText(status: string, kind: string | undefined, resetsAt: number | null,
-                               now: number = Date.now() / 1000, timeZone?: string): string {
-  const until = kind === "quota_wait" ? untilText(resetsAt, now, timeZone) : "";
-  return until ? `${status} ${until}` : status;
-}

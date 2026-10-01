@@ -31,27 +31,22 @@ def main():
     if not c.check("paths.writable exists", fn is not None):
         return c.report("paths")
     home = "/home/mop"
-    c.expect("relative credentials name resolves under the node's home",
-             fn(home, ".claude/.credentials.json"), "/home/mop/.claude/.credentials.json")
     c.expect("relative secrets name resolves under the node's home",
              fn(home, ".config/mop/secrets.env"), "/home/mop/.config/mop/secrets.env")
     c.expect("the old absolute form with the node's own home still passes (transition)",
-             fn(home, "/home/mop/.claude/.credentials.json"), "/home/mop/.claude/.credentials.json")
+             fn(home, "/home/mop/.config/mop/secrets.env"), "/home/mop/.config/mop/secrets.env")
     c.expect("an absolute path with another home is refused",
-             fn(home, "/home/ermak/.claude/.credentials.json"), None)
+             fn(home, "/home/ermak/.config/mop/secrets.env"), None)
     c.expect("a file outside the white list is refused", fn(home, ".bashrc"), None)
     c.expect("an absolute path elsewhere is refused", fn(home, "/etc/passwd"), None)
     c.expect("traversal past the white list is refused",
-             fn(home, ".claude/../.bashrc"), None)
+             fn(home, ".config/mop/../secrets.env"), None)
     c.expect("a name that merely starts like a listed one is refused",
-             fn(home, ".claude/.credentials.json.bak"), None)
+             fn(home, ".config/mop/secrets.env.bak"), None)
     names = getattr(paths, "WRITABLE", ())
-    # Метка кредита (#284): третье имя белого списка.
-    c.expect("the white list is the three relative names, no home in them",
-             sorted(names), [".claude/.credentials.json", ".config/mop/secrets.env",
-                             ".local/state/mop/cred"])
-    c.expect("the cred marker resolves under the node's home",
-             fn(home, ".local/state/mop/cred"), "/home/mop/.local/state/mop/cred")
+    # С #387 список -- одно имя: логин claude и метка кредита умерли.
+    c.expect("the white list is the one relative name, no home in it (#387)",
+             sorted(names), [".config/mop/secrets.env"])
     return c.report("paths")
 
 

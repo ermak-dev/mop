@@ -9,7 +9,7 @@
 import os
 import time
 
-from . import bus, config, lease, llm, state
+from . import bus, config, lease, state
 from .. import driver
 from .domain import Alloc, CloneFacts, JobMeta, NodeRow, PoolNode, holds_work
 from .state import PuppetRow, State, action_for, failing_row, silent, spec_action, verdict
@@ -258,7 +258,6 @@ def _row(item, disk_kb=None):
         state=state,
         kind=kind,
         owner=item.get("owner") or None,
-        llm=llm.of_meta(meta),
         # Нет ключа в мете -- None; «?» рисует показ (PuppetRow.render, #274).
         origin=meta.origin,
         disk_kb=disk_kb,
@@ -430,11 +429,8 @@ def diagnose():
             continue
         action = action_for(item["kind"])
         if action is not False:
-            # Аренда -- из меты джоба (#357): лечить протухший логин doctor
-            # берётся только у папета с арендой, её он и раздаёт заново.
             issues.append({"name": job["ID"], "alloc": alloc,
-                           "diagnosis": item["state"], "action": action,
-                           "lease": JobMeta.from_job(job).cred})
+                           "diagnosis": item["state"], "action": action})
     return issues
 
 
@@ -546,7 +542,7 @@ def _update(name, alloc, me):
     if not meta.origin:
         raise RuntimeError(f"{name} has no origin in Meta")
     got = _cluster("update", name=name, origin=meta.origin,
-                   profile=llm.of_meta(meta), branch=meta.branch, **me)
+                   branch=meta.branch, **me)
     return ("spec re-registered — the puppet comes up with the new wrapper"
             + _note(got))
 
@@ -742,7 +738,6 @@ def recycle(name, workspace_of=None, force=False, branch=None):
     origin = meta.origin
     if not origin:
         raise RuntimeError(f"{name} has no origin in Meta — is this even a puppet?")
-    profile = llm.of_meta(meta)
     alloc = Alloc.from_dict(_cluster("alloc", name=name).get("alloc"))
     node = alloc.node if alloc else None
     if not node:
@@ -764,7 +759,7 @@ def recycle(name, workspace_of=None, force=False, branch=None):
     if workspace_of:
         text, sent = workspace_of(origin)
         fields = {"workspace": text, "bootstrap_sent": sent}
-    got = _cluster("update", name=name, origin=origin, profile=profile, branch=branch,
+    got = _cluster("update", name=name, origin=origin, branch=branch,
                    **me, **fields)
     # Метка регистрации (#334): командлет ждёт итог прогона по ней.
     return {"node": node, "owner_note": note, "bootstrap_sent": sent,

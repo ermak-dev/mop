@@ -25,22 +25,17 @@ SECRETS_ENV = "secrets.env"                  # ключи LLM на узле и �
 SERVERS = "servers"                          # креды серверов у оператора
 BOOTSTRAP = "bootstrap"                      # файлы bootstrap'а у сервера
 PROJECTS = "projects"                        # реестр проектов сервера
-CREDS = "creds"                              # реестр кредитов сервера (#283)
 NODE_ENV = "node.env"                        # что узел знает о себе
 
 # Что глагол `write` агента имеет право положить, относительно дома пула
 # (#279). Дом здесь не пишется: его знает узел, а не тот, кто шлёт. Раньше
 # клиент слал абсолютный путь из MOP_HOME своей установки, и на чужом
 # сервере (дом /home/mop против /home/ermak оператора) агент отказывал по
-# каждому узлу -- `mop login` с машины оператора не работал никуда, кроме
-# своей установки.
-CREDENTIALS = ".claude/.credentials.json"    # логин claude.ai
-NODE_SECRETS = f"{DIR}/{SECRETS_ENV}"        # ключи LLM
-# Метка кредита (#284): имя кредита, которым работает тело. Рядом с записями
-# ходов (session.py: stdlib, без импорта отсюда), а не в .config/mop.
+# каждому узлу -- клиент с чужой установки не работал никуда, кроме своей.
+NODE_SECRETS = f"{DIR}/{SECRETS_ENV}"        # ключ LLM-прокси (#391)
+# Записи исходов ходов (session.py: stdlib, без импорта отсюда).
 STATE = ".local/state/mop"
-CRED_MARK = f"{STATE}/cred"
-WRITABLE = (CREDENTIALS, NODE_SECRETS, CRED_MARK)
+WRITABLE = (NODE_SECRETS,)
 
 
 def local(*parts):

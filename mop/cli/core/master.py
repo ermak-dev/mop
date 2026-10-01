@@ -1,10 +1,10 @@
-"""launch claude as a project's master: mop master [--llm PROFILE] [git-origin] [claude options]
+"""launch claude as a project's master: mop master [git-origin] [claude options]
 
 Without an argument, the origin of the current working copy is used. One
 project — one project: a master sees and reaches only its own puppets; anyone
 else's don't exist for it.
 
-Only --llm and origin belong to this command; everything else goes to claude
+Only origin belongs to this command; everything else goes to claude
 as-is (`mop master --continue` resumes the master's last session). The
 command won't mirror claude's own flags: there are dozens of them, and the
 list would drift the moment claude ships a new version. Pass a flag that
@@ -41,12 +41,9 @@ automatic on exactly its main signal. The price is named up front: the
 master holds the Nomad token, pushes, and talks to the tracker, and it will
 no longer ask about any of that.
 
---llm brings the master's session up on a profile from mop/common/llm/ — the same
-set puppets run on. Without the flag, the installation's MOP_DEFAULT_LLM
-applies. The profile's static env goes into the session whole, while the key
-itself is read from the master machine's .env: there's no node secrets.env
-here, and the local .env is exactly what serves as the source of truth for
-keys.
+The session runs on the installation's single LLM proxy; its key is read
+from the master machine's .env — there's no node secrets.env here, and the
+local .env is exactly what serves as the source of truth for keys.
 """
 import json
 import os
@@ -54,7 +51,7 @@ import sys
 
 from mop.cli import lib
 from mop.cli.core import _common
-from mop.common import config, llm, puppets
+from mop.common import config, puppets
 
 # Скилл едет в пакете (#351): у клиента, поставленного из git, config.PROJECT
 # -- site-packages, и skills/ рядом с ним нет. В клоне skills/master --
@@ -115,8 +112,6 @@ def claude_args(args):
 
 
 def main(argv):
-    profile, args = _common.parse_llm(argv)
-    profile = llm.resolve(profile)
     mine, passthru = claude_args(args)
     if len(mine) > 1:
         lib.usage(__doc__)
@@ -139,11 +134,11 @@ def main(argv):
                   f"in the server's identity provider (mop server user, or the directory)")
     link_skill()
 
-    # Профиль тот же, что у папетов, но источник ключа другой: не узловой
-    # secrets.env, а местный .env — общее с `mop code`, в _common.session_env.
-    _, session = _common.session_env(profile)
+    # Источник ключа -- не узловой secrets.env, а местный .env: общее с
+    # `mop code`, в _common.session_env.
+    session = _common.session_env()
     env = dict(os.environ, MOP_PROJECT=project, **session)
-    print(f"master of project {project} ({origin}) [{profile}]"
+    print(f"master of project {project} ({origin})"
           + (f" + claude {' '.join(passthru)}" if passthru else ""))
     os.execvpe("claude", ["claude", "--dangerously-skip-permissions",
                           "--mcp-config", mcp_config()] + passthru, env)

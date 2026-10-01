@@ -166,45 +166,38 @@ def check_template_version(c):
     ограничение размещения, и спека прежнего шаблона читалась свежей.
     SOLUTION: версия шаблона в Meta — хеш того, что общее у спек всех
     папетов, без значений конкретного папета. STATUS: FIXED — see #174"""
-    versions = {(spec.job_spec(n, o, p, cont=cont)["Job"].get("Meta") or {}).get("mop_spec")
-                for n, o, p, cont in SPEC_INPUTS}
+    versions = {(spec.job_spec(n, o, cont=cont)["Job"].get("Meta") or {}).get("mop_spec")
+                for n, o, cont in SPEC_INPUTS}
     c.check("the template version must be one for every puppet",
             not (len(versions) != 1 or None in versions), versions)
     # Одна строка врапера — другая версия: иначе правка врапера снова
     # прошла бы мимо doctor.
     with patched(spec, WRAPPER=spec.WRAPPER + "\n# one more line\n"):
-        other = (spec.job_spec(*SPEC_INPUTS[0][:3])["Job"].get("Meta") or {}).get("mop_spec")
+        other = (spec.job_spec(*SPEC_INPUTS[0][:2])["Job"].get("Meta") or {}).get("mop_spec")
     c.check("a changed wrapper line must change the template version",
             not (other in versions or other is None))
     # Версия не зависит от реестра профилей: удалённый MOP_DEFAULT_LLM иначе
     # ронял spec_is_stale, а ростер глотал падение как «спека свежая» —
     # ровно та тихая ошибка, которую закрывает #174.
-    with patched_env(MOP_DEFAULT_LLM="no-such-profile"):
-        try:
-            got = spec.current_version()
-        except Exception as e:
-            got = f"raised {e!r}"
-    c.check("current_version with a removed default profile", not (got not in versions),
-            f"{got!r}, wanted {versions}")
     c.check("current_version must equal the version job_spec puts in Meta",
             not (spec.current_version() not in versions))
 
 
-# (имя, origin, профиль, cont): оба профиля (без ключа и с ключом и картой
-# моделей), профиль по умолчанию, проект с точкой в имени (экранирование в
-# ограничении) и разовый подъём с историей. Драйвера среди входов нет: спека
-# от него не зависит — внешний врапер один на все тела (docs/DRIVER.md).
+# (имя, origin, cont): проект с точкой в имени (экранирование в ограничении)
+# и разовый подъём с историей. Драйвера среди входов нет: спека от него не
+# зависит — внешний врапер один на все тела (docs/DRIVER.md). Профилей
+# больше нет (#390): окружение LLM одно.
 SPEC_INPUTS = [
-    ("pu-mop-1", "git@git.example.dev:someone/mop.git", "claude", False),
-    ("pu-mop-2", "git@git.example.dev:someone/mop.git", None, False),
-    ("pu-rugent-3", "https://git.example.dev/rugent/rugent.git", "glm", False),
-    ("pu-my.proj-1", "git@git.example.dev:someone/my.proj.git", "glm", True),
+    ("pu-mop-1", "git@git.example.dev:someone/mop.git", False),
+    ("pu-mop-2", "git@git.example.dev:someone/mop.git", False),
+    ("pu-rugent-3", "https://git.example.dev/rugent/rugent.git", False),
+    ("pu-my.proj-1", "git@git.example.dev:someone/my.proj.git", True),
 ]
 
 
-def render(name, origin, profile, cont):
+def render(name, origin, cont):
     """Спека ровно так, как её увидит Nomad: JSON, в порядке ключей."""
-    return json.dumps(spec.job_spec(name, origin, profile, cont=cont),
+    return json.dumps(spec.job_spec(name, origin, cont=cont),
                       ensure_ascii=False, indent=1)
 
 
@@ -258,8 +251,8 @@ def check_wrapper_paths(c):
     """STATUS: FIXED — see #155"""
     from mop import driver
     from mop.cli.driver import run
-    for name, origin, profile, cont in SPEC_INPUTS:
-        env = spec.job_spec(name, origin, profile, cont=cont)["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
+    for name, origin, cont in SPEC_INPUTS:
+        env = spec.job_spec(name, origin, cont=cont)["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
         project = env.get("PU_PROJECT")
         # (b) каждый путь — там же, где его строил старый врапер, и там же,
         # где его строит остальной код.
@@ -330,7 +323,7 @@ def check_git_identity(c):
     # Прежний код снимал обе переменные после блока безусловно (del), а не
     # возвращал прежние: до блока их нет -- patched_env даёт то же.
     with patched_env(MOP_GIT_NAME="Pool Bot", MOP_GIT_EMAIL="bot@example.dev"):
-        env = spec.job_spec(*inputs[:3])["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
+        env = spec.job_spec(*inputs[:2])["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
         version = spec.current_version()
     got = [k for k in env if k.startswith("GIT_")]
     c.check("the spec must carry no GIT_*, even with MOP_GIT_* in the environment",
@@ -650,7 +643,7 @@ def check_hook_events_341(c):
     перерегистрирует каждый джоб; связь держит эта проверка."""
     want = HOOK_EVENTS
     for inputs in SPEC_INPUTS:
-        got = wrapper_hook_events(spec.job_spec(*inputs[:3], cont=inputs[3]))
+        got = wrapper_hook_events(spec.job_spec(*inputs[:2], cont=inputs[2]))
         c.check(f"{inputs[0]}: the wrapper hooks exactly session's events",
                 got is not None and len(got) == len(set(got)) and set(got) == want,
                 f"wrapper {got}, session {sorted(want)}")
@@ -709,7 +702,7 @@ def check_claude_hooks_223(c):
     c.check("the wrapper travels base64: a $$ in it would reach the body literally",
             not ("$$" in spec.WRAPPER))
     for inputs in SPEC_INPUTS:
-        job = spec.job_spec(*inputs[:3], cont=inputs[3])
+        job = spec.job_spec(*inputs[:2], cont=inputs[2])
         env = job["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
         c.check(f"{inputs[0]}: the wrapper in the spec has no hooks",
                 not ('settings="--settings $hooks"' not in
@@ -735,7 +728,7 @@ def check_claude_hooks_223(c):
 # llm.of_meta; перерегистрация на сервере -- spec.respec, и clear записывает
 # ветку, а restore и лечение её несут.
 # STATUS: FIXED — see #265
-BRANCHED = ("pu-mop-3", "git@git.example.dev:someone/mop.git", "claude", False, "feat/256-x")
+BRANCHED = ("pu-mop-3", "git@git.example.dev:someone/mop.git", False, "feat/256-x")
 
 
 def check_job_meta_265(c):
@@ -743,8 +736,8 @@ def check_job_meta_265(c):
     JobMeta = getattr(domain, "JobMeta", None)
     c.check("mop.common.domain has no JobMeta", not (JobMeta is None))
     # Круг без потерь, байт в байт и в том же порядке ключей.
-    for name, origin, profile, cont, *branch in (SPEC_INPUTS + [BRANCHED]) if JobMeta else []:
-        meta = spec.job_spec(name, origin, profile, cont=cont,
+    for name, origin, cont, *branch in (SPEC_INPUTS + [BRANCHED]) if JobMeta else []:
+        meta = spec.job_spec(name, origin, cont=cont,
                              branch=branch[0] if branch else None)["Job"]["Meta"]
         m = JobMeta.from_meta(meta)
         back = m.to_meta()
@@ -754,24 +747,16 @@ def check_job_meta_265(c):
                 not (JobMeta.from_job({"Meta": meta}) != m))
         c.check(f"JobMeta.project for {name}",
                 not (m.project != spec.driver.project_of(origin)), repr(m.project))
-    # Аренда кредита (#284): Meta.cred едет как ветка -- только когда есть.
-    if JobMeta is not None:
-        with_cred = spec.job_spec(*BRANCHED[:3], branch=BRANCHED[4], cred="anton")["Job"]["Meta"]
-        c.expect("job_spec(cred=...) puts cred in Meta", with_cred.get("cred"), "anton")
-        c.check("JobMeta round trip keeps cred",
-                JobMeta.from_meta(with_cred).cred == "anton"
-                and json.dumps(JobMeta.from_meta(with_cred).to_meta()) == json.dumps(with_cred))
-        without = spec.job_spec(*BRANCHED[:3], branch=BRANCHED[4])["Job"]["Meta"]
-        c.check("no cred -> no cred key in Meta", "cred" not in without, without)
-        c.expect("respec carries cred", spec.respec("pu-mop-3", JobMeta.from_meta(with_cred))
-                 ["Job"]["Meta"].get("cred"), "anton")
+    # Аренда кредита выпилена (#384): в Meta -- origin, llm, ветка, версия.
+    c.check("no cred or llm keys in Meta any more (#384, #390)",
+            not {"cred", "llm"} & set(spec.job_spec(*BRANCHED[:2], branch=BRANCHED[3])["Job"]["Meta"]))
     empty = JobMeta.from_job({}) if JobMeta else None
     c.check("a job without Meta",
-            not (empty is not None and (empty.origin, empty.llm, empty.branch, empty.spec_version,
-                                        empty.project) != (None, None, None, None, "")), empty)
+            not (empty is not None and (empty.origin, empty.branch, empty.spec_version,
+                                        empty.project) != (None, None, None, "")), empty)
     if JobMeta is not None:
         try:
-            JobMeta.from_meta({"origin": "o", "llm": "l"}).__setattr__("llm", "x")
+            JobMeta.from_meta({"origin": "o"}).__setattr__("branch", "x")
             c.fail("JobMeta must be frozen")
         except AttributeError:
             pass
@@ -779,7 +764,7 @@ def check_job_meta_265(c):
     # Сборка образа снимает папетов и поднимает их с веткой мастера.
     from mop.server import image
     from mop.common import puppets
-    job = spec.job_spec(*BRANCHED[:3], branch=BRANCHED[4])["Job"]
+    job = spec.job_spec(*BRANCHED[:2], branch=BRANCHED[3])["Job"]
     called = []
     real = spec.job_spec
     # Nomad -- поддельный, параметром (#275), а не подменой атрибутов модуля.
@@ -794,7 +779,7 @@ def check_job_meta_265(c):
         image.restore(gone, api=fake)
     got = [k.get("branch", a[4] if len(a) > 4 else None) for a, k in called]
     c.check("image.restore must raise the puppet on its branch",
-            not (got != [BRANCHED[4]]), f"job_spec calls {called}")
+            not (got != [BRANCHED[3]]), f"job_spec calls {called}")
 
     # Лечение doctor'а (update) несёт ветку папета.
     sent = []
@@ -803,7 +788,7 @@ def check_job_meta_265(c):
         puppets.treat({"action": "update", "alloc": None, "name": job["ID"]})
     upd = [kw for verb, kw in sent if verb == "update"]
     c.check("treat must re-register with the puppet's branch",
-            not (not upd or upd[0].get("branch") != BRANCHED[4]
+            not (not upd or upd[0].get("branch") != BRANCHED[3]
                  or upd[0].get("origin") != BRANCHED[1]), sent)
 
     # Мету читают только через JobMeta: сырых чтений её ключей нет нигде, кроме

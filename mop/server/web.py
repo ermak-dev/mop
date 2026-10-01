@@ -22,10 +22,9 @@ import os
 import threading
 import time
 
-from ..common import bus, credreg as credrows, puppets, state
+from ..common import bus, puppets, state
 from ..common.domain import WHO_WAIT, MasterAnswer
 from .. import usage
-from . import credlogin
 from . import nodes as node_facts
 
 STATES_EVERY = 15      # с: ростер Nomad + состояния с узлов
@@ -33,7 +32,6 @@ SIZES_EVERY = 120      # с: обмер du — тяжёлый IO, nice, но в�
 USAGE_EVERY = 600      # с: разбор транскриптов в телах
 USAGE_DAYS = 14        # окно расхода, как у `mop stat`
 USAGE_TIMEOUT = 90     # как у `mop stat`: разбор небыстрый
-CREDS_EVERY = 60       # с: реестр кредитов -- чтение файлов на сервере (#285)
 MASTERS_EVERY = 30     # с: опрос who по проектам -- живые мастера (#305)
 EVENTS_CAP = 100       # сколько событий помнит журнал
 DEBOUNCE = 1.0         # с: пачка событий — один круг, а не по кругу на каждое
@@ -194,7 +192,7 @@ def master_rows(answers, rows):
     return sorted(out, key=lambda m: (m["project"], m["user"], m["master"]))
 
 
-def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at, creds=(),
+def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at,
              masters=()):
     """Один JSON на страницу и /api/pool. Набор ключей закреплён — страница
     читает их по имени.
@@ -208,7 +206,7 @@ def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at, cred
     return {"at": at, "projects": projects(rows), "counts": counts(rows),
             "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "per_user": per_user,
-            "journal": journal, "errors": errors, "creds": list(creds),
+            "journal": journal, "errors": errors,
             "masters": list(masters),
             # Период опроса мастеров (#325): страница пишет «раз в N с» по
             # нему, а не своей копией числа.
@@ -267,50 +265,6 @@ def cache_control(url):
 # строка собирается из перечисленных полей, а не копией записи.
 CRED_WORDS = {"active": "активен", "quota_wait": "ждёт квоты",
               "needs_login": "ждёт ручной авторизации"}
-LOGIN_MODES = tuple(credlogin.MODES)
-
-
-def cred_status_word(st):
-    """Статус кредита по-русски для страницы: три исхода плюс «не проверялся».
-    Правило одно на CLI и страницу (#317, credreg.status_word), таблица слов --
-    здесь.
-
-    Время сброса квоты в слово не входит (#331): здесь оно было бы в поясе
-    сервера и без даты, и недельное окно через три дня читалось как «сегодня
-    в пять утра». resets_at едет в строке числом, и «до …» пишет страница в
-    поясе браузера."""
-    return credrows.status_word(st, CRED_WORDS, "не проверялся")
-
-
-def cred_status_kind(st):
-    """Вид статуса кредита для страницы (#325): active / quota_wait /
-    needs_login, иначе unknown -- в том числе «не проверялся». Цвет бейджа
-    страница берёт по нему, а не по началу слова."""
-    kind = (st or {}).get("kind")
-    return kind if kind in CRED_WORDS else "unknown"
-
-
-def cred_rows(records, now, holders=None):
-    """Записи реестра -> строки страницы: имя, профиль, вид, владелец, статус
-    словами, время сброса, процент худшего окна, возраст и держатели аренды.
-    Ключ, токен и прочее содержимое записи сюда не переписываются.
-
-    holders -- {кредит: {папет: узел}} из credreg.holders() (#301): та же
-    аренда, что у `mop cred list`. Нет карты -- у каждой строки пустой
-    список, а не отсутствие ключа: странице не надо гадать."""
-    holders = holders or {}
-    out = []
-    for rec in records:
-        st = rec.get("status") or {}
-        name = rec.get("name") or "-"
-        out.append({"name": name, "profile": rec.get("profile") or "-",
-                    "kind": rec.get("kind") or "-", "owner": rec.get("owner") or "",
-                    "status": cred_status_word(st), "status_kind": cred_status_kind(st),
-                    "resets_at": st.get("resets_at"),
-                    "percent": st.get("percent"),
-                    "age": credrows.age(rec, now),
-                    "holders": sorted(holders.get(name) or {})})
-    return out
 
 
 def _body(body):
@@ -329,44 +283,9 @@ def _field(body, name, required=True):
     return v, None
 
 
-def parse_login_start(body):
-    """Тело /api/creds/login/start -> ({name, mode}, None) либо (None, причина)."""
-    body, err = _body(body)
-    if err:
-        return None, err
-    name, err = _field(body, "name")
-    if err:
-        return None, err
-    try:
-        credrows.check_name(name)
-    except ValueError as e:
-        return None, f"name: {e}"
-    # Без режима -- None: режим решает вид кредита в login_start (#339).
-    mode, _ = _field(body, "mode", required=False)
-    mode = mode or None
-    if mode is not None and mode not in LOGIN_MODES:
-        return None, f"mode: one of {', '.join(LOGIN_MODES)}"
-    return {"name": name, "mode": mode}, None
-
-
-def parse_login_code(body):
-    """Тело /api/creds/login/code -> ({name, code}, None) либо (None, причина)."""
-    body, err = _body(body)
-    if err:
-        return None, err
-    name, err = _field(body, "name")
-    if err:
-        return None, err
-    code, err = _field(body, "code")
-    if err:
-        return None, err
-    return {"name": name, "code": code}, None
-
-
-# ─── сборщик ─────────────────────────────────────────────────────────────
 class Collector:
     """Держит снимок и пять потоков, которые его обновляют: states, sizes,
-    usage, creds, masters (start).
+    usage, masters (start).
 
     Версия растёт на каждом изменении; `wait` отдаёт SSE-клиенту новую
     версию или таймаут. Ошибки кругов лежат в снимке по имени круга, а не
@@ -378,7 +297,6 @@ class Collector:
         self.version = 0
         self.rows, self.sizes, self.nodes = [], {}, []
         self.usage, self.per_puppet, self.per_user, self.journal = [], [], [], []
-        self.creds = []
         self.masters = []
         self.errors = {}
         self.at = None
@@ -391,7 +309,7 @@ class Collector:
                             self.usage, self.per_puppet, self.per_user,
                             self.journal, [f"{k}: {v}" for k, v in
                                            sorted(self.errors.items())],
-                            self.at, self.creds, self.masters)
+                            self.at, self.masters)
 
     def wait(self, version, timeout):
         """-> (версия, снимок) — новая версия, либо та же по таймауту."""
@@ -416,7 +334,7 @@ class Collector:
         self._kick.set()
 
     def start(self):
-        for fn in (self._states, self._sizes, self._usage, self._creds, self._masters):
+        for fn in (self._states, self._sizes, self._usage, self._masters):
             threading.Thread(target=fn, daemon=True, name=f"mop-web-{fn.__name__}").start()
 
     def _note(self, kind, error):
@@ -480,15 +398,6 @@ class Collector:
             time.sleep(USAGE_EVERY)
 
 
-    def _creds(self):
-        # Реестр лежит на сервере рядом с сервисом, и читается напрямую
-        # (mop/server/credreg.py), а не глаголом кластера. Ростер и узлы
-        # сборщик спрашивает у сервиса кластера по субъекту без логина --
-        # он service открыт намеренно; с логином -- закрыт (#309, docs/BUS.md).
-        while True:
-            self.refresh_creds()
-            time.sleep(CREDS_EVERY)
-
     def _masters(self):
         # Живые мастера (#305): опрос who в общий инбокс каждого проекта --
         # тот же, которым их находит инструмент agents. Проекты -- реестр
@@ -508,24 +417,6 @@ class Collector:
         while True:
             self._round("masters", compute, lambda found: setattr(self, "masters", found))
             time.sleep(MASTERS_EVERY)
-
-    def refresh_creds(self):
-        """Перечитать реестр сейчас: после добавления или логина со страницы
-        строка обязана появиться без минуты ожидания."""
-        def compute():
-            from . import credreg
-            credreg.login_forget_expired()
-            # Аренда -- из меты джобов, тем же токеном Nomad пользователя
-            # пула, что у сервиса кластера. Не прочиталась -- строки без
-            # держателей, реестр всё равно показываем.
-            try:
-                held = credreg.holders()
-            except Exception:
-                held = {}
-            return cred_rows(credreg.all(), time.time(), held)
-        self._round("creds", compute, lambda rows: setattr(self, "creds", rows))
-
-
 def gather_usage(days=USAGE_DAYS):
     """Расход по узлам, как в `mop stat`: -> ({дата: {вид: n}},
     [{name, node, total, вид: n}] от прожорливого к скромному,

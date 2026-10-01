@@ -1,5 +1,5 @@
 // Приложение дашборда (#296): шапка со счётчиками корзин, ошибки сборщика и
-// секции -- пул и узлы (#298), расход (#299), кредиты (#300), журнал (#298).
+// секции -- пул и узлы (#298), расход (#299), журнал (#298).
 import { Box, Container, Group, Stack, Text, Title, Alert } from "@mantine/core";
 import { usePool } from "./usePool";
 import { PoolTable } from "./components/PoolTable";
@@ -8,7 +8,6 @@ import { Masters } from "./components/Masters";
 import { Journal } from "./components/Journal";
 import { UsageChart } from "./components/UsageChart";
 import { UsageByUser } from "./components/UsageByUser";
-import { Credentials } from "./components/Credentials";
 import { LoadBadges, LoadBar } from "./components/PoolLoad";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 
@@ -52,7 +51,6 @@ export default function App() {
               <UsageChart days={snapshot.usage} />
               <UsageByUser users={snapshot.per_user} />
               {/* кредиты (#300) */}
-              <Credentials creds={snapshot.creds} />
               <Journal journal={snapshot.journal} />
             </>
           )}

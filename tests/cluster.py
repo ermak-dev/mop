@@ -596,48 +596,6 @@ def check_update_keeps_branch_257(c):
 # SOLUTION: cluster._add/_update валидируют req.cred по реестру (имя и
 # профиль), без него берут credreg.pick, update держит мету как ветку.
 # STATUS: FIXED — see #284
-def check_cred_lease_284(c):
-    calls = []
-    recs = [{"name": "anton", "profile": "claude", "kind": "login", "owner": "",
-             "added_at": 0, "status": {"kind": "active", "resets_at": None, "percent": 1,
-                                       "detail": "", "probed_at": 0}},
-            {"name": "z1", "profile": "glm", "kind": "key", "owner": "", "added_at": 0,
-             "status": {"kind": "active", "resets_at": None, "percent": 1, "detail": "",
-                        "probed_at": 0}}]
-    by = {r["name"]: r for r in recs}
-    job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
-                                      "cred": "anton"}}
-    with restored(cluster.spec, "job_spec"), restored(cluster, "store_workspace"), \
-            patched(cluster.credreg, load=lambda name: by.get(name), all=lambda: recs):
-        cluster.spec.job_spec = lambda name, origin, profile=None, cont=False, branch=None, \
-            cred=None, node=None: calls.append(cred) or {"Job": {"ID": name}}
-        cluster.store_workspace = lambda root, name, req: None
-        with cluster.using(FakeNomad()):
-            got = cluster._add("mop", {"origin": "git@h:g/mop.git", "profile": "claude",
-                                       "cred": "nope"})
-            c.check("add: an unknown cred is refused", "nope" in str(got.get("error")), got)
-            got = cluster._add("mop", {"origin": "git@h:g/mop.git", "profile": "claude",
-                                       "cred": "z1"})
-            c.check("add: a cred of another profile is refused",
-                    "glm" in str(got.get("error")) or "profile" in str(got.get("error")), got)
-            cluster._add("mop", {"origin": "git@h:g/mop.git", "profile": "claude", "cred": "anton"})
-            cluster._add("mop", {"origin": "git@h:g/mop.git", "profile": "glm"})
-        with cluster.using(FakeNomad(jobs={"pu-mop-1": job})):
-            cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
-                                    "profile": "claude"})
-        with cluster.using(FakeNomad(jobs={"pu-mop-1": job})):
-            got = cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
-                                          "profile": "claude", "cred": "z1"})
-            c.check("update: a cred of another profile is refused", got.get("error"), got)
-    c.expect("add names the cred, picks one by profile, update keeps the meta cred",
-             calls, ["anton", "z1", "anton"])
-
-
-# ── #289: update держит папета на узле его аллокации ─────────────────────
-# HYPOTHESIS: _update регистрирует спеку без узла, и Nomad вправе разместить
-# папета заново где угодно -- тело с клоном остаётся на старом узле.
-# SOLUTION: _update берёт узел из последней аллокации и отдаёт его respec;
-# без аллокации (папет ещё не размещён) привязки нет. STATUS: FIXED — see #289
 def check_update_pins_node_289(c):
     seen = []
     job = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
@@ -992,92 +950,6 @@ def check_stderr_verb_333(c):
     c.check("#333 stderr: another project's puppet is refused", bool(got.get("error")), got)
 
 
-def check_cred_push_312(c):
-    """HYPOTHESIS (#312): новый держатель аренды получал кредит только когда
-    tick замечал смену кредита (sha по кредиту, не по узлу): поднятый позже --
-    на копии узла, то есть на чужом логине оператора.
-    SOLUTION: глагол оператора cred_push {name}: сервис кластера берёт из
-    Nomad узел последней аллокации и аренду из меты джоба и отдаёт кредит
-    адресной записью (credreg.push) в тело этого папета. Узел -- из Nomad,
-    никогда из запроса. Зовёт его bootstrap на каждом подъёме.
-    STATUS: FIXED — see #312"""
-    from mop.server import credreg as srv
-    # Кому глагол дан, с #360 проверяет check_cred_push_project_360: мастер
-    # проекта отдаёт аренду своему папету, оператор -- как раньше.
-    v = cluster.VERBS.get("cred_push")
-    if not c.check("#312 cred_push is a verb", v is not None):
-        return
-    leased = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
-                                         "cred": "anton"}}
-    plain = {"ID": "pu-mop-2", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
-    allocs = {"pu-mop-1": {"ID": "a-1", "NodeName": "hyper"},
-              "pu-mop-2": {"ID": "a-2", "NodeName": "hyper"}}
-    pushed = []
-    api = FakeNomad(jobs={"pu-mop-1": leased, "pu-mop-2": plain, "pu-mop-3": leased},
-                    allocs=allocs)
-    with patched(srv, push=lambda name, node, bodies: pushed.append((name, node, bodies)) or "OK"):
-        got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-1",
-                                       "node": "forged"}, api=api)
-        c.expect("#312 cred_push: the lease to the alloc's node from Nomad, the request's node ignored",
-                 (got, pushed), ({"ok": True, "lease": "anton", "node": "hyper", "result": "OK"},
-                                 [("anton", "hyper", ["pu-mop-1"])]))
-        pushed.clear()
-        got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-2"}, api=api)
-        c.expect("#312 cred_push: no lease -> nothing pushed", (got, pushed),
-                 ({"ok": True, "lease": None}, []))
-        got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-3"}, api=api)
-        c.expect("#312 cred_push: no allocation -> not reached, nothing pushed", (got, pushed),
-                 ({"ok": True, "lease": "anton", "node": None,
-                   "result": "NOT REACHED: pu-mop-3 has no allocation"}, []))
-
-
-# ── #360: cred_push -- проектный глагол ────────────────────────────────
-# HYPOTHESIS: cred_push -- глагол оператора (#312), и мастер проекта не
-# может отдать своему папету его же аренду из реестра: doctor --fix (#357)
-# лечил бы протухший логин только из контекста оператора, а мастер,
-# который сегодня лечит его локальным файлом через write, это потерял бы.
-# SOLUTION: строка таблицы (PROJECT, named, acting), как bootstrap_result:
-# имя проверяется по origin джоба, чужой и непомеченный -- отказ, нет
-# джоба -- отказ; обработчик прежний. Оператор проходит как раньше.
-# STATUS: FIXED — see #360
-def check_cred_push_project_360(c):
-    from mop.server import credreg as srv
-    v = cluster.VERBS.get("cred_push")
-    c.expect("#360 cred_push: project scope, named and acting like bootstrap_result",
-             v and (v.scope, v.named, v.acting), (cluster.PROJECT, True, True))
-    leased = {"ID": "pu-mop-1", "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
-                                         "cred": "anton"}}
-    bare = {"ID": "pu-mop-4", "Meta": {"llm": "claude", "cred": "anton"}}
-    api = FakeNomad(jobs={"pu-mop-1": leased, "pu-mop-4": bare},
-                    allocs={"pu-mop-1": {"ID": "a-1", "NodeName": "hyper"},
-                            "pu-mop-4": {"ID": "a-4", "NodeName": "hyper"}})
-    pushed = []
-    want = {"ok": True, "lease": "anton", "node": "hyper", "result": "OK"}
-    with patched(srv, push=lambda name, node, bodies: pushed.append((name, node, bodies)) or "OK"):
-        got = cluster.answer("mop", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
-        c.expect("#360 a master pushes its own puppet's lease", (got, pushed),
-                 (want, [("anton", "hyper", ["pu-mop-1"])]))
-        pushed.clear()
-        got = cluster.answer("rugent", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
-        c.check("#360 another project's puppet is refused, nothing pushed",
-                "belongs to project mop" in (got.get("error") or "") and not pushed, got)
-        got = cluster.answer("mop", {"verb": "cred_push", "name": "pu-mop-4"}, api=api)
-        c.check("#360 a job without origin is refused to a master",
-                "carries no origin" in (got.get("error") or "") and not pushed, got)
-        got = cluster.answer("mop", {"verb": "cred_push", "name": "pu-mop-9"}, api=api)
-        c.check("#360 a missing job is a refusal",
-                "no job pu-mop-9" in (got.get("error") or "") and not pushed, got)
-        got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
-        c.expect("#360 the operator as before", (got, pushed),
-                 (want, [("anton", "hyper", ["pu-mop-1"])]))
-
-
-# ── #375: глагол nodes ходит в Nomad через api ────────────────────────
-# HYPOTHESIS: nodes.nomad_rows зовёт живые nomad.nodes_meta()/get_nodes()
-# мимо cluster._api(): answer(api=FakeNomad) отдаёт узлы живого кластера, а
-# не фейка, и контракт #275 «Nomad за интерфейсом» протекает.
-# SOLUTION: nodes.nomad_rows(pool, api); cluster._nodes передаёт _api().
-# STATUS: FIXED — see #375
 def check_nodes_api_375(c):
     from mop.server import nodes, nomad
     fake = FakeNomad(nodes=[{"Name": "n2", "Status": "ready", "Datacenter": nomad.POOL_DC},
@@ -1116,9 +988,7 @@ def check_update_origin_365(c):
         a.register = lambda spec: registered.append(spec) or {}
         return a
     with patched(cluster.spec, respec=lambda name, meta, cont=False, node=None:
-                 {"Job": {"ID": name, "Meta": meta.to_meta()}}), \
-            patched(cluster, _cred_for=lambda *a, **kw: (None, None)), \
-            patched(cluster.credreg, all=lambda: []):
+                 {"Job": {"ID": name, "Meta": meta.to_meta()}}):
         req = {"verb": "update", "name": "pu-mop-1", "origin": rugent, "profile": "claude"}
         got = cluster.answer("mop", req, api=api())
         c.expect("#365 a master's update onto another project's origin, no new_origin: refused",
@@ -1153,9 +1023,7 @@ def check_update_origin_365(c):
     no_origin = "pu-rugent-1 carries no origin"
     with patched(cluster.spec, respec=lambda name, meta, cont=False, node=None:
                  {"Job": {"ID": name, "Meta": meta.to_meta()}}), \
-            patched(cluster, _cred_for=lambda *a, **kw: (None, None),
-                    _stop=lambda project, req: reached.append("stop") or {"ok": True}), \
-            patched(cluster.credreg, all=lambda: []):
+            patched(cluster, _stop=lambda project, req: reached.append("stop") or {"ok": True}):
         cluster.VERBS["stop"], keep_stop = dataclasses.replace(
             cluster.VERBS["stop"], fn=cluster._stop), cluster.VERBS["stop"]
         try:
@@ -1189,80 +1057,7 @@ def check_update_origin_365(c):
             cluster.VERBS["add"] = keep_add
 
 
-# ── #318: держатели в ответах cred_list и cred_status -- одна форма ─────
-# Характеристика до переезда (эпик #314): имена папетов по алфавиту, узел
-# не едет; cred_status с именем пробует один кредит, без имени -- все.
-def check_cred_holders_318(c):
-    recs = [{"name": "a"}, {"name": "b"}]
-    probed = []
-    with patched(cluster.credreg, all=lambda: recs,
-                 holders=lambda api=None: {"a": {"pu-x-2": "n1", "pu-x-1": None}, "b": {}},
-                 probe=lambda name, now=None: probed.append(name) or {"name": name},
-                 probe_all=lambda now=None: probed.append("*") or recs), \
-            cluster.using(FakeNomad()):
-        want = {"a": ["pu-x-1", "pu-x-2"], "b": []}
-        c.expect("#318 cred_list", cluster._cred_list("admin", {}),
-                 {"ok": True, "creds": recs, "holders": want})
-        c.expect("#318 cred_status of one", cluster._cred_status("admin", {"name": "a"}),
-                 {"ok": True, "creds": [{"name": "a"}], "holders": want})
-        c.expect("#318 cred_status of all", cluster._cred_status("admin", {}),
-                 {"ok": True, "creds": recs, "holders": want})
-    c.expect("#318 which probe ran", probed, ["a", "*"])
 
-def check_host_refusal_312(c):
-    """HYPOTHESIS (#312): на host-узле два кредита одного профиля делят один
-    $HOME, и сервис кластера это позволял. SOLUTION: правило host_conflict --
-    в update (узел закреплён аллокацией) и в cred_push на подъёме (для add
-    узел выбирает Nomad позже): отказ вместо записи. STATUS: FIXED — see #312"""
-    import tempfile
-    from mop.common import credreg as common
-    from mop.server import credreg as srv
-    job = lambda name, cred: {"ID": name, "Meta": {"origin": "git@h:g/mop.git", "llm": "claude",
-                                                   "cred": cred}}
-    jobs = {"pu-mop-1": job("pu-mop-1", "ermak"), "pu-mop-2": job("pu-mop-2", "anton")}
-    allocs = {"pu-mop-1": {"ID": "a-1", "NodeName": "box"},
-              "pu-mop-2": {"ID": "a-2", "NodeName": "box"}}
-    pushed = []
-    with tempfile.TemporaryDirectory() as tmp, \
-            patched(srv, ROOT=tmp, push=lambda n, node, b, timeout=None: pushed.append(n) or "OK"):
-        for name in ("anton", "ermak"):
-            srv.save(common.record(name, "claude", "login", now=1))
-        for driver_name, refused in (("host", True), ("pve", False)):
-            api = FakeNomad(jobs=jobs, allocs=allocs, meta={"box": {"mop_driver": driver_name}})
-            pushed.clear()
-            got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
-            c.check(f"#312 cred_push on a {driver_name} node shared with another claude lease",
-                    bool(got.get("refused")) == refused and (pushed == []) == refused, (got, pushed))
-            with cluster.using(api):
-                why = cluster.host_refusal("pu-mop-1", "ermak", "box")
-            c.check(f"#312 host_refusal on {driver_name}", bool(why) == refused, why)
-        api = FakeNomad(jobs=dict(jobs, **{"pu-mop-2": job("pu-mop-2", "ermak")}), allocs=allocs,
-                        meta={"box": {"mop_driver": "host"}})
-        got = cluster.answer("admin", {"verb": "cred_push", "name": "pu-mop-1"}, api=api)
-        c.check("#312 cred_push on host: the same credential on the node is fine",
-                not got.get("refused") and got.get("result") == "OK", got)
-        # update: узел закреплён аллокацией -- отказ до регистрации.
-        registered = []
-        api = FakeNomad(jobs=jobs, allocs=allocs, meta={"box": {"mop_driver": "host"}})
-        api.register = lambda spec: registered.append(spec)
-        with restored(cluster, "store_workspace"), restored(cluster.spec, "respec"):
-            cluster.store_workspace = lambda root, name, req: None
-            cluster.spec.respec = lambda *a, **k: {"Job": {"ID": "pu-mop-1"}}
-            with cluster.using(api):
-                got = cluster._update("mop", {"name": "pu-mop-1", "origin": "git@h:g/mop.git",
-                                              "profile": "claude", "cred": "ermak"})
-        c.check("#312 update on host with another claude lease there: refused, not registered",
-                "$HOME" in (got.get("error") or "") and registered == [], (got, registered))
-
-
-# ── #345: сдавшийся bootstrap останавливает джоб и виден в ростере ──────
-# HYPOTHESIS: остановить джоб может только сервис кластера (Nomad у него), а
-# ростер и `alloc` берут причину из stderr аллокации -- у остановленного
-# джоба её нет, а после GC Nomad нет и аллокации.
-# SOLUTION: глагол оператора give_up (bootstrap просит его после ответа
-# узлу) перечитывает запись итога и останавливает джоб (purge False: клон и
-# тело на месте) только если сдался текущий ключ; nomad_items и alloc несут
-# gave_up -- строку из записи. STATUS: FIXED — see #345
 def check_give_up_345(c):
     from mop.server import bootstrap
     row = cluster.VERBS.get("give_up")
@@ -1323,12 +1118,12 @@ def main():
                   check_secret_verbs, check_verb_table_173,
                   check_forget_inventory_178, check_forget_summary_196,
                   check_gates_40, check_caller_207, check_slots_total_243,
-                  check_update_keeps_branch_257, check_cred_lease_284,
+                  check_update_keeps_branch_257,
                   check_update_pins_node_289, check_owner_gate_267,
                   check_node_267, check_node_forms_277,
-                  check_nomad_api_275, check_stderr_verb_333, check_cred_push_312, check_cred_push_project_360,
-                  check_update_origin_365, check_cred_holders_318, check_nodes_api_375,
-                  check_host_refusal_312):
+                  check_nomad_api_275, check_stderr_verb_333,
+                  check_update_origin_365, check_nodes_api_375,
+                  ):
         check(c)
     return c.report("cluster")
 

@@ -526,9 +526,9 @@ def check_row_none_274(c):
     import inspect
     from mop.common import bus, puppets
     from mop.cli.core import list as cli_list
-    empty = PuppetRow("pu-x-1", None, "pending", None, None, None, "claude", None)
+    empty = PuppetRow("pu-x-1", None, "pending", None, None, None, None)
     old = {"name": "pu-x-1", "node": "-", "alloc_status": "pending", "state": "-",
-           "kind": None, "owner": "-", "llm": "claude", "origin": "?", "disk_kb": None}
+           "kind": None, "owner": "-", "origin": "?", "disk_kb": None}
     render = getattr(empty, "render", None)
     c.expect("#274 None renders as the old strings", render and render(), old)
     c.expect("#274 to_dict is the rendered wire form", empty.to_dict(), old)
@@ -771,7 +771,7 @@ def check_invariants_273(c):
             ("Gone(target=None)", lambda: Gone(None), "target"),
             ("JobMeta(origin='')", lambda: JobMeta("", "claude"), "origin"),
             ("JobMeta(origin=5)", lambda: JobMeta(5, "claude"), "origin"),
-            ("JobMeta(llm=7)", lambda: JobMeta("git@h:g/mop.git", 7), "llm"),
+            
             ("CloneFacts.from_dict garbage", lambda: CloneFacts.from_dict({"dirty": "x", "ahead": 0}), "dirty"),
             ("Body.from_dict garbage created", lambda: Body.from_dict({"name": "pu-mop-1", "created": "yes"}), "created"),
             ("Gone.from_dict without target", lambda: Gone.from_dict({"reset": True}), "target")]:
@@ -784,7 +784,7 @@ def check_invariants_273(c):
             ("Body pve", lambda: Body("pu-mop-1", 9003, "10.77.35.59", True)),
             ("Gone host", lambda: Gone("/home/u/puppets/pu-mop-1/target")),
             ("Gone pve", lambda: Gone("body 9003", 9003)),
-            ("JobMeta full", lambda: JobMeta("git@h:g/mop.git", "claude", "feat/1", "3")),
+            ("JobMeta full", lambda: JobMeta("git@h:g/mop.git", "feat/1", "3")),
             ("JobMeta without origin (a job without meta)", lambda: JobMeta(None, None)),
             ("JobMeta.from_meta({})", lambda: JobMeta.from_meta({})),
             ("Body.from_dict of an old agent (no created)", lambda: Body.from_dict({"name": "pu-mop-1", "body": None}))]:

@@ -75,26 +75,17 @@ class JobMeta:
     Раньше её читали сырым .get в семи модулях с разными умолчаниями ("",
     None, "?"), а перерегистрацию по ней писали четыре места -- и они
     разошлись: сборка образа теряла ветку (#265). Отсутствующий ключ здесь --
-    None; умолчания показа (ростер: "?") и профиля (llm.of_meta) -- у
     читателя, одно на каждое. Имя проекта не хранится -- выводится из origin
     одним правилом driver.project_of."""
     origin: str
-    llm: str
     branch: str = None
     spec_version: str = None
-    # Аренда кредита (#284): имя кредита реестра, которым работает папет;
-    # None -- без аренды, логин оператора как прежде (`mop login`).
-    cred: str = None
 
     def __post_init__(self):
         # origin -- None (джоб без Meta: законно, это «ничей») либо
         # непустая строка; пустая -- ни то ни другое (#273).
         if not (self.origin is None or (isinstance(self.origin, str) and self.origin)):
             _refuse(self, "origin", "None or a non-empty string")
-        if not _optional_str(self.llm):
-            _refuse(self, "llm", "None or a string")
-        if not _optional_str(self.cred):
-            _refuse(self, "cred", "None or a string")
 
     @property
     def project(self):
@@ -104,8 +95,10 @@ class JobMeta:
     def from_meta(cls, meta):
         """Словарь Meta (из джоба или из ответа глагола spec) -> JobMeta."""
         m = meta or {}
-        return cls(m.get("origin"), m.get("llm"), m.get("branch") or None, m.get(SPEC_META),
-                   m.get("cred") or None)
+        # cred старых мет игнорируется молча: аренды больше нет (#384), и
+        # прочитанная -- не отказ, а прошлое, которое перезапишет respec.
+        # llm старых мет игнорируется молча: профилей больше нет (#390).
+        return cls(m.get("origin"), m.get("branch") or None, m.get(SPEC_META))
 
     @classmethod
     def from_job(cls, job):
@@ -113,12 +106,10 @@ class JobMeta:
 
     def to_meta(self):
         """Словарь для Nomad -- в порядке ключей, каким его писал job_spec:
-        origin, llm, ветка и кредит (только если есть), версия шаблона."""
-        out = {"origin": self.origin, "llm": self.llm}
+        origin и ветка (если есть), версия шаблона."""
+        out = {"origin": self.origin}
         if self.branch:
             out["branch"] = self.branch
-        if self.cred:
-            out["cred"] = self.cred
         if self.spec_version is not None:
             out[SPEC_META] = self.spec_version
         return out
@@ -478,27 +469,6 @@ class Gone:
         if not d or d.get("error"):
             return None
         return cls(d.get("target"), d.get("destroyed"))
-
-
-# ─── кредит провайдера ───────────────────────────────────────────────────
-@dataclass(frozen=True)
-class CredStatus:
-    """Состояние кредита провайдера LLM (#287) -- три исхода, которые видит
-    оператор: `active` (активен), `quota_wait` (ждёт квоты до resets_at),
-    `needs_login` (ждёт ручной авторизации: ключ отозван, токен истёк).
-
-    resets_at -- epoch в секундах, когда откроется исчерпанное окно, либо
-    None; percent -- загрузка худшего окна; detail -- одна строка человеку."""
-    kind: str
-    resets_at: object = None
-    percent: object = None
-    detail: str = ""
-
-    KINDS = ("active", "quota_wait", "needs_login")
-
-    def __post_init__(self):
-        if self.kind not in self.KINDS:
-            _refuse(self, "kind", f"one of {', '.join(self.KINDS)}")
 
 
 # ─── глагол ──────────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@ bootstrap песочницы за папета). Положи туда глаг�
 регистрирует и снимает джобы. Свой субъект прав никому не добавляет: у
 `master-<проект>` уже есть весь `mop.<проект>.>`, у папета и узла — нет.
 
-Спеку джоба собирает сервер, а не проситель. Глагол — `add(origin, profile)`,
+Спеку джоба собирает сервер, а не проситель. Глагол — `add(origin)`,
 не `register(spec)`: приняв готовую спеку, сервис отдал бы исполнение кода на
 узлах любому, кто дотянулся до шины, и токен на сервере не защищал бы ничего.
 
@@ -33,10 +33,9 @@ import time
 
 import base64
 
-from ..common import credreg as common_credreg
 from .. import driver
-from . import bootstrap, credreg, natsconf, nodes, nomad, spec
-from ..common import (bus, busnames, config, creds, domain, landing, lease, llm, paths, project_secrets,
+from . import bootstrap, natsconf, nodes, nomad, proxykey, spec
+from ..common import (bus, busnames, config, creds, domain, landing, lease, paths, project_secrets,
                       projects, puppets, service, state)
 from ..common.domain import Alloc, CloneFacts, JobMeta, PoolNode, Project, Verb
 
@@ -395,43 +394,17 @@ def _add(project, req):
     if why:
         return {"error": why}
     name = next_name(target.name)
-    # Аренда кредита (#284): названный -- по реестру, без него -- первый
-    # активный кредит профиля, либо ничего (логин оператора, как прежде).
-    cred, why = _cred_for(req.get("profile"), req.get("cred"))
-    if why:
-        return {"error": why}
     # workspace -- до регистрации: первый подъём обязан его увидеть.
     marker = store_workspace(bootstrap.ROOT, name, req)
-    _api().register(spec.job_spec(name, origin, req.get("profile"),
-                                 branch=req.get("branch"), cred=cred))
-    # cred -- только когда аренда есть, метка (#334) -- только когда клиент
-    # прислал происхождение: без них ответ байт в байт прежний.
-    return {"ok": True, "name": name, "origin": origin, **({"cred": cred} if cred else {}),
+    _api().register(spec.job_spec(name, origin, branch=req.get("branch")))
+    # Метка (#334) -- только когда клиент прислал происхождение: без неё
+    # ответ байт в байт прежний.
+    return {"ok": True, "name": name, "origin": origin,
             **({"bootstrap_marker": marker} if marker else {})}
 
 
-def _cred_for(profile, wanted, kept=None):
-    """Кредит папету -> (имя | None, отказ | None). Названный обязан быть в
-    реестре и того же профиля -- иначе отказ, а не молчаливый подъём без
-    кредита; без названного держится прежний (update), иначе выбирается
-    первый активный профиля."""
-    profile = llm.resolve(profile)
-    if wanted:
-        rec = credreg.load(wanted)
-        if rec is None:
-            return None, f"no credential {wanted} in the registry (mop cred list)"
-        if rec.get("profile") != profile:
-            return None, (f"credential {wanted} is for profile {rec.get('profile')}, "
-                          f"the puppet runs {profile}")
-        return wanted, None
-    if kept:
-        return kept, None
-    # Первый активный кредит профиля по реестру либо None.
-    return common_credreg.pick(profile, credreg.all()), None
-
-
 def _kept_meta(name):
-    """Мета джоба (#256, #284): ветка и кредит, с которыми папет заведён."""
+    """Мета джоба (#256): ветка, с которой папет заведён."""
     # Чтение по возможности: нет джоба или Nomad молчит -- нет и меты, а о
     # самом Nomad скажет register следом.
     try:
@@ -454,24 +427,14 @@ def _update(project, req):
     # (#284) -- так же, и профиль сверяется с реестром.
     kept = _kept_meta(name)
     branch = req.get("branch") or kept.branch
-    cred, why = _cred_for(req.get("profile"), req.get("cred"),
-                          kept.cred if kept.llm == llm.resolve(req.get("profile")) else None)
-    if why:
-        return {"error": why}
     # Узел -- из аллокации (#289): стоящий папет перерегистрируется на своём
     # узле, где его тело с клоном; неразмещённый (нет аллокации) -- куда
     # поставит Nomad, как при подъёме.
     alloc = Alloc.from_dict(_api().latest_alloc(name))
     node = (alloc.node if alloc else None) or None
-    # Узел закреплён (#289) -- правило host проверяется до регистрации (#312).
-    if cred and node:
-        refused = host_refusal(name, cred, node)
-        if refused:
-            return {"error": refused}
-    _api().register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch,
-                                              cred=cred),
+    _api().register(spec.respec(name, JobMeta(req.get("origin"), branch),
                                cont=bool(req.get("cont")), node=node))
-    out = {"ok": True, "name": name, "node": node, **({"cred": cred} if cred else {})}
+    out = {"ok": True, "name": name, "node": node}
     if marker:
         out.update(bootstrap_marker=marker,
                    replaced=before is None or _version(name) != before)
@@ -542,7 +505,7 @@ def _alloc(project, req):
 
 def _give_up(project, req):
     """Остановить джоб, чей bootstrap сдался (#345). Зовёт mop-bootstrap
-    после ответа узлу, как cred_push (#312); просителю не верим -- запись
+    после ответа узлу; просителю не верим -- запись
     итога перечитывается, и стоп только если сдался текущий ключ. Стоп, а не
     снос (purge False): клон и тело на месте, `mop update` поднимает снова."""
     name = req["name"]
@@ -781,100 +744,6 @@ def _project_limit(project, req):
 # Оператору: кредит -- авторизация у провайдера LLM на всю установку, а не
 # на проект. Секрет едет по шине один раз, внутрь (cred_add), и наружу не
 # возвращается ни одним глаголом: строки списка -- без него.
-def _cred_add(project, req):
-    # Ключ провайдера -- add_key; файл кредов claude (`mop login`, #284) --
-    # add_login_file: дом логина, refresh-токен остаётся на сервере.
-    if req.get("credentials"):
-        rec = credreg.add_login_file(req["name"], req["credentials"],
-                                     owner=req.get("owner") or "")
-    else:
-        rec = credreg.add_key(req["name"], req["profile"], req.get("key"),
-                              owner=req.get("owner") or "")
-    return {"ok": True, "name": rec["name"], "profile": rec["profile"]}
-
-
-def _cred_rm(project, req):
-    name = req["name"]
-    if not credreg.remove(name):
-        return {"error": f"no credential {name}"}
-    return {"ok": True, "name": name}
-
-
-def host_refusal(name, lease, node):
-    """Правило host_conflict над Nomad (#312): драйвер узла из его меты,
-    аренды папетов узла из мет джобов. Узел не host или мета не читается --
-    None: контейнерные тела отдельны, а сомнение не повод не пустить."""
-    try:
-        meta = _api().node_meta(node) or {}
-    except Exception:
-        return None
-    try:
-        if driver.is_container(driver.of_node(meta, node)):
-            return None
-    except RuntimeError:
-        # Неизвестный драйвер в мете (#175): о нём скажут операции над
-        # узлом громко; аренду не держим.
-        return None
-    held = credreg.holders(_api())
-    on_node = {p: cred for cred, ps in held.items() for p, n in ps.items() if n == node}
-    profiles = {c: (credreg.load(c) or {}).get("profile") for c in {*on_node.values(), lease} if c}
-    return common_credreg.host_conflict(name, lease, on_node, profiles, node)
-
-
-def _cred_push(project, req):
-    """Аренду папета -- в его тело, на каждом подъёме (#312). Зовёт
-    bootstrap после прогона, до ответа узлу: так кредит в теле раньше tmux.
-
-    Узел -- последней аллокации по Nomad, аренда -- мета джоба; из запроса
-    берётся только имя, поэтому поддельный запрос может разве что ещё раз
-    отдать аренду её же держателю. Раньше новый держатель получал кредит
-    только когда tick замечал смену кредита (sha по кредиту, не по узлу), а
-    до того жил на копии узла -- чужом логине оператора."""
-    name = req.get("name") or ""
-    job = _api().get_job(name)
-    lease = JobMeta.from_job(job).cred if job else None
-    if not lease:
-        return {"ok": True, "lease": None}
-    try:
-        alloc = Alloc.from_dict(_api().latest_alloc(name))
-    except Exception:
-        alloc = None
-    node = alloc.node if alloc else None
-    if not node:
-        return {"ok": True, "lease": lease, "node": None,
-                "result": f"NOT REACHED: {name} has no allocation"}
-    # На подъёме -- и ворота host (#312): у add узел выбрал Nomad только что.
-    refused = host_refusal(name, lease, node)
-    if refused:
-        return {"ok": True, "lease": lease, "node": node, "refused": refused}
-    return {"ok": True, "lease": lease, "node": node,
-            "result": credreg.push(lease, node, [name])}
-
-
-def _cred_list(project, req):
-    # Держатели аренды (#284) -- отдельным полем: запись едет как лежит.
-    return {"ok": True, "creds": credreg.all(), "holders": credreg.holder_names(_api())}
-
-
-def _cred_status(project, req):
-    name = req.get("name")
-    if name:
-        recs = [credreg.probe(name)]
-    else:
-        recs = credreg.probe_all()
-    return {"ok": True, "creds": recs, "holders": credreg.holder_names(_api())}
-
-
-def _cred_login_start(project, req):
-    return {"ok": True, "url": credreg.login_start(req["name"], req.get("mode") or None)}
-
-
-def _cred_login_code(project, req):
-    got = credreg.login_code(req["name"], req.get("code") or "", owner=req.get("owner") or "")
-    return got if got.get("error") else {**got, "name": req["name"]}
-
-
-# ─── глаголы: секреты проекта (#127) ─────────────────────────────────────
 def _registered(project):
     """Отказ по незаведённому проекту: опечатка в имени завела бы секреты
     проекту, которого нет."""
@@ -1002,17 +871,10 @@ VERBS = {
     "project_delete": Verb(_project_delete, ADMIN,   False, False),
     "project_limit":  Verb(_project_limit,  ADMIN,   False, False),
     # Реестр кредитов (#283): на всю установку, оператору.
-    "cred_add":        Verb(_cred_add,        ADMIN,   False, False),
-    "cred_rm":         Verb(_cred_rm,         ADMIN,   False, False),
-    "cred_list":       Verb(_cred_list,       ADMIN,   False, False),
     # Аренда -- в тело своего папета (#360): мастеру проекта тоже, имя
     # проверяется по origin джоба, как у bootstrap_result. Нового права нет:
     # обработчик берёт из запроса одно имя, аренду -- из меты джоба, узел --
     # из Nomad, и отдаёт папету свежую копию его же аренды.
-    "cred_push":       Verb(_cred_push,       PROJECT, True,  True),
-    "cred_status":     Verb(_cred_status,     ADMIN,   False, False),
-    "cred_login_start": Verb(_cred_login_start, ADMIN, False, False),
-    "cred_login_code": Verb(_cred_login_code, ADMIN,   False, False),
     # Сдавшийся bootstrap (#345): просит mop-bootstrap, стоп -- здесь.
     "give_up":         Verb(_give_up,         ADMIN,   False, False),
 }
@@ -1093,9 +955,8 @@ async def serve(log, api=nomad):
     (#275), по умолчанию живой."""
     # Оба субъекта (#207): с логином вызывающего и прежний, до уборки.
     subj = [busnames.cluster(busnames.ANY), busnames.cluster(busnames.ANY, login=busnames.ANY)]
-    # Цикл кредитов (#284): пробы, продление токенов, раздача держателям и
-    # приписывание провалов -- своим потоком, шина его не ждёт.
-    threading.Thread(target=credreg.ticker, args=(log, api), daemon=True,
-                     name="cred-ticker").start()
+    # Ключ LLM-прокси узлам (#391): клиентские пути раздачи умерли, владелец
+    # ключа -- сервер. Старт -- не тик: ключ обязан опередить первый папет.
+    proxykey.start(log)
     await service.serve("mop-cluster", subj, lambda project, req, _send: answer(project, req, api=api),
                         log, journal, lambda: banner(", ".join(subj), nomad.ADDR))
