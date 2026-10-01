@@ -122,6 +122,11 @@
   become: yes
   gather_facts: no
 
+  # Тег -- для хирургической раскатки одного слоя (#380): новый location
+  # nginx катится без переигрывания остальных игр. Полный прогон тегов
+  # не замечает.
+  tags: [proxy]
+
   roles:
     - proxy
 
@@ -138,6 +143,23 @@
   roles:
     - web
 
+
+# LLM-прокси (#380, эпик #379): CLIProxyAPI на сервере. После дашборда --
+# тем же пользователем пула и его каталогам. Тег -- для хирургической
+# раскатки нового слоя без переигрывания живых сервисов; полный прогон
+# тегов не замечает.
+- name: LLM proxy on the server
+  hosts: server
+  gather_facts: no
+  tags: [llmproxy]
+
+  vars:
+    llm_proxy_tgz: "https://github.com/router-for-me/CLIProxyAPI/releases/download/v{{ MOP_LLM_PROXY_VERSION }}/CLIProxyAPI_{{ MOP_LLM_PROXY_VERSION }}_linux_amd64.tar.gz"
+    llm_proxy_client_key: "{{ lookup('password', secrets_dir + '/llm-proxy-client.pass length=32 chars=ascii_letters,digits') }}"
+    llm_proxy_mgmt_key: "{{ lookup('password', secrets_dir + '/llm-proxy-mgmt.pass length=32 chars=ascii_letters,digits') }}"
+
+  roles:
+    - llmproxy
 
 # doctor по расписанию (#359): systemd-таймер на сервере. После дашборда --
 # креды сервера на шину кладёт роль web.

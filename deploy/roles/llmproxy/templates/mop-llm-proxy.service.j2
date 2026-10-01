@@ -1,0 +1,17 @@
+[Unit]
+Description=LLM proxy (CLIProxyAPI: подписки claude/codex и ключи GLM за одним /v1/messages, #379)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Под пользователем пула, как nats-server и mop-web: секреты OAuth в его
+# доме, root ничего не добавляет.
+User={{ MOP_USER }}
+Group={{ MOP_USER }}
+ExecStart=/usr/local/bin/cli-proxy-api -config {{ MOP_HOME }}/.config/mop/llm-proxy/config.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
