@@ -9,11 +9,40 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.common import bus, paths, puppets  # noqa: E402
+from mop.common import bus, config, paths, puppets  # noqa: E402
 from mop.client import keys  # noqa: E402
+
+
+# ── переходный ключ в secrets.env (#382) ─────────────────────────────────
+# HYPOTHESIS: профили стали shim'ами над прокси и просят только MOP_PROXY_KEY,
+# а на стенде живы glm-папеты на Z_AI_KEY: пропади ключ из раздачи -- их
+# рестарт умрёт «нет ключа». SOLUTION: переходные имена едут, пока есть в
+# .env установки; установки без GLM-прошлого их не замечают.
+# STATUS: FIXED — see #382
+def check_transitional_key_382(c):
+    import tempfile
+
+    def blob_of(lines):
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
+            f.write("\n".join(lines) + "\n")
+            path = f.name
+        try:
+            with patched(puppets, LOCAL_KEYS_FILE=path):
+                blob, note = keys.llm_keys_blob()
+            return blob, note
+        finally:
+            os.unlink(path)
+
+    both, _ = blob_of(["MOP_PROXY_KEY=proxy-secret", "Z_AI_KEY=glm-secret"])
+    c.expect("both keys ride while Z_AI_KEY is in .env (#382)", both,
+             "MOP_PROXY_KEY=proxy-secret\nZ_AI_KEY=glm-secret\n")
+    only, note = blob_of(["MOP_PROXY_KEY=proxy-secret"])
+    c.expect("no Z_AI_KEY in .env -> only the proxy key rides (#382)", only,
+             "MOP_PROXY_KEY=proxy-secret\n")
+    c.expect("no missing-key note when the transition is empty (#382)", note, None)
 
 
 # ── дом пула не едет в глаголе write (#279) ──────────────────────────────
@@ -136,6 +165,7 @@ def check_body_refusal_366(c):
 
 def main():
     c = Checks()
+    check_transitional_key_382(c)
     # HYPOTHESIS (#135): неответ агента уводил в запасной путь через
     # sysbatch Nomad, а без токена печатал «agent silent … run mop login on
     # the controller» -- при том что агент просто писал в тела дольше

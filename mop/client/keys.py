@@ -17,6 +17,19 @@ from ..common import bus, config, credreg, fsutil, llm, paths, puppets
 # Логин claude.ai управляющей машины — то, что раздаётся на узлы.
 CREDENTIALS = credreg.credentials_file(os.path.expanduser("~"))
 
+# Переход (#382): профили больше не просят Z_AI_KEY -- они shim'ы над прокси,
+# -- но на стенде живы glm-папеты, начатые на этом ключе, и рестарт такого
+# папета обязан найти ключ в secrets.env. Едет, пока ключ есть в .env
+# установки; установки без GLM-прошлого его просто не заметят. Снимается
+# вместе с механизмом профилей (#390).
+TRANSITIONAL_KEYS = ("Z_AI_KEY",)
+
+
+def _wanted(env):
+    """Какие имена .env везти узлам: ключи профилей и переходные, что есть."""
+    wanted = {p["key"] for p in llm.profiles().values() if p.get("key")}
+    return wanted | {k for k in TRANSITIONAL_KEYS if k in env}
+
 
 def distribute(files):
     """Разложить [(путь, b64)] по всем ready-узлам пула -> {узел: результат}.
@@ -44,15 +57,15 @@ def llm_keys_blob():
     .env проекта: там же лежат креды GitLab, и на узлах пула им делать нечего.
     Едет ровно перечисленное.
     -> (содержимое|None, замечание|None)"""
-    wanted = {p["key"] for p in llm.profiles().values() if p.get("key")}
-    if not wanted:
-        return None, None
     if not os.path.exists(puppets.LOCAL_KEYS_FILE):
         return None, f"no {puppets.LOCAL_KEYS_FILE} — profiles needing a key won't start"
     # Тот же разбор, что у настроек: это и есть .env, ключи в нём — строки
     # того же примитивного формата.
-    found = {k: v for k, v in config.read_env(puppets.LOCAL_KEYS_FILE).items()
-             if k in wanted and v}
+    env = config.read_env(puppets.LOCAL_KEYS_FILE)
+    wanted = _wanted(env)
+    if not wanted:
+        return None, None
+    found = {k: v for k, v in env.items() if k in wanted and v}
     missing = sorted(wanted - set(found))
     note = f"{puppets.LOCAL_KEYS_FILE} is missing: {', '.join(missing)}" if missing else None
     if not found:
