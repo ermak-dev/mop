@@ -110,7 +110,7 @@ def check_bus_envelope_264(c):
     в bus.py четырежды (у ask_once -- без ensure_ascii=False), переход на
     прежний субъект при NoRespondersError (#207) был записан трижды (ask_once,
     _ask, _one), а request_many/request_stream заставляли девять мест
-    собирать {"verb": ...} руками; keys.results_from и bus.failure разбирали
+    собирать {"verb": ...} руками; результаты write и bus.failure разбирали
     ответ узла одной и той же тройной проверкой каждый сам.
     SOLUTION: один конверт (bus.envelope), одна корутина запроса с переходом
     (bus.arequest) на всех путях; request_many(verb, узлы, **поля) и
@@ -120,7 +120,7 @@ def check_bus_envelope_264(c):
     Соединение -- заглушка: субъект с логином отвечает NoRespondersError,
     прежний -- эхом того, что пришло."""
     import json
-    from mop.client import keys
+    from mop.server import proxykey
     failed_before = c.failed
 
     class Conn:
