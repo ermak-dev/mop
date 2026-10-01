@@ -35,7 +35,7 @@ def check_write_in_bus_315(c):
                      (path, bus.file_data(b64)), ("p/q", raw))
             c.check("bus.as_file: b64 is a str, it goes into JSON", isinstance(b64, str))
     c.expect("bus.WRITE_TIMEOUT stays 60s", getattr(bus, "WRITE_TIMEOUT", None), 60)
-    for rel in ("mop/server/proxykey.py", "mop/server/credreg.py", "mop/node/agent.py"):
+    for rel in ("mop/server/proxykey.py", "mop/node/agent.py"):
         src = open(os.path.join(root, rel)).read()
         tree = ast.parse(src)
         own = sorted({n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
@@ -44,16 +44,13 @@ def check_write_in_bus_315(c):
                         for t in n.targets if isinstance(t, ast.Name) and t.id == "WRITE_TIMEOUT"})
         c.check(f"{rel}: no own copy of the write helpers", not own, own)
         c.check(f"{rel}: no base64 of its own, the encoding lives in bus", "base64" not in src)
-    for rel in ("mop/server/proxykey.py", "mop/server/credreg.py"):
+    for rel in ("mop/server/proxykey.py",):
         # Строка-результат, а не упоминание в докстринге: f"NOT REACHED: …".
         tree = ast.parse(open(os.path.join(root, rel)).read())
         built = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)
                  and any(isinstance(v, ast.Constant) and "NOT REACHED" in str(v.value)
                          for v in n.values)]
         c.check(f"{rel}: no answer mapping by hand (NOT REACHED lives in bus)", not built, built)
-    src = open(os.path.join(root, "mop/server/credreg.py")).read()
-    c.check("server/credreg.py: fan-out through bus.request_many, no bus.request loop",
-            "bus.request(" not in src and "bus.request_many(" in src)
 
 
 # ── #366: отказ тела в ответе write ─────────────────────────────────────

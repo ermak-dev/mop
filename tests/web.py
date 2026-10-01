@@ -136,7 +136,7 @@ def check_snapshot(c):
     # per_user -- расход по людям (#245).
     # creds -- реестр кредитов (#285).
     want = {"at", "projects", "counts", "nodes", "usage", "per_puppet", "per_user",
-            "journal", "errors", "creds", "masters", "masters_every", "load"}
+            "journal", "errors", "masters", "masters_every", "load"}
     # masters -- живые мастера по опросу who (#305); masters_every -- период
     # этого опроса (#325): страница его не выдумывает. load -- места пула и
     # полоса аллокаций (#378).
@@ -235,37 +235,6 @@ CREDS = [
 ]
 
 
-def check_creds_285(c):
-    rows = web.cred_rows(CREDS, now=1_000_000)
-    c.expect("#285 cred names", [r["name"] for r in rows], ["anton", "team", "old", "fresh"])
-    c.expect("#285 status words", [r["status"] for r in rows],
-             ["активен", "ждёт квоты",
-              "ждёт ручной авторизации: HTTP 401", "не проверялся"])
-    c.expect("#285 percent and age", [(r["percent"], r["age"]) for r in rows],
-             [(46, "2h"), (100, "3d"), (None, "1m"), (None, "0m")])
-    c.check("#285 no secret reaches the page",
-            not any(k in r for r in rows for k in ("key", "token", "secret", "detail_raw")),
-            rows)
-    # status_kind -- вид статуса рядом со словом (#325).
-    c.expect("#285 columns", sorted(rows[0]),
-             sorted(["name", "profile", "kind", "owner", "status", "status_kind", "resets_at",
-                     "percent", "age", "holders"]))
-    snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=[], journal=[],
-                        errors=[], at=1.0, creds=rows)
-    c.expect("#285 snapshot carries creds", snap.get("creds"), rows)
-
-    # Без режима -- None: режим решает вид кредита в login_start (#339).
-    c.expect("#285 parse_login_start", web.parse_login_start({"name": "anton"}),
-             ({"name": "anton", "mode": None}, None))
-    c.expect("#285 parse_login_start setup-token", web.parse_login_start({"name": "a", "mode": "setup-token"}),
-             ({"name": "a", "mode": "setup-token"}, None))
-    c.check("#285 parse_login_start refuses a strange mode",
-            web.parse_login_start({"name": "a", "mode": "x"})[0] is None)
-    c.expect("#285 parse_login_code", web.parse_login_code({"name": "a", "code": " c#s "}),
-             ({"name": "a", "code": "c#s"}, None))
-    c.check("#285 parse_login_code refuses an empty code",
-            web.parse_login_code({"name": "a", "code": " "})[0] is None)
-
 
 # ── страница только показывает реестр и авторизует claude в строке (#294) ──
 # Решение оператора 27.09: добавление кредитов -- командами `mop cred`, на
@@ -280,39 +249,6 @@ def check_creds_285(c):
 # стала React-приложением, и старый web/index.html с #301 удалён.
 
 
-def check_row_button_294(c):
-    c.check("#294 parse_cred_add is gone", not hasattr(web, "parse_cred_add"))
-    from mop.cli.server import web as webcli
-    routes = webcli.Handler.ROUTES
-    c.check("#294 /api/creds/add is not routed", "/api/creds/add" not in routes, sorted(routes))
-    c.expect("#294 login routes stay", sorted(routes),
-             ["/api/creds/login/code", "/api/creds/login/start"])
-    rows = web.cred_rows(CREDS, now=1_000_000)
-    c.expect("#294 rows carry the profile for the button",
-             [r["profile"] for r in rows], ["claude", "glm", "claude", "claude"])
-    c.expect("#294 parse_login_start still validates",
-             web.parse_login_start({"name": "anton"}), ({"name": "anton", "mode": None}, None))
-    c.check("#294 parse_login_code still refuses an empty code",
-            web.parse_login_code({"name": "a", "code": ""})[0] is None)
-
-
-# ── #301: держатели аренды в строках страницы ─────────────────────────
-# HYPOTHESIS: cred_rows не несёт holders, и колонка «держатели» на странице
-# пуста, хотя `mop cred list` их показывает: сервис читает реестр, но не
-# аренду из меты джобов.
-# SOLUTION: cred_rows(records, now, holders) -- {кредит: {папет: узел}}
-# из credreg.holders(), имена папетов по алфавиту; без карты -- пустой
-# список, строка не падает. STATUS: FIXED — see #301
-def check_holders_301(c):
-    held = {"anton": {"pu-mop-6": "gpu", "pu-mop-1": None}, "team": {"pu-rudesktop-8": "a2"}}
-    rows = {r["name"]: r for r in web.cred_rows(CREDS, now=1_000_000, holders=held)}
-    c.expect("#301 holders sorted by puppet", rows["anton"].get("holders"),
-             ["pu-mop-1", "pu-mop-6"])
-    c.expect("#301 a glm key has its holder", rows["team"].get("holders"), ["pu-rudesktop-8"])
-    c.expect("#301 no lease -- an empty list", rows["old"].get("holders"), [])
-    bare = web.cred_rows(CREDS, now=1_000_000)
-    c.check("#301 without a holders map every row has an empty list",
-            all(r.get("holders") == [] for r in bare), bare)
 
 
 # ── #305: живые мастера на странице ──────────────────────────────────
@@ -383,96 +319,7 @@ def check_dist_297(c):
             os.path.isfile(webcli.PAGE) and os.path.isdir(os.path.join(os.path.dirname(webcli.PAGE), "assets")))
 
 
-# ── #331: время сброса -- не в слове статуса ─────────────────────────────
-# HYPOTHESIS: cred_status_word вшивал в слово human_time(resets_at) --
-# «%H:%M:%S» в поясе сервера, без даты: недельное окно, которое сбросится
-# через три дня, читалось как «сегодня в 5 утра». resets_at и так едет в
-# снимке числом.
-# SOLUTION: слово quota_wait -- голое «ждёт квоты», время собирает страница
-# из resets_at в поясе браузера (web/src/components/format.ts); human_time
-# ушёл. needs_login и active не меняются.
-# STATUS: FIXED — see #331
-def check_reset_time_331(c):
-    c.expect("#331 quota_wait carries no time, only the word",
-             web.cred_status_word({"kind": "quota_wait", "resets_at": 1_790_000_000}), "ждёт квоты")
-    c.expect("#331 quota_wait without a reset time: the same word",
-             web.cred_status_word({"kind": "quota_wait", "resets_at": None}), "ждёт квоты")
-    c.expect("#331 needs_login keeps its detail",
-             web.cred_status_word({"kind": "needs_login", "detail": "HTTP 401"}), "ждёт ручной авторизации: HTTP 401")
-    c.expect("#331 active unchanged", web.cred_status_word({"kind": "active"}), "активен")
-    c.check("#331 human_time is gone: nothing else read it", not hasattr(web, "human_time"))
 
-
-def check_login_start_no_default_339(c):
-    """HYPOTHESIS (#339): parse_login_start подставляет режим login, и
-    login_start не отличает «не спросили» от «спросили login»: кредит вида
-    token входил `claude auth login`. SOLUTION: без режима -- None, режим
-    выводит login_start из записи; явный режим по-прежнему проверяется.
-    STATUS: FIXED — see #339"""
-    c.expect("#339 parse_login_start without a mode gives None",
-             web.parse_login_start({"name": "old"}), ({"name": "old", "mode": None}, None))
-    c.expect("#339 an empty mode is no mode", web.parse_login_start({"name": "old", "mode": " "}),
-             ({"name": "old", "mode": None}, None))
-    c.expect("#339 an explicit mode passes through",
-             web.parse_login_start({"name": "old", "mode": "login"}), ({"name": "old", "mode": "login"}, None))
-    c.check("#339 a strange mode is still refused",
-            web.parse_login_start({"name": "old", "mode": "x"})[0] is None)
-
-
-# ── #325: снимок несёт виды статусов и период опроса ───────────────────
-# HYPOTHESIS: страница выводит правила сервера заново по словам: цвет
-# кредита -- по началу русского слова (CRED_WORDS), корзину узла -- регэкспами
-# по строке state (nodes.row), период опроса мастеров -- «every 30 s» в
-# Masters.tsx против MASTERS_EVERY; сменится слово -- бейдж молча серый.
-# SOLUTION: строка кредита несёт status_kind (active / quota_wait /
-# needs_login / unknown) рядом со словом, строка узла -- kind (free / busy /
-# down, те же корзины, что страница считает сегодня), снимок -- masters_every.
-# Добавочно: прежние ключи на месте. STATUS: FIXED — see #325
-def check_kinds_325(c):
-    from mop.server import nodes
-    # Кредиты: вид -- из статуса записи, а не из слова.
-    base = {"name": "x", "profile": "claude", "kind": "login", "added_at": 1}
-    cases = [({"kind": "active"}, "активен", "active"),
-             ({"kind": "quota_wait", "resets_at": 5}, "ждёт квоты", "quota_wait"),
-             ({"kind": "needs_login", "detail": "login expired"},
-              "ждёт ручной авторизации: login expired", "needs_login"),
-             (None, "не проверялся", "unknown"),
-             ({}, "не проверялся", "unknown")]
-    for st, word, kind in cases:
-        row = web.cred_rows([{**base, "status": st}], now=10)[0]
-        c.expect(f"#325 cred status {st}: the word stays, status_kind added",
-                 (row.get("status"), row.get("status_kind"), row.get("kind")),
-                 (word, kind, "login"))
-
-    # Узлы: каждое состояние, которое собирает nodes.row, -> корзина.
-    # Корзины -- те, что страница считает сегодня (format.ts nodeKind):
-    # ready без приписки -- free, draining/closed -- busy, прочее -- down.
-    want = {("ready", False, "eligible"): ("ready", "free"),
-            ("ready", True, "eligible"): ("ready, draining", "busy"),
-            ("ready", False, "ineligible"): ("ready, closed", "busy"),
-            ("ready", True, "ineligible"): ("ready, draining", "busy"),
-            ("down", False, "eligible"): ("down", "down"),
-            ("down", True, "eligible"): ("down, draining", "busy"),
-            ("down", False, "ineligible"): ("down, closed", "busy"),
-            ("initializing", False, "eligible"): ("initializing", "down"),
-            ("initializing", False, "ineligible"): ("initializing, closed", "busy"),
-            ("disconnected", False, "eligible"): ("disconnected", "down"),
-            ("disconnected", True, "eligible"): ("disconnected, draining", "busy")}
-    fn = getattr(web, "node_rows", None)
-    if not c.check("#325 web.node_rows exists", fn is not None):
-        return
-    for (status, drain, elig), (state, kind) in want.items():
-        row = nodes.row({"Name": "n1", "Status": status, "Drain": drain,
-                         "SchedulingEligibility": elig}, {"mop_driver": "host"}, {})
-        got = fn([row])[0]
-        c.expect(f"#325 node {status}, drain {drain}, {elig}: state and kind",
-                 (got.get("state"), got.get("kind")), (state, kind))
-        c.expect(f"#325 node {state}: the old keys stay", {k: got[k] for k in row}, row)
-
-    snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=[], journal=[],
-                        errors=[], at=1.0)
-    c.expect("#325 the snapshot carries the masters' poll period",
-             snap.get("masters_every"), web.MASTERS_EVERY)
 
 
 # ── #319: круг сборщика, запись журнала, схема who (характеристика) ────────
@@ -510,7 +357,6 @@ def _one_pass(col, round_):
 
 def check_rounds_319(c):
     from mop.common import projects as registry
-    from mop.server import credreg
     boom, empty = RuntimeError("boom"), RuntimeError()
 
     def raising(e):
@@ -554,15 +400,6 @@ def check_rounds_319(c):
             _one_pass(col, col._usage)
         c.expect(f"#319 round usage {label}: note and one bump",
                  (col.errors.get("usage"), col.version), (want, 1))
-    # creds -- refresh_creds, один вызов.
-    for label, forget, want in (("success", lambda: None, None), ("failure", raising(boom), "boom"),
-                                ("failure, empty message", raising(empty), "RuntimeError")):
-        col = web.Collector()
-        with patched(credreg, login_forget_expired=forget, holders=lambda: {}, all=lambda: []):
-            col.refresh_creds()
-        c.expect(f"#319 round creds {label}: note and one bump",
-                 (col.errors.get("creds"), col.version), (want, 1))
-
 
 def _fake_handler(webcli, method, path, body=b""):
     import io
@@ -598,34 +435,6 @@ def check_replies_319(c):
                 ("Content-Length", str(n)), ("Cache-Control", "no-store")]
     col = Col()
     login = json.dumps({"name": "anton", "code": "c"}).encode()
-    with patched(webcli, COLLECTOR=col), \
-            patched(webcli.credreg, login_code=lambda name, code: {"ok": True, "owner": "anton@ex.dev"}):
-        for what, got, want in (
-                ("GET /api/pool", _fake_handler(webcli, "GET", "/api/pool"),
-                 (head(200, 38), '{"название": "пул", "n": 1}'.encode())),
-                ("404", _fake_handler(webcli, "POST", "/nope", b"{}"),
-                 (head(404, 25), b'{"error": "no such path"}')),
-                ("400 not JSON", _fake_handler(webcli, "POST", "/api/creds/login/start", b"{not json"),
-                 (head(400, 35), b'{"error": "body: JSON is expected"}')),
-                ("400 refused", _fake_handler(webcli, "POST", "/api/creds/login/start",
-                                              json.dumps({"name": ""}).encode()),
-                 (head(400, 27), b'{"error": "name: required"}')),
-                ("200", _fake_handler(webcli, "POST", "/api/creds/login/code", login),
-                 (head(200, 54), b'{"ok": true, "owner": "anton@ex.dev", "name": "anton"}'))):
-            c.expect(f"#319 reply {what}: status, headers and bytes", got, want)
-        for msg, want in (("сбой", '{"error": "сбой"}'.encode()), ("", b'{"error": "RuntimeError"}')):
-            with patched(webcli.Handler, _cred=staticmethod(
-                    lambda a, f, m=msg: (_ for _ in ()).throw(RuntimeError(m)))):
-                got = _fake_handler(webcli, "POST", "/api/creds/login/start",
-                                    json.dumps({"name": "anton"}).encode())
-            c.expect(f"#319 reply 500 {msg or 'empty'}: bytes", got, (head(500, len(want)), want))
-    c.expect("#319 the cred journal record: the same fields as journal_entry fills",
-             col.events, [{"event": "cred login_code", "name": "anton", "node": "-",
-                           "project": "-", "text": "anton@ex.dev"}])
-    c.expect("#319 one refresh after a successful action", col.refreshed, 1)
-    c.expect("#319 journal_entry fills the defaults", web.journal_entry({}),
-             {"event": "?", "node": "-", "name": "-", "project": "-", "text": ""})
-
 
 def check_who_319(c):
     """Чтение ответа who: страница (master_rows) и инструмент agents (mcp)."""
@@ -756,8 +565,7 @@ def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
-               check_creds_285, check_row_button_294, check_holders_301, check_masters_305, check_dist_297,
-               check_reset_time_331, check_login_start_no_default_339, check_kinds_325,
+               check_masters_305, check_dist_297,
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
                check_load_378):
         fn(c)

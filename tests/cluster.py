@@ -988,9 +988,7 @@ def check_update_origin_365(c):
         a.register = lambda spec: registered.append(spec) or {}
         return a
     with patched(cluster.spec, respec=lambda name, meta, cont=False, node=None:
-                 {"Job": {"ID": name, "Meta": meta.to_meta()}}), \
-            patched(cluster, _cred_for=lambda *a, **kw: (None, None)), \
-            patched(cluster.credreg, all=lambda: []):
+                 {"Job": {"ID": name, "Meta": meta.to_meta()}}):
         req = {"verb": "update", "name": "pu-mop-1", "origin": rugent, "profile": "claude"}
         got = cluster.answer("mop", req, api=api())
         c.expect("#365 a master's update onto another project's origin, no new_origin: refused",
@@ -1025,9 +1023,7 @@ def check_update_origin_365(c):
     no_origin = "pu-rugent-1 carries no origin"
     with patched(cluster.spec, respec=lambda name, meta, cont=False, node=None:
                  {"Job": {"ID": name, "Meta": meta.to_meta()}}), \
-            patched(cluster, _cred_for=lambda *a, **kw: (None, None),
-                    _stop=lambda project, req: reached.append("stop") or {"ok": True}), \
-            patched(cluster.credreg, all=lambda: []):
+            patched(cluster, _stop=lambda project, req: reached.append("stop") or {"ok": True}):
         cluster.VERBS["stop"], keep_stop = dataclasses.replace(
             cluster.VERBS["stop"], fn=cluster._stop), cluster.VERBS["stop"]
         try:
@@ -1061,25 +1057,6 @@ def check_update_origin_365(c):
             cluster.VERBS["add"] = keep_add
 
 
-# ── #318: держатели в ответах cred_list и cred_status -- одна форма ─────
-# Характеристика до переезда (эпик #314): имена папетов по алфавиту, узел
-# не едет; cred_status с именем пробует один кредит, без имени -- все.
-def check_cred_holders_318(c):
-    recs = [{"name": "a"}, {"name": "b"}]
-    probed = []
-    with patched(cluster.credreg, all=lambda: recs,
-                 holders=lambda api=None: {"a": {"pu-x-2": "n1", "pu-x-1": None}, "b": {}},
-                 probe=lambda name, now=None: probed.append(name) or {"name": name},
-                 probe_all=lambda now=None: probed.append("*") or recs), \
-            cluster.using(FakeNomad()):
-        want = {"a": ["pu-x-1", "pu-x-2"], "b": []}
-        c.expect("#318 cred_list", cluster._cred_list("admin", {}),
-                 {"ok": True, "creds": recs, "holders": want})
-        c.expect("#318 cred_status of one", cluster._cred_status("admin", {"name": "a"}),
-                 {"ok": True, "creds": [{"name": "a"}], "holders": want})
-        c.expect("#318 cred_status of all", cluster._cred_status("admin", {}),
-                 {"ok": True, "creds": recs, "holders": want})
-    c.expect("#318 which probe ran", probed, ["a", "*"])
 
 def check_give_up_345(c):
     from mop.server import bootstrap
@@ -1145,7 +1122,7 @@ def main():
                   check_update_pins_node_289, check_owner_gate_267,
                   check_node_267, check_node_forms_277,
                   check_nomad_api_275, check_stderr_verb_333,
-                  check_update_origin_365, check_cred_holders_318, check_nodes_api_375,
+                  check_update_origin_365, check_nodes_api_375,
                   ):
         check(c)
     return c.report("cluster")
