@@ -7,11 +7,6 @@ login -- путь кредов (#385). Владелец ключа -- серве
 своего субъекта -- админа: копия каждого узла и живые тела без аренды.
 Свежие тела сеются с копии узла, живые получают письмо напрямую.
 
-Переходный Z_AI_KEY едет рядом, пока есть в .env сервера: на стенде живы
-glm-папеты старой раздачи, чей рестарт обязан найти ключ (#382). Уберут
-строку из .env -- ключ исчезнет из блоба сам; список снимается вместе с
-механизмом профилей (#390).
-
 Только stdlib: рендер и решение чистые (tests/proxykey.py), раздача -- на
 живом пуле, потоком сервиса.
 """
@@ -23,8 +18,6 @@ import time
 
 from ..common import bus, config, fsutil, paths, puppets
 
-# Переходный состав блоба (#382): едет, пока есть в .env сервера.
-TRANSITIONAL = ("Z_AI_KEY",)
 TICK = 300                   # как цикл кредитов (#284): редко и предсказуемо
 STATE = paths.local("proxy-key.json")
 
@@ -33,9 +26,8 @@ def blob(env):
     """Что везти узлам в secrets.env: ключ прокси и переходные, что есть.
     -> содержимое | None, когда раздавать нечего (ключа нет -- установка
     без прокси, тишина правильнее отказа)."""
-    wanted = ["MOP_PROXY_KEY", *TRANSITIONAL]
-    found = {k: v for k, v in env.items() if k in wanted and v}
-    return fsutil.write_kv(found) if found else None
+    key = env.get("MOP_PROXY_KEY")
+    return f"MOP_PROXY_KEY={key}\n" if key else None
 
 
 def sha(content):

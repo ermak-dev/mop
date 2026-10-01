@@ -13,7 +13,7 @@ Run on a client: an operator's machine or a master shell.
 #### mop add
 
 ```text
-create a puppet: mop add [--llm PROFILE] [git-origin]
+create a puppet: mop add [git-origin]
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>. Nomad decides placement — a puppet
@@ -33,7 +33,7 @@ isn't something a bus verb can hand over.
 #### mop code
 
 ```text
-launch claude on an LLM profile, outside the pool: mop code [--llm PROFILE] [claude options]
+launch claude on an LLM profile, outside the pool: mop code [claude options]
 
 Same profile machinery as `mop master`, none of the pool. No project, no bus
 credentials, no mop MCP server: this is an ordinary claude session that just
@@ -41,7 +41,7 @@ happens to come up on a chosen provider. Use it where the pool has nothing to
 do with the job — a scratch checkout, someone else's repository, a shell on
 a machine that never got `mop server deploy`.
 
-Only --llm belongs to this command; everything else goes to claude as-is
+Everything goes to claude as-is
 (`mop code --continue` resumes the last session here). The command won't
 mirror claude's own flags: there are dozens of them, and the list would drift
 the moment claude ships a new version.
@@ -52,8 +52,7 @@ of the command is to get to work on a provider without ceremony, and
 answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
---llm brings the session up on a profile from mop/common/llm/ — the same set puppets
-run on. Without the flag, the installation's MOP_DEFAULT_LLM applies. The
+The session runs on the installation's single LLM proxy (MOP_PROXY_URL). The
 profile's static env goes into the session whole, while the key itself is read
 from this machine's .env: there's no node secrets.env here, and the local .env
 is exactly what serves as the source of truth for keys.
@@ -108,13 +107,13 @@ the dispatch decision rests on this.
 #### mop master
 
 ```text
-launch claude as a project's master: mop master [--llm PROFILE] [git-origin] [claude options]
+launch claude as a project's master: mop master [git-origin] [claude options]
 
 Without an argument, the origin of the current working copy is used. One
 project — one project: a master sees and reaches only its own puppets; anyone
 else's don't exist for it.
 
-Only --llm and origin belong to this command; everything else goes to claude
+Only origin belongs to this command; everything else goes to claude
 as-is (`mop master --continue` resumes the master's last session). The
 command won't mirror claude's own flags: there are dozens of them, and the
 list would drift the moment claude ships a new version. Pass a flag that
@@ -151,9 +150,7 @@ automatic on exactly its main signal. The price is named up front: the
 master holds the Nomad token, pushes, and talks to the tracker, and it will
 no longer ask about any of that.
 
---llm brings the master's session up on a profile from mop/common/llm/ — the same
 set puppets run on. Without the flag, the installation's MOP_DEFAULT_LLM
-applies. The profile's static env goes into the session whole, while the key
 itself is read from the master machine's .env: there's no node secrets.env
 here, and the local .env is exactly what serves as the source of truth for
 keys.
@@ -234,19 +231,13 @@ tail of a puppet's tmux buffer: mop tail <name> [-n N] [-f]
 #### mop update
 
 ```text
-update a puppet: mop update <name> [git-origin] [--llm PROFILE] [--fresh] [--force]
+update a puppet: mop update <name> [git-origin] [--fresh] [--force]
 
 Changes what's named and keeps the rest: without origin the puppet stays on
-its repository, without --llm it stays on its profile. Switching the
-repository must not silently drop the profile back to default, and vice
-versa.
-
-By default the claude that comes up resumes the directory's last
-conversation, so switching profiles moves work already in progress onto a
-different model. That's a one-off allowance: an allocation restart doesn't
-reread the spec, and treatment is a restart — a treated puppet isn't obliged
-to come back into the context it got stuck on.
---fresh brings it up with a clean session.
+its repository. By default the claude that comes up resumes the directory's
+last conversation; --fresh brings it up with a clean session. An allocation
+restart doesn't reread the spec, and treatment is a restart — a treated
+puppet isn't obliged to come back into the context it got stuck on.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
@@ -343,19 +334,6 @@ The password stays in ~/.config/mop/servers/<server>/: one login per person
 per server, for every project. The working copy remembers only the server
 and the login (git config mop.server, mop.user, not committed), and every
 mop command run in it goes there. --user NAME is the old spelling of LOGIN.
-```
-
-#### mop llm
-
-```text
-LLM profiles: mop llm [--probe] [--tiers] — what a puppet can run on and whether the key is there
-
-A profile changes exactly one thing — where a puppet goes for tokens.
-Everything else (tmux, state, stuck detection) is the same for every profile.
---probe asks each provider that can answer (a profile with a probe hook and
-a key at hand) whether the key is alive and how much quota is left.
---tiers prints the installation's tier order (MOP_LLM_TIERS): strongest
-first, the order the policy walks when a credential runs out.
 ```
 
 #### mop setup

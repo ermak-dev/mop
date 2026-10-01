@@ -75,11 +75,9 @@ class JobMeta:
     Раньше её читали сырым .get в семи модулях с разными умолчаниями ("",
     None, "?"), а перерегистрацию по ней писали четыре места -- и они
     разошлись: сборка образа теряла ветку (#265). Отсутствующий ключ здесь --
-    None; умолчания показа (ростер: "?") и профиля (llm.of_meta) -- у
     читателя, одно на каждое. Имя проекта не хранится -- выводится из origin
     одним правилом driver.project_of."""
     origin: str
-    llm: str
     branch: str = None
     spec_version: str = None
 
@@ -88,8 +86,6 @@ class JobMeta:
         # непустая строка; пустая -- ни то ни другое (#273).
         if not (self.origin is None or (isinstance(self.origin, str) and self.origin)):
             _refuse(self, "origin", "None or a non-empty string")
-        if not _optional_str(self.llm):
-            _refuse(self, "llm", "None or a string")
 
     @property
     def project(self):
@@ -101,7 +97,8 @@ class JobMeta:
         m = meta or {}
         # cred старых мет игнорируется молча: аренды больше нет (#384), и
         # прочитанная -- не отказ, а прошлое, которое перезапишет respec.
-        return cls(m.get("origin"), m.get("llm"), m.get("branch") or None, m.get(SPEC_META))
+        # llm старых мет игнорируется молча: профилей больше нет (#390).
+        return cls(m.get("origin"), m.get("branch") or None, m.get(SPEC_META))
 
     @classmethod
     def from_job(cls, job):
@@ -109,8 +106,8 @@ class JobMeta:
 
     def to_meta(self):
         """Словарь для Nomad -- в порядке ключей, каким его писал job_spec:
-        origin, llm, ветка (если есть), версия шаблона."""
-        out = {"origin": self.origin, "llm": self.llm}
+        origin и ветка (если есть), версия шаблона."""
+        out = {"origin": self.origin}
         if self.branch:
             out["branch"] = self.branch
         if self.spec_version is not None:

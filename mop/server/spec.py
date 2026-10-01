@@ -374,12 +374,24 @@ while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wa
 """
 
 
-def task_env(name, origin, profile, prof, cont=False, mem=0):
+def llm_env():
+    """Статическое окружение LLM сессии (#390): единственный сервер
+    установки -- прокси, адрес -- настройка. Ключ врапер берёт на узле из
+    secrets.env (его раздаёт сервис, #391), сюда секреты не ездят. Карта
+    моделей -- сегодняшняя стенда; снимется алиасами в самом прокси."""
+    return {
+        "ANTHROPIC_BASE_URL": config.get("MOP_PROXY_URL"),
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3[1m]",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3[1m]",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3-flash",
+        "API_TIMEOUT_MS": "3000000",
+    }
+
+
+def task_env(name, origin, cont=False, mem=0):
     """Окружение задачи папета. Одно место и для job_spec, и для версии
-    шаблона: current_version зовёт его с пустым профилем, не спрашивая реестр
-    профилей (#174) — набор ключей от профиля не зависит. mem -- потолок
-    памяти папета, МБ (spec.memory)."""
-    llm_env = "".join(f"{k}={v}\n" for k, v in prof["env"].items())
+    шаблона. mem -- потолок памяти папета, МБ (spec.memory)."""
+    env_llm = "".join(f"{k}={v}\n" for k, v in llm.env().items())
     project = driver.project_of(origin)
     env = {
         "PU_NAME": name,
@@ -399,11 +411,12 @@ def task_env(name, origin, profile, prof, cont=False, mem=0):
         # Разовый токен: врапер гасит его маркером в клоне, поэтому историю
         # поднимет только первый подъём по этой спеке, а рестарты — чистые.
         "PU_CONTINUE": str(time.time()) if cont else "",
-        # LLM-профиль: имена и эндпоинт — здесь, ключ — на узле
-        "PU_LLM": profile,
-        "PU_LLM_ENV": base64.b64encode(llm_env.encode()).decode(),
-        "PU_LLM_KEY_VAR": prof.get("key") or "",
-        "PU_LLM_AUTH_VAR": prof.get("auth_var") or "ANTHROPIC_AUTH_TOKEN",
+        # LLM (#390): эндпоинт и модели -- здесь, ключ -- на узле, в
+        # secrets.env, его раздаёт сервис кластера (#391).
+        "PU_LLM": "proxy",
+        "PU_LLM_ENV": base64.b64encode(env_llm.encode()).decode(),
+        "PU_LLM_KEY_VAR": llm.KEY,
+        "PU_LLM_AUTH_VAR": llm.AUTH_VAR,
         # Потолок памяти папета (#197): на host его держит cgroup задачи
         # (MemoryMaxMB), в pve-теле -- `pct --memory`, который ставит ensure
         # драйвера из этой переменной на каждом подъёме.
@@ -420,35 +433,21 @@ def task_env(name, origin, profile, prof, cont=False, mem=0):
     return env
 
 
-def job_spec(name, origin, profile=None, cont=False, branch=None, node=None):
+def job_spec(name, origin, cont=False, branch=None, node=None):
     """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
-    историю каталога (`claude --continue`).
-    метой, как ветка: окружение и врапер те же. node — узел, к которому спека
+    историю каталога (`claude --continue`). node — узел, к которому спека
     привязана (#289): перерегистрация стоящего папета, см. node_constraint.
 
     По умолчанию чисто, и умолчание выбрано так намеренно: подъём с историей
     нужен ровно там, где работу продолжают под другой моделью, а везде ещё
     (новый папет, рецикл, лечение) чистый старт — половина смысла операции."""
-    profile = llm.resolve(profile)
-    prof = llm.get(profile)
-    if prof is None:
-        # Протухший Meta.llm у работающего джоба: профиль удалили из реестра,
-        # а джоб жив. Отказ обязан звать папета по имени — иначе искать, кто
-        # именно не перерегистрируется, придётся по трассе.
-        raise RuntimeError(f"{name}: no LLM profile {profile}; available: "
-                           f"{', '.join(llm.profiles())} (mop llm)")
-    # Ветка мастера (#249, #256) -- метой, не окружением: Nomad отдаёт её
-    # задаче как NOMAD_META_branch, `mop driver run` ставит на неё свежий
-    # клон. Окружение задачи и врапер при этом те же, версия шаблона та же,
-    # и ни одна зарегистрированная спека не устаревает. Мету собирает одно
-    # значение (#265): тот же порядок ключей, что читают все остальные.
-    meta = JobMeta(origin, profile, branch)
+    meta = JobMeta(origin, branch)
     project = Project.of(origin, asks=read_asks())
     try:
         reserve, ceiling = memory(project.asks, MEM_MAX, MEM)
     except ValueError as e:
         raise RuntimeError(f"{name}: {e} ({project.name})")
-    env = task_env(name, origin, profile, prof, cont, ceiling)
+    env = task_env(name, origin, cont, ceiling)
     meta = dataclasses.replace(meta, spec_version=template_version(env)).to_meta()
     return {"Job": {
         "ID": name,
@@ -495,8 +494,7 @@ def respec(name, meta, cont=False, node=None):
 
     node — узел стоящего папета (#289): update держит его на месте. Сборка
     образа узла не называет: тела снесены, держать некого."""
-    return job_spec(name, meta.origin, meta.llm, cont=cont, branch=meta.branch,
-                    node=node)
+    return job_spec(name, meta.origin, cont=cont, branch=meta.branch, node=node)
 
 
 def node_constraint(node):
@@ -631,7 +629,7 @@ def current_version():
     """Версия шаблона, который собрал бы сегодняшний mop. Без реестра
     профилей: удалённый MOP_DEFAULT_LLM иначе ронял бы spec_is_stale, а ростер
     глотает падение как «спека свежая» — та самая тихая ошибка (#174)."""
-    return template_version(task_env("pu-spec-1", "spec", "", {"env": {}}))
+    return template_version(task_env("pu-spec-1", "spec"))
 
 
 def spec_is_stale(job):

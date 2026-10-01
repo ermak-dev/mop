@@ -189,16 +189,6 @@ DEFAULTS = {
     # тулчейн стоит на узлах), а не продукта; {HOME} подставляется на месте.
     "MOP_PUPPET_PATH": "/usr/local/bin:/usr/bin:/bin:{HOME}/.local/bin:{HOME}/.cargo/bin:{HOME}/.nvm/versions/node/v22.12.0/bin",
     "MOP_FALLBACK_MODEL": "opus",
-    # Ярусы LLM (#286): profile[:model] через запятую, от сильного к
-    # слабому. По ним политика (mop/common/tiers.py) решает, куда переводить
-    # папета, когда кредит кончился или модель отказала: другой кредит того
-    # же провайдера (горячо), модель ниже (/model), другой поставщик
-    # (перерегистрация). Профили -- из mop/common/llm/, сверяет tiers.default.
-    "MOP_LLM_TIERS": "claude:opus,claude:sonnet,glm",
-    # Каким профилем из mop/common/llm/ поднимать сессию без явного --llm: папета
-    # или мастера. Выбор установки, а не продукта: контора на одном провайдере
-    # меняет дефолт, а не каждую команду.
-    "MOP_DEFAULT_LLM": "claude",
     # Единственный LLM-сервер установки (#379): прокси на контроллере
     # (deploy/roles/llmproxy, #380) кормит и папетов, и мастера. Адрес --
     # свой у каждой установки, поэтому настройка, а не литерал в mop/.
@@ -477,7 +467,7 @@ SERVER_SCOPED = {
     "mop-cluster": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                     "MOP_HOME", "MOP_USER", "MOP_NOMAD_PORT", "MOP_POOL_DC",
                     "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",
-                    "MOP_PUPPET_PATH", "MOP_DEFAULT_LLM",
+                    "MOP_PUPPET_PATH", "MOP_PROXY_URL", "MOP_PROXY_KEY",
                     # reload шины с проверкой (#211): `mop project add/rm`
                     "MOP_NATS_MONITOR_PORT"),
     # Сервис auth callout (#206): шина на петле, провайдер личностей. Пароли

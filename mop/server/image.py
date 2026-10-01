@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 
-from ..common import config, llm, manifest, puppets, state
+from ..common import config, manifest, puppets, state
 from ..common.domain import Alloc, JobMeta
 from .. import driver
 from . import nomad, playvars, spec
@@ -140,7 +140,7 @@ def project_rows(project, api=None):
 
 def clear(project, force=False, api=None, node=None):
     """Остановить папетов проекта на контейнерных узлах и снести их тела.
-    -> [{name, origin, llm, node}] — кого поднять заново после сборки.
+    -> [{name, origin, node}] — кого поднять заново после сборки.
     Отказ по занятым — RuntimeError из plan_clear, до первого останова.
     node -- только на этом узле (#280)."""
     api = api or nomad
@@ -155,7 +155,7 @@ def clear(project, force=False, api=None, node=None):
         puppets.wipe(node, name)
         # Ветка мастера (#256) едет с остальной метой (#265): без неё папет
         # после сборки поднимался на origin/HEAD, а не на своей ветке.
-        gone.append({"name": name, "origin": m.origin, "llm": llm.of_meta(m),
+        gone.append({"name": name, "origin": m.origin,
                      "branch": m.branch, "node": node})
     return gone
 
@@ -172,7 +172,7 @@ def restore(gone, api=None):
     failed = []
     for p in gone:
         try:
-            (api or nomad).register(spec.respec(p["name"], JobMeta(p["origin"], p["llm"],
+            (api or nomad).register(spec.respec(p["name"], JobMeta(p["origin"],
                                                           p.get("branch"))))
         except Exception as e:
             failed.append(f"{p['name']} on {p.get('node') or '?'}: "

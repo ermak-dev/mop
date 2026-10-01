@@ -59,7 +59,6 @@ class PuppetRow:
     state: str
     kind: str
     owner: str
-    llm: str
     origin: str
     disk_kb: int = None
 

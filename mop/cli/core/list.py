@@ -10,7 +10,7 @@ from mop.common import puppets
 # длинной строке можно только собрав их все, то есть промолчав до конца обмера.
 # Значение шире своей колонки не режется, а сдвигает хвост строки — как в df.
 # Последняя колонка (origin) не добивается вовсе.
-WIDTHS = (15, 7, 8, 46, 10, 7, 7)
+WIDTHS = (15, 7, 8, 46, 10, 7)
 
 
 def place(row):
@@ -24,8 +24,7 @@ def place(row):
 
 def line(r):
     s = r.render()
-    cells = (s["name"], s["node"], s["alloc_status"], s["state"], s["owner"], place(r),
-             s["llm"])
+    cells = (s["name"], s["node"], s["alloc_status"], s["state"], s["owner"], place(r))
     return "  ".join(c.ljust(w) for c, w in zip(cells, WIDTHS)) + "  " + s["origin"]
 
 

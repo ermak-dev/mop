@@ -17,7 +17,7 @@ bootstrap песочницы за папета). Положи туда глаг�
 регистрирует и снимает джобы. Свой субъект прав никому не добавляет: у
 `master-<проект>` уже есть весь `mop.<проект>.>`, у папета и узла — нет.
 
-Спеку джоба собирает сервер, а не проситель. Глагол — `add(origin, profile)`,
+Спеку джоба собирает сервер, а не проситель. Глагол — `add(origin)`,
 не `register(spec)`: приняв готовую спеку, сервис отдал бы исполнение кода на
 узлах любому, кто дотянулся до шины, и токен на сервере не защищал бы ничего.
 
@@ -35,7 +35,7 @@ import base64
 
 from .. import driver
 from . import bootstrap, natsconf, nodes, nomad, proxykey, spec
-from ..common import (bus, busnames, config, creds, domain, landing, lease, llm, paths, project_secrets,
+from ..common import (bus, busnames, config, creds, domain, landing, lease, paths, project_secrets,
                       projects, puppets, service, state)
 from ..common.domain import Alloc, CloneFacts, JobMeta, PoolNode, Project, Verb
 
@@ -396,8 +396,7 @@ def _add(project, req):
     name = next_name(target.name)
     # workspace -- до регистрации: первый подъём обязан его увидеть.
     marker = store_workspace(bootstrap.ROOT, name, req)
-    _api().register(spec.job_spec(name, origin, req.get("profile"),
-                                 branch=req.get("branch")))
+    _api().register(spec.job_spec(name, origin, branch=req.get("branch")))
     # Метка (#334) -- только когда клиент прислал происхождение: без неё
     # ответ байт в байт прежний.
     return {"ok": True, "name": name, "origin": origin,
@@ -433,7 +432,7 @@ def _update(project, req):
     # поставит Nomad, как при подъёме.
     alloc = Alloc.from_dict(_api().latest_alloc(name))
     node = (alloc.node if alloc else None) or None
-    _api().register(spec.respec(name, JobMeta(req.get("origin"), req.get("profile"), branch),
+    _api().register(spec.respec(name, JobMeta(req.get("origin"), branch),
                                cont=bool(req.get("cont")), node=node))
     out = {"ok": True, "name": name, "node": node}
     if marker:
