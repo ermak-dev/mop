@@ -62,7 +62,16 @@
     group: "{{ MOP_USER }}"
     mode: "0700"
 
-- name: Config
+# Конфиг -- только при начальной установке: дальше его редактирует человек
+# панелью (провайдеры, ключи, модели), и повторный рендер стирал бы эти
+# правки молча. Скелет шаблона -- то, с чего установка стартует; изменения
+# скелета на живой установке вносятся руками по этому же шаблону.
+- name: Is the config already there
+  ansible.builtin.stat:
+    path: "{{ MOP_HOME }}/.config/mop/llm-proxy/config.yaml"
+  register: llm_proxy_conf
+
+- name: Config, only at first install
   ansible.builtin.template:
     src: config.yaml.j2
     dest: "{{ MOP_HOME }}/.config/mop/llm-proxy/config.yaml"
@@ -70,6 +79,7 @@
     group: "{{ MOP_USER }}"
     mode: "0600"
   no_log: yes
+  when: not llm_proxy_conf.stat.exists
   notify: restart mop-llm-proxy
 
 - name: Systemd unit
