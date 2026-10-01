@@ -430,11 +430,8 @@ def diagnose():
             continue
         action = action_for(item["kind"])
         if action is not False:
-            # Аренда -- из меты джоба (#357): лечить протухший логин doctor
-            # берётся только у папета с арендой, её он и раздаёт заново.
             issues.append({"name": job["ID"], "alloc": alloc,
-                           "diagnosis": item["state"], "action": action,
-                           "lease": JobMeta.from_job(job).cred})
+                           "diagnosis": item["state"], "action": action})
     return issues
 
 

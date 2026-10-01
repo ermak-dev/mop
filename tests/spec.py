@@ -754,17 +754,9 @@ def check_job_meta_265(c):
                 not (JobMeta.from_job({"Meta": meta}) != m))
         c.check(f"JobMeta.project for {name}",
                 not (m.project != spec.driver.project_of(origin)), repr(m.project))
-    # Аренда кредита (#284): Meta.cred едет как ветка -- только когда есть.
-    if JobMeta is not None:
-        with_cred = spec.job_spec(*BRANCHED[:3], branch=BRANCHED[4], cred="anton")["Job"]["Meta"]
-        c.expect("job_spec(cred=...) puts cred in Meta", with_cred.get("cred"), "anton")
-        c.check("JobMeta round trip keeps cred",
-                JobMeta.from_meta(with_cred).cred == "anton"
-                and json.dumps(JobMeta.from_meta(with_cred).to_meta()) == json.dumps(with_cred))
-        without = spec.job_spec(*BRANCHED[:3], branch=BRANCHED[4])["Job"]["Meta"]
-        c.check("no cred -> no cred key in Meta", "cred" not in without, without)
-        c.expect("respec carries cred", spec.respec("pu-mop-3", JobMeta.from_meta(with_cred))
-                 ["Job"]["Meta"].get("cred"), "anton")
+    # Аренда кредита выпилена (#384): в Meta -- origin, llm, ветка, версия.
+    c.check("no cred key in Meta any more (#384)",
+            "cred" not in spec.job_spec(*BRANCHED[:3], branch=BRANCHED[4])["Job"]["Meta"])
     empty = JobMeta.from_job({}) if JobMeta else None
     c.check("a job without Meta",
             not (empty is not None and (empty.origin, empty.llm, empty.branch, empty.spec_version,

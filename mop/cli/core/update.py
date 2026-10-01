@@ -1,4 +1,4 @@
-"""update a puppet: mop update <name> [git-origin] [--llm PROFILE] [--cred NAME] [--fresh] [--force]
+"""update a puppet: mop update <name> [git-origin] [--llm PROFILE] [--fresh] [--force]
 
 Changes what's named and keeps the rest: without origin the puppet stays on
 its repository, without --llm it stays on its profile. Switching the
@@ -26,8 +26,6 @@ MCP = {"annotations": "destructive", "args": [
     {"name": "name", "type": "string", "required": True, "help": "puppet name, pu-<project>-<n>"},
     {"name": "origin", "type": "string", "help": "new git origin; without it, the repository is kept"},
     {"name": "llm", "type": "string", "flag": "--llm", "help": "LLM profile"},
-    {"name": "cred", "type": "string", "flag": "--cred",
-     "help": "registry credential to lease; the puppet keeps its lease otherwise"},
     {"name": "fresh", "type": "boolean", "flag": "--fresh", "help": "come up with a clean session"},
     {"name": "force", "type": "boolean", "flag": "--force",
      "help": "act on a puppet another master leads; the answer names whom"}]}
@@ -35,7 +33,6 @@ MCP = {"annotations": "destructive", "args": [
 
 def main(argv):
     profile, args = _common.parse_llm(argv)
-    cred, args = lib.parse_value(args, "--cred")
     fresh = "--fresh" in args
     args, force = lib.parse_named([a for a in args if a != "--fresh"], __doc__, most=2)
     name = args[0]
@@ -59,7 +56,7 @@ def main(argv):
                            cont=cont, new_origin=origin if origin != old else None,
                            workspace=text, bootstrap_sent=sent,
                            owner=bus.login(), force=force,
-                           branch=context.current().branch, cred=cred)
+                           branch=context.current().branch)
     # На успехе эха параметров нет (#179): человек их только что набрал сам.
     # Чью аренду прошёл force -- называем (#40); что уехало в bootstrap --
     # тоже (#334): это оператор набрать не мог.

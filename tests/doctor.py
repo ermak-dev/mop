@@ -127,13 +127,12 @@ def check_select_356(c, doctor):
 
 
 # Вывод до шва, снятый с командлета до правки: байт в байт тот же.
-# С #357 контракт --fix изменён сознательно: логин раздаётся арендой из
-# реестра (cred_push) папету по одному, в treat; строки локальной раздачи
-# (`n3: claude.ai login FAILED`) и отказа «local credentials are stale» нет.
+# С #384 контракт --fix снова проще: логины провайдеров умерли вместе с
+# арендами, лечение login+nudge -- только побудка (#290); раздач нет.
 ISSUES = [{"name": "pu-mop-1", "alloc": {"NodeName": "n1"},
            "diagnosis": "HUNG (not responding)", "action": "restart"},
           {"name": "pu-mop-2", "alloc": {"NodeName": "n2"},
-           "diagnosis": "not logged in", "action": "login+nudge", "lease": "anton"},
+           "diagnosis": "not logged in", "action": "login+nudge"},
           {"name": "pu-mop-3", "alloc": None,
            "diagnosis": "queued — no free slots in the pool", "action": None}]
 OUT_TABLE = ("pu-mop-1  n1  HUNG (not responding)               [restart]\n"
@@ -167,11 +166,8 @@ def check_output_356(c, argvs):
 
 
 def _output_356(c, argvs, cmd):
-    asked = []
     with restored(puppets, "diagnose", "treat"), restored(bus, "call_cluster"):
         puppets.treat = lambda issue: f"treated {issue['action']}"
-        bus.call_cluster = lambda verb, **kw: asked.append((verb, kw)) or \
-            {"ok": True, "lease": "anton", "node": "n2", "result": "OK"}
         for pre in argvs:
             for issues, argv, want in [([], [], "pool is healthy: nothing stuck\n"),
                                        (ISSUES, [], OUT_TABLE),
@@ -181,21 +177,6 @@ def _output_356(c, argvs, cmd):
                 out, err, code = run_command(cmd.main, pre + argv)
                 c.expect(f"#356 mop doctor {' '.join(pre + argv)}: the same output",
                          (out, err, code), (want, "", 0))
-        c.expect("#357 --fix pushed the lease of the one login+nudge puppet, by name",
-                 asked, [("cred_push", {"name": "pu-mop-2"})] * len(argvs))
-        # Аренда не дошла -- побудки нет, причина в строке лечения.
-        bus.call_cluster = lambda verb, **kw: {"ok": True, "lease": "anton", "node": "n2",
-                                               "result": "NOT REACHED: n2 agent silent"}
-        puppets.diagnose = lambda: ISSUES
-        out, err, code = run_command(cmd.main, ["--fix"])
-        c.expect("#357 a lease that did not arrive: no nudge, the reason in the row",
-                 (out, err, code),
-                 ("pu-mop-1  n1  HUNG (not responding)\n"
-                  "pu-mop-2  n2  not logged in\n"
-                  "pu-mop-3  -   queued — no free slots in the pool\n\n"
-                  "  pu-mop-1: treated restart\n"
-                  "  pu-mop-2: lease not pushed: NOT REACHED: n2 agent silent\n", "", 0))
-
 
 # ── #357: логин лечится арендой из реестра, а не локальным файлом ──────
 # HYPOTHESIS: лечение login+nudge гейтится ~/.claude/.credentials.json машины
@@ -207,91 +188,6 @@ def _output_356(c, argvs, cmd):
 # лечится: диагноз называет `mop update --cred`, action нет. Локального
 # пути в doctor нет вовсе.
 # STATUS: FIXED — see #357
-PUSHED = [
-    ("delivered", {"ok": True, "lease": "anton", "node": "n2", "result": "OK"}, None),
-    ("not reached", {"ok": True, "lease": "anton", "node": None,
-                     "result": "NOT REACHED: pu-mop-2 has no allocation"},
-     "lease not pushed: NOT REACHED: pu-mop-2 has no allocation"),
-    ("the write failed", {"ok": True, "lease": "anton", "node": "n2",
-                          "result": "FAILED: disk full"}, "lease not pushed: FAILED: disk full"),
-    ("the host gate refused", {"ok": True, "lease": "anton", "node": "n2",
-                               "refused": "another claude credential holds n2"},
-     "lease not pushed: another claude credential holds n2"),
-    ("the lease is gone since diagnose", {"ok": True, "lease": None},
-     "lease not pushed: pu-mop-2 holds no lease any more — mop update --cred"),
-]
-
-
-def check_lease_357(c, doctor):
-    group = doctor.module("puppets")
-    fn = getattr(group, "push_outcome", None)
-    if not c.check("#357 puppets.push_outcome exists", fn is not None):
-        return
-    for what, reply, want in PUSHED:
-        c.expect(f"#357 push_outcome: {what}", fn("pu-mop-2", reply), want)
-
-    # Диагноз: без аренды -- проблема без автолечения, названная словами.
-    login = {"name": "pu-mop-2", "alloc": {"NodeName": "n2"},
-             "diagnosis": "login expired", "action": "login+nudge"}
-    hung = {"name": "pu-mop-1", "alloc": {"NodeName": "n1"},
-            "diagnosis": "HUNG (not responding)", "action": "restart"}
-    with restored(puppets, "diagnose"):
-        puppets.diagnose = lambda: [dict(login, lease="anton"), dict(login, lease=None), hung]
-        got = group.diagnose()
-    c.expect("#357 diagnose: leased -> login+nudge; no lease -> the operator's call",
-             [(i["diagnosis"], i["action"]) for i in got],
-             [("login expired", "login+nudge"),
-              ("login expired; no lease — mop update --cred", None),
-              ("HUNG (not responding)", "restart")])
-
-    # Аренда в проблеме -- из меты джоба, в общем diagnose.
-    run = {"ClientStatus": "running", "NodeName": "n2"}
-
-    def item(name, meta):
-        return {"job": {"ID": name, "Meta": meta}, "alloc": run, "stale": False,
-                "state": "login expired", "kind": "login", "task": None, "reason": None}
-    with restored(puppets, "roster"):
-        puppets.roster = lambda stale=False: [
-            item("pu-mop-2", {"origin": "git@h:g/mop.git", "llm": "claude", "cred": "anton"}),
-            item("pu-mop-3", {"origin": "git@h:g/mop.git", "llm": "claude"})]
-        got = puppets.diagnose()
-    c.expect("#357 puppets.diagnose carries the job's lease",
-             [(i["name"], i["action"], i.get("lease")) for i in got],
-             [("pu-mop-2", "login+nudge", "anton"), ("pu-mop-3", "login+nudge", None)])
-
-    # Лечение: cred_push по имени, из контекста вызывающего; не дошло -- без
-    # побудки; отказ сервиса -- строкой, не трассой.
-    nudged, asked = [], []
-    with restored(puppets, "treat"), restored(bus, "call_cluster"):
-        puppets.treat = lambda issue: nudged.append(issue["name"]) or "credentials pushed, nudged"
-        leased = dict(login, lease="anton")
-        bus.call_cluster = lambda verb, **kw: asked.append((verb, kw)) or PUSHED[0][1]
-        c.expect("#357 treat: pushed, then nudged", (group.treat(leased), asked, nudged),
-                 ("credentials pushed, nudged", [("cred_push", {"name": "pu-mop-2"})],
-                  ["pu-mop-2"]))
-        nudged.clear()
-        bus.call_cluster = lambda verb, **kw: PUSHED[1][1]
-        c.expect("#357 treat: not reached -> no nudge", (group.treat(leased), nudged),
-                 (PUSHED[1][2], []))
-
-        def refuse(verb, **kw):
-            raise bus.Refused("pu-mop-2 belongs to project mop, not rugent")
-        bus.call_cluster = refuse
-        c.expect("#357 treat: a refusal of the service -> its text, no nudge",
-                 (group.treat(leased), nudged),
-                 ("lease not pushed: pu-mop-2 belongs to project mop, not rugent", []))
-        bus.call_cluster = lambda verb, **kw: asked.append(verb) or {}
-        asked.clear()
-        c.expect("#357 treat: anything else goes straight to puppets.treat",
-                 (group.treat(hung), asked, nudged), ("credentials pushed, nudged", [], ["pu-mop-1"]))
-
-    # Локального пути в doctor нет.
-    for path in (os.path.join(ROOT, "mop", "client", "doctor", "puppets.py"), CONSUMER):
-        text = open(path).read()
-        c.check(f"#357 no local credentials path in {os.path.relpath(path, ROOT)}",
-                "credentials_fresh" not in text and "push_login" not in text)
-
-
 # ── #358: группа disk -- подметание узлов через шину ──────────────────────
 # HYPOTHESIS: подметание диска запускает только nomad periodic pu-cleanup, и
 # его итог лежит в логах аллокаций: doctor не видит ни кто подмёл, ни кто
@@ -520,7 +416,6 @@ def main():
         check_where_358(c, doctor)
         check_disk_358(c, doctor)
         check_disk_bodies_363(c, doctor)
-        check_lease_357(c, doctor)
         check_safe_359(c, doctor)
         check_unknown_action_370(c)
     else:

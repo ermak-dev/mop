@@ -13,7 +13,7 @@ Run on a client: an operator's machine or a master shell.
 #### mop add
 
 ```text
-create a puppet: mop add [--llm PROFILE] [--cred NAME] [git-origin]
+create a puppet: mop add [--llm PROFILE] [git-origin]
 
 Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>. Nomad decides placement — a puppet
@@ -234,7 +234,7 @@ tail of a puppet's tmux buffer: mop tail <name> [-n N] [-f]
 #### mop update
 
 ```text
-update a puppet: mop update <name> [git-origin] [--llm PROFILE] [--cred NAME] [--fresh] [--force]
+update a puppet: mop update <name> [git-origin] [--llm PROFILE] [--fresh] [--force]
 
 Changes what's named and keeps the rest: without origin the puppet stays on
 its repository, without --llm it stays on its profile. Switching the

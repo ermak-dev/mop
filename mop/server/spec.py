@@ -420,9 +420,9 @@ def task_env(name, origin, profile, prof, cont=False, mem=0):
     return env
 
 
-def job_spec(name, origin, profile=None, cont=False, branch=None, cred=None, node=None):
+def job_spec(name, origin, profile=None, cont=False, branch=None, node=None):
     """Спека джоба. cont=True — первому подъёму по этой спеке разрешено поднять
-    историю каталога (`claude --continue`). cred -- аренда кредита (#284),
+    историю каталога (`claude --continue`).
     метой, как ветка: окружение и врапер те же. node — узел, к которому спека
     привязана (#289): перерегистрация стоящего папета, см. node_constraint.
 
@@ -442,7 +442,7 @@ def job_spec(name, origin, profile=None, cont=False, branch=None, cred=None, nod
     # клон. Окружение задачи и врапер при этом те же, версия шаблона та же,
     # и ни одна зарегистрированная спека не устаревает. Мету собирает одно
     # значение (#265): тот же порядок ключей, что читают все остальные.
-    meta = JobMeta(origin, profile, branch, cred=cred)
+    meta = JobMeta(origin, profile, branch)
     project = Project.of(origin, asks=read_asks())
     try:
         reserve, ceiling = memory(project.asks, MEM_MAX, MEM)
@@ -496,7 +496,7 @@ def respec(name, meta, cont=False, node=None):
     node — узел стоящего папета (#289): update держит его на месте. Сборка
     образа узла не называет: тела снесены, держать некого."""
     return job_spec(name, meta.origin, meta.llm, cont=cont, branch=meta.branch,
-                    cred=meta.cred, node=node)
+                    node=node)
 
 
 def node_constraint(node):

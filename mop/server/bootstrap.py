@@ -452,46 +452,6 @@ def owner_identity(req):
     return identity.profile(identity.server_provider(), login)
 
 
-# Сколько подъём ждёт аренду (#312): cred_push -- Nomad и запись в тело.
-LEASE_TIMEOUT = 45
-# Запас на сам ответ узлу: узел ждёт весь bootstrap не дольше
-# busnames.BOOTSTRAP_TIMEOUT (run.py), и раздача не вправе его съесть.
-REPLY_MARGIN = 5
-# Отказ аренды на этом узле (#312, host): не заметка, а отказ подъёма.
-REFUSED = "refused: "
-_clock = time.time
-
-
-def lease_budget(elapsed):
-    """Сколько секунд дать cred_push после прогона, шедшего elapsed. Чистая.
-    -> секунды | None, если не осталось: прогон может занять до TIMEOUT-10,
-    и раздача сверху сорвала бы подъём, который прогон пропустил."""
-    left = busnames.BOOTSTRAP_TIMEOUT - REPLY_MARGIN - elapsed
-    if left < 1:
-        return None
-    return min(LEASE_TIMEOUT, int(left))
-
-
-def lease_note(name, timeout=LEASE_TIMEOUT):
-    """Аренду папета -- в тело до tmux (#312): cred_push сервиса кластера,
-    у которого Nomad. -> заметка при неудаче либо None. Неудача не роняет
-    подъём: папет встаёт на копии узла, как до #312, а журнал и ответ это
-    называют. timeout None -- времени не осталось (lease_budget)."""
-    if timeout is None:
-        return "no time left for the lease push"
-    try:
-        got = bus.ask_cluster("cred_push", timeout=timeout, project=bus.ADMIN, name=name)
-    except bus.BusError as e:
-        return f"lease not pushed: {e}"
-    if got.get("error"):
-        return f"lease not pushed: {got['error']}"
-    if got.get("refused"):
-        return REFUSED + got["refused"]
-    if not got.get("lease") or got.get("result") == "OK":
-        return None
-    return f"lease {got['lease']} not pushed: {got.get('result')}"
-
-
 def _later(delay, fn):
     """Отложенный вызов своим потоком; шов для проверок (#345)."""
     t = threading.Timer(delay, fn)
@@ -529,7 +489,6 @@ def answer(project, req, _send=None):
         if verb == "ping":
             return {"ok": True, "puppets": _puppets_here()}
         if verb == "bootstrap":
-            started = _clock()
             why = refusal(req, project)
             if why:
                 return {"error": why}
@@ -551,15 +510,7 @@ def answer(project, req, _send=None):
                 return {**out, "gave_up": True, "failures": rec["failures"]}
             # Кред папета едет тем же ответом: узел уже позвал нас, и
             # второго разговора ради одного файла не нужно.
-            out = with_creds(out, puppet_creds(project), project)
-            if out.get("ok"):
-                note = lease_note(req.get("name"), lease_budget(_clock() - started))
-                if note and note.startswith(REFUSED):
-                    # Отказ host-узла (#312): не подъём на чужом аккаунте.
-                    return {"error": note[len(REFUSED):]}
-                if note:
-                    out["lease_note"] = note
-            return out
+            return with_creds(out, puppet_creds(project), project)
         if verb == "identity":
             return owner_identity(req)
         # `put` снят (#133): workspace кладут глаголы жизненного цикла
@@ -587,8 +538,7 @@ def journal(project, req, out):
     else:
         what = "ok"
     lines = [f"{project}.{req.get('verb')} {req.get('name', '')}: {what}"
-             + (f" in {out['seconds']}s" if out.get("seconds") is not None else "")
-             + (f"; {out['lease_note']}" if out.get("lease_note") else "")]
+             + (f" in {out['seconds']}s" if out.get("seconds") is not None else "")]
     if not out.get("ok", True):
         lines.append(f"{out.get('tail', '')}")
     return lines
