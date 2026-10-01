@@ -37,6 +37,30 @@ server {
         proxy_read_timeout 1h;
     }
 
+    # Панель LLM-прокси (#380, эпик #379): страница под /llm/ -- клиентская
+    # часть один инлайн-файл, префикс ей безразличен. Её API панель строит
+    # от корня origin (utils/connection.ts): /v8/management -- потому вторым
+    # location. Оба на петлю: management API прокси отвечает только с неё
+    # (allow-remote: false), и этот TLS -- единственный путь к управлению;
+    # авторизация -- management-ключ самого прокси.
+    location /llm/ {
+        proxy_pass http://127.0.0.1:{{ MOP_LLM_PROXY_PORT }}/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location /v8/management/ {
+        proxy_pass http://127.0.0.1:{{ MOP_LLM_PROXY_PORT }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        # Журнал панели стримится: без буферизации и с запасом времени.
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:{{ MOP_WEB_PORT }};
         proxy_set_header Host $host;

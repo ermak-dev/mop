@@ -1,0 +1,118 @@
+# LLM-прокси на сервере (CLIProxyAPI, #380, эпик #379): подписки claude и
+# codex и Anthropic-совместимые ключи (GLM) за одним /v1/messages для всех
+# профилей папетов и мастера. Пул аккаунтов, ротация и refresh токенов --
+# внутри прокси; узлы держат один токен прокси (secrets.env, #382), никаких
+# секретов провайдеров на узлах больше нет.
+#
+# Сервер, как дашборд и шина: машина, включённая всегда, -- и единственная,
+# кому положено быть освежителем чужих OAuth-токенов (провайдеры ротируют
+# refresh-токен, второй освежитель убивал бы первый). Управление -- панелью
+# самого прокси через TLS-прокси (/llm/, роль proxy), аккаунты лежат в его
+# auth-dir на сервере.
+#
+# Ключи не задаются руками и не ездят по репозиторию: lookup('password')
+# заводит файл в secrets/ при первом прогоне, как пароли шины. Клиентский
+# ключ прокси потом уезжает узлам через secrets.env профиля (#382),
+# management-ключ не покидает сервер: панель спрашивает его у человека,
+# сервис будет читать aggregate'ом с петли (#383).
+---
+# Бинарь пиннуется версией из настроек, как nats-server: обновление --
+# правка MOP_LLM_PROXY_VERSION и прогон. Распаковка -- в версионируемый
+# каталог, а в /usr/local/bin бинарь ложит copy по содержимому: рестарт
+# заказывают только настоящие обновления, а не каждый прогон.
+- name: Release tarball of CLIProxyAPI
+  ansible.builtin.get_url:
+    url: "{{ llm_proxy_tgz }}"
+    dest: "/tmp/cli-proxy-api-{{ MOP_LLM_PROXY_VERSION }}.tar.gz"
+    mode: "0600"
+
+- name: Unpacked release
+  ansible.builtin.file:
+    path: "/tmp/cli-proxy-api-{{ MOP_LLM_PROXY_VERSION }}"
+    state: directory
+    mode: "0700"
+
+- name: Extract the release
+  ansible.builtin.command:
+    argv:
+      - tar
+      - -xzf
+      - /tmp/cli-proxy-api-{{ MOP_LLM_PROXY_VERSION }}.tar.gz
+      - -C
+      - /tmp/cli-proxy-api-{{ MOP_LLM_PROXY_VERSION }}
+      - cli-proxy-api
+    creates: "/tmp/cli-proxy-api-{{ MOP_LLM_PROXY_VERSION }}/cli-proxy-api"
+
+- name: The binary
+  become: yes
+  ansible.builtin.copy:
+    src: "/tmp/cli-proxy-api-{{ MOP_LLM_PROXY_VERSION }}/cli-proxy-api"
+    dest: /usr/local/bin/cli-proxy-api
+    mode: "0755"
+    remote_src: yes
+  notify: restart mop-llm-proxy
+
+# Дом прокси: конфиг и auth-dir с аккаунтами провайдеров. 0700 пользователю
+# пула -- то же, что дому кредита claude (#281): секреты OAuth внутри.
+- name: State dir of the LLM proxy
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop/llm-proxy"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0700"
+
+- name: Config
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ MOP_HOME }}/.config/mop/llm-proxy/config.yaml"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0600"
+  no_log: yes
+  notify: restart mop-llm-proxy
+
+- name: Systemd unit
+  become: yes
+  ansible.builtin.template:
+    src: mop-llm-proxy.service.j2
+    dest: /etc/systemd/system/mop-llm-proxy.service
+    mode: "0644"
+  notify: restart mop-llm-proxy
+
+- name: Enable and start
+  become: yes
+  ansible.builtin.systemd:
+    name: mop-llm-proxy
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Apply the restart now, before the check
+  ansible.builtin.meta: flush_handlers
+
+# Прогоном, а не чтением статуса: юнит в бесконечном рестарте systemd вполне
+# устраивает. /v1/models без аккаунтов отвечает пустым списком -- но ключ
+# проверяет и он: 401 значил бы, что конфиг с другим ключом.
+- name: The proxy answers on the LLM API
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ MOP_LLM_PROXY_PORT }}/v1/models"
+    headers:
+      Authorization: "Bearer {{ llm_proxy_client_key }}"
+    status_code: 200
+  no_log: yes
+  register: llm_proxy_health
+  until: llm_proxy_health.status == 200
+  retries: 20
+  delay: 3
+
+# Management API отвечает только с петли (allow-remote: false) -- прогон и
+# спрашивает с неё. Снаружи этот же порт обязан молчать: узкий путь к
+# управлению -- TLS-прокси, и его проверяет роль proxy... нет, проверим здесь:
+# прямой заход с LAN-адреса (не петли) обязан получить отказ.
+- name: Management refuses non-localhost on the API port
+  ansible.builtin.uri:
+    url: "http://{{ MOP_SERVER_LAN }}:{{ MOP_LLM_PROXY_PORT }}/v8/management/credentials"
+    status_code: [403, 401]
+  register: llm_proxy_remote
+  failed_when: llm_proxy_remote.status not in [401, 403, 404]
