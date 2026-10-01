@@ -291,7 +291,7 @@ DEFAULTS = {
     # Ключ проекта сюда не входит: его имя зависит от проекта, и кладёт его
     # драйвер отдельно, в момент ensure, когда проект известен.
     "MOP_BODY_SEED": ".ssh/id_rsa,.ssh/id_ed25519,.ssh/known_hosts,"
-                     f"{paths.NODE_SECRETS},{paths.CREDENTIALS}",
+                     f"{paths.NODE_SECRETS}",
 }
 
 # Пусто = такой функциональности нет. Проверять надо пустоту, а не отсутствие

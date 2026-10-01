@@ -30,10 +30,6 @@ SESSIONS = os.path.expanduser("~/.claude/sessions")
 STATE = os.path.expanduser("~/.local/state/mop")
 # Записи исхода хода (#222): их пишет хук claude, читает `state`.
 TURNS = os.path.join(STATE, "turns")
-# Метка кредита (#284): имя кредита реестра, которым работает это тело;
-# кладёт сервер вместе с кредами (paths.CRED_MARK), хук вписывает в запись
-# хода, и провал хода приписывается кредиту, а не только папету.
-CRED_MARK = os.path.join(STATE, "cred")
 CONNECT_TIMEOUT = 5
 PRIORITIES = ("now", "next", "later")
 MODES = ("bypass", "prompting")
@@ -198,33 +194,21 @@ def _plain_id(sid):
         all(c.isalnum() or c in "-_" for c in sid) and sid.isascii()
 
 
-def turn_record(payload, now, cred=None):
+def turn_record(payload, now):
     """Вход хука -> запись исхода хода или None (событие не наше, нет
-    session_id). Форма ровно {event, at, error, detail, cred}; cred -- имя
-    кредита из метки тела (#284) либо None."""
+    session_id). Форма ровно {event, at, error, detail}."""
     if not isinstance(payload, dict) or not _plain_id(payload.get("session_id")):
         return None
     event = payload.get("hook_event_name")
     if event in CLEARING:
-        return {"event": event, "at": int(now), "error": None, "detail": None, "cred": cred}
+        return {"event": event, "at": int(now), "error": None, "detail": None}
     if event == FAILURE:
         # Кода нет -- всё равно провал: «unknown» из словаря claude, а не
         # None, который читался бы снятой ошибкой.
         detail = payload.get("last_assistant_message")
         return {"event": event, "at": int(now), "error": payload.get("error") or "unknown",
-                "detail": detail[:DETAIL_MAX] if isinstance(detail, str) and detail else None,
-                "cred": cred}
+                "detail": detail[:DETAIL_MAX] if isinstance(detail, str) and detail else None}
     return None
-
-
-def cred_mark(path=None):
-    """Имя кредита из метки тела либо None: нет файла -- нет аренды."""
-    try:
-        with open(path or CRED_MARK) as f:
-            name = f.read().strip()
-    except OSError:
-        return None
-    return name or None
 
 
 def _write_turn(root, sid, record, now):
@@ -250,7 +234,7 @@ def _write_turn(root, sid, record, now):
 def hook(text, now, root=None):
     """Вход хука (stdin) -> запись на диск, если событие наше."""
     payload = json.loads(text)
-    record = turn_record(payload, now, cred_mark())
+    record = turn_record(payload, now)
     if record is not None:
         _write_turn(root or TURNS, payload["session_id"], record, now)
 

@@ -790,30 +790,21 @@ async def v_clone(_conn, req):
     return {"clone": await clone_facts(req["name"])}
 
 
-def write_targets(project, requested, live, owners, marks, carries_mark, is_container,
-                  node_mark):
-    """Куда писать файлы глагола `write` (#312). Чистая.
+def write_targets(project, requested, live, owners, is_container,
+                  puppet_home=None):
+    """Куда писать файлы глагола `write` (#312, #387). Чистая.
     -> (тела, писать ли копию узла, отказ|None, названные, но не живые).
 
-    Раньше -- всегда в копию узла и во все живые тела: раздача кредита a
-    перетирала кредит b соседа, а `mop login` мастера проекта X -- кредит в
-    телах проекта Y на том же узле. Копия узла -- то, что драйвер сеет в
-    каждое новое тело, и последний писавший побеждал для всех будущих.
+    Меток аренды больше нет (#387): write без адреса пишет копию узла и
+    живые тела без оговорок -- узел -- одного сервера, и «чужой кред» в
+    теле оказаться не может. project -- проект субъекта (admin --
+    оператор); requested -- `bodies` запроса либо None; live -- живые тела
+    (у host -- папеты узла); owners -- {тело: проект}.
 
-    project -- проект субъекта (admin -- оператор); requested -- `bodies`
-    запроса либо None; live -- живые тела (у host -- папеты узла); owners --
-    {тело: проект}; marks -- {тело: метка аренды} ("" -- нет; нечитаемая --
-    не пустая: метка только оберегает от записи); carries_mark -- везёт ли
-    запись метку (так пишет раздача кредита, `mop login` -- никогда);
-    node_mark -- метка на самом узле (у host тело и есть узел).
-
-    Адресная запись (раздача кредита): только названные тела, каждое --
-    папет проекта просящего (admin -- любое); копия узла -- только у host,
-    где тело и есть узел (второй кредит профиля на host-узле отказывает
-    сервис кластера). Без адреса (`mop login`): проект -- только свои тела
-    без аренды и не копию узла (её посеют чужим папетам); admin -- копию
-    узла и тела без аренды. Аренда -- правда, метка -- подсказка: она
-    только не даёт перетереть, и ничего не приписывает (#308)."""
+    Адресная запись: только названные тела, каждое -- папет проекта
+    просящего (admin -- любое); копия узла -- только у host, где тело и
+    есть узел. Без адреса: admin -- копия узла и все живые тела, проект --
+    свои живые тела, у host -- свой узел, когда на нём только свои."""
     admin = project == bus.ADMIN
     if requested is not None:
         bad = [n for n in requested if not driver.valid_name(n)]
@@ -828,25 +819,12 @@ def write_targets(project, requested, live, owners, marks, carries_mark, is_cont
             return [], True, None, []
         return [n for n in requested if n in live], False, None, [
             n for n in requested if n not in live]
-    if admin and carries_mark:
-        # ПЕРЕХОД (#312): раздача кредита от сервера до #312 -- без `bodies`,
-        # с меткой. Пишется, как было; уходит, когда сервер и все агенты
-        # пройдут этот выпуск.
-        return list(live), True, None, []
-    free = [n for n in live if not marks.get(n)]
     if admin:
-        return (free if is_container else []), (is_container or not node_mark), None, []
+        return (list(live) if is_container else []), True, None, []
     if is_container:
-        return [n for n in free if owners.get(n) == project], False, None, []
+        return [n for n in live if owners.get(n) == project], False, None, []
     alone = all(owners.get(n) == project for n in live)
-    return [], alone and not node_mark, None, []
-
-
-async def _mark_of(name, path):
-    """Метка аренды в теле: имя кредита, "" -- нет; не прочиталась -- "?",
-    и тело не перетирается."""
-    out, code = await bsh(name, f"cat {shlex.quote(path)} 2>/dev/null; true")
-    return out.strip() if code == 0 else "?"
+    return [], alone, None, []
 
 
 async def v_write(_conn, req):
@@ -861,8 +839,6 @@ async def v_write(_conn, req):
         if not full:
             return {"error": f"agent is not allowed to write to {path}"}
         files.append((full, bus.file_data(b64)))
-    mark_path = paths.writable(HOME, paths.CRED_MARK)
-    carries_mark = any(p == mark_path for p, _ in files)
     requested = req.get("bodies")
     project = req.get("_project")
     live = await DRIVER.bodies()
@@ -870,20 +846,8 @@ async def v_write(_conn, req):
              if driver.valid_name(n)]
     owners = {} if project == bus.ADMIN else dict(zip(named, await asyncio.gather(
         *(puppet_project(n) for n in named))))
-    marks, node_mark = {}, ""
-    if requested is None and not (project == bus.ADMIN and carries_mark):
-        if driver.separate_bodies(DRIVER):
-            marks = dict(zip(live, await asyncio.gather(*(_mark_of(n, mark_path)
-                                                          for n in live))))
-        else:
-            try:
-                with open(mark_path) as f:
-                    node_mark = f.read().strip()
-            except OSError:
-                node_mark = ""
     bodies, node_copy, refused, absent = write_targets(
-        project, requested, live, owners, marks, carries_mark, driver.separate_bodies(DRIVER),
-        node_mark)
+        project, requested, live, owners, driver.separate_bodies(DRIVER))
     if refused:
         return {"error": refused}
 
