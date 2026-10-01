@@ -27,6 +27,11 @@ def blob(env):
     -> содержимое | None, когда раздавать нечего (ключа нет -- установка
     без прокси, тишина правильнее отказа)."""
     key = env.get("MOP_PROXY_KEY")
+    # config.effective() несёт происхождение настройки кортежем (значение,
+    # источник): в блоб едет значение, а не его repr -- 401 у всех тел
+    # стоил именно этого.
+    if isinstance(key, tuple):
+        key = key[0]
     return f"MOP_PROXY_KEY={key}\n" if key else None
 
 

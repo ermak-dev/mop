@@ -114,6 +114,8 @@ def main():
              proxykey.blob({"Z_AI_KEY": "z1"}), None)
     c.expect("blob: an empty key is no key (#391)",
              proxykey.blob({"MOP_PROXY_KEY": ""}), None)
+    c.expect("blob: effective() carries provenance -- the value rides, not its repr",
+             proxykey.blob({"MOP_PROXY_KEY": ("s1", ".env")}), "MOP_PROXY_KEY=s1\n")
 
     # ── пора ли раздавать (#391): по отпечатку, недошедшие не считаются ──
     c.expect("due: no state -> push", proxykey.due("b", None), True)
