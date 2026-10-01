@@ -1047,8 +1047,11 @@ def check_output_rules(c):
             c.check(f"{what} must be silent on success: out {out!r} err {err!r} code {code!r}",
                     not (out or err or code))
         from mop.cli.pool import doctor
-        # Здоровый пул — одна строка результата, её и показываем.
+        from mop.client.doctor import proxy as proxy_group
+        # Здоровый пул — одна строка результата, её и показываем. Прокси
+        # заглушен: его живость -- про контроллер, не про этот вывод.
         puppets.diagnose = lambda: []
+        proxy_group.diagnose = lambda: []
         out, _, _ = run_command(doctor.main, [])
         c.expect("doctor on a healthy pool", out, "pool is healthy: nothing stuck\n")
         # Советов «run X» в успешном выводе нет: таблица уже говорит [restart].
@@ -1058,6 +1061,7 @@ def check_output_rules(c):
         for what, text in (("doctor", out),):
             c.check(f"{what} advises another command on success: {text!r}",
                     not (re.search(r"\bmop [a-z]+", text)))
+        del proxy_group.diagnose
     check_output_rest(c)
 
 
