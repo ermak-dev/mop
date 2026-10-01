@@ -8,7 +8,6 @@ import { Masters } from "./components/Masters";
 import { Journal } from "./components/Journal";
 import { UsageChart } from "./components/UsageChart";
 import { UsageByUser } from "./components/UsageByUser";
-import { Credentials } from "./components/Credentials";
 import { LoadBadges, LoadBar } from "./components/PoolLoad";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 
@@ -52,7 +51,6 @@ export default function App() {
               <UsageChart days={snapshot.usage} />
               <UsageByUser users={snapshot.per_user} />
               {/* кредиты (#300) */}
-              <Credentials creds={snapshot.creds} />
               <Journal journal={snapshot.journal} />
             </>
           )}
