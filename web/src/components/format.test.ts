@@ -1,6 +1,5 @@
 // Запись чисел и корзин как на старой странице (#298).
-import { credStatusText, gb, gbOfMb, hhmmss, human, listOrDash, percentText, plural,
-  presentKinds, ratio, statusColor, untilText } from "./format";
+import { gb, gbOfMb, hhmmss, human, plural, ratio, untilText } from "./format";
 
 test("gb: kilobytes to GB or MB, dash without data", () => {
   expect(gb(null)).toBe("-");
@@ -54,13 +53,6 @@ test("days decline in Russian", () => {
 });
 
 // Вынесены из компонентов и creds-api (#323): поведение прежнее.
-test("present kinds, list or dash, credential status and percent", () => {
-  expect(presentKinds({ puppets: 3, free: 1, busy: 0, sick: 2, silent: 0, down: 0 })).toEqual(["free", "sick"]);
-  expect(listOrDash([])).toBe("-");
-  expect(listOrDash(["pu-mop-1", "pu-mop-3"])).toBe("pu-mop-1, pu-mop-3");
-  expect(percentText(null)).toBe("-");
-  expect(percentText(51)).toBe("51%");
-});
 
 // Время сброса квоты (#331): в поясе смотрящего, «до чч:мм» сегодня и
 // «до дд.мм чч:мм» в другой день. Пояс и «сейчас» закреплены: проверка не
@@ -80,25 +72,7 @@ test("#331 the reset time reads in the viewer's zone, with a date when not today
 // #326: виды -- из снимка (#325), а не из слов. Цвет бейджа -- по
 // status_kind, время сброса -- только к quota_wait. Снимок сервера до #325
 // видов не несёт: бейдж серый, слово как есть, без «до …».
-test("#326 the credential badge colour comes from status_kind", () => {
-  expect(statusColor("active")).toBe("green");
-  expect(statusColor("quota_wait")).toBe("yellow");
-  expect(statusColor("needs_login")).toBe("red");
-  expect(statusColor("unknown")).toBe("gray");
-  expect(statusColor(undefined)).toBe("gray");
-});
 
-test("#326 the reset time goes only to quota_wait, whatever the word", () => {
-  const msk = "Europe/Moscow";
-  const reset = at(2026, 9, 30, 2, 0);
-  expect(credStatusText("ждёт квоты", "quota_wait", reset, NOW, msk)).toBe("ждёт квоты до 30.09 05:00");
-  // Слово сменилось -- время на месте: страница держится вида, не слова.
-  expect(credStatusText("квота кончилась", "quota_wait", reset, NOW, msk)).toBe("квота кончилась до 30.09 05:00");
-  expect(credStatusText("ждёт квоты", "quota_wait", null, NOW, msk)).toBe("ждёт квоты");
-  expect(credStatusText("активен", "active", reset, NOW, msk)).toBe("активен");
-  // Снимок без status_kind (сервер до #325, у которого до #331 время уже в слове).
-  expect(credStatusText("ждёт квоты до 05:00:00", undefined, reset, NOW, msk)).toBe("ждёт квоты до 05:00:00");
-});
 
 // Свободная память узла (#329): вниз, как `mop node` и строка пула. Узел с
 // 1536 МБ -- «1 GB»: папет резервирует 8 ГБ, и показать места больше, чем

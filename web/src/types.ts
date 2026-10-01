@@ -20,7 +20,6 @@ export interface Project { name: string; puppets: Puppet[]; counts: Counts }
 /** Корзина узла, которую считает сервер (#325, nodes.bucket). */
 export type NodeKind = "free" | "busy" | "down";
 /** Вид статуса кредита (#325, web.cred_status_kind). */
-export type CredStatusKind = "active" | "quota_wait" | "needs_login" | "unknown";
 
 /** Узел; error -- только у узла с отказом (NodeRow.to_row на сервере); kind
  *  -- корзина от сервера (#325), у снимка до #325 её нет. */
@@ -37,13 +36,6 @@ export interface PuppetUsage extends Tokens { name: string; node: string }
 /** Событие журнала: метку at ставит сборщик каждому (Collector.event). */
 export interface JournalEntry { at: number; event: string; name: string; node: string; project: string; text: string }
 /** Строка реестра кредитов; holders -- всегда список, пустой без аренды. */
-export interface Cred {
-  name: string; profile: string; kind: string; owner: string; status: string;
-  /** вид статуса (#325); kind выше -- вид самого кредита (login/token/key) */
-  status_kind?: CredStatusKind;
-  resets_at: number | null; percent: number | null; age: string; holders: string[];
-}
-
 /** Сегмент полосы аллокаций (#378): корзина бегущих папетов, «прочее
  *  выделенное» (other) или свободные места (vacant) -- в порядке сервера. */
 export type LoadKind = "busy" | "free" | "sick" | "silent" | "other" | "vacant";
@@ -62,7 +54,6 @@ export interface Snapshot {
   per_user: UsageUser[];
   journal: JournalEntry[];
   errors: string[];
-  creds: Cred[];
   masters: Master[];
   /** период опроса who в секундах (#325, MASTERS_EVERY) */
   masters_every?: number;
