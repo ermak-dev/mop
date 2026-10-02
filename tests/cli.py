@@ -1954,6 +1954,23 @@ def check_fallback_model_183(c):
     check_free_floor_329(c)
     check_add_failure_377(c)
     check_add_argv_399(c)
+    check_master_argv_400(c)
+
+
+# HYPOTHESIS: после смены интерфейса на main(argv) master всё ещё передавал
+# старую переменную args парсеру, падая до определения проекта.
+# SOLUTION: передавать argv напрямую в claude_args.
+# RESULT: лишний origin отвергается без запуска claude или обращения к шине.
+# STATUS: FIXED — see #400
+def check_master_argv_400(c):
+    from mop.cli.core import master
+    try:
+        out, err, code = run_command(master.main, ["git@h:g/a.git", "git@h:g/b.git"])
+    except NameError as e:
+        c.fail("#400 mop master must parse argv before starting a session", str(e))
+        return
+    c.check("#400 mop master refuses two origins with usage",
+            code != 0 and "mop master" in str(code), (out, err, code))
 
 
 # HYPOTHESIS: после переноса командлета на main(argv) тело mop add осталось
