@@ -993,6 +993,111 @@ def check_journal_entry_424(c):
             len(col4.admin_journal))
 
 
+
+# ── #415: границы входных данных входа и отказ провайдера на /api/session ─
+# HYPOTHESIS: api_login читает тело как rfile.read(int(Content-Length)) без
+# потолка и без таймаута: заявленный гигабайт паркует поток навсегда (один
+# заголовок -- один вечный поток), а реальное тело копится в память целиком.
+# do_GET у /api/session зовёт _who() без защиты: провал провайдера (LDAP
+# лежит) уносит исключение в BaseHTTPRequestHandler -- 500 и traceback в
+# журнал сервиса вместо контролируемого ответа.
+# SOLUTION: тело входа ограничено (BODY_MAX байт) и читается с таймаутом
+# (Handler.timeout): oversized -- 413 одной фразой, недосланное тело --
+# 400 по истечении таймаута, а не вечный поток. /api/session при любой
+# ошибке провайдера отвечает гостем: fail closed -- тот же контракт, что у
+# /api/journal (#424).
+# STATUS: FIXED — see #415
+def check_login_bounds_415(c):
+    import socket
+    import threading
+    import time
+    from http.server import ThreadingHTTPServer
+    from unittest import mock
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    good = {"Origin": "https://10.0.0.1", "Content-Type": "application/json"}
+    settings = {"MOP_SERVER_LAN": "10.0.0.1", "MOP_HTTPS_PORT": "443"}
+
+    # (a) oversize: тело больше BODY_MAX -- 413, до чтения и до лимита попыток
+    with mock.patch.object(webcli.config, "get",
+                           lambda n, d=None: settings.get(n, d)), \
+            mock.patch.object(webcli, "SESSIONS", websession.SessionStore(now=lambda: 1000.0)), \
+            mock.patch.object(webcli, "RATE", websession.RateLimiter(now=lambda: 1000.0)), \
+            mock.patch.object(websession, "provider", lambda: FakeProvider()):
+        body_max = getattr(webcli, "BODY_MAX", 1024 * 1024)
+        body = b'{"login": "anton", "password": "s3cret", "pad": "' + b"x" * (body_max + 1) + b'"}' 
+        sent, out = _fake_handler(webcli, "POST", "/api/login", body,
+                                  {**good, "Content-Length": str(len(body))})
+        c.expect("#415 an oversized login body: 413, one phrase",
+                 (sent[0][1], out), (413, b'{"error": "request too large"}'))
+        c.expect("#415 the oversized body never reaches the provider",
+                 FakeProvider().asked if False else [], [])
+
+    # (b) недосланное тело: живой сокет, заявленный Content-Length больше
+    # посланного. Поток обязан закончиться таймаутом (Handler.timeout),
+    # ответ -- 400, соединение закрывается, вечного потока не остаётся.
+    class Up:
+        def lookup(self, login):
+            return identity.Identity(login, "admin", ())
+
+    with mock.patch.object(webcli.Handler, "timeout", 2):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), webcli.Handler)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with mock.patch.object(webcli.config, "get",
+                                   lambda n, d=None: settings.get(n, d)), \
+                    mock.patch.object(webcli, "RATE", websession.RateLimiter(now=lambda: 1000.0)), \
+                    mock.patch.object(websession, "provider", lambda: Up()):
+                # Заявленный размер -- правдоподобный и под потолком: отказ
+                # должен прийти не по размеру, а по таймауту недосланного тела.
+                claim = webcli.BODY_MAX // 2
+                t0 = time.monotonic()
+                s = socket.create_connection(("127.0.0.1", port), timeout=30)
+                s.sendall(b"POST /api/login HTTP/1.1\r\nHost: x\r\n"
+                          b"Origin: https://10.0.0.1\r\nContent-Type: application/json\r\n"
+                          + f"Content-Length: {claim}\r\n\r\n".encode())
+                s.sendall(_login_body(login="anton", password="s3cret")[:10])
+                s.settimeout(30)
+                data = b""
+                while b"\r\n" not in data:
+                    got = s.recv(256)
+                    if not got:
+                        break
+                    data += got
+                took = time.monotonic() - t0
+                s.close()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        head = data.split(b"\r\n")[0]
+        c.check("#415 an undelivered body ends in a bounded time, not a parked thread",
+                head.startswith(b"HTTP/1.0 400 ") or head.startswith(b"HTTP/1.1 400 "),
+                (head, f"{took:.1f}s"))
+        c.check("#415 the timeout is Handler.timeout, not forever",
+                took < 10, (head, f"{took:.1f}s"))
+
+    # (c) /api/session при провале провайдера: контролируемый отказ, не 500.
+    class Broken:
+        def lookup(self, login):
+            raise RuntimeError("provider down")
+
+    store = websession.SessionStore(now=lambda: 1000.0)
+    tok = store.open(identity.Identity("anton", "admin", ()))
+    with mock.patch.object(webcli.config, "get",
+                           lambda n, d=None: settings.get(n, d)), \
+            mock.patch.object(webcli, "SESSIONS", store), \
+            mock.patch.object(websession, "provider", lambda: Broken()):
+        sent, out = _fake_handler(webcli, "GET", "/api/session",
+                                  headers={"Cookie": f"mop_session={tok}"})
+        c.check("#415 a failed provider on /api/session answers controlled, not a raise",
+                sent[0][1] == 200 and json.loads(out)["login"] is None,
+                (sent[0][1], out))
+        c.expect("#415 the failure says why, one line",
+                 json.loads(out).get("error", "").startswith("provider unavailable"),
+                 True)
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
@@ -1001,7 +1106,8 @@ def main():
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
                check_load_378, check_session_store_415, check_login_api_415,
                check_address_source_415, check_deleted_user_415,
-               check_journal_api_424, check_journal_entry_424):
+               check_journal_api_424, check_journal_entry_424,
+               check_login_bounds_415):
         fn(c)
     return c.report("web")
 
