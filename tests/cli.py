@@ -359,8 +359,40 @@ def check_reference_committed_350(c):
         c.check(f"#350 no legacy name mop {words}", f"\n#### mop {words}\n" not in md)
 
 
+# HYPOTHESIS: environment() исполняется до клиентского командлета и читает
+# installation .env; дочерний mop mcp стартует тем же диспетчером.
+# SOLUTION: диспетчер выбирает клиентский источник до environment и run,
+# а dev/server сохраняют установочный файл.
+# RESULT: list, join и mcp не открывают .env; dev и server сохраняют источник.
+# STATUS: FIXED — see #396
+def check_dispatch_sources_396(c):
+    from mop.common import config
+    opened = []
+    def read_installation():
+        opened.append(True)
+        return {"MOP_LOCALE": "C.UTF-8"}
+    def command(module):
+        def main(argv):
+            config.get("MOP_LOCALE")
+            return 0
+        return main
+    with patched(config, _load=read_installation), patched(cli, command=command):
+        for name, module, client in (("list", "mop.cli.core.list", True),
+                                     ("join", "mop.cli.pool.join", True),
+                                     ("mcp", "mop.cli.service.mcp", True),
+                                     ("dev", "mop.cli.dev", False),
+                                     ("server", "mop.cli.server", False)):
+            with patched(cli, resolve=lambda *a: (module, [])):
+                opened.clear()
+                _, _, code = run_command(cli.main, [name])
+                c.expect(f"#396 {name} dispatch succeeds", code, 0)
+                c.check(f"#396 {name} installation source selection",
+                        (not opened) if client else bool(opened), opened)
+
+
 def main():
     c = Checks()
+    check_dispatch_sources_396(c)
     check_reference_render_350(c)
     check_reference_empty_350(c)
     check_reference_committed_350(c)

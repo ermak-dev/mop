@@ -30,6 +30,8 @@ GitLab, которым в пуле делать нечего. Всё, что н�
 Дефолты при этом всё равно обязаны быть рабочими сами по себе: узел, до
 которого deploy ещё не доходил, обязан вести себя разумно.
 """
+import contextlib
+import contextvars
 import os
 import pwd
 
@@ -525,6 +527,21 @@ def require(*names):
                       + "\n\ntemplate: cp .env.example .env")
 
 _cache = {}
+_client_sources = contextvars.ContextVar("mop_client_sources", default=False)
+
+
+@contextlib.contextmanager
+def client_sources():
+    """Клиент читает окружение, node.env и дефолты, но не .env установки."""
+    token = _client_sources.set(True)
+    try:
+        yield
+    finally:
+        _client_sources.reset(token)
+
+
+def _installation():
+    return {} if _client_sources.get() else _load()
 
 
 def read_env(path):
@@ -601,7 +618,7 @@ def get(name, default=None):
     if name in PROCESS_SCOPED:
         return os.environ.get(name) or default
     value = (_context(name) or os.environ.get(name)
-             or _node().get(name) or _load().get(name))
+             or _node().get(name) or _installation().get(name))
     if value:
         return value
     return DERIVED[name]() if not default and name in DERIVED else default
@@ -620,8 +637,8 @@ def effective():
             out[name] = (default, "default")
         elif _node().get(name):
             out[name] = (_node()[name], "node")
-        elif _load().get(name):
-            out[name] = (_load()[name], ".env")
+        elif _installation().get(name):
+            out[name] = (_installation()[name], ".env")
         elif name in DERIVED:
             out[name] = (DERIVED[name](), "derived")
         else:
