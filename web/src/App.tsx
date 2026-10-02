@@ -47,18 +47,22 @@ export default function App() {
     };
   }, []);
 
-  const login = async (login: string, password: string) => {
+  // Возврат -- успех входа: SessionBox закрывает окно только на true.
+  // Отказ (401/429/сбой) не бросаем дальше: это не ошибка страницы.
+  const login = async (login: string, password: string): Promise<boolean> => {
     try {
       setSession(await postLogin(login, password));
       setFailed(null);
       // успех входа снимает и прошлую ошибку панели: страница снова в порядке
       setPanelError(null);
       authEpoch.current++;
+      return true;
     } catch (e) {
       // 401 -- сервер отказал, 429 -- лимит попыток; остальное -- панель
       setFailed(e instanceof LoginRefused
         ? (e.status === 401 ? "неверный логин или пароль" : e.reason)
         : "панель недоступна");
+      return false;
     }
   };
   const logout = async () => {

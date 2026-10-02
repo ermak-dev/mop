@@ -100,6 +100,7 @@ test("#416 login flow: the session box appears after a successful POST", async (
 test("#416 a wrong password shows the localized reason, password field empty", async () => {
   reset({ login: null, role: null }); // прошлый тест вошёл антоном
   renderUi(<App />);
+  // ...тело ниже осталось, см. новый интеграционный тест ревью
   fireEvent.click(screen.getByRole("button", { name: "Login" }));
   // модал появляется с переходом; ждём оба поля, потом меняем
   const user = await screen.findByLabelText("Логин", {}, { timeout: 3000 });
@@ -186,4 +187,45 @@ test("#416 focus re-checks the session: TTL turned an admin into a guest", async
   fireEvent.focus(window);
   await waitFor(() => expect(screen.queryByText("anton")).toBeNull());
   expect(screen.getByRole("button", { name: "Login" })).toBeInTheDocument();
+});
+
+
+// Ревью 2 (#416): App.login глотает отказ и возвращает fulfilled Promise --
+// с настоящим (не подменённым) onLogin окно обязано остаться открытым.
+test("#416 integration: after a 401 the modal stays open with the reason", async () => {
+  reset({ login: null, role: null });
+  renderUi(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.change(await screen.findByLabelText("Логин", {}, { timeout: 3000 }),
+                   { target: { value: "olga" } }); // мок отказывает всем, кроме anton
+  fireEvent.change(await screen.findByLabelText("Пароль", {}, { timeout: 3000 }),
+                   { target: { value: "wrong" } });
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  await waitFor(() => expect(screen.getByText("неверный логин или пароль")).toBeInTheDocument());
+  // ждём дольше выхода анимации модала: закрытое окно убирает поля из DOM,
+  // открытое -- держит их и причину рядом
+  await new Promise((r) => setTimeout(r, 400));
+  expect(screen.getByText("неверный логин или пароль")).toBeInTheDocument();
+  expect(screen.getByLabelText("Пароль")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "Войти" })).toBeInTheDocument();
+});
+
+// Ревью 2 (#416): поздний стартовый опрос обязан РАЗРЕШИТЬСЯ гостем уже
+// после успешного входа -- и не затереть его.
+test("#416 a late guest answer arriving after login leaves the login alone", async () => {
+  reset({ login: null, role: null });
+  let release: (s: Session) => void = () => {};
+  const gate = new Promise<Session>((r) => { release = r; });
+  (vi.mocked(await import("./useSession")) as { fetchSession: unknown }).fetchSession =
+    () => gate as Promise<Session>;
+  renderUi(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.change(await screen.findByLabelText("Логин", {}, { timeout: 3000 }),
+                   { target: { value: "anton" } });
+  fireEvent.change(screen.getByLabelText("Пароль"), { target: { value: "x" } });
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  await waitFor(() => expect(screen.getByText("anton")).toBeInTheDocument());
+  release({ login: null, role: null }); // опоздавший ответ -- гость
+  await new Promise((r) => setTimeout(r, 50));
+  expect(screen.getByText("anton")).toBeInTheDocument();
 });

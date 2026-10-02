@@ -33,11 +33,9 @@ test("#416 the modal asks login and password and submits them", async () => {
 
 test("#416 a wrong password shows the reason and clears the field", async () => {
   // После отказа поле пароля пусто: пароль не остаётся в DOM дольше попытки.
-  // Отказ обязан дойти до App (тот покажет причину): перехватываем тут,
-  // чтобы проверка ждала именно отказа, а не висящего промиса.
+  // Отказ -- возвращённое false, как в App после правки контракта.
   let refused = false;
-  const onLogin = vi.fn(() =>
-    Promise.reject(new Error("no")).finally(() => { refused = true; }));
+  const onLogin = vi.fn(async () => { refused = true; return false; });
   renderUi(<SessionBox session={GUEST} onLogin={onLogin} onLogout={vi.fn()} failed={null} />);
   fireEvent.click(screen.getByRole("button", { name: "Login" }));
   const pwd = await screen.findByLabelText("Пароль");
@@ -90,7 +88,7 @@ test("#416 closing the modal clears the password (X and Отмена)", async ()
 });
 
 test("#416 a successful login closes the modal; after logout it is closed too", async () => {
-  const onLogin = vi.fn().mockResolvedValue(undefined);
+  const onLogin = vi.fn().mockResolvedValue(true);
   const view = renderUi(<SessionBox session={GUEST} onLogin={onLogin} onLogout={vi.fn()} failed={null} />);
   fireEvent.click(screen.getByRole("button", { name: "Login" }));
   fireEvent.change(await screen.findByLabelText("Пароль"), { target: { value: "secret" } });
@@ -106,11 +104,14 @@ test("#416 a successful login closes the modal; after logout it is closed too", 
 });
 
 test("#416 a failed login keeps the modal open with the reason", async () => {
-  const onLogin = vi.fn(() => Promise.reject(new Error("no")));
+  // App после правки возвращает false, не бросает
+  const onLogin = vi.fn().mockResolvedValue(false);
   renderUi(<SessionBox session={GUEST} onLogin={onLogin} onLogout={vi.fn()} failed="неверный логин или пароль" />);
   fireEvent.click(screen.getByRole("button", { name: "Login" }));
   fireEvent.change(await screen.findByLabelText("Пароль"), { target: { value: "x" } });
   fireEvent.click(screen.getByRole("button", { name: "Войти" }));
   await waitFor(() => expect(screen.getByLabelText("Пароль")).toHaveValue(""));
-  expect(screen.queryByLabelText("Пароль")).not.toBeNull(); // окно ещё открыто
+  // окно открыто и после успокоения анимации
+  await new Promise((r) => setTimeout(r, 400));
+  expect(screen.getByLabelText("Пароль")).toBeInTheDocument();
 });

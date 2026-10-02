@@ -8,7 +8,9 @@ import { GUEST, type Session } from "../useSession";
 
 type Props = {
   session: Session;
-  onLogin: (login: string, password: string) => Promise<void>;
+  /** true -- вход удался (окно закроется), false -- отказ (окно остаётся,
+   *  рядом причина в failed). Не бросает: отказ входа -- не ошибка страницы. */
+  onLogin: (login: string, password: string) => Promise<boolean>;
   onLogout: () => Promise<void>;
   /** Причина отказа входа с сервера (LoginRefused.reason), null -- нет отказа. */
   failed: string | null;
@@ -27,14 +29,8 @@ export function SessionBox({ session, onLogin, onLogout, failed }: Props) {
     // После попытки -- успеха или отказа -- пароля в поле нет: он живёт
     // ровно на время попытки и никуда больше не записывается. Успех
     // закрывает окно; отказ оставляет открытым -- рядом причина.
-    try {
-      await onLogin(login, password);
-      setOpen(false);
-    } catch {
-      // Причину отказа покажет App (failed); здесь важно одно: поле пусто
-    } finally {
-      setPassword("");
-    }
+    setPassword("");
+    if (await onLogin(login, password)) setOpen(false);
   };
 
   if (session.login) {
