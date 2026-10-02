@@ -268,28 +268,25 @@ def check_masters_305(c):
                  "session": "mop-ab", "cwd": "/home/ermak/mop"},
                 {"master": "ivan.box-3", "project": "mop", "user": "ivan",
                  "session": None, "cwd": None},
-                # #421: тот же мастер ответил дважды, но без sessionId у ответа
-                # нет личности -- склеивать нельзя, строк две. С sessionId
-                # дубль склеен в check_master_sessions_421.
+                # тот же мастер ответил дважды (две подписки) -- одна строка:
+                # без sessionId (#421) дедуп -- по самому (project, address).
                 {"master": "ermak.mate-7", "project": "mop", "user": "ermak",
                  "session": "mop-ab", "cwd": "/home/ermak/mop"}],
         "rugent": [],
     }
     got = web.master_rows(answers, rows)
-    c.expect("#305 rows by project, user and address (#421: no sessionId -- no glue)",
+    c.expect("#305 one row per master, by project, user and address",
              [(m["project"], m["user"], m["master"]) for m in got],
-             [("mop", "ermak", "ermak.mate-7"), ("mop", "ermak", "ermak.mate-7"),
-              ("mop", "ivan", "ivan.box-3")])
+             [("mop", "ermak", "ermak.mate-7"), ("mop", "ivan", "ivan.box-3")])
     c.expect("#305 puppets of the project leased by that login",
-             [m["puppets"] for m in got],
-             [["pu-mop-1", "pu-mop-3"], ["pu-mop-1", "pu-mop-3"], ["pu-mop-2"]])
+             [m["puppets"] for m in got], [["pu-mop-1", "pu-mop-3"], ["pu-mop-2"]])
     c.expect("#305 empty session and directory read as a dash",
-             (got[2]["session"], got[2]["cwd"]), ("-", "-"))
+             (got[1]["session"], got[1]["cwd"]), ("-", "-"))
     c.expect("#305 a reply without a project falls under the asked one",
              web.master_rows({"x": [{"master": "a.b-1", "user": "a"}]}, [])[0]["project"], "x")
     snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=[], journal=[],
                         errors=[], at=1.0, masters=got)
-    c.expect("#305 the snapshot carries the masters", len(snap["masters"]), 3)
+    c.expect("#305 the snapshot carries the masters", len(snap["masters"]), 2)
 
 
 # ── #297: страница -- собранное React-приложение из web/dist ─────────────
@@ -628,6 +625,15 @@ def check_master_sessions_421(c):
     # Дубль ответа той же сессии -- по-прежнему одна строка.
     twice = web.master_rows({"mop": answers["mop"] + [answers["mop"][0]]}, rows)
     c.expect("#421 a duplicate who answer adds no row", len(twice), 4)
+    # Legacy (#421, ревью): повтор ТОГО ЖЕ who-адреса без sessionId -- один
+    # ответивший endpoint, одна строка; разные адреса -- разные строки.
+    legacy = [{"master": "ermak.mate-7", "user": "ermak", "session": "mop-ab",
+               "sessionId": None, "cwd": "/h/ermak/mop"}]
+    c.expect("#421 the same legacy address twice: one row",
+             len(web.master_rows({"mop": legacy + legacy}, rows)), 1)
+    c.expect("#421 different legacy addresses: two rows",
+             len(web.master_rows({"mop": legacy + [{**legacy[0], "master": "ermak.box-9"}]},
+                                 rows)), 2)
 
 
 def check_who_answer_421(c):
