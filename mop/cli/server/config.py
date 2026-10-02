@@ -25,7 +25,8 @@ def main(argv):
     if argv:
         lib.usage(__doc__)
     print("\n".join(table([("SETTING", "VALUE", "SOURCE")]
-                          + [(k, v, src) for k, (v, src) in eff.items()])))
+                          + [(k, "[redacted]" if k == "MOP_PROXY_KEY" else v, src)
+                             for k, (v, src) in eff.items()])))
     print(f"\nfile: {config.ENV_FILE}")
 
 

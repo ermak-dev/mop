@@ -144,10 +144,10 @@ EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml", "w
 # передавал. Порт и DC Nomad -- из тикета; объём, потолок, посев и PATH папета
 # нашла проверка ниже (их читает mop/server/spec.py, а спецификацию теперь собирает
 # сервис кластера, не машина оператора с её .env); с #390 сюда же адрес
-# и ключ LLM-прокси -- их читают спека (mop.common.llm) и раздача (#391).
+# LLM-прокси, а ключ с #393 читается из закрытого файла, не из unit (#402).
 ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          "MOP_MEM_MB", "MOP_PUPPET_SEED", "MOP_PUPPET_PATH",
-                         "MOP_PROXY_URL", "MOP_PROXY_KEY",
+                         "MOP_PROXY_URL",
                          # reload шины с проверкой (#211): /varz на петле.
                          "MOP_NATS_MONITOR_PORT")}
 # Несекретные настройки провайдера личностей (#214) -- сервисам, которые его
