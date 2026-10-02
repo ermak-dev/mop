@@ -38,7 +38,7 @@ vi.mock("./useSession", async () => {
 vi.mock("./useJournal", () => {
   const state = { journal: [] as JournalEntry[], error: null as string | null };
   return {
-    useJournal: () => state,
+    useJournal: (_session: unknown, active: boolean) => (active ? state : { journal: [], error: null }),
     __setJournal: (j: JournalEntry[], e: string | null) => { state.journal = j; state.error = e; },
   };
 });

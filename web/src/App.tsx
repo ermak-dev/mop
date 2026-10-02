@@ -30,9 +30,10 @@ export default function App() {
   const [session, setSession] = useState<Session>(GUEST);
   const [failed, setFailed] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
-  // Журнал (#422): закрытый источник, тянет только admin; на 401/403 и
-  // смену роли записи стирает сам хук -- на экране не остаётся прежних.
-  const journal = useJournal(session);
+  // Журнал (#422): закрытый источник, тянет только admin и только пока
+  // страница журнала открыта (опрос каждые POLL_S, ревью #422); на 401/403
+  // и смену роли записи стирает сам хук -- на экране не остаётся прежних.
+  const journal = useJournal(session, page === "journal");
   // Стартовый опрос и обновление на возврат к вкладке (#416, ревью): cookie
   // сессии живёт TTL, и открытая вкладка без reload показывала бы админ-ссылку
   // и логин вечно. Порядок без гонки со входом: опрос кладёт ответ только

@@ -3,7 +3,7 @@
 // открывается кликом или с клавиатуры (кнопка в ячейке времени -- вся
 // строка доступна Tab'ом и Enter'ом). Новые сверху; снимок не хранится --
 // что пришло из useJournal, то и на экране.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Table, Text, UnstyledButton } from "@mantine/core";
 import type { JournalEntry } from "../types";
 import { fullAt, journalText } from "../journalView";
@@ -47,6 +47,10 @@ export function JournalPage({ journal, error = null, open, initial }: {
 }) {
   const [entry, setEntry] = useState<JournalEntry | null>(initial ?? null);
   const items = [...journal].reverse();   // новые сверху
+  // Открытый диалог не переживает отказ источника (ревью #422): журнал --
+  // только действующему админу, и error здесь значит, что право ушло, --
+  // ни диалога, ни таблицы устаревших данных на экране.
+  useEffect(() => { if (error) setEntry(null); }, [error]);
   return (
     <div data-testid="journal-page">
       <SectionTitle title="Журнал" note={items.length ? "события шины, новые сверху" : undefined} />

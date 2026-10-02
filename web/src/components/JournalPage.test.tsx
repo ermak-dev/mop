@@ -8,8 +8,10 @@
 // RESULT: тесты написаны до реализации (RED).
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
+import { MantineProvider } from "@mantine/core";
 import { renderUi } from "../test-utils";
 import { JournalPage } from "./JournalPage";
+import { JournalModal } from "./JournalModal";
 import type { JournalEntry } from "../types";
 
 const J: JournalEntry[] = [
@@ -59,9 +61,45 @@ test("the refusal reason shows instead of a stale journal", () => {
   expect(screen.queryByRole("row")).toBeNull();
 });
 
-// Страница рисует и сам диалог: выбранная запись сразу видна целиком.
-test("the page renders the modal for the chosen entry", async () => {
-  renderUi(<JournalPage journal={J} open={() => {}} initial={J[1]} />);
-  await waitFor(() =>
-    expect(screen.getByRole("dialog", { name: /send — pu-mop-1/ })).toBeInTheDocument());
+// Ревью #422: открытый диалог не переживает отказ источника. Журнал --
+// только действующему админу: как только приходит error, диалог закрывается
+// и таблица уходит -- ни одного кадра устаревших данных на экране.
+test("review: an open modal closes the moment the source refuses", async () => {
+  const view = renderUi(<JournalPage journal={J} error={null} open={() => {}} initial={J[1]} />);
+  expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  // источник отказал: 401/403/роль ушла -- hook положил error и пустой журнал
+  view.rerender(<MantineProvider>
+    <JournalPage journal={[]} error="журнал недоступен: прав не хватает" open={() => {}} />
+  </MantineProvider>);
+  // диалог закрыт сразу, без ждущего клика; записей нет
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByText(/прав не хватает/)).toBeInTheDocument();
+});
+
+// Блокер ревью (4): oversized-маркер #424 несёт только {event,text,at,
+// received_at} -- name/node/project в записи нет. Диалог обязан рисовать
+// такой маркер без crash'а, пустые поля показывая прочерком.
+test("review: an oversized marker without name/node/project renders, not crashes", () => {
+  const marker = { at: 1700000000, received_at: 1700000001, event: "type",
+                   text: "[oversized: 64 KB]" } as JournalEntry;
+  renderUi(<JournalModal entry={marker} onClose={() => {}} />);
+  const dlg = screen.getByRole("dialog");
+  expect(dlg.textContent).toContain("type");
+  expect(dlg.textContent).toContain("[oversized: 64 KB]");
+  expect(dlg.textContent).not.toContain("undefined");
+});
+
+// Блокер ревью (5): полное событие копируем в буфер одной кнопкой.
+test("review: the modal copies the full entry JSON to the clipboard", async () => {
+  const E: JournalEntry = { at: 1700000000, event: "send", name: "pu-mop-1",
+                            node: "hyper", project: "mop", text: "from ermak" };
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  renderUi(<JournalModal entry={E} onClose={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: /копировать/i }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+  // запись целиком, читаемо отступами; проверяем содержимое, не формат
+  const sent = writeText.mock.calls[0][0] as string;
+  expect(JSON.parse(sent)).toEqual(E);
+  vi.unstubAllGlobals();
 });
