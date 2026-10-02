@@ -29,6 +29,15 @@ from mop.cli.core import _common
 from mop.cli.pool import login
 
 
+def claude_argv(passthru):
+    """Аргументы запуска claude -> список. Чистая функция (#419): и флаг
+    пропуска разрешений, и отключение черновиков отзыва живут здесь, у
+    фактического execvpe -- одно место на оба."""
+    skip = "--dangerously-skip-permissions"
+    args = ([] if skip in passthru else [skip]) + list(passthru)
+    return ["claude", *args, *_common.FEEDBACK_SETTINGS]
+
+
 def main(argv):
     login.ensure()
     # Никакого разбора позиционных: своих аргументов у команды нет, и всё
@@ -44,8 +53,7 @@ def main(argv):
     # Флаг добавляется здесь, а не оставляется пользователю: команда для
     # того и есть, чтобы сесть за работу без церемоний. Свой экземпляр из
     # passthru не дублируем — claude второй раз не нужен.
-    skip = "--dangerously-skip-permissions"
-    args = ([] if skip in passthru else [skip]) + passthru
+    args = claude_argv(passthru)[1:]
     print(f"claude + {' '.join(args)}", flush=True)
     os.execvpe("claude", ["claude"] + args, env)
 

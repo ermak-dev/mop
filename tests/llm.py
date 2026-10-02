@@ -127,6 +127,38 @@ def main():
             not os.path.isdir(os.path.join(os.path.dirname(config.__file__), "llm")))
     # Клиентская сессия из joined-конфига проверяется выше (#397);
     # llm.env() остаётся серверным шаблоном для спеки папета.
+    # HYPOTHESIS (#419): у сессий `mop master` и `mop code` инструмент
+    # черновиков отзыва и команда /feedback живут своей жизнью: репозиторий
+    # их не затыкал, и сессия отправляла черновики/команду от имени машины.
+    # SOLUTION: session_env отдаёт и это -- настройкой feedbackDrafts=off
+    # (узко: инструмент и очередь черновиков, не зонтик NONESSENTIAL_TRAFFIC,
+    # который резал бы обновления плагинов) и переменную DISABLE_FEEDBACK_COMMAND
+    # (команда /feedback). Оба значения -- код строки, контракт той же версии
+    # claude, что и остальной спека-стенд.
+    # RESULT: до исправления -- ни переменной, ни --settings в argv.
+    # STATUS: FIXED — see #419
+    from mop.cli.core import code, master
+    want_args = ('--settings', '{"feedbackDrafts":"off"}')
+
+    # Пара (флаг, значение) должна идти подряд: разрыв -- уже чужой аргумент.
+    def carries(argv):
+        return any(argv[i:i + 2] == list(want_args) for i in range(len(argv)))
+
+    # session_env требует joined-сервер (#397) -- поднимем его в temp-каталоге,
+    # как проверки #397/#412 выше.
+    with tempfile.TemporaryDirectory(prefix="mop-419-") as root, \
+            patched(creds, ROOT=root), patched_env(MOP_SERVER_LAN=None), \
+            config.client_sources():
+        creds.write_client(os.path.join(root, "s.test"), "443",
+                           "https://s.test/llm", "key")
+        with context.use(context.resolve({}, {}, {})):
+            session = _common.session_env()
+    c.check("the session env carries the feedback kill switch (#419)",
+            session.get("DISABLE_FEEDBACK_COMMAND") == "1", session)
+    c.check("mop code passes feedbackDrafts=off to claude (#419)",
+            carries(code.claude_argv(["--continue"])), code.claude_argv(["--continue"]))
+    c.check("mop master passes feedbackDrafts=off to claude (#419)",
+            carries(master.claude_argv([])), master.claude_argv([]))
     return c.report("llm")
 
 

@@ -113,6 +113,14 @@ def claude_args(args):
     return mine, [a for a in args if a.startswith("-")] + tail
 
 
+def claude_argv(passthru):
+    """Аргументы запуска claude -> список. Чистая функция (#419): сборка
+    argv в одном месте, как code.claude_argv."""
+    return ["claude", "--dangerously-skip-permissions",
+            "--mcp-config", mcp_config(),
+            *passthru, *_common.FEEDBACK_SETTINGS]
+
+
 def _main(argv):
     mine, passthru = claude_args(argv)
     if len(mine) > 1:
@@ -142,9 +150,7 @@ def _main(argv):
     env = dict(os.environ, MOP_PROJECT=project, **session)
     print(f"master of project {project} ({origin})"
           + (f" + claude {' '.join(passthru)}" if passthru else ""))
-    os.execvpe("claude", ["claude", "--dangerously-skip-permissions",
-                          "--mcp-config", mcp_config()] + passthru, env)
-
+    os.execvpe("claude", claude_argv(passthru)[1:], env)
 
 
 # Вход -- до lib.cluster: без client.json тот не найдёт выбранный сервер.

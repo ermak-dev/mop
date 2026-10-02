@@ -138,4 +138,17 @@ def session_env():
     if record["proxy_url"].startswith("https://") and os.path.isfile(cert) \
             and not os.environ.get("NODE_EXTRA_CA_CERTS"):
         env["NODE_EXTRA_CA_CERTS"] = cert
+    # Черновики отзыва и /feedback (#419) гасятся в обоих режимах запуска
+    # claude: переменная -- команде, настройка -- инструменту SendFeedback
+    # (значения и SemVer-контракт -- Claude Code 2.1.287: feedbackDrafts
+    # notify|quiet|off, «off» выключает инструмент и очередь целиком).
+    # Зонтик CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC не используем: он
+    # резал бы и обновления плагинов, Remote Control -- тоже мимо.
+    env["DISABLE_FEEDBACK_COMMAND"] = "1"
     return env
+
+
+# Настройка одного сеанса (#419): черновики отзыва отключены, файлы настроек
+# не трогаются. Идёт парой к session_env -- то, что гасится командой, а то,
+# что настройкой, расходиться по местам не должно.
+FEEDBACK_SETTINGS = ('--settings', '{"feedbackDrafts":"off"}')
