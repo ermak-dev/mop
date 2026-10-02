@@ -19,10 +19,10 @@ into claude. From there the slice is inherited: mop mcp, spawned by this
 session as a child, sees MOP_PROJECT, builds the project's bus credentials from
 the server's directory (mop/common/creds.py) and subscribes to its project's inbox.
 
-No ansible on this machine: the credentials arrive with `mop join --user`,
-the server itself is named by MOP_SERVER_LAN (the environment outranks .env,
-so one variable retargets the master at another pool), and the /master skill
-is linked from here.
+No ansible on this machine: bus and proxy credentials arrive with
+`mop join --server ADDRESS LOGIN`. The server comes from the clone binding,
+MOP_SERVER_LAN or --server; without one, a single joined server is selected.
+The /master skill is linked from here.
 
 The pool server arrives as an argument, not from a directory config. The
 master sits in a working copy of its own project, while the `.mcp.json` that
@@ -38,12 +38,11 @@ Puppets live under --dangerously-skip-permissions, and the message channel
 checks classes: a puppet's report that reaches a master in ordinary mode gets
 parked in the held queue to wait for a human — meaning the loop stops being
 automatic on exactly its main signal. The price is named up front: the
-master holds the Nomad token, pushes, and talks to the tracker, and it will
-no longer ask about any of that.
+master can push, manage its project's puppets and talk to the tracker without
+asking on every step. The Nomad token stays on the server.
 
-The session runs on the installation's single LLM proxy; its key is read
-from the master machine's .env — there's no node secrets.env here, and the
-local .env is exactly what serves as the source of truth for keys.
+The session uses the selected server's LLM proxy. Its URL and key come from
+the private client.json written by mop join, not from installation .env.
 """
 import json
 import os
@@ -134,8 +133,8 @@ def main(argv):
                   f"in the server's identity provider (mop server user, or the directory)")
     link_skill()
 
-    # Источник ключа -- не узловой secrets.env, а местный .env: общее с
-    # `mop code`, в _common.session_env.
+    # URL и ключ -- из joined-конфига выбранного сервера; `mop code`
+    # использует тот же источник без MCP и папетов.
     session = _common.session_env()
     env = dict(os.environ, MOP_PROJECT=project, **session)
     print(f"master of project {project} ({origin})"

@@ -17,9 +17,9 @@ of the command is to get to work on a provider without ceremony, and
 answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
-The session runs on the installation's single LLM proxy (MOP_PROXY_URL);
-the key is read from this machine's .env: there's no node secrets.env here,
-and the local .env is exactly what serves as the source of truth for keys.
+The session uses the selected server's LLM proxy. Its URL and key come from
+the private client.json saved by mop join. With multiple joined servers,
+name one with --server; this command never adds the pool's MCP tools.
 """
 import os
 
@@ -33,8 +33,7 @@ def main(argv):
     # `--` из `mop master`: там он отделял origin от значения чужого флага,
     # здесь отделять не от чего.
     passthru = argv
-    # Тот же источник ключа, что у мастера: местный .env, а не узловой
-    # secrets.env — общее в _common.session_env.
+    # Тот же joined-конфиг, что у мастера, без доступа к пулу.
     session = _common.session_env()
     env = dict(os.environ, **session)
     # flush до exec: буфер stdout не переживает execvpe, и строка о профиле
