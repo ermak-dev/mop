@@ -29,6 +29,23 @@ from mop.cli.core import _common
 from mop.cli.pool import login
 
 
+def claude_argv(passthru, settings_path=None):
+    """Аргументы запуска claude -> список. Чистая функция (#419): и флаг
+    пропуска разрешений, и отключение черновиков отзыва живут здесь, у
+    фактического execvpe -- одно место на оба.
+
+    Настройки отзыва -- ОДИН --settings сразу за «claude»: повторных
+    claude не мержит (побеждает последний), за `--` флаги не читаются, а
+    вставка в середину рвала бы чужой флаг с значением. Авто-skip (когда
+    пользователь не передал свой) -- сразу после пары. settings_path --
+    memfd-путь настроек (commandlet готовит), без него своя пара."""
+    skip = "--dangerously-skip-permissions"
+    settings = ["--settings", settings_path] if settings_path \
+        else list(_common.FEEDBACK_SETTINGS)
+    args = ([] if skip in passthru else [skip]) + list(passthru)
+    return ["claude", *settings, *args]
+
+
 def main(argv):
     login.ensure()
     # Никакого разбора позиционных: своих аргументов у команды нет, и всё
@@ -39,13 +56,21 @@ def main(argv):
     # Тот же joined-конфиг, что у мастера, без доступа к пулу.
     session = _common.session_env()
     env = dict(os.environ, **session)
+    # Настройки отзыва (#419): пользовательский --settings (если был)
+    # сливается с feedbackDrafts=off; итог ездит memfd-путём -- без
+    # argv-содержимого и без диска. Недоступный файл или не-JSON --
+    # отказ, а не молчаливое включение черновиков.
+    try:
+        value, passthru = _common.feedback_settings(passthru)
+    except ValueError as e:
+        lib.usage(str(e))
+    path, _fd = _common.feedback_fd(value)
     # flush до exec: буфер stdout не переживает execvpe, и строка о профиле
     # пропадала бы везде, где вывод не в терминал.
     # Флаг добавляется здесь, а не оставляется пользователю: команда для
     # того и есть, чтобы сесть за работу без церемоний. Свой экземпляр из
     # passthru не дублируем — claude второй раз не нужен.
-    skip = "--dangerously-skip-permissions"
-    args = ([] if skip in passthru else [skip]) + passthru
+    args = claude_argv(passthru, path)[1:]
     print(f"claude + {' '.join(args)}", flush=True)
     os.execvpe("claude", ["claude"] + args, env)
 

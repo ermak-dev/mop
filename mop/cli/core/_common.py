@@ -2,6 +2,7 @@
 узлы, workspace папета. Здесь, а не в lib: это клиентская сторона, а lib
 импортирует каждый командлет на каждой машине, и ключи с профилями ей
 тянуть за собой незачем."""
+import json
 import os
 import time
 
@@ -138,4 +139,151 @@ def session_env():
     if record["proxy_url"].startswith("https://") and os.path.isfile(cert) \
             and not os.environ.get("NODE_EXTRA_CA_CERTS"):
         env["NODE_EXTRA_CA_CERTS"] = cert
+    # Черновики отзыва и /feedback (#419) гасятся в обоих режимах запуска
+    # claude: переменная -- команде, настройка -- инструменту SendFeedback
+    # (значения и SemVer-контракт -- Claude Code 2.1.287: feedbackDrafts
+    # notify|quiet|off, «off» выключает инструмент и очередь целиком).
+    # Зонтик CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC не используем: он
+    # резал бы и обновления плагинов, Remote Control -- тоже мимо.
+    env["DISABLE_FEEDBACK_COMMAND"] = "1"
     return env
+
+
+# Настройка одного сеанса (#419): черновики отзыва отключены, файлы настроек
+# не трогаются. Идёт парой к session_env -- то, что гасится командой, а то,
+# что настройкой, расходиться по местам не должно.
+FEEDBACK_SETTINGS = ('--settings', '{"feedbackDrafts":"off"}')
+
+# Ключ, который mop вписывает в пользовательские настройки (#419): пустой
+# никогда -- «везде» означает и явное отсутствие ключа у пользователя.
+FEEDBACK_KEY = "feedbackDrafts"
+FEEDBACK_VALUE = "off"
+# Инструмент отправки отзыва гасится и напрямую (#419): feedbackDrafts=off
+# убирает очередь черновиков и инструмент по описанию схемы, но требование
+# тикета -- невозможность отправки через tool, и это проверяемый контракт
+# настроек, а не поведение модели. Тот же deny, что у врапера (#420):
+# сессия не может ни вызвать инструмент, ни получить его в списке.
+FEEDBACK_TOOL = "SendFeedback"
+
+
+def _merged(parsed):
+    """Наложить гашение отзыва на настройки (чистая, #419) -> JSON-строка.
+
+    feedbackDrafts=off плюс permissions.deny c SendFeedback: чужой deny
+    сохраняется, добавление идемпотентно, allow того же имени не снимает
+    deny (в схеме Claude deny сильнее allow). Прочие ключи пользователя
+    не трогаются."""
+    parsed[FEEDBACK_KEY] = FEEDBACK_VALUE
+    perms = parsed.get("permissions")
+    if not isinstance(perms, dict):
+        perms = parsed["permissions"] = {}
+    deny = perms.get("deny")
+    if not isinstance(deny, list):
+        deny = perms["deny"] = []
+    if FEEDBACK_TOOL not in deny:
+        deny.append(FEEDBACK_TOOL)
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+def feedback_settings(passthru, read=None):
+    """Итоговые настройки отзыва для запуска claude -> (значение, переписанный
+    пасстру). Чистая функция (#419): read -- как прочитать файл-путь (для
+    проверки подменяется), по умолчанию диск.
+
+    Последнее пользовательское --settings в зоне флагов (до первого `--`;
+    форма и через пробел, и через «=») несёт в себе и его настройки, и наш
+    feedbackDrafts=off: claude повторных --settings не мержит (побеждает
+    последний целиком), и вторым флагом его настройки терялись бы. Файл
+    читается и возвращается значением -- commandlet отдаст его claude как
+    memfd-путь (без диска и без argv: настройки бывают не для чужих глаз,
+    а argv виден всей машине). Ключ ставится всегда -- «везде»; остальные
+    ключи пользователя сохраняются.
+
+    Файл недоступен или не-JSON/не-объект -- ValueError: fail closed,
+    commandlet откажет явно, а не молча включит черновики. Ошибка значения
+    не несёт. Своего --settings нет -- ('{"feedbackDrafts":"off"}', пасстру
+    как был). За `--` флагов для claude нет -- та часть не рассматривается
+    и не трогается."""
+    read = read or _read_file
+    dash = passthru.index("--") if "--" in passthru else len(passthru)
+    flags, tail = list(passthru[:dash]), passthru[dash:]
+    last = None
+    i = 0
+    while i < len(flags):
+        value = None
+        if flags[i] == "--settings" and i + 1 < len(flags):
+            value = flags[i + 1]
+        elif flags[i].startswith("--settings="):
+            value = flags[i][len("--settings="):]
+        elif flags[i] == "--settings":
+            # Флаг без значения: собрать argv с ним mop не может (битый
+            # флаг у claude), а молча отбросить -- потеря пользовательских
+            # настроек. Отказ.
+            raise ValueError("--settings without a value: mop cannot add "
+                             f"{FEEDBACK_KEY} to it. Pass a file path or a "
+                             "JSON object")
+        if value == "":
+            # Пустое значение (= или пустой аргумент) -- тот же битый
+            # флаг: молча оставить его в пасстру значило бы вытеснить наш
+            # off (он вставляется в начало, а это стало бы последним).
+            raise ValueError("--settings without a value: mop cannot add "
+                             f"{FEEDBACK_KEY} to it. Pass a file path or a "
+                             "JSON object")
+        if value:
+            last = (i, value)
+        i += 1
+    if last is None:
+        return _merged({}), passthru
+    i, value = last
+    # Inline-объект узнаётся по первому значимому символу, не по строке:
+    # claude принимает JSON с ведущим пробелом, и это не путь к файлу.
+    if value.lstrip().startswith("{"):
+        text = value
+    else:
+        try:
+            text = read(value)
+        except OSError as e:
+            raise ValueError(f"--settings file cannot be read ({e.strerror}): "
+                             f"mop cannot add {FEEDBACK_KEY} to it") from None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        raise ValueError("--settings is not valid JSON: mop cannot add "
+                         f"{FEEDBACK_KEY} to it") from None
+    if not isinstance(parsed, dict):
+        raise ValueError("--settings is not a JSON object: mop cannot add "
+                         f"{FEEDBACK_KEY} to it")
+    parsed = _merged(parsed)
+    # Все пользовательские --settings снимаются, не только последний:
+    # наша пара едет в начало argv, и ранний, останься он, встал бы после
+    # неё -- и вытеснил off (claude повторов не мержит, побеждает
+    # последний).
+    stripped = []
+    i = 0
+    while i < len(flags):
+        if flags[i] == "--settings":
+            i += 2
+            continue
+        if flags[i].startswith("--settings="):
+            i += 1
+            continue
+        stripped.append(flags[i])
+        i += 1
+    return parsed, stripped + tail
+
+
+def _read_file(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def feedback_fd(value):
+    """Значение настроек -> (memfd-путь, fd) для exec (#419). Настройки
+    катаются файловым дескриптором: без диска, без argv-содержимого, fd
+    наследуется в execvpe (pass_fds тут нет -- exec в своём процессе,
+    дескриптор помечен наследуемым)."""
+    fd = os.memfd_create("mop-claude-settings", flags=0)
+    os.write(fd, value.encode())
+    os.lseek(fd, 0, 0)
+    os.set_inheritable(fd, True)
+    return f"/proc/self/fd/{fd}", fd
