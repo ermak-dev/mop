@@ -3,7 +3,7 @@
 // открывается кликом или с клавиатуры (кнопка в ячейке времени -- вся
 // строка доступна Tab'ом и Enter'ом). Новые сверху; снимок не хранится --
 // что пришло из useJournal, то и на экране.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Table, Text, UnstyledButton } from "@mantine/core";
 import type { JournalEntry } from "../types";
 import { fullAt, journalText } from "../journalView";
@@ -51,8 +51,17 @@ export function JournalPage({ journal, error = null, open, initial }: {
   // право ушло, и скрыть надо в этот же рендер, не эффектом после paint:
   // рендер с пустым списком уже не рисует ни таблицы, ни модала.
   const denied = error != null;
-  useEffect(() => { if (denied) setEntry(null); }, [denied]);
+  // и не переживает смену источника (ревью 3): журнал другой -- запись A
+  // в диалоге чужая новому списку, entry гасится вместе с ним
+  const source = journal;
+  const prevSource = useRef(source);
+  useEffect(() => {
+    if (denied) setEntry(null);
+    else if (prevSource.current !== source) setEntry(null);
+    prevSource.current = source;
+  }, [denied, source]);
   const shown = denied ? [] : items;
+  const held = denied || prevSource.current !== source ? null : entry;
   return (
     <div data-testid="journal-page">
       <SectionTitle title="Журнал" note={shown.length ? "события шины, новые сверху" : undefined} />
@@ -65,9 +74,9 @@ export function JournalPage({ journal, error = null, open, initial }: {
           <Table.Tbody>{shown.map((e, i) => <Row key={i} e={e} onOpen={() => { setEntry(e); open(e); }} />)}</Table.Tbody>
         </Table>
       ) : !error && <EmptyNote>{EMPTY}</EmptyNote>}
-      {/* отказ скрыл таблицу этим же рендером; модал ещё держится один
-          эффект -- но с уже пустой таблицей и причиной на экране */}
-      {!denied && entry && <JournalModal entry={entry} onClose={() => setEntry(null)} />}
+      {/* отказ или смена источника скрыли таблицу этим же рендером; модал
+          держится только на показанном журнале */}
+      {held && <JournalModal entry={held} onClose={() => setEntry(null)} />}
     </div>
   );
 }

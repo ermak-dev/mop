@@ -102,9 +102,10 @@ test("review2: role loss returns an empty refused journal in the same render", a
   expect(view.result.current.error).toContain("прав не хватает");
 });
 
-// Ревью 2 (#422): смена admin A → admin B: прежние записи не переживают
-// смену логина -- до ответа нового запроса журнал пуст, не чужой.
-test("review2: an admin switch wipes the old data before the new answer", async () => {
+// Ревью 2→3 (#422): прежняя формулировка «до нового ответа» усилена
+// ревью 3 -- та же проверка живёт ниже как «in the same render»; здесь
+// остаётся обращение к серверу при смене логина (новый источник).
+test("review2: an admin switch asks the source anew", async () => {
   const fetchMock = vi.fn(async () => ok(J));
   vi.stubGlobal("fetch", fetchMock);
   const view = renderHook(({ login }) => useJournal({ login, role: "admin" }, true), {
@@ -112,15 +113,65 @@ test("review2: an admin switch wipes the old data before the new answer", async 
   });
   await waitFor(() => expect(view.result.current.journal).toEqual(J));
   view.rerender({ login: "bob" });
-  expect(view.result.current.journal).toEqual([]);
-  await waitFor(() => expect(view.result.current.journal).toEqual(J));
-  expect(fetchMock).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 });
 
-// Ревью 2 (#422): поколение запросов. Медленный 200 прошлого круга
-// опроса приходит ПОСЛЕ свежего 403 -- и не имеет права восстановить
-// события: отвечает только последний начатый запрос.
-test("review2: a stale 200 landing after a fresh 403 cannot restore events", async () => {
+// Ревью 2→3 (#422): поздний 200 после свежего 403 не восстанавливает
+// события. Формулировка ревью 2 («отвечает последний начатый») уточнена
+// ревью 3 до монотонной версии принятого -- поведение то же, тест ниже.
+
+// Ревью 3 (#422): A(admin)→B(admin) -- синхронно, не эффектом. Смена
+// логина меняет источник состояния, и тот же рендер уже не показывает
+// журнал прошлого админа: очистка -- до ответа, в returned value.
+test("review3: an admin switch wipes the old journal in the same render", async () => {
+  const AJ: JournalEntry[] = [{ at: 1, event: "send", name: "pu-a", node: "n", project: "p", text: "" }];
+  const BJ: JournalEntry[] = [{ at: 2, event: "idle", name: "pu-b", node: "n", project: "p", text: "" }];
+  let who = "anton";
+  const fetchMock = vi.fn(async () => ok(who === "anton" ? AJ : BJ));
+  vi.stubGlobal("fetch", fetchMock);
+  const view = renderHook(({ login }) => useJournal({ login, role: "admin" }, true), {
+    initialProps: { login: "anton" as string },
+  });
+  await waitFor(() => expect(view.result.current.journal).toEqual(AJ));
+  who = "bob";
+  view.rerender({ login: "bob" });
+  // тот же рендер, что и смена логина: журнал A уже не показан
+  expect(view.result.current.journal).toEqual([]);
+  await waitFor(() => expect(view.result.current.journal).toEqual(BJ));
+});
+
+// Ревью 3 (#422): медленный опрос не запирает журнал навечно. Если каждый
+// ответ идёт дольше периода, слепое «позже начатый выигрывает» отбрасывало
+// бы всё; применять ответ надо по монотонной версии последнего ПРИНЯТОГО:
+// последовательные 200-е, каждый следующий -- свежее принятого.
+test("review3: every poll slower than the period still lands its answer", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const AJ: JournalEntry[] = [{ at: 1, event: "send", name: "pu-a", node: "n", project: "p", text: "" }];
+  const BJ: JournalEntry[] = [{ at: 2, event: "idle", name: "pu-b", node: "n", project: "p", text: "" }];
+  let batch = 0;
+  const bodies = [AJ, BJ];
+  const fetchMock = vi.fn(async () => {
+    const mine = batch;
+    // каждый ответ приходит через полтора периода -- ПОСЛЕ следующего тика
+    await new Promise((r) => setTimeout(r, POLL_S * 1000 * 1.5));
+    return ok(bodies[mine]);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const view = renderHook(() => useJournal({ login: "anton", role: "admin" }, true));
+  await act(async () => {
+    batch = 1;
+    await vi.advanceTimersByTimeAsync(POLL_S * 1000 * 3 + 1);
+  });
+  // оба ответа опоздали мимо чужого старта -- но каждый новее принятого;
+  // тиков могло накопиться больше двух -- важен итог, не их число
+  expect(view.result.current.journal).toEqual(BJ);
+  expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+  vi.useRealTimers();
+});
+
+// Ревью 3 (#422): а защита от позднего 200 после свежего 403 остаётся:
+// принятый отказ -- монотонный барьер, поздний 200 мимо него не проходит.
+test("review3: a late 200 after an accepted 403 still cannot land", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   let calls = 0;
   let releaseFirst: (j: JournalEntry[]) => void = () => {};
@@ -132,19 +183,16 @@ test("review2: a stale 200 landing after a fresh 403 cannot restore events", asy
                json: async () => ({ journal: await firstBody }) } as unknown as Response;
     }
     if (calls === 2) return { ok: false, status: 403 } as Response;
-    return ok(J);
+    return ok([]);
   });
   vi.stubGlobal("fetch", fetchMock);
   const view = renderHook(() => useJournal({ login: "anton", role: "admin" }, true));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-  // второй круг (403) успел ответить раньше, чем тело первого
   await act(async () => { await vi.advanceTimersByTimeAsync(POLL_S * 1000 + 1); });
   await waitFor(() => expect(view.result.current.error).toContain("прав не хватает"));
-  expect(view.result.current.journal).toEqual([]);
-  releaseFirst(J);   // опоздавший 200 со старым журналом
+  releaseFirst(J);   // опоздавший 200 прошлого круга
   await act(async () => { await vi.advanceTimersByTimeAsync(50); });
-  expect(view.result.current.journal).toEqual([]);   // не восстановился
-  expect(view.result.current.error).toContain("прав не хватает");
+  expect(view.result.current.journal).toEqual([]);
   vi.useRealTimers();
 });
 

@@ -64,3 +64,12 @@ test("review2: fullAt shows the browser timezone offset too", () => {
   expect(fullAt(E.at)).toMatch(/(UTC|[+-]\d{2}:\d{2})$/);
   expect(fullAt(null)).toBe("-");
 });
+
+// Ревью 3 (#422): безумная метка не ломает страницу. Бэкенд допускает
+// конечные значения вроде 1e20, а Date(1e23 мс) вне диапазона -- RangeError
+// из formatToParts ронял бы весь журнал; такая метка -- прочерк.
+test("review3: an out-of-range timestamp renders a dash, not a crash", () => {
+  expect(fullAt(1e20, "UTC")).toBe("-");
+  expect(fullAt(1e20)).toBe("-");
+  expect(Number.isFinite(1e20)).toBe(true);   // метка конечна -- тест про Date, не про NaN
+});

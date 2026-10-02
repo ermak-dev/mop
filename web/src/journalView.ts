@@ -11,12 +11,16 @@ import type { JournalEntry } from "./types";
  *  timeZone -- для проверок, страница его не передаёт. */
 export function fullAt(ts: number | null | undefined, timeZone?: string): string {
   if (!ts) return "-";
+  const date = new Date(ts * 1000);
+  // конечная, но вне диапазона Date метка (бэкенд допускает 1e20) --
+  // прочерк, а не RangeError, роняющий всю страницу журнала (#422, ревью 3)
+  if (isNaN(date.getTime())) return "-";
   const fmt = new Intl.DateTimeFormat("ru-RU", {
     timeZone, year: "numeric", month: "2-digit", day: "2-digit",
     hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
     timeZoneName: "shortOffset",
   });
-  const get = (t: string) => fmt.formatToParts(new Date(ts * 1000)).find((x) => x.type === t)?.value ?? "";
+  const get = (t: string) => fmt.formatToParts(date).find((x) => x.type === t)?.value ?? "";
   // node печатает «GMT» вместо «UTC» -- это один и тот же нулевой пояс,
   // приводим к каноническому виду, чтобы запись не зависела от среды
   const zone = get("timeZoneName").replace(/^GMT$/, "UTC");

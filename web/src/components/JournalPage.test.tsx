@@ -76,6 +76,21 @@ test("review: an open modal closes the moment the source refuses", async () => {
   expect(screen.getByText(/прав не хватает/)).toBeInTheDocument();
 });
 
+// Ревью 3 (#422): открытый диалог записи A не переживает смену источника
+// A→B (error нет, журнал просто новый): диалог -- часть показанного
+// журнала, чужой записи в нём быть не должно.
+test("review3: an open modal does not survive a journal switch", async () => {
+  const BJ: JournalEntry[] = [{ at: 1700000120, event: "wipe", name: "pu-mop-2", node: "gpu",
+                                project: "other", text: "" }];
+  const view = renderUi(<JournalPage journal={J} error={null} open={() => {}} initial={J[1]} />);
+  expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  view.rerender(<MantineProvider>
+    <JournalPage journal={BJ} error={null} open={() => {}} />
+  </MantineProvider>);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByText("pu-mop-2")).toBeInTheDocument();
+});
+
 // Ревью 2 (#422): модал показывает и сырое поле text -- отдельно от
 // человекочитаемого описания: полное событие обязано нести запись как
 // она есть, описание -- надстройка, не замена.

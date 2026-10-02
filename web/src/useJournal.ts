@@ -25,15 +25,30 @@ const REFUSED: Journal = { journal: [], error: DENIED };
 
 export function useJournal(session: Session, active: boolean): Journal {
   const [state, setState] = useState<Journal>({ journal: [], error: null });
-  // Поколение запросов: решает последний начатый. Живёт в ref -- эффект
-  // не перезапускается от него, а ответы сравниваются с текущим.
-  const gen = useRef(0);
+  // Поколение запросов -- по монотонной версии принятого (ревью 3):
+  // решает не «кто начат последним», а «кто новее последнего принятого».
+  // Опрос медленнее периода тогда не запирает журнал навечно (каждый
+  // ответ новее принятого), а поздний 200 после свежего 403 всё равно
+  // отбрасывается -- у 403 уже есть принятая версия.
+  const accepted = useRef(0);
+  // Порядковый номер запроса: растёт с каждым запуском, ответы сравниваются
+  // с принятой версией -- «новее принятого», а не «начат последним».
+  const seq = useRef(0);
+  // Ключ источника: чей журнал в состоянии. Смена логина/роли/страницы --
+  // другой источник: первый рендер после смены уже не показывает записей
+  // прошлого (эффект ниже несёт новые). prev НЕ пишется в рендере после
+  // чтения -- только эффектом, иначе «прошлый» всегда совпадал бы с
+  // сегодняшним.
+  const source = `${session.login ?? ""}\0${session.role ?? ""}\0${active}`;
+  const prev = useRef(source);
+  const stale = prev.current !== source;
 
   useEffect(() => {
     // не админ или страница закрыта: источник не спрашивают вовсе.
     // Отказ для закрытой страницы хук всё равно выводит: открытая руками
     // #journal без прав увидит причину, а не пустую таблицу.
     if (session.role !== "admin" || !active) {
+      prev.current = source;
       setState(active ? REFUSED : { journal: [], error: null });
       return;
     }
@@ -43,41 +58,49 @@ export function useJournal(session: Session, active: boolean): Journal {
 
     const refused = (why: string) => setState({ journal: [], error: why });
     const load = () => {
-      // смена поколения до ответа: прошлый запуск больше не решает
-      const at = ++gen.current;
+      // версия этого запроса -- следующая за последним принятым
+      const at = ++seq.current;
       fetch("/api/journal", { credentials: "same-origin", signal: ctrl.signal })
         .then(async (r) => {
-          if (!alive || at !== gen.current) return;
+          if (!alive || at <= accepted.current) return;
           if (r.ok) {
             const body = (await r.json()) as { journal: JournalEntry[] };
-            // поколение проверяется и после парса: тело старого ответа не
+            // версия проверяется и после парса: тело старого ответа не
             // имеет права вернуть журнал после logout или свежего 403
-            if (!alive || at !== gen.current) return;
+            if (!alive || at <= accepted.current) return;
+            accepted.current = at;
             setState({ journal: body.journal, error: null });
           } else {
+            accepted.current = at;   // отказ -- тоже принятый ответ
             // 401 -- сессия кончилась, 403 -- роль ушла
             refused(r.status === 401 || r.status === 403 ? DENIED : SILENT);
           }
         })
-        .catch(() => { if (alive && at === gen.current) refused(SILENT); });
+        .catch(() => { if (alive && at > accepted.current) refused(SILENT); });
     };
 
     // смена admin A → admin B: прежние записи стёрты до нового ответа --
-    // журнал не показывает чужого глаза прошлую картину
+    // журнал не показывает чужого глаза прошлую картину; планка принятия
+    // выше номеров прошлых запросов (их эффект поднял в cleanup)
+    prev.current = source;
     setState({ journal: [], error: null });
     load();
     timer = setInterval(load, POLL_S * 1000);
     return () => {
       alive = false;
-      gen.current++;                  // ответы прошлого эффекта -- в никуда
+      // незакрытые запросы эффекта умирают: планка принятия -- выше любого
+      // номера, который они могли получить (seq уже вырос на их стартах)
+      accepted.current = seq.current;
       ctrl.abort();
       if (timer) clearInterval(timer);
     };
     // login в зависимостях: смена админа -- новый источник состояния
-  }, [session.login, session.role, active]);
+  }, [session.login, session.role, active, source]);
 
-  // Синхронный отказ без эффекта: роль ушла -- этот же рендер уже без
-  // записей (эффект выше дочистит состояние, но кадр не зависит от него)
+  // Синхронный возврат без эффекта: право ушло или источник сменился --
+  // этот же рендер уже без записей прошлого (эффект выше донесёт новое,
+  // но кадр не зависит от него).
   if (active && session.role !== "admin") return REFUSED;
+  if (stale) return { journal: [], error: null };
   return state;
 }
