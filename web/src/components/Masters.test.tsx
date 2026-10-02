@@ -40,11 +40,12 @@ test("#423 a legacy row says so instead of posing as a session", () => {
   expect(within(row).getByText(/по адресу/)).toBeInTheDocument();
 });
 
-test("#423 same session names, different sessions: two rows by their own addresses", () => {
+test("#423 same project, same session name, different addresses: two rows", () => {
+  // Один проект: разлить строки по проекту нельзя -- различает адрес.
   const same: Master[] = [
     { project: "mop", master: "ermak.mate-7", addresses: ["ermak.mate-7"], identified: true,
       user: "ermak", session: "mop-ab", cwd: "-", puppets: [] },
-    { project: "rugent", master: "ermak.box-9", addresses: ["ermak.box-9"], identified: true,
+    { project: "mop", master: "ermak.box-9", addresses: ["ermak.box-9"], identified: true,
       user: "ermak", session: "mop-ab", cwd: "-", puppets: [] },
   ];
   renderUi(<Masters masters={same} />);
@@ -53,12 +54,14 @@ test("#423 same session names, different sessions: two rows by their own address
   expect(screen.getByText("ermak.box-9")).toBeInTheDocument();
 });
 
-// Переход: старый бэкенд без addresses и identified.
-test("#423 a legacy snapshot without addresses: the address column still works", () => {
+// Переход: старый бэкенд без addresses и identified. Счётчик подтверждённых
+// сессий -- 0: старый снимок не выдаётся за сессии, адреса считаются адресами.
+test("#423 a legacy snapshot without identified counts 0 sessions", () => {
   const legacy = M.map(({ addresses, identified, ...rest }) => rest) as Master[];
   renderUi(<Masters masters={legacy} />);
   expect(screen.getByText("ermak.mate-7")).toBeInTheDocument();
   expect(screen.getByText("ivan.box-3")).toBeInTheDocument();
+  expect(screen.getByText(/0 сессий, 2 по адресам/)).toBeInTheDocument();
 });
 
 // #326: период опроса -- из снимка (masters_every, #325), не своей копией.
