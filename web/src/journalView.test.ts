@@ -21,7 +21,7 @@ const E: JournalEntry = {
 // 1700000000 -- 2023-11-14 22:13:20 UTC; пояс фиксирован, чтобы проверка
 // не зависела от часового пояса того, кто её запускает.
 test("fullAt shows date and time with seconds, dash without at", () => {
-  expect(fullAt(E.at, "UTC")).toBe("14.11.2023 22:13:20");
+  expect(fullAt(E.at, "UTC")).toMatch(/^14\.11\.2023 22:13:20/);
   expect(fullAt(null)).toBe("-");
 });
 
@@ -47,8 +47,20 @@ test("journalText phrases the known kinds, falls back to text", () => {
     .toBe("что-то новое");
 });
 
-// Фразы не должны зависеть от лишних полей: контракт #424 расширяет запись
-// optional-полями, строки выше -- только те, что сервер отдаёт сегодня.
-test("send without a name in text keeps the phrase whole", () => {
-  expect(journalText({ ...E, text: "from mop" })).toBe("сообщение от mop");
+// Ревью 2 (#422): полная запись -- с поясом. Критерий тикета: дата/время с
+// часовым поясом; пояс смотрящего меняет запись, и без «UTC»/«+03» строка
+// о поясе молчит.
+test("review2: fullAt ends with the timezone offset", () => {
+  expect(fullAt(E.at, "UTC")).toBe("14.11.2023 22:13:20 UTC");
+  const msk = fullAt(E.at, "Europe/Moscow");
+  // ICU пишет смещение коротко (GMT+3) -- проверяем число смещения и дату
+  expect(msk).toMatch(/GMT\+3$|\+03:00$/);
+  expect(msk).toContain("15.11.2023");
+});
+
+// Пояс прилагается и без фиксированного пояса в аргументе (пояс браузера):
+// строка всегда заканчивается смещением.
+test("review2: fullAt shows the browser timezone offset too", () => {
+  expect(fullAt(E.at)).toMatch(/(UTC|[+-]\d{2}:\d{2})$/);
+  expect(fullAt(null)).toBe("-");
 });

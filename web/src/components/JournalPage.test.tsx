@@ -22,7 +22,7 @@ const J: JournalEntry[] = [
 
 test("rows carry full date, event, puppet, node, project and the phrase", () => {
   renderUi(<JournalPage journal={J} open={() => {}} />);
-  const row = screen.getByText("14.11.2023 22:14:20").closest("tr")!;
+  const row = screen.getByText(/^14.11.2023 22:14:20 /).closest("tr")!;
   // дата «полная»: не чч:мм:сс главной, а день и время с секундами
   expect(row.textContent).toContain("idle");
   expect(row.textContent).toContain("pu-mop-1");
@@ -36,7 +36,7 @@ test("clicking a row opens the modal, keyboard Enter too", () => {
   // клик по строке: старейшая запись (новые сверху) -- с текстом from ermak
   fireEvent.click(screen.getByText(/сообщение от ermak/));
   expect(open).toHaveBeenCalledWith(J[1]);
-  const row = screen.getByText("14.11.2023 22:14:20").closest("tr")!;
+  const row = screen.getByText(/^14.11.2023 22:14:20 /).closest("tr")!;
   fireEvent.keyDown(row, { key: "Enter" });
   expect(open).toHaveBeenCalledTimes(2);
 });
@@ -74,6 +74,19 @@ test("review: an open modal closes the moment the source refuses", async () => {
   // диалог закрыт сразу, без ждущего клика; записей нет
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(screen.getByText(/прав не хватает/)).toBeInTheDocument();
+});
+
+// Ревью 2 (#422): модал показывает и сырое поле text -- отдельно от
+// человекочитаемого описания: полное событие обязано нести запись как
+// она есть, описание -- надстройка, не замена.
+test("review2: the modal shows the raw text field besides the phrase", () => {
+  renderUi(<JournalModal entry={J[1]} onClose={() => {}} />);
+  const dlg = screen.getByRole("dialog");
+  // сырая строка события агента -- как пришла
+  expect(dlg.textContent).toContain("text:");
+  expect(dlg.textContent).toContain("from ermak");
+  // и человекочитаемая фраза рядом
+  expect(dlg.textContent).toContain("сообщение от ermak");
 });
 
 // Блокер ревью (4): oversized-маркер #424 несёт только {event,text,at,

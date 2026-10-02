@@ -17,7 +17,8 @@ function orDash(v: unknown): string {
 }
 
 /** Поля сегодняшней записи: подпись -> значение. received_at (#424) --
- *  когда сервер принял запись; есть не всегда (окно раскатки). */
+ *  когда сервер принял запись; есть не всегда (окно раскатки). text --
+ *  сырой, как пришёл: полное событие держит запись, а не пересказ. */
 function knownRows(e: JournalEntry): [string, string][] {
   const rows: [string, string][] = [
     ["время события", fullAt(e.at)],
@@ -25,6 +26,7 @@ function knownRows(e: JournalEntry): [string, string][] {
     ["папет", orDash(e.name)],
     ["проект", orDash(e.project)],
     ["событие", orDash(e.event)],
+    ["text", orDash(e.text)],
   ];
   if (e.received_at != null) rows.splice(1, 0, ["принято сервером", fullAt(e.received_at)]);
   return rows;

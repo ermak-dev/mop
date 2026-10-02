@@ -47,23 +47,27 @@ export function JournalPage({ journal, error = null, open, initial }: {
 }) {
   const [entry, setEntry] = useState<JournalEntry | null>(initial ?? null);
   const items = [...journal].reverse();   // новые сверху
-  // Открытый диалог не переживает отказ источника (ревью #422): журнал --
-  // только действующему админу, и error здесь значит, что право ушло, --
-  // ни диалога, ни таблицы устаревших данных на экране.
-  useEffect(() => { if (error) setEntry(null); }, [error]);
+  // Открытый диалог не переживает отказ источника (ревью 2 #422): error --
+  // право ушло, и скрыть надо в этот же рендер, не эффектом после paint:
+  // рендер с пустым списком уже не рисует ни таблицы, ни модала.
+  const denied = error != null;
+  useEffect(() => { if (denied) setEntry(null); }, [denied]);
+  const shown = denied ? [] : items;
   return (
     <div data-testid="journal-page">
-      <SectionTitle title="Журнал" note={items.length ? "события шины, новые сверху" : undefined} />
+      <SectionTitle title="Журнал" note={shown.length ? "события шины, новые сверху" : undefined} />
       {error && <Text c="red" size="sm" mb="xs">{error}</Text>}
-      {items.length ? (
+      {shown.length ? (
         <Table striped highlightOnHover withTableBorder>
           <Table.Thead>
             <Table.Tr>{Object.values(COLS).map((c, i) => <Table.Th key={i}>{c.label}</Table.Th>)}</Table.Tr>
           </Table.Thead>
-          <Table.Tbody>{items.map((e, i) => <Row key={i} e={e} onOpen={() => { setEntry(e); open(e); }} />)}</Table.Tbody>
+          <Table.Tbody>{shown.map((e, i) => <Row key={i} e={e} onOpen={() => { setEntry(e); open(e); }} />)}</Table.Tbody>
         </Table>
       ) : !error && <EmptyNote>{EMPTY}</EmptyNote>}
-      {entry && <JournalModal entry={entry} onClose={() => setEntry(null)} />}
+      {/* отказ скрыл таблицу этим же рендером; модал ещё держится один
+          эффект -- но с уже пустой таблицей и причиной на экране */}
+      {!denied && entry && <JournalModal entry={entry} onClose={() => setEntry(null)} />}
     </div>
   );
 }

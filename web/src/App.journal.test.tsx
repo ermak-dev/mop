@@ -95,6 +95,30 @@ test("#422 opening #journal as a guest shows the refusal, not events", async () 
   expect(screen.queryByText("pu-mop-1")).toBeNull();
 });
 
+// Ревью 2 (#422): открытый popup не переживает logout/разжалование -- и
+// не эффектом после paint, а тем же рендером: denial проходит в App
+// синхронно, JournalPage скрывает таблицу и модал до первой перерисовки
+// браузера. Здесь -- жизненный путь: admin открыл событие, cookie истекла,
+// опрос ответил 401 и хук положил отказ (мок кладёт его как хук бы).
+test("#422 review2: logout with an open popup clears it without a stale frame", async () => {
+  const m = await mocks();
+  m.session.__set({ login: "anton", role: "admin" });
+  m.journal.__setJournal(J, null);
+  renderUi(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Журнал" }));
+  await waitFor(() => expect(window.location.hash).toBe("#journal"));
+  // открыли полное событие
+  fireEvent.click(screen.getByText(/сообщение от ermak/));
+  await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+  // cookie истекла: опрос ответил 401 -- хук вернул отказ; сессия уже гость
+  m.journal.__setJournal([], "журнал недоступен: прав не хватает");
+  m.session.__set({ login: null, role: null });
+  fireEvent.focus(window);   // App перерисовался -- состояние мока прочитано
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByText(/прав не хватает/)).toBeInTheDocument();
+  expect(screen.queryByText(/сообщение от ermak/)).toBeNull();
+});
+
 test("#422 back from the journal returns to the main page", async () => {
   const m = await mocks();
   m.session.__set({ login: "anton", role: "admin" });
