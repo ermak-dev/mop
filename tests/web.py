@@ -448,9 +448,10 @@ def check_who_319(c):
     c.expect("#319 page: a who answer as a masters row",
              web.master_rows({"mop": [answer, bare]}, rows),
              [{"project": "mop", "master": "-", "addresses": ["-"], "user": "-",
-               "session": "-", "cwd": "-", "puppets": []},
+               "session": "-", "cwd": "-", "identified": False, "puppets": []},
               {"project": "mop", "master": "anton.mate-7", "addresses": ["anton.mate-7"],
-               "user": "anton", "session": "s-1", "cwd": "/w", "puppets": ["pu-mop-1"]}])
+               "user": "anton", "session": "s-1", "cwd": "/w", "identified": False,
+               "puppets": ["pu-mop-1"]}])
     with patched(mcp.bus, gather=lambda *a, **k: [answer, bare]), patched(mcp, MASTER_ID="anton.mate-7"):
         got = mcp._masters()
     c.expect("#319 agents: the masters table from the same answers", got,
@@ -616,6 +617,11 @@ def check_master_sessions_421(c):
     # Публичный снимок: сырого sessionId в строках нет.
     c.check("#421 no raw sessionId in the public rows",
             all("sessionId" not in m for m in got), got)
+    # #421 follow-up: строка называет, чем она склеена -- сессией или
+    # адресом. Без маркера число «сессий» врёт, пока живы старые MCP.
+    c.expect("#421 a sessionId row is identified",
+             [m["identified"] for m in got],
+             [True, True, False, False])
     # «puppets» -- папеты логина в проекте; для старой страницы поле на месте
     # и не множится по адресам (#423 пояснит ownership).
     c.expect("#421 puppets follow the login, once per session row",
