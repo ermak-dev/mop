@@ -144,7 +144,7 @@ def permissions(op, login=None):
                     busnames.masters(p), busnames.events(p), busnames.server(p)]
     if role == ADMIN:
         publish.append(busnames.build())
-    publish.append(busnames.INBOX)
+    publish.extend((busnames.join_config(login), busnames.INBOX))
     return {"allow": allow, "deny": deny, "publish": publish, "publish_deny": deny}
 
 

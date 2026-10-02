@@ -24,6 +24,7 @@ NODE_FILE = f"~/{paths.DIR}/bus.json"
 # Канал, в котором человек называет себя токеном субъекта (#207): управляющий
 # rpc агента и сервис кластера. Публичный msg -- папетов, логина там нет.
 CALLER_CHANNEL = "rpc"
+JOIN_ROOT = "mopjoin"       # вне mop.>: проектная маска не выдаёт ключ прокси
 
 
 # ─── субъекты ────────────────────────────────────────────────────────────
@@ -78,6 +79,11 @@ def cluster(project, login=None):
     """Сервис кластера. login -- токен вызывающего (#207)."""
     subj = f"{ROOT}.{project}.{CLUSTER_CHANNEL}.{CALLER_CHANNEL}"
     return f"{subj}.{_token(login)}" if login else subj
+
+
+def join_config(login):
+    """Личный адрес запроса конфигурации: вне проектных масок и server.rpc."""
+    return f"{JOIN_ROOT}.{_token(login)}.{CALLER_CHANNEL}"
 
 
 # ─── вызывающий в субъекте (#207) ────────────────────────────────────────
@@ -138,6 +144,8 @@ def caller(subject):
     elif len(parts) == 5 and parts[0] == ROOT and parts[2] == CLUSTER_CHANNEL \
             and parts[3] == CALLER_CHANNEL:
         login = parts[4]
+    elif len(parts) == 3 and parts[0] == JOIN_ROOT and parts[2] == CALLER_CHANNEL:
+        login = parts[1]
     else:
         return None
     return login_of(login)
@@ -169,7 +177,8 @@ def agent_subscriptions(name):
 def service_subscriptions():
     """На что подписаны сервисы сервера под `service`: bootstrap, кластер,
     сборщик, журнал дашборда."""
-    return [server(ANY), cluster(ANY), cluster(ANY, login=ANY), build(), events(ANY)]
+    return [server(ANY), cluster(ANY), cluster(ANY, login=ANY), join_config(ANY),
+            build(), events(ANY)]
 
 
 # ─── пользователи ────────────────────────────────────────────────────────
