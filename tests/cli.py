@@ -1953,6 +1953,25 @@ def check_fallback_model_183(c):
     check_tail_stderr_333(c)
     check_free_floor_329(c)
     check_add_failure_377(c)
+    check_add_argv_399(c)
+
+
+# HYPOTHESIS: после переноса командлета на main(argv) тело mop add осталось
+# читать прежнюю переменную args; даже --help падает до разбора аргументов.
+# SOLUTION: читать argv из параметра main и не вызывать сеть для лишних аргументов.
+# RESULT: два аргумента дают usage, а не NameError.
+# STATUS: FIXED — see #399
+def check_add_argv_399(c):
+    from mop.cli.core import add
+    from mop.common import config
+    with patched(config, require=lambda *names: None):
+        try:
+            out, err, code = run_command(add.main, ["first", "second"])
+        except NameError as e:
+            c.fail("#399 mop add must parse argv before network", str(e))
+            return
+    c.check("#399 mop add refuses extra arguments with usage",
+            code != 0 and "mop add" in str(code), (out, err, code))
 
 
 # ── #377: путь отказа `mop add` -- текст, а не трасса ────────────────────
