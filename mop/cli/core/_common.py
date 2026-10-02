@@ -6,7 +6,7 @@ import os
 import time
 
 from mop.cli import lib
-from mop.common import bus, busnames, config, llm, manifest, puppets
+from mop.common import bus, busnames, config, creds, llm, manifest, puppets
 
 
 def workspace_text(origin):
@@ -122,13 +122,12 @@ def report_bootstrap(name, got, p):
 
 
 def session_env():
-    """Окружение сессии claude (#390): единственный сервер установки --
-    прокси. -> {переменные}. Ключ -- из местной .env (мастеру узел ничего
-    не выдавал); отказ, а не тишина: сессия без ключа отбивает каждый ход
-    401-м. Так поднимаются и мастер, и `mop code`. Окружение --
-    mop.common.llm, того же вида, что в спеке."""
+    """Окружение claude: модельная карта общая, URL и ключ -- joined-сервера."""
+    host = config.get("MOP_SERVER_LAN")
+    record = creds.client(creds.server_dir(host))
+    if record is None:
+        raise RuntimeError(f"no joined proxy configuration for {host}: run mop join --server {host}")
     env = dict(llm.env())
-    if not (key := config.get(llm.KEY)):
-        lib.usage(f"no {llm.KEY} in {puppets.LOCAL_KEYS_FILE} — add it and retry")
-    env[llm.AUTH_VAR] = key
+    env["ANTHROPIC_BASE_URL"] = record["proxy_url"]
+    env[llm.AUTH_VAR] = record["proxy_key"]
     return env

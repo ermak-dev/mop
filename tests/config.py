@@ -48,8 +48,9 @@ def check_client_sources_396(c):
             with patched_env(MOP_PVE_STORAGE="explicit"):
                 c.expect("#396 explicit process env survives", config.get("MOP_PVE_STORAGE"),
                          "explicit")
-            c.expect("#396 effective skips installation env", config.effective()["MOP_LOCALE"],
-                     (config.SETTINGS["MOP_LOCALE"], "default"))
+            with patched_env(MOP_SERVER_LAN="explicit.test"):
+                c.expect("#396 effective skips installation env", config.effective()["MOP_LOCALE"],
+                         (config.SETTINGS["MOP_LOCALE"], "default"))
         c.expect("#396 client never opens installation env", reads, [])
         c.expect("#396 server/dev still read installation env", config.get("MOP_PVE_STORAGE"),
                  "installation")

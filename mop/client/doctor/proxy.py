@@ -9,7 +9,7 @@
 import urllib.error
 import urllib.request
 
-from mop.common import config, llm
+from mop.common import config, creds
 
 TIMEOUT = 10
 
@@ -31,8 +31,12 @@ def issues_of(answer):
 
 def _probe():
     """Код ответа /v1_models | исключение сети."""
-    req = urllib.request.Request(config.get("MOP_PROXY_URL").rstrip("/") + "/v1/models",
-                                 headers={"Authorization": f"Bearer {config.get(llm.KEY)}"})
+    host = config.get("MOP_SERVER_LAN")
+    joined = creds.client(creds.server_dir(host))
+    if joined is None:
+        raise RuntimeError(f"no joined proxy configuration for {host}: run mop join --server {host}")
+    req = urllib.request.Request(joined["proxy_url"].rstrip("/") + "/v1/models",
+                                 headers={"Authorization": f"Bearer {joined['proxy_key']}"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             return r.status

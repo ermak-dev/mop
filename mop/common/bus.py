@@ -180,8 +180,9 @@ def server_config(host):
     if not op:
         raise BusError(f"no bus credentials: {directory}/{creds.OPERATOR_FILE} "
                        f"is missing — run mop join --server {host}")
-    return creds.wss_config(host, settings.get("MOP_HTTPS_PORT"), PROJECT,
-                            op["password"], user=op["user"],
+    joined = creds.client(directory)
+    port = joined["https_port"] if joined else settings.get("MOP_HTTPS_PORT")
+    return creds.wss_config(host, port, PROJECT, op["password"], user=op["user"],
                             cafile=creds.cafile(directory))
 
 

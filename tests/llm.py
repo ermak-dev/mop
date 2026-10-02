@@ -6,16 +6,63 @@
 """
 import os
 import sys
+import tempfile
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched, patched_env  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.common import config, llm  # noqa: E402
+from mop.common import config, context, creds, llm  # noqa: E402
+
+
+# HYPOTHESIS: сессия и проверка прокси берут URL/ключ из .env, а без
+# привязки сервер угадывается даже если join есть на двух установках.
+# SOLUTION: выбранный сервер и его client.json — единственный источник для
+# клиентских команд; без выбора при двух входах явный отказ.
+# RESULT: два сервера разделены, один выбирается без подсказки, два отказывают.
+# STATUS: FIXED — see #397
+def check_joined_proxy_397(c):
+    from mop.cli.core import _common
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-llm-397-"), "servers")
+    with patched(creds, ROOT=root), patched_env(MOP_SERVER_LAN=None,
+                                                MOP_PROXY_URL="http://wrong.test",
+                                                MOP_PROXY_KEY="wrong-key"):
+        for host, url, key, port in (("a.test", "https://a.test/llm", "a-key", "8443"),
+                                     ("b.test", "https://b.test/llm", "b-key", "443")):
+            creds.write_client(os.path.join(root, host), port, url, key)
+        with config.client_sources():
+            with context.use(context.resolve({"server": "a.test"}, {}, {})):
+                result = _common.session_env()
+                c.expect("#397 selected server supplies session URL", result["ANTHROPIC_BASE_URL"],
+                         "https://a.test/llm")
+                c.expect("#397 selected server supplies session key", result[llm.AUTH_VAR],
+                         "a-key")
+            with context.use(context.resolve({"server": "b.test"}, {}, {})):
+                c.expect("#397 second server is independent", _common.session_env()[llm.AUTH_VAR],
+                         "b-key")
+            with context.use(context.resolve({}, {}, {})):
+                try:
+                    _common.session_env()
+                    c.fail("#397 two joined servers require an explicit selection")
+                except (RuntimeError, ValueError) as e:
+                    c.check("#397 ambiguity identifies server choice", "server" in str(e).lower(),
+                            str(e))
+                try:
+                    config.get("MOP_SERVER_LAN")
+                    c.fail("#397 roster must not guess a server")
+                except (RuntimeError, ValueError):
+                    pass
+        os.remove(os.path.join(root, "b.test", creds.CLIENT_FILE))
+        with config.client_sources(), context.use(context.resolve({}, {}, {})):
+            c.expect("#397 one joined server is the default", config.get("MOP_SERVER_LAN"),
+                     "a.test")
+            c.expect("#397 mop code can use the only server", _common.session_env()[llm.AUTH_VAR],
+                     "a-key")
 
 
 def main():
     c = Checks()
+    check_joined_proxy_397(c)
     # HYPOTHESIS (#390): реестр плагинов-профилей умер вместе с провайдерами:
     # держать его ради одного URL -- против KISS, а ENV профилей перестал
     # быть статикой плагина. SOLUTION: один модуль с env() и именем ключа;
@@ -45,13 +92,8 @@ def main():
             with_normal["PU_LLM_KEY_VAR"], llm.KEY)
     c.check("no profile names remain in the tree (#390)",
             not os.path.isdir(os.path.join(os.path.dirname(config.__file__), "llm")))
-    from _lib import patched
-    with patched(config, get=lambda name, _d=config.get: {"MOP_PROXY_KEY": "k3"}.get(name, _d(name))):
-        session = _common.session_env()
-    c.check("the local session carries the proxy key (#390)",
-            session.get("ANTHROPIC_AUTH_TOKEN") == "k3"
-            and session.get("ANTHROPIC_BASE_URL") == llm.env()["ANTHROPIC_BASE_URL"],
-            {k: v for k, v in session.items() if "TOKEN" in k})
+    # Клиентская сессия из joined-конфига проверяется выше (#397);
+    # llm.env() остаётся серверным шаблоном для спеки папета.
     return c.report("llm")
 
 
