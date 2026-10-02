@@ -1,7 +1,10 @@
 // Приложение дашборда (#296): шапка со счётчиками корзин, ошибки сборщика и
 // секции -- пул и узлы (#298), расход (#299), журнал (#298).
 import { Box, Container, Group, Stack, Text, Title, Alert } from "@mantine/core";
+import { useEffect, useState } from "react";
 import { usePool } from "./usePool";
+import { fetchSession, GUEST, LoginRefused, postLogin, postLogout, type Session } from "./useSession";
+import { SessionBox } from "./components/SessionBox";
 import { PoolTable } from "./components/PoolTable";
 import { NodesPanel } from "./components/NodesPanel";
 import { Masters } from "./components/Masters";
@@ -17,6 +20,34 @@ import { ThemeSwitch } from "./components/ThemeSwitch";
 
 export default function App() {
   const { snapshot } = usePool();
+  // Сессия (#416): до ответа -- гость, 401/сбой панели не рвут публичные
+  // таблицы; истёкшая cookie -- тот же гость.
+  const [session, setSession] = useState<Session>(GUEST);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  useEffect(() => {
+    fetchSession().then(setSession).catch(() => setPanelError("панель недоступна"));
+  }, []);
+
+  const login = async (login: string, password: string) => {
+    try {
+      setSession(await postLogin(login, password));
+      setFailed(null);
+    } catch (e) {
+      // 401 -- сервер отказал, 429 -- лимит попыток; остальное -- панель
+      setFailed(e instanceof LoginRefused
+        ? (e.status === 401 ? "неверный логин или пароль" : e.reason)
+        : "панель недоступна");
+    }
+  };
+  const logout = async () => {
+    try {
+      setSession(await postLogout());
+      setFailed(null);
+    } catch {
+      setPanelError("панель недоступна");
+    }
+  };
   // Полоса аллокаций -- во всю ширину окна (#378), поэтому страница -- два
   // контейнера: шапка над полосой, секции под ней.
   return (
@@ -30,6 +61,8 @@ export default function App() {
           <Group gap="md">
             {snapshot ? <LoadBadges load={snapshot.load} counts={snapshot.counts} />
               : <Text c="dimmed">снимок ещё не пришёл</Text>}
+            {panelError && <Text c="red" size="sm">{panelError}</Text>}
+            <SessionBox session={session} onLogin={login} onLogout={logout} failed={failed} />
             <ThemeSwitch />
           </Group>
         </Group>
