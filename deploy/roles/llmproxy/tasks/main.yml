@@ -116,6 +116,18 @@
   retries: 20
   delay: 3
 
+# Шлюз панели берёт ключ из закрытой копии, а живой config.yaml после
+# первого рендера не обновляется. Одна проверка уже поднятого прокси ловит
+# рассинхрон до выдачи панели: повторы 401 банят 127.0.0.1 на полчаса.
+# Ни ключ, ни ответ config (с хэшем ключа) не попадают в вывод ansible.
+- name: The panel gateway key is accepted by the proxy
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ MOP_LLM_PROXY_PORT }}/v8/management/config"
+    headers:
+      Authorization: "Bearer {{ lookup('file', MOP_HOME + '/.config/mop/secrets/llm-proxy-mgmt.pass') }}"
+    status_code: 200
+  no_log: true
+
 # Management API отвечает только с петли (allow-remote: false) -- прогон и
 # спрашивает с неё. Снаружи этот же порт обязан молчать: узкий путь к
 # управлению -- TLS-прокси, и его проверяет роль proxy... нет, проверим здесь:
