@@ -53,7 +53,7 @@ answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
 The session uses the selected server's LLM proxy. Its URL and key come from
-the private client.json saved by mop join. With multiple joined servers,
+the private client.json saved by mop login. With multiple joined servers,
 name one with --server; this command never adds the pool's MCP tools.
 ```
 
@@ -128,7 +128,7 @@ session as a child, sees MOP_PROJECT, builds the project's bus credentials from
 the server's directory (mop/common/creds.py) and subscribes to its project's inbox.
 
 No ansible on this machine: bus and proxy credentials arrive with
-`mop join --server ADDRESS LOGIN`. The server comes from the clone binding,
+`mop login --server ADDRESS LOGIN`. The server comes from the clone binding,
 MOP_SERVER_LAN or --server; without one, a single joined server is selected.
 The /master skill is linked from here.
 
@@ -150,7 +150,7 @@ master can push, manage its project's puppets and talk to the tracker without
 asking on every step. The Nomad token stays on the server.
 
 The session uses the selected server's LLM proxy. Its URL and key come from
-the private client.json written by mop join, not from installation .env.
+the private client.json written by mop login, not from installation .env.
 ```
 
 #### mop recycle
@@ -302,10 +302,10 @@ MOP_GC_MAX_PER_RUN per run. Run this as the operator, not from a master
 shell: disk pressure on a node is a fact about every tenant, not one project.
 ```
 
-#### mop join
+#### mop login
 
 ```text
-join a pool server: mop join [--server ADDRESS] [LOGIN]
+log in to a pool server: mop login [--server ADDRESS] [LOGIN]
 
 Server and login come from --server/LOGIN, the process environment or the
 working copy's binding; if missing, they are asked for. The bus password is
@@ -871,7 +871,7 @@ project secrets: mop secret file|var add|list|remove
   mop secret var list               names only: a list is no way to read a secret
   mop secret var remove VAR...
 
-The project is this working copy's, the server its binding (mop join). The
+The project is this working copy's, the server its binding (mop login). The
 server keeps them and every puppet of the project gets them at each
 start: files in the root of its clone, variables in its session. A puppet
 already running gets a change at its next start (mop recycle).

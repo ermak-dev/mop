@@ -493,7 +493,7 @@ def main(argv):
         # человек входит своим именем, и выбрать его за оператора deploy не
         # может. Громко, а не красной проверкой с непонятной причиной.
         lib.fail(f"installed, but this machine is nobody on the bus yet: "
-                 f"log in with mop join <login> (a person from mop server user, or "
+                 f"log in with mop login <login> (a person from mop server user, or "
                  f"from the directory), then mop list")
         return 1
 

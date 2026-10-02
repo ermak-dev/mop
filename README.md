@@ -101,7 +101,7 @@ uv tool install git+ssh://git@ssh.sourcecraft.dev/ermakdev/mop.git
 
 ```
 cd ~/src/project
-mop join --server <адрес сервера> <логин>
+mop login --server <адрес сервера> <логин>
 ```
 
 Рабочая копия запоминает сервер и логин; пароль шины и настройки прокси лежат в отдельных закрытых файлах `operator.json` и `client.json` под `~/.config/mop/servers/<сервер>/`. Логин и пароль заводит администратор сервера (или они из каталога организации) — [docs/AUTH.md](docs/AUTH.md). Для нескольких серверов называйте нужный через `--server`; установка `.env` клиенту не нужна.
@@ -174,7 +174,7 @@ mop tail <имя>             хвост экрана папета; mop attach <
 mop add / mop recycle      завести папета / пересоздать его на чистой рабочей копии
 mop stat                   расход токенов по пулу
 mop doctor [--fix]         диагностика пула
-mop join                   войти на сервер и сохранить настройки прокси
+mop login                   войти на сервер и сохранить настройки прокси
 mop project add [origin]   завести проект (без origin — эта рабочая копия)
 mop disk / mop gc / mop sweep  место на узлах и уборка, подробности в docs/GC.md
 ```

@@ -378,7 +378,7 @@ def check_dispatch_sources_396(c):
         return main
     with patched(config, _load=read_installation), patched(cli, command=command):
         for name, module, client in (("list", "mop.cli.core.list", True),
-                                     ("join", "mop.cli.pool.join", True),
+                                     ("login", "mop.cli.pool.login", True),
                                      ("mcp", "mop.cli.service.mcp", True),
                                      ("dev", "mop.cli.dev", False),
                                      ("server", "mop.cli.server", False)):
@@ -398,7 +398,7 @@ def check_dispatch_sources_396(c):
 def check_current_docs_401(c):
     files = ("README.md", ".env.example", "CLAUDE.md", "docs/PROXY.md",
              "docs/DRIVER.md", "docs/MCP.md", "docs/BUS.md", "docs/CLI.md")
-    removed = ("mop login", "mop llm", "mop cred", "--llm", "--cred",
+    removed = ("mop llm", "mop cred", "--llm", "--cred",
                "MOP_DEFAULT_LLM", "Z_AI_KEY", "ANTHROPIC_API_KEY")
     for name in files:
         text = open(os.path.join(ROOT, name), encoding="utf-8").read()
@@ -426,8 +426,23 @@ def check_current_docs_401(c):
         c.check(f"#405 {name} does not require manual proxy key entry", obsolete not in text)
 
 
+# HYPOTHESIS: вход остаётся только как join, а старые вызовы после rename
+# потеряют команду. Псевдоним не должен попадать в каталог новых команд.
+# RESULT: новая команда в каталоге, старое имя работает только как alias.
+# STATUS: FIXED — see #407
+def check_login_name_407(c):
+    cat = cli.catalog(cli.scan())
+    c.check("#407 login is the current command", "login" in cat and "join" not in cat)
+    c.expect("#407 old join is a transitional alias",
+             cli.unalias(["join", "--server", "srv.test"]),
+             ["login", "--server", "srv.test"])
+    c.check("#407 reference documents login rather than alias",
+            "#### mop login" in cli.reference() and "#### mop join" not in cli.reference())
+
+
 def main():
     c = Checks()
+    check_login_name_407(c)
     check_current_docs_401(c)
     check_dispatch_sources_396(c)
     check_reference_render_350(c)

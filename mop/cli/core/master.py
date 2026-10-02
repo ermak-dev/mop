@@ -20,7 +20,7 @@ session as a child, sees MOP_PROJECT, builds the project's bus credentials from
 the server's directory (mop/common/creds.py) and subscribes to its project's inbox.
 
 No ansible on this machine: bus and proxy credentials arrive with
-`mop join --server ADDRESS LOGIN`. The server comes from the clone binding,
+`mop login --server ADDRESS LOGIN`. The server comes from the clone binding,
 MOP_SERVER_LAN or --server; without one, a single joined server is selected.
 The /master skill is linked from here.
 
@@ -42,7 +42,7 @@ master can push, manage its project's puppets and talk to the tracker without
 asking on every step. The Nomad token stays on the server.
 
 The session uses the selected server's LLM proxy. Its URL and key come from
-the private client.json written by mop join, not from installation .env.
+the private client.json written by mop login, not from installation .env.
 """
 import json
 import os
@@ -128,7 +128,7 @@ def main(argv):
         # за спиной оператора: на узел ведёт одна дорога, и это deploy на
         # сервере; сюда его плоды привозит join.
         lib.usage(f"no bus credentials on this machine.\n"
-                  f"Log in as yourself: mop join <login>. The project "
+                  f"Log in as yourself: mop login <login>. The project "
                   f"must be registered (mop project add {origin}) and yours "
                   f"in the server's identity provider (mop server user, or the directory)")
     link_skill()

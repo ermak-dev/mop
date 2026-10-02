@@ -8,7 +8,7 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 from _lib import Checks, patched, patched_env  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.cli.pool import join  # noqa: E402
+from mop.cli.pool import login as join  # noqa: E402
 from mop.common import busnames, config, context, creds  # noqa: E402
 
 
