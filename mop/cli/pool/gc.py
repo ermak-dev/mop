@@ -6,13 +6,14 @@ MOP_GC_MAX_PER_RUN per run. Run this as the operator, not from a master
 shell: disk pressure on a node is a fact about every tenant, not one project.
 """
 from mop.cli import lib
-from mop.common import bus, config, puppets, state
+from mop.common import bus, puppets, state
 
 
 def main(argv):
     dry = lib.dry(argv, __doc__)
-    limit = config.num("MOP_GC_FREE_MIN_GB")
-    cap = config.num("MOP_GC_MAX_PER_RUN")
+    policy = bus.call_cluster("gc_policy")
+    limit = policy["free_min_gb"]
+    cap = policy["max_per_run"]
     rows = puppets.puppet_rows()
     nodes = sorted({r.node for r in rows if r.node is not None})
     disks = bus.request_many("disk", nodes)

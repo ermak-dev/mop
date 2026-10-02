@@ -147,7 +147,7 @@ EXCLUDES = [".git", "__pycache__", ".env", "inventory.ini", "inventory.yaml", "w
 # LLM-прокси, а ключ с #393 читается из закрытого файла, не из unit (#402).
 ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          "MOP_MEM_MB", "MOP_PUPPET_SEED", "MOP_PUPPET_PATH",
-                         "MOP_PROXY_URL",
+                         "MOP_PROXY_URL", "MOP_GC_FREE_MIN_GB", "MOP_GC_MAX_PER_RUN",
                          # reload шины с проверкой (#211): /varz на петле.
                          "MOP_NATS_MONITOR_PORT")}
 # Несекретные настройки провайдера личностей (#214) -- сервисам, которые его

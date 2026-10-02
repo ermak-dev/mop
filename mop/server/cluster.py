@@ -628,6 +628,12 @@ def _meta(project, req):
     return {"ok": True, "node": req["node"], "meta": _api().node_meta(req["node"])}
 
 
+def _gc_policy(project, req):
+    """Единая политика удаления свободных папетов, заданная установкой."""
+    return {"ok": True, "free_min_gb": config.num("MOP_GC_FREE_MIN_GB"),
+            "max_per_run": config.num("MOP_GC_MAX_PER_RUN")}
+
+
 # ─── глаголы: проекты (#117) ─────────────────────────────────────────────
 # Реестр, лимиты и пароли папетов живут здесь, на сервере, и пишет их только
 # сервис. Глаголы идут в потоках петли, поэтому правка реестра -- под замком:
@@ -866,6 +872,7 @@ VERBS = {
     "up":             Verb(_up,             ADMIN,   False, False),
     "forget":         Verb(_forget,         ADMIN,   False, False),
     "meta":           Verb(_meta,           ADMIN,   False, False),
+    "gc_policy":      Verb(_gc_policy,      ADMIN,   False, False),
     "projects":       Verb(_projects,       ADMIN,   False, False),
     "project_add":    Verb(_project_add,    ADMIN,   False, False),
     "project_delete": Verb(_project_delete, ADMIN,   False, False),
