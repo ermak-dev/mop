@@ -158,6 +158,31 @@ FEEDBACK_SETTINGS = ('--settings', '{"feedbackDrafts":"off"}')
 # никогда -- «везде» означает и явное отсутствие ключа у пользователя.
 FEEDBACK_KEY = "feedbackDrafts"
 FEEDBACK_VALUE = "off"
+# Инструмент отправки отзыва гасится и напрямую (#419): feedbackDrafts=off
+# убирает очередь черновиков и инструмент по описанию схемы, но требование
+# тикета -- невозможность отправки через tool, и это проверяемый контракт
+# настроек, а не поведение модели. Тот же deny, что у врапера (#420):
+# сессия не может ни вызвать инструмент, ни получить его в списке.
+FEEDBACK_TOOL = "SendFeedback"
+
+
+def _merged(parsed):
+    """Наложить гашение отзыва на настройки (чистая, #419) -> JSON-строка.
+
+    feedbackDrafts=off плюс permissions.deny c SendFeedback: чужой deny
+    сохраняется, добавление идемпотентно, allow того же имени не снимает
+    deny (в схеме Claude deny сильнее allow). Прочие ключи пользователя
+    не трогаются."""
+    parsed[FEEDBACK_KEY] = FEEDBACK_VALUE
+    perms = parsed.get("permissions")
+    if not isinstance(perms, dict):
+        perms = parsed["permissions"] = {}
+    deny = perms.get("deny")
+    if not isinstance(deny, list):
+        deny = perms["deny"] = []
+    if FEEDBACK_TOOL not in deny:
+        deny.append(FEEDBACK_TOOL)
+    return json.dumps(parsed, ensure_ascii=False)
 
 
 def feedback_settings(passthru, read=None):
@@ -208,7 +233,7 @@ def feedback_settings(passthru, read=None):
             last = (i, value)
         i += 1
     if last is None:
-        return FEEDBACK_SETTINGS[1], passthru
+        return _merged({}), passthru
     i, value = last
     # Inline-объект узнаётся по первому значимому символу, не по строке:
     # claude принимает JSON с ведущим пробелом, и это не путь к файлу.
@@ -228,7 +253,7 @@ def feedback_settings(passthru, read=None):
     if not isinstance(parsed, dict):
         raise ValueError("--settings is not a JSON object: mop cannot add "
                          f"{FEEDBACK_KEY} to it")
-    parsed[FEEDBACK_KEY] = FEEDBACK_VALUE
+    parsed = _merged(parsed)
     # Все пользовательские --settings снимаются, не только последний:
     # наша пара едет в начало argv, и ранний, останься он, встал бы после
     # неё -- и вытеснил off (claude повторов не мержит, побеждает
@@ -244,7 +269,7 @@ def feedback_settings(passthru, read=None):
             continue
         stripped.append(flags[i])
         i += 1
-    return json.dumps(parsed, ensure_ascii=False), stripped + tail
+    return parsed, stripped + tail
 
 
 def _read_file(path):

@@ -221,18 +221,22 @@ def main():
     # Inline: off вписан, чужие env/hooks целы, своего --settings не осталось.
     value, argv, got = merges(["--settings", '{"env":{"X":"1"}}'])
     c.check("inline settings keep keys and gain off (#419)",
-            got == {"env": {"X": "1"}, "feedbackDrafts": "off"}
+            got == {"env": {"X": "1"}, "feedbackDrafts": "off",
+                    "permissions": {"deny": ["SendFeedback"]}}
             and "--settings" not in argv, argv)
     # Файл: прочитан, off наложен, путь из argv убран.
     value, argv, got = merges(["--settings", "custom.json"], read=read)
     c.check("settings file is read, merged, path removed (#419)",
             got == {"env": {"X": "1"}, "hooks": {"PreToolUse": []},
-                    "feedbackDrafts": "off"}
+                    "feedbackDrafts": "off",
+                    "permissions": {"deny": ["SendFeedback"]}}
             and "custom.json" not in argv, argv)
     # =-форма.
     value, argv, got = merges(["--settings=custom.json"], read=read)
     c.check("=form file merged the same way (#419)",
-            got.get("feedbackDrafts") == "off" and "--settings" not in argv,
+            got.get("feedbackDrafts") == "off"
+            and got["permissions"]["deny"] == ["SendFeedback"]
+            and "--settings" not in argv,
             argv)
     # Повторные --settings: ровно ОДНА пара в итоге -- merged с последнего;
     # ранние, останься они в пасстру, встали бы ПОСЛЕ нашей пары и вытеснили
@@ -240,7 +244,8 @@ def main():
     value, argv, got = merges(["--settings", '{"env":{"A":"1"}}',
                               "--settings", '{"env":{"B":"2"}}'])
     c.check("repeated settings collapse into one merged pair (#419)",
-            got == {"env": {"B": "2"}, "feedbackDrafts": "off"}
+            got == {"env": {"B": "2"}, "feedbackDrafts": "off",
+                    "permissions": {"deny": ["SendFeedback"]}}
             and "--settings" not in argv
             and '{"env": {"A": "1"}}' not in argv, argv)
     # Дефект из ревью: пара не может встать в середину чужого флага с
@@ -266,21 +271,48 @@ def main():
     try:
         value, argv, got = merges(["--settings", ' {"env":{"X":"1"}}'])
         c.check("leading-space inline JSON merges as inline (#419)",
-                got == {"env": {"X": "1"}, "feedbackDrafts": "off"}
+                got == {"env": {"X": "1"}, "feedbackDrafts": "off",
+                        "permissions": {"deny": ["SendFeedback"]}}
                 and "--settings" not in argv, argv)
     except ValueError as e:
         c.check("leading-space inline JSON merges as inline (#419)", False, str(e))
+    # Требование #419 -- невозможность отправки через tool, а не только
+    # очередь черновиков: в merged всегда permissions.deny с SendFeedback
+    # (как wrapper #420). Чужой deny сохраняется, добавление идемпотентно,
+    # пользовательское allow того же имени не снимает наш deny.
+    value, argv, got = merges(["--settings",
+                               '{"permissions":{"deny":["AskUserQuestion"]},'
+                               '"env":{"X":"1"}}'])
+    c.check("user deny kept, SendFeedback added (#419)",
+            got["permissions"]["deny"] == ["AskUserQuestion", "SendFeedback"],
+            value)
+    value, argv, got = merges(["--settings",
+                               '{"permissions":{"deny":["SendFeedback"]}}'])
+    c.check("SendFeedback deny is idempotent (#419)",
+            got["permissions"]["deny"] == ["SendFeedback"], value)
+    value, argv, got = merges(["--settings",
+                               '{"permissions":{"allow":["SendFeedback"],'
+                               '"ask":true}}'])
+    c.check("user allow does not lift our deny, other keys intact (#419)",
+            got["permissions"]["deny"] == ["SendFeedback"]
+            and got["permissions"]["allow"] == ["SendFeedback"]
+            and got["permissions"]["ask"] is True, value)
+    value, argv, got = merges(["--continue"])
+    c.check("own settings carry the deny too (#419)",
+            got == {"feedbackDrafts": "off",
+                    "permissions": {"deny": ["SendFeedback"]}}, value)
     # Своего --settings нет: своя пара, пасстру нетронут.
     value, argv, got = merges(["--continue"])
     c.check("no user settings -> own value, passthru intact (#419)",
-            value == '{"feedbackDrafts": "off"}'.replace(": ", ":")
-            or json.loads(value) == {"feedbackDrafts": "off"},
-            (value, argv))
+            json.loads(value) == {"feedbackDrafts": "off",
+                                  "permissions": {"deny": ["SendFeedback"]}}
+            and argv == ["--continue"], (value, argv))
     # За `--` флагов нет: пользовательское значение за разделителем не
     # трогается, ours ставится командлетом в зоне флагов.
     value, argv, got = merges(["--", "--settings", '{"env":{"X":"1"}}'])
     c.check("beyond -- untouched, own value returned (#419)",
-            json.loads(value) == {"feedbackDrafts": "off"}
+            json.loads(value) == {"feedbackDrafts": "off",
+                                  "permissions": {"deny": ["SendFeedback"]}}
             and argv == ["--", "--settings", '{"env":{"X":"1"}}'], argv)
     # Fail closed: недоступный файл, не-JSON, не-объект -- ValueError без
     # значения в тексте (секреты не эхом).
