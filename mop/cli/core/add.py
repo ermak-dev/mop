@@ -20,9 +20,9 @@ MCP = {"annotations": "destructive", "args": [
 
 
 def main(argv):
-    if len(args) > 1:
+    if len(argv) > 1:
         lib.usage(__doc__)
-    origin = lib.origin(args[0] if args else None, __doc__)
+    origin = lib.origin(argv[0] if argv else None, __doc__)
     project = puppets.project_of(origin)
     # Курица и яйцо: у нового проекта ещё нет пользователя в конфиге NATS, и
     # папет поднимется, но к шине не подключится — прочитается как «агент
@@ -32,7 +32,7 @@ def main(argv):
                   f"Register it on the server: mop project add {origin}")
     p = lib.Progress(project)
     try:
-        return _add(origin, project, bool(args), p)
+        return _add(origin, project, bool(argv), p)
     finally:
         p.clear()
 
