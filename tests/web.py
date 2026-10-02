@@ -1018,20 +1018,22 @@ def check_login_bounds_415(c):
     good = {"Origin": "https://10.0.0.1", "Content-Type": "application/json"}
     settings = {"MOP_SERVER_LAN": "10.0.0.1", "MOP_HTTPS_PORT": "443"}
 
-    # (a) oversize: тело больше BODY_MAX -- 413, до чтения и до лимита попыток
+    # (a) oversize: тело больше BODY_MAX -- 413, до чтения и до лимита попыток.
+    # Провайдер -- шпион: oversized не должен дойти до authenticate.
+    spy = FakeProvider()
+    body_max = getattr(webcli, "BODY_MAX", 1024 * 1024)
+    body = b'{"login": "anton", "password": "s3cret", "pad": "' + b"x" * (body_max + 1) + b'"}'
     with mock.patch.object(webcli.config, "get",
                            lambda n, d=None: settings.get(n, d)), \
             mock.patch.object(webcli, "SESSIONS", websession.SessionStore(now=lambda: 1000.0)), \
             mock.patch.object(webcli, "RATE", websession.RateLimiter(now=lambda: 1000.0)), \
-            mock.patch.object(websession, "provider", lambda: FakeProvider()):
-        body_max = getattr(webcli, "BODY_MAX", 1024 * 1024)
-        body = b'{"login": "anton", "password": "s3cret", "pad": "' + b"x" * (body_max + 1) + b'"}' 
+            mock.patch.object(websession, "provider", lambda: spy):
         sent, out = _fake_handler(webcli, "POST", "/api/login", body,
                                   {**good, "Content-Length": str(len(body))})
         c.expect("#415 an oversized login body: 413, one phrase",
                  (sent[0][1], out), (413, b'{"error": "request too large"}'))
         c.expect("#415 the oversized body never reaches the provider",
-                 FakeProvider().asked if False else [], [])
+                 spy.asked, [])
 
     # (b) недосланное тело: живой сокет, заявленный Content-Length больше
     # посланного. Поток обязан закончиться таймаутом (Handler.timeout),
