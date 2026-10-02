@@ -13,6 +13,8 @@
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 
@@ -731,6 +733,71 @@ def check_claude_hooks_223(c):
 BRANCHED = ("pu-mop-3", "git@git.example.dev:someone/mop.git", False, "feat/256-x")
 
 
+# ── #420: папету нельзя черновики feedback — ни писать, ни подсказывать ────
+# HYPOTHESIS: у папета нет человека, которому показать черновик feedback, а
+# Claude Code 2.1.287 даёт модели инструмент SendFeedback: она пишет черновики
+# в ~/.claude/feedback/drafts/ и заметку о них на хост-узел, где ~/.claude
+# делят все claude машины. Инструмент не выключен, политика feedbackDrafts по
+# умолчанию notify — и ход за ходом копятся черновики, которых никто не
+# отправит, и подсказки «покажи /feedback».
+# SOLUTION: врапер переводит политику feedbackDrafts в off (значение из
+# Claude Code 2.1.287: notify | quiet | off, restrictive — off) в своём
+# ~/.claude/settings.json — не в общем на узле: каждый подъём сходится сам,
+# и чужие сессии узла не задеваются; deny-правило на SendFeedback — то же
+# место, что SendMessage (#223): инструмента нет и в списке, его не choosing.
+# DISABLE_FEEDBACK_COMMAND гасит и /feedback-команду в панели. Ничего больше
+# не выключается: Remote Control и автообновления остаются как были.
+# STATUS: FIXED — see #420
+
+
+# Тело edit_json из врапера (#420): секция feedback исполняется с ним же,
+# как в теле, без второго парсера bash.
+EDIT_JSON = 'edit_json() {  # <file> <jq-program> [jq-args...]\n    local file="$1" program="$2"; shift 2\n    local tmp="$file.$PU_NAME.tmp"\n    exec 9>"$file.lock"\n    flock 9\n    # `jq empty` is not a validity check: a zero-byte file is an empty jq input\n    # stream, so it exits 0, every filter over it yields nothing, and the 0-byte\n    # config got written straight back (2026-08-28, one node — all six puppets parked\n    # on the config prompt while `mop list` showed only "HUNG"). Demand an\n    # actual object, and never install an empty result.\n    jq -e \'type == "object"\' "$file" >/dev/null 2>&1 || echo \'{}\' > "$file"\n    if jq "$@" "$program" "$file" > "$tmp" && [ -s "$tmp" ]; then\n        mv "$tmp" "$file"\n    else\n        rm -f "$tmp"\n    fi\n    flock -u 9\n    exec 9>&-\n}'
+
+def check_no_feedback_420(c):
+    import tempfile
+    section = re.search(r"^# --- feedback drafts[^\n]*\n(.*?)^# --- end of feedback drafts ---",
+                        spec.WRAPPER, re.M | re.S)
+    if not c.check("#420 the wrapper has a feedback drafts section",
+                   not (section is None)):
+        return
+    body = section.group(1)
+    # (a) политика — off, имя инструмента — то, что видно в 2.1.287
+    c.check("#420 feedbackDrafts is turned off",
+            not ('feedbackDrafts = "off"' not in body), body)
+    c.check("#420 the deny rule carries SendFeedback",
+            not ('"SendFeedback"' not in body), body)
+    c.check("#420 the /feedback command is disabled",
+            not ("DISABLE_FEEDBACK_COMMAND=1" not in body), body)
+    # (b) файл узловой, замок и починка — общие edit_json; чужого не трогаем
+    c.check("#420 the policy goes to the node-level settings.json",
+            not ("edit_json" not in body
+                 or "$HOME/.claude/settings.json" not in body), body)
+    c.check("#420 no other policy is touched",
+            not (re.search(r"\b(skipDangerousModePermissionPrompt|RemoteControl|"
+                           r"autoUpdate|auto_updates)\b", body) is not None), body)
+    # (c) секция исполняется как есть: свой HOME, замок и jq как в теле
+    home = tempfile.mkdtemp()
+    try:
+        script = ("set -e\nmkdir -p \"$HOME/.claude\"\n[ -f \"$HOME/.claude/settings.json\" ] "
+                  '|| echo \'{}\' > "$HOME/.claude/settings.json"\n' + EDIT_JSON + "\n"
+                  + body + '\nprintf "%s" "$DISABLE_FEEDBACK_COMMAND"\n')
+        env = {"HOME": home, "PU_NAME": "pu-mop-1", "PATH": os.environ["PATH"]}
+        r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, env=env)
+        if c.check("#420 the feedback section runs clean",
+                   not (r.returncode or r.stderr.strip()),
+                   f"exit {r.returncode}: {r.stderr.strip()[-200:]}"):
+            with open(os.path.join(home, ".claude", "settings.json")) as f:
+                doc = json.load(f)
+            c.expect("#420 the written settings carry the policy",
+                     doc.get("feedbackDrafts"), "off")
+            c.expect("#420 the deny rule holds SendFeedback",
+                     "SendFeedback" in (doc.get("permissions") or {}).get("deny", []),
+                     True)
+    finally:
+        shutil.rmtree(home)
+
+
 def check_job_meta_265(c):
     from mop.common import domain
     JobMeta = getattr(domain, "JobMeta", None)
@@ -859,7 +926,7 @@ def main():
                check_git_identity, check_driver_free_183,
                check_memory_197, check_project_asks_197, check_spec_memory_197,
                check_nomad_order_197, check_claude_hooks_223, check_hook_events_341,
-               check_job_meta_265,
+               check_no_feedback_420, check_job_meta_265,
                check_node_pin_289):
         fn(c)
 
