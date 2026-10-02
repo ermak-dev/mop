@@ -1099,6 +1099,29 @@ def check_cluster_key_copy_402(c):
         and s.get("owner") == "{{ MOP_USER }}" for s in folders))
 
 
+def check_llm_request_size_411(c, can_render):
+    # HYPOTHESIS: nginx отвергает большую текстовую историю и её compact
+    # до LLM-прокси; Claude маскирует HTTP 413 как лимит media в 32 МБ.
+    # Проверяем рендер: LLM API принимает тело не меньше 32 МБ, настройка
+    # установки меняет этот предел только на маршруте LLM.
+    # SOLUTION: свой client_max_body_size у /llm/, размер из SETTINGS.
+    # RESULT: до исправления обе проверки рендера падали без директивы.
+    # STATUS: FIXED — see #411
+    if not can_render:
+        return
+    template = open(os.path.join(DEPLOY, "roles", "proxy", "templates", "mop.conf.j2")).read()
+    variables = dict(config.SETTINGS, MOP_SERVER_LAN="srv.test")
+    for limit in (config.SETTINGS.get("MOP_LLM_REQUEST_MAX_MB", ""), "96"):
+        got = render(template, dict(variables, MOP_LLM_REQUEST_MAX_MB=limit))
+        location = re.search(r"location /llm/ \{([^}]+)\}", got).group(1)
+        found = re.search(r"client_max_body_size\s+(\d+)m;", location)
+        c.check(f"#411: LLM accepts large requests with limit {limit!r}",
+                found is not None and found[1] == limit and int(found[1]) >= 32,
+                location)
+        c.check("#411: the request limit belongs only to the LLM route",
+                got.count("client_max_body_size") == 1, got)
+
+
 def main():
     c = Checks()
     check_cluster_key_copy_402(c)
@@ -1427,6 +1450,7 @@ def main():
     check_users_reload_199(c)
     check_one_node_280(c)
 
+    check_llm_request_size_411(c, can_render)
     check_job_gc_348(c, can_render)
     check_doctor_timer_359(c)
     check_pu_cleanup_gone_361(c)
