@@ -39,6 +39,8 @@ PAGE = os.path.join(DIST, "index.html")
 LOGO = os.path.join(config.PROJECT, "docs", "logo.png")   # фавикон и шапка
 PING_EVERY = 15      # с: пустой кадр SSE, чтобы прокси и браузер не рвали тишину
 
+BODY_MAX = 16 * 1024       # байт тела входа: {login, password} -- это байты,
+                           # не гигабайты (#415)
 COLLECTOR = web.Collector()
 SESSIONS = websession.SessionStore()
 RATE = websession.RateLimiter()
@@ -46,6 +48,9 @@ RATE = websession.RateLimiter()
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "mop-web"
+    # Таймаут соединения (#415): недосланное тело не паркует поток вечно,
+    # socket.timeout читается как обычный отказ (400), соединение закрывается.
+    timeout = 30
 
     def log_message(self, fmt, *args):
         """Молчим про каждый запрос: под systemd журнал забился бы SSE-пингами.
@@ -101,8 +106,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(403, {"error": "origin refused"})
         if not RATE.allowed(addr):
             return self._json(429, {"error": "too many attempts, try later"})
+        # Тело входа -- килобайты, не гигабайты: один заголовок Content-Length
+        # без потолка парковал поток в read навсегда (#415), и недосланное
+        # тело держало его до разрыва соединения.
         try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0 or length > BODY_MAX:
+            return self._json(413, {"error": "request too large"})
+        try:
+            body = json.loads(self.rfile.read(length))
             login, password = body["login"], body["password"]
             if not isinstance(login, str) or not isinstance(password, str):
                 raise ValueError
@@ -156,7 +170,13 @@ class Handler(BaseHTTPRequestHandler):
             with open(LOGO, "rb") as f:
                 return self._send(200, f.read(), "image/png")
         if path == "/api/session":
-            login, role = self._who()
+            # Провал провайдера -- гость с причиной, не 500 в журнал (#415):
+            # тот же fail closed, что у /api/journal (#424).
+            try:
+                login, role = self._who()
+            except Exception:
+                return self._json(200, {"login": None, "role": None,
+                                        "error": "provider unavailable"})
             return self._json(200, {"login": login, "role": role})
         if path == "/api/journal":
             return self.api_journal()
