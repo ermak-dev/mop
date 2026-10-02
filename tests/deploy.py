@@ -1118,68 +1118,66 @@ def check_llm_request_size_411(c, can_render):
         c.check(f"#411: LLM accepts large requests with limit {limit!r}",
                 found is not None and found[1] == limit and int(found[1]) >= 32,
                 location)
-        # #418: лимит приехал и на маршруты шлюза панели (/llm/raw/,
-        # /v8/management) -- это те же тела LLM-прокси. Ожидание
-        # «только на LLM-маршруте» растянуто до «только на маршрутах к
-        # LLM-прокси», глобальной директивы по-прежнему нет; каждая
-        # директива несёт ровно подставленный предел.
-        c.check("#411: the request limit stays on the LLM routes only",
-                got.count("client_max_body_size")
-                == got.count(f"client_max_body_size {limit}m"),
-                got.count("client_max_body_size"))
+        # Строгость «нигде кроме» уехала в check_mgmt_gateway_418: там
+        # блоки по границам скобок, четыре ожидаемых маршрута, по одному
+        # лимиту в каждом.
 
 
 
 # HYPOTHESIS (#418): management-ключ прокси живёт только внутри config.yaml
 # (bcrypt после первого старта), и серверному шлюзу панели (#417) нечем
-# представиться прокси: ключ нигде не лежит отдельным закрытым файлом.
-# Прямые /v8/management и алиас /llm/v8/management при этом открыты мимо
-# шлюза -- путь, который #417 закрывает за собой.
-# SOLUTION (контракт pu3): роль web кладёт закрытую копию ключа (тот же
-# lookup, что у llmproxy -- совпадение при установке гарантировано общим
-# источником) до старта mop-web: paths.local(paths.SECRETS,
-# 'llm-proxy-mgmt.pass'), MOP_USER, файл 0600, каталог 0700, no_log;
-# nginx: = /llm/management.html и /llm/raw/ и /v8/management/ ведёт в
-# mop-web (шим, gated raw панель для iframe, API-шлюз), exact
-# /llm/v8/management и prefix /llm/v8/management/ -- deny, /llm/
-# остальное как было; лимит тела и read_timeout 75s на raw/API,
-# buffering off.
-# RESULT: до правки -- ни копии ключа, ни gateway-маршрутов (8 RED);
-# после -- копия условна (без llmproxy-тега не кладётся), маршруты
-# шлюза и deny закрыты, прочее не тронуто.
+# представиться прокси. Прямые /v8/management и алиас /llm/v8/management
+# открыты мимо шлюза.
+# SOLUTION (контракт pu3): роль web кладёт закрытую копию ключа тем же
+# lookup-выражением, что читает роль llmproxy -- источник один, файл в
+# secrets/ контроллера один, копия совпадает с секретом по построению на
+# любой установке (vars плей-scoped, ссылкой через переменную роль web её
+# НЕ видит -- потому буквальный тот же lookup, не имя). nginx: шим
+# = /llm/management.html, gated raw /llm/raw/, API /v8/management/ и exact
+# /v8/management -- в mop-web; ^~ /llm/management и deny /llm/v8/management*
+# закрывают обходы через срез префикса суффикс-играми; лимит тела и
+# read_timeout 75s на маршруты шлюза, buffering off.
+# RESULT: RED ловил и play-scoped переменную (when всегда false -- копия
+# не ставилась ни на одной установке), и отсутствие ^~ блока; после
+# правки -- копия ставится всегда, оба источника байт-в-байт одинаковые.
 # STATUS: FIXED — see #418
 def check_mgmt_gateway_418(c, can_render):
     want = os.path.join(".config", "mop", "secrets", "llm-proxy-mgmt.pass")
     tasks = yaml.safe_load(open(
         os.path.join(DEPLOY, "roles", "web", "tasks", "main.yml"),
         encoding="utf-8"))
-    copies = [t for t in tasks if "llm_proxy_mgmt_key" in str(t)]
-    unit_at = next((i for i, t in enumerate(tasks)
-                    if "mop-web unit" in str(t.get("name", "")).lower()
-                    or t.get("ansible.builtin.template", {}).get("src", "") == "service.j2"), None)
-    copies = [t for t in tasks if "llm_proxy_mgmt_key" in str(t)]
-    # Вторая установка без LLM-прокси (#418): переменная рождается в плее
-    # с тегом llmproxy, а роль web играет в другом плее -- без условия
-    # задача падала бы на rumop с undefined variable. Копия условна: нет
-    # плекса -- нет и ключа, шлюзу нечем представляться, и это не ошибка.
-    c.check("#418 the key copy is conditional on the llmproxy play",
-            len(copies) == 1 and copies[0].get("when") is not None
-            and "llm" in str(copies[0].get("when")), copies[0] if copies else None)
+    # Источник llmproxy: то же выражение из setup.yml.
+    setup = yaml.safe_load(open(os.path.join(DEPLOY, "setup.yml"),
+                                encoding="utf-8"))
+    source = next((str(play.get("vars", {}).get("llm_proxy_mgmt_key"))
+                   for play in setup
+                   if play.get("vars", {}).get("llm_proxy_mgmt_key")), "")
+    copies = [t for t in tasks
+              if t.get("ansible.builtin.copy", {}).get("dest", "").endswith(
+                  "llm-proxy-mgmt.pass")]
     c.check("#418 the web role carries a private copy of the management key",
             len(copies) == 1, [t.get("name") for t in copies])
     if copies:
-        spec = copies[0].get("ansible.builtin.copy", {})
+        spec = copies[0]["ansible.builtin.copy"]
+        c.check("#418 the copy comes from the same lookup as llmproxy's, not a play-scoped name",
+                spec.get("content", "") == "{{ " + source.strip("{} }") + " }}"
+                and "llm_proxy_mgmt_key" not in spec.get("content", ""),
+                spec.get("content"))
         c.check("#418 the key copy is the gateway's own path and permissions",
                 spec.get("dest", "").endswith(want)
                 and spec.get("owner") == "{{ MOP_USER }}"
                 and spec.get("group") == "{{ MOP_USER }}"
                 and spec.get("mode") in ("0600", "'0600'")
                 and copies[0].get("no_log") is True, spec)
+        c.check("#418 the copy is unconditional: both installs carry the proxy",
+                copies[0].get("when") is None, copies[0].get("when"))
+        unit_at = next((i for i, t in enumerate(tasks)
+                        if t.get("ansible.builtin.template", {}).get(
+                            "src", "") == "service.j2"), None)
         if unit_at is not None:
             c.check("#418 the key copy lands before the web unit starts",
                     tasks.index(copies[0]) < unit_at,
                     (tasks.index(copies[0]), unit_at))
-        # Каталог копии -- 0700: не доверяем umask.
         dirs = [t for t in tasks
                 if t.get("ansible.builtin.file", {}).get("state") == "directory"
                 and t["ansible.builtin.file"].get("path", "").endswith(
@@ -1194,55 +1192,57 @@ def check_mgmt_gateway_418(c, can_render):
     got = render(template, dict(config.SETTINGS, MOP_SERVER_LAN="srv.test"))
     web = f"127.0.0.1:{config.SETTINGS['MOP_WEB_PORT']}"
 
-    def location(pattern):
-        m = re.search(r"location (= )?" + pattern + r" ?\{[^}]*\}", got)
+    # Блок location по границам скобок: никаких выводов «покрыто» из
+    # существования соседнего блока.
+    def block(pattern):
+        m = re.search(r"location\s+(?:=\s*|\^~\s*)?" + pattern
+                      + r"\s*\{(?:[^{}]*)\}", got)
         return m.group(0) if m else ""
 
-    # Шлюз: три маршрута в mop-web.
-    for path_pat, what in ((r"/v8/management/", "API gateway"),
-                           (r"/llm/management\.html", "panel shim"),
-                           (r"/llm/raw/", "gated raw panel")):
-        m = location(path_pat)
+    # Шлюз: три маршрута в mop-web (exact шима, raw префикс, API префикс и
+    # exact без слеша).
+    for path_pat, what, exact in ((r"/llm/management\.html", "panel shim", True),
+                                  (r"/llm/raw/", "gated raw panel", False),
+                                  (r"/v8/management/", "API gateway", False),
+                                  (r"/v8/management", "exact API", True)):
+        b = block(path_pat)
         c.check(f"#418 {what} goes to mop-web",
-                bool(m) and web in m, m or "no location")
-    # Exact /v8/management (без слеша) обработан шлюзом или deny -- но не
-    # уходит в CPA прямым proxy_pass.
-    m = location(r"/v8/management")
-    c.check("#418 exact /v8/management does not bypass the gateway",
-            ("= /v8/management" in m or "/v8/management " in m) and web in m, m)
-    # Алиасы -- deny: exact и prefix каждый своим location.
-    for alias, kind in ((r"/llm/v8/management", "exact"),
-                        (r"/llm/v8/management/", "prefix")):
-        m = location(alias)
-        c.check(f"#418 alias {alias} ({kind}) is denied",
-                bool(m) and ("= " + alias.strip("\\/") in m.replace("location = ", "= ")
-                             or "return 403" in m), m or "no location")
-    # /llm/management* -- в шлюз (gated), не напрямую в CPA: шим страницы
-    # и всё, что панель может попросить под этим префиксом.
-    for probe in ("/llm/management", "/llm/management/", "/llm/management.html/"):
-        m = re.search(r"location (= )?" + re.escape(probe) + r" ?\{[^}]*\}", got)
-        covered = bool(m and web in m.group(0)) or bool(
-            re.search(r"location (= )?/llm/management(\.html)? ?\{[^}]*\}", got)
-            and web in (re.search(r"location (= )?/llm/management(\.html)? ?\{[^}]*\}", got) or
-                        re.match("", "")).group(0))
-        c.check(f"#418 {probe} never reaches CPA past the gate",
-                covered, m.group(0) if m else "no location")
-    # /llm/ остальное как было (панельный location на CPA жив).
-    m = location(r"/llm/")
+                bool(b) and web in b, b or "no block")
+    # Обходы закрыты: ^~ /llm/management (все суффиксы: /, .html/, junk)
+    # и оба вида /llm/v8/management.
+    guard = block(r"/llm/management")
+    c.check("#418 ^~ /llm/management denies every suffix past the shim",
+            guard.startswith("location ^~ /llm/management")
+            and "403" in guard, guard)
+    for alias in (r"/llm/v8/management", r"/llm/v8/management/"):
+        b = block(alias)
+        c.check(f"#418 alias {alias} is denied",
+                bool(b) and "403" in b, b or "no block")
+    # Шим -- exact: exact выигрывает у ^~, и только точный путь открыт.
+    shim = block(r"/llm/management\.html")
+    c.check("#418 the shim is an exact match, not a prefix",
+            "location = /llm/management.html" in shim, shim)
+    # /llm/ остальное как было -- на CPA, с лимитом #411.
+    panel = block(r"/llm/")
     c.check("#418 /llm/ still proxies the panel prefix to CPA",
-            bool(m) and "8317" in m.replace(
-                config.SETTINGS.get("MOP_LLM_PROXY_PORT", "8317"), "8317"), m)
-    c.check("#418 #411 body limit stays on the LLM route",
-            "client_max_body_size" in location(r"/llm/"), location(r"/llm/"))
+            "client_max_body_size" in panel
+            and config.SETTINGS["MOP_LLM_PROXY_PORT"] in panel, panel)
     # Лимит и таймауты на raw/API.
     for path_pat in (r"/llm/raw/", r"/v8/management/"):
-        m = location(path_pat)
+        b = block(path_pat)
         c.check(f"#418 {path_pat}: body limit, 75s read timeout, buffering off",
-                "client_max_body_size" in m and "75s" in m
-                and "proxy_buffering off" in m, m)
+                "client_max_body_size" in b and "75s" in b
+                and "proxy_buffering off" in b, b)
     # Неприкосновенность остального.
     for keep in ("location = /nats", "location = /events", "location / {"):
         c.check(f"#418 {keep} untouched", keep in got, keep)
+    # #418 расширение #411: лимит ровно на четырёх ожидаемых маршрутах,
+    # по одной директиве в каждом, нигде больше -- блоками, не счётчиком.
+    limited = [b for b in (panel, block(r"/llm/raw/"), block(r"/v8/management/"),
+                           block(r"/v8/management"))]
+    c.check("#411+#418 the body limit sits on exactly the four LLM routes",
+            all(b.count("client_max_body_size") == 1 for b in limited)
+            and got.count("client_max_body_size") == 4, got.count("client_max_body_size"))
 
 
 def main():

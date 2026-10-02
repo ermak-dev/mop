@@ -95,10 +95,11 @@
 
 # Копия management-ключа LLM-прокси для шлюза панели (#418, эпик #413):
 # шлюз mop-web подкладывает его в Authorization к /v8/management. Тот же
-# lookup, что у роли llmproxy -- при установке копия совпадает с secret-key
-# конфига по построению. Переменная рождается в плее с тегом llmproxy
-# (deploy/setup.yml): установка без LLM-прокси (rumop) её не имеет -- там
-# копия не кладётся, шлюзу нечем представляться, и это не ошибка прогона.
+# lookup-выражение, что в vars плей llmproxy (deploy/setup.yml): имя
+# llm_proxy_mgmt_key веб-роли НЕ видно -- переменная play-scoped, а web
+# играет раньше и в другом плее. Один и тот же файл secrets/ -- и ключ
+# один на установку; lookup существующий файл не меняет, так что копия
+# совпадает с секретом прокси по построению, и на обеих установках.
 # Живую ротацию это НЕ синхронизирует: config.yaml рендерится только при
 # первой установке, и смена исходного пароля доезжает до копии, но не до
 # прокси -- шаг ротации описан в docs/PROXY.md.
@@ -114,14 +115,13 @@
 
 - name: Management key of the LLM proxy for the panel gateway
   ansible.builtin.copy:
-    content: "{{ llm_proxy_mgmt_key }}"
+    content: "{{ lookup('password', secrets_dir + '/llm-proxy-mgmt.pass length=32 chars=ascii_letters,digits') }}"
     dest: "{{ MOP_HOME }}/.config/mop/secrets/llm-proxy-mgmt.pass"
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
     mode: "0600"
   no_log: true
   notify: restart mop-web
-  when: llm_proxy_mgmt_key is defined
 
 - name: Systemd unit
   become: yes
