@@ -112,7 +112,7 @@ def claude_args(args):
 
 
 def main(argv):
-    mine, passthru = claude_args(args)
+    mine, passthru = claude_args(argv)
     if len(mine) > 1:
         lib.usage(__doc__)
     # Origin, в котором нет ни хоста, ни пути, — почти наверняка значение
