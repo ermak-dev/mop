@@ -528,8 +528,10 @@ def full_entry(msg, now=None):
     entry = {"at": at if at is not None else received, "received_at": received, **clean}
     if len(json.dumps(entry, ensure_ascii=False, default=str).encode()) > ENTRY_MAX:
         # Маркер ограничен целиком: даже имя события не переносится сырым --
-        # длинное имя само раздувает запись и может нести секрет.
-        name = msg.get("event")
+        # длинное имя само раздувает запись и может нести секрет. Короткое --
+        # отредактированным (в clean -- bearer и ключ=значение уже сняты),
+        # не сырым: 64 байта хватает и на «Bearer sk-…».
+        name = clean.get("event")
         name = name if isinstance(name, str) and len(name) <= 64 else "?"
         return {"event": name, "text": "[event over size limit]",
                 "at": entry["at"], "received_at": received}

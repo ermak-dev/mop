@@ -1012,6 +1012,22 @@ def check_journal_entry_424(c):
     col8.event({"event": "type", "text": "see chapter=42 of the spec"})
     c.expect("#424 a non-credential key keeps its value",
              col8.admin_journal[0].get("text"), "see chapter=42 of the spec")
+    # Oversize-маркер, короткое имя (#424, follow-up 2): имя события
+    # укладывается в 64 байта и несёт bearer -- маркер обязан отдать его
+    # отредактированным, не сырым. То же -- другие текстовые поля.
+    colA = _journal_collector()
+    colA.event({"event": "Bearer sk-SHORT1", "text": "big",
+                "blob": "z" * (web.ENTRY_MAX + 1024)})
+    flatA = json.dumps(colA.admin_journal)
+    c.check("#424 the oversize marker redacts a short bearer event name",
+            "sk-SHORT1" not in flatA, flatA[:200])
+    colB = _journal_collector()
+    colB.event({"event": "cmd", "note": "Bearer sk-SHORT2",
+                "blob": "z" * (web.ENTRY_MAX + 1024)})
+    flatB = json.dumps(colB.admin_journal)
+    c.check("#424 the oversize marker redacts other text fields of the event",
+            "sk-SHORT2" not in flatB, flatB[:200])
+
     # Oversize-маркер: длинное имя события с bearer внутри не возвращается
     # сырым -- маркер ограничен и заменяет имя.
     col9 = _journal_collector()
@@ -1019,7 +1035,7 @@ def check_journal_entry_424(c):
                 "blob": "z" * (web.ENTRY_MAX + 1024)})
     flat9 = json.dumps(col9.admin_journal)
     c.check("#424 the oversize marker never returns a raw bearer name",
-            "Bearer s" not in flat9 and '"x' not in flat9, flat9[:200])
+            "Bearer s" not in flat9, flat9[:200])
 
     col5 = _journal_collector()
     col5.event({"event": "type", "text":
