@@ -4,6 +4,7 @@
 Профилей больше нет (#390): окружение сессии одно для папетов и мастеров --
 адрес прокси из настройки, карта моделей, имя ключа. Всё -- чистые данные.
 """
+import json
 import os
 import sys
 import tempfile
@@ -166,12 +167,9 @@ def main():
     # нашего --settings В КОНЕЦ ломит обе края: чужие настройки он
     # затирает, а за `--` вообще не применяется. SOLUTION: вставлять пару
     # ДО пасстру (сразу за постоянными флагами) -- тогда наше значение
-    # стоит раньше, пользовательский --settings позже и побеждает у claude
-    # ровно его файл, а до `--` наш флаг доходит. feedbackDrafts при этом
-    # пользователь может перезаписать сознательно -- и это правильно:
-    # явное ближе.
-    # RESULT: append-порядок ломил обе границы; вставка до пасстру --
-    # чужой файл побеждает, наш флаг применяется и до `--`.
+    # стоит раньше пользовательского. (Слияние внутрь его значения --
+    # ниже, feedback_pair: требование «везде».) Хвост узнаём по
+    # последнему элементу, а не по первому (флаг может совпасть с нашим).
     def carries_before_passthru(argv, passthru):
         # Пара подряд, и её конец -- до начала хвоста пасстру: хвост
         # узнаём по последнему элементу (уникальное значение), а не по
@@ -184,13 +182,10 @@ def main():
         head = argv[:-len(passthru)] if passthru else argv
         return any(head[i:i + 2] == list(want_args) for i in range(len(head)))
 
-    user = ["--settings", "custom.json"]
-    c.check("mop code puts feedback settings before the passthru (#419)",
-            carries_before_passthru(code.claude_argv(user), user),
-            code.claude_argv(user))
-    c.check("mop master puts feedback settings before the passthru (#419)",
-            carries_before_passthru(master.claude_argv(user), user),
-            master.claude_argv(user))
+    user = ["--settings", '{"model":"opus"}']
+
+    # Слияние пользовательского значения -- в feedback_settings (ниже);
+    # командлетный слой проверяется с готовым memfd-путём.
     dash = ["--", "--settings", "custom.json"]
     c.check("mop code feedback settings stay effective before -- (#419)",
             carries(code.claude_argv(dash))
@@ -200,6 +195,105 @@ def main():
             carries(master.claude_argv(dash))
             and master.claude_argv(dash).index("--") > master.claude_argv(dash).index(want_args[0]),
             master.claude_argv(dash))
+    # HYPOTHESIS (правка #419, требование «везде» + законный пасстру):
+    # claude повторные --settings не мержит (последний побеждает целиком),
+    # и наш off ДО пользовательского значения молча включал черновики,
+    # когда у того ключа не было; отказ от его файла ломал пасстру
+    # (hooks пользователя живут именно файлами). SOLUTION: последний
+    # пользовательский --settings (файл или inline, до первого `--`,
+    # форма через пробел и через «=») читается, feedbackDrafts=off
+    # накладывается, итог едет ОДНИМ --settings memfd-путём -- без
+    # argv-содержимого и без диска (подтверждено живым claude 2.1.287:
+    # унаследованный /proc/self/fd/N читается). Свой --settings
+    # отсутствует -- своя пара. Недоступный файл, не-JSON, не-объект --
+    # ValueError (fail closed), без значения в тексте ошибки.
+    # RESULT: слияние держит и off, и чужие env/hooks; края отказывают
+    # явно и молча про значения.
+    from mop.cli.core._common import feedback_fd, feedback_settings
+
+    def merges(src, read=None):
+        value, argv = feedback_settings(list(src), read=read)
+        return value, argv, json.loads(value)
+
+    files = {"custom.json": '{"env":{"X":"1"},"hooks":{"PreToolUse":[]}}'}
+    read = files.__getitem__
+
+    # Inline: off вписан, чужие env/hooks целы, своего --settings не осталось.
+    value, argv, got = merges(["--settings", '{"env":{"X":"1"}}'])
+    c.check("inline settings keep keys and gain off (#419)",
+            got == {"env": {"X": "1"}, "feedbackDrafts": "off"}
+            and "--settings" not in argv, argv)
+    # Файл: прочитан, off наложен, путь из argv убран.
+    value, argv, got = merges(["--settings", "custom.json"], read=read)
+    c.check("settings file is read, merged, path removed (#419)",
+            got == {"env": {"X": "1"}, "hooks": {"PreToolUse": []},
+                    "feedbackDrafts": "off"}
+            and "custom.json" not in argv, argv)
+    # =-форма.
+    value, argv, got = merges(["--settings=custom.json"], read=read)
+    c.check("=form file merged the same way (#419)",
+            got.get("feedbackDrafts") == "off" and "--settings" not in argv,
+            argv)
+    # Повторные: сливается последний, ранний остаётся на месте как был.
+    value, argv, got = merges(["--settings", '{"env":{"A":"1"}}',
+                              "--settings", '{"env":{"B":"2"}}'])
+    c.check("only the last user value is merged (#419)",
+            got == {"env": {"B": "2"}, "feedbackDrafts": "off"}
+            and argv == ["--settings", '{"env":{"A":"1"}}'], argv)
+    # Своего --settings нет: своя пара, пасстру нетронут.
+    value, argv, got = merges(["--continue"])
+    c.check("no user settings -> own value, passthru intact (#419)",
+            value == '{"feedbackDrafts": "off"}'.replace(": ", ":")
+            or json.loads(value) == {"feedbackDrafts": "off"},
+            (value, argv))
+    # За `--` флагов нет: пользовательское значение за разделителем не
+    # трогается, ours ставится командлетом в зоне флагов.
+    value, argv, got = merges(["--", "--settings", '{"env":{"X":"1"}}'])
+    c.check("beyond -- untouched, own value returned (#419)",
+            json.loads(value) == {"feedbackDrafts": "off"}
+            and argv == ["--", "--settings", '{"env":{"X":"1"}}'], argv)
+    # Fail closed: недоступный файл, не-JSON, не-объект -- ValueError без
+    # значения в тексте (секреты не эхом).
+    def missing(path):
+        raise FileNotFoundError(path)
+
+    for bad, what, reader in (
+            (["--settings", "custom.json"], "unreadable file", missing),
+            (["--settings", "bad.json"], "not json",
+             {"bad.json": "not json"}.__getitem__),
+            (["--settings", "arr.json"], "not an object",
+             {"arr.json": "[1,2]"}.__getitem__)):
+        try:
+            feedback_settings(bad, read=reader)
+            c.check(f"{what} must refuse (#419)", False, bad)
+        except ValueError as e:
+            c.check(f"{what} must refuse, no value echoed (#419)",
+                    "feedbackDrafts" in str(e) and "custom.json" not in str(e)
+                    and "not json" not in str(e) and "[1,2]" not in str(e),
+                    str(e))
+    # memfd: путь вида /proc/self/fd/N, содержимое читается и равно значению.
+    path, fd = feedback_fd(value)
+    with open(path, encoding="utf-8") as f:
+        c.check("feedback_fd carries the value unread via the fd path (#419)",
+                path.startswith("/proc/self/fd/") and f.read() == value, path)
+    os.close(fd)
+    # Командлеты: один --settings в зоне флагов, до пасстру и до `--`,
+    # пара не рвётся даже когда пользователь передал свой skip-флаг.
+    argv = code.claude_argv(["--continue"], "/proc/self/fd/3")
+    c.check("mop code: one settings flag before the passthru (#419)",
+            argv[argv.index("--settings"):argv.index("--settings") + 2]
+            == ["--settings", "/proc/self/fd/3"]
+            and argv.index("--settings") < argv.index("--continue")
+            and argv.count("--settings") == 1, argv)
+    argv = master.claude_argv(["--", "--model", "opus"], "/proc/self/fd/3")
+    c.check("mop master: settings flag before -- (#419)",
+            argv.index("--settings") < argv.index("--")
+            and argv.count("--settings") == 1, argv)
+    argv = code.claude_argv(["--dangerously-skip-permissions", "--continue"],
+                            "/proc/self/fd/3")
+    c.check("pair intact next to the user skip flag (#419)",
+            any(argv[i:i + 2] == ["--settings", "/proc/self/fd/3"]
+                for i in range(len(argv))), argv)
     return c.report("llm")
 
 

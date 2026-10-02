@@ -2,6 +2,7 @@
 узлы, workspace папета. Здесь, а не в lib: это клиентская сторона, а lib
 импортирует каждый командлет на каждой машине, и ключи с профилями ей
 тянуть за собой незачем."""
+import json
 import os
 import time
 
@@ -152,3 +153,85 @@ def session_env():
 # не трогаются. Идёт парой к session_env -- то, что гасится командой, а то,
 # что настройкой, расходиться по местам не должно.
 FEEDBACK_SETTINGS = ('--settings', '{"feedbackDrafts":"off"}')
+
+# Ключ, который mop вписывает в пользовательские настройки (#419): пустой
+# никогда -- «везде» означает и явное отсутствие ключа у пользователя.
+FEEDBACK_KEY = "feedbackDrafts"
+FEEDBACK_VALUE = "off"
+
+
+def feedback_settings(passthru, read=None):
+    """Итоговые настройки отзыва для запуска claude -> (значение, переписанный
+    пасстру). Чистая функция (#419): read -- как прочитать файл-путь (для
+    проверки подменяется), по умолчанию диск.
+
+    Последнее пользовательское --settings в зоне флагов (до первого `--`;
+    форма и через пробел, и через «=») несёт в себе и его настройки, и наш
+    feedbackDrafts=off: claude повторных --settings не мержит (побеждает
+    последний целиком), и вторым флагом его настройки терялись бы. Файл
+    читается и возвращается значением -- commandlet отдаст его claude как
+    memfd-путь (без диска и без argv: настройки бывают не для чужих глаз,
+    а argv виден всей машине). Ключ ставится всегда -- «везде»; остальные
+    ключи пользователя сохраняются.
+
+    Файл недоступен или не-JSON/не-объект -- ValueError: fail closed,
+    commandlet откажет явно, а не молча включит черновики. Ошибка значения
+    не несёт. Своего --settings нет -- ('{"feedbackDrafts":"off"}', пасстру
+    как был). За `--` флагов для claude нет -- та часть не рассматривается
+    и не трогается."""
+    read = read or _read_file
+    dash = passthru.index("--") if "--" in passthru else len(passthru)
+    flags, tail = list(passthru[:dash]), passthru[dash:]
+    last = None
+    for i, arg in enumerate(flags):
+        value = None
+        if arg == "--settings" and i + 1 < len(flags):
+            value = flags[i + 1]
+        elif arg.startswith("--settings="):
+            value = arg[len("--settings="):]
+        if value:
+            last = (i, value)
+    if last is None:
+        return FEEDBACK_SETTINGS[1], passthru
+    i, value = last
+    if value.startswith("{"):
+        text = value
+    else:
+        try:
+            text = read(value)
+        except OSError as e:
+            raise ValueError(f"--settings file cannot be read ({e.strerror}): "
+                             f"mop cannot add {FEEDBACK_KEY} to it") from None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        raise ValueError("--settings is not valid JSON: mop cannot add "
+                         f"{FEEDBACK_KEY} to it") from None
+    if not isinstance(parsed, dict):
+        raise ValueError("--settings is not a JSON object: mop cannot add "
+                         f"{FEEDBACK_KEY} to it")
+    parsed[FEEDBACK_KEY] = FEEDBACK_VALUE
+    # Одна пара на месте прежней: файловый путь и inline-объект едут одним
+    # значением дальше (commandlet решает, файл это или строка).
+    if flags[i] == "--settings":
+        del flags[i:i + 2]
+    else:
+        del flags[i]
+    return json.dumps(parsed, ensure_ascii=False), flags + tail
+
+
+def _read_file(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def feedback_fd(value):
+    """Значение настроек -> (memfd-путь, fd) для exec (#419). Настройки
+    катаются файловым дескриптором: без диска, без argv-содержимого, fd
+    наследуется в execvpe (pass_fds тут нет -- exec в своём процессе,
+    дескриптор помечен наследуемым)."""
+    fd = os.memfd_create("mop-claude-settings", flags=0)
+    os.write(fd, value.encode())
+    os.lseek(fd, 0, 0)
+    os.set_inheritable(fd, True)
+    return f"/proc/self/fd/{fd}", fd

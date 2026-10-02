@@ -29,19 +29,20 @@ from mop.cli.core import _common
 from mop.cli.pool import login
 
 
-def claude_argv(passthru):
+def claude_argv(passthru, settings_path=None):
     """Аргументы запуска claude -> список. Чистая функция (#419): и флаг
     пропуска разрешений, и отключение черновиков отзыва живут здесь, у
     фактического execvpe -- одно место на оба.
 
-    Свой --settings ставится ДО пасстру, а не в конец: claude не мержит
-    повторные --settings (побеждает последний), а за `--` флаги вообще не
-    читаются. Раньше пасстру наш feedbackDrafts=off действует всегда, а
-    пользовательский --settings позже -- и сильнее: его файл целиком
-    побеждает, в том числе сознательное включение черновиков обратно."""
+    Настройки отзыва -- ОДИН --settings до пасстру: повторных claude не
+    мержит (побеждает последний), а за `--` флаги не читаются вовсе.
+    settings_path -- memfd-путь настроек (commandlet готовит), без него
+    своя пара."""
     skip = "--dangerously-skip-permissions"
     args = ([] if skip in passthru else [skip]) + list(passthru)
-    return ["claude", *args[:1], *_common.FEEDBACK_SETTINGS, *args[1:]]
+    settings = ["--settings", settings_path] if settings_path \
+        else list(_common.FEEDBACK_SETTINGS)
+    return ["claude", *args[:1], *settings, *args[1:]]
 
 
 def main(argv):
@@ -54,12 +55,21 @@ def main(argv):
     # Тот же joined-конфиг, что у мастера, без доступа к пулу.
     session = _common.session_env()
     env = dict(os.environ, **session)
+    # Настройки отзыва (#419): пользовательский --settings (если был)
+    # сливается с feedbackDrafts=off; итог ездит memfd-путём -- без
+    # argv-содержимого и без диска. Недоступный файл или не-JSON --
+    # отказ, а не молчаливое включение черновиков.
+    try:
+        value, passthru = _common.feedback_settings(passthru)
+    except ValueError as e:
+        lib.usage(str(e))
+    path, _fd = _common.feedback_fd(value)
     # flush до exec: буфер stdout не переживает execvpe, и строка о профиле
     # пропадала бы везде, где вывод не в терминал.
     # Флаг добавляется здесь, а не оставляется пользователю: команда для
     # того и есть, чтобы сесть за работу без церемоний. Свой экземпляр из
     # passthru не дублируем — claude второй раз не нужен.
-    args = claude_argv(passthru)[1:]
+    args = claude_argv(passthru, path)[1:]
     print(f"claude + {' '.join(args)}", flush=True)
     os.execvpe("claude", ["claude"] + args, env)
 

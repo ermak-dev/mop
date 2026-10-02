@@ -113,13 +113,16 @@ def claude_args(args):
     return mine, [a for a in args if a.startswith("-")] + tail
 
 
-def claude_argv(passthru):
+def claude_argv(passthru, settings_path=None):
     """Аргументы запуска claude -> список. Чистая функция (#419): сборка
-    argv в одном месте, как code.claude_argv. Свой --settings -- до
-    пасстру: почему -- в docstring того же места, code.claude_argv."""
+    argv в одном месте, как code.claude_argv. Настройки отзыва -- один
+    --settings до пасстру (почему одним -- там же), settings_path --
+    memfd-путь подготовленных настроек."""
+    settings = ["--settings", settings_path] if settings_path \
+        else list(_common.FEEDBACK_SETTINGS)
     return ["claude", "--dangerously-skip-permissions",
             "--mcp-config", mcp_config(),
-            *_common.FEEDBACK_SETTINGS, *passthru]
+            *settings, *passthru]
 
 
 def _main(argv):
@@ -149,9 +152,17 @@ def _main(argv):
     # использует тот же источник без MCP и папетов.
     session = _common.session_env()
     env = dict(os.environ, MOP_PROJECT=project, **session)
+    # Настройки отзыва (#419): слияние пользовательского --settings с
+    # feedbackDrafts=off, итог -- memfd-путём; отказ -- явно (как у
+    # `mop code`, общее в _common.feedback_settings).
+    try:
+        value, passthru = _common.feedback_settings(passthru)
+    except ValueError as e:
+        lib.usage(str(e))
+    path, _fd = _common.feedback_fd(value)
     print(f"master of project {project} ({origin})"
           + (f" + claude {' '.join(passthru)}" if passthru else ""))
-    os.execvpe("claude", claude_argv(passthru)[1:], env)
+    os.execvpe("claude", claude_argv(passthru, path)[1:], env)
 
 
 # Вход -- до lib.cluster: без client.json тот не найдёт выбранный сервер.
