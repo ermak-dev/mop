@@ -251,14 +251,25 @@ def main():
     c.check("pair never splits a user flag from its value (#419)",
             argv == ["claude", "--settings", "/proc/self/fd/3",
                      "--model", "opus", "--dangerously-skip-permissions"], argv)
-    # `--settings` без значения -- ясный отказ до exec, не битый флаг.
-    for bad in (["--settings"], ["--continue", "--settings"]):
+    # `--settings` без значения (bare и пустое =) -- ясный отказ до
+    # exec, не битый флаг: пустое иначе молча оставалось в пасстру ПОСЛЕ
+    # нашей пары и вытесняло off. Inline-JSON с ведущим пробелом --
+    # валидный для claude JSON, это не путь: мерджится как inline.
+    for bad in (["--settings"], ["--continue", "--settings"],
+                ["--settings="], ["--settings", ""]):
         try:
             feedback_settings(bad)
             c.check("dangling --settings must refuse (#419)", False, bad)
         except ValueError as e:
             c.check("dangling --settings must refuse (#419)",
                     "feedbackDrafts" in str(e), str(e))
+    try:
+        value, argv, got = merges(["--settings", ' {"env":{"X":"1"}}'])
+        c.check("leading-space inline JSON merges as inline (#419)",
+                got == {"env": {"X": "1"}, "feedbackDrafts": "off"}
+                and "--settings" not in argv, argv)
+    except ValueError as e:
+        c.check("leading-space inline JSON merges as inline (#419)", False, str(e))
     # Своего --settings нет: своя пара, пасстру нетронут.
     value, argv, got = merges(["--continue"])
     c.check("no user settings -> own value, passthru intact (#419)",

@@ -197,13 +197,22 @@ def feedback_settings(passthru, read=None):
             raise ValueError("--settings without a value: mop cannot add "
                              f"{FEEDBACK_KEY} to it. Pass a file path or a "
                              "JSON object")
+        if value == "":
+            # Пустое значение (= или пустой аргумент) -- тот же битый
+            # флаг: молча оставить его в пасстру значило бы вытеснить наш
+            # off (он вставляется в начало, а это стало бы последним).
+            raise ValueError("--settings without a value: mop cannot add "
+                             f"{FEEDBACK_KEY} to it. Pass a file path or a "
+                             "JSON object")
         if value:
             last = (i, value)
         i += 1
     if last is None:
         return FEEDBACK_SETTINGS[1], passthru
     i, value = last
-    if value.startswith("{"):
+    # Inline-объект узнаётся по первому значимому символу, не по строке:
+    # claude принимает JSON с ведущим пробелом, и это не путь к файлу.
+    if value.lstrip().startswith("{"):
         text = value
     else:
         try:
