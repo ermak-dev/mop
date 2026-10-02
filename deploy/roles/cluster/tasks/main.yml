@@ -45,6 +45,29 @@
     group: "{{ MOP_USER }}"
     mode: "0644"
 
+# Ключ создан lookup('password') у контроллера: прокси (#380) читает тот
+# же файл, но стартует после кластера. Раздатчик (#393) читает закрытую
+# копию под пользователем пула, а не MOP_PROXY_KEY из открытого юнита.
+- name: Private directory for the cluster's proxy key
+  become: yes
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop/secrets"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0700"
+
+- name: Installed proxy key for the cluster
+  become: yes
+  ansible.builtin.copy:
+    content: "{{ lookup('password', secrets_dir + '/llm-proxy-client.pass length=32 chars=ascii_letters,digits') }}\n"
+    dest: "{{ MOP_HOME }}/.config/mop/secrets/llm-proxy-client.pass"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0600"
+  no_log: true
+  notify: restart mop-cluster
+
 - name: Systemd unit
   become: yes
   ansible.builtin.template:
