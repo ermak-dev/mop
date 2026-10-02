@@ -37,7 +37,7 @@ test("#423 the header counts sessions and legacy endpoints apart", () => {
 test("#423 a legacy row says so instead of posing as a session", () => {
   renderUi(<Masters masters={M} />);
   const row = screen.getByText("mop-cd").closest("tr")!;
-  expect(within(row).getByText(/по адресу/)).toBeInTheDocument();
+  expect(within(row).getByText(/MCP-адрес, сессия не подтверждена/)).toBeInTheDocument();
 });
 
 test("#423 same project, same session name, different addresses: two rows", () => {
@@ -57,6 +57,7 @@ test("#423 same project, same session name, different addresses: two rows", () =
 // Переход: старый бэкенд без addresses и identified. Счётчик подтверждённых
 // сессий -- 0: старый снимок не выдаётся за сессии, адреса считаются адресами.
 test("#423 a legacy snapshot without identified counts 0 sessions", () => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- снятие полей и есть тест
   const legacy = M.map(({ addresses, identified, ...rest }) => rest) as Master[];
   renderUi(<Masters masters={legacy} />);
   expect(screen.getByText("ermak.mate-7")).toBeInTheDocument();

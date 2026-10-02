@@ -60,11 +60,16 @@ export interface Snapshot {
   load?: Load;
 }
 
-/** Живой мастер по опросу who (#305): адрес для send, логин, сессия, каталог
- *  и папеты проекта, чья аренда на этом логине. */
+/** Живой мастер по опросу who (#305, #421, #423): строка -- живая
+ *  Claude-сессия. master -- первый адрес для send, addresses -- все адреса
+ *  сессии; identified -- серверный маркер: строка склеена по sessionId
+ *  (сырой id публично не ходит), false -- legacy endpoint без личности.
+ *  Старый снимок без addresses/identified читается как один адрес и false. */
 export interface Master {
   project: string;
   master: string;
+  addresses?: string[];
+  identified?: boolean;
   user: string;
   session: string;
   cwd: string;
