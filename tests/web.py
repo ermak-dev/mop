@@ -695,10 +695,14 @@ def check_login_api_415(c):
 
 # Источник адреса для лимита (#415): через nginx все -- 127.0.0.1, и ключ
 # по сокету запирал бы вход всей конторе после пяти неудач одного.
-# Источник адреса для лимита (#415): nginx ставит только X-Forwarded-For
-# ($proxy_add_x_forwarded_for -- последний элемент это $remote_addr nginx),
-# X-Real-IP он не ставит и не срезает: клиентский X-Real-IP дошёл бы до web
-# подделанным. Доверяем последнему элементу XFF и только с петли.
+# ── #415: источник адреса лимита ─────────────────────────────────────────
+# HYPOTHESIS: ключ лимита по сокету за nginx -- 127.0.0.1 у всех (5 неудач
+# одного запирали вход всей конторе), а X-Real-IP из доверия -- подделка:
+# nginx его не ставит и не срезает, и клиентский X-Real-IP доходил до web.
+# SOLUTION: websession.client_addr -- последний элемент X-Forwarded-For
+# (его ставит сам nginx своим $remote_addr), только при peer loopback и
+# строго валидированный; иначе -- адрес сокета.
+# STATUS: FIXED — see #415
 def check_address_source_415(c):
     from mop.cli.server import web as webcli
     from mop.server import websession, identity
@@ -744,7 +748,12 @@ def check_address_source_415(c):
                  (sent[0][1], out), (200, b'{"login": "anton", "role": "admin"}'))
 
 
-# RED 2 (#415): удалённый из file/LDAP user не остаётся вошедшим до конца TTL.
+# ── #415: удалённый пользователь ────────────────────────────────────────
+# HYPOTHESIS: SessionStore.get перечитывал провайдера только у admin, и
+# удалённый из file/LDAP user оставался вошедшим весь TTL вопреки отзыву.
+# SOLUTION: личность перечитывается у каждой сессии: lookup None -- гость
+# сразу, любая роль.
+# STATUS: FIXED — see #415
 def check_deleted_user_415(c):
     from mop.server import identity, websession
 
