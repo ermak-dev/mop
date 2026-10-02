@@ -66,7 +66,17 @@ export function Masters({ masters, every }: { masters: Master[]; every?: number 
                     <div key={a}><Code>{a}</Code></div>
                   ))}
                 </Table.Td>
-                <Table.Td>{listOrDash(m.puppets)}</Table.Td>
+                <Table.Td>
+                  {/* Список -- аренда ЛОГИНА в проекте (#423, ревью):
+                      один и тот же у всех сессий владельца, собственностью
+                      сессии он не является. */}
+                  {m.puppets.length ? (
+                    <>
+                      <Text span size="sm" c="dimmed">папеты пользователя: </Text>
+                      {listOrDash(m.puppets)}
+                    </>
+                  ) : listOrDash(m.puppets)}
+                </Table.Td>
               </Table.Tr>
             ))}
           </Table.Tbody>

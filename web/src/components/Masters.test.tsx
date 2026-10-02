@@ -54,6 +54,24 @@ test("#423 same project, same session name, different addresses: two rows", () =
   expect(screen.getByText("ermak.box-9")).toBeInTheDocument();
 });
 
+// #423, ревью: у двух сессий одного владельца бэкенд кладёт в обе строки
+// один и тот же список папетов логина. Повторять его как собственность
+// каждой сессии -- исходный дефект #421; список -- аренда пользователя.
+test("#423 two sessions of one owner: the puppet list is the user's lease, marked so", () => {
+  const two: Master[] = [
+    { project: "mop", master: "ermak.mate-7", addresses: ["ermak.mate-7"], identified: true,
+      user: "ermak", session: "mop-ab", cwd: "-", puppets: ["pu-mop-1", "pu-mop-3"] },
+    { project: "mop", master: "ermak.box-9", addresses: ["ermak.box-9"], identified: true,
+      user: "ermak", session: "mop-cd", cwd: "-", puppets: ["pu-mop-1", "pu-mop-3"] },
+  ];
+  renderUi(<Masters masters={two} />);
+  // Список в строке -- не молчаливая собственность сессии: подпись называет,
+  // чей он (аренда логина в проекте).
+  const row = screen.getByText("mop-ab").closest("tr")!;
+  expect(within(row).getByText(/папеты пользователя/)).toBeInTheDocument();
+  expect(within(row).getByText("pu-mop-1, pu-mop-3")).toBeInTheDocument();
+});
+
 // Переход: старый бэкенд без addresses и identified. Счётчик подтверждённых
 // сессий -- 0: старый снимок не выдаётся за сессии, адреса считаются адресами.
 test("#423 a legacy snapshot without identified counts 0 sessions", () => {
