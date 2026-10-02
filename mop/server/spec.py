@@ -272,6 +272,22 @@ edit_json "$HOME/.claude/settings.json" '.skipDangerousModePermissionPrompt = tr
 edit_json "$HOME/.claude/settings.json" '.permissions.deny =
     ((.permissions.deny // []) + ["SendMessage", "ListAgents",
       "AskUserQuestion", "EnterWorktree", "ExitWorktree"] | unique)'
+# --- feedback drafts (#420) ---
+# У папета нет человека, которому показать черновик feedback: SendFeedback
+# (Claude Code 2.1.287) пишет черновики в ~/.claude/feedback/drafts/ и
+# заметку о них -- и на host-узле ~/.claude делят все claude машины. Политика
+# feedbackDrafts: notify | quiet | off (умолчание notify); off -- restrictive,
+# им же гасится подсказка «покажи черновики /feedback». Deny-правило -- то же
+# место, что SendMessage (#223): deny фильтрует список инструментов до модели,
+# на режим прав он не смотрит и работает под --dangerously-skip-permissions.
+# Слияние, а не присваивание: чужие deny-правила на узле сносить незачем.
+# DISABLE_FEEDBACK_COMMAND гасит /feedback-команду в панели. Ничего больше --
+# ни Remote Control, ни автообновлений -- не выключается: инструмент один.
+edit_json "$HOME/.claude/settings.json" '.feedbackDrafts = "off"'
+edit_json "$HOME/.claude/settings.json" '.permissions.deny =
+    ((.permissions.deny // []) + ["SendFeedback"] | unique)'
+export DISABLE_FEEDBACK_COMMAND=1
+# --- end of feedback drafts ---
 # CARGO_TARGET_DIR grows without bound - 22 to 49 GB per puppet in practice, and
 # five of them filled a node's disk on 2026-08-26, which killed the WSL VM and
 # stranded every allocation on it. Boot is the only safe moment to drop
