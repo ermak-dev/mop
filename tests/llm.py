@@ -60,9 +60,42 @@ def check_joined_proxy_397(c):
                      "a-key")
 
 
+def check_session_ca_412(c):
+    # HYPOTHESIS: session_env передаёт URL/ключ, но Node.js не получает
+    # сохранённый сертификат; с ним та же сессия проходит TLS.
+    # SOLUTION: для HTTPS передать tls.pem выбранного сервера через
+    # NODE_EXTRA_CA_CERTS, не заменяя явный выбор пользователя.
+    # RESULT: до исправления оба сервера давали None вместо пути CA.
+    # STATUS: FIXED — see #412
+    from mop.cli.core import _common
+    with tempfile.TemporaryDirectory(prefix="mop-ca-412-") as root, \
+            patched(creds, ROOT=root), patched_env(NODE_EXTRA_CA_CERTS=None), \
+            config.client_sources():
+        for host in ("a.test", "b.test"):
+            directory = os.path.join(root, host)
+            creds.write_client(directory, "443", f"https://{host}/llm", "key")
+            cert = os.path.join(directory, creds.CERT_FILE)
+            with open(cert, "w") as f:
+                f.write("test certificate")
+            with context.use(context.resolve({"server": host}, {}, {})):
+                c.expect(f"#412 Claude trusts the selected server {host}",
+                         _common.session_env().get("NODE_EXTRA_CA_CERTS"), cert)
+        with context.use(context.resolve({"server": "a.test"}, {}, {})):
+            with patched_env(NODE_EXTRA_CA_CERTS="/custom/ca.pem"):
+                env = dict(os.environ, **_common.session_env())
+                c.expect("#412 explicit user CA is preserved", env.get("NODE_EXTRA_CA_CERTS"),
+                         "/custom/ca.pem")
+            creds.write_client(os.path.join(root, "a.test"), "443", "http://a.test/llm", "key")
+            c.check("#412 HTTP needs no extra CA", "NODE_EXTRA_CA_CERTS" not in _common.session_env())
+            creds.write_client(os.path.join(root, "a.test"), "443", "https://a.test/llm", "key")
+            os.remove(os.path.join(root, "a.test", creds.CERT_FILE))
+            c.check("#412 no nonexistent CA path", "NODE_EXTRA_CA_CERTS" not in _common.session_env())
+
+
 def main():
     c = Checks()
     check_joined_proxy_397(c)
+    check_session_ca_412(c)
     # HYPOTHESIS (#390): реестр плагинов-профилей умер вместе с провайдерами:
     # держать его ради одного URL -- против KISS, а ENV профилей перестал
     # быть статикой плагина. SOLUTION: один модуль с env() и именем ключа;

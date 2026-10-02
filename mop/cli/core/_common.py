@@ -124,10 +124,18 @@ def report_bootstrap(name, got, p):
 def session_env():
     """Окружение claude: модельная карта общая, URL и ключ -- joined-сервера."""
     host = config.get("MOP_SERVER_LAN")
-    record = creds.client(creds.server_dir(host))
+    directory = creds.server_dir(host)
+    record = creds.client(directory)
     if record is None:
         raise RuntimeError(f"no joined proxy configuration for {host}: run mop join --server {host}")
     env = dict(llm.env())
     env["ANTHROPIC_BASE_URL"] = record["proxy_url"]
     env[llm.AUTH_VAR] = record["proxy_key"]
+    # Шина и Python уже доверяют закреплённому сертификату (#412), но
+    # Claude -- процесс Node.js со своим хранилищем доверия. Явный выбор
+    # пользователя оставляем; без файла обычные публичные CA работают сами.
+    cert = os.path.join(directory, creds.CERT_FILE)
+    if record["proxy_url"].startswith("https://") and os.path.isfile(cert) \
+            and not os.environ.get("NODE_EXTRA_CA_CERTS"):
+        env["NODE_EXTRA_CA_CERTS"] = cert
     return env
