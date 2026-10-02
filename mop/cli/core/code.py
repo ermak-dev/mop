@@ -34,15 +34,16 @@ def claude_argv(passthru, settings_path=None):
     пропуска разрешений, и отключение черновиков отзыва живут здесь, у
     фактического execvpe -- одно место на оба.
 
-    Настройки отзыва -- ОДИН --settings до пасстру: повторных claude не
-    мержит (побеждает последний), а за `--` флаги не читаются вовсе.
-    settings_path -- memfd-путь настроек (commandlet готовит), без него
-    своя пара."""
+    Настройки отзыва -- ОДИН --settings сразу за «claude»: повторных
+    claude не мержит (побеждает последний), за `--` флаги не читаются, а
+    вставка в середину рвала бы чужой флаг с значением. Авто-skip (когда
+    пользователь не передал свой) -- сразу после пары. settings_path --
+    memfd-путь настроек (commandlet готовит), без него своя пара."""
     skip = "--dangerously-skip-permissions"
-    args = ([] if skip in passthru else [skip]) + list(passthru)
     settings = ["--settings", settings_path] if settings_path \
         else list(_common.FEEDBACK_SETTINGS)
-    return ["claude", *args[:1], *settings, *args[1:]]
+    args = ([] if skip in passthru else [skip]) + list(passthru)
+    return ["claude", *settings, *args]
 
 
 def main(argv):

@@ -234,12 +234,31 @@ def main():
     c.check("=form file merged the same way (#419)",
             got.get("feedbackDrafts") == "off" and "--settings" not in argv,
             argv)
-    # Повторные: сливается последний, ранний остаётся на месте как был.
+    # Повторные --settings: ровно ОДНА пара в итоге -- merged с последнего;
+    # ранние, останься они в пасстру, встали бы ПОСЛЕ нашей пары и вытеснили
+    # off (claude повторов не мержит, побеждает последний). Все снимаются.
     value, argv, got = merges(["--settings", '{"env":{"A":"1"}}',
                               "--settings", '{"env":{"B":"2"}}'])
-    c.check("only the last user value is merged (#419)",
+    c.check("repeated settings collapse into one merged pair (#419)",
             got == {"env": {"B": "2"}, "feedbackDrafts": "off"}
-            and argv == ["--settings", '{"env":{"A":"1"}}'], argv)
+            and "--settings" not in argv
+            and '{"env": {"A": "1"}}' not in argv, argv)
+    # Дефект из ревью: пара не может встать в середину чужого флага с
+    # значением. Точный argv: [claude, пара, *пасстру] -- при
+    # пользовательском skip-флаге в середине набора.
+    argv = code.claude_argv(["--model", "opus", "--dangerously-skip-permissions"],
+                            "/proc/self/fd/3")
+    c.check("pair never splits a user flag from its value (#419)",
+            argv == ["claude", "--settings", "/proc/self/fd/3",
+                     "--model", "opus", "--dangerously-skip-permissions"], argv)
+    # `--settings` без значения -- ясный отказ до exec, не битый флаг.
+    for bad in (["--settings"], ["--continue", "--settings"]):
+        try:
+            feedback_settings(bad)
+            c.check("dangling --settings must refuse (#419)", False, bad)
+        except ValueError as e:
+            c.check("dangling --settings must refuse (#419)",
+                    "feedbackDrafts" in str(e), str(e))
     # Своего --settings нет: своя пара, пасстру нетронут.
     value, argv, got = merges(["--continue"])
     c.check("no user settings -> own value, passthru intact (#419)",

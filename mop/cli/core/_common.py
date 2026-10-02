@@ -183,14 +183,23 @@ def feedback_settings(passthru, read=None):
     dash = passthru.index("--") if "--" in passthru else len(passthru)
     flags, tail = list(passthru[:dash]), passthru[dash:]
     last = None
-    for i, arg in enumerate(flags):
+    i = 0
+    while i < len(flags):
         value = None
-        if arg == "--settings" and i + 1 < len(flags):
+        if flags[i] == "--settings" and i + 1 < len(flags):
             value = flags[i + 1]
-        elif arg.startswith("--settings="):
-            value = arg[len("--settings="):]
+        elif flags[i].startswith("--settings="):
+            value = flags[i][len("--settings="):]
+        elif flags[i] == "--settings":
+            # Флаг без значения: собрать argv с ним mop не может (битый
+            # флаг у claude), а молча отбросить -- потеря пользовательских
+            # настроек. Отказ.
+            raise ValueError("--settings without a value: mop cannot add "
+                             f"{FEEDBACK_KEY} to it. Pass a file path or a "
+                             "JSON object")
         if value:
             last = (i, value)
+        i += 1
     if last is None:
         return FEEDBACK_SETTINGS[1], passthru
     i, value = last
@@ -211,13 +220,22 @@ def feedback_settings(passthru, read=None):
         raise ValueError("--settings is not a JSON object: mop cannot add "
                          f"{FEEDBACK_KEY} to it")
     parsed[FEEDBACK_KEY] = FEEDBACK_VALUE
-    # Одна пара на месте прежней: файловый путь и inline-объект едут одним
-    # значением дальше (commandlet решает, файл это или строка).
-    if flags[i] == "--settings":
-        del flags[i:i + 2]
-    else:
-        del flags[i]
-    return json.dumps(parsed, ensure_ascii=False), flags + tail
+    # Все пользовательские --settings снимаются, не только последний:
+    # наша пара едет в начало argv, и ранний, останься он, встал бы после
+    # неё -- и вытеснил off (claude повторов не мержит, побеждает
+    # последний).
+    stripped = []
+    i = 0
+    while i < len(flags):
+        if flags[i] == "--settings":
+            i += 2
+            continue
+        if flags[i].startswith("--settings="):
+            i += 1
+            continue
+        stripped.append(flags[i])
+        i += 1
+    return json.dumps(parsed, ensure_ascii=False), stripped + tail
 
 
 def _read_file(path):
