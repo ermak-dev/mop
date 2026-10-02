@@ -390,8 +390,38 @@ def check_dispatch_sources_396(c):
                         (not opened) if client else bool(opened), opened)
 
 
+# HYPOTHESIS: старые команды и источник ключа остались в руководстве даже
+# после миграции join. Справочник генерируется из докстрингов командлетов.
+# SOLUTION: руководство и docstring описывают тот же рабочий клиентский путь.
+# RESULT: действующие инструкции описывают join, сервер и закрытые источники.
+# STATUS: FIXED — see #401
+def check_current_docs_401(c):
+    files = ("README.md", ".env.example", "CLAUDE.md", "docs/PROXY.md",
+             "docs/DRIVER.md", "docs/MCP.md", "docs/BUS.md", "docs/CLI.md")
+    removed = ("mop login", "mop llm", "mop cred", "--llm", "--cred",
+               "MOP_DEFAULT_LLM", "Z_AI_KEY", "ANTHROPIC_API_KEY")
+    for name in files:
+        text = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        for obsolete in removed:
+            c.check(f"#401 {name} has no obsolete {obsolete}", obsolete not in text)
+    for name in ("README.md", "docs/PROXY.md", "docs/CLI.md"):
+        text = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        c.check(f"#401 {name} names joined client configuration",
+                "client.json" in text or "mop join" in text)
+    for name, stale in (("docs/CLI.md", "local .env is exactly"),
+                        ("docs/PROXY.md", "мастерских копий"),
+                        ("docs/BUS.md", "слоя — дефолт установки из `.env`"),
+                        (".env.example", "MOP_PROXY_KEY=")):
+        text = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        c.check(f"#401 {name} does not claim installation env is a client source",
+                stale not in text)
+    c.check("#401 mop help does not promise client fallback to .env",
+            "with none of them, from .env" not in cli.usage())
+
+
 def main():
     c = Checks()
+    check_current_docs_401(c)
     check_dispatch_sources_396(c)
     check_reference_render_350(c)
     check_reference_empty_350(c)

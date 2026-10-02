@@ -70,8 +70,8 @@ MCP-сервер пула: ростер, канал сообщений папе�
 MCP = {"annotations": "destructive", "args": [
     {"name": "name", "type": "string", "required": True, "help": "..."},
     {"name": "origin", "type": "string", "help": "..."},
-    {"name": "llm", "type": "string", "flag": "--llm", "help": "..."},
-    {"name": "fresh", "type": "boolean", "flag": "--fresh", "help": "..."}]}
+    {"name": "fresh", "type": "boolean", "flag": "--fresh", "help": "..."},
+    {"name": "force", "type": "boolean", "flag": "--force", "help": "..."}]}
 ```
 
 * Имя инструмента — слова команды через подчёркивание (`node_drain`,
