@@ -1109,8 +1109,45 @@ def check_give_up_345(c):
                      [i.get("gave_up") for i in cluster.nomad_items("mop")], [None])
 
 
+# HYPOTHESIS: сервер не выдаёт ключ после входа и не отличает вызов человека
+# от узлового server.rpc или подложенного логина в JSON.
+# SOLUTION: только приватный субъект с логином вызывает выдачу из закрытого
+# файла; остальные субъекты отказывают, а журнал не содержит ответа.
+# RESULT: ключ отдаётся после личной аутентификации, не из JSON и не в журнал.
+# STATUS: FIXED — see #404
+def check_join_config_404(c):
+    import asyncio
+    from mop.common import config, service
+    from mop.server import proxykey
+    key_file = os.path.join(tempfile.mkdtemp(prefix="mop-join-rpc-"), "client.pass")
+    with open(key_file, "w") as f:
+        f.write("private-key\n")
+    settings = {"MOP_SERVER_LAN": "srv.test", "MOP_HTTPS_PORT": "8443"}
+    with patched(proxykey, KEY_FILE=key_file), \
+            patched(config, get=lambda name: settings.get(name, "")):
+        request = {"verb": "client_config", "_caller": "alice"}
+        c.expect("#404 verified join returns only client settings",
+                 cluster.answer(None, request),
+                 {"ok": True, "https_port": "8443", "proxy_url": "https://srv.test:8443/llm",
+                  "proxy_key": "private-key"})
+        c.check("#404 ordinary project RPC cannot fetch key",
+                "proxy_key" not in cluster.answer("mop", request))
+        c.check("#404 unauthenticated join cannot fetch key",
+                "proxy_key" not in cluster.answer(None, {"verb": "client_config"}))
+        journal = cluster.journal(None, request, cluster.answer(None, request))
+        c.check("#404 key never appears in service journal", "private-key" not in str(journal))
+
+        async def forged():
+            return await service.answer("mop-cluster", None,
+                                        b'{"verb":"client_config","_caller":"alice"}',
+                                        lambda project, req, send: cluster.answer(project, req),
+                                        cluster.journal, lambda line: None, lambda **kw: None)
+        c.check("#404 caller supplied in JSON is ignored", "proxy_key" not in asyncio.run(forged()))
+
+
 def main():
     c = Checks()
+    check_join_config_404(c)
     check_give_up_345(c)
     check_bootstrap_334(c)
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,

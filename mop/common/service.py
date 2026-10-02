@@ -21,6 +21,8 @@ def project_from_subject(subject):
     пишет кто угодно. Нет третьего токена -- нет проекта: подписки сервисов
     ловят ровно четыре, короче сюда ничего не приходит."""
     parts = (subject or "").split(".")
+    if len(parts) == 3 and parts[0] == busnames.JOIN_ROOT and parts[2] == "rpc":
+        return None
     return parts[1] if len(parts) > 2 else ""
 
 

@@ -41,8 +41,8 @@ USERS_CONF = """users = [
   {
     user: "service", password: "svc-pass"
     permissions: {
-      publish:   { allow: ["mop.>", "_INBOX.>"], deny: ["mop.*.node.*.rpc.*", "mop.*.cluster.rpc.*"] }
-      subscribe: { allow: ["mop.>", "_INBOX.>"] }
+      publish:   { allow: ["mop.>", "mopjoin.*.rpc", "_INBOX.>"], deny: ["mop.*.node.*.rpc.*", "mop.*.cluster.rpc.*", "mopjoin.*.rpc"] }
+      subscribe: { allow: ["mop.>", "mopjoin.*.rpc", "_INBOX.>"] }
     }
   }
   {
@@ -144,6 +144,13 @@ def check_login_in_subject_207(c):
     c.expect(*rule("alice", "mop.mop.node.hyper.rpc.bob", False))
     c.expect(*rule("alice", "mop.mop.cluster.rpc.alice", True))
     c.expect(*rule("alice", "mop.mop.cluster.rpc.bob", False))
+    # #404: вне mop.>, поэтому user:* и admin не получают чужой логин
+    # через проектную маску; service слушает, но не публикует запрос.
+    for user in ("alice", "anton", "olga", "anton.ermak"):
+        c.expect(*rule(user, busnames.join_config(user), True))
+        c.expect(*rule(user, busnames.join_config("bob"), False))
+    for user in ("service", "node-hyper", "puppet-mop"):
+        c.expect(*rule(user, busnames.join_config("alice"), False))
     c.expect(*rule("alice", "mop.mop.node.hyper.rpc", True))
     c.expect(*rule("alice", "mop.mop.cluster.rpc", True))
     # Всё, что человек публикует сегодня, остаётся: инбоксы мастеров и
