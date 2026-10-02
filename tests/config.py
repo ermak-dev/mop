@@ -19,6 +19,43 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import config, manifest  # noqa: E402
 
+
+# HYPOTHESIS: вызов config.get у клиента читает installation .env даже когда
+# искомая настройка уже есть в окружении или node.env.
+# SOLUTION: клиентская политика пропускает .env для get/effective; вне неё
+# сервер и dev продолжают читать тот же файл, вложенная политика восстанавливается.
+# RESULT: клиент игнорирует .env и восстанавливает политику после команды.
+# STATUS: FIXED — see #396
+def check_client_sources_396(c):
+    envf = os.path.join(tempfile.mkdtemp(), ".env")
+    with open(envf, "w") as f:
+        f.write("MOP_LOCALE=from-installation\nMOP_PVE_STORAGE=installation\n")
+    original = config._load
+    reads = []
+
+    def traced():
+        reads.append(True)
+        return original()
+
+    with patched(config, ENV_FILE=envf, _load=traced):
+        config.forget()
+        client = getattr(config, "client_sources", None)
+        if not c.check("#396 client source policy exists", client is not None):
+            return
+        with client():
+            c.expect("#396 client defaults exclude installation env",
+                     config.get("MOP_PVE_STORAGE"), config.SETTINGS["MOP_PVE_STORAGE"])
+            with patched_env(MOP_PVE_STORAGE="explicit"):
+                c.expect("#396 explicit process env survives", config.get("MOP_PVE_STORAGE"),
+                         "explicit")
+            c.expect("#396 effective skips installation env", config.effective()["MOP_LOCALE"],
+                     (config.SETTINGS["MOP_LOCALE"], "default"))
+        c.expect("#396 client never opens installation env", reads, [])
+        c.expect("#396 server/dev still read installation env", config.get("MOP_PVE_STORAGE"),
+                 "installation")
+        config.forget()
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
@@ -47,6 +84,7 @@ def check_proxy_key_redaction_394(c):
 
 def main():
     c = Checks()
+    check_client_sources_396(c)
     check_proxy_key_redaction_394(c)
     me = pwd.getpwuid(os.getuid()).pw_name
 
