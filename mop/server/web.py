@@ -19,6 +19,7 @@ inode, расход токенов — разбор транскриптов в 
 """
 import dataclasses
 import json
+import re
 import os
 import threading
 import time
@@ -462,7 +463,8 @@ ENTRY_MAX = 64 * 1024
 # Поля-ключи не хранятся и не отдаются: событие с шины публичных данных не
 # обещает, а журнал читает человек и браузер. Регистр не важен, вложенные
 # словари чистятся тем же списком.
-CREDENTIAL_KEYS = ("management_key", "authorization", "password", "token", "secret")
+CREDENTIAL_KEYS = ("management_key", "authorization", "password", "passwd",
+                   "token", "secret", "api_key", "access_key", "credentials")
 
 
 def _valid_at(value):
@@ -475,6 +477,29 @@ def _valid_at(value):
     return value
 
 
+# Типовой секрет в свободном тексте события (#424, доработка): значение
+# bearer-схемы. Только эта форма -- произвольный текст не распознаётся как
+# секрет, и обещать этого нельзя; остальной текст остаётся как был.
+_BEARER = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+")
+# Ключ=значение в тексте команды (#424, follow-up): значение теряется, слово
+# ключа остаётся. Словарь -- тот же CREDENTIAL_KEYS (признанный список), а
+# не «любое слово перед =»: произвольная строка секретом не считается. Формы:
+# --key value, --key=value, key=value, key: value (регистр ключа не важен).
+_KEY = "|".join(re.escape(k) for k in sorted(CREDENTIAL_KEYS, key=len, reverse=True))
+_KV = re.compile(rf"(?i)(--)?({_KEY})([=:\s]+)([^\s,;]+)")
+
+
+def _redact_text(text):
+    """Убрать bearer-значения и ключ=значение из строки события; контекст
+    вокруг -- оставить."""
+    if not isinstance(text, str):
+        return text
+    def kv(m):
+        # Дефис-префикс и слово ключа остаются: контекст команды читается.
+        return f"{m.group(1) or ''}{m.group(2)}{m.group(3)}[redacted]"
+    return _KV.sub(kv, _BEARER.sub("Bearer [redacted]", text))
+
+
 def _strip_credentials(value):
     """Убрать credential-поля на любом уровне. Списки чистятся поэлементно,
     словари -- по ключу (без учёта регистра); остальное -- как есть."""
@@ -484,6 +509,8 @@ def _strip_credentials(value):
                 if not any(k.lower().endswith(s) or s in k.lower() for s in CREDENTIAL_KEYS)}
     if isinstance(value, list):
         return [_strip_credentials(v) for v in value]
+    if isinstance(value, str):
+        return _redact_text(value)
     return value
 
 
@@ -501,8 +528,10 @@ def full_entry(msg, now=None):
     entry = {"at": at if at is not None else received, "received_at": received, **clean}
     if len(json.dumps(entry, ensure_ascii=False, default=str).encode()) > ENTRY_MAX:
         # Маркер ограничен целиком: даже имя события не переносится сырым --
-        # длинное имя само раздувает запись и может нести секрет.
-        name = msg.get("event")
+        # длинное имя само раздувает запись и может нести секрет. Короткое --
+        # отредактированным (в clean -- bearer и ключ=значение уже сняты),
+        # не сырым: 64 байта хватает и на «Bearer sk-…».
+        name = clean.get("event")
         name = name if isinstance(name, str) and len(name) <= 64 else "?"
         return {"event": name, "text": "[event over size limit]",
                 "at": entry["at"], "received_at": received}
