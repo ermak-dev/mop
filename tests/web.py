@@ -10,7 +10,11 @@
 
 STATUS: FIXED — see #66
 """
+import io
 import os
+import threading
+import json
+from io import BytesIO
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
@@ -767,6 +771,228 @@ def check_deleted_user_415(c):
         c.expect("#415 a user deleted from the provider loses the session",
                  store.get(tok, 1000.0), None)
 
+# ── #424: админский журнал ──────────────────────────────────────────────
+# HYPOTHESIS: журнал событий (кто/кому/что посылал, узлы, проекты) уезжал
+# публичным снимком /api/pool и SSE /events любому в LAN, а события с шины
+# фильтровались до пяти полей, теряя остальное. SOLUTION: полный журнал --
+# отдельное кольцо сборщика и отдельный GET /api/journal под актуальной
+# admin-ролью (401 гостю, 403 вошедшему user, fail closed при ошибке
+# провайдера); снимок и SSE несут journal: [] на переход. Запись хранит все
+# поля события, кроме credential-полей, исходный at с фолбеком на время
+# получения и отдельный received_at; событие больше ENTRY_MAX байт
+# сериализации заменяется маркером.
+# STATUS: FIXED — see #424
+import base64 as _b64
+
+
+def _journal_collector():
+    """Сборщик без потоков: только журнал и снимок."""
+    col = web.Collector.__new__(web.Collector)
+    col.journal, col.admin_journal, col.at = [], [], None
+    col.rows, col.nodes, col.usage = [], [], []
+    col.per_puppet, col.per_user, col.masters = [], [], []
+    col.sizes = {}
+    col._cond = threading.Condition()
+    col.version, col.errors = 0, {}
+    col._kick = threading.Event()
+    return col
+
+
+def check_journal_api_424(c):
+    import json
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    store = websession.SessionStore(now=lambda: 1000.0)
+    provider = FakeProvider()
+    good = {"Origin": "https://10.0.0.1"}
+    admin = store.open(identity.Identity("anton", "admin", ()))
+    user = store.open(identity.Identity("olga", "user", ()))
+
+    with patched(webcli.config, get=lambda name, default=None: {"MOP_SERVER_LAN": "10.0.0.1",
+                                                                "MOP_HTTPS_PORT": "443"}.get(name, default)), \
+            patched(webcli, SESSIONS=store, COLLECTOR=_journal_collector()), \
+            patched(websession, provider=lambda: provider):
+        col = webcli.COLLECTOR
+        col.event({"event": "send", "node": "n1", "name": "pu-x-1",
+                   "project": "x", "text": "hi", "at": 100.5, "extra": "kept"})
+        # guest: 401, no-store
+        sent, out = _fake_handler(webcli, "GET", "/api/journal")
+        c.expect("#424 guest: 401 login required", (sent[0][1], out),
+                 (401, b'{"error": "login required"}'))
+        c.check("#424 refusals carry no-store",
+                any(k == "Cache-Control" and v == "no-store" for k, v in sent))
+        # user: 403
+        sent, out = _fake_handler(webcli, "GET", "/api/journal",
+                                  headers={"Cookie": f"mop_session={user}"})
+        c.expect("#424 logged-in user: 403 admin only", (sent[0][1], out),
+                 (403, b'{"error": "admin only"}'))
+        # admin: 200, все поля, обе метки времени
+        sent, out = _fake_handler(webcli, "GET", "/api/journal",
+                                  headers={"Cookie": f"mop_session={admin}"})
+        if not c.check("#424 admin: the route answers JSON",
+                       out.startswith(b'{"journal"'), out[:60]):
+            return
+        got = json.loads(out)["journal"]
+        c.check("#424 admin: 200 with the entries",
+                sent[0][1] == 200 and len(got) == 1, (sent[0][1], got))
+        c.expect("#424 the entry keeps every ordinary field",
+                 {k: got[0].get(k) for k in ("event", "node", "name", "project", "text", "extra")},
+                 {"event": "send", "node": "n1", "name": "pu-x-1", "project": "x",
+                  "text": "hi", "extra": "kept"})
+        c.expect("#424 the original at survives", got[0].get("at"), 100.5)
+        c.check("#424 received_at is separate and sane",
+                isinstance(got[0].get("received_at"), (int, float))
+                and got[0]["received_at"] >= 100.5, got[0])
+
+        # Публичность: снимок и SSE без записей.
+        snap = col.current()
+        c.expect("#424 /api/pool carries no journal entries", snap.get("journal"), [])
+        sent, out = _fake_handler(webcli, "GET", "/api/pool")
+        c.check("#424 /api/pool 200 and no entry in the wire",
+                sent[0][1] == 200 and b"pu-x-1" not in out, out[:120])
+        # Настоящий первый кадр /events: тестовый Handler с wfile, который
+        # рвёт соединение после первой записи -- до пинга.
+        class _Pipe(BytesIO):
+            def write(self, data):
+                out = super().write(data)
+                raise BrokenPipeError()
+        class _Handler(webcli.Handler.__class__):
+            pass
+        h = webcli.Handler.__new__(webcli.Handler)
+        h.path = "/events"
+        h.headers = {}
+        h.wfile = _Pipe()
+        h.rfile = BytesIO()
+        h.client_address = ("127.0.0.1", 0)
+        h.send_response = lambda code, msg=None: None
+        h.send_header = lambda k, v: None
+        h.end_headers = lambda: None
+        try:
+            h.do_GET()
+        except BrokenPipeError:
+            pass
+        frame = h.wfile.getvalue()
+        c.check("#424 the first /events frame carries no journal entry",
+                frame.startswith(b"event: snapshot\ndata: ")
+                and b"pu-x-1" not in frame and b"\"journal\": []" in frame,
+                frame[:120])
+        src = open(os.path.join(os.path.dirname(webcli.__file__), "web.py")).read()
+        c.check("#424 /events still streams the snapshot, no journal of its own",
+                "if path == \"/events\":" in src and "journal" not in src.split('def stream')[1][:600])
+
+        # Смена роли admin -> user: та же cookie, уже не админ.
+        class _NowUser:
+            def lookup(self, login):
+                return identity.Identity(login, "user", ()) if login == "anton" else None
+        with patched(websession, provider=lambda: _NowUser()):
+            sent, out = _fake_handler(webcli, "GET", "/api/journal",
+                                      headers={"Cookie": f"mop_session={admin}"})
+            c.expect("#424 a demoted admin gets 403 on the same cookie",
+                     (sent[0][1], out), (403, b'{"error": "admin only"}'))
+
+        # Отзыв сессии и ошибка провайдера: fail closed, не 500.
+        store.close(admin)
+        sent, out = _fake_handler(webcli, "GET", "/api/journal",
+                                  headers={"Cookie": f"mop_session={admin}"})
+        c.expect("#424 a revoked session is a guest again", (sent[0][1], out),
+                 (401, b'{"error": "login required"}'))
+
+        class _Broken:
+            def lookup(self, login):
+                raise RuntimeError("provider down")
+        admin2 = store.open(identity.Identity("anton", "admin", ()))
+        with patched(websession, provider=lambda: _Broken()):
+            sent, out = _fake_handler(webcli, "GET", "/api/journal",
+                                      headers={"Cookie": f"mop_session={admin2}"})
+            c.expect("#424 a provider failure fails closed", (sent[0][1], out),
+                     (401, b'{"error": "login required"}'))
+
+
+def check_journal_entry_424(c):
+    col = _journal_collector()
+    # at отсутствует/невалиден (bool, NaN, inf, строка): валидное время
+    # получения, не null; received_at всегда отдельный.
+    cases = [
+        ({"event": "send", "text": "a"}, None),
+        ({"event": "send", "text": "b", "at": True}, None),
+        ({"event": "send", "text": "c", "at": float("nan")}, None),
+        ({"event": "send", "text": "d", "at": float("inf")}, None),
+        ({"event": "send", "text": "e", "at": "100.5"}, None),
+        ({"event": "send", "text": "f", "at": 200.25}, 200.25),
+    ]
+    for msg, want_at in cases:
+        col.event(msg)
+    got = col.admin_journal
+    for i, (msg, want_at) in enumerate(cases):
+        if not c.check(f"#424 the entry carries both timestamps ({msg.get('text')})",
+                       "at" in got[i] and "received_at" in got[i], got[i]):
+            continue
+        at, received = got[i]["at"], got[i]["received_at"]
+        c.check(f"#424 at fallback for {msg.get('text')}: valid receipt time",
+                isinstance(at, (int, float)) and not isinstance(at, bool)
+                and at == at and -1e12 < at < 1e12, (msg.get("at"), at))
+        if want_at is not None:
+            c.expect(f"#424 a valid original at is kept ({msg.get('text')})", at, want_at)
+        c.check(f"#424 received_at is separate ({msg.get('text')})",
+                isinstance(received, (int, float)), received)
+    # Будущая исходная метка (рассинхрон часов) сохраняется как есть,
+    # независимо от received_at.
+    colf = _journal_collector()
+    colf.event({"event": "send", "text": "future", "at": 4102444800.0})
+    c.expect("#424 a future original at survives untouched",
+             (colf.admin_journal[0]["at"], colf.admin_journal[0]["received_at"] < 4102444800.0),
+             (4102444800.0, True))
+
+    # Credential-поля не хранятся и не отдаются, на любом регистре и вложенно.
+    col2 = _journal_collector()
+    col2.event({"event": "send", "text": "x", "management_key": "MK",
+                "Authorization": "Bearer y", "user_password": "p",
+                "nested": {"token": "t", "keep": 1}, "SECRET": "s"})
+    flat = json.dumps(col2.admin_journal)
+    for secret in ("MK", "Bearer y", '"p"', '"t"', '"s"'):
+        c.check(f"#424 credential values never stored ({secret})", secret not in flat, flat)
+    c.check("#424 non-credential nested fields survive",
+            col2.admin_journal
+            and col2.admin_journal[0].get("nested", {}).get("keep") == 1,
+            col2.admin_journal[0] if col2.admin_journal else None)
+
+    # Oversized: событие целиком больше ENTRY_MAX байт сериализации --
+    # заменяется ограниченным маркером, не хранится как есть.
+    col3 = _journal_collector()
+    col3.event({"event": "send", "text": "small", "at": 1.0})
+    huge = "z" * (web.ENTRY_MAX + 1024)
+    col3.event({"event": "send", "text": "big", "blob": huge, "at": 2.0})
+    if not c.check("#424 two entries after an oversized one",
+                   len(col3.admin_journal) == 2, len(col3.admin_journal)):
+        return
+    c.check("#424 an oversized event becomes a bounded marker",
+            "blob" not in col3.admin_journal[1]
+            and len(json.dumps(col3.admin_journal[1]).encode()) <= web.ENTRY_MAX,
+            len(json.dumps(col3.admin_journal[1]).encode()))
+    c.check("#424 the marker names the event",
+            col3.admin_journal[1].get("event") == "send"
+            and isinstance(col3.admin_journal[1].get("text"), str), col3.admin_journal[1])
+    # Длинное имя события само раздувает запись: маркер обязан быть
+    # ограничен целиком, без сырого большого поля -- в нём может быть секрет.
+    col5 = _journal_collector()
+    col5.event({"event": "send-" + "z" * (web.ENTRY_MAX + 512),
+                "text": "short", "at": 3.0})
+    marker = col5.admin_journal[0]
+    c.check("#424 an oversized event name yields a bounded marker",
+            len(json.dumps(marker).encode()) <= web.ENTRY_MAX
+            and marker.get("event") != "send-" + "z" * (web.ENTRY_MAX + 512),
+            len(json.dumps(marker).encode()))
+    # Кольцо 100: старое вытесняется, больше не отдаётся.
+    col4 = _journal_collector()
+    for i in range(120):
+        col4.event({"event": "send", "text": f"e{i}", "at": float(i)})
+    c.check("#424 the ring keeps the last 100",
+            len(col4.admin_journal) == 100
+            and col4.admin_journal[0]["text"] == "e20"
+            and col4.admin_journal[-1]["text"] == "e119",
+            len(col4.admin_journal))
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
@@ -774,7 +1000,8 @@ def main():
                check_masters_305, check_dist_297,
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
                check_load_378, check_session_store_415, check_login_api_415,
-               check_address_source_415, check_deleted_user_415):
+               check_address_source_415, check_deleted_user_415,
+               check_journal_api_424, check_journal_entry_424):
         fn(c)
     return c.report("web")
 

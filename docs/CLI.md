@@ -1209,6 +1209,8 @@ refreshed in place (docs/WEB.md):
   /api/session who is logged in; login and logout by post with JSON on
                /api/login, /api/logout -- file/LDAP via the same identity
                as the bus, server-side session cookie, for the admin gate
+  /api/journal the full event journal, admin only (current role re-checked
+               per request); the public snapshot and /events carry no entries
 
 No login on the page (the LAN is trusted, operator's decision 2026-09-26;
 authorization comes later). The pool itself stays read-only here: a restart
