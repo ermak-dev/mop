@@ -20,8 +20,10 @@ session as a child, sees MOP_PROJECT, builds the project's bus credentials from
 the server's directory (mop/common/creds.py) and subscribes to its project's inbox.
 
 No ansible on this machine: bus and proxy credentials arrive with
-`mop login --server ADDRESS LOGIN`. The server comes from the clone binding,
-MOP_SERVER_LAN or --server; without one, a single joined server is selected.
+`mop login --server ADDRESS LOGIN`, started automatically if either record
+is missing. The server comes from the clone binding, MOP_SERVER_LAN or
+--server; without one, a single joined server is selected. Without a
+terminal or an unambiguous server, login refuses before launching claude.
 The /master skill is linked from here.
 
 The pool server arrives as an argument, not from a directory config. The
@@ -50,6 +52,7 @@ import sys
 
 from mop.cli import lib
 from mop.cli.core import _common
+from mop.cli.pool import login
 from mop.common import config, puppets
 
 # Скилл едет в пакете (#351): у клиента, поставленного из git, config.PROJECT
@@ -110,7 +113,7 @@ def claude_args(args):
     return mine, [a for a in args if a.startswith("-")] + tail
 
 
-def main(argv):
+def _main(argv):
     mine, passthru = claude_args(argv)
     if len(mine) > 1:
         lib.usage(__doc__)
@@ -144,5 +147,12 @@ def main(argv):
 
 
 
-# Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)
+# Вход -- до lib.cluster: без client.json тот не найдёт выбранный сервер.
+_launch = lib.cluster(_main)
+
+
+def main(argv):
+    if len(claude_args(argv)[0]) > 1:
+        lib.usage(__doc__)
+    login.ensure()
+    return _launch(argv)

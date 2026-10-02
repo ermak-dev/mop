@@ -53,8 +53,9 @@ answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
 The session uses the selected server's LLM proxy. Its URL and key come from
-the private client.json saved by mop login. With multiple joined servers,
-name one with --server; this command never adds the pool's MCP tools.
+the private client.json saved by mop login; missing credentials start login
+before claude. With multiple joined servers, name one with --server. Without
+a terminal, missing input refuses. This command never adds the pool's MCP tools.
 ```
 
 #### mop delete
@@ -128,8 +129,10 @@ session as a child, sees MOP_PROJECT, builds the project's bus credentials from
 the server's directory (mop/common/creds.py) and subscribes to its project's inbox.
 
 No ansible on this machine: bus and proxy credentials arrive with
-`mop login --server ADDRESS LOGIN`. The server comes from the clone binding,
-MOP_SERVER_LAN or --server; without one, a single joined server is selected.
+`mop login --server ADDRESS LOGIN`, started automatically if either record
+is missing. The server comes from the clone binding, MOP_SERVER_LAN or
+--server; without one, a single joined server is selected. Without a
+terminal or an unambiguous server, login refuses before launching claude.
 The /master skill is linked from here.
 
 The pool server arrives as an argument, not from a directory config. The
