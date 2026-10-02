@@ -202,7 +202,13 @@ def master_rows(answers, rows):
             if key not in by_session:
                 by_session[key] = {"project": project, "master": address,
                                    "addresses": [address], "user": a.user or "-",
-                                   "session": a.session or "-", "cwd": a.cwd or "-"}
+                                   "session": a.session or "-", "cwd": a.cwd or "-",
+                                   # Чем строка склеена (#421): сессией (у who-
+                                   # ответа есть sessionId) или самим адресом
+                                   # (legacy endpoint). Число «сессий» на
+                                   # странице без этого врёт, пока живы старые
+                                   # MCP; сам sessionId публично не ходит.
+                                   "identified": bool(a.session_id)}
                 order.append(key)
             elif address not in by_session[key]["addresses"]:
                 by_session[key]["addresses"].append(address)
