@@ -18,7 +18,7 @@
 На шину человека пускает auth callout: сервис `mop-callout` на сервере
 спрашивает провайдера на каждом входе и выдаёт права по роли. Статических
 учёток людей на шине нет. Люди входят только через WebSocket, то есть через
-TLS-прокси сервера — так ходит `mop join` и всё, что после него. Ролей три:
+TLS-прокси сервера — так ходит `mop login` и всё, что после него. Ролей три:
 
 | Роль | Что доступно |
 |---|---|
@@ -192,7 +192,7 @@ mop server user import
 затем удалить строку `MOP_OPERATORS` из `.env` и прогнать `mop server deploy`. Имени
 и почты у перенесённых нет — их можно дописать, удалив человека и заведя
 заново, или правкой строки файла. `operator.json` на машинах людей после
-переноса работает без нового `mop join`: пароль тот же.
+переноса работает без нового `mop login`: пароль тот же.
 
 ## Клиент: вход
 
@@ -200,7 +200,7 @@ mop server user import
 
 ```
 cd ~/src/project
-mop join --server <адрес сервера> <логин>
+mop login --server <адрес сервера> <логин>
 ```
 
 Пароль спрашивается и сразу проверяется соединением; без терминала его
@@ -215,7 +215,7 @@ openssl x509 -noout -fingerprint -sha256 -in ~/.config/mop/secrets/tls.pem
 Пароль ложится в `~/.config/mop/servers/<сервер>/` — один логин на человека
 на сервер, для всех проектов. Рабочая копия запоминает только сервер и
 логин (`git config mop.server`, `mop.user`, не коммитится). На самом сервере
-человек входит так же — `mop join`.
+человек входит так же — `mop login`.
 
 ## Отзыв доступа
 
@@ -244,7 +244,7 @@ journalctl -u mop-callout -n 50
 |---|---|
 | `<логин>: unknown login` | нет в файле (`mop server user add`) или в каталоге под `MOP_LDAP_BASE` / `MOP_LDAP_LOGIN_ATTR` |
 | `<логин>: wrong password` | неверный пароль; в файле — `mop server user passwd` |
-| `people connect over WebSocket only` | человек пришёл на порт шины напрямую; входить надо через `mop join` (wss через прокси) |
+| `people connect over WebSocket only` | человек пришёл на порт шины напрямую; входить надо через `mop login` (wss через прокси) |
 | `no access -- in none of the pool's LDAP groups` | человек есть в каталоге, но не в группах пула: `MOP_LDAP_ADMIN_GROUP`, `MOP_LDAP_ACCESS_GROUP`, `mop-<проект>` |
 | `ambiguous login, N entries in LDAP` | логину соответствуют несколько записей: сузить `MOP_LDAP_BASE` или сменить `MOP_LDAP_LOGIN_ATTR` |
 | `LDAP service bind as ... failed` | неверные `MOP_LDAP_BIND_DN` / `MOP_LDAP_BIND_PASSWORD`; после правки — `mop server deploy` |

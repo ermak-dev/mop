@@ -1,4 +1,4 @@
-"""join a pool server: mop join [--server ADDRESS] [LOGIN]
+"""log in to a pool server: mop login [--server ADDRESS] [LOGIN]
 
 Server and login come from --server/LOGIN, the process environment or the
 working copy's binding; if missing, they are asked for. The bus password is
@@ -177,7 +177,7 @@ def main(argv):
     командная строка; `--server` снимает диспетчер, логин -- здесь."""
     explicit_server, login = parse(argv)
     ctx = context.current()
-    if explicit_server:                       # `mop join --server` мимо диспетчера
+    if explicit_server:                       # `mop login --server` мимо диспетчера
         ctx = context.resolve({"server": explicit_server}, os.environ,
                               context.clone_binding())
     in_clone = git("rev-parse", "--show-toplevel") is not None

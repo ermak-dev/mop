@@ -18,7 +18,7 @@ answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
 The session uses the selected server's LLM proxy. Its URL and key come from
-the private client.json saved by mop join. With multiple joined servers,
+the private client.json saved by mop login. With multiple joined servers,
 name one with --server; this command never adds the pool's MCP tools.
 """
 import os
