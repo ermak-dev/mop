@@ -1185,11 +1185,38 @@ def check_mgmt_gateway_418(c, can_render):
         c.check("#418 the secrets dir is 0700",
                 any(d["ansible.builtin.file"].get("mode") in ("0700", "'0700'")
                     for d in dirs), [d.get("name") for d in dirs])
+    # HYPOTHESIS: копия ключа может устареть относительно живого config.yaml;
+    # один запрос после запуска прокси ловит рассинхрон до выдачи панели.
+    # SOLUTION: одноразовый GET после проверки LLM endpoint, весь вывод скрыт.
+    # RESULT: без GET красная проверка, с ним зелёная.
+    # STATUS: FIXED — see #418
+    proxy_tasks = yaml.safe_load(open(os.path.join(DEPLOY, "roles", "llmproxy", "tasks", "main.yml"),
+                                     encoding="utf-8"))
+    checks = [t for t in proxy_tasks if t.get("name") == "The panel gateway key is accepted by the proxy"]
+    c.check("#418 management key has a single post-start health check", len(checks) == 1)
+    if checks:
+        check = checks[0]
+        req = check.get("ansible.builtin.uri", {})
+        c.check("#418 health uses the same secret file as the gateway, only on loopback",
+                req.get("url") == "http://127.0.0.1:{{ MOP_LLM_PROXY_PORT }}/v8/management/config"
+                and "lookup('file', MOP_HOME + '/.config/mop/secrets/llm-proxy-mgmt.pass')"
+                    in req.get("headers", {}).get("Authorization", "")
+                and req.get("status_code") == 200
+                and check.get("no_log") is True,
+                {"url": req.get("url"), "no_log": check.get("no_log")})
+        names = [t.get("name") for t in proxy_tasks]
+        c.check("#418 health comes after proxy start and existing LLM health",
+                names.index("The proxy answers on the LLM API") < names.index(check["name"])
+                and names.index("Enable and start") < names.index(check["name"]))
+        c.check("#418 invalid key does not retry against the IP ban",
+                all(k not in check for k in ("until", "retries", "delay")))
+
     if not can_render:
         return
     template = open(os.path.join(DEPLOY, "roles", "proxy", "templates",
                                  "mop.conf.j2"), encoding="utf-8").read()
-    got = render(template, dict(config.SETTINGS, MOP_SERVER_LAN="srv.test"))
+    got = render(template, dict(config.SETTINGS, MOP_SERVER_LAN="srv.test",
+                                 MOP_LLM_REQUEST_MAX_MB="17"))
     web = f"127.0.0.1:{config.SETTINGS['MOP_WEB_PORT']}"
 
     # Блок location по границам скобок: никаких выводов «покрыто» из
@@ -1243,6 +1270,15 @@ def check_mgmt_gateway_418(c, can_render):
     c.check("#411+#418 the body limit sits on exactly the four LLM routes",
             all(b.count("client_max_body_size") == 1 for b in limited)
             and got.count("client_max_body_size") == 4, got.count("client_max_body_size"))
+    # HYPOTHESIS: подсчёт директив пропускал неправильное значение в одном
+    # location; все четыре должны брать потолок установки, не константу.
+    # Нестандартные 17 МБ отличают подстановку настройки от хардкода 64 МБ.
+    want_limit = "client_max_body_size 17m;"
+    for path, b in zip(("/llm/", "/llm/raw/", "/v8/management/", "=/v8/management"),
+                       limited):
+        c.check(f"#418 {path} uses the configured body limit",
+                bool(b) and want_limit in b, b or "no block")
+
 
 
 def main():
