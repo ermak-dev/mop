@@ -18,6 +18,7 @@ inode, расход токенов — разбор транскриптов в 
 Модуль возвращает данные и ничего не печатает; HTTP живёт в bin/web.
 """
 import dataclasses
+import json
 import os
 import threading
 import time
@@ -297,6 +298,7 @@ class Collector:
         self.version = 0
         self.rows, self.sizes, self.nodes = [], {}, []
         self.usage, self.per_puppet, self.per_user, self.journal = [], [], [], []
+        self.admin_journal = []     # полный журнал, только /api/journal (#424)
         self.masters = []
         self.errors = {}
         self.at = None
@@ -307,8 +309,10 @@ class Collector:
         with self._cond:
             return snapshot(with_sizes(self.rows, self.sizes), self.nodes,
                             self.usage, self.per_puppet, self.per_user,
-                            self.journal, [f"{k}: {v}" for k, v in
-                                           sorted(self.errors.items())],
+                            # Публичный снимок без записей журнала (#424):
+                            # полный -- только /api/journal под admin-ролью.
+                            [], [f"{k}: {v}" for k, v in
+                                 sorted(self.errors.items())],
                             self.at, self.masters)
 
     def wait(self, version, timeout):
@@ -323,10 +327,13 @@ class Collector:
             self.version += 1
             self._cond.notify_all()
 
-    def event(self, entry):
-        """Событие с шины: в журнал и быстрый круг вперёд."""
+    def event(self, entry, msg=None):
+        """Событие с шины: полный журнал -- админу (#424), быстрый круг --
+        вперёд. Публичный снимок записей больше не несёт: пустой список на
+        переход (#424), живое -- в admin_journal."""
+        full = full_entry(msg if msg is not None else entry)
         with self._cond:
-            self.journal = push(self.journal, {"at": time.time(), **entry})
+            self.admin_journal = push(getattr(self, "admin_journal", []), full)
         self._bump()
         self._kick.set()
 
@@ -446,5 +453,55 @@ def journal_entry(msg):
     return {"event": msg.get("event") or "?", "node": msg.get("node") or "-",
             "name": msg.get("name") or "-", "project": msg.get("project") or "-",
             "text": msg.get("text") or ""}
+
+
+# ─── полный журнал для админа (#424) ─────────────────────────────────────
+# Одна запись -- не больше ENTRY_MAX байт сериализации: событие больше
+# заменяется маркером, а не хранится oversized.
+ENTRY_MAX = 64 * 1024
+# Поля-ключи не хранятся и не отдаются: событие с шины публичных данных не
+# обещает, а журнал читает человек и браузер. Регистр не важен, вложенные
+# словари чистятся тем же списком.
+CREDENTIAL_KEYS = ("management_key", "authorization", "password", "token", "secret")
+
+
+def _valid_at(value):
+    """Исходный at события -> число | None: bool и нечисла (NaN, inf,
+    строки) не годятся -- JSON их не переносит и смысл у них другой."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    return value
+
+
+def _strip_credentials(value):
+    """Убрать credential-поля на любом уровне. Списки чистятся поэлементно,
+    словари -- по ключу (без учёта регистра); остальное -- как есть."""
+    if isinstance(value, dict):
+        return {k: _strip_credentials(v)
+                for k, v in value.items()
+                if not any(k.lower().endswith(s) or s in k.lower() for s in CREDENTIAL_KEYS)}
+    if isinstance(value, list):
+        return [_strip_credentials(v) for v in value]
+    return value
+
+
+def full_entry(msg, now=None):
+    """Событие шины -> полная запись админского журнала (#424).
+
+    Все обычные поля события сохраняются без белого списка; исходный at
+    остаётся, если это валидное число, иначе -- время получения (fail к
+    честной метке, не null); received_at -- всегда отдельное поле.
+    Credential-поля вычищаются; событие, не влезающее в ENTRY_MAX байт
+    сериализации, заменяется ограниченным маркером."""
+    received = (now or time.time)() if callable(now or time.time) else (now or time.time())
+    clean = _strip_credentials(dict(msg))
+    at = _valid_at(clean.pop("at", None))
+    entry = {"at": at if at is not None else received, "received_at": received, **clean}
+    if len(json.dumps(entry, ensure_ascii=False, default=str).encode()) > ENTRY_MAX:
+        return {"event": msg.get("event") or "?", "text": "[event over size limit]",
+                "at": entry["at"], "received_at": received}
+    return entry
 
 

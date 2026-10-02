@@ -12,6 +12,8 @@ refreshed in place (docs/WEB.md):
   /api/session who is logged in; login and logout by post with JSON on
                /api/login, /api/logout -- file/LDAP via the same identity
                as the bus, server-side session cookie, for the admin gate
+  /api/journal the full event journal, admin only (current role re-checked
+               per request); the public snapshot and /events carry no entries
 
 No login on the page (the LAN is trusted, operator's decision 2026-09-26;
 authorization comes later). The pool itself stays read-only here: a restart
@@ -156,6 +158,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/session":
             login, role = self._who()
             return self._json(200, {"login": login, "role": role})
+        if path == "/api/journal":
+            return self.api_journal()
         if path == "/api/pool":
             return self._json(200, COLLECTOR.current())
         if path == "/healthz":
@@ -166,6 +170,25 @@ class Handler(BaseHTTPRequestHandler):
             return self.stream()
         self._send(404, "no such path\n", "text/plain")
 
+
+    def api_journal(self):
+        """Полный журнал событий -- только актуальному admin (#424).
+
+        Роль перечитывается на каждом запросе (SessionStore -> провайдер,
+        #415): сменившийся admin -> user и умерший провайдер не пускают
+        (fail closed -- как гость), а не ходят с ролью на момент входа.
+        Записей в публичном снимке нет, ключи кредов сюда не попадают."""
+        try:
+            login, role = self._who()
+        except Exception:
+            login, role = None, None
+        if not login:
+            return self._json(401, {"error": "login required"})
+        if role != "admin":
+            return self._json(403, {"error": "admin only"})
+        with COLLECTOR._cond:
+            entries = list(COLLECTOR.admin_journal)
+        return self._json(200, {"journal": entries})
 
     def stream(self):
         """SSE: снимок при подключении и на каждое изменение, пинг в тишине.
@@ -210,7 +233,8 @@ def listen_events():
     """Журнал проекта с шины: под кредами admin видны все проекты. Шина легла —
     дашборд живёт опросом, а причина видна в снимке."""
     try:
-        bus.subscribe(bus.events(busnames.ANY), lambda msg: COLLECTOR.event(web.journal_entry(msg)))
+        bus.subscribe(bus.events(busnames.ANY),
+                      lambda msg: COLLECTOR.event(web.journal_entry(msg), msg=msg))
     except bus.BusError as e:
         with COLLECTOR._cond:
             COLLECTOR.errors["events"] = str(e)
