@@ -2,9 +2,10 @@
 
 Клиентские пути раздачи умерли: из мастер-шелла копию узла не пишут -- это
 by design (#312, чужой проект не сеет свои ключи будущим телам), а mop
-login -- путь кредов (#385). Владелец ключа -- сервер: ключ лежит в его
-.env (MOP_PROXY_KEY), и сервис кластера раздаёт его глаголом write от
-своего субъекта -- админа: копия каждого узла и живые тела без аренды.
+login -- путь кредов (#385). Владелец ключа -- сервер: ключ лежит в
+закрытом файле установленного прокси; до раскатки файла работает старый
+MOP_PROXY_KEY из окружения. Сервис раздаёт ключ глаголом write от своего
+субъекта -- админа: копия каждого узла и живые тела без аренды.
 Свежие тела сеются с копии узла, живые получают письмо напрямую.
 
 Только stdlib: рендер и решение чистые (tests/proxykey.py), раздача -- на
@@ -20,6 +21,20 @@ from ..common import bus, config, paths, puppets
 
 TICK = 300                   # редко и предсказуемо; sha не нов -- ни одного запроса
 STATE = paths.local("proxy-key.json")
+KEY_FILE = paths.local(paths.SECRETS, "llm-proxy-client.pass")
+
+
+def source(env, path=None):
+    """Ключ установленного прокси; прежний env -- лишь до раскатки файла."""
+    try:
+        with open(path or KEY_FILE, encoding="utf-8") as f:
+            key = f.read().rstrip("\r\n")
+    except FileNotFoundError:
+        old = env.get("MOP_PROXY_KEY", "")
+        return old[0] if isinstance(old, tuple) else old
+    if not key:
+        raise ValueError("installed proxy key file is empty")
+    return key
 
 
 def blob(env):
@@ -61,7 +76,7 @@ def push(env=None, nodes=None, now=None):
     (проба), иначе состав пула по шине. Пишет глагол write без адреса:
     агент для админа кладёт копию узла и живые тела без аренды."""
     env = config.effective() if env is None else env
-    content = blob(env)
+    content = blob({"MOP_PROXY_KEY": source(env)})
     if not due(content, _load()):
         return None
     if nodes is None:
