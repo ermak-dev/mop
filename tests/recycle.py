@@ -41,7 +41,7 @@ def recycled(**kw):
 
 def check_branch_367(c):
     # HYPOTHESIS (#367): recycle сам читал context.current().branch -- git
-    # config mop.branch каталога запуска или MOP_BRANCH. `mop gc` операторский
+    # config mop.branch каталога запуска или MOP_BRANCH. `mop server gc` операторский
     # и рециклит папетов всех проектов: ветка окружения оператора перекрывала
     # ветку из меты джоба, wipe делал checkout -B на неё, перерегистрация
     # писала её в Meta. SOLUTION: ветка -- параметр recycle, None -> meta.branch;
@@ -63,7 +63,7 @@ def check_branch_367(c):
                      got["update"].get("branch"), "epic/Y")
 
     # Командлет mop recycle -- тот, кто знает рабочую копию: он и передаёт
-    # ветку контекста; mop gc не передаёт ничего.
+    # ветку контекста; mop server gc не передаёт ничего.
     from mop.cli.core import recycle as cmd
     seen = {}
 
@@ -75,8 +75,8 @@ def check_branch_367(c):
         run_command(cmd.main, ["pu-proj-1"], via_cli=True)
     c.expect("mop recycle passes the context branch", seen.get("branch"), "epic/X")
 
-    src = open(os.path.join(ROOT, "mop", "cli", "pool", "gc.py")).read()
-    c.check("mop gc passes no branch", "puppets.recycle(name)" in src)
+    src = open(os.path.join(ROOT, "mop", "cli", "server", "gc.py")).read()
+    c.check("mop server gc passes no branch", "puppets.recycle(name)" in src)
 
 
 def main():

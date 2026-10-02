@@ -47,10 +47,7 @@ LAYERS = {
     # cli: клиент
     "mop.cli.core": CLIENT, "mop.cli.project": CLIENT, "mop.cli.secret": CLIENT,
     "mop.cli.node": CLIENT, "mop.cli.dev": CLIENT, "mop.cli.service.mcp": CLIENT,
-    "mop.cli.pool.doctor": CLIENT,
     "mop.cli.pool.login": CLIENT, "mop.cli.pool.llm": CLIENT,
-    "mop.cli.pool.disk": CLIENT, "mop.cli.pool.gc": CLIENT,
-    "mop.cli.pool.sweep": CLIENT,
     "mop.cli.pool": CLIENT, "mop.cli.service": CLIENT,
     # cli: сервер. Образ печёт контроллер: ansible по гипервизорам, как deploy.
     "mop.cli.driver.build": SERVER,

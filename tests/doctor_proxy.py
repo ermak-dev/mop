@@ -14,7 +14,7 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.client.doctor import proxy  # noqa: E402
+from mop.server.doctor import proxy  # noqa: E402
 from mop.common import config, context, creds  # noqa: E402
 
 
@@ -48,7 +48,7 @@ def check_joined_probe_397(c):
 # SOLUTION: для URL выбранного сервера использовать закрытый cafile, не
 # отключая проверку; для чужого URL оставить системное доверие.
 # RESULT: закреплённый сертификат используется только для своего сервера;
-# живой mop doctor proxy после join отвечает «pool is healthy».
+# живой mop server doctor proxy после join отвечает «pool is healthy».
 # STATUS: FIXED — see #406
 def check_pinned_proxy_406(c):
     root = os.path.join(tempfile.mkdtemp(prefix="mop-probe-406-"), "servers")

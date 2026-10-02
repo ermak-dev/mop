@@ -1,10 +1,11 @@
-"""space on pool nodes: mop disk [node]
+"""space on pool nodes: mop server disk [node]
 
 df on the filesystem where puppet clones and target directories live.
-This is a node-level verb: it refuses in a master shell — host space is
-the operator's to see.
+This is a node-level verb run only on the server: host space belongs
+to the whole pool, not to one project.
 """
 from mop.cli import lib
+from mop.cli.server import _maintenance
 from mop.common import bus, puppets
 from mop.common.render import table
 
@@ -27,4 +28,4 @@ def main(argv):
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)
+main = lib.cluster(_maintenance.only_server(main))

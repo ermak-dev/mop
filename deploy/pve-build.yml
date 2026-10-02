@@ -140,7 +140,7 @@
 
     # Образ с живым клоном не заменить, поэтому тел проекта на узле быть не
     # должно. Их снимает `mop driver build` до плейбука (останов джобов и
-    # снос тел); что осталось — сироты, и это дело `mop sweep`, а не
+    # снос тел); что осталось — сироты, и это дело `mop server sweep`, а не
     # сборки: снести чужую работу молча хуже отказа.
     - name: No body of the project may still stand here
       ansible.builtin.assert:
@@ -148,7 +148,7 @@
         fail_msg: >-
           bodies of {{ mop_project }} still stand on {{ inventory_hostname }}:
           {{ project_bodies | join(', ') }} — the image cannot be replaced under
-          them; orphans go with mop sweep, live puppets with mop driver build --force
+          them; orphans go with mop server sweep, live puppets with mop driver build --force
 
     # Размеры тела: чего просит проект (mop.yaml), но не выше потолка этой
     # машины. Просит чужой репозиторий, а решает узел, на котором тело будет

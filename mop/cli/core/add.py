@@ -75,7 +75,7 @@ def _add(origin, project, named, p):
     p.clear()
     lib.fail(f"{name} is " + ("not placed on any node" if node is None
                               else f"still starting on {node}")
-             + " after 2 minutes: mop doctor")
+             + " after 2 minutes: mop server doctor")
     return 1
 
 

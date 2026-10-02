@@ -7,7 +7,7 @@ import hermetic  # noqa: F401,E402
 from _lib import Checks, patched, patched_env, run_command  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.cli.pool import gc  # noqa: E402
+from mop.cli.server import gc, _maintenance  # noqa: E402
 from mop.common import state  # noqa: E402
 from mop.server import cluster  # noqa: E402
 
@@ -37,7 +37,8 @@ def check_server_policy_398(c):
                     request_many=lambda *a: {"node-a": {"free_gb": 20}}), \
             patched(gc.puppets, puppet_rows=lambda: [row],
                     recycle=lambda name: recycled.append(name)):
-        out, _, code = run_command(gc.main, ["--dry"])
+        with patched(_maintenance, require=lambda: None):
+            out, _, code = run_command(gc.main, ["--dry"])
     c.expect("#398 client asks server for policy", asked, ["gc_policy"])
     c.check("#398 dry run uses server threshold", "20 GB free < 25" in out, out)
     c.expect("#398 dry run does not recycle", recycled, [])
@@ -47,7 +48,8 @@ def check_server_policy_398(c):
             patched(gc.bus, call_cluster=lambda *a: (_ for _ in ()).throw(RuntimeError("offline"))), \
             patched(gc.puppets, puppet_rows=lambda: c.fail("#398 no roster on policy failure")):
         try:
-            gc.main(["--dry"])
+            with patched(_maintenance, require=lambda: None):
+                gc.main(["--dry"])
             c.fail("#398 server outage must refuse, not use local defaults")
         except RuntimeError:
             pass

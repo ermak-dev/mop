@@ -1,4 +1,4 @@
-"""pool diagnostics: mop doctor [group] [--fix [--safe]]
+"""pool diagnostics: mop server doctor [group] [--fix [--safe]]
 
 Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
 and a job spec older than the node driver — that last one looks perfectly
@@ -6,8 +6,7 @@ healthy until the scheduler moves it to a hypervisor. The disk group asks each
 node's agent what the disk watchdog would sweep there and who is under disk
 pressure; --fix sweeps for real.
 
-The checks come in groups, a module each in mop/client/doctor/: `mop doctor`
-runs them all, `mop doctor <group>` runs one; a name that is not a group is
+The checks come in groups, a module each in mop/server/doctor/: `mop server doctor` runs them all, `mop server doctor <group>` runs one; an unknown name is
 refused with the list of groups.
 
 --fix treats what's treatable; a silent node agent is not on this list — the
@@ -23,15 +22,9 @@ sweep — and names the rest without executing it: restarts, alloc stops,
 import sys
 
 from mop.cli import lib
-from mop.client import doctor
+from mop.cli.server import _maintenance
+from mop.server import doctor
 from mop.common.render import table
-
-
-# Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
-MCP = {"annotations": "destructive", "args": [
-    {"name": "fix", "type": "boolean", "flag": "--fix", "help": "treat what is treatable"},
-    {"name": "safe", "type": "boolean", "flag": "--safe",
-     "help": "with fix: treat only what cannot break work (login+nudge, sweep)"}]}
 
 
 def main(argv):
@@ -82,4 +75,4 @@ def main(argv):
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)
+main = lib.cluster(_maintenance.only_server(main))
