@@ -8,9 +8,10 @@
 """
 import os
 import sys
+import tempfile
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import bus  # noqa: E402
@@ -98,8 +99,45 @@ def check_results_135(c):
     c.check("a node with no answer at all must be NOT REACHED",
             not (not got.get("d", "").startswith("NOT REACHED")))
 
+# HYPOTHESIS: раздатчик и установленный прокси читают разные источники:
+# .env кластера против llm-proxy-client.pass контроллера. Ключ может устареть
+# или вовсе отсутствовать у кластера, хотя прокси уже поднят.
+# SOLUTION: приватный passfile сервисной учётки старше старого .env;
+# если файла пока нет, работающие установки продолжают читать .env.
+# RESULT: раздача предпочитает файл и сохраняет переходный старый источник.
+# STATUS: FIXED — see #393
+def check_source_393(c):
+    source = getattr(proxykey, "source", None)
+    if not c.check("#393 proxykey.source exists", source is not None):
+        return
+    with tempfile.TemporaryDirectory(prefix="mop-key-source-") as d:
+        path = os.path.join(d, "llm-proxy-client.pass")
+        old = {"MOP_PROXY_KEY": ("old", ".env")}
+        c.expect("#393 no passfile: previous source continues", source(old, path), "old")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("generated\n")
+        c.expect("#393 installed proxy key wins over old env", source(old, path), "generated")
+        c.expect("#393 file works without env key", source({}, path), "generated")
+        sent = []
+
+        def write(*args, **kwargs):
+            sent.append(bus.file_data(kwargs["files"][0][1]))
+            return {"node": {"written": ["ok"]}}
+
+        with patched(proxykey, KEY_FILE=path), patched(proxykey.config,
+                                                     effective=lambda: old), \
+                patched(proxykey, _load=lambda: None), \
+                patched(proxykey.puppets, ready_nodes=lambda: ["node"]), \
+                patched(proxykey.bus, request_many=write), \
+                patched(proxykey, _save=lambda state: None):
+            got = proxykey.push()
+        c.expect("#393 push distributes the installed key", (got, sent),
+                 ({"node": "OK"}, [b"MOP_PROXY_KEY=generated\n"]))
+
+
 def main():
     c = Checks()
+    check_source_393(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

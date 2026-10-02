@@ -628,6 +628,25 @@ def _meta(project, req):
     return {"ok": True, "node": req["node"], "meta": _api().node_meta(req["node"])}
 
 
+def _gc_policy(project, req):
+    """Единая политика удаления свободных папетов, заданная установкой."""
+    return {"ok": True, "free_min_gb": config.num("MOP_GC_FREE_MIN_GB"),
+            "max_per_run": config.num("MOP_GC_MAX_PER_RUN")}
+
+
+def _client_config(req):
+    """Только личный субъект после проверки NATS, не узловой server.rpc."""
+    if not req.get("_caller"):
+        return {"error": "client_config requires an authenticated personal subject"}
+    key = proxykey.source({})
+    if not key:
+        return {"error": "proxy client key is not installed on the server"}
+    host = config.get("MOP_SERVER_LAN")
+    port = str(config.get("MOP_HTTPS_PORT"))
+    return {"ok": True, "https_port": port,
+            "proxy_url": f"https://{host}:{port}/llm", "proxy_key": key}
+
+
 # ─── глаголы: проекты (#117) ─────────────────────────────────────────────
 # Реестр, лимиты и пароли папетов живут здесь, на сервере, и пишет их только
 # сервис. Глаголы идут в потоках петли, поэтому правка реестра -- под замком:
@@ -866,6 +885,7 @@ VERBS = {
     "up":             Verb(_up,             ADMIN,   False, False),
     "forget":         Verb(_forget,         ADMIN,   False, False),
     "meta":           Verb(_meta,           ADMIN,   False, False),
+    "gc_policy":      Verb(_gc_policy,      ADMIN,   False, False),
     "projects":       Verb(_projects,       ADMIN,   False, False),
     "project_add":    Verb(_project_add,    ADMIN,   False, False),
     "project_delete": Verb(_project_delete, ADMIN,   False, False),
@@ -901,6 +921,9 @@ def answer(project, req, api=None):
 
 def _answer(project, req):
     verb = req.get("verb")
+    if project is None:
+        return _client_config(req) if verb == "client_config" else \
+            {"error": f"no such join verb {verb}"}
     name = req.get("name")
     spec = _row(verb)
     origin, exists = (None, False)
@@ -954,7 +977,8 @@ async def serve(log, api=nomad):
     проекты, а разделяет их проверкой проекта из субъекта. api -- Nomad
     (#275), по умолчанию живой."""
     # Оба субъекта (#207): с логином вызывающего и прежний, до уборки.
-    subj = [busnames.cluster(busnames.ANY), busnames.cluster(busnames.ANY, login=busnames.ANY)]
+    subj = [busnames.cluster(busnames.ANY), busnames.cluster(busnames.ANY, login=busnames.ANY),
+            busnames.join_config(busnames.ANY)]
     # Ключ LLM-прокси узлам (#391): клиентские пути раздачи умерли, владелец
     # ключа -- сервер. Старт -- не тик: ключ обязан опередить первый папет.
     proxykey.start(log)

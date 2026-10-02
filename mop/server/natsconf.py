@@ -72,7 +72,8 @@ def _user(name, password, perms, extra=""):
 
 
 # Сервисы сервера (#104): машина, а не человек. Права пока как у admin.
-SERVICE_PERMISSIONS = [busnames.everything(), busnames.INBOX]
+SERVICE_PERMISSIONS = [busnames.everything(), busnames.join_config(busnames.ANY),
+                       busnames.INBOX]
 # ...кроме субъектов с логином человека (#207): машина его не называет, а
 # сервис с mop.> иначе опубликовал бы запрос от чьего угодно имени.
 # Прежний субъект без логина (mop.<проект>.cluster.rpc) открыт намеренно
@@ -81,7 +82,8 @@ SERVICE_PERMISSIONS = [busnames.everything(), busnames.INBOX]
 # живёт только на сервере у пользователя пула, у которого там же токен
 # Nomad и креды оператора: ничего сверх этого service не получает.
 SERVICE_PUBLISH_DENY = [busnames.node(busnames.ANY, "*", "rpc", login=busnames.ANY),
-                        busnames.cluster(busnames.ANY, login=busnames.ANY)]
+                        busnames.cluster(busnames.ANY, login=busnames.ANY),
+                        busnames.join_config(busnames.ANY)]
 
 
 def puppet_permissions(project):

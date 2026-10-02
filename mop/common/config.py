@@ -1,4 +1,4 @@
-"""Настройки этой установки: .env проекта поверх дефолтов в коде.
+"""Настройки установки: .env сервера поверх дефолтов; клиент без .env.
 
 'Настройки делятся на три рода, и деление это не косметическое:
 
@@ -30,6 +30,8 @@ GitLab, которым в пуле делать нечего. Всё, что н�
 Дефолты при этом всё равно обязаны быть рабочими сами по себе: узел, до
 которого deploy ещё не доходил, обязан вести себя разумно.
 """
+import contextlib
+import contextvars
 import os
 import pwd
 
@@ -193,9 +195,9 @@ DEFAULTS = {
     # (deploy/roles/llmproxy, #380) кормит и папетов, и мастера. Адрес --
     # свой у каждой установки, поэтому настройка, а не литерал в mop/.
     "MOP_PROXY_URL": "http://mop.corp.ermak.dev:8317",
-    # Клиентский ключ прокси: им представляются все сессии пула. Значение
-    # сгенерировано на контроллере (secrets/llm-proxy-client.pass) и лежит
-    # в .env установки и мастерских копий.
+    # Клиентский ключ прокси: сервер хранит сгенерированное значение в
+    # secrets/llm-proxy-client.pass; узлам раздаёт закрытым файлом, операторы
+    # вводят его при join. Переходный ключ .env здесь не распространяется.
     "MOP_PROXY_KEY": "",
     # Что врапер подсеивает в клон из ~/puppet-env/<проект> — и ровно то же
     # глагол wipe щадит при git clean -x. Запятая, шаблоны gitignore-стиля;
@@ -467,7 +469,8 @@ SERVER_SCOPED = {
     "mop-cluster": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                     "MOP_HOME", "MOP_USER", "MOP_NOMAD_PORT", "MOP_POOL_DC",
                     "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",
-                    "MOP_PUPPET_PATH", "MOP_PROXY_URL", "MOP_PROXY_KEY",
+                    "MOP_PUPPET_PATH", "MOP_PROXY_URL",
+                    "MOP_GC_FREE_MIN_GB", "MOP_GC_MAX_PER_RUN",
                     # reload шины с проверкой (#211): `mop project add/rm`
                     "MOP_NATS_MONITOR_PORT"),
     # Сервис auth callout (#206): шина на петле, провайдер личностей. Пароли
@@ -525,6 +528,21 @@ def require(*names):
                       + "\n\ntemplate: cp .env.example .env")
 
 _cache = {}
+_client_sources = contextvars.ContextVar("mop_client_sources", default=False)
+
+
+@contextlib.contextmanager
+def client_sources():
+    """Клиент читает окружение, node.env и дефолты, но не .env установки."""
+    token = _client_sources.set(True)
+    try:
+        yield
+    finally:
+        _client_sources.reset(token)
+
+
+def _installation():
+    return {} if _client_sources.get() else _load()
 
 
 def read_env(path):
@@ -601,9 +619,12 @@ def get(name, default=None):
     if name in PROCESS_SCOPED:
         return os.environ.get(name) or default
     value = (_context(name) or os.environ.get(name)
-             or _node().get(name) or _load().get(name))
+             or _node().get(name) or _installation().get(name))
     if value:
         return value
+    if name == "MOP_SERVER_LAN" and _client_sources.get():
+        from . import creds
+        return creds.joined_host()
     return DERIVED[name]() if not default and name in DERIVED else default
 
 
@@ -620,8 +641,8 @@ def effective():
             out[name] = (default, "default")
         elif _node().get(name):
             out[name] = (_node()[name], "node")
-        elif _load().get(name):
-            out[name] = (_load()[name], ".env")
+        elif _installation().get(name):
+            out[name] = (_installation()[name], ".env")
         elif name in DERIVED:
             out[name] = (DERIVED[name](), "derived")
         else:

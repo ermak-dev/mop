@@ -359,8 +359,77 @@ def check_reference_committed_350(c):
         c.check(f"#350 no legacy name mop {words}", f"\n#### mop {words}\n" not in md)
 
 
+# HYPOTHESIS: environment() исполняется до клиентского командлета и читает
+# installation .env; дочерний mop mcp стартует тем же диспетчером.
+# SOLUTION: диспетчер выбирает клиентский источник до environment и run,
+# а dev/server сохраняют установочный файл.
+# RESULT: list, join и mcp не открывают .env; dev и server сохраняют источник.
+# STATUS: FIXED — see #396
+def check_dispatch_sources_396(c):
+    from mop.common import config
+    opened = []
+    def read_installation():
+        opened.append(True)
+        return {"MOP_LOCALE": "C.UTF-8"}
+    def command(module):
+        def main(argv):
+            config.get("MOP_LOCALE")
+            return 0
+        return main
+    with patched(config, _load=read_installation), patched(cli, command=command):
+        for name, module, client in (("list", "mop.cli.core.list", True),
+                                     ("join", "mop.cli.pool.join", True),
+                                     ("mcp", "mop.cli.service.mcp", True),
+                                     ("dev", "mop.cli.dev", False),
+                                     ("server", "mop.cli.server", False)):
+            with patched(cli, resolve=lambda *a: (module, [])):
+                opened.clear()
+                _, _, code = run_command(cli.main, [name])
+                c.expect(f"#396 {name} dispatch succeeds", code, 0)
+                c.check(f"#396 {name} installation source selection",
+                        (not opened) if client else bool(opened), opened)
+
+
+# HYPOTHESIS: старые команды и источник ключа остались в руководстве даже
+# после миграции join. Справочник генерируется из докстрингов командлетов.
+# SOLUTION: руководство и docstring описывают тот же рабочий клиентский путь.
+# RESULT: действующие инструкции описывают join, сервер и закрытые источники.
+# STATUS: FIXED — see #401
+def check_current_docs_401(c):
+    files = ("README.md", ".env.example", "CLAUDE.md", "docs/PROXY.md",
+             "docs/DRIVER.md", "docs/MCP.md", "docs/BUS.md", "docs/CLI.md")
+    removed = ("mop login", "mop llm", "mop cred", "--llm", "--cred",
+               "MOP_DEFAULT_LLM", "Z_AI_KEY", "ANTHROPIC_API_KEY")
+    for name in files:
+        text = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        for obsolete in removed:
+            c.check(f"#401 {name} has no obsolete {obsolete}", obsolete not in text)
+    for name in ("README.md", "docs/PROXY.md", "docs/CLI.md"):
+        text = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        c.check(f"#401 {name} names joined client configuration",
+                "client.json" in text or "mop join" in text)
+    for name, stale in (("docs/CLI.md", "local .env is exactly"),
+                        ("docs/PROXY.md", "мастерских копий"),
+                        ("docs/BUS.md", "слоя — дефолт установки из `.env`"),
+                        (".env.example", "MOP_PROXY_KEY=")):
+        text = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        c.check(f"#401 {name} does not claim installation env is a client source",
+                stale not in text)
+    c.check("#401 mop help does not promise client fallback to .env",
+            "with none of them, from .env" not in cli.usage())
+    # STATUS: FIXED — see #405. Единый вход не просит секрет прокси отдельно.
+    for name, obsolete in (("README.md", "ключ, полученный от администратора"),
+                           ("docs/PROXY.md", "передают закрытым"),
+                           (".env.example", "клиент\n# вводит"),
+                           ("docs/CLI.md", "key are asked for separately")):
+        text = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        c.check(f"#405 {name} does not require manual proxy key entry", obsolete not in text)
+
+
 def main():
     c = Checks()
+    check_current_docs_401(c)
+    check_dispatch_sources_396(c)
     check_reference_render_350(c)
     check_reference_empty_350(c)
     check_reference_committed_350(c)
@@ -982,7 +1051,7 @@ CAPS_OK = {
     # статусы, которые читают глазами и модель
     "FAILED", "AGENT", "SILENT", "DELIVERED", "HUNG", "MUST", "SHOULD",
     # протоколы, сигналы, литералы чужих программ
-    "JSON", "NATS", "LDAP", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
+    "JSON", "NATS", "LDAP", "HTTP", "HTTPS", "PATH", "PYTHONPATH", "HEAD", "TERM", "SIGHUP", "VMID",
     "PLAY", "RECAP",
     # идентификаторы в тексте
     "SECTIONS",
@@ -1953,6 +2022,42 @@ def check_fallback_model_183(c):
     check_tail_stderr_333(c)
     check_free_floor_329(c)
     check_add_failure_377(c)
+    check_add_argv_399(c)
+    check_master_argv_400(c)
+
+
+# HYPOTHESIS: после смены интерфейса на main(argv) master всё ещё передавал
+# старую переменную args парсеру, падая до определения проекта.
+# SOLUTION: передавать argv напрямую в claude_args.
+# RESULT: лишний origin отвергается без запуска claude или обращения к шине.
+# STATUS: FIXED — see #400
+def check_master_argv_400(c):
+    from mop.cli.core import master
+    try:
+        out, err, code = run_command(master.main, ["git@h:g/a.git", "git@h:g/b.git"])
+    except NameError as e:
+        c.fail("#400 mop master must parse argv before starting a session", str(e))
+        return
+    c.check("#400 mop master refuses two origins with usage",
+            code != 0 and "mop master" in str(code), (out, err, code))
+
+
+# HYPOTHESIS: после переноса командлета на main(argv) тело mop add осталось
+# читать прежнюю переменную args; даже --help падает до разбора аргументов.
+# SOLUTION: читать argv из параметра main и не вызывать сеть для лишних аргументов.
+# RESULT: два аргумента дают usage, а не NameError.
+# STATUS: FIXED — see #399
+def check_add_argv_399(c):
+    from mop.cli.core import add
+    from mop.common import config
+    with patched(config, require=lambda *names: None):
+        try:
+            out, err, code = run_command(add.main, ["first", "second"])
+        except NameError as e:
+            c.fail("#399 mop add must parse argv before network", str(e))
+            return
+    c.check("#399 mop add refuses extra arguments with usage",
+            code != 0 and "mop add" in str(code), (out, err, code))
 
 
 # ── #377: путь отказа `mop add` -- текст, а не трасса ────────────────────

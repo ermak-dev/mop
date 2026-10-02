@@ -14,16 +14,79 @@ import pwd
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, patched, patched_env  # noqa: E402
+from _lib import Checks, patched, patched_env, run_command  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import config, manifest  # noqa: E402
 
+
+# HYPOTHESIS: вызов config.get у клиента читает installation .env даже когда
+# искомая настройка уже есть в окружении или node.env.
+# SOLUTION: клиентская политика пропускает .env для get/effective; вне неё
+# сервер и dev продолжают читать тот же файл, вложенная политика восстанавливается.
+# RESULT: клиент игнорирует .env и восстанавливает политику после команды.
+# STATUS: FIXED — see #396
+def check_client_sources_396(c):
+    envf = os.path.join(tempfile.mkdtemp(), ".env")
+    with open(envf, "w") as f:
+        f.write("MOP_LOCALE=from-installation\nMOP_PVE_STORAGE=installation\n")
+    original = config._load
+    reads = []
+
+    def traced():
+        reads.append(True)
+        return original()
+
+    with patched(config, ENV_FILE=envf, _load=traced):
+        config.forget()
+        client = getattr(config, "client_sources", None)
+        if not c.check("#396 client source policy exists", client is not None):
+            return
+        with client():
+            c.expect("#396 client defaults exclude installation env",
+                     config.get("MOP_PVE_STORAGE"), config.SETTINGS["MOP_PVE_STORAGE"])
+            with patched_env(MOP_PVE_STORAGE="explicit"):
+                c.expect("#396 explicit process env survives", config.get("MOP_PVE_STORAGE"),
+                         "explicit")
+            with patched_env(MOP_SERVER_LAN="explicit.test"):
+                c.expect("#396 effective skips installation env", config.effective()["MOP_LOCALE"],
+                         (config.SETTINGS["MOP_LOCALE"], "default"))
+        c.expect("#396 client never opens installation env", reads, [])
+        c.expect("#396 server/dev still read installation env", config.get("MOP_PVE_STORAGE"),
+                 "installation")
+        config.forget()
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+# HYPOTHESIS: config.effective() передавал MOP_PROXY_KEY и в таблицу,
+# и в JSON для Ansible; unit с режимом 0644 содержал тот же секрет.
+# SOLUTION: печатный вывод маскирует значение, playbook_vars исключает ключ
+# целиком, а SERVER_SCOPED не включает его в юнит. Раздатчик читает файл.
+# RESULT: оба вида вывода и unit не содержат секретного значения.
+# STATUS: FIXED — see #394, #402
+def check_proxy_key_redaction_394(c):
+    from mop.cli.server import config as server_config
+    from mop.server import playvars
+    with patched_env(MOP_PROXY_KEY="sentinel-do-not-print"):
+        config.forget()
+        table, _, _ = run_command(server_config.main, [])
+        machine, _, _ = run_command(server_config.main, ["--json"])
+        c.check("#394 settings table never prints the proxy key",
+                "sentinel-do-not-print" not in table and "MOP_PROXY_KEY" in table)
+        c.check("#394 settings JSON does not carry the proxy key",
+                "MOP_PROXY_KEY" not in playvars.playbook_vars()
+                and "sentinel-do-not-print" not in machine)
+        c.check("#402 cluster's public unit gets no proxy key",
+                "MOP_PROXY_KEY" not in config.SERVER_SCOPED["mop-cluster"])
+    config.forget()
 
 
 def main():
     c = Checks()
+    check_client_sources_396(c)
+    check_proxy_key_redaction_394(c)
     me = pwd.getpwuid(os.getuid()).pw_name
 
     # Защемлено живым отказом (2026-09-17, первый контейнерный папет).
@@ -265,7 +328,7 @@ def main():
                 pv = playvars.playbook_vars()
             except ImportError as e:
                 pv = {"import": str(e)}
-            want = (set(config.SETTINGS) - set(PROCESS)) | {
+            want = (set(config.SETTINGS) - set(PROCESS) - {"MOP_PROXY_KEY"}) | {
                 "MOP_NODE_SCOPED", "MOP_SERVER_SCOPED", "MOP_PIP_DEPS"}
             c.check("playbook_vars keys differ", not (set(pv) != want),
                     f"extra {sorted(set(pv) - want)}, missing {sorted(want - set(pv))}")

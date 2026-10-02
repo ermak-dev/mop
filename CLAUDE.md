@@ -51,12 +51,12 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 
 ## Secrets
 
- - **MUST** The project's secrets live in `.env` and nowhere else; what generates itself (NATS passwords, the Nomad token, the claude.ai login) never lands there
+ - **MUST** Installation inputs live in the server's `.env`; generated credentials (NATS passwords, Nomad token, LLM proxy keys) stay in private server files. Client `mop join` saves bus and proxy credentials per server in `operator.json` and `client.json`, never in installation `.env`
  - **MUST** `.env` never travels to the nodes — rsync excludes it explicitly
  - **MUST** No secrets in a Nomad job spec: it is visible in the UI and stays in the cluster's state; keys go to the nodes as a file, the spec carries only variable names
  - **MUST** A puppet reaches the bus under its project's credentials, not the node's: the agent sees who is being asked about, never who is asking
  - **MUST** Nodes are given nothing beyond their subjects: a new need is an agent verb, not a privilege
- - **MUST** The node-level verb `disk` lives in the `admin` pseudo-project only. `write` was taken out of that list deliberately — otherwise a project's master cannot `mop login` its own puppets; that is safe exactly while the `WRITABLE` files are assembled from the machine, not from the master's project — true for the claude login and `secrets.env`; the credential mark any master can overwrite, and it stays harmless because attribution trusts only the lease in the job meta, never the mark (#284, #308)
+ - **MUST** The node-level verb `disk` lives in the `admin` pseudo-project only. `write` can deliver only paths from the node's own `WRITABLE` list; the cluster service uses it to distribute `secrets.env`, never a path supplied by a master (#284, #308, #393)
 
 ## Traps that cost debugging
 

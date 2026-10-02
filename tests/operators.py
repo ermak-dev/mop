@@ -23,7 +23,8 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.server import operators  # noqa: E402
+from mop.server import natsconf, operators  # noqa: E402
+from mop.common import busnames, service  # noqa: E402
 
 
 def check_parse(c):
@@ -93,7 +94,7 @@ def check_permissions(c):
     c.check("user", not (sub(got) != want), f"{got}, wanted {want}")
     want_pub = [f"mop.{p}.{t}" for p in ("mop", "rugent") for t in (
         "node.*.rpc.ivan", "cluster.rpc.ivan", "node.*.rpc", "cluster.rpc", "node.*.msg",
-        "all.msg", "master.>", "events", "server.rpc")] + ["_INBOX.>"]
+        "all.msg", "master.>", "events", "server.rpc")] + ["mopjoin.ivan.rpc", "_INBOX.>"]
     c.check("user publishes", not (got["publish"] != want_pub or got["publish_deny"] != []),
             f"{got['publish']}, {got['publish_deny']}")
     # admin -- весь mop.>: все проекты плюс машинные глаголы в mop.admin.*.
@@ -117,9 +118,40 @@ def check_permissions(c):
     # STATUS: FIXED — see #106
 
 
+# HYPOTHESIS: обычный server.rpc открыт узлам, а проектные маски user:*
+# позволяют публиковать от чужого логина. Ключу нужен отдельный адрес.
+# SOLUTION: один субъект вне проектной маски, публикуемый человеком только
+# под своим токеном; сервис слушает, машины и паппеты не публикуют.
+# RESULT: у людей личный субъект, проектные маски и машины его не открывают.
+# STATUS: FIXED — see #404
+def check_join_subject_404(c):
+    address = getattr(busnames, "join_config", None)
+    if not c.check("#404 private join subject exists", address is not None):
+        return
+    for role, projects, login in (("admin", ["*"], "anton"),
+                                  ("user", ["mop"], "ivan"),
+                                  ("user", ["*"], "olga")):
+        pub = operators.permissions({"role": role, "projects": projects}, login)["publish"]
+        c.check(f"#404 {role} can publish only their joined-config subject",
+                address(login) in pub and address("other") not in pub, pub)
+        c.check(f"#404 {role} subject is outside project wildcard",
+                not address(login).startswith("mop."), address(login))
+        c.expect("#404 caller is taken from the subject", busnames.caller(address(login)),
+                 login)
+        c.expect("#404 joined-config subject has no project", service.project_from_subject(address(login)),
+                 None)
+    c.check("#404 service subscribes to the private address",
+            address(busnames.ANY) in busnames.service_subscriptions()
+            and address(busnames.ANY) in natsconf.SERVICE_PERMISSIONS)
+    c.check("#404 node cannot publish joined-config request",
+            address("ivan") not in natsconf.node_permissions("n1")["publish"])
+    c.check("#404 puppet cannot publish joined-config request",
+            address("ivan") not in natsconf.puppet_permissions("mop")["publish"])
+
+
 def main():
     c = Checks()
-    for fn in (check_parse, check_reserved, check_permissions):
+    for fn in (check_parse, check_reserved, check_permissions, check_join_subject_404):
         fn(c)
     return c.report("operators")
 

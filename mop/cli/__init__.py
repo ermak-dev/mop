@@ -26,6 +26,7 @@
 
 """
 import ast
+import contextlib
 import importlib
 import os
 import sys
@@ -286,8 +287,9 @@ def usage(found=None):
              "", "  mop [--server ADDRESS] <command> [arguments]",
              "", "  the server and the login come from the working copy (git config",
              "  mop.server, mop.user), then MOP_SERVER_LAN / MOP_BUS_USER, then",
-             "  --server; with none of them, from .env. Your integration branch,",
-             "  if not the repository's default: git config mop.branch, or MOP_BRANCH"]
+             "  --server; with none of them, the one joined server. Several",
+             "  joined servers need --server. Join first if none is known.",
+             "  Integration branch: git config mop.branch, or MOP_BRANCH"]
     groups = [(s, n, p) for s, n, p in found if p]
     for section in SECTIONS:
         rows = [(n, describe(_path_of(section, n, False)))
@@ -378,6 +380,13 @@ def reference():
 
 
 # ─── запуск ──────────────────────────────────────────────────────────────
+def client_command(modname):
+    """Операторские команды, включая дочерний MCP, без .env установки."""
+    return modname.startswith(("mop.cli.core.", "mop.cli.pool.", "mop.cli.node.",
+                               "mop.cli.project.", "mop.cli.secret.")) or \
+        modname == "mop.cli.service.mcp"
+
+
 def main(argv):
     # Глобальная опция (#131): сервер для любой команды, с любого места argv.
     from mop.common import context
@@ -399,8 +408,10 @@ def main(argv):
         return 1
     modname, rest = found
     # Контекст -- до environment(): тот читает настройки, и сервер в них
-    # должен быть уже этой команды. Слои: клон < окружение < --server.
-    with context.use(context.here({"server": server} if server else {})):
+    # должен быть уже этой команды. Клиент не открывает .env установки.
+    from ..common import config
+    policy = config.client_sources() if client_command(modname) else contextlib.nullcontext()
+    with context.use(context.here({"server": server} if server else {})), policy:
         environment()
         return run(command(modname), rest)
 
