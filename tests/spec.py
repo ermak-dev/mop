@@ -779,11 +779,19 @@ def check_no_feedback_420(c):
     # (c) секция исполняется как есть: свой HOME, замок и jq как в теле
     home = tempfile.mkdtemp()
     try:
-        script = ("set -e\nmkdir -p \"$HOME/.claude\"\n[ -f \"$HOME/.claude/settings.json\" ] "
-                  '|| echo \'{}\' > "$HOME/.claude/settings.json"\n' + EDIT_JSON + "\n"
+        # Узловой settings.json общий для всех папетов узла: секция обязана
+        # вливаться, а не присваивать. Стартовый файл -- с чужими deny-правилами
+        # и посторонним ключом; секция гоняется дважды (каждый подъём).
+        seed = {"permissions": {"deny": ["SendMessage", "AskUserQuestion"]},
+                "editorMode": "vim"}
+        os.makedirs(os.path.join(home, ".claude"))
+        with open(os.path.join(home, ".claude", "settings.json"), "w") as f:
+            json.dump(seed, f)
+        script = ("set -e\n" + EDIT_JSON + "\n"
                   + body + '\nprintf "%s" "$DISABLE_FEEDBACK_COMMAND"\n')
         env = {"HOME": home, "PU_NAME": "pu-mop-1", "PATH": os.environ["PATH"]}
-        r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, env=env)
+        for _ in range(2):
+            r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, env=env)
         if c.check("#420 the feedback section runs clean",
                    not (r.returncode or r.stderr.strip()),
                    f"exit {r.returncode}: {r.stderr.strip()[-200:]}"):
@@ -791,9 +799,13 @@ def check_no_feedback_420(c):
                 doc = json.load(f)
             c.expect("#420 the written settings carry the policy",
                      doc.get("feedbackDrafts"), "off")
-            c.expect("#420 the deny rule holds SendFeedback",
-                     "SendFeedback" in (doc.get("permissions") or {}).get("deny", []),
-                     True)
+            deny = (doc.get("permissions") or {}).get("deny", [])
+            c.check("#420 the foreign deny rules survive",
+                    not (not {"SendMessage", "AskUserQuestion"} <= set(deny)), deny)
+            c.expect("#420 SendFeedback lands in deny exactly once",
+                     deny.count("SendFeedback"), 1)
+            c.expect("#420 a foreign top-level key survives",
+                     doc.get("editorMode"), "vim")
     finally:
         shutil.rmtree(home)
 
