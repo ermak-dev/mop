@@ -1,7 +1,7 @@
 // Приложение дашборда (#296): шапка со счётчиками корзин, ошибки сборщика и
 // секции -- пул и узлы (#298), расход (#299), журнал (#298).
 import { Box, Container, Group, Stack, Text, Title, Alert } from "@mantine/core";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { usePool } from "./usePool";
 import { fetchSession, GUEST, LoginRefused, postLogin, postLogout, type Session } from "./useSession";
 import { SessionBox } from "./components/SessionBox";
@@ -25,14 +25,35 @@ export default function App() {
   const [session, setSession] = useState<Session>(GUEST);
   const [failed, setFailed] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
+  // Стартовый опрос и обновление на возврат к вкладке (#416, ревью): cookie
+  // сессии живёт TTL, и открытая вкладка без reload показывала бы админ-ссылку
+  // и логин вечно. Порядок без гонки со входом: опрос кладёт ответ только
+  // если после него не было локального входа/выхода -- счётчик версий.
+  const authEpoch = useRef(0);
+  const sync = () => {
+    const at = authEpoch.current;
+    fetchSession()
+      .then((s) => { if (at === authEpoch.current) setSession(s); })
+      .catch(() => { if (at === authEpoch.current) setPanelError("панель недоступна"); });
+  };
   useEffect(() => {
-    fetchSession().then(setSession).catch(() => setPanelError("панель недоступна"));
+    sync();
+    const onFocus = () => sync();
+    document.addEventListener("visibilitychange", onFocus);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", onFocus);
+      window.removeEventListener("focus", onFocus);
+    };
   }, []);
 
   const login = async (login: string, password: string) => {
     try {
       setSession(await postLogin(login, password));
       setFailed(null);
+      // успех входа снимает и прошлую ошибку панели: страница снова в порядке
+      setPanelError(null);
+      authEpoch.current++;
     } catch (e) {
       // 401 -- сервер отказал, 429 -- лимит попыток; остальное -- панель
       setFailed(e instanceof LoginRefused
@@ -44,6 +65,7 @@ export default function App() {
     try {
       setSession(await postLogout());
       setFailed(null);
+      authEpoch.current++;
     } catch {
       setPanelError("панель недоступна");
     }

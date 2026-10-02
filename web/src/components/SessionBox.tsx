@@ -19,11 +19,17 @@ export function SessionBox({ session, onLogin, onLogout, failed }: Props) {
   const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
 
+  // Закрытие модала -- тоже конец попытки: пароля в поле нет ни после
+  // отправки, ни после «Отмена»/креста.
+  const close = () => { setOpen(false); setPassword(""); };
+
   const submit = async () => {
     // После попытки -- успеха или отказа -- пароля в поле нет: он живёт
-    // ровно на время попытки и никуда больше не записывается.
+    // ровно на время попытки и никуда больше не записывается. Успех
+    // закрывает окно; отказ оставляет открытым -- рядом причина.
     try {
       await onLogin(login, password);
+      setOpen(false);
     } catch {
       // Причину отказа покажет App (failed); здесь важно одно: поле пусто
     } finally {
@@ -47,13 +53,13 @@ export function SessionBox({ session, onLogin, onLogout, failed }: Props) {
   return (
     <>
       <Button variant="light" onClick={() => setOpen(true)}>Login</Button>
-      <Modal opened={open} onClose={() => setOpen(false)} title="Вход" centered>
+      <Modal opened={open} onClose={close} title="Вход" centered>
         {failed && <Alert color="red" variant="light" mb="sm">{failed}</Alert>}
         <TextInput label="Логин" value={login} onChange={(e) => setLogin(e.target.value)} />
         <PasswordInput label="Пароль" value={password}
                        onChange={(e) => setPassword(e.target.value)} mt="sm" />
         <Group justify="flex-end" mt="md">
-          <Button variant="light" color="gray" onClick={() => setOpen(false)}>Отмена</Button>
+          <Button variant="light" color="gray" onClick={close}>Отмена</Button>
           <Button onClick={submit}>Войти</Button>
         </Group>
       </Modal>

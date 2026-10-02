@@ -24,6 +24,7 @@ vi.mock("./useSession", async () => {
     },
     postLogout: () => { state.current = real.GUEST; return Promise.resolve(real.GUEST); },
     __reset: (s: typeof real.GUEST) => { state.current = s; },
+    __state: () => state.current,
   };
 });
 // __reset есть только в моке; берём его из живого реестра модулей
@@ -71,7 +72,14 @@ test("#378 a snapshot without load keeps the old header and draws no bar", () =>
 
 // #416: сессия в шапке. Гость -- Login, вошедший -- Logout и логин, admin --
 // ссылка на панель прокси. Таблицы публичные -- остаются при любом состоянии.
-const reset = (s: import("./useSession").Session) => mocked.__reset?.(s);
+const reset = (s: Session) => {
+  mocked.__reset?.(s);
+  // тесты выше подменяли fetchSession своей; reset возвращает читающую state
+  (mocked as { fetchSession?: unknown }).fetchSession = () =>
+    Promise.resolve((mocked as { __state?: () => Session }).__state?.()
+      ?? { login: null, role: null });
+};
+type Session = import("./useSession").Session;
 
 test("#416 a guest header has Login, an operator's has Logout", async () => {
   renderUi(<App />);
@@ -126,4 +134,56 @@ test("#416 admin sees the LLM Proxy link, user does not", async () => {
   renderUi(<App />);
   await screen.findByText("olga");
   expect(screen.queryByRole("link", { name: "LLM Proxy" })).toBeNull();
+});
+
+
+// Ревью #416: гонка стартового опроса, ошибка панели, обновление по focus.
+test("#416 a late initial fetch cannot overwrite a fresher login", async () => {
+  // первый fetchSession подвисает; вход успевает раньше -- ответ гостя не приходит
+  const hanging = { calls: 0 };
+  const slow: () => Promise<Session> = () => {
+    hanging.calls++;
+    // первый опрос не отвечает никогда: вход успевает раньше
+    return hanging.calls === 1 ? new Promise<Session>(() => {})
+                               : Promise.resolve({ login: "anton", role: "admin" });
+  };
+  (vi.mocked(await import("./useSession")) as { fetchSession: unknown }).fetchSession = slow;
+  renderUi(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.change(await screen.findByLabelText("Логин", {}, { timeout: 3000 }),
+                   { target: { value: "anton" } });
+  fireEvent.change(screen.getByLabelText("Пароль"), { target: { value: "x" } });
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  await waitFor(() => expect(screen.getByText("anton")).toBeInTheDocument());
+  await new Promise((r) => setTimeout(r, 50)); // подвисший опрос не ответил -- и не должен
+  expect(screen.getByText("anton")).toBeInTheDocument();
+});
+
+test("#416 a successful login clears a stale panel error", async () => {
+  // стартовый fetch падает 5xx, потом вход успешен: ошибки панели больше нет
+  const mod = vi.mocked(await import("./useSession")) as unknown as {
+    fetchSession: () => Promise<Session>;
+  };
+  const original = mod.fetchSession;
+  mod.fetchSession = () => Promise.reject(new Error("5xx"));
+  renderUi(<App />);
+  await waitFor(() => expect(screen.getByText("панель недоступна")).toBeInTheDocument());
+  mod.fetchSession = original;
+  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.change(await screen.findByLabelText("Логин", {}, { timeout: 3000 }),
+                   { target: { value: "anton" } });
+  fireEvent.change(screen.getByLabelText("Пароль"), { target: { value: "x" } });
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  await waitFor(() => expect(screen.queryByText("панель недоступна")).toBeNull());
+  expect(screen.getByText("anton")).toBeInTheDocument();
+});
+
+test("#416 focus re-checks the session: TTL turned an admin into a guest", async () => {
+  reset({ login: "anton", role: "admin" });
+  renderUi(<App />);
+  await screen.findByText("anton");
+  reset({ login: null, role: null }); // cookie истекла
+  fireEvent.focus(window);
+  await waitFor(() => expect(screen.queryByText("anton")).toBeNull());
+  expect(screen.getByRole("button", { name: "Login" })).toBeInTheDocument();
 });

@@ -2,6 +2,7 @@
 // ссылка на панель прокси. Публичные таблицы не зависят от сессии.
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { MantineProvider } from "@mantine/core";
 import { renderUi } from "../test-utils";
 import { SessionBox } from "./SessionBox";
 import { GUEST, type Session } from "../useSession";
@@ -74,4 +75,42 @@ test("#416 a failed login shows the server's reason", async () => {
                        failed="invalid login or password" />);
   fireEvent.click(screen.getByRole("button", { name: "Login" }));
   expect(await screen.findByText("invalid login or password")).toBeInTheDocument();
+});
+
+
+// Ревью #416: закрытие окна и успех входа.
+test("#416 closing the modal clears the password (X and Отмена)", async () => {
+  renderUi(<SessionBox session={GUEST} onLogin={vi.fn()} onLogout={vi.fn()} failed={null} />);
+  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  const pwd = await screen.findByLabelText("Пароль", {}, { timeout: 3000 });
+  fireEvent.change(pwd, { target: { value: "secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "Отмена" }));
+  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  expect(await screen.findByLabelText("Пароль")).toHaveValue("");
+});
+
+test("#416 a successful login closes the modal; after logout it is closed too", async () => {
+  const onLogin = vi.fn().mockResolvedValue(undefined);
+  const view = renderUi(<SessionBox session={GUEST} onLogin={onLogin} onLogout={vi.fn()} failed={null} />);
+  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.change(await screen.findByLabelText("Пароль"), { target: { value: "secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  await waitFor(() => expect(screen.queryByLabelText("Пароль")).toBeNull());
+  // сессия сменилась (App перерисовал с новым session), окно не открывается само
+  view.rerender(
+    <MantineProvider>
+      <SessionBox session={USER} onLogin={onLogin} onLogout={vi.fn()} failed={null} />
+    </MantineProvider>);
+  expect(screen.queryByLabelText("Пароль")).toBeNull();
+  expect(screen.getByRole("button", { name: "Logout" })).toBeInTheDocument();
+});
+
+test("#416 a failed login keeps the modal open with the reason", async () => {
+  const onLogin = vi.fn(() => Promise.reject(new Error("no")));
+  renderUi(<SessionBox session={GUEST} onLogin={onLogin} onLogout={vi.fn()} failed="неверный логин или пароль" />);
+  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.change(await screen.findByLabelText("Пароль"), { target: { value: "x" } });
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  await waitFor(() => expect(screen.getByLabelText("Пароль")).toHaveValue(""));
+  expect(screen.queryByLabelText("Пароль")).not.toBeNull(); // окно ещё открыто
 });
