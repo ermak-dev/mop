@@ -1065,8 +1065,43 @@ def check_pu_cleanup_gone_361(c):
     c.check("#361 memory oversubscription is still set by the run", len(over) == 1, len(over))
 
 
+# HYPOTHESIS: контроллер создаёт ключ прокси только в игре llmproxy после
+# запуска кластера; кластерный сервис не имеет файла и берёт второй ключ
+# из открытого unit. Раскатка только сервера оставила бы узлы без ключа.
+# SOLUTION: роль cluster перед стартом сервиса создаёт приватную копию
+# ключа из того же lookup, что использует llmproxy, с no_log и mode 0600.
+# RESULT: сервис всегда может прочесть закрытый файл до запуска.
+# STATUS: FIXED — see #402
+def check_cluster_key_copy_402(c):
+    from mop.server import proxykey
+    path = os.path.join(DEPLOY, "roles", "cluster", "tasks", "main.yml")
+    tasks = yaml.safe_load(open(path, encoding="utf-8"))
+    secret = [i for i, t in enumerate(tasks)
+              if "llm-proxy-client.pass" in str(t.get("ansible.builtin.copy", {}))]
+    c.check("#402 the cluster receives the proxy's own key before starting",
+            len(secret) == 1 and secret[0] < next(
+                (i for i, t in enumerate(tasks) if t.get("name") == "Systemd unit"), -1), secret)
+    if not secret:
+        return
+    t = tasks[secret[0]]
+    spec = t["ansible.builtin.copy"]
+    c.check("#402 private key file uses the cluster's own location and permissions",
+            spec.get("dest", "").endswith("/.config/mop/secrets/llm-proxy-client.pass")
+            and spec.get("owner") == "{{ MOP_USER }}"
+            and spec.get("mode") == "0600" and t.get("no_log") is True,
+            {k: v for k, v in spec.items() if k != "content"})
+    c.check("#402 install reuses the proxy's generated passfile",
+            "lookup('password'" in str(spec.get("content", ""))
+            and os.path.basename(proxykey.KEY_FILE) == "llm-proxy-client.pass")
+    folders = [t.get("ansible.builtin.file", {}) for t in tasks[:secret[0]]]
+    c.check("#402 secret directory exists with 0700", any(
+        s.get("path", "").endswith("/.config/mop/secrets") and s.get("mode") == "0700"
+        and s.get("owner") == "{{ MOP_USER }}" for s in folders))
+
+
 def main():
     c = Checks()
+    check_cluster_key_copy_402(c)
 
     # ── юниты из общего шаблона ───────────────────────────────────────────
     template = os.path.join(COMMON, "templates", "service.j2")
