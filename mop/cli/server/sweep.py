@@ -1,12 +1,12 @@
-"""garbage on the pool's nodes: mop sweep [--dry]
+"""garbage on the pool's nodes: mop server sweep [--dry]
 
 Objects no puppet owns any more. Nomad is the authority: a body whose name
 is in no job is an orphan, and on a hypervisor an orphan is a running
 container holding memory and disk that nothing accounts for.
 
-Run this as the operator, not from a master shell: what stands on a node is
-a fact about every tenant, not about one project — the same reason `mop gc`
-and `mop disk` live outside a master's reach.
+Run this on the server, not from a master shell: what stands on a node is
+a fact about every tenant, not about one project — the same reason
+`mop server gc` and `mop server disk` live outside a master's reach.
 
 Two kinds, deliberately of different weight. An `orphan` is destroyed: its
 puppet is gone and the body cannot come back to anyone. A `build body` is
@@ -23,6 +23,7 @@ machine that holds the register.
 import sys
 
 from mop.cli import lib
+from mop.cli.server import _maintenance
 from mop.common import bus, puppets
 from mop.common.render import table
 
@@ -97,4 +98,4 @@ def main(argv):
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
-main = lib.cluster(main)
+main = lib.cluster(_maintenance.only_server(main))

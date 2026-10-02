@@ -378,7 +378,7 @@ def check_dispatch_sources_396(c):
         return main
     with patched(config, _load=read_installation), patched(cli, command=command):
         for name, module, client in (("list", "mop.cli.core.list", True),
-                                     ("join", "mop.cli.pool.join", True),
+                                     ("login", "mop.cli.pool.login", True),
                                      ("mcp", "mop.cli.service.mcp", True),
                                      ("dev", "mop.cli.dev", False),
                                      ("server", "mop.cli.server", False)):
@@ -398,7 +398,7 @@ def check_dispatch_sources_396(c):
 def check_current_docs_401(c):
     files = ("README.md", ".env.example", "CLAUDE.md", "docs/PROXY.md",
              "docs/DRIVER.md", "docs/MCP.md", "docs/BUS.md", "docs/CLI.md")
-    removed = ("mop login", "mop llm", "mop cred", "--llm", "--cred",
+    removed = ("mop llm", "mop cred", "--llm", "--cred",
                "MOP_DEFAULT_LLM", "Z_AI_KEY", "ANTHROPIC_API_KEY")
     for name in files:
         text = open(os.path.join(ROOT, name), encoding="utf-8").read()
@@ -426,8 +426,64 @@ def check_current_docs_401(c):
         c.check(f"#405 {name} does not require manual proxy key entry", obsolete not in text)
 
 
+# HYPOTHESIS: вход остаётся только как join, а старые вызовы после rename
+# потеряют команду. Псевдоним не должен попадать в каталог новых команд.
+# RESULT: новая команда в каталоге, старое имя работает только как alias.
+# STATUS: FIXED — see #407
+def check_login_name_407(c):
+    cat = cli.catalog(cli.scan())
+    c.check("#407 login is the current command", "login" in cat and "join" not in cat)
+    c.expect("#407 old join is a transitional alias",
+             cli.unalias(["join", "--server", "srv.test"]),
+             ["login", "--server", "srv.test"])
+    c.check("#407 reference documents login rather than alias",
+            "#### mop login" in cli.reference() and "#### mop join" not in cli.reference())
+
+
+# HYPOTHESIS: общая уборка и doctor остаются доступными клиенту и мастеру.
+# SOLUTION: серверные командлеты без клиентского каталога и MCP.
+# RESULT: мастер не видит общие команды, клиент отказывает до шины;
+# установленный контроллер проходит проверку, dry/fix проверены отдельно.
+# STATUS: FIXED — see #409
+def check_server_maintenance_409(c):
+    cat = cli.catalog(cli.scan())
+    verbs = cli.verbs().get("server", {})
+    for name in ("gc", "doctor", "disk", "sweep"):
+        c.check(f"#409 {name} is not a client command", name not in cat)
+        c.check(f"#409 server {name} exists", name in verbs)
+    tools = [name for name, _, path in cli.tool_commands(cli.scan(), cli.verbs())
+             if cli.declared(path) is not None]
+    for name in ("gc", "doctor", "disk", "sweep"):
+        c.check(f"#409 server {name} is not a master MCP tool", f"server_{name}" not in tools)
+    from mop.cli.server import _maintenance
+    from mop.cli.server import disk, doctor, gc, sweep
+    from _lib import patched
+    for name, command in (("disk", disk), ("doctor", doctor), ("gc", gc), ("sweep", sweep)):
+        with patched(_maintenance.os.path, isfile=lambda path: False):
+            try:
+                command.main([])
+                c.fail(f"#409 client can run server {name}")
+            except RuntimeError as e:
+                c.check(f"#409 server {name} refuses before bus", "server" in str(e), str(e))
+    called = []
+    with patched(_maintenance.os.path, isfile=lambda path: True), \
+            patched(_maintenance.os, access=lambda path, mode: True):
+        _maintenance.only_server(lambda argv: called.append(argv))(["--dry"])
+    c.expect("#409 controller enters maintenance command", called, [["--dry"]])
+    with patched(_maintenance.os.path, isfile=lambda path: True), \
+            patched(_maintenance.os, access=lambda path, mode: False):
+        try:
+            _maintenance.only_server(lambda argv: c.fail("#409 unreadable credentials run"))([])
+            c.fail("#409 unreadable server credentials accepted")
+        except RuntimeError:
+            pass
+
+
+
 def main():
     c = Checks()
+    check_server_maintenance_409(c)
+    check_login_name_407(c)
     check_current_docs_401(c)
     check_dispatch_sources_396(c)
     check_reference_render_350(c)
@@ -1090,6 +1146,12 @@ def caps_hits(files):
     return hits
 
 
+def run_server(main, argv):
+    from mop.cli.server import _maintenance
+    with patched(_maintenance, require=lambda: None):
+        return run_command(main, argv)
+
+
 def check_output_rules(c):
     """STATUS: FIXED — see #159"""
     import glob
@@ -1115,18 +1177,18 @@ def check_output_rules(c):
             out, err, code = run_command(main, argv)
             c.check(f"{what} must be silent on success: out {out!r} err {err!r} code {code!r}",
                     not (out or err or code))
-        from mop.cli.pool import doctor
-        from mop.client.doctor import proxy as proxy_group
+        from mop.cli.server import doctor
+        from mop.server.doctor import proxy as proxy_group
         # Здоровый пул — одна строка результата, её и показываем. Прокси
         # заглушен: его живость -- про контроллер, не про этот вывод.
         puppets.diagnose = lambda: []
         proxy_group.diagnose = lambda: []
-        out, _, _ = run_command(doctor.main, [])
+        out, _, _ = run_server(doctor.main, [])
         c.expect("doctor on a healthy pool", out, "pool is healthy: nothing stuck\n")
         # Советов «run X» в успешном выводе нет: таблица уже говорит [restart].
         puppets.diagnose = lambda: [{"name": "pu-mop-1", "alloc": {"NodeName": "n1"},
                                      "diagnosis": "HUNG (not responding)", "action": "restart"}]
-        out, _, _ = run_command(doctor.main, [])
+        out, _, _ = run_server(doctor.main, [])
         for what, text in (("doctor", out),):
             c.check(f"{what} advises another command on success: {text!r}",
                     not (re.search(r"\bmop [a-z]+", text)))
@@ -1141,7 +1203,8 @@ def check_output_rest(c):
     from mop.common import bus, puppets
     from mop.server import image, playvars
     from mop.cli.driver import build
-    from mop.cli.pool import setup, sweep
+    from mop.cli.pool import setup
+    from mop.cli.server import sweep
 
     # setup: шаг установки — строка хода на терминале, не на терминале
     # тишина; предупреждение про claude — в stderr, stdout пуст.
@@ -1169,7 +1232,7 @@ def check_output_rest(c):
     with patched(puppets, ready_nodes=lambda: {"n1"}, jobs=lambda *a, **kw: [{"ID": "pu-a-1"}],
                  classify_junk=lambda answers, known: []), \
             patched(bus, request_many=lambda verb, nodes, **kw: {"n1": {"bodies": [], "templates": []}}):
-        out, err, code = run_command(sweep.main, [])
+        out, err, code = run_server(sweep.main, [])
     c.check(f"sweep with nothing to sweep must be silent: {out!r} {err!r} {code!r}", not (out or err or code))
 
     # driver build: без эха того, откуда прочитан .mop.
@@ -1193,7 +1256,7 @@ def check_output_179(c):
     from mop.server import image
     from mop.cli.core import update
     from mop.cli.driver import build
-    from mop.cli.pool import sweep
+    from mop.cli.server import sweep
 
     def in_stderr(got, text, nonzero):
         """Отказ только в stderr, с text и нужным кодом. -> (ok, подробность)."""
@@ -1204,15 +1267,15 @@ def check_output_179(c):
     with restored(puppets, "ready_nodes", "jobs", "classify_junk"), restored(bus, "request_many"):
         puppets.ready_nodes = lambda: set()
         c.check("sweep with no ready nodes",
-                *in_stderr(run_command(sweep.main, []), "no ready nodes", True))
+                *in_stderr(run_server(sweep.main, []), "no ready nodes", True))
         puppets.ready_nodes = lambda: {"n1"}
         bus.request_many = lambda verb, nodes, **kw: {"n1": None}
         c.check("sweep where no node answered",
-                *in_stderr(run_command(sweep.main, []), "no node answered", True))
+                *in_stderr(run_server(sweep.main, []), "no node answered", True))
         bus.request_many = lambda verb, nodes, **kw: {"n1": {"bodies": [], "templates": []}}
         puppets.jobs = lambda *a, **kw: []
         c.check("sweep where Nomad lists no puppets",
-                *in_stderr(run_command(sweep.main, []), "Nomad lists no puppets", True))
+                *in_stderr(run_server(sweep.main, []), "Nomad lists no puppets", True))
         # Промолчавший узел при ответившем соседе: отказ по нему -- тоже в
         # stderr, а код выхода за него отвечает.
         bus.request_many = lambda verb, nodes, **kw: {"n1": {"bodies": [], "templates": []},
@@ -1221,7 +1284,7 @@ def check_output_179(c):
         puppets.jobs = lambda *a, **kw: [{"ID": "pu-a-1"}]
         puppets.classify_junk = lambda answers, known: []
         c.check("sweep with one silent node",
-                *in_stderr(run_command(sweep.main, []), "n2: no response", True))
+                *in_stderr(run_server(sweep.main, []), "n2: no response", True))
 
     with patched(image, prepare=lambda origin, root: {"project": "p", "asks": {},
                                                       "alien": ["MOP_X"], "legacy": [".mop.yaml"]},
@@ -2117,7 +2180,7 @@ def check_server_namespace_259(c):
     LEGACY: driver как целое не псевдоним, run/list/sweep/build в нём.
     STATUS: FIXED — see #259"""
     want = {"deploy", "config", "setup", "user", "cluster", "bootstrap", "web",
-            "callout", "pve-facts"}
+            "callout", "pve-facts", "doctor", "gc", "disk", "sweep"}
     tree = cli.verbs()
     got = set(tree.get("server") or {})
     c.expect("#259 server must hold exactly its verbs", sorted(got), sorted(want))

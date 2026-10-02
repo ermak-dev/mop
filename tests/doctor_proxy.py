@@ -5,6 +5,7 @@
 останавливает и папетов, и мастеров, и doctor обязан это видеть.
 """
 import os
+import ssl
 import sys
 import tempfile
 import urllib.error
@@ -13,7 +14,7 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.client.doctor import proxy  # noqa: E402
+from mop.server.doctor import proxy  # noqa: E402
 from mop.common import config, context, creds  # noqa: E402
 
 
@@ -42,8 +43,43 @@ def check_joined_probe_397(c):
              [("https://a.test/llm/v1/models", "Bearer secret")])
 
 
+# HYPOTHESIS: doctor передаёт URL и ключ, но не TLS-пин того же сервера;
+# исправный самоподписанный прокси читается как недоступный.
+# SOLUTION: для URL выбранного сервера использовать закрытый cafile, не
+# отключая проверку; для чужого URL оставить системное доверие.
+# RESULT: закреплённый сертификат используется только для своего сервера;
+# живой mop server doctor proxy после join отвечает «pool is healthy».
+# STATUS: FIXED — see #406
+def check_pinned_proxy_406(c):
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-probe-406-"), "servers")
+    dest = os.path.join(root, "srv.test")
+    creds.write_client(dest, "443", "https://srv.test/llm", "key")
+    seen, marker = [], object()
+    class Response:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+    def open_url(req, timeout, context=None):
+        seen.append(context)
+        return Response()
+    with patched(creds, ROOT=root, cafile=lambda d: "/private/tls.pem"), \
+            patched(ssl, create_default_context=lambda cafile=None: marker if cafile else None), \
+            patched(proxy.urllib.request, urlopen=open_url), \
+            context.use(context.resolve({"server": "srv.test"}, {}, {})), \
+            config.client_sources():
+        c.expect("#406 pinned server probe succeeds", proxy._probe(), 200)
+        c.expect("#406 doctor passes pinned TLS context", seen, [marker])
+        creds.write_client(dest, "443", "https://other.test/llm", "key")
+        seen.clear()
+        c.expect("#406 foreign proxy probe succeeds", proxy._probe(), 200)
+        c.expect("#406 foreign URL does not inherit server pin", seen, [None])
+
+
 def main():
     c = Checks()
+    check_pinned_proxy_406(c)
     check_joined_probe_397(c)
     # ── разбор ответа /v1/models -> диагноз ─────────────────────────────
     # HYPOTHESIS (#383): прокси молчит -- каждый ход всех сессий пула бьётся

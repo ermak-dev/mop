@@ -129,7 +129,7 @@ def template_vmid(project, base=_BASE):
 def stage_name(project):
     """Имя СБОРОЧНОГО тела проекта (#60): в нём играется плейбук, и только
     потом оно становится образом. Под тем же префиксом pu-tmpl-, чтобы
-    ростер тел его не показывал папетом, а `mop sweep` — назвал, но не снёс."""
+    ростер тел его не показывал папетом, а `mop server sweep` — назвал, но не снёс."""
     return f"{template_name(project)}-build"
 
 
@@ -166,7 +166,7 @@ def stage_vmid(project, listing, base=_BASE):
         if vmid != mine and vmid not in taken:
             return vmid
     raise RuntimeError(f"no free vmid for a build body of {project} in "
-                       f"{lo}..{hi}: sweep old images (mop sweep)")
+                       f"{lo}..{hi}: sweep old images (mop server sweep)")
 
 
 def address_of_vmid(vmid, subnet=SUBNET):
@@ -427,7 +427,7 @@ async def capacity():
     """Память гипервизора и место в хранилище тел.
 
     `df $HOME` здесь не значит ничего: тела лежат не в домашнем каталоге, а на
-    томе хранилища, и подменить одно другим значит дать `mop gc` число, к делу
+    томе хранилища, и подменить одно другим значит дать `mop server gc` число, к делу
     не относящееся."""
     out, code = await _pve("capacity", STORAGE, timeout=LIST_TIMEOUT)
     if code not in (0, None) or not out.strip():

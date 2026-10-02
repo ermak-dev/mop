@@ -1,4 +1,4 @@
-"""join a pool server: mop join [--server ADDRESS] [LOGIN]
+"""log in to a pool server: mop login [--server ADDRESS] [LOGIN]
 
 Server and login come from --server/LOGIN, the process environment or the
 working copy's binding; if missing, they are asked for. The bus password is
@@ -172,12 +172,66 @@ def complete(host, login, dest, https):
         raise
 
 
+def _bind(host, user):
+    """Запомнить только адрес и имя в локальном клоне, без паролей."""
+    if git("rev-parse", "--show-toplevel") is None:
+        return
+    clone = context.clone_binding()
+    for name, value in (("server", host), ("user", user)):
+        if clone.get(name) != value:
+            git("config", "--local", context.FIELDS[name][0], value)
+
+
+def ensure():
+    """Дополнить отсутствующий вход перед запуском master или code."""
+    ctx = context.current()
+    host = ctx.server
+    if not host:
+        joined = sorted(d for d in glob.glob(os.path.join(creds.ROOT, "*"))
+                        if os.path.isfile(os.path.join(d, creds.CLIENT_FILE)))
+        if len(joined) > 1:
+            raise RuntimeError("multiple joined servers: name one with --server")
+        old = sorted(d for d in glob.glob(os.path.join(creds.ROOT, "*"))
+                     if creds.operator(d) is not None)
+        choices = joined or old
+        if len(choices) > 1:
+            raise RuntimeError("multiple server logins: name one with --server")
+        if choices:
+            host = os.path.basename(choices[0])
+        elif sys.stdin.isatty():
+            host = ask("server address: ")
+        else:
+            raise RuntimeError("no server and no terminal: run mop login --server ADDRESS")
+    dest = creds.server_dir(host)
+    stored = creds.operator(dest)
+    try:
+        saved = creds.client(dest)
+    except ValueError as e:
+        raise RuntimeError(str(e)) from e
+    if stored and saved:
+        return host
+    user = creds.pick_login(ctx.user, (stored or {}).get("user"), None)
+    if not user:
+        if not sys.stdin.isatty():
+            raise RuntimeError(f"no login for {host}: run mop login --server {host}")
+        user = ask(f"login on {host}: ")
+    if not stored and not sys.stdin.isatty() and not os.environ.get("MOP_BUS_PASSWORD"):
+        raise RuntimeError(f"no password and no terminal: run mop login --server {host}")
+    https = (saved or {}).get("https_port") or os.environ.get("MOP_HTTPS_PORT") or "443"
+    if not saved and sys.stdin.isatty():
+        https = ask(f"HTTPS port for {host} [{https}]: ", default=https)
+    with context.use(context.resolve({"server": host}, {}, {})):
+        complete(host, user, dest, https)
+    _bind(host, user)
+    return host
+
+
 def main(argv):
     """Сервер и логин -- из контекста команды (#131): клон < окружение <
     командная строка; `--server` снимает диспетчер, логин -- здесь."""
     explicit_server, login = parse(argv)
     ctx = context.current()
-    if explicit_server:                       # `mop join --server` мимо диспетчера
+    if explicit_server:                       # `mop login --server` мимо диспетчера
         ctx = context.resolve({"server": explicit_server}, os.environ,
                               context.clone_binding())
     in_clone = git("rev-parse", "--show-toplevel") is not None
@@ -208,12 +262,7 @@ def main(argv):
     except (RuntimeError, ValueError, OSError) as e:
         lib.fail(str(e))
         return 1
-    # Клон запоминает свой сервер и логин (#125, #131); пароль -- нет.
-    if in_clone:
-        clone = context.clone_binding()
-        for name, value in (("server", host), ("user", login)):
-            if clone.get(name) != value:
-                git("config", "--local", context.FIELDS[name][0], value)
+    _bind(host, login)
     return 0
 
 

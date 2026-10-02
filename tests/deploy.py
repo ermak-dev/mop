@@ -181,7 +181,7 @@ PINNED["mop-doctor"] = ('[Unit]\nDescription=mop-doctor (doctor по распи�
                         '# запускал бы следующий: потолок -- меньше часа, до следующего срабатывания.\n'
                         'TimeoutStartSec=50min\n'
                         '# Через диспетчер: он ставит PYTHONPATH, без него командлет пакета не найдёт.\n'
-                        'ExecStart=/home/mopuser/mop/bin/mop doctor --fix --safe\n')
+                        'ExecStart=/home/mopuser/mop/bin/mop server doctor --fix --safe\n')
 # Снят заново в #219: окружение -- без MOP_AUTH_CALLOUT (callout всегда включён)
 # и без MOP_OPERATORS (людей даёт только провайдер).
 

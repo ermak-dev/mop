@@ -554,7 +554,7 @@ def _roster(project, req):
     каждой отдельным запросом по сети.
 
     stale=True добавляет вердикт об устаревшей спеке, и только по просьбе: он
-    стоит вызова API на каждый джоб, а нужен одному `mop doctor`. Платить за
+    стоит вызова API на каждый джоб, а нужен одному `mop server doctor`. Платить за
     него в каждом `mop list` было бы платой за чужой глагол."""
     return {"ok": True, "items": nomad_items(project, stale=bool(req.get("stale")))}
 

@@ -1,9 +1,9 @@
-"""Группы проверок `mop doctor` (#356): один файл -- одна группа.
+"""Группы проверок `mop server doctor` (#356): один файл -- одна группа.
 
 Устроено как драйверы узла (mop/driver/):
 обнаружение глобом каталога (plugins.discover), таблицы регистрации нет,
 контракт проверяется громко при загрузке, имя файла -- имя группы и слово
-подкоманды: `mop doctor puppets`. Эпик #355 добавляет группы файлами, не
+подкоманды: `mop server doctor puppets`. Эпик #355 добавляет группы файлами, не
 ветками в командлете.
 
 Контракт группы -- модуль с докстрингом (первая строка -- строка группы в
@@ -16,7 +16,7 @@
                        (раздать креды); отказ останавливает --fix целиком
   treat(issue)      -> что вышло, строкой
 
-Потребитель (mop/cli/pool/doctor.py) зовёт только CONSUMED и по имени
+Потребитель (mop/cli/server/doctor.py) зовёт только CONSUMED и по имени
 группы не ветвится.
 """
 import importlib
@@ -34,7 +34,7 @@ _CACHE = None
 def contract(name, mod):
     """Модуль группы -> {doc}; RuntimeError при нарушении. Отдельно от
     загрузки: проверяема без пула (tests/doctor.py)."""
-    where = f"mop/client/doctor/{name}.py"
+    where = f"mop/server/doctor/{name}.py"
     for verb in CONSUMED:
         if not callable(getattr(mod, verb, None)):
             raise RuntimeError(f"{where}: no {verb}() — the contract is "
@@ -82,15 +82,15 @@ def treats(issue, safe):
 
 
 def select(names, argv):
-    """argv `mop doctor` -> ([группы], fix, safe). Чистая функция. Без группы
+    """argv `mop server doctor` -> ([группы], fix, safe). Чистая функция. Без группы
     -- все; одна названная -- она; иное -- ValueError с перечнем групп.
     --safe сужает лечение и без --fix смысла не имеет -- отказ."""
     fix, safe = "--fix" in argv, "--safe" in argv
     if safe and not fix:
-        raise ValueError("--safe narrows --fix: mop doctor [group] --fix --safe")
+        raise ValueError("--safe narrows --fix: mop server doctor [group] --fix --safe")
     rest = [a for a in argv if a not in ("--fix", "--safe")]
     if not rest:
         return list(names), fix, safe
     if len(rest) == 1 and rest[0] in names:
         return rest, fix, safe
-    raise ValueError(f"mop doctor [group] [--fix [--safe]]; the groups: {', '.join(names)}")
+    raise ValueError(f"mop server doctor [group] [--fix [--safe]]; the groups: {', '.join(names)}")

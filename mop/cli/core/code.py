@@ -18,16 +18,19 @@ answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
 The session uses the selected server's LLM proxy. Its URL and key come from
-the private client.json saved by mop join. With multiple joined servers,
-name one with --server; this command never adds the pool's MCP tools.
+the private client.json saved by mop login; missing credentials start login
+before claude. With multiple joined servers, name one with --server. Without
+a terminal, missing input refuses. This command never adds the pool's MCP tools.
 """
 import os
 
 from mop.cli import lib
 from mop.cli.core import _common
+from mop.cli.pool import login
 
 
 def main(argv):
+    login.ensure()
     # Никакого разбора позиционных: своих аргументов у команды нет, и всё
     # уезжает claude дословно. Отсюда же отсутствие обязательного
     # `--` из `mop master`: там он отделял origin от значения чужого флага,

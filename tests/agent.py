@@ -1323,11 +1323,11 @@ def check_hung_sweep_373(c):
 
 
 def _doctor_sweep_timeout():
-    """Сколько doctor disk ждёт ответа sweep -- из его кода: клиентский
+    """Сколько doctor disk ждёт ответа sweep -- из его кода: серверный
     модуль тянет шину, а проверке нужно одно число."""
     import re
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    src = open(os.path.join(root, "mop", "client", "doctor", "disk.py")).read()
+    src = open(os.path.join(root, "mop", "server", "doctor", "disk.py")).read()
     return float(re.search(r"^SWEEP_TIMEOUT = (\d+)", src, re.M)[1])
 
 

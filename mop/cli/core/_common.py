@@ -127,7 +127,7 @@ def session_env():
     directory = creds.server_dir(host)
     record = creds.client(directory)
     if record is None:
-        raise RuntimeError(f"no joined proxy configuration for {host}: run mop join --server {host}")
+        raise RuntimeError(f"no joined proxy configuration for {host}: run mop login --server {host}")
     env = dict(llm.env())
     env["ANTHROPIC_BASE_URL"] = record["proxy_url"]
     env[llm.AUTH_VAR] = record["proxy_key"]

@@ -6,7 +6,9 @@
 автолечения. Слова называют юнит на контроллере: рестарт папетов здесь
 ничего не чинит (#383).
 """
+import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from mop.common import config, creds
@@ -34,11 +36,14 @@ def _probe():
     host = config.get("MOP_SERVER_LAN")
     joined = creds.client(creds.server_dir(host))
     if joined is None:
-        raise RuntimeError(f"no joined proxy configuration for {host}: run mop join --server {host}")
+        raise RuntimeError(f"no joined proxy configuration for {host}: run mop login --server {host}")
     req = urllib.request.Request(joined["proxy_url"].rstrip("/") + "/v1/models",
                                  headers={"Authorization": f"Bearer {joined['proxy_key']}"})
+    pin = creds.cafile(creds.server_dir(host)) if \
+        urllib.parse.urlsplit(joined["proxy_url"]).hostname == host else None
+    opts = {"context": ssl.create_default_context(cafile=pin)} if pin else {}
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        with urllib.request.urlopen(req, timeout=TIMEOUT, **opts) as r:
             return r.status
     except urllib.error.HTTPError as e:
         return e.code

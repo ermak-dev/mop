@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Шов проверок doctor без пула: python3 tests/doctor.py
 
-`mop doctor` -- группы проверок модулями mop/client/doctor/ (#356), по
+`mop server doctor` -- группы проверок модулями mop/server/doctor/ (#356), по
 образцу драйверов узла и профилей LLM: один файл -- одна группа,
 обнаружение глобом каталога, контракт громко при загрузке, потребитель
-(mop/cli/pool/doctor.py) не ветвится по группе. Здесь -- контракт, имена
+(mop/cli/server/doctor.py) не ветвится по группе. Здесь -- контракт, имена
 групп, потребляемое против объявленного и вывод командлета байт в байт тот
 же, что до шва.
 """
@@ -22,12 +22,19 @@ os.environ.setdefault("MOP_SERVER_LAN", "10.0.0.1")
 
 from mop.common import bus, puppets  # noqa: E402
 
-CONSUMER = os.path.join(ROOT, "mop", "cli", "pool", "doctor.py")
+CONSUMER = os.path.join(ROOT, "mop", "cli", "server", "doctor.py")
+
+
+def run_server(main, args):
+    from mop.cli.server import _maintenance
+    from _lib import patched
+    with patched(_maintenance, require=lambda: None):
+        return run_command(main, args)
 
 
 def registry():
     try:
-        from mop.client import doctor
+        from mop.server import doctor
         return doctor
     except ImportError:
         return None
@@ -65,12 +72,12 @@ def consumed_names():
 
 
 # ── #356: шов проверок doctor ───────────────────────────────────────────
-# HYPOTHESIS: `mop doctor` -- один вызов puppets.diagnose(); проверкам
+# HYPOTHESIS: `mop server doctor` -- один вызов puppets.diagnose(); проверкам
 # эпика #355 (логины, диск, расписание) встать некуда, и каждая добавилась
 # бы веткой в командлет.
-# SOLUTION: реестр mop/client/doctor/ (plugins.discover, contract,
+# SOLUTION: реестр mop/server/doctor/ (plugins.discover, contract,
 # CONSUMED); первая группа puppets -- сегодняшние diagnose/treat целиком;
-# `mop doctor [group] [--fix]`, вывод тот же.
+# `mop server doctor [group] [--fix]`, вывод тот же.
 # STATUS: FIXED — see #356
 def check_contract_356(c, doctor):
     for what, mod, ok in CONTRACT:
@@ -150,7 +157,8 @@ OUT_NONE = ("pu-mop-3  -  queued — no free slots in the pool\n"
 
 
 def check_output_356(c, argvs):
-    from mop.cli.pool import doctor as cmd
+    from mop.cli.server import doctor as cmd
+    from mop.cli.server import _maintenance
     # Группы после шва (disk, #358) пусты: вывод до шва -- вывод группы
     # puppets, и соседняя группа не должна ни ходить в шину, ни добавлять строк.
     others = [cmd.doctor.module(n) for n in cmd.doctor.groups() if n != "puppets"] \
@@ -174,8 +182,8 @@ def _output_356(c, argvs, cmd):
                                        (ISSUES, ["--fix"], OUT_FIX),
                                        (ISSUES[2:], [], OUT_NONE)]:
                 puppets.diagnose = lambda issues=issues: issues
-                out, err, code = run_command(cmd.main, pre + argv)
-                c.expect(f"#356 mop doctor {' '.join(pre + argv)}: the same output",
+                out, err, code = run_server(cmd.main, pre + argv)
+                c.expect(f"#356 mop server doctor {' '.join(pre + argv)}: the same output",
                          (out, err, code), (want, "", 0))
 
 # ── #357: логин лечится арендой из реестра, а не локальным файлом ──────
@@ -192,9 +200,9 @@ def _output_356(c, argvs, cmd):
 # HYPOTHESIS: подметание диска запускает только nomad periodic pu-cleanup, и
 # его итог лежит в логах аллокаций: doctor не видит ни кто подмёл, ни кто
 # под давлением, ни кто отказал.
-# SOLUTION: группа mop/client/doctor/disk.py: diagnose спрашивает глагол
+# SOLUTION: группа mop/server/doctor/disk.py: diagnose спрашивает глагол
 # агента sweep у каждого готового узла всухую (MOP_SWEEP_DRY), treat метёт
-# по-настоящему -- `mop doctor` без --fix ничего не сносит, как и остальные
+# по-настоящему -- `mop server doctor` без --fix ничего не сносит, как и остальные
 # группы. Колонка «где» у проблемы -- поле node (узловая проблема) либо узел
 # аллокации (проблема папета): doctor.where.
 # STATUS: FIXED — see #358
@@ -341,7 +349,8 @@ def check_safe_359(c, doctor):
     c.expect("#359 no action: nothing to treat, safe or not",
              (doctor.treats(none, False), doctor.treats(none, True)), (False, False))
     # Вывод: небезопасное названо строкой лечения и не исполнено.
-    from mop.cli.pool import doctor as cmd
+    from mop.cli.server import doctor as cmd
+    from mop.cli.server import _maintenance
     treated = []
     others = [doctor.module(n) for n in doctor.groups() if n != "puppets"]
     saved = [(m, m.diagnose) for m in others]
@@ -354,14 +363,13 @@ def check_safe_359(c, doctor):
                 f"treated {issue['action']}"
             bus.call_cluster = lambda verb, **kw: {"ok": True, "lease": "anton",
                                                    "node": "n2", "result": "OK"}
-            out, err, code = run_command(cmd.main, ["--fix", "--safe"])
+            out, err, code = run_server(cmd.main, ["--fix", "--safe"])
     finally:
         for m, fn in saved:
             m.diagnose = fn
-    c.expect("#359 mop doctor --fix --safe: the output", (out, err, code), (OUT_SAFE, "", 0))
+    c.expect("#359 mop server doctor --fix --safe: the output", (out, err, code), (OUT_SAFE, "", 0))
     c.expect("#359 only the safe action was executed", treated, ["login+nudge"])
-    c.check("#359 the MCP tool offers --safe",
-            any(a.get("flag") == "--safe" for a in cmd.MCP["args"]), cmd.MCP["args"])
+    c.check("#409 server doctor is not a master MCP tool", not hasattr(cmd, "MCP"))
 
 
 # ── #370: неизвестное действие лечения -- отказ, а не рестарт ───────────
@@ -408,7 +416,7 @@ def check_unknown_action_370(c):
 def main():
     c = Checks()
     doctor = registry()
-    if c.check("#356 mop.client.doctor, the registry of check groups", doctor is not None):
+    if c.check("#356 mop.server.doctor, the registry of check groups", doctor is not None):
         check_contract_356(c, doctor)
         check_registry_356(c, doctor)
         check_select_356(c, doctor)

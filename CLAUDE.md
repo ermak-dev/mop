@@ -44,14 +44,14 @@ particular decision from the comment next to the code, subsystems from `docs/`:
  - **MUST** A required setting with no sensible default goes in `config.REQUIRED`: silently walking into someone else's LAN is worse than a loud refusal
  - **MUST NOT** Nothing a specific project needs goes into `deploy/` (toolchain, env files, other people's MCP servers) — that is the installation's own `sandbox.yaml` and the projects' `.mop/sandbox.yaml` (baked) and `.mop/bootstrap.yaml` (played at every start)
  - **MUST** A project has one definition: `driver.project_of`, the origin's basename without `.git`; puppet names are built from it too. The word «shard» is gone (#85)
- - **MUST** Two layers: Nomad decides where a puppet stands, the bus decides how to talk to it. The Nomad token lives on the server and, through `mop join`, on operators' machines; it never reaches a node
- - **MUST** The server is the ansible controller and the operator's machine is not in the inventory: it gets the server's credentials with `mop join` into `~/.config/mop/servers/[address]/`, and `MOP_SERVER_LAN` in the environment retargets a master at another server
+ - **MUST** Two layers: Nomad decides where a puppet stands, the bus decides how to talk to it. The Nomad token lives only on the server; neither `mop login` nor a node receives it
+ - **MUST** The server is the ansible controller and the operator's machine is not in the inventory: it gets the server's credentials with `mop login` into `~/.config/mop/servers/[address]/`, and `MOP_SERVER_LAN` in the environment retargets a master at another server
  - **MUST** Symlinks pointing in from outside are interfaces: `~/bin/mop`, `~/.claude/skills/master`; deploy plays `deploy/site.yml` from the repository and writes nothing under `~/etc` (#311)
  - Terminology: **master** is the controlling side, **puppet** the working one; `free (master)` in a state string is a git branch, not a role
 
 ## Secrets
 
- - **MUST** Installation inputs live in the server's `.env`; generated credentials (NATS passwords, Nomad token, LLM proxy keys) stay in private server files. Client `mop join` saves bus and proxy credentials per server in `operator.json` and `client.json`, never in installation `.env`
+ - **MUST** Installation inputs live in the server's `.env`; generated credentials (NATS passwords, Nomad token, LLM proxy keys) stay in private server files. Client `mop login` saves bus and proxy credentials per server in `operator.json` and `client.json`, never in installation `.env`
  - **MUST** `.env` never travels to the nodes — rsync excludes it explicitly
  - **MUST** No secrets in a Nomad job spec: it is visible in the UI and stays in the cluster's state; keys go to the nodes as a file, the spec carries only variable names
  - **MUST** A puppet reaches the bus under its project's credentials, not the node's: the agent sees who is being asked about, never who is asking

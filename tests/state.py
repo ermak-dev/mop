@@ -568,7 +568,7 @@ def check_row_none_274(c):
     c.expect("#274 _row writes no sentinel into node/state/owner/origin", written, [])
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     compared = []
-    for rel in ("mop/common/puppets.py", "mop/cli/pool/gc.py", "mop/server/web.py"):
+    for rel in ("mop/common/puppets.py", "mop/cli/server/gc.py", "mop/server/web.py"):
         for n, line in enumerate(open(os.path.join(root, rel)), 1):
             if any(f'.{f} {op} "{s}"' in line for f in ("node", "owner", "origin", "state")
                    for op in ("==", "!=") for s in ("-", "?")):

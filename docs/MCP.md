@@ -93,7 +93,7 @@ MCP = {"annotations": "destructive", "args": [
   инструментом не отдать), `master`, `code`, службы.
 
 Сейчас объявлены: `add`, `delete`, `restart`, `update`, `recycle`, `wipe`,
-`landing`, `stat`, `doctor`, `login`, `node`, `node drain`, `node up`,
+`landing`, `stat`, `login`, `node`, `node drain`, `node up`,
 `project add`, `project limit`. Список — `mop mcp --check` в числе инструментов, а
 поимённо — у клиента.
 
