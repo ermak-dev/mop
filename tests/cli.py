@@ -417,6 +417,13 @@ def check_current_docs_401(c):
                 stale not in text)
     c.check("#401 mop help does not promise client fallback to .env",
             "with none of them, from .env" not in cli.usage())
+    # STATUS: FIXED — see #405. Единый вход не просит секрет прокси отдельно.
+    for name, obsolete in (("README.md", "ключ, полученный от администратора"),
+                           ("docs/PROXY.md", "передают закрытым"),
+                           (".env.example", "клиент\n# вводит"),
+                           ("docs/CLI.md", "key are asked for separately")):
+        text = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        c.check(f"#405 {name} does not require manual proxy key entry", obsolete not in text)
 
 
 def main():
