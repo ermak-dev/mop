@@ -495,12 +495,16 @@ def full_entry(msg, now=None):
     честной метке, не null); received_at -- всегда отдельное поле.
     Credential-поля вычищаются; событие, не влезающее в ENTRY_MAX байт
     сериализации, заменяется ограниченным маркером."""
-    received = (now or time.time)() if callable(now or time.time) else (now or time.time())
+    received = time.time() if now is None else (now() if callable(now) else now)
     clean = _strip_credentials(dict(msg))
     at = _valid_at(clean.pop("at", None))
     entry = {"at": at if at is not None else received, "received_at": received, **clean}
     if len(json.dumps(entry, ensure_ascii=False, default=str).encode()) > ENTRY_MAX:
-        return {"event": msg.get("event") or "?", "text": "[event over size limit]",
+        # Маркер ограничен целиком: даже имя события не переносится сырым --
+        # длинное имя само раздувает запись и может нести секрет.
+        name = msg.get("event")
+        name = name if isinstance(name, str) and len(name) <= 64 else "?"
+        return {"event": name, "text": "[event over size limit]",
                 "at": entry["at"], "received_at": received}
     return entry
 

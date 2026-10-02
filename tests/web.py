@@ -10,9 +10,11 @@
 
 STATUS: FIXED — see #66
 """
+import io
 import os
 import threading
 import json
+from io import BytesIO
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
@@ -848,8 +850,32 @@ def check_journal_api_424(c):
         sent, out = _fake_handler(webcli, "GET", "/api/pool")
         c.check("#424 /api/pool 200 and no entry in the wire",
                 sent[0][1] == 200 and b"pu-x-1" not in out, out[:120])
-        c.check("#424 the /events stream is the same snapshot",
-                b"pu-x-1" not in json.dumps(snap).encode(), json.dumps(snap)[:120])
+        # Настоящий первый кадр /events: тестовый Handler с wfile, который
+        # рвёт соединение после первой записи -- до пинга.
+        class _Pipe(BytesIO):
+            def write(self, data):
+                out = super().write(data)
+                raise BrokenPipeError()
+        class _Handler(webcli.Handler.__class__):
+            pass
+        h = webcli.Handler.__new__(webcli.Handler)
+        h.path = "/events"
+        h.headers = {}
+        h.wfile = _Pipe()
+        h.rfile = BytesIO()
+        h.client_address = ("127.0.0.1", 0)
+        h.send_response = lambda code, msg=None: None
+        h.send_header = lambda k, v: None
+        h.end_headers = lambda: None
+        try:
+            h.do_GET()
+        except BrokenPipeError:
+            pass
+        frame = h.wfile.getvalue()
+        c.check("#424 the first /events frame carries no journal entry",
+                frame.startswith(b"event: snapshot\ndata: ")
+                and b"pu-x-1" not in frame and b"\"journal\": []" in frame,
+                frame[:120])
         src = open(os.path.join(os.path.dirname(webcli.__file__), "web.py")).read()
         c.check("#424 /events still streams the snapshot, no journal of its own",
                 "if path == \"/events\":" in src and "journal" not in src.split('def stream')[1][:600])
@@ -908,7 +934,14 @@ def check_journal_entry_424(c):
         if want_at is not None:
             c.expect(f"#424 a valid original at is kept ({msg.get('text')})", at, want_at)
         c.check(f"#424 received_at is separate ({msg.get('text')})",
-                isinstance(received, (int, float)) and received >= at, received)
+                isinstance(received, (int, float)), received)
+    # Будущая исходная метка (рассинхрон часов) сохраняется как есть,
+    # независимо от received_at.
+    colf = _journal_collector()
+    colf.event({"event": "send", "text": "future", "at": 4102444800.0})
+    c.expect("#424 a future original at survives untouched",
+             (colf.admin_journal[0]["at"], colf.admin_journal[0]["received_at"] < 4102444800.0),
+             (4102444800.0, True))
 
     # Credential-поля не хранятся и не отдаются, на любом регистре и вложенно.
     col2 = _journal_collector()
@@ -939,6 +972,16 @@ def check_journal_entry_424(c):
     c.check("#424 the marker names the event",
             col3.admin_journal[1].get("event") == "send"
             and isinstance(col3.admin_journal[1].get("text"), str), col3.admin_journal[1])
+    # Длинное имя события само раздувает запись: маркер обязан быть
+    # ограничен целиком, без сырого большого поля -- в нём может быть секрет.
+    col5 = _journal_collector()
+    col5.event({"event": "send-" + "z" * (web.ENTRY_MAX + 512),
+                "text": "short", "at": 3.0})
+    marker = col5.admin_journal[0]
+    c.check("#424 an oversized event name yields a bounded marker",
+            len(json.dumps(marker).encode()) <= web.ENTRY_MAX
+            and marker.get("event") != "send-" + "z" * (web.ENTRY_MAX + 512),
+            len(json.dumps(marker).encode()))
     # Кольцо 100: старое вытесняется, больше не отдаётся.
     col4 = _journal_collector()
     for i in range(120):
