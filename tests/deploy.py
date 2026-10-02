@@ -1144,8 +1144,10 @@ def check_llm_request_size_411(c, can_render):
 # /llm/v8/management и prefix /llm/v8/management/ -- deny, /llm/
 # остальное как было; лимит тела и read_timeout 75s на raw/API,
 # buffering off.
-# RESULT: до правки -- ни копии ключа, ни gateway-маршрутов; RED.
-# STATUS: не исправлено -- RED, реализация в этой же ветке
+# RESULT: до правки -- ни копии ключа, ни gateway-маршрутов (8 RED);
+# после -- копия условна (без llmproxy-тега не кладётся), маршруты
+# шлюза и deny закрыты, прочее не тронуто.
+# STATUS: FIXED — see #418
 def check_mgmt_gateway_418(c, can_render):
     want = os.path.join(".config", "mop", "secrets", "llm-proxy-mgmt.pass")
     tasks = yaml.safe_load(open(
@@ -1155,6 +1157,14 @@ def check_mgmt_gateway_418(c, can_render):
     unit_at = next((i for i, t in enumerate(tasks)
                     if "mop-web unit" in str(t.get("name", "")).lower()
                     or t.get("ansible.builtin.template", {}).get("src", "") == "service.j2"), None)
+    copies = [t for t in tasks if "llm_proxy_mgmt_key" in str(t)]
+    # Вторая установка без LLM-прокси (#418): переменная рождается в плее
+    # с тегом llmproxy, а роль web играет в другом плее -- без условия
+    # задача падала бы на rumop с undefined variable. Копия условна: нет
+    # плекса -- нет и ключа, шлюзу нечем представляться, и это не ошибка.
+    c.check("#418 the key copy is conditional on the llmproxy play",
+            len(copies) == 1 and copies[0].get("when") is not None
+            and "llm" in str(copies[0].get("when")), copies[0] if copies else None)
     c.check("#418 the web role carries a private copy of the management key",
             len(copies) == 1, [t.get("name") for t in copies])
     if copies:
@@ -1200,11 +1210,23 @@ def check_mgmt_gateway_418(c, can_render):
     m = location(r"/v8/management")
     c.check("#418 exact /v8/management does not bypass the gateway",
             ("= /v8/management" in m or "/v8/management " in m) and web in m, m)
-    # Алиасы -- deny.
-    for alias in (r"/llm/v8/management",):
+    # Алиасы -- deny: exact и prefix каждый своим location.
+    for alias, kind in ((r"/llm/v8/management", "exact"),
+                        (r"/llm/v8/management/", "prefix")):
         m = location(alias)
-        c.check("#418 alias /llm/v8/management is denied",
-                bool(m) and ("403" in m or "deny" in m or "return 403" in m), m or "no location")
+        c.check(f"#418 alias {alias} ({kind}) is denied",
+                bool(m) and ("= " + alias.strip("\\/") in m.replace("location = ", "= ")
+                             or "return 403" in m), m or "no location")
+    # /llm/management* -- в шлюз (gated), не напрямую в CPA: шим страницы
+    # и всё, что панель может попросить под этим префиксом.
+    for probe in ("/llm/management", "/llm/management/", "/llm/management.html/"):
+        m = re.search(r"location (= )?" + re.escape(probe) + r" ?\{[^}]*\}", got)
+        covered = bool(m and web in m.group(0)) or bool(
+            re.search(r"location (= )?/llm/management(\.html)? ?\{[^}]*\}", got)
+            and web in (re.search(r"location (= )?/llm/management(\.html)? ?\{[^}]*\}", got) or
+                        re.match("", "")).group(0))
+        c.check(f"#418 {probe} never reaches CPA past the gate",
+                covered, m.group(0) if m else "no location")
     # /llm/ остальное как было (панельный location на CPA жив).
     m = location(r"/llm/")
     c.check("#418 /llm/ still proxies the panel prefix to CPA",

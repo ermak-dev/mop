@@ -110,6 +110,18 @@ server {
         return 403;
     }
 
+    # Сами /llm/management* -- тоже мимо прокси: шим живёт на точном
+    # /llm/management.html, а остальное под этим префиксом (включая
+    # хвосты со слешем и /llm/management.html/) панель не спрашивает --
+    # закрыто, чтобы suffix-игры не открывали обход.
+    location = /llm/management {
+        return 403;
+    }
+
+    location /llm/management/ {
+        return 403;
+    }
+
     location /llm/ {
         # История и compact проходят здесь же (#411): дефолт nginx
         # отрезал текстовый контекст, а Claude называл 413 лимитом media.
