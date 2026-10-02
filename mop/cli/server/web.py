@@ -9,6 +9,9 @@ refreshed in place (docs/WEB.md):
   /api/pool    the current snapshot as JSON
   /events      the same snapshot pushed as server-sent events
   /healthz     200 once the first snapshot is in
+  /api/session who is logged in; login and logout by post with JSON on
+               /api/login, /api/logout -- file/LDAP via the same identity
+               as the bus, server-side session cookie, for the admin gate
 
 No login on the page (the LAN is trusted, operator's decision 2026-09-26;
 authorization comes later). The pool itself stays read-only here: a restart
@@ -25,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
 from mop.common import bus, busnames, config
-from mop.server import web
+from mop.server import web, websession
 
 # Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
 # исходниками (docs/WEB.md); собирает `mop dev web build`, сверяет CI.
@@ -35,6 +38,8 @@ LOGO = os.path.join(config.PROJECT, "docs", "logo.png")   # фавикон и ш
 PING_EVERY = 15      # с: пустой кадр SSE, чтобы прокси и браузер не рвали тишину
 
 COLLECTOR = web.Collector()
+SESSIONS = websession.SessionStore()
+RATE = websession.RateLimiter()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -59,6 +64,75 @@ class Handler(BaseHTTPRequestHandler):
         ensure_ascii=False; их тексты -- ASCII, и байты у них те же."""
         return self._send(code, json.dumps(body, ensure_ascii=False))
 
+    def _origin_ok(self):
+        """Origin строго публичный https origin (#415): без Origin -- отказ,
+        чужой -- отказ. CSRF без токена: Origin и требование JSON закрывают
+        и форму, и чужую страницу."""
+        return websession.origin_ok(self.headers,
+                                    websession.public_origin(config.get))
+
+    def _who(self):
+        """Личность по cookie: (login, role) | (None, None)."""
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            if part.strip().startswith(websession.COOKIE + "="):
+                got = SESSIONS.get(part.strip().split("=", 1)[1])
+                if got:
+                    return got
+        return None, None
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/login":
+            return self.api_login()
+        if path == "/api/logout":
+            return self.api_logout()
+        self._send(404, "no such path\n", "text/plain")
+
+    def api_login(self):
+        """Вход: JSON {login, password} -> сессия в cookie.
+
+        Ответ отказа -- одна фраза без причины: «нет такого логина»
+        подсказывало бы перебор. Любая неудача считает в rate limit."""
+        addr = websession.client_addr(self.headers, self.client_address)
+        if not self._origin_ok() or (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
+            return self._json(403, {"error": "origin refused"})
+        if not RATE.allowed(addr):
+            return self._json(429, {"error": "too many attempts, try later"})
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            login, password = body["login"], body["password"]
+            if not isinstance(login, str) or not isinstance(password, str):
+                raise ValueError
+        except Exception:
+            return self._json(400, {"error": "bad request: JSON {login, password}"})
+        try:
+            who = websession.provider().authenticate(login, password)
+        except Exception:
+            RATE.note_failure(addr)
+            return self._json(401, {"error": "invalid login or password"})
+        token = SESSIONS.open(who)
+        RATE.note_success(addr)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Set-Cookie",
+                         f"{websession.COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Strict")
+        self.send_header("Cache-Control", "no-store")
+        data = json.dumps({"login": who.login, "role": who.role}, ensure_ascii=False).encode()
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def api_logout(self):
+        """Отзыв сессии: cookie больше не работает, ответ -- гость."""
+        if not self._origin_ok() or (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
+            return self._json(403, {"error": "origin refused"})
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            if part.strip().startswith(websession.COOKIE + "="):
+                SESSIONS.close(part.strip().split("=", 1)[1])
+        return self._json(200, {"login": None, "role": None})
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/":
@@ -79,6 +153,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/logo.png":
             with open(LOGO, "rb") as f:
                 return self._send(200, f.read(), "image/png")
+        if path == "/api/session":
+            login, role = self._who()
+            return self._json(200, {"login": login, "role": role})
         if path == "/api/pool":
             return self._json(200, COLLECTOR.current())
         if path == "/healthz":

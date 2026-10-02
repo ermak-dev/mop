@@ -1206,6 +1206,9 @@ refreshed in place (docs/WEB.md):
   /api/pool    the current snapshot as JSON
   /events      the same snapshot pushed as server-sent events
   /healthz     200 once the first snapshot is in
+  /api/session who is logged in; login and logout by post with JSON on
+               /api/login, /api/logout -- file/LDAP via the same identity
+               as the bus, server-side session cookie, for the admin gate
 
 No login on the page (the LAN is trusted, operator's decision 2026-09-26;
 authorization comes later). The pool itself stays read-only here: a restart
