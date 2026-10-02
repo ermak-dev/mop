@@ -11,6 +11,7 @@
 
     operator.json               кто эта машина на шине: человек после
                                 `mop join`, на сервере -- service (#104)
+    client.json                 закрытые настройки прокси для этого сервера
     tls.pem                     самоподписанный сертификат TLS-прокси (#97)
     bootstrap.json              management-токен Nomad, только на контроллере
 
@@ -28,6 +29,7 @@ import hashlib
 import json
 import os
 import ssl
+from urllib.parse import urlsplit
 
 from . import busnames, config, fsutil, paths
 
@@ -36,6 +38,7 @@ ROOT = paths.local(paths.SERVERS)
 # проект. Пользователь тут один — сам человек, — и от проекта он не зависит:
 # проект живёт в СУБЪЕКТЕ, права на субъект проверяет сервер NATS.
 OPERATOR_FILE = "operator.json"
+CLIENT_FILE = "client.json"
 ADMIN = busnames.ADMIN   # псевдопроект оператора: проекта нет
 # Машинный пользователь сервисов сервера (#104): mop-web, mop-bootstrap,
 # mop-cluster. Раньше они ходили под admin, и его пароль был общим с людьми.
@@ -247,6 +250,50 @@ def write_operator(directory, user, password):
     make_dir(directory)
     path = os.path.join(directory, OPERATOR_FILE)
     fsutil.write_private(path, json.dumps({"user": user, "password": password}))
+    return path
+
+
+def _client_values(https_port, proxy_url, proxy_key):
+    """Запись клиента: один порт TLS для шины, адрес и ключ LLM-прокси."""
+    port = str(https_port)
+    if not port.isascii() or not port.isdecimal() or not 1 <= int(port) <= 65535:
+        raise ValueError("joined server HTTPS port must be between 1 and 65535")
+    try:
+        url = urlsplit(proxy_url)
+        valid = (url.scheme in ("http", "https") and url.hostname and url.port != 0
+                 and not (url.username or url.password or url.query or url.fragment))
+    except (ValueError, TypeError, AttributeError):
+        valid = False
+    if not valid or any(c.isspace() for c in proxy_url):
+        raise ValueError("joined proxy URL must be an HTTP(S) address without credentials")
+    if not isinstance(proxy_key, str) or not proxy_key or any(
+            c in "\r\n\x00" for c in proxy_key):
+        raise ValueError("joined proxy key must be a nonempty single line")
+    return {"https_port": port, "proxy_url": proxy_url, "proxy_key": proxy_key}
+
+
+def client(directory):
+    """Настройки прокси выбранного сервера, либо None до первого join.
+
+    Сломанная запись -- отказ, не переход к .env или соседнему серверу."""
+    try:
+        with open(os.path.join(directory, CLIENT_FILE), encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise ValueError("cannot read joined client config") from e
+    if not isinstance(raw, dict) or set(raw) != {"https_port", "proxy_url", "proxy_key"}:
+        raise ValueError("invalid joined client config")
+    return _client_values(**raw)
+
+
+def write_client(directory, https_port, proxy_url, proxy_key):
+    """Сохранить всю проверенную запись атомарно, отдельно от пароля шины."""
+    values = _client_values(https_port, proxy_url, proxy_key)
+    make_dir(directory)
+    path = os.path.join(directory, CLIENT_FILE)
+    fsutil.write_private(path, json.dumps(values))
     return path
 
 

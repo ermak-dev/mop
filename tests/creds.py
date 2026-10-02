@@ -36,8 +36,54 @@ USERS = [
 ]
 
 
+# HYPOTHESIS: operator.json знает только пароль шины; URL и ключ прокси
+# берутся из .env установленного mop и не привязаны к адресу сервера.
+# SOLUTION: отдельный client.json в приватном каталоге сервера, атомарно;
+# неверный ввод отвергается до записи, старый файл остаётся целым.
+# RESULT: два сервера и старая запись шины живут независимо.
+# STATUS: FIXED — see #403
+def check_joined_client_403(c):
+    read = getattr(creds, "client", None)
+    write = getattr(creds, "write_client", None)
+    if not c.check("#403 joined client read and write exist", read and write):
+        return
+    root = tempfile.mkdtemp(prefix="mop-joined-403-")
+    a, b = os.path.join(root, "servers", "a"), os.path.join(root, "servers", "b")
+    c.expect("#403 fresh join has no proxy configuration", read(a), None)
+    creds.write_operator(a, "user-a", "bus-a")
+    want_a = {"https_port": "443", "proxy_url": "http://proxy-a.test:8317",
+              "proxy_key": "key-a"}
+    want_b = {"https_port": "8443", "proxy_url": "https://proxy-b.test",
+              "proxy_key": "key-b"}
+    write(a, **want_a)
+    write(b, **want_b)
+    c.expect("#403 first server retains its proxy settings", read(a), want_a)
+    c.expect("#403 second server has distinct settings", read(b), want_b)
+    c.expect("#403 joining proxy does not overwrite bus credentials",
+             creds.operator(a), {"user": "user-a", "password": "bus-a"})
+    for path in (os.path.dirname(a), a, b):
+        c.expect(f"#403 private directory {os.path.basename(path)}",
+                 os.stat(path).st_mode & 0o777, 0o700)
+    path = os.path.join(a, creds.CLIENT_FILE)
+    c.expect("#403 private proxy credential file", os.stat(path).st_mode & 0o777, 0o600)
+    c.check("#403 no temporary file remains", not any(n.endswith(".tmp") for n in os.listdir(a)))
+    try:
+        write(a, https_port="0", proxy_url=want_a["proxy_url"], proxy_key="wrong")
+        c.fail("#403 invalid port must not replace valid config")
+    except ValueError:
+        c.expect("#403 old config survives failed validation", read(a), want_a)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"proxy_key":"broken"}')
+    try:
+        read(a)
+        c.fail("#403 malformed joined config must refuse, not fall back to env")
+    except ValueError:
+        pass
+
+
 def main():
     c = Checks()
+    check_joined_client_403(c)
 
     for project, user, fname in USERS:
         got = creds.bus_config("10.0.0.5", "4222", project, "s3cret")
