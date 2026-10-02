@@ -76,7 +76,12 @@ export function useJournal(session: Session, active: boolean): Journal {
             refused(r.status === 401 || r.status === 403 ? DENIED : SILENT);
           }
         })
-        .catch(() => { if (alive && at > accepted.current) refused(SILENT); });
+        .catch(() => {
+          if (!alive || at <= accepted.current) return;
+          accepted.current = at;     // терминальный отказ держит барьер: поздний
+                                     // 200 старого запроса не «вылечит» ошибку
+          refused(SILENT);
+        });
     };
 
     // смена admin A → admin B: прежние записи стёрты до нового ответа --

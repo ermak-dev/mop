@@ -9,7 +9,7 @@
 // контракта нет в SSE) -- новые события приходят без перезагрузки; на
 // главной закрытый журнал не спрашивают вовсе.
 // RESULT: тесты написаны до реализации (RED).
-import { renderHook, act, waitFor } from "@testing-library/react";
+import { act, render, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { POLL_S, useJournal } from "./useJournal";
 import type { JournalEntry } from "./types";
@@ -120,24 +120,32 @@ test("review2: an admin switch asks the source anew", async () => {
 // события. Формулировка ревью 2 («отвечает последний начатый») уточнена
 // ревью 3 до монотонной версии принятого -- поведение то же, тест ниже.
 
-// Ревью 3 (#422): A(admin)→B(admin) -- синхронно, не эффектом. Смена
-// логина меняет источник состояния, и тот же рендер уже не показывает
-// журнал прошлого админа: очистка -- до ответа, в returned value.
-test("review3: an admin switch wipes the old journal in the same render", async () => {
+// Ревью 3→5 (#422): A(admin)→B(admin) -- синхронно, не эффектом. Ассерт
+// срабатывает ВНУТРИ render-фазы Probe: rerender() в RTL flush'ит эффекты
+// синхронно до возврата, поэтому «прочитать frames после rerender» не
+// доказывает порядок. Гейт ставится до rerender, проверка первого кадра
+// нового логина идёт в том же стеке, что и вызов хука.
+test("review5: an admin switch wipes the old journal in the very first render", async () => {
   const AJ: JournalEntry[] = [{ at: 1, event: "send", name: "pu-a", node: "n", project: "p", text: "" }];
   const BJ: JournalEntry[] = [{ at: 2, event: "idle", name: "pu-b", node: "n", project: "p", text: "" }];
   let who = "anton";
   const fetchMock = vi.fn(async () => ok(who === "anton" ? AJ : BJ));
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(({ login }) => useJournal({ login, role: "admin" }, true), {
-    initialProps: { login: "anton" as string },
-  });
-  await waitFor(() => expect(view.result.current.journal).toEqual(AJ));
+  // первый кадр с новым логином: journal хука в момент render'а
+  let firstBobFrame: JournalEntry[] | undefined;
+  function Probe({ login }: { login: string }) {
+    const j = useJournal({ login, role: "admin" }, true);
+    if (login === "bob" && firstBobFrame === undefined) firstBobFrame = j.journal;
+    return null;
+  }
+  const view = render(<Probe login="anton" />);
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
   who = "bob";
-  view.rerender({ login: "bob" });
-  // тот же рендер, что и смена логина: журнал A уже не показан
-  expect(view.result.current.journal).toEqual([]);
-  await waitFor(() => expect(view.result.current.journal).toEqual(BJ));
+  view.rerender(<Probe login="bob" />);
+  // кадр захвачен в render-фазе, ДО эффектов этого рендера
+  expect(firstBobFrame).toEqual([]);
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 });
 
 // Ревью 3 (#422): медленный опрос не запирает журнал навечно. Если каждый
@@ -193,6 +201,38 @@ test("review3: a late 200 after an accepted 403 still cannot land", async () => 
   releaseFirst(J);   // опоздавший 200 прошлого круга
   await act(async () => { await vi.advanceTimersByTimeAsync(50); });
   expect(view.result.current.journal).toEqual([]);
+  vi.useRealTimers();
+});
+
+// Ревью 5 (#422): монотонный барьер -- для всех исходов. Сетевой отказ
+// применяет SILENT, но не поднимал принятую версию: поздний 200 старого
+// запроса затем «лечил» ошибку и возвращал записи после «панель не
+// отвечает». Отказ обязан держать барьер как 401/403.
+test("review5: a network refusal holds its barrier against a stale 200", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  let calls = 0;
+  let releaseFirst: (j: JournalEntry[]) => void = () => {};
+  const firstBody = new Promise<JournalEntry[]>((r) => { releaseFirst = r; });
+  const fetchMock = vi.fn(async () => {
+    calls++;
+    if (calls === 1) {
+      // первый 200 зависает в теле
+      return { ok: true, status: 200,
+               json: async () => ({ journal: await firstBody }) } as unknown as Response;
+    }
+    if (calls === 2) throw new TypeError("network down");   // терминальный отказ
+    return ok([]);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const view = renderHook(() => useJournal({ login: "anton", role: "admin" }, true));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+  // второй круг упал сетью -- SILENT применён
+  await act(async () => { await vi.advanceTimersByTimeAsync(POLL_S * 1000 + 1); });
+  await waitFor(() => expect(view.result.current.error).toContain("панель не отвечает"));
+  releaseFirst(J);   // тело первого 200 пришло после отказа
+  await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+  expect(view.result.current.journal).toEqual([]);          // не восстановился
+  expect(view.result.current.error).toContain("панель не отвечает");
   vi.useRealTimers();
 });
 
