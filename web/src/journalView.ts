@@ -4,6 +4,14 @@
 // журнала и диалог читают одни и те же строки.
 import type { JournalEntry } from "./types";
 
+/** text как строка: сервер (full_entry) сохраняет поле каким угодно JSON
+ *  и может вовсе его не положить. Число -- показать числом, отсутствие --
+ *  пустой строкой; сырое значение без потерь остаётся в модале (orDash). */
+function asText(v: unknown): string {
+  if (v == null) return "";
+  return typeof v === "string" ? v : String(v);
+}
+
 /** Полная дата события: дд.мм.гггг чч:мм:сс + пояс смотрящего, «-» без
  *  метки. Главная пишет одни чч:мм:сс (format.hhmmss) -- журнал живёт
  *  дольше дня, и без даты утреннее событие не отличить от вчерашнего, а
@@ -37,17 +45,24 @@ export function entryTitle(e: JournalEntry): string {
  *  Виды -- те, что публикует агент (_event): send, idle, wipe, type, up.
  *  Незнакомый вид не выдумывает своей фразы -- остаётся text как есть. */
 export function journalText(e: JournalEntry): string {
+  // text нормализован в строку: сервер (full_entry) кладёт какое угодно
+  // значение и может не положить поля вовсе -- фраза не имеет права крашить
+  const text = asText(e.text);
   switch (e.event) {
-    // агент пишет «from <имя>» -- фраза по-русски, имя остаётся как есть
-    case "send": return `сообщение от ${e.text.replace(/^from\s+/, "")}`.trim();
-    case "idle": return e.text ? `дождался простоя: ${e.text}` : "дождался простоя";
+    // агент пишет «from <имя>» -- фраза по-русски, имя остаётся как есть;
+    // пустое или отсутствующее имя -- фраза без хвоста, не «сообщение от»
+    case "send": {
+      const who = text.replace(/^from\s+/, "").trim();
+      return who ? `сообщение от ${who}` : "сообщение";
+    }
+    case "idle": return text ? `дождался простоя: ${text}` : "дождался простоя";
     case "wipe": return "клон снесён";
-    case "type": return e.text ? `команда в клоне: ${e.text}` : "команда в клоне";
+    case "type": return text ? `команда в клоне: ${text}` : "команда в клоне";
     // «up» агент пишет латиницей «agent on <узел>» -- переводим узел в фразу
     case "up": {
-      const node = e.text.replace(/^agent on\s+/, "");
-      return node && node !== e.text ? `агент на узле ${node} поднялся` : "агент поднялся";
+      const node = text.replace(/^agent on\s+/, "");
+      return node && node !== text ? `агент на узле ${node} поднялся` : "агент поднялся";
     }
-    default: return e.text;
+    default: return text;
   }
 }

@@ -20,7 +20,7 @@ test("shows every field: full time, event, puppet, node, project, phrase", () =>
   renderUi(<JournalModal entry={E} onClose={() => {}} />);
   const dlg = screen.getByRole("dialog");
   expect(dlg.getAttribute("aria-label") ?? dlg.textContent).toContain("send — pu-mop-1");
-  expect(screen.getByText(/^14\.11\.2023 22:13:20 /)).toBeInTheDocument();
+  expect(screen.getByText("14.11.2023 22:13:20 UTC")).toBeInTheDocument();
   expect(screen.getByText("hyper")).toBeInTheDocument();
   expect(screen.getByText("mop")).toBeInTheDocument();
   expect(screen.getByText("сообщение от ermak")).toBeInTheDocument();

@@ -22,7 +22,7 @@ const J: JournalEntry[] = [
 
 test("rows carry full date, event, puppet, node, project and the phrase", () => {
   renderUi(<JournalPage journal={J} open={() => {}} sourceKey="anton\0admin" />);
-  const row = screen.getByText(/^14.11.2023 22:14:20 /).closest("tr")!;
+  const row = screen.getByText("14.11.2023 22:14:20 UTC").closest("tr")!;
   // дата «полная»: не чч:мм:сс главной, а день и время с секундами
   expect(row.textContent).toContain("idle");
   expect(row.textContent).toContain("pu-mop-1");
@@ -36,7 +36,7 @@ test("clicking a row opens the modal, keyboard Enter too", () => {
   // клик по строке: старейшая запись (новые сверху) -- с текстом from ermak
   fireEvent.click(screen.getByText(/сообщение от ermak/));
   expect(open).toHaveBeenCalledWith(J[1]);
-  const row = screen.getByText(/^14.11.2023 22:14:20 /).closest("tr")!;
+  const row = screen.getByText("14.11.2023 22:14:20 UTC").closest("tr")!;
   fireEvent.keyDown(row, { key: "Enter" });
   expect(open).toHaveBeenCalledTimes(2);
 });

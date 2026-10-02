@@ -12,7 +12,8 @@ import { entryTitle, fullAt, journalText } from "../journalView";
 
 /** Поле записи или прочерк: oversized-маркер #424 полей не несёт. */
 function orDash(v: unknown): string {
-  const s = typeof v === "object" ? JSON.stringify(v) : String(v ?? "");
+  if (v == null) return "-";
+  const s = typeof v === "object" ? JSON.stringify(v) : String(v);
   return s === "" || s === "undefined" || s === "null" ? "-" : s;
 }
 

@@ -21,7 +21,7 @@ const E: JournalEntry = {
 // 1700000000 -- 2023-11-14 22:13:20 UTC; пояс фиксирован, чтобы проверка
 // не зависела от часового пояса того, кто её запускает.
 test("fullAt shows date and time with seconds, dash without at", () => {
-  expect(fullAt(E.at, "UTC")).toMatch(/^14\.11\.2023 22:13:20/);
+  expect(fullAt(E.at, "UTC")).toBe("14.11.2023 22:13:20 UTC");
   expect(fullAt(null)).toBe("-");
 });
 
@@ -47,21 +47,36 @@ test("journalText phrases the known kinds, falls back to text", () => {
     .toBe("что-то новое");
 });
 
+// Ревью 6 (#422): text -- произвольный JSON, каким его сохранил сервер
+// (full_entry): числа, отсутствие поля. Фраза обязана строиться без
+// краха, сырое значение -- не теряться (его показывает модал как есть).
+test("review6: a non-string or missing text phrases safely", () => {
+  const num = { ...E, text: 42 } as unknown as typeof E;
+  expect(journalText(num)).toBe("сообщение от 42");
+  const noText = { at: E.at, event: "send", name: "p", node: "n", project: "x" } as typeof E;
+  expect(journalText(noText)).toBe("сообщение");
+  const upNum = { ...E, event: "up", text: 7 } as unknown as typeof E;
+  expect(() => journalText(upNum)).not.toThrow();
+  expect(journalText(upNum)).toBe("агент поднялся");
+});
+
 // Ревью 2 (#422): полная запись -- с поясом. Критерий тикета: дата/время с
 // часовым поясом; пояс смотрящего меняет запись, и без «UTC»/«+03» строка
 // о поясе молчит.
 test("review2: fullAt ends with the timezone offset", () => {
   expect(fullAt(E.at, "UTC")).toBe("14.11.2023 22:13:20 UTC");
   const msk = fullAt(E.at, "Europe/Moscow");
-  // ICU пишет смещение коротко (GMT+3) -- проверяем число смещения и дату
-  expect(msk).toMatch(/GMT\+3$|\+03:00$/);
+  // вид смещения зависит от ICU (GMT+3 или +03:00) -- дата и число зоны
+  expect(msk).toMatch(/(GMT\+3|\+03:00)$/);
   expect(msk).toContain("15.11.2023");
 });
 
 // Пояс прилагается и без фиксированного пояса в аргументе (пояс браузера):
 // строка всегда заканчивается смещением.
 test("review2: fullAt shows the browser timezone offset too", () => {
-  expect(fullAt(E.at)).toMatch(/(UTC|[+-]\d{2}:\d{2})$/);
+  // в среде проверок зона фиксирована UTC (setupTests) -- запись всегда
+  // несёт смещение, и проверка не зависит от машины
+  expect(fullAt(E.at)).toBe("14.11.2023 22:13:20 UTC");
   expect(fullAt(null)).toBe("-");
 });
 
