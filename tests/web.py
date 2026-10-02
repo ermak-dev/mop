@@ -695,18 +695,26 @@ def check_login_api_415(c):
 
 # Источник адреса для лимита (#415): через nginx все -- 127.0.0.1, и ключ
 # по сокету запирал бы вход всей конторе после пяти неудач одного.
+# Источник адреса для лимита (#415): nginx ставит только X-Forwarded-For
+# ($proxy_add_x_forwarded_for -- последний элемент это $remote_addr nginx),
+# X-Real-IP он не ставит и не срезает: клиентский X-Real-IP дошёл бы до web
+# подделанным. Доверяем последнему элементу XFF и только с петли.
 def check_address_source_415(c):
     from mop.cli.server import web as webcli
     from mop.server import websession, identity
 
-    c.expect("#415 from the loopback nginx: X-Real-IP is the key",
-             websession.client_addr({"X-Real-IP": "10.1.2.3"}, ("127.0.0.1", 0)),
-             "10.1.2.3")
-    c.expect("#415 no X-Real-IP: the socket peer",
-             websession.client_addr({}, ("127.0.0.1", 0)), "127.0.0.1")
-    c.expect("#415 not from the loopback: a spoofed header is ignored",
-             websession.client_addr({"X-Real-IP": "1.2.3.4"}, ("10.9.9.9", 0)),
-             "10.9.9.9")
+    c.expect("#415 the loopback proxy: the LAST XFF element is the key",
+             websession.client_addr({"X-Forwarded-For": "spoofed, 10.1.2.3"},
+                                    ("127.0.0.1", 0)), "10.1.2.3")
+    c.expect("#415 X-Real-IP is not trusted at all",
+             websession.client_addr({"X-Real-IP": "10.9.9.9"}, ("127.0.0.1", 0)),
+             "127.0.0.1")
+    c.expect("#415 garbage in XFF: the socket peer",
+             websession.client_addr({"X-Forwarded-For": "not-an-ip"}, ("127.0.0.1", 0)),
+             "127.0.0.1")
+    c.expect("#415 not from the loopback: headers ignored",
+             websession.client_addr({"X-Forwarded-For": "1.2.3.4", "X-Real-IP": "5.6.7.8"},
+                                    ("10.9.9.9", 0)), "10.9.9.9")
     # Гейт касается эндпоинта (#416), а не входа: admin входит и мимо петли.
     good = {"Origin": "https://10.0.0.1", "Content-Type": "application/json"}
     store = websession.SessionStore(now=lambda: 1000.0)
@@ -719,9 +727,10 @@ def check_address_source_415(c):
                                   peer=("10.5.5.5", 0))
         c.expect("#415 an admin logs in from any address: the gate is the endpoint's",
                  (sent[0][1], out), (200, b'{"login": "anton", "role": "admin"}'))
-        # Разные X-Real-IP -- разные вёдра: чужие неудачи не запирают вход.
+        # Разные клиенты за одним nginx -- разные вёдра: чужие неудачи не
+        # запирают вход, и клиентский префикс XFF их не смешивает.
         a = {"Origin": "https://10.0.0.1", "Content-Type": "application/json",
-             "X-Real-IP": "10.1.1.1"}
+             "X-Forwarded-For": "spoofed, 10.1.1.1"}
         for _ in range(5):
             _fake_handler(webcli, "POST", "/api/login",
                           _login_body(login="anton", password="nope"), a)
@@ -730,11 +739,24 @@ def check_address_source_415(c):
         c.expect("#415 the flooded address is locked", sent[0][1], 429)
         sent, out = _fake_handler(webcli, "POST", "/api/login",
                                   _login_body(login="anton", password="s3cret"),
-                                  {**good, "X-Real-IP": "10.2.2.2"})
+                                  {**good, "X-Forwarded-For": "spoofed, 10.2.2.2"})
         c.expect("#415 the neighbour behind the same nginx still logs in",
                  (sent[0][1], out), (200, b'{"login": "anton", "role": "admin"}'))
 
 
+# RED 2 (#415): удалённый из file/LDAP user не остаётся вошедшим до конца TTL.
+def check_deleted_user_415(c):
+    from mop.server import identity, websession
+
+    class Gone:
+        def lookup(self, login):
+            return None
+
+    store = websession.SessionStore(now=lambda: 1000.0)
+    tok = store.open(identity.Identity("olga", "user", ()))
+    with patched(websession, provider=lambda: Gone()):
+        c.expect("#415 a user deleted from the provider loses the session",
+                 store.get(tok, 1000.0), None)
 
 def main():
     c = Checks()
@@ -743,7 +765,7 @@ def main():
                check_masters_305, check_dist_297,
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
                check_load_378, check_session_store_415, check_login_api_415,
-               check_address_source_415):
+               check_address_source_415, check_deleted_user_415):
         fn(c)
     return c.report("web")
 

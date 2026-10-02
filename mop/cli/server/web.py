@@ -156,9 +156,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/session":
             login, role = self._who()
             return self._json(200, {"login": login, "role": role})
-        if path == "/api/session":
-            login, role = self._who()
-            return self._json(200, {"login": login, "role": role})
         if path == "/api/pool":
             return self._json(200, COLLECTOR.current())
         if path == "/healthz":

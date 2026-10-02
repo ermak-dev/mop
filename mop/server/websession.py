@@ -9,6 +9,7 @@
 Роль перечитывается поставщиком при каждом взгляде: сессия пережила
 `mop server user` -- роль могла уйти.
 """
+import ipaddress
 import secrets
 import threading
 import time
@@ -52,16 +53,13 @@ class SessionStore:
             if not got or got[2] < now:
                 self._sessions.pop(token, None)
                 return None
-        login, role = got[0], got[1]
-        if role == "admin":
-            # Роль могла уйти с прошлой правкой операторов: сессия остаётся
-            # сессией, но admin видит уже сегодняшнюю правду. Логина не стало
-            # -- сессии тоже нет.
-            who = provider().lookup(login)
-            if who is None:
-                return None
-            role = who.role
-        return login, role
+        # Личность перечитывается провайдером на каждом взгляде (#415):
+        # удалённый из file/LDAP -- и admin, и user -- теряет сессию сразу,
+        # а не в конце TTL; роль берётся сегодняшняя, какой бы она ни была.
+        who = provider().lookup(got[0])
+        if who is None:
+            return None
+        return who.login, who.role
 
     def close(self, token):
         """Отзыв. -> True, если сессия была."""
@@ -89,14 +87,20 @@ def client_addr(headers, peer):
     """Ключ rate limit: чей это браузер.
 
     Через nginx одноранговый адрес сокета -- 127.0.0.1 у всех, и пять неудач
-    одного запирали бы вход всей конторе. X-Real-IP верен ровно оттуда:
-    свой nginx переписывает заголовок своим $remote_addr, и верим мы ему
-    только с петли. Запрос не с петли (мимо прокси) заголовок не читает
-    вовсе: подделанный X-Real-IP не должен размывать чужие неудачи."""
+    одного запирали бы вход всей конторе. Прокси-контракт нынешнего nginx
+    (deploy/roles/proxy/templates/mop.conf.j2): X-Forwarded-For
+    $proxy_add_x_forwarded_for -- последний элемент ставит сам nginx своим
+    $remote_addr, клиентский префикс может быть подделан и не читается.
+    X-Real-IP nginx не ставит и не срезает: доверять ему нельзя вовсе.
+    Заголовки читаются только с петли: запрос мимо прокси несёт свои."""
     if peer[0] in ("127.0.0.1", "::1"):
-        got = (headers.get("X-Real-IP") or "").strip()
-        if got:
-            return got
+        chain = (headers.get("X-Forwarded-For") or "").split(",")
+        got = chain[-1].strip() if chain else ""
+        try:
+            if got:
+                return str(ipaddress.ip_address(got))
+        except ValueError:
+            pass
     return peer[0]
 
 
