@@ -506,11 +506,16 @@ class MasterAnswer:
     user: object = None
     session: object = None
     cwd: object = None
+    # Уникальная личность сессии (#421): имя файла сессии. Имя сессии (session)
+    # выводится из каталога и не уникально; у одной живой сессии несколько
+    # who-адресов, и мерить мастеров адресами -- считать одну сессию многими.
+    session_id: object = None
 
     def to_dict(self):
         return {"master": self.master, "project": self.project, "user": self.user,
-                "session": self.session, "cwd": self.cwd}
+                "session": self.session, "cwd": self.cwd, "sessionId": self.session_id}
 
     @classmethod
     def from_dict(cls, d):
-        return cls(d.get("master"), d.get("project"), d.get("user"), d.get("session"), d.get("cwd"))
+        return cls(d.get("master"), d.get("project"), d.get("user"), d.get("session"),
+                   d.get("cwd"), d.get("sessionId"))

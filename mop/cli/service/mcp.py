@@ -207,8 +207,10 @@ def on_inbox(m):
     общий инбокс проекта, «кто из мастеров жив»."""
     if m.get("verb") == "who":
         d = channel.my_session() or {}
-        # Схема ответа -- одна (#319): domain.MasterAnswer.
-        return MasterAnswer(MASTER_ID, bus.PROJECT, bus.login(), d.get("name"), d.get("cwd")).to_dict()
+        # Схема ответа -- одна (#319): domain.MasterAnswer. sessionId -- имя
+        # файла сессии: личность сессии уникальна (#421), имя -- нет.
+        return MasterAnswer(MASTER_ID, bus.PROJECT, bus.login(), d.get("name"), d.get("cwd"),
+                            d.get("sessionId")).to_dict()
     sock = channel.master_socket()
     if not sock:
         return {"error": f"master {MASTER_ID} has no session — nowhere to deliver the note"}

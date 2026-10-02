@@ -268,7 +268,8 @@ def check_masters_305(c):
                  "session": "mop-ab", "cwd": "/home/ermak/mop"},
                 {"master": "ivan.box-3", "project": "mop", "user": "ivan",
                  "session": None, "cwd": None},
-                # тот же мастер ответил дважды (две подписки) -- одна строка
+                # тот же мастер ответил дважды (две подписки) -- одна строка:
+                # без sessionId (#421) дедуп -- по самому (project, address).
                 {"master": "ermak.mate-7", "project": "mop", "user": "ermak",
                  "session": "mop-ab", "cwd": "/home/ermak/mop"}],
         "rugent": [],
@@ -446,9 +447,10 @@ def check_who_319(c):
                       "git@h:g/mop.git")]
     c.expect("#319 page: a who answer as a masters row",
              web.master_rows({"mop": [answer, bare]}, rows),
-             [{"project": "mop", "master": "-", "user": "-", "session": "-", "cwd": "-", "puppets": []},
-              {"project": "mop", "master": "anton.mate-7", "user": "anton", "session": "s-1",
-               "cwd": "/w", "puppets": ["pu-mop-1"]}])
+             [{"project": "mop", "master": "-", "addresses": ["-"], "user": "-",
+               "session": "-", "cwd": "-", "puppets": []},
+              {"project": "mop", "master": "anton.mate-7", "addresses": ["anton.mate-7"],
+               "user": "anton", "session": "s-1", "cwd": "/w", "puppets": ["pu-mop-1"]}])
     with patched(mcp.bus, gather=lambda *a, **k: [answer, bare]), patched(mcp, MASTER_ID="anton.mate-7"):
         got = mcp._masters()
     c.expect("#319 agents: the masters table from the same answers", got,
@@ -561,13 +563,98 @@ def check_load_378(c):
     c.expect("#378 the snapshot carries the load", snap.get("load"), fn([busy], [node(1, 2)]))
 
 
+# ── #421: «Мастера» -- уникальные Claude-сессии, не who-адреса ───────────
+# HYPOTHESIS: master_rows мерил мастеров who-адресами: у одной живой сессии
+# их несколько (инбокс проекта и личный), и каждый адрес становился строкой,
+# а папеты приписывались каждому адресу логина. Сессий без sessionId он
+# склеивал по (проект, адрес) -- адрес у мёртвой сессии жив, и строки
+# плодились; личность сессии в ответе не было вовсе.
+# SOLUTION: who-ответ несёт sessionId (модификатор адреса: имя файла
+# сессии уникально, имя -- нет); master_rows группирует ответы по
+# (project, sessionId), адреса собирает списком -- адресация не теряется;
+# без sessionId ответы одной (project, user) не склеиваются. «puppets» --
+# папеты логина проекта (не адреса): поле сохранено для старой страницы,
+# ownership пояснит UI (#423). Публичный снимок sessionId не раскрывает:
+# строка -- лишь указатель «одна сессия», адреса как были.
+# STATUS: FIXED — see #421
+def check_master_sessions_421(c):
+    import dataclasses
+    rows = [dataclasses.replace(row("pu-mop-1", "git@h:g/mop.git"), owner="ermak"),
+            dataclasses.replace(row("pu-mop-2", "git@h:g/mop.git"), owner="ivan"),
+            dataclasses.replace(row("pu-mop-3", "git@h:g/mop.git"), owner="ermak")]
+    answers = {
+        "mop": [
+            # Одна живая сессия, два who-адреса (личный инбокс и общий).
+            {"master": "ermak.mate-7", "user": "ermak", "session": "mop-ab",
+             "sessionId": "0f1e-2d3c", "cwd": "/h/ermak/mop"},
+            {"master": "ermak.mate-7-all", "user": "ermak", "session": "mop-ab",
+             "sessionId": "0f1e-2d3c", "cwd": "/h/ermak/mop"},
+            # Другая живая сессия того же логина.
+            {"master": "ermak.box-9", "user": "ermak", "session": "mop-cd",
+             "sessionId": "9b8a-7c6d", "cwd": "/h/ermak/other"},
+            # Сессия без sessionId: своя строка, ни с кем не склеена.
+            {"master": "ivan.box-3", "user": "ivan", "session": "mop-ef",
+             "sessionId": None, "cwd": None},
+            {"master": "ivan.box-4", "user": "ivan", "session": "mop-gh",
+             "sessionId": None, "cwd": None},
+        ],
+    }
+    got = web.master_rows(answers, rows)
+    c.expect("#421 one row per live session, not per who address",
+             sorted((m["user"], m["session"]) for m in got),
+             [("ermak", "mop-ab"), ("ermak", "mop-cd"), ("ivan", "mop-ef"),
+              ("ivan", "mop-gh")])
+    ab = next(m for m in got if m["session"] == "mop-ab")
+    c.expect("#421 every who address of the session is kept: send still reaches it",
+             ab["master"], "ermak.mate-7")
+    c.expect("#421 the addresses list carries all of them",
+             sorted(ab["addresses"]),
+             ["ermak.mate-7", "ermak.mate-7-all"])
+    c.expect("#421 the other session carries its own address only",
+             next(m for m in got if m["session"] == "mop-cd")["addresses"],
+             ["ermak.box-9"])
+    # Публичный снимок: сырого sessionId в строках нет.
+    c.check("#421 no raw sessionId in the public rows",
+            all("sessionId" not in m for m in got), got)
+    # «puppets» -- папеты логина в проекте; для старой страницы поле на месте
+    # и не множится по адресам (#423 пояснит ownership).
+    c.expect("#421 puppets follow the login, once per session row",
+             [m["puppets"] for m in got],
+             [["pu-mop-1", "pu-mop-3"], ["pu-mop-1", "pu-mop-3"],
+              ["pu-mop-2"], ["pu-mop-2"]])
+    # Дубль ответа той же сессии -- по-прежнему одна строка.
+    twice = web.master_rows({"mop": answers["mop"] + [answers["mop"][0]]}, rows)
+    c.expect("#421 a duplicate who answer adds no row", len(twice), 4)
+    # Legacy (#421, ревью): повтор ТОГО ЖЕ who-адреса без sessionId -- один
+    # ответивший endpoint, одна строка; разные адреса -- разные строки.
+    legacy = [{"master": "ermak.mate-7", "user": "ermak", "session": "mop-ab",
+               "sessionId": None, "cwd": "/h/ermak/mop"}]
+    c.expect("#421 the same legacy address twice: one row",
+             len(web.master_rows({"mop": legacy + legacy}, rows)), 1)
+    c.expect("#421 different legacy addresses: two rows",
+             len(web.master_rows({"mop": legacy + [{**legacy[0], "master": "ermak.box-9"}]},
+                                 rows)), 2)
+
+
+def check_who_answer_421(c):
+    from mop.common.domain import MasterAnswer
+    d = {"master": "a.b-1", "project": "mop", "user": "a", "session": "s",
+         "sessionId": "0f1e-2d3c", "cwd": "/w"}
+    a = MasterAnswer.from_dict(d)
+    c.expect("#421 MasterAnswer carries the session identity", a.session_id, "0f1e-2d3c")
+    c.expect("#421 to_dict keeps it on the wire",
+             MasterAnswer.from_dict(a.to_dict()).session_id, "0f1e-2d3c")
+    c.expect("#421 an old answer without it reads as None",
+             MasterAnswer.from_dict({"master": "a.b-1"}).session_id, None)
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
                check_masters_305, check_dist_297,
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
-               check_load_378):
+               check_load_378, check_master_sessions_421, check_who_answer_421):
         fn(c)
     return c.report("web")
 

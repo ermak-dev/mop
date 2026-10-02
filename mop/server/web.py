@@ -165,30 +165,52 @@ def user_rows(answers):
 
 
 def master_rows(answers, rows):
-    """Ответы who по проектам -> строки секции «Мастера» (#305). Чистая.
+    """Ответы who по проектам -> строки секции «Мастера» (#305, #421). Чистая.
 
     answers -- {проект: [ответ who]}, ответ -- то, что отдаёт mcp.on_inbox:
-    {master, project, user, session, cwd}. Реестра мастеров нет намеренно
-    (mcp._masters): живой -- тот, кто отозвался. Папеты -- проекта, чья
-    аренда (owner строки ростера) на логине мастера: так видно, кто чем
-    правит. Один мастер, ответивший дважды, -- одна строка."""
+    {master, project, user, session, sessionId, cwd}. Реестра мастеров нет
+    намеренно (mcp._masters): живой -- тот, кто отозвался.
+
+    Единица строки -- живая Claude-сессия (#421), не who-адрес: у сессии
+    адресов несколько (личный инбокс и общий проекта), и адрес-единица
+    плодил строки и приписывал папетов каждому адресу. sessionId -- имя
+    файла сессии, оно уникально; все адреса сессии собираются списком, ни
+    один не теряется. Ответ без sessionId (#421 -- старый мастер) склеить
+    по сессии нельзя: дедуп по самому (project, address) -- один ответивший
+    endpoint, одна строка, как и до #421.
+
+    «puppets» -- папеты проекта, чья аренда (owner строки ростера) на
+    логине: принадлежности сессии оно не выражает, поле оставлено для
+    страницы, ownership пояснит #423. Один мастер, ответивший дважды, --
+    одна строка."""
     by_owner = {}
     for r in rows:
         if r.owner:
             by_owner.setdefault((row_project(r), r.owner), []).append(r.name)
-    seen, out = set(), []
+    by_session, order = {}, []
     for asked, found in answers.items():
         for d in found or []:
             a = MasterAnswer.from_dict(d)
             project = a.project or asked
             address = str(a.master or "-")
-            if (project, address) in seen:
-                continue
-            seen.add((project, address))
-            user = a.user or "-"
-            out.append({"project": project, "master": address, "user": user,
-                        "session": a.session or "-", "cwd": a.cwd or "-",
-                        "puppets": sorted(by_owner.get((project, user), []))})
+            # Ключ -- сессия; без sessionId у ответа нет личности, и каждая
+            # такая строка своя: счётчик в ключе не даёт им склеиться.
+            # Ключ -- сессия. Без sessionId личности нет: дедуп -- по самому
+            # (project, address), один ответивший endpoint -- одна строка
+            # (так было и до #421); разные адреса -- разные строки.
+            key = (project, a.session_id) if a.session_id else (project, address)
+            if key not in by_session:
+                by_session[key] = {"project": project, "master": address,
+                                   "addresses": [address], "user": a.user or "-",
+                                   "session": a.session or "-", "cwd": a.cwd or "-"}
+                order.append(key)
+            elif address not in by_session[key]["addresses"]:
+                by_session[key]["addresses"].append(address)
+    out = []
+    for key in order:
+        m = dict(by_session[key])
+        m["puppets"] = sorted(by_owner.get((m["project"], m["user"]), []))
+        out.append(m)
     return sorted(out, key=lambda m: (m["project"], m["user"], m["master"]))
 
 
@@ -207,6 +229,8 @@ def snapshot(rows, nodes, usage, per_puppet, per_user, journal, errors, at,
             "nodes": nodes, "usage": usage,
             "per_puppet": per_puppet, "per_user": per_user,
             "journal": journal, "errors": errors,
+            # Строка мастера -- живая сессия (#421): addresses -- все её
+            # who-адреса, master -- первый из них (адресация старой страницы).
             "masters": list(masters),
             # Период опроса мастеров (#325): страница пишет «раз в N с» по
             # нему, а не своей копией числа.
