@@ -481,11 +481,23 @@ def _valid_at(value):
 # bearer-схемы. Только эта форма -- произвольный текст не распознаётся как
 # секрет, и обещать этого нельзя; остальной текст остаётся как был.
 _BEARER = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+")
+# Ключ=значение в тексте команды (#424, follow-up): значение теряется, слово
+# ключа остаётся. Словарь -- тот же CREDENTIAL_KEYS (признанный список), а
+# не «любое слово перед =»: произвольная строка секретом не считается. Формы:
+# --key value, --key=value, key=value, key: value (регистр ключа не важен).
+_KEY = "|".join(re.escape(k) for k in sorted(CREDENTIAL_KEYS, key=len, reverse=True))
+_KV = re.compile(rf"(?i)(--)?({_KEY})([=:\s]+)([^\s,;]+)")
 
 
 def _redact_text(text):
-    """Убрать bearer-значения из строки события, контекст вокруг -- оставить."""
-    return _BEARER.sub("Bearer [redacted]", text) if isinstance(text, str) else text
+    """Убрать bearer-значения и ключ=значение из строки события; контекст
+    вокруг -- оставить."""
+    if not isinstance(text, str):
+        return text
+    def kv(m):
+        # Дефис-префикс и слово ключа остаются: контекст команды читается.
+        return f"{m.group(1) or ''}{m.group(2)}{m.group(3)}[redacted]"
+    return _KV.sub(kv, _BEARER.sub("Bearer [redacted]", text))
 
 
 def _strip_credentials(value):
