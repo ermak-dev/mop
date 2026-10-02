@@ -32,10 +32,16 @@ from mop.cli.pool import login
 def claude_argv(passthru):
     """Аргументы запуска claude -> список. Чистая функция (#419): и флаг
     пропуска разрешений, и отключение черновиков отзыва живут здесь, у
-    фактического execvpe -- одно место на оба."""
+    фактического execvpe -- одно место на оба.
+
+    Свой --settings ставится ДО пасстру, а не в конец: claude не мержит
+    повторные --settings (побеждает последний), а за `--` флаги вообще не
+    читаются. Раньше пасстру наш feedbackDrafts=off действует всегда, а
+    пользовательский --settings позже -- и сильнее: его файл целиком
+    побеждает, в том числе сознательное включение черновиков обратно."""
     skip = "--dangerously-skip-permissions"
     args = ([] if skip in passthru else [skip]) + list(passthru)
-    return ["claude", *args, *_common.FEEDBACK_SETTINGS]
+    return ["claude", *args[:1], *_common.FEEDBACK_SETTINGS, *args[1:]]
 
 
 def main(argv):

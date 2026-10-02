@@ -159,6 +159,47 @@ def main():
             carries(code.claude_argv(["--continue"])), code.claude_argv(["--continue"]))
     c.check("mop master passes feedbackDrafts=off to claude (#419)",
             carries(master.claude_argv([])), master.claude_argv([]))
+    # HYPOTHESIS (правка #419, край пасстру): claude 2.1.287 не мержит
+    # повторные --settings -- побеждает последний (проверено на живом
+    # бинарнике: env из первого значения пропадает), а всё после `--`
+    # парсер считает позиционными и флагом уже не читает. Значит append
+    # нашего --settings В КОНЕЦ ломит обе края: чужие настройки он
+    # затирает, а за `--` вообще не применяется. SOLUTION: вставлять пару
+    # ДО пасстру (сразу за постоянными флагами) -- тогда наше значение
+    # стоит раньше, пользовательский --settings позже и побеждает у claude
+    # ровно его файл, а до `--` наш флаг доходит. feedbackDrafts при этом
+    # пользователь может перезаписать сознательно -- и это правильно:
+    # явное ближе.
+    # RESULT: append-порядок ломил обе границы; вставка до пасстру --
+    # чужой файл побеждает, наш флаг применяется и до `--`.
+    def carries_before_passthru(argv, passthru):
+        # Пара подряд, и её конец -- до начала хвоста пасстру: хвост
+        # узнаём по последнему элементу (уникальное значение), а не по
+        # первому (флаг может совпасть с нашим).
+        if not passthru:
+            return any(argv[i:i + 2] == list(want_args) for i in range(len(argv)))
+        tail = argv[-len(passthru):] if len(passthru) <= len(argv) else []
+        if tail != passthru:
+            return False
+        head = argv[:-len(passthru)] if passthru else argv
+        return any(head[i:i + 2] == list(want_args) for i in range(len(head)))
+
+    user = ["--settings", "custom.json"]
+    c.check("mop code puts feedback settings before the passthru (#419)",
+            carries_before_passthru(code.claude_argv(user), user),
+            code.claude_argv(user))
+    c.check("mop master puts feedback settings before the passthru (#419)",
+            carries_before_passthru(master.claude_argv(user), user),
+            master.claude_argv(user))
+    dash = ["--", "--settings", "custom.json"]
+    c.check("mop code feedback settings stay effective before -- (#419)",
+            carries(code.claude_argv(dash))
+            and code.claude_argv(dash).index("--") > code.claude_argv(dash).index(want_args[0]),
+            code.claude_argv(dash))
+    c.check("mop master feedback settings stay effective before -- (#419)",
+            carries(master.claude_argv(dash))
+            and master.claude_argv(dash).index("--") > master.claude_argv(dash).index(want_args[0]),
+            master.claude_argv(dash))
     return c.report("llm")
 
 

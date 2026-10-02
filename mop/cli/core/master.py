@@ -115,10 +115,11 @@ def claude_args(args):
 
 def claude_argv(passthru):
     """Аргументы запуска claude -> список. Чистая функция (#419): сборка
-    argv в одном месте, как code.claude_argv."""
+    argv в одном месте, как code.claude_argv. Свой --settings -- до
+    пасстру: почему -- в docstring того же места, code.claude_argv."""
     return ["claude", "--dangerously-skip-permissions",
             "--mcp-config", mcp_config(),
-            *passthru, *_common.FEEDBACK_SETTINGS]
+            *_common.FEEDBACK_SETTINGS, *passthru]
 
 
 def _main(argv):
