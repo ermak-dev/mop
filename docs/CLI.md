@@ -306,30 +306,28 @@ shell: disk pressure on a node is a fact about every tenant, not one project.
 #### mop join
 
 ```text
-log in to a server's bus as yourself: mop join [--server ADDRESS] [LOGIN]
+join a pool server: mop join [--server ADDRESS] [LOGIN]
 
-What is not named comes from the command's context: the working
-copy's binding (git config mop.server, mop.user), over it the environment
-(MOP_SERVER_LAN, MOP_BUS_USER), over it the command line (--server, LOGIN).
-With no server in any of them: the one server you are already logged in to
-whose registry has this clone's origin, else MOP_SERVER_LAN from .env. With
-no login: the one kept for that server, else $USER.
+Server and login come from --server/LOGIN, the process environment or the
+working copy's binding; if missing, they are asked for. The bus password is
+asked without echo (or read from MOP_BUS_PASSWORD) and verified before
+saving. A valid previous login is reused.
 
-The password is asked for (or read from MOP_BUS_PASSWORD) and checked by
-connecting before anything is written; if you are already logged in to that
-server under that login, nothing is asked. Who you are and what you may
-reach is decided by the server's identity provider: its operators file
-(mop server user) or its directory.
+The HTTPS port defaults to 443. On a new join, the LLM proxy URL and client
+key are asked for separately (key without echo). Use the server's TLS URL,
+for example https://ADDRESS/llm; an HTTP URL is accepted only on loopback.
+The key is checked with /v1/models before credentials are saved. Obtain it
+from the controller through a private channel; join does not expose a shared
+key over the pool bus or a public API.
 
-The bus is reached through the server's TLS proxy (wss://<server>/nats); a
-self-signed certificate is pinned on first login, before the password is
-sent, and its fingerprint printed — compare it on the controller:
-openssl x509 -noout -fingerprint -sha256 -in ~/.config/mop/secrets/tls.pem
+The bus uses the server's TLS proxy at /nats. A self-signed certificate is
+pinned before sending the bus password; compare its fingerprint on the
+controller: openssl x509 -noout -fingerprint -sha256 -in
+~/.config/mop/secrets/tls.pem
 
-The password stays in ~/.config/mop/servers/<server>/: one login per person
-per server, for every project. The working copy remembers only the server
-and the login (git config mop.server, mop.user, not committed), and every
-mop command run in it goes there. --user NAME is the old spelling of LOGIN.
+Bus and proxy credentials stay in separate private files under
+~/.config/mop/servers/<server>/. The clone remembers only server and login
+in local git config. --user NAME is the old spelling of LOGIN.
 ```
 
 #### mop setup
