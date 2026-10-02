@@ -258,53 +258,6 @@ refused with that master's name; --force acts anyway and says whose it was.
 
 ### pool: the pool and its machines, for the operator
 
-#### mop disk
-
-```text
-space on pool nodes: mop disk [node]
-
-df on the filesystem where puppet clones and target directories live.
-This is a node-level verb: it refuses in a master shell — host space is
-the operator's to see.
-```
-
-#### mop doctor
-
-```text
-pool diagnostics: mop doctor [group] [--fix [--safe]]
-
-Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
-and a job spec older than the node driver — that last one looks perfectly
-healthy until the scheduler moves it to a hypervisor. The disk group asks each
-node's agent what the disk watchdog would sweep there and who is under disk
-pressure; --fix sweeps for real.
-
-The checks come in groups, a module each in mop/client/doctor/: `mop doctor`
-runs them all, `mop doctor <group>` runs one; a name that is not a group is
-refused with the list of groups.
-
---fix treats what's treatable; a silent node agent is not on this list — the
-puppet may well be working fine, and a restart would kill that work in the
-clone. An expired login is treated without a restart: the puppet is nudged
-to go on, so its conversation survives.
-
---fix --safe treats only what cannot break work — login+nudge and the disk
-sweep — and names the rest without executing it: restarts, alloc stops,
-/model and spec updates stay the operator's call. The server runs it hourly
-(mop-doctor.timer), its output goes to the journal.
-```
-
-#### mop gc
-
-```text
-recycle free puppets on nodes low on space: mop gc [--dry]
-
-A node with less than MOP_GC_FREE_MIN_GB free gets its free puppets
-recycled (clone reset to HEAD, target wiped) — no more than
-MOP_GC_MAX_PER_RUN per run. Run this as the operator, not from a master
-shell: disk pressure on a node is a fact about every tenant, not one project.
-```
-
 #### mop login
 
 ```text
@@ -346,32 +299,6 @@ Ansible does the work, as everywhere else in mop: this command only
 installs ansible itself through apt when it is missing (Debian 13 ships
 the full ansible package, collections included) and runs
 deploy/self.yml against localhost. Running it again changes nothing.
-```
-
-#### mop sweep
-
-```text
-garbage on the pool's nodes: mop sweep [--dry]
-
-Objects no puppet owns any more. Nomad is the authority: a body whose name
-is in no job is an orphan, and on a hypervisor an orphan is a running
-container holding memory and disk that nothing accounts for.
-
-Run this as the operator, not from a master shell: what stands on a node is
-a fact about every tenant, not about one project — the same reason `mop gc`
-and `mop disk` live outside a master's reach.
-
-Two kinds, deliberately of different weight. An `orphan` is destroyed: its
-puppet is gone and the body cannot come back to anyone. A `build body` is
-only named — a sealed image always stands still, so one that runs is either a
-build happening right now or a build that broke, and from here those two
-look the same. Destroying someone's running build costs more than leaving
-rubbish until the next sweep.
-
-`mop driver sweep` is the other half and stays: it runs ON a node, knows
-nothing of Nomad, and judges by the absence of a tmux session. That is the
-right signal for a node left alone; this one is the right signal for the
-machine that holds the register.
 ```
 
 ### dev: the developer's own commands: the project's tracker, CI and checks, not the pool
@@ -1089,6 +1016,52 @@ that started the job, and that newer commit's own deploy job rolls it out:
 --from-ci then says so and exits 0. Every other refusal stays a refusal.
 ```
 
+#### mop server disk
+
+```text
+space on pool nodes: mop server disk [node]
+
+df on the filesystem where puppet clones and target directories live.
+This is a node-level verb run only on the server: host space belongs
+to the whole pool, not to one project.
+```
+
+#### mop server doctor
+
+```text
+pool diagnostics: mop server doctor [group] [--fix [--safe]]
+
+Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
+and a job spec older than the node driver — that last one looks perfectly
+healthy until the scheduler moves it to a hypervisor. The disk group asks each
+node's agent what the disk watchdog would sweep there and who is under disk
+pressure; --fix sweeps for real.
+
+The checks come in groups, a module each in mop/server/doctor/: `mop server doctor` runs them all, `mop server doctor <group>` runs one; an unknown name is
+refused with the list of groups.
+
+--fix treats what's treatable; a silent node agent is not on this list — the
+puppet may well be working fine, and a restart would kill that work in the
+clone. An expired login is treated without a restart: the puppet is nudged
+to go on, so its conversation survives.
+
+--fix --safe treats only what cannot break work — login+nudge and the disk
+sweep — and names the rest without executing it: restarts, alloc stops,
+/model and spec updates stay the operator's call. The server runs it hourly
+(mop-doctor.timer), its output goes to the journal.
+```
+
+#### mop server gc
+
+```text
+recycle free puppets on nodes low on space: mop server gc [--dry]
+
+A node with less than MOP_GC_FREE_MIN_GB free gets its free puppets
+recycled (clone reset to HEAD, target wiped) — no more than
+MOP_GC_MAX_PER_RUN per run. Run this on the server, not from a master shell: disk pressure on a node
+is a fact about every tenant, not one project.
+```
+
 #### mop server pve-facts
 
 ```text
@@ -1120,6 +1093,32 @@ Ansible does the work, as everywhere else in mop: this command only
 installs ansible itself through apt when it is missing (Debian 13 ships
 the full ansible package, collections included) and runs
 deploy/self.yml against localhost. Running it again changes nothing.
+```
+
+#### mop server sweep
+
+```text
+garbage on the pool's nodes: mop server sweep [--dry]
+
+Objects no puppet owns any more. Nomad is the authority: a body whose name
+is in no job is an orphan, and on a hypervisor an orphan is a running
+container holding memory and disk that nothing accounts for.
+
+Run this on the server, not from a master shell: what stands on a node is
+a fact about every tenant, not about one project — the same reason
+`mop server gc` and `mop server disk` live outside a master's reach.
+
+Two kinds, deliberately of different weight. An `orphan` is destroyed: its
+puppet is gone and the body cannot come back to anyone. A `build body` is
+only named — a sealed image always stands still, so one that runs is either a
+build happening right now or a build that broke, and from here those two
+look the same. Destroying someone's running build costs more than leaving
+rubbish until the next sweep.
+
+`mop driver sweep` is the other half and stays: it runs ON a node, knows
+nothing of Nomad, and judges by the absence of a tmux session. That is the
+right signal for a node left alone; this one is the right signal for the
+machine that holds the register.
 ```
 
 #### mop server user

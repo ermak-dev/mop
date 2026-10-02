@@ -36,7 +36,7 @@ def _probe():
     host = config.get("MOP_SERVER_LAN")
     joined = creds.client(creds.server_dir(host))
     if joined is None:
-        raise RuntimeError(f"no joined proxy configuration for {host}: run mop join --server {host}")
+        raise RuntimeError(f"no joined proxy configuration for {host}: run mop login --server {host}")
     req = urllib.request.Request(joined["proxy_url"].rstrip("/") + "/v1/models",
                                  headers={"Authorization": f"Bearer {joined['proxy_key']}"})
     pin = creds.cafile(creds.server_dir(host)) if \

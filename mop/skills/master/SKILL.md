@@ -194,7 +194,7 @@ by the pool's single LLM proxy, so any name the proxy serves is one slash
 away. `puppet(action="restart")` never keeps the conversation — that is
 deliberate, since returning a stuck puppet to the context he stuck on would
 just reproduce the jam. If the proxy itself is down or out of quota, that is
-the operator's to fix (the panel, `mop doctor`) — no puppet-side move helps.
+the operator's to fix (the panel, `mop server doctor`) — no puppet-side move helps.
 
 ## Clone discipline
 
