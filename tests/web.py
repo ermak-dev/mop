@@ -408,6 +408,7 @@ def check_rounds_319(c):
 def _fake_handler(webcli, method, path, body=b"", headers=None, peer=("127.0.0.1", 0)):
     import io
     h = webcli.Handler.__new__(webcli.Handler)
+    h.command = method
     h.path = path
     h.headers = {"Content-Length": str(len(body)), **(headers or {})}
     h.rfile, h.wfile, h.sent = io.BytesIO(body), io.BytesIO(), []
@@ -1172,7 +1173,624 @@ def check_login_bounds_415(c):
         c.expect("#415 the failure says why, one line",
                  json.loads(out).get("error", "").startswith("provider unavailable"),
                  True)
+# ── #417: write-guard гейтвея управления прокси ─────────────────────────
+# HYPOTHESIS: полный PUT конфига из сток-панели (Source-режим) удаляет блок
+# management и убивает ключ; PATCH с полем secret-key подменяет ключ
+# плейнтекстом из браузера. SOLUTION: чистый guard в mop/server/web.py --
+# решение по (метод, путь, тело): пропустить / запретить / инжектировать
+# management-блок из серверного источника. Парсинг -- только server-side,
+# сырой ключ в телах и ответах не появляется.
+# STATUS: FIXED — see #417
+import json as _json417
 
+
+def check_guard_417(c):
+    fn = getattr(web, "guard_management_write", None)
+    if not c.check("#417 web.guard_management_write exists", fn is not None):
+        return
+    # Источник ключа -- перечитываемый закрытый файл (#418 положит его в
+    # каталог MOP_USER); callable, как файл: сбой чтения -- None.
+    KEY = "k" * 32
+    reads = []
+
+    def source():
+        reads.append(1)
+        return KEY
+
+    # GET и прочие безопасные методы -- прозрачны.
+    for method, path in (("GET", "/v8/management/config"),
+                         ("GET", "/v8/management/observability/logs"),
+                         ("POST", "/v8/management/credentials/refresh")):
+        got = fn(method, path, b"", source)
+        c.expect(f"#417 {method} passes through", got["action"], "pass")
+
+    # PATCH без secret-key -- пропуск как есть.
+    method, path = "PATCH", "/v8/management/config"
+    body = _json417.dumps({"management": {"disable-auto-update-panel": False},
+                           "server": {"port": 18317}}).encode()
+    got = fn(method, path, body, source)
+    c.expect("#417 a merge PATCH without the secret passes", got["action"], "pass")
+
+    # PATCH с secret-key (плейнтекст ИЛИ хэш) -- 403, до upstream.
+    for what, value in (("plaintext", "NEWKEY"), ("the hash", "$2b$10$abc"),
+                        ("empty", "")):
+        body = _json417.dumps({"management": {"secret-key": value}}).encode()
+        got = fn(method, path, body, source)
+        c.expect(f"#417 PATCH carrying secret-key ({what}) is refused",
+                 (got["action"], got.get("status")), ("refuse", 403))
+
+    # path-addressed PATCH к самому полю -- тоже 403.
+    body = _json417.dumps({"secret-key": "x"}).encode()
+    got = fn("PATCH", "/v8/management/config/management", body, source)
+    c.expect("#417 a path-addressed write to the field is refused",
+             (got["action"], got.get("status")), ("refuse", 403))
+    got = fn("PATCH", "/v8/management/config/management/secret-key", b'"y"', source)
+    c.expect("#417 the leaf path itself is refused", (got["action"], got.get("status")),
+             ("refuse", 403))
+
+    # PUT полного документа БЕЗ блока management -- инжект блока с ключом
+    # (вариант A: ключ перечитывается из источника на каждый write).
+    method, path = "PUT", "/v8/management/config"
+    body = _json417.dumps({"server": {"port": 18317}, "config-version": 8}).encode()
+    got = fn(method, path, body, source)
+    c.check("#417 a full PUT without management injects key+defaults",
+            got["action"] == "inject"
+            and _json417.loads(got["body"])["management"]["secret-key"] == KEY
+            and _json417.loads(got["body"])["management"]["allow-remote"] is False, got)
+
+    # Ключ перечитывается на каждый write: ротация файлом #418 подхватывается.
+    before = len(reads)
+    fn(method, path, body, source)
+    c.check("#417 the key source is re-read per write", len(reads) == before + 1, len(reads))
+
+    # PUT/config.yaml (raw YAML) без блока -- инжект YAML-строкой; с полем -- 403.
+    yaml_body = b"server:\n  port: 18317\n"
+    got = fn("PUT", "/v8/management/config.yaml", yaml_body, source)
+    c.check("#417 a YAML PUT without management injects key+defaults",
+            got["action"] == "inject"
+            and b"management:" in got["body"] and b"allow-remote: false" in got["body"]
+            and KEY.encode() in got["body"], got)
+    yaml_bad = b"server:\n  port: 18317\nmanagement:\n  secret-key: \"K\"\n"
+    got = fn("PUT", "/v8/management/config.yaml", yaml_bad, source)
+    c.expect("#417 a YAML PUT carrying the secret is refused",
+             (got["action"], got.get("status")), ("refuse", 403))
+
+    # Битые тела write -- fail closed, не пропускать и не угадывать.
+    for method, path in (("PATCH", "/v8/management/config"),
+                         ("PUT", "/v8/management/config"),
+                         ("PUT", "/v8/management/config.yaml")):
+        got = fn(method, path, b"{not json", source)
+        c.expect(f"#417 a malformed {method} body fails closed",
+                 (got["action"], got.get("status")), ("refuse", 400))
+
+    # Файл ключа недоступен, а PUT удалил бы секрет -- fail closed 503.
+    got = fn("PUT", "/v8/management/config", body, lambda: None)
+    c.expect("#417 no key source and a deleting PUT: refuse",
+             (got["action"], got.get("status")), ("refuse", 503))
+
+    # PUT С блоком management без secret-key -- инжект ключа, прочие
+    # management-настройки клиента сохраняются (полная замена не теряет их).
+    body = _json417.dumps({"management": {"disable-auto-update-panel": False},
+                           "server": {"port": 18317}}).encode()
+    got = fn("PUT", "/v8/management/config", body, source)
+    c.check("#417 a PUT keeping other management settings gets the key injected",
+            got["action"] == "inject"
+            and _json417.loads(got["body"])["management"]["disable-auto-update-panel"] is False
+            and _json417.loads(got["body"])["management"]["secret-key"] == KEY, got)
+
+
+# Ответная сторона (#417): upstream отдаёт bcrypt-хэш secret-key в
+# /config и /config.yaml -- в браузер не идёт ни хэш, ни ключ. Плейсхолдер
+# знаком guard'у: явная запись плейсхолдера == отсутствию поля.
+PLACEHOLDER = "managed-by-mop"
+
+
+def check_guard_placeholder_417(c):
+    fn = web.guard_management_write
+    KEY = "k" * 32
+
+    # GET-ответы: JSON и YAML ветки.
+    red = getattr(web, "redact_management_read", None)
+    if not c.check("#417 web.redact_management_read exists", red is not None):
+        return
+    body = _json417.dumps({"server": {"port": 18317},
+                           "management": {"secret-key": "$2b$10$HASH",
+                                          "allow-remote": False}}).encode()
+    got = red("/v8/management/config", body)
+    doc = _json417.loads(got)
+    c.expect("#417 the JSON read hides the hash behind the placeholder",
+             doc["management"]["secret-key"], PLACEHOLDER)
+    c.expect("#417 other management fields survive the read",
+             doc["management"]["allow-remote"], False)
+    yaml_body = b"server:\n  port: 18317\nmanagement:\n  secret-key: \"$2b$10$HASH\"\n"
+    got = red("/v8/management/config.yaml", yaml_body)
+    c.check("#417 the YAML read hides the hash",
+            b"$2b$10$HASH" not in got and PLACEHOLDER.encode() in got, got)
+    untouched = b'{"credentials": {"files": []}}'
+    c.expect("#417 a non-config read passes byte-for-byte",
+             red("/v8/management/credentials", untouched), untouched)
+
+    # Guard: плейсхолдер в клиентском write == поле отсутствует -> инжект;
+    # любой иной явный ключ -> 403.
+    body = _json417.dumps({"management": {"secret-key": PLACEHOLDER,
+                                          "disable-auto-update-panel": False}}).encode()
+    got = fn("PUT", "/v8/management/config", body, lambda: KEY)
+    c.check("#417 the placeholder in a PUT reads as absent: key injected",
+            got["action"] == "inject"
+            and _json417.loads(got["body"])["management"]["secret-key"] == KEY
+            and _json417.loads(got["body"])["management"]["disable-auto-update-panel"] is False,
+            got)
+    body = _json417.dumps({"management": {"secret-key": "$2b$10$HASH"}}).encode()
+    got = fn("PUT", "/v8/management/config", body, lambda: KEY)
+    c.expect("#417 the hash echoed back is an explicit key: refuse",
+             (got["action"], got.get("status")), ("refuse", 403))
+    got = fn("PUT", "/v8/management/config.yaml",
+             f"management:\n  secret-key: {PLACEHOLDER}\n".encode(), lambda: KEY)
+    c.check("#417 the placeholder in a YAML PUT reads as absent",
+            got["action"] == "inject"
+            and KEY.encode() in got["body"], got)
+
+
+# ── #417: circuit breaker ключа ─────────────────────────────────────────
+# CPA банит 127.0.0.1 на 30 минут после 5 неудач: панель одним загрузом
+# шлёт больше пяти management-запросов, потому «не ретраить в рамках
+# запроса» не спасает. Гейтвей после upstream 401/403 гасит ВСЕ запросы
+# с тем же ключом до смены содержимого защищённой копии.
+# STATUS: FIXED — see #417
+def check_breaker_417(c):
+    cls = getattr(web, "KeyBreaker", None)
+    if not c.check("#417 web.KeyBreaker exists", cls is not None):
+        return
+
+    ups = []      # походы к upstream
+    refusals = [] # локальные отказы
+    br = web.KeyBreaker(ask=lambda: refusals.append(1))
+
+    class Up:
+        def __init__(self, code):
+            self.code = code
+        def __init__(self, code, log=None):
+            self.code, self.log = code, (log if log is not None else [])
+        def __call__(self, method, path, body, key):
+            self.log.append(key)
+            return self.code, b"upstream said no"
+
+    # 401: первая попытка уходит, вторая с тем же ключом -- 503 без похода
+    up = Up(401, ups)
+    got = br("GET", "/v8/management/config", b"", "K1", up)
+    c.expect("#417 the first 401 reaches upstream", got, (401, b"upstream said no"))
+    for i in range(6):
+        got = br("GET", "/v8/management/config", b"", "K1", up)
+        c.expect(f"#417 after a 401 the same key is refused locally ({i})",
+                 got, (503, b"proxy management key rejected"))
+    c.expect("#417 exactly one upstream call for a rejected key", len(ups), 1)
+    c.check("#417 later refusals never reach upstream", len(refusals) == 6, len(refusals))
+
+    # новый ключ (ротация копии) -- проба снова разрешена
+    up2 = Up(200, ups)
+    got = br("GET", "/v8/management/config", b"", "K2", up2)
+    c.expect("#417 a rotated key gets a fresh attempt", got, (200, b"upstream said no"))
+
+    # 200 не активирует ничего (проверяем ДО 403: его cooldown глобален --
+    # петля забанена, и даже хороший ключ не должен долбить upstream)
+    up4 = Up(200, ups)
+    br("GET", "/v8/management/config", b"", "K4", up4)
+    got = br("GET", "/v8/management/config", b"", "K4", up4)
+    c.expect("#417 a good key keeps flowing", got, (200, b"upstream said no"))
+
+    # 403-бан: тот же ключ долбить нельзя, и бан переживёт ротацию ключа
+    up3 = Up(403, ups)
+    br("GET", "/v8/management/config", b"", "K3", up3)
+    got = br("GET", "/v8/management/config", b"", "K3", up3)
+    c.expect("#417 a 403 ban also trips the breaker", got, (503, b"proxy management key rejected"))
+    got = br("GET", "/v8/management/config", b"", "K3-rotated", up3)
+    c.expect("#417 the loopback ban survives a key rotation (cooldown)",
+             got, (503, b"proxy management key rejected"))
+
+
+# ── #417: HTTP-гейтвей управления прокси ────────────────────────────────
+# HYPOTHESIS: браузеру нужен путь к панели CPA без ключа в браузере.
+# SOLUTION: mop-web маршруты /llm/management.html (шим с sentinel) и
+# /v8/management/* (проксирование с серверным ключом), /llm/raw/* (сток
+# панель), все под admin-cookie; Bearer клиента снимается, ответы
+# редачатся, write'ы идут через guard, ключ из файла #418.
+# STATUS: FIXED — see #417
+class _Upstream417:
+    """Фикстура upstream: считает запросы, помнит последний Bearer/тело."""
+
+    def __init__(self, code=200, body=b'{"ok": true}', redirect=None):
+        self.code, self.body, self.redirect = code, body, redirect
+        self.calls = []
+
+    def __call__(self, method, path, body, key):
+        self.calls.append({"method": method, "path": path, "body": body,
+                           "key": key})
+        if self.redirect:
+            return 302, self.redirect
+        return self.code, self.body
+
+
+def _fetch_panel_417(upstream, key):
+    """Станд-панель c одним относительным редиректом (как в контракте)."""
+    code, got = upstream("GET", "/management.html", b"", key)
+    if code in (301, 302, 303, 307, 308):
+        target = got.decode("utf-8", "replace")
+        if "://" in target or target.startswith("//"):
+            return 502, b"proxy management redirect refused"
+        if target.count("/") > 4 or len(target) > 256:
+            return 502, b"proxy management redirect refused"
+        code, got = upstream("GET", target, b"", key)
+        return code, got
+    return code, got
+
+
+def _gateway417(webcli, store, provider, upstream, key="K" * 32,
+                path="/v8/management/config", method="GET", body=b"",
+                headers=None, breaker=None):
+    from mop.server import websession as _ws
+    """Прогнать запрос через тестовый Handler с подменённым upstream."""
+    import types
+    def request_upstream(method, p, b, h, key=None):
+        upstream.forwarded_headers = h
+        return (*upstream(method, p, b, key), "application/json")
+    gw = types.SimpleNamespace(
+        key=(lambda: key) if key is not None else (lambda: None),
+        breaker=breaker or web.KeyBreaker(),
+        call=request_upstream,
+        fetch_panel=lambda: _fetch_panel_417(upstream, key))
+    with patched(webcli.config, get=lambda name, default=None: {"MOP_SERVER_LAN": "10.0.0.1",
+                                                                "MOP_HTTPS_PORT": "443"}.get(name, default)), \
+            patched(webcli, SESSIONS=store), patched(_ws, provider=lambda: provider), \
+            patched(webcli, GATEWAY=gw):
+        return _fake_handler(webcli, method, path, body, headers or {})
+
+
+def check_gateway_417(c):
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    store = websession.SessionStore(now=lambda: 1000.0)
+    admin = store.open(identity.Identity("anton", "admin", ()))
+    user = store.open(identity.Identity("olga", "user", ()))
+    provider = FakeProvider()
+
+    # Гость и user не допускаются ни к API, ни к шиму: sentinel не пишется.
+    for path in ("/v8/management/config", "/llm/management.html",
+                 "/llm/raw/management.html"):
+        sent, out = _gateway417(webcli, store, provider, _Upstream417(),
+                                path=path, method="GET")
+        c.check(f"#417 {path}: a guest gets 401, not the panel",
+                sent[0][1] == 401 and web.SENTINEL.encode() not in out,
+                (sent[0][1], out[:60]))
+    sent, out = _gateway417(webcli, store, provider, _Upstream417(),
+                            path="/v8/management/config", method="GET",
+                            headers={"Cookie": f"mop_session={user}"})
+    c.expect("#417 a logged-in user gets 403", sent[0][1], 403)
+
+    # Admin: проксирование подменяет клиентский Bearer серверным ключом.
+    up = _Upstream417()
+    sent, out = _gateway417(webcli, store, provider, up,
+                            headers={"Cookie": f"mop_session={admin}",
+                                     "Authorization": "Bearer EVIL"})
+    c.expect("#417 admin reaches the API through the gateway", sent[0][1], 200)
+    c.expect("#417 the client Bearer is replaced by the server key",
+             up.calls[0]["key"], "K" * 32)
+    c.check("#417 no-store on the proxied answer",
+            any(k == "Cache-Control" and v == "no-store" for k, v in sent))
+
+    # GET /config: хэш закрыт плейсхолдером.
+    up = _Upstream417(body=_json417.dumps(
+        {"management": {"secret-key": "$2b$10$HASH"}}).encode())
+    sent, out = _gateway417(webcli, store, provider, up,
+                            path="/v8/management/config",
+                            headers={"Cookie": f"mop_session={admin}"})
+    c.check("#417 the hash never reaches the browser",
+            b"$2b$10$HASH" not in out
+            and web.PLACEHOLDER.encode() in out, out[:80])
+
+    # Write: guard решает до upstream; unsafe методы требуют Origin.
+    up = _Upstream417()
+    sent, out = _gateway417(webcli, store, provider, up,
+                            path="/v8/management/config", method="PUT",
+                            body=_json417.dumps({"server": {"port": 1}}).encode(),
+                            headers={"Cookie": f"mop_session={admin}",
+                                     "Content-Type": "application/json"})
+    c.expect("#417 an unsafe write without Origin is refused",
+             sent[0][1], 403)
+    c.expect("#417 nothing reached upstream", len(up.calls), 0)
+    sent, out = _gateway417(webcli, store, provider, up,
+                            path="/v8/management/config", method="PUT",
+                            body=_json417.dumps({"server": {"port": 1}}).encode(),
+                            headers={"Cookie": f"mop_session={admin}",
+                                     "Origin": "https://10.0.0.1",
+                                     "Content-Type": "application/json"})
+    c.check("#417 a full PUT goes through the guard: key injected upstream",
+            up.calls and up.calls[0]["body"]
+            and _json417.loads(up.calls[0]["body"])["management"]["secret-key"] == "K" * 32,
+            up.calls[:1])
+
+    # Роль отозвана -- та же cookie уже не админ.
+    class _NowUser:
+        def lookup(self, login):
+            return identity.Identity(login, "user", ()) if login == "anton" else None
+    sent, out = _gateway417(webcli, store, _NowUser(), _Upstream417(),
+                            headers={"Cookie": f"mop_session={admin}"})
+    c.expect("#417 a demoted admin is refused on the same cookie",
+             sent[0][1], 403)
+
+    # Breaker: 401 от upstream -- второй запрос 503, upstream не зовётся.
+    up = _Upstream417(code=401)
+    br = web.KeyBreaker()
+    _gateway417(webcli, store, provider, up, breaker=br,
+                headers={"Cookie": f"mop_session={admin}"})
+    calls_before = len(up.calls)
+    sent, out = _gateway417(webcli, store, provider, up, breaker=br,
+                            headers={"Cookie": f"mop_session={admin}"})
+    c.expect("#417 the breaker answers 503 locally", sent[0][1], 503)
+    c.expect("#417 no extra upstream call after the breaker", len(up.calls),
+             calls_before)
+    c.check("#417 the refusal body carries no key",
+            b"K" * 32 not in out, out[:60])
+
+    # Нет ключа (#418 ещё не положила копию) -- чтение тоже 503.
+    gw_upstream = _Upstream417()
+    sent, out = _gateway417(webcli, store, provider, gw_upstream, key=None,
+                            headers={"Cookie": f"mop_session={admin}"})
+    c.expect("#417 without the key file even reads fail closed", sent[0][1], 503)
+    c.expect("#417 upstream untouched without the key", len(gw_upstream.calls), 0)
+
+    # Шим: admin получает страницу с sentinel, raw -- сток-панель без sentinel.
+    up = _Upstream417(body=b"<!doctype html>stock panel")
+    sent, out = _gateway417(webcli, store, provider, up,
+                            path="/llm/management.html",
+                            headers={"Cookie": f"mop_session={admin}"})
+    c.check("#417 stock 8.0.8 migrates the public sentinel from managementKey",
+            b"localStorage.setItem('managementKey'" in out, out[:350])
+    c.check("#417 the shim bootstraps the sentinel for the admin",
+            web.SENTINEL.encode() in out
+            and b"/llm/raw/management.html" in out, out[:100])
+    sent, out = _gateway417(webcli, store, provider, up,
+                            path="/llm/raw/management.html",
+                            headers={"Cookie": f"mop_session={admin}"})
+    c.check("#417 the raw panel is served without the sentinel",
+            out.startswith(b"<!doctype html>stock panel")
+            and web.SENTINEL.encode() not in out, out[:80])
+
+    # Редирект: относительный на ту же панель -- следуем; абсолютный -- нет.
+    up = _Upstream417(redirect=b"/management.html")
+    sent, out = _gateway417(webcli, store, provider, up,
+                            path="/llm/raw/management.html",
+                            headers={"Cookie": f"mop_session={admin}"})
+    c.check("#417 a relative redirect is followed in-origin",
+            up.calls and any(call["path"] == "/management.html" for call in up.calls),
+            up.calls)
+    up = _Upstream417(redirect=b"https://evil.example/panel")
+    sent, out = _gateway417(webcli, store, provider, up,
+                            path="/llm/raw/management.html",
+                            headers={"Cookie": f"mop_session={admin}"})
+    c.expect("#417 an absolute redirect fails closed", sent[0][1], 502)
+
+
+# Параллельный край breaker (#417): до первого ответа панель уже открыла
+# несколько management-запросов; если гасить ключ только после ответа,
+# петля успевает попасть под бан CPA. Пробы ключа сериализуются, пока
+# ключ не подтверждён.
+def check_breaker_singleflight_417(c):
+    import threading
+    cls = web.KeyBreaker
+    br = cls()
+    ups = []
+
+    class Slow401:
+        def __call__(self, method, path, body, key):
+            ups.append(key)
+            import time as _t
+            _t.sleep(0.05)
+            return 401, b"no"
+
+    results = []
+    def worker():
+        results.append(br("GET", "/v8/management/config", b"", "K1", Slow401()))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    c.check("#417 concurrent first attempts: at most one reaches upstream",
+            len(ups) <= 1, ups)
+    c.check("#417 all callers get the refusal",
+            all(r == (503, cls.REFUSED_BODY) for r in results)
+            or all(r[0] in (401, 503) for r in results), results[:3])
+
+    # после подтверждённого успеха параллельность возвращается
+    ups.clear()
+    class Ok:
+        def __call__(self, method, path, body, key):
+            ups.append(key)
+            return 200, b"yes"
+    br2 = cls()
+    results2 = []
+    def worker2():
+        results2.append(br2("GET", "/v8/management/config", b"", "K9", Ok()))
+    threads = [threading.Thread(target=worker2) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    c.check("#417 a proven-good key flows in parallel",
+            len(ups) == 4 and all(r[0] == 200 for r in results2), (len(ups), results2[:2]))
+
+
+# Заголовки ответа upstream (#417): наружу идёт только whitelist --
+# Set-Cookie/WWW-Authenticate/Access-Control-* не проходят.
+def check_header_whitelist_417(c):
+    fn = getattr(web, "response_headers", None)
+    if not c.check("#417 web.response_headers exists", fn is not None):
+        return
+    given = {"Content-Type": "application/json",
+             "Set-Cookie": "session=evil",
+             "WWW-Authenticate": 'Basic realm="cpa"',
+             "Access-Control-Allow-Origin": "*",
+             "X-Cpa-Version": "8.0.8"}
+    got = fn(given)
+    c.expect("#417 the whitelist keeps content-type and version",
+             (got.get("Content-Type"), got.get("X-Cpa-Version")),
+             ("application/json", "8.0.8"))
+    for bad in ("Set-Cookie", "WWW-Authenticate", "Access-Control-Allow-Origin"):
+        c.check(f"#417 {bad} never passes to the browser", bad not in got, got)
+
+
+
+# ── #417: сетевой контракт шлюза при ошибках и перенаправлении ──────────
+# HYPOTHESIS: urllib автоматически переходит по 302 с Authorization на
+# другой origin; обрыв первого upstream до ответа оставляет single-flight
+# в исключении, а битый конфиг с хэшем уходит браузеру как есть.
+# SOLUTION: открывать upstream без автоперехода; переход обрабатывать только
+# по Location на разрешённый путь, секретные ответы fail closed; breaker
+# завершает пробу и выпускает ожидающих даже при исключении.
+# STATUS: FIXED — see #417
+
+def check_gateway_fail_closed_417(c):
+    import threading as _threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from unittest import mock
+    from mop.cli.server import web as webcli
+
+    leaks = []
+    class Target(BaseHTTPRequestHandler):
+        def do_GET(self):
+            leaks.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"remote")
+        def log_message(self, *args):
+            pass
+    target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+    class Redirect(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_port}/remote")
+            self.end_headers()
+        def log_message(self, *args):
+            pass
+    redirect = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    workers = [_threading.Thread(target=s.serve_forever, daemon=True)
+               for s in (target, redirect)]
+    for worker in workers:
+        worker.start()
+    try:
+        gw = webcli.Gateway(key="only-on-server")
+        gw.port = lambda: redirect.server_port
+        with mock.patch.dict(os.environ, {"HTTP_PROXY": f"http://127.0.0.1:{target.server_port}",
+                                              "http_proxy": f"http://127.0.0.1:{target.server_port}",
+                                              "NO_PROXY": "", "no_proxy": ""}):
+            code, body, _ = gw.call("GET", "/management.html", b"")
+        c.check("#417 HTTP_PROXY never sees the server key or the request",
+                not leaks, leaks)
+        c.expect("#417 redirect remains an explicit response to the caller", code, 302)
+    finally:
+        for server in (redirect, target):
+            server.shutdown()
+            server.server_close()
+
+    probes = []
+    class WrongKey(BaseHTTPRequestHandler):
+        def do_GET(self):
+            probes.append(self.path)
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(b"wrong key")
+        def log_message(self, *args):
+            pass
+    wrong = ThreadingHTTPServer(("127.0.0.1", 0), WrongKey)
+    worker = _threading.Thread(target=wrong.serve_forever, daemon=True)
+    worker.start()
+    try:
+        gw = webcli.Gateway(key="rejected-key")
+        gw.port = lambda: wrong.server_port
+        first = gw.fetch_panel()
+        second = gw.fetch_panel()
+        c.expect("#417 raw panel key mismatch triggers one probe, not an IP ban",
+                 len(probes), 1)
+        c.expect("#417 the second raw panel request fails closed locally",
+                 second[0], 503)
+    finally:
+        wrong.shutdown()
+        wrong.server_close()
+
+    br = web.KeyBreaker()
+    def fails(*args):
+        raise RuntimeError("upstream died")
+    try:
+        br("GET", "/v8/management/config", b"", "K", fails)
+    except RuntimeError:
+        pass
+    except Exception as exc:
+        c.fail(f"#417 breaker must preserve upstream failure, got {type(exc).__name__}")
+    else:
+        c.fail("#417 upstream failure should propagate")
+    c.check("#417 failed probe does not strand an inflight event",
+            not br._inflight, br._inflight)
+    c.check("#417 malformed config does not go to the browser",
+            web.redact_management_read("/v8/management/config",
+               b'{"management":{"secret-key":"$2b$HASH"}broken') is None)
+
+
+def check_gateway_body_bounds_417(c):
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    store = websession.SessionStore(now=lambda: 1000.0)
+    token = store.open(identity.Identity("anton", "admin", ()))
+    up = _Upstream417()
+    good = {"Cookie": f"mop_session={token}",
+            "Origin": "https://10.0.0.1", "Content-Type": "application/json"}
+    sent, out = _gateway417(webcli, store, FakeProvider(), up,
+                             method="POST", path="/v8/management/config",
+                             body=b"{}", headers={**good, "Content-Length": "not-a-number"})
+    c.expect("#417 malformed Content-Length gets a bounded rejection", sent[0][1], 400)
+    c.expect("#417 malformed body length never reaches upstream", len(up.calls), 0)
+    sent, out = _gateway417(webcli, store, FakeProvider(), up,
+                             method="POST", path="/v8/management/config",
+                             body=b"{}", headers={**good, "Content-Length": str(web.PANEL_MAX+1)})
+    c.expect("#417 oversize Content-Length is rejected without truncation", sent[0][1], 413)
+    c.expect("#417 oversized body never reaches upstream", len(up.calls), 0)
+
+
+# ── #417: полный URL запроса и удаление management-конфига ──────────────
+# HYPOTHESIS: query теряется при разборе маршрута Handler, а DELETE либо
+# POST /config проходят мимо write-guard и способны удалить ключ.
+# SOLUTION: маршрутизировать по pathname, к loopback передавать полный
+# request-target и отвергать неразрешённые замены конфига до upstream.
+# STATUS: FIXED — see #417
+
+def check_gateway_route_and_delete_417(c):
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    source = lambda: "K" * 32
+    for method in ("DELETE", "POST"):
+        got = web.guard_management_write(method, "/v8/management/config", b"{}", source)
+        c.expect(f"#417 {method} cannot replace or erase the management key",
+                 (got["action"], got.get("status")), ("refuse", 403))
+    store = websession.SessionStore(now=lambda: 1000.0)
+    token = store.open(identity.Identity("anton", "admin", ()))
+    up = _Upstream417()
+    headers = {"Cookie": f"mop_session={token}"}
+    sent, out = _gateway417(webcli, store, FakeProvider(), up,
+                             path="/v8/management/logs?limit=13%26page=2", headers=headers)
+    c.expect("#417 management API forwards the exact query to loopback",
+             up.calls[0]["path"] if up.calls else None,
+             "/v8/management/logs?limit=13%26page=2")
+    sent, out = _gateway417(webcli, store, FakeProvider(), up,
+                             method="PUT", path="/v8/management/config.yaml",
+                             body=b"server: {port: 1}\n",
+                             headers={**headers, "Origin": "https://10.0.0.1",
+                                      "Content-Type": "application/yaml"})
+    c.expect("#417 Source Save keeps YAML media type to loopback",
+             up.forwarded_headers.get("Content-Type"), "application/yaml")
+    sent, out = _gateway417(webcli, store, FakeProvider(), up,
+                             method="DELETE", path="/v8/management/config",
+                             headers={**headers, "Origin": "https://10.0.0.1"})
+    c.expect("#417 blocked DELETE does not reach upstream", len(up.calls), 2)
 
 def main():
     c = Checks()
@@ -1183,7 +1801,11 @@ def main():
                check_load_378, check_session_store_415, check_login_api_415,
                check_address_source_415, check_deleted_user_415,
                check_journal_api_424, check_journal_entry_424,
-               check_login_bounds_415):
+               check_login_bounds_415, check_guard_417,
+               check_guard_placeholder_417, check_breaker_417,
+               check_gateway_417, check_breaker_singleflight_417,
+               check_header_whitelist_417, check_gateway_fail_closed_417,
+               check_gateway_body_bounds_417, check_gateway_route_and_delete_417):
         fn(c)
     return c.report("web")
 
