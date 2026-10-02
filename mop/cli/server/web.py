@@ -94,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
 
         Ответ отказа -- одна фраза без причины: «нет такого логина»
         подсказывало бы перебор. Любая неудача считает в rate limit."""
-        addr = self.client_address[0]
+        addr = websession.client_addr(self.headers, self.client_address)
         if not self._origin_ok() or (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
             return self._json(403, {"error": "origin refused"})
         if not RATE.allowed(addr):
@@ -111,11 +111,6 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             RATE.note_failure(addr)
             return self._json(401, {"error": "invalid login or password"})
-        # Внутренний admin-гейт (#416) пока fail closed: nginx ещё не
-        # размечает internal-запросы, и admin снаружи не входит вовсе.
-        if who.role == "admin" and not remote(self.client_address):
-            RATE.note_failure(addr)
-            return self._json(403, {"error": "origin refused"})
         token = SESSIONS.open(who)
         RATE.note_success(addr)
         self.send_response(200)
@@ -212,14 +207,6 @@ def parse(argv):
         else:
             lib.usage(__doc__)
     return port, bind
-
-
-def remote(address):
-    """Запрос пришёл с этого сервера (curl с локалхоста, проверка прокси)?
-
-    Гейт admin-запроса (#416) снаружи закрыт наглухо: nginx пока не
-    размечает internal, поэтому fail closed -- снаружи admin не войти."""
-    return address[0] in ("127.0.0.1", "::1")
 
 
 def listen_events():

@@ -401,13 +401,13 @@ def check_rounds_319(c):
         c.expect(f"#319 round usage {label}: note and one bump",
                  (col.errors.get("usage"), col.version), (want, 1))
 
-def _fake_handler(webcli, method, path, body=b"", headers=None):
+def _fake_handler(webcli, method, path, body=b"", headers=None, peer=("127.0.0.1", 0)):
     import io
     h = webcli.Handler.__new__(webcli.Handler)
     h.path = path
     h.headers = {"Content-Length": str(len(body)), **(headers or {})}
     h.rfile, h.wfile, h.sent = io.BytesIO(body), io.BytesIO(), []
-    h.client_address = ("127.0.0.1", 0)
+    h.client_address = peer
     h.send_response = lambda code, msg=None: h.sent.append(("status", code))
     h.send_header = lambda k, v: h.sent.append((k, v))
     h.end_headers = lambda: None
@@ -693,21 +693,47 @@ def check_login_api_415(c):
             and src.index("/events") > src.index("/api/pool"))
 
 
-def check_admin_gate_415(c):
-    import re
+# Источник адреса для лимита (#415): через nginx все -- 127.0.0.1, и ключ
+# по сокету запирал бы вход всей конторе после пяти неудач одного.
+def check_address_source_415(c):
     from mop.cli.server import web as webcli
-    from mop.server import websession
+    from mop.server import websession, identity
+
+    c.expect("#415 from the loopback nginx: X-Real-IP is the key",
+             websession.client_addr({"X-Real-IP": "10.1.2.3"}, ("127.0.0.1", 0)),
+             "10.1.2.3")
+    c.expect("#415 no X-Real-IP: the socket peer",
+             websession.client_addr({}, ("127.0.0.1", 0)), "127.0.0.1")
+    c.expect("#415 not from the loopback: a spoofed header is ignored",
+             websession.client_addr({"X-Real-IP": "1.2.3.4"}, ("10.9.9.9", 0)),
+             "10.9.9.9")
+    # Гейт касается эндпоинта (#416), а не входа: admin входит и мимо петли.
+    good = {"Origin": "https://10.0.0.1", "Content-Type": "application/json"}
     store = websession.SessionStore(now=lambda: 1000.0)
     with patched(webcli.config, get=lambda name, default=None: {"MOP_SERVER_LAN": "10.0.0.1",
                                                                 "MOP_HTTPS_PORT": "443"}.get(name, default)), \
             patched(webcli, SESSIONS=store, RATE=websession.RateLimiter(now=lambda: 1000.0)), \
-            patched(websession, provider=lambda: FakeProvider()), \
-            patched(webcli, remote=lambda addr: False):
+            patched(websession, provider=lambda: FakeProvider()):
+        sent, out = _fake_handler(webcli, "POST", "/api/login",
+                                  _login_body(login="anton", password="s3cret"), good,
+                                  peer=("10.5.5.5", 0))
+        c.expect("#415 an admin logs in from any address: the gate is the endpoint's",
+                 (sent[0][1], out), (200, b'{"login": "anton", "role": "admin"}'))
+        # Разные X-Real-IP -- разные вёдра: чужие неудачи не запирают вход.
+        a = {"Origin": "https://10.0.0.1", "Content-Type": "application/json",
+             "X-Real-IP": "10.1.1.1"}
+        for _ in range(5):
+            _fake_handler(webcli, "POST", "/api/login",
+                          _login_body(login="anton", password="nope"), a)
+        sent, out = _fake_handler(webcli, "POST", "/api/login",
+                                  _login_body(login="anton", password="nope"), a)
+        c.expect("#415 the flooded address is locked", sent[0][1], 429)
         sent, out = _fake_handler(webcli, "POST", "/api/login",
                                   _login_body(login="anton", password="s3cret"),
-                                  {"Origin": "https://10.0.0.1", "Content-Type": "application/json"})
-        c.check("#415 the admin gate fails closed from outside",
-                sent[0][1] == 403, (sent[0][1], out))
+                                  {**good, "X-Real-IP": "10.2.2.2"})
+        c.expect("#415 the neighbour behind the same nginx still logs in",
+                 (sent[0][1], out), (200, b'{"login": "anton", "role": "admin"}'))
+
 
 
 def main():
@@ -717,7 +743,7 @@ def main():
                check_masters_305, check_dist_297,
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
                check_load_378, check_session_store_415, check_login_api_415,
-               check_admin_gate_415):
+               check_address_source_415):
         fn(c)
     return c.report("web")
 
