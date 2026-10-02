@@ -122,7 +122,8 @@ export default function App() {
       {!onJournal && snapshot?.load && <Box w="100%"><LoadBar load={snapshot.load} /></Box>}
       <Container size="xl" pt="sm" pb="md">
         {onJournal ? (
-          <JournalPage journal={journal.journal} error={journal.error} open={() => {}} />
+          <JournalPage journal={journal.journal} error={journal.error} open={() => {}}
+                       sourceKey={`${session.login ?? ""}\0${session.role ?? ""}`} />
         ) : (
         <Stack gap="md">
           {snapshot && snapshot.errors.length > 0 && (

@@ -21,7 +21,7 @@ const J: JournalEntry[] = [
 ];
 
 test("rows carry full date, event, puppet, node, project and the phrase", () => {
-  renderUi(<JournalPage journal={J} open={() => {}} />);
+  renderUi(<JournalPage journal={J} open={() => {}} sourceKey="anton\0admin" />);
   const row = screen.getByText(/^14.11.2023 22:14:20 /).closest("tr")!;
   // дата «полная»: не чч:мм:сс главной, а день и время с секундами
   expect(row.textContent).toContain("idle");
@@ -32,7 +32,7 @@ test("rows carry full date, event, puppet, node, project and the phrase", () => 
 
 test("clicking a row opens the modal, keyboard Enter too", () => {
   const open = vi.fn();
-  renderUi(<JournalPage journal={J} open={open} />);
+  renderUi(<JournalPage journal={J} open={open} sourceKey="anton\0admin" />);
   // клик по строке: старейшая запись (новые сверху) -- с текстом from ermak
   fireEvent.click(screen.getByText(/сообщение от ermak/));
   expect(open).toHaveBeenCalledWith(J[1]);
@@ -43,19 +43,19 @@ test("clicking a row opens the modal, keyboard Enter too", () => {
 
 test("keyboard: Enter on the focused row opens the modal too", () => {
   const open = vi.fn();
-  renderUi(<JournalPage journal={J} open={open} />);
+  renderUi(<JournalPage journal={J} open={open} sourceKey="anton\0admin" />);
   const row = screen.getAllByRole("row")[1];   // [0] -- заголовок
   fireEvent.keyDown(row, { key: "Enter" });
   expect(open).toHaveBeenCalledWith(J[1]);
 });
 
 test("an empty journal keeps the old note", () => {
-  renderUi(<JournalPage journal={[]} open={() => {}} />);
+  renderUi(<JournalPage journal={[]} open={() => {}} sourceKey="anton\0admin" />);
   expect(screen.getByText(/событий пока нет/)).toBeInTheDocument();
 });
 
 test("the refusal reason shows instead of a stale journal", () => {
-  renderUi(<JournalPage journal={[]} error="журнал недоступен: прав не хватает" open={() => {}} />);
+  renderUi(<JournalPage journal={[]} error="журнал недоступен: прав не хватает" open={() => {}} sourceKey="anton\0admin" />);
   expect(screen.getByText(/прав не хватает/)).toBeInTheDocument();
   // прежних записей нет: только причина
   expect(screen.queryByRole("row")).toBeNull();
@@ -65,27 +65,45 @@ test("the refusal reason shows instead of a stale journal", () => {
 // только действующему админу: как только приходит error, диалог закрывается
 // и таблица уходит -- ни одного кадра устаревших данных на экране.
 test("review: an open modal closes the moment the source refuses", async () => {
-  const view = renderUi(<JournalPage journal={J} error={null} open={() => {}} initial={J[1]} />);
+  const view = renderUi(<JournalPage journal={J} error={null} open={() => {}} initial={J[1]} sourceKey="anton\0admin" />);
   expect(await screen.findByRole("dialog")).toBeInTheDocument();
   // источник отказал: 401/403/роль ушла -- hook положил error и пустой журнал
   view.rerender(<MantineProvider>
-    <JournalPage journal={[]} error="журнал недоступен: прав не хватает" open={() => {}} />
+    <JournalPage journal={[]} error="журнал недоступен: прав не хватает" open={() => {}} sourceKey="anton\0admin" />
   </MantineProvider>);
   // диалог закрыт сразу, без ждущего клика; записей нет
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(screen.getByText(/прав не хватает/)).toBeInTheDocument();
 });
 
+// Ревью 4 (#422): обычный 10s опрос приносит новый массив с теми же
+// событиями -- ссылка другая, источник тот же. Диалог полного события
+// переживает такой кадр: закрыть его может смена источника или отказ,
+// не тик опроса.
+test("review4: an open modal survives a same-source poll frame", async () => {
+  const view = renderUi(<JournalPage journal={J} error={null} open={() => {}} initial={J[1]}
+                                     sourceKey="anton\0admin" />);
+  expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  // очередной опрос: новый массив, то же содержимое, тот же источник
+  view.rerender(<MantineProvider>
+    <JournalPage journal={[...J]} error={null} open={() => {}} sourceKey="anton\0admin" />
+  </MantineProvider>);
+  await new Promise((r) => setTimeout(r, 50));
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+});
+
 // Ревью 3 (#422): открытый диалог записи A не переживает смену источника
 // A→B (error нет, журнал просто новый): диалог -- часть показанного
-// журнала, чужой записи в нём быть не должно.
-test("review3: an open modal does not survive a journal switch", async () => {
+// журнала, чужой записи в нём быть не должно. Ключ источника -- от App
+// (кто смотрит), не ссылка массива: опрос её меняет каждую 10 с.
+test("review3: an open modal does not survive a source switch", async () => {
   const BJ: JournalEntry[] = [{ at: 1700000120, event: "wipe", name: "pu-mop-2", node: "gpu",
                                 project: "other", text: "" }];
-  const view = renderUi(<JournalPage journal={J} error={null} open={() => {}} initial={J[1]} />);
+  const view = renderUi(<JournalPage journal={J} error={null} open={() => {}} initial={J[1]}
+                                     sourceKey="anton\0admin" />);
   expect(await screen.findByRole("dialog")).toBeInTheDocument();
   view.rerender(<MantineProvider>
-    <JournalPage journal={BJ} error={null} open={() => {}} />
+    <JournalPage journal={BJ} error={null} open={() => {}} sourceKey="bob\0admin" />
   </MantineProvider>);
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(screen.getByText("pu-mop-2")).toBeInTheDocument();

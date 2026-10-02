@@ -36,7 +36,7 @@ function Row({ e, onOpen }: { e: JournalEntry; onOpen: () => void }) {
   );
 }
 
-export function JournalPage({ journal, error = null, open, initial }: {
+export function JournalPage({ journal, error = null, open, initial, sourceKey }: {
   journal: JournalEntry[];
   /** Отказ источника (#424): null -- загрузка прошла или не начиналась. */
   error?: string | null;
@@ -44,6 +44,8 @@ export function JournalPage({ journal, error = null, open, initial }: {
   open: (e: JournalEntry) => void;
   /** Запись, чей диалог уже открыт (переход по ссылке внутрь). */
   initial?: JournalEntry;
+  /** Ключ источника (кто смотрит): смена закрывает диалог, опрос -- нет. */
+  sourceKey: string;
 }) {
   const [entry, setEntry] = useState<JournalEntry | null>(initial ?? null);
   const items = [...journal].reverse();   // новые сверху
@@ -51,17 +53,18 @@ export function JournalPage({ journal, error = null, open, initial }: {
   // право ушло, и скрыть надо в этот же рендер, не эффектом после paint:
   // рендер с пустым списком уже не рисует ни таблицы, ни модала.
   const denied = error != null;
-  // и не переживает смену источника (ревью 3): журнал другой -- запись A
-  // в диалоге чужая новому списку, entry гасится вместе с ним
-  const source = journal;
-  const prevSource = useRef(source);
+  // и не переживает смену источника (ревью 3): журнал другого админа --
+  // запись A в диалоге чужая. Ключ источника приносит App (кто смотрит),
+  // а не ссылка массива: опрос строит новый массив тем же содержимым
+  // каждые POLL_S, и на ссылке диалог закрывался бы сам собой (ревью 4).
+  const prevSource = useRef(sourceKey);
+  const switched = prevSource.current !== sourceKey;
   useEffect(() => {
-    if (denied) setEntry(null);
-    else if (prevSource.current !== source) setEntry(null);
-    prevSource.current = source;
-  }, [denied, source]);
+    if (denied || switched) setEntry(null);
+    prevSource.current = sourceKey;
+  }, [denied, switched, sourceKey]);
   const shown = denied ? [] : items;
-  const held = denied || prevSource.current !== source ? null : entry;
+  const held = denied || switched ? null : entry;
   return (
     <div data-testid="journal-page">
       <SectionTitle title="Журнал" note={shown.length ? "события шины, новые сверху" : undefined} />
