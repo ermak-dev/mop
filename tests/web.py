@@ -17,7 +17,7 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.server import web  # noqa: E402
+from mop.server import identity, web  # noqa: E402
 from mop.common.state import PuppetRow, State, silent  # noqa: E402
 
 FREE = State("free", branch="master")
@@ -401,11 +401,13 @@ def check_rounds_319(c):
         c.expect(f"#319 round usage {label}: note and one bump",
                  (col.errors.get("usage"), col.version), (want, 1))
 
-def _fake_handler(webcli, method, path, body=b""):
+def _fake_handler(webcli, method, path, body=b"", headers=None):
     import io
     h = webcli.Handler.__new__(webcli.Handler)
-    h.path, h.headers = path, {"Content-Length": str(len(body))}
+    h.path = path
+    h.headers = {"Content-Length": str(len(body)), **(headers or {})}
     h.rfile, h.wfile, h.sent = io.BytesIO(body), io.BytesIO(), []
+    h.client_address = ("127.0.0.1", 0)
     h.send_response = lambda code, msg=None: h.sent.append(("status", code))
     h.send_header = lambda k, v: h.sent.append((k, v))
     h.end_headers = lambda: None
@@ -561,13 +563,161 @@ def check_load_378(c):
     c.expect("#378 the snapshot carries the load", snap.get("load"), fn([busy], [node(1, 2)]))
 
 
+# ── #415: вход дашборда -- серверная HTTP-сессия file/LDAP ───────────────
+# HYPOTHESIS: у страницы входа нет вовсе: /api/pool и /events открыты, и
+#серверный гейт появиться не может -- некому спросить «кто ты».
+# SOLUTION: GET /api/session, POST /api/login, POST /api/logout в
+# mop/server/websession.py: провайдер identity.server_provider (file/LDAP,
+# одна на callout и identity), серверная сессия с TTL и отзывом, cookie
+# Secure HttpOnly SameSite=Strict Path=/, rate limit входа, Origin строго
+# публичный https origin, admin-гейт fail closed снаружи. /api/pool и
+# /events не тронуты.
+# STATUS: FIXED — see #415
+GUEST = b'{"login": null, "role": null}'
+
+
+class FakeProvider:
+    """Провайдер по образцу identity: authenticate -> Identity | Refused."""
+
+    def __init__(self, refusals=()):
+        self.refusals = list(refusals)
+        self.asked = []
+
+    def authenticate(self, login, password):
+        self.asked.append((login, password))
+        if self.refusals:
+            raise identity.Refused(self.refusals.pop(0))
+        if password != "s3cret":
+            raise identity.Refused("wrong password")
+        return identity.Identity(login, "admin" if login == "anton" else "user", ())
+
+    def lookup(self, login):
+        return identity.Identity(login, "admin" if login == "anton" else "user", ())
+
+
+def _login_body(**kw):
+    import json as _json
+    return _json.dumps(kw).encode()
+
+
+def check_session_store_415(c):
+    from mop.server import websession
+    store = websession.SessionStore(now=lambda: 1000.0)
+    store2 = websession.SessionStore(now=lambda: 1000.0)
+    # Речек роли admin идёт провайдером; в проверке он -- подмена.
+    with patched(websession, provider=lambda: FakeProvider()):
+        tok = store.open(identity.Identity("anton", "admin", ()))
+        c.check("#415 open: a token of session strength", len(tok) >= 32, len(tok))
+        c.expect("#415 a fresh session reads back", store.get(tok, 1000.0),
+                 ("anton", "admin"))
+        c.expect("#415 revoked by logout", (store.close(tok), store.get(tok, 1000.0)),
+                 (True, None))
+        c.expect("#415 TTL: expired reads as guest",
+                 store.get(store2.open(identity.Identity("anton", "admin", ())),
+                           1000.0 + websession.TTL + 1), None)
+        c.expect("#415 close of a stranger: no exception", store.close("x" * 40), False)
+        other = store.open(identity.Identity("olga", "user", ()))
+        c.check("#415 tokens are not alike", tok != other, (tok, other))
+
+
+
+def check_login_api_415(c):
+    import json
+    import re
+    import os as _os
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    good = {"Origin": "https://10.0.0.1", "Content-Type": "application/json"}
+    store = websession.SessionStore(now=lambda: 1000.0)
+    provider = FakeProvider()
+    sent, out = [], b""
+    with patched(webcli.config, get=lambda name, default=None: {"MOP_SERVER_LAN": "10.0.0.1",
+                                                                "MOP_HTTPS_PORT": "443"}.get(name, default)), \
+            patched(webcli, SESSIONS=store), patched(websession, provider=lambda: provider):
+        sent, out = _fake_handler(webcli, "GET", "/api/session")
+        c.expect("#415 GET /api/session: the guest", out, GUEST)
+        sent, out = _fake_handler(webcli, "POST", "/api/login", _login_body(login="anton", password="s3cret"), good)
+        c.expect("#415 POST /api/login: the who and role", out, b'{"login": "anton", "role": "admin"}')
+        cookie = dict((k, v) for k, v in sent if k == "Set-Cookie")
+        c.check(f"#415 the cookie: Secure HttpOnly SameSite=Strict Path=/: {cookie}",
+                "Secure" in cookie.get("Set-Cookie", "") and "HttpOnly" in cookie.get("Set-Cookie", "")
+                and "SameSite=Strict" in cookie.get("Set-Cookie", "") and "Path=/" in cookie.get("Set-Cookie", ""))
+        token = cookie["Set-Cookie"].split("=", 1)[1].split(";", 1)[0]
+        sent, out = _fake_handler(webcli, "GET", "/api/session", headers={"Cookie": f"mop_session={token}"})
+        c.expect("#415 GET /api/session: the logged-in", out,
+                 b'{"login": "anton", "role": "admin"}')
+        sent, out = _fake_handler(webcli, "POST", "/api/logout", b"",
+                                  {**good, "Cookie": f"mop_session={token}"})
+        c.expect("#415 POST /api/logout: the guest again", out, GUEST)
+        sent, out = _fake_handler(webcli, "GET", "/api/session", headers={"Cookie": f"mop_session={token}"})
+        c.expect("#415 after logout the cookie no longer logs in", out, GUEST)
+
+        # Отказ: одна фраза без причины, никакого перебора логинов.
+        sent, out = _fake_handler(webcli, "POST", "/api/login",
+                                  _login_body(login="anton", password="nope"), good)
+        c.expect("#415 a wrong password: 401, one phrase", (sent[0][1], out),
+                 (401, b'{"error": "invalid login or password"}'))
+        c.expect("#415 the wrong password still cost the provider one ask",
+                 provider.asked[-1], ("anton", "nope"))
+        sent, out = _fake_handler(webcli, "POST", "/api/login", _login_body(login="x"), good)
+        c.expect("#415 a broken body: 400, not a trace", (sent[0][1], json.loads(out)["error"][:11]),
+                 (400, "bad request"))
+        # CSRF/Origin: оба POST -- только JSON с нашим https origin.
+        for what, hdrs in (("no Origin", {}),
+                           ("a foreign Origin", {"Origin": "https://evil.example"}),
+                           ("a form post", {"Origin": "https://10.0.0.1",
+                                            "Content-Type": "application/x-www-form-urlencoded"})):
+            sent, out = _fake_handler(webcli, "POST", "/api/login",
+                                      _login_body(login="anton", password="s3cret"),
+                                      hdrs or None)
+            c.expect(f"#415 login refused: {what}", (sent[0][1], out),
+                     (403, b'{"error": "origin refused"}'))
+        c.expect("#415 origin refusals never reach the provider",
+                 provider.asked[-1], ("anton", "nope"))
+        # Rate limit: пятый и дальше -- 429, окно одно.
+        for i in range(4):
+            _fake_handler(webcli, "POST", "/api/login",
+                          _login_body(login="anton", password="nope"), good)
+        sent, out = _fake_handler(webcli, "POST", "/api/login",
+                                  _login_body(login="anton", password="s3cret"), good)
+        c.expect("#415 after a burst of failures login is 429", (sent[0][1], out),
+                 (429, b'{"error": "too many attempts, try later"}'))
+    # /api/pool остался открытым; /events -- тот же разбор пути, без входа
+    # (гонять SSE в проверке -- вечно ждать следующего кадра).
+    sent, out = _fake_handler(webcli, "GET", "/api/pool")
+    c.expect("#415 /api/pool stays public", sent[0][1], 200)
+    src = open(_os.path.join(_os.path.dirname(webcli.__file__), "web.py")).read()
+    gate = re.search(r"do_GET.*?/api/session.*?/api/pool", src, re.S)
+    c.check("#415 /events keeps its branch with no session gate",
+            "if path == \"/events\":" in src and gate is not None
+            and src.index("/events") > src.index("/api/pool"))
+
+
+def check_admin_gate_415(c):
+    import re
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    store = websession.SessionStore(now=lambda: 1000.0)
+    with patched(webcli.config, get=lambda name, default=None: {"MOP_SERVER_LAN": "10.0.0.1",
+                                                                "MOP_HTTPS_PORT": "443"}.get(name, default)), \
+            patched(webcli, SESSIONS=store, RATE=websession.RateLimiter(now=lambda: 1000.0)), \
+            patched(websession, provider=lambda: FakeProvider()), \
+            patched(webcli, remote=lambda addr: False):
+        sent, out = _fake_handler(webcli, "POST", "/api/login",
+                                  _login_body(login="anton", password="s3cret"),
+                                  {"Origin": "https://10.0.0.1", "Content-Type": "application/json"})
+        c.check("#415 the admin gate fails closed from outside",
+                sent[0][1] == 403, (sent[0][1], out))
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
                check_masters_305, check_dist_297,
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
-               check_load_378):
+               check_load_378, check_session_store_415, check_login_api_415,
+               check_admin_gate_415):
         fn(c)
     return c.report("web")
 
