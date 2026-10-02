@@ -5,12 +5,12 @@ working copy's binding; if missing, they are asked for. The bus password is
 asked without echo (or read from MOP_BUS_PASSWORD) and verified before
 saving. A valid previous login is reused.
 
-The HTTPS port defaults to 443. On a new join, the LLM proxy URL and client
-key are asked for separately (key without echo). Use the server's TLS URL,
-for example https://ADDRESS/llm; an HTTP URL is accepted only on loopback.
-The key is checked with /v1/models before credentials are saved. Obtain it
-from the controller through a private channel; join does not expose a shared
-key over the pool bus or a public API.
+The HTTPS port defaults to 443. After authenticating to the bus, join asks
+the server for its LLM proxy URL and client key over a personal, authenticated
+subject. The key is never printed or asked for separately; /v1/models is
+checked before saving. Rejoining refreshes a rotated key without replacing
+working credentials when verification fails. Neither nodes nor puppets can
+request the key, and there is no public HTTP endpoint for it.
 
 The bus uses the server's TLS proxy at /nats. A self-signed certificate is
 pinned before sending the bus password; compare its fingerprint on the
@@ -32,7 +32,7 @@ import urllib.parse
 import urllib.request
 
 from mop.cli import lib
-from mop.common import bus, context, creds, paths
+from mop.common import bus, busnames, context, creds, paths
 
 
 def parse(argv):
@@ -126,6 +126,25 @@ def _restore_pin(dest, der):
             os.remove(path)
 
 
+def _fetch(host, login, password, dest, https):
+    """Запросить настройки от имени уже проверенного человека, не узла."""
+    c = creds.wss_config(host, https, None, password, user=login,
+                         cafile=creds.cafile(dest))
+    reply = bus.ask_once(c, busnames.join_config(login), "client_config")
+    if not isinstance(reply, dict):
+        raise RuntimeError("invalid proxy configuration response")
+    if reply.get("error"):
+        raise RuntimeError(reply["error"])
+    try:
+        record = creds._client_values(reply["https_port"], reply["proxy_url"],
+                                      reply["proxy_key"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise RuntimeError("invalid proxy configuration from server") from e
+    if record["https_port"] != https:
+        raise RuntimeError("server proxy port differs from the verified bus port")
+    return record
+
+
 def complete(host, login, dest, https):
     """Один проверенный вход: старый пароль можно использовать, новые файлы
     появляются только после обеих сетевых проверок."""
@@ -136,22 +155,8 @@ def complete(host, login, dest, https):
         stored = creds.operator(dest)
         valid = stored and stored["user"] == login and _still_valid(host, https, dest, stored)
         password = stored["password"] if valid else _login(host, login, dest, https)
-        old = creds.client(dest)
-
-        def values():
-            url = ask(f"LLM proxy URL for {host}: ")
-            key = ask(f"LLM proxy key for {host}: ", secret=True)
-            return creds._client_values(https, url, key)
-
-        record = old or values()
-        try:
-            _probe(record["proxy_url"], record["proxy_key"], dest)
-        except RuntimeError:
-            if not old or not sys.stdin.isatty():
-                raise
-            # Поменявшийся в панели ключ не должен требовать ручной правки JSON.
-            record = values()
-            _probe(record["proxy_url"], record["proxy_key"], dest)
+        record = _fetch(host, login, password, dest, https)
+        _probe(record["proxy_url"], record["proxy_key"], dest)
         creds.write_client(dest, **record)
         if not valid:
             creds.write_operator(dest, login, password)

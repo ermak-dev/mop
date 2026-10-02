@@ -312,12 +312,12 @@ working copy's binding; if missing, they are asked for. The bus password is
 asked without echo (or read from MOP_BUS_PASSWORD) and verified before
 saving. A valid previous login is reused.
 
-The HTTPS port defaults to 443. On a new join, the LLM proxy URL and client
-key are asked for separately (key without echo). Use the server's TLS URL,
-for example https://ADDRESS/llm; an HTTP URL is accepted only on loopback.
-The key is checked with /v1/models before credentials are saved. Obtain it
-from the controller through a private channel; join does not expose a shared
-key over the pool bus or a public API.
+The HTTPS port defaults to 443. After authenticating to the bus, join asks
+the server for its LLM proxy URL and client key over a personal, authenticated
+subject. The key is never printed or asked for separately; /v1/models is
+checked before saving. Rejoining refreshes a rotated key without replacing
+working credentials when verification fails. Neither nodes nor puppets can
+request the key, and there is no public HTTP endpoint for it.
 
 The bus uses the server's TLS proxy at /nats. A self-signed certificate is
 pinned before sending the bus password; compare its fingerprint on the
