@@ -229,3 +229,35 @@ test("#416 a late guest answer arriving after login leaves the login alone", asy
   await new Promise((r) => setTimeout(r, 50));
   expect(screen.getByText("anton")).toBeInTheDocument();
 });
+
+
+// Ревью 3 (#416): focus и visibility стартуют два sync с одной эпохой --
+// если старший ответ придёт позже, он не имеет права менять состояние.
+test("#416 out-of-order session answers: the newest request wins", async () => {
+  // первая фаза: вошли (admin) -- как в жизни, входом; упрощаем: стартовый
+  // sync отвечает admin, страница показывает антона
+  (vi.mocked(await import("./useSession")) as { fetchSession: unknown }).fetchSession =
+    () => Promise.resolve({ login: "anton", role: "admin" });
+  renderUi(<App />);
+  await screen.findByText("anton");
+
+  // вторая фаза: mount-подобный «старый» опрос висит, «новый» (focus) уже
+  // знает, что cookie истекла -- гость
+  let stale: (s: Session) => void = () => {};
+  const hold = new Promise<Session>((r) => { stale = r; });
+  let calls = 0;
+  (vi.mocked(await import("./useSession")) as { fetchSession: unknown }).fetchSession = () => {
+    calls++;
+    return calls === 1 ? (hold as Promise<Session>) : Promise.resolve({ login: null, role: null });
+  };
+  // как в жизни: focus и visibility стартуют два sync почти сразу;
+  // первый (старый) висит, второй (новый) отвечает гостем
+  fireEvent.focus(window);
+  fireEvent(document, new Event("visibilitychange"));
+  await waitFor(() => expect(screen.queryByText("anton")).toBeNull());
+  stale({ login: "anton", role: "admin" }); // опоздавший старый ответ: admin
+  await new Promise((r) => setTimeout(r, 100));
+  // старый ответ не возвращает админа: последний начатый sync решает
+  expect(screen.queryByText("anton")).toBeNull();
+  expect(screen.getByRole("button", { name: "Login" })).toBeInTheDocument();
+});

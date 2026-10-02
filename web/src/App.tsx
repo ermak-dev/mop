@@ -30,11 +30,19 @@ export default function App() {
   // и логин вечно. Порядок без гонки со входом: опрос кладёт ответ только
   // если после него не было локального входа/выхода -- счётчик версий.
   const authEpoch = useRef(0);
+  // Поколение запросов: отвечает только последний НАЧАТЫЙ sync. Два опроса
+  // (focus + visibility) с одной эпохой -- старший ответ, пришедший позже
+  // младшего, не возвращает прошлое состояние. authEpoch отдельно: локальный
+  // вход/выход отменяет и висящие опросы.
+  const syncGen = useRef(0);
   const sync = () => {
     const at = authEpoch.current;
+    const gen = ++syncGen.current;
     fetchSession()
-      .then((s) => { if (at === authEpoch.current) setSession(s); })
-      .catch(() => { if (at === authEpoch.current) setPanelError("панель недоступна"); });
+      .then((s) => { if (at === authEpoch.current && gen === syncGen.current) setSession(s); })
+      .catch(() => {
+        if (at === authEpoch.current && gen === syncGen.current) setPanelError("панель недоступна");
+      });
   };
   useEffect(() => {
     sync();
