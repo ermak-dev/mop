@@ -19,6 +19,7 @@ inode, расход токенов — разбор транскриптов в 
 """
 import dataclasses
 import json
+import re
 import os
 import threading
 import time
@@ -462,7 +463,8 @@ ENTRY_MAX = 64 * 1024
 # Поля-ключи не хранятся и не отдаются: событие с шины публичных данных не
 # обещает, а журнал читает человек и браузер. Регистр не важен, вложенные
 # словари чистятся тем же списком.
-CREDENTIAL_KEYS = ("management_key", "authorization", "password", "token", "secret")
+CREDENTIAL_KEYS = ("management_key", "authorization", "password", "passwd",
+                   "token", "secret", "api_key", "access_key", "credentials")
 
 
 def _valid_at(value):
@@ -475,6 +477,17 @@ def _valid_at(value):
     return value
 
 
+# Типовой секрет в свободном тексте события (#424, доработка): значение
+# bearer-схемы. Только эта форма -- произвольный текст не распознаётся как
+# секрет, и обещать этого нельзя; остальной текст остаётся как был.
+_BEARER = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+")
+
+
+def _redact_text(text):
+    """Убрать bearer-значения из строки события, контекст вокруг -- оставить."""
+    return _BEARER.sub("Bearer [redacted]", text) if isinstance(text, str) else text
+
+
 def _strip_credentials(value):
     """Убрать credential-поля на любом уровне. Списки чистятся поэлементно,
     словари -- по ключу (без учёта регистра); остальное -- как есть."""
@@ -484,6 +497,8 @@ def _strip_credentials(value):
                 if not any(k.lower().endswith(s) or s in k.lower() for s in CREDENTIAL_KEYS)}
     if isinstance(value, list):
         return [_strip_credentials(v) for v in value]
+    if isinstance(value, str):
+        return _redact_text(value)
     return value
 
 

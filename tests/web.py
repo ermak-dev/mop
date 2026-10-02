@@ -972,6 +972,30 @@ def check_journal_entry_424(c):
     c.check("#424 the marker names the event",
             col3.admin_journal[1].get("event") == "send"
             and isinstance(col3.admin_journal[1].get("text"), str), col3.admin_journal[1])
+    # ── #424, доработка: ключи и bearer в text ──────────────────────────
+    # HYPOTHESIS: список CREDENTIAL_KEYS ловит поля, но не ловит ни ключей
+    # api_key/access_key/credentials/passwd, ни типового секрета ВНУТРИ
+    # text: «Authorization: Bearer <фиктивный>» сохранялся в admin-журнал.
+    # SOLUTION: список дополнен массовыми именами ключей; из text события
+    # убирается bearer-значение (типовая форма), остальной текст остаётся --
+    # без претензии распознать произвольный секрет в свободном тексте.
+    # STATUS: FIXED — see #424
+    col4 = _journal_collector()
+    col4.event({"event": "send", "text": "x", "api_key": "AK", "access_key": "AK2",
+                "credentials": "c", "passwd": "p", "api_token": "t"})
+    flat4 = json.dumps(col4.admin_journal)
+    for secret in ('"AK"', '"AK2"', '"c"', '"p"', '"t"'):
+        c.check(f"#424 key {secret} never stored", secret not in flat4, flat4)
+
+    col5 = _journal_collector()
+    col5.event({"event": "type", "text":
+                "switched model: Authorization: Bearer sk-ant-FAKE123, please re-check"})
+    flat5 = json.dumps(col5.admin_journal)
+    c.check("#424 a bearer value in text is redacted",
+            "sk-ant-FAKE123" not in flat5, flat5)
+    c.check("#424 the text around the secret survives",
+            "switched model" in flat5 and "please re-check" in flat5, flat5)
+
     # Длинное имя события само раздувает запись: маркер обязан быть
     # ограничен целиком, без сырого большого поля -- в нём может быть секрет.
     col5 = _journal_collector()
