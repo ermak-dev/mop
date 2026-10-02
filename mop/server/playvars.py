@@ -20,8 +20,10 @@ def playbook_vars():
     `mop setup` и `mop server setup`."""
     # Настройки процесса (PROCESS_SCOPED) не едут: они про этот процесс, а не
     # про установку -- MOP_PROJECT из шелла мастера ansible ни к чему.
+    # Ключ прокси читает сервис из файла (#393): общий JSON для плейбуков,
+    # образов и `mop server config --json` печатать его не должен.
     out = {k: v for k, (v, _) in config.effective().items()
-           if k not in config.PROCESS_SCOPED}
+           if k not in (*config.PROCESS_SCOPED, "MOP_PROXY_KEY")}
     out["MOP_NODE_SCOPED"] = ",".join(config.NODE_SCOPED)
     out["MOP_SERVER_SCOPED"] = {u: list(v) for u, v in config.SERVER_SCOPED.items()}
     out["MOP_PIP_DEPS"] = ",".join(deps.PIP)

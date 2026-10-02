@@ -467,7 +467,7 @@ SERVER_SCOPED = {
     "mop-cluster": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
                     "MOP_HOME", "MOP_USER", "MOP_NOMAD_PORT", "MOP_POOL_DC",
                     "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",
-                    "MOP_PUPPET_PATH", "MOP_PROXY_URL", "MOP_PROXY_KEY",
+                    "MOP_PUPPET_PATH", "MOP_PROXY_URL",
                     # reload шины с проверкой (#211): `mop project add/rm`
                     "MOP_NATS_MONITOR_PORT"),
     # Сервис auth callout (#206): шина на петле, провайдер личностей. Пароли
