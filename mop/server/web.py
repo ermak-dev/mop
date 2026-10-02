@@ -18,6 +18,8 @@ inode, расход токенов — разбор транскриптов в 
 Модуль возвращает данные и ничего не печатает; HTTP живёт в bin/web.
 """
 import dataclasses
+import json
+import re
 import os
 import threading
 import time
@@ -327,6 +329,7 @@ class Collector:
         self.version = 0
         self.rows, self.sizes, self.nodes = [], {}, []
         self.usage, self.per_puppet, self.per_user, self.journal = [], [], [], []
+        self.admin_journal = []     # полный журнал, только /api/journal (#424)
         self.masters = []
         self.errors = {}
         self.at = None
@@ -337,8 +340,10 @@ class Collector:
         with self._cond:
             return snapshot(with_sizes(self.rows, self.sizes), self.nodes,
                             self.usage, self.per_puppet, self.per_user,
-                            self.journal, [f"{k}: {v}" for k, v in
-                                           sorted(self.errors.items())],
+                            # Публичный снимок без записей журнала (#424):
+                            # полный -- только /api/journal под admin-ролью.
+                            [], [f"{k}: {v}" for k, v in
+                                 sorted(self.errors.items())],
                             self.at, self.masters)
 
     def wait(self, version, timeout):
@@ -353,10 +358,13 @@ class Collector:
             self.version += 1
             self._cond.notify_all()
 
-    def event(self, entry):
-        """Событие с шины: в журнал и быстрый круг вперёд."""
+    def event(self, entry, msg=None):
+        """Событие с шины: полный журнал -- админу (#424), быстрый круг --
+        вперёд. Публичный снимок записей больше не несёт: пустой список на
+        переход (#424), живое -- в admin_journal."""
+        full = full_entry(msg if msg is not None else entry)
         with self._cond:
-            self.journal = push(self.journal, {"at": time.time(), **entry})
+            self.admin_journal = push(getattr(self, "admin_journal", []), full)
         self._bump()
         self._kick.set()
 
@@ -476,5 +484,354 @@ def journal_entry(msg):
     return {"event": msg.get("event") or "?", "node": msg.get("node") or "-",
             "name": msg.get("name") or "-", "project": msg.get("project") or "-",
             "text": msg.get("text") or ""}
+
+
+# ─── гейтвей управления прокси (#417) ────────────────────────────────────
+# Write-guard конфига CLIProxyAPI: сток-панель в Source-режиме кладёт весь
+# документ PUT'ом и без блока management убивает ключ; PATCH с полем
+# secret-key подменяет ключ значением из браузера. Решение принимает
+# сервер -- пропустить, отказать или инжектировать management-блок из
+# серверного источника; парсинг только здесь, сырой ключ наружу не идёт.
+import yaml
+
+
+class KeyBreaker:
+    """Circuit breaker ключа management (#417): CPA банит петлю на 30 минут
+    после пяти неудач, а панель одним загрузом шлёт больше пяти запросов.
+    После upstream 401/403 ключ считается отвергнутым: все запросы с ним
+    получают 503 локально, без похода к upstream и без ключа в ответе --
+    пока содержимое защищённой копии не сменится (новое значение -- новая
+    проба). Ротация ключа -- отдельная операция оператора, не автоматизм."""
+
+    REFUSED_BODY = b"proxy management key rejected"
+    # Бан CPA петлевой: 30 минут, и ротация ключа его не снимает
+    COOLDOWN = 30 * 60
+
+    def __init__(self, ask=None):
+        self._lock = threading.Lock()
+        self._refused = set()
+        self._banned_until = 0.0
+        self._proven = set()     # ключи с подтверждённым успехом
+        self._inflight = {}      # ключ -> событие «проба завершена»
+        self._ask = ask          # диагностика проверок: каждый локальный отказ
+
+    def __call__(self, method, path, body, key, upstream):
+        """Пропустить запрос к upstream, если ключ жив. -> (код, тело).
+
+        Неподтверждённый ключ -- single-flight: первая проба идёт одна,
+        остальные ждут её исхода. Панель открывает запросы пачкой, и без
+        этого пять параллельных 401 банят петлю раньше, чем мы узнаем об
+        отказе. Подтверждённый успех снимает сериализацию."""
+        while True:
+            with self._lock:
+                refused = key in self._refused or time.time() < self._banned_until
+                if refused:
+                    if self._ask:
+                        self._ask()
+                    return 503, self.REFUSED_BODY
+                if key in self._proven:
+                    break
+                done = self._inflight.get(key)
+                if done is None:
+                    done = threading.Event()
+                    self._inflight[key] = done
+                    break
+            done.wait()
+        code = None
+        try:
+            code, got = upstream(method, path, body, key)
+        finally:
+            # Изменить состояние до освобождения ожидающих: если event.set()
+            # случится раньше отказа 401, второй поток сделает вторую пробу.
+            with self._lock:
+                if code == 200:
+                    self._proven.add(key)
+                if code in (401, 403):
+                    self._refused.add(key)
+                    if code == 403:
+                        # Бан CPA петлевой: ротация не снимает cooldown.
+                        self._banned_until = max(self._banned_until,
+                                                 time.time() + self.COOLDOWN)
+                event = self._inflight.pop(key, None)
+                if event:
+                    event.set()
+        if code in (401, 403):
+            return code, got
+        return code, got
+
+
+# Management-блок, инжектируемый полному PUT (#417, вариант A): ключ
+# перечитывается из закрытого файла на каждый write, остальные поля --
+# безопасные дефолты управления (в config.yaml прокси их задаёт deploy).
+MANAGEMENT_DEFAULTS = {"allow-remote": False, "disable-auto-update-panel": True}
+
+
+def _management_paths_hit(obj):
+    """Затрагивает ли JSON-запись ЯВНОЕ поле management.secret-key: хэш или
+    новый ключ -- замена, плейсхолдер из прочитанного конфига -- как
+    отсутствие поля (браузер вернул то, что мы ему показали)."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "secret-key":
+                return v != PLACEHOLDER
+            if k == "management" and isinstance(v, dict) and "secret-key" in v:
+                return v["secret-key"] != PLACEHOLDER if isinstance(v["secret-key"], str) else True
+    return False
+
+
+def _yaml_doc(body):
+    """YAML-тело -> dict | None (битое/не словарь -- None)."""
+    try:
+        doc = yaml.safe_load(body)
+    except yaml.YAMLError:
+        return None
+    return doc if isinstance(doc, dict) else {}
+
+
+def _has_explicit_secret(doc):
+    """В документе есть ЯВНЫЙ secret-key (не наш плейсхолдер из чтения)?"""
+    mgmt = doc.get("management")
+    if not isinstance(mgmt, dict) or "secret-key" not in mgmt:
+        return False
+    value = mgmt["secret-key"]
+    return not (isinstance(value, str) and value == PLACEHOLDER)
+
+
+def _yaml_has_secret(body):
+    """YAML-тело несёт явный management.secret-key? Парсим, не grep:
+    комментарии и чужие поля с похожим именем не считаются."""
+    doc = _yaml_doc(body)
+    if doc is None:
+        return None      # битый YAML -- не гадаем
+    return _has_explicit_secret(doc)
+
+
+def _yaml_has_management(body):
+    try:
+        doc = yaml.safe_load(body)
+    except yaml.YAMLError:
+        return None
+    return isinstance(doc, dict) and isinstance(doc.get("management"), dict)
+
+
+# Что видит браузер вместо хэша в прочитанном конфиге (#417): плейсхолдер
+# не секрет и знаком guard'у -- его возврат в write читается как отсутствие
+# поля, не как явная замена ключа.
+PLACEHOLDER = "managed-by-mop"
+# Sentinel для шима сток-панели (#417): публичное слово в localStorage
+# браузера; upstream его не принимает, гейтвей подменяет своим ключом.
+SENTINEL = "mop-proxy-managed"
+# Размеры гейтвея (#417): сток-панель -- один файл ~3 МБ; тела write --
+# конфиги, но лимит общий с /llm/ у nginx.
+PANEL_MAX = 4 * 1024 * 1024
+REDIRECT_MAX = 3
+
+
+def mgmt_key_path():
+    """Закрытая копия management-ключа (#418): каталог пула текущего
+    пользователя, никакие хосты/home вне paths.local. До раскатки #418
+    файла нет -- гейтвей fail closed, и это норма перехода."""
+    return paths.local(paths.SECRETS, "llm-proxy-mgmt.pass")
+
+
+# Что из заголовков ответа upstream уходит браузеру (#417): cookie и
+# аутентификационные вызовы прокси не проходят -- сессия у нас своя.
+RESPONSE_KEEP = ("Content-Type", "X-Cpa-Version", "X-Cpa-Build-Date",
+                 "X-Server-Version", "X-Cpa-Support-Plugin")
+
+
+def response_headers(headers):
+    """Заголовки upstream -> заголовки для браузера: только whitelist."""
+    return {k: v for k, v in (headers or {}).items()
+            if k in RESPONSE_KEEP}
+
+
+def redact_management_read(path, body):
+    """Ответ upstream -> тело для браузера: хэш secret-key в /config и
+    /config.yaml закрыт плейсхолдером, остальное -- байт в байт. Не-конфиг
+    и битые тела проходят как есть: чтение не должно рвать страницу."""
+    if not path.rstrip("/").endswith("/config") and not path.endswith("/config.yaml"):
+        return body
+    try:
+        if path.endswith("/config.yaml"):
+            doc = yaml.safe_load(body)
+            if isinstance(doc, dict) and isinstance(doc.get("management"), dict) \
+                    and "secret-key" in doc["management"]:
+                doc["management"]["secret-key"] = PLACEHOLDER
+                return yaml.safe_dump(doc, default_flow_style=False,
+                                      allow_unicode=True).encode()
+            return body
+        doc = json.loads(body)
+        if isinstance(doc, dict) and isinstance(doc.get("management"), dict) \
+                and "secret-key" in doc["management"]:
+            doc["management"]["secret-key"] = PLACEHOLDER
+            return json.dumps(doc, ensure_ascii=False).encode()
+        return body
+    except (ValueError, UnicodeDecodeError, yaml.YAMLError):
+        return None     # битый ответ с секретом нельзя выдавать как есть
+
+
+def guard_management_write(method, path, body, key_source):
+    """Решение write-guard'а. -> {action: pass|refuse|inject, status?,
+    body?}.
+
+    method/path -- запрос браузера; body -- байты; key_source -- callable
+    -> plaintext-ключ из закрытого файла сервера | None (файл недоступен);
+    зовётся на каждый write, ротация подхватывается без кэша. Отказ: 403
+    «поле ведётся mop'ом», 400 «битое тело», 503 «ключ недоступен, а PUT
+    удалил бы секрет». Инжект: management-блок получает актуальный
+    secret-key; прочие management-настройки клиента сохраняются, полей
+    без клиента добавляются безопасные дефолты. Сырой ключ живёт только
+    в теле исходящего loopback-запроса -- не в ответах и не в логах."""
+    if method not in ("POST", "PATCH", "PUT", "DELETE"):
+        return {"action": "pass"}
+    if not path.startswith("/v8/management/"):
+        return {"action": "pass"}
+
+    is_yaml = path.endswith("/config.yaml")
+    if not (path.rstrip("/").endswith("/config") or is_yaml
+            or "/config/" in path):
+        return {"action": "pass"}     # не конфиг: credentials, oauth и пр.
+
+    # Полный документ нельзя удалять/создавать без preservation-контракта;
+    # панель сохраняет его PUT, отдельные настройки -- PATCH.
+    if method in ("POST", "DELETE"):
+        return {"action": "refuse", "status": 403}
+
+    # path-addressed запись в само поле
+    if "/config/management" in path and method == "PATCH":
+        return {"action": "refuse", "status": 403}
+
+
+    if is_yaml:
+        doc = _yaml_doc(body)
+        if doc is None:
+            return {"action": "refuse", "status": 400}
+        has_secret = _has_explicit_secret(doc)
+        has_mgmt = isinstance(doc.get("management"), dict)
+        if has_secret:
+            return {"action": "refuse", "status": 403}
+        key = key_source()
+        if key is None:
+            return {"action": "refuse", "status": 503}
+        if not has_mgmt:
+            doc["management"] = {"secret-key": key, **MANAGEMENT_DEFAULTS}
+        else:
+            # блок клиента без явного ключа (или с нашим плейсхолдером) --
+            # ключ сервера, прочие настройки клиента сохраняются
+            client = {k: v for k, v in doc["management"].items()
+                      if k != "secret-key"}
+            doc["management"] = {**MANAGEMENT_DEFAULTS, **client,
+                                 "secret-key": key}
+        return {"action": "inject",
+                "body": yaml.safe_dump(doc, default_flow_style=False,
+                                       allow_unicode=True).encode()}
+
+    # JSON-ветка: PATCH -- слияние, PUT -- полная замена
+    try:
+        doc = json.loads(body or b"{}")
+        if not isinstance(doc, dict):
+            raise ValueError
+    except (ValueError, UnicodeDecodeError):
+        return {"action": "refuse", "status": 400}
+    if _management_paths_hit(doc):
+        return {"action": "refuse", "status": 403}
+    # плейсхолдер из прочитанного конфига -- как отсутствие поля
+    mgmt = doc.get("management")
+    if isinstance(mgmt, dict) and mgmt.get("secret-key") == PLACEHOLDER:
+        mgmt.pop("secret-key")
+    if method == "PUT":
+        key = key_source()
+        if key is None:
+            return {"action": "refuse", "status": 503}
+        client = doc.get("management") if isinstance(doc.get("management"), dict) else {}
+        # настройки клиента сохраняются, ключ -- только серверный
+        doc["management"] = {**MANAGEMENT_DEFAULTS, **client,
+                             "secret-key": key}
+        return {"action": "inject",
+                "body": json.dumps(doc, ensure_ascii=False).encode()}
+    return {"action": "pass"}
+
+
+# ─── полный журнал для админа (#424) ─────────────────────────────────────
+# Одна запись -- не больше ENTRY_MAX байт сериализации: событие больше
+# заменяется маркером, а не хранится oversized.
+ENTRY_MAX = 64 * 1024
+# Поля-ключи не хранятся и не отдаются: событие с шины публичных данных не
+# обещает, а журнал читает человек и браузер. Регистр не важен, вложенные
+# словари чистятся тем же списком.
+CREDENTIAL_KEYS = ("management_key", "authorization", "password", "passwd",
+                   "token", "secret", "api_key", "access_key", "credentials")
+
+
+def _valid_at(value):
+    """Исходный at события -> число | None: bool и нечисла (NaN, inf,
+    строки) не годятся -- JSON их не переносит и смысл у них другой."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    return value
+
+
+# Типовой секрет в свободном тексте события (#424, доработка): значение
+# bearer-схемы. Только эта форма -- произвольный текст не распознаётся как
+# секрет, и обещать этого нельзя; остальной текст остаётся как был.
+_BEARER = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+")
+# Ключ=значение в тексте команды (#424, follow-up): значение теряется, слово
+# ключа остаётся. Словарь -- тот же CREDENTIAL_KEYS (признанный список), а
+# не «любое слово перед =»: произвольная строка секретом не считается. Формы:
+# --key value, --key=value, key=value, key: value (регистр ключа не важен).
+_KEY = "|".join(re.escape(k) for k in sorted(CREDENTIAL_KEYS, key=len, reverse=True))
+_KV = re.compile(rf"(?i)(--)?({_KEY})([=:\s]+)([^\s,;]+)")
+
+
+def _redact_text(text):
+    """Убрать bearer-значения и ключ=значение из строки события; контекст
+    вокруг -- оставить."""
+    if not isinstance(text, str):
+        return text
+    def kv(m):
+        # Дефис-префикс и слово ключа остаются: контекст команды читается.
+        return f"{m.group(1) or ''}{m.group(2)}{m.group(3)}[redacted]"
+    return _KV.sub(kv, _BEARER.sub("Bearer [redacted]", text))
+
+
+def _strip_credentials(value):
+    """Убрать credential-поля на любом уровне. Списки чистятся поэлементно,
+    словари -- по ключу (без учёта регистра); остальное -- как есть."""
+    if isinstance(value, dict):
+        return {k: _strip_credentials(v)
+                for k, v in value.items()
+                if not any(k.lower().endswith(s) or s in k.lower() for s in CREDENTIAL_KEYS)}
+    if isinstance(value, list):
+        return [_strip_credentials(v) for v in value]
+    if isinstance(value, str):
+        return _redact_text(value)
+    return value
+
+
+def full_entry(msg, now=None):
+    """Событие шины -> полная запись админского журнала (#424).
+
+    Все обычные поля события сохраняются без белого списка; исходный at
+    остаётся, если это валидное число, иначе -- время получения (fail к
+    честной метке, не null); received_at -- всегда отдельное поле.
+    Credential-поля вычищаются; событие, не влезающее в ENTRY_MAX байт
+    сериализации, заменяется ограниченным маркером."""
+    received = time.time() if now is None else (now() if callable(now) else now)
+    clean = _strip_credentials(dict(msg))
+    at = _valid_at(clean.pop("at", None))
+    entry = {"at": at if at is not None else received, "received_at": received, **clean}
+    if len(json.dumps(entry, ensure_ascii=False, default=str).encode()) > ENTRY_MAX:
+        # Маркер ограничен целиком: даже имя события не переносится сырым --
+        # длинное имя само раздувает запись и может нести секрет. Короткое --
+        # отредактированным (в clean -- bearer и ключ=значение уже сняты),
+        # не сырым: 64 байта хватает и на «Bearer sk-…».
+        name = clean.get("event")
+        name = name if isinstance(name, str) and len(name) <= 64 else "?"
+        return {"event": name, "text": "[event over size limit]",
+                "at": entry["at"], "received_at": received}
+    return entry
 
 

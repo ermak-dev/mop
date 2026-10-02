@@ -31,8 +31,15 @@ export interface Tokens { total: number; input: number; output: number; cache_wr
 export interface UsageDay extends Tokens { date: string }
 export interface UsageUser extends Tokens { login: string }
 export interface PuppetUsage extends Tokens { name: string; node: string }
-/** Событие журнала: метку at ставит сборщик каждому (Collector.event). */
-export interface JournalEntry { at: number; event: string; name: string; node: string; project: string; text: string }
+/** Событие журнала (#422, контракт #424): at -- исходная метка агента,
+ *  received_at -- когда запись принял сервер; обычные поля события тоже
+ *  здесь, credential-поля вычищены на сервере. Дальнейшие безопасные поля
+ *  конверта -- optional: страница показывает их без выдумывания своих. */
+export interface JournalEntry {
+  at: number; received_at?: number; event: string; name: string; node: string;
+  project: string; text: string;
+  [extra: string]: unknown;
+}
 /** Строка реестра кредитов; holders -- всегда список, пустой без аренды. */
 /** Сегмент полосы аллокаций (#378): корзина бегущих папетов, «прочее
  *  выделенное» (other) или свободные места (vacant) -- в порядке сервера. */
@@ -50,7 +57,9 @@ export interface Snapshot {
   usage: UsageDay[];
   per_puppet: PuppetUsage[];
   per_user: UsageUser[];
-  journal: JournalEntry[];
+  /** Окно раскатки #424: журнал ушёл из публичного снимка; старый сервер
+   *  ещё кладёт его сюда -- главная его больше не читает. */
+  journal?: JournalEntry[];
   errors: string[];
   masters: Master[];
   /** период опроса who в секундах (#325, MASTERS_EVERY) */
