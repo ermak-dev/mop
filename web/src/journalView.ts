@@ -38,7 +38,10 @@ export function fullAt(ts: number | null | undefined, timeZone?: string): string
 /** Заголовок карточки: «событие — папет»; без папета («up» пишет агент
  *  узла) -- одно событие. */
 export function entryTitle(e: JournalEntry): string {
-  return e.name && e.name !== "-" ? `${e.event} — ${e.name}` : e.event;
+  // имя и событие -- строками: full_entry хранит произвольный JSON (ревью 7)
+  const name = asText(e.name).replace(/^undefined$|^null$/, "");
+  const event = asText(e.event) || "?";
+  return name && name !== "-" ? `${event} — ${name}` : event;
 }
 
 /** Осмысленное описание по виду события (#422): не сырой text, а фраза.

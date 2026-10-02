@@ -76,6 +76,25 @@ test("review: an open modal closes the moment the source refuses", async () => {
   expect(screen.getByText(/прав не хватает/)).toBeInTheDocument();
 });
 
+// Ревью 7 (#422): full_entry хранит произвольный JSON не только в text --
+// объект в name/event/node/project ронял строку таблицы («Objects are not
+// valid as a React child»). Ячейки таблицы и заголовок рисуются строками
+// (объект -- его JSON); модал остаётся носителем сырого значения. Вид
+// события, не являющийся строкой, фразу не заслужил -- колонка описания
+// честно показывает сырой text.
+test("review7: object name/event/node render as text, not a crash", () => {
+  const odd = [
+    { at: 1700000000, event: { kind: "send" }, name: { x: 1 }, node: [1, 2],
+      project: "mop", text: "from ermak" },
+  ] as unknown as JournalEntry[];
+  renderUi(<JournalPage journal={odd} open={() => {}} sourceKey="anton\0admin" />);
+  const row = screen.getByText("14.11.2023 22:13:20 UTC").closest("tr")!;
+  expect(row.textContent).toContain('{"kind":"send"}');   // event -- строкой
+  expect(row.textContent).toContain('{"x":1}');           // name -- строкой
+  expect(row.textContent).toContain("mop");
+  expect(row.textContent).toContain("from ermak");        // default: сырой text
+});
+
 // Ревью 4 (#422): обычный 10s опрос приносит новый массив с теми же
 // событиями -- ссылка другая, источник тот же. Диалог полного события
 // переживает такой кадр: закрыть его может смена источника или отказ,

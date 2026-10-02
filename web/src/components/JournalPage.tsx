@@ -19,7 +19,11 @@ export const EMPTY = "событий пока нет — агенты пишут
 
 // Время как кнопка: строка таблицы не фокусится сама, а кнопка в первой
 // ячейке -- и клик мышью, и Tab+Enter; на клик по всей строке -- тоже открываем.
+// Ячейки -- строками: full_entry хранит произвольный JSON, и объект в
+// name/event/node ронял таблицу («Objects are not valid as a React child»,
+// ревью 7); сырое значение остаётся в диалоге.
 function Row({ e, onOpen }: { e: JournalEntry; onOpen: () => void }) {
+  const cell = (v: unknown) => (v == null ? "-" : typeof v === "object" ? JSON.stringify(v) : String(v));
   return (
     <Table.Tr onClick={onOpen} onKeyDown={(ev) => { if (ev.key === "Enter") onOpen(); }}>
       <Table.Td>
@@ -27,10 +31,10 @@ function Row({ e, onOpen }: { e: JournalEntry; onOpen: () => void }) {
           {fullAt(e.at)}
         </UnstyledButton>
       </Table.Td>
-      <Table.Td><Text span fw={600}>{e.event}</Text></Table.Td>
-      <Table.Td>{e.name}</Table.Td>
-      <Table.Td>{e.node}</Table.Td>
-      <Table.Td>{e.project}</Table.Td>
+      <Table.Td><Text span fw={600}>{cell(e.event)}</Text></Table.Td>
+      <Table.Td>{cell(e.name)}</Table.Td>
+      <Table.Td>{cell(e.node)}</Table.Td>
+      <Table.Td>{cell(e.project)}</Table.Td>
       <Table.Td><Text lineClamp={1}>{journalText(e)}</Text></Table.Td>
     </Table.Tr>
   );
