@@ -43,6 +43,73 @@ server {
     # location. Оба на петлю: management API прокси отвечает только с неё
     # (allow-remote: false), и этот TLS -- единственный путь к управлению;
     # авторизация -- management-ключ самого прокси.
+    #
+    # #418 (эпик #413): управление ушло за шлюз. /llm/management.html --
+    # шим mop-web (свой вход, iframe на /llm/raw/management.html), /llm/raw/
+    # -- gated стоковая панель от mop-web, /v8/management/ -- API-шлюз
+    # mop-web: сессия оператора с ролью admin + Bearer из закрытой копии
+    # ключа. Алиасы через срез префикса /llm/ закрыты deny: панель строит
+    # путь от корня origin, но обход шлюза через префикс не должен
+    # работать. Прочее под /llm/ -- у прокси, как было (#411).
+    location = /llm/management.html {
+        proxy_pass http://127.0.0.1:{{ MOP_WEB_PORT }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location /llm/raw/ {
+        proxy_pass http://127.0.0.1:{{ MOP_WEB_PORT }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        # Стоковая панель -- один inline HTML, будущие ассеты -- те же
+        # относительные пути: лимит как у LLM-маршрута (#411), стрим --
+        # без буферизации и с тем же запасом, что у API.
+        client_max_body_size {{ MOP_LLM_REQUEST_MAX_MB }}m;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 75s;
+    }
+
+    location /v8/management/ {
+        proxy_pass http://127.0.0.1:{{ MOP_WEB_PORT }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        # Журнал панели стримится: без буферизации, лимит тела как у
+        # панели, таймаут -- короче вчерашнего часа: шлюз может ответить
+        # быстрее, а зависший upstream виден раньше.
+        client_max_body_size {{ MOP_LLM_REQUEST_MAX_MB }}m;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 75s;
+    }
+
+    # Exact без слеша -- тоже шлюз: панель строит путь без слеша на
+    # корневых запросах, и это не повод уходить мимо префиксного location.
+    location = /v8/management {
+        proxy_pass http://127.0.0.1:{{ MOP_WEB_PORT }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        client_max_body_size {{ MOP_LLM_REQUEST_MAX_MB }}m;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 75s;
+    }
+
+    # Обход шлюза через срез префикса /llm/: /llm/v8/management -- это
+    # /v8/management на порту прокси,management-ключа у клиента нет, но
+    # путь обязан закрываться здесь, не доходя до прокси.
+    location = /llm/v8/management {
+        return 403;
+    }
+
+    location /llm/v8/management/ {
+        return 403;
+    }
+
     location /llm/ {
         # История и compact проходят здесь же (#411): дефолт nginx
         # отрезал текстовый контекст, а Claude называл 413 лимитом media.
@@ -51,17 +118,6 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-    }
-
-    location /v8/management/ {
-        proxy_pass http://127.0.0.1:{{ MOP_LLM_PROXY_PORT }};
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        # Журнал панели стримится: без буферизации и с запасом времени.
-        proxy_http_version 1.1;
-        proxy_buffering off;
-        proxy_read_timeout 1h;
     }
 
     location / {

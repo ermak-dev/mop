@@ -1118,8 +1118,109 @@ def check_llm_request_size_411(c, can_render):
         c.check(f"#411: LLM accepts large requests with limit {limit!r}",
                 found is not None and found[1] == limit and int(found[1]) >= 32,
                 location)
-        c.check("#411: the request limit belongs only to the LLM route",
-                got.count("client_max_body_size") == 1, got)
+        # #418: лимит приехал и на маршруты шлюза панели (/llm/raw/,
+        # /v8/management) -- это те же тела LLM-прокси. Ожидание
+        # «только на LLM-маршруте» растянуто до «только на маршрутах к
+        # LLM-прокси», глобальной директивы по-прежнему нет; каждая
+        # директива несёт ровно подставленный предел.
+        c.check("#411: the request limit stays on the LLM routes only",
+                got.count("client_max_body_size")
+                == got.count(f"client_max_body_size {limit}m"),
+                got.count("client_max_body_size"))
+
+
+
+# HYPOTHESIS (#418): management-ключ прокси живёт только внутри config.yaml
+# (bcrypt после первого старта), и серверному шлюзу панели (#417) нечем
+# представиться прокси: ключ нигде не лежит отдельным закрытым файлом.
+# Прямые /v8/management и алиас /llm/v8/management при этом открыты мимо
+# шлюза -- путь, который #417 закрывает за собой.
+# SOLUTION (контракт pu3): роль web кладёт закрытую копию ключа (тот же
+# lookup, что у llmproxy -- совпадение при установке гарантировано общим
+# источником) до старта mop-web: paths.local(paths.SECRETS,
+# 'llm-proxy-mgmt.pass'), MOP_USER, файл 0600, каталог 0700, no_log;
+# nginx: = /llm/management.html и /llm/raw/ и /v8/management/ ведёт в
+# mop-web (шим, gated raw панель для iframe, API-шлюз), exact
+# /llm/v8/management и prefix /llm/v8/management/ -- deny, /llm/
+# остальное как было; лимит тела и read_timeout 75s на raw/API,
+# buffering off.
+# RESULT: до правки -- ни копии ключа, ни gateway-маршрутов; RED.
+# STATUS: не исправлено -- RED, реализация в этой же ветке
+def check_mgmt_gateway_418(c, can_render):
+    want = os.path.join(".config", "mop", "secrets", "llm-proxy-mgmt.pass")
+    tasks = yaml.safe_load(open(
+        os.path.join(DEPLOY, "roles", "web", "tasks", "main.yml"),
+        encoding="utf-8"))
+    copies = [t for t in tasks if "llm_proxy_mgmt_key" in str(t)]
+    unit_at = next((i for i, t in enumerate(tasks)
+                    if "mop-web unit" in str(t.get("name", "")).lower()
+                    or t.get("ansible.builtin.template", {}).get("src", "") == "service.j2"), None)
+    c.check("#418 the web role carries a private copy of the management key",
+            len(copies) == 1, [t.get("name") for t in copies])
+    if copies:
+        spec = copies[0].get("ansible.builtin.copy", {})
+        c.check("#418 the key copy is the gateway's own path and permissions",
+                spec.get("dest", "").endswith(want)
+                and spec.get("owner") == "{{ MOP_USER }}"
+                and spec.get("group") == "{{ MOP_USER }}"
+                and spec.get("mode") in ("0600", "'0600'")
+                and copies[0].get("no_log") is True, spec)
+        if unit_at is not None:
+            c.check("#418 the key copy lands before the web unit starts",
+                    tasks.index(copies[0]) < unit_at,
+                    (tasks.index(copies[0]), unit_at))
+        # Каталог копии -- 0700: не доверяем umask.
+        dirs = [t for t in tasks
+                if t.get("ansible.builtin.file", {}).get("state") == "directory"
+                and t["ansible.builtin.file"].get("path", "").endswith(
+                    os.path.join(".config", "mop", "secrets"))]
+        c.check("#418 the secrets dir is 0700",
+                any(d["ansible.builtin.file"].get("mode") in ("0700", "'0700'")
+                    for d in dirs), [d.get("name") for d in dirs])
+    if not can_render:
+        return
+    template = open(os.path.join(DEPLOY, "roles", "proxy", "templates",
+                                 "mop.conf.j2"), encoding="utf-8").read()
+    got = render(template, dict(config.SETTINGS, MOP_SERVER_LAN="srv.test"))
+    web = f"127.0.0.1:{config.SETTINGS['MOP_WEB_PORT']}"
+
+    def location(pattern):
+        m = re.search(r"location (= )?" + pattern + r" ?\{[^}]*\}", got)
+        return m.group(0) if m else ""
+
+    # Шлюз: три маршрута в mop-web.
+    for path_pat, what in ((r"/v8/management/", "API gateway"),
+                           (r"/llm/management\.html", "panel shim"),
+                           (r"/llm/raw/", "gated raw panel")):
+        m = location(path_pat)
+        c.check(f"#418 {what} goes to mop-web",
+                bool(m) and web in m, m or "no location")
+    # Exact /v8/management (без слеша) обработан шлюзом или deny -- но не
+    # уходит в CPA прямым proxy_pass.
+    m = location(r"/v8/management")
+    c.check("#418 exact /v8/management does not bypass the gateway",
+            ("= /v8/management" in m or "/v8/management " in m) and web in m, m)
+    # Алиасы -- deny.
+    for alias in (r"/llm/v8/management",):
+        m = location(alias)
+        c.check("#418 alias /llm/v8/management is denied",
+                bool(m) and ("403" in m or "deny" in m or "return 403" in m), m or "no location")
+    # /llm/ остальное как было (панельный location на CPA жив).
+    m = location(r"/llm/")
+    c.check("#418 /llm/ still proxies the panel prefix to CPA",
+            bool(m) and "8317" in m.replace(
+                config.SETTINGS.get("MOP_LLM_PROXY_PORT", "8317"), "8317"), m)
+    c.check("#418 #411 body limit stays on the LLM route",
+            "client_max_body_size" in location(r"/llm/"), location(r"/llm/"))
+    # Лимит и таймауты на raw/API.
+    for path_pat in (r"/llm/raw/", r"/v8/management/"):
+        m = location(path_pat)
+        c.check(f"#418 {path_pat}: body limit, 75s read timeout, buffering off",
+                "client_max_body_size" in m and "75s" in m
+                and "proxy_buffering off" in m, m)
+    # Неприкосновенность остального.
+    for keep in ("location = /nats", "location = /events", "location / {"):
+        c.check(f"#418 {keep} untouched", keep in got, keep)
 
 
 def main():
@@ -1136,6 +1237,7 @@ def main():
         can_render = False
         hermetic.skip("rendering of the units",
                       "no jinja2 on this machine — only the structure below is checked")
+    check_mgmt_gateway_418(c, can_render)
     # ── кому что из настроек (#176) ───────────────────────────────────────
     scoped = getattr(config, "SERVER_SCOPED", {})
     c.check("config.SERVER_SCOPED names every server unit",

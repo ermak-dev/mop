@@ -93,6 +93,32 @@
     mode: "0600"
   notify: restart mop-web
 
+# Копия management-ключа LLM-прокси для шлюза панели (#418, эпик #413):
+# шлюз mop-web подкладывает его в Authorization к /v8/management. Тот же
+# lookup, что у роли llmproxy -- при установке копия совпадает с secret-key
+# конфига по построению. Живую ротацию это НЕ синхронизирует: config.yaml
+# рендерится только при первой установке, и смена исходного пароля доезжает
+# до копии, но не до прокси -- шаг ротации описан в docs/PROXY.md.
+# Перечитывается шлюзом на каждом запросе, рестарт не нужен.
+- name: Secrets dir of the server, closed
+  become: yes
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop/secrets"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0700"
+
+- name: Management key of the LLM proxy for the panel gateway
+  ansible.builtin.copy:
+    content: "{{ llm_proxy_mgmt_key }}"
+    dest: "{{ MOP_HOME }}/.config/mop/secrets/llm-proxy-mgmt.pass"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0600"
+  no_log: true
+  notify: restart mop-web
+
 - name: Systemd unit
   become: yes
   ansible.builtin.template:
