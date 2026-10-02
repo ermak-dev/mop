@@ -621,6 +621,9 @@ def get(name, default=None):
              or _node().get(name) or _installation().get(name))
     if value:
         return value
+    if name == "MOP_SERVER_LAN" and _client_sources.get():
+        from . import creds
+        return creds.joined_host()
     return DERIVED[name]() if not default and name in DERIVED else default
 
 

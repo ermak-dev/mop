@@ -55,6 +55,20 @@ CERT_FILE = "tls.pem"
 WSS_PATH = "/nats"
 
 
+def joined_host():
+    """Единственный joined-сервер клиента; несколько требуют явного выбора."""
+    try:
+        hosts = sorted(name for name in os.listdir(ROOT)
+                       if os.path.isfile(os.path.join(ROOT, name, CLIENT_FILE)))
+    except FileNotFoundError:
+        hosts = []
+    if len(hosts) == 1:
+        return hosts[0]
+    if hosts:
+        raise RuntimeError(f"multiple joined servers ({', '.join(hosts)}): name one with --server")
+    raise RuntimeError("no joined server: run mop join --server <address>")
+
+
 def server_dir(host=None):
     """Каталог кредов сервера. Ключ — адрес, и только он: у двух серверов два
     каталога, и переменная окружения переключает их вместе с NOMAD_ADDR."""
