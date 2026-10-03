@@ -19,6 +19,7 @@ Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>; placement over the pool and the
 8 GB reservation are not chosen here. Silent when the puppet is running; on
 a terminal it shows the current step. The new puppet is in mop list.
+Use mop models to see model IDs offered by the selected proxy.
 ```
 
 #### mop attach
@@ -124,6 +125,16 @@ manage the project's puppets and talk to the tracker without asking on
 every step. The Nomad token stays on the server. The session uses the
 selected server's LLM proxy; its URL and key come from the private
 client.json written by mop login.
+```
+
+#### mop models
+
+```text
+list models offered by the selected LLM proxy: mop models
+
+Reads the live /v1/models catalog using the selected server's client key.
+The key is never printed. The proxy catalog may include models that Claude
+Code cannot use; this command does not test model compatibility.
 ```
 
 #### mop profile

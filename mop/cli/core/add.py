@@ -4,6 +4,7 @@ Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>; placement over the pool and the
 8 GB reservation are not chosen here. Silent when the puppet is running; on
 a terminal it shows the current step. The new puppet is in mop list.
+Use mop models to see model IDs offered by the selected proxy.
 """
 import time
 
