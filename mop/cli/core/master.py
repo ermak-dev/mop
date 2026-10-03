@@ -161,7 +161,7 @@ def _main(argv):
     path, _fd = _common.feedback_fd(value)
     print(f"master of project {project} ({origin})"
           + (f" + claude {' '.join(passthru)}" if passthru else ""))
-    os.execvpe("claude", claude_argv(passthru, path)[1:], env)
+    os.execvpe("claude", claude_argv(passthru, path), env)
 
 
 # Вход -- до lib.cluster: без client.json тот не найдёт выбранный сервер.
