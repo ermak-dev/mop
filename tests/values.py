@@ -373,10 +373,11 @@ def check_puppet_row_204(c):
     """Строка ростера: поля и их порядок -- прежние ключи словаря; словарь
     обратим; незнакомый ключ -- отказ, а не молча лишнее поле."""
     from mop.common.state import PuppetRow
-    keys = ["name", "node", "alloc_status", "state", "kind", "owner",
+    # #454: llm вернулось на прежнее место (после owner) -- провод дашборда.
+    keys = ["name", "node", "alloc_status", "state", "kind", "owner", "llm",
             "origin", "disk_kb"]
     d = dict(zip(keys, ["pu-mop-1", "mate", "running", "free", "free", "-",
-                        "claude", MOP, 12]))
+                        "glm-5.3", "claude", MOP, 12]))
     r = PuppetRow.from_dict(d)
     c.check("PuppetRow.to_dict", not (list(r.to_dict()) != keys or r.to_dict() != d),
             f"got {r.to_dict()!r}, wanted {d!r}")
