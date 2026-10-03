@@ -16,8 +16,8 @@ def main(argv):
     try:
         from mop.server import callout
     except ImportError as e:
-        sys.exit(f"mop server callout needs {e.name}: pip install nkeys pynacl (MOP_PIP_DEPS)")
+        sys.exit(f"the callout needs {e.name}: pip install nkeys pynacl (MOP_PIP_DEPS)")
     try:
         return lib.serve(callout.run)
     except (RuntimeError, OSError, ValueError) as e:
-        sys.exit(f"mop server callout: {e}")
+        sys.exit(f"callout: {e}")
