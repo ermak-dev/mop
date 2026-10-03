@@ -83,11 +83,11 @@ landing token of this project: mop landing [take <puppet>|give|show] [--force]
                                 take it from a gone master; says whose it was
   mop landing give --force      release a gone master's token
 
-Exactly one puppet between merge and push per project: two parallel gates
-race, and the second push bounces non-fast-forward. take refuses while
-another master holds the token, naming who and since when; asking again for
-the same puppet is not an error. The holder is your login on the bus; a
-holder that went away is released with --force.
+Exactly one puppet between merge and push per project: two parallel pushes
+race, and the second bounces non-fast-forward. take refuses while another
+master holds the token, naming who and since when; asking again for the same
+puppet is not an error. The holder is your login on the bus; a holder that
+went away is released with --force.
 ```
 
 #### mop list
@@ -240,14 +240,13 @@ saving. A valid previous login is reused.
 
 The HTTPS port uses --https-port, the saved client port, MOP_HTTPS_PORT or
 443, in that order, without prompting; a sole joined server is selected when
-none is named. After the bus, join also fetches the server's LLM proxy URL
-and client key and checks /v1/models before saving; rejoining refreshes a
-rotated key without replacing working credentials.
+none is named. Join also fetches the server's LLM proxy URL and client key
+and verifies them before saving; rejoining refreshes a rotated key without
+replacing working credentials.
 
-The bus goes through the server's TLS proxy at /nats. Its self-signed
-certificate is pinned before the bus password is sent; compare the
-fingerprint on the controller: openssl x509 -noout -fingerprint -sha256 -in
-~/.config/mop/secrets/tls.pem
+The server's certificate is pinned before the bus password is sent; compare
+the fingerprint on the controller: openssl x509 -noout -fingerprint -sha256
+-in ~/.config/mop/secrets/tls.pem
 
 Credentials stay in separate private files under
 ~/.config/mop/servers/<server>/. The clone remembers only server and login
@@ -627,12 +626,11 @@ pool nodes: mop node [drain|up|forget <name>]
   mop node                 what the pool stands on: driver, projects, capacity
   mop node drain <name>    move its puppets off and close it to the scheduler
   mop node up <name>       open it to the scheduler again
-  mop node forget <name>   drop the node from the roster
+  mop node forget <name>   drop it from the roster
 
-Draining is graceful: the wrapper takes its session down on TERM, so a
-puppet leaves with its clone intact. `forget` refuses while anything still
-runs there, and while the node is in the inventory — the next deploy would
-configure it from again.
+Draining is graceful: a puppet leaves with its clone intact. `forget`
+refuses while anything still runs there, and while the node is in the
+inventory — the next deploy would configure it from again.
 ```
 
 #### mop node drain
@@ -678,9 +676,7 @@ pool projects: mop project [add <git-origin>|delete <name>|list]
   mop project list [--origins]  the same list, for scripts
 
 A project is one repository and one slice of the pool; its name is the
-basename of its origin, and puppet names are built from it. The registry
-lives on the server; every subcommand is an operator's verb of the cluster
-service, so it works from any machine with the admin role.
+basename of its origin, and puppet names are built from it.
 ```
 
 #### mop project add

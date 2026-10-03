@@ -7,14 +7,13 @@ saving. A valid previous login is reused.
 
 The HTTPS port uses --https-port, the saved client port, MOP_HTTPS_PORT or
 443, in that order, without prompting; a sole joined server is selected when
-none is named. After the bus, join also fetches the server's LLM proxy URL
-and client key and checks /v1/models before saving; rejoining refreshes a
-rotated key without replacing working credentials.
+none is named. Join also fetches the server's LLM proxy URL and client key
+and verifies them before saving; rejoining refreshes a rotated key without
+replacing working credentials.
 
-The bus goes through the server's TLS proxy at /nats. Its self-signed
-certificate is pinned before the bus password is sent; compare the
-fingerprint on the controller: openssl x509 -noout -fingerprint -sha256 -in
-~/.config/mop/secrets/tls.pem
+The server's certificate is pinned before the bus password is sent; compare
+the fingerprint on the controller: openssl x509 -noout -fingerprint -sha256
+-in ~/.config/mop/secrets/tls.pem
 
 Credentials stay in separate private files under
 ~/.config/mop/servers/<server>/. The clone remembers only server and login

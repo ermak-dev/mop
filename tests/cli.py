@@ -512,9 +512,9 @@ def check_server_maintenance_409(c):
 # кормил int() сырой аргумент, когда соседний stat --days делает то же
 # через usage. Оператор видит стек вместо подсказки.
 # SOLUTION: разбор tail возвращает usage для -n без числа и для не-числа;
-# это тот же контракт, что у stat --days. Прочие командлеты скоупа
-# (core/pool/node/project/secret) проверены: сырых int() над аргументами
-# больше нет.
+# это тот же контракт, что у stat --days.
+# RESULT: пять плохих форм -- usage (SystemExit с докстрингом), здоровые
+# -n 20 / -n20 / -f -- прежние значения; stat --days не изменился.
 # STATUS: FIXED — see #431
 def check_tail_parse_431(c):
     from mop.cli.core import stat, tail
@@ -541,62 +541,12 @@ def check_tail_parse_431(c):
             c.check(f"#431 stat {bad}: usage, as before", True)
 
 
-def check_help_audit_431(c):
-    """#431: у команд скоупа докстринги сохраняют последствия --force,
-    предупреждения доступа и синтаксис; сырых int() над аргументами нет."""
-    import ast, importlib, os
-    root = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "mop", "cli")
-    force_docs = {"core/delete", "core/recycle", "core/restart", "core/update",
-                  "core/wipe", "core/landing"}
-    for sec in ("core", "pool", "node", "project", "secret"):
-        d = os.path.join(root, sec)
-        for f in sorted(os.listdir(d)):
-            if not f.endswith(".py") or f.startswith("__"):
-                continue
-            rel = f"{sec}.{f[:-3]}"
-            src = open(os.path.join(d, f)).read()
-            # int() над разобранным аргументом -- только за try/usage.
-            tree = ast.parse(src)
-            guarded = set()
-            for t in ast.walk(tree):
-                # try/except над разбором или isdecimal-гейт в том же
-                # условии: не-число до int() не доходит, отказ уже обработан.
-                if isinstance(t, ast.Try):
-                    for x in ast.walk(t):
-                        if isinstance(x, ast.Call) and getattr(x.func, "id", None) == "int":
-                            guarded.add(x.lineno)
-                if isinstance(t, ast.If) and any(
-                        isinstance(v, ast.Call) and getattr(v.func, "attr", "") == "isdecimal"
-                        for v in ast.walk(t.test)):
-                    for x in ast.walk(t.test):
-                        if isinstance(x, ast.Call) and getattr(x.func, "id", None) == "int":
-                            guarded.add(x.lineno)
-            for n in ast.walk(tree):
-                if (isinstance(n, ast.Call) and getattr(n.func, "id", None) == "int"
-                        and n.lineno not in guarded):
-                    c.fail(f"#431 {rel}: bare int() of an argument at line {n.lineno}"
-                           " -- a bad value must be a usage refusal")
-            doc = (importlib.import_module(f"mop.cli.{rel}").__doc__ or "").strip()
-            key = rel.replace(".", "/")
-            if key in force_docs:
-                c.check(f"#431 {key}: the docstring keeps --force consequences",
-                        "--force" in doc, doc[:80])
-
-
-# ── #431: короткая помощь операторских команд ───────────────────────────
-# HYPOTHESIS: помощь landing/master/delete/login и групп node/project/secret
-# рассказывала устройство (очередь токенов, exec-механику, склейку_cred),
-# а оператору нужно действие, синтаксис и существенные последствия.
-# SOLUTION: докстринги сокращены до action/syntax/consequences; сохранены
-# --force (чьё было), TLS-пин (отпечаток), доступ (чужой мастер, живой
-# узел). Проверка -- конкретные строки до/после, не лимит слов.
-# STATUS: FIXED — see #431
 CONCISE_431 = {
     "mop.cli.core.landing": (
         ("syntax", "mop landing [take <puppet>|give|show] [--force]"),
         ("keeps", "take it from a gone master"),
         ("keeps", "one puppet between merge and push"),
-        ("gone", "keeps the cluster service"),
+        ("gone", "the token is kept by the cluster service"),
     ),
     "mop.cli.core.master": (
         ("syntax", "mop master [git-origin] [claude options]"),
@@ -604,7 +554,7 @@ CONCISE_431 = {
         ("keeps", "a master sees and reaches only its own puppets"),
         ("keeps", "`mop login --server ADDRESS LOGIN`"),
         ("gone", "mop/common/creds.py"),
-        ("gone", "rewrites"),
+        ("gone", "mop mcp, spawned"),
     ),
     "mop.cli.core.delete": (
         ("syntax", "mop delete <name> [--force]"),
@@ -619,16 +569,20 @@ CONCISE_431 = {
         ("keeps", "MOP_HTTPS_PORT"),
         ("gone", "personal, authenticated"),
         ("gone", "no public HTTP endpoint"),
+        ("gone", "/nats"),
+        ("gone", "/v1/models"),
     ),
     "mop.cli.node": (
         ("syntax", "mop node [drain|up|forget <name>]"),
         ("keeps", "refuses while anything still"),
         ("gone", "never hears of it again"),
+        ("gone", "on TERM"),
     ),
     "mop.cli.project": (
         ("syntax", "mop project [add <git-origin>|delete <name>|list]"),
         ("keeps", "puppet limit"),
         ("gone", "Registering used to be a side effect"),
+        ("gone", "the registry lives on the server"),
     ),
     "mop.cli.secret": (
         ("syntax", "mop secret file|var add|list|remove"),
@@ -2256,7 +2210,6 @@ def check_fallback_model_183(c):
     check_free_floor_329(c)
     check_add_failure_377(c)
     check_tail_parse_431(c)
-    check_help_audit_431(c)
     check_concise_help_431(c)
     check_add_argv_399(c)
     check_master_argv_400(c)

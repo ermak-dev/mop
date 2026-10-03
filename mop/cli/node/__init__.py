@@ -3,12 +3,11 @@
   mop node                 what the pool stands on: driver, projects, capacity
   mop node drain <name>    move its puppets off and close it to the scheduler
   mop node up <name>       open it to the scheduler again
-  mop node forget <name>   drop the node from the roster
+  mop node forget <name>   drop it from the roster
 
-Draining is graceful: the wrapper takes its session down on TERM, so a
-puppet leaves with its clone intact. `forget` refuses while anything still
-runs there, and while the node is in the inventory — the next deploy would
-configure it from again.
+Draining is graceful: a puppet leaves with its clone intact. `forget`
+refuses while anything still runs there, and while the node is in the
+inventory — the next deploy would configure it from again.
 """
 from mop.cli import lib
 from mop.common import puppets

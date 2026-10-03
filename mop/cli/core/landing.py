@@ -7,11 +7,11 @@
                                 take it from a gone master; says whose it was
   mop landing give --force      release a gone master's token
 
-Exactly one puppet between merge and push per project: two parallel gates
-race, and the second push bounces non-fast-forward. take refuses while
-another master holds the token, naming who and since when; asking again for
-the same puppet is not an error. The holder is your login on the bus; a
-holder that went away is released with --force.
+Exactly one puppet between merge and push per project: two parallel pushes
+race, and the second bounces non-fast-forward. take refuses while another
+master holds the token, naming who and since when; asking again for the same
+puppet is not an error. The holder is your login on the bus; a holder that
+went away is released with --force.
 """
 from mop.cli import lib
 from mop.common import bus, landing, puppets

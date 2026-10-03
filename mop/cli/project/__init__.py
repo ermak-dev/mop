@@ -8,9 +8,7 @@
   mop project list [--origins]  the same list, for scripts
 
 A project is one repository and one slice of the pool; its name is the
-basename of its origin, and puppet names are built from it. The registry
-lives on the server; every subcommand is an operator's verb of the cluster
-service, so it works from any machine with the admin role.
+basename of its origin, and puppet names are built from it.
 """
 from mop.cli import lib
 from mop.cli.project import list as _list
