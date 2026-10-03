@@ -24,7 +24,7 @@ test("projectNote names the buckets in order", () => {
   expect(projectNote({ puppets: 0, free: 0, busy: 0, sick: 0, silent: 0, down: 0 })).toBe("");
 });
 
-test("a section per project: one status word, the branch as a chip", () => {
+test("a section per project: one status word, the branch in its own column", () => {
   renderUi(<PoolTable projects={PROJECTS} />);
   expect(screen.getByRole("heading", { name: /mop/ })).toHaveTextContent("1 свободен, 1 занят");
   expectHead(Object.values(COLS));
@@ -36,7 +36,8 @@ test("a section per project: one status word, the branch as a chip", () => {
   expect(within(rows[0]).getByText("свободен")).toBeInTheDocument();
   expect(rows[1]).toHaveAttribute("data-kind", "busy");
   expect(within(rows[1]).getByText("ermak")).toBeInTheDocument();
-  // Слово статуса -- по виду, ветка -- чипом: state-строка в ячейке не ищется.
+  // Слово статуса -- по виду, ветка -- своей колонкой: state-строка в
+  // ячейке не ищется.
   expect(within(rows[1]).getByText("занят")).toBeInTheDocument();
   expect(within(rows[1]).getByText("#12")).toBeInTheDocument();
 });
@@ -77,8 +78,21 @@ test("#452 the branch is a chip of its own, no state-string parsing", () => {
   const rows = screen.getAllByRole("row").slice(1);
   // Ветка -- из поля branch, а не разобранный «busy: feat/452».
   expect(within(rows[0]).getByText("feat/452")).toBeInTheDocument();
-  // Нет ветки -- нет чипа: слово не изображает ветку.
-  expect(within(rows[1]).queryByText(/feat|master/)).not.toBeInTheDocument();
+  // Нет ветки -- прочерк в ячейке ветки (четвёртая колонка): слово не
+  // изображает ветку. Прочерк в ней один: owner «-» и llm «-» в этой
+  // строке -- другие колонки, у каждой свой.
+  const cells = within(rows[1]).getAllByRole("cell");
+  expect(cells[3]).toHaveTextContent("-");
+  expect(within(cells[3]).getByText("-")).toBeInTheDocument();
+});
+
+test("#478 the repository is the section header, not a column", () => {
+  renderUi(<PoolTable projects={PROJECTS} />);
+  // Колонки «репозиторий» больше нет.
+  expect(screen.queryByRole("columnheader", { name: "репозиторий" })).not.toBeInTheDocument();
+  // Репозиторий -- строкой под заголовком секции, один раз на секцию.
+  const section = screen.getByRole("heading", { name: /mop/ }).parentElement!;
+  expect(within(section).getAllByText("git@h:g/mop.git")).toHaveLength(1);
 });
 
 test("#452 the detail rides under the status, the alloc lives in the tooltip", () => {

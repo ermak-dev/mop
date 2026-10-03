@@ -1,7 +1,9 @@
 // Папеты по проектам (#298): секция на проект с заголовком-счётчиком.
 // #452: статус -- одна колонка: слово по виду вердикта, цвет по корзине,
-// ветка -- чипом рядом, подробность -- под словом; аллокация ушла из
-// таблицы в подсказку (данные её по-прежнему несут).
+// подробность -- под словом; аллокация ушла из таблицы в подсказку (данные
+// её по-прежнему несут). #478: ветка -- своя колонка (чип ветки внутри
+// статуса ломал чтение колонки скопом), репозиторий уехал из таблицы в
+// заголовок секции: секция и есть проект, у всех строк один origin.
 import { Badge, Box, Code, Group, Stack, Table, Text, Tooltip } from "@mantine/core";
 import type { Counts, Project, Puppet } from "../types";
 import { gb, KIND_WORD, presentKinds, verdictColor, verdictWord } from "./format";
@@ -10,8 +12,9 @@ import { align, TableHead } from "./TableHead";
 
 export const COLS = {
   name: { label: "папет" }, node: { label: "узел" },
-  state: { label: "статус" }, owner: { label: "пользователь" }, llm: { label: "модель" },
-  disk: { label: "место", right: true }, origin: { label: "репозиторий" },
+  state: { label: "статус" }, branch: { label: "ветка" },
+  owner: { label: "пользователь" }, llm: { label: "модель" },
+  disk: { label: "место", right: true },
 };
 
 export function projectNote(counts: Counts): string {
@@ -21,6 +24,12 @@ export function projectNote(counts: Counts): string {
 // Подсказка статуса (#452): полная state-строка, какой её собрал сервер, и
 // аллокация -- то, что ушло из таблицы, но спрашивается взглядом.
 const statusTip = (p: Puppet): string => `${p.state} · ${p.alloc_status}`;
+
+// Репозитории секции (#478): по одному на каждую строку, без повторов.
+// Группировка сервера даёт один; список, а не первое значение, -- чтобы
+// перемену контракта было видно, а не молча потерять второй origin.
+const origins = (sh: Project): string[] =>
+  [...new Set(sh.puppets.map((p) => p.origin).filter(Boolean))];
 
 function Row({ p }: { p: Puppet }) {
   const color = verdictColor(p.kind, p.bucket);
@@ -41,9 +50,6 @@ function Row({ p }: { p: Puppet }) {
             <Group gap={6} wrap="nowrap">
               <Text span c={color} fw={p.bucket === "free" || p.bucket === "busy" ? 400 : 600}
                     lineClamp={1}>{verdictWord(p.kind)}</Text>
-              {/* Ветка -- отдельным чипом из своего поля (#452): страница
-                  не разбирает state-строку. */}
-              {p.branch ? <Code>{p.branch}</Code> : null}
             </Group>
             {/* Подробность -- под словом, тем же цветом: причина видна без
                 наведения, «not responding», «prove», «uncommitted: 3». */}
@@ -51,10 +57,12 @@ function Row({ p }: { p: Puppet }) {
           </Box>
         </Tooltip>
       </Table.Td>
+      {/* Ветка -- своей колонкой из своего поля (#478): сравнивается между
+          строками, не мешая читать статус по колонке скопом. */}
+      <Table.Td>{p.branch ? <Code>{p.branch}</Code> : "-"}</Table.Td>
       <Table.Td>{p.owner || "-"}</Table.Td>
       <Table.Td>{p.llm}</Table.Td>
       <Table.Td ta={align(COLS.disk)}>{gb(p.disk_kb)}</Table.Td>
-      <Table.Td><Code>{p.origin}</Code></Table.Td>
     </Table.Tr>
   );
 }
@@ -65,7 +73,14 @@ export function PoolTable({ projects }: { projects: Project[] }) {
     <Stack gap="md" data-testid="pool">
       {projects.map((sh) => (
         <div key={sh.name}>
+          {/* Репозиторий -- в заголовке (#478): секция сгруппирована по
+              project_of(origin), у всех строк он один, колонка повторяла
+              бы его в каждой строке. Разные origin внутри секции не
+              допускаются группировкой; на всякий случай показываем все. */}
           <SectionTitle title={sh.name} note={projectNote(sh.counts)} />
+          {origins(sh).map((o) => (
+            <Text key={o} size="sm" c="dimmed"><Code>{o}</Code></Text>
+          ))}
           <Table striped highlightOnHover withTableBorder>
             <TableHead cols={Object.values(COLS)} />
             <Table.Tbody>{sh.puppets.map((p) => <Row key={p.name} p={p} />)}</Table.Tbody>
