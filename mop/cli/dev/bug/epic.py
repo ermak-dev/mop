@@ -4,6 +4,9 @@ from mop.common import gitlab
 from mop.common.render import table
 from mop.cli.dev.bug._common import parser
 
+MCP = {"annotations": "readonly", "args": [
+    {"name": "iid", "type": "string", "required": True}]}
+
 
 def main(argv):
     p = parser("epic")

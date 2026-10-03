@@ -7,8 +7,8 @@
   mop dev web   build the dashboard (web/dist) and check the committed build
 
 Run from a working copy of the project: the coordinates come from its git
-origin, the credentials from .env. Not in MCP: the master runs them from
-its shell.
+origin, the credentials from .env. Only declared tracker and CI leaves are
+available to the master through MCP; checks, docs and builds remain local.
 """
 
 
