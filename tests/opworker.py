@@ -25,25 +25,46 @@ from mop.server import opworker  # noqa: E402
 
 # ── каркас проверки ──────────────────────────────────────────────────────
 class Recorder:
-    """Транспорт-подмена: глаголы #458 считаются, любой может упасть."""
+    """Транспорт-подмена: глаголы #458 считаются, любой может упасть.
+
+    alloc -- read-глагол наблюдения (#464): отдаёт неизменную сводку задачи;
+    счётчик рестартов стоит -- наблюдение честно кончается unknown, а сам
+    эффект считается по рестарт-RPC."""
+    ALLOC = {"ID": "a1", "ClientStatus": "running",
+             "task": {"state": "running", "restarts": 7, "exit": None,
+                      "next_s": None, "failed": False}}
 
     def __init__(self, fail_at=None):
         self.calls = []
         self.fail_at = fail_at or {}
-        self.answers = {"add": {"ok": True, "name": "pu-mop-9"}}
+        self.answers = {"add": {"ok": True, "name": "pu-mop-9"},
+                        "alloc": {"alloc": dict(self.ALLOC)}}
 
     def __call__(self, verb, **fields):
         self.calls.append((verb, fields))
         why = self.fail_at.get(verb) or self.fail_at.get("*")
         if why:
             raise ops.bus.Refused(why) if "refuse" in str(why) else RuntimeError(why)
-        return dict(self.answers.get(verb, {"ok": True}))
+        got = self.answers.get(verb)
+        if got is None:
+            return {}
+        return dict(got) if isinstance(got, dict) else got
+
+    def effect_rpcs(self):
+        """Вызовы-эффекты без read-глаголов наблюдения (#464)."""
+        return [call for call in self.calls
+                if not (isinstance(call, tuple) and len(call) == 2
+                        and call[0] in ("alloc",))]
 
 
 def one(now=(lambda: 1_000.0)):
-    """Воркер на свежем временном каталоге."""
+    """Воркер на свежем временном каталоге.
+
+    Наблюдение рестарта (#464): нулевой срок и переданный сон -- иначе
+    каждый рестарт матрицы опрашивал бы свои observe_wait по-настоящему."""
     root = tempfile.mkdtemp(prefix="mop-test-476-")
-    return opworker.Worker(root, now=now), root
+    return opworker.Worker(root, now=now, observe_wait=0,
+                           sleep=lambda s: None), root
 
 
 def facts_clean():
@@ -79,7 +100,7 @@ def main():
     c.check(what + "a duplicate click returns the same operation",
             out1.get("op") == out2.get("op"), (out1, out2))
     c.check(what + "the duplicate fires the effect once",
-            len(transport.calls) == 1, transport.calls)
+            len(transport.effect_rpcs()) == 1, transport.calls)
     # Ключ тот же, payload другой -- отказ, ключ не даётся бесплатно.
     other = w.submit("anton", "restart", "pu-mop-1", {"force": True},
                      transport=transport, key="click-1",
@@ -121,7 +142,7 @@ def main():
     # запись обязана честно стать unknown, а не «выполнено» и не «провалено».
     w4, root4 = one()
     stuck = w4._begin_for_test("anton", "restart", "pu-mop-1", {})
-    w5 = opworker.Worker(root4, now=lambda: 2_000.0)
+    w5 = opworker.Worker(root4, now=lambda: 2_000.0, transport=Recorder(), sleep=lambda s: None)
     got = w5.read("anton", stuck)
     c.check(what + "a restart marks a stuck running record unknown",
             got.get("status") == "unknown", got)
@@ -146,7 +167,7 @@ def main():
                      safety=lambda name, project, **kw: (True, None))
     c.check(what + "the queue admits up to its limit",
             full.get("status") != "queue-full", full)
-    w8 = opworker.Worker(tempfile.mkdtemp(prefix="mop-test-476-"), now=lambda: 1.0)
+    w8 = opworker.Worker(tempfile.mkdtemp(prefix="mop-test-476-"), now=lambda: 1.0, observe_wait=0, sleep=lambda s: None)
     w8.LIMIT = 1
     t8 = Recorder()
     # Одна незавершённая -- весь лимит: новая не принимается, и очередь
@@ -209,7 +230,7 @@ def main():
     # запись unknown (не failed: эффекта могли и не быть).
     wa, roota = one()
     wa._begin_for_test("anton", "restart", "pu-mop-1", {})
-    wb = opworker.Worker(roota, now=lambda: 5_000.0)
+    wb = opworker.Worker(roota, now=lambda: 5_000.0, observe_wait=0, sleep=lambda s: None)
     c.check(what + "a crash before the effect leaves unknown, not failed",
             wb.read("anton", wb._ops and list(wb._ops)[0]).get("status") == "unknown",
             list(wb._ops.values()))
@@ -234,7 +255,7 @@ def main():
     c.check(what + "a storage failure fails the submission loudly",
             crashed.get("status") == "failed" or crashed.get("error"), crashed)
     # Хранилище недоступно -- операция не запускается вовсе.
-    we = opworker.Worker(tempfile.mkdtemp(prefix="mop-test-476-"), now=lambda: 1.0)
+    we = opworker.Worker(tempfile.mkdtemp(prefix="mop-test-476-"), now=lambda: 1.0, observe_wait=0, sleep=lambda s: None)
     te = Recorder()
     import os as _os
     _os.chmod(we._root, 0o500)
@@ -273,6 +294,111 @@ def main():
                          safety=lambda name, project, **kw: (True, None))
     c.check(what + "a replayed purged key is refused, not silently new",
             replayed.get("status") == "refused", replayed)
+
+    # ── наблюдаемый рестарт (#464): база в журнале ДО эффекта ───────────
+    # HYPOTHESIS: воркер, зовя наблюдаемый рестарт, берёт снимок задачи тем
+    # же read-глаголом; без записи базы ДО эффекта краш службы между RPC и
+    # исходом оставлял бы донаблюдению не от чего отсчитывать сигнал.
+    # SOLUTION: снимок -- в журнал (baseline) до RPC эффекта; recovery
+    # (#476) донаблюдает read-only тем же сигналом (ops.observe_restart),
+    # эффект не переигрывается никогда.
+    class Ticking(Recorder):
+        """alloc растит счётчик рестартов после первого эффекта."""
+        def __init__(self):
+            super().__init__()
+            self.fired = False
+
+        def __call__(self, verb, **fields):
+            if verb == "restart":
+                self.fired = True
+            got = super().__call__(verb, **fields)
+            if verb == "alloc" and self.fired:
+                got = {"alloc": dict(self.ALLOC, task=dict(self.ALLOC["task"],
+                                                           restarts=8))}
+            return got
+    wg, rootg = one()
+    tg = Ticking()
+    got = wg.submit("anton", "restart", "pu-mop-1", {},
+                    transport=tg, safety=lambda name, project, **kw: (True, None))
+    c.check(what + "an observed restart whose signal arrives succeeds",
+            got.get("status") == "succeeded" and got.get("restarts") == 8, got)
+    c.check(what + "the journal carries the baseline",
+            wg.read("anton", got["op"]).get("baseline", {}).get("task", {})
+            .get("restarts") == 7, wg.read("anton", got["op"]))
+    # Сигнала нет (счётчик стоит) -- unknown, не succeeded: прежний running
+    # не успех (#464).
+    wh, _ = one()
+    th = Recorder()
+    got = wh.submit("anton", "restart", "pu-mop-1", {},
+                    transport=th, safety=lambda name, project, **kw: (True, None))
+    c.check(what + "a standing old running is unknown, not succeeded",
+            got.get("status") == "unknown"
+            and "no restart seen" in (got.get("error") or ""), got)
+    # Задача вернулась падшей -- partial с причиной.
+    class Falling(Recorder):
+        def __call__(self, verb, **fields):
+            got = super().__call__(verb, **fields)
+            if verb == "alloc" and self.fired:
+                return {"alloc": dict(self.ALLOC,
+                                      task=dict(self.ALLOC["task"], restarts=8,
+                                                failed=True, state="dead"))}
+            if verb == "restart":
+                self.fired = True
+            return got
+    wi, _ = one()
+    ti = Falling()
+    got = wi.submit("anton", "restart", "pu-mop-1", {},
+                    transport=ti, safety=lambda name, project, **kw: (True, None))
+    c.check(what + "a task dead after the restart is partial",
+            got.get("status") == "partial", got)
+
+    # ── recovery-observation (#464 x #476) ──────────────────────────────
+    # Журнальная база есть, исход не записан: подъём службы донаблюдает
+    # read-only тем же сигналом. Эффект не переигрывается: рестарт-RPC в
+    # transport восстановления не приходит.
+    class RecoveryTransport(Recorder):
+        """transport нового процесса: сигнал рестарта уже в кластере."""
+        def __init__(self):
+            super().__init__()
+            self.restarts = 0
+        def __call__(self, verb, **fields):
+            if verb == "restart":
+                self.restarts = 99      # маркер переигрывания
+            got = super().__call__(verb, **fields)
+            if verb == "alloc":
+                got = {"alloc": dict(self.ALLOC,
+                                     task=dict(self.ALLOC["task"],
+                                               restarts=8 + self.restarts))}
+            return got
+    # Запись, остановленная ПОСЛЕ RPC с базой в журнале: running + baseline.
+    wj, rootj = one()
+    tj = RecoveryTransport()
+    stuck = wj._begin_for_test("anton", "restart", "pu-mop-1", {})
+    wj._mark(wj._ops[stuck], "running", baseline={"ID": "a1", "task": {"restarts": 7}})
+    wk = opworker.Worker(rootj, now=lambda: 2_000.0, transport=tj,
+                         observe_wait=0, sleep=lambda s: None)
+    got = wk.read("anton", stuck)
+    c.check(what + "recovery observes the journal's baseline to a verdict",
+            got.get("status") == "succeeded" and got.get("restarts") == 8, got)
+    c.check(what + "recovery never replays the effect",
+            tj.restarts == 0, tj.calls)
+    # Транспорта у нового процесса нет -- unknown с причиной, не падение.
+    wl, rootl = one()
+    stuck2 = wl._begin_for_test("anton", "restart", "pu-mop-1", {})
+    wl._mark(wl._ops[stuck2], "running", baseline={"ID": "a1", "task": {"restarts": 7}})
+    wm = opworker.Worker(rootl, now=lambda: 3_000.0, observe_wait=0,
+                         sleep=lambda s: None)
+    got = wm.read("anton", stuck2)
+    c.check(what + "recovery without a transport stays unknown",
+            got.get("status") == "unknown", got)
+    # Queued-запись (до RPC, базы нет) -- прежняя судьба: unknown.
+    wn, rootn = one()
+    stuck3 = wn._begin_for_test("anton", "restart", "pu-mop-1", {})
+    wo = opworker.Worker(rootn, now=lambda: 4_000.0, transport=Recorder(),
+                         observe_wait=0, sleep=lambda s: None)
+    c.check(what + "a queued record without baseline stays unknown",
+            wo.read("anton", stuck3).get("status") == "unknown",
+            wo.read("anton", stuck3))
 
     return c.report("opworker")
 

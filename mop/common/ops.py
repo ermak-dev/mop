@@ -207,11 +207,58 @@ def update(transport, name, origin=None, fresh=False, workspace=None,
     return _bootstrap(transport, name, got, [], bootstrap_wait, sleep, clock, step)
 
 
-def restart(transport, name, force=False, login=None):
+def restart(transport, name, force=False, login=None, observe=False,
+            before=None, observe_wait=30, sleep=time.sleep, clock=time.time):
     """Перезапустить сессию папета на том же клоне. -> вердикт-словарь.
 
     Отказ владельца -- refused с именем владельца в error; успех без
-    наблюдения итога -- accepted: рестарт не имеет своего прогона."""
+    наблюдения итога -- accepted: рестарт не имеет своего прогона.
+
+    observe -- явный режим (#464): тот же глагол restart, но операция
+    подтверждает рестарт задачи реальным сигналом, а не «accepted на
+    слово». Сигнал -- сводка задачи глагола alloc (read-only, едет с #126):
+    снимок ДО RPC, затем опрос, пока счётчик рестартов не сдвинется или
+    задача не выйдет из running (перезапуск или ожидание его). Прежний
+    running -- не успех: это та же старая сессия. Смена allocation ID --
+    НЕ подтверждение (рестарт задачи, а не новая аллокация): это unknown.
+    Увиденный рестарт с вернувшейся падшей задачей -- partial с причиной;
+    увиденный без вернувшегося running за срок -- partial. Итог ---
+    registered (снова running), partial, refused, unknown. CLI без observe
+    -- прежний контракт байт в байт; force наблюдение не выключает.
+    before -- уже снятый снимок аллокации (его берёт воркер #476, записав
+    базу в журнал ДО эффекта); без него снимок берёт сама операция."""
+    if not observe:
+        return _restart_plain(transport, name, force, login)
+    if before is None:
+        try:
+            before = task_snapshot(transport, name)
+        except Exception:
+            before = None
+    try:
+        got = transport("restart", name=name, owner=login, force=force)
+    except bus.Refused as e:
+        return _refused(name, str(e))
+    if got.get("error"):
+        return _refused(name, got["error"])
+    return _observe(transport, name, before, observe_wait, sleep, clock)
+
+
+def observe_restart(transport, name, before, observe_wait=0,
+                    sleep=lambda s: None, clock=time.time):
+    """Донаблюдать рестарт задачи (#464) тем же сигналом, не переигрывая
+    эффект: восстановление воркера #476 для прерванного наблюдаемого
+    рестарта. Алгоритм один -- тот же _observe; вердикт -- outcome()."""
+    return _observe(transport, name, before, observe_wait, sleep, clock)
+
+
+def task_snapshot(transport, name):
+    """Снимок аллокации ДО рестарта; None, если сводки задачи в ответе нет."""
+    raw = (transport("alloc", name=name) or {}).get("alloc") or {}
+    return raw if raw.get("task") else None
+
+
+def _restart_plain(transport, name, force, login):
+    """Прежний контракт: RPC, вердикт по ответу, без наблюдения."""
     try:
         got = transport("restart", name=name, owner=login, force=force)
     except bus.Refused as e:
@@ -219,6 +266,84 @@ def restart(transport, name, force=False, login=None):
     if got.get("error"):
         return _refused(name, got["error"])
     return outcome(ACCEPTED, name, owner_note=got.get("owner_note"))
+
+
+def _observe(transport, name, before, wait, sleep, clock):
+    """Дождаться сигнала рестарта задачи и факта работоспособности.
+
+    before -- снимок аллокации ДО RPC. Сигнал -- сдвиг счётчика рестартов
+    или выход задачи из running (перезапуск либо ожидание его); потом --
+    снова running, не failed. Смена allocation ID подтверждением не
+    служит (тикет #464: рестарт задачи, а не новая аллокация) -- unknown."""
+    def snap():
+        return (transport("alloc", name=name) or {}).get("alloc") or {}
+
+    def mistake(raw, error):
+        task = (raw or {}).get("task") or {}
+        return outcome(UNKNOWN, name, error=error,
+                       alloc=(raw or {}).get("ID"),
+                       restarts=task.get("restarts"))
+
+    deadline = clock() + wait
+    base_restarts = ((before or {}).get("task") or {}).get("restarts") or 0
+    base_id = (before or {}).get("ID")
+    # Фаза 1: сигнал. Опрос read-only до сдвига счётчика, выхода задачи
+    # из running или срока.
+    while True:
+        try:
+            raw = snap()
+        except Exception as e:
+            return mistake(None, f"{name}: the restart is not observed: {e}")
+        task = raw.get("task")
+        aid = raw.get("ID")
+        if base_id and aid and aid != base_id:
+            # Аллокацию заменили -- рестарт задачи не подтверждён.
+            return mistake(raw, f"{name}: the allocation was replaced "
+                                f"({base_id} -> {aid}), not restarted")
+        if task is None:
+            return mistake(raw, f"{name}: no task to observe "
+                                f"(the allocation has no task states)")
+        moved = (task.get("restarts") or 0) > base_restarts
+        left_running = bool(task.get("state")) \
+            and task["state"].lower() != "running"
+        if moved or left_running:
+            break
+        if clock() >= deadline:
+            return mistake(raw, f"{name}: no restart seen in {wait}s "
+                                f"(the old task kept running)")
+        sleep(2)
+    # Фаза 2: факт работоспособности -- задача снова running, не failed.
+    while True:
+        try:
+            raw = snap()
+        except Exception as e:
+            return mistake(None, f"{name}: the restarted task is not "
+                                 f"confirmed: {e}")
+        aid = raw.get("ID")
+        task = raw.get("task")
+        if base_id and aid and aid != base_id:
+            # id сменился уже после сигнала: подтверждение потеряло силу.
+            return mistake(raw, f"{name}: the allocation was replaced "
+                                f"({base_id} -> {aid}), not restarted")
+        if task is None:
+            return mistake(raw, f"{name}: no task to confirm")
+        if task.get("failed"):
+            why = f"{name}: the task failed after the restart"
+            if raw.get("reason"):
+                why += f": {raw['reason']}"      # причина падения (#126)
+            elif task.get("exit") is not None:
+                why += f" (exit {task['exit']})"
+            return outcome(PARTIAL, name, alloc=aid,
+                           restarts=task.get("restarts"), error=why)
+        if (task.get("state") or "").lower() == "running":
+            return outcome(REGISTERED, name, alloc=aid,
+                           restarts=task.get("restarts"))
+        if clock() >= deadline:
+            return outcome(PARTIAL, name, alloc=aid,
+                           restarts=task.get("restarts"),
+                           error=f"{name}: restarted but not running "
+                                 f"again within {wait}s")
+        sleep(2)
 
 
 # ─── доставка (#458: из mop/client/channel.py) ──────────────────────────
