@@ -8,7 +8,7 @@ Every command of `mop`, as its commandlet in `mop/cli` describes itself: the fir
 
 Run on a client: an operator's machine or a master shell.
 
-### core: every day, from a master shell
+### core: commands
 
 #### mop add
 
@@ -256,7 +256,7 @@ Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
 ```
 
-### pool: the pool and its machines, for the operator
+### pool: administration
 
 #### mop login
 
@@ -1227,7 +1227,7 @@ Port and bind address default to MOP_WEB_PORT (9000) and MOP_WEB_BIND
 
 Started by systemd and the job spec, not by hand.
 
-### service: run by systemd and the job spec, not by hand
+### service: managed services (not for interactive use)
 
 #### mop agent
 

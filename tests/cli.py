@@ -35,6 +35,33 @@ VERBS = {"driver": {"build": {}, "run": {}}, "bug": {},
          "dev": {"bug": {"new": {}, "list": {}}, "ci": {"list": {}}}}
 
 
+# HYPOTHESIS: общий help пересказывает устройство и при опечатке печатает
+# весь каталог вместо одного способа исправить вызов.
+# SOLUTION: короткий заголовок, каталог действий и одна подсказка на опечатку.
+# RESULT: проверяется на живом каталоге без входа в пул.
+# STATUS: FIXED — see #430
+
+def check_concise_global_help_430(c):
+    help_text = cli.usage()
+    c.check("#430 help keeps command form", "mop [--server" in help_text)
+    c.check("#430 help retains daily commands", all(
+        f"    {name}" in help_text for name in ("add", "list", "login", "master")))
+    for internal in ("Nomad", "NATS", "git config", "MOP_BUS_USER", "Integration branch"):
+        c.check(f"#430 help omits {internal}", internal not in help_text)
+    c.check("#430 help gives a focused route to more detail", "mop help" in help_text)
+
+    out, err, code = run_command(cli.main, ["not-a-command"])
+    c.expect("#430 unknown command leaves stdout empty", out, "")
+    c.expect("#430 unknown command exits nonzero", code, 1)
+    c.check("#430 unknown command names typo and help", all(
+        word in err for word in ("not-a-command", "mop help")), repr(err))
+    c.check("#430 unknown command does not dump catalog", "    add " not in err, repr(err))
+
+    out, err, code = run_command(cli.main, ["help"])
+    c.expect("#430 explicit help uses concise catalog", (out, err, code),
+             (help_text + "\n", "", 0))
+
+
 # ── #334: mop add/update/recycle говорят, какой bootstrap отправлен ────
 # HYPOTHESIS: workspace_text возвращает голый текст -- откуда он (рабочая
 # копия или origin, какой коммит, правлен ли), теряется, и `mop update`
@@ -486,6 +513,7 @@ def main():
     check_login_name_407(c)
     check_current_docs_401(c)
     check_dispatch_sources_396(c)
+    check_concise_global_help_430(c)
     check_reference_render_350(c)
     check_reference_empty_350(c)
     check_reference_committed_350(c)
