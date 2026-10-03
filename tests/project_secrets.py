@@ -59,6 +59,51 @@ def main():
         except AttributeError:
             break
 
+    # ── #429: отказ не эхом секрета ─────────────────────────────────────
+    # HYPOTHESIS: parse_var кладёт в отказ весь аргумент: «K-V=SENTINEL» --
+    # и VALUE уезжает в stderr/journal мастера, куда секрету попадать
+    # незачем. То же -- перевод строки в значении (ключ там уже выведен
+    # отдельно, но строка исходная) и отказ put_file с именем-путём не
+    # эхом данных.
+    # SOLUTION: отказы называют форму и ключ (безопасный вид), значение --
+    # заглушка <VALUE>; без «=» присланного текста в отказе нет вовсе.
+    # RESULT: «K-V=<VALUE>: expected VAR=VALUE», «expected VAR=VALUE»;
+    # SENTINEL во всех формах отсутствует, корректная переменная разбирается.
+    # STATUS: FIXED — see #429
+    SENTINEL = "SENTINEL-DO-NOT-PRINT-9f3a"
+    for bad in (f"K-V={SENTINEL}", f"NOEQ{SENTINEL}", f"1X={SENTINEL}",
+                f"K=two{SENTINEL}\nlines"):
+        try:
+            ps.parse_var(bad)
+            c.fail(f"parse_var({bad.split('=')[0]}...) must be refused")
+        except ValueError as e:
+            c.check(f"#429 the refusal of {bad.split('=')[0]}... names no value",
+                    SENTINEL not in str(e), str(e))
+    # Ревью #429: короткое значение без «=» -- тоже секрет, обрезка не
+    # спасает; отказ не эхом никакого присланного текста.
+    SHORT = "TOPSECRET"
+    try:
+        ps.parse_var(SHORT)
+        c.fail("parse_var(TOPSECRET) must be refused")
+    except ValueError as e:
+        c.check("#429 no supplied text in the no-separator refusal",
+                SHORT not in str(e), str(e))
+    # Управляющие символы и перевод строки в ключе -- только безопасная
+    # диагностика, без сырого мусора.
+    for bad_key in ("K\x01V=1", "K\nV=2", "K\x1b[31m=3"):
+        try:
+            ps.parse_var(bad_key)
+            c.fail(f"parse_var({bad_key!r}) must be refused")
+        except ValueError as e:
+            c.check(f"#429 the refusal of a control-character key is clean: {bad_key!r}",
+                    "\x01" not in str(e) and "\n" not in str(e) and "\x1b" not in str(e),
+                    str(e))
+    try:
+        ps.parse_var(f"GOODKEY={SENTINEL}")
+        c.check("#429 a well-formed var still parses", True)
+    except ValueError as e:
+        c.fail("#429 redaction must not refuse well-formed vars", str(e))
+
     # Корень -- ещё не существующий: его заводит само хранилище, как на сервере.
     root = os.path.join(tempfile.mkdtemp(prefix="mop-test-secrets-"), "project-secrets")
     try:
