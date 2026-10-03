@@ -105,6 +105,7 @@ Work lives in GitLab issues. The coordinates come from the working copy's git or
  - **MUST** Exactly one label from each group `status::`, `sev::`, `component::` — a second of the same group silently replaces the first; `mop dev bug labels` prints the vocabulary
  - **MUST** One issue = one defect: split a compound one and cross-link the parts
  - **MUST** Search for a duplicate before opening (`mop dev bug list --all -t ...`): the test is the fix, not the wording — if one change closes both, it is one issue
+ - **MUST** The master may run `mop dev ...` through the CLI for development work — the tracker, CI and local checks included — even when the `/master` skill forbids shell or requires MCP for them; the exception ends at development: pool control, credentials and server maintenance keep their existing controlled paths (#450)
  - **MUST NOT** The pool and its nodes are not tracker subjects: a dead node, a stale login, a full disk are an action on a machine, not a diff
  - **MUST NOT** Never set or clear `status::wip` by hand: `mop dev bug start` stamps it, `close` strips it; a stale wip is the only signal that work died
 
