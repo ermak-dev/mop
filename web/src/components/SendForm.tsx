@@ -25,7 +25,7 @@ export function SendForm({ session, target }: { session: Session; target: string
 
   const send = () => {
     if (!message.trim() || live) return;    // пустое не постится, живой ход один
-    void submit({ message: message.trim() });
+    void submit("send", { message: message.trim() });
     setMessage("");                         // текст уехал: в поле его больше нет
   };
 

@@ -24,14 +24,15 @@ export interface AdminOpState {
   lost: boolean;
 }
 
-const TERMINAL = new Set(["succeeded", "refused", "failed", "partial", "unknown"]);
+/** Терминальные статусы (#476). unknown -- терминал, но НЕ failed. */
+export const TERMINAL = new Set(["succeeded", "refused", "failed", "partial", "unknown"]);
 const POLL_MS = 1000;
 
 /** Слова отказов страницы (#463 -- тот же словарь слов, не второй). */
 const DENIED = "операция недоступна: прав не хватает";
 
 export function useAdminOp(session: Session, target: string | null,
-                           action = "restart", pollMs = POLL_MS) {
+                           pollMs = POLL_MS) {
   const [op, setOp] = useState<AdminOpState>(
     { status: "idle", id: null, error: null, lost: false });
   const seq = useRef(0);
@@ -52,7 +53,8 @@ export function useAdminOp(session: Session, target: string | null,
     }
   }, [source, stale]);
 
-  const submit = useCallback(async (params: Record<string, unknown> = {}):
+  const submit = useCallback(async (act: string = "restart",
+                                params: Record<string, unknown> = {}):
     Promise<string | null> => {
     if (session.role !== "admin" || !target) {
       setOp({ status: "refused", id: null, error: DENIED, lost: false });
@@ -70,7 +72,7 @@ export function useAdminOp(session: Session, target: string | null,
         const r = await fetch("/api/admin/ops", {
           method: "POST", credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, target, params }),
+          body: JSON.stringify({ action: act, target, params }),
         });
         if (at !== seq.current) return null;      // источник сменился
         if (!r.ok) {
@@ -96,7 +98,7 @@ export function useAdminOp(session: Session, target: string | null,
     })();
     inflight.current = ride;
     return ride;
-  }, [session.role, target, action, op.id, op.status]);
+  }, [session.role, target, op.id, op.status]);
 
   // Опрос результата: только пока есть id и статус не терминальный.
   // Первый GET -- сразу: 202 ещё ничего не значил, и бессмысленно ждать

@@ -144,7 +144,7 @@ test("three poll failures in a row read as unknown and stop the poll", async () 
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
     () => { gets += 1; return Promise.reject(new Error("down")); });
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1", "restart", 1));
+  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1", 1));
   await act(async () => { await view.result.current.submit(); });
   await waitFor(() => expect(view.result.current.op.status).toBe("unknown"), { timeout: 2000 });
   expect(gets).toBeGreaterThanOrEqual(3);
@@ -157,7 +157,7 @@ test("a lost POST answer is unknown, and nothing retries it", async () => {
   const fetchMock = postGet(() => Promise.reject(new Error("connection reset")),
                             () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1", "restart", 1));
+  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1", 1));
   await act(async () => { await view.result.current.submit(); });
   await waitFor(() => expect(view.result.current.op.status).toBe("unknown"));
   expect(view.result.current.op.lost).toBe(true);
@@ -232,7 +232,7 @@ test("#469 send passes its params: submit carries the message", async () => {
                             () => Promise.resolve(opJson("succeeded")));
   vi.stubGlobal("fetch", fetchMock);
   const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1", "send"));
-  await act(async () => { await view.result.current.submit({ message: "привет" }); });
+  await act(async () => { await view.result.current.submit("send", { message: "привет" }); });
   const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
   expect(body).toEqual({ action: "send", target: "pu-mop-1", params: { message: "привет" } });
 });
