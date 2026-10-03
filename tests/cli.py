@@ -622,14 +622,19 @@ CONCISE_431 = {
 
 def check_concise_help_431(c):
     import importlib
+    import re as _re
     for mod, rows in CONCISE_431.items():
         doc = (importlib.import_module(mod).__doc__ or "").strip()
+        # Переносы строк и регистр не должны решать судьбу утверждения:
+        # свернутые пробелы, нижний регистр -- и фраза ищется как фраза.
+        flat = _re.sub(r"\s+", " ", doc).lower()
         for kind, text in rows:
             what = f"#431 {mod.rsplit('.', 1)[-1]} help {kind}: {text[:40]!r}"
+            hit = _re.sub(r"\s+", " ", text).lower() in flat
             if kind in ("syntax", "keeps"):
-                c.check(what, text in doc, doc[:120])
+                c.check(what, hit, doc[:120])
             else:
-                c.check(what, text not in doc, "still present")
+                c.check(what, not hit, "still present")
 
 
 def main():
