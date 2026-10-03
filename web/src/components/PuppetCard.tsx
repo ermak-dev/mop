@@ -10,6 +10,7 @@ import { Code, Group, Loader, Modal, Stack, Table, Text } from "@mantine/core";
 import type { Snapshot } from "../types";
 import type { Session } from "../useSession";
 import { usePuppetCard, usePuppetTail } from "../usePuppetCard";
+import { RestartBox } from "./RestartBox";
 import { gb, verdictColor, verdictWord } from "./format";
 import { TableHead } from "./TableHead";
 
@@ -74,6 +75,9 @@ export function PuppetCard({ snapshot, session, target, onClose }: {
             {row.detail ? <Text span size="sm" c="dimmed">{row.detail}</Text> : null}
             <Text span size="sm" c="dimmed">наблюдение в {at}</Text>
           </Group>
+          {/* рестарт (#465): кнопка и точное подтверждение строки; не-admin
+              его не видит, смена цели гасит подтверждение вместе с карточкой */}
+          <RestartBox session={session} row={row} />
           <Table striped withTableBorder>
             <TableHead cols={Object.values(COLS)} />
             <Table.Tbody>
