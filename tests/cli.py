@@ -960,6 +960,118 @@ def check_deploy_argument_refusal_439(c):
             repr(err))
 
 
+# ─── #475: смешанный провал не прячется за недоступными узлами ───────────
+# ansible-core (2.21, plugins/strategy/__init__.py) выбирает код игры
+# цепочкой: не RUN_OK -- вернуть его; ДАЛЕЕ недоступные -- 4; ДАЛЕЕ
+# провалившиеся -- 2. Недоступные стоят РАНЬШЕ провалившихся, и
+# _tqm._unreachable_hosts копится по играм, поэтому прогон с failed=1 и
+# unreachable=1 в recap приходит кодом 4 -- тем же, что и чистый #87.
+# Равенство `rc != _play.UNREACHABLE` в deploy.main читала его как «узлы
+# молчат»: печатала «everything that did is configured», собирала креды,
+# показывала ростер и выходила нулём -- CI-джоба deploy:mop была зелёной
+# при красном localhost в логе (проверено живым прогоном ansible-core
+# 2.21.4: чистый unreachable -- 4, чистый failed -- 2, смешанный в одной
+# игре и разнесённый по играм -- 4).
+# Код возврата один говорит лишь об недоступных; провал виден только в
+# PLAY RECAP, строкой `host ... failed=N ... N>0`. Паттерн -- #333
+# (bootstrap.failed_task).
+RECAP_MIXED = ("PLAY RECAP *********************************************************************\n"
+               "localhost                  : ok=41   changed=0    unreachable=0    failed=1   "
+               "skipped=3   rescued=0    ignored=0\n"
+               "wate-wsl                   : ok=0    changed=0    unreachable=1    failed=0   "
+               "skipped=0   rescued=0    ignored=0\n")
+RECAP_UNREACHABLE = ("PLAY RECAP *********************************************************************\n"
+                     "wate-wsl                   : ok=0    changed=0    unreachable=1    failed=0   "
+                     "skipped=0   rescued=0    ignored=0\n")
+RECAP_OK = ("PLAY RECAP *********************************************************************\n"
+            "localhost                  : ok=41   changed=0    unreachable=0    failed=0   "
+            "skipped=3   rescued=0    ignored=0\n")
+
+
+def check_deploy_mixed_outcome_475(c):
+    """HYPOTHESIS: deploy различал коды ansible равенством с UNREACHABLE,
+    и смешанный прогон (failed=1 + unreachable=1) приходил кодом 4 -- как
+    чистый #87. SOLUTION: вердикт по итогам прогона, а не по одному коду:
+    провал в PLAY RECAP делает прогон красным при любом коде, чистый
+    unreachable остаётся веткой #87. STATUS: FIXED — see #475"""
+    from mop.cli.server import _play
+
+    # Чистая классификация: (код ansible, recap) -> вердикт.
+    for what, rc, recap, want in (
+            # Смешанный случай ansible маскирует кодом 4 -- как в #475.
+            ("a mixed run, unreachable first in the playbook", 4, RECAP_MIXED, "failed"),
+            ("the both-bits code", 6, RECAP_MIXED, "failed"),
+            ("the failed code", 2, RECAP_MIXED, "failed"),
+            # Ветку #87 не ослабляем: чистый unreachable -- не красный прогон.
+            ("an unreachable-only run, the #87 case", 4, RECAP_UNREACHABLE, "unreachable"),
+            # Сухой прогон recap не печатает; код 4 без провала в логе --
+            # тоже #87 (вывод могли и не собрать).
+            ("no recap in hand", 4, "", "unreachable"),
+            ("a clean run", 0, RECAP_OK, "ok"),
+            ("a recap without failures says ok whatever the code", 0, RECAP_OK, "ok")):
+        got = _play.verdict(rc, recap)
+        c.expect(f"#475 verdict of rc={rc} with {what}", got, want)
+
+    # deploy.main обязана читать вердикт, не код: смешанный прогон --
+    # красный отказ, без кредов и ростера за ним. Подмена _play.play --
+    # шов, каким его видит deploy: (код, вывод прогона).
+    import shutil
+    import subprocess
+    from mop.common import bus, config, creds, projects
+    from mop.cli.server import deploy
+    from mop.server import identity
+    d = tempfile.mkdtemp(prefix="mop-test-deploy-475-")
+    inventory, key = os.path.join(d, "inventory.yaml"), os.path.join(d, "id")
+    for f in (inventory, key, key + ".pub"):
+        open(f, "w").close()
+    people = os.path.join(d, "operators")
+    with open(people, "w") as f:
+        f.write(identity.format_line(identity.Identity("anton", "admin", ("*",)),
+                                     identity.hash_password("x")) + "\n")
+    runs = {"recap": RECAP_MIXED, "rc": 4}
+    collected, checked = [], []
+    listing = [INVENTORY_CLEAN]
+    env = dict(os.environ)
+    try:
+        with offline(), \
+                patched(shutil, which=lambda cmd: f"/usr/bin/{cmd}"), \
+                patched(config, require=lambda *a: None), \
+                patched(subprocess, run=lambda argv, **kw: subprocess.CompletedProcess(
+                    argv, 0, json.dumps(listing[0]), "")), \
+                patched(_play, play=lambda *a, **kw: (runs["rc"], runs["recap"])), \
+                patched(deploy, missing_extras=lambda setting, root: [],
+                        manifests=lambda origins: {},
+                        check=lambda: checked.append(1)), \
+                patched(bus, ask_cluster=lambda *a, **kw: {"ok": True, "projects": []}), \
+                patched(projects, for_deploy=lambda answer, local: ([], None),
+                        read=lambda: []), \
+                patched(creds, collect=lambda *a, **kw: collected.append(1) or [],
+                        operator=lambda dest: "anton"):
+            os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key,
+                               "MOP_OPERATORS_FILE": people})
+            out, err, code = run_command(deploy.main, [])
+            # Красный -- не ноль, и отказ называет провал; «configured» из
+            # прежнего поведения не должно быть.
+            c.check("#475 a mixed run is a red refusal, not \"configured\"",
+                    code != 0 and "failed" in err.lower()
+                    and "did not answer" not in err, (code, repr(err)))
+            c.check("#475 no credentials collected after a mixed run", not collected,
+                    collected)
+            c.check("#475 no roster check after a mixed run", not checked, checked)
+            c.check("#475 the refusal names the failure, not silence",
+                    "failed" in err.lower() and "did not answer" not in err, repr(err))
+            # А чистый #87 остаётся прежним: не красный, креды и ростер собраны.
+            collected.clear(), checked.clear()
+            runs["recap"], runs["rc"] = RECAP_UNREACHABLE, 4
+            out, err, code = run_command(deploy.main, [])
+            c.expect("#475 an unreachable-only run stays the #87 way: not red", code, 0)
+            c.check("#475 #87 still collects credentials", not (not collected), collected)
+            c.check("#475 #87 still shows the roster", not (not checked), checked)
+    finally:
+        os.environ.clear()
+        os.environ.update(env)
+
+
 def main():
     c = Checks()
     check_server_maintenance_409(c)
@@ -969,6 +1081,7 @@ def main():
     check_concise_global_help_430(c)
     check_help_content_432(c)
     check_deploy_argument_refusal_439(c)
+    check_deploy_mixed_outcome_475(c)
     check_refusals_432(c)
     check_reference_render_350(c)
     check_reference_empty_350(c)
@@ -2462,16 +2575,25 @@ def check_deploy_check(c):
                                      identity.hash_password("x")) + "\n")
     calls, collected, checked = [], [], []
     listing = [INVENTORY_CLEAN]
+
+    def run_mock(argv):
+        """Прогон в игре (#475): игра пишется в список, ansible-inventory
+        отвечает листингом, плейбук -- пустым выводом и нулём."""
+        calls.append(argv)
+        text = json.dumps(listing[0]) if argv and argv[0] == "ansible-inventory" else ""
+        return subprocess.CompletedProcess(argv, 0, text, "")
+
     # Окружение -- снимком до предохранителя: после проверки оно целиком
     # прежнее, без MOP_SERVER_LAN предохранителя и без INVENTORY здесь.
     env = dict(os.environ)
     try:
+        # #475: play() собирает вывод прогона (subprocess.run) и возвращает
+        # (код, вывод); игры пишет тот же mock, а ansible-inventory
+        # отвечает листингом.
         with offline(), \
                 patched(shutil, which=lambda cmd: f"/usr/bin/{cmd}"), \
                 patched(config, require=lambda *a: None), \
-                patched(subprocess, call=lambda argv, **kw: calls.append(argv) or 0,
-                        run=lambda argv, **kw: subprocess.CompletedProcess(
-                            argv, 0, json.dumps(listing[0]), "")), \
+                patched(subprocess, run=lambda argv, **kw: run_mock(argv)), \
                 patched(playvars, playbook_vars=lambda: {}), \
                 patched(deploy, missing_extras=lambda setting, root: [],
                         link=lambda name, target: None, manifests=lambda origins: {},
