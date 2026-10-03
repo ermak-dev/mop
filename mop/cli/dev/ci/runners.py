@@ -1,7 +1,7 @@
 """mop dev ci runners: the project's runners and the jobs they are running
 
 A runner per line: ON/OFF (takes work or paused), id, description, status
-(whether GitLab sees it), tags. Then each running job with the runner that
+(whether GitLab sees it), tags. Then each running job and the runner that
 holds it.
 """
 from mop.common import gitlab

@@ -1,4 +1,4 @@
-"""run the checks in tests/: mop dev test [name ...] [--strict] [-v]
+"""mop dev test [name ...] [--strict] [-v]: run the checks in tests/
 
 Every file of tests/ (a helper named _*.py is not a check), or only the
 named ones: `mop dev test cli spec`. The checks of the working copy you run

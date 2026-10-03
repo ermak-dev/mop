@@ -4,7 +4,7 @@ Runs `npm ci` and `vite build` in web/. Silent when the build lands.
 
   --check   build into a temporary directory instead and compare it with
             web/dist byte for byte; the differing files are listed and the
-            exit code is 1 -- the committed dist must be rebuilt
+            exit code is 1: rebuild with `mop dev web build`
 
 Needs node and npm on this machine (the developer's or CI's), never on a
 server.

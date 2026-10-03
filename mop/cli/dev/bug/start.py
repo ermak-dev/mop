@@ -1,4 +1,6 @@
-"""mop dev bug start <iid> [slug] [--no-branch] [--worker W]: claim an issue — status::wip plus a branch
+"""mop dev bug start <iid> [slug] [--no-branch] [--worker W]: claim an issue
+
+Sets status::wip and, unless --no-branch, creates the issue's branch.
 """
 from mop.cli import lib
 from mop.common import gitlab

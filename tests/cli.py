@@ -2262,6 +2262,7 @@ def check_fallback_model_183(c):
     check_concise_help_431(c)
     check_add_argv_399(c)
     check_master_argv_400(c)
+    check_dev_help_433(c)
 
 
 # HYPOTHESIS: после смены интерфейса на main(argv) master всё ещё передавал
@@ -2627,6 +2628,93 @@ def check_tail_stderr_333(c):
             patched(mcp, MASTER=True):
         got = mcp.tail("pu-mop-1", lines=2)
     c.expect("#333 MCP tail: the same text", got, want.rstrip("\n"))
+
+
+# ── #433: справка и отказы mop/cli/dev короче, контракт на месте ───────
+# HYPOTHESIS: докстринги dev-групп разрослись повторами («the same, N of
+# them», пересказ аргументов в прозе) и туманными фразами («against the
+# project», «as they would in a pipeline», «must be rebuilt»): читающий их
+# модель вынуждена разбирать синтаксис из прозы, а человек -- листать.
+# SOLUTION: у каждой команды -- аудит фразы, синтаксис вызова, действенные
+# предупреждения и словарь статусов остаются, повторы и пересказ уходят.
+# Проверка чистая: перечень глаголов из cli.verbs(), докстринги -- без
+# импорта; границы -- «запрещённая фраза отсутствует» и «контрактное слово
+# на месте», не числовые лимиты.
+# STATUS: FIXED — see #433
+GONE_433 = {
+    # пересказ списка в прозе вместо одной строки синтаксиса
+    "dev/ci/__init__.py": ("the same, N of them",),
+    # «против проекта» без слова о том, что проверяется и где
+    "dev/ci/lint.py": ("against the project", "as they would in a pipeline"),
+    # многословие «должен быть перестроен» вместо действия
+    "dev/web/build.py": ("must be rebuilt",),
+}
+KEPT_433 = {
+    # словарь статусов -- контракт трекера, по группе на issue
+    "dev/bug/relabel.py": ("live", "wip", "parked", "fixed", "noise", "dup"),
+    # шёпот о молчаливом поведении GitLab -- это и есть предупреждение
+    "dev/bug/labels.py": ("silently replaces",),
+    # `-` и stdin -- путь тела, его потеря меняет поведение
+    "dev/bug/comment.py": ("-",),
+    "dev/bug/new.py": ("--body-file", "stdin"),
+    "dev/bug/edit.py": ("--body-file",),
+    # отказы с именованием состояния -- действенная диагностика
+    "dev/ci/cancel.py": ("Refused",),
+    "dev/ci/retry.py": ("Refused",),
+    # разрушительное и молчаливое: предупреждение обязано остаться
+    "dev/web/build.py": ("--check", "byte for byte"),
+    # группы перечисляют свои глаголы: «нет аргументов» -- не сообщение,
+    # а команда с аргументом обязана назвать их разбор
+    "dev/test.py": ("--strict",),
+}
+
+
+def check_dev_help_433(c):
+    # Каталог dev-подпространства из обхода пакета: группы, подгруппы,
+    # глаголы -- всё, что справочник и usage показывают пользователю.
+    import glob
+    base = os.path.join(cli.PACKAGE, "dev")
+    files = sorted(glob.glob(os.path.join(base, "**", "*.py"), recursive=True))
+    docs = {os.path.relpath(f, cli.PACKAGE).replace(os.sep, "/"): cli.docstring(f)
+            for f in files if "__pycache__" not in f}
+    if not c.check("#433 the dev subtree is catalogued: 4 groups, 21 verbs",
+                   len([d for d in docs if d.endswith("__init__.py")]) == 4
+                   and len([d for d in docs
+                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 21,
+                   sorted(docs)):
+        return
+    for path, phrases in GONE_433.items():
+        for phrase in phrases:
+            c.check(f"#433 {path} no longer says «{phrase}»",
+                    phrase not in docs.get(path, phrase), docs.get(path, "")[:120])
+    for path, words in KEPT_433.items():
+        for word in words:
+            c.check(f"#433 {path} keeps «{word}»", word in docs.get(path, ""),
+                    docs.get(path, "")[:120])
+    # Ревью 897f80a: relabel не закрывает -- relabel_action даёт только
+    # "reopen" либо "relabel", закрытие -- глагол close. Справка, обещающая
+    # «closes», отправляет читателя мимо команды, которая это умеет;
+    # назвать close как правильную команду -- можно и нужно.
+    doc = docs["dev/bug/relabel.py"]
+    lower = doc.lower()
+    c.check("#433 relabel help may promise reopening, not closing",
+            "closes it" not in lower and "or close" not in lower
+            and "open or close" not in lower, doc)
+    c.check("#433 relabel help names the statuses that reopen",
+            all(w in lower for w in ("live", "wip", "parked", "reopen"))
+            and "`mop dev bug close`" in doc, doc)
+    c.check("#433 the bug index does not promise closing by relabel",
+            "open or close" not in docs["dev/bug/__init__.py"].lower(),
+            docs["dev/bug/__init__.py"][:200])
+    # Синтаксис вызова остаётся первой строкой: «mop dev …» с глаголом.
+    for path, doc in docs.items():
+        if path.endswith("_common.py"):
+            continue
+        first = doc.splitlines()[0] if doc else ""
+        c.check(f"#433 {path} first line names the command",
+                first.startswith("mop ") or (path.endswith("__init__.py")
+                                             and first and not first.startswith(" ")),
+                first[:80])
 
 
 if __name__ == "__main__":
