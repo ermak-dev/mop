@@ -51,12 +51,14 @@ def parse_var(text):
     # значение уходит, остаётся ключ и заглушка; без «=» -- как было,
     # значения в аргументе нет.
     if not sep or not _KEY.match(key):
-        head = (text or "").split("=", 1)[0]
-        shown = (f"{head}=<VALUE>" if sep
-                 # Без «=» значения в аргументе нет, но и сыпать его целиком
-                 # в stderr незачем: это чужие данные того же сорта.
-                 else ((text or "")[:24] + "…" if len(text or "") > 24 else (text or "")))
-        raise ValueError(f"{shown!r}: expected VAR=VALUE")
+        # Ключ в показе -- только безопасный вид: буквы, цифры, знак
+        # подчёркивания; управляющие символы и перевод строки уехали бы в
+        # stderr как есть (#429). Без «=» присланного текста в отказе нет
+        # вовсе: короткое значение без разделителя -- тоже секрет.
+        head = re.sub(r"[^A-Za-z0-9_]", "", (text or "").split("=", 1)[0])[:24]
+        if not sep:
+            raise ValueError("expected VAR=VALUE")
+        raise ValueError(f"{head}=<VALUE>: expected VAR=VALUE")
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         value = value[1:-1]
     if "\n" in value or "\r" in value:

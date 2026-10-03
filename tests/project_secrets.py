@@ -76,6 +76,25 @@ def main():
         except ValueError as e:
             c.check(f"#429 the refusal of {bad.split('=')[0]}... names no value",
                     SENTINEL not in str(e), str(e))
+    # Ревью #429: короткое значение без «=» -- тоже секрет, обрезка не
+    # спасает; отказ не эхом никакого присланного текста.
+    SHORT = "TOPSECRET"
+    try:
+        ps.parse_var(SHORT)
+        c.fail("parse_var(TOPSECRET) must be refused")
+    except ValueError as e:
+        c.check("#429 no supplied text in the no-separator refusal",
+                SHORT not in str(e), str(e))
+    # Управляющие символы и перевод строки в ключе -- только безопасная
+    # диагностика, без сырого мусора.
+    for bad_key in ("K\x01V=1", "K\nV=2", "K\x1b[31m=3"):
+        try:
+            ps.parse_var(bad_key)
+            c.fail(f"parse_var({bad_key!r}) must be refused")
+        except ValueError as e:
+            c.check(f"#429 the refusal of a control-character key is clean: {bad_key!r}",
+                    "\x01" not in str(e) and "\n" not in str(e) and "\x1b" not in str(e),
+                    str(e))
     try:
         ps.parse_var(f"GOODKEY={SENTINEL}")
         c.check("#429 a well-formed var still parses", True)
