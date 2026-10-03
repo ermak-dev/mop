@@ -1248,21 +1248,8 @@ Runs on a node: nothing here may import what a node does not have
 #### mop mcp
 
 ```text
-pool MCP server: the same pool as tools for claude
+mop mcp [--check]: expose pool commands as tools
 
-Started as `mop mcp` by a claude session, a master's or a puppet's, as its
-child process; the transport is stdio.
-
-What it offers is decided by the bus credentials, not by flags:
-
-  * an operator's login with MOP_PROJECT -- a project's master: the channel
-    and management, over that project's slice of the pool (`mop master`
-    sets the project);
-  * an operator's login without a project -- the operator: the same over
-    the whole pool;
-  * `puppet-<project>` -- a puppet: the channel only.
-
-The management tools are the commandlets themselves: one that declares
-`MCP = {...}` becomes a tool. The channel's protocol is docs/CHANNEL.md, the
-bus subjects docs/BUS.md, the server docs/MCP.md.
+Started by a claude session. --check shows whether it can reach the pool;
+the available tools depend on the session's access.
 ```

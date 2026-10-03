@@ -627,6 +627,33 @@ def main():
              "origin/swarm" in mine and "land" in mine.lower(), True)
     c.expect("#250 the plain text is kept verbatim in front", mine.startswith(plain), True)
 
+    # HYPOTHESIS: MCP повторяет внутреннее устройство канала в инструкциях
+    # и каждом описании; сокращение докстрингов командлетов его не затрагивает.
+    # SOLUTION: инструкции и четыре рукописных описания говорят о выборе
+    # инструмента и последствиях force, не о транспортном механизме.
+    # RESULT: модель получает короткие действия без потери ограничения.
+    # STATUS: FIXED — see #434
+    shown = {t.name: t.description for t in mcp.app._tool_manager.list_tools()}
+    for name in ("agents", "send", "tail"):
+        c.check(f"#434 {name} still described", bool(shown.get(name)))
+        c.check(f"#434 {name} hides transport internals", not any(
+            word in (shown.get(name) or "") for word in
+            ("node agent", "skipSlashCommands", "bus", "tmux", "neighboring node")))
+    c.check("#434 send retains force/ownership warning", all(
+        word in shown["send"] for word in ("force", "owner")))
+    c.check("#434 agents retains free-work rule", all(
+        word in shown["agents"] for word in ("free", "unsaved")))
+    # В профиле папета slash не зарегистрирован: читаем объявление инструмента.
+    import inspect
+    slash_source = inspect.getsource(mcp.slash)
+    c.check("#434 slash omits transport implementation", "skipSlashCommands" not in slash_source)
+    c.check("#434 slash retains allowed-command list and force", all(
+        word in slash_source for word in ("SLASH_ALLOWED", "force=true")))
+    c.check("#434 instructions avoid implementation history", not any(
+        word in plain for word in ("Nomad", "NATS", "bus", "neighboring node")))
+    c.check("#434 instructions retain dispatch check", all(
+        word in plain for word in ("agents", "send", "unsaved")))
+
     c.check("#264 one envelope, one fallback, request_many(verb, nodes)",
             check_bus_envelope_264(c))
     c.check("#369 a stale permissions error does not explain a later timeout",
