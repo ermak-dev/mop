@@ -34,15 +34,23 @@ def main():
     c.check("long turns get a long client timeout (#382)",
             env.get("API_TIMEOUT_MS") == "3000000", env.get("API_TIMEOUT_MS"))
     # Спека и локальная сессия обязаны собирать окружение из одного места:
-    # иначе врапер и мастер расходились бы молча.
+    # иначе врапер и мастер расходились бы молча. С #449 спека собирает
+    # окружение папета из llm.env() не буквально: слоты моделей сбрасывает,
+    # каталог включает (подробно -- tests/spec.py, check_llm_env_449);
+    # здесь -- что едет папету, растёт из этого же модуля. Прежние две
+    # проверки звали c.check со значением вместо булева -- и проходили
+    # всегда; теперь это настоящие сравнения.
     from mop.server import spec
     from mop.cli.core import _common
     with_normal = spec.task_env("pu-x-1", "git@h:g/x.git")
     baked = dict(kv.split("=", 1) for kv in
                  __import__("base64").b64decode(with_normal["PU_LLM_ENV"]).decode().splitlines())
-    c.check("the spec bakes exactly llm.env() (#390)", baked, dict(llm.env()))
-    c.check("the spec reads the key by llm.KEY (#390)",
-            with_normal["PU_LLM_KEY_VAR"], llm.KEY)
+    c.expect("what rides to the puppet grows from llm.env() (#449)",
+             baked, {**{k: v for k, v in llm.env().items()
+                        if not k.startswith("ANTHROPIC_DEFAULT_")},
+                     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"})
+    c.expect("the spec reads the key by llm.KEY (#390)",
+             with_normal["PU_LLM_KEY_VAR"], llm.KEY)
     c.check("no profile names remain in the tree (#390)",
             not os.path.isdir(os.path.join(os.path.dirname(config.__file__), "llm")))
     from _lib import patched
