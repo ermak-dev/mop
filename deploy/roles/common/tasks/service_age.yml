@@ -1,0 +1,35 @@
+# Рестарт серверного сервиса по СОСТОЯНИЮ, а не только по changed прогона
+# (#477). Прогон, оборвавшийся после синка пакета, но до handler'ов, терял
+# сигнал навсегда: retry «без изменений» уже не перезапускал сервис, и mop
+# update собирал спеку процессом со старым кодом (поймано на #4584: у новой
+# сессии нет statusLine). Теперь каждый следующий прогон сравнивает время
+# живого сервиса с временем установленного пакета и перезапускает отстающий.
+#
+# Вызывается ПОСЛЕ «Enable and start» роли: сервис обязан существовать, а не
+# подниматься этой задачей. Читает только показания systemd и mtime файла;
+# ничего не ставит и не синкает. Задачу играют для service из списка сервисов вызывающей роли (свой
+# loop_var, #194); имя пакета-маркера одно на установку (#116).
+- name: Does the running service predate the installed package ({{ service }})
+  become: yes
+  ansible.builtin.shell: |
+    set -o pipefail
+    svc=$(systemctl show "{{ service }}" -p ActiveEnterTimestamp --value)
+    [ -n "$svc" ] || { echo older; exit 0; }
+    pkg=$(stat -c %Y "{{ MOP_HOME }}/.config/mop/package.version")
+    # Оба значения -- стеночные секунды UTC: systemd печатает ISO-время
+    # с таймзоной, awk приводит его к epoch, mtime уже epoch. Часы одни,
+    # прыжки исключены: оба значения читаются в один момент.
+    svc_e=$(echo "$svc" | awk -F' +' '{ cmd="date -d \"" $0 "\" +%s"; cmd | getline e; close(cmd); print e }')
+    [ -n "$svc_e" ] && [ "$svc_e" -lt "$pkg" ] 2>/dev/null && { echo older; exit 0; }
+    echo current
+  register: mop_service_age
+  changed_when: false
+  check_mode: false
+
+- name: Restart the service running the old package ({{ service }})
+  become: yes
+  ansible.builtin.systemd:
+    name: "{{ service }}"
+    state: restarted
+    daemon_reload: yes
+  when: mop_service_age.stdout | default('') | trim == 'older'
