@@ -210,8 +210,102 @@ def check_fetch_proxy_405(c):
     c.expect("#405 mismatched port leaves previous client config", creds.client(dest), old)
 
 
+# HYPOTHESIS (#427): оба пути входа спрашивают HTTPS-порт даже при обычном
+# 443, а явный вход без контекста не использует единственный joined-сервер.
+# SOLUTION: явный --https-port, затем сохранённый порт, окружение и 443;
+# одинаковый выбор одного joined-сервера, неоднозначность -- отказ.
+# RESULT: до правки 11 отказов; после неё 55 проверок входа зелёные.
+# STATUS: FIXED — see #427
+
+def check_login_port_and_server_427(c):
+    from _lib import patched_env
+    def run(argv):
+        try:
+            return join.main(argv)
+        except (SystemExit, ValueError):
+            return 1
+    for argv, expected in ((["alice", "--https-port", "8443"], (None, "alice", "8443")),
+                           (["--https-port=8443", "alice"], (None, "alice", "8443"))):
+        try:
+            got = join.parse(argv)
+        except SystemExit:
+            got = None
+        c.expect("#427 explicit port syntax", got, expected)
+
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-login-427-"), "servers")
+    calls, errors, prompts = [], [], []
+    def complete(*args):
+        calls.append(args)
+    def ask(prompt, **kw):
+        prompts.append(prompt)
+        return "new.test" if prompt == "server address: " else "unexpected answer"
+    with patched(creds, ROOT=root), patched(join, git=lambda *a: None, serving=lambda *a: [],
+                 complete=complete, ask=ask), patched(join.lib, fail=errors.append), \
+            context.use(context.resolve({}, {}, {})), patched_env(MOP_HTTPS_PORT="9443"):
+        for argv, expected in ((["--server", "srv.test", "alice", "--https-port", "8443"], "8443"),
+                               (["--server", "srv.test", "alice", "--https-port=8555"], "8555"),
+                               (["--server", "srv.test", "alice"], "9443")):
+            calls.clear()
+            c.expect("#427 explicit login succeeds", run(argv), 0)
+            c.expect("#427 port precedence", calls[-1][3] if calls else None, expected)
+        c.expect("#427 no routine port question", prompts, [])
+        calls.clear()
+        c.expect("#427 invalid port refuses", run(["--server", "srv.test", "alice",
+                                                           "--https-port", "65536"]), 1)
+        c.expect("#427 invalid port never connects", calls, [])
+        c.check("#427 invalid port explained", bool(errors) and "port" in errors[-1].lower())
+
+    with patched(creds, ROOT=root), patched(join, git=lambda *a: None, serving=lambda *a: [],
+                 complete=complete, ask=ask), patched(join.lib, fail=errors.append), \
+            patched_env(MOP_HTTPS_PORT=None), \
+            context.use(context.resolve({}, {}, {})):
+        calls.clear()
+        c.expect("#427 silent default succeeds", run(["--server", "srv.test", "alice"]), 0)
+        c.expect("#427 silent default is 443", calls[-1][3] if calls else None, "443")
+        c.expect("#427 still no port question", prompts, [])
+        calls.clear()
+        c.expect("#427 empty explicit port refuses", run(["--server", "srv.test", "alice",
+                                                          "--https-port="]), 1)
+        c.expect("#427 empty port never connects", calls, [])
+        creds.write_client(os.path.join(root, "srv.test"), "7443",
+                           "https://srv.test:7443/llm", "fake-key")
+        calls.clear()
+        c.expect("#427 saved port succeeds", run(["--server", "srv.test", "alice"]), 0)
+        c.expect("#427 saved port reused", calls[-1][3] if calls else None, "7443")
+        calls.clear()
+        c.expect("#427 explicit port overrides saved", run(["--server", "srv.test", "alice",
+                                                              "--https-port", "8555"]), 0)
+        c.expect("#427 explicit override selected", calls[-1][3] if calls else None, "8555")
+        calls.clear()
+        c.expect("#427 one joined server chosen", run(["alice"]), 0)
+        c.expect("#427 one joined server address", calls[-1][0] if calls else None, "srv.test")
+        creds.write_client(os.path.join(root, "other.test"), "443",
+                           "https://other.test/llm", "fake-key")
+        calls.clear()
+        c.expect("#427 two joined servers refuse", run(["alice"]), 1)
+        c.expect("#427 ambiguity never connects", calls, [])
+        c.check("#427 ambiguity explained", bool(errors) and "multiple" in errors[-1].lower())
+
+    with patched(creds, ROOT=root), patched(join, git=lambda *a: None, serving=lambda *a: [],
+                 complete=complete, ask=ask), patched_env(MOP_HTTPS_PORT="9443"), \
+            context.use(context.resolve({}, {}, {})):
+        calls.clear()
+        c.expect("#427 saved port beats environment", run(["--server", "srv.test", "alice"]), 0)
+        c.expect("#427 saved port is preferred", calls[-1][3] if calls else None, "7443")
+
+    with patched(creds, ROOT=os.path.join(root, "new")), patched(
+            join, git=lambda *a: None, serving=lambda *a: [], complete=complete, ask=ask), \
+            context.use(context.resolve({}, {}, {})), patched_env(MOP_HTTPS_PORT=None):
+        prompts.clear()
+        calls.clear()
+        c.expect("#427 first login may ask address", run(["alice"]), 0)
+        c.expect("#427 first login asks only address", prompts, ["server address: "])
+        c.expect("#427 first login defaults port", calls[-1][3] if calls else None, "443")
+
+
 def main():
     c = Checks()
+    check_login_port_and_server_427(c)
     check_fetch_proxy_405(c)
     check_complete_395(c)
     check_no_local_env_395(c)

@@ -1,11 +1,13 @@
-"""log in to a pool server: mop login [--server ADDRESS] [LOGIN]
+"""log in to a pool server: mop login [login] [--server host] [--https-port port]
 
 Server and login come from --server/LOGIN, the process environment or the
 working copy's binding; if missing, they are asked for. The bus password is
 asked without echo (or read from MOP_BUS_PASSWORD) and verified before
 saving. A valid previous login is reused.
 
-The HTTPS port defaults to 443. After authenticating to the bus, join asks
+The HTTPS port uses --https-port, the saved client port, MOP_HTTPS_PORT,
+or 443, in that order, without prompting. A sole joined server is selected
+when no server is named or bound. After authenticating to the bus, join asks
 the server for its LLM proxy URL and client key over a personal, authenticated
 subject. The key is never printed or asked for separately; /v1/models is
 checked before saving. Rejoining refreshes a rotated key without replacing
@@ -36,15 +38,15 @@ from mop.common import bus, busnames, context, creds, paths
 
 
 def parse(argv):
-    """-> (сервер|None, логин|None). Отказ -- usage."""
-    server, login, rest = None, None, list(argv)
+    """-> (сервер|None, логин|None, HTTPS-порт|None). Отказ -- usage."""
+    server, login, https, rest = None, None, None, list(argv)
     while rest:
         a = rest.pop(0)
-        if a in ("--server", "--user"):
+        if a in ("--server", "--user", "--https-port"):
             if not rest:
                 lib.usage(__doc__)
             v = rest.pop(0)
-        elif a.startswith("--server=") or a.startswith("--user="):
+        elif a.startswith(("--server=", "--user=", "--https-port=")):
             a, v = a.split("=", 1)
         elif a.startswith("-") or login is not None:
             lib.usage(__doc__)
@@ -53,9 +55,11 @@ def parse(argv):
             continue
         if a == "--server":
             server = v
+        elif a == "--https-port":
+            https = v
         else:
             login = v
-    return server, login
+    return server, login, https
 
 
 def git(*args):
@@ -145,6 +149,15 @@ def _fetch(host, login, password, dest, https):
     return record
 
 
+def _https_port(explicit, saved):
+    """Явный выбор > сохранённый > окружение > 443, до соединения."""
+    https = (explicit if explicit is not None else
+             (saved or {}).get("https_port") or os.environ.get("MOP_HTTPS_PORT") or "443")
+    if not https.isascii() or not https.isdecimal() or not 1 <= int(https) <= 65535:
+        raise ValueError("server HTTPS port must be between 1 and 65535")
+    return https
+
+
 def complete(host, login, dest, https):
     """Один проверенный вход: старый пароль можно использовать, новые файлы
     появляются только после обеих сетевых проверок."""
@@ -217,9 +230,7 @@ def ensure():
         user = ask(f"login on {host}: ")
     if not stored and not sys.stdin.isatty() and not os.environ.get("MOP_BUS_PASSWORD"):
         raise RuntimeError(f"no password and no terminal: run mop login --server {host}")
-    https = (saved or {}).get("https_port") or os.environ.get("MOP_HTTPS_PORT") or "443"
-    if not saved and sys.stdin.isatty():
-        https = ask(f"HTTPS port for {host} [{https}]: ", default=https)
+    https = _https_port(None, saved)
     with context.use(context.resolve({"server": host}, {}, {})):
         complete(host, user, dest, https)
     _bind(host, user)
@@ -229,7 +240,7 @@ def ensure():
 def main(argv):
     """Сервер и логин -- из контекста команды (#131): клон < окружение <
     командная строка; `--server` снимает диспетчер, логин -- здесь."""
-    explicit_server, login = parse(argv)
+    explicit_server, login, explicit_https = parse(argv)
     ctx = context.current()
     if explicit_server:                       # `mop login --server` мимо диспетчера
         ctx = context.resolve({"server": explicit_server}, os.environ,
@@ -241,6 +252,11 @@ def main(argv):
     bound = ctx.server if src == "clone" else None
     found = serving(origin) if origin and not ctx.server else []
     try:
+        if not (explicit or bound or found):
+            joined = sorted(d for d in glob.glob(os.path.join(creds.ROOT, "*"))
+                            if os.path.isfile(os.path.join(d, creds.CLIENT_FILE)))
+            if joined:
+                found = [creds.joined_host()]
         try:
             host = creds.pick_server(explicit, bound, found, None)
         except ValueError:
@@ -255,9 +271,7 @@ def main(argv):
             if not login:
                 login = ask(f"login on {host}: ")
             saved = creds.client(dest)
-            https = (saved or {}).get("https_port") or os.environ.get("MOP_HTTPS_PORT") or "443"
-            if not saved and sys.stdin.isatty():
-                https = ask(f"HTTPS port for {host} [{https}]: ", default=https)
+            https = _https_port(explicit_https, saved)
             complete(host, login, dest, https)
     except (RuntimeError, ValueError, OSError) as e:
         lib.fail(str(e))
