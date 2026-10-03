@@ -116,6 +116,86 @@ def main():
         with context.use(context.resolve(cli={}, env={}, clone={})):
             c.check("#249 without a branch context default_branch must ask git",
                     lib.default_branch().startswith("origin/"), repr(lib.default_branch()))
+
+    # ── #457: изолированный контекст общих операций ─────────────────────
+    # HYPOTHESIS (#457): ContextVar в context.use сопровождается записью
+    # os.environ, а context.here читает cwd процесса. Общая операция,
+    # позванная из двух потоков (CLI и HTTP-worker), перехлёстывается:
+    # окружение -- вход отдельного CLI-процесса, но не хранилище состояния
+    # HTTP-запроса; cwd -- процессная величина. Механически обернуть
+    # HTTP-handler менеджером use() недостаточно.
+    # SOLUTION: isolated(ctx) -- контекст без побочных эффектов: ни
+    # os.environ, ни cwd; нижний вызов (bus/config) принимает контекст
+    # явно, worker получает ровно переданный контекст аргументом, не
+    # переносом ContextVar в поток. Immutable-контекст без изменяемых
+    # вложенных словарей: sources -- mapping-proxy.
+    # STATUS: FIXED — see #457
+    import threading
+
+    ctx = context.resolve(cli={"server": "a.srv", "branch": "dev"}, env={}, clone={})
+    c.check("#457 sources must not be a mutable dict",
+            not isinstance(ctx.sources, dict), type(ctx.sources).__name__)
+    try:
+        ctx.sources["server"] = "b.srv"
+        c.fail("#457 sources must be immutable", "assignment went through")
+    except TypeError:
+        pass
+
+    # Окружение и cwd неизменны после isolated -- успеха и исключения.
+    env_before = dict(os.environ)
+    cwd_before = os.getcwd()
+    caught = False
+    try:
+        with context.isolated(context.resolve(cli={"server": "iso.srv"}, env={}, clone={})):
+            c.check("#457 isolated must set current() without touching os.environ",
+                    not (context.current().server != "iso.srv"
+                         or os.environ != env_before or os.getcwd() != cwd_before))
+            raise RuntimeError("boom")
+    except RuntimeError:
+        caught = True
+    c.check("#457 isolated must restore everything even on exception",
+            not (not caught or os.environ != env_before or os.getcwd() != cwd_before
+                 or context.current().server is not None))
+
+    # Два одновременно исполняемых контекста с разными actor/project/branch и
+    # подставным транспортом: у нижнего вызова нет чужих значений. Контекст
+    # передаётся ЯВНО: worker не рассчитывает на перенос ContextVar в поток.
+    seen = {}
+    barrier = threading.Barrier(2)
+
+    def fake_transport(label, actor, project, branch):
+        barrier.wait()
+        seen[label] = (context.current().server, actor, project, branch)
+        return {"ok": True}
+
+    def run(label, ictx):
+        with context.isolated(ictx):
+            context.call_in_context(ictx, fake_transport, label,
+                                    actor="actor-" + label, project=label,
+                                    branch=ictx.branch)
+
+    one = context.resolve(cli={"server": "one.srv", "branch": "dev-one"}, env={}, clone={})
+    two = context.resolve(cli={"server": "two.srv", "branch": "dev-two"}, env={}, clone={})
+    t1 = threading.Thread(target=run, args=("p1", one))
+    t2 = threading.Thread(target=run, args=("p2", two))
+    t1.start(); t2.start(); t1.join(); t2.join()
+    c.check("#457 two parallel contexts must not leak into each other",
+            not (seen.get("p1") != ("one.srv", "actor-p1", "p1", "dev-one")
+                 or seen.get("p2") != ("two.srv", "actor-p2", "p2", "dev-two")),
+            seen)
+
+    # Креды шины выбираются контекстом, а не процессом: другой сервер --
+    # другой файл, кэш одного соединения под ногами не путает установки.
+    c.check("#457 bus credentials must key on the context, not the process",
+            context.bus_file(one) != context.bus_file(two),
+            (context.bus_file(one), context.bus_file(two)))
+
+    # Явный env для реального дочернего процесса -- копия, не мутация.
+    child = context.child_env(one, MOP_EXTRA="x")
+    c.check("#457 child_env builds a copy without mutating os.environ",
+            not (child is os.environ or child.get("MOP_SERVER_LAN") != "one.srv"
+                 or "MOP_SERVER_LAN" in os.environ or child.get("MOP_EXTRA") != "x"))
+
     return c.report("context")
 
 
