@@ -281,9 +281,10 @@ if [ -d "$TARGET_DIR" ] \
     && [ "$(du -sm "$TARGET_DIR" 2>/dev/null | cut -f1 || echo 0)" -gt 30000 ]; then
     rm -rf "$TARGET_DIR"
 fi
-# LLM-профиль папета: набор переменных для tmux -e. Статическая часть
-# (эндпоинт и карта моделей) приезжает в PU_LLM_ENV из спеки джоба, а ключ —
-# только с узла: в спеке джоба секретам не место (её видно в UI Nomad).
+# LLM-окружение папета: набор переменных для tmux -e. Статическая часть
+# (эндпоинт и включённый каталог моделей) приезжает в PU_LLM_ENV из спеки
+# джоба, а ключ — только с узла: в спеке джоба секретам не место (её видно
+# в UI Nomad).
 llm_env=()
 if [ -n "$PU_LLM_ENV" ]; then
     while IFS= read -r kv; do
@@ -372,20 +373,6 @@ tmux -L "$PU_NAME" new-session -d -s "$PU_NAME" -c "$d" \
 trap 'tmux -L "$PU_NAME" kill-session -t "$PU_NAME" 2>/dev/null; exit 0' TERM INT
 while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wait $!; done
 """
-
-
-def llm_env():
-    """Статическое окружение LLM сессии (#390): единственный сервер
-    установки -- прокси, адрес -- настройка. Ключ врапер берёт на узле из
-    secrets.env (его раздаёт сервис, #391), сюда секреты не ездят. Карта
-    моделей -- сегодняшняя стенда; снимется алиасами в самом прокси."""
-    return {
-        "ANTHROPIC_BASE_URL": config.get("MOP_PROXY_URL"),
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3[1m]",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3[1m]",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3-flash",
-        "API_TIMEOUT_MS": "3000000",
-    }
 
 
 def task_env(name, origin, cont=False, mem=0):
@@ -615,10 +602,14 @@ def template_version(env):
     """Короткий хеш того, что общее у спек всех папетов: врапер, внешняя
     команда, НАБОР переменных, имена группы и задачи, форма ограничения.
     Значения конкретного папета (имя, origin, профиль, cont) в него не входят:
-    иначе устаревшим читался бы каждый второй."""
+    иначе устаревшим читался бы каждый второй. Окружение LLM -- значением, а
+    не набором ключей (#449): спека квашит его целиком, и смена каталога
+    моделей без смены версии оставила бы стоящих папетов на старой карте
+    навсегда свежими -- та же тихая ошибка, что и #174."""
     c = project_constraint("x")
     m = memory_constraint(0)
     shape = {"wrapper": WRAPPER, "outer": OUTER, "env": sorted(env),
+             "llm": llm.env(),
              "group": GROUP, "task": TASK,
              "constraint": [c["LTarget"], c["Operand"]],
              "memory": [m["LTarget"], m["Operand"]]}

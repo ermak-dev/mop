@@ -181,6 +181,20 @@ def check_template_version(c):
     # ровно та тихая ошибка, которую закрывает #174.
     c.check("current_version must equal the version job_spec puts in Meta",
             not (spec.current_version() not in versions))
+    # HYPOTHESIS (#449): llm.env() перестал навязывать карту моделей, но
+    # version (хеш НАБОРА ключей окружения) от этого не шелохнулся: набор
+    # ключей не изменился, изменились значения. Стоящий папет со старой
+    # заквашенной картой читался бы свежим вечно -- та же тихая ошибка,
+    # которую закрывал #174. SOLUTION: в версию входит и окружение LLM,
+    # которое спека квашит: смена каталога моделей меняет и версию.
+    # RESULT: правка mop/common/llm.py (#449) двигает mop_spec, и doctor
+    # видит весь пул устаревшим; перерегистрация -- только свободным.
+    from mop.common import llm as _llm
+    _today = dict(_llm.env())
+    with patched(_llm, env=lambda: dict(_today, EXTRA_MODEL_SLOT="x")):
+        other = (spec.job_spec(*SPEC_INPUTS[0][:2])["Job"].get("Meta") or {}).get("mop_spec")
+    c.check("a changed LLM environment must change the template version (#449)",
+            not (other in versions or other is None), other)
 
 
 # (имя, origin, cont): проект с точкой в имени (экранирование в ограничении)

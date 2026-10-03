@@ -27,10 +27,20 @@ def main():
             and bool(env["ANTHROPIC_BASE_URL"]), env.get("ANTHROPIC_BASE_URL"))
     c.check("the key rides under its own name (#390)",
             (llm.KEY, llm.AUTH_VAR), ("MOP_PROXY_KEY", "ANTHROPIC_AUTH_TOKEN"))
-    c.check("every model slot is named (#390)",
-            all(env.get(k) for k in
-                ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                 "ANTHROPIC_DEFAULT_HAIKU_MODEL")), env)
+    # HYPOTHESIS (#449): статическая карта opus/sonnet/haiku в окружении
+    # сессии навязывала папету glm-имена, которых в прокси нет (400 unknown
+    # provider), пока мастер выбирал модели из живого каталога прокси.
+    # SOLUTION: окружение не называет моделей вовсе -- каталог открывает
+    # claude'у CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1, и папет
+    # выбирает из того же каталога, что и мастер. Сервер и таймаут --
+    # прежние: меняется только выбор модели.
+    # RESULT: карта -- единственное, что менялось; адрес прокси и таймаут
+    # остались, ключ по-прежнему читает врапер на узле.
+    c.check("no model slot is imposed on the session (#449)",
+            not [k for k in env if k.startswith("ANTHROPIC_DEFAULT_")], sorted(env))
+    c.check("the session discovers models from the gateway catalog (#449)",
+            env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") == "1",
+            env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"))
     c.check("long turns get a long client timeout (#382)",
             env.get("API_TIMEOUT_MS") == "3000000", env.get("API_TIMEOUT_MS"))
     # Спека и локальная сессия обязаны собирать окружение из одного места:
