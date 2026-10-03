@@ -144,6 +144,42 @@ def fetch_is_shallow_and_blobless(c):
 # новый ключ хоста сам (accept-new) и по-прежнему отказывает сменившемуся;
 # выбранный оператором ssh (GIT_SSH_COMMAND, GIT_SSH) не трогаем.
 # STATUS: FIXED — see #141
+# HYPOTHESIS: git stderr попадает в пользовательский отказ целиком: origin с
+# учётным значением или произвольный вывод внешней программы становится эхом.
+# SOLUTION: на границе клонирования передавать только известный класс ошибки;
+# непонятный вывод оставлять за пределами ответа, с общим действием.
+# RESULT: причины различаются, ни один синтетический секрет не повторяется.
+# STATUS: FIXED — see #436
+
+def clone_failure_is_safe_436(c):
+    import shutil
+    cases = (
+        ("fatal: repository 'https://user:FAKE_SECRET@host.test/repo.git' not found",
+         "repository not found"),
+        ("fatal: Authentication failed for 'https://user:FAKE_SECRET@host.test/repo.git'",
+         "access denied"),
+        ("Host key verification failed. FAKE_SECRET", "host identity could not be verified"),
+        ("Permission denied (publickey). FAKE_SECRET", "access denied"),
+        ("Could not resolve hostname host.test: FAKE_SECRET", "host not found"),
+        ("Connection timed out. FAKE_SECRET", "connection failed"),
+        ("weird FAKE_SECRET output", "clone failed; check the origin and access"),
+    )
+    for stderr, reason in cases:
+        def fake_run(argv, **kwargs):
+            if argv[0] == "rm":
+                shutil.rmtree(argv[-1])
+                return subprocess.CompletedProcess(argv, 0)
+            return subprocess.CompletedProcess(argv, 128, "", stderr)
+        with patched(manifest.subprocess, run=fake_run):
+            try:
+                manifest.fetch("https://host.test/repo.git")
+                c.fail("#436 failed clone must raise")
+            except RuntimeError as e:
+                c.expect("#436 clone failure is specific without raw stderr", str(e),
+                         f"cannot read repo: {reason}")
+                c.check("#436 synthetic secret stays private", "FAKE_SECRET" not in str(e))
+
+
 def clone_env_accepts_new_host_keys(c):
     env = manifest.clone_env({"PATH": "/bin"})
     c.check("clone env: a new host key must be accepted",
@@ -200,6 +236,7 @@ def main():
     except RuntimeError as e:
         c.check("malformed message names the file", "bad/.mop/sandbox.yaml" in str(e), e)
     clone_env_accepts_new_host_keys(c)
+    clone_failure_is_safe_436(c)
     fetch_is_shallow_and_blobless(c)
     return c.report("manifest")
 
