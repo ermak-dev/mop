@@ -529,6 +529,9 @@ def check_row_none_274(c):
     empty = PuppetRow("pu-x-1", None, "pending", None, None, None, None)
     old = {"name": "pu-x-1", "node": "-", "alloc_status": "pending", "state": "-",
            "kind": None, "owner": "-", "origin": "?", "disk_kb": None}
+    # #454: поле модели вернулось (с дефолтом None); ожидание #274 --
+    # прежний провод плюс новое поле. Прочерк модели -- тоже показ.
+    old = {**old, "llm": "-"}
     render = getattr(empty, "render", None)
     c.expect("#274 None renders as the old strings", render and render(), old)
     c.expect("#274 to_dict is the rendered wire form", empty.to_dict(), old)
@@ -663,6 +666,89 @@ def check_alloc_377(c):
                     "no allocation" in str(e) and "pu-a-2" in str(e))
 
 
+# ── #454: модель сессии в строке ростера ──────────────────────────────────
+# HYPOTHESIS: #390 снял PuppetRow.llm вместе с профилями, а дашборд
+# (web/src/types.ts, PoolTable) поле читает. Источник модели после #390 не
+# мета джоба (профилей нет), а сессия папета: session.py state (#453)
+# добавит model в запись, агент положит её в факты. Решения модель не
+# касается -- это показ; None -- «источника нет»: агент старый, сессия
+# мертва или спросить некого.
+# SOLUTION: PuppetRow.llm (имя поля прежнее -- провод дашборда), state.model_of
+# -- чистая функция над фактами: model только живой сессии, старые агенты и
+# старые снимки разбираются без поля. Регистр по умолчанию/env/каталог не
+# подменяет модель.
+# STATUS: FIXED — see #454
+def check_model_454(c):
+    from mop.common import state
+
+    def facts(alive, listen):
+        """Факты узла с записью state: alive/listen -- значения или отсутствие."""
+        rec = {"status": "idle", "waitingFor": None, "turn": None,
+               "model": "glm-5.3"}
+        if alive is not None:
+            rec["alive"] = alive
+        if listen is not None:
+            rec["listen"] = listen
+        return {"present": True, "session": "idle 1 1", "clone": None,
+                "state": rec}
+
+    live = facts(True, True)
+    old = {"present": True, "session": "idle 1 1", "clone": None}
+    model_of = getattr(state, "model_of", None)
+    if not c.check("#454 state.model_of exists", model_of is not None):
+        return
+    # Строка ростера несёт модель фактов, а не догадку: живая сессия ->
+    # имя, всё остальное -> None. Поле llm -- прежнее имя провода дашборда.
+    # Считает ростер (как и владельца), _row только читает.
+    def item(facts_value):
+        return {"job": {"ID": "pu-x-1", "Status": "running", "Meta": {}},
+                "alloc": {"NodeName": "n1", "ClientStatus": "running"},
+                "error": None, "state": None, "kind": None, "owner": None,
+                "llm": state.model_of(facts_value)}
+    # Консервативный контракт атрибуции (#454): модель несёт только запись
+    # с ОБИМИ признаками живости. alive -- лишь os.kill(pid, 0), и PID может
+    # стоять за чужим процессом; listen -- socket_alive. Факты идут с узла
+    # в разное время, и старый или битый ответ может принести любое их
+    # сочетание -- всё, кроме alive И listen, читается как «источника нет».
+    # (что, alive, listen, ожидание)
+    LIVENESS = [
+        ("a live session (alive and listening)", True, True, "glm-5.3"),
+        ("a pid-alive session without its socket", True, False, None),
+        ("a socket answering for a dead pid", False, True, None),
+        ("a corpse", False, False, None),
+    ]
+    for what, alive, listen, want in LIVENESS:
+        c.expect(f"#454 {what}: model_of", model_of(facts(alive, listen)), want)
+        c.expect(f"#454 {what}: the row",
+                 puppets._row(item(facts(alive, listen))).llm, want)
+    # Отсутствующий признак -- то же, что ложный: записи без alive или без
+    # listen недостаточно.
+    c.expect("#454 a record without alive is not live enough",
+             model_of(facts(None, True)), None)
+    c.expect("#454 a record without listen is not live enough",
+             model_of(facts(True, None)), None)
+    c.expect("#454 an old agent without model", model_of(old), None)
+    c.expect("#454 no facts at all", model_of(None), None)
+    # Никаких подмен: пустая строка -- не модель, а отсутствие.
+    c.expect("#454 an empty model is no model",
+             model_of({**live, "state": {**live["state"], "model": ""}}), None)
+    c.expect("#454 a broken state record", model_of({"present": True, "state": "x"}), None)
+    c.expect("#454 a state record without model", model_of({
+        "present": True, "state": {"status": "idle", "alive": True}}), None)
+    # Старый снимок дашборда без llm разбирается: поле -- с дефолтом, и
+    # показ прочерка остаётся делом render.
+    old_row = PuppetRow.from_dict({"name": "pu-x-1", "node": "n1",
+                                   "alloc_status": "running", "state": "-",
+                                   "kind": None, "owner": "-", "origin": "?",
+                                   "disk_kb": None})
+    c.expect("#454 an old snapshot row reads back", old_row.llm, None)
+    rendered = old_row.render()
+    c.check("#454 render keeps the old key set",
+            list(rendered) == ["name", "node", "alloc_status", "state", "kind",
+                               "owner", "llm", "origin", "disk_kb"], list(rendered))
+    c.expect("#454 None model renders as the dash", rendered["llm"], "-")
+
+
 def main():
     c = Checks()
     for what, given, want in CASES:
@@ -678,6 +764,7 @@ def main():
     check_stale_spec(c)
     check_clone_agreement(c)
     check_row_none_274(c)
+    check_model_454(c)
     check_invariants_273(c)
     check_alloc_377(c)
     for state, want in FREE_CASES:

@@ -220,14 +220,23 @@ hooks="$HOME/.config/mop/claude-hooks.json"
 # -- claude встаёт без --settings, а врапер говорит об этом в лог задачи.
 # Упасть здесь значило бы уронить папета из-за того, что должно лишь сообщать
 # о нём. Внутри if set -e не срабатывает -- на этом и стоит развилка.
+# Статус-строка (#455) -- в тот же файл и тем же jq: claude папета зовёт
+# глагол statusline того же session.py (#453). Охрана здесь -- НЕ копия
+# хуковой: stdout хука -- шум в контексте модели, а stdout статус-строки --
+# сама строка, и глушить её значило бы убрать статус-строку целиком.
+# Гасятся stderr и код выхода: старый session.py без глагола печатает usage
+# и выходит 2, отсутствующий -- ненулевой; без охраны строка гасла бы на
+# каждом ходу до раскатки пакета по узлам.
 settings=""
 if mkdir -p "$(dirname "$hooks")" \
-    && jq -n --arg cmd "python3 $mop_root/mop/session.py hook >/dev/null 2>&1 || true" '
+    && jq -n --arg cmd "python3 $mop_root/mop/session.py hook >/dev/null 2>&1 || true" \
+           --arg status "python3 $mop_root/mop/session.py statusline 2>/dev/null || true" '
         {hooks: (["SessionStart", "UserPromptSubmit", "Stop", "StopFailure",
                   "PostModelSwitch"]
             | map({key: ., value: [{hooks: [{type: "command", command: $cmd,
                                              timeout: 5}]}]})
-            | from_entries)}' > "$hooks.$PU_NAME.tmp" \
+            | from_entries),
+         statusLine: {type: "command", command: $status}}' > "$hooks.$PU_NAME.tmp" \
     && mv "$hooks.$PU_NAME.tmp" "$hooks"; then
     settings="--settings $hooks"
 else
@@ -297,9 +306,10 @@ if [ -d "$TARGET_DIR" ] \
     && [ "$(du -sm "$TARGET_DIR" 2>/dev/null | cut -f1 || echo 0)" -gt 30000 ]; then
     rm -rf "$TARGET_DIR"
 fi
-# LLM-профиль папета: набор переменных для tmux -e. Статическая часть
-# (эндпоинт и карта моделей) приезжает в PU_LLM_ENV из спеки джоба, а ключ —
-# только с узла: в спеке джоба секретам не место (её видно в UI Nomad).
+# LLM-окружение папета: набор переменных для tmux -e. Статическая часть
+# (эндпоинт и включённый каталог моделей) приезжает в PU_LLM_ENV из спеки
+# джоба, а ключ — только с узла: в спеке джоба секретам не место (её видно
+# в UI Nomad).
 llm_env=()
 if [ -n "$PU_LLM_ENV" ]; then
     while IFS= read -r kv; do
@@ -390,24 +400,32 @@ while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wa
 """
 
 
-def llm_env():
-    """Статическое окружение LLM сессии (#390): единственный сервер
-    установки -- прокси, адрес -- настройка. Ключ врапер берёт на узле из
-    secrets.env (его раздаёт сервис, #391), сюда секреты не ездят. Карта
-    моделей -- сегодняшняя стенда; снимется алиасами в самом прокси."""
-    return {
-        "ANTHROPIC_BASE_URL": config.get("MOP_PROXY_URL"),
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3[1m]",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3[1m]",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3-flash",
-        "API_TIMEOUT_MS": "3000000",
-    }
+# Каталог моделей прокси (#449): переменная, которая его включает. Живёт
+# здесь, а не в llm.env(): папет -- слой спеки, и выбор «модели называет
+# код или каталог» -- решение этого слоя. Мастерская сессия остаётся на
+# llm.env() как есть.
+DISCOVERY = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"
+
+
+def gateway_env():
+    """Окружение LLM сессии ПАПЕТА -> {переменная: значение}.
+
+    Собирается из llm.env(), но не квашится им целиком (#449): слоты
+    ANTHROPIC_DEFAULT_*_MODEL сбрасываются, каталог включается. Статическая
+    карта навязывала папету имена, которых за прокси нет (400 unknown
+    provider), пока мастер выбирал модели из живого каталога; с discovery
+    папет выбирает из того же /v1/models. Адрес и таймаут -- из llm.env()
+    без изменений, ключ врапер по-прежнему берёт на узле."""
+    env = {k: v for k, v in llm.env().items()
+           if not k.startswith("ANTHROPIC_DEFAULT_")}
+    env[DISCOVERY] = "1"
+    return env
 
 
 def task_env(name, origin, cont=False, mem=0):
     """Окружение задачи папета. Одно место и для job_spec, и для версии
     шаблона. mem -- потолок памяти папета, МБ (spec.memory)."""
-    env_llm = "".join(f"{k}={v}\n" for k, v in llm.env().items())
+    env_llm = "".join(f"{k}={v}\n" for k, v in gateway_env().items())
     project = driver.project_of(origin)
     env = {
         "PU_NAME": name,
@@ -631,10 +649,14 @@ def template_version(env):
     """Короткий хеш того, что общее у спек всех папетов: врапер, внешняя
     команда, НАБОР переменных, имена группы и задачи, форма ограничения.
     Значения конкретного папета (имя, origin, профиль, cont) в него не входят:
-    иначе устаревшим читался бы каждый второй."""
+    иначе устаревшим читался бы каждый второй. Окружение LLM -- значением, а
+    не набором ключей (#449): оно едет в PU_LLM_ENV, и правка его значения без
+    смены версии оставила бы стоящих папетов на старом окружении навсегда
+    свежими -- та же тихая ошибка, что и #174."""
     c = project_constraint("x")
     m = memory_constraint(0)
     shape = {"wrapper": WRAPPER, "outer": OUTER, "env": sorted(env),
+             "llm": gateway_env(),
              "group": GROUP, "task": TASK,
              "constraint": [c["LTarget"], c["Operand"]],
              "memory": [m["LTarget"], m["Operand"]]}

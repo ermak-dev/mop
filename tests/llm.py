@@ -100,6 +100,8 @@ def check_session_ca_412(c):
 # и включает discovery, оставляя папетскую спеку и выбранный gateway без перемен.
 # RESULT: до правки восемь отказов на двух серверах; теперь 75 проверок
 # llm и 228 проверок спеки зелёные без запуска claude и настоящих ключей.
+# После #449 «нет перемен у папета» значит форму #449: без карты моделей,
+# с каталогом; проверка переформулирована под новый контракт.
 # STATUS: FIXED — see #426
 
 def check_client_model_discovery_426(c):
@@ -146,10 +148,18 @@ def check_client_model_discovery_426(c):
                          "kept")
                 c.check("#426 explicit model argument kept", "gpt-example" in args)
                 c.expect("#426 claude binary selected", binary, "claude")
-    baked = __import__("base64").b64decode(
-        spec.task_env("pu-x-1", "git@h:g/x.git")["PU_LLM_ENV"]).decode()
+    # С #449 контракт папета сменился: спека не квасит карту моделей, а
+    # включает каталог (tests/spec.py, check_llm_env_449). Смысл #426 жив --
+    # клиентская мутация (снятие алиасов для СВОЕЙ сессии) не трогает спеку:
+    # папетское окружение не зависит от клиентского и имеет форму #449.
+    baked = dict(kv.split("=", 1) for kv in __import__("base64").b64decode(
+        spec.task_env("pu-x-1", "git@h:g/x.git")["PU_LLM_ENV"]).decode().splitlines())
     c.check("#426 client-only change leaves puppet model environment intact",
-            all(f"{slot}=" in baked for slot in slots))
+            all(slot not in baked for slot in slots))
+    c.expect("#426 puppet env has the #449 shape regardless of the client",
+             baked, {k: v for k, v in llm.env().items()
+                     if not k.startswith("ANTHROPIC_DEFAULT_")}
+             | {"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"})
 
 
 # HYPOTHESIS (#440): claude_argv() верен, но _main срезает имя программы
@@ -204,15 +214,23 @@ def main():
     c.check("long turns get a long client timeout (#382)",
             env.get("API_TIMEOUT_MS") == "3000000", env.get("API_TIMEOUT_MS"))
     # Спека и локальная сессия обязаны собирать окружение из одного места:
-    # иначе врапер и мастер расходились бы молча.
+    # иначе врапер и мастер расходились бы молча. С #449 спека собирает
+    # окружение папета из llm.env() не буквально: слоты моделей сбрасывает,
+    # каталог включает (подробно -- tests/spec.py, check_llm_env_449);
+    # здесь -- что едет папету, растёт из этого же модуля. Прежние две
+    # проверки звали c.check со значением вместо булева -- и проходили
+    # всегда; теперь это настоящие сравнения.
     from mop.server import spec
     from mop.cli.core import _common
     with_normal = spec.task_env("pu-x-1", "git@h:g/x.git")
     baked = dict(kv.split("=", 1) for kv in
                  __import__("base64").b64decode(with_normal["PU_LLM_ENV"]).decode().splitlines())
-    c.check("the spec bakes exactly llm.env() (#390)", baked, dict(llm.env()))
-    c.check("the spec reads the key by llm.KEY (#390)",
-            with_normal["PU_LLM_KEY_VAR"], llm.KEY)
+    c.expect("what rides to the puppet grows from llm.env() (#449)",
+             baked, {**{k: v for k, v in llm.env().items()
+                        if not k.startswith("ANTHROPIC_DEFAULT_")},
+                     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"})
+    c.expect("the spec reads the key by llm.KEY (#390)",
+             with_normal["PU_LLM_KEY_VAR"], llm.KEY)
     c.check("no profile names remain in the tree (#390)",
             not os.path.isdir(os.path.join(os.path.dirname(config.__file__), "llm")))
     # Клиентская сессия из joined-конфига проверяется выше (#397);

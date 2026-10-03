@@ -12,7 +12,7 @@ import time
 from . import bus, config, lease, state
 from .. import driver
 from .domain import Alloc, CloneFacts, JobMeta, NodeRow, PoolNode, holds_work
-from .state import PuppetRow, State, action_for, failing_row, silent, spec_action, verdict
+from .state import PuppetRow, State, action_for, failing_row, model_of, silent, spec_action, verdict
 
 PROJECT = config.PROJECT
 
@@ -216,6 +216,9 @@ def roster(stale=False):
             f = seen.get(i["job"]["ID"])
             _judge(i, verdict(f))
             i["owner"] = owner_of(f, now)
+            # Модель сессии -- тем же ходом, что владелец (#454): считается
+            # здесь из фактов, _row только читает.
+            i["llm"] = model_of(f)
     return got
 
 
@@ -258,6 +261,9 @@ def _row(item, disk_kb=None):
         state=state,
         kind=kind,
         owner=item.get("owner") or None,
+        # Модель -- из фактов узла, только живой сессии (#454); None -- нет
+        # источника (старый агент, мёртвая сессия), прочерк рисует показ.
+        llm=item.get("llm") or None,
         # Нет ключа в мете -- None; «?» рисует показ (PuppetRow.render, #274).
         origin=meta.origin,
         disk_kb=disk_kb,
