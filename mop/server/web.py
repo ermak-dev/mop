@@ -759,9 +759,12 @@ def guard_management_write(method, path, body, key_source):
 ENTRY_MAX = 64 * 1024
 # Поля-ключи не хранятся и не отдаются: событие с шины публичных данных не
 # обещает, а журнал читает человек и браузер. Регистр не важен, вложенные
-# словари чистятся тем же списком.
+# словари чистятся тем же списком. proxy_key -- ключ LLM-прокси установки
+# (#391): имя его переменной MOP_PROXY_KEY не содержит ни token, ни secret,
+# и без отдельного слова ключ ездил бы в событиях и хвостах как есть (#462).
 CREDENTIAL_KEYS = ("management_key", "authorization", "password", "passwd",
-                   "token", "secret", "api_key", "access_key", "credentials")
+                   "token", "secret", "api_key", "access_key", "credentials",
+                   "proxy_key")
 
 
 def _valid_at(value):
@@ -867,7 +870,9 @@ def puppet_tail(name, pane, node_of):
 
     pane/node_of -- читатели puppets (подмена в проверках): узел берётся у
     работающего job'а, панель -- целиком и режется с конца до лимита;
-    обрезание помечается, молчать о нём -- врать оператору."""
+    обрезание помечается, молчать о нём -- врать оператору. Каждая строка
+    проходит _redact_text (#424): экран показывает ключи (экспорт, curl с
+    bearer), и хвост не должен увозить их в браузер."""
     try:
         node = node_of(name)
     except (LookupError, RuntimeError, Exception) as e:
@@ -877,13 +882,14 @@ def puppet_tail(name, pane, node_of):
     except Exception as e:  # читатель умер -- честный отказ, не пустота
         return None, f"reader failed: {e}"
     if len(lines) <= TAIL_LINES:
-        return lines, False
-    return lines[-TAIL_LINES:], True
+        return [_redact_text(l) for l in lines], False
+    return [_redact_text(l) for l in lines[-TAIL_LINES:]], True
 
 
 def puppet_stderr(name, stderr_reader):
-    """Хвост stderr задачи папета -> (строки, причина | None)."""
+    """Хвост stderr задачи папета -> (строки, причина | None). Строки --
+    через _redact_text: и stderr задач носит ключи команд запуска."""
     try:
-        return stderr_reader(name, STDERR_LINES), None
+        return [_redact_text(l) for l in stderr_reader(name, STDERR_LINES)], None
     except Exception as e:
         return None, f"reader failed: {e}"

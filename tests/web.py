@@ -2074,8 +2074,16 @@ def check_puppet_tail_462(c):
     admin = store.open(identity.Identity("anton", "admin", ()))
     user = store.open(identity.Identity("olga", "user", ()))
     big = [f"line {i}" for i in range(5000)]
-    readers = _FakeReaders(panes={("mate", "pu-mop-1"): big},
-                           stderr={"pu-mop-1": ["err 1", "err 2"]},
+    # Секретная строка в панели и в stderr (#462): экран папета показывает
+    # ключи (экспорт в клоне, curl с bearer), и хвост обязан увозить их
+    # отредактированными -- тем же механизмом, что журнал (#424).
+    # Секретные строки -- В КОНЦЕ панели: хвост режет с конца, и секреты
+    # обязаны попасть в показанное окно, чтобы проверка ред акции была
+    # честной (не мимо окна).
+    secret_pane = ["ok line", "ANTHROPIC_AUTH_TOKEN=sk-live-secret",
+                   "curl -H 'Authorization: Bearer abc.def.ghi' done"]
+    readers = _FakeReaders(panes={("mate", "pu-mop-1"): big + secret_pane},
+                           stderr={"pu-mop-1": ["err 1", "MOP_PROXY_KEY=hush-hush"]},
                            nodes={"pu-mop-1": "mate"})
     what = "#462 "
 
@@ -2098,10 +2106,19 @@ def check_puppet_tail_462(c):
         got = json.loads(out)
         shown = got.get("lines") or []
         c.check(what + "the tail is limited", len(shown) <= 1000, len(shown))
-        c.check(what + "the tail is cut from the end", shown[-1] == "line 4999", shown[-1] if shown else None)
+        c.check(what + "the tail is cut from the end and keeps the last line",
+                shown[-1].startswith("curl -H 'Authorization"), shown[-1] if shown else None)
         c.expect(what + "truncation is marked", got.get("truncated"), True)
         c.check(what + "the tail carries no-store",
                 any(k == "Cache-Control" and v == "no-store" for k, v in sent))
+        # Секреты в строках ред актируются (#462, механизм #424): ключ=
+        # значение и bearer не едут в браузер, контекст строки остаётся.
+        joined = "\n".join(shown)
+        c.check(what + "no secret value rides in the tail",
+                "sk-live-secret" not in joined and "abc.def.ghi" not in joined, joined[:200])
+        c.check(what + "the tail keeps the key words and the redaction mark",
+                "ANTHROPIC_AUTH_TOKEN=[redacted]" in joined
+                and "Authorization: [redacted]" in joined, joined[:200])
         # Хвост берётся у РЕАЛЬНОГО job: узел -- от node_of по имени из ростера,
         # а не из пути и не из запроса.
         c.expect(what + "the pane reader saw the roster's node",
@@ -2111,7 +2128,8 @@ def check_puppet_tail_462(c):
         sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-1/stderr",
                                   headers={"Cookie": f"mop_session={admin}"})
         got = json.loads(out)
-        c.check(what + "stderr answers", sent[0][1] == 200 and got.get("lines") == ["err 1", "err 2"], out[:80])
+        c.check(what + "stderr answers",
+                sent[0][1] == 200 and got.get("lines") == ["err 1", "MOP_PROXY_KEY=[redacted]"], out[:80])
         c.check(what + "stderr lines are limited by a server constant",
                 bool(readers.seen("stderr")) and readers.seen("stderr")[0][2] <= 200,
                 readers.seen("stderr"))
