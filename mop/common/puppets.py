@@ -120,7 +120,7 @@ def failing(alloc):
     """Строка состояния падающего папета из ответа `alloc`, либо None (#126)."""
     a = Alloc.from_dict(alloc) or Alloc()
     row = failing_row(a.client_status, a.task, a.reason)
-    return row[1] if row else None
+    return str(row[1]) if row else None
 
 
 def not_running(name, alloc):
@@ -186,6 +186,7 @@ def roster(stale=False):
     got, by_node = [], {}
     for item in items(stale=stale):
         item["state"] = item["kind"] = None
+        item["detail"] = item["branch"] = None
         item["owner"] = None
         alloc = Alloc.from_dict(item["alloc"])
         if alloc and alloc.running:
@@ -223,8 +224,12 @@ def roster(stale=False):
 
 
 def _judge(item, state):
-    """Вердикт в строку ростера: строка — показать, вид — решать по нему."""
+    """Вердикт в строку ростера: строка -- показать, вид -- решать по нему,
+    подробность и ветка (#452) -- та же пара, что _SHOW сворачивает в
+    строку: странице они нужны порознь, и разбирать свой же показ она
+    не должна."""
     item["state"], item["kind"] = str(state), state.kind
+    item["detail"], item["branch"] = state.detail, state.branch
 
 
 def owner_of(facts, now):
@@ -244,16 +249,20 @@ def _row(item, disk_kb=None):
     meta = JobMeta.from_job(job)
     status = item["error"] or (alloc.client_status if alloc else job.get("Status", "?"))
     state, kind = item["state"] or None, item.get("kind")
+    detail, branch = item.get("detail"), item.get("branch")
     # Падающий на старте -- failing с причиной, а не pending (#126).
     failing = failing_row(status, item.get("task"), item.get("reason"))
     if failing and not item["error"]:
-        status, state = failing
-        kind = "failing"
+        # Причина -- detail вердикта, показ собирает «FAILED: ...» из неё.
+        status, verdict_state = failing
+        state, kind = str(verdict_state), "failing"
+        detail, branch = verdict_state.detail, None
     # Сдавшийся bootstrap (#345): джоб остановлен сервером, причина -- из
     # записи итога, а не из stderr (аллокации может не быть вовсе) и без
     # хвоста «(N restarts, …)»: считал не Nomad, а сервер.
     if item.get("gave_up") and not item["error"]:
         status, state, kind = "failed", str(State("failing", item["gave_up"])), "failing"
+        detail, branch = item["gave_up"], None
     return PuppetRow(
         name=job["ID"],
         node=alloc.node if alloc else None,
@@ -264,6 +273,10 @@ def _row(item, disk_kb=None):
         # Модель -- из фактов узла, только живой сессии (#454); None -- нет
         # источника (старый агент, мёртвая сессия), прочерк рисует показ.
         llm=item.get("llm") or None,
+        # Подробность и ветка вердикта (#452): у failing/gave_up причина
+        # лежит в detail их собственного State.
+        detail=detail,
+        branch=branch,
         # Нет ключа в мете -- None; «?» рисует показ (PuppetRow.render, #274).
         origin=meta.origin,
         disk_kb=disk_kb,
@@ -427,7 +440,7 @@ def diagnose():
                               item.get("reason"))
         if failing:
             issues.append({"name": job["ID"], "alloc": alloc,
-                           "diagnosis": failing[1], "action": None})
+                           "diagnosis": str(failing[1]), "action": None})
             continue
         if not alloc or status.client_status in ("lost", "unknown", "failed", "pending"):
             issues.append(_placement_issue(job, alloc, item.get("unserved"),

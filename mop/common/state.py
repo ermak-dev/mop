@@ -61,6 +61,12 @@ class PuppetRow:
     kind: str
     owner: str
     llm: str = None
+    # Подробность и ветка вердикта (#452): расшифровка той же state-строки,
+    # что _SHOW сворачивает в одну строку для человека. Показу с прочерком
+    # не учат (#274: None на проводе и есть «данных нет»): страница рисует
+    # статус одним словом по kind, detail уточняет, branch -- отдельное поле.
+    detail: str = None
+    branch: str = None
     origin: str = None
     disk_kb: int = None
 
@@ -465,10 +471,13 @@ def _human(seconds):
 
 
 def failing_row(alloc_status, task, reason):
-    """(колонка аллокации, колонка состояния) падающего папета | None.
+    """(колонка аллокации, вердикт State) падающего папета | None.
 
     Падающий -- задача не работает, уже падала ненулём или сдалась. Работающую
-    задачу с прошлыми падениями не трогаем: она поднялась."""
+    задачу с прошлыми падениями не трогаем: она поднялась.
+
+    Вердикт -- State, а не строка (#452): _row кладёт его detail в строку
+    ростера порознь, показ собирает str()."""
     if not task or task["state"] == "running":
         return None
     gave_up = task["failed"] or task["state"] == "dead"
@@ -477,7 +486,7 @@ def failing_row(alloc_status, task, reason):
     why = reason or f"exit {task['exit']}"
     when = "gave up" if gave_up else (f"next in {_human(task['next_s'])}"
                                       if task["next_s"] else "restarting")
-    return "failing", str(State("failing", f"{why} ({task['restarts']} restarts, {when})"))
+    return "failing", State("failing", f"{why} ({task['restarts']} restarts, {when})")
 
 
 # ─── лечение ─────────────────────────────────────────────────────────────
