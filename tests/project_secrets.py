@@ -65,10 +65,10 @@ def main():
     # незачем. То же -- перевод строки в значении (ключ там уже выведен
     # отдельно, но строка исходная) и отказ put_file с именем-путём не
     # эхом данных.
-    # SOLUTION: отказы называют форму и ключ (безопасный вид), значение --
-    # заглушка <VALUE>; без «=» присланного текста в отказе нет вовсе.
-    # RESULT: «K-V=<VALUE>: expected VAR=VALUE», «expected VAR=VALUE»;
-    # SENTINEL во всех формах отсутствует, корректная переменная разбирается.
+    # SOLUTION: отказ называет ожидаемую форму или неверное имя без эха
+    # присланного текста, даже если разделитель «=» пропущен.
+    # RESULT: «invalid variable name; expected VAR=VALUE» или
+    # «expected VAR=VALUE»; корректная переменная разбирается.
     # STATUS: FIXED — see #429
     SENTINEL = "SENTINEL-DO-NOT-PRINT-9f3a"
     for bad in (f"K-V={SENTINEL}", f"NOEQ{SENTINEL}", f"1X={SENTINEL}",
@@ -79,6 +79,16 @@ def main():
         except ValueError as e:
             c.check(f"#429 the refusal of {bad.split('=')[0]}... names no value",
                     SENTINEL not in str(e), str(e))
+    # Второй проход #429: удаление плохого символа превращало K-V в
+    # правдоподобное KV и делало отказ обманчивым. Называем дефект, не эхо.
+    for malformed in (f"K-V={SENTINEL}", f"1X={SENTINEL}"):
+        try:
+            ps.parse_var(malformed)
+            c.fail("#429 invalid variable name must be refused")
+        except ValueError as e:
+            c.expect("#429 invalid name has honest, value-free refusal", str(e),
+                     "invalid variable name; expected VAR=VALUE")
+
     # Ревью #429: короткое значение без «=» -- тоже секрет, обрезка не
     # спасает; отказ не эхом никакого присланного текста.
     SHORT = "TOPSECRET"
