@@ -625,6 +625,30 @@ def main():
     # выводе), зелёный после.
     # STATUS: FIXED — see #226
 
+    # ─── #481: --check предупреждает про admin-срез без MOP_PROJECT ─────
+    # HYPOTHESIS: claude с MCP mop, запущенный не через `mop master`, живёт
+    # без MOP_PROJECT; его who-ответ уходит в admin-срез, опрос проекта его
+    # не находит, и сессия невидима в «Мастерах» дашборда (03.10: mop-b8
+    # полдня не была видна). --check молчал про это же.
+    # SOLUTION: --check мастера без проекта печатает предупреждение: срез
+    # admin, в списке мастеров проекта сессии не будет; с MOP_PROJECT --
+    # прежняя строка без предупреждения.
+    with patched(mcp, MASTER=True), \
+            patched(bus, config=lambda: {"url": "nats://x"}, PROJECT=bus.ADMIN):
+        text, _, code = run_command(mcp.main, ["--check"])
+    c.expect("#481 check still succeeds without project", code, 0)
+    c.expect("#481 the admin slice is named",
+             any(w in text.lower() for w in ("admin", "оператора")), True)
+    c.expect("#481 the invisibility is named",
+             "masters" in text.lower() or "мастер" in text.lower(), True)
+    with patched(mcp, MASTER=True), \
+            patched(bus, config=lambda: {"url": "nats://x"}, PROJECT="mop"):
+        text, _, _ = run_command(mcp.main, ["--check"])
+    c.expect("#481 a project profile carries no warning",
+             "warning" in text.lower(), False)
+    # RESULT: красный на молчащем --check, зелёный после.
+    # STATUS: FIXED — see #481
+
     # ─── интеграционная ветка мастера в инструкциях MCP (#250) ────────────
     # HYPOTHESIS: #249 отдал ветку человека сессии мастера переменной
     # MOP_BRANCH и одной фразой в шаге 0 скилла; мастер rudesktop, стартовав
