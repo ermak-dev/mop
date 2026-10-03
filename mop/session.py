@@ -242,6 +242,23 @@ def _write_turn(root, sid, record, now):
 # событием PostModelSwitch (to_model). Отмена и провал перехода события не
 # дают -- проверено вживую на 2.1.288: провалившийся /model не оставляет
 # записи, и статус-строка продолжает звать прежнюю модель.
+#
+# У statusLine нет времени наблюдения: в его JSON поля с моментом, когда
+# модель была видна, нет, «сейчас» стока -- только момент прихода строки.
+# Опрос, сгенерированный ДО перехода, может дойти и ПОСЛЕ -- с прежней
+# моделью и «свежим» временем прихода. Голое сравнение at такую запись
+# пропускало: она откатывала применённый переход (равный at и даже at+1,
+# если опрос завис в канале на секунду дольше). Отсюда окно STALE_WINDOW:
+# событие перехода запоминает from_model и свой момент; опрос с прежней
+# моделью внутри окна -- запоздалый и отбрасывается, с новой -- подтверждение
+# и обновляет at. Окно конечно: модель могла смениться и без события
+# (ручной /model с «s: session only»), и далеко от события опрос -- правда
+# как есть. Граница гарантии: откат не ловится, если опрос завис дольше
+# окна И модель успела смениться без события -- тогда «старое» наблюдение
+# неотличимо от нового факта.
+STALE_WINDOW = 300
+
+
 def model_record(payload, now):
     """Вход statusline или PostModelSwitch -> {model, at} | None.
 
@@ -263,6 +280,20 @@ def model_record(payload, now):
     return {"model": model, "at": int(now)}
 
 
+def _model_event(payload):
+    """Событие перехода -> (to_model, from_model) | None. Проверенные поля,
+    не сырой словарь: from_model нужен записи как память о прежней модели,
+    и валидируется той же нормой, что to_model."""
+    to_m = payload.get("to_model") if isinstance(payload, dict) else None
+    from_m = payload.get("from_model") if isinstance(payload, dict) else None
+    if not (isinstance(to_m, str) and to_m and len(to_m) <= 128):
+        return None
+    if from_m is not None and not (isinstance(from_m, str) and from_m
+                                   and len(from_m) <= 128):
+        from_m = None
+    return to_m, from_m
+
+
 def read_model(sid, root=None):
     """Запись модели сессии или None (нет, не читается, чужой session_id)."""
     if not _plain_id(sid):
@@ -278,25 +309,34 @@ def read_model(sid, root=None):
 def write_model(payload, now, root=None):
     """Вход statusline/PostModelSwitch -> запись модели по session_id.
 
-    Гонка писателей решается по правилу очереди: побеждает больший at, при
-    равных -- событие перехода. Причина: statusline периодичен, и запаздывающий
-    опрос со старой моделью не должен откатывать уже применённый переход; а
-    ровно в момент применения строже всего событие. Пометки источника запись
-    не несёт: at разрешает конфликт и без неё, а минус одно поле -- минус
-    один способ разойтись со спекой.
-
-    TTL и атомарность -- как у записей хода (_write_turn)."""
+    Событие перехода право всегда -- оно ставит модель, прежнюю пишет в
+    from_model, свой момент в event_at. Опрос внутри STALE_WINDOW от события
+    с моделью from_model отбрасывается (запоздалое наблюдение ДО перехода),
+    с любой другой -- пишется: подтверждение ли, новый факт ли. Опрос вне
+    окна пишется как есть. TTL и атомарность -- как у записей хода
+    (_write_turn)."""
     record = model_record(payload, now)
     if record is None:
         return
-    current = read_model(payload["session_id"], root=root)
-    if current and current.get("model") == record["model"] \
-            and current.get("at", 0) >= record["at"]:
-        # Тот же ответ периодического опроса: перезапись ничего не меняет.
-        return
-    if current and current.get("at", 0) > record["at"]:
-        return
-    _write_turn(root or MODELS, payload["session_id"], record, now)
+    sid = payload["session_id"]
+    event = _model_event(payload)
+    current = read_model(sid, root=root)
+    if current and not event:
+        in_window = current.get("event_at") \
+            and record["at"] - current["event_at"] <= STALE_WINDOW
+        if in_window and record["model"] == current.get("from_model"):
+            # Запоздалое наблюдение до перехода: модель уже сменена событием.
+            return
+        if record["model"] == current.get("model") \
+                and current.get("at", 0) >= record["at"]:
+            # Тот же ответ периодического опроса: перезапись ничего не меняет.
+            return
+    out = dict(record)
+    if event:
+        to_m, from_m = event
+        out["from_model"] = from_m
+        out["event_at"] = record["at"]
+    _write_turn(root or MODELS, sid, out, now)
 
 
 def hook(text, now, root=None):

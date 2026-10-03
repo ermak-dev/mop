@@ -22,11 +22,14 @@ Claude Code сам выдаёт текущую модель в JSON на stdin s
 2.1.288: cancel/Esc, validation error, network error).
 SOLUTION: `session.py statusline` и PostModelSwitch в `hook` пишут запись
 модели по session_id (~/.local/state/mop/models/<session_id>.json -- только
-{model, at}, ничего из сырого JSON), `state <cwd>` отдаёт model.id только
-живой сессии каталога. Запаздывающий statusLine не откатывает более новую
-запись: побеждает больший at, при равенстве -- switch (событие перехода
-строже периодического опроса). Вход в проверках настоящий:
-tests/statusline_hooks.json снят тем же способом.
+проверенные поля, ничего из сырого JSON), `state <cwd>` отдаёт model.id
+только живой сессии каталога. Запаздывающий statusLine не откатывает
+переход: у statusLine нет времени наблюдения, «сейчас» стока -- момент
+прихода, поэтому событие перехода ставит модель и открывает окно стагнации
+(STALE_WINDOW): опрос с прежней моделью внутри окна отбрасывается, с новой
+-- подтверждает; вне окна опрос -- правда (модель могла смениться без
+события). Вход в проверках настоящий: tests/statusline_hooks.json снят тем
+же способом.
 STATUS: FIXED — see #453
 """
 import json
@@ -285,35 +288,74 @@ def check_model_race(c):
 
     По одному session_id писатели двое (statusline периодичен, hook --
     событиен), и порядок их приходов не гарантируется: claude шлёт
-    statusLine и на старте, и вслед за переходом. Правило то же, что у
-    очереди: побеждает запись с большим at; при равных -- событие перехода,
-    оно строже опроса (to_model виден ровно в момент применения). Сценарии --
-    каждый в своём каталоге: предыдущий сценарий не должен оставлять
-    winning-запись, иначе он же и выиграет следующий."""
+    statusLine и на старте, и вслед за переходом. У statusLine нет своего
+    времени наблюдения (в его JSON поля нет), «сейчас» стока -- только
+    момент прихода, поэтому опрос может оказаться «новее» события, неся
+    старую модель. Отсюда правило: успешный переход ставит модель, и опрос
+    не вправе вернуть прежнюю -- окно стагнации от события
+    (STALE_WINDOW): внутри окна опрос с ДРУГОЙ моделью отбрасывается как
+    запоздалый, с той же -- обновляет at. Опрос вне окна -- правда как
+    есть: модель могла смениться вовсе без события (ручной /model с «s:
+    use this session only»). Сценарии -- каждый в своём каталоге:
+    предыдущий сценарий не должен оставлять winning-запись, иначе он же и
+    выиграет следующий."""
     sl = STATUS["statusline"]
     # Одна сессия: у снятых входов session_id разных сессий, а гонка -- про
-    # писателей одной.
-    sw = dict(STATUS["switch"], session_id=sl["session_id"])
+    # писателей одной. sl_new подтверждает модель перехода, sw_back возвращает
+    # прежнюю: обе -- та же пара моделей с обеих сторон окна.
+    sid = sl["session_id"]
+    sw = dict(STATUS["switch"], session_id=sid)
+    sl_new = dict(sl, model={"id": "glm-5.3[1m]", "display_name": "glm-5.3[1m]"})
+    sw_back = dict(sw, from_model="glm-5.3[1m]", to_model="claude-opus-5-5")
 
     def race(name, steps, want_model, want_at=None):
         home = tempfile.mkdtemp(prefix="mop-test-453-race-")
         for payload, now in steps:
             session.write_model(payload, now, root=home)
-        rec = json.load(open(os.path.join(home, f'{sl["session_id"]}.json')))
-        bad = rec.get("model") != want_model or             (want_at is not None and rec.get("at") != want_at)
+        rec = json.load(open(os.path.join(home, f"{sid}.json")))
+        bad = rec.get("model") != want_model or \
+            (want_at is not None and rec.get("at") != want_at)
         c.check(f"{name}: {rec!r}, wanted model {want_model!r}"
                 + (f" at {want_at!r}" if want_at is not None else ""), not (bad))
 
+    # Форма записи: опрос -- {model, at}, событие помнит прежнюю модель и
+    # свой момент (окно стагнации). Проверяется формой множеств, не точным
+    # словарём: лишнее поле -- повод для теста, а не для молчаливого пропуска.
+    home = tempfile.mkdtemp(prefix="mop-test-453-shape-")
+    session.write_model(sl, NOW, root=home)
+    rec = json.load(open(os.path.join(home, f"{sid}.json")))
+    c.check(f"poll record shape must be {{model, at}}: {rec!r}",
+            not (set(rec) != {"model", "at"}))
+    session.write_model(sw, NOW + 5, root=home)
+    rec = json.load(open(os.path.join(home, f"{sid}.json")))
+    c.check(f"event record must add from_model/event_at: {rec!r}",
+            not (set(rec) != {"model", "at", "from_model", "event_at"}
+                 or rec.get("from_model") != "claude-opus-5-5"
+                 or rec.get("event_at") != NOW + 5))
     # switch (t0+5) уже записан, statusline (t0) опоздал.
     race("late statusline must not roll back the switch",
          [(sl, NOW), (sw, NOW + 5), (sl, NOW)], "glm-5.3[1m]", NOW + 5)
-    # Ровно те же at, но порядок обратный: событие перехода строже опроса.
-    race("equal at: switch wins over poll",
-         [(sl, NOW), (sw, NOW)], "glm-5.3[1m]", NOW)
-    # Периодический опрос новее события -- он и прав: модель могла смениться
-    # снова, и statusline это видит; at идёт за победителем.
-    race("fresher poll beats older switch",
-         [(sw, NOW), (sl, NOW + 1)], "claude-opus-5-5", NOW + 1)
+    # Отчёт мастера: событие(new) при T, затем опоздавший опрос(old) при том
+    # же T -- ручной откат по случайному порядку приходов.
+    race("equal at: stale poll must not roll back the switch",
+         [(sw, NOW), (sl, NOW)], "glm-5.3[1m]", NOW)
+    # То же, но опрос опоздал сильнее: его «сейчас» на секунду позже события,
+    # а модель в нём -- прежняя. Откат «новее по времени прихода» -- та же
+    # дыра, только шире.
+    race("stale poll arriving later (at+1) must not roll back the switch",
+         [(sw, NOW), (sl, NOW + 1)], "glm-5.3[1m]", NOW)
+    # Подтверждённая статус-строкой новая модель проходит: опрос с ТОЙ же
+    # моделью внутри окна обновляет at -- колонка дашборда живая.
+    race("statusline confirming the new model refreshes at",
+         [(sw, NOW), (sl_new, NOW + 1)], "glm-5.3[1m]", NOW + 1)
+    # Новый успешный switch обратно -- событие поверх окна: новое событие
+    # всегда право, чья бы модель в нём ни была.
+    race("a new switch beats the stale window",
+         [(sw, NOW), (sl, NOW + 1), (sw_back, NOW + 2)], "claude-opus-5-5", NOW + 2)
+    # Опрос вне окна с другой моделью -- правда: сессия могла уйти с /model
+    # вручную (s: session only), и события не было.
+    race("poll far after the window is the truth",
+         [(sw, NOW), (sl, NOW + 301)], "claude-opus-5-5", NOW + 301)
     # Тот же ответ опроса перезаписи не стоит: запись и так верна.
     race("same poll answer rewrites nothing",
          [(sl, NOW), (sl, NOW)], "claude-opus-5-5", NOW)
