@@ -61,6 +61,7 @@ from mop.common.domain import WHO_WAIT, MasterAnswer  # noqa: E402
 from mop.client import channel  # noqa: E402
 from mop import cli, session  # noqa: E402
 from mop.cli import lib                                   # noqa: E402
+from mop.cli.core.profile import profile_name               # noqa: E402
 from mop.common.render import table                              # noqa: E402
 
 INSTRUCTIONS = (
@@ -442,7 +443,7 @@ def command_tool(name, words, path, decl):
 
     params = []
     for a in args:
-        t = TYPES[a["type"]]
+        t = list[str] if a.get("repeatable") else TYPES[a["type"]]
         default = inspect.Parameter.empty if a.get("required") else \
             False if t is bool else None
         hint = t if a.get("required") or t is bool else Optional[t]
@@ -538,9 +539,7 @@ def main(argv=None):
             where = bus.config()["url"]
         except bus.BusError as e:
             where = f"none ({e})"
-        who = ("node" if not MASTER
-               else "operator" if bus.PROJECT == bus.ADMIN
-               else f"master of project {bus.PROJECT}")
+        who = profile_name(MASTER, bus.PROJECT)
         # Ни адреса, ни инбокса (#226): --check -- отдельный процесс, и его
         # pid не pid живого сервера сессии. Напечатанный адрес не слушал бы
         # никто, а отданный папету увёл бы ответ в пустоту. Адрес мастера --

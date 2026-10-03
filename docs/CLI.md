@@ -156,6 +156,15 @@ The session uses the selected server's LLM proxy. Its URL and key come from
 the private client.json written by mop login, not from installation .env.
 ```
 
+#### mop profile
+
+```text
+mop profile: show the pool role, project and integration branch
+
+The role comes from bus credentials, not the presence of MCP tools. An unset
+integration branch is reported as unset; it is not inferred from origin/HEAD.
+```
+
 #### mop recycle
 
 ```text
@@ -317,8 +326,8 @@ the developer's own commands: the project's tracker, CI and checks, not the pool
   mop dev web   build the dashboard (web/dist) and check the committed build
 
 Run from a working copy of the project: the coordinates come from its git
-origin, the credentials from .env. Not in MCP: the master runs them from
-its shell.
+origin, the credentials from .env. Only declared tracker and CI leaves are
+available to the master through MCP; checks, docs and builds remain local.
 ```
 
 #### mop dev bug
@@ -328,10 +337,11 @@ project tracker: GitLab issues, one issue per unit of work
 
   mop dev bug list [--all] [--label L] [-t TEXT]   open issues, worst first
   mop dev bug show <iid>                           full body
-  mop dev bug new "<title>" [--label L ...]        body from --body-file or stdin
+  mop dev bug new "<title>" [--label L ...]        body from --body, --body-file or stdin
   mop dev bug new "<title>" --epic 12              child of epic #12
+  mop dev bug evidence <iid>                       fetched branches and integration merges
   mop dev bug epic <iid>                           the epic's children and progress
-  mop dev bug edit <iid> [--title T] [--body-file F]  replace the title and/or body
+  mop dev bug edit <iid> [--title T] [--body TEXT|--body-file F]  replace the title and/or body
   mop dev bug comment <iid> "<text>"               comment (or - for stdin)
   mop dev bug start <iid> [slug] [--no-branch]     claim: status::wip + branch
   mop dev bug close <iid> --comment "..."          close, default status::fixed
@@ -359,10 +369,10 @@ mop dev bug comment <iid> "<text>" | - | --body-file F: comment on an issue
 #### mop dev bug edit
 
 ```text
-mop dev bug edit <iid> [--title T] [--body-file F|-] [--epic N | --no-epic]: change an issue
+mop dev bug edit <iid> [--title T] [--body TEXT|--body-file F|-] [--epic N | --no-epic]: change an issue
 
-Replaces the title and/or the whole body; the body comes from --body-file
-or stdin (-). The epic marker on the first line survives a body edit
+Replaces the title and/or the whole body; the body comes from --body,
+--body-file or stdin (-). The epic marker on the first line survives a body edit
 unless --epic names another parent or --no-epic removes it. Nothing named:
 usage, not a silent no-op.
 ```
@@ -371,6 +381,18 @@ usage, not a silent no-op.
 
 ```text
 mop dev bug epic <iid>: the epic's children and progress
+```
+
+#### mop dev bug evidence
+
+```text
+mop dev bug evidence <iid>: remote issue branches and verified integration merges
+
+Fetches origin first (updates local remote-tracking refs). Inspects at most
+500 listed remote refs, the configured integration branch, 40 integration
+refs and 80 first-parent merges per ref. A branch mention or #iid in a commit
+message is not evidence of integration; a merge needs a second parent on
+that branch. Missing/deleted branch tips cannot be verified.
 ```
 
 #### mop dev bug labels
@@ -388,9 +410,9 @@ mop dev bug list [--all] [--label L] [-t TEXT]: open issues, worst first
 #### mop dev bug new
 
 ```text
-mop dev bug new "<title>" [--label L ...] [--body-file F] [--epic N]: open an issue
+mop dev bug new "<title>" [--label L ...] [--body TEXT|--body-file F] [--epic N]: open an issue
 
-Body from --body-file or stdin; --epic makes it a child of that epic. A
+Body from --body, --body-file or stdin; --epic makes it a child of that epic. A
 status label is added when none is given: status::live.
 ```
 

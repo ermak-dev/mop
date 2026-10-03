@@ -8,6 +8,11 @@ from mop.cli.dev.ci._common import parser
 
 LINES = 60
 
+MCP = {"annotations": "readonly", "args": [
+    {"name": "job", "type": "string", "required": True},
+    {"name": "lines", "type": "integer", "flag": "--lines"},
+    {"name": "full", "type": "boolean", "flag": "--full"}]}
+
 def main(argv):
     p = parser("log")
     p.add_argument("job", type=int)
