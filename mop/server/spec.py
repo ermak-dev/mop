@@ -375,10 +375,32 @@ while tmux -L "$PU_NAME" has-session -t "$PU_NAME" 2>/dev/null; do sleep 10 & wa
 """
 
 
+# Каталог моделей прокси (#449): переменная, которая его включает. Живёт
+# здесь, а не в llm.env(): папет -- слой спеки, и выбор «модели называет
+# код или каталог» -- решение этого слоя. Мастерская сессия остаётся на
+# llm.env() как есть.
+DISCOVERY = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"
+
+
+def gateway_env():
+    """Окружение LLM сессии ПАПЕТА -> {переменная: значение}.
+
+    Собирается из llm.env(), но не квашится им целиком (#449): слоты
+    ANTHROPIC_DEFAULT_*_MODEL сбрасываются, каталог включается. Статическая
+    карта навязывала папету имена, которых за прокси нет (400 unknown
+    provider), пока мастер выбирал модели из живого каталога; с discovery
+    папет выбирает из того же /v1/models. Адрес и таймаут -- из llm.env()
+    без изменений, ключ врапер по-прежнему берёт на узле."""
+    env = {k: v for k, v in llm.env().items()
+           if not k.startswith("ANTHROPIC_DEFAULT_")}
+    env[DISCOVERY] = "1"
+    return env
+
+
 def task_env(name, origin, cont=False, mem=0):
     """Окружение задачи папета. Одно место и для job_spec, и для версии
     шаблона. mem -- потолок памяти папета, МБ (spec.memory)."""
-    env_llm = "".join(f"{k}={v}\n" for k, v in llm.env().items())
+    env_llm = "".join(f"{k}={v}\n" for k, v in gateway_env().items())
     project = driver.project_of(origin)
     env = {
         "PU_NAME": name,
@@ -603,13 +625,13 @@ def template_version(env):
     команда, НАБОР переменных, имена группы и задачи, форма ограничения.
     Значения конкретного папета (имя, origin, профиль, cont) в него не входят:
     иначе устаревшим читался бы каждый второй. Окружение LLM -- значением, а
-    не набором ключей (#449): спека квашит его целиком, и смена каталога
-    моделей без смены версии оставила бы стоящих папетов на старой карте
-    навсегда свежими -- та же тихая ошибка, что и #174."""
+    не набором ключей (#449): оно едет в PU_LLM_ENV, и правка его значения без
+    смены версии оставила бы стоящих папетов на старом окружении навсегда
+    свежими -- та же тихая ошибка, что и #174."""
     c = project_constraint("x")
     m = memory_constraint(0)
     shape = {"wrapper": WRAPPER, "outer": OUTER, "env": sorted(env),
-             "llm": llm.env(),
+             "llm": gateway_env(),
              "group": GROUP, "task": TASK,
              "constraint": [c["LTarget"], c["Operand"]],
              "memory": [m["LTarget"], m["Operand"]]}

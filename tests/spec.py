@@ -10,6 +10,7 @@
 Это не фреймворк и не прогон всего проекта: остальное по-прежнему добывается
 на живом пуле.
 """
+import base64
 import json
 import os
 import re
@@ -45,7 +46,7 @@ os.environ.update(PINNED)
 time.time = lambda: 1_790_000_000.0
 SNAPSHOT = os.path.join(os.path.dirname(os.path.realpath(__file__)), "spec_snapshot.json")
 
-from mop.common import config  # noqa: E402
+from mop.common import config, llm  # noqa: E402
 from mop.server import spec  # noqa: E402
 from mop import session  # noqa: E402
 
@@ -181,20 +182,22 @@ def check_template_version(c):
     # ровно та тихая ошибка, которую закрывает #174.
     c.check("current_version must equal the version job_spec puts in Meta",
             not (spec.current_version() not in versions))
-    # HYPOTHESIS (#449): llm.env() перестал навязывать карту моделей, но
-    # version (хеш НАБОРА ключей окружения) от этого не шелохнулся: набор
-    # ключей не изменился, изменились значения. Стоящий папет со старой
-    # заквашенной картой читался бы свежим вечно -- та же тихая ошибка,
-    # которую закрывал #174. SOLUTION: в версию входит и окружение LLM,
-    # которое спека квашит: смена каталога моделей меняет и версию.
-    # RESULT: правка mop/common/llm.py (#449) двигает mop_spec, и doctor
-    # видит весь пул устаревшим; перерегистрация -- только свободным.
-    from mop.common import llm as _llm
-    _today = dict(_llm.env())
-    with patched(_llm, env=lambda: dict(_today, EXTRA_MODEL_SLOT="x")):
-        other = (spec.job_spec(*SPEC_INPUTS[0][:2])["Job"].get("Meta") or {}).get("mop_spec")
-    c.check("a changed LLM environment must change the template version (#449)",
-            not (other in versions or other is None), other)
+    # HYPOTHESIS (#449): окружение LLM папета едет ЗНАЧЕНИЕМ (PU_LLM_ENV), а
+    # версия хешировала только набор ключей -- правка окружения не двигала
+    # mop_spec, и стоящий папет со старой картой читался бы свежим вечно
+    # (класс #174). SOLUTION: в версию входит то, что реально едет папету.
+    # RESULT: правка едущего (адрес прокси) двигает версию; правка того, что
+    # спека сбрасывает (слот модели из llm.env()), -- нет: до папета она не
+    # доходит, и перерегистрация из-за неё не нужна.
+    _today = dict(llm.env())
+    with patched(llm, env=lambda: dict(_today, ANTHROPIC_BASE_URL="http://other:1")):
+        moved = (spec.job_spec(*SPEC_INPUTS[0][:2])["Job"].get("Meta") or {}).get("mop_spec")
+    with patched(llm, env=lambda: dict(_today, ANTHROPIC_DEFAULT_OPUS_MODEL="other-9[1m]")):
+        stayed = (spec.job_spec(*SPEC_INPUTS[0][:2])["Job"].get("Meta") or {}).get("mop_spec")
+    c.check("a changed riding LLM env must change the template version (#449)",
+            not (moved in versions or moved is None), moved)
+    c.check("a model slot the spec drops must not move the template version (#449)",
+            not (stayed not in versions), stayed)
 
 
 # (имя, origin, cont): проект с точкой в имени (экранирование в ограничении)
@@ -207,6 +210,54 @@ SPEC_INPUTS = [
     ("pu-rugent-3", "https://git.example.dev/rugent/rugent.git", False),
     ("pu-my.proj-1", "git@git.example.dev:someone/my.proj.git", True),
 ]
+
+
+def puppet_llm_env(task_environment):
+    """Окружение LLM, которое спека квашит папету: PU_LLM_ENV -> словарь."""
+    blob = task_environment["PU_LLM_ENV"]
+    return dict(kv.split("=", 1) for kv in base64.b64decode(blob).decode().splitlines())
+
+
+# ── #449: модели папета — каталог прокси, не карта из кода ────────────────
+# HYPOTHESIS: спека квасила llm.env() как есть, и статическая карта
+# ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL навязывала папету glm-имена,
+# которых за прокси нет (каждый ход -- 400 unknown provider), пока мастер
+# выбирал модели из живого каталога. SOLUTION: спека собирает окружение
+# папета из llm.env() сама: слоты моделей сбрасывает, discovery включает --
+# папет выбирает из того же каталога /v1/models, что видит мастер. Мастерская
+# сессия (cli/core/_common.py) остаётся на llm.env() как есть: её модель
+# выбирает человек, и карта там -- вопрос другого слоя.
+# STATUS: FIXED — see #449
+DISCOVERY = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"
+
+
+def check_llm_env_449(c):
+    """Окружение LLM, которое едет папету (#449): каталог, не карта."""
+    what = "puppet llm env, "
+    for name, origin, _ in SPEC_INPUTS:
+        env = spec.job_spec(name, origin)["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]
+        baked = puppet_llm_env(env)
+        # (a) ни одного навязанного слота модели: имена выбирает каталог
+        slots = sorted(k for k in baked if k.startswith("ANTHROPIC_DEFAULT_"))
+        c.check(f"{what}no model slot rides to {name}", not slots, slots)
+        # (b) каталог включён: без него claude звал бы дефолтные имена,
+        # которых в прокси нет -- тот же 400, только позже
+        c.check(f"{what}discovery is on for {name}",
+                baked.get(DISCOVERY) == "1", baked.get(DISCOVERY))
+        # (c) адрес и таймаут -- из llm.env(), ключ -- по-прежнему на узле
+        c.check(f"{what}the proxy URL and timeout ride unchanged to {name}",
+                (baked.get("ANTHROPIC_BASE_URL"), baked.get("API_TIMEOUT_MS"))
+                == (llm.env()["ANTHROPIC_BASE_URL"], llm.env()["API_TIMEOUT_MS"]), baked)
+        c.check(f"{what}the key still comes from the node for {name}",
+                (env.get("PU_LLM_KEY_VAR"), env.get("PU_LLM_AUTH_VAR")),
+                (llm.KEY, llm.AUTH_VAR))
+        # (d) карта llm.env() НЕ едет папету целиком: спека -- тот слой,
+        # который решает, что из неё положено папету
+        _map = dict(llm.env())
+        with patched(llm, env=lambda: dict(_map, ANTHROPIC_DEFAULT_OPUS_MODEL="gone-9")):
+            c.check(f"{what}a model slot from llm.env() is dropped for {name}",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL" not in puppet_llm_env(
+                        spec.job_spec(name, origin)["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]))
 
 
 def render(name, origin, cont):
@@ -869,7 +920,8 @@ def main():
             f.write("\n")
         return 0
     c = Checks()
-    for fn in (check_snapshot, check_template_version, check_wrapper_paths,
+    for fn in (check_snapshot, check_template_version, check_llm_env_449,
+               check_wrapper_paths,
                check_git_identity, check_driver_free_183,
                check_memory_197, check_project_asks_197, check_spec_memory_197,
                check_nomad_order_197, check_claude_hooks_223, check_hook_events_341,
