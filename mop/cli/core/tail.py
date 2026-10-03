@@ -30,10 +30,16 @@ def parse(argv):
     for a in it:
         if a == "-f":
             follow = True
-        elif a == "-n":
-            lines = int(next(it, "10"))
-        elif a.startswith("-n"):
-            lines = int(a[2:])
+        elif a == "-n" or a.startswith("-n"):
+            # -n N или -nN; не-число и пустой хвост -- usage, как у stat
+            # --days (#431): оператору подсказка, а не трасса ValueError.
+            raw = next(it, "") if a == "-n" else a[2:]
+            try:
+                lines = int(raw)
+            except ValueError:
+                lib.usage(__doc__)
+            if raw.startswith("-") or lines < 1:
+                lib.usage(__doc__)
         elif name is None:
             name = a
         else:

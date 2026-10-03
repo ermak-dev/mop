@@ -507,6 +507,102 @@ def check_server_maintenance_409(c):
 
 
 
+# ── #431: разбор операторских команд ────────────────────────────────────
+# HYPOTHESIS: mop tail -n x ронял командлет трассой ValueError: parse
+# кормил int() сырой аргумент, когда соседний stat --days делает то же
+# через usage. Оператор видит стек вместо подсказки.
+# SOLUTION: разбор tail возвращает usage для -n без числа и для не-числа;
+# это тот же контракт, что у stat --days.
+# RESULT: пять плохих форм -- usage (SystemExit с докстрингом), здоровые
+# -n 20 / -n20 / -f -- прежние значения; stat --days не изменился.
+# STATUS: FIXED — see #431
+def check_tail_parse_431(c):
+    from mop.cli.core import stat, tail
+    # Здоровые формы не меняются.
+    c.expect("#431 tail parses its flags", tail.parse(["pu-mop-1", "-n", "20"]),
+             ("pu-mop-1", 20, False))
+    c.expect("#431 tail -n=N", tail.parse(["pu-mop-1", "-n20"]), ("pu-mop-1", 20, False))
+    c.expect("#431 tail -f", tail.parse(["pu-mop-1", "-f"]), ("pu-mop-1", 10, True))
+    for bad in (["pu-mop-1", "-n", "x"], ["pu-mop-1", "-n0x"], ["pu-mop-1", "-n", "-f"],
+                ["pu-mop-1", "-n"]):
+        try:
+            got = tail.parse(bad)
+            c.fail(f"#431 tail {bad} must be a usage refusal, parsed {got!r}")
+        except ValueError as e:
+            c.fail(f"#431 tail {bad}: a trace, not a usage refusal", str(e))
+        except SystemExit:
+            c.check(f"#431 tail {bad}: usage", True)
+    # Соседний контракт для сверки.
+    for bad in (["--days", "x"], ["--days"]):
+        try:
+            stat.parse(bad)
+            c.fail(f"#431 stat {bad} must refuse")
+        except SystemExit:
+            c.check(f"#431 stat {bad}: usage, as before", True)
+
+
+CONCISE_431 = {
+    "mop.cli.core.landing": (
+        ("syntax", "mop landing [take <puppet>|give|show] [--force]"),
+        ("keeps", "take it from a gone master"),
+        ("keeps", "one puppet between merge and push"),
+        ("gone", "the token is kept by the cluster service"),
+    ),
+    "mop.cli.core.master": (
+        ("syntax", "mop master [git-origin] [claude options]"),
+        ("keeps", "resumes the master's last session"),
+        ("keeps", "a master sees and reaches only its own puppets"),
+        ("keeps", "`mop login --server ADDRESS LOGIN`"),
+        ("gone", "mop/common/creds.py"),
+        ("gone", "mop mcp, spawned"),
+    ),
+    "mop.cli.core.delete": (
+        ("syntax", "mop delete <name> [--force]"),
+        ("keeps", "the clone stays"),
+        ("keeps", "refused with that master's name"),
+        ("gone", "a body nobody owns is a running container"),
+    ),
+    "mop.cli.pool.login": (
+        ("syntax", "mop login [login] [--server host] [--https-port port]"),
+        ("keeps", "asked without echo"),
+        ("keeps", "fingerprint"),
+        ("keeps", "MOP_HTTPS_PORT"),
+        ("gone", "personal, authenticated"),
+        ("gone", "no public HTTP endpoint"),
+        ("gone", "/nats"),
+        ("gone", "/v1/models"),
+    ),
+    "mop.cli.node": (
+        ("syntax", "mop node [drain|up|forget <name>]"),
+        ("keeps", "refuses while anything still"),
+        ("gone", "never hears of it again"),
+        ("gone", "on TERM"),
+    ),
+    "mop.cli.project": (
+        ("syntax", "mop project [add <git-origin>|delete <name>|list]"),
+        ("keeps", "puppet limit"),
+        ("gone", "Registering used to be a side effect"),
+        ("gone", "the registry lives on the server"),
+    ),
+    "mop.cli.secret": (
+        ("syntax", "mop secret file|var add|list|remove"),
+        ("keeps", "kept on the server"),
+    ),
+}
+
+
+def check_concise_help_431(c):
+    import importlib
+    for mod, rows in CONCISE_431.items():
+        doc = (importlib.import_module(mod).__doc__ or "").strip()
+        for kind, text in rows:
+            what = f"#431 {mod.rsplit('.', 1)[-1]} help {kind}: {text[:40]!r}"
+            if kind in ("syntax", "keeps"):
+                c.check(what, text in doc, doc[:120])
+            else:
+                c.check(what, text not in doc, "still present")
+
+
 def main():
     c = Checks()
     check_server_maintenance_409(c)
@@ -2113,6 +2209,8 @@ def check_fallback_model_183(c):
     check_tail_stderr_333(c)
     check_free_floor_329(c)
     check_add_failure_377(c)
+    check_tail_parse_431(c)
+    check_concise_help_431(c)
     check_add_argv_399(c)
     check_master_argv_400(c)
 
