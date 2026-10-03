@@ -26,8 +26,9 @@ SOLUTION: `session.py statusline` и PostModelSwitch в `hook` пишут зап
 только живой сессии каталога. Запаздывающий statusLine не откатывает
 переход: у statusLine нет времени наблюдения, «сейчас» стока -- момент
 прихода, поэтому событие перехода ставит модель и открывает окно стагнации
-(STALE_WINDOW): опрос с прежней моделью внутри окна отбрасывается, с новой
--- подтверждает; вне окна опрос -- правда (модель могла смениться без
+(STALE_WINDOW): пока окно действует, опрос лишь подтверждает модель
+события (at -- только вперёд), сменить модель внутри окна способно только
+новое событие; вне окна опрос -- правда (модель могла смениться без
 события). Вход в проверках настоящий: tests/statusline_hooks.json снят тем
 же способом.
 STATUS: FIXED — see #453
@@ -328,10 +329,29 @@ def check_model_race(c):
             not (set(rec) != {"model", "at"}))
     session.write_model(sw, NOW + 5, root=home)
     rec = json.load(open(os.path.join(home, f"{sid}.json")))
-    c.check(f"event record must add from_model/event_at: {rec!r}",
-            not (set(rec) != {"model", "at", "from_model", "event_at"}
-                 or rec.get("from_model") != "claude-opus-5-5"
+    c.check(f"event record must add event_at: {rec!r}",
+            not (set(rec) != {"model", "at", "event_at"}
                  or rec.get("event_at") != NOW + 5))
+    # Ревью мастера, второй проход: два быстрых перехода opus->glm->flash,
+    # затем запоздалый опрос с САМОЙ ПЕРВОЙ моделью внутри окна. Память
+    # from_model держала только glm (непосредственного предшественника), и
+    # правило «иная модель -- пиши» пропускало откат flash->opus.
+    sw2 = dict(sw, from_model="glm-5.3[1m]", to_model="glm-5.3-flash")
+    race("two switches: stale poll of the first model must not roll back the second",
+         [(sw, NOW), (sw2, NOW + 1), (sl, NOW + 2)], "glm-5.3-flash", NOW + 1)
+    # Подтверждение модели события опросом внутри окна: at обновляется, и
+    # окно ПЕРЕЖИВАЕТ подтверждение -- следующий запоздалый опрос со старой
+    # моделью всё ещё отброшен (стирать event_at подтверждением -- та же
+    # дыра на секунду позже).
+    race("confirming poll refreshes at and keeps the window",
+         [(sw, NOW), (sl_new, NOW + 1), (sl, NOW + 2)], "glm-5.3[1m]", NOW + 1)
+    # Форма: подтверждающий опрос внутри окна несёт тот же event_at.
+    home = tempfile.mkdtemp(prefix="mop-test-453-keepwin-")
+    session.write_model(sw, NOW, root=home)
+    session.write_model(sl_new, NOW + 1, root=home)
+    rec = json.load(open(os.path.join(home, f"{sid}.json")))
+    c.check(f"confirming poll must keep event_at: {rec!r}",
+            not (rec.get("event_at") != NOW))
     # switch (t0+5) уже записан, statusline (t0) опоздал.
     race("late statusline must not roll back the switch",
          [(sl, NOW), (sw, NOW + 5), (sl, NOW)], "glm-5.3[1m]", NOW + 5)
@@ -356,6 +376,10 @@ def check_model_race(c):
     # вручную (s: session only), и события не было.
     race("poll far after the window is the truth",
          [(sw, NOW), (sl, NOW + 301)], "claude-opus-5-5", NOW + 301)
+    # Дубль подтверждающего опроса с более ранним временем прихода не
+    # откатывает at: «сейчас» дубликата -- не новое наблюдение.
+    race("duplicate confirm with older at must not regress at",
+         [(sw, NOW), (sl_new, NOW + 10), (sl_new, NOW + 5)], "glm-5.3[1m]", NOW + 10)
     # Тот же ответ опроса перезаписи не стоит: запись и так верна.
     race("same poll answer rewrites nothing",
          [(sl, NOW), (sl, NOW)], "claude-opus-5-5", NOW)
