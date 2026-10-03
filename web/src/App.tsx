@@ -2,7 +2,7 @@
 // секции -- пул и узлы (#298), расход (#299). Журнал (#422) -- отдельная
 // страница на #journal для админа: событиям больше нет места на главной,
 // их источник -- закрытый /api/journal (#424), а не публичный снимок.
-import { Box, Container, Group, Stack, Text, Title, Alert, Anchor } from "@mantine/core";
+import { Alert, Container, Group, Stack, Tabs, Text } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 import { usePool } from "./usePool";
 import { fetchSession, GUEST, LoginRefused, postLogin, postLogout, type Session } from "./useSession";
@@ -91,36 +91,31 @@ export default function App() {
       setPanelError("панель недоступна");
     }
   };
-  // Полоса аллокаций -- во всю ширину окна (#378), поэтому страница -- два
-  // контейнера: шапка над полосой, секции под ней. На странице журнала
-  // (#422) полосы нет: заголовок и таблица событий вместо секций пула.
   const onJournal = page === "journal";
   return (
-    <>
-      <Container size="xl" pt="md" pb="sm">
+    <Container size="xl" pt="md" pb="md">
+      <Stack gap="md">
         <Group justify="space-between" align="center">
-          <Group gap="sm">
-            <img src="/logo.png" alt="" width={28} height={28} />
-            <Title order={2}>Master Of Puppet</Title>
-            {/* Со страницы журнала -- назад к пулу (#422) */}
-            {onJournal && (
-              <Anchor component="button" type="button" onClick={() => go("main")}
-                      aria-label="главная" ml="xs">пул</Anchor>
-            )}
-          </Group>
+          <Tabs value={page} onChange={(value) => {
+            if (value === "main" || value === "journal") go(value);
+          }}>
+            <Tabs.List aria-label="страницы">
+              <Tabs.Tab value="main">Пул</Tabs.Tab>
+              {session.role === "admin" && <Tabs.Tab value="journal">Журнал</Tabs.Tab>}
+            </Tabs.List>
+          </Tabs>
           <Group gap="md">
-            {snapshot && !onJournal ? <LoadBadges load={snapshot.load} counts={snapshot.counts} />
-              : !onJournal && <Text c="dimmed">снимок ещё не пришёл</Text>}
             {panelError && <Text c="red" size="sm">{panelError}</Text>}
-            <SessionBox session={session} onLogin={login} onLogout={logout} failed={failed}
-                        goJournal={() => go("journal")} journalActive={onJournal} />
+            <SessionBox session={session} onLogin={login} onLogout={logout} failed={failed} />
             <ThemeSwitch />
           </Group>
         </Group>
-      </Container>
-      {/* снимок без load (сервер до #378) -- без полосы */}
-      {!onJournal && snapshot?.load && <Box w="100%"><LoadBar load={snapshot.load} /></Box>}
-      <Container size="xl" pt="sm" pb="md">
+        <Group gap="sm">
+          <img src="/logo.png" alt="" width={28} height={28} />
+          {snapshot ? <LoadBadges load={snapshot.load} counts={snapshot.counts} />
+            : <Text c="dimmed">снимок ещё не пришёл</Text>}
+        </Group>
+        {!onJournal && snapshot?.load && <LoadBar load={snapshot.load} />}
         {onJournal ? (
           <JournalPage journal={journal.journal} error={journal.error} open={() => {}}
                        sourceKey={`${session.login ?? ""}\0${session.role ?? ""}`} />
@@ -143,7 +138,7 @@ export default function App() {
           )}
         </Stack>
         )}
-      </Container>
-    </>
+      </Stack>
+    </Container>
   );
 }

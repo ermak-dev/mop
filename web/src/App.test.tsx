@@ -34,7 +34,8 @@ const mocked = vi.mocked(await import("./useSession")) as unknown as {
 
 test("the header shows the counters and the collector's errors", () => {
   renderUi(<App />);
-  expect(screen.getByText("Master Of Puppet")).toBeInTheDocument();
+  expect(screen.queryByText(/Master Of Puppets?/i)).toBeNull();
+  expect(document.querySelector('img[src="/logo.png"]')).toBeInTheDocument();
   expect(screen.getByText("3 папета")).toBeInTheDocument();
   expect(screen.getByText("1 свободны")).toBeInTheDocument();
   expect(screen.getByText("2 заняты")).toBeInTheDocument();
@@ -48,6 +49,27 @@ test("#378 one row of badges and the allocation bar", () => {
   expect(screen.getAllByTestId("chips")).toHaveLength(1);
   expect(screen.getByText("всего 0 мест")).toBeInTheDocument();
   expect(screen.getByTestId("load-bar")).toBeInTheDocument();
+});
+
+// HYPOTHESIS (#446): вкладки страниц идут первым рядом, а полоса вместе с
+// логотипом, бейджами и секциями лежит внутри одного рабочего контейнера.
+// SOLUTION: Mantine Tabs в навигации, общий Container size="xl".
+// RESULT: порядок и общий контейнер проверены. STATUS: FIXED — see #446.
+test("#446 navigation precedes branding and the load bar stays inside the workspace", () => {
+  renderUi(<App />);
+  const nav = screen.getByRole("tablist", { name: "страницы" });
+  const main = screen.getByRole("tab", { name: "Пул" });
+  const logo = document.querySelector('img[src="/logo.png"]');
+  const badges = screen.getByTestId("chips");
+  const bar = screen.getByTestId("load-bar");
+  expect(main).toHaveAttribute("aria-selected", "true");
+  expect(nav).toContainElement(main);
+  expect(logo).toBeInTheDocument();
+  expect(nav.compareDocumentPosition(logo!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(logo!.compareDocumentPosition(badges)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(badges.compareDocumentPosition(bar)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(bar.closest(".mantine-Container-root")).toBe(nav.closest(".mantine-Container-root"));
+  expect(bar.closest(".mantine-Container-root")).toBe(screen.getByText("nomad: no connection").closest(".mantine-Container-root"));
 });
 
 // Подвала нет (просьба оператора 27.09, #301): строка «поток событий · без
