@@ -552,6 +552,7 @@ CONCISE_431 = {
         ("syntax", "mop master [git-origin] [claude options]"),
         ("keeps", "resumes the master's last session"),
         ("keeps", "a master sees and reaches only its own puppets"),
+        ("gone", "one master: a master sees"),
         ("keeps", "`mop login --server ADDRESS LOGIN`"),
         ("gone", "mop/common/creds.py"),
         ("gone", "mop mcp, spawned"),
