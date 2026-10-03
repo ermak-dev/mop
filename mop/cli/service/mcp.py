@@ -512,6 +512,15 @@ def main(argv=None):
         print(f"mop mcp: profile {who}, "
               f"{len(app._tool_manager.list_tools())} tools, bus {where}, "
               f"session: {channel.master_socket() or 'not found'}")
+        # Мастер без проекта -- оператор admin-среза (#481): его who-ответ
+        # уходит в admin-инбоксы, опрос проекта его не находит, и живая
+        # сессия невидима в «Мастерах» дашборда. Сессию в каталоге проекта
+        # так и не нашли -- а молчание --check выглядело как «всё в порядке».
+        # bus.PROJECT пустым не бывает: без MOP_PROJECT он уже равен ADMIN.
+        if MASTER and bus.PROJECT == bus.ADMIN:
+            print("warning: no MOP_PROJECT -- you answer in the admin slice and "
+                  "will not appear in a project's masters; run mop master <project> "
+                  "or export MOP_PROJECT")
         return 0
     watch_inbox()
     app.run("stdio")
