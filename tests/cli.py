@@ -973,6 +973,19 @@ def check_evidence_tool_444(c):
             code == 0 and f"{merged} merged bug/444-x at {tip} (verified ancestry)" in output,
             (output, err, code))
 
+    # Интеграция может идти из локальной review-ветки: её точный второй
+    # родитель — опубликованный tip задачи, хотя имена refs различаются.
+    def alias_git(*args):
+        if args[0] == "log":
+            return (f"{merged}\t{base} {tip}\t"
+                    "Merge branch 'review/444-evidence' into epic/441-master-mcp")
+        return pretend_git(*args)
+    with patched(lib, git=alias_git), patched(evidence, _ancestor=real_ancestor):
+        output, err, code = run_command(evidence.main, ["444"], via_cli=True)
+    c.check("#444 verifies an exact published issue tip under a local alias",
+            code == 0 and f"{merged} merged review/444-evidence at {tip}" in output,
+            (output, err, code))
+
     # Даже за пределом общего перечня назначенная ветка обязана проверяться.
     current = "origin/integration/441-current"
     branch = "origin/bug/444-x"
