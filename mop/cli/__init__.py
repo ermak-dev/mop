@@ -234,6 +234,11 @@ def tool_commands(found, group_verbs, private=PRIVATE):
             out.append((name, [name], _path_of(section, name, False)))
         elif section not in private:
             out += _tools_of([section], group_verbs.get(section) or {}, True)
+        elif section == "dev" and "evidence" in (group_verbs.get("dev", {}).get("bug") or {}):
+            # Единственный ограниченный reader трекера; остальные dev закрыты.
+            words = ["dev", "bug", "evidence"]
+            out.append(("dev_bug_evidence", words,
+                        os.path.join(PACKAGE, *words) + ".py"))
     return out
 
 

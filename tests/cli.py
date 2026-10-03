@@ -877,6 +877,77 @@ def check_mcp_declarations(c):
             c.fail(f"{os.path.relpath(path)}: {e}")
 
 
+# #444: из закрытого пространства dev выходит только чтение свидетельств,
+# без shell/Git-исполнителя и без остальных глаголов трекера.
+# HYPOTHESIS: PRIVATE скрывает даже явно объявленный ограниченный leaf.
+# SOLUTION: разрешён единственный dev bug evidence, с literal MCP iid.
+# RESULT: проверяется ниже. STATUS: FIXED — see #444
+def check_evidence_tool_444(c):
+    from mop.cli.dev.bug import evidence
+    path = evidence.__file__
+    decl = cli.declared(path)
+    c.expect("#444 evidence literal MCP", decl,
+             {"annotations": "readonly", "args": [
+                 {"name": "iid", "type": "string", "required": True,
+                  "help": "issue number"}]})
+    exposed = {n: words for n, words, _ in cli.tool_commands(cli.scan(), cli.verbs())
+               if n.startswith("dev_")}
+    c.expect("#444 only bounded dev tool exposed", exposed,
+             {"dev_bug_evidence": ["dev", "bug", "evidence"]})
+
+    # Ложный merge: ветка уже в первом родителе, второй — чужая работа.
+    # Заголовок второго с именем задачи не доказывает её интеграцию.
+    base, tip, unrelated, merged = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    calls = []
+
+    def pretend_git(*args):
+        calls.append(args)
+        if args[0] == "fetch":
+            return ""
+        if args[0] == "for-each-ref":
+            return f"origin/bug/444-x\t{tip}\norigin/master\t{merged}"
+        if args[0] == "log":
+            return (f"{merged}\t{tip} {unrelated}\t"
+                    "Merge branch 'bug/444-x' into master\n"
+                    f"{base}\t{tip}\tfix: mention #444 only")
+        raise AssertionError(args)
+
+    def ancestor(a, b):
+        return (a, b) in {(tip, unrelated), (tip, tip)}
+
+    with patched(lib, git=pretend_git), patched(evidence, _ancestor=ancestor):
+        output, err, code = run_command(evidence.main, ["444"], via_cli=True)
+    c.expect("#444 reader runs", (err, code), ("", 0))
+    c.check("#444 fetches before inspecting refs", calls[0] == ("fetch", "--prune", "origin"))
+    c.check("#444 refuses a merge whose branch is already in first parent",
+            "verified ancestry" not in output, output)
+    c.check("#444 does not treat a plain issue mention as merge",
+            "fix: mention" not in output, output)
+
+    # Настоящий merge: второй родитель — ветка задачи, первого в ней нет.
+    def real_ancestor(a, b):
+        return a == b
+
+    def real_git(*args):
+        if args[0] == "log":
+            return (f"{merged}\t{base} {tip}\t"
+                    "Merge branch 'bug/444-x' into master")
+        return pretend_git(*args)
+
+    with patched(lib, git=real_git), patched(evidence, _ancestor=real_ancestor):
+        output, err, code = run_command(evidence.main, ["444"], via_cli=True)
+    c.check("#444 verifies actual second-parent merge",
+            code == 0 and f"{merged} merged bug/444-x at {tip} (verified ancestry)" in output,
+            (output, err, code))
+
+    for iid in ("0", "-1", "444; echo unsafe", "9" * 5000):
+        with patched(lib, git=lambda *args: c.fail("invalid iid reached git")):
+            out, err, code = run_command(evidence.main, [iid])
+        c.check(f"#444 invalid iid {iid[:15]!r} refused without git",
+                code != 0 and not out and "iid must be" in err,
+                (out, err[:100], code))
+
+
 def check_refusals_163(c):
     """#163: отказ сервиса кластера на pool и nodes читался пустым списком.
 
@@ -2070,15 +2141,19 @@ def check_fallback_model_183(c):
     c.check(f"#254 LEGACY must map bug and ci into dev: {cli.LEGACY}",
             not (cli.LEGACY.get("bug") != ("dev", "bug") or cli.LEGACY.get("ci") != ("dev", "ci")))
     for name, words, path in cli.tool_commands(cli.scan(), tree, private=()):
+        if words == ["dev", "bug", "evidence"]:
+            continue  # #444: единственный read-only инструмент в dev.
         c.check(f"#254 {' '.join(words)} must not declare MCP",
                 not (words[0] == "dev" and cli.declared(path) is not None))
-    c.check("#254 no dev tool may reach MCP",
-            not (any(n.startswith("dev") or n.startswith("ci_") for n, _, _ in
-                     cli.tool_commands(cli.scan(), tree))))
+    exposed_dev = {n for n, _, _ in cli.tool_commands(cli.scan(), tree)
+                   if n.startswith("dev_") or n.startswith("ci_")}
+    c.expect("#254 dev remains private except evidence", exposed_dev,
+             {"dev_bug_evidence"})
     got = cli.resolve(cli.unalias(["bug", "list"]), top, tree)
     c.expect("#254 `mop dev bug list` must still resolve through LEGACY", got,
              ("mop.cli.dev.bug.list", []))
 
+    check_evidence_tool_444(c)
     check_server_namespace_259(c)
     check_named_263(c)
     check_body_file_270(c)

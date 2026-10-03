@@ -362,8 +362,40 @@ EPIC_OF = [
 ]
 
 
+# #444: доказательство интеграции требует ветки именно этой задачи и
+# второго родителя merge, а не любого коммита со строкой #iid.
+# HYPOTHESIS: поиск по тексту истории принимает упоминание #444 за merge.
+# SOLUTION: отбор имён веток и распознавание точного имени ветки в merge.
+# RESULT: проверяется ниже. STATUS: FIXED — see #444
+
+def check_evidence_444(c):
+    branch = getattr(gitlab, "evidence_branch", None)
+    source = getattr(gitlab, "merge_source", None)
+    c.check("#444 branch matcher exists", branch is not None)
+    c.check("#444 merge source parser exists", source is not None)
+    if not branch or not source:
+        return
+    for ref, expected in [
+        ("origin/bug/444-git-shell", True), ("origin/feat/444", True),
+        ("origin/refactor/444-x", True), ("origin/docs/444-x", True),
+        ("origin/ci/444-x", True), ("origin/bug/4444-x", False),
+        ("origin/bug/444extra", False), ("origin/epic/444-x", False),
+        ("origin/bug/44-444", False), ("origin/bug/444-x\nother", False),
+    ]:
+        c.expect(f"#444 branch {ref!r}", branch(ref, "444"), expected)
+    for subject, expected in [
+        ("Merge branch 'bug/444-git-shell' into epic/441-master-mcp", "bug/444-git-shell"),
+        ("Merge branch 'feat/444' into master", "feat/444"),
+        ("fix: mention #444 only", None),
+        ("Merge #444 branch 'bug/444-git-shell'", None),
+        ("Merge branch 'bug/4444-x' into master", "bug/4444-x"),
+    ]:
+        c.expect(f"#444 merge {subject!r}", source(subject), expected)
+
+
 def main():
     c = Checks()
+    check_evidence_444(c)
     for url, want in ORIGINS:
         c.expect(f"origin {url!r}", gitlab._parse_origin(url), want)
 
