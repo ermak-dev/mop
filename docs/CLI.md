@@ -335,7 +335,7 @@ project tracker: GitLab issues, one issue per unit of work
   mop dev bug comment <iid> "<text>"               comment (or - for stdin)
   mop dev bug start <iid> [slug] [--no-branch]     claim: status::wip + branch
   mop dev bug close <iid> --comment "..."          close, default status::fixed
-  mop dev bug relabel <iid> [--status S]           change labels, open or close
+  mop dev bug relabel <iid> [--status S]           change labels; live, wip, parked reopen
   mop dev bug labels                               the label vocabulary
 
 Coordinates come from the working copy's git origin; credentials are
@@ -398,9 +398,10 @@ status label is added when none is given: status::live.
 #### mop dev bug relabel
 
 ```text
-mop dev bug relabel <iid> [--status S] [--label L ...]: change labels, open or close by the status
+mop dev bug relabel <iid> [--status S] [--label L ...]: change labels
 
---status live, wip or parked reopens a closed issue; fixed, noise or dup closes it.
+--status live, wip or parked also reopens a closed issue; fixed, noise and
+dup are closing statuses, but only `mop dev bug close` closes.
 ```
 
 #### mop dev bug show

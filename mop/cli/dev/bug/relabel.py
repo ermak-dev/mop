@@ -1,6 +1,7 @@
-"""mop dev bug relabel <iid> [--status S] [--label L ...]: change labels, open or close by the status
+"""mop dev bug relabel <iid> [--status S] [--label L ...]: change labels
 
---status live, wip or parked reopens a closed issue; fixed, noise or dup closes it.
+--status live, wip or parked also reopens a closed issue; fixed, noise and
+dup are closing statuses, but only `mop dev bug close` closes.
 """
 from mop.common import gitlab
 from mop.cli.dev.bug._common import parser

@@ -9,7 +9,7 @@
   mop dev bug comment <iid> "<text>"               comment (or - for stdin)
   mop dev bug start <iid> [slug] [--no-branch]     claim: status::wip + branch
   mop dev bug close <iid> --comment "..."          close, default status::fixed
-  mop dev bug relabel <iid> [--status S]           change labels, open or close
+  mop dev bug relabel <iid> [--status S]           change labels; live, wip, parked reopen
   mop dev bug labels                               the label vocabulary
 
 Coordinates come from the working copy's git origin; credentials are

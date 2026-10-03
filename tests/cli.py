@@ -2516,6 +2516,21 @@ def check_dev_help_433(c):
         for word in words:
             c.check(f"#433 {path} keeps «{word}»", word in docs.get(path, ""),
                     docs.get(path, "")[:120])
+    # Ревью 897f80a: relabel не закрывает -- relabel_action даёт только
+    # "reopen" либо "relabel", закрытие -- глагол close. Справка, обещающая
+    # «closes», отправляет читателя мимо команды, которая это умеет;
+    # назвать close как правильную команду -- можно и нужно.
+    doc = docs["dev/bug/relabel.py"]
+    lower = doc.lower()
+    c.check("#433 relabel help may promise reopening, not closing",
+            "closes it" not in lower and "or close" not in lower
+            and "open or close" not in lower, doc)
+    c.check("#433 relabel help names the statuses that reopen",
+            all(w in lower for w in ("live", "wip", "parked", "reopen"))
+            and "`mop dev bug close`" in doc, doc)
+    c.check("#433 the bug index does not promise closing by relabel",
+            "open or close" not in docs["dev/bug/__init__.py"].lower(),
+            docs["dev/bug/__init__.py"][:200])
     # Синтаксис вызова остаётся первой строкой: «mop dev …» с глаголом.
     for path, doc in docs.items():
         if path.endswith("_common.py"):
