@@ -4,7 +4,7 @@
 //
 // Одно место на запись (#323): склонение, короткие числа, слова корзин и
 // цвет статуса кредита жили копиями в App, usage-format и creds-api.
-import { KINDS, type Counts, type Kind } from "../types";
+import { KINDS, type Counts, type Kind, type VerdictKind } from "../types";
 
 // Слова корзин: one -- у одного папета (подпись проекта), many -- у
 // счётчика в шапке. Слова прежние, как были в двух таблицах.
@@ -19,6 +19,26 @@ export const KIND_WORD: Record<Kind, { one: string; many: string }> = {
 export const KIND_COLOR: Record<Kind, string> = {
   free: "green", busy: "yellow", sick: "red", silent: "violet", down: "gray",
 };
+
+// #452: слово статуса -- по виду вердикта (kind), тем же словам, что
+// оператор читал в state-строке, одним словом. Список -- те же VERDICTS,
+// что на сервере; незнакомого вида страница не рисует.
+export const VERDICT_WORD: Record<Exclude<VerdictKind, null>, string> = {
+  silent: "агент молчит", hung: "завис", dialog: "ждёт действия",
+  login: "логин", quota: "нет квоты", error: "ошибка", waiting: "ждёт ввода",
+  busy: "занят", other: "иначе", free: "свободен", idle: "брошенная работа",
+  unknown: "неизвестно", failing: "падает",
+};
+
+/** Слово статуса одним словом (#452): вид из снимка, null -- «нет данных». */
+export const verdictWord = (kind: VerdictKind): string =>
+  (kind && VERDICT_WORD[kind]) || "нет данных";
+
+/** Цвет строки статуса (#452): по корзине из снимка, а не по виду --
+ *  больной и молчащий красятся своей краской, остальное -- корзиной;
+ *  корзины нет (переходный снимок) -- серый, как down. */
+export const verdictColor = (kind: VerdictKind, bucket: Kind | undefined | null): string =>
+  (kind === "silent" && KIND_COLOR.silent) || KIND_COLOR[bucket || "down"];
 
 /** Корзины, в которых кто-то есть, в порядке KINDS. */
 export function presentKinds(counts: Counts): Kind[] {

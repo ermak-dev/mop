@@ -1,5 +1,25 @@
 // Запись чисел и корзин как на старой странице (#298).
-import { gb, gbOfMb, hhmmss, human, plural, ratio, untilText } from "./format";
+import { gb, gbOfMb, hhmmss, human, KIND_COLOR, plural, ratio, untilText,
+         verdictColor, verdictWord } from "./format";
+import type { VerdictKind } from "../types";
+
+// #452: слово статуса по виду вердикта -- все 13 видов из KINDS вердикта
+// (tests/state.py), тем же списком: незнакомого вида страница не рисует.
+const VERDICT_WORDS: [VerdictKind, string][] = [
+  ["silent", "агент молчит"],
+  ["hung", "завис"],
+  ["dialog", "ждёт действия"],
+  ["login", "логин"],
+  ["quota", "нет квоты"],
+  ["error", "ошибка"],
+  ["waiting", "ждёт ввода"],
+  ["busy", "занят"],
+  ["other", "иначе"],
+  ["free", "свободен"],
+  ["idle", "брошенная работа"],
+  ["unknown", "неизвестно"],
+  ["failing", "падает"],
+];
 
 test("gb: kilobytes to GB or MB, dash without data", () => {
   expect(gb(null)).toBe("-");
@@ -76,11 +96,31 @@ test("#331 the reset time reads in the viewer's zone, with a date when not today
 
 // Свободная память узла (#329): вниз, как `mop node` и строка пула. Узел с
 // 1536 МБ -- «1 GB»: папет резервирует 8 ГБ, и показать места больше, чем
-// есть, значит обещать то, чего планировщик не даст.
+// есть, значит обещать того, чего планировщик не даст.
 test("#329 gbOfMb floors: never more GB than there are", () => {
   expect(gbOfMb(1536)).toBe("1 GB");
   expect(gbOfMb(2047)).toBe("1 GB");
   expect(gbOfMb(2048)).toBe("2 GB");
   expect(gbOfMb(64511)).toBe("62 GB");
   expect(gbOfMb(null)).toBe("-");
+});
+
+// #452: слово статуса -- по виду вердикта (kind), не разбор state-строки.
+// Слова те же, что читал оператор в state-строке, одним словом; null --
+// переходный снимок (сервер до #452 не нёс вида или спросить некого).
+test("#452 a verdict word for every kind, and none for no data", () => {
+  for (const [kind, word] of VERDICT_WORDS) expect(verdictWord(kind)).toBe(word);
+  expect(verdictWord(null)).toBe("нет данных");
+});
+
+// #452: цвет строки -- по корзине (bucket), а слово -- по виду: больной
+// (sick) и молчащий (silent) красятся своей краской, остальное -- корзиной.
+test("#452 the color comes from the bucket, not the verdict kind", () => {
+  // hung вердиктом красился бы красным sick, но корзина busy -- жёлтый.
+  expect(verdictColor("hung", "busy")).toBe(KIND_COLOR.busy);
+  expect(verdictColor("login", "sick")).toBe(KIND_COLOR.sick);
+  expect(verdictColor("silent", "silent")).toBe(KIND_COLOR.silent);
+  // Переходный снимок: ни вида, ни корзины -- серый, как down.
+  expect(verdictColor(null, null)).toBe(KIND_COLOR.down);
+  expect(verdictColor("busy", null)).toBe(KIND_COLOR.down);
 });
