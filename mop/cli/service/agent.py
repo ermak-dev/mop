@@ -3,12 +3,8 @@
   mop agent            subscribe and serve, until stopped
   mop agent --check    ask this node's agent over the bus whether it answers
 
-One per node, under systemd, outside the job spec (docs/BUS.md). The unit
-starts it as `mop agent`; units not yet rolled out still start
-`python3 -m mop.agent`, which lands here too.
-
-Runs on a node: nothing here may import what a node does not have
-(python-nomad, the installation's .env) -- hence no mop.cli.lib.
+One per node, under systemd, outside the job spec (docs/BUS.md): it must
+answer precisely while a puppet is restarting.
 """
 import asyncio
 import sys

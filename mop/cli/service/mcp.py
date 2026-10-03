@@ -1,20 +1,7 @@
-"""pool MCP server: the same pool as tools for claude
+"""mop mcp [--check]: expose pool commands as tools
 
-Started as `mop mcp` by a claude session, a master's or a puppet's, as its
-child process; the transport is stdio.
-
-What it offers is decided by the bus credentials, not by flags:
-
-  * an operator's login with MOP_PROJECT -- a project's master: the channel
-    and management, over that project's slice of the pool (`mop master`
-    sets the project);
-  * an operator's login without a project -- the operator: the same over
-    the whole pool;
-  * `puppet-<project>` -- a puppet: the channel only.
-
-The management tools are the commandlets themselves: one that declares
-`MCP = {...}` becomes a tool. The channel's protocol is docs/CHANNEL.md, the
-bus subjects docs/BUS.md, the server docs/MCP.md.
+Started by a claude session. --check shows the local profile and connection
+settings; the available tools depend on the session's access.
 """
 # Три профиля, и решают их креды на шине, а не флаги (is_master):
 #
@@ -65,21 +52,11 @@ from mop.cli.core.profile import profile_name               # noqa: E402
 from mop.common.render import table                              # noqa: E402
 
 INSTRUCTIONS = (
-        "Pool of claude puppets on top of Nomad.\n\n"
-        "This is the only channel to the pool: to message a puppet or find out "
-        "who's free, use `send` and `agents` from here. The built-in "
-        "SendMessage/ListAgents won't do: they only see sessions on this same "
-        "host, and puppets live on other nodes — on a neighboring node the "
-        "built-in lookup will silently find no one. Delivery here goes over "
-        "the pool's bus to the node agent that holds the puppet, so the host "
-        "doesn't matter.\n\n"
-        "`agents` — who's around and in what state, `send` — message a puppet, "
-        "`tail` — what's on its screen. Always check `agents` before "
-        "dispatching: \"free\" there means the clone has no unsaved work, not "
-        "just that the session is silent.\n\n"
-        "The other tools are the mop commands themselves, run from this "
-        "session's working copy: their output is the answer, and a command "
-        "that succeeds quietly answers `done` — the result shows in `agents`."
+    "Use this server's `agents` and `send` to find and message pool puppets or "
+    "project masters; built-in session tools cannot reach them. Check `agents` "
+    "before dispatch: free means the clone has no unsaved work, not merely that "
+    "the session is idle. `tail` shows the puppet's screen. Other tools run "
+    "the corresponding mop command; a quiet success returns `done`."
 )
 
 
@@ -95,12 +72,9 @@ def instructions(environ):
     if not branch:
         return INSTRUCTIONS
     return INSTRUCTIONS + (
-        f"\n\nThe integration branch of this master is `{branch}` (MOP_BRANCH, "
-        f"from `git config mop.branch` of the operator's working copy). It is "
-        f"the base of every ticket branch (`origin/{branch}`), the target of "
-        f"every landing, and the branch you name in every dispatch. The "
-        f"repository's default branch, origin/HEAD and where the team's merges "
-        f"go do not decide this: the operator did.")
+        f"\n\nThe integration branch is `{branch}`. Base ticket branches on "
+        f"`origin/{branch}`, land into `{branch}`, and name it in dispatch. "
+        "Do not substitute the repository's default branch.")
 
 
 app = MCPServer("mop", instructions=instructions(os.environ))
@@ -212,27 +186,30 @@ def on_inbox(m):
         # файла сессии: личность сессии уникальна (#421), имя -- нет.
         return MasterAnswer(MASTER_ID, bus.PROJECT, bus.login(), d.get("name"), d.get("cwd"),
                             d.get("sessionId")).to_dict()
+    unavailable = {"error": "master session unavailable — choose a live master"}
     sock = channel.master_socket()
     if not sock:
-        return {"error": f"master {MASTER_ID} has no session — nowhere to deliver the note"}
+        return unavailable
     # priority по умолчанию later: так кладёт вести агент, и перебивать ход
     # мастера уведомлением о простое незачем. Папет со своим отчётом просит
     # громче — и имеет право, отчёта мастер ждёт.
-    r = session.send(sock, m.get("text") or "",
-                     priority=m.get("priority") or "later",
-                     from_name=m.get("from") or m.get("node") or "mop")
+    try:
+        r = session.send(sock, m.get("text") or "",
+                         priority=m.get("priority") or "later",
+                         from_name=m.get("from") or m.get("node") or "mop")
+    except ConnectionError:
+        # Сокет может умереть после master_socket; локальный путь в ответ
+        # адресату не отдаём, а просьба выбрать живого мастера остаётся.
+        return unavailable
     return {"msg_id": r["msg_id"]}
 
 
 # ─── инструменты: канал ──────────────────────────────────────────────────
 @tool(annotations=READ_ONLY, description=(
-    "Who you can message: pool puppets on ALL nodes, masters of your project, "
-    "and claude sessions on this machine. Fuller than the built-in "
-    "ListAgents, which only sees this host. For a puppet it shows the true "
-    "state (free/busy/HUNG/no model quota/unsaved work in the clone) "
-    "and repository; for a master, the address to reply to. "
-    "A master's address comes only from the masters table here or from the "
-    "envelope of a received message (from-name), never from `mop mcp --check`."))
+    "List pool puppets, project masters and local sessions. Check before "
+    "dispatch: free means no unsaved work in the clone, not just an idle "
+    "session. Reply to a master's address only from the masters table "
+    "or a received message."))
 def agents(project: str = "") -> str:
     out = _roster(project) if MASTER else _roster_from_bus()
     out += _masters()
@@ -304,18 +281,11 @@ def _masters():
 
 
 @tool(description=(
-    "Send a message to a pool puppet, a project master, or a session on this "
-    "machine. The only working way to reach both a puppet and a master: the "
-    "built-in SendMessage only reaches sessions on this same host and on a "
-    "neighboring node will silently find no one. `to`: puppet name "
-    "(pu-<project>-<n>), master address from agents or from the envelope of "
-    "a received message (from-name), name/pid of a local session. Returns a "
-    "delivery verdict, not the fact of sending. notify_when_idle=true does "
-    "not block: when the recipient frees up, a notification arrives as a "
-    "separate message. A master's message to a puppet makes the master its "
-    "owner (the OWNER column); a puppet led by another master — work in its "
-    "clone, or dispatched in the last minutes — refuses, naming the owner. "
-    "force=true takes it over: only when that master is gone or agrees."))
+    "Message a puppet, a project master or a local session. Use the address "
+    "from agents or a received message. Returns a delivery verdict; "
+    "notify_when_idle arranges a later notice. Messaging a puppet claims "
+    "ownership; force=true overrides another master's ownership only if "
+    "that master agrees or is gone."))
 def send(to: str, message: str, priority: str = "next",
          notify_when_idle: bool = False, wait_seconds: int = 0,
          force: bool = False) -> str:
@@ -348,9 +318,8 @@ def send(to: str, message: str, priority: str = "next",
 
 
 @tool(annotations=READ_ONLY, description=(
-    "Tail of the puppet's tmux buffer — the only way to see what's not in "
-    "the state: a held dialog for someone else's message, a login prompt, "
-    "a quota complaint."))
+    "Read recent output from a puppet's screen, including dialogs and "
+    "errors missing from its state."))
 def tail(name: str, lines: int = 40, grep: str = "") -> str:
     try:
         buf = puppets.pane_lines(channel.puppet_node(name, MASTER), name)
@@ -367,13 +336,9 @@ def tail(name: str, lines: int = 40, grep: str = "") -> str:
 
 # ─── инструменты: управление ─────────────────────────────────────────────
 @master_tool(annotations=DESTRUCTIVE, description=(
-    "Slash command in a puppet's TUI. Needed separately because slash "
-    "commands don't pass through the channel: the message is queued with "
-    "skipSlashCommands. Escape dismisses a stuck dialog without answering "
-    "it: a stuck puppet is invisible to the roster, and messages pile up "
-    f"unread in the queue. Allowed: {', '.join(SLASH_ALLOWED)}. A puppet "
-    "another master leads is refused with that master's name; force=true "
-    "types anyway."))
+    "Type a permitted slash command or Escape in a puppet's session. "
+    f"Allowed: {', '.join(SLASH_ALLOWED)}. force=true overrides another "
+    "master's ownership only if that master agrees or is gone."))
 def slash(name: str, command: str, force: bool = False) -> str:
     if not command.split()[0:1] or command.split()[0] not in SLASH_ALLOWED:
         return f"only allowed: {', '.join(SLASH_ALLOWED)}"

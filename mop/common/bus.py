@@ -515,7 +515,9 @@ def _ask(subj, who, dead, verb, timeout, **fields):
     try:
         return json.loads(msg.data.decode())
     except ValueError:
-        raise BusError(f"{who} answered with non-JSON: {msg.data[:120]!r}")
+        # Ответ удалённой стороны нельзя цитировать в отказе: в нём могут
+        # оказаться закрытые данные, а оператору нужна причина, не тело.
+        raise BusError(f"{who} returned an invalid response")
 
 
 def request(node, verb, timeout=TIMEOUT, channel="rpc", project=None, **fields):

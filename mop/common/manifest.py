@@ -106,6 +106,23 @@ def clone_env(environ):
     return env
 
 
+def clone_failure(stderr):
+    """Ошибка клона без чужого stderr: его нельзя показывать целиком --
+    адрес репозитория может нести закрытое значение."""
+    text = stderr.lower()
+    if "host key verification failed" in text:
+        return "host identity could not be verified"
+    if "authentication failed" in text or "permission denied" in text:
+        return "access denied"
+    if "repository" in text and "not found" in text:
+        return "repository not found"
+    if "could not resolve host" in text:
+        return "host not found"
+    if "connection timed out" in text or "connection refused" in text:
+        return "connection failed"
+    return "clone failed; check the origin and access"
+
+
 def fetch(origin):
     """origin -> словарь манифестов проекта: {'project', 'asks', 'alien',
     'legacy', 'sandbox_vars', 'sandbox_tasks', 'bootstrap_vars',
@@ -133,7 +150,7 @@ def fetch(origin):
                            capture_output=True, text=True, env=clone_env(os.environ))
         if r.returncode != 0:
             raise RuntimeError(f"cannot read {project}: "
-                               f"{(r.stderr or r.stdout).strip()}")
+                               f"{clone_failure(r.stderr or r.stdout)}")
 
         def show(path):
             got = subprocess.run(["git", "-C", tmp, "show", f"HEAD:{path}"],

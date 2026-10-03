@@ -1,9 +1,8 @@
 """mop dev bug edit <iid> [--title T] [--body TEXT|--body-file F|-] [--epic N | --no-epic]: change an issue
 
-Replaces the title and/or the whole body; the body comes from --body,
---body-file or stdin (-). The epic marker on the first line survives a body edit
-unless --epic names another parent or --no-epic removes it. Nothing named:
-usage, not a silent no-op.
+Replaces the title and/or body from --body, --body-file or stdin (-).
+The first-line epic marker survives a body edit unless --epic changes it or
+--no-epic removes it. With nothing to change, prints usage.
 """
 from mop.common import gitlab
 from mop.cli import lib

@@ -2,12 +2,10 @@
 
 Writes the CLI reference: every command and verb of `mop` with its whole
 docstring, in three parts -- client, server, service. Silent when the file
-is written.
+is written. A commandlet with an empty docstring is refused, named.
 
-The reference is committed, and tests/cli.py compares it with its
-regeneration: an edit to a commandlet's docstring ships with the
-regenerated docs/CLI.md in the same commit, or CI is red. A commandlet
-with an empty docstring is refused, named.
+The reference is committed: an edit to a commandlet's docstring ships with
+the regenerated docs/CLI.md in the same commit, or CI is red.
 """
 from mop import cli
 # Без mop.cli.lib: lib тянет шину, а справочнику нужны только файлы (#302).

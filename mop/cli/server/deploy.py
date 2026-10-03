@@ -1,34 +1,18 @@
 """deploy: mop server deploy [--check] [--skip-pipeline] [--from-ci]
 
-The whole installation in one run: one playbook, site.yml, so there is one
-ansible process and one PLAY RECAP — a line per machine over every layer.
-No separate targets: fixing what fell over is cheaper by rerunning than by
-remembering which target owned it.
+The whole installation in one run; no separate targets — rerunning is
+cheaper than remembering which target owned what. Machines only:
+projects come and go with `mop project add|delete`, deploy takes no
+arguments.
 
-Machines, not projects. Which projects the pool serves is the registry
-(~/.config/mop/projects) and `mop project add|delete`; deploy reads it and
-takes no arguments. While it accepted an origin, registering a project
-was a side effect of a full run, and there was no way to take one off at all.
-
---check runs the same playbook in ansible's check mode with --diff: nothing
-on the machines changes, and the output is the difference a real run would
-make. Nothing after the playbook runs: collecting the server credentials
-writes files, and the roster check is not the question a dry run answers.
-
-With MOP_DEPLOY_NEEDS_GREEN=1 in .env, deploy refuses unless the GitLab
-pipeline of the working copy's HEAD on origin's default branch is success,
-or still running with every job outside stage deploy green (CI rolling
-itself out); another branch's pipeline of the same commit does not count. --skip-pipeline is
-the emergency way past it, and says so. --check changes nothing and is not
-gated.
-
---from-ci is what CI's deploy job runs on the server: the working copy must
-be on origin's default branch with no tracked file modified; it fetches,
-fast-forwards to origin and rolls that out. The pipeline gate is mandatory
-there: it refuses without MOP_DEPLOY_NEEDS_GREEN=1 and with --skip-pipeline.
-When the only answer of the gate is "wait", HEAD has moved past the commit
-that started the job, and that newer commit's own deploy job rolls it out:
---from-ci then says so and exits 0. Every other refusal stays a refusal.
+--check: ansible's check mode with --diff — nothing changes, and
+nothing runs after the playbook. With MOP_DEPLOY_NEEDS_GREEN=1 deploy
+refuses unless HEAD's pipeline on the default branch is green;
+--skip-pipeline is the emergency way past and says so. --from-ci is
+what CI runs on the server: default branch, fetch, fast-forward, the
+gate mandatory; when the gate's only answer would be "wait" because
+HEAD has moved past the commit that started the job, it exits 0 — the
+newer job deploys it.
 """
 import json
 import os
@@ -376,7 +360,7 @@ def main(argv):
     # До первого сетевого вызова: зависимости контроллера ставит mop server setup,
     # и отказ его называет.
     if not shutil.which("ansible-playbook"):
-        lib.fail("no ansible-playbook on this machine -- run mop server setup")
+        lib.fail("no ansible-playbook here -- run `mop server setup`")
         return 1
     # Полный REQUIRED спрашивает только deploy: остальным хватает адреса
     # сервера, а MOP_GIT_HOST читают одни плейбуки.
@@ -389,8 +373,8 @@ def main(argv):
         argv = []
     if argv:
         # Origin в аргументах заводил проект побочным эффектом прогона (#79).
-        lib.fail(f"mop server deploy takes no arguments; {argv[0]} looks like a project.\n"
-                 f"Register it: mop project add {argv[0]}")
+        lib.fail("deploy takes no arguments; to register a project, "
+                 "run mop project add <git-origin>")
         return 1
     if from_ci and not ci_pull(skip_pipeline, dry):
         return 1
@@ -442,9 +426,9 @@ def main(argv):
     # падал бы на середине. Дефолт считает config (первый из стандартных имён).
     key = config.get("MOP_GIT_KEY")
     if not key or not os.path.isfile(key) or not os.path.isfile(key + ".pub"):
-        lib.fail(f"no git key for the pool on this machine (MOP_GIT_KEY={key or 'unset'}) "
-                 f"-- make one: ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519, "
-                 f"register its .pub on MOP_GIT_HOST, or name yours in .env")
+        lib.fail(f"no pool git key (MOP_GIT_KEY={key or 'unset'}): ssh-keygen "
+                 f"-t ed25519 -N '' -f ~/.ssh/id_ed25519, register the .pub on "
+                 f"MOP_GIT_HOST, or name yours in .env")
         return 1
 
     # Проекты: реестр сервера, и только он (#117). Пользователей NATS по нему
@@ -479,7 +463,7 @@ def main(argv):
         # они и нужны. Машине по возвращении нужен свой прогон, и это
         # сказано.
         lib.fail("some machines did not answer; everything that did is "
-                 "configured. Run mop server deploy again when they are back")
+                 "configured -- run mop server deploy again when they are back")
 
     # Контроллер — тоже машина оператора: его каталог сервера собирается здесь
     # из secrets/ и bootstrap.json. Самоподписанный сертификат закрепляется,
@@ -493,8 +477,8 @@ def main(argv):
         # человек входит своим именем, и выбрать его за оператора deploy не
         # может. Громко, а не красной проверкой с непонятной причиной.
         lib.fail(f"installed, but this machine is nobody on the bus yet: "
-                 f"log in with mop login <login> (a person from mop server user, or "
-                 f"from the directory), then mop list")
+                 f"log in with mop login <login> (a person from "
+                 f"`mop server user add` or the directory), then mop list")
         return 1
 
     lib.section("check")

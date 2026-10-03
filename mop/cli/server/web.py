@@ -1,27 +1,18 @@
 """pool dashboard on the web: mop server web [--port N] [--bind ADDR]
 
-The same picture as `mop list`, `mop node` and `mop stat` on one page,
-refreshed in place (docs/WEB.md):
+`mop list`, `mop node` and `mop stat` on one page, refreshed in place:
 
-  /            the page: the built application, web/dist/index.html
-  /assets/N    the application's files from web/dist/assets (hashed names)
-  /logo.png    the logo (docs/logo.png), also the favicon
-  /api/pool    the current snapshot as JSON
-  /events      the same snapshot pushed as server-sent events
+  /            the page, /assets/N its files, /logo.png
+  /api/pool    snapshot as JSON; /events — the same as SSE
   /healthz     200 once the first snapshot is in
-  /api/session who is logged in; login and logout by post with JSON on
-               /api/login, /api/logout -- file/LDAP via the same identity
-               as the bus, server-side session cookie, for the admin gate
-  /api/journal the full event journal, admin only (current role re-checked
-               per request); the public snapshot and /events carry no entries
+  /api/session the session; /api/login and /api/logout by JSON post
+               (file/LDAP, bus identity)
+  /api/journal the full journal, admin only; the public feeds none
 
-No login on the page (the LAN is trusted, operator's decision 2026-09-26;
-authorization comes later). The pool itself stays read-only here: a restart
-from a button would kill the work in a puppet's clone, and puppet actions
-snapshot carries names, owners and statuses only, and the journal never sees
-a code.
-Port and bind address default to MOP_WEB_PORT (9000) and MOP_WEB_BIND
-(127.0.0.1): outside the server the page is reached through the TLS proxy.
+The overview is available without login; logging in opens the admin side —
+the journal and the proxy panel. The pool stays read-only here: a
+restart button would kill work in a clone. Port and bind:
+MOP_WEB_PORT (9000), MOP_WEB_BIND (127.0.0.1); beyond — the TLS proxy.
 """
 import json
 import os

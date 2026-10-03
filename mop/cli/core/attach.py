@@ -1,7 +1,7 @@
-"""attach to a puppet's tmux session: mop attach <name>
+"""open a terminal on a puppet: mop attach <name>
 
-The only subcommand that goes over ssh instead of the bus: a live terminal
-isn't something a bus verb can hand over.
+Goes over ssh, not the bus: a live terminal is not something a bus verb
+hands over.
 """
 import os
 import shlex

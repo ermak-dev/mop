@@ -1,8 +1,8 @@
 """mop dev ci show <id> [--failed]: a pipeline's jobs
 
 The pipeline's line, then one line per job: status, id, stage, name,
-duration, and "(allow_failure)" for a job whose failure does not fail the
-pipeline. --failed shows only the failures that do.
+duration. A job marked "(allow_failure)" may fail without failing the
+pipeline; --failed lists only the jobs that did fail it.
 """
 from mop.common import gitlab
 from mop.common.render import table

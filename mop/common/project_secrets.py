@@ -46,8 +46,12 @@ def parse_var(text):
     строки -- отказ: переменная живёт одной строкой в vars.env."""
     key, sep, value = (text or "").partition("=")
     key = key.strip()
-    if not sep or not _KEY.match(key):
-        raise ValueError(f"{text!r}: expected VAR=VALUE")
+    # Отказ не цитирует переданный текст: до «=» тоже может быть секрет,
+    # а в значении он находится по определению (#429).
+    if not sep:
+        raise ValueError("expected VAR=VALUE")
+    if not _KEY.match(key):
+        raise ValueError("invalid variable name; expected VAR=VALUE")
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         value = value[1:-1]
     if "\n" in value or "\r" in value:

@@ -1,14 +1,9 @@
-"""take a project off the bus: mop project delete <name>
+"""take a project off the pool: mop project delete <name>
 
-Asks the cluster service on the server (operator's verb project_delete):
-the project leaves the server's registry, its NATS user and bus
-password go, and so does its puppet limit.
-
-Refuses while the project still has puppets: a master whose puppets are
-alive would lose the bus under them, and the puppets would keep working
-with no one able to hear them. Delete them first (mop delete <name>).
-
-The repository is not touched: this is about the pool, not about the code.
+The project leaves the pool together with its puppet limit; its puppets
+lose the bus. Refuses while the project still has puppets — they would keep
+working with no one able to reach them — delete its puppets first
+(mop delete pu-<project>-<n>). The repository is not touched.
 """
 from mop.cli import lib
 from mop.common import bus

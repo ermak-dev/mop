@@ -10,9 +10,8 @@
   mop server callout     the bus's auth callout (unit mop-callout)
   mop server pve-facts   a Proxmox node's image and build facts, for the build playbook
 
-These need what lives only on the server: the inventory, the playbooks,
-secrets/ and the Nomad token. The old one-word names (mop server deploy, mop server user,
-mop server cluster, ...) still work for one release.
+These need what lives only on the controller: the inventory, the
+playbooks, secrets/ and the Nomad token.
 """
 from mop.cli import lib
 

@@ -8,7 +8,7 @@ Every command of `mop`, as its commandlet in `mop/cli` describes itself: the fir
 
 Run on a client: an operator's machine or a master shell.
 
-### core: every day, from a master shell
+### core: commands
 
 #### mop add
 
@@ -16,18 +16,18 @@ Run on a client: an operator's machine or a master shell.
 create a puppet: mop add [git-origin]
 
 Without origin, the origin of the current working copy is used. The name is
-picked automatically: <project>-<number>. Nomad decides placement — a puppet
-reserves 8 GB from the pool. Silent when the puppet is running; on a
-terminal it shows the current step. The new puppet is in mop list.
+picked automatically: <project>-<number>; placement over the pool and the
+8 GB reservation are not chosen here. Silent when the puppet is running; on
+a terminal it shows the current step. The new puppet is in mop list.
 ```
 
 #### mop attach
 
 ```text
-attach to a puppet's tmux session: mop attach <name>
+open a terminal on a puppet: mop attach <name>
 
-The only subcommand that goes over ssh instead of the bus: a live terminal
-isn't something a bus verb can hand over.
+Goes over ssh, not the bus: a live terminal is not something a bus verb
+hands over.
 ```
 
 #### mop code
@@ -64,9 +64,8 @@ a terminal, missing input refuses. This command never adds the pool's MCP tools.
 delete a puppet: mop delete <name> [--force]
 
 Where the body is the node itself, the clone stays and is reused if a puppet
-of that name comes back. Where the body is a container, it goes with the
-puppet: the clone lives inside it, and a body nobody owns is a running
-container holding memory and disk.
+of that name comes back; where it is a container, the body goes with the
+puppet — memory and disk with it.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
@@ -84,15 +83,11 @@ landing token of this project: mop landing [take <puppet>|give|show] [--force]
                                 take it from a gone master; says whose it was
   mop landing give --force      release a gone master's token
 
-Exactly one puppet between merge and push per project: two parallel gates
-race, and the second push bounces non-fast-forward after its gate ran against
-an integration that no longer exists. The token is kept by the cluster
-service, so every master of the project sees the same queue.
-
-take refuses while another master holds the token, naming who, for which
-puppet and since when; asking again for the same puppet is not an error. The
-holder is your login on the bus. There is no expiry: a holder that went away
-is released with --force.
+Exactly one puppet between merge and push per project: two parallel pushes
+race, and the second bounces non-fast-forward. take refuses while another
+master holds the token, naming who and since when; asking again for the same
+puppet is not an error. The holder is your login on the bus; a holder that
+went away is released with --force.
 ```
 
 #### mop list
@@ -109,51 +104,26 @@ the dispatch decision rests on this.
 ```text
 launch claude as a project's master: mop master [git-origin] [claude options]
 
-Without an argument, the origin of the current working copy is used. One
-project — one project: a master sees and reaches only its own puppets; anyone
-else's don't exist for it.
+Without an argument, the origin of the current working copy is used. A
+master sees and reaches only its own project's puppets; anyone else's don't
+exist for it.
 
-Only origin belongs to this command; everything else goes to claude
-as-is (`mop master --continue` resumes the master's last session). The
-command won't mirror claude's own flags: there are dozens of them, and the
-list would drift the moment claude ships a new version. Pass a flag that
-takes a VALUE after `--` (`mop master -- --model opus`): otherwise the value
-is indistinguishable from origin.
-
-You can run as many masters as you like, including several for one project:
-an inbox is addressed by master, not by project, so they never get confused.
-
-All this command does is work out the project, check its credentials, and exec
-into claude. From there the slice is inherited: mop mcp, spawned by this
-session as a child, sees MOP_PROJECT, builds the project's bus credentials from
-the server's directory (mop/common/creds.py) and subscribes to its project's inbox.
+Only origin belongs to this command; everything else goes to claude as-is
+(`mop master --continue` resumes the master's last session). A flag that
+takes a VALUE goes after `--` (`mop master -- --model opus`): otherwise the
+value is indistinguishable from origin. Several masters of one project are
+fine: inboxes are addressed per master.
 
 No ansible on this machine: bus and proxy credentials arrive with
 `mop login --server ADDRESS LOGIN`, started automatically if either record
-is missing. The server comes from the clone binding, MOP_SERVER_LAN or
---server; without one, a single joined server is selected. Without a
-terminal or an unambiguous server, login refuses before launching claude.
-The /master skill is linked from here.
+is missing; without a terminal or an unambiguous server it refuses before
+launching claude.
 
-The pool server arrives as an argument, not from a directory config. The
-master sits in a working copy of its own project, while the `.mcp.json` that
-names the server lives in the mop repository — that is, anywhere except
-where masters actually run. The very first run in a foreign directory came up
-with no mcp__mop__* at all, and the session could neither see the roster nor
-write to a puppet. Registering the server globally is possible, but
-~/.claude.json is live state that running sessions rewrite; the argument
-touches nothing and applies to this session alone.
-
-The master comes up in the same permission class as the pool it commands.
-Puppets live under --dangerously-skip-permissions, and the message channel
-checks classes: a puppet's report that reaches a master in ordinary mode gets
-parked in the held queue to wait for a human — meaning the loop stops being
-automatic on exactly its main signal. The price is named up front: the
-master can push, manage its project's puppets and talk to the tracker without
-asking on every step. The Nomad token stays on the server.
-
-The session uses the selected server's LLM proxy. Its URL and key come from
-the private client.json written by mop login, not from installation .env.
+The master runs in the same permission class as its pool: it can push,
+manage the project's puppets and talk to the tracker without asking on
+every step. The Nomad token stays on the server. The session uses the
+selected server's LLM proxy; its URL and key come from the private
+client.json written by mop login.
 ```
 
 #### mop profile
@@ -231,7 +201,7 @@ master shell the picture is the project's, not the pool's.
 #### mop tail
 
 ```text
-tail of a puppet's tmux buffer: mop tail <name> [-n N] [-f]
+tail of a puppet's screen: mop tail <name> [-n N] [-f]
 
 -n N   how many lines (default 10)
 -f     keep following until Ctrl-C
@@ -265,7 +235,7 @@ Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
 ```
 
-### pool: the pool and its machines, for the operator
+### pool: administration
 
 #### mop login
 
@@ -277,21 +247,17 @@ working copy's binding; if missing, they are asked for. The bus password is
 asked without echo (or read from MOP_BUS_PASSWORD) and verified before
 saving. A valid previous login is reused.
 
-The HTTPS port uses --https-port, the saved client port, MOP_HTTPS_PORT,
-or 443, in that order, without prompting. A sole joined server is selected
-when no server is named or bound. After authenticating to the bus, join asks
-the server for its LLM proxy URL and client key over a personal, authenticated
-subject. The key is never printed or asked for separately; /v1/models is
-checked before saving. Rejoining refreshes a rotated key without replacing
-working credentials when verification fails. Neither nodes nor puppets can
-request the key, and there is no public HTTP endpoint for it.
+The HTTPS port uses --https-port, the saved client port, MOP_HTTPS_PORT or
+443, in that order, without prompting; a sole joined server is selected when
+none is named. Join also fetches the server's LLM proxy URL and client key
+and verifies them before saving; rejoining refreshes a rotated key without
+replacing working credentials.
 
-The bus uses the server's TLS proxy at /nats. A self-signed certificate is
-pinned before sending the bus password; compare its fingerprint on the
-controller: openssl x509 -noout -fingerprint -sha256 -in
-~/.config/mop/secrets/tls.pem
+The server's certificate is pinned before the bus password is sent; compare
+the fingerprint on the controller: openssl x509 -noout -fingerprint -sha256
+-in ~/.config/mop/secrets/tls.pem
 
-Bus and proxy credentials stay in separate private files under
+Credentials stay in separate private files under
 ~/.config/mop/servers/<server>/. The clone remembers only server and login
 in local git config. --user NAME is the old spelling of LOGIN.
 ```
@@ -345,13 +311,12 @@ project tracker: GitLab issues, one issue per unit of work
   mop dev bug comment <iid> "<text>"               comment (or - for stdin)
   mop dev bug start <iid> [slug] [--no-branch]     claim: status::wip + branch
   mop dev bug close <iid> --comment "..."          close, default status::fixed
-  mop dev bug relabel <iid> --status live          back to the queue
-  mop dev bug relabel <iid> --status parked        postponed: stays open, not worked on
+  mop dev bug relabel <iid> [--status S]           change labels; live, wip, parked reopen
   mop dev bug labels                               the label vocabulary
 
 Coordinates come from the working copy's git origin; credentials are
-GITLAB_TOKEN (or GITLAB_USER + GITLAB_PASSWORD) in .env. Titles, bodies and comments are in
-Russian; branch names and commits stay English.
+GITLAB_TOKEN (or GITLAB_USER + GITLAB_PASSWORD) in .env. Titles, bodies
+and comments are in Russian; branch names and commits stay English.
 ```
 
 #### mop dev bug close
@@ -371,10 +336,9 @@ mop dev bug comment <iid> "<text>" | - | --body-file F: comment on an issue
 ```text
 mop dev bug edit <iid> [--title T] [--body TEXT|--body-file F|-] [--epic N | --no-epic]: change an issue
 
-Replaces the title and/or the whole body; the body comes from --body,
---body-file or stdin (-). The epic marker on the first line survives a body edit
-unless --epic names another parent or --no-epic removes it. Nothing named:
-usage, not a silent no-op.
+Replaces the title and/or body from --body, --body-file or stdin (-).
+The first-line epic marker survives a body edit unless --epic changes it or
+--no-epic removes it. With nothing to change, prints usage.
 ```
 
 #### mop dev bug epic
@@ -398,7 +362,9 @@ that branch. Missing/deleted branch tips cannot be verified.
 #### mop dev bug labels
 
 ```text
-mop dev bug labels: the label vocabulary
+mop dev bug labels: the label vocabulary, one from each group per issue
+
+A second label of the same group silently replaces the first.
 ```
 
 #### mop dev bug list
@@ -419,7 +385,10 @@ status label is added when none is given: status::live.
 #### mop dev bug relabel
 
 ```text
-mop dev bug relabel <iid> [--status S] [--label L ...]: change labels, reopen when the status is an open one
+mop dev bug relabel <iid> [--status S] [--label L ...]: change labels
+
+--status live, wip or parked also reopens a closed issue; fixed, noise and
+dup are closing statuses, but only `mop dev bug close` closes.
 ```
 
 #### mop dev bug show
@@ -431,7 +400,9 @@ mop dev bug show <iid>: the full body of an issue
 #### mop dev bug start
 
 ```text
-mop dev bug start <iid> [slug] [--no-branch] [--worker W]: claim an issue — status::wip plus a branch
+mop dev bug start <iid> [slug] [--no-branch] [--worker W]: claim an issue
+
+Sets status::wip and, unless --no-branch, creates the issue's branch.
 ```
 
 #### mop dev ci
@@ -440,13 +411,12 @@ mop dev bug start <iid> [slug] [--no-branch] [--worker W]: claim an issue — st
 pipelines, job logs, lint and runners: GitLab CI from the terminal
 
   mop dev ci                           the latest 15 pipelines
-  mop dev ci list [-n N]               the same, N of them
   mop dev ci <id> [--failed]           a pipeline's jobs; --failed: only real failures
   mop dev ci show <id> [--failed]      the same
   mop dev ci why <id>                  why it failed: failing jobs with their log tails
   mop dev ci log <job> [--lines N] [--full]
-                                   a job's log, the last 60 lines by default
-  mop dev ci lint [file]               check a .gitlab-ci.yml, the working copy's by default
+                                       a job's log, the last 60 lines by default
+  mop dev ci lint [file]               validate a .gitlab-ci.yml, the working copy's by default
   mop dev ci retry <job>               run a finished job again
   mop dev ci retry --pipeline <id>     rerun a pipeline's failed jobs
   mop dev ci cancel <id>               cancel a pipeline that is still going
@@ -468,11 +438,11 @@ skipped), naming its state: GitLab would accept that and do nothing.
 #### mop dev ci lint
 
 ```text
-mop dev ci lint [file]: check a .gitlab-ci.yml against the project
+mop dev ci lint [file]: validate a .gitlab-ci.yml the way GitLab would
 
-The file is the working copy's .gitlab-ci.yml by default. Prints
-"valid — N job(s): ..." or "invalid" with the errors (exit 1), then warnings.
-Includes resolve against the project, as they would in a pipeline.
+The file is the working copy's .gitlab-ci.yml by default; its includes are
+resolved. Prints "valid — N job(s): ..." or "invalid" with the errors
+(exit 1), then warnings.
 ```
 
 #### mop dev ci list
@@ -506,7 +476,7 @@ the new job's id and url; a pipeline retry prints the pipeline's.
 mop dev ci runners: the project's runners and the jobs they are running
 
 A runner per line: ON/OFF (takes work or paused), id, description, status
-(whether GitLab sees it), tags. Then each running job with the runner that
+(whether GitLab sees it), tags. Then each running job and the runner that
 holds it.
 ```
 
@@ -516,8 +486,8 @@ holds it.
 mop dev ci show <id> [--failed]: a pipeline's jobs
 
 The pipeline's line, then one line per job: status, id, stage, name,
-duration, and "(allow_failure)" for a job whose failure does not fail the
-pipeline. --failed shows only the failures that do.
+duration. A job marked "(allow_failure)" may fail without failing the
+pipeline; --failed lists only the jobs that did fail it.
 ```
 
 #### mop dev ci why
@@ -526,9 +496,9 @@ pipeline. --failed shows only the failures that do.
 mop dev ci why <id>: why a pipeline failed
 
 Each job that failed the pipeline, with the last lines of its log. A failed
-job with allow_failure is named as one that did NOT fail the pipeline. With
-no failed job at all, what the pipeline itself says (yaml_errors,
-failure_reason, detailed status): a rejected .gitlab-ci.yml fails with no jobs.
+job with allow_failure is named as one that did NOT fail the pipeline. When
+no job failed at all, the pipeline's own reason: a rejected .gitlab-ci.yml
+fails with no jobs.
 ```
 
 #### mop dev docs
@@ -538,18 +508,16 @@ mop dev docs: regenerate docs/CLI.md from the commandlets' docstrings
 
 Writes the CLI reference: every command and verb of `mop` with its whole
 docstring, in three parts -- client, server, service. Silent when the file
-is written.
+is written. A commandlet with an empty docstring is refused, named.
 
-The reference is committed, and tests/cli.py compares it with its
-regeneration: an edit to a commandlet's docstring ships with the
-regenerated docs/CLI.md in the same commit, or CI is red. A commandlet
-with an empty docstring is refused, named.
+The reference is committed: an edit to a commandlet's docstring ships with
+the regenerated docs/CLI.md in the same commit, or CI is red.
 ```
 
 #### mop dev test
 
 ```text
-run the checks in tests/: mop dev test [name ...] [--strict] [-v]
+mop dev test [name ...] [--strict] [-v]: run the checks in tests/
 
 Every file of tests/ (a helper named _*.py is not a check), or only the
 named ones: `mop dev test cli spec`. The checks of the working copy you run
@@ -585,7 +553,7 @@ Runs `npm ci` and `vite build` in web/. Silent when the build lands.
 
   --check   build into a temporary directory instead and compare it with
             web/dist byte for byte; the differing files are listed and the
-            exit code is 1 -- the committed dist must be rebuilt
+            exit code is 1: rebuild with `mop dev web build`
 
 Needs node and npm on this machine (the developer's or CI's), never on a
 server.
@@ -607,10 +575,8 @@ node driver: in what a puppet lives
                                  bake the project's image on the hypervisors;
                                  no argument: this working copy, .mop as it lies
 
-`run` is what the job spec calls. The outer wrapper is driver-agnostic because
-Nomad picks the node only after the spec is registered, so the master cannot
-know what the body will be; everything about the body happens here, on the
-node that owns it. Each verb is a module of this package.
+`run` raises the body and holds its session: everything about the body
+happens on the node that owns it, in whatever that node's driver is.
 ```
 
 #### mop driver build
@@ -684,11 +650,9 @@ pool nodes: mop node [drain|up|forget <name>]
   mop node up <name>       open it to the scheduler again
   mop node forget <name>   drop it from the roster
 
-Draining is graceful: the wrapper takes its session down on TERM, so a
-puppet leaves with its clone intact. `forget` refuses while anything still
-runs there — a node dropped from under a live puppet keeps working and the
-master never hears of it again — and while the node is in the inventory,
-which the next deploy would configure it from again.
+Draining is graceful: a puppet leaves with its clone intact. `forget`
+refuses while anything still runs there, and while the node is in the
+inventory — the next deploy would configure it from again.
 ```
 
 #### mop node drain
@@ -727,21 +691,14 @@ mop node up <name>: open the node to the scheduler again
 pool projects: mop project [add <git-origin>|delete <name>|list]
 
   mop project              what the pool serves: one line per project
-  mop project add [origin] register a project and put it on the bus
+  mop project add [origin] register a project for the pool
                            (default: this working copy's origin)
-  mop project delete <name> take it off the bus and out of the registry
+  mop project delete <name> take it off the pool
   mop project limit [<name> <N|none>]  puppet limit of a project
   mop project list [--origins]  the same list, for scripts
 
-A project is one repository, one slice of the pool, one master; its name is
-the basename of its origin, and the pool builds puppet names from it. The
-registry lives on the server and is the only answer to "which projects are
-set up"; every subcommand is an operator's verb of the cluster service,
-so it works from any machine with the admin role, not only from the
-controller. Operators reach a project by their role in the server's identity provider.
-
-Registering used to be a side effect of `mop server deploy <origin>` and there was
-no way to take a project off. `mop server deploy` no longer takes origins.
+A project is one repository and one slice of the pool; its name is the
+basename of its origin, and puppet names are built from it.
 ```
 
 #### mop project add
@@ -769,17 +726,12 @@ the build's output, and erases both when done.
 #### mop project delete
 
 ```text
-take a project off the bus: mop project delete <name>
+take a project off the pool: mop project delete <name>
 
-Asks the cluster service on the server (operator's verb project_delete):
-the project leaves the server's registry, its NATS user and bus
-password go, and so does its puppet limit.
-
-Refuses while the project still has puppets: a master whose puppets are
-alive would lose the bus under them, and the puppets would keep working
-with no one able to hear them. Delete them first (mop delete <name>).
-
-The repository is not touched: this is about the pool, not about the code.
+The project leaves the pool together with its puppet limit; its puppets
+lose the bus. Refuses while the project still has puppets — they would keep
+working with no one able to reach them — delete its puppets first
+(mop delete pu-<project>-<n>). The repository is not touched.
 ```
 
 #### mop project limit
@@ -806,9 +758,7 @@ service reads it on every add, so no restart is needed.
 ```text
 projects the pool serves: mop project list [--origins]
 
-Asks the cluster service for the server's registry. --origins prints
-the origins themselves; without it, project names — the same names the bus
-users are built from.
+--origins prints the origins themselves; without it, project names.
 ```
 
 ### secret: project secrets: mop secret file|var add|list|remove
@@ -873,9 +823,8 @@ the installation's server: commands run on the controller, not on a client
   mop server callout     the bus's auth callout (unit mop-callout)
   mop server pve-facts   a Proxmox node's image and build facts, for the build playbook
 
-These need what lives only on the server: the inventory, the playbooks,
-secrets/ and the Nomad token. The old one-word names (mop server deploy, mop server user,
-mop server cluster, ...) still work for one release.
+These need what lives only on the controller: the inventory, the
+playbooks, secrets/ and the Nomad token.
 ```
 
 #### mop server bootstrap
@@ -906,8 +855,8 @@ mop server bootstrap check: is the service answering on the bus, and for which p
 ```text
 mop server bootstrap serve: the server's subscriber (unit mop-bootstrap)
 
-Listens on mop.*.server.rpc and plays a project's .mop/bootstrap.yaml into a
-sandbox when its node asks at start (docs/BOOTSTRAP.md).
+Plays a project's .mop/bootstrap.yaml into a sandbox when its node asks
+at start (docs/BOOTSTRAP.md).
 ```
 
 #### mop server callout
@@ -915,10 +864,10 @@ sandbox when its node asks at start (docs/BOOTSTRAP.md).
 ```text
 mop server callout: the bus's auth callout (unit mop-callout)
 
-On the server, as the pool user. nats-server asks it at every connect of
-someone not in auth_users: people are checked by the identity provider and
-get the rights they had in users.conf, only over WebSocket; puppets are
-checked against the server's own password files. docs/BUS.md.
+On the server, as the pool user. Handles authentication for people —
+checked by the identity provider, keeping their rights, only over
+WebSocket — and for puppets, checked against the server's own password
+files. docs/BUS.md.
 ```
 
 #### mop server cluster
@@ -932,10 +881,9 @@ cluster service: mop server cluster [serve|check|users|reload|builder] — Nomad
   mop server cluster reload   make nats reread its config, and check it took
   mop server cluster builder  the server's image builder (unit mop-builder)
 
-The only thing on the installation that talks to Nomad on someone else's
-behalf. A master and an operator ask a verb on mop.<project>.cluster.rpc;
-the service checks whether they may and only then calls the API, so the
-management token stays on the server (mop/server/cluster.py).
+The only one on the installation that talks to Nomad on someone else's
+behalf: masters and operators ask, the service checks that they may —
+the management token never leaves the server.
 ```
 
 #### mop server cluster builder
@@ -1009,35 +957,19 @@ things required in .env are secrets.
 ```text
 deploy: mop server deploy [--check] [--skip-pipeline] [--from-ci]
 
-The whole installation in one run: one playbook, site.yml, so there is one
-ansible process and one PLAY RECAP — a line per machine over every layer.
-No separate targets: fixing what fell over is cheaper by rerunning than by
-remembering which target owned it.
+The whole installation in one run; no separate targets — rerunning is
+cheaper than remembering which target owned what. Machines only:
+projects come and go with `mop project add|delete`, deploy takes no
+arguments.
 
-Machines, not projects. Which projects the pool serves is the registry
-(~/.config/mop/projects) and `mop project add|delete`; deploy reads it and
-takes no arguments. While it accepted an origin, registering a project
-was a side effect of a full run, and there was no way to take one off at all.
-
---check runs the same playbook in ansible's check mode with --diff: nothing
-on the machines changes, and the output is the difference a real run would
-make. Nothing after the playbook runs: collecting the server credentials
-writes files, and the roster check is not the question a dry run answers.
-
-With MOP_DEPLOY_NEEDS_GREEN=1 in .env, deploy refuses unless the GitLab
-pipeline of the working copy's HEAD on origin's default branch is success,
-or still running with every job outside stage deploy green (CI rolling
-itself out); another branch's pipeline of the same commit does not count. --skip-pipeline is
-the emergency way past it, and says so. --check changes nothing and is not
-gated.
-
---from-ci is what CI's deploy job runs on the server: the working copy must
-be on origin's default branch with no tracked file modified; it fetches,
-fast-forwards to origin and rolls that out. The pipeline gate is mandatory
-there: it refuses without MOP_DEPLOY_NEEDS_GREEN=1 and with --skip-pipeline.
-When the only answer of the gate is "wait", HEAD has moved past the commit
-that started the job, and that newer commit's own deploy job rolls it out:
---from-ci then says so and exits 0. Every other refusal stays a refusal.
+--check: ansible's check mode with --diff — nothing changes, and
+nothing runs after the playbook. With MOP_DEPLOY_NEEDS_GREEN=1 deploy
+refuses unless HEAD's pipeline on the default branch is green;
+--skip-pipeline is the emergency way past and says so. --from-ci is
+what CI runs on the server: default branch, fetch, fast-forward, the
+gate mandatory; when the gate's only answer would be "wait" because
+HEAD has moved past the commit that started the job, it exits 0 — the
+newer job deploys it.
 ```
 
 #### mop server disk
@@ -1055,24 +987,15 @@ to the whole pool, not to one project.
 ```text
 pool diagnostics: mop server doctor [group] [--fix [--safe]]
 
-Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
-and a job spec older than the node driver — that last one looks perfectly
-healthy until the scheduler moves it to a hypervisor. The disk group asks each
-node's agent what the disk watchdog would sweep there and who is under disk
-pressure; --fix sweeps for real.
+Catches stuck puppets, a stale login, restart backoff, exhausted quota,
+and a job spec older than the node driver. Without an argument every
+group runs; an unknown group name is refused with the list.
 
-The checks come in groups, a module each in mop/server/doctor/: `mop server doctor` runs them all, `mop server doctor <group>` runs one; an unknown name is
-refused with the list of groups.
-
---fix treats what's treatable; a silent node agent is not on this list — the
-puppet may well be working fine, and a restart would kill that work in the
-clone. An expired login is treated without a restart: the puppet is nudged
-to go on, so its conversation survives.
-
---fix --safe treats only what cannot break work — login+nudge and the disk
-sweep — and names the rest without executing it: restarts, alloc stops,
-/model and spec updates stay the operator's call. The server runs it hourly
-(mop-doctor.timer), its output goes to the journal.
+--fix treats what is treatable; a silent node agent is left alone — the
+puppet may be working, and a restart would kill that work. --fix --safe
+treats only what cannot break work (login+nudge, disk sweep) and names
+the rest: restarts, stops, /model and spec updates stay the operator's
+call. The server runs --fix --safe hourly (mop-doctor.timer).
 ```
 
 #### mop server gc
@@ -1089,17 +1012,15 @@ is a fact about every tenant, not one project.
 #### mop server pve-facts
 
 ```text
-mop server pve-facts --base N [--project P --listing TEXT]: what the playbooks know of the pve driver, as JSON
+mop server pve-facts --base N [--project P --listing TEXT]: the pve driver's facts as JSON
 
-The facts of one hypervisor, from its VMID base (the host's line in the
-inventory): the bodies' network, gateway and prefix, the routes to its
-bodies, the wrapper path, the body key and known_hosts, the top of its VMID
-range. With --project, also the project's image and build body (vmid, name,
-address, whether it stands) and the project's bodies standing there;
---listing is the output of the wrapper's `list` on that node.
+One hypervisor's facts from its VMID base (the host's inventory line):
+the bodies' network, gateway and prefix, the routes, the wrapper path,
+the body key and known_hosts, the top of its VMID range. With --project
+also its image and build body, and the project's bodies standing there;
+--listing is the wrapper's `list` output on that node.
 
-Run by deploy/pve-build.yml and the pve role on the controller; one
-computation in mop/driver/pve.py instead of copies in the playbooks.
+Controller-side facts for the image build and the hypervisor role.
 ```
 
 #### mop server setup
@@ -1124,25 +1045,12 @@ deploy/self.yml against localhost. Running it again changes nothing.
 ```text
 garbage on the pool's nodes: mop server sweep [--dry]
 
-Objects no puppet owns any more. Nomad is the authority: a body whose name
-is in no job is an orphan, and on a hypervisor an orphan is a running
-container holding memory and disk that nothing accounts for.
-
-Run this on the server, not from a master shell: what stands on a node is
-a fact about every tenant, not about one project — the same reason
-`mop server gc` and `mop server disk` live outside a master's reach.
-
-Two kinds, deliberately of different weight. An `orphan` is destroyed: its
-puppet is gone and the body cannot come back to anyone. A `build body` is
-only named — a sealed image always stands still, so one that runs is either a
-build happening right now or a build that broke, and from here those two
-look the same. Destroying someone's running build costs more than leaving
-rubbish until the next sweep.
-
-`mop driver sweep` is the other half and stays: it runs ON a node, knows
-nothing of Nomad, and judges by the absence of a tmux session. That is the
-right signal for a node left alone; this one is the right signal for the
-machine that holds the register.
+Destroys orphan bodies — those no job names any more — and only lists
+build bodies: a running sealed image is either a live build or a broken
+one, and they look the same from here. --dry lists without destroying.
+Run on the server, not a master shell: what stands on a node is every
+tenant's fact. `mop driver sweep` is the node half: it judges by the
+absence of a tmux session.
 ```
 
 #### mop server user
@@ -1221,35 +1129,26 @@ Silent when all goes well.
 ```text
 pool dashboard on the web: mop server web [--port N] [--bind ADDR]
 
-The same picture as `mop list`, `mop node` and `mop stat` on one page,
-refreshed in place (docs/WEB.md):
+`mop list`, `mop node` and `mop stat` on one page, refreshed in place:
 
-  /            the page: the built application, web/dist/index.html
-  /assets/N    the application's files from web/dist/assets (hashed names)
-  /logo.png    the logo (docs/logo.png), also the favicon
-  /api/pool    the current snapshot as JSON
-  /events      the same snapshot pushed as server-sent events
+  /            the page, /assets/N its files, /logo.png
+  /api/pool    snapshot as JSON; /events — the same as SSE
   /healthz     200 once the first snapshot is in
-  /api/session who is logged in; login and logout by post with JSON on
-               /api/login, /api/logout -- file/LDAP via the same identity
-               as the bus, server-side session cookie, for the admin gate
-  /api/journal the full event journal, admin only (current role re-checked
-               per request); the public snapshot and /events carry no entries
+  /api/session the session; /api/login and /api/logout by JSON post
+               (file/LDAP, bus identity)
+  /api/journal the full journal, admin only; the public feeds none
 
-No login on the page (the LAN is trusted, operator's decision 2026-09-26;
-authorization comes later). The pool itself stays read-only here: a restart
-from a button would kill the work in a puppet's clone, and puppet actions
-snapshot carries names, owners and statuses only, and the journal never sees
-a code.
-Port and bind address default to MOP_WEB_PORT (9000) and MOP_WEB_BIND
-(127.0.0.1): outside the server the page is reached through the TLS proxy.
+The overview is available without login; logging in opens the admin side —
+the journal and the proxy panel. The pool stays read-only here: a
+restart button would kill work in a clone. Port and bind:
+MOP_WEB_PORT (9000), MOP_WEB_BIND (127.0.0.1); beyond — the TLS proxy.
 ```
 
 ## Service
 
 Started by systemd and the job spec, not by hand.
 
-### service: run by systemd and the job spec, not by hand
+### service: managed services (not for interactive use)
 
 #### mop agent
 
@@ -1259,32 +1158,15 @@ node agent: answers the bus about the puppets on this node (unit mop-agent)
   mop agent            subscribe and serve, until stopped
   mop agent --check    ask this node's agent over the bus whether it answers
 
-One per node, under systemd, outside the job spec (docs/BUS.md). The unit
-starts it as `mop agent`; units not yet rolled out still start
-`python3 -m mop.agent`, which lands here too.
-
-Runs on a node: nothing here may import what a node does not have
-(python-nomad, the installation's .env) -- hence no mop.cli.lib.
+One per node, under systemd, outside the job spec (docs/BUS.md): it must
+answer precisely while a puppet is restarting.
 ```
 
 #### mop mcp
 
 ```text
-pool MCP server: the same pool as tools for claude
+mop mcp [--check]: expose pool commands as tools
 
-Started as `mop mcp` by a claude session, a master's or a puppet's, as its
-child process; the transport is stdio.
-
-What it offers is decided by the bus credentials, not by flags:
-
-  * an operator's login with MOP_PROJECT -- a project's master: the channel
-    and management, over that project's slice of the pool (`mop master`
-    sets the project);
-  * an operator's login without a project -- the operator: the same over
-    the whole pool;
-  * `puppet-<project>` -- a puppet: the channel only.
-
-The management tools are the commandlets themselves: one that declares
-`MCP = {...}` becomes a tool. The channel's protocol is docs/CHANNEL.md, the
-bus subjects docs/BUS.md, the server docs/MCP.md.
+Started by a claude session. --check shows the local profile and connection
+settings; the available tools depend on the session's access.
 ```

@@ -580,6 +580,27 @@ def main():
         c.expect("the same line goes to stderr", err.getvalue().strip(), line.strip())
     # STATUS: FIXED — see #213
 
+    # HYPOTHESIS: сессия мастера может умереть после поиска сокета; его
+    # локальный путь выезжает в отказ отправителю через шину.
+    # SOLUTION: отсутствие сокета и отказ соединения дают один безопасный
+    # вердикт с полезным действием; прочие ошибки не глушатся.
+    # RESULT: путь не уходит адресату при обеих формах смерти сессии.
+    # STATUS: FIXED — see #437
+    missing = "/run/user/1000/private/master-123.sock"
+    message = {"verb": "message", "text": "report", "from": "pu-mop-9"}
+    with patched(channel, master_socket=lambda: missing), \
+            patched(session, send=lambda *a, **k: (_ for _ in ()).throw(
+                ConnectionError(f"inbox not found: {missing} — session died or moved"))):
+        try:
+            outcome = mcp.on_inbox(message)
+        except ConnectionError as e:
+            c.fail("#437 dead inbox must return a verdict instead of raising", str(e))
+            outcome = {}
+    want = {"error": "master session unavailable — choose a live master"}
+    c.expect("#437 dead inbox names action without path", outcome, want)
+    with patched(channel, master_socket=lambda: None):
+        c.expect("#437 missing inbox uses the same refusal", mcp.on_inbox(message), want)
+
     # ─── #226: --check не выдаёт свой адрес за адрес живого сервера ─────────
     # HYPOTHESIS: `mop mcp --check` -- отдельный процесс; MASTER_ID строится
     # из его собственного pid, и напечатанный адрес с инбоксом не слушает
@@ -626,6 +647,36 @@ def main():
     c.expect("#250 base of ticket branches and landing target",
              "origin/swarm" in mine and "land" in mine.lower(), True)
     c.expect("#250 the plain text is kept verbatim in front", mine.startswith(plain), True)
+
+    # HYPOTHESIS: MCP повторяет внутреннее устройство канала в инструкциях
+    # и каждом описании; сокращение докстрингов командлетов его не затрагивает.
+    # SOLUTION: инструкции и четыре рукописных описания говорят о выборе
+    # инструмента и последствиях force, не о транспортном механизме.
+    # RESULT: модель получает короткие действия без потери ограничения.
+    # STATUS: FIXED — see #434
+    shown = {t.name: t.description for t in mcp.app._tool_manager.list_tools()}
+    for name in ("agents", "send", "tail"):
+        c.check(f"#434 {name} still described", bool(shown.get(name)))
+        c.check(f"#434 {name} hides transport internals", not any(
+            word in (shown.get(name) or "") for word in
+            ("node agent", "skipSlashCommands", "bus", "tmux", "neighboring node")))
+    c.check("#434 send retains force/ownership warning", all(
+        word in shown["send"] for word in ("force", "owner")))
+    c.check("#434 agents retains free-work rule", all(
+        word in shown["agents"] for word in ("free", "unsaved")))
+    # В профиле папета slash не зарегистрирован: читаем объявление инструмента.
+    import inspect
+    slash_source = inspect.getsource(mcp.slash)
+    c.check("#434 slash omits transport implementation", "skipSlashCommands" not in slash_source)
+    c.check("#434 slash retains allowed-command list and force", all(
+        word in slash_source for word in ("SLASH_ALLOWED", "force=true")))
+    c.check("#434 instructions avoid implementation history", not any(
+        word in plain for word in ("Nomad", "NATS", "bus", "neighboring node")))
+    c.check("#434 --check describes local settings, not a live reachability test",
+            "local profile" in (mcp.__doc__ or "") and
+            "can reach" not in (mcp.__doc__ or ""))
+    c.check("#434 instructions retain dispatch check", all(
+        word in plain for word in ("agents", "send", "unsaved")))
 
     c.check("#264 one envelope, one fallback, request_many(verb, nodes)",
             check_bus_envelope_264(c))

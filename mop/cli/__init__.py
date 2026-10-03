@@ -39,9 +39,9 @@ BIN = os.path.join(PROJECT, "bin")
 # служебное последним.
 SECTIONS = ("core", "pool", "service")
 TITLES = {
-    "core": "every day, from a master shell",
-    "pool": "the pool and its machines, for the operator",
-    "service": "run by systemd and the job spec, not by hand",
+    "core": "commands",
+    "pool": "administration",
+    "service": "managed services (not for interactive use)",
 }
 
 
@@ -294,7 +294,7 @@ def tool_argv(args, values):
         if skipped:
             raise ValueError(f"{a['name']} needs {skipped} too: positionals go in order")
         if str(v).startswith("-"):
-            raise ValueError(f"{a['name']}: {v!r} would read as a flag")
+            raise ValueError(f"{a['name']}: value would read as a flag")
         argv.append(str(v))
     return argv + flags
 
@@ -306,13 +306,8 @@ def _path_of(section, name, is_pkg):
 def usage(found=None):
     """Список команд по секциям — ответ на `mop` без аргументов."""
     found = scan() if found is None else found
-    lines = ["mop — pool of claude puppets on top of Nomad, message bus on top of NATS",
-             "", "  mop [--server ADDRESS] <command> [arguments]",
-             "", "  the server and the login come from the working copy (git config",
-             "  mop.server, mop.user), then MOP_SERVER_LAN / MOP_BUS_USER, then",
-             "  --server; with none of them, the one joined server. Several",
-             "  joined servers need --server. Join first if none is known.",
-             "  Integration branch: git config mop.branch, or MOP_BRANCH"]
+    lines = ["mop — manage the pool",
+             "", "  mop [--server host] <command> [arguments]"]
     groups = [(s, n, p) for s, n, p in found if p]
     for section in SECTIONS:
         rows = [(n, describe(_path_of(section, n, False)))
@@ -426,8 +421,7 @@ def main(argv):
     except RuntimeError as e:
         sys.exit(f"mop: {e}")
     if found is None:
-        print(f"mop: no such subcommand «{argv[0]}»", file=sys.stderr)
-        print(usage(), file=sys.stderr)
+        print(f"mop: unknown command {argv[0]!r}; run 'mop help'", file=sys.stderr)
         return 1
     modname, rest = found
     # Контекст -- до environment(): тот читает настройки, и сервер в них
