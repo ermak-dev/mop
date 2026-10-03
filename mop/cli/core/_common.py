@@ -7,7 +7,7 @@ import os
 import time
 
 from mop.cli import lib
-from mop.common import bus, busnames, config, creds, llm, manifest, puppets
+from mop.common import bus, busnames, config, creds, llm, manifest, ops, puppets
 
 
 def workspace_text(origin):
@@ -66,6 +66,39 @@ def sent_line(prov):
 BOOTSTRAP_WAIT = busnames.BOOTSTRAP_TIMEOUT + 120
 NOT_REPLACED = ("bootstrap not played: the spec is unchanged, "
                 "Nomad kept the running allocation")
+
+
+def render(v, p=None, name=None):
+    """Вердикт общей операции (#458) -> код выхода командлета (#459).
+
+    Пользовательский контракт прежний: успех -- молча (или строкой итога
+    прогона), отказ -- ошибкой, unknown/partial -- ошибкой с тем, что
+    известно. Эхо параметров нет (#179)."""
+    if p:
+        p.clear()
+    kind = v.get("outcome")
+    name = name or v.get("name")
+    if kind == ops.REGISTERED:
+        line = outcome_line(v.get("bootstrap"), BOOTSTRAP_WAIT) \
+            if v.get("bootstrap") is not None else None
+        if line:
+            print(line, flush=True)
+        return 0
+    if kind == ops.ACCEPTED:
+        if v.get("replaced") is False:
+            print(NOT_REPLACED, flush=True)
+        return 0
+    if kind == ops.REFUSED:
+        lib.fail(v.get("error") or "refused")
+        return 1
+    if kind == ops.PARTIAL and v.get("bootstrap") is None:
+        # Итог не увиден -- не известный провал, а неизвестность (#334):
+        # stdout и 0, а не ошибка.
+        print(outcome_line(None, v.get("waited", BOOTSTRAP_WAIT)), flush=True)
+        return 0
+    # unknown и partial с ошибкой: эффект мог случиться -- честно сказать.
+    lib.fail(v.get("error") or f"{name}: outcome {kind}")
+    return 1
 
 
 def outcome_line(record, waited):
