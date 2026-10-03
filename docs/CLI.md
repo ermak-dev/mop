@@ -1250,6 +1250,6 @@ Runs on a node: nothing here may import what a node does not have
 ```text
 mop mcp [--check]: expose pool commands as tools
 
-Started by a claude session. --check shows whether it can reach the pool;
-the available tools depend on the session's access.
+Started by a claude session. --check shows the local profile and connection
+settings; the available tools depend on the session's access.
 ```

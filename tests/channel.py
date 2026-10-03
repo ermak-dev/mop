@@ -651,6 +651,9 @@ def main():
         word in slash_source for word in ("SLASH_ALLOWED", "force=true")))
     c.check("#434 instructions avoid implementation history", not any(
         word in plain for word in ("Nomad", "NATS", "bus", "neighboring node")))
+    c.check("#434 --check describes local settings, not a live reachability test",
+            "local profile" in (mcp.__doc__ or "") and
+            "can reach" not in (mcp.__doc__ or ""))
     c.check("#434 instructions retain dispatch check", all(
         word in plain for word in ("agents", "send", "unsaved")))
 
