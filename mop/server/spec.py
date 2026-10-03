@@ -220,14 +220,23 @@ hooks="$HOME/.config/mop/claude-hooks.json"
 # -- claude встаёт без --settings, а врапер говорит об этом в лог задачи.
 # Упасть здесь значило бы уронить папета из-за того, что должно лишь сообщать
 # о нём. Внутри if set -e не срабатывает -- на этом и стоит развилка.
+# Статус-строка (#455) -- в тот же файл и тем же jq: claude папета зовёт
+# глагол statusline того же session.py (#453). Охрана здесь -- НЕ копия
+# хуковой: stdout хука -- шум в контексте модели, а stdout статус-строки --
+# сама строка, и глушить её значило бы убрать статус-строку целиком.
+# Гасятся stderr и код выхода: старый session.py без глагола печатает usage
+# и выходит 2, отсутствующий -- ненулевой; без охраны строка гасла бы на
+# каждом ходу до раскатки пакета по узлам.
 settings=""
 if mkdir -p "$(dirname "$hooks")" \
-    && jq -n --arg cmd "python3 $mop_root/mop/session.py hook >/dev/null 2>&1 || true" '
+    && jq -n --arg cmd "python3 $mop_root/mop/session.py hook >/dev/null 2>&1 || true" \
+           --arg status "python3 $mop_root/mop/session.py statusline 2>/dev/null || true" '
         {hooks: (["SessionStart", "UserPromptSubmit", "Stop", "StopFailure",
                   "PostModelSwitch"]
             | map({key: ., value: [{hooks: [{type: "command", command: $cmd,
                                              timeout: 5}]}]})
-            | from_entries)}' > "$hooks.$PU_NAME.tmp" \
+            | from_entries),
+         statusLine: {type: "command", command: $status}}' > "$hooks.$PU_NAME.tmp" \
     && mv "$hooks.$PU_NAME.tmp" "$hooks"; then
     settings="--settings $hooks"
 else

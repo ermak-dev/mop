@@ -713,6 +713,92 @@ def check_hook_events_341(c):
                 got is not None and len(got) == len(set(got)) and set(got) == want,
                 f"wrapper {got}, session {sorted(want)}")
 
+# ── #455: статус-строка -- в тот же файл --settings, тем же корнем ────────
+# HYPOTHESIS: файл --settings врапера несёт только хуки, и статус-строка
+# папета не настроена вовсе: claude показывает свой дефолт, который ничего
+# не знает о пуле. Глагол statusline (#453) читает stdin JSON и печатает
+# строку, но claude папета его не зовёт -- ровно та же болезнь, что #223
+# с хуками.
+# SOLUTION: тот же jq, который пишет хуки, кладёт рядом top-level statusLine
+# с командой `python3 <тот же mop_root>/mop/session.py statusline` (#223:
+# корень -- тот же, откуда стартует mop, иначе команда молча умрёт на узле).
+# Охрана своя, не копия хуковой: stdout хука -- шум в контексте модели, а
+# stdout статус-строки -- САМА строка, глушить её значило бы убрать
+# статус-строку целиком. Гасятся stderr и код выхода: старый session.py без
+# глагола печатает usage в stderr и выходит 2, отсутствующий -- ненулевой,
+# и без охраны это видит экран папета на каждом ходу.
+# STATUS: RED
+STATUSLINE_VERB = "statusline"
+STATUSLINE_GUARD = "2>/dev/null || true"
+
+
+def check_statusline_455(c):
+    """#455: файл --settings несёт хуки как прежде И top-level statusLine
+    командой из того же mop_root; охрана гасит stderr и код выхода любого
+    session.py на узле, не трогая stdout."""
+    import shutil
+    import subprocess
+    import tempfile
+    section = hooks_section()
+    if not c.check("the wrapper has no claude hooks section", not (section is None)):
+        return
+    if shutil.which("jq", path=os.environ["PATH"]) is None:
+        hermetic.skip("the statusline settings check", "no jq on this machine")
+        return
+    home = tempfile.mkdtemp()
+    try:
+        # Кусок исполняется как в теле: set -e, свой HOME, имя папета.
+        r = run_hooks_section(section, home, os.environ["PATH"])
+        if not c.check("the hooks section fails", not (r.returncode), r.stderr.strip()):
+            return
+        mop_root, hooks, _settings = r.stdout.split("\n")
+        try:
+            with open(hooks) as f:
+                doc = json.load(f)
+        except (OSError, ValueError) as e:
+            c.fail("the settings file is not JSON", e)
+            return
+        # (a) хуки как прежде: пять событий, каждая -- охраняемый вызов hook
+        events = (doc.get("hooks") or {})
+        cmds = {h.get("command") for groups in events.values()
+                for g in groups for h in g.get("hooks", [])}
+        session_py = f"{mop_root}/mop/session.py"
+        c.check("the hooks must stay as they were, on the same session.py",
+                not (set(events) != HOOK_EVENTS
+                     or cmds != {f"python3 {session_py} hook >/dev/null 2>&1 || true"}),
+                f"{sorted(events)}, {sorted(cmds)}")
+        # (b) top-level statusLine: глагол того же session.py, из того же
+        # mop_root, с охраной stderr и кода выхода
+        line = doc.get("statusLine")
+        c.check("the settings must carry a top-level statusLine command",
+                isinstance(line, dict) and line.get("type") == "command"
+                and isinstance(line.get("command"), str), line)
+        cmd = line.get("command", "") if isinstance(line, dict) else ""
+        want = f"python3 {session_py} {STATUSLINE_VERB} {STATUSLINE_GUARD}"
+        c.check(f"the statusLine command must be {STATUSLINE_VERB!r} of the "
+                "same session.py, guarded",
+                cmd == want, f"got {cmd!r}, want {want!r}")
+        # (c) охрана держит против любого session.py на узле: старый без
+        # глагола (usage в stderr, выход 2) и отсутствующий. Выход 0 и тишина
+        # в stderr; stdout -- полезная нагрузка, от старого её просто нет.
+        os.makedirs(os.path.dirname(session_py), exist_ok=True)
+        for what, body in (("an old session.py", "import sys\n"
+                            "print('usage: session.py ...', file=sys.stderr)\nsys.exit(2)\n"),
+                           ("no session.py", None)):
+            if body is None:
+                os.remove(session_py)
+            else:
+                with open(session_py, "w") as f:
+                    f.write(body)
+            r = subprocess.run(["sh", "-c", cmd], input="{}", text=True,
+                               capture_output=True)
+            c.check(f"{what}: the statusLine command must exit 0 with no stderr",
+                    not (r.returncode or r.stderr),
+                    f"got {r.returncode} {r.stderr!r}")
+    finally:
+        shutil.rmtree(home)
+
+
 def check_claude_hooks_223(c):
     """STATUS: FIXED — see #223"""
     import base64
@@ -925,6 +1011,7 @@ def main():
                check_git_identity, check_driver_free_183,
                check_memory_197, check_project_asks_197, check_spec_memory_197,
                check_nomad_order_197, check_claude_hooks_223, check_hook_events_341,
+               check_statusline_455,
                check_job_meta_265,
                check_node_pin_289):
         fn(c)
