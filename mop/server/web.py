@@ -835,3 +835,55 @@ def full_entry(msg, now=None):
     return entry
 
 
+
+
+# ── карточка папета и его хвост (#462) ───────────────────────────────────
+# Приватные read-only маршруты дашборда: гость не входит, user не admin,
+# цель -- РЕАЛЬНЫЙ job из строк ростера (имя из пути до читателей не
+# доезжает: неизвестное -- 404, а не запрос к шине). Читатели -- молчаливые
+# функции puppets (pane_lines, alloc_stderr, node_of): HTTP-слой их только
+# зовёт, ничего не парся из CLI. Лимиты -- константы сервера, обрезание
+# помечается честно. Мутирующих глаголов здесь нет вовсе.
+TAIL_LINES = 1000        # строк панеля: tmux-история бывает огромной
+STDERR_LINES = 200       # строк stderr задачи
+TAIL_TIMEOUT = 30        # с на панель: медленный du не должен рвать ответ
+
+
+def puppet_card(rows, name):
+    """Строка ростера по имени -> PuppetRow | None. Чистая функция.
+
+    Цель ищется по РЕАЛЬНЫМ строкам (Collector.rows), не по префиксу пути и
+    не по запросу шины: имя, которого нет в ростере, -- отсутствующая цель,
+    а не чужая. Контракт статуса -- #452, как есть: слово по kind, detail,
+    branch -- уже в строке."""
+    for r in rows or []:
+        if r.name == name:
+            return r
+    return None
+
+
+def puppet_tail(name, pane, node_of):
+    """Хвост экрана папета -> (строки, обрезано) | (None, причина).
+
+    pane/node_of -- читатели puppets (подмена в проверках): узел берётся у
+    работающего job'а, панель -- целиком и режется с конца до лимита;
+    обрезание помечается, молчать о нём -- врать оператору."""
+    try:
+        node = node_of(name)
+    except (LookupError, RuntimeError, Exception) as e:
+        return None, f"node unknown: {e}"
+    try:
+        lines = pane(node, name)
+    except Exception as e:  # читатель умер -- честный отказ, не пустота
+        return None, f"reader failed: {e}"
+    if len(lines) <= TAIL_LINES:
+        return lines, False
+    return lines[-TAIL_LINES:], True
+
+
+def puppet_stderr(name, stderr_reader):
+    """Хвост stderr задачи папета -> (строки, причина | None)."""
+    try:
+        return stderr_reader(name, STDERR_LINES), None
+    except Exception as e:
+        return None, f"reader failed: {e}"

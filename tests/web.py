@@ -1930,6 +1930,240 @@ def check_gateway_key_path_425(c):
              web.mgmt_key_path(), paths.local(paths.SECRETS, "llm-proxy-mgmt.pass"))
 
 
+# ── #462: приватная карточка папета и ограниченный tail ──────────────────
+# HYPOTHESIS: у дашборда нет ни карточки одного папета, ни его хвоста: чтобы
+# посмотреть stderr или экран, оператор заходил на сервер по ssh. Но HTTP-слой
+# тонкий, а читатели уже есть -- молчаливые функции puppets (pane_lines,
+# alloc_stderr, node_of). Новые маршруты обязаны: пускать только актуального
+# admin (роль перечитывается провайдером на каждом запросе -- сменившегося
+# admin -> user не пускаем), целиться в РЕАЛЬНЫЙ job из строк ростера (имя
+# из пути не доезжает до шины нетронутым: неизвестное имя -- 404, а не
+# запрос), держать лимиты (строки хвоста, таймаут) и честно помечать
+# обрезание. Хвост -- только admin, не в публичный SSE-снимок и не в журнал.
+# SOLUTION: два GET-маршрута за admin-гейтом; сборка ответа -- в
+# web.puppet_card/web.puppet_tail (чистые функции над читателями), слой HTTP
+# только гейт и отправка. Никаких мутирующих RPC: пути только на чтение.
+# STATUS: see #462
+class _FakeReaders:
+    """Молчаливые читатели puppets для #462: счётчики вызовов и влияние
+    подмен -- панель, stderr, узел. Никогда не шина: проверка чистая."""
+
+    def __init__(self, panes=None, stderr=None, nodes=None, stderr_error=None):
+        import mop.common.puppets as p
+        self.calls = []
+        self.panes = panes or {}
+        self.stderr = stderr or {}
+        self.nodes = nodes or {}
+        self.stderr_error = stderr_error
+        self.puppets = p
+
+    def install(self):
+        def pane(node, name):
+            self.calls.append(("pane", node, name))
+            return self.panes[(node, name)]
+        def stderr(name, lines):
+            self.calls.append(("stderr", name, lines))
+            if self.stderr_error:
+                raise RuntimeError(self.stderr_error)
+            return self.stderr[name]
+        def node_of(name, running=True):
+            self.calls.append(("node_of", name, running))
+            return self.nodes[name]
+        return patched(self.puppets, pane_lines=pane, alloc_stderr=stderr, node_of=node_of)
+
+    def seen(self, kind):
+        return [call for call in self.calls if call[0] == kind]
+
+
+def _card_collector(rows):
+    """Собиратель с данными строками: карточка ищет цель по ростеру, а не
+    по имени пути."""
+
+    class Col:
+        def __init__(self):
+            self.rows = rows
+    return Col()
+
+
+CARD_ROW = PuppetRow(name="pu-mop-1", node="mate", alloc_status="running",
+                     state="busy", kind="busy", owner="anton",
+                     llm="glm-5.3", origin="git@h:g/mop.git", disk_kb=1)
+# Строка с деталями #452 -- контракт статуса переиспользуется как есть.
+CARD_ROW_452 = PuppetRow(name="pu-mop-2", node="mate", alloc_status="running",
+                         state="hung", kind="hung", owner=None,
+                         detail="no tmux session", branch=None,
+                         llm=None, origin=None, disk_kb=None)
+
+
+def check_puppet_card_462(c):
+    import json
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    store = websession.SessionStore(now=lambda: 1000.0)
+    provider = FakeProvider()
+    admin = store.open(identity.Identity("anton", "admin", ()))
+    user = store.open(identity.Identity("olga", "user", ()))
+    readers = _FakeReaders()
+    what = "#462 "
+
+    with patched(webcli.config, get=lambda name, default=None: {"MOP_SERVER_LAN": "10.0.0.1",
+                                                                "MOP_HTTPS_PORT": "443"}.get(name, default)), \
+            patched(webcli, SESSIONS=store, COLLECTOR=_card_collector([CARD_ROW])), \
+            patched(websession, provider=lambda: provider), readers.install():
+        # Гость: 401, user: 403 -- оба не касаются читателей вовсе.
+        sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-1")
+        c.expect(what + "guest: 401 login required", (sent[0][1], out),
+                 (401, b'{"error": "login required"}'))
+        c.check(what + "the guest touched no reader", not readers.calls, readers.calls)
+        sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-1",
+                                  headers={"Cookie": f"mop_session={user}"})
+        c.expect(what + "user: 403 admin only", (sent[0][1], out),
+                 (403, b'{"error": "admin only"}'))
+        c.check(what + "the user touched no reader", not readers.calls, readers.calls)
+        # Admin: карточка -- строка ростера по имени, целиком.
+        sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-1",
+                                  headers={"Cookie": f"mop_session={admin}"})
+        if not c.check(what + "admin: the card answers JSON", sent[0][1] == 200, out[:80]):
+            return
+        got = json.loads(out)
+        c.expect(what + "the card is the roster row", got.get("puppet"),
+                 CARD_ROW.to_dict())
+        c.check(what + "the card carries no-store",
+                any(k == "Cache-Control" and v == "no-store" for k, v in sent))
+        # Статусный контракт #452 -- как есть: слово по kind, detail, branch.
+        with patched(webcli, COLLECTOR=_card_collector([CARD_ROW_452])):
+            sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-2",
+                                      headers={"Cookie": f"mop_session={admin}"})
+            row = json.loads(out)["puppet"]
+        c.expect(what + "the status contract of #452 rides unchanged",
+                 (row["kind"], row["detail"], row["branch"], row["state"]),
+                 ("hung", "no tmux session", None, "hung"))
+        # Неизвестная цель: 404, имя НЕ доезжает до шины.
+        sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-none-1",
+                                  headers={"Cookie": f"mop_session={admin}"})
+        c.expect(what + "an unknown target: 404", (sent[0][1], json.loads(out).get("error")),
+                 (404, "no such puppet"))
+        c.check(what + "an unknown name reaches no reader", not readers.seen("pane")
+                and not readers.seen("stderr") and not readers.seen("node_of"), readers.calls)
+        # Инъекция именем: тоже 404, без запросов к шине.
+        for hostile in ("../../etc", "a%20b", "x;y", "PU-MOP-1"):
+            sent, out = _fake_handler(webcli, "GET", f"/api/puppet/{hostile}",
+                                      headers={"Cookie": f"mop_session={admin}"})
+            c.expect(what + f"hostile name {hostile!r}: 404, not a bus call",
+                     (sent[0][1], bool(readers.calls)), (404, False))
+        # Понижение роли: сессия жива, админа уже нет -- fail closed.
+        demoted = FakeProvider()
+        demoted.authenticate = lambda *a: identity.Refused("x")
+
+        class _Demoted:
+            def lookup(self, login):
+                return identity.Identity(login, "user", ())
+        with patched(websession, provider=lambda: _Demoted()):
+            sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-1",
+                                      headers={"Cookie": f"mop_session={admin}"})
+        c.expect(what + "a demoted admin: 403, not the card", (sent[0][1], json.loads(out).get("error")),
+                 (403, "admin only"))
+
+
+def check_puppet_tail_462(c):
+    import json
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    store = websession.SessionStore(now=lambda: 1000.0)
+    provider = FakeProvider()
+    admin = store.open(identity.Identity("anton", "admin", ()))
+    user = store.open(identity.Identity("olga", "user", ()))
+    big = [f"line {i}" for i in range(5000)]
+    readers = _FakeReaders(panes={("mate", "pu-mop-1"): big},
+                           stderr={"pu-mop-1": ["err 1", "err 2"]},
+                           nodes={"pu-mop-1": "mate"})
+    what = "#462 "
+
+    with patched(webcli.config, get=lambda name, default=None: {"MOP_SERVER_LAN": "10.0.0.1",
+                                                                "MOP_HTTPS_PORT": "443"}.get(name, default)), \
+            patched(webcli, SESSIONS=store, COLLECTOR=_card_collector([CARD_ROW])), \
+            patched(websession, provider=lambda: provider), readers.install():
+        # Хвост -- тоже admin-only: гость и user не видят экрана.
+        for who, tok in (("guest", None), ("user", user)):
+            sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-1/tail",
+                                      headers={"Cookie": f"mop_session={tok}"} if tok else None)
+            c.check(what + f"tail for {who}: refused with a code",
+                    sent[0][1] in (401, 403), (sent[0][1], out[:40]))
+        c.check(what + "tail: the refused touched no reader", not readers.calls, readers.calls)
+        # Admin: хвост панеля, обрезанный до лимита, с честной пометкой.
+        sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-1/tail",
+                                  headers={"Cookie": f"mop_session={admin}"})
+        if not c.check(what + "admin tail: 200", sent[0][1] == 200, out[:80]):
+            return
+        got = json.loads(out)
+        shown = got.get("lines") or []
+        c.check(what + "the tail is limited", len(shown) <= 1000, len(shown))
+        c.check(what + "the tail is cut from the end", shown[-1] == "line 4999", shown[-1] if shown else None)
+        c.expect(what + "truncation is marked", got.get("truncated"), True)
+        c.check(what + "the tail carries no-store",
+                any(k == "Cache-Control" and v == "no-store" for k, v in sent))
+        # Хвост берётся у РЕАЛЬНОГО job: узел -- от node_of по имени из ростера,
+        # а не из пути и не из запроса.
+        c.expect(what + "the pane reader saw the roster's node",
+                 readers.seen("pane") and readers.seen("pane")[0][1], "mate")
+        # Ограничение длины stderr.
+        readers.calls.clear()
+        sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-1/stderr",
+                                  headers={"Cookie": f"mop_session={admin}"})
+        got = json.loads(out)
+        c.check(what + "stderr answers", sent[0][1] == 200 and got.get("lines") == ["err 1", "err 2"], out[:80])
+        c.check(what + "stderr lines are limited by a server constant",
+                bool(readers.seen("stderr")) and readers.seen("stderr")[0][2] <= 200,
+                readers.seen("stderr"))
+        # Читатель умер -- 502-стиль честного отказа, не 500 и не пустота.
+        def _boom_pane(node, name):
+            raise RuntimeError("tmux boom")
+        broke = _FakeReaders()
+        broke.install()
+        # Поверх установки: сам панельный читатель падает.
+        with patched(broke.puppets, pane_lines=_boom_pane, node_of=lambda name, running=True: "mate"):
+            sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-1/tail",
+                                      headers={"Cookie": f"mop_session={admin}"})
+        c.expect(what + "a dead reader: an honest 502", (sent[0][1], json.loads(out).get("error")),
+                 (502, "reader failed: tmux boom"))
+        # Хвост не появляется в публичном снимке и не считается журналом.
+        snap = web.snapshot(rows=[], nodes=[], usage=[], per_puppet=[], per_user=[],
+                            journal=[], errors=[], at=1.0)
+        c.check(what + "no tail in the public snapshot",
+                not any("tail" in k or "pane" in k for k in snap), sorted(snap))
+
+
+def check_puppet_no_rpc_462(c):
+    """Маршруты карточки -- только читатели puppets: ни один мутирующий
+    глагол шины из них не зовётся (send/type/wipe/restart/update)."""
+    import mop.common.bus as busmod
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    store = websession.SessionStore(now=lambda: 1000.0)
+    admin = store.open(identity.Identity("anton", "admin", ()))
+    touched = []
+    with patched(webcli.config, get=lambda name, default=None: {"MOP_SERVER_LAN": "10.0.0.1",
+                                                                "MOP_HTTPS_PORT": "443"}.get(name, default)), \
+            patched(webcli, SESSIONS=store, COLLECTOR=_card_collector([CARD_ROW])), \
+            patched(websession, provider=lambda: FakeProvider()), \
+            patched(busmod, request=lambda *a, **k: touched.append(("request", a)) or {"lines": []}), \
+            patched(busmod, request_many=lambda *a, **k: touched.append(("many", a)) or {}, \
+                    ask_cluster=lambda *a, **k: touched.append(("cluster", a)) or {}), \
+            readers_stub():
+        for path in ("/api/puppet/pu-mop-1", "/api/puppet/pu-mop-1/tail", "/api/puppet/pu-mop-1/stderr"):
+            _fake_handler(webcli, "GET", path, headers={"Cookie": f"mop_session={admin}"})
+    c.check("#462 the card routes fire no mutating RPC of their own", not touched, touched)
+
+
+def readers_stub():
+    """Читатели на чистых данных: маршрут не обязан ходить на шину в этой
+    проверке -- здесь смотрим только, ЧТО он зовёт."""
+    import mop.common.puppets as p
+    return patched(p, pane_lines=lambda node, name: ["ok"],
+                   alloc_stderr=lambda name, lines: ["ok"],
+                   node_of=lambda name, running=True: "mate")
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
@@ -1946,7 +2180,8 @@ def main():
                check_gateway_417, check_breaker_singleflight_417,
                check_header_whitelist_417, check_gateway_fail_closed_417,
                check_gateway_body_bounds_417, check_gateway_route_and_delete_417,
-               check_gateway_key_path_425):
+               check_gateway_key_path_425,
+               check_puppet_card_462, check_puppet_tail_462, check_puppet_no_rpc_462):
         fn(c)
     return c.report("web")
 
