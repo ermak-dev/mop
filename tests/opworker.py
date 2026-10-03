@@ -13,13 +13,13 @@ import json
 import os
 import sys
 import tempfile
-import threading
+import time
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
 from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.common import ops  # noqa: E402
+from mop.common import bus, ops, puppets, state  # noqa: E402
 from mop.server import opworker  # noqa: E402
 
 
@@ -647,6 +647,242 @@ def main():
                                               "commit": None})
         c.check("#470 a malformed file reads as tasks unknown",
                 prov.get("tasks") is None and prov.get("present") is True, prov)
+
+    # ── жизненный цикл через воркер (#471): recycle/delete/wipe ─────────
+    # HYPOTHESIS: у веб-клика те же общие реализации puppets.recycle/delete/
+    # wipe (#458), что и у CLI; вторая реализация разошлась бы с первой в
+    # тот же день. До регистрации воркер честно отвечает, что операции нет.
+    # SOLUTION: глаголы регистрируются в _library_effect обёрткой со
+    # структурным результатом (outcome-словарь #458) поверх готовых функций;
+    # safety -- disruptive перед эффектом, аудит и адресация субъектом
+    # проекта цели -- как у restart.
+    # RESULT: 12 RED-checks (no library operation) -> wrappers in
+    # mop/server/opworker.py; матрица и сериализация -- тем же ходом.
+    # STATUS: FIXED — see #471
+    t471 = Recorder()
+    w471, _ = one()
+    got = w471.submit("anton", "reboot", "pu-mop-1", {}, transport=t471,
+                      safety=lambda name, project, **kw: (True, None))
+    c.check("#471 a verb with no library operation is refused, not crashed",
+            (got.get("status"), got.get("error"))
+            == ("failed", "no library operation for reboot"), got)
+
+    # Подмена общего слоя: эффекты считаются вызовами, ответы -- структурой
+    # реальных функций (tests/recycle.py, tests/delete.py).
+    class Lifecycle:
+        """Подмена puppets.recycle/delete/wipe: вызовы и их ответы."""
+
+        def __init__(self, result=None, error=None):
+            self.calls = []
+            self.result = result or {}
+            self.error = error
+
+        def recycle(self, name, **kw):
+            self.calls.append(("recycle", name, kw))
+            if self.error:
+                raise RuntimeError(self.error)
+            return dict(self.result, node="n1")
+
+        def delete(self, name, **kw):
+            self.calls.append(("delete", name, kw))
+            if self.error:
+                raise RuntimeError(self.error)
+            return dict(self.result, node="n1", body="destroyed")
+
+        def wipe(self, node, name, **kw):
+            self.calls.append(("wipe", node, name, kw))
+            if self.error:
+                raise RuntimeError(self.error)
+            return {"reset": True, "target": "target"}
+
+        def node_of(self, name, running=True):
+            self.calls.append(("node_of", name, {"running": running}))
+            return "n9"
+
+
+    def lifecycle_worker(lc):
+        w, _ = one()
+        return w
+
+    def run_verb(verb, lc, facts=None, busy=False, safety=None):
+        """Воркер, чей library-эффект зовёт общий слой подменой."""
+        w, _ = one()
+        asked = []
+        with patched(puppets, recycle=lc.recycle, delete=lc.delete,
+                     wipe=lc.wipe, node_of=lc.node_of):
+            got = w.submit("anton", verb, "pu-mop-1", {}, transport=t471,
+                           safety=safety or (lambda name, project, **kw: (True, None)))
+        return got
+
+    # Успешный путь каждого глагола через воркер: эффект -- общий, вердикт --
+    # карта исходов #476. registered -> succeeded.
+    lc = Lifecycle()
+    got = run_verb("recycle", lc)
+    c.check("#471 recycle through the worker succeeds",
+            got.get("status") == "succeeded", got)
+    c.check("#471 recycle calls the common implementation once",
+            [(c[0], c[1]) for c in lc.calls] == [("recycle", "pu-mop-1")], lc.calls)
+    c.check("#471 recycle carries no force from the web",
+            lc.calls and lc.calls[0][2].get("force") is False, lc.calls)
+
+    lc = Lifecycle()
+    got = run_verb("delete", lc)
+    c.check("#471 delete through the worker succeeds",
+            got.get("status") == "succeeded", got)
+    c.check("#471 delete calls the common implementation",
+            [(c[0], c[1]) for c in lc.calls] == [("delete", "pu-mop-1")], lc.calls)
+
+    lc = Lifecycle()
+    got = run_verb("wipe", lc)
+    c.check("#471 wipe through the worker succeeds",
+            got.get("status") == "succeeded", got)
+    c.check("#471 wipe resolves the node stopped and wipes there",
+            [(c[0], c[1]) for c in lc.calls] == [("node_of", "pu-mop-1"),
+                                                 ("wipe", "n9")]
+            and lc.calls[1][2] == "pu-mop-1"
+            and lc.calls[1][3].get("force") is False,
+            lc.calls)
+
+    # Partial (#476): recycle поднял папета, наблюдение не сошлось --
+    # replaced=False общей операции (спека не изменилась, клон не поднимется)
+    # читается как partial, а не тишина.
+    class AcceptedLifecycle(Lifecycle):
+        def recycle(self, name, **kw):
+            super().recycle(name, **kw)
+            return {"replaced": False, "node": "n1"}
+
+    lc = AcceptedLifecycle()
+    got = run_verb("recycle", lc)
+    c.check("#471 recycle without its confirmation reads partial",
+            got.get("status") == "partial", got)
+
+    # Отказ эффекта -- failed с причиной, не тишина.
+    lc = Lifecycle(error="pu-mop-1 has no allocation — nothing to recycle")
+    got = run_verb("recycle", lc)
+    c.check("#471 a failing effect is failed with the reason",
+            (got.get("status"), "no allocation" in (got.get("error") or ""))
+            == ("failed", True), got)
+
+    # Живое отказ агента у wipe (#40): tmux-сессия жива -- refused, как
+    # в CLI (puppets.wipe отвечает RuntimeError'ом с полем error агента).
+    lc = Lifecycle(error="pu-mop-1: tmux session is alive — stop the job first")
+    got = run_verb("wipe", lc)
+    c.check("#471 wipe on a live session is refused, as in the CLI",
+            (got.get("status"), "alive" in (got.get("error") or ""))
+            == ("refused", True), got)
+
+    # ── safety-матрица (#460) на каждом из трёх, disruptive ─────────────
+    # Dirty-клон, чужая живая аренда, busy-сессия и неизвестные факты --
+    # отказ ДО эффекта на каждом глаголе; эффект не зовётся вовсе. Предикат
+    # здесь -- сам ops.safety, но disruptive воркеру задаёт РЕГИСТРАЦИЯ:
+    # какой kw она передала, проверяет ProbingSafety ниже.
+    class ProbingSafety:
+        """ops.safety как её зовёт воркер: kw пишутся, disruptive читается."""
+
+        def __init__(self, facts, busy):
+            self.facts, self.busy = facts, busy
+            self.seen = {}
+
+        def __call__(self, name, project, **kw):
+            self.seen = kw
+            return ops.safety(name, project, owner=kw.get("owner"),
+                              facts=self.facts, busy=self.busy,
+                              disruptive=self.disruptive(kw), now=NOW)
+
+        @staticmethod
+        def disruptive(kw):
+            return bool(kw.get("disruptive"))
+
+    NOW = 1_000_000.0
+    CL = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
+    DIRTY_CL = {"cur": "epic/x", "def": "master", "dirty": 3, "ahead": 1}
+    MATRIX = (
+        ("a dirty clone", {"clone": dict(DIRTY_CL, owner=None)}),
+        ("a foreign live lease",
+         {"clone": dict(CL, owner={"user": "olga", "at": NOW - 5})}),
+        ("a busy session", {"clone": dict(CL, owner={"user": "anton", "at": NOW - 5})}),
+        ("unknown facts", None),
+        ("an agent error", {"error": "agent silent"}),
+    )
+    for verb in ("recycle", "delete", "wipe"):
+        for what, facts in MATRIX:
+            lc = Lifecycle()
+            busy = what == "a busy session"
+            probe = ProbingSafety(facts, busy)
+            got = run_verb(verb, lc, safety=probe)
+            refused = got.get("status") == "refused"
+            c.check(f"#471 {verb} refuses on {what}",
+                    refused and bool(got.get("error")), got)
+            c.check(f"#471 {verb} on {what} never fires the effect",
+                    not lc.calls, lc.calls)
+
+        # Регистрация обязана пометить глагол разрушительным: busy-сессия
+        # (своя аренда, чистый клон) доходит до safety и отпирается им.
+        lc = Lifecycle()
+        probe = ProbingSafety({"clone": dict(CL, owner={"user": "anton",
+                                                       "at": NOW - 5})}, True)
+        got = run_verb(verb, lc, safety=probe)
+        c.check(f"#471 {verb} is registered disruptive",
+                probe.seen.get("disruptive") is True, probe.seen)
+
+    # Своя аренда на чистом клоне, сессия не занята -- проход (не матрица
+    # отказа): воркер зовёт safety disruptive=True сам.
+    lc = Lifecycle()
+    ok_safety = lambda name, project, **kw: ops.safety(
+        name, project, owner=kw.get("owner"),
+        facts={"clone": dict(CL, owner={"user": "anton", "at": NOW - 5})},
+        busy=False, disruptive=True, now=NOW)
+    got = run_verb("recycle", lc, safety=ok_safety)
+    c.check("#471 own lease on a clean idle clone passes to the effect",
+            got.get("status") == "succeeded" and len(lc.calls) == 1, got)
+
+    # ── аудит и payload (#476: без message/workspace) ────────────────────
+    lc = Lifecycle()
+    got = run_verb("recycle", lc)
+    listed = w471.read("anton", role="admin")
+    # Чтение -- другой воркер, здесь важен ответ операции: без payload.
+    c.check("#471 the operation answer carries no executor payload",
+            not any(k in json.dumps(got) for k in ("workspace", "message",
+                                                   "request", "params")), got)
+    w471b, root471 = one()
+    with patched(puppets, recycle=lc.recycle, delete=lc.delete,
+                 wipe=lc.wipe, node_of=lc.node_of):
+        rec = w471b.submit("anton", "recycle", "pu-mop-1", {},
+                           transport=t471,
+                           safety=lambda name, project, **kw: (True, None))
+    listed = w471b.read("anton", role="admin")
+    c.check("#471 the record list carries no lifecycle payload",
+            not any(k in json.dumps(listed)
+                    for k in ("workspace", "message", "request")), listed)
+    c.check("#471 every lifecycle operation has an audit record",
+            all(("principal" in r and "sender" in r) for r in w471b._audit()),
+            w471b._audit())
+    # Payload-файл -- приватный, но не в журнале: журнал без workspace.
+    with open(os.path.join(root471, "ops.jsonl")) as f:
+        journal = f.read()
+    c.check("#471 the journal carries no workspace text",
+            "workspace" not in journal, journal[:400])
+
+    # ── сериализация: recycle и delete одной цели не едут разом ─────────
+    w471c, _ = one()
+    stuck = w471c._begin_for_test("anton", "recycle", "pu-mop-1", {})
+    lc = Lifecycle()
+    with patched(puppets, recycle=lc.recycle, delete=lc.delete,
+                 wipe=lc.wipe, node_of=lc.node_of):
+        queued = w471c.submit("anton", "delete", "pu-mop-1", {},
+                              transport=t471,
+                              safety=lambda name, project, **kw: (True, None))
+    c.check("#471 a delete queued behind a recycle of the same target waits",
+            (queued.get("status"), lc.calls), ("queued", []))
+    w471c._mark(w471c._ops[stuck], "succeeded")
+    with patched(puppets, recycle=lc.recycle, delete=lc.delete,
+                 wipe=lc.wipe, node_of=lc.node_of):
+        w471c._drive("pu-mop-1", t471, lambda name, project, **kw: (True, None),
+                     None, None)
+    done = w471c.read("anton", queued["op"])
+    c.check("#471 the queued delete runs after the target frees",
+            done.get("status") == "succeeded" and len(lc.calls) == 1,
+            (done, lc.calls))
 
     return c.report("opworker")
 
