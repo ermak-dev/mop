@@ -24,7 +24,7 @@ import os
 import threading
 import time
 
-from ..common import bus, puppets, state
+from ..common import bus, paths, puppets, state
 from ..common.domain import WHO_WAIT, MasterAnswer
 from .. import usage
 from . import nodes as node_facts

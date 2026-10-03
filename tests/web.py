@@ -1884,6 +1884,18 @@ def check_gateway_route_and_delete_417(c):
                              headers={**headers, "Origin": "https://10.0.0.1"})
     c.expect("#417 blocked DELETE does not reach upstream", len(up.calls), 2)
 
+# ── #425: путь к закрытому ключу панели вычисляется в рабочем модуле ──────
+# HYPOTHESIS: #417 проверял guard и шлюз с подставленным key, но не вызов
+# mgmt_key_path на реальном сервере; имя paths не импортировано.
+# SOLUTION: вызывать реальную функцию, не подменяя ключ и не читая его.
+# STATUS: FIXED — see #425
+
+def check_gateway_key_path_425(c):
+    from mop.common import paths
+    c.expect("#425 gateway locates the server-only key file",
+             web.mgmt_key_path(), paths.local(paths.SECRETS, "llm-proxy-mgmt.pass"))
+
+
 def main():
     c = Checks()
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
@@ -1898,7 +1910,8 @@ def main():
                check_guard_placeholder_417, check_breaker_417,
                check_gateway_417, check_breaker_singleflight_417,
                check_header_whitelist_417, check_gateway_fail_closed_417,
-               check_gateway_body_bounds_417, check_gateway_route_and_delete_417):
+               check_gateway_body_bounds_417, check_gateway_route_and_delete_417,
+               check_gateway_key_path_425):
         fn(c)
     return c.report("web")
 
