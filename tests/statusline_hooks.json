@@ -1,0 +1,51 @@
+{
+ "_about": "Real statusLine and PostModelSwitch inputs, Claude Code 2.1.288, captured 2026-10-03 in a throwaway CLAUDE_CONFIG_DIR sandbox (interactive tmux: statusLine never fires under -p). Only numbers under cost/context_window were zeroed and paths shortened (scratch dir, home); keys and string values are as captured. See #453.",
+ "statusline": {
+  "context_window": {
+   "context_window_size": 1000000,
+   "current_usage": null,
+   "remaining_percentage": null,
+   "total_input_tokens": 0,
+   "total_output_tokens": 0,
+   "used_percentage": null
+  },
+  "cost": {
+   "total_api_duration_ms": 0,
+   "total_cost_usd": 0,
+   "total_duration_ms": 29343,
+   "total_lines_added": 0,
+   "total_lines_removed": 0
+  },
+  "cwd": "/tmp/scratch/work",
+  "effort": {"level": "medium"},
+  "exceeds_200k_tokens": false,
+  "fast_mode": false,
+  "model": {"display_name": "Opus 5.5", "id": "claude-opus-5-5"},
+  "output_style": {"name": "default"},
+  "session_id": "1e17eca0-f329-4c44-9a52-e009d19faed0",
+  "thinking": {"enabled": true},
+  "transcript_path": "/home/u/.claude/projects/-tmp-scratch-work/1e17eca0-f329-4c44-9a52-e009d19faed0.jsonl",
+  "version": "2.1.288",
+  "workspace": {
+   "added_dirs": [],
+   "current_dir": "/tmp/scratch/work",
+   "project_dir": "/tmp/scratch/work"
+  }
+ },
+ "switch": {
+  "cache_ttl": "5m",
+  "context_tokens": 0,
+  "cwd": "/tmp/scratch/work",
+  "estimated_cache_write_usd": 0,
+  "from_model": "claude-opus-5-5",
+  "hook_event_name": "PostModelSwitch",
+  "pricing": "default",
+  "prompt_cache_warm": false,
+  "prompt_id": "7ab5fd05-73cb-4ca9-ad2f-be5dede1b8e5",
+  "requested_model": "glm-5.3[1m]",
+  "session_id": "36d00b50-d70d-4e1d-b3c6-48092c79902b",
+  "source": "command",
+  "to_model": "glm-5.3[1m]",
+  "transcript_path": "/home/u/.claude/projects/-tmp-scratch-work/36d00b50-d70d-4e1d-b3c6-48092c79902b.jsonl"
+ }
+}

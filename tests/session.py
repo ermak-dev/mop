@@ -12,6 +12,22 @@ SOLUTION: `session.py hook` пишет запись исхода хода по s
 её вместе с состоянием свежейшей сессии каталога. Вход хуков в проверках --
 настоящий: tests/session_hooks.json снят живым `claude -p` (2.1.281).
 STATUS: FIXED — see #222
+
+HYPOTHESIS (#453): дашборд показывает модель папета пусто: сессии claude не
+несут модель нигде, что читает ростер (в файле сессии поля нет, транс крипт
+молчит), а после #449 выбор модели у папета -- состояние времени выполнения.
+Claude Code сам выдаёт текущую модель в JSON на stdin statusline-команды при
+старте и примерно раз в 10 с, а успешный переход -- событием PostModelSwitch
+(from_model/to_model); отмена и провал события не дают (проверено вживую,
+2.1.288: cancel/Esc, validation error, network error).
+SOLUTION: `session.py statusline` и PostModelSwitch в `hook` пишут запись
+модели по session_id (~/.local/state/mop/models/<session_id>.json -- только
+{model, at}, ничего из сырого JSON), `state <cwd>` отдаёт model.id только
+живой сессии каталога. Запаздывающий statusLine не откатывает более новую
+запись: побеждает больший at, при равенстве -- switch (событие перехода
+строже периодического опроса). Вход в проверках настоящий:
+tests/statusline_hooks.json снят тем же способом.
+STATUS: FIXED — see #453
 """
 import json
 import os
@@ -30,6 +46,8 @@ from mop import session  # noqa: E402
 with open(os.path.join(HERE, "session_hooks.json")) as f:
     HOOKS = json.load(f)
 OK, FAIL = HOOKS["ok"], HOOKS["fail"]
+with open(os.path.join(HERE, "statusline_hooks.json")) as f:
+    STATUS = json.load(f)
 NOW = 1_790_000_000
 SESSION_PY = os.path.join(os.path.dirname(HERE), "mop", "session.py")
 
@@ -127,7 +145,8 @@ def check_state(c):
                            "error": error, "detail": None}, f)
         # Пустой каталог: явный пустой ответ, а не исключение.
         got = fn(cwd)
-        want = {"status": None, "waitingFor": None, "alive": False, "listen": False, "turn": None}
+        want = {"status": None, "waitingFor": None, "alive": False, "listen": False,
+                "turn": None, "model": None}
         c.check(f"no session -> {got!r}, wanted {want!r}", not (got != want))
         # Старая сессия упала на логине, свежая ждёт в диалоге: берётся свежая.
         put_session(999999, "old-sid", 1000, status="idle")
@@ -172,9 +191,213 @@ def check_state(c):
 
 
 
+def run_statusline(home, stdin):
+    env = dict(os.environ, HOME=home)
+    return subprocess.run([sys.executable, SESSION_PY, "statusline"], input=stdin, env=env,
+                          capture_output=True, text=True, timeout=30)
+
+
+def check_model_record(c):
+    """Чистая функция: статус-строка и PostModelSwitch -> {model, at} | None.
+
+    Запись ровно этой формы и ничего из сырого JSON: cost/контекст/пути --
+    расход и внутренности сессии, ростеру нужное один id."""
+    fn = getattr(session, "model_record", None)
+    if not c.check("session.model_record(payload, now) is missing", not (fn is None)):
+        return
+    sl, sw = STATUS["statusline"], STATUS["switch"]
+    # Настоящий вход statusLine при старте: id модели.
+    got = fn(sl, NOW)
+    want = {"model": "claude-opus-5-5", "at": NOW}
+    c.check(f"statusline -> {got!r}, wanted {want!r}", not (got != want))
+    # Успешный /model: PostModelSwitch отдаёт to_model той же формы.
+    got = fn(sw, NOW + 5)
+    want = {"model": "glm-5.3[1m]", "at": NOW + 5}
+    c.check(f"PostModelSwitch -> {got!r}, wanted {want!r}", not (got != want))
+    # Чужие события hook-стока моделью не считаются: PostModelSwitch
+    # обрабатывают оба стока, но turn-вид даёт None.
+    got = fn(FAIL["StopFailure"], NOW)
+    c.check(f"StopFailure is not a model event: {got!r}", not (got is not None))
+    # Битый ввод: не наш session_id, нет модели, нет словаря.
+    for name, payload in (("no session_id", {"model": {"id": "x"}}),
+                          ("bad session_id", dict(sl, session_id="../../etc")),
+                          ("no model", {k: v for k, v in sl.items() if k != "model"}),
+                          ("model no id", dict(sl, model={"display_name": "X"})),
+                          ("empty id", dict(sl, model={"id": ""})),
+                          ("id not str", dict(sl, model={"id": 42})),
+                          ("huge id", dict(sl, model={"id": "x" * 129})),
+                          ("switch no to_model", {k: v for k, v in sw.items()
+                                                  if k != "to_model"}),
+                          ("not a dict", [1])):
+        got = fn(payload, NOW)
+        c.check(f"{name} -> None, got {got!r}", not (got is not None))
+
+
+def check_statusline_cli(c):
+    """Сток statusline: молча, всегда 0, запись только валидная и атомарно."""
+    home = tempfile.mkdtemp(prefix="mop-test-453-sl-")
+    models = os.path.join(home, ".local", "state", "mop", "models")
+    sid = STATUS["statusline"]["session_id"]
+    path = os.path.join(models, f"{sid}.json")
+    # Мусор на входе -- как у hook: ни строчки, код 0 (stdout statusline
+    # рендерится в терминал сессии).
+    for garbage in ("", "not json", "[1]", '{"session_id": "x"}', "\x00\xff"):
+        r = run_statusline(home, garbage)
+        c.check(f"statusline on {garbage!r}: exit {r.returncode}, out {r.stdout!r}, "
+                f"err {r.stderr!r}",
+                not (r.returncode != 0 or r.stdout or r.stderr))
+    c.check("garbage must write nothing", not (os.path.exists(models) and os.listdir(models)),
+            os.listdir(models) if os.path.exists(models) else [])
+    r = run_statusline(home, json.dumps(STATUS["statusline"]))
+    try:
+        rec = json.load(open(path))
+    except (OSError, ValueError) as e:
+        c.fail(f"statusline must write {path}: {e}; exit {r.returncode}")
+        return
+    c.check(f"statusline through the sink: exit {r.returncode}, {r.stdout!r}, {rec!r}",
+            not (r.returncode != 0 or r.stdout or rec.get("model") != "claude-opus-5-5"))
+    c.check(f"record must carry only model and at: {rec!r}",
+            not (set(rec) != {"model", "at"}))
+    c.check(f"at must be now in epoch seconds: {rec!r}",
+            not (abs(rec.get("at", 0) - time.time()) > 60))
+    # Никаких временных файлов рядом и ничего сверх записи.
+    left = [f for f in os.listdir(models) if not f.endswith(".json")]
+    c.check(f"temporary files left behind: {left}", not (left))
+    # Успешный /model тем же стоком не ломает прежний: hook пишет и запись
+    # хода, и запись модели.
+    r = run_hook(home, json.dumps(STATUS["switch"]))
+    try:
+        rec = json.load(open(os.path.join(models, f'{STATUS["switch"]["session_id"]}.json')))
+    except (OSError, ValueError) as e:
+        c.fail(f"PostModelSwitch through hook must write the model record: {e}")
+        return
+    c.check(f"PostModelSwitch model record: {rec!r}, exit {r.returncode}",
+            not (r.returncode != 0 or rec.get("model") != "glm-5.3[1m]"))
+    # Провал перехода модели не пишет: события нет -- записи нет.
+    os.remove(os.path.join(models, f'{STATUS["switch"]["session_id"]}.json'))
+    run_hook(home, json.dumps(FAIL["StopFailure"]))
+    c.check("failed/cancelled switch must leave no model record",
+            not os.path.exists(os.path.join(models, f'{STATUS["switch"]["session_id"]}.json')))
+
+
+def check_model_race(c):
+    """Гонка: запаздывающий statusLine не откатывает переключение модели.
+
+    По одному session_id писатели двое (statusline периодичен, hook --
+    событиен), и порядок их приходов не гарантируется: claude шлёт
+    statusLine и на старте, и вслед за переходом. Правило то же, что у
+    очереди: побеждает запись с большим at; при равных -- событие перехода,
+    оно строже опроса (to_model виден ровно в момент применения). Сценарии --
+    каждый в своём каталоге: предыдущий сценарий не должен оставлять
+    winning-запись, иначе он же и выиграет следующий."""
+    sl = STATUS["statusline"]
+    # Одна сессия: у снятых входов session_id разных сессий, а гонка -- про
+    # писателей одной.
+    sw = dict(STATUS["switch"], session_id=sl["session_id"])
+
+    def race(name, steps, want_model, want_at=None):
+        home = tempfile.mkdtemp(prefix="mop-test-453-race-")
+        for payload, now in steps:
+            session.write_model(payload, now, root=home)
+        rec = json.load(open(os.path.join(home, f'{sl["session_id"]}.json')))
+        bad = rec.get("model") != want_model or             (want_at is not None and rec.get("at") != want_at)
+        c.check(f"{name}: {rec!r}, wanted model {want_model!r}"
+                + (f" at {want_at!r}" if want_at is not None else ""), not (bad))
+
+    # switch (t0+5) уже записан, statusline (t0) опоздал.
+    race("late statusline must not roll back the switch",
+         [(sl, NOW), (sw, NOW + 5), (sl, NOW)], "glm-5.3[1m]", NOW + 5)
+    # Ровно те же at, но порядок обратный: событие перехода строже опроса.
+    race("equal at: switch wins over poll",
+         [(sl, NOW), (sw, NOW)], "glm-5.3[1m]", NOW)
+    # Периодический опрос новее события -- он и прав: модель могла смениться
+    # снова, и statusline это видит; at идёт за победителем.
+    race("fresher poll beats older switch",
+         [(sw, NOW), (sl, NOW + 1)], "claude-opus-5-5", NOW + 1)
+    # Тот же ответ опроса перезаписи не стоит: запись и так верна.
+    race("same poll answer rewrites nothing",
+         [(sl, NOW), (sl, NOW)], "claude-opus-5-5", NOW)
+
+
+def check_model_in_state(c):
+    """state <cwd>: model.id только живой сессии каталога, чужие -- мимо."""
+    root = tempfile.mkdtemp(prefix="mop-test-453-state-")
+    sessions, models, cwd = (os.path.join(root, d) for d in ("sessions", "models", "work"))
+    for d in (sessions, models, cwd):
+        os.makedirs(d)
+    with patched(session, SESSIONS=sessions, MODELS=models):
+
+        def put_session(pid, sid, at, **more):
+            with open(os.path.join(sessions, f"{pid}.json"), "w") as f:
+                json.dump({"pid": pid, "sessionId": sid, "cwd": cwd, "statusUpdatedAt": at,
+                           "messagingSocketPath": os.path.join(root, f"{pid}.sock"),
+                           **more}, f)
+
+        def put_model(sid, model, at):
+            with open(os.path.join(models, f"{sid}.json"), "w") as f:
+                json.dump({"model": model, "at": at}, f)
+
+        # Базовая диагностика умершей сессии не меняется: прежние ключи, те
+        # же значения, model -- null без записи.
+        put_session(999999, "old-sid", 1000, status="idle")
+        put_model("old-sid", "claude-opus-5-5", NOW)
+        want = {"status": "idle", "waitingFor": None, "alive": False, "listen": False,
+                "turn": None, "model": None}
+        got = session.state(cwd)
+        c.check(f"dead session: model must be null, diagnostics intact: {got!r}",
+                not ({k: got.get(k) for k in want} != want))
+        # Живая сессия каталога с записью: model.id отдаётся.
+        import socket as _socket
+        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        srv.bind(os.path.join(root, "live.sock"))
+        # Бэклог как у инбокса: каждая проба state() -- это connect без
+        # accept, и очередь listen(1) исчерпывается уже второй пробой.
+        srv.listen(8)
+        try:
+            put_session(999998, "live-sid", 2000, status="busy",
+                        messagingSocketPath=os.path.join(root, "live.sock"))
+            put_model("live-sid", "glm-5.3[1m]", NOW)
+            got = session.state(cwd)
+            c.check(f"live session must yield its model: {got!r}",
+                    not (got.get("model") != "glm-5.3[1m]"))
+            # Живая, но записи ещё нет (сессия старее развертывания стоков):
+            # null, а не модель мёртвой соседки.
+            os.remove(os.path.join(models, "live-sid.json"))
+            got = session.state(cwd)
+            c.check(f"no record -> null, not the dead one's model: {got!r}",
+                    not (got.get("model") is not None))
+            # Запись мусора вместо JSON игнорируется молча.
+            with open(os.path.join(models, "live-sid.json"), "w") as f:
+                f.write("{oops")
+            got = session.state(cwd)
+            c.check(f"broken record must read as null: {got!r}",
+                    not (got.get("model") is not None))
+            # CLI: одна строка JSON, model внутри. Сокет жив ровно на время
+            # подпроцесса: проверка живости -- коннект, а после srv.close()
+            # живых нет и model читался бы null.
+            put_model("live-sid", "glm-5.3[1m]", NOW)
+            env = dict(os.environ, HOME=root)
+            r = subprocess.run([sys.executable, "-c",
+                                "import sys; sys.path.insert(0, sys.argv[1]); "
+                                "from mop import session as s; "
+                                "s.SESSIONS, s.MODELS = sys.argv[2], sys.argv[3]; "
+                                "sys.exit(s.main(['state', sys.argv[4]]))",
+                                os.path.dirname(HERE), sessions, models, cwd],
+                               env=env, capture_output=True, text=True, timeout=30)
+            lines = r.stdout.splitlines()
+            c.check(f"state CLI must print one JSON line with model: exit {r.returncode}, "
+                    f"{r.stdout!r}, {r.stderr!r}",
+                    not (r.returncode != 0 or len(lines) != 1
+                         or json.loads(lines[0]).get("model") != "glm-5.3[1m]"))
+        finally:
+            srv.close()
+
+
 def main():
     c = Checks()
-    for fn in (check_turn_record, check_hook_cli, check_state):
+    for fn in (check_turn_record, check_hook_cli, check_state,
+               check_model_record, check_statusline_cli, check_model_race,
+               check_model_in_state):
         try:
             fn(c)
         except Exception as e:

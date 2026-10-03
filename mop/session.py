@@ -30,6 +30,10 @@ SESSIONS = os.path.expanduser("~/.claude/sessions")
 STATE = os.path.expanduser("~/.local/state/mop")
 # Записи исхода хода (#222): их пишет хук claude, читает `state`.
 TURNS = os.path.join(STATE, "turns")
+# Записи модели сессии (#453): их пишут statusline и PostModelSwitch, читает
+# `state`. Только {model, at} -- сырой JSON statusline несут cost и контекст,
+# это расход и внутренности сессии, а не состояние папета.
+MODELS = os.path.join(STATE, "models")
 CONNECT_TIMEOUT = 5
 PRIORITIES = ("now", "next", "later")
 MODES = ("bypass", "prompting")
@@ -231,12 +235,77 @@ def _write_turn(root, sid, record, now):
             pass
 
 
+# ─── модель сессии (#453) ────────────────────────────────────────────────
+# Дашборд показывает модель папета пусто: сессии claude не несут модель
+# нигде, что читает ростер. Claude Code сам сообщает её дважды: JSON на stdin
+# statusline-команды (при старте и далее периодически, поле model.id) и
+# событием PostModelSwitch (to_model). Отмена и провал перехода события не
+# дают -- проверено вживую на 2.1.288: провалившийся /model не оставляет
+# записи, и статус-строка продолжает звать прежнюю модель.
+def model_record(payload, now):
+    """Вход statusline или PostModelSwitch -> {model, at} | None.
+
+    Ровно эта форма и ничего из сырого JSON: ростеру нужен один id.
+    PostModelSwitch распознаётся по to_model (в словаре statusline его нет),
+    statusline -- по model.id; отсюда один вход у обоих стоков."""
+    if not isinstance(payload, dict) or not _plain_id(payload.get("session_id")):
+        return None
+    if isinstance(payload.get("to_model"), str) and payload["to_model"]:
+        model = payload["to_model"]
+    else:
+        model = (payload.get("model") or {}).get("id") \
+            if isinstance(payload.get("model"), dict) else None
+    # Ограничение сверху держит запись файлом с честным именем, а не потоком
+    # чужих данных под именем session_id: словарь claude открытый, и поле
+    # может оказаться чем угодно.
+    if not isinstance(model, str) or not model or len(model) > 128:
+        return None
+    return {"model": model, "at": int(now)}
+
+
+def read_model(sid, root=None):
+    """Запись модели сессии или None (нет, не читается, чужой session_id)."""
+    if not _plain_id(sid):
+        return None
+    try:
+        with open(os.path.join(root or MODELS, f"{sid}.json")) as f:
+            got = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def write_model(payload, now, root=None):
+    """Вход statusline/PostModelSwitch -> запись модели по session_id.
+
+    Гонка писателей решается по правилу очереди: побеждает больший at, при
+    равных -- событие перехода. Причина: statusline периодичен, и запаздывающий
+    опрос со старой моделью не должен откатывать уже применённый переход; а
+    ровно в момент применения строже всего событие. Пометки источника запись
+    не несёт: at разрешает конфликт и без неё, а минус одно поле -- минус
+    один способ разойтись со спекой.
+
+    TTL и атомарность -- как у записей хода (_write_turn)."""
+    record = model_record(payload, now)
+    if record is None:
+        return
+    current = read_model(payload["session_id"], root=root)
+    if current and current.get("model") == record["model"] \
+            and current.get("at", 0) >= record["at"]:
+        # Тот же ответ периодического опроса: перезапись ничего не меняет.
+        return
+    if current and current.get("at", 0) > record["at"]:
+        return
+    _write_turn(root or MODELS, payload["session_id"], record, now)
+
+
 def hook(text, now, root=None):
     """Вход хука (stdin) -> запись на диск, если событие наше."""
     payload = json.loads(text)
     record = turn_record(payload, now)
     if record is not None:
         _write_turn(root or TURNS, payload["session_id"], record, now)
+    write_model(payload, now, root=root)
 
 
 def read_turn(sid, root=None):
@@ -254,20 +323,30 @@ def read_turn(sid, root=None):
 def state(cwd):
     """Состояние свежейшей сессии каталога одной записью: status, alive и
     listen -- как у probe, waitingFor -- из файла сессии (открытый диалог),
-    turn -- запись исхода хода этой сессии. Сессии нет -- те же ключи,
-    пустые: status и waitingFor null, alive и listen false, turn null."""
+    turn -- запись исхода хода этой сессии, model -- id модели ЖИВОЙ сессии
+    каталога по её session_id (мёртвая -- null: запись трупа ничего не
+    говорит о работающей сессии). Сессии нет -- те же ключи, пустые:
+    status и waitingFor null, alive и listen false, turn и model null."""
     d = session_for_cwd(cwd)
     if d is None:
         return {"status": None, "waitingFor": None, "alive": False, "listen": False,
-                "turn": None}
+                "turn": None, "model": None}
     try:
         os.kill(int(d.get("pid")), 0)
         alive = True
     except Exception:
         alive = False
     listen = socket_alive(d["messagingSocketPath"]) if d.get("messagingSocketPath") else False
+    live = None
+    if listen:
+        # Модель -- утверждение о работающей сессии: свежайший файл каталога
+        # может быть трупом. Диагностику умершей сессии (status/turn) это не
+        # трогает: она и прежде была о свежайшем файле, а model -- о живых.
+        live = live_session_for_cwd(cwd)
+    got = read_model(live.get("sessionId")) if live is not None else None
     return {"status": d.get("status", "?"), "waitingFor": d.get("waitingFor"),
-            "alive": alive, "listen": listen, "turn": read_turn(d.get("sessionId"))}
+            "alive": alive, "listen": listen, "turn": read_turn(d.get("sessionId")),
+            "model": got.get("model") if got else None}
 
 
 # ─── протокол канала ─────────────────────────────────────────────────────
@@ -488,6 +567,14 @@ def main(argv):
         except BaseException:
             pass
         return 0
+    if argv[:1] == ["statusline"]:
+        # Тот же контракт молчания: stdout statusline-команды уходит прямо в
+        # терминал сессии, а её сбой не должен ронять показ строки.
+        try:
+            write_model(json.loads(sys.stdin.read()), time.time())
+        except BaseException:
+            pass
+        return 0
     if len(argv) >= 2 and argv[0] == "state":
         try:
             out = state(argv[1])
@@ -527,7 +614,7 @@ def main(argv):
         print(json.dumps(out, ensure_ascii=False))
         return 0 if "error" not in out else 1
     print("usage: session.py probe <cwd> | state <cwd> | hook (stdin) | "
-          "wait-idle <cwd> <timeout> [tag] | "
+          "statusline (stdin) | wait-idle <cwd> <timeout> [tag] | "
           "send <target> <text> [--priority P] [--mode M] [--from-name N] "
           "[--wait SEC]", file=sys.stderr)
     return 2
