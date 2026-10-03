@@ -1,17 +1,29 @@
 // Снимок пула (#297): форма JSON, который отдают /api/pool и /events.
 // Ключи закреплены сервером (mop/server/web.py, snapshot) и проверяются в
 // tests/web.py; страница читает их по имени и ничего не решает второй раз:
-// корзина папета (kind) и счётчики считаются на сервере.
+// вид вердикта (kind), корзина (bucket) и счётчики считаются на сервере.
 
 // Корзины -- одним списком (#323): тип и счётчики выводятся из него, а не
 // перечисляются второй раз.
 export const KINDS = ["free", "busy", "sick", "silent", "down"] as const;
 export type Kind = (typeof KINDS)[number];
 
+// Виды вердикта (#452) -- тем же списком, что state.KINDS на сервере:
+// слово статуса и его иконка выводятся из него. null -- переходный снимок
+// (сервер до #452 или спросить некого: state-строка прочерк).
+export const VERDICTS = ["silent", "hung", "dialog", "login", "quota", "error",
+  "waiting", "busy", "other", "free", "idle", "unknown", "failing"] as const;
+export type VerdictKind = (typeof VERDICTS)[number] | null;
+
 export type Counts = { puppets: number } & Record<Kind, number>;
 
+// Строка папета (#452): kind -- вид вердикта (слово статуса), bucket --
+// корзина (цвет), branch -- ветка чипом, detail -- подробность под словом;
+// alloc_status остаётся в данных, из таблицы он ушёл в подсказку. Поля
+// снимка до #452 отсутствуют -- undefined читается как null.
 export interface Puppet {
-  name: string; node: string; alloc_status: string; state: string; kind: Kind;
+  name: string; node: string; alloc_status: string; state: string;
+  kind: VerdictKind; bucket?: Kind; detail?: string | null; branch?: string | null;
   owner: string; llm: string; origin: string; disk_kb: number | null;
 }
 

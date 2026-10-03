@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from _lib import Checks, patched  # noqa: E402
 from mop.common import puppets  # noqa: E402
 from mop import session  # noqa: E402
-from mop.common.state import PuppetRow, State, action_for, failing_row, failure_reason, is_free, silent, task_summary, verdict
+from mop.common.state import KINDS, PuppetRow, State, action_for, failing_row, failure_reason, is_free, silent, task_summary, verdict
 
 CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
 # Папет на ветке своего мастера (#256): она и дом клона (#272).
@@ -497,9 +497,10 @@ def check_failing(c):
             not (failure_reason("x\nsomething broke\n\n") != "something broke"
                  or failure_reason("") is not None))
     # Строка ростера: падающий -- failing с причиной и сроком, а не pending.
+    # Вердикт -- State (#452): detail несёт причину, строку собирает показ.
     fn = failing_row
     got = fn("pending", t, "bootstrap: no file") if fn else None
-    want = ("failing", "FAILED: bootstrap: no file (4 restarts, next in 26m)")
+    want = ("failing", State("failing", "bootstrap: no file (4 restarts, next in 26m)"))
     c.expect("failing_row", got, want)
     # Работающая задача и задача без падений -- не failing.
     for task in ({"state": "running", "restarts": 4, "exit": 1, "next_s": None, "failed": False},
@@ -511,7 +512,7 @@ def check_failing(c):
     dead = {"state": "dead", "restarts": 9, "exit": 1, "next_s": None, "failed": True}
     got = fn("failed", dead, "boom") if fn else None
     c.expect("failing_row for a task that gave up", got,
-             ("failing", "FAILED: boom (9 restarts, gave up)"))
+             ("failing", State("failing", "boom (9 restarts, gave up)")))
 
 
 def check_row_none_274(c):
@@ -532,6 +533,9 @@ def check_row_none_274(c):
     # #454: поле модели вернулось (с дефолтом None); ожидание #274 --
     # прежний провод плюс новое поле. Прочерк модели -- тоже показ.
     old = {**old, "llm": "-"}
+    # #452: подробность и ветка вердикта -- без прочерка: None на проводе
+    # и есть «данных нет», как у llm до #454 не было.
+    old = {**old, "detail": None, "branch": None}
     render = getattr(empty, "render", None)
     c.expect("#274 None renders as the old strings", render and render(), old)
     c.expect("#274 to_dict is the rendered wire form", empty.to_dict(), old)
@@ -745,8 +749,106 @@ def check_model_454(c):
     rendered = old_row.render()
     c.check("#454 render keeps the old key set",
             list(rendered) == ["name", "node", "alloc_status", "state", "kind",
-                               "owner", "llm", "origin", "disk_kb"], list(rendered))
+                               "owner", "llm", "detail", "branch", "origin",
+                               "disk_kb"], list(rendered))
     c.expect("#454 None model renders as the dash", rendered["llm"], "-")
+
+
+# ── #452: вердикт строки -- не только строка: detail и branch доезжают ───
+# HYPOTHESIS: _judge кладёт в строку ростера str(verdict), а detail и branch
+# теряются: _SHOW сворачивает их в одну строку для человека, и дашборду
+# пришлось бы разбирать её обратно регэкспами («free (master)» -> ветка),
+# чтобы нарисовать статус одним словом с веткой отдельным полем. Строка для
+# показа уже есть (state), вид -- тоже (kind); подробность и ветка -- те же
+# данные вердикта, и терять их в _judge значило отдать странице разбор
+# собственного показа.
+# SOLUTION: PuppetRow.detail/branch по образцу llm (#454): вердикт целиком
+# доезжает в строку (_judge/_row, пути failing и gave_up -- из своего State),
+# поля -- с дефолтом None, без прочерка в SHOWN: None на проводе и есть
+# «данных нет». Покрытие -- не выдуманными фактами, а существующими
+# матрицами CASES/HOOKED/SCREENLESS: та же пара (факты, State) идёт и в
+# проверку строки, и в реальный путь строки; silent и failing -- своими
+# путями (молчащий агент, падающая задача).
+# STATUS: FIXED — see #452
+def check_verdict_fields_452(c):
+    def judged(state, **over):
+        """Реальный путь строки: _judge пишет вердикт, _row собирает PuppetRow.
+        Падающему -- задача и причина, сдавшемуся -- запись итога (#345)."""
+        item = {"job": {"ID": "pu-x-1", "Status": "running", "Meta": {}},
+                "alloc": {"NodeName": "n1", "ClientStatus": "running"},
+                "error": None, "state": None, "kind": None, "owner": None,
+                "llm": None}
+        item.update(over)
+        puppets._judge(item, state)
+        return puppets._row(item)
+
+    # Матрица матриц: пара (факты, State) из каждого существующего случая
+    # проходит через настоящий путь строки. Строка остаётся прежней (на ней
+    # стоит `mop list`), а detail/branch -- расшифровка той же строки.
+    cases = [(what, f, verdict(f)) for what, f, _ in CASES]
+    cases += [(f"#224 {what}", f, verdict(f)) for what, f, _, _free in HOOKED]
+    cases += [(f"#235 {what}", f, verdict(f)) for what, f, _ in SCREENLESS]
+    seen = set()
+    # Поля существуют и идут после llm (порядок ключей провода закреплён
+    # to_dict'ом; llm уже добавлялся так же, #454).
+    import dataclasses
+    names = [f.name for f in dataclasses.fields(PuppetRow)]
+    c.check("#452 PuppetRow carries detail and branch",
+            "detail" in names and "branch" in names, names)
+    for what, facts_value, v in cases:
+        r = judged(v)
+        seen.add(v.kind)
+        c.expect(f"#452 {what}: the state line stays", r.state, str(v))
+        c.expect(f"#452 {what}: kind stays", r.kind, v.kind)
+        if "detail" not in names:
+            continue
+        c.expect(f"#452 {what}: detail", r.detail, v.detail)
+        c.expect(f"#452 {what}: branch", r.branch, v.branch)
+
+    # Молчащий агент: тот же _judge, причина -- в detail, ветки нет.
+    if "detail" in [f.name for f in dataclasses.fields(PuppetRow)]:
+        r = judged(silent("no responders"))
+        seen.add(r.kind)
+        c.expect("#452 silent: the row", (r.state, r.kind, r.detail, r.branch),
+                 ("AGENT SILENT (no responders)", "silent", "no responders", None))
+
+        # Падающий на старте: detail -- причина с попытками и сроком (#126),
+        # ровно то, что _SHOW прячет в «FAILED: ...».
+        task = {"state": "dead", "restarts": 9, "exit": 1, "next_s": None, "failed": True}
+        r = judged(State("free"), task=task, reason="boom")
+        seen.add(r.kind)
+        c.expect("#452 failing: the row",
+                 (r.state, r.kind, r.detail, r.branch),
+                 ("FAILED: boom (9 restarts, gave up)", "failing",
+                  "boom (9 restarts, gave up)", None))
+        # Сдавшийся bootstrap (#345): причина -- из записи итога.
+        r = judged(State("free"), gave_up="no .env")
+        c.expect("#452 gave up: the row", (r.state, r.kind, r.detail),
+                 ("FAILED: no .env", "failing", "no .env"))
+
+    # Все 13 видов из KINDS доезжают хотя бы одним случаем.
+    c.check("#452 every verdict kind reaches the row", seen == set(KINDS),
+            sorted(set(KINDS) - seen))
+
+    # Провод: незнакомый ключ -- по-прежнему TypeError (#274), старый снимок
+    # без новых полей читается с None, новых ключей в SHOWN нет -- None на
+    # проводе и есть «данных нет», а не прочерк.
+    try:
+        PuppetRow.from_dict({"name": "pu-x-1", "node": "n1", "alloc_status": "running",
+                             "state": "-", "kind": None, "owner": "-", "origin": "?",
+                             "disk_kb": None, "surprise": 1})
+        c.fail("#452 from_dict must refuse an unknown key", "no TypeError")
+    except TypeError:
+        pass
+    old = PuppetRow.from_dict({"name": "pu-x-1", "node": "n1", "alloc_status": "running",
+                               "state": "-", "kind": None, "owner": "-", "origin": "?",
+                               "disk_kb": None})
+    if "detail" in [f.name for f in dataclasses.fields(PuppetRow)]:
+        c.expect("#452 an old snapshot row reads back", (old.detail, old.branch),
+                 (None, None))
+        c.check("#452 None detail stays None on the wire",
+                old.to_dict().get("detail") is None and old.to_dict().get("branch") is None,
+                old.to_dict())
 
 
 def main():
@@ -765,6 +867,7 @@ def main():
     check_clone_agreement(c)
     check_row_none_274(c)
     check_model_454(c)
+    check_verdict_fields_452(c)
     check_invariants_273(c)
     check_alloc_377(c)
     for state, want in FREE_CASES:

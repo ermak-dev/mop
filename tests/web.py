@@ -87,13 +87,44 @@ def check_projects(c):
              ["pu-rugent-1", "pu-rugent-2"])
     want = {"puppets": 2, "free": 1, "busy": 0, "sick": 0, "silent": 1, "down": 0}
     c.expect("counts(mop)", by["mop"]["counts"], want)
-    # Корзина лежит в строке: страница красит по ней, а не разбирает
-    # текст состояния второй раз на JS.
-    c.check("kind on row", not (by["rugent"]["puppets"][0].get("kind") != "down"),
-            by["rugent"]["puppets"][0])
+    # Корзина -- отдельным ключом (#452): kind остаётся видом вердикта,
+    # bucket -- краска страницы; первой строке rugent спрашивать некого.
+    c.expect("bucket on row", [p.get("bucket") for p in by["rugent"]["puppets"]],
+             ["down", "busy"])
+    c.expect("kind stays the verdict kind on the row",
+             [p.get("kind") for p in by["rugent"]["puppets"]], [None, "busy"])
     total = web.counts(ROWS)
     want = {"puppets": 5, "free": 2, "busy": 1, "sick": 0, "silent": 1, "down": 1}
     c.expect("counts(all)", total, want)
+
+
+# ── #452: корзина -- отдельный ключ, вид вердикта не затирается ──────────
+# HYPOTHESIS: projects() кладёт корзину в kind поверх вида вердикта: страница
+# красит по корзине, но виду (одно слово статуса, detail, branch) места в
+# проводе нет -- старая страница его не показывала. #452 рисует статус одним
+# словом по виду, и затёртый kind значило бы перегнать вид в строку state
+# и разбирать её на JS.
+# SOLUTION: корзина уезжает в отдельный ключ bucket (#452): kind остаётся
+# видом вердикта (classify по нему же), bucket -- корзиной для краски.
+# STATUS: FIXED — see #452
+def check_bucket_452(c):
+    rows = [row("pu-mop-1", MOP, State("hung", "not responding")),
+            row("pu-mop-2", MOP, State("busy", branch="feat/452")),
+            row("pu-mop-3", MOP, FREE)]
+    snap = web.projects(rows)
+    puppets_ = snap[0]["puppets"]
+    # Вид вердикта на месте, корзина -- рядом отдельным ключом: страница
+    # получает и то, и другое, ничего не разбирая сама.
+    c.expect("#452 kind keeps the verdict kind", [p.get("kind") for p in puppets_],
+             ["hung", "busy", "free"])
+    c.expect("#452 bucket carries the classify", [p.get("bucket") for p in puppets_],
+             ["sick", "busy", "free"])
+    # Счётчики -- по корзинам, как и раньше (#210).
+    c.expect("#452 counts stay by bucket", snap[0]["counts"],
+             {"puppets": 3, "free": 1, "busy": 1, "sick": 1, "silent": 0, "down": 0})
+    # Старый снимок без bucket читается: поля нет -- страница рисует по kind.
+    c.check("#452 bucket is a render-time key, not a row field",
+            not any("bucket" in r.to_dict() for r in rows), [r.to_dict() for r in rows])
 
 
 def check_sizes(c):
@@ -210,8 +241,11 @@ def check_sick_in_project_210(c):
     want = {"puppets": 2, "free": 0, "busy": 1, "sick": 1, "silent": 0, "down": 0}
     c.expect("#210 header counts", snap["counts"], want)
     c.expect("#210 project counts", snap["projects"][0]["counts"], want)
-    c.expect("#210 bucket on rows", [p["kind"] for p in snap["projects"][0]["puppets"]],
+    # Корзина на строках -- в bucket (#452): kind остался видом вердикта.
+    c.expect("#210 bucket on rows", [p["bucket"] for p in snap["projects"][0]["puppets"]],
              ["sick", "busy"])
+    c.expect("#210 kind stays the verdict kind",
+             [p["kind"] for p in snap["projects"][0]["puppets"]], ["hung", "busy"])
 
 
 # ── реестр кредитов на странице (#285) ──────────────────────────────────
@@ -1901,6 +1935,7 @@ def main():
     for fn in (check_classify, check_projects, check_sizes, check_journal, check_usage,
                check_snapshot, check_sick_in_project_210, check_by_user_245,
                check_masters_305, check_dist_297,
+               check_bucket_452,
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
                check_load_378, check_master_sessions_421, check_who_answer_421,
                check_session_store_415, check_login_api_415,

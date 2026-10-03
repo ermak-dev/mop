@@ -374,10 +374,12 @@ def check_puppet_row_204(c):
     обратим; незнакомый ключ -- отказ, а не молча лишнее поле."""
     from mop.common.state import PuppetRow
     # #454: llm вернулось на прежнее место (после owner) -- провод дашборда.
+    # #452: detail и branch -- после llm: расшифровка state-строки для
+    # страницы, None без прочерка.
     keys = ["name", "node", "alloc_status", "state", "kind", "owner", "llm",
-            "origin", "disk_kb"]
+            "detail", "branch", "origin", "disk_kb"]
     d = dict(zip(keys, ["pu-mop-1", "mate", "running", "free", "free", "-",
-                        "glm-5.3", "claude", MOP, 12]))
+                        "glm-5.3", None, None, "claude", MOP, 12]))
     r = PuppetRow.from_dict(d)
     c.check("PuppetRow.to_dict", not (list(r.to_dict()) != keys or r.to_dict() != d),
             f"got {r.to_dict()!r}, wanted {d!r}")
