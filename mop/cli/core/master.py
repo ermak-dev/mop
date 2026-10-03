@@ -150,8 +150,7 @@ def _main(argv):
 
     # URL и ключ -- из joined-конфига выбранного сервера; `mop code`
     # использует тот же источник без MCP и папетов.
-    session = _common.session_env()
-    env = dict(os.environ, MOP_PROJECT=project, **session)
+    env = _common.launch_env(project=project)
     # Настройки отзыва (#419): слияние пользовательского --settings с
     # feedbackDrafts=off, итог -- memfd-путём; отказ -- явно (как у
     # `mop code`, общее в _common.feedback_settings).

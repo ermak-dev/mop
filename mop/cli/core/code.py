@@ -54,8 +54,7 @@ def main(argv):
     # здесь отделять не от чего.
     passthru = argv
     # Тот же joined-конфиг, что у мастера, без доступа к пулу.
-    session = _common.session_env()
-    env = dict(os.environ, **session)
+    env = _common.launch_env()
     # Настройки отзыва (#419): пользовательский --settings (если был)
     # сливается с feedbackDrafts=off; итог ездит memfd-путём -- без
     # argv-содержимого и без диска. Недоступный файл или не-JSON --
