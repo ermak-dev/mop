@@ -358,7 +358,7 @@ def main(argv):
     # До первого сетевого вызова: зависимости контроллера ставит mop server setup,
     # и отказ его называет.
     if not shutil.which("ansible-playbook"):
-        lib.fail("no ansible-playbook here -- run `mop setup` (server)")
+        lib.fail("no ansible-playbook here -- run `mop server setup`")
         return 1
     # Полный REQUIRED спрашивает только deploy: остальным хватает адреса
     # сервера, а MOP_GIT_HOST читают одни плейбуки.

@@ -1,11 +1,10 @@
 """pool diagnostics: mop server doctor [group] [--fix [--safe]]
 
 Catches stuck puppets, a stale login, restart backoff, exhausted quota,
-and a job spec older than the node driver. Groups are modules in
-mop/server/doctor/; no argument runs them all, an unknown name is refused
-with the list.
+and a job spec older than the node driver. Without an argument every
+group runs; an unknown group name is refused with the list.
 
---fix treats what is treatable; a silent node agent is NOT treated — the
+--fix treats what is treatable; a silent node agent is left alone — the
 puppet may be working, and a restart would kill that work. --fix --safe
 treats only what cannot break work (login+nudge, disk sweep) and names
 the rest: restarts, stops, /model and spec updates stay the operator's

@@ -913,7 +913,7 @@ cluster service: mop server cluster [serve|check|users|reload|builder] — Nomad
 The only thing on the installation that talks to Nomad on someone else's
 behalf. A master and an operator ask a verb on mop.<project>.cluster.rpc;
 the service checks whether they may and only then calls the API, so the
-management token stays on the server (mop/server/cluster.py).
+management token never leaves the server.
 ```
 
 #### mop server cluster builder
@@ -1016,11 +1016,10 @@ to the whole pool, not to one project.
 pool diagnostics: mop server doctor [group] [--fix [--safe]]
 
 Catches stuck puppets, a stale login, restart backoff, exhausted quota,
-and a job spec older than the node driver. Groups are modules in
-mop/server/doctor/; no argument runs them all, an unknown name is refused
-with the list.
+and a job spec older than the node driver. Without an argument every
+group runs; an unknown group name is refused with the list.
 
---fix treats what is treatable; a silent node agent is NOT treated — the
+--fix treats what is treatable; a silent node agent is left alone — the
 puppet may be working, and a restart would kill that work. --fix --safe
 treats only what cannot break work (login+nudge, disk sweep) and names
 the rest: restarts, stops, /model and spec updates stay the operator's
@@ -1075,13 +1074,12 @@ deploy/self.yml against localhost. Running it again changes nothing.
 ```text
 garbage on the pool's nodes: mop server sweep [--dry]
 
-Bodies no puppet owns any more; Nomad is the authority — a body named
-in no job is an orphan. An orphan is destroyed (on a hypervisor it is a
-running container nobody accounts for); a build body is only named: a
-running sealed image is either a live build or a broken one, and they
-look the same from here. Run on the server, not a master shell — what
-stands on a node is every tenant's fact. `mop driver sweep` is the node
-half: it knows no Nomad and judges by the absence of a tmux session.
+Destroys orphan bodies — those no job names any more — and only lists
+build bodies: a running sealed image is either a live build or a broken
+one, and they look the same from here. --dry lists without destroying.
+Run on the server, not a master shell: what stands on a node is every
+tenant's fact. `mop driver sweep` is the node half: it judges by the
+absence of a tmux session.
 ```
 
 #### mop server user

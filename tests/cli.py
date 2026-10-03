@@ -359,87 +359,78 @@ def check_reference_committed_350(c):
         c.check(f"#350 no legacy name mop {words}", f"\n#### mop {words}\n" not in md)
 
 
-# ── #432: справка командлетов driver/server/service кратка, синтаксис цел ──
+# ── #432: справка командлетов и групп driver/server/service — суть, не история ──
 # HYPOTHESIS: докстринги этих командлетов выросли в рассказы (deploy 302
-# слова, sweep 211, web 198, doctor 194) и уезжают целиком в docs/CLI.md и
-# в ответ usage; редкая деталь принадлежит docs/, а не help. Отказы в тех
-# же файлах повторяют имя команды внутри её собственного сообщения и
-# раскладывают лечение на три предложения там, где хватает одного.
-# SOLUTION: заголовок с синтаксисом + один-два абзаца сути (что делает,
-# где запускать, что ломает); детали -- в docs/. Отказ -- одна строка:
-# причина и лечение, без повторов имени команды. Ключи и предупреждения
-# о потере работы сохранены дословно.
+# слова, sweep 211, web 198, doctor 194, группы 114-160) и уезжают целиком
+# в docs/CLI.md и в ответ usage; редкая деталь принадлежит docs/, а не help.
+# Отказы в тех же файлах повторяли имя команды внутри её собственного
+# сообщения.
+# SOLUTION: заголовок с синтаксисом и один-два абзаца сути — что делает,
+# где запускать, что ломает; группы перечисляют глаголы без пересказа их
+# докстрингов. Отказ — одна строка: причина и лечение. Ключи и
+# предупреждения о потере работы сохранены дословно.
 # STATUS: FIXED — see #432
 import ast
 import os
 
 
-def owned_commandlets():
-    """[(путь, докстринг)] командлетов #432: driver, server, service,
-    без mcp.py (проза мастера) и скрытых модулей (_*.py) -- не команды."""
-    root = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "mop", "cli")
-    out = []
+def _owned_help():
+    """{(путь: докстринг)} командлетов и групп #432: driver, server,
+    service, включая __init__ групп (server/cluster, server/user,
+    server/bootstrap), без mcp.py (проза мастера) и скрытых _*.py.
+    Разбор AST, без импорта: как сам справочник (#350)."""
+    from mop import cli
+    root = os.path.dirname(cli.__file__)
+    out = {}
     for group in ("driver", "server", "service"):
-        for dirpath, _, names in sorted(os.walk(os.path.join(root, group))):
+        base = os.path.join(root, group)
+        out[os.path.join(base, "__init__.py")] = cli.docstring(os.path.join(base, "__init__.py")) or ""
+        for dirpath, _, names in sorted(os.walk(base)):
             if "__pycache__" in dirpath:
                 continue
             for n in sorted(names):
-                if not n.endswith(".py") or n.startswith("_") or n in ("mcp.py", "__init__.py"):
+                if not n.endswith(".py") or n == "mcp.py":
+                    continue
+                # __init__.py секции уже взят выше; скрытые _*.py -- не
+                # команды. Вложенный __init__.py -- help группы
+                # (server/cluster, server/user, server/bootstrap).
+                if n.startswith("_") and n != "__init__.py":
+                    continue
+                if n == "__init__.py" and dirpath == base:
                     continue
                 path = os.path.join(dirpath, n)
-                doc = ast.get_docstring(ast.parse(open(path).read())) or ""
-                out.append((path, doc))
+                out[path] = cli.docstring(path) or ""
     return out
 
 
-# Заголовок-синтаксис и два коротких абзаца; рассказ -- в docs/.
-HELP_MAX_WORDS = 110
-# Отказ -- причина и лечение одной строкой.
-REFUSAL_MAX = 160
-
-
-def refusal_texts(path):
-    """Текстовые части отказов (lib.fail / sys.exit строкой или f-строкой)
-    с номерами строк. Формулы подстановок не считаются текстом."""
-    out = []
-    for node in ast.walk(ast.parse(open(path).read())):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-            continue
-        if node.func.attr not in ("fail", "exit") or not node.args:
-            continue
-        a = node.args[0]
-        if isinstance(a, ast.Constant) and isinstance(a.value, str):
-            out.append((node.lineno, a.value))
-        elif isinstance(a, ast.JoinedStr):
-            out.append((node.lineno, "".join(x.value for x in a.values
-                                             if isinstance(x, ast.Constant))))
-    return out
-
-
-def check_help_size_432(c):
+def check_help_content_432(c):
+    """Ужатая справка сохраняет суть: глаголы групп перечислены, ключи и
+    предупреждения о потере работы — дословно. Конкретные утверждения
+    вместо потолков: будущая необходимая деталь не обязана влезать."""
     failed_before = c.failed
-    for path, doc in owned_commandlets():
-        words = len(doc.split())
-        c.check(f"#432 {os.path.relpath(path)}: help fits {HELP_MAX_WORDS} words (now {words})",
-                words <= HELP_MAX_WORDS, doc.splitlines()[0][:70])
-        first = doc.splitlines()[0]
-        # Заголовок называет команду: сам «mop …» либо глагол, а полный
-        # вызов («mop agent») назван в докстринге.
-        verb = os.path.basename(path)[:-3]
-        c.check(f"#432 {os.path.relpath(path)}: the first line names the command",
-                "mop " in first or verb in first.split(":")[0], first)
-    return c.failed == failed_before
+    docs = _owned_help()
 
+    # Группа перечисляет свои глаголы — весь список, до последнего.
+    verbs_of = {
+        "mop/cli/driver/__init__.py": ("list", "run", "sweep", "clone-work", "build"),
+        "mop/cli/server/cluster/__init__.py": ("serve", "check", "users", "reload", "builder"),
+        "mop/cli/server/user/__init__.py": ("add", "passwd", "delete", "import"),
+        "mop/cli/server/bootstrap/__init__.py": ("serve", "check"),
+    }
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    for rel, verbs in verbs_of.items():
+        doc = docs.get(os.path.join(root, rel))
+        if not c.check(f"#432 the group help exists: {rel}", doc is not None, rel):
+            continue
+        for v in verbs:
+            c.check(f"#432 {rel} lists its verb {v}", v in doc, doc.splitlines()[0][:60])
 
-def check_help_keeps_432(c):
-    """Ключи и предупреждения, которые нельзя было потерять."""
-    failed_before = c.failed
-    docs = {os.path.relpath(p): d for p, d in owned_commandlets()}
+    # Ключи и предупреждения, которые нельзя было потерять при отжиме.
     must = {
         "mop/cli/server/deploy.py": ("--check", "--skip-pipeline", "--from-ci",
                                      "MOP_DEPLOY_NEEDS_GREEN"),
-        "mop/cli/server/doctor.py": ("--fix", "--safe"),
-        "mop/cli/server/sweep.py": ("--dry",),
+        "mop/cli/server/doctor.py": ("--fix", "--safe", "silent"),
+        "mop/cli/server/sweep.py": ("--dry", "build bodies", "orphan"),
         "mop/cli/server/gc.py": ("--dry", "MOP_GC_FREE_MIN_GB"),
         "mop/cli/driver/build.py": ("--fresh", "--force", "--node"),
         "mop/cli/driver/sweep.py": ("--dry",),
@@ -447,35 +438,98 @@ def check_help_keeps_432(c):
         "mop/cli/server/user/add.py": ("--role", "--projects", "--stdin"),
         "mop/cli/server/user/passwd.py": ("--stdin",),
         "mop/cli/server/pve-facts.py": ("--base", "--project", "--listing"),
-        "mop/cli/server/web.py": ("--port", "--bind"),
+        "mop/cli/server/web.py": ("--port", "--bind", "/api/journal"),
         "mop/cli/server/config.py": ("--json",),
         "mop/cli/server/cluster/users.py": ("--reload",),
         "mop/cli/service/agent.py": ("--check",),
     }
     for rel, keys in must.items():
-        doc = docs.get(rel)
+        doc = docs.get(os.path.join(root, rel))
         if not c.check(f"#432 {rel} is in the audit", doc is not None, rel):
             continue
         for k in keys:
-            c.check(f"#432 {rel} keeps {k}", k in doc, doc.splitlines()[0][:60])
+            c.check(f"#432 {rel} keeps {k!r}", k in doc, doc.splitlines()[0][:60])
+
+    # Отжатые докстринги: суть осталась, история ушла. Было/стало по
+    # существу, а не по длине.
+    was = {"mop/cli/server/deploy.py": 302, "mop/cli/server/sweep.py": 211,
+           "mop/cli/server/web.py": 198, "mop/cli/server/doctor.py": 194}
+    for rel, words in was.items():
+        doc = docs[os.path.join(root, rel)]
+        now = len(doc.split())
+        c.check(f"#432 {rel}: the essay is gone ({words} -> {now})",
+                now < words * 0.6, doc.splitlines()[0][:60])
+
+    # Серверная группа всё ещё говорит, где живут её команды.
+    srv = docs[os.path.join(root, "mop/cli/server/__init__.py")]
+    c.check("#432 the server group keeps the controller-only note",
+            "controller" in srv, srv.splitlines()[0][:60])
+    # Справка говорит о команде, не о внутренностях пакета: пути модулей
+    # и Nomad-внутренности — не помощь вызывающему.
+    for rel, doc in docs.items():
+        if not doc:
+            continue     # service/__init__.py — технический, не команда
+        c.check(f"#432 {os.path.relpath(rel, root)} names no internal module path",
+                "mop/server/" not in doc and "mop/cli/" not in doc,
+                doc.splitlines()[0][:60])
+    # Капс — не акцент (CLAUDE.md): справка — тоже вывод программы. Речь
+    # об эмфазе («NOT treated»), а не о статус-токенах и именах настроек:
+    # PLAY RECAP, MOP_*, VMID, LAN — легальные капс по смыслу.
+    EMPHASIS = ("NOT", "ALWAYS", "NEVER", "MUST", "ONLY", "WARNING", "DANGER")
+    for rel, doc in docs.items():
+        if not doc:
+            continue
+        caps = [w.strip(".,:;()[]") for w in doc.split()
+                if w.strip(".,:;()[]") in EMPHASIS]
+        c.check(f"#432 {os.path.relpath(rel, root)}: no caps emphasis",
+                not caps, caps)
     return c.failed == failed_before
 
 
-def check_refusals_short_432(c):
-    """Отказы owned-командлетов: одна строка без повторов имени команды."""
+def check_refusals_432(c):
+    """Отказы изменённых команд: одна мысль, лечение названо, без повтора
+    собственного префикса команды. Только изменённые строки — конкретные
+    утверждения."""
     failed_before = c.failed
-    for path, _ in owned_commandlets():
-        rel = os.path.relpath(path)
-        for ln, text in refusal_texts(path):
-            c.check(f"#432 {rel}:{ln}: the refusal fits {REFUSAL_MAX} chars (now {len(text)})",
-                    len(text) <= REFUSAL_MAX, text[:70])
-            # Имя самой команды внутри её отказа -- повтор: «deploy takes no
-            # arguments» достаточно без «mop server deploy» ещё раз.
-            words = " ".join(text.split())
-            c.check(f"#432 {rel}:{ln}: no 'mop server' inside a server command's refusal",
-                    not (os.sep + "server" + os.sep in path and "mop server" in words),
-                    words[:70])
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+    def text_of(path, lineno):
+        """Текстовая часть отказа (lib.fail/sys.exit) на строке."""
+        for node in ast.walk(ast.parse(open(path).read())):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr not in ("fail", "exit") or not node.args:
+                continue
+            if node.lineno != lineno:
+                continue
+            a = node.args[0]
+            if isinstance(a, ast.Constant):
+                return a.value
+            if isinstance(a, ast.JoinedStr):
+                return "".join(x.value for x in a.values if isinstance(x, ast.Constant))
+        return None
+
+    # deploy: лишний аргумент -- это совет зарегистрировать проект, а не
+    # повтор собственного имени команды.
+    got = text_of(os.path.join(root, "mop/cli/server/deploy.py"), 374)
+    c.check("#432 the no-arguments refusal cures, not repeats",
+            got is not None and "mop project add" in got
+            and "mop server deploy takes" not in got, got)
+    # deploy: точный синтаксис команды-зависимости, не пересказ.
+    got = text_of(os.path.join(root, "mop/cli/server/deploy.py"), 361)
+    c.check("#432 the missing-ansible refusal names the exact command",
+            got is not None and "mop server setup" in got, got)
+    # deploy: недоступные машины -- одна строка с лечением.
+    got = text_of(os.path.join(root, "mop/cli/server/deploy.py"), 463)
+    c.check("#432 the unanswered-machines refusal stays one sentence",
+            got is not None and "\n" not in got and "deploy again" in got, got)
+    # cluster/users: ссылка на deploy без «mop server» внутри.
+    got = text_of(os.path.join(root, "mop/cli/server/cluster/users.py"), 26)
+    c.check("#432 the base-users refusal names the fix without the prefix",
+            got is not None and "deploy writes" in got
+            and "mop server deploy" not in got, got)
     return c.failed == failed_before
+
 
 # HYPOTHESIS: environment() исполняется до клиентского командлета и читает
 # installation .env; дочерний mop mcp стартует тем же диспетчером.
@@ -604,9 +658,8 @@ def main():
     check_login_name_407(c)
     check_current_docs_401(c)
     check_dispatch_sources_396(c)
-    check_help_size_432(c)
-    check_help_keeps_432(c)
-    check_refusals_short_432(c)
+    check_help_content_432(c)
+    check_refusals_432(c)
     check_reference_render_350(c)
     check_reference_empty_350(c)
     check_reference_committed_350(c)

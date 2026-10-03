@@ -1,12 +1,11 @@
 """garbage on the pool's nodes: mop server sweep [--dry]
 
-Bodies no puppet owns any more; Nomad is the authority — a body named
-in no job is an orphan. An orphan is destroyed (on a hypervisor it is a
-running container nobody accounts for); a build body is only named: a
-running sealed image is either a live build or a broken one, and they
-look the same from here. Run on the server, not a master shell — what
-stands on a node is every tenant's fact. `mop driver sweep` is the node
-half: it knows no Nomad and judges by the absence of a tmux session.
+Destroys orphan bodies — those no job names any more — and only lists
+build bodies: a running sealed image is either a live build or a broken
+one, and they look the same from here. --dry lists without destroying.
+Run on the server, not a master shell: what stands on a node is every
+tenant's fact. `mop driver sweep` is the node half: it judges by the
+absence of a tmux session.
 """
 import sys
 
