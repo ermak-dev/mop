@@ -3,6 +3,11 @@
 from mop.common import gitlab
 from mop.cli.dev.bug._common import parser
 
+MCP = {"annotations": "destructive", "args": [
+    {"name": "iid", "type": "string", "required": True},
+    {"name": "status", "type": "string", "flag": "--status"},
+    {"name": "label", "type": "string", "flag": "--label", "repeatable": True}]}
+
 
 def main(argv):
     p = parser("relabel")

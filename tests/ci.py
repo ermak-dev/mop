@@ -189,19 +189,20 @@ def check_cases(c):
 
 
 def check_group(c):
-    """`mop dev ci` — группа с глаголами; MCP только у читающих (#233)."""
+    """`mop dev ci` — группа с глаголами; MCP у выбранных листьев (#443)."""
     from mop import cli
     verbs = set((cli.verbs().get("dev") or {}).get("ci") or {})   # дерево (#253): глаголы -- ключи
     want = {"list", "show", "log", "why", "lint", "retry", "cancel", "runners"}
     if not c.check("mop dev ci verbs", not (verbs != want),
                    f"{sorted(verbs or ())}, wanted {sorted(want)}"):
         return
-    # #233 давал читающим глаголам MCP; #254 снимает его со всех: dev --
-    # внутренние команды разработчика, мастер зовёт их из шелла, и
-    # пространство целиком закрыто для инструментов (cli.PRIVATE).
+    # Только явно выбранные листья (#443), включая retry; cancel остаётся
+    # приватным и не может появиться как инструмент вместе со всей группой.
+    exposed = {"list", "show", "why", "log", "retry"}
     for verb in sorted(want):
         decl = cli.declared(os.path.join(cli.PACKAGE, "dev", "ci", f"{verb}.py"))
-        c.check(f"mop dev ci {verb} must stay out of MCP", decl is None, repr(decl))
+        c.check(f"mop dev ci {verb} MCP declaration", (decl is not None) ==
+                (verb in exposed), repr(decl))
     c.check("mop dev ci itself must stay out of MCP: its verbs are the tools",
             not (cli.declared(os.path.join(cli.PACKAGE, "dev", "ci", "__init__.py")) is not None))
     # Без глагола — список, с числом — пайплайн: разбирает сама группа.

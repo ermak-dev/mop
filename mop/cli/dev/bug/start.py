@@ -4,6 +4,14 @@ from mop.cli import lib
 from mop.common import gitlab
 from mop.cli.dev.bug._common import parser
 
+# Обязательный true не позволяет MCP переключить общий checkout мастера.
+MCP = {"annotations": "destructive", "args": [
+    {"name": "iid", "type": "string", "required": True},
+    {"name": "slug", "type": "string"},
+    {"name": "worker", "type": "string", "flag": "--worker"},
+    {"name": "no_branch", "type": "boolean", "flag": "--no-branch", "required": True,
+     "help": "Required: leave the master checkout untouched"}]}
+
 
 def main(argv):
     p = parser("start")

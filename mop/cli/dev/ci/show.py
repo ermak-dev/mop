@@ -8,6 +8,10 @@ from mop.common import gitlab
 from mop.common.render import table
 from mop.cli.dev.ci._common import parser
 
+MCP = {"annotations": "readonly", "args": [
+    {"name": "id", "type": "string", "required": True},
+    {"name": "failed", "type": "boolean", "flag": "--failed"}]}
+
 def main(argv):
     p = parser("show")
     p.add_argument("id", type=int)
