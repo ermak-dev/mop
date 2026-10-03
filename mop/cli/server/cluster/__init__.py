@@ -6,10 +6,9 @@
   mop server cluster reload   make nats reread its config, and check it took
   mop server cluster builder  the server's image builder (unit mop-builder)
 
-The only thing on the installation that talks to Nomad on someone else's
-behalf. A master and an operator ask a verb on mop.<project>.cluster.rpc;
-the service checks whether they may and only then calls the API, so the
-management token never leaves the server.
+The only one on the installation that talks to Nomad on someone else's
+behalf: masters and operators ask, the service checks that they may —
+the management token never leaves the server.
 """
 from mop.cli import lib
 from mop.cli.server.cluster import check as _check

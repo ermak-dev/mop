@@ -10,8 +10,9 @@ nothing runs after the playbook. With MOP_DEPLOY_NEEDS_GREEN=1 deploy
 refuses unless HEAD's pipeline on the default branch is green;
 --skip-pipeline is the emergency way past and says so. --from-ci is
 what CI runs on the server: default branch, fetch, fast-forward, the
-gate mandatory; if HEAD has moved on it exits 0 — the newer job rolls
-the rollout out.
+gate mandatory; when the gate's only answer would be "wait" because
+HEAD has moved past the commit that started the job, it exits 0 — the
+newer job deploys it.
 """
 import json
 import os

@@ -450,6 +450,60 @@ def check_help_content_432(c):
         for k in keys:
             c.check(f"#432 {rel} keeps {k!r}", k in doc, doc.splitlines()[0][:60])
 
+    # Группы и служебные командлеты: без истории и внутренностей.
+    # driver: где живёт тело и кто его поднимает -- суть; «Each verb is a
+    # module» и job spec/Nomad -- устройство, не помощь.
+    drv = docs[os.path.join(root, "mop/cli/driver/__init__.py")]
+    c.check("#432 the driver group keeps the node-side note",
+            "node" in drv, drv.splitlines()[0][:60])
+    for gone in ("module of this package", "job spec", "Nomad picks"):
+        c.check(f"#432 the driver group names no {gone!r}",
+                gone not in drv, [l for l in drv.splitlines() if gone in l])
+    # server: что нужно контроллеру; «old one-word names» -- неверная уже
+    # история (имена с тех пор иные).
+    srvgrp = docs[os.path.join(root, "mop/cli/server/__init__.py")]
+    c.check("#432 the server group keeps what only the server has",
+            "inventory" in srvgrp, srvgrp.splitlines()[0][:60])
+    for gone in ("old one-word names", "still work for one release"):
+        c.check(f"#432 the server group names no {gone!r}",
+                gone not in srvgrp, [l for l in srvgrp.splitlines() if gone in l])
+    # agent: по одному на узел, вне джобы, --check спрашивает шину;
+    # переходные юниты и внутренние импорты -- не помощь.
+    ag = docs[os.path.join(root, "mop/cli/service/agent.py")]
+    for kept in ("one per node", "--check", "systemd"):
+        c.check(f"#432 the agent help keeps {kept!r}",
+                kept.lower() in ag.lower(), ag.splitlines()[0][:60])
+    for gone in ("python3 -m mop.agent", "mop.cli.lib", "python-nomad"):
+        c.check(f"#432 the agent help names no {gone!r}",
+                gone not in ag, [l for l in ag.splitlines() if gone in l])
+    # bootstrap serve: что делает (при старте песочницы), без subject.
+    bs = docs[os.path.join(root, "mop/cli/server/bootstrap/serve.py")]
+    c.check("#432 the bootstrap help keeps the at-start note",
+            "start" in bs, bs.splitlines()[0][:60])
+    c.check("#432 the bootstrap help names no bus subject",
+            "server.rpc" not in bs and "mop.*" not in bs,
+            [l for l in bs.splitlines() if "rpc" in l])
+    # pve-facts: контроллерные факты, без путей плейбуков и модулей.
+    pve = docs[os.path.join(root, "mop/cli/server/pve-facts.py")]
+    c.check("#432 the pve-facts help keeps the controller note",
+            "controller" in pve.lower(), pve.splitlines()[0][:60])
+    for gone in ("deploy/pve-build.yml", "mop/driver/pve.py", "pve role"):
+        c.check(f"#432 the pve-facts help names no {gone!r}",
+                gone not in pve, [l for l in pve.splitlines() if gone in l])
+    # callout: кто и как проверяется; без пересказа auth_users и файла.
+    co = docs[os.path.join(root, "mop/cli/server/callout.py")]
+    c.check("#432 the callout help keeps who is checked",
+            "people" in co and "puppets" in co, co.splitlines()[0][:60])
+    for gone in ("auth_users", "users.conf"):
+        c.check(f"#432 the callout help names no {gone!r}",
+                gone not in co, [l for l in co.splitlines() if gone in l])
+    # cluster: роль и гарантия токена, без subject и Nomad API.
+    cl = docs[os.path.join(root, "mop/cli/server/cluster/__init__.py")]
+    c.check("#432 the cluster group keeps the token guarantee",
+            "token" in cl and "server" in cl, cl.splitlines()[0][:60])
+    for gone in ("cluster.rpc", "mop.<project>", "calls the API"):
+        c.check(f"#432 the cluster group names no {gone!r}",
+                gone not in cl, [l for l in cl.splitlines() if gone in l])
     # web: справка описывает вход как он есть (#416): публичный обзор,
     # логин открывает admin-части (журнал, панель прокси). «No login for
     # the page» — опровергнуто самим маршрутом /api/login.
@@ -458,12 +512,22 @@ def check_help_content_432(c):
             "/api/login" in webdoc and "login" in webdoc.lower(), webdoc[:60])
     c.check("#432 the web help says the admin gate",
             "admin" in webdoc, webdoc.splitlines()[0][:60])
+    c.check("#432 the web help claims no network boundary",
+            "LAN" not in webdoc and "without login" in webdoc,
+            [l for l in webdoc.splitlines() if "login" in l.lower()][:2])
     c.check("#432 the web help claims no login",
             "No login" not in webdoc, [l for l in webdoc.splitlines() if "login" in l.lower()][:2])
     # deploy: справка говорит о команде, не об устройстве прогона: имя
     # плейбука, заголовок ansible, «реестр» и внутренности --from-ci —
     # не помощь вызывающему. Поведение флагов и последствия — остаются.
     dep = docs[os.path.join(root, "mop/cli/server/deploy.py")]
+    # deploy: условие мягкого выхода --from-ci -- ожидание гейта, а не
+    # безусловное обещание; и новый job «deploys it».
+    c.check("#432 the deploy help ties the soft exit to the gate's wait",
+            'answer would be "wait"' in dep and "exits 0" in dep,
+            [l for l in dep.splitlines() if "wait" in l or "exits 0" in l])
+    c.check("#432 the deploy help keeps no redundant rollout wording",
+            "rolls the rollout" not in dep, dep.splitlines()[-1])
     for gone in ("site.yml", "PLAY RECAP", "registry"):
         c.check(f"#432 the deploy help names no {gone!r}",
                 gone not in dep, [l for l in dep.splitlines() if gone in l])

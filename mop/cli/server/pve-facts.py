@@ -6,8 +6,7 @@ the body key and known_hosts, the top of its VMID range. With --project
 also its image and build body, and the project's bodies standing there;
 --listing is the wrapper's `list` output on that node.
 
-Run by deploy/pve-build.yml and the pve role on the controller; one
-computation in mop/driver/pve.py instead of copies in the playbooks.
+Controller-side facts for the image build and the hypervisor role.
 """
 import argparse
 import json

@@ -585,10 +585,8 @@ node driver: in what a puppet lives
                                  bake the project's image on the hypervisors;
                                  no argument: this working copy, .mop as it lies
 
-`run` is what the job spec calls. The outer wrapper is driver-agnostic because
-Nomad picks the node only after the spec is registered, so the master cannot
-know what the body will be; everything about the body happens here, on the
-node that owns it. Each verb is a module of this package.
+`run` raises the body and holds its session: everything about the body
+happens on the node that owns it, in whatever that node's driver is.
 ```
 
 #### mop driver build
@@ -851,9 +849,8 @@ the installation's server: commands run on the controller, not on a client
   mop server callout     the bus's auth callout (unit mop-callout)
   mop server pve-facts   a Proxmox node's image and build facts, for the build playbook
 
-These need what lives only on the server: the inventory, the playbooks,
-secrets/ and the Nomad token. The old one-word names (mop server deploy, mop server user,
-mop server cluster, ...) still work for one release.
+These need what lives only on the controller: the inventory, the
+playbooks, secrets/ and the Nomad token.
 ```
 
 #### mop server bootstrap
@@ -884,8 +881,8 @@ mop server bootstrap check: is the service answering on the bus, and for which p
 ```text
 mop server bootstrap serve: the server's subscriber (unit mop-bootstrap)
 
-Listens on mop.*.server.rpc and plays a project's .mop/bootstrap.yaml into a
-sandbox when its node asks at start (docs/BOOTSTRAP.md).
+Plays a project's .mop/bootstrap.yaml into a sandbox when its node asks
+at start (docs/BOOTSTRAP.md).
 ```
 
 #### mop server callout
@@ -893,10 +890,10 @@ sandbox when its node asks at start (docs/BOOTSTRAP.md).
 ```text
 mop server callout: the bus's auth callout (unit mop-callout)
 
-On the server, as the pool user. nats-server asks it at every connect of
-someone not in auth_users: people are checked by the identity provider and
-get the rights they had in users.conf, only over WebSocket; puppets are
-checked against the server's own password files. docs/BUS.md.
+On the server, as the pool user. The bus asks it at every connect:
+people are checked by the identity provider and keep their rights,
+only over WebSocket; puppets are checked against the server's own
+password files. docs/BUS.md.
 ```
 
 #### mop server cluster
@@ -910,10 +907,9 @@ cluster service: mop server cluster [serve|check|users|reload|builder] — Nomad
   mop server cluster reload   make nats reread its config, and check it took
   mop server cluster builder  the server's image builder (unit mop-builder)
 
-The only thing on the installation that talks to Nomad on someone else's
-behalf. A master and an operator ask a verb on mop.<project>.cluster.rpc;
-the service checks whether they may and only then calls the API, so the
-management token never leaves the server.
+The only one on the installation that talks to Nomad on someone else's
+behalf: masters and operators ask, the service checks that they may —
+the management token never leaves the server.
 ```
 
 #### mop server cluster builder
@@ -997,8 +993,9 @@ nothing runs after the playbook. With MOP_DEPLOY_NEEDS_GREEN=1 deploy
 refuses unless HEAD's pipeline on the default branch is green;
 --skip-pipeline is the emergency way past and says so. --from-ci is
 what CI runs on the server: default branch, fetch, fast-forward, the
-gate mandatory; if HEAD has moved on it exits 0 — the newer job rolls
-the rollout out.
+gate mandatory; when the gate's only answer would be "wait" because
+HEAD has moved past the commit that started the job, it exits 0 — the
+newer job deploys it.
 ```
 
 #### mop server disk
@@ -1049,8 +1046,7 @@ the body key and known_hosts, the top of its VMID range. With --project
 also its image and build body, and the project's bodies standing there;
 --listing is the wrapper's `list` output on that node.
 
-Run by deploy/pve-build.yml and the pve role on the controller; one
-computation in mop/driver/pve.py instead of copies in the playbooks.
+Controller-side facts for the image build and the hypervisor role.
 ```
 
 #### mop server setup
@@ -1168,7 +1164,7 @@ pool dashboard on the web: mop server web [--port N] [--bind ADDR]
                (file/LDAP, bus identity)
   /api/journal the full journal, admin only; the public feeds none
 
-The overview is public to the LAN; logging in opens the admin side —
+The overview is available without login; logging in opens the admin side —
 the journal and the proxy panel. The pool stays read-only here: a
 restart button would kill work in a clone. Port and bind:
 MOP_WEB_PORT (9000), MOP_WEB_BIND (127.0.0.1); beyond — the TLS proxy.
@@ -1188,12 +1184,9 @@ node agent: answers the bus about the puppets on this node (unit mop-agent)
   mop agent            subscribe and serve, until stopped
   mop agent --check    ask this node's agent over the bus whether it answers
 
-One per node, under systemd, outside the job spec (docs/BUS.md). The unit
-starts it as `mop agent`; units not yet rolled out still start
-`python3 -m mop.agent`, which lands here too.
-
-Runs on a node: nothing here may import what a node does not have
-(python-nomad, the installation's .env) -- hence no mop.cli.lib.
+One per node, under systemd, outside the job spec (docs/BUS.md): it must
+answer precisely while a puppet is restarting. Runs on a node, so it
+takes nothing from the controller.
 ```
 
 #### mop mcp

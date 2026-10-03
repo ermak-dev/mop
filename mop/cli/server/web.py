@@ -9,7 +9,7 @@
                (file/LDAP, bus identity)
   /api/journal the full journal, admin only; the public feeds none
 
-The overview is public to the LAN; logging in opens the admin side —
+The overview is available without login; logging in opens the admin side —
 the journal and the proxy panel. The pool stays read-only here: a
 restart button would kill work in a clone. Port and bind:
 MOP_WEB_PORT (9000), MOP_WEB_BIND (127.0.0.1); beyond — the TLS proxy.

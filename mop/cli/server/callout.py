@@ -1,9 +1,9 @@
 """mop server callout: the bus's auth callout (unit mop-callout)
 
-On the server, as the pool user. nats-server asks it at every connect of
-someone not in auth_users: people are checked by the identity provider and
-get the rights they had in users.conf, only over WebSocket; puppets are
-checked against the server's own password files. docs/BUS.md.
+On the server, as the pool user. The bus asks it at every connect:
+people are checked by the identity provider and keep their rights,
+only over WebSocket; puppets are checked against the server's own
+password files. docs/BUS.md.
 """
 import sys
 
