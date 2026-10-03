@@ -680,7 +680,8 @@ def delete(name, force=False):
     драйвера уносит тело целиком, и он же откажет, если tmux-сессия ещё
     жива, — снос под живой сессией недопустим независимо от того, что решил
     мастер."""
-    alloc = Alloc.from_dict(_cluster("alloc", name=name).get("alloc"))
+    got = _cluster("alloc", name=name)
+    alloc = Alloc.from_dict(got.get("alloc"))
     node = alloc.node if alloc else None
     # Ворота владения (#40) -- у сервиса, до снятия джоба.
     note = _cluster("delete", name=name, owner=bus.login(),
