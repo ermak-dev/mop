@@ -87,10 +87,13 @@ def main(argv):
         for row in rows[:MERGE_LIMIT]:
             sha, parents, subject = row.split("\t", 2)
             source = merge_source(subject)
-            if len(parents.split()) != 2 or not source or not evidence_branch("origin/" + source, iid):
+            if len(parents.split()) != 2 or not source:
                 continue
-            tip = branches.get("origin/" + source)
             first, second = parents.split()
+            tip = branches.get("origin/" + source) or next(
+                (value for value in branches.values() if value == second), None)
+            if not evidence_branch("origin/" + source, iid) and not tip:
+                continue
             if sha in seen:
                 continue
             seen.add(sha)
