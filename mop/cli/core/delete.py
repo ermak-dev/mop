@@ -1,9 +1,8 @@
 """delete a puppet: mop delete <name> [--force]
 
 Where the body is the node itself, the clone stays and is reused if a puppet
-of that name comes back. Where the body is a container, it goes with the
-puppet: the clone lives inside it, and a body nobody owns is a running
-container holding memory and disk.
+of that name comes back; where it is a container, the body goes with the
+puppet — memory and disk with it.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.

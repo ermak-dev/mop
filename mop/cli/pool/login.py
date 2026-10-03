@@ -5,21 +5,18 @@ working copy's binding; if missing, they are asked for. The bus password is
 asked without echo (or read from MOP_BUS_PASSWORD) and verified before
 saving. A valid previous login is reused.
 
-The HTTPS port uses --https-port, the saved client port, MOP_HTTPS_PORT,
-or 443, in that order, without prompting. A sole joined server is selected
-when no server is named or bound. After authenticating to the bus, join asks
-the server for its LLM proxy URL and client key over a personal, authenticated
-subject. The key is never printed or asked for separately; /v1/models is
-checked before saving. Rejoining refreshes a rotated key without replacing
-working credentials when verification fails. Neither nodes nor puppets can
-request the key, and there is no public HTTP endpoint for it.
+The HTTPS port uses --https-port, the saved client port, MOP_HTTPS_PORT or
+443, in that order, without prompting; a sole joined server is selected when
+none is named. After the bus, join also fetches the server's LLM proxy URL
+and client key and checks /v1/models before saving; rejoining refreshes a
+rotated key without replacing working credentials.
 
-The bus uses the server's TLS proxy at /nats. A self-signed certificate is
-pinned before sending the bus password; compare its fingerprint on the
-controller: openssl x509 -noout -fingerprint -sha256 -in
+The bus goes through the server's TLS proxy at /nats. Its self-signed
+certificate is pinned before the bus password is sent; compare the
+fingerprint on the controller: openssl x509 -noout -fingerprint -sha256 -in
 ~/.config/mop/secrets/tls.pem
 
-Bus and proxy credentials stay in separate private files under
+Credentials stay in separate private files under
 ~/.config/mop/servers/<server>/. The clone remembers only server and login
 in local git config. --user NAME is the old spelling of LOGIN.
 """

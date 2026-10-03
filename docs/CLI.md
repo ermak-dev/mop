@@ -64,9 +64,8 @@ a terminal, missing input refuses. This command never adds the pool's MCP tools.
 delete a puppet: mop delete <name> [--force]
 
 Where the body is the node itself, the clone stays and is reused if a puppet
-of that name comes back. Where the body is a container, it goes with the
-puppet: the clone lives inside it, and a body nobody owns is a running
-container holding memory and disk.
+of that name comes back; where it is a container, the body goes with the
+puppet — memory and disk with it.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
@@ -85,14 +84,10 @@ landing token of this project: mop landing [take <puppet>|give|show] [--force]
   mop landing give --force      release a gone master's token
 
 Exactly one puppet between merge and push per project: two parallel gates
-race, and the second push bounces non-fast-forward after its gate ran against
-an integration that no longer exists. The token is kept by the cluster
-service, so every master of the project sees the same queue.
-
-take refuses while another master holds the token, naming who, for which
-puppet and since when; asking again for the same puppet is not an error. The
-holder is your login on the bus. There is no expiry: a holder that went away
-is released with --force.
+race, and the second push bounces non-fast-forward. take refuses while
+another master holds the token, naming who and since when; asking again for
+the same puppet is not an error. The holder is your login on the bus; a
+holder that went away is released with --force.
 ```
 
 #### mop list
@@ -110,50 +105,25 @@ the dispatch decision rests on this.
 launch claude as a project's master: mop master [git-origin] [claude options]
 
 Without an argument, the origin of the current working copy is used. One
-project — one project: a master sees and reaches only its own puppets; anyone
+project — one master: a master sees and reaches only its own puppets; anyone
 else's don't exist for it.
 
-Only origin belongs to this command; everything else goes to claude
-as-is (`mop master --continue` resumes the master's last session). The
-command won't mirror claude's own flags: there are dozens of them, and the
-list would drift the moment claude ships a new version. Pass a flag that
-takes a VALUE after `--` (`mop master -- --model opus`): otherwise the value
-is indistinguishable from origin.
-
-You can run as many masters as you like, including several for one project:
-an inbox is addressed by master, not by project, so they never get confused.
-
-All this command does is work out the project, check its credentials, and exec
-into claude. From there the slice is inherited: mop mcp, spawned by this
-session as a child, sees MOP_PROJECT, builds the project's bus credentials from
-the server's directory (mop/common/creds.py) and subscribes to its project's inbox.
+Only origin belongs to this command; everything else goes to claude as-is
+(`mop master --continue` resumes the master's last session). A flag that
+takes a VALUE goes after `--` (`mop master -- --model opus`): otherwise the
+value is indistinguishable from origin. Several masters of one project are
+fine: inboxes are addressed per master.
 
 No ansible on this machine: bus and proxy credentials arrive with
 `mop login --server ADDRESS LOGIN`, started automatically if either record
-is missing. The server comes from the clone binding, MOP_SERVER_LAN or
---server; without one, a single joined server is selected. Without a
-terminal or an unambiguous server, login refuses before launching claude.
-The /master skill is linked from here.
+is missing; without a terminal or an unambiguous server it refuses before
+launching claude.
 
-The pool server arrives as an argument, not from a directory config. The
-master sits in a working copy of its own project, while the `.mcp.json` that
-names the server lives in the mop repository — that is, anywhere except
-where masters actually run. The very first run in a foreign directory came up
-with no mcp__mop__* at all, and the session could neither see the roster nor
-write to a puppet. Registering the server globally is possible, but
-~/.claude.json is live state that running sessions rewrite; the argument
-touches nothing and applies to this session alone.
-
-The master comes up in the same permission class as the pool it commands.
-Puppets live under --dangerously-skip-permissions, and the message channel
-checks classes: a puppet's report that reaches a master in ordinary mode gets
-parked in the held queue to wait for a human — meaning the loop stops being
-automatic on exactly its main signal. The price is named up front: the
-master can push, manage its project's puppets and talk to the tracker without
-asking on every step. The Nomad token stays on the server.
-
-The session uses the selected server's LLM proxy. Its URL and key come from
-the private client.json written by mop login, not from installation .env.
+The master runs in the same permission class as its pool: it can push,
+manage the project's puppets and talk to the tracker without asking on
+every step. The Nomad token stays on the server. The session uses the
+selected server's LLM proxy; its URL and key come from the private
+client.json written by mop login.
 ```
 
 #### mop recycle
@@ -268,21 +238,18 @@ working copy's binding; if missing, they are asked for. The bus password is
 asked without echo (or read from MOP_BUS_PASSWORD) and verified before
 saving. A valid previous login is reused.
 
-The HTTPS port uses --https-port, the saved client port, MOP_HTTPS_PORT,
-or 443, in that order, without prompting. A sole joined server is selected
-when no server is named or bound. After authenticating to the bus, join asks
-the server for its LLM proxy URL and client key over a personal, authenticated
-subject. The key is never printed or asked for separately; /v1/models is
-checked before saving. Rejoining refreshes a rotated key without replacing
-working credentials when verification fails. Neither nodes nor puppets can
-request the key, and there is no public HTTP endpoint for it.
+The HTTPS port uses --https-port, the saved client port, MOP_HTTPS_PORT or
+443, in that order, without prompting; a sole joined server is selected when
+none is named. After the bus, join also fetches the server's LLM proxy URL
+and client key and checks /v1/models before saving; rejoining refreshes a
+rotated key without replacing working credentials.
 
-The bus uses the server's TLS proxy at /nats. A self-signed certificate is
-pinned before sending the bus password; compare its fingerprint on the
-controller: openssl x509 -noout -fingerprint -sha256 -in
+The bus goes through the server's TLS proxy at /nats. Its self-signed
+certificate is pinned before the bus password is sent; compare the
+fingerprint on the controller: openssl x509 -noout -fingerprint -sha256 -in
 ~/.config/mop/secrets/tls.pem
 
-Bus and proxy credentials stay in separate private files under
+Credentials stay in separate private files under
 ~/.config/mop/servers/<server>/. The clone remembers only server and login
 in local git config. --user NAME is the old spelling of LOGIN.
 ```
@@ -660,13 +627,12 @@ pool nodes: mop node [drain|up|forget <name>]
   mop node                 what the pool stands on: driver, projects, capacity
   mop node drain <name>    move its puppets off and close it to the scheduler
   mop node up <name>       open it to the scheduler again
-  mop node forget <name>   drop it from the roster
+  mop node forget <name>   drop the node from the roster
 
 Draining is graceful: the wrapper takes its session down on TERM, so a
 puppet leaves with its clone intact. `forget` refuses while anything still
-runs there — a node dropped from under a live puppet keeps working and the
-master never hears of it again — and while the node is in the inventory,
-which the next deploy would configure it from again.
+runs there, and while the node is in the inventory — the next deploy would
+configure it from again.
 ```
 
 #### mop node drain
@@ -711,15 +677,10 @@ pool projects: mop project [add <git-origin>|delete <name>|list]
   mop project limit [<name> <N|none>]  puppet limit of a project
   mop project list [--origins]  the same list, for scripts
 
-A project is one repository, one slice of the pool, one master; its name is
-the basename of its origin, and the pool builds puppet names from it. The
-registry lives on the server and is the only answer to "which projects are
-set up"; every subcommand is an operator's verb of the cluster service,
-so it works from any machine with the admin role, not only from the
-controller. Operators reach a project by their role in the server's identity provider.
-
-Registering used to be a side effect of `mop server deploy <origin>` and there was
-no way to take a project off. `mop server deploy` no longer takes origins.
+A project is one repository and one slice of the pool; its name is the
+basename of its origin, and puppet names are built from it. The registry
+lives on the server; every subcommand is an operator's verb of the cluster
+service, so it works from any machine with the admin role.
 ```
 
 #### mop project add

@@ -1,50 +1,25 @@
 """launch claude as a project's master: mop master [git-origin] [claude options]
 
 Without an argument, the origin of the current working copy is used. One
-project — one project: a master sees and reaches only its own puppets; anyone
+project — one master: a master sees and reaches only its own puppets; anyone
 else's don't exist for it.
 
-Only origin belongs to this command; everything else goes to claude
-as-is (`mop master --continue` resumes the master's last session). The
-command won't mirror claude's own flags: there are dozens of them, and the
-list would drift the moment claude ships a new version. Pass a flag that
-takes a VALUE after `--` (`mop master -- --model opus`): otherwise the value
-is indistinguishable from origin.
-
-You can run as many masters as you like, including several for one project:
-an inbox is addressed by master, not by project, so they never get confused.
-
-All this command does is work out the project, check its credentials, and exec
-into claude. From there the slice is inherited: mop mcp, spawned by this
-session as a child, sees MOP_PROJECT, builds the project's bus credentials from
-the server's directory (mop/common/creds.py) and subscribes to its project's inbox.
+Only origin belongs to this command; everything else goes to claude as-is
+(`mop master --continue` resumes the master's last session). A flag that
+takes a VALUE goes after `--` (`mop master -- --model opus`): otherwise the
+value is indistinguishable from origin. Several masters of one project are
+fine: inboxes are addressed per master.
 
 No ansible on this machine: bus and proxy credentials arrive with
 `mop login --server ADDRESS LOGIN`, started automatically if either record
-is missing. The server comes from the clone binding, MOP_SERVER_LAN or
---server; without one, a single joined server is selected. Without a
-terminal or an unambiguous server, login refuses before launching claude.
-The /master skill is linked from here.
+is missing; without a terminal or an unambiguous server it refuses before
+launching claude.
 
-The pool server arrives as an argument, not from a directory config. The
-master sits in a working copy of its own project, while the `.mcp.json` that
-names the server lives in the mop repository — that is, anywhere except
-where masters actually run. The very first run in a foreign directory came up
-with no mcp__mop__* at all, and the session could neither see the roster nor
-write to a puppet. Registering the server globally is possible, but
-~/.claude.json is live state that running sessions rewrite; the argument
-touches nothing and applies to this session alone.
-
-The master comes up in the same permission class as the pool it commands.
-Puppets live under --dangerously-skip-permissions, and the message channel
-checks classes: a puppet's report that reaches a master in ordinary mode gets
-parked in the held queue to wait for a human — meaning the loop stops being
-automatic on exactly its main signal. The price is named up front: the
-master can push, manage its project's puppets and talk to the tracker without
-asking on every step. The Nomad token stays on the server.
-
-The session uses the selected server's LLM proxy. Its URL and key come from
-the private client.json written by mop login, not from installation .env.
+The master runs in the same permission class as its pool: it can push,
+manage the project's puppets and talk to the tracker without asking on
+every step. The Nomad token stays on the server. The session uses the
+selected server's LLM proxy; its URL and key come from the private
+client.json written by mop login.
 """
 import json
 import os

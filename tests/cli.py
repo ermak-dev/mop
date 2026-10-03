@@ -583,6 +583,72 @@ def check_help_audit_431(c):
                         "--force" in doc, doc[:80])
 
 
+# ── #431: короткая помощь операторских команд ───────────────────────────
+# HYPOTHESIS: помощь landing/master/delete/login и групп node/project/secret
+# рассказывала устройство (очередь токенов, exec-механику, склейку_cred),
+# а оператору нужно действие, синтаксис и существенные последствия.
+# SOLUTION: докстринги сокращены до action/syntax/consequences; сохранены
+# --force (чьё было), TLS-пин (отпечаток), доступ (чужой мастер, живой
+# узел). Проверка -- конкретные строки до/после, не лимит слов.
+# STATUS: FIXED — see #431
+CONCISE_431 = {
+    "mop.cli.core.landing": (
+        ("syntax", "mop landing [take <puppet>|give|show] [--force]"),
+        ("keeps", "take it from a gone master"),
+        ("keeps", "one puppet between merge and push"),
+        ("gone", "keeps the cluster service"),
+    ),
+    "mop.cli.core.master": (
+        ("syntax", "mop master [git-origin] [claude options]"),
+        ("keeps", "resumes the master's last session"),
+        ("keeps", "a master sees and reaches only its own puppets"),
+        ("keeps", "`mop login --server ADDRESS LOGIN`"),
+        ("gone", "mop/common/creds.py"),
+        ("gone", "rewrites"),
+    ),
+    "mop.cli.core.delete": (
+        ("syntax", "mop delete <name> [--force]"),
+        ("keeps", "the clone stays"),
+        ("keeps", "refused with that master's name"),
+        ("gone", "a body nobody owns is a running container"),
+    ),
+    "mop.cli.pool.login": (
+        ("syntax", "mop login [login] [--server host] [--https-port port]"),
+        ("keeps", "asked without echo"),
+        ("keeps", "fingerprint"),
+        ("keeps", "MOP_HTTPS_PORT"),
+        ("gone", "personal, authenticated"),
+        ("gone", "no public HTTP endpoint"),
+    ),
+    "mop.cli.node": (
+        ("syntax", "mop node [drain|up|forget <name>]"),
+        ("keeps", "refuses while anything still"),
+        ("gone", "never hears of it again"),
+    ),
+    "mop.cli.project": (
+        ("syntax", "mop project [add <git-origin>|delete <name>|list]"),
+        ("keeps", "puppet limit"),
+        ("gone", "Registering used to be a side effect"),
+    ),
+    "mop.cli.secret": (
+        ("syntax", "mop secret file|var add|list|remove"),
+        ("keeps", "kept on the server"),
+    ),
+}
+
+
+def check_concise_help_431(c):
+    import importlib
+    for mod, rows in CONCISE_431.items():
+        doc = (importlib.import_module(mod).__doc__ or "").strip()
+        for kind, text in rows:
+            what = f"#431 {mod.rsplit('.', 1)[-1]} help {kind}: {text[:40]!r}"
+            if kind in ("syntax", "keeps"):
+                c.check(what, text in doc, doc[:120])
+            else:
+                c.check(what, text not in doc, "still present")
+
+
 def main():
     c = Checks()
     check_server_maintenance_409(c)
@@ -2191,6 +2257,7 @@ def check_fallback_model_183(c):
     check_add_failure_377(c)
     check_tail_parse_431(c)
     check_help_audit_431(c)
+    check_concise_help_431(c)
     check_add_argv_399(c)
     check_master_argv_400(c)
 
