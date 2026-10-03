@@ -93,10 +93,70 @@ def check_session_ca_412(c):
             c.check("#412 no nonexistent CA path", "NODE_EXTRA_CA_CERTS" not in _common.session_env())
 
 
+
+# HYPOTHESIS (#426): клиент переносит статическую GLM-карту папета даже
+# на сервер, где GLM нет; Claude без gateway discovery не видит каталог.
+# SOLUTION: клиентский запуск убирает модельные алиасы (включая унаследованные)
+# и включает discovery, оставляя папетскую спеку и выбранный gateway без перемен.
+# RESULT: до правки восемь отказов на двух серверах; теперь 75 проверок
+# llm и 228 проверок спеки зелёные без запуска claude и настоящих ключей.
+# STATUS: FIXED — see #426
+
+def check_client_model_discovery_426(c):
+    from mop.cli.core import _common, code, master
+    from mop.server import spec
+    slots = ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+             "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+    captured = []
+
+    def fake_exec(binary, args, env):
+        captured.append((binary, args, env))
+
+    with tempfile.TemporaryDirectory(prefix="mop-426-") as root, \
+            patched(creds, ROOT=root), \
+            patched_env(MOP_SERVER_LAN=None,
+                        ANTHROPIC_DEFAULT_OPUS_MODEL="old-parent-glm",
+                        ANTHROPIC_DEFAULT_SONNET_MODEL="old-parent-glm",
+                        ANTHROPIC_DEFAULT_HAIKU_MODEL="old-parent-glm",
+                        CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="0",
+                        MOP_426_UNRELATED="kept"), \
+            config.client_sources(), \
+            patched(master.lib, origin=lambda *a: "git@h:g/cloudpub.git",
+                    project_ready=lambda *a: True), \
+            patched(master, link_skill=lambda: None, mcp_config=lambda: "{}"), \
+            patched(code.login, ensure=lambda: None), \
+            patched(_common, feedback_fd=lambda *a: ("/proc/self/fd/3", 3)), \
+            patched(master.os, execvpe=fake_exec):
+        for host in ("a.test", "b.test"):
+            creds.write_client(os.path.join(root, host), "443",
+                               f"https://{host}/llm", f"{host}-fake-key")
+            with context.use(context.resolve({"server": host}, {}, {})):
+                code.main(["--model", "gpt-example"])
+                master._main(["--", "--model", "gpt-example"])
+            for binary, args, env in captured[-2:]:
+                c.expect(f"#426 {host} selected gateway", env.get("ANTHROPIC_BASE_URL"),
+                         f"https://{host}/llm")
+                c.expect(f"#426 {host} selected client key", env.get(llm.AUTH_VAR),
+                         f"{host}-fake-key")
+                c.expect("#426 native gateway discovery enabled",
+                         env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"), "1")
+                c.check("#426 no mop or inherited model aliases",
+                        all(slot not in env for slot in slots))
+                c.expect("#426 unrelated environment kept", env.get("MOP_426_UNRELATED"),
+                         "kept")
+                c.check("#426 explicit model argument kept", "gpt-example" in args)
+                c.expect("#426 claude binary selected", binary, "claude")
+    baked = __import__("base64").b64decode(
+        spec.task_env("pu-x-1", "git@h:g/x.git")["PU_LLM_ENV"]).decode()
+    c.check("#426 client-only change leaves puppet model environment intact",
+            all(f"{slot}=" in baked for slot in slots))
+
+
 def main():
     c = Checks()
     check_joined_proxy_397(c)
     check_session_ca_412(c)
+    check_client_model_discovery_426(c)
     # HYPOTHESIS (#390): реестр плагинов-профилей умер вместе с провайдерами:
     # держать его ради одного URL -- против KISS, а ENV профилей перестал
     # быть статикой плагина. SOLUTION: один модуль с env() и именем ключа;

@@ -122,16 +122,23 @@ def report_bootstrap(name, got, p):
     return 0
 
 
+MODEL_OVERRIDES = ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                   "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+
+
 def session_env():
-    """Окружение claude: модельная карта общая, URL и ключ -- joined-сервера."""
+    """Клиентский gateway: URL и ключ выбранного сервера, без модели стенда."""
     host = config.get("MOP_SERVER_LAN")
     directory = creds.server_dir(host)
     record = creds.client(directory)
     if record is None:
         raise RuntimeError(f"no joined proxy configuration for {host}: run mop login --server {host}")
     env = dict(llm.env())
+    for name in MODEL_OVERRIDES:
+        env.pop(name, None)   # карта llm.env() остаётся только у папетов
     env["ANTHROPIC_BASE_URL"] = record["proxy_url"]
     env[llm.AUTH_VAR] = record["proxy_key"]
+    env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     # Шина и Python уже доверяют закреплённому сертификату (#412), но
     # Claude -- процесс Node.js со своим хранилищем доверия. Явный выбор
     # пользователя оставляем; без файла обычные публичные CA работают сами.
@@ -146,6 +153,17 @@ def session_env():
     # Зонтик CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC не используем: он
     # резал бы и обновления плагинов, Remote Control -- тоже мимо.
     env["DISABLE_FEEDBACK_COMMAND"] = "1"
+    return env
+
+
+def launch_env(project=None):
+    """Окружение нового claude: старые модельные алиасы не наследуются."""
+    env = dict(os.environ)
+    for name in MODEL_OVERRIDES:
+        env.pop(name, None)
+    env.update(session_env())
+    if project is not None:
+        env["MOP_PROJECT"] = project
     return env
 
 
