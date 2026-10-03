@@ -1,23 +1,14 @@
 """pool diagnostics: mop server doctor [group] [--fix [--safe]]
 
-Catches stuck puppets, a stale login, restart backoff, exhausted model quota,
-and a job spec older than the node driver — that last one looks perfectly
-healthy until the scheduler moves it to a hypervisor. The disk group asks each
-node's agent what the disk watchdog would sweep there and who is under disk
-pressure; --fix sweeps for real.
+Catches stuck puppets, a stale login, restart backoff, exhausted quota,
+and a job spec older than the node driver. Without an argument every
+group runs; an unknown group name is refused with the list.
 
-The checks come in groups, a module each in mop/server/doctor/: `mop server doctor` runs them all, `mop server doctor <group>` runs one; an unknown name is
-refused with the list of groups.
-
---fix treats what's treatable; a silent node agent is not on this list — the
-puppet may well be working fine, and a restart would kill that work in the
-clone. An expired login is treated without a restart: the puppet is nudged
-to go on, so its conversation survives.
-
---fix --safe treats only what cannot break work — login+nudge and the disk
-sweep — and names the rest without executing it: restarts, alloc stops,
-/model and spec updates stay the operator's call. The server runs it hourly
-(mop-doctor.timer), its output goes to the journal.
+--fix treats what is treatable; a silent node agent is left alone — the
+puppet may be working, and a restart would kill that work. --fix --safe
+treats only what cannot break work (login+nudge, disk sweep) and names
+the rest: restarts, stops, /model and spec updates stay the operator's
+call. The server runs --fix --safe hourly (mop-doctor.timer).
 """
 import sys
 

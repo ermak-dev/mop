@@ -9,10 +9,8 @@
                                  bake the project's image on the hypervisors;
                                  no argument: this working copy, .mop as it lies
 
-`run` is what the job spec calls. The outer wrapper is driver-agnostic because
-Nomad picks the node only after the spec is registered, so the master cannot
-know what the body will be; everything about the body happens here, on the
-node that owns it. Each verb is a module of this package.
+`run` raises the body and holds its session: everything about the body
+happens on the node that owns it, in whatever that node's driver is.
 """
 from mop.cli import lib
 from mop import driver

@@ -386,6 +386,286 @@ def check_reference_committed_350(c):
         c.check(f"#350 no legacy name mop {words}", f"\n#### mop {words}\n" not in md)
 
 
+# ── #432: справка командлетов и групп driver/server/service — суть, не история ──
+# HYPOTHESIS: докстринги этих командлетов выросли в рассказы (deploy 302
+# слова, sweep 211, web 198, doctor 194, группы 114-160) и уезжают целиком
+# в docs/CLI.md и в ответ usage; редкая деталь принадлежит docs/, а не help.
+# Отказы в тех же файлах повторяли имя команды внутри её собственного
+# сообщения.
+# SOLUTION: заголовок с синтаксисом и один-два абзаца сути — что делает,
+# где запускать, что ломает; группы перечисляют глаголы без пересказа их
+# докстрингов. Отказ — одна строка: причина и лечение. Ключи и
+# предупреждения о потере работы сохранены дословно.
+# STATUS: FIXED — see #432
+import ast
+import os
+
+
+def _owned_help():
+    """{(путь: докстринг)} командлетов и групп #432: driver, server,
+    service, включая __init__ групп (server/cluster, server/user,
+    server/bootstrap), без mcp.py (проза мастера) и скрытых _*.py.
+    Разбор AST, без импорта: как сам справочник (#350)."""
+    from mop import cli
+    root = os.path.dirname(cli.__file__)
+    out = {}
+    for group in ("driver", "server", "service"):
+        base = os.path.join(root, group)
+        out[os.path.join(base, "__init__.py")] = cli.docstring(os.path.join(base, "__init__.py")) or ""
+        for dirpath, _, names in sorted(os.walk(base)):
+            if "__pycache__" in dirpath:
+                continue
+            for n in sorted(names):
+                if not n.endswith(".py") or n == "mcp.py":
+                    continue
+                # __init__.py секции уже взят выше; скрытые _*.py -- не
+                # команды. Вложенный __init__.py -- help группы
+                # (server/cluster, server/user, server/bootstrap).
+                if n.startswith("_") and n != "__init__.py":
+                    continue
+                if n == "__init__.py" and dirpath == base:
+                    continue
+                path = os.path.join(dirpath, n)
+                out[path] = cli.docstring(path) or ""
+    return out
+
+
+def check_help_content_432(c):
+    """Ужатая справка сохраняет суть: глаголы групп перечислены, ключи и
+    предупреждения о потере работы — дословно. Конкретные утверждения
+    вместо потолков: будущая необходимая деталь не обязана влезать."""
+    failed_before = c.failed
+    docs = _owned_help()
+
+    # Группа перечисляет свои глаголы — весь список, до последнего.
+    verbs_of = {
+        "mop/cli/driver/__init__.py": ("list", "run", "sweep", "clone-work", "build"),
+        "mop/cli/server/cluster/__init__.py": ("serve", "check", "users", "reload", "builder"),
+        "mop/cli/server/user/__init__.py": ("add", "passwd", "delete", "import"),
+        "mop/cli/server/bootstrap/__init__.py": ("serve", "check"),
+    }
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    for rel, verbs in verbs_of.items():
+        doc = docs.get(os.path.join(root, rel))
+        if not c.check(f"#432 the group help exists: {rel}", doc is not None, rel):
+            continue
+        for v in verbs:
+            c.check(f"#432 {rel} lists its verb {v}", v in doc, doc.splitlines()[0][:60])
+
+    # Ключи и предупреждения, которые нельзя было потерять при отжиме.
+    must = {
+        "mop/cli/server/deploy.py": ("--check", "--skip-pipeline", "--from-ci",
+                                     "MOP_DEPLOY_NEEDS_GREEN"),
+        "mop/cli/server/doctor.py": ("--fix", "--safe", "silent"),
+        "mop/cli/server/sweep.py": ("--dry", "build bodies", "orphan"),
+        "mop/cli/server/gc.py": ("--dry", "MOP_GC_FREE_MIN_GB"),
+        "mop/cli/driver/build.py": ("--fresh", "--force", "--node"),
+        "mop/cli/driver/sweep.py": ("--dry",),
+        "mop/cli/driver/clone-work.py": ("exit 0 yes, 3 no", "cannot be read is kept"),
+        "mop/cli/server/user/add.py": ("--role", "--projects", "--stdin"),
+        "mop/cli/server/user/passwd.py": ("--stdin",),
+        "mop/cli/server/pve-facts.py": ("--base", "--project", "--listing"),
+        "mop/cli/server/web.py": ("--port", "--bind", "/api/journal"),
+        "mop/cli/server/config.py": ("--json",),
+        "mop/cli/server/cluster/users.py": ("--reload",),
+        "mop/cli/service/agent.py": ("--check",),
+    }
+    for rel, keys in must.items():
+        doc = docs.get(os.path.join(root, rel))
+        if not c.check(f"#432 {rel} is in the audit", doc is not None, rel):
+            continue
+        for k in keys:
+            c.check(f"#432 {rel} keeps {k!r}", k in doc, doc.splitlines()[0][:60])
+
+    # Группы и служебные командлеты: без истории и внутренностей.
+    # driver: где живёт тело и кто его поднимает -- суть; «Each verb is a
+    # module» и job spec/Nomad -- устройство, не помощь.
+    drv = docs[os.path.join(root, "mop/cli/driver/__init__.py")]
+    c.check("#432 the driver group keeps the node-side note",
+            "node" in drv, drv.splitlines()[0][:60])
+    for gone in ("module of this package", "job spec", "Nomad picks"):
+        c.check(f"#432 the driver group names no {gone!r}",
+                gone not in drv, [l for l in drv.splitlines() if gone in l])
+    # server: что нужно контроллеру; «old one-word names» -- неверная уже
+    # история (имена с тех пор иные).
+    srvgrp = docs[os.path.join(root, "mop/cli/server/__init__.py")]
+    c.check("#432 the server group keeps what only the server has",
+            "inventory" in srvgrp, srvgrp.splitlines()[0][:60])
+    for gone in ("old one-word names", "still work for one release"):
+        c.check(f"#432 the server group names no {gone!r}",
+                gone not in srvgrp, [l for l in srvgrp.splitlines() if gone in l])
+    # agent: по одному на узел, вне джобы, --check спрашивает шину;
+    # переходные юниты и внутренние импорты -- не помощь.
+    ag = docs[os.path.join(root, "mop/cli/service/agent.py")]
+    for kept in ("one per node", "--check", "systemd"):
+        c.check(f"#432 the agent help keeps {kept!r}",
+                kept.lower() in ag.lower(), ag.splitlines()[0][:60])
+    for gone in ("python3 -m mop.agent", "mop.cli.lib", "python-nomad"):
+        c.check(f"#432 the agent help names no {gone!r}",
+                gone not in ag, [l for l in ag.splitlines() if gone in l])
+    # bootstrap serve: что делает (при старте песочницы), без subject.
+    bs = docs[os.path.join(root, "mop/cli/server/bootstrap/serve.py")]
+    c.check("#432 the bootstrap help keeps the at-start note",
+            "start" in bs, bs.splitlines()[0][:60])
+    c.check("#432 the bootstrap help names no bus subject",
+            "server.rpc" not in bs and "mop.*" not in bs,
+            [l for l in bs.splitlines() if "rpc" in l])
+    # pve-facts: контроллерные факты, без путей плейбуков и модулей.
+    pve = docs[os.path.join(root, "mop/cli/server/pve-facts.py")]
+    c.check("#432 the pve-facts help keeps the controller note",
+            "controller" in pve.lower(), pve.splitlines()[0][:60])
+    for gone in ("deploy/pve-build.yml", "mop/driver/pve.py", "pve role"):
+        c.check(f"#432 the pve-facts help names no {gone!r}",
+                gone not in pve, [l for l in pve.splitlines() if gone in l])
+    # callout: кто и как проверяется; без пересказа auth_users и файла.
+    co = docs[os.path.join(root, "mop/cli/server/callout.py")]
+    c.check("#432 the callout help keeps who is checked",
+            "people" in co and "puppets" in co, co.splitlines()[0][:60])
+    for gone in ("auth_users", "users.conf"):
+        c.check(f"#432 the callout help names no {gone!r}",
+                gone not in co, [l for l in co.splitlines() if gone in l])
+    # callout: без частоты «at every connect» (спрашивает не каждого) —
+    # ровно то, что делает: проверяет людей и папетов.
+    c.check("#432 the callout help claims no every-connect frequency",
+            "every connect" not in co and "at every connect" not in co,
+            [l for l in co.splitlines() if "connect" in l.lower()])
+    # agent: никаких утверждений о том, что узел «ничего не берёт» с
+    # контроллера — node.env и креды приезжают именно оттуда.
+    c.check("#432 the agent help claims no controller-independence",
+            "nothing from the controller" not in ag.lower()
+            and "takes nothing" not in ag.lower(),
+            [l for l in ag.splitlines() if "controller" in l.lower()])
+
+    # cluster: роль и гарантия токена, без subject и Nomad API.
+    cl = docs[os.path.join(root, "mop/cli/server/cluster/__init__.py")]
+    c.check("#432 the cluster group keeps the token guarantee",
+            "token" in cl and "server" in cl, cl.splitlines()[0][:60])
+    for gone in ("cluster.rpc", "mop.<project>", "calls the API"):
+        c.check(f"#432 the cluster group names no {gone!r}",
+                gone not in cl, [l for l in cl.splitlines() if gone in l])
+    # web: справка описывает вход как он есть (#416): публичный обзор,
+    # логин открывает admin-части (журнал, панель прокси). «No login for
+    # the page» — опровергнуто самим маршрутом /api/login.
+    webdoc = docs[os.path.join(root, "mop/cli/server/web.py")]
+    c.check("#432 the web help names the login (it exists, #416)",
+            "/api/login" in webdoc and "login" in webdoc.lower(), webdoc[:60])
+    c.check("#432 the web help says the admin gate",
+            "admin" in webdoc, webdoc.splitlines()[0][:60])
+    c.check("#432 the web help claims no network boundary",
+            "LAN" not in webdoc and "without login" in webdoc,
+            [l for l in webdoc.splitlines() if "login" in l.lower()][:2])
+    c.check("#432 the web help claims no login",
+            "No login" not in webdoc, [l for l in webdoc.splitlines() if "login" in l.lower()][:2])
+    # deploy: справка говорит о команде, не об устройстве прогона: имя
+    # плейбука, заголовок ansible, «реестр» и внутренности --from-ci —
+    # не помощь вызывающему. Поведение флагов и последствия — остаются.
+    dep = docs[os.path.join(root, "mop/cli/server/deploy.py")]
+    # deploy: условие мягкого выхода --from-ci -- ожидание гейта, а не
+    # безусловное обещание; и новый job «deploys it».
+    c.check("#432 the deploy help ties the soft exit to the gate's wait",
+            'answer would be "wait"' in dep and "exits 0" in dep,
+            [l for l in dep.splitlines() if "wait" in l or "exits 0" in l])
+    c.check("#432 the deploy help keeps no redundant rollout wording",
+            "rolls the rollout" not in dep, dep.splitlines()[-1])
+    for gone in ("site.yml", "PLAY RECAP", "registry"):
+        c.check(f"#432 the deploy help names no {gone!r}",
+                gone not in dep, [l for l in dep.splitlines() if gone in l])
+    for kept in ("--check", "--diff", "--skip-pipeline", "--from-ci",
+                 "MOP_DEPLOY_NEEDS_GREEN", "default branch"):
+        c.check(f"#432 the deploy help keeps {kept!r}", kept in dep,
+                dep.splitlines()[0][:60])
+
+    # Серверная группа всё ещё говорит, где живут её команды.
+    srv = docs[os.path.join(root, "mop/cli/server/__init__.py")]
+    c.check("#432 the server group keeps the controller-only note",
+            "controller" in srv, srv.splitlines()[0][:60])
+    # Справка говорит о команде, не о внутренностях пакета: пути модулей
+    # и Nomad-внутренности — не помощь вызывающему.
+    for rel, doc in docs.items():
+        if not doc:
+            continue     # service/__init__.py — технический, не команда
+        rel_docs = os.path.relpath(rel, root)
+        # Модульные пути — нигде; docs/*.md и web/dist — только не в
+        # пересказе usage самих web и deploy (рассказ о справке — в docs/).
+        no_doc_ref = rel_docs in ("mop/cli/server/web.py", "mop/cli/server/deploy.py")
+        c.check(f"#432 {rel_docs} names no internal path",
+                "mop/server/" not in doc and "mop/cli/" not in doc
+                and not (no_doc_ref and ("docs/" in doc or "web/dist" in doc)),
+                doc.splitlines()[0][:60])
+    # Капс — не акцент (CLAUDE.md): справка — тоже вывод программы. Речь
+    # об эмфазе («NOT treated»), а не о статус-токенах и именах настроек:
+    # PLAY RECAP, MOP_*, VMID, LAN — легальные капс по смыслу.
+    EMPHASIS = ("NOT", "ALWAYS", "NEVER", "MUST", "ONLY", "WARNING", "DANGER")
+    for rel, doc in docs.items():
+        if not doc:
+            continue
+        caps = [w.strip(".,:;()[]") for w in doc.split()
+                if w.strip(".,:;()[]") in EMPHASIS]
+        c.check(f"#432 {os.path.relpath(rel, root)}: no caps emphasis",
+                not caps, caps)
+    return c.failed == failed_before
+
+
+def check_refusals_432(c):
+    """Отказы изменённых команд: одна мысль, лечение названо, без повтора
+    собственного префикса команды. Только изменённые строки — конкретные
+    утверждения."""
+    failed_before = c.failed
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+    def refusals_of(path):
+        """Текстовые части отказов (lib.fail/sys.exit) файла — по содержимому
+        вызова, без привязки к номерам строк."""
+        out = []
+        for node in ast.walk(ast.parse(open(path).read())):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr not in ("fail", "exit") or not node.args:
+                continue
+            a = node.args[0]
+            if isinstance(a, ast.Constant):
+                out.append(a.value)
+            elif isinstance(a, ast.JoinedStr):
+                out.append("".join(x.value for x in a.values
+                                   if isinstance(x, ast.Constant)))
+        return out
+
+    def one(path, marker):
+        """Отказ, содержащий marker; ровно один такой."""
+        got = [t for t in refusals_of(os.path.join(root, path)) if marker in t]
+        if not c.check(f"#432 {path} has the refusal with {marker!r}", len(got) == 1, got):
+            return None
+        return got[0]
+
+    # deploy: лишний аргумент -- совет зарегистрировать проект, точной
+    # командой, без повтора собственного имени.
+    got = one("mop/cli/server/deploy.py", "takes no arguments")
+    c.check("#432 the no-arguments refusal cures with the exact command",
+            got is not None and "mop project add" in got
+            and "mop server deploy takes" not in got, got)
+    # deploy: точный синтаксис команды-зависимости.
+    got = one("mop/cli/server/deploy.py", "no ansible-playbook")
+    c.check("#432 the missing-ansible refusal names the exact command",
+            got is not None and "mop server setup" in got, got)
+    # deploy: недоступные машины -- одна строка с лечением, и лечение --
+    # та же команда, а не «a deploy».
+    got = one("mop/cli/server/deploy.py", "did not answer")
+    c.check("#432 the unanswered-machines refusal stays one sentence and exact",
+            got is not None and "\n" not in got and "mop server deploy again" in got, got)
+    # deploy: подсказка входа называет точную команду, не «user verbs».
+    got = one("mop/cli/server/deploy.py", "nobody on the bus")
+    c.check("#432 the login-hint refusal names the exact command",
+            got is not None and "mop server user" in got and "user` verbs" not in got, got)
+    # cluster/users: лечение — точная команда, без пересказа «a deploy».
+    got = one("mop/cli/server/cluster/users.py", "no base users")
+    c.check("#432 the base-users refusal names the exact command",
+            got is not None and "mop server deploy" in got, got)
+    got = one("mop/cli/server/cluster/users.py", "changed: nats takes it")
+    c.check("#432 the callout-restart refusal names the exact way",
+            got is not None and "systemctl restart" in got, got)
+    return c.failed == failed_before
+
+
 # HYPOTHESIS: environment() исполняется до клиентского командлета и читает
 # installation .env; дочерний mop mcp стартует тем же диспетчером.
 # SOLUTION: диспетчер выбирает клиентский источник до environment и run,
@@ -664,6 +944,8 @@ def main():
     check_current_docs_401(c)
     check_dispatch_sources_396(c)
     check_concise_global_help_430(c)
+    check_help_content_432(c)
+    check_refusals_432(c)
     check_reference_render_350(c)
     check_reference_empty_350(c)
     check_reference_committed_350(c)
