@@ -443,7 +443,7 @@ def command_tool(name, words, path, decl):
 
     params = []
     for a in args:
-        t = TYPES[a["type"]]
+        t = list[str] if a.get("repeatable") else TYPES[a["type"]]
         default = inspect.Parameter.empty if a.get("required") else \
             False if t is bool else None
         hint = t if a.get("required") or t is bool else Optional[t]

@@ -1,21 +1,36 @@
 """mop dev bug evidence <iid>: remote issue branches and verified integration merges
 
-Fetches origin first. Inspects at most 500 remote refs, 40 integration refs and
-80 first-parent merges per integration ref. A branch mention or #iid in a
-commit message is not evidence of integration; a merge needs a second parent
-on that branch. Missing/deleted branch tips cannot be verified.
+Fetches origin first (updates local remote-tracking refs). Inspects at most
+500 listed remote refs, the configured integration branch, 40 integration
+refs and 80 first-parent merges per ref. A branch mention or #iid in a commit
+message is not evidence of integration; a merge needs a second parent on
+that branch. Missing/deleted branch tips cannot be verified.
 """
+import re
+
 from mop.cli import lib
+from mop.common import context
 from mop.cli.dev.bug._common import parser
-from mop.common import gitlab
 
 
-MCP = {"annotations": "readonly", "args": [
+MCP = {"annotations": "destructive", "args": [
     {"name": "iid", "type": "string", "required": True, "help": "issue number"}]}
 
 REF_LIMIT = 500
 INTEGRATION_LIMIT = 40
 MERGE_LIMIT = 80
+
+
+def evidence_branch(ref, iid):
+    """Удалённая ветка задачи: тип и точный номер, без соседних номеров."""
+    return bool(re.fullmatch(r"origin/(?:bug|feat|refactor|docs|ci)/" +
+                             re.escape(str(iid)) + r"(?:-[a-z0-9-]+)?", ref))
+
+
+def merge_source(subject):
+    """Имя второго родителя из стандартного заголовка merge, не #номер."""
+    match = re.fullmatch(r"Merge branch '([^'\n]+)' into [^\n]+", subject)
+    return match.group(1) if match else None
 
 
 def _ancestor(older, newer):
@@ -41,9 +56,18 @@ def main(argv):
     refs = [line.split("\t", 1) for line in raw.splitlines()]
     clipped = len(refs) > REF_LIMIT
     refs = refs[:REF_LIMIT]
-    branches = {ref: sha for ref, sha in refs if gitlab.evidence_branch(ref, iid)}
+    branches = {ref: sha for ref, sha in refs if evidence_branch(ref, iid)}
     integrations = [ref for ref, _ in refs if ref == "origin/master" or
                     ref.startswith(("origin/epic/", "origin/integration/", "origin/integrate/"))]
+    branch = context.current().branch
+    if branch:
+        current = f"origin/{branch}"
+        exact = lib.git("for-each-ref", "--format=%(refname:short)%09%(objectname)",
+                        f"refs/remotes/{current}")
+        if any(line.split("\t", 1)[0] == current for line in exact.splitlines()):
+            integrations = [current] + [ref for ref in integrations if ref != current]
+        else:
+            print(f"integration branch {current} is absent after fetch; results may be incomplete")
     limited = len(integrations) > INTEGRATION_LIMIT
     integrations = integrations[:INTEGRATION_LIMIT]
     print(f"#{iid} remote issue branches (origin, fetched):")
@@ -62,8 +86,8 @@ def main(argv):
             print(f"  {ref}: history limited to {MERGE_LIMIT} merges")
         for row in rows[:MERGE_LIMIT]:
             sha, parents, subject = row.split("\t", 2)
-            source = gitlab.merge_source(subject)
-            if len(parents.split()) != 2 or not source or not gitlab.evidence_branch("origin/" + source, iid):
+            source = merge_source(subject)
+            if len(parents.split()) != 2 or not source or not evidence_branch("origin/" + source, iid):
                 continue
             tip = branches.get("origin/" + source)
             first, second = parents.split()

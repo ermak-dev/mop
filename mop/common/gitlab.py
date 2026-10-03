@@ -445,18 +445,6 @@ def branch_name(labels, iid, slug=None):
     return f"{branch_type(labels)}/{iid}" + (f"-{clean}" if clean else "")
 
 
-def evidence_branch(ref, iid):
-    """Удалённая ветка задачи: тип и точный номер, без соседних номеров."""
-    return bool(re.fullmatch(r"origin/(?:bug|feat|refactor|docs|ci)/" +
-                             re.escape(str(iid)) + r"(?:-[a-z0-9-]+)?", ref))
-
-
-def merge_source(subject):
-    """Имя второго родителя из стандартного заголовка merge, не #номер."""
-    match = re.fullmatch(r"Merge branch '([^'\n]+)' into [^\n]+", subject)
-    return match.group(1) if match else None
-
-
 def with_status(existing, status):
     """Метки после смены состояния: снять любую `status::` и поставить одну.
 

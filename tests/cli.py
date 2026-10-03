@@ -720,6 +720,7 @@ def main():
     # STATUS: FIXED — see #111
 
     check_mcp_declarations(c)
+    check_dev_mcp_443(c)
     check_refusals(c)
     check_refusals_163(c)
     check_output_rules(c)
@@ -797,8 +798,8 @@ def check_mcp_declarations(c):
     # HYPOTHESIS: диспетчер знает один уровень, `mop dev bug new` и
     # `mop server user add` некуда положить. SOLUTION: verbs() -- дерево,
     # tool_commands спускается по нему и именует инструмент словами через
-    # подчёркивание; пространства из PRIVATE (dev) в MCP не выдаются --
-    # внутренние команды разработчика модели не нужны; unalias переписывает
+    # подчёркивание; в PRIVATE видны только явно объявленные листья (#443);
+    # unalias переписывает
     # прежнее имя по таблице LEGACY молча, на один релиз.
     # STATUS: FIXED — see #253
     nested = [("core", "add", False), ("server", "", True), ("dev", "", True)]
@@ -817,8 +818,8 @@ def check_mcp_declarations(c):
             "dev_bug_new": (["dev", "bug", "new"], "dev/bug/new.py")}
     c.expect("#253 nested tool_commands", got, want)
     names = {n for n, _, _ in cli.tool_commands(nested, tree)}
-    c.check(f"#253 PRIVATE must hide dev from the tools and keep server: {sorted(names)}",
-            not (any(n.startswith("dev") for n in names) or "server_user_add" not in names))
+    c.check(f"#253 server tools remain visible: {sorted(names)}",
+            "server_user_add" in names)
     c.check(f"#253 dev must be private: {cli.PRIVATE}", not ("dev" not in cli.PRIVATE))
     table = {"bug": ("dev", "bug"), "web": ("server", "web")}
     for argv, want in [(["bug", "new", "t"], ["dev", "bug", "new", "t"]),
@@ -877,23 +878,55 @@ def check_mcp_declarations(c):
             c.fail(f"{os.path.relpath(path)}: {e}")
 
 
-# #444: из закрытого пространства dev выходит только чтение свидетельств,
-# без shell/Git-исполнителя и без остальных глаголов трекера.
-# HYPOTHESIS: PRIVATE скрывает даже явно объявленный ограниченный leaf.
-# SOLUTION: разрешён единственный dev bug evidence, с literal MCP iid.
+# #444: ограниченное свидетельство из веток задачи, без shell/Git-инструмента.
+# HYPOTHESIS: сортировка сотен refs исключает назначенную ветку интеграции.
+# SOLUTION: приоритет ветки контекста вне общего лимита, неполноту видно.
 # RESULT: проверяется ниже. STATUS: FIXED — see #444
+# #444: доказательство интеграции требует ветки именно этой задачи и
+# второго родителя merge, а не любого коммита со строкой #iid.
+# HYPOTHESIS: поиск по тексту истории принимает упоминание #444 за merge.
+# SOLUTION: отбор имён веток и распознавание точного имени ветки в merge.
+# RESULT: проверяется ниже. STATUS: FIXED — see #444
+
+def check_evidence_444(c):
+    from mop.cli.dev.bug import evidence
+    branch = getattr(evidence, "evidence_branch", None)
+    source = getattr(evidence, "merge_source", None)
+    c.check("#444 branch matcher exists", branch is not None)
+    c.check("#444 merge source parser exists", source is not None)
+    if not branch or not source:
+        return
+    for ref, expected in [
+        ("origin/bug/444-git-shell", True), ("origin/feat/444", True),
+        ("origin/refactor/444-x", True), ("origin/docs/444-x", True),
+        ("origin/ci/444-x", True), ("origin/bug/4444-x", False),
+        ("origin/bug/444extra", False), ("origin/epic/444-x", False),
+        ("origin/bug/44-444", False), ("origin/bug/444-x\nother", False),
+    ]:
+        c.expect(f"#444 branch {ref!r}", branch(ref, "444"), expected)
+    for subject, expected in [
+        ("Merge branch 'bug/444-git-shell' into epic/441-master-mcp", "bug/444-git-shell"),
+        ("Merge branch 'feat/444' into master", "feat/444"),
+        ("fix: mention #444 only", None),
+        ("Merge #444 branch 'bug/444-git-shell'", None),
+        ("Merge branch 'bug/4444-x' into master", "bug/4444-x"),
+    ]:
+        c.expect(f"#444 merge {subject!r}", source(subject), expected)
+
+
 def check_evidence_tool_444(c):
     from mop.cli.dev.bug import evidence
+    from mop.common import context
     path = evidence.__file__
     decl = cli.declared(path)
-    c.expect("#444 evidence literal MCP", decl,
-             {"annotations": "readonly", "args": [
+    c.expect("#444 evidence fetch mutates local refs, not readonly", decl,
+             {"annotations": "destructive", "args": [
                  {"name": "iid", "type": "string", "required": True,
                   "help": "issue number"}]})
     exposed = {n: words for n, words, _ in cli.tool_commands(cli.scan(), cli.verbs())
                if n.startswith("dev_")}
-    c.expect("#444 only bounded dev tool exposed", exposed,
-             {"dev_bug_evidence": ["dev", "bug", "evidence"]})
+    c.expect("#444 evidence uses developer leaf discovery", exposed.get("dev_bug_evidence"),
+             ["dev", "bug", "evidence"])
 
     # Ложный merge: ветка уже в первом родителе, второй — чужая работа.
     # Заголовок второго с именем задачи не доказывает её интеграцию.
@@ -940,12 +973,155 @@ def check_evidence_tool_444(c):
             code == 0 and f"{merged} merged bug/444-x at {tip} (verified ancestry)" in output,
             (output, err, code))
 
+    # Даже за пределом общего перечня назначенная ветка обязана проверяться.
+    current = "origin/integration/441-current"
+    branch = "origin/bug/444-x"
+    calls.clear()
+    def crowded_git(*args):
+        calls.append(args)
+        if args[0] == "fetch":
+            return ""
+        if args[0] == "for-each-ref" and args[-1] == "refs/remotes/origin":
+            return f"{branch}\t{tip}\n" + "\n".join(
+                f"origin/epic/{n:03}\t{base}" for n in range(500))
+        if args[0] == "for-each-ref" and args[-1] == "refs/remotes/" + current:
+            return f"{current}\t{merged}"
+        if args[0] == "log":
+            return f"{merged}\t{base} {tip}\tMerge branch 'bug/444-x' into integration/441-current"
+        raise AssertionError(args)
+    with patched(lib, git=crowded_git), patched(evidence, _ancestor=real_ancestor), \
+            context.use(context.Context(branch="integration/441-current")):
+        output, err, code = run_command(evidence.main, ["444"], via_cli=True)
+    c.check("#444 current integration inspected past remote ref limit",
+            code == 0 and f"{current} {merged} merged {branch.removeprefix('origin/')}" in output,
+            (output, err, code))
+    c.check("#444 truncated refs explicitly marked incomplete",
+            "results may be incomplete" in output, output)
+
     for iid in ("0", "-1", "444; echo unsafe", "9" * 5000):
         with patched(lib, git=lambda *args: c.fail("invalid iid reached git")):
             out, err, code = run_command(evidence.main, [iid])
         c.check(f"#444 invalid iid {iid[:15]!r} refused without git",
                 code != 0 and not out and "iid must be" in err,
                 (out, err[:100], code))
+
+def check_dev_mcp_443(c):
+    """HYPOTHESIS: private dev скрывает объявленные листья, stdin закрыт.
+    SOLUTION: только объявленные листья видны; массив меток и --body доступны.
+    RESULT: мастер зовёт командлеты без переключения своей ветки.
+    STATUS: FIXED — see #443"""
+    import io
+    import inspect
+    from mop.cli.dev.bug import new, edit
+    from mop.cli.service import mcp
+    from mop.common import gitlab
+
+    bug = ("list", "show", "epic", "labels", "new", "edit", "comment",
+           "start", "close", "relabel", "evidence")
+    ci = ("list", "show", "why", "log", "retry")
+    expected = {f"dev_bug_{x}" for x in bug} | {f"dev_ci_{x}" for x in ci}
+    tools = {n: (words, cli.declared(path)) for n, words, path in
+             cli.tool_commands(cli.scan(), cli.verbs()) if cli.declared(path) is not None}
+    c.expect("#443 exact declared developer leaves", {n for n in tools if n.startswith("dev_")}, expected)
+    calls = []
+    with patched(mcp, MASTER=False, command_tool=lambda *args: calls.append(args)):
+        mcp.command_tools()
+    c.expect("#443 node profile has no developer tools", calls, [])
+    for name in expected & tools.keys():
+        words, decl = tools[name]
+        c.check(f"#443 {name} uses its commandlet with explicit annotation",
+                words == name.split("_") and decl.get("annotations") in
+                ("readonly", "destructive"))
+    for name in ("dev", "dev_bug", "dev_ci", "dev_test", "dev_docs", "dev_web",
+                 "dev_web_build", "dev_ci_cancel", "dev_ci_lint", "dev_ci_runners"):
+        c.check(f"#443 {name} stays hidden", name not in tools)
+    if "dev_bug_start" in tools:
+        start_args = tools["dev_bug_start"][1]["args"]
+        c.check("#443 start requires no-branch to protect checkout",
+                any(a.get("flag") == "--no-branch" and a.get("required")
+                    for a in start_args))
+        for value in (None, False):
+            try:
+                cli.tool_argv(start_args, {"iid": "443", "no_branch": value})
+            except ValueError:
+                pass
+            else:
+                c.fail(f"#443 start accepted no_branch={value!r}")
+        c.expect("#443 start keeps checkout untouched", cli.tool_argv(start_args, {
+            "iid": "443", "no_branch": True}), ["443", "--no-branch"])
+    for name in ("dev_bug_list", "dev_bug_new", "dev_bug_relabel"):
+        if name not in tools:
+            continue
+        args = tools[name][1]["args"]
+        values = {"label": ["sev::low", "component::cli"]}
+        if name == "dev_bug_new":
+            values.update(title="Задача", body="Тело")
+        elif name == "dev_bug_relabel":
+            values["iid"] = "443"
+        rendered = cli.tool_argv(args, values)
+        c.expect(f"#443 repeatable {name} labels",
+                 [rendered[i:i+2] for i, item in enumerate(rendered) if item == "--label"],
+                 [["--label", "sev::low"], ["--label", "component::cli"]])
+        for bad in ("sev::low", ["sev::low", 4]):
+            try:
+                cli.tool_argv(args, {**values, "body": "Тело", "label": bad})
+            except ValueError:
+                pass
+            else:
+                c.fail(f"#443 {name} accepted non-list label {bad!r}")
+    for name in ("dev_bug_new", "dev_bug_edit"):
+        if name in tools:
+            c.check(f"#443 {name} takes body inline",
+                    any(a.get("flag") == "--body" for a in tools[name][1]["args"]))
+    if "dev_bug_new" in tools:
+        new_args = tools["dev_bug_new"][1]["args"]
+        c.check("#443 MCP new requires body rather than reading DEVNULL",
+                any(a.get("flag") == "--body" and a.get("required") for a in new_args))
+        try:
+            cli.tool_argv(new_args, {"title": "Задача"})
+        except ValueError:
+            pass
+        else:
+            c.fail("#443 MCP new accepted missing body")
+    if "dev_bug_list" in tools:
+        captured = []
+        with patched(mcp.app, add_tool=lambda fn, **kw: captured.append(fn)):
+            mcp.command_tool("test_443_labels", ["dev", "bug", "list"],
+                             "dev/bug/list.py", tools["dev_bug_list"][1])
+        hint = inspect.signature(captured[0]).parameters["label"].annotation
+        c.check("#443 MCP signature has typed list labels", "list[str]" in str(hint), str(hint))
+    calls = []
+    with patched(sys, stdin=io.StringIO("WRONG STDIN")), \
+            patched(gitlab, create=lambda *a: calls.append(a) or {"iid": 443, "web_url": "url"}):
+        run_command(new.main, ["Задача", "--body", "Строка\nтела", "--label", "sev::low"])
+    c.expect("#443 new inline body, no stdin", calls,
+             [("Задача", "Строка\nтела", ["sev::low", "status::live"])])
+    calls.clear()
+    with patched(sys, stdin=io.StringIO("WRONG STDIN")), \
+            patched(gitlab, issue=lambda iid: {"description": "<!-- epic:12 -->\nold"}), \
+            patched(gitlab, edit=lambda *a: calls.append(a)):
+        run_command(edit.main, ["443", "--body", "Новый текст"])
+    c.expect("#443 edit inline body keeps epic", calls,
+             [("443", None, gitlab.replace_body("<!-- epic:12 -->\nold", "Новый текст", gitlab.KEEP))])
+    # HYPOTHESIS: пробельное --body после strip открывает пустую задачу.
+    # SOLUTION: пустое тело отклоняет и MCP, и командлет, до вызова трекера.
+    if "dev_bug_new" in tools:
+        for empty in ("", "   \n"):
+            try:
+                cli.tool_argv(tools["dev_bug_new"][1]["args"],
+                              {"title": "Задача", "body": empty})
+            except ValueError:
+                pass
+            else:
+                c.fail(f"#443 MCP accepted empty issue body {empty!r}")
+    calls.clear()
+    with patched(gitlab, create=lambda *a: calls.append(a) or {"iid": 443, "web_url": "url"}):
+        _, _, code = run_command(new.main, ["Задача", "--body", "   \n"])
+    c.check("#443 CLI rejects empty issue body", code != 0 and not calls,
+            f"code={code}, calls={calls}")
+    for fn, argv in ((new.main, ["Задача"]), (edit.main, ["443"])):
+        _, _, code = run_command(fn, argv + ["--body", "text", "--body-file", "/missing"])
+        c.check(f"#443 {fn.__module__} rejects two body sources", code != 0)
 
 
 def check_refusals_163(c):
@@ -2131,6 +2307,8 @@ def check_fallback_model_183(c):
     # HYPOTHESIS: трекер и CI проекта -- команды разработчика, а лежат среди
     # команд пула и торчат в MCP инструментами ci_*. SOLUTION: mop/cli/dev/
     # {bug,ci}, группа dev в PRIVATE, прежние имена -- через LEGACY один релиз.
+    # Теперь отдельные листья объявлены инструментами (#443), но группа
+    # по-прежнему закрыта по умолчанию.
     # STATUS: FIXED — see #254
     tree = cli.verbs()
     # bug и ci -- в dev; сам dev растёт (#271 -- test), поэтому «содержит».
@@ -2140,19 +2318,14 @@ def check_fallback_model_183(c):
     c.check("#254 bug and ci must not stay top-level commands", not ("bug" in top or "ci" in top))
     c.check(f"#254 LEGACY must map bug and ci into dev: {cli.LEGACY}",
             not (cli.LEGACY.get("bug") != ("dev", "bug") or cli.LEGACY.get("ci") != ("dev", "ci")))
-    for name, words, path in cli.tool_commands(cli.scan(), tree, private=()):
-        if words == ["dev", "bug", "evidence"]:
-            continue  # #444: единственный read-only инструмент в dev.
-        c.check(f"#254 {' '.join(words)} must not declare MCP",
-                not (words[0] == "dev" and cli.declared(path) is not None))
-    exposed_dev = {n for n, _, _ in cli.tool_commands(cli.scan(), tree)
-                   if n.startswith("dev_") or n.startswith("ci_")}
-    c.expect("#254 dev remains private except evidence", exposed_dev,
-             {"dev_bug_evidence"})
+    c.check("#254 no legacy top-level ci tool may reach MCP",
+            not (any(n.startswith("ci_") for n, _, _ in
+                     cli.tool_commands(cli.scan(), tree))))
     got = cli.resolve(cli.unalias(["bug", "list"]), top, tree)
     c.expect("#254 `mop dev bug list` must still resolve through LEGACY", got,
              ("mop.cli.dev.bug.list", []))
 
+    check_evidence_444(c)
     check_evidence_tool_444(c)
     check_server_namespace_259(c)
     check_named_263(c)

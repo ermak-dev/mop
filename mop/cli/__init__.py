@@ -86,9 +86,8 @@ def _tree(path):
     return out
 
 
-# Пространства команд, которых нет в MCP (#253): внутренние команды
-# разработчика (трекер, CI) модель зовёт из шелла мастера, инструментами
-# они не нужны.
+# Приватные пространства не попадают в MCP целиком (#253); отдельные
+# объявленные листья доступны мастеру (#443), прочие остаются скрытыми.
 PRIVATE = ("dev",)
 
 # Прежние имена команд -> новые слова (#253): переезд команды в пространство
@@ -178,11 +177,12 @@ def describe(path):
 #          "background": True,          # итог -- вестью в сессию, не ответом
 #          "args": [{"name", "type": string|integer|boolean,
 #                    "flag": "--x" (без него -- позиционный),
+#                    "repeatable": True (только строковый флаг -> список строк),
 #                    "required": bool, "help": "..."}]}
 # Таблицы команд нет: объявление живёт рядом с разбором argv, который оно
 # описывает, и расходиться им негде.
 DECL_KEYS = {"annotations", "background", "args"}
-ARG_KEYS = {"name", "type", "flag", "required", "help"}
+ARG_KEYS = {"name", "type", "flag", "required", "help", "repeatable"}
 ARG_TYPES = ("string", "integer", "boolean")
 ANNOTATIONS = ("readonly", "destructive")
 
@@ -214,6 +214,10 @@ def declared(path):
             raise ValueError(f"MCP arg {a['name']}: type one of {', '.join(ARG_TYPES)}")
         if a["type"] != "string" and not a.get("flag"):
             raise ValueError(f"MCP arg {a['name']}: a {a['type']} needs a flag")
+        if "repeatable" in a and (a["repeatable"] is not True or
+                                  a["type"] != "string" or not a.get("flag") or
+                                  a.get("required")):
+            raise ValueError(f"MCP arg {a['name']}: repeatable needs an optional string flag")
         if not a.get("flag"):
             # Необязательный позиционный -- только в хвосте: пропуск в
             # середине сдвинул бы следующие на чужое место.
@@ -227,18 +231,18 @@ def declared(path):
 def tool_commands(found, group_verbs, private=PRIVATE):
     """[(каталог, имя, подпакет?)] -> [(имя инструмента, слова команды,
     путь модуля)]. Группа -- сама и каждый её глагол, вглубь (#253):
-    `node_drain`, `server_user_add`. Пространства из private пропускаются."""
+    `node_drain`, `server_user_add`. В private видны только листья с MCP."""
     out = []
     for section, name, is_pkg in found:
         if not is_pkg:
-            out.append((name, [name], _path_of(section, name, False)))
-        elif section not in private:
-            out += _tools_of([section], group_verbs.get(section) or {}, True)
-        elif section == "dev" and "evidence" in (group_verbs.get("dev", {}).get("bug") or {}):
-            # Единственный ограниченный reader трекера; остальные dev закрыты.
-            words = ["dev", "bug", "evidence"]
-            out.append(("dev_bug_evidence", words,
-                        os.path.join(PACKAGE, *words) + ".py"))
+            path = _path_of(section, name, False)
+            if section not in private or declared(path) is not None:
+                out.append((name, [name], path))
+        else:
+            entries = _tools_of([section], group_verbs.get(section) or {}, True)
+            out += [(tool, words, path) for tool, words, path in entries
+                    if section not in private or
+                    (not path.endswith("__init__.py") and declared(path) is not None)]
     return out
 
 
@@ -264,7 +268,20 @@ def tool_argv(args, values):
     for a in args:
         v = values.get(a["name"])
         if a.get("flag"):
-            if a["type"] == "boolean":
+            if a.get("required") and a["type"] != "boolean" and (v is None or
+                isinstance(v, str) and not v.strip()):
+                raise ValueError(f"{a['name']} is required")
+            if a.get("repeatable"):
+                if v is None:
+                    continue
+                if not isinstance(v, list) or any(not isinstance(x, str) or
+                                                 not x or x.startswith("-") for x in v):
+                    raise ValueError(f"{a['name']}: expected a list of flag values")
+                for x in v:
+                    flags += [a["flag"], x]
+            elif a["type"] == "boolean":
+                if a.get("required") and v is not True:
+                    raise ValueError(f"{a['name']} must be true")
                 flags += [a["flag"]] if v else []
             elif v not in (None, ""):
                 flags += [a["flag"], str(v)]
