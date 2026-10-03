@@ -507,6 +507,82 @@ def check_server_maintenance_409(c):
 
 
 
+# ── #431: разбор операторских команд ────────────────────────────────────
+# HYPOTHESIS: mop tail -n x ронял командлет трассой ValueError: parse
+# кормил int() сырой аргумент, когда соседний stat --days делает то же
+# через usage. Оператор видит стек вместо подсказки.
+# SOLUTION: разбор tail возвращает usage для -n без числа и для не-числа;
+# это тот же контракт, что у stat --days. Прочие командлеты скоупа
+# (core/pool/node/project/secret) проверены: сырых int() над аргументами
+# больше нет.
+# STATUS: FIXED — see #431
+def check_tail_parse_431(c):
+    from mop.cli.core import stat, tail
+    # Здоровые формы не меняются.
+    c.expect("#431 tail parses its flags", tail.parse(["pu-mop-1", "-n", "20"]),
+             ("pu-mop-1", 20, False))
+    c.expect("#431 tail -n=N", tail.parse(["pu-mop-1", "-n20"]), ("pu-mop-1", 20, False))
+    c.expect("#431 tail -f", tail.parse(["pu-mop-1", "-f"]), ("pu-mop-1", 10, True))
+    for bad in (["pu-mop-1", "-n", "x"], ["pu-mop-1", "-n0x"], ["pu-mop-1", "-n", "-f"],
+                ["pu-mop-1", "-n"]):
+        try:
+            got = tail.parse(bad)
+            c.fail(f"#431 tail {bad} must be a usage refusal, parsed {got!r}")
+        except ValueError as e:
+            c.fail(f"#431 tail {bad}: a trace, not a usage refusal", str(e))
+        except SystemExit:
+            c.check(f"#431 tail {bad}: usage", True)
+    # Соседний контракт для сверки.
+    for bad in (["--days", "x"], ["--days"]):
+        try:
+            stat.parse(bad)
+            c.fail(f"#431 stat {bad} must refuse")
+        except SystemExit:
+            c.check(f"#431 stat {bad}: usage, as before", True)
+
+
+def check_help_audit_431(c):
+    """#431: у команд скоупа докстринги сохраняют последствия --force,
+    предупреждения доступа и синтаксис; сырых int() над аргументами нет."""
+    import ast, importlib, os
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "mop", "cli")
+    force_docs = {"core/delete", "core/recycle", "core/restart", "core/update",
+                  "core/wipe", "core/landing"}
+    for sec in ("core", "pool", "node", "project", "secret"):
+        d = os.path.join(root, sec)
+        for f in sorted(os.listdir(d)):
+            if not f.endswith(".py") or f.startswith("__"):
+                continue
+            rel = f"{sec}.{f[:-3]}"
+            src = open(os.path.join(d, f)).read()
+            # int() над разобранным аргументом -- только за try/usage.
+            tree = ast.parse(src)
+            guarded = set()
+            for t in ast.walk(tree):
+                # try/except над разбором или isdecimal-гейт в том же
+                # условии: не-число до int() не доходит, отказ уже обработан.
+                if isinstance(t, ast.Try):
+                    for x in ast.walk(t):
+                        if isinstance(x, ast.Call) and getattr(x.func, "id", None) == "int":
+                            guarded.add(x.lineno)
+                if isinstance(t, ast.If) and any(
+                        isinstance(v, ast.Call) and getattr(v.func, "attr", "") == "isdecimal"
+                        for v in ast.walk(t.test)):
+                    for x in ast.walk(t.test):
+                        if isinstance(x, ast.Call) and getattr(x.func, "id", None) == "int":
+                            guarded.add(x.lineno)
+            for n in ast.walk(tree):
+                if (isinstance(n, ast.Call) and getattr(n.func, "id", None) == "int"
+                        and n.lineno not in guarded):
+                    c.fail(f"#431 {rel}: bare int() of an argument at line {n.lineno}"
+                           " -- a bad value must be a usage refusal")
+            doc = (importlib.import_module(f"mop.cli.{rel}").__doc__ or "").strip()
+            key = rel.replace(".", "/")
+            if key in force_docs:
+                c.check(f"#431 {key}: the docstring keeps --force consequences",
+                        "--force" in doc, doc[:80])
+
+
 def main():
     c = Checks()
     check_server_maintenance_409(c)
@@ -2113,6 +2189,8 @@ def check_fallback_model_183(c):
     check_tail_stderr_333(c)
     check_free_floor_329(c)
     check_add_failure_377(c)
+    check_tail_parse_431(c)
+    check_help_audit_431(c)
     check_add_argv_399(c)
     check_master_argv_400(c)
 
