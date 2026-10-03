@@ -1185,6 +1185,36 @@ def check_cluster_key_copy_402(c):
         and s.get("owner") == "{{ MOP_USER }}" for s in folders))
 
 
+# HYPOTHESIS (#479): апстрим Z.AI текстовый и отвергает любые image-блоки
+# (400 messages.content.type is invalid), а скелет config.yaml о том не
+# знал: панель заводит glm-5.3 как openai-compatibility, и первая же
+# вставка картинки или Read(png) убивала сессию glm-5.3 насовсем.
+# SOLUTION: скелет несёт правило requests.payload.filter, вырезающее
+# image_url-части из пользовательских сообщений для glm-*. Проверено на
+# живом прокси v8.0.8: filter-правило одно покрывает и вставленные
+# картинки, и картинки из tool-результатов (переводчик прокси сам
+# переносит их в следующее user-сообщение как image_url). Имя glm-* --
+# не имя провайдера, а модель; других текстовых апстримов в пуле нет.
+# RESULT: до правки RED -- в скелете нет ни секции requests, ни правила.
+# STATUS: FIXED — see #479
+def check_skeleton_image_filter_479(c):
+    path = os.path.join(DEPLOY, "roles", "llmproxy", "templates", "config.yaml.j2")
+    skeleton = open(path, encoding="utf-8").read()
+    variables = dict(config.SETTINGS, MOP_HOME="/home/mop",
+                     llm_proxy_client_key="ck", llm_proxy_mgmt_key="mk")
+    cfg = yaml.safe_load(render(skeleton, variables))
+    rule = ((cfg.get("requests") or {}).get("payload") or {}).get("filter") or []
+    c.check("#479 the skeleton carries the image-strip filter rule",
+            len(rule) == 1, rule)
+    if not rule:
+        return
+    params = rule[0].get("params") or []
+    c.check("#479 the rule strips image parts from user messages of glm-*",
+            params == ['messages.#(role=="user")#.content.#(type=="image_url")#']
+            and [m.get("name") for m in rule[0].get("models") or []] == ["glm-*"],
+            (rule[0].get("models"), params))
+
+
 def check_llm_request_size_411(c, can_render):
     # HYPOTHESIS: nginx отвергает большую текстовую историю и её compact
     # до LLM-прокси; Claude маскирует HTTP 413 как лимит media в 32 МБ.
@@ -1370,6 +1400,7 @@ def check_mgmt_gateway_418(c, can_render):
 def main():
     c = Checks()
     check_cluster_key_copy_402(c)
+    check_skeleton_image_filter_479(c)
 
     # ── юниты из общего шаблона ───────────────────────────────────────────
     template = os.path.join(COMMON, "templates", "service.j2")

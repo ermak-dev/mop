@@ -54,3 +54,19 @@ observability:
     logging-to-file: true
     logs-max-total-size-mb: 100
     request-log: false
+
+requests:
+  payload:
+    # Апстрим Z.AI текстовый и отвергает любой image-блок: 400 «content.type
+    # is invalid, allowed values: ['text']» убивает сессию glm-5.3 насовсем --
+    # картинка остаётся в транскрипте, и resume повторяет отказ (#479).
+    # Правило вырезает image_url-части из пользовательских сообщений уже
+    # переведённого payload; картинки из tool-результатов покрывает оно же:
+    # переводчик прокси переносит их в следующее user-сообщение. Модели
+    # других провайдеров правило не задевает (glm-* -- имена моделей, а не
+    # провайдер: панель заводит Z.AI как openai-compatibility).
+    filter:
+      - models:
+          - name: "glm-*"
+        params:
+          - 'messages.#(role=="user")#.content.#(type=="image_url")#'
