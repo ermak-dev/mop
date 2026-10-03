@@ -14,13 +14,9 @@ type Props = {
   onLogout: () => Promise<void>;
   /** Причина отказа входа с сервера (LoginRefused.reason), null -- нет отказа. */
   failed: string | null;
-  /** Переход на страницу журнала (#422): ссылку видит только admin. */
-  goJournal?: () => void;
-  /** Активна ли страница журнала (#422): ссылка подсвечена. */
-  journalActive?: boolean;
 };
 
-export function SessionBox({ session, onLogin, onLogout, failed, goJournal, journalActive }: Props) {
+export function SessionBox({ session, onLogin, onLogout, failed }: Props) {
   const [open, setOpen] = useState(false);
   const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
@@ -44,11 +40,6 @@ export function SessionBox({ session, onLogin, onLogout, failed, goJournal, jour
         {session.role === "admin" && (
           <Anchor href="/llm/management.html" target="_blank" rel="noopener"
                   aria-label="LLM Proxy">LLM Proxy</Anchor>
-        )}
-        {/* Журнал -- отдельная страница админа (#422); активная -- подсвечена */}
-        {session.role === "admin" && goJournal && (
-          <Anchor component="button" type="button" onClick={goJournal}
-                  aria-label="Журнал" c={journalActive ? undefined : "dimmed"}>Журнал</Anchor>
         )}
         <span>{session.login}</span>
         <Button variant="light" color="gray" onClick={onLogout}>Logout</Button>

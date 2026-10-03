@@ -65,11 +65,11 @@ test("#422 the main page has no embedded journal any more", () => {
 test("#422 a guest and a plain user see no link to the journal page", async () => {
   const m = await mocks();
   renderUi(<App />);
-  expect(screen.queryByRole("button", { name: "Журнал" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Журнал" })).toBeNull();
   m.session.__set({ login: "olga", role: "user" });
   fireEvent.focus(window);
   await waitFor(() => expect(screen.getByText("olga")).toBeInTheDocument());
-  expect(screen.queryByRole("button", { name: "Журнал" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Журнал" })).toBeNull();
 });
 
 test("#422 admin follows the link to #journal and sees the events", async () => {
@@ -77,8 +77,7 @@ test("#422 admin follows the link to #journal and sees the events", async () => 
   m.session.__set({ login: "anton", role: "admin" });
   m.journal.__setJournal(J, null);
   renderUi(<App />);
-  // Anchor component="button" -- в DOM кнопка с aria-label
-  const link = await screen.findByRole("button", { name: "Журнал" });
+  const link = await screen.findByRole("tab", { name: "Журнал" });
   fireEvent.click(link);
   await waitFor(() => expect(window.location.hash).toBe("#journal"));
   expect(await screen.findByText("pu-mop-1")).toBeInTheDocument();
@@ -105,7 +104,7 @@ test("#422 review2: logout with an open popup clears it without a stale frame", 
   m.session.__set({ login: "anton", role: "admin" });
   m.journal.__setJournal(J, null);
   renderUi(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Журнал" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Журнал" }));
   await waitFor(() => expect(window.location.hash).toBe("#journal"));
   // открыли полное событие
   fireEvent.click(screen.getByText(/сообщение от ermak/));
@@ -124,9 +123,10 @@ test("#422 back from the journal returns to the main page", async () => {
   m.session.__set({ login: "anton", role: "admin" });
   m.journal.__setJournal(J, null);
   renderUi(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Журнал" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Журнал" }));
   await waitFor(() => expect(window.location.hash).toBe("#journal"));
-  fireEvent.click(screen.getByRole("button", { name: "главная" }));
+  expect(screen.getByRole("tab", { name: "Журнал" })).toHaveAttribute("aria-selected", "true");
+  fireEvent.click(screen.getByRole("tab", { name: "Пул" }));
   await waitFor(() => expect(window.location.hash).toBe(""));
   // главная: таблицы пула снова на экране (снимок пуст -- заметка вместо
   // таблиц, но страница журнала ушла)
