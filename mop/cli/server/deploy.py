@@ -373,8 +373,8 @@ def main(argv):
         argv = []
     if argv:
         # Origin в аргументах заводил проект побочным эффектом прогона (#79).
-        lib.fail(f"deploy takes no arguments; {argv[0]} looks like a project.\n"
-                 f"Register it: mop project add {argv[0]}")
+        lib.fail("deploy takes no arguments; to register a project, "
+                 "run mop project add <git-origin>")
         return 1
     if from_ci and not ci_pull(skip_pipeline, dry):
         return 1

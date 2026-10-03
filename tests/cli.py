@@ -937,6 +937,29 @@ def check_mcp_positional_refusal_438(c):
         c.fail("#438 flag-like positional must still be rejected")
 
 
+
+# HYPOTHESIS: отказ deploy с лишним аргументом выводит argv[0] дважды,
+# включая URL с секретом; команда исправления не требует значения в отказе.
+# SOLUTION: отказ называет синтаксис и плейсхолдер вместо сырых данных.
+# RESULT: отказ не содержит маркер, имя исправляющей команды и код сохранились.
+# STATUS: FIXED — see #439
+def check_deploy_argument_refusal_439(c):
+    import shutil
+    from mop.common import config
+    from mop.cli.server import deploy
+
+    marker = "-SYNTHETIC_PRIVATE_VALUE"
+    with patched(shutil, which=lambda name: "/usr/bin/ansible-playbook"), \
+            patched(config, require=lambda: None):
+        out, err, code = run_command(deploy.main, [marker])
+    c.expect("#439 extra argument exits with a refusal", code, 1)
+    c.check("#439 extra argument is not echoed in either stream",
+            marker not in out and marker not in err, repr((out, err)))
+    c.check("#439 refusal shows the correcting command with a placeholder",
+            "mop project add <git-origin>" in err and "takes no arguments" in err,
+            repr(err))
+
+
 def main():
     c = Checks()
     check_server_maintenance_409(c)
@@ -945,6 +968,7 @@ def main():
     check_dispatch_sources_396(c)
     check_concise_global_help_430(c)
     check_help_content_432(c)
+    check_deploy_argument_refusal_439(c)
     check_refusals_432(c)
     check_reference_render_350(c)
     check_reference_empty_350(c)
