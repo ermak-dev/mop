@@ -156,6 +156,15 @@ The session uses the selected server's LLM proxy. Its URL and key come from
 the private client.json written by mop login, not from installation .env.
 ```
 
+#### mop profile
+
+```text
+mop profile: show the pool role, project and integration branch
+
+The role comes from bus credentials, not the presence of MCP tools. An unset
+integration branch is reported as unset; it is not inferred from origin/HEAD.
+```
+
 #### mop recycle
 
 ```text
