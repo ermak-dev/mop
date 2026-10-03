@@ -603,6 +603,26 @@ def check_concise_help_431(c):
                 c.check(what, text not in doc, "still present")
 
 
+
+# HYPOTHESIS: отказ MCP-позиционного аргумента, похожего на флаг,
+# включает repr самого значения; значение могло быть приватным.
+# SOLUTION: отказ оставляет имя поля и причину, но не входное значение.
+# RESULT: синтетический маркер не попал в отказ, поле и причина остались.
+# STATUS: FIXED — see #438
+def check_mcp_positional_refusal_438(c):
+    marker = "-SYNTHETIC_PRIVATE_VALUE"
+    args = [{"name": "origin", "type": "string", "required": True}]
+    try:
+        cli.tool_argv(args, {"origin": marker})
+    except ValueError as e:
+        message = str(e)
+        c.check("#438 reject a flag-like positional without echoing its value",
+                "origin" in message and "flag" in message and marker not in message,
+                message)
+    else:
+        c.fail("#438 flag-like positional must still be rejected")
+
+
 def main():
     c = Checks()
     check_server_maintenance_409(c)
@@ -844,6 +864,7 @@ def main():
     # STATUS: FIXED — see #111
 
     check_mcp_declarations(c)
+    check_mcp_positional_refusal_438(c)
     check_refusals(c)
     check_refusals_163(c)
     check_output_rules(c)

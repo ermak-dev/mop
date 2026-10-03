@@ -272,7 +272,7 @@ def tool_argv(args, values):
         if skipped:
             raise ValueError(f"{a['name']} needs {skipped} too: positionals go in order")
         if str(v).startswith("-"):
-            raise ValueError(f"{a['name']}: {v!r} would read as a flag")
+            raise ValueError(f"{a['name']}: value would read as a flag")
         argv.append(str(v))
     return argv + flags
 
