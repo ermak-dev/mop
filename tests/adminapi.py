@@ -206,6 +206,65 @@ def main():
             len(set(ids)) == 2 and {m.get("target") for m in made} == {"pu-mop-1", "pu-mop-2"},
             made)
 
+    # ── реестр проектов для формы add (#472) ───────────────────────────
+    # Читатель реестра подставной: строки -- origin'ы, как их держит
+    # projects.read(); нет файла -- пусто.
+    def registry(lines):
+        return lambda: set(lines)
+
+    got = adminapi.project_list(registry(["git@h:g/mop.git", "https://x/y/web.git"]))
+    by = {p["name"]: p for p in got}
+    c.check("#472 project_list names by project_of and keeps the origin",
+            by.get("mop", {}).get("origin") == "git@h:g/mop.git"
+            and by.get("web", {}).get("origin") == "https://x/y/web.git", got)
+    c.check("#472 project_list is sorted by name",
+            [p["name"] for p in got] == ["mop", "web"], got)
+    c.check("#472 an empty registry reads as an empty list, not an error",
+            adminapi.project_list(registry([])) == [], got)
+    # Кривая строка без origin-вида не роняет список: их вычищает reader,
+    # но здесь — защита по записи (#337).
+    got = adminapi.project_list(registry(["git@h:g/mop.git", "junk line"]))
+    c.check("#472 a non-origin line is dropped, the rest survives",
+            [p["name"] for p in got] == ["mop"], got)
+
+    # GET /api/admin/projects: admin-only, остальным -- код отказа.
+    listing_api = adminapi.Api(ops, adminapi.Queue(), origin="https://pool.example",
+                               who=ADMIN)
+    class ListHandler:
+        command = "GET"
+        path = "/api/admin/projects"
+        origin = "https://pool.example"
+        headers = {"Origin": "https://pool.example"}
+        def __init__(self, who):
+            self.who = who
+            self.sent = []
+        def _json(self, code, payload):
+            self.sent.append((code, payload))
+
+    h = ListHandler(ADMIN)
+    listing_api.projects(h, registry(["git@h:g/mop.git"]))
+    c.check("#472 GET projects serves the admin the list",
+            h.sent and h.sent[0][0] == 200
+            and h.sent[0][1].get("projects")[0]["name"] == "mop", h.sent)
+    h = ListHandler(None)
+    listing_api.projects(h, registry(["git@h:g/mop.git"]))
+    c.check("#472 GET projects refuses a guest with 401",
+            h.sent and h.sent[0][0] == 401, h.sent)
+    h = ListHandler(USER)
+    listing_api.projects(h, registry(["git@h:g/mop.git"]))
+    c.check("#472 GET projects refuses a non-admin with 403",
+            h.sent and h.sent[0][0] == 403, h.sent)
+    # Провайдер лёг -- закрыто, без сырой ошибки.
+    def broken_provider(*a, **k):
+        raise RuntimeError("ldap socket /etc/ld.pwd down")
+    closed = adminapi.Api(ops, adminapi.Queue(), origin="https://pool.example",
+                          provider=broken_provider)
+    h = ListHandler(ADMIN)
+    closed.projects(h, registry(["git@h:g/mop.git"]))
+    c.check("#472 GET projects with a dead provider is closed, no raw detail",
+            h.sent and h.sent[0][0] in (503, 401)
+            and "ldap" not in json.dumps(h.sent[0][1]), h.sent)
+
     return c.report("adminapi")
 
 

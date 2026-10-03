@@ -231,8 +231,35 @@ test("#469 send passes its params: submit carries the message", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("succeeded")));
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1", "send"));
+  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
   await act(async () => { await view.result.current.submit("send", { message: "привет" }); });
   const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
   expect(body).toEqual({ action: "send", target: "pu-mop-1", params: { message: "привет" } });
+});
+
+// #472: add едет без цели -- ключа target в теле нет вовсе, контракт
+// {action, params}. Хук допускает null-цель у админа; не-admin и так
+// отказан ролью.
+test("#472 add rides without a target: the body omits it", async () => {
+  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
+                            () => Promise.resolve(opJson("succeeded")));
+  vi.stubGlobal("fetch", fetchMock);
+  const view = renderHook(() => useAdminOp(ADMIN, null));
+  await act(async () => {
+    await view.result.current.submit("add", { origin: "git@h:g/mop.git" });
+  });
+  const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+  expect(body).toEqual({ action: "add", params: { origin: "git@h:g/mop.git" } });
+  expect("target" in body).toBe(false);
+  await waitFor(() => expect(view.result.current.op.status).toBe("succeeded"));
+});
+
+test("#472 a guest add asks nothing", async () => {
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+  const view = renderHook(() => useAdminOp(GUEST_SESS, null));
+  await act(async () => { await view.result.current.submit("add", { origin: "x" }); });
+  expect(view.result.current.op.status).toBe("refused");
+  expect(view.result.current.op.error).toBeTruthy();
+  expect(fetchMock).not.toHaveBeenCalled();
 });
