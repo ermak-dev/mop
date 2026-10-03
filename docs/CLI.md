@@ -987,17 +987,18 @@ things required in .env are secrets.
 ```text
 deploy: mop server deploy [--check] [--skip-pipeline] [--from-ci]
 
-The whole installation in one run: one playbook (site.yml), one PLAY
-RECAP, no separate targets — rerunning is cheaper than remembering which
-target owned what. Machines only: projects live in the registry
-(`mop project add|delete`); deploy takes no arguments.
+The whole installation in one run; no separate targets — rerunning is
+cheaper than remembering which target owned what. Machines only:
+projects come and go with `mop project add|delete`, deploy takes no
+arguments.
 
---check: ansible's check mode with --diff; nothing changes, nothing runs
-after the playbook. With MOP_DEPLOY_NEEDS_GREEN=1 deploy refuses unless
-HEAD's pipeline on the default branch is green; --skip-pipeline is the
-emergency way past. --from-ci is CI's job on the server: default branch,
-fetch, fast-forward, the gate mandatory; if HEAD has moved on it exits 0
-— the newer job rolls it out.
+--check: ansible's check mode with --diff — nothing changes, and
+nothing runs after the playbook. With MOP_DEPLOY_NEEDS_GREEN=1 deploy
+refuses unless HEAD's pipeline on the default branch is green;
+--skip-pipeline is the emergency way past and says so. --from-ci is
+what CI runs on the server: default branch, fetch, fast-forward, the
+gate mandatory; if HEAD has moved on it exits 0 — the newer job rolls
+the rollout out.
 ```
 
 #### mop server disk
@@ -1158,18 +1159,18 @@ Silent when all goes well.
 ```text
 pool dashboard on the web: mop server web [--port N] [--bind ADDR]
 
-`mop list`, `mop node` and `mop stat` on one page, refreshed in place
-(docs/WEB.md):
+`mop list`, `mop node` and `mop stat` on one page, refreshed in place:
 
-  /            the page (web/dist), /assets/N its files, /logo.png
+  /            the page, /assets/N its files, /logo.png
   /api/pool    snapshot as JSON; /events — the same as SSE
   /healthz     200 once the first snapshot is in
   /api/session the session; /api/login and /api/logout by JSON post
                (file/LDAP, bus identity)
   /api/journal the full journal, admin only; the public feeds none
 
-No login for the page (the LAN is trusted); the pool stays read-only —
-a restart button would kill work in a clone. Port and bind:
+The overview is public to the LAN; logging in opens the admin side —
+the journal and the proxy panel. The pool stays read-only here: a
+restart button would kill work in a clone. Port and bind:
 MOP_WEB_PORT (9000), MOP_WEB_BIND (127.0.0.1); beyond — the TLS proxy.
 ```
 

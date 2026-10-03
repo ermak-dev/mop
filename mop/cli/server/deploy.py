@@ -1,16 +1,17 @@
 """deploy: mop server deploy [--check] [--skip-pipeline] [--from-ci]
 
-The whole installation in one run: one playbook (site.yml), one PLAY
-RECAP, no separate targets — rerunning is cheaper than remembering which
-target owned what. Machines only: projects live in the registry
-(`mop project add|delete`); deploy takes no arguments.
+The whole installation in one run; no separate targets — rerunning is
+cheaper than remembering which target owned what. Machines only:
+projects come and go with `mop project add|delete`, deploy takes no
+arguments.
 
---check: ansible's check mode with --diff; nothing changes, nothing runs
-after the playbook. With MOP_DEPLOY_NEEDS_GREEN=1 deploy refuses unless
-HEAD's pipeline on the default branch is green; --skip-pipeline is the
-emergency way past. --from-ci is CI's job on the server: default branch,
-fetch, fast-forward, the gate mandatory; if HEAD has moved on it exits 0
-— the newer job rolls it out.
+--check: ansible's check mode with --diff — nothing changes, and
+nothing runs after the playbook. With MOP_DEPLOY_NEEDS_GREEN=1 deploy
+refuses unless HEAD's pipeline on the default branch is green;
+--skip-pipeline is the emergency way past and says so. --from-ci is
+what CI runs on the server: default branch, fetch, fast-forward, the
+gate mandatory; if HEAD has moved on it exits 0 — the newer job rolls
+the rollout out.
 """
 import json
 import os
@@ -461,7 +462,7 @@ def main(argv):
         # они и нужны. Машине по возвращении нужен свой прогон, и это
         # сказано.
         lib.fail("some machines did not answer; everything that did is "
-                 "configured -- deploy again when they are back")
+                 "configured -- run mop server deploy again when they are back")
 
     # Контроллер — тоже машина оператора: его каталог сервера собирается здесь
     # из secrets/ и bootstrap.json. Самоподписанный сертификат закрепляется,
@@ -475,8 +476,8 @@ def main(argv):
         # человек входит своим именем, и выбрать его за оператора deploy не
         # может. Громко, а не красной проверкой с непонятной причиной.
         lib.fail(f"installed, but this machine is nobody on the bus yet: "
-                 f"log in with mop login <login> (a person from `user` verbs "
-                 f"or the directory), then mop list")
+                 f"log in with mop login <login> (a person from "
+                 f"`mop server user add` or the directory), then mop list")
         return 1
 
     lib.section("check")

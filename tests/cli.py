@@ -450,15 +450,27 @@ def check_help_content_432(c):
         for k in keys:
             c.check(f"#432 {rel} keeps {k!r}", k in doc, doc.splitlines()[0][:60])
 
-    # Отжатые докстринги: суть осталась, история ушла. Было/стало по
-    # существу, а не по длине.
-    was = {"mop/cli/server/deploy.py": 302, "mop/cli/server/sweep.py": 211,
-           "mop/cli/server/web.py": 198, "mop/cli/server/doctor.py": 194}
-    for rel, words in was.items():
-        doc = docs[os.path.join(root, rel)]
-        now = len(doc.split())
-        c.check(f"#432 {rel}: the essay is gone ({words} -> {now})",
-                now < words * 0.6, doc.splitlines()[0][:60])
+    # web: справка описывает вход как он есть (#416): публичный обзор,
+    # логин открывает admin-части (журнал, панель прокси). «No login for
+    # the page» — опровергнуто самим маршрутом /api/login.
+    webdoc = docs[os.path.join(root, "mop/cli/server/web.py")]
+    c.check("#432 the web help names the login (it exists, #416)",
+            "/api/login" in webdoc and "login" in webdoc.lower(), webdoc[:60])
+    c.check("#432 the web help says the admin gate",
+            "admin" in webdoc, webdoc.splitlines()[0][:60])
+    c.check("#432 the web help claims no login",
+            "No login" not in webdoc, [l for l in webdoc.splitlines() if "login" in l.lower()][:2])
+    # deploy: справка говорит о команде, не об устройстве прогона: имя
+    # плейбука, заголовок ansible, «реестр» и внутренности --from-ci —
+    # не помощь вызывающему. Поведение флагов и последствия — остаются.
+    dep = docs[os.path.join(root, "mop/cli/server/deploy.py")]
+    for gone in ("site.yml", "PLAY RECAP", "registry"):
+        c.check(f"#432 the deploy help names no {gone!r}",
+                gone not in dep, [l for l in dep.splitlines() if gone in l])
+    for kept in ("--check", "--diff", "--skip-pipeline", "--from-ci",
+                 "MOP_DEPLOY_NEEDS_GREEN", "default branch"):
+        c.check(f"#432 the deploy help keeps {kept!r}", kept in dep,
+                dep.splitlines()[0][:60])
 
     # Серверная группа всё ещё говорит, где живут её команды.
     srv = docs[os.path.join(root, "mop/cli/server/__init__.py")]
@@ -469,8 +481,13 @@ def check_help_content_432(c):
     for rel, doc in docs.items():
         if not doc:
             continue     # service/__init__.py — технический, не команда
-        c.check(f"#432 {os.path.relpath(rel, root)} names no internal module path",
-                "mop/server/" not in doc and "mop/cli/" not in doc,
+        rel_docs = os.path.relpath(rel, root)
+        # Модульные пути — нигде; docs/*.md и web/dist — только не в
+        # пересказе usage самих web и deploy (рассказ о справке — в docs/).
+        no_doc_ref = rel_docs in ("mop/cli/server/web.py", "mop/cli/server/deploy.py")
+        c.check(f"#432 {rel_docs} names no internal path",
+                "mop/server/" not in doc and "mop/cli/" not in doc
+                and not (no_doc_ref and ("docs/" in doc or "web/dist" in doc)),
                 doc.splitlines()[0][:60])
     # Капс — не акцент (CLAUDE.md): справка — тоже вывод программы. Речь
     # об эмфазе («NOT treated»), а не о статус-токенах и именах настроек:
@@ -493,41 +510,56 @@ def check_refusals_432(c):
     failed_before = c.failed
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
-    def text_of(path, lineno):
-        """Текстовая часть отказа (lib.fail/sys.exit) на строке."""
+    def refusals_of(path):
+        """Текстовые части отказов (lib.fail/sys.exit) файла — по содержимому
+        вызова, без привязки к номерам строк."""
+        out = []
         for node in ast.walk(ast.parse(open(path).read())):
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                 continue
             if node.func.attr not in ("fail", "exit") or not node.args:
                 continue
-            if node.lineno != lineno:
-                continue
             a = node.args[0]
             if isinstance(a, ast.Constant):
-                return a.value
-            if isinstance(a, ast.JoinedStr):
-                return "".join(x.value for x in a.values if isinstance(x, ast.Constant))
-        return None
+                out.append(a.value)
+            elif isinstance(a, ast.JoinedStr):
+                out.append("".join(x.value for x in a.values
+                                   if isinstance(x, ast.Constant)))
+        return out
 
-    # deploy: лишний аргумент -- это совет зарегистрировать проект, а не
-    # повтор собственного имени команды.
-    got = text_of(os.path.join(root, "mop/cli/server/deploy.py"), 374)
-    c.check("#432 the no-arguments refusal cures, not repeats",
+    def one(path, marker):
+        """Отказ, содержащий marker; ровно один такой."""
+        got = [t for t in refusals_of(os.path.join(root, path)) if marker in t]
+        if not c.check(f"#432 {path} has the refusal with {marker!r}", len(got) == 1, got):
+            return None
+        return got[0]
+
+    # deploy: лишний аргумент -- совет зарегистрировать проект, точной
+    # командой, без повтора собственного имени.
+    got = one("mop/cli/server/deploy.py", "takes no arguments")
+    c.check("#432 the no-arguments refusal cures with the exact command",
             got is not None and "mop project add" in got
             and "mop server deploy takes" not in got, got)
-    # deploy: точный синтаксис команды-зависимости, не пересказ.
-    got = text_of(os.path.join(root, "mop/cli/server/deploy.py"), 361)
+    # deploy: точный синтаксис команды-зависимости.
+    got = one("mop/cli/server/deploy.py", "no ansible-playbook")
     c.check("#432 the missing-ansible refusal names the exact command",
             got is not None and "mop server setup" in got, got)
-    # deploy: недоступные машины -- одна строка с лечением.
-    got = text_of(os.path.join(root, "mop/cli/server/deploy.py"), 463)
-    c.check("#432 the unanswered-machines refusal stays one sentence",
-            got is not None and "\n" not in got and "deploy again" in got, got)
-    # cluster/users: ссылка на deploy без «mop server» внутри.
-    got = text_of(os.path.join(root, "mop/cli/server/cluster/users.py"), 26)
-    c.check("#432 the base-users refusal names the fix without the prefix",
-            got is not None and "deploy writes" in got
-            and "mop server deploy" not in got, got)
+    # deploy: недоступные машины -- одна строка с лечением, и лечение --
+    # та же команда, а не «a deploy».
+    got = one("mop/cli/server/deploy.py", "did not answer")
+    c.check("#432 the unanswered-machines refusal stays one sentence and exact",
+            got is not None and "\n" not in got and "mop server deploy again" in got, got)
+    # deploy: подсказка входа называет точную команду, не «user verbs».
+    got = one("mop/cli/server/deploy.py", "nobody on the bus")
+    c.check("#432 the login-hint refusal names the exact command",
+            got is not None and "mop server user" in got and "user` verbs" not in got, got)
+    # cluster/users: лечение — точная команда, без пересказа «a deploy».
+    got = one("mop/cli/server/cluster/users.py", "no base users")
+    c.check("#432 the base-users refusal names the exact command",
+            got is not None and "mop server deploy" in got, got)
+    got = one("mop/cli/server/cluster/users.py", "changed: nats takes it")
+    c.check("#432 the callout-restart refusal names the exact way",
+            got is not None and "systemctl restart" in got, got)
     return c.failed == failed_before
 
 

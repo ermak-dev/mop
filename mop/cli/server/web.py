@@ -1,17 +1,17 @@
 """pool dashboard on the web: mop server web [--port N] [--bind ADDR]
 
-`mop list`, `mop node` and `mop stat` on one page, refreshed in place
-(docs/WEB.md):
+`mop list`, `mop node` and `mop stat` on one page, refreshed in place:
 
-  /            the page (web/dist), /assets/N its files, /logo.png
+  /            the page, /assets/N its files, /logo.png
   /api/pool    snapshot as JSON; /events — the same as SSE
   /healthz     200 once the first snapshot is in
   /api/session the session; /api/login and /api/logout by JSON post
                (file/LDAP, bus identity)
   /api/journal the full journal, admin only; the public feeds none
 
-No login for the page (the LAN is trusted); the pool stays read-only —
-a restart button would kill work in a clone. Port and bind:
+The overview is public to the LAN; logging in opens the admin side —
+the journal and the proxy panel. The pool stays read-only here: a
+restart button would kill work in a clone. Port and bind:
 MOP_WEB_PORT (9000), MOP_WEB_BIND (127.0.0.1); beyond — the TLS proxy.
 """
 import json

@@ -23,7 +23,7 @@ def main(argv):
     try:
         changed, _ = natsconf.apply(names, bootstrap.PUPPET_CREDS)
     except (OSError, ValueError) as e:
-        sys.exit(f"no base users ({e}) -- deploy writes {natsconf.BASE}")
+        sys.exit(f"no base users ({e}) -- mop server deploy writes {natsconf.BASE}")
     try:
         restart = natsconf.apply_callout()
     except ImportError as e:
@@ -35,7 +35,7 @@ def main(argv):
     # nats не перезапускает.
     if restart and "--reload" in argv:
         sys.exit(f"{natsconf.CALLOUT} changed: nats takes it only by a restart "
-                 f"(systemctl restart {natsconf.UNIT}, or a deploy)")
+                 f"(systemctl restart {natsconf.UNIT}, or mop server deploy)")
     if changed and "--reload" in argv:
         try:
             natsconf.reload()
