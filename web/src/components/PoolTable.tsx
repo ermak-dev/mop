@@ -31,16 +31,24 @@ const statusTip = (p: Puppet): string => `${p.state} · ${p.alloc_status}`;
 const origins = (sh: Project): string[] =>
   [...new Set(sh.puppets.map((p) => p.origin).filter(Boolean))];
 
-function Row({ p }: { p: Puppet }) {
+function Row({ p, onOpen }: { p: Puppet; onOpen?: (name: string) => void }) {
   const color = verdictColor(p.kind, p.bucket);
   return (
     <Table.Tr data-kind={p.bucket || p.kind}>
       <Table.Td>
         {/* точка корзины перед именем, в одну строку: узкая колонка иначе
-            переносила имя под точку */}
+            переносила имя под точку. Имя -- кнопка при наличии карточки
+            (#463): открытие доступно и с клавиатуры (Tab + Enter). */}
         <Group gap={6} wrap="nowrap">
           <Badge size="xs" circle color={color} />
-          <Text span size="sm" style={{ whiteSpace: "nowrap" }}>{p.name}</Text>
+          {onOpen ? (
+            <Text component="button" span size="sm" title="карточка папета"
+                  style={{ whiteSpace: "nowrap", background: "none", border: 0,
+                           padding: 0, cursor: "pointer", textAlign: "left", font: "inherit" }}
+                  onClick={() => onOpen(p.name)}>{p.name}</Text>
+          ) : (
+            <Text span size="sm" style={{ whiteSpace: "nowrap" }}>{p.name}</Text>
+          )}
         </Group>
       </Table.Td>
       <Table.Td>{p.node}</Table.Td>
@@ -67,7 +75,12 @@ function Row({ p }: { p: Puppet }) {
   );
 }
 
-export function PoolTable({ projects }: { projects: Project[] }) {
+export function PoolTable({ projects, onOpen }: {
+  projects: Project[];
+  /** Открыть карточку папета по имени (#463); нет -- имя строкой, гостю
+   *  карточка недоступна и опенер не рисуется. */
+  onOpen?: (name: string) => void;
+}) {
   if (!projects.length) return <EmptyNote>папетов нет</EmptyNote>;
   return (
     <Stack gap="md" data-testid="pool">
@@ -83,7 +96,7 @@ export function PoolTable({ projects }: { projects: Project[] }) {
           ))}
           <Table striped highlightOnHover withTableBorder>
             <TableHead cols={Object.values(COLS)} />
-            <Table.Tbody>{sh.puppets.map((p) => <Row key={p.name} p={p} />)}</Table.Tbody>
+            <Table.Tbody>{sh.puppets.map((p) => <Row key={p.name} p={p} onOpen={onOpen} />)}</Table.Tbody>
           </Table>
         </div>
       ))}

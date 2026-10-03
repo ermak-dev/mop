@@ -10,6 +10,7 @@ import { useJournal } from "./useJournal";
 import { useHashPage } from "./useHashPage";
 import { SessionBox } from "./components/SessionBox";
 import { PoolTable } from "./components/PoolTable";
+import { PuppetCard } from "./components/PuppetCard";
 import { NodesPanel } from "./components/NodesPanel";
 import { Masters } from "./components/Masters";
 import { JournalPage } from "./components/JournalPage";
@@ -82,11 +83,19 @@ export default function App() {
       return false;
     }
   };
+  // Карточка папета (#463): цель держит App, не таблица -- закрытие и смена
+  // роли/логина гасят её отсюда одним setState, а опоздавший ответ прежней
+  // цели отбрасывает сам хук (поколение). Гостю и не-admin опенера нет.
+  const [puppet, setPuppet] = useState<string | null>(null);
+  const closePuppet = () => setPuppet(null);
   const logout = async () => {
     try {
       setSession(await postLogout());
       setFailed(null);
       authEpoch.current++;
+      // открытая карточка не переживает выход (#463): факты админа не
+      // остаются на экране гостя
+      setPuppet(null);
     } catch {
       setPanelError("панель недоступна");
     }
@@ -126,7 +135,11 @@ export default function App() {
           )}
           {snapshot && (
             <>
-              <PoolTable projects={snapshot.projects} />
+              <PoolTable projects={snapshot.projects}
+                         onOpen={session.role === "admin" ? setPuppet : undefined} />
+              <PuppetCard snapshot={snapshot} session={session}
+                          target={session.role === "admin" ? puppet : null}
+                          onClose={closePuppet} />
               {/* живые мастера (#305) */}
               <Masters masters={snapshot.masters} every={snapshot.masters_every} />
               <NodesPanel nodes={snapshot.nodes} />
