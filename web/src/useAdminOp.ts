@@ -52,7 +52,8 @@ export function useAdminOp(session: Session, target: string | null,
     }
   }, [source, stale]);
 
-  const submit = useCallback(async (): Promise<string | null> => {
+  const submit = useCallback(async (params: Record<string, unknown> = {}):
+    Promise<string | null> => {
     if (session.role !== "admin" || !target) {
       setOp({ status: "refused", id: null, error: DENIED, lost: false });
       return null;
@@ -69,7 +70,7 @@ export function useAdminOp(session: Session, target: string | null,
         const r = await fetch("/api/admin/ops", {
           method: "POST", credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, target, params: {} }),
+          body: JSON.stringify({ action, target, params }),
         });
         if (at !== seq.current) return null;      // источник сменился
         if (!r.ok) {

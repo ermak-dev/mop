@@ -224,3 +224,15 @@ test("no storage: nothing lands in localStorage or sessionStorage", async () => 
   expect(window.localStorage.length).toBe(0);
   expect(window.sessionStorage.length).toBe(0);
 });
+
+// #469: send -- та же операция админа, но с параметрами: submit несёт
+// {message}. Restart зовёт submit() без аргументов -- params: {} как был.
+test("#469 send passes its params: submit carries the message", async () => {
+  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
+                            () => Promise.resolve(opJson("succeeded")));
+  vi.stubGlobal("fetch", fetchMock);
+  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1", "send"));
+  await act(async () => { await view.result.current.submit({ message: "привет" }); });
+  const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+  expect(body).toEqual({ action: "send", target: "pu-mop-1", params: { message: "привет" } });
+});
