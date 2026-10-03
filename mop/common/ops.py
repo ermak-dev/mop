@@ -1,11 +1,23 @@
-"""Общие операции пула: add/update/restart и доставка (#458).
+"""Общие операции пула: add/update/restart, доставка и safe-precondition.
 
-Командлеты держали workflow целиком: регистрация, ожидание узла, прогон
-bootstrap'а по метке, строки шагов. Вебу (#456) нужны те же операции, но
-без терминала и без второй реализации: копия разошлась бы с первой в тот
-же день. Слой один, общие для CLI и веба; фронтенды выбирают своими
-параметрами только разрешённые себе возможности (workspace -- локальный
-снимок для CLI, удалённый источник для веба), а не копиями workflow.
+Две части одного слоя, знакомые по своим тикетам:
+
+    workflow (#458) -- add/update/restart/send_to_puppet/bootstrap_result:
+    командлеты держали их целиком (регистрация, ожидание узла, прогон
+    bootstrap'а по метке, строки шагов); вебу (#456) нужны те же операции
+    без терминала и без второй реализации -- копия разошлась бы с первой
+    в тот же день.
+
+    safety (#460) -- один инвариант безопасного действия для веб-воркера
+    (safety/target_project/record): воркер шлёт глаголы субъектом проекта
+    цели, и перед каждым действием обязан спросить одно и то же. Части
+    независимы: safety не импортирует workflow и не зовёт его -- только
+    общие домены (domain.holds_work, lease.live); workflow safety не зовёт
+    сам, его вызывает воркер перед операцией.
+
+Фронтенды выбирают своими параметрами только разрешённые себе возможности
+(workspace -- локальный снимок для CLI, удалённый источник для веба), а не
+копиями workflow.
 
 Результат операции отделён от успешности побочного эффекта:
     registered  сама регистрация сошлась (джоб/аллокация есть, спека легла)
@@ -28,8 +40,7 @@ context.bus_file -- кэш одного соединения процесса н
 нарушения направления импортов. send_to_puppet переехал сюда из
 mop/client/channel.py (#458): вердикт доставки нужен и вебу, а клиентский
 модуль серверу недоступен. channel.py остаётся тонкой обёрткой для своего
-слоя. Безопасность действий -- не здесь: safe-precondition один в #460
-(ops.safety), этот слой его только вызовет.
+слоя.
 
 Единицы времени -- секунды; вызовы нижнего транспорта (bus) -- аргументом
 transport, чтобы проверки подставляли свой и операция оставалась чистой.
@@ -222,3 +233,75 @@ def send_to_puppet(transport, node, name, message, priority="next", wait=0,
 def _clamp_wait(seconds, ceiling=600):
     """Сколько ждать простоя: 0..ceiling. Та же норма, что channel."""
     return min(max(seconds or 0, 0), ceiling)
+
+
+# ─── safe-precondition веб-мутаций (#460) ────────────────────────────────
+# Воркер дашборда шлёт изменяющие глаголы как машина под субъектом проекта
+# цели: ворота владения сервиса (#40, lease.gate) начинают работать как для
+# мастера. Но ворота пускают СВОЕГО -- а «свой» для веб-клика решает не
+# тело запроса, а HTTP-сессия человека. Ниже -- один инвариант на все
+# handlers воркера, копий по тикетам нет. Часть независима от workflow
+# выше: только общие домены (domain.holds_work, lease.live).
+from .domain import CloneFacts, holds_work
+from . import lease
+
+
+def target_project(origin, job_project=None):
+    """Проект цели -- из origin джоба (Meta.origin), не из имени.
+
+    Один источник права: origin берёт воркер из джоба, имя проекта --
+    puppets.project_of(origin). Префикс имени папета и тело запроса здесь
+    не участвуют: их пишет кто угодно. job_project -- зарегистрированный
+    проект (реестр сервера) для add, где джоба ещё нет: регистрируемый
+    origin обязан быть в реестре, и его проект говорит реестр."""
+    if origin is None:
+        return job_project
+    return puppets.project_of(origin)
+
+
+def safety(name, project, owner=None, facts=None, busy=False,
+           disruptive=False, now=None):
+    """Безопасно ли действие воркера над папетом. -> (можно, причина).
+
+    Один инвариант (#460):
+      - факты клона известны: ошибка агента, тишина (None) и битый ответ --
+        отказ («не знаю» не значит «пусто», AGENT SILENT -- папет может
+        работать);
+      - работы в клоне нет -- включая ничейную: веб-клик не диспатч, окно
+        lease.WINDOW ему не положено (это дорога CLI-мастера);
+      - чужой живой аренды нет; своя -- проходит;
+      - disruptive (рестарт, stop, wipe) при живой занятой сессии цели --
+        отказ даже со своей арендой: сессию ведёт человек.
+
+    owner -- логин человека из HTTP-сессии: для него «своя» аренда.
+    busy -- жива ли сессия цели (вердикт ростера). facts -- ответ _clone_of:
+    {"clone": ...} | {"error": ...} | None. Окно между проверкой и эффектом
+    не заперто -- как у CLI."""
+    if now is None:
+        now = time.time()
+    if facts is None or facts.get("error") or not facts.get("clone"):
+        return False, (f"{name}: cannot tell if it holds work — "
+                       f"{(facts or {}).get('error') or 'no facts from the node'}")
+    clone = CloneFacts.from_dict(facts["clone"])
+    if holds_work(clone):
+        whose = clone.owner.user if clone.owner else "nobody"
+        return False, (f"{name}: work in the clone (led by {whose}) — "
+                       f"the web does not take work over")
+    if clone.owner and clone.owner.user != owner:
+        if lease.live(clone.owner, clone, now):
+            return False, (f"{name}: led by {clone.owner.user} — "
+                           f"ask them, the web does not take leases over")
+    if disruptive and busy:
+        return False, (f"{name}: the session is live — a disruptive action "
+                       f"would kill the work in it")
+    return True, None
+
+
+def record(verb, name, project, principal, sender="mop-web"):
+    """Аудит-запись операции воркера (#476): принципал HTTP и сервис --
+    отдельные поля, payload сообщения -- НЕ входит (ключи не хранятся).
+
+    owner_note и события шины сохраняются воркером отдельно; здесь только
+    сама запись: кто из людей велел, какой сервис исполнил, что и над кем."""
+    return {"event": "op", "verb": verb, "name": name, "project": project,
+            "principal": principal, "sender": sender}
