@@ -680,27 +680,23 @@ def check_alloc_377(c):
 # STATUS: FIXED — see #454
 def check_model_454(c):
     from mop.common import state
-    live = {"present": True, "session": "idle 1 1", "clone": None,
-            "state": {"status": "idle", "alive": True, "listen": True,
-                      "waitingFor": None, "turn": None, "model": "glm-5.3"}}
-    # Труп: ни процесса, ни сокета -- сессия умерла целиком.
-    dead = {"present": True, "session": "idle 0 0", "clone": None,
-            "state": {"status": "idle", "alive": False, "listen": False,
-                      "waitingFor": None, "turn": None, "model": "glm-5.3"}}
+
+    def facts(alive, listen):
+        """Факты узла с записью state: alive/listen -- значения или отсутствие."""
+        rec = {"status": "idle", "waitingFor": None, "turn": None,
+               "model": "glm-5.3"}
+        if alive is not None:
+            rec["alive"] = alive
+        if listen is not None:
+            rec["listen"] = listen
+        return {"present": True, "session": "idle 1 1", "clone": None,
+                "state": rec}
+
+    live = facts(True, True)
     old = {"present": True, "session": "idle 1 1", "clone": None}
     model_of = getattr(state, "model_of", None)
     if not c.check("#454 state.model_of exists", model_of is not None):
         return
-    c.expect("#454 a live session's model", model_of(live), "glm-5.3")
-    c.expect("#454 a dead session has no model", model_of(dead), None)
-    c.expect("#454 an old agent without model", model_of(old), None)
-    c.expect("#454 no facts at all", model_of(None), None)
-    # Никаких подмен: пустая строка -- не модель, а отсутствие.
-    c.expect("#454 an empty model is no model",
-             model_of({**live, "state": {**live["state"], "model": ""}}), None)
-    c.expect("#454 a broken state record", model_of({"present": True, "state": "x"}), None)
-    c.expect("#454 a state record without model", model_of({
-        "present": True, "state": {"status": "idle", "alive": True}}), None)
     # Строка ростера несёт модель фактов, а не догадку: живая сессия ->
     # имя, всё остальное -> None. Поле llm -- прежнее имя провода дашборда.
     # Считает ростер (как и владельца), _row только читает.
@@ -709,22 +705,36 @@ def check_model_454(c):
                 "alloc": {"NodeName": "n1", "ClientStatus": "running"},
                 "error": None, "state": None, "kind": None, "owner": None,
                 "llm": state.model_of(facts_value)}
-    row = puppets._row(item(live))
-    c.expect("#454 the row carries the live session's model", row.llm, "glm-5.3")
-    c.expect("#454 a dead session renders no model", puppets._row(item(dead)).llm, None)
-    # Живость -- это сокет, не PID (#454): alive в записи state -- лишь
-    # os.kill(pid, 0), и PID может стоять за чужим процессом; достоверный
-    # признак -- listen (socket_alive). Процесс есть, сокета нет -- сессия
-    # не жива, её модель папету не приписываем. Живая запись в проверках
-    # несёт И alive, И listen.
-    pid_only = {**live, "state": {**live["state"], "listen": False}}
-    c.expect("#454 a pid-alive session without its socket has no model",
-             model_of(pid_only), None)
-    c.expect("#454 a pid-alive session without its socket renders no model",
-             puppets._row(item(pid_only)).llm, None)
+    # Консервативный контракт атрибуции (#454): модель несёт только запись
+    # с ОБИМИ признаками живости. alive -- лишь os.kill(pid, 0), и PID может
+    # стоять за чужим процессом; listen -- socket_alive. Факты идут с узла
+    # в разное время, и старый или битый ответ может принести любое их
+    # сочетание -- всё, кроме alive И listen, читается как «источника нет».
+    # (что, alive, listen, ожидание)
+    LIVENESS = [
+        ("a live session (alive and listening)", True, True, "glm-5.3"),
+        ("a pid-alive session without its socket", True, False, None),
+        ("a socket answering for a dead pid", False, True, None),
+        ("a corpse", False, False, None),
+    ]
+    for what, alive, listen, want in LIVENESS:
+        c.expect(f"#454 {what}: model_of", model_of(facts(alive, listen)), want)
+        c.expect(f"#454 {what}: the row",
+                 puppets._row(item(facts(alive, listen))).llm, want)
+    # Отсутствующий признак -- то же, что ложный: записи без alive или без
+    # listen недостаточно.
+    c.expect("#454 a record without alive is not live enough",
+             model_of(facts(None, True)), None)
     c.expect("#454 a record without listen is not live enough",
-             model_of({**live, "state": {k: v for k, v in live["state"].items()
-                                         if k != "listen"}}), None)
+             model_of(facts(True, None)), None)
+    c.expect("#454 an old agent without model", model_of(old), None)
+    c.expect("#454 no facts at all", model_of(None), None)
+    # Никаких подмен: пустая строка -- не модель, а отсутствие.
+    c.expect("#454 an empty model is no model",
+             model_of({**live, "state": {**live["state"], "model": ""}}), None)
+    c.expect("#454 a broken state record", model_of({"present": True, "state": "x"}), None)
+    c.expect("#454 a state record without model", model_of({
+        "present": True, "state": {"status": "idle", "alive": True}}), None)
     # Старый снимок дашборда без llm разбирается: поле -- с дефолтом, и
     # показ прочерка остаётся делом render.
     old_row = PuppetRow.from_dict({"name": "pu-x-1", "node": "n1",
