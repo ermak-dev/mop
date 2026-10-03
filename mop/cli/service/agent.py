@@ -4,8 +4,7 @@
   mop agent --check    ask this node's agent over the bus whether it answers
 
 One per node, under systemd, outside the job spec (docs/BUS.md): it must
-answer precisely while a puppet is restarting. Runs on a node, so it
-takes nothing from the controller.
+answer precisely while a puppet is restarting.
 """
 import asyncio
 import sys

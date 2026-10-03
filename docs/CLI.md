@@ -890,10 +890,10 @@ at start (docs/BOOTSTRAP.md).
 ```text
 mop server callout: the bus's auth callout (unit mop-callout)
 
-On the server, as the pool user. The bus asks it at every connect:
-people are checked by the identity provider and keep their rights,
-only over WebSocket; puppets are checked against the server's own
-password files. docs/BUS.md.
+On the server, as the pool user. Handles authentication for people —
+checked by the identity provider, keeping their rights, only over
+WebSocket — and for puppets, checked against the server's own password
+files. docs/BUS.md.
 ```
 
 #### mop server cluster
@@ -1185,8 +1185,7 @@ node agent: answers the bus about the puppets on this node (unit mop-agent)
   mop agent --check    ask this node's agent over the bus whether it answers
 
 One per node, under systemd, outside the job spec (docs/BUS.md): it must
-answer precisely while a puppet is restarting. Runs on a node, so it
-takes nothing from the controller.
+answer precisely while a puppet is restarting.
 ```
 
 #### mop mcp

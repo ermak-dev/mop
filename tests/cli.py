@@ -497,6 +497,18 @@ def check_help_content_432(c):
     for gone in ("auth_users", "users.conf"):
         c.check(f"#432 the callout help names no {gone!r}",
                 gone not in co, [l for l in co.splitlines() if gone in l])
+    # callout: без частоты «at every connect» (спрашивает не каждого) —
+    # ровно то, что делает: проверяет людей и папетов.
+    c.check("#432 the callout help claims no every-connect frequency",
+            "every connect" not in co and "at every connect" not in co,
+            [l for l in co.splitlines() if "connect" in l.lower()])
+    # agent: никаких утверждений о том, что узел «ничего не берёт» с
+    # контроллера — node.env и креды приезжают именно оттуда.
+    c.check("#432 the agent help claims no controller-independence",
+            "nothing from the controller" not in ag.lower()
+            and "takes nothing" not in ag.lower(),
+            [l for l in ag.splitlines() if "controller" in l.lower()])
+
     # cluster: роль и гарантия токена, без subject и Nomad API.
     cl = docs[os.path.join(root, "mop/cli/server/cluster/__init__.py")]
     c.check("#432 the cluster group keeps the token guarantee",
