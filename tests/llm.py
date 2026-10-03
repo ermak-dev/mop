@@ -152,11 +152,40 @@ def check_client_model_discovery_426(c):
             all(f"{slot}=" in baked for slot in slots))
 
 
+# HYPOTHESIS (#440): claude_argv() верен, но _main срезает имя программы
+# перед execvpe; флаг обхода становится argv[0], который Claude не разбирает.
+# SOLUTION: передать полный argv с именем claude, как делает mop code.
+# RESULT: сначала две проверки падали (argv[0] был флагом, argv[1] --mcp-config),
+# после правки флаг остался первым разбираемым аргументом.
+# STATUS: FIXED — see #440
+def check_master_exec_argv_440(c):
+    from mop.cli.core import _common, master
+    called = []
+
+    def fake_exec(binary, args, env):
+        called.append((binary, args))
+
+    with patched(master.lib, origin=lambda *a: "git@h:g/cloudpub.git",
+                 project_ready=lambda *a: True), \
+            patched(master, link_skill=lambda: None, mcp_config=lambda: "{}"), \
+            patched(_common, launch_env=lambda project=None: {"MOP_PROJECT": project},
+                    feedback_fd=lambda *a: ("/proc/self/fd/3", 3)), \
+            patched(master.os, execvpe=fake_exec):
+        master._main([])
+
+    binary, args = called[0]
+    c.expect("#440 master executes claude", binary, "claude")
+    c.expect("#440 executable occupies argv[0]", args[0], "claude")
+    c.expect("#440 bypass is parsed as argv[1]", args[1],
+             "--dangerously-skip-permissions")
+
+
 def main():
     c = Checks()
     check_joined_proxy_397(c)
     check_session_ca_412(c)
     check_client_model_discovery_426(c)
+    check_master_exec_argv_440(c)
     # HYPOTHESIS (#390): реестр плагинов-профилей умер вместе с провайдерами:
     # держать его ради одного URL -- против KISS, а ENV профилей перестал
     # быть статикой плагина. SOLUTION: один модуль с env() и именем ключа;
