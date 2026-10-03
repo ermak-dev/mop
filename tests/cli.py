@@ -551,7 +551,7 @@ CONCISE_431 = {
     "mop.cli.core.master": (
         ("syntax", "mop master [git-origin] [claude options]"),
         ("keeps", "resumes the master's last session"),
-        ("keeps", "a master sees and reaches only its own puppets"),
+        ("keeps", "a master sees and reaches only its own project's puppets"),
         ("gone", "one master: a master sees"),
         ("keeps", "`mop login --server ADDRESS LOGIN`"),
         ("gone", "mop/common/creds.py"),
