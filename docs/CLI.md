@@ -16,18 +16,18 @@ Run on a client: an operator's machine or a master shell.
 create a puppet: mop add [git-origin]
 
 Without origin, the origin of the current working copy is used. The name is
-picked automatically: <project>-<number>. Nomad decides placement — a puppet
-reserves 8 GB from the pool. Silent when the puppet is running; on a
-terminal it shows the current step. The new puppet is in mop list.
+picked automatically: <project>-<number>; placement over the pool and the
+8 GB reservation are not chosen here. Silent when the puppet is running; on
+a terminal it shows the current step. The new puppet is in mop list.
 ```
 
 #### mop attach
 
 ```text
-attach to a puppet's tmux session: mop attach <name>
+open a terminal on a puppet: mop attach <name>
 
-The only subcommand that goes over ssh instead of the bus: a live terminal
-isn't something a bus verb can hand over.
+Goes over ssh, not the bus: a live terminal is not something a bus verb
+hands over.
 ```
 
 #### mop code
@@ -192,7 +192,7 @@ master shell the picture is the project's, not the pool's.
 #### mop tail
 
 ```text
-tail of a puppet's tmux buffer: mop tail <name> [-n N] [-f]
+tail of a puppet's screen: mop tail <name> [-n N] [-f]
 
 -n N   how many lines (default 10)
 -f     keep following until Ctrl-C
@@ -669,9 +669,9 @@ mop node up <name>: open the node to the scheduler again
 pool projects: mop project [add <git-origin>|delete <name>|list]
 
   mop project              what the pool serves: one line per project
-  mop project add [origin] register a project and put it on the bus
+  mop project add [origin] register a project for the pool
                            (default: this working copy's origin)
-  mop project delete <name> take it off the bus and out of the registry
+  mop project delete <name> take it off the pool
   mop project limit [<name> <N|none>]  puppet limit of a project
   mop project list [--origins]  the same list, for scripts
 
@@ -704,17 +704,12 @@ the build's output, and erases both when done.
 #### mop project delete
 
 ```text
-take a project off the bus: mop project delete <name>
+take a project off the pool: mop project delete <name>
 
-Asks the cluster service on the server (operator's verb project_delete):
-the project leaves the server's registry, its NATS user and bus
-password go, and so does its puppet limit.
-
-Refuses while the project still has puppets: a master whose puppets are
-alive would lose the bus under them, and the puppets would keep working
-with no one able to hear them. Delete them first (mop delete <name>).
-
-The repository is not touched: this is about the pool, not about the code.
+The project leaves the pool together with its puppet limit; its puppets
+lose the bus. Refuses while the project still has puppets — they would keep
+working with no one able to reach them — delete its puppets first
+(mop delete pu-<project>-<n>). The repository is not touched.
 ```
 
 #### mop project limit
@@ -741,9 +736,7 @@ service reads it on every add, so no restart is needed.
 ```text
 projects the pool serves: mop project list [--origins]
 
-Asks the cluster service for the server's registry. --origins prints
-the origins themselves; without it, project names — the same names the bus
-users are built from.
+--origins prints the origins themselves; without it, project names.
 ```
 
 ### secret: project secrets: mop secret file|var add|list|remove

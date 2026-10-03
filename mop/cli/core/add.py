@@ -1,9 +1,9 @@
 """create a puppet: mop add [git-origin]
 
 Without origin, the origin of the current working copy is used. The name is
-picked automatically: <project>-<number>. Nomad decides placement — a puppet
-reserves 8 GB from the pool. Silent when the puppet is running; on a
-terminal it shows the current step. The new puppet is in mop list.
+picked automatically: <project>-<number>; placement over the pool and the
+8 GB reservation are not chosen here. Silent when the puppet is running; on
+a terminal it shows the current step. The new puppet is in mop list.
 """
 import time
 

@@ -583,10 +583,38 @@ CONCISE_431 = {
         ("keeps", "puppet limit"),
         ("gone", "Registering used to be a side effect"),
         ("gone", "the registry lives on the server"),
+        ("gone", "put it on the bus"),
+        ("gone", "out of the registry"),
     ),
     "mop.cli.secret": (
         ("syntax", "mop secret file|var add|list|remove"),
         ("keeps", "kept on the server"),
+    ),
+    "mop.cli.project.delete": (
+        ("keeps", "Refuses while the project still has puppets"),
+        ("keeps", "The repository is not touched"),
+        ("gone", "cluster service"),
+        ("gone", "NATS user"),
+        # Подсказка обязана называть папетов, а не «name» проекта.
+        ("keeps", "delete its puppets first"),
+    ),
+    "mop.cli.project.list": (
+        ("syntax", "mop project list [--origins]"),
+        ("gone", "cluster service"),
+        ("gone", "registry"),
+    ),
+    "mop.cli.core.add": (
+        ("syntax", "mop add [git-origin]"),
+        ("gone", "Nomad decides placement"),
+    ),
+    "mop.cli.core.tail": (
+        ("syntax", "mop tail <name> [-n N] [-f]"),
+        ("gone", "tmux"),
+    ),
+    "mop.cli.core.attach": (
+        ("syntax", "mop attach <name>"),
+        ("keeps", "over ssh"),
+        ("gone", "the only subcommand"),
     ),
 }
 

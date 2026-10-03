@@ -1,4 +1,4 @@
-"""tail of a puppet's tmux buffer: mop tail <name> [-n N] [-f]
+"""tail of a puppet's screen: mop tail <name> [-n N] [-f]
 
   -n N   how many lines (default 10)
   -f     keep following until Ctrl-C
