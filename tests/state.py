@@ -683,8 +683,9 @@ def check_model_454(c):
     live = {"present": True, "session": "idle 1 1", "clone": None,
             "state": {"status": "idle", "alive": True, "listen": True,
                       "waitingFor": None, "turn": None, "model": "glm-5.3"}}
-    dead = {"present": True, "session": "idle 0 1", "clone": None,
-            "state": {"status": "idle", "alive": False, "listen": True,
+    # Труп: ни процесса, ни сокета -- сессия умерла целиком.
+    dead = {"present": True, "session": "idle 0 0", "clone": None,
+            "state": {"status": "idle", "alive": False, "listen": False,
                       "waitingFor": None, "turn": None, "model": "glm-5.3"}}
     old = {"present": True, "session": "idle 1 1", "clone": None}
     model_of = getattr(state, "model_of", None)
@@ -711,6 +712,19 @@ def check_model_454(c):
     row = puppets._row(item(live))
     c.expect("#454 the row carries the live session's model", row.llm, "glm-5.3")
     c.expect("#454 a dead session renders no model", puppets._row(item(dead)).llm, None)
+    # Живость -- это сокет, не PID (#454): alive в записи state -- лишь
+    # os.kill(pid, 0), и PID может стоять за чужим процессом; достоверный
+    # признак -- listen (socket_alive). Процесс есть, сокета нет -- сессия
+    # не жива, её модель папету не приписываем. Живая запись в проверках
+    # несёт И alive, И listen.
+    pid_only = {**live, "state": {**live["state"], "listen": False}}
+    c.expect("#454 a pid-alive session without its socket has no model",
+             model_of(pid_only), None)
+    c.expect("#454 a pid-alive session without its socket renders no model",
+             puppets._row(item(pid_only)).llm, None)
+    c.expect("#454 a record without listen is not live enough",
+             model_of({**live, "state": {k: v for k, v in live["state"].items()
+                                         if k != "listen"}}), None)
     # Старый снимок дашборда без llm разбирается: поле -- с дефолтом, и
     # показ прочерка остаётся делом render.
     old_row = PuppetRow.from_dict({"name": "pu-x-1", "node": "n1",
