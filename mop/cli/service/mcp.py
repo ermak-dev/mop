@@ -185,15 +185,21 @@ def on_inbox(m):
         # файла сессии: личность сессии уникальна (#421), имя -- нет.
         return MasterAnswer(MASTER_ID, bus.PROJECT, bus.login(), d.get("name"), d.get("cwd"),
                             d.get("sessionId")).to_dict()
+    unavailable = {"error": "master session unavailable — choose a live master"}
     sock = channel.master_socket()
     if not sock:
-        return {"error": f"master {MASTER_ID} has no session — nowhere to deliver the note"}
+        return unavailable
     # priority по умолчанию later: так кладёт вести агент, и перебивать ход
     # мастера уведомлением о простое незачем. Папет со своим отчётом просит
     # громче — и имеет право, отчёта мастер ждёт.
-    r = session.send(sock, m.get("text") or "",
-                     priority=m.get("priority") or "later",
-                     from_name=m.get("from") or m.get("node") or "mop")
+    try:
+        r = session.send(sock, m.get("text") or "",
+                         priority=m.get("priority") or "later",
+                         from_name=m.get("from") or m.get("node") or "mop")
+    except ConnectionError:
+        # Сокет может умереть после master_socket; локальный путь в ответ
+        # адресату не отдаём, а просьба выбрать живого мастера остаётся.
+        return unavailable
     return {"msg_id": r["msg_id"]}
 
 

@@ -580,6 +580,27 @@ def main():
         c.expect("the same line goes to stderr", err.getvalue().strip(), line.strip())
     # STATUS: FIXED — see #213
 
+    # HYPOTHESIS: сессия мастера может умереть после поиска сокета; его
+    # локальный путь выезжает в отказ отправителю через шину.
+    # SOLUTION: отсутствие сокета и отказ соединения дают один безопасный
+    # вердикт с полезным действием; прочие ошибки не глушатся.
+    # RESULT: путь не уходит адресату при обеих формах смерти сессии.
+    # STATUS: FIXED — see #437
+    missing = "/run/user/1000/private/master-123.sock"
+    message = {"verb": "message", "text": "report", "from": "pu-mop-9"}
+    with patched(channel, master_socket=lambda: missing), \
+            patched(session, send=lambda *a, **k: (_ for _ in ()).throw(
+                ConnectionError(f"inbox not found: {missing} — session died or moved"))):
+        try:
+            outcome = mcp.on_inbox(message)
+        except ConnectionError as e:
+            c.fail("#437 dead inbox must return a verdict instead of raising", str(e))
+            outcome = {}
+    want = {"error": "master session unavailable — choose a live master"}
+    c.expect("#437 dead inbox names action without path", outcome, want)
+    with patched(channel, master_socket=lambda: None):
+        c.expect("#437 missing inbox uses the same refusal", mcp.on_inbox(message), want)
+
     # ─── #226: --check не выдаёт свой адрес за адрес живого сервера ─────────
     # HYPOTHESIS: `mop mcp --check` -- отдельный процесс; MASTER_ID строится
     # из его собственного pid, и напечатанный адрес с инбоксом не слушает
