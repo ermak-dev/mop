@@ -124,12 +124,16 @@ def add(transport, origin, workspace, branch=None, ctx=None,
                 return _bootstrap(transport, name, got, progress,
                                   bootstrap_wait, sleep, clock, step)
             if a.client_status == "failed" or puppets.failing(raw):
+                why = puppets.failing(raw) or "failed to start"
                 return outcome(UNKNOWN, name, progress,
-                               error=puppets.failing(raw) or "failed to start")
+                               error=f"{name} on {node}: {why}")
             note(f"{name}: starting on {node}")
         sleep(1)
     return outcome(UNKNOWN, name, progress,
-                   error="not placed on any node in time")
+                   error=f"{name} is "
+                         + (f"still starting on {node}" if node
+                            else "not placed on any node")
+                         + " after 2 minutes: mop server doctor")
 
 
 def _bootstrap(transport, name, got, progress, wait, sleep, clock, step):
@@ -143,8 +147,13 @@ def _bootstrap(transport, name, got, progress, wait, sleep, clock, step):
     record = bootstrap_result(transport, name, marker, wait, sleep, clock, step)
     if record is None:
         return outcome(PARTIAL, name, progress,
-                       marker=marker, bootstrap=None)
-    ok = bool(record.get("played") and record.get("ok"))
+                       marker=marker, bootstrap=None, waited=wait)
+    # Прогона не было (played False) -- не провал: новый прогон просто не
+    # состоялся, и это не отказ сервиса.
+    if not record.get("played"):
+        return outcome(ACCEPTED, name, progress,
+                       marker=marker, bootstrap=record)
+    ok = bool(record.get("ok"))
     return outcome(REGISTERED if ok else REFUSED, name, progress,
                    marker=marker, bootstrap=record,
                    error=None if ok else _bootstrap_error(record))
@@ -162,7 +171,7 @@ def _bootstrap_error(record):
 
 
 def update(transport, name, origin=None, fresh=False, workspace=None,
-           branch=None, force=False, login=None, ctx=None,
+           branch=None, force=False, login=None, ctx=None, spec=None,
            sleep=time.sleep, clock=time.time, step=lambda s: None,
            bootstrap_wait=BOOTSTRAP_WAIT):
     """Перевести папета: смена origin, fresh/resume, перерегистрация.
@@ -170,8 +179,9 @@ def update(transport, name, origin=None, fresh=False, workspace=None,
     origin=None -- прежний репозиторий. fresh при смене origin вынужден:
     разговор прежнего проекта в чужом репозитории -- чужой контекст.
     no-op (спека не изменилась) -- accepted, не registered: эффект
-    «принято», нового прогона не будет."""
-    spec = transport("spec", name=name)
+    «принято», нового прогона не будет. spec -- уже прочитанная спека
+    (перила мастер-шелла отдали): не спрашивать вторично."""
+    spec = spec if spec is not None else transport("spec", name=name)
     if spec.get("error"):
         return _refused(name, spec["error"])
     meta = puppets.JobMeta.from_meta(spec.get("meta"))
@@ -192,7 +202,8 @@ def update(transport, name, origin=None, fresh=False, workspace=None,
         return _refused(name, got["error"])
     if got.get("bootstrap_marker") is None:
         # Спека не изменилась: Nomad не переразмещает (#334).
-        return outcome(ACCEPTED, name, replaced=got.get("replaced"))
+        return outcome(ACCEPTED, name, replaced=got.get("replaced"),
+                       owner_note=got.get("owner_note"))
     return _bootstrap(transport, name, got, [], bootstrap_wait, sleep, clock, step)
 
 

@@ -7,7 +7,7 @@ Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
-from mop.common import bus, puppets
+from mop.common import bus, ops, puppets
 
 
 # Инструмент MCP (#160): описание -- докстринг выше, вызов -- эта команда.
@@ -21,14 +21,12 @@ def main(argv):
     name, force = lib.named(argv, __doc__)
     # Не работает -- отказ с причиной (LookupError) до запроса рестарта.
     puppets.running_alloc(name)
-    try:
-        got = bus.call_cluster("restart", name=name, owner=bus.login(), force=force)
-    except bus.Refused as e:
-        raise bus.Refused(f"restart failed: {e}\n"
+    v = ops.restart(bus.call_cluster, name, force=force, login=bus.login())
+    if v.get("outcome") == ops.REFUSED:
+        raise bus.Refused(f"restart failed: {v['error']}\n"
                           f"Alternative: mop delete {name} && mop add <origin>")
     # Молча на успехе; чью аренду прошёл force -- называем (#40).
-    lib.note(name, got)
-
+    lib.note(name, v)
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).

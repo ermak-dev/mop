@@ -11,7 +11,7 @@
 """
 import os
 
-from mop.common import bus, puppets
+from mop.common import bus, ops, puppets
 from mop import session
 
 # Дольше десяти минут ждать простоя незачем: запрос держит соединение, а
@@ -140,19 +140,13 @@ def send_to_puppet(node, name, message, priority="next", wait=0, notify=None,
                    **fields):
     """Доставка через агента узла. -> вердикт | bus.BusError.
 
-    Ожидание простоя целиком на узле: подписку держит агент рядом с сокетом
-    и, дождавшись, публикует в инбокс мастера. notify=None -- поле в запрос
-    не идёт вовсе; с ожиданием подписка не нужна: ответ и так дождётся.
-    Остальные поля (owner, force, from_name, reply_to) едут агенту как есть."""
-    wait = clamp_wait(wait)
-    extra = {} if notify is None else {"notify": bool(notify and not wait)}
-    r = bus.request(node, "send", name=name, message=message, priority=priority,
-                    wait=wait, **extra, **fields, timeout=wait + bus.TIMEOUT)
-    v = {"kind": "puppet", "to": name, "wait": wait, "notify": extra.get("notify", False)}
-    if "error" in r:
-        return dict(v, error=r["error"])
-    return dict(v, msg_id=r.get("msg_id"), owner_note=r.get("owner_note"),
-                idle=r.get("idle"))
+    Тонкая обёртка (#459): тело -- общая операция ops.send_to_puppet
+    (#458), транспорт -- bus.request этого слоя. Ожидание простоя целиком
+    на узле; notify=None -- поле в запрос не идёт вовсе; остальные поля
+    (owner, force, from_name, reply_to) едут агенту как есть."""
+    return ops.send_to_puppet(bus.request, node, name, message,
+                              priority=priority, wait=wait, notify=notify,
+                              **fields)
 
 
 def send_local(sess, message, priority="next", wait=0, **fields):

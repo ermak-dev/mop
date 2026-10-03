@@ -11,7 +11,7 @@ refused with that master's name; --force acts anyway and says whose it was.
 """
 from mop.cli import lib
 from mop.cli.core import _common
-from mop.common import bus, context
+from mop.common import bus, context, ops
 from mop.common.domain import JobMeta
 
 
@@ -28,38 +28,25 @@ def main(argv):
     fresh = "--fresh" in argv
     args, force = lib.parse_named([a for a in argv if a != "--fresh"], __doc__, most=2)
     name = args[0]
-    spec = lib.guard(name) or bus.call_cluster("spec", name=name)
-    meta = JobMeta.from_meta(spec.get("meta"))
-    old = meta.origin
-    if not old:
-        # Джоб без origin в Meta — не папет: ростер их и не показывает.
-        lib.usage(f"{name}: no origin in the spec — this isn't a pool puppet")
-    origin = args[1] if len(args) > 1 else old
-    # История каталога переживает только смену репозитория вместе с клоном:
-    # разговор остался от прежнего проекта, и поднять его в чужом
-    # репозитории -- выдать папету чужой контекст за свой.
-    cont = not fresh and origin == old
-    # Спеку собирает сервис кластера: сюда она больше не ездит (#80) —
-    # иначе кто угодно с доступом к шине клал бы на узел свою командную
-    # строку. Решение «что меняем» остаётся здесь, сборка — там.
-    text, sent = _common.workspace_text(origin)
-    got = bus.call_cluster("update", name=name, origin=origin,
-                           cont=cont, new_origin=origin if origin != old else None,
-                           workspace=text, bootstrap_sent=sent,
-                           owner=bus.login(), force=force,
-                           branch=context.current().branch)
-    # На успехе эха параметров нет (#179): человек их только что набрал сам.
-    # Чью аренду прошёл force -- называем (#40); что уехало в bootstrap --
-    # тоже (#334): это оператор набрать не мог.
-    lib.note(name, got)
+    # Перила мастер-шелла уже отдали спеку (чей папет): не спрашивать
+    # вторично, тот же ответ едет в общую операцию.
+    spec = lib.guard(name)
+    text, sent = _common.workspace_text(args[1] if len(args) > 1 else None)
+    v = ops.update(bus.call_cluster, name,
+                   origin=args[1] if len(args) > 1 else None,
+                   fresh=fresh, workspace=(text, sent),
+                   force=force, login=bus.login(),
+                   branch=context.current().branch, spec=spec,
+                   bootstrap_wait=_common.BOOTSTRAP_WAIT)
+    # Порядок прежний (#263): чью аренду прошёл force -- строкой до
+    # «что уехало в bootstrap», затем итог.
+    lib.note(name, v)
     print(_common.sent_line(sent), flush=True)
-    # Чем кончился прогон этой регистрации (#334) -- ждём и называем.
     p = lib.Progress(name)
     try:
-        return _common.report_bootstrap(name, got, p)
+        return _common.render(v, p, name)
     finally:
         p.clear()
-
 
 
 # Проверка настроек кластера — до первого сетевого вызова (lib.cluster).
