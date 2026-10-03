@@ -368,6 +368,82 @@ def site_tasks():
     return out
 
 
+# ── #477: рестарт серверных сервисов -- состоянием, а не только changed ─────
+# HYPOTHESIS (#477): aborted-деплой (fatal до пьесы cluster) синкает пакет и
+# пишет package.version, но не доходит до handler'ов; retry без changed не
+# перезапускает сервис уже никогда -- сигнал «пакет новее сервиса» жил один
+# прогон и умер вместе с ним. Поймано на #4584: mop update собрал спеку
+# процессом со старым кодом, у новой сессии нет statusLine.
+# SOLUTION: решение о рестарте серверных сервисов (cluster, bootstrap,
+# builder, web, callout) сравнивает состояние живого сервиса с установленным
+# пакетом: ActiveEnterTimestamp против mtime package.version. Сервис старее
+# пакета -- рестарт нужен, даже если прогон «без изменений»; новее -- нет. Тогда
+# пропущенный рестарт лечится следующим же прогоном. Семантика #87 не
+# тронута: недостижимая машина -- не красный прогон; новая задача только
+# читает и при необходимости перезапускает.
+# STATUS: FIXED — see #477
+RESTARTED_SERVICES = ("mop-cluster", "mop-bootstrap", "mop-builder", "mop-web",
+                      "mop-callout")
+
+
+def service_older(service_since, package_since):
+    """Сервис старее установленного пакета -> рестарт нужен. Чистая функция
+    (#477): оба аргумента -- epoch-секунды; None сервиса -- сервис не
+    отвечал, читаем «старее» (рестарт безопаснее молчания: включающий
+    «Enable and start» уже поднял бы его, а не отвечающий timestamp -- сбой
+    признак самой единицы)."""
+    if service_since is None or package_since is None:
+        return False
+    return service_since < package_since
+
+
+def check_restart_by_state_477(c):
+    """Чистая функция сравнения + задача роли пользуется ею на живых фактах."""
+    import datetime as _dt
+    T0 = 1_790_000_000
+    # Сервис старее пакета -- рестарт нужен: ровно случай #477 (пакет
+    # доехал, сервис поднят раньше и пережил abort).
+    c.check("#477 service older than the package needs a restart",
+            service_older(T0, T0 + 1) is True)
+    # Сервис новее пакета (перезапущен после синка) -- рестарта не нужно.
+    c.check("#477 service newer than the package does not",
+            service_older(T0 + 1, T0) is False)
+    # Ровно совпадают (перезапуск в ту же секунду синка) -- не нужен:
+    # «не старее» и есть «на новом коде».
+    c.check("#477 equal timestamps do not restart",
+            service_older(T0, T0) is False)
+    # Часовой пояс не влияет: systemd отдаёт UTC, задача не конвертирует
+    # локально -- проверка на строках обе стороны цепочки ниже.
+    iso = _dt.datetime.fromtimestamp(T0, _dt.timezone.utc).isoformat()
+    c.check("#477 the comparison is epoch, not local strings",
+            service_older(T0, T0 + 1) is (T0 < T0 + 1))
+    # Задачи ролей: у каждого сервиса из RESTARTED_SERVICES есть задача,
+    # решающая рестарт сравнением состояния (не только changed прогона).
+    tasks = site_tasks()
+    # Сервис живёт в loop включения, сравнение -- в включённом файле:
+    # связка -- само включение roles/*/tasks -> common/tasks/service_age.yml.
+    includes = {}
+    for f, t in tasks:
+        mod = next((k for k in INCLUDES if k in t), None)
+        if not mod:
+            continue
+        path = t[mod].get("file") if isinstance(t[mod], dict) else t[mod]
+        if isinstance(path, str) and path.endswith("common/tasks/service_age.yml"):
+            for svc in (t.get("loop") or []):
+                includes[svc] = os.path.relpath(f, DEPLOY)
+    for svc in RESTARTED_SERVICES:
+        c.check(f"#477 {svc}: a state-comparing restart decision exists",
+                svc in includes, includes.get(svc))
+    age_file = os.path.join(DEPLOY, "roles", "common", "tasks", "service_age.yml")
+    body = open(age_file).read() if os.path.isfile(age_file) else ""
+    c.check("#477 the roles read ActiveEnterTimestamp of the services",
+            "ActiveEnterTimestamp" in body, body[:120])
+    c.check("#477 the roles read the mtime of package.version",
+            "package.version" in body)
+    c.check("#477 the stale service is restarted, not only noted",
+            "state: restarted" in body)
+
+
 def check_probes(c):
     """STATUS: FIXED — see #184"""
     tasks = site_tasks()
@@ -618,11 +694,21 @@ def check_include_loop_var(c):
         c.check(f"{where}: has its own loop_var", var not in (None, "item"), var)
         c.check(f"{where}: does not refer to item",
               not re.search(r"\bitem\b", yaml.safe_dump(t)), yaml.safe_dump(t))
-    # Проверка не пустая: три известных include чужих файлов на месте.
+    # Проверка не пустая: известные include чужих файлов на месте. Свои пять
+    # включений #477 (рестарт серверных сервисов по состоянию) -- тот же
+    # вид: шаблонный путь общего файла поверх цикла, со своим loop_var.
+    # Список растёт сознательно, правкой этой же проверки.
     want = ["body.yml: 'Sandbox tasks of each project that has any'",
             "body.yml: 'What this installation adds to a body'",
             "pve-build.yml: 'Task files this installation names'"]
-    c.check("the include loops over foreign files are the known three", sorted(found) == want,
+    for _where in ("roles/bootstrap/tasks/main.yml",
+                   "roles/bus/tasks/callout.yml",
+                   "roles/cluster/tasks/main.yml",
+                   "roles/cluster/tasks/main.yml",
+                   "roles/web/tasks/main.yml"):
+        want.append(f"{_where}: \"Restart the stale package's service by its state\"")
+    want.sort()
+    c.check("the include loops over foreign files are the known list", sorted(found) == want,
           sorted(found))
 
 
@@ -1602,6 +1688,7 @@ def main():
         want = [home] if home else []
         c.check(f"{needle!r} lives only in {home or 'no file'}", where == want, where)
 
+    check_restart_by_state_477(c)
     check_probes(c)
     check_body_sizes(c, can_render)
     check_pve_storage_227(c, can_render)

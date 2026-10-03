@@ -84,6 +84,17 @@
     state: started
     daemon_reload: yes
 
+
+
+# Рестарт по состоянию (#477): живой сервис старее установленного пакета --
+# перезапустить даже в прогоне «без изменений». Аборт прошлого прогона
+# между синком и handler'ами иначе не лечится ничем.
+- name: Restart the stale package's service by its state
+  ansible.builtin.include_tasks: "{{ role_path }}/../common/tasks/service_age.yml"
+  loop: ['mop-bootstrap']
+  loop_control:
+    loop_var: service
+
 - name: Apply the restart now, before the check
   ansible.builtin.meta: flush_handlers
 
