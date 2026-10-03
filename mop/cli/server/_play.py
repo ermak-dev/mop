@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 
 from mop.common import config
 from mop.server import identity, playvars
@@ -19,6 +20,43 @@ PROJECTS_VAR = "mop_projects"
 # «проект, возможно, не на шине» значит отправить оператора искать поломку
 # там, где её нет.
 UNREACHABLE = 4
+
+# Провал ansible и «не ответила» -- разные биты одного кода (2 и 4), но
+# базовая стратегия ansible (plugins/strategy/__init__.py) недоступные
+# проверяет РАНЬШЕ провалившихся, и _tqm._unreachable_hosts копится по
+# играм: смешанный прогон (failed=1 и unreachable=1) приходит кодом 4,
+# тем же, что и чистый #87. Поэтому код один не спрашивает «был ли
+# провал» -- только recap.
+_FAILED_RECAP = "failed="
+
+
+def verdict(rc, output=""):
+    """Итог прогона ansible по коду и выводу. -> "ok" | "unreachable" | "failed".
+
+    failed -- у прогона есть провалившаяся машина (failed=N>0 в PLAY
+    RECAP или бит 2 в коде): красный прогон, чем бы ни кончился расклад
+    недоступных (#475). unreachable -- машины не ответили, но не падали:
+    ветка #87, прогон не красный. ok -- чисто."""
+    if rc & 2 or _recap_failed(output):
+        return "failed"
+    if rc & UNREACHABLE:
+        return "unreachable"
+    return "ok"
+
+
+def _recap_failed(output):
+    """Есть ли failed=N>0 в строках PLAY RECAP вывода ansible."""
+    for line in (output or "").splitlines():
+        if "failed=" not in line:
+            continue
+        for part in line.split():
+            if part.startswith(_FAILED_RECAP):
+                try:
+                    if int(part[len(_FAILED_RECAP):]) > 0:
+                        return True
+                except ValueError:
+                    pass
+    return False
 
 
 def play_vars(projects, manifests=None, limits=None, git_hosts=None, inventory_hosts=None):
@@ -60,7 +98,7 @@ def play_env(get):
     return {"MOP_LDAP_BIND_PASSWORD": get("MOP_LDAP_BIND_PASSWORD") or ""}
 def play(playbook, projects, manifests=None, git_hosts=None, check=False,
          inventory_hosts=None):
-    """Прогон плейбука установки. -> код возврата ansible.
+    """Прогон плейбука установки. -> (код возврата ansible, его вывод).
 
     Один вход для полной игры (site.yml) и для узкого прогона проектов
     (до #117): списки, которые едут плейбуку, собираются одним
@@ -73,6 +111,12 @@ def play(playbook, projects, manifests=None, git_hosts=None, check=False,
 
     check=True -- прогон без изменений (#177): ansible --check --diff, и
     вывод прогона -- это разница, которую внёс бы настоящий.
+
+    Вывод собирается здесь (#475): код один не говорит, был ли провал --
+    ansible маскирует смешанный прогон (failed=1 и unreachable=1) кодом
+    чистых недоступных узлов, и только PLAY RECAP называет провалившуюся
+    машину. Игра идёт в терминал как раньше, вывод читается из тех же
+    stdout/stderr.
     """
     if not shutil.which("ansible-playbook"):
         raise RuntimeError("no ansible-playbook on this machine -- run mop server setup")
@@ -85,8 +129,11 @@ def play(playbook, projects, manifests=None, git_hosts=None, check=False,
     extra = ([json.dumps(vars_, ensure_ascii=False)]
              + play_vars(projects, manifests, git_hosts=git_hosts,
                          inventory_hosts=inventory_hosts))
-    return subprocess.call(
+    proc = subprocess.run(
         ["ansible-playbook", "-i", inventory, os.path.join(config.PROJECT, playbook),
          *sum((["--extra-vars", v] for v in extra), []),
          *(["--check", "--diff"] if check else [])],
-        env={**os.environ, **play_env(config.get)})
+        env={**os.environ, **play_env(config.get)}, capture_output=True, text=True)
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    return proc.returncode, proc.stdout + proc.stderr
