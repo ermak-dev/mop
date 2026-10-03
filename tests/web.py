@@ -376,8 +376,8 @@ def check_rounds_319(c):
                                    ("failure, empty message", {**ok_patch, failing: raising(empty)},
                                     "RuntimeError")):
             col = web.Collector()
-            col.rows = [PuppetRow("pu-a-1", "n1", "running", "free", "free", "-", "claude",
-                                  "git@h:g/a.git")]
+            col.rows = [PuppetRow("pu-a-1", "n1", "running", "free", "free", "-",
+                                  origin="git@h:g/a.git")]
             col.errors = {kind: "stale"} if want is None else {}
             before = col.version
             with patched(web.puppets, **patch), patched(registry, read=lambda: set(),
@@ -443,7 +443,7 @@ def check_who_319(c):
               "cwd": "/w"}
     bare = {"master": None, "user": None, "session": None, "cwd": None}
     rows = [PuppetRow("pu-mop-1", "n1", "running", "busy", "busy", "anton",
-                      "git@h:g/mop.git")]
+                      origin="git@h:g/mop.git")]
     c.expect("#319 page: a who answer as a masters row",
              web.master_rows({"mop": [answer, bare]}, rows),
              [{"project": "mop", "master": "-", "user": "-", "session": "-", "cwd": "-", "puppets": []},
