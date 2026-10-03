@@ -103,9 +103,31 @@ def check_launchers_408(c):
         c.expect("#408 code logs in before exec, without pool MCP", calls, ["login"])
 
 
+# HYPOTHESIS (#427): ensure() запрашивает порт при первом входе на обычный
+# TLS-сервер, хотя порт уже известен из окружения или равен 443.
+# SOLUTION: один беззвучный выбор порта без сетевого побочного эффекта.
+# RESULT: до правки оба ожидания не сбылись; после неё 12 проверок зелёные.
+# STATUS: FIXED — see #427
+def check_silent_port_427(c):
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-auto-427-"), "servers")
+    calls, prompts = [], []
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+    with patched(creds, ROOT=root), patched(login, complete=lambda *a: calls.append(a),
+                 _bind=lambda *a: None, ask=lambda p, **kw: prompts.append(p) or "unexpected"), \
+            patched(sys, stdin=Tty()), context.use(context.resolve({"server": "srv.test",
+                                                                     "user": "alice"}, {}, {})), \
+            patched_env(MOP_BUS_PASSWORD="fake-password", MOP_HTTPS_PORT="8443"):
+        login.ensure()
+        c.expect("#427 preflight uses configured port", calls[-1][3] if calls else None, "8443")
+        c.expect("#427 preflight does not ask for port", prompts, [])
+
+
 def main():
     c = Checks()
     check_ensure_408(c)
+    check_silent_port_427(c)
     check_launchers_408(c)
     return c.report("autologin")
 

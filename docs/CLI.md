@@ -261,14 +261,16 @@ refused with that master's name; --force acts anyway and says whose it was.
 #### mop login
 
 ```text
-log in to a pool server: mop login [--server ADDRESS] [LOGIN]
+log in to a pool server: mop login [login] [--server host] [--https-port port]
 
 Server and login come from --server/LOGIN, the process environment or the
 working copy's binding; if missing, they are asked for. The bus password is
 asked without echo (or read from MOP_BUS_PASSWORD) and verified before
 saving. A valid previous login is reused.
 
-The HTTPS port defaults to 443. After authenticating to the bus, join asks
+The HTTPS port uses --https-port, the saved client port, MOP_HTTPS_PORT,
+or 443, in that order, without prompting. A sole joined server is selected
+when no server is named or bound. After authenticating to the bus, join asks
 the server for its LLM proxy URL and client key over a personal, authenticated
 subject. The key is never printed or asked for separately; /v1/models is
 checked before saving. Rejoining refreshes a rotated key without replacing
