@@ -9,13 +9,12 @@
   mop dev bug comment <iid> "<text>"               comment (or - for stdin)
   mop dev bug start <iid> [slug] [--no-branch]     claim: status::wip + branch
   mop dev bug close <iid> --comment "..."          close, default status::fixed
-  mop dev bug relabel <iid> --status live          back to the queue
-  mop dev bug relabel <iid> --status parked        postponed: stays open, not worked on
+  mop dev bug relabel <iid> [--status S]           change labels, open or close
   mop dev bug labels                               the label vocabulary
 
 Coordinates come from the working copy's git origin; credentials are
-GITLAB_TOKEN (or GITLAB_USER + GITLAB_PASSWORD) in .env. Titles, bodies and comments are in
-Russian; branch names and commits stay English.
+GITLAB_TOKEN (or GITLAB_USER + GITLAB_PASSWORD) in .env. Titles, bodies
+and comments are in Russian; branch names and commits stay English.
 """
 from mop.cli import lib
 

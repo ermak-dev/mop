@@ -1,9 +1,9 @@
 """mop dev ci why <id>: why a pipeline failed
 
 Each job that failed the pipeline, with the last lines of its log. A failed
-job with allow_failure is named as one that did NOT fail the pipeline. With
-no failed job at all, what the pipeline itself says (yaml_errors,
-failure_reason, detailed status): a rejected .gitlab-ci.yml fails with no jobs.
+job with allow_failure is named as one that did NOT fail the pipeline. When
+no job failed at all, the pipeline's own reason: a rejected .gitlab-ci.yml
+fails with no jobs.
 """
 from mop.common import gitlab
 from mop.cli import lib

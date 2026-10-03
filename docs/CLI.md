@@ -335,13 +335,12 @@ project tracker: GitLab issues, one issue per unit of work
   mop dev bug comment <iid> "<text>"               comment (or - for stdin)
   mop dev bug start <iid> [slug] [--no-branch]     claim: status::wip + branch
   mop dev bug close <iid> --comment "..."          close, default status::fixed
-  mop dev bug relabel <iid> --status live          back to the queue
-  mop dev bug relabel <iid> --status parked        postponed: stays open, not worked on
+  mop dev bug relabel <iid> [--status S]           change labels, open or close
   mop dev bug labels                               the label vocabulary
 
 Coordinates come from the working copy's git origin; credentials are
-GITLAB_TOKEN (or GITLAB_USER + GITLAB_PASSWORD) in .env. Titles, bodies and comments are in
-Russian; branch names and commits stay English.
+GITLAB_TOKEN (or GITLAB_USER + GITLAB_PASSWORD) in .env. Titles, bodies
+and comments are in Russian; branch names and commits stay English.
 ```
 
 #### mop dev bug close
@@ -363,8 +362,8 @@ mop dev bug edit <iid> [--title T] [--body-file F|-] [--epic N | --no-epic]: cha
 
 Replaces the title and/or the whole body; the body comes from --body-file
 or stdin (-). The epic marker on the first line survives a body edit
-unless --epic names another parent or --no-epic removes it. Nothing named:
-usage, not a silent no-op.
+unless --epic names another parent or --no-epic removes it. With nothing
+named, prints usage: an edit must name something.
 ```
 
 #### mop dev bug epic
@@ -376,7 +375,9 @@ mop dev bug epic <iid>: the epic's children and progress
 #### mop dev bug labels
 
 ```text
-mop dev bug labels: the label vocabulary
+mop dev bug labels: the label vocabulary, one from each group per issue
+
+A second label of the same group silently replaces the first.
 ```
 
 #### mop dev bug list
@@ -397,7 +398,9 @@ status label is added when none is given: status::live.
 #### mop dev bug relabel
 
 ```text
-mop dev bug relabel <iid> [--status S] [--label L ...]: change labels, reopen when the status is an open one
+mop dev bug relabel <iid> [--status S] [--label L ...]: change labels, open or close by the status
+
+--status live, wip or parked reopens a closed issue; fixed, noise or dup closes it.
 ```
 
 #### mop dev bug show
@@ -409,7 +412,9 @@ mop dev bug show <iid>: the full body of an issue
 #### mop dev bug start
 
 ```text
-mop dev bug start <iid> [slug] [--no-branch] [--worker W]: claim an issue — status::wip plus a branch
+mop dev bug start <iid> [slug] [--no-branch] [--worker W]: claim an issue
+
+Sets status::wip and, unless --no-branch, creates the issue's branch.
 ```
 
 #### mop dev ci
@@ -418,13 +423,12 @@ mop dev bug start <iid> [slug] [--no-branch] [--worker W]: claim an issue — st
 pipelines, job logs, lint and runners: GitLab CI from the terminal
 
   mop dev ci                           the latest 15 pipelines
-  mop dev ci list [-n N]               the same, N of them
   mop dev ci <id> [--failed]           a pipeline's jobs; --failed: only real failures
   mop dev ci show <id> [--failed]      the same
   mop dev ci why <id>                  why it failed: failing jobs with their log tails
   mop dev ci log <job> [--lines N] [--full]
-                                   a job's log, the last 60 lines by default
-  mop dev ci lint [file]               check a .gitlab-ci.yml, the working copy's by default
+                                       a job's log, the last 60 lines by default
+  mop dev ci lint [file]               validate a .gitlab-ci.yml, the working copy's by default
   mop dev ci retry <job>               run a finished job again
   mop dev ci retry --pipeline <id>     rerun a pipeline's failed jobs
   mop dev ci cancel <id>               cancel a pipeline that is still going
@@ -446,11 +450,11 @@ skipped), naming its state: GitLab would accept that and do nothing.
 #### mop dev ci lint
 
 ```text
-mop dev ci lint [file]: check a .gitlab-ci.yml against the project
+mop dev ci lint [file]: validate a .gitlab-ci.yml the way GitLab would
 
-The file is the working copy's .gitlab-ci.yml by default. Prints
-"valid — N job(s): ..." or "invalid" with the errors (exit 1), then warnings.
-Includes resolve against the project, as they would in a pipeline.
+The file is the working copy's .gitlab-ci.yml by default; its includes are
+resolved. Prints "valid — N job(s): ..." or "invalid" with the errors
+(exit 1), then warnings.
 ```
 
 #### mop dev ci list
@@ -484,7 +488,7 @@ the new job's id and url; a pipeline retry prints the pipeline's.
 mop dev ci runners: the project's runners and the jobs they are running
 
 A runner per line: ON/OFF (takes work or paused), id, description, status
-(whether GitLab sees it), tags. Then each running job with the runner that
+(whether GitLab sees it), tags. Then each running job and the runner that
 holds it.
 ```
 
@@ -494,8 +498,8 @@ holds it.
 mop dev ci show <id> [--failed]: a pipeline's jobs
 
 The pipeline's line, then one line per job: status, id, stage, name,
-duration, and "(allow_failure)" for a job whose failure does not fail the
-pipeline. --failed shows only the failures that do.
+duration. A job marked "(allow_failure)" may fail without failing the
+pipeline; --failed lists only the jobs that did fail it.
 ```
 
 #### mop dev ci why
@@ -504,9 +508,9 @@ pipeline. --failed shows only the failures that do.
 mop dev ci why <id>: why a pipeline failed
 
 Each job that failed the pipeline, with the last lines of its log. A failed
-job with allow_failure is named as one that did NOT fail the pipeline. With
-no failed job at all, what the pipeline itself says (yaml_errors,
-failure_reason, detailed status): a rejected .gitlab-ci.yml fails with no jobs.
+job with allow_failure is named as one that did NOT fail the pipeline. When
+no job failed at all, the pipeline's own reason: a rejected .gitlab-ci.yml
+fails with no jobs.
 ```
 
 #### mop dev docs
@@ -516,18 +520,16 @@ mop dev docs: regenerate docs/CLI.md from the commandlets' docstrings
 
 Writes the CLI reference: every command and verb of `mop` with its whole
 docstring, in three parts -- client, server, service. Silent when the file
-is written.
+is written. A commandlet with an empty docstring is refused, named.
 
-The reference is committed, and tests/cli.py compares it with its
-regeneration: an edit to a commandlet's docstring ships with the
-regenerated docs/CLI.md in the same commit, or CI is red. A commandlet
-with an empty docstring is refused, named.
+The reference is committed: an edit to a commandlet's docstring ships with
+the regenerated docs/CLI.md in the same commit, or CI is red.
 ```
 
 #### mop dev test
 
 ```text
-run the checks in tests/: mop dev test [name ...] [--strict] [-v]
+mop dev test [name ...] [--strict] [-v]: run the checks in tests/
 
 Every file of tests/ (a helper named _*.py is not a check), or only the
 named ones: `mop dev test cli spec`. The checks of the working copy you run
@@ -563,7 +565,7 @@ Runs `npm ci` and `vite build` in web/. Silent when the build lands.
 
   --check   build into a temporary directory instead and compare it with
             web/dist byte for byte; the differing files are listed and the
-            exit code is 1 -- the committed dist must be rebuilt
+            exit code is 1: rebuild with `mop dev web build`
 
 Needs node and npm on this machine (the developer's or CI's), never on a
 server.

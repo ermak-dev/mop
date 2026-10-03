@@ -2,8 +2,8 @@
 
 Replaces the title and/or the whole body; the body comes from --body-file
 or stdin (-). The epic marker on the first line survives a body edit
-unless --epic names another parent or --no-epic removes it. Nothing named:
-usage, not a silent no-op.
+unless --epic names another parent or --no-epic removes it. With nothing
+named, prints usage: an edit must name something.
 """
 from mop.common import gitlab
 from mop.cli import lib

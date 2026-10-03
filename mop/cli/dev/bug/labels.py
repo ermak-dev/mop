@@ -1,4 +1,6 @@
-"""mop dev bug labels: the label vocabulary
+"""mop dev bug labels: the label vocabulary, one from each group per issue
+
+A second label of the same group silently replaces the first.
 """
 from mop.common import gitlab
 from mop.common.render import table

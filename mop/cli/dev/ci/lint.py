@@ -1,8 +1,8 @@
-"""mop dev ci lint [file]: check a .gitlab-ci.yml against the project
+"""mop dev ci lint [file]: validate a .gitlab-ci.yml the way GitLab would
 
-The file is the working copy's .gitlab-ci.yml by default. Prints
-"valid — N job(s): ..." or "invalid" with the errors (exit 1), then warnings.
-Includes resolve against the project, as they would in a pipeline.
+The file is the working copy's .gitlab-ci.yml by default; its includes are
+resolved. Prints "valid — N job(s): ..." or "invalid" with the errors
+(exit 1), then warnings.
 """
 import os
 
