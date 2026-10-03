@@ -104,9 +104,9 @@ the dispatch decision rests on this.
 ```text
 launch claude as a project's master: mop master [git-origin] [claude options]
 
-Without an argument, the origin of the current working copy is used. One
-project — one master: a master sees and reaches only its own puppets; anyone
-else's don't exist for it.
+Without an argument, the origin of the current working copy is used. A
+master sees and reaches only its own project's puppets; anyone else's don't
+exist for it.
 
 Only origin belongs to this command; everything else goes to claude as-is
 (`mop master --continue` resumes the master's last session). A flag that
