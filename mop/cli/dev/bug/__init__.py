@@ -4,6 +4,7 @@
   mop dev bug show <iid>                           full body
   mop dev bug new "<title>" [--label L ...]        body from --body, --body-file or stdin
   mop dev bug new "<title>" --epic 12              child of epic #12
+  mop dev bug evidence <iid>                       fetched branches and integration merges
   mop dev bug epic <iid>                           the epic's children and progress
   mop dev bug edit <iid> [--title T] [--body TEXT|--body-file F]  replace the title and/or body
   mop dev bug comment <iid> "<text>"               comment (or - for stdin)

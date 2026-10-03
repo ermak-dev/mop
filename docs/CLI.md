@@ -339,6 +339,7 @@ project tracker: GitLab issues, one issue per unit of work
   mop dev bug show <iid>                           full body
   mop dev bug new "<title>" [--label L ...]        body from --body, --body-file or stdin
   mop dev bug new "<title>" --epic 12              child of epic #12
+  mop dev bug evidence <iid>                       fetched branches and integration merges
   mop dev bug epic <iid>                           the epic's children and progress
   mop dev bug edit <iid> [--title T] [--body TEXT|--body-file F]  replace the title and/or body
   mop dev bug comment <iid> "<text>"               comment (or - for stdin)
@@ -380,6 +381,18 @@ usage, not a silent no-op.
 
 ```text
 mop dev bug epic <iid>: the epic's children and progress
+```
+
+#### mop dev bug evidence
+
+```text
+mop dev bug evidence <iid>: remote issue branches and verified integration merges
+
+Fetches origin first (updates local remote-tracking refs). Inspects at most
+500 listed remote refs, the configured integration branch, 40 integration
+refs and 80 first-parent merges per ref. A branch mention or #iid in a commit
+message is not evidence of integration; a merge needs a second parent on
+that branch. Missing/deleted branch tips cannot be verified.
 ```
 
 #### mop dev bug labels

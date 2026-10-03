@@ -878,6 +878,133 @@ def check_mcp_declarations(c):
             c.fail(f"{os.path.relpath(path)}: {e}")
 
 
+# #444: ограниченное свидетельство из веток задачи, без shell/Git-инструмента.
+# HYPOTHESIS: сортировка сотен refs исключает назначенную ветку интеграции.
+# SOLUTION: приоритет ветки контекста вне общего лимита, неполноту видно.
+# RESULT: проверяется ниже. STATUS: FIXED — see #444
+# #444: доказательство интеграции требует ветки именно этой задачи и
+# второго родителя merge, а не любого коммита со строкой #iid.
+# HYPOTHESIS: поиск по тексту истории принимает упоминание #444 за merge.
+# SOLUTION: отбор имён веток и распознавание точного имени ветки в merge.
+# RESULT: проверяется ниже. STATUS: FIXED — see #444
+
+def check_evidence_444(c):
+    from mop.cli.dev.bug import evidence
+    branch = getattr(evidence, "evidence_branch", None)
+    source = getattr(evidence, "merge_source", None)
+    c.check("#444 branch matcher exists", branch is not None)
+    c.check("#444 merge source parser exists", source is not None)
+    if not branch or not source:
+        return
+    for ref, expected in [
+        ("origin/bug/444-git-shell", True), ("origin/feat/444", True),
+        ("origin/refactor/444-x", True), ("origin/docs/444-x", True),
+        ("origin/ci/444-x", True), ("origin/bug/4444-x", False),
+        ("origin/bug/444extra", False), ("origin/epic/444-x", False),
+        ("origin/bug/44-444", False), ("origin/bug/444-x\nother", False),
+    ]:
+        c.expect(f"#444 branch {ref!r}", branch(ref, "444"), expected)
+    for subject, expected in [
+        ("Merge branch 'bug/444-git-shell' into epic/441-master-mcp", "bug/444-git-shell"),
+        ("Merge branch 'feat/444' into master", "feat/444"),
+        ("fix: mention #444 only", None),
+        ("Merge #444 branch 'bug/444-git-shell'", None),
+        ("Merge branch 'bug/4444-x' into master", "bug/4444-x"),
+    ]:
+        c.expect(f"#444 merge {subject!r}", source(subject), expected)
+
+
+def check_evidence_tool_444(c):
+    from mop.cli.dev.bug import evidence
+    from mop.common import context
+    path = evidence.__file__
+    decl = cli.declared(path)
+    c.expect("#444 evidence fetch mutates local refs, not readonly", decl,
+             {"annotations": "destructive", "args": [
+                 {"name": "iid", "type": "string", "required": True,
+                  "help": "issue number"}]})
+    exposed = {n: words for n, words, _ in cli.tool_commands(cli.scan(), cli.verbs())
+               if n.startswith("dev_")}
+    c.expect("#444 evidence uses developer leaf discovery", exposed.get("dev_bug_evidence"),
+             ["dev", "bug", "evidence"])
+
+    # Ложный merge: ветка уже в первом родителе, второй — чужая работа.
+    # Заголовок второго с именем задачи не доказывает её интеграцию.
+    base, tip, unrelated, merged = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    calls = []
+
+    def pretend_git(*args):
+        calls.append(args)
+        if args[0] == "fetch":
+            return ""
+        if args[0] == "for-each-ref":
+            return f"origin/bug/444-x\t{tip}\norigin/master\t{merged}"
+        if args[0] == "log":
+            return (f"{merged}\t{tip} {unrelated}\t"
+                    "Merge branch 'bug/444-x' into master\n"
+                    f"{base}\t{tip}\tfix: mention #444 only")
+        raise AssertionError(args)
+
+    def ancestor(a, b):
+        return (a, b) in {(tip, unrelated), (tip, tip)}
+
+    with patched(lib, git=pretend_git), patched(evidence, _ancestor=ancestor):
+        output, err, code = run_command(evidence.main, ["444"], via_cli=True)
+    c.expect("#444 reader runs", (err, code), ("", 0))
+    c.check("#444 fetches before inspecting refs", calls[0] == ("fetch", "--prune", "origin"))
+    c.check("#444 refuses a merge whose branch is already in first parent",
+            "verified ancestry" not in output, output)
+    c.check("#444 does not treat a plain issue mention as merge",
+            "fix: mention" not in output, output)
+
+    # Настоящий merge: второй родитель — ветка задачи, первого в ней нет.
+    def real_ancestor(a, b):
+        return a == b
+
+    def real_git(*args):
+        if args[0] == "log":
+            return (f"{merged}\t{base} {tip}\t"
+                    "Merge branch 'bug/444-x' into master")
+        return pretend_git(*args)
+
+    with patched(lib, git=real_git), patched(evidence, _ancestor=real_ancestor):
+        output, err, code = run_command(evidence.main, ["444"], via_cli=True)
+    c.check("#444 verifies actual second-parent merge",
+            code == 0 and f"{merged} merged bug/444-x at {tip} (verified ancestry)" in output,
+            (output, err, code))
+
+    # Даже за пределом общего перечня назначенная ветка обязана проверяться.
+    current = "origin/integration/441-current"
+    branch = "origin/bug/444-x"
+    calls.clear()
+    def crowded_git(*args):
+        calls.append(args)
+        if args[0] == "fetch":
+            return ""
+        if args[0] == "for-each-ref" and args[-1] == "refs/remotes/origin":
+            return f"{branch}\t{tip}\n" + "\n".join(
+                f"origin/epic/{n:03}\t{base}" for n in range(500))
+        if args[0] == "for-each-ref" and args[-1] == "refs/remotes/" + current:
+            return f"{current}\t{merged}"
+        if args[0] == "log":
+            return f"{merged}\t{base} {tip}\tMerge branch 'bug/444-x' into integration/441-current"
+        raise AssertionError(args)
+    with patched(lib, git=crowded_git), patched(evidence, _ancestor=real_ancestor), \
+            context.use(context.Context(branch="integration/441-current")):
+        output, err, code = run_command(evidence.main, ["444"], via_cli=True)
+    c.check("#444 current integration inspected past remote ref limit",
+            code == 0 and f"{current} {merged} merged {branch.removeprefix('origin/')}" in output,
+            (output, err, code))
+    c.check("#444 truncated refs explicitly marked incomplete",
+            "results may be incomplete" in output, output)
+
+    for iid in ("0", "-1", "444; echo unsafe", "9" * 5000):
+        with patched(lib, git=lambda *args: c.fail("invalid iid reached git")):
+            out, err, code = run_command(evidence.main, [iid])
+        c.check(f"#444 invalid iid {iid[:15]!r} refused without git",
+                code != 0 and not out and "iid must be" in err,
+                (out, err[:100], code))
+
 def check_dev_mcp_443(c):
     """HYPOTHESIS: private dev скрывает объявленные листья, stdin закрыт.
     SOLUTION: только объявленные листья видны; массив меток и --body доступны.
@@ -890,7 +1017,7 @@ def check_dev_mcp_443(c):
     from mop.common import gitlab
 
     bug = ("list", "show", "epic", "labels", "new", "edit", "comment",
-           "start", "close", "relabel")
+           "start", "close", "relabel", "evidence")
     ci = ("list", "show", "why", "log", "retry")
     expected = {f"dev_bug_{x}" for x in bug} | {f"dev_ci_{x}" for x in ci}
     tools = {n: (words, cli.declared(path)) for n, words, path in
@@ -2198,6 +2325,8 @@ def check_fallback_model_183(c):
     c.expect("#254 `mop dev bug list` must still resolve through LEGACY", got,
              ("mop.cli.dev.bug.list", []))
 
+    check_evidence_444(c)
+    check_evidence_tool_444(c)
     check_server_namespace_259(c)
     check_named_263(c)
     check_body_file_270(c)

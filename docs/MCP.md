@@ -98,6 +98,9 @@ MCP = {"annotations": "destructive", "args": [
   `test`, `docs`, `web`, `ci cancel`, `ci lint` или `ci runners`.
   `dev bug new` принимает тело через обязательный для MCP `--body` без stdin;
   `dev bug start` требует `--no-branch` и не переключает чекаут мастера.
+  `dev bug evidence` ограничивает просмотр истории одним номером задачи,
+  но делает `git fetch --prune`: это изменение локальных remote-tracking refs,
+  поэтому инструмент аннотирован как destructive, а не readOnly.
   Эти инструменты регистрируются только в профиле мастера/оператора.
 
 Каталог определяется объявлениями командлетов; `mop mcp --check` показывает
