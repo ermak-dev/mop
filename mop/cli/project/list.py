@@ -1,8 +1,6 @@
 """projects the pool serves: mop project list [--origins]
 
-Asks the cluster service for the server's registry. --origins prints
-the origins themselves; without it, project names — the same names the bus
-users are built from.
+--origins prints the origins themselves; without it, project names.
 """
 from mop.cli import lib
 from mop.common import bus
