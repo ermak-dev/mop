@@ -265,6 +265,56 @@ def main():
             h.sent and h.sent[0][0] in (503, 401)
             and "ldap" not in json.dumps(h.sent[0][1]), h.sent)
 
+    # ── add/update в реестре операций (#470) ────────────────────────────
+    # HYPOTHESIS: реестр знает только send; клик add/update (#472) доезжает
+    # до адаптера и отвечает 404 unsupported -- кнопки формы мертвы. У add
+    # цели ещё нет: требование target в _parse отметило бы его до реестра.
+    # SOLUTION: register("add"/"update", params) (#470); target обязателен
+    # для существующих операций и не обязателен для add (origin в params).
+    # Подключение -- одна точка у воркера (#470): адаптер и исполнитель
+    # расходиться не могут.
+    wired = adminapi.Operations()
+    from mop.server import opworker
+    opworker.register(wired)
+    wired_api = adminapi.Api(wired, adminapi.Queue(),
+                             origin="https://pool.example", who=ADMIN)
+
+    def post(action, target="pu-mop-1", params=None):
+        body = req(action, target=target, params=params or {})
+        h = Handler(body=body, length=len(body))
+        wired_api.post(h)
+        return h
+
+    h = post("add", target=None, params={"origin": "git@h:g/mop.git"})
+    c.check("#470 add without a target is accepted (202)",
+            h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
+    h = post("add", target=None, params={"origin": "git@h:g/mop.git",
+                                         "branch": "dev"})
+    c.check("#470 add accepts origin and branch, nothing else",
+            h.sent and h.sent[0][0] == 202, h.sent)
+    h = post("add", target=None, params={"origin": "git@h:g/mop.git",
+                                         "fresh": True})
+    c.check("#470 add refuses an update-only parameter",
+            h.sent and h.sent[0][0] == 400, h.sent)
+    h = post("update", params={"fresh": False})
+    c.check("#470 update keeps origin implicit, carries fresh",
+            h.sent and h.sent[0][0] == 202, h.sent)
+    h = post("update", target="pu-mop-2",
+             params={"fresh": True, "origin": "git@h:g/new.git"})
+    c.check("#470 remove mode carries fresh and the new origin",
+            h.sent and h.sent[0][0] == 202, h.sent)
+    h = post("update", params={"mode": "keep"})
+    c.check("#470 update refuses unknown parameters",
+            h.sent and h.sent[0][0] == 400, h.sent)
+    # target не стал необязательным вовсе: цель существующих операций
+    # осталась обязательной.
+    h = post("restart", target=None, params={})
+    c.check("#470 a lifecycle op still requires its target",
+            h.sent and h.sent[0][0] == 400, h.sent)
+    h = post("update", target=None, params={"fresh": False})
+    c.check("#470 update without a target is refused",
+            h.sent and h.sent[0][0] == 400, h.sent)
+
     return c.report("adminapi")
 
 

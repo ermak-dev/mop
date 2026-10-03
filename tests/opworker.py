@@ -400,6 +400,254 @@ def main():
             wo.read("anton", stuck3).get("status") == "unknown",
             wo.read("anton", stuck3))
 
+    # ── add/update поверх общих операций (#470) ─────────────────────────
+    # HYPOTHESIS: воркер умеет только restart; адаптер (#461) ставит add в
+    # очередь, а исполнителя у глагола нет -- «no library operation». У веба
+    # нет рабочей копии: workspace обязан приезжать из ЯВНОГО удалённого
+    # источника (fetch origin -- как его читает manifest), никаких cwd-чтений
+    # и локальных файлов сервера; origin add обязан быть в реестре -- иначе
+    # отказ до эффекта. fresh у update -- явный bool, молчаливого режима нет.
+    # SOLUTION: _library_effect зовёт ops.add/ops.update (#458); источник
+    # workspace -- remote_workspace(origin), injectируется проверками;
+    # реестр -- callable; цель add -- сам origin (дедуп и сериализация по
+    # нему), присвоенное имя -- факт записи.
+    PROV = {"source": "origin", "commit": "c1", "dirty": False,
+            "tasks": 1, "present": True}
+
+    class AddT(Recorder):
+        """Ответы сервиса для add: имя, метка, подъём, свой итог прогона."""
+
+        def __init__(self):
+            super().__init__()
+            self.answers = {"add": {"ok": True, "name": "pu-mop-9",
+                                    "bootstrap_marker": "m1"},
+                            "alloc": {"alloc": dict(self.ALLOC)},
+                            "bootstrap_result": {"result": {"sent": "m1",
+                                                            "played": True,
+                                                            "ok": True}}}
+
+    def web_worker(registry=("git@h:g/x.git",), workspace=None):
+        root = tempfile.mkdtemp(prefix="mop-test-470-")
+        # Выкачки дефолтного источника считаются: w._fetched -- список origin.
+        seen = []
+        core = workspace or (lambda o: (f"boot for {o}", dict(PROV)))
+        w = opworker.Worker(root, now=lambda: 1_000.0, observe_wait=0,
+                            sleep=lambda s: None,
+                            registry=(lambda: set(registry))
+                            if registry is not None else None,
+                            workspace=lambda o: (seen.append(o), core(o))[1])
+        w._fetched = seen
+        return w, root
+
+    # Успешный add: workspace уходит из явного источника, одна выкачка.
+    fetched = []
+    w, _ = web_worker(workspace=lambda o: (fetched.append(o),
+                                           f"boot for {o}", dict(PROV))[1:])
+    t = AddT()
+    got = w.submit("anton", "add", None,
+                   {"origin": "git@h:g/x.git", "branch": "dev"},
+                   transport=t, safety=lambda name, project, **kw: (True, None))
+    c.check("#470 add through the worker succeeds with #476 verdicts",
+            got.get("status") == "succeeded", got)
+    c.check("#470 add rides the explicit remote workspace",
+            t.calls and t.calls[0] == ("add", {"origin": "git@h:g/x.git",
+                                               "timeout": 30,
+                                               "workspace": "boot for git@h:g/x.git",
+                                               "bootstrap_sent": PROV,
+                                               "branch": "dev"}), t.calls[:1])
+    c.check("#470 the workspace is fetched once, from the given origin",
+            fetched == ["git@h:g/x.git"], fetched)
+    c.check("#470 the assigned puppet name lands in the record",
+            w.read("anton", got["op"]).get("name") == "pu-mop-9",
+            w.read("anton", got["op"]))
+
+    # Незарегистрированный origin -- отказ ДО эффекта (кнопки нет -- и
+    # обходной дороги нет: воркер сам gates).
+    w, _ = web_worker(registry=("git@h:g/other.git",))
+    t = AddT()
+    got = w.submit("anton", "add", None, {"origin": "git@h:g/x.git"},
+                   transport=t, safety=lambda name, project, **kw: (True, None))
+    c.check("#470 an unregistered origin is refused before any effect",
+            got.get("status") == "refused" and "registry" in (got.get("error") or "")
+            and not t.calls, (got, t.calls))
+    # Реестр не подключён -- отказ (fail closed), не тихий пропуск.
+    w, _ = web_worker(registry=None)
+    got = w.submit("anton", "add", None, {"origin": "git@h:g/x.git"},
+                   transport=AddT(),
+                   safety=lambda name, project, **kw: (True, None))
+    c.check("#470 add without a wired registry is refused, not waved through",
+            got.get("status") == "refused", got)
+
+    # Цель add -- сам origin: дедуп по нему, сериализация по нему; имени
+    # папета ещё нет, его присвоит сервис.
+    w, _ = web_worker()
+    a1 = w.submit("anton", "add", None, {"origin": "git@h:g/x.git"},
+                  transport=AddT(),
+                  safety=lambda name, project, **kw: (True, None))
+    a2 = w.submit("anton", "add", None, {"origin": "git@h:g/x.git"},
+                  transport=AddT(),
+                  safety=lambda name, project, **kw: (True, None))
+    c.check("#470 a repeated add of one origin is the same operation",
+            a1.get("op") == a2.get("op"), (a1, a2))
+    stuck = w._begin_for_test("anton", "add", "git@h:g/x.git",
+                              {"origin": "git@h:g/x.git"})
+    t = AddT()
+    # Другой actor -- другой ключ дедупа: та же операция не вернётся,
+    # новая встанет за незавершённой (сериализация по цели=origin).
+    waiting = w.submit("olga", "add", None, {"origin": "git@h:g/x.git"},
+                       transport=t,
+                       safety=lambda name, project, **kw: (True, None))
+    c.check("#470 a second add of one origin waits, fires nothing",
+            waiting.get("status") == "queued" and not t.calls, (waiting, t.calls))
+    other = w.submit("anton", "add", None, {"origin": "git@h:g/y.git"},
+                     transport=AddT(),
+                     safety=lambda name, project, **kw: (True, None))
+    c.check("#470 an add of another origin does not wait",
+            other.get("status") in opworker.TERMINAL, other)
+
+    # Payload не входит в аудит: текст bootstrap'а живёт только в вызове
+    # операции, в журнале, в GET и в payload-файле его нет.
+    w, root = web_worker(workspace=lambda o: ("BOOT-SECRET-470", dict(PROV)))
+    got = w.submit("anton", "add", None, {"origin": "git@h:g/x.git"},
+                   transport=AddT(),
+                   safety=lambda name, project, **kw: (True, None))
+    with open(w._log, encoding="utf-8") as f:
+        journal = f.read()
+    c.check("#470 the bootstrap text never enters the journal",
+            "BOOT-SECRET-470" not in journal, journal[-200:])
+    c.check("#470 the bootstrap text never enters GET",
+            "BOOT-SECRET-470" not in json.dumps(w.read("anton", role="admin")),
+            w.read("anton", role="admin"))
+    with open(os.path.join(root, "payload", f"{got['op']}.json"),
+              encoding="utf-8") as f:
+        payload = json.load(f)
+    c.check("#470 the payload file holds the request, not the fetched text",
+            "BOOT-SECRET-470" not in json.dumps(payload)
+            and payload.get("request") == {"origin": "git@h:g/x.git"}, payload)
+    c.check("#470 the audit record carries no workspace",
+            "BOOT-SECRET-470" not in json.dumps(w._audit()), w._audit())
+
+    # ── update через воркер: fresh явный, источник -- origin папета ─────
+    # keep (fresh false): origin прежний (из спеки), workspace -- из него
+    # же; спека читается ОДИН раз и едет в операцию (не спрашивать вторично).
+    w, _ = web_worker()
+    t = Recorder()
+    t.answers = {"spec": {"meta": {"origin": "git@h:g/x.git"}},
+                 "update": {"replaced": None}}
+    got = w.submit("anton", "update", "pu-mop-1", {"fresh": False},
+                   transport=t, safety=lambda name, project, **kw: (True, None))
+    c.check("#470 a keep update reads as partial (accepted, no run)",
+            got.get("status") == "partial", got)
+    c.check("#470 a keep update keeps the origin and resumes",
+            len(t.calls) > 1 and t.calls[1] == ("update",
+                {"name": "pu-mop-1", "origin": "git@h:g/x.git", "cont": True,
+                 "new_origin": None, "workspace": "boot for git@h:g/x.git",
+                 "bootstrap_sent": PROV, "owner": "anton", "force": False,
+                 "branch": None}), t.calls[1:])
+    c.check("#470 a keep update fetches the puppet's own origin",
+            w._fetched == ["git@h:g/x.git"], w._fetched)
+    c.check("#470 the spec is read once and rides into the operation",
+            [verb for verb, _ in t.calls].count("spec") == 1, t.calls)
+    # remove (fresh true + origin): workspace -- из НОВОГО origin.
+    w, _ = web_worker()
+    t = Recorder()
+    t.answers = {"spec": {"meta": {"origin": "git@h:g/x.git"}},
+                 "update": {"bootstrap_marker": "m3"},
+                 "bootstrap_result": {"result": {"sent": "m3", "played": True,
+                                                 "ok": True}}}
+    got = w.submit("anton", "update", "pu-mop-1",
+                   {"fresh": True, "origin": "git@h:g/new.git"},
+                   transport=t, safety=lambda name, project, **kw: (True, None))
+    c.check("#470 a remove update succeeds through the worker",
+            got.get("status") == "succeeded", got)
+    fields = t.calls[1][1]
+    c.check("#470 a remove update rides the NEW origin's workspace",
+            fields.get("cont") is False
+            and fields.get("new_origin") == "git@h:g/new.git"
+            and fields.get("workspace") == "boot for git@h:g/new.git", fields)
+    c.check("#470 a remove update fetches only the new origin",
+            w._fetched == ["git@h:g/new.git"], w._fetched)
+
+    # ── safety-матрица на update (#460/#470): отказ ДО эффекта ──────────
+    NOW = 1_000_000.0
+    CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
+
+    def bound_safety(facts):
+        return lambda name, project, owner: ops.safety(
+            name, project, owner=owner, facts=facts, now=NOW)
+
+    def update_worker_with(facts):
+        w, _ = web_worker()
+        t = Recorder()
+        t.answers = {"spec": {"meta": {"origin": "git@h:g/x.git"}},
+                     "update": {"replaced": None}}
+        return w, t
+
+    for what, facts in (
+            ("a dirty clone", {"clone": dict(CLEAN, dirty=2, owner=None)}),
+            ("a foreign live lease",
+             {"clone": dict(CLEAN, owner={"user": "olga", "at": NOW - 5})}),
+            ("unknown facts", None),
+            ("an agent error", {"error": "silent"})):
+        w, t = update_worker_with(facts)
+        got = w.submit("anton", "update", "pu-mop-1", {"fresh": False},
+                       transport=t, safety=bound_safety(facts))
+        c.check(f"#470 update refuses {what} before the effect",
+                got.get("status") == "refused" and not t.calls, (got, t.calls))
+    ok, why = bound_safety({"clone": dict(CLEAN, owner={"user": "olga",
+                                                        "at": NOW - 5})})(
+        "pu-mop-1", None, "anton")
+    c.check("#470 the foreign-lease refusal names the holder",
+            not ok and "olga" in (why or ""), why)
+    # Своя живая аренда на чистом клоне -- проход, эффект исполняется.
+    w, t = update_worker_with(None)
+    got = w.submit("anton", "update", "pu-mop-1", {"fresh": False},
+                   transport=t,
+                   safety=bound_safety({"clone": dict(CLEAN, owner={"user": "anton",
+                                                                    "at": NOW - 5})}))
+    c.check("#470 update with the owner's own clean lease runs",
+            got.get("status") == "partial" and t.calls, (got, t.calls))
+
+    # Выкачка не удалась -- failed громко, с фразой без чужого stderr.
+    def broken_source(origin):
+        raise RuntimeError("cannot read x: access denied")
+    w, _ = web_worker(workspace=broken_source)
+    got = w.submit("anton", "add", None, {"origin": "git@h:g/x.git"},
+                   transport=AddT(),
+                   safety=lambda name, project, **kw: (True, None))
+    c.check("#470 a failed workspace fetch fails loudly",
+            got.get("status") == "failed" and "access denied" in got.get("error", ""),
+            got)
+
+    # ── remote_workspace: происхождение тем же видом, что у CLI (#334) ──
+    # Только origin-источник: fetch_tree и cwd дороги не касаются вовсе.
+    rs = getattr(opworker, "remote_workspace", None)
+    if c.check("#470 remote_workspace exists", rs is not None):
+        from mop.common import manifest
+        WS_TEXT = ("- name: ws\n  vars:\n    A: 1\n  tasks:\n"
+                   "    - name: t1\n      ansible.builtin.debug: {msg: hi}\n"
+                   "    - name: t2\n      ansible.builtin.debug: {msg: ho}\n")
+
+        def boom(*a, **k):
+            raise AssertionError("fetch_tree must not be touched by the web")
+        with patched(manifest, fetch_tree=boom):
+            text, prov = rs("git@h:g/x.git",
+                            fetch=lambda o: {"bootstrap_text": WS_TEXT,
+                                             "commit": "abc123"})
+        c.expect("#470 the remote provenance carries the CLI shape",
+                 prov, {"source": "origin", "commit": "abc123", "dirty": False,
+                        "tasks": 2, "present": True})
+        c.check("#470 the remote text is the file's text", text == WS_TEXT, text)
+        text, prov = rs("o", fetch=lambda o: {"bootstrap_text": "",
+                                              "commit": "abc"})
+        c.expect("#470 no file means present false and zero tasks",
+                 prov, {"source": "origin", "commit": "abc", "dirty": False,
+                        "tasks": 0, "present": False})
+        text, prov = rs("o", fetch=lambda o: {"bootstrap_text": "vars: {}\n",
+                                              "commit": None})
+        c.check("#470 a malformed file reads as tasks unknown",
+                prov.get("tasks") is None and prov.get("present") is True, prov)
+
     return c.report("opworker")
 
 

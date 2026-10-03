@@ -35,7 +35,7 @@ import os
 import threading
 import time
 
-from ..common import ops
+from ..common import ops, puppets
 
 # Сроки и лимиты (#476): настраиваются атрибутами воркера, значения --
 # заведённые константы установки.
@@ -58,6 +58,73 @@ _FROM_OUTCOME = {"registered": "succeeded", "accepted": "partial",
                  "refused": "refused", "failed": "failed",
                  "partial": "partial",
                  "unknown": "unknown"}
+
+# Параметры веб-операций (#470): реестр HTTP-whitelist'а (#461) и связь
+# цель/запрос у адаптера -- из одной точки. add без цели: имя присвоит
+# сервис, target клика -- сам origin; add_request/update_request --
+# валидаторы params, их отказ -- отказ приёма, до intent.
+ADD_PARAMS = ("origin", "branch")
+UPDATE_PARAMS = ("fresh", "origin")
+
+
+def register(registry):
+    """Подключить операции к реестру адаптера (#461). Одна точка: воркер и
+    реестр HTTP расходиться не могут -- добавил глагол сюда, кнопка в GUI
+    жива. Add без цели (#470): имя присвоит сервис, target клика -- origin.
+    Вызывает поднимающий веб service; проверки зовут явно."""
+    registry.register("add", ADD_PARAMS, target=False)
+    registry.register("update", UPDATE_PARAMS)
+
+
+def remote_workspace(origin, fetch=None):
+    """workspace веб-операции из ЯВНОГО удалённого источника (#470).
+
+    У веба нет рабочей копии: текст .mop/bootstrap.yaml берётся из origin
+    (fetch -- manifest.fetch-подобный читатель), никаких cwd-чтений и
+    локальных файлов сервера. Происхождение -- тем же видом, что собирал
+    командлет (#334): source всегда "origin". Пусто (файла нет) -- честная
+    половина: сервер снимет копию bootstrap'а, и удаление доедет."""
+    from ..common import manifest
+    if fetch is None:
+        fetch = manifest.fetch
+    got = fetch(origin) or {}
+    text = got.get("bootstrap_text") or ""
+    present = bool(text.strip())
+    tasks = 0
+    if present:
+        try:
+            tasks = len(manifest.play(text)[1])
+        except ValueError:
+            tasks = None
+    return text, {"source": "origin", "commit": got.get("commit"),
+                  "dirty": False, "tasks": tasks, "present": present}
+
+
+def add_request(params):
+    """params add -> (target, поля глагола). Target add -- сам origin:
+    имени папета ещё нет, его присвоит сервис (#470)."""
+    origin = params.get("origin")
+    if not isinstance(origin, str) or not origin.strip():
+        raise ValueError("add needs the origin parameter")
+    return origin, {"origin": origin,
+                    **({"branch": params["branch"]}
+                       if params.get("branch") else {})}
+
+
+def update_request(params):
+    """params update -> (target, поля глагола). fresh -- ЯВНЫЙ bool
+    (#470): молчаливого режима нет, отсутствующий False. Происхождение
+    workspace решает операция: fresh без origin -- прежний, с origin --
+    новый."""
+    fresh = params.get("fresh")
+    if not isinstance(fresh, bool):
+        raise ValueError("update needs an explicit fresh (bool)")
+    out = {"fresh": fresh}
+    if params.get("origin") is not None:
+        if not isinstance(params["origin"], str) or not params["origin"].strip():
+            raise ValueError("update origin must be a non-empty origin")
+        out["origin"] = params["origin"]
+    return out
 
 
 def normalized(request):
@@ -98,7 +165,7 @@ class Worker:
     def __init__(self, root=None, now=None, retention_days=RETENTION_DAYS,
                  payload_days=PAYLOAD_DAYS, transport=None,
                  observe_wait=OBSERVE_WAIT, observe_poll=OBSERVE_POLL,
-                 sleep=time.sleep):
+                 sleep=time.sleep, registry=None, workspace=None):
         import tempfile
         from ..common import paths
         self._root = root or paths.local("operations")
@@ -107,6 +174,13 @@ class Worker:
         self.observe_wait, self.observe_poll = observe_wait, observe_poll
         self._sleep = sleep              # наблюдение опрашивает им же
         self._transport = transport      # read-only: донаблюдение (#464)
+        # Источник workspace веб-операций (#470): origin -> (текст,
+        # происхождение), явный удалённый источник; None -- дефолт
+        # remote_workspace (manifest.fetch).
+        self._workspace = workspace
+        # Реестр заведённых проектов (callable -> set origin'ов): gate add
+        # (#470). None -- не подключён, add отказывает (fail closed).
+        self._registry = registry
         self._lock = threading.Lock()
         self._log = os.path.join(self._root, "ops.jsonl")
         self._ops = {}          # id -> запись
@@ -141,6 +215,20 @@ class Worker:
 
     def _accept(self, actor, verb, target, request, digest,
                 transport, safety, effect, context, key):
+        request = request or {}
+        # add (#470): цели нет -- ею становится сам origin; заводить можно
+        # только заведённый проект. update: fresh -- явный bool. Всё до
+        # intent: кривой запрос не оставляет «что-то случилось».
+        try:
+            if verb == "add":
+                target, _ = add_request(request)
+                why = self._registry_refusal(target)
+                if why:
+                    return {"status": "refused", "error": why}
+            elif verb == "update":
+                update_request(request)
+        except ValueError as e:
+            return {"status": "refused", "error": str(e)}
         idem = key or f"{verb}:{target}:{digest[:8]}"
         with self._lock:
             known = self._by_key.get((actor, idem))
@@ -206,9 +294,9 @@ class Worker:
             return {**rec, "status": "failed", "error": str(e), "audit": audit}
         kind = (got or {}).get("outcome") if isinstance(got, dict) else None
         status = _FROM_OUTCOME.get(kind, "partial")
-        # Факты наблюдения (#464) -- в журнал: по ним карточка и recovery
-        # отвечают, что именно увидено.
-        facts = {k: (got or {}).get(k) for k in ("alloc", "restarts")
+        # Факты наблюдения (#464) и присвоенное имя add (#470) -- в журнал:
+        # по ним карточка и recovery отвечают, что именно увидено.
+        facts = {k: (got or {}).get(k) for k in ("alloc", "restarts", "name")
                  if (got or {}).get(k) is not None}
         self._mark(rec, status, error=(got or {}).get("error"), **facts)
         # Освободив цель, двинуть следующую по ней (queued -> исход).
@@ -231,8 +319,15 @@ class Worker:
 
         Рестарт -- наблюдаемым режимом (#464): база снимка пишется в
         журнал ДО эффекта, наблюдение -- часть операции; алгоритм --
-        в mop/common/ops.py, здесь вызов."""
-        fn = {"restart": ops.restart, "add": None, "update": None}.get(rec["verb"])
+        в mop/common/ops.py, здесь вызов.
+
+        add/update (#470): workspace -- из ЯВНОГО удалённого источника
+        (self._workspace, по умолчанию remote_workspace), никогда не cwd и
+        не локальный файл сервера. Update читает спеку здесь, до эффекта:
+        origin прежнего репозитория решает, чей workspace качать, и в
+        операцию едет один раз (не спрашивать вторично)."""
+        fn = {"restart": ops.restart, "add": ops.add,
+              "update": ops.update}.get(rec["verb"])
         if fn is None:
             raise RuntimeError(f"no library operation for {rec['verb']}")
         base = rec.get("baseline")
@@ -246,16 +341,66 @@ class Worker:
                 self._mark(rec, rec["status"], baseline=base)
         # transport -- глаголы сервиса кластера (transport(verb, **fields)),
         # как у #458; контекст #457 передаётся явно, без env потока.
-        call = (lambda: fn(transport, rec["target"], login=rec["actor"],
-                           force=False, observe=True, before=base,
-                           observe_wait=self.observe_wait,
-                           sleep=lambda s: self._sleep(self.observe_poll))
-                if rec["verb"] == "restart"
-                else lambda: fn(transport, rec["target"], login=rec["actor"]))
+        if rec["verb"] == "restart":
+            call = lambda: fn(transport, rec["target"], login=rec["actor"],
+                              force=False, observe=True, before=base,
+                              observe_wait=self.observe_wait,
+                              sleep=lambda s: self._sleep(self.observe_poll))
+        else:
+            call = lambda: self._lifecycle(fn, rec, transport)
         if context is not None:
             from ..common import context as _c
             return lambda: _c.call_in_context(context, call)
         return call
+
+    def _source(self, origin):
+        """Выкачка workspace (#470): подмена проверками, по умолчанию --
+        manifest.fetch через remote_workspace."""
+        if self._workspace is not None:
+            return self._workspace(origin)
+        return remote_workspace(origin)
+
+    def _lifecycle(self, fn, rec, transport):
+        """add/update (#470): построить вход, позвать общую операцию.
+
+        add: workspace из origin запроса, branch -- из него же; присвоенное
+        имя -- факт записи. update: спека читается ДО эффекта (чей origin
+        -- решает) и едет в операцию один раз; fresh -- явный bool запроса;
+        workspace -- из нового или прежнего origin."""
+        request = self._payload_read(rec["op"]).get("request") or {}
+        if rec["verb"] == "add":
+            text, sent = self._source(rec["target"])
+            return fn(transport, rec["target"], (text, sent),
+                      branch=request.get("branch"))
+        spec = transport("spec", name=rec["target"]) or {}
+        old_origin = (spec.get("meta") or {}).get("origin")
+        new_origin = (request.get("origin")
+                      if request.get("origin") is not None else old_origin)
+        text, sent = self._source(new_origin)
+        return fn(transport, rec["target"], origin=request.get("origin"),
+                  fresh=bool(request.get("fresh")), workspace=(text, sent),
+                  force=False, login=rec["actor"], spec=spec)
+
+    def _payload_read(self, op):
+        """Payload операции: запрос без ответов транспорта (#470)."""
+        try:
+            with open(os.path.join(self._root, "payload", f"{op}.json"),
+                      encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _registry_refusal(self, origin):
+        """Gate add (#470): origin обязан быть в реестре сервера. None --
+        не подключён -- отказ тоже (fail closed): тихо пропустить значит
+        завести проект, которого нет ни у шины, ни у плейбука."""
+        if self._registry is None:
+            return f"no project {puppets.project_of(origin)} in the registry"
+        known = self._registry() or set()
+        if origin not in known:
+            return (f"no project {puppets.project_of(origin)} in the registry; "
+                    f"what the pool serves: mop project list")
+        return None
 
     def _project_of(self, rec):
         """Проект цели операции: из payload запроса его нет, пока воркер
