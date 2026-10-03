@@ -42,6 +42,8 @@ from ..common import ops
 RETENTION_DAYS = 30          # сколько жить завершённым записям
 PAYLOAD_DAYS = 3             # payload исполнителя живёт короче записей
 QUEUE_LIMIT = 100            # незавершённых операций в очереди на приём
+OBSERVE_WAIT = 60            # сколько наблюдать рестарт (#464)
+OBSERVE_POLL = 2             # шаг опроса наблюдения
 
 # Модель (#476): точные переходы. unknown -- не failed: эффекта могли и
 # быть, и не быть; повтор автоматом запрещён.
@@ -54,6 +56,7 @@ TERMINAL = ("succeeded", "refused", "failed", "partial", "unknown")
 # unknown/failed -- ни эффекта, ни отказа.
 _FROM_OUTCOME = {"registered": "succeeded", "accepted": "partial",
                  "refused": "refused", "failed": "failed",
+                 "partial": "partial",
                  "unknown": "unknown"}
 
 
@@ -64,6 +67,22 @@ def normalized(request):
     из повторного клика «другой payload»."""
     return hashlib.sha256(json.dumps(request or {}, sort_keys=True,
                                      ensure_ascii=False).encode()).hexdigest()
+
+
+def _quiet_transport(transport):
+    """Транспорт восстановления: сбой read-запроса -- None, а не исключение.
+
+    Донаблюдение при подъёме службы не имеет права уронить её старт; None
+    (-- транспорт не дан) -- наблюдение пропускается, запись остаётся
+    unknown."""
+
+    class Quiet:
+        def __call__(self, verb, **fields):
+            try:
+                return transport(verb, **fields)
+            except Exception:
+                return None
+    return Quiet() if transport else None
 
 
 class Worker:
@@ -77,12 +96,17 @@ class Worker:
     LIMIT = QUEUE_LIMIT
 
     def __init__(self, root=None, now=None, retention_days=RETENTION_DAYS,
-                 payload_days=PAYLOAD_DAYS):
+                 payload_days=PAYLOAD_DAYS, transport=None,
+                 observe_wait=OBSERVE_WAIT, observe_poll=OBSERVE_POLL,
+                 sleep=time.sleep):
         import tempfile
         from ..common import paths
         self._root = root or paths.local("operations")
         self._now = now or time.time
         self.retention_days, self.payload_days = retention_days, payload_days
+        self.observe_wait, self.observe_poll = observe_wait, observe_poll
+        self._sleep = sleep              # наблюдение опрашивает им же
+        self._transport = transport      # read-only: донаблюдение (#464)
         self._lock = threading.Lock()
         self._log = os.path.join(self._root, "ops.jsonl")
         self._ops = {}          # id -> запись
@@ -182,7 +206,11 @@ class Worker:
             return {**rec, "status": "failed", "error": str(e), "audit": audit}
         kind = (got or {}).get("outcome") if isinstance(got, dict) else None
         status = _FROM_OUTCOME.get(kind, "partial")
-        self._mark(rec, status, error=(got or {}).get("error"))
+        # Факты наблюдения (#464) -- в журнал: по ним карточка и recovery
+        # отвечают, что именно увидено.
+        facts = {k: (got or {}).get(k) for k in ("alloc", "restarts")
+                 if (got or {}).get(k) is not None}
+        self._mark(rec, status, error=(got or {}).get("error"), **facts)
         # Освободив цель, двинуть следующую по ней (queued -> исход).
         self._drive(rec["target"], transport, safety, effect, context)
         return {**rec, "status": status,
@@ -199,18 +227,35 @@ class Worker:
             self._run(self._ops[o], transport, safety, effect, context)
 
     def _library_effect(self, rec, transport, context):
-        """Эффект библиотечным workflow #458: воркер не держит копий."""
+        """Эффект библиотечным workflow #458: воркер не держит копий.
+
+        Рестарт -- наблюдаемым режимом (#464): база снимка пишется в
+        журнал ДО эффекта, наблюдение -- часть операции; алгоритм --
+        в mop/common/ops.py, здесь вызов."""
         fn = {"restart": ops.restart, "add": None, "update": None}.get(rec["verb"])
         if fn is None:
             raise RuntimeError(f"no library operation for {rec['verb']}")
+        base = rec.get("baseline")
+        if rec["verb"] == "restart" and base is None:
+            try:
+                base = ops.task_snapshot(transport, rec["target"])
+            except Exception:
+                base = None
+            if base is not None:
+                # База наблюдения -- ДО эффекта: переживает крах службы.
+                self._mark(rec, rec["status"], baseline=base)
         # transport -- глаголы сервиса кластера (transport(verb, **fields)),
         # как у #458; контекст #457 передаётся явно, без env потока.
+        call = (lambda: fn(transport, rec["target"], login=rec["actor"],
+                           force=False, observe=True, before=base,
+                           observe_wait=self.observe_wait,
+                           sleep=lambda s: self._sleep(self.observe_poll))
+                if rec["verb"] == "restart"
+                else lambda: fn(transport, rec["target"], login=rec["actor"]))
         if context is not None:
             from ..common import context as _c
-            return lambda: _c.call_in_context(
-                context, fn, transport, rec["target"],
-                login=rec["actor"], force=False)
-        return lambda: fn(transport, rec["target"], login=rec["actor"])
+            return lambda: _c.call_in_context(context, call)
+        return call
 
     def _project_of(self, rec):
         """Проект цели операции: из payload запроса его нет, пока воркер
@@ -245,12 +290,16 @@ class Worker:
             f.flush()
             os.fsync(f.fileno())
 
-    def _mark(self, rec, status, error=None):
-        """Переход с записью в журнал; завершённая уходит из очереди."""
+    def _mark(self, rec, status, error=None, **facts):
+        """Переход с записью в журнал; завершённая уходит из очереди.
+
+        facts (baseline/alloc/restarts) -- факты операции, в журнал: без
+        них донаблюдению восстановления не от чего отсчитывать сигнал."""
         rec = self._ops[rec["op"]]
         rec["status"] = status
         if error is not None:
             rec["error"] = error
+        rec.update({k: v for k, v in facts.items() if v is not None})
         if status in TERMINAL and rec["op"] in self._open:
             self._open.remove(rec["op"])
         self._append({**rec, "transition": status})
@@ -283,12 +332,35 @@ class Worker:
                         self._open.append(op)
 
     def _recover(self):
-        """Подъём службы: незавершённое -- unknown, без переигрывания."""
+        """Подъём службы: незавершённое -- unknown, без переигрывания.
+
+        Исключение -- наблюдаемый рестарт (#464) с журнальной базой: до
+        краша он мог и сойтись. Донаблюдение -- read-only тем же сигналом
+        (ops.observe_restart), эффект не переигрывается никогда: unknown
+        запрещает автоматический повтор (#476). Сошлось -- честный исход,
+        не сошлось -- остаётся unknown с причиной."""
         for op in list(self._open):
             rec = self._ops[op]
-            if rec["status"] in ("queued", "running"):
+            if rec["status"] not in ("queued", "running"):
+                continue
+            if rec["verb"] == "restart" and rec.get("baseline") \
+                    and self._transport is not None:
+                got = ops.observe_restart(_quiet_transport(self._transport),
+                                          rec["target"], rec["baseline"],
+                                          observe_wait=self.observe_wait,
+                                          sleep=lambda s: self._sleep(self.observe_poll),
+                                          clock=self._now)
+                if got.get("outcome") == "registered":
+                    self._mark(rec, "succeeded",
+                               alloc=got.get("alloc"),
+                               restarts=got.get("restarts"))
+                    continue
                 self._mark(rec, "unknown",
-                           error="the web service restarted mid-operation")
+                           error=got.get("error")
+                           or "the web service restarted mid-operation")
+                continue
+            self._mark(rec, "unknown",
+                       error="the web service restarted mid-operation")
 
     # ── служебное для проверок (#476: чистые механизмы) ────────────────
     def _begin_for_test(self, actor, verb, target, request):
