@@ -65,7 +65,10 @@ def main():
     # незачем. То же -- перевод строки в значении (ключ там уже выведен
     # отдельно, но строка исходная) и отказ put_file с именем-путём не
     # эхом данных.
-    # SOLUTION: отказы называют форму/ключ/путь, значение -- [redacted].
+    # SOLUTION: отказы называют форму и ключ (безопасный вид), значение --
+    # заглушка <VALUE>; без «=» присланного текста в отказе нет вовсе.
+    # RESULT: «K-V=<VALUE>: expected VAR=VALUE», «expected VAR=VALUE»;
+    # SENTINEL во всех формах отсутствует, корректная переменная разбирается.
     # STATUS: FIXED — see #429
     SENTINEL = "SENTINEL-DO-NOT-PRINT-9f3a"
     for bad in (f"K-V={SENTINEL}", f"NOEQ{SENTINEL}", f"1X={SENTINEL}",
