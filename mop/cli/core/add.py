@@ -4,6 +4,7 @@ Without origin, the origin of the current working copy is used. The name is
 picked automatically: <project>-<number>. Nomad decides placement — a puppet
 reserves 8 GB from the pool. Silent when the puppet is running; on a
 terminal it shows the current step. The new puppet is in mop list.
+Use mop models to see model IDs offered by the selected proxy.
 """
 import time
 
