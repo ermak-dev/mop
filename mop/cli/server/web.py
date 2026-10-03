@@ -20,7 +20,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
-from mop.common import bus, busnames, config
+from mop.common import bus, busnames, config, puppets
 from mop.server import web, websession
 
 # Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
@@ -384,6 +384,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"login": login, "role": role})
         if path == "/api/journal":
             return self.api_journal()
+        if path.startswith("/api/puppet/"):
+            return self.api_puppet(path)
         if path == "/llm/management.html":
             return self.llm_shim()
         if path.startswith("/llm/raw/"):
@@ -419,6 +421,44 @@ class Handler(BaseHTTPRequestHandler):
         with COLLECTOR._cond:
             entries = list(COLLECTOR.admin_journal)
         return self._json(200, {"journal": entries})
+
+    def api_puppet(self, path):
+        """Карточка папета и его хвост -- только актуальному admin (#462).
+
+        Тот же fail closed, что у /api/journal: сменившийся admin -> user и
+        умерший провайдер не пускают. Цель -- реальный job из строк ростера:
+        имя из пути до читателей не доезжает (404 без запроса к шине).
+        Хвост -- ограничен и помечает обрезание; ничего не пишется и не
+        логируется: log_message молчит, ответы no-store."""
+        try:
+            login, role = self._who()
+        except Exception:
+            login, role = None, None
+        if not login:
+            return self._json(401, {"error": "login required"})
+        if role != "admin":
+            return self._json(403, {"error": "admin only"})
+        # /api/puppet/<имя>[/tail|/stderr]: имя -- остаток пути целиком;
+        # слэши в нём -- не наша грамматика, такой цели в ростере нет.
+        rest = path[len("/api/puppet/"):]
+        name, _, sub = rest.partition("/")
+        rows = getattr(COLLECTOR, "rows", None) or []
+        row = web.puppet_card(rows, name)
+        if row is None:
+            return self._json(404, {"error": "no such puppet"})
+        if not sub:
+            return self._json(200, {"puppet": row.to_dict()})
+        if sub == "tail":
+            lines, note = web.puppet_tail(name, puppets.pane_lines, puppets.node_of)
+            if lines is None:
+                return self._json(502, {"error": note})
+            return self._json(200, {"lines": lines, "truncated": note})
+        if sub == "stderr":
+            lines, note = web.puppet_stderr(name, puppets.alloc_stderr)
+            if lines is None:
+                return self._json(502, {"error": note})
+            return self._json(200, {"lines": lines})
+        return self._json(404, {"error": "no such puppet"})
 
     def stream(self):
         """SSE: снимок при подключении и на каждое изменение, пинг в тишине.
