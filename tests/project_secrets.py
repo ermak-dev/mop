@@ -59,6 +59,29 @@ def main():
         except AttributeError:
             break
 
+    # ── #429: отказ не эхом секрета ─────────────────────────────────────
+    # HYPOTHESIS: parse_var кладёт в отказ весь аргумент: «K-V=SENTINEL» --
+    # и VALUE уезжает в stderr/journal мастера, куда секрету попадать
+    # незачем. То же -- перевод строки в значении (ключ там уже выведен
+    # отдельно, но строка исходная) и отказ put_file с именем-путём не
+    # эхом данных.
+    # SOLUTION: отказы называют форму/ключ/путь, значение -- [redacted].
+    # STATUS: FIXED — see #429
+    SENTINEL = "SENTINEL-DO-NOT-PRINT-9f3a"
+    for bad in (f"K-V={SENTINEL}", f"NOEQ{SENTINEL}", f"1X={SENTINEL}",
+                f"K=two{SENTINEL}\nlines"):
+        try:
+            ps.parse_var(bad)
+            c.fail(f"parse_var({bad.split('=')[0]}...) must be refused")
+        except ValueError as e:
+            c.check(f"#429 the refusal of {bad.split('=')[0]}... names no value",
+                    SENTINEL not in str(e), str(e))
+    try:
+        ps.parse_var(f"GOODKEY={SENTINEL}")
+        c.check("#429 a well-formed var still parses", True)
+    except ValueError as e:
+        c.fail("#429 redaction must not refuse well-formed vars", str(e))
+
     # Корень -- ещё не существующий: его заводит само хранилище, как на сервере.
     root = os.path.join(tempfile.mkdtemp(prefix="mop-test-secrets-"), "project-secrets")
     try:

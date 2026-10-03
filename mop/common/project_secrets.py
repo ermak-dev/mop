@@ -46,8 +46,17 @@ def parse_var(text):
     строки -- отказ: переменная живёт одной строкой в vars.env."""
     key, sep, value = (text or "").partition("=")
     key = key.strip()
+    # Отказ называет форму, но не значение (#429): аргумент печатается в
+    # stderr мастера и уходит в журнал -- секрету там места нет. Было «=» --
+    # значение уходит, остаётся ключ и заглушка; без «=» -- как было,
+    # значения в аргументе нет.
     if not sep or not _KEY.match(key):
-        raise ValueError(f"{text!r}: expected VAR=VALUE")
+        head = (text or "").split("=", 1)[0]
+        shown = (f"{head}=<VALUE>" if sep
+                 # Без «=» значения в аргументе нет, но и сыпать его целиком
+                 # в stderr незачем: это чужие данные того же сорта.
+                 else ((text or "")[:24] + "…" if len(text or "") > 24 else (text or "")))
+        raise ValueError(f"{shown!r}: expected VAR=VALUE")
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         value = value[1:-1]
     if "\n" in value or "\r" in value:
