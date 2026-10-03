@@ -147,10 +147,21 @@ class Operations:
     def __init__(self):
         self._lock = threading.Lock()
         self._actions = {"send": SEND_PARAMS}
+        # Операции без цели (#470): add заводит нового папета -- имени ещё
+        # нет, его присвоит сервис, и цель клика -- сам origin.
+        self._targetless = set()
 
-    def register(self, action, params):
+    def register(self, action, params, target=True):
         with self._lock:
             self._actions[action] = tuple(params)
+            if not target:
+                self._targetless.add(action)
+            else:
+                self._targetless.discard(action)
+
+    def needs_target(self, action):
+        with self._lock:
+            return action not in self._targetless
 
     def has(self, action):
         with self._lock:
@@ -254,21 +265,37 @@ class Api:
             # Произвольный subject/verb/shell/actor/env -- тот же отказ.
             raise Refused(400, "unknown fields: " + ", ".join(unknown))
         action, target, params = got.get("action"), got.get("target"), got.get("params") or {}
-        if not isinstance(action, str) or not isinstance(target, str) \
-                or not isinstance(params, dict):
+        if not isinstance(action, str) or not isinstance(params, dict):
+            raise Refused(400, "schema: {action, target, params}")
+        # Цель обязательна, кроме зарегистрированных без неё (#470): add
+        # кладёт origin в params, и присвоенное имя едет фактом записи.
+        if target is None and self.ops.needs_target(action) or \
+                (target is not None and not isinstance(target, str)):
             raise Refused(400, "schema: {action, target, params}")
         self.ops.check(action, params)
         return action, target, params
 
     # ─── постановка и повторы ──────────────────────────────────────────
+    @staticmethod
+    def effective_target(action, target, params):
+        """Устойчивая идентичность операции (#470): target, а для операции
+        без цели -- origin из params. Две подачи одного origin -- один
+        спор, подачи разных origin'ов друг другу не мешают."""
+        if target is None:
+            return params.get("origin")
+        return target
+
     def submit(self, action, target, params, who):
         """Операция -> задача в очереди + запись результата. Повтор того
         же payload -- тот же id; другой payload на ту же цель -- конфликт,
         пока прежняя задача в очереди."""
-        key = (action, target, tuple(sorted(params.items())))
+        key = (action, self.effective_target(action, target, params),
+               tuple(sorted(params.items())))
         with self._lock:
             self._sweep()
-            prior = self._active.get((action, target))
+            prior = self._active.get((action,
+                                      self.effective_target(action, target,
+                                                            params)))
             if prior and prior.get("key") == key:
                 # Идемпотентный повтор: тот же ответ без второй задачи.
                 return self._results[prior["id"]]
