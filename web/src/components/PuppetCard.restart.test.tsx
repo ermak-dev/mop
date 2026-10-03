@@ -85,3 +85,26 @@ test("stale confirm after a target switch rides nowhere", async () => {
     .toHaveLength(0);
 });
 
+
+// #472: update на карточке -- явный выбор fresh (keep/replace/remove) с
+// последствиями; подтверждение точной цели, POST {action: update}.
+test("#472 the card offers update with explicit fresh modes", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => cardOk(CARD)));
+  renderUi(<PuppetCard snapshot={snap(CARD)} session={ADMIN} target={CARD.name}
+                       onClose={() => {}} />);
+  await waitFor(() => expect(screen.getByText("свободен")).toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: /^правка$/i }));
+  // три явных режима, ни один не выбран заранее
+  for (const m of ["как было", "свежий клон", "другой origin"]) {
+    expect(screen.getByRole("radio", { name: new RegExp(m, "i") })).toBeInTheDocument();
+  }
+  expect(screen.getAllByRole("radio")
+    .filter((r) => (r as HTMLInputElement).checked)).toHaveLength(0);
+});
+
+test("#472 a guest never sees the update button", () => {
+  vi.stubGlobal("fetch", vi.fn());
+  renderUi(<PuppetCard snapshot={snap(CARD)} session={{ login: null, role: null }}
+                       target={CARD.name} onClose={() => {}} />);
+  expect(screen.queryByRole("button", { name: /^правка$/i })).toBeNull();
+});

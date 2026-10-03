@@ -11,6 +11,7 @@ import { useHashPage } from "./useHashPage";
 import { SessionBox } from "./components/SessionBox";
 import { PoolTable } from "./components/PoolTable";
 import { PuppetCard } from "./components/PuppetCard";
+import { AddBox } from "./components/AddBox";
 import { NodesPanel } from "./components/NodesPanel";
 import { Masters } from "./components/Masters";
 import { JournalPage } from "./components/JournalPage";
@@ -133,6 +134,8 @@ export default function App() {
           {snapshot && snapshot.errors.length > 0 && (
             <Alert color="red" variant="light" title="сборщик">{snapshot.errors.join("\n")}</Alert>
           )}
+          {/* завести папета (#472): кнопка главной страницы, только админу */}
+          <AddBox session={session} />
           {snapshot && (
             <>
               <PoolTable projects={snapshot.projects}

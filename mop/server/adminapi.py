@@ -41,12 +41,21 @@ safety); HTTP-whitelist может быть у́же CLI, но не копией
 Воркер (#476) подключается регистрацией исполнителя: Operations.register
 добавляет действие и его параметры. До этого endpoint отвечает
 unsupported -- интерфейс честен.
+
+GET /api/admin/projects (#472) -- список заведённых проектов для формы
+add: реестр сервера, admin-only, чтение без побочных действий (Origin-гейт
+-- защита записи, чтению он не нужен, как и GET результата). Ответ --
+имя и origin: имя выводится project_of origin'а, легаси-имена без
+origin'а форме не участвуют -- обратного отображения «имя -> origin»
+в системе нет (#33). no-store ставит обвязка HTTP.
 """
 import json
 import re
 import threading
 import time
 import uuid
+
+from ..common import puppets
 
 # ─── лимиты и сроки ──────────────────────────────────────────────────────
 BODY_MAX = 64 * 1024        # запросы -- килобайты: параметры, не файлы
@@ -83,6 +92,24 @@ class Refused(Exception):
     def __init__(self, code, error):
         super().__init__(error)
         self.code, self.error = code, error
+
+
+def project_list(known):
+    """Строки реестра -> [{name, origin}] для формы add (#472).
+
+    Имя -- project_of origin'а, единственное определение проекта (#154).
+    Легаси-строки (голые имена без origin-вида) выпадают: форму add кормит
+    origin, а не имя, обратного отображения нет (#33). Отсортировано --
+    список в ответе не зависит от порядка множества."""
+    from .. import driver  # как в cluster.py: server импортирует driver
+    if callable(known):     # провайдер-читатель реестра, как в projects()
+        known = known()
+    out = []
+    for line in known:
+        if not puppets.looks_like_origin(line):
+            continue
+        out.append({"name": driver.project_of(line), "origin": line})
+    return sorted(out, key=lambda p: p["name"])
 
 
 class Queue:
@@ -273,6 +300,20 @@ class Api:
         # Публичного в результате нет: ни params, ни текста сообщения.
         return {k: v for k, v in got.items() if k in ("id", "action", "target",
                                                       "status", "login", "at")}
+
+    # ─── GET /api/admin/projects ────────────────────────────────────────
+    def projects(self, handler, known):
+        """Список заведённых проектов (#472): имя и origin из реестра.
+        Admin-only, чтение без побочных действий; реестр живёт на сервере
+        (#117), форма add берёт его отсюда, а не с машины админа."""
+        why = self._admin(getattr(handler, "who", None), asked=True)
+        if why:
+            return handler._json(why[0], {"error": why[1]})
+        try:
+            listing = project_list(known)
+        except Exception as e:  # noqa: BLE001 -- наружу только фраза
+            return handler._json(503, {"error": sanitize(e)})
+        return handler._json(200, {"projects": listing})
 
     def _sweep(self):
         now = self._now()

@@ -12,6 +12,7 @@ import type { Session } from "../useSession";
 import { usePuppetCard, usePuppetTail } from "../usePuppetCard";
 import { RestartBox } from "./RestartBox";
 import { SendForm } from "./SendForm";
+import { UpdateBox } from "./UpdateBox";
 import { gb, verdictColor, verdictWord } from "./format";
 import { TableHead } from "./TableHead";
 
@@ -79,6 +80,8 @@ export function PuppetCard({ snapshot, session, target, onClose }: {
           {/* рестарт (#465): кнопка и точное подтверждение строки; не-admin
               его не видит, смена цели гасит подтверждение вместе с карточкой */}
           <RestartBox session={session} row={row} />
+          {/* обновление (#472): fresh -- явный выбор keep/replace/remove */}
+          <UpdateBox session={session} row={row} />
           {/* адресный send (#469): тот же общий ход операции (useAdminOp);
               форма видна только админу -- не-admin внутрь не заходит */}
           {session.role === "admin" && <SendForm session={session} target={row.name} />}

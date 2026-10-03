@@ -19,7 +19,8 @@ export const sendWord = (status: string): string =>
 const TERMINAL = new Set(["succeeded", "refused", "failed", "partial", "unknown"]);
 
 export function SendForm({ session, target }: { session: Session; target: string }) {
-  const { op, submit } = useAdminOp(session, session.role === "admin" ? target : null, "send");
+  // третий аргумент хука -- pollMs (#473): действие уезжает в submit, не сюда
+  const { op, submit } = useAdminOp(session, session.role === "admin" ? target : null);
   const [message, setMessage] = useState("");
   const live = op.status !== "idle" && !TERMINAL.has(op.status);
 

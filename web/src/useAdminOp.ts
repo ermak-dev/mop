@@ -56,7 +56,9 @@ export function useAdminOp(session: Session, target: string | null,
   const submit = useCallback(async (act: string = "restart",
                                 params: Record<string, unknown> = {}):
     Promise<string | null> => {
-    if (session.role !== "admin" || !target) {
+    // Цель у add нет (#472): контракт {action, target?, params}; отказ
+    // только у не-admin -- null-цель сама по себе не отказ.
+    if (session.role !== "admin") {
       setOp({ status: "refused", id: null, error: DENIED, lost: false });
       return null;
     }
@@ -69,10 +71,15 @@ export function useAdminOp(session: Session, target: string | null,
     setOp({ status: "submitted", id: null, error: null, lost: false });
     const ride = (async (): Promise<string | null> => {
       try {
+        // Ключ target при null-цели не едет вовсе (#472): контракт
+        // {action, target?, params}, и null в JSON не «отсутствие».
+        const schema = target === null
+          ? { action: act, params }
+          : { action: act, target, params };
         const r = await fetch("/api/admin/ops", {
           method: "POST", credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: act, target, params }),
+          body: JSON.stringify(schema),
         });
         if (at !== seq.current) return null;      // источник сменился
         if (!r.ok) {
