@@ -79,7 +79,7 @@ test("the tail loads only on request, truncation is named", async () => {
   await waitFor(() => expect(screen.getByText("свободен")).toBeInTheDocument());
   expect(fetchMock).toHaveBeenCalledTimes(1);   // карточка, не хвост
   expect(screen.queryByTestId("tail-lines")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: /экран/i }));
+  fireEvent.click(screen.getByRole("tab", { name: /экран/i }));
   await waitFor(() => expect(screen.getByTestId("tail-lines")).toBeInTheDocument());
   expect(screen.getByText("line 1")).toBeInTheDocument();
   expect(screen.getByText("обрезано", { exact: false })).toBeInTheDocument();
@@ -99,7 +99,7 @@ test("screen text with markup is shown as text, never executed", async () => {
       : cardOk(CARD)));
   open();
   await waitFor(() => expect(screen.getByText("свободен")).toBeInTheDocument());
-  fireEvent.click(screen.getByRole("button", { name: /экран/i }));
+  fireEvent.click(screen.getByRole("tab", { name: /экран/i }));
   await waitFor(() => expect(screen.getByTestId("tail-lines")).toBeInTheDocument());
   expect(screen.getByText('<img src=x onerror="alert(1)">')).toBeInTheDocument();
   expect(screen.getByText("\x1b[31mred ansi\x1b[0m")).toBeInTheDocument();
@@ -119,7 +119,7 @@ test("403 on the card: no facts on the screen", async () => {
   open();
   await waitFor(() => expect(screen.getByText(/прав не хватает/)).toBeInTheDocument());
   expect(screen.queryByText("master")).toBeNull();
-  expect(screen.queryByRole("button", { name: /экран/i })).toBeNull();
+  expect(screen.queryByRole("tab", { name: /экран/i })).toBeNull();
 });
 
 test("an unknown target names the refusal, the close button stays", async () => {

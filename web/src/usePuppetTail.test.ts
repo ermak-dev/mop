@@ -122,6 +122,48 @@ test("no storage: nothing lands in localStorage or sessionStorage", async () => 
   expect(window.sessionStorage.length).toBe(0);
 });
 
+// HYPOTHESIS: у запроса нет pending, и старый ответ может погасить новый спиннер.
+// SOLUTION: loading принадлежит поколению запроса, включая чтение JSON.
+// RESULT: старый ответ не гасит новый спиннер; смена источника очищает его.
+// STATUS: FIXED — see #484
+test("#484 loading belongs to the latest request through JSON decoding", async () => {
+  let first!: (r: Response) => void;
+  let body!: (b: unknown) => void;
+  const fetchMock = vi.fn()
+    .mockImplementationOnce(() => new Promise<Response>((resolve) => { first = resolve; }))
+    .mockResolvedValueOnce({ ok: true, json: () => new Promise((resolve) => { body = resolve; }) });
+  vi.stubGlobal("fetch", fetchMock);
+  const view = renderHook(() => usePuppetTail(ADMIN, "pu-mop-1"));
+  expect(view.result.current.loading).toBe(false);
+  let p1!: Promise<void>, p2!: Promise<void>;
+  await act(async () => { p1 = view.result.current.load(); });
+  expect(view.result.current.loading).toBe(true);
+  await act(async () => { p2 = view.result.current.load(); });
+  await act(async () => { first(tailOk(["stale"])); await p1; });
+  expect(view.result.current.loading).toBe(true);
+  await act(async () => { body({ lines: ["latest"] }); await p2; });
+  expect(view.result.current.loading).toBe(false);
+  expect(view.result.current.lines).toEqual(["latest"]);
+});
+
+test("#484 switching sources cancels the previous loading state", async () => {
+  vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+  const view = renderHook(({ target }) => usePuppetTail(ADMIN, target),
+    { initialProps: { target: "pu-mop-1" as string | null } });
+  await act(async () => { void view.result.current.load(); });
+  expect(view.result.current.loading).toBe(true);
+  view.rerender({ target: null });
+  expect(view.result.current.loading).toBe(false);
+});
+
+test("#484 failed requests stop loading", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+  const view = renderHook(() => usePuppetTail(ADMIN, "pu-mop-1"));
+  await act(async () => { await view.result.current.load(); });
+  expect(view.result.current.loading).toBe(false);
+  expect(view.result.current.error).toBeTruthy();
+});
+
 // прямое обращение к глобальному fetch внутри проверки подмены
 test("no storage: nothing lands in localStorage or sessionStorage (recheck)", () => {
   // дубль выше уже прошёл; здесь только сигнатура глобалов на месте

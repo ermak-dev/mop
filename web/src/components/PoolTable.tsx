@@ -6,6 +6,8 @@
 // заголовок секции: секция и есть проект, у всех строк один origin.
 import { Badge, Box, Code, Group, Stack, Table, Text, Tooltip } from "@mantine/core";
 import type { Counts, Project, Puppet } from "../types";
+import type { Session } from "../useSession";
+import { PuppetActions } from "./PuppetActions";
 import { gb, KIND_WORD, presentKinds, verdictColor, verdictWord } from "./format";
 import { EmptyNote, SectionTitle } from "./Section";
 import { align, TableHead } from "./TableHead";
@@ -31,7 +33,9 @@ const statusTip = (p: Puppet): string => `${p.state} · ${p.alloc_status}`;
 const origins = (sh: Project): string[] =>
   [...new Set(sh.puppets.map((p) => p.origin).filter(Boolean))];
 
-function Row({ p, onOpen }: { p: Puppet; onOpen?: (name: string) => void }) {
+function Row({ p, onOpen, session }: {
+  p: Puppet; onOpen?: (name: string) => void; session?: Session;
+}) {
   const color = verdictColor(p.kind, p.bucket);
   return (
     <Table.Tr data-kind={p.bucket || p.kind}>
@@ -71,12 +75,16 @@ function Row({ p, onOpen }: { p: Puppet; onOpen?: (name: string) => void }) {
       <Table.Td>{p.owner || "-"}</Table.Td>
       <Table.Td>{p.llm}</Table.Td>
       <Table.Td ta={align(COLS.disk)}>{gb(p.disk_kb)}</Table.Td>
+      {session?.role === "admin" && <Table.Td>
+        <PuppetActions key={`${session.login}\0${p.name}`} row={p} session={session} />
+      </Table.Td>}
     </Table.Tr>
   );
 }
 
-export function PoolTable({ projects, onOpen }: {
+export function PoolTable({ projects, onOpen, session }: {
   projects: Project[];
+  session?: Session;
   /** Открыть карточку папета по имени (#463); нет -- имя строкой, гостю
    *  карточка недоступна и опенер не рисуется. */
   onOpen?: (name: string) => void;
@@ -94,10 +102,12 @@ export function PoolTable({ projects, onOpen }: {
           {origins(sh).map((o) => (
             <Text key={o} size="sm" c="dimmed"><Code>{o}</Code></Text>
           ))}
-          <Table striped highlightOnHover withTableBorder>
-            <TableHead cols={Object.values(COLS)} />
-            <Table.Tbody>{sh.puppets.map((p) => <Row key={p.name} p={p} onOpen={onOpen} />)}</Table.Tbody>
-          </Table>
+          <Table.ScrollContainer minWidth={session?.role === "admin" ? 1080 : 800}>
+            <Table striped highlightOnHover withTableBorder>
+              <TableHead cols={[...Object.values(COLS), ...(session?.role === "admin" ? [{ label: "действия" }] : [])]} />
+              <Table.Tbody>{sh.puppets.map((p) => <Row key={p.name} p={p} onOpen={onOpen} session={session} />)}</Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
         </div>
       ))}
     </Stack>

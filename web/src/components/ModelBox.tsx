@@ -1,4 +1,4 @@
-// Смена модели на карточке папета (#468): выбор из каталога прокси --
+// Смена модели из строки папета: выбор из каталога прокси --
 // единственный источник (useModels, GET /api/admin/models), своего списка
 // страница не держит. Подтверждение -- точная цель (имя, узел, модель),
 // как у рестарта (#465) и правки (#472). Ход операции -- общий useAdminOp:
@@ -7,6 +7,8 @@
 // считается. Радио, а не Select: выпадашка не открывается в jsdom (#472).
 // Не-admin кнопки не видит; результат в памяти страницы.
 import { useState } from "react";
+import { IconCpu } from "@tabler/icons-react";
+import { IconButton } from "./IconButton";
 import { Button, Code, Group, Modal, Radio, Stack, Text } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -36,10 +38,10 @@ export function ModelBox({ session, row }: {
   };
   return (
     <Group gap="sm">
-      <Button size="xs" variant="light" color="blue" disabled={live}
+      <IconButton label="модель" variant="subtle" size="lg" disabled={live}
               onClick={() => { setModel(null); setOpen(true); }}>
-        модель
-      </Button>
+        <IconCpu size={18} />
+      </IconButton>
       {op.status !== "idle" && (
         <Text size="sm" c={op.status === "succeeded" ? "teal"
                             : op.status === "unknown" ? "yellow" : "red"}
@@ -54,6 +56,7 @@ export function ModelBox({ session, row }: {
                title="смена модели" data-testid="model-form"
                closeButtonProps={{ "aria-label": "закрыть" }}>
           <Stack gap="sm" data-testid="model-choices">
+            <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
             {catalogError ? <Text size="sm" c="red">{catalogError}</Text> : null}
             {models.length ? (
               <Radio.Group value={model}

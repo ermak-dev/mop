@@ -549,6 +549,9 @@ the dashboard's build: Vite + React in web/, the result committed in web/dist
 
   mop dev web build            npm ci and vite build into web/dist
   mop dev web build --check    build aside and compare with web/dist byte for byte
+  mop dev web test [file ...]  run the dashboard interaction tests
+  mop dev web test --types     check TypeScript
+  mop dev web preview         serve the built dashboard locally, without a pool API
 
 Node and npm are the developer's and CI's: the servers get the built dist
 with the package and never run node. `--check` is what CI runs on every
@@ -568,6 +571,25 @@ Runs `npm ci` and `vite build` in web/. Silent when the build lands.
 
 Needs node and npm on this machine (the developer's or CI's), never on a
 server.
+```
+
+#### mop dev web preview
+
+```text
+mop dev web preview [--port N]: serve the built dashboard on localhost
+
+Serves web/dist on 127.0.0.1:4173 by default, without a pool API.
+Build first with `mop dev web build`. Stop with Ctrl+C.
+```
+
+#### mop dev web test
+
+```text
+mop dev web test [file ...] [--types]: check the dashboard
+
+Runs Vitest in web/, optionally restricted to the named test files.
+With --types, runs TypeScript checking instead of interaction tests.
+Install dependencies first with `mop dev web build`.
 ```
 
 ### driver: node driver: in what a puppet lives

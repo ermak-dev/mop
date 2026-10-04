@@ -138,7 +138,7 @@ export default function App() {
           <AddBox session={session} />
           {snapshot && (
             <>
-              <PoolTable projects={snapshot.projects}
+              <PoolTable projects={snapshot.projects} session={session}
                          onOpen={session.role === "admin" ? setPuppet : undefined} />
               <PuppetCard snapshot={snapshot} session={session}
                           target={session.role === "admin" ? puppet : null}

@@ -79,6 +79,8 @@ export interface PuppetTailState {
   lines: string[];
   truncated: boolean;
   error: string | null;
+  loading: boolean;
+  loaded: boolean;
   load: () => Promise<void>;
 }
 
@@ -90,6 +92,8 @@ export function usePuppetTail(session: Session, target: string | null,
   const [lines, setLines] = useState<string[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   // поколение: растёт на каждый load и на каждую смену источника -- ответ
   // с меньшим номером молча теряется, чьи бы строки он ни вёз
   const gen = useRef(0);
@@ -100,11 +104,11 @@ export function usePuppetTail(session: Session, target: string | null,
   if (prev.current !== source) {
     prev.current = source;
     gen.current++;
-    if (lines.length || truncated || error) {
-      setLines([]);
-      setTruncated(false);
-      setError(null);
-    }
+    setLines([]);
+    setTruncated(false);
+    setError(null);
+    setLoading(false);
+    setLoaded(false);
   }
 
   const load = useCallback(async () => {
@@ -113,9 +117,13 @@ export function usePuppetTail(session: Session, target: string | null,
       setLines([]);
       setTruncated(false);
       setError(session.role !== "admin" && target ? DENIED : null);
+      setLoading(false);
+      setLoaded(false);
       return;
     }
     const at = ++gen.current;
+    setLoading(true);
+    setError(null);
     try {
       const r = await fetch(`/api/puppet/${encodeURIComponent(target)}/${which}`,
                             { credentials: "same-origin" });
@@ -131,8 +139,13 @@ export function usePuppetTail(session: Session, target: string | null,
       setLines([]);
       setTruncated(false);
       setError(SILENT);
+    } finally {
+      if (at === gen.current) {
+        setLoading(false);
+        setLoaded(true);
+      }
     }
   }, [session.role, session.login, target, which]);
 
-  return { lines, truncated, error, load };
+  return { lines, truncated, error, loading, loaded, load };
 }

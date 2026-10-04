@@ -1,4 +1,4 @@
-// Restart в карточке папета (#465): кнопка, точное подтверждение и
+// Restart из строки папета: иконка, точное подтверждение и
 // вердикт операции. Подтверждение показывает факты строки (имя, узел,
 // state-строка) -- подтверждается ровно то, что на экране; слова вердикта
 // -- модель #476: running -- «идёт», unknown -- «неизвестно» (НЕ failed:
@@ -7,6 +7,8 @@
 // Результат операции в памяти страницы: перезагрузка начинает заново --
 // id хранить негде (#463 запретил storage), это названо в отчёте #465.
 import { useState } from "react";
+import { IconRefresh } from "@tabler/icons-react";
+import { IconButton } from "./IconButton";
 import { Button, Code, Group, Modal, Stack, Text } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -34,11 +36,10 @@ export function RestartBox({ session, row }: {
   const live = op.status !== "idle" && !TERMINAL.has(op.status);
   return (
     <Group gap="sm">
-      <Button size="xs" variant="light" color="orange"
-              disabled={live}
-              onClick={() => setOpen(true)}>
-        рестарт
-      </Button>
+      <IconButton label="рестарт" variant="subtle" color="orange" size="lg"
+              disabled={live} onClick={() => setOpen(true)}>
+        <IconRefresh size={18} />
+      </IconButton>
       {/* вердикт держится, пока операция жива или терминальна в этой памяти */}
       {op.status !== "idle" && (
         <Text size="sm" c={op.status === "succeeded" ? "teal"
