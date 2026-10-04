@@ -585,7 +585,8 @@ def drive_operations():
             continue
         verdict = WORKER.submit(job.get("login") or "-",
                                 job["action"], job.get("target") or "",
-                                job.get("params") or {}, key=job["id"])
+                                job.get("params") or {}, key=job["id"],
+                                transport=opworker.default_transport())
         ADMINAPI.settle(job["id"], verdict)
 
 

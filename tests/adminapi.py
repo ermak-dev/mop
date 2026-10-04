@@ -164,6 +164,27 @@ def main():
     got = driven_api.result(op_id, ("anton", "admin"))
     c.expect("#491 the result reads the worker verdict",
              got.get("status"), "succeeded")
+    # #496: причина исхода едет в результат. Слой #495 переводит её в
+    # закрытую публичную фразу по словарю фрагментов: известная причина
+    # узнаваема, неизвестная получает свой fallback -- но не пустоту.
+    body2 = req("restart", "pu-mop-9")
+    h2 = Handler(who=ADMIN, body=body2, length=len(body2))
+    driven_api.post(h2)
+    op2 = h2.sent[0][1]["id"]
+    driven_api.settle(op2, {"status": "refused",
+                            "error": "pu-mop-9: work in the clone: 2 uncommitted"})
+    got = driven_api.result(op2, ("anton", "admin"))
+    c.expect("#496 the result carries the refusal reason",
+             got.get("error"), "target has unfinished work")
+    # Драйверный транспорт существует и говорит глаголами кластера.
+    from mop.server import opworker as _ow2
+    c.check("#496 default_transport is a callable, not None",
+            callable(_ow2.default_transport()), None)
+    # Библиотечная фраза переживает sanitize: имя папета и слова причины
+    # остаются -- санитизация для сырых исключений, не для готовых фраз.
+    c.expect("#496 sanitize keeps a library phrase readable",
+             adminapi.sanitize("pu-mop-2: tmux session is alive"),
+             "pu-mop-2 tmux session is alive")
 
     # ── #464/#489: воркер регистрирует все глаголы адаптера одной точкой;
     # рестарт был пропущен -- POST из GUI отвечал unsupported (#489).
