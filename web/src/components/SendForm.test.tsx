@@ -1,13 +1,15 @@
 // #469: адресный send, один POST, payload не в URL/storage, честный исход.
 // #489: те же гарантии проверяются через поле в диалоге экрана.
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { MantineProvider } from "@mantine/core";
 import { PoolTable } from "./PoolTable";
 import { SendForm, sendWord } from "./SendForm";
 import { emptySnapshot, renderUi } from "../test-utils";
 import type { Puppet } from "../types";
 
+const notice = vi.hoisted(() => ({ show: vi.fn() }));
+vi.mock("@mantine/notifications", () => ({ notifications: { show: notice.show } }));
 const ADMIN = { login: "anton", role: "admin" as const };
 const CARD: Puppet = {
   name: "pu-mop-1", node: "hyper", alloc_status: "running",
@@ -37,7 +39,15 @@ const typeAndSend = async () => {
 };
 const posts = (mock: ReturnType<typeof route>) => mock.mock.calls.filter((c) => c[1]?.method === "POST");
 
+beforeEach(() => notice.show.mockClear());
 afterEach(() => vi.unstubAllGlobals());
+
+const readyForNext = async () => {
+  fireEvent.change(screen.getByLabelText("Сообщение"), { target: { value: "следующее" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled());
+  expect(screen.queryByTestId("send-verdict")).toBeNull();
+  expect(notice.show).not.toHaveBeenCalled();
+};
 
 test("sendWord names the outcome for a human", () => {
   expect(sendWord("succeeded")).toBe("доставлено");
@@ -51,7 +61,7 @@ test("#469 the row offers send to the admin and posts the narrow schema", async 
   vi.stubGlobal("fetch", fetchMock);
   open();
   await typeAndSend();
-  await waitFor(() => expect(screen.getByTestId("send-verdict")).toHaveTextContent("доставлено"));
+  await readyForNext();
   const post = posts(fetchMock)[0];
   expect(post[0]).toBe("/api/admin/ops");
   expect(JSON.parse(post[1]!.body as string))
@@ -63,7 +73,7 @@ test("#469 the payload never rides the URL or storage", async () => {
   vi.stubGlobal("fetch", fetchMock);
   open();
   await typeAndSend();
-  await waitFor(() => expect(screen.getByTestId("send-verdict")).toHaveTextContent("доставлено"));
+  await readyForNext();
   for (const call of fetchMock.mock.calls) expect(String(call[0])).not.toContain("привет");
   expect(JSON.stringify(window.localStorage)).not.toContain("привет");
   expect(JSON.stringify(window.sessionStorage)).not.toContain("привет");
@@ -89,8 +99,10 @@ test.each([["refused", "отказано"], ["unknown", "исход неизве
     vi.stubGlobal("fetch", route(async () => ok202("op-1"), async () => opJson(status, "held by ermak")));
     open();
     await typeAndSend();
-    await waitFor(() => expect(screen.getByTestId("send-verdict")).toHaveTextContent(word));
-    expect(screen.getByText("held by ermak")).toBeInTheDocument();
+    await waitFor(() => expect(notice.show).toHaveBeenCalledTimes(1));
+    expect(notice.show.mock.calls[0][0].message).toContain(word);
+    expect(notice.show.mock.calls[0][0].message).toContain("held by ermak");
+    expect(screen.queryByText("held by ermak")).toBeNull();
   });
 
 test("#469 a submit refusal names the phrase without fake success", async () => {
@@ -98,7 +110,9 @@ test("#469 a submit refusal names the phrase without fake success", async () => 
     json: async () => ({ error: "admin only" }) }) as Response, async () => opJson("running")));
   open();
   await typeAndSend();
-  expect(await screen.findByText(/admin only/)).toBeInTheDocument();
+  await waitFor(() => expect(notice.show).toHaveBeenCalledTimes(1));
+  expect(notice.show.mock.calls[0][0].message).toContain("admin only");
+  expect(notice.show.mock.calls[0][0].message).not.toContain("доставлено");
   expect(screen.queryByText("доставлено")).toBeNull();
 });
 
@@ -129,6 +143,7 @@ test.each(["logout", "target"])("#469 late verdict after %s lands nowhere", asyn
     session={change === "logout" ? { login: null, role: null } : ADMIN} /></MantineProvider>);
   await act(async () => { release(ok202("op-1")); });
   expect(screen.queryByTestId("send-verdict")).toBeNull();
+  expect(notice.show).not.toHaveBeenCalled();
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(posts(fetchMock)).toHaveLength(1);
 });
@@ -137,5 +152,5 @@ test("#469 the bare form works standalone", async () => {
   vi.stubGlobal("fetch", route(async () => ok202("op-1"), async () => opJson("succeeded")));
   renderUi(<SendForm session={ADMIN} target={CARD.name} />);
   await typeAndSend();
-  await waitFor(() => expect(screen.getByTestId("send-verdict")).toHaveTextContent("доставлено"));
+  await readyForNext();
 });

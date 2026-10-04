@@ -191,6 +191,22 @@ test("a refusal names the server phrase (the dialog did not close, a foreign lea
     .toMatch(/dialog did not close/);
 });
 
+// HYPOTHESIS: done.current=null совпадает с id отказа ещё до постановки в очередь.
+// SOLUTION: общий механизм учитывает завершённую попытку, не только id.
+// STATUS: FIXED — see #492
+test("#492 each model submission refusal without an id produces a balloon", async () => {
+  shown.length = 0;
+  vi.stubGlobal("fetch", postGet(async () => ({ ok: false, status: 403,
+    json: async () => ({ error: "admin only" }) }) as Response,
+    async () => opJson("running")));
+  renderUi(<ModelBox session={ADMIN} row={ROW} />);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    await ride(/glm-5\.3-flash/i);
+    await waitFor(() => expect(shown).toHaveLength(attempt));
+    expect(String((shown[attempt - 1] as { message: string }).message)).toContain("admin only");
+  }
+});
+
 test("a guest and a user see no model button", () => {
   vi.stubGlobal("fetch", vi.fn());
   renderUi(<ModelBox session={{ login: null, role: null }} row={ROW} />);

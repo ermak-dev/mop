@@ -6,8 +6,8 @@
 // свежая запись, та же модель) -- «диалог закрылся» подтверждением не
 // считается. Радио, а не Select: выпадашка не открывается в jsdom (#472).
 // Не-admin кнопки не видит; результат в памяти страницы.
-import { useEffect, useRef, useState } from "react";
-import { notifications } from "@mantine/notifications";
+import { useState } from "react";
+import { useOperationNotice } from "../useOperationNotice";
 import { IconCpu } from "@tabler/icons-react";
 import { IconButton } from "./IconButton";
 import { Button, Code, Group, Modal, Radio, Stack, Text } from "@mantine/core";
@@ -17,16 +17,6 @@ import { useModels } from "../useModels";
 import { TERMINAL, useAdminOp } from "../useAdminOp";
 
 import { opWord } from "./RestartBox";
-
-// Цвет и жизнь балуна вердикта (#488): терминал -- заметный, accepted --
-// короткая тихая сводка, unknown -- жёлтый вопрос.
-export const verdictToast = (status: string, error?: string | null) => ({
-  color: status === "succeeded" ? "teal"
-       : status === "unknown" ? "yellow"
-       : status === "accepted" ? "gray" : "red",
-  message: `${opWord(status)}${error ? `: ${error}` : ""}`,
-  autoClose: status === "accepted" ? 4000 : 8000,
-});
 
 export function ModelBox({ session, row }: {
   session: Session;
@@ -41,17 +31,13 @@ export function ModelBox({ session, row }: {
   // Каталог -- при открытии формы (want=open): чтение без действий.
   const { models, error: catalogError } = useModels(
     session, session.role === "admin" && open);
-  // Терминальный вердикт -- балун + перечитанный снимок (#488): модель
-  // в ростере приезжает сама, без F5. Один раз на смену статуса: прошлый
-  // терминал помним.
-  const done = useRef<string | null>(null);
-  useEffect(() => {
-    if (op.status === "idle" || !TERMINAL.has(op.status)) return;
-    if (done.current === op.id) return;
-    done.current = op.id;
-    notifications.show(verdictToast(op.status, op.error));
-    fetch("/api/pool", { credentials: "same-origin" }).catch(() => {});
-  }, [op.status, op.id, op.error]);
+  useOperationNotice(op, {
+    scope: `${session.login}\0${session.role}\0${row.name}`,
+    title: `Смена модели: ${row.name}`,
+    word: op.status === "succeeded" ? "модель изменена" : opWord(op.status),
+    enabled: session.role === "admin",
+    onSettled: () => { void fetch("/api/pool", { credentials: "same-origin" }).catch(() => {}); },
+  });
   if (session.role !== "admin") return null;
   const current = row.llm && row.llm !== "-" ? row.llm : null;
   const go = () => {
