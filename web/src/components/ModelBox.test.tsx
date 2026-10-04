@@ -23,6 +23,9 @@ const ROW: Puppet = {
   branch: "master", owner: "-", llm: "-", origin: "git@h:g/mop.git", disk_kb: null,
 };
 
+// #488: у папета есть текущая модель -- диалог обязан её показать.
+const LIVE_ROW: Puppet = { ...ROW, llm: "glm-5.3-flash" };
+
 const ok202 = (id: string) =>
   ({ ok: true, status: 202, json: async () => ({ id, status: "accepted" }) }) as Response;
 const opJson = (status: string) =>
@@ -61,6 +64,45 @@ test("the card offers a model switch with the catalog as radios, no preselection
   // ни один вариант не выбран заранее: смена без выбора невозможна
   const checked = screen.getAllByRole("radio").filter((r) => (r as HTMLInputElement).checked);
   expect(checked).toHaveLength(0);
+});
+
+test("#488 the current model is marked and not selectable", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => catalog()));
+  renderUi(<ModelBox session={ADMIN} row={LIVE_ROW} />);
+  await openBox();
+  const cur = screen.getByRole("radio", { name: /текущая.*glm-5\.3-flash|glm-5\.3-flash.*текущая/i });
+  expect(cur).toBeDisabled();
+  // остальные -- живые для выбора
+  expect(screen.getByRole("radio", { name: /^glm-5\.3$/i })).toBeEnabled();
+});
+
+// #488: шпион балунов на уровне модуля -- vi.mock поднимается наверх.
+const shown: unknown[] = [];
+vi.mock("@mantine/notifications", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("@mantine/notifications")>();
+  return { ...orig, notifications: { ...orig.notifications,
+    show: (n: unknown) => shown.push(n) } };
+});
+
+test("#488 verdicts ride toast balloons, not an inline line", async () => {
+  shown.length = 0;
+  vi.stubGlobal("fetch", postGet(() => Promise.resolve(ok202("op-1")),
+                            () => Promise.resolve(opJson("refused"))));
+  renderUi(<ModelBox session={ADMIN} row={LIVE_ROW} />);
+  await ride(/claude-opus-5-5/i);
+  await waitFor(() => expect(shown.length).toBeGreaterThan(0));
+  const last = shown[shown.length - 1] as { message?: string; color?: string };
+  expect(String(last.message)).toContain("отказано");
+});
+
+test("#488 after a terminal verdict the pool snapshot is refetched", async () => {
+  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
+                            () => Promise.resolve(opJson("succeeded")));
+  vi.stubGlobal("fetch", fetchMock);
+  renderUi(<ModelBox session={ADMIN} row={LIVE_ROW} />);
+  await ride(/claude-opus-5-5/i);
+  await waitFor(() => expect(fetchMock.mock.calls
+    .filter((c) => String(c[0]).endsWith("/api/pool"))).toHaveLength(1));
 });
 
 test("the catalog comes from the server facade, not a homemade list", async () => {
@@ -119,16 +161,19 @@ test("without a choice the continue button is locked and nothing posts", async (
 });
 
 test("succeeded reads the confirmed word, unknown is named unknown", async () => {
+  shown.length = 0;
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("unknown")));
   vi.stubGlobal("fetch", fetchMock);
   renderUi(<ModelBox session={ADMIN} row={ROW} />);
   await ride(/glm-5\.3-flash/i);
-  await waitFor(() => expect(screen.getByTestId("model-verdict"))
-    .toHaveTextContent(/исход неизвестен/i));
+  await waitFor(() => expect(shown.length).toBeGreaterThan(0));
+  expect(String((shown[shown.length - 1] as { message?: string }).message))
+    .toMatch(/исход неизвестен/i);
 });
 
 test("a refusal names the server phrase (the dialog did not close, a foreign lease)", async () => {
+  shown.length = 0;
   const refused = () =>
     ({ ok: true, status: 200, json: async () => ({ id: "op-1",
        action: "model", target: "pu-mop-1", status: "refused",
@@ -139,9 +184,10 @@ test("a refusal names the server phrase (the dialog did not close, a foreign lea
   vi.stubGlobal("fetch", fetchMock);
   renderUi(<ModelBox session={ADMIN} row={ROW} />);
   await ride(/glm-5\.3-flash/i);
-  await waitFor(() => expect(screen.getByTestId("model-verdict"))
-    .toHaveTextContent(/отказано/i));
-  expect(screen.getByTestId("model-verdict").textContent)
+  await waitFor(() => expect(shown.length).toBeGreaterThan(0));
+  expect(String((shown[shown.length - 1] as { message?: string }).message))
+    .toMatch(/отказано/i);
+  expect(String((shown[shown.length - 1] as { message?: string }).message))
     .toMatch(/dialog did not close/);
 });
 

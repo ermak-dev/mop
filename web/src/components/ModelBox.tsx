@@ -6,7 +6,8 @@
 // свежая запись, та же модель) -- «диалог закрылся» подтверждением не
 // считается. Радио, а не Select: выпадашка не открывается в jsdom (#472).
 // Не-admin кнопки не видит; результат в памяти страницы.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { notifications } from "@mantine/notifications";
 import { IconCpu } from "@tabler/icons-react";
 import { IconButton } from "./IconButton";
 import { Button, Code, Group, Modal, Radio, Stack, Text } from "@mantine/core";
@@ -16,6 +17,16 @@ import { useModels } from "../useModels";
 import { TERMINAL, useAdminOp } from "../useAdminOp";
 
 import { opWord } from "./RestartBox";
+
+// Цвет и жизнь балуна вердикта (#488): терминал -- заметный, accepted --
+// короткая тихая сводка, unknown -- жёлтый вопрос.
+export const verdictToast = (status: string, error?: string | null) => ({
+  color: status === "succeeded" ? "teal"
+       : status === "unknown" ? "yellow"
+       : status === "accepted" ? "gray" : "red",
+  message: `${opWord(status)}${error ? `: ${error}` : ""}`,
+  autoClose: status === "accepted" ? 4000 : 8000,
+});
 
 export function ModelBox({ session, row }: {
   session: Session;
@@ -30,7 +41,19 @@ export function ModelBox({ session, row }: {
   // Каталог -- при открытии формы (want=open): чтение без действий.
   const { models, error: catalogError } = useModels(
     session, session.role === "admin" && open);
+  // Терминальный вердикт -- балун + перечитанный снимок (#488): модель
+  // в ростере приезжает сама, без F5. Один раз на смену статуса: прошлый
+  // терминал помним.
+  const done = useRef<string | null>(null);
+  useEffect(() => {
+    if (op.status === "idle" || !TERMINAL.has(op.status)) return;
+    if (done.current === op.id) return;
+    done.current = op.id;
+    notifications.show(verdictToast(op.status, op.error));
+    fetch("/api/pool", { credentials: "same-origin" }).catch(() => {});
+  }, [op.status, op.id, op.error]);
   if (session.role !== "admin") return null;
+  const current = row.llm && row.llm !== "-" ? row.llm : null;
   const go = () => {
     if (!model || live) return;
     setOpen(false); setConfirm(false); setModel(null);
@@ -42,15 +65,6 @@ export function ModelBox({ session, row }: {
               onClick={() => { setModel(null); setOpen(true); }}>
         <IconCpu size={18} />
       </IconButton>
-      {op.status !== "idle" && (
-        <Text size="sm" c={op.status === "succeeded" ? "teal"
-                            : op.status === "unknown" ? "yellow" : "red"}
-              data-testid="model-verdict">
-          {opWord(op.status)}
-          {op.error ? `: ${op.error}` : ""}
-          {op.lost ? " (первый ответ потерян)" : ""}
-        </Text>
-      )}
       {open && !confirm && (
         <Modal opened onClose={() => setOpen(false)} size="md"
                title="смена модели" data-testid="model-form"
@@ -63,7 +77,9 @@ export function ModelBox({ session, row }: {
                            onChange={(v) => setModel(v)}>
                 <Stack gap={8} mt="xs">
                   {models.map((m) => (
-                    <Radio key={m} value={m} label={m} />
+                    <Radio key={m} value={m}
+                           label={m === current ? `${m} — текущая` : m}
+                           disabled={m === current} />
                   ))}
                 </Stack>
               </Radio.Group>
