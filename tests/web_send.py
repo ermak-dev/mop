@@ -48,10 +48,19 @@ def main():
                 opworker.register(registry)
                 api = adminapi.Api(registry, adminapi.Queue(), origin="https://pool.example")
                 record = api.submit("send", target, {"message": message}, ("alice", "admin"))
-                job = api.queue.take()
-                verdict = worker.submit(job["login"], job["action"], job["target"],
-                                        job["params"], key=job["id"])
-                api.settle(record["id"], verdict)
+                from mop.cli.server import web as webcli
+
+                class Empty(Exception):
+                    pass
+
+                def stop(_):
+                    raise Empty()
+
+                with patched(webcli, ADMINAPI=api, WORKER=worker), patched(webcli.time, sleep=stop):
+                    try:
+                        webcli.drive_operations()
+                    except Empty:
+                        pass
                 got = api.result(record["id"], ("alice", "admin"))
             else:
                 got = worker.submit("alice", "send", target,
