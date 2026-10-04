@@ -10,11 +10,14 @@
 `mop server user` -- роль могла уйти.
 """
 import ipaddress
+import json
+import os
 import secrets
 import threading
 import time
 
 from . import identity
+from ..common import fsutil
 
 
 # TTL сессии, с. Абсолютный, рабочий день: брошенная вкладка не ходит
@@ -31,18 +34,58 @@ class SessionStore:
 
     Один замок на таблицу: вход -- редкое событие, а GET /api/session ходит
     часто; спорить о таблице незачем, счётчиков попыток она не касается.
+
+    Таблица переживает рестарт сервера (#485): раскатка перезапускает
+    сервис, и выходить каждому админу после каждого deploy -- не жизнь.
+    Файл в приватном каталоге сервера, рядом с журналом операций (#476):
+    атомарная запись (временный + os.replace) на open/close, загрузка на
+    старте с вычисткой просроченных. В файле -- токены и дедлайны; роль не
+    пишется: её всё равно перечитывает провайдер на каждом взгляде (#415),
+    и украденный файл даёт ровно то, что даёт украденная cookie. Битый
+    файл -- старт с пустой таблицы: сессии сбрасываются честно, сервер
+    поднимается.
     """
 
-    def __init__(self, now=None):
+    def __init__(self, now=None, path=None):
+        from ..common import paths
         self._now = now or time.time
         self._lock = threading.Lock()
         self._sessions = {}      # токен -> (login, role, отозвать после)
+        self._path = path or paths.local("sessions.json")
+        self._load()
+
+    # ── устойчивость (#485) ────────────────────────────────────────────
+    def _load(self):
+        """Файл -> таблица. Просроченные не поднимаются; битый файл --
+        пустая таблица: молча терять живые сессии плохо, но падать сервису
+        ещё хуже, а потеря -- ровно прежнее поведение без файла."""
+        try:
+            with open(self._path) as f:
+                raw = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict):
+            return
+        now = self._now()
+        for token, row in raw.items():
+            if isinstance(row, list) and len(row) == 3 and row[2] >= now:
+                self._sessions[token] = tuple(row)
+
+    def _save(self):
+        """Таблица -> файл, атомарно. Пишется под замком таблицы."""
+        try:
+            fsutil.write_atomic(self._path, json.dumps(self._sessions))
+        except OSError:
+            # Каталог недоступен -- сессии живут в памяти, как до #485:
+            # вход не должен падать из-за хранилища.
+            pass
 
     def open(self, who):
         """Личность -> токен cookie."""
         token = secrets.token_urlsafe(32)
         with self._lock:
             self._sessions[token] = (who.login, who.role, self._now() + TTL)
+            self._save()
         return token
 
     def get(self, token, now=None):
@@ -64,7 +107,10 @@ class SessionStore:
     def close(self, token):
         """Отзыв. -> True, если сессия была."""
         with self._lock:
-            return self._sessions.pop(token, None) is not None
+            had = self._sessions.pop(token, None) is not None
+            if had:
+                self._save()
+            return had
 
 
 def provider():
