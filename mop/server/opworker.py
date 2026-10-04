@@ -35,7 +35,7 @@ import os
 import threading
 import time
 
-from ..common import ops, puppets
+from ..common import bus, ops, puppets
 
 # Сроки и лимиты (#476): настраиваются атрибутами воркера, значения --
 # заведённые константы установки.
@@ -65,6 +65,9 @@ _FROM_OUTCOME = {"registered": "succeeded", "accepted": "partial",
 # валидаторы params, их отказ -- отказ приёма, до intent.
 ADD_PARAMS = ("origin", "branch")
 UPDATE_PARAMS = ("fresh", "origin")
+# Разрушительные действия (#471) аргументов не имеют: force веб не берёт
+# по определению (#473), пустой кортеж -- «никаких лишних полей».
+RUIN_PARAMS = ()
 
 
 def register(registry):
@@ -74,6 +77,9 @@ def register(registry):
     Вызывает поднимающий веб service; проверки зовут явно."""
     registry.register("add", ADD_PARAMS, target=False)
     registry.register("update", UPDATE_PARAMS)
+    registry.register("recycle", RUIN_PARAMS)
+    registry.register("delete", RUIN_PARAMS)
+    registry.register("wipe", RUIN_PARAMS)
 
 
 def remote_workspace(origin, fetch=None):
@@ -150,6 +156,74 @@ def _quiet_transport(transport):
             except Exception:
                 return None
     return Quiet() if transport else None
+
+
+# ── жизненный цикл (#471): обёртки общего слоя ───────────────────────────
+# puppets.recycle/delete/wipe -- УЖЕ общие реализации (#458; CLI и gc зовут
+# их же), здесь только структурный ответ: воркер читает ключи outcome(),
+# вторая реализация алгоритма не пишется. Отказ владельца от ворот сервиса
+# и отказ агента (живая tmux-сессия у wipe) едут bus.Refused/RuntimeError --
+# их ловит _run и пишет failed; снос по живой сессии -- работа safety и
+# агента, не своя матрица. force веб не берёт: ни одна кнопка его не шлёт.
+# Логин -- принципал HTTP-сессии: операции #458 зовут им login=, ворота
+# владения сервиса (#40) видят человека, а не машину.
+
+
+def _outcome_of(got, name):
+    """Ответ общей функции -> вердикт outcome(). replaced=False (спека не
+    изменилась, нового прогона не будет) -- accepted: эффект был,
+    наблюдения у него нет. Ключ name из ответов узла не переопределяет
+    вердиктный -- цель операции уже названа."""
+    if not isinstance(got, dict):
+        return ops.outcome(ops.ACCEPTED, name)
+    facts = {k: v for k, v in got.items() if k not in ("name", "replaced")}
+    if got.get("replaced") is False:
+        return ops.outcome(ops.ACCEPTED, name, **facts)
+    return ops.outcome(ops.REGISTERED, name, **facts)
+
+
+# Отказы, которые суть вердикт, а не сбой: ворота сервиса (#40) и живая
+# tmux-сессия у wipe (#40 агента) отвечают внятным «нет», и CLI показывал
+# бы их как отказ операции. Неизвестность эффекта здесь ложной быть не
+# может -- обёртки ловят только эти два текста, остальное летит выше и
+# остаётся failed.
+_LIVE_SESSION = "tmux session is alive"
+
+
+def _guarded(target, fn):
+    """Общий вызов с переводом внятных отказов в refused-вердикт."""
+    try:
+        return fn()
+    except (bus.Refused, RuntimeError) as e:
+        text = str(e)
+        kind = (ops.REFUSED if _LIVE_SESSION in text
+                or "led by" in text or "held by" in text
+                else None)
+        if kind is None:
+            raise
+        return ops.outcome(kind, target, error=text)
+
+
+def _wrap_recycle(target, login):
+    return _outcome_of(_guarded(target, lambda: puppets.recycle(
+        target, force=False)), target)
+
+
+def _wrap_delete(target, login):
+    return _outcome_of(_guarded(target, lambda: puppets.delete(
+        target, force=False)), target)
+
+
+def _wrap_wipe(target, login):
+    # Голый wipe -- остановленному (#377: узел любой последней аллокации);
+    # живая сессия -- отказ агента, для неё recycle.
+    return _outcome_of(_guarded(target, lambda: puppets.wipe(
+        puppets.node_of(target, running=False), target, force=False)), target)
+
+
+# Регистрация disruptive (#460): снос клона, джоба или тела под занятой
+# сессией -- отказ даже со своей арендой; _run зовёт safety им.
+DISRUPTIVE = frozenset({"restart", "recycle", "delete", "wipe"})
 
 
 class Worker:
@@ -280,8 +354,11 @@ class Worker:
         self._mark(rec, "running")
         if safety is not None:
             # Сигнатура -- ops.safety (#460): имя, проект цели, принципал.
+            # Разрушительность -- словарь регистрации (#471), не решение
+            # вызывающего.
             ok, why = safety(rec["target"], self._project_of(rec),
-                             owner=rec["actor"])
+                             owner=rec["actor"],
+                             disruptive=rec["verb"] in DISRUPTIVE)
             if not ok:
                 self._mark(rec, "refused", error=why)
                 return {**rec, "status": "refused", "error": why, "audit": audit}
@@ -325,9 +402,15 @@ class Worker:
         (self._workspace, по умолчанию remote_workspace), никогда не cwd и
         не локальный файл сервера. Update читает спеку здесь, до эффекта:
         origin прежнего репозитория решает, чей workspace качать, и в
-        операцию едет один раз (не спрашивать вторично)."""
-        fn = {"restart": ops.restart, "add": ops.add,
-              "update": ops.update}.get(rec["verb"])
+        операцию едет один раз (не спрашивать вторично).
+
+        Жизненный цикл (#471) -- те же общие функции puppets.recycle/
+        delete/wipe, что и у CLI: обёртка кладёт их ответ в структурный
+        вердикт outcome(), эффектов-копий здесь нет.
+        """
+        fn = {"restart": ops.restart, "add": ops.add, "update": ops.update,
+              "recycle": _wrap_recycle, "delete": _wrap_delete,
+              "wipe": _wrap_wipe}.get(rec["verb"])
         if fn is None:
             raise RuntimeError(f"no library operation for {rec['verb']}")
         base = rec.get("baseline")
@@ -340,14 +423,25 @@ class Worker:
                 # База наблюдения -- ДО эффекта: переживает крах службы.
                 self._mark(rec, rec["status"], baseline=base)
         # transport -- глаголы сервиса кластера (transport(verb, **fields)),
-        # как у #458; контекст #457 передаётся явно, без env потока.
+        # как у #458; контекст #457 передаётся явно, без env потока. Две
+        # ветки -- двумя именами: лямбда с тернарником внутри ловила бы
+        # else-ветку лениво (тело `lambda: A if ... else B` -- само B),
+        # и #476 это не прощупал -- ветка была мертва (fn None).
         if rec["verb"] == "restart":
             call = lambda: fn(transport, rec["target"], login=rec["actor"],
                               force=False, observe=True, before=base,
                               observe_wait=self.observe_wait,
                               sleep=lambda s: self._sleep(self.observe_poll))
         else:
-            call = lambda: self._lifecycle(fn, rec, transport)
+            # Ветви по семействам: add/update (#470) строят вход в _lifecycle,
+            # жизненный цикл (#471) зовёт общие функции напрямую. Две ветки --
+            # двумя именами: лямбда с тернарником внутри ловила бы else-ветку
+            # лениво (тело `lambda: A if ... else B` -- само B), и #476 это
+            # не прощупал -- ветка была мертва (fn None).
+            if rec["verb"] in ("add", "update"):
+                call = lambda: self._lifecycle(fn, rec, transport)
+            else:
+                call = lambda: fn(rec["target"], login=rec["actor"])
         if context is not None:
             from ..common import context as _c
             return lambda: _c.call_in_context(context, call)
