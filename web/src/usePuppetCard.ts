@@ -81,12 +81,13 @@ export interface PuppetTailState {
   error: string | null;
   loading: boolean;
   loaded: boolean;
+  blocked: boolean;
   load: () => Promise<void>;
 }
 
-/** Хвост экрана (tail) или stderr задачи (stderr) -- по явному load(),
- *  без follow и таймеров: каждый кадр -- новое нажатие. Смена цели или
- *  потеря роли стирают строки; ответ не последнего load() отбрасывается. */
+/** Чтение кадра без встроенного таймера: расписанием управляет просмотрщик.
+ *  Временный отказ сохраняет последний кадр; потеря прав, цели или роли
+ *  стирает его. Ответ не последнего load() отбрасывается. */
 export function usePuppetTail(session: Session, target: string | null,
                               which: "tail" | "stderr" = "tail"): PuppetTailState {
   const [lines, setLines] = useState<string[]>([]);
@@ -94,6 +95,8 @@ export function usePuppetTail(session: Session, target: string | null,
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [blocked, setBlocked] = useState(false);
+  const requests = useRef(new Set<AbortController>());
   // поколение: растёт на каждый load и на каждую смену источника -- ответ
   // с меньшим номером молча теряется, чьи бы строки он ни вёз
   const gen = useRef(0);
@@ -109,7 +112,14 @@ export function usePuppetTail(session: Session, target: string | null,
     setError(null);
     setLoading(false);
     setLoaded(false);
+    setBlocked(false);
   }
+
+  useEffect(() => () => {
+    gen.current++;
+    for (const controller of requests.current) controller.abort();
+    requests.current.clear();
+  }, [source]);
 
   const load = useCallback(async () => {
     if (session.role !== "admin" || !target) {
@@ -122,24 +132,35 @@ export function usePuppetTail(session: Session, target: string | null,
       return;
     }
     const at = ++gen.current;
+    const controller = new AbortController();
+    requests.current.add(controller);
     setLoading(true);
-    setError(null);
     try {
       const r = await fetch(`/api/puppet/${encodeURIComponent(target)}/${which}`,
-                            { credentials: "same-origin" });
+                            { credentials: "same-origin", signal: controller.signal });
       if (at !== gen.current) return;
-      if (!r.ok) { setLines([]); setTruncated(false); setError(refuseText(r.status)); return; }
+      if (!r.ok) {
+        if ([401, 403, 404].includes(r.status)) {
+          setLines([]);
+          setTruncated(false);
+          setBlocked(true);
+        }
+        setError(refuseText(r.status));
+        return;
+      }
       const body = (await r.json()) as { lines: string[]; truncated?: boolean };
       if (at !== gen.current) return;
-      setLines(Array.isArray(body.lines) ? body.lines : []);
+      const next = Array.isArray(body.lines) ? body.lines : [];
+      setLines((previous) => previous.length === next.length
+        && previous.every((line, i) => line === next[i]) ? previous : next);
       setTruncated(body.truncated === true);
       setError(null);
+      setBlocked(false);
     } catch {
       if (at !== gen.current) return;
-      setLines([]);
-      setTruncated(false);
       setError(SILENT);
     } finally {
+      requests.current.delete(controller);
       if (at === gen.current) {
         setLoading(false);
         setLoaded(true);
@@ -147,5 +168,5 @@ export function usePuppetTail(session: Session, target: string | null,
     }
   }, [session.role, session.login, target, which]);
 
-  return { lines, truncated, error, loading, loaded, load };
+  return { lines, truncated, error, loading, loaded, blocked, load };
 }

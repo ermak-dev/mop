@@ -7,6 +7,9 @@ import "@testing-library/jest-dom/vitest";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).process = { ...(globalThis as any).process, env: { ...((globalThis as any).process?.env ?? {}), TZ: "UTC" } };
 
+// Autosize у Mantine слушает загрузку шрифтов; FontFaceSet в jsdom нет.
+if (!document.fonts) Object.defineProperty(document, "fonts", { value: new EventTarget() });
+
 // Mantine в jsdom: matchMedia и ResizeObserver у jsdom нет.
 window.matchMedia = window.matchMedia || ((query: string) => ({
   matches: false, media: query, onchange: null,

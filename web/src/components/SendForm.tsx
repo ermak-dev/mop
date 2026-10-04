@@ -1,4 +1,4 @@
-// Форма адресного send в отдельном диалоге папета,
+// Форма адресного send внизу экрана папета,
 // на том же общем ходе операции (useAdminOp): POST
 // /api/admin/ops {action: "send", params: {message}} -> id -> вердикт.
 // Политика первого выпуска #461: адресная доставка, никакого wait/notify
@@ -32,16 +32,18 @@ export function SendForm({ session, target }: { session: Session; target: string
 
   return (
     <form data-testid="send-form" onSubmit={(e) => { e.preventDefault(); send(); }}>
-      <Textarea
-        label="Сообщение"
-        value={message}
-        onChange={(e) => setMessage(e.target.value)}
-        minRows={3}
-        data-testid="send-text"
-      />
-      <Group justify="flex-end" mt="xs">
-        <Button size="xs" onClick={send} loading={op.status === "submitted"}
-                data-testid="send-send">Отправить</Button>
+      <Group align="flex-end" wrap="nowrap" gap="sm">
+        <Textarea
+          label="Сообщение"
+          placeholder="Сообщение папету"
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          autosize minRows={1} maxRows={4}
+          style={{ flex: 1, minWidth: 0 }}
+          data-testid="send-text"
+        />
+        <Button size="sm" onClick={send} loading={op.status === "submitted"}
+                disabled={!message.trim() || live} data-testid="send-send">Отправить</Button>
       </Group>
       {op.status !== "idle" && (
         <Text size="sm" c={op.status === "succeeded" ? "teal"

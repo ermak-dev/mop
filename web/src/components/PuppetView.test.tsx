@@ -32,7 +32,7 @@ afterEach(() => {
 
 test.each([
   ["рестарт", "подтвердите рестарт"], ["правка", "правка папета"],
-  ["модель", "смена модели"], ["сообщение", "сообщение папету"],
+  ["модель", "смена модели"],
   ["экран", "экран pu-mop-1"], ["лог", "лог pu-mop-1"],
 ])("row icon %s opens only its own dialog", async (label, title) => {
   vi.stubGlobal("fetch", vi.fn(async () => response({ models: [], lines: [] })));
@@ -58,7 +58,8 @@ test("#487 actions have a right-aligned shrink-to-fit column", () => {
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
   expect(actions).toHaveStyle({ justifyContent: "flex-end", flexWrap: "nowrap" });
   expect(actions.closest("td")).toHaveStyle({ width: "1%", whiteSpace: "nowrap", textAlign: "right" });
-  expect(within(actions).getAllByRole("button")).toHaveLength(6);
+  expect(within(actions).getAllByRole("button")).toHaveLength(5);
+  expect(within(actions).queryByRole("button", { name: "сообщение" })).toBeNull();
 });
 
 test.each(["рестарт", "правка", "модель"])("#487 %s result never widens the row", async (action) => {
@@ -100,15 +101,15 @@ test.each(["tail", "stderr"] as const)("#487 %s shows loading on open", async (w
   expect(screen.queryByRole("status")).toBeNull();
 });
 
-test("refresh replaces old output with loading and names an empty result", async () => {
+test("#489 refresh preserves old output until the new frame arrives", async () => {
   let release!: (r: Response) => void;
   const pending = new Promise<Response>((resolve) => { release = resolve; });
   vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(response({ lines: ["old screen"] })).mockReturnValueOnce(pending));
   card();
   await screen.findByText("old screen");
   fireEvent.click(screen.getByRole("button", { name: "обновить" }));
-  expect(screen.getByRole("status")).toBeInTheDocument();
-  expect(screen.queryByText("old screen")).toBeNull();
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.getByText("old screen")).toBeInTheDocument();
   await act(async () => { release(response({ lines: [] })); });
   expect(await screen.findByText("вывод пуст")).toBeInTheDocument();
 });

@@ -1,5 +1,5 @@
 // #469: адресный send, один POST, payload не в URL/storage, честный исход.
-// #484: те же гарантии проверяются через отдельный диалог из строки.
+// #489: те же гарантии проверяются через поле в диалоге экрана.
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { MantineProvider } from "@mantine/core";
@@ -23,11 +23,12 @@ const opJson = (status: string, error?: string) =>
   ({ ok: true, status: 200, json: async () => ({ id: "op-1", action: "send",
     target: CARD.name, status, error }) }) as Response;
 const route = (post: () => Promise<Response>, get: () => Promise<Response>) =>
-  vi.fn(async (_url: string | URL, init?: RequestInit) =>
-    init?.method === "POST" ? post() : get());
+  vi.fn(async (url: string | URL, init?: RequestInit) =>
+    init?.method === "POST" ? post() : String(url).endsWith("/tail")
+      ? ({ ok: true, json: async () => ({ lines: ["screen"] }) }) as Response : get());
 const open = () => {
   const view = renderUi(<PoolTable projects={projects} session={ADMIN} />);
-  fireEvent.click(screen.getByRole("button", { name: "сообщение" }));
+  fireEvent.click(screen.getByRole("button", { name: "экран" }));
   return view;
 };
 const typeAndSend = async () => {
