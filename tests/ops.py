@@ -365,7 +365,168 @@ def main():
     progress.append("mutated")
     c.check("progress is copied into the verdict", v["progress"] == ["step"], v)
 
+    # ── смена модели (#468): один workflow на MCP и веб ──────────────────
+    # HYPOTHESIS: /model у MCP и клик в GUI напечатают команду каждый своей
+    # копией: белый список ID, подтверждение и показ расходятся в тот же день,
+    # что и add/workspace. Дым («accepted на слово») — главный провал тикета:
+    # печать вернулась, диалог не виден, а смена не подтверждена телеметрией.
+    # SOLUTION: ops.switch_model -- вердикт outcome(): валидация ID, эффект
+    # puppets.switch_model, подтверждение сессией (sessionId, model_at,
+    # модель) от read-глагола state узла; no-op на уже выбранной; кривой id
+    # и чужая сессия -- refused до эффекта; нет сигнала -- unknown.
+    # Примечание: модель в статусе хранится в записи с суффиксом окна
+    # («glm-5.3[1m]»), а каталог прокси зовёт её «glm-5.3» -- сравнение по
+    # нормализованному id (без хвоста в скобках).
+
+    def state_answer(rec):
+        def read_state(node, verb, **fields):
+            assert verb == "state", verb
+            return {"puppets": {fields["name"]: {"present": True,
+                                                 "session": "idle 1 1",
+                                                 "clone": None,
+                                                 "state": rec}}}
+        return read_state
+
+    LIVE = {"status": "idle", "waitingFor": None, "alive": True, "listen": True,
+            "turn": None, "sessionId": "sess-1", "model_at": 1000,
+            "model": "glm-5.3[1m]"}
+
+    # -- валидация id: до всякого транспорта ------------------------------
+    for bad in ("", "a\nb", "glm/../../etc", "glm; rm", "x" * 129, "модель", None, 5):
+        fake = Fake({})
+        v = ops.switch_model(fake.node, "node-1", "pu-x-1", bad,
+                             session_reader=state_answer(LIVE))
+        c.check(f"#468 invalid model id {bad!r} is refused before any effect",
+                v.get("outcome") == ops.REFUSED and not fake.calls, (v, fake.calls))
+    for good in ("glm-5.3", "claude-opus-5-5", "glm-5.3[1m]"):
+        fake = Fake({})
+        v = ops.switch_model(fake.node, "node-1", "pu-x-1", good,
+                             session_reader=state_answer({**LIVE, "model": good}),
+                             switcher=lambda node, name, model, force=False: None,
+                             now=lambda: 2000, observe_wait=0, sleep=nosleep)
+        c.check(f"#468 valid id {good!r} passes validation",
+                v.get("outcome") != ops.REFUSED or fake.calls, (v, fake.calls))
+
+    # -- no-op: телеметрия уже показывает ту же модель --------------------
+    fake = Fake({})
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=state_answer(LIVE),
+                         switcher=lambda *a, **k: (_ for _ in ()).throw(
+                             AssertionError("must not switch")),
+                         now=lambda: 1500, fresh_within=1200)
+    c.check("#468 same model reads as registered no-op without an effect",
+            v.get("outcome") == ops.REGISTERED and not fake.calls
+            and v.get("noop") is True, (v, fake.calls))
+
+    # -- отказ эффекта (диалог не закрылся, чужая аренда) -- refused ------
+    fake = Fake({})
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "claude-opus-5-5",
+                         session_reader=state_answer(LIVE),
+                         switcher=lambda *a, **k: (_ for _ in ()).throw(
+                             RuntimeError("model switch dialog did not close")),
+                         now=lambda: 2000)
+    c.check("#468 a failed effect reads refused with its reason",
+            v.get("outcome") == ops.REFUSED and "dialog" in v.get("error", ""), v)
+
+    # -- успех: эффект, затем подтверждение телеметрией этой сессии -------
+    def reader_live(rec):
+        def read(node, verb, **fields):
+            return {"puppets": {fields["name"]: {"present": True,
+                                                 "session": "idle 1 1",
+                                                 "clone": None, "state": rec}}}
+        return read
+
+    seen = {}
+    def switcher(node, name, model, force=False):
+        seen["switched"] = model
+    fake = Fake({})
+    base_then = {**LIVE, "model": "claude-opus-5-5", "model_at": 1000}
+    after = {"n": 0}
+    def confirmed_reader(node, verb, **fields):
+        after["n"] += 1
+        rec = base_then if after["n"] == 1 else {**LIVE, "model": "glm-5.3[1m]",
+                                                 "model_at": 2900}
+        return {"puppets": {fields["name"]: {"present": True,
+                                             "session": "idle 1 1",
+                                             "clone": None, "state": rec}}}
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=confirmed_reader,
+                         switcher=switcher, now=lambda: 3000, fresh_within=1200,
+                         sleep=nosleep)
+    c.check("#468 confirmed switch reads registered with the session bound",
+            v.get("outcome") == ops.REGISTERED and v.get("sessionId") == "sess-1"
+            and seen.get("switched") == "glm-5.3", v)
+
+    # -- чужая сессия: sessionId сменился между базой и подтверждением ----
+    # Первый ответ (база) -- sess-1, после эффекта -- sess-2: подтверждение
+    # другой сессии не наше, и ждать его незачем.
+    reads = {"n": 0}
+    def session_flips(node, verb, **fields):
+        reads["n"] += 1
+        sid = "sess-1" if reads["n"] == 1 else "sess-2"
+        base = {"model": "claude-opus-5-5", "model_at": 1000} if reads["n"] == 1 \
+            else {"model": "glm-5.3[1m]", "model_at": 2990}
+        return {"puppets": {fields["name"]: {"present": True,
+                                             "session": "idle 1 1",
+                                             "clone": None,
+                                             "state": {**LIVE, "sessionId": sid,
+                                                       **base}}}}
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=session_flips,
+                         switcher=switcher, now=lambda: 3000, fresh_within=1200,
+                         observe_wait=0, sleep=nosleep)
+    c.check("#468 another session id is not a confirmation: unknown",
+            v.get("outcome") == ops.UNKNOWN, v)
+
+    # -- устаревший снимок: model_at старше окна -- не подтверждение ------
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=reader_live({**LIVE, "model": "glm-5.3[1m]",
+                                                     "model_at": 100}),
+                         switcher=switcher, now=lambda: 3000, fresh_within=1200,
+                         observe_wait=0, sleep=nosleep)
+    c.check("#468 a stale snapshot is not a confirmation: unknown",
+            v.get("outcome") == ops.UNKNOWN, v)
+
+    # -- телеметрия показывает третью модель -- смена не сошлась ----------
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=reader_live({**LIVE, "model": "claude-opus-5-5",
+                                                     "model_at": 2990}),
+                         switcher=switcher, now=lambda: 3000, fresh_within=1200,
+                         observe_wait=0, sleep=nosleep)
+    c.check("#468 a third model after the switch is partial, not success",
+            v.get("outcome") == ops.PARTIAL, v)
+
+    # -- запаздывающий сигнал: второй опрос подтверждает, сон реален лишь
+    #    в аргументе -- срок двигают ступенями часов ----------------------
+    polls = {"n": 0}
+    def late_signal(node, verb, **fields):
+        polls["n"] += 1
+        rec = {**LIVE, "model": "glm-5.3[1m]",
+               "model_at": 1000 if polls["n"] == 1 else 3300}
+        return {"puppets": {fields["name"]: {"present": True,
+                                             "session": "idle 1 1",
+                                             "clone": None, "state": rec}}}
+    ticks = []
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=late_signal,
+                         switcher=switcher, fresh_within=1200,
+                         now=lambda: 3000 + 100 * len(ticks),
+                         sleep=lambda s: ticks.append(s))
+    c.check("#468 a late fresh signal is confirmed at once it appears",
+            v.get("outcome") == ops.REGISTERED and v.get("sessionId") == "sess-1"
+            and ticks == [] and polls["n"] == 2, (v, ticks, polls))
+
+    # -- таймаут наблюдения: эффекта могли и не увидеть -- unknown --------
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=reader_live({**LIVE, "model": "glm-5.3[1m]",
+                                                     "model_at": 1000}),
+                         switcher=switcher, now=lambda: 3000, fresh_within=1200,
+                         observe_wait=0, sleep=nosleep)
+    c.check("#468 no fresh signal in time reads unknown",
+            v.get("outcome") == ops.UNKNOWN, v)
+
     return c.report("ops")
+
 
 
 if __name__ == "__main__":
