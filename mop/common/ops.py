@@ -405,7 +405,7 @@ def switch_model(transport, node, name, model, session_reader=None,
     # No-op -- только по СВЕЖЕЙ записи: устаревший снимок «уже выбранной»
     # модели не доказательство (модель могли сменить без события) -- тогда
     # эффект идёт как заказан.
-    before = read(node, "state", name=name)
+    before = read(node, name)
     base = _live_rec(name, before)
     if base is not None and model_matches(base.get("model"), model) \
             and (now() - (base.get("model_at") or 0)) <= fresh_within:
@@ -419,7 +419,7 @@ def switch_model(transport, node, name, model, session_reader=None,
     # покажет заказанную модель в той же сессии; нет -- unknown за срок.
     deadline = now() + (observe_wait if observe_wait is not None else 30)
     while True:
-        got = _live_rec(name, read(node, "state", name=name))
+        got = _live_rec(name, read(node, name))
         if got is not None and got.get("sessionId") == base.get("sessionId") \
                 and model_matches(got.get("model"), model) \
                 and (now() - (got.get("model_at") or 0)) <= fresh_within:
@@ -446,8 +446,12 @@ def _live_rec(name, answer):
 
 
 def _session_reader(transport):
-    def read(node, verb, **fields):
-        return transport(node, verb, **fields)
+    # states, а не state: v_state отвечает голыми фактами без конверта
+    # {"puppets": ...}, который разбирает _live_rec; конверт пачки (глагол
+    # states, тем же ходом читает ростер) -- форма, на которой держится
+    # и ответ _mine-фильтрации, и _live_rec.
+    def read(node, name):
+        return transport(node, "states", names=[name])
     return read
 
 

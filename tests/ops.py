@@ -19,9 +19,11 @@ from _lib import Checks  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 try:
-    from mop.common import bus, ops
+    from mop.common import bus, ops, puppets
 except ImportError:
     ops = None
+
+from _lib import patched  # noqa: E402
 
 
 class Fake:
@@ -379,12 +381,13 @@ def main():
     # нормализованному id (без хвоста в скобках).
 
     def state_answer(rec):
-        def read_state(node, verb, **fields):
-            assert verb == "state", verb
-            return {"puppets": {fields["name"]: {"present": True,
-                                                 "session": "idle 1 1",
-                                                 "clone": None,
-                                                 "state": rec}}}
+        # Подмена читателя -- новой сигнатуры read(node, name): конверт --
+        # ответ пачки states, тот же, что ростер разбирает.
+        def read_state(node, name):
+            return {"puppets": {name: {"present": True,
+                                       "session": "idle 1 1",
+                                       "clone": None,
+                                       "state": rec}}}
         return read_state
 
     LIVE = {"status": "idle", "waitingFor": None, "alive": True, "listen": True,
@@ -430,10 +433,10 @@ def main():
 
     # -- успех: эффект, затем подтверждение телеметрией этой сессии -------
     def reader_live(rec):
-        def read(node, verb, **fields):
-            return {"puppets": {fields["name"]: {"present": True,
-                                                 "session": "idle 1 1",
-                                                 "clone": None, "state": rec}}}
+        def read(node, name):
+            return {"puppets": {name: {"present": True,
+                                       "session": "idle 1 1",
+                                       "clone": None, "state": rec}}}
         return read
 
     seen = {}
@@ -442,13 +445,13 @@ def main():
     fake = Fake({})
     base_then = {**LIVE, "model": "claude-opus-5-5", "model_at": 1000}
     after = {"n": 0}
-    def confirmed_reader(node, verb, **fields):
+    def confirmed_reader(node, name):
         after["n"] += 1
         rec = base_then if after["n"] == 1 else {**LIVE, "model": "glm-5.3[1m]",
                                                  "model_at": 2900}
-        return {"puppets": {fields["name"]: {"present": True,
-                                             "session": "idle 1 1",
-                                             "clone": None, "state": rec}}}
+        return {"puppets": {name: {"present": True,
+                                   "session": "idle 1 1",
+                                   "clone": None, "state": rec}}}
     v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
                          session_reader=confirmed_reader,
                          switcher=switcher, now=lambda: 3000, fresh_within=1200,
@@ -461,16 +464,16 @@ def main():
     # Первый ответ (база) -- sess-1, после эффекта -- sess-2: подтверждение
     # другой сессии не наше, и ждать его незачем.
     reads = {"n": 0}
-    def session_flips(node, verb, **fields):
+    def session_flips(node, name):
         reads["n"] += 1
         sid = "sess-1" if reads["n"] == 1 else "sess-2"
         base = {"model": "claude-opus-5-5", "model_at": 1000} if reads["n"] == 1 \
             else {"model": "glm-5.3[1m]", "model_at": 2990}
-        return {"puppets": {fields["name"]: {"present": True,
-                                             "session": "idle 1 1",
-                                             "clone": None,
-                                             "state": {**LIVE, "sessionId": sid,
-                                                       **base}}}}
+        return {"puppets": {name: {"present": True,
+                                   "session": "idle 1 1",
+                                   "clone": None,
+                                   "state": {**LIVE, "sessionId": sid,
+                                             **base}}}}
     v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
                          session_reader=session_flips,
                          switcher=switcher, now=lambda: 3000, fresh_within=1200,
@@ -499,13 +502,13 @@ def main():
     # -- запаздывающий сигнал: второй опрос подтверждает, сон реален лишь
     #    в аргументе -- срок двигают ступенями часов ----------------------
     polls = {"n": 0}
-    def late_signal(node, verb, **fields):
+    def late_signal(node, name):
         polls["n"] += 1
         rec = {**LIVE, "model": "glm-5.3[1m]",
                "model_at": 1000 if polls["n"] == 1 else 3300}
-        return {"puppets": {fields["name"]: {"present": True,
-                                             "session": "idle 1 1",
-                                             "clone": None, "state": rec}}}
+        return {"puppets": {name: {"present": True,
+                                   "session": "idle 1 1",
+                                   "clone": None, "state": rec}}}
     ticks = []
     v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
                          session_reader=late_signal,
@@ -515,6 +518,29 @@ def main():
     c.check("#468 a late fresh signal is confirmed at once it appears",
             v.get("outcome") == ops.REGISTERED and v.get("sessionId") == "sess-1"
             and ticks == [] and polls["n"] == 2, (v, ticks, polls))
+
+    # -- читатель по умолчанию ходит тем же глаголом, что ростер ---------
+    # HYPOTHESIS: дефолтный reader зовёт одиночный state -- агент отвечает
+    # на него голыми фактами без конверта {"puppets": ...}, который
+    # разбирает _live_rec; подтверждение на живом проводе не сошлось бы
+    # никогда, при зелёных проверках с подменным reader'ом.
+    # SOLUTION: глагол states (пачкой, конверт совпадает с ответом states,
+    # который ростер и разбирает). Транспорт здесь node-образный, как
+    # Fake.node: base читается ДО эффекта, эффект -- puppets.switch_model
+    # (подмена), затем опрос -- за срок не успевает (observe_wait=0).
+    transport = Fake({"states": {"puppets": {"pu-x-1": {
+        "present": True, "session": "idle 1 1", "clone": None,
+        "state": {**LIVE, "model": "claude-opus-5-5", "model_at": 1000}}}}})
+    with patched(puppets, switch_model=switcher):
+        v = ops.switch_model(transport.node, "node-1", "pu-x-1", "glm-5.3",
+                             session_reader=None, now=lambda: 3000,
+                             fresh_within=1200, observe_wait=0, sleep=nosleep)
+    verbs = [c[1] for c in transport.calls]
+    c.check("#468 the default reader speaks the states verb like the roster",
+            verbs and verbs[0] == "states"
+            and all(vv == "states" for vv in verbs), (verbs, transport.calls))
+    c.check("#468 the default-path switcher saw the model, verdict unknown on a stale read",
+            seen.get("switched") == "glm-5.3" and v.get("outcome") == ops.UNKNOWN, (seen, v))
 
     # -- таймаут наблюдения: эффекта могли и не увидеть -- unknown --------
     v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
