@@ -20,7 +20,7 @@ from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.common import bus, ops, puppets, state  # noqa: E402
-from mop.server import opworker  # noqa: E402
+from mop.server import adminapi, opworker  # noqa: E402
 
 
 # ── каркас проверки ──────────────────────────────────────────────────────
@@ -886,6 +886,159 @@ def main():
     c.check("#471 the queued delete runs after the target frees",
             done.get("status") == "succeeded" and len(lc.calls) == 1,
             (done, lc.calls))
+
+    # ── смена модели через воркер (#468) ─────────────────────────────────
+    # HYPOTHESIS: веб-клик и MCP напечатали бы каждый свою смену: белый
+    # список ID, подтверждение телеметрией и no-op разъехались бы так же,
+    # как add/workspace. До регистрации адаптер честно отвечает 404.
+    # SOLUTION: глагол model регистрируется в opworker.register
+    # (MODEL_PARAMS), валидатор model_request отбрасывает кривой id ДО
+    # intent; эффект -- общий ops.switch_model (#468): воркер резолвит узел
+    # цели и кормит ему node-образный транспорт; safety -- не disruptive
+    # (смена не убивает сессию, TUI-ход), отказы агента -- refused.
+    # RED-проверки до реализации.
+    class ModelT:
+        """Node-транспорт: read-глагол states -- тот же конверт, что у
+        ростера. Вызовы считаются (node, verb, fields)."""
+        def __init__(self, states):
+            self.states = states
+            self.calls = []
+
+        def __call__(self, node, verb, **fields):
+            self.calls.append((node, verb, fields))
+            if verb == "states":
+                return {"puppets": {n: self.states[n] for n in
+                                    fields.get("names", [])
+                                    if n in self.states}}
+            return {}
+
+    STATE468 = {"status": "idle", "alive": True, "listen": True,
+                "sessionId": "s1", "model": "claude-opus-5-5",
+                "model_at": 999_995}
+    t468 = ModelT({"pu-mop-1": {"present": True, "session": "idle 1 1",
+                                "clone": None, "state": dict(STATE468)}})
+    # Base-запись свежая относительно такта воркера (now=1e6): модель
+    # старая -- эффект пойдёт; смена -- подменённый puppets.switch_model.
+
+    def model_worker(nower=None):
+        w, _ = one(now=nower or (lambda: 1_000_000.0))
+        return w
+
+    # Успешная смена: эффект -- общий слой, verdict registered -> succeeded.
+    # Обёртка ходит bus.request-транспортом (read-глагол узла) и
+    # puppets.node_of; шину подменяют на ответы t468: эффект --
+    # puppets.switch_model, его тоже считает seen_calls.
+    seen_calls = []
+    def flip(node, name, model, force=False, **kw):
+        seen_calls.append((node, name, model, force))
+        t468.states["pu-mop-1"]["state"] = {
+            **STATE468, "model": "glm-5.3[1m]", "model_at": 1_000_000}
+    with patched(bus, request=lambda node, verb, **f: t468(node, verb, **f)), \
+            patched(puppets, switch_model=flip,
+                    node_of=lambda name, running=True: "n8"):
+        w = model_worker()
+        got = w.submit("anton", "model", "pu-mop-1", {"model": "glm-5.3"},
+                       transport=t468,
+                       safety=lambda name, project, **kw: (True, None))
+    c.check("#468 model through the worker succeeds",
+            got.get("status") == "succeeded", got)
+    c.check("#468 the switcher got the puppet node and the ordered model",
+            seen_calls == [("n8", "pu-mop-1", "glm-5.3", False)], seen_calls)
+
+    # Кривой id -- отказ ДО intent: ни вызова эффекта, ни записи операции.
+    with patched(puppets, switch_model=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not switch")), node_of=lambda *a, **k: "n8"):
+        before = len(w.read("anton", role="admin"))
+        got = w.submit("anton", "model", "pu-mop-1", {"model": "glm/../etc"},
+                       transport=ModelT({}),
+                       safety=lambda name, project, **kw: (True, None))
+        after = len(w.read("anton", role="admin"))
+    c.check("#468 an invalid model id is refused before any intent",
+            got.get("status") == "refused" and "model id" in (got.get("error") or "")
+            and before == after, (got, before, after))
+
+    # Отказ эффекта (диалог не закрылся) -- refused с причиной, не failed.
+    # Телеметрия после успешного пути уже перевёрнута: вернуть базовую,
+    # иначе no-op закроет смену без эффекта.
+    t468.states["pu-mop-1"]["state"] = dict(STATE468)
+    with patched(bus, request=lambda node, verb, **f: t468(node, verb, **f)), \
+            patched(puppets, switch_model=lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("model switch dialog did not close")),
+                node_of=lambda *a, **k: "n8"):
+        got = model_worker().submit("anton", "model", "pu-mop-1",
+                                    {"model": "glm-5.3"},
+                                    transport=t468,
+                                    safety=lambda name, project,
+                                    **kw: (True, None))
+    c.check("#468 a dialog that did not close reads refused",
+            got.get("status") == "refused"
+            and "dialog" in (got.get("error") or ""), got)
+
+    # Смена -- не disruptive: сессия живёт, safety не должен получать
+    # destructive-флаг. Проверка -- ProbingSafety видит disruptive=False.
+    class ModelSafety:
+        def __init__(self):
+            self.seen = None
+        def __call__(self, name, project, **kw):
+            self.seen = kw
+            return True, None
+    probe = ModelSafety()
+    t468.states["pu-mop-1"]["state"] = dict(STATE468)
+    with patched(bus, request=lambda node, verb, **f: t468(node, verb, **f)), \
+            patched(puppets, switch_model=flip,
+                    node_of=lambda *a, **k: "n8"):
+        got = model_worker().submit("anton", "model", "pu-mop-1",
+                                    {"model": "glm-5.3"},
+                                    transport=t468, safety=probe)
+    c.check("#468 model is registered non-disruptive",
+            probe.seen is not None and probe.seen.get("disruptive") is False,
+            probe.seen)
+
+    # Адаптер: verb model до регистрации -- 404; после -- 202 и кривой id
+    # -- отказ приёма (валидатор живёт в одной точке с реестром).
+    ADMIN = ("anton", "admin")
+    wired = adminapi.Operations()
+    opworker.register(wired)
+    def req(action, target="pu-mop-1", params=None):
+        import json as _json
+        return _json.dumps({"action": action, "target": target,
+                            "params": params or {}}).encode()
+    class ModelHandler:
+        """Подставной handler: как Handler в tests/adminapi.py."""
+        def __init__(self, body):
+            self.who = ADMIN
+            self.origin = "https://pool.example"
+            self.headers = {"Origin": self.origin,
+                            "Content-Type": "application/json",
+                            "Content-Length": str(len(body))}
+            self.command = "POST"
+            self.path = "/api/admin/ops"
+            self.body = body
+            self.rfile = __import__("io").BytesIO(body)
+            self.sent = []
+        def _json(self, code, payload):
+            self.sent.append((code, payload))
+    def post_model(params):
+        # Свежая Api на пост: активная операция прежнего поста не держит
+        # 409 -- здесь проверяется реестр и валидатор приёма, не очередь.
+        api = adminapi.Api(wired, adminapi.Queue(),
+                           origin="https://pool.example", who=ADMIN)
+        body = req("model", target="pu-mop-1", params=params)
+        h = ModelHandler(body)
+        api.post(h)
+        return h
+    h = post_model({"model": "glm-5.3"})
+    c.check("#468 model posts one parameter and reaches the queue (202)",
+            h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
+    h = post_model({})
+    c.check("#468 model without the model parameter is accepted, the verdict refuses",
+            h.sent and h.sent[0][0] == 202, h.sent)
+    h = post_model({"model": "glm/../etc"})
+    c.check("#468 model with an invalid id reaches the queue, the verdict refuses",
+            h.sent and h.sent[0][0] == 202, h.sent)
+    h = post_model({"model": "glm-5.3", "force": True})
+    c.check("#468 model refuses any other parameter",
+            h.sent and h.sent[0][0] == 400, h.sent)
 
     return c.report("opworker")
 
