@@ -127,6 +127,44 @@ def main():
     h = Handler(body=req("restart", "pu-mop-1"), length=None)
     h.headers["Content-Length"] = str(len(h.body))
     api.post(h)
+    # ── #491: очередь адаптера потребляется -- задача доезжает до воркера,
+    # статус записи становится терминальным (иначе «принято» висит вечно).
+    from mop.cli.server import web as webcli
+    import time as _time
+
+    class _Clock:
+        def __init__(self): self.t = 1000.0
+        def __call__(self): return self.t
+
+    clock = _Clock()
+    driven = adminapi.Queue()
+    driven_ops = adminapi.Operations()
+    from mop.server import opworker as _ow
+    _ow.register(driven_ops)
+    driven_api = adminapi.Api(driven_ops, driven, origin="https://pool.example", who=ADMIN)
+    body = req("restart", "pu-mop-1")
+    h = Handler(who=ADMIN, body=body, length=len(body))
+    driven_api.post(h)
+    op_id = h.sent[0][1]["id"]
+
+    class _Done(Exception):
+        pass
+
+    def effect():  # подменный эффект: outcome-вид #458, терминал сразу
+        return {"outcome": "registered", "name": "pu-mop-1"}
+
+    from mop.server import opworker
+    w = opworker.Worker(now=clock, sleep=lambda s: None)
+    job = driven.take()
+    c.check("#491 the queue yields the accepted job", job is not None and job.get("id") == op_id, job)
+    verdict = w.submit(job["login"], "restart", "pu-mop-1", {}, effect=effect)
+    c.expect("#491 the worker speaks a terminal status",
+             verdict.get("status"), "succeeded")
+    driven_api.settle(op_id, verdict)
+    got = driven_api.result(op_id, ("anton", "admin"))
+    c.expect("#491 the result reads the worker verdict",
+             got.get("status"), "succeeded")
+
     # ── #464/#489: воркер регистрирует все глаголы адаптера одной точкой;
     # рестарт был пропущен -- POST из GUI отвечал unsupported (#489).
     from mop.server import opworker

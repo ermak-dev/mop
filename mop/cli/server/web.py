@@ -17,6 +17,7 @@ MOP_WEB_PORT (9000), MOP_WEB_BIND (127.0.0.1); beyond — the TLS proxy.
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
@@ -42,6 +43,7 @@ RATE = websession.RateLimiter()
 # адаптер берёт сам из handler.who (куки -> SESSIONS -> провайдер).
 OPS = adminapi.Operations()
 opworker.register(OPS)
+WORKER = opworker.Worker()
 
 
 class _LiveApi(adminapi.Api):
@@ -59,6 +61,7 @@ class _LiveApi(adminapi.Api):
 
 
 ADMINAPI = _LiveApi(OPS, adminapi.Queue(), origin=None)
+# Драйвер очереди (#491) гоняет задачи адаптера через WORKER; определён ниже.
 
 
 class Gateway:
@@ -565,10 +568,32 @@ def _registry_projects():
         return set()
 
 
+def drive_operations():
+    """Потреблять очередь адаптера (#491): задача -> воркер -> settle.
+
+    POST кладёт задачу и отвечает 202; исполнение -- здесь, в своём
+    потоке, не в запросе (#461). Вердикт воркера переносится в запись
+    результата адаптера: без переноса «принято» висит вечно. Воркер
+    синхронен (сам ждёт наблюдения #464) -- поток один, очередь по цели
+    сериализуется и в воркере (#476). Шина легла -- задача вернётся в
+    очередь следующим кругом? Нет: take уже снял; потому исключение
+    ловим и честно пишем failed, а не теряем."""
+    while True:
+        job = ADMINAPI.queue.take()
+        if job is None:
+            time.sleep(0.2)
+            continue
+        verdict = WORKER.submit(job.get("login") or "-",
+                                job["action"], job.get("target") or "",
+                                job.get("params") or {})
+        ADMINAPI.settle(job["id"], verdict)
+
+
 def main(argv):
     port, bind = parse(argv)
     COLLECTOR.start()
     threading.Thread(target=listen_events, daemon=True, name="mop-web-events").start()
+    threading.Thread(target=drive_operations, daemon=True, name="mop-web-ops").start()
     srv = ThreadingHTTPServer((bind, port), Handler)
     srv.daemon_threads = True
     print(f"mop-web: http://{bind}:{port}/ — states every {web.STATES_EVERY}s, "
