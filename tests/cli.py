@@ -3375,11 +3375,14 @@ def check_dev_help_433(c):
     # #444 добавил ограниченный reader трекера после проверки #433: новый
     # глагол обязателен в каталоге, а не повод ослабить его полноту.
     # STATUS: FIXED — see #444
-    if not c.check("#433 dev subtree: 4 groups, 22 verbs including evidence",
+    # #484: проверки и локальный просмотр веба тоже идут через диспетчер.
+    if not c.check("#433 dev subtree: 4 groups, 24 verbs including web checks and preview",
                    len([d for d in docs if d.endswith("__init__.py")]) == 4
                    and len([d for d in docs
-                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 22
-                   and docs.get("dev/bug/evidence.py", "").startswith("mop dev bug evidence"),
+                            if not d.endswith("__init__.py") and not d.endswith("_common.py")]) == 24
+                   and docs.get("dev/bug/evidence.py", "").startswith("mop dev bug evidence")
+                   and docs.get("dev/web/test.py", "").startswith("mop dev web test")
+                   and docs.get("dev/web/preview.py", "").startswith("mop dev web preview"),
                    sorted(docs)):
         return
     for path, phrases in GONE_433.items():

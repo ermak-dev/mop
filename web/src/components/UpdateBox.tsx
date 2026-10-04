@@ -1,4 +1,4 @@
-// Update на карточке папета (#472): fresh -- не «что-то» и не умолчание,
+// Update из строки папета: fresh -- не «что-то» и не умолчание,
 // а явный выбор из трёх режимов с последствиями на экране (слова #473):
 //   продолжить как было  -> fresh=false: разговор живёт, ничего не гибнет;
 //   свежий клон          -> fresh=true при своём origin: клон начисто,
@@ -12,6 +12,8 @@
 // Регистрация update у исполнителя приедет из #470: до тех сервер
 // ответит unsupported, фраза показывается как есть.
 import { useState } from "react";
+import { IconSettings } from "@tabler/icons-react";
+import { IconButton } from "./IconButton";
 import { Button, Code, Group, Modal, Radio, Stack, Text, TextInput } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -70,10 +72,10 @@ export function UpdateBox({ session, row }: {
   return (
     <Group gap="sm">
       {/* «правка», не «обновить»: слово занято обновлением хвоста экрана */}
-      <Button size="xs" variant="light" color="blue" disabled={live}
+      <IconButton label="правка" variant="subtle" size="lg" disabled={live}
               onClick={() => setOpen(true)}>
-        правка
-      </Button>
+        <IconSettings size={18} />
+      </IconButton>
       {op.status !== "idle" && (
         <Text size="sm" c={op.status === "succeeded" ? "teal"
                             : op.status === "unknown" ? "yellow" : "red"}
@@ -88,6 +90,7 @@ export function UpdateBox({ session, row }: {
                title="правка папета" data-testid="update-form"
                closeButtonProps={{ "aria-label": "закрыть" }}>
           <Stack gap="sm" data-testid="update-modes">
+            <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
             <Radio.Group value={mode} onChange={(v) => setMode(v as keyof typeof MODES)}>
               <Stack gap={8} mt="xs">
                 {(Object.keys(MODES) as (keyof typeof MODES)[]).map((k) => (
