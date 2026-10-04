@@ -26,7 +26,7 @@ export const KIND_COLOR: Record<Kind, string> = {
 export const VERDICT_WORD: Record<Exclude<VerdictKind, null>, string> = {
   silent: "агент молчит", hung: "завис", dialog: "ждёт действия",
   login: "логин", quota: "нет квоты", error: "ошибка", waiting: "ждёт ввода",
-  busy: "занят", other: "иначе", free: "свободен", idle: "брошенная работа",
+  busy: "занят", other: "иначе", free: "свободен", idle: "работа в клоне",
   unknown: "неизвестно", failing: "падает",
 };
 
