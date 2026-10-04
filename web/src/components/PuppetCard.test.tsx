@@ -1,130 +1,88 @@
-// Карточка папета (#463): приватная панель админа -- факты строки ростера
-// (#452: kind/detail/branch как в таблице, тот же formatter) и хвост экрана
-// по явному запросу. Клавиатурно доступная, ANSI/разметка не исполняются,
-// ничего не пишется в storage.
-//
-// RESULT: тесты написаны до реализации (RED).
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+// HYPOTHESIS: просмотр требует второго клика, а факты отнимают высоту.
+// SOLUTION: открытый диалог сразу читает выбранный источник без карточки;
+// права, экранирование и отбрасывание старых ответов остаются прежними.
+// RESULT: автозагрузка обоих источников и приватность проверены.
+// STATUS: FIXED — see #487
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { MantineProvider } from "@mantine/core";
 import { afterEach, expect, test, vi } from "vitest";
 import { PuppetCard } from "./PuppetCard";
-import { emptySnapshot, renderUi } from "../test-utils";
-import type { Puppet, Snapshot } from "../types";
-import type { Session } from "../useSession";
+import { renderUi } from "../test-utils";
 
-const ADMIN: Session = { login: "anton", role: "admin" };
-const GUEST_SESS: Session = { login: null, role: null };
-
-const CARD: Puppet = {
-  name: "pu-mop-1", node: "hyper", alloc_status: "running", state: "free (master)",
-  kind: "free", bucket: "free", detail: null, branch: "master",
-  owner: "-", llm: "-", origin: "git@h:g/mop.git", disk_kb: null,
-};
-
-const snap = (p: Puppet): Snapshot => emptySnapshot({
-  projects: [{ name: "mop", counts: {
-    puppets: 1, free: 1, busy: 0, sick: 0, silent: 0, down: 0,
-  }, puppets: [p] }],
-});
-
-const cardOk = (puppet: Puppet) =>
-  ({ ok: true, status: 200, json: async () => ({ puppet }) }) as Response;
+const ADMIN = { login: "anton", role: "admin" as const };
 const tailOk = (lines: string[], truncated = false) =>
   ({ ok: true, status: 200, json: async () => ({ lines, truncated }) }) as Response;
-
-const open = (p: Puppet = CARD) => {
-  renderUi(<PuppetCard snapshot={snap(p)} session={ADMIN} target={p.name} onClose={() => {}} />);
-};
+const open = (which: "tail" | "stderr" = "tail") => renderUi(
+  <PuppetCard session={ADMIN} target="pu-mop-1" which={which} onClose={() => {}} />);
 
 afterEach(() => vi.unstubAllGlobals());
 
-test("the card shows the roster facts with the shared formatter", async () => {
-  vi.stubGlobal("fetch", vi.fn(async () => cardOk({ ...CARD, detail: "not responding" })));
-  open();
-  // слово статуса -- из verdictWord, не своя копия (#463: не второй enum)
-  await waitFor(() => expect(screen.getByText("свободен")).toBeInTheDocument());
-  expect(screen.getByText("master")).toBeInTheDocument();
-  expect(screen.getByText("not responding")).toBeInTheDocument();
-  expect(screen.getByText(/hyper/)).toBeInTheDocument();
-  expect(screen.getByText("git@h:g/mop.git")).toBeInTheDocument();
+test.each(["tail", "stderr"] as const)("#487 opening %s immediately loads only that endpoint", async (which) => {
+  const fetchMock = vi.fn(async () => tailOk(["line 1", "line 2"], true));
+  vi.stubGlobal("fetch", fetchMock);
+  open(which);
+  await screen.findByText("line 1");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock).toHaveBeenCalledWith(`/api/puppet/pu-mop-1/${which}`,
+    expect.objectContaining({ credentials: "same-origin" }));
+  expect(screen.getByText(/обрезано/)).toBeInTheDocument();
+  for (const label of ["узел", "ветка", "владелец", "модель", "репозиторий", "место клона", "state-строка"])
+    expect(screen.queryByText(label, { exact: true })).toBeNull();
+  expect(screen.queryByRole("tab")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "обновить" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 });
 
-test("unknown facts are explained, not guessed", async () => {
-  vi.stubGlobal("fetch", vi.fn(async () => cardOk(CARD)));
-  open();
-  await waitFor(() => expect(screen.getByText("свободен")).toBeInTheDocument());
-  // disk_kb null -- «-», модель null -- «-», владелец без аренды -- «-»
-  const dashes = await screen.findAllByText("-");
-  expect(dashes.length).toBeGreaterThanOrEqual(3);
-});
-
-test("the card is keyboard accessible and closes from the keyboard", async () => {
-  vi.stubGlobal("fetch", vi.fn(async () => cardOk(CARD)));
+test("viewer has an accessible close button", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => tailOk([])));
   const onClose = vi.fn();
-  renderUi(<PuppetCard snapshot={snap(CARD)} session={ADMIN} target={CARD.name} onClose={onClose} />);
-  const closer = await screen.findByRole("button", { name: /закрыть/i });
+  renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={onClose} />);
+  const closer = screen.getByRole("button", { name: "закрыть" });
   closer.focus();
   expect(document.activeElement).toBe(closer);
-  // Mantine закрывает по клику (кнопка) и по Escape (модал) -- Enter на
-  // нативной кнопке тоже жмёт её; проверяем доступный путь закрытия
   fireEvent.click(closer);
   expect(onClose).toHaveBeenCalled();
+  await screen.findByText("вывод пуст");
 });
 
-test("the tail loads only on request, truncation is named", async () => {
-  const fetchMock = vi.fn(async (url: string) =>
-    String(url).endsWith("/tail") ? tailOk(["line 1", "line 2"], true) : cardOk(CARD));
-  vi.stubGlobal("fetch", fetchMock);
+test("screen markup and ANSI remain text", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => tailOk([
+    '<img src=x onerror="alert(1)">', "\x1b[31mred ansi\x1b[0m", "<script>alert(2)</script>",
+  ])));
   open();
-  // до запроса -- ни строк, ни обращения к /tail
-  await waitFor(() => expect(screen.getByText("свободен")).toBeInTheDocument());
-  expect(fetchMock).toHaveBeenCalledTimes(1);   // карточка, не хвост
-  expect(screen.queryByTestId("tail-lines")).toBeNull();
-  fireEvent.click(screen.getByRole("tab", { name: /экран/i }));
-  await waitFor(() => expect(screen.getByTestId("tail-lines")).toBeInTheDocument());
-  expect(screen.getByText("line 1")).toBeInTheDocument();
-  expect(screen.getByText("обрезано", { exact: false })).toBeInTheDocument();
-  expect(fetchMock).toHaveBeenCalledTimes(2);
-  expect(fetchMock).toHaveBeenLastCalledWith("/api/puppet/pu-mop-1/tail",
-    expect.objectContaining({ credentials: "same-origin" }));
-  // повторный запрос -- снова кнопка, без фонового follow
-  fireEvent.click(screen.getByRole("button", { name: /обновить/i }));
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
-});
-
-test("screen text with markup is shown as text, never executed", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (url: string) =>
-    String(url).endsWith("/tail")
-      ? tailOk(['<img src=x onerror="alert(1)">', "\x1b[31mred ansi\x1b[0m",
-                 "<script>alert(2)</script>"])
-      : cardOk(CARD)));
-  open();
-  await waitFor(() => expect(screen.getByText("свободен")).toBeInTheDocument());
-  fireEvent.click(screen.getByRole("tab", { name: /экран/i }));
-  await waitFor(() => expect(screen.getByTestId("tail-lines")).toBeInTheDocument());
-  expect(screen.getByText('<img src=x onerror="alert(1)">')).toBeInTheDocument();
+  expect(await screen.findByText('<img src=x onerror="alert(1)">')).toBeInTheDocument();
   expect(screen.getByText("\x1b[31mred ansi\x1b[0m")).toBeInTheDocument();
   expect(document.querySelector("img[src=x]")).toBeNull();
   expect(document.querySelector("script")).toBeNull();
 });
 
-test("a guest sees no card even with a target", () => {
+test("a guest cannot open or request either source", () => {
   vi.stubGlobal("fetch", vi.fn());
-  renderUi(<PuppetCard snapshot={snap(CARD)} session={GUEST_SESS} target={CARD.name} onClose={() => {}} />);
-  expect(screen.queryByText(CARD.name)).toBeNull();
-  expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+  renderUi(<PuppetCard session={{ login: null, role: null }} target="pu-mop-1"
+    which="stderr" onClose={() => {}} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 });
 
-test("403 on the card: no facts on the screen", async () => {
-  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 403 }) as Response));
-  open();
-  await waitFor(() => expect(screen.getByText(/прав не хватает/)).toBeInTheDocument());
-  expect(screen.queryByText("master")).toBeNull();
-  expect(screen.queryByRole("tab", { name: /экран/i })).toBeNull();
-});
+test.each([[403, "прав не хватает"], [404, "нет такого папета"], [502, "панель не отвечает"]])(
+  "HTTP %s stops the spinner and displays the refusal", async (status, message) => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status }) as Response));
+    open();
+    expect(await screen.findByRole("alert")).toHaveTextContent(message as string);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("button", { name: "закрыть" })).toBeInTheDocument();
+  });
 
-test("an unknown target names the refusal, the close button stays", async () => {
-  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 404 }) as Response));
-  open();
-  await waitFor(() => expect(screen.getByText(/нет такого папета/)).toBeInTheDocument());
-  expect(screen.getByRole("button", { name: /закрыть/i })).toBeInTheDocument();
+test("#487 switching sources never displays the old response", async () => {
+  let release!: (r: Response) => void;
+  const slow = new Promise<Response>((resolve) => { release = resolve; });
+  const mock = vi.fn((url: string) => url.endsWith("/tail") ? slow : Promise.resolve(tailOk(["stderr only"])));
+  vi.stubGlobal("fetch", mock);
+  const view = open();
+  view.rerender(<MantineProvider><PuppetCard session={ADMIN} target="pu-mop-1"
+    which="stderr" onClose={() => {}} /></MantineProvider>);
+  await screen.findByText("stderr only");
+  await act(async () => { release(tailOk(["old screen"])); });
+  expect(screen.queryByText("old screen")).toBeNull();
+  expect(screen.getByText("stderr only")).toBeInTheDocument();
 });

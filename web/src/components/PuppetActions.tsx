@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Group, Modal, Stack, Text } from "@mantine/core";
-import { IconMessage } from "@tabler/icons-react";
+import { IconMessage, IconTerminal2, IconFileText } from "@tabler/icons-react";
+import { PuppetCard, type PuppetSource } from "./PuppetCard";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
 import { IconButton } from "./IconButton";
@@ -11,8 +12,17 @@ import { UpdateBox } from "./UpdateBox";
 
 export function PuppetActions({ row, session }: { row: Puppet; session: Session }) {
   const [send, setSend] = useState(false);
+  const [viewer, setViewer] = useState<PuppetSource | null>(null);
   if (session.role !== "admin") return null;
-  return <Group gap={4} wrap="nowrap" role="group" aria-label={`действия ${row.name}`}>
+  return <Group gap={4} wrap="nowrap" role="group" aria-label={`действия ${row.name}`}
+    style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
+    <IconButton label="экран" variant="subtle" size="lg" onClick={() => setViewer("tail")}>
+      <IconTerminal2 size={18} />
+    </IconButton>
+    <IconButton label="лог" variant="subtle" size="lg" onClick={() => setViewer("stderr")}>
+      <IconFileText size={18} />
+    </IconButton>
+    {viewer && <PuppetCard session={session} target={row.name} which={viewer} onClose={() => setViewer(null)} />}
     <IconButton label="сообщение" variant="subtle" size="lg" onClick={() => setSend(true)}>
       <IconMessage size={18} />
     </IconButton>

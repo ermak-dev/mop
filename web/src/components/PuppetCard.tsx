@@ -1,135 +1,115 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Box, Code, Group, Loader, Modal, Paper, SimpleGrid, Stack, Tabs, Text } from "@mantine/core";
-import { IconRefresh, IconTerminal2, IconFileAlert, IconZoomIn, IconArrowsHorizontal } from "@tabler/icons-react";
-import type { Snapshot } from "../types";
+import { Box, Group, Loader, Modal, Stack, Text } from "@mantine/core";
+import { IconRefresh, IconZoomIn, IconZoomOut, IconArrowsHorizontal } from "@tabler/icons-react";
 import type { Session } from "../useSession";
-import { usePuppetCard, usePuppetTail } from "../usePuppetCard";
+import { usePuppetTail } from "../usePuppetCard";
 import { IconButton } from "./IconButton";
-import { gb, verdictColor, verdictWord } from "./format";
 
-function Fact({ label, children }: { label: string; children: React.ReactNode }) {
-  return <Box style={{ minWidth: 0, overflowWrap: "anywhere" }}>
-    <Text size="xs" c="dimmed">{label}</Text>
-    <Text component="div" size="sm">{children}</Text>
-  </Box>;
-}
+export type PuppetSource = "tail" | "stderr";
 
-/** Терминальные колонки не переносятся: масштаб измеряется по реальной
- * ширине шрифта, а не по числу символов (кириллица и широкие глифы). */
-function TailLines({ lines, fitWidth }: { lines: string[]; fitWidth: boolean }) {
+function PuppetOutput({ session, target, which }: {
+  session: Session; target: string; which: PuppetSource;
+}) {
+  const tail = usePuppetTail(session, target, which);
   const viewport = useRef<HTMLDivElement>(null);
   const text = useRef<HTMLPreElement>(null);
-  const [size, setSize] = useState({ scale: 1, height: undefined as number | undefined });
-  useLayoutEffect(() => {
-    const fit = () => {
-      if (!viewport.current || !text.current) return;
-      const width = viewport.current.clientWidth;
-      const natural = text.current.scrollWidth;
-      const scale = fitWidth && width && natural ? Math.min(1, width / natural) : 1;
-      setSize({ scale, height: text.current.scrollHeight * scale });
-    };
-    fit();
-    const observer = new ResizeObserver(fit);
-    observer.observe(viewport.current!);
-    observer.observe(text.current!);
-    return () => observer.disconnect();
-  }, [lines, fitWidth]);
-  return <Box ref={viewport} style={{
-    overflowX: fitWidth ? "hidden" : "auto", overflowY: "hidden",
-    height: fitWidth ? size.height : "auto",
-  }}>
-    <Box component="pre" ref={text} data-testid="tail-lines" m={0} style={{
-      width: "max-content", whiteSpace: "pre", fontFamily: "var(--mantine-font-family-monospace)",
-      fontSize: 13, lineHeight: 1.45, transformOrigin: "top left", transform: `scale(${size.scale})`,
-    }}>{lines.map((line, i) => <span key={i}>{line}{i < lines.length - 1 ? "\n" : ""}</span>)}</Box>
-  </Box>;
-}
+  const [size, setSize] = useState({ width: 0, height: 0, available: 0, viewportHeight: 0 });
+  const [zoom, setZoom] = useState<number | null>(null);
+  const atEnd = useRef(true);
+  const logicalTop = useRef(0);
+  const scale = zoom ?? (size.width && size.available ? Math.min(1, size.available / size.width) : 1);
 
-function PuppetScreen({ session, target }: { session: Session; target: string }) {
-  const [which, setWhich] = useState<"tail" | "stderr">("tail");
-  const [requested, setRequested] = useState(false);
-  const [fitWidth, setFitWidth] = useState(true);
-  const tail = usePuppetTail(session, target, which);
-  // После выбора вкладки эффект получает load именно нового источника.
-  useEffect(() => { if (requested) void tail.load(); }, [requested, tail.load]);
-  const select = (value: string | null) => {
-    if (value !== "tail" && value !== "stderr") return;
-    if (value === which && requested) void tail.load();
-    setWhich(value);
-    setRequested(true);
-  };
-  return <Stack gap="xs">
-    <Group justify="space-between" wrap="nowrap">
-      <Tabs value={which} onChange={select}>
-        <Tabs.List aria-label="вывод папета">
-          <Tabs.Tab value="tail" leftSection={<IconTerminal2 size={16} />}
-            onClick={() => { if (!requested) setRequested(true); }}>экран</Tabs.Tab>
-          <Tabs.Tab value="stderr" leftSection={<IconFileAlert size={16} />}>stderr</Tabs.Tab>
-        </Tabs.List>
-      </Tabs>
+  useEffect(() => { void tail.load(); }, [tail.load]);
+
+  useLayoutEffect(() => {
+    const measure = () => {
+      if (!viewport.current || !text.current) return;
+      const next = { width: text.current.offsetWidth, height: text.current.offsetHeight,
+        available: viewport.current.clientWidth, viewportHeight: viewport.current.clientHeight };
+      setSize((prev) => prev.width === next.width && prev.height === next.height
+        && prev.available === next.available && prev.viewportHeight === next.viewportHeight ? prev : next);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    if (viewport.current) observer.observe(viewport.current);
+    if (text.current) observer.observe(text.current);
+    return () => observer.disconnect();
+  }, [tail.lines, tail.loading]);
+
+  // Масштаб меняет геометрию, но не место чтения: конец остаётся концом,
+  // а прокрученный вверх текст сохраняет логическую вертикальную позицию.
+  useLayoutEffect(() => {
+    if (!viewport.current) return;
+    viewport.current.scrollTop = atEnd.current
+      ? viewport.current.scrollHeight : logicalTop.current * scale;
+  }, [tail.lines, size.height, size.viewportHeight, scale, tail.loading]);
+
+  const changeZoom = (delta: number) => setZoom(Math.max(0.1, Math.min(4, scale + delta)));
+  const loading = tail.loading || !tail.loaded;
+  return <>
+    <Group role="toolbar" aria-label="просмотр" justify="space-between" wrap="nowrap" gap={4}
+      px="md" pb="xs" style={{ flexShrink: 0, borderBottom: "1px solid var(--mantine-color-default-border)" }}>
       <Group gap={4} wrap="nowrap">
-        <IconButton label={fitWidth ? "масштаб 1:1" : "подогнать по ширине"}
-          variant="subtle" size="lg" onClick={() => setFitWidth(!fitWidth)}>
-          {fitWidth ? <IconZoomIn size={18} /> : <IconArrowsHorizontal size={18} />}
-        </IconButton>
-        <IconButton label="обновить" variant="subtle" size="lg" disabled={tail.loading}
-          onClick={() => { if (requested) void tail.load(); else setRequested(true); }}>
-          <IconRefresh size={18} />
-        </IconButton>
+        <IconButton label="уменьшить" variant="subtle" size="lg" disabled={scale <= 0.1}
+          onClick={() => changeZoom(-0.25)}><IconZoomOut size={18} /></IconButton>
+        <Text size="sm" w={44} ta="center" aria-label="масштаб">{Math.round(scale * 100)}%</Text>
+        <IconButton label="увеличить" variant="subtle" size="lg" disabled={scale >= 4}
+          onClick={() => changeZoom(0.25)}><IconZoomIn size={18} /></IconButton>
+        <IconButton label="по ширине" variant={zoom === null ? "light" : "subtle"} size="lg"
+          aria-pressed={zoom === null} onClick={() => setZoom(null)}><IconArrowsHorizontal size={18} /></IconButton>
+      </Group>
+      <Group gap="xs" wrap="nowrap">
+        {!loading && tail.truncated && <Text size="xs" c="dimmed">обрезано: показан конец</Text>}
+        <IconButton label="обновить" variant="subtle" size="lg" disabled={loading}
+          onClick={() => { atEnd.current = true; void tail.load(); }}><IconRefresh size={18} /></IconButton>
       </Group>
     </Group>
-    <Paper withBorder radius="md" p="md" mih={220} style={{ overflow: "hidden" }}>
-      {tail.loading ? <Stack align="center" justify="center" mih={188} gap="sm"
-        role="status" aria-label={which === "tail" ? "загрузка экрана" : "загрузка stderr"}>
-        <Loader size="sm" /><Text size="sm" c="dimmed">{which === "tail" ? "загрузка экрана" : "загрузка stderr"}</Text>
-      </Stack> : tail.error ? <Text c="red" role="alert">{tail.error}</Text>
-        : tail.lines.length ? <TailLines lines={tail.lines} fitWidth={fitWidth} />
-        : <Text size="sm" c="dimmed" ta="center" mt="xl">
-          {tail.loaded ? "вывод пуст" : "выберите экран или stderr для загрузки"}
-        </Text>}
-    </Paper>
-    {!tail.loading && tail.truncated && <Text size="xs" c="dimmed">обрезано: показан конец</Text>}
-  </Stack>;
+    <Box p="md" style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
+      <Box ref={viewport} data-testid="output-scroll" role="region"
+        aria-label={which === "tail" ? "вывод экрана" : "вывод лога"} tabIndex={0}
+        style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", scrollbarGutter: "stable" }}
+        onScroll={() => {
+          const el = viewport.current!;
+          atEnd.current = el.scrollHeight - el.clientHeight - el.scrollTop <= 2;
+          logicalTop.current = el.scrollTop / scale;
+        }}>
+        {loading ? <Stack h="100%" align="center" justify="center" gap="sm"
+          role="status" aria-label={which === "tail" ? "загрузка экрана" : "загрузка лога"}>
+          <Loader size="sm" /><Text size="sm" c="dimmed">{which === "tail" ? "загрузка экрана" : "загрузка лога"}</Text>
+        </Stack> : tail.error ? <Text c="red" role="alert">{tail.error}</Text>
+          : tail.lines.length ? (
+            // Рамка занимает только масштабированный размер; исходный pre
+            // вне потока и не создаёт пустую область прокрутки за выводом.
+            <Box style={{ position: "relative", width: Math.ceil(size.width * scale),
+              height: Math.ceil(size.height * scale), minWidth: "100%", overflow: "hidden" }}>
+              <Box component="pre" ref={text} data-testid="tail-lines" m={0} style={{
+                position: "absolute", top: 0, left: 0, width: "max-content", whiteSpace: "pre",
+                fontFamily: "var(--mantine-font-family-monospace)", fontSize: 13, lineHeight: 1.45,
+                transformOrigin: "top left", transform: `scale(${scale})`,
+              }}>{tail.lines.map((line, i) => <span key={i}>{line}{i < tail.lines.length - 1 ? "\n" : ""}</span>)}</Box>
+            </Box>
+          ) : <Text size="sm" c="dimmed" ta="center" mt="xl">вывод пуст</Text>}
+      </Box>
+    </Box>
+  </>;
 }
 
-export function PuppetCard({ snapshot, session, target, onClose }: {
-  snapshot: Snapshot;
+export function PuppetCard({ session, target, which = "tail", onClose }: {
   session: Session;
   target: string | null;
+  which?: PuppetSource;
   onClose: () => void;
 }) {
-  const { card: row, error } = usePuppetCard(session, target);
-  const at = snapshot.at ? new Date(snapshot.at * 1000).toLocaleTimeString() : "-";
   if (!target || session.role !== "admin") return null;
-  return (
-    <Modal opened onClose={onClose} size="min(1440px, calc(100vw - 32px))" yOffset={16}
-      title={<Text fw={600}>папет {target}</Text>} data-testid="puppet-card"
-      padding="lg" radius="md" closeButtonProps={{ "aria-label": "закрыть" }}>
-      {error ? <Text c="red" role="alert">{error}</Text> : !row ? (
-        <Group gap="sm" mih={220} justify="center" role="status" aria-label="загрузка карточки">
-          <Loader size="sm" /><Text c="dimmed">карточка грузится</Text>
-        </Group>
-      ) : (
-        <Stack gap="md">
-          <Group justify="space-between" gap="xs">
-            <Group gap="sm">
-              <Text fw={600} c={verdictColor(row.kind, row.bucket)}>{verdictWord(row.kind)}</Text>
-              {row.detail && <Text size="sm" c="dimmed">{row.detail}</Text>}
-            </Group>
-            <Text size="xs" c="dimmed">наблюдение в {at}</Text>
-          </Group>
-          <SimpleGrid cols={{ base: 2, sm: 3, md: 6 }} spacing="sm" verticalSpacing="xs">
-            <Fact label="узел">{row.node || "-"}</Fact>
-            <Fact label="ветка">{row.branch ? <Code>{row.branch}</Code> : "-"}</Fact>
-            <Fact label="владелец">{row.owner || "-"}</Fact>
-            <Fact label="модель">{row.llm || "-"}</Fact>
-            <Fact label="место клона">{gb(row.disk_kb)}</Fact>
-            <Fact label="state-строка"><Code>{row.state}</Code></Fact>
-          </SimpleGrid>
-          <Fact label="репозиторий">{row.origin ? <Code>{row.origin}</Code> : "-"}</Fact>
-          <PuppetScreen key={`${session.login}\0${target}`} session={session} target={target} />
-        </Stack>
-      )}
-    </Modal>
-  );
+  return <Modal opened onClose={onClose} size="min(1440px, calc(100vw - 32px))" yOffset={16}
+    title={<Text fw={600}>{which === "tail" ? "экран" : "лог"} {target}</Text>}
+    data-testid="puppet-card" padding="md" radius="md" closeButtonProps={{ "aria-label": "закрыть" }}
+    styles={{
+      content: { height: "calc(100dvh - 32px)", maxHeight: "calc(100dvh - 32px)",
+        display: "flex", flexDirection: "column", overflow: "hidden" },
+      header: { flexShrink: 0 },
+      body: { flex: 1, minHeight: 0, padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" },
+    }}>
+    <PuppetOutput key={`${session.login}\0${target}\0${which}`} session={session} target={target} which={which} />
+  </Modal>;
 }

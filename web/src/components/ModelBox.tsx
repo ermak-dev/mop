@@ -61,7 +61,7 @@ export function ModelBox({ session, row }: {
   };
   return (
     <Group gap="sm">
-      <IconButton label="модель" variant="subtle" size="lg" disabled={live}
+      <IconButton label="модель" variant="subtle" size="lg"
               onClick={() => { setModel(null); setOpen(true); }}>
         <IconCpu size={18} />
       </IconButton>
