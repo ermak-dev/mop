@@ -28,6 +28,7 @@ import contextvars
 import os
 import subprocess
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from . import config
 
@@ -42,8 +43,14 @@ class Context:
     server: str = None
     user: str = None
     branch: str = None     # интеграционная ветка человека (#249), без origin/
-    # поле -> откуда взято: "clone", "env", "cli"
-    sources: dict = field(default_factory=dict)
+    # поле -> откуда взято: "clone", "env", "cli". Только для чтения (#457):
+    # контекст, собранный одним запросом, не редактируется другим потоком --
+    # изменяемый вложенный словарь открывал бы именно это.
+    sources: MappingProxyType = field(default_factory=dict)
+
+    def __post_init__(self):
+        if isinstance(self.sources, dict):
+            object.__setattr__(self, "sources", MappingProxyType(self.sources))
 
 
 _current = contextvars.ContextVar("mop_context", default=Context())
@@ -109,6 +116,60 @@ def current():
 # Поля, что старше файлов настроек, объявлены здесь одним местом (#156):
 # config -- нижний слой и сверху не читает, поэтому вписываем сами.
 config.attach_context({var: name for name, (_, var) in FIELDS.items()}, current)
+
+
+@contextlib.contextmanager
+def isolated(ctx):
+    """Контекст без побочных эффектов (#457): только ContextVar, без записи
+    в os.environ и без смены cwd.
+
+    Для общих операций, позванных не из CLI: два запроса к серверу идут
+    параллельно, и os.environ -- вход отдельного CLI-процесса, а не
+    хранилище состояния HTTP-запроса. Вложенным процессам контекст
+    передают явно (child_env), а не через окружение.
+
+    В отличие от use(), окружение не трогается вовсе: ContextVar
+    возвращается reset'ом, а os.environ никто не менял.
+    Контекст шины (файл кредов) выбирает bus_file -- кэш соединения
+    процесса здесь не годится, другой сервер -- другие креды."""
+    token = _current.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _current.reset(token)
+
+
+def call_in_context(ctx, fn, *args, **kwargs):
+    """Выполнить fn В ЭТОМ потоке под ctx, вернув его же. Для worker'а
+    (#476): контекст передаётся явным аргументом -- перенос ContextVar в
+    новый поток не гарантируется, и полагаться на него нельзя."""
+    with isolated(ctx):
+        return fn(*args, **kwargs)
+
+
+def bus_file(ctx=None):
+    """Файл кредов шины выбранного сервера или None. Креды -- свойство
+    установки (ctx.server), а не процесса: у кэша bus.connect одного
+    соединения нет данных, чей это сервер, и общий слой выбирает файл
+    сам, передавая его вниз явно."""
+    server = (ctx or current()).server
+    if not server:
+        return None
+    from . import creds
+    return os.path.join(creds.server_dir(server), creds.OPERATOR_FILE)
+
+
+def child_env(ctx, **extra):
+    """Окружение реального дочернего процесса: КОПИЯ, не мутация os.environ
+    (#457). Поля контекста -- переменными, плюс extra; вызывающий передаёт
+    копию в subprocess сам."""
+    env = dict(os.environ)
+    for name, (_, var) in FIELDS.items():
+        value = getattr(ctx, name)
+        if value:
+            env[var] = value
+    env.update(extra)
+    return env
 
 
 @contextlib.contextmanager

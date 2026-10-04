@@ -26,3 +26,18 @@ def env():
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3-flash",
         "API_TIMEOUT_MS": "3000000",
     }
+
+
+def catalog_ids(payload):
+    """Ответ GET /v1/models -> [id]. Общий парсер каталога (#448, #468):
+    клиент и сервер читают одним кодом, второй копии быть не должно.
+    Неожиданная форма -- ValueError, не тихий пустой список."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise ValueError("invalid proxy model catalog: expected data list")
+    out = []
+    for model in payload["data"]:
+        if not isinstance(model, dict) or not isinstance(model.get("id"), str) \
+                or not model["id"]:
+            raise ValueError("invalid proxy model catalog: expected model id")
+        out.append(model["id"])
+    return out

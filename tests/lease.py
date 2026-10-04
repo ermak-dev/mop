@@ -192,6 +192,89 @@ def main():
               (back, list(back)), (wire, list(wire)))
     c.expect("#266: no clone data is no CloneFacts", CloneFacts.from_dict(None), None)
 
+    # ── safe-политика веб-мутаций (#460) ─────────────────────────────
+    # HYPOTHESIS: воркер дашборда шлёт изменяющие глаголы субъектом admin:
+    # операторские ворота его пропускают не спрашивая агента (#40), и любой
+    # клик по странице убивал бы чужую работу. CLI-мастер проходит ворота
+    # владения, веб-клик -- нет, хотя человек за ним тот же.
+    # SOLUTION: ops.safety(name, project) -- один общий инвариант безопасного
+    # действия: факты клона известны (unknown/AGENT SILENT -- отказ), работы
+    # нет (включая ничейную: чистый -- не значит безопасный), чужой живой
+    # аренды нет. Проект цели -- из Meta.origin джоба, принципал -- логин
+    # человека из HTTP-сессии (owner=), а не из тела запроса. Аудит (#476):
+    # принципал и сервис-отправитель -- отдельными полями записи операции.
+    # STATUS: see #460
+    from mop.common import ops
+    safety = getattr(ops, "safety", None)
+    if c.check("ops.safety exists", safety is not None):
+        def ask(name, project, owner, facts, busy=False, disruptive=False):
+            return safety(name, project, owner=owner, facts=facts,
+                          busy=busy, disruptive=disruptive, now=NOW)
+
+        # Факты -- как их отдаёт _clone_of: {"clone": ...} | {"error": ...} | None.
+        CLEAN_F = {"clone": dict(CLEAN, owner=None)}
+        DIRTY_F = {"clone": dict(DIRTY, owner={"user": "olga", "at": NOW - 5})}
+        MINE_F = {"clone": dict(CLEAN, owner={"user": "anton", "at": NOW - 5})}
+
+        # Своя аренда на чистом клоне -- проход. Чистый ничейный -- тоже
+        # проход: работы нет, держать некому (окно диспатча -- дорога CLI,
+        # здесь его держит отсутствие работы).
+        c.expect("#460 own lease on a clean clone passes",
+                 ask("pu-mop-1", "mop", "anton", MINE_F), (True, None))
+        c.expect("#460 nobody's clean clone passes",
+                 ask("pu-mop-1", "mop", "anton", CLEAN_F), (True, None))
+        # Ничейный dirty-клон -- ОТКАЗ (в отличие от CLI): работу без
+        # владельца веб не берёт и не убивает.
+        ok, why = ask("pu-mop-1", "mop", "anton", {"clone": dict(DIRTY, owner=None)})
+        c.expect("#460 nobody's dirty clone is refused", ok, False)
+        c.check("#460 the refusal says whose work it is", "nobody" in (why or ""), why)
+        # Чужая живая аренда -- отказ с именем владельца.
+        ok, why = ask("pu-mop-1", "mop", "anton", DIRTY_F)
+        c.expect("#460 a foreign live lease is refused", ok, False)
+        c.check("#460 the refusal names the lease holder", "olga" in (why or ""), why)
+        # Факты неизвестны (AGENT SILENT, ошибка агента, аллокации нет) -- отказ.
+        for what, facts in (("an agent error", {"error": "silent"}),
+                            ("no facts at all", None),
+                            ("a broken answer", {"clone": None})):
+            ok, why = ask("pu-mop-1", "mop", "anton", facts)
+            c.expect(f"#460 {what} is refused", ok, False)
+        # Disruptive поверх занятой сессии -- отказ даже при своей аренде.
+        ok, why = ask("pu-mop-1", "mop", "anton", MINE_F, busy=True, disruptive=True)
+        c.expect("#460 a disruptive action over a busy session is refused", ok, False)
+
+        # Подделка из тела запроса прав не расширяет: owner и project --
+        # ПАРАМЕТРЫ воркера (логин сессии и проект из Meta.origin), не поля
+        # запроса; safety о них вовсе не спрашивает у тела. Чужой проект в
+        # параметре -- тот же инвариант: аренда чужого человека держит.
+        foreign = {"clone": dict(CLEAN, owner={"user": "olga", "at": NOW - 5})}
+        ok, why = ask("pu-mop-2", "rugent", "anton", foreign)
+        c.expect("#460 a lease of another user holds regardless of project", ok, False)
+        c.check("#460 the refusal still names the holder", "olga" in (why or ""), why)
+
+        # Проект цели -- из Meta.origin, не из префикса имени и не из тела.
+        c.expect("#460 the target project comes from the job's origin",
+                 ops.target_project("git@h:g/my.proj.git"), "my.proj")
+        c.expect("#460 no origin -- the registered project of the caller",
+                 ops.target_project(None, job_project="rugent"), "rugent")
+        c.check("#460 the project never comes from the puppet name prefix",
+                ops.target_project("git@h:g/x.git") != "pu-mop-1", ops.target_project("git@h:g/x.git"))
+
+        # Адресация: глагол уходит субъектом ПРОЕКТА цели -- существующая
+        # функция строит адрес, и права NATS начинают работать как для
+        # мастера: у воркера нет своего субъекта admin.
+        from mop.common import bus, busnames
+        c.expect("#460 the verb rides the target project's subject",
+                 busnames.cluster("rugent"), "mop.rugent.cluster.rpc")
+
+        # Аудит (#476): принципал HTTP и сервис-отправитель -- отдельные
+        # поля; payload сообщения в записи нет.
+        audit = ops.record("restart", "pu-mop-1", "mop", "anton")
+        c.expect("#460 the audit record carries the principal and the sender",
+                 (audit.get("principal"), audit.get("sender")), ("anton", "mop-web"))
+        c.check("#460 the audit record carries no message payload",
+                not any(k in audit for k in ("body", "payload", "req", "password", "token")),
+                sorted(audit))
+
     return c.report("lease")
 
 

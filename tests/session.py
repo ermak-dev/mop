@@ -150,7 +150,7 @@ def check_state(c):
         # Пустой каталог: явный пустой ответ, а не исключение.
         got = fn(cwd)
         want = {"status": None, "waitingFor": None, "alive": False, "listen": False,
-                "turn": None, "model": None}
+                "turn": None, "sessionId": None, "model_at": None, "model": None}
         c.check(f"no session -> {got!r}, wanted {want!r}", not (got != want))
         # Старая сессия упала на логине, свежая ждёт в диалоге: берётся свежая.
         put_session(999999, "old-sid", 1000, status="idle")
@@ -459,11 +459,74 @@ def check_model_in_state(c):
             srv.close()
 
 
+def check_state_binds_session_468(c):
+    """#468: state <cwd> -- не только модель, но и привязка подтверждения.
+
+    Смена модели подтверждается телеметрией самой сессии, и вердикту нужно
+    два поля сверх model: sessionId ЖИВОЙ сессии (чья модель -- чей session_id,
+    трупу модель не приписываем, как и в #453) и model_at -- время записи
+    модели (свежесть: показ «сменилась» без времени -- слово, не факт).
+    Мёртвая сессия или нет записи -- поля null/None при нетронутой диагностике.
+    """
+    root = tempfile.mkdtemp(prefix="mop-test-468-state-")
+    sessions, models, cwd = (os.path.join(root, d) for d in ("sessions", "models", "work"))
+    for d in (sessions, models, cwd):
+        os.makedirs(d)
+    with patched(session, SESSIONS=sessions, MODELS=models):
+
+        def put_session(pid, sid, at, **more):
+            with open(os.path.join(sessions, f"{pid}.json"), "w") as f:
+                json.dump({"pid": pid, "sessionId": sid, "cwd": cwd, "statusUpdatedAt": at,
+                           "messagingSocketPath": os.path.join(root, f"{pid}.sock"),
+                           **more}, f)
+
+        def put_model(sid, model, at):
+            with open(os.path.join(models, f"{sid}.json"), "w") as f:
+                json.dump({"model": model, "at": at}, f)
+
+        import socket as _socket
+        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        srv.bind(os.path.join(root, "live.sock"))
+        srv.listen(8)
+        try:
+            # Мёртвая сессия каталога: привязки нет, модель тоже -- трупу не
+            # приписываем, и диагностике прежних полей не тронута.
+            put_session(999999, "old-sid", 1000, status="idle")
+            put_model("old-sid", "claude-opus-5-5", NOW)
+            got = session.state(cwd)
+            c.check(f"dead session: sessionId and model_at are None: {got!r}",
+                    got.get("sessionId") is None and got.get("model_at") is None)
+            c.check("dead session: diagnostics intact",
+                    got.get("status") == "idle" and got.get("alive") is False
+                    and got.get("listen") is False and got.get("model") is None)
+            # Живая сессия с записью: sessionId живой, model_at -- из записи.
+            put_session(999998, "live-sid", 2000, status="busy",
+                        messagingSocketPath=os.path.join(root, "live.sock"))
+            put_model("live-sid", "glm-5.3[1m]", 1_790_000_123)
+            got = session.state(cwd)
+            c.check("live session binds its sessionId",
+                    got.get("sessionId") == "live-sid", got)
+            c.check("model_at is the record's time, not now()",
+                    got.get("model_at") == 1_790_000_123, got)
+            c.check("model rides beside the binding",
+                    got.get("model") == "glm-5.3[1m]", got)
+            # Записи нет -- model_at вместе с моделью, sessionId остаётся:
+            # сессия жива, но подтвердить нечем.
+            os.remove(os.path.join(models, "live-sid.json"))
+            got = session.state(cwd)
+            c.check("no record: model_at is None, sessionId stays",
+                    got.get("model_at") is None and got.get("sessionId") == "live-sid",
+                    got)
+        finally:
+            srv.close()
+
+
 def main():
     c = Checks()
     for fn in (check_turn_record, check_hook_cli, check_state,
                check_model_record, check_statusline_cli, check_model_race,
-               check_model_in_state):
+               check_model_in_state,
+               check_state_binds_session_468):
         try:
             fn(c)
         except Exception as e:

@@ -11,15 +11,10 @@ TIMEOUT = 10
 
 
 def ids(payload):
-    """Ответ /v1/models -> идентификаторы; неожиданную форму не скрывать."""
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-        raise ValueError("invalid proxy model catalog: expected data list")
-    result = []
-    for model in payload["data"]:
-        if not isinstance(model, dict) or not isinstance(model.get("id"), str) or not model["id"]:
-            raise ValueError("invalid proxy model catalog: expected model id")
-        result.append(model["id"])
-    return result
+    """Ответ /v1/models -> идентификаторы (#448). Парсер общий (#468):
+    серверному фасаду каталога нужен тот же разбор, копии не должно быть."""
+    from ..common.llm import catalog_ids
+    return catalog_ids(payload)
 
 
 def available():

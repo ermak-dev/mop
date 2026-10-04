@@ -283,3 +283,22 @@ test("#416 out-of-order session answers: the newest request wins", async () => {
   expect(screen.queryByText("anton")).toBeNull();
   expect(screen.getByRole("button", { name: "Login" })).toBeInTheDocument();
 });
+
+// #472: завести папета -- кнопка главной страницы, только для админа; для
+// гостя и user её нет вовсе. Реестр проектов для формы едет с сервера
+// (GET /api/admin/projects) -- здесь только видимость кнопки.
+test("#472 the add-puppet button shows only to the admin", async () => {
+  (vi.mocked(await import("./useSession")) as { fetchSession: unknown }).fetchSession =
+    () => Promise.resolve({ login: "anton", role: "admin" });
+  const box = renderUi(<App />);
+  await screen.findByText("anton");
+  expect(screen.getByRole("button", { name: /завести папета/i })).toBeInTheDocument();
+  box.unmount();
+
+  (vi.mocked(await import("./useSession")) as { fetchSession: unknown }).fetchSession =
+    () => Promise.resolve({ login: "olga", role: "user" });
+  const box2 = renderUi(<App />);
+  await screen.findByText("olga");
+  expect(screen.queryByRole("button", { name: /завести папета/i })).toBeNull();
+  box2.unmount();
+});

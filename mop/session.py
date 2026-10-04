@@ -366,12 +366,16 @@ def state(cwd):
     listen -- как у probe, waitingFor -- из файла сессии (открытый диалог),
     turn -- запись исхода хода этой сессии, model -- id модели ЖИВОЙ сессии
     каталога по её session_id (мёртвая -- null: запись трупа ничего не
-    говорит о работающей сессии). Сессии нет -- те же ключи, пустые:
-    status и waitingFor null, alive и listen false, turn и model null."""
+    говорит о работающей сессии). Привязка подтверждения (#468): sessionId
+    -- session_id живой сессии (чья модель -- тот же id), model_at -- время
+    записи модели (свежесть показа); записи нет -- model_at null вместе с
+    моделью, sessionId остаётся. Сессии нет -- те же ключи, пустые:
+    status и waitingFor null, alive и listen false, turn, sessionId,
+    model_at и model null."""
     d = session_for_cwd(cwd)
     if d is None:
         return {"status": None, "waitingFor": None, "alive": False, "listen": False,
-                "turn": None, "model": None}
+                "turn": None, "sessionId": None, "model_at": None, "model": None}
     try:
         os.kill(int(d.get("pid")), 0)
         alive = True
@@ -387,6 +391,8 @@ def state(cwd):
     got = read_model(live.get("sessionId")) if live is not None else None
     return {"status": d.get("status", "?"), "waitingFor": d.get("waitingFor"),
             "alive": alive, "listen": listen, "turn": read_turn(d.get("sessionId")),
+            "sessionId": live.get("sessionId") if live is not None else None,
+            "model_at": got.get("at") if got else None,
             "model": got.get("model") if got else None}
 
 

@@ -3027,7 +3027,7 @@ def check_add_failure_377(c):
         with patched(bus, call_cluster=call_cluster), \
                 patched(_common,
                         workspace_text=lambda o: ("", None), sent_line=lambda s: ""), \
-                patched(lib, fail=said.append), patched(add.time, sleep=lambda s: None), \
+                patched(lib, fail=said.append), patched(_common.ops.time, sleep=lambda s: None), \
                 patched(context, current=lambda: type("Ctx", (), {"branch": None})()):
             try:
                 code = add._add("git@h:g/mop.git", "mop", False, P())
