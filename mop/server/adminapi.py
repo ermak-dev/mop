@@ -94,6 +94,36 @@ def sanitize(error):
     return squeezed or "error"
 
 
+def result_error(status, error):
+    """Публичная причина — закрытая фраза, подробности остаются в журнале.
+
+    Фильтрации пунктуации недостаточно: ключ или текст сообщения могут
+    состоять из обычных букв. Ни один фрагмент сырой ошибки не копируется.
+    """
+    fallback = {
+        "refused": "operation refused",
+        "failed": "operation failed",
+        "partial": "operation completed only partially",
+        "unknown": "operation outcome is unknown; inspect the target before retrying",
+    }.get(status)
+    if fallback is None:
+        return None
+    text = str(error or "")
+    reasons = (
+        ("work in the clone", "target has unfinished work"),
+        ("led by", "target is owned by another user"),
+        ("held by", "target is owned by another user"),
+        ("cannot inspect the target", "target state is unavailable"),
+        ("cannot tell if it holds work", "target state is unavailable"),
+        ("cannot determine the target project", "target project is unavailable"),
+        ("no live session", "target has no live session"),
+        ("not running", "target is not running"),
+        ("send needs only a non-empty message", "send needs a non-empty message"),
+        ("message delivery could not be confirmed", "message delivery could not be confirmed"),
+    )
+    return next((public for fragment, public in reasons if fragment in text), fallback)
+
+
 class Refused(Exception):
     """Валидационный отказ адаптера: (код, фраза)."""
 
@@ -381,12 +411,17 @@ class Api:
             return {"status": str(why[0])}
         with self._lock:
             self._sweep()
-            got = self._results.get(op_id)
+            stored = self._results.get(op_id)
+            got = dict(stored) if stored is not None else None
         if got is None:
             return {"status": "not found"}
         # Публичного в результате нет: ни params, ни текста сообщения.
-        return {k: v for k, v in got.items() if k in ("id", "action", "target",
-                                                      "status", "login", "at")}
+        result = {k: v for k, v in got.items() if k in ("id", "action", "target",
+                                                       "status", "login", "at")}
+        reason = result_error(got["status"], got.get("error"))
+        if reason:
+            result["error"] = reason
+        return result
 
     # ─── GET /api/admin/projects ────────────────────────────────────────
     def projects(self, handler, known):
