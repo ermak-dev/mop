@@ -12,3 +12,4 @@ web/src/node_modules/
 # сборка пакета (#351): pip и uv собирают здесь, в репозиторий не едет
 build/
 *.egg-info/
+.playwright-mcp/
