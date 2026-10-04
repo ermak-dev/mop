@@ -751,6 +751,39 @@ def check_session_store_415(c):
         c.check("#415 tokens are not alike", tok != other, (tok, other))
 
 
+def check_session_survives_restart_485(c):
+    """HYPOTHESIS (#485): SessionStore держит токены в памяти -- каждый
+    рестарт сервиса web (deploy:mop) разлогинивает всех админов.
+    SOLUTION: таблица токенов в paths.local("sessions.json"), атомарно
+    tmp+rename на open/close, загрузка на старте, просроченные выкидываются;
+    роль в файл не пишется (перечитывается провайдером, #415).
+    STATUS: FIXED — see #485"""
+    import os
+    import tempfile
+    from mop.common import paths
+    from mop.server import websession
+    with tempfile.TemporaryDirectory() as tmp:
+        with patched(paths, local=lambda *parts: os.path.join(tmp, *parts)), \
+                patched(websession, provider=lambda: FakeProvider()):
+            one = websession.SessionStore(now=lambda: 1000.0)
+            tok = one.open(identity.Identity("anton", "admin", ()))
+            two = websession.SessionStore(now=lambda: 1001.0)
+            c.check("#485 a new process sees the live token",
+                    two.get(tok, 1001.0), ("anton", "admin"))
+            two.close(tok)
+            three = websession.SessionStore(now=lambda: 1002.0)
+            c.expect("#485 a logout survives the restart too", three.get(tok, 1002.0), None)
+            dead = three.open(identity.Identity("anton", "admin", ()))
+            four = websession.SessionStore(now=lambda: 1003.0)
+            c.expect("#485 an expired token does not rise from the file",
+                     four.get(dead, 1003.0 + websession.TTL + 1), None)
+            with open(os.path.join(tmp, "sessions.json"), "w") as f:
+                f.write("{ not json")
+            five = websession.SessionStore(now=lambda: 1005.0)
+            c.expect("#485 a corrupt file starts empty, not crashed",
+                     five.get(dead, 1005.0), None)
+
+
 
 def check_login_api_415(c):
     import json
@@ -2191,6 +2224,7 @@ def main():
                check_rounds_319, check_replies_319, check_who_319, check_shape_319,
                check_load_378, check_master_sessions_421, check_who_answer_421,
                check_session_store_415, check_login_api_415,
+               check_session_survives_restart_485,
                check_address_source_415, check_deleted_user_415,
                check_journal_api_424, check_journal_entry_424,
                check_login_bounds_415, check_guard_417,
