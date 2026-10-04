@@ -152,6 +152,14 @@ def model_request(params):
     return out
 
 
+def send_request(params):
+    """Текст сообщения без расширения полномочий полями force/owner."""
+    message = params.get("message")
+    if set(params) != {"message"} or not isinstance(message, str) or not message.strip():
+        raise ValueError("send needs only a non-empty message")
+    return message
+
+
 def normalized(request):
     """Нормализованный запрос -> хэш: сортированные ключи, без пробелов.
 
@@ -256,6 +264,45 @@ def _wrap_model(target, login, model, now=None, sleep=None, observe_wait=30):
         observe_wait=observe_wait))
 
 
+def _wrap_send(target, login, message):
+    """Доставка от HTTP-принципала: факты и проект не берутся из запроса."""
+    if not login or not isinstance(target, str) or not target.startswith(puppets.JOB_PREFIX):
+        return ops.outcome(ops.REFUSED, target, error="send needs an authenticated actor and a puppet target")
+    try:
+        spec = puppets._cluster("spec", name=target) or {}
+        origin = (spec.get("meta") or {}).get("origin")
+        if not origin:
+            return ops.outcome(ops.REFUSED, target, error="cannot determine the target project")
+        project = ops.target_project(origin)
+        if not project or project == bus.ADMIN:
+            return ops.outcome(ops.REFUSED, target, error="cannot determine the target project")
+        node = puppets.node_of(target)
+
+        def node_call(node, verb, **fields):
+            return bus.request(node, verb, project=project, **fields)
+
+        facts = node_call(node, "state", name=target)
+        safe, why = ops.safety(target, project, owner=login, facts=facts)
+        if not safe:
+            return ops.outcome(ops.REFUSED, target, error=why)
+    except (bus.BusError, bus.Refused, LookupError):
+        return ops.outcome(ops.REFUSED, target, error="cannot inspect the target before sending")
+    try:
+        # У веб-чата нет инбокса на шине: from_name не выдаёт выдуманный
+        # адрес за ответный. HTTP-принципал едет владельцем, force запрещён.
+        got = ops.send_to_puppet(node_call, node, target, message, owner=login, force=False)
+    except bus.Refused as e:
+        return ops.outcome(ops.REFUSED, target, error=str(e))
+    except Exception:
+        # Запрос мог дойти до сокета до потери ответа: повторять нельзя.
+        return ops.outcome(ops.UNKNOWN, target, error="message delivery could not be confirmed")
+    if got.get("error"):
+        return ops.outcome(ops.REFUSED, target, error=got["error"])
+    if not isinstance(got.get("msg_id"), str) or not got["msg_id"].strip():
+        return ops.outcome(ops.UNKNOWN, target, error="message delivery could not be confirmed")
+    return ops.outcome(ops.REGISTERED, target)
+
+
 # Регистрация disruptive (#460): снос клона, джоба или тела под занятой
 # сессией -- отказ даже со своей арендой; _run зовёт safety им.
 DISRUPTIVE = frozenset({"restart", "recycle", "delete", "wipe"})
@@ -338,6 +385,8 @@ class Worker:
                 update_request(request)
             elif verb == "model":
                 model_request(request)
+            elif verb == "send":
+                send_request(request)
         except ValueError as e:
             return {"status": "refused", "error": str(e)}
         idem = key or f"{verb}:{target}:{digest[:8]}"
@@ -447,7 +496,8 @@ class Worker:
         """
         fn = {"restart": ops.restart, "add": ops.add, "update": ops.update,
               "recycle": _wrap_recycle, "delete": _wrap_delete,
-              "wipe": _wrap_wipe, "model": _wrap_model}.get(rec["verb"])
+              "wipe": _wrap_wipe, "model": _wrap_model,
+              "send": _wrap_send}.get(rec["verb"])
         if fn is None:
             raise RuntimeError(f"no library operation for {rec['verb']}")
         base = rec.get("baseline")
@@ -477,6 +527,9 @@ class Worker:
             # не прощупал -- ветка была мертва (fn None).
             if rec["verb"] in ("add", "update"):
                 call = lambda: self._lifecycle(fn, rec, transport)
+            elif rec["verb"] == "send":
+                message = send_request(self._payload_read(rec["op"]).get("request", {}))
+                call = lambda: fn(rec["target"], rec["actor"], message)
             elif rec["verb"] == "model":
                 # Смена модели (#468): id заказа читается из payload
                 # запроса один раз, здесь; эффект -- общий слой с часами
