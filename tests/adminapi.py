@@ -343,6 +343,9 @@ def main():
     h = post("add", target=None, params={"origin": "git@h:g/mop.git"})
     c.check("#470 add without a target is accepted (202)",
             h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
+    # Следующая проверка схемы — отдельная команда после завершения первой.
+    accepted_add = wired_api.queue.take()
+    wired_api.settle(accepted_add["id"], {"status": "succeeded"})
     h = post("add", target=None, params={"origin": "git@h:g/mop.git",
                                          "branch": "dev"})
     c.check("#470 add accepts origin and branch, nothing else",

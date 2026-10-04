@@ -333,13 +333,12 @@ class Api:
         """Операция -> задача в очереди + запись результата. Повтор того
         же payload -- тот же id; другой payload на ту же цель -- конфликт,
         пока прежняя задача в очереди."""
-        key = (action, self.effective_target(action, target, params),
-               tuple(sorted(params.items())))
+        active_key = (action, self.effective_target(action, target, params))
+        login = (who or (None,))[0]
+        key = (login, active_key, tuple(sorted(params.items())))
         with self._lock:
             self._sweep()
-            prior = self._active.get((action,
-                                      self.effective_target(action, target,
-                                                            params)))
+            prior = self._active.get(active_key)
             if prior and prior.get("key") == key:
                 # Идемпотентный повтор: тот же ответ без второй задачи.
                 return self._results[prior["id"]]
@@ -347,14 +346,15 @@ class Api:
                 raise Refused(409, "another operation is queued for this target")
             op_id = uuid.uuid4().hex
             record = {"id": op_id, "action": action, "target": target,
-                      "status": "accepted", "login": (who or (None,))[0],
+                      "status": "accepted", "login": login,
                       "at": self._now()}
+            # Отказ очереди не оставляет мнимую активную операцию. Settle
+            # ждёт этот же замок, даже если драйвер сразу забрал задачу.
+            self.queue.put({"id": op_id, "action": action, "target": target,
+                            "params": params, "login": login,
+                            "_expires": self._now() + RECORD_TTL})
             self._results[op_id] = record
-            self._active[(action, target)] = {"id": op_id, "key": key}
-        # Payload -- только в задаче, с сроком; запись результата его не несёт.
-        self.queue.put({"id": op_id, "action": action, "target": target,
-                        "params": params, "login": record["login"],
-                        "_expires": self._now() + RECORD_TTL})
+            self._active[active_key] = {"id": op_id, "key": key}
         return record
 
     def settle(self, op_id, verdict):
@@ -367,11 +367,15 @@ class Api:
             if got is None:
                 return
             status = verdict.get("status")
-            if status not in ("succeeded", "refused", "failed", "partial", "unknown"):
+            terminal = ("succeeded", "refused", "failed", "partial", "unknown")
+            if status not in terminal or got["status"] in terminal:
                 return
             got["status"] = status
             if verdict.get("error"):
                 got["error"] = verdict["error"]
+            for key, active in list(self._active.items()):
+                if active["id"] == op_id:
+                    self._active.pop(key)
 
     # ─── GET результата ────────────────────────────────────────────────
     def result(self, op_id, who):
