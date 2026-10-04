@@ -180,6 +180,29 @@ def main():
     from mop.server import opworker as _ow2
     c.check("#496 default_transport is a callable, not None",
             callable(_ow2.default_transport()), None)
+
+    # ── #498: субъект глагола -- проект цели, не процесс веб-службы ──────
+    subjects = []
+    import mop.common.bus as _bus
+
+    class _ClusterSpy:
+        @staticmethod
+        def call_cluster(verb, timeout=None, project=None, **fields):
+            subjects.append((verb, project))
+            if verb == "spec":
+                return {"meta": {"origin": "git@git.ermak.dev:rugent/rugent.git"}}
+            return {}
+
+    with patched(_bus, call_cluster=_ClusterSpy.call_cluster):
+        # Резолвер -- параметр транспорта; воркеровский строит его из
+        # Meta.origin через spec (живой путь проверен #498 отдельно).
+        tr = _ow2.default_transport(lambda n: "rugent" if n else None)
+        got = tr("restart", name="pu-rugent-1")
+        c.expect("#498 a named verb rides the target's project subject",
+                 subjects[-1], ("restart", "rugent"))
+        tr("add", origin="git@git.ermak.dev:rugent/rugent.git")
+        c.expect("#498 add rides the registered origin's project",
+                 subjects[-1], ("add", "rugent"))
     # Библиотечная фраза переживает sanitize: имя папета и слова причины
     # остаются -- санитизация для сырых исключений, не для готовых фраз.
     c.expect("#496 sanitize keeps a library phrase readable",

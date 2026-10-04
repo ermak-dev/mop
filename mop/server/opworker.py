@@ -74,17 +74,27 @@ RUIN_PARAMS = ()
 MODEL_PARAMS = ("model",)
 
 
-def default_transport():
+def default_transport(resolver=None):
     """Глаголы сервиса кластера для библиотечных операций воркера (#496).
 
     Драйвер веб-службы передаёт его в submit: без транспорта эффект падал
     «'NoneType' object is not callable» -- воркер транспорта не строит,
-    его передают. Субъект -- проекта цели: так решает #460, а тут транспорт
-    один на все глаголы операции (restart/add/update спрашивают сервис
-    кластера проекта папета; ask_cluster возвращает поля, Refused и
-    BusError ловят границы операций -- их текст едет в error вердикта)."""
-    def call(verb, **fields):
-        return bus.call_cluster(verb, **fields)
+    его передают. Субъект -- ПРОЕКТА ЦЕЛИ (#498): resolver(name) -> проект
+    из фактов джоба; у add проект решает регистрируемый origin (#470).
+    Без резолвера -- субъект процесса: чужой проект получит belongs-отказ
+    словами сервиса, но правильный вход -- резолвер воркера (#460)."""
+    def call(verb, name=None, **fields):
+        project = None
+        if resolver is not None:
+            project = (resolver(fields.get("origin"))
+                       if verb == "add" and fields.get("origin")
+                       else resolver(name) if name else None)
+        # name едет в глагол, а не остаётся параметром резолвера:
+        # библиотека зовёт transport("restart", name=...), и проглотить
+        # его здесь -- сервис получит глагол без поля.
+        if name is not None:
+            fields["name"] = name
+        return bus.call_cluster(verb, project=project, **fields)
     return call
 
 
@@ -609,6 +619,23 @@ class Worker:
             return (f"no project {puppets.project_of(origin)} in the registry; "
                     f"what the pool serves: mop project list")
         return None
+
+    def project_resolver(self):
+        """Имя папета -> проект цели (#498): origin из Meta джоба глаголом
+        spec (чтение роста не делит по проектам), project_of -- одно
+        определение (#154). Нет имени или шина молчит -- None: транспорт
+        уйдёт субъектом процесса и получит belongs-отказ словами сервиса,
+        а не тишину."""
+        def resolve(name):
+            if not name:
+                return None
+            try:
+                spec = bus.call_cluster("spec", name=name) or {}
+            except Exception:
+                return None
+            origin = puppets.JobMeta.from_meta(spec.get("meta")).origin
+            return puppets.project_of(origin) if origin else None
+        return resolve
 
     def _project_of(self, rec):
         """Проект цели операции: из payload запроса его нет, пока воркер

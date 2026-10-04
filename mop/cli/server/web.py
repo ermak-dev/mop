@@ -45,6 +45,35 @@ OPS = adminapi.Operations()
 opworker.register(OPS)
 WORKER = opworker.Worker()
 
+def _resolve_project(name):
+    """Проект цели по имени (#498): спек кластера спрашивать нельзя --
+    глагол принадлежит проекту цели и отвечает belongs-отказом субъекту
+    mop (круг). Пул же делит ростер по субъекту, а оператор видит все:
+    спросим ростер каждого проекта реестра (список -- операторским
+    projects) и найдём имя. Кэш строк -- 60 с: имя живёт дольше круга
+    операций, а реестр меняется редко. Нет нигде -- None: транспорт уйдёт
+    субъектом процесса, отказ доедет словами сервиса."""
+    now = time.time()
+    with _ROSTER_LOCK:
+        if now - _ROSTER_CACHE[0] > 60:
+            rows = {}
+            try:
+                got = bus.call_cluster("projects", project=bus.ADMIN) or {}
+                for p in got.get("names") or []:
+                    items = bus.call_cluster("roster", project=p) or {}
+                    for i in items.get("items") or []:
+                        meta = puppets.JobMeta.from_job(i.get("job") or {})
+                        if meta.origin:
+                            rows[i["job"]["ID"]] = puppets.project_of(meta.origin)
+            except Exception:
+                pass  # шина легла: кэш прежний, транспорт скажет словами
+            _ROSTER_CACHE[0], _ROSTER_CACHE[1] = now, rows
+        return _ROSTER_CACHE[1].get(name)
+
+# Резолвер проекта цели (#498): один на службу, из строк сборчика;
+# подмены WORKER в проверках резолвер не трогают.
+RESOLVER = _resolve_project
+
 
 class _LiveApi(adminapi.Api):
     """Адаптер с Origin'ом установки «на запрос»: Api ждёт строку в
@@ -586,7 +615,7 @@ def drive_operations():
         verdict = WORKER.submit(job.get("login") or "-",
                                 job["action"], job.get("target") or "",
                                 job.get("params") or {}, key=job["id"],
-                                transport=opworker.default_transport())
+                                transport=opworker.default_transport(RESOLVER))
         ADMINAPI.settle(job["id"], verdict)
 
 
