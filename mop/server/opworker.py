@@ -79,6 +79,10 @@ def register(registry):
     реестр HTTP расходиться не могут -- добавил глагол сюда, кнопка в GUI
     жива. Add без цели (#470): имя присвоит сервис, target клика -- origin.
     Вызывает поднимающий веб service; проверки зовут явно."""
+    # restart: рестарт не имеет своих params (force у веба нет, #460),
+    # но глагол обязан быть зарегистрирован -- иначе POST из GUI отвечает
+    # unsupported (#489: пропуск #464, эффект был, регистрации не было).
+    registry.register("restart", ())
     registry.register("add", ADD_PARAMS, target=False)
     registry.register("update", UPDATE_PARAMS)
     registry.register("recycle", RUIN_PARAMS)

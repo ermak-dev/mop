@@ -127,6 +127,23 @@ def main():
     h = Handler(body=req("restart", "pu-mop-1"), length=None)
     h.headers["Content-Length"] = str(len(h.body))
     api.post(h)
+    # ── #464/#489: воркер регистрирует все глаголы адаптера одной точкой;
+    # рестарт был пропущен -- POST из GUI отвечал unsupported (#489).
+    from mop.server import opworker
+    wired_all = adminapi.Operations()
+    opworker.register(wired_all)
+    wired_api2 = adminapi.Api(wired_all, adminapi.Queue(),
+                              origin="https://pool.example", who=ADMIN)
+    for verb in ("add", "update", "restart", "recycle", "delete", "wipe", "model"):
+        body = req(verb, target="pu-mop-1")
+        h = Handler(who=ADMIN, body=body, length=len(body))
+        wired_api2.post(h)
+        c.check(f"#489 opworker.register wires {verb}",
+                h.sent and h.sent[0][0] != 404, h.sent)
+
+    body = req("dance", "pu-mop-1")
+    h = Handler(who=ADMIN, body=body, length=len(body))
+    api.post(h)
     c.check("#461 unregistered operation is 404/unsupported, no button",
             h.sent and h.sent[0][0] == 404
             and h.sent[0][1].get("error") == "unsupported operation", h.sent)
