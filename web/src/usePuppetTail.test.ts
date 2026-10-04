@@ -1,7 +1,8 @@
 // Хвост экрана папета (#463): GET /api/puppet/<имя>/tail и /stderr (#462) --
 // только по явному запросу админа, без follow: хвост не опрашивается по
 // таймеру, каждый кадр -- новая кнопка. Обрезание помечается сервером и
-// показывается честно; 401/403/502 и смена цели стирают прошлые строки.
+// показывается честно; 401/403 и смена цели стирают прошлые строки.
+// #489: временный 502 оставляет последний полученный кадр с ошибкой.
 //
 // RESULT: тесты написаны до реализации (RED).
 import { act, renderHook } from "@testing-library/react";
@@ -162,6 +163,41 @@ test("#484 failed requests stop loading", async () => {
   await act(async () => { await view.result.current.load(); });
   expect(view.result.current.loading).toBe(false);
   expect(view.result.current.error).toBeTruthy();
+});
+
+// HYPOTHESIS: каждый успешный снимок меняет ссылку строк, а сбой стирает кадр.
+// SOLUTION: одинаковые строки сохраняют ссылку; временный отказ оставляет
+// последний кадр, но 401/403 очищает приватное и запрещает фоновый опрос.
+// RESULT: одинаковые кадры сохраняют ссылку, закрытие отменяет запрос.
+// STATUS: FIXED — see #489
+test("#489 identical snapshots preserve the lines reference", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => tailOk(["same", "screen"])));
+  const view = renderHook(() => usePuppetTail(ADMIN, "pu-mop-1"));
+  await act(async () => { await view.result.current.load(); });
+  const lines = view.result.current.lines;
+  await act(async () => { await view.result.current.load(); });
+  expect(view.result.current.lines).toBe(lines);
+});
+
+test("#489 a refresh failure preserves the last snapshot and marks it stale", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(tailOk(["last frame"], true))
+    .mockResolvedValueOnce({ ok: false, status: 502 }));
+  const view = renderHook(() => usePuppetTail(ADMIN, "pu-mop-1"));
+  await act(async () => { await view.result.current.load(); });
+  await act(async () => { await view.result.current.load(); });
+  expect(view.result.current.lines).toEqual(["last frame"]);
+  expect(view.result.current.truncated).toBe(true);
+  expect(view.result.current.error).toBeTruthy();
+});
+
+test("#489 unmount aborts an in-flight read", async () => {
+  const mock = vi.fn((_url: string, _init?: RequestInit) => new Promise<Response>(() => {}));
+  vi.stubGlobal("fetch", mock);
+  const view = renderHook(() => usePuppetTail(ADMIN, "pu-mop-1"));
+  await act(async () => { void view.result.current.load(); });
+  const signal = mock.mock.calls[0][1]?.signal;
+  view.unmount();
+  expect(signal?.aborted).toBe(true);
 });
 
 // прямое обращение к глобальному fetch внутри проверки подмены

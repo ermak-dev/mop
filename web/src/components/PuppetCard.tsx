@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Box, Group, Loader, Modal, Stack, Text } from "@mantine/core";
 import { IconRefresh, IconZoomIn, IconZoomOut, IconArrowsHorizontal } from "@tabler/icons-react";
 import type { Session } from "../useSession";
 import { usePuppetTail } from "../usePuppetCard";
 import { IconButton } from "./IconButton";
+import { SendForm } from "./SendForm";
 
 export type PuppetSource = "tail" | "stderr";
 
@@ -19,7 +20,28 @@ function PuppetOutput({ session, target, which }: {
   const logicalTop = useRef(0);
   const scale = zoom ?? (size.width && size.available ? Math.min(1, size.available / size.width) : 1);
 
-  useEffect(() => { void tail.load(); }, [tail.load]);
+  const pending = useRef<Promise<void> | null>(null);
+  const blocked = useRef(tail.blocked);
+  blocked.current = tail.blocked;
+  const refresh = useCallback(() => {
+    if (pending.current) return pending.current;
+    const ride = tail.load();
+    pending.current = ride;
+    void ride.finally(() => { if (pending.current === ride) pending.current = null; });
+    return ride;
+  }, [tail.load]);
+
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      if (!active || blocked.current) return;
+      await refresh();
+      if (active && which === "tail" && !blocked.current) timer = setTimeout(tick, 3000);
+    };
+    void tick();
+    return () => { active = false; clearTimeout(timer); pending.current = null; };
+  }, [refresh, which]);
 
   useLayoutEffect(() => {
     const measure = () => {
@@ -34,7 +56,7 @@ function PuppetOutput({ session, target, which }: {
     if (viewport.current) observer.observe(viewport.current);
     if (text.current) observer.observe(text.current);
     return () => observer.disconnect();
-  }, [tail.lines, tail.loading]);
+  }, [tail.lines, tail.loaded, tail.blocked]);
 
   // Масштаб меняет геометрию, но не место чтения: конец остаётся концом,
   // а прокрученный вверх текст сохраняет логическую вертикальную позицию.
@@ -42,10 +64,10 @@ function PuppetOutput({ session, target, which }: {
     if (!viewport.current) return;
     viewport.current.scrollTop = atEnd.current
       ? viewport.current.scrollHeight : logicalTop.current * scale;
-  }, [tail.lines, size.height, size.viewportHeight, scale, tail.loading]);
+  }, [tail.lines, size.height, size.viewportHeight, scale]);
 
   const changeZoom = (delta: number) => setZoom(Math.max(0.1, Math.min(4, scale + delta)));
-  const loading = tail.loading || !tail.loaded;
+  const loading = !tail.loaded;
   return <>
     <Group role="toolbar" aria-label="просмотр" justify="space-between" wrap="nowrap" gap={4}
       px="md" pb="xs" style={{ flexShrink: 0, borderBottom: "1px solid var(--mantine-color-default-border)" }}>
@@ -61,9 +83,12 @@ function PuppetOutput({ session, target, which }: {
       <Group gap="xs" wrap="nowrap">
         {!loading && tail.truncated && <Text size="xs" c="dimmed">обрезано: показан конец</Text>}
         <IconButton label="обновить" variant="subtle" size="lg" disabled={loading}
-          onClick={() => { atEnd.current = true; void tail.load(); }}><IconRefresh size={18} /></IconButton>
+          onClick={() => { void refresh(); }}><IconRefresh size={18} /></IconButton>
       </Group>
     </Group>
+    {tail.error && <Text role="alert" c="red" size="xs" px="md" pt="xs" style={{ flexShrink: 0 }}>
+      {tail.error}{tail.lines.length ? "; показан последний снимок" : ""}
+    </Text>}
     <Box p="md" style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
       <Box ref={viewport} data-testid="output-scroll" role="region"
         aria-label={which === "tail" ? "вывод экрана" : "вывод лога"} tabIndex={0}
@@ -76,10 +101,10 @@ function PuppetOutput({ session, target, which }: {
         {loading ? <Stack h="100%" align="center" justify="center" gap="sm"
           role="status" aria-label={which === "tail" ? "загрузка экрана" : "загрузка лога"}>
           <Loader size="sm" /><Text size="sm" c="dimmed">{which === "tail" ? "загрузка экрана" : "загрузка лога"}</Text>
-        </Stack> : tail.error ? <Text c="red" role="alert">{tail.error}</Text>
-          : tail.lines.length ? (
-            // Рамка занимает только масштабированный размер; исходный pre
-            // вне потока и не создаёт пустую область прокрутки за выводом.
+        </Stack> : tail.blocked ? null : (
+          <>
+            {/* Рамка занимает только масштабированный размер; исходный pre
+                вне потока и не создаёт пустую область прокрутки за выводом. */}
             <Box style={{ position: "relative", width: Math.ceil(size.width * scale),
               height: Math.ceil(size.height * scale), minWidth: "100%", overflow: "hidden" }}>
               <Box component="pre" ref={text} data-testid="tail-lines" m={0} style={{
@@ -88,9 +113,15 @@ function PuppetOutput({ session, target, which }: {
                 transformOrigin: "top left", transform: `scale(${scale})`,
               }}>{tail.lines.map((line, i) => <span key={i}>{line}{i < tail.lines.length - 1 ? "\n" : ""}</span>)}</Box>
             </Box>
-          ) : <Text size="sm" c="dimmed" ta="center" mt="xl">вывод пуст</Text>}
+            {!tail.lines.length && !tail.error && <Text size="sm" c="dimmed" ta="center" mt="xl">вывод пуст</Text>}
+          </>
+        )}
       </Box>
     </Box>
+    {which === "tail" && !tail.blocked && <Box px="md" py="sm" data-testid="screen-composer"
+      style={{ flexShrink: 0, borderTop: "1px solid var(--mantine-color-default-border)" }}>
+      <SendForm session={session} target={target} />
+    </Box>}
   </>;
 }
 
