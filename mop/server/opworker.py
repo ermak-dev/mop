@@ -68,6 +68,10 @@ UPDATE_PARAMS = ("fresh", "origin")
 # Разрушительные действия (#471) аргументов не имеют: force веб не берёт
 # по определению (#473), пустой кортеж -- «никаких лишних полей».
 RUIN_PARAMS = ()
+# Смена модели (#468): один параметр -- id из каталога прокси. Форму
+# проверяет ops.valid_model_id (слэш/перевод строки/управление там не
+# проходят); «прокси такое не знает» -- внятный отказ эффекта, не догадка.
+MODEL_PARAMS = ("model",)
 
 
 def register(registry):
@@ -80,6 +84,7 @@ def register(registry):
     registry.register("recycle", RUIN_PARAMS)
     registry.register("delete", RUIN_PARAMS)
     registry.register("wipe", RUIN_PARAMS)
+    registry.register("model", MODEL_PARAMS)
 
 
 def remote_workspace(origin, fetch=None):
@@ -130,6 +135,16 @@ def update_request(params):
         if not isinstance(params["origin"], str) or not params["origin"].strip():
             raise ValueError("update origin must be a non-empty origin")
         out["origin"] = params["origin"]
+
+
+def model_request(params):
+    """params model -> id модели (#468). Форма id -- ops.valid_model_id:
+    отказ приёма до intent, кривой запрос не оставляет записи «что-то
+    случилось». Само существование модели у прокси проверяет эффект."""
+    model = params.get("model")
+    if not ops.valid_model_id(model):
+        raise ValueError(f"model needs a valid model id, got {model!r}")
+    return model
     return out
 
 
@@ -221,6 +236,22 @@ def _wrap_wipe(target, login):
         puppets.node_of(target, running=False), target, force=False)), target)
 
 
+def _wrap_model(target, login, model, now=None, sleep=None, observe_wait=30):
+    # Смена модели (#468) -- общий ops.switch_model (#468), не своя копия:
+    # валидация формы, no-op по свежей телеметрии и подтверждение сессией
+    # живут там. Часы и сон -- воркера (застрявший такт теста не заставил
+    # бы наблюдение жить по-настоящему); отказ эффекта (диалог не
+    # закрылся) ловит _guarded.
+    def node_call(node, verb, **fields):
+        # node-образный транспорт поверх шины: read-глагол узла своим
+        # проектом (оператор -- admin-проект, права как у mop admin).
+        return bus.request(node, verb, **fields)
+    return _guarded(target, lambda: ops.switch_model(
+        node_call, puppets.node_of(target), target, model,
+        now=now or time.time, sleep=sleep or time.sleep,
+        observe_wait=observe_wait))
+
+
 # Регистрация disruptive (#460): снос клона, джоба или тела под занятой
 # сессией -- отказ даже со своей арендой; _run зовёт safety им.
 DISRUPTIVE = frozenset({"restart", "recycle", "delete", "wipe"})
@@ -301,6 +332,8 @@ class Worker:
                     return {"status": "refused", "error": why}
             elif verb == "update":
                 update_request(request)
+            elif verb == "model":
+                model_request(request)
         except ValueError as e:
             return {"status": "refused", "error": str(e)}
         idem = key or f"{verb}:{target}:{digest[:8]}"
@@ -410,7 +443,7 @@ class Worker:
         """
         fn = {"restart": ops.restart, "add": ops.add, "update": ops.update,
               "recycle": _wrap_recycle, "delete": _wrap_delete,
-              "wipe": _wrap_wipe}.get(rec["verb"])
+              "wipe": _wrap_wipe, "model": _wrap_model}.get(rec["verb"])
         if fn is None:
             raise RuntimeError(f"no library operation for {rec['verb']}")
         base = rec.get("baseline")
@@ -440,6 +473,16 @@ class Worker:
             # не прощупал -- ветка была мертва (fn None).
             if rec["verb"] in ("add", "update"):
                 call = lambda: self._lifecycle(fn, rec, transport)
+            elif rec["verb"] == "model":
+                # Смена модели (#468): id заказа читается из payload
+                # запроса один раз, здесь; эффект -- общий слой с часами
+                # и сном воркера, как у наблюдаемого рестарта (#464).
+                model = self._payload_read(rec["op"]).get("request", {}) \
+                    .get("model")
+                call = lambda: fn(rec["target"], rec["actor"], model,
+                                  now=self._now,
+                                  sleep=lambda s: self._sleep(self.observe_poll),
+                                  observe_wait=self.observe_wait)
             else:
                 call = lambda: fn(rec["target"], login=rec["actor"])
         if context is not None:

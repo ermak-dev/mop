@@ -48,6 +48,14 @@ add: реестр сервера, admin-only, чтение без побочны
 имя и origin: имя выводится project_of origin'а, легаси-имена без
 origin'а форме не участвуют -- обратного отображения «имя -> origin»
 в системе нет (#33). no-store ставит обвязка HTTP.
+
+GET /api/admin/models (#468) -- каталог моделей прокси для формы смены:
+админ-only так же, ответ {"models": [id]}. Источник читается сервером
+(mop/common/llm.catalog_read: URL из настройки, ключ из файла
+установленного прокси, #391) -- ключ и URL в ответ не едут; парсер
+общий с клиентом (#448, mop/common/llm.catalog_ids), второй копии
+urllib-логики здесь нет. Лежащий источник -- closed 503 фразой
+allowlist'а.
 """
 import json
 import re
@@ -55,7 +63,7 @@ import threading
 import time
 import uuid
 
-from ..common import puppets
+from ..common import config, puppets
 
 # ─── лимиты и сроки ──────────────────────────────────────────────────────
 BODY_MAX = 64 * 1024        # запросы -- килобайты: параметры, не файлы
@@ -92,6 +100,42 @@ class Refused(Exception):
     def __init__(self, code, error):
         super().__init__(error)
         self.code, self.error = code, error
+
+
+def catalog_read(env=None, key_path=None):
+    """Каталог моделей прокси глазами сервера (#468): GET /v1/models
+    клиентским ключом. Ключ -- файл установленного прокси
+    (proxykey.source, #391), прежний env -- переходный; URL -- настройка
+    MOP_PROXY_URL. Ключ не логируется и в ответы не едет -- только внутрь
+    HTTPS-запроса. -> [id] | исключение (лежащий прокси, нет ключа):
+    фасад переведёт в общую фразу 503. Сервер-слой: proxykey и creds
+    общему слою не видны (imports go downward only)."""
+    import ssl
+    import urllib.parse
+    import urllib.request
+    from . import proxykey
+    from ..common import creds
+    url = (config.get("MOP_PROXY_URL") or "").rstrip("/")
+    key = proxykey.source(env or {}, key_path)
+    if not url or not key:
+        raise RuntimeError("proxy address or key is not configured")
+    host = config.get("MOP_SERVER_LAN")
+    req = urllib.request.Request(url + "/v1/models",
+                                 headers={"Authorization": f"Bearer {key}"})
+    # Пин CA -- как у doctor (_probe): TLS-прокси установки имеет свой CA.
+    pin = None
+    try:
+        pin = creds.cafile(creds.server_dir(host)) \
+            if urllib.parse.urlsplit(url).hostname == host else None
+    except Exception:
+        pin = None
+    context = ssl.create_default_context(cafile=pin)
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+    with opener.open(req, timeout=10) as r:
+        if r.status != 200:
+            raise RuntimeError(f"proxy catalog answered HTTP {r.status}")
+        from ..common import llm
+        return llm.catalog_ids(json.load(r))
 
 
 def project_list(known):
@@ -341,6 +385,26 @@ class Api:
         except Exception as e:  # noqa: BLE001 -- наружу только фраза
             return handler._json(503, {"error": sanitize(e)})
         return handler._json(200, {"projects": listing})
+
+    # ─── GET /api/admin/models ──────────────────────────────────────────
+    def models(self, handler, read=None):
+        """Каталог моделей прокси (#468): id из /v1/models. Admin-only,
+        чтение без побочных действий; read -- читатель сервера (подмена
+        проверками; по умолчанию llm.catalog_read). Ответ -- {"models":
+        [id]}: ни ключа, ни URL прокси в нём нет."""
+        why = self._admin(getattr(handler, "who", None), asked=True)
+        if why:
+            return handler._json(why[0], {"error": why[1]})
+        if read is None:
+            read = catalog_read
+        try:
+            got = read() or []
+        except Exception:  # noqa: BLE001 -- наружу общая фраза: в сыром
+            # исключении ходят адреса и пути, а диагноз один -- источника
+            # нет; какой именно, админу формы знать не нужно.
+            return handler._json(503, {"error": "model catalog is unavailable"})
+        return handler._json(200, {"models": sorted(got)})
+
 
     def _sweep(self):
         now = self._now()

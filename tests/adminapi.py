@@ -20,7 +20,7 @@ import os
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks  # noqa: E402
+from _lib import Checks, patched, patched_env  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 try:
@@ -360,6 +360,68 @@ def main():
                 h.sent and h.sent[0][0] == 400
                 and "unknown parameters" in h.sent[0][1].get("error", ""),
                 h.sent)
+
+    # ── каталог моделей для формы (#468) ─────────────────────────────────
+    # HYPOTHESIS: форма смены не знает моделей -- их зовёт прокси, и
+    # список у браузера только если сервер сам его принёс. Ключ прокси в
+    # ответе или в конфиге фронта -- утечка (#448: ключ не покидает HTTPS
+    # и localhost); вторая копия urllib-логики в adminapi -- расползание.
+    # SOLUTION: чистый парсер каталога -- общий (client слоя #448 и
+    # сервер зовут один код), читатель сервера -- config + proxykey.source
+    # (файл установленного прокси, прежний env -- переходный). Ответ --
+    # {"models": [id]}; ключ и URL наружу не едут; лежащий источник --
+    # closed 503 без сырой детали.
+    from mop.common import llm
+
+    c.check("#468 the catalog parser is the client one, not a copy",
+            llm.catalog_ids({"data": [{"id": "glm-5.3"}]}) == ["glm-5.3"], None)
+    try:
+        llm.catalog_ids({"data": [{"name": "opus"}]})
+        c.check("#468 a malformed catalog is rejected by the shared parser", False)
+    except ValueError:
+        c.check("#468 a malformed catalog is rejected by the shared parser", True)
+
+    def catalog(readings):
+        """Читатель каталога: ответы по очереди; исключение -- лежащий
+        источник (503 без сырой детали)."""
+        def reader():
+            got = readings.pop(0) if len(readings) > 1 else readings[0]
+            if isinstance(got, Exception):
+                raise got
+            return got
+        return reader
+
+    class GetHandler:
+        command = "GET"
+        path = "/api/admin/models"
+        headers = {}
+        def __init__(self, who=ADMIN):
+            self.who = who
+            self.sent = []
+        def _json(self, code, payload):
+            self.sent.append((code, payload))
+
+    listing_api = adminapi.Api(ops, adminapi.Queue(),
+                               origin="https://pool.example", who=ADMIN)
+    h = GetHandler()
+    listing_api.models(h, catalog([["glm-5.3", "claude-opus-5-5"]]))
+    c.check("#468 GET models serves the admin the id list",
+            h.sent and h.sent[0][0] == 200
+            and h.sent[0][1] == {"models": ["claude-opus-5-5", "glm-5.3"]}, h.sent)
+    h = GetHandler(None)
+    listing_api.models(h, catalog([["glm-5.3"]]))
+    c.check("#468 GET models refuses a guest with 401",
+            h.sent and h.sent[0][0] == 401, h.sent)
+    h = GetHandler(USER)
+    listing_api.models(h, catalog([["glm-5.3"]]))
+    c.check("#468 GET models refuses a non-admin with 403",
+            h.sent and h.sent[0][0] == 403, h.sent)
+    h = GetHandler()
+    listing_api.models(h, catalog([RuntimeError("secret /etc/mop/key down")]))
+    c.check("#468 a dead catalog source reads closed, no raw detail",
+            h.sent and h.sent[0][0] == 503
+            and json.dumps(h.sent[0][1])
+            == '{"error": "model catalog is unavailable"}', h.sent)
 
     return c.report("adminapi")
 

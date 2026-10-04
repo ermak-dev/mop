@@ -45,6 +45,7 @@ mop/client/channel.py (#458): вердикт доставки нужен и ве
 Единицы времени -- секунды; вызовы нижнего транспорта (bus) -- аргументом
 transport, чтобы проверки подставляли свой и операция оставалась чистой.
 """
+import re
 import time
 
 from . import bus, busnames, context as _context
@@ -344,6 +345,119 @@ def _observe(transport, name, before, wait, sleep, clock):
                            error=f"{name}: restarted but not running "
                                  f"again within {wait}s")
         sleep(2)
+
+
+# ─── смена модели (#468): один workflow на MCP и веб ─────────────────────
+# Модель на проводе -- id каталога прокси; claude хранит её в записи статуса
+# с суффиксом окна («glm-5.3[1m]»), поэтому сравнение -- по нормализованному
+# id: хвост в квадратных скобках не часть имени модели.
+_WINDOW = re.compile(r"\[[^\]]*\]\s*$")
+# id модели -- буквы, цифры, точка, дефис, подчёркивание; скобочная форма
+# окна (для no-op сравнения) разрешена хвостом. Слэша, перевода строки,
+# пробелов и прочего управления нет: id едет аргументом tmux-ввода и в
+# путь записи телеметрии не попадает, проверка формы -- на этом слое, до эффекта.
+_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[^\]]*\])?")
+MODEL_ID_MAX = 128
+
+
+def valid_model_id(model):
+    """id модели -> bool. Не имя семейства и не каталог: форма одна, а
+    «прокси такое не знает» -- внятный отказ эффекта, не догадка здесь."""
+    return (isinstance(model, str) and bool(model)
+            and len(model) <= MODEL_ID_MAX
+            and _MODEL_ID.fullmatch(model) is not None)
+
+
+def model_matches(shown, wanted):
+    """Модель телеметрии и заказанная -- одна модель? Нормализация: хвост
+    окна контекста в скобках не часть имени. None -- не решение."""
+    if not isinstance(shown, str) or not shown:
+        return False
+    return _WINDOW.sub("", shown) == _WINDOW.sub("", wanted or "")
+
+
+def switch_model(transport, node, name, model, session_reader=None,
+                 switcher=None, now=time.time, observe_wait=30,
+                 fresh_within=120, sleep=time.sleep):
+    """Перевести папета на модель: вердикт outcome() (#468).
+
+    transport -- глаголы узла (bus.request-подобный): подтверждение читает
+    read-глагол state, тот же, что ростер. session_reader -- ответ узла на
+    state (подмена проверками; по умолчанию -- сам transport). switcher --
+    эффект (по умолчанию puppets.switch_model: печать /model в tmux-пейн и
+    подтверждение диалога). Слой ниже client: и CLI/MCP, и воркер сервера
+    зовут этот же код.
+
+    Вердикты: валидный id и уже выбранная модель по свежей телеметрии --
+    registered no-op без эффекта (второй раз одну и ту же -- не ход в TUI);
+    кривой id -- refused до транспорта; отказ эффекта (диалог не закрылся,
+    чужая аренда) -- refused с причиной; телеметрия подтвердила ту же
+    сессию (sessionId как до эффекта), свежую запись (model_at внутри окна)
+    и нормализованно ту же модель -- registered с привязкой; другая модель
+    при живом подтверждении сессии -- partial (эффект был, смены не видно);
+    нет сигнала нужной свежести за срок -- unknown (эффект мог и быть).
+    """
+    if not valid_model_id(model):
+        return _refused(name, f"invalid model id: {model!r}")
+    read = session_reader or _session_reader(transport)
+    act = switcher or _switcher()
+    # База ДО эффекта: чья сессия сейчас -- её sessionId и ждём в ответе.
+    # No-op -- только по СВЕЖЕЙ записи: устаревший снимок «уже выбранной»
+    # модели не доказательство (модель могли сменить без события) -- тогда
+    # эффект идёт как заказан.
+    before = read(node, name)
+    base = _live_rec(name, before)
+    if base is not None and model_matches(base.get("model"), model) \
+            and (now() - (base.get("model_at") or 0)) <= fresh_within:
+        return outcome(REGISTERED, name, noop=True,
+                       sessionId=base.get("sessionId"))
+    try:
+        act(node, name, model, False)
+    except (bus.Refused, RuntimeError, LookupError) as e:
+        return _refused(name, str(e))
+    # Подтверждение телеметрией: опрашиваем read-глаголом, пока запись не
+    # покажет заказанную модель в той же сессии; нет -- unknown за срок.
+    deadline = now() + (observe_wait if observe_wait is not None else 30)
+    while True:
+        got = _live_rec(name, read(node, name))
+        if got is not None and got.get("sessionId") == base.get("sessionId") \
+                and model_matches(got.get("model"), model) \
+                and (now() - (got.get("model_at") or 0)) <= fresh_within:
+            return outcome(REGISTERED, name, sessionId=got.get("sessionId"))
+        if now() >= deadline:
+            break
+        sleep(2)
+    fresh = got is not None and got.get("sessionId") == base.get("sessionId") \
+        and (now() - (got.get("model_at") or 0)) <= fresh_within
+    if fresh and got.get("model"):
+        return outcome(PARTIAL, name, error=f"{name}: still on "
+                                            f"{got.get('model')} after the switch")
+    return outcome(UNKNOWN, name, error=f"{name}: no fresh model signal "
+                                        f"within {observe_wait}s")
+
+
+def _live_rec(name, answer):
+    """Ответ глагола state -> запись живой сессии папета | None."""
+    rec = ((answer or {}).get("puppets") or {}).get(name) or {}
+    st = rec.get("state")
+    if not isinstance(st, dict) or not (st.get("alive") and st.get("listen")):
+        return None
+    return st
+
+
+def _session_reader(transport):
+    # states, а не state: v_state отвечает голыми фактами без конверта
+    # {"puppets": ...}, который разбирает _live_rec; конверт пачки (глагол
+    # states, тем же ходом читает ростер) -- форма, на которой держится
+    # и ответ _mine-фильтрации, и _live_rec.
+    def read(node, name):
+        return transport(node, "states", names=[name])
+    return read
+
+
+def _switcher():
+    from . import puppets
+    return puppets.switch_model
 
 
 # ─── доставка (#458: из mop/client/channel.py) ──────────────────────────
