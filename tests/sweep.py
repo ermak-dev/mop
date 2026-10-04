@@ -133,8 +133,10 @@ def check_v_junk_372(c):
              reply["work"].get("pu-a-1"), probed["pu-a-1"])
     rows = {r["name"]: r for r in puppets.classify_junk({"hyper": reply}, set())}
     off = rows.get("pu-a-1") or {}
-    c.check(f"#372 a clean pushed orphan off its home branch is spared: {off}",
-            off.get("sweepable") is False and "off home master" in (off.get("detail") or ""))
+    # #483: чистый сирота вне дома сносится, как и дома: позиция чистого
+    # клона не работа, а сироте её сохранять некому.
+    c.check(f"#483 a clean pushed orphan off its home branch is swept too: {off}",
+            off.get("sweepable") is True)
     c.expect("#372 a clean orphan at home is swept",
              (rows.get("pu-a-2") or {}).get("sweepable"), True)
 

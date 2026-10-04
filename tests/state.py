@@ -81,12 +81,16 @@ CASES = [
 
     # Свободен = в клоне нечего терять. На этом стоит решение о диспатче.
     ("clean and everything's on origin", facts("idle 1 1", CLEAN), "free (master)"),
-    # #272: чистый клон не на доме держит тикет (папет ждёт приёма отчёта);
-    # дом -- ветка мастера из меты, у старого агента -- ветка по умолчанию.
-    ("foreign branch, everything's pushed, but off its home -- holds a ticket",
-     facts("idle 1 1", {**WORK, "home": "master"}), "idle: bug/1063 (off home master)"),
-    ("the same from an old agent: no home key, home is the default branch",
-     facts("idle 1 1", OLD_WORK), "idle: bug/1063 (off home master)"),
+    # #483: чистый клон вне дома -- free, а не idle: несохранённого и
+    # неотправленного нет, а позиция чистого клона работу не держит (окно
+    # приёма закрывает живая аренда и ветка тикета, не ростер).
+    ("#483 clean clone off its home -- the place is free",
+     facts("idle 1 1", {**WORK, "home": "master"}), "free (bug/1063)"),
+    ("#483 the same from an old agent: home is the default branch",
+     facts("idle 1 1", OLD_WORK), "free (bug/1063)"),
+    ("#483 dirty clone off its home still holds work",
+     facts("idle 1 1", {**WORK, "home": "master", "dirty": 1}),
+     "idle: bug/1063 (вне дома master) (uncommitted: 1)"),
     ("the master's branch is its home, everything's pushed",
      facts("idle 1 1", WORK), "free (bug/1063)"),
     ("uncommitted files",
@@ -296,7 +300,7 @@ TREATMENT = [
     ("idle: bug/1063 (uncommitted: 3)", False, False, "busy"),
     ("idle: bug/1063 (unpushed: 2)", False, False, "busy"),
     ("idle: bug/1063 (uncommitted: 3, unpushed: 2)", False, False, "busy"),
-    ("idle: bug/1063 (off home master)", False, False, "busy"),
+    ("idle: bug/1063 (вне дома master) (uncommitted: 1)", False, False, "busy"),
     ("idle: bug/1063 (uncommitted: 2)", False, False, "busy"),
     ("idle: master (unpushed: 2)", False, False, "busy"),
     ("idle: master (uncommitted: 3)", False, False, "busy"),
@@ -879,10 +883,14 @@ def main():
 CLONE_TABLE = [
     ("clean on the default branch", CLEAN, False),
     ("clean on the master's branch (its home)", WORK, False),
-    # #272: дом клона -- ветка мастера или ветка по умолчанию.
-    ("clean off its home: waiting for accept", {**WORK, "home": "master"}, True),
-    ("clean off its home, old agent (no home key)", OLD_WORK, True),
-    ("clean on the default branch, home elsewhere", {**CLEAN, "home": "swarm"}, True),
+    # #483: чистый клон вне дома работу не держит -- ни для ростера, ни для
+    # аренды, ни для уборки: позиция чистого клона не работа, окно приёма
+    # закрывает живая аренда и ветка тикета. Держат -- грязь, неотправленное
+    # и неизвестность.
+    ("#483 clean off its home: free for everyone", {**WORK, "home": "master"}, False),
+    ("#483 clean off its home, old agent (no home key)", OLD_WORK, False),
+    ("#483 clean on the default branch, home elsewhere", {**CLEAN, "home": "swarm"}, False),
+    ("#483 uncommitted off its home", {**WORK, "home": "master", "dirty": 1}, True),
     ("uncommitted on the default branch", {**CLEAN, "dirty": 2}, True),
     ("unpushed on a branch", {**WORK, "ahead": 1}, True),
     ("both on a branch", {**WORK, "dirty": 1, "ahead": 3}, True),
