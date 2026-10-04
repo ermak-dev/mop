@@ -40,7 +40,7 @@ vi.mock("./useSession", async () => {
 
 const cardOk = () => ({
   ok: true, status: 200,
-  json: async () => ({ puppet: SNAP.projects[0].puppets[0] }),
+  json: async () => ({ lines: ["private output"] }),
 }) as Response;
 
 const mocked = vi.mocked(await import("./useSession")) as unknown as {
@@ -57,7 +57,7 @@ test("admin opens the card from the row; a guest has no opener", async () => {
   // admin: строка открывается кнопкой с доступным именем
   const opener = screen.getByRole("button", { name: /pu-mop-1/i });
   fireEvent.click(opener);
-  await waitFor(() => expect(screen.getByText("git@h:g/mop.git")).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText("private output")).toBeInTheDocument());
   view.unmount();
 });
 
@@ -75,12 +75,10 @@ test("logout with the card open clears it in the same render", async () => {
   renderUi(<App />);
   // сессия admin приезжает асинхронно -- ждём открывашку, не кликаем вслепую
   fireEvent.click(await screen.findByRole("button", { name: /pu-mop-1/i }));
-  // карточка загрузилась: сырая state-строка -- факт только карточки
-  await waitFor(() => expect(screen.getByText("free (master)")).toBeInTheDocument());
-  // выход из шапки: карточка закрывается, факты уходят с экрана. Признак --
-  // сырая state-строка: она только в карточке, таблица показывает слово.
+  // Приватный вывод не должен оставаться после выхода из сессии.
+  await waitFor(() => expect(screen.getByText("private output")).toBeInTheDocument());
   fireEvent.click(screen.getByRole("button", { name: /logout/i }));
-  await waitFor(() => expect(screen.queryByText("free (master)")).toBeNull());
+  await waitFor(() => expect(screen.queryByText("private output")).toBeNull());
   // Mantine держит пустой корень модала в DOM -- пустота и есть признак
   const dialog = screen.queryByRole("dialog");
   expect(dialog?.textContent ?? "").toBe("");
@@ -96,16 +94,14 @@ test("switching the target while pending never swaps in the old card", async () 
   fireEvent.click(await screen.findByRole("button", { name: /pu-mop-1/i }));
   // карточка ещё грузится; пользователь закрывает её
   fireEvent.click(await screen.findByRole("button", { name: /закрыть/i }));
-  // корень модала Mantine держит в DOM -- содержимое уходит. Сырая
-  // state-строка -- факт карточки, в таблице её текста нет.
-  await waitFor(() => expect(screen.queryByText("free (master)")).toBeNull());
+  // Закрытие убирает приватный вывод ещё до прихода ответа.
+  await waitFor(() => expect(screen.queryByText("private output")).toBeNull());
   // Mantine держит пустой корень модала в DOM -- пустота и есть признак
   expect(screen.queryByRole("dialog")?.textContent ?? "").toBe("");
   // опоздавший ответ первой открытой карточки приходит после закрытия
   await act(async () => { release?.(cardOk()); });
   await new Promise((r) => setTimeout(r, 20));
-  // закрытая цель не воскресает: карточки нет вовсе (origin в заголовке
-  // секции -- публичный факт, признак -- отсутствие диалога и state-строки)
+  // Закрытая цель не воскресает вместе с запоздалым ответом.
   expect(screen.queryByRole("dialog")).toBeNull();
-  expect(screen.queryByText("free (master)")).toBeNull();
+  expect(screen.queryByText("private output")).toBeNull();
 });

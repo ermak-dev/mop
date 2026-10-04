@@ -9,6 +9,7 @@
 import { useState } from "react";
 import { IconRefresh } from "@tabler/icons-react";
 import { IconButton } from "./IconButton";
+import { OperationResult } from "./OperationResult";
 import { Button, Code, Group, Modal, Stack, Text } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -24,31 +25,23 @@ export function opWord(status: string): string {
   }[status] ?? status;
 }
 
-const TERMINAL = new Set(["succeeded", "refused", "failed", "partial", "unknown"]);
-
 export function RestartBox({ session, row }: {
   session: Session;
   /** Строка ростера: подтверждение показывает её факты. */
   row: Puppet;
 }) {
   const [open, setOpen] = useState(false);
+  const [result, setResult] = useState(false);
   const { op, submit } = useAdminOp(session, session.role === "admin" ? row.name : null);
-  const live = op.status !== "idle" && !TERMINAL.has(op.status);
   return (
     <Group gap="sm">
       <IconButton label="рестарт" variant="subtle" color="orange" size="lg"
-              disabled={live} onClick={() => setOpen(true)}>
+              onClick={() => { if (op.status !== "idle") setResult(true); else setOpen(true); }}>
         <IconRefresh size={18} />
       </IconButton>
-      {/* вердикт держится, пока операция жива или терминальна в этой памяти */}
-      {op.status !== "idle" && (
-        <Text size="sm" c={op.status === "succeeded" ? "teal"
-                            : op.status === "unknown" ? "yellow" : "red"}>
-          {opWord(op.status)}
-          {op.lost ? " (первый ответ потерян)" : ""}
-        </Text>
-      )}
-      {op.error ? <Text size="sm" c="red">{op.error}</Text> : null}
+      <OperationResult opened={result} onClose={() => setResult(false)}
+        onAgain={() => { setResult(false); setOpen(true); }} title="рестарт"
+        target={row.name} op={op} word={opWord(op.status)} testId="restart-verdict" />
       {/* модал рендерится только открытым: закрытого контента в DOM нет
           (Mantine иначе держит его под спрятанным переходом) */}
       {open && (
@@ -67,7 +60,7 @@ export function RestartBox({ session, row }: {
             <Button variant="light" color="gray" onClick={() => setOpen(false)}>
               отмена
             </Button>
-            <Button color="orange" onClick={() => { setOpen(false); void submit(); }}>
+            <Button color="orange" onClick={() => { setOpen(false); setResult(true); void submit(); }}>
               подтвердить
             </Button>
           </Group>
