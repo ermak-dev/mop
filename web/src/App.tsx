@@ -140,7 +140,7 @@ export default function App() {
             <>
               <PoolTable projects={snapshot.projects} session={session}
                          onOpen={session.role === "admin" ? setPuppet : undefined} />
-              <PuppetCard snapshot={snapshot} session={session}
+              <PuppetCard session={session}
                           target={session.role === "admin" ? puppet : null}
                           onClose={closePuppet} />
               {/* живые мастера (#305) */}

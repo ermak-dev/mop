@@ -5,7 +5,7 @@
 // заголовке.
 import { Table } from "@mantine/core";
 
-export interface Col { label: string; right?: boolean }
+export interface Col { label: string; right?: boolean; compact?: boolean }
 
 /** Выравнивание колонки для Table.Th и Table.Td. */
 export const align = (col: Col) => (col.right ? "right" : undefined);
@@ -13,7 +13,7 @@ export const align = (col: Col) => (col.right ? "right" : undefined);
 export function TableHead({ cols }: { cols: readonly Col[] }) {
   return (
     <Table.Thead>
-      <Table.Tr>{cols.map((c, i) => <Table.Th key={i} ta={align(c)}>{c.label}</Table.Th>)}</Table.Tr>
+      <Table.Tr>{cols.map((c, i) => <Table.Th key={i} ta={align(c)} style={c.compact ? { width: "1%", whiteSpace: "nowrap" } : undefined}>{c.label}</Table.Th>)}</Table.Tr>
     </Table.Thead>
   );
 }

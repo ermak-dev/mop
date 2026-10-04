@@ -9,6 +9,7 @@
 import { useState } from "react";
 import { IconCpu } from "@tabler/icons-react";
 import { IconButton } from "./IconButton";
+import { OperationResult } from "./OperationResult";
 import { Button, Code, Group, Modal, Radio, Stack, Text } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -25,6 +26,7 @@ export function ModelBox({ session, row }: {
   const { op, submit } = useAdminOp(session, session.role === "admin" ? row.name : null);
   const [model, setModel] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [result, setResult] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const live = op.status !== "idle" && !TERMINAL.has(op.status);
   // Каталог -- при открытии формы (want=open): чтение без действий.
@@ -33,24 +35,18 @@ export function ModelBox({ session, row }: {
   if (session.role !== "admin") return null;
   const go = () => {
     if (!model || live) return;
-    setOpen(false); setConfirm(false); setModel(null);
+    setOpen(false); setConfirm(false); setModel(null); setResult(true);
     void submit("model", { model });
   };
   return (
     <Group gap="sm">
-      <IconButton label="модель" variant="subtle" size="lg" disabled={live}
-              onClick={() => { setModel(null); setOpen(true); }}>
+      <IconButton label="модель" variant="subtle" size="lg"
+              onClick={() => { if (op.status !== "idle") setResult(true); else { setModel(null); setOpen(true); } }}>
         <IconCpu size={18} />
       </IconButton>
-      {op.status !== "idle" && (
-        <Text size="sm" c={op.status === "succeeded" ? "teal"
-                            : op.status === "unknown" ? "yellow" : "red"}
-              data-testid="model-verdict">
-          {opWord(op.status)}
-          {op.error ? `: ${op.error}` : ""}
-          {op.lost ? " (первый ответ потерян)" : ""}
-        </Text>
-      )}
+      <OperationResult opened={result} onClose={() => setResult(false)}
+        onAgain={() => { setResult(false); setModel(null); setOpen(true); }} title="смена модели"
+        target={row.name} op={op} word={opWord(op.status)} testId="model-verdict" />
       {open && !confirm && (
         <Modal opened onClose={() => setOpen(false)} size="md"
                title="смена модели" data-testid="model-form"

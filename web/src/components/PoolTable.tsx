@@ -75,7 +75,7 @@ function Row({ p, onOpen, session }: {
       <Table.Td>{p.owner || "-"}</Table.Td>
       <Table.Td>{p.llm}</Table.Td>
       <Table.Td ta={align(COLS.disk)}>{gb(p.disk_kb)}</Table.Td>
-      {session?.role === "admin" && <Table.Td>
+      {session?.role === "admin" && <Table.Td ta="right" style={{ width: "1%", whiteSpace: "nowrap" }}>
         <PuppetActions key={`${session.login}\0${p.name}`} row={p} session={session} />
       </Table.Td>}
     </Table.Tr>
@@ -104,7 +104,7 @@ export function PoolTable({ projects, onOpen, session }: {
           ))}
           <Table.ScrollContainer minWidth={session?.role === "admin" ? 1080 : 800}>
             <Table striped highlightOnHover withTableBorder>
-              <TableHead cols={[...Object.values(COLS), ...(session?.role === "admin" ? [{ label: "действия" }] : [])]} />
+              <TableHead cols={[...Object.values(COLS), ...(session?.role === "admin" ? [{ label: "действия", right: true, compact: true }] : [])]} />
               <Table.Tbody>{sh.puppets.map((p) => <Row key={p.name} p={p} onOpen={onOpen} session={session} />)}</Table.Tbody>
             </Table>
           </Table.ScrollContainer>

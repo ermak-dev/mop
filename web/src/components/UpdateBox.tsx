@@ -14,6 +14,7 @@
 import { useState } from "react";
 import { IconSettings } from "@tabler/icons-react";
 import { IconButton } from "./IconButton";
+import { OperationResult } from "./OperationResult";
 import { Button, Code, Group, Modal, Radio, Stack, Text, TextInput } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -56,6 +57,7 @@ export function UpdateBox({ session, row }: {
   const [mode, setMode] = useState<keyof typeof MODES | null>(null);
   const [origin, setOrigin] = useState("");
   const [open, setOpen] = useState(false);
+  const [result, setResult] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const live = op.status !== "idle" && !TERMINAL.has(op.status);
   if (session.role !== "admin") return null;
@@ -66,25 +68,19 @@ export function UpdateBox({ session, row }: {
     : null;
   const go = () => {
     if (!params || live) return;
-    setOpen(false); setConfirm(false); setMode(null); setOrigin("");
+    setOpen(false); setConfirm(false); setMode(null); setOrigin(""); setResult(true);
     void submit("update", params);
   };
   return (
     <Group gap="sm">
       {/* «правка», не «обновить»: слово занято обновлением хвоста экрана */}
-      <IconButton label="правка" variant="subtle" size="lg" disabled={live}
-              onClick={() => setOpen(true)}>
+      <IconButton label="правка" variant="subtle" size="lg"
+              onClick={() => { if (op.status !== "idle") setResult(true); else setOpen(true); }}>
         <IconSettings size={18} />
       </IconButton>
-      {op.status !== "idle" && (
-        <Text size="sm" c={op.status === "succeeded" ? "teal"
-                            : op.status === "unknown" ? "yellow" : "red"}
-              data-testid="update-verdict">
-          {opWord(op.status)}
-          {op.lost ? " (первый ответ потерян)" : ""}
-        </Text>
-      )}
-      {op.error ? <Text size="sm" c="red">{op.error}</Text> : null}
+      <OperationResult opened={result} onClose={() => setResult(false)}
+        onAgain={() => { setResult(false); setOpen(true); }} title="правка папета"
+        target={row.name} op={op} word={opWord(op.status)} testId="update-verdict" />
       {open && !confirm && (
         <Modal opened onClose={() => setOpen(false)} size="md"
                title="правка папета" data-testid="update-form"

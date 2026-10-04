@@ -96,8 +96,8 @@ test("a refused operation names the server phrase, retry posts again", async () 
   fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
   fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
   await waitFor(() => expect(screen.getByText(/queued/i)).toBeInTheDocument());
-  // повтор -- новое подтверждение и новый POST (решение админа)
-  fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
+  // Повтор начинается из результата, затем снова подтверждает точную цель.
+  fireEvent.click(screen.getByRole("button", { name: "новая команда" }));
   fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
   await waitFor(() =>
     expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
