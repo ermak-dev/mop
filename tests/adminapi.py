@@ -315,6 +315,52 @@ def main():
     c.check("#470 update without a target is refused",
             h.sent and h.sent[0][0] == 400, h.sent)
 
+    # ── recycle/delete/wipe в реестре операций (#471) ───────────────────
+    # HYPOTHESIS: реестр знает send/restart/add/update; клик разрушительных
+    # действий (#473) доезжает до адаптера и отвечает 404 unsupported --
+    # кнопки DestructiveBox мертвы. У ruin-глаголов аргументов нет: force
+    # веб не берёт по определению, параметров пусто.
+    # SOLUTION: три register в той же точке стыковки opworker.register;
+    # пустой кортеж параметров -- «никаких лишних полей», любое тело
+    # params -- 400 unknown parameters. 202 -- запись в очередь воркера,
+    # не исполнение.
+    # До/после подключения -- на двух реестрах: подключённый выше wired
+    # свою работу сделал (202), чистый -- честные 404 кнопок без неё.
+    unwired = adminapi.Operations()
+    unwired_api = adminapi.Api(unwired, adminapi.Queue(),
+                               origin="https://pool.example", who=ADMIN)
+
+    def post_raw(action, target="pu-mop-1", params=None):
+        body = req(action, target=target, params=params or {})
+        h = Handler(body=body, length=len(body))
+        unwired_api.post(h)
+        return h
+
+    h = post_raw("recycle")
+    c.check("#471 an unregistered ruin verb is 404 unsupported",
+            h.sent and h.sent[0][0] == 404
+            and h.sent[0][1].get("error") == "unsupported operation", h.sent)
+    h = post_raw("wipe", params={"force": True})
+    c.check("#471 wipe on an unwired registry is 404, force or not",
+            h.sent and h.sent[0][0] == 404, h.sent)
+
+    opworker.register(wired)
+    h = post("recycle")
+    c.check("#471 recycle posts empty and reaches the queue (202)",
+            h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
+    h = post("delete")
+    c.check("#471 delete posts empty and reaches the queue (202)",
+            h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
+    h = post("wipe")
+    c.check("#471 wipe posts empty and reaches the queue (202)",
+            h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
+    for verb in ("recycle", "delete", "wipe"):
+        h = post(verb, params={"force": True})
+        c.check(f"#471 {verb} refuses any parameter (force never rides)",
+                h.sent and h.sent[0][0] == 400
+                and "unknown parameters" in h.sent[0][1].get("error", ""),
+                h.sent)
+
     return c.report("adminapi")
 
 

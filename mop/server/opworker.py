@@ -65,6 +65,9 @@ _FROM_OUTCOME = {"registered": "succeeded", "accepted": "partial",
 # валидаторы params, их отказ -- отказ приёма, до intent.
 ADD_PARAMS = ("origin", "branch")
 UPDATE_PARAMS = ("fresh", "origin")
+# Разрушительные действия (#471) аргументов не имеют: force веб не берёт
+# по определению (#473), пустой кортеж -- «никаких лишних полей».
+RUIN_PARAMS = ()
 
 
 def register(registry):
@@ -74,6 +77,9 @@ def register(registry):
     Вызывает поднимающий веб service; проверки зовут явно."""
     registry.register("add", ADD_PARAMS, target=False)
     registry.register("update", UPDATE_PARAMS)
+    registry.register("recycle", RUIN_PARAMS)
+    registry.register("delete", RUIN_PARAMS)
+    registry.register("wipe", RUIN_PARAMS)
 
 
 def remote_workspace(origin, fetch=None):
