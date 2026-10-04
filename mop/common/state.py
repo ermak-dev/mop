@@ -252,7 +252,13 @@ def _clone_veto(clone):
     # посреди тикета работа, — а это разные разговоры: первого ждут, второго
     # спасают. Диспатчу оба одинаково запрещены, и это решает не слово, а
     # вид: свободен только вид free.
-    return State("idle", ", ".join(clone.work()), clone.branch)
+    # #483: off home -- не работа и не причина статуса: маркер уходит в
+    # ветку показа, detail перечисляет только грязь и неотправленное.
+    work = [w for w in clone.work() if not w.startswith("off home")]
+    home = clone.home_branch
+    branch = (f"{clone.branch} (вне дома {home})"
+              if clone.branch and home and clone.branch != home else clone.branch)
+    return State("idle", ", ".join(work), branch)
 
 
 def _state_from_session(st, clone):

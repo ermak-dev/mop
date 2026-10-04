@@ -160,18 +160,20 @@ def main():
     # STATUS: FIXED — see #272
     waiting = {"cur": "bug/272-x", "def": "master", "home": "master", "dirty": 0, "ahead": 0}
     ok, why = lease.may_touch(stale, "anton", CloneFacts.from_dict(waiting), NOW)
-    c.expect("#272: a puppet waiting for accept refuses another master", ok, False)
-    c.expect("#272: the refusal names the ticket branch and the owner",
-          "bug/272-x" in (why or "") and "olga" in (why or ""), True)
+    c.expect("#483: a clean clone off its home no longer refuses another master", ok, True)
     home = {"cur": "swarm", "def": "master", "home": "swarm", "dirty": 0, "ahead": 0}
     c.expect("#272: clean on its home (the master's branch) with a stale owner is takeable",
           lease.may_touch(stale, "anton", CloneFacts.from_dict(home), NOW), (True, None))
-    c.expect("#272: off its home even on the default branch holds",
+    # #483: чистый клон на любой ветке -- берётся; работу держат грязь и
+    # неотправленное, не позиция.
+    c.expect("#483: clean on the default branch (off its home) is takeable too",
           lease.may_touch(stale, "anton", CloneFacts.from_dict(dict(home, cur="master")),
-                          NOW)[0], False)
+                          NOW), (True, None))
     old = {"cur": "bug/272-x", "def": "master", "dirty": 0, "ahead": 0}
-    c.expect("#272: old agent (no home) off the default branch holds",
-          lease.may_touch(stale, "anton", CloneFacts.from_dict(old), NOW)[0], False)
+    # #483: чистый вне дома -- не работа; ветка не держит аренду.
+    c.expect("#483 old agent (no home) off the default branch is takeable",
+          lease.may_touch(stale, "anton", CloneFacts.from_dict(old), NOW),
+          (True, None))
     c.expect("#272: old agent (no home) on the default branch is takeable",
           lease.may_touch(stale, "anton", CloneFacts.from_dict(dict(old, cur="master")),
                           NOW), (True, None))

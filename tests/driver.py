@@ -371,8 +371,9 @@ SWEEP_PLAN = [
      ("keep", "no session, clone holds work (unpushed: 2)")),
     ("no session, both -> kept", ("pu-x-4", 1, _clone(dirty=1, ahead=1), None),
      ("keep", "no session, clone holds work (uncommitted: 1, unpushed: 1)")),
-    ("no session, clean but off its home -> kept", ("pu-x-5", 1, _clone(branch="fix/7-x"), None),
-     ("keep", "no session, clone holds work (off home master)")),
+    ("#483 no session, clean but off its home -> destroyed too",
+     ("pu-x-5", 1, _clone(branch="fix/7-x"), None),
+     ("destroy", "no session, clean clone")),
     ("no session, clone unreadable -> kept", ("pu-x-6", 1, None, 0),
      ("keep", "no session, clone unreadable")),
     ("no session, clone probe unanswered -> kept", ("pu-x-7", 1, None, None),
@@ -487,8 +488,8 @@ CLONE_VERDICT = [
      (False, "no session, clone holds work (uncommitted: 1)")),
     ("unpushed -> kept", _clone(ahead=2), True,
      (False, "no session, clone holds work (unpushed: 2)")),
-    ("clean but off its home -> kept (was removable)", _clone(branch="fix/1-x"), True,
-     (False, "no session, clone holds work (off home master)")),
+    ("#483 clean but off its home -> removable (position is not work)", _clone(branch="fix/1-x"), True,
+     (True, "no session, clean clone")),
     ("unreadable -> kept", None, True, (False, "no session, clone unreadable")),
     ("no .git -> removable, no clone", None, False, (True, "no session, no clone")),
 ]
@@ -578,11 +579,12 @@ def check_host_sweep_rule_347(c):
         home = _host_home(tmp)
         r = _run_sweep(home, f'#!/bin/sh\nexec {REPO}/bin/mop "$@"\n')
         left = sorted(os.listdir(os.path.join(home, "puppets")))
-        c.expect("#347 host sweep removes the clean clone and the dir without .git",
-                 left, ["pu-a-1", "pu-a-3", "pu-a-4"])
+        # #483: чистый вне дома (pu-a-4) сносится вместе с чистым дома
+        # (pu-a-2); остаются живой pu-a-1 и держащий работу pu-a-3.
+        c.expect("#483 host sweep removes clean clones home and away",
+                 left, ["pu-a-1", "pu-a-3"])
         c.check("#347 host sweep names why it keeps",
-                "pu-a-3: no session, clone holds work (uncommitted: 1), kept" in r.stdout
-                and "pu-a-4: no session, clone holds work (off home master), kept" in r.stdout,
+                "pu-a-3: no session, clone holds work (uncommitted: 1), kept" in r.stdout,
                 (r.stdout, r.stderr[-500:]))
         # Сломанная проверка -- не «работа в клоне»: оставить и сказать об этом.
         home = _host_home(os.path.join(tmp, "broken"))
