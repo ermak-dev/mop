@@ -751,6 +751,53 @@ def check_session_store_415(c):
         c.check("#415 tokens are not alike", tok != other, (tok, other))
 
 
+def check_admin_routes_486(c):
+    """HYPOTHESIS (#486): /api/admin/* не смонтированы в живом Handler --
+    GUI операций (модель, рестарт, send) получает 404 «no such path»,
+    хотя адаптер и воркер влиты.
+    SOLUTION: маршруты в do_GET/do_POST через модульный ADMINAPI
+    (Operations + opworker.register + Api); админ -- подменной cookie.
+    STATUS: FIXED — see #486"""
+    import json as _json
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    good = {"Origin": "https://10.0.0.1", "Content-Type": "application/json"}
+    store = websession.SessionStore(now=lambda: 1000.0)
+    with patched(webcli.config, get=lambda name, default=None: {"MOP_SERVER_LAN": "10.0.0.1",
+                                                                "MOP_HTTPS_PORT": "443"}.get(name, default)), \
+            patched(webcli, SESSIONS=store), patched(websession, provider=lambda: FakeProvider()):
+        tok = store.open(identity.Identity("anton", "admin", ()))
+        cookie = {"Cookie": f"mop_session={tok}"}
+        sent, out = _fake_handler(webcli, "GET", "/api/admin/models", headers=cookie)
+        # Каталог читается от прокси установки; в проверке его нет -- подмена
+        # читателя: маршрут обязан отвечать 200 со списком, а не 404/503.
+        # Маршрут обязан ответить 200 со списком; реальный читатель звал бы
+        # прокси установки -- в проверке подменён через модульную ссылку.
+        import mop.server.adminapi as _aa
+        real = _aa.catalog_read
+        _aa.catalog_read = lambda *a, **k: ["glm-5.3", "gpt-5.5"]
+        try:
+            sent, out = _fake_handler(webcli, "GET", "/api/admin/models", headers=cookie)
+        finally:
+            _aa.catalog_read = real
+        c.check("#486 GET /api/admin/models answers, not 404",
+                sent[0][1] == 200 and b"glm-5.3" in out, (sent[:1], out[:80]))
+        sent, out = _fake_handler(webcli, "GET", "/api/admin/projects", headers=cookie)
+        c.check("#486 GET /api/admin/projects answers, not 404",
+                sent[0][1] != 404 and b"projects" in out, (sent[:1], out[:80]))
+        sent, out = _fake_handler(webcli, "GET", "/api/admin/models")
+        c.check("#486 the guest gets 401 on models",
+                sent[0][1] == 401, (sent[:1], out[:60]))
+        body = _json.dumps({"action": "send", "target": "pu-mop-1",
+                            "params": {"message": "hi"}}).encode()
+        sent, out = _fake_handler(webcli, "POST", "/api/admin/ops", body, {**good, **cookie})
+        c.check("#486 POST /api/admin/ops is accepted (202 with id)",
+                sent[0][1] == 202 and b"id" in out, (sent[:1], out[:80]))
+        sent, out = _fake_handler(webcli, "POST", "/api/admin/ops", body, good)
+        c.check("#486 the guest gets 401 on ops",
+                sent[0][1] == 401, (sent[:1], out[:60]))
+
+
 def check_session_survives_restart_485(c):
     """HYPOTHESIS (#485): SessionStore держит токены в памяти -- каждый
     рестарт сервиса web (deploy:mop) разлогинивает всех админов.
@@ -2225,6 +2272,7 @@ def main():
                check_load_378, check_master_sessions_421, check_who_answer_421,
                check_session_store_415, check_login_api_415,
                check_session_survives_restart_485,
+               check_admin_routes_486,
                check_address_source_415, check_deleted_user_415,
                check_journal_api_424, check_journal_entry_424,
                check_login_bounds_415, check_guard_417,
