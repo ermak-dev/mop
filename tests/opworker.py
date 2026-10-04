@@ -573,8 +573,11 @@ def main():
     CLEAN = {"cur": "master", "def": "master", "dirty": 0, "ahead": 0}
 
     def bound_safety(facts):
-        return lambda name, project, owner: ops.safety(
-            name, project, owner=owner, facts=facts, now=NOW)
+        # disruptive (#471) воркер ставит сам; заглушке он не нужен --
+        # общий ops.safety его принимает, факт disruptive у фактов свой.
+        return lambda name, project, owner, disruptive=False: ops.safety(
+            name, project, owner=owner, facts=facts, now=NOW,
+            disruptive=disruptive)
 
     def update_worker_with(facts):
         w, _ = web_worker()
