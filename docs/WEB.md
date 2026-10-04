@@ -38,7 +38,7 @@
 |---|---|---|
 | снимок | `mop/server/web.py` | чистые функции: корзина папета, группы по проектам, счётчики, ось расхода; виды для страницы (#325) — `kind` узла (`nodes.bucket`), период опроса мастеров `masters_every`: страница красит по ним, а не по словам; места пула `load` (#378) — всего, выделено, свободных и сегменты полосы аллокаций, сумма сегментов равна всем местам |
 | сборщик | `mop/server/web.py`, `Collector` | пять потоков с пятью расписаниями (ниже) держат снимок и версию |
-| HTTP | `mop/cli/server/web.py` | stdlib `http.server`: `/`, `/assets/<имя>`, `/logo.png`, `/api/session`, `/api/login`, `/api/logout`, `/api/pool`, `/api/journal`, `/api/puppet/<имя>[/tail|/stderr]`, `/events` (SSE), `/healthz`, шим LLM-панели `/v8/management/*` и `/llm/*` (#417); операции — через адаптер `mop/server/adminapi.py` (#461, монтаж маршрутов — #471, в работе) |
+| HTTP | `mop/cli/server/web.py` | stdlib `http.server`: `/`, `/assets/<имя>`, `/logo.png`, `/api/session`, `/api/login`, `/api/logout`, `/api/pool`, `/api/journal`, `/api/puppet/<имя>[/tail|/stderr]`, `/events` (SSE), `/healthz`, шим LLM-панели `/v8/management/*` и `/llm/*` (#417); операции — через адаптер `mop/server/adminapi.py` (#461): `/api/admin/ops`, `/api/admin/projects`, `/api/admin/models` |
 | исполнитель | `mop/server/opworker.py`, `Worker` (#476) | устойчивый журнал операций, вызов библиотечного workflow |
 | адаптер | `mop/server/adminapi.py` (#461) | гейты admin/Origin/тела, реестр операций, постановка воркеру |
 | страница | `web/src/` → `web/dist/` | React-приложение (Vite + React 19 + TypeScript + Mantine): читает снимок и красит |
@@ -68,7 +68,7 @@ CSS.
 | `SendForm` | адресный send (#469): тот же ход операции |
 | `UpdateBox` | правка папета (#472): режимы keep/replace/remove с показом последствий до подтверждения, точное имя цели |
 | `AddBox`, `useProjects` | завод папета (#472): выбор из `GET /api/admin/projects` (реестр сервера), имя странице не выводится — присваивает сервис |
-| `DestructiveBox` | recycle/delete/wipe (#473, покомпонентно; монтаж карточки — #471, в работе): preview последствий и точное подтверждение |
+| `DestructiveBox` | recycle/delete/wipe (#473, приём — #471): preview последствий и точное подтверждение, force нет |
 | `Masters` | живые мастера: проект, пользователь, сессия, каталог, адрес для `send`, папеты его аренды |
 | `NodesPanel` | узлы: драйвер, проекты, состояние, свободная и вся память, слоты `N/M` |
 | `UsageChart`, `UsageByUser` | расход токенов по дням окна и по пользователям |
@@ -139,9 +139,9 @@ CSS.
 | restart | `mop restart --force` | `restart` | RestartBox (#464), с наблюдением, без force | `ops.restart`; воркер #476 |
 | add | `mop add` | `add` | AddBox (#472), workspace из origin | `ops.add`; воркер #476 (#470) |
 | update | `mop update --fresh --force` | `update` | UpdateBox (#472): keep/replace/remove, без force | `ops.update`; воркер #476 (#470) |
-| recycle | `mop recycle` | `recycle` | в разработке (#471) | `puppets.recycle` |
-| delete | `mop delete` | `delete` | в разработке (#471) | `puppets.delete` |
-| wipe | `mop wipe --force` | `wipe` | в разработке (#471) | `puppets.wipe` |
+| recycle | `mop recycle` | `recycle` | DestructiveBox (#473/#471), preview и подтверждение | `puppets.recycle`; воркер #476 |
+| delete | `mop delete` | `delete` | DestructiveBox (#473/#471), preview и подтверждение | `puppets.delete`; воркер #476 |
+| wipe | `mop wipe --force` | `wipe` | DestructiveBox (#473/#471), без force | `puppets.wipe`; воркер #476 |
 | смена модели | `mop profile`, `mop models` | `profile`, `models` | ModelBox (#468), каталог фасадом, с телеметрией | `ops.switch_model`; воркер #476 |
 
 Различия фронтендов — выбор каждого, не копия алгоритма:
@@ -160,11 +160,6 @@ CSS.
   `notify_when_idle`, без ожидания окончания, без двустороннего чата.
 * force в вебе нет ни у одной операции: чужая аренда и работа в клоне —
   отказ с именем владельца (#460).
-* recycle/delete/wipe — в работе (#471): компоненты и подтверждения готовы (#473),
-  монтаж и регистрация — за своими тикетами; кнопки появляются вместе с операцией
-  в реестре. Смена модели смонтирована и зарегистрирована (#468).
-* Маршруты `/api/admin/ops` и `/api/admin/projects` определены адаптером
-  (#461/#472) с проверками; монтаж их в HTTP-службе — #471.
 * Состояние операции живёт в памяти страницы (#465): перезагрузка начинает
   заново; доводит журнал операций и карточка.
 * `tsc --noEmit`, `npm test` и lint — локальные проверки разработчика;
