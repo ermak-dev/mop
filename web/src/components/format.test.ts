@@ -16,7 +16,7 @@ const VERDICT_WORDS: [VerdictKind, string][] = [
   ["busy", "занят"],
   ["other", "иначе"],
   ["free", "свободен"],
-  ["idle", "брошенная работа"],
+  ["idle", "работа в клоне"],
   ["unknown", "неизвестно"],
   ["failing", "падает"],
 ];
