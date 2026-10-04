@@ -405,9 +405,20 @@ def switch_model(transport, node, name, model, session_reader=None,
     # No-op -- только по СВЕЖЕЙ записи: устаревший снимок «уже выбранной»
     # модели не доказательство (модель могли сменить без события) -- тогда
     # эффект идёт как заказан.
-    before = read(node, name)
+    # Тишина узла на базе -- «сессию не знать»: печатать слепую команду
+    # в TUI -- гадание, а не эффект; отказ до всякого хода. BusError --
+    # только дорога до агента; внятный отказ агента полем error едет
+    # _live_rec как отсутствие живой записи и дальше -- unknown.
+    try:
+        before = read(node, name)
+    except bus.BusError as e:
+        return _refused(name, f"{name}: cannot read the session: {e}")
     base = _live_rec(name, before)
-    if base is not None and model_matches(base.get("model"), model) \
+    if base is None:
+        # Живой сессии нет: переключать нечего, /model в мёртвый пейн не
+        # печатается (эффект сам отказал бы, но вердикт честнее здесь).
+        return _refused(name, f"{name}: no live session to switch")
+    if model_matches(base.get("model"), model) \
             and (now() - (base.get("model_at") or 0)) <= fresh_within:
         return outcome(REGISTERED, name, noop=True,
                        sessionId=base.get("sessionId"))
@@ -417,9 +428,16 @@ def switch_model(transport, node, name, model, session_reader=None,
         return _refused(name, str(e))
     # Подтверждение телеметрией: опрашиваем read-глаголом, пока запись не
     # покажет заказанную модель в той же сессии; нет -- unknown за срок.
+    # Агент умер после эффекта -- эффект мог быть: разрыв наблюдения
+    # читается unknown, не крахом и не отказом.
     deadline = now() + (observe_wait if observe_wait is not None else 30)
     while True:
-        got = _live_rec(name, read(node, name))
+        try:
+            answer = read(node, name)
+        except bus.BusError:
+            got = None
+            break
+        got = _live_rec(name, answer)
         if got is not None and got.get("sessionId") == base.get("sessionId") \
                 and model_matches(got.get("model"), model) \
                 and (now() - (got.get("model_at") or 0)) <= fresh_within:

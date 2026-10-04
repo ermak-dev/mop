@@ -542,6 +542,36 @@ def main():
     c.check("#468 the default-path switcher saw the model, verdict unknown on a stale read",
             seen.get("switched") == "glm-5.3" and v.get("outcome") == ops.UNKNOWN, (seen, v))
 
+    # -- тишина узла: read-транспорт уронился исключением (BusError) -----
+    # HYPOTHESIS: агент молчит до эффекта -- печать в TUI слепа: сессию
+    # не знать, эффект вслепую -- не эффект, а гадание; агент умер после
+    # эффекта -- эффект мог быть, и наблюдение его не увидит: unknown.
+    # SOLUTION: исключение читателя ДО эффекта -- refused (без эффекта),
+    # В цикле наблюдения -- unknown (эффект был, сигнала нет).
+    seen["switched"] = None
+    def dead_before(node, name):
+        raise bus.BusError("node agent is silent")
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=dead_before,
+                         switcher=switcher, now=lambda: 3000, sleep=nosleep)
+    c.check("#468 a silent reader before the effect is refused, no effect fired",
+            v.get("outcome") == ops.REFUSED and seen.get("switched") is None,
+            (v, seen))
+    flips = {"n": 0}
+    def dead_after(node, name):
+        flips["n"] += 1
+        if flips["n"] == 1:
+            return {"puppets": {name: {"present": True, "session": "idle 1 1",
+                                       "clone": None,
+                                       "state": {**LIVE, "model": "claude-opus-5-5",
+                                                 "model_at": 1000}}}}
+        raise bus.BusError("node agent died")
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=dead_after,
+                         switcher=switcher, now=lambda: 3000, sleep=nosleep)
+    c.check("#468 a dead reader during observation reads unknown",
+            v.get("outcome") == ops.UNKNOWN, v)
+
     # -- таймаут наблюдения: эффекта могли и не увидеть -- unknown --------
     v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
                          session_reader=reader_live({**LIVE, "model": "glm-5.3[1m]",

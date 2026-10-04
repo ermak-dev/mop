@@ -10,6 +10,7 @@ import { Code, Group, Loader, Modal, Stack, Table, Text } from "@mantine/core";
 import type { Snapshot } from "../types";
 import type { Session } from "../useSession";
 import { usePuppetCard, usePuppetTail } from "../usePuppetCard";
+import { ModelBox } from "./ModelBox";
 import { RestartBox } from "./RestartBox";
 import { SendForm } from "./SendForm";
 import { UpdateBox } from "./UpdateBox";
@@ -82,6 +83,9 @@ export function PuppetCard({ snapshot, session, target, onClose }: {
           <RestartBox session={session} row={row} />
           {/* обновление (#472): fresh -- явный выбор keep/replace/remove */}
           <UpdateBox session={session} row={row} />
+          {/* смена модели (#468): каталог прокси, подтверждение цели,
+              вердикт -- по телеметрии сервера */}
+          <ModelBox session={session} row={row} />
           {/* адресный send (#469): тот же общий ход операции (useAdminOp);
               форма видна только админу -- не-admin внутрь не заходит */}
           {session.role === "admin" && <SendForm session={session} target={row.name} />}
