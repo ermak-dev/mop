@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
 from mop.common import bus, busnames, config, puppets
-from mop.server import web, websession
+from mop.server import adminapi, opworker, web, websession
 
 # Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
 # исходниками (docs/WEB.md); собирает `mop dev web build`, сверяет CI.
@@ -35,6 +35,30 @@ BODY_MAX = 16 * 1024       # байт тела входа: {login, password} -- 
 COLLECTOR = web.Collector()
 SESSIONS = websession.SessionStore()
 RATE = websession.RateLimiter()
+
+# Операции дашборда (#486): реестр -- та же точка стыковки, что у воркера
+# (opworker.register, #470/#471), очередь и адаптер -- рядом; Origin для
+# POST -- публичный https-origin установки (#415). Личность каждого запроса
+# адаптер берёт сам из handler.who (куки -> SESSIONS -> провайдер).
+OPS = adminapi.Operations()
+opworker.register(OPS)
+
+
+class _LiveApi(adminapi.Api):
+    """Адаптер с Origin'ом установки «на запрос»: Api ждёт строку в
+    конструкторе, а настройка читается живой конфигурацией (в проверках --
+    подменённой), не моментом импорта модуля."""
+
+    @property
+    def origin(self):
+        return websession.public_origin(config.get)
+
+    @origin.setter
+    def origin(self, _):
+        pass
+
+
+ADMINAPI = _LiveApi(OPS, adminapi.Queue(), origin=None)
 
 
 class Gateway:
@@ -152,6 +176,13 @@ class Handler(BaseHTTPRequestHandler):
         return websession.origin_ok(self.headers,
                                     websession.public_origin(config.get))
 
+    @property
+    def who(self):
+        """Личность запроса атрибутом (#486): адаптер операций читает
+        handler.who, живой Handler считает её методом _who -- мост, чтобы
+        контракт адаптера не узнал про куки."""
+        return self._who()
+
     def _who(self):
         """Личность по cookie: (login, role) | (None, None)."""
         raw = self.headers.get("Cookie") or ""
@@ -170,24 +201,32 @@ class Handler(BaseHTTPRequestHandler):
             return self.api_logout()
         if path.startswith("/v8/management/"):
             return self.llm_api(self.path)
+        if path == "/api/admin/ops":
+            return ADMINAPI.post(self)
         self._send(404, "no such path\n", "text/plain")
 
     def do_PUT(self):
         path = self.path.split("?", 1)[0]
         if path.startswith("/v8/management/"):
             return self.llm_api(self.path)
+        if path == "/api/admin/ops":
+            return ADMINAPI.post(self)
         self._send(404, "no such path\n", "text/plain")
 
     def do_PATCH(self):
         path = self.path.split("?", 1)[0]
         if path.startswith("/v8/management/"):
             return self.llm_api(self.path)
+        if path == "/api/admin/ops":
+            return ADMINAPI.post(self)
         self._send(404, "no such path\n", "text/plain")
 
     def do_DELETE(self):
         path = self.path.split("?", 1)[0]
         if path.startswith("/v8/management/"):
             return self.llm_api(self.path)
+        if path == "/api/admin/ops":
+            return ADMINAPI.post(self)
         self._send(404, "no such path\n", "text/plain")
 
     def _llm_admin(self):
@@ -386,6 +425,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.api_journal()
         if path.startswith("/api/puppet/"):
             return self.api_puppet(path)
+        if path == "/api/admin/models":
+            return ADMINAPI.models(self)
+        if path == "/api/admin/projects":
+            return ADMINAPI.projects(self, _registry_projects())
+        if path.startswith("/api/admin/ops/"):
+            return self._json(200, ADMINAPI.result(path.rsplit("/", 1)[-1], self.who))
         if path == "/llm/management.html":
             return self.llm_shim()
         if path.startswith("/llm/raw/"):
@@ -508,6 +553,16 @@ def listen_events():
     except bus.BusError as e:
         with COLLECTOR._cond:
             COLLECTOR.errors["events"] = str(e)
+
+
+def _registry_projects():
+    """Реестр сервера для GET /api/admin/projects (#472/#486): набор
+    origin'ов, как его держит сервер; читать -- не менять."""
+    from mop.common import projects as registry
+    try:
+        return registry.read()
+    except Exception:
+        return set()
 
 
 def main(argv):
