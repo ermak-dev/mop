@@ -357,6 +357,22 @@ class Api:
                         "_expires": self._now() + RECORD_TTL})
         return record
 
+    def settle(self, op_id, verdict):
+        """Вердикт воркера -- в запись результата (#491): очередь адаптера
+        потребляет драйвер веб-службы, и статус записи обязан дожить до
+        терминала, иначе «принято» висит вечно. Чужой id -- тихо: запись
+        могла уйти по TTL, воркер узнает из result()."""
+        with self._lock:
+            got = self._results.get(op_id)
+            if got is None:
+                return
+            status = verdict.get("status")
+            if status not in ("succeeded", "refused", "failed", "partial", "unknown"):
+                return
+            got["status"] = status
+            if verdict.get("error"):
+                got["error"] = verdict["error"]
+
     # ─── GET результата ────────────────────────────────────────────────
     def result(self, op_id, who):
         """Результат по id. Admin-only; ответ -- без payload."""
