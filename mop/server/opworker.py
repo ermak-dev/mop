@@ -45,6 +45,16 @@ QUEUE_LIMIT = 100            # незавершённых операций в о
 OBSERVE_WAIT = 60            # сколько наблюдать рестарт (#464)
 OBSERVE_POLL = 2             # шаг опроса наблюдения
 
+# Срок эффекта (#497): зависший эффект (bus-запрос без ответа -- мёртвый
+# узел-получатель) иначе держит полосу цели вечно. Значение -- настройка
+# MOP_WEB_EFFECT_TIMEOUT (дефолт 900 с, запас над долгим add ~540 с).
+EFFECT_TIMEOUT = 900
+
+# Исключение срока (#497): не RuntimeError -- _guarded не переводит его в
+# refused, а ловит только _run как сбои эффекта.
+class _TimedOut(Exception):
+    pass
+
 # Модель (#476): точные переходы. unknown -- не failed: эффекта могли и
 # быть, и не быть; повтор автоматом запрещён.
 STATUSES = ("queued", "running", "succeeded", "refused", "failed",
@@ -345,13 +355,18 @@ class Worker:
     def __init__(self, root=None, now=None, retention_days=RETENTION_DAYS,
                  payload_days=PAYLOAD_DAYS, transport=None,
                  observe_wait=OBSERVE_WAIT, observe_poll=OBSERVE_POLL,
-                 sleep=time.sleep, registry=None, workspace=None):
+                 effect_timeout=None, sleep=time.sleep, registry=None,
+                 workspace=None):
         import tempfile
         from ..common import paths
         self._root = root or paths.local("operations")
         self._now = now or time.time
         self.retention_days, self.payload_days = retention_days, payload_days
         self.observe_wait, self.observe_poll = observe_wait, observe_poll
+        if effect_timeout is None:
+            from ..common import config
+            effect_timeout = max(1, config.num("MOP_WEB_EFFECT_TIMEOUT"))
+        self.effect_timeout = effect_timeout  # срок эффекта (#497)
         self._sleep = sleep              # наблюдение опрашивает им же
         self._transport = transport      # read-only: донаблюдение (#464)
         # Источник workspace веб-операций (#470): origin -> (текст,
@@ -475,7 +490,14 @@ class Worker:
         try:
             if effect is None:
                 effect = self._library_effect(rec, transport, context)
-            got = effect()
+            got = self._limited(effect)
+        except _TimedOut as e:
+            # Срок вышел, а не эффект отказал: он мог дойти до цели --
+            # исход неизвестен, повтор автоматом запрещён (#476: unknown
+            # не failed и не retryable).
+            self._mark(rec, "unknown", error=str(e))
+            return {**rec, "status": "unknown", "error": str(e),
+                    "audit": audit}
         except Exception as e:
             self._mark(rec, "failed", error=str(e))
             return {**rec, "status": "failed", "error": str(e), "audit": audit}
@@ -491,6 +513,50 @@ class Worker:
         return {**rec, "status": status,
                 "error": (got or {}).get("error"),
                 "audit": audit}
+
+    def _limited(self, effect):
+        """Эффект под сроком (#497): вернувшемуся -- его ответ, молчащему --
+        исключение TimedOut.
+
+        Эффект ходит в шину без своего таймаута: адресат-узел умер -- поток
+        стоит в bus-запросе вечно, полоса цели заклинивает. Терминируем:
+        запись unknown, цель свободна (#476: повтор автоматом запрещён --
+        эффект мог дойти). Сам поток НЕ убиваем: Python этого не умеет;
+        он остаётся демоном и умирает с процессом службы. Полосу он не
+        держит -- Semaphore освобождается в finally, так что зомби-нитка
+        одной зависшей операции не запирает очередь цели (#499: их источник
+        -- мёртвый узел, честных зависших эффектов почти не бывает).
+        """
+        box = []
+        lane = threading.Semaphore(1)
+
+        def run():
+            try:
+                box.append((False, effect()))
+            except Exception as e:      # тоже результат: его ждёт _run
+                box.append((True, e))
+
+        # Полоса -- на операцию: два эффекта одной операции не бывает, а
+        # течь семафором при повторном входе значило бы отменить
+        # сериализацию целей (она -- в записях _open, не здесь).
+        if not lane.acquire(blocking=False):
+            raise RuntimeError("the operation effect is already running")
+        try:
+            worker = threading.Thread(target=run, daemon=True,
+                                      name="mop-op-effect")
+            worker.start()
+            deadline = self._now() + self.effect_timeout
+            while worker.is_alive():
+                if self._now() >= deadline:
+                    raise _TimedOut(f"effect timed out after "
+                                    f"{self.effect_timeout}s")
+                self._sleep(0.1)
+            err, value = box[0]
+            if err:
+                raise value
+            return value
+        finally:
+            lane.release()
 
     def _drive(self, target, transport, safety, effect, context):
         """Исполнить следующую queued-операцию по цели после завершения."""
