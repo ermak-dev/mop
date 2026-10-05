@@ -1,6 +1,9 @@
 // Кнопка restart в карточке (#465): точное подтверждение (имя, узел,
 // состояние на экране), вердикт словами #476, unknown -- не failed,
 // автоповтора нет. Никакого force.
+// #508: рестарт в общем стиле операций (#465/#473) и дизейбл по статусу
+// цели -- признак уже в строке: bucket down (аллокации нет) и kind failing
+// (задача падает); причина видна до клика, не отказом после.
 //
 // RESULT: тесты написаны до реализации (RED).
 import { fireEvent, screen, waitFor } from "@testing-library/react";
@@ -18,6 +21,13 @@ const ROW: Puppet = {
   branch: "#12", owner: "ermak", llm: "glm",
   origin: "git@h:g/mop.git", disk_kb: null,
 };
+
+// #508: строка без бегущей аллокации -- bucket down; задача падает --
+// kind failing. Обе -- признак строки, который сервер уже посчитал.
+const DOWN: Puppet = { ...ROW, alloc_status: "stopped", bucket: "down",
+  kind: "unknown", state: "stopped" };
+const FAILING: Puppet = { ...ROW, alloc_status: "running", kind: "failing",
+  bucket: "busy", state: "FAILED: exit 1", detail: "exit 1" };
 
 const ok202 = (id: string) =>
   ({ ok: true, status: 202, json: async () => ({ id, status: "accepted" }) }) as Response;
@@ -119,4 +129,31 @@ test("no storage: nothing lands in localStorage or sessionStorage", async () => 
 function openBox(row: Puppet = ROW, session: Session = ADMIN) {
   renderUi(<RestartBox session={session} row={row} />);
 }
+
+// ── #508: дизейбл по статусу цели, причина до клика ──────────────────────
+
+test("#508 a down bucket disables restart with the reason named", () => {
+  vi.stubGlobal("fetch", vi.fn());
+  openBox(DOWN);
+  // имя кнопки -- причина: слово «рестарт» в нём и есть
+  const button = screen.getByRole("button", { name: /рестарт недоступен: не запущен/ });
+  expect(button).toBeDisabled();
+  expect(button).toHaveAttribute("aria-label", "рестарт недоступен: не запущен");
+  expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+});
+
+test("#508 a failing task disables restart with the reason named", () => {
+  vi.stubGlobal("fetch", vi.fn());
+  openBox(FAILING);
+  const button = screen.getByRole("button", { name: /рестарт недоступен: задача падает/ });
+  expect(button).toBeDisabled();
+  expect(button).toHaveAttribute("aria-label", "рестарт недоступен: задача падает");
+  expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+});
+
+test("#508 a live puppet keeps restart enabled", () => {
+  vi.stubGlobal("fetch", vi.fn());
+  openBox(ROW);
+  expect(screen.getByRole("button", { name: "рестарт" })).toBeEnabled();
+});
 
