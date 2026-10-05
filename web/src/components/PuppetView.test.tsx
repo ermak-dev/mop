@@ -38,8 +38,9 @@ afterEach(() => {
 });
 
 // #507: иконки действий -- экран, рестарт, правка, модель; «лог» ушёл.
+// #513: рестарт шлёт POST сразу -- его диалог это ход операции.
 test.each([
-  ["рестарт", "подтвердите рестарт"], ["правка", "правка папета"],
+  ["рестарт", "рестарт: pu-mop-1"], ["правка", "правка папета"],
   ["модель", "смена модели"],
   ["экран", "экран pu-mop-1"],
 ])("row icon %s opens only its own dialog", async (label, title) => {
@@ -82,6 +83,8 @@ test.each(["рестарт", "правка", "модель"])("#487 %s result ne
   renderUi(<PoolTable projects={snapshot.projects} session={session} />);
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
   fireEvent.click(within(actions).getByRole("button", { name: action }));
+  // #513: все три обратимы -- «продолжить»/клик шлёт POST сразу,
+  // моды подтверждения нет
   if (action === "правка") {
     fireEvent.click(screen.getByRole("radio", { name: "продолжить как было" }));
     fireEvent.click(screen.getByRole("button", { name: "продолжить" }));
@@ -89,7 +92,6 @@ test.each(["рестарт", "правка", "модель"])("#487 %s result ne
     fireEvent.click(await screen.findByRole("radio", { name: "other-model" }));
     fireEvent.click(screen.getByRole("button", { name: "продолжить" }));
   }
-  fireEvent.click(screen.getByRole("button", { name: "подтвердить" }));
   // #487: вердикт строку не расширяет. #488: у модели вердикт уехал в
   // балун (слово оператора); рестарт и правка показывают его модальным
   // диалогом. Инвариант один -- строки действий чисты.
@@ -191,7 +193,7 @@ test.each(["рестарт", "правка", "модель"])("#487 %s preserves
     fireEvent.click(await screen.findByRole("radio", { name: "other-model" }));
     fireEvent.click(screen.getByRole("button", { name: "продолжить" }));
   }
-  fireEvent.click(screen.getByRole("button", { name: "подтвердить" }));
+  // #513: подтверждения у обратимых нет -- POST уже ушёл
   if (action === "модель") {
     // #488: вердикт модели -- балун; ход живёт в useAdminOp, повторная
     // команда открывает форму, дедуп на сервере (id на месте).
@@ -208,8 +210,14 @@ test.each(["рестарт", "правка", "модель"])("#487 %s preserves
     expect(mock.mock.calls.filter((c) => c[1]?.method === "POST")).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "новая команда" }));
     expect(screen.queryByText(/review refusal/)).toBeNull();
-    expect(screen.getAllByRole("dialog")).toHaveLength(1);
-    expect(mock.mock.calls.filter((c) => c[1]?.method === "POST")).toHaveLength(1);
+    // #513: рестарт шлёт POST сразу; у правки «новая команда» открывает
+    // форму заново (повторный выбор режима) -- у каждой свой честный вход
+    if (action === "рестарт") {
+      await waitFor(() => expect(mock.mock.calls
+        .filter((c) => c[1]?.method === "POST")).toHaveLength(2));
+    } else {
+      expect(await screen.findByTestId("update-modes")).toBeInTheDocument();
+    }
   }
 });
 

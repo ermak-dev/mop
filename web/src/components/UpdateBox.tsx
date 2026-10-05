@@ -6,11 +6,11 @@
 //   другой origin        -> fresh=true + новый origin: пересадка, разговор
 //                           гибнет; origin -- явное поле, пустое не постится.
 // Выбор без режима невозможен: ни одна радио не отмечена заранее, POST без
-// выбора не уходит. Подтверждение -- точная цель (имя, узел, состояние),
-// как у рестарта (#465) и разрушительных (#473). Ход операции -- общий
+// выбора не уходит. #513: keep обратим -- «продолжить» шлёт POST сразу,
+// без моды подтверждения; replace и remove необратимы (гибнут клон и
+// разговор) -- у них подтверждение точной цели (имя, узел, состояние)
+// остаётся, как у разрушительных (#473). Ход операции -- общий
 // useAdminOp; результат в памяти страницы, перезагрузка начинает заново.
-// Регистрация update у исполнителя приедет из #470: до тех сервер
-// ответит unsupported, фраза показывается как есть.
 import { useState } from "react";
 import { IconSettings } from "@tabler/icons-react";
 import { IconButton } from "./IconButton";
@@ -71,6 +71,13 @@ export function UpdateBox({ session, row }: {
     setOpen(false); setConfirm(false); setMode(null); setOrigin(""); setResult(true);
     void submit("update", params);
   };
+  // «продолжить»: keep обратим -- POST сразу (#513); fresh-режимы
+  // необратимы -- сначала подтверждение точной цели
+  const next = () => {
+    if (!params || live) return;
+    if (mode === "keep") { go(); return; }
+    setConfirm(true);
+  };
   return (
     <Group gap="sm">
       {/* «правка», не «обновить»: слово занято обновлением хвоста экрана */}
@@ -106,7 +113,7 @@ export function UpdateBox({ session, row }: {
             <Group justify="flex-end" gap="sm">
               <Button variant="light" color="gray"
                       onClick={() => setOpen(false)}>отмена</Button>
-              <Button disabled={!ready || live} onClick={() => setConfirm(true)}>
+              <Button disabled={!ready || live} onClick={next}>
                 продолжить
               </Button>
             </Group>

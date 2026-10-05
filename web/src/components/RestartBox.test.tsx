@@ -1,9 +1,9 @@
-// Кнопка restart в карточке (#465): точное подтверждение (имя, узел,
-// состояние на экране), вердикт словами #476, unknown -- не failed,
-// автоповтора нет. Никакого force.
+// Кнопка restart в карточке (#465): вердикт словами #476, unknown -- не
+// failed, автоповтора нет. Никакого force. #513: рестарт обратим -- клик
+// по иконке шлёт POST сразу, мода «подтвердите рестарт» ушла.
 //
 // RESULT: тесты написаны до реализации (RED).
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { RestartBox } from "./RestartBox";
 import { renderUi } from "../test-utils";
@@ -28,27 +28,34 @@ const postGet = (post: () => Promise<Response>, get: () => Promise<Response>) =>
   vi.fn(async (url: string | URL, init?: { method?: string }) =>
     (init?.method ?? "GET") === "POST" ? post() : get());
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-test("the confirm names exactly what is on screen: name, node, state", async () => {
-  vi.stubGlobal("fetch", vi.fn());
-  openBox();
-  fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
-  // в подтверждении -- факты строки: цель, узел, state-строка
-  const dialog = await screen.findByRole("dialog");
-  expect(dialog.textContent).toContain("pu-mop-1");
-  expect(dialog.textContent).toContain("hyper");
-  expect(dialog.textContent).toContain("busy: #12");
-  expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
-});
-
-test("confirm posts once and the running verdict shows", async () => {
+// #513: рестарт обратим -- клик шлёт POST сразу, без моды подтверждения.
+test("#513 the restart click posts at once, no confirm dialog", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
   openBox();
   fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
+  // моды подтверждения нет: открывшийся диалог -- только ход операции
+  // («рестарт: pu-mop-1»), не «подтвердите рестарт»
+  expect(screen.queryByText(/подтвердите рестарт/i)).toBeNull();
+  expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
+    method: "POST", credentials: "same-origin" }));
+  const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+  expect(body).toEqual({ action: "restart", target: "pu-mop-1", params: {} });
+  await waitFor(() => expect(screen.getByText(/идёт/i)).toBeInTheDocument());
+});
+
+// #513: моды подтверждения у рестарта больше нет; прежние проверки
+// подтверждения адаптированы: один клик -- один POST, вердикт словами
+// #476, unknown -- не failed, автоповтора нет. Никакого force.
+test("the click posts once and the running verdict shows", async () => {
+  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
+                            () => Promise.resolve(opJson("running")));
+  vi.stubGlobal("fetch", fetchMock);
+  openBox();
+  fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
   await waitFor(() => expect(screen.getByText(/идёт/i)).toBeInTheDocument());
   expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
     method: "POST", credentials: "same-origin" }));
@@ -62,7 +69,6 @@ test("terminal succeeded verdict is shown; retry needs a new click", async () =>
   vi.stubGlobal("fetch", fetchMock);
   openBox();
   fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
   await waitFor(() => expect(screen.getByText(/перезапущен/i)).toBeInTheDocument());
 });
 
@@ -72,18 +78,8 @@ test("unknown is named unknown, never failed", async () => {
   vi.stubGlobal("fetch", fetchMock);
   openBox();
   fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
   await waitFor(() => expect(screen.getByText(/неизвестен/i)).toBeInTheDocument());
   expect(screen.queryByText(/не удался/i)).toBeNull();
-});
-
-test("cancel rides nowhere", async () => {
-  vi.stubGlobal("fetch", vi.fn());
-  openBox();
-  fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /отмена/i }));
-  expect(screen.queryByRole("dialog")).toBeNull();
-  expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
 });
 
 test("a refused operation names the server phrase, retry posts again", async () => {
@@ -94,11 +90,10 @@ test("a refused operation names the server phrase, retry posts again", async () 
   vi.stubGlobal("fetch", fetchMock);
   openBox();
   fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
   await waitFor(() => expect(screen.getByText(/queued/i)).toBeInTheDocument());
-  // Повтор начинается из результата, затем снова подтверждает точную цель.
+  // Повтор начинается из результата («новая команда» шлёт снова): клик
+  // подтверждения больше не нужен, рестарт обратим (#513).
   fireEvent.click(screen.getByRole("button", { name: "новая команда" }));
-  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
   await waitFor(() =>
     expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
       .toHaveLength(2));
@@ -110,7 +105,6 @@ test("no storage: nothing lands in localStorage or sessionStorage", async () => 
   vi.stubGlobal("fetch", fetchMock);
   openBox();
   fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
   await waitFor(() => expect(screen.getByText(/перезапущен/i)).toBeInTheDocument());
   expect(window.localStorage.length).toBe(0);
   expect(window.sessionStorage.length).toBe(0);
