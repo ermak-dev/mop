@@ -415,9 +415,31 @@ def switch_model(transport, node, name, model, session_reader=None,
         return _refused(name, f"{name}: cannot read the session: {e}")
     base = _live_rec(name, before)
     if base is None:
-        # Живой сессии нет: переключать нечего, /model в мёртвый пейн не
-        # печатается (эффект сам отказал бы, но вердикт честнее здесь).
-        return _refused(name, f"{name}: no live session to switch")
+        # Живой сессии нет. Два разных факта, два ответа (#501): tmux
+        # мёртв (present False) -- переключать нечего, /model в мёртвый
+        # пейн не печатается (эффект сам отказал бы, но вердикт честнее
+        # здесь). Tmux жив, телеметрии ещё нет (present True без живой
+        # записи) -- сразу после рестарта сессия поднимается:
+        # sessions/<pid>.json и statusline пишутся позже онбординга, и
+        # прежний отказ читался как «папет выключен». Не отказ, а
+        # retry-окно тем же read-глаголом до observe_wait: база появилась
+        # -- эффект идёт; не появилась -- отказ словами о телеметрии.
+        # Новых глаголов и настроек нет: срок -- существующий
+        # observe_wait.
+        deadline = now() + (observe_wait if observe_wait is not None else 30)
+        while base is None and _tmux_alive(name, before):
+            if now() >= deadline:
+                return _refused(name, f"{name}: the session telemetry "
+                                      f"did not appear within {observe_wait}s "
+                                      f"after the restart")
+            sleep(2)
+            try:
+                before = read(node, name)
+            except bus.BusError:
+                continue
+            base = _live_rec(name, before)
+        if base is None:
+            return _refused(name, f"{name}: no live session to switch")
     if model_matches(base.get("model"), model) \
             and (now() - (base.get("model_at") or 0)) <= fresh_within:
         return outcome(REGISTERED, name, noop=True,
@@ -461,6 +483,15 @@ def _live_rec(name, answer):
     if not isinstance(st, dict) or not (st.get("alive") and st.get("listen")):
         return None
     return st
+
+
+def _tmux_alive(name, answer):
+    """Жив ли tmux-пейн папета по ответу states (#501): present -- факт
+    узла (mop/node/agent.facts), его отсутствие в ответе -- «узел не
+    знает» и ждёт нечего. Это не вторая телеметрия: тот же ответ, из
+    которого _live_rec берёт живую запись."""
+    rec = ((answer or {}).get("puppets") or {}).get(name) or {}
+    return bool(rec.get("present"))
 
 
 def _session_reader(transport):
