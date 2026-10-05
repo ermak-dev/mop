@@ -5,6 +5,7 @@
 import { Alert, Container, Group, Stack, Tabs, Text } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 import { usePool } from "./usePool";
+import { useTargetVerdicts } from "./useOperationFeed";
 import { fetchSession, GUEST, LoginRefused, postLogin, postLogout, type Session } from "./useSession";
 import { useJournal } from "./useJournal";
 import { useHashPage } from "./useHashPage";
@@ -26,6 +27,11 @@ import { ThemeSwitch } from "./components/ThemeSwitch";
 
 export default function App() {
   const { snapshot } = usePool();
+  // Вердикты целей (#504): кадры `operation` разбирает usePool (тот же
+  // поток /events), канал держит словарь {цель -> исход} -- строка
+  // таблицы рисует unknown-карточку со ссылкой в журнал; кнопки операций
+  // получают терминал по id там же (useAdminOp).
+  const verdicts = useTargetVerdicts();
   const { page, go } = useHashPage();
   // Сессия (#416): до ответа -- гость, 401/сбой панели не рвут публичные
   // таблицы; истёкшая cookie -- тот же гость.
@@ -139,6 +145,7 @@ export default function App() {
           {snapshot && (
             <>
               <PoolTable projects={snapshot.projects} session={session}
+                         verdicts={verdicts}
                          onOpen={session.role === "admin" ? setPuppet : undefined} />
               <PuppetCard session={session}
                           target={session.role === "admin" ? puppet : null}

@@ -13,6 +13,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { useAdminOp } from "./useAdminOp";
+import { operations } from "./useOperationFeed";
 import type { Session } from "./useSession";
 
 const ADMIN: Session = { login: "anton", role: "admin" };
@@ -30,7 +31,7 @@ const postGet = (post: () => Promise<Response>, get: () => Promise<Response>) =>
   vi.fn(async (url: string | URL, init?: { method?: string }) =>
     (init?.method ?? "GET") === "POST" ? post() : get());
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); operations.resetForTest(); });
 
 test("no request rides until submit", async () => {
   const fetchMock = vi.fn();
@@ -40,15 +41,15 @@ test("no request rides until submit", async () => {
   expect(fetchMock).not.toHaveBeenCalled();
 });
 
-test("submit posts the narrow schema and polls to the terminal status", async () => {
+test("submit posts the narrow schema; the single GET shows running, the frame settles", async () => {
   let gets = 0;
   const fetchMock = postGet(
     () => Promise.resolve(ok202("op-1")),
-    () => { gets += 1; return Promise.resolve(opJson(gets === 1 ? "running" : "succeeded")); });
+    () => { gets += 1; return Promise.resolve(opJson("running")); });
   vi.stubGlobal("fetch", fetchMock);
   const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
   await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("succeeded"));
+  await waitFor(() => expect(view.result.current.op.status).toBe("running"));
   expect(view.result.current.op.id).toBe("op-1");
   expect(view.result.current.op.error).toBeNull();
   // узкая схема: ни subject/verb/shell, ни лишних полей
@@ -59,7 +60,11 @@ test("submit posts the narrow schema and polls to the terminal status", async ()
   expect(body).toEqual({ action: "restart", target: "pu-mop-1", params: {} });
   expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops/op-1",
     expect.objectContaining({ credentials: "same-origin" }));
-  // терминал -- опрос остановлен
+  // терминал -- кадром (#504), после него -- тишина
+  await act(async () => { operations.frame({ id: "op-1", action: "restart",
+    target: "pu-mop-1", status: "succeeded" }); });
+  expect(view.result.current.op.status).toBe("succeeded");
+  expect(gets).toBe(1);
   const after = fetchMock.mock.calls.length;
   await pause(15);
   expect(fetchMock.mock.calls.length).toBe(after);
@@ -139,25 +144,31 @@ test("a purged result (not found) reads as unknown", async () => {
   await waitFor(() => expect(view.result.current.op.status).toBe("unknown"));
 });
 
-test("three poll failures in a row read as unknown and stop the poll", async () => {
+// #504: прежний цикл опроса (три промаха подряд -- unknown) ушёл с
+// механизмом: терминал приезжает кадром, потерю покрывает таймер канала.
+// Новый контракт мёртвой сети: единственный GET промолчал -- операция
+// ОСТАЁТСЯ принятой (никакого своего unknown в петле), вердикт ждут
+// кадром; своего браузерного таймаута страница не строит (#504).
+test("#504 a dead network on the single GET keeps the op accepted, verdict waits for the frame", async () => {
   let gets = 0;
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
     () => { gets += 1; return Promise.reject(new Error("down")); });
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1", 1));
+  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
   await act(async () => { await view.result.current.submit(); });
-  await waitFor(() => expect(view.result.current.op.status).toBe("unknown"), { timeout: 2000 });
-  expect(gets).toBeGreaterThanOrEqual(3);
-  const after = fetchMock.mock.calls.length;
-  await pause(15);
-  expect(fetchMock.mock.calls.length).toBe(after);
+  await waitFor(() => expect(gets).toBe(1));
+  await pause(30);
+  // Ни второго GET, ни самодельного unknown: правда -- кадр или таймер
+  // канала (проверен в useOperationFeed.test.ts).
+  expect(gets).toBe(1);
+  expect(view.result.current.op.status).toBe("accepted");
 });
 
 test("a lost POST answer is unknown, and nothing retries it", async () => {
   const fetchMock = postGet(() => Promise.reject(new Error("connection reset")),
                             () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1", 1));
+  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
   await act(async () => { await view.result.current.submit(); });
   await waitFor(() => expect(view.result.current.op.status).toBe("unknown"));
   expect(view.result.current.op.lost).toBe(true);
@@ -262,4 +273,50 @@ test("#472 a guest add asks nothing", async () => {
   expect(view.result.current.op.status).toBe("refused");
   expect(view.result.current.op.error).toBeTruthy();
   expect(fetchMock).not.toHaveBeenCalled();
+});
+
+// ── #504: терминал -- кадром SSE, опрос уходит ──────────────────────────
+// Ровно один GET сразу после 202 (мгновенные refused, waiting/running на
+// момент подачи), дальше терминал ждут кадром канала (#504 useOperationFeed),
+// потерю покрывает таймер канала. Цикла опроса больше нет: непрерывное
+// обновление waiting -- не этот тикет (названо в остатке).
+test("#504 after 202 exactly one GET rides, then silence until the frame", async () => {
+  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
+                            () => Promise.resolve(opJson("running")));
+  vi.stubGlobal("fetch", fetchMock);
+  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
+  await act(async () => { await view.result.current.submit(); });
+  await waitFor(() => expect(view.result.current.op.status).toBe("running"));
+  const after = fetchMock.mock.calls.length;
+  // Пауза больше двух тиков прежнего цикла (1 с): живой цикл успел бы
+  // сходить дважды -- тишина и есть отсутствие цикла.
+  await pause(2500);
+  expect(fetchMock.mock.calls.length).toBe(after);   // цикла нет: один GET
+});
+
+test("#504 the single GET carries a terminal straight to the verdict", async () => {
+  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
+                            () => Promise.resolve(opJson("refused")));
+  vi.stubGlobal("fetch", fetchMock);
+  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
+  await act(async () => { await view.result.current.submit(); });
+  await waitFor(() => expect(view.result.current.op.status).toBe("refused"));
+  const after = fetchMock.mock.calls.length;
+  await pause(20);
+  expect(fetchMock.mock.calls.length).toBe(after);
+});
+
+test("#504 a terminal frame for the pending id settles the op without any GET", async () => {
+  let gets = 0;
+  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
+    () => { gets += 1; return Promise.resolve(opJson("running")); });
+  vi.stubGlobal("fetch", fetchMock);
+  const view = renderHook(() => useAdminOp(ADMIN, "pu-mop-1"));
+  await act(async () => { await view.result.current.submit(); });
+  await waitFor(() => expect(view.result.current.op.status).toBe("running"));
+  // Кадр приходит из канала (#504): слушатель -- операция по id.
+  await act(async () => { operations.frame({ id: "op-1", action: "restart",
+    target: "pu-mop-1", status: "succeeded" }); });
+  await waitFor(() => expect(view.result.current.op.status).toBe("succeeded"));
+  expect(gets).toBe(1);
 });
