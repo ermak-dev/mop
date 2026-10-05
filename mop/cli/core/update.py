@@ -29,11 +29,20 @@ def main(argv):
     args, force = lib.parse_named([a for a in argv if a != "--fresh"], __doc__, most=2)
     name = args[0]
     # Перила мастер-шелла уже отдали спеку (чей папет): не спрашивать
-    # вторично, тот же ответ едет в общую операцию.
-    spec = lib.guard(name)
-    text, sent = _common.workspace_text(args[1] if len(args) > 1 else None)
+    # вторично, тот же ответ едет в общую операцию. Вне проекта перил нет
+    # (guard=None) -- спеку спрашиваем сами, как до #459: прежний репозиторий
+    # нужен ЗДЕСЬ, до workspace_text.
+    spec = lib.guard(name) or bus.call_cluster("spec", name=name)
+    # Прежний репозиторий -- из спеки (#503): без origin папет остаётся на
+    # нём (контракт до #459). workspace_text строку и ждёт -- None звал
+    # manifest.fetch(None) и падал TypeError.
+    old = JobMeta.from_meta(spec.get("meta")).origin
+    if len(args) == 1 and not old:
+        lib.usage(f"{name}: no origin in the spec — this isn't a pool puppet")
+    origin = args[1] if len(args) > 1 else old
+    text, sent = _common.workspace_text(origin)
     v = ops.update(bus.call_cluster, name,
-                   origin=args[1] if len(args) > 1 else None,
+                   origin=origin if len(args) > 1 else None,
                    fresh=fresh, workspace=(text, sent),
                    force=force, login=bus.login(),
                    branch=context.current().branch, spec=spec,
