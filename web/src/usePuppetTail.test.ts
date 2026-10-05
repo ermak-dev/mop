@@ -1,8 +1,10 @@
-// Хвост экрана папета (#463): GET /api/puppet/<имя>/tail и /stderr (#462) --
-// только по явному запросу админа, без follow: хвост не опрашивается по
-// таймеру, каждый кадр -- новая кнопка. Обрезание помечается сервером и
-// показывается честно; 401/403 и смена цели стирают прошлые строки.
+// Хвост экрана папета (#463): GET /api/puppet/<имя>/tail (#462) -- только по
+// явному запросу админа, без follow: хвост не опрашивается по таймеру,
+// каждый кадр -- новая кнопка. Обрезание помечается сервером и показывается
+// честно; 401/403 и смена цели стирают прошлые строки.
 // #489: временный 502 оставляет последний полученный кадр с ошибкой.
+// #507: чтение stderr ушло вместе с кнопкой «лог» -- живые сессии в tmux,
+// stderr у задачи пуст; проверяем, что хвост ходит только на /tail.
 //
 // RESULT: тесты написаны до реализации (RED).
 import { act, renderHook } from "@testing-library/react";
@@ -51,14 +53,15 @@ test("load() brings the tail, the truncated flag included", async () => {
     expect.objectContaining({ credentials: "same-origin" }));
 });
 
-test("stderr rides its own endpoint", async () => {
-  const fetchMock = vi.fn(async () => tailOk(["err 1"]));
+// #507: у хвоста один источник -- экран. Чтения stderr больше нет вовсе:
+// ни параметра, ни запроса на .../stderr (кнопка «лог» ушла).
+test("#507 the tail reads only the screen endpoint", async () => {
+  const fetchMock = vi.fn(async () => tailOk(["screen 1"]));
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderHook(() => usePuppetTail(ADMIN, "pu-mop-1", "stderr"));
-  await act(async () => { await view.result.current.load(); });
-  expect(view.result.current.lines).toEqual(["err 1"]);
-  expect(fetchMock).toHaveBeenCalledWith("/api/puppet/pu-mop-1/stderr",
-    expect.objectContaining({ credentials: "same-origin" }));
+  // @ts-expect-error #507: параметра источника больше нет
+  renderHook(() => usePuppetTail(ADMIN, "pu-mop-1", "stderr"));
+  await act(async () => { await Promise.resolve(); });
+  expect(fetchMock).not.toHaveBeenCalled();
 });
 
 test("502 from a dead reader is an error with no lines", async () => {

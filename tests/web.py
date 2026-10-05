@@ -2203,16 +2203,17 @@ def check_puppet_tail_462(c):
         # а не из пути и не из запроса.
         c.expect(what + "the pane reader saw the roster's node",
                  readers.seen("pane") and readers.seen("pane")[0][1], "mate")
-        # Ограничение длины stderr.
+        # #507: маршрут stderr ушёл вместе с кнопкой «лог» -- живые сессии
+        # в tmux, stderr у задачи пуст, причина падающей уже в вердикте
+        # строки (#126). Читатель alloc_stderr остаётся у диагностики
+        # кластера (failing_row, MCP, CLI tail) -- GUI его больше не зовёт.
         readers.calls.clear()
         sent, out = _fake_handler(webcli, "GET", "/api/puppet/pu-mop-1/stderr",
                                   headers={"Cookie": f"mop_session={admin}"})
-        got = json.loads(out)
-        c.check(what + "stderr answers",
-                sent[0][1] == 200 and got.get("lines") == ["err 1", "MOP_PROXY_KEY=[redacted]"], out[:80])
-        c.check(what + "stderr lines are limited by a server constant",
-                bool(readers.seen("stderr")) and readers.seen("stderr")[0][2] <= 200,
-                readers.seen("stderr"))
+        c.check(what + "#507 stderr route is gone",
+                sent[0][1] == 404, (sent[0][1], out[:60]))
+        c.check(what + "#507 no reader fired for stderr",
+                not readers.seen("stderr"), readers.seen("stderr"))
         # Читатель умер -- 502-стиль честного отказа, не 500 и не пустота.
         def _boom_pane(node, name):
             raise RuntimeError("tmux boom")

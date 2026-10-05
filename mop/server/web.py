@@ -848,7 +848,6 @@ def full_entry(msg, now=None):
 # зовёт, ничего не парся из CLI. Лимиты -- константы сервера, обрезание
 # помечается честно. Мутирующих глаголов здесь нет вовсе.
 TAIL_LINES = 1000        # строк панеля: tmux-история бывает огромной
-STDERR_LINES = 200       # строк stderr задачи
 TAIL_TIMEOUT = 30        # с на панель: медленный du не должен рвать ответ
 
 
@@ -885,11 +884,3 @@ def puppet_tail(name, pane, node_of):
         return [_redact_text(l) for l in lines], False
     return [_redact_text(l) for l in lines[-TAIL_LINES:]], True
 
-
-def puppet_stderr(name, stderr_reader):
-    """Хвост stderr задачи папета -> (строки, причина | None). Строки --
-    через _redact_text: и stderr задач носит ключи команд запуска."""
-    try:
-        return [_redact_text(l) for l in stderr_reader(name, STDERR_LINES)], None
-    except Exception as e:
-        return None, f"reader failed: {e}"

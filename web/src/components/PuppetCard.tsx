@@ -6,12 +6,12 @@ import { usePuppetTail } from "../usePuppetCard";
 import { IconButton } from "./IconButton";
 import { SendForm } from "./SendForm";
 
-export type PuppetSource = "tail" | "stderr";
-
-function PuppetOutput({ session, target, which }: {
-  session: Session; target: string; which: PuppetSource;
+// #507: единственный источник -- экран (tail); ветка stderr ушла вместе с
+// кнопкой «лог»: у задачи он пуст, причина падающей -- в вердикте строки.
+function PuppetOutput({ session, target }: {
+  session: Session; target: string;
 }) {
-  const tail = usePuppetTail(session, target, which);
+  const tail = usePuppetTail(session, target);
   const viewport = useRef<HTMLDivElement>(null);
   const text = useRef<HTMLPreElement>(null);
   const [size, setSize] = useState({ width: 0, height: 0, available: 0, viewportHeight: 0 });
@@ -37,11 +37,11 @@ function PuppetOutput({ session, target, which }: {
     const tick = async () => {
       if (!active || blocked.current) return;
       await refresh();
-      if (active && which === "tail" && !blocked.current) timer = setTimeout(tick, 3000);
+      if (active && !blocked.current) timer = setTimeout(tick, 3000);
     };
     void tick();
     return () => { active = false; clearTimeout(timer); pending.current = null; };
-  }, [refresh, which]);
+  }, [refresh]);
 
   useLayoutEffect(() => {
     const measure = () => {
@@ -91,7 +91,7 @@ function PuppetOutput({ session, target, which }: {
     </Text>}
     <Box p="md" style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
       <Box ref={viewport} data-testid="output-scroll" role="region"
-        aria-label={which === "tail" ? "вывод экрана" : "вывод лога"} tabIndex={0}
+        aria-label="вывод экрана" tabIndex={0}
         style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", scrollbarGutter: "stable" }}
         onScroll={() => {
           const el = viewport.current!;
@@ -99,8 +99,8 @@ function PuppetOutput({ session, target, which }: {
           logicalTop.current = el.scrollTop / scale;
         }}>
         {loading ? <Stack h="100%" align="center" justify="center" gap="sm"
-          role="status" aria-label={which === "tail" ? "загрузка экрана" : "загрузка лога"}>
-          <Loader size="sm" /><Text size="sm" c="dimmed">{which === "tail" ? "загрузка экрана" : "загрузка лога"}</Text>
+          role="status" aria-label="загрузка экрана">
+          <Loader size="sm" /><Text size="sm" c="dimmed">загрузка экрана</Text>
         </Stack> : tail.blocked ? null : (
           <>
             {/* Рамка занимает только масштабированный размер; исходный pre
@@ -118,22 +118,21 @@ function PuppetOutput({ session, target, which }: {
         )}
       </Box>
     </Box>
-    {which === "tail" && !tail.blocked && <Box px="md" py="sm" data-testid="screen-composer"
+    {!tail.blocked && <Box px="md" py="sm" data-testid="screen-composer"
       style={{ flexShrink: 0, borderTop: "1px solid var(--mantine-color-default-border)" }}>
       <SendForm session={session} target={target} />
     </Box>}
   </>;
 }
 
-export function PuppetCard({ session, target, which = "tail", onClose }: {
+export function PuppetCard({ session, target, onClose }: {
   session: Session;
   target: string | null;
-  which?: PuppetSource;
   onClose: () => void;
 }) {
   if (!target || session.role !== "admin") return null;
   return <Modal opened onClose={onClose} size="min(1440px, calc(100vw - 32px))" yOffset={16}
-    title={<Text fw={600}>{which === "tail" ? "экран" : "лог"} {target}</Text>}
+    title={<Text fw={600}>экран {target}</Text>}
     data-testid="puppet-card" padding="md" radius="md" closeButtonProps={{ "aria-label": "закрыть" }}
     styles={{
       content: { height: "calc(100dvh - 32px)", maxHeight: "calc(100dvh - 32px)",
@@ -141,6 +140,6 @@ export function PuppetCard({ session, target, which = "tail", onClose }: {
       header: { flexShrink: 0 },
       body: { flex: 1, minHeight: 0, padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" },
     }}>
-    <PuppetOutput key={`${session.login}\0${target}\0${which}`} session={session} target={target} which={which} />
+    <PuppetOutput key={`${session.login}\0${target}`} session={session} target={target} />
   </Modal>;
 }

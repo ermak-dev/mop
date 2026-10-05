@@ -20,8 +20,8 @@ const row: Puppet = {
 const snapshot = emptySnapshot({ projects: [{ name: "mop", puppets: [row],
   counts: { puppets: 1, free: 1, busy: 0, sick: 0, silent: 0, down: 0 } }] });
 const response = (body: unknown) => ({ ok: true, json: async () => body }) as Response;
-const card = (which: "tail" | "stderr" = "tail") => renderUi(<PuppetCard session={session}
-  target={row.name} which={which} onClose={() => {}} />);
+const card = () => renderUi(<PuppetCard session={session}
+  target={row.name} onClose={() => {}} />);
 
 const originalScrollTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTop");
 afterEach(() => {
@@ -30,10 +30,11 @@ afterEach(() => {
   else Reflect.deleteProperty(HTMLElement.prototype, "scrollTop");
 });
 
+// #507: иконки действий -- экран, рестарт, правка, модель; «лог» ушёл.
 test.each([
   ["рестарт", "подтвердите рестарт"], ["правка", "правка папета"],
   ["модель", "смена модели"],
-  ["экран", "экран pu-mop-1"], ["лог", "лог pu-mop-1"],
+  ["экран", "экран pu-mop-1"],
 ])("row icon %s opens only its own dialog", async (label, title) => {
   vi.stubGlobal("fetch", vi.fn(async () => response({ models: [], lines: [] })));
   renderUi(<PoolTable projects={snapshot.projects} session={session} />);
@@ -58,7 +59,8 @@ test("#487 actions have a right-aligned shrink-to-fit column", () => {
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
   expect(actions).toHaveStyle({ justifyContent: "flex-end", flexWrap: "nowrap" });
   expect(actions.closest("td")).toHaveStyle({ width: "1%", whiteSpace: "nowrap", textAlign: "right" });
-  expect(within(actions).getAllByRole("button")).toHaveLength(5);
+  expect(within(actions).getAllByRole("button")).toHaveLength(4);
+  expect(within(actions).queryByRole("button", { name: "лог" })).toBeNull();
   expect(within(actions).queryByRole("button", { name: "сообщение" })).toBeNull();
 });
 
@@ -90,12 +92,13 @@ test.each(["рестарт", "правка", "модель"])("#487 %s result ne
   }
 });
 
-test.each(["tail", "stderr"] as const)("#487 %s shows loading on open", async (which) => {
+// #507: карточка открывает один источник -- экран.
+test("#487 the screen shows loading on open", async () => {
   let release!: (r: Response) => void;
   vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { release = resolve; })));
-  card(which);
+  card();
   expect(screen.getByRole("status")).toBeInTheDocument();
-  expect(vi.mocked(fetch)).toHaveBeenCalledWith(`/api/puppet/pu-mop-1/${which}`, expect.anything());
+  expect(vi.mocked(fetch)).toHaveBeenCalledWith("/api/puppet/pu-mop-1/tail", expect.anything());
   await act(async () => { release(response({ lines: ["loaded"] })); });
   expect(await screen.findByText("loaded")).toBeInTheDocument();
   expect(screen.queryByRole("status")).toBeNull();
@@ -152,7 +155,7 @@ test("#487 height-only resize keeps the last log line visible", async () => {
   vi.spyOn(HTMLElement.prototype, "scrollTop", "get").mockImplementation(() => top);
   vi.spyOn(HTMLElement.prototype, "scrollTop", "set").mockImplementation((value) => { top = Math.min(value, 1200 - height); });
   vi.stubGlobal("fetch", vi.fn(async () => response({ lines: ["last log line"] })));
-  card("stderr");
+  card();
   await screen.findByText("last log line");
   expect(top).toBe(900);
   await act(async () => { height = 100; notify(); });
@@ -198,10 +201,10 @@ test.each(["рестарт", "правка", "модель"])("#487 %s preserves
   }
 });
 
-test("#487 opening a log scrolls its viewport to the end", async () => {
+test("#487 opening the screen scrolls its viewport to the end", async () => {
   vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1200);
   vi.stubGlobal("fetch", vi.fn(async () => response({ lines: ["oldest", "latest"] })));
-  card("stderr");
+  card();
   await screen.findByText("latest");
   expect(screen.getByTestId("output-scroll").scrollTop).toBe(1200);
 });

@@ -553,7 +553,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "login required"})
         if role != "admin":
             return self._json(403, {"error": "admin only"})
-        # /api/puppet/<имя>[/tail|/stderr]: имя -- остаток пути целиком;
+        # /api/puppet/<имя>[/tail]: имя -- остаток пути целиком;
         # слэши в нём -- не наша грамматика, такой цели в ростере нет.
         rest = path[len("/api/puppet/"):]
         name, _, sub = rest.partition("/")
@@ -568,11 +568,8 @@ class Handler(BaseHTTPRequestHandler):
             if lines is None:
                 return self._json(502, {"error": note})
             return self._json(200, {"lines": lines, "truncated": note})
-        if sub == "stderr":
-            lines, note = web.puppet_stderr(name, puppets.alloc_stderr)
-            if lines is None:
-                return self._json(502, {"error": note})
-            return self._json(200, {"lines": lines})
+        # #507: маршрута stderr больше нет -- кнопка «лог» ушла из GUI;
+        # неизвестный подсубъект по-прежнему 404.
         return self._json(404, {"error": "no such puppet"})
 
     def stream(self):
