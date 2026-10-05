@@ -12,6 +12,7 @@
 import json
 import os
 import sys
+import threading
 import tempfile
 import time
 
@@ -273,6 +274,44 @@ def main():
                          safety=lambda name, project, **kw: (True, None))
     c.check(what + "the storage recovers for new submissions",
             ok_again.get("op") is not None, ok_again)
+
+    # ── зависший эффект терминируется сроком (#497) ─────────────────────
+    # HYPOTHESIS: эффект исполняется в полосе цели без срока; отправка
+    # папету без узла-получателя стоит в bus-запросе навсегда -- settle не
+    # приходит, цель держится, каждая следующая подача по ней -- 409
+    # часами. SOLUTION: эффект под сроком (EFFECT_TIMEOUT, часы -- те же
+    # now/sleep воркера); вышло -- честный unknown «effect timed out»
+    # (эффект мог дойти -- повтор автоматом запрещён, #476), цель
+    # свободна. Поток эффекта убить нельзя -- он остаётся демоном; полосу
+    # он не держит: её держала запись операции, и та терминирована.
+    # Часы здесь настоящие: замороженный now никогда не дошёл бы до
+    # дедлайна, а эффект -- событие на настенных секундах.
+    # RESULT: срок бил как failed -- исправлено: _TimedOut терминируется
+    # unknown (эффект мог дойти), STATUS: FIXED -- see #497.
+    wt = opworker.Worker(tempfile.mkdtemp(prefix="mop-test-497-"),
+                         effect_timeout=1, observe_wait=0)
+    tt = Recorder()
+    gate = threading.Event()        # эффект не возвращается, пока не открыли
+    stuck_effect = lambda: gate.wait(10)
+    first = wt.submit("anton", "send", "pu-mop-1", {"message": "hi"},
+                      transport=tt,
+                      safety=lambda name, project, **kw: (True, None),
+                      effect=stuck_effect)
+    c.check(what + "a hung effect terminates the operation in finite time",
+            first.get("status") == "unknown", first)
+    c.check(what + "the timed-out verdict names its cause",
+            "timed out" in (first.get("error") or ""), first)
+    c.check(what + "a timed-out operation forbids the automatic retry",
+            not wt._retryable(wt.read("anton", first["op"])), first)
+    # Цель свободна: вторая подача по той же цели принимается и доходит до
+    # исхода, а не queued/409 навсегда.
+    gate.set()
+    second = wt.submit("anton", "send", "pu-mop-1", {"message": "again"},
+                       transport=tt,
+                       safety=lambda name, project, **kw: (True, None),
+                       effect=lambda: {"outcome": "registered"})
+    c.check(what + "after the timeout the target admits a new submission",
+            second.get("status") in opworker.TERMINAL, second)
 
     # ── retention и tombstone ───────────────────────────────────────────
     # После очистки старый ключ нельзя молча считать новым безопасным
