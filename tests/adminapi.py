@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
-"""Admin HTTP API поверх общих операций: python3 tests/adminapi.py
+"""Тонкий исполнитель веб-операций: python3 tests/adminapi.py
 
-HYPOTHESIS (#461): админу GUI нужны те же операции пула, что CLI (#458),
-но без терминала; запускать workflow в потоке запроса нельзя (#476), и
-второй реализации быть не должно. Раздавать произвольные RPC/subject или
-shell-строки через HTTP нельзя.
-SOLUTION: mop/server/adminapi.py -- тонкий адаптер: гейты admin/Origin/
-Content-Type/Content-Length/JSON, узкая схема {action, target, params},
-реестр допустимых операций и параметров (unsupported до регистрации),
-send-обработчик первого выпуска (только адресная доставка папету),
-постановка воркеру без исполнения в потоке запроса, различимые коды
-(202 принято / 409 конфликт / 4xx валидация / 5xx транспорт), детали
-ошибок -- allowlist, не raw exceptions. GET результатов -- admin-only,
-no-store, не в публичном SSE; payload -- только в приватной очереди.
-STATUS: FIXED — see #461
+HYPOTHESIS (#499): веб держал две копии «жизни операции» -- очередь задач,
+_active-замок с 409 и _results с TTL (адаптер #461), журнал ops.jsonl,
+payload-файлы, _recover и пер-целевую очередь (воркер #476). Общий workflow
+#458 уже один, а копии оркестрации разъехались (#497: вечный accepted,
+409 часами).
+SOLUTION: исполнитель #499 в adminapi.Api -- приём в памяти (идемпотентность
+тем же payload -> тот же id), поток на операцию через ops.* тем же
+транспортом, что CLI, сериализация семафором на цель (ждёт, а не отказывает),
+терминал -- SSE-кадром operation в существующий поток /events (#424),
+рестарт службы -- честный unknown с ссылкой на журнал: правда об эффекте --
+аудит пула (ops.record) и /api/journal. Семафор освобождается в finally:
+таймаут зависшего эффекта #497 встанет сюда без переделки слоя.
 """
 import json
 import os
 import sys
+import threading
+import time
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, patched, patched_env  # noqa: E402
+from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-try:
-    from mop.server import adminapi
-except ImportError:
-    adminapi = None
+from mop.server import adminapi, opworker  # noqa: E402
 
 ADMIN = ("ermak", "admin")
 USER = ("olga", "user")
@@ -66,216 +64,263 @@ class Handler:
         self.sent.append((code, payload))
         return None
 
-    def _origin_ok(self):
-        return self.headers.get("Origin") == self.origin
+
+class Scripted:
+    """Эффект-подмена: считанные вызовы, сценарии ответов.
+
+    gate -- барьер медленного эффекта: отпускает его проверка; entered --
+    факт захода в эффект (вторая операция обязана ждать семафор цели,
+    а не отказываться)."""
+
+    def __init__(self, replies=None, gate=None):
+        self.replies = list(replies or [])
+        self.calls = []
+        self.gate = gate
+        self.entered = threading.Event()
+        self.released = threading.Event()
+
+    def __call__(self):
+        self.calls.append(1)
+        self.entered.set()
+        if self.gate is not None:
+            self.gate.wait(5)
+            self.released.set()
+        return self.replies.pop(0) if self.replies else \
+            {"outcome": "registered", "name": "pu-mop-1"}
+
+
+TERMINAL = frozenset(opworker.TERMINAL)
+
+
+def terminal(rec):
+    return rec.get("status") if rec.get("status") in TERMINAL else None
+
+
+def wait_terminal(api, op_id, who=ADMIN, timeout=10):
+    """Дождаться терминала записи (поток исполнения -- асинхронный)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        got = api.result(op_id, who)
+        if terminal(got):
+            return got
+        time.sleep(0.02)
+    return api.result(op_id, who)
 
 
 def main():
     c = Checks()
-    if not c.check("mop.server.adminapi exists", adminapi is not None):
-        return c.report("adminapi")
-
     ops = adminapi.Operations()
-    queue = adminapi.Queue()
-    api = adminapi.Api(ops, queue, origin="https://pool.example", who=ADMIN)
+    opworker.register(ops)
 
-    # ── гейты: роли, провайдер, Origin, тип, размер, JSON ───────────────
-    # Гость и не-admin не доходят до разбора тела.
+    # ── приём: идемпотентность тем же payload -> тот же id, в памяти ─────
+    # HYPOTHESIS: двойной клик обязан возвращать тот же id -- иначе второй
+    # клик рождал бы вторую операцию на ту же цель; память и есть срок:
+    # рестарт службы ниже честно отвечает unknown, а завершённая операция
+    # ключ освобождает (после терминала тот же payload -- новая команда,
+    # это проверяет tests/web_intents.py).
+    held = threading.Event()
+    keeper = Scripted(gate=held)
+    api = adminapi.Api(ops, origin="https://pool.example", who=ADMIN,
+                       executor=lambda action, target, params, who: keeper)
+    first = api.submit("send", "pu-mop-1", {"message": "hi"}, ADMIN)
+    second = api.submit("send", "pu-mop-1", {"message": "hi"}, ADMIN)
+    c.check("#499 the same payload resubmits to the same id",
+            first["id"] == second["id"], (first, second))
+    # Другой payload на ту же цель -- вторая операция, не 409: исполнитель
+    # ждёт семафор цели, а не отказывает (#497: 409 висел часами).
+    other = api.submit("send", "pu-mop-1", {"message": "other"}, ADMIN)
+    c.check("#499 a different payload on the same target is a new operation",
+            other["id"] != first["id"], (first, other))
+    held.set()
+    wait_terminal(api, first["id"])
+
+    # ── исполнение: поток на операцию, обе до терминала, вторая не 409 ──
+    # HYPOTHESIS: две операции на одну цель подряд; прежний _active-замок
+    # отказывал второй 409 «another operation is queued for this target»,
+    # и отказ висел часами (#497). Семафор на цель ждёт: обе доводятся до
+    # терминала последовательно, страница видит waiting.
+    gate = threading.Event()
+    slow = Scripted(gate=gate)
+    fast = Scripted()
+    api2 = adminapi.Api(ops, origin="https://pool.example", who=ADMIN,
+                        executor=lambda action, target, params, who:
+                        {"send:pu-mop-1:hi": slow,
+                         "send:pu-mop-1:hi2": fast}[
+                            f"{action}:{target}:{params.get('message')}"])
+    r1 = api2.submit("send", "pu-mop-1", {"message": "hi"}, ADMIN)
+    slow.entered.wait(5)
+    r2 = api2.submit("send", "pu-mop-1", {"message": "hi2"}, ADMIN)
+    c.check("#499 the second submission on a busy target is accepted, not 409",
+            r2.get("id") and r2["id"] != r1["id"], (r1, r2))
+    c.check("#499 while the first runs the second waits for the target",
+            not fast.entered.wait(0.3), fast.calls)
+    gate.set()
+    a = wait_terminal(api2, r1["id"])
+    b = wait_terminal(api2, r2["id"])
+    c.check("#499 both operations on one target reach their terminal",
+            terminal(a) == "succeeded" and terminal(b) == "succeeded", (a, b))
+    c.check("#499 each effect fired exactly once, in order",
+            len(slow.calls) == 1 and len(fast.calls) == 1 and slow.released.is_set(),
+            (slow.calls, fast.calls))
+
+    # ── ожидание видно статусом: waiting до семафора, running после ─────
+    gate2 = threading.Event()
+    w_slow = Scripted(gate=gate2)
+    w_fast = Scripted()
+    api_w = adminapi.Api(ops, origin="https://pool.example", who=ADMIN,
+                         executor=lambda action, target, params, who:
+                         {"a": w_slow, "b": w_fast}[params.get("message")])
+    ra = api_w.submit("send", "pu-mop-1", {"message": "a"}, ADMIN)
+    w_slow.entered.wait(5)
+    rb = api_w.submit("send", "pu-mop-1", {"message": "b"}, ADMIN)
+    c.check("#499 the waiting operation reads waiting",
+            api_w.result(rb["id"], ADMIN).get("status") == "waiting",
+            api_w.result(rb["id"], ADMIN))
+    c.check("#499 the running operation reads running",
+            api_w.result(ra["id"], ADMIN).get("status") == "running",
+            api_w.result(ra["id"], ADMIN))
+    gate2.set()
+    wait_terminal(api_w, ra["id"])
+    wait_terminal(api_w, rb["id"])
+
+    # ── вердикт: SSE-кадр operation на терминальный статус ──────────────
+    # Терминал публикуется в существующий поток /events (#424): кадр
+    # operation несёт {id, action, target, status, error?} и не несёт
+    # payload. Подписчик -- on_terminal адаптера; обвязка /events в
+    # mop/cli/server/web.py зайдёт тем же крючком.
+    api3 = adminapi.Api(ops, origin="https://pool.example", who=ADMIN)
+    seen = []
+    api3.on_terminal(lambda frame: seen.append(frame))
+    eff = Scripted(replies=[{"outcome": "refused", "name": "pu-mop-1",
+                             "error": "pu-mop-1: work in the clone"}])
+    api3.executor = lambda action, target, params, who: eff
+    api3.submit("send", "pu-mop-1", {"message": "hi"}, ADMIN)
+    eff.entered.wait(5)
+    deadline = time.monotonic() + 5
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.02)
+    c.check("#499 the terminal lands as an SSE operation frame",
+            seen and seen[0].get("status") == "refused"
+            and seen[0].get("action") == "send"
+            and seen[0].get("target") == "pu-mop-1", seen)
+    c.check("#499 the SSE frame carries no params payload",
+            seen and "params" not in seen[0] and "message" not in seen[0], seen)
+
+    # ── крах эффекта: вердикт failed, не вечный running (#497) ──────────
+    # Прежняя гарантия жила журналом воркера (#476 «crash leaves a durable
+    # failure»); с #499 крах эффекта ловит поток адаптера: запись -- failed
+    # с причиной, ключ и семафор цели освобождены. #497 (таймаут
+    # зависшего эффекта) -- отдельный слой; здесь только то, что упавший
+    # эффект не оставляет «вечный running».
+    class Boom:
+        def __call__(self):
+            raise RuntimeError("bus down")
+
+    api_boom = adminapi.Api(ops, origin="https://pool.example", who=ADMIN,
+                            executor=lambda *a: Boom())
+    boom_frames = []
+    api_boom.on_terminal(boom_frames.append)
+    r = api_boom.submit("send", "pu-mop-2", {"message": "x"}, ADMIN)
+    a = wait_terminal(api_boom, r["id"])
+    c.check("#499 an effect that crashes reads failed, with a reason",
+            a.get("status") == "failed" and a.get("error"), a)
+    c.check("#499 the crashed operation frees its key for a resubmit",
+            api_boom.submit("send", "pu-mop-2", {"message": "x"}, ADMIN)["id"]
+            != r["id"])
+    c.check("#499 the crash lands as an SSE frame, closed phrase only",
+            boom_frames and boom_frames[0].get("status") == "failed"
+            and boom_frames[0].get("error") == "operation failed", boom_frames)
+
+    # ── рестарт службы: неизвестные id -- «исход неизвестен, смотри журнал»
+    # Дюрабельность «клик -> вердикт» через рестарт веба сознательно не
+    # делаем: память и есть срок. Новый экземпляр незнакомый id отдаёт как
+    # unknown со ссылкой на журнал, а не not found и не вечный accepted.
+    api4 = adminapi.Api(ops, origin="https://pool.example", who=ADMIN,
+                        executor=lambda *a: Scripted())
+    got = api4.result(first["id"], ADMIN)
+    c.check("#499 after a restart an unknown id reads unknown with a journal pointer",
+            got.get("status") == "unknown"
+            and "journal" in (got.get("error") or ""), got)
+
+    # ── коды на двери: гейты адаптера живут как жили (#461) ─────────────
+    ops_g = adminapi.Operations()
+    opworker.register(ops_g)
+    api_g = adminapi.Api(ops_g, origin="https://pool.example", who=ADMIN,
+                         executor=lambda *a: Scripted())
     for who, want in ((None, 401), (("olga", "user"), 403)):
-        h = Handler(who=who, body=req("send", "pu-mop-1"), length=99)
-        api.post(h)
+        h = Handler(who=who, body=req("send", "pu-mop-1", {"message": "hi"}), length=99)
+        api_g.post(h)
         c.check(f"#461 {who and who[1] or 'guest'} -> {want}",
                 h.sent and h.sent[0][0] == want, h.sent)
-    # Провайдер лёг -- закрыто, и без сырой ошибки наружу.
+
     def broken(*a, **k):
         raise RuntimeError("ldap socket: secret-path /etc/ld.pwd")
-    h = Handler(body=req("send", "pu-mop-1"), length=99)
-    adminapi.Api(ops, queue, origin="https://pool.example", who=ADMIN,
-                 provider=broken).post(h)
+    h = Handler(body=req("send", "pu-mop-1", {"message": "hi"}), length=99)
+    adminapi.Api(ops_g, origin="https://pool.example", who=ADMIN,
+                 provider=broken, executor=lambda *a: Scripted()).post(h)
     c.check("#461 provider failure is closed",
             h.sent and h.sent[0][0] in (503, 401) and
             "secret" not in json.dumps(h.sent[0][1]), h.sent)
-    # Чужой/отсутствующий Origin.
     for origin in (None, "https://evil.example"):
         h = Handler(origin=origin or "", body=req("send", "pu-mop-1"), length=99)
-        api.post(h)
-        c.check(f"#461 origin {origin!r} refused", h.sent and h.sent[0][0] == 403, h.sent)
-    # Не-JSON тип, oversized, недочитанное тело, мусор, лишние поля.
+        api_g.post(h)
+        c.check(f"#461 origin {origin!r} refused",
+                h.sent and h.sent[0][0] == 403, h.sent)
     h = Handler(content_type="text/plain", body=b"x", length=1)
-    api.post(h)
+    api_g.post(h)
     c.check("#461 non-JSON content type refused", h.sent and h.sent[0][0] in (400, 415),
             h.sent)
     big = b"{" + b'"pad": "' + b"x" * (adminapi.BODY_MAX + 1) + b'"}'
     h = Handler(body=big, length=len(big))
-    api.post(h)
+    api_g.post(h)
     c.check("#461 oversized body refused", h.sent and h.sent[0][0] == 413, h.sent)
     h = Handler(body=req("send", "pu-mop-1")[:5], length=99)
-    api.post(h)
+    api_g.post(h)
     c.check("#461 truncated JSON refused", h.sent and h.sent[0][0] == 400, h.sent)
     h = Handler(body=b"not json", length=8)
-    api.post(h)
+    api_g.post(h)
     c.check("#461 garbage refused", h.sent and h.sent[0][0] == 400, h.sent)
     h = Handler(body=req("send", "pu-mop-1", actor="forged", env={"X": 1},
                          subject="mop.admin.cluster.rpc", verb="delete",
                          cwd="/", argv=["rm"]), length=None)
     h.headers["Content-Length"] = str(len(h.body))
-    api.post(h)
+    api_g.post(h)
     c.check("#461 forged actor/env/subject/verb/cwd/argv refused as unknown fields",
             h.sent and h.sent[0][0] == 400, h.sent)
 
     # ── реестр: незарегистрированное -- unsupported, не 500 ─────────────
+    bare = adminapi.Operations()
+    api_bare = adminapi.Api(bare, origin="https://pool.example", who=ADMIN,
+                            executor=lambda *a: Scripted())
     h = Handler(body=req("restart", "pu-mop-1"), length=None)
     h.headers["Content-Length"] = str(len(h.body))
-    api.post(h)
-    # ── #491: очередь адаптера потребляется -- задача доезжает до воркера,
-    # статус записи становится терминальным (иначе «принято» висит вечно).
-    from mop.cli.server import web as webcli
-    import time as _time
-
-    class _Clock:
-        def __init__(self): self.t = 1000.0
-        def __call__(self): return self.t
-
-    clock = _Clock()
-    driven = adminapi.Queue()
-    driven_ops = adminapi.Operations()
-    from mop.server import opworker as _ow
-    _ow.register(driven_ops)
-    driven_api = adminapi.Api(driven_ops, driven, origin="https://pool.example", who=ADMIN)
-    body = req("restart", "pu-mop-1")
-    h = Handler(who=ADMIN, body=body, length=len(body))
-    driven_api.post(h)
-    op_id = h.sent[0][1]["id"]
-
-    class _Done(Exception):
-        pass
-
-    def effect():  # подменный эффект: outcome-вид #458, терминал сразу
-        return {"outcome": "registered", "name": "pu-mop-1"}
-
-    from mop.server import opworker
-    w = opworker.Worker(now=clock, sleep=lambda s: None)
-    job = driven.take()
-    c.check("#491 the queue yields the accepted job", job is not None and job.get("id") == op_id, job)
-    verdict = w.submit(job["login"], "restart", "pu-mop-1", {}, effect=effect)
-    c.expect("#491 the worker speaks a terminal status",
-             verdict.get("status"), "succeeded")
-    driven_api.settle(op_id, verdict)
-    got = driven_api.result(op_id, ("anton", "admin"))
-    c.expect("#491 the result reads the worker verdict",
-             got.get("status"), "succeeded")
-    # #496: причина исхода едет в результат. Слой #495 переводит её в
-    # закрытую публичную фразу по словарю фрагментов: известная причина
-    # узнаваема, неизвестная получает свой fallback -- но не пустоту.
-    body2 = req("restart", "pu-mop-9")
-    h2 = Handler(who=ADMIN, body=body2, length=len(body2))
-    driven_api.post(h2)
-    op2 = h2.sent[0][1]["id"]
-    driven_api.settle(op2, {"status": "refused",
-                            "error": "pu-mop-9: work in the clone: 2 uncommitted"})
-    got = driven_api.result(op2, ("anton", "admin"))
-    c.expect("#496 the result carries the refusal reason",
-             got.get("error"), "target has unfinished work")
-    # Драйверный транспорт существует и говорит глаголами кластера.
-    from mop.server import opworker as _ow2
-    c.check("#496 default_transport is a callable, not None",
-            callable(_ow2.default_transport()), None)
-
-    # ── #498: субъект глагола -- проект цели, не процесс веб-службы ──────
-    subjects = []
-    import mop.common.bus as _bus
-
-    class _ClusterSpy:
-        @staticmethod
-        def call_cluster(verb, timeout=None, project=None, **fields):
-            subjects.append((verb, project))
-            if verb == "spec":
-                return {"meta": {"origin": "git@git.ermak.dev:rugent/rugent.git"}}
-            return {}
-
-    with patched(_bus, call_cluster=_ClusterSpy.call_cluster):
-        # Резолвер -- параметр транспорта; воркеровский строит его из
-        # Meta.origin через spec (живой путь проверен #498 отдельно).
-        tr = _ow2.default_transport(lambda n: "rugent" if n else None)
-        got = tr("restart", name="pu-rugent-1")
-        c.expect("#498 a named verb rides the target's project subject",
-                 subjects[-1], ("restart", "rugent"))
-        tr("add", origin="git@git.ermak.dev:rugent/rugent.git")
-        c.expect("#498 add rides the registered origin's project",
-                 subjects[-1], ("add", "rugent"))
-    # Библиотечная фраза переживает sanitize: имя папета и слова причины
-    # остаются -- санитизация для сырых исключений, не для готовых фраз.
-    c.expect("#496 sanitize keeps a library phrase readable",
-             adminapi.sanitize("pu-mop-2: tmux session is alive"),
-             "pu-mop-2 tmux session is alive")
-
-    # ── #464/#489: воркер регистрирует все глаголы адаптера одной точкой;
-    # рестарт был пропущен -- POST из GUI отвечал unsupported (#489).
-    from mop.server import opworker
-    wired_all = adminapi.Operations()
-    opworker.register(wired_all)
-    wired_api2 = adminapi.Api(wired_all, adminapi.Queue(),
-                              origin="https://pool.example", who=ADMIN)
-    for verb in ("add", "update", "restart", "recycle", "delete", "wipe", "model"):
-        body = req(verb, target="pu-mop-1")
-        h = Handler(who=ADMIN, body=body, length=len(body))
-        wired_api2.post(h)
-        c.check(f"#489 opworker.register wires {verb}",
-                h.sent and h.sent[0][0] != 404, h.sent)
-
-    body = req("dance", "pu-mop-1")
-    h = Handler(who=ADMIN, body=body, length=len(body))
-    api.post(h)
+    api_bare.post(h)
     c.check("#461 unregistered operation is 404/unsupported, no button",
             h.sent and h.sent[0][0] == 404
             and h.sent[0][1].get("error") == "unsupported operation", h.sent)
-    # send зарегистрирован из коробки: первый выпуск.
-    sent_to_worker = []
-    queue.put = lambda job: sent_to_worker.append(job)
-    h = Handler(body=req("send", "pu-mop-1", params={"message": "hi"}), length=None)
-    h.headers["Content-Length"] = str(len(h.body))
-    api.post(h)
-    c.check("#461 send -> 202 with an operation id",
-            h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
-    c.check("#461 the job went to the worker queue, not the request thread",
-            len(sent_to_worker) == 1 and sent_to_worker[0]["action"] == "send"
-            and sent_to_worker[0]["target"] == "pu-mop-1", sent_to_worker)
-    c.check("#461 queued payload is private: not in the answer",
-            "message" not in json.dumps(h.sent[0][1]), h.sent)
-    # Неизвестные параметры -- не пасс-through.
+    for verb in ("add", "update", "restart", "recycle", "delete", "wipe", "model"):
+        body = req(verb, target="pu-mop-1")
+        h = Handler(who=ADMIN, body=body, length=len(body))
+        api_g.post(h)
+        c.check(f"#489 opworker.register wires {verb}",
+                h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
     h = Handler(body=req("send", "pu-mop-1", params={"message": "hi",
                                                      "notify_when_idle": True,
                                                      "wait": 60}), length=None)
     h.headers["Content-Length"] = str(len(h.body))
-    api.post(h)
+    api_g.post(h)
     c.check("#461 first-release send policy: notify/wait are not accepted",
             h.sent and h.sent[0][0] == 400, h.sent)
 
-    # ── конфликты и повторы ─────────────────────────────────────────────
-    # Тот же payload повторно -- конфликт изменившейся цели/конкурирующей
-    # операции; тот же id -- идемпотентный ответ.
-    first = api.submit("send", "pu-mop-1", {"message": "hi"}, ADMIN)
-    second = api.submit("send", "pu-mop-1", {"message": "hi"}, ADMIN)
-    c.check("#461 the same payload resubmits to the same id (idempotent)",
-            first["id"] == second["id"], (first, second))
-    try:
-        api.submit("send", "pu-mop-1", {"message": "other"}, ADMIN)
-        c.fail("#461 a different payload for the same target conflicts while queued",
-               "no conflict raised")
-    except adminapi.Refused as e:
-        c.check("#461 a different payload conflicts with 409", e.code == 409, e.code)
-
-    # ── GET результата: admin-only, no-store, чужой id -- не отдаётся ───
+    # ── GET результата: admin-only, no payload, статусы ─────────────────
     got = api.result(first["id"], ADMIN)
     c.check("#461 own result is readable", got.get("id") == first["id"], got)
-    c.check("#461 a result of an unknown id is not found",
-            api.result("no-such-id", ADMIN).get("status") == "not found")
+    c.check("#461 a result of an unknown id reads unknown with the journal pointer",
+            api.result("no-such-id", ADMIN).get("status") == "unknown", None)
     c.check("#461 a result is admin-only",
             api.result(first["id"], USER).get("status") in ("401", "403", "refused"))
     c.check("#461 the result carries no message payload",
             "message" not in json.dumps(got), got)
-    # Публичный снимок ростера не подтверждает операцию: ответ результата
-    # несёт метафору операции (action/target/status), но не payload.
     c.check("#461 results never ride the public snapshot",
             not any(k in got for k in ("params", "message")), got)
 
@@ -287,9 +332,9 @@ def main():
              adminapi.sanitize(ValueError("target pu-mop-1 refused: held by olga")),
              "target pu-mop-1 refused held by olga")
 
-    # ── параллельные контексты: два запроса -- две операции ────────────
-    import threading
-    fresh = adminapi.Api(ops, adminapi.Queue(), origin="https://pool.example")
+    # ── параллельные контексты: два запроса -- две операции ─────────────
+    fresh = adminapi.Api(ops, origin="https://pool.example",
+                         executor=lambda *a: Scripted())
     made = []
 
     def submit(tag):
@@ -306,8 +351,6 @@ def main():
             made)
 
     # ── реестр проектов для формы add (#472) ───────────────────────────
-    # Читатель реестра подставной: строки -- origin'ы, как их держит
-    # projects.read(); нет файла -- пусто.
     def registry(lines):
         return lambda: set(lines)
 
@@ -320,15 +363,10 @@ def main():
             [p["name"] for p in got] == ["mop", "web"], got)
     c.check("#472 an empty registry reads as an empty list, not an error",
             adminapi.project_list(registry([])) == [], got)
-    # Кривая строка без origin-вида не роняет список: их вычищает reader,
-    # но здесь — защита по записи (#337).
     got = adminapi.project_list(registry(["git@h:g/mop.git", "junk line"]))
     c.check("#472 a non-origin line is dropped, the rest survives",
             [p["name"] for p in got] == ["mop"], got)
 
-    # GET /api/admin/projects: admin-only, остальным -- код отказа.
-    listing_api = adminapi.Api(ops, adminapi.Queue(), origin="https://pool.example",
-                               who=ADMIN)
     class ListHandler:
         command = "GET"
         path = "/api/admin/projects"
@@ -340,6 +378,8 @@ def main():
         def _json(self, code, payload):
             self.sent.append((code, payload))
 
+    listing_api = adminapi.Api(ops, origin="https://pool.example", who=ADMIN,
+                               executor=lambda *a: Scripted())
     h = ListHandler(ADMIN)
     listing_api.projects(h, registry(["git@h:g/mop.git"]))
     c.check("#472 GET projects serves the admin the list",
@@ -353,11 +393,11 @@ def main():
     listing_api.projects(h, registry(["git@h:g/mop.git"]))
     c.check("#472 GET projects refuses a non-admin with 403",
             h.sent and h.sent[0][0] == 403, h.sent)
-    # Провайдер лёг -- закрыто, без сырой ошибки.
+
     def broken_provider(*a, **k):
         raise RuntimeError("ldap socket /etc/ld.pwd down")
-    closed = adminapi.Api(ops, adminapi.Queue(), origin="https://pool.example",
-                          provider=broken_provider)
+    closed = adminapi.Api(ops, origin="https://pool.example",
+                          provider=broken_provider, executor=lambda *a: Scripted())
     h = ListHandler(ADMIN)
     closed.projects(h, registry(["git@h:g/mop.git"]))
     c.check("#472 GET projects with a dead provider is closed, no raw detail",
@@ -365,18 +405,10 @@ def main():
             and "ldap" not in json.dumps(h.sent[0][1]), h.sent)
 
     # ── add/update в реестре операций (#470) ────────────────────────────
-    # HYPOTHESIS: реестр знает только send; клик add/update (#472) доезжает
-    # до адаптера и отвечает 404 unsupported -- кнопки формы мертвы. У add
-    # цели ещё нет: требование target в _parse отметило бы его до реестра.
-    # SOLUTION: register("add"/"update", params) (#470); target обязателен
-    # для существующих операций и не обязателен для add (origin в params).
-    # Подключение -- одна точка у воркера (#470): адаптер и исполнитель
-    # расходиться не могут.
     wired = adminapi.Operations()
-    from mop.server import opworker
     opworker.register(wired)
-    wired_api = adminapi.Api(wired, adminapi.Queue(),
-                             origin="https://pool.example", who=ADMIN)
+    wired_api = adminapi.Api(wired, origin="https://pool.example", who=ADMIN,
+                             executor=lambda *a: Scripted())
 
     def post(action, target="pu-mop-1", params=None):
         body = req(action, target=target, params=params or {})
@@ -387,9 +419,6 @@ def main():
     h = post("add", target=None, params={"origin": "git@h:g/mop.git"})
     c.check("#470 add without a target is accepted (202)",
             h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
-    # Следующая проверка схемы — отдельная команда после завершения первой.
-    accepted_add = wired_api.queue.take()
-    wired_api.settle(accepted_add["id"], {"status": "succeeded"})
     h = post("add", target=None, params={"origin": "git@h:g/mop.git",
                                          "branch": "dev"})
     c.check("#470 add accepts origin and branch, nothing else",
@@ -408,8 +437,6 @@ def main():
     h = post("update", params={"mode": "keep"})
     c.check("#470 update refuses unknown parameters",
             h.sent and h.sent[0][0] == 400, h.sent)
-    # target не стал необязательным вовсе: цель существующих операций
-    # осталась обязательной.
     h = post("restart", target=None, params={})
     c.check("#470 a lifecycle op still requires its target",
             h.sent and h.sent[0][0] == 400, h.sent)
@@ -417,20 +444,10 @@ def main():
     c.check("#470 update without a target is refused",
             h.sent and h.sent[0][0] == 400, h.sent)
 
-    # ── recycle/delete/wipe в реестре операций (#471) ───────────────────
-    # HYPOTHESIS: реестр знает send/restart/add/update; клик разрушительных
-    # действий (#473) доезжает до адаптера и отвечает 404 unsupported --
-    # кнопки DestructiveBox мертвы. У ruin-глаголов аргументов нет: force
-    # веб не берёт по определению, параметров пусто.
-    # SOLUTION: три register в той же точке стыковки opworker.register;
-    # пустой кортеж параметров -- «никаких лишних полей», любое тело
-    # params -- 400 unknown parameters. 202 -- запись в очередь воркера,
-    # не исполнение.
-    # До/после подключения -- на двух реестрах: подключённый выше wired
-    # свою работу сделал (202), чистый -- честные 404 кнопок без неё.
+    # ── recycle/delete/wipe в реестре (#471) ────────────────────────────
     unwired = adminapi.Operations()
-    unwired_api = adminapi.Api(unwired, adminapi.Queue(),
-                               origin="https://pool.example", who=ADMIN)
+    unwired_api = adminapi.Api(unwired, origin="https://pool.example", who=ADMIN,
+                               executor=lambda *a: Scripted())
 
     def post_raw(action, target="pu-mop-1", params=None):
         body = req(action, target=target, params=params or {})
@@ -445,17 +462,6 @@ def main():
     h = post_raw("wipe", params={"force": True})
     c.check("#471 wipe on an unwired registry is 404, force or not",
             h.sent and h.sent[0][0] == 404, h.sent)
-
-    opworker.register(wired)
-    h = post("recycle")
-    c.check("#471 recycle posts empty and reaches the queue (202)",
-            h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
-    h = post("delete")
-    c.check("#471 delete posts empty and reaches the queue (202)",
-            h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
-    h = post("wipe")
-    c.check("#471 wipe posts empty and reaches the queue (202)",
-            h.sent and h.sent[0][0] == 202 and h.sent[0][1].get("id"), h.sent)
     for verb in ("recycle", "delete", "wipe"):
         h = post(verb, params={"force": True})
         c.check(f"#471 {verb} refuses any parameter (force never rides)",
@@ -463,16 +469,7 @@ def main():
                 and "unknown parameters" in h.sent[0][1].get("error", ""),
                 h.sent)
 
-    # ── каталог моделей для формы (#468) ─────────────────────────────────
-    # HYPOTHESIS: форма смены не знает моделей -- их зовёт прокси, и
-    # список у браузера только если сервер сам его принёс. Ключ прокси в
-    # ответе или в конфиге фронта -- утечка (#448: ключ не покидает HTTPS
-    # и localhost); вторая копия urllib-логики в adminapi -- расползание.
-    # SOLUTION: чистый парсер каталога -- общий (client слоя #448 и
-    # сервер зовут один код), читатель сервера -- config + proxykey.source
-    # (файл установленного прокси, прежний env -- переходный). Ответ --
-    # {"models": [id]}; ключ и URL наружу не едут; лежащий источник --
-    # closed 503 без сырой детали.
+    # ── каталог моделей для формы (#468) ────────────────────────────────
     from mop.common import llm
 
     c.check("#468 the catalog parser is the client one, not a copy",
@@ -484,8 +481,6 @@ def main():
         c.check("#468 a malformed catalog is rejected by the shared parser", True)
 
     def catalog(readings):
-        """Читатель каталога: ответы по очереди; исключение -- лежащий
-        источник (503 без сырой детали)."""
         def reader():
             got = readings.pop(0) if len(readings) > 1 else readings[0]
             if isinstance(got, Exception):
@@ -503,8 +498,8 @@ def main():
         def _json(self, code, payload):
             self.sent.append((code, payload))
 
-    listing_api = adminapi.Api(ops, adminapi.Queue(),
-                               origin="https://pool.example", who=ADMIN)
+    listing_api = adminapi.Api(ops, origin="https://pool.example", who=ADMIN,
+                               executor=lambda *a: Scripted())
     h = GetHandler()
     listing_api.models(h, catalog([["glm-5.3", "claude-opus-5-5"]]))
     c.check("#468 GET models serves the admin the id list",

@@ -19,7 +19,8 @@ import { useAdminOp } from "../useAdminOp";
 export function opWord(status: string): string {
   return {
     idle: "", submitted: "отправляется", accepted: "принято",
-    queued: "ждёт очереди", running: "идёт", succeeded: "перезапущен",
+    queued: "ждёт очереди", waiting: "ждёт цель", running: "идёт",
+    succeeded: "перезапущен",
     refused: "отказано", failed: "не удался", partial: "частично: эффект без наблюдения",
     unknown: "исход неизвестен",
   }[status] ?? status;
