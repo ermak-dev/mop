@@ -1329,18 +1329,14 @@ def check_private_ca_517(c, can_render):
                 spec.get("src") == "{{ MOP_TLS_CA or secrets_dir + '/tls.pem' }}",
                 spec.get("src"))
         c.check("#517 the pin stays for self-signed and private CA, gone only for public",
-                pin[0].get("when") in (
-                    "not MOP_TLS_CERT or MOP_TLS_CA",
-                    "MOP_TLS_CA or not MOP_TLS_CERT"),
+                pin[0].get("when") == "(MOP_TLS_CA | length > 0) or not MOP_TLS_CERT",
                 pin[0].get("when"))
     gone = [t for t in tasks if t.get("name") == "No pin with a real certificate"]
     c.check("#517 the no-pin task is one", len(gone) == 1,
             [t.get("name") for t in gone])
     if gone:
         c.check("#517 the no-pin task fires only for a public certificate",
-                gone[0].get("when") in (
-                    "MOP_TLS_CERT | length > 0 and not MOP_TLS_CA",
-                    "(MOP_TLS_CERT | length > 0) and not MOP_TLS_CA"),
+                gone[0].get("when") == "(MOP_TLS_CERT | length > 0) and (MOP_TLS_CA | length == 0)",
                 gone[0].get("when"))
     # Сквозная проверка: ca_path -- CA-файл для частной CA, пин -- для
     # самоподписанного, omit -- для публичного.
@@ -1378,6 +1374,35 @@ def check_private_ca_517(c, can_render):
             ca_render("/etc/ssl/srv.pem", "/etc/ssl/root-ca.pem"))
     c.check("#517 self-signed keeps its own pin",
             ca_render("", "") == "/srv/secrets/tls.pem", ca_render("", ""))
+
+    # ── #518: when-условия строго булевы ────────────────────────────────
+    # ansible-core 2.19+ отказывается от не-булева результата when
+    # («Conditional result (True) was derived from value of type str»):
+    # живой деплой с MOP_TLS_CA упал на задаче пина -- `MOP_TLS_CA or ...`
+    # с непустой CA возвращает строку-путь. Условия переписаны в
+    # сравнения длины; рендер -- native, как ansible сворачивает when
+    # (строковый рендер стрингифицирует и булевы, им тип не сверить).
+    pin_task = next((t for t in tasks
+                     if t.get("name") == "Pinned certificate of the TLS proxy"), {})
+    nopin_task = next((t for t in tasks
+                       if t.get("name") == "No pin with a real certificate"), {})
+    combos = (("", ""), ("/etc/ssl/srv.pem", ""),
+              ("/etc/ssl/srv.pem", "/etc/ssl/root-ca.pem"))
+    for cert, ca in combos:
+        v = dict(config.SETTINGS, MOP_TLS_CERT=cert, MOP_TLS_CA=ca)
+        for label, task, want in (
+                ("pin", pin_task,
+                 bool(ca or not cert)),
+                ("no-pin", nopin_task,
+                 bool(cert and not ca))):
+            cond = (task.get("when") or "")
+            from jinja2 import StrictUndefined
+            from jinja2.nativetypes import NativeEnvironment
+            native = NativeEnvironment(undefined=StrictUndefined)
+            got = native.from_string("{{ " + cond + " }}").render(**v)
+            c.check(f"#518 when of the {label} task is strictly boolean "
+                    f"(CERT={cert or 'empty'!r}, CA={ca or 'empty'!r})",
+                    isinstance(got, bool) and got == want, repr(got))
 
 
 def check_mgmt_gateway_418(c, can_render):

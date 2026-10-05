@@ -74,14 +74,14 @@
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
     mode: "0600"
-  when: MOP_TLS_CA or not MOP_TLS_CERT
+  when: (MOP_TLS_CA | length > 0) or not MOP_TLS_CERT
   notify: restart mop-web
 
 - name: No pin with a real certificate
   ansible.builtin.file:
     path: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/tls.pem"
     state: absent
-  when: MOP_TLS_CERT | length > 0 and not MOP_TLS_CA
+  when: (MOP_TLS_CERT | length > 0) and (MOP_TLS_CA | length == 0)
   notify: restart mop-web
 
 # Токен Nomad -- из каталога сервера на контроллере: туда его забирает игра
