@@ -3,15 +3,17 @@
 `mop list`, `mop node` and `mop stat` on one page, refreshed in place:
 
   /            the page, /assets/N its files, /logo.png
-  /api/pool    snapshot as JSON; /events — the same as SSE
+  /api/pool    snapshot as JSON; /events — the same as SSE,
+               plus an `operation` frame when a click reaches its verdict
   /healthz     200 once the first snapshot is in
   /api/session the session; /api/login and /api/logout by JSON post
                (file/LDAP, bus identity)
   /api/journal the full journal, admin only; the public feeds none
 
 The overview is available without login; logging in opens the admin side —
-the journal and the proxy panel. The pool stays read-only here: a
-restart button would kill work in a clone. Port and bind:
+the journal and the proxy panel. Admin clicks ride the shared workflow
+as a thread-per-operation executor: the verdict lands as an SSE `operation`
+frame and an ops.record audit line in the journal. Port and bind:
 MOP_WEB_PORT (9000), MOP_WEB_BIND (127.0.0.1); beyond — the TLS proxy.
 """
 import json
@@ -21,7 +23,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mop.cli import lib
-from mop.common import bus, busnames, config, puppets
+from mop.common import bus, busnames, config, ops, puppets
 from mop.server import adminapi, opworker, web, websession
 
 # Собранное приложение: index и ассеты из web/dist, закоммиченного вместе с
@@ -38,12 +40,18 @@ SESSIONS = websession.SessionStore()
 RATE = websession.RateLimiter()
 
 # Операции дашборда (#486): реестр -- та же точка стыковки, что у воркера
-# (opworker.register, #470/#471), очередь и адаптер -- рядом; Origin для
+# (opworker.register, #470/#471), исполнитель и адаптер -- рядом; Origin для
 # POST -- публичный https-origin установки (#415). Личность каждого запроса
 # адаптер берёт сам из handler.who (куки -> SESSIONS -> провайдер).
 OPS = adminapi.Operations()
 opworker.register(OPS)
 WORKER = opworker.Worker()
+
+# Кэш ростера для резолвера проекта (#498): [момент, {имя -> проект}].
+# #498 вёз функцию без этих определений -- первый же вызов резолвера
+# падал NameError; #499 чинит точку, на которой стоит исполнитель.
+_ROSTER_LOCK = threading.Lock()
+_ROSTER_CACHE = [0.0, {}]
 
 def _resolve_project(name):
     """Проект цели по имени (#498): спек кластера спрашивать нельзя --
@@ -74,6 +82,19 @@ def _resolve_project(name):
 # подмены WORKER в проверках резолвер не трогают.
 RESOLVER = _resolve_project
 
+# Исполнитель #499: эффект операции -- воркер run тем же транспортом,
+# что CLI (#496/#498); поток на операцию даёт адаптер (adminapi), сюда
+# приходит уже свободная цель. Личность -- (login, role) HTTP-сессии.
+def _execute(action, target, params, who):
+    login = (who or (None,))[0]
+    return lambda: WORKER.run(action, target or "", params, login,
+                              transport=opworker.default_transport(RESOLVER))
+
+# Очередь кадров operation для /events (#499): терминал приходит из
+# потока операции, SSE-читатель забирает своим темпом.
+_OP_LOCK = threading.Lock()
+_OP_FRAMES = []
+
 
 class _LiveApi(adminapi.Api):
     """Адаптер с Origin'ом установки «на запрос»: Api ждёт строку в
@@ -89,8 +110,25 @@ class _LiveApi(adminapi.Api):
         pass
 
 
-ADMINAPI = _LiveApi(OPS, adminapi.Queue(), origin=None)
-# Драйвер очереди (#491) гоняет задачи адаптера через WORKER; определён ниже.
+ADMINAPI = _LiveApi(OPS, origin=None, executor=_execute)
+
+# Терминал операции (#499): SSE-кадр operation в /events и аудит-запись
+# ops.record в журнал шины -- подписка listen_events кладёт её в
+# COLLECTOR (/api/journal), событие уходит и остальным мастерам.
+def _on_operation(frame):
+    payload = json.dumps(frame, ensure_ascii=False)
+    with _OP_LOCK:
+        _OP_FRAMES.append(payload)
+        del _OP_FRAMES[:-100]
+    COLLECTOR.kick()
+    try:
+        bus.emit(ops.record(frame.get("action"), frame.get("target"),
+                            None, frame.get("login")))
+    except Exception:
+        pass  # журнал вторичен: тишина не роняет вердикт
+
+
+ADMINAPI.on_terminal(_on_operation)
 
 
 class Gateway:
@@ -538,14 +576,16 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "no such puppet"})
 
     def stream(self):
-        """SSE: снимок при подключении и на каждое изменение, пинг в тишине.
-        Соединение живёт в своём потоке; обрыв клиента — нормальный выход."""
+        """SSE: снимок при подключении и на каждое изменение, пинг в тишине;
+        терминал операции -- отдельным кадром operation (#499). Соединение
+        живёт в своём потоке; обрыв клиента — нормальный выход."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         version = 0
+        sent = 0
         try:
             while True:
                 got, snap = COLLECTOR.wait(version, PING_EVERY)
@@ -555,6 +595,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(f"event: snapshot\ndata: {payload}\n\n".encode())
                 else:
                     self.wfile.write(b": ping\n\n")
+                # Кадры operation (#499): терминалы операций, накопившиеся
+                # с прошлого круга; payload в них нет (#461).
+                with _OP_LOCK:
+                    frames = _OP_FRAMES[sent:]
+                    sent = len(_OP_FRAMES)
+                for frame in frames:
+                    self.wfile.write(f"event: operation\ndata: {frame}\n\n".encode())
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
@@ -597,36 +644,13 @@ def _registry_projects():
         return set()
 
 
-def drive_operations():
-    """Потреблять очередь адаптера (#491): задача -> воркер -> settle.
-
-    POST кладёт задачу и отвечает 202; исполнение -- здесь, в своём
-    потоке, не в запросе (#461). Вердикт воркера переносится в запись
-    результата адаптера: без переноса «принято» висит вечно. Воркер
-    синхронен (сам ждёт наблюдения #464) -- поток один, очередь по цели
-    сериализуется и в воркере (#476). Шина легла -- задача вернётся в
-    очередь следующим кругом? Нет: take уже снял; потому исключение
-    ловим и честно пишем failed, а не теряем."""
-    while True:
-        job = ADMINAPI.queue.take()
-        if job is None:
-            time.sleep(0.2)
-            continue
-        verdict = WORKER.submit(job.get("login") or "-",
-                                job["action"], job.get("target") or "",
-                                job.get("params") or {}, key=job["id"],
-                                transport=opworker.default_transport(RESOLVER))
-        ADMINAPI.settle(job["id"], verdict)
-
-
 def main(argv):
     port, bind = parse(argv)
     COLLECTOR.start()
     threading.Thread(target=listen_events, daemon=True, name="mop-web-events").start()
-    threading.Thread(target=drive_operations, daemon=True, name="mop-web-ops").start()
     srv = ThreadingHTTPServer((bind, port), Handler)
     srv.daemon_threads = True
-    print(f"mop-web: http://{bind}:{port}/ — states every {web.STATES_EVERY}s, "
+    print(f"mop-web: http://{bind}:{port} — states every {web.STATES_EVERY}s, "
           f"sizes every {web.SIZES_EVERY}s, usage every {web.USAGE_EVERY}s", flush=True)
     srv.serve_forever()
 

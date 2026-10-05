@@ -1165,15 +1165,17 @@ pool dashboard on the web: mop server web [--port N] [--bind ADDR]
 `mop list`, `mop node` and `mop stat` on one page, refreshed in place:
 
   /            the page, /assets/N its files, /logo.png
-  /api/pool    snapshot as JSON; /events — the same as SSE
+  /api/pool    snapshot as JSON; /events — the same as SSE,
+               plus an `operation` frame when a click reaches its verdict
   /healthz     200 once the first snapshot is in
   /api/session the session; /api/login and /api/logout by JSON post
                (file/LDAP, bus identity)
   /api/journal the full journal, admin only; the public feeds none
 
 The overview is available without login; logging in opens the admin side —
-the journal and the proxy panel. The pool stays read-only here: a
-restart button would kill work in a clone. Port and bind:
+the journal and the proxy panel. Admin clicks ride the shared workflow
+as a thread-per-operation executor: the verdict lands as an SSE `operation`
+frame and an ops.record audit line in the journal. Port and bind:
 MOP_WEB_PORT (9000), MOP_WEB_BIND (127.0.0.1); beyond — the TLS proxy.
 ```
 

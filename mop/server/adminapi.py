@@ -1,9 +1,28 @@
-"""Тонкий admin HTTP API поверх общих операций и исполнителя (#461).
+"""Тонкий admin HTTP API поверх общих операций и исполнителя (#461, #499).
 
 Серверный адаптер, и только он: гейты, разбор узкой схемы, реестр
-операций, постановка воркеру (#476), ответы. Workflow здесь не исполняется
--- ни в потоке запроса, ни где-либо: операция уезжает задачей, результат
-читается отдельным GET'ом.
+операций, приём и статусы. Workflow здесь не исполняется -- ни в потоке
+запроса, ни где-либо: POST принимает операцию (202), исполнение --
+поток на операцию, результат читается отдельным GET'ом.
+
+Приём (#499) -- словарь в памяти: тот же payload -- тот же id (двойной
+клик не рождает вторую операцию), другой payload на ту же цель --
+вторая операция: исполнитель ждёт семафор цели (страница видит
+waiting), а не отказывает 409 (#497: отказ висел часами). Завершённая
+операция освобождает ключ и цель: явный повтор -- новая операция,
+дедуп -- про живой клик, не про историю. Рестарт службы стирает память:
+незнакомый id читается unknown со ссылкой на журнал -- дюрабельности
+«клик -> вердикт» через рестарт нет, правда об эффекте -- аудит пула
+(ops.record) и /api/journal, как у CLI.
+
+Сериализация -- семафор на устойчивую идентичность цели (effective_
+target): операции одной цели едут по очереди, разных -- параллельно.
+Семафор освобождается в finally: зависший эффект (#497 -- таймаут
+отдельным слоем) встаёт сюда без переделки этого слоя.
+
+Вердикт (#499) публикуется терминальным SSE-кадром operation в
+существующий поток /events (#424) -- через on_terminal-крючок адаптера;
+кадр несёт {id, action, target, status, error?} и не несет payload.
 
 Гейты, по убыванию цены ошибки:
     роль       admin на каждом POST и GET результата: гость -- 401,
@@ -20,27 +39,25 @@
 subject/verb, shell/argv/cwd/env, адресов удалённых серверов: такие поля --
 «неизвестные» и режутся на разборе, а не фильтруются потом.
 
-Коды различимы: 202 -- только принятие (ничего не исполнено), 409 --
-конфликт (payload/цель изменились, конкурирующая операция в очереди),
-4xx -- аутентификация и валидация, 503 -- транспорт. Детали ошибок --
+Коды различимы: 202 -- только принятие (ничего не исполнено), 4xx --
+аутентификация и валидация, 503 -- транспорт. Детали ошибок --
 allowlist-фразы (sanitize), не raw exceptions: в них ходят пути и секреты.
 
 Send-to-puppet первого выпуска: только адресная доставка папету, вердикт
-accepted/delivered/held/refused/unknown; без notify_when_idle,
-wait-until-done и двустороннего веб-чата. Текст сообщения живёт только в
-приватной задаче очереди с ограниченным сроком -- не в ответе, не в
-результате, не в URL, не в публичном снимке.
+succeeded/refused/unknown; без notify_when_idle, wait-until-done и
+двустороннего веб-чата. Текст сообщения живёт только в живой операции
+памяти -- не в ответе, не в результате, не в URL, не в SSE-кадре.
 
 Реестр операций общий с библиотекой (#458 -- сами операции, #460 --
 safety); HTTP-whitelist может быть у́же CLI, но не копией алгоритма.
 Незарегистрированная операция -- unsupported (404): кнопка в GUI не
 показывается, пока операция не подключена. GET результатов -- admin-only
-и no-store, в публичный SSE не попадают; обновление публичного ростера не
-подтверждает операцию.
+и no-store, в публичный SSE payload результата не попадает; обновление
+публичного ростера не подтверждает операцию.
 
-Воркер (#476) подключается регистрацией исполнителя: Operations.register
-добавляет действие и его параметры. До этого endpoint отвечает
-unsupported -- интерфейс честен.
+Исполнитель (#499) подключается фабрикой эффектов: executor(action,
+target, params, who) -> эффект, адаптер зовёт его в потоке операции.
+До подключения endpoint отвечает 503 -- интерфейс честен.
 
 GET /api/admin/projects (#472) -- список заведённых проектов для формы
 add: реестр сервера, admin-only, чтение без побочных действий (Origin-гейт
@@ -64,11 +81,10 @@ import time
 import uuid
 
 from ..common import config, puppets
+from .opworker import TERMINAL, status_of
 
-# ─── лимиты и сроки ──────────────────────────────────────────────────────
+# ─── лимиты ──────────────────────────────────────────────────────────────
 BODY_MAX = 64 * 1024        # запросы -- килобайты: параметры, не файлы
-RECORD_TTL = 24 * 3600      # результаты живут сутки, payload в очереди -- столько же
-QUEUE_MAX = 64              # очередь не бесконечна: заполненная -- 503
 
 # Что разрешено первым выпуском (send): адресная доставка папету.
 SEND_PARAMS = ("message",)
@@ -186,33 +202,6 @@ def project_list(known):
     return sorted(out, key=lambda p: p["name"])
 
 
-class Queue:
-    """Очередь задач воркеру (#476). Задача -- словарь; текст сообщения --
-    только здесь, приватно и с сроком."""
-
-    def __init__(self, maxsize=QUEUE_MAX):
-        self._items = []
-        self._lock = threading.Lock()
-        self._maxsize = maxsize
-        self.put = self._put
-
-    def _put(self, job):
-        with self._lock:
-            self._sweep()
-            if len(self._items) >= self._maxsize:
-                raise Refused(503, "operation queue is full")
-            self._items.append(job)
-
-    def take(self):
-        with self._lock:
-            self._sweep()
-            return self._items.pop(0) if self._items else None
-
-    def _sweep(self):
-        now = time.time()
-        self._items = [j for j in self._items if j.get("_expires", now + 1) > now]
-
-
 class Operations:
     """Реестр допустимых операций и их параметров. Регистрация -- точка
     стыковки с воркером (#476) и операциями (#458): пока действие не
@@ -256,23 +245,30 @@ class Operations:
 
 
 class Api:
-    """Адаптер: handler -> ответ. Гейты в порядке цены ошибки."""
+    """Адаптер: handler -> ответ. Гейты в порядке цены ошибки, приём и
+    статусы -- в памяти (#499), исполнение -- поток на операцию."""
 
-    def __init__(self, operations, queue, origin, who=None,
-                 provider=None, now=time.time):
+    def __init__(self, operations, origin, who=None, provider=None,
+                 now=time.time, executor=None):
         """who -- личность запроса (login, role) из сессии handler'а, не
-        конструктора: каждый запрос приходит со своей."""
+        конструктора: каждый запрос приходит со своей. executor --
+        фабрика эффекта (action, target, params, who) -> эффект:
+        адаптер зовёт её в потоке операции, эффект возвращает вердикт
+        воркера ({status, error, ...}, статусы #476)."""
         self.ops = operations
-        self.queue = queue
         self.origin = origin
         self.who = who
         self._provider = provider
         self._now = now
+        self.executor = executor
         self._lock = threading.Lock()
         # id -> запись результата; payload в записи НЕ живёт.
-        self._results = {}
-        # (action, target) -> id активной задачи: повтор и конфликт.
-        self._active = {}
+        self._records = {}
+        # ключ payload -> id: пока операция жива, повтор -- тот же id.
+        self._by_key = {}
+        # цель -> семафор: одна операция на цель, вторая ждёт (#497).
+        self._gates = {}
+        self._on_terminal = []
 
     # ─── роль: перечитывается на каждом запросе ────────────────────────
     def _admin(self, who=None, asked=False):
@@ -295,7 +291,7 @@ class Api:
 
     # ─── POST /api/admin/ops ───────────────────────────────────────────
     def post(self, handler):
-        """Гейты + разбор + постановка. Ответ -- через handler._json."""
+        """Гейты + разбор + приём. Ответ -- через handler._json."""
         why = self._admin(getattr(handler, "who", None), asked=True)
         if why:
             return handler._json(why[0], {"error": why[1]})
@@ -349,7 +345,7 @@ class Api:
         self.ops.check(action, params)
         return action, target, params
 
-    # ─── постановка и повторы ──────────────────────────────────────────
+    # ─── приём и повторы ───────────────────────────────────────────────
     @staticmethod
     def effective_target(action, target, params):
         """Устойчивая идентичность операции (#470): target, а для операции
@@ -360,65 +356,99 @@ class Api:
         return target
 
     def submit(self, action, target, params, who):
-        """Операция -> задача в очереди + запись результата. Повтор того
-        же payload -- тот же id; другой payload на ту же цель -- конфликт,
-        пока прежняя задача в очереди."""
-        active_key = (action, self.effective_target(action, target, params))
+        """Операция -> поток исполнения + запись результата. Повтор того же
+        payload, пока операция жива, -- тот же id; другой payload на ту же
+        цель -- вторая операция: она ждёт семафор цели, а не отказывает
+        (#497). Завершённая операция ключ освобождает: явный повтор --
+        новая операция."""
+        params = params or {}
         login = (who or (None,))[0]
-        key = (login, active_key, tuple(sorted(params.items())))
+        key = (action, self.effective_target(action, target, params),
+               tuple(sorted(params.items())))
         with self._lock:
-            self._sweep()
-            prior = self._active.get(active_key)
-            if prior and prior.get("key") == key:
-                # Идемпотентный повтор: тот же ответ без второй задачи.
-                return self._results[prior["id"]]
-            if prior:
-                raise Refused(409, "another operation is queued for this target")
+            known = self._by_key.get(key)
+            if known is not None:
+                rec = self._records[known]
+                return {k: rec[k] for k in ("id", "action", "target",
+                                            "status", "login", "at")}
+            if self.executor is None:
+                raise Refused(503, "operations executor is not wired")
             op_id = uuid.uuid4().hex
             record = {"id": op_id, "action": action, "target": target,
-                      "status": "accepted", "login": login,
-                      "at": self._now()}
-            # Отказ очереди не оставляет мнимую активную операцию. Settle
-            # ждёт этот же замок, даже если драйвер сразу забрал задачу.
-            self.queue.put({"id": op_id, "action": action, "target": target,
-                            "params": params, "login": login,
-                            "_expires": self._now() + RECORD_TTL})
-            self._results[op_id] = record
-            self._active[active_key] = {"id": op_id, "key": key}
-        return record
+                      "status": "accepted", "login": login, "at": self._now()}
+            self._records[op_id] = record
+            self._by_key[key] = op_id
+        threading.Thread(target=self._execute,
+                         args=(record, key, params, who),
+                         daemon=True, name=f"mop-web-op-{op_id[:8]}").start()
+        return dict(record)
 
-    def settle(self, op_id, verdict):
-        """Вердикт воркера -- в запись результата (#491): очередь адаптера
-        потребляет драйвер веб-службы, и статус записи обязан дожить до
-        терминала, иначе «принято» висит вечно. Чужой id -- тихо: запись
-        могла уйти по TTL, воркер узнает из result()."""
+    def _gate(self, target):
+        """Семафор цели: одна операция на цель (#499)."""
         with self._lock:
-            got = self._results.get(op_id)
-            if got is None:
-                return
-            status = verdict.get("status")
-            terminal = ("succeeded", "refused", "failed", "partial", "unknown")
-            if status not in terminal or got["status"] in terminal:
-                return
-            got["status"] = status
-            if verdict.get("error"):
-                got["error"] = verdict["error"]
-            for key, active in list(self._active.items()):
-                if active["id"] == op_id:
-                    self._active.pop(key)
+            return self._gates.setdefault(target, threading.Semaphore(1))
+
+    def _mark(self, record, status):
+        with self._lock:
+            record["status"] = status
+
+    def _execute(self, record, key, params, who):
+        """Поток операции (#499): waiting -> семафор цели -> running ->
+        эффект -> терминал. Семафор освобождается в finally: зависший
+        эффект (#497 -- таймаут отдельным слоем) не запирает цель навсегда
+        и не требует переделки этого слоя."""
+        gate = self._gate(self.effective_target(record["action"],
+                                                record["target"], params))
+        self._mark(record, "waiting")
+        gate.acquire()
+        try:
+            self._mark(record, "running")
+            effect = self.executor(record["action"], record["target"],
+                                   params, who)
+            verdict = effect() if callable(effect) else effect
+            status = status_of(verdict)
+        except Exception as e:  # noqa: BLE001 -- вердикт с причиной, не тишь
+            status, verdict = "failed", {"error": str(e)}
+        finally:
+            gate.release()
+        with self._lock:
+            rec = self._records.get(record["id"])
+            if rec is not None:
+                rec["status"] = status
+                if isinstance(verdict, dict) and verdict.get("error"):
+                    rec["error"] = verdict["error"]
+                if self._by_key.get(key) == record["id"]:
+                    self._by_key.pop(key, None)
+        # Кадр публичен (/events): статус и закрытая фраза, без payload.
+        frame = {"id": record["id"], "action": record["action"],
+                 "target": record["target"], "status": status}
+        reason = result_error(status, rec.get("error") if rec else None)
+        if reason:
+            frame["error"] = reason
+        for cb in list(self._on_terminal):
+            cb(frame)
+
+    def on_terminal(self, callback):
+        """Крючок терминала (#499): кадр {id, action, target, status,
+        error?} -- в SSE /events (#424) и в журнал службы. Payload в кадре
+        нет; причина -- закрытая фраза result_error, не сырой error."""
+        self._on_terminal.append(callback)
 
     # ─── GET результата ────────────────────────────────────────────────
     def result(self, op_id, who):
-        """Результат по id. Admin-only; ответ -- без payload."""
+        """Результат по id. Admin-only; ответ -- без payload. Незнакомый id
+        (рестарт службы, чужой) -- unknown со ссылкой на журнал: правда об
+        эффекте -- /api/journal и аудит пула, не память адаптера."""
         why = self._admin(who, asked=True)
         if why:
             return {"status": str(why[0])}
         with self._lock:
-            self._sweep()
-            stored = self._results.get(op_id)
+            stored = self._records.get(op_id)
             got = dict(stored) if stored is not None else None
         if got is None:
-            return {"status": "not found"}
+            return {"status": "unknown",
+                    "error": "operation outcome is unknown; "
+                             "inspect the pool journal (/api/journal)"}
         # Публичного в результате нет: ни params, ни текста сообщения.
         result = {k: v for k, v in got.items() if k in ("id", "action", "target",
                                                        "status", "login", "at")}
@@ -459,13 +489,3 @@ class Api:
             # нет; какой именно, админу формы знать не нужно.
             return handler._json(503, {"error": "model catalog is unavailable"})
         return handler._json(200, {"models": sorted(got)})
-
-
-    def _sweep(self):
-        now = self._now()
-        stale = [i for i, r in self._results.items() if now - r["at"] > RECORD_TTL]
-        for i in stale:
-            self._results.pop(i, None)
-        for key, act in list(self._active.items()):
-            if act["id"] in stale:
-                self._active.pop(key, None)

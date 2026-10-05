@@ -297,6 +297,8 @@ test("the role returning reloads the journal fresh", async () => {
   view.rerender({ role: null });
   expect(view.result.current.journal).toEqual([]);
   view.rerender({ role: "admin" });
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-  expect(view.result.current.journal).toEqual(J);
+  // ждём сам журнал, не число вызовов: ответ второго fetch садится в
+  // состояние асинхронно, и мгновенный чек после счётчика ловил пустой
+  // рендер (мерцание в полной сборке, не в одиночном прогоне).
+  await waitFor(() => expect(view.result.current.journal).toEqual(J));
 });

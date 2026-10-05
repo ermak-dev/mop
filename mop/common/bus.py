@@ -443,6 +443,24 @@ def events(project=None):
     return busnames.events(project or PROJECT)
 
 
+def emit(fields, project=None):
+    """Публикация события в субъект events (#499). Огонь и забыть:
+    слушателей может не быть, ответа нет; ошибка публикации -- тишина
+    (журнал вторичен, ронять операцию из-за него нельзя). Вызывают
+    машины: сервис веба публикует исход операции аудитом ops.record.
+    Тело -- тем же encode, что у запросов: одно место сборки JSON."""
+    payload = encode(fields or {})
+    try:
+        nc = connect()
+
+        async def _pub():
+            await nc.publish(events(project), payload)
+            await nc.flush(timeout=FLUSH)
+        _call(_pub(), 5)
+    except Exception:
+        pass
+
+
 def cluster_subject(project=None, as_login=None):
     """Сервис кластера как адресат (#80): Nomad за шиной.
 
