@@ -1298,6 +1298,88 @@ def check_llm_request_size_411(c, can_render):
 # не ставилась ни на одной установке), и отсутствие ^~ блока; после
 # правки -- копия ставится всегда, оба источника байт-в-байт одинаковые.
 # STATUS: FIXED — see #418
+
+# ── частная CA для серверного TLS (#517) ─────────────────────────────────
+# HYPOTHESIS: продукт понимает серверный TLS бинарно -- самоподписанный
+# (сертификат генерится, пинится сервисам, служит ca_path проверке) или
+# публично-доверенный (MOP_TLS_CERT: pin сервисам удаляется, ca_path
+# проверки omit). Сертификату от частной CA нет места: сервисы остаются
+# без доверия («pinned none: the system CAs», сборщики стояли), а сквозная
+# проверка через прокси падает с «self-signed certificate in certificate
+# chain».
+# SOLUTION: настройка MOP_TLS_CA -- путь к корню частной CA на
+# контроллере. С ней web-роль кладёт пин из CA-файла (задача «Pinned
+# certificate» обобщается: src = MOP_TLS_CA), ca_path проверки -- тот же
+# файл. Без неё прежние пути не меняются ни строкой: публичный снимает
+# пин, самоподписанный пинит свой secrets/tls.pem.
+# RESULT: проверяется ниже на структуре задач и рендере ca_path при
+# трёх комбинациях. STATUS: RED
+def check_private_ca_517(c, can_render):
+    tasks = yaml.safe_load(open(
+        os.path.join(DEPLOY, "roles", "web", "tasks", "main.yml"),
+        encoding="utf-8"))
+    # Задача-пин: одна, src -- выбор из трёх путей, условие -- не
+    # публичный-без-CA (пин ложен только там).
+    pin = [t for t in tasks if t.get("name") == "Pinned certificate of the TLS proxy"]
+    c.check("#517 the pin task is one", len(pin) == 1,
+            [t.get("name") for t in pin])
+    if pin:
+        spec = pin[0]["ansible.builtin.copy"]
+        c.check("#517 the pin source covers the private CA",
+                spec.get("src") == "{{ MOP_TLS_CA or secrets_dir + '/tls.pem' }}",
+                spec.get("src"))
+        c.check("#517 the pin stays for self-signed and private CA, gone only for public",
+                pin[0].get("when") in (
+                    "not MOP_TLS_CERT or MOP_TLS_CA",
+                    "MOP_TLS_CA or not MOP_TLS_CERT"),
+                pin[0].get("when"))
+    gone = [t for t in tasks if t.get("name") == "No pin with a real certificate"]
+    c.check("#517 the no-pin task is one", len(gone) == 1,
+            [t.get("name") for t in gone])
+    if gone:
+        c.check("#517 the no-pin task fires only for a public certificate",
+                gone[0].get("when") in (
+                    "MOP_TLS_CERT | length > 0 and not MOP_TLS_CA",
+                    "(MOP_TLS_CERT | length > 0) and not MOP_TLS_CA"),
+                gone[0].get("when"))
+    # Сквозная проверка: ca_path -- CA-файл для частной CA, пин -- для
+    # самоподписанного, omit -- для публичного.
+    probe = [t for t in tasks if t.get("name") == "The dashboard answers through the TLS proxy"]
+    c.check("#517 the probe task is one", len(probe) == 1)
+    if probe:
+        ca_path = probe[0]["ansible.builtin.uri"].get("ca_path")
+        c.check("#517 the probe verifies against the CA file when given, the pin otherwise",
+                ca_path == "{{ omit if MOP_TLS_CERT and not MOP_TLS_CA else "
+                            "(MOP_TLS_CA or secrets_dir + '/tls.pem') }}",
+                ca_path)
+    # Настройка: в config.SETTINGS, пустой дефолт, и едет плейбукам.
+    from mop.server import playvars
+    c.check("#517 MOP_TLS_CA is a setting with an empty default",
+            config.SETTINGS.get("MOP_TLS_CA", "\0") == "",
+            config.SETTINGS.get("MOP_TLS_CA"))
+    c.check("#517 MOP_TLS_CA reaches the playbooks",
+            "MOP_TLS_CA" in playvars.playbook_vars(),
+            sorted(k for k in playvars.playbook_vars() if k.startswith("MOP_TLS")))
+
+    if not can_render:
+        return
+    # Рендер ca_path при трёх комбинациях. omit не рендерится объектом --
+    # jinja стрингифицирует любое значение на выводе, -- поэтому публичный
+    # путь (omit) сверен структурой выражения выше, а здесь рендерится
+    # выбор файла: частная CA -- свой корень, самоподписанный -- свой пин.
+    def ca_render(cert, ca):
+        v = dict(config.SETTINGS, MOP_SERVER_LAN="srv.test",
+                 MOP_TLS_CERT=cert, MOP_TLS_CA=ca)
+        return render("{{ MOP_TLS_CA or secrets_dir + '/tls.pem' }}",
+                      dict(v, secrets_dir="/srv/secrets"))
+
+    c.check("#517 private CA pins its root for the probe",
+            ca_render("/etc/ssl/srv.pem", "/etc/ssl/root-ca.pem") == "/etc/ssl/root-ca.pem",
+            ca_render("/etc/ssl/srv.pem", "/etc/ssl/root-ca.pem"))
+    c.check("#517 self-signed keeps its own pin",
+            ca_render("", "") == "/srv/secrets/tls.pem", ca_render("", ""))
+
+
 def check_mgmt_gateway_418(c, can_render):
     want = os.path.join(".config", "mop", "secrets", "llm-proxy-mgmt.pass")
     tasks = yaml.safe_load(open(
@@ -1454,6 +1536,7 @@ def main():
         hermetic.skip("rendering of the units",
                       "no jinja2 on this machine — only the structure below is checked")
     check_mgmt_gateway_418(c, can_render)
+    check_private_ca_517(c, can_render)
     # ── кому что из настроек (#176) ───────────────────────────────────────
     scoped = getattr(config, "SERVER_SCOPED", {})
     c.check("config.SERVER_SCOPED names every server unit",
