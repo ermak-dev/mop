@@ -3,11 +3,12 @@ import { gb, gbOfMb, hhmmss, human, KIND_COLOR, plural, ratio, untilText,
          verdictColor, verdictWord } from "./format";
 import type { VerdictKind } from "../types";
 
-// #452: слово статуса по виду вердикта -- все 13 видов из KINDS вердикта
+// #452: слово статуса по виду вердикта -- все 14 видов из KINDS вердикта
 // (tests/state.py), тем же списком: незнакомого вида страница не рисует.
 const VERDICT_WORDS: [VerdictKind, string][] = [
   ["silent", "агент молчит"],
   ["hung", "завис"],
+  ["starting", "поднимается"],
   ["dialog", "ждёт действия"],
   ["login", "логин"],
   ["quota", "нет квоты"],
