@@ -25,22 +25,24 @@ def check_control_boundary(c, text):
     c.check("#445 ordinary read-only file inspection permitted",
             "read-only" in text and "file" in text)
     c.check("#445 profile gate", "mcp__mop__profile" in text)
-    c.check("#445 master claim without branch", "no_branch=true" in text)
+    c.check("#445 master claim without branch", "--no-branch" in text)
     c.check("#445 missing tools escalated rather than bypassed",
             bool(re.search(r"missing.*tool.*(?:operator|stop)", text, re.I | re.S)))
 
 
 def check_tools(c, text):
     for tool in ("agents", "send", "tail", "slash", "add", "delete", "restart",
-                 "node", "project_add", "landing", "profile",
-                 "dev_bug_list", "dev_bug_show", "dev_bug_epic", "dev_bug_labels",
-                 "dev_bug_new", "dev_bug_edit", "dev_bug_comment", "dev_bug_start",
-                 "dev_bug_close", "dev_bug_relabel", "dev_bug_evidence",
-                 "dev_ci_list", "dev_ci_show", "dev_ci_why", "dev_ci_log", "dev_ci_retry"):
+                 "node", "project_add", "landing", "profile"):
         c.check(f"#445 tool: {tool}", f"mcp__mop__{tool}" in text)
+    # #515: группа dev не экспонируется в MCP вовсе -- скилл не учит
+    # мастера звать dev_bug_*/dev_ci_*; трекер и CI идут из шелла
+    # мастера (исключение #450), названным словами, без списка имён.
+    c.check("#515 no developer tool may be taught to the master",
+            "mcp__mop__dev_" not in text)
+    c.check("#515 tracker and CI stay on the master's CLI (#450)",
+            "mop dev bug" in text and "mop dev ci" in text)
     for stale in ("puppet(action=", "doctor(", "mop attach", "mop secret",
-                  "mop server deploy", "mop server doctor", "mop mcp --check",
-                  "mop dev bug", "mop dev ci"):
+                  "mop server deploy", "mop server doctor", "mop mcp --check"):
         c.check(f"#445 no obsolete master operation: {stale}", stale not in text)
 
 

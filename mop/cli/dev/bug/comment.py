@@ -3,10 +3,6 @@
 from mop.common import gitlab
 from mop.cli.dev.bug._common import parser, read_body
 
-MCP = {"annotations": "destructive", "args": [
-    {"name": "iid", "type": "string", "required": True},
-    {"name": "text", "type": "string", "required": True}]}
-
 
 def main(argv):
     p = parser("comment")

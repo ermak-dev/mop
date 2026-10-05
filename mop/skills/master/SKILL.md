@@ -28,13 +28,12 @@ new assertion), and name what the fix does not cover in dispatch and close.
 
 ## Control boundary — MCP only
 
-The master performs **all pool, tracker and CI operations exclusively through
-mop MCP tools** (`mcp__mop__*`). No direct Bash/shell, CLI `mop`, Git commands,
+The master performs **all pool operations exclusively through mop MCP
+tools** (`mcp__mop__*`). No direct Bash/shell, CLI `mop`, Git commands,
 HTTP tracker/API requests, other MCP servers, browser UI or fallback route for
 these operations — not even for a read, a missing tool, a failed MCP call or
-an inconvenient tool argument. Do not route master's pool/tracker/CI
-control through a puppet or a local `Agent` subagent. Ordinary non-shell,
-read-only file
+an inconvenient tool argument. Do not route master's pool control through a
+puppet or a local `Agent` subagent. Ordinary non-shell, read-only file
 inspection of project source and rules is allowed; it does not authorize
 shell-based search, local Git inspection, or local changes. The master never
 merges, checks, commits or pushes Git: these are the puppet's tasks after the
@@ -43,6 +42,11 @@ or refuses, stop that operation and ask the operator to restore/add the tool;
 report what remains unverified. Do not invent a substitute. Installation,
 server maintenance, credentials and secrets are operator actions, not master
 work.
+
+**Development commands are the one shell exception (#450)**: the project's
+tracker and CI — `mop dev bug …` and `mop dev ci …` — run from the master's
+own shell in its working copy, because the tracker's coordinates resolve from
+that copy's git origin. They are deliberately not MCP tools (#515).
 
 ## Step 0 — learn the project and profile
 
@@ -144,42 +148,42 @@ working branch is the ticket claim; create it before edits.
 
 ## Tracker and CI workflow
 
-Only mop MCP tools access the tracker. Discover vocabulary with
-`mcp__mop__dev_bug_labels`, search possible duplicates with
-`mcp__mop__dev_bug_list`, inspect a ticket with `mcp__mop__dev_bug_show`,
-and read epic relationships with `mcp__mop__dev_bug_epic`. A new unit of work
-gets its own issue before implementation, via `mcp__mop__dev_bug_new`; edit
-its evidence and scope with `mcp__mop__dev_bug_edit`, or leave a comment with
-`mcp__mop__dev_bug_comment`. Use `mcp__mop__dev_bug_relabel` for permitted
-labels, never to set/clear `status::wip` by hand: claim only after approval
-with **`mcp__mop__dev_bug_start(no_branch=true)`**, so the master's shared
-checkout is never switched; close with `mcp__mop__dev_bug_close` after
-verified rollout. Keep exactly one `status::`, `sev::`, and `component::`
-label. Titles, bodies and comments use the project's required language; in
-mop they are Russian. A ticket body names reproduction, expected/actual,
-evidence, confirmed cause when known and proposed work. One defect per
-issue; check for duplicates first. Neither a dead node nor a full disk is a
-tracker defect.
+The tracker and CI are **the master's CLI** (`mop dev bug …`, `mop dev ci …`
+from the shell, #450/#515): the tracker's coordinates resolve from the
+working copy's git origin, so the CLI always lands in this project's
+tracker. Discover vocabulary with `mop dev bug labels`, search possible
+duplicates with `mop dev bug list`, inspect a ticket with `mop dev bug show`,
+and read epic relationships with `mop dev bug epic`. A new unit of work gets
+its own issue before implementation, via `mop dev bug new`; edit its evidence
+and scope with `mop dev bug edit`, or leave a comment with `mop dev bug
+comment`. Use `mop dev bug relabel` for permitted labels, never to set/clear
+`status::wip` by hand: claim only after approval with **`mop dev bug start
+--no-branch`**, so the master's shared checkout is never switched; close with
+`mop dev bug close --comment "…"` after verified rollout. Keep exactly one
+`status::`, `sev::`, and `component::` label. Titles, bodies and comments use
+the project's required language; in mop they are Russian. A ticket body names
+reproduction, expected/actual, evidence, confirmed cause when known and
+proposed work. One defect per issue; check for duplicates first. Neither a
+dead node nor a full disk is a tracker defect.
 
 Before claiming an open ticket, rebuild the set from live
-`mcp__mop__dev_bug_list` and `mcp__mop__dev_bug_show`, not a saved snapshot.
-Where available, use `mcp__mop__dev_bug_evidence` to determine whether a
+`mop dev bug list` and `mop dev bug show`, not a saved snapshot.
+Where available, use `mop dev bug evidence` to determine whether a
 branch or implementing merge already exists. Its evidence is not proof of a
 fix: read the ticket and the puppet's report, and distinguish instrumentation,
-incomplete work and incidental issue mentions from a fix. If this tool is
-missing and you cannot establish the status through supported MCP tools,
-stop and ask the operator, not local Git or a tracker HTTP call. An epic
-itself is not dispatchable work: its component tickets and trigger must be
-explicit, closed and satisfied before it can land.
+incomplete work and incidental issue mentions from a fix. If the CLI is
+unavailable and you cannot establish the status through it, stop and ask the
+operator. An epic itself is not dispatchable work: its component tickets and
+trigger must be explicit, closed and satisfied before it can land.
 
-The integration pipeline belongs to the master. Use `mcp__mop__dev_ci_list`
-and `mcp__mop__dev_ci_show` to track it, `mcp__mop__dev_ci_why` and
-`mcp__mop__dev_ci_log` to explain failure, and `mcp__mop__dev_ci_retry` for
-a cancelled/failed run when project rules warrant it. Consecutive pushes
-may cancel prior runs; ensure the integration head has a pipeline that
-actually ran, not merely a last cancelled one. Do not stretch landings
-apart to save cancelled runs. Report CI failures and unverified rollouts
-honestly; do not claim green from a puppet's source reading or an old run.
+The integration pipeline belongs to the master. Use `mop dev ci list` and
+`mop dev ci show` to track it, `mop dev ci why` and `mop dev ci log` to
+explain failure, and `mop dev ci retry` for a cancelled/failed run when
+project rules warrant it. Consecutive pushes may cancel prior runs; ensure
+the integration head has a pipeline that actually ran, not merely a last
+cancelled one. Do not stretch landings apart to save cancelled runs. Report
+CI failures and unverified rollouts honestly; do not claim green from a
+puppet's source reading or an old run.
 
 ## Triage
 
@@ -274,8 +278,8 @@ clone where practical, but never weaken required tests for speed. The
 puppet reports the full fix and merge shas, checks actually run, and the
 remaining work; the master does not infer completion from a process exit.
 
-Close or transfer via `mcp__mop__dev_bug_close` or the appropriate tracker
-MCP tool **after rollout is verified**, citing the fix/merge commits, the
+Close or transfer via `mop dev bug close --comment "…"` **after rollout is
+verified**, citing the fix/merge commits, the
 guarding test, what remains, and actual verification. If rollout or CI is
 still pending, leave the issue open and say so. A merged or pushed fix is not
 by itself a deployment. Keep source changes and deployment ownership with

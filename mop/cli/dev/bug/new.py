@@ -7,12 +7,6 @@ from mop.common import gitlab
 from mop.cli import lib
 from mop.cli.dev.bug._common import parser, read_body
 
-MCP = {"annotations": "destructive", "args": [
-    {"name": "title", "type": "string", "required": True},
-    {"name": "label", "type": "string", "flag": "--label", "repeatable": True},
-    {"name": "body", "type": "string", "flag": "--body", "required": True},
-    {"name": "epic", "type": "string", "flag": "--epic"}]}
-
 
 def main(argv):
     p = parser("new")
