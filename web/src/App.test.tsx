@@ -1,5 +1,5 @@
 // Скелет (#297): шапка и счётчики корзин из снимка.
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 import App from "./App";
 import { emptySnapshot, renderUi } from "./test-utils";
@@ -310,11 +310,13 @@ test("#472 the add-puppet button shows only to the admin", async () => {
   box2.unmount();
 });
 
-// ── #504: вердикт приезжает кадром SSE и рисует unknown-карточку цели ───
-// HYPOTHESIS: страница узнавала терминал только опросом GET; операция с
-// исходом unknown молчала и на строке цели не показывалась. SOLUTION: App
-// держит канал кадров (useOperationFeed), кадр unknown рисует карточку
-// цели в таблице со ссылкой в журнал; опрос статуса операции не ходит.
+// ── #509: терминал кадра -- балун, не карточка строки ──────────────────
+// HYPOTHESIS: вердикт чужой операции (id не из 202 этой страницы) виден
+// был только в журнале, страница о нём молчала; карточка-вердикт на
+// строке (#504) ушла -- слово дублировало бы балун и расширяло статус.
+// SOLUTION: App подписан на шину кадров (useOperationFeed), терминальный
+// кадр с чужим id показывает балун по правилам useOperationNotice: слово,
+// цвет, имя цели в заголовке; unknown -- жёлтый со ссылкой в журнал.
 // RESULT: тесты написаны до реализации (RED).
 import { act } from "@testing-library/react";
 import { operations } from "./useOperationFeed";
@@ -329,23 +331,34 @@ const WITH_PUPPET = emptySnapshot({
       origin: "git@h:g/mop.git", disk_kb: null }] }],
 });
 
-test("#504 an unknown SSE frame draws the target card on the pool table", async () => {
-  // Снимок с папетом -- состоянием теста (poolState), в конце файл
-  // возвращается к дефолтному SNAP.
+const shown: unknown[] = [];
+vi.mock("@mantine/notifications", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("@mantine/notifications")>();
+  return { ...orig, notifications: { ...orig.notifications,
+    show: (n: unknown) => shown.push(n) } };
+});
+
+test("#509 a foreign unknown frame balloons, the row stays clean", async () => {
+  shown.length = 0;
   poolState.snap = WITH_PUPPET;
   reset({ login: "anton", role: "admin" });
   renderUi(<App />);
   await screen.findByText("pu-mop-1");
-  // Кадр unknown по цели -- карточка на строке со ссылкой в журнал.
-  // Разбор SSE живёт в usePool (проверен своим файлом); здесь кадр
-  // входит шиной канала -- тот же вход, что даёт слушатель потока.
+  // Кадр unknown с чужим id (не из 202 этой страницы): балун со словом
+  // канала и ссылкой в журнал, карточки на строке нет. Разбор SSE живёт в
+  // usePool (проверен своим файлом); кадр входит шиной канала -- тот же
+  // вход, что даёт слушатель потока.
   await act(async () => {
     operations.frame({ id: "op-7", action: "restart",
                        target: "pu-mop-1", status: "unknown" });
   });
-  const card = await screen.findByTestId("target-verdict-pu-mop-1");
-  expect(card).toHaveTextContent("исход неизвестен");
-  expect(within(card).getByRole("link", { name: /журнал/i }))
-    .toHaveAttribute("href", "#journal");
+  await waitFor(() => expect(shown).toHaveLength(1));
+  const balloon = shown[0] as { title?: string; message?: unknown; color?: string };
+  expect(String(balloon.title)).toContain("pu-mop-1");
+  // сообщение unknown -- JSX со ссылкой: смотрим плоско
+  expect(JSON.stringify(balloon.message)).toContain("исход неизвестен");
+  expect(JSON.stringify(balloon.message)).toContain("#journal");
+  expect(balloon.color).toBe("yellow");
+  expect(screen.queryByTestId("target-verdict-pu-mop-1")).toBeNull();
   poolState.snap = null;
 });
