@@ -8,6 +8,10 @@ import { IconButton } from "./IconButton";
 import { ModelBox } from "./ModelBox";
 import { RestartBox } from "./RestartBox";
 import { UpdateBox } from "./UpdateBox";
+// Разрушительные (#512): монтирование #473 в строку цели -- тот же
+// контракт session+row, что у соседей; внутри компонента свой
+// двухшаговый поток (preview -> подтверждение), общим он не становится.
+import { DestructiveBox } from "./DestructiveBox";
 
 export function PuppetActions({ row, session }: { row: Puppet; session: Session }) {
   const [viewer, setViewer] = useState<PuppetSource | null>(null);
@@ -24,5 +28,6 @@ export function PuppetActions({ row, session }: { row: Puppet; session: Session 
     <ModelBox session={session} row={row} />
     <UpdateBox session={session} row={row} />
     <RestartBox session={session} row={row} />
+    <DestructiveBox session={session} row={row} />
   </Group>;
 }
