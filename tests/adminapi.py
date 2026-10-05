@@ -107,6 +107,19 @@ def wait_terminal(api, op_id, who=ADMIN, timeout=10):
     return api.result(op_id, who)
 
 
+def wait_frames(frames, timeout=10):
+    """Дождаться кадра on_terminal (#514): публикация кадра -- отдельный
+    факт, следующий ЗА терминальным статусом записи (между ними журнал-
+    строка #506 и разнос колбэков), и читатель, берущий список одним
+    чтением сразу после терминала, гоняется с публикатором. Поллинг с
+    дедлайном, как wait_terminal; пусто после дедлайна -- провал проверки,
+    а не пропуск кадра."""
+    deadline = time.monotonic() + timeout
+    while not frames and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return frames
+
+
 def main():
     c = Checks()
     ops = adminapi.Operations()
@@ -196,9 +209,7 @@ def main():
     api3.executor = lambda action, target, params, who: eff
     api3.submit("send", "pu-mop-1", {"message": "hi"}, ADMIN)
     eff.entered.wait(5)
-    deadline = time.monotonic() + 5
-    while not seen and time.monotonic() < deadline:
-        time.sleep(0.02)
+    wait_frames(seen, timeout=5)
     c.check("#499 the terminal lands as an SSE operation frame",
             seen and seen[0].get("status") == "refused"
             and seen[0].get("action") == "send"
@@ -227,9 +238,43 @@ def main():
     c.check("#499 the crashed operation frees its key for a resubmit",
             api_boom.submit("send", "pu-mop-2", {"message": "x"}, ADMIN)["id"]
             != r["id"])
+    wait_frames(boom_frames)  # кадр -- факт за терминальным статусом (#514)
     c.check("#499 the crash lands as an SSE frame, closed phrase only",
             boom_frames and boom_frames[0].get("status") == "failed"
             and boom_frames[0].get("error") == "operation failed", boom_frames)
+
+    # ── кадр ждут, а не читают одним разом (#514) ───────────────────────
+    # HYPOTHESIS: hermetic-гонка CI («the crash lands as an SSE frame,
+    # closed phrase only: []»): поток операции ставит записи терминальный
+    # статус под замком, а кадр публикует после -- между ними журнал-строка
+    # #506 (syscall в пайп подпроцесса) и разнос колбэков. Читатель, берущий
+    # список кадров одним чтением сразу после терминального статуса,
+    # гоняется с публикатором: под нагрузкой окно ловится пустым (2 из 75
+    # прогонов локально). Статус и кадр -- два раздельных наблюдаемых факта:
+    # колбэки в продакшне делают bus I/O (web.py), под замком адаптера их
+    # звать нельзя, и порядок «статус -> кадр» -- правильный для подписчика.
+    # SOLUTION: честное ожидание кадра с дедлайном (wait_frames), той же
+    # дисциплины, что wait_terminal; утверждение не слабеет -- кадр со
+    # статусом и закрытой фразой обязан наблюдаться. Окно здесь
+    # детерминировано: колбэк задержан на 0.2 с после терминального
+    # статуса записи.
+    # RESULT: до фикса -- красный каждый прогон, кадр читали одним чтением;
+    # STATUS: FIXED — see #514.
+    late = []
+
+    def slow_frame(frame):
+        time.sleep(0.2)   # окно «статус уже терминален, кадра ещё нет»
+        late.append(frame)
+
+    api_late = adminapi.Api(ops, origin="https://pool.example", who=ADMIN,
+                            executor=lambda *a: Boom())
+    api_late.on_terminal(slow_frame)
+    r = api_late.submit("send", "pu-late-1", {"message": "x"}, ADMIN)
+    a = wait_terminal(api_late, r["id"])
+    wait_frames(late)  # фикс #514: ждать кадр, а не читать одним чтением
+    c.check("#514 a frame landing after the terminal status is observed",
+            late and late[0].get("status") == "failed"
+            and late[0].get("error") == "operation failed", late)
 
     # ── сырая причина неуспеха -- в журнал службы (#506) ────────────────
     # HYPOTHESIS: после #499 (журнал ops.jsonl удалён) сырой текст
@@ -255,9 +300,15 @@ def main():
     import io as _io
     import contextlib as _cl
     buf = _io.StringIO()
+    # Кадр ждём, не выходя из redirect_stderr (#514): журнал-строка и кадр
+    # публикуются ПОСЛЕ терминального статуса, и чтение буфера одним
+    # чтением сразу после терминала -- та же гонка, что и у boom-кадра.
+    # Строка в _execute печатается раньше колбэков: доставленный кадр
+    # гарантирует и строку в буфере.
     with _cl.redirect_stderr(buf):
         r = api_deny.submit("send", "pu-rugent-1", {"message": "x"}, ADMIN)
         a = wait_terminal(api_deny, r["id"])
+        wait_frames(deny_frames)
     line = buf.getvalue()
     c.check("#506 an unsuccessful terminal logs one line to the service journal",
             a.get("status") == "failed"
