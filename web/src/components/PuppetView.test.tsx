@@ -37,21 +37,17 @@ afterEach(() => {
   else Reflect.deleteProperty(HTMLElement.prototype, "scrollTop");
 });
 
-// #507: иконки действий -- экран, рестарт, правка, модель; «лог» ушёл.
-// #513: рестарт шлёт POST сразу -- его диалог это ход операции.
-test.each([
-  ["рестарт", "рестарт: pu-mop-1"], ["правка", "правка папета"],
-  ["модель", "смена модели"],
-  ["экран", "экран pu-mop-1"],
-])("row icon %s opens only its own dialog", async (label, title) => {
+// #507: иконка «лог» ушла. #516: в строке только «экран» и «правка»,
+// все операции цели -- пунктами в окне правки.
+test("row icon экран opens only its own dialog", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => response({ models: [], lines: [] })));
   renderUi(<PoolTable projects={snapshot.projects} session={session} />);
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
-  const button = within(actions).getByRole("button", { name: label });
+  const button = within(actions).getByRole("button", { name: "экран" });
   expect(button.querySelector("svg")).not.toBeNull();
   expect(button.textContent).toBe("");
   fireEvent.click(button);
-  const dialog = await screen.findByRole("dialog", { name: title });
+  const dialog = await screen.findByRole("dialog", { name: `экран ${row.name}` });
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
   expect(dialog).toHaveTextContent(row.name);
 });
@@ -67,14 +63,19 @@ test("#487 actions have a right-aligned shrink-to-fit column", () => {
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
   expect(actions).toHaveStyle({ justifyContent: "flex-end", flexWrap: "nowrap" });
   expect(actions.closest("td")).toHaveStyle({ width: "1%", whiteSpace: "nowrap", textAlign: "right" });
-  // #512: колонка -- экран, модель, правка, рестарт и три разрушительных
-  // («лог» ушёл #507); состав перечислен, не только число
+  // #516: строка -- экран и правка; модель/рестарт/разрушительные уехали
+  // пунктами в окно правки, состав перечислен, не только число
   expect(within(actions).getAllByRole("button")
     .map((b) => b.getAttribute("aria-label") ?? b.textContent?.trim()))
-    .toEqual(["экран", "модель", "правка", "рестарт", "recycle", "delete", "wipe"]);
+    .toEqual(["экран", "правка"]);
   expect(within(actions).queryByRole("button", { name: "сообщение" })).toBeNull();
 });
 
+// Вход #516: клик «правка» в строке -> пункт в окне -> действие. Окно
+// закрывается при выборе пункта (одно действие в один момент), вердикты
+// каждой операции показываются её собственным механизмом (#487: рестарт
+// и правка -- OperationResult, #488: модель -- балун, #516:
+// разрушительные -- OperationResult).
 test.each(["рестарт", "правка", "модель"])("#487 %s result never widens the row", async (action) => {
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => response(
     init?.method === "POST" ? { id: "op-1", status: "accepted" }
@@ -82,9 +83,13 @@ test.each(["рестарт", "правка", "модель"])("#487 %s result ne
       : { id: "op-1", status: "succeeded" })));
   renderUi(<PoolTable projects={snapshot.projects} session={session} />);
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
-  fireEvent.click(within(actions).getByRole("button", { name: action }));
-  // #513: все три обратимы -- «продолжить»/клик шлёт POST сразу,
-  // моды подтверждения нет
+  fireEvent.click(within(actions).getByRole("button", { name: "правка" }));
+  const win = await screen.findByTestId("control-window");
+  const item = within(win).getByRole("button", { name: action === "правка" ? "правка" : action });
+  fireEvent.click(item);
+  // окно закрылось выбранным пунктом: на экране один диалог -- поток
+  expect(screen.queryByTestId("control-window")).toBeNull();
+  // #513: обратимые шлют сразу; у правки/модели -- своя форма
   if (action === "правка") {
     fireEvent.click(screen.getByRole("radio", { name: "продолжить как было" }));
     fireEvent.click(screen.getByRole("button", { name: "продолжить" }));
@@ -185,7 +190,10 @@ test.each(["рестарт", "правка", "модель"])("#487 %s preserves
   vi.stubGlobal("fetch", mock);
   renderUi(<PoolTable projects={snapshot.projects} session={session} />);
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
-  fireEvent.click(within(actions).getByRole("button", { name: action }));
+  // вход #516: строка -> окно правки -> пункт; окно закрывается пунктом
+  fireEvent.click(within(actions).getByRole("button", { name: "правка" }));
+  const win = await screen.findByTestId("control-window");
+  fireEvent.click(within(win).getByRole("button", { name: action === "правка" ? "правка" : action }));
   if (action === "правка") {
     fireEvent.click(screen.getByRole("radio", { name: "продолжить как было" }));
     fireEvent.click(screen.getByRole("button", { name: "продолжить" }));
@@ -199,13 +207,17 @@ test.each(["рестарт", "правка", "модель"])("#487 %s preserves
     // команда открывает форму, дедуп на сервере (id на месте).
     await waitFor(() => expect(mock.mock.calls
       .filter((c) => c[1]?.method === "POST")).toHaveLength(1));
-    fireEvent.click(within(actions).getByRole("button", { name: action }));
+    fireEvent.click(within(actions).getByRole("button", { name: "правка" }));
+    const again = await screen.findByTestId("control-window");
+    fireEvent.click(within(again).getByRole("button", { name: "модель" }));
     expect(await screen.findByTestId("model-choices")).toBeInTheDocument();
   } else {
     await screen.findByText("принято");
     fireEvent.click(screen.getByRole("button", { name: "закрыть" }));
     await act(async () => { finish(response({ status: "failed", error: "review refusal" })); });
-    fireEvent.click(within(actions).getByRole("button", { name: action }));
+    fireEvent.click(within(actions).getByRole("button", { name: "правка" }));
+    const again = await screen.findByTestId("control-window");
+    fireEvent.click(within(again).getByRole("button", { name: action === "правка" ? "правка" : action }));
     expect(await screen.findByText(/review refusal/)).toBeInTheDocument();
     expect(mock.mock.calls.filter((c) => c[1]?.method === "POST")).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "новая команда" }));
@@ -221,19 +233,22 @@ test.each(["рестарт", "правка", "модель"])("#487 %s preserves
   }
 });
 
-test("#512 the admin row offers the destructive actions, a non-admin never sees them", () => {
+test("#512 the row offers the destructive actions, a non-admin never sees them", () => {
   vi.stubGlobal("fetch", vi.fn());
   renderUi(<PoolTable projects={snapshot.projects} session={session} />);
-  const actions = screen.getByRole("group", { name: `действия ${row.name}` });
-  // монтирование #473: три разрушительных действия в строке цели,
-  // каждое со своим двухшаговым потоком (preview -> подтверждение)
+  fireEvent.click(screen.getByRole("button", { name: "правка" }));
+  const win = screen.getByTestId("control-window");
+  // #512/#516: три разрушительных действия -- пунктами окна правки
+  // цели, каждое со своим двухшаговым потоком (preview -> подтверждение)
   for (const label of ["recycle", "delete", "wipe"]) {
-    expect(within(actions).getByRole("button", { name: label })).toBeInTheDocument();
+    expect(within(win).getByRole("button", { name: label })).toBeInTheDocument();
   }
-  // не-админ всей колонки действий не видит -- разрушительных тоже;
-  // первый стол убираем до второго рендера, иначе он отвечает за кнопки
+  // не-админ всей колонки действий не видит -- окна и разрушительных
+  // тоже; первый стол убираем до второго рендера, иначе он отвечает за
+  // кнопки
   cleanup();
   renderUi(<PoolTable projects={snapshot.projects} session={{ login: "user", role: "user" }} />);
+  expect(screen.queryByRole("button", { name: "правка" })).toBeNull();
   expect(screen.queryByRole("button", { name: "recycle" })).toBeNull();
   expect(screen.queryByRole("button", { name: "delete" })).toBeNull();
   expect(screen.queryByRole("button", { name: "wipe" })).toBeNull();
@@ -245,4 +260,104 @@ test("#487 opening the screen scrolls its viewport to the end", async () => {
   card();
   await screen.findByText("latest");
   expect(screen.getByTestId("output-scroll").scrollTop).toBe(1200);
+});
+
+// ── #516: окно правки -- окно управления целью ──────────────────────────
+
+// Пункты -- все операции цели в одном окне (#516): правка, модель,
+// рестарт и три разрушительных. Названия -- слова GUI, recycle/delete/
+// wipe -- имена действий сервера.
+test("#516 the edit window lists every operation as an item", async () => {
+  vi.stubGlobal("fetch", vi.fn());
+  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
+    .getByRole("button", { name: "правка" }));
+  const win = await screen.findByTestId("control-window");
+  expect(win.textContent).toContain(row.name);
+  for (const label of ["правка", "модель", "рестарт", "recycle", "delete", "wipe"]) {
+    expect(within(win).getByRole("button", { name: label })).toBeInTheDocument();
+  }
+});
+
+// Дизейбл-причины #508 переезжают в пункт рестарта окна (#516): признак
+// строки виден до клика, отказ после клика был бы вторым ответом.
+test.each([
+  ["down", "рестарт недоступен: не запущен"],
+  ["failing", "рестарт недоступен: задача падает"],
+])("#516 the restart item carries the %s disable reason", async (kind, reason) => {
+  vi.stubGlobal("fetch", vi.fn());
+  const target: Puppet = kind === "down"
+    ? { ...row, alloc_status: "stopped", bucket: "down", state: "stopped" }
+    : { ...row, kind: "failing", state: "FAILED: exit 1", detail: "exit 1" };
+  const shot = emptySnapshot({ projects: [{ name: "mop", puppets: [target],
+    counts: { puppets: 1, free: 0, busy: 1, sick: 0, silent: 0, down: 0 } }] });
+  renderUi(<PoolTable projects={shot.projects} session={session} />);
+  fireEvent.click(screen.getByRole("button", { name: "правка" }));
+  const win = await screen.findByTestId("control-window");
+  const item = within(win).getByRole("button", { name: new RegExp(reason) });
+  expect(item).toBeDisabled();
+  expect(item).toHaveAttribute("aria-label", reason);
+  expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+});
+
+// Разрушительный пункт окна (#516) проходит весь поток #512: preview ->
+// подтверждение точной цели -> POST; окно закрылось выбранным пунктом.
+test("#516 a destructive item rides its two-step flow from the window", async () => {
+  const fetchMock = vi.fn(async () => response({ id: "op-1", status: "accepted" }));
+  vi.stubGlobal("fetch", fetchMock);
+  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
+    .getByRole("button", { name: "правка" }));
+  const win = await screen.findByTestId("control-window");
+  fireEvent.click(within(win).getByRole("button", { name: "recycle" }));
+  // окно закрылось пунктом: на экране -- preview последствий
+  expect(screen.queryByTestId("control-window")).toBeNull();
+  expect(await screen.findByText(/несохранённая работа погибнет/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /продолжить/i }));
+  await screen.findByText("подтвердите recycle");
+  const confirm = screen.getAllByRole("dialog")
+    .find((d) => d.textContent.includes("подтвердите recycle"));
+  expect(confirm?.textContent).toContain(row.name);
+  fireEvent.click(screen.getByRole("button", { name: /^подтвердить$/ }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops",
+    expect.objectContaining({ method: "POST" })));
+});
+
+// Вердикт разрушительной операции (#516): инлайн-строки рядом с кнопками
+// больше нет (кнопки уехали в окно) -- вердикт показывает OperationResult,
+// единый механизм с рестартом/правкой (#465/#473).
+test("#516 a destructive verdict rides the OperationResult modal", async () => {
+  const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) =>
+    response(init?.method === "POST" ? { id: "op-1", status: "accepted" }
+      : { id: "op-1", action: "recycle", target: row.name, status: "failed",
+          error: "image builder refused" }));
+  vi.stubGlobal("fetch", fetchMock);
+  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
+    .getByRole("button", { name: "правка" }));
+  const win = await screen.findByTestId("control-window");
+  fireEvent.click(within(win).getByRole("button", { name: "recycle" }));
+  expect(await screen.findByText(/несохранённая работа погибнет/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /продолжить/i }));
+  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/ }));
+  const verdict = await screen.findByText(/не удался/i);
+  // вердикт -- в модале операции, не строкой рядом с кнопками
+  expect(verdict.closest('[role="dialog"]')).not.toBeNull();
+  expect(verdict).toHaveTextContent("image builder refused");
+});
+
+// Обратимый пункт шлёт сразу (#513 сохраняется в окне): рестарт из окна
+// -- POST без моды подтверждения, диалог -- только ход операции.
+test("#516 the restart item posts at once, reversible #513 kept", async () => {
+  const fetchMock = vi.fn(async () => response({ id: "op-1", status: "accepted" }));
+  vi.stubGlobal("fetch", fetchMock);
+  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
+    .getByRole("button", { name: "правка" }));
+  const win = await screen.findByTestId("control-window");
+  fireEvent.click(within(win).getByRole("button", { name: "рестарт" }));
+  expect(screen.queryByTestId("control-window")).toBeNull();
+  expect(screen.queryByText(/подтвердите рестарт/i)).toBeNull();
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops",
+    expect.objectContaining({ method: "POST" })));
 });

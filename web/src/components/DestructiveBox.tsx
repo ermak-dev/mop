@@ -1,19 +1,23 @@
-// Разрушительные действия из карточки (#473): recycle/delete/wipe --
-// три отдельных кнопки, никаких обобщённых «force». Каждое -- двухшаговое:
+// Разрушительные действия (#473): recycle/delete/wipe -- три отдельных
+// действия, никаких обобщённых «force». Каждое -- двухшаговое:
 // (1) preview последствий, свой для каждого действия (клон/тело/джоб),
 // (2) подтверждение точной цели -- имя, узел и state-строка с экрана.
 // Stale-защита: поток держит строку, на которую открыт; строка сменилась
 // (rerender принёс другую цель) -- подтверждение умирает, повтор начинается
 // заново, с preview: молча ретраить по имени нельзя, под именем мог
 // оказаться другой экземпляр. Частичный исход -- «частично», recovery
-// не обещается. Никакого force: params пусты, схема -- #461; регистрация
-// действий в исполнителе приедет из #471 -- до тех пор сервер ответит
-// unsupported, и фраза отказа будет показана как есть.
+// не обещается. Никакого force: params пусты, схема -- #461.
+// #516: точка входа -- пункт окна правки (icon=false + сигнал-токен с
+// именем действия); инлайн-вердикта при живом ходе больше нет -- вердикт
+// показывает OperationResult, единый механизм с рестартом/правкой
+// (#465/#473): кнопки уехали из строки, строке вердикт показывать некому.
 import { useRef, useState } from "react";
 import { Button, Code, Group, Modal, Stack, Text } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
 import { TERMINAL, useAdminOp } from "../useAdminOp";
+import { useSignal, type Signal as EntrySignal } from "./ControlWindow";
+import { OperationResult } from "./OperationResult";
 import { opWord } from "./RestartBox";
 
 /** Последствия действия для preview (#456/#471): что гибнет, что живёт. */
@@ -36,13 +40,22 @@ const PREVIEW: Record<string, { title: string; lines: string[] }> = {
 
 const ACTIONS = ["recycle", "delete", "wipe"] as const;
 
-export function DestructiveBox({ session, row }: {
+/** Сигнал пункта окна с именем действия (#516): окно знает, какой пункт
+ * нажат; срабатывание -- по изменению токена. */
+export type DestructiveSignal = { sub: string; at: number } | null;
+
+export function DestructiveBox({ session, row, icon = true, signal = null }: {
   session: Session;
   /** Строка ростера, на которую открыт поток: её факты и подтверждает. */
   row: Puppet;
+  /** Кожа кнопок в строке (#516): пункт окна шлёт сигнал без кнопок. */
+  icon?: boolean;
+  /** Сигнал-токен пункта окна (#516): sub -- имя действия. */
+  signal?: DestructiveSignal;
 }) {
   const [action, setAction] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
+  const [result, setResult] = useState(false);
   // Строка, на которую открыт поток. Смена цели между preview и
   // подтверждением -- подтверждение не той цели (#473): умерщвляем поток
   // в рендере (паттерн useJournal -- prev сверяется до краски), повтор
@@ -55,24 +68,28 @@ export function DestructiveBox({ session, row }: {
   }
   const { op, submit } = useAdminOp(session, session.role === "admin" ? row.name : null);
   const live = op.status !== "idle" && !TERMINAL.has(op.status);
+  // Вход пунктом окна (#516): сигнал с именем действия открывает preview;
+  // живой ход показывает результат (повтор -- после вердикта).
+  const enter = useRef((sub: string) => {
+    if (live) { setResult(true); return; }
+    flowFor.current = row.name;
+    setAction(sub); setConfirm(null);
+  });
+  useSignal(signal as EntrySignal, () => enter.current(signal!.sub));
   if (session.role !== "admin") return null;
   return (
     <Group gap="sm">
-      {ACTIONS.map((a) => (
+      {icon && ACTIONS.map((a) => (
         <Button key={a} size="xs" variant="light" color="red"
                 disabled={live}
                 onClick={() => { flowFor.current = row.name; setAction(a); setConfirm(null); }}>
           {a}
         </Button>
       ))}
-      {op.status !== "idle" && (
-        <Text size="sm" c={op.status === "succeeded" ? "teal"
-                            : op.status === "unknown" ? "yellow" : "red"}>
-          {opWord(op.status)}
-          {op.lost ? " (первый ответ потерян)" : ""}
-        </Text>
-      )}
-      {op.error ? <Text size="sm" c="red">{op.error}</Text> : null}
+      <OperationResult opened={result} onClose={() => setResult(false)}
+        onAgain={() => { setResult(false); setAction(null); setConfirm(null); }}
+        title={confirm ?? action ?? "операция"} target={row.name}
+        op={op} word={opWord(op.status)} testId="destructive-verdict" />
       {/* Шаг 1: preview последствий выбранного действия. */}
       {action && !confirm && (
         <Modal opened onClose={() => setAction(null)} size="md"
@@ -117,6 +134,7 @@ export function DestructiveBox({ session, row }: {
               <Button color="red" onClick={() => {
                 const a = confirm;
                 setConfirm(null); setAction(null);
+                setResult(true);
                 void submit(a);
               }}>
                 подтвердить

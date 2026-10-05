@@ -1,15 +1,17 @@
-// Разрушительные действия из карточки (#473): recycle/delete/wipe --
-// три отдельных действия, каждое двухшаговое: сначала preview последствий
+// Разрушительные действия (#473): recycle/delete/wipe -- три отдельных
+// действия, каждое двухшаговое: сначала preview последствий
 // (driver-specific, из #456/#471), затем подтверждение точной цели (имя,
 // узел, состояние на экране). Stale: цель сменилась между preview и
 // подтверждением -- подтверждение не уезжает, повтор -- новый preview.
 // Частичный исход -- «частично», recovery не обещается. Никакого force.
+// #516: точка входа -- пункт окна правки (icon=false + сигнал-токен),
+// инлайн-вердикта нет -- вердикт показывает OperationResult, единый
+// механизм с рестартом/правкой.
 //
 // RESULT: тесты написаны до реализации (RED).
-import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { DestructiveBox } from "./DestructiveBox";
-import { renderUi } from "../test-utils";
 import { MantineProvider } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -34,39 +36,79 @@ const postGet = (post: () => Promise<Response>, get: () => Promise<Response>) =>
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-test("three separate actions are offered, each with its own preview", async () => {
+/** Пункт окна: сигнал-токен, как его шлёт PuppetActions (#516). */
+class Signal {
+  current: { sub: string; at: number } | null = null;
+  /** Выбор пункта окна: sub -- имя действия. */
+  fire(sub = "recycle") { this.current = { sub, at: Date.now() + Math.random() }; }
+}
+
+/** Бокс в коже пункта окна: без иконок, вход -- сигнал-токен. */
+function mountItem(signal: Signal, row: Puppet = ROW, session: Session = ADMIN) {
+  return render(<MantineProvider>
+    <DestructiveBox session={session} row={row} icon={false} signal={signal.current} />
+  </MantineProvider>);
+}
+
+test("#516 no icons in the window skin, entry by signal only", () => {
   vi.stubGlobal("fetch", vi.fn());
-  renderBox();
-  for (const label of ["recycle", "delete", "wipe"]) {
-    expect(screen.getByRole("button", { name: new RegExp(label, "i") }))
-      .toHaveTextContent(new RegExp(label, "i"));
-  }
+  const signal = new Signal();
+  mountItem(signal);
+  // кожи иконок нет вовсе: пункт окна -- единственный вход
+  expect(screen.queryByRole("button", { name: /^recycle$/i })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^delete$/i })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^wipe$/i })).toBeNull();
+  // первый рендер с сигналом молчит: mount-выстрел был бы ложным стартом
+  act(() => { signal.fire(); });
+  mountItem(signal).unmount();
+  expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+  expect(screen.queryByText(/несохранённая работа погибнет/i)).toBeNull();
+});
+
+test("#516 the signal opens the recycle preview from the window item", async () => {
+  vi.stubGlobal("fetch", vi.fn());
+  const signal = new Signal();
+  const view = mountItem(signal);
+  act(() => { signal.fire(); });
+  view.rerender(<MantineProvider>
+    <DestructiveBox session={ADMIN} row={ROW} icon={false} signal={signal.current} />
+  </MantineProvider>);
   // preview recycle: клон начисто, тело живо, несохранённая работа гибнет
-  fireEvent.click(screen.getByRole("button", { name: /^recycle$/i }));
-  const preview = await screen.findByText(/несохранённая работа погибнет/i);
-  expect(preview).toBeInTheDocument();
+  expect(await screen.findByText(/несохранённая работа погибнет/i)).toBeInTheDocument();
   // подтверждения ещё нет -- это первый шаг
   expect(screen.queryByRole("button", { name: /^подтвердить$/i })).toBeNull();
 });
 
-test("delete preview names clone+job, wipe preview names the body", async () => {
+test("#516 the delete and wipe signals open their own previews", async () => {
   vi.stubGlobal("fetch", vi.fn());
-  renderBox();
-  fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+  const signal = new Signal();
+  const view = mountItem(signal);
+  act(() => { signal.fire("delete"); });
+  view.rerender(<MantineProvider>
+    <DestructiveBox session={ADMIN} row={ROW} icon={false} signal={signal.current} />
+  </MantineProvider>);
   expect(await screen.findByText(/клон и джоб удаляются/i)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /отмена/i }));
-  fireEvent.click(screen.getByRole("button", { name: /^wipe$/i }));
+  // preview wipe -- своё, не delete
+  act(() => { signal.fire("wipe"); });
+  view.rerender(<MantineProvider>
+    <DestructiveBox session={ADMIN} row={ROW} icon={false} signal={signal.current} />
+  </MantineProvider>);
   expect(await screen.findByText(/тело пересоздаётся/i)).toBeInTheDocument();
 });
 
-test("the second step confirms the exact on-screen target", async () => {
+test("#516 the second step confirms the exact on-screen target", async () => {
   vi.stubGlobal("fetch", vi.fn());
-  renderBox();
-  fireEvent.click(screen.getByRole("button", { name: /^recycle$/i }));
+  const signal = new Signal();
+  const view = mountItem(signal);
+  act(() => { signal.fire(); });
+  view.rerender(<MantineProvider>
+    <DestructiveBox session={ADMIN} row={ROW} icon={false} signal={signal.current} />
+  </MantineProvider>);
   await screen.findByText(/несохранённая работа погибнет/i);
   fireEvent.click(screen.getByRole("button", { name: /продолжить/i }));
-  // диалог подтверждения ищем по заголовку: карточных диалогов тут нет,
-  // но модалей может быть больше одного
+  // диалог подтверждения ищем по содержимому: модалей может быть больше
+  // одного
   await screen.findByText("подтвердите recycle");
   const dialog = screen.getAllByRole("dialog")
     .find((d) => d.textContent.includes("подтвердите recycle"));
@@ -76,12 +118,13 @@ test("the second step confirms the exact on-screen target", async () => {
   expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
 });
 
-test("confirm posts the chosen action and the verdict shows", async () => {
+test("#516 confirm posts the chosen action and the verdict shows", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("running", "recycle")));
   vi.stubGlobal("fetch", fetchMock);
-  renderBox();
-  await rideRecycle();
+  const signal = new Signal();
+  const view = mountItem(signal);
+  await rideRecycle(view, signal);
   await waitFor(() => expect(screen.getByText(/идёт/i)).toBeInTheDocument());
   expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
     method: "POST", credentials: "same-origin" }));
@@ -89,20 +132,24 @@ test("confirm posts the chosen action and the verdict shows", async () => {
   expect(body).toEqual({ action: "recycle", target: "pu-mop-1", params: {} });
 });
 
-test("a target change between preview and confirm kills the confirm", async () => {
+test("#516 a target change between preview and confirm kills the confirm", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
-  const view = renderBox();
-  fireEvent.click(screen.getByRole("button", { name: /^recycle$/i }));
+  const signal = new Signal();
+  const view = mountItem(signal);
+  act(() => { signal.fire(); });
+  view.rerender(<MantineProvider>
+    <DestructiveBox session={ADMIN} row={ROW} icon={false} signal={signal.current} />
+  </MantineProvider>);
   await screen.findByText(/несохранённая работа погибнет/i);
   fireEvent.click(screen.getByRole("button", { name: /продолжить/i }));
   await screen.findByText("подтвердите recycle");
-  // цель сменилась под открытым потоком (строка перерисовалась другой):
-  // rerender -- под тем же провайдером, что первый рендер
+  // цель сменилась под открытым потоком (строка перерисовалась другой)
   await act(async () => {
     view.rerender(<MantineProvider>
-      <DestructiveBox session={ADMIN} row={{ ...ROW, name: "pu-mop-2" }} />
+      <DestructiveBox session={ADMIN} row={{ ...ROW, name: "pu-mop-2" }} icon={false}
+                      signal={signal.current} />
     </MantineProvider>);
   });
   // подтверждение уехало вместе с прежней целью: POST не начался
@@ -111,34 +158,41 @@ test("a target change between preview and confirm kills the confirm", async () =
   // повтор по имени -- не молча ретраит: поток начинается заново, с preview
   await act(async () => {
     view.rerender(<MantineProvider>
-      <DestructiveBox session={ADMIN} row={ROW} />
+      <DestructiveBox session={ADMIN} row={ROW} icon={false} signal={signal.current} />
     </MantineProvider>);
   });
   expect(screen.queryByText(/несохранённая работа погибнет/i)).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: /^recycle$/i }));
+  act(() => { signal.fire(); });
+  view.rerender(<MantineProvider>
+    <DestructiveBox session={ADMIN} row={ROW} icon={false} signal={signal.current} />
+  </MantineProvider>);
   expect(await screen.findByText(/несохранённая работа погибнет/i)).toBeInTheDocument();
 });
 
-test("partial is named partial, no recovery is promised", async () => {
+test("#516 partial is named partial, no recovery is promised", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("partial")));
   vi.stubGlobal("fetch", fetchMock);
-  renderBox();
-  await rideRecycle();
+  const signal = new Signal();
+  const view = mountItem(signal);
+  await rideRecycle(view, signal);
   await waitFor(() => expect(screen.getByText(/частично/i)).toBeInTheDocument());
   expect(screen.queryByText(/восстанов/i)).toBeNull();
 });
 
-test("double submit rides one POST", async () => {
+test("#516 double submit rides one POST", async () => {
   let release: ((r: Response) => void) | null = null;
   const slow = new Promise<Response>((resolve) => { release = resolve; });
   const fetchMock = postGet(() => slow, () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
-  renderBox();
-  fireEvent.click(screen.getByRole("button", { name: /^recycle$/i }));
+  const signal = new Signal();
+  const view = mountItem(signal);
+  act(() => { signal.fire(); });
+  view.rerender(<MantineProvider>
+    <DestructiveBox session={ADMIN} row={ROW} icon={false} signal={signal.current} />
+  </MantineProvider>);
   await screen.findByText(/несохранённая работа погибнет/i);
   fireEvent.click(screen.getByRole("button", { name: /продолжить/i }));
-  // двойной под: два клика по «подтвердить» -- POST один
   // двойной под: два клика, пока POST в полёте -- POST один
   const confirmBtn = await screen.findByRole("button", { name: /^подтвердить$/i });
   fireEvent.click(confirmBtn);
@@ -150,32 +204,34 @@ test("double submit rides one POST", async () => {
     .toHaveLength(1);
 });
 
-test("unknown is named unknown, never failed", async () => {
+test("#516 unknown is named unknown, never failed", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("unknown", "wipe")));
   vi.stubGlobal("fetch", fetchMock);
-  renderBox();
-  await waitFor(() => expect(screen.getByRole("button", { name: /^wipe$/i })).toBeInTheDocument());
-  await rideWipe();
+  const signal = new Signal();
+  const view = mountItem(signal);
+  await rideWipe(view, signal);
   await waitFor(() => expect(screen.getByText(/неизвестен/i)).toBeInTheDocument());
   expect(screen.queryByText(/не удался/i)).toBeNull();
 });
 
-function renderBox(row: Puppet = ROW, session: Session = ADMIN) {
-  return renderUi(<DestructiveBox session={session} row={row} />);
-}
-
-/** Пройти recycle до POST: preview -> продолжить -> подтвердить. */
-async function rideRecycle() {
-  fireEvent.click(screen.getByRole("button", { name: /^recycle$/i }));
+/** Пройти recycle до POST: сигнал -> preview -> продолжить -> подтвердить. */
+async function rideRecycle(view: ReturnType<typeof mountItem>, signal: Signal) {
+  act(() => { signal.fire(); });
+  view.rerender(<MantineProvider>
+    <DestructiveBox session={ADMIN} row={ROW} icon={false} signal={signal.current} />
+  </MantineProvider>);
   await screen.findByText(/несохранённая работа погибнет/i);
   fireEvent.click(screen.getByRole("button", { name: /продолжить/i }));
   fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
 }
 
 /** Пройти wipe до POST. */
-async function rideWipe() {
-  fireEvent.click(screen.getByRole("button", { name: /^wipe$/i }));
+async function rideWipe(view: ReturnType<typeof mountItem>, signal: Signal) {
+  act(() => { signal.fire("wipe"); });
+  view.rerender(<MantineProvider>
+    <DestructiveBox session={ADMIN} row={ROW} icon={false} signal={signal.current} />
+  </MantineProvider>);
   await screen.findByText(/тело пересоздаётся/i);
   fireEvent.click(screen.getByRole("button", { name: /продолжить/i }));
   fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));

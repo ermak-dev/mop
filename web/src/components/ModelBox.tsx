@@ -11,6 +11,7 @@ import { useState } from "react";
 import { useOperationNotice } from "../useOperationNotice";
 import { IconCpu } from "@tabler/icons-react";
 import { IconButton } from "./IconButton";
+import { useSignal, type Signal } from "./ControlWindow";
 import { Button, Group, Modal, Radio, Stack, Text } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -19,10 +20,14 @@ import { TERMINAL, useAdminOp } from "../useAdminOp";
 
 import { opWord } from "./RestartBox";
 
-export function ModelBox({ session, row }: {
+export function ModelBox({ session, row, icon = true, signal = null }: {
   session: Session;
   /** Строка ростера: цель смены модели. */
   row: Puppet;
+  /** Кожа иконки в строке (#516): пункт окна шлёт сигнал без иконки. */
+  icon?: boolean;
+  /** Сигнал-токен пункта окна (#516): срабатывание по изменению. */
+  signal?: Signal;
 }) {
   const { op, submit } = useAdminOp(session, session.role === "admin" ? row.name : null);
   const [model, setModel] = useState<string | null>(null);
@@ -45,12 +50,16 @@ export function ModelBox({ session, row }: {
     setOpen(false); setModel(null);
     void submit("model", { model });
   };
+  // Вход (#516): пункт окна или иконка строки -- один и тот же ход
+  const enter = () => { setModel(null); setOpen(true); };
+  useSignal(signal, enter);
   return (
     <Group gap="sm">
-      <IconButton label="модель" variant="subtle" size="lg"
-              onClick={() => { setModel(null); setOpen(true); }}>
-        <IconCpu size={18} />
-      </IconButton>
+      {icon && (
+        <IconButton label="модель" variant="subtle" size="lg" onClick={enter}>
+          <IconCpu size={18} />
+        </IconButton>
+      )}
       {open && (
         <Modal opened onClose={() => setOpen(false)} size="md"
                title="смена модели" data-testid="model-form"
