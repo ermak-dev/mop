@@ -1,6 +1,7 @@
 // #484: прежние гарантии карточки проверяются через новое место действий,
-// строку ростера. Смена цели/роли уничтожает открытое подтверждение.
-import { fireEvent, screen, within } from "@testing-library/react";
+// строку ростера. Смена цели/роли уничтожает открытую операцию.
+// #513: рестарт шлёт POST сразу -- проверяется ход операции, не мода.
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { MantineProvider } from "@mantine/core";
 import { PoolTable } from "./PoolTable";
@@ -17,30 +18,32 @@ const projects = emptySnapshot({ projects: [{ name: "mop", counts: {
   puppets: 1, free: 1, busy: 0, sick: 0, silent: 0, down: 0,
 }, puppets: [CARD] }] }).projects;
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-test("the admin opens a single restart confirm from the row", async () => {
-  vi.stubGlobal("fetch", vi.fn());
+test("#513 the restart click posts at once from the row", async () => {
+  const fetchMock = vi.fn(async () => ({ ok: true, status: 202,
+    json: async () => ({ id: "op-1", status: "accepted" }) }) as Response);
+  vi.stubGlobal("fetch", fetchMock);
   renderUi(<PoolTable projects={projects} session={ADMIN} />);
   fireEvent.click(screen.getByRole("button", { name: "рестарт" }));
-  const dialog = await screen.findByRole("dialog");
-  expect(screen.getAllByRole("dialog")).toHaveLength(1);
-  expect(dialog).toHaveTextContent("pu-mop-1");
-  expect(dialog).toHaveTextContent("hyper");
-  expect(dialog).toHaveTextContent("free (master)");
-  expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  // диалог -- только ход операции, не подтверждение
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
+    method: "POST", credentials: "same-origin" })));
+  expect(screen.queryByText(/подтвердите рестарт/i)).toBeNull();
 });
 
-test.each(["target", "role", "login"])("stale restart confirm after %s change rides nowhere", (change) => {
-  vi.stubGlobal("fetch", vi.fn());
+test.each(["target", "role", "login"])("stale restart op after %s change rides nowhere", async (change) => {
+  const fetchMock = vi.fn(async () => new Promise<Response>(() => {}));
+  vi.stubGlobal("fetch", fetchMock);
   const view = renderUi(<PoolTable projects={projects} session={ADMIN} />);
   fireEvent.click(screen.getByRole("button", { name: "рестарт" }));
-  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
   view.rerender(<MantineProvider><PoolTable projects={change === "target" ? [] : projects}
     session={change === "role" ? { login: null, role: null }
       : change === "login" ? { ...ADMIN, login: "other" } : ADMIN} /></MantineProvider>);
-  expect(screen.queryByRole("dialog")).toBeNull();
-  expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  // смена источника стирает ход: диалог операции закрыт (#513: моды
+  // подтверждения больше нет, stale-проверка смотрит на ход)
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
 test("the row offers update with explicit fresh modes", () => {
