@@ -581,6 +581,80 @@ def main():
     c.check("#468 no fresh signal in time reads unknown",
             v.get("outcome") == ops.UNKNOWN, v)
 
+    # ── окно после рестарта (#501): tmux жив, телеметрии ещё нет ────────
+    # HYPOTHESIS: между эффектом рестарта и появлением телеметрии новой
+    # сессии есть окно (онбординг claude: sessions/<pid>.json с
+    # messagingSocketPath пишется позже подсказок, statusline -- ещё
+    # позже). В нём states отвечает present True без живой записи, и
+    # смена модели сразу после рестарта из GUI отказывала «no live
+    # session to switch» -- как будто папет выключен, хотя сессия
+    # поднимается, и через полминуты та же операция проходит.
+    # SOLUTION: refusal «сессии нет» различает два факта: tmux мёртв
+    # (present False -- прежний отказ, переключать нечего) и tmux жив,
+    # телеметрии ещё нет (present True, живой записи нет -- retry-окно
+    # read до observe_wait, в котором база появляется; не отказ до
+    # эффекта, а ожидание в операции). Никаких новых глаголов и настроек:
+    # срок -- существующий observe_wait. Подтверждение ниже считывает
+    # свежую базу как sessionId-базу той же сессии.
+    # RESULT: первый прогон красный -- «refused: no live session to
+    # switch» на present True без state; STATUS: FIXED -- see #501.
+
+    # -- база: present True, state нет -- retry-окно, не отказ ----------
+    # Сеанс поднимается: первый read без живой записи, второй -- с ней.
+    # Часы ступенями: sleep(2) двигает на 2; observe_wait=60 -- окно
+    # открыто, база читается, эффект идёт.
+    def rising_reader(node, name):
+        rising["n"] += 1
+        rec = None if rising["n"] == 1 else {**LIVE, "model": "claude-opus-5-5",
+                                             "model_at": 3000}
+        row = {"present": True, "session": "idle 1 1", "clone": None}
+        if rec is not None:
+            row["state"] = rec
+        return {"puppets": {name: row}}
+    rising = {"n": 0}
+    seen.clear()
+    window = {"t": 3000}
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=rising_reader,
+                         now=lambda: window["t"], switcher=switcher,
+                         fresh_within=1200, observe_wait=60,
+                         sleep=lambda s: window.update(t=window["t"] + s))
+    c.check("#501 a live tmux with no telemetry yet opens a retry window, not a refusal",
+            v.get("outcome") != ops.REFUSED
+            and "no live session" not in (v.get("error") or ""),
+            (v, seen))
+    c.check("#501 the retry window ends in a fresh base and the effect fires",
+            seen.get("switched") == "glm-5.3", seen)
+
+    # -- тот же факт, но окно закрылось: телеметрии нет за observe_wait --
+    # Отказ по-прежнему честен, но словами «телеметрии нет за срок», не
+    # «сессии нет вообще».
+    def never_reader(node, name):
+        return {"puppets": {name: {"present": True, "session": "idle 1 1",
+                                   "clone": None}}}
+    seen.clear()
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=never_reader,
+                         now=lambda: 3000, switcher=switcher,
+                         observe_wait=0, sleep=nosleep)
+    c.check("#501 a closed window still refuses, naming the missing telemetry",
+            v.get("outcome") == ops.REFUSED
+            and "no live session" not in v.get("error", "")
+            and v.get("error") is not None, v)
+
+    # -- контроль: мёртвый tmux -- прежний отказ -------------------------
+    def dead_reader(node, name):
+        return {"puppets": {name: {"present": False}}}
+    seen.clear()
+    v = ops.switch_model(fake.node, "node-1", "pu-x-1", "glm-5.3",
+                         session_reader=dead_reader,
+                         now=lambda: 3000, switcher=switcher,
+                         observe_wait=60, sleep=nosleep)
+    c.check("#501 a dead tmux keeps the old refusal",
+            v.get("outcome") == ops.REFUSED
+            and "no live session" in v.get("error", "") and not seen,
+            (v, seen))
+
     return c.report("ops")
 
 
