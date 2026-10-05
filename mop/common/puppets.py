@@ -215,7 +215,12 @@ def roster(stale=False):
         now = time.time()
         for i in its:
             f = seen.get(i["job"]["ID"])
-            _judge(i, verdict(f))
+            # Сводка задачи -- в факты для вердикта (#510): возраст попытки
+            # решает, «поднимается» папет или уже «нет tmux session».
+            # Аллокации нет -- сводки нет, вердикт сам знает, что делать.
+            if f is not None and not f.get("error"):
+                f = {**f, "task": i.get("task")}
+            _judge(i, verdict(f, now))
             i["owner"] = owner_of(f, now)
             # Модель сессии -- тем же ходом, что владелец (#454): считается
             # здесь из фактов, _row только читает.
