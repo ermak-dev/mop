@@ -117,3 +117,80 @@ test("#452 a transition snapshot without the new fields still renders", () => {
   renderUi(<PoolTable projects={old} />);
   expect(screen.getByText("нет данных")).toBeInTheDocument();
 });
+
+// ── #504: unknown-карточка цели из SSE-канала вердиктов ────────────────
+// HYPOTHESIS: операция с исходом unknown молчала -- вердикт жил только в
+// памяти кнопки, строка цели о нём не знала; повторить операцию человек
+// мог, не зная, что прежняя ещё неизвестна. SOLUTION: строка цели с
+// терминальным вердиктом канала (#504) рисует карточку исхода; unknown --
+// жёлтым со ссылкой в журнал, автоповтора на unknown нет (#476).
+// RESULT: тесты написаны до реализации (RED).
+import type { TargetVerdict } from "../useOperationFeed";
+import type { Session } from "../useSession";
+
+const ADMIN: Session = { login: "anton", role: "admin" };
+
+const UNKNOWN: Project[] = [{
+  name: "mop",
+  counts: { puppets: 1, free: 1, busy: 0, sick: 0, silent: 0, down: 0 },
+  puppets: [{
+    name: "pu-mop-1", node: "hyper", alloc_status: "running", state: "free (master)",
+    kind: "free", bucket: "free", detail: null, branch: "master",
+    owner: "", llm: "claude", origin: "git@h:g/mop.git", disk_kb: null }],
+}];
+
+const v = (status: string, extra: Partial<TargetVerdict> = {}): TargetVerdict =>
+  ({ status, id: "op-1", error: null, lostVerdict: false, action: "restart", ...extra });
+
+test("#504 an unknown verdict draws the target card with a journal link", () => {
+  renderUi(<PoolTable projects={UNKNOWN} session={ADMIN}
+                      verdicts={{ "pu-mop-1": v("unknown") }} />);
+  // Карточка на строке цели: слово канала, ссылка в журнал.
+  const card = screen.getByTestId("target-verdict-pu-mop-1");
+  expect(card).toHaveTextContent("исход неизвестен");
+  expect(card).toHaveTextContent("смотри журнал");
+  const link = within(card).getByRole("link", { name: /журнал/i });
+  expect(link).toHaveAttribute("href", "#journal");
+});
+
+test("#504 the card names a lost verdict, not a server refusal", () => {
+  renderUi(<PoolTable projects={UNKNOWN} session={ADMIN}
+                      verdicts={{ "pu-mop-1": v("unknown", { lostVerdict: true }) }} />);
+  const card = screen.getByTestId("target-verdict-pu-mop-1");
+  expect(card).toHaveTextContent("исход неизвестен");
+  // Потерянный вердикт -- не отказ сервера: фразы отказа на карточке нет.
+  expect(card).not.toHaveTextContent("отказано");
+});
+
+test("#504 no retry on unknown: the card carries no operation button", () => {
+  renderUi(<PoolTable projects={UNKNOWN} session={ADMIN}
+                      verdicts={{ "pu-mop-1": v("unknown") }} />);
+  const card = screen.getByTestId("target-verdict-pu-mop-1");
+  expect(within(card).queryByRole("button")).toBeNull();
+});
+
+test("#504 a settled verdict draws its own word, not the unknown card", () => {
+  renderUi(<PoolTable projects={UNKNOWN} session={ADMIN}
+                      verdicts={{ "pu-mop-1": v("succeeded") }} />);
+  const card = screen.getByTestId("target-verdict-pu-mop-1");
+  expect(card).toHaveTextContent("выполнено");
+  expect(card).not.toHaveTextContent("исход неизвестен");
+});
+
+test("#504 a target without a verdict draws no card", () => {
+  renderUi(<PoolTable projects={UNKNOWN} session={ADMIN} verdicts={{}} />);
+  expect(screen.queryByTestId("target-verdict-pu-mop-1")).toBeNull();
+});
+
+test("#504 the card follows the row, not the page: another target stays clean", () => {
+  const two: Project[] = [{
+    name: "mop",
+    counts: { puppets: 2, free: 2, busy: 0, sick: 0, silent: 0, down: 0 },
+    puppets: [UNKNOWN[0].puppets[0],
+      { ...UNKNOWN[0].puppets[0], name: "pu-mop-2", node: "gpu" }],
+  }];
+  renderUi(<PoolTable projects={two} session={ADMIN}
+                      verdicts={{ "pu-mop-1": v("unknown") }} />);
+  expect(screen.getByTestId("target-verdict-pu-mop-1")).toBeInTheDocument();
+  expect(screen.queryByTestId("target-verdict-pu-mop-2")).toBeNull();
+});

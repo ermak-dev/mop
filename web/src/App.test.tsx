@@ -1,5 +1,5 @@
 // Скелет (#297): шапка и счётчики корзин из снимка.
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 import App from "./App";
 import { emptySnapshot, renderUi } from "./test-utils";
@@ -9,7 +9,14 @@ const SNAP = emptySnapshot({
   counts: { puppets: 3, free: 1, busy: 2, sick: 0, silent: 0, down: 0 },
 });
 
-vi.mock("./usePool", () => ({ usePool: () => ({ snapshot: SNAP }) }));
+// Снимок -- состояние теста (#504): проверка вердиктов подменяет его,
+// остальной файл живёт с дефолтным SNAP (тот же приём, что state у мока
+// useSession ниже). Фабрика vi.mock поднимается выше const SNAP, поэтому
+// держатель -- vi.hoisted, а сам SNAP читается только в момент вызова.
+const poolState = vi.hoisted(() => ({ snap: null as import("./types").Snapshot | null }));
+vi.mock("./usePool", () => ({
+  usePool: () => ({ snapshot: poolState.snap ?? SNAP }),
+}));
 
 // #416: сессия -- гость по умолчанию, тест меняет состоянием модуля.
 vi.mock("./useSession", async () => {
@@ -301,4 +308,44 @@ test("#472 the add-puppet button shows only to the admin", async () => {
   await screen.findByText("olga");
   expect(screen.queryByRole("button", { name: /завести папета/i })).toBeNull();
   box2.unmount();
+});
+
+// ── #504: вердикт приезжает кадром SSE и рисует unknown-карточку цели ───
+// HYPOTHESIS: страница узнавала терминал только опросом GET; операция с
+// исходом unknown молчала и на строке цели не показывалась. SOLUTION: App
+// держит канал кадров (useOperationFeed), кадр unknown рисует карточку
+// цели в таблице со ссылкой в журнал; опрос статуса операции не ходит.
+// RESULT: тесты написаны до реализации (RED).
+import { act } from "@testing-library/react";
+import { operations } from "./useOperationFeed";
+
+const WITH_PUPPET = emptySnapshot({
+  at: 1,
+  projects: [{ name: "mop",
+    counts: { puppets: 1, free: 1, busy: 0, sick: 0, silent: 0, down: 0 },
+    puppets: [{ name: "pu-mop-1", node: "hyper", alloc_status: "running",
+      state: "free (master)", kind: "free", bucket: "free", detail: null,
+      branch: "master", owner: "", llm: "claude",
+      origin: "git@h:g/mop.git", disk_kb: null }] }],
+});
+
+test("#504 an unknown SSE frame draws the target card on the pool table", async () => {
+  // Снимок с папетом -- состоянием теста (poolState), в конце файл
+  // возвращается к дефолтному SNAP.
+  poolState.snap = WITH_PUPPET;
+  reset({ login: "anton", role: "admin" });
+  renderUi(<App />);
+  await screen.findByText("pu-mop-1");
+  // Кадр unknown по цели -- карточка на строке со ссылкой в журнал.
+  // Разбор SSE живёт в usePool (проверен своим файлом); здесь кадр
+  // входит шиной канала -- тот же вход, что даёт слушатель потока.
+  await act(async () => {
+    operations.frame({ id: "op-7", action: "restart",
+                       target: "pu-mop-1", status: "unknown" });
+  });
+  const card = await screen.findByTestId("target-verdict-pu-mop-1");
+  expect(card).toHaveTextContent("исход неизвестен");
+  expect(within(card).getByRole("link", { name: /журнал/i }))
+    .toHaveAttribute("href", "#journal");
+  poolState.snap = null;
 });

@@ -3,8 +3,11 @@
 // сам переподключается, но пока сервер лежит, страница обязана хоть что-то
 // показывать -- на обрыве потока включается опрос раз в десять секунд, а с
 // первым кадром потока опрос выключается.
+// Кадры `operation` (#504) идут тем же потоком: этот хук -- единственный
+// владелец соединения, и разбор кадров -- здесь, второй поток не заводится.
 import { useEffect, useState } from "react";
 import type { Snapshot } from "./types";
+import { onOperationEvent } from "./useOperationFeed";
 
 export const POLL_MS = 10_000;
 
@@ -27,6 +30,8 @@ export function usePool(): Pool {
       setSnapshot(JSON.parse((e as MessageEvent).data) as Snapshot);
       stopPolling();
     });
+    // Терминалы операций (#504) -- тем же потоком: канал вердиктов.
+    es.addEventListener("operation", onOperationEvent);
     es.onerror = () => poll();
     return () => { closed = true; es.close(); stopPolling(); };
   }, []);

@@ -1,17 +1,23 @@
 // Операция админа (#465): POST /api/admin/ops {action,target,params} ->
-// 202 {id} -> опрос GET /api/admin/ops/<id> до терминала. Модель статусов
-// -- #476: queued/running/accepted -- ждём, succeeded/refused/failed/
-// partial/unknown -- терминал; unknown НЕ failed (эффекта могли и не
-// быть), автоповтора нет -- повтор только решением админа. Идемпотентность
-// -- сервер (#461): тот же payload -- тот же id; клиент не плодит второй
+// 202 {id} -> один GET сразу после 202 (мгновенные refused, waiting/
+// running на момент подачи), дальше терминал приезжает кадром SSE
+// `operation` (#504 useOperationFeed -- канал держит App и раздаёт
+// операциям по id); потерянный терминал покрывает таймер канала
+// (серверный потолок эффекта), не эта петля. Модель статусов -- #476:
+// queued/running/accepted -- ждём, succeeded/refused/failed/partial/
+// unknown -- терминал; unknown НЕ failed (эффекта могли и не быть),
+// автоповтора нет -- повтор только решением админа. Идемпотентность --
+// сервер (#461): тот же payload -- тот же id; клиент не плодит второй
 // POST: двойной под и повтор при живой задаче возвращают тот же id.
 // Смена источника (роль, цель) стирает операцию в тот же рендер; 202,
-// опоздавший за сменой, не начинает опрос. Потерянный первый ответ
+// опоздавший за сменой, не начинается вовсе. Потерянный первый ответ
 // (сбой сети, 202 без id) -- unknown без id: ни эффекта, ни отказа,
-// автоповтора тем более. Результат живёт в памяти страницы (#465,
-// первый выпуск): перезагрузка начинает заново.
+// автоповтора тем более (#504: без id нет ни операции, ни таймера).
+// Результат живёт в памяти страницы (#465, первый выпуск): перезагрузка
+// начинает заново.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Session } from "./useSession";
+import { operations } from "./useOperationFeed";
 
 export interface AdminOpState {
   /** idle -> submitted -> accepted -> queued/running -> терминал/unknown. */
@@ -26,13 +32,11 @@ export interface AdminOpState {
 
 /** Терминальные статусы (#476). unknown -- терминал, но НЕ failed. */
 export const TERMINAL = new Set(["succeeded", "refused", "failed", "partial", "unknown"]);
-const POLL_MS = 1000;
 
 /** Слова отказов страницы (#463 -- тот же словарь слов, не второй). */
 const DENIED = "операция недоступна: прав не хватает";
 
-export function useAdminOp(session: Session, target: string | null,
-                           pollMs = POLL_MS) {
+export function useAdminOp(session: Session, target: string | null) {
   const [op, setOp] = useState<AdminOpState>(
     { status: "idle", id: null, error: null, lost: false });
   const seq = useRef(0);
@@ -107,54 +111,51 @@ export function useAdminOp(session: Session, target: string | null,
     return ride;
   }, [session.role, target, op.id, op.status]);
 
-  // Опрос результата: только пока есть id и статус не терминальный.
-  // Первый GET -- сразу: 202 ещё ничего не значил, и бессмысленно ждать
-  // интервал до первой правды.
+  // Единственный GET после 202 (#504): ловит мгновенный refused и статусы
+  // на момент подачи (waiting/running); дальше терминал ждут кадром.
+  // Зависимость -- только id: повторный рендер со сменой промежуточного
+  // статуса не рождает второй GET. «not found» -- запись вытекла: правда
+  // -- журнал, это unknown.
   useEffect(() => {
     if (!op.id || TERMINAL.has(op.status)) return;
     let alive = true;
-    let misses = 0;
-    const tick = async () => {
-      while (alive) {
-        try {
-          const r = await fetch(`/api/admin/ops/${op.id}`,
-                                { credentials: "same-origin" });
-          if (!alive) return;
-          if (!r.ok) {
-            misses += 1;
-            if (misses >= 3) {
-              setOp({ status: "unknown", id: op.id, error: null, lost: false });
-              return;
-            }
-          } else {
-            misses = 0;
-            const body = (await r.json()) as { status?: string; error?: string };
-            if (!alive) return;
-            const status = body.status ?? "";
-            if (status === "not found") {
-              // Запись вытекла/очищена: ни эффекта, ни отказа не известно.
-              setOp({ status: "unknown", id: op.id, error: null, lost: false });
-              return;
-            }
-            if (TERMINAL.has(status)) {
-              setOp({ status, id: op.id, error: body.error ?? null, lost: false });
-              return;
-            }
-            if (status) setOp((o) => ({ ...o, status }));
-          }
-        } catch {
-          misses += 1;
-          if (misses >= 3) {
-            if (alive) setOp({ status: "unknown", id: op.id, error: null, lost: false });
-            return;
-          }
+    const at = op.id;
+    operations.accepted(target, at);
+    (async () => {
+      try {
+        const r = await fetch(`/api/admin/ops/${at}`,
+                              { credentials: "same-origin" });
+        if (!alive || !r.ok) return;
+        const body = (await r.json()) as { status?: string; error?: string };
+        if (!alive) return;
+        const status = body.status ?? "";
+        if (status === "not found") {
+          // Запись вытекла/очищена: ни эффекта, ни отказа не известно.
+          operations.expired(target, at);
+          setOp((o) => o.id === at ? { status: "unknown", id: at, error: null, lost: false } : o);
+        } else if (TERMINAL.has(status)) {
+          operations.observed(target, at, status, body.error ?? null);
+          setOp((o) => o.id === at
+            ? { status, id: at, error: body.error ?? null, lost: false } : o);
+        } else if (status) {
+          operations.observed(target, at, status, null);
+          setOp((o) => o.id === at && !TERMINAL.has(o.status)
+            ? { ...o, status } : o);
         }
-        await new Promise((res) => setTimeout(res, pollMs));
-      }
-    };
-    void tick();
+      } catch { /* GET не прошёл -- терминал ждём кадром (#504) */ }
+    })();
     return () => { alive = false; };
-  }, [op.id, op.status, pollMs]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [op.id]);
+
+  // Терминальный кадр канала (#504): своя операция по id доходит до
+  // вердикта без всякого опроса. Чужой id молчит.
+  useEffect(() => operations.subscribe((f) => {
+    if (!TERMINAL.has(f.status)) return;
+    setOp((o) => o.id === f.id && !TERMINAL.has(o.status)
+      ? { status: f.status, id: o.id, error: f.error ?? null, lost: false }
+      : o);
+  }), []);
 
   return { op, submit };
 }
