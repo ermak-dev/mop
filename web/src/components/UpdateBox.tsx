@@ -15,6 +15,7 @@ import { useState } from "react";
 import { IconSettings } from "@tabler/icons-react";
 import { IconButton } from "./IconButton";
 import { OperationResult } from "./OperationResult";
+import { useSignal, type Signal } from "./ControlWindow";
 import { Button, Code, Group, Modal, Radio, Stack, Text, TextInput } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -48,10 +49,14 @@ const MODES: Record<string, { label: string; lines: string[] }> = {
   },
 };
 
-export function UpdateBox({ session, row }: {
+export function UpdateBox({ session, row, icon = true, signal = null }: {
   session: Session;
   /** Строка ростера: подтверждение показывает её факты, origin -- hers. */
   row: Puppet;
+  /** Кожа иконки в строке (#516): пункт окна шлёт сигнал без иконки. */
+  icon?: boolean;
+  /** Сигнал-токен пункта окна (#516): срабатывание по изменению. */
+  signal?: Signal;
 }) {
   const { op, submit } = useAdminOp(session, session.role === "admin" ? row.name : null);
   const [mode, setMode] = useState<keyof typeof MODES | null>(null);
@@ -61,6 +66,10 @@ export function UpdateBox({ session, row }: {
   const [confirm, setConfirm] = useState(false);
   const live = op.status !== "idle" && !TERMINAL.has(op.status);
   if (session.role !== "admin") return null;
+  // Вход (#516): пункт окна или иконка строки -- один и тот же ход:
+  // живой ход показывает результат, свободный бокс открывает форму.
+  const enter = () => { if (op.status !== "idle") setResult(true); else setOpen(true); };
+  useSignal(signal, enter);
   const ready = mode !== null && (mode !== "remove" || origin.trim() !== "");
   const params = mode === "keep" ? { fresh: false }
     : mode === "replace" ? { fresh: true }
@@ -81,10 +90,11 @@ export function UpdateBox({ session, row }: {
   return (
     <Group gap="sm">
       {/* «правка», не «обновить»: слово занято обновлением хвоста экрана */}
-      <IconButton label="правка" variant="subtle" size="lg"
-              onClick={() => { if (op.status !== "idle") setResult(true); else setOpen(true); }}>
-        <IconSettings size={18} />
-      </IconButton>
+      {icon && (
+        <IconButton label="правка" variant="subtle" size="lg" onClick={enter}>
+          <IconSettings size={18} />
+        </IconButton>
+      )}
       <OperationResult opened={result} onClose={() => setResult(false)}
         onAgain={() => { setResult(false); setOpen(true); }} title="правка папета"
         target={row.name} op={op} word={opWord(op.status)} testId="update-verdict" />

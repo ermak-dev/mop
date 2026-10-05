@@ -25,7 +25,10 @@ test("#513 the restart click posts at once from the row", async () => {
     json: async () => ({ id: "op-1", status: "accepted" }) }) as Response);
   vi.stubGlobal("fetch", fetchMock);
   renderUi(<PoolTable projects={projects} session={ADMIN} />);
-  fireEvent.click(screen.getByRole("button", { name: "рестарт" }));
+  // вход #516: строка -> окно правки -> пункт рестарта
+  fireEvent.click(screen.getByRole("button", { name: "правка" }));
+  const win = await screen.findByTestId("control-window");
+  fireEvent.click(within(win).getByRole("button", { name: "рестарт" }));
   // диалог -- только ход операции, не подтверждение
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
     method: "POST", credentials: "same-origin" })));
@@ -36,7 +39,9 @@ test.each(["target", "role", "login"])("stale restart op after %s change rides n
   const fetchMock = vi.fn(async () => new Promise<Response>(() => {}));
   vi.stubGlobal("fetch", fetchMock);
   const view = renderUi(<PoolTable projects={projects} session={ADMIN} />);
-  fireEvent.click(screen.getByRole("button", { name: "рестарт" }));
+  fireEvent.click(screen.getByRole("button", { name: "правка" }));
+  const win = await screen.findByTestId("control-window");
+  fireEvent.click(within(win).getByRole("button", { name: "рестарт" }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalled());
   view.rerender(<MantineProvider><PoolTable projects={change === "target" ? [] : projects}
     session={change === "role" ? { login: null, role: null }
@@ -49,6 +54,8 @@ test.each(["target", "role", "login"])("stale restart op after %s change rides n
 test("the row offers update with explicit fresh modes", () => {
   renderUi(<PoolTable projects={projects} session={ADMIN} />);
   fireEvent.click(screen.getByRole("button", { name: "правка" }));
+  const win = screen.getByTestId("control-window");
+  fireEvent.click(within(win).getByRole("button", { name: "правка" }));
   const dialog = screen.getByRole("dialog");
   for (const m of ["как было", "свежий клон", "другой origin"]) {
     expect(within(dialog).getByRole("radio", { name: new RegExp(m, "i") })).toBeInTheDocument();
