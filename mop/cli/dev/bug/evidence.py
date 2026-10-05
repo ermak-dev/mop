@@ -13,9 +13,6 @@ from mop.common import context
 from mop.cli.dev.bug._common import parser
 
 
-MCP = {"annotations": "destructive", "args": [
-    {"name": "iid", "type": "string", "required": True, "help": "issue number"}]}
-
 REF_LIMIT = 500
 INTEGRATION_LIMIT = 40
 MERGE_LIMIT = 80

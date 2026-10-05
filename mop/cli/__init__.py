@@ -86,8 +86,10 @@ def _tree(path):
     return out
 
 
-# Приватные пространства не попадают в MCP целиком (#253); отдельные
-# объявленные листья доступны мастеру (#443), прочие остаются скрытыми.
+# Пространства команд, которых нет в MCP (#253): внутренние команды
+# разработчика (трекер, CI) модель зовёт из шелла мастера (#450), и группа
+# закрыта целиком (#515): координаты трекера резолвятся из origin пакета,
+# и объявленный лист уводил мастера чужого проекта в трекер mop.
 PRIVATE = ("dev",)
 
 # Прежние имена команд -> новые слова (#253): переезд команды в пространство
@@ -231,18 +233,16 @@ def declared(path):
 def tool_commands(found, group_verbs, private=PRIVATE):
     """[(каталог, имя, подпакет?)] -> [(имя инструмента, слова команды,
     путь модуля)]. Группа -- сама и каждый её глагол, вглубь (#253):
-    `node_drain`, `server_user_add`. В private видны только листья с MCP."""
+    `node_drain`, `server_user_add`. Пространства из private пропускаются
+    целиком, декларация листа дверь не открывает (#515)."""
     out = []
     for section, name, is_pkg in found:
+        if section in private:
+            continue
         if not is_pkg:
-            path = _path_of(section, name, False)
-            if section not in private or declared(path) is not None:
-                out.append((name, [name], path))
+            out.append((name, [name], _path_of(section, name, False)))
         else:
-            entries = _tools_of([section], group_verbs.get(section) or {}, True)
-            out += [(tool, words, path) for tool, words, path in entries
-                    if section not in private or
-                    (not path.endswith("__init__.py") and declared(path) is not None)]
+            out += _tools_of([section], group_verbs.get(section) or {}, True)
     return out
 
 

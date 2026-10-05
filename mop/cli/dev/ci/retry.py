@@ -6,10 +6,6 @@ the new job's id and url; a pipeline retry prints the pipeline's.
 from mop.common import gitlab
 from mop.cli.dev.ci._common import parser
 
-MCP = {"annotations": "destructive", "args": [
-    {"name": "job", "type": "string"},
-    {"name": "pipeline", "type": "integer", "flag": "--pipeline"}]}
-
 
 def main(argv):
     p = parser("retry")

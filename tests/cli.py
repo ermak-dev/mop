@@ -1386,7 +1386,7 @@ def main():
     # STATUS: FIXED — see #111
 
     check_mcp_declarations(c)
-    check_dev_mcp_443(c)
+    check_dev_mcp_515(c)
     check_mcp_positional_refusal_438(c)
     check_refusals(c)
     check_refusals_163(c)
@@ -1584,16 +1584,14 @@ def check_evidence_444(c):
 def check_evidence_tool_444(c):
     from mop.cli.dev.bug import evidence
     from mop.common import context
+    # #515: dev не экспонируется в MCP -- декларации evidence больше нет;
+    # сам командлет и его осторожность с local refs остаются CLI мастера.
     path = evidence.__file__
-    decl = cli.declared(path)
-    c.expect("#444 evidence fetch mutates local refs, not readonly", decl,
-             {"annotations": "destructive", "args": [
-                 {"name": "iid", "type": "string", "required": True,
-                  "help": "issue number"}]})
+    c.check("#444 evidence carries no MCP declaration after #515",
+            cli.declared(path) is None)
     exposed = {n: words for n, words, _ in cli.tool_commands(cli.scan(), cli.verbs())
                if n.startswith("dev_")}
-    c.expect("#444 evidence uses developer leaf discovery", exposed.get("dev_bug_evidence"),
-             ["dev", "bug", "evidence"])
+    c.expect("#515 evidence stays out of the MCP catalog", exposed, {})
 
     # Ложный merge: ветка уже в первом родителе, второй — чужая работа.
     # Заголовок второго с именем задачи не доказывает её интеграцию.
@@ -1685,91 +1683,81 @@ def check_evidence_tool_444(c):
                 code != 0 and not out and "iid must be" in err,
                 (out, err[:100], code))
 
-def check_dev_mcp_443(c):
-    """HYPOTHESIS: private dev скрывает объявленные листья, stdin закрыт.
-    SOLUTION: только объявленные листья видны; массив меток и --body доступны.
-    RESULT: мастер зовёт командлеты без переключения своей ветки.
-    STATUS: FIXED — see #443"""
+def check_dev_mcp_515(c):
+    """#515: приватная группа dev не экспонируется в MCP вовсе.
+
+    HYPOTHESIS: координаты трекера резолвятся из origin пакета mop, не из
+    cwd сессии мастера -- мастер чужого проекта через dev_bug_*/dev_ci_*
+    попадал в трекер mop (#515). SOLUTION: группа dev закрыта в MCP
+    целиком: declared-фильтр в tool_commands упразднён, декларации из
+    листьев удалены; трекер и CI остаются CLI мастера (исключение #450).
+    RESULT: в экспозиции нет ни одного dev-инструмента, командлеты живы.
+    STATUS: FIXED — see #515"""
     import io
     import inspect
     from mop.cli.dev.bug import new, edit
     from mop.cli.service import mcp
     from mop.common import gitlab
 
-    bug = ("list", "show", "epic", "labels", "new", "edit", "comment",
-           "start", "close", "relabel", "evidence")
-    ci = ("list", "show", "why", "log", "retry")
-    expected = {f"dev_bug_{x}" for x in bug} | {f"dev_ci_{x}" for x in ci}
-    tools = {n: (words, cli.declared(path)) for n, words, path in
-             cli.tool_commands(cli.scan(), cli.verbs()) if cli.declared(path) is not None}
-    c.expect("#443 exact declared developer leaves", {n for n in tools if n.startswith("dev_")}, expected)
+    # Экспозиция собирается обходом дерева: приватная группа не входит в
+    # неё ни группой, ни листом -- независимо от деклараций (#515).
+    tools = {n: words for n, words, path in
+             cli.tool_commands(cli.scan(), cli.verbs())}
+    c.check("#515 no developer tool is exposed", not (any(
+        n == "dev" or n.startswith("dev_") for n in tools)),
+        f"{sorted(n for n in tools if n == 'dev' or n.startswith('dev_'))}")
+    # Дверь закрыта на уровне группы: даже объявление MCP в dev-листе не
+    # пробивает её обратно (#515). Дверь «объявить = экспонировать» для
+    # остальных групп остаётся единственным инвариантом.
+    declared_leaf = os.path.join(cli.PACKAGE, "dev", "bug", "list.py")
+    c.check("#515 no developer leaf carries an MCP declaration",
+            cli.declared(declared_leaf) is None)
     calls = []
     with patched(mcp, MASTER=False, command_tool=lambda *args: calls.append(args)):
         mcp.command_tools()
-    c.expect("#443 node profile has no developer tools", calls, [])
-    for name in expected & tools.keys():
-        words, decl = tools[name]
-        c.check(f"#443 {name} uses its commandlet with explicit annotation",
-                words == name.split("_") and decl.get("annotations") in
-                ("readonly", "destructive"))
-    for name in ("dev", "dev_bug", "dev_ci", "dev_test", "dev_docs", "dev_web",
-                 "dev_web_build", "dev_ci_cancel", "dev_ci_lint", "dev_ci_runners"):
-        c.check(f"#443 {name} stays hidden", name not in tools)
-    if "dev_bug_start" in tools:
-        start_args = tools["dev_bug_start"][1]["args"]
-        c.check("#443 start requires no-branch to protect checkout",
-                any(a.get("flag") == "--no-branch" and a.get("required")
-                    for a in start_args))
-        for value in (None, False):
-            try:
-                cli.tool_argv(start_args, {"iid": "443", "no_branch": value})
-            except ValueError:
-                pass
-            else:
-                c.fail(f"#443 start accepted no_branch={value!r}")
-        c.expect("#443 start keeps checkout untouched", cli.tool_argv(start_args, {
-            "iid": "443", "no_branch": True}), ["443", "--no-branch"])
-    for name in ("dev_bug_list", "dev_bug_new", "dev_bug_relabel"):
-        if name not in tools:
-            continue
-        args = tools[name][1]["args"]
+    c.expect("#515 node profile has no developer tools", calls, [])
+    # Профиль мастера собирает каталог тем же обходом: пока что не
+    # смотря на PROFILE, проверяем состав выше -- повторять его здесь
+    # значило бы вторую копию списка.
+    # Командлеты остаются рабочим CLI: characterization ниже -- те же
+    # вызовы, что были зелёными до #515 (#443), ничего не ослаблено.
+
+    # ── перенесено из #443: поведение самого механизма объявлений ──────
+    # repeatable остаётся механизмом адаптера; его последние живые
+    # пользователи ушли вместе с dev-декларациями, поэтому контракт --
+    # синтетическим объявлением.
+    d = tempfile.mkdtemp(prefix="mop-test-mcp-515-")
+    p = os.path.join(d, "x.py")
+    with open(p, "w") as f:
+        f.write('"""x"""\n'
+                'MCP = {"args": [{"name": "label", "type": "string", '
+                '"flag": "--label", "repeatable": True}]}\n')
+    decl = cli.declared(p)
+    c.check("#515 repeatable declaration reads", isinstance(decl, dict))
+    if isinstance(decl, dict):
         values = {"label": ["sev::low", "component::cli"]}
-        if name == "dev_bug_new":
-            values.update(title="Задача", body="Тело")
-        elif name == "dev_bug_relabel":
-            values["iid"] = "443"
-        rendered = cli.tool_argv(args, values)
-        c.expect(f"#443 repeatable {name} labels",
-                 [rendered[i:i+2] for i, item in enumerate(rendered) if item == "--label"],
-                 [["--label", "sev::low"], ["--label", "component::cli"]])
+        c.expect("#515 repeatable renders a flag per value",
+                 cli.tool_argv(decl["args"], values),
+                 ["--label", "sev::low", "--label", "component::cli"])
         for bad in ("sev::low", ["sev::low", 4]):
             try:
-                cli.tool_argv(args, {**values, "body": "Тело", "label": bad})
+                cli.tool_argv(decl["args"], {"label": bad})
             except ValueError:
                 pass
             else:
-                c.fail(f"#443 {name} accepted non-list label {bad!r}")
-    for name in ("dev_bug_new", "dev_bug_edit"):
-        if name in tools:
-            c.check(f"#443 {name} takes body inline",
-                    any(a.get("flag") == "--body" for a in tools[name][1]["args"]))
-    if "dev_bug_new" in tools:
-        new_args = tools["dev_bug_new"][1]["args"]
-        c.check("#443 MCP new requires body rather than reading DEVNULL",
-                any(a.get("flag") == "--body" and a.get("required") for a in new_args))
-        try:
-            cli.tool_argv(new_args, {"title": "Задача"})
-        except ValueError:
-            pass
-        else:
-            c.fail("#443 MCP new accepted missing body")
-    if "dev_bug_list" in tools:
-        captured = []
-        with patched(mcp.app, add_tool=lambda fn, **kw: captured.append(fn)):
-            mcp.command_tool("test_443_labels", ["dev", "bug", "list"],
-                             "dev/bug/list.py", tools["dev_bug_list"][1])
-        hint = inspect.signature(captured[0]).parameters["label"].annotation
-        c.check("#443 MCP signature has typed list labels", "list[str]" in str(hint), str(hint))
+                c.fail(f"#515 repeatable accepted non-list label {bad!r}")
+        for bad in (["-x", "ok"], ["ok", "--flag"]):
+            try:
+                cli.tool_argv(decl["args"], {"label": bad})
+            except ValueError:
+                pass
+            else:
+                c.fail(f"#515 repeatable accepted dash-prefixed {bad!r}")
+
+    # ── characterization: командлеты dev живут как CLI и после #515 ────
+    # Те же вызовы, что были зелёными в #443: тело из --body без stdin,
+    # эпик сохраняется при правке, пустое тело отклоняет, второго
+    # источника тела не бывает. Экспозиция ушла, поведение осталось.
     calls = []
     with patched(sys, stdin=io.StringIO("WRONG STDIN")), \
             patched(gitlab, create=lambda *a: calls.append(a) or {"iid": 443, "web_url": "url"}):
@@ -1783,17 +1771,7 @@ def check_dev_mcp_443(c):
         run_command(edit.main, ["443", "--body", "Новый текст"])
     c.expect("#443 edit inline body keeps epic", calls,
              [("443", None, gitlab.replace_body("<!-- epic:12 -->\nold", "Новый текст", gitlab.KEEP))])
-    # HYPOTHESIS: пробельное --body после strip открывает пустую задачу.
-    # SOLUTION: пустое тело отклоняет и MCP, и командлет, до вызова трекера.
-    if "dev_bug_new" in tools:
-        for empty in ("", "   \n"):
-            try:
-                cli.tool_argv(tools["dev_bug_new"][1]["args"],
-                              {"title": "Задача", "body": empty})
-            except ValueError:
-                pass
-            else:
-                c.fail(f"#443 MCP accepted empty issue body {empty!r}")
+    # Пустое тело отклоняет сам командлет, до вызова трекера (#443).
     calls.clear()
     with patched(gitlab, create=lambda *a: calls.append(a) or {"iid": 443, "web_url": "url"}):
         _, _, code = run_command(new.main, ["Задача", "--body", "   \n"])

@@ -1,21 +1,21 @@
-// Restart из строки папета (#508: в общем стиле операций #465/#473 --
-// у рестарта нет формы, сразу подтверждение точной цели): иконка, точное
-// подтверждение и вердикт операции. Подтверждение показывает факты строки
-// (имя, узел, state-строка) -- подтверждается ровно то, что на экране;
-// слова вердикта -- модель #476: running -- «идёт», unknown --
-// «неизвестно» (НЕ failed: эффекта могли и не быть), автоповтора нет --
-// повтор это новый клик и новое подтверждение. Никакого force: params
-// пусты, схема -- #461. Если рестарт невозможен по статусу цели (#508) --
-// аллокации нет (bucket down) или задача падает (kind failing) -- кнопка
-// дизейблится с причиной в подписи: признак уже посчитан сервером в
-// строке, отказ после клика был бы вторым ответом на вопрос строки.
-// Результат операции в памяти страницы: перезагрузка начинает заново --
-// id хранить негде (#463 запретил storage), это названо в отчёте #465.
+// Restart из строки папета (#465): иконка и вердикт операции. #513:
+// рестарт обратим -- клик шлёт POST сразу, мода точного подтверждения
+// ушла (подтверждение осталось у необратимых: разрушительные #473 и
+// update в fresh-режимах). Если рестарт невозможен по статусу цели
+// (#508) -- аллокации нет (bucket down) или задача падает (kind
+// failing) -- кнопка дизейблится с причиной в подписи: признак уже
+// посчитан сервером в строке, отказ после клика был бы вторым ответом
+// на вопрос строки. Слова вердикта -- модель #476: running -- «идёт»,
+// unknown -- «неизвестно» (НЕ failed: эффекта могли и не быть),
+// автоповтора нет -- повтор это новый клик. Никакого force: params
+// пусты, схема -- #461. Результат операции в памяти страницы:
+// перезагрузка начинает заново -- id хранить негде (#463 запретил
+// storage), это названо в отчёте #465.
 import { useState } from "react";
 import { IconRefresh } from "@tabler/icons-react";
 import { IconButton } from "./IconButton";
 import { OperationResult } from "./OperationResult";
-import { Button, Code, Group, Modal, Stack, Text } from "@mantine/core";
+import { Group } from "@mantine/core";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
 import { useAdminOp } from "../useAdminOp";
@@ -42,10 +42,9 @@ export function restartReason(row: Puppet): string | null {
 
 export function RestartBox({ session, row }: {
   session: Session;
-  /** Строка ростера: подтверждение показывает её факты. */
+  /** Строка ростера: цель рестарта. */
   row: Puppet;
 }) {
-  const [open, setOpen] = useState(false);
   const [result, setResult] = useState(false);
   const { op, submit } = useAdminOp(session, session.role === "admin" ? row.name : null);
   // #508: причина дизейбла едет в подпись иконки -- Tooltip и aria-label
@@ -55,37 +54,13 @@ export function RestartBox({ session, row }: {
     <Group gap="sm">
       <IconButton label={blocked ?? "рестарт"} variant="subtle" color="orange" size="lg"
               disabled={!!blocked}
-              onClick={() => { if (op.status !== "idle") setResult(true); else setOpen(true); }}>
+              onClick={() => { if (op.status !== "idle") setResult(true);
+                               else { setResult(true); void submit(); } }}>
         <IconRefresh size={18} />
       </IconButton>
       <OperationResult opened={result} onClose={() => setResult(false)}
-        onAgain={() => { setResult(false); setOpen(true); }} title="рестарт"
+        onAgain={() => { setResult(false); void submit(); }} title="рестарт"
         target={row.name} op={op} word={opWord(op.status)} testId="restart-verdict" />
-      {/* модал рендерится только открытым: закрытого контента в DOM нет
-          (Mantine иначе держит его под спрятанным переходом) */}
-      {open && (
-      <Modal opened onClose={() => setOpen(false)} size="md"
-             title="подтвердите рестарт" data-testid="restart-confirm"
-             closeButtonProps={{ "aria-label": "закрыть" }}>
-        <Stack gap="sm">
-          {/* точная цель: что подтверждается -- то и на экране */}
-          <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
-          <Text size="sm">узел: {row.node}</Text>
-          <Text size="sm">состояние: <Code>{row.state}</Code></Text>
-          <Text size="sm" c="dimmed">
-            панель перерегистрирует job; сила (force) не применяется
-          </Text>
-          <Group justify="flex-end" gap="sm">
-            <Button variant="light" color="gray" onClick={() => setOpen(false)}>
-              отмена
-            </Button>
-            <Button color="orange" onClick={() => { setOpen(false); setResult(true); void submit(); }}>
-              подтвердить
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
-      )}
     </Group>
   );
 }

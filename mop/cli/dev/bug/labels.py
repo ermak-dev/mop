@@ -5,8 +5,6 @@ A second label of the same group silently replaces the first.
 from mop.common import gitlab
 from mop.common.render import table
 
-MCP = {"annotations": "readonly"}
-
 
 def main(_argv):
     print("\n".join(table([(g + "::", ", ".join(v)) for g, v in gitlab.VOCAB.items()])))

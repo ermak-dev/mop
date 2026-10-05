@@ -13,9 +13,6 @@ from mop.cli.dev.ci._common import parser
 # подробности одной — это уже `mop dev ci log`.
 LINES = 30
 
-MCP = {"annotations": "readonly", "args": [
-    {"name": "id", "type": "string", "required": True}]}
-
 def main(argv):
     p = parser("why")
     p.add_argument("id", type=int)
