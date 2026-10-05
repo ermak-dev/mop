@@ -128,8 +128,10 @@ test.each([300, 1200])("#487 zoom changes even when %s-pixel text already fits",
   expect(terminal).toHaveStyle({ transform: `scale(${initial + 0.25})` });
   fireEvent.click(screen.getByRole("button", { name: "уменьшить" }));
   expect(terminal).toHaveStyle({ transform: `scale(${initial})` });
-  fireEvent.click(screen.getByRole("button", { name: "по ширине" }));
-  expect(terminal).toHaveStyle({ transform: `scale(${initial})` });
+  // #511: кнопки «по ширине» больше нет — сброс к автоподгонке был
+  // нерабочим решением; zoom=null остаётся начальным состоянием, ручные
+  // +/- остаются.
+  expect(screen.queryByRole("button", { name: "по ширине" })).toBeNull();
   expect(screen.getByRole("toolbar", { name: "просмотр" }).closest('[data-testid="output-scroll"]')).toBeNull();
   expect(screen.getByTestId("output-scroll")).toHaveStyle({ overflow: "auto", minHeight: "0" });
 });

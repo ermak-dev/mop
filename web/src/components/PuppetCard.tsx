@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Box, Group, Loader, Modal, Stack, Text } from "@mantine/core";
-import { IconRefresh, IconZoomIn, IconZoomOut, IconArrowsHorizontal } from "@tabler/icons-react";
+import { IconRefresh, IconZoomIn, IconZoomOut } from "@tabler/icons-react";
 import type { Session } from "../useSession";
 import { usePuppetTail } from "../usePuppetCard";
 import { IconButton } from "./IconButton";
@@ -77,8 +77,6 @@ function PuppetOutput({ session, target, which }: {
         <Text size="sm" w={44} ta="center" aria-label="масштаб">{Math.round(scale * 100)}%</Text>
         <IconButton label="увеличить" variant="subtle" size="lg" disabled={scale >= 4}
           onClick={() => changeZoom(0.25)}><IconZoomIn size={18} /></IconButton>
-        <IconButton label="по ширине" variant={zoom === null ? "light" : "subtle"} size="lg"
-          aria-pressed={zoom === null} onClick={() => setZoom(null)}><IconArrowsHorizontal size={18} /></IconButton>
       </Group>
       <Group gap="xs" wrap="nowrap">
         {!loading && tail.truncated && <Text size="xs" c="dimmed">обрезано: показан конец</Text>}
