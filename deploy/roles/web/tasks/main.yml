@@ -65,21 +65,23 @@
 # Самоподписанный сертификат TLS-прокси (#97): сервисы сервера ходят на
 # шину через прокси, как любой клиент каталога сервера, и закрепляют его так
 # же. С настоящим (MOP_TLS_CERT) пин снимается: он отверг бы настоящий.
+# Частная CA (MOP_TLS_CA, #517) возвращает пин обратно: системные корни
+# корня установки не знают, и сервисы доверяют ровно ему.
 - name: Pinned certificate of the TLS proxy
   ansible.builtin.copy:
-    src: "{{ secrets_dir }}/tls.pem"
+    src: "{{ MOP_TLS_CA or secrets_dir + '/tls.pem' }}"
     dest: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/tls.pem"
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
     mode: "0600"
-  when: not MOP_TLS_CERT
+  when: MOP_TLS_CA or not MOP_TLS_CERT
   notify: restart mop-web
 
 - name: No pin with a real certificate
   ansible.builtin.file:
     path: "{{ MOP_HOME }}/.config/mop/servers/{{ MOP_SERVER_LAN }}/tls.pem"
     state: absent
-  when: MOP_TLS_CERT | length > 0
+  when: MOP_TLS_CERT | length > 0 and not MOP_TLS_CA
   notify: restart mop-web
 
 # Токен Nomad -- из каталога сервера на контроллере: туда его забирает игра
@@ -187,7 +189,7 @@
   delegate_to: localhost
   ansible.builtin.uri:
     url: "https://{{ MOP_SERVER_LAN }}:{{ MOP_HTTPS_PORT }}/healthz"
-    ca_path: "{{ omit if MOP_TLS_CERT else secrets_dir + '/tls.pem' }}"
+    ca_path: "{{ omit if MOP_TLS_CERT and not MOP_TLS_CA else (MOP_TLS_CA or secrets_dir + '/tls.pem') }}"
     status_code: 200
   register: proxy_health
   until: proxy_health.status == 200
