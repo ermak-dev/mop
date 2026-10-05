@@ -4,12 +4,18 @@
 // неподвижная панель и собственная область прокрутки с реальным zoom.
 // RESULT: проверены resize по высоте и результат, пришедший в закрытый диалог.
 // STATUS: FIXED — see #487
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { PoolTable } from "./PoolTable";
 import { PuppetCard } from "./PuppetCard";
 import { emptySnapshot, renderUi } from "../test-utils";
 import type { Puppet } from "../types";
+
+// #512: файл без cleanup держал DOM между проверками -- ростер из ранней
+// проверки оставался на экране поздней, и screen-запросы читали чужие
+// строки. Монтирование разрушительных (#512) проверяется по этому же
+// экрану, и без cleanup подсчёт кнопок считал бы чужие.
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 const session = { login: "admin", role: "admin" as const };
 const row: Puppet = {
@@ -24,8 +30,9 @@ const card = () => renderUi(<PuppetCard session={session}
   target={row.name} onClose={() => {}} />);
 
 const originalScrollTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTop");
+// второй afterEach -- тому же «каждому разу»: scrollTop-дескриптор (#487)
+// возвращается после каждого стола, не только конца файла
 afterEach(() => {
-  vi.unstubAllGlobals(); vi.restoreAllMocks();
   if (originalScrollTop) Object.defineProperty(HTMLElement.prototype, "scrollTop", originalScrollTop);
   else Reflect.deleteProperty(HTMLElement.prototype, "scrollTop");
 });
@@ -59,8 +66,11 @@ test("#487 actions have a right-aligned shrink-to-fit column", () => {
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
   expect(actions).toHaveStyle({ justifyContent: "flex-end", flexWrap: "nowrap" });
   expect(actions.closest("td")).toHaveStyle({ width: "1%", whiteSpace: "nowrap", textAlign: "right" });
-  expect(within(actions).getAllByRole("button")).toHaveLength(4);
-  expect(within(actions).queryByRole("button", { name: "лог" })).toBeNull();
+  // #512: колонка -- экран, модель, правка, рестарт и три разрушительных
+  // («лог» ушёл #507); состав перечислен, не только число
+  expect(within(actions).getAllByRole("button")
+    .map((b) => b.getAttribute("aria-label") ?? b.textContent?.trim()))
+    .toEqual(["экран", "модель", "правка", "рестарт", "recycle", "delete", "wipe"]);
   expect(within(actions).queryByRole("button", { name: "сообщение" })).toBeNull();
 });
 
@@ -199,6 +209,24 @@ test.each(["рестарт", "правка", "модель"])("#487 %s preserves
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     expect(mock.mock.calls.filter((c) => c[1]?.method === "POST")).toHaveLength(1);
   }
+});
+
+test("#512 the admin row offers the destructive actions, a non-admin never sees them", () => {
+  vi.stubGlobal("fetch", vi.fn());
+  renderUi(<PoolTable projects={snapshot.projects} session={session} />);
+  const actions = screen.getByRole("group", { name: `действия ${row.name}` });
+  // монтирование #473: три разрушительных действия в строке цели,
+  // каждое со своим двухшаговым потоком (preview -> подтверждение)
+  for (const label of ["recycle", "delete", "wipe"]) {
+    expect(within(actions).getByRole("button", { name: label })).toBeInTheDocument();
+  }
+  // не-админ всей колонки действий не видит -- разрушительных тоже;
+  // первый стол убираем до второго рендера, иначе он отвечает за кнопки
+  cleanup();
+  renderUi(<PoolTable projects={snapshot.projects} session={{ login: "user", role: "user" }} />);
+  expect(screen.queryByRole("button", { name: "recycle" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "delete" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "wipe" })).toBeNull();
 });
 
 test("#487 opening the screen scrolls its viewport to the end", async () => {
