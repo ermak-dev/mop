@@ -259,6 +259,74 @@ def check_bootstrap_outcome_334(c):
                   "bootstrap_result" in seen),
                  (want_out, want_err, want_code, want_asked))
 
+# ── #503: mop update без origin — TypeError в workspace_text ───────────
+# HYPOTHESIS: рефакторинг #459 (00b888f) уронил подстановку прежнего
+# репозитория из спеки: командлет зовёт workspace_text(None), cwd_origin()
+# == None ложно, выполнение проваливается в manifest.fetch(None) и падает
+# TypeError в project_of -- папета нельзя перерегистрировать на прежнем
+# репозитории без явного origin.
+# SOLUTION: командлет восстанавливает контракт до 00b888f — origin из
+# meta.origin прочитанной перилами спеки (lib.guard уже отдал её); в
+# workspace_text уезжает фактическая строка, не None. ops.update и
+# web-воркер origin=None понимают и не задеты; recycle свой origin берёт
+# сам внутри общей функции.
+def check_update_origin_503(c):
+    from mop.cli.core import update
+    from mop.common import bus
+    spec = {"ok": True, "meta": {"origin": "git@h:g/mop.git", "branch": "master"}}
+    seen_wt, seen_rpc = [], []
+
+    def wt(origin):
+        seen_wt.append(origin)
+        return "", {"source": "origin", "commit": "abc", "dirty": False,
+                    "tasks": 0, "present": False}
+
+    def cc(verb, **kw):
+        seen_rpc.append((verb, kw))
+        # Спека не изменилась: no-op -- accepted, прогона не будет.
+        return {"ok": True, "replaced": False, "owner_note": None}
+    with patched_env(MOP_SERVER_LAN="192.0.2.1"), \
+            patched(lib, guard=lambda name: spec), \
+            patched(bus, call_cluster=cc, login=lambda: "anton"), \
+            patched(_common, workspace_text=wt, BOOTSTRAP_WAIT=0):
+        out, err, code = run_command(update.main, ["pu-mop-1"])
+    c.check("#503 update without origin passes the spec's origin to workspace_text",
+            seen_wt == ["git@h:g/mop.git"], seen_wt)
+    c.check("#503 update without origin sends the same origin to the service",
+            seen_rpc and seen_rpc[0][1].get("origin") == "git@h:g/mop.git",
+            seen_rpc)
+    c.check("#503 the command no longer crashes (exit 0, clean stderr)",
+            code == 0 and not err.strip(), (code, err))
+    # Явный origin по-прежнему едет как есть — подстановка только для
+    # пропущенного аргумента.
+    seen_wt.clear(), seen_rpc.clear()
+    with patched_env(MOP_SERVER_LAN="192.0.2.1"), \
+            patched(lib, guard=lambda name: spec), \
+            patched(bus, call_cluster=cc, login=lambda: "anton"), \
+            patched(_common, workspace_text=wt, BOOTSTRAP_WAIT=0):
+        run_command(update.main, ["pu-mop-1", "git@h:g/other.git"])
+    c.check("#503 an explicit origin overrides the spec's",
+            seen_wt == ["git@h:g/other.git"]
+            and seen_rpc[0][1].get("origin") == "git@h:g/other.git",
+            (seen_wt, seen_rpc))
+    # Спека без origin — не папет: прежний отказ командлета (usage), не
+    # TypeError в глубине manifest.
+    seen_wt.clear(), seen_rpc.clear()
+    bare = {"ok": True, "meta": {"branch": "master"}}
+    with patched_env(MOP_SERVER_LAN="192.0.2.1"), \
+            patched(lib, guard=lambda name: bare), \
+            patched(bus, call_cluster=cc, login=lambda: "anton"), \
+            patched(_common, workspace_text=wt, BOOTSTRAP_WAIT=0):
+        out, err, code = run_command(update.main, ["pu-mop-1"])
+    # usage -- SystemExit(текст): в процессе кодом выхода становится сам
+    # текст, его печатает интерпретатор (как у #263). Существенно: отказ
+    # ДО workspace_text -- None туда больше не уезжает.
+    c.check("#503 a spec without origin refuses before workspace_text",
+            not seen_wt and bool(code)
+            and "no origin in the spec" in str(code), (seen_wt, code, out, err))
+# STATUS: FIXED — see #503
+
+
 # ── #345: сдавшийся bootstrap в `mop list` и `mop tail` ────────────────
 # HYPOTHESIS: у остановленного джоба нет работающей аллокации, а после GC
 # Nomad -- никакой: failing_row по stderr аллокации ничего не скажет, и
@@ -1088,6 +1156,7 @@ def main():
     check_reference_committed_350(c)
     check_gave_up_rows_345(c)
     check_bootstrap_outcome_334(c)
+    check_update_origin_503(c)
     check_bootstrap_sent_334(c)
     # HYPOTHESIS: каталога нет — диспетчер bash ищет файл по имени в bin/.
     # SOLUTION: catalog() из обхода пакета, resolve() по нему.
