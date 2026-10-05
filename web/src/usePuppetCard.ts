@@ -1,5 +1,6 @@
 // Приватные чтения карточки папета (#463, контракт #462): GET
-// /api/puppet/<имя> и .../tail|/stderr. Только admin и только по явной цели:
+// /api/puppet/<имя> и .../tail (#507: чтение stderr ушло вместе с кнопкой
+// «лог»). Только admin и только по явной цели:
 // ни опроса, ни хранения -- записи живут в состоянии компонента, смена
 // источника (роль, цель) стирает их в тот же рендер, а опоздавший ответ
 // прежнего запроса не воскресит их. Поколение -- как в useJournal: принят
@@ -88,8 +89,7 @@ export interface PuppetTailState {
 /** Чтение кадра без встроенного таймера: расписанием управляет просмотрщик.
  *  Временный отказ сохраняет последний кадр; потеря прав, цели или роли
  *  стирает его. Ответ не последнего load() отбрасывается. */
-export function usePuppetTail(session: Session, target: string | null,
-                              which: "tail" | "stderr" = "tail"): PuppetTailState {
+export function usePuppetTail(session: Session, target: string | null): PuppetTailState {
   const [lines, setLines] = useState<string[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -100,7 +100,7 @@ export function usePuppetTail(session: Session, target: string | null,
   // поколение: растёт на каждый load и на каждую смену источника -- ответ
   // с меньшим номером молча теряется, чьи бы строки он ни вёз
   const gen = useRef(0);
-  const source = `${session.login ?? ""}\0${session.role ?? ""}\0${target ?? ""}\0${which}`;
+  const source = `${session.login ?? ""}\0${session.role ?? ""}\0${target ?? ""}`;
   const prev = useRef(source);
 
   // смена источника: стирание в тот же рендер, не эффектом после paint
@@ -136,7 +136,7 @@ export function usePuppetTail(session: Session, target: string | null,
     requests.current.add(controller);
     setLoading(true);
     try {
-      const r = await fetch(`/api/puppet/${encodeURIComponent(target)}/${which}`,
+      const r = await fetch(`/api/puppet/${encodeURIComponent(target)}/tail`,
                             { credentials: "same-origin", signal: controller.signal });
       if (at !== gen.current) return;
       if (!r.ok) {
@@ -166,7 +166,7 @@ export function usePuppetTail(session: Session, target: string | null,
         setLoaded(true);
       }
     }
-  }, [session.role, session.login, target, which]);
+  }, [session.role, session.login, target]);
 
   return { lines, truncated, error, loading, loaded, blocked, load };
 }

@@ -12,21 +12,18 @@ import { renderUi } from "../test-utils";
 const ADMIN = { login: "admin", role: "admin" as const };
 const ok = (lines: string[]) => ({ ok: true, status: 200, json: async () => ({ lines }) }) as Response;
 const tick = async (ms = 0) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
-const open = (which: "tail" | "stderr" = "tail") => renderUi(
-  <PuppetCard session={ADMIN} target="pu-mop-1" which={which} onClose={() => {}} />);
+const open = () => renderUi(
+  <PuppetCard session={ADMIN} target="pu-mop-1" onClose={() => {}} />);
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-test("#489 composer is fixed in the screen, not in the log", async () => {
+test("#489 the composer sits inside the screen dialog", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => ok(["screen"])));
-  const view = open(); await tick();
+  open(); await tick();
   const composer = screen.getByRole("textbox", { name: "Сообщение" });
   expect(composer.closest('[data-testid="output-scroll"]')).toBeNull();
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
-  view.unmount();
-  open("stderr"); await tick();
-  expect(screen.queryByRole("textbox", { name: "Сообщение" })).toBeNull();
 });
 
 test("#489 polling keeps the same terminal, draft, focus, zoom and scroll", async () => {
@@ -106,12 +103,12 @@ test.each(["close", "role", "target"])("#489 %s stops polling and ignores a late
   expect(mock.mock.calls.filter((c) => String(c[0]).includes("pu-mop-1"))).toHaveLength(2);
 });
 
-test("#489 stderr does not auto-refresh", async () => {
+// #507: источник один -- экран, и он один решает расписание опроса; ветки
+// stderr и её «без авто-обновления» больше нет.
+test("#489 the screen keeps polling on its timer", async () => {
   const mock = vi.fn(async () => ok(["log"])); vi.stubGlobal("fetch", mock);
-  open("stderr"); await tick(12000);
-  expect(mock).toHaveBeenCalledTimes(1);
-  fireEvent.click(screen.getByRole("button", { name: "обновить" })); await tick();
-  expect(mock).toHaveBeenCalledTimes(2);
+  open(); await tick(12000);
+  expect(mock.mock.calls.length).toBeGreaterThanOrEqual(3);
 });
 
 test("#489 a transient failure keeps the last frame and recovers without remounting", async () => {
