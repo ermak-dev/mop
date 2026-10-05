@@ -231,6 +231,52 @@ def main():
             boom_frames and boom_frames[0].get("status") == "failed"
             and boom_frames[0].get("error") == "operation failed", boom_frames)
 
+    # ── сырая причина неуспеха -- в журнал службы (#506) ────────────────
+    # HYPOTHESIS: после #499 (журнал ops.jsonl удалён) сырой текст
+    # исключения жил только в памяти процесса: кадр /events и GET несут
+    # закрытую фразу (#495), journalctl молчал, аудит пула -- только
+    # {event: op}. Живой отказ («cannot read rugent: access denied» часами
+    # читался как «operation failed») диагностировался воспроизведением
+    # эффекта руками. SOLUTION: терминализация неуспеха пишет одну строку
+    # в stderr службы (юнит не переопределяет StandardError -- она в
+    # journalctl -u mop-web): op id, action, target, login, статус и
+    # СЫРАЯ причина. Успех молчит (шум); публичный кадр не меняется --
+    # #495 не ослабляется, строка живёт только в журнале оператора.
+    # RESULT: первый прогон красный -- строки в stderr нет; STATUS:
+    # FIXED -- see #506.
+    class Deny:
+        def __call__(self):
+            raise RuntimeError("cannot read rugent: access denied")
+
+    api_deny = adminapi.Api(ops, origin="https://pool.example", who=ADMIN,
+                            executor=lambda *a: Deny())
+    deny_frames = []
+    api_deny.on_terminal(deny_frames.append)
+    import io as _io
+    import contextlib as _cl
+    buf = _io.StringIO()
+    with _cl.redirect_stderr(buf):
+        r = api_deny.submit("send", "pu-rugent-1", {"message": "x"}, ADMIN)
+        a = wait_terminal(api_deny, r["id"])
+    line = buf.getvalue()
+    c.check("#506 an unsuccessful terminal logs one line to the service journal",
+            a.get("status") == "failed"
+            and line.count("\n") == 1
+            and r["id"] in line and "access denied" in line
+            and "pu-rugent-1" in line, (a, line))
+    c.check("#506 the journal line keeps the public frame closed",
+            deny_frames and deny_frames[0].get("error") == "operation failed"
+            and "access denied" not in json.dumps(deny_frames), deny_frames)
+    # Успех молчит: succeeded-терминал не пишет в stderr ничего.
+    api_ok = adminapi.Api(ops, origin="https://pool.example", who=ADMIN,
+                          executor=lambda *a: Scripted())
+    buf2 = _io.StringIO()
+    with _cl.redirect_stderr(buf2):
+        r = api_ok.submit("send", "pu-mop-3", {"message": "ok"}, ADMIN)
+        wait_terminal(api_ok, r["id"])
+    c.check("#506 a succeeded terminal stays silent in the journal",
+            buf2.getvalue() == "", buf2.getvalue())
+
     # ── рестарт службы: неизвестные id -- «исход неизвестен, смотри журнал»
     # Дюрабельность «клик -> вердикт» через рестарт веба сознательно не
     # делаем: память и есть срок. Новый экземпляр незнакомый id отдаёт как
