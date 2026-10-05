@@ -46,13 +46,28 @@ const openBox = async () => {
   await screen.findByTestId("model-choices");
 };
 
-/** Пройти до POST: открыть, выбрать модель, подтвердить. */
+/** Пройти до POST: открыть, выбрать модель. #513: «продолжить» шлёт
+ *  сразу -- клик подтверждения не нужен, смена модели обратима. */
 const ride = async (model: RegExp) => {
   await openBox();
   fireEvent.click(screen.getByRole("radio", { name: model }));
   fireEvent.click(screen.getByRole("button", { name: /^продолжить$/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
 };
+
+// #513: смена модели обратима -- «продолжить» шлёт POST сразу, моды нет.
+test("#513 the model choice posts at once on continue, no confirm dialog", async () => {
+  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
+                            () => Promise.resolve(opJson("succeeded")));
+  vi.stubGlobal("fetch", fetchMock);
+  renderUi(<ModelBox session={ADMIN} row={LIVE_ROW} />);
+  await openBox();
+  fireEvent.click(screen.getByRole("radio", { name: /^glm-5\.3$/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^продолжить$/i }));
+  expect(screen.queryByText(/подтвердите смену модели/i)).toBeNull();
+  const post = fetchMock.mock.calls.find((c) => (c[1] as { method?: string })?.method === "POST");
+  expect(JSON.parse((post?.[1] as { body: string }).body))
+    .toEqual({ action: "model", target: "pu-mop-1", params: { model: "glm-5.3" } });
+});
 
 test("the card offers a model switch with the catalog as radios, no preselection", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => catalog()));
@@ -117,24 +132,24 @@ test("the catalog comes from the server facade, not a homemade list", async () =
   expect(screen.queryByRole("radio", { name: /fantasy-model/ })).toBeNull();
 });
 
-test("confirm shows the exact target before the POST", async () => {
+// #513: подтверждения у смены модели больше нет; прежняя проверка
+// подтверждения адаптирована: выбор виден на экране до «продолжить»,
+// POST не уходит без выбора, после клика -- сразу.
+test("the form names the target and the choice rides one POST", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
   renderUi(<ModelBox session={ADMIN} row={ROW} />);
   await openBox();
+  // форма называет цель до выбора
+  expect(screen.getByTestId("model-choices").textContent).toContain("pu-mop-1");
   fireEvent.click(screen.getByRole("radio", { name: /glm-5\.3-flash/i }));
   fireEvent.click(screen.getByRole("button", { name: /^продолжить$/i }));
-  const dialog = (await screen.findAllByRole("dialog"))
-    .find((d) => d.textContent.includes("подтвердите смену модели"));
-  expect(dialog?.textContent).toContain("pu-mop-1");
-  expect(dialog?.textContent).toContain("hyper");
-  expect(dialog?.textContent).toContain("glm-5.3-flash");
-  // Подтверждение без сети: до клика «подтвердить» POST не уходит (GET
-  // каталога при открытии формы -- законное чтение, не исполнение).
-  expect(fetchMock.mock.calls
-         .filter((c) => (c[1] as { method?: string })?.method === "POST"))
-    .toHaveLength(0);
+  expect(screen.queryByText(/подтвердите смену модели/i)).toBeNull();
+  const post = fetchMock.mock.calls.find((c) => (c[1] as { method?: string })?.method === "POST");
+  expect(JSON.parse((post?.[1] as { body: string }).body))
+    .toEqual({ action: "model", target: "pu-mop-1",
+               params: { model: "glm-5.3-flash" } });
 });
 
 test("the choice posts {action: model, target, params: {model}}", async () => {

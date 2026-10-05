@@ -134,11 +134,11 @@ export function useAdminOp(session: Session, target: string | null) {
           operations.expired(target, at);
           setOp((o) => o.id === at ? { status: "unknown", id: at, error: null, lost: false } : o);
         } else if (TERMINAL.has(status)) {
-          operations.observed(target, at, status, body.error ?? null);
+          operations.observed(target, at, status);
           setOp((o) => o.id === at
             ? { status, id: at, error: body.error ?? null, lost: false } : o);
         } else if (status) {
-          operations.observed(target, at, status, null);
+          operations.observed(target, at, status);
           setOp((o) => o.id === at && !TERMINAL.has(o.status)
             ? { ...o, status } : o);
         }

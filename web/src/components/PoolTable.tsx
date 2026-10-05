@@ -7,7 +7,6 @@
 import { Badge, Box, Code, Group, Stack, Table, Text, Tooltip } from "@mantine/core";
 import type { Counts, Project, Puppet } from "../types";
 import type { Session } from "../useSession";
-import type { TargetVerdict } from "../useOperationFeed";
 import { PuppetActions } from "./PuppetActions";
 import { gb, KIND_WORD, presentKinds, verdictColor, verdictWord } from "./format";
 import { EmptyNote, SectionTitle } from "./Section";
@@ -34,37 +33,8 @@ const statusTip = (p: Puppet): string => `${p.state} · ${p.alloc_status}`;
 const origins = (sh: Project): string[] =>
   [...new Set(sh.puppets.map((p) => p.origin).filter(Boolean))];
 
-// Карточка исхода цели (#504): терминальный вердикт из SSE-канала на
-// строке цели. unknown -- жёлтым со ссылкой в журнал (правда об эффекте
-// там, не в памяти страницы), кнопки на карточке нет: автоповтор на
-// unknown запрещён (#476), повтор -- новый клик своим подтверждением.
-const VERDICT_CARD: Record<string, { word: string; color: string; journal?: boolean }> = {
-  succeeded: { word: "выполнено", color: "teal" },
-  refused: { word: "отказано", color: "red" },
-  failed: { word: "не удался", color: "red" },
-  partial: { word: "частично", color: "yellow" },
-  unknown: { word: "исход неизвестен, смотри журнал", color: "yellow", journal: true },
-};
-
-function TargetVerdictCard({ verdict, target }: {
-  verdict: TargetVerdict; target: string;
-}) {
-  const card = VERDICT_CARD[verdict.status];
-  if (!card) return null;
-  return (
-    <Group gap={4} wrap="nowrap" mt={2} data-testid={`target-verdict-${target}`}>
-      <Badge size="xs" variant="light" color={card.color}>{card.word}</Badge>
-      {card.journal && (
-        <Text component="a" href="#journal" size="xs" c="dimmed"
-              style={{ whiteSpace: "nowrap" }}>журнал</Text>
-      )}
-    </Group>
-  );
-}
-
-function Row({ p, onOpen, session, verdict }: {
+function Row({ p, onOpen, session }: {
   p: Puppet; onOpen?: (name: string) => void; session?: Session;
-  verdict?: TargetVerdict;
 }) {
   const color = verdictColor(p.kind, p.bucket);
   return (
@@ -96,7 +66,6 @@ function Row({ p, onOpen, session, verdict }: {
             {/* Подробность -- под словом, тем же цветом: причина видна без
                 наведения, «not responding», «prove», «uncommitted: 3». */}
             {p.detail ? <Text span size="xs" c="dimmed" lineClamp={1}>{p.detail}</Text> : null}
-            {verdict && <TargetVerdictCard verdict={verdict} target={p.name} />}
           </Box>
         </Tooltip>
       </Table.Td>
@@ -113,14 +82,12 @@ function Row({ p, onOpen, session, verdict }: {
   );
 }
 
-export function PoolTable({ projects, onOpen, session, verdicts }: {
+export function PoolTable({ projects, onOpen, session }: {
   projects: Project[];
   session?: Session;
   /** Открыть карточку папета по имени (#463); нет -- имя строкой, гостю
    *  карточка недоступна и опенер не рисуется. */
   onOpen?: (name: string) => void;
-  /** Вердикты целей из SSE-канала операций (#504). */
-  verdicts?: Record<string, TargetVerdict>;
 }) {
   if (!projects.length) return <EmptyNote>папетов нет</EmptyNote>;
   return (
@@ -138,7 +105,7 @@ export function PoolTable({ projects, onOpen, session, verdicts }: {
           <Table.ScrollContainer minWidth={session?.role === "admin" ? 1080 : 800}>
             <Table striped highlightOnHover withTableBorder>
               <TableHead cols={[...Object.values(COLS), ...(session?.role === "admin" ? [{ label: "действия", right: true, compact: true }] : [])]} />
-              <Table.Tbody>{sh.puppets.map((p) => <Row key={p.name} p={p} onOpen={onOpen} session={session} verdict={verdicts?.[p.name]} />)}</Table.Tbody>
+              <Table.Tbody>{sh.puppets.map((p) => <Row key={p.name} p={p} onOpen={onOpen} session={session} />)}</Table.Tbody>
             </Table>
           </Table.ScrollContainer>
         </div>

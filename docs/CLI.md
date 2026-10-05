@@ -303,8 +303,10 @@ the developer's own commands: the project's tracker, CI and checks, not the pool
   mop dev web   build the dashboard (web/dist) and check the committed build
 
 Run from a working copy of the project: the coordinates come from its git
-origin, the credentials from .env. Only declared tracker and CI leaves are
-available to the master through MCP; checks, docs and builds remain local.
+origin, the credentials from .env. The tracker and CI stay on the master's
+CLI and are never exposed as MCP tools: the tracker's coordinates resolve
+from the package's origin, not the session's working copy, and a tool here
+would lead a foreign master into this project's tracker.
 ```
 
 #### mop dev bug

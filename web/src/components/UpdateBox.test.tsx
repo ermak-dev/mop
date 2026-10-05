@@ -36,15 +36,34 @@ const openBox = async () => {
   await screen.findByTestId("update-modes");
 };
 
-/** Пройти до POST: открыть, выбрать режим, подтвердить. */
+/** Пройти до POST: открыть, выбрать режим. Fresh-режимы необратимы --
+ *  подтверждение остаётся (#513); keep шлёт сразу. */
 const ride = async (mode: string, phrase: RegExp) => {
   await openBox();
   fireEvent.click(screen.getByRole("radio", { name: new RegExp(mode, "i") }));
   // последствия выбора -- на экране до подтверждения
   expect(screen.getByTestId("update-modes").textContent).toMatch(phrase);
   fireEvent.click(screen.getByRole("button", { name: /^продолжить$/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
+  if (mode !== "как было") {
+    fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
+  }
 };
+
+// #513: keep обратим -- «продолжить» шлёт POST сразу, моды подтверждения нет.
+test("#513 keep posts at once on continue, no confirm dialog", async () => {
+  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
+                            () => Promise.resolve(opJson("succeeded")));
+  vi.stubGlobal("fetch", fetchMock);
+  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
+  await openBox();
+  fireEvent.click(screen.getByRole("radio", { name: /как было/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^продолжить$/i }));
+  // мода «подтвердите update» не открывалась
+  expect(screen.queryByText(/подтвердите update/i)).toBeNull();
+  const post = fetchMock.mock.calls.find((c) => (c[1] as { method?: string })?.method === "POST");
+  expect(JSON.parse((post?.[1] as { body: string }).body))
+    .toEqual({ action: "update", target: "pu-mop-1", params: { fresh: false } });
+});
 
 test("the card offers update with three explicit modes, no silent default", async () => {
   vi.stubGlobal("fetch", vi.fn());
