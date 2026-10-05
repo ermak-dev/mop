@@ -106,6 +106,9 @@ _SHOW = {
     # Молчит агент узла, а не папет: отдельный вид, не «завис».
     "silent": lambda d, b: f"AGENT SILENT ({d})",
     "hung": lambda d, b: f"HUNG ({d})",
+    # Пересоздание сессии (#510): tmux ещё не поднят, но попытка свежая --
+    # это этап, а не болезнь; слова без скобок, чтобы не читалось диагнозом.
+    "starting": lambda d, b: "starting",
     "dialog": lambda d, b: _tail("needs action", ": ", d),
     "login": lambda d, b: _tail(d, ": ", b),
     "quota": lambda d, b: _tail("no model quota", ": ", d),
@@ -329,7 +332,7 @@ def _state_from_clone(clone):
     return State("busy", branch=branch) if branch else State("free")
 
 
-def verdict(f):
+def verdict(f, now=None):
     """Занятость места по фактам с узла -> State. Чистая функция: см. блок выше.
 
     «Свободен» означает, что в клоне нет несохранённой работы, а не что сессия
@@ -339,17 +342,49 @@ def verdict(f):
     вправе сказать «free», а последнее слово за клоном — _clone_veto. Пока
     вето стояло внутри одной ветки _verdict, три остальные дороги к «free»
     обходили клон стороной."""
-    state = _verdict(f)
+    state = _verdict(f, now)
     if not is_free(state.kind):
         return state
     return _clone_veto(_clone(f)) or state
 
 
-def _verdict(f):
+# ── пересоздание сессии (#510) ───────────────────────────────────────────
+# Сколько попытка без tmux ещё считается подъёмом, а не отказом. 300 с --
+# BOOTSTRAP_TIMEOUT узла (busnames.py): столько узел ждёт от сервера ответа
+# на bootstrap песочницы; в host-узле врапер доходит до tmux за секунды, в
+# pve-теле платит копию семени, секреты и правку конфигов -- минуты.
+STARTING_AFTER = 300
+
+
+def _attempt_age_s(task, now=None):
+    """Возраст текущей попытки задачи по её сводке | None (#510).
+
+    started_at -- последнее событие Started (task_summary). None -- возраста
+    нет (сводки нет, события нет, мусор): незнание возраста не прячет
+    отказ и не даёт ложного «поднимается»."""
+    started = (task or {}).get("started_at") if isinstance(task, dict) else None
+    if not isinstance(started, (int, float)) or started <= 0:
+        return None
+    now = time.time() if now is None else now
+    return max(0, int(now - started))
+
+
+def _verdict(f, now=None):
     """Активность папета по записи хода и файлу сессии. Про клон см. verdict."""
     if not f or f.get("error"):
         return State("hung", (f or {}).get("error", "no answer")[:40])
     if not f.get("present"):
+        # Пересоздание сессии -- не отказ папета (#510): после рестарта или
+        # переселения аллокация уже running, а врапер ещё не дошёл до
+        # `tmux new-session` (семя, секреты, правка ~/.claude.json). Пока
+        # попытка моложе STARTING_AFTER -- «поднимается»: не болеет, не
+        # красное; Doctor его не трогает -- лечение в момент пересоздания
+        # гонялось бы с самим врапером. Возраст -- started_at сводки задачи
+        # (TaskStates.Events, Started); его нет в фактах (старый агент,
+        # чужой путь) -- незнание возраста не прячет отказ: прежний hung.
+        age = _attempt_age_s(f.get("task"), now)
+        if age is not None and age < STARTING_AFTER:
+            return State("starting")
         return State("hung", "no tmux session")
 
     hooked = _state_from_turn(f)
@@ -426,6 +461,13 @@ def task_summary(alloc, now=None):
     events = t.get("Events") or []
     exits = [e.get("ExitCode") for e in events if e.get("Type") == "Terminated"]
     last = events[-1] if events else {}
+    # Возраст текущей попытки (#510): последнее Started -- начало попытки,
+    # в которой живём; после рестарта оно моложе аллокации. Тот же формат
+    # Time (нс), что у Restarting ниже; секунды без долей: окно подъёма
+    # измеряется ими.
+    started = [e.get("Time") for e in events
+               if e.get("Type") == "Started" and e.get("Time")]
+    started_at = int(started[-1] // 1_000_000_000) if started else None
     next_s = None
     if last.get("Type") == "Restarting" and last.get("StartDelay"):
         at = (last.get("Time") or 0) + last["StartDelay"]
@@ -433,7 +475,7 @@ def task_summary(alloc, now=None):
         next_s = max(0, int(at // 1_000_000_000 - now))
     return {"state": t.get("State"), "restarts": t.get("Restarts") or 0,
             "exit": exits[-1] if exits else None,
-            "next_s": next_s,
+            "next_s": next_s, "started_at": started_at,
             "failed": bool(t.get("Failed"))}
 
 
@@ -512,6 +554,9 @@ _ACTIONS = {
     # знаем ничего. Показать — да, трогать — нет.
     "silent": None,
     "hung": RESTART,
+    # Поднимается (#510): лечение не нужно -- врапер сам ведёт попытку к
+    # tmux, и рестарт в это окно гонялся бы с ним. Ждёт, а не лечится.
+    "starting": None,
     # Сессия жива, но упёрлась в запрос действия и сама не сдвинется.
     # "waiting for input" не трогаем: это бывает и нормальным межходовым
     # состоянием, автолечить его опасно — только показываем.

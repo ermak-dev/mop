@@ -484,7 +484,10 @@ def check_failing(c):
     """HYPOTHESIS (#126): ростер читал только ClientStatus. SOLUTION: сводка
     задачи и причина из stderr. STATUS: FIXED — see #126"""
     t = task_summary(ALLOC, now=1000)
-    want = {"state": "pending", "restarts": 4, "exit": 1, "next_s": 1576, "failed": False}
+    want = {"state": "pending", "restarts": 4, "exit": 1, "next_s": 1576,
+            # Started без Time (фикстура) -- возраста нет: None, не догадка
+            # (#510). Само поле -- часть контракта сводки.
+            "started_at": None, "failed": False}
     c.expect("task_summary", t, want)
     # Срок -- оставшийся, а не задержка на момент события: через десять минут
     # «next in 26m» было бы неправдой.
@@ -829,6 +832,11 @@ def check_verdict_fields_452(c):
         r = judged(State("free"), gave_up="no .env")
         c.expect("#452 gave up: the row", (r.state, r.kind, r.detail),
                  ("FAILED: no .env", "failing", "no .env"))
+        # Поднимается (#510): слов без скобок -- не диагноз, detail нет.
+        r = judged(State("starting"))
+        seen.add(r.kind)
+        c.expect("#510 starting: the row", (r.state, r.kind, r.detail),
+                 ("starting", "starting", None))
 
     # Все 13 видов из KINDS доезжают хотя бы одним случаем.
     c.check("#452 every verdict kind reaches the row", seen == set(KINDS),
@@ -855,6 +863,57 @@ def check_verdict_fields_452(c):
                 old.to_dict())
 
 
+# ── #510: пересоздание сессии -- не отказ папета ─────────────────────────
+# HYPOTHESIS: после рестарта/переселения есть окно (секунды -- десятки
+# секунд), когда аллокация уже running, а врапер ещё не дошёл до
+# `tmux new-session`: копия семени, секреты, правка ~/.claude.json, окружение.
+# В этом окне present=False и _verdict безусловно писал «HUNG (no tmux
+# session)» -- оператор читал «завис» на нормальном этапе пересоздания, а
+# doctor заодно назначал рестарт убивающей силы.
+# SOLUTION: возраст попытки уже есть в фактах -- TaskStates.Events, событие
+# Started с Time в наносекундах (тот же формат, что читает next_s). Свежая
+# попытка (младше STARTING_AFTER) с present=False -- «starting»: не болеет
+# (doctor не лечит), в корзине busy (не красное). Старше порога -- прежний
+# hung «no tmux session». Порог 300 с -- BOOTSTRAP_TIMEOUT узла
+# (busnames.py): столько узел ждёт от сервера ответ на bootstrap песочницы,
+# и это же верхняя граница подъёма тела до tmux; короче -- pve-папет с
+# копией семени и секретов читался бы ложно больным на медленном диске.
+# RESULT: первый прогон красный -- verdict({present: False}) не знает
+# возраста; STATUS: FIXED -- see #510.
+STARTING_AFTER = 300
+
+
+def check_starting_510(c):
+    import time as _time
+    now = 1_000_000
+
+    def facts_starting(age_s):
+        """Факты present=False с попыткой возраста age_s."""
+        return {"present": False,
+                "task": {"state": "running", "restarts": 0, "exit": None,
+                         "next_s": None, "failed": False,
+                         "started_at": now - age_s}}
+
+    # Свежая попытка без tmux -- поднимается, не «завис».
+    v = verdict(facts_starting(30), now=now)
+    c.expect("#510 a fresh attempt without tmux reads starting",
+             (v.kind, str(v)), ("starting", "starting"))
+    # Возраст на пороге -- уже не поднимается: окно кончилось.
+    v = verdict(facts_starting(STARTING_AFTER), now=now)
+    c.expect("#510 an attempt past the window reads the old hung",
+             (v.kind, str(v)), ("hung", "HUNG (no tmux session)"))
+    # Возраста в фактах нет (старый агент, чужой путь) -- прежний hung:
+    # незнание возраста не лечит и не прячет отказ.
+    v = verdict({"present": False}, now=now)
+    c.expect("#510 no age in the facts keeps the old hung",
+             (v.kind, str(v)), ("hung", "HUNG (no tmux session)"))
+    # «Поднимается» не лечится: рестарт в момент пересоздания убивал бы
+    # работу, которой ещё нет, и гонялся бы с самим врапером.
+    c.expect("#510 starting has no cure", action_for("starting"), None)
+    # И не свободно: место занято аллокацией, диспатч сюда не идёт.
+    c.expect("#510 starting is not free", is_free("starting"), False)
+
+
 def main():
     c = Checks()
     for what, given, want in CASES:
@@ -874,6 +933,7 @@ def main():
     check_verdict_fields_452(c)
     check_invariants_273(c)
     check_alloc_377(c)
+    check_starting_510(c)
     for state, want in FREE_CASES:
         c.expect(f"is_free({state!r})", is_free(state and state.kind), want)
     return c.report("state")
