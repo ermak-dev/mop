@@ -6,9 +6,6 @@ from mop.common import gitlab
 from mop.common.render import table
 from mop.cli.dev.ci._common import parser
 
-MCP = {"annotations": "readonly", "args": [
-    {"name": "n", "type": "integer", "flag": "-n"}]}
-
 
 def main(argv):
     p = parser("list")
