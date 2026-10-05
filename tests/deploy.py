@@ -494,6 +494,47 @@ NODE_RULE = "hostvars[inventory_hostname][item | lower] | default(lookup('vars',
 # правилу node.env в свой факт node_storage до первой задачи, которая его
 # берёт; ни одной голой подстановки MOP_PVE_STORAGE в pve-build.yml.
 # STATUS: FIXED — see #227
+def check_routes_gateway_wait_502(c, can_render):
+    """#502: mop-routes ждёт готовности шлюза до маршрутов.
+
+    HYPOTHESIS: юнит стартует по After=network-online.target, но в LXC
+    адрес eth0 приходит по DHCP от dhclient позже target'а (3 из 4 загрузок
+    сервера mop), шлюза ещё нет в таблице -- первая же `ip route replace
+    ... via <шлюз>` отказывает «Nexthop has invalid gateway», юнит падает, и
+    сервер остаётся без дорог к телам: bootstrap папетов валится по
+    ssh-таймауту до ручного `systemctl restart mop-routes`.
+    SOLUTION: ExecStartPre с циклом ожидания `ip route get` до первого
+    гипервизора (без установленного маршрута команда отказывает) под
+    /usr/bin/timeout; маршруты -- после него.
+    STATUS: FIXED — see #502"""
+    path = os.path.join(DEPLOY, "roles", "pve", "templates", "mop-routes.service.j2")
+    text = open(path).read()
+    c.check("#502 the routes template exists", os.path.isfile(path))
+    if not can_render:
+        return
+    v = {"pve_hops": ["hyper"],
+         "hostvars": {"hyper": {"pve_lan": "192.168.1.112",
+                                "pve_routes": ["10.77.36.0/23", "10.77.38.0/24"],
+                                "inventory_hostname": "hyper"}}}
+    try:
+        got = render(text, v)
+    except Exception as e:  # noqa: BLE001 -- проверка, не код пула
+        c.fail(f"#502 routes render: {type(e).__name__}", str(e))
+        return
+    lines = [l for l in got.splitlines() if l.startswith(("ExecStartPre=", "ExecStart="))]
+    # Сначала ожидание шлюза, потом первый маршрут.
+    c.check("#502 the gateway wait comes before the routes",
+          bool(lines) and lines[0].startswith("ExecStartPre="), lines[:2])
+    wait = next((l for l in lines if "route get" in l), "")
+    c.check("#502 the wait probes the first hop under a timeout",
+          wait.startswith("ExecStartPre=/usr/bin/timeout") and "route get" in wait
+          and "192.168.1.112" in wait, wait)
+    routes = [l for l in lines if l.startswith("ExecStart=")]
+    c.check("#502 the routes follow the wait, all of them",
+          len(routes) == 2
+          and all(f"via 192.168.1.112" in l for l in routes), routes)
+
+
 def check_pve_storage_227(c, can_render):
     plays = yaml.safe_load(open(os.path.join(DEPLOY, "pve-build.yml")))
 
@@ -1723,6 +1764,7 @@ def main():
     check_probes(c)
     check_body_sizes(c, can_render)
     check_pve_storage_227(c, can_render)
+    check_routes_gateway_wait_502(c, can_render)
     check_include_loop_var(c)
     check_add_host_loop_278(c)
     check_users_reload_199(c)

@@ -6,6 +6,12 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# network-online.target в контейнере достигается раньше, чем eth0 получит
+# адрес по DHCP (#502): шлюза в таблице ещё нет, и первая же команда ниже
+# отказывает «Nexthop has invalid gateway». Ждём шлюз до маршрутов:
+# без установленного маршрута `ip route get` не проходит, под timeout --
+# чтобы зависший DHCP не держал юнит вечно.
+ExecStartPre=/usr/bin/timeout 60 /bin/sh -c 'until ip route get {{ hostvars[pve_hops[0]].pve_lan }} >/dev/null 2>&1; do sleep 1; done'
 # По блоку на каждый кусок сети тел: гипервизор, его база VMID, его адрес.
 # Ставит deploy/pve.yml из того, что назвали сами гипервизоры; править
 # руками незачем, следующий прогон перепишет.
