@@ -76,6 +76,7 @@ allowlist'а.
 """
 import json
 import re
+import sys
 import threading
 import time
 import uuid
@@ -425,6 +426,20 @@ class Api:
         reason = result_error(status, rec.get("error") if rec else None)
         if reason:
             frame["error"] = reason
+        # Сырая причина неуспеха -- в журнал службы (#506): после #499
+        # (журнал ops.jsonl удалён) текст исключения жил только в памяти
+        # процесса, и живой отказ читался «operation failed» без улик.
+        # Одна строка в stderr (юнит не переопределяет StandardError --
+        # она в journalctl -u mop-web); успех молчит, публичный кадр и
+        # GET остаются на закрытой фразе (#495), ничего не едет на шину.
+        if status in TERMINAL and status != "succeeded":
+            raw = (rec or {}).get("error") if isinstance(rec, dict) else None
+            if isinstance(verdict, dict) and verdict.get("error"):
+                raw = verdict["error"]
+            print(f"op {record['id']} {record['action']} "
+                  f"{record['target']} login={record['login']} "
+                  f"{status}: {raw or 'no reason captured'}",
+                  file=sys.stderr, flush=True)
         for cb in list(self._on_terminal):
             cb(frame)
 
