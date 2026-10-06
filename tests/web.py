@@ -2301,6 +2301,67 @@ def check_panel_routes_523(c):
                 sent[0][1] == 404, sent[0][1])
 
 
+# ── #523, подсимптом: PUT секции с телом-массивом ─────────────────────────
+# HYPOTHESIS: PUT /v8/management/config/api-keys/openai-compatibility несёт
+# тело-МАССИВ (список провайдеров, GET той же секции отдаёт массив), а
+# JSON-ветка guard'а требует isinstance(doc, dict) и уходит в «битое тело»
+# 400. Прямой эхо-PUT на прокси -- 200: гейт рвал легальную запись секции.
+# Массив -- значение секции, не management-ветка: secret-key в нём быть не
+# может по форме конфига, и проверка обязана это утверждать, а не верить.
+# SOLUTION: массив валиден как документ; hit-scan обходит и его элементы --
+# management-поля в элементах массива ловятся, путь записи закрыт.
+# STATUS: FIXED — see #523
+def check_section_array_523(c):
+    import json as _json523b
+    fn = web.guard_management_write
+    src = lambda: "K" * 32
+
+    # PUT секции с телом-массивом: pass, не 400 -- это полный документ
+    # секции, не поле management.
+    body = _json523b.dumps([{"base-url": "https://x", "api-key": "k"},
+                            {"base-url": "https://y", "name": "p2"}]).encode()
+    got = fn("PUT", "/v8/management/config/api-keys/openai-compatibility",
+             body, src)
+    c.expect("#523 a section PUT with an array body passes",
+             got["action"], "pass")
+    c.check("#523 an array section PUT carries no injection",
+            "body" not in got, got)
+    # Пустой массив -- та же секция, та же легальность (сброс списка).
+    got = fn("PUT", "/v8/management/config/api-keys/openai-compatibility",
+             b"[]", src)
+    c.expect("#523 an empty array is a legal section reset",
+             got["action"], "pass")
+    # Битое тело по-прежнему 400: массив не спасает мусор.
+    for bad in (b"[{not json", b'"just a string"', b"42"):
+        got = fn("PUT", "/v8/management/config/api-keys/openai-compatibility",
+                 bad, src)
+        c.expect(f"#523 a malformed body stays 400 ({bad[:12]!r})",
+                 (got["action"], got.get("status")), ("refuse", 400))
+    # management-поля в элементах массива ловятся: hit-scan не верит форме.
+    body = _json523b.dumps([{"management": {"secret-key": "sneaky"}}]).encode()
+    got = fn("PUT", "/v8/management/config/api-keys/openai-compatibility",
+             body, src)
+    c.expect("#523 a management field inside an array element is refused",
+             (got["action"], got.get("status")), ("refuse", 403))
+    body = _json523b.dumps([{"secret-key": "sneaky"}]).encode()
+    got = fn("PUT", "/v8/management/config/api-keys/openai-compatibility",
+             body, src)
+    c.expect("#523 a bare secret-key inside an array element is refused",
+             (got["action"], got.get("status")), ("refuse", 403))
+    # Полный PUT /config остаётся только dict: массив на корневом конфиге --
+    # не форма конфига, 400, не новый лазейка.
+    got = fn("PUT", "/v8/management/config", b"[1, 2]", src)
+    c.expect("#523 the root config stays dict-only",
+             (got["action"], got.get("status")), ("refuse", 400))
+    # PATCH секции с массивом -- тоже pass: merge-семантика секции на
+    # стороне upstream, гейт лишь не пропускает management.
+    body = _json523b.dumps([{"base-url": "https://z"}]).encode()
+    got = fn("PATCH", "/v8/management/config/api-keys/openai-compatibility",
+             body, src)
+    c.expect("#523 a section PATCH with an array body passes",
+             got["action"], "pass")
+
+
 # ── #462: приватная карточка папета и ограниченный tail ──────────────────
 # HYPOTHESIS: у дашборда нет ни карточки одного папета, ни его хвоста: чтобы
 # посмотреть stderr или экран, оператор заходил на сервер по ssh. Но HTTP-слой
@@ -2575,6 +2636,7 @@ def main():
                check_gateway_body_bounds_417, check_gateway_route_and_delete_417,
                check_gateway_key_path_425,
                check_hash_echo_523, check_panel_routes_523,
+               check_section_array_523,
                check_puppet_card_462, check_puppet_tail_462, check_puppet_no_rpc_462):
         fn(c)
     return c.report("web")

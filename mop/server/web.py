@@ -570,7 +570,8 @@ def _management_paths_hit(obj, key=None):
     """Затрагивает ли JSON-запись ЯВНОЕ поле management.secret-key: новый
     ключ -- замена, плейсхолдер или хэш текущего ключа из прочитанного
     конфига (#523) -- как отсутствие поля (браузер вернул то, что мы
-    ему показали)."""
+    ему показали). Тело секции бывает массивом (#523): элементы
+    сканируются тем же проходом -- форма не ослабляет проверку."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             if k == "secret-key":
@@ -584,6 +585,9 @@ def _management_paths_hit(obj, key=None):
                     return True
                 return not (got == PLACEHOLDER
                             or _echoed_current_key(got, key))
+        return False
+    if isinstance(obj, list):
+        return any(_management_paths_hit(item, key) for item in obj)
     return False
 
 
@@ -759,16 +763,25 @@ def guard_management_write(method, path, body, key_source):
                 "body": yaml.safe_dump(doc, default_flow_style=False,
                                        allow_unicode=True).encode()}
 
-    # JSON-ветка: PATCH -- слияние, PUT -- полная замена
+    # JSON-ветка: PATCH -- слияние, PUT -- полная замена. Тело-массив --
+    # легальная форма записи СЕКЦИИ (#523: PUT /config/api-keys/... несёт
+    # список провайдеров); корневой /config остаётся dict-only.
+    is_root = path.rstrip("/").endswith("/config")
     try:
         doc = json.loads(body or b"{}")
-        if not isinstance(doc, dict):
+        if isinstance(doc, list) and is_root:
+            raise ValueError
+        if not isinstance(doc, (dict, list)):
             raise ValueError
     except (ValueError, UnicodeDecodeError):
         return {"action": "refuse", "status": 400}
     key = key_source()
     if _management_paths_hit(doc, key):
         return {"action": "refuse", "status": 403}
+    # Массив секции не несёт management-блока: инжект не нужен, запись
+    # идёт как есть (upstream сам знает форму секции).
+    if isinstance(doc, list):
+        return {"action": "pass"}
     # плейсхолдер или хэш текущего ключа из прочитанного конфига (#523) --
     # как отсутствие поля
     mgmt = doc.get("management")
