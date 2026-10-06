@@ -25,7 +25,7 @@ test("#513 the restart click posts at once from the row", async () => {
     json: async () => ({ id: "op-1", status: "accepted" }) }) as Response);
   vi.stubGlobal("fetch", fetchMock);
   renderUi(<PoolTable projects={projects} session={ADMIN} />);
-  // вход #516: строка -> окно правки -> пункт рестарта
+  // вход #520: строка -> визард правки -> пункт рестарта
   fireEvent.click(screen.getByRole("button", { name: "правка" }));
   const win = await screen.findByTestId("control-window");
   fireEvent.click(within(win).getByRole("button", { name: "рестарт" }));
@@ -52,10 +52,12 @@ test.each(["target", "role", "login"])("stale restart op after %s change rides n
 });
 
 test("the row offers update with explicit fresh modes", () => {
+  vi.stubGlobal("fetch", vi.fn());
   renderUi(<PoolTable projects={projects} session={ADMIN} />);
   fireEvent.click(screen.getByRole("button", { name: "правка" }));
   const win = screen.getByTestId("control-window");
-  fireEvent.click(within(win).getByRole("button", { name: "правка" }));
+  // #520: пункт update -- «обновление», шаг параметров визарда
+  fireEvent.click(within(win).getByRole("button", { name: "обновление" }));
   const dialog = screen.getByRole("dialog");
   for (const m of ["как было", "свежий клон", "другой origin"]) {
     expect(within(dialog).getByRole("radio", { name: new RegExp(m, "i") })).toBeInTheDocument();

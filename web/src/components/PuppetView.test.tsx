@@ -71,10 +71,10 @@ test("#487 actions have a right-aligned shrink-to-fit column", () => {
   expect(within(actions).queryByRole("button", { name: "сообщение" })).toBeNull();
 });
 
-// Вход #516: клик «правка» в строке -> пункт в окне -> действие. Окно
-// закрывается при выборе пункта (одно действие в один момент), вердикты
+// Вход #516 -> #520: клик «правка» в строке -> визард -> действие. Окно
+// переключает шаги и закрывается исполнением (#520), вердикты
 // каждой операции показываются её собственным механизмом (#487: рестарт
-// и правка -- OperationResult, #488: модель -- балун, #516:
+// и обновление -- OperationResult, #488: модель -- балун, #516:
 // разрушительные -- OperationResult).
 test.each(["рестарт", "правка", "модель"])("#487 %s result never widens the row", async (action) => {
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => response(
@@ -85,26 +85,30 @@ test.each(["рестарт", "правка", "модель"])("#487 %s result ne
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
   fireEvent.click(within(actions).getByRole("button", { name: "правка" }));
   const win = await screen.findByTestId("control-window");
-  const item = within(win).getByRole("button", { name: action === "правка" ? "правка" : action });
+  // #520: пункт update зовётся «обновление», дубля имени больше нет
+  const item = within(win).getByRole("button",
+    { name: action === "правка" ? "обновление" : action });
   fireEvent.click(item);
-  // окно закрылось выбранным пунктом: на экране один диалог -- поток
-  expect(screen.queryByTestId("control-window")).toBeNull();
-  // #513: обратимые шлют сразу; у правки/модели -- своя форма
+  // #513: обратимые шлют сразу; у обновления/модели -- шаг параметров
   if (action === "правка") {
     fireEvent.click(screen.getByRole("radio", { name: "продолжить как было" }));
-    fireEvent.click(screen.getByRole("button", { name: "продолжить" }));
+    fireEvent.click(screen.getByRole("button", { name: /^выполнить$/i }));
   } else if (action === "модель") {
     fireEvent.click(await screen.findByRole("radio", { name: "other-model" }));
-    fireEvent.click(screen.getByRole("button", { name: "продолжить" }));
+    fireEvent.click(screen.getByRole("button", { name: /^выполнить$/i }));
   }
   // #487: вердикт строку не расширяет. #488: у модели вердикт уехал в
-  // балун (слово оператора); рестарт и правка показывают его модальным
-  // диалогом. Инвариант один -- строки действий чисты.
+  // балун (слово оператора); рестарт и обновление показывают его
+  // модальным диалогом. Инвариант один -- строки действий чисты.
   if (action === "модель") {
     await waitFor(() => expect(actions).not.toHaveTextContent("перезапущен"));
   } else {
-    const result = await screen.findByText("перезапущен");
+    // слово вердикта у каждого своё: рестарт -- «перезапущен»,
+    // обновление -- «обновлено» (#520)
+    const result = await screen.findByText(
+      action === "правка" ? "обновлено" : "перезапущен");
     expect(result.closest('[role="dialog"]')).not.toBeNull();
+    expect(actions).not.toHaveTextContent("обновлено");
     expect(actions).not.toHaveTextContent("перезапущен");
   }
 });
@@ -190,16 +194,17 @@ test.each(["рестарт", "правка", "модель"])("#487 %s preserves
   vi.stubGlobal("fetch", mock);
   renderUi(<PoolTable projects={snapshot.projects} session={session} />);
   const actions = screen.getByRole("group", { name: `действия ${row.name}` });
-  // вход #516: строка -> окно правки -> пункт; окно закрывается пунктом
+  // вход #520: строка -> визард -> действие; окно живёт до исполнения
   fireEvent.click(within(actions).getByRole("button", { name: "правка" }));
   const win = await screen.findByTestId("control-window");
-  fireEvent.click(within(win).getByRole("button", { name: action === "правка" ? "правка" : action }));
+  fireEvent.click(within(win).getByRole("button",
+    { name: action === "правка" ? "обновление" : action }));
   if (action === "правка") {
     fireEvent.click(screen.getByRole("radio", { name: "продолжить как было" }));
-    fireEvent.click(screen.getByRole("button", { name: "продолжить" }));
+    fireEvent.click(screen.getByRole("button", { name: /^выполнить$/i }));
   } else if (action === "модель") {
     fireEvent.click(await screen.findByRole("radio", { name: "other-model" }));
-    fireEvent.click(screen.getByRole("button", { name: "продолжить" }));
+    fireEvent.click(screen.getByRole("button", { name: /^выполнить$/i }));
   }
   // #513: подтверждения у обратимых нет -- POST уже ушёл
   if (action === "модель") {
@@ -217,13 +222,15 @@ test.each(["рестарт", "правка", "модель"])("#487 %s preserves
     await act(async () => { finish(response({ status: "failed", error: "review refusal" })); });
     fireEvent.click(within(actions).getByRole("button", { name: "правка" }));
     const again = await screen.findByTestId("control-window");
-    fireEvent.click(within(again).getByRole("button", { name: action === "правка" ? "правка" : action }));
+    fireEvent.click(within(again).getByRole("button",
+      { name: action === "правка" ? "обновление" : action }));
     expect(await screen.findByText(/review refusal/)).toBeInTheDocument();
     expect(mock.mock.calls.filter((c) => c[1]?.method === "POST")).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "новая команда" }));
     expect(screen.queryByText(/review refusal/)).toBeNull();
-    // #513: рестарт шлёт POST сразу; у правки «новая команда» открывает
-    // форму заново (повторный выбор режима) -- у каждой свой честный вход
+    // #513: рестарт шлёт POST сразу; у обновления «новая команда»
+    // открывает визард заново (повторный выбор режима) -- у каждой свой
+    // честный вход
     if (action === "рестарт") {
       await waitFor(() => expect(mock.mock.calls
         .filter((c) => c[1]?.method === "POST")).toHaveLength(2));
@@ -238,8 +245,9 @@ test("#512 the row offers the destructive actions, a non-admin never sees them",
   renderUi(<PoolTable projects={snapshot.projects} session={session} />);
   fireEvent.click(screen.getByRole("button", { name: "правка" }));
   const win = screen.getByTestId("control-window");
-  // #512/#516: три разрушительных действия -- пунктами окна правки
-  // цели, каждое со своим двухшаговым потоком (preview -> подтверждение)
+  // #512/#516/#520: три разрушительных действия -- пунктами визарда
+  // правки цели, каждое -- единый экран последствий с одним
+  // подтверждением
   for (const label of ["recycle", "delete", "wipe"]) {
     expect(within(win).getByRole("button", { name: label })).toBeInTheDocument();
   }
@@ -264,17 +272,19 @@ test("#487 opening the screen scrolls its viewport to the end", async () => {
 
 // ── #516: окно правки -- окно управления целью ──────────────────────────
 
-// Пункты -- все операции цели в одном окне (#516): правка, модель,
-// рестарт и три разрушительных. Названия -- слова GUI, recycle/delete/
-// wipe -- имена действий сервера.
+// Пункты -- все операции цели в одном окне (#516): обновление (update,
+// #520: без дубля имени «правка»), модель, рестарт и три разрушительных.
+// Названия -- слова GUI, recycle/delete/wipe -- имена действий сервера.
+// #520: окно больше не закрывается выбором пункта -- оно визард: выбор
+// переключает шаг, приказ уходит движку с последнего экрана.
 test("#516 the edit window lists every operation as an item", async () => {
-  vi.stubGlobal("fetch", vi.fn());
+  vi.stubGlobal("fetch", vi.fn(async () => response({ models: [] })));
   renderUi(<PoolTable projects={snapshot.projects} session={session} />);
   fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
     .getByRole("button", { name: "правка" }));
   const win = await screen.findByTestId("control-window");
   expect(win.textContent).toContain(row.name);
-  for (const label of ["правка", "модель", "рестарт", "recycle", "delete", "wipe"]) {
+  for (const label of ["обновление", "модель", "рестарт", "recycle", "delete", "wipe"]) {
     expect(within(win).getByRole("button", { name: label })).toBeInTheDocument();
   }
 });
@@ -300,8 +310,9 @@ test.each([
   expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
 });
 
-// Разрушительный пункт окна (#516) проходит весь поток #512: preview ->
-// подтверждение точной цели -> POST; окно закрылось выбранным пунктом.
+// Разрушительный пункт (#516 -> #520): единый экран последствий -- что
+// гибнет и факты точной цели вместе, одна «подтвердить» (прежде --
+// preview и подтверждение двумя модами #512).
 test("#516 a destructive item rides its two-step flow from the window", async () => {
   const fetchMock = vi.fn(async () => response({ id: "op-1", status: "accepted" }));
   vi.stubGlobal("fetch", fetchMock);
@@ -310,14 +321,11 @@ test("#516 a destructive item rides its two-step flow from the window", async ()
     .getByRole("button", { name: "правка" }));
   const win = await screen.findByTestId("control-window");
   fireEvent.click(within(win).getByRole("button", { name: "recycle" }));
-  // окно закрылось пунктом: на экране -- preview последствий
-  expect(screen.queryByTestId("control-window")).toBeNull();
+  // окно живо (#520): единый экран последствий с фактами цели
+  expect(screen.getByTestId("control-window")).toBeInTheDocument();
   expect(await screen.findByText(/несохранённая работа погибнет/i)).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /продолжить/i }));
-  await screen.findByText("подтвердите recycle");
-  const confirm = screen.getAllByRole("dialog")
-    .find((d) => d.textContent.includes("подтвердите recycle"));
-  expect(confirm?.textContent).toContain(row.name);
+  expect(screen.getByTestId("control-window").textContent).toContain(row.name);
+  expect(screen.queryByRole("button", { name: /продолжить/i })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: /^подтвердить$/ }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops",
     expect.objectContaining({ method: "POST" })));
@@ -338,16 +346,15 @@ test("#516 a destructive verdict rides the OperationResult modal", async () => {
   const win = await screen.findByTestId("control-window");
   fireEvent.click(within(win).getByRole("button", { name: "recycle" }));
   expect(await screen.findByText(/несохранённая работа погибнет/i)).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /продолжить/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^подтвердить$/ }));
   const verdict = await screen.findByText(/не удался/i);
   // вердикт -- в модале операции, не строкой рядом с кнопками
   expect(verdict.closest('[role="dialog"]')).not.toBeNull();
   expect(verdict).toHaveTextContent("image builder refused");
 });
 
-// Обратимый пункт шлёт сразу (#513 сохраняется в окне): рестарт из окна
-// -- POST без моды подтверждения, диалог -- только ход операции.
+// Обратимый пункт шлёт сразу (#513 сохраняется в визарде #520): рестарт
+// с первого экрана -- POST сразу, Stepper не переключается.
 test("#516 the restart item posts at once, reversible #513 kept", async () => {
   const fetchMock = vi.fn(async () => response({ id: "op-1", status: "accepted" }));
   vi.stubGlobal("fetch", fetchMock);

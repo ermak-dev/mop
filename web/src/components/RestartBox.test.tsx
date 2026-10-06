@@ -1,14 +1,14 @@
-// Кнопка restart в карточке (#465): вердикт словами #476, unknown -- не
-// failed, автоповтора нет. Никакого force. #513: рестарт обратим -- клик
-// по иконке шлёт POST сразу, мода «подтвердите рестарт» ушла. #508:
-// дизейбл по статусу цели -- признак уже в строке: bucket down
-// (аллокации нет) и kind failing (задача падает); причина видна до
-// клика, не отказом после.
+// Рестарт (#465 -> #520): движок без кожи, вход -- приказ визарда
+// {act: "restart", params: {}}: клик по пункту первого экрана шлёт POST
+// сразу (#513), Stepper не переключается. Вердикт -- словами #476,
+// unknown -- не failed, автоповтора нет. Никакого force. Дизейбл #508
+// живёт в пункте визарда (restartReason), не в движке.
 //
 // RESULT: тесты написаны до реализации (RED).
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import { RestartBox } from "./RestartBox";
+import { RestartBox, restartReason } from "./RestartBox";
+import { MantineProvider } from "@mantine/core";
 import { renderUi } from "../test-utils";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -22,13 +22,6 @@ const ROW: Puppet = {
   origin: "git@h:g/mop.git", disk_kb: null,
 };
 
-// #508: строка без бегущей аллокации -- bucket down; задача падает --
-// kind failing. Обе -- признак строки, который сервер уже посчитал.
-const DOWN: Puppet = { ...ROW, alloc_status: "stopped", bucket: "down",
-  kind: "unknown", state: "stopped" };
-const FAILING: Puppet = { ...ROW, alloc_status: "running", kind: "failing",
-  bucket: "busy", state: "FAILED: exit 1", detail: "exit 1" };
-
 const ok202 = (id: string) =>
   ({ ok: true, status: 202, json: async () => ({ id, status: "accepted" }) }) as Response;
 const opJson = (status: string) =>
@@ -40,66 +33,70 @@ const postGet = (post: () => Promise<Response>, get: () => Promise<Response>) =>
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-// #513: рестарт обратим -- клик шлёт POST сразу, без моды подтверждения.
-test("#513 the restart click posts at once, no confirm dialog", async () => {
+/** Приказ визарда (#520): клик по пункту рестарта. */
+class Order {
+  current: { at: number; act: string; params: Record<string, unknown> } | null = null;
+  fire(act: string, params: Record<string, unknown> = {}) {
+    this.current = { at: Date.now() + Math.random(), act, params };
+  }
+}
+
+/** Движок в коже #520: без кнопки, вход -- приказ-токен. */
+function mountEngine(order: Order, row: Puppet = ROW, session: Session = ADMIN) {
+  return renderUi(<RestartBox session={session} row={row} order={order.current} />);
+}
+
+/** Приказ и ререндер одним ходом. */
+const send = (view: ReturnType<typeof mountEngine>, order: Order) => {
+  order.fire("restart");
+  view.rerender(<MantineProvider>
+    <RestartBox session={ADMIN} row={ROW} order={order.current} />
+  </MantineProvider>);
+};
+
+test("#520 the restart order posts at once, no confirm dialog", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
-  openBox();
-  fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
-  // моды подтверждения нет: открывшийся диалог -- только ход операции
-  // («рестарт: pu-mop-1»), не «подтвердите рестарт»
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order);
   expect(screen.queryByText(/подтвердите рестарт/i)).toBeNull();
-  expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
-    method: "POST", credentials: "same-origin" }));
   const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
   expect(body).toEqual({ action: "restart", target: "pu-mop-1", params: {} });
   await waitFor(() => expect(screen.getByText(/идёт/i)).toBeInTheDocument());
 });
 
-// #513: моды подтверждения у рестарта больше нет; прежние проверки
-// подтверждения адаптированы: один клик -- один POST, вердикт словами
-// #476, unknown -- не failed, автоповтора нет. Никакого force.
-test("the click posts once and the running verdict shows", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("running")));
-  vi.stubGlobal("fetch", fetchMock);
-  openBox();
-  fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
-  await waitFor(() => expect(screen.getByText(/идёт/i)).toBeInTheDocument());
-  expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
-    method: "POST", credentials: "same-origin" }));
-  const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
-  expect(body).toEqual({ action: "restart", target: "pu-mop-1", params: {} });
-});
-
-test("terminal succeeded verdict is shown; retry needs a new click", async () => {
+test("#520 terminal succeeded verdict is shown; retry needs a new order", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("succeeded")));
   vi.stubGlobal("fetch", fetchMock);
-  openBox();
-  fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order);
   await waitFor(() => expect(screen.getByText(/перезапущен/i)).toBeInTheDocument());
 });
 
-test("unknown is named unknown, never failed", async () => {
+test("#520 unknown is named unknown, never failed", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("unknown")));
   vi.stubGlobal("fetch", fetchMock);
-  openBox();
-  fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order);
   await waitFor(() => expect(screen.getByText(/неизвестен/i)).toBeInTheDocument());
   expect(screen.queryByText(/не удался/i)).toBeNull();
 });
 
-test("a refused operation names the server phrase, retry posts again", async () => {
+test("#520 a refused operation names the server phrase, retry posts again", async () => {
   const fetchMock = postGet(
     () => Promise.resolve({ ok: false, status: 409,
       json: async () => ({ error: "another operation is queued" }) }) as Response,
     () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
-  openBox();
-  fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order);
   await waitFor(() => expect(screen.getByText(/queued/i)).toBeInTheDocument());
   // Повтор начинается из результата («новая команда» шлёт снова): клик
   // подтверждения больше не нужен, рестарт обратим (#513).
@@ -109,45 +106,26 @@ test("a refused operation names the server phrase, retry posts again", async () 
       .toHaveLength(2));
 });
 
-test("no storage: nothing lands in localStorage or sessionStorage", async () => {
+test("#520 no storage: nothing lands in localStorage or sessionStorage", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("succeeded")));
   vi.stubGlobal("fetch", fetchMock);
-  openBox();
-  fireEvent.click(screen.getByRole("button", { name: /рестарт/i }));
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order);
   await waitFor(() => expect(screen.getByText(/перезапущен/i)).toBeInTheDocument());
   expect(window.localStorage.length).toBe(0);
   expect(window.sessionStorage.length).toBe(0);
 });
 
-function openBox(row: Puppet = ROW, session: Session = ADMIN) {
-  renderUi(<RestartBox session={session} row={row} />);
-}
+// ── #508: признак строки -- чистая функция, пункт визарда её зовёт ──────
 
-// ── #508: дизейбл по статусу цели, причина до клика ──────────────────────
-
-test("#508 a down bucket disables restart with the reason named", () => {
-  vi.stubGlobal("fetch", vi.fn());
-  openBox(DOWN);
-  // имя кнопки -- причина: слово «рестарт» в нём и есть
-  const button = screen.getByRole("button", { name: /рестарт недоступен: не запущен/ });
-  expect(button).toBeDisabled();
-  expect(button).toHaveAttribute("aria-label", "рестарт недоступен: не запущен");
-  expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+test("#508 restartReason names down and failing with human words", () => {
+  const DOWN: Puppet = { ...ROW, alloc_status: "stopped", bucket: "down",
+    kind: "unknown", state: "stopped" };
+  const FAILING: Puppet = { ...ROW, kind: "failing",
+    state: "FAILED: exit 1", detail: "exit 1" };
+  expect(restartReason(DOWN)).toBe("рестарт недоступен: не запущен");
+  expect(restartReason(FAILING)).toBe("рестарт недоступен: задача падает");
+  expect(restartReason(ROW)).toBeNull();
 });
-
-test("#508 a failing task disables restart with the reason named", () => {
-  vi.stubGlobal("fetch", vi.fn());
-  openBox(FAILING);
-  const button = screen.getByRole("button", { name: /рестарт недоступен: задача падает/ });
-  expect(button).toBeDisabled();
-  expect(button).toHaveAttribute("aria-label", "рестарт недоступен: задача падает");
-  expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
-});
-
-test("#508 a live puppet keeps restart enabled", () => {
-  vi.stubGlobal("fetch", vi.fn());
-  openBox(ROW);
-  expect(screen.getByRole("button", { name: "рестарт" })).toBeEnabled();
-});
-

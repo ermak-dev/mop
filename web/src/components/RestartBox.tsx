@@ -1,23 +1,17 @@
-// Restart цели (#465/#513): клик шлёт POST сразу, обратим -- моды
-// подтверждения нет (подтверждение осталось у необратимых: разрушительные
-// #473 и update в fresh-режимах). Если рестарт невозможен по статусу цели
-// (#508) -- аллокации нет (bucket down) или задача падает (kind failing)
-// -- вход дизейблится с причиной в подписи: признак уже посчитан сервером
-// в строке, отказ после клика был бы вторым ответом на вопрос строки.
-// #516: точка входа -- пункт окна правки (icon=false + сигнал-токен);
-// иконка в строке ушла, боксы остались смонтированными в строке --
-// вердикт операции переживает окно. Слова вердикта -- модель #476:
-// running -- «идёт», unknown -- «неизвестно» (НЕ failed: эффекта могли и
-// не быть), автоповтора нет -- повтор это новый клик. Никакого force:
-// params пусты, схема -- #461. Результат операции в памяти страницы:
-// перезагрузка начинает заново -- id хранить негде (#463 запретил
-// storage), это названо в отчёте #465.
-import { useState } from "react";
-import { IconRefresh } from "@tabler/icons-react";
-import { IconButton } from "./IconButton";
+// Рестарт цели (#465/#513 -> #520): движок без кожи -- визард ControlWindow
+// шлёт приказ-токен {at, act: "restart", params: {}} с первого экрана,
+// клик по пункту шлёт POST сразу (обратим, моды подтверждения нет,
+// #513). Если рестарт невозможен по статусу цели (#508) -- пункт
+// дизейблится с причиной в подписи; признак уже посчитан сервером в
+// строке, отказ после клика был бы вторым ответом на вопрос строки.
+// Слова вердикта -- модель #476: running -- «идёт», unknown --
+// «неизвестно» (НЕ failed: эффекта могли и не быть), автоповтора нет --
+// повтор это новая команда. Никакого force: params пусты, схема -- #461.
+// Результат операции в памяти страницы: перезагрузка начинает заново
+// (#463 запретил storage), это названо в отчёте #465.
+import { useEffect, useState } from "react";
 import { OperationResult } from "./OperationResult";
-import { useSignal, type Signal } from "./ControlWindow";
-import { Group } from "@mantine/core";
+import { useOrder, useSignal, type Signal } from "./ControlWindow";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
 import { useAdminOp } from "../useAdminOp";
@@ -42,40 +36,33 @@ export function restartReason(row: Puppet): string | null {
   return null;
 }
 
-export function RestartBox({ session, row, icon = true, signal = null }: {
+export function RestartBox({ session, row, order = null, reveal = null, onState }: {
   session: Session;
-  /** Строка ростера: цель рестарта и её признаки. */
+  /** Строка ростера: цель рестарта. */
   row: Puppet;
-  /** Кожа иконки в строке (#516): пункт окна шлёт сигнал без иконки. */
-  icon?: boolean;
-  /** Сигнал-токен пункта окна (#516): срабатывание по изменению. */
-  signal?: Signal;
+  /** Приказ-токен визарда (#520): срабатывание по изменению. */
+  order?: Signal;
+  /** Приказ «показать сохранённый вердикт» (#487): от визарда. */
+  reveal?: Signal;
+  /** Состояние хода вверх (#487): как у обновления -- визард при
+   * повторном входе показывает вердикт, не молчит. */
+  onState?: (status: string) => void;
 }) {
   const [result, setResult] = useState(false);
   const { op, submit } = useAdminOp(session, session.role === "admin" ? row.name : null);
-  const blocked = restartReason(row);
-  // #508: причина дизейбла едет в подпись -- Tooltip и aria-label
-  // пишутся из одного слова, человек и проверка видят одно.
-  const label = blocked ?? "рестарт";
-  // Вход (#516): пункт окна или клик иконки -- один и тот же ход
-  // (семантика #513 дословно): живой или завершённый ход показывает
-  // результат, новый POST -- только из «новая команда» или свободного
-  // бокса.
-  const enter = () => { if (op.status !== "idle") setResult(true);
-                        else { setResult(true); void submit(); } };
-  useSignal(signal, enter);
+  useEffect(() => { onState?.(op.status); }, [op.status, onState]);
+  useSignal(reveal, () => setResult(true));
+  // Вход (#520): приказ визарда; повторный вход при живом или терминальном
+  // ходе визард divert-ит на вердикт (engineState, #487), приказ здесь --
+  // новая команда и постится; дедуп живого хода -- движковый (useAdminOp).
+  // Замыкание свежего рендера держит сам useOrder (latest-ref).
+  useOrder(order, "restart", () => {
+    setResult(true); void submit();
+  });
+  if (session.role !== "admin") return null;
   return (
-    <Group gap="sm">
-      {icon && (
-        <IconButton label={label} variant="subtle" color="orange" size="lg"
-                disabled={!!blocked}
-                onClick={() => { setResult(true); void submit(); }}>
-          <IconRefresh size={18} />
-        </IconButton>
-      )}
-      <OperationResult opened={result} onClose={() => setResult(false)}
-        onAgain={() => { setResult(false); void submit(); }} title="рестарт"
-        target={row.name} op={op} word={opWord(op.status)} testId="restart-verdict" />
-    </Group>
+    <OperationResult opened={result} onClose={() => setResult(false)}
+      onAgain={() => { setResult(false); void submit(); }} title="рестарт"
+      target={row.name} op={op} word={opWord(op.status)} testId="restart-verdict" />
   );
 }
