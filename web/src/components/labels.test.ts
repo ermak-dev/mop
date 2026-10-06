@@ -45,11 +45,11 @@ import { PREVIEW } from "./DestructiveBox";
 import { MODES } from "./UpdateBox";
 
 test("#521 the destructive consequences read like the operator's wipe sample", () => {
-  // wipe -- эталон диспатча, слово в слово
+  // wipe -- эталон диспатча, слово в слово; имена действий -- русские
   expect(PREVIEW.wipe.lines).toEqual([
     "Клон будет сброшен к HEAD, каталог цели вычищен.",
     "Тело пересоздаётся, разговор теряется.",
-    "Живая сессия — отказ: wipe для остановленного, полный цикл — recycle.",
+    "Живая сессия — отказ: сброс — для остановленного, полный цикл — пересоздание.",
   ]);
   // delete: что гибнет, что остаётся
   expect(PREVIEW.delete.lines).toEqual([
@@ -59,7 +59,7 @@ test("#521 the destructive consequences read like the operator's wipe sample", (
   // recycle: клон начисто, тело живёт
   expect(PREVIEW.recycle.lines).toEqual([
     "Клон будет возвращён к origin/ветке: несохранённая работа погибнет.",
-    "Каталог цели будет вычищен целиком: первая сборка после recycle медленная.",
+    "Каталог цели будет вычищен целиком: первая сборка после пересоздания медленная.",
     "Джоб и тело останутся жить: папет поднимется заново на чистом клоне.",
   ]);
 });
