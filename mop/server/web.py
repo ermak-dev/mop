@@ -566,16 +566,24 @@ class KeyBreaker:
 MANAGEMENT_DEFAULTS = {"allow-remote": False, "disable-auto-update-panel": True}
 
 
-def _management_paths_hit(obj):
-    """Затрагивает ли JSON-запись ЯВНОЕ поле management.secret-key: хэш или
-    новый ключ -- замена, плейсхолдер из прочитанного конфига -- как
-    отсутствие поля (браузер вернул то, что мы ему показали)."""
+def _management_paths_hit(obj, key=None):
+    """Затрагивает ли JSON-запись ЯВНОЕ поле management.secret-key: новый
+    ключ -- замена, плейсхолдер или хэш текущего ключа из прочитанного
+    конфига (#523) -- как отсутствие поля (браузер вернул то, что мы
+    ему показали)."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             if k == "secret-key":
-                return v != PLACEHOLDER
+                if isinstance(v, str) and (v == PLACEHOLDER
+                                           or _echoed_current_key(v, key)):
+                    return False
+                return True
             if k == "management" and isinstance(v, dict) and "secret-key" in v:
-                return v["secret-key"] != PLACEHOLDER if isinstance(v["secret-key"], str) else True
+                got = v["secret-key"]
+                if not isinstance(got, str):
+                    return True
+                return not (got == PLACEHOLDER
+                            or _echoed_current_key(got, key))
     return False
 
 
@@ -588,22 +596,17 @@ def _yaml_doc(body):
     return doc if isinstance(doc, dict) else {}
 
 
-def _has_explicit_secret(doc):
-    """В документе есть ЯВНЫЙ secret-key (не наш плейсхолдер из чтения)?"""
+def _has_explicit_secret(doc, key=None):
+    """В документе есть ЯВНЫЙ secret-key (не наш плейсхолдер из чтения и
+    не хэш текущего ключа, echoing назад панелью -- #523)?"""
     mgmt = doc.get("management")
     if not isinstance(mgmt, dict) or "secret-key" not in mgmt:
         return False
     value = mgmt["secret-key"]
-    return not (isinstance(value, str) and value == PLACEHOLDER)
-
-
-def _yaml_has_secret(body):
-    """YAML-тело несёт явный management.secret-key? Парсим, не grep:
-    комментарии и чужие поля с похожим именем не считаются."""
-    doc = _yaml_doc(body)
-    if doc is None:
-        return None      # битый YAML -- не гадаем
-    return _has_explicit_secret(doc)
+    if isinstance(value, str) and (value == PLACEHOLDER
+                                   or _echoed_current_key(value, key)):
+        return False
+    return True
 
 
 def _yaml_has_management(body):
@@ -618,6 +621,32 @@ def _yaml_has_management(body):
 # не секрет и знаком guard'у -- его возврат в write читается как отсутствие
 # поля, не как явная замена ключа.
 PLACEHOLDER = "managed-by-mop"
+
+
+def _echoed_current_key(value, key):
+    """Значение secret-key -- bcrypt-хэш ТЕКУЩЕГО ключа сервера (#523)?
+
+    Сток-панель показывает прочитанный конфиг и при сохранении возвращает
+    прочитанные поля как есть: upstream отдаёт ключ хэшем, и панель несёт
+    его обратно. Такой хэш -- то же, что плейсхолдер: браузер вернул то,
+    что ему показали, нового ключа в записи нет. Сверка -- bcrypt по
+    ключу из закрытой копии (он у guard уже есть); без bcrypt или без
+    ключа хэш не распознаётся, и запись остаётся 403 -- молчаливого
+    послабления guard'а нет. Новый ключ (значение мимо сверки) -- 403,
+    как было (#417: ключ ведёт mop)."""
+    if not isinstance(value, str) or not value or value == PLACEHOLDER or not key:
+        return False
+    if not (value.startswith("$2a$") or value.startswith("$2b$")
+            or value.startswith("$2y$")):
+        return False
+    try:
+        import bcrypt
+    except ImportError:
+        return False
+    try:
+        return bcrypt.checkpw(key.encode(), value.encode())
+    except (ValueError, TypeError):
+        return False
 # Sentinel для шима сток-панели (#417): публичное слово в localStorage
 # браузера; upstream его не принимает, гейтвей подменяет своим ключом.
 SENTINEL = "mop-proxy-managed"
@@ -707,18 +736,21 @@ def guard_management_write(method, path, body, key_source):
         doc = _yaml_doc(body)
         if doc is None:
             return {"action": "refuse", "status": 400}
-        has_secret = _has_explicit_secret(doc)
+        # Ключ нужен уже для распознавания хэша (#523): панель возвращает
+        # прочитанное значение, и хэш текущего ключа -- «нет поля», не 403.
+        key = key_source()
+        has_secret = _has_explicit_secret(doc, key)
         has_mgmt = isinstance(doc.get("management"), dict)
         if has_secret:
             return {"action": "refuse", "status": 403}
-        key = key_source()
         if key is None:
             return {"action": "refuse", "status": 503}
         if not has_mgmt:
             doc["management"] = {"secret-key": key, **MANAGEMENT_DEFAULTS}
         else:
-            # блок клиента без явного ключа (или с нашим плейсхолдером) --
-            # ключ сервера, прочие настройки клиента сохраняются
+            # блок клиента без явного ключа (или с нашим плейсхолдером,
+            # или с хэшем текущего ключа) -- ключ сервера, прочие
+            # настройки клиента сохраняются
             client = {k: v for k, v in doc["management"].items()
                       if k != "secret-key"}
             doc["management"] = {**MANAGEMENT_DEFAULTS, **client,
@@ -734,11 +766,15 @@ def guard_management_write(method, path, body, key_source):
             raise ValueError
     except (ValueError, UnicodeDecodeError):
         return {"action": "refuse", "status": 400}
-    if _management_paths_hit(doc):
+    key = key_source()
+    if _management_paths_hit(doc, key):
         return {"action": "refuse", "status": 403}
-    # плейсхолдер из прочитанного конфига -- как отсутствие поля
+    # плейсхолдер или хэш текущего ключа из прочитанного конфига (#523) --
+    # как отсутствие поля
     mgmt = doc.get("management")
-    if isinstance(mgmt, dict) and mgmt.get("secret-key") == PLACEHOLDER:
+    if isinstance(mgmt, dict) and isinstance(mgmt.get("secret-key"), str) \
+            and (mgmt["secret-key"] == PLACEHOLDER
+                 or _echoed_current_key(mgmt["secret-key"], key)):
         mgmt.pop("secret-key")
     if method == "PUT":
         key = key_source()
