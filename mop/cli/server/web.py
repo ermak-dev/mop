@@ -231,9 +231,16 @@ class Handler(BaseHTTPRequestHandler):
         """Молчим про каждый запрос: под systemd журнал забился бы SSE-пингами.
         Ошибки печатает log_error, и он остаётся."""
 
-    def _send(self, code, body, ctype="application/json; charset=utf-8", cache="no-store"):
+    def _send(self, code, body, ctype="application/json; charset=utf-8", cache="no-store",
+              extra=None):
+        """Один выход ответа. extra -- заголовки upstream после whitelist:
+        отправляются ПОСЛЕ send_response -- send_header до строки состояния
+        кладёт их на провод первыми, и браузер читает ответ как HTTP/0.9
+        (#523, живой сервер: все /v8/management/* падали)."""
         data = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", cache)
@@ -416,10 +423,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(502, b"proxy management config unreadable", "text/plain")
         # Тип тела и whitelist заголовков (#417/#523): панель читает
         # X-Cpa-Support-Plugin и X-Cpa-Version из ответов; cookie и
-        # аутентификационные вызовы upstream браузеру не нужны.
-        for name, value in web.response_headers(heads).items():
-            self.send_header(name, value)
-        return self._send(code, got, ctype)
+        # аутентификационные вызовы upstream браузеру не нужны. Порядок
+        # важен: заголовки уходят после строки состояния, внутри _send.
+        return self._send(code, got, ctype, extra=web.response_headers(heads))
 
     def api_login(self):
         """Вход: JSON {login, password} -> сессия в cookie.

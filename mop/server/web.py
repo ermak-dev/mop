@@ -539,7 +539,12 @@ class KeyBreaker:
             done.wait()
         code = None
         try:
-            code, got = upstream(method, path, body, key)
+            # Upstream бывает двух форм: (код, тело) -- обёртка fetch_panel,
+            # и (код, тело, заголовки) -- обёртка llm_api (#523). Жёсткая
+            # распаковка на два роняла поток до отправки ответа (#523,
+            # живой сервер: соединение рвётся без статуса).
+            answer = upstream(method, path, body, key)
+            code, got = answer[0], answer[1]
         finally:
             # Изменить состояние до освобождения ожидающих: если event.set()
             # случится раньше отказа 401, второй поток сделает вторую пробу.
@@ -555,9 +560,8 @@ class KeyBreaker:
                 event = self._inflight.pop(key, None)
                 if event:
                     event.set()
-        if code in (401, 403):
-            return code, got
-        return code, got
+        # Полный ответ upstream, без свёртки: llm_api ждёт и заголовки.
+        return answer
 
 
 # Management-блок, инжектируемый полному PUT (#417, вариант A): ключ

@@ -2284,9 +2284,14 @@ def check_panel_routes_523(c):
             patched(webcli, GATEWAY=gw):
         sent, out = _fake_handler(webcli, "GET", "/v8/management/plugins",
                                   headers=headers)
+        # Хотфикс #523: заголовок, отправленный ДО строки состояния, рвёт
+        # ответ на проводе -- браузер видит его первым и читает ответ как
+        # HTTP/0.9 (все /v8/management/* падали, /api/* жили). Строка
+        # состояния обязана идти первым элементом отправки.
+        c.check("#523 the status line is sent before upstream headers",
+                sent[0] == ("status", 200), sent)
         c.check("#523 the browser answer carries the plugin header",
-                any(k == "status" and v == 200 for k, v in sent)
-                and any(k == "X-Cpa-Support-Plugin" and v == "true" for k, v in sent),
+                any(k == "X-Cpa-Support-Plugin" and v == "true" for k, v in sent),
                 sent)
         c.check("#523 the browser answer carries the server version",
                 any(k == "X-Cpa-Version" and v == "8.0.16" for k, v in sent), sent)
@@ -2299,6 +2304,57 @@ def check_panel_routes_523(c):
                                   headers=headers)
         c.check("#523 an unknown raw path is still refused",
                 sent[0][1] == 404, sent[0][1])
+
+
+# ── #523, хотфикс: breaker и порядок заголовков на проводе ────────────────
+# HYPOTHESIS: два независимых дефекта вскрылись на живом сервере после
+# раскатки. (1) KeyBreaker.__call__ распаковывает ровно два значения,
+# а upstream после #523 может вернуть и три (код, тело, заголовки) --
+# ValueError убивает поток до отправки ответа, соединение рвётся без
+# статуса. (2) Заголовки upstream отправлялись send_header'ом ДО
+# send_response: BaseHTTPRequestHandler кладёт их в буфер раньше строки
+# состояния, и на проводе первым байтом идёт «X-Cpa-...: ...», а не
+# «HTTP/1.1 ...» -- браузер читает такой ответ как HTTP/0.9 и рвёт
+# соединение (панель: «Auto login failed: timeout 30s», curl: «HTTP/0.9»).
+# Оба обязаны быть пойманы проверками, а не вскрыты на живом прокси.
+# SOLUTION: breaker распаковывает upstream толерантно к 2 и 3 значениям
+# и возвращает то, что дал upstream (тело ответа не теряется); заголовки
+# upstream отправляются ПОСЛЕ send_response, внутри _send.
+# STATUS: FIXED — see #523
+def check_hotfix_unwrap_523(c):
+    from mop.server import web as weblib
+
+    # (1) breaker не падает на 3-кортежном upstream и не теряет значения
+    kb = weblib.KeyBreaker()
+    heads = {"X-Cpa-Support-Plugin": "true"}
+
+    def up3(method, path, body, key):
+        return 200, b'{"ok": true}', heads
+
+    out3 = kb("GET", "/v8/management/plugins", b"", "K" * 32, up3)
+    c.check("#523 breaker survives a 3-tuple upstream",
+            isinstance(out3, tuple) and out3[0] == 200 and out3[1] == b'{"ok": true}',
+            out3)
+    c.check("#523 breaker passes the upstream headers through",
+            len(out3) == 3 and out3[2] == heads, out3)
+
+    def up2(method, path, body, key):
+        return 200, b"panel"
+
+    out2 = kb("GET", "/management.html", b"", "K" * 32, up2)
+    c.check("#523 breaker keeps the 2-tuple shape of fetch_panel",
+            out2 == (200, b"panel"), out2)
+
+    # отказ ключа по-прежнему локальный 503, без похода к upstream
+    def up_never(method, path, body, key):
+        raise AssertionError("upstream must not be called")
+
+    kb2 = weblib.KeyBreaker()
+    kb2._refused.add("K" * 32)
+
+    out_ref = kb2("GET", "/x", b"", "K" * 32, up_never)
+    c.check("#523 a refused key still answers 503 locally",
+            out_ref[0] == 503, out_ref)
 
 
 # ── #523, подсимптом: PUT секции с телом-массивом ─────────────────────────
@@ -2636,7 +2692,7 @@ def main():
                check_gateway_body_bounds_417, check_gateway_route_and_delete_417,
                check_gateway_key_path_425,
                check_hash_echo_523, check_panel_routes_523,
-               check_section_array_523,
+               check_section_array_523, check_hotfix_unwrap_523,
                check_puppet_card_462, check_puppet_tail_462, check_puppet_no_rpc_462):
         fn(c)
     return c.report("web")
