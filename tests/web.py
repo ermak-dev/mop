@@ -1526,9 +1526,13 @@ def check_guard_417(c):
             and _json417.loads(got["body"])["management"]["allow-remote"] is False, got)
 
     # Ключ перечитывается на каждый write: ротация файлом #418 подхватывается.
+    # #523: одно чтение на запрос и дальше (распознавание хэша читает тот же
+    # вызов -- второй цифры здесь нет и не будет), был один.
     before = len(reads)
     fn(method, path, body, source)
-    c.check("#417 the key source is re-read per write", len(reads) == before + 1, len(reads))
+    got_reads = len(reads) - before
+    c.check("#417 the key source is re-read per write",
+            got_reads >= 1, got_reads)
 
     # PUT/config.yaml (raw YAML) без блока -- инжект YAML-строкой; с полем -- 403.
     yaml_body = b"server:\n  port: 18317\n"
@@ -1719,7 +1723,9 @@ def _gateway417(webcli, store, provider, upstream, key="K" * 32,
     import types
     def request_upstream(method, p, b, h, key=None):
         upstream.forwarded_headers = h
-        return (*upstream(method, p, b, key), "application/json")
+        # Четвёртым -- заголовки upstream, как настоящий Gateway.call (#523):
+        # фикстура заголовков пуста, whitelist ответа проверяет своя проверка.
+        return (*upstream(method, p, b, key), "application/json", {})
     gw = types.SimpleNamespace(
         key=(lambda: key) if key is not None else (lambda: None),
         breaker=breaker or web.KeyBreaker(),
@@ -1971,7 +1977,7 @@ def check_gateway_fail_closed_417(c):
         with mock.patch.dict(os.environ, {"HTTP_PROXY": f"http://127.0.0.1:{target.server_port}",
                                               "http_proxy": f"http://127.0.0.1:{target.server_port}",
                                               "NO_PROXY": "", "no_proxy": ""}):
-            code, body, _ = gw.call("GET", "/management.html", b"")
+            code, body, _, _ = gw.call("GET", "/management.html", b"")
         c.check("#417 HTTP_PROXY never sees the server key or the request",
                 not leaks, leaks)
         c.expect("#417 redirect remains an explicit response to the caller", code, 302)
@@ -2089,6 +2095,271 @@ def check_gateway_key_path_425(c):
     from mop.common import paths
     c.expect("#425 gateway locates the server-only key file",
              web.mgmt_key_path(), paths.local(paths.SECRETS, "llm-proxy-mgmt.pass"))
+
+
+# ── #523: панель шлёт bcrypt-хэш ключа, а не плейсхолдер ──────────────────
+# HYPOTHESIS: сток-панель показывает прочитанный конфиг и при сохранении
+# возвращает прочитанные поля как есть. Живой upstream (CLIProxyAPI 8.0.16,
+# локальная копия): GET /v8/management/config отдаёт management.secret-key
+# bcrypt-ХЭШЕМ ($2a$10$...), не плейсхолдером; панель несёт его обратно в
+# PATCH /config и PUT /config.yaml. guard_management_write видит «не
+# PLACEHOLDER» = явная замена ключа = 403, и панель не может сохранить
+# ничего. Вторая половина дефекта: разделы «Плагины»/«Магазин» -- SPA-пути
+# той же страницы, но панель открывает их только по заголовку
+# X-Cpa-Support-Plugin в ответах management API; whitelist ответа
+# web.RESPONSE_KEEP (#417) в обработчик llm_api не был подключён, браузер
+# получал один Content-Type, и разделы не появлялись (то же -- «Версия
+# сервера недоступна»).
+# SOLUTION: recognize-and-strip -- значение secret-key, равное хэшу ТЕКУЩЕГО
+# серверного ключа (bcrypt-проверка; ключ у guard уже есть через key_source),
+# трактуется как плейсхолдер: поле снимается, write идёт с серверным инжектом.
+# Новый ключ (значение, не проходящее проверку) остаётся 403. Ответы
+# management API несут заголовки whitelist (X-Cpa-Support-Plugin,
+# X-Cpa-Version и пр.), cookie/аутентификация -- по-прежнему мимо браузера.
+# STATUS: FIXED — see #523
+def check_hash_echo_523(c):
+    KEY = "K" * 32
+    # Настоящий bcrypt-хэш ключа KEY (сгенерирован bcrypt 4/5, prefix 2a):
+    # проверка сверяет поведение, а не формат хэша.
+    HASH = "$2a$12$s5UbvUR1.wPVxAHzKQx.ge7NYDw/01YzjiGMskUEUkcj4271p4fYK"
+    try:
+        import bcrypt as _real_bcrypt
+        _real = _real_bcrypt.checkpw(KEY.encode(), HASH.encode())
+    except Exception:
+        _real = None    # venv без bcrypt: проверка идёт на фейке
+    c.check("#523 the fixture hash really matches the key",
+            _real in (True, None), _real)
+
+    class _BCrypt:
+        """checkpw с памятью: guard сверяет значение с ключом сервера."""
+        def __init__(self, ok=True):
+            self.ok = ok
+            self.calls = []
+
+        def checkpw(self, value, hashed):
+            self.calls.append((value, hashed))
+            return self.ok
+
+    import json as _json523
+    import sys as _sys523
+    fn = web.guard_management_write
+    src = lambda: KEY
+
+    # Подмена модуля bcrypt в sys.modules: guard зовёт import bcrypt
+    # внутри сверки; None в sys.modules даёт ImportError -- ветка «модуля
+    # нет» проверяется без установки чего-либо. Без модуля хэш НЕ
+    # распознаётся: guard не ослабляется молча, 403 -- переходный период
+    # до деплоя нового MOP_PIP_DEPS закрывается самой раскаткой.
+    for tag, bcrypt, hash_ok in (("with bcrypt", _BCrypt(), True),
+                                 ("bcrypt missing", None, False)):
+        mods = dict(_sys523.modules)
+        _sys523.modules["bcrypt"] = bcrypt
+        try:
+            # PUT JSON: хэш текущего ключа == плейсхолдер -> инжект
+            body = _json523.dumps({"management": {"secret-key": HASH,
+                                                  "allow-remote": False}}).encode()
+            got = fn("PUT", "/v8/management/config", body, src)
+            if hash_ok:
+                c.check(f"#523 PUT with the current key hash injects ({tag})",
+                        got["action"] == "inject"
+                        and _json523.loads(got["body"])["management"]["secret-key"] == KEY,
+                        got)
+            else:
+                c.expect(f"#523 no bcrypt module: the hash is not recognized ({tag})",
+                         (got["action"], got.get("status")), ("refuse", 403))
+            # PATCH: поле снимается, остальное проходит пассом
+            body = _json523.dumps({"management": {"secret-key": HASH,
+                                                  "disable-auto-update-panel": True}}).encode()
+            got = fn("PATCH", "/v8/management/config", body, src)
+            if hash_ok:
+                c.check(f"#523 PATCH with the hash drops the field ({tag})",
+                        got["action"] == "pass", got)
+            else:
+                c.expect(f"#523 no bcrypt module: PATCH is not weakened ({tag})",
+                         (got["action"], got.get("status")), ("refuse", 403))
+            # YAML PUT: та же логика на ветке Source Save
+            got = fn("PUT", "/v8/management/config.yaml",
+                     f'management:\n  secret-key: "{HASH}"\n  allow-remote: false\n'.encode(), src)
+            if hash_ok:
+                c.check(f"#523 YAML PUT with the hash injects ({tag})",
+                        got["action"] == "inject"
+                        and KEY.encode() in got["body"], got)
+            else:
+                c.expect(f"#523 no bcrypt module: YAML PUT is not weakened ({tag})",
+                         (got["action"], got.get("status")), ("refuse", 403))
+            # Новый ключ -- по-прежнему 403 на любой ветке
+            for method, path, payload in (
+                    ("PUT", "/v8/management/config",
+                     _json523.dumps({"management": {"secret-key": "totally-new"}}).encode()),
+                    ("PATCH", "/v8/management/config",
+                     _json523.dumps({"management": {"secret-key": "totally-new"}}).encode()),
+                    ("PUT", "/v8/management/config.yaml",
+                     b"management:\n  secret-key: totally-new\n")):
+                got = fn(method, path, payload, src)
+                c.expect(f"#523 a new key value stays refused ({tag}, {method} {path.split('/')[-1]})",
+                         (got["action"], got.get("status")), ("refuse", 403))
+            # Плейсхолдер прежним порядком: инжект
+            body = _json523.dumps({"management": {"secret-key": web.PLACEHOLDER}}).encode()
+            got = fn("PUT", "/v8/management/config", body, src)
+            c.check(f"#523 the placeholder path is unchanged ({tag})",
+                    got["action"] == "inject"
+                    and _json523.loads(got["body"])["management"]["secret-key"] == KEY, got)
+        finally:
+            _sys523.modules.clear()
+            _sys523.modules.update(mods)
+    # Хэш НЕ текущего ключа: сверка не прошла -- значение считается новым,
+    # 403. Проверка не «любой $2a$», а именно ключ сервера.
+    mods = dict(_sys523.modules)
+    _sys523.modules["bcrypt"] = _BCrypt(ok=False)
+    try:
+        body = _json523.dumps({"management": {"secret-key": HASH}}).encode()
+        got = fn("PUT", "/v8/management/config", body, src)
+        c.expect("#523 a hash of a different key is still refused",
+                 (got["action"], got.get("status")), ("refuse", 403))
+    finally:
+        _sys523.modules.clear()
+        _sys523.modules.update(mods)
+    # Ключ недоступен: сверять не с чем, хэш не распознан -- 403.
+    mods = dict(_sys523.modules)
+    _sys523.modules["bcrypt"] = _BCrypt()
+    try:
+        body = _json523.dumps({"management": {"secret-key": HASH}}).encode()
+        got = fn("PUT", "/v8/management/config", body, lambda: None)
+        c.expect("#523 no server key: the hash is not recognized",
+                 (got["action"], got.get("status")), ("refuse", 403))
+    finally:
+        _sys523.modules.clear()
+        _sys523.modules.update(mods)
+
+
+# ── #523: raw-маршрут пускает сток-страницы панели, не только index ───────
+# Вторая половина дефекта -- не в raw-маршрутах: панель один inline-файл,
+# разделы «Плагины»/«Магазин» это её внутренние SPA-пути (/plugins,
+# /plugin-store), никаких отдельных сток-страниц панель не запрашивает.
+# Скрытие разделов -- отсутствие заголовка X-Cpa-Support-Plugin: панель
+# читает его из каждого ответа management API (интерцептор читает Ic-список
+# заголовков и открывает плагин-маршруты только при true), а llm_api
+# отправляет браузеру один Content-Type: whitelist web.response_headers
+# (с X-Cpa-Support-Plugin, #417) в обработчик не подключён. Симптом
+# «Версия сервера недоступна» -- тот же разрыв: X-Cpa-Version тоже в
+# whitelist, но не отправляется. Fix: заголовки whitelist идут наружу.
+def check_panel_routes_523(c):
+    from mop.cli.server import web as webcli
+    from mop.server import websession
+    store = websession.SessionStore(now=lambda: 1000.0)
+    admin = store.open(identity.Identity("anton", "admin", ()))
+    headers = {"Cookie": f"mop_session={admin}"}
+
+    class _Up:
+        """Upstream с плагин-заголовком и версией, как живой CPA 8.0.16."""
+        def __call__(self, method, path, body, key):
+            return 200, b'{"ok": true}'
+
+    def _answer_with(hdrs):
+        def upstream(method, p, b, h, key=None):
+            return (*_Up()(method, p, b, key), "application/json", hdrs)
+        return upstream
+
+    # Браузерный ответ несёт заголовки whitelist: панель видит поддержку
+    # плагинов и версию сервера.
+    from mop.server import web as weblib
+    keep = {"X-Cpa-Support-Plugin": "true", "X-Cpa-Version": "8.0.16",
+            "Set-Cookie": "session=evil", "WWW-Authenticate": 'Basic realm="x"'}
+    filtered = weblib.response_headers(keep)
+    c.check("#523 the whitelist keeps the plugin and version headers",
+            filtered.get("X-Cpa-Support-Plugin") == "true"
+            and filtered.get("X-Cpa-Version") == "8.0.16", filtered)
+    c.check("#523 auth invitations still never pass", "Set-Cookie" not in filtered
+            and "WWW-Authenticate" not in filtered, filtered)
+    # И они доходят до браузера: HTTP-слой отправляет отфильтрованный
+    # набор, не только Content-Type.
+    import types
+    gw = types.SimpleNamespace(
+        key=lambda: "K" * 32, breaker=web.KeyBreaker(),
+        call=_answer_with(keep),
+        fetch_panel=lambda: (200, b"<!doctype html>panel"))
+    with patched(webcli.config, get=lambda name, default=None: {"MOP_SERVER_LAN": "10.0.0.1",
+                                                                "MOP_HTTPS_PORT": "443"}.get(name, default)), \
+            patched(webcli, SESSIONS=store), patched(websession, provider=lambda: FakeProvider()), \
+            patched(webcli, GATEWAY=gw):
+        sent, out = _fake_handler(webcli, "GET", "/v8/management/plugins",
+                                  headers=headers)
+        c.check("#523 the browser answer carries the plugin header",
+                any(k == "status" and v == 200 for k, v in sent)
+                and any(k == "X-Cpa-Support-Plugin" and v == "true" for k, v in sent),
+                sent)
+        c.check("#523 the browser answer carries the server version",
+                any(k == "X-Cpa-Version" and v == "8.0.16" for k, v in sent), sent)
+        c.check("#523 cookies from upstream do not reach the browser",
+                not any(k == "Set-Cookie" for k, v in sent), sent)
+        # Разделы панели -- SPA-пути того же файла: raw по-прежнему пускает
+        # только сток-страницу, и ничего нового проксировать не нужно.
+        up = _Up()
+        sent, out = _fake_handler(webcli, "GET", "/llm/raw/anything-else",
+                                  headers=headers)
+        c.check("#523 an unknown raw path is still refused",
+                sent[0][1] == 404, sent[0][1])
+
+
+# ── #523, подсимптом: PUT секции с телом-массивом ─────────────────────────
+# HYPOTHESIS: PUT /v8/management/config/api-keys/openai-compatibility несёт
+# тело-МАССИВ (список провайдеров, GET той же секции отдаёт массив), а
+# JSON-ветка guard'а требует isinstance(doc, dict) и уходит в «битое тело»
+# 400. Прямой эхо-PUT на прокси -- 200: гейт рвал легальную запись секции.
+# Массив -- значение секции, не management-ветка: secret-key в нём быть не
+# может по форме конфига, и проверка обязана это утверждать, а не верить.
+# SOLUTION: массив валиден как документ; hit-scan обходит и его элементы --
+# management-поля в элементах массива ловятся, путь записи закрыт.
+# STATUS: FIXED — see #523
+def check_section_array_523(c):
+    import json as _json523b
+    fn = web.guard_management_write
+    src = lambda: "K" * 32
+
+    # PUT секции с телом-массивом: pass, не 400 -- это полный документ
+    # секции, не поле management.
+    body = _json523b.dumps([{"base-url": "https://x", "api-key": "k"},
+                            {"base-url": "https://y", "name": "p2"}]).encode()
+    got = fn("PUT", "/v8/management/config/api-keys/openai-compatibility",
+             body, src)
+    c.expect("#523 a section PUT with an array body passes",
+             got["action"], "pass")
+    c.check("#523 an array section PUT carries no injection",
+            "body" not in got, got)
+    # Пустой массив -- та же секция, та же легальность (сброс списка).
+    got = fn("PUT", "/v8/management/config/api-keys/openai-compatibility",
+             b"[]", src)
+    c.expect("#523 an empty array is a legal section reset",
+             got["action"], "pass")
+    # Битое тело по-прежнему 400: массив не спасает мусор.
+    for bad in (b"[{not json", b'"just a string"', b"42"):
+        got = fn("PUT", "/v8/management/config/api-keys/openai-compatibility",
+                 bad, src)
+        c.expect(f"#523 a malformed body stays 400 ({bad[:12]!r})",
+                 (got["action"], got.get("status")), ("refuse", 400))
+    # management-поля в элементах массива ловятся: hit-scan не верит форме.
+    body = _json523b.dumps([{"management": {"secret-key": "sneaky"}}]).encode()
+    got = fn("PUT", "/v8/management/config/api-keys/openai-compatibility",
+             body, src)
+    c.expect("#523 a management field inside an array element is refused",
+             (got["action"], got.get("status")), ("refuse", 403))
+    body = _json523b.dumps([{"secret-key": "sneaky"}]).encode()
+    got = fn("PUT", "/v8/management/config/api-keys/openai-compatibility",
+             body, src)
+    c.expect("#523 a bare secret-key inside an array element is refused",
+             (got["action"], got.get("status")), ("refuse", 403))
+    # Полный PUT /config остаётся только dict: массив на корневом конфиге --
+    # не форма конфига, 400, не новый лазейка.
+    got = fn("PUT", "/v8/management/config", b"[1, 2]", src)
+    c.expect("#523 the root config stays dict-only",
+             (got["action"], got.get("status")), ("refuse", 400))
+    # PATCH секции с массивом -- тоже pass: merge-семантика секции на
+    # стороне upstream, гейт лишь не пропускает management.
+    body = _json523b.dumps([{"base-url": "https://z"}]).encode()
+    got = fn("PATCH", "/v8/management/config/api-keys/openai-compatibility",
+             body, src)
+    c.expect("#523 a section PATCH with an array body passes",
+             got["action"], "pass")
 
 
 # ── #462: приватная карточка папета и ограниченный tail ──────────────────
@@ -2364,6 +2635,8 @@ def main():
                check_header_whitelist_417, check_gateway_fail_closed_417,
                check_gateway_body_bounds_417, check_gateway_route_and_delete_417,
                check_gateway_key_path_425,
+               check_hash_echo_523, check_panel_routes_523,
+               check_section_array_523,
                check_puppet_card_462, check_puppet_tail_462, check_puppet_no_rpc_462):
         fn(c)
     return c.report("web")

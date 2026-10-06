@@ -160,12 +160,13 @@ class Gateway:
 
     def call(self, method, path, body, headers=None, key=None):
         """Запрос только на петлю: окружение HTTP_PROXY не участвует.
-        -> (код, тело, content-type). Редиректы оставляем вызывающему."""
+        -> (код, тело, content-type, заголовки upstream). Редиректы
+        оставляем вызывающему."""
         import http.client
 
         key = self.key() if key is None else key
         if not key:
-            return 503, b"proxy management key unavailable", "text/plain"
+            return 503, b"proxy management key unavailable", "text/plain", {}
         forwarded = {k: v for k, v in (headers or {}).items()
                      if k.lower() not in ("authorization", "cookie", "host")}
         forwarded["Authorization"] = f"Bearer {key}"
@@ -175,13 +176,19 @@ class Gateway:
             conn.request(method, path, body=body or None, headers=forwarded)
             r = conn.getresponse()
             if r.status in (301, 302, 303, 307, 308):
-                return r.status, (r.getheader("Location") or "").encode(), "text/plain"
+                return r.status, (r.getheader("Location") or "").encode(), \
+                    "text/plain", {}
             got = r.read(web.PANEL_MAX + 1)
             if len(got) > web.PANEL_MAX:
-                return 502, b"proxy management answer too large", "text/plain"
-            return r.status, got, r.getheader("Content-Type", "application/json")
+                return 502, b"proxy management answer too large", "text/plain", {}
+            # Заголовки upstream нужны браузеру (#523): панель открывает
+            # разделы плагинов по X-Cpa-Support-Plugin и называет версию
+            # сервера по X-Cpa-Version. Отдаются не все -- наружу идёт
+            # whitelist web.response_headers, а не сырой набор.
+            heads = {k: v for k, v in r.getheaders() if k.lower() != "content-type"}
+            return r.status, got, r.getheader("Content-Type", "application/json"), heads
         except (http.client.HTTPException, OSError, ValueError):
-            return 502, b"proxy management upstream unreachable", "text/plain"
+            return 502, b"proxy management upstream unreachable", "text/plain", {}
         finally:
             if conn is not None:
                 conn.close()
@@ -198,7 +205,7 @@ class Gateway:
         if not key:
             return 503, b"proxy management key unavailable"
         def upstream(method, target, body, sent_key):
-            code, got, _ = self.call(method, target, body, key=sent_key)
+            code, got, _, _ = self.call(method, target, body, key=sent_key)
             return code, got
         for _ in range(web.REDIRECT_MAX):
             code, body = self.breaker("GET", path, b"", key, upstream)
@@ -389,16 +396,17 @@ class Handler(BaseHTTPRequestHandler):
         forwarded = {name: self.headers[name] for name in ("Content-Type", "Accept")
                      if self.headers.get(name)}
         def upstream(method, p, b, k):
-            code, got, ctype = gw.call(method, p, b, forwarded, key=k)
-            return code, (got, ctype)
+            code, got, ctype, heads = gw.call(method, p, b, forwarded, key=k)
+            return code, (got, ctype, heads)
         try:
             code, answer = gw.breaker(self.command, path, body, key, upstream)
         except Exception:
             return self._send(502, b"proxy management upstream unreachable", "text/plain")
         if isinstance(answer, tuple):
-            got, ctype = answer
+            got, ctype = answer[0], answer[1]
+            heads = answer[2] if len(answer) > 2 else {}
         else:
-            got, ctype = answer, "text/plain"
+            got, ctype, heads = answer, "text/plain", {}
         if code in (301, 302, 303, 307, 308):
             return self._send(502, b"proxy management redirect refused", "text/plain")
         if self.command == "GET" and code == 200 \
@@ -406,7 +414,11 @@ class Handler(BaseHTTPRequestHandler):
             got = web.redact_management_read(route, got)
             if got is None:
                 return self._send(502, b"proxy management config unreadable", "text/plain")
-        # Только тип тела уходит наружу, заголовки upstream не копируем.
+        # Тип тела и whitelist заголовков (#417/#523): панель читает
+        # X-Cpa-Support-Plugin и X-Cpa-Version из ответов; cookie и
+        # аутентификационные вызовы upstream браузеру не нужны.
+        for name, value in web.response_headers(heads).items():
+            self.send_header(name, value)
         return self._send(code, got, ctype)
 
     def api_login(self):

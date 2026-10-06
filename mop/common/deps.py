@@ -21,4 +21,5 @@ PIP = (
     "ldap3",          # провайдер личности ldap (#208); импорт ленивый
     "nkeys",          # подпись JWT auth callout (#206, mop/server/nkjwt.py)
     "pynacl",         # ящики xkey и проверка подписи: nkeys 0.2.1 их не умеет
+    "bcrypt",         # распознавание хэша ключа в write панели (#523, web.py)
 )
