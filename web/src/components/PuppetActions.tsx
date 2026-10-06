@@ -1,10 +1,11 @@
-// Действия строки (#516): в строке -- «экран» и «правка»; все операции
-// цели (правка, модель, рестарт, recycle/delete/wipe) -- пунктами в окне
-// правки (ControlWindow). Волна #507-#513 натащила в строку восемь
-// иконок; операторский минимализм свернул их в одно окно. Боксы
-// остаются смонтированными здесь же: их useAdminOp-стейт переживает
-// окно (вердикт, пришедший после закрытия, не теряется), окно лишь
-// запускает поток выбранного пункта сигнал-токеном.
+// Действия строки (#516/#520): в строке -- «экран» и «правка»; все
+// операции цели -- визардом ControlWindow (Stepper: выбор действия ->
+// параметры -> подтверждение). Боксы-движки (useAdminOp +
+// OperationResult/балуны) остаются смонтированными здесь же: их
+// состояние переживает окно, вердикт, пришедший после закрытия, не
+// теряется; визард шлёт им один приказ-токен на строку, каждый движок
+// берёт свой act. «новая команда» в вердикте обновления возвращает
+// визард на шаг обновления (повтор -- новый выбор режима).
 // #507: кнопка «лог» (stderr) ушла -- живые сессии в tmux, stderr у
 // задачи пуст; экран остаётся.
 import { useState } from "react";
@@ -18,45 +19,55 @@ import { ModelBox } from "./ModelBox";
 import { RestartBox } from "./RestartBox";
 import { UpdateBox } from "./UpdateBox";
 import { DestructiveBox } from "./DestructiveBox";
-// #512: монтирование #473 в строку цели -- тот же контракт session+row;
-// #516: кожа иконок уехала в окно, поток остался тем же компонентом.
 import { ControlWindow, type ControlEntry, type Signal } from "./ControlWindow";
 
 export function PuppetActions({ row, session }: { row: Puppet; session: Session }) {
   // экран или ничего (#507): второй источник -- stderr -- ушёл с кнопкой «лог»
   const [viewer, setViewer] = useState<"tail" | null>(null);
-  // окно правки (#516): перечень операций цели пунктами
+  // окно правки (#516/#520): визард операций цели
   const [win, setWin] = useState(false);
-  // сигналы пунктов (#516): токен меняется на каждый выбор, боксы
-  // срабатывают по изменению
-  const [sigUpdate, setSigUpdate] = useState<Signal>(null);
-  const [sigModel, setSigModel] = useState<Signal>(null);
-  const [sigRestart, setSigRestart] = useState<Signal>(null);
-  const [sigRuin, setSigRuin] = useState<{ sub: string; at: number } | null>(null);
+  // Возврат «новая команда» (#520): визард открывается сразу на шаге
+  // обновления -- повтор обновления это новый выбор режима
+  const [reopen, setReopen] = useState<ControlEntry | null>(null);
+  // Приказ движкам (#520): один токен на строку, каждый берёт свой act
+  const [order, setOrder] = useState<Signal>(null);
+  // Состояния движков (#487): {act: status}. Визард при повторном входе
+  // узнаёт из них, есть ли непоказанный ход, и приказывает движку
+  // показать вердикт, а не открывает форму поверх живого/терминального
+  // хода. setState в render-колбеке стабильной подписи -- ок (Object.
+  // is на значении), движки рапортуют через useEffect.
+  const [engineState, setEngineState] = useState<Record<string, string>>({});
+  const engineOf = (act: string) => (status: string) =>
+    setEngineState((m) => (m[act] === status ? m : { ...m, [act]: status }));
+  // Приказы «показать вердикт» (#487): {act: токен}, движок срабатывает
+  // по изменению своего токена
+  const [reveal, setReveal] = useState<Record<string, Signal>>({});
+  const revealOf = (act: string) => reveal[act] ?? null;
   if (session.role !== "admin") return null;
-  const pick = (entry: ControlEntry) => {
-    setWin(false);
-    const at = { at: Date.now() };
-    if (entry === "update") setSigUpdate(at);
-    else if (entry === "model") setSigModel(at);
-    else if (entry === "restart") setSigRestart(at);
-    else setSigRuin({ sub: entry, at: Date.now() });
-  };
   return <Group gap={4} wrap="nowrap" role="group" aria-label={`действия ${row.name}`}
     style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
     <IconButton label="экран" variant="subtle" size="lg" onClick={() => setViewer("tail")}>
       <IconTerminal2 size={18} />
     </IconButton>
     {viewer && <PuppetCard session={session} target={row.name} onClose={() => setViewer(null)} />}
-    <IconButton label="правка" variant="subtle" size="lg" onClick={() => setWin(true)}>
+    <IconButton label="правка" variant="subtle" size="lg"
+                onClick={() => { setReopen(null); setWin(true); }}>
       <IconSettings size={18} />
     </IconButton>
-    {/* Боксы -- в коже пункта окна: без иконок, вход по сигналу. */}
-    <ModelBox session={session} row={row} icon={false} signal={sigModel} />
-    <UpdateBox session={session} row={row} icon={false} signal={sigUpdate} />
-    <RestartBox session={session} row={row} icon={false} signal={sigRestart} />
-    <DestructiveBox session={session} row={row} icon={false} signal={sigRuin} />
-    <ControlWindow opened={win} onClose={() => setWin(false)} onPick={pick}
-                   row={row} session={session} />
+    {/* Движки -- в коже #520: без кнопок, вход -- приказ визарда. */}
+    <ModelBox session={session} row={row} order={order} />
+    <UpdateBox session={session} row={row} order={order} reveal={revealOf("update")}
+               onState={engineOf("update")}
+               onReopen={() => { setReopen("update"); setWin(true); }} />
+    <RestartBox session={session} row={row} order={order}
+                reveal={revealOf("restart")} onState={engineOf("restart")} />
+    <DestructiveBox session={session} row={row} order={order}
+                    reveal={revealOf("destructive")} onState={engineOf("destructive")} />
+    <ControlWindow opened={win} onClose={() => { setWin(false); setReopen(null); }}
+                   onOrder={(o) => setOrder({ at: Date.now(), act: o.act, params: o.params })}
+                   row={row} session={session} initialEntry={reopen}
+                   engineState={engineState}
+                   onReveal={(act) => setReveal((m) =>
+                     ({ ...m, [act]: { at: Date.now(), act, params: {} } }))} />
   </Group>;
 }

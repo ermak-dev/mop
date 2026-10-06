@@ -1,13 +1,15 @@
-// Форма update на карточке папета (#472): fresh как явный выбор
-// keep/replace/remove -- никаких None и умолчаний «как-нибудь». Последствия
-// -- слова #473 (preview), при каждом выборе. POST /api/admin/ops
-// {action: "update", target, params} -- параметры те же, что и выбор:
-// fresh=false (keep), fresh=true (replace), fresh=true + origin (remove).
+// Обновление (#470 -> #520): три явных режима fresh -- keep/replace/
+// remove, никаких умолчаний. #520: шаг параметров и единый финальный
+// экран собирает визард (ControlWindow), приказ приезжает токеном
+// {at, act, params: {fresh[, origin]}}: движок шлёт POST и показывает
+// вердикт OperationResult'ом. keep -- обратим (#513): подтверждение не
+// нужно, визард шлёт приказ сразу с шага параметров.
 //
 // RESULT: тесты написаны до реализации (RED).
 import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { UpdateBox } from "./UpdateBox";
+import { MantineProvider } from "@mantine/core";
 import { renderUi } from "../test-utils";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -22,190 +24,135 @@ const ROW: Puppet = {
 
 const ok202 = (id: string) =>
   ({ ok: true, status: 202, json: async () => ({ id, status: "accepted" }) }) as Response;
-const opJson = (status: string) =>
+const opJson = (status: string, error: string | null = null) =>
   ({ ok: true, status: 200, json: async () => ({ id: "op-1", action: "update",
-     target: "pu-mop-1", status }) }) as Response;
+     target: "pu-mop-1", status, error }) }) as Response;
 const postGet = (post: () => Promise<Response>, get: () => Promise<Response>) =>
   vi.fn(async (url: string | URL, init?: { method?: string }) =>
     (init?.method ?? "GET") === "POST" ? post() : get());
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-const openBox = async () => {
-  fireEvent.click(screen.getByRole("button", { name: /правка/i }));
-  await screen.findByTestId("update-modes");
-};
-
-/** Пройти до POST: открыть, выбрать режим. Fresh-режимы необратимы --
- *  подтверждение остаётся (#513); keep шлёт сразу. */
-const ride = async (mode: string, phrase: RegExp) => {
-  await openBox();
-  fireEvent.click(screen.getByRole("radio", { name: new RegExp(mode, "i") }));
-  // последствия выбора -- на экране до подтверждения
-  expect(screen.getByTestId("update-modes").textContent).toMatch(phrase);
-  fireEvent.click(screen.getByRole("button", { name: /^продолжить$/i }));
-  if (mode !== "как было") {
-    fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
+/** Приказ визарда (#520): подтверждение с финального экрана. */
+class Order {
+  current: { at: number; act: string; params: Record<string, unknown> } | null = null;
+  fire(act: string, params: Record<string, unknown> = {}) {
+    this.current = { at: Date.now() + Math.random(), act, params };
   }
+}
+
+/** Движок в коже #520: без кнопок, вход -- приказ-токен. */
+function mountEngine(order: Order, row: Puppet = ROW, session: Session = ADMIN) {
+  return renderUi(<UpdateBox session={session} row={row} order={order.current} />);
+}
+
+/** Последний POST-вызов fetch как разобранный body. */
+const lastPost = (fetchMock: ReturnType<typeof postGet>) => {
+  const post = fetchMock.mock.calls.find((c) => (c[1] as { method?: string })?.method === "POST");
+  return post ? JSON.parse((post[1] as { body: string }).body) : null;
 };
 
-// #513: keep обратим -- «продолжить» шлёт POST сразу, моды подтверждения нет.
-test("#513 keep posts at once on continue, no confirm dialog", async () => {
+/** Приказ и ререндер одним ходом: как визард шлёт подтверждение. */
+const send = (view: ReturnType<typeof mountEngine>, order: Order,
+              act: string, params: Record<string, unknown>) => {
+  order.fire(act, params);
+  view.rerender(<MantineProvider>
+    <UpdateBox session={ADMIN} row={ROW} order={order.current} />
+  </MantineProvider>);
+};
+
+test("#520 keep posts fresh=false at once, no confirm", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("succeeded")));
   vi.stubGlobal("fetch", fetchMock);
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await openBox();
-  fireEvent.click(screen.getByRole("radio", { name: /как было/i }));
-  fireEvent.click(screen.getByRole("button", { name: /^продолжить$/i }));
-  // мода «подтвердите update» не открывалась
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order, "update", { fresh: false });
   expect(screen.queryByText(/подтвердите update/i)).toBeNull();
-  const post = fetchMock.mock.calls.find((c) => (c[1] as { method?: string })?.method === "POST");
-  expect(JSON.parse((post?.[1] as { body: string }).body))
-    .toEqual({ action: "update", target: "pu-mop-1", params: { fresh: false } });
+  await waitFor(() =>
+    expect(lastPost(fetchMock)).toEqual({ action: "update", target: "pu-mop-1",
+      params: { fresh: false } }));
 });
 
-test("the card offers update with three explicit modes, no silent default", async () => {
-  vi.stubGlobal("fetch", vi.fn());
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await openBox();
-  for (const m of ["продолжить как было", "свежий клон, тот же origin",
-                   "другой origin"]) {
-    expect(screen.getByRole("radio", { name: new RegExp(m, "i") })).toBeInTheDocument();
-  }
-  // ни один режим не выбран заранее: выбора «по умолчанию» нет
-  const checked = screen.getAllByRole("radio").filter((r) => (r as HTMLInputElement).checked);
-  expect(checked).toHaveLength(0);
-});
-
-test("keep announces: conversation continues, nothing dies", async () => {
-  vi.stubGlobal("fetch", vi.fn());
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await openBox();
-  fireEvent.click(screen.getByRole("radio", { name: /как было/i }));
-  expect(screen.getByTestId("update-modes").textContent)
-    .toMatch(/разговор продолж/i);
-  expect(screen.getByTestId("update-modes").textContent).toMatch(/ничего не гибнет|несохранённ/);
-});
-
-test("replace announces: fresh clone, the conversation dies", async () => {
-  vi.stubGlobal("fetch", vi.fn());
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await openBox();
-  fireEvent.click(screen.getByRole("radio", { name: /свежий клон/i }));
-  const t = screen.getByTestId("update-modes").textContent;
-  expect(t).toMatch(/свежий клон/i);
-  expect(t).toMatch(/разговор (погибнет|умрёт|теряется)/i);
-});
-
-test("remove announces the new origin input and its consequences", async () => {
-  vi.stubGlobal("fetch", vi.fn());
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await openBox();
-  fireEvent.click(screen.getByRole("radio", { name: /другой origin/i }));
-  // origin -- явное поле: без него подтверждения нет
-  expect(screen.getByLabelText(/новый origin/i)).toBeInTheDocument();
-  expect(screen.getByTestId("update-modes").textContent)
-    .toMatch(/разговор (погибнет|умрёт|теряется)/i);
-});
-
-test("confirm shows the exact target before the POST", async () => {
-  vi.stubGlobal("fetch", vi.fn());
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await openBox();
-  fireEvent.click(screen.getByRole("radio", { name: /свежий клон/i }));
-  fireEvent.click(screen.getByRole("button", { name: /^продолжить$/i }));
-  const dialog = (await screen.findAllByRole("dialog"))
-    .find((d) => d.textContent.includes("подтвердите update"));
-  expect(dialog?.textContent).toContain("pu-mop-1");
-  expect(dialog?.textContent).toContain("hyper");
-  expect(dialog?.textContent).toContain("free (master)");
-  expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
-});
-
-test("keep posts fresh=false", async () => {
+test("#520 replace posts fresh=true with the same origin", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("succeeded")));
   vi.stubGlobal("fetch", fetchMock);
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await ride("как было", /разговор продолж/i);
-  const post = fetchMock.mock.calls.find((c) => (c[1] as { method?: string })?.method === "POST");
-  expect(JSON.parse((post?.[1] as { body: string }).body))
-    .toEqual({ action: "update", target: "pu-mop-1", params: { fresh: false } });
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order, "update", { fresh: true });
+  await waitFor(() =>
+    expect(lastPost(fetchMock)).toEqual({ action: "update", target: "pu-mop-1",
+      params: { fresh: true } }));
 });
 
-test("replace posts fresh=true with the same origin", async () => {
+test("#520 remove posts fresh=true with the new origin", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("succeeded")));
   vi.stubGlobal("fetch", fetchMock);
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await ride("свежий клон", /разговор/i);
-  const post = fetchMock.mock.calls.find((c) => (c[1] as { method?: string })?.method === "POST");
-  expect(JSON.parse((post?.[1] as { body: string }).body))
-    .toEqual({ action: "update", target: "pu-mop-1", params: { fresh: true } });
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order, "update", { fresh: true, origin: "https://x/y/other.git" });
+  await waitFor(() =>
+    expect(lastPost(fetchMock)).toEqual({ action: "update", target: "pu-mop-1",
+      params: { fresh: true, origin: "https://x/y/other.git" } }));
 });
 
-test("remove posts fresh=true with the new origin", async () => {
+test("#520 unknown is named unknown, never failed", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("succeeded")));
+                            () => Promise.resolve(opJson("unknown")));
   vi.stubGlobal("fetch", fetchMock);
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await openBox();
-  fireEvent.click(screen.getByRole("radio", { name: /другой origin/i }));
-  fireEvent.change(screen.getByLabelText(/новый origin/i),
-                   { target: { value: "https://x/y/other.git" } });
-  fireEvent.click(screen.getByRole("button", { name: /^продолжить$/i }));
-  fireEvent.click(await screen.findByRole("button", { name: /^подтвердить$/i }));
-  const post = fetchMock.mock.calls.find((c) => (c[1] as { method?: string })?.method === "POST");
-  expect(JSON.parse((post?.[1] as { body: string }).body))
-    .toEqual({ action: "update", target: "pu-mop-1",
-               params: { fresh: true, origin: "https://x/y/other.git" } });
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order, "update", { fresh: false });
+  await waitFor(() => expect(screen.getByTestId("update-verdict"))
+    .toHaveTextContent(/исход неизвестен/i));
+  expect(screen.getByTestId("update-verdict")).not.toHaveTextContent(/не удался/);
 });
 
-test("remove without an origin filled posts nothing", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("succeeded")));
-  vi.stubGlobal("fetch", fetchMock);
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await openBox();
-  fireEvent.click(screen.getByRole("radio", { name: /другой origin/i }));
-  // пустой origin: до подтверждения не дойти -- продолжить заперта
-  expect(screen.getByRole("button", { name: /^продолжить$/i })).toBeDisabled();
-  expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
-    .toHaveLength(0);
-});
-
-test("double submit rides one POST", async () => {
+test("#520 double submit rides one POST", async () => {
   let release: ((r: Response) => void) | null = null;
   const slow = new Promise<Response>((resolve) => { release = resolve; });
   const fetchMock = postGet(() => slow, () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await openBox();
-  fireEvent.click(screen.getByRole("radio", { name: /свежий клон/i }));
-  fireEvent.click(screen.getByRole("button", { name: /^продолжить$/i }));
-  const btn = await screen.findByRole("button", { name: /^подтвердить$/i });
-  fireEvent.click(btn);
-  fireEvent.click(btn);
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order, "update", { fresh: true });
+  send(view, order, "update", { fresh: true });
   await act(async () => { release?.(ok202("op-9")); });
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
     .toHaveLength(1);
 });
 
-test("unknown is named unknown, a refusal names the server phrase", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("unknown")));
-  vi.stubGlobal("fetch", fetchMock);
-  renderUi(<UpdateBox session={ADMIN} row={ROW} />);
-  await ride("свежий клон", /разговор/i);
-  await waitFor(() => expect(screen.getByTestId("update-verdict"))
-    .toHaveTextContent(/исход неизвестен/i));
-  expect(screen.getByTestId("update-verdict")).not.toHaveTextContent(/не удался/);
+test("#520 a guest sees no update at all", () => {
+  vi.stubGlobal("fetch", vi.fn());
+  const order = new Order();
+  mountEngine(order, ROW, { login: null, role: null });
+  expect(screen.queryByRole("button", { name: /обнов/i })).toBeNull();
 });
 
-test("a guest and a user see no update button", () => {
-  vi.stubGlobal("fetch", vi.fn());
-  renderUi(<UpdateBox session={{ login: null, role: null }} row={ROW} />);
-  expect(screen.queryByRole("button", { name: /правка/i })).toBeNull();
+// #487/#513: разделение дверей. Повторный вход при непоказанном ходе
+// визард divert-ит на вердикт (engineState), сюда ордер не доходит;
+// ордер здесь -- всегда новая команда с финального экрана визарда,
+// терминальный ход не глотается. HYPOTHESIS: движковый гард «показать
+// старый вердикт вместо POST» глотал бы новую команду; SOLUTION: гард
+// живёт в визарде, движок постит каждый ордер, дедуп живого хода --
+// useAdminOp.
+test("#520 an order after a terminal verdict is a new command and posts", async () => {
+  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
+                            () => Promise.resolve(opJson("failed", "review refusal")));
+  vi.stubGlobal("fetch", fetchMock);
+  const order = new Order();
+  const view = mountEngine(order);
+  send(view, order, "update", { fresh: false });
+  await waitFor(() =>
+    expect(screen.getByTestId("update-verdict")).toHaveTextContent(/review refusal/i));
+  // вердикт закрыли; новая команда с финального экрана -- второй POST
+  fireEvent.click(screen.getByRole("button", { name: "закрыть" }));
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  send(view, order, "update", { fresh: false });
+  await waitFor(() =>
+    expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
+      .toHaveLength(2));
 });
