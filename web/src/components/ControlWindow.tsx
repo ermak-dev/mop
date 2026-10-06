@@ -40,7 +40,7 @@ import type { Puppet } from "../types";
 import type { Session } from "../useSession";
 import { useModels } from "../useModels";
 import { restartReason, opWord, RESTART_EFFECTS } from "./RestartBox";
-import { MODES } from "./UpdateBox";
+import { MODES, UPDATE_WARNING } from "./UpdateBox";
 import { PREVIEW } from "./DestructiveBox";
 import { LABELS } from "./labels";
 import { TERMINAL } from "../useAdminOp";
@@ -352,9 +352,9 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
               <Group justify="flex-end" gap="sm">
                 <Button variant="default" onClick={onClose}>{LABELS.cancel}</Button>
                 {/* «продолжить работу» шаг параметров пропускает (#527):
-                    у keep параметров нет */}
+                    у keep нет ни параметров, ни последствий -- сразу финал */}
                 <Button disabled={!mode}
-                        onClick={() => setStep(mode === "remove" ? 2 : 3)}>
+                        onClick={() => setStep(mode === "keep" ? 3 : 2)}>
                   {LABELS.next}
                 </Button>
               </Group>
@@ -363,20 +363,29 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
         )}
         {updateFlow && (
           <Stepper.Step label="параметры" description={ENTRY_WORD.update}>
-            {/* Шаг параметров (#527): у переключения на другой проект --
-                новый репозиторий; «продолжить работу» сюда не попадает */}
+            {/* Шаг параметров (#527, канон): «Что произойдёт:» с
+                буллетами последствий; у переключения на другой проект --
+                поле «Новый проект:» и буллет с именем цели; replace
+                приходит сюда без поля. «продолжить работу» шаг
+                пропускает */}
             <Stack gap="md" data-testid="wizard-body" style={{ minHeight: tallest }}>
+              <Text size="sm" fw={600}>Что произойдёт:</Text>
               <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
               <Text size="sm" c="dimmed">{MODES[mode ?? "remove"].label}</Text>
+              {mode === "remove" && (
+                <>
+                  <TextInput label="Новый проект" value={origin}
+                             onChange={(e) => setOrigin(e.target.value)}
+                             data-testid="update-origin" />
+                  <Text size="sm" c="dimmed">Имя папета останется прежним: {row.name}</Text>
+                </>
+              )}
               {MODES[mode ?? "remove"].lines.map((l) => (
-                <Text key={l} size="sm" c="dimmed">{l}</Text>
+                <Text key={l} size="sm" c="dimmed" component="li">{l}</Text>
               ))}
-              <TextInput label="новый репозиторий" value={origin}
-                         onChange={(e) => setOrigin(e.target.value)}
-                         data-testid="update-origin" />
               <Group justify="flex-end" gap="sm">
                 <Button variant="default" onClick={() => setStep(1)}>{LABELS.back}</Button>
-                <Button disabled={origin.trim() === ""}
+                <Button disabled={mode === "remove" && origin.trim() === ""}
                         onClick={() => setStep(3)}>{LABELS.next}</Button>
               </Group>
             </Stack>
@@ -413,38 +422,49 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
         )}
         <Stepper.Step label="завершение" description={entry ? ENTRY_WORD[entry] : ""}>
           {/* Финальный экран = подтверждение (#522 -> #527): заголовок
-              «Проверьте параметры операции», факты точной цели --
-              цель/узел/состояние-цитата, слово операции, последствия;
-              предупреждение о необратимости -- только у необратимых.
-              «сила (force) не применяется» ушла (#527) -- у всех
-              действий один отказ от force, «частичный исход…» упрощена
-              до честного слова про исход */}
+              «Проверьте параметры операции»; у обновления факты канона
+              (Папет/Узел/Текущий статус/Операция) и блок «Внимание:» у
+              необратимых режимов, у прочих действий -- прежние факты и
+              словарь последствий движков. «сила (force) не применяется»
+              ушла (#527), «частичный исход…» упрощена */}
           <Stack gap="md" data-testid="wizard-body" style={{ minHeight: tallest }}>
             <Text size="sm" fw={600}>Проверьте параметры операции</Text>
-            {/* факты точной цели -- ровно то, что на экране (#465) */}
-            <Text size="sm">действие: <Text span fw={600}>{entry ? ENTRY_WORD[entry] : ""}</Text></Text>
-            <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
-            <Text size="sm">узел: {row.node}</Text>
-            <Text size="sm">состояние: <Code>{row.state}</Code></Text>
-            {lines.map((l) => <Text key={l} size="sm" c="dimmed">{l}</Text>)}
-            {entry === "update" && mode === "remove" && (
-              <Text size="sm">новый репозиторий: <Code>{origin.trim()}</Code></Text>
-            )}
-            {entry === "model" && model && (
-              <Text size="sm">модель: <Code>{model}</Code></Text>
-            )}
-            {/* необратимость названа словом только там, где она есть:
-                keep/replace-путь «продолжить работу» обратим, ruin --
-                нет; исход без наблюдения -- честное слово, не
-                канцелярит «частичный исход» */}
-            {(isRuin(entry) || (entry === "update" && mode !== "keep")) && (
-              <Text size="sm" c="red">Действие необратимо.</Text>
-            )}
+            {updateFlow ? (<>
+              {/* факты канона #527: имя, узел, статус-цитата, режим */}
+              <Text size="sm">Папет: <Text span fw={600}>{row.name}</Text></Text>
+              <Text size="sm">Узел: {row.node}</Text>
+              <Text size="sm">Текущий статус: <Code>{row.state}</Code></Text>
+              <Text size="sm">Операция: <Text span fw={600}>{mode ? MODES[mode].label : ""}</Text></Text>
+              {/* «Внимание:» -- только у необратимых режимов (#527):
+                  keep обратим, блока и заголовка нет */}
+              {mode && mode !== "keep" && (<>
+                <Text size="sm" fw={600} c="red">Внимание:</Text>
+                {UPDATE_WARNING.map((l) => (
+                  <Text key={l} size="sm" c="red" component="li">{l}</Text>
+                ))}
+              </>)}
+              {mode === "remove" && (
+                <Text size="sm">Новый проект: <Code>{origin.trim()}</Code></Text>
+              )}
+            </>) : (<>
+              {/* факты точной цели -- ровно то, что на экране (#465) */}
+              <Text size="sm">действие: <Text span fw={600}>{entry ? ENTRY_WORD[entry] : ""}</Text></Text>
+              <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
+              <Text size="sm">узел: {row.node}</Text>
+              <Text size="sm">состояние: <Code>{row.state}</Code></Text>
+              {lines.map((l) => <Text key={l} size="sm" c="dimmed">{l}</Text>)}
+              {entry === "model" && model && (
+                <Text size="sm">модель: <Code>{model}</Code></Text>
+              )}
+              {isRuin(entry) && (
+                <Text size="sm" c="red">Действие необратимо.</Text>
+              )}
+            </>)}
             <Text size="sm" c="dimmed">Исход показывается как есть.</Text>
             <Group justify="flex-end" gap="sm">
               <Button variant="default"
                       onClick={() => setStep(updateFlow
-                        ? (mode === "remove" ? 2 : 1) : modelFlow ? 1 : 0)}>
+                        ? (mode === "keep" ? 1 : 2) : modelFlow ? 1 : 0)}>
                 {LABELS.back}
               </Button>
               {/* «Завершить» = согласие (#522): финальный экран сам

@@ -129,9 +129,10 @@ test("#527 the mode radios carry their consequence descriptions", () => {
   mount();
   fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
   const win = screen.getByTestId("control-window");
-  // подпись-описание -- у всех трёх радио, словарь #527
-  expect(win.textContent).toMatch(/контекст диалога с Claude/i);
-  expect(win.textContent).toMatch(/пересобирается начисто/i);
+  // подпись-описание -- у всех трёх радио, канон тикета дословно
+  expect(win.textContent).toMatch(/Папет продолжит с того же места/);
+  expect(win.textContent).toMatch(/Папет начнёт с чистой копии кода/);
+  expect(win.textContent).toMatch(/Папет начнёт работать с другим репозиторием/);
   // «Продолжить» заперт до выбора режима
   expect(within(win).getByRole("button", { name: LABELS.next })).toBeDisabled();
   fireEvent.click(within(win).getByRole("radio", { name: /Пересобрать чистый клон/i }));
@@ -174,8 +175,8 @@ test.each([
 });
 
 // keep обратим, но финальный экран обязателен всем (#522), а шаг
-// параметров он пропускает (#527: у keep нет параметров): выбор режима
-// → сразу финал, «Завершить» шлёт приказ.
+// параметров он пропускает (#527: у keep нет ни параметров, ни
+// последствий): выбор режима → сразу финал, «Завершить» шлёт приказ.
 test("#527 update keep skips the parameter step straight to the final", () => {
   vi.stubGlobal("fetch", vi.fn());
   const { onClose, onOrder } = mount();
@@ -183,7 +184,10 @@ test("#527 update keep skips the parameter step straight to the final", () => {
   fireEvent.click(screen.getByRole("radio", { name: /Продолжить работу/i }));
   fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
   const win = screen.getByTestId("control-window");
-  expect(win.textContent).toMatch(/Контекст диалога с Claude сохранится: сессия продолжится/);
+  // финал канона: факты + режим, БЕЗ блока «Внимание:» -- keep обратим
+  expect(within(win).getByText("Проверьте параметры операции")).toBeInTheDocument();
+  expect(win.textContent).toMatch(/Операция: Продолжить работу/);
+  expect(win.textContent).not.toMatch(/Внимание:/);
   expect(onOrder).not.toHaveBeenCalled();
   fireEvent.click(within(win).getByRole("button", { name: /^Завершить$/ }));
   expect(onOrder).toHaveBeenCalledWith(expect.objectContaining(
@@ -191,19 +195,30 @@ test("#527 update keep skips the parameter step straight to the final", () => {
   expect(onClose).not.toHaveBeenCalled();
 });
 
-// replace: шаг параметров показывает последствия, финальный экран --
-// последствия И факты точной цели одной страницей, одна кнопка согласия.
+// replace: шаг параметров -- «Что произойдёт:» с буллетами канона,
+// затем финальный экран с фактами и блоком «Внимание:».
 test("#522 update replace rides the final screen with target facts", () => {
   vi.stubGlobal("fetch", vi.fn());
   const { onOrder } = mount();
   fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
   fireEvent.click(screen.getByRole("radio", { name: /Пересобрать чистый клон/i }));
   fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
-  const win = screen.getByTestId("control-window");
-  expect(win.textContent).toMatch(/несохранённая работа погибнет/);
-  expect(win.textContent).toContain("pu-mop-1");
-  expect(win.textContent).toContain("hyper");
-  expect(win.textContent).toContain("busy: #12");
+  // шаг параметров: буллеты «Что произойдёт:» (replace без поля)
+  let win = screen.getByTestId("control-window");
+  expect(within(win).getByText("Что произойдёт:")).toBeInTheDocument();
+  expect(win.textContent).toMatch(/Рабочая копия будет пересобрана с нуля/);
+  expect(win.textContent).toMatch(/Папет останется на том же проекте/);
+  expect(within(win).queryByRole("textbox")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
+  // финал: факты канона + «Внимание:» -- replace необратим
+  win = screen.getByTestId("control-window");
+  expect(win.textContent).toMatch(/Папет: pu-mop-1/);
+  expect(win.textContent).toMatch(/Узел: hyper/);
+  expect(win.textContent).toMatch(/Текущий статус: busy: #12/);
+  expect(win.textContent).toMatch(/Операция: Пересобрать чистый клон/);
+  expect(win.textContent).toMatch(/Внимание:/);
+  expect(win.textContent).toMatch(/Контекст диалога будет потерян/);
+  expect(win.textContent).toMatch(/Первая сборка после пересоздания займёт больше времени/);
   expect(within(win).getAllByRole("button", { name: /^Завершить$/ })).toHaveLength(1);
   expect(onOrder).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: /^Завершить$/ }));
@@ -217,10 +232,12 @@ test("#522 update remove requires the origin and posts it", () => {
   fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
   fireEvent.click(screen.getByRole("radio", { name: /Переключить на другой проект/i }));
   fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
-  // шаг параметров: пустой репозиторий запирает путь дальше --
-  // переключение без адреса не едет
+  // шаг параметров: пустой проект запирает путь дальше --
+  // переключение без адреса не едет; имя цели названо на шаге
   expect(screen.getByRole("button", { name: /^Продолжить$/ })).toBeDisabled();
-  fireEvent.change(screen.getByLabelText(/новый репозиторий/i),
+  expect(screen.getByTestId("control-window").textContent)
+    .toMatch(/Имя папета останется прежним: pu-mop-1/);
+  fireEvent.change(screen.getByLabelText(/новый проект/i),
     { target: { value: "https://x/y/other.git" } });
   fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
   expect(screen.getByTestId("control-window").textContent)
@@ -270,19 +287,19 @@ test("#522 destructive rides straight to the final screen", () => {
     { act: "recycle", params: {} }));
 });
 
-// Назад ничего не очищает: выбранный режим, репозиторий и модель живут.
+// Назад ничего не очищает: выбранный режим, проект и модель живут.
 test("#522 back keeps the chosen mode and origin", () => {
   vi.stubGlobal("fetch", vi.fn());
   mount();
   fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
   fireEvent.click(screen.getByRole("radio", { name: /Переключить на другой проект/i }));
   fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
-  fireEvent.change(screen.getByLabelText(/новый репозиторий/i),
+  fireEvent.change(screen.getByLabelText(/новый проект/i),
     { target: { value: "https://x/y/other.git" } });
   fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
   fireEvent.click(screen.getByRole("button", { name: /^Назад$/ }));
   // финал -> параметры: адрес на месте
-  expect(screen.getByLabelText(/новый репозиторий/i)).toHaveValue("https://x/y/other.git");
+  expect(screen.getByLabelText(/новый проект/i)).toHaveValue("https://x/y/other.git");
   fireEvent.click(screen.getByRole("button", { name: /^Назад$/ }));
   // параметры -> режим: выбор на месте, повторный проход не с нуля
   expect((screen.getByRole("radio", { name: /Переключить на другой проект/i }) as HTMLInputElement)
@@ -300,11 +317,9 @@ test("#522 back from the final screen returns to the choice", () => {
   }
 });
 
-// Финальный экран = подтверждение (#527): заголовок «Проверьте
-// параметры операции», факты точной цели -- цель/узел/состояние как
-// есть (free (master) -- цитата факта, не очеловеченное слово),
-// операция, предупреждения -- только у необратимых, у переключения --
-// новый репозиторий.
+// Финальный экран = подтверждение (#527, канон): заголовок «Проверьте
+// параметры операции», факты Папет/Узел/Текущий статус/Операция,
+// статус -- цитата строки ростера, у переключения -- «Новый проект».
 test("#527 the final screen reads the ticket's confirmation wording", () => {
   vi.stubGlobal("fetch", vi.fn());
   // состояние-цитата: free (master) -- факт цели, не очеловеченное слово
@@ -312,17 +327,21 @@ test("#527 the final screen reads the ticket's confirmation wording", () => {
   fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
   fireEvent.click(screen.getByRole("radio", { name: /Переключить на другой проект/i }));
   fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
-  fireEvent.change(screen.getByLabelText(/новый репозиторий/i),
+  fireEvent.change(screen.getByLabelText(/новый проект/i),
     { target: { value: "https://x/y/other.git" } });
   fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
   const win = screen.getByTestId("control-window");
   expect(within(win).getByText("Проверьте параметры операции")).toBeInTheDocument();
-  // факты цели: имя, узел, состояние-цитата, слово операции
-  expect(win.textContent).toContain("pu-mop-1");
-  expect(win.textContent).toContain("hyper");
-  expect(win.textContent).toContain("free (master)");
-  // «частичный исход показывается как есть…» упрощена (#527): была
-  // канцелярская фраза про частичный исход и обещания восстановления
+  // факты канона: имя, узел, статус-цитата, режим
+  expect(win.textContent).toMatch(/Папет: pu-mop-1/);
+  expect(win.textContent).toMatch(/Узел: hyper/);
+  expect(win.textContent).toMatch(/Текущий статус: free \(master\)/);
+  expect(win.textContent).toMatch(/Операция: Переключить на другой проект/);
+  expect(win.textContent).toMatch(/Новый проект: https:\/\/x\/y\/other\.git/);
+  // «Внимание:» -- у необратимого режима, буллеты канона
+  expect(win.textContent).toMatch(/Внимание:/);
+  expect(win.textContent).toMatch(/Контекст диалога будет потерян/);
+  // «частичный исход показывается как есть…» упрощена (#527)
   expect(win.textContent).not.toMatch(/частичный исход показывается как есть/);
   expect(win.textContent).not.toMatch(/восстановления не обещается/);
   fireEvent.click(within(win).getByRole("button", { name: /^Завершить$/ }));
@@ -331,8 +350,7 @@ test("#527 the final screen reads the ticket's confirmation wording", () => {
 });
 
 // Предупреждение о необратимости -- только у необратимых операций
-// (#527): keep обратим, у него нет предупреждения; разрушительные
-// держат его. Проверяем через словарь строк финала.
+// (#527): keep обратим, у него нет ни «Внимание:», ни буллетов потерь.
 test("#527 reversibility is named only where it is lost", () => {
   vi.stubGlobal("fetch", vi.fn());
   mount();
@@ -340,8 +358,9 @@ test("#527 reversibility is named only where it is lost", () => {
   fireEvent.click(screen.getByRole("radio", { name: /Продолжить работу/i }));
   fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
   const win = screen.getByTestId("control-window");
-  expect(win.textContent).toMatch(/Контекст диалога с Claude сохранится/);
-  expect(win.textContent).not.toMatch(/необратимо/);
+  expect(win.textContent).toMatch(/Операция: Продолжить работу/);
+  expect(win.textContent).not.toMatch(/Внимание:/);
+  expect(win.textContent).not.toMatch(/будут потеряны/);
 });
 
 // Фиксированная высота (#527) -- структурно: контейнер шага держит
