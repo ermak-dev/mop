@@ -1256,6 +1256,96 @@ def check_skeleton_image_filter_479(c):
             (rule[0].get("models"), params))
 
 
+# ── #524: обновление прокси приезжает деплоем, а не руками ─────────────
+# Бинарь пиннится настройкой MOP_LLM_PROXY_VERSION; смена версии обязана
+# поднять прокси без ручных шагов. HYPOTHESIS: если copy без notify или
+# распаковка без creates, прогон либо не перезапускает юнит, либо
+# перезапускает его каждый раз -- и то и другое молча.
+def check_llmproxy_upgrade_524(c):
+    tasks = [t for f, t in site_tasks() if f.endswith("roles/llmproxy/tasks/main.yml")]
+    by = {t.get("name"): t for t in tasks}
+    binary = by.get("The binary") or {}
+    c.check("#524 the copied binary orders a restart",
+            binary.get("notify") == "restart mop-llm-proxy", binary)
+    copy = binary.get("ansible.builtin.copy") or {}
+    c.check("#524 the binary lands by content, so only a real upgrade restarts",
+            bool(copy) and copy.get("remote_src") is True, binary)
+    extract = by.get("Extract the release") or {}
+    command = extract.get("ansible.builtin.command") or {}
+    creates = command.get("argv") or []
+    c.check("#524 the extract is idempotent: versioned creates",
+            command.get("creates") == "/tmp/cli-proxy-api-"
+            "{{ MOP_LLM_PROXY_VERSION }}/cli-proxy-api"
+            and any("cli-proxy-api" in a for a in creates), extract)
+    names = [t.get("name") for t in tasks]
+    c.check("#524 the restart lands before the health probe",
+            "Apply the restart now, before the check" in names
+            and names.index("Apply the restart now, before the check")
+            < names.index("The proxy answers on the LLM API"), names)
+
+
+# ── #525: панель LLM-прокси приезжает со сборкой, а не «latest на момент
+# первого захода» ────────────────────────────────────────────────────────
+# Панель (management.html) -- отдельный репозиторий Cli-Proxy-API-Management-
+# Center со своей нумерацией; в tar CLIProxyAPI и в ассетах его релиза её
+# нет. До сих пор прокси качал её сам при первом заходе (ServeManagement
+# ControlPanel -> EnsureLatestManagementHTML), и disable-auto-update-panel
+# того не отменял: флаг гасит фоновый апдейтер, не первый доступ. Итог --
+# бинарник 8.0.16 с ассетом 8.0.8 (#523). Привязать панель к версии бинарника
+# нельзя: нумерации независимые.
+# HYPOTHESIS: панель обязана приезжать деплоем пинненной версией, в тот путь,
+# где её ищет прокси. Юнит не задаёт WRITABLE_PATH и MANAGEMENT_STATIC_PATH,
+# значит StaticDir -- fallback «каталог конфига + static», т.е. static/ под
+# конфигом llm-proxy; get_url родителей не создаёт -- каталог обязан завести
+# до него, как делает роль для распаковки.
+# SOLUTION: настройка MOP_LLM_PANEL_VERSION (тег Management-Center), get_url
+# по шаблону тега в {{ MOP_HOME }}/.config/mop/llm-proxy/static/management.html
+# пользователю пула. Существующий файл прокси находит и не качает: stat
+# успешен, EnsureLatest не зовётся вовсе.
+# RESULT: проверки ниже. STATUS: FIXED — see #525
+def check_llmproxy_panel_525(c):
+    c.check("#525 the panel version is its own setting (not the binary's)",
+            "MOP_LLM_PANEL_VERSION" in config.SETTINGS, sorted(
+                k for k in config.SETTINGS if "PANEL" in k))
+    tasks = [t for f, t in site_tasks() if f.endswith("roles/llmproxy/tasks/main.yml")]
+    by = {t.get("name"): t for t in tasks}
+    names = [t.get("name") for t in tasks]
+    static_dir = by.get("Static dir for the baked panel") or {}
+    mkdir = static_dir.get("ansible.builtin.file") or {}
+    # Прокси без env берёт «каталог конфига + static» (managementasset.
+    # StaticDir: WRITABLE_PATH/MANAGEMENT_STATIC_PATH не заданы юнитом) --
+    # любой другой путь молча не читался бы, и прокси качал бы панель сам.
+    c.check("#525 the static dir is the config dir's static/, the unit's fallback",
+            mkdir.get("path") == "{{ MOP_HOME }}/.config/mop/llm-proxy/static",
+            static_dir)
+    c.check("#525 the static dir belongs to the pool user",
+            mkdir.get("owner") == "{{ MOP_USER }}" and mkdir.get("group") == "{{ MOP_USER }}"
+            and mkdir.get("mode") == "0700", static_dir)
+    asset = by.get("Baked panel of the management UI") or {}
+    get_url = asset.get("ansible.builtin.get_url") or {}
+    c.check("#525 the panel asset is versioned by MOP_LLM_PANEL_VERSION",
+            get_url.get("url") == "{{ llm_proxy_panel_html }}", asset)
+    c.check("#525 the panel lands where the proxy looks for it",
+            get_url.get("dest") == "{{ MOP_HOME }}/.config/mop/llm-proxy/"
+            "static/management.html", asset)
+    c.check("#525 the panel is owned by the pool user",
+            get_url.get("owner") == "{{ MOP_USER }}" and get_url.get("group") == "{{ MOP_USER }}"
+            and get_url.get("mode") == "0644", asset)
+    c.check("#525 the dir task precedes the get_url (get_url creates no parents)",
+            "Static dir for the baked panel" in names
+            and "Baked panel of the management UI" in names
+            and names.index("Static dir for the baked panel")
+            < names.index("Baked panel of the management UI"), names)
+    # Шаблон URL -- тег отдельного репозитория Management-Center: ассета
+    # с версией бинарника не существует, нумерации независимые (#525).
+    setup = yaml.safe_load(open(os.path.join(DEPLOY, "setup.yml"), encoding="utf-8"))
+    plays = {p.get("name"): p.get("vars") or {} for p in setup if isinstance(p, dict)}
+    url = plays.get("LLM proxy on the server", {}).get("llm_proxy_panel_html")
+    c.check("#525 the URL template points at the Management-Center tag",
+            url == "https://github.com/router-for-me/Cli-Proxy-API-Management-Center/"
+            "releases/download/v{{ MOP_LLM_PANEL_VERSION }}/management.html", url)
+
+
 def check_llm_request_size_411(c, can_render):
     # HYPOTHESIS: nginx отвергает большую текстовую историю и её compact
     # до LLM-прокси; Claude маскирует HTTP 413 как лимит media в 32 МБ.
@@ -1549,6 +1639,8 @@ def main():
     c = Checks()
     check_cluster_key_copy_402(c)
     check_skeleton_image_filter_479(c)
+    check_llmproxy_upgrade_524(c)
+    check_llmproxy_panel_525(c)
 
     # ── юниты из общего шаблона ───────────────────────────────────────────
     template = os.path.join(COMMON, "templates", "service.j2")

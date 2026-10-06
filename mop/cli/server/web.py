@@ -160,12 +160,13 @@ class Gateway:
 
     def call(self, method, path, body, headers=None, key=None):
         """Запрос только на петлю: окружение HTTP_PROXY не участвует.
-        -> (код, тело, content-type). Редиректы оставляем вызывающему."""
+        -> (код, тело, content-type, заголовки upstream). Редиректы
+        оставляем вызывающему."""
         import http.client
 
         key = self.key() if key is None else key
         if not key:
-            return 503, b"proxy management key unavailable", "text/plain"
+            return 503, b"proxy management key unavailable", "text/plain", {}
         forwarded = {k: v for k, v in (headers or {}).items()
                      if k.lower() not in ("authorization", "cookie", "host")}
         forwarded["Authorization"] = f"Bearer {key}"
@@ -175,13 +176,19 @@ class Gateway:
             conn.request(method, path, body=body or None, headers=forwarded)
             r = conn.getresponse()
             if r.status in (301, 302, 303, 307, 308):
-                return r.status, (r.getheader("Location") or "").encode(), "text/plain"
+                return r.status, (r.getheader("Location") or "").encode(), \
+                    "text/plain", {}
             got = r.read(web.PANEL_MAX + 1)
             if len(got) > web.PANEL_MAX:
-                return 502, b"proxy management answer too large", "text/plain"
-            return r.status, got, r.getheader("Content-Type", "application/json")
+                return 502, b"proxy management answer too large", "text/plain", {}
+            # Заголовки upstream нужны браузеру (#523): панель открывает
+            # разделы плагинов по X-Cpa-Support-Plugin и называет версию
+            # сервера по X-Cpa-Version. Отдаются не все -- наружу идёт
+            # whitelist web.response_headers, а не сырой набор.
+            heads = {k: v for k, v in r.getheaders() if k.lower() != "content-type"}
+            return r.status, got, r.getheader("Content-Type", "application/json"), heads
         except (http.client.HTTPException, OSError, ValueError):
-            return 502, b"proxy management upstream unreachable", "text/plain"
+            return 502, b"proxy management upstream unreachable", "text/plain", {}
         finally:
             if conn is not None:
                 conn.close()
@@ -198,7 +205,7 @@ class Gateway:
         if not key:
             return 503, b"proxy management key unavailable"
         def upstream(method, target, body, sent_key):
-            code, got, _ = self.call(method, target, body, key=sent_key)
+            code, got, _, _ = self.call(method, target, body, key=sent_key)
             return code, got
         for _ in range(web.REDIRECT_MAX):
             code, body = self.breaker("GET", path, b"", key, upstream)
@@ -224,9 +231,16 @@ class Handler(BaseHTTPRequestHandler):
         """Молчим про каждый запрос: под systemd журнал забился бы SSE-пингами.
         Ошибки печатает log_error, и он остаётся."""
 
-    def _send(self, code, body, ctype="application/json; charset=utf-8", cache="no-store"):
+    def _send(self, code, body, ctype="application/json; charset=utf-8", cache="no-store",
+              extra=None):
+        """Один выход ответа. extra -- заголовки upstream после whitelist:
+        отправляются ПОСЛЕ send_response -- send_header до строки состояния
+        кладёт их на провод первыми, и браузер читает ответ как HTTP/0.9
+        (#523, живой сервер: все /v8/management/* падали)."""
         data = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", cache)
@@ -314,26 +328,25 @@ class Handler(BaseHTTPRequestHandler):
         return (login, role)
 
     def llm_shim(self):
-        """Шим сток-панели (#417): sentinel в localStorage, панель -- в
-        iframe отдельного raw-маршута. Не-admin не получает ни sentinel,
-        ни страницы."""
+        """Шим сток-панели (#417): sentinel в localStorage, переход на
+        raw-панель тем же документом (#526). Фрейм исторически писал ключ
+        до кода панели, не трогая storage главной страницы, но шим и панель
+        на одном origin -- фрейм давал только двойную прокрутку.
+        Не-admin не получает ни sentinel, ни страницы."""
         who = self._llm_admin()
         if who == "401":
             return self._json(401, {"error": "login required"})
         if who == "403":
             return self._json(403, {"error": "admin only"})
         page = ("<!doctype html><html><head><meta charset=\"utf-8\">"
-                "<title>LLM Proxy</title>"
-                "<style>body{margin:0}iframe{border:0;width:100vw;height:100vh}</style>"
-                "</head><body><script>"
+                "<title>LLM Proxy</title></head><body><script>"
                 "localStorage.removeItem('cli-proxy-auth');"
                 "localStorage.removeItem('apiBase');"
                 "localStorage.removeItem('apiUrl');"
                 "localStorage.setItem('managementKey', " + json.dumps(web.SENTINEL) + ");"
                 "localStorage.setItem('isLoggedIn', 'true');"
-                "</script>"
-                "<iframe src=\"/llm/raw/management.html\"></iframe>"
-                "</body></html>").encode()
+                "location.replace('/llm/raw/management.html');"
+                "</script></body></html>").encode()
         return self._send(200, page, "text/html; charset=utf-8")
 
     def llm_raw(self, path):
@@ -389,16 +402,17 @@ class Handler(BaseHTTPRequestHandler):
         forwarded = {name: self.headers[name] for name in ("Content-Type", "Accept")
                      if self.headers.get(name)}
         def upstream(method, p, b, k):
-            code, got, ctype = gw.call(method, p, b, forwarded, key=k)
-            return code, (got, ctype)
+            code, got, ctype, heads = gw.call(method, p, b, forwarded, key=k)
+            return code, (got, ctype, heads)
         try:
             code, answer = gw.breaker(self.command, path, body, key, upstream)
         except Exception:
             return self._send(502, b"proxy management upstream unreachable", "text/plain")
         if isinstance(answer, tuple):
-            got, ctype = answer
+            got, ctype = answer[0], answer[1]
+            heads = answer[2] if len(answer) > 2 else {}
         else:
-            got, ctype = answer, "text/plain"
+            got, ctype, heads = answer, "text/plain", {}
         if code in (301, 302, 303, 307, 308):
             return self._send(502, b"proxy management redirect refused", "text/plain")
         if self.command == "GET" and code == 200 \
@@ -406,8 +420,11 @@ class Handler(BaseHTTPRequestHandler):
             got = web.redact_management_read(route, got)
             if got is None:
                 return self._send(502, b"proxy management config unreadable", "text/plain")
-        # Только тип тела уходит наружу, заголовки upstream не копируем.
-        return self._send(code, got, ctype)
+        # Тип тела и whitelist заголовков (#417/#523): панель читает
+        # X-Cpa-Support-Plugin и X-Cpa-Version из ответов; cookie и
+        # аутентификационные вызовы upstream браузеру не нужны. Порядок
+        # важен: заголовки уходят после строки состояния, внутри _send.
+        return self._send(code, got, ctype, extra=web.response_headers(heads))
 
     def api_login(self):
         """Вход: JSON {login, password} -> сессия в cookie.

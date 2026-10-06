@@ -1,5 +1,6 @@
-# Проверки mop (#230, эпик #228): каждый файл tests/ в Docker, на 3.12
-# (машина оператора) и 3.13 (сервер и узлы, Debian 13).
+# Проверки mop (#230, эпик #228): каждый файл tests/ в Docker, на 3.12 --
+# машине оператора; сервер и узлы (Debian 13, 3.13) гоняют тот же tests/
+# поверх того же deps.PIP, своя джоба там не ловила ничего своего (#525).
 #
 # Раннер -- shell-исполнитель `builder` с тегом docker, под непривилегированным
 # пользователем: image: он не видит, и шаги задачи шли бы на самом хосте
@@ -80,11 +81,6 @@ test:py3.12:
   variables:
     PYTHON_IMAGE: python:3.12-slim
 
-test:py3.13:
-  extends: .tests
-  variables:
-    PYTHON_IMAGE: python:3.13-slim
-
 # Дашборд (#297): собранный web/dist лежит в репозитории, потому что на
 # серверах node нет и rumop раскатывается с сервера вручную. Задача собирает
 # приложение заново и сравнивает с закоммиченным байт в байт: разошедшийся с
@@ -113,7 +109,7 @@ deploy:mop:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $MOP_DEPLOY_TARGET
   tags: [docker]
-  needs: [test:py3.12, test:py3.13, web:dist]
+  needs: [test:py3.12, web:dist]
   # Одна выкладка за раз: два master'а подряд не раскатываются внахлёст.
   resource_group: mop-deploy
   variables:

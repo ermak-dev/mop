@@ -62,6 +62,29 @@
     group: "{{ MOP_USER }}"
     mode: "0700"
 
+# Панель (management.html) приезжает со сборкой, а не «latest на момент
+# первого захода» (#525, инцидент #523: бинарник 8.0.16 при ассете 8.0.8).
+# Ассет живёт в отдельном репозитории Management-Center со своей нумерацией
+# -- потому и настройка отдельная, не MOP_LLM_PROXY_VERSION. Каталог static/
+# обязан завести до get_url: тот родителей не создаёт, а прокси без env
+# (юнит не задаёт ни WRITABLE_PATH, ни MANAGEMENT_STATIC_PATH) ищет панель
+# ровно здесь -- «каталог конфига + static», fallback managementasset.StaticDir.
+- name: Static dir for the baked panel
+  ansible.builtin.file:
+    path: "{{ MOP_HOME }}/.config/mop/llm-proxy/static"
+    state: directory
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0700"
+
+- name: Baked panel of the management UI
+  ansible.builtin.get_url:
+    url: "{{ llm_proxy_panel_html }}"
+    dest: "{{ MOP_HOME }}/.config/mop/llm-proxy/static/management.html"
+    owner: "{{ MOP_USER }}"
+    group: "{{ MOP_USER }}"
+    mode: "0644"
+
 # Конфиг -- только при начальной установке: дальше его редактирует человек
 # панелью (провайдеры, ключи, модели), и повторный рендер стирал бы эти
 # правки молча. Скелет шаблона -- то, с чего установка стартует; изменения
