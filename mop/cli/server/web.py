@@ -582,7 +582,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         version = 0
-        sent = 0
+        # Курсор кадров -- с текущей длины буфера (#519): подписчик получает
+        # только терминалы, пришедшие после его подключения, а не хвост,
+        # накопившийся до него (иначе каждое F5 перерисовывает старые балуны).
+        # Сам буфер остаётся: терминал приходит из потока операции между
+        # пробуждениями читателя, и живому соединению без него кадр теряется.
+        with _OP_LOCK:
+            sent = len(_OP_FRAMES)
         try:
             while True:
                 got, snap = COLLECTOR.wait(version, PING_EVERY)

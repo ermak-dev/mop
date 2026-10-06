@@ -1274,6 +1274,87 @@ def check_journal_entry_424(c):
             len(col4.admin_journal))
 
 
+# ── #519: новый подписчик /events не получает хвост старых operation-кадров ─
+# HYPOTHESIS: курсор кадров operation у соединения стартует с нуля, а буфер
+# _OP_FRAMES держит последние терминалы операций: каждый новый подписчик /events
+# вычитывает весь хвост -- и каждое F5 дашборда перерисовывает пачку старых
+# балунов. Буфер при этом живым соединениям нужен: терминал приходит из
+# потока операции (_on_operation), а SSE-читатель забирает своим темпом, раз
+# в пробуждение -- между кругами кадры копятся только здесь.
+# SOLUTION: курсор инициализируется текущей длиной буфера под замком:
+# подписчик получает лишь кадры, пришедшие после его подключения, а буфер
+# остаётся межпоточной очередью вещания живым соединениям.
+# STATUS: FIXED — see #519
+def check_no_replay_519(c):
+    import json
+    from mop.cli.server import web as webcli
+
+    OLD = json.dumps({"action": "restart", "target": "pu-old-1",
+                      "verdict": "ok"}, ensure_ascii=False)
+    NEW = json.dumps({"action": "restart", "target": "pu-new-1",
+                      "verdict": "ok"}, ensure_ascii=False)
+
+    class _Col:
+        """Сборщик без потоков: два круга, на втором -- «терминал операции»
+        из чужого потока (кадр ложится в буфер между пробуждениями)."""
+        def __init__(self, later=()):
+            self.version, self.rounds, self.later = 0, 0, later
+
+        def wait(self, version, timeout):
+            self.rounds += 1
+            if self.rounds > 2:
+                raise BrokenPipeError()  # достаточно кругов: разрыв клиента
+            self.version += 1
+            # later -- терминал из чужого потока МЕЖДУ кругами читателя:
+            # после первого вычитания, до второго.
+            if self.rounds >= 2:
+                for frame in self.later:
+                    webcli._OP_FRAMES.append(frame)
+            return self.version, {"n": self.version}
+
+        def current(self):
+            return {"n": 0}
+
+        def kick(self):
+            pass
+
+    def _subscribe(before, later):
+        """Кадры before лежат в буфере ДО подписчика; later приходят после
+        его первого круга. -> что подписчик успел получить в wfile."""
+        with patched(webcli, COLLECTOR=_Col(later), _OP_FRAMES=list(before)):
+            h = webcli.Handler.__new__(webcli.Handler)
+            h.path = "/events"
+            h.headers = {}
+            h.wfile = BytesIO()
+            h.rfile = BytesIO()
+            h.client_address = ("127.0.0.1", 0)
+            h.send_response = lambda code, msg=None: None
+            h.send_header = lambda k, v: None
+            h.end_headers = lambda: None
+            try:
+                h.do_GET()
+            except BrokenPipeError:
+                pass
+            return h.wfile.getvalue()
+
+    # Живой подписчик: кадр, пришедший при нём, доезжает.
+    live = _subscribe([OLD], [NEW])
+    if not c.check("#519 the live listener saw two rounds",
+                   live.count(b"event: snapshot") == 2, live[:120]):
+        return
+    c.check("#519 a frame arriving during the connection is delivered",
+            live.count(b"event: operation") == 1 and b"pu-new-1" in live,
+            live[-160:])
+    # Новый подписчик: хвост, накопившийся до него, не переигрывается.
+    fresh = _subscribe([OLD], [])
+    c.check("#519 a new subscriber gets no frames from before its connect",
+            fresh.count(b"event: snapshot") == 2
+            and b"event: operation" not in fresh
+            and b"pu-old-1" not in fresh,
+            fresh[-160:])
+
+
+
 
 # ── #415: границы входных данных входа и отказ провайдера на /api/session ─
 # HYPOTHESIS: api_login читает тело как rfile.read(int(Content-Length)) без
@@ -2276,6 +2357,7 @@ def main():
                check_admin_routes_486,
                check_address_source_415, check_deleted_user_415,
                check_journal_api_424, check_journal_entry_424,
+               check_no_replay_519,
                check_login_bounds_415, check_guard_417,
                check_guard_placeholder_417, check_breaker_417,
                check_gateway_417, check_breaker_singleflight_417,
