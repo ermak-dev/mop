@@ -38,7 +38,7 @@ test("#489 polling keeps the same terminal, draft, focus, zoom and scroll", asyn
   const terminal = screen.getByTestId("tail-lines");
   const input = screen.getByRole("textbox", { name: "Сообщение" });
   fireEvent.change(input, { target: { value: "unsent draft" } });
-  fireEvent.click(screen.getByRole("button", { name: "увеличить" }));
+  fireEvent.click(screen.getByRole("button", { name: "Увеличить" }));
   input.focus();
   const viewport = screen.getByTestId("output-scroll");
   Object.defineProperty(viewport, "scrollHeight", { value: 2000 });
@@ -46,7 +46,7 @@ test("#489 polling keeps the same terminal, draft, focus, zoom and scroll", asyn
   viewport.scrollTop = 125; fireEvent.scroll(viewport);
   await tick(3000);
   expect(mock).toHaveBeenCalledTimes(2);
-  expect(screen.getByRole("button", { name: "обновить" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Обновить" })).toBeEnabled();
   expect(screen.getByTestId("tail-lines")).toBe(terminal);
   expect(screen.queryByRole("status")).toBeNull();
   expect(screen.getByText("old screen")).toBeInTheDocument();
@@ -78,7 +78,7 @@ test("#489 manual refresh cannot overlap with the polling timer", async () => {
     .mockResolvedValue(ok(["next"]));
   vi.stubGlobal("fetch", mock);
   open(); await tick(2500);
-  fireEvent.click(screen.getByRole("button", { name: "обновить" }));
+  fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
   await tick(6000);
   expect(mock).toHaveBeenCalledTimes(2);
   await act(async () => { release(ok(["manual"])); });

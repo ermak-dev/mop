@@ -5,6 +5,7 @@ import type { Session } from "../useSession";
 import { usePuppetTail } from "../usePuppetCard";
 import { IconButton } from "./IconButton";
 import { SendForm } from "./SendForm";
+import { LABELS } from "./labels";
 
 // #507: единственный источник -- экран (tail); ветка stderr ушла вместе с
 // кнопкой «лог»: у задачи он пуст, причина падающей -- в вердикте строки.
@@ -72,15 +73,15 @@ function PuppetOutput({ session, target }: {
     <Group role="toolbar" aria-label="просмотр" justify="space-between" wrap="nowrap" gap={4}
       px="md" pb="xs" style={{ flexShrink: 0, borderBottom: "1px solid var(--mantine-color-default-border)" }}>
       <Group gap={4} wrap="nowrap">
-        <IconButton label="уменьшить" variant="subtle" size="lg" disabled={scale <= 0.1}
+        <IconButton label="Уменьшить" variant="subtle" size="lg" disabled={scale <= 0.1}
           onClick={() => changeZoom(-0.25)}><IconZoomOut size={18} /></IconButton>
         <Text size="sm" w={44} ta="center" aria-label="масштаб">{Math.round(scale * 100)}%</Text>
-        <IconButton label="увеличить" variant="subtle" size="lg" disabled={scale >= 4}
+        <IconButton label="Увеличить" variant="subtle" size="lg" disabled={scale >= 4}
           onClick={() => changeZoom(0.25)}><IconZoomIn size={18} /></IconButton>
       </Group>
       <Group gap="xs" wrap="nowrap">
         {!loading && tail.truncated && <Text size="xs" c="dimmed">обрезано: показан конец</Text>}
-        <IconButton label="обновить" variant="subtle" size="lg" disabled={loading}
+        <IconButton label={LABELS.refresh} variant="subtle" size="lg" disabled={loading}
           onClick={() => { void refresh(); }}><IconRefresh size={18} /></IconButton>
       </Group>
     </Group>
@@ -131,7 +132,7 @@ export function PuppetCard({ session, target, onClose }: {
   if (!target || session.role !== "admin") return null;
   return <Modal opened onClose={onClose} size="min(1440px, calc(100vw - 32px))" yOffset={16}
     title={<Text fw={600}>экран {target}</Text>}
-    data-testid="puppet-card" padding="md" radius="md" closeButtonProps={{ "aria-label": "закрыть" }}
+    data-testid="puppet-card" padding="md" radius="md" closeButtonProps={{ "aria-label": LABELS.close }}
     styles={{
       content: { height: "calc(100dvh - 32px)", maxHeight: "calc(100dvh - 32px)",
         display: "flex", flexDirection: "column", overflow: "hidden" },

@@ -24,7 +24,7 @@ export function ModelBox({ session, row, order = null }: {
   useOperationNotice(op, {
     scope: `${session.login}\0${session.role}\0${row.name}`,
     title: `Смена модели: ${row.name}`,
-    word: op.status === "succeeded" ? "модель изменена" : opWord(op.status),
+    word: op.status === "succeeded" ? "Модель изменена" : opWord(op.status),
     enabled: session.role === "admin",
     onSettled: () => { void fetch("/api/pool", { credentials: "same-origin" }).catch(() => {}); },
   });

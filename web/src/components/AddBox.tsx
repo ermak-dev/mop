@@ -15,10 +15,11 @@ import type { Session } from "../useSession";
 import { useAdminOp } from "../useAdminOp";
 import { useProjects } from "../useProjects";
 import { opWord } from "./RestartBox";
+import { LABELS } from "./labels";
 
 /** Слово исхода add: свой глагол у «succeeded», остальное -- общий словарь. */
 export const addWord = (status: string): string =>
-  status === "succeeded" ? "заведён" : opWord(status);
+  status === "succeeded" ? "Заведён" : opWord(status);
 
 const TERMINAL = new Set(["succeeded", "refused", "failed", "partial", "unknown"]);
 
@@ -55,7 +56,7 @@ export function AddBox({ session }: { session: Session }) {
       {open && (
         <Modal opened onClose={() => setOpen(false)} size="md"
                title="завести папета" data-testid="add-form"
-               closeButtonProps={{ "aria-label": "закрыть" }}>
+               closeButtonProps={{ "aria-label": LABELS.close }}>
           <Stack gap="sm">
             {registryError ? <Text c="red">{registryError}</Text> : null}
             {!registryError && projects.length === 0 ? (
@@ -87,7 +88,7 @@ export function AddBox({ session }: { session: Session }) {
             </Text>
             <Group justify="flex-end" gap="sm">
               <Button variant="light" color="gray"
-                      onClick={() => setOpen(false)}>отмена</Button>
+                      onClick={() => setOpen(false)}>{LABELS.cancel}</Button>
               <Button onClick={add} disabled={!picked || live}
                       loading={op.status === "submitted"}
                       data-testid="add-submit">завести</Button>

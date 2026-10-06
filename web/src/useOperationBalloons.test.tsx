@@ -37,7 +37,7 @@ test("#509 a foreign terminal frame shows one balloon with the target name", () 
   frame({ id: "op-foreign", target: "pu-mop-2", status: "succeeded" });
   expect(shown).toHaveLength(1);
   expect(String(shown[0].title)).toContain("pu-mop-2");
-  expect(String(shown[0].message)).toContain("выполнено");
+  expect(String(shown[0].message)).toContain("Выполнено");
   expect(shown[0].color).toBe("teal");
   // правило useOperationNotice: балун живёт 8 секунд
   expect(shown[0].autoClose).toBe(8000);
@@ -65,7 +65,7 @@ test("#509 unknown is yellow and carries the journal link inside", () => {
   expect(shown[0].color).toBe("yellow");
   // правда об эффекте -- в журнале: ссылка едет в самом балуне
   const flat = JSON.stringify(shown[0].message);
-  expect(flat).toContain("исход неизвестен");
+  expect(flat).toContain("Исход неизвестен");
   expect(flat).toContain("журнал");
   expect(flat).toContain("#journal");
 });

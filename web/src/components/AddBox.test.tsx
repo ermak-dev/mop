@@ -111,7 +111,7 @@ test("after 202 the poll reads the outcome by id from the page memory", async ()
   fireEvent.click(await screen.findByRole("radio", { name: /mop/i }));
   fireEvent.click(screen.getByRole("button", { name: /^завести$/i }));
   // 202 принят, опрос по id из памяти: первый же GET даёт правду
-  await waitFor(() => expect(screen.getByTestId("add-verdict")).toHaveTextContent(/идёт/i));
+  await waitFor(() => expect(screen.getByTestId("add-verdict")).toHaveTextContent(/Идёт/));
   expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/api/admin/ops/op-1"))).toBe(true);
 });
 
@@ -124,7 +124,7 @@ test("a dropped answer (unknown) is named unknown, never failed", async () => {
   fireEvent.click(await screen.findByRole("radio", { name: /mop/i }));
   fireEvent.click(screen.getByRole("button", { name: /^завести$/i }));
   await waitFor(() => expect(screen.getByTestId("add-verdict"))
-    .toHaveTextContent(/исход неизвестен/i));
+    .toHaveTextContent(/Исход неизвестен/));
   // unknown -- не failed: слова «не удался» нет
   expect(screen.getByTestId("add-verdict")).not.toHaveTextContent(/не удался/);
 });

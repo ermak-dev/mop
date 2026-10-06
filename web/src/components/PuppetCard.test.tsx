@@ -31,7 +31,7 @@ test("#487 opening the screen immediately loads only that endpoint", async () =>
   for (const label of ["узел", "ветка", "владелец", "модель", "репозиторий", "место клона", "state-строка"])
     expect(screen.queryByText(label, { exact: true })).toBeNull();
   expect(screen.queryByRole("tab")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "обновить" }));
+  fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 });
 
@@ -39,7 +39,7 @@ test("viewer has an accessible close button", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => tailOk([])));
   const onClose = vi.fn();
   renderUi(<PuppetCard session={ADMIN} target="pu-mop-1" onClose={onClose} />);
-  const closer = screen.getByRole("button", { name: "закрыть" });
+  const closer = screen.getByRole("button", { name: "Закрыть" });
   closer.focus();
   expect(document.activeElement).toBe(closer);
   fireEvent.click(closer);
@@ -72,7 +72,7 @@ test.each([[403, "прав не хватает"], [404, "нет такого п�
     open();
     expect(await screen.findByRole("alert")).toHaveTextContent(message as string);
     expect(screen.queryByRole("status")).toBeNull();
-    expect(screen.getByRole("button", { name: "закрыть" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Закрыть" })).toBeInTheDocument();
   });
 
 test("#487 switching sources never displays the old response", async () => {

@@ -23,6 +23,7 @@ import { useModels } from "../useModels";
 import { restartReason } from "./RestartBox";
 import { MODES } from "./UpdateBox";
 import { PREVIEW } from "./DestructiveBox";
+import { LABELS } from "./labels";
 
 /** Какое действие запускает визард (#520). */
 export type ControlEntry = "update" | "model" | "restart" | "recycle" | "delete" | "wipe";
@@ -68,10 +69,10 @@ const RUIN = ["recycle", "delete", "wipe"] as const;
 const isRuin = (e: string | null): e is (typeof RUIN)[number] =>
   !!e && (RUIN as readonly string[]).includes(e);
 
-/** Слово GUI для действия на финальном экране. */
+/** Слово GUI для действия на финальном экране -- словарь #521. */
 const ENTRY_WORD: Record<string, string> = {
-  update: "обновление", model: "модель", restart: "рестарт",
-  recycle: "recycle", delete: "delete", wipe: "wipe",
+  update: LABELS.update, model: LABELS.model, restart: LABELS.restart,
+  recycle: LABELS.recycle, delete: LABELS.delete, wipe: LABELS.wipe,
 };
 
 export function ControlWindow({ opened, onClose, onOrder, row, session,
@@ -173,22 +174,24 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
   return (
     <Modal opened onClose={onClose} size="md" title="правка папета"
            data-testid="control-window"
-           closeButtonProps={{ "aria-label": "закрыть" }}>
+           closeButtonProps={{ "aria-label": LABELS.close }}>
       <Stepper active={step} onStepClick={setStep} allowNextStepsSelect={false}>
         <Stepper.Step label="действие" description={row.name}>
           <Stack gap="xs">
             <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
-            <Button variant="light" onClick={() => pick("update")}>обновление</Button>
-            <Button variant="light" onClick={() => pick("model")}>модель</Button>
+            <Button variant="light" onClick={() => pick("update")}>{LABELS.update}</Button>
+            <Button variant="light" onClick={() => pick("model")}>{LABELS.model}</Button>
             <Tooltip label={blocked ?? ""} disabled={!blocked}>
               <Button variant="light" color="orange" disabled={!!blocked}
-                      aria-label={blocked ?? "рестарт"}
-                      onClick={() => pick("restart")}>рестарт</Button>
+                      aria-label={blocked ?? LABELS.restart}
+                      onClick={() => pick("restart")}>{LABELS.restart}</Button>
             </Tooltip>
             {/* разрушительные -- своим красным, последствия -- на
                 едином экране подтверждения (#512/#473) */}
             {RUIN.map((a) => (
-              <Button key={a} variant="light" color="red" onClick={() => pick(a)}>{a}</Button>
+              <Button key={a} variant="light" color="red" onClick={() => pick(a)}>
+                {a === "recycle" ? LABELS.recycle : a === "delete" ? LABELS.delete : LABELS.wipe}
+              </Button>
             ))}
           </Stack>
         </Stepper.Step>
@@ -238,11 +241,11 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
               </>
             )}
             <Group justify="flex-end" gap="sm">
-              <Button variant="light" color="gray" onClick={() => setStep(0)}>назад</Button>
+              <Button variant="light" color="gray" onClick={() => setStep(0)}>{LABELS.back}</Button>
               {ruin
-                ? <Button disabled={!ready} onClick={() => setStep(2)}>далее</Button>
+                ? <Button disabled={!ready} onClick={() => setStep(2)}>{LABELS.next}</Button>
                 : <Button disabled={!ready} onClick={() => { if (entry) order(entry, params); }}>
-                    выполнить
+                    {LABELS.run}
                   </Button>}
             </Group>
           </Stack>
@@ -266,13 +269,13 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
             </Text>
             <Group justify="flex-end" gap="sm">
               <Button variant="light" color="gray"
-                      onClick={() => setStep(isRuin(entry) ? 0 : 1)}>назад</Button>
+                      onClick={() => setStep(isRuin(entry) ? 0 : 1)}>{LABELS.back}</Button>
               <Button color={isRuin(entry) ? "red" : "blue"}
                       onClick={() => {
                         if (isRuin(entry)) order(entry, {});
                         else if (entry === "update") order("update", params);
                       }}>
-                подтвердить
+                {LABELS.confirm}
               </Button>
             </Group>
           </Stack>

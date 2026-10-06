@@ -64,7 +64,7 @@ test("#520 the restart order posts at once, no confirm dialog", async () => {
   expect(screen.queryByText(/подтвердите рестарт/i)).toBeNull();
   const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
   expect(body).toEqual({ action: "restart", target: "pu-mop-1", params: {} });
-  await waitFor(() => expect(screen.getByText(/идёт/i)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText(/Идёт/)).toBeInTheDocument());
 });
 
 test("#520 terminal succeeded verdict is shown; retry needs a new order", async () => {
@@ -74,7 +74,7 @@ test("#520 terminal succeeded verdict is shown; retry needs a new order", async 
   const order = new Order();
   const view = mountEngine(order);
   send(view, order);
-  await waitFor(() => expect(screen.getByText(/перезапущен/i)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText(/Перезапущен/)).toBeInTheDocument());
 });
 
 test("#520 unknown is named unknown, never failed", async () => {
@@ -84,8 +84,8 @@ test("#520 unknown is named unknown, never failed", async () => {
   const order = new Order();
   const view = mountEngine(order);
   send(view, order);
-  await waitFor(() => expect(screen.getByText(/неизвестен/i)).toBeInTheDocument());
-  expect(screen.queryByText(/не удался/i)).toBeNull();
+  await waitFor(() => expect(screen.getByText(/Исход неизвестен/)).toBeInTheDocument());
+  expect(screen.queryByText(/Не удался/)).toBeNull();
 });
 
 test("#520 a refused operation names the server phrase, retry posts again", async () => {
@@ -100,7 +100,7 @@ test("#520 a refused operation names the server phrase, retry posts again", asyn
   await waitFor(() => expect(screen.getByText(/queued/i)).toBeInTheDocument());
   // Повтор начинается из результата («новая команда» шлёт снова): клик
   // подтверждения больше не нужен, рестарт обратим (#513).
-  fireEvent.click(screen.getByRole("button", { name: "новая команда" }));
+  fireEvent.click(screen.getByRole("button", { name: "Новая команда" }));
   await waitFor(() =>
     expect(fetchMock.mock.calls.filter((c) => (c[1] as { method?: string })?.method === "POST"))
       .toHaveLength(2));
@@ -113,7 +113,7 @@ test("#520 no storage: nothing lands in localStorage or sessionStorage", async (
   const order = new Order();
   const view = mountEngine(order);
   send(view, order);
-  await waitFor(() => expect(screen.getByText(/перезапущен/i)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText(/Перезапущен/)).toBeInTheDocument());
   expect(window.localStorage.length).toBe(0);
   expect(window.sessionStorage.length).toBe(0);
 });

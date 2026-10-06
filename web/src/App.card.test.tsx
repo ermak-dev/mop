@@ -77,7 +77,7 @@ test("logout with the card open clears it in the same render", async () => {
   fireEvent.click(await screen.findByRole("button", { name: /pu-mop-1/i }));
   // Приватный вывод не должен оставаться после выхода из сессии.
   await waitFor(() => expect(screen.getByText("private output")).toBeInTheDocument());
-  fireEvent.click(screen.getByRole("button", { name: /logout/i }));
+  fireEvent.click(screen.getByRole("button", { name: "Выйти" }));
   await waitFor(() => expect(screen.queryByText("private output")).toBeNull());
   // Mantine держит пустой корень модала в DOM -- пустота и есть признак
   const dialog = screen.queryByRole("dialog");
