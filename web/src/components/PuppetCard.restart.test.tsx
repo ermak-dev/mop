@@ -31,7 +31,7 @@ test("#513 the restart click posts from the final screen", async () => {
   const win = await screen.findByTestId("control-window");
   fireEvent.click(within(win).getByRole("button", { name: "Рестарт" }));
   // до согласия POST нет: финальный экран сам и есть подтверждение
-  expect(win.textContent).toMatch(/Разговор теряется/);
+  expect(win.textContent).toMatch(/Контекст диалога с Claude теряется/);
   expect(fetchMock).not.toHaveBeenCalled();
   fireEvent.click(within(win).getByRole("button", { name: /^Завершить$/ }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
@@ -59,11 +59,12 @@ test("the row offers update with explicit fresh modes", () => {
   renderUi(<PoolTable projects={projects} session={ADMIN} />);
   fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = screen.getByTestId("control-window");
-  // #522: пункт update раскрывает радио трёх режимов прямо на первом
-  // экране, шаг выбора режима ушёл
+  // #527: пункт update ведёт на СВОЙ шаг выбора режима -- три радио,
+  // не смешанные с кнопками чужих операций
   fireEvent.click(within(win).getByRole("button", { name: "Обновление" }));
   const dialog = screen.getByRole("dialog");
-  for (const m of ["как было", "свежий клон", "другой origin"]) {
+  for (const m of ["Продолжить работу", "Пересобрать чистый клон",
+                   "Переключить на другой проект"]) {
     expect(within(dialog).getByRole("radio", { name: new RegExp(m, "i") })).toBeInTheDocument();
   }
   expect(within(dialog).getAllByRole("radio")
