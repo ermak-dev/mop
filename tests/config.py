@@ -233,6 +233,15 @@ def main():
     unknown = [k for k in config.NODE_SCOPED if k not in config.SETTINGS]
     c.check("NODE_SCOPED names settings that do not exist", not (unknown), unknown)
 
+    # Версия LLM-прокси живёт в сборке, одной настройкой -- как MOP_NATS_VERSION:
+    # обновление -- это правка дефолта и прогон роли, а не правка на сервере.
+    # Сток-панель новее 8.0.8, и её маршруты моделей давали 404 на живом
+    # прокси (#523); поднятие версии -- единственное место, где она есть.
+    # HYPOTHESIS: дефолт отстал от решения об обновлении.
+    c.check("MOP_LLM_PROXY_VERSION default is the pinned release 8.0.16 (#524)",
+            not (config.SETTINGS.get("MOP_LLM_PROXY_VERSION") != "8.0.16"),
+            f"{config.SETTINGS.get('MOP_LLM_PROXY_VERSION')!r}")
+
     # #358: подметание зовёт агент узла (глагол sweep), а агент читает
     # настройки из node.env -- .env туда не едет. Пороги ехали только в спеку
     # pu-cleanup через --extra-vars, и агент их не увидел бы: pu-sweep
