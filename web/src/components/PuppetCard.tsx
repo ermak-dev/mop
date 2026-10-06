@@ -70,7 +70,7 @@ function PuppetOutput({ session, target }: {
   const loading = !tail.loaded;
   return <>
     <Group role="toolbar" aria-label="просмотр" justify="space-between" wrap="nowrap" gap={4}
-      px="md" pb="xs" style={{ flexShrink: 0, borderBottom: "1px solid var(--mantine-color-default-border)" }}>
+      px="md" pb="xs" style={{ flexShrink: 0, backgroundColor: "var(--mantine-color-gray-0)", borderBottom: "1px solid var(--mantine-color-default-border)" }}>
       <Group gap={4} wrap="nowrap">
         <IconButton label="уменьшить" variant="subtle" size="lg" disabled={scale <= 0.1}
           onClick={() => changeZoom(-0.25)}><IconZoomOut size={18} /></IconButton>
@@ -90,7 +90,7 @@ function PuppetOutput({ session, target }: {
     <Box p="md" style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
       <Box ref={viewport} data-testid="output-scroll" role="region"
         aria-label="вывод экрана" tabIndex={0}
-        style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", scrollbarGutter: "stable" }}
+        style={{ flex: 1, minWidth: "100%", minHeight: 0, overflow: "auto", scrollbarGutter: "stable", backgroundColor: "var(--mantine-color-dark-8)", color: "var(--mantine-color-gray-1)" }}
         onScroll={() => {
           const el = viewport.current!;
           atEnd.current = el.scrollHeight - el.clientHeight - el.scrollTop <= 2;
@@ -106,7 +106,7 @@ function PuppetOutput({ session, target }: {
             <Box style={{ position: "relative", width: Math.ceil(size.width * scale),
               height: Math.ceil(size.height * scale), minWidth: "100%", overflow: "hidden" }}>
               <Box component="pre" ref={text} data-testid="tail-lines" m={0} style={{
-                position: "absolute", top: 0, left: 0, width: "max-content", whiteSpace: "pre",
+                position: "absolute", top: 0, left: 0, width: "max-content", minWidth: "100%", whiteSpace: "pre",
                 fontFamily: "var(--mantine-font-family-monospace)", fontSize: 13, lineHeight: 1.45,
                 transformOrigin: "top left", transform: `scale(${scale})`,
               }}>{tail.lines.map((line, i) => <span key={i}>{line}{i < tail.lines.length - 1 ? "\n" : ""}</span>)}</Box>
@@ -117,7 +117,7 @@ function PuppetOutput({ session, target }: {
       </Box>
     </Box>
     {!tail.blocked && <Box px="md" py="sm" data-testid="screen-composer"
-      style={{ flexShrink: 0, borderTop: "1px solid var(--mantine-color-default-border)" }}>
+      style={{ flexShrink: 0, backgroundColor: "var(--mantine-color-gray-0)", borderTop: "1px solid var(--mantine-color-default-border)" }}>
       <SendForm session={session} target={target} />
     </Box>}
   </>;
@@ -129,7 +129,7 @@ export function PuppetCard({ session, target, onClose }: {
   onClose: () => void;
 }) {
   if (!target || session.role !== "admin") return null;
-  return <Modal opened onClose={onClose} size="min(1440px, calc(100vw - 32px))" yOffset={16}
+  return <Modal opened onClose={onClose} size="min(1000px, calc(100vw - 32px))" yOffset={16}
     title={<Text fw={600}>экран {target}</Text>}
     data-testid="puppet-card" padding="md" radius="md" closeButtonProps={{ "aria-label": "закрыть" }}
     styles={{
