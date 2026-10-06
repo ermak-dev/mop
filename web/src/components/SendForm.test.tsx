@@ -30,7 +30,7 @@ const route = (post: () => Promise<Response>, get: () => Promise<Response>) =>
       ? ({ ok: true, json: async () => ({ lines: ["screen"] }) }) as Response : get());
 const open = () => {
   const view = renderUi(<PoolTable projects={projects} session={ADMIN} />);
-  fireEvent.click(screen.getByRole("button", { name: "экран" }));
+  fireEvent.click(screen.getByRole("button", { name: "Экран" }));
   return view;
 };
 const typeAndSend = async () => {
@@ -50,10 +50,10 @@ const readyForNext = async () => {
 };
 
 test("sendWord names the outcome for a human", () => {
-  expect(sendWord("succeeded")).toBe("доставлено");
-  expect(sendWord("refused")).toBe("отказано");
-  expect(sendWord("unknown")).toBe("исход неизвестен");
-  expect(sendWord("running")).toBe("идёт");
+  expect(sendWord("succeeded")).toBe("Доставлено");
+  expect(sendWord("refused")).toBe("Отказано");
+  expect(sendWord("unknown")).toBe("Исход неизвестен");
+  expect(sendWord("running")).toBe("Идёт");
 });
 
 test("#469 the row offers send to the admin and posts the narrow schema", async () => {
@@ -94,7 +94,7 @@ test("#469 double submit is one POST", async () => {
   expect(posts(fetchMock)).toHaveLength(1);
 });
 
-test.each([["refused", "отказано"], ["unknown", "исход неизвестен"]])(
+test.each([["refused", "Отказано"], ["unknown", "Исход неизвестен"]])(
   "#469 %s verdict is shown with the server reason", async (status, word) => {
     vi.stubGlobal("fetch", route(async () => ok202("op-1"), async () => opJson(status, "held by ermak")));
     open();
@@ -112,8 +112,8 @@ test("#469 a submit refusal names the phrase without fake success", async () => 
   await typeAndSend();
   await waitFor(() => expect(notice.show).toHaveBeenCalledTimes(1));
   expect(notice.show.mock.calls[0][0].message).toContain("admin only");
-  expect(notice.show.mock.calls[0][0].message).not.toContain("доставлено");
-  expect(screen.queryByText("доставлено")).toBeNull();
+  expect(notice.show.mock.calls[0][0].message).not.toContain("Доставлено");
+  expect(screen.queryByText("Доставлено")).toBeNull();
 });
 
 test("#469 a guest sees no send form or icon", () => {

@@ -15,7 +15,7 @@ import { opWord } from "./RestartBox";
 
 /** Слово исхода send: свой глагол у «succeeded», остальное -- общий словарь. */
 export const sendWord = (status: string): string =>
-  status === "succeeded" ? "доставлено" : opWord(status);
+  status === "succeeded" ? "Доставлено" : opWord(status);
 
 export function SendForm({ session, target }: { session: Session; target: string }) {
   // третий аргумент хука -- pollMs (#473): действие уезжает в submit, не сюда

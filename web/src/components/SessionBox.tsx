@@ -5,6 +5,7 @@
 import { useState } from "react";
 import { Alert, Anchor, Button, Group, Modal, PasswordInput, TextInput } from "@mantine/core";
 import { GUEST, type Session } from "../useSession";
+import { LABELS } from "./labels";
 
 type Props = {
   session: Session;
@@ -42,21 +43,21 @@ export function SessionBox({ session, onLogin, onLogout, failed }: Props) {
                   aria-label="LLM Proxy">LLM Proxy</Anchor>
         )}
         <span>{session.login}</span>
-        <Button variant="light" color="gray" onClick={onLogout}>Logout</Button>
+        <Button variant="light" color="gray" onClick={onLogout}>{LABELS.logout}</Button>
       </Group>
     );
   }
   return (
     <>
-      <Button variant="light" onClick={() => setOpen(true)}>Login</Button>
+      <Button variant="light" onClick={() => setOpen(true)}>{LABELS.login}</Button>
       <Modal opened={open} onClose={close} title="Вход" centered>
         {failed && <Alert color="red" variant="light" mb="sm">{failed}</Alert>}
         <TextInput label="Логин" value={login} onChange={(e) => setLogin(e.target.value)} />
         <PasswordInput label="Пароль" value={password}
                        onChange={(e) => setPassword(e.target.value)} mt="sm" />
         <Group justify="flex-end" mt="md">
-          <Button variant="light" color="gray" onClick={close}>Отмена</Button>
-          <Button onClick={submit}>Войти</Button>
+          <Button variant="light" color="gray" onClick={close}>{LABELS.cancel}</Button>
+          <Button onClick={submit}>{LABELS.login}</Button>
         </Group>
       </Modal>
     </>

@@ -1,5 +1,6 @@
 import { Button, Group, Loader, Modal, Stack, Text } from "@mantine/core";
 import { TERMINAL, type AdminOpState } from "../useAdminOp";
+import { LABELS } from "./labels";
 
 export function OperationResult({ opened, onClose, onAgain, title, target, op, word, testId }: {
   opened: boolean; onClose: () => void; onAgain: () => void; title: string; target: string;
@@ -8,7 +9,7 @@ export function OperationResult({ opened, onClose, onAgain, title, target, op, w
   if (!opened) return null;
   const live = op.status !== "idle" && !TERMINAL.has(op.status);
   return <Modal opened onClose={onClose} title={`${title}: ${target}`} size="md"
-    closeButtonProps={{ "aria-label": "закрыть" }}>
+    closeButtonProps={{ "aria-label": LABELS.close }}>
     <Stack gap="sm">
       <Group gap="sm">
         {live && <Loader size="sm" />}
@@ -18,7 +19,7 @@ export function OperationResult({ opened, onClose, onAgain, title, target, op, w
         </Text>
       </Group>
       {!live && op.status !== "idle" && <Group justify="flex-end">
-        <Button variant="light" onClick={onAgain}>новая команда</Button>
+        <Button variant="light" onClick={onAgain}>{LABELS.again}</Button>
       </Group>}
     </Stack>
   </Modal>;

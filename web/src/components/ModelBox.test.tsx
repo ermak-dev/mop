@@ -97,7 +97,7 @@ test("#520 verdicts ride toast balloons, not an inline line", async () => {
   send(view, order, "claude-opus-5-5");
   await waitFor(() => expect(shown.length).toBeGreaterThan(0));
   const last = shown[shown.length - 1] as { message?: string; color?: string };
-  expect(String(last.message)).toContain("отказано");
+  expect(String(last.message)).toContain("Отказано");
   expect(last.color).toBe("red");
 });
 
@@ -122,7 +122,7 @@ test("#520 succeeded reads the confirmed word, unknown is named unknown", async 
   send(view, order, "glm-5.3-flash");
   await waitFor(() => expect(shown.length).toBeGreaterThan(0));
   expect(String((shown[shown.length - 1] as { message?: string }).message))
-    .toMatch(/исход неизвестен/i);
+    .toMatch(/Исход неизвестен/);
 });
 
 test("#520 a refusal names the server phrase (the dialog did not close, a foreign lease)", async () => {
@@ -140,7 +140,7 @@ test("#520 a refusal names the server phrase (the dialog did not close, a foreig
   send(view, order, "glm-5.3-flash");
   await waitFor(() => expect(shown.length).toBeGreaterThan(0));
   expect(String((shown[shown.length - 1] as { message?: string }).message))
-    .toMatch(/отказано/i);
+    .toMatch(/Отказано/);
   expect(String((shown[shown.length - 1] as { message?: string }).message))
     .toMatch(/dialog did not close/);
 });

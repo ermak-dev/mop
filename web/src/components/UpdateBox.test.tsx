@@ -106,7 +106,7 @@ test("#520 unknown is named unknown, never failed", async () => {
   const view = mountEngine(order);
   send(view, order, "update", { fresh: false });
   await waitFor(() => expect(screen.getByTestId("update-verdict"))
-    .toHaveTextContent(/исход неизвестен/i));
+    .toHaveTextContent(/Исход неизвестен/));
   expect(screen.getByTestId("update-verdict")).not.toHaveTextContent(/не удался/);
 });
 
@@ -149,7 +149,7 @@ test("#520 an order after a terminal verdict is a new command and posts", async 
   await waitFor(() =>
     expect(screen.getByTestId("update-verdict")).toHaveTextContent(/review refusal/i));
   // вердикт закрыли; новая команда с финального экрана -- второй POST
-  fireEvent.click(screen.getByRole("button", { name: "закрыть" }));
+  fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   send(view, order, "update", { fresh: false });
   await waitFor(() =>

@@ -26,9 +26,9 @@ test("#513 the restart click posts at once from the row", async () => {
   vi.stubGlobal("fetch", fetchMock);
   renderUi(<PoolTable projects={projects} session={ADMIN} />);
   // вход #520: строка -> визард правки -> пункт рестарта
-  fireEvent.click(screen.getByRole("button", { name: "правка" }));
+  fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
-  fireEvent.click(within(win).getByRole("button", { name: "рестарт" }));
+  fireEvent.click(within(win).getByRole("button", { name: "Рестарт" }));
   // диалог -- только ход операции, не подтверждение
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
     method: "POST", credentials: "same-origin" })));
@@ -39,9 +39,9 @@ test.each(["target", "role", "login"])("stale restart op after %s change rides n
   const fetchMock = vi.fn(async () => new Promise<Response>(() => {}));
   vi.stubGlobal("fetch", fetchMock);
   const view = renderUi(<PoolTable projects={projects} session={ADMIN} />);
-  fireEvent.click(screen.getByRole("button", { name: "правка" }));
+  fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
-  fireEvent.click(within(win).getByRole("button", { name: "рестарт" }));
+  fireEvent.click(within(win).getByRole("button", { name: "Рестарт" }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalled());
   view.rerender(<MantineProvider><PoolTable projects={change === "target" ? [] : projects}
     session={change === "role" ? { login: null, role: null }
@@ -54,10 +54,10 @@ test.each(["target", "role", "login"])("stale restart op after %s change rides n
 test("the row offers update with explicit fresh modes", () => {
   vi.stubGlobal("fetch", vi.fn());
   renderUi(<PoolTable projects={projects} session={ADMIN} />);
-  fireEvent.click(screen.getByRole("button", { name: "правка" }));
+  fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = screen.getByTestId("control-window");
   // #520: пункт update -- «обновление», шаг параметров визарда
-  fireEvent.click(within(win).getByRole("button", { name: "обновление" }));
+  fireEvent.click(within(win).getByRole("button", { name: "Обновление" }));
   const dialog = screen.getByRole("dialog");
   for (const m of ["как было", "свежий клон", "другой origin"]) {
     expect(within(dialog).getByRole("radio", { name: new RegExp(m, "i") })).toBeInTheDocument();
@@ -68,6 +68,6 @@ test("the row offers update with explicit fresh modes", () => {
 
 test("a guest never sees restart or update", () => {
   renderUi(<PoolTable projects={projects} session={{ login: null, role: null }} />);
-  expect(screen.queryByRole("button", { name: "рестарт" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "правка" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Рестарт" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Правка" })).toBeNull();
 });

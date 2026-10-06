@@ -20,6 +20,7 @@ import { RestartBox } from "./RestartBox";
 import { UpdateBox } from "./UpdateBox";
 import { DestructiveBox } from "./DestructiveBox";
 import { ControlWindow, type ControlEntry, type Signal } from "./ControlWindow";
+import { LABELS } from "./labels";
 
 export function PuppetActions({ row, session }: { row: Puppet; session: Session }) {
   // экран или ничего (#507): второй источник -- stderr -- ушёл с кнопкой «лог»
@@ -46,11 +47,11 @@ export function PuppetActions({ row, session }: { row: Puppet; session: Session 
   if (session.role !== "admin") return null;
   return <Group gap={4} wrap="nowrap" role="group" aria-label={`действия ${row.name}`}
     style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
-    <IconButton label="экран" variant="subtle" size="lg" onClick={() => setViewer("tail")}>
+    <IconButton label={LABELS.screen} variant="subtle" size="lg" onClick={() => setViewer("tail")}>
       <IconTerminal2 size={18} />
     </IconButton>
     {viewer && <PuppetCard session={session} target={row.name} onClose={() => setViewer(null)} />}
-    <IconButton label="правка" variant="subtle" size="lg"
+    <IconButton label={LABELS.edit} variant="subtle" size="lg"
                 onClick={() => { setReopen(null); setWin(true); }}>
       <IconSettings size={18} />
     </IconButton>

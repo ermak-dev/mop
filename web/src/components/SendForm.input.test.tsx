@@ -73,7 +73,7 @@ test("#492 accepted is silent, remains in-flight, and a terminal result unlocks 
   await waitFor(() => expect(mock.mock.calls.some((c) => c[0].endsWith("/op-1"))).toBe(true));
   type("next message");
   expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
-  expect(screen.queryByText("принято")).toBeNull();
+  expect(screen.queryByText("Принято")).toBeNull();
   expect(screen.queryByTestId("send-verdict")).toBeNull();
   expect(notice.show).not.toHaveBeenCalled();
   fireEvent.keyDown(input(), { key: "Enter", ctrlKey: true });
@@ -113,7 +113,7 @@ test("#492 lost submission response is unknown rather than delivered", async () 
   open(); type(); fireEvent.keyDown(input(), { key: "Enter" });
   await waitFor(() => expect(notice.show).toHaveBeenCalledTimes(1));
   expect(notice.show.mock.calls[0][0]).toEqual(expect.objectContaining({
-    color: "yellow", message: expect.stringContaining("исход неизвестен"),
+    color: "yellow", message: expect.stringContaining("Исход неизвестен"),
   }));
   expect(notice.show.mock.calls[0][0].message).toContain("первый ответ потерян");
 });

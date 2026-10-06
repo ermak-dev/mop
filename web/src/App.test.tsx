@@ -1,5 +1,5 @@
 // Скелет (#297): шапка и счётчики корзин из снимка.
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 import App from "./App";
 import { emptySnapshot, renderUi } from "./test-utils";
@@ -99,7 +99,7 @@ test("#378 a snapshot without load keeps the old header and draws no bar", () =>
   expect(screen.queryByTestId("load-bar")).toBeNull();
 });
 
-// #416: сессия в шапке. Гость -- Login, вошедший -- Logout и логин, admin --
+// #416: сессия в шапке. Гость -- «Войти», вошедший -- «Выйти» и логин, admin --
 // ссылка на панель прокси. Таблицы публичные -- остаются при любом состоянии.
 const reset = (s: Session) => {
   mocked.__reset?.(s);
@@ -110,33 +110,34 @@ const reset = (s: Session) => {
 };
 type Session = import("./useSession").Session;
 
-test("#416 a guest header has Login, an operator's has Logout", async () => {
+test("#521 a guest header has Войти, an operator's has Выйти", async () => {
   renderUi(<App />);
-  expect(screen.getByRole("button", { name: "Login" })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Logout" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Войти" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Выйти" })).toBeNull();
 });
 
 test("#416 login flow: the session box appears after a successful POST", async () => {
   renderUi(<App />);
-  fireEvent.click(screen.getByRole("button", { name: "Login" }));
-  fireEvent.change(await screen.findByLabelText("Логин"), { target: { value: "anton" } });
-  fireEvent.change(screen.getByLabelText("Пароль"), { target: { value: "secret" } });
   fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  const modal = await screen.findByRole("dialog");
+  fireEvent.change(within(modal).getByLabelText("Логин"), { target: { value: "anton" } });
+  fireEvent.change(within(modal).getByLabelText("Пароль"), { target: { value: "secret" } });
+  fireEvent.click(within(modal).getByRole("button", { name: "Войти" }));
   expect(await screen.findByText("anton")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Logout" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Выйти" })).toBeInTheDocument();
 });
 
 test("#416 a wrong password shows the localized reason, password field empty", async () => {
   reset({ login: null, role: null }); // прошлый тест вошёл антоном
   renderUi(<App />);
   // ...тело ниже осталось, см. новый интеграционный тест ревью
-  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
   // модал появляется с переходом; ждём оба поля, потом меняем
   const user = await screen.findByLabelText("Логин", {}, { timeout: 3000 });
   const pwd = await screen.findByLabelText("Пароль", {}, { timeout: 3000 });
   fireEvent.change(user, { target: { value: "olga" } });
   fireEvent.change(pwd, { target: { value: "wrong" } });
-  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Войти" }));
   // причина приходит асинхронно (postLogin -> setState)
   await waitFor(() => expect(screen.getByText("неверный логин или пароль")).toBeInTheDocument());
   expect(screen.getByLabelText("Пароль")).toHaveValue("");
@@ -145,18 +146,18 @@ test("#416 a wrong password shows the localized reason, password field empty", a
 test("#416 logout returns to the guest header", async () => {
   reset({ login: "anton", role: "admin" });
   renderUi(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Logout" }));
-  expect(await screen.findByRole("button", { name: "Login" })).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "Выйти" }));
+  expect(await screen.findByRole("button", { name: "Войти" })).toBeInTheDocument();
 });
 
 test("#416 admin sees the LLM Proxy link, user does not", async () => {
   // fetchSession по умолчанию -- гость; логинимся антоном (admin)
   const box = renderUi(<App />);
-  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
   fireEvent.change(await screen.findByLabelText("Логин", {}, { timeout: 2000 }),
                    { target: { value: "anton" } });
   fireEvent.change(screen.getByLabelText("Пароль"), { target: { value: "x" } });
-  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Войти" }));
   const link = await screen.findByRole("link", { name: "LLM Proxy" }, { timeout: 2000 });
   expect(link).toHaveAttribute("href", "/llm/management.html");
   box.unmount();
@@ -179,11 +180,11 @@ test("#416 a late initial fetch cannot overwrite a fresher login", async () => {
   };
   (vi.mocked(await import("./useSession")) as { fetchSession: unknown }).fetchSession = slow;
   renderUi(<App />);
-  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
   fireEvent.change(await screen.findByLabelText("Логин", {}, { timeout: 3000 }),
                    { target: { value: "anton" } });
   fireEvent.change(screen.getByLabelText("Пароль"), { target: { value: "x" } });
-  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Войти" }));
   await waitFor(() => expect(screen.getByText("anton")).toBeInTheDocument());
   await new Promise((r) => setTimeout(r, 50)); // подвисший опрос не ответил -- и не должен
   expect(screen.getByText("anton")).toBeInTheDocument();
@@ -199,11 +200,11 @@ test("#416 a successful login clears a stale panel error", async () => {
   renderUi(<App />);
   await waitFor(() => expect(screen.getByText("панель недоступна")).toBeInTheDocument());
   mod.fetchSession = original;
-  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
   fireEvent.change(await screen.findByLabelText("Логин", {}, { timeout: 3000 }),
                    { target: { value: "anton" } });
   fireEvent.change(screen.getByLabelText("Пароль"), { target: { value: "x" } });
-  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Войти" }));
   await waitFor(() => expect(screen.queryByText("панель недоступна")).toBeNull());
   expect(screen.getByText("anton")).toBeInTheDocument();
 });
@@ -215,7 +216,7 @@ test("#416 focus re-checks the session: TTL turned an admin into a guest", async
   reset({ login: null, role: null }); // cookie истекла
   fireEvent.focus(window);
   await waitFor(() => expect(screen.queryByText("anton")).toBeNull());
-  expect(screen.getByRole("button", { name: "Login" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Войти" })).toBeInTheDocument();
 });
 
 
@@ -224,19 +225,21 @@ test("#416 focus re-checks the session: TTL turned an admin into a guest", async
 test("#416 integration: after a 401 the modal stays open with the reason", async () => {
   reset({ login: null, role: null });
   renderUi(<App />);
-  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
   fireEvent.change(await screen.findByLabelText("Логин", {}, { timeout: 3000 }),
                    { target: { value: "olga" } }); // мок отказывает всем, кроме anton
   fireEvent.change(await screen.findByLabelText("Пароль", {}, { timeout: 3000 }),
                    { target: { value: "wrong" } });
-  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Войти" }));
   await waitFor(() => expect(screen.getByText("неверный логин или пароль")).toBeInTheDocument());
   // ждём дольше выхода анимации модала: закрытое окно убирает поля из DOM,
   // открытое -- держит их и причину рядом
   await new Promise((r) => setTimeout(r, 400));
   expect(screen.getByText("неверный логин или пароль")).toBeInTheDocument();
   expect(screen.getByLabelText("Пароль")).toHaveValue("");
-  expect(screen.getByRole("button", { name: "Войти" })).toBeInTheDocument();
+  // модал открыт: его «Войти» на месте (шапочная закрыта за ним)
+  expect(within(screen.getByRole("dialog"))
+    .getByRole("button", { name: "Войти" })).toBeInTheDocument();
 });
 
 // Ревью 2 (#416): поздний стартовый опрос обязан РАЗРЕШИТЬСЯ гостем уже
@@ -248,11 +251,11 @@ test("#416 a late guest answer arriving after login leaves the login alone", asy
   (vi.mocked(await import("./useSession")) as { fetchSession: unknown }).fetchSession =
     () => gate as Promise<Session>;
   renderUi(<App />);
-  fireEvent.click(screen.getByRole("button", { name: "Login" }));
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
   fireEvent.change(await screen.findByLabelText("Логин", {}, { timeout: 3000 }),
                    { target: { value: "anton" } });
   fireEvent.change(screen.getByLabelText("Пароль"), { target: { value: "x" } });
-  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Войти" }));
   await waitFor(() => expect(screen.getByText("anton")).toBeInTheDocument());
   release({ login: null, role: null }); // опоздавший ответ -- гость
   await new Promise((r) => setTimeout(r, 50));
@@ -288,7 +291,7 @@ test("#416 out-of-order session answers: the newest request wins", async () => {
   await new Promise((r) => setTimeout(r, 100));
   // старый ответ не возвращает админа: последний начатый sync решает
   expect(screen.queryByText("anton")).toBeNull();
-  expect(screen.getByRole("button", { name: "Login" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Войти" })).toBeInTheDocument();
 });
 
 // #472: завести папета -- кнопка главной страницы, только для админа; для
@@ -356,7 +359,7 @@ test("#509 a foreign unknown frame balloons, the row stays clean", async () => {
   const balloon = shown[0] as { title?: string; message?: unknown; color?: string };
   expect(String(balloon.title)).toContain("pu-mop-1");
   // сообщение unknown -- JSX со ссылкой: смотрим плоско
-  expect(JSON.stringify(balloon.message)).toContain("исход неизвестен");
+  expect(JSON.stringify(balloon.message)).toContain("Исход неизвестен");
   expect(JSON.stringify(balloon.message)).toContain("#journal");
   expect(balloon.color).toBe("yellow");
   expect(screen.queryByTestId("target-verdict-pu-mop-1")).toBeNull();

@@ -41,22 +41,22 @@ const mount = (row: Puppet = ROW) => {
   return { view, onOrder, onClose };
 };
 
-test("#520 the choice screen lists six actions, update is named обновление", () => {
+test("#520 the choice screen lists six actions, update is named Обновление", () => {
   vi.stubGlobal("fetch", vi.fn());
   const { onOrder } = mount();
   const win = screen.getByTestId("control-window");
-  for (const label of ["обновление", "модель", "рестарт", "recycle", "delete", "wipe"]) {
+  for (const label of ["Обновление", "Модель", "Рестарт", "recycle", "delete", "wipe"]) {
     expect(within(win).getByRole("button", { name: label })).toBeInTheDocument();
   }
   // вложения «правка -> правка» нет: дубль имени окна умер
-  expect(within(win).queryByRole("button", { name: "правка" })).toBeNull();
+  expect(within(win).queryByRole("button", { name: "Правка" })).toBeNull();
   expect(onOrder).not.toHaveBeenCalled();
 });
 
 test("#520 picking an item switches the step, the window stays open", () => {
   vi.stubGlobal("fetch", vi.fn());
   const { onClose, onOrder } = mount();
-  fireEvent.click(screen.getByRole("button", { name: "обновление" }));
+  fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
   // окно живо: шаг параметров с тремя режимами #470
   expect(screen.getByTestId("control-window")).toBeInTheDocument();
   for (const m of ["продолжить как было", "свежий клон, тот же origin", "другой origin"]) {
@@ -69,13 +69,13 @@ test("#520 picking an item switches the step, the window stays open", () => {
 test("#520 the restart item posts at once, the stepper never switches", () => {
   vi.stubGlobal("fetch", vi.fn());
   const { onClose, onOrder } = mount();
-  fireEvent.click(screen.getByRole("button", { name: "рестарт" }));
+  fireEvent.click(screen.getByRole("button", { name: "Рестарт" }));
   expect(onOrder).toHaveBeenCalledWith(expect.objectContaining(
     { act: "restart", params: {} }));
   expect(onClose).toHaveBeenCalled();
   // никаких шагов: ни радио, ни подтверждения
   expect(screen.queryByRole("radio")).toBeNull();
-  expect(screen.queryByRole("button", { name: /подтвердить/i })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Подтвердить/ })).toBeNull();
 });
 
 // Дизейбл-причина #508 -- на пункте первого экрана: признак строки
@@ -100,13 +100,13 @@ test.each([
 test("#520 update keep rides Выполнить on the params step, no confirm screen", () => {
   vi.stubGlobal("fetch", vi.fn());
   const { onClose, onOrder } = mount();
-  fireEvent.click(screen.getByRole("button", { name: "обновление" }));
+  fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
   fireEvent.click(screen.getByRole("radio", { name: /как было/i }));
-  fireEvent.click(screen.getByRole("button", { name: /^выполнить$/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^Выполнить$/ }));
   expect(onOrder).toHaveBeenCalledWith(expect.objectContaining(
     { act: "update", params: { fresh: false } }));
   expect(onClose).toHaveBeenCalled();
-  expect(screen.queryByRole("button", { name: /подтвердить/i })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Подтвердить/ })).toBeNull();
 });
 
 // replace необратим: единый финальный экран -- последствия И факты
@@ -114,17 +114,17 @@ test("#520 update keep rides Выполнить on the params step, no confirm s
 test("#520 update replace rides the single confirm screen with target facts", () => {
   vi.stubGlobal("fetch", vi.fn());
   const { onOrder } = mount();
-  fireEvent.click(screen.getByRole("button", { name: "обновление" }));
+  fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
   fireEvent.click(screen.getByRole("radio", { name: /свежий клон/i }));
-  fireEvent.click(screen.getByRole("button", { name: /^далее$/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^Далее$/ }));
   const win = screen.getByTestId("control-window");
   expect(win.textContent).toMatch(/несохранённая работа погибнет/);
   expect(win.textContent).toContain("pu-mop-1");
   expect(win.textContent).toContain("hyper");
   expect(win.textContent).toContain("busy: #12");
-  expect(within(win).getAllByRole("button", { name: /^подтвердить$/i })).toHaveLength(1);
+  expect(within(win).getAllByRole("button", { name: /^Подтвердить$/ })).toHaveLength(1);
   expect(onOrder).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: /^подтвердить$/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^Подтвердить$/ }));
   expect(onOrder).toHaveBeenCalledWith(expect.objectContaining(
     { act: "update", params: { fresh: true } }));
 });
@@ -132,16 +132,16 @@ test("#520 update replace rides the single confirm screen with target facts", ()
 test("#520 update remove requires the origin and posts it", () => {
   vi.stubGlobal("fetch", vi.fn());
   const { onOrder } = mount();
-  fireEvent.click(screen.getByRole("button", { name: "обновление" }));
+  fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
   fireEvent.click(screen.getByRole("radio", { name: /другой origin/i }));
   // пустой origin запирает путь дальше: пересадка без адреса не едет
-  expect(screen.getByRole("button", { name: /^далее$/i })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /^Далее$/ })).toBeDisabled();
   fireEvent.change(screen.getByLabelText(/новый origin/i),
     { target: { value: "https://x/y/other.git" } });
-  fireEvent.click(screen.getByRole("button", { name: /^далее$/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^Далее$/ }));
   expect(screen.getByTestId("control-window").textContent)
     .toContain("https://x/y/other.git");
-  fireEvent.click(screen.getByRole("button", { name: /^подтвердить$/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^Подтвердить$/ }));
   expect(onOrder).toHaveBeenCalledWith(expect.objectContaining(
     { act: "update", params: { fresh: true, origin: "https://x/y/other.git" } }));
 });
@@ -152,16 +152,16 @@ test("#520 model rides the catalog, the current model is locked, Выполни�
   vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200,
     json: async () => ({ models: ["glm-5.3", "glm-5.3-flash"] }) }) as Response));
   const { onOrder } = mount();
-  fireEvent.click(screen.getByRole("button", { name: "модель" }));
+  fireEvent.click(screen.getByRole("button", { name: "Модель" }));
   const radio = await screen.findByRole("radio", { name: /^glm-5\.3$/i });
   expect(screen.getByRole("radio", { name: /текущая/i })).toBeDisabled();
-  expect(screen.getByRole("button", { name: /^выполнить$/i })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /^Выполнить$/ })).toBeDisabled();
   fireEvent.click(radio);
-  fireEvent.click(screen.getByRole("button", { name: /^выполнить$/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^Выполнить$/ }));
   expect(onOrder).toHaveBeenCalledWith(expect.objectContaining(
     { act: "model", params: { model: "glm-5.3" } }));
   // смена модели обратима (#513): экрана подтверждения нет
-  expect(screen.queryByRole("button", { name: /подтвердить/i })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Подтвердить/ })).toBeNull();
 });
 
 // Разрушительное -- ONE экран после выбора: последствия и факты цели
@@ -177,7 +177,7 @@ test("#520 destructive rides ONE consequences screen with a single button", () =
   expect(win.textContent).toContain("hyper");
   expect(win.textContent).toContain("busy: #12");
   expect(screen.queryByRole("button", { name: /продолжить/i })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: /^подтвердить$/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^Подтвердить$/ }));
   expect(onOrder).toHaveBeenCalledWith(expect.objectContaining(
     { act: "recycle", params: {} }));
 });
@@ -185,15 +185,15 @@ test("#520 destructive rides ONE consequences screen with a single button", () =
 test("#520 back walks from confirm to params to choice", () => {
   vi.stubGlobal("fetch", vi.fn());
   mount();
-  fireEvent.click(screen.getByRole("button", { name: "обновление" }));
+  fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
   fireEvent.click(screen.getByRole("radio", { name: /свежий клон/i }));
-  fireEvent.click(screen.getByRole("button", { name: /^далее$/i }));
-  fireEvent.click(screen.getByRole("button", { name: /^назад$/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^Далее$/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^Назад$/ }));
   // параметры снова: выбор режима на месте
   expect(screen.getByRole("radio", { name: /свежий клон/i })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /^назад$/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^Назад$/ }));
   // возврат к выбору действия: все шесть пунктов
-  for (const label of ["обновление", "модель", "рестарт", "recycle", "delete", "wipe"]) {
+  for (const label of ["Обновление", "Модель", "Рестарт", "recycle", "delete", "wipe"]) {
     expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
   }
 });
@@ -202,10 +202,10 @@ test("#520 destructive back returns straight to the choice screen", () => {
   vi.stubGlobal("fetch", vi.fn());
   mount();
   fireEvent.click(screen.getByRole("button", { name: "wipe" }));
-  expect(screen.getByTestId("control-window").textContent).toMatch(/тело пересоздаётся/);
-  fireEvent.click(screen.getByRole("button", { name: /^назад$/i }));
+  expect(screen.getByTestId("control-window").textContent).toMatch(/Тело пересоздаётся/);
+  fireEvent.click(screen.getByRole("button", { name: /^Назад$/ }));
   expect(screen.getByRole("button", { name: "recycle" })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: /^подтвердить$/i })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Подтвердить$/ })).toBeNull();
 });
 
 // Гард #473 в визарде: смена цели под открытым окном (шаг параметров
@@ -215,14 +215,14 @@ test("#520 a target change under an open wizard resets to the choice screen", ()
   vi.stubGlobal("fetch", vi.fn());
   const { view, onOrder } = mount();
   fireEvent.click(screen.getByRole("button", { name: "wipe" }));
-  expect(screen.getByTestId("control-window").textContent).toMatch(/тело пересоздаётся/);
+  expect(screen.getByTestId("control-window").textContent).toMatch(/Тело пересоздаётся/);
   view.rerender(<MantineProvider>
     <ControlWindow opened row={{ ...ROW, name: "pu-mop-2" }} session={ADMIN}
       onClose={vi.fn()} onOrder={vi.fn()} />
   </MantineProvider>);
   const win = screen.getByTestId("control-window");
   expect(win.textContent).toContain("pu-mop-2");
-  expect(screen.queryByRole("button", { name: /^подтвердить$/i })).toBeNull();
-  expect(screen.getByRole("button", { name: "обновление" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^Подтвердить$/ })).toBeNull();
+  expect(screen.getByRole("button", { name: "Обновление" })).toBeInTheDocument();
   expect(onOrder).not.toHaveBeenCalled();
 });

@@ -82,7 +82,7 @@ test("#520 the recycle order posts the exact action once", async () => {
   const view = mountEngine(order);
   order.fire("recycle");
   sendOrder(view, order);
-  await waitFor(() => expect(screen.getByText(/идёт/i)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText(/Идёт/)).toBeInTheDocument());
   expect(lastPost(fetchMock)).toEqual({ action: "recycle", target: "pu-mop-1", params: {} });
   expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
     method: "POST", credentials: "same-origin" }));
@@ -107,7 +107,7 @@ test("#520 the verdict rides the OperationResult modal", async () => {
   const view = mountEngine(order);
   order.fire("wipe");
   sendOrder(view, order);
-  const verdict = await screen.findByText(/не удался/i);
+  const verdict = await screen.findByText(/Не удался/);
   expect(verdict.closest('[role="dialog"]')).not.toBeNull();
 });
 
@@ -119,7 +119,7 @@ test("#520 partial is named partial, no recovery is promised", async () => {
   const view = mountEngine(order);
   order.fire("recycle");
   sendOrder(view, order);
-  await waitFor(() => expect(screen.getByText(/частично/i)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText(/Частично/)).toBeInTheDocument());
   expect(screen.queryByText(/восстанов/i)).toBeNull();
 });
 
@@ -149,6 +149,6 @@ test("#520 unknown is named unknown, never failed", async () => {
   const view = mountEngine(order);
   order.fire("wipe");
   sendOrder(view, order);
-  await waitFor(() => expect(screen.getByText(/неизвестен/i)).toBeInTheDocument());
-  expect(screen.queryByText(/не удался/i)).toBeNull();
+  await waitFor(() => expect(screen.getByText(/Исход неизвестен/)).toBeInTheDocument());
+  expect(screen.queryByText(/Не удался/)).toBeNull();
 });
