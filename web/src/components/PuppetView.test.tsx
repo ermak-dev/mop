@@ -248,7 +248,7 @@ test("#512 the row offers the destructive actions, a non-admin never sees them",
   // #512/#516/#520: три разрушительных действия -- пунктами визарда
   // правки цели, каждое -- единый экран последствий с одним
   // подтверждением
-  for (const label of ["recycle", "delete", "wipe"]) {
+  for (const label of ["Пересоздать", "Удалить", "Сбросить"]) {
     expect(within(win).getByRole("button", { name: label })).toBeInTheDocument();
   }
   // не-админ всей колонки действий не видит -- окна и разрушительных
@@ -257,9 +257,9 @@ test("#512 the row offers the destructive actions, a non-admin never sees them",
   cleanup();
   renderUi(<PoolTable projects={snapshot.projects} session={{ login: "user", role: "user" }} />);
   expect(screen.queryByRole("button", { name: "Правка" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "recycle" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "delete" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "wipe" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Пересоздать" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Удалить" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Сбросить" })).toBeNull();
 });
 
 test("#487 opening the screen scrolls its viewport to the end", async () => {
@@ -284,7 +284,7 @@ test("#516 the edit window lists every operation as an item", async () => {
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
   expect(win.textContent).toContain(row.name);
-  for (const label of ["Обновление", "Модель", "Рестарт", "recycle", "delete", "wipe"]) {
+  for (const label of ["Обновление", "Модель", "Рестарт", "Пересоздать", "Удалить", "Сбросить"]) {
     expect(within(win).getByRole("button", { name: label })).toBeInTheDocument();
   }
 });
@@ -320,7 +320,7 @@ test("#516 a destructive item rides its two-step flow from the window", async ()
   fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
-  fireEvent.click(within(win).getByRole("button", { name: "recycle" }));
+  fireEvent.click(within(win).getByRole("button", { name: "Пересоздать" }));
   // окно живо (#520): единый экран последствий с фактами цели
   expect(screen.getByTestId("control-window")).toBeInTheDocument();
   expect(await screen.findByText(/несохранённая работа погибнет/)).toBeInTheDocument();
@@ -344,7 +344,7 @@ test("#516 a destructive verdict rides the OperationResult modal", async () => {
   fireEvent.click(within(screen.getByRole("group", { name: `действия ${row.name}` }))
     .getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
-  fireEvent.click(within(win).getByRole("button", { name: "recycle" }));
+  fireEvent.click(within(win).getByRole("button", { name: "Пересоздать" }));
   expect(await screen.findByText(/несохранённая работа погибнет/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /^Подтвердить$/ }));
   const verdict = await screen.findByText(/Не удался/);

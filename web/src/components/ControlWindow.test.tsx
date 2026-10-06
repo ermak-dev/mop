@@ -45,7 +45,7 @@ test("#520 the choice screen lists six actions, update is named Обновлен
   vi.stubGlobal("fetch", vi.fn());
   const { onOrder } = mount();
   const win = screen.getByTestId("control-window");
-  for (const label of ["Обновление", "Модель", "Рестарт", "recycle", "delete", "wipe"]) {
+  for (const label of ["Обновление", "Модель", "Рестарт", "Пересоздать", "Удалить", "Сбросить"]) {
     expect(within(win).getByRole("button", { name: label })).toBeInTheDocument();
   }
   // вложения «правка -> правка» нет: дубль имени окна умер
@@ -169,7 +169,7 @@ test("#520 model rides the catalog, the current model is locked, Выполни�
 test("#520 destructive rides ONE consequences screen with a single button", () => {
   vi.stubGlobal("fetch", vi.fn());
   const { onOrder } = mount();
-  fireEvent.click(screen.getByRole("button", { name: "recycle" }));
+  fireEvent.click(screen.getByRole("button", { name: "Пересоздать" }));
   const win = screen.getByTestId("control-window");
   expect(win.textContent).toMatch(/несохранённая работа погибнет/);
   expect(win.textContent).toMatch(/сила \(force\) не применяется/);
@@ -193,7 +193,7 @@ test("#520 back walks from confirm to params to choice", () => {
   expect(screen.getByRole("radio", { name: /свежий клон/i })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /^Назад$/ }));
   // возврат к выбору действия: все шесть пунктов
-  for (const label of ["Обновление", "Модель", "Рестарт", "recycle", "delete", "wipe"]) {
+  for (const label of ["Обновление", "Модель", "Рестарт", "Пересоздать", "Удалить", "Сбросить"]) {
     expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
   }
 });
@@ -201,10 +201,10 @@ test("#520 back walks from confirm to params to choice", () => {
 test("#520 destructive back returns straight to the choice screen", () => {
   vi.stubGlobal("fetch", vi.fn());
   mount();
-  fireEvent.click(screen.getByRole("button", { name: "wipe" }));
+  fireEvent.click(screen.getByRole("button", { name: "Сбросить" }));
   expect(screen.getByTestId("control-window").textContent).toMatch(/Тело пересоздаётся/);
   fireEvent.click(screen.getByRole("button", { name: /^Назад$/ }));
-  expect(screen.getByRole("button", { name: "recycle" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Пересоздать" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /^Подтвердить$/ })).toBeNull();
 });
 
@@ -214,7 +214,7 @@ test("#520 destructive back returns straight to the choice screen", () => {
 test("#520 a target change under an open wizard resets to the choice screen", () => {
   vi.stubGlobal("fetch", vi.fn());
   const { view, onOrder } = mount();
-  fireEvent.click(screen.getByRole("button", { name: "wipe" }));
+  fireEvent.click(screen.getByRole("button", { name: "Сбросить" }));
   expect(screen.getByTestId("control-window").textContent).toMatch(/Тело пересоздаётся/);
   view.rerender(<MantineProvider>
     <ControlWindow opened row={{ ...ROW, name: "pu-mop-2" }} session={ADMIN}
