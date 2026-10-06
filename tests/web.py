@@ -1848,6 +1848,39 @@ def check_gateway_417(c):
             out.startswith(b"<!doctype html>stock panel")
             and web.SENTINEL.encode() not in out, out[:80])
 
+    # ── #526: шим без iframe, запись ключа и переход тем же документом.
+    # HYPOTHESIS: обёртка-iframe давала двойную прокрутку (полосы обёртки
+    # + полосы панели). Ключ уже записывается до кода панели, и шим с
+    # raw-панелью на одном origin -- фрейм не нужен: достаточно
+    # location.replace на raw-панель, не трогая sentinel-модель #417.
+    # SOLUTION: шим записывает managementKey/isLoggedIn и тут же делает
+    # location.replace('/llm/raw/management.html'); iframe и CSS-обёртка
+    # из страницы уходят, admin-гейт raw-маршрута не меняется.
+    # STATUS: FIXED — see #526
+    up526 = _Upstream417(body=b"<!doctype html>stock panel")
+    sent, out = _gateway417(webcli, store, provider, up526,
+                            path="/llm/management.html",
+                            headers={"Cookie": f"mop_session={admin}"})
+    c.check("#526 the shim writes the key and jumps to the raw panel",
+            b"localStorage.setItem('managementKey'" in out
+            and b"location.replace('/llm/raw/management.html')" in out,
+            out[:400])
+    c.check("#526 the shim wraps the panel in no iframe",
+            b"<iframe" not in out, out[:400])
+    c.check("#526 the shim keeps the login bootstrap",
+            b"localStorage.setItem('isLoggedIn', 'true')" in out, out[:400])
+    # Raw-гейт прежний: admin по-прежнему получает сток-панель, не-admin --
+    # отказ.
+    sent, out = _gateway417(webcli, store, provider, up526,
+                            path="/llm/raw/management.html",
+                            headers={"Cookie": f"mop_session={admin}"})
+    c.check("#526 the raw gate still serves the stock panel to the admin",
+            out.startswith(b"<!doctype html>stock panel"), out[:60])
+    sent, out = _gateway417(webcli, store, provider, up526,
+                            path="/llm/raw/management.html")
+    c.check("#526 the raw gate still refuses a stranger",
+            sent[0][1] == 401, sent[:1])
+
     # Редирект: относительный на ту же панель -- следуем; абсолютный -- нет.
     up = _Upstream417(redirect=b"/management.html")
     sent, out = _gateway417(webcli, store, provider, up,
