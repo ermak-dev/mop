@@ -214,6 +214,32 @@ def check_group(c):
         c.expect(f"route({argv})", route(argv), want_route)
 
 
+def check_pipeline_yaml(c):
+    """#525: одна джоба тестов (3.12), деплой без py3.13 в needs.
+
+    До #525 тесты ходили на 3.12 (машина оператора) и 3.13 (сервер и узлы,
+    Debian 13). 3.13 избыточна: оба образа гоняют один и тот же tests/
+    поверх одного deps.PIP, и код уже годы пишется под нижнюю границу --
+    вторая джоба удваивает время пайплайна, не ловя ничего своего. Остаток
+    в коммите.
+    """
+    import yaml
+
+    path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.realpath(__file__))), ".gitlab-ci.yml")
+    try:
+        ci = yaml.safe_load(open(path, encoding="utf-8")) or {}
+    except FileNotFoundError:
+        c.fail("#525 .gitlab-ci.yml", "not found")
+        return
+    c.check("#525 the py3.13 test job is gone",
+            "test:py3.13" not in ci, sorted(k for k in ci if "3.13" in k))
+    c.check("#525 the py3.12 test job stays",
+            "test:py3.12" in ci and "extends" in (ci.get("test:py3.12") or {}), ci.get("test:py3.12"))
+    needs = (ci.get("deploy:mop") or {}).get("needs")
+    c.expect("#525 deploy needs the survivors only", needs, ["test:py3.12", "web:dist"])
+
+
 def main():
     c = Checks()
     check_cases(c)
@@ -221,6 +247,10 @@ def main():
         check_group(c)
     except Exception as e:  # noqa: BLE001
         c.fail("mop dev ci group", f"raised {type(e).__name__}: {e}")
+    try:
+        check_pipeline_yaml(c)
+    except Exception as e:  # noqa: BLE001
+        c.fail("#525 pipeline yaml check", f"raised {type(e).__name__}: {e}")
     return c.report("ci")
 
 
