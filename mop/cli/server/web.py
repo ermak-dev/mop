@@ -328,26 +328,25 @@ class Handler(BaseHTTPRequestHandler):
         return (login, role)
 
     def llm_shim(self):
-        """Шим сток-панели (#417): sentinel в localStorage, панель -- в
-        iframe отдельного raw-маршута. Не-admin не получает ни sentinel,
-        ни страницы."""
+        """Шим сток-панели (#417): sentinel в localStorage, переход на
+        raw-панель тем же документом (#526). Фрейм исторически писал ключ
+        до кода панели, не трогая storage главной страницы, но шим и панель
+        на одном origin -- фрейм давал только двойную прокрутку.
+        Не-admin не получает ни sentinel, ни страницы."""
         who = self._llm_admin()
         if who == "401":
             return self._json(401, {"error": "login required"})
         if who == "403":
             return self._json(403, {"error": "admin only"})
         page = ("<!doctype html><html><head><meta charset=\"utf-8\">"
-                "<title>LLM Proxy</title>"
-                "<style>body{margin:0}iframe{border:0;width:100vw;height:100vh}</style>"
-                "</head><body><script>"
+                "<title>LLM Proxy</title></head><body><script>"
                 "localStorage.removeItem('cli-proxy-auth');"
                 "localStorage.removeItem('apiBase');"
                 "localStorage.removeItem('apiUrl');"
                 "localStorage.setItem('managementKey', " + json.dumps(web.SENTINEL) + ");"
                 "localStorage.setItem('isLoggedIn', 'true');"
-                "</script>"
-                "<iframe src=\"/llm/raw/management.html\"></iframe>"
-                "</body></html>").encode()
+                "location.replace('/llm/raw/management.html');"
+                "</script></body></html>").encode()
         return self._send(200, page, "text/html; charset=utf-8")
 
     def llm_raw(self, path):
