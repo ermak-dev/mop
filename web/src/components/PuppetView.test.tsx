@@ -91,7 +91,7 @@ test.each(["Рестарт", "Правка", "Модель"])("#487 %s result ne
   // #522: финальный экран у всех; выбор режима/модели ведёт на него,
   // «Завершить» шлёт приказ
   if (action === "Правка") {
-    fireEvent.click(screen.getByRole("radio", { name: "продолжить как было" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Продолжить работу" }));
     fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
   } else if (action === "Модель") {
     fireEvent.click(await screen.findByRole("radio", { name: "other-model" }));
@@ -200,7 +200,7 @@ test.each(["Рестарт", "Правка", "Модель"])("#487 %s preserves
   fireEvent.click(within(win).getByRole("button",
     { name: action === "Правка" ? "Обновление" : action }));
   if (action === "Правка") {
-    fireEvent.click(screen.getByRole("radio", { name: "продолжить как было" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Продолжить работу" }));
     fireEvent.click(screen.getByRole("button", { name: /^Продолжить$/ }));
   } else if (action === "Модель") {
     fireEvent.click(await screen.findByRole("radio", { name: "other-model" }));
@@ -237,7 +237,7 @@ test.each(["Рестарт", "Правка", "Модель"])("#487 %s preserves
         .filter((c) => c[1]?.method === "POST")).toHaveLength(2));
     } else {
       fireEvent.click(screen.getByRole("button", { name: "Обновление" }));
-      expect(await screen.findByRole("radio", { name: "продолжить как было" }))
+      expect(await screen.findByRole("radio", { name: "Продолжить работу" }))
         .toBeInTheDocument();
     }
   }
@@ -366,7 +366,7 @@ test("#516 the restart item posts from its final screen", async () => {
   const win = await screen.findByTestId("control-window");
   fireEvent.click(within(win).getByRole("button", { name: "Рестарт" }));
   // финальный экран рестарта: последствия названы до POST
-  expect(win.textContent).toMatch(/Клон не трогается: несохранённая работа живёт/);
+  expect(win.textContent).toMatch(/Рабочая копия не трогается: несохранённая работа живёт/);
   expect(fetchMock).not.toHaveBeenCalled();
   fireEvent.click(within(win).getByRole("button", { name: /^Завершить$/ }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops",

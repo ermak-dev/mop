@@ -1,15 +1,18 @@
-// Окно управления целью (#516 -> #522): ЕДИНСТВЕННЫЙ диалог операций
-// цели -- любые вердикты и превью живут его экранами, вторых мод нет.
-// Первый экран -- все шесть действий (обновление, модель, рестарт,
-// Пересоздать/Удалить/Сбросить); при выборе «Обновление» под ним
-// inline раскрывается радио трёх режимов #470 (+поле origin у
-// пересадки) -- тот же шаг Степпера, шаг выбора режима ушёл.
+// Окно управления целью (#516 -> #522 -> #527): ЕДИНСТВЕННЫЙ диалог
+// операций цели -- любые вердикты и превью живут его экранами, вторых
+// мод нет. Первый экран -- все шесть действий (обновление, модель,
+// рестарт, Пересоздать/Удалить/Сбросить), каркас #520/#522 не тронут
+// #527. #527: «Обновление» ведёт в собственный ТРЁХШАГОВЫЙ поток --
+// выбор режима («Что вы хотите сделать с папетом?», радио с
+// описаниями-последствиями) -> параметры (репозиторий у переключения;
+// «продолжить работу» шаг пропускает) -> финал; радио ушло с первого
+// экрана, смешения радио с кнопками чужих операций больше нет.
 // Единое правило подтверждения: КАЖДАЯ операция заканчивается
-// финальным экраном «что произойдёт» (последствия + факты точной
-// цели), и этот экран сам является подтверждением -- кнопка
-// «Завершить» = согласие. Immediate-POST рестарта и пропуск
-// подтверждения у обратимых ушли. Модель -- три шага (каталог #
-// 468), остальные -- выбор -> финал.
+// финальным экраном «что произойдёт» («Проверьте параметры
+// операции»: последствия + факты точной цели), и этот экран сам
+// является подтверждением -- кнопка «Завершить» = согласие.
+// Immediate-POST рестарта и пропуск подтверждения у обратимых ушли.
+// Модель -- три шага (каталог #468), остальные -- выбор -> финал.
 // После «Завершить» визард не закрывается, а показывает экран хода:
 // Loader+слово статуса в живом, терминальный вердикт с причиной и
 // «(первый ответ потерян)»; футер -- «Новая команда» (по терминалу)
@@ -21,10 +24,16 @@
 // Первый экран однотонный: опасность говорит текстом финального
 // экрана, не цветом; дизейбл рестарта с причиной -- #508. Гард #473:
 // смена цели после выбора сбрасывает к выбору. «Назад» ничего не
-// очищает. Контракт окна: Modal centered, Stepper, Stack/Group
-// gap=md, футер Назад default / Продолжить primary / Завершить
-// primary, дизейбл при невалидном, без кастомных примитивов и
-// хардкода цветов.
+// очищает. #527: словарь замен терминов (репозиторий, рабочая копия,
+// контекст диалога с Claude, задача), «сила (force) не применяется»
+// ушла, «частичный исход…» упрощена; title «Правка папета», size lg,
+// футер шагов [Отмена/Назад] [Продолжить/Завершить]. Фиксированная
+// высота шага (#527): контейнер шага держит структурный minHeight по
+// максимуму содержания шагов потока -- смена режима не прыгает
+// высотой, динамических полей на шаге выбора режима нет.
+// Контракт окна: Modal centered, Stepper, Stack/Group gap=md, футер
+// Назад default / Продолжить primary / Завершить primary, дизейбл
+// при невалидном, без кастомных примитивов и хардкода цветов.
 import { useEffect, useRef, useState } from "react";
 import { Button, Code, Group, Loader, Modal, Radio, Stack, Stepper, Text, TextInput, Tooltip } from "@mantine/core";
 import type { Puppet } from "../types";
@@ -121,9 +130,13 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
    * иначе pick того же пункта навсегда diverted бы на старый терминал. */
   onForget?: () => void;
 }) {
-  // Фаза визарда (#522): 0 -- выбор действия (радио режимов -- inline
-  // на нём), 1 -- параметры (только модель), 2 -- финальный экран
-  // «что произойдёт», 3 -- экран хода после «Завершить».
+  // Фаза визарда (#522 -> #527): шаги -- номера ЭКРАНОВ, у потоков их
+  // разное число. Выбор действия всегда 0. Обновление (#527) -- свой
+  // трёхшаговый поток: 1 -- «Что вы хотите сделать с папетом?» (радио
+  // режимов с описаниями), 2 -- параметры (репозиторий у переключения;
+  // «продолжить работу» шаг пропускает), 3 -- финальный экран «что
+  // произойдёт», 4 -- экран хода после «Завершить». Модель -- 1
+  // каталог, 3 финал; рестарт и разрушительные -- сразу 3 финал.
   // Открытие сразу на шаге действия (#520, «новая команда»): визард
   // смонтирован всегда и возвращает null закрытым, инициализатор стейта
   // срабатывает один раз -- смену initialEntry ловит prev-ref (паттерн
@@ -141,7 +154,10 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
   if (prevEntry.current !== initialEntry) {
     prevEntry.current = initialEntry;
     if (initialEntry) {
-      setStep(initialEntry === "model" ? 1 : 0);
+      // «Новая команда» в вердикте обновления возвращает к выбору
+      // режима -- свой шаг каждого потока (#527): обновление и модель
+      // начинают с шага 1, прочие -- с финала
+      setStep(initialEntry === "update" || initialEntry === "model" ? 1 : 3);
       setEntry(initialEntry);
       flowFor.current = row.name;
     } else { setStep(0); setEntry(null); }
@@ -164,7 +180,7 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
   const prevOpen = useRef(!opened);
   if (opened && !prevOpen.current && heldEngine && !initialEntry) {
     setProgressOf(heldEngine);
-    setStep(3);
+    setStep(4);
     flowFor.current = row.name;
   }
   prevOpen.current = opened;
@@ -194,7 +210,7 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
     onOrder({ act, params: p });
     if (act === "model") { reset(); onClose(); return; }
     setProgressOf(ENGINE_OF[act]);
-    setStep(3);
+    setStep(4);
   };
   // Полный сброс визарда: к первому экрану, выбор чист; показанный вердикт
   // движка забывается -- иначе pick того же пункта diverted бы обратно
@@ -219,17 +235,18 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
   };
   const pick = (e: ControlEntry) => {
     const held = heldState(e);
-    if (held) { setEntry(e); setProgressOf(ENGINE_OF[e]); setStep(3); return; }
+    if (held) { setEntry(e); setProgressOf(ENGINE_OF[e]); setStep(4); return; }
     flowFor.current = row.name;
     setEntry(e);
-    setStep(e === "model" ? 1 : (e === "update" ? 0 : 2));
+    // #527: обновление открывает СВОЙ шаг выбора режима (1), модель --
+    // каталог (1), рестарт и разрушительные -- сразу финал (3)
+    setStep(e === "update" || e === "model" ? 1 : 3);
   };  // Последствия выбранного хода -- на финальный экран
   const lines = isRuin(entry) ? PREVIEW[entry].lines
     : entry === "restart" ? RESTART_EFFECTS
     : entry === "update" && mode ? MODES[mode].lines : [];
   // Экран хода (#522): стейт поднят движком по ключу progressOf
-  const live = progressOf ? engineState[progressOf] : null;
-  const opLive = !live
+  const live = progressOf ? engineState[progressOf] : null;  const opLive = !live
     || (live.status !== "idle" && !TERMINAL.has(live.status));
   const opDone = !!live && TERMINAL.has(live.status);
   const wordOf = (st: EngineState | null) => !st ? "Отправляется"
@@ -237,7 +254,7 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
 
   // ── Экран хода: Loader/вердикт, футер по терминалу ─────────────────
   // live==null -- приказ ушёл, движок ещё не отрапортовал: живой ход
-  if (step === 3 && progressOf) {
+  if (step === 4 && progressOf) {
     return (
       <Modal opened onClose={onClose} centered size="md" radius="md" title="правка папета"
              data-testid="control-window"
@@ -262,42 +279,35 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
     );
   }
 
-  // Шаги Степпера перерисовываются по выбранному действию (#522):
-  // модель -- выбор/параметры/финал, остальные -- выбор/финал.
+  // Шаги Степпера перерисовываются по выбранному действию (#522 ->
+  // #527): обновление -- выбор/режим/параметры/финал, модель --
+  // выбор/параметры/финал, остальные -- выбор/финал. Фиксированная
+  // высота (#527): контейнер шага держит minHeight по максимуму
+  // содержания шагов потока -- смена режима/шага не прыгает высотой.
+  // Резерв считаем структурно (строка ~21px, радио ~36px, поле ~66px),
+  // jsdom layout не считает -- константа потока, не измерение.
   const modelFlow = entry === "model";
+  const updateFlow = entry === "update";
+  const perLine = 21, perRadio = 36, perField = 66;
+  const tallest = updateFlow
+    ? Math.max(3 * perRadio + 2 * perLine + perField + 80,
+               3 * perRadio + 5 * perLine + 80)
+    : 4 * perRadio + 3 * perLine + 80;
   return (
-    <Modal opened onClose={onClose} centered size="md" radius="md" title="правка папета"
+    <Modal opened onClose={onClose} centered size="lg" radius="md" title="Правка папета"
            data-testid="control-window"
            closeButtonProps={{ "aria-label": LABELS.close }}>
-      <Stepper active={modelFlow ? Math.min(step, 2) : (step >= 2 ? 1 : 0)}
+      <Stepper active={updateFlow ? Math.min(step, 3)
+                 : modelFlow ? Math.min(step, 2) : (step >= 3 ? 1 : 0)}
                onStepClick={setStep} allowNextStepsSelect={false}>
         <Stepper.Step label="действие" description={row.name}>
-          <Stack gap="md">
+          <Stack gap="md" data-testid="wizard-body" style={{ minHeight: tallest }}>
             <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
             <Stack gap="xs">
+              {/* #527: обновление ведёт на СВОЙ шаг режима -- радио на
+                  первом экране больше не живёт, смешения радио с
+                  кнопками чужих операций нет */}
               <Button variant="light" onClick={() => pick("update")}>{LABELS.update}</Button>
-              {/* радио режимов #470 -- inline под пунктом, тот же шаг
-                  Степпера; поле origin -- у пересадки */}
-              {entry === "update" && (
-                <>
-                  <Radio.Group value={mode} onChange={(v) => setMode(v as keyof typeof MODES)}
-                                data-testid="update-modes">
-                    <Stack gap={8} mt="xs">
-                      {(Object.keys(MODES) as (keyof typeof MODES)[]).map((k) => (
-                        <Radio key={k} value={k} label={MODES[k].label} />
-                      ))}
-                    </Stack>
-                  </Radio.Group>
-                  {mode && MODES[mode].lines.map((l) => (
-                    <Text key={l} size="sm" c="dimmed">{l}</Text>
-                  ))}
-                  {mode === "remove" && (
-                    <TextInput label="новый origin" value={origin}
-                               onChange={(e) => setOrigin(e.target.value)}
-                               data-testid="update-origin" />
-                  )}
-                </>
-              )}
               <Button variant="light" onClick={() => pick("model")}>{LABELS.model}</Button>
               <Tooltip label={blocked ?? ""} disabled={!blocked}>
                 <Button variant="light" disabled={!!blocked}
@@ -312,15 +322,66 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
                 </Button>
               ))}
             </Stack>
-            <Group justify="flex-end" gap="sm">
-              {/* первый экран вёл бы «Назад» в никуда -- футер только у
-                  шагов с продолжением */}
-              {entry === "update" && (
-                <Button disabled={!ready} onClick={() => setStep(2)}>{LABELS.next}</Button>
-              )}
-            </Group>
+            {/* первый экран не ведёт дальше -- ни «Назад», ни
+                «Продолжить»: выбор пункта и есть переход */}
           </Stack>
         </Stepper.Step>
+        {updateFlow && (
+          <Stepper.Step label="режим" description={ENTRY_WORD.update}>
+            {/* Шаг выбора режима (#527): заголовок тикета, радио с
+                описаниями-последствиями под каждым, футер
+                [Отмена][Продолжить]. Динамических полей здесь нет --
+                репозиторий живёт на шаге параметров */}
+            <Stack gap="md" data-testid="wizard-body" style={{ minHeight: tallest }}>
+              <Text size="sm" fw={600}>Что вы хотите сделать с папетом?</Text>
+              <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
+              <Radio.Group value={mode} onChange={(v) => setMode(v as keyof typeof MODES)}
+                           data-testid="update-modes">
+                <Stack gap={8} mt="xs">
+                  {(Object.keys(MODES) as (keyof typeof MODES)[]).map((k) => (
+                    <div key={k}>
+                      <Radio value={k} label={MODES[k].label} />
+                      {/* короткая подпись-описание -- у каждого радио
+                          статично (#527), полные последствия -- на шаге
+                          параметров, не на выборе */}
+                      <Text size="sm" c="dimmed" pl={26}>{MODES[k].note}</Text>
+                    </div>
+                  ))}
+                </Stack>
+              </Radio.Group>
+              <Group justify="flex-end" gap="sm">
+                <Button variant="default" onClick={onClose}>{LABELS.cancel}</Button>
+                {/* «продолжить работу» шаг параметров пропускает (#527):
+                    у keep параметров нет */}
+                <Button disabled={!mode}
+                        onClick={() => setStep(mode === "remove" ? 2 : 3)}>
+                  {LABELS.next}
+                </Button>
+              </Group>
+            </Stack>
+          </Stepper.Step>
+        )}
+        {updateFlow && (
+          <Stepper.Step label="параметры" description={ENTRY_WORD.update}>
+            {/* Шаг параметров (#527): у переключения на другой проект --
+                новый репозиторий; «продолжить работу» сюда не попадает */}
+            <Stack gap="md" data-testid="wizard-body" style={{ minHeight: tallest }}>
+              <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
+              <Text size="sm" c="dimmed">{MODES[mode ?? "remove"].label}</Text>
+              {MODES[mode ?? "remove"].lines.map((l) => (
+                <Text key={l} size="sm" c="dimmed">{l}</Text>
+              ))}
+              <TextInput label="новый репозиторий" value={origin}
+                         onChange={(e) => setOrigin(e.target.value)}
+                         data-testid="update-origin" />
+              <Group justify="flex-end" gap="sm">
+                <Button variant="default" onClick={() => setStep(1)}>{LABELS.back}</Button>
+                <Button disabled={origin.trim() === ""}
+                        onClick={() => setStep(3)}>{LABELS.next}</Button>
+              </Group>
+            </Stack>
+          </Stepper.Step>
+        )}
         {modelFlow && (
           <Stepper.Step label="параметры" description={entry ? ENTRY_WORD[entry] : ""}>
             <Stack gap="md" data-testid="model-choices">
@@ -345,13 +406,21 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
               ) : null}
               <Group justify="flex-end" gap="sm">
                 <Button variant="default" onClick={() => setStep(0)}>{LABELS.back}</Button>
-                <Button disabled={!ready} onClick={() => setStep(2)}>{LABELS.next}</Button>
+                <Button disabled={!ready} onClick={() => setStep(3)}>{LABELS.next}</Button>
               </Group>
             </Stack>
           </Stepper.Step>
         )}
         <Stepper.Step label="завершение" description={entry ? ENTRY_WORD[entry] : ""}>
-          <Stack gap="md">
+          {/* Финальный экран = подтверждение (#522 -> #527): заголовок
+              «Проверьте параметры операции», факты точной цели --
+              цель/узел/состояние-цитата, слово операции, последствия;
+              предупреждение о необратимости -- только у необратимых.
+              «сила (force) не применяется» ушла (#527) -- у всех
+              действий один отказ от force, «частичный исход…» упрощена
+              до честного слова про исход */}
+          <Stack gap="md" data-testid="wizard-body" style={{ minHeight: tallest }}>
+            <Text size="sm" fw={600}>Проверьте параметры операции</Text>
             {/* факты точной цели -- ровно то, что на экране (#465) */}
             <Text size="sm">действие: <Text span fw={600}>{entry ? ENTRY_WORD[entry] : ""}</Text></Text>
             <Text size="sm">цель: <Text span fw={600}>{row.name}</Text></Text>
@@ -359,20 +428,25 @@ export function ControlWindow({ opened, onClose, onOrder, row, session,
             <Text size="sm">состояние: <Code>{row.state}</Code></Text>
             {lines.map((l) => <Text key={l} size="sm" c="dimmed">{l}</Text>)}
             {entry === "update" && mode === "remove" && (
-              <Text size="sm">новый origin: <Code>{origin.trim()}</Code></Text>
+              <Text size="sm">новый репозиторий: <Code>{origin.trim()}</Code></Text>
             )}
             {entry === "model" && model && (
               <Text size="sm">модель: <Code>{model}</Code></Text>
             )}
-            {isRuin(entry) && (
-              <Text size="sm" c="dimmed">сила (force) не применяется</Text>
+            {/* необратимость названа словом только там, где она есть:
+                keep/replace-путь «продолжить работу» обратим, ruin --
+                нет; исход без наблюдения -- честное слово, не
+                канцелярит «частичный исход» */}
+            {(isRuin(entry) || (entry === "update" && mode !== "keep")) && (
+              <Text size="sm" c="red">Действие необратимо.</Text>
             )}
-            <Text size="sm" c="dimmed">
-              частичный исход показывается как есть; восстановления не обещается
-            </Text>
+            <Text size="sm" c="dimmed">Исход показывается как есть.</Text>
             <Group justify="flex-end" gap="sm">
               <Button variant="default"
-                      onClick={() => setStep(modelFlow ? 1 : 0)}>{LABELS.back}</Button>
+                      onClick={() => setStep(updateFlow
+                        ? (mode === "remove" ? 2 : 1) : modelFlow ? 1 : 0)}>
+                {LABELS.back}
+              </Button>
               {/* «Завершить» = согласие (#522): финальный экран сам
                   подтверждение */}
               <Button onClick={() => { if (entry) finish(entry, params); }}>
