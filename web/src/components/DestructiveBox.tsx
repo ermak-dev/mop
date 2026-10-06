@@ -1,17 +1,16 @@
-// Разрушительные действия (#473 -> #520): recycle/delete/wipe -- три
-// отдельных действия, никаких обобщённых «force». #520: единый экран
-// последствий (что гибнет + факты точной цели + одна «подтвердить»)
-// собирает визард ControlWindow; движок шлёт POST по приказ-токену
-// {at, act, params} и показывает вердикт OperationResult'ом (#465,
-// единый механизм с рестартом/обновлением). Stale-защита движковая:
-// смена источника (роль, цель) стирает операцию в тот же рендер
-// (useAdminOp), молча ретраить по имени нельзя. Частичный исход --
-// «частично», recovery не обещается. Никакого force: params пусты,
+// Разрушительные действия (#473 -> #522): recycle/delete/wipe -- три
+// отдельных действия, никаких обобщённых «force». Финальный экран
+// последствий (что гибнет + факты точной цели + «Завершить» =
+// согласие) собирает визард ControlWindow; движок без кожи и без
+// собственной моды (#522): шлёт POST по приказ-токену
+// {at, act, params} и поднимает стейт операции наверх (onState
+// {status, error, lost}) -- экран хода рисует визард. Stale-защита
+// движковая: смена источника (роль, цель) стирает операцию в тот же
+// рендер (useAdminOp), молча ретраить по имени нельзя. Частичный исход
+// -- «частично», recovery не обещается. Никакого force: params пусты,
 // схема -- #461.
-import { useEffect, useState } from "react";
-import { OperationResult } from "./OperationResult";
-import { useOrder, useSignal, type Signal } from "./ControlWindow";
-import { opWord } from "./RestartBox";
+import { useEffect } from "react";
+import { useOrder, useSignal, type Signal, type EngineState } from "./ControlWindow";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
 import { useAdminOp } from "../useAdminOp";
@@ -35,39 +34,28 @@ export const PREVIEW: Record<string, { title: string; lines: string[] }> = {
   ]},
 };
 
-export function DestructiveBox({ session, row, order = null, reveal = null, onState }: {
+export function DestructiveBox({ session, row, order = null, forget = null, onState }: {
   session: Session;
   /** Строка ростера: цель действия, её факты подтверждал визард. */
   row: Puppet;
-  /** Приказ-токен визарда (#520): срабатывание по изменению. */
+  /** Приказ-токен визарда (#522): «Завершить» с финального экрана. */
   order?: Signal;
-  /** Приказ «показать сохранённый вердикт» (#487): от визарда. */
-  reveal?: Signal;
-  /** Состояние хода вверх (#487): как у обновления -- визард при
-   * повторном входе показывает вердикт, не молчит. */
-  onState?: (status: string) => void;
+  /** Забыть показанный вердикт (#522): «новая команда» из футера хода. */
+  forget?: Signal;
+  /** Стейт хода вверх (#522): визард рисует экран хода. */
+  onState?: (op: EngineState) => void;
 }) {
-  const [result, setResult] = useState(false);
-  const [title, setTitle] = useState("операция");
-  const { op, submit } = useAdminOp(session, session.role === "admin" ? row.name : null);
-  useEffect(() => { onState?.(op.status); }, [op.status, onState]);
-  useSignal(reveal, () => setResult(true));
-  // Вход (#520): приказ визарда; живой или завершённый ход показывает
-  // результат, второго POST нет (движковый дедуп), повтор -- новый
-  // приказ через визард. Замыкание свежего рендера держит сам useOrder
-  // (latest-ref): свой useRef здесь ловил бы первый рендер.
-  const enter = (act: string, params: Record<string, unknown>) => {
-    setTitle(act);
-    setResult(true);
-    void submit(act, params);
-  };
-  useOrder(order, "recycle", (p) => enter("recycle", p));
-  useOrder(order, "delete", (p) => enter("delete", p));
-  useOrder(order, "wipe", (p) => enter("wipe", p));
-  if (session.role !== "admin") return null;
-  return (
-    <OperationResult opened={result} onClose={() => setResult(false)}
-      onAgain={() => { setResult(false); }} title={title}
-      target={row.name} op={op} word={opWord(op.status)} testId="destructive-verdict" />
-  );
+  const { op, submit, forget: settle } = useAdminOp(session, session.role === "admin" ? row.name : null);
+  useEffect(() => { onState?.(op); }, [op, onState]);
+  // Вход (#522): приказ -- всегда новая команда; живой или завершённый
+  // ход визард показывает экраном хода по поднятому стейту, второго
+  // POST нет (движковый дедуп). Замыкание свежего рендера держит сам
+  // useOrder (latest-ref): свой useRef здесь ловил бы первый рендер.
+  useOrder(order, "recycle", (p) => { void submit("recycle", p); });
+  useOrder(order, "delete", (p) => { void submit("delete", p); });
+  useOrder(order, "wipe", (p) => { void submit("wipe", p); });
+  // «Новая команда» (#522): показанный вердикт стирается, иначе pick того
+  // же пункта навсегда diverted бы на старый терминал.
+  useSignal(forget, settle);
+  return null;
 }
