@@ -1256,6 +1256,34 @@ def check_skeleton_image_filter_479(c):
             (rule[0].get("models"), params))
 
 
+# ── #524: обновление прокси приезжает деплоем, а не руками ─────────────
+# Бинарь пиннится настройкой MOP_LLM_PROXY_VERSION; смена версии обязана
+# поднять прокси без ручных шагов. HYPOTHESIS: если copy без notify или
+# распаковка без creates, прогон либо не перезапускает юнит, либо
+# перезапускает его каждый раз -- и то и другое молча.
+def check_llmproxy_upgrade_524(c):
+    tasks = [t for f, t in site_tasks() if f.endswith("roles/llmproxy/tasks/main.yml")]
+    by = {t.get("name"): t for t in tasks}
+    binary = by.get("The binary") or {}
+    c.check("#524 the copied binary orders a restart",
+            binary.get("notify") == "restart mop-llm-proxy", binary)
+    copy = binary.get("ansible.builtin.copy") or {}
+    c.check("#524 the binary lands by content, so only a real upgrade restarts",
+            bool(copy) and copy.get("remote_src") is True, binary)
+    extract = by.get("Extract the release") or {}
+    command = extract.get("ansible.builtin.command") or {}
+    creates = command.get("argv") or []
+    c.check("#524 the extract is idempotent: versioned creates",
+            command.get("creates") == "/tmp/cli-proxy-api-"
+            "{{ MOP_LLM_PROXY_VERSION }}/cli-proxy-api"
+            and any("cli-proxy-api" in a for a in creates), extract)
+    names = [t.get("name") for t in tasks]
+    c.check("#524 the restart lands before the health probe",
+            "Apply the restart now, before the check" in names
+            and names.index("Apply the restart now, before the check")
+            < names.index("The proxy answers on the LLM API"), names)
+
+
 def check_llm_request_size_411(c, can_render):
     # HYPOTHESIS: nginx отвергает большую текстовую историю и её compact
     # до LLM-прокси; Claude маскирует HTTP 413 как лимит media в 32 МБ.
@@ -1549,6 +1577,7 @@ def main():
     c = Checks()
     check_cluster_key_copy_402(c)
     check_skeleton_image_filter_479(c)
+    check_llmproxy_upgrade_524(c)
 
     # ── юниты из общего шаблона ───────────────────────────────────────────
     template = os.path.join(COMMON, "templates", "service.j2")
