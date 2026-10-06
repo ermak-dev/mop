@@ -20,19 +20,22 @@ const projects = emptySnapshot({ projects: [{ name: "mop", counts: {
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-test("#513 the restart click posts at once from the row", async () => {
+test("#513 the restart click posts from the final screen", async () => {
   const fetchMock = vi.fn(async () => ({ ok: true, status: 202,
     json: async () => ({ id: "op-1", status: "accepted" }) }) as Response);
   vi.stubGlobal("fetch", fetchMock);
   renderUi(<PoolTable projects={projects} session={ADMIN} />);
-  // вход #520: строка -> визард правки -> пункт рестарта
+  // вход #522: строка -> визард правки -> финальный экран рестарта ->
+  // «Завершить» = согласие (единое правило подтверждения)
   fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
   fireEvent.click(within(win).getByRole("button", { name: "Рестарт" }));
-  // диалог -- только ход операции, не подтверждение
+  // до согласия POST нет: финальный экран сам и есть подтверждение
+  expect(win.textContent).toMatch(/Разговор теряется/);
+  expect(fetchMock).not.toHaveBeenCalled();
+  fireEvent.click(within(win).getByRole("button", { name: /^Завершить$/ }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
     method: "POST", credentials: "same-origin" })));
-  expect(screen.queryByText(/подтвердите рестарт/i)).toBeNull();
 });
 
 test.each(["target", "role", "login"])("stale restart op after %s change rides nowhere", async (change) => {
@@ -42,13 +45,13 @@ test.each(["target", "role", "login"])("stale restart op after %s change rides n
   fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = await screen.findByTestId("control-window");
   fireEvent.click(within(win).getByRole("button", { name: "Рестарт" }));
+  fireEvent.click(within(win).getByRole("button", { name: /^Завершить$/ }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalled());
   view.rerender(<MantineProvider><PoolTable projects={change === "target" ? [] : projects}
     session={change === "role" ? { login: null, role: null }
       : change === "login" ? { ...ADMIN, login: "other" } : ADMIN} /></MantineProvider>);
-  // смена источника стирает ход: диалог операции закрыт (#513: моды
-  // подтверждения больше нет, stale-проверка смотрит на ход)
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  // смена источника стирает ход: экран хода исчез вместе с окном цели
+  await waitFor(() => expect(screen.queryByTestId("control-window")).toBeNull());
 });
 
 test("the row offers update with explicit fresh modes", () => {
@@ -56,7 +59,8 @@ test("the row offers update with explicit fresh modes", () => {
   renderUi(<PoolTable projects={projects} session={ADMIN} />);
   fireEvent.click(screen.getByRole("button", { name: "Правка" }));
   const win = screen.getByTestId("control-window");
-  // #520: пункт update -- «обновление», шаг параметров визарда
+  // #522: пункт update раскрывает радио трёх режимов прямо на первом
+  // экране, шаг выбора режима ушёл
   fireEvent.click(within(win).getByRole("button", { name: "Обновление" }));
   const dialog = screen.getByRole("dialog");
   for (const m of ["как было", "свежий клон", "другой origin"]) {

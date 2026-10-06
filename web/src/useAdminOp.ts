@@ -111,6 +111,15 @@ export function useAdminOp(session: Session, target: string | null) {
     return ride;
   }, [session.role, target, op.id, op.status]);
 
+  // «Новая команда» (#522): визард просит забыть показанный вердикт --
+  // стейт в idle тем же рендером, поздние кадры старого id глохнут по
+  // seq. Живой ход не забывается: forget зовёт только терминальный футер.
+  const forget = useCallback(() => {
+    seq.current += 1;
+    inflight.current = null;
+    setOp({ status: "idle", id: null, error: null, lost: false });
+  }, []);
+
   // Единственный GET после 202 (#504): ловит мгновенный refused и статусы
   // на момент подачи (waiting/running); дальше терминал ждут кадром.
   // Зависимость -- только id: повторный рендер со сменой промежуточного
@@ -157,7 +166,7 @@ export function useAdminOp(session: Session, target: string | null) {
       : o);
   }), []);
 
-  return { op, submit };
+  return { op, submit, forget };
 }
 
 /** Фраза отказа -- allowlist-ответ сервера, без сырых исключений. */

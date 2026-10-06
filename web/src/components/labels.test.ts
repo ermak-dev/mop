@@ -17,8 +17,11 @@ test("#521 the label dictionary carries the operator's words, capitalized", () =
   // Ядро диспатча: с заглавной, русские, без латиницы Login/Logout
   expect(LABELS).toMatchObject({
     login: "Войти", logout: "Выйти",
-    cancel: "Отмена", back: "Назад", next: "Далее",
-    run: "Выполнить", confirm: "Подтвердить",
+    cancel: "Отмена", back: "Назад",
+    // футер визарда #522: одна кнопка согласия у всех операций --
+    // «Продолжить» ведёт к финалу, «Завершить» его исполняет; «Выполнить»
+    // и «Подтвердить» ушли вместе с режимами подтверждения
+    next: "Продолжить", finish: "Завершить",
     close: "Закрыть", again: "Новая команда",
     // пункты визарда #520: шесть действий с заглавной; разрушительные --
     // русские имена, утверждены оператором в приёмке #521
@@ -34,6 +37,14 @@ test("#521 no latin button word survives in the dictionary", () => {
   // Login/Logout должны быть заменены русскими словами
   expect(Object.values(LABELS)).not.toContain("Login");
   expect(Object.values(LABELS)).not.toContain("Logout");
+});
+
+test("#522 the wizard footer words replace the per-mode buttons", () => {
+  // единое правило подтверждения #522: «Выполнить»/«Подтвердить» ушли,
+  // осталась пара «Продолжить»/«Завершить»
+  expect(Object.values(LABELS)).not.toContain("Выполнить");
+  expect(Object.values(LABELS)).not.toContain("Подтвердить");
+  expect(Object.values(LABELS)).not.toContain("Далее");
 });
 
 // Тексты последствий (#521): литературный русский в стиле оператора --

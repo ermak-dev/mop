@@ -1,17 +1,18 @@
-// Рестарт цели (#465/#513 -> #520): движок без кожи -- визард ControlWindow
-// шлёт приказ-токен {at, act: "restart", params: {}} с первого экрана,
-// клик по пункту шлёт POST сразу (обратим, моды подтверждения нет,
-// #513). Если рестарт невозможен по статусу цели (#508) -- пункт
-// дизейблится с причиной в подписи; признак уже посчитан сервером в
-// строке, отказ после клика был бы вторым ответом на вопрос строки.
-// Слова вердикта -- модель #476: running -- «идёт», unknown --
-// «неизвестно» (НЕ failed: эффекта могли и не быть), автоповтора нет --
-// повтор это новая команда. Никакого force: params пусты, схема -- #461.
-// Результат операции в памяти страницы: перезагрузка начинает заново
-// (#463 запретил storage), это названо в отчёте #465.
-import { useEffect, useState } from "react";
-import { OperationResult } from "./OperationResult";
-import { useOrder, useSignal, type Signal } from "./ControlWindow";
+// Рестарт цели (#465/#513 -> #522): движок без кожи и без собственной
+// моды. Визард ControlWindow шлёт приказ-токен {at, act: "restart",
+// params: {}} с финального экрана (#522: единое правило подтверждения
+// -- финал у всех, immediate-POST ушёл), движок шлёт POST и поднимает
+// стейт операции наверх (onState {status, error, lost}) -- экран хода
+// рисует визард. Если рестарт невозможен по статусу цели (#508) --
+// пункт дизейблится с причиной в подписи; признак уже посчитан
+// сервером в строке, отказ после клика был бы вторым ответом на
+// вопрос строки. Слова вердикта -- модель #476: running -- «идёт»,
+// unknown -- «неизвестно» (НЕ failed: эффекта могли и не быть),
+// автоповтора нет -- повтор это новая команда. Никакого force:
+// params пусты, схема -- #461. Результат операции в памяти страницы:
+// перезагрузка начинает заново (#463 запретил storage).
+import { useEffect } from "react";
+import { useOrder, useSignal, type Signal, type EngineState } from "./ControlWindow";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
 import { useAdminOp } from "../useAdminOp";
@@ -46,33 +47,28 @@ export function restartReason(row: Puppet): string | null {
   return null;
 }
 
-export function RestartBox({ session, row, order = null, reveal = null, onState }: {
+export function RestartBox({ session, row, order = null, forget = null, onState }: {
   session: Session;
   /** Строка ростера: цель рестарта. */
   row: Puppet;
-  /** Приказ-токен визарда (#520): срабатывание по изменению. */
+  /** Приказ-токен визарда (#522): срабатывание по изменению. */
   order?: Signal;
-  /** Приказ «показать сохранённый вердикт» (#487): от визарда. */
-  reveal?: Signal;
-  /** Состояние хода вверх (#487): как у обновления -- визард при
-   * повторном входе показывает вердикт, не молчит. */
-  onState?: (status: string) => void;
+  /** Забыть показанный вердикт (#522): «новая команда» из футера хода. */
+  forget?: Signal;
+  /** Стейт хода вверх (#522): визард рисует экран хода -- статус,
+   * причина и потерянный ответ едут одним объектом. */
+  onState?: (op: EngineState) => void;
 }) {
-  const [result, setResult] = useState(false);
-  const { op, submit } = useAdminOp(session, session.role === "admin" ? row.name : null);
-  useEffect(() => { onState?.(op.status); }, [op.status, onState]);
-  useSignal(reveal, () => setResult(true));
-  // Вход (#520): приказ визарда; повторный вход при живом или терминальном
-  // ходе визард divert-ит на вердикт (engineState, #487), приказ здесь --
-  // новая команда и постится; дедуп живого хода -- движковый (useAdminOp).
-  // Замыкание свежего рендера держит сам useOrder (latest-ref).
-  useOrder(order, "restart", () => {
-    setResult(true); void submit();
-  });
-  if (session.role !== "admin") return null;
-  return (
-    <OperationResult opened={result} onClose={() => setResult(false)}
-      onAgain={() => { setResult(false); void submit(); }} title="рестарт"
-      target={row.name} op={op} word={opWord(op.status)} testId="restart-verdict" />
-  );
+  const { op, submit, forget: settle } = useAdminOp(session, session.role === "admin" ? row.name : null);
+  useEffect(() => { onState?.(op); }, [op, onState]);
+  // Вход (#522): приказ -- всегда новая команда с финального экрана
+  // визарда; повторный вход при живом ходе визард пускает экраном хода
+  // (engineState), сюда ордер не доходит. Дедуп живого хода --
+  // движковый (useAdminOp). Замыкание свежего рендера держит сам
+  // useOrder (latest-ref).
+  useOrder(order, "restart", () => { void submit(); });
+  // «Новая команда» (#522): показанный вердикт стирается, иначе pick того
+  // же пункта навсегда diverted бы на старый терминал.
+  useSignal(forget, settle);
+  return null;
 }

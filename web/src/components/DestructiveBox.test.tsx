@@ -1,16 +1,17 @@
-// Разрушительные действия (#473 -> #520): recycle/delete/wipe -- три
-// отдельных действия, движок без кожи. #520: единый экран последствий
-// собирает визард (ControlWindow), приказ приезжает токеном
-// {at, act, params}: движок шлёт POST и показывает вердикт
-// OperationResult'ом. Stale-защита движковая (#473): смена источника
-// стирает операцию в тот же рендер (useAdminOp). Частичный исход --
+// Разрушительные действия (#473 -> #522): recycle/delete/wipe -- три
+// отдельных действия, движок без кожи и без собственной моды. Визард
+// шлёт приказ-токен с финального экрана, движок шлёт POST и поднимает
+// стейт наверх (onState {status, error, lost}) -- экран хода рисует
+// визард. Stale-защита движковая (#473): смена источника стирает
+// операцию в тот же рендер (useAdminOp). Частичный исход --
 // «частично», recovery не обещается. Никакого force.
 //
 // RESULT: тесты написаны до реализации (RED).
-import { act, cleanup, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, waitFor } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import { DestructiveBox } from "./DestructiveBox";
 import { MantineProvider } from "@mantine/core";
+import { DestructiveBox } from "./DestructiveBox";
 import { renderUi } from "../test-utils";
 import type { Puppet } from "../types";
 import type { Session } from "../useSession";
@@ -26,36 +27,27 @@ const ROW: Puppet = {
 
 const ok202 = (id: string) =>
   ({ ok: true, status: 202, json: async () => ({ id, status: "accepted" }) }) as Response;
-const opJson = (status: string, action = "recycle") =>
+const opJson = (status: string, action = "recycle", error: string | null = null) =>
   ({ ok: true, status: 200, json: async () => ({ id: "op-1", action,
-     target: "pu-mop-1", status }) }) as Response;
+     target: "pu-mop-1", status, error }) }) as Response;
 const postGet = (post: () => Promise<Response>, get: () => Promise<Response>) =>
   vi.fn(async (url: string | URL, init?: { method?: string }) =>
     (init?.method ?? "GET") === "POST" ? post() : get());
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-/** Приказ визарда (#520): токен меняется, движок срабатывает. */
+/** Приказ визарда (#522): «Завершить» с финального экрана. */
 class Order {
   current: { at: number; act: string; params: Record<string, unknown> } | null = null;
-  /** Подтверждение с финального экрана визарда. */
   fire(act: string, params: Record<string, unknown> = {}) {
     this.current = { at: Date.now() + Math.random(), act, params };
   }
 }
 
-/** Движок в коже #520: без кнопок, вход -- приказ-токен. */
-function mountEngine(order: Order, row: Puppet = ROW, session: Session = ADMIN) {
-  return renderUi(<DestructiveBox session={session} row={row} order={order.current} />);
-}
-
-/** Ререндер с новым приказом: как визард шлёт подтверждение. */
-function sendOrder(view: ReturnType<typeof mountEngine>, order: Order,
-                   row: Puppet = ROW) {
-  view.rerender(<MantineProvider>
-    <DestructiveBox session={ADMIN} row={row} order={order.current} />
-  </MantineProvider>);
-}
+/** Движок без кожи #522. */
+const mountEngine = (order: Order, row: Puppet = ROW,
+                     onState = vi.fn()) => renderUi(
+  <DestructiveBox session={ADMIN} row={row} order={order.current} onState={onState} />);
 
 /** Последний POST-вызов fetch как разобранный body. */
 const lastPost = (fetchMock: ReturnType<typeof postGet>) => {
@@ -63,32 +55,42 @@ const lastPost = (fetchMock: ReturnType<typeof postGet>) => {
   return post ? JSON.parse((post[1] as { body: string }).body) : null;
 };
 
-test("#520 no buttons in the engine skin, entry by order only", () => {
+/** Ререндер с новым приказом: как визард шлёт подтверждение. */
+const sendOrder = (view: ReturnType<typeof mountEngine>, order: Order,
+                   row: Puppet = ROW, onState = vi.fn()) => {
+  // ререндер держит ту же форму дерева, что монтировал renderUi: смена
+  // корня перемонтирует движок, и useOrder глотает приказ (mount молчит)
+  view.rerender(<MantineProvider><DestructiveBox session={ADMIN} row={row}
+    order={order.current} onState={onState} /></MantineProvider>);
+};
+
+test("#522 no buttons and no dialog in the engine skin, entry by order only", () => {
   vi.stubGlobal("fetch", vi.fn());
   const order = new Order();
   mountEngine(order);
-  expect(screen.queryByRole("button", { name: /^recycle$/i })).toBeNull();
-  expect(screen.queryByRole("button", { name: /^delete$/i })).toBeNull();
-  expect(screen.queryByRole("button", { name: /^wipe$/i })).toBeNull();
+  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
   // первый рендер молчит: mount-выстрел был бы ложным стартом
   expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
 });
 
-test("#520 the recycle order posts the exact action once", async () => {
+test("#522 the recycle order posts the exact action once, state goes up", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("running")));
   vi.stubGlobal("fetch", fetchMock);
   const order = new Order();
-  const view = mountEngine(order);
+  const onState = vi.fn();
+  const view = mountEngine(order, ROW, onState);
   order.fire("recycle");
-  sendOrder(view, order);
-  await waitFor(() => expect(screen.getByText(/Идёт/)).toBeInTheDocument());
+  sendOrder(view, order, ROW, onState);
+  await waitFor(() => expect(onState).toHaveBeenCalledWith(
+    expect.objectContaining({ status: "accepted" })));
   expect(lastPost(fetchMock)).toEqual({ action: "recycle", target: "pu-mop-1", params: {} });
   expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops", expect.objectContaining({
     method: "POST", credentials: "same-origin" }));
 });
 
-test("#520 delete and wipe orders post their own actions", async () => {
+test("#522 delete and wipe orders post their own actions", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("succeeded", "delete")));
   vi.stubGlobal("fetch", fetchMock);
@@ -97,33 +99,36 @@ test("#520 delete and wipe orders post their own actions", async () => {
   order.fire("delete");
   sendOrder(view, order);
   await waitFor(() => expect(lastPost(fetchMock)?.action).toBe("delete"));
-});
-
-test("#520 the verdict rides the OperationResult modal", async () => {
-  const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("failed", "wipe")));
-  vi.stubGlobal("fetch", fetchMock);
-  const order = new Order();
-  const view = mountEngine(order);
+  // первый ход дошёл до терминала: GET-вердикт «succeeded» усвоен, иначе
+  // движковый дедуп (живой id) честно съел бы второй приказ -- живой ход
+  // одна команда (#476), новая команда -- после вердикта
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/admin/ops/op-1",
+    expect.objectContaining({ credentials: "same-origin" })));
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   order.fire("wipe");
   sendOrder(view, order);
-  const verdict = await screen.findByText(/Не удался/);
-  expect(verdict.closest('[role="dialog"]')).not.toBeNull();
+  const posts = fetchMock.mock.calls
+    .filter((c) => (c[1] as { method?: string })?.method === "POST");
+  await waitFor(() => expect(posts.length).toBeGreaterThanOrEqual(2));
+  expect(JSON.parse((posts[posts.length - 1][1] as { body: string }).body).action)
+    .toBe("wipe");
 });
 
-test("#520 partial is named partial, no recovery is promised", async () => {
+test("#522 a failed verdict carries the reason up, never a modal", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
-                            () => Promise.resolve(opJson("partial")));
+                            () => Promise.resolve(opJson("failed", "wipe", "image builder refused")));
   vi.stubGlobal("fetch", fetchMock);
   const order = new Order();
-  const view = mountEngine(order);
-  order.fire("recycle");
-  sendOrder(view, order);
-  await waitFor(() => expect(screen.getByText(/Частично/)).toBeInTheDocument());
-  expect(screen.queryByText(/восстанов/i)).toBeNull();
+  const onState = vi.fn();
+  const view = mountEngine(order, ROW, onState);
+  order.fire("wipe");
+  sendOrder(view, order, ROW, onState);
+  await waitFor(() => expect(onState).toHaveBeenCalledWith(
+    expect.objectContaining({ status: "failed", error: "image builder refused" })));
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-test("#520 double submit rides one POST", async () => {
+test("#522 double submit rides one POST", async () => {
   let release: ((r: Response) => void) | null = null;
   const slow = new Promise<Response>((resolve) => { release = resolve; });
   const fetchMock = postGet(() => slow, () => Promise.resolve(opJson("running")));
@@ -132,7 +137,6 @@ test("#520 double submit rides one POST", async () => {
   const view = mountEngine(order);
   order.fire("recycle");
   sendOrder(view, order);
-  // повторный приказ при живом POST: движковый дедуп -- POST один
   order.fire("recycle");
   sendOrder(view, order);
   await act(async () => { release?.(ok202("op-9")); });
@@ -141,14 +145,17 @@ test("#520 double submit rides one POST", async () => {
     .toHaveLength(1);
 });
 
-test("#520 unknown is named unknown, never failed", async () => {
+test("#522 unknown is named unknown up the wire, never failed", async () => {
   const fetchMock = postGet(() => Promise.resolve(ok202("op-1")),
                             () => Promise.resolve(opJson("unknown", "wipe")));
   vi.stubGlobal("fetch", fetchMock);
   const order = new Order();
-  const view = mountEngine(order);
+  const onState = vi.fn();
+  const view = mountEngine(order, ROW, onState);
   order.fire("wipe");
-  sendOrder(view, order);
-  await waitFor(() => expect(screen.getByText(/Исход неизвестен/)).toBeInTheDocument());
-  expect(screen.queryByText(/Не удался/)).toBeNull();
+  sendOrder(view, order, ROW, onState);
+  await waitFor(() => expect(onState).toHaveBeenCalledWith(
+    expect.objectContaining({ status: "unknown" })));
+  const calls = onState.mock.calls.map((c) => c[0]?.status);
+  expect(calls).not.toContain("failed");
 });
