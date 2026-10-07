@@ -35,6 +35,24 @@ OP = paths.local("proxy-rotation.json")
 LOCK = paths.local("proxy-rotation.lock")
 
 
+def _fetch_list():
+    """Шов remote-списка прокси: GET management api-keys. Реализация --
+    глагол #539; библиотека шва не имеет (внеплановый вызов -- громкий
+    отказ, не тихий None)."""
+    raise NotImplementedError("the proxy key list seam is the #539 verb's")
+
+
+def _put_list(keys):
+    """Шов записи списка: PUT management api-keys. (исход, причина);
+    'applied' -- записано (применение подтверждает только probe)."""
+    raise NotImplementedError("the proxy key list seam is the #539 verb's")
+
+
+def _probe(key):
+    """Шов проверки клиентским API: принят ли ключ прокси сейчас."""
+    raise NotImplementedError("the proxy probe seam is the #539 verb's")
+
+
 @contextmanager
 def _lock(path=LOCK):
     """flock на постоянном приватном lock-файле: параллельная операция того
@@ -170,6 +188,48 @@ def _key_or_none(path):
     except OSError:
         return None
     return key or None
+
+
+def _remote_step(state):
+    """Шаг remote-списка: свежее чтение, объединение, типизированный исход.
+
+    Читает список СВЕЖО (панель могла писать между шагами), пишет
+    объединение прочитанного с сохранённым new -- чужие ключи не тронуты.
+    Пустой прочитанный список не пишется никогда: он открывает прокси (#537,
+    upstream provider.go:20-24). Управляемый old обязан быть в списке ДО
+    изменения -- иначе drift, и решает оператор. -> {"ok": bool, ...} без
+    ключей."""
+    out = {"ok": False}
+    keys = _fetch_list()
+    if not keys:
+        out["blocker"] = "the read key list is empty; an empty list is never written"
+        return out
+    if state["old"] not in keys:
+        out["blocker"] = (f"drift: the managed old key is not in the proxy list; "
+                          f"restoring a revoked key is an operator decision")
+        return out
+    want = keys + [state["new"]] if state["new"] not in keys else keys
+    try:
+        verdict, reason = _put_list(want)
+    except (OSError, TimeoutError) as e:
+        # Unknown-исход: PUT мог примениться. Не откатываем, не меняем
+        # ключ: reconcile на resume перечитает свежий список.
+        out["blocker"] = f"unknown PUT outcome ({type(e).__name__}): reconcile on resume"
+        out["unknown"] = True
+        return out
+    if verdict != "applied":
+        out["blocker"] = f"PUT refused before applying: {reason}"
+        out["refused"] = True
+        return out
+    state["stage"] = "listed"
+    _save_op(state)
+    out.update({"ok": True, "stage": state["stage"]})
+    return out
+
+
+def _save_op(state):
+    """Чекпоинт состояния операции: приватно, атомарно."""
+    fsutil.write_private(OP, json.dumps(state))
 
 
 def _project(state):

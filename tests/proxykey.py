@@ -6,6 +6,7 @@
 пуле. Здесь же итоги глагола write (bus.results_from): клиентский
 раздатчик keys.py умер (#385), потребитель один -- этот модуль.
 """
+import json
 import os
 import subprocess
 import sys
@@ -437,6 +438,134 @@ def check_preflight_538(c):
                 isinstance(r, str) and cp in r, r)
 
 
+# ── #538: remote-шаг — свежий список, сохранение всех, типизированный исход
+#
+# HYPOTHESIS: ротация без exclusive-записи конкурирует с панелью: читать
+# список один раз в begin и PUT-нуть его позже значило бы перезаписать
+# чужие ключи устаревшим списком; PUT-исход «отказ» без различия
+# предзаписи и неизвестности толкал бы к слепому повтору или rollback.
+# SOLUTION: remote-шаг читает список СВЕЖО при каждом применении, пишет
+# объединение (все прочитанные + сохранённый new, чужие ключи не тронуты),
+# пустой прочитанный список не пишется никогда, а исход шва типизирован:
+# подтверждённый отказ ДО применения (контракт обработчика) отличается от
+# unknown (timeout/обрыв) -- второй не двигает и не откатывает.
+class FakeRemote:
+    """Швы remote-мира: свежий список, PUT, probe. Журнал вызовов."""
+
+    def __init__(self, keys, refuse_put=None, unknown_put=False):
+        self.keys = list(keys)
+        self.refuse_put = refuse_put      # подтверждённый отказ ДО записи
+        self.unknown_put = unknown_put    # timeout/обрыв: исход неизвестен
+        self.puts = []
+        self.probes = []
+
+    def fetch_list(self):
+        return list(self.keys)
+
+    def put_list(self, keys):
+        self.puts.append(list(keys))
+        if self.unknown_put:
+            raise TimeoutError("put timed out")
+        if self.refuse_put is not None:
+            return self.refuse_put        # e.g. ("refused", "403 forbidden")
+        self.keys = list(keys)
+        return ("applied", None)
+
+    def probe(self, key):
+        self.probes.append(key)
+        return key in self.keys
+
+
+def check_remote_step_538(c):
+    step = getattr(proxykey, "_remote_step", None)
+    if not c.check("#538 proxykey._remote_step exists", callable(step)):
+        return
+    with tempfile.TemporaryDirectory(prefix="mop-rot-remote-") as d:
+        src = os.path.join(d, "llm-proxy-client.pass")
+        cp = os.path.join(d, "copy.pass")
+        op = os.path.join(d, "op.json")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("old-key\n")
+        with open(cp, "w", encoding="utf-8") as f:
+            f.write("old-key\n")
+        os.chmod(cp, 0o600)
+        os.chmod(src, 0o600)
+
+        def state(**over):
+            base = {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                    "new": "new-key", "source": src, "copy": cp,
+                    "recipients": ["node1"], "stage": "ready"}
+            base.update(over)
+            return base
+
+        # Согласованный путь: старый в списке, PUT несёт объединение со
+        # ВСЕМИ чужими ключами, new принимается, old остаётся.
+        remote = FakeRemote(["old-key", "panel-key"])
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=remote.put_list, _probe=remote.probe):
+            out = step(state())
+        c.check("#538 the remote step succeeds", out.get("ok"), out)
+        c.expect("#538 PUT carries every read key plus new (unmanaged kept)",
+                 remote.puts, [["old-key", "panel-key", "new-key"]])
+        c.check("#538 the accepted step advances past the remote stage",
+                out.get("stage") != "ready", out)
+        with open(op, encoding="utf-8") as f:
+            saved = json.load(f)
+        c.check("#538 the remote checkpoint is saved",
+                saved.get("stage") == out.get("stage"), saved)
+
+        # Подтверждённый отказ ДО применения -- блокер с причиной, список
+        # прокси не изменён, ключи не потеряны.
+        remote = FakeRemote(["old-key", "panel-key"],
+                            refuse_put=("refused", "403 forbidden"))
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=remote.put_list, _probe=remote.probe):
+            out = step(state())
+        c.check("#538 a confirmed pre-apply refusal blocks with the reason",
+                not out.get("ok") and "403" in str(out.get("blocker")), out)
+        c.check("#538 a refused PUT did not change the proxy list",
+                remote.keys == ["old-key", "panel-key"], remote.keys)
+
+        # Unknown-исход (timeout ПОСЛЕ возможного применения) -- НЕ отказ:
+        # чекпоинт остаётся, повторное применение идёт по свежему списку.
+        remote = FakeRemote(["old-key", "panel-key"], unknown_put=True)
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=remote.put_list, _probe=remote.probe):
+            out = step(state())
+        c.check("#538 an unknown PUT outcome keeps the operation open",
+                not out.get("ok") and "unknown" in str(out.get("blocker", "")).lower(),
+                out)
+
+        # Resume после unknown: тот же new, свежий список (панель успела
+        # добавить ключ) -- объединение, чужой ключ не стёрт.
+        remote = FakeRemote(["old-key", "panel-key"])
+        remote.keys.append("late-panel-key")
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=remote.put_list, _probe=remote.probe):
+            out = step(state())
+        c.check("#538 resume after unknown re-applies on a fresh list", out.get("ok"), out)
+        c.expect("#538 the late panel key survives the re-apply",
+                 remote.puts[-1], ["old-key", "panel-key", "late-panel-key", "new-key"])
+
+        # Пустой прочитанный список -- запрет записи ВСЕГДА.
+        remote = FakeRemote([])
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=remote.put_list, _probe=remote.probe):
+            out = step(state())
+        c.check("#538 an empty read list is never written",
+                not out.get("ok") and not remote.puts, (out, remote.puts))
+
+        # Старый ключ отсутствует в списке до начала -- drift, а не
+        # самовольное восстановление отозванного.
+        remote = FakeRemote(["panel-key"])
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=remote.put_list, _probe=remote.probe):
+            out = step(state())
+        c.check("#538 a missing managed old key is drift before mutation",
+                not out.get("ok") and "drift" in str(out.get("blocker", "")).lower()
+                and not remote.puts, (out, remote.puts))
+
+
 def main():
     c = Checks()
     check_source_393(c)
@@ -445,6 +574,7 @@ def main():
     check_lock_538(c)
     check_resume_refusals_538(c)
     check_preflight_538(c)
+    check_remote_step_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и
