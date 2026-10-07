@@ -230,10 +230,244 @@ def check_read_limits_337(c):
         shutil.rmtree(d)
 
 
+# ─── атомарный реестр #534 ───────────────────────────────────────────────
+def _refused534(c, what, fn, *needles):
+    """Утверждение: fn() отказывает RuntimeError с причиной (без потерь).
+
+    Локальный диалект: в _lib.Checks нет refused, а инфраструктура проверок
+    -- вне границ #534."""
+    import traceback
+    try:
+        fn()
+        got = None
+    except RuntimeError as e:
+        got = str(e)
+        traceback.clear_frames(e.__traceback__)
+        del e
+    except Exception as e:  # noqa: BLE001 -- ровно этот провал и ловим
+        got = f"WRONG EXC {type(e).__name__}: {e}"
+    ok = got is not None and all(n in got for n in needles) if needles else got is not None
+    c.check(what, bool(ok), f"refusal was {got!r}")
+
+
+# HYPOTHESIS (#534): origin'ы (projects) и лимиты (limits.json) лежат в двух
+# файлах, и каждый мутирующий глагол сервиса пишет их двумя отдельными
+# атомарными записями: обрыв или падение между ними разводит данные --
+# проект снят, а потолок остался (или наоборот), и повторный завод читался
+# бы чужим прошлым. Ниже -- проверка чистой половины атомарного реестра
+# ~/.config/mop/projects.json {version:1, projects:[{origin, limit?}]}:
+# миграция пары legacy-файлов в один снимок, разбор/отказы схемы, снимок
+# одного поколения и обратное преобразование для даунгрейда. Глагольная
+# половина (один writer, один снимок на операцию) -- в tests/cluster.py.
+def _reg53x(d):
+    """Каталог с legacy-парой реестра во временном доме проверки."""
+    import json as _json
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _legacy_pair(d, lines, limits=None):
+    """Записать legacy-пару: projects (строки) + limits.json."""
+    import json as _json
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "projects"), "w") as f:
+        f.write("".join(f"{s}\n" for s in lines))
+    _write_limits53x(d, limits or {})
+
+
+def _write_limits53x(d, limits):
+    import json as _json
+    with open(os.path.join(d, "limits.json"), "w") as f:
+        f.write(_json.dumps(limits, sort_keys=True))
+
+
+def check_migration_534(c):
+    """Миграция legacy-пары в атомарный снимок. Чистая функция от пары.
+
+    Отказ миграции -- громкий, с конкретной причиной и без потерь: старые
+    файлы остаются как были, нового файла нет, ничего не выбрасывается.
+    Голое имя, коллизия basename'ов и orphan/битый лимит непредставимы в
+    v1 без выдумывания origin'а -- это отказ оператору, а не молчаливая
+    потеря строки. STATUS: #534 (реализация следует за красным прогоном)"""
+    import shutil
+    import tempfile
+    d = tempfile.mkdtemp(prefix="mop-test-534-")
+    try:
+        # Чистая пара: снимок v1 с лимитами по месту, один проект на запись.
+        _legacy_pair(d, [MOP, RU], {"mop": 3, "rudesktop": 0})
+        got = projects.snapshot_of(d)
+        c.expect("#534 migrate a clean legacy pair", got,
+                 {"version": 1, "projects": [
+                     {"origin": MOP, "limit": 3},
+                     {"origin": RU, "limit": 0}]})
+
+        # Нет лимита -- ключа нет (не None: None и 0 -- разные вещи).
+        _legacy_pair(d, [MOP])
+        got = projects.snapshot_of(d)
+        c.expect("#534 no limit means no key", got,
+                 {"version": 1, "projects": [{"origin": MOP}]})
+
+        # Пустой реестр -- валидный пустой снимок, не отказ.
+        _legacy_pair(d, [])
+        c.expect("#534 an empty legacy pair migrates to an empty v1 snapshot",
+                 projects.snapshot_of(d), {"version": 1, "projects": []})
+
+        # Нет пары -- нет данных; отказ: выдумывать реестр нельзя (нет
+        # файлов и нет снимка -- это не «пусто», а «неизвестно»).
+        shutil.rmtree(d)
+        os.makedirs(d)
+        _refused534(c, "#534 no legacy pair and no snapshot must refuse loudly",
+                  lambda: projects.snapshot_of(d))
+
+        # Голое имя непредставимо в v1 (origin выдумывать нельзя): отказ
+        # с именем, legacy-файл не трогаем, нового файла нет.
+        shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
+        _legacy_pair(d, [MOP, "oldproject"])
+        _refused534(c, "#534 a bare legacy name must refuse with the name",
+                  lambda: projects.snapshot_of(d), "oldproject")
+        c.check("#534 a refused migration leaves the legacy registry untouched",
+                projects.read(os.path.join(d, "projects")) == {MOP, "oldproject"})
+        c.check("#534 a refused migration writes no new file",
+                not os.path.exists(os.path.join(d, "projects.json")))
+
+        # Два origin'а одного проекта (один basename): в v1 -- по одной
+        # записи на проект, задваивать лимит некуда; без консенсуса,
+        # какой origin правда, мигрировать нельзя -- отказ с обоими.
+        shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
+        _legacy_pair(d, [MOP, OTHER])  # один basename rudesktop
+        _refused534(c, "#534 two origins of one project must refuse with both",
+                  lambda: projects.snapshot_of(d), OTHER.split("/")[-1].split(".")[0])
+
+        # Orphan-лимит (имени нет в реестре) и нецелое значение: отказ с
+        # именем, а не молчаливая утрата потолка.
+        shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
+        _legacy_pair(d, [MOP], {"ghost": 2})
+        _refused534(c, "#534 an orphan limit must refuse with the name",
+                  lambda: projects.snapshot_of(d), "ghost")
+        shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
+        _legacy_pair(d, [MOP], {"mop": 2, "rudesktop": 1})
+        _refused534(c, "#534 a limit of an unknown project must refuse with the name",
+                  lambda: projects.snapshot_of(d), "rudesktop")
+
+        # Уже мигрированное: повторная миграция того же снимка -- тот же
+        # результат, файлов-легаси больше не читаем.
+        shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
+        _legacy_pair(d, [MOP], {"mop": 3})
+        first = projects.snapshot_of(d)
+        os.remove(os.path.join(d, "projects"))
+        os.remove(os.path.join(d, "limits.json"))
+        import json as _json
+        with open(os.path.join(d, "projects.json"), "w") as f:
+            f.write(_json.dumps(first))
+        c.expect("#534 an existing v1 snapshot is read back as itself",
+                 projects.snapshot_of(d), first)
+
+        # Битый/чужой projects.json: громкий отказ без пустого реестра и
+        # без fallback на legacy-файлы (fallback маскировал бы поломку).
+        for name, text in (("broken json", "{broken"),
+                           ("a newer schema", '{"version": 2, "projects": []}'),
+                           ("not an object", "[1]")):
+            with open(os.path.join(d, "projects.json"), "w") as f:
+                f.write(text)
+            _refused534(c, f"#534 a malformed snapshot ({name}) must refuse loudly",
+                      lambda: projects.snapshot_of(d))
+        os.remove(os.path.join(d, "projects.json"))
+
+        # Отказ миграции не создаёт файл: пара с голым именем осталась
+        # парой, файла нет (проверено выше), и повтор -- тот же отказ.
+        d2 = tempfile.mkdtemp(prefix="mop-test-534-")
+        try:
+            _legacy_pair(d2, [RU, "oldproject"])
+            for _ in range(2):
+                _refused534(c, "#534 repeat migration of a bad pair refuses the same way",
+                          lambda: projects.snapshot_of(d2))
+                c.check("#534 no snapshot appears after a refusal",
+                        not os.path.exists(os.path.join(d2, "projects.json")))
+        finally:
+            shutil.rmtree(d2)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def check_snapshot_534(c):
+    """Снимок v1: разбор, ограничения схемы и одно поколение на операцию.
+
+    STATUS: #534"""
+    import json
+    import shutil
+    import tempfile
+    d = tempfile.mkdtemp(prefix="mop-test-534-")
+    try:
+        path = os.path.join(d, "projects.json")
+        # Полный снимок читается целиком: origins и limits из одного
+        # поколения -- раздельное чтение двух файлов и разводило данные.
+        with open(path, "w") as f:
+            f.write(json.dumps({"version": 1, "projects": [
+                {"origin": MOP, "limit": 3}, {"origin": RU}]}))
+        snap = projects.snapshot_of(d)
+        c.expect("#534 origins and limits of one snapshot", projects.snapshot_origins(snap), [MOP, RU])
+        c.expect("#534 limits of one snapshot", projects.snapshot_limits(snap),
+                 {"mop": 3})
+
+        # Мутация над снимком: добавление/снятие/лимит не трогают исходник.
+        got = projects.snapshot_with_origin(snap, "git@h:team/new.git")
+        c.expect("#534 snapshot_with_origin adds one project",
+                 projects.snapshot_origins(got), [MOP, RU, "git@h:team/new.git"])
+        c.check("#534 snapshot_with_origin leaves the source untouched",
+                projects.snapshot_origins(snap) == [MOP, RU])
+
+        got = projects.snapshot_without(snap, "mop")
+        c.expect("#534 snapshot_without drops the project and its limit",
+                 (projects.snapshot_origins(got), projects.snapshot_limits(got)),
+                 ([RU], {}))
+
+        got = projects.snapshot_with_limit(snap, "rudesktop", 0)
+        c.expect("#534 snapshot_with_limit sets a zero freeze",
+                 projects.snapshot_limits(got), {"mop": 3, "rudesktop": 0})
+        got = projects.snapshot_with_limit(snap, "mop", None)
+        c.expect("#534 snapshot_with_limit lifts a limit",
+                 projects.snapshot_limits(got), {})
+
+        # Чистые функции снимка не пишут на диск и не падают на битом
+        # аргументе -- запись ведёт writer сервиса, и только он.
+        _refused534(c, "#534 a bare name is not an origin in v1 either",
+                  lambda: projects.snapshot_with_origin(snap, "bare"))
+        c.check("#534 no file is written by pure snapshot functions",
+                not os.path.exists(os.path.join(d, "new.json")))
+
+        # Обратное преобразование актуального v1 снимка в legacy-пару
+        # (#534, даунгрейд после остановки writers): чистая функция, без
+        # записи на диск, roundtrip-стабильна после новых мутаций.
+        v1 = {"version": 1, "projects": [
+            {"origin": MOP, "limit": 3}, {"origin": RU}]}
+        lines, limits = projects.legacy_pair_of(v1)
+        c.expect("#534 export to a legacy registry file", lines, [MOP, RU])
+        c.expect("#534 export to legacy limits", limits, {"mop": 3})
+        # Roundtrip: выгрузил -> смигрировал обратно -- тот же снимок.
+        c.expect("#534 legacy export roundtrips back to the same v1 snapshot",
+                 projects.snapshot_of(_pair_dir(d, lines, limits)), v1)
+        # После новых мутаций (добавили проект, сняли другой) экспорт --
+        # по-прежнему пара без потерь.
+        v1b = projects.snapshot_with_origin(
+            projects.snapshot_without(v1, "mop"), "git@h:team/new.git")
+        lines, limits = projects.legacy_pair_of(v1b)
+        c.expect("#534 export after new mutations roundtrips",
+                 projects.snapshot_of(_pair_dir(d, lines, limits)), v1b)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _pair_dir(d, lines, limits):
+    """Каталог с записанной legacy-парой (для roundtrip)."""
+    _legacy_pair(os.path.join(d, "pair"), sorted(lines), limits)
+    return os.path.join(d, "pair")
+
+
 def main():
     c = Checks()
     for fn in (check_add, check_delete, check_names, check_limits, check_read_limits_337,
-               check_git_hosts, check_for_deploy):
+               check_git_hosts, check_for_deploy,
+               check_migration_534, check_snapshot_534):
         fn(c)
     return c.report("projects")
 
