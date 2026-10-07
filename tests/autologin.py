@@ -2,6 +2,7 @@
 """Автовход перед запуском сессий без живой шины: python3 tests/autologin.py."""
 import io
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -65,7 +66,15 @@ def check_ensure_408(c):
         except RuntimeError as e:
             c.check("#408 ambiguity is explicit", "server" in str(e).lower(), str(e))
         os.remove(os.path.join(other, creds.OPERATOR_FILE))
-        with patched(login, complete=finish), patched_env(MOP_BUS_PASSWORD="bus-password"):
+        # #530: ensure() с успешной заглушкой complete доходит до _bind.
+        # Без подмены git настоящий `git config --local` писал привязку в
+        # .git/config репозитория cwd (раннер `mop dev test` -- это корень
+        # рабочей копии): после проверок #529 настоящий клон получил
+        # mop.server=srv.test и mop.user=alice. Здесь интерес -- выбор
+        # единственного прежнего operator, не привязка: git -- как у всех
+        # сценариев ensure выше.
+        with patched(login, complete=finish, git=fake_git), \
+                patched_env(MOP_BUS_PASSWORD="bus-password"):
             ensure()
         c.expect("#408 sole previous operator is selected", calls[-1][0], "srv.test")
 
@@ -124,9 +133,72 @@ def check_silent_port_427(c):
         c.expect("#427 preflight does not ask for port", prompts, [])
 
 
+# HYPOTHESIS (#530): второй сценарий check_ensure_408 зовёт ensure() с
+# заглушкой complete, но БЕЗ подмены login.git. Раннер `mop dev test`
+# запускает файл проверок с cwd в корне репозитория, и успешный ensure
+# доходит до _bind: настоящий `git config --local mop.server ...` пишет
+# привязку в .git/config того репозитория, где лежит cwd, -- после
+# проверок #529 в настоящем клоне появились mop.server=srv.test и
+# mop.user=alice, и models/list ушёл на тестовый сервер. Первый сценарий
+# подменяет git и чист, no-TTY падает до complete -- дыра одна.
+# SOLUTION: сценарий ensure исполняется ТОЛЬКО в дочернем процессе с cwd
+# во ВРЕМЕННОМ репозитории -- main() не зовёт check_ensure_408 в процессе
+# прогона, и при возврате дефекта записи уйдут во временный репозиторий и
+# поднимут guard, а не в .git/config настоящего клона. Ребёнок гоняет
+# check_ensure_408 целиком, со всеми её проверками, и проваливается кодом
+# выхода; родитель требует ребёнка зелёным и -- отдельной пробой git --
+# что локальный конфиг временного репозитория не получил ни одной
+# mop.*-записи. Проба различает исходы git: 1 -- записей нет, 0 --
+# записи есть (возврат дефекта), прочее -- ошибка git с причиной, а не
+# молчаливое «пусто». Репозиторий -- на TemporaryDirectory: после
+# прогона каталога нет. Локальный конфиг, не --show-origin: враждебный
+# прогон hermetic кладёт mop.server и в ~/.gitconfig (#209), и
+# глобальные записи -- не эта дыра.
+# RESULT: при снятой изоляции сценария (красная проба guard) дочерний
+# ensure() оставляет во временном репозитории mop.server=srv.test и
+# mop.user=alice, guard краснеет, конфиг настоящего клона неизменен;
+# после изоляции ребёнок зелёный и конфиг временного репозитория чист.
+# STATUS: FIXED — see #530
+def check_ensure_hermetic_530(c):
+    tests = os.path.dirname(os.path.realpath(__file__))
+    with tempfile.TemporaryDirectory(prefix="mop-auto-530-repo-") as repo:
+        r = subprocess.run(["git", "init", "-q", repo], capture_output=True, text=True)
+        if not c.check("#530 scenario repository init", r.returncode == 0, r.stderr):
+            return
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, {tests!r})\n"
+            "import hermetic  # noqa: F401 -- изоляция настроек (#209)\n"
+            "import autologin\n"
+            "from _lib import Checks\n"
+            "c = Checks()\n"
+            "autologin.check_ensure_408(c)\n"
+            "sys.exit(1 if c.failed else 0)\n"
+        )
+        run = subprocess.run([sys.executable, "-c", code], cwd=repo,
+                             env={**os.environ, "PYTHONPATH": tests},
+                             capture_output=True, text=True)
+        c.check("#530 check_ensure_408 stays green in its own process",
+                run.returncode == 0, (run.stdout + run.stderr).strip()[-500:])
+        leak = subprocess.run(["git", "config", "--local", "--get-regexp", "^mop\\."],
+                              cwd=repo, capture_output=True, text=True)
+        if leak.returncode == 0:
+            c.fail("#530 check_ensure_408 wrote mop.* into the cwd repository's config",
+                   leak.stdout.strip())
+        elif leak.returncode != 1:
+            c.fail("#530 git config probe in the scenario repository failed",
+                   f"exit {leak.returncode}: {(leak.stdout + leak.stderr).strip()}")
+        else:
+            c.check("#530 check_ensure_408 leaves the cwd repository's config clean",
+                    not leak.stdout.strip(), leak.stdout.strip())
+
+
 def main():
     c = Checks()
-    check_ensure_408(c)
+    # #530: сценарий ensure -- только в дочернем процессе с временным
+    # репозиторием: при возврате дефекта записи поднимают guard там, а не
+    # в .git/config репозитория cwd прогона.
+    check_ensure_hermetic_530(c)
     check_silent_port_427(c)
     check_launchers_408(c)
     return c.report("autologin")
