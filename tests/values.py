@@ -264,6 +264,17 @@ def project_forms():
             out["add_free"] = dump(cluster._add("mop", {"origin": MOP}))
         registered = [call[1] for call in fake.calls if call[0] == "register"]
         out["registered"] = dump(registered)
+    # Взгляд читателя (#534): прежняя среда фикстуры -- пара с голым именем
+    # legacy -- читается глаголом-списком как всегда: снятое значение
+    # байт в байт совпадает с до-рефакторным ответом projects (см.
+    # значения до #534 в git-истории снимка). Мутации на такой паре
+    # отказывают -- поэтому основная среда выше сеет снимок.
+    d2 = tempfile.mkdtemp(prefix="mop-test-204l-")
+    projects.write(sorted({MOP, RUGENT, "legacy"}), os.path.join(d2, "projects"))
+    projects.write_limits({"mop": 2}, os.path.join(d2, "limits.json"))
+    with restored(projects, "SNAPSHOT_DIR"):
+        projects.SNAPSHOT_DIR = d2
+        out["legacy_listing"] = dump(cluster._projects("admin", {}))
     return out
 
 
