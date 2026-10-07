@@ -719,6 +719,138 @@ def check_local_and_delivery_538(c):
                 out.get("ok") and "0" in str(out.get("note", "")), out)
 
 
+# ── #538: склейка — resume ведёт шаги по чекпоинтам, status не течёт ─────
+# HYPOTHESIS: шаги по отдельности не дают операции: resume обязан вести их
+# по сохранённым чекпоинтам до первого блокера, занятая блокировка --
+# отказ без эффектов, а status обязан показывать состояние без ключей и
+# без raw-причин швов.
+def check_pipeline_538(c):
+    with tempfile.TemporaryDirectory(prefix="mop-rot-pipe-") as d:
+        src = os.path.join(d, "llm-proxy-client.pass")
+        cp = os.path.join(d, "copy.pass")
+        op = os.path.join(d, "op.json")
+        lock = os.path.join(d, "rotation.lock")
+        for p, k in ((src, "old-key"), (cp, "old-key")):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(k + "\n")
+            os.chmod(p, 0o600)
+        order = []
+        remote = FakeRemote(["old-key", "panel-key"])
+        answers = {"node1": "OK", "node2": "OK"}
+
+        def deliver(key, nodes):
+            order.append("deliver")
+            return dict(answers)
+
+        def probe(key):
+            order.append("probe")
+            # begin родил случайный ключ: принят любой, кроме заведомо
+            # неверного, которого нет в списке прокси.
+            return not key.startswith("definitely-wrong-")
+
+        def fetch():
+            order.append("fetch")
+            return remote.fetch_list()
+
+        def put(keys):
+            order.append("put")
+            return remote.put_list(keys)
+
+        real_preflight = proxykey._preflight
+
+        def preflight(state):
+            order.append("preflight")
+            return real_preflight(state)
+
+        patches = dict(OP=op, LOCK=lock, _fetch_list=fetch, _put_list=put,
+                       _probe=probe, _deliver=deliver, _preflight=preflight)
+        with patched(proxykey, **patches):
+            got = proxykey.begin(src, cp, ["node1", "node2"], exclusive=True)
+            c.expect("#538 begin names the ready stage", got.get("stage"), "ready")
+            with open(op, encoding="utf-8") as f:
+                saved = json.load(f)
+            c.check("#538 begin did not run the pipeline",
+                    not order, order)
+
+            out = proxykey.resume(exclusive=True)
+            c.check("#538 a clean pipeline completes", out.get("ok"), out)
+            c.check("#538 the pipeline ran preflight, remote, probes, local, deliver",
+                    order == ["preflight", "fetch", "put", "probe", "probe",
+                              "probe", "deliver"], order)
+            with open(op, encoding="utf-8") as f:
+                saved = json.load(f)
+            c.expect("#538 completed state survives", saved.get("stage"), "completed")
+
+            # Status: проекция без ключей, завершённая стадия читается.
+            st = proxykey.status()
+            c.expect("#538 status names the completed stage", st.get("stage"), "completed")
+            c.check("#538 status carries no keys",
+                    not any(k in st for k in ("old", "new", "key")), st)
+
+            # Занятая блокировка -- отказ без эффектов, состояние цело.
+            # Завершённая операция читается ДО захвата, поэтому занятость
+            # проверяем на НЕзавершённой: откатываем stage файла.
+            import fcntl
+            with open(op, encoding="utf-8") as f:
+                saved = json.load(f)
+            saved["stage"] = "local"
+            with open(op, "w", encoding="utf-8") as f:
+                json.dump(saved, f)
+            held = open(lock, "a")
+            fcntl.flock(held, fcntl.LOCK_EX)
+            try:
+                try:
+                    proxykey.resume(exclusive=True)
+                    c.fail("#538 a busy lock must refuse")
+                except RuntimeError as e:
+                    c.check("#538 a busy lock refuses by name",
+                            "running" in str(e).lower(), str(e))
+            finally:
+                fcntl.flock(held, fcntl.LOCK_UN)
+                held.close()
+            # Возвращаем завершённое состояние для дальнейших проверок.
+            saved["stage"] = "completed"
+            with open(op, "w", encoding="utf-8") as f:
+                json.dump(saved, f)
+            with open(op, encoding="utf-8") as f:
+                after = json.load(f)
+            c.check("#538 the refused resume kept the state intact",
+                    after == saved, (after, saved))
+
+            # Гонка межпроцессно: ребёнок держит lock -- родитель отказывает,
+            # состояние не тронуто.
+            code = ("import fcntl, sys;"
+                    f"f = open({lock!r}, 'a');"
+                    "fcntl.flock(f, fcntl.LOCK_EX);"
+                    "print('held', flush=True);"
+                    "import time; time.sleep(1.5);"
+                    "sys.exit(0)")
+            kid = subprocess.Popen([sys.executable, "-c", code],
+                                   stdout=subprocess.PIPE, text=True)
+            kid.stdout.readline()          # ребёнок держит блокировку
+            # Снова незавершённая стадия: completed читается без lock.
+            with open(op, encoding="utf-8") as f:
+                completed = json.load(f)
+            completed["stage"] = "local"
+            with open(op, "w", encoding="utf-8") as f:
+                json.dump(completed, f)
+            try:
+                proxykey.resume(exclusive=True)
+                c.fail("#538 a cross-process busy lock must refuse")
+            except RuntimeError as e:
+                c.check("#538 a cross-process busy lock refuses",
+                        "running" in str(e).lower(), str(e))
+            kid.wait()
+            completed["stage"] = "completed"
+            with open(op, "w", encoding="utf-8") as f:
+                json.dump(completed, f)
+            with open(op, encoding="utf-8") as f:
+                after = json.load(f)
+            c.check("#538 the cross-process refusal kept the state intact",
+                    after.get("stage") == "completed" and after.get("id") == saved.get("id"),
+                    (after, saved))
+
+
 def main():
     c = Checks()
     check_source_393(c)
@@ -730,6 +862,7 @@ def main():
     check_remote_step_538(c)
     check_probe_step_538(c)
     check_local_and_delivery_538(c)
+    check_pipeline_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

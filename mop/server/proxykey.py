@@ -54,11 +54,15 @@ def _probe(key):
 
 
 @contextmanager
-def _lock(path=LOCK):
+def _lock(path=None):
     """flock на постоянном приватном lock-файле: параллельная операция того
     же процесса отказывает сразу, смерть процесса освобождает блокировку
     сама -- угадывать по PID, жив ли владелец, не нужно. Файл не
-    пересоздаётся по звонку: inode живёт, пока жив каталог."""
+    пересоздаётся по звонку: inode живёт, пока жив каталог. Путь читается
+    на каждом входе (не дефолтом аргумента), чтобы подмена LOCK в проверке
+    доходила до настоящего файла."""
+    if path is None:
+        path = LOCK
     fsutil.make_private_dir(os.path.dirname(path))
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
@@ -105,14 +109,41 @@ def begin(source_path, copy_path, recipients, *, exclusive):
 def resume(*, exclusive):
     """Продолжить незавершённую ротацию по её приватному состоянию.
 
-    exclusive -- то же обязательное явное условие на КАЖДОМ входе. Состояние
-    читается целиком: битое, чужой схемы или без ключей -- громкий отказ без
-    эффектов. -> проекция без ключей."""
+    exclusive -- то же обязательное явное условие на КАЖДОМ входе. Ведёт
+    шаги по сохранённым чекпоинтам до первого блокера: preflight (на старте
+    операции, не на каждом входе) → remote-список → probe-подтверждение →
+    локальная смена → раздача. Завершённая операция читается как завершённая.
+    -> {"ok": bool, ...} без ключей."""
     if not exclusive:
         raise RuntimeError("rotation requires the exclusive-writer precondition")
     with _lock():
         state = _checked_state()
-        return _project(state)
+        if state.get("stage") == "completed":
+            return {"ok": True, "stage": "completed"}
+        if state.get("stage") == "ready":
+            blocker = _preflight(state)
+            if blocker:
+                return {"ok": False, "blocker": blocker}
+        steps = {"ready": _remote_step, "listed": _probe_step,
+                 "accepted": _local_step, "local": _deliver_step}
+        while state["stage"] in steps:
+            out = steps[state["stage"]](state)
+            if not out.get("ok"):
+                return out
+        return {"ok": True, "stage": state["stage"]}
+
+
+def status():
+    """Состояние операции для вызывающего: без ключей и без raw-причин.
+    Нет операции -- честный None."""
+    state = _load_op()
+    if state is None:
+        return None
+    out = _project(state)
+    delivered = state.get("delivered")
+    if delivered:
+        out["delivered"] = dict(delivered)
+    return out
 
 
 def _load_op():
