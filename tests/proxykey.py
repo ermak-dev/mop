@@ -154,10 +154,86 @@ def check_strict_settled_538(c):
     c.check("#538 empty outcome settles strictly", fn({}))
 
 
+# ── #538: begin — явные пути, обязательное условие, состояние до эффекта ──
+# HYPOTHESIS: у ротации нет CAS (#537), и begin без явного exclusive-writer
+# условия, с путями по умолчанию или с состоянием после remote-эффекта
+# запускал бы конкурирующего писателя. SOLUTION: begin требует явных
+# source_path/copy_path и явного exclusive-условия от вызывающего; отказ
+# происходит БЕЗ эффектов (ни состояния, ни remote-шва), а согласный begin
+# пишет приватное состояние операции ДО любого remote-шва -- дальнейшие
+# шаги делает resume по чекпоинтам.
+def check_begin_538(c):
+    begin = getattr(proxykey, "begin", None)
+    if not c.check("#538 proxykey.begin exists", begin is not None):
+        return
+    import json
+    import stat
+    with tempfile.TemporaryDirectory(prefix="mop-rot-") as d:
+        source_path = os.path.join(d, "llm-proxy-client.pass")
+        copy_path = os.path.join(d, "copy.pass")
+        op = os.path.join(d, "op.json")
+        calls = []
+
+        def seam(name):
+            def reach(*a, **k):
+                calls.append(name)
+                raise AssertionError(f"begin must not reach {name}")
+            return reach
+
+        def fresh(old="old-key\n"):
+            with open(source_path, "w", encoding="utf-8") as f:
+                f.write(old)
+
+        fresh()
+        with patched(proxykey, OP=op, _fetch_list=seam("fetch_list"),
+                     _put_list=seam("put_list"), _probe=seam("probe")):
+            try:
+                begin(source_path, copy_path, ["node1"], exclusive=False)
+                c.fail("#538 begin without the explicit exclusive precondition must refuse")
+            except RuntimeError as e:
+                c.check("#538 the refusal names the exclusive-writer precondition",
+                        "exclusive" in str(e).lower(), str(e))
+            c.check("#538 a refused begin writes no operation state",
+                    not os.path.exists(op))
+            c.check("#538 a refused begin reaches no remote seam", not calls, calls)
+
+            fresh("\n")
+            try:
+                begin(source_path, copy_path, ["node1"], exclusive=True)
+                c.fail("#538 an empty key source must refuse")
+            except RuntimeError as e:
+                c.check("#538 the empty-source refusal names the file",
+                        source_path in str(e), str(e))
+            c.check("#538 an empty source writes no operation state",
+                    not os.path.exists(op))
+
+            fresh()
+            got = begin(source_path, copy_path, ["node1", "node2"], exclusive=True)
+        c.check("#538 begin wrote the state before any remote seam",
+                os.path.exists(op) and not calls, calls)
+        mode = stat.S_IMODE(os.stat(op).st_mode)
+        c.check("#538 the operation state is private (0600)", mode == 0o600, oct(mode))
+        with open(op, encoding="utf-8") as f:
+            raw = json.load(f)
+        c.expect("#538 the state keeps the old key of the source", raw.get("old"), "old-key")
+        c.check("#538 the state keeps a one-time new key",
+                bool(raw.get("new")) and raw["new"] != "old-key", repr(raw.get("new")))
+        c.expect("#538 the state names the schema", raw.get("schema"), proxykey.SCHEMA)
+        c.expect("#538 the state saves the explicit recipient set",
+                 raw.get("recipients"), ["node1", "node2"])
+        c.expect("#538 the state names the source path", raw.get("source"), source_path)
+        c.expect("#538 the state names the copy path", raw.get("copy"), copy_path)
+        c.check("#538 the state names its stage",
+                isinstance(raw.get("stage"), str) and raw["stage"], repr(raw.get("stage")))
+        c.check("#538 begin returns a projection without keys",
+                isinstance(got, dict) and "old" not in got and "new" not in got, got)
+
+
 def main():
     c = Checks()
     check_source_393(c)
     check_strict_settled_538(c)
+    check_begin_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

@@ -14,14 +14,67 @@ MOP_PROXY_KEY из окружения. Сервис раздаёт ключ гл
 import hashlib
 import json
 import os
+import secrets
 import threading
 import time
 
-from ..common import bus, config, paths, puppets
+from ..common import bus, config, fsutil, paths, puppets
 
 TICK = 300                   # редко и предсказуемо; sha не нов -- ни одного запроса
 STATE = paths.local("proxy-key.json")
 KEY_FILE = paths.local(paths.SECRETS, "llm-proxy-client.pass")
+
+# ── ротация клиентского ключа (#538, контракт #537) ──────────────────────
+# Протокол без CAS: единственный писатель -- обязательное явное условие
+# вызывающего, не молчаливое допущение. Состояние ОДНОЙ операции, приватное:
+# старый и новый ключ для возобновления после сбоя (отпечатка недостаточно).
+SCHEMA = 1
+OP = paths.local("proxy-rotation.json")
+
+
+def begin(source_path, copy_path, recipients, *, exclusive):
+    """Начать ротацию: проверить условие, родить ключ, записать состояние.
+
+    Никаких remote-швов: begin только создаёт приватное состояние ДО любого
+    эффекта -- шаги к удалённому списку делает resume по чекпоинтам.
+    exclusive -- явное условие единственного писателя от вызывающего: без
+    него отказ без эффектов. recipients -- сохраняемый НАМЕРЕННЫЙ список
+    получателей (ready_nodes его не фильтрует на resume). -> проекция без
+    ключей."""
+    if not exclusive:
+        raise RuntimeError("rotation requires the exclusive-writer precondition")
+    old = _read_key(source_path)
+    state = {"id": secrets.token_hex(8), "schema": SCHEMA,
+             "old": old, "new": _new_key(),
+             "source": source_path, "copy": copy_path,
+             "recipients": list(recipients), "stage": "ready"}
+    fsutil.make_private_dir(os.path.dirname(OP))
+    fsutil.write_private(OP, json.dumps(state))
+    return _project(state)
+
+
+def _read_key(path):
+    """Ключ из файла: пустой файл -- громкий отказ с именем файла."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            key = f.read().rstrip("\r\n")
+    except OSError as e:
+        raise RuntimeError(f"cannot read the key source {path}: {e.strerror}") from e
+    if not key:
+        raise RuntimeError(f"the key source {path} is empty")
+    return key
+
+
+def _new_key():
+    """Одноразовая генерация нового клиентского ключа."""
+    return secrets.token_urlsafe(32)
+
+
+def _project(state):
+    """Состояние для вызывающего: без ключей и без raw-исключений."""
+    return {"id": state.get("id"), "schema": state.get("schema"),
+            "stage": state.get("stage"),
+            "recipients": list(state.get("recipients") or [])}
 
 
 def source(env, path=None):
