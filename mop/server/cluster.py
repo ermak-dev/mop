@@ -35,7 +35,7 @@ import base64
 
 from .. import driver
 from . import bootstrap, natsconf, nodes, nomad, proxykey, spec
-from ..common import (bus, busnames, config, creds, domain, landing, lease, paths, project_secrets,
+from ..common import (bus, busnames, config, creds, domain, fsutil, landing, lease, paths, project_secrets,
                       projects, puppets, service, state)
 from ..common.domain import Alloc, CloneFacts, JobMeta, PoolNode, Project, Verb
 
@@ -707,19 +707,63 @@ def _users_apply(names, verify_user=None):
 def _with_rollback(snapshot, change):
     """Правка реестра с откатом: снимок и файл пользователей возвращаются,
     если шина нового пользователя не пустила. Снимок один (#534): реестр
-    и лимиты возвращаются вместе, разводить их больше нечем."""
+    и лимиты возвращаются вместе, разводить их больше нечем.
+
+    Формат переключает только УСПЕШНАЯ мутация (#534). Правда о том, была
+    ли запись, -- сам диск, а не порядок исключений: откат смотрит байты
+    снимка ДО и ПОСЛЕ провалившейся правки. Не менялись -- диск не трогаем
+    (запись умерла до commit'а -- вслепую не перезаписываем). Файла не
+    было, а теперь есть -- неуспешная мутация сняла создание. Были другие
+    байты -- возвращаем прежние ЦЕЛИКОМ. Откат сам упал -- обе ошибки
+    доезжают до ответа: проглоченный откат выглядел бы успехом с чужим
+    состоянием на диске."""
+    try:
+        before = _snapshot_bytes()
+    except OSError as e:
+        raise RuntimeError(f"cannot read the registry to guard the change: {e}") from None
     users = natsconf.read_users()
     try:
         return change()
-    except Exception:
-        _save(snapshot)
+    except Exception as e:
+        errors = [f"{e}"]
+        try:
+            now = _snapshot_bytes()
+        except OSError as e2:
+            now = _UNREADABLE
+            errors.append(f"rollback failed: {e2}")
+        if now != before:
+            try:
+                if before is None:
+                    os.remove(projects.SNAPSHOT)
+                else:
+                    fsutil.write_atomic(projects.SNAPSHOT, before)
+            except Exception as e2:  # noqa: BLE001 -- отказ отката доезжает до ответа
+                errors.append(f"rollback failed: {e2}")
         if users is not None:
             natsconf.write(users)
             try:
                 natsconf.reload()
             except Exception:
                 pass
+        if len(errors) > 1:
+            # Исходный отказ + отказ отката: ложный успех хуже провала.
+            raise RuntimeError("; ".join(errors)) from None
         raise
+
+
+# Маркер «диск после провала не читается»: отличается от любого содержимого
+# и от отсутствия, откат обязан попытаться вернуть прежние байты.
+_UNREADABLE = object()
+
+
+def _snapshot_bytes():
+    """Байты projects.json либо None, если файла нет. Ошибка чтения --
+    наружу: состояние реестра перед правкой обязано быть известно."""
+    try:
+        with open(projects.SNAPSHOT, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
 
 
 def _projects(project, req):

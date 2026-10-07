@@ -1407,21 +1407,94 @@ def check_registry_verbs_534(c):
         finally:
             env.cleanup()
 
-    # 7. Обрыв после записи реестра (шина не пустила пользователя): снимок
-    # откачен к прежнему состоянию -- и legacy-пара, и снятая v1 не расходятся
-    # с действительностью; данные не теряются и не задваиваются.
+    # 7. Обрыв после записи реестра (шина не пустила пользователя). v1 не
+    # существовало ДО RPC -- провал мутации не переключает формат: снимок
+    # не создаётся вовсе, legacy-пара остаётся как была, users -- применённые
+    # ДО провала остаются в журнале, отказ доносит причину провала.
     env = _Registry534()
     with env.patched_env(refuse_apply=RuntimeError("nats rejected the user")):
         try:
             got = cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
             c.check("#534 a failed users-apply refuses the verb",
                     bool(got.get("error")) and "nats rejected the user" in got.get("error", ""), got)
-            snap = env.snapshot()
-            c.expect("#534 the snapshot rolls back to the pre-mutation state",
-                     sorted(p["origin"] for p in snap["projects"]),
-                     sorted([MOP534, RU534]))
-            c.check("#534 rollback leaves one snapshot, not a broken pair",
-                    os.path.exists(os.path.join(env.dir, "projects")))
+            c.check("#534 a failed mutation before any v1 leaves projects.json absent",
+                    not os.path.exists(env.snapshot_path()), env.snapshot_path())
+            c.check("#534 a failed mutation before any v1 leaves the legacy bytes untouched",
+                    env.legacy() == {MOP534, RU534}, env.legacy())
+            c.check("#534 a failed mutation still applied users before failing",
+                    bool(env.log["apply"]), env.log)
+        finally:
+            env.cleanup()
+
+    # 7b. Тот же провал на свежей установке: ни пары, ни снимка -- после
+    # провала реестра по-прежнему нет ни одного файла.
+    env = _Registry534(fresh=True)
+    with env.patched_env(refuse_apply=RuntimeError("nats rejected the user")):
+        try:
+            got = cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
+            c.check("#534 a failed mutation on a fresh install refuses the verb",
+                    bool(got.get("error")) and "nats rejected the user" in got.get("error", ""), got)
+            c.check("#534 a failed mutation on a fresh install creates no projects.json",
+                    not os.path.exists(env.snapshot_path()), env.snapshot_path())
+            c.check("#534 a failed mutation on a fresh install writes no legacy files",
+                    not os.path.exists(os.path.join(env.dir, "projects"))
+                    and not os.path.exists(os.path.join(env.dir, "limits.json")))
+        finally:
+            env.cleanup()
+
+    # 7c. Провал поверх СУЩЕСТВУЮЩЕЙ v1 (снимок писан раньше, без провала):
+    # диск возвращается к прежнему содержимому снимка, файл не удаляется.
+    env = _Registry534(fresh=True)
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/base.git"})
+            before = env.snapshot()
+            with patched(cluster, _users_apply=_failing_apply("nats rejected the user")):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                c.check("#534 a failed users-apply over existing v1 refuses the verb",
+                        bool(got.get("error")) and "nats rejected the user" in got.get("error", ""), got)
+                c.check("#534 a failed users-apply over existing v1 restores the previous snapshot",
+                        os.path.exists(env.snapshot_path()) and env.snapshot() == before,
+                        env.snapshot_path())
+        finally:
+            env.cleanup()
+
+    # 7d. Провал поверх мигрировавшей установки (снимок создан более ранним
+    # успешным глаголом): прежний снимок восстановлен байт в байт.
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/base.git"})
+            before = open(env.snapshot_path()).read()
+            with patched(cluster, _users_apply=_failing_apply("nats rejected the user")):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                c.check("#534 a failed users-apply over a migrated registry refuses the verb",
+                        bool(got.get("error")) and "nats rejected the user" in got.get("error", ""), got)
+                c.check("#534 a failed users-apply over a migrated registry restores the snapshot bytes",
+                        open(env.snapshot_path()).read() == before, before)
+        finally:
+            env.cleanup()
+
+    # 7e. Провал записи снимка (ФС умерла) поверх мигрировавшей установки:
+    # записи не было -- откат не перезаписывает диск вслепую, прежний
+    # снимок цел.
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/base.git"})
+            before = env.snapshot()
+
+            def dying_write(snapshot, path=None, *a, **k):
+                raise RuntimeError("fs died mid-write")
+
+            with patched(cluster.projects, write_snapshot=dying_write):
+                got = cluster.answer("admin", {"verb": "project_delete", "name": "rudesktop"})
+                c.check("#534 a precommit write failure refuses the verb",
+                        bool(got.get("error")) and "fs died mid-write" in got.get("error", ""), got)
+                c.check("#534 a precommit write failure leaves the snapshot whole",
+                        env.snapshot() == before, env.snapshot())
         finally:
             env.cleanup()
 
@@ -1539,6 +1612,78 @@ def check_registry_verbs_534(c):
             finally:
                 env.cleanup()
 
+    # 15. Синтетический секрет в испорченном снимке (строка-«пароль» в
+    # version, null в limit): отказ доходит и в reader, и в мутацию, но
+    # ни сам секрет, ни сырые значения в ответе RPC нет -- только путь и
+    # тип ошибки (#534).
+    for text, needle in (('{"version": "hunter2-secret", "projects": []}', "hunter2"),
+                         ('{"version": 1, "projects": [{"origin": "%s", "limit": null}]}' % RU534,
+                          "null")):
+        env = _Registry534(fresh=True)
+        with open(env.snapshot_path(), "w") as f:
+            f.write(text)
+        with env.patched_env():
+            try:
+                for verb in ("projects", ("project_add", {"origin": "git@h:team/new.git"})):
+                    req = {"verb": verb} if isinstance(verb, str) else {"verb": verb[0], **verb[1]}
+                    got = cluster.answer("admin", req)
+                    err = got.get("error") or ""
+                    c.check(f"#534 a corrupted snapshot ({needle}) refuses {req['verb']} over RPC",
+                            bool(err), got)
+                    c.check(f"#534 the {req['verb']} refusal leaks no secret over RPC",
+                            "hunter2-secret" not in err, err)
+                    c.check(f"#534 the {req['verb']} refusal names the file, not raw values",
+                            "projects.json" in err, err)
+            finally:
+                env.cleanup()
+
+    # 16. Откат сам не удался (диск не отдал файл, созданный провалившейся
+    # мутацией): в ответе -- И исходный отказ, и отказ отката; ложного
+    # успеха и глухого «nats rejected» нет.
+    env = _Registry534()
+    with env.patched_env(refuse_apply=RuntimeError("nats rejected the user")):
+        try:
+            def busy_remove(path):
+                raise OSError("disk busy")
+
+            with patched(os, remove=busy_remove):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check("#534 a failed rollback surfaces both errors",
+                        "nats rejected the user" in err and "disk busy" in err, err)
+                c.check("#534 a failed rollback is no false success",
+                        not got.get("ok"), got)
+        finally:
+            env.cleanup()
+
+    # 17. Откат не смог восстановить прежние байты (ФС умерла на записи):
+    # обе ошибки -- в ответе; прежний снимок на диске затёрт новой записью,
+    # и об этом говорит refusal, а не молчание.
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/base.git"})
+            from mop.common import fsutil
+            real_wa = fsutil.write_atomic
+            box = {"n": 0}
+
+            def flaky_write(path, data, *a, **k):
+                box["n"] += 1
+                if box["n"] == 1:  # запись самой мутации -- настоящая
+                    return real_wa(path, data, *a, **k)
+                raise OSError("disk full on rollback")
+
+            with patched(fsutil, write_atomic=flaky_write), \
+                    patched(cluster, _users_apply=_failing_apply("nats rejected the user")):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check("#534 a failed restore surfaces both errors",
+                        "nats rejected the user" in err and "disk full on rollback" in err, err)
+        finally:
+            env.cleanup()
+
     # 13. Атомарность по видимому читателю: обрыв записи (падение ФС между
     # решением и users_apply, и в users_apply) оставляет на диске ЦЕЛИКОМ
     # прежний или новый снимок -- никогда не смесь и никогда не пусто.
@@ -1592,6 +1737,14 @@ def check_registry_verbs_534(c):
 def _no_patch():
     """Пустая подмена: ни одного атрибута (для ровной записи цикла #13)."""
     yield None
+
+
+def _failing_apply(why):
+    """Заглушка cluster._users_apply, падающая сразу (обрыв ПОСЛЕ записи
+    снимка: шина не пустила пользователя)."""
+    def apply(names, verify_user=None):
+        raise RuntimeError(why)
+    return apply
 def check_concurrent_534(c):
     """Concurrent-запись реестра: замок держит «прочитал-записал» целиком.
 
