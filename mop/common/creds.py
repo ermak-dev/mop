@@ -31,7 +31,7 @@ import os
 import ssl
 from urllib.parse import urlsplit
 
-from . import busnames, config, fsutil, paths
+from . import busnames, config, fsutil, paths  # noqa: F401 -- config: server_dir
 
 ROOT = paths.local(paths.SERVERS)
 # Кред оператора-человека (#84): один файл на машину, а не по паролю на
@@ -39,6 +39,11 @@ ROOT = paths.local(paths.SERVERS)
 # проект живёт в СУБЪЕКТЕ, права на субъект проверяет сервер NATS.
 OPERATOR_FILE = "operator.json"
 CLIENT_FILE = "client.json"
+# Атомарный клиентский профиль (#533): весь вход человека одной записью --
+# версия, креды шины, порт и прокси. Прежняя пара operator.json+client.json
+# писалась двумя записями, и отказ между ними смешивал несвязанные входы.
+CONNECTION_FILE = "connection.json"
+CONNECTION_VERSION = 1
 ADMIN = busnames.ADMIN   # псевдопроект оператора: проекта нет
 # Машинный пользователь сервисов сервера (#104): mop-web, mop-bootstrap,
 # mop-cluster. Раньше они ходили под admin, и его пароль был общим с людьми.
@@ -56,16 +61,18 @@ WSS_PATH = "/nats"
 
 
 def joined_host():
-    """Единственный joined-сервер клиента; несколько требуют явного выбора."""
-    try:
-        hosts = sorted(name for name in os.listdir(ROOT)
-                       if os.path.isfile(os.path.join(ROOT, name, CLIENT_FILE)))
-    except FileNotFoundError:
-        hosts = []
+    """Единственный joined-сервер клиента; несколько требуют явного выбора.
+
+    Joined -- след входа: целый профиль (#533: connection.json или целая
+    legacy-пара), машинный вход или остаток половины как подсказка адреса
+    для повторного login. Профиль из остатка не собирается: запускатели
+    откажут сами, внятно."""
+    hosts = joined_dirs()
     if len(hosts) == 1:
         return hosts[0]
     if hosts:
-        raise RuntimeError(f"multiple joined servers ({', '.join(hosts)}): name one with --server")
+        raise RuntimeError(f"multiple joined servers ({', '.join(hosts)}): "
+                           f"name one with --server")
     raise RuntimeError("no joined server: run mop join --server <address>")
 
 
@@ -309,6 +316,138 @@ def write_client(directory, https_port, proxy_url, proxy_key):
     path = os.path.join(directory, CLIENT_FILE)
     fsutil.write_private(path, json.dumps(values))
     return path
+
+
+# ─── атомарный профиль человека (#533) ──────────────────────────────────
+def _connection_values(user, password, https_port, proxy_url, proxy_key):
+    """Схема connection.json целиком: одна запись -- один вход. Значения
+    проходят проверку прежних _client_values: порт, URL и ключ -- те же
+    правила, что и у пары."""
+    if not isinstance(user, str) or not user or busnames.is_machine(user):
+        # Машинное имя сюда не пишет и writer, но и читатель не примет:
+        # connection.json -- профиль человека, служебный вход живёт в
+        # operator.json и в него не переводится.
+        raise ValueError("connection profile belongs to a person, not a machine login")
+    if not isinstance(password, str) or not password:
+        raise ValueError("connection profile needs a bus password")
+    client = _client_values(https_port, proxy_url, proxy_key)
+    return {"version": CONNECTION_VERSION, "bus": {"user": user, "password": password},
+            "https_port": client["https_port"], "proxy": {"url": client["proxy_url"],
+                                                          "key": client["proxy_key"]}}
+
+
+def write_connection(directory, user, password, https_port, proxy_url, proxy_key):
+    """Единственный атомарный writer профиля человека: одна запись после
+    обеих сетевых проверок (#533). Каталог и файл закрыты, читатель видит
+    либо прежний профиль целиком, либо новый целиком."""
+    values = _connection_values(user, password, https_port, proxy_url, proxy_key)
+    make_dir(directory)
+    path = os.path.join(directory, CONNECTION_FILE)
+    fsutil.write_private(path, json.dumps(values))
+    return path
+
+
+def _read_connection(directory):
+    """Разбор connection.json без fallback. ValueError называет ремонт и не
+    несёт секретов: содержимое файла в текст отказа не попадает."""
+    try:
+        with open(os.path.join(directory, CONNECTION_FILE), encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise ValueError(f"cannot read the connection profile: re-run mop login "
+                         f"on {os.path.basename(directory)}") from e
+    if not isinstance(raw, dict) or raw.get("version") != CONNECTION_VERSION:
+        raise ValueError("unknown connection profile version: re-run mop login")
+    try:
+        bus_part, proxy_part = raw["bus"], raw["proxy"]
+        values = _connection_values(bus_part["user"], bus_part["password"],
+                                     raw["https_port"], proxy_part["url"],
+                                     proxy_part["key"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("invalid connection profile: re-run mop login") from None
+    # Плоская форма -- та же, что у прежней пары: читатели (server_config,
+    # session_env, models, doctor) не знают про схему файла.
+    return {"user": bus_part["user"], "password": bus_part["password"],
+            "https_port": values["https_port"], "proxy_url": values["proxy"]["url"],
+            "proxy_key": values["proxy"]["key"]}
+
+
+def human_profile(directory):
+    """Профиль человека из каталога сервера, либо None. Один решатель для
+    всех читателей (#533): connection.json, иначе ЦЕЛАЯ legacy-пара, ничего
+    больше. Половина пары -- отказ, а не вход вполовину; machine operator
+    рядом с профилем человека -- конфликт без выбора стороны."""
+    conn = _read_connection(directory)
+    op = operator(directory)
+    if op is not None and busnames.is_machine(op["user"]):
+        if conn is not None:
+            raise ValueError("machine service identity and a human login conflict: "
+                             "use a separate operator account or connection directory")
+        return None     # служебный каталог: человеческого профиля в нём нет
+    if conn is not None:
+        return conn
+    if op is None:
+        try:
+            got = client(directory)
+        except ValueError as e:
+            # Битый client.json -- отказ и без operator.json, с ремонтом.
+            raise ValueError(f"{e}: re-run mop login") from None
+        if got is not None:
+            # Прокс-половина прежней пары: не вход, а след входа. Пароль
+            # неизвестен, доверять старому ключу без нового login нельзя.
+            raise ValueError("incomplete login: re-run mop login --server "
+                             f"{os.path.basename(directory)}")
+        return None
+    try:
+        joined = client(directory)
+    except ValueError as e:
+        # Битая пара -- отказ, не «нет входа»: ошибки client() несут свой
+        # смысл, ремонт называем здесь.
+        raise ValueError(f"{e}: re-run mop login") from None
+    if joined is None:
+        # Половина прежней пары -- не вход: пароль без прокси-настроек
+        # запускал бы сессию без модели (#533). Восстановление -- полный вход.
+        raise ValueError(f"incomplete login: re-run mop login --server "
+                         f"{os.path.basename(directory)}")
+    return {"user": op["user"], "password": op["password"],
+            "https_port": joined["https_port"], "proxy_url": joined["proxy_url"],
+            "proxy_key": joined["proxy_key"]}
+
+
+def _machine_login(directory):
+    """Служебный вход каталога (machine operator.json), либо None."""
+    op = operator(directory)
+    return op if op is not None and busnames.is_machine(op["user"]) else None
+
+
+def joined_dirs(root=None):
+    """Каталоги серверов, где есть след входа: целый профиль, машинный вход
+    или ОСТАТОК прежней пары (#533). Остаток -- только подсказка выбора
+    адреса для повторного login (main/ensure): профелем он не становится,
+    и запускатели без полного входа откажут.
+
+    Сломанный каталог -- кандидат всё равно: «не могу разобрать» не значит
+    «выбор вслепую»; явный --server назовёт его и получит внятный отказ."""
+    root = root or ROOT
+    try:
+        names = sorted(os.listdir(root))
+    except FileNotFoundError:
+        return []
+    out = []
+    for name in names:
+        d = os.path.join(root, name)
+        try:
+            whole = human_profile(d) is not None or _machine_login(d) is not None
+        except ValueError:
+            whole = os.path.isfile(os.path.join(d, CONNECTION_FILE)) or \
+                os.path.isfile(os.path.join(d, CLIENT_FILE)) or \
+                os.path.isfile(os.path.join(d, OPERATOR_FILE))
+        if whole or os.path.isfile(os.path.join(d, CLIENT_FILE)) or \
+                os.path.isfile(os.path.join(d, OPERATOR_FILE)):
+            out.append(name)
+    return out
 
 
 def password(directory, project):

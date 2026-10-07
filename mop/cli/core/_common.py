@@ -163,9 +163,15 @@ def session_env():
     """Клиентский gateway: URL и ключ выбранного сервера, без модели стенда."""
     host = config.get("MOP_SERVER_LAN")
     directory = creds.server_dir(host)
-    record = creds.client(directory)
+    # Один снимок профиля (#533): человеческий вход целиком или отказ.
+    # Служебный каталог (service) человеческой сессии не готовит: без
+    # proxy-конфига запускать нечего.
+    try:
+        record = creds.human_profile(directory)
+    except ValueError as e:
+        raise RuntimeError(str(e)) from e
     if record is None:
-        raise RuntimeError(f"no joined proxy configuration for {host}: run mop login --server {host}")
+        raise RuntimeError(f"no human login for {host}: run mop login --server {host}")
     env = dict(llm.env())
     for name in MODEL_OVERRIDES:
         env.pop(name, None)   # карта llm.env() остаётся только у папетов

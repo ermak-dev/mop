@@ -20,7 +20,6 @@ Credentials stay in separate private files under
 in local git config. --user NAME is the old spelling of LOGIN.
 """
 import getpass
-import glob
 import os
 import ssl
 import subprocess
@@ -66,8 +65,7 @@ def git(*args):
 def serving(origin):
     """Серверы, где у машины уже есть вход и чей реестр знает origin."""
     out = []
-    for d in sorted(glob.glob(os.path.join(creds.ROOT, "*"))):
-        host = os.path.basename(d)
+    for host in creds.joined_dirs():
         try:
             c = bus.server_config(host)
             # Логин -- тех кредов, которыми спрашиваем (#207), а не этой машины.
@@ -155,20 +153,36 @@ def _https_port(explicit, saved):
 
 
 def complete(host, login, dest, https):
-    """Один проверенный вход: старый пароль можно использовать, новые файлы
-    появляются только после обеих сетевых проверок."""
+    """Один проверенный вход: старый пароль можно использовать, новая запись
+    появляется только после обеих сетевых проверок -- и запись одна (#533).
+
+    Каталог с машинным operator.json (service) человеку закрыт: вход сюда
+    молча сменил бы личность сервисов, поэтому отказ до сети и до файлов."""
     if not https.isascii() or not https.isdecimal() or not 1 <= int(https) <= 65535:
         raise ValueError("server HTTPS port must be between 1 and 65535")
+    stored = creds.operator(dest)
+    if stored is not None and busnames.is_machine(stored["user"]):
+        raise RuntimeError("machine service identity and a human login conflict: "
+                           "use a separate operator account or connection directory")
+    # Прежний вход для повтора пароля: целый профиль, а при его отсутствии
+    # (или остатке) -- operator.json, если он человеческий. Повторное
+    # использование -- только после обычной проверки (_still_valid).
+    try:
+        profile = creds.human_profile(dest)
+    except ValueError:
+        profile = None
+    stored = profile or (stored if stored is not None and
+                         not busnames.is_machine(stored["user"]) else None)
     pin = _pinned(creds.cafile(dest))
     try:
-        stored = creds.operator(dest)
         valid = stored and stored["user"] == login and _still_valid(host, https, dest, stored)
         password = stored["password"] if valid else _login(host, login, dest, https)
         record = _fetch(host, login, password, dest, https)
         _probe(record["proxy_url"], record["proxy_key"], dest)
-        creds.write_client(dest, **record)
-        if not valid:
-            creds.write_operator(dest, login, password)
+        # Одна атомарная запись: провал между двумя прежними оставлял смесь --
+        # пароль одного входа с портом и ключом другого (#533).
+        creds.write_connection(dest, login, password, record["https_port"],
+                               record["proxy_url"], record["proxy_key"])
         # Старые ролевые пароли и токен Nomad удаляем только после полного входа.
         gone = creds.legacy(os.listdir(dest))
         if os.path.exists(os.path.join(dest, creds.TOKEN_FILE)) and \
@@ -192,33 +206,41 @@ def _bind(host, user):
 
 
 def ensure():
-    """Дополнить отсутствующий вход перед запуском master или code."""
+    """Дополнить отсутствующий вход перед запуском master или code.
+
+    Частичный остаток прежней пары (#533) -- не вход: восстановление одно,
+    полный повторный вход (проверка шины, свежий proxy-конфиг, проба ключа),
+    а не дописывание недостающей половины. Остаток годен только как подсказка
+    выбора адреса и логина -- не как профиль."""
     ctx = context.current()
     host = ctx.server
     if not host:
-        joined = sorted(d for d in glob.glob(os.path.join(creds.ROOT, "*"))
-                        if os.path.isfile(os.path.join(d, creds.CLIENT_FILE)))
+        joined = creds.joined_dirs()
         if len(joined) > 1:
             raise RuntimeError("multiple joined servers: name one with --server")
-        old = sorted(d for d in glob.glob(os.path.join(creds.ROOT, "*"))
-                     if creds.operator(d) is not None)
+        old = sorted(name for name in _dirs()
+                     if creds.operator(os.path.join(creds.ROOT, name)) is not None)
         choices = joined or old
         if len(choices) > 1:
             raise RuntimeError("multiple server logins: name one with --server")
         if choices:
-            host = os.path.basename(choices[0])
+            host = choices[0]
         elif sys.stdin.isatty():
             host = ask("server address: ")
         else:
             raise RuntimeError("no server and no terminal: run mop login --server ADDRESS")
     dest = creds.server_dir(host)
-    stored = creds.operator(dest)
     try:
-        saved = creds.client(dest)
+        if creds.human_profile(dest) is not None:
+            return host
     except ValueError as e:
-        raise RuntimeError(str(e)) from e
-    if stored and saved:
-        return host
+        # Частичный остаток -- не отказ, а направление ремонта: полный вход
+        # ниже его восстанавливает. Отказ решателя здесь глушил бы сам login.
+        if "conflict" not in str(e):
+            pass
+        else:
+            raise RuntimeError(str(e)) from e
+    stored = creds.operator(dest)
     user = creds.pick_login(ctx.user, (stored or {}).get("user"), None)
     if not user:
         if not sys.stdin.isatty():
@@ -226,11 +248,26 @@ def ensure():
         user = ask(f"login on {host}: ")
     if not stored and not sys.stdin.isatty() and not os.environ.get("MOP_BUS_PASSWORD"):
         raise RuntimeError(f"no password and no terminal: run mop login --server {host}")
-    https = _https_port(None, saved)
+    # Порт -- подсказка из остатка (машинный каталог своего порта не хранит);
+    # операторская половина без client.json идёт с портом по умолчанию.
+    try:
+        hint = creds.client(dest) if stored is None or not busnames.is_machine(
+            stored["user"]) else None
+    except ValueError:
+        hint = None
+    https = _https_port(None, hint)
     with context.use(context.resolve({"server": host}, {}, {})):
         complete(host, user, dest, https)
     _bind(host, user)
     return host
+
+
+def _dirs():
+    """Каталоги серверов, что есть; пусто -- когда корня ещё нет."""
+    try:
+        return sorted(os.listdir(creds.ROOT))
+    except FileNotFoundError:
+        return []
 
 
 def main(argv):
@@ -249,10 +286,10 @@ def main(argv):
     found = serving(origin) if origin and not ctx.server else []
     try:
         if not (explicit or bound or found):
-            joined = sorted(d for d in glob.glob(os.path.join(creds.ROOT, "*"))
-                            if os.path.isfile(os.path.join(d, creds.CLIENT_FILE)))
-            if joined:
-                found = [creds.joined_host()]
+            found = creds.joined_dirs()   # следы входов направляют выбор (#533)
+            if len(found) > 1:
+                raise RuntimeError(f"multiple joined servers ({', '.join(found)}): "
+                                   f"name one with --server")
         try:
             host = creds.pick_server(explicit, bound, found, None)
         except ValueError:
@@ -266,7 +303,12 @@ def main(argv):
             login = creds.pick_login(login or ctx.user, (stored or {}).get("user"), None)
             if not login:
                 login = ask(f"login on {host}: ")
-            saved = creds.client(dest)
+            # Порт -- подсказка из остатка прежнего входа; полный профиль
+            # знает свой порт сам, машинный каталог порта не хранит.
+            try:
+                saved = creds.client(dest)
+            except ValueError:
+                saved = None
             https = _https_port(explicit_https, saved)
             complete(host, login, dest, https)
     except (RuntimeError, ValueError, OSError) as e:

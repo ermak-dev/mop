@@ -273,7 +273,12 @@ def project_ready(project):
     здесь только «есть чем представиться», а отказ по правам приезжает с
     шины и читается отдельно (bus._silence). project остаётся в подписи:
     вопрос задают про проект, и ответ однажды может от него зависеть."""
-    return creds.operator(creds.server_dir()) is not None
+    directory = creds.server_dir()
+    try:
+        return creds.human_profile(directory) is not None or \
+            creds.operator(directory) is not None
+    except ValueError:   # сломанный профиль -- «нет чем»: ремонт -- mop login
+        return False
 
 
 def in_project():

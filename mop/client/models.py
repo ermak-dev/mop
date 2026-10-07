@@ -21,9 +21,13 @@ def available():
     """ID моделей выбранного joined-сервера; ключ не покидает HTTPS и localhost."""
     host = config.get("MOP_SERVER_LAN")
     directory = creds.server_dir(host)
-    joined = creds.client(directory)
+    # Один снимок профиля (#533): читаем готовый человеческий вход, не половины.
+    try:
+        joined = creds.human_profile(directory)
+    except ValueError as e:
+        raise RuntimeError(str(e)) from e
     if joined is None:
-        raise RuntimeError(f"no joined proxy configuration for {host}: run mop login --server {host}")
+        raise RuntimeError(f"no human login for {host}: run mop login --server {host}")
     url = joined["proxy_url"].rstrip("/") + "/v1/models"
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" and not (parsed.scheme == "http" and
