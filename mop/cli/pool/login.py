@@ -156,21 +156,26 @@ def complete(host, login, dest, https):
     """Один проверенный вход: старый пароль можно использовать, новая запись
     появляется только после обеих сетевых проверок -- и запись одна (#533).
 
-    Каталог с машинным operator.json (service) человеку закрыт: вход сюда
-    молча сменил бы личность сервисов, поэтому отказ до сети и до файлов."""
+    Каталог с машинным operator.json (service) или испорченным/неизвестным
+    connection.json человеку закрыт ДО сети и записи: первый вход молча
+    сменил бы личность сервисов, второй -- перезаписал бы чужой формат."""
     if not https.isascii() or not https.isdecimal() or not 1 <= int(https) <= 65535:
         raise ValueError("server HTTPS port must be between 1 and 65535")
     stored = creds.operator(dest)
     if stored is not None and busnames.is_machine(stored["user"]):
         raise RuntimeError("machine service identity and a human login conflict: "
                            "use a separate operator account or connection directory")
+    try:
+        kind, profile = creds.snapshot(dest)
+    except creds.ProfileError as e:
+        # Испорченный/неизвестный новый файл не перезаписывается и не
+        # читается как legacy: чинить его может только человек, а не вход.
+        if e.kind in ("broken", "conflict"):
+            raise RuntimeError(str(e)) from e
+        profile = None       # partial: половина пары, ниже полный вход
     # Прежний вход для повтора пароля: целый профиль, а при его отсутствии
     # (или остатке) -- operator.json, если он человеческий. Повторное
     # использование -- только после обычной проверки (_still_valid).
-    try:
-        profile = creds.human_profile(dest)
-    except ValueError:
-        profile = None
     stored = profile or (stored if stored is not None and
                          not busnames.is_machine(stored["user"]) else None)
     pin = _pinned(creds.cafile(dest))
@@ -183,16 +188,20 @@ def complete(host, login, dest, https):
         # пароль одного входа с портом и ключом другого (#533).
         creds.write_connection(dest, login, password, record["https_port"],
                                record["proxy_url"], record["proxy_key"])
-        # Старые ролевые пароли и токен Nomad удаляем только после полного входа.
-        gone = creds.legacy(os.listdir(dest))
-        if os.path.exists(os.path.join(dest, creds.TOKEN_FILE)) and \
-                not os.path.isdir(paths.local(paths.SECRETS)):
-            gone.append(creds.TOKEN_FILE)
-        for name in gone:
-            os.remove(os.path.join(dest, name))
     except Exception:
         _restore_pin(dest, pin)
         raise
+    # После записи профиль новый и целый: провал очистки -- не отказ входа и
+    # не откат пина, а честный остаток старых файлов; вход уже состоялся.
+    gone = creds.legacy(os.listdir(dest))
+    if os.path.exists(os.path.join(dest, creds.TOKEN_FILE)) and \
+            not os.path.isdir(paths.local(paths.SECRETS)):
+        gone.append(creds.TOKEN_FILE)
+    try:
+        for name in gone:
+            os.remove(os.path.join(dest, name))
+    except OSError as e:
+        print(f"login complete, cleanup incomplete: {e}", file=sys.stderr)
 
 
 def _bind(host, user):
@@ -233,12 +242,11 @@ def ensure():
     try:
         if creds.human_profile(dest) is not None:
             return host
-    except ValueError as e:
-        # Частичный остаток -- не отказ, а направление ремонта: полный вход
-        # ниже его восстанавливает. Отказ решателя здесь глушил бы сам login.
-        if "conflict" not in str(e):
-            pass
-        else:
+    except creds.ProfileError as e:
+        # Конфликт и испорченный/неизвестный новый файл -- отказ: повторный
+        # вход молча перезаписал бы чужой формат. Половина пары -- не отказ,
+        # а направление ремонта: полный вход ниже её восстанавливает.
+        if e.kind != "partial":
             raise RuntimeError(str(e)) from e
     stored = creds.operator(dest)
     user = creds.pick_login(ctx.user, (stored or {}).get("user"), None)

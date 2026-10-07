@@ -89,10 +89,11 @@ def quiet_complete(dest, row=None, **kw):
 
 
 def refute(c, what, fn, *needles):
-    """fn поднимает ValueError, чей текст содержит needles и не содержит секретов."""
+    """fn поднимает отказ (ValueError или его наследников, BusError в их
+    числе), чей текст содержит needles и не содержит секретов."""
     try:
         fn()
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         text = str(e)
         missing = [n for n in needles if n not in text]
         leak = [s for s in SECRETS if s in text]
@@ -107,89 +108,110 @@ def refute(c, what, fn, *needles):
 
 
 # ── дефект #533: смешение входов при промежуточном отказе ───────────────
+# Инвариант ОДИН на обеих реализациях (базовой и исправленной), ожидание не
+# меняется между прогонами: после complete -- успешного или сорвавшегося --
+# эффективный вход каталога есть ЦЕЛИКОМ ALICE, ЦЕЛИКОМ BOB или его нет,
+# НИКОГДА смесь. Саботаж второго старого writer допустим: в новой реализации
+# он просто не вызывается, и вход завершается целиком. Наблюдение
+# нормализовано: чтение каталога решателем (до правки -- поштучно из пары,
+# после -- готовый профиль), смесь видна как «не ALICE и не BOB».
+def effective(dest):
+    """Эффективный вход каталога, нормализованный к форме профиля.
+
+    На базовой реализации собирается из пары поштучно (как её читатели), на
+    исправленной -- читается готовый профиль; источник не важен, важна
+    ЦЕЛОСТНОСТЬ. Отказ решателя -- «нет входа» (None), не смесь."""
+    try:
+        return creds.human_profile(dest)
+    except AttributeError:      # до правки решателя нет: читаем как база
+        op, cl = creds.operator(dest), None
+        try:
+            cl = creds.client(dest)
+        except ValueError:
+            cl = None
+        if op and cl:
+            return {"user": op["user"], "password": op["password"],
+                    "https_port": cl["https_port"], "proxy_url": cl["proxy_url"],
+                    "proxy_key": cl["proxy_key"]}
+        return None
+    except ValueError:
+        return None
+
+
 def check_mixed_write_533(c):
-    write = getattr(creds, "write_connection", None)
-    profile = getattr(creds, "human_profile", None)
-    c.check("#533 write_connection exists", write is not None)
-    c.check("#533 human_profile exists", profile is not None)
-    if not (write and profile):
-        # До исправления: показать сам дефект. Сегодня provал записи
-        # operator.json (вторая из двух) оставляет смесь -- пароль старого
-        # входа с портом и ключом нового, -- и ни один читатель не видит
-        # подмены: это не отказ, а ложный вход.
-        root = tempfile.mkdtemp(prefix="mop-conn-defect-")
-        dest = os.path.join(root, "srv.test")
-        put_legacy(dest, ALICE)
-        def boom(*a, **k):
-            raise RuntimeError("disk full")
-        with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
-                     _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
-                                        "proxy_key": BOB[4]},
-                     _probe=lambda *a: None), \
-                patched(creds, write_operator=boom):
-            try:
-                join.complete("srv.test", "bob", dest, "8443")
-                c.fail("#533 (defect) an interrupted login must surface the failure")
-            except RuntimeError as e:
-                c.check("#533 (defect) the interrupted write is the operator record",
-                        "disk full" in str(e), str(e))
-        op, cl = creds.operator(dest), creds.client(dest)
-        c.expect("#533 (defect) the bus password stays the old login",
-                 (op or {}).get("user"), ALICE[0])
-        c.expect("#533 (defect) the client record is the new one",
-                 (cl or {}).get("proxy_key"), BOB[4])
-        c.check("#533 (defect) today a mixed directory reads as a valid login",
-                op is not None and cl is not None,
-                f"operator {op}, client {cl}")
-        return
     root = tempfile.mkdtemp(prefix="mop-conn-533-")
     dest = os.path.join(root, "srv.test")
 
-    # Старый вход лежит, повторный вход нового человека срывается на полпути:
-    # сегодня вторая запись (operator.json) не доходит, и читатель собирает
-    # пароль старого с портом нового. После исправления провал промежуточной
-    # записи не существует: запись одна.
+    # Прерванный повторный вход нового человека: саботаж второго writer
+    # (operator.json на базовой реализации, в новой он не вызывается).
     put_legacy(dest, ALICE)
-    sabotaged = []
-    real_operator = creds.write_operator
-    with patched(join, _login=lambda *a: BOB[1],
+    c.expect("#533 the old login is whole before the attempt",
+             effective(dest), profile_of(ALICE))
+    outcome = []
+    with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
                  _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
                                     "proxy_key": BOB[4]},
                  _probe=lambda *a: None), \
-            patched(creds, write_operator=lambda *a: sabotaged.append(a)):
-        join.complete("srv.test", "bob", dest, "8443")
-    c.check("#533 a complete login needs no second record", not sabotaged, sabotaged)
-    got = profile(dest)
-    c.expect("#533 the reader sees one whole login, not a mix",
-             got, profile_of(BOB))
-    c.expect("#533 new proxy travels with its own login", got["proxy_key"], BOB[4])
+            patched(creds, write_operator=_sabotage("disk full")):
+        try:
+            join.complete("srv.test", "bob", dest, "8443")
+            outcome.append("completed")
+        except (RuntimeError, OSError) as e:
+            outcome.append(f"refused: {e}")
+            c.check("#533 an interrupted write surfaces its failure",
+                    "disk full" in str(e), str(e))
+    got = effective(dest)
+    c.check("#533 after an interrupted login the directory holds one whole "
+            "login, never a mix",
+            got in (profile_of(ALICE), profile_of(BOB)),
+            f"outcome {outcome}, effective {got}")
 
-    # Одна запись на успешный вход: файл connection.json, 0600, без мусора.
-    path = os.path.join(dest, "connection.json")
-    c.check("#533 connection.json is written", os.path.isfile(path))
-    if os.path.isfile(path):
-        c.expect("#533 private profile file", os.stat(path).st_mode & 0o777, 0o600)
-    for d in (os.path.dirname(dest), dest):
+    # Успешный повторный вход: эффективный вход -- целиком новый.
+    with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
+                 _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
+                                    "proxy_key": BOB[4]},
+                 _probe=lambda *a: None):
+        join.complete("srv.test", "bob", dest, "8443")
+    got = effective(dest)
+    c.check("#533 a successful re-login switches the whole login",
+            got == profile_of(BOB), f"effective {got}")
+    c.check("#533 the new proxy travels with its own login",
+            (got or {}).get("proxy_key") == BOB[4], f"effective {got}")
+
+    # Приватность -- нормализованно: каталоги 0700, каждый файл входа 0600,
+    # временных файлов не остаётся. Одно ожидание на обеих реализациях.
+    for d in (root, dest):
         c.expect(f"#533 private directory {os.path.basename(d)}",
                  os.stat(d).st_mode & 0o777, 0o700)
+    names = [n for n in os.listdir(dest) if not n.endswith(".tmp")]
+    c.check("#533 every profile file is private",
+            all(os.stat(os.path.join(dest, n)).st_mode & 0o777 == 0o600 for n in names),
+            names)
     c.check("#533 no temporary file remains",
             not any(n.endswith(".tmp") for n in os.listdir(dest)), os.listdir(dest))
 
-    # Неуспешная проверка не оставляет ни нового файла, ни полузаписи.
-    fresh = os.path.join(root, "fresh.test")
-    os.makedirs(fresh)
-    with patched(join, _login=lambda *a: BOB[1],
+    # Неуспешная вторая проверка (проба ключа): ни нового файла, ни полузаписи,
+    # прежний вход целиком на месте. Одно ожидание на обеих реализациях.
+    with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
                  _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
                                     "proxy_key": BOB[4]},
                  _probe=lambda *a: (_ for _ in ()).throw(RuntimeError("HTTP 401"))):
         try:
-            join.complete("fresh.test", "bob", fresh, "8443")
+            join.complete("srv.test", "bob", dest, "8443")
             c.fail("#533 failed verification must refuse")
         except RuntimeError:
             pass
-    c.check("#533 a failed login writes nothing",
-            not os.path.exists(os.path.join(fresh, "connection.json")),
-            os.listdir(fresh))
+    c.check("#533 a failed verification keeps the previous login whole",
+            effective(dest) in (profile_of(ALICE), profile_of(BOB)),
+            f"effective {effective(dest)}")
+
+
+def _sabotage(reason):
+    """Заглушка-провал для старого writer: саботаж допустим в обеих
+    реализациях, в новой он просто не вызывается."""
+    def boom(*a, **k):
+        raise RuntimeError(reason)
+    return boom
 
 
 # ── решатель: новая схема, порча, неизвестная версия ────────────────────
@@ -217,6 +239,10 @@ def check_reader_new_533(c):
            lambda: profile(a), "version", "mop login")
     put_connection(a, ALICE, version="one")
     refute(c, "#533 a nonnumeric version refuses", lambda: profile(a), "version")
+    # bool в Python равен единице: `true` в файле не версия 1, а чужой формат.
+    put_connection(a, ALICE, version=True)
+    refute(c, "#533 a boolean version is not schema version 1",
+           lambda: profile(a), "version")
     with open(os.path.join(a, "connection.json"), "w", encoding="utf-8") as f:
         f.write("{not json")
     refute(c, "#533 a corrupted file refuses without a legacy fallback",
@@ -429,6 +455,103 @@ def check_two_servers_533(c):
             c.fail("#533 discovery counts connection.json alone", str(e))
 
 
+# ── существующий испорченный/неизвестный профиль не перезаписывается ─────
+# Recovery входа существует только для отсутствующего нового файла и
+# неполной ВАЛИДНОЙ legacy-пары. Испорченный/неизвестный connection.json --
+# отказ ДО сети и записи, во всех путях: complete, ensure, main. На базовой
+# реализации каталог читается парой и вход молча лезет в сеть -- ровно это
+# и должен поймать красный прогон.
+def check_broken_profile_not_overwritten_533(c):
+    for label, mutate in (
+            ("version 2", lambda d: put_connection(d, ALICE, version=2)),
+            ("malformed", lambda d: _corrupt(d))):
+        root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-broken-"), "servers")
+        host = label.replace(" ", "-") + ".test"
+        dest = os.path.join(root, host)
+        # Испорченный профиль лежит рядом со старой парой: ни старый пароль,
+        # ни порт не читаются из него, файл не перезаписывается, сеть не зовётся.
+        put_legacy(dest, ALICE)
+        mutate(dest)
+        raw = open(os.path.join(dest, "connection.json"), encoding="utf-8").read()
+        before = snapshot(dest)
+        touched = []
+        with patched(creds, ROOT=root), \
+                patched(join, _login=lambda *a: touched.append("_login") or "bus-x",
+                         _still_valid=lambda *a: touched.append("_still_valid") or False,
+                         _fetch=lambda *a: touched.append("_fetch") or
+                         {"https_port": "443", "proxy_url": "https://x/llm",
+                          "proxy_key": "x"},
+                         _probe=lambda *a: touched.append("_probe"),
+                         ask=lambda *a: touched.append("ask") or "alice",
+                         git=lambda *a: None), \
+                patched(creds, untrusted_cert=lambda *a: touched.append("cert") or None), \
+                patched(join.bus, check=lambda *a: touched.append("bus.check")), \
+                patched(creds, write_connection=lambda *a: touched.append("write")), \
+                patched(sys, stderr=io.StringIO()), \
+                context.use(context.resolve({"server": host, "user": "alice"}, {}, {})), \
+                patched_env(MOP_BUS_PASSWORD="bus-x", MOP_SERVER_LAN=host,
+                            MOP_HTTPS_PORT="443"):
+            for path, call in (("complete", lambda: join.complete(
+                                    host, "alice", dest, "443")),
+                                ("ensure", lambda: join.ensure()),
+                                ("main", lambda: join.main(["--server", host,
+                                                            "--https-port", "443"]))):
+                touched.clear()
+                refusal, rc = None, None
+                try:
+                    rc = call()        # main отказывает кодом 1, не исключением
+                except (RuntimeError, ValueError) as e:
+                    refusal, rc = str(e), 1
+                c.check(f"#533 {path} refuses a broken profile ({label}) "
+                        f"before network and writing",
+                        rc == 1 and not touched,
+                        f"rc {rc}, touched {touched}, refusal {refusal}")
+        c.expect(f"#533 {label}: the broken file bytes are unchanged",
+                 open(os.path.join(dest, "connection.json"), encoding="utf-8").read(), raw)
+        c.expect(f"#533 {label}: the directory is untouched", snapshot(dest), before)
+
+
+def _corrupt(directory):
+    """Записать в connection.json осмысленно испорченный новый формат."""
+    with open(os.path.join(directory, "connection.json"), "w", encoding="utf-8") as f:
+        f.write('{"version": 1, "bus": null}')   # не словарь bus -- мусор
+
+
+# ── провал очистки после успешной записи не отменяет вход ───────────────
+# После успешного write_connection провал очистки старых записей -- не отказ
+# входа: новый профиль цел, TLS-пин не откатывается, провал назван честно.
+def check_cleanup_failure_keeps_profile_533(c):
+    if getattr(creds, "write_connection", None) is None:
+        return      # до #533 записи две и cleanup внутри того же try: правки нет
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-cleanup-"), "servers")
+    dest = os.path.join(root, "srv.test")
+    put_legacy(dest, ALICE)
+    # Старый ролевой пароль: именно его убирает очистка после записи.
+    with open(os.path.join(dest, creds.pass_file(None)), "w", encoding="utf-8") as f:
+        f.write("old role password\n")
+    pin_path = creds.write_cert(dest, b"old-pin-der")
+    pin_before = open(pin_path, encoding="utf-8").read()
+
+    def boom_remove(path):
+        raise OSError("cleanup refused")
+
+    with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
+                 _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
+                                    "proxy_key": BOB[4]},
+                 _probe=lambda *a: None), \
+            patched(os, remove=boom_remove):
+        err = io.StringIO()
+        with patched(sys, stderr=err):
+            join.complete("srv.test", "bob", dest, "8443")
+    c.check("#533 a failed cleanup is reported, not swallowed",
+            "cleanup incomplete" in err.getvalue(), err.getvalue())
+    got = creds.human_profile(dest)
+    c.expect("#533 the new profile stays after a failed cleanup",
+             got, profile_of(BOB))
+    c.expect("#533 the TLS pin is not rolled back after the profile is written",
+             open(pin_path, encoding="utf-8").read(), pin_before)
+
+
 def main():
     c = Checks()
     check_mixed_write_533(c)
@@ -438,6 +561,8 @@ def main():
     check_human_login_refuses_machine_533(c)
     check_recover_533(c)
     check_two_servers_533(c)
+    check_broken_profile_not_overwritten_533(c)
+    check_cleanup_failure_keeps_profile_533(c)
     return c.report("connection")
 
 

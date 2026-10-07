@@ -177,20 +177,18 @@ def server_config(host):
     # контракт: operator.json сервиса, порт из client.json, если лежит,
     # иначе настройка, proxy не обязателен. Сосуществование machine operator
     # и человеческого профиля -- конфликт без выбора стороны.
-    profile = creds.human_profile(directory)
-    op = creds.operator(directory)
-    if profile is None and op is not None:
-        # Служебный каталог (service): машинный вход, не человек.
-        if busnames.is_machine(op["user"]):
-            joined = creds.client(directory)
-            port = joined["https_port"] if joined else settings.get("MOP_HTTPS_PORT")
-            return creds.wss_config(host, port, PROJECT, op["password"], user=op["user"],
-                                    cafile=creds.cafile(directory))
-        raise BusError(f"incomplete login: {directory} — run mop login --server {host}")
-    if profile is None:
-        raise BusError(f"no bus credentials: {directory} — run mop login --server {host}")
-    return creds.wss_config(host, profile["https_port"], PROJECT, profile["password"],
-                            user=profile["user"], cafile=creds.cafile(directory))
+    try:
+        kind, profile = creds.snapshot(directory)
+    except creds.ProfileError as e:
+        raise BusError(str(e)) from e
+    if kind == "human":
+        return creds.wss_config(host, profile["https_port"], PROJECT, profile["password"],
+                                user=profile["user"], cafile=creds.cafile(directory))
+    if kind == "machine":
+        port = profile["https_port"] if profile["https_port"] else settings.get("MOP_HTTPS_PORT")
+        return creds.wss_config(host, port, PROJECT, profile["password"],
+                                user=profile["user"], cafile=creds.cafile(directory))
+    raise BusError(f"no bus credentials: {directory} — run mop login --server {host}")
 
 
 # ─── соединение ──────────────────────────────────────────────────────────

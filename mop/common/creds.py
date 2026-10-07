@@ -319,6 +319,19 @@ def write_client(directory, https_port, proxy_url, proxy_key):
 
 
 # ─── атомарный профиль человека (#533) ──────────────────────────────────
+class ProfileError(ValueError):
+    """Отказ решателя профиля с ТИПОМ причины (#533): читателю -- текст,
+    login различает случаи по kind, а не поиском слов в сообщении.
+    broken -- испорченный/неизвестный новый файл или битая запись пары:
+    ремонта без полного входа нет и перезапись запрещена; conflict --
+    machine operator рядом с человеческим профилем; partial -- половина
+    прежней пары: восстановима полным входом."""
+
+    def __init__(self, kind, text):
+        super().__init__(text)
+        self.kind = kind
+
+
 def _connection_values(user, password, https_port, proxy_url, proxy_key):
     """Схема connection.json целиком: одна запись -- один вход. Значения
     проходят проверку прежних _client_values: порт, URL и ключ -- те же
@@ -358,7 +371,12 @@ def _read_connection(directory):
     except (OSError, ValueError) as e:
         raise ValueError(f"cannot read the connection profile: re-run mop login "
                          f"on {os.path.basename(directory)}") from e
-    if not isinstance(raw, dict) or raw.get("version") != CONNECTION_VERSION:
+    # Версия -- строго int: bool в Python равен единице, и `true` в файле
+    # иначе прочитался бы как версия 1. Неизвестная версия -- отказ, не None:
+    # молчаливое «нет входа» прятало бы чужой формат за повторным входом.
+    version = raw.get("version") if isinstance(raw, dict) else None
+    if isinstance(version, bool) or not isinstance(version, int) \
+            or version != CONNECTION_VERSION:
         raise ValueError("unknown connection profile version: re-run mop login")
     try:
         bus_part, proxy_part = raw["bus"], raw["proxy"]
@@ -374,52 +392,55 @@ def _read_connection(directory):
             "proxy_key": values["proxy"]["key"]}
 
 
-def human_profile(directory):
-    """Профиль человека из каталога сервера, либо None. Один решатель для
-    всех читателей (#533): connection.json, иначе ЦЕЛАЯ legacy-пара, ничего
-    больше. Половина пары -- отказ, а не вход вполовину; machine operator
-    рядом с профилем человека -- конфликт без выбора стороны."""
+def snapshot(directory):
+    """ОДИН снимок каталога сервера: каждый файл читается один раз (#533).
+    -> ("human", профиль) | ("machine", {user, password, https_port|None}) |
+    (None, None). Конфликт machine operator + человеческий профиль,
+    половины прежней пары и битые записи -- ProfileError с типом причины.
+
+    Единственный решатель для шины: два отдельных чтения увидели бы два
+    поколения каталога, если writer заменил файл между ними."""
     conn = _read_connection(directory)
     op = operator(directory)
     if op is not None and busnames.is_machine(op["user"]):
         if conn is not None:
-            raise ValueError("machine service identity and a human login conflict: "
-                             "use a separate operator account or connection directory")
-        return None     # служебный каталог: человеческого профиля в нём нет
+            raise ProfileError("conflict", "machine service identity and a human login "
+                               "conflict: use a separate operator account "
+                               "or connection directory")
+        # Служебный каталог -- прежний контракт шины: порт из client.json,
+        # если лежит (битый -- отказ, как раньше), иначе настройка; прокси
+        # не обязателен.
+        joined = client(directory)
+        return "machine", {"user": op["user"], "password": op["password"],
+                           "https_port": joined["https_port"] if joined else None}
     if conn is not None:
-        return conn
-    if op is None:
-        try:
-            got = client(directory)
-        except ValueError as e:
-            # Битый client.json -- отказ и без operator.json, с ремонтом.
-            raise ValueError(f"{e}: re-run mop login") from None
-        if got is not None:
-            # Прокс-половина прежней пары: не вход, а след входа. Пароль
-            # неизвестен, доверять старому ключу без нового login нельзя.
-            raise ValueError("incomplete login: re-run mop login --server "
-                             f"{os.path.basename(directory)}")
-        return None
+        return "human", conn
     try:
         joined = client(directory)
     except ValueError as e:
-        # Битая пара -- отказ, не «нет входа»: ошибки client() несут свой
+        # Битая запись -- отказ, не «нет входа»: ошибки client() несут свой
         # смысл, ремонт называем здесь.
-        raise ValueError(f"{e}: re-run mop login") from None
-    if joined is None:
+        raise ProfileError("broken", f"{e}: re-run mop login") from None
+    if joined is None and op is None:
+        return None, None
+    if joined is None or op is None:
         # Половина прежней пары -- не вход: пароль без прокси-настроек
-        # запускал бы сессию без модели (#533). Восстановление -- полный вход.
-        raise ValueError(f"incomplete login: re-run mop login --server "
-                         f"{os.path.basename(directory)}")
-    return {"user": op["user"], "password": op["password"],
-            "https_port": joined["https_port"], "proxy_url": joined["proxy_url"],
-            "proxy_key": joined["proxy_key"]}
+        # запускал бы сессию без модели, прокси без пароля -- вход неизвестно
+        # кого. Восстановление -- полный вход (#533).
+        raise ProfileError("partial", f"incomplete login: re-run mop login "
+                           f"--server {os.path.basename(directory)}")
+    return "human", {"user": op["user"], "password": op["password"],
+                     "https_port": joined["https_port"],
+                     "proxy_url": joined["proxy_url"],
+                     "proxy_key": joined["proxy_key"]}
 
 
-def _machine_login(directory):
-    """Служебный вход каталога (machine operator.json), либо None."""
-    op = operator(directory)
-    return op if op is not None and busnames.is_machine(op["user"]) else None
+def human_profile(directory):
+    """Профиль человека из каталога сервера, либо None. Тонкая обёртка
+    snapshot (#533): служебный каталог профелем человека не становится,
+    остальные случаи решает общий снимок."""
+    kind, who = snapshot(directory)
+    return who if kind == "human" else None
 
 
 def joined_dirs(root=None):
@@ -428,26 +449,17 @@ def joined_dirs(root=None):
     адреса для повторного login (main/ensure): профелем он не становится,
     и запускатели без полного входа откажут.
 
-    Сломанный каталог -- кандидат всё равно: «не могу разобрать» не значит
-    «выбор вслепую»; явный --server назовёт его и получит внятный отказ."""
+    След -- наличие файла, не содержимое: сломанный каталог остаётся
+    кандидатом, «не могу разобрать» не значит «выбор вслепую»; явный
+    --server назовёт его и получит внятный отказ."""
     root = root or ROOT
     try:
         names = sorted(os.listdir(root))
     except FileNotFoundError:
         return []
-    out = []
-    for name in names:
-        d = os.path.join(root, name)
-        try:
-            whole = human_profile(d) is not None or _machine_login(d) is not None
-        except ValueError:
-            whole = os.path.isfile(os.path.join(d, CONNECTION_FILE)) or \
-                os.path.isfile(os.path.join(d, CLIENT_FILE)) or \
-                os.path.isfile(os.path.join(d, OPERATOR_FILE))
-        if whole or os.path.isfile(os.path.join(d, CLIENT_FILE)) or \
-                os.path.isfile(os.path.join(d, OPERATOR_FILE)):
-            out.append(name)
-    return out
+    return [name for name in names
+            if any(os.path.isfile(os.path.join(root, name, f))
+                   for f in (CONNECTION_FILE, CLIENT_FILE, OPERATOR_FILE))]
 
 
 def password(directory, project):
