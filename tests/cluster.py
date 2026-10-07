@@ -1502,6 +1502,43 @@ def check_registry_verbs_534(c):
         finally:
             env.cleanup()
 
+    # 14. Читающий глагол показывает прежние данные из проблемной пары:
+    # refusing-миграция блокирует МУТАЦИЮ, а не чтение (#534: старые данные
+    # остаются видимыми, `mop project list` не пустеет). Голое имя остаётся
+    # строкой и именем, orphan-лимит виден в limits, и ничего не пишется;
+    # изменяющий глагол в тот же момент отказывает с именем причины.
+    for pair in ({RU534, "oldproject"}, {RU534, OTHER534}):
+        env = _Registry534(limits={"mop": 2, "oldproject": 4})
+        with open(os.path.join(env.dir, "projects"), "w") as f:
+            f.write("".join(f"{s}\n" for s in sorted(pair)))
+        with env.patched_env():
+            try:
+                got = cluster.answer("admin", {"verb": "projects"})
+                c.check(f"#534 listing a bad pair ({sorted(pair)[0]}) keeps the answer ok",
+                        bool(got.get("ok")), got)
+                c.expect(f"#534 listing keeps the legacy lines ({sorted(pair)[0]})",
+                         got.get("lines"), sorted(pair))
+                c.expect(f"#534 listing keeps the legacy names ({sorted(pair)[0]})",
+                         got.get("names"),
+                         sorted({"rudesktop"} | (pair & {"oldproject"})))
+                c.expect(f"#534 listing keeps the legacy limits ({sorted(pair)[0]})",
+                         got.get("limits"), {"mop": 2, "oldproject": 4})
+                c.check(f"#534 listing a bad pair writes nothing ({sorted(pair)[0]})",
+                        not os.path.exists(env.snapshot_path()))
+                # Мутация в тот же момент -- отказ с именем причины, файлы не
+                # тронуты (ответ глагола оборачивается исключением в error).
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check(f"#534 mutation of a bad pair refuses by cause ({sorted(pair)[0]})",
+                        bool(err) and ("oldproject" in err or "rudesktop" in err), got)
+                c.check(f"#534 mutation of a bad pair writes no snapshot ({sorted(pair)[0]})",
+                        not os.path.exists(env.snapshot_path()))
+                c.check(f"#534 mutation of a bad pair leaves the pair intact ({sorted(pair)[0]})",
+                        env.legacy() == pair, env.legacy())
+            finally:
+                env.cleanup()
+
     # 13. Атомарность по видимому читателю: обрыв записи (падение ФС между
     # решением и users_apply, и в users_apply) оставляет на диске ЦЕЛИКОМ
     # прежний или новый снимок -- никогда не смесь и никогда не пусто.

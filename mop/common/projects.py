@@ -190,7 +190,12 @@ def snapshot_of(dir_):
       * нет снимка, есть пара -- снимок из пары; непредставимое (голое
         имя, два origin'а одного проекта, orphan/чужой лимит) -- отказ с
         именем, без потерь и без выдумывания origin'а;
-      * нет ничего -- свежая установка: честный пустой реестр."""
+      * нет ничего -- свежая установка: честный пустой реестр.
+
+    Это взгляд writer'а: отказ здесь блокирует мутацию. Читателю
+    (глаголы-списки, лимит в add, users прогонов), которому старые данные
+    обязаны оставаться видимыми, -- view_of: та же пара, но без отказов
+    представимости."""
     path = os.path.join(dir_, "projects.json")
     if os.path.exists(path):
         return _snapshot_from_file(path)
@@ -198,6 +203,36 @@ def snapshot_of(dir_):
     if os.path.exists(old_registry) or os.path.exists(old_limits):
         return _snapshot_of_pair(dir_)
     return {"version": SNAPSHOT_VERSION, "projects": []}
+
+
+def view_of(dir_):
+    """Снимок для читателя: прежние видимые данные, отказов представимости
+    нет. Чистая, ничего не пишет.
+
+    Непредставимое в v1 (голое имя, два origin'а одного проекта, orphan-
+    лимит) не теряется из виду: миграция -- отказ writer'а (snapshot_of),
+    а читатель видит то же, что показывал прежний ответ глагола projects
+    по этой паре. Для этого снимок несёт необязательные legacy-строки и
+    legacy-лимиты -- их печатают snapshot_lines/names/limits, но writer
+    их не сохраняет: первый успешный мутирующий глагол миграцию потребует,
+    и там отказ будет услышан."""
+    path = os.path.join(dir_, "projects.json")
+    if os.path.exists(path):
+        return _snapshot_from_file(path)
+    old_registry, old_limits = os.path.join(dir_, "projects"), os.path.join(dir_, "limits.json")
+    if not (os.path.exists(old_registry) or os.path.exists(old_limits)):
+        return {"version": SNAPSHOT_VERSION, "projects": []}
+    origins, legacy = puppets.project_ids(read(os.path.join(dir_, "projects")))
+    limits = read_limits(os.path.join(dir_, "limits.json"))
+    snap = {"version": SNAPSHOT_VERSION,
+            "projects": [_entry(o, limits.get(puppets.project_of(o))) for o in sorted(origins)]}
+    if legacy:
+        snap["legacy"] = sorted(legacy)
+    orphans = {k: v for k, v in limits.items()
+               if k not in {puppets.project_of(o) for o in origins}}
+    if orphans:
+        snap["legacy_limits"] = orphans
+    return snap
 
 
 def _snapshot_from_file(path):
@@ -224,13 +259,16 @@ def _snapshot_of_pair(dir_):
     Голое имя и коллизия basename'ов в v1 не представимы без выдумывания
     origin'а; orphan-лимит (имени нет в реестре) нельзя ни перенести (не
     куда), ни выбросить (потеря потолка) -- всё это отказ оператору с
-    конкретным именем, файлы остаются как были."""
+    именем, файлы остаются как были. Отказ называет причину и сохранность,
+    но не способ исправления: правка реестра идёт теми же глаголами
+    (первый мутирующий потребует ту же миграцию и откажет тем же
+    отказом), а редактирование файлов руками -- не путь пула."""
     origins, legacy = puppets.project_ids(read(os.path.join(dir_, "projects")))
     if legacy:
         raise RuntimeError("cannot migrate the registry: bare name(s) without an "
-                           f"origin: {', '.join(sorted(legacy))}. Add the origin of "
-                           "each project (mop project add <git-origin>) or drop "
-                           "the line by hand: v1 stores origins only")
+                           f"origin: {', '.join(sorted(legacy))}. v1 stores origins "
+                           "only; the files are intact, and fixing them is an "
+                           "operator decision")
     seen = {}
     for o in sorted(origins):
         name = puppets.project_of(o)
@@ -238,16 +276,17 @@ def _snapshot_of_pair(dir_):
             # Имя и число, не сырые origin'ы: origin в реестре может нести
             # креды (userinfo, token), и отказ оператору их не печатает.
             raise RuntimeError("cannot migrate the registry: 2 origins of one "
-                               f"project {name}. Leave the true one and drop "
-                               "the other by hand (mop project list --origins): "
-                               "v1 keeps one project per name")
+                               f"project {name}. v1 keeps one origin per project; "
+                               "the files are intact, and choosing the true one "
+                               "is an operator decision")
         seen[name] = o
     limits = read_limits(os.path.join(dir_, "limits.json"))
     for name in sorted(limits):
         if name not in seen:
             raise RuntimeError("cannot migrate the registry: limit of an unknown "
-                               f"project {name!r} in limits.json. Remove the line "
-                               "by hand or register the project first")
+                               f"project {name!r} in limits.json. The files are "
+                               "intact, and what to do with the limit is an "
+                               "operator decision")
     return {"version": SNAPSHOT_VERSION,
             "projects": [_entry(o, limits.get(puppets.project_of(o))) for o in sorted(origins)]}
 
@@ -258,14 +297,18 @@ def snapshot_origins(snapshot):
 
 
 def snapshot_limits(snapshot):
-    """{имя: потолок} снимка: только записи с лимитом."""
-    return {puppets.project_of(p["origin"]): p["limit"]
-            for p in snapshot["projects"] if p.get("limit") is not None}
+    """{имя: потолок} снимка: записи с лимитом плюс legacy-потолки вида --
+    прежний ответ глагола projects печатал limits целиком."""
+    out = {puppets.project_of(p["origin"]): p["limit"]
+           for p in snapshot["projects"] if p.get("limit") is not None}
+    out.update(snapshot.get("legacy_limits") or {})
+    return out
 
 
 def snapshot_names(snapshot):
     """Имена проектов снимка (basename'ы, без дублей), по порядку."""
-    return sorted({puppets.project_of(p["origin"]) for p in snapshot["projects"]})
+    return sorted({puppets.project_of(p["origin"]) for p in snapshot["projects"]}
+                  | set(snapshot.get("legacy") or []))
 
 
 def snapshot_with_origin(snapshot, origin):
@@ -314,11 +357,15 @@ def snapshot_with_limit(snapshot, name, value):
 def snapshot_lines(snapshot):
     """Строки реестра для ответа глагола `projects` (поле lines): origin'ы
     и голые имена снимка -- как их печатает и читает легаси-реестр."""
-    return snapshot_origins(snapshot)
+    return snapshot_origins(snapshot) + list(snapshot.get("legacy") or [])
 
 
 def write_snapshot(snapshot, path=SNAPSHOT):
-    """Запись снимка атомарно. Единственный writer -- сервис кластера."""
+    """Запись снимка атомарно. Единственный writer -- сервис кластера.
+
+    Legacy-поля вида (голые имена, orphan-потолки) -- только читателю: на
+    диск их writer не кладёт, v1-снимок представим (миграция либо уже
+    прошла, либо откажет с именем до всякой записи)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {"version": snapshot["version"],
                "projects": [{"origin": p["origin"], **({"limit": p["limit"]}

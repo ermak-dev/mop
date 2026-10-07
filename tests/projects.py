@@ -497,11 +497,107 @@ def _pair_dir(d, lines, limits):
     return os.path.join(d, "pair")
 
 
+def _migrate_refusal(dir_):
+    """Текст отказа миграции пары в каталоге (или None, если не отказала)."""
+    try:
+        projects.snapshot_of(dir_)
+        return None
+    except RuntimeError as e:
+        return str(e)
+
+
+def check_view_534(c):
+    """Читающий взгляд #534: прежние видимые данные из проблемной пары.
+
+    Читатель (глагол-список, лимит в add, users deploy-прогона) обязан
+    показывать старые данные и без миграции -- refusing-миграция блокирует
+    МУТАЦИЮ, а не чтение. Голое имя остаётся строкой lines, конфликт
+    basename'ов -- оба origin'а, orphan-лимит -- в limits: взгляд
+    воссоздаёт прежний ответ глагола `projects` по паре, ничего не пишет
+    и не теряет. STATUS: #534"""
+    import shutil
+    import tempfile
+    d = tempfile.mkdtemp(prefix="mop-test-534v-")
+    try:
+        # Чистая пара: взгляд -- тот же снимок, что и миграция.
+        _legacy_pair(d, [MOP, RU], {"mop": 3, "rudesktop": 0})
+        c.expect("#534 the view of a clean pair is the migration itself",
+                 projects.view_of(d), projects.snapshot_of(d))
+
+        # Свежая установка: взгляд -- честный пустой реестр.
+        shutil.rmtree(d)
+        d = tempfile.mkdtemp(prefix="mop-test-534v-")
+        c.expect("#534 the view of a fresh install is empty",
+                 projects.view_of(d), {"version": 1, "projects": []})
+
+        # Голое имя: взгляд сохраняет прежний ответ глагола `projects` --
+        # имя в lines и names, лимит при нём, origin'ы как были.
+        _legacy_pair(d, [MOP, "oldproject"], {"mop": 3})
+        got = projects.view_of(d)
+        c.expect("#534 a bare legacy name survives in the view's lines",
+                 sorted(projects.snapshot_lines(got)), sorted([MOP, "oldproject"]))
+        c.expect("#534 a bare legacy name survives in the view's names",
+                 projects.snapshot_names(got), ["mop", "oldproject"])
+        c.expect("#534 the view keeps the limit of a bare-named project",
+                 projects.snapshot_limits(got), {"mop": 3})
+        c.check("#534 the view writes nothing",
+                not os.path.exists(os.path.join(d, "projects.json")))
+
+        # Конфликт basename'ов: прежний ответ `projects` показывает оба
+        # origin'а и оба имени -- без консенсуса, какой правда.
+        _legacy_pair(d, [RU, OTHER], {"rudesktop": 1})
+        got = projects.view_of(d)
+        c.expect("#534 a colliding pair shows both origins in the view",
+                 sorted(projects.snapshot_lines(got)), sorted([RU, OTHER]))
+        c.expect("#534 a colliding pair shows the name in the view",
+                 projects.snapshot_names(got), ["rudesktop"])
+        c.expect("#534 a colliding pair keeps its limit in the view",
+                 projects.snapshot_limits(got), {"rudesktop": 1})
+        c.check("#534 the view of a collision writes nothing",
+                not os.path.exists(os.path.join(d, "projects.json")))
+
+        # Orphan-лимит: потолок чужого имени виден -- прежний ответ
+        # `projects` печатал limits целиком, включая неизвестные имена.
+        _legacy_pair(d, [MOP], {"mop": 3, "ghost": 7})
+        got = projects.view_of(d)
+        c.expect("#534 an orphan limit stays visible in the view",
+                 projects.snapshot_limits(got), {"mop": 3, "ghost": 7})
+        c.check("#534 the view of an orphan limit writes nothing",
+                not os.path.exists(os.path.join(d, "projects.json")))
+
+        # Битый/чужой снимок -- как и в snapshot_of: громкий отказ без
+        # пустого реестра и без fallback (взгляд не弱ее миграции).
+        with open(os.path.join(d, "projects.json"), "w") as f:
+            f.write('{"version": 2, "projects": []}')
+        _refused534(c, "#534 the view refuses a newer schema loudly",
+                  lambda: projects.view_of(d))
+        os.remove(os.path.join(d, "projects.json"))
+
+        # Вдогонку -- контракт ошибок миграции: отказ называет причину и
+        # сохранность (файлы не тронуты), но НЕ советует несуществующего
+        # исправления. Совет «заведи origin» или «удали руками» -- ловушка:
+        # правка реестра идёт теми же глаголами, и миграция, которой совет
+        # требует, тем же отказом и откажет. Решение конфликта -- отдельная
+        # задача (resolve), не строка в отказе.
+        _legacy_pair(d, [RU, OTHER])
+        _refused534(c, "#534 the collision refusal names no fix that migration would refuse",
+                  lambda: projects.snapshot_of(d), "rudesktop", "intact")
+        c.check("#534 the collision refusal advises no hand-editing",
+                " by hand" not in (str(_migrate_refusal(d)) or ""), "")
+        _legacy_pair(d, [MOP, "oldproject"])
+        _refused534(c, "#534 the bare-name refusal names no fix that migration would refuse",
+                  lambda: projects.snapshot_of(d), "oldproject", "intact")
+        c.check("#534 the bare-name refusal advises no hand-editing",
+                " by hand" not in (str(_migrate_refusal(d)) or ""), "")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     c = Checks()
     for fn in (check_add, check_delete, check_names, check_limits, check_read_limits_337,
                check_git_hosts, check_for_deploy,
-               check_migration_534, check_snapshot_534):
+               check_migration_534, check_snapshot_534, check_view_534):
         fn(c)
     return c.report("projects")
 

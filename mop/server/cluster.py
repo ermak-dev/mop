@@ -389,8 +389,9 @@ def _add(project, req):
     # Лимит -- проекта из origin, а не просителя: оператор через admin
     # заводит папета тому же проекту и упирается в тот же потолок. Реестр
     # читается на каждый запрос: правка лимита доезжает без рестарта.
-    # Читатель снимка (#534): пишет его только глагол проектов.
-    target = Project.of(origin, projects.snapshot_limits(_snapshot()))
+    # Читатель снимка (#534): взгляд читателя, пишет его только глагол
+    # проектов -- непредставимая пара не прячет потолок действующего.
+    target = Project.of(origin, projects.snapshot_limits(_view()))
     why = over_limit(target.name, _live_count(target.name), target.limit)
     if why:
         return {"error": why}
@@ -664,9 +665,17 @@ _projects_lock = threading.Lock()
 
 
 def _snapshot():
-    """Снимок реестра. Читает, никогда не пишет (#534). Каталог -- атрибут
-    модуля на момент вызова: тесты и установки подменяют одно место."""
+    """Снимок реестра для writer'а: миграция требует представимости в v1,
+    непредставимое -- отказ (#534). Каталог -- атрибут модуля на момент
+    вызова: тесты и установки подменяют одно место."""
     return projects.snapshot_of(projects.SNAPSHOT_DIR)
+
+
+def _view():
+    """Снимок реестра для читателя (#534): старые данные видимы и без
+    миграции -- отказ представимости блокирует мутацию, а не чтение.
+    Читает, никогда не пишет."""
+    return projects.view_of(projects.SNAPSHOT_DIR)
 
 
 def _save(snapshot):
@@ -714,7 +723,10 @@ def _with_rollback(snapshot, change):
 
 
 def _projects(project, req):
-    snap = _snapshot()
+    # Взгляд читателя (#534): проблемная легаси-пара не прячет старые
+    # данные за отказом миграции -- refusing-миграция блокирует мутацию,
+    # а список показывает то же, что показывал всегда.
+    snap = _view()
     return {"ok": True, "names": projects.snapshot_names(snap),
             "origins": sorted(projects.snapshot_origins(snap)),
             "lines": sorted(projects.snapshot_lines(snap)),
@@ -788,7 +800,9 @@ def _project_limit(project, req):
 def _registered(project):
     """Отказ по незаведённому проекту: опечатка в имени завела бы секреты
     проекту, которого нет."""
-    if project not in _names(projects.read()):
+    # Взгляд читателя (#534): секреты кладутся проекту из видимого реестра,
+    # проблемная пара его не прячет -- отказ здесь не о миграции.
+    if project not in projects.snapshot_names(_view()):
         return {"error": f"no project {project} in the registry: mop project add"}
     return None
 
