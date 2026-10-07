@@ -135,9 +135,29 @@ def check_source_393(c):
                  ({"node": "OK"}, [b"MOP_PROXY_KEY=generated\n"]))
 
 
+# ── #538: строгий итог раздачи ротации — отказ держит операцию открытой ──
+# HYPOTHESIS: settled отвергает только NOT REACHED, а FAILED агента считает
+# «дошли до всех»: частичная раздача закрыла бы шаг ротации, недошедший
+# узел ходил бы старым ключом до отдельного retirement (#537, контракт
+# docs/PROXY.md). SOLUTION: strict_settled -- отдельный предикат ротации:
+# и NOT REACHED, и FAILED держат операцию открытой; старый settled тика
+# раздачи (#391) не меняется скрыто.
+def check_strict_settled_538(c):
+    fn = getattr(proxykey, "strict_settled", None)
+    if not c.check("#538 proxykey.strict_settled exists", fn is not None):
+        return
+    c.check("#538 NOT REACHED keeps the rotation open",
+            not fn({"gpu": "OK", "hyper": "NOT REACHED: down"}))
+    c.check("#538 FAILED keeps the rotation open",
+            not fn({"gpu": "OK", "hyper": "FAILED: x"}))
+    c.check("#538 every recipient OK settles strictly", fn({"gpu": "OK"}))
+    c.check("#538 empty outcome settles strictly", fn({}))
+
+
 def main():
     c = Checks()
     check_source_393(c)
+    check_strict_settled_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

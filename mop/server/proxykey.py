@@ -69,6 +69,14 @@ def settled(outcome):
     return not any(str(r).startswith("NOT REACHED") for r in (outcome or {}).values())
 
 
+def strict_settled(outcome):
+    """Итог раздачи ШАГА ротации (#537, #538): держат открытым и недошедший
+    узел (NOT REACHED), и отказ агента (FAILED) -- частичная раздача не
+    «completed»: недошедшие так и ходят старым ключом до отдельного
+    retirement. Старый settled тика (#391) этим не заменяется."""
+    return not any(str(r) != "OK" for r in (outcome or {}).values())
+
+
 def push(env=None, nodes=None, now=None):
     """Раздать блоб узлам и запомнить отпечаток. -> {узел: итог} | None.
 
