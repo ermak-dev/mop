@@ -83,8 +83,80 @@ def check_proxy_key_redaction_394(c):
     config.forget()
 
 
+# HYPOTHESIS (#535): read_env глотает ЛЮБОЙ OSError и отвечает {}: файл,
+# который существует, но не читается (права), или путь-каталог, или ошибка
+# I/O — всё это превращается в «настроек нет», и настройка молчно падает
+# в дефолт или в чужое значение. Отказ лекарства не имеет: пустые
+# настройки на живой машине читаются как «файла нет», хотя файл есть.
+# SOLUTION: отсутствию файла (FileNotFoundError, а на каталоге при чтении
+# -- IsADirectoryError) оставлено штатное {}; любой прочий OSError
+# поднимается с путём и причиной strerror — вызывающие (get/effective/
+# фронтенды) несут его дальше обычным порядком исключений, содержимое
+# файла в ошибку не попадает (только путь и причина системы).
+# RESULT: до правки PermissionError и путь-каталог возвращали {} —
+# проверка красная; после — FileNotFoundError/IsADirectoryError дают {},
+# PermissionError поднимается RuntimeError с путём и strerror.
+# STATUS: FIXED — see #535
+def check_read_env_errors_535(c):
+    d = tempfile.mkdtemp(prefix="mop-env-535-")
+    gone = os.path.join(d, "no-such.env")
+    c.expect("#535 a missing file is the normal empty case",
+             config.read_env(gone), {})
+    directory = os.path.join(d, "as-a-directory.env")
+    os.mkdir(directory)
+    c.expect("#535 a directory in place of the file is not settings",
+             config.read_env(directory), {})
+
+    # Существующий, но недоступный: права снимаются на файле во
+    # временном дереве проверки, настоящие конфиги не трогаются.
+    locked = os.path.join(d, "locked.env")
+    with open(locked, "w") as f:
+        f.write("MOP_PVE_STORAGE=from-locked\n")
+    os.chmod(locked, 0)
+    try:
+        config.read_env(locked)
+        c.fail("#535 an unreadable existing file must refuse, not return {}",
+               locked)
+    except config.ReadError as e:
+        # Путь и причина системы; содержимое файла в ошибку не входит.
+        c.check("#535 the refusal names the file and the system's reason",
+                locked in str(e) and "Permission denied" in str(e), str(e))
+        c.check("#535 the refusal says it is about reading settings",
+                "cannot read settings" in str(e), str(e))
+        c.check("#535 settings contents do not leak into the error",
+                "from-locked" not in str(e), str(e))
+    finally:
+        os.chmod(locked, 0o600)
+
+    # Отказ доезжает и до клиента настроек: config.get/effective несут
+    # его, а не подменяют пустыми настройками.
+    with open(locked, "w") as f:
+        f.write("MOP_PVE_STORAGE=from-locked\n")
+    os.chmod(locked, 0)
+    try:
+        with patched(config, ENV_FILE=locked):
+            config.forget()
+            try:
+                config.effective()
+                c.fail("#535 effective() must not swallow an unreadable .env",
+                       locked)
+            except config.ReadError as e:
+                c.check("#535 effective() carries the refusal with its reason",
+                        locked in str(e) and "Permission denied" in str(e), str(e))
+            try:
+                config.get("MOP_LOCALE")
+                c.fail("#535 get() must not swallow an unreadable .env", locked)
+            except config.ReadError as e:
+                c.check("#535 get() carries the refusal with its reason",
+                        locked in str(e) and "Permission denied" in str(e), str(e))
+    finally:
+        os.chmod(locked, 0o600)
+        config.forget()
+
+
 def main():
     c = Checks()
+    check_read_env_errors_535(c)
     check_client_sources_396(c)
     check_proxy_key_redaction_394(c)
     me = pwd.getpwuid(os.getuid()).pw_name

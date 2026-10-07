@@ -535,6 +535,12 @@ class Missing(RuntimeError):
     """Обязательная настройка не заполнена."""
 
 
+class ReadError(RuntimeError):
+    """Существующий файл настроек не читается (#535): отказ I/O, права.
+    Отдельный класс, а не голый RuntimeError, чтобы фронтенд мог отличить
+    «файл недоступен» от прочих отказов и назвать причину без трассировки."""
+
+
 def require(*names):
     """Проверить обязательные — все, либо названные. Зовут фронтенды перед
     работой с кластером: мастеру нужен один MOP_SERVER_LAN, MOP_GIT_HOST
@@ -570,13 +576,21 @@ def _installation():
 
 def read_env(path):
     """То же файлом. Отсутствие файла — штатный случай: на узле нет .env, на
-    управляющей машине нет node.env. Публична, потому что тем же форматом
-    читаются и ключи LLM из .env."""
+    управляющей машине нет node.env, и каталог на месте файла -- то же
+    «нечего читать». Публична, потому что тем же форматом читаются и ключи
+    LLM из .env.
+
+    Любой прочий отказ чтения -- громкий (#535): глотание OSError
+    превращало существующий, но недоступный файл в «настроек нет», и
+    настройка молча ехала в дефолт. Причина -- с путём, содержимое файла
+    в ошибку не входит."""
     try:
         with open(path) as f:
             return fsutil.read_kv(f.read())
-    except OSError:
+    except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
         return {}
+    except OSError as e:
+        raise ReadError(f"cannot read settings from {path}: {e.strerror}") from e
 
 
 def _file(path):
