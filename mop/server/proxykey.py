@@ -17,6 +17,7 @@ import os
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 
 from ..common import bus, config, fsutil, paths, puppets
 
@@ -30,6 +31,31 @@ KEY_FILE = paths.local(paths.SECRETS, "llm-proxy-client.pass")
 # старый и новый ключ для возобновления после сбоя (отпечатка недостаточно).
 SCHEMA = 1
 OP = paths.local("proxy-rotation.json")
+LOCK = paths.local("proxy-rotation.lock")
+
+
+@contextmanager
+def _lock(path=LOCK):
+    """flock на постоянном приватном lock-файле: параллельная операция того
+    же процесса отказывает сразу, смерть процесса освобождает блокировку
+    сама -- угадывать по PID, жив ли владелец, не нужно. Файл не
+    пересоздаётся по звонку: inode живёт, пока жив каталог."""
+    fsutil.make_private_dir(os.path.dirname(path))
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        try:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            raise RuntimeError("another rotation is running in this home") from e
+        try:
+            yield
+        finally:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def begin(source_path, copy_path, recipients, *, exclusive):

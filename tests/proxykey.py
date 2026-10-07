@@ -7,6 +7,7 @@
 раздатчик keys.py умер (#385), потребитель один -- этот модуль.
 """
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -229,11 +230,55 @@ def check_begin_538(c):
                 isinstance(got, dict) and "old" not in got and "new" not in got, got)
 
 
+# ── #538: локальная блокировка — fcntl.flock на приватном lock-файле ─────
+# HYPOTHESIS: два одновременных begin/resume в одном процессе могли бы
+# перезаписать состояние операции друг друга, а O_EXCL-файл с PID требовал
+# бы угадывать, жив ли владелец. SOLUTION: flock на постоянном приватном
+# lock-файле: вторая операция отказывает сразу, смерть процесса освобождает
+# блокировку сама (ядро), файл не пересоздаётся по звонку.
+def check_lock_538(c):
+    lock = getattr(proxykey, "_lock", None)
+    if not c.check("#538 proxykey._lock exists", callable(lock)):
+        return
+    import fcntl
+    with tempfile.TemporaryDirectory(prefix="mop-rot-lock-") as d:
+        path = os.path.join(d, "rotation.lock")
+        with lock(path):
+            c.check("#538 the lock file exists while held", os.path.exists(path))
+            # Тот же inode, не пересоздаётся по звонку: захват вторым --
+            # через НЕзависящий от нас реестр, прямо через fcntl.
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    c.fail("#538 a second holder must not lock")
+                except OSError:
+                    c.check("#538 the holder's lock is an flock second grab refuses", True)
+            finally:
+                os.close(fd)
+        with lock(path):
+            c.check("#538 the lock is free again after release", True)
+        # Смерть процесса освобождает: ребёнок держит flock и умирает.
+        code = ("import fcntl, os, sys, time;"
+                f"f = open({path!r}, 'a');"
+                "fcntl.flock(f, fcntl.LOCK_EX);"
+                "print('held', flush=True);"
+                "import subprocess;"
+                "subprocess.run(['sleep', '0.2']);"
+                "os._exit(0)")
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        c.check("#538 the child held and died gracefully", r.stdout.strip() == "held",
+                r.stdout + r.stderr)
+        with lock(path):
+            c.check("#538 process death frees the flock (no stale guess)", True)
+
+
 def main():
     c = Checks()
     check_source_393(c)
     check_strict_settled_538(c)
     check_begin_538(c)
+    check_lock_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и
