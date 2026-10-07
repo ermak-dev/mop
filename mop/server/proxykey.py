@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import secrets
+import stat
 import threading
 import time
 from contextlib import contextmanager
@@ -136,6 +137,39 @@ def _read_key(path):
 def _new_key():
     """Одноразовая генерация нового клиентского ключа."""
     return secrets.token_urlsafe(32)
+
+
+def _preflight(state):
+    """Локальные именованные блокеры ДО любой remote-мутации. -> None |
+    строка-блокер. Третье значение (не old, не new) -- drift: оператор
+    решает ДО изменения. Сервисопригодность копии: права прежние, режим
+    приватный -- атомарная запись под root сменила бы владельца и отрезала
+    бы сервис от его копии."""
+    for path, what in ((state["source"], "source"), (state["copy"], "copy")):
+        key = _key_or_none(path)
+        if key is None:
+            return f"blocker: {what} file {path} is missing or empty"
+        if key not in (state["old"], state["new"]):
+            return (f"drift: {what} file {path} holds neither the old nor "
+                    f"the new key of the operation")
+    try:
+        mode = stat.S_IMODE(os.stat(state["copy"]).st_mode)
+    except OSError as e:
+        return f"blocker: copy file {state['copy']} is not serviceable: {e.strerror}"
+    if mode & 0o077:
+        return (f"blocker: copy file {state['copy']} mode {oct(mode)} is not "
+                f"private; rotation must preserve a serviceable copy")
+    return None
+
+
+def _key_or_none(path):
+    """Ключ из файла либо None: нет файла, нечитаем или пуст."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            key = f.read().rstrip("\r\n")
+    except OSError:
+        return None
+    return key or None
 
 
 def _project(state):

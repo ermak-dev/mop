@@ -362,6 +362,81 @@ def check_resume_refusals_538(c):
                     isinstance(got, dict) and got.get("stage") != "completed", got)
 
 
+# ── #538: preflight — именованные блокеры ДО любой remote-мутации ────────
+# HYPOTHESIS: preflight в начале begin отклонял бы собственный recoverable
+# сплит (источник уже новый, копия ещё старая -- это ровно то состояние,
+# ради которого существует resume), а пропуск проверки прав записи давал
+# бы root-записи превратить сервисную копию в root:0600 и отрезать сервис.
+# SOLUTION: preflight живёт в resume перед remote-шагом; он проверяет
+# serviceability ОБЕИХ путей (запись + прежний владелец/режим) и зовётся
+# НАЧАЛЕ ротации, а не на каждом resume; любое третье значение в файлах
+# (не old, не new) -- drift, отказ.
+def check_preflight_538(c):
+    fn = getattr(proxykey, "_preflight", None)
+    if not c.check("#538 proxykey._preflight exists", callable(fn)):
+        return
+    import stat
+    with tempfile.TemporaryDirectory(prefix="mop-rot-pre-") as d:
+        src = os.path.join(d, "llm-proxy-client.pass")
+        cp = os.path.join(d, "copy.pass")
+        state = {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                 "new": "new-key", "source": src, "copy": cp,
+                 "recipients": ["node1"], "stage": "ready"}
+
+        def put(path, text):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.chmod(path, 0o600)
+
+        # Согласованный старт: оба old -- ок, без remote-эффектов.
+        put(src, "old-key\n")
+        put(cp, "old-key\n")
+        c.check("#538 preflight passes a consistent start",
+                fn(state) is None, "must be None")
+
+        # Собственный recoverable сплит: источник уже new, копия ещё old --
+        # это чекпоинт операции, не drift.
+        put(src, "new-key\n")
+        c.check("#538 preflight accepts its own source-ahead split",
+                fn(state) is None, "must be None")
+
+        # Третье значение в источнике -- drift.
+        put(src, "third-key\n")
+        r = fn(state)
+        c.check("#538 a third source value is a named drift blocker",
+                isinstance(r, str) and "drift" in r.lower() and src in r, r)
+
+        # Третье значение в копии -- тоже drift.
+        put(src, "new-key\n")
+        put(cp, "third-key\n")
+        r = fn(state)
+        c.check("#538 a third copy value is a named drift blocker",
+                isinstance(r, str) and "drift" in r.lower() and cp in r, r)
+
+        # Источник не существует -- именованный блокер.
+        os.remove(src)
+        r = fn(state)
+        c.check("#538 a missing source is a named blocker",
+                isinstance(r, str) and src in r, r)
+
+        # Несервисопригодная копия: запись под root сменила бы владельца
+        # файла -- единственный uid на теле в тесте сам себе, проверяем
+        # режим: чужой 0644 должен быть назван ДО мутации.
+        put(src, "new-key\n")
+        put(cp, "old-key\n")
+        os.chmod(cp, 0o644)
+        r = fn(state)
+        c.check("#538 a world-readable copy is a named blocker before mutation",
+                isinstance(r, str) and cp in r and "mode" in r.lower(), r)
+        os.chmod(cp, 0o600)
+
+        # Пустой файл копии -- блокер с именем файла.
+        put(cp, "\n")
+        r = fn(state)
+        c.check("#538 an empty copy is a named blocker",
+                isinstance(r, str) and cp in r, r)
+
+
 def main():
     c = Checks()
     check_source_393(c)
@@ -369,6 +444,7 @@ def main():
     check_begin_538(c)
     check_lock_538(c)
     check_resume_refusals_538(c)
+    check_preflight_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и
