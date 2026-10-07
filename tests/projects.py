@@ -615,7 +615,7 @@ def check_schema_534(c):
             ("an entry not an object", '{"version": 1, "projects": [42]}', None),
             ("an entry without origin", '{"version": 1, "projects": [{"limit": 2}]}', "origin"),
             ("an unknown entry field", '{"version": 1, "projects": '
-             '[{"origin": "%s", "name": "mop"}]}' % MOP, "name"),
+             '[{"origin": "%s", "name": "mop"}]}' % MOP, "unknown"),
             ("an empty origin", '{"version": 1, "projects": [{"origin": ""}]}', "origin"),
             ("a non-string origin", '{"version": 1, "projects": [{"origin": 7}]}', "origin"),
             ("a null limit", '{"version": 1, "projects": '
@@ -628,7 +628,7 @@ def check_schema_534(c):
              '[{"origin": "%s", "limit": -1}]}' % MOP, "limit"),
             ("a string limit", '{"version": 1, "projects": '
              '[{"origin": "%s", "limit": "2"}]}' % MOP, "limit"),
-            ("an unknown top-level field", '{"version": 1, "projects": [], "note": "x"}', "note"),
+            ("an unknown top-level field", '{"version": 1, "projects": [], "note": "x"}', "unknown"),
         ]
         for label, text, needle in cases:
             with open(snap, "w") as f:
@@ -648,6 +648,53 @@ def check_schema_534(c):
         got = _refusal_of(lambda: projects.snapshot_of(d))
         c.check("#534 the version refusal names the type, not the raw value",
                 bool(got and "hunter2-secret" not in got and "str" in got), repr(got))
+        # Числовая чужая версия: число -- не секрет, отказ называет её;
+        # wrongtype (строка в version) -- format refusal БЕЗ совета
+        # «upgrade»: апгрейд строку в схему не превратит.
+        with open(snap, "w") as f:
+            f.write('{"version": 2, "projects": []}')
+        got = _refusal_of(lambda: projects.snapshot_of(d))
+        c.check("#534 a numeric foreign version names the number",
+                bool(got and "version 2" in got), repr(got))
+        with open(snap, "w") as f:
+            f.write('{"version": "hunter2-secret", "projects": []}')
+        got = _refusal_of(lambda: projects.snapshot_of(d))
+        c.check("#534 a wrongtype version is a format refusal without upgrade advice",
+                bool(got and "upgrade" not in got and "hunter2-secret" not in got
+                     and "str" in got), repr(got))
+
+        # Секрет в названии неизвестного поля (top-level и в записи): имя
+        # чужого поля -- тоже содержимое испорченного файла, не печатаем.
+        with open(snap, "w") as f:
+            f.write('{"version": 1, "projects": [], "hunter2-secret-field": 1}')
+        got = _refusal_of(lambda: projects.snapshot_of(d))
+        c.check("#534 an unknown top-level key refuses without its raw name",
+                bool(got and "hunter2-secret-field" not in got and "unknown" in got), repr(got))
+        with open(snap, "w") as f:
+            f.write('{"version": 1, "projects": [{"origin": "%s", "hunter2": 1}]}' % MOP)
+        got = _refusal_of(lambda: projects.snapshot_of(d))
+        c.check("#534 an unknown entry key refuses without its raw name",
+                bool(got and "hunter2" not in got and "unknown" in got), repr(got))
+        # Тот же класс в writer и export: непредставимое не печатается.
+        wout = os.path.join(d, "wtest534.json")
+        got = _refusal_of(lambda: projects.write_snapshot(
+            {"version": 1, "projects": [{"origin": MOP, "hunter2": 1}]}, wout))
+        c.check("#534 the writer refuses an unknown field without its raw name",
+                bool(got and "hunter2" not in got and "WRONG EXC" not in got), repr(got))
+        c.check("#534 the refused unknown-field write leaves no file",
+                not os.path.exists(wout))
+        got = _refusal_of(lambda: projects.legacy_pair_of(
+            {"version": 1, "projects": [], "hunter2": 1}))
+        c.check("#534 the export refuses an unknown top-level key without its raw name",
+                bool(got and "hunter2" not in got), repr(got))
+
+        # Null-лимит: отказ типа, без совета «remove the key» -- советы
+        # ручного лечения для malformed не разрешены.
+        with open(snap, "w") as f:
+            f.write('{"version": 1, "projects": [{"origin": "%s", "limit": null}]}' % MOP)
+        got = _refusal_of(lambda: projects.snapshot_of(d))
+        c.check("#534 a null limit refuses without manual-repair advice",
+                bool(got and "remove the key" not in got and "NoneType" in got), repr(got))
 
         # Writer: та же схема, ДО всякого mkdir, и явный null -- отказ.
         out = os.path.join(d, "out", "sub", "projects.json")

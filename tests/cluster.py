@@ -1221,11 +1221,13 @@ class _Registry534:
         shutil.rmtree(self.dir, ignore_errors=True)
 
     @contextlib.contextmanager
-    def patched_env(self, refuse_apply=None):
+    def patched_env(self, refuse_apply=None, users_text=None):
         """Включить среду: пути реестра в каталог среды, соседи -- заглушки.
 
         refuse_apply -- исключение, которым откажет _users_apply: тест
-        обрыва после записи реестра (шина не пустила нового пользователя)."""
+        обрыва после записи реестра (шина не пустила нового пользователя).
+        users_text -- что читает read_users (None -- «файла нет», как
+        прежде): откат с текстом обязан и восстановить его, и reload."""
         from mop.common import projects as _projects
         me = self
 
@@ -1236,6 +1238,18 @@ class _Registry534:
             return False
 
         apply_fn = failing_users_apply if refuse_apply is not None else self._users_apply
+        read_users = (lambda path=None: None) if users_text is None \
+            else (lambda path=None: users_text)
+        users_path = os.path.join(self.dir, "users.conf")
+        # Дефолт path=USERS связан при def (та же ловушка, что у легаси-пары):
+        # патч атрибута модуля его не перенаправляет -- заворачиваем сами
+        # функции с явным путём в каталог среды.
+        _real_conf_write = _natsconf.write
+        written_users = []
+
+        def conf_write(text, path=None, *a, **k):
+            written_users.append(text)
+            return _real_conf_write(text, users_path if path is None else path, *a, **k)
         _projects = cluster.projects
         _real_read = _projects.read
         _real_write = _projects.write
@@ -1269,7 +1283,8 @@ class _Registry534:
                 snapshot, os.path.join(self.dir, "projects.json") if path is None else path, *a, **k)
 
         with patched(cluster, _users_apply=apply_fn, nomad_jobs=self._jobs), \
-                patched(_natsconf, reload=self._reload, read_users=lambda path=None: None,
+                patched(_natsconf, reload=self._reload, read_users=read_users,
+                        write=conf_write, USERS=users_path,
                         read_base=lambda: {"service": "pw"}), \
                 patched(_projects, read=read, write=write, read_limits=read_limits,
                         write_limits=write_limits, snapshot_of=snapshot_of,
@@ -1278,6 +1293,7 @@ class _Registry534:
                         SNAPSHOT=os.path.join(self.dir, "projects.json"),
                         SNAPSHOT_DIR=self.dir), \
                 patched(_bootstrap, PUPPET_CREDS=os.path.join(self.dir, "puppets")), \
+                patched(_natsconf, USERS=os.path.join(self.dir, "users.conf")), \
                 patched(_creds, puppet_pass_file=lambda n: f"{n}.pass"), \
                 patched(project_secrets, ROOT=os.path.join(self.dir, "secrets"),
                         project_dir=lambda root, n: os.path.join(root, n)), \
@@ -1613,12 +1629,18 @@ def check_registry_verbs_534(c):
                 env.cleanup()
 
     # 15. Синтетический секрет в испорченном снимке (строка-«пароль» в
-    # version, null в limit): отказ доходит и в reader, и в мутацию, но
-    # ни сам секрет, ни сырые значения в ответе RPC нет -- только путь и
-    # тип ошибки (#534).
-    for text, needle in (('{"version": "hunter2-secret", "projects": []}', "hunter2"),
-                         ('{"version": 1, "projects": [{"origin": "%s", "limit": null}]}' % RU534,
-                          "null")):
+    # version, секрет в названии неизвестного поля): отказ доходит и в
+    # reader, и в мутацию, но ни сам секрет, ни сырые значения в ответе
+    # RPC нет -- только путь и тип ошибки (#534). Null-лимит -- отказ
+    # типа, слово «null» в нём не секрет (это имя типа из JSON).
+    for text, needles in (('{"version": "hunter2-secret", "projects": []}',
+                           ("hunter2-secret",)),
+                          ('{"version": 1, "projects": [{"origin": "%s", "limit": null}]}' % RU534,
+                           ()),
+                          ('{"version": 1, "projects": '
+                           '[{"origin": "%s", "hunter2-field": 1}]}' % RU534,
+                           ("hunter2-field",)),
+                          ('{"version": 2, "projects": []}', ())):
         env = _Registry534(fresh=True)
         with open(env.snapshot_path(), "w") as f:
             f.write(text)
@@ -1628,10 +1650,10 @@ def check_registry_verbs_534(c):
                     req = {"verb": verb} if isinstance(verb, str) else {"verb": verb[0], **verb[1]}
                     got = cluster.answer("admin", req)
                     err = got.get("error") or ""
-                    c.check(f"#534 a corrupted snapshot ({needle}) refuses {req['verb']} over RPC",
+                    c.check(f"#534 a corrupted snapshot refuses {req['verb']} over RPC",
                             bool(err), got)
                     c.check(f"#534 the {req['verb']} refusal leaks no secret over RPC",
-                            "hunter2-secret" not in err, err)
+                            all(n not in err for n in needles), err)
                     c.check(f"#534 the {req['verb']} refusal names the file, not raw values",
                             "projects.json" in err, err)
             finally:
@@ -1654,6 +1676,45 @@ def check_registry_verbs_534(c):
                         "nats rejected the user" in err and "disk busy" in err, err)
                 c.check("#534 a failed rollback is no false success",
                         not got.get("ok"), got)
+        finally:
+            env.cleanup()
+
+    # 16b. Компенсация users тоже падает: исходный отказ и обе неудачи
+    # отката (снимок и файл пользователей) -- в ответе; секретное
+    # содержимое users в текст не попадает.
+    env = _Registry534()
+    with env.patched_env(refuse_apply=RuntimeError("nats rejected the user"),
+                         users_text="users before the change"):
+        try:
+            def dying_users_write(users, *a, **k):
+                raise OSError("users file busy")
+
+            with patched(_natsconf, write=dying_users_write):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check("#534 a failed users restore surfaces with the primary refusal",
+                        "nats rejected the user" in err and "users file busy" in err, err)
+                c.check("#534 a failed users restore keeps no false success",
+                        not got.get("ok"), got)
+        finally:
+            env.cleanup()
+
+    # 16c. Reload после восстановления users упал: обе причины -- в
+    # ответе, RPC не превращается в ложный успех.
+    env = _Registry534()
+    with env.patched_env(refuse_apply=RuntimeError("nats rejected the user"),
+                         users_text="users before the change"):
+        try:
+            def dying_reload():
+                raise RuntimeError("reload rejected")
+
+            with patched(_natsconf, reload=dying_reload):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check("#534 a failed reload surfaces with the primary refusal",
+                        "nats rejected the user" in err and "reload rejected" in err, err)
         finally:
             env.cleanup()
 
@@ -1681,6 +1742,41 @@ def check_registry_verbs_534(c):
                 err = got.get("error") or ""
                 c.check("#534 a failed restore surfaces both errors",
                         "nats rejected the user" in err and "disk full on rollback" in err, err)
+        finally:
+            env.cleanup()
+
+    # 17b. Тройной провал: мутация, восстановление снимка и запись users --
+    # все три причины в одном surfaced reason, ничего не потеряно и нет
+    # ложного успеха.
+    env = _Registry534()
+    with env.patched_env(users_text="users before the change"):
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/base.git"})
+            from mop.common import fsutil
+            real_wa = fsutil.write_atomic
+            box = {"n": 0}
+
+            def flaky_write(path, data, *a, **k):
+                box["n"] += 1
+                if box["n"] == 1:
+                    return real_wa(path, data, *a, **k)
+                raise OSError("disk full on rollback")
+
+            def dying_users_write(users, *a, **k):
+                raise OSError("users file busy")
+
+            with patched(fsutil, write_atomic=flaky_write), \
+                    patched(_natsconf, write=dying_users_write), \
+                    patched(cluster, _users_apply=_failing_apply("nats rejected the user")):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check("#534 a triple failure surfaces every cause",
+                        all(why in err for why in ("nats rejected the user",
+                                                   "disk full on rollback",
+                                                   "users file busy")), err)
+                c.check("#534 a triple failure is no false success",
+                        not got.get("ok"), got)
         finally:
             env.cleanup()
 

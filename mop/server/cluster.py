@@ -740,11 +740,19 @@ def _with_rollback(snapshot, change):
             except Exception as e2:  # noqa: BLE001 -- отказ отката доезжает до ответа
                 errors.append(f"rollback failed: {e2}")
         if users is not None:
-            natsconf.write(users)
+            # Компенсация users -- та же часть отката (#534): мы уже внутри
+            # провалившейся правки, RPC всё равно отказан, и неудача этой
+            # записи не «решать ли», а «не потерять ли» -- причина доезжает
+            # к исходной. Секретное содержимое users в текст не попадает.
             try:
-                natsconf.reload()
-            except Exception:
-                pass
+                natsconf.write(users)
+            except Exception as e3:  # noqa: BLE001 -- отказ отката доезжает до ответа
+                errors.append(f"users restore failed: {e3}")
+            else:
+                try:
+                    natsconf.reload()
+                except Exception as e3:  # noqa: BLE001 -- отказ отката доезжает до ответа
+                    errors.append(f"reload failed: {e3}")
         if len(errors) > 1:
             # Исходный отказ + отказ отката: ложный успех хуже провала.
             raise RuntimeError("; ".join(errors)) from None

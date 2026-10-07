@@ -264,7 +264,8 @@ def _checked(snapshot, where):
     >= 0 (bool -- не int для лимита, null -- не отсутствие ключа); один
     origin на имя проекта. Отказ называет место, имя и ТИП -- не сырое
     значение: в испорченном файле может лежать секрет (строка в version,
-    чужой токен в limit), а текст отказа уезжает в журналы и ответы RPC.
+    чужой токен в limit, секрет и в НАЗВАНИИ неизвестного поля), а текст
+    отказа уезжает в журналы и ответы RPC.
     """
     if not isinstance(snapshot, dict):
         raise RuntimeError(f"{where} is {type(snapshot).__name__}, not an object "
@@ -273,12 +274,17 @@ def _checked(snapshot, where):
         missing = {"version", "projects"} - set(snapshot)
         if missing:
             raise RuntimeError(f"{where} carries no {', '.join(sorted(missing))}")
-        raise RuntimeError(f"{where} carries unknown field(s): "
-                           f"{', '.join(sorted(set(snapshot) - {'version', 'projects'}))}")
+        extra = set(snapshot) - {"version", "projects"}
+        raise RuntimeError(f"{where} carries {len(extra)} unknown field(s) outside "
+                           "version and projects")
     version = snapshot["version"]
     if type(version) is not int or version != SNAPSHOT_VERSION:
-        raise RuntimeError(f"{where} is version of type {type(version).__name__}, this "
-                           f"mop reads version {SNAPSHOT_VERSION}: upgrade mop first")
+        if type(version) is int:
+            # Число -- не секрет: назвать его точнее, чем «не наша схема».
+            raise RuntimeError(f"{where} is version {version}, this mop reads version "
+                               f"{SNAPSHOT_VERSION}: upgrade mop first")
+        raise RuntimeError(f"{where} is version of type {type(version).__name__}, not "
+                           f"an integer: this mop reads version {SNAPSHOT_VERSION}")
     if not isinstance(snapshot["projects"], list):
         raise RuntimeError(f"{where}: projects must be a list")
     seen = set()
@@ -289,8 +295,9 @@ def _checked(snapshot, where):
                                    "not an object with an origin")
             if "origin" not in p:
                 raise RuntimeError(f"{where}: project #{n} carries no origin")
-            raise RuntimeError(f"{where}: project #{n} carries unknown field(s): "
-                               f"{', '.join(sorted(set(p) - {'origin', 'limit'}))}")
+            extra = set(p) - {"origin", "limit"}
+            raise RuntimeError(f"{where}: project #{n} carries {len(extra)} unknown "
+                               "field(s) outside origin and limit")
         origin = p["origin"]
         if not isinstance(origin, str) or not puppets.looks_like_origin(origin):
             raise RuntimeError(f"{where}: origin of project #{n} is "
@@ -303,8 +310,8 @@ def _checked(snapshot, where):
             value = p["limit"]
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise RuntimeError(f"{where}: limit of {name} is a {type(value).__name__}, "
-                                   "not a whole number >= 0; null is not the absence of "
-                                   "a limit -- remove the key")
+                                   "not a whole number >= 0; null is not the absence "
+                                   "of a limit")
         seen.add(name)
     return snapshot
 
