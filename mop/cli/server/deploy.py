@@ -476,7 +476,10 @@ def main(argv):
     got = creds.collect(paths.local(paths.SECRETS), dest,
                         pin=not config.get("MOP_TLS_CERT"))
     print(f"  server credentials: {', '.join(got) or 'nothing to pin'} in {dest}")
-    if creds.operator(dest) is None:
+    # Один снимок каталога (#533): прежняя пара чтений коротко замыкалась
+    # по старой записи и обходила решатель.
+    kind, _ = creds.snapshot(dest)
+    if kind is None:
         # Проверка ниже ходит на шину, а войти этой машине пока нечем:
         # человек входит своим именем, и выбрать его за оператора deploy не
         # может. Громко, а не красной проверкой с непонятной причиной.

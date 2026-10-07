@@ -28,9 +28,11 @@ def check_joined_proxy_397(c):
     with patched(creds, ROOT=root), patched_env(MOP_SERVER_LAN=None,
                                                 MOP_PROXY_URL="http://wrong.test",
                                                 MOP_PROXY_KEY="wrong-key"):
+        # #533: целый вход -- одна connection.json (пароль шины + прокси вместе),
+        # прежняя пара больше не пишется.
         for host, url, key, port in (("a.test", "https://a.test/llm", "a-key", "8443"),
                                      ("b.test", "https://b.test/llm", "b-key", "443")):
-            creds.write_client(os.path.join(root, host), port, url, key)
+            creds.write_connection(os.path.join(root, host), "user", "bus-pw", port, url, key)
         with config.client_sources():
             with context.use(context.resolve({"server": "a.test"}, {}, {})):
                 result = _common.session_env()
@@ -53,7 +55,7 @@ def check_joined_proxy_397(c):
                     c.fail("#397 roster must not guess a server")
                 except (RuntimeError, ValueError):
                     pass
-        os.remove(os.path.join(root, "b.test", creds.CLIENT_FILE))
+        os.remove(os.path.join(root, "b.test", creds.CONNECTION_FILE))
         with config.client_sources(), context.use(context.resolve({}, {}, {})):
             c.expect("#397 one joined server is the default", config.get("MOP_SERVER_LAN"),
                      "a.test")
@@ -74,7 +76,7 @@ def check_session_ca_412(c):
             config.client_sources():
         for host in ("a.test", "b.test"):
             directory = os.path.join(root, host)
-            creds.write_client(directory, "443", f"https://{host}/llm", "key")
+            creds.write_connection(directory, "user", "bus-pw", "443", f"https://{host}/llm", "key")
             cert = os.path.join(directory, creds.CERT_FILE)
             with open(cert, "w") as f:
                 f.write("test certificate")
@@ -86,9 +88,11 @@ def check_session_ca_412(c):
                 env = dict(os.environ, **_common.session_env())
                 c.expect("#412 explicit user CA is preserved", env.get("NODE_EXTRA_CA_CERTS"),
                          "/custom/ca.pem")
-            creds.write_client(os.path.join(root, "a.test"), "443", "http://a.test/llm", "key")
+            creds.write_connection(os.path.join(root, "a.test"), "user", "bus-pw", "443",
+                                   "http://a.test/llm", "key")
             c.check("#412 HTTP needs no extra CA", "NODE_EXTRA_CA_CERTS" not in _common.session_env())
-            creds.write_client(os.path.join(root, "a.test"), "443", "https://a.test/llm", "key")
+            creds.write_connection(os.path.join(root, "a.test"), "user", "bus-pw", "443",
+                                   "https://a.test/llm", "key")
             os.remove(os.path.join(root, "a.test", creds.CERT_FILE))
             c.check("#412 no nonexistent CA path", "NODE_EXTRA_CA_CERTS" not in _common.session_env())
 
@@ -130,8 +134,8 @@ def check_client_model_discovery_426(c):
             patched(_common, feedback_fd=lambda *a: ("/proc/self/fd/3", 3)), \
             patched(master.os, execvpe=fake_exec):
         for host in ("a.test", "b.test"):
-            creds.write_client(os.path.join(root, host), "443",
-                               f"https://{host}/llm", f"{host}-fake-key")
+            creds.write_connection(os.path.join(root, host), "user", "bus-pw", "443",
+                                   f"https://{host}/llm", f"{host}-fake-key")
             with context.use(context.resolve({"server": host}, {}, {})):
                 code.main(["--model", "gpt-example"])
                 master._main(["--", "--model", "gpt-example"])
@@ -257,8 +261,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="mop-419-") as root, \
             patched(creds, ROOT=root), patched_env(MOP_SERVER_LAN=None), \
             config.client_sources():
-        creds.write_client(os.path.join(root, "s.test"), "443",
-                           "https://s.test/llm", "key")
+        creds.write_connection(os.path.join(root, "s.test"), "user", "bus-pw", "443",
+                               "https://s.test/llm", "key")
         with context.use(context.resolve({}, {}, {})):
             session = _common.session_env()
     c.check("the session env carries the feedback kill switch (#419)",

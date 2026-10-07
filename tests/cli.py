@@ -1114,7 +1114,9 @@ def check_deploy_mixed_outcome_475(c):
                 patched(projects, for_deploy=lambda answer, local: ([], None),
                         read=lambda: []), \
                 patched(creds, collect=lambda *a, **kw: collected.append(1) or [],
-                        operator=lambda dest: "anton"):
+                        operator=lambda dest: "anton",
+                        snapshot=lambda dest: ("human", {"user": "anton",
+                                                         "password": "x"})):
             os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key,
                                "MOP_OPERATORS_FILE": people})
             out, err, code = run_command(deploy.main, [])
@@ -2648,7 +2650,9 @@ def check_deploy_check(c):
                 patched(bus, ask_cluster=lambda *a, **kw: {"ok": True, "projects": []}), \
                 patched(projects, for_deploy=lambda answer, local: ([], None), read=lambda: []), \
                 patched(creds, collect=lambda *a, **kw: collected.append(1) or [],
-                        operator=lambda dest: "anton"):
+                        operator=lambda dest: "anton",
+                        snapshot=lambda dest: ("human", {"user": "anton",
+                                                         "password": "x"})):
             os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key,
                                "MOP_OPERATORS_FILE": people})
             for argv, dry in (([], False), (["--check"], True)):

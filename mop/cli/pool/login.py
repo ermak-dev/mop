@@ -20,7 +20,6 @@ Credentials stay in separate private files under
 in local git config. --user NAME is the old spelling of LOGIN.
 """
 import getpass
-import glob
 import os
 import ssl
 import subprocess
@@ -66,8 +65,7 @@ def git(*args):
 def serving(origin):
     """Серверы, где у машины уже есть вход и чей реестр знает origin."""
     out = []
-    for d in sorted(glob.glob(os.path.join(creds.ROOT, "*"))):
-        host = os.path.basename(d)
+    for host in creds.joined_dirs():
         try:
             c = bus.server_config(host)
             # Логин -- тех кредов, которыми спрашиваем (#207), а не этой машины.
@@ -155,30 +153,58 @@ def _https_port(explicit, saved):
 
 
 def complete(host, login, dest, https):
-    """Один проверенный вход: старый пароль можно использовать, новые файлы
-    появляются только после обеих сетевых проверок."""
+    """Один проверенный вход: старый пароль можно использовать, новая запись
+    появляется только после обеих сетевых проверок -- и запись одна (#533).
+
+    Каталог классифицируется ОДНИМ снимком creds.snapshot -- НА ВХОДЕ этой
+    фазы (прямые вызовы и командлеты входят сюда, а не в main/ensure), и
+    классификация одна на весь вход: machine (service) и испорченный/
+    неизвестный connection.json закрыты человеку ДО сети и записи -- первый
+    вход молча сменил бы личность сервисов, второй -- перезаписал бы чужой
+    формат. После классификации половины НЕ перечитываются: два чтения
+    увидели бы два поколения каталога. Подсказка из остатка -- не доверие:
+    пароль используется только после обычной проверки шиной (_still_valid)."""
     if not https.isascii() or not https.isdecimal() or not 1 <= int(https) <= 65535:
         raise ValueError("server HTTPS port must be between 1 and 65535")
+    try:
+        kind, profile = creds.snapshot(dest)
+    except creds.ProfileError as e:
+        # Испорченный/неизвестный новый файл не перезаписывается и не
+        # читается как legacy: чинить его может только человек, а не вход.
+        raise RuntimeError(str(e)) from e
+    if kind == "machine":
+        # Служебный каталог: конфликт и здесь, до сети, TLS-пина и записи.
+        raise RuntimeError("machine service identity and a human login conflict: "
+                           "use a separate operator account or connection directory")
+    if kind != "human" and kind != "partial":
+        # Пустой каталог -- ни профиля, ни подсказки: полный вход с нуля.
+        profile = None
     pin = _pinned(creds.cafile(dest))
     try:
-        stored = creds.operator(dest)
-        valid = stored and stored["user"] == login and _still_valid(host, https, dest, stored)
-        password = stored["password"] if valid else _login(host, login, dest, https)
+        valid = profile and profile.get("user") == login and \
+            _still_valid(host, https, dest, profile)
+        password = profile["password"] if valid else _login(host, login, dest, https)
         record = _fetch(host, login, password, dest, https)
         _probe(record["proxy_url"], record["proxy_key"], dest)
-        creds.write_client(dest, **record)
-        if not valid:
-            creds.write_operator(dest, login, password)
-        # Старые ролевые пароли и токен Nomad удаляем только после полного входа.
+        # Одна атомарная запись: провал между двумя прежними оставлял смесь --
+        # пароль одного входа с портом и ключом другого (#533).
+        creds.write_connection(dest, login, password, record["https_port"],
+                               record["proxy_url"], record["proxy_key"])
+    except Exception:
+        _restore_pin(dest, pin)
+        raise
+    # После записи профиль новый и целый: провал очистки -- не отказ входа и
+    # не откат пина, а честный остаток старых файлов; вход уже состоялся.
+    # Вся фаза очистки под одной защитой: и список, и удаления.
+    try:
         gone = creds.legacy(os.listdir(dest))
         if os.path.exists(os.path.join(dest, creds.TOKEN_FILE)) and \
                 not os.path.isdir(paths.local(paths.SECRETS)):
             gone.append(creds.TOKEN_FILE)
         for name in gone:
             os.remove(os.path.join(dest, name))
-    except Exception:
-        _restore_pin(dest, pin)
-        raise
+    except OSError as e:
+        print(f"login complete, cleanup incomplete: {e}", file=sys.stderr)
 
 
 def _bind(host, user):
@@ -192,45 +218,68 @@ def _bind(host, user):
 
 
 def ensure():
-    """Дополнить отсутствующий вход перед запуском master или code."""
+    """Дополнить отсутствующий вход перед запуском master или code.
+
+    Частичный остаток прежней пары (#533) -- не вход: восстановление одно,
+    полный повторный вход (проверка шины, свежий proxy-конфиг, проба ключа),
+    а не дописывание недостающей половины. Остаток годен только как подсказка
+    выбора адреса и логина -- не как профиль."""
     ctx = context.current()
     host = ctx.server
     if not host:
-        joined = sorted(d for d in glob.glob(os.path.join(creds.ROOT, "*"))
-                        if os.path.isfile(os.path.join(d, creds.CLIENT_FILE)))
+        joined = creds.joined_dirs()
         if len(joined) > 1:
             raise RuntimeError("multiple joined servers: name one with --server")
-        old = sorted(d for d in glob.glob(os.path.join(creds.ROOT, "*"))
-                     if creds.operator(d) is not None)
+        old = sorted(name for name in _dirs()
+                     if creds.operator(os.path.join(creds.ROOT, name)) is not None)
         choices = joined or old
         if len(choices) > 1:
             raise RuntimeError("multiple server logins: name one with --server")
         if choices:
-            host = os.path.basename(choices[0])
+            host = choices[0]
         elif sys.stdin.isatty():
             host = ask("server address: ")
         else:
             raise RuntimeError("no server and no terminal: run mop login --server ADDRESS")
     dest = creds.server_dir(host)
-    stored = creds.operator(dest)
+    # Один снимок на весь ensure (#533): классификация, подсказки и пароль
+    # для complete -- из одного поколения каталога, без поштучных чтений
+    # половин (два чтения видели бы два поколения, а битый operator.json
+    # молча терял имя на полпути к отказу).
     try:
-        saved = creds.client(dest)
-    except ValueError as e:
+        kind, hints = creds.snapshot(dest)
+    except creds.ProfileError as e:
+        # Конфликт и испорченный/неизвестный новый файл -- отказ: повторный
+        # вход молча перезаписал бы чужой формат.
         raise RuntimeError(str(e)) from e
-    if stored and saved:
-        return host
-    user = creds.pick_login(ctx.user, (stored or {}).get("user"), None)
+    if kind == "human":
+        return host          # целый вход: не трогаем
+    if kind == "machine":
+        raise RuntimeError("machine service identity and a human login conflict: "
+                           "use a separate operator account or connection directory")
+    # partial (остаток пары) или пустой каталог: полный вход. Остаток --
+    # подсказки имени/порта и проверки прежнего пароля, не доверие.
+    user, port_hint = ((hints or {}).get("user"),
+                       (hints or {}).get("https_port")) if kind == "partial" \
+        else (None, None)
+    user = creds.pick_login(ctx.user, user, None)
     if not user:
         if not sys.stdin.isatty():
             raise RuntimeError(f"no login for {host}: run mop login --server {host}")
         user = ask(f"login on {host}: ")
-    if not stored and not sys.stdin.isatty() and not os.environ.get("MOP_BUS_PASSWORD"):
-        raise RuntimeError(f"no password and no terminal: run mop login --server {host}")
-    https = _https_port(None, saved)
+    https = _https_port(None, {"https_port": port_hint} if port_hint else None)
     with context.use(context.resolve({"server": host}, {}, {})):
         complete(host, user, dest, https)
     _bind(host, user)
     return host
+
+
+def _dirs():
+    """Каталоги серверов, что есть; пусто -- когда корня ещё нет."""
+    try:
+        return sorted(os.listdir(creds.ROOT))
+    except FileNotFoundError:
+        return []
 
 
 def main(argv):
@@ -249,10 +298,10 @@ def main(argv):
     found = serving(origin) if origin and not ctx.server else []
     try:
         if not (explicit or bound or found):
-            joined = sorted(d for d in glob.glob(os.path.join(creds.ROOT, "*"))
-                            if os.path.isfile(os.path.join(d, creds.CLIENT_FILE)))
-            if joined:
-                found = [creds.joined_host()]
+            found = creds.joined_dirs()   # следы входов направляют выбор (#533)
+            if len(found) > 1:
+                raise RuntimeError(f"multiple joined servers ({', '.join(found)}): "
+                                   f"name one with --server")
         try:
             host = creds.pick_server(explicit, bound, found, None)
         except ValueError:
@@ -262,12 +311,31 @@ def main(argv):
         # Дальше весь процесс -- про этот сервер: каталог кредов, TLS-прокси.
         with context.use(context.resolve({"server": host}, {}, {})):
             dest = creds.server_dir(host)
-            stored = creds.operator(dest)
-            login = creds.pick_login(login or ctx.user, (stored or {}).get("user"), None)
+            # Подсказки -- из ОДНОГО снимка каталога (#533): целый профиль
+            # знает логин и порт сам; остаток пары подсказывает то, что в
+            # нём лежит. Явные аргументы и контекст старше любой подсказки.
+            # broken/conflict отказывают ЗДЕСЬ, до сети, вопросов и чтения
+            # legacy-половин: вход такой каталог не ремонтирует.
+            try:
+                kind, who = creds.snapshot(dest)
+            except creds.ProfileError as e:
+                lib.fail(str(e))
+                return 1
+            if kind == "machine":
+                lib.fail("machine service identity and a human login conflict: "
+                         "use a separate operator account or connection directory")
+                return 1
+            # kind здесь human | partial | None: профиль и остаток несут
+            # подсказки, пустой каталог -- нет.
+            hint = who or {}
+            login = creds.pick_login(login or ctx.user, hint.get("user"), None)
             if not login:
                 login = ask(f"login on {host}: ")
-            saved = creds.client(dest)
-            https = _https_port(explicit_https, saved)
+            # Порт -- подсказка из профиля или остатка; машинный каталог
+            # своего порта не хранит.
+            https = _https_port(explicit_https,
+                                {"https_port": hint["https_port"]}
+                                if hint.get("https_port") else None)
             complete(host, login, dest, https)
     except (RuntimeError, ValueError, OSError) as e:
         lib.fail(str(e))

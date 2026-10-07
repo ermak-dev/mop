@@ -63,7 +63,8 @@ def check_selected_server_448(c, models):
     with patched(creds, ROOT=root), patched_env(MOP_SERVER_LAN=None), \
             patched(urllib.request, build_opener=opener), config.client_sources():
         for host in ("a.test", "b.test"):
-            creds.write_client(os.path.join(root, host), "443", f"https://{host}/llm", host + "-key")
+            creds.write_connection(os.path.join(root, host), "user", "bus-pw", "443",
+                                   f"https://{host}/llm", host + "-key")
         with context.use(context.resolve({"server": "b.test"}, {}, {})):
             c.expect("#448 chosen proxy models", models.available(), ["model-a", "model-b"])
         c.expect("#448 request uses chosen URL and key", seen,

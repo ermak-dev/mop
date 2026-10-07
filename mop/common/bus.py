@@ -171,19 +171,28 @@ def server_config(host):
     Отдельно от config(), потому что `mop join` спрашивает и чужие серверы,
     на которые у машины уже есть вход: чей реестр знает этот клон (#125)."""
     directory = creds.server_dir(host)
-    # Каталог сервера -- это человек или сервис сервера, и ходят они через
-    # TLS-прокси (#97): пароль по сети открытым текстом не идёт. Кред один --
-    # кто эта машина на шине (#106): одни креды на все проекты человека, а
-    # какой именно проект -- решает СУБЪЕКТ, и права на субъект проверяет
-    # сервер NATS. Ролевых паролей admin и master-<проект> больше нет.
-    op = creds.operator(directory)
-    if not op:
-        raise BusError(f"no bus credentials: {directory}/{creds.OPERATOR_FILE} "
-                       f"is missing — run mop join --server {host}")
-    joined = creds.client(directory)
-    port = joined["https_port"] if joined else settings.get("MOP_HTTPS_PORT")
-    return creds.wss_config(host, port, PROJECT, op["password"], user=op["user"],
-                            cafile=creds.cafile(directory))
+    # Один снимок профиля на операцию (#533): прежние два чтения поштучно
+    # собирали конфиг из несвязанных половин. Человек -- целый профиль
+    # (connection.json либо целая пара); машинный каталог -- прежний
+    # контракт: operator.json сервиса, порт из client.json, если лежит,
+    # иначе настройка, proxy не обязателен. Сосуществование machine operator
+    # и человеческого профиля -- конфликт без выбора стороны, половина пары
+    # -- не вход (нужно имя из operator.json и пароль, которого нет).
+    try:
+        kind, profile = creds.snapshot(directory)
+    except creds.ProfileError as e:
+        raise BusError(str(e)) from e
+    if kind == "human":
+        return creds.wss_config(host, profile["https_port"], PROJECT, profile["password"],
+                                user=profile["user"], cafile=creds.cafile(directory))
+    if kind == "machine":
+        port = profile["https_port"] if profile["https_port"] else settings.get("MOP_HTTPS_PORT")
+        return creds.wss_config(host, port, PROJECT, profile["password"],
+                                user=profile["user"], cafile=creds.cafile(directory))
+    if kind == "partial":
+        raise BusError(f"incomplete login in {directory}: re-run mop login "
+                       f"--server {host}")
+    raise BusError(f"no bus credentials: {directory} — run mop login --server {host}")
 
 
 # ─── соединение ──────────────────────────────────────────────────────────

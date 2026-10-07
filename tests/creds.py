@@ -363,8 +363,11 @@ def check_no_human_over_nats_219(c):
 
     # Каталог сервера оператора -- всегда wss.
     # Как настоящий: servers/<адрес>/ -- make_dir закрывает и родителя.
+    # #533: целый вход пишется одной connection.json; операторская половина
+    # -- не профиль, и server_config отказывает, а не собирает конфиг из
+    # остатка (проверено в tests/connection.py).
     d = os.path.join(tempfile.mkdtemp(prefix="mop-test-creds-219-"), "servers", "10.0.0.1")
-    creds.write_operator(d, "anton", "pw")
+    creds.write_connection(d, "anton", "pw", "443", "https://10.0.0.1:443/llm", "key")
     with patched_env(MOP_SERVER_DIR=d):
         try:
             from mop.common import bus, config
@@ -372,10 +375,10 @@ def check_no_human_over_nats_219(c):
             c.check("a person's bus config (the server directory) is wss",
                     conf["url"].startswith("wss://") and conf["user"] == "anton", conf)
             # HYPOTHESIS: клиент шины игнорирует HTTPS-порт, сохранённый join.
-            # SOLUTION: тот же client.json питает шину и LLM-сессию.
+            # SOLUTION: тот же профиль питает шину и LLM-сессию.
             # RESULT: wss использует порт выбранного joined-сервера.
             # STATUS: FIXED — see #397
-            creds.write_client(d, "8443", "https://10.0.0.1:8443/llm", "key")
+            creds.write_connection(d, "anton", "pw", "8443", "https://10.0.0.1:8443/llm", "key")
             with config.client_sources():
                 c.expect("#397 bus uses joined HTTPS port",
                          bus.server_config("10.0.0.1")["url"],
