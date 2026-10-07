@@ -312,12 +312,15 @@ def check_migration_534(c):
         c.expect("#534 an empty legacy pair migrates to an empty v1 snapshot",
                  projects.snapshot_of(d), {"version": 1, "projects": []})
 
-        # Нет пары -- нет данных; отказ: выдумывать реестр нельзя (нет
-        # файлов и нет снимка -- это не «пусто», а «неизвестно»).
+        # Нет ни пары, ни снимка -- свежая установка: реестр честно пуст
+        # (это поддерживаемое состояние, а не «неизвестно»), и читатель
+        # ничего не создаёт. Первый успешный add создаст projects.json.
         shutil.rmtree(d)
         os.makedirs(d)
-        _refused534(c, "#534 no legacy pair and no snapshot must refuse loudly",
-                  lambda: projects.snapshot_of(d))
+        c.expect("#534 a fresh install reads as an empty registry",
+                 projects.snapshot_of(d), {"version": 1, "projects": []})
+        c.check("#534 reading a fresh install writes nothing",
+                not os.path.exists(os.path.join(d, "projects.json")))
 
         # Голое имя непредставимо в v1 (origin выдумывать нельзя): отказ
         # с именем, legacy-файл не трогаем, нового файла нет.
@@ -334,15 +337,21 @@ def check_migration_534(c):
         # записи на проект, задваивать лимит некуда; без консенсуса,
         # какой origin правда, мигрировать нельзя -- отказ с обоими.
         shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
-        _legacy_pair(d, [MOP, OTHER])  # один basename rudesktop
+        _legacy_pair(d, [RU, OTHER])  # оба -- rudesktop
         _refused534(c, "#534 two origins of one project must refuse with both",
-                  lambda: projects.snapshot_of(d), OTHER.split("/")[-1].split(".")[0])
+                  lambda: projects.snapshot_of(d), RU, OTHER)
 
         # Orphan-лимит (имени нет в реестре) и нецелое значение: отказ с
-        # именем, а не молчаливая утрата потолка.
+        # именем, а не молчаливая утрата потолка. Непустые limits без
+        # projects вовсе -- тот же отказ: потолки без реестра не
+        # обнуляются молча.
         shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
         _legacy_pair(d, [MOP], {"ghost": 2})
         _refused534(c, "#534 an orphan limit must refuse with the name",
+                  lambda: projects.snapshot_of(d), "ghost")
+        shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
+        _legacy_pair(d, [], {"ghost": 2})
+        _refused534(c, "#534 non-empty limits without projects must refuse",
                   lambda: projects.snapshot_of(d), "ghost")
         shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
         _legacy_pair(d, [MOP], {"mop": 2, "rudesktop": 1})

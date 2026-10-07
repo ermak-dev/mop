@@ -1177,10 +1177,12 @@ class _Registry534:
     сервис делал и в каком порядке, и сам решает, что было побочным
     эффектом. Реестр изначально -- legacy-пара в каталоге `dir`."""
 
-    def __init__(self, limits=None, live=None):
+    def __init__(self, limits=None, live=None, fresh=False):
         self.dir = tempfile.mkdtemp(prefix="mop-test-534c-")
         self.live = live or []
         self.log = {"apply": [], "reload": [], "creds": [], "secrets": [], "jobs": []}
+        if fresh:
+            return  # свежая установка: ни legacy-пары, ни снимка
         with open(os.path.join(self.dir, "projects"), "w") as f:
             f.write("".join(f"{s}\n" for s in (RU534, MOP534)))
         with open(os.path.join(self.dir, "limits.json"), "w") as f:
@@ -1234,11 +1236,39 @@ class _Registry534:
             return False
 
         apply_fn = failing_users_apply if refuse_apply is not None else self._users_apply
+        _projects = cluster.projects
+        _real_read = _projects.read
+        _real_write = _projects.write
+        _real_read_limits = _projects.read_limits
+        _real_write_limits = _projects.write_limits
+        _real_snapshot_of = getattr(_projects, "snapshot_of", None)
+        legacy_file = os.path.join(self.dir, "projects")
+        limits_file = os.path.join(self.dir, "limits.json")
+        # Дефолты путей в read/write/read_limits связаны при def, патч
+        # атрибута FILE их не перенаправляет -- заворачиваем сами функции,
+        # с явным путём в каталог среды; только так глаголы читают и пишут
+        # реестр среды, а не временный дом процесса.
+        def read(path=None, *a, **k):
+            return _real_read(legacy_file if path is None else path, *a, **k)
+
+        def write(lines, path=None, *a, **k):
+            return _real_write(lines, legacy_file if path is None else path, *a, **k)
+
+        def read_limits(path=None, *a, **k):
+            return _real_read_limits(limits_file if path is None else path, *a, **k)
+
+        def write_limits(limits, path=None, *a, **k):
+            return _real_write_limits(limits, limits_file if path is None else path, *a, **k)
+
+        def snapshot_of(dir_=None, *a, **k):
+            return _real_snapshot_of(self.dir if dir_ is None else dir_, *a, **k)
+
         with patched(cluster, _users_apply=apply_fn, nomad_jobs=self._jobs), \
                 patched(_natsconf, reload=self._reload, read_users=lambda path=None: None,
                         read_base=lambda: {"service": "pw"}), \
-                patched(cluster.projects, FILE=os.path.join(self.dir, "projects"),
-                        LIMITS=os.path.join(self.dir, "limits.json"),
+                patched(_projects, read=read, write=write, read_limits=read_limits,
+                        write_limits=write_limits, snapshot_of=snapshot_of,
+                        FILE=legacy_file, LIMITS=limits_file,
                         SNAPSHOT=os.path.join(self.dir, "projects.json")), \
                 patched(_bootstrap, PUPPET_CREDS=os.path.join(self.dir, "puppets")), \
                 patched(_creds, puppet_pass_file=lambda n: f"{n}.pass"), \
@@ -1295,6 +1325,29 @@ def check_registry_verbs_534(c):
             c.expect("#534 a repeat add is idempotent", got, {"ok": True, "name": "new", "added": False})
             c.expect("#534 the second add reads the snapshot, not the stale pair",
                      env.snapshot(), before)
+        finally:
+            env.cleanup()
+
+    # 3a. Свежая установка: ни пары, ни снимка -- реестр пуст, читатель
+    # ничего не создаёт; первый успешный add атомарно заводит projects.json.
+    env = _Registry534(fresh=True)
+    with env.patched_env():
+        try:
+            got = cluster.answer("admin", {"verb": "projects"})
+            c.check("#534 a fresh install lists an empty registry",
+                    got.get("ok") and got.get("names") == [] and got.get("limits") == {},
+                    got)
+            c.check("#534 a fresh install's listing writes nothing",
+                    not os.path.exists(env.snapshot_path()))
+            got = cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
+            c.expect("#534 the first add on a fresh install answers as before", got,
+                     {"ok": True, "name": "new", "added": True})
+            c.expect("#534 the first add creates the snapshot alone",
+                     [(p["origin"], p.get("limit")) for p in env.snapshot()["projects"]],
+                     [("git@h:team/new.git", None)])
+            c.check("#534 the first add writes no legacy files",
+                    not os.path.exists(os.path.join(env.dir, "projects"))
+                    and not os.path.exists(os.path.join(env.dir, "limits.json")))
         finally:
             env.cleanup()
 
@@ -1396,13 +1449,13 @@ def check_registry_verbs_534(c):
     # обоими origin'ами, ничего не пишет и не теряет.
     env = _Registry534()
     with open(os.path.join(env.dir, "projects"), "w") as f:
-        f.write(f"{MOP534}\n{OTHER534}\n")
+        f.write(f"{RU534}\n{OTHER534}\n")  # оба -- rudesktop
     with env.patched_env():
         try:
-            got = cluster.answer("admin", {"verb": "project_limit", "name": "mop", "value": "3"})
+            got = cluster.answer("admin", {"verb": "project_limit", "name": "rudesktop", "value": "3"})
             c.check("#534 a colliding legacy pair refuses with both origins",
                     bool(got.get("error")) and OTHER534 in got.get("error", "")
-                    and MOP534 in got.get("error", ""), got)
+                    and RU534 in got.get("error", ""), got)
             c.check("#534 a colliding pair writes no snapshot",
                     not os.path.exists(env.snapshot_path()))
         finally:
@@ -1441,6 +1494,89 @@ def check_registry_verbs_534(c):
             env.cleanup()
 
 
+def check_concurrent_534(c):
+    """Concurrent-запись реестра: замок держит «прочитал-записал» целиком.
+
+    Детерминированное пересечение: барьер стоит ВНУТРИ критической секции --
+    обёртка вокруг чтения реестра не отпускает читателя, пока в секцию не
+    вошли оба потока (Event с ограниченным ожиданием, не вечный барьер:
+    с настоящим замком второй внутрь не попадает, и это и есть доказательство
+    исключения). Гипотеза (#534): без замка оба читают один пустой реестр и
+    пишут поверх -- один проект теряется молча. STATUS: #534"""
+    import threading
+
+    def race(lock):
+        """Два одновременных add на свежей среде. -> (origin'ы на диске,
+        вошли ли оба в секцию до первой записи)."""
+        env = _Registry534(fresh=True)
+        try:
+            with env.patched_env():
+                from mop.common import projects as _projects
+                both_read = threading.Event()      # оба прочли реестр
+                first_read = threading.Lock()
+                reads = {"n": 0}
+                real_snapshot_of = _projects.snapshot_of
+
+                def gated_snapshot_of(d):
+                    got = real_snapshot_of(d)
+                    with first_read:
+                        reads["n"] += 1
+                        if reads["n"] == 2:
+                            both_read.set()   # оба в секции: отпускаем
+                    if not both_read.wait(timeout=5):
+                        pass  # второй не пришёл -- замок не пустил, идём дальше
+                    return got
+
+                results = {}
+
+                def racing(tag, origin):
+                    results[tag] = cluster.answer(
+                        "admin", {"verb": "project_add", "origin": origin})
+
+                threads = [threading.Thread(target=racing, args=(t, o)) for t, o in (
+                    ("one", "git@h:team/one.git"), ("two", "git@h:team/two.git"))]
+                with patched(_projects, snapshot_of=gated_snapshot_of), \
+                        patched(cluster, _projects_lock=lock):
+                    for t in threads:
+                        t.start()
+                    for t in threads:
+                        t.join(timeout=15)
+                if not os.path.exists(env.snapshot_path()):
+                    return None, results
+                with open(env.snapshot_path()) as f:
+                    snap = json.load(f)
+                return {p["origin"] for p in snap["projects"]}, results
+        finally:
+            env.cleanup()
+
+    # Без замка (пустышка): оба входят в секцию, читают один и тот же
+    # пустой снимок и пишут поверх -- один проект теряется молча.
+    kept, answers = race(_no_lock_534())
+    c.check("#534 without the lock a concurrent add is lost",
+            kept is not None and kept != {"git@h:team/one.git", "git@h:team/two.git"},
+            f"on disk: {sorted(kept or [])}, answers: {answers}")
+
+    # С настоящим замком сервиса: секция «прочитал-записал» целиком под
+    # замком, второй поток читает уже результат первого -- выживают оба.
+    kept, answers = race(cluster._projects_lock)
+    c.check("#534 with the lock both concurrent adds survive",
+            kept == {"git@h:team/one.git", "git@h:team/two.git"},
+            f"on disk: {sorted(kept or [])}, answers: {answers}")
+
+
+def _no_lock_534():
+    """Замок-пустышка: держит и сразу отпускает, защиты нет -- ровно то,
+    что было бы без замка."""
+    class _PassThrough:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    return _PassThrough()
+
+
 def main():
     c = Checks()
     check_join_config_404(c)
@@ -1456,7 +1592,7 @@ def main():
                   check_node_267, check_node_forms_277,
                   check_nomad_api_275, check_stderr_verb_333,
                   check_update_origin_365, check_nodes_api_375,
-                  check_registry_verbs_534,
+                  check_registry_verbs_534, check_concurrent_534,
                   ):
         check(c)
     return c.report("cluster")
