@@ -39,18 +39,18 @@ def _fetch_list():
     """Шов remote-списка прокси: GET management api-keys. Реализация --
     глагол #539; библиотека шва не имеет (внеплановый вызов -- громкий
     отказ, не тихий None)."""
-    raise NotImplementedError("the proxy key list seam is the #539 verb's")
+    raise NotImplementedError("the proxy key list seam belongs to the orchestration verb")
 
 
 def _put_list(keys):
     """Шов записи списка: PUT management api-keys. (исход, причина);
     'applied' -- записано (применение подтверждает только probe)."""
-    raise NotImplementedError("the proxy key list seam is the #539 verb's")
+    raise NotImplementedError("the proxy key list seam belongs to the orchestration verb")
 
 
 def _probe(key):
     """Шов проверки клиентским API: принят ли ключ прокси сейчас."""
-    raise NotImplementedError("the proxy probe seam is the #539 verb's")
+    raise NotImplementedError("the proxy probe seam belongs to the orchestration verb")
 
 
 @contextmanager
