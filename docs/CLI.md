@@ -966,7 +966,7 @@ mop server cluster users [--reload]: write the bus users file from the server's 
 
 On the server, as the pool user. Reads the people, services and nodes that
 mop server deploy put into /etc/nats/base-users.json, the projects from the
-server's registry (~/.config/mop/projects), gives a project without a bus
+server's registry (~/.config/mop/projects.json), gives a project without a bus
 password a new one, and writes /etc/nats/users.conf (the machines) and
 /etc/nats/callout.conf with the auth callout's keys.
 --reload sends nats-server SIGHUP when users.conf changed and checks that
