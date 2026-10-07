@@ -360,6 +360,12 @@ def snapshot_lines(snapshot):
     return snapshot_origins(snapshot) + list(snapshot.get("legacy") or [])
 
 
+def view_lines(view):
+    """Строки взгляда для локального читателя без сервера (fallback deploy,
+    `mop cluster users`): те же lines, что у глагола-списка. Чистая."""
+    return snapshot_lines(view)
+
+
 def write_snapshot(snapshot, path=SNAPSHOT):
     """Запись снимка атомарно. Единственный writer -- сервис кластера.
 

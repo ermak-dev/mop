@@ -438,7 +438,11 @@ def main(argv):
         answer = bus.ask_cluster("projects", project=bus.ADMIN, timeout=10)
     except Exception as e:
         answer = {"error": str(e)}
-    lines, note = projects.for_deploy(answer, projects.read())
+    # Локальная копия (#534) -- взгляд реестра этой машины, а не сырой
+    # легаси-файл: после миграции пара на диске остаётся лежать остывшей,
+    # и fallback должен видеть актуальный снимок.
+    lines, note = projects.for_deploy(
+        answer, projects.view_lines(projects.view_of(projects.SNAPSHOT_DIR)))
     if note:
         print(f"  {note}", file=sys.stderr, flush=True)
     origins, legacy = puppets.project_ids(lines)

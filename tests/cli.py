@@ -2276,6 +2276,25 @@ def check_output_182(c):
             c.check(f"cluster users {argv} must be silent on success: "
                     f"out {out!r} err {err!r} code {code!r}", not (out or err or code))
 
+        # #534: users читает взгляд реестра, а не устаревший легаси-файл.
+        # После миграции правда на диске -- projects.json; projects.read()
+        # видит только остывшую пару, и команда заводила бы пользователей
+        # без новых проектов.
+        seen = []
+        natsconf.apply = lambda names, creds: (seen.append(sorted(names)), (True, None))[1]
+        with tempfile.TemporaryDirectory(prefix="mop-test-534u-") as d:
+            with open(os.path.join(d, "projects.json"), "w") as f:
+                f.write(json.dumps({"version": 1, "projects": [
+                    {"origin": "git@h:g/p.git"}, {"origin": "git@h:team/new.git"}]}))
+            with restored(projects, "SNAPSHOT", "SNAPSHOT_DIR"), \
+                    restored(projects, "read", "view_of", "view_lines"):
+                projects.SNAPSHOT = os.path.join(d, "projects.json")
+                projects.SNAPSHOT_DIR = d
+                projects.read = lambda: ["git@h:g/p.git"]  # остывшая пара
+                out, err, code = through(users.main, [])
+        c.expect("#534 cluster users reads the current registry view",
+                 seen, [["new", "p"]])
+
 
 def check_restore_all_188(c):
     """HYPOTHESIS (#188): image.restore поднимал папетов до первого отказа

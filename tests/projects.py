@@ -178,7 +178,9 @@ def check_for_deploy(c):
     проектах теперь -- реестр сервера, который правят глаголы сервиса.
     SOLUTION: deploy спрашивает сервер; нет ответа (чистая установка: шины
     ещё нет) -- берёт копию этой машины и говорит об этом.
-    STATUS: FIXED — see #117"""
+    STATUS: FIXED — see #117; локальная копия -- взгляд #534, а не сырой
+    легаси-файл: после миграции файлы пары на диске устаревают, и fallback
+    должен видеть актуальный снимок, а не остывший projects."""
     try:
         fn = projects.for_deploy
     except AttributeError:
@@ -193,6 +195,41 @@ def check_for_deploy(c):
     # Пустой ответ сервера -- правда (проектов нет), а не повод взять копию.
     lines, note = fn({"ok": True, "lines": []}, {"git@h:g/old.git"})
     c.check(f"an empty server registry is the truth: {lines}", not (lines != set()))
+
+
+def check_local_view_534(c):
+    """Локальный fallback deploy и команда users читают взгляд, не легаси-файл.
+
+    HYPOTHESIS (#534): после миграции реестр на диске -- projects.json, а
+    легаси-файлы пары остаются лежать устаревшими. Читатели, которым
+    говорено «нет ответа сервера -- возьми локальную копию» (deploy) или
+    «заведи пользователей шины по реестру этой машины» (mop cluster
+    users), продолжали читать projects.read() -- устаревший файл: новые
+    проекты, заведённые глаголом, не получали пользователей шины, и
+    прогон/команда молча откатывали реестр к до-миграционному.
+    SOLUTION: оба читают projects.view_lines(view_of(SNAPSHOT_DIR)) --
+    тот же взгляд, что и глагол-список сервиса: старые данные видимы,
+    актуальный снимок -- источник.
+    STATUS: #534 (красный прогон впереди реализации)."""
+    import shutil
+    import tempfile
+    d = tempfile.mkdtemp(prefix="mop-test-534l-")
+    try:
+        # После миграции на диске только снимок: взгляд читает его, а не
+        # отсутствующий легаси-файл.
+        import json as _json
+        with open(os.path.join(d, "projects.json"), "w") as f:
+            f.write(_json.dumps({"version": 1, "projects": [
+                {"origin": MOP, "limit": 2}, {"origin": RU}]}))
+        c.expect("#534 the local view of a migrated registry sees the snapshot",
+                 sorted(projects.view_lines(projects.view_of(d))),
+                 sorted([MOP, RU]))
+        # Форма списка -- прежняя (строки для плейбука, без структур).
+        c.check("#534 the local view yields plain lines",
+                all(isinstance(l, str) for l in projects.view_lines(projects.view_of(d))),
+                "")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def check_read_limits_337(c):
@@ -596,7 +633,7 @@ def check_view_534(c):
 def main():
     c = Checks()
     for fn in (check_add, check_delete, check_names, check_limits, check_read_limits_337,
-               check_git_hosts, check_for_deploy,
+               check_git_hosts, check_for_deploy, check_local_view_534,
                check_migration_534, check_snapshot_534, check_view_534):
         fn(c)
     return c.report("projects")
