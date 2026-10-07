@@ -34,16 +34,22 @@ def issues_of(answer):
 def _probe():
     """Код ответа /v1_models | исключение сети."""
     host = config.get("MOP_SERVER_LAN")
-    # Один снимок профиля (#533): доктор тоже читает каталог одним решателем.
+    # Один снимок профиля (#533): доктор тоже читает каталог одним решателем;
+    # пустой каталог отличён от служебного -- у них разные ремонты.
     try:
-        joined = creds.human_profile(creds.server_dir(host))
-    except ValueError as e:
+        kind, joined = creds.snapshot(creds.server_dir(host))
+    except creds.ProfileError as e:
         raise RuntimeError(str(e)) from e
-    if joined is None:
-        # Служебный каталог: человеческий login в него сам запрещён.
-        raise RuntimeError(f"no human login for {host} (a machine service "
-                           f"directory): use a separate operator account "
-                           f"or connection directory")
+    if kind != "human":
+        if kind == "machine":
+            raise RuntimeError(f"no human login for {host} (a machine service "
+                               f"directory): use a separate operator account "
+                               f"or connection directory, run mop login "
+                               f"--server {host} <login>")
+        if kind == "partial":
+            raise RuntimeError(f"incomplete login for {host}: re-run "
+                               f"mop login --server {host}")
+        raise RuntimeError(f"no login for {host}: run mop login --server {host}")
     req = urllib.request.Request(joined["proxy_url"].rstrip("/") + "/v1/models",
                                  headers={"Authorization": f"Bearer {joined['proxy_key']}"})
     pin = creds.cafile(creds.server_dir(host)) if \

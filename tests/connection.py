@@ -289,12 +289,22 @@ def check_reader_legacy_533(c):
 
     op_only = os.path.join(root, "op.test")
     creds.write_operator(op_only, ALICE[0], ALICE[1])
-    refute(c, "#533 an operator-only legacy half is not a profile",
-           lambda: profile(op_only), "mop login")
+    # Половина -- не профиль решателя (None), а отказ «неполный вход» --
+    # работа consumer'ов (#533): bus проверен ниже, запускатели -- своими
+    # текстами в check_service_conflict_533.
+    c.expect("#533 an operator-only legacy half is not a profile",
+             profile(op_only), None)
     cl_only = os.path.join(root, "cl.test")
     creds.write_client(cl_only, ALICE[2], ALICE[3], ALICE[4])
-    refute(c, "#533 a client-only legacy half is not a profile",
-           lambda: profile(cl_only), "mop login")
+    c.expect("#533 a client-only legacy half is not a profile",
+             profile(cl_only), None)
+    # Половина -- не вход и для шины: отказ «неполный вход», не конфиг из
+    # того, что лежит (имя без пароля -- вход неизвестно кого).
+    with patched(creds, ROOT=root), \
+            context.use(context.resolve({"server": "op.test"}, {}, {})), \
+            config.client_sources():
+        refute(c, "#533 the bus refuses an incomplete login",
+               lambda: bus.server_config("op.test"), "incomplete login", "mop login")
 
     # Порченая пара -- отказ, как сегодня у client(): не «нет входа».
     broken = os.path.join(root, "broken.test")
@@ -346,17 +356,41 @@ def check_service_conflict_533(c):
                  bus.server_config("pinned.test")["url"], "wss://pinned.test:8443/nats")
 
     # Человеческая сессия на service-каталоге -- не вход: запускатель
-    # отказывает, а не запускает сессию без прокси.
+    # отказывает, а не запускает сессию без прокси. Пустой каталог -- ДРУГОЙ
+    # случай: там «войдите» годится, здесь вход сам запрещён; тексты отказов
+    # обязаны их различать (#533).
     from mop.cli.core import _common
-    with patched(creds, ROOT=root), patched_env(MOP_SERVER_LAN="plain.test"), \
-            context.use(context.resolve({"server": "plain.test"}, {}, {})), \
-            config.client_sources():
+    from mop.client import models
+    from mop.server.doctor import proxy as doctor
+    for label, module, fn, refuse in (
+            ("session_env", _common, lambda: _common.session_env(),
+             ("separate", "mop login")),
+            ("models", models, lambda: models.available(), ("separate",)),
+            ("doctor", doctor, lambda: doctor._probe(), ("separate",))):
+        for case, name in (("empty", "empty.test"), ("machine", "plain.test")):
+            os.makedirs(os.path.join(root, name), exist_ok=True)
+            with patched(creds, ROOT=root), patched_env(MOP_SERVER_LAN=name), \
+                    context.use(context.resolve({"server": name}, {}, {})), \
+                    config.client_sources():
+                try:
+                    fn()
+                    c.fail(f"#533 {label} must refuse a {case} directory")
+                except RuntimeError as e:
+                    text = str(e)
+                    if case == "machine":
+                        c.check(f"#533 {label}: a machine directory names a "
+                                f"separate operator account",
+                                all(n in text for n in refuse), text)
+                    else:
+                        c.check(f"#533 {label}: an empty directory is not "
+                                f"called a machine service directory",
+                                "machine service" not in text and
+                                "run mop login" in text, text)
+    for name in ("empty.test",):
         try:
-            _common.session_env()
-            c.fail("#533 session_env must refuse a machine-only login")
-        except RuntimeError as e:
-            c.check("#533 the refusal names login, not a silent launch",
-                    "mop login" in str(e) or "login" in str(e), str(e))
+            os.rmdir(os.path.join(root, name))
+        except OSError:
+            pass
 
 
 # ── вход человека в конфликтный каталог отказывает до сети ──────────────
@@ -391,7 +425,7 @@ def check_recover_533(c):
     root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-recover-"), "servers")
     calls = []
 
-    def finish(host, who, directory, port):
+    def finish(host, who, directory, port, **kw):
         calls.append((host, who, directory, port))
         put_connection(directory, (who, "fresh-bus", port,
                                    f"https://{host}/llm", "fresh-key"))
@@ -428,6 +462,41 @@ def check_recover_533(c):
     c.expect("#533 the old proxy key is not trusted", got.get("proxy_key"), "fresh-key")
     c.expect("#533 the recovered profile carries the context login",
              got.get("user"), "bob")
+
+    # Операторская половина без терминала: имя известно из остатка, пароль
+    # сохранён -- восстановление без единого вопроса (#533: подсказки из
+    # ОДНОГО снимка, имя не теряется).
+    calls.clear()
+    op_quiet = os.path.join(root, "quiet.test")
+    creds.write_operator(op_quiet, "alice", "stale-bus")
+    with patched(creds, ROOT=root), patched(join, complete=finish, git=lambda *a: None), \
+            patched(context, clone_binding=lambda: {}), \
+            context.use(context.resolve({"server": "quiet.test"}, {}, {})), \
+            patched_env(MOP_BUS_PASSWORD="fresh-bus"), \
+            patched(sys, stdin=io.StringIO()):
+        join.ensure()
+    c.expect("#533 an operator half recovers its own user without asking",
+             calls, [("quiet.test", "alice", op_quiet, "443")])
+
+    # Прокс-половина с явным именем и паролем из окружения: полный вход без
+    # вопросов и без чтения старого ключа.
+    calls.clear()
+    root2 = os.path.join(tempfile.mkdtemp(prefix="mop-conn-recover2-"), "servers")
+    cl2 = os.path.join(root2, "half2.test")
+    creds.write_client(cl2, "9443", "https://half2.test/llm", "old-key")
+    def finish2(host, who, directory, port, **kw):
+        calls.append((host, who, directory, port))
+        put_connection(directory, (who, "fresh-bus", port,
+                                   f"https://{host}/llm", "fresh-key"))
+    with patched(creds, ROOT=root2), patched(join, complete=finish2,
+                                             git=lambda *a: None), \
+            patched(context, clone_binding=lambda: {}), \
+            context.use(context.resolve({"server": "half2.test", "user": "bob"}, {}, {})), \
+            patched_env(MOP_BUS_PASSWORD="fresh-bus"), \
+            patched(sys, stdin=io.StringIO()):
+        join.ensure()
+    c.expect("#533 a client half with an explicit login goes in full",
+             calls, [("half2.test", "bob", cl2, "9443")])
 
     # Готовый вход не трогается: повторный ensure молчит.
     calls.clear()
@@ -515,6 +584,36 @@ def check_broken_profile_not_overwritten_533(c):
                  open(os.path.join(dest, "connection.json"), encoding="utf-8").read(), raw)
         c.expect(f"#533 {label}: the directory is untouched", snapshot(dest), before)
 
+        # Тот же испорченный каталог без явного логина и без терминала:
+        # отказ обязан нести ИСХОДНУЮ причину (broken), без вопросов, без
+        # чтения legacy-половин и без сети (#533: main не глотает класс).
+        touched.clear()
+        with patched(creds, ROOT=root), \
+                patched(join, _login=lambda *a: touched.append("_login") or "bus-x",
+                        _still_valid=lambda *a: touched.append("_still_valid") or False,
+                        _fetch=lambda *a: touched.append("_fetch") or
+                        {"https_port": "443", "proxy_url": "https://x/llm", "proxy_key": "x"},
+                        _probe=lambda *a: touched.append("_probe"),
+                        ask=lambda *a: touched.append("ask") or "alice",
+                        git=lambda *a: None), \
+                patched(creds, client=lambda *a: touched.append("client") or None), \
+                patched(creds, operator=lambda *a: touched.append("operator") or None), \
+                patched(sys, stderr=io.StringIO()), \
+                context.use(context.resolve({}, {}, {})), \
+                patched_env(MOP_BUS_PASSWORD="bus-x", MOP_SERVER_LAN=host,
+                            MOP_HTTPS_PORT="443"):
+            try:
+                rc = join.main(["--server", host, "--https-port", "443"])
+                refusal = None
+            except (RuntimeError, ValueError) as e:
+                rc, refusal = 1, str(e)
+            err = sys.stderr.getvalue()
+            c.check(f"#533 {path}: a broken profile with no named login fails "
+                    f"with its own reason ({label})",
+                    rc == 1 and "connection profile" in err and not touched
+                    and "ask" not in touched,
+                    f"rc {rc}, touched {touched}, stderr {err!r}")
+
 
 def _corrupt(directory):
     """Записать в connection.json осмысленно испорченный новый формат."""
@@ -601,6 +700,33 @@ def check_broken_operator_533(c):
                         f"before network, questions and writing",
                         rc == 1 and not touched,
                         f"rc {rc}, touched {touched}, refusal {refusal}")
+        # Без явного логина и без терминала тот же битый operator.json --
+        # исходная причина, ноль вопросов (#533: main не глотает класс).
+        touched.clear()
+        with patched(creds, ROOT=root), \
+                patched(join, _login=lambda *a: touched.append("_login") or "bus-x",
+                        _still_valid=lambda *a: touched.append("_still_valid") or False,
+                        _fetch=lambda *a: touched.append("_fetch") or
+                        {"https_port": "443", "proxy_url": "https://x/llm", "proxy_key": "x"},
+                        _probe=lambda *a: touched.append("_probe"),
+                        ask=lambda *a: touched.append("ask") or "alice",
+                        git=lambda *a: None), \
+                patched(creds, client=lambda *a: touched.append("client") or None), \
+                patched(creds, operator=lambda *a: touched.append("operator") or None), \
+                patched(sys, stderr=io.StringIO()), \
+                context.use(context.resolve({}, {}, {})), \
+                patched_env(MOP_BUS_PASSWORD="bus-x", MOP_SERVER_LAN=host):
+            try:
+                rc = join.main(["--server", host])
+                refusal = None
+            except (RuntimeError, ValueError) as e:
+                rc, refusal = 1, str(e)
+            err = sys.stderr.getvalue()
+            c.check(f"#533 a broken operator record with no named login fails "
+                    f"with its own reason ({label})",
+                    rc == 1 and "operator record" in err and "ask" not in touched
+                    and not touched,
+                    f"rc {rc}, touched {touched}, stderr {err!r}")
         # Ничего не записано, файл оператора не тронут (права вернули для чтения).
         os.chmod(os.path.join(dest, creds.OPERATOR_FILE), 0o600)
         c.check(f"#533 {label}: no new profile is written",
@@ -694,7 +820,7 @@ def check_schema_strict_533(c):
 def check_hints_from_snapshot_533(c):
     calls, prompts = [], []
 
-    def record_complete(host, login, dest, https):
+    def record_complete(host, login, dest, https, **kw):
         calls.append((login, https))
 
     def no_ask(*a, **k):

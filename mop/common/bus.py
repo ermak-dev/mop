@@ -176,7 +176,8 @@ def server_config(host):
     # (connection.json либо целая пара); машинный каталог -- прежний
     # контракт: operator.json сервиса, порт из client.json, если лежит,
     # иначе настройка, proxy не обязателен. Сосуществование machine operator
-    # и человеческого профиля -- конфликт без выбора стороны.
+    # и человеческого профиля -- конфликт без выбора стороны, половина пары
+    # -- не вход (нужно имя из operator.json и пароль, которого нет).
     try:
         kind, profile = creds.snapshot(directory)
     except creds.ProfileError as e:
@@ -188,6 +189,9 @@ def server_config(host):
         port = profile["https_port"] if profile["https_port"] else settings.get("MOP_HTTPS_PORT")
         return creds.wss_config(host, port, PROJECT, profile["password"],
                                 user=profile["user"], cafile=creds.cafile(directory))
+    if kind == "partial":
+        raise BusError(f"incomplete login in {directory}: re-run mop login "
+                       f"--server {host}")
     raise BusError(f"no bus credentials: {directory} — run mop login --server {host}")
 
 

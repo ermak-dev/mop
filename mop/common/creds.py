@@ -435,11 +435,15 @@ def _read_connection(directory):
 def snapshot(directory):
     """ОДИН снимок каталога сервера: каждый файл читается один раз (#533).
     -> ("human", профиль) | ("machine", {user, password, https_port|None}) |
-    (None, None). Конфликт machine operator + человеческий профиль,
-    половины прежней пары и битые записи -- ProfileError с типом причины.
+    ("partial", {user, password, https_port} -- только поля, что лежат) |
+    (None, None). Конфликт machine operator + человеческий профиль и битые
+    записи -- ProfileError с типом причины.
 
     Единственный решатель для шины и login: два отдельных чтения увидели бы
-    два поколения каталога, если writer заменил файл между ними."""
+    два поколения каталога, если writer заменил файл между ними. Половины
+    прежней пары -- тоже снимок: consumer'ы отказывают «не полный вход», а
+    login берёт из остатка подсказки (имя/порт) и идёт ПОЛНЫМ входом --
+    старый proxy-ключ остатка не доверяется."""
     conn = _read_connection(directory)
     op = _operator_strict(directory)
     if op is not None and busnames.is_machine(op["user"]):
@@ -462,26 +466,27 @@ def snapshot(directory):
         # смысл, ремонт называем здесь.
         raise ProfileError("broken", f"cannot use the legacy pair in {directory}: "
                           f"{e}") from None
-    if joined is None and op is None:
+    if joined is not None and op is not None:
+        return "human", {"user": op["user"], "password": op["password"],
+                         "https_port": joined["https_port"],
+                         "proxy_url": joined["proxy_url"],
+                         "proxy_key": joined["proxy_key"]}
+    # Половина прежней пары -- не вход: пароль без прокси-настроек запускал
+    # бы сессию без модели, прокси без пароля -- вход неизвестно кого.
+    # Половина -- ПОДСКАЗКА (имя/порт, проверка прежнего пароля), не
+    # профиль: пароль без проверки шиной не используется, старый ключ
+    # прокси не доверяется.
+    if op is None and joined is None:
         return None, None
-    if joined is None or op is None:
-        # Половина прежней пары -- не вход: пароль без прокси-настроек
-        # запускал бы сессию без модели, прокси без пароля -- вход неизвестно
-        # кого. Восстановление -- полный вход (#533), но половина -- ПОДСКАЗКА
-        # (проверка прежнего пароля), не профиль: пароль без проверки шиной
-        # не используется.
-        raise ProfileError("partial", f"incomplete login: re-run mop login "
-                           f"--server {os.path.basename(directory)}")
-    return "human", {"user": op["user"], "password": op["password"],
-                     "https_port": joined["https_port"],
-                     "proxy_url": joined["proxy_url"],
-                     "proxy_key": joined["proxy_key"]}
+    return "partial", {"user": op["user"] if op else None,
+                       "password": op["password"] if op else None,
+                       "https_port": joined["https_port"] if joined else None}
 
 
 def human_profile(directory):
     """Профиль человека из каталога сервера, либо None. Тонкая обёртка
-    snapshot (#533): служебный каталог профелем человека не становится,
-    остальные случаи решает общий снимок."""
+    snapshot (#533): пустой каталог, машинный и неполный вход профелем
+    человека не становятся, остальные случаи решает общий снимок."""
     kind, who = snapshot(directory)
     return who if kind == "human" else None
 

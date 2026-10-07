@@ -94,7 +94,7 @@ def check_no_local_env_395(c):
         raise AssertionError("join opened installation .env")
     with patched(config, _load=no_load), patched(join, serving=lambda *a: [],
             git=lambda *a: None, ask=lambda prompt, **kw: asked.append(prompt) or "srv.test",
-            complete=lambda *a: None), patched_env(MOP_SERVER_LAN=None):
+            complete=lambda *a, **k: None), patched_env(MOP_SERVER_LAN=None):
         try:
             join.main(["alice"])
         except AssertionError as e:
@@ -111,7 +111,7 @@ def check_ambiguous_server_395(c):
             join, serving=lambda *a: ["one.test", "two.test"],
             git=lambda *a: "origin" if a and a[0] == "rev-parse" else None,
             ask=lambda *a, **k: c.fail("#395 ambiguous server must not prompt"),
-            complete=lambda *a: c.fail("#395 ambiguous server must not connect")), \
+            complete=lambda *a, **k: c.fail("#395 ambiguous server must not connect")), \
             patched(join.lib, cwd_origin=lambda: "origin", fail=errors.append):
         code = join.main(["alice"])
     c.expect("#395 ambiguous server refuses", code, 1)
@@ -240,7 +240,7 @@ def check_login_port_and_server_427(c):
 
     root = os.path.join(tempfile.mkdtemp(prefix="mop-login-427-"), "servers")
     calls, errors, prompts = [], [], []
-    def complete(*args):
+    def complete(*args, **kw):
         calls.append(args)
     def ask(prompt, **kw):
         prompts.append(prompt)

@@ -163,20 +163,29 @@ def session_env():
     """Клиентский gateway: URL и ключ выбранного сервера, без модели стенда."""
     host = config.get("MOP_SERVER_LAN")
     directory = creds.server_dir(host)
-    # Один снимок профиля (#533): человеческий вход целиком или отказ.
-    # Служебный каталог (service) человеческой сессии не готовит: без
-    # proxy-конфига запускать нечего.
+    # Один снимок профиля (#533): человеческий вход целиком или отказ,
+    # и пустой каталог отличён от служебного -- «войди сюда» годится
+    # только первому.
     try:
-        record = creds.human_profile(directory)
-    except ValueError as e:
+        kind, record = creds.snapshot(directory)
+    except creds.ProfileError as e:
         raise RuntimeError(str(e)) from e
-    if record is None:
+    if kind == "human":
+        pass
+    elif kind == "machine":
         # Служебный каталог: человеческий login в него сам запрещён, совет
-        # «войди сюда» был бы заведомо неработающим.
+        # «войди сюда» был бы заведомо неработающим. Отдельная учётка не
+        # требует другой установки: вход на ТОМ ЖЕ сервере, в свой каталог.
         raise RuntimeError(f"no human login for {host} (a machine service "
                            f"directory): use a separate operator account "
                            f"or connection directory, run mop login "
-                           f"--server <another address>")
+                           f"--server {host} <login>")
+    elif kind == "partial":
+        raise RuntimeError(f"incomplete login for {host}: re-run "
+                           f"mop login --server {host}")
+    else:
+        raise RuntimeError(f"no login for {host}: run "
+                           f"mop login --server {host}")
     env = dict(llm.env())
     for name in MODEL_OVERRIDES:
         env.pop(name, None)   # карта llm.env() остаётся только у папетов
