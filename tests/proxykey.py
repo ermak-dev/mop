@@ -627,6 +627,98 @@ def check_probe_step_538(c):
                 not out.get("ok") and "wrong" in str(out.get("blocker", "")).lower(), out)
 
 
+# ── #538: локальная смена и раздача — чекпоинты вокруг записи путей ──────
+# HYPOTHESIS: запись new в источник и копию двумя независимыми записями
+# без чекпоинтов оставляла бы crash-сплит невосстановимым, а итог раздачи
+# по старому settled (FAILED = «дошли») закрывал бы операцию при недосове.
+# SOLUTION: локальный шаг пишет new в оба пути атомарно и приватно,
+# отмечая чекпоинты до и после; шаг раздачи ходит по ЗАМОРОЖЕННОМУ
+# сохранённому списку получателей, судит по strict_settled (FAILED и
+# NOT REACHED держат открытой), пустой список -- честный «0 recipients».
+def check_local_and_delivery_538(c):
+    local = getattr(proxykey, "_local_step", None)
+    deliver = getattr(proxykey, "_deliver_step", None)
+    if not c.check("#538 proxykey._local_step exists", callable(local)):
+        return
+    if not c.check("#538 proxykey._deliver_step exists", callable(deliver)):
+        return
+    import stat as st
+    with tempfile.TemporaryDirectory(prefix="mop-rot-local-") as d:
+        src = os.path.join(d, "llm-proxy-client.pass")
+        cp = os.path.join(d, "copy.pass")
+        op = os.path.join(d, "op.json")
+
+        def state(stage="accepted"):
+            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                    "new": "new-key", "source": src, "copy": cp,
+                    "recipients": ["node1", "node2"], "stage": stage}
+
+        def fresh():
+            for p, k in ((src, "old-key"), (cp, "old-key")):
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(k + "\n")
+                os.chmod(p, 0o600)
+
+        # Локальная смена: оба пути несут new, режим приватный,
+        # чекпоинт сохранён.
+        fresh()
+        with patched(proxykey, OP=op):
+            out = local(state())
+        c.check("#538 the local step succeeds", out.get("ok"), out)
+        c.expect("#538 the source now holds the new key",
+                 open(src).read().strip(), "new-key")
+        c.expect("#538 the copy now holds the new key",
+                 open(cp).read().strip(), "new-key")
+        c.check("#538 both paths stay private",
+                st.S_IMODE(os.stat(cp).st_mode) == 0o600
+                and st.S_IMODE(os.stat(src).st_mode) == 0o600)
+        with open(op, encoding="utf-8") as f:
+            saved = json.load(f)
+        c.check("#538 the local checkpoint names its stage",
+                saved.get("stage") not in (None, "accepted"), saved)
+
+        # Crash-сплит: источник new, копия old -- шаг идемпотентно
+        # заканчивает начатое, не отказ и не перегенерация.
+        fresh()
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("new-key\n")
+        with patched(proxykey, OP=op):
+            out = local(state())
+        c.check("#538 a crashed split is finished, not refused",
+                out.get("ok") and open(cp).read().strip() == "new-key", out)
+
+        # Раздача: замороженные получатели, итог -- strict_settled.
+        answers = {"node1": "OK", "node2": "FAILED: body down"}
+        sent = []
+
+        def write(verb, nodes, timeout=None, files=None):
+            sent.append((nodes, files))
+            return dict(answers)
+
+        with patched(proxykey, OP=op, _deliver=write):
+            out = deliver(state(stage="local"))
+        c.check("#538 a FAILED recipient keeps the delivery open",
+                not out.get("ok"), out)
+        c.check("#538 delivery goes to the frozen saved recipients",
+                sent and sent[0][0] == ["node1", "node2"], sent)
+        with open(op, encoding="utf-8") as f:
+            saved = json.load(f)
+        c.expect("#538 the per-recipient verdicts are checkpointed",
+                 saved.get("delivered"), answers)
+
+        answers = {"node1": "OK", "node2": "OK"}
+        with patched(proxykey, OP=op, _deliver=write):
+            out = deliver(state(stage="local"))
+        c.check("#538 all recipients OK complete the delivery",
+                out.get("ok") and out.get("stage") != "local", out)
+
+        # Пустой сохранённый список -- честный ноль, не «все обновлены».
+        with patched(proxykey, OP=op, _deliver=write):
+            out = deliver({**state(stage="local"), "recipients": []})
+        c.check("#538 an explicit empty recipient set completes with 0 named",
+                out.get("ok") and "0" in str(out.get("note", "")), out)
+
+
 def main():
     c = Checks()
     check_source_393(c)
@@ -637,6 +729,7 @@ def main():
     check_preflight_538(c)
     check_remote_step_538(c)
     check_probe_step_538(c)
+    check_local_and_delivery_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

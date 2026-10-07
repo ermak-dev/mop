@@ -254,6 +254,51 @@ def _probe_step(state):
     return {"ok": True, "stage": state["stage"]}
 
 
+def _local_step(state):
+    """Локальная смена: new в источник и копию, атомарно и приватно.
+    Идемпотентна: crash между двумя записями оставляет сплит «источник
+    новый, копия старая» -- повтор шага заканчивает начатое, ключ тот же
+    сохранённый. Режим и владелец прежних файлов сохраняются (0600)."""
+    for path in (state["source"], state["copy"]):
+        fsutil.write_private(path, state["new"] + "\n")
+    state["stage"] = "local"
+    _save_op(state)
+    return {"ok": True, "stage": state["stage"]}
+
+
+def _deliver_step(state):
+    """Раздача blob по ЗАМОРОЖЕННОМУ сохранённому списку получателей:
+    ready_nodes здесь не спрашивают -- offline-узел выпал бы из списка, и
+    частичная раздача закрылась бы как полная. Итог судит strict_settled:
+    FAILED и NOT REACHED держат операцию открытой. Пустой сохранённый
+    список -- честный «0 recipients». -> {"ok": bool, ...} без ключей."""
+    nodes = list(state.get("recipients") or [])
+    if not nodes:
+        state["stage"] = "completed"
+        _save_op(state)
+        return {"ok": True, "stage": "completed", "note": "0 recipients: "
+                "the saved recipient set is empty"}
+    answers = _deliver(state["new"], nodes)
+    # Шов может вернуть уже сведённые итоги (probe-стиль) или сырые ответы
+    # агентов -- сведение одно: bus.results_from (#315).
+    out = (answers if all(isinstance(v, str) for v in answers.values())
+           else bus.results_from(nodes, answers))
+    state["delivered"] = out
+    if not strict_settled(out):
+        _save_op(state)
+        return {"ok": False, "blocker": "delivery is open: "
+                + ", ".join(f"{n} {r}" for n, r in sorted(out.items()) if r != "OK")}
+    state["stage"] = "completed"
+    _save_op(state)
+    return {"ok": True, "stage": "completed"}
+
+
+def _deliver(key, nodes):
+    """Шов раздачи: глагол write узлам (blob secrets.env). Реализация --
+    оркестрация #539; библиотека шва не имеет."""
+    raise NotImplementedError("the delivery seam belongs to the orchestration verb")
+
+
 def _save_op(state):
     """Чекпоинт состояния операции: приватно, атомарно."""
     fsutil.write_private(OP, json.dumps(state))
