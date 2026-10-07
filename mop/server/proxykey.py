@@ -227,6 +227,33 @@ def _remote_step(state):
     return out
 
 
+def _probe_step(state):
+    """Шаг подтверждения применения: только probes доказывают, что прокси
+    принимает ключи. Успех PUT -- запись, не применение (#537: конфиг
+    применяет асинхронная горутина). Нужно всё сразу: new принят, old
+    по-прежнему принят, заведомо неверный клиентский ключ отвергнут --
+    «оба приняты» без негативной проверки не доказывает включённую
+    авторизацию (пустой список открывает прокси). -> {"ok": bool, ...} без
+    ключей."""
+    if not _probe(state["new"]):
+        # Not-yet, не отказ: список мог сохраниться, применение ещё идёт.
+        return {"ok": False,
+                "blocker": "pending: the proxy does not accept the new key yet "
+                           "(async apply); bounded rechecks, then pending stands"}
+    if not _probe(state["old"]):
+        return {"ok": False,
+                "blocker": "the proxy no longer accepts the old key before the "
+                           "operation issued anything; distribution would strand nodes"}
+    wrong = "definitely-wrong-" + state["id"]
+    if _probe(wrong):
+        return {"ok": False,
+                "blocker": "the wrong client key is accepted: client auth is off; "
+                           "issuing is refused"}
+    state["stage"] = "accepted"
+    _save_op(state)
+    return {"ok": True, "stage": state["stage"]}
+
+
 def _save_op(state):
     """Чекпоинт состояния операции: приватно, атомарно."""
     fsutil.write_private(OP, json.dumps(state))

@@ -566,6 +566,67 @@ def check_remote_step_538(c):
                 and not remote.puts, (out, remote.puts))
 
 
+# ── #538: probe-подтверждение — применение доказывает только запрос ──────
+# HYPOTHESIS: успех PUT доказывает запись, но не применение (прокси
+# применяет конфиг асинхронной горутиной, #537): считать шаг завершённым
+# по 200 значило бы выдать ключ, который прокси ещё отвергает. Равно и
+# «приняты оба» без негативной проверки не доказывает включённую
+# авторизацию: пустой список открывает прокси всем.
+# SOLUTION: применение подтверждают ТОЛЬКО probes: new принят, old
+# по-прежнему принят, заведомо неверный клиентский ключ отвергнут;
+# пока async-применение не догнало -- pending с причиной, не отказ.
+def check_probe_step_538(c):
+    step = getattr(proxykey, "_probe_step", None)
+    if not c.check("#538 proxykey._probe_step exists", callable(step)):
+        return
+    with tempfile.TemporaryDirectory(prefix="mop-rot-probe-") as d:
+        op = os.path.join(d, "op.json")
+
+        def state(stage="listed"):
+            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                    "new": "new-key", "source": os.path.join(d, "s"),
+                    "copy": os.path.join(d, "c"), "recipients": ["node1"],
+                    "stage": stage}
+
+        # Полное подтверждение: new принят, old принят, неверный отвергнут.
+        answers = {"old-key": True, "new-key": True}
+        wrong_seen = []
+        with patched(proxykey, OP=op, _probe=lambda k: wrong_seen.append(k) or answers.get(k, False)):
+            out = step(state())
+        c.check("#538 a fully confirmed application advances", out.get("ok"), out)
+        c.check("#538 the wrong-key probe ran (negative check is required)",
+                wrong_seen and wrong_seen[-1] not in answers, wrong_seen)
+        c.check("#538 the confirmed step moves past listed",
+                out.get("stage") not in (None, "listed"), out)
+
+        # Async-применение ещё не догнало: probe new = False -- pending,
+        # не отказ и не смена ключа/источника.
+        answers = {"old-key": True, "new-key": False}
+        with patched(proxykey, OP=op, _probe=lambda k: answers.get(k, False)):
+            out = step(state())
+        c.check("#538 a not-yet-applied new key is pending with a reason",
+                not out.get("ok") and "pending" in str(out.get("blocker", "")).lower(),
+                out)
+        c.check("#538 a pending probe keeps the stage",
+                out.get("stage", "listed") == "listed", out)
+
+        # Old перестал приниматься до выдачи -- блокер: раздача оставила бы
+        # узлы без работающего ключа.
+        answers = {"old-key": False, "new-key": True}
+        with patched(proxykey, OP=op, _probe=lambda k: answers.get(k, False)):
+            out = step(state())
+        c.check("#538 a rejected old key blocks before issuing",
+                not out.get("ok") and "old" in str(out.get("blocker", "")).lower(), out)
+
+        # Негативная проверка провалилась: неверный ключ принимается --
+        # авторизация не включена, выдавать ключ нельзя.
+        answers = {"old-key": True, "new-key": True}
+        with patched(proxykey, OP=op, _probe=lambda k: True):
+            out = step(state())
+        c.check("#538 an accepted wrong key blocks: auth is off",
+                not out.get("ok") and "wrong" in str(out.get("blocker", "")).lower(), out)
+
+
 def main():
     c = Checks()
     check_source_393(c)
@@ -575,6 +636,7 @@ def main():
     check_resume_refusals_538(c)
     check_preflight_538(c)
     check_remote_step_538(c)
+    check_probe_step_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и
