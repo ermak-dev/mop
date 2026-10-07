@@ -273,12 +273,102 @@ def check_lock_538(c):
             c.check("#538 process death frees the flock (no stale guess)", True)
 
 
+# ── #538: resume — условие на каждом входе, состояние до эффектов ────────
+# HYPOTHESIS: resume без повторного явного exclusive-условия, с чужим или
+# битым состоянием, или поверх незавершённой другой операции продолжал бы
+# ротацию вслепую. SOLUTION: resume требует exclusive так же явно; состояние
+# обязано быть читаемым, своей схемы, с целыми old/new; begin поверх
+# активного состояния отказывает (заменяемо только завершённое).
+def check_resume_refusals_538(c):
+    resume = getattr(proxykey, "resume", None)
+    if not c.check("#538 proxykey.resume exists", resume is not None):
+        return
+    import json
+    with tempfile.TemporaryDirectory(prefix="mop-rot-res-") as d:
+        source_path = os.path.join(d, "llm-proxy-client.pass")
+        copy_path = os.path.join(d, "copy.pass")
+        op = os.path.join(d, "op.json")
+        with open(source_path, "w", encoding="utf-8") as f:
+            f.write("old-key\n")
+        calls = []
+
+        def seam(name):
+            def reach(*a, **k):
+                calls.append(name)
+                raise AssertionError(f"resume must not reach {name}")
+            return reach
+
+        def state(**over):
+            base = {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                    "new": "new-key", "source": source_path, "copy": copy_path,
+                    "recipients": ["node1"], "stage": "ready"}
+            base.update(over)
+            fsutil_dir = os.path.dirname(op)
+            os.makedirs(fsutil_dir, exist_ok=True)
+            with open(op, "w", encoding="utf-8") as f:
+                json.dump(base, f)
+            return base
+
+        patches = dict(OP=op, _fetch_list=seam("fetch_list"),
+                       _put_list=seam("put_list"), _probe=seam("probe"))
+        with patched(proxykey, **patches):
+            # Нет состояния -- продолжать нечего, эффектов нет.
+            try:
+                resume(exclusive=True)
+                c.fail("#538 resume without a state must refuse")
+            except RuntimeError as e:
+                c.check("#538 no-state refusal is loud", "state" in str(e).lower(), str(e))
+            c.check("#538 no-state resume reaches no seam", not calls, calls)
+
+            state()
+            try:
+                resume(exclusive=False)
+                c.fail("#538 resume without the explicit precondition must refuse")
+            except RuntimeError as e:
+                c.check("#538 resume names the exclusive precondition",
+                        "exclusive" in str(e).lower(), str(e))
+            c.check("#538 a refused resume reaches no seam", not calls, calls)
+
+            for name, broken in (("schema", {"schema": proxykey.SCHEMA + 1}),
+                                 ("no old", {"old": ""}),
+                                 ("no new", {"new": ""}),
+                                 ("no recipients", {"recipients": None})):
+                state(**broken)
+                try:
+                    resume(exclusive=True)
+                    c.fail(f"#538 a broken state ({name}) must refuse loudly")
+                except RuntimeError as e:
+                    c.check(f"#538 a broken state ({name}) refuses with a reason",
+                            bool(str(e)), str(e))
+                c.check(f"#538 a broken state ({name}) reaches no seam", not calls, calls)
+
+            state()
+            try:
+                proxykey.begin(source_path, copy_path, ["node1"], exclusive=True)
+                c.fail("#538 begin over an active state must refuse")
+            except RuntimeError as e:
+                c.check("#538 begin over an active state names it",
+                        "state" in str(e).lower() or "running" in str(e).lower(), str(e))
+            c.check("#538 begin over an active state reaches no seam", not calls, calls)
+            with open(op, encoding="utf-8") as f:
+                kept = json.load(f)
+            c.check("#538 the active state survives the refused begin",
+                    kept.get("old") == "old-key" and kept.get("new") == "new-key", kept)
+
+            # Терминальное завершённое состояние заменяемо новым begin.
+            state(stage="completed")
+            got = proxykey.begin(source_path, copy_path, ["node1"], exclusive=True)
+            c.check("#538 begin replaces only a terminal state",
+                    isinstance(got, dict) and got.get("stage") != "completed", got)
+
+
 def main():
     c = Checks()
     check_source_393(c)
     check_strict_settled_538(c)
     check_begin_538(c)
     check_lock_538(c)
+    check_resume_refusals_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

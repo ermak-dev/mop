@@ -69,14 +69,56 @@ def begin(source_path, copy_path, recipients, *, exclusive):
     ключей."""
     if not exclusive:
         raise RuntimeError("rotation requires the exclusive-writer precondition")
-    old = _read_key(source_path)
-    state = {"id": secrets.token_hex(8), "schema": SCHEMA,
-             "old": old, "new": _new_key(),
-             "source": source_path, "copy": copy_path,
-             "recipients": list(recipients), "stage": "ready"}
-    fsutil.make_private_dir(os.path.dirname(OP))
-    fsutil.write_private(OP, json.dumps(state))
-    return _project(state)
+    with _lock():
+        prior = _load_op()
+        if prior is not None and prior.get("stage") != "completed":
+            raise RuntimeError("an unfinished rotation state exists; resume it, "
+                               "do not begin over it")
+        old = _read_key(source_path)
+        state = {"id": secrets.token_hex(8), "schema": SCHEMA,
+                 "old": old, "new": _new_key(),
+                 "source": source_path, "copy": copy_path,
+                 "recipients": list(recipients), "stage": "ready"}
+        fsutil.write_private(OP, json.dumps(state))
+        return _project(state)
+
+
+def resume(*, exclusive):
+    """Продолжить незавершённую ротацию по её приватному состоянию.
+
+    exclusive -- то же обязательное явное условие на КАЖДОМ входе. Состояние
+    читается целиком: битое, чужой схемы или без ключей -- громкий отказ без
+    эффектов. -> проекция без ключей."""
+    if not exclusive:
+        raise RuntimeError("rotation requires the exclusive-writer precondition")
+    with _lock():
+        state = _checked_state()
+        return _project(state)
+
+
+def _load_op():
+    """Состояние операции либо None: файла нет или не JSON."""
+    try:
+        with open(OP, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _checked_state():
+    """Состояние, годное для продолжения, либо громкий отказ."""
+    state = _load_op()
+    if state is None:
+        raise RuntimeError("no rotation state to resume")
+    if state.get("schema") != SCHEMA:
+        raise RuntimeError(f"rotation state schema {state.get('schema')!r} "
+                           f"is not {SCHEMA}: not this library's state")
+    for field in ("old", "new"):
+        if not state.get(field):
+            raise RuntimeError(f"rotation state has no {field} key: not resumable")
+    if not isinstance(state.get("recipients"), list):
+        raise RuntimeError("rotation state has no saved recipient set")
+    return state
 
 
 def _read_key(path):
