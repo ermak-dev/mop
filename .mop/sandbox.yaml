@@ -12,8 +12,24 @@
 # mop — питон и git, ему не нужно то, на что рассчитана установка: там
 # потолок под тяжёлые проекты с rust и постгресом. Того, что нужно на каждом
 # старте, у mop тоже нет — bootstrap.yaml не заведён.
+#
+# Тестовым зависимостям проекта здесь и место (#543): проверки рендерят
+# шаблоны ролей через jinja2, которого нет в deps.PIP — он список runtime
+# узлов, тел и контроллера, а не проверок, и в deploy/ у него своего места
+# нет (это надбавка именно проекта, CI ставит его себе отдельной строкой).
+# Ставится в user site пользователя пула тем же способом, что и пакеты
+# mop (deploy/roles/common/tasks/pip.yml): тело гоняет проверки тем же
+# системным python3 и из того же HOME.
 - name: What mop bakes into its sandbox
   vars:
     MOP_MEM_MB: "6144"
     MOP_DISK_GB: "40"
     MOP_CORES: "2"
+  tasks:
+    - name: Test dependencies of the project (jinja2 renders the roles' templates)
+      become: true
+      become_user: "{{ MOP_USER }}"
+      ansible.builtin.pip:
+        name: [jinja2]
+        extra_args: --user --break-system-packages
+        state: present
