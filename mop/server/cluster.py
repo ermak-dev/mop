@@ -387,9 +387,10 @@ def _gated(fn):
 def _add(project, req):
     origin = req.get("origin")
     # Лимит -- проекта из origin, а не просителя: оператор через admin
-    # заводит папета тому же проекту и упирается в тот же потолок. Файл
+    # заводит папета тому же проекту и упирается в тот же потолок. Реестр
     # читается на каждый запрос: правка лимита доезжает без рестарта.
-    target = Project.of(origin, projects.read_limits())
+    # Читатель снимка (#534): пишет его только глагол проектов.
+    target = Project.of(origin, projects.snapshot_limits(_snapshot()))
     why = over_limit(target.name, _live_count(target.name), target.limit)
     if why:
         return {"error": why}
@@ -651,7 +652,26 @@ def _client_config(req):
 # Реестр, лимиты и пароли папетов живут здесь, на сервере, и пишет их только
 # сервис. Глаголы идут в потоках петли, поэтому правка реестра -- под замком:
 # два одновременных завода иначе потеряли бы один из проектов.
+#
+# Реестр -- один атомарный снимок ~/.config/mop/projects.json (#534):
+# {version:1, projects:[{origin, limit?}]}. Reader (глаголы-списки, лимит
+# в add) читает, но НИКОГДА не пишет, мигрируя только в голове; миграцию
+# на диск выполняет первый успешный ИЗМЕНЯЮЩИЙ глагол -- тот же замок, тот
+# же один снимок: обрыв или падение между «реестр» и «лимиты» больше не
+# разводит данные. Легаси-пара (projects + limits.json) остаётся на диске
+# (её читает deploy до #540 и откат), но сервис её больше не пишет.
 _projects_lock = threading.Lock()
+
+
+def _snapshot():
+    """Снимок реестра. Читает, никогда не пишет (#534). Каталог -- атрибут
+    модуля на момент вызова: тесты и установки подменяют одно место."""
+    return projects.snapshot_of(projects.SNAPSHOT_DIR)
+
+
+def _save(snapshot):
+    """Запись снимка: единственный writer -- мутирующий глагол под замком."""
+    projects.write_snapshot(snapshot, projects.SNAPSHOT)
 
 
 def _names(lines):
@@ -675,14 +695,15 @@ def _users_apply(names, verify_user=None):
     return changed
 
 
-def _with_rollback(lines, change):
-    """Правка реестра с откатом: реестр и файл пользователей возвращаются,
-    если шина нового пользователя не пустила."""
+def _with_rollback(snapshot, change):
+    """Правка реестра с откатом: снимок и файл пользователей возвращаются,
+    если шина нового пользователя не пустила. Снимок один (#534): реестр
+    и лимиты возвращаются вместе, разводить их больше нечем."""
     users = natsconf.read_users()
     try:
         return change()
     except Exception:
-        projects.write(lines)
+        _save(snapshot)
         if users is not None:
             natsconf.write(users)
             try:
@@ -693,32 +714,35 @@ def _with_rollback(lines, change):
 
 
 def _projects(project, req):
-    lines = projects.read()
-    origins, legacy = puppets.project_ids(lines)
-    return {"ok": True, "names": projects.names(origins, legacy),
-            "origins": sorted(origins), "lines": sorted(lines),
-            "limits": projects.read_limits()}
+    snap = _snapshot()
+    return {"ok": True, "names": projects.snapshot_names(snap),
+            "origins": sorted(projects.snapshot_origins(snap)),
+            "lines": sorted(projects.snapshot_lines(snap)),
+            "limits": projects.snapshot_limits(snap)}
 
 
 def _project_add(project, req):
     origin = req["origin"]
+    name = puppets.project_of(origin)
     with _projects_lock:
-        lines = projects.read()
-        new, added = projects.with_origin(origin, lines)
-        name = puppets.project_of(origin)
+        snap = _snapshot()
+        new = projects.snapshot_with_origin(snap, origin)
+        added = projects.snapshot_origins(new) != projects.snapshot_origins(snap)
 
         def change():
-            projects.write(new)
-            _users_apply(_names(new), verify_user=name)
-        _with_rollback(lines, change)
+            _save(new)
+            _users_apply(projects.snapshot_names(new), verify_user=name)
+        _with_rollback(snap, change)
     return {"ok": True, "name": name, "added": added}
 
 
 def _project_delete(project, req):
     name = req["name"]
     with _projects_lock:
-        lines = projects.read()
-        new, dropped = projects.without_project(name, lines)
+        snap = _snapshot()
+        new = projects.snapshot_without(snap, name)
+        dropped = sorted(set(projects.snapshot_origins(snap))
+                         - set(projects.snapshot_origins(new)))
         alive = [j["ID"] for j in nomad_jobs(bus.ADMIN)
                  if JobMeta.from_job(j).project == name]
         why = delete_refusal(name, dropped, alive)
@@ -726,20 +750,17 @@ def _project_delete(project, req):
             return {"error": why}
 
         def change():
-            projects.write(new)
-            _users_apply(_names(new))
-        _with_rollback(lines, change)
-        # Лимит снятого проекта (#107) уходит с ним: заведённый заново проект
-        # получил бы чужой потолок из прошлого. Пароль -- тоже: сервер раздавал
-        # бы кред пользователя, которого на шине уже нет.
-        limits = projects.read_limits()
-        if name in limits:
-            projects.write_limits(projects.with_limit(limits, name, None))
+            _save(new)
+            _users_apply(projects.snapshot_names(new))
+        _with_rollback(snap, change)
+        # Лимит снятого проекта (#107) уходит с ним -- он в том же снимке,
+        # разводить их больше нечем. Пароль и секреты -- вне снимка, как
+        # раньше: сервер раздавал бы кред пользователя, которого на шине
+        # уже нет, а заведённый заново получил бы чужие секреты.
         try:
             os.remove(os.path.join(bootstrap.PUPPET_CREDS, creds.puppet_pass_file(name)))
         except FileNotFoundError:
             pass
-        # Секреты снятого проекта (#127): заведённый заново получил бы чужие.
         import shutil
         shutil.rmtree(project_secrets.project_dir(project_secrets.ROOT, name),
                       ignore_errors=True)
@@ -752,10 +773,11 @@ def _project_limit(project, req):
     if value is not None:
         value = projects.parse_limit(str(value))
     with _projects_lock:
-        if name not in _names(projects.read()):
+        snap = _snapshot()
+        if name not in projects.snapshot_names(snap):
             return {"error": f"no project {name} in the registry; what the pool "
                              f"serves: mop project list"}
-        projects.write_limits(projects.with_limit(projects.read_limits(), name, value))
+        _save(projects.snapshot_with_limit(snap, name, value))
     return {"ok": True, "name": name, "limit": value}
 
 

@@ -1242,6 +1242,7 @@ class _Registry534:
         _real_read_limits = _projects.read_limits
         _real_write_limits = _projects.write_limits
         _real_snapshot_of = getattr(_projects, "snapshot_of", None)
+        _real_write_snapshot = getattr(_projects, "write_snapshot", None)
         legacy_file = os.path.join(self.dir, "projects")
         limits_file = os.path.join(self.dir, "limits.json")
         # Дефолты путей в read/write/read_limits связаны при def, патч
@@ -1263,13 +1264,19 @@ class _Registry534:
         def snapshot_of(dir_=None, *a, **k):
             return _real_snapshot_of(self.dir if dir_ is None else dir_, *a, **k)
 
+        def write_snapshot(snapshot, path=None, *a, **k):
+            return _real_write_snapshot(
+                snapshot, os.path.join(self.dir, "projects.json") if path is None else path, *a, **k)
+
         with patched(cluster, _users_apply=apply_fn, nomad_jobs=self._jobs), \
                 patched(_natsconf, reload=self._reload, read_users=lambda path=None: None,
                         read_base=lambda: {"service": "pw"}), \
                 patched(_projects, read=read, write=write, read_limits=read_limits,
                         write_limits=write_limits, snapshot_of=snapshot_of,
+                        write_snapshot=write_snapshot,
                         FILE=legacy_file, LIMITS=limits_file,
-                        SNAPSHOT=os.path.join(self.dir, "projects.json")), \
+                        SNAPSHOT=os.path.join(self.dir, "projects.json"),
+                        SNAPSHOT_DIR=self.dir), \
                 patched(_bootstrap, PUPPET_CREDS=os.path.join(self.dir, "puppets")), \
                 patched(_creds, puppet_pass_file=lambda n: f"{n}.pass"), \
                 patched(project_secrets, ROOT=os.path.join(self.dir, "secrets"),

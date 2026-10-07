@@ -155,6 +155,189 @@ def write(lines, path=FILE):
     fsutil.write_atomic(path, "".join(f"{s}\n" for s in sorted(lines)))
 
 
+# ─── атомарный реестр: один файл вместо пары (#534) ──────────────────────
+# Раньше origin'ы (projects) и лимиты (limits.json) лежали в двух файлах, и
+# каждый мутирующий глагол сервиса писал их двумя отдельными атомарными
+# записями: обрыв между ними разводил данные -- проект снят, а потолок
+# остался. Теперь реестр -- один снимок {version:1, projects:[{origin,
+# limit?}]}: ключа limit нет -- без лимита, limit:0 -- заморозка; имя
+# нигде не хранится, оно выводится driver.project_of. Один проект на
+# basename: второй origin того же имени в v1 не лезет, и миграция такой
+# пары отказывает. Всё ниже -- чистые функции от снимка; читает и пишет
+# файл один writer -- сервис кластера (mop/server/cluster.py), под своим
+# замком, снимок целиком за одну операцию.
+SNAPSHOT = paths.local("projects.json")
+SNAPSHOT_DIR = os.path.dirname(SNAPSHOT)
+SNAPSHOT_VERSION = 1
+# Легаси-файлы (projects, limits.json) остаются на диске -- их читает
+# deploy до #540 и откат; новый writer их не пишет, правда после
+# миграции -- снимок.
+
+
+def _entry(origin, limit):
+    """Запись снимка: без лимита -- без ключа (None и 0 -- разные вещи)."""
+    return {"origin": origin} if limit is None else {"origin": origin, "limit": limit}
+
+
+def snapshot_of(dir_):
+    """Снимок реестра каталога: projects.json либо миграция пары. Чистая.
+
+    Функция НИЧЕГО не пишет -- даже миграция здесь только считает снимок,
+    записывает его writer сервиса. Порядок:
+      * есть projects.json -- он и есть правда; битый JSON, чужая схема
+        (version > нашей) или не-объект -- громкий отказ: пустой реестр
+        или fallback на легаси-пару маскировали бы поломку;
+      * нет снимка, есть пара -- снимок из пары; непредставимое (голое
+        имя, два origin'а одного проекта, orphan/чужой лимит) -- отказ с
+        именем, без потерь и без выдумывания origin'а;
+      * нет ничего -- свежая установка: честный пустой реестр."""
+    path = os.path.join(dir_, "projects.json")
+    if os.path.exists(path):
+        return _snapshot_from_file(path)
+    old_registry, old_limits = os.path.join(dir_, "projects"), os.path.join(dir_, "limits.json")
+    if os.path.exists(old_registry) or os.path.exists(old_limits):
+        return _snapshot_of_pair(dir_)
+    return {"version": SNAPSHOT_VERSION, "projects": []}
+
+
+def _snapshot_from_file(path):
+    """Разбор файла снимка с проверкой схемы. Битое -- громкий отказ."""
+    try:
+        with open(path) as f:
+            got = json.load(f)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"the project registry {path} is unreadable: {e}") from None
+    if not isinstance(got, dict) or "projects" not in got:
+        raise RuntimeError(f"the project registry {path} is not an object with projects")
+    version = got.get("version")
+    if version != SNAPSHOT_VERSION:
+        raise RuntimeError(f"the project registry {path} is version {version!r}, "
+                           f"this mop reads version {SNAPSHOT_VERSION}: upgrade mop first")
+    if not isinstance(got["projects"], list):
+        raise RuntimeError(f"the project registry {path}: projects must be a list")
+    return got
+
+
+def _snapshot_of_pair(dir_):
+    """Снимок из легаси-пары каталога. Непредставимое -- отказ, не потеря.
+
+    Голое имя и коллизия basename'ов в v1 не представимы без выдумывания
+    origin'а; orphan-лимит (имени нет в реестре) нельзя ни перенести (не
+    куда), ни выбросить (потеря потолка) -- всё это отказ оператору с
+    конкретным именем, файлы остаются как были."""
+    origins, legacy = puppets.project_ids(read(os.path.join(dir_, "projects")))
+    if legacy:
+        raise RuntimeError("cannot migrate the registry: bare name(s) without an "
+                           f"origin: {', '.join(sorted(legacy))}. Add the origin of "
+                           "each project (mop project add <git-origin>) or drop "
+                           "the line by hand: v1 stores origins only")
+    seen = {}
+    for o in sorted(origins):
+        name = puppets.project_of(o)
+        if name in seen:
+            raise RuntimeError("cannot migrate the registry: two origins of one "
+                               f"project {name}: {seen[name]} and {o}. Leave the "
+                               "true one and drop the other by hand: v1 keeps one "
+                               "project per name")
+        seen[name] = o
+    limits = read_limits(os.path.join(dir_, "limits.json"))
+    for name in sorted(limits):
+        if name not in seen:
+            raise RuntimeError("cannot migrate the registry: limit of an unknown "
+                               f"project {name!r} in limits.json. Remove the line "
+                               "by hand or register the project first")
+    return {"version": SNAPSHOT_VERSION,
+            "projects": [_entry(o, limits.get(puppets.project_of(o))) for o in sorted(origins)]}
+
+
+def snapshot_origins(snapshot):
+    """Origin'ы снимка по порядку."""
+    return [p["origin"] for p in snapshot["projects"]]
+
+
+def snapshot_limits(snapshot):
+    """{имя: потолок} снимка: только записи с лимитом."""
+    return {puppets.project_of(p["origin"]): p["limit"]
+            for p in snapshot["projects"] if p.get("limit") is not None}
+
+
+def snapshot_names(snapshot):
+    """Имена проектов снимка (basename'ы, без дублей), по порядку."""
+    return sorted({puppets.project_of(p["origin"]) for p in snapshot["projects"]})
+
+
+def snapshot_with_origin(snapshot, origin):
+    """Снимок после завода проекта. -> снимок. Чистая.
+
+    Голое имя -- отказ, как и в легаси-реестре: origin -- единственная
+    правда о проекте. Второй origin того же имени -- тоже отказ: в v1
+    один проект на имя, и выбрать «правильный» origin молча нельзя.
+    Заведённость глагол видит, сравнив снимки: здесь только данные."""
+    origin = (origin or "").strip()
+    if not puppets.looks_like_origin(origin):
+        raise RuntimeError(f"{origin!r} doesn't look like a git-origin: "
+                           f"a project is registered by its origin, not by its name")
+    if origin in snapshot_origins(snapshot):
+        return {"version": snapshot["version"], "projects": list(snapshot["projects"])}
+    name = puppets.project_of(origin)
+    if name in snapshot_names(snapshot):
+        raise RuntimeError(f"project {name} is already registered with another "
+                           f"origin: v1 keeps one origin per project")
+    return {"version": snapshot["version"],
+            "projects": snapshot["projects"] + [_entry(origin, None)]}
+
+
+def snapshot_without(snapshot, name):
+    """Снимок после снятия проекта по имени. -> снимок.
+
+    Имя -- basename origin'а: проект снимается весь, вместе с лимитом --
+    в одном снимке, разводить их больше нечем. Снятые строки глагол
+    выводит сравнением снимков; пустой результат значит «проекта нет»,
+    и это отказ вызывающего (опечатка иначе читалась бы снятием)."""
+    return {"version": snapshot["version"],
+            "projects": [p for p in snapshot["projects"]
+                         if puppets.project_of(p["origin"]) != name]}
+
+
+def snapshot_with_limit(snapshot, name, value):
+    """Снимок после установки лимита (value=None -- снять). -> снимок."""
+    out = []
+    for p in snapshot["projects"]:
+        if puppets.project_of(p["origin"]) == name:
+            p = _entry(p["origin"], value)
+        out.append(p)
+    return {"version": snapshot["version"], "projects": out}
+
+
+def snapshot_lines(snapshot):
+    """Строки реестра для ответа глагола `projects` (поле lines): origin'ы
+    и голые имена снимка -- как их печатает и читает легаси-реестр."""
+    return snapshot_origins(snapshot)
+
+
+def write_snapshot(snapshot, path=SNAPSHOT):
+    """Запись снимка атомарно. Единственный writer -- сервис кластера."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {"version": snapshot["version"],
+               "projects": [{"origin": p["origin"], **({"limit": p["limit"]}
+                                                       if p.get("limit") is not None else {})}
+                            for p in snapshot["projects"]]}
+    fsutil.write_atomic(path, json.dumps(payload, indent=1, sort_keys=True) + "\n")
+
+
+def legacy_pair_of(snapshot):
+    """Обратное преобразование снимка в легаси-пару. -> (строки, лимиты).
+
+    Чистая, без записи: даунгрейд -- операторская процедура (остановить
+    writers, выгрузить пару, переключить), и её шаги видны явно. После
+    новых мутаций v1 roundtrip-стабильна: миграция той же пары даёт тот
+    же снимок (проверено tests/projects.py)."""
+    lines = snapshot_origins(snapshot)
+    limits = {puppets.project_of(p["origin"]): p["limit"]
+              for p in snapshot["projects"] if p.get("limit") is not None}
+    return lines, limits
+
+
 def for_deploy(answer, local):
     """Реестр для `mop server deploy`. -> (строки, примечание|None). Чистая функция.
 
