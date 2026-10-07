@@ -1460,9 +1460,11 @@ def check_registry_verbs_534(c):
     with env.patched_env():
         try:
             got = cluster.answer("admin", {"verb": "project_limit", "name": "rudesktop", "value": "3"})
-            c.check("#534 a colliding legacy pair refuses with both origins",
-                    bool(got.get("error")) and OTHER534 in got.get("error", "")
-                    and RU534 in got.get("error", ""), got)
+            err = got.get("error") or ""
+            c.check("#534 a colliding legacy pair refuses by project name",
+                    bool(got.get("error")) and "rudesktop" in err and "2" in err, got)
+            c.check("#534 the collision refusal leaks no raw origin",
+                    bool(got.get("error")) and RU534 not in err and OTHER534 not in err, got)
             c.check("#534 a colliding pair writes no snapshot",
                     not os.path.exists(env.snapshot_path()))
         finally:
@@ -1500,38 +1502,132 @@ def check_registry_verbs_534(c):
         finally:
             env.cleanup()
 
+    # 13. Атомарность по видимому читателю: обрыв записи (падение ФС между
+    # решением и users_apply, и в users_apply) оставляет на диске ЦЕЛИКОМ
+    # прежний или новый снимок -- никогда не смесь и никогда не пусто.
+    # Инжекция -- на файловой записи снимка и на users_apply, по отдельности.
+    # (Прежний красный сценарий -- обрыв write_limits в старой паре --
+    # документирован в отчёте: проекты без проекта, лимиты с ним.)
+    import threading
+    for where in ("write_snapshot", "users_apply"):
+        env = _Registry534(limits={"mop": 2})
+        refuse = RuntimeError("nats rejected the user") if where == "users_apply" else None
+        try:
+            with env.patched_env(refuse_apply=refuse):
+                before = cluster.answer("admin", {"verb": "projects"}).get("limits")
+                _projects = cluster.projects
+                real_write_snapshot = _projects.write_snapshot
+                crashed = threading.Event()
 
+                def dying_write(snapshot, path=None, *a, **k):
+                    crashed.set()
+                    raise RuntimeError(f"fs died mid-write ({where})")
+
+                patches = {"write_snapshot": dying_write} if where == "write_snapshot" else {}
+                with patched(_projects, **patches) if patches else _no_patch():
+                    got = cluster.answer("admin",
+                                         {"verb": "project_delete", "name": "rudesktop"})
+                    err = got.get("error") or ""
+                    c.check(f"#534 a crash at {where} refuses the verb",
+                            bool(err), got)
+                    if where == "write_snapshot":
+                        # Запись не случилась вовсе: на диске прежний снимок
+                        # целиком (или его ещё нет -- миграция не дошла до
+                        # записи). Users не применялись, пароли целы.
+                        c.check(f"#534 a crash at {where} leaves the registry whole",
+                                not os.path.exists(env.snapshot_path())
+                                or env.snapshot()["projects"], "snapshot exists but empty")
+                        c.check(f"#534 a crash at {where} applies no users",
+                                not env.log["apply"], env.log)
+                    else:
+                        # Снимок записан, шина не пустила: откат вернул
+                        # прежний снимок; рядом лежат и legacy-пара (не
+                        # тронута миграцией? -- пара осталась, но правда --
+                        # снимок: сравним с ответом listing).
+                        after = cluster.answer("admin", {"verb": "projects"}).get("limits")
+                        c.expect(f"#534 a crash at {where} rolls the registry back",
+                                 after, before)
+        finally:
+            env.cleanup()
+
+
+@contextlib.contextmanager
+def _no_patch():
+    """Пустая подмена: ни одного атрибута (для ровной записи цикла #13)."""
+    yield None
 def check_concurrent_534(c):
     """Concurrent-запись реестра: замок держит «прочитал-записал» целиком.
 
-    Детерминированное пересечение: барьер стоит ВНУТРИ критической секции --
-    обёртка вокруг чтения реестра не отпускает читателя, пока в секцию не
-    вошли оба потока (Event с ограниченным ожиданием, не вечный барьер:
-    с настоящим замком второй внутрь не попадает, и это и есть доказательство
-    исключения). Гипотеза (#534): без замка оба читают один пустой реестр и
-    пишут поверх -- один проект теряется молча. STATUS: #534"""
+    Два детерминированных сценария, координатор -- инструментальный замок:
+    он видит каждую попытку acquire и каждый release и синхронизирует потоки
+    по этим событиям, не по ожиданию невозможного. Unlocked: пустышка вместо
+    замка, гейт отпускает обоих читателей только после того, как ОБА взяли
+    снимок -- пересечение гарантировано, и одно изменение теряется.
+    Locked: настоящий замок; координатор ждёт первого release и ВТОРОЙ
+    попытки acquire (сигнал до входа в реальный acquire), после чего
+    отпускает первого -- оба изменения живы, потому что второй прочитал
+    уже результат первого. Таймауты -- страховка: истекли -- FAIL, а не
+    молчаливый успех. STATUS: #534"""
     import threading
 
-    def race(lock):
+    class _InstrLock:
+        """Замок с журналом: acquire/release/attempt видны координатору."""
+
+        def __init__(self, real):
+            self.real = real
+            self.acquired = threading.Event()   # первый взял замок
+            self.released = threading.Event()   # первый отпустил
+            self.attempt2 = threading.Event()   # второй стучится
+            self.holders = 0
+            self._m = threading.Lock()
+            self._let_in = threading.Event()    # координатор разрешает идти
+
+        def acquire(self, *a, **k):
+            with self._m:
+                self.holders += 1
+                if self.holders == 1:
+                    self.acquired.set()
+                elif self.holders == 2:
+                    self.attempt2.set()
+            self._let_in.wait(timeout=10)  # страховка: координатор решает
+            return self.real.acquire(*a, **k)
+
+        def release(self):
+            self.real.release()
+            with self._m:
+                self.holders -= 1
+                if self.holders == 0:
+                    self.released.set()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    def race(lock, unlocked):
         """Два одновременных add на свежей среде. -> (origin'ы на диске,
-        вошли ли оба в секцию до первой записи)."""
+        ответы глаголов)."""
         env = _Registry534(fresh=True)
         try:
             with env.patched_env():
                 from mop.common import projects as _projects
-                both_read = threading.Event()      # оба прочли реестр
-                first_read = threading.Lock()
                 reads = {"n": 0}
+                both_read = threading.Event()
+                _rm = threading.Lock()
                 real_snapshot_of = _projects.snapshot_of
 
-                def gated_snapshot_of(d):
+                def counted_snapshot_of(d):
                     got = real_snapshot_of(d)
-                    with first_read:
+                    with _rm:
                         reads["n"] += 1
                         if reads["n"] == 2:
-                            both_read.set()   # оба в секции: отпускаем
-                    if not both_read.wait(timeout=5):
-                        pass  # второй не пришёл -- замок не пустил, идём дальше
+                            both_read.set()
+                    if unlocked:
+                        # Гейт unlocked-сценария: читатель стоит, пока ОБА
+                        # не прочли снимок -- пересечение до записи гарантировано.
+                        both_read.wait(timeout=10)
                     return got
 
                 results = {}
@@ -1542,12 +1638,31 @@ def check_concurrent_534(c):
 
                 threads = [threading.Thread(target=racing, args=(t, o)) for t, o in (
                     ("one", "git@h:team/one.git"), ("two", "git@h:team/two.git"))]
-                with patched(_projects, snapshot_of=gated_snapshot_of), \
+                with patched(_projects, snapshot_of=counted_snapshot_of), \
                         patched(cluster, _projects_lock=lock):
                     for t in threads:
                         t.start()
+                    if unlocked:
+                        # Пустышка пускает сразу: пересечение даёт гейт
+                        # чтения, а не очередь у замка.
+                        lock._let_in.set()
+                        ok_gate = both_read.wait(timeout=10)  # страховка
+                    else:
+                        # Locked: ждём первого держателя и второй попытки --
+                        # только тогда второй стоит у двери уже НАДРЕАЛЬНОГО
+                        # acquire, и мы отпускаем первого.
+                        ok_gate = lock.acquired.wait(timeout=10)
+                        ok_gate = lock.attempt2.wait(timeout=10) and ok_gate
+                        lock._let_in.set()
+                        ok_gate = lock.released.wait(timeout=10) and ok_gate
                     for t in threads:
                         t.join(timeout=15)
+                    for t in threads:
+                        if t.is_alive():
+                            c.fail("#534 a racing thread hung", "join timed out")
+                if not ok_gate:
+                    c.fail("#534 the race coordinator timed out",
+                           "the expected lock/read events never came")
                 if not os.path.exists(env.snapshot_path()):
                     return None, results
                 with open(env.snapshot_path()) as f:
@@ -1556,25 +1671,33 @@ def check_concurrent_534(c):
         finally:
             env.cleanup()
 
-    # Без замка (пустышка): оба входят в секцию, читают один и тот же
-    # пустой снимок и пишут поверх -- один проект теряется молча.
-    kept, answers = race(_no_lock_534())
+    # Unlocked (пустышка вместо замка): пересечение гарантировано гейтом
+    # чтения -- на диске выживает один, второй ответ ok, но его нет в файле.
+    fake = _InstrLock(_no_lock_534())
+    kept, answers = race(fake, unlocked=True)
     c.check("#534 without the lock a concurrent add is lost",
             kept is not None and kept != {"git@h:team/one.git", "git@h:team/two.git"},
             f"on disk: {sorted(kept or [])}, answers: {answers}")
 
-    # С настоящим замком сервиса: секция «прочитал-записал» целиком под
-    # замком, второй поток читает уже результат первого -- выживают оба.
-    kept, answers = race(cluster._projects_lock)
+    # Locked (настоящий замок за инструментальной обёрткой): второй входит
+    # только после release первого и читает его результат -- оба живы.
+    instr = _InstrLock(cluster._projects_lock)
+    kept, answers = race(instr, unlocked=False)
     c.check("#534 with the lock both concurrent adds survive",
             kept == {"git@h:team/one.git", "git@h:team/two.git"},
             f"on disk: {sorted(kept or [])}, answers: {answers}")
 
 
 def _no_lock_534():
-    """Замок-пустышка: держит и сразу отпускает, защиты нет -- ровно то,
-    что было бы без замка."""
+    """Замок-пустышка: acquire/release есть, защиты нет -- ровно то,
+    что было бы без замка (threading.Lock без удержания)."""
     class _PassThrough:
+        def acquire(self, *a, **k):
+            return True
+
+        def release(self):
+            return None
+
         def __enter__(self):
             return self
 

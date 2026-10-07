@@ -231,17 +231,18 @@ def project_forms():
     оператору по шине, и файлы, которые пишет сервис."""
     out = {}
     d = tempfile.mkdtemp(prefix="mop-test-204-")
-    reg, lim = os.path.join(d, "projects"), os.path.join(d, "limits.json")
-    with restored(projects, "FILE", "LIMITS"), \
-            restored(projects.read, "__defaults__"), restored(projects.write, "__defaults__"), \
-            restored(projects.read_limits, "__defaults__"), \
-            restored(projects.write_limits, "__defaults__"), \
+    # Реестр -- один атомарный снимок (#534); сервис пару больше не пишет.
+    # Голое легаси-имя в v1 непредставимо (миграция отказала бы), поэтому
+    # характеристическая среда заводит только два origin'а.
+    snap_path = os.path.join(d, "projects.json")
+    with restored(projects, "SNAPSHOT", "SNAPSHOT_DIR", "FILE", "LIMITS"), \
             restored(cluster, "_live_count", "next_name", "store_workspace"), \
             restored(cluster.spec, "job_spec"):
-        projects.read.__defaults__ = projects.write.__defaults__ = (reg,)
-        projects.read_limits.__defaults__ = projects.write_limits.__defaults__ = (lim,)
-        projects.write({MOP, RUGENT, "legacy"})
-        projects.write_limits({"mop": 2})
+        projects.SNAPSHOT = snap_path
+        projects.SNAPSHOT_DIR = d
+        projects.write_snapshot({"version": projects.SNAPSHOT_VERSION,
+                                 "projects": [{"origin": MOP, "limit": 2},
+                                              {"origin": RUGENT}]}, snap_path)
         out["projects"] = dump(cluster._projects("admin", {}))
         out["limit_set"] = dump(cluster._project_limit("admin", {"name": "rugent",
                                                                 "value": "5"}))
@@ -249,8 +250,7 @@ def project_forms():
                                                                   "value": None}))
         out["limit_foreign"] = dump(cluster._project_limit("admin", {"name": "nope",
                                                                     "value": 1}))
-        out["limits_file"] = open(lim).read()
-        out["registry_file"] = open(reg).read()
+        out["registry_file"] = open(snap_path).read()
         cluster._live_count = lambda target: 5
         cluster.next_name = lambda target: f"pu-{target}-6"
         cluster.store_workspace = lambda root, name, req: None

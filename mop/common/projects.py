@@ -235,10 +235,12 @@ def _snapshot_of_pair(dir_):
     for o in sorted(origins):
         name = puppets.project_of(o)
         if name in seen:
-            raise RuntimeError("cannot migrate the registry: two origins of one "
-                               f"project {name}: {seen[name]} and {o}. Leave the "
-                               "true one and drop the other by hand: v1 keeps one "
-                               "project per name")
+            # Имя и число, не сырые origin'ы: origin в реестре может нести
+            # креды (userinfo, token), и отказ оператору их не печатает.
+            raise RuntimeError("cannot migrate the registry: 2 origins of one "
+                               f"project {name}. Leave the true one and drop "
+                               "the other by hand (mop project list --origins): "
+                               "v1 keeps one project per name")
         seen[name] = o
     limits = read_limits(os.path.join(dir_, "limits.json"))
     for name in sorted(limits):

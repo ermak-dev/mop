@@ -335,11 +335,36 @@ def check_migration_534(c):
 
         # Два origin'а одного проекта (один basename): в v1 -- по одной
         # записи на проект, задваивать лимит некуда; без консенсуса,
-        # какой origin правда, мигрировать нельзя -- отказ с обоими.
+        # какой origin правда, мигрировать нельзя -- отказ. Origin в
+        # реестре тоже может нести креды (userinfo, token): отказ называет
+        # имя проекта и число конфликтов и НЕ печатает сырые origin'ы --
+        # ни из запроса, ни с диска.
         shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
         _legacy_pair(d, [RU, OTHER])  # оба -- rudesktop
-        _refused534(c, "#534 two origins of one project must refuse with both",
-                  lambda: projects.snapshot_of(d), RU, OTHER)
+        try:
+            projects.snapshot_of(d)
+            got = None
+        except RuntimeError as e:
+            got = str(e)
+        c.check("#534 a colliding pair refuses with the project name",
+                bool(got and "rudesktop" in got), repr(got))
+        c.check("#534 the collision refusal counts the conflicts",
+                bool(got and "2" in got), repr(got))
+        c.check("#534 the collision refusal leaks no raw origin",
+                bool(got and RU not in got and OTHER not in got), repr(got))
+        # Тот же запрет для origin'а с кредами в записи реестра: голого
+        # имени достаточно, чтобы найти проблему; секрет не перепечатывается.
+        credentialed = "https://user:secret-token@forge.example/team/rudesktop.git"
+        shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
+        _legacy_pair(d, [RU, credentialed])
+        try:
+            projects.snapshot_of(d)
+            got = None
+        except RuntimeError as e:
+            got = str(e)
+        c.check("#534 a credential-bearing origin must not leak into the refusal",
+                bool(got and "secret-token" not in got and "user:" not in got
+                     and RU not in got and credentialed not in got), repr(got))
 
         # Orphan-лимит (имени нет в реестре) и нецелое значение: отказ с
         # именем, а не молчаливая утрата потолка. Непустые limits без
