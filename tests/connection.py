@@ -245,16 +245,17 @@ def check_reader_new_533(c):
            lambda: profile(a), "version")
     with open(os.path.join(a, "connection.json"), "w", encoding="utf-8") as f:
         f.write("{not json")
-    # Порча -- не «нет входа», и чинит её человек, не повторный вход: текст
-    # обязан называть файл и ремонт руками, а не заведомо неработающий login.
+    # Порча -- не «нет входа»: отказ называет файл и факт, без совета
+    # удалить/править руками (мог бы стереть более новые данные) и без
+    # заведомо неработающего «re-run mop login».
     refute(c, "#533 a corrupted file refuses without a legacy fallback",
-           lambda: profile(a), "damaged", "repair or remove")
+           lambda: profile(a), "not valid JSON")
     # Порча не молчит и на уровне шины: server_config отказывает, а не
     # собирает конфиг из соседних остатков.
     with patched(creds, ROOT=root), context.use(context.resolve({"server": "a.test"}, {}, {})), \
             config.client_sources():
         refute(c, "#533 the bus refuses a corrupted profile",
-               lambda: bus.server_config("a.test"), "damaged")
+               lambda: bus.server_config("a.test"), "not valid JSON")
     put_connection(a, ALICE)
     broken = payload_of(ALICE)
     broken["bus"] = "alice"          # не объект: секрета в тексте быть не должно
@@ -662,13 +663,31 @@ def check_schema_strict_533(c):
     except ValueError as e:
         c.check("#533 unknown version names the file, not a relogin",
                 "srv.test" in str(e) and "re-run mop login" not in str(e), str(e))
+        # Числовая версия -- названа: после строгой проверки типа это факт
+        # формата, не содержимое файла.
+        c.check("#533 a numeric version is named after the type check",
+                "version 2" in str(e), str(e))
+    # Значение версии может быть чем угодно -- от токена до чужих данных:
+    # отказ называет тип/факт, но НЕ цитирует произвольное значение.
+    put_connection(dest, ALICE, version="secret-token")
+    try:
+        profile(dest)
+        c.fail("#533 a bogus version must refuse")
+    except ValueError as e:
+        c.check("#533 the refusal does not quote the bogus version value",
+                "secret-token" not in str(e), str(e))
+        c.check("#533 the refusal does not advise hand repair or removal",
+                not any(w in str(e).lower() for w in ("repair", "remove", "edit")),
+                str(e))
     _corrupt(dest)
     try:
         profile(dest)
         c.fail("#533 a corrupted file must refuse")
     except ValueError as e:
-        c.check("#533 a corrupted file names repair, not relogin",
-                "re-run mop login" not in str(e), str(e))
+        c.check("#533 a corrupted file names the fact, without removal advice",
+                "re-run mop login" not in str(e) and
+                not any(w in str(e).lower() for w in ("repair", "remove")),
+                str(e))
 
 
 # ── подсказки login/порта берутся из нового профиля, не из старой пары ───

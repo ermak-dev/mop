@@ -397,17 +397,20 @@ def _read_connection(directory):
         return None
     except (OSError, ValueError) as e:
         raise ProfileError("broken", f"cannot read the connection profile in "
-                          f"{directory} ({e.__class__.__name__}): the file is "
-                          f"damaged, repair or remove it by hand") from e
+                          f"{directory} ({e.__class__.__name__}): the file "
+                          f"is not valid JSON") from e
     # Версия -- строго int: bool в Python равен единице, и `true` в файле
     # иначе прочитался бы как версия 1. Неизвестная версия -- отказ, не None:
     # молчаливое «нет входа» прятало бы чужой формат за повторным входом.
+    # Числовой тип -- после проверки int, это факт формата; ПРОИЗВОЛЬНОЕ
+    # значение (строка, токен, чужие данные) в текст не цитируется (#533).
     version = raw.get("version") if isinstance(raw, dict) else None
-    if isinstance(version, bool) or not isinstance(version, int) \
-            or version != CONNECTION_VERSION:
+    if isinstance(version, bool) or not isinstance(version, int):
         raise ProfileError("broken", f"unsupported connection profile in {directory}: "
-                          f"unknown version {version!r} (supported: "
-                          f"{CONNECTION_VERSION})")
+                          f"the version is {type(version).__name__}, not a number")
+    if version != CONNECTION_VERSION:
+        raise ProfileError("broken", f"unsupported connection profile in {directory}: "
+                          f"version {version} (supported: {CONNECTION_VERSION})")
     if not isinstance(raw, dict) or set(raw) != {"version", "bus", "https_port", "proxy"} \
             or not isinstance(raw["bus"], dict) or set(raw["bus"]) != {"user", "password"} \
             or not isinstance(raw["proxy"], dict) or set(raw["proxy"]) != {"url", "key"}:
