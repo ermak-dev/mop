@@ -1617,22 +1617,62 @@ def check_mgmt_gateway_418(c, can_render):
     # Неприкосновенность остального.
     for keep in ("location = /nats", "location = /events", "location / {"):
         c.check(f"#418 {keep} untouched", keep in got, keep)
-    # #418 расширение #411: лимит ровно на четырёх ожидаемых маршрутах,
+    # #529 добавляет корневой /v1/: лимит на пяти ожидаемых маршрутах,
     # по одной директиве в каждом, нигде больше -- блоками, не счётчиком.
     limited = [b for b in (panel, block(r"/llm/raw/"), block(r"/v8/management/"),
-                           block(r"/v8/management"))]
-    c.check("#411+#418 the body limit sits on exactly the four LLM routes",
+                           block(r"/v8/management"), block(r"/v1/"))]
+    c.check("#411+#418+#529 the body limit sits on exactly the five LLM routes",
             all(b.count("client_max_body_size") == 1 for b in limited)
-            and got.count("client_max_body_size") == 4, got.count("client_max_body_size"))
+            and got.count("client_max_body_size") == 5, got.count("client_max_body_size"))
     # HYPOTHESIS: подсчёт директив пропускал неправильное значение в одном
-    # location; все четыре должны брать потолок установки, не константу.
+    # location; все пять должны брать потолок установки, не константу.
     # Нестандартные 17 МБ отличают подстановку настройки от хардкода 64 МБ.
     want_limit = "client_max_body_size 17m;"
-    for path, b in zip(("/llm/", "/llm/raw/", "/v8/management/", "=/v8/management"),
+    for path, b in zip(("/llm/", "/llm/raw/", "/v8/management/", "=/v8/management", "/v1/"),
                        limited):
         c.check(f"#418 {path} uses the configured body limit",
                 bool(b) and want_limit in b, b or "no block")
 
+
+def check_root_v1_proxy_529(c, can_render):
+    # HYPOTHESIS: панель строит /v1/models от корня origin, а nginx
+    # отправляет корневой /v1/ в mop-web, где каталога нет.
+    # SOLUTION: /v1/ проксируется без среза URI, с клиентским ключом,
+    # лимитом установки и потоковым ответом без буферизации.
+    # RESULT: до правки рендер падал на отсутствии /v1/ и его директив.
+    # STATUS: FIXED — see #529
+    if not can_render:
+        return
+    template = open(os.path.join(DEPLOY, "roles", "proxy", "templates",
+                                 "mop.conf.j2"), encoding="utf-8").read()
+    for port, limit in ((config.SETTINGS["MOP_LLM_PROXY_PORT"],
+                         config.SETTINGS["MOP_LLM_REQUEST_MAX_MB"]),
+                        ("18317", "96")):
+        got = render(template, dict(config.SETTINGS, MOP_SERVER_LAN="srv.test",
+                                    MOP_LLM_PROXY_PORT=port,
+                                    MOP_LLM_REQUEST_MAX_MB=limit))
+        matches = re.findall(r"location\s+/v1/\s*\{([^{}]*)\}", got)
+        c.check(f"#529 root /v1/ has one API prefix route (port {port})",
+                len(matches) == 1, matches or "no /v1/ route")
+        route = matches[0] if len(matches) == 1 else ""
+        c.check(f"#529 /v1/models and other API paths retain /v1/ (port {port})",
+                f"proxy_pass http://127.0.0.1:{port};" in route,
+                route or "no /v1/ route")
+        c.check(f"#529 /v1/ uses the installation body limit {limit}m",
+                f"client_max_body_size {limit}m;" in route, route)
+        c.check("#529 /v1/ forwards streaming responses without buffering",
+                "proxy_buffering off;" in route
+                and "proxy_http_version 1.1;" in route
+                and 'proxy_set_header Connection "";' in route
+                and "proxy_read_timeout 1h;" in route, route)
+        c.check("#529 /v1/ keeps the caller's API key, not a server credential",
+                bool(route) and not re.search(
+                    r"proxy_set_header\s+(?:Authorization|[Xx]-[Aa]pi-[Kk]ey)\b",
+                    route) and "MOP_PROXY_KEY" not in route, route)
+        for header in ("proxy_set_header Host $host;",
+                       "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+                       "proxy_set_header X-Forwarded-Proto https;"):
+            c.check(f"#529 /v1/ preserves {header}", header in route, route)
 
 
 def main():
@@ -1653,6 +1693,7 @@ def main():
         hermetic.skip("rendering of the units",
                       "no jinja2 on this machine — only the structure below is checked")
     check_mgmt_gateway_418(c, can_render)
+    check_root_v1_proxy_529(c, can_render)
     check_private_ca_517(c, can_render)
     # ── кому что из настроек (#176) ───────────────────────────────────────
     scoped = getattr(config, "SERVER_SCOPED", {})
