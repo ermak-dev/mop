@@ -84,62 +84,114 @@ def check_proxy_key_redaction_394(c):
 
 
 # HYPOTHESIS (#535): read_env глотает ЛЮБОЙ OSError и отвечает {}: файл,
-# который существует, но не читается (права), или путь-каталог, или ошибка
-# I/O — всё это превращается в «настроек нет», и настройка молчно падает
-# в дефолт или в чужое значение. Отказ лекарства не имеет: пустые
-# настройки на живой машине читаются как «файла нет», хотя файл есть.
-# SOLUTION: отсутствию файла (FileNotFoundError, а на каталоге при чтении
-# -- IsADirectoryError) оставлено штатное {}; любой прочий OSError
-# поднимается с путём и причиной strerror — вызывающие (get/effective/
-# фронтенды) несут его дальше обычным порядком исключений, содержимое
-# файла в ошибку не попадает (только путь и причина системы).
-# RESULT: до правки PermissionError и путь-каталог возвращали {} —
-# проверка красная; после — FileNotFoundError/IsADirectoryError дают {},
-# PermissionError поднимается RuntimeError с путём и strerror.
+# который существует, но не читается (права, ошибка I/O), путь-каталог на
+# месте файла, файл на месте компонента пути — всё это превращается в
+# «настроек нет», и настройка молча падает в дефолт или чужое значение.
+# Штатное отсутствие — ровно одно: FileNotFoundError.
+# SOLUTION: только FileNotFoundError даёт {}; любой прочий OSError
+# (IsADirectoryError, NotADirectoryError, PermissionError, EIO) поднимает
+# ReadError с путём и причиной strerror — вызывающие (get/effective/
+# фронтенды) несут его дальше обычным порядком исключений; содержимое
+# файла в ошибку не попадает.
+# RESULT: до правки каталог на месте файла, файл на месте компонента и
+# EIO возвращали {} — проверки красные; после — ReadError с причиной,
+# FileNotFoundError остаётся {}.
 # STATUS: FIXED — see #535
 def check_read_env_errors_535(c):
+    import errno
     d = tempfile.mkdtemp(prefix="mop-env-535-")
     gone = os.path.join(d, "no-such.env")
     c.expect("#535 a missing file is the normal empty case",
              config.read_env(gone), {})
+
+    # Подмена builtins.open на время вызова: read_env открывает файл
+    # builtins.open (своего open в модуле нет), подмена даёт
+    # детерминированные отказы (EACCES под root, EIO) без опоры на
+    # особенности машины. Восстановление -- обязательно: builtins.open
+    # нужен всему дальнейшему файлу.
+    import builtins
+
+    def refuse(what, path, reason=None):
+        try:
+            config.read_env(path)
+            c.fail(f"#535 {what}", str(path))
+        except config.ReadError as e:
+            c.check(f"#535 {what}: names the path and the system's reason",
+                    str(path) in str(e) and (reason is None or reason in str(e)), str(e))
+            c.check(f"#535 {what}: says it is about reading settings",
+                    "cannot read settings" in str(e), str(e))
+
     directory = os.path.join(d, "as-a-directory.env")
     os.mkdir(directory)
-    c.expect("#535 a directory in place of the file is not settings",
-             config.read_env(directory), {})
+    refuse("a directory in place of the file must refuse", directory)
 
-    # Существующий, но недоступный: права снимаются на файле во
-    # временном дереве проверки, настоящие конфиги не трогаются.
+    # Компонента пути -- файл: open("/файл/.env") даёт ENOTDIR.
+    as_file = os.path.join(d, "settings.env")
+    with open(as_file, "w") as f:
+        f.write("MOP_LOCALE=x\n")
+    refuse("a file where a path component must be", os.path.join(as_file, ".env"))
+
+    # Отказ I/O: детерминированный EIO подменой open.
+    def eio(file, *a, **kw):
+        raise OSError(errno.EIO, "Input/output error")
+    saved_open = builtins.open
+    try:
+        builtins.open = eio
+        refuse("an I/O error must refuse", os.path.join(d, "eio.env"), "Input/output")
+    finally:
+        builtins.open = saved_open
+
+    # Существующий, но недоступный: файл во временном дереве; chmod --
+    # прямой PermissionError, а под root (chmod ему не помеха) -- та же
+    # причина EACCES подменой open. Оба пути обязаны кончиться отказом.
+    def eacces(file, *a, **kw):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
     locked = os.path.join(d, "locked.env")
     with open(locked, "w") as f:
         f.write("MOP_PVE_STORAGE=from-locked\n")
     os.chmod(locked, 0)
     try:
-        config.read_env(locked)
-        c.fail("#535 an unreadable existing file must refuse, not return {}",
-               locked)
-    except config.ReadError as e:
-        # Путь и причина системы; содержимое файла в ошибку не входит.
+        refused = None
+        try:
+            config.read_env(locked)
+        except config.ReadError as e:
+            refused = str(e)
+        if refused is None:
+            try:
+                builtins.open = eacces
+                config.read_env(locked)
+                c.fail("#535 an unreadable existing file must refuse, not return {}",
+                       locked)
+            except config.ReadError as e:
+                refused = str(e)
+            finally:
+                builtins.open = saved_open
         c.check("#535 the refusal names the file and the system's reason",
-                locked in str(e) and "Permission denied" in str(e), str(e))
+                locked in refused and "Permission denied" in refused, refused)
         c.check("#535 the refusal says it is about reading settings",
-                "cannot read settings" in str(e), str(e))
+                "cannot read settings" in refused, refused)
         c.check("#535 settings contents do not leak into the error",
-                "from-locked" not in str(e), str(e))
+                "from-locked" not in refused, refused)
     finally:
         os.chmod(locked, 0o600)
 
     # Отказ доезжает и до клиента настроек: config.get/effective несут
-    # его, а не подменяют пустыми настройками.
-    with open(locked, "w") as f:
-        f.write("MOP_PVE_STORAGE=from-locked\n")
-    os.chmod(locked, 0)
+    # его, а не подменяют пустыми настройками. Подмена open гасится
+    # ровно на read_kv: настоящие open нужны и другим файлам прогона.
+    import mop.common.fsutil as fs
+    real_read_kv = fs.read_kv
+
+    def refusing_read_kv(text):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
     try:
         with patched(config, ENV_FILE=locked):
+            fs.read_kv = refusing_read_kv
             config.forget()
             try:
                 config.effective()
-                c.fail("#535 effective() must not swallow an unreadable .env",
-                       locked)
+                c.fail("#535 effective() must not swallow an unreadable .env", locked)
             except config.ReadError as e:
                 c.check("#535 effective() carries the refusal with its reason",
                         locked in str(e) and "Permission denied" in str(e), str(e))
@@ -149,9 +201,47 @@ def check_read_env_errors_535(c):
             except config.ReadError as e:
                 c.check("#535 get() carries the refusal with its reason",
                         locked in str(e) and "Permission denied" in str(e), str(e))
+            fs.read_kv = real_read_kv
+            c.expect("#535 a readable file still loads after the refusal case",
+                     config.read_env(locked), {"MOP_PVE_STORAGE": "from-locked"})
     finally:
-        os.chmod(locked, 0o600)
+        fs.read_kv = real_read_kv
         config.forget()
+
+    # CLI: отказ выходит одной строкой с причиной, кодом 1 и без
+    # трассировки — та же обёртка, что у прочих отказов (#535). Ребёнок
+    # с той же подменой read_kv: постоянная проверка, не ручной прогон.
+    code = (
+        "import sys, errno\n"
+        f"sys.path.insert(0, {os.path.dirname(os.path.realpath(__file__))!r})\n"
+        "import hermetic  # noqa: F401\n"
+        "from _lib import patched\n"
+        "from mop.common import config\n"
+        "import mop.common.fsutil as fs\n"
+        "import mop.cli\n"
+        "def refuse(text):\n"
+        "    raise PermissionError(errno.EACCES, 'Permission denied')\n"
+        f"envf = {locked!r}\n"
+        "fs.read_kv = refuse\n"
+        "with patched(config, ENV_FILE=envf):\n"
+        "    config.forget()\n"
+        "    try:\n"
+        "        mop.cli.main(['server', 'config'])\n"
+        "    except SystemExit as e:\n"
+        "        sys.exit(e.code if isinstance(e.code, int) else 0)\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
+                       env={**os.environ, "MOP_ENV_FILE": locked},
+                       capture_output=True, text=True)
+    c.check("#535 the CLI exits 1 on an unreadable settings file",
+            r.returncode == 1, f"exit {r.returncode}")
+    c.check("#535 the CLI names the file and the reason on stderr",
+            locked in r.stderr and "Permission denied" in r.stderr, r.stderr.strip())
+    c.check("#535 the CLI shows no traceback",
+            "Traceback" not in r.stderr and "Traceback" not in r.stdout,
+            (r.stderr + r.stdout).strip()[:300])
+    c.check("#535 the CLI error carries no settings contents",
+            "from-locked" not in r.stderr + r.stdout, r.stderr.strip())
 
 
 def main():
