@@ -369,9 +369,18 @@ def view_lines(view):
 def write_snapshot(snapshot, path=SNAPSHOT):
     """Запись снимка атомарно. Единственный writer -- сервис кластера.
 
-    Legacy-поля вида (голые имена, orphan-потолки) -- только читателю: на
-    диск их writer не кладёт, v1-снимок представим (миграция либо уже
-    прошла, либо откажет с именем до всякой записи)."""
+    Legacy-поля вида (голые имена, orphan-потолки) -- только читателю, и
+    writer такой view ОТКАЗЫВАЕТСЯ писать: молча выбросить их и сохранить
+    усечённое состояние -- та же потеря, что и обрыв между двумя файлами.
+    Мутаторы зовут strict snapshot_of, но и сам writer держит гейт:
+    непредставимое не должно доехать до диска ни одним путём. На диск --
+    только представимый v1."""
+    if snapshot.get("legacy") or snapshot.get("legacy_limits"):
+        raise RuntimeError("cannot write the registry: the view carries unrepresentable "
+                           "legacy data (bare name(s) "
+                           f"{', '.join(sorted(snapshot.get('legacy') or ()))}, limit(s) of "
+                           f"{', '.join(sorted((snapshot.get('legacy_limits') or {}).keys()))}); "
+                           "migrate the pair by an operator decision first")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {"version": snapshot["version"],
                "projects": [{"origin": p["origin"], **({"limit": p["limit"]}

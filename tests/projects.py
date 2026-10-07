@@ -602,6 +602,27 @@ def check_view_534(c):
         c.check("#534 the view of an orphan limit writes nothing",
                 not os.path.exists(os.path.join(d, "projects.json")))
 
+        # Writer не принимает непредставимый view: молча выбросить
+        # legacy-поля и сохранить усечённое состояние -- та же потеря,
+        # что и обрыв между двумя файлами; strict snapshot_of в мутаторах
+        # -- необходимая, но не единственная гарантия сохранности.
+        out = os.path.join(d, "out.json")
+        _legacy_pair(d, [MOP, "oldproject"])
+        _refused534(c, "#534 write_snapshot refuses a view with legacy lines",
+                  lambda: projects.write_snapshot(projects.view_of(d), out), "oldproject")
+        c.check("#534 a refused write leaves no file",
+                not os.path.exists(out))
+        _legacy_pair(d, [MOP], {"mop": 3, "ghost": 7})
+        _refused534(c, "#534 write_snapshot refuses a view with legacy limits",
+                  lambda: projects.write_snapshot(projects.view_of(d), out), "ghost")
+        c.check("#534 a refused write still leaves no file",
+                not os.path.exists(out))
+        # Представимый снимок пишется как раньше -- гейт бьёт только view.
+        projects.write_snapshot({"version": 1, "projects": [{"origin": MOP}]}, out)
+        c.check("#534 a representable snapshot still writes",
+                os.path.exists(out))
+        os.remove(out)
+
         # Битый/чужой снимок -- как и в snapshot_of: громкий отказ без
         # пустого реестра и без fallback (взгляд не弱ее миграции).
         with open(os.path.join(d, "projects.json"), "w") as f:
