@@ -250,6 +250,21 @@ def check_reader_new_533(c):
     # заведомо неработающего «re-run mop login».
     refute(c, "#533 a corrupted file refuses without a legacy fallback",
            lambda: profile(a), "not valid JSON")
+    # Нечитаемый файл -- ДРУГОЙ факт: «не JSON» оклеветало бы права как
+    # порчу. Класс исключения безопасен и точен, ложный факт -- нет (#533).
+    os.chmod(os.path.join(a, "connection.json"), 0)
+    try:
+        def unreadable():
+            try:
+                profile(a)
+            except ValueError as e:
+                if "not valid JSON" in str(e) and "PermissionError" in str(e):
+                    raise AssertionError("a PermissionError is not bad JSON") from e
+                raise
+        refute(c, "#533 an unreadable file names cannot-read, not bad JSON",
+               unreadable, "PermissionError", "cannot read")
+    finally:
+        os.chmod(os.path.join(a, "connection.json"), 0o600)
     # Порча не молчит и на уровне шины: server_config отказывает, а не
     # собирает конфиг из соседних остатков.
     with patched(creds, ROOT=root), context.use(context.resolve({"server": "a.test"}, {}, {})), \

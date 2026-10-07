@@ -395,7 +395,12 @@ def _read_connection(directory):
             raw = json.load(f)
     except FileNotFoundError:
         return None
-    except (OSError, ValueError) as e:
+    except OSError as e:
+        # Права -- не порча: класс исключения безопасен и точен, «не JSON»
+        # оклеветало бы чужие права как битый формат (#533).
+        raise ProfileError("broken", f"cannot read the connection profile in "
+                          f"{directory}: {e.__class__.__name__}") from e
+    except ValueError as e:
         raise ProfileError("broken", f"cannot read the connection profile in "
                           f"{directory} ({e.__class__.__name__}): the file "
                           f"is not valid JSON") from e
