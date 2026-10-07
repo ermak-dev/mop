@@ -253,6 +253,49 @@ def _snapshot_from_file(path):
     return got
 
 
+def _strict_lines(path):
+    """Строки легаси-реестра для МИГРАЦИИ: без файла -- пусто, ошибка чтения
+    -- громкий отказ. Прощающий read() глотает OSError, и недоступный
+    файл выглядел бы пустым реестром: writer такое не читает."""
+    try:
+        with open(path) as f:
+            return {l.strip() for l in f if l.strip()}
+    except FileNotFoundError:
+        return set()
+    except OSError as e:
+        raise RuntimeError(f"cannot migrate the registry: {path} is unreadable: {e}") from None
+
+
+def _strict_limits(path):
+    """Лимиты пары для МИГРАЦИИ: каждая запись -- целое >= 0 или отказ.
+
+    Прощающий read_limits (#337) отбрасывает null/bool/строки молча: глагол
+    переживал одну плохую строку. Миграция -- writer: усечённые потолки
+    она сохраняла бы навсегда, поэтому невалидная запись -- отказ с именем
+    и значением, файлы не тронуты."""
+    try:
+        with open(path) as f:
+            got = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"cannot migrate the registry: {path} is unreadable: {e}") from None
+    if not isinstance(got, dict):
+        raise RuntimeError(f"cannot migrate the registry: {path} must be an object")
+    out = {}
+    for name, value in got.items():
+        # bool -- это int в питоне, проверяем первым; срез float (1.0)
+        # принимаем как 1 -- json-файл исторически писался json.dumps от
+        # int, но этажность значению не вредит.
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise RuntimeError("cannot migrate the registry: limit of {name!r} in "
+                               f"{path} is not a whole number: {value!r}. The files "
+                               "are intact, and what to do with it is an operator "
+                               "decision")
+        out[name] = value
+    return out
+
+
 def _snapshot_of_pair(dir_):
     """Снимок из легаси-пары каталога. Непредставимое -- отказ, не потеря.
 
@@ -263,7 +306,7 @@ def _snapshot_of_pair(dir_):
     но не способ исправления: правка реестра идёт теми же глаголами
     (первый мутирующий потребует ту же миграцию и откажет тем же
     отказом), а редактирование файлов руками -- не путь пула."""
-    origins, legacy = puppets.project_ids(read(os.path.join(dir_, "projects")))
+    origins, legacy = puppets.project_ids(_strict_lines(os.path.join(dir_, "projects")))
     if legacy:
         raise RuntimeError("cannot migrate the registry: bare name(s) without an "
                            f"origin: {', '.join(sorted(legacy))}. v1 stores origins "
@@ -280,7 +323,7 @@ def _snapshot_of_pair(dir_):
                                "the files are intact, and choosing the true one "
                                "is an operator decision")
         seen[name] = o
-    limits = read_limits(os.path.join(dir_, "limits.json"))
+    limits = _strict_limits(os.path.join(dir_, "limits.json"))
     for name in sorted(limits):
         if name not in seen:
             raise RuntimeError("cannot migrate the registry: limit of an unknown "

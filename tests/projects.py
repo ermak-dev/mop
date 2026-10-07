@@ -420,6 +420,33 @@ def check_migration_534(c):
         _refused534(c, "#534 a limit of an unknown project must refuse with the name",
                   lambda: projects.snapshot_of(d), "rudesktop")
 
+        # Strict-миграция не читает пару прощающим читателем (#534):
+        # read_limits молча отбрасывает null/bool/дробные/битые значения
+        # и приводит через int() -- strict потерял бы потолок ДО
+        # валидации, и мутация сохранила бы усечённое состояние. Невалидная
+        # запись -- отказ с именем и значением, файлы не тронуты.
+        for name, value in (("null", "null"), ("true", "true"), ("float", "1.5"),
+                            ("string", '"junk"'), ("negative", "-1")):
+            shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
+            _legacy_pair(d, [MOP], {"mop": 2})
+            with open(os.path.join(d, "limits.json"), "w") as f:
+                f.write('{"mop": 2, "p": %s}' % value)
+            _refused534(c, f"#534 a non-integer limit ({name}) must refuse the migration",
+                      lambda: projects.snapshot_of(d), "p")
+            c.check(f"#534 a refused non-integer limit ({name}) keeps the file bytes",
+                    open(os.path.join(d, "limits.json")).read()
+                    == '{"mop": 2, "p": %s}' % value)
+
+        # IO-отказ не становится пустым реестром: read() глотает OSError,
+        # и strict-миграция недоступного файла увидела бы «нет проектов».
+        # Для writer'а это громкий отказ с причиной от системы.
+        shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
+        _legacy_pair(d, [MOP], {"mop": 2})
+        os.chmod(os.path.join(d, "projects"), 0)
+        _refused534(c, "#534 an unreadable registry file must refuse loudly",
+                  lambda: projects.snapshot_of(d))
+        os.chmod(os.path.join(d, "projects"), 0o644)
+
         # Уже мигрированное: повторная миграция того же снимка -- тот же
         # результат, файлов-легаси больше не читаем.
         shutil.rmtree(d); d = tempfile.mkdtemp(prefix="mop-test-534-")
