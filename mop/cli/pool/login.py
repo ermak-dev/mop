@@ -152,43 +152,33 @@ def _https_port(explicit, saved):
     return https
 
 
-def complete(host, login, dest, https, stored=None):
+def complete(host, login, dest, https):
     """Один проверенный вход: старый пароль можно использовать, новая запись
     появляется только после обеих сетевых проверок -- и запись одна (#533).
 
-    Каталог классифицируется ОДНИМ снимком creds.snapshot: machine (service)
-    и испорченный/неизвестный connection.json закрыты человеку ДО сети и
-    записи -- первый вход молча сменил бы личность сервисов, второй --
-    перезаписал бы чужой формат. Два отдельных чтения увидели бы два
-    поколения каталога, если writer заменил файл между ними.
-
-    stored -- уже снятые ПОДСКАЗКИ (имя/пароль либо None), по одному
-    классификатору на процесс: повторная классификация собственного шага
-    была бы вторым поколением каталога (машина успела бы стать сервисом
-    между классификацией и сетью). Подсказка -- не доверие: пароль
-    используется только после обычной проверки шиной (_still_valid)."""
+    Каталог классифицируется ОДНИМ снимком creds.snapshot -- НА ВХОДЕ этой
+    фазы (прямые вызовы и командлеты входят сюда, а не в main/ensure), и
+    классификация одна на весь вход: machine (service) и испорченный/
+    неизвестный connection.json закрыты человеку ДО сети и записи -- первый
+    вход молча сменил бы личность сервисов, второй -- перезаписал бы чужой
+    формат. После классификации половины НЕ перечитываются: два чтения
+    увидели бы два поколения каталога. Подсказка из остатка -- не доверие:
+    пароль используется только после обычной проверки шиной (_still_valid)."""
     if not https.isascii() or not https.isdecimal() or not 1 <= int(https) <= 65535:
         raise ValueError("server HTTPS port must be between 1 and 65535")
-    kind, profile = None, None
     try:
         kind, profile = creds.snapshot(dest)
     except creds.ProfileError as e:
         # Испорченный/неизвестный новый файл не перезаписывается и не
         # читается как legacy: чинить его может только человек, а не вход.
-        if e.kind in ("broken", "conflict"):
-            raise RuntimeError(str(e)) from e
-        # partial: половина прежней пары -- ниже полный вход, по подсказке
-        # сохранённого пароля (пароль без проверки шиной не используется).
-        profile = stored if stored is not None else None
+        raise RuntimeError(str(e)) from e
     if kind == "machine":
         # Служебный каталог: конфликт и здесь, до сети, TLS-пина и записи.
         raise RuntimeError("machine service identity and a human login conflict: "
                            "use a separate operator account or connection directory")
-    # Прежний вход для повтора пароля: целый профиль или остаток пары, если
-    # он человеческий. Повторное использование -- только после обычной
-    # проверки (_still_valid).
-    if profile is None:
-        profile = stored
+    if kind != "human" and kind != "partial":
+        # Пустой каталог -- ни профиля, ни подсказки: полный вход с нуля.
+        profile = None
     pin = _pinned(creds.cafile(dest))
     try:
         valid = profile and profile.get("user") == login and \
@@ -279,21 +269,9 @@ def ensure():
         user = ask(f"login on {host}: ")
     https = _https_port(None, {"https_port": port_hint} if port_hint else None)
     with context.use(context.resolve({"server": host}, {}, {})):
-        complete(host, user, dest, https, stored=stored_hint(dest, kind, hints))
+        complete(host, user, dest, https)
     _bind(host, user)
     return host
-
-
-def stored_hint(dest, kind, hints):
-    """Подсказка прежнего пароля для complete (#533): пароль операторской
-    половины, если она человеческая -- и только как кандидат на проверку
-    _still_valid, не как доверенный профиль."""
-    if kind != "partial":
-        return None
-    user, password = (hints or {}).get("user"), (hints or {}).get("password")
-    if user and password and not busnames.is_machine(user):
-        return {"user": user, "password": password}
-    return None
 
 
 def _dirs():
@@ -358,8 +336,7 @@ def main(argv):
             https = _https_port(explicit_https,
                                 {"https_port": hint["https_port"]}
                                 if hint.get("https_port") else None)
-            complete(host, login, dest, https,
-                     stored=stored_hint(dest, kind, who))
+            complete(host, login, dest, https)
     except (RuntimeError, ValueError, OSError) as e:
         lib.fail(str(e))
         return 1

@@ -877,6 +877,58 @@ def check_hints_from_snapshot_533(c):
 
 
 # ── один снимок в complete: служебный каталог не перезаписывается ───────
+# ── прямой complete на остатке: подсказка из ЕГО снимка, не параметр ────
+def check_complete_partial_hint_533(c):
+    # complete -- существующая точка входа (тесты и будущие командлеты зовут
+    # его напрямую). Подсказка прежнего пароля приходит из ЕГО собственной
+    # классификации на входе фазы, а не необязательным параметром: параметр
+    # со значением по умолчанию None -- обход проверки, если звавший забыл
+    # его передать (#533).
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-cph-"), "servers")
+    dest = os.path.join(root, "srv.test")
+    creds.write_operator(dest, "alice", "stale-bus")
+    calls = []
+    with patched(join, _still_valid=lambda *a: calls.append(("_still_valid", a[3])) or True,
+                 _login=lambda *a: calls.append(("_login", a[1])) or "fresh-bus",
+                 _fetch=lambda *a: {"https_port": "443", "proxy_url": "https://x/llm",
+                                    "proxy_key": "k"},
+                 _probe=lambda *a: None), \
+            patched_env(MOP_BUS_PASSWORD="fresh-bus"):
+        join.complete("srv.test", "alice", dest, "443")
+    c.check("#533 a direct complete re-checks the stored half password",
+            calls == [("_still_valid", {"user": "alice", "password": "stale-bus",
+                                        "https_port": None})],
+            calls)
+
+
+# ── writer меняет ТОЛЬКО connection.json; соседи -- нетронуты ──────────
+def check_writer_neighbors_533(c):
+    if getattr(creds, "write_connection", None) is None:
+        return      # до #533 writer -- пара записей; контракт нового writer'а
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-neigh-"), "servers")
+    dest = os.path.join(root, "srv.test")
+    put_legacy(dest, ALICE)
+    with open(os.path.join(dest, creds.pass_file(None)), "w", encoding="utf-8") as f:
+        f.write("old role password\n")
+    pin_path = creds.write_cert(dest, b"old-pin-der")
+    neighbors = {n: open(os.path.join(dest, n), encoding="utf-8").read()
+                 for n in (creds.OPERATOR_FILE, creds.CLIENT_FILE,
+                           os.path.basename(pin_path))}
+    with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
+                 _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
+                                    "proxy_key": BOB[4]},
+                 _probe=lambda *a: None):
+        join.complete("srv.test", "bob", dest, "8443")
+    for name, was in neighbors.items():
+        c.expect(f"#533 the writer does not touch {name}",
+                 open(os.path.join(dest, name), encoding="utf-8").read(), was)
+    c.check("#533 the cleanup removes only the role password",
+            creds.pass_file(None) not in os.listdir(dest), os.listdir(dest))
+    c.expect("#533 the new login is the connection profile alone",
+             creds.human_profile(dest), profile_of(BOB))
+
+
+# ── один снимок в complete: служебный каталог не перезаписывается ───────
 def check_machine_race_533(c):
     # Два чтения -- два поколения: пре-чек operator() увидел пустоту, снимок
     # уже видит service. Решение одно: классификация каталога одним
@@ -971,6 +1023,8 @@ def main():
     check_schema_strict_533(c)
     check_hints_from_snapshot_533(c)
     check_machine_race_533(c)
+    check_complete_partial_hint_533(c)
+    check_writer_neighbors_533(c)
     check_cleanup_phase_covered_533(c)
     return c.report("connection")
 
