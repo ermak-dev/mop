@@ -570,6 +570,185 @@ def _migrate_refusal(dir_):
         return str(e)
 
 
+def _refusal_of(fn):
+    """Текст отказа fn (или None, если не отказала; не-RuntimeError -- маркер)."""
+    try:
+        fn()
+        return None
+    except RuntimeError as e:
+        return str(e)
+    except Exception as e:  # noqa: BLE001 -- ровно этот провал и ловим
+        return f"WRONG EXC {type(e).__name__}: {e}"
+
+
+def check_schema_534(c):
+    """Схема v1 одним валидатором: reader, writer и export сверяют одно.
+
+    HYPOTHESIS (#534): _snapshot_from_file проверял только «это dict,
+    version == 1, projects -- список» (== принимал True и 1.0) и записи не
+    проверял вовсе: null/не-объекты, пустой и нестроковый origin, неизвестные
+    поля, дубль basename'а, limit null/bool/float/отрицательный/строка
+    читались как данные, а writer молча выбрасывал явный null. Отказы
+    печатали сырые значения (version!r, value!r) -- содержимое испорченного
+    файла, с кредами, уезжало в текст ошибки. И existence-проверка
+    os.path.exists глотала ошибки: существующий-но-нечитаемый v1 (битый
+    symlink, права) молча давал fallback на легаси-пару.
+    SOLUTION: один чистый валидатор _checked -- точные ключи верхнего
+    уровня, type(version) is int и == 1, запись {origin, limit?} с origin
+    по правилам origin'ов и лимитом строго int >= 0 (null -- не отсутствие
+    ключа), один origin на имя; в отказе -- путь/имя/тип, не сырое
+    значение. Пользуют его reader (_snapshot_from_file), write_snapshot
+    (до всякого mkdir) и legacy_pair_of; существование файла отличает
+    «нет» от «есть, но не достать».
+    STATUS: #534 (красный прогон впереди реализации)."""
+    import json as _json
+    import shutil
+    import tempfile
+    d = tempfile.mkdtemp(prefix="mop-test-534s-")
+    try:
+        snap = os.path.join(d, "projects.json")
+        # Reader: каждое нарушение схемы -- отказ, не «прочиталось как есть».
+        cases = [
+            ("version true", '{"version": true, "projects": []}', "version"),
+            ("version 1.0", '{"version": 1.0, "projects": []}', "version"),
+            ("a null entry", '{"version": 1, "projects": [null]}', None),
+            ("an entry not an object", '{"version": 1, "projects": [42]}', None),
+            ("an entry without origin", '{"version": 1, "projects": [{"limit": 2}]}', "origin"),
+            ("an unknown entry field", '{"version": 1, "projects": '
+             '[{"origin": "%s", "name": "mop"}]}' % MOP, "name"),
+            ("an empty origin", '{"version": 1, "projects": [{"origin": ""}]}', "origin"),
+            ("a non-string origin", '{"version": 1, "projects": [{"origin": 7}]}', "origin"),
+            ("a null limit", '{"version": 1, "projects": '
+             '[{"origin": "%s", "limit": null}]}' % MOP, "limit"),
+            ("a bool limit", '{"version": 1, "projects": '
+             '[{"origin": "%s", "limit": true}]}' % MOP, "limit"),
+            ("a float limit", '{"version": 1, "projects": '
+             '[{"origin": "%s", "limit": 1.5}]}' % MOP, "limit"),
+            ("a negative limit", '{"version": 1, "projects": '
+             '[{"origin": "%s", "limit": -1}]}' % MOP, "limit"),
+            ("a string limit", '{"version": 1, "projects": '
+             '[{"origin": "%s", "limit": "2"}]}' % MOP, "limit"),
+            ("an unknown top-level field", '{"version": 1, "projects": [], "note": "x"}', "note"),
+        ]
+        for label, text, needle in cases:
+            with open(snap, "w") as f:
+                f.write(text)
+            _refused534(c, f"#534 the reader refuses {label}",
+                      lambda: projects.snapshot_of(d), *( [needle] if needle else [] ))
+        # Дубль basename'а в самом файле: в v1 один origin на проект.
+        with open(snap, "w") as f:
+            f.write(_json.dumps({"version": 1, "projects": [
+                {"origin": RU}, {"origin": OTHER}]}))
+        _refused534(c, "#534 the reader refuses 2 origins of one project in the file",
+                  lambda: projects.snapshot_of(d), "rudesktop", "2")
+
+        # Сырое значение не печатается: version -- строка с секретом.
+        with open(snap, "w") as f:
+            f.write('{"version": "hunter2-secret", "projects": []}')
+        got = _refusal_of(lambda: projects.snapshot_of(d))
+        c.check("#534 the version refusal names the type, not the raw value",
+                bool(got and "hunter2-secret" not in got and "str" in got), repr(got))
+
+        # Writer: та же схема, ДО всякого mkdir, и явный null -- отказ.
+        out = os.path.join(d, "out", "sub", "projects.json")
+        _refused534(c, "#534 the writer refuses a snapshot of another version",
+                  lambda: projects.write_snapshot({"version": 2, "projects": []}, out))
+        _refused534(c, "#534 the writer refuses an explicit null limit",
+                  lambda: projects.write_snapshot({"version": 1, "projects": [
+                      {"origin": MOP, "limit": None}]}, out), "limit")
+        _refused534(c, "#534 the writer refuses an unknown entry field",
+                  lambda: projects.write_snapshot({"version": 1, "projects": [
+                      {"origin": MOP, "name": "mop"}]}, out))
+        c.check("#534 a refused writer creates no directories",
+                not os.path.exists(os.path.join(d, "out")))
+        # Представимый снимок пишется и читается обратно (регрессия).
+        projects.write_snapshot({"version": 1, "projects": [{"origin": MOP, "limit": 2}]}, out)
+        c.check("#534 a representable snapshot still writes", os.path.exists(out))
+        c.expect("#534 the written snapshot reads back",
+                 projects.snapshot_of(os.path.dirname(out)),
+                 {"version": 1, "projects": [{"origin": MOP, "limit": 2}]})
+
+        # Export: непредставимый view (голые имена, orphan-потолки) --
+        # отказ, не потеря строк при выгрузке.
+        pair = tempfile.mkdtemp(prefix="mop-test-534s-p-")
+        _legacy_pair(pair, [MOP, "oldproject"], {"mop": 3, "ghost": 7})
+        _refused534(c, "#534 the export refuses a view with legacy lines",
+                  lambda: projects.legacy_pair_of(projects.view_of(pair)), "oldproject")
+        _refused534(c, "#534 the export refuses a view with legacy limits",
+                  lambda: projects.legacy_pair_of(projects.view_of(pair)), "ghost")
+        # View коллизии (два origin одного имени, legacy-полей нет): writer
+        # обязан отказаться -- в v1 один origin на проект.
+        shutil.rmtree(pair)
+        pair = tempfile.mkdtemp(prefix="mop-test-534s-p-")
+        _legacy_pair(pair, [RU, OTHER])
+        _refused534(c, "#534 the writer refuses a view with 2 origins of one project",
+                  lambda: projects.write_snapshot(projects.view_of(pair),
+                                                  os.path.join(d, "out2")), "rudesktop")
+        c.check("#534 the refused collision write leaves no file",
+                not os.path.exists(os.path.join(d, "out2")))
+
+        # Строгие лимиты пары: отрицательное -- отказ; сырое значение и
+        # буквальный {name!r} в отказе -- нет.
+        shutil.rmtree(pair)
+        pair = tempfile.mkdtemp(prefix="mop-test-534s-p-")
+        _legacy_pair(pair, [MOP], {"mop": -1})
+        _refused534(c, "#534 a negative limit must refuse the migration",
+                  lambda: projects.snapshot_of(pair), "mop")
+        shutil.rmtree(pair)
+        pair = tempfile.mkdtemp(prefix="mop-test-534s-p-")
+        _legacy_pair(pair, [MOP], {"mop": "hunter2"})
+        got = _refusal_of(lambda: projects.snapshot_of(pair))
+        c.check("#534 the limit refusal names the project and the type, not the raw value",
+                bool(got and "hunter2" not in got and "mop" in got and "str" in got
+                     and "{name" not in got), repr(got))
+
+        # Существующий-но-нечитаемый v1: битый symlink и недоступный
+        # каталог -- громкий отказ, fallback на легаси-пару нет.
+        broken = tempfile.mkdtemp(prefix="mop-test-534s-b-")
+        _legacy_pair(broken, [MOP])
+        os.symlink("no-such-target", os.path.join(broken, "projects.json"))
+        _refused534(c, "#534 a broken-symlink snapshot refuses, no fallback to the pair",
+                  lambda: projects.snapshot_of(broken), "projects.json")
+        os.remove(os.path.join(broken, "projects.json"))
+        c.expect("#534 with the symlink gone the pair migrates",
+                 projects.snapshot_of(broken), {"version": 1, "projects": [{"origin": MOP}]})
+        shutil.rmtree(broken)
+        # Тот же класс для читателя: битый symlink в взгляд читателя -- не
+        # «пара с миграцией», а громкий отказ (fallback маскировал бы поломку).
+        broken = tempfile.mkdtemp(prefix="mop-test-534s-b-")
+        _legacy_pair(broken, [MOP])
+        os.symlink("no-such-target", os.path.join(broken, "projects.json"))
+        _refused534(c, "#534 a broken-symlink snapshot refuses for the reader too",
+                  lambda: projects.view_of(broken), "projects.json")
+        os.remove(os.path.join(broken, "projects.json"))
+        c.expect("#534 with the symlink gone the reader migrates the pair",
+                 projects.view_of(broken), {"version": 1, "projects": [{"origin": MOP}]})
+        shutil.rmtree(broken)
+        shut = tempfile.mkdtemp(prefix="mop-test-534s-d-")
+        projects.write_snapshot({"version": 1, "projects": [{"origin": MOP}]},
+                                os.path.join(shut, "projects.json"))
+        os.chmod(shut, 0)
+        try:
+            _refused534(c, "#534 an unreachable directory refuses, not an empty registry",
+                      lambda: projects.snapshot_of(shut))
+        finally:
+            os.chmod(shut, 0o700)
+        shutil.rmtree(shut)
+        # Пара (без снимка) в недоступном каталоге -- тот же класс: не
+        # «свежая установка» с пустым реестром, а громкий отказ.
+        paird = tempfile.mkdtemp(prefix="mop-test-534s-pd-")
+        _legacy_pair(paird, [MOP])
+        os.chmod(paird, 0)
+        try:
+            _refused534(c, "#534 an unreachable directory with a pair refuses too",
+                      lambda: projects.snapshot_of(paird))
+        finally:
+            os.chmod(paird, 0o700)
+        shutil.rmtree(paird)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def check_view_534(c):
     """Читающий взгляд #534: прежние видимые данные из проблемной пары.
 
@@ -682,7 +861,8 @@ def main():
     c = Checks()
     for fn in (check_add, check_delete, check_names, check_limits, check_read_limits_337,
                check_git_hosts, check_for_deploy, check_local_view_534,
-               check_migration_534, check_snapshot_534, check_view_534):
+               check_migration_534, check_schema_534, check_snapshot_534,
+               check_view_534):
         fn(c)
     return c.report("projects")
 

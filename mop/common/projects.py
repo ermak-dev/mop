@@ -197,7 +197,7 @@ def snapshot_of(dir_):
     обязаны оставаться видимыми, -- view_of: та же пара, но без отказов
     представимости."""
     path = os.path.join(dir_, "projects.json")
-    if os.path.exists(path):
+    if _present(path):
         return _snapshot_from_file(path)
     old_registry, old_limits = os.path.join(dir_, "projects"), os.path.join(dir_, "limits.json")
     if os.path.exists(old_registry) or os.path.exists(old_limits):
@@ -217,7 +217,7 @@ def view_of(dir_):
     их не сохраняет: первый успешный мутирующий глагол миграцию потребует,
     и там отказ будет услышан."""
     path = os.path.join(dir_, "projects.json")
-    if os.path.exists(path):
+    if _present(path):
         return _snapshot_from_file(path)
     old_registry, old_limits = os.path.join(dir_, "projects"), os.path.join(dir_, "limits.json")
     if not (os.path.exists(old_registry) or os.path.exists(old_limits)):
@@ -235,22 +235,88 @@ def view_of(dir_):
     return snap
 
 
+def _present(path):
+    """Есть ли файл, отличив «нет» от «есть, но не достать» (#534).
+
+    os.path.exists глотает причину недоступности: битый symlink или
+    недоступный каталог выглядели бы «файла нет», и читатель молча ушёл
+    бы в fallback на легаси-пару, маскируя поломку старым реестром.
+    «Не достать» -- громкий отказ, а не пустое место."""
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        raise RuntimeError(f"cannot tell the registry state: {path}: {e}") from None
+
+
+def _checked(snapshot, where):
+    """Проверка схемы v1 одним местом. -> те же данные, битое -- отказ.
+
+    Её зовут reader файла (_snapshot_from_file), writer (write_snapshot)
+    и export (legacy_pair_of): одни и те же данные обязаны проходить или
+    отказывать одинаково везде, иначе writer «нормализовал» бы то, что
+    reader сочёл битым. Схема: точные ключи {version, projects}; version
+    -- строго int (type is int: True и 1.0 проходят сравнение == 1, но
+    схемой не являются); каждая запись -- {origin, limit?} без чужих
+    полей, origin валиден по правилам origin'ов, limit -- строго целое
+    >= 0 (bool -- не int для лимита, null -- не отсутствие ключа); один
+    origin на имя проекта. Отказ называет место, имя и ТИП -- не сырое
+    значение: в испорченном файле может лежать секрет (строка в version,
+    чужой токен в limit), а текст отказа уезжает в журналы и ответы RPC.
+    """
+    if not isinstance(snapshot, dict):
+        raise RuntimeError(f"{where} is {type(snapshot).__name__}, not an object "
+                           "with version and projects")
+    if set(snapshot) != {"version", "projects"}:
+        missing = {"version", "projects"} - set(snapshot)
+        if missing:
+            raise RuntimeError(f"{where} carries no {', '.join(sorted(missing))}")
+        raise RuntimeError(f"{where} carries unknown field(s): "
+                           f"{', '.join(sorted(set(snapshot) - {'version', 'projects'}))}")
+    version = snapshot["version"]
+    if type(version) is not int or version != SNAPSHOT_VERSION:
+        raise RuntimeError(f"{where} is version of type {type(version).__name__}, this "
+                           f"mop reads version {SNAPSHOT_VERSION}: upgrade mop first")
+    if not isinstance(snapshot["projects"], list):
+        raise RuntimeError(f"{where}: projects must be a list")
+    seen = set()
+    for n, p in enumerate(snapshot["projects"], start=1):
+        if not isinstance(p, dict) or "origin" not in p or set(p) - {"origin", "limit"}:
+            if not isinstance(p, dict):
+                raise RuntimeError(f"{where}: project #{n} is {type(p).__name__}, "
+                                   "not an object with an origin")
+            if "origin" not in p:
+                raise RuntimeError(f"{where}: project #{n} carries no origin")
+            raise RuntimeError(f"{where}: project #{n} carries unknown field(s): "
+                               f"{', '.join(sorted(set(p) - {'origin', 'limit'}))}")
+        origin = p["origin"]
+        if not isinstance(origin, str) or not puppets.looks_like_origin(origin):
+            raise RuntimeError(f"{where}: origin of project #{n} is "
+                               f"{type(origin).__name__}, not a git-origin")
+        name = puppets.project_of(origin)
+        if name in seen:
+            raise RuntimeError(f"{where}: 2 origins of one project {name}; v1 keeps "
+                               "one origin per project")
+        if "limit" in p:
+            value = p["limit"]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RuntimeError(f"{where}: limit of {name} is a {type(value).__name__}, "
+                                   "not a whole number >= 0; null is not the absence of "
+                                   "a limit -- remove the key")
+        seen.add(name)
+    return snapshot
+
+
 def _snapshot_from_file(path):
-    """Разбор файла снимка с проверкой схемы. Битое -- громкий отказ."""
+    """Разбор файла снимка с проверкой схемы (_checked). Битое -- отказ."""
     try:
         with open(path) as f:
             got = json.load(f)
     except (OSError, ValueError) as e:
         raise RuntimeError(f"the project registry {path} is unreadable: {e}") from None
-    if not isinstance(got, dict) or "projects" not in got:
-        raise RuntimeError(f"the project registry {path} is not an object with projects")
-    version = got.get("version")
-    if version != SNAPSHOT_VERSION:
-        raise RuntimeError(f"the project registry {path} is version {version!r}, "
-                           f"this mop reads version {SNAPSHOT_VERSION}: upgrade mop first")
-    if not isinstance(got["projects"], list):
-        raise RuntimeError(f"the project registry {path}: projects must be a list")
-    return got
+    return _checked(got, f"the project registry {path}")
 
 
 def _strict_lines(path):
@@ -272,7 +338,8 @@ def _strict_limits(path):
     Прощающий read_limits (#337) отбрасывает null/bool/строки молча: глагол
     переживал одну плохую строку. Миграция -- writer: усечённые потолки
     она сохраняла бы навсегда, поэтому невалидная запись -- отказ с именем
-    и значением, файлы не тронуты."""
+    и ТИПОМ (не сырым значением: в испорченном файле может лежать секрет),
+    файлы не тронуты."""
     try:
         with open(path) as f:
             got = json.load(f)
@@ -281,17 +348,17 @@ def _strict_limits(path):
     except (OSError, ValueError) as e:
         raise RuntimeError(f"cannot migrate the registry: {path} is unreadable: {e}") from None
     if not isinstance(got, dict):
-        raise RuntimeError(f"cannot migrate the registry: {path} must be an object")
+        raise RuntimeError(f"cannot migrate the registry: {path} is "
+                           f"{type(got).__name__}, not an object")
     out = {}
     for name, value in got.items():
-        # bool -- это int в питоне, проверяем первым; срез float (1.0)
-        # принимаем как 1 -- json-файл исторически писался json.dumps от
-        # int, но этажность значению не вредит.
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise RuntimeError("cannot migrate the registry: limit of {name!r} in "
-                               f"{path} is not a whole number: {value!r}. The files "
-                               "are intact, and what to do with it is an operator "
-                               "decision")
+        # bool -- это int в питоне, проверяем первым; отрицательное -- не
+        # потолок: миграция сохраняла бы его навсегда.
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError(f"cannot migrate the registry: limit of {name} in "
+                               f"{path} is a {type(value).__name__}, not a whole "
+                               "number >= 0. The files are intact, and what to do "
+                               "with it is an operator decision")
         out[name] = value
     return out
 
@@ -412,23 +479,26 @@ def view_lines(view):
 def write_snapshot(snapshot, path=SNAPSHOT):
     """Запись снимка атомарно. Единственный writer -- сервис кластера.
 
-    Legacy-поля вида (голые имена, orphan-потолки) -- только читателю, и
-    writer такой view ОТКАЗЫВАЕТСЯ писать: молча выбросить их и сохранить
-    усечённое состояние -- та же потеря, что и обрыв между двумя файлами.
-    Мутаторы зовут strict snapshot_of, но и сам writer держит гейт:
-    непредставимое не должно доехать до диска ни одним путём. На диск --
-    только представимый v1."""
+    Схема -- та же проверка _checked, что у reader'а, ДО всякого mkdir и
+    записи: writer не «нормализует» битое (явный null limit, чужие поля)
+    в усечённый файл. Legacy-поля вида (голые имена, orphan-потолки) --
+    только читателю, и writer такой view ОТКАЗЫВАЕТСЯ писать: молча
+    выбросить их и сохранить усечённое состояние -- та же потеря, что
+    обрыв между двумя файлами. Мутаторы зовут strict snapshot_of, но и
+    сам writer держит гейт: непредставимое не должно доехать до диска
+    ни одним путём."""
+    if not isinstance(snapshot, dict):
+        _checked(snapshot, "cannot write the registry: the snapshot")  # отказ по типу
     if snapshot.get("legacy") or snapshot.get("legacy_limits"):
         raise RuntimeError("cannot write the registry: the view carries unrepresentable "
                            "legacy data (bare name(s) "
                            f"{', '.join(sorted(snapshot.get('legacy') or ()))}, limit(s) of "
                            f"{', '.join(sorted((snapshot.get('legacy_limits') or {}).keys()))}); "
                            "migrate the pair by an operator decision first")
+    _checked(snapshot, "cannot write the registry: the snapshot")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {"version": snapshot["version"],
-               "projects": [{"origin": p["origin"], **({"limit": p["limit"]}
-                                                       if p.get("limit") is not None else {})}
-                            for p in snapshot["projects"]]}
+               "projects": [dict(p) for p in snapshot["projects"]]}
     fsutil.write_atomic(path, json.dumps(payload, indent=1, sort_keys=True) + "\n")
 
 
@@ -438,10 +508,20 @@ def legacy_pair_of(snapshot):
     Чистая, без записи: даунгрейд -- операторская процедура (остановить
     writers, выгрузить пару, переключить), и её шаги видны явно. После
     новых мутаций v1 roundtrip-стабильна: миграция той же пары даёт тот
-    же снимок (проверено tests/projects.py)."""
+    же снимок (проверено tests/projects.py). View читателя (голые имена,
+    orphan-потолки) непредставим в паре без потерь -- отказ, не потеря."""
+    if not isinstance(snapshot, dict):
+        _checked(snapshot, "cannot export the snapshot: it")  # отказ по типу
+    if snapshot.get("legacy") or snapshot.get("legacy_limits"):
+        raise RuntimeError("cannot export a view with unrepresentable legacy data "
+                           "(bare name(s) "
+                           f"{', '.join(sorted(snapshot.get('legacy') or ()))}, limit(s) of "
+                           f"{', '.join(sorted((snapshot.get('legacy_limits') or {}).keys()))}); "
+                           "migrate the pair by an operator decision first")
+    _checked(snapshot, "cannot export the snapshot: it")
     lines = snapshot_origins(snapshot)
     limits = {puppets.project_of(p["origin"]): p["limit"]
-              for p in snapshot["projects"] if p.get("limit") is not None}
+              for p in snapshot["projects"] if "limit" in p}
     return lines, limits
 
 
