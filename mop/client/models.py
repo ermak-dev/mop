@@ -27,7 +27,10 @@ def available():
     except ValueError as e:
         raise RuntimeError(str(e)) from e
     if joined is None:
-        raise RuntimeError(f"no human login for {host}: run mop login --server {host}")
+        # Служебный каталог: человеческий login в него сам запрещён.
+        raise RuntimeError(f"no human login for {host} (a machine service "
+                           f"directory): use a separate operator account "
+                           f"or connection directory")
     url = joined["proxy_url"].rstrip("/") + "/v1/models"
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" and not (parsed.scheme == "http" and

@@ -323,13 +323,37 @@ class ProfileError(ValueError):
     """Отказ решателя профиля с ТИПОМ причины (#533): читателю -- текст,
     login различает случаи по kind, а не поиском слов в сообщении.
     broken -- испорченный/неизвестный новый файл или битая запись пары:
-    ремонта без полного входа нет и перезапись запрещена; conflict --
-    machine operator рядом с человеческим профилем; partial -- половина
-    прежней пары: восстановима полным входом."""
+    ремонта полным входом нет и перезапись запрещена (файл чинит человек);
+    conflict -- machine operator рядом с человеческим профилем; partial --
+    половина прежней пары: восстановима полным входом. Текст не советует
+    `re-run mop login` там, где вход не ремонт (broken), и не несёт
+    секретов."""
 
     def __init__(self, kind, text):
         super().__init__(text)
         self.kind = kind
+
+
+def _operator_strict(directory):
+    """operator.json для решателя: None -- файла нет; {user, password} --
+    валидная запись; ProfileError("broken") -- есть, но не читается или не
+    той формы. Публичный operator() молча даёт None для мусора -- для
+    «кто эта машина» это верно, а решателю нужна правда: иначе битый
+    operator.json превращался бы в «оператора нет», и recovery полного
+    входа перезаписывал бы неизвестно чью запись (#533)."""
+    path = os.path.join(directory, OPERATOR_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise ProfileError("broken", f"cannot read the operator record in "
+                          f"{directory}: {e.__class__.__name__}") from e
+    if not isinstance(raw, dict) or set(raw) != {"user", "password"} or \
+            not all(isinstance(raw[k], str) and raw[k] for k in ("user", "password")):
+        raise ProfileError("broken", f"invalid operator record in {directory}")
+    return {"user": raw["user"], "password": raw["password"]}
 
 
 def _connection_values(user, password, https_port, proxy_url, proxy_key):
@@ -361,33 +385,46 @@ def write_connection(directory, user, password, https_port, proxy_url, proxy_key
 
 
 def _read_connection(directory):
-    """Разбор connection.json без fallback. ValueError называет ремонт и не
-    несёт секретов: содержимое файла в текст отказа не попадает."""
+    """Разбор connection.json без fallback. Схема version 1 -- замкнутая:
+    неизвестные поля на верхнем уровне и в bus/proxy -- отказ, не потеря:
+    relogin writer'ом молча выбросил бы чужие данные. Тексты отказов не
+    советуют `re-run mop login` -- вход такой файл не ремонтирует -- и не
+    несут секретов: содержимое файла в текст не попадает."""
     try:
         with open(os.path.join(directory, CONNECTION_FILE), encoding="utf-8") as f:
             raw = json.load(f)
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as e:
-        raise ValueError(f"cannot read the connection profile: re-run mop login "
-                         f"on {os.path.basename(directory)}") from e
+        raise ProfileError("broken", f"cannot read the connection profile in "
+                          f"{directory} ({e.__class__.__name__}): the file is "
+                          f"damaged, repair or remove it by hand") from e
     # Версия -- строго int: bool в Python равен единице, и `true` в файле
     # иначе прочитался бы как версия 1. Неизвестная версия -- отказ, не None:
     # молчаливое «нет входа» прятало бы чужой формат за повторным входом.
     version = raw.get("version") if isinstance(raw, dict) else None
     if isinstance(version, bool) or not isinstance(version, int) \
             or version != CONNECTION_VERSION:
-        raise ValueError("unknown connection profile version: re-run mop login")
+        raise ProfileError("broken", f"unsupported connection profile in {directory}: "
+                          f"unknown version {version!r} (supported: "
+                          f"{CONNECTION_VERSION})")
+    if not isinstance(raw, dict) or set(raw) != {"version", "bus", "https_port", "proxy"} \
+            or not isinstance(raw["bus"], dict) or set(raw["bus"]) != {"user", "password"} \
+            or not isinstance(raw["proxy"], dict) or set(raw["proxy"]) != {"url", "key"}:
+        raise ProfileError("broken", f"invalid connection profile in {directory}: "
+                          f"the record does not match version "
+                          f"{CONNECTION_VERSION}")
     try:
-        bus_part, proxy_part = raw["bus"], raw["proxy"]
-        values = _connection_values(bus_part["user"], bus_part["password"],
-                                     raw["https_port"], proxy_part["url"],
-                                     proxy_part["key"])
-    except (KeyError, TypeError, ValueError):
-        raise ValueError("invalid connection profile: re-run mop login") from None
+        values = _connection_values(raw["bus"]["user"], raw["bus"]["password"],
+                                     raw["https_port"], raw["proxy"]["url"],
+                                     raw["proxy"]["key"])
+    except (TypeError, ValueError):
+        raise ProfileError("broken", f"invalid connection profile in {directory}: "
+                          f"the record does not match version "
+                          f"{CONNECTION_VERSION}") from None
     # Плоская форма -- та же, что у прежней пары: читатели (server_config,
     # session_env, models, doctor) не знают про схему файла.
-    return {"user": bus_part["user"], "password": bus_part["password"],
+    return {"user": raw["bus"]["user"], "password": raw["bus"]["password"],
             "https_port": values["https_port"], "proxy_url": values["proxy"]["url"],
             "proxy_key": values["proxy"]["key"]}
 
@@ -398,10 +435,10 @@ def snapshot(directory):
     (None, None). Конфликт machine operator + человеческий профиль,
     половины прежней пары и битые записи -- ProfileError с типом причины.
 
-    Единственный решатель для шины: два отдельных чтения увидели бы два
-    поколения каталога, если writer заменил файл между ними."""
+    Единственный решатель для шины и login: два отдельных чтения увидели бы
+    два поколения каталога, если writer заменил файл между ними."""
     conn = _read_connection(directory)
-    op = operator(directory)
+    op = _operator_strict(directory)
     if op is not None and busnames.is_machine(op["user"]):
         if conn is not None:
             raise ProfileError("conflict", "machine service identity and a human login "
@@ -420,13 +457,16 @@ def snapshot(directory):
     except ValueError as e:
         # Битая запись -- отказ, не «нет входа»: ошибки client() несут свой
         # смысл, ремонт называем здесь.
-        raise ProfileError("broken", f"{e}: re-run mop login") from None
+        raise ProfileError("broken", f"cannot use the legacy pair in {directory}: "
+                          f"{e}") from None
     if joined is None and op is None:
         return None, None
     if joined is None or op is None:
         # Половина прежней пары -- не вход: пароль без прокси-настроек
         # запускал бы сессию без модели, прокси без пароля -- вход неизвестно
-        # кого. Восстановление -- полный вход (#533).
+        # кого. Восстановление -- полный вход (#533), но половина -- ПОДСКАЗКА
+        # (проверка прежнего пароля), не профиль: пароль без проверки шиной
+        # не используется.
         raise ProfileError("partial", f"incomplete login: re-run mop login "
                            f"--server {os.path.basename(directory)}")
     return "human", {"user": op["user"], "password": op["password"],

@@ -40,7 +40,10 @@ def _probe():
     except ValueError as e:
         raise RuntimeError(str(e)) from e
     if joined is None:
-        raise RuntimeError(f"no human login for {host}: run mop login --server {host}")
+        # Служебный каталог: человеческий login в него сам запрещён.
+        raise RuntimeError(f"no human login for {host} (a machine service "
+                           f"directory): use a separate operator account "
+                           f"or connection directory")
     req = urllib.request.Request(joined["proxy_url"].rstrip("/") + "/v1/models",
                                  headers={"Authorization": f"Bearer {joined['proxy_key']}"})
     pin = creds.cafile(creds.server_dir(host)) if \

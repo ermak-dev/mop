@@ -171,7 +171,12 @@ def session_env():
     except ValueError as e:
         raise RuntimeError(str(e)) from e
     if record is None:
-        raise RuntimeError(f"no human login for {host}: run mop login --server {host}")
+        # Служебный каталог: человеческий login в него сам запрещён, совет
+        # «войди сюда» был бы заведомо неработающим.
+        raise RuntimeError(f"no human login for {host} (a machine service "
+                           f"directory): use a separate operator account "
+                           f"or connection directory, run mop login "
+                           f"--server <another address>")
     env = dict(llm.env())
     for name in MODEL_OVERRIDES:
         env.pop(name, None)   # карта llm.env() остаётся только у папетов

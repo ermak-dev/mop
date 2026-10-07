@@ -156,15 +156,14 @@ def complete(host, login, dest, https):
     """Один проверенный вход: старый пароль можно использовать, новая запись
     появляется только после обеих сетевых проверок -- и запись одна (#533).
 
-    Каталог с машинным operator.json (service) или испорченным/неизвестным
-    connection.json человеку закрыт ДО сети и записи: первый вход молча
-    сменил бы личность сервисов, второй -- перезаписал бы чужой формат."""
+    Каталог классифицируется ОДНИМ снимком creds.snapshot: machine (service)
+    и испорченный/неизвестный connection.json закрыты человеку ДО сети и
+    записи -- первый вход молча сменил бы личность сервисов, второй --
+    перезаписал бы чужой формат. Два отдельных чтения увидели бы два
+    поколения каталога, если writer заменил файл между ними."""
     if not https.isascii() or not https.isdecimal() or not 1 <= int(https) <= 65535:
         raise ValueError("server HTTPS port must be between 1 and 65535")
-    stored = creds.operator(dest)
-    if stored is not None and busnames.is_machine(stored["user"]):
-        raise RuntimeError("machine service identity and a human login conflict: "
-                           "use a separate operator account or connection directory")
+    kind, profile = None, None
     try:
         kind, profile = creds.snapshot(dest)
     except creds.ProfileError as e:
@@ -173,11 +172,22 @@ def complete(host, login, dest, https):
         if e.kind in ("broken", "conflict"):
             raise RuntimeError(str(e)) from e
         profile = None       # partial: половина пары, ниже полный вход
+        # Операторская половина -- ПОДСКАЗКА для проверки прежнего пароля
+        # (_still_valid), не профиль: без проверки шиной пароль не идёт.
+        try:
+            half = creds._operator_strict(dest)
+        except creds.ProfileError:
+            half = None
+        if half is not None and not busnames.is_machine(half["user"]):
+            profile = {"user": half["user"], "password": half["password"]}
+    if kind == "machine":
+        # Служебный каталог: конфликт и здесь, до сети, TLS-пина и записи.
+        raise RuntimeError("machine service identity and a human login conflict: "
+                           "use a separate operator account or connection directory")
     # Прежний вход для повтора пароля: целый профиль, а при его отсутствии
     # (или остатке) -- operator.json, если он человеческий. Повторное
     # использование -- только после обычной проверки (_still_valid).
-    stored = profile or (stored if stored is not None and
-                         not busnames.is_machine(stored["user"]) else None)
+    stored = profile
     pin = _pinned(creds.cafile(dest))
     try:
         valid = stored and stored["user"] == login and _still_valid(host, https, dest, stored)
@@ -193,11 +203,12 @@ def complete(host, login, dest, https):
         raise
     # После записи профиль новый и целый: провал очистки -- не отказ входа и
     # не откат пина, а честный остаток старых файлов; вход уже состоялся.
-    gone = creds.legacy(os.listdir(dest))
-    if os.path.exists(os.path.join(dest, creds.TOKEN_FILE)) and \
-            not os.path.isdir(paths.local(paths.SECRETS)):
-        gone.append(creds.TOKEN_FILE)
+    # Вся фаза очистки под одной защитой: и список, и удаления.
     try:
+        gone = creds.legacy(os.listdir(dest))
+        if os.path.exists(os.path.join(dest, creds.TOKEN_FILE)) and \
+                not os.path.isdir(paths.local(paths.SECRETS)):
+            gone.append(creds.TOKEN_FILE)
         for name in gone:
             os.remove(os.path.join(dest, name))
     except OSError as e:
@@ -239,31 +250,43 @@ def ensure():
         else:
             raise RuntimeError("no server and no terminal: run mop login --server ADDRESS")
     dest = creds.server_dir(host)
+    kind, profile, op = None, None, None
     try:
-        if creds.human_profile(dest) is not None:
-            return host
+        kind, profile = creds.snapshot(dest)
+        if kind == "human":
+            return host          # целый вход: не трогаем
+        if kind == "machine":
+            raise RuntimeError("machine service identity and a human login conflict: "
+                               "use a separate operator account or connection directory")
     except creds.ProfileError as e:
         # Конфликт и испорченный/неизвестный новый файл -- отказ: повторный
         # вход молча перезаписал бы чужой формат. Половина пары -- не отказ,
         # а направление ремонта: полный вход ниже её восстанавливает.
         if e.kind != "partial":
             raise RuntimeError(str(e)) from e
-    stored = creds.operator(dest)
-    user = creds.pick_login(ctx.user, (stored or {}).get("user"), None)
+        try:
+            op = creds.operator(dest)    # половина: логин-подсказка, не профиль
+        except ValueError:
+            op = None
+    if profile is None:
+        op = creds.operator(dest) if op is None else op
+    user = creds.pick_login(ctx.user, (profile or op or {}).get("user"), None)
     if not user:
         if not sys.stdin.isatty():
             raise RuntimeError(f"no login for {host}: run mop login --server {host}")
         user = ask(f"login on {host}: ")
-    if not stored and not sys.stdin.isatty() and not os.environ.get("MOP_BUS_PASSWORD"):
+    if not (profile or op) and not sys.stdin.isatty() and not os.environ.get("MOP_BUS_PASSWORD"):
         raise RuntimeError(f"no password and no terminal: run mop login --server {host}")
-    # Порт -- подсказка из остатка (машинный каталог своего порта не хранит);
-    # операторская половина без client.json идёт с портом по умолчанию.
-    try:
-        hint = creds.client(dest) if stored is None or not busnames.is_machine(
-            stored["user"]) else None
-    except ValueError:
-        hint = None
-    https = _https_port(None, hint)
+    # Порт -- подсказка из нового профиля или остатка прежней пары: машинный
+    # каталог своего порта не хранит; операторская половина без client.json
+    # идёт с портом по умолчанию.
+    hint = (profile or {}).get("https_port")
+    if hint is None:
+        try:
+            hint = creds.client(dest)["https_port"] if creds.client(dest) else None
+        except ValueError:
+            hint = None
+    https = _https_port(None, {"https_port": hint} if hint else None)
     with context.use(context.resolve({"server": host}, {}, {})):
         complete(host, user, dest, https)
     _bind(host, user)
@@ -307,16 +330,27 @@ def main(argv):
         # Дальше весь процесс -- про этот сервер: каталог кредов, TLS-прокси.
         with context.use(context.resolve({"server": host}, {}, {})):
             dest = creds.server_dir(host)
-            stored = creds.operator(dest)
-            login = creds.pick_login(login or ctx.user, (stored or {}).get("user"), None)
+            # Подсказки -- из ОДНОГО снимка каталога (#533): целый профиль
+            # знает логин и порт сам; остаток пары подсказывает то, что в
+            # нём лежит. Явные аргументы и контекст старше любой подсказки.
+            kind, profile = None, None
+            try:
+                kind, profile = creds.snapshot(dest)
+            except creds.ProfileError:
+                pass           # отказ скажет сам complete, по тому же снимку
+            hint_user = ((profile if kind == "human" else None) or {}).get("user")
+            login = creds.pick_login(login or ctx.user, hint_user, None)
             if not login:
                 login = ask(f"login on {host}: ")
-            # Порт -- подсказка из остатка прежнего входа; полный профиль
-            # знает свой порт сам, машинный каталог порта не хранит.
-            try:
-                saved = creds.client(dest)
-            except ValueError:
-                saved = None
+            # Порт -- подсказка из профиля или остатка; машинный каталог
+            # своего порта не хранит.
+            saved = {"https_port": profile["https_port"]} \
+                if kind == "human" and profile else None
+            if saved is None:
+                try:
+                    saved = creds.client(dest)
+                except ValueError:
+                    saved = None
             https = _https_port(explicit_https, saved)
             complete(host, login, dest, https)
     except (RuntimeError, ValueError, OSError) as e:

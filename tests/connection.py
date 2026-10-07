@@ -236,7 +236,7 @@ def check_reader_new_533(c):
 
     put_connection(a, ALICE, version=2)
     refute(c, "#533 an unknown version refuses without a fallback",
-           lambda: profile(a), "version", "mop login")
+           lambda: profile(a), "unsupported", "version")
     put_connection(a, ALICE, version="one")
     refute(c, "#533 a nonnumeric version refuses", lambda: profile(a), "version")
     # bool в Python равен единице: `true` в файле не версия 1, а чужой формат.
@@ -245,21 +245,24 @@ def check_reader_new_533(c):
            lambda: profile(a), "version")
     with open(os.path.join(a, "connection.json"), "w", encoding="utf-8") as f:
         f.write("{not json")
+    # Порча -- не «нет входа», и чинит её человек, не повторный вход: текст
+    # обязан называть файл и ремонт руками, а не заведомо неработающий login.
     refute(c, "#533 a corrupted file refuses without a legacy fallback",
-           lambda: profile(a), "mop login")
+           lambda: profile(a), "damaged", "repair or remove")
     # Порча не молчит и на уровне шины: server_config отказывает, а не
     # собирает конфиг из соседних остатков.
     with patched(creds, ROOT=root), context.use(context.resolve({"server": "a.test"}, {}, {})), \
             config.client_sources():
         refute(c, "#533 the bus refuses a corrupted profile",
-               lambda: bus.server_config("a.test"), "mop login")
+               lambda: bus.server_config("a.test"), "damaged")
     put_connection(a, ALICE)
     broken = payload_of(ALICE)
     broken["bus"] = "alice"          # не объект: секрета в тексте быть не должно
     creds.make_dir(a)
     with open(os.path.join(a, "connection.json"), "w", encoding="utf-8") as f:
         json.dump(broken, f)
-    refute(c, "#533 a wrong-shaped record refuses", lambda: profile(a), "mop login")
+    refute(c, "#533 a wrong-shaped record refuses",
+           lambda: profile(a), "does not match version")
 
 
 # ── решатель: legacy-пара и её остатки ──────────────────────────────────
@@ -297,7 +300,8 @@ def check_reader_legacy_533(c):
     put_legacy(broken, ALICE)
     with open(os.path.join(broken, creds.CLIENT_FILE), "w", encoding="utf-8") as f:
         f.write('{"proxy_key": "x"}')
-    refute(c, "#533 a broken legacy pair refuses", lambda: profile(broken), "mop login")
+    refute(c, "#533 a broken legacy pair refuses",
+           lambda: profile(broken), "legacy pair")
 
 
 # ── машинный operator.json: конфликт и служебный путь ───────────────────
@@ -552,6 +556,246 @@ def check_cleanup_failure_keeps_profile_533(c):
              open(pin_path, encoding="utf-8").read(), pin_before)
 
 
+# ── битый operator.json -- не «половина пары», а отказ ──────────────────
+# Публичный operator() молча даёт None для мусора; решатель обязан
+# различать «файла нет» (recovery разрешён) и «файл не читается/не той
+# формы» (recovery перезаписал бы неизвестно чью запись). Служебный
+# operator.json, нечитаемый рядом с человеческим connection.json, тоже не
+# имеет права превратиться в «оператора нет».
+def check_broken_operator_533(c):
+    for label, mutate in (
+            ("malformed json", lambda d: _write_raw(d, creds.OPERATOR_FILE, "{oops")),
+            ("wrong shape", lambda d: _write_raw(d, creds.OPERATOR_FILE,
+                                                 '{"user": 1, "password": "x"}')),
+            ("unreadable", lambda d: os.chmod(os.path.join(d, creds.OPERATOR_FILE), 0))):
+        root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-op-"), "servers")
+        host = label.replace(" ", "-") + ".test"
+        dest = os.path.join(root, host)
+        put_legacy(dest, ALICE)     # валидная пара, ломаем операторскую половину
+        mutate(dest)
+        touched = []
+        with patched(creds, ROOT=root), \
+                patched(join, _login=lambda *a: touched.append("_login") or "bus-x",
+                         _still_valid=lambda *a: touched.append("_still_valid") or False,
+                         _fetch=lambda *a: touched.append("_fetch") or
+                         {"https_port": "443", "proxy_url": "https://x/llm", "proxy_key": "x"},
+                         _probe=lambda *a: touched.append("_probe"),
+                         ask=lambda *a: touched.append("ask") or "alice",
+                         git=lambda *a: None), \
+                patched(creds, write_connection=lambda *a: touched.append("write")), \
+                context.use(context.resolve({"server": host, "user": "alice"}, {}, {})), \
+                patched_env(MOP_BUS_PASSWORD="bus-x", MOP_SERVER_LAN=host):
+            for path, call in (("reader", lambda: creds.human_profile(dest)),
+                                ("ensure", lambda: join.ensure()),
+                                ("main", lambda: join.main(["--server", host]))):
+                touched.clear()
+                refusal, rc = None, None
+                try:
+                    rc = call()
+                except (RuntimeError, ValueError) as e:
+                    refusal, rc = str(e), 1
+                except AttributeError:
+                    refusal = "no resolver on this implementation"
+                c.check(f"#533 {path} refuses a broken operator record ({label}) "
+                        f"before network, questions and writing",
+                        rc == 1 and not touched,
+                        f"rc {rc}, touched {touched}, refusal {refusal}")
+        # Ничего не записано, файл оператора не тронут (права вернули для чтения).
+        os.chmod(os.path.join(dest, creds.OPERATOR_FILE), 0o600)
+        c.check(f"#533 {label}: no new profile is written",
+                not os.path.exists(os.path.join(dest, getattr(
+                    creds, "CONNECTION_FILE", "connection.json"))),
+                os.listdir(dest))
+
+    # Нечитаемый operator.json рядом с ВАЛИДНЫМ connection.json -- не «нет
+    # оператора»: профиль не читается молча поверх неизвестной записи.
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-op2-"), "servers")
+    dest = os.path.join(root, "srv.test")
+    put_connection(dest, ALICE)
+    _write_raw(dest, creds.OPERATOR_FILE, '{"user": "service", "password": "service-secret"}')
+    os.chmod(os.path.join(dest, creds.OPERATOR_FILE), 0)
+    try:
+        refute(c, "#533 an unreadable operator next to a human profile refuses",
+               lambda: creds.human_profile(dest), "operator")
+    finally:
+        os.chmod(os.path.join(dest, creds.OPERATOR_FILE), 0o600)
+
+
+def _write_raw(directory, name, text):
+    with open(os.path.join(directory, name), "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+# ── строгая схема version 1: неизвестные поля -- отказ, не потеря ────────
+def check_schema_strict_533(c):
+    profile = getattr(creds, "human_profile", None)
+    if not c.check("#533 human_profile exists", profile is not None):
+        return
+    root = tempfile.mkdtemp(prefix="mop-conn-schema-")
+    dest = os.path.join(root, "srv.test")
+    cases = {
+        "extra top field": {"extra": 1},
+        "extra bus field": {"bus": {"user": "alice", "password": "p", "role": "x"}},
+        "extra proxy field": {"proxy": {"url": "https://x/llm", "key": "k", "tag": 1}},
+    }
+    for label, patch_ in cases.items():
+        payload = payload_of(ALICE)
+        payload.update(patch_)
+        creds.make_dir(dest)
+        with open(os.path.join(dest, "connection.json"), "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.chmod(os.path.join(dest, "connection.json"), 0o600)
+        try:
+            profile(dest)
+            c.fail(f"#533 unknown fields must refuse ({label})")
+        except ValueError as e:
+            c.check(f"#533 unknown fields refuse, not vanish ({label})",
+                    "connection profile" in str(e), str(e))
+            c.check(f"#533 the refusal carries no unworkable advice ({label})",
+                    "re-run mop login" not in str(e), str(e))
+        os.remove(os.path.join(dest, "connection.json"))
+    # И версии/форма: совет «re-run mop login» заведомо неработоспособен.
+    put_connection(dest, ALICE, version=2)
+    try:
+        profile(dest)
+        c.fail("#533 an unknown version must refuse")
+    except ValueError as e:
+        c.check("#533 unknown version names the file, not a relogin",
+                "srv.test" in str(e) and "re-run mop login" not in str(e), str(e))
+    _corrupt(dest)
+    try:
+        profile(dest)
+        c.fail("#533 a corrupted file must refuse")
+    except ValueError as e:
+        c.check("#533 a corrupted file names repair, not relogin",
+                "re-run mop login" not in str(e), str(e))
+
+
+# ── подсказки login/порта берутся из нового профиля, не из старой пары ───
+def check_hints_from_snapshot_533(c):
+    calls, prompts = [], []
+
+    def record_complete(host, login, dest, https):
+        calls.append((login, https))
+
+    def no_ask(*a, **k):
+        prompts.append(a)
+        return "should-not-be-asked"
+
+    # Новый профиль bob:8443 + оставленная старая пара alice:443: без явных
+    # user/port вход идёт НОВЫМ логином и портом.
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-hints-"), "servers")
+    dest = os.path.join(root, "srv.test")
+    put_legacy(dest, ALICE)
+    put_connection(dest, BOB)
+    with patched(creds, ROOT=root), patched(join, complete=record_complete,
+                                            ask=no_ask, git=lambda *a: None, _bind=lambda *a: None), \
+            context.use(context.resolve({"server": "srv.test"}, {}, {})), \
+            patched_env(MOP_BUS_PASSWORD="bus-x", MOP_SERVER_LAN="srv.test"):
+        join.main(["--server", "srv.test"])
+    c.expect("#533 relogin hints come from the new profile: login", [x[0] for x in calls], [BOB[0]])
+    c.expect("#533 relogin hints come from the new profile: port", [x[1] for x in calls], [BOB[2]])
+    c.check("#533 a stored profile is not asked for again", not prompts, prompts)
+
+    # Свежий каталог только с connection.json (пары нет): логин и порт --
+    # из профиля, без вопросов.
+    calls.clear()
+    fresh_root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-hints2-"), "servers")
+    fresh = os.path.join(fresh_root, "srv2.test")
+    put_connection(fresh, BOB)
+    with patched(creds, ROOT=fresh_root), patched(join, complete=record_complete,
+                                                  ask=no_ask, git=lambda *a: None,
+                                                  _bind=lambda *a: None), \
+            context.use(context.resolve({}, {}, {})), \
+            patched_env(MOP_BUS_PASSWORD="bus-x"):
+        join.main(["--server", "srv2.test"])
+    c.expect("#533 a connection-only directory hints its own login",
+             [x[0] for x in calls], [BOB[0]])
+    c.expect("#533 a connection-only directory hints its own port",
+             [x[1] for x in calls], [BOB[2]])
+    c.check("#533 no questions when the profile knows the login", not prompts, prompts)
+
+
+# ── один снимок в complete: служебный каталог не перезаписывается ───────
+def check_machine_race_533(c):
+    # Два чтения -- два поколения: пре-чек operator() увидел пустоту, снимок
+    # уже видит service. Решение одно: классификация каталога одним
+    # snapshot, machine -- отказ до сети и записи.
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-conn-race-"), "servers")
+    dest = os.path.join(root, "srv.test")
+    put_machine(dest)
+    answers = iter([None,                    # пре-чек operator() в complete
+                    {"user": creds.SERVICE, "password": "service-secret"}])  # снимок
+
+    def flaky_operator(directory):
+        return next(answers, {"user": creds.SERVICE, "password": "service-secret"})
+
+    touched = []
+    with patched(creds, ROOT=root), patched(creds, operator=flaky_operator), \
+            patched(join, _login=lambda *a: touched.append("_login") or "bus-x",
+                    _fetch=lambda *a: touched.append("_fetch") or
+                    {"https_port": "443", "proxy_url": "https://x/llm", "proxy_key": "x"},
+                    _probe=lambda *a: touched.append("_probe")), \
+            patched(creds, write_connection=lambda *a: touched.append("write")), \
+            context.use(context.resolve({"server": "srv.test", "user": "alice"}, {}, {})):
+        try:
+            join.complete("srv.test", "alice", dest, "443")
+            c.fail("#533 a machine-classified directory must refuse a human login")
+        except (RuntimeError, ValueError) as e:
+            c.check("#533 machine classification refuses before network and writing",
+                    not touched, f"touched {touched}: {e}")
+    c.check("#533 no human profile lands in the service directory",
+            not os.path.exists(os.path.join(dest, "connection.json")), os.listdir(dest))
+
+
+# ── провал ЛЮБОГО шага очистки после записи не отменяет вход ────────────
+def check_cleanup_phase_covered_533(c):
+    profile = getattr(creds, "human_profile", None)
+    if profile is None:
+        return      # до #533 решателя нет; поведение очистки не его тема
+    for label, sabotage in (("listdir", "listdir"), ("remove", "remove")):
+        root = os.path.join(tempfile.mkdtemp(prefix=f"mop-conn-clean-{label}-"), "servers")
+        dest = os.path.join(root, "srv.test")
+        put_legacy(dest, ALICE)
+        with open(os.path.join(dest, creds.pass_file(None)), "w", encoding="utf-8") as f:
+            f.write("old role password\n")
+        pin_path = creds.write_cert(dest, b"old-pin-der")
+        pin_before = open(pin_path, encoding="utf-8").read()
+        real_listdir, real_remove = os.listdir, os.remove
+
+        def boom_listdir(p):
+            if p == dest:
+                raise OSError("listdir refused")
+            return real_listdir(p)
+
+        def boom_remove(p):
+            raise OSError("cleanup refused")
+
+        sabotage_patch = patched(os, listdir=boom_listdir) if label == "listdir" \
+            else patched(os, remove=boom_remove)
+        crashed = None
+        with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
+                     _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
+                                        "proxy_key": BOB[4]},
+                     _probe=lambda *a: None), sabotage_patch:
+            err = io.StringIO()
+            with patched(sys, stderr=err):
+                try:
+                    join.complete("srv.test", "bob", dest, "8443")
+                except OSError as e:
+                    # До правки listdir сидел в общем try: отказ очистки --
+                    # «проваленный вход» исключением, без сообщения. Это и
+                    # есть дефект; красный прогон фиксирует его вот так.
+                    crashed = str(e)
+        c.check(f"#533 a failed {label} cleanup is reported, not a failed login "
+                f"(base crash: {crashed})",
+                "cleanup incomplete" in err.getvalue(), err.getvalue())
+        c.expect(f"#533 the new profile stays after a {label} cleanup failure",
+                 creds.human_profile(dest), profile_of(BOB))
+        c.expect(f"#533 the TLS pin survives a {label} cleanup failure",
+                 open(pin_path, encoding="utf-8").read(), pin_before)
+
+
 def main():
     c = Checks()
     check_mixed_write_533(c)
@@ -563,6 +807,11 @@ def main():
     check_two_servers_533(c)
     check_broken_profile_not_overwritten_533(c)
     check_cleanup_failure_keeps_profile_533(c)
+    check_broken_operator_533(c)
+    check_schema_strict_533(c)
+    check_hints_from_snapshot_533(c)
+    check_machine_race_533(c)
+    check_cleanup_phase_covered_533(c)
     return c.report("connection")
 
 

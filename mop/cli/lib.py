@@ -272,13 +272,14 @@ def project_ready(project):
     именно ему положено, решает сервер NATS по роли, а не файл, -- поэтому
     здесь только «есть чем представиться», а отказ по правам приезжает с
     шины и читается отдельно (bus._silence). project остаётся в подписи:
-    вопрос задают про проект, и ответ однажды может от него зависеть."""
-    directory = creds.server_dir()
-    try:
-        return creds.human_profile(directory) is not None or \
-            creds.operator(directory) is not None
-    except ValueError:   # сломанный профиль -- «нет чем»: ремонт -- mop login
-        return False
+    вопрос задают про проект, и ответ однажды может от него зависеть.
+
+    Классификация -- ОДНИМ снимком creds.snapshot (#533): служебный каталог
+    готов к шине (machine), человеческий -- тоже; broken/conflict НЕ
+    глотаются «нет, не готов» -- причина доезжает до вызывающего командлета,
+    а не умирает в проверке, посылая человека в неработающий ремонт."""
+    kind, _ = creds.snapshot(creds.server_dir())
+    return kind is not None      # human | machine -- есть кем представиться
 
 
 def in_project():
