@@ -396,6 +396,31 @@ def _remote_step(state):
         out["blocker"] = (f"drift: the managed old key is not in the proxy list; "
                           f"restoring a revoked key is an operator decision")
         return out
+    # Pre-PUT пробы ДО первой мутации: old принят и заведомо неверный
+    # ключ отвергнут. Мёртвый old или выключенная авторизация -- блокер
+    # ДО записи: мутация списка при них бессмысленна или опасна
+    # (пустой список открывает прокси, #537). Post-PUT пробы new/old/
+    # wrong остаются в _probe_step.
+    try:
+        old_accepted = _probe(state["old"])
+    except Exception as e:  # noqa: BLE001 -- причина шва, не payload
+        return {"ok": False,
+                "blocker": f"cannot probe the old key ({type(e).__name__})"}
+    if not old_accepted:
+        return {"ok": False,
+                "blocker": "the proxy does not accept the old key; "
+                           "refusing to mutate the list before an operator "
+                           "decision"}
+    wrong = "definitely-wrong-" + state["id"]
+    try:
+        wrong_accepted = _probe(wrong)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False,
+                "blocker": f"cannot probe with a wrong key ({type(e).__name__})"}
+    if wrong_accepted:
+        return {"ok": False,
+                "blocker": "the wrong client key is accepted: client auth is off; "
+                           "refusing to mutate the list"}
     want = keys + [state["new"]] if state["new"] not in keys else keys
     try:
         verdict = _put_list(want)

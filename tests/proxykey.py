@@ -569,6 +569,70 @@ def check_remote_step_538(c):
                 not out.get("ok") and "drift" in str(out.get("blocker", "")).lower()
                 and not remote.puts, (out, remote.puts))
 
+        # Pre-PUT probes: ДО первой remote-мутации обязаны быть
+        # подтверждены old-принят и wrong-отвергнут; post-PUT
+        # new/old/wrong остаются.
+        # HYPOTHESIS (RED): PUT шёл до проб авторизации: с мёртвым
+        # old-ключом или выключенной авторизацией мутация уже случилась.
+        order = []
+        remote = FakeRemote(["old-key", "panel-key"])
+
+        def fetch():
+            order.append("fetch")
+            return remote.fetch_list()
+
+        def put(keys):
+            order.append("put")
+            return remote.put_list(keys)
+
+        def probe(key):
+            order.append("probe")
+            return remote.probe(key)
+
+        # Полный согласованный путь: probe old, probe wrong ДО put.
+        with patched(proxykey, OP=op, _fetch_list=fetch, _put_list=put,
+                     _probe=probe):
+            out = step(state())
+        c.check("#538 pre-PUT probes run before the first remote mutation",
+                order[:3] == ["fetch", "probe", "probe"]
+                and order.index("put") > order.index("probe"), order)
+        c.check("#538 the remote step order ends after the post-PUT "
+                "probes of the probe step",
+                order == ["fetch", "probe", "probe", "put"], order)
+
+        # Old не принят до PUT -- мутации нет вовсе.
+        order.clear()
+        remote = FakeRemote(["old-key", "panel-key"])
+        answers = {"old-key": False}
+
+        def probe_old_first(key):
+            order.append("probe")
+            return answers.get(key, True)
+
+        with patched(proxykey, OP=op, _fetch_list=fetch, _put_list=put,
+                     _probe=probe_old_first):
+            out = step(state())
+        c.check("#538 an unaccepted old key blocks BEFORE the PUT",
+                "put" not in order and not out.get("ok"), (out, order))
+
+        # Wrong принят до PUT (авторизация выключена) -- мутации нет.
+        order.clear()
+        remote = FakeRemote(["old-key", "panel-key"])
+        wrong_seen = []
+
+        def probe_auth_off(key):
+            order.append("probe")
+            wrong_seen.append(key)
+            if wrong_seen and key not in ("old-key",) and key.startswith("definitely-wrong-"):
+                return True
+            return key in ("old-key",)
+
+        with patched(proxykey, OP=op, _fetch_list=fetch, _put_list=put,
+                     _probe=probe_auth_off):
+            out = step(state())
+        c.check("#538 an accepted wrong key blocks BEFORE the PUT",
+                "put" not in order and not out.get("ok"), (out, order))
+
 
 # ── #538: probe-подтверждение — применение доказывает только запрос ──────
 # HYPOTHESIS: успех PUT доказывает запись, но не применение (прокси
@@ -760,14 +824,14 @@ def check_pipeline_538(c):
             order.append("put")
             return remote.put_list(keys)
 
-        real_preflight = proxykey._preflight
+        real_local = proxykey._local_step
 
-        def preflight(state):
-            order.append("preflight")
-            return real_preflight(state)
+        def local(state):
+            order.append("local")
+            return real_local(state)
 
         patches = dict(OP=op, LOCK=lock, _fetch_list=fetch, _put_list=put,
-                       _probe=probe, _deliver=deliver, _preflight=preflight)
+                       _probe=probe, _deliver=deliver, _local_step=local)
         with patched(proxykey, **patches):
             got = proxykey.begin(src, cp, ["node1", "node2"], exclusive=True)
             c.expect("#538 begin names the ready stage", got.get("stage"), "ready")
@@ -778,9 +842,10 @@ def check_pipeline_538(c):
 
             out = proxykey.resume(exclusive=True)
             c.check("#538 a clean pipeline completes", out.get("ok"), out)
-            c.check("#538 the pipeline ran remote, probes, local, deliver",
-                    order == ["fetch", "put", "probe", "probe",
-                              "probe", "deliver"], order)
+            c.check("#538 the pipeline ran fetch, pre-PUT probes, put, "
+                    "post-PUT probes, local, deliver",
+                    order == ["fetch", "probe", "probe", "put", "probe",
+                              "probe", "probe", "local", "deliver"], order)
             with open(op, encoding="utf-8") as f:
                 saved = json.load(f)
             c.expect("#538 completed state survives", saved.get("stage"), "completed")
@@ -1346,13 +1411,15 @@ def check_coverage_and_verdicts_538(c):
         # Допустимые verdict-теги шва PUT перечислены; неизвестный тег --
         # исход unknown, не refused-before-applying.
         remote = FakeRemote(["old-key", "panel-key"])
+        accept_probe = lambda k: k in ("old-key",)  # noqa: E731
         tags = {"weird-tag": ("unknown", "не известен тегу исхода")}
 
         def put(keys):
             remote.puts.append(list(keys))
             return tags["weird-tag"]
 
-        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list, _put_list=put):
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list, _put_list=put,
+                     _probe=accept_probe):
             out = proxykey._remote_step(state(stage="ready"))
         c.check("#538 an unknown verdict tag is an unknown outcome",
                 not out.get("ok") and out.get("unknown") is True
@@ -1367,7 +1434,7 @@ def check_coverage_and_verdicts_538(c):
             return refuse
 
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
-                     _put_list=put_refused):
+                         _put_list=put_refused, _probe=accept_probe):
             out = proxykey._remote_step(state(stage="ready"))
         c.check("#538 a refused PUT stays refused with a safe reason",
                 out.get("refused") is True and "SECRET_KEY" not in str(out), out)
@@ -1407,7 +1474,7 @@ def check_coverage_and_verdicts_538(c):
             return ("refused", {"http_status": 403, "reason": "SECRET-TOKEN"})
 
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
-                     _put_list=put_reason_any):
+                         _put_list=put_reason_any, _probe=accept_probe):
             out = proxykey._remote_step(state(stage="ready"))
         c.check("#538 a non-enumerated reason word does not ride",
                 "SECRET-TOKEN" not in json.dumps(out), out)
@@ -1428,7 +1495,7 @@ def check_coverage_and_verdicts_538(c):
             with open(op, "w", encoding="utf-8") as f:
                 json.dump({**state(stage="ready")}, f)
             with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
-                         _put_list=put_mal):
+                         _put_list=put_mal, _probe=accept_probe):
                 out = proxykey._remote_step(state(stage="ready"))
             c.check(f"#538 {name} is a named outcome, not a crash",
                     isinstance(out, dict) and not out.get("ok"), out)
@@ -1445,12 +1512,12 @@ def check_coverage_and_verdicts_538(c):
 
         for st in (9999, True, -403, 0):
             with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
-                         _put_list=put_status(st)):
+                         _put_list=put_status(st), _probe=accept_probe):
                 out = proxykey._remote_step(state(stage="ready"))
             c.check(f"#538 http_status {st!r} does not ride",
                     out.get("http_status") != st, out)
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
-                     _put_list=put_status(403)):
+                         _put_list=put_status(403), _probe=accept_probe):
             out = proxykey._remote_step(state(stage="ready"))
         c.check("#538 a real 403 still rides",
                 out.get("http_status") == 403, out)
@@ -1482,7 +1549,7 @@ def check_coverage_and_verdicts_538(c):
         with open(op, "w", encoding="utf-8") as f:
             json.dump({**state(stage="ready")}, f)
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
-                     _put_list=put_runtime):
+                         _put_list=put_runtime, _probe=accept_probe):
             out = proxykey._remote_step(state(stage="ready"))
         c.check("#538 a RuntimeError PUT is a safe unknown outcome",
                 not out.get("ok") and out.get("unknown") is True
@@ -1648,7 +1715,7 @@ def check_structured_reason_538(c):
 
         remote = FakeRemote(["old-key", "panel-key"])
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
-                     _put_list=put_refused):
+                     _put_list=put_refused, _probe=lambda k: k in ("old-key",)):
             out = proxykey._remote_step(state())
         c.check("#538 a structured refusal keeps the http status",
                 out.get("http_status") == 403, out)
@@ -1664,7 +1731,7 @@ def check_structured_reason_538(c):
             return ("refused", "403 forbidden raw body SECRET=abc")
 
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
-                     _put_list=put_refused_str):
+                     _put_list=put_refused_str, _probe=lambda k: k in ("old-key",)):
             out = proxykey._remote_step(state())
         c.check("#538 a plain-string reason does not ride",
                 "SECRET" not in json.dumps(out), out)
@@ -1676,7 +1743,7 @@ def check_structured_reason_538(c):
             raise TimeoutError("connection lost after 403 FORBIDDEN body SECRET")
 
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
-                     _put_list=put_boom):
+                     _put_list=put_boom, _probe=lambda k: k in ("old-key",)):
             out = proxykey._remote_step(state())
         c.check("#538 an exception outcome carries no guessed status",
                 "http_status" not in out and "403" not in json.dumps(out), out)
