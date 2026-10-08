@@ -21,6 +21,9 @@ def main(argv):
         return 0
     if as_json:
         print(json.dumps(out))
+        # invalid -- громкий отказ и в JSON-режиме: тихий rc 0 читался
+        # бы как успешное чтение живого состояния.
+        return 1 if out.get("stage") == "invalid" else 0
     elif out.get("stage") == "invalid":
         lib.fail(out.get("reason") or "invalid")
         return 1

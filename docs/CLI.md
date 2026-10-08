@@ -1155,7 +1155,7 @@ start a rotation: mop server proxykey start --nodes n1,n2 --exclusive
 Checks the controller boundary, resolves the controller source and the
 cluster service copy, freezes the recipient set (--nodes, or
 --all-registered for the full known node set, offline included, or
---no-recipients), and records the private checkpoint. No network effect:
+--no-recipients), and records the private checkpoint. No proxy effect:
 the remote steps belong to resume. --exclusive affirms the caller is the
 only writer (panel included); without it the command refuses.
 ```

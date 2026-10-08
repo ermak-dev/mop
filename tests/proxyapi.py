@@ -16,7 +16,13 @@ SOLUTION: mop/server/proxyapi.py -- Effects-адаптер (urllib, только
 граница контроллера + resolve путей + доставка прямым bus-каналом по
 ЯВНОМУ списку узлов; mop/cli/server/proxykey/{__init__,start,resume,status}
 -- печать safe-проекции, rc 0/1.
-STATUS: в работе (#539): прогон до реализации обязан быть красным.
+STATUS: FIXED (#539, раунд ревью) -- блокер конструктора (затенение
+mgmt_key_path) и дефекты 1-7 закрыты: probe с тремя исходами,
+сверка --nodes с составом и алфавитом, один защищённый вызов
+--all-registered, deliver через proxykey.blob, status --json invalid
+rc 1, неабсолютный MOP_HOME -- отказ. 21 RED до исправлений, 69 green
+после; upstream-формы GET/PUT закреплены архивом v8.0.16 (sdk_config.go:63,
+config_v8.go:57,72,112).
 """
 import io
 import json
@@ -84,16 +90,141 @@ def stand(c, keys=("old-key-539",), accepted=("old-key-539",),
             "inv": inv, "dir": d}, FakeHTTP(keys, accepted, put_outcome)
 
 
-def effects_of(http, mgmt_path, port="8317"):
-    """Адаптер с подсунутым транспортом, портом и файлом ключа management."""
+def effects_of(http, mgmt_path):
+    """Адаптер с подсунутым транспортом и файлом ключа management.
+
+    Путь подсунут ЯВНО только там, где проверка про другой шов: путь по
+    умолчанию (HOME-граница) проверяет свой отдельный прогон ниже --
+ретесты ревью, что штатный конструктор без аргументов работает."""
     from mop.server import proxyapi
-    return proxyapi.Effects(transport=http, mgmt_key_path=mgmt_path,
-                           port=port)
+    # mgmt_file -- имя после исправления блокера; до него -- старое
+    # mgmt_key_path, и каждая проверка должна уметь строить адаптер.
+    try:
+        return proxyapi.Effects(transport=http, mgmt_file=mgmt_path)
+    except TypeError:
+        return proxyapi.Effects(transport=http, mgmt_key_path=mgmt_path)
 
 
 def no_network_log(c, http, what):
     c.check(f"#539 {what}: ни одного касания транспорта",
             not http.log, http.log)
+
+
+# ── ретесты ревью: блокер конструктора и исходы probe ────────────────────
+# HYPOTHESIS (блокер ревью): параметр mgmt_key_path затенял одноимённую
+# функцию модуля, и штатный путь _common.effects() -> Effects() падал с
+# TypeError 'NoneType' object is not callable: start и resume сломаны,
+# а проверки этого не видели, потому что всегда подставляли путь.
+def check_default_ctor_539(c):
+    from mop.server import proxyapi
+    box, http = stand(c)
+    # Конструктор строится так же, как фронтенд: без mgmt_key_path.
+    # Путь management-ключа по умолчанию -- paths.local: подменяем HOME,
+    # чтобы он лёг в stand-каталог.
+    from mop.common import paths
+    with patched_env(HOME=box["dir"], INVENTORY=box["inv"]):
+        want = paths.local(paths.SECRETS, "llm-proxy-mgmt.pass")
+        os.makedirs(os.path.dirname(want), exist_ok=True)
+        with open(want, "w", encoding="utf-8") as f:
+            f.write("mgmt-key-539\n")
+        try:
+            eff = proxyapi.Effects(transport=http)
+            c.check("#539 the no-arg construction works like the frontend",
+                    eff is not None, eff)
+            c.check("#539 the default management key path is the "
+                    "controller's own",
+                    eff._mgmt == want, (eff._mgmt, want))
+        except TypeError as e:
+            c.check("#539 the no-arg construction works like the frontend",
+                    False, repr(e))
+
+
+# HYPOTHESIS (дефект 1 ревью): probe == 200 засчитывал любой не-200
+# (502 у лежащего прокси, 404, 500) как «ключ отвергнут» -- негативная
+# проверка авторизации проходила ложно. Исходов три: 200 -> True,
+# 401/403 -> False, остальное -- исключение оркестратору.
+def check_probe_outcomes_539(c):
+    from mop.server import proxyapi
+    box, http = stand(c)
+    eff = effects_of(http, box["mgmt"])
+
+    class StatusHTTP(FakeHTTP):
+        def __init__(self, statuses):
+            self.statuses = list(statuses)
+            self.log = []
+
+        def models(self, key):
+            self.log.append(("probe", key))
+            return self.statuses.pop(0)
+
+    for code, want in ((200, True), (401, False), (403, False)):
+        st = StatusHTTP([code])
+        eff = effects_of(st, box["mgmt"])
+        got = eff.probe("old-key-539")
+        c.check(f"#539 probe {code} maps to {want}",
+                got is want, (code, got))
+
+    for code in (502, 404, 500):
+        st = StatusHTTP([code])
+        eff = effects_of(st, box["mgmt"])
+        try:
+            eff.probe("old-key-539")
+            c.fail(f"#539 probe {code} must not be a verdict")
+        except RuntimeError as e:
+            c.check(f"#539 probe {code} raises to the orchestrator",
+                    "probe" in str(e).lower() or str(code) in str(e), repr(e))
+
+
+# ── дополнение ревью: исходы PUT по кодам и слово блокера ────────────────
+# HYPOTHESIS (дополнение, pu-mop-3): 400/422 -- подтверждённый отказ
+# валидации ДО записи -> refused с причиной invalid; 401 -> unauthorized,
+# 403 -> forbidden; 500 write_failed -- исход неясен, исключение. Причина
+# выводится ИЗ КОДА (живой _Urllib не везёт reason), не из тела ответа.
+def check_put_reasons_539(c):
+    from mop.server import proxyapi
+    # Живой транспорт возвращает только код -- как здесь.
+    for code, want in ((400, "invalid"), (422, "invalid"),
+                       (401, "unauthorized"), (403, "forbidden")):
+        box, http = stand(c, put_outcome={"http_status": code})
+        eff = effects_of(http, box["mgmt"])
+        tag, why = eff.put_list(["old-key-539"])
+        c.check(f"#539 PUT {code} is refused as {want}",
+                tag == "refused" and why == {"http_status": code,
+                                             "reason": want}, (tag, why))
+    # 500 -- исход неясен: исключение, не refused.
+    box, http = stand(c, put_outcome={"http_status": 500})
+    eff = effects_of(http, box["mgmt"])
+    try:
+        eff.put_list(["old-key-539"])
+        c.fail("#539 PUT 500 must stay unknown, not refused")
+    except RuntimeError:
+        c.check("#539 PUT 500 stays unknown (raises)", True, None)
+
+
+# HYPOTHESIS (дополнение): 5 неудач management блокируют адрес на 30
+# минут, исключения для петли нет. Слово блокера 401 обязано предупреждать
+# о блокировке, 403 -- «доступ запрещён, возможна блокировка».
+def check_show_wording_539(c):
+    from mop.cli.server.proxykey import _common
+    for status, reason, needle in (
+            (401, "unauthorized", "30 minutes"),
+            (403, "forbidden", "denied")):
+        out = {"ok": False, "stage": "listed", "refused": True,
+               "blocker": "PUT refused before applying",
+               "http_status": status, "reason": reason}
+        with patched(sys, stderr=io.StringIO(), stdout=io.StringIO()):
+            rc = _common.show(out, as_json=False)
+            text = sys.stderr.getvalue()
+        c.check(f"#539 a refused {status} names the lockout in text",
+                needle in text, text)
+    out = {"ok": False, "stage": "listed", "refused": True,
+           "blocker": "PUT refused before applying",
+           "http_status": 400, "reason": "invalid"}
+    with patched(sys, stderr=io.StringIO(), stdout=io.StringIO()):
+        _common.show(out, as_json=False)
+        text = sys.stderr.getvalue()
+    c.check("#539 a validation refusal names it invalid",
+            "validation refused" in text, text)
 
 
 # ── граница контроллера: puppet-контекст и не-контроллер отказ ДО сети ──
@@ -280,7 +411,7 @@ def check_recipients_539(c):
         raise RuntimeError("cluster unreachable")
 
     with patched(puppets_mod, pool=boom):
-        why = proxyapi.nodes_refusal()
+        why = proxyapi.all_nodes_guarded()
     c.check("#539 an unreachable node listing blocks, not empties",
             isinstance(why, str), why)
 
@@ -330,7 +461,164 @@ def check_delivery_539(c):
     no_network_log(c, http, "delivery stays off the management channel")
 
 
-# ── CLI: rc, safe-JSON, --exclusive, группа глаголов ─────────────────────
+# ── дефект 3 ревью: --nodes сверяется с составом и алфавитом ─────────────
+# HYPOTHESIS: опечатка замораживала узла, который никогда не ответит
+# (навечно pending), а имя с точкой или * и > уезжало прямо в субъект
+# шины. Каждое имя -- известный узел И чистый токен субъекта, отказ до
+# begin.
+def check_nodes_validation_539(c):
+    from mop.server import proxyapi
+    from mop.common import puppets as puppets_mod
+
+    class Row:
+        def __init__(self, name):
+            self.name = name
+
+    fake_pool = lambda: [Row(n) for n in ("node1", "node2")]  # noqa: E731
+
+    def refusal_for(names):
+        try:
+            return proxyapi.node_refusals(names)
+        except AttributeError as e:
+            return repr(e)  # функции нет -- RED до исправления
+
+    with patched(puppets_mod, pool=fake_pool):
+        got = proxyapi.all_nodes_guarded()
+        c.check("#539 a reachable pool passes the preflight",
+                got == ["node1", "node2"], got)
+
+        # Неизвестное имя -- отказ до begin, не вечный pending. Заглавные
+        # отсюда же: состава с таким именем нет.
+        for unknown in (["node1", "nope"], ["Node1"]):
+            why = refusal_for(unknown)
+            c.check(f"#539 an unknown node name {unknown[-1]!r} is "
+                    "refused before begin",
+                    isinstance(why, str) and unknown[-1] in why, why)
+
+        # Грязные токены субъекта шины -- отказ ДО состава: точка режет
+        # токен, * и > -- маски, пробел/пустое -- не имя.
+        for bad in ("node1.*", "node.1", "node1>", "*node1", "node 1", ""):
+            why = refusal_for([bad] if bad else ["", "node1"])
+            c.check(f"#539 a dirty subject token {bad!r} is refused",
+                    isinstance(why, str) and bad in why, why)
+
+        # Известные и чистые -- проходят.
+        why = refusal_for(["node1", "node2"])
+        c.check("#539 known clean names pass", why is None, why)
+
+
+# ── дефект 4 ревью: --all-registered -- один защищённый вызов состава ────
+# HYPOTHESIS: nodes_refusal() звал all_nodes(), затем all_nodes() шёл
+# вторым без защиты: второй отказ -- traceback, два вызова могут дать
+# разное.
+def check_all_registered_once_539(c):
+    from mop.server import proxyapi
+    from mop.common import puppets as puppets_mod
+    calls = []
+
+    class Row:
+        def __init__(self, name):
+            self.name = name
+
+    def counting():
+        calls.append(1)
+        return [Row("node1")]
+
+    with patched(puppets_mod, pool=counting):
+        try:
+            got = proxyapi.all_nodes_guarded()
+        except AttributeError as e:
+            got = repr(e)  # функции нет -- RED до исправления
+    c.check("#539 --all-registered lists the port exactly once".replace(
+        "port", "pool"), len(calls) == 1 and got == ["node1"], (len(calls), got))
+
+    calls.clear()
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("cluster unreachable")
+
+    # Падающий состав -- именованный строка-блокер, не traceback, и
+    # ровно один вызов (второго больше не существует).
+    with patched(puppets_mod, pool=boom):
+        got = proxyapi.all_nodes_guarded()
+    c.check("#539 a failing listing surfaces as a blocker, not tracebacks",
+            isinstance(got, str) and "RuntimeError" in got
+            and len(calls) == 1, (got, len(calls)))
+
+
+# ── дефект 5 ревью: deliver рендерит блоб единственным рендером ──────────
+# HYPOTHESIS: у двух писателей одного secrets.env должен быть один
+# рендер: строка вручную разъедется с proxykey.blob молча.
+def check_deliver_blob_539(c):
+    from mop.server import proxyapi
+    from mop.server import proxykey
+    box, http = stand(c)
+    eff = effects_of(http, box["mgmt"])
+    sent = []
+
+    def fake_request_many(verb, nodes, timeout=None, channel=None,
+                          project=None, files=None, **fields):
+        sent.append((verb, list(nodes), files))
+        return {n: {"written": ["secrets.env"]} for n in nodes}
+
+    from mop.common import bus
+    # Индикатор единственного рендера: подменяем proxykey.blob ЗАМЕТНО
+    # (другой суффикс). Ручная строка в deliver этого не заметит --
+    # проверка обязана быть красной до перехода deliver на blob().
+    def loud_blob(env):
+        return proxykey.blob.__wrapped__(env) + "#rendered\n" \
+            if hasattr(proxykey.blob, "__wrapped__") else \
+            f"MOP_PROXY_KEY={env.get('MOP_PROXY_KEY')}\n#rendered\n"
+
+    with patched(bus, request_many=fake_request_many), \
+            patched(proxykey, blob=loud_blob):
+        eff.deliver("new-key-539", ["node1"])
+    files = sent[0][2] if sent else []
+    content = bus.file_data(files[0][1]) if files else b""
+    c.check("#539 delivery renders the blob with the one renderer",
+            content.endswith(b"#rendered\n"), content)
+
+
+# ── дефект 6 ревью: status --json invalid тоже rc 1 ──────────────────────
+# HYPOTHESIS: текстовый путь invalid -- rc 1, а JSON -- rc 0: по
+# docstring invalid -- rc 1 в обоих режимах.
+def check_status_json_invalid_539(c):
+    from mop.cli.server.proxykey import status
+    box, http = stand(c)
+    # Валидный JSON с недопустимой схемой: библиотека отдаёт
+    # {"stage": "invalid", "reason": ...} -- сценарий ревью, где
+    # текстовый путь давал rc 1, а --json молча rc 0.
+    with open(box["op"], "w", encoding="utf-8") as f:
+        json.dump({"bogus": True}, f)
+    rc, out_text = None, ""
+    with patched(proxykey, OP=box["op"], LOCK=box["lock"]), \
+            patched_env(INVENTORY=box["inv"]), \
+            patched(sys, stdout=io.StringIO(), stderr=io.StringIO()):
+        rc = status.main(["--json"])
+        out_text = sys.stdout.getvalue()
+    c.check("#539 status --json on an invalid state is rc 1",
+            rc == 1 and "invalid" in out_text.lower(), (rc, out_text))
+
+
+# ── дефект 7 ревью: неабсолютный MOP_HOME -- отказ до эффектов ───────────
+# HYPOTHESIS: config.get("MOP_HOME") or "" при пустой настройке давал
+# путь от CWD; неабсолютный MOP_HOME -- отказ до эффектов.
+def check_mophome_absolute_539(c):
+    from mop.server import proxyapi
+    box, http = stand(c)
+    for bad in ("", "relative/home", "./rel", ".."):
+        why = proxyapi.resolve_refusal(cluster_home=bad)
+        c.check(f"#539 a non-absolute MOP_HOME {bad!r} is refused",
+                isinstance(why, str) and "MOP_HOME" in why, why)
+    why = proxyapi.resolve_refusal(cluster_home=os.path.join(box["dir"],
+                                                              "abs-home"))
+    c.check("#539 an absolute MOP_HOME passes the preflight",
+            why is None, why)
+    no_network_log(c, http, "the MOP_HOME preflight")
+
+
+
 def check_cli_539(c):
     from mop.cli.server.proxykey import start, status
     box, http = stand(c)
@@ -372,6 +660,15 @@ def main():
     check_controller_guard_539(c)
     check_adapter_pinned_539(c)
     check_adapter_outcomes_539(c)
+    check_default_ctor_539(c)
+    check_probe_outcomes_539(c)
+    check_put_reasons_539(c)
+    check_show_wording_539(c)
+    check_nodes_validation_539(c)
+    check_all_registered_once_539(c)
+    check_deliver_blob_539(c)
+    check_status_json_invalid_539(c)
+    check_mophome_absolute_539(c)
     check_paths_539(c)
     check_recipients_539(c)
     check_delivery_539(c)

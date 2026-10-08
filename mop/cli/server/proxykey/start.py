@@ -3,7 +3,7 @@
 Checks the controller boundary, resolves the controller source and the
 cluster service copy, freezes the recipient set (--nodes, or
 --all-registered for the full known node set, offline included, or
---no-recipients), and records the private checkpoint. No network effect:
+--no-recipients), and records the private checkpoint. No proxy effect:
 the remote steps belong to resume. --exclusive affirms the caller is the
 only writer (panel included); without it the command refuses.
 """
@@ -27,6 +27,10 @@ def main(argv):
         lib.fail(nodes)
         return 1
     src, cp = _resolve()
+    why = _common.resolve_refusal()
+    if why:
+        lib.fail(why)
+        return 1
     try:
         out = proxykey.begin(src, cp, nodes, exclusive=True,
                              effects=_common.effects())

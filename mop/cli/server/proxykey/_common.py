@@ -1,5 +1,6 @@
 """Общее у глаголов `mop server proxykey`: граница, эффекты, печать."""
 import json
+import os
 import sys
 
 from mop.cli import lib
@@ -11,7 +12,19 @@ def refusal():
     why = proxyapi.refusal_if_not_controller()
     if why:
         return why
-    return proxyapi.port_refusal()
+    why = proxyapi.port_refusal()
+    if why:
+        return why
+    path = proxyapi.mgmt_key_path()
+    if not os.path.isfile(path):
+        return f"no management key at {path} (the controller's secrets)"
+    return None
+
+
+def resolve_refusal():
+    """Пригодность путей ДО begin: неабсолютный или пустой MOP_HOME --
+    отказ, не путь от CWD. -> str | None."""
+    return proxyapi.resolve_refusal()
 
 
 def effects():
@@ -23,17 +36,18 @@ def effects():
 def recipients(argv_opts):
     """Явный набор получателей из опций start. -> [имя] | str-отказ.
 
-    --nodes n1,n2 -- явный список (повторяемый флаг суммируется);
-    --all-registered -- полный известный состав БЕЗ ready-фильтра;
-    --no-recipients -- осознанный пустой набор (пустой пул). Недоступный
-    состав -- блокер ДО эффекта, не пустой набор."""
+    --nodes n1,n2 -- явный список (повторяемый флаг суммируется), каждое
+    имя -- чистый токен субъекта и известный узел (отказ до begin);
+    --all-registered -- полный известный состав БЕЗ ready-фильтра, ОДИН
+    защищённый вызов; --no-recipients -- осознанный пустой набор.
+    Недоступный состав -- блокер ДО эффекта, не пустой набор."""
     if "--no-recipients" in argv_opts:
         return []
     if "--all-registered" in argv_opts:
-        why = proxyapi.nodes_refusal()
-        if why:
-            return why
-        return proxyapi.all_nodes()
+        got = proxyapi.all_nodes_guarded()
+        if isinstance(got, str):
+            return got
+        return got
     raw = argv_opts.get("--nodes", "")
     if not raw:
         return ("start needs a recipient set: --nodes n1,n2, "
@@ -43,18 +57,43 @@ def recipients(argv_opts):
         name = name.strip()
         if name:
             out.append(name)
-    return out or []
+    why = proxyapi.node_refusals(out)
+    if why:
+        return why
+    return out
 
 
 def show(out, as_json):
     """Итог операции: тихий быстрый успех, явный JSON/текст при
     pending/отказе. Ключей и raw-причин здесь нет -- safe-проекция
-    библиотеки. -> rc."""
+    библиотеки. Слово блокера по типизированным полям: 401 --
+    предупреждение о блокировке петли (5 неудач management запирают
+    адрес на 30 минут, исключения для 127.0.0.1 нет), 403 -- «доступ
+    запрещён», не «ключ неверен». -> rc."""
     if as_json:
         print(json.dumps(out))
-    elif not out.get("ok"):
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
         why = out.get("blocker") or out.get("note") or out.get("stage")
-        print(f"pending: {why}", file=sys.stderr)
+        extra = _wording(out)
+        print(f"pending: {why}{extra}", file=sys.stderr)
     elif out.get("stage") == "completed":
         print("completed")
     return 0 if out.get("ok") else 1
+
+
+def _wording(out):
+    """Типизированное дополнение к блокеру по http_status/reason. -> str.
+
+    Только перечислимые факты безопасной проекции, ничего из шва."""
+    status = out.get("http_status")
+    reason = out.get("reason")
+    if status == 401 and reason == "unauthorized":
+        return (" — the management key is wrong or missing; repeated "
+                "attempts lock this address out for 30 minutes, with "
+                "no exception for the loopback")
+    if status == 403 and reason == "forbidden":
+        return " — access denied; the address may be locked out after failed attempts"
+    if reason == "invalid":
+        return " — validation refused the write before applying"
+    return ""

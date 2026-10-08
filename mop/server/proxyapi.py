@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 
 from ..common import bus, config, paths, puppets
+from . import proxykey
 
 # Пиннутые маршруты management API v8 (#537: config_v8.go:64-141):
 # запись секции адресная, тело -- список ЦЕЛИКОМ; условной записи нет,
@@ -69,6 +70,19 @@ def refusal_if_not_controller(inventory=None):
     return None
 
 
+def resolve_refusal(cluster_home=None):
+    """Неабсолютный MOP_HOME -> строка-отказ | None. Пустая настройка
+    иначе давала путь от CWD: молчаливая запись не туда. Проверка ДО
+    эффектов, вместе с остальной границей."""
+    home = cluster_home if cluster_home is not None \
+        else (config.get("MOP_HOME") or "")
+    if home and not os.path.isabs(home):
+        return f"MOP_HOME must be absolute, got {home!r}"
+    if not home:
+        return "MOP_HOME is not set: the cluster service copy has no home"
+    return None
+
+
 def resolve_paths(cluster_copy=None):
     """(источник, копия кластера). Источник -- secrets контроллера
     (paths.local, дом текущего пользователя-сервиса), копия -- под
@@ -80,8 +94,10 @@ def resolve_paths(cluster_copy=None):
     src = paths.local(paths.SECRETS, "llm-proxy-client.pass")
     if cluster_copy is not None:
         return src, cluster_copy
-    return src, paths.under(config.get("MOP_HOME") or "",
-                            paths.SECRETS, "llm-proxy-client.pass")
+    home = config.get("MOP_HOME") or ""
+    # Абсолютность проверяет resolve_refusal; сюда попадает уже
+    # прошедшее границу (start зовёт отказ до begin).
+    return src, paths.under(home, paths.SECRETS, "llm-proxy-client.pass")
 
 
 def mgmt_key_path():
@@ -99,12 +115,51 @@ def all_nodes():
     return sorted({n.name for n in puppets.pool()})
 
 
+def all_nodes_guarded():
+    """ОДИН защищённый вызов состава для --all-registered: два отдельных
+    (nodes_refusal + all_nodes) -- это два отказа и два разных ответа,
+    второй без защиты давал traceback. -> [имя] | строка-блокер."""
+    try:
+        return all_nodes()
+    except Exception as e:  # noqa: BLE001 -- причина решается оператором
+        return f"cannot list the pool nodes ({type(e).__name__})"
+
+
 def nodes_refusal(pool=None):
-    """Недоступный состав узлов -> строка-блокер | None."""
+    """Недоступный состав узлов -> строка-блокер | None.
+
+    Устаревает: один защищённый вызов -- all_nodes_guarded; проверка
+    аргументов --node -- node_refusals. Оставлена на этот переход, пока
+    фронтенды переключены."""
     try:
         (pool if pool is not None else all_nodes)()
     except Exception as e:  # noqa: BLE001 -- причина решается оператором
         return f"cannot list the pool nodes ({type(e).__name__})"
+    return None
+
+
+# Чистый токен субъекта шины (busnames.node вставляет имя как есть):
+# точка режет токен, * и > -- маски, пробел/пустое -- не имя.
+CLEAN_NODE = set("abcdefghijklmnopqrstuvwxyz0123456789-_")
+
+
+def node_refusals(names, pool=None):
+    """Явный список --nodes перед begin: каждое имя -- чистый токен
+    субъекта И известный узел. Опечатка иначе замораживает получателя,
+    который никогда не ответит (навечно pending), а точка или маска
+    уезжает прямо в субъект шины. -> строка-отказ | None."""
+    for name in names:
+        if not name or set(name) - CLEAN_NODE:
+            return (f"node name {name!r} is not a clean bus subject "
+                    f"token (letters, digits, - and _)")
+    try:
+        known = set(pool if pool is not None else all_nodes())
+    except Exception as e:  # noqa: BLE001 -- состав недоступен -- блокер
+        return f"cannot list the pool nodes ({type(e).__name__})"
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        return ("unknown node names (not in the pool): "
+                + ", ".join(unknown))
     return None
 
 
@@ -116,11 +171,12 @@ class Effects:
     management читается из файла ПРИ КАЖДОМ эффекте: файл могла сменить
     роль web между шагами."""
 
-    def __init__(self, transport=None, mgmt_key_path=None, port=None):
+    def __init__(self, transport=None, mgmt_file=None):
+        # mgmt_file (не mgmt_key_path): одноимённый параметр затенял
+        # функцию модуля, и штатный конструктор без аргументов падал
+        # TypeError 'NoneType' -- start и resume были сломаны.
         self._transport = transport if transport is not None else _Urllib()
-        self._mgmt = mgmt_key_path if mgmt_key_path is not None \
-            else mgmt_key_path()
-        self._port = port
+        self._mgmt = mgmt_file if mgmt_file is not None else mgmt_key_path()
 
     def _bearer(self):
         with open(self._mgmt, encoding="utf-8") as f:
@@ -132,27 +188,45 @@ class Effects:
             raise RuntimeError("the key list answer is not a list")
         return keys
 
+    # Причина выводится ИЗ КОДА, не из тела ответа (живой transport
+    # возвращает только http_status): 400/422 -- валидация отвергла ДО
+    # записи; 401/403 -- доступ; 500 -- исход неясен (write_failed может
+    # примениться). Слово причины -- из конечного перечня REASONS #538.
+    CODE_REASONS = {400: "invalid", 422: "invalid", 401: "unauthorized",
+                    403: "forbidden"}
+
     def put_list(self, keys):
         why = self._transport.put_keys(self._bearer(), list(keys))
         if why is None:
             return ("applied", None)
-        # Подтверждённый отказ ДО применения: только 401/403 handler'а
-        # management (пин #537); прочее -- исключение, исход неясен.
         code = why.get("http_status")
-        if code in REFUSED_CODES:
+        if code in self.CODE_REASONS:
             return ("refused", {"http_status": code,
-                                "reason": why.get("reason")})
+                                "reason": self.CODE_REASONS[code]})
         raise RuntimeError(f"unclear PUT outcome (HTTP {code})")
 
     def probe(self, key):
-        return self._transport.models(key) == 200
+        # Три исхода, не два: не-200/401x -- не «ключ отвергнут».
+        # 502 у лежащего прокси или 500, зачитанные как False, проводили
+        # негативную проверку авторизации ложно. Неясное -- исключение
+        # оркестратору (библиотека превращает его в именованный блокер
+        # без мутации).
+        code = self._transport.models(key)
+        if code == 200:
+            return True
+        if code in (401, 403):
+            return False
+        raise RuntimeError(f"probe /v1/models answered HTTP {code}, "
+                           f"the outcome is unclear")
 
     def deliver(self, key, nodes):
         # Прямой write-канал по ЯВНОМУ сохранённому списку (#539): старый
         # push() решает по sha-гейту и settled -- резюмируемая раздача с
         # FAILED/NOT REACHED «завершилась» бы или молча пропустила. Итоги
         # сводит bus.results_from, строгую оценку -- strict_settled #538.
-        content = f"MOP_PROXY_KEY={key}\n"
+        # Блоб рендерит proxykey.blob -- ЕДИНСТВЕННЫЙ рендер secrets.env:
+        # у двух писателей одного файла не может быть двух форматов.
+        content = proxykey.blob({"MOP_PROXY_KEY": key})
         answers = bus.request_many(
             "write", list(nodes), timeout=bus.WRITE_TIMEOUT,
             files=[bus.as_file(paths.NODE_SECRETS, content)])
