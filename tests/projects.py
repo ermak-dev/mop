@@ -16,6 +16,7 @@ SOLUTION: реестр ~/.config/mop/projects, группа `mop project add|del
 и узкий прогон deploy/projects.yml; deploy реестр только читает.
 STATUS: FIXED — see #79
 """
+import contextlib
 import os
 import sys
 
@@ -581,6 +582,289 @@ def _refusal_of(fn):
         return f"WRONG EXC {type(e).__name__}: {e}"
 
 
+def check_export_542(c):
+    """Оффлайн-экспорт реестра для отката: проверяемая легаси-пара из v1.
+
+    HYPOTHESIS (#542): после миграции старые projects/limits.json остаются
+    на диске устаревшими, и git revert снимка не сохраняет add/delete/limit,
+    сделанные после него. Обратного экспорта нет: снимать пару руками --
+    небезопасно (origin'ы несут креды, порядок файлов не атомарен).
+    SOLUTION: чистая функция export_pair -- читает projects.json ОДИН раз
+    (байты -> digest -> валидатор #534), раскладывает легаси-пару в НОВЫЙ
+    каталог с заявкой имени через mkdir (EEXIST -- отказ без overwrite),
+    файлы 0600/каталог 0700, маркер export.json последним. Живой реестр
+    не тронут; провал чистит только созданное этой попыткой.
+    STATUS: #542 (красный прогон впереди реализации)."""
+    import hashlib
+    import json as _json
+    import shutil
+    import tempfile
+    v1 = {"version": 1, "projects": [
+        {"origin": MOP, "limit": 2}, {"origin": RU}]}
+
+    def seed(root):
+        projects.SNAPSHOT = os.path.join(root, "src", "projects.json")
+        projects.SNAPSHOT_DIR = os.path.join(root, "src")
+        projects.write_snapshot(v1, projects.SNAPSHOT)
+        return projects.SNAPSHOT
+
+    root = tempfile.mkdtemp(prefix="mop-test-542-")
+    saved_snapshot, saved_dir = projects.SNAPSHOT, projects.SNAPSHOT_DIR
+    try:
+        src = seed(root)
+        raw = open(src, "rb").read()
+        digest = hashlib.sha256(raw).hexdigest()
+        dest = os.path.join(root, "rollback")
+
+        out = projects.export_pair(dest)
+        c.check("#542 export answers with a summary, not a raw snapshot",
+                isinstance(out, dict) and out.get("projects") == 2, out)
+        c.check("#542 export names the source and its digest",
+                out.get("source") == src and out.get("sha256") == digest, out)
+        c.check("#542 the destination is a private directory",
+                oct(os.stat(dest).st_mode & 0o777) == "0o700", oct(os.stat(dest).st_mode))
+        for name in ("projects", "limits.json", "export.json"):
+            c.check(f"#542 the exported {name} is 0600",
+                    oct(os.stat(os.path.join(dest, name)).st_mode & 0o777) == "0o600", name)
+        c.expect("#542 the exported lines are the legacy registry",
+                 sorted(open(os.path.join(dest, "projects")).read().splitlines()),
+                 sorted([MOP, RU]))
+        c.expect("#542 the exported limits are the legacy limits",
+                 _json.load(open(os.path.join(dest, "limits.json"))), {"mop": 2})
+        marker = _json.load(open(os.path.join(dest, "export.json")))
+        c.check("#542 the marker carries the digest and the schema, not origins",
+                marker.get("snapshot_sha256") == digest
+                and marker.get("schema") == "legacy-pair"
+                and MOP not in _json.dumps(marker), marker)
+        c.check("#542 the marker is newer than the pair it certifies",
+                os.path.getmtime(os.path.join(dest, "export.json"))
+                >= max(os.path.getmtime(os.path.join(dest, "projects")),
+                       os.path.getmtime(os.path.join(dest, "limits.json"))))
+
+        # Roundtrip: экспортированная пара мигрирует обратно в ТОТ ЖЕ v1.
+        c.expect("#542 the exported pair migrates back to the same v1",
+                 projects.snapshot_of(dest), v1)
+
+        # Roundtrip после новых мутаций: export снимает актуальное
+        # состояние, а не заголовок миграции.
+        v1b = projects.snapshot_with_origin(
+            projects.snapshot_without(v1, "mop"), "git@h:team/new.git")
+        projects.write_snapshot(v1b, src)
+        raw_b = open(src, "rb").read()
+        dest2 = os.path.join(root, "rollback2")
+        projects.export_pair(dest2)
+        c.expect("#542 export after new mutations roundtrips",
+                 projects.snapshot_of(dest2), v1b)
+
+        # Живой реестр не тронут: байты source не изменились ЭТИМ экспортом
+        # (слепок -- после перезаписи v1b, сравнение -- после export_pair).
+        c.check("#542 export leaves the source bytes alone",
+                open(src, "rb").read() == raw_b)
+
+        # Отказы: dest уже есть (файл, каталог, symlink) -- без overwrite.
+        busy = os.path.join(root, "busy")
+        open(busy, "w").write("x")
+        _refused542(c, "#542 an existing file destination refuses",
+                 lambda: projects.export_pair(busy))
+        c.check("#542 the refused file destination keeps its bytes",
+                open(busy).read() == "x")
+        made = os.path.join(root, "made")
+        os.mkdir(made)
+        _refused542(c, "#542 an existing directory destination refuses",
+                 lambda: projects.export_pair(made))
+        link = os.path.join(root, "link")
+        os.symlink(root, link)
+        _refused542(c, "#542 a symlink destination refuses",
+                 lambda: projects.export_pair(link))
+        c.check("#542 a refused symlink leaves its target alone",
+                sorted(os.listdir(link)) == sorted(os.listdir(root)))
+
+        # Race: параллельный mkdir успел раньше -- отказ, чужой каталог цел.
+        raced = os.path.join(root, "raced")
+
+        def racer():
+            os.mkdir(raced, 0o700)
+            with open(os.path.join(raced, "foreign"), "w") as f:
+                f.write("not ours")
+
+        import threading
+        t = threading.Thread(target=racer)
+        t.start()
+        t.join()
+        _refused542(c, "#542 a concurrently created destination refuses",
+                 lambda: projects.export_pair(raced))
+        c.check("#542 the concurrent directory is not cleaned up",
+                os.path.exists(os.path.join(raced, "foreign")))
+
+        # Нет v1 -- экспортировать нечего: пара НЕ fallback.
+        empty_root = tempfile.mkdtemp(prefix="mop-test-542-e-")
+        try:
+            projects.SNAPSHOT = os.path.join(empty_root, "projects.json")
+            projects.SNAPSHOT_DIR = empty_root
+            _refused542(c, "#542 no snapshot to export refuses, no pair fallback",
+                     lambda: projects.export_pair(os.path.join(root, "none")))
+            c.check("#542 the refused no-snapshot export creates nothing",
+                    not os.path.exists(os.path.join(root, "none")))
+        finally:
+            shutil.rmtree(empty_root)
+
+        # Битый v1 (неизвестная версия, мусор) -- отказ валидатора #534.
+        bad_root = tempfile.mkdtemp(prefix="mop-test-542-b-")
+        try:
+            projects.SNAPSHOT = os.path.join(bad_root, "projects.json")
+            projects.SNAPSHOT_DIR = bad_root
+            for text in ('{"version": 2, "projects": []}', "{broken"):
+                with open(projects.SNAPSHOT, "w") as f:
+                    f.write(text)
+                _refused542(c, "#542 a bad snapshot refuses the export",
+                         lambda: projects.export_pair(os.path.join(root, "bad")))
+                c.check("#542 the refused bad-snapshot export creates nothing",
+                        not os.path.exists(os.path.join(root, "bad")))
+        finally:
+            shutil.rmtree(bad_root)
+
+        # Провал записи внутри экспорта: чистится ТОЛЬКО созданное этой
+        # попыткой; parent и source живы.
+        flaky_root = tempfile.mkdtemp(prefix="mop-test-542-f-")
+        try:
+            src2 = seed(flaky_root)
+            from mop.common import fsutil
+            real_wp = fsutil.write_private
+
+            def dying_write(path, data, *a, **k):
+                if os.path.basename(path) == "limits.json":
+                    raise OSError("disk full")
+                return real_wp(path, data, *a, **k)
+
+            dest3 = os.path.join(flaky_root, "rollback")
+            with _patched(fsutil, write_private=dying_write):
+                _refused542(c, "#542 a failed write refuses the export",
+                         lambda: projects.export_pair(dest3))
+            c.check("#542 the failed export cleans up its own directory",
+                    not os.path.exists(dest3), dest3)
+            c.check("#542 the failed export leaves the source alive",
+                    open(src2, "rb").read()[:1] == b"{")
+        finally:
+            shutil.rmtree(flaky_root)
+
+        # Inode-якорь: между провалом записи и cleanup кто-то ПОДМЕНИЛ наш
+        # каталог (rmtree+smlink) -- cleanup обязан заметить и НЕ удалять
+        # чужое; отказ называет, что каталог больше не наш.
+        swap_root = tempfile.mkdtemp(prefix="mop-test-542-i-")
+        try:
+            src3 = seed(swap_root)
+            from mop.common import fsutil as _fu
+            _real_wp2 = _fu.write_private
+
+            def swap_write(path, data, *a, **k):
+                if os.path.basename(path) == "limits.json":
+                    # между заявкой и провалом каталог подменили
+                    victim = os.path.dirname(path)
+                    shutil.rmtree(victim)
+                    os.symlink(os.path.join(swap_root, "src"), victim)
+                    raise OSError("disk full")
+                return _real_wp2(path, data, *a, **k)
+
+            victim_dir = os.path.join(swap_root, "rollback")
+            with _patched(_fu, write_private=swap_write):
+                got = None
+                try:
+                    projects.export_pair(victim_dir)
+                except RuntimeError as e:
+                    got = str(e)
+                except OSError as e:
+                    got = f"WRONG EXC OSError: {e}"
+                c.check("#542 a replaced directory is not removed by cleanup",
+                        bool(got and "ours" in got and os.path.islink(victim_dir)), got)
+                c.check("#542 the replaced directory keeps its target alive",
+                        os.path.exists(os.path.join(swap_root, "src", "projects.json")))
+        finally:
+            shutil.rmtree(swap_root, ignore_errors=True)
+
+        # Фолты на каждом файле (projects, limits.json, export.json):
+        # экспорт отказывает, своего каталога не остаётся (marker-провал
+        # чистит созданное -- публикация не состоялась).
+        for victim in ("projects", "limits.json", "export.json"):
+            fault_root = tempfile.mkdtemp(prefix="mop-test-542-w-")
+            try:
+                seed(fault_root)
+                from mop.common import fsutil as _fu2
+                _real_wp3 = _fu2.write_private
+
+                def dying_write(path, data, *a, _v=victim, **k):
+                    if os.path.basename(path) == _v:
+                        raise OSError(f"disk died on {_v}")
+                    return _real_wp3(path, data, *a, **k)
+
+                fdest = os.path.join(fault_root, "rollback")
+                with _patched(_fu2, write_private=dying_write):
+                    _refused542(c, f"#542 a write fault on {victim} refuses the export",
+                             lambda: projects.export_pair(fdest), "disk died")
+                c.check(f"#542 the {victim} fault cleans its own directory",
+                        not os.path.exists(fdest), fdest)
+            finally:
+                shutil.rmtree(fault_root, ignore_errors=True)
+
+        # Маркер несёт дайджесты файлов и счётчик; сводка -- машиначитаемая,
+        # без URL: перекладываем уже сделанные проверки сюда после зелёного.
+        marker2 = _json.load(open(os.path.join(dest2, "export.json")))
+        for name in ("projects", "limits.json"):
+            body = open(os.path.join(dest2, name), "rb").read()
+            c.check(f"#542 the marker carries the {name} digest",
+                    marker2.get("files", {}).get(name)
+                    == hashlib.sha256(body).hexdigest(), marker2.get("files"))
+        c.check("#542 the marker counts the projects",
+                marker2.get("projects") == 2, marker2)
+
+        # Секрет в origin не раскрывается: экспорт пишет его в закрытый
+        # файл пары (это его данные), но НИ в отказ, ни в маркер.
+        secret = "https://user:secret-token@forge.example/team/x.git"
+        secret_root = tempfile.mkdtemp(prefix="mop-test-542-s-")
+        try:
+            projects.SNAPSHOT = os.path.join(secret_root, "projects.json")
+            projects.SNAPSHOT_DIR = secret_root
+            projects.write_snapshot({"version": 1, "projects": [{"origin": secret}]},
+                                    projects.SNAPSHOT)
+            sdest = os.path.join(secret_root, "out")
+            out = projects.export_pair(sdest)
+            c.check("#542 the summary leaks no origin credentials",
+                    "secret-token" not in _json.dumps(out), out)
+            c.check("#542 the marker leaks no origin credentials",
+                    "secret-token" not in open(os.path.join(sdest, "export.json")).read())
+        finally:
+            shutil.rmtree(secret_root)
+    finally:
+        projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def _patched(obj, **kw):
+    """Подмена атрибутов на время блока (местный patched: без _lib-зависимостей)."""
+    import contextlib as _cl
+    saved = {k: getattr(obj, k) for k in kw}
+    for k, v in kw.items():
+        setattr(obj, k, v)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            setattr(obj, k, v)
+
+
+def _refused542(c, what, fn, *needles):
+    """Утверждение: fn() отказывает RuntimeError (текст ниже -- без сырья)."""
+    try:
+        fn()
+        c.check(what, False, "refusal was None")
+    except RuntimeError as e:
+        c.check(what, True, str(e))
+        for n in needles:
+            c.check(f"{what}: names {n}", n in str(e), str(e))
+    except Exception as e:  # noqa: BLE001 -- не тот класс -- сразу видно
+        c.check(what, False, f"wrong exception {type(e).__name__}: {e}")
+
+
 def check_schema_534(c):
     """Схема v1 одним валидатором: reader, writer и export сверяют одно.
 
@@ -909,7 +1193,7 @@ def main():
     for fn in (check_add, check_delete, check_names, check_limits, check_read_limits_337,
                check_git_hosts, check_for_deploy, check_local_view_534,
                check_migration_534, check_schema_534, check_snapshot_534,
-               check_view_534):
+               check_view_534, check_export_542):
         fn(c)
     return c.report("projects")
 

@@ -23,8 +23,11 @@
 остаются голые имена, origin которых уже не узнать; завести новую такую
 строку нельзя, а старую не теряем.
 """
+import hashlib
 import json
 import os
+import shutil
+import time
 
 from .. import driver
 from . import fsutil, paths, puppets
@@ -530,6 +533,99 @@ def legacy_pair_of(snapshot):
     limits = {puppets.project_of(p["origin"]): p["limit"]
               for p in snapshot["projects"] if "limit" in p}
     return lines, limits
+
+
+# ─── выгрузка для отката: пара из одного снимка (#542) ────────────────────
+# После миграции старые projects/limits.json лежат на диске устаревшими, а
+# git revert снимка не сохраняет add/delete/limit, случившиеся позже.
+# Обратный экспорт -- это один валидированный снимок, разложенный в пару в
+# НОВОМ каталоге: живой реестр не тронут, настоящий переключение -- за
+# оператором (остановить writers, снять финальный экспорт, сверить digest,
+# переключить). Resume v1 после правок старым writer'ом обязан перечитать
+# свежий снимок, а не доверять устаревшему; лечить голые имена/коллизии/
+# orphan-потолки автоматически команда не берётся -- это отдельные решения.
+def export_pair(dest, snapshot_path=None):
+    """Выгрузить реестр парой в НОВЫЙ каталог. -> сводка. Чистая от
+    живого реестра: читает ОДИН раз, пишет только в dest.
+
+    Порядок и гарантии (#542):
+      * снимок читается ОДНИМ запросом ДО всякого mkdir -- байты, digest,
+        разбор валидатором #534; нет файла или битый -- отказ, БЕЗ
+        fallback на устаревшую легаси-пару;
+      * каталог заявляется атомарным mkdir (0700): EEXIST -- существующий
+        файл/каталог/symlink/чужая заявка -- отказ без overwrite;
+      * файлы пишутся 0600 атомарно (origin'ы несут креды), маркер
+        export.json -- ПОСЛЕДНИМ: его нет -- экспорт не состоялся;
+      * провал чистит только созданное ЭТОЙ попыткой, и лишь пока каталог
+        ещё тот же inode (symlink-подмена между заявкой и cleanup не даёт
+        чужое удалить); непонятная принадлежность -- оставить на месте и
+        назвать это в отказе;
+      * сводка -- счётчик, источник и digest: креды origin'ов живут в
+        закрытых файлах пары, не в stdout/metadata/ошибках.
+    """
+    path = SNAPSHOT if snapshot_path is None else snapshot_path
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raise RuntimeError(f"nothing to export: {path} does not exist; a legacy "
+                           "pair is not a rollback source -- migrate first") from None
+    except OSError as e:
+        raise RuntimeError(f"cannot export: {path} is unreadable: {e}") from None
+    try:
+        parsed = json.loads(raw)
+    except ValueError as e:
+        raise RuntimeError(f"cannot export: {path} is not valid JSON: {e}") from None
+    _checked(parsed, f"cannot export: {path}")
+    lines, limits = legacy_pair_of(parsed)
+    digest = hashlib.sha256(raw).hexdigest()
+    pair = {
+        "projects": "".join(f"{s}\n" for s in lines).encode(),
+        "limits.json": (json.dumps(limits, sort_keys=True) + "\n").encode(),
+    }
+    # Заявка имени: mkdir атомарен, EEXIST -- отказ. Родителя создаёт
+    # оператор: экспорт не расползается по чужим путям.
+    try:
+        os.mkdir(dest, 0o700)
+    except FileExistsError:
+        raise RuntimeError(f"cannot export: {dest} already exists; refusing to "
+                           "overwrite -- name a new directory") from None
+    except OSError as e:
+        raise RuntimeError(f"cannot export: cannot create {dest}: {e}") from None
+    # Якорь попытки: cleanup доверяет только тому же inode.
+    anchor = os.stat(dest).st_ino
+    try:
+        for name, data in pair.items():
+            fsutil.write_private(os.path.join(dest, name), data)
+        marker = {"what": "mop registry rollback export", "version": 1,
+                  "schema": "legacy-pair", "source": path, "snapshot_sha256": digest,
+                  "projects": len(lines),
+                  "files": {n: hashlib.sha256(d).hexdigest() for n, d in pair.items()},
+                  "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        fsutil.write_private(os.path.join(dest, "export.json"),
+                             (json.dumps(marker, indent=1, sort_keys=True) + "\n").encode())
+    except Exception as e:
+        # Публикация не состоялась: убрать своё, но ТОЛЬКО своё. Каталог
+        # мог быть подменён между заявкой и провалом -- inode сверяется
+        # до rmtree, чужое не трогаем и говорим об этом в отказе.
+        why = [f"cannot export: {e}"]
+        try:
+            if not os.path.exists(dest):
+                why.append("the destination directory disappeared before cleanup")
+            elif os.path.islink(dest):
+                why.append("the destination is no longer ours (a symlink now); "
+                           "left in place")
+            elif os.stat(dest).st_ino != anchor:
+                why.append("the destination was replaced by another directory; "
+                           "left in place")
+            else:
+                shutil.rmtree(dest)
+                why.append(f"removed the incomplete export {dest}")
+        except OSError as e2:
+            why.append(f"cleanup failed: {e2}")
+        raise RuntimeError("; ".join(why)) from None
+    return {"what": "mop registry rollback export", "projects": len(lines),
+            "source": path, "sha256": digest, "dest": dest}
 
 
 def for_deploy(answer, local):
