@@ -755,6 +755,25 @@ def check_local_and_delivery_538(c):
         c.check("#538 a crashed split is finished, not refused",
                 out.get("ok") and open(cp).read().strip() == "new-key", out)
 
+        # Третий ключ на копии ПОСЛЕ входного guard resume: шов probe мог
+        # подменить файл между входным guard и локальной записью -- шаг
+        # проверяет домен ключей СВОИМ guard перед записью и НЕ затирает
+        # чужой ключ (собственный old/new сплит остаётся восстановимым).
+        # HYPOTHESIS (RED): _local_step писал без повторной проверки --
+        # third-key на копии молча затирался new.
+        fresh()
+        with open(cp, "w", encoding="utf-8") as f:
+            f.write("third-key\n")
+        with patched(proxykey, OP=op):
+            out = local(state(), proxykey._SEAMS)
+        c.check("#538 a third key on the copy blocks the local write",
+                not out.get("ok") and "drift" in str(out.get("blocker", "")).lower(),
+                out)
+        c.check("#538 the blocked local write touched no file",
+                open(src).read().strip() == "old-key"
+                and open(cp).read().strip() == "third-key",
+                (open(src).read(), open(cp).read()))
+
         # Раздача: замороженные получатели, итог -- strict_settled.
         answers = {"node1": "OK", "node2": "FAILED: body down"}
         sent = []
@@ -773,6 +792,16 @@ def check_local_and_delivery_538(c):
             saved = json.load(f)
         c.expect("#538 the per-recipient verdicts are checkpointed",
                  saved.get("delivered"), answers)
+        # HYPOTHESIS (RED): pending-блокер собирал f"{n} {r}" с raw-хвостом
+        # -- секрет из ответа узла ехал в публичный blocker resume.
+        # SOLUTION: та же единственная safe-проекция, что в status() --
+        # код узла (OK/FAILED/NOT REACHED) без хвоста; приватный
+        # чекпоинт хранит полный итог, публичный итог его не echo-ит.
+        c.check("#538 the pending blocker carries no raw verdict tail",
+                "body down" not in str(out.get("blocker", ""))
+                and "FAILED" in str(out.get("blocker", "")), out)
+        c.check("#538 the pending blocker still names the recipient",
+                "node2" in str(out.get("blocker", "")), out)
 
         answers = {"node1": "OK", "node2": "OK"}
         with patched(proxykey, OP=op, _deliver=write):
@@ -1654,6 +1683,11 @@ def check_owner_preservation_538(c):
 
         # (3) Root-ветка mocked fchown: владелец путей -- не процесс (root
         # запускает сервис), сохранённый владелец едет в write_private.
+        # С guard внутри _local_step сценарий root+чужой-uid ДО записи
+        # блокируется по контракту (проверка (4) ниже) -- здесь
+        # изолируется сам механизм: write_private получает ПРЕЖНЕГО
+        # владельца файла. Guard-контракт проверяют (1) и (4), своя
+        # third-key проверка -- в check_local_and_delivery_538.
         root_cases = []
         foreign_owner = types.SimpleNamespace(st_mode=0o100600, st_uid=1000, st_gid=1000)
 
@@ -1667,6 +1701,7 @@ def check_owner_preservation_538(c):
         with patched(proxykey.os, stat=stat_root), \
                 patched(proxykey.os, geteuid=lambda: 0), \
                 patched(proxykey.fsutil, write_private=write_root), \
+                patched(proxykey, _guard=lambda s: None), \
                 patched(proxykey, OP=op):
             out = proxykey._local_step(state(), proxykey._SEAMS)
         c.check("#538 under a root process the local step keeps the service owner",

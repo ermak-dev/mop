@@ -159,14 +159,9 @@ def status():
     out = _project(state)
     delivered = state.get("delivered")
     if delivered:
-        # Публичная проекция -- только перечислимые коды узла: хвост
-        # FAILED:.../NOT REACHED:... несёт raw payload (причина агента),
-        # приватный чекпоинт его хранит, статус -- не echo-ит.
-        out["delivered"] = {n: ("OK" if v == "OK" else
-                                "FAILED" if v.startswith("FAILED: ") else
-                                "NOT REACHED" if v.startswith("NOT REACHED: ") else
-                                "FAILED")
-                            for n, v in delivered.items()}
+        # Публичная проекция -- только перечислимые коды узла: та же
+        # единственная _safe_code, что и в блокере раздачи.
+        out["delivered"] = {n: _safe_code(v) for n, v in delivered.items()}
     return out
 
 
@@ -526,13 +521,34 @@ def _local_step(state, seams):
     новый, копия старая» -- повтор шага заканчивает начатое, ключ тот же
     сохранённый. Владелец каждого пути берётся С ПРЕЖНЕГО файла и едет в
     write_private owner=: атомарный replace под root иначе отдал бы inode
-    процессу (root:0600) и отрезал бы сервис от его копии. Режим -- 0600."""
+    процессу (root:0600) и отрезал бы сервис от его копии. Режим -- 0600.
+    Guard ЗДЕСЬ, перед записью: входной guard resume стоит до всего цикла
+    шагов, и пауза на probe-шаге не должна открывать окно, в котором
+    третий ключ на копии молча затирается (домен ключей стадии accepted
+    позволяет свой old/new сплит, но не чужой ключ)."""
+    blocker = _guard(state)
+    if blocker:
+        return {"ok": False, "blocker": blocker}
     for path in (state["source"], state["copy"]):
         st = os.stat(path)
         fsutil.write_private(path, state["new"] + "\n", owner=(st.st_uid, st.st_gid))
     state["stage"] = "local"
     _save_op(state)
     return {"ok": True, "stage": state["stage"]}
+
+
+def _safe_code(verdict):
+    """Единственная safe-проекция итога узла: перечислимый код без
+    raw-хвоста (причина агента в FAILED:.../NOT REACHED:... -- payload,
+    приватный чекпоинт его хранит, публичные итоги -- status() И блокер
+    resume -- его не echo-ят)."""
+    if verdict == "OK":
+        return "OK"
+    if verdict.startswith("FAILED: "):
+        return "FAILED"
+    if verdict.startswith("NOT REACHED: "):
+        return "NOT REACHED"
+    return "FAILED"
 
 
 def _deliver_step(state, seams):
@@ -569,7 +585,7 @@ def _deliver_step(state, seams):
     state["delivered"] = out
     if not strict_settled(out) or stray:
         _save_op(state)
-        why = [f"{n} {r}" for n, r in sorted(out.items()) if r != "OK"]
+        why = [f"{n} {_safe_code(r)}" for n, r in sorted(out.items()) if r != "OK"]
         if stray:
             why.append(f"{stray} unexpected recipient"
                        f"{'s' if stray != 1 else ''} in the answers")
