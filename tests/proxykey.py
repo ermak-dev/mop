@@ -1041,6 +1041,56 @@ def check_state_validator_538(c):
             write({**good2, "stage": "local", "delivered": {"node1": "FAILED: x"}})
             c.check("#538 an open stage with a partial delivered is valid",
                     proxykey._validate(proxykey._load_op()) is None, "must be None")
+            # status: публичная проекция -- только валидированное. Битое
+            # состояние -> {"stage": "invalid", "reason": <строка валидатора>},
+            # raw-значения приватных полей не ездят; delivered берётся только
+            # из валидного состояния.
+            # HYPOTHESIS (RED): status echo-ил поля напрямую и падал TypeError
+            # на битом delivered (peer finding 4).
+            def read_status():
+                return proxykey.status()
+
+            write({**good2, "stage": "local", "delivered": {"node1": "FAILED: x",
+                                                            "node2": "OK"}})
+            st = read_status()
+            c.check("#538 status projects the open stage with its delivered",
+                    isinstance(st, dict) and st.get("stage") == "local" and
+                    st.get("delivered", {}).get("node1") == "FAILED: x", st)
+            c.check("#538 status carries no keys",
+                    not any(k in st for k in ("old", "new", "key")), st)
+            write({**good2, "delivered": {"node1": "raw secret payload"},
+                   "stage": "local"})
+            st = read_status()
+            c.check("#538 a broken delivered yields an invalid status, not a crash",
+                    isinstance(st, dict) and st.get("stage") == "invalid"
+                    and isinstance(st.get("reason"), str), st)
+            c.check("#538 the invalid reason carries no raw field value",
+                    leak not in str(st.get("reason", "")), st)
+            write({**good2, "stage": leak})
+            st = read_status()
+            c.check("#538 an invalid stage value does not ride into status",
+                    st.get("stage") == "invalid" and leak not in json.dumps(st), st)
+
+            # Каталог состояния без прав -- это не «нет операции»: отказ с
+            # причиной доступа, не молчаливый None (begin мог бы затирать).
+            import stat as st_mode
+            write(good2)
+            dir_mode = os.stat(d).st_mode
+            os.chmod(d, 0o000)
+            try:
+                try:
+                    proxykey._load_op()
+                    c.fail("#538 an unreadable state dir must refuse, not None")
+                except RuntimeError as e:
+                    c.check("#538 a permission-denied state dir is named",
+                            "cannot read" in str(e), str(e))
+            finally:
+                os.chmod(d, dir_mode)
+            c.check("#538 after restoring the dir the state loads again",
+                    isinstance(proxykey._load_op(), dict), "must be a dict")
+
+
+
 
 # ── #538: serviceability обоих путей и guard на каждом resume ────────────
 # HYPOTHESIS: _preflight проверял режим только копии, не владельца и не
