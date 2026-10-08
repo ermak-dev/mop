@@ -1142,8 +1142,77 @@ def check_deploy_mixed_outcome_475(c):
         os.environ.update(env)
 
 
+def check_deploy_staging_error_548(c):
+    """HYPOTHESIS (#548): вокруг _staged_registry_seed ловился только
+    RuntimeError; OSError из mkdtemp/chmod/write_snapshot уходил трейсбеком
+    и ронял deploy даже серверу, у которого реестр есть и посев был бы
+    пропущен. SOLUTION: ошибка подготовки любого вида -- тот же отказ:
+    одна строка в stderr, плейбук идёт с mop_registry_seed_refused, deploy
+    не падает. STATUS: FIXED — see #548"""
+    import shutil
+    import subprocess
+    from mop.common import bus, config, creds, projects
+    from mop.cli.server import deploy
+    from mop.server import identity
+    d = tempfile.mkdtemp(prefix="mop-test-deploy-548-")
+    inventory, key = os.path.join(d, "inventory.yaml"), os.path.join(d, "id")
+    for f in (inventory, key, key + ".pub"):
+        open(f, "w").close()
+    people = os.path.join(d, "operators")
+    with open(people, "w") as f:
+        f.write(identity.format_line(identity.Identity("anton", "admin", ("*",)),
+                                     identity.hash_password("x")) + "\n")
+    plays = []
+    listing = [INVENTORY_CLEAN]
+    env = dict(os.environ)
+
+    def run_mock(argv):
+        """Игра (#475): ansible-inventory отвечает листингом, плейбук -- нулём."""
+        text = json.dumps(listing[0]) if argv and argv[0] == "ansible-inventory" else ""
+        return subprocess.CompletedProcess(argv, 0, text, "")
+
+    try:
+        with offline(), \
+                patched(shutil, which=lambda cmd: f"/usr/bin/{cmd}"), \
+                patched(config, require=lambda *a: None), \
+                patched(subprocess, run=lambda argv, **kw: run_mock(argv)), \
+                patched(_play, play=lambda *a, **kw: plays.append(kw) or (0, "")), \
+                patched(deploy, missing_extras=lambda setting, root: [],
+                        manifests=lambda origins: {},
+                        check=lambda: None, _staged_registry_seed=lambda: (
+                            (_ for _ in ()).throw(OSError(28, "No space left on device")))), \
+                patched(bus, ask_cluster=lambda *a, **kw: {"ok": True, "projects": []}), \
+                patched(projects, for_deploy=lambda answer, local: ([], None), read=lambda: []), \
+                patched(creds, collect=lambda *a, **kw: [], operator=lambda dest: "anton",
+                        snapshot=lambda dest: ("human", {"user": "anton", "password": "x"})):
+            os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key,
+                               "MOP_OPERATORS_FILE": people})
+            try:
+                out, err, code = run_command(deploy.main, [])
+            except OSError as e:
+                # Сам дефект #548: OSError подготовки уходит из main
+                # наружу трейсбеком, унося весь файл проверок.
+                c.check("#548 an OSError in staging does not kill deploy with a traceback",
+                        False, f"main raised {e!r}")
+                out, err, code, plays[:] = "", "", 1, []
+            sent = plays[-1] if plays else {}
+            c.check("#548 an OSError in staging does not kill deploy with a traceback",
+                    code == 0 and plays and "Traceback" not in err, (code, repr(err)[:200]))
+            c.check("#548 the refusal is one stderr line naming the failure",
+                    len([l for l in err.strip().splitlines() if l.strip()]) == 1
+                    and "cannot stage the registry seed" in err and "No space left" in err,
+                    repr(err)[:200])
+            c.check("#548 the play still runs, with the refused flag and no seed",
+                    sent.get("registry_seed") is None
+                    and sent.get("registry_seed_refused") is True, sent)
+    finally:
+        os.environ.clear()
+        os.environ.update(env)
+
+
 def main():
     c = Checks()
+    check_deploy_staging_error_548(c)
     check_server_maintenance_409(c)
     check_login_name_407(c)
     check_current_docs_401(c)

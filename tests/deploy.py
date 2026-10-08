@@ -1251,10 +1251,17 @@ def check_registry_seeding_540(c, ptasks):
 # контроллера, плейбуку едет булев признак mop_registry_seed_refused
 # (без текста и без origin'ов), и задача fail в плее валит прогон только
 # там, где посев нужен: сервер пуст, сервис неактивен, HOME разные.
-# RESULT: регрессионный раунд -- красный прогон вперёд фикс: шесть отказов
+# #548: ошибка файловой системы при подготовке (mkdtemp, chmod, запись)
+# -- тот же отказ: ловился только RuntimeError, OSError уходил трейсбеком
+# и ронял deploy даже серверу с реестром. Своевременная уборка: каталог
+# после mkdtemp, упавшего на записи, убирается, а причина не несёт
+# содержимого реестра. Плейбук и условия fail-задачи не меняются.
+# RESULT: #540 -- регрессионный раунд красным вперёд фикса: шесть отказов
 # (нет fail-задачи, нет same-HOME скипа, отказ поднимался вместо None,
-# признака в extra-vars нет, дефолта нет); после фикса все зелёные.
-# STATUS: FIXED — see #540
+# признака в extra-vars нет, дефолта нет). #548 -- красный прогон вперёд
+# фикса: пять отказов (OSError из mkdtemp/chmod/write поднимался трейсбеком
+# и оставлял свой каталог); после фикса все зелёные.
+# STATUS: FIXED — see #540, #548
 def check_registry_staging_540(c):
     import inspect
     import json as _json
@@ -1372,6 +1379,58 @@ def check_registry_staging_540(c):
                 os.environ["MOP_HOME"] = was_home
             reg.SNAPSHOT_DIR = was_dir
             shutil.rmtree(base, ignore_errors=True)
+    # #548: ошибка файловой системы подготовки -- тот же отказ, что и
+    # непредставимый реестр: OSError из mkdtemp/chmod/write_snapshot не
+    # должен доходить до вызывающего трейсбеком. Поднимается одна
+    # RuntimeError, причина называет шаг, но не содержимое реестра;
+    # каталог, заведённый mkdtemp до падения chmod/записи, убирается.
+    def boom(error):
+        def raise_it(*a, **kw):
+            raise error
+        return raise_it
+
+    from _lib import patched
+    oops = OSError(28, "No space left on device")
+    for label, broken in (("mkdtemp", "mkdtemp"), ("chmod", "chmod"),
+                          ("write", "write_snapshot")):
+        base, home = make({"projects": pair})
+        was, was_home, was_dir = os.environ.get("HOME"), os.environ.get("MOP_HOME"), reg.SNAPSHOT_DIR
+        made = []
+        real_mkdtemp, real_chmod, real_write = tempfile.mkdtemp, os.chmod, reg.write_snapshot
+
+        def spy_mkdtemp(*a, **kw):
+            made.append(real_mkdtemp(*a, **kw))
+            return made[-1]
+
+        try:
+            os.environ["HOME"] = home
+            os.environ["MOP_HOME"] = "/srv/mop"
+            reg.SNAPSHOT_DIR = os.path.join(home, ".config", "mop")
+            with patched(tempfile, mkdtemp=boom(oops) if broken == "mkdtemp" else spy_mkdtemp), \
+                    patched(os, chmod=boom(oops) if broken == "chmod" else real_chmod), \
+                    patched(reg, write_snapshot=boom(oops) if broken == "write_snapshot"
+                            else real_write):
+                try:
+                    got = deploy_cli._staged_registry_seed()
+                except (RuntimeError, OSError) as e:
+                    got = e
+            c.check(f"#548 staging failure at {label}: a loud refusal, not a traceback",
+                    isinstance(got, RuntimeError), repr(got)[:120])
+            if isinstance(got, RuntimeError):
+                c.check(f"#548 staging failure at {label}: the reason carries no registry content",
+                        "git@h" not in str(got), str(got)[:120])
+            c.check(f"#548 staging failure at {label}: the staged dir is cleaned up",
+                    not any(os.path.exists(m) for m in made), made)
+        finally:
+            os.environ["HOME"] = was
+            if was_home is None:
+                os.environ.pop("MOP_HOME", None)
+            else:
+                os.environ["MOP_HOME"] = was_home
+            reg.SNAPSHOT_DIR = was_dir
+            shutil.rmtree(base, ignore_errors=True)
+            for m in made:
+                shutil.rmtree(m, ignore_errors=True)
     # Плейбуку едет ПУТЬ, не JSON: extra-vars одной строкой-объектом.
     vars_ = _play.play_vars([], registry_seed="/tmp/staged/projects.json")
     c.check("#540 the play carries the staged seed as a path, not a payload",

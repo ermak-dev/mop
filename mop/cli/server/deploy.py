@@ -368,10 +368,13 @@ def _staged_registry_seed():
     deploy'ю, который посева не требует (#540). Конвертация легаси-пары --
     только чтение (snapshot_of без записи в реестр контроллера);
     непредставимое (голое имя, коллизия, orphan-потолок) и битый JSON --
-    ОТКАЗ (RuntimeError), не fallback: файлы контроллера остаются как
-    были, а решение -- за вызывающим, отказ не должен валить deploy,
-    которому посев не нужен. Плейбуку едет путь, не содержимое: реестр --
-    не для argv и журналов.
+    ОТКАЗ, не fallback: файлы контроллера остаются как были, а решение --
+    за вызывающим, отказ не должен валить deploy, которому посев не нужен.
+    Ошибка файловой системы подготовки (mkdtemp, chmod, запись) -- тот же
+    отказ (#548): RuntimeError одной причиной, без трейсбека и без
+    содержимого реестра, а каталог, заведённый до падения, убирается --
+    свой мусор префлайт не оставляет. Плейбуку едет путь, не содержимое:
+    реестр -- не для argv и журналов.
     """
     if os.path.expanduser("~") == config.get("MOP_HOME"):
         return None
@@ -380,14 +383,23 @@ def _staged_registry_seed():
             or os.path.exists(os.path.join(projects.SNAPSHOT_DIR, "limits.json"))):
         return None
     snapshot = projects.snapshot_of(projects.SNAPSHOT_DIR)
-    staged = tempfile.mkdtemp(prefix="mop-registry-seed-")
-    os.chmod(staged, 0o700)
-    path = os.path.join(staged, "projects.json")
-    # write_atomic пишет с правами umask (реестр -- не секрет для своего
-    # пользователя, но посев едет в чужой домашний каталог): снимок для
-    # посева закрывается 0600 явно.
-    projects.write_snapshot(snapshot, path=path)
-    os.chmod(path, 0o600)
+    staged = None
+    try:
+        staged = tempfile.mkdtemp(prefix="mop-registry-seed-")
+        os.chmod(staged, 0o700)
+        path = os.path.join(staged, "projects.json")
+        # write_atomic пишет с правами umask (реестр -- не секрет для
+        # своего пользователя, но посев едет в чужой домашний каталог):
+        # снимок для посева закрывается 0600 явно.
+        projects.write_snapshot(snapshot, path=path)
+        os.chmod(path, 0o600)
+    except OSError as e:
+        # Свой шаг и своё имя ошибки, не содержимое реестра: str(e) OSError
+        # несёт путь снимка, но не его текст. Без префикса «cannot stage»:
+        # его добавляет вызывающий, у отказа одна строка.
+        if staged is not None:
+            shutil.rmtree(staged, ignore_errors=True)
+        raise RuntimeError(f"registry seed staging failed: {e}") from None
     return path
 
 
@@ -491,10 +503,13 @@ def main(argv):
     # Причина печатается здесь, на контроллере: сообщение библиотеки не
     # несёт сырых origin'ов, а плейбуку едет только признак. Уборка --
     # после прогона: путь едет плейбуку extra-vars, не содержимое.
+    # OSError не ловлен -- belt and suspenders (#548): помощник сам
+    # сворачивает свою файловую систему в RuntimeError, и ловля обоих
+    # держит main прямым даже при будущих правках помощника.
     seed, seed_refused = None, False
     try:
         seed = _staged_registry_seed()
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         seed_refused = True
         lib.fail(f"cannot stage the registry seed: {e}")
     try:
