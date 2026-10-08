@@ -13,7 +13,7 @@ import sys
 
 from mop.cli import lib
 from mop.server import bootstrap, natsconf
-from mop.common import projects, puppets
+from mop.common import projects
 
 
 def main(argv):
