@@ -505,7 +505,7 @@ def check_remote_step_538(c):
         remote = FakeRemote(["old-key", "panel-key"])
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                      _put_list=remote.put_list, _probe=remote.probe):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 the remote step succeeds", out.get("ok"), out)
         c.expect("#538 PUT carries every read key plus new (unmanaged kept)",
                  remote.puts, [["old-key", "panel-key", "new-key"]])
@@ -522,7 +522,7 @@ def check_remote_step_538(c):
                             refuse_put=("refused", "403 forbidden"))
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                      _put_list=remote.put_list, _probe=remote.probe):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 a confirmed pre-apply refusal blocks",
                 not out.get("ok") and out.get("refused") is True, out)
         c.check("#538 the refused blocker carries no raw seam reason",
@@ -535,7 +535,7 @@ def check_remote_step_538(c):
         remote = FakeRemote(["old-key", "panel-key"], unknown_put=True)
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                      _put_list=remote.put_list, _probe=remote.probe):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 an unknown PUT outcome keeps the operation open",
                 not out.get("ok") and "unknown" in str(out.get("blocker", "")).lower(),
                 out)
@@ -546,7 +546,7 @@ def check_remote_step_538(c):
         remote.keys.append("late-panel-key")
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                      _put_list=remote.put_list, _probe=remote.probe):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 resume after unknown re-applies on a fresh list", out.get("ok"), out)
         c.expect("#538 the late panel key survives the re-apply",
                  remote.puts[-1], ["old-key", "panel-key", "late-panel-key", "new-key"])
@@ -555,7 +555,7 @@ def check_remote_step_538(c):
         remote = FakeRemote([])
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                      _put_list=remote.put_list, _probe=remote.probe):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 an empty read list is never written",
                 not out.get("ok") and not remote.puts, (out, remote.puts))
 
@@ -564,7 +564,7 @@ def check_remote_step_538(c):
         remote = FakeRemote(["panel-key"])
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                      _put_list=remote.put_list, _probe=remote.probe):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 a missing managed old key is drift before mutation",
                 not out.get("ok") and "drift" in str(out.get("blocker", "")).lower()
                 and not remote.puts, (out, remote.puts))
@@ -592,7 +592,7 @@ def check_remote_step_538(c):
         # Полный согласованный путь: probe old, probe wrong ДО put.
         with patched(proxykey, OP=op, _fetch_list=fetch, _put_list=put,
                      _probe=probe):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 pre-PUT probes run before the first remote mutation",
                 order[:3] == ["fetch", "probe", "probe"]
                 and order.index("put") > order.index("probe"), order)
@@ -611,7 +611,7 @@ def check_remote_step_538(c):
 
         with patched(proxykey, OP=op, _fetch_list=fetch, _put_list=put,
                      _probe=probe_old_first):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 an unaccepted old key blocks BEFORE the PUT",
                 "put" not in order and not out.get("ok"), (out, order))
 
@@ -629,7 +629,7 @@ def check_remote_step_538(c):
 
         with patched(proxykey, OP=op, _fetch_list=fetch, _put_list=put,
                      _probe=probe_auth_off):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 an accepted wrong key blocks BEFORE the PUT",
                 "put" not in order and not out.get("ok"), (out, order))
 
@@ -660,7 +660,7 @@ def check_probe_step_538(c):
         answers = {"old-key": True, "new-key": True}
         wrong_seen = []
         with patched(proxykey, OP=op, _probe=lambda k: wrong_seen.append(k) or answers.get(k, False)):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 a fully confirmed application advances", out.get("ok"), out)
         c.check("#538 the wrong-key probe ran (negative check is required)",
                 wrong_seen and wrong_seen[-1] not in answers, wrong_seen)
@@ -671,7 +671,7 @@ def check_probe_step_538(c):
         # не отказ и не смена ключа/источника.
         answers = {"old-key": True, "new-key": False}
         with patched(proxykey, OP=op, _probe=lambda k: answers.get(k, False)):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 a not-yet-applied new key is pending with a reason",
                 not out.get("ok") and "pending" in str(out.get("blocker", "")).lower(),
                 out)
@@ -682,7 +682,7 @@ def check_probe_step_538(c):
         # узлы без работающего ключа.
         answers = {"old-key": False, "new-key": True}
         with patched(proxykey, OP=op, _probe=lambda k: answers.get(k, False)):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 a rejected old key blocks before issuing",
                 not out.get("ok") and "old" in str(out.get("blocker", "")).lower(), out)
 
@@ -690,7 +690,7 @@ def check_probe_step_538(c):
         # авторизация не включена, выдавать ключ нельзя.
         answers = {"old-key": True, "new-key": True}
         with patched(proxykey, OP=op, _probe=lambda k: True):
-            out = step(state())
+            out = step(state(), proxykey._SEAMS)
         c.check("#538 an accepted wrong key blocks: auth is off",
                 not out.get("ok") and "wrong" in str(out.get("blocker", "")).lower(), out)
 
@@ -731,7 +731,7 @@ def check_local_and_delivery_538(c):
         # чекпоинт сохранён.
         fresh()
         with patched(proxykey, OP=op):
-            out = local(state())
+            out = local(state(), proxykey._SEAMS)
         c.check("#538 the local step succeeds", out.get("ok"), out)
         c.expect("#538 the source now holds the new key",
                  open(src).read().strip(), "new-key")
@@ -751,7 +751,7 @@ def check_local_and_delivery_538(c):
         with open(src, "w", encoding="utf-8") as f:
             f.write("new-key\n")
         with patched(proxykey, OP=op):
-            out = local(state())
+            out = local(state(), proxykey._SEAMS)
         c.check("#538 a crashed split is finished, not refused",
                 out.get("ok") and open(cp).read().strip() == "new-key", out)
 
@@ -764,7 +764,7 @@ def check_local_and_delivery_538(c):
             return dict(answers)
 
         with patched(proxykey, OP=op, _deliver=write):
-            out = deliver(state(stage="local"))
+            out = deliver(state(stage="local"), proxykey._SEAMS)
         c.check("#538 a FAILED recipient keeps the delivery open",
                 not out.get("ok"), out)
         c.check("#538 delivery goes to the frozen saved recipients",
@@ -776,13 +776,14 @@ def check_local_and_delivery_538(c):
 
         answers = {"node1": "OK", "node2": "OK"}
         with patched(proxykey, OP=op, _deliver=write):
-            out = deliver(state(stage="local"))
+            out = deliver(state(stage="local"), proxykey._SEAMS)
         c.check("#538 all recipients OK complete the delivery",
                 out.get("ok") and out.get("stage") != "local", out)
 
         # Пустой сохранённый список -- честный ноль, не «все обновлены».
         with patched(proxykey, OP=op, _deliver=write):
-            out = deliver({**state(stage="local"), "recipients": []})
+            out = deliver({**state(stage="local"), "recipients": []},
+                          proxykey._SEAMS)
         c.check("#538 an explicit empty recipient set completes with 0 named",
                 out.get("ok") and "0" in str(out.get("note", "")), out)
 
@@ -826,9 +827,9 @@ def check_pipeline_538(c):
 
         real_local = proxykey._local_step
 
-        def local(state):
+        def local(state, seams):
             order.append("local")
-            return real_local(state)
+            return real_local(state, seams)
 
         patches = dict(OP=op, LOCK=lock, _fetch_list=fetch, _put_list=put,
                        _probe=probe, _deliver=deliver, _local_step=local)
@@ -1360,7 +1361,7 @@ def check_coverage_and_verdicts_538(c):
             return {}
 
         with patched(proxykey, OP=op, _deliver=deliver_empty):
-            out = proxykey._deliver_step(state())
+            out = proxykey._deliver_step(state(), proxykey._SEAMS)
         c.check("#538 empty answers never complete a live recipient set",
                 not out.get("ok"), out)
         c.check("#538 the blocker names the missing recipients",
@@ -1380,7 +1381,7 @@ def check_coverage_and_verdicts_538(c):
             return {"node1": "OK"}
 
         with patched(proxykey, OP=op, _deliver=deliver_partial):
-            out = proxykey._deliver_step(state())
+            out = proxykey._deliver_step(state(), proxykey._SEAMS)
         c.check("#538 a subset answer set never completes",
                 not out.get("ok") and "node2" in str(out.get("blocker", "")), out)
 
@@ -1390,7 +1391,7 @@ def check_coverage_and_verdicts_538(c):
             return {"node1": "OK", "node2": "OK", "ghost": "OK"}
 
         with patched(proxykey, OP=op, _deliver=deliver_extra):
-            out = proxykey._deliver_step(state())
+            out = proxykey._deliver_step(state(), proxykey._SEAMS)
         c.check("#538 an unexpected recipient does not count",
                 not out.get("ok") and "ghost" not in str(out.get("blocker", ""))
                 and "unexpected" in str(out.get("blocker", "")), out)
@@ -1405,7 +1406,7 @@ def check_coverage_and_verdicts_538(c):
             return {"node1": "OK", "node2": "OK"}
 
         with patched(proxykey, OP=op, _deliver=deliver_full):
-            out = proxykey._deliver_step(state())
+            out = proxykey._deliver_step(state(), proxykey._SEAMS)
         c.check("#538 full coverage completes", out.get("ok"), out)
 
         # Допустимые verdict-теги шва PUT перечислены; неизвестный тег --
@@ -1420,7 +1421,7 @@ def check_coverage_and_verdicts_538(c):
 
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list, _put_list=put,
                      _probe=accept_probe):
-            out = proxykey._remote_step(state(stage="ready"))
+            out = proxykey._remote_step(state(stage="ready"), proxykey._SEAMS)
         c.check("#538 an unknown verdict tag is an unknown outcome",
                 not out.get("ok") and out.get("unknown") is True
                 and "unknown" in str(out.get("blocker", "")).lower(), out)
@@ -1435,7 +1436,7 @@ def check_coverage_and_verdicts_538(c):
 
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                          _put_list=put_refused, _probe=accept_probe):
-            out = proxykey._remote_step(state(stage="ready"))
+            out = proxykey._remote_step(state(stage="ready"), proxykey._SEAMS)
         c.check("#538 a refused PUT stays refused with a safe reason",
                 out.get("refused") is True and "SECRET_KEY" not in str(out), out)
 
@@ -1445,7 +1446,7 @@ def check_coverage_and_verdicts_538(c):
             raise ConnectionError("GET https://x/y Authorization: Bearer RAWKEY")
 
         with patched(proxykey, OP=op, _fetch_list=fetch_boom):
-            out = proxykey._remote_step(state(stage="ready"))
+            out = proxykey._remote_step(state(stage="ready"), proxykey._SEAMS)
         c.check("#538 a fetch exception is a safe blocker without payload",
                 not out.get("ok") and "RAWKEY" not in str(out)
                 and "ConnectionError" in str(out.get("blocker", "")), out)
@@ -1454,7 +1455,7 @@ def check_coverage_and_verdicts_538(c):
             raise TimeoutError("probe body with key=new-key")
 
         with patched(proxykey, OP=op, _probe=probe_boom):
-            out = proxykey._probe_step(state(stage="listed"))
+            out = proxykey._probe_step(state(stage="listed"), proxykey._SEAMS)
         c.check("#538 a probe exception is a safe blocker without payload",
                 not out.get("ok") and "new-key" not in str(out), out)
 
@@ -1462,7 +1463,7 @@ def check_coverage_and_verdicts_538(c):
             raise OSError("ssh: password=MOP_PROXY_KEY leaked")
 
         with patched(proxykey, OP=op, _deliver=deliver_boom):
-            out = proxykey._deliver_step(state())
+            out = proxykey._deliver_step(state(), proxykey._SEAMS)
         c.check("#538 a delivery exception is a safe blocker without payload",
                 not out.get("ok") and "MOP_PROXY_KEY" not in str(out), out)
 
@@ -1475,7 +1476,7 @@ def check_coverage_and_verdicts_538(c):
 
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                          _put_list=put_reason_any, _probe=accept_probe):
-            out = proxykey._remote_step(state(stage="ready"))
+            out = proxykey._remote_step(state(stage="ready"), proxykey._SEAMS)
         c.check("#538 a non-enumerated reason word does not ride",
                 "SECRET-TOKEN" not in json.dumps(out), out)
         c.check("#538 the refusal itself still rides",
@@ -1496,7 +1497,7 @@ def check_coverage_and_verdicts_538(c):
                 json.dump({**state(stage="ready")}, f)
             with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                          _put_list=put_mal, _probe=accept_probe):
-                out = proxykey._remote_step(state(stage="ready"))
+                out = proxykey._remote_step(state(stage="ready"), proxykey._SEAMS)
             c.check(f"#538 {name} is a named outcome, not a crash",
                     isinstance(out, dict) and not out.get("ok"), out)
             c.check(f"#538 {name} keeps the checkpoint",
@@ -1513,12 +1514,12 @@ def check_coverage_and_verdicts_538(c):
         for st in (9999, True, -403, 0):
             with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                          _put_list=put_status(st), _probe=accept_probe):
-                out = proxykey._remote_step(state(stage="ready"))
+                out = proxykey._remote_step(state(stage="ready"), proxykey._SEAMS)
             c.check(f"#538 http_status {st!r} does not ride",
                     out.get("http_status") != st, out)
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                          _put_list=put_status(403), _probe=accept_probe):
-            out = proxykey._remote_step(state(stage="ready"))
+            out = proxykey._remote_step(state(stage="ready"), proxykey._SEAMS)
         c.check("#538 a real 403 still rides",
                 out.get("http_status") == 403, out)
 
@@ -1532,7 +1533,7 @@ def check_coverage_and_verdicts_538(c):
                 json.dump({**state(stage="ready")}, f)
             with patched(proxykey, OP=op, _fetch_list=fetch_bad,
                          _put_list=put_mal):
-                out = proxykey._remote_step(state(stage="ready"))
+                out = proxykey._remote_step(state(stage="ready"), proxykey._SEAMS)
             c.check(f"#538 a malformed key list ({name}) is a named blocker",
                     isinstance(out, dict) and not out.get("ok")
                     and isinstance(out.get("blocker"), str), out)
@@ -1550,7 +1551,7 @@ def check_coverage_and_verdicts_538(c):
             json.dump({**state(stage="ready")}, f)
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                          _put_list=put_runtime, _probe=accept_probe):
-            out = proxykey._remote_step(state(stage="ready"))
+            out = proxykey._remote_step(state(stage="ready"), proxykey._SEAMS)
         c.check("#538 a RuntimeError PUT is a safe unknown outcome",
                 not out.get("ok") and out.get("unknown") is True
                 and "SECRET" not in json.dumps(out), out)
@@ -1562,7 +1563,7 @@ def check_coverage_and_verdicts_538(c):
             return {n: "OK" for n in nodes} | {"ghost-with-secret": "OK"}
 
         with patched(proxykey, OP=op, _deliver=deliver_ghosts):
-            out = proxykey._deliver_step(state(stage="local"))
+            out = proxykey._deliver_step(state(stage="local"), proxykey._SEAMS)
         c.check("#538 an unexpected recipient is reported by count",
                 "ghost-with-secret" not in str(out.get("blocker", "")), out)
         c.check("#538 the unexpected count is still a blocker",
@@ -1638,7 +1639,7 @@ def check_owner_preservation_538(c):
         with patched(proxykey.os, stat=stat_kept), \
                 patched(proxykey.fsutil, write_private=write_spy), \
                 patched(proxykey, OP=op):
-            out = proxykey._local_step(state())
+            out = proxykey._local_step(state(), proxykey._SEAMS)
         c.check("#538 the local step succeeds with the seam spy", out.get("ok"), out)
         own_calls = [x for x in calls if x[0] in (src, cp)]
         if c.check("#538 the local step writes both paths", len(own_calls) == 2, calls):
@@ -1667,7 +1668,7 @@ def check_owner_preservation_538(c):
                 patched(proxykey.os, geteuid=lambda: 0), \
                 patched(proxykey.fsutil, write_private=write_root), \
                 patched(proxykey, OP=op):
-            out = proxykey._local_step(state())
+            out = proxykey._local_step(state(), proxykey._SEAMS)
         c.check("#538 under a root process the local step keeps the service owner",
                 out.get("ok"), out)
         root_own = [x for x in root_cases if x[0] in (src, cp)]
@@ -1716,7 +1717,7 @@ def check_structured_reason_538(c):
         remote = FakeRemote(["old-key", "panel-key"])
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                      _put_list=put_refused, _probe=lambda k: k in ("old-key",)):
-            out = proxykey._remote_step(state())
+            out = proxykey._remote_step(state(), proxykey._SEAMS)
         c.check("#538 a structured refusal keeps the http status",
                 out.get("http_status") == 403, out)
         c.check("#538 a structured refusal keeps the enumerated reason",
@@ -1732,7 +1733,7 @@ def check_structured_reason_538(c):
 
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                      _put_list=put_refused_str, _probe=lambda k: k in ("old-key",)):
-            out = proxykey._remote_step(state())
+            out = proxykey._remote_step(state(), proxykey._SEAMS)
         c.check("#538 a plain-string reason does not ride",
                 "SECRET" not in json.dumps(out), out)
         c.check("#538 a string reason still says refused",
@@ -1744,7 +1745,7 @@ def check_structured_reason_538(c):
 
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                      _put_list=put_boom, _probe=lambda k: k in ("old-key",)):
-            out = proxykey._remote_step(state())
+            out = proxykey._remote_step(state(), proxykey._SEAMS)
         c.check("#538 an exception outcome carries no guessed status",
                 "http_status" not in out and "403" not in json.dumps(out), out)
         c.check("#538 an exception outcome stays unknown",
@@ -1758,6 +1759,82 @@ def check_structured_reason_538(c):
 # SOLUTION: полный resume со stage=accepted, подменённый os.stat показывает
 # чужого владельца -- PUT-шов не вызывается вовсе (guard до remote);
 # согласный владелец -- write_private получает сохранённого (uid,gid).
+# ── #538: явное внедрение эффектов — швы параметром, не monkeypatch ──────
+# HYPOTHESIS (RED): публичные begin/resume читали модульные глобали
+# (_fetch_list/_put_list/_probe/_deliver): #539 пришлось бы подменять
+# модуль в production. SOLUTION: маленький явный effects-объект --
+# параметр публичных функций; глобали остаются дефолтом только для
+# проверок. Устаревший resume-docstring («preflight ... не на каждом
+# входе») меняется тем же коммитом.
+def check_effects_di_538(c):
+    with tempfile.TemporaryDirectory(prefix="mop-rot-di-") as d:
+        src, cp = os.path.join(d, "s"), os.path.join(d, "c")
+        op, lock = os.path.join(d, "op.json"), os.path.join(d, "lock")
+        for p in (src, cp):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("old-key\n")
+            os.chmod(p, 0o600)
+        calls = []
+
+        class Effects:
+            def fetch_list(self):
+                calls.append("fetch")
+                return ["old-key"]
+
+            def put_list(self, keys):
+                calls.append("put")
+                return ("applied", None)
+
+            def probe(self, key):
+                calls.append("probe")
+                return not key.startswith("definitely-wrong-")
+
+            def deliver(self, key, nodes):
+                calls.append("deliver")
+                return {n: "OK" for n in nodes}
+
+        # begin/resume принимают effects=... и НЕ читают глобалей вовсе.
+        boom = dict(_fetch_list=lambda: (_ for _ in ()).throw(AssertionError(
+                        "global seam reached")), _put_list=None, _probe=None,
+                    _deliver=None)
+        eff = Effects()
+        with patched(proxykey, OP=op, LOCK=lock, **boom):
+            got = proxykey.begin(src, cp, ["node1"], exclusive=True,
+                                 effects=eff)
+            c.check("#538 begin takes an explicit effects object",
+                    isinstance(got, dict) and got.get("stage") == "ready", got)
+            out = proxykey.resume(exclusive=True, effects=eff)
+            c.check("#538 resume drives the seams through the effects object",
+                    out.get("ok") and out.get("stage") == "completed", out)
+        c.check("#538 the effects object saw the whole pipeline",
+                calls == ["fetch", "probe", "probe", "put",
+                          "probe", "probe", "probe", "deliver"], calls)
+
+        # Дефолт без effects -- прежние модульные швы (для проверок).
+        # Файлы после первого прогона держат new-key: возвращаем old-key,
+        # иначе второй begin примет new-key за old и упрётся в дрейф.
+        calls.clear()
+        for p in (src, cp):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("old-key\n")
+            os.chmod(p, 0o600)
+        with patched(proxykey, OP=op, LOCK=lock, _fetch_list=eff.fetch_list,
+                     _put_list=eff.put_list, _probe=eff.probe,
+                     _deliver=eff.deliver):
+            proxykey.begin(src, cp, ["node1"], exclusive=True)
+            out = proxykey.resume(exclusive=True)
+        c.check("#538 without effects the module seams serve as the default",
+                out.get("ok") and out.get("stage") == "completed", out)
+        c.check("#538 the default path saw the same pipeline",
+                calls == ["fetch", "probe", "probe", "put",
+                          "probe", "probe", "probe", "deliver"], calls)
+
+        # Устаревший docstring про preflight-only-start исчез.
+        doc = proxykey.resume.__doc__ or ""
+        c.check("#538 the stale resume docstring is gone",
+                "не на каждом входе" not in doc, doc)
+
+
 def check_owner_in_resume_flow_538(c):
     import types
     with tempfile.TemporaryDirectory(prefix="mop-rot-flow-") as d:
@@ -1847,6 +1924,7 @@ def main():
     check_owner_preservation_538(c)
     check_structured_reason_538(c)
     check_owner_in_resume_flow_538(c)
+    check_effects_di_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

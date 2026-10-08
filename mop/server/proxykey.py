@@ -81,7 +81,7 @@ def _lock(path=None):
         os.close(fd)
 
 
-def begin(source_path, copy_path, recipients, *, exclusive):
+def begin(source_path, copy_path, recipients, *, exclusive, effects=None):
     """Начать ротацию: проверить условие, родить ключ, записать состояние.
 
     Никаких remote-швов: begin только создаёт приватное состояние ДО любого
@@ -92,6 +92,7 @@ def begin(source_path, copy_path, recipients, *, exclusive):
     ключей."""
     if exclusive is not True:
         raise RuntimeError("rotation requires the exclusive-writer precondition")
+    seams = effects if effects is not None else _SEAMS
     with _lock():
         prior = _load_op()
         if prior is not None:
@@ -114,16 +115,20 @@ def begin(source_path, copy_path, recipients, *, exclusive):
         return _project(state)
 
 
-def resume(*, exclusive):
+def resume(*, exclusive, effects=None):
     """Продолжить незавершённую ротацию по её приватному состоянию.
 
     exclusive -- то же обязательное явное условие на КАЖДОМ входе. Ведёт
-    шаги по сохранённым чекпоинтам до первого блокера: preflight (на старте
-    операции, не на каждом входе) → remote-список → probe-подтверждение →
-    локальная смена → раздача. Завершённая операция читается как завершённая.
+    шаги по сохранённым чекпоинтам до первого блокера: guard перед
+    КАЖДОЙ мутирующей фазой → remote-список (pre-PUT пробы авторизации)
+    → probe-подтверждение → локальная смена → раздача. Завершённая
+    операция читается как завершённая. effects -- явное внедрение швов
+    (#539 не подменяет модуль): маленький объект с fetch_list/put_list/
+    probe/deliver; без него -- модульные швы (дефолт для проверок).
     -> {"ok": bool, ...} без ключей."""
     if exclusive is not True:
         raise RuntimeError("rotation requires the exclusive-writer precondition")
+    seams = effects if effects is not None else _SEAMS
     with _lock():
         state = _checked_state()
         if state.get("stage") == "completed":
@@ -136,7 +141,7 @@ def resume(*, exclusive):
         steps = {"ready": _remote_step, "listed": _probe_step,
                  "accepted": _local_step, "local": _deliver_step}
         while state["stage"] in steps:
-            out = steps[state["stage"]](state)
+            out = steps[state["stage"]](state, seams)
             if not out.get("ok"):
                 return out
         return {"ok": True, "stage": state["stage"]}
@@ -357,6 +362,20 @@ def _preflight(state):
     return _guard(state)
 
 
+class _ModuleSeams:
+    """Дефолтные швы для проверок: тонкая обёртка над модульными
+    функциями. Production-вызывающий #539 передаёт свой effects-объект
+    явно и подмены модуля нет."""
+
+    fetch_list = staticmethod(lambda: _fetch_list())
+    put_list = staticmethod(lambda keys: _put_list(keys))
+    probe = staticmethod(lambda key: _probe(key))
+    deliver = staticmethod(lambda key, nodes: _deliver(key, nodes))
+
+
+_SEAMS = _ModuleSeams()
+
+
 PUT_TAGS = ("applied", "refused")
 # допустимые теги исхода шва PUT: "applied" -- записано (применение
 # доказывает только probe), "refused" -- подтверждённый отказ ДО
@@ -368,7 +387,7 @@ REASONS = ("unauthorized", "forbidden", "access_denied", "conflict",
 HTTP_MIN, HTTP_MAX = 100, 599
 
 
-def _remote_step(state):
+def _remote_step(state, seams):
     """Шаг remote-списка: свежее чтение, объединение, типизированный исход.
 
     Читает список СВЕЖО (панель могла писать между шагами), пишет
@@ -380,7 +399,7 @@ def _remote_step(state):
     не теряется. -> {"ok": bool, ...} без ключей."""
     out = {"ok": False}
     try:
-        keys = _fetch_list()
+        keys = seams.fetch_list()
     except Exception as e:  # noqa: BLE001 -- причина шва, не его payload
         out["blocker"] = f"cannot read the key list ({type(e).__name__})"
         return out
@@ -402,7 +421,7 @@ def _remote_step(state):
     # (пустой список открывает прокси, #537). Post-PUT пробы new/old/
     # wrong остаются в _probe_step.
     try:
-        old_accepted = _probe(state["old"])
+        old_accepted = seams.probe(state["old"])
     except Exception as e:  # noqa: BLE001 -- причина шва, не payload
         return {"ok": False,
                 "blocker": f"cannot probe the old key ({type(e).__name__})"}
@@ -413,7 +432,7 @@ def _remote_step(state):
                            "decision"}
     wrong = "definitely-wrong-" + state["id"]
     try:
-        wrong_accepted = _probe(wrong)
+        wrong_accepted = seams.probe(wrong)
     except Exception as e:  # noqa: BLE001
         return {"ok": False,
                 "blocker": f"cannot probe with a wrong key ({type(e).__name__})"}
@@ -423,7 +442,7 @@ def _remote_step(state):
                            "refusing to mutate the list"}
     want = keys + [state["new"]] if state["new"] not in keys else keys
     try:
-        verdict = _put_list(want)
+        verdict = seams.put_list(want)
     except Exception as e:  # noqa: BLE001 -- любой транспортный класс шва:
         # неизвестный исход, не отказ ДО применения; BaseException
         # (SystemExit/KeyboardInterrupt) не глотается.
@@ -459,7 +478,7 @@ def _remote_step(state):
     return out
 
 
-def _probe_step(state):
+def _probe_step(state, seams):
     """Шаг подтверждения применения: только probes доказывают, что прокси
     принимает ключи. Успех PUT -- запись, не применение (#537: конфиг
     применяет асинхронная горутина). Нужно всё сразу: new принят, old
@@ -468,7 +487,7 @@ def _probe_step(state):
     авторизацию (пустой список открывает прокси). -> {"ok": bool, ...} без
     ключей."""
     try:
-        accepted_new = _probe(state["new"])
+        accepted_new = seams.probe(state["new"])
     except Exception as e:  # noqa: BLE001 -- причина шва, не его payload
         return {"ok": False,
                 "blocker": f"cannot probe the new key ({type(e).__name__})"}
@@ -478,7 +497,7 @@ def _probe_step(state):
                 "blocker": "pending: the proxy does not accept the new key yet "
                            "(async apply); bounded rechecks, then pending stands"}
     try:
-        accepted_old = _probe(state["old"])
+        accepted_old = seams.probe(state["old"])
     except Exception as e:  # noqa: BLE001
         return {"ok": False,
                 "blocker": f"cannot probe the old key ({type(e).__name__})"}
@@ -488,7 +507,7 @@ def _probe_step(state):
                            "operation issued anything; distribution would strand nodes"}
     wrong = "definitely-wrong-" + state["id"]
     try:
-        wrong_accepted = _probe(wrong)
+        wrong_accepted = seams.probe(wrong)
     except Exception as e:  # noqa: BLE001
         return {"ok": False,
                 "blocker": f"cannot probe with a wrong key ({type(e).__name__})"}
@@ -501,7 +520,7 @@ def _probe_step(state):
     return {"ok": True, "stage": state["stage"]}
 
 
-def _local_step(state):
+def _local_step(state, seams):
     """Локальная смена: new в источник и копию, атомарно и приватно.
     Идемпотентна: crash между двумя записями оставляет сплит «источник
     новый, копия старая» -- повтор шага заканчивает начатое, ключ тот же
@@ -516,7 +535,7 @@ def _local_step(state):
     return {"ok": True, "stage": state["stage"]}
 
 
-def _deliver_step(state):
+def _deliver_step(state, seams):
     """Раздача blob по ЗАМОРОЖЕННОМУ сохранённому списку получателей:
     ready_nodes здесь не спрашивают -- offline-узел выпал бы из списка, и
     частичная раздача закрылась бы как полная. Итог судит strict_settled:
@@ -529,7 +548,7 @@ def _deliver_step(state):
         return {"ok": True, "stage": "completed", "note": "0 recipients: "
                 "the saved recipient set is empty"}
     try:
-        answers = _deliver(state["new"], nodes)
+        answers = seams.deliver(state["new"], nodes)
     except Exception as e:  # noqa: BLE001 -- причина шва, не его payload
         return {"ok": False,
                 "blocker": f"delivery failed ({type(e).__name__}); "
