@@ -128,10 +128,11 @@ def resume(*, exclusive):
         state = _checked_state()
         if state.get("stage") == "completed":
             return {"ok": True, "stage": "completed"}
-        if state.get("stage") == "ready":
-            blocker = _preflight(state)
-            if blocker:
-                return {"ok": False, "blocker": blocker}
+        # Guard на каждом входе перед mutating-шагом: пауза на любой
+        # стадии не открывает окно третьей стороне.
+        blocker = _guard(state)
+        if blocker:
+            return {"ok": False, "blocker": blocker}
         steps = {"ready": _remote_step, "listed": _probe_step,
                  "accepted": _local_step, "local": _deliver_step}
         while state["stage"] in steps:
@@ -228,37 +229,68 @@ def _new_key():
     return secrets.token_urlsafe(32)
 
 
-def _preflight(state):
-    """Локальные именованные блокеры ДО любой remote-мутации. -> None |
-    строка-блокер. Третье значение (не old, не new) -- drift: оператор
-    решает ДО изменения. Сервисопригодность копии: права прежние, режим
-    приватный -- атомарная запись под root сменила бы владельца и отрезала
-    бы сервис от его копии."""
-    for path, what in ((state["source"], "source"), (state["copy"], "copy")):
-        key = _key_or_none(path)
-        if key is None:
-            return f"blocker: {what} file {path} is missing or empty"
-        if key not in (state["old"], state["new"]):
-            return (f"drift: {what} file {path} holds neither the old nor "
-                    f"the new key of the operation")
-    try:
-        mode = stat.S_IMODE(os.stat(state["copy"]).st_mode)
-    except OSError as e:
-        return f"blocker: copy file {state['copy']} is not serviceable: {e.strerror}"
-    if mode & 0o077:
-        return (f"blocker: copy file {state['copy']} mode {oct(mode)} is not "
-                f"private; rotation must preserve a serviceable copy")
-    return None
-
-
-def _key_or_none(path):
-    """Ключ из файла либо None: нет файла, нечитаем или пуст."""
+def _read_file_key(path):
+    """Ключ из файла с различённой причиной. -> (причина, ключ | None):
+    "ok" | "missing" | "empty" | "permission" | "io". Различение не для
+    красоты: «нет файла» и «нет прав» -- разные решения оператора."""
     try:
         with open(path, encoding="utf-8") as f:
             key = f.read().rstrip("\r\n")
+    except FileNotFoundError:
+        return "missing", None
+    except IsADirectoryError:
+        return "io", None
+    except PermissionError:
+        return "permission", None
     except OSError:
-        return None
-    return key or None
+        return "io", None
+    if not key:
+        return "empty", None
+    return "ok", key
+
+
+def _serviceable(state):
+    """Сервисопригодность ОБЕИХ путей до remote: режим приватный, владелец
+    -- сам процесс. Владелец нужен ДО первой записи: атомарный replace
+    без owner под root отдаёт inode процессу, и root:0600 отрезает сервис
+    от его копии. -> None | строка-блокер."""
+    for what, path in (("source", state["source"]), ("copy", state["copy"])):
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError as e:
+            return f"blocker: {what} file {path} is not serviceable: {e.strerror}"
+        if mode & 0o077:
+            return (f"blocker: {what} file {path} mode {oct(mode)} is not "
+                    f"private; rotation must preserve a serviceable copy")
+        owner = os.stat(path).st_uid
+        if owner != os.getuid():
+            return (f"blocker: {what} file {path} is owned by uid {owner}, "
+                    f"not this process; an atomic write would strand the service")
+    return None
+
+
+def _guard(state):
+    """Guard КАЖДОГО resume перед mutating-шагом: пауза на поздней стадии
+    не открывает окно третьей стороне. Собственный сплит (old/new) --
+    восстанавливаем; третье значение, смена владельца или режима --
+    блокер. -> None | строка-блокер."""
+    blocker = _serviceable(state)
+    if blocker:
+        return blocker
+    for what, path in (("source", state["source"]), ("copy", state["copy"])):
+        why, key = _read_file_key(path)
+        if why != "ok":
+            return f"blocker: {what} file {path} is {why}"
+        if key not in (state["old"], state["new"]):
+            return (f"drift: {what} file {path} holds neither the old nor "
+                    f"the new key of the operation")
+    return None
+
+
+def _preflight(state):
+    """Локальные именованные блокеры ДО любой remote-мутации: guard
+    состояния на старте операции (ready). -> None | строка-блокер."""
+    return _guard(state)
 
 
 def _remote_step(state):

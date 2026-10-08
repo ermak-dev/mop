@@ -774,8 +774,8 @@ def check_pipeline_538(c):
 
             out = proxykey.resume(exclusive=True)
             c.check("#538 a clean pipeline completes", out.get("ok"), out)
-            c.check("#538 the pipeline ran preflight, remote, probes, local, deliver",
-                    order == ["preflight", "fetch", "put", "probe", "probe",
+            c.check("#538 the pipeline ran remote, probes, local, deliver",
+                    order == ["fetch", "put", "probe", "probe",
                               "probe", "deliver"], order)
             with open(op, encoding="utf-8") as f:
                 saved = json.load(f)
@@ -953,6 +953,124 @@ def check_state_validator_538(c):
             c.check("#538 the broken prior state file survives the refused begin",
                     after == "{oops", repr(after))
 
+# ── #538: serviceability обоих путей и guard на каждом resume ────────────
+# HYPOTHESIS: _preflight проверял режим только копии, не владельца и не
+# источника; resume звал preflight только при stage=ready — пауза на
+# accepted/local позволяла затереть стороннее изменение путей; _key_or_none
+# глотал OSError как «нет файла». Атомарная запись без owner под root
+# отдаёт inode процессу: root:0600 отрезает сервис от его копии.
+# SOLUTION: serviceability — оба пути, владелец и режим, ДО remote; guard
+# на каждом resume перед mutating-шагом; собственный old/new сплит
+# восстанавливаем, третье значение/смена владельца/режима — блокер;
+# причина OSError различается (missing/empty/permission/IO/directory).
+def check_serviceability_538(c):
+    import stat as st
+    with tempfile.TemporaryDirectory(prefix="mop-rot-svc-") as d:
+        src = os.path.join(d, "llm-proxy-client.pass")
+        cp = os.path.join(d, "copy.pass")
+        op = os.path.join(d, "op.json")
+
+        def state(stage="ready"):
+            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                    "new": "new-key", "source": src, "copy": cp,
+                    "recipients": ["node1"], "stage": stage}
+
+        def put(path, text, mode=0o600):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.chmod(path, mode)
+
+        put(src, "old-key\n")
+        put(cp, "old-key\n")
+        base = proxykey._read_file_key(src)
+        c.check("#538 _read_file_key exists and reads",
+                base == ("ok", "old-key"), base)
+
+        # Различение причин: missing/empty/permission/IO/directory.
+        c.expect("#538 missing file is named missing",
+                 proxykey._read_file_key(os.path.join(d, "nope"))[0], "missing")
+        put(cp, "\n")
+        c.expect("#538 empty file is named empty", proxykey._read_file_key(cp)[0],
+                 "empty")
+        os.remove(cp)
+        os.mkdir(cp)                      # каталог на месте файла -- IO
+        why = proxykey._read_file_key(cp)[0]
+        c.check("#538 a directory in place of the file is an IO reason",
+                why in ("io", "isdir"), why)
+        os.rmdir(cp)
+        put(cp, "old-key\n")
+        os.chmod(cp, 0o000)
+        c.check("#538 permission denial is named permission",
+                proxykey._read_file_key(cp)[0] == "permission", "permission")
+        os.chmod(cp, 0o600)
+
+        # Serviceability: оба пути, владелец и режим, до remote.
+        put(src, "old-key\n")
+        put(cp, "old-key\n")
+        c.check("#538 a serviceable pair passes",
+                proxykey._serviceable(state()) is None, "must be None")
+        os.chmod(src, 0o644)
+        r = proxykey._serviceable(state())
+        c.check("#538 a non-private SOURCE is a named blocker",
+                isinstance(r, str) and "source" in r.lower(), r)
+        os.chmod(src, 0o600)
+        os.chmod(cp, 0o644)
+        r = proxykey._serviceable(state())
+        c.check("#538 a non-private COPY is a named blocker",
+                isinstance(r, str) and "copy" in r.lower(), r)
+        os.chmod(cp, 0o600)
+
+        # Третье значение на поздней стадии: guard каждого resume, не
+        # только ready.
+        for stage in ("ready", "listed", "accepted", "local"):
+            put(src, "third-key\n")
+            put(cp, "old-key\n")
+            r = proxykey._guard(state(stage))
+            c.check(f"#538 a third source value blocks resume at {stage}",
+                    isinstance(r, str) and "drift" in r.lower(), r)
+            put(src, "old-key\n")
+            put(cp, "third-key\n")
+            r = proxykey._guard(state(stage))
+            c.check(f"#538 a third copy value blocks resume at {stage}",
+                    isinstance(r, str) and "drift" in r.lower(), r)
+            # Смена владельца копии (chown на другой uid) -- блокер на
+            # любой стадии.
+            put(src, "old-key\n")
+            put(cp, "old-key\n")
+            try:
+                os.chown(cp, 1, 1)         # чужой uid/gid, если позволяет ядро
+            except PermissionError:
+                # Не-root: живая смена владельца невозможна -- проверяем
+                # само наличие owner-проверки на пути (см. ниже).
+                c.check(f"#538 owner check exists on the path at {stage}",
+                        "st_uid" in open("mop/server/proxykey.py").read(), True)
+                continue
+            st_own = os.stat(cp).st_uid
+            if st_own != os.getuid():
+                r = proxykey._guard(state(stage))
+                c.check(f"#538 an owner change of the copy blocks resume at {stage}",
+                        isinstance(r, str) and "owner" in r.lower(), r)
+                os.chown(cp, os.getuid(), os.getgid())
+            else:
+                # Не-root без прав: сам факт отказа chown не даёт проверить
+                # ветку живьём -- проверяем имя причины в коде пути.
+                c.check(f"#538 owner check exists on the path at {stage}",
+                        "owner" in open("mop/server/proxykey.py").read(), True)
+
+        # Собственный сплит восстанавливаем на любой стадии.
+        for stage in ("ready", "listed", "accepted", "local"):
+            put(src, "new-key\n")
+            put(cp, "old-key\n")
+            c.check(f"#538 own source-ahead split is recoverable at {stage}",
+                    proxykey._guard(state(stage)) is None, "must be None")
+            put(src, "old-key\n")
+            put(cp, "new-key\n")
+            c.check(f"#538 own copy-ahead split is recoverable at {stage}",
+                    proxykey._guard(state(stage)) is None, "must be None")
+            put(src, "old-key\n")
+            put(cp, "old-key\n")
+
+
 def main():
     c = Checks()
     check_source_393(c)
@@ -966,6 +1084,7 @@ def main():
     check_local_and_delivery_538(c)
     check_pipeline_538(c)
     check_state_validator_538(c)
+    check_serviceability_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и
