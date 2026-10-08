@@ -225,6 +225,77 @@ def main():
                               os.path.isdir(os.path.join(xdir, "adir"))
                               and os.listdir(os.path.join(xdir, "adir")) == [],
                               True)
+
+                        # ── один writer, не копия внутри fsutil (ревью #542) ──
+                        # HYPOTHESIS: write_private_dirfd продублировал тело
+                        # _write в том же файле: guard #153 снаружи зелёный, а
+                        # писателя снова два. SOLUTION: _write получает
+                        # keyword dir_fd, adapter тонкий, owner/fsync/nonce --
+                        # одним телом; path-форма не меняется.
+                        import inspect as _inspect
+                        c.check("_write carries the dir_fd keyword (#542)",
+                                "dir_fd" in _inspect.signature(fsutil._write).parameters)
+                        routed = []
+                        with _lib.patched(fsutil, _write=lambda *a, **k: routed.append((a, k))):
+                            fsutil.write_private_dirfd(dfd, "route", b"x")
+                            fsutil.write_private(os.path.join(xdir, "bypath"), b"y")
+                        ok_route = (len(routed) == 2
+                                    and routed[0][0][:2] == ("route", b"x")
+                                    and routed[0][1].get("private") is True
+                                    and routed[0][1].get("dir_fd") == dfd
+                                    and routed[1][0][:2] == (os.path.join(xdir, "bypath"), b"y")
+                                    and "dir_fd" not in routed[1][1])
+                        c.check("write_private_dirfd is a thin _write adapter (#542)",
+                              ok_route, True)
+                        c.check("write_private keeps the path form (#542)",
+                              len(routed) == 2
+                              and routed[1][1].get("private") is True, True)
+
+                        # ── имена по fd -- строго single entry (ревью #542) ──
+                        # Пустое, '.', '..', с '/' или NUL уводит запись из
+                        # каталога-якоря (path traversal, усечение c_char_p)
+                        # и обязано отказать ValueError ДО всякого syscall.
+                        import errno as _errno
+                        bad = ["", ".", "..", "a/b", "/abs", "a/../b", "a\x00b"]
+                        before_bad = sorted(os.listdir(xdir))
+                        escaped = []
+                        for n in bad:
+                            for attempt in (
+                                lambda: fsutil.rename_noreplace(dfd, n, dfd, "free1"),
+                                lambda: fsutil.rename_noreplace(dfd, "free1", dfd, n),
+                                lambda: fsutil.write_private_dirfd(dfd, n, b"x"),
+                            ):
+                                try:
+                                    attempt()
+                                    escaped.append(repr(n))
+                                except ValueError:
+                                    pass  # единственный правильный отказ
+                                except OSError as e:
+                                    # имя дошло до syscall -- не отказ ДО него
+                                    escaped.append(f"{n!r}: {e.errno}")
+                        c.expect("dirfd names are strict single entries (#542)",
+                              escaped, [])
+                        c.expect("a bad name touches nothing on disk (#542)",
+                              sorted(os.listdir(xdir)), before_bad)
+
+                        # ── нет renameat2 -- ENOSYS, без fallback (ревью #542) ──
+                        import ctypes as _ctypes
+                        def _no_renameat2():
+                            raise OSError(_errno.ENOSYS,
+                                          "renameat2 is not available on this platform")
+                        seen = None
+                        with _lib.patched(fsutil, _renameat2=_no_renameat2):
+                            try:
+                                fsutil.rename_noreplace(dfd, "newf", dfd, "adir")
+                                seen = "no refusal"
+                            except OSError as e:
+                                seen = e.errno
+                        c.check("rename_noreplace: no renameat2 -> ENOSYS, no fallback (#542)",
+                              seen, _errno.ENOSYS)
+                        with open(os.path.join(xdir, "newf"), "rb") as f:
+                            c.check("rename_noreplace: ENOSYS leaves names intact (#542)",
+                                  f.read() == b"secret"
+                                  and os.path.isdir(os.path.join(xdir, "adir")), True)
                     finally:
                         os.close(dfd)
                 c.expect("write_private: no temp left",

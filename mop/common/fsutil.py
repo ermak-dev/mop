@@ -14,19 +14,39 @@ import os
 import secrets
 
 
-def _write(path, data, private, owner=None):
+def _single_entry(name):
+    """Имя записи В КАТАЛОГЕ ПО fd: строго одна запись (#542).
+
+    Пустое имя, '.', '..', с '/' или NUL уводит запись из каталога-якоря:
+    '/' разрешается относительно fd (path traversal), абсолютный путь fd
+    игнорирует вовсе, NUL обрезает c_char_p в renameat2. Отказ ДО всякого
+    syscall -- ValueError, а не надежда на errno от самого syscall."""
+    if (not isinstance(name, str) or not name or "/" in name or "\0" in name
+            or name in (".", "..")):
+        raise ValueError(f"not a single directory entry: {name!r}")
+
+
+def _write(path, data, private, owner=None, dir_fd=None):
     """Временный файл рядом, fsync, rename. Читатель видит либо прежний файл
     целиком, либо новый целиком: nats-server перечитывает users.conf в любой
     момент, а обрыв посреди записи кредов оставлял усечённый файл.
 
     owner -- (uid, gid) файла, отданный до первого байта (#234): не выходит
-    -- OSError, и на месте остаётся прежний файл, а не чужой."""
+    -- OSError, и на месте остаётся прежний файл, а не чужой.
+
+    dir_fd -- писать в каталог по его fd, path -- ОДНО имя записи в нём
+    (см. _single_entry): путь подменяют (rmtree + чужой mkdir), а fd держит
+    каталог, на котором стоит попытка (#542)."""
     raw = data.encode() if isinstance(data, str) else data
     # Имя с солью, а не `path.tmp`: два писателя одного файла не пишут в
     # один временный, а брошенный после обрыва не мешает следующей записи.
-    tmp = f"{path}.{secrets.token_hex(4)}.tmp"
+    if dir_fd is None:
+        tmp = f"{path}.{secrets.token_hex(4)}.tmp"
+    else:
+        _single_entry(path)
+        tmp = f".{path}.{secrets.token_hex(4)}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                 0o600 if private else 0o666)
+                 0o600 if private else 0o666, dir_fd=dir_fd)
     try:
         if private:
             # 0600 до первого байта и независимо от umask: mode у open
@@ -41,12 +61,12 @@ def _write(path, data, private, owner=None):
             f.write(raw)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        os.replace(tmp, path, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except BaseException:
         if fd is not None:
             os.close(fd)
         try:
-            os.remove(tmp)
+            os.unlink(tmp, dir_fd=dir_fd)
         except FileNotFoundError:
             pass
         raise
@@ -61,34 +81,33 @@ def write_private(path, data, owner=None):
 def write_private_dirfd(dirfd, name, data):
     """Приватный файл В КАТАЛОГЕ ПО ЕГО fd, не по пути (#542).
 
-    Тот же writer, что write_private (временный с солью + fsync + rename,
-    0600 до первого байта), но имя каталога не используется вовсе: путь
-    подменяют (rmtree + чужой mkdir), а fd держит каталог, на котором
-    стоит попытка. Подмена между записями ломается здесь же ENOENT --
-    отвязанный каталог новых имён не даёт."""
-    raw = data.encode() if isinstance(data, str) else data
-    tmp = f".{name}.{secrets.token_hex(4)}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dirfd)
-    try:
-        # 0600 до первого байта и независимо от umask.
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            fd = None
-            f.write(raw)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
-    except BaseException:
-        if fd is not None:
-            os.close(fd)
-        try:
-            os.unlink(tmp, dir_fd=dirfd)
-        except FileNotFoundError:
-            pass
-        raise
+    Тонкая обёртка того же _write (dir_fd): имя каталога не используется
+    вовсе -- путь подменяют (rmtree + чужой mkdir), а fd держит якорь.
+    Подмена между записями ломается здесь же ENOENT -- отвязанный каталог
+    новых имён не даёт."""
+    _write(name, data, private=True, dir_fd=dirfd)
 
 
 _RENAME_NOREPLACE = 1 << 0
+
+
+def _renameat2():
+    """Загруженный renameat2 (lazy): недоступен -- OSError ENOSYS (#542).
+
+    Загрузка при первом вызове, не при импорте модуля: fsutil тянет и
+    config на клиенте, и агент на узле, и наличие libc-символа не должно
+    решать, импортируется ли пакет вообще. Платформа без флага --
+    именованное ограничение вызывающему, не молчаливый fallback."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        fn = libc.renameat2
+    except AttributeError:
+        raise OSError(errno.ENOSYS,
+                      "renameat2 is not available on this platform") from None
+    fn.restype = ctypes.c_int
+    fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                   ctypes.c_char_p, ctypes.c_uint]
+    return fn
 
 
 def rename_noreplace(src_dirfd, src_name, dst_dirfd, dst_name):
@@ -98,17 +117,14 @@ def rename_noreplace(src_dirfd, src_name, dst_dirfd, dst_name):
     symlink) -- False, цель не тронута; свободно -- True и перенесено
     атомарно. Это единственный способ заявить имя без окна «проверил --
     затем положил»: между stat и rename имя занимает чужой, и обычный
-    os.rename молча затёр бы его. Недоступность renameat2 (ENOSYS/EINVAL
-    -- ядро или ФС без флага) поднимает OSError -- вызывающий обязан
-    отказать, а не откатываться к проверке-затем-rename."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    try:
-        fn = libc.renameat2
-    except AttributeError:
-        raise OSError(errno.ENOSYS, "renameat2 is not available on this platform") from None
-    fn.restype = ctypes.c_int
-    fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
-                   ctypes.c_char_p, ctypes.c_uint]
+    os.rename молча затёр бы его. Имена -- строго single entry (см.
+    _single_entry): '/' уводит перенос из якоря, NUL обрезает c_char_p.
+    Недоступность renameat2 (ENOSYS/EINVAL -- ядро или ФС без флага)
+    поднимает OSError -- вызывающий обязан отказать, а не откатываться
+    к проверке-затем-rename."""
+    _single_entry(src_name)
+    _single_entry(dst_name)
+    fn = _renameat2()
     ctypes.set_errno(0)
     got = fn(src_dirfd, os.fsencode(src_name), dst_dirfd,
              os.fsencode(dst_name), _RENAME_NOREPLACE)
