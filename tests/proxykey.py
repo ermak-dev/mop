@@ -514,15 +514,17 @@ def check_remote_step_538(c):
         c.check("#538 the remote checkpoint is saved",
                 saved.get("stage") == out.get("stage"), saved)
 
-        # Подтверждённый отказ ДО применения -- блокер с причиной, список
-        # прокси не изменён, ключи не потеряны.
+        # Подтверждённый отказ ДО применения -- блокер, список прокси не
+        # изменён; причина шва НЕ echo-ится raw (может нести payload).
         remote = FakeRemote(["old-key", "panel-key"],
                             refuse_put=("refused", "403 forbidden"))
         with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
                      _put_list=remote.put_list, _probe=remote.probe):
             out = step(state())
-        c.check("#538 a confirmed pre-apply refusal blocks with the reason",
-                not out.get("ok") and "403" in str(out.get("blocker")), out)
+        c.check("#538 a confirmed pre-apply refusal blocks",
+                not out.get("ok") and out.get("refused") is True, out)
+        c.check("#538 the refused blocker carries no raw seam reason",
+                "403" not in str(out), out)
         c.check("#538 a refused PUT did not change the proxy list",
                 remote.keys == ["old-key", "panel-key"], remote.keys)
 
@@ -1071,6 +1073,135 @@ def check_serviceability_538(c):
             put(cp, "old-key\n")
 
 
+# ── #538: покрытие получателей и типизированные исходы швов ─────────────
+# HYPOTHESIS: _deliver_step доверял all(isinstance(v,str)) -- на ПУСТОМ
+# answers это истинно, и strict_settled({}) закрывал раздачу при живом
+# списке получателей; verdict шва любой не-"applied" объявлялся
+# refused-before-applying; raw reason шва ехал в блокер как есть.
+# SOLUTION: покрытие сверяется с сохранённым списком получателей --
+# отсутствующий узел явно NOT REACHED/pending, subset не завершает;
+# допустимые verdict-теги шва перечислены, неизвестный тег -- исход
+# unknown с чекпоинтом; причина шва -- safe-строка, не raw-echo.
+def check_coverage_and_verdicts_538(c):
+    with tempfile.TemporaryDirectory(prefix="mop-rot-cov-") as d:
+        op = os.path.join(d, "op.json")
+
+        def state(stage="local"):
+            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                    "new": "new-key", "source": os.path.join(d, "s"),
+                    "copy": os.path.join(d, "c"),
+                    "recipients": ["node1", "node2"], "stage": stage}
+
+        # Пустые answers при живом списке -- НЕ завершение: каждый
+        # отсутствующий получатель явно назван недошедшим.
+        def deliver_empty(key, nodes):
+            return {}
+
+        with patched(proxykey, OP=op, _deliver=deliver_empty):
+            out = proxykey._deliver_step(state())
+        c.check("#538 empty answers never complete a live recipient set",
+                not out.get("ok"), out)
+        c.check("#538 the blocker names the missing recipients",
+                "node1" in str(out.get("blocker", "")) and
+                "node2" in str(out.get("blocker", "")), out)
+        with open(op, encoding="utf-8") as f:
+            saved = json.load(f)
+        c.expect("#538 missing recipients are checkpointed as not reached",
+                 saved.get("delivered", {}).get("node1"), "NOT REACHED: no answer")
+        c.expect("#538 the second missing recipient too",
+                 saved.get("delivered", {}).get("node2"), "NOT REACHED: no answer")
+        c.check("#538 an incomplete delivery is not completed",
+                saved.get("stage") != "completed", saved.get("stage"))
+
+        # Subset ответов -- тоже не завершение.
+        def deliver_partial(key, nodes):
+            return {"node1": "OK"}
+
+        with patched(proxykey, OP=op, _deliver=deliver_partial):
+            out = proxykey._deliver_step(state())
+        c.check("#538 a subset answer set never completes",
+                not out.get("ok") and "node2" in str(out.get("blocker", "")), out)
+
+        # Неожиданный получатель в ответах -- не выдаётся за успех и не
+        # расширяет сохранённый список.
+        def deliver_extra(key, nodes):
+            return {"node1": "OK", "node2": "OK", "ghost": "OK"}
+
+        with patched(proxykey, OP=op, _deliver=deliver_extra):
+            out = proxykey._deliver_step(state())
+        c.check("#538 an unexpected recipient does not count",
+                not out.get("ok") and "ghost" in str(out.get("blocker", "")), out)
+        with open(op, encoding="utf-8") as f:
+            saved = json.load(f)
+        c.check("#538 the saved recipient set does not grow",
+                sorted(saved.get("delivered", {})) == ["node1", "node2"],
+                saved.get("delivered"))
+
+        # Полное покрытие OK -- завершение.
+        def deliver_full(key, nodes):
+            return {"node1": "OK", "node2": "OK"}
+
+        with patched(proxykey, OP=op, _deliver=deliver_full):
+            out = proxykey._deliver_step(state())
+        c.check("#538 full coverage completes", out.get("ok"), out)
+
+        # Допустимые verdict-теги шва PUT перечислены; неизвестный тег --
+        # исход unknown, не refused-before-applying.
+        remote = FakeRemote(["old-key", "panel-key"])
+        tags = {"weird-tag": ("unknown", "не известен тегу исхода")}
+
+        def put(keys):
+            remote.puts.append(list(keys))
+            return tags["weird-tag"]
+
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list, _put_list=put):
+            out = proxykey._remote_step(state(stage="ready"))
+        c.check("#538 an unknown verdict tag is an unknown outcome",
+                not out.get("ok") and out.get("unknown") is True
+                and "unknown" in str(out.get("blocker", "")).lower(), out)
+        c.check("#538 an unknown tag is not declared a pre-apply refusal",
+                not out.get("refused"), out)
+
+        # Refused-тег остаётся refused; reason шва не echo-ится raw.
+        refuse = ("refused", "403 FORBIDDEN raw body with key=SECRET_KEY")
+
+        def put_refused(keys):
+            return refuse
+
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=put_refused):
+            out = proxykey._remote_step(state(stage="ready"))
+        c.check("#538 a refused PUT stays refused with a safe reason",
+                out.get("refused") is True and "SECRET_KEY" not in str(out), out)
+
+        # Исключения швов fetch/probe/deliver: состояние сохранено, причина
+        # safe (имя типа, не payload).
+        def fetch_boom():
+            raise ConnectionError("GET https://x/y Authorization: Bearer RAWKEY")
+
+        with patched(proxykey, OP=op, _fetch_list=fetch_boom):
+            out = proxykey._remote_step(state(stage="ready"))
+        c.check("#538 a fetch exception is a safe blocker without payload",
+                not out.get("ok") and "RAWKEY" not in str(out)
+                and "ConnectionError" in str(out.get("blocker", "")), out)
+
+        def probe_boom(key):
+            raise TimeoutError("probe body with key=new-key")
+
+        with patched(proxykey, OP=op, _probe=probe_boom):
+            out = proxykey._probe_step(state(stage="listed"))
+        c.check("#538 a probe exception is a safe blocker without payload",
+                not out.get("ok") and "new-key" not in str(out), out)
+
+        def deliver_boom(key, nodes):
+            raise OSError("ssh: password=MOP_PROXY_KEY leaked")
+
+        with patched(proxykey, OP=op, _deliver=deliver_boom):
+            out = proxykey._deliver_step(state())
+        c.check("#538 a delivery exception is a safe blocker without payload",
+                not out.get("ok") and "MOP_PROXY_KEY" not in str(out), out)
+
+
 def main():
     c = Checks()
     check_source_393(c)
@@ -1085,6 +1216,7 @@ def main():
     check_pipeline_538(c)
     check_state_validator_538(c)
     check_serviceability_538(c)
+    check_coverage_and_verdicts_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

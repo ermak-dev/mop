@@ -293,6 +293,12 @@ def _preflight(state):
     return _guard(state)
 
 
+PUT_TAGS = ("applied", "refused")
+# допустимые теги исхода шва PUT: "applied" -- записано (применение
+# доказывает только probe), "refused" -- подтверждённый отказ ДО
+# применения. Всё прочее из шва -- неизвестный исход, не отказ.
+
+
 def _remote_step(state):
     """Шаг remote-списка: свежее чтение, объединение, типизированный исход.
 
@@ -303,7 +309,11 @@ def _remote_step(state):
     изменения -- иначе drift, и решает оператор. -> {"ok": bool, ...} без
     ключей."""
     out = {"ok": False}
-    keys = _fetch_list()
+    try:
+        keys = _fetch_list()
+    except Exception as e:  # noqa: BLE001 -- причина шва, не его payload
+        out["blocker"] = f"cannot read the key list ({type(e).__name__})"
+        return out
     if not keys:
         out["blocker"] = "the read key list is empty; an empty list is never written"
         return out
@@ -313,15 +323,22 @@ def _remote_step(state):
         return out
     want = keys + [state["new"]] if state["new"] not in keys else keys
     try:
-        verdict, reason = _put_list(want)
+        verdict = _put_list(want)
     except (OSError, TimeoutError) as e:
         # Unknown-исход: PUT мог примениться. Не откатываем, не меняем
         # ключ: reconcile на resume перечитает свежий список.
         out["blocker"] = f"unknown PUT outcome ({type(e).__name__}): reconcile on resume"
         out["unknown"] = True
         return out
-    if verdict != "applied":
-        out["blocker"] = f"PUT refused before applying: {reason}"
+    tag = verdict[0] if isinstance(verdict, tuple) else None
+    if tag not in PUT_TAGS:
+        # Неизвестный тег шва -- исход неизвестен, не отказ ДО применения.
+        out["blocker"] = (f"unknown PUT outcome (seam tag {tag!r}): "
+                          f"reconcile on resume")
+        out["unknown"] = True
+        return out
+    if tag == "refused":
+        out["blocker"] = "PUT refused before applying"
         out["refused"] = True
         return out
     state["stage"] = "listed"
@@ -338,17 +355,32 @@ def _probe_step(state):
     «оба приняты» без негативной проверки не доказывает включённую
     авторизацию (пустой список открывает прокси). -> {"ok": bool, ...} без
     ключей."""
-    if not _probe(state["new"]):
+    try:
+        accepted_new = _probe(state["new"])
+    except Exception as e:  # noqa: BLE001 -- причина шва, не его payload
+        return {"ok": False,
+                "blocker": f"cannot probe the new key ({type(e).__name__})"}
+    if not accepted_new:
         # Not-yet, не отказ: список мог сохраниться, применение ещё идёт.
         return {"ok": False,
                 "blocker": "pending: the proxy does not accept the new key yet "
                            "(async apply); bounded rechecks, then pending stands"}
-    if not _probe(state["old"]):
+    try:
+        accepted_old = _probe(state["old"])
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False,
+                "blocker": f"cannot probe the old key ({type(e).__name__})"}
+    if not accepted_old:
         return {"ok": False,
                 "blocker": "the proxy no longer accepts the old key before the "
                            "operation issued anything; distribution would strand nodes"}
     wrong = "definitely-wrong-" + state["id"]
-    if _probe(wrong):
+    try:
+        wrong_accepted = _probe(wrong)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False,
+                "blocker": f"cannot probe with a wrong key ({type(e).__name__})"}
+    if wrong_accepted:
         return {"ok": False,
                 "blocker": "the wrong client key is accepted: client auth is off; "
                            "issuing is refused"}
@@ -381,16 +413,30 @@ def _deliver_step(state):
         _save_op(state)
         return {"ok": True, "stage": "completed", "note": "0 recipients: "
                 "the saved recipient set is empty"}
-    answers = _deliver(state["new"], nodes)
-    # Шов может вернуть уже сведённые итоги (probe-стиль) или сырые ответы
-    # агентов -- сведение одно: bus.results_from (#315).
-    out = (answers if all(isinstance(v, str) for v in answers.values())
-           else bus.results_from(nodes, answers))
+    try:
+        answers = _deliver(state["new"], nodes)
+    except Exception as e:  # noqa: BLE001 -- причина шва, не его payload
+        return {"ok": False,
+                "blocker": f"delivery failed ({type(e).__name__}); "
+                           f"the operation stays open"}
+    # Покрытие сверяется с СОХРАНЁННЫМ списком: пустые или частичные
+    # ответы не завершают раздачу, неожидаемый получатель не считается.
+    # Сведение сырых ответов агентов одно: bus.results_from (#315).
+    if answers and all(isinstance(v, str) for v in answers.values()):
+        out = {n: answers[n] for n in nodes if n in answers}
+    elif answers:
+        out = bus.results_from(nodes, answers)
+    else:
+        out = {}
+    out.update({n: "NOT REACHED: no answer" for n in nodes if n not in out})
+    stray = sorted(set(answers or {}) - set(nodes))
     state["delivered"] = out
-    if not strict_settled(out):
+    if not strict_settled(out) or stray:
         _save_op(state)
-        return {"ok": False, "blocker": "delivery is open: "
-                + ", ".join(f"{n} {r}" for n, r in sorted(out.items()) if r != "OK")}
+        why = [f"{n} {r}" for n, r in sorted(out.items()) if r != "OK"]
+        if stray:
+            why.append("unexpected recipients in answers: " + ", ".join(stray))
+        return {"ok": False, "blocker": "delivery is open: " + "; ".join(why)}
     state["stage"] = "completed"
     _save_op(state)
     return {"ok": True, "stage": "completed"}
