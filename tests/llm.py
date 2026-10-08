@@ -322,10 +322,60 @@ def check_setting_origin_547(c):
                  llm.env()["ANTHROPIC_BASE_URL"], "https://proxy.vendor.dev/anthropic")
 
 
+# HYPOTHESIS (#547, ревью мастера): серверный читатель каталога зовёт
+# контракт без порта установки -- host-only подсказка, а с ней (до
+# adb998d) canonical снимал /llm с любого порта того же имени.
+# SOLUTION: catalog_read передаёт обе подсказки установки:
+# MOP_SERVER_LAN + MOP_HTTPS_PORT; ревью ловит отсутствие порта в
+# самом вызове, не в поведении (canonical уже требует обе).
+# RESULT: RED -- вызов пока host-only.
+# STATUS: RED
+def check_catalog_reader_hints_547(c):
+    from mop.server import adminapi
+    seen = {}
+
+    def fake_endpoint(url, resource, host=None, port=None):
+        seen.update(url=url, resource=resource, host=host, port=port)
+        return "https://srv.test:8443/v1/models"
+
+    import urllib.request
+    from mop.common import llm as llm_mod
+
+    class Ok:
+        status = 200
+
+        def read(self):
+            return b'{"data":[{"id":"glm-5.3"}]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    settings = {"MOP_PROXY_URL": "https://srv.test:8443/llm",
+                 "MOP_SERVER_LAN": "srv.test", "MOP_HTTPS_PORT": "8443"}
+
+    def fake_open(req, timeout=10):
+        seen["opened"] = req.full_url
+        return Ok()
+
+    from mop.server import proxykey
+
+    with patched(llm_mod, endpoint=fake_endpoint), \
+            patched(adminapi.config, get=lambda name: settings.get(name, "")), \
+            patched(urllib.request, build_opener=lambda *h: type("O", (), {"open": staticmethod(fake_open)})()), \
+            patched(proxykey, source=lambda *a, **k: "file-key"):
+        got = adminapi.catalog_read()
+    c.expect("#547 the catalog ids ride the shared parser", got, ["glm-5.3"])
+    c.expect("#547 catalog_read hands the contract both issuer hints",
+             (seen.get("host"), seen.get("port")), ("srv.test", "8443"))
+
 def main():
     c = Checks()
     check_url_contract_547(c)
     check_setting_origin_547(c)
+    check_catalog_reader_hints_547(c)
     check_joined_proxy_397(c)
     check_session_ca_412(c)
     check_client_model_discovery_426(c)
