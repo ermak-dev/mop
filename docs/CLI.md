@@ -72,6 +72,22 @@ Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
 ```
 
+#### mop diagnose
+
+```text
+mop diagnose: offline summary of the selected server login
+
+Prints which server the next command would talk to, where that choice
+came from, where its login directory is, and whether the login is whole:
+complete, partial (a leftover half of the old pair), empty or a machine
+service identity. No network, no prompts, no writes; the login's secrets
+are never shown.
+
+Broken or conflicting directories refuse with exit code 1 -- the refusal
+is the diagnosis. partial/empty/machine are informational: exit code 0
+with an explicit not-ready line, not a success message.
+```
+
 #### mop landing
 
 ```text
@@ -1005,6 +1021,23 @@ what CI runs on the server: default branch, fetch, fast-forward, the
 gate mandatory; when the gate's only answer would be "wait" because
 HEAD has moved past the commit that started the job, it exits 0 — the
 newer job deploys it.
+```
+
+#### mop server diagnose
+
+```text
+mop server diagnose: offline summary of this installation only
+
+Reports two local facts, no network, no migration, no writes: where each
+effective setting of this installation comes from (the same resolver as
+`mop server config`, values themselves are not printed here), and what
+the local project registry runs on -- a v1 snapshot, the legacy pair of
+files, or nothing yet. This is not the registry of a remote selected
+server; client-side selection is `mop diagnose`.
+
+A registry that cannot be read refuses with exit code 1 naming the file;
+a missing registry is informational: exit code 0 with an explicit
+not-ready line.
 ```
 
 #### mop server disk
