@@ -519,7 +519,15 @@ def legacy_pair_of(snapshot):
     writers, выгрузить пару, переключить), и её шаги видны явно. После
     новых мутаций v1 roundtrip-стабильна: миграция той же пары даёт тот
     же снимок (проверено tests/projects.py). View читателя (голые имена,
-    orphan-потолки) непредставим в паре без потерь -- отказ, не потеря."""
+    orphan-потолки) непредставим в паре без потерь -- отказ, не потеря.
+
+    Граница lossless (#542): сериализация пары -- строка + "\n" на строку,
+    а читатель пары собирает строки .strip(). Origin с CR/LF, NUL или
+    краевым пробелом парсер origin'ов принимает (он кормит живые клоны и
+    прощает края), но пара из него читалась бы НЕ тем числом строк и
+    проектов: экспорт обязан быть lossless, такой origin -- отказ ДО
+    всякой записи, без raw origin в тексте.
+    """
     if not isinstance(snapshot, dict):
         _checked(snapshot, "cannot export the snapshot: it")  # отказ по типу
     if snapshot.get("legacy") or snapshot.get("legacy_limits"):
@@ -530,6 +538,15 @@ def legacy_pair_of(snapshot):
                            "migrate the pair by an operator decision first")
     _checked(snapshot, "cannot export the snapshot: it")
     lines = snapshot_origins(snapshot)
+    for n, origin in enumerate(lines, start=1):
+        # Одна строка реестра на origin: без CR/LF/NUL и без краевого
+        # пробела (читатель пары стрипает). Отказ -- место и номер, не
+        # сырой origin с кредами.
+        if (not isinstance(origin, str) or "\n" in origin or "\r" in origin
+                or "\0" in origin or origin != origin.strip()):
+            raise RuntimeError(f"cannot export the snapshot: origin of project #{n} "
+                               "carries a line break, NUL or edge whitespace; "
+                               "the legacy pair is not lossless for it")
     limits = {puppets.project_of(p["origin"]): p["limit"]
               for p in snapshot["projects"] if "limit" in p}
     return lines, limits

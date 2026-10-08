@@ -1102,6 +1102,81 @@ def check_export_safety_542(c):
     finally:
         projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
         shutil.rmtree(root, ignore_errors=True)
+    # 6. LOSSLESS-граница обратного экспорта (#542, ревью 3): origin, из
+    # которого легаси-читатель собирает НЕ ТО, что писали, обязан
+    # отказывать ДО всякой записи. parse_origin прощает CR/LF/краевой
+    # пробел (strip+partition), а сериализация пары -- строка + "\n":
+    # multiline origin расщепился бы на два «проекта», strip-зависимый --
+    # молча потерял бы края. Это свойство обратного экспорта, не дефект
+    # парсера: парсер кормит живые клоны, экспорт обязан быть lossless.
+    # HYPOTHESIS: _checked принимает multiline origin (looks_like_origin
+    # говорит «да»), legacy_pair_of их не проверяет -- пара пишется и
+    # читается обратно ДРУГИМ числом проектов.
+    # SOLUTION: минимальная граница в сериализации -- origin легаси-пары
+    # обязан быть одной строкой без CR/LF/NUL и без краевого пробела
+    # (strip-инвариант читателя); представимые формы (пробел внутри пути,
+    # userinfo, порт) проходят. Отказ ДО staging, без raw origin, источник
+    # не тронут.
+    # RESULT: см. ниже; STATUS: FIXED — see #542.
+    import json as _json
+    bad_origins = {
+        "multiline": (f"{MOP}\n{RU}", "line break"),
+        "CR": (f"{MOP}\r", "line break"),
+        "CRLF": (f"{MOP}\r\n", "line break"),
+        "leading space": (f" {MOP}", "whitespace"),
+        "trailing space": (f"{MOP} ", "whitespace"),
+        "leading tab": (f"\t{MOP}", "whitespace"),
+        "NUL": (f"{MOP}\x00tail", "NUL"),
+    }
+    for label, (origin, kind) in bad_origins.items():
+        root = tempfile.mkdtemp(prefix="mop-test-542-lossless-")
+        try:
+            seeded(root)
+            with open(projects.SNAPSHOT, "w") as f:
+                f.write(_json.dumps({"version": 1, "projects": [{"origin": origin}]}))
+            before = open(projects.SNAPSHOT, "rb").read()
+            dest = os.path.join(root, "out")
+            got = refusal_of(lambda: projects.export_pair(dest))
+            c.check(f"#542 a {label} origin refuses the export before any write",
+                    bool(got) and "cannot export" in got, got)
+            c.check(f"#542 a {label} origin refusal names the kind, not the origin",
+                    bool(got) and kind in got and origin not in got
+                    and origin.strip() not in got, got)
+            c.check(f"#542 a {label} origin leaves the source untouched",
+                    open(projects.SNAPSHOT, "rb").read() == before, origin[:20])
+            c.check(f"#542 a {label} origin leaves no directory at dest",
+                    not os.path.exists(dest), dest)
+            c.check(f"#542 a {label} origin leaves no staging garbage",
+                    not [n for n in os.listdir(root) if n.startswith(".mop-export")],
+                    os.listdir(root))
+        finally:
+            projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
+            shutil.rmtree(root, ignore_errors=True)
+
+    # Представимые формы обязаны проходить и быть lossless.
+    ok_origins = {
+        "space inside path": "https://example.org/team/my project/x.git",
+        "userinfo": "https://user:pw@example.org/team/mop.git",
+        "port": "ssh://git@example.org:2222/team/mop.git",
+        "scp path with group": "git@h:group/mop.git",
+        "file path": "/srv/git/mop.git",
+    }
+    for label, origin in ok_origins.items():
+        root = tempfile.mkdtemp(prefix="mop-test-542-ok-")
+        try:
+            seeded(root)
+            with open(projects.SNAPSHOT, "w") as f:
+                f.write(_json.dumps({"version": 1, "projects": [{"origin": origin}]}))
+            dest = os.path.join(root, "out")
+            out = projects.export_pair(dest)
+            c.check(f"#542 a representable {label} export is lossless",
+                    sorted(os.listdir(dest)) == ["export.json", "limits.json", "projects"]
+                    and open(os.path.join(dest, "projects")).read() == f"{origin}\n"
+                    and out.get("projects") == 1,
+                    (sorted(os.listdir(dest)), open(os.path.join(dest, "projects")).read()))
+        finally:
+            projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def check_schema_534(c):
