@@ -360,11 +360,13 @@ def _session_env_cases_541(c, root, port, issued, legacy):
     """Случаи session_env внутри подменённого creds.ROOT (см. выше)."""
     import subprocess
 
-    # Проба git -- по ВРЕМЕННОМУ репозиторию, а не по клону прогона: копия
-    # репозитория враждебного прогона hermetic живёт без .git, и проба клона
-    # падала бы сама по себе; а сценарий, способный писать в git, должен
-    # иметь репозиторий, который не жалко. Исходы различены как #530: сбой
-    # пробы -- ПРОВАЛ с причиной, а не молчаливое None == None «не изменился».
+    # Проба git -- по ВРЕМЕННОМУ репозиторию, и session_env зовётся ИЗ
+    # НЕГО (os.chdir в try/finally): запись в git config ушла бы в текущий
+    # каталог процесса, и проба обязана смотреть туда, куда она ушла бы --
+    # иначе «does not touch» проходил бы всегда (ревью #541). Клон прогона
+    # не годится: копия репозитория враждебного прогона hermetic живёт без
+    # .git, и проба падала бы сама по себе. Исходы различены как #530: сбой
+    # пробы -- ПРОВАЛ с причиной, а не молчаливое None == None.
     repo = os.path.join(root, "repo")
     os.makedirs(repo)
     init = subprocess.run(["git", "init", "-q", repo], capture_output=True,
@@ -380,6 +382,16 @@ def _session_env_cases_541(c, root, port, issued, legacy):
     if not c.check("#541 the git probe repository initializes",
                    init.returncode == 0, init.stderr.strip()[-300:]):
         return
+    keep_cwd = os.getcwd()
+    os.chdir(repo)
+    try:
+        _session_env_runs_541(c, root, port, issued, legacy, git_mop_config)
+    finally:
+        os.chdir(keep_cwd)
+
+
+def _session_env_runs_541(c, root, port, issued, legacy, git_mop_config):
+    """Прогоны session_env из каталога временного репозитория (cwd уже там)."""
     directory = creds.server_dir(HOST)
     creds.write_connection(directory, "alice", "bus-secret", port,
                            legacy, "proxy-secret")
