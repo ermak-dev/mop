@@ -18,8 +18,9 @@ launching claude.
 The master runs in the same permission class as its pool: it can push,
 manage the project's puppets and talk to the tracker without asking on
 every step. The Nomad token stays on the server. The session uses the
-selected server's LLM proxy; its URL and key come from the private
-client.json written by mop login.
+selected server's LLM proxy; its URL and key come from the server
+profile, connection.json written by mop login (the legacy
+operator/client pair is still read for compatibility).
 """
 import json
 import os
@@ -139,7 +140,8 @@ def _main(argv):
     os.execvpe("claude", claude_argv(passthru, path), env)
 
 
-# Вход -- до lib.cluster: без client.json тот не найдёт выбранный сервер.
+# Вход -- до lib.cluster: без профиля сервера (connection.json) тот не
+# найдёт выбранный сервер.
 _launch = lib.cluster(_main)
 
 
