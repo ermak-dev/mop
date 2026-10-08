@@ -40,7 +40,14 @@ def recipients(argv_opts):
     имя -- чистый токен субъекта и известный узел (отказ до begin);
     --all-registered -- полный известный состав БЕЗ ready-фильтра, ОДИН
     защищённый вызов; --no-recipients -- осознанный пустой набор.
-    Недоступный состав -- блокер ДО эффекта, не пустой набор."""
+    Конфликт флагов -- отказ, не молчаливый выбор одного. Недоступный
+    состав -- блокер ДО эффекта, не пустой набор."""
+    given = [flag for flag in ("--nodes", "--all-registered",
+                               "--no-recipients") if flag in argv_opts
+             and (flag != "--nodes" or argv_opts.get("--nodes"))]
+    if len(given) > 1:
+        return ("start needs one recipient set, got "
+                + " and ".join(given))
     if "--no-recipients" in argv_opts:
         return []
     if "--all-registered" in argv_opts:

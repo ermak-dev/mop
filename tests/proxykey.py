@@ -478,6 +478,72 @@ class FakeRemote:
         return key in self.keys
 
 
+def check_fetch_typing_539(c):
+    """Блокер чтения списка несёт типизированный отказ шва (#539).
+
+    HYPOTHESIS: при неверном ключе management первым запросом resume идёт
+    GET списка; без http_status в блокере оператор не узнаёт, что каждая
+    следующая попытка приближает блокировку адреса на 30 минут. Шов
+    поднимает типизированное исключение (целый http_status, без тела);
+    _remote_step копирует его той же проверкой, что для PUT.
+    SOLUTION: адаптер несёт .http_status; библиотека проецирует
+    status+reason, слово блокера остаётся прежним.
+    STATUS: FIXED — see #539 (малая правка #538: _copy_typed общий
+    для PUT-вердикта и исключения шва).
+    """
+    step = proxykey._remote_step
+    with tempfile.TemporaryDirectory(prefix="mop-rot-fetch-") as d:
+        src = os.path.join(d, "client.pass")
+        cp = os.path.join(d, "copy.pass")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("old-key\n")
+        with open(cp, "w", encoding="utf-8") as f:
+            f.write("old-key\n")
+
+        def state():
+            return {"id": "0123456789abcdef", "schema": proxykey.SCHEMA,
+                    "old": "old-key", "new": "new-key", "source": src,
+                    "copy": cp, "recipients": ["node1"], "stage": "ready"}
+
+        class Refused(Exception):
+            pass
+
+        def fetch_401():
+            e = Refused("GET api-keys answered HTTP 401")
+            e.http_status = 401
+            e.reason = "unauthorized"
+            raise e
+
+        def fetch_plain():
+            raise RuntimeError("connection refused")
+
+        with patched(proxykey, OP=os.path.join(d, "op.json")):
+            out = step(state(), _seams_with(fetch=fetch_401))
+        c.check("#539 a typed GET refusal carries http_status and reason",
+                out.get("http_status") == 401
+                and out.get("reason") == "unauthorized"
+                and "cannot read the key list" in str(out.get("blocker")),
+                out)
+        with patched(proxykey, OP=os.path.join(d, "op.json")):
+            out = step(state(), _seams_with(fetch=fetch_plain))
+        c.check("#539 an untyped seam failure keeps the plain blocker",
+                "cannot read the key list" in str(out.get("blocker"))
+                and "http_status" not in out, out)
+
+
+def _seams_with(fetch):
+    """Швы #538 с подменённым fetch_list: шаг remote-списка."""
+    base = proxykey._SEAMS
+
+    class Seams:
+        fetch_list = staticmethod(fetch)
+        put_list = staticmethod(lambda k: ("applied", None))
+        probe = staticmethod(lambda k: True)
+
+    Seams.put_list = staticmethod(base.put_list)
+    return Seams()
+
+
 def check_remote_step_538(c):
     step = getattr(proxykey, "_remote_step", None)
     if not c.check("#538 proxykey._remote_step exists", callable(step)):
@@ -1950,6 +2016,7 @@ def main():
     check_resume_refusals_538(c)
     check_preflight_538(c)
     check_remote_step_538(c)
+    check_fetch_typing_539(c)
     check_probe_step_538(c)
     check_local_and_delivery_538(c)
     check_pipeline_538(c)

@@ -117,25 +117,12 @@ def all_nodes():
 
 def all_nodes_guarded():
     """ОДИН защищённый вызов состава для --all-registered: два отдельных
-    (nodes_refusal + all_nodes) -- это два отказа и два разных ответа,
-    второй без защиты давал traceback. -> [имя] | строка-блокер."""
+    вызова -- это два отказа и два разных ответа, второй без защиты
+    давал traceback. -> [имя] | строка-блокер."""
     try:
         return all_nodes()
     except Exception as e:  # noqa: BLE001 -- причина решается оператором
         return f"cannot list the pool nodes ({type(e).__name__})"
-
-
-def nodes_refusal(pool=None):
-    """Недоступный состав узлов -> строка-блокер | None.
-
-    Устаревает: один защищённый вызов -- all_nodes_guarded; проверка
-    аргументов --node -- node_refusals. Оставлена на этот переход, пока
-    фронтенды переключены."""
-    try:
-        (pool if pool is not None else all_nodes)()
-    except Exception as e:  # noqa: BLE001 -- причина решается оператором
-        return f"cannot list the pool nodes ({type(e).__name__})"
-    return None
 
 
 # Чистый токен субъекта шины (busnames.node вставляет имя как есть):
@@ -183,7 +170,22 @@ class Effects:
             return f.read().rstrip("\r\n")
 
     def fetch_list(self):
-        keys = self._transport.get_keys(self._bearer())
+        # Отказ управленческого GET -- типизированное исключение: целый
+        # http_status и reason из кода (без тела ответа). При неверном
+        # ключе management GET идёт первым (до PUT), и без кода в блокере
+        # оператор не узнаёт, что повторы ведут к блокировке адреса на
+        # 30 минут.
+        try:
+            keys = self._transport.get_keys(self._bearer())
+        except Exception as e:  # noqa: BLE001 -- нести код, не payload
+            code = getattr(e, "code", None)
+            if type(code) is int and 100 <= code <= 599:
+                typed = _CodeRefused(
+                    f"GET api-keys answered HTTP {code}")
+                typed.http_status = code
+                typed.reason = self.CODE_REASONS.get(code)
+                raise typed from e
+            raise
         if not isinstance(keys, list):
             raise RuntimeError("the key list answer is not a list")
         return keys
@@ -256,7 +258,10 @@ class _Urllib:
     def get_keys(self, bearer):
         status, raw = self._call(KEYS_ROUTE, "GET", bearer)
         if status != 200:
-            raise RuntimeError(f"GET api-keys answered HTTP {status}")
+            # Целочисленный .code: fetch_list поднимет типизированный
+            # отказ (http_status), не строку.
+            raise _HTTPStatus(f"GET api-keys answered HTTP {status}",
+                              status)
         return json.loads(raw)
 
     def put_keys(self, bearer, keys):
@@ -269,6 +274,18 @@ class _Urllib:
     def models(self, key):
         status, _ = self._call(MODELS_ROUTE, "GET", key)
         return status
+
+
+class _CodeRefused(RuntimeError):
+    """Отказ управления с типизированным целым кодом HTTP (без тела)."""
+
+
+class _HTTPStatus(RuntimeError):
+    """Транспортный отказ с целым кодом: живой GET, не строка в причине."""
+
+    def __init__(self, msg, code):
+        super().__init__(msg)
+        self.code = code
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

@@ -17,12 +17,12 @@ SOLUTION: mop/server/proxyapi.py -- Effects-адаптер (urllib, только
 ЯВНОМУ списку узлов; mop/cli/server/proxykey/{__init__,start,resume,status}
 -- печать safe-проекции, rc 0/1.
 STATUS: FIXED (#539, раунд ревью) -- блокер конструктора (затенение
-mgmt_key_path) и дефекты 1-7 закрыты: probe с тремя исходами,
-сверка --nodes с составом и алфавитом, один защищённый вызов
---all-registered, deliver через proxykey.blob, status --json invalid
-rc 1, неабсолютный MOP_HOME -- отказ. 21 RED до исправлений, 69 green
-после; upstream-формы GET/PUT закреплены архивом v8.0.16 (sdk_config.go:63,
-config_v8.go:57,72,112).
+mgmt_key_path) и дефекты 1-7 закрыты; пробел ревью 0abeaeb: 401
+управленческого GET (первый запрос resume) несёт http_status+reason,
+_wording предупреждает о блокировке 30 минут; конфликт флагов
+получателей -- отказ; nodes_refusal удалён; откат к старому имени
+параметра убран. Upstream-формы GET/PUT закреплены архивом v8.0.16
+(sdk_config.go:63, config_v8.go:57,72,112).
 """
 import io
 import json
@@ -95,14 +95,11 @@ def effects_of(http, mgmt_path):
 
     Путь подсунут ЯВНО только там, где проверка про другой шов: путь по
     умолчанию (HOME-граница) проверяет свой отдельный прогон ниже --
-ретесты ревью, что штатный конструктор без аргументов работает."""
+    ретесты ревью, что штатный конструктор без аргументов работает.
+    Старое имя параметра не ловится: регрессия сигнатуры обязана
+    падать, а не откатываться молча."""
     from mop.server import proxyapi
-    # mgmt_file -- имя после исправления блокера; до него -- старое
-    # mgmt_key_path, и каждая проверка должна уметь строить адаптер.
-    try:
-        return proxyapi.Effects(transport=http, mgmt_file=mgmt_path)
-    except TypeError:
-        return proxyapi.Effects(transport=http, mgmt_key_path=mgmt_path)
+    return proxyapi.Effects(transport=http, mgmt_file=mgmt_path)
 
 
 def no_network_log(c, http, what):
@@ -225,6 +222,84 @@ def check_show_wording_539(c):
         text = sys.stderr.getvalue()
     c.check("#539 a validation refusal names it invalid",
             "validation refused" in text, text)
+
+
+# ── мелочь ревью: конфликт флагов получателей -- отказ ────────────────────
+# HYPOTHESIS: одновременные --nodes/--all-registered/--no-recipients молча
+# выбирали один набор -- оператор не узнаёт, какой заморожен.
+def check_flag_conflict_539(c):
+    from mop.cli.server.proxykey import _common
+    combos = ({"--nodes": "node1", "--all-registered": True},
+              {"--nodes": "node1", "--no-recipients": True},
+              {"--all-registered": True, "--no-recipients": True},
+              {"--nodes": "node1", "--all-registered": True,
+               "--no-recipients": True})
+    for opts in combos:
+        why = _common.recipients(opts)
+        c.check(f"#539 conflicting recipient flags {[k for k in opts]}"
+                " are refused",
+                isinstance(why, str) and "one recipient" in why, why)
+
+
+# ── пробел ревью: 401 управленческого GET идёт ПЕРВЫМ, до PUT ─────────────
+# HYPOTHESIS: при неверном ключе management первым запросом resume идёт
+# GET списка; предупреждение о блокировке должно срабатывать уже на нём.
+# Сквозная: resume с фейковым транспортом, отдающим 401 на GET -- не
+# вручную собранный out.
+def check_get_lockout_539(c):
+    from mop.cli.server.proxykey import resume, _common
+    from mop.server import proxyapi
+    box, http = stand(c)
+    http.log.clear()
+    # Транспорт отдаёт 401 на GET: шов _CodeRefused с целым кодом.
+    refused = proxyapi._HTTPStatus("GET api-keys answered HTTP 401", 401)
+
+    class RefusingHTTP(FakeHTTP):
+        def get_keys(self, bearer):
+            self.log.append(("get", bearer))
+            raise refused
+
+    rh = RefusingHTTP(keys=[], accepted=[])
+    rh.log = []
+    # Начатая операция в стадии ready: resume пойдёт в remote-шаг.
+    eff = effects_of(rh, box["mgmt"])
+    # Preflight ищет management-ключ, begin -- источник: оба в
+    # paths.local ПОД подклеенным HOME, внутри того же контекста.
+    from mop.common import paths
+    with patched(proxykey, OP=box["op"], LOCK=box["lock"]), \
+            patched_env(INVENTORY=box["inv"], MOP_PROJECT=None,
+                        MOP_BUS_CONFIG=None, HOME=box["dir"],
+                        MOP_HOME=os.path.join(box["dir"], "abs-home")), \
+            patched(_common, effects=lambda: eff), \
+            patched(sys, stdout=io.StringIO(), stderr=io.StringIO()):
+        for name, key in (("llm-proxy-mgmt.pass", "mgmt-key-539"),
+                          ("llm-proxy-client.pass", "old-key-539")):
+            p = paths.local(paths.SECRETS, name)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(key + "\n")
+            os.chmod(p, 0o600)
+        cp = paths.under(os.path.join(box["dir"], "abs-home"),
+                         paths.SECRETS, "llm-proxy-client.pass")
+        os.makedirs(os.path.dirname(cp), exist_ok=True)
+        with open(cp, "w", encoding="utf-8") as f:
+            f.write("old-key-539\n")
+        os.chmod(cp, 0o600)
+        begin_rc = None
+        from mop.cli.server.proxykey import start
+        begin_rc = start.main(["--no-recipients", "--exclusive"])
+        rh.log.clear()
+        rc = resume.main(["--exclusive"])
+        err_text = sys.stderr.getvalue()
+    # Контракт #539: rc0 только complete/readonly; begin-успех оставляет
+    # операцию в ready -- честный rc1 «pending: ready», это не отказ.
+    c.check("#539 resume on a GET 401 reaches the remote step and fails",
+            begin_rc == 1 and rc == 1, (begin_rc, rc))
+    c.check("#539 the GET-401 resume blocker warns about the lockout",
+            "30 minutes" in err_text and "401" not in err_text, err_text)
+    c.check("#539 the refusal came from the GET, not a PUT",
+            any(e[0] == "get" for e in rh.log)
+            and not any(e[0] == "put" for e in rh.log), rh.log)
 
 
 # ── граница контроллера: puppet-контекст и не-контроллер отказ ДО сети ──
@@ -664,6 +739,8 @@ def main():
     check_probe_outcomes_539(c)
     check_put_reasons_539(c)
     check_show_wording_539(c)
+    check_flag_conflict_539(c)
+    check_get_lockout_539(c)
     check_nodes_validation_539(c)
     check_all_registered_once_539(c)
     check_deliver_blob_539(c)
