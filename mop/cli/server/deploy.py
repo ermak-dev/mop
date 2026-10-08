@@ -362,13 +362,19 @@ def _staged_registry_seed():
 
     Возвращает путь к личному (0600) временному файлу со строгим снимком
     v1 или None, когда реестра на контроллере нет вовсе (пустая установка
-    -- сеять нечего, первый add создаст снимок на сервере). Конвертация
-    легаси-пары -- только чтение (snapshot_of без записи в реестр
-    контроллера); непредставимое (голое имя, коллизия, orphan-потолок) и
-    битый JSON -- ОТКАЗ, не fallback: вызовящий разворачивает его до
-    плейбука, файлы контроллера остаются как были. Плейбуку едет путь,
-    не содержимое: реестр -- не для argv и журналов.
+    -- сеять нечего, первый add создаст снимок на сервере). Один HOME у
+    контроллера и сервера -- тоже None, без чтения реестра: это одна
+    машина, посев в YAML скипает, и строгий снимок здесь отказал бы
+    deploy'ю, который посева не требует (#540). Конвертация легаси-пары --
+    только чтение (snapshot_of без записи в реестр контроллера);
+    непредставимое (голое имя, коллизия, orphan-потолок) и битый JSON --
+    ОТКАЗ (RuntimeError), не fallback: файлы контроллера остаются как
+    были, а решение -- за вызывающим, отказ не должен валить deploy,
+    которому посев не нужен. Плейбуку едет путь, не содержимое: реестр --
+    не для argv и журналов.
     """
+    if os.path.expanduser("~") == config.get("MOP_HOME"):
+        return None
     if not (os.path.exists(os.path.join(projects.SNAPSHOT_DIR, "projects.json"))
             or os.path.exists(os.path.join(projects.SNAPSHOT_DIR, "projects"))
             or os.path.exists(os.path.join(projects.SNAPSHOT_DIR, "limits.json"))):
@@ -478,19 +484,24 @@ def main(argv):
 
     lib.section("ansible: site.yml")
     # Посев реестра (#540): один провалидированный снимок v1 готовится на
-    # контроллере; отказ конвертации (голое имя, коллизия, битый JSON) --
-    # до плейбука, целиком, без полупосева. Уборка -- после прогона:
-    # путь едет плейбуку extra-vars, не содержимое.
+    # контроллере; непредставимый реестр -- отказ ДО плейбука, целиком,
+    # без полупосева. Но отказ стейджинга не валит deploy сразу: сервер с
+    # любым своим реестром разворачивается как раньше, а пустой получает
+    # громкий отказ уже в плее (fail-задача под условиями самого посева).
+    # Причина печатается здесь, на контроллере: сообщение библиотеки не
+    # несёт сырых origin'ов, а плейбуку едет только признак. Уборка --
+    # после прогона: путь едет плейбуку extra-vars, не содержимое.
+    seed, seed_refused = None, False
     try:
         seed = _staged_registry_seed()
     except RuntimeError as e:
+        seed_refused = True
         lib.fail(f"cannot stage the registry seed: {e}")
-        return 1
     try:
         rc, output = _play.play(SITE, projects.names(origins, legacy), manifests(origins),
                                 projects.git_hosts(origins, config.get("MOP_GIT_HOST")),
                                 check=dry, inventory_hosts=inventory_hosts(listing),
-                                registry_seed=seed)
+                                registry_seed=seed, registry_seed_refused=seed_refused)
     finally:
         if seed:
             shutil.rmtree(os.path.dirname(seed), ignore_errors=True)
