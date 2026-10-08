@@ -1246,6 +1246,92 @@ def check_export_readback_553(c):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_cluster_names_direct_551(c):
+    """`mop server cluster users` берёт имена из снимка без legacy-разбора (#551).
+
+    HYPOTHESIS (#551): командлет строил имена цепочкой
+    names(*project_ids(view_lines(view_of(...)))) -- basename-разбор тех
+    же строк, из которых снимок уже собран: snapshot_names делает то же
+    из снимка напрямую, и двойной разбор -- лишний путь расхождения.
+    SOLUTION: до замены доказана эквивалентность обеих цепочек (v1, пустой,
+    легаси-взгляд с голыми именами и orphan-лимитами, дубли, порядок), и
+    только затем users.py зовёт projects.snapshot_names(view_of(...)) --
+    один источник имён. Deploy не тронут: ему нужны origin'ы, не имена.
+    STATUS: FIXED — see #551."""
+    import json as _json
+    import shutil
+    import tempfile
+    from mop.common import puppets
+
+    def old_chain(view):
+        return projects.names(*puppets.project_ids(projects.view_lines(view)))
+
+    # 1. Эквивалентность на представимых данных: v1 с дублями basename'ов
+    #    и без legacy -- старая цепочка и snapshot_names неразличимы.
+    v1 = {"version": 1, "projects": [
+        {"origin": RU}, {"origin": MOP, "limit": 2}, {"origin": OTHER}]}
+    c.check("#551 v1: both chains agree",
+            old_chain(v1) == projects.snapshot_names(v1)
+            == sorted({puppets.project_of(o) for o in (RU, MOP, OTHER)}),
+            (old_chain(v1), projects.snapshot_names(v1)))
+
+    # Пустой снимок -- пустые имена обеими цепочками.
+    empty = {"version": 1, "projects": []}
+    c.check("#551 empty: both chains agree",
+            old_chain(empty) == projects.snapshot_names(empty) == [],
+            (old_chain(empty), projects.snapshot_names(empty)))
+
+    # 2. Легаси-взгляд: голые имена и orphan-лимиты, которые вид несёт
+    #    отдельно. Старая цепочка кормит их своим же разбором
+    #    (project_ids делит на origin'ы и голые имена), snapshot_names --
+    #    полями снимка. Обязаны сходиться в том же порядке.
+    legacy_view = {"version": 1, "projects": [
+            {"origin": RU, "limit": 3}, {"origin": MOP}],
+        "legacy": ["oldproject", "rudesktop"],
+        "legacy_limits": {"orphan": 5}}
+    want = sorted({"rudesktop", "mop", "oldproject"})
+    c.check("#551 legacy view: both chains agree",
+            old_chain(legacy_view) == projects.snapshot_names(legacy_view) == want,
+            (old_chain(legacy_view), projects.snapshot_names(legacy_view)))
+
+    # 3. Дубли в данных не дают дублей имён ни в одной цепочке (оба конца
+    #    -- множества), порядок -- один и тот же отсортированный.
+    dupes = {"version": 1, "projects": [
+        {"origin": RU}, {"origin": OTHER}, {"origin": MOP}]}
+    c.check("#551 duplicate basenames collapse in both chains",
+            old_chain(dupes) == projects.snapshot_names(dupes)
+            == ["mop", "rudesktop"],
+            (old_chain(dupes), projects.snapshot_names(dupes)))
+
+    # 4. Живой взгляд с диска: пара на диске -> view_of -> обе цепочки.
+    #    Здесь единственное различие цепочек: старая идёт через чтение
+    #    строк, новая -- через поля снимка; файл один и тот же.
+    root = tempfile.mkdtemp(prefix="mop-test-551-")
+    try:
+        _legacy_pair(os.path.join(root, "reg"), [RU, MOP, "oldproject"],
+                     {"rudesktop": 3, "orphan": 5})
+        view = projects.view_of(os.path.join(root, "reg"))
+        c.check("#551 a disk view: both chains agree",
+                old_chain(view) == projects.snapshot_names(view),
+                (old_chain(view), projects.snapshot_names(view)))
+        # Порядок обязан быть отсортированным в обеих цепочках.
+        got = projects.snapshot_names(view)
+        c.check("#551 the order is sorted",
+                got == sorted(got) and len(got) == len(set(got)), got)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # 5. Проводка командлета: имена берутся из снимка одним вызовом,
+    #    двойной basename-разбор больше не живёт в users.py.
+    import inspect
+    from mop.cli.server.cluster import users as users_mod
+    users_src = inspect.getsource(users_mod)
+    c.check("#551 users.py reads names from the snapshot directly",
+            "projects.snapshot_names(" in users_src
+            and "projects.names(" not in users_src
+            and "view_lines(" not in users_src, users_src[:400])
+
+
 def check_schema_534(c):
     """Схема v1 одним валидатором: reader, writer и export сверяют одно.
 
@@ -1575,7 +1661,7 @@ def main():
                check_git_hosts, check_for_deploy, check_local_view_534,
                check_migration_534, check_schema_534, check_snapshot_534,
                check_view_534, check_export_542, check_export_safety_542,
-               check_export_readback_553):
+               check_export_readback_553, check_cluster_names_direct_551):
         fn(c)
     return c.report("projects")
 

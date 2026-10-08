@@ -22,8 +22,10 @@ def main(argv):
     # Взгляд реестра (#534): правда на диске -- projects.json, легаси-файл
     # пары после миграции остаётся лежать устаревшим. Голые легаси-имена
     # вид тоже показывает -- пользователей шины они заводили и раньше.
-    names = projects.names(*puppets.project_ids(
-        projects.view_lines(projects.view_of(projects.SNAPSHOT_DIR))))
+    # Имена -- из снимка напрямую (#551): эквивалентность прежней цепочки
+    # имён по строкам вида доказана проверками, двойной basename-разбор
+    # не нужен.
+    names = projects.snapshot_names(projects.view_of(projects.SNAPSHOT_DIR))
     try:
         changed, _ = natsconf.apply(names, bootstrap.PUPPET_CREDS)
     except (OSError, ValueError) as e:
