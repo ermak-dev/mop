@@ -38,10 +38,10 @@ def check_complete_395(c):
         asked.append((prompt, secret))
         return None
 
-    def probe(url, key, directory):
+    def probe(url, key, directory, port=None):
         c.expect("#395 bus credentials are not persisted before proxy check",
                  profile(dest), None)
-        probed.append((url, key, directory))
+        probed.append((url, key, directory, port))
 
     with patched(join, ask=ask, _login=lambda *args: "bus-secret",
                  _still_valid=lambda *args: False, _fetch=lambda *args: record,
@@ -50,8 +50,8 @@ def check_complete_395(c):
     c.expect("#395 the whole login is written after success", profile(dest),
              {"user": "alice", "password": "bus-secret", "https_port": "443",
               "proxy_url": "https://srv.test/llm", "proxy_key": "proxy-secret"})
-    c.expect("#395 proxy URL and key are checked", probed,
-             [("https://srv.test/llm", "proxy-secret", dest)])
+    c.expect("#395/#547 proxy URL, key and verified port are checked", probed,
+             [("https://srv.test/llm", "proxy-secret", dest, "443")])
     c.expect("#405 proxy settings do not need a second prompt", asked, [])
 
     # На старом входе шина уже работает: донастроить только прокси, пароль
@@ -63,7 +63,7 @@ def check_complete_395(c):
                  _login=lambda *a: c.fail("#395 valid bus login must not ask for password"),
                  _fetch=lambda *a: {"https_port": "443", "proxy_url": "https://old.test/llm",
                                     "proxy_key": "wrong"},
-                 _probe=lambda *a: (_ for _ in ()).throw(RuntimeError("HTTP 401"))):
+                 _probe=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("HTTP 401"))):
         try:
             complete("old.test", "alice", old, "443")
             c.fail("#395 wrong proxy key must refuse")
@@ -79,7 +79,7 @@ def check_complete_395(c):
     with patched(join, ask=lambda *a, **k: c.fail("#395 complete join must not prompt"),
                  _still_valid=lambda *a: True,
                  _login=lambda *a: c.fail("#395 complete join must not ask for bus password"),
-                 _fetch=lambda *a: record, _probe=lambda *a: None):
+                 _fetch=lambda *a: record, _probe=lambda *a, **k: None):
         complete("srv.test", "alice", dest, "443")
     c.expect("#395 rejoin does not change credentials", profile(dest),
              {"user": "alice", "password": "bus-secret", "https_port": "443",
@@ -136,7 +136,7 @@ def check_failed_login_keeps_pin_395(c):
     c.expect("#395 failed login retains previous TLS pin", join._pinned(creds.cafile(dest)), old_der)
 
     with patched(join, _login=lambda *a: (creds.write_cert(dest, new_der) and "bus-secret"),
-                 _probe=lambda *a: (_ for _ in ()).throw(RuntimeError("HTTP 401")),
+                 _probe=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("HTTP 401")),
                  _fetch=lambda *a: {"https_port": "443", "proxy_url": "https://srv.test/llm",
                                     "proxy_key": "wrong"}):
         try:
@@ -171,7 +171,8 @@ def check_fetch_proxy_405(c):
         return got
 
     with patched(join, ask=ask, _login=lambda *a: "bus-secret",
-                 _probe=lambda url, key, directory: verified.append((url, key, directory))), \
+                 _probe=lambda url, key, directory, port=None:
+                     verified.append((url, key, directory, port))), \
             patched(join.bus, ask_once=request):
         join.complete("srv.test", "alice", dest, "443")
     c.expect("#405 join does not ask for proxy URL or key", asked, [])
@@ -181,8 +182,8 @@ def check_fetch_proxy_405(c):
         c.expect("#405 fetch reuses bus credentials and TLS port",
                  (requests[0][0]["user"], requests[0][0]["password"], requests[0][0]["url"]),
                  ("alice", "bus-secret", "wss://srv.test:443/nats"))
-    c.expect("#405 fetched settings verified before saving", verified,
-             [(got["proxy_url"], got["proxy_key"], dest)])
+    c.expect("#405/#547 probe carries the verified port of the login",
+             verified, [(got["proxy_url"], got["proxy_key"], dest, "443")])
     c.expect("#405 saved key is the server's",
              {k: creds.human_profile(dest)[k] for k in ("https_port", "proxy_url", "proxy_key")},
              {"https_port": "443", "proxy_url": got["proxy_url"], "proxy_key": "server-key"})
@@ -190,13 +191,13 @@ def check_fetch_proxy_405(c):
     creds.write_connection(dest, "alice", "bus-secret", "443", got["proxy_url"], "old-key")
     with patched(join, ask=ask, _still_valid=lambda *a: True,
                  _login=lambda *a: c.fail("#405 valid bus credentials must be reused"),
-                 _probe=lambda *a: None), patched(join.bus, ask_once=request):
+                 _probe=lambda *a, **k: None), patched(join.bus, ask_once=request):
         join.complete("srv.test", "alice", dest, "443")
     c.expect("#405 rotated key replaces old key",
              creds.human_profile(dest)["proxy_key"], "server-key")
 
     old = creds.human_profile(dest)
-    with patched(join, _still_valid=lambda *a: True, _probe=lambda *a: None), \
+    with patched(join, _still_valid=lambda *a: True, _probe=lambda *a, **k: None), \
             patched(join.bus, ask_once=lambda *a: {"error": "not authorized"}):
         try:
             join.complete("srv.test", "alice", dest, "443")
@@ -205,7 +206,7 @@ def check_fetch_proxy_405(c):
             pass
     c.expect("#405 failed RPC leaves previous client config", creds.human_profile(dest), old)
     with patched(join, _still_valid=lambda *a: True,
-                 _probe=lambda *a: c.fail("#405 mismatched port must not send key")), \
+                 _probe=lambda *a, **k: c.fail("#405 mismatched port must not send key")), \
             patched(join.bus, ask_once=lambda *a: dict(got, https_port="8443")):
         try:
             join.complete("srv.test", "alice", dest, "443")

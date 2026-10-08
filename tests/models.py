@@ -64,11 +64,11 @@ def check_selected_server_448(c, models):
             patched(urllib.request, build_opener=opener), config.client_sources():
         for host in ("a.test", "b.test"):
             creds.write_connection(os.path.join(root, host), "user", "bus-pw", "443",
-                                   f"https://{host}/llm", host + "-key")
+                                   f"https://{host}:443/llm", host + "-key")
         with context.use(context.resolve({"server": "b.test"}, {}, {})):
             c.expect("#448 chosen proxy models", models.available(), ["model-a", "model-b"])
-        c.expect("#448 request uses chosen URL and key", seen,
-                 [("https://b.test/llm/v1/models", "Bearer b.test-key", 10)])
+        c.expect("#448/#547 request uses the canonical URL and key", seen,
+                 [("https://b.test:443/v1/models", "Bearer b.test-key", 10)])
         with context.use(context.resolve({}, {}, {})):
             try:
                 models.available()

@@ -5,7 +5,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from mop.common import config, creds
+from mop.common import config, creds, llm
 
 TIMEOUT = 10
 
@@ -37,7 +37,8 @@ def available():
             raise RuntimeError(f"incomplete login for {host}: re-run "
                                f"mop login --server {host}")
         raise RuntimeError(f"no login for {host}: run mop login --server {host}")
-    url = joined["proxy_url"].rstrip("/") + "/v1/models"
+    url = llm.endpoint(joined["proxy_url"], "models", host=host,
+                       port=joined["https_port"])
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" and not (parsed.scheme == "http" and
                                           parsed.hostname in ("localhost", "127.0.0.1", "::1")):

@@ -161,13 +161,17 @@ def catalog_read(env=None, key_path=None):
     import urllib.parse
     import urllib.request
     from . import proxykey
-    from ..common import creds
+    from ..common import creds, llm
     url = (config.get("MOP_PROXY_URL") or "").rstrip("/")
     key = proxykey.source(env or {}, key_path)
     if not url or not key:
         raise RuntimeError("proxy address or key is not configured")
     host = config.get("MOP_SERVER_LAN")
-    req = urllib.request.Request(url + "/v1/models",
+    # Канонический /v1/models (#547): внутренний корень установки (8317)
+    # надстраивается тем же контрактом. Обе подсказки установки: без
+    # порта host-only снимал бы /llm с чужого порта того же имени.
+    req = urllib.request.Request(llm.endpoint(url, "models", host=host,
+                                                port=config.get("MOP_HTTPS_PORT")),
                                  headers={"Authorization": f"Bearer {key}"})
     # Пин CA -- как у doctor (_probe): TLS-прокси установки имеет свой CA.
     pin = None

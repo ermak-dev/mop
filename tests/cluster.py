@@ -1128,7 +1128,7 @@ def check_join_config_404(c):
         request = {"verb": "client_config", "_caller": "alice"}
         c.expect("#404 verified join returns only client settings",
                  cluster.answer(None, request),
-                 {"ok": True, "https_port": "8443", "proxy_url": "https://srv.test:8443/llm",
+                 {"ok": True, "https_port": "8443", "proxy_url": "https://srv.test:8443",
                   "proxy_key": "private-key"})
         c.check("#404 ordinary project RPC cannot fetch key",
                 "proxy_key" not in cluster.answer("mop", request))
@@ -1143,6 +1143,29 @@ def check_join_config_404(c):
                                         lambda project, req, send: cluster.answer(project, req),
                                         cluster.journal, lambda line: None, lambda **kw: None)
         c.check("#404 caller supplied in JSON is ignored", "proxy_key" not in asyncio.run(forged()))
+
+
+# HYPOTHESIS (#547): _client_config выдаёт адрес с историческим префиксом
+# /llm, и клиенты носят llm/v1, хотя канонический Anthropic-корень прокси --
+# origin сервера: nginx root /v1 уже есть (#529). Издатель обязан выдавать
+# канонический origin (scheme/host/port, без /llm и без /v1); надстраивать
+# /v1/* -- работа потребителя, и ровно одна.
+# SOLUTION: writer выдаёт origin без сегментов; RED ниже -- нынешний /llm.
+# STATUS: RED
+def check_client_config_origin_547(c):
+    from mop.common import config
+    from mop.server import proxykey
+    key_file = os.path.join(tempfile.mkdtemp(prefix="mop-origin-547-"), "client.pass")
+    with open(key_file, "w") as f:
+        f.write("private-key\n")
+    settings = {"MOP_SERVER_LAN": "srv.test", "MOP_HTTPS_PORT": "8443"}
+    with patched(proxykey, KEY_FILE=key_file), \
+            patched(config, get=lambda name: settings.get(name, "")):
+        got = cluster.answer(None, {"verb": "client_config", "_caller": "alice"})
+    c.expect("#547 the issuer hands out the canonical origin, no /llm",
+             got["proxy_url"], "https://srv.test:8443")
+    c.check("#547 the canonical origin carries no /v1 either",
+            "/v1" not in got["proxy_url"], got["proxy_url"])
 
 
 # ─── атомарный реестр проектов у сервиса кластера (#534) ─────────────────
@@ -1996,6 +2019,7 @@ def _no_lock_534():
 def main():
     c = Checks()
     check_join_config_404(c)
+    check_client_config_origin_547(c)
     check_give_up_345(c)
     check_bootstrap_334(c)
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
