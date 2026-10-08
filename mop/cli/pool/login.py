@@ -157,7 +157,7 @@ def _https_port(explicit, saved):
     """Явный выбор > сохранённый > окружение > 443, до соединения."""
     https = (explicit if explicit is not None else
              (saved or {}).get("https_port") or os.environ.get("MOP_HTTPS_PORT") or "443")
-    if not https.isascii() or not https.isdecimal() or not 1 <= int(https) <= 65535:
+    if not creds.valid_https_port(https):
         raise ValueError("server HTTPS port must be between 1 and 65535")
     return https
 
@@ -174,7 +174,7 @@ def complete(host, login, dest, https):
     формат. После классификации половины НЕ перечитываются: два чтения
     увидели бы два поколения каталога. Подсказка из остатка -- не доверие:
     пароль используется только после обычной проверки шиной (_still_valid)."""
-    if not https.isascii() or not https.isdecimal() or not 1 <= int(https) <= 65535:
+    if not creds.valid_https_port(https):
         raise ValueError("server HTTPS port must be between 1 and 65535")
     try:
         kind, profile = creds.snapshot(dest)

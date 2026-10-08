@@ -274,10 +274,24 @@ def write_operator(directory, user, password):
     return path
 
 
+def valid_https_port(text):
+    """Правда ли это HTTPS-порт: ASCII-десятичная строка 1..65535 (#550).
+
+    Единственный источник правила для всех, кто складывает порт в каталог
+    сервера (client.json, connection.json, login): три копии условия уже
+    были бы тремя границами. isdecimal без isascii пускал бы Unicode-цифры
+    («٤٤٣»), знак и пробел -- не десятичная запись числа. Предикат:
+    отказ с текстом СВОЕГО места поднимает вызывающий. Не строка -- не
+    порт (False, не падение)."""
+    if not isinstance(text, str):
+        return False
+    return text.isascii() and text.isdecimal() and 1 <= int(text) <= 65535
+
+
 def _client_values(https_port, proxy_url, proxy_key):
     """Запись клиента: один порт TLS для шины, адрес и ключ LLM-прокси."""
     port = str(https_port)
-    if not port.isascii() or not port.isdecimal() or not 1 <= int(port) <= 65535:
+    if not valid_https_port(port):
         raise ValueError("joined server HTTPS port must be between 1 and 65535")
     try:
         url = urlsplit(proxy_url)

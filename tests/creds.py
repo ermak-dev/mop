@@ -316,6 +316,7 @@ def main():
     check_no_human_over_nats_219(c)
     check_operator_not_object_336(c)
     check_human_login_549(c)
+    check_valid_https_port_550(c)
     return c.report("creds")
 
 
@@ -476,6 +477,41 @@ def check_human_login_549(c):
             c.check(f"#549 the {kind} refusal is the resolver's own text",
                     "connection" in str(e) if kind == "broken" else "conflict" in str(e),
                     str(e))
+
+
+def check_valid_https_port_550(c):
+    """HYPOTHESIS (#550): правило порта HTTPS (ASCII-десятичная строка
+    1..65535) записано трижды -- creds._client_values, login._https_port и
+    login.complete. Три копии одного правила -- расхождение на первой же
+    правке границы; isdecimal, в отличие от isdigit, пропускает
+    Unicode-цифры, и забытое isascii пустило бы «٤٤٣» в конфиг.
+    SOLUTION: creds.valid_https_port(text) -> bool -- единственный источник
+    правила; отказ с собственным текстом каждого места поднимает
+    вызывающий, ни одна строка вывода не меняется.
+    STATUS: FIXED — see #550"""
+    # Границы и нормальные значения.
+    for text in ("1", "443", "65535", "8080"):
+        c.check(f"#550 port {text!r} is valid",
+                creds.valid_https_port(text) is True)
+    # За границами.
+    for text in ("0", "65536", "99999"):
+        c.check(f"#550 port {text!r} is out of range",
+                creds.valid_https_port(text) is False)
+    # Пустая строка.
+    c.check("#550 an empty port is invalid",
+            creds.valid_https_port("") is False)
+    # Unicode-цифры: isdecimal их принимает, правило -- нет.
+    c.check("#550 Arabic-Indic digits are not an ASCII port",
+            creds.valid_https_port("٤٤٣") is False)
+    # Знак и пробелы: это не десятичная запись числа.
+    for text in ("+443", "-443", " 443", "443 ", "44 3", "\t443"):
+        c.check(f"#550 port {text!r} with sign or space is invalid",
+                creds.valid_https_port(text) is False)
+    # Не строка -- не порт; вызывающие питаются только строками (слой выше
+    # переводит int в str), но предикат не должен падать на чужом типе.
+    for value in (443, None, 443.0):
+        c.check(f"#550 a non-string {value!r} is not a port",
+                creds.valid_https_port(value) is False)
 
 
 if __name__ == "__main__":
