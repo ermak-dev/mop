@@ -12,10 +12,10 @@ a missing registry is informational: exit code 0 with an explicit
 not-ready line.
 """
 import json
+import os
 import sys
 
 from mop.cli import lib
-from mop.common import projects
 from mop.server import diagnose
 
 MCP = {"annotations": "readonly", "args": [
@@ -23,8 +23,9 @@ MCP = {"annotations": "readonly", "args": [
      "help": "print the summary as one JSON object"}]}
 
 NOT_READY = {
-    "legacy pair": "registry still on the legacy pair: the first mutating "
-                   "verb migrates it, not this command, not-ready as v1",
+    "legacy pair": "registry still on the legacy pair: needs a representable "
+                   "migration (bare names or colliding origins would refuse); "
+                   "no changes made here, not-ready as v1",
     "empty": "no registry yet: not-ready, add the first project to create it",
 }
 
@@ -49,8 +50,9 @@ def main(argv):
     print("settings sources " +
           ", ".join(f"{src} {n}" for src, n in sorted(counts.items())))
     reg = got["registry"]
+    files = ", ".join(os.path.basename(f) for f in reg["files"])
     print(f"registry {reg['source']} ({reg['projects']} projects, "
-          f"file {reg['file']})")
+          f"files {files}, at {os.path.dirname(reg['files'][0])})")
     hint = NOT_READY.get(reg["source"])
     if hint:
         print(hint)

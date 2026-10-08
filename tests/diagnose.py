@@ -22,6 +22,8 @@ STATUS: в работе (#536): прогон до реализации обяз�
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -45,6 +47,12 @@ def put_connection(directory, row, version=1):
                    "https_port": row[2],
                    "proxy": {"url": row[3], "key": row[4]}}, f)
     os.chmod(path, 0o600)
+
+
+def put_legacy(directory, row):
+    """Прежняя пара: operator.json + client.json, без connection.json."""
+    creds.write_operator(directory, row[0], row[1])
+    creds.write_client(directory, row[2], row[3], row[4])
 
 
 def put_registry_v1(dir_, origins=()):
@@ -91,35 +99,51 @@ def check_client_side_536(c):
             got["server"] == "srv.test", got)
     c.check("#536 the client report names the server directory",
             got["directory"] == dest, got)
-    c.check("#536 the client report names where the server came from",
-            got["source"] in ("context", "env", "joined"), got)
     c.check("#536 a complete profile is complete",
             got["status"] == "complete", got)
-    c.check("#536 the schema version is named",
+    # Схема -- ФАКТ прочитанного файла, не константа на все случаи:
+    # connection.json валидирован решателем, у него версия известна.
+    c.check("#536 a validated connection names its actual schema",
             got["schema"] == creds.CONNECTION_VERSION, got)
     c.check("#536 only the selected directory is read",
             reads == [dest], reads)
 
-    # Клиент не читает .env установки: сервер без context/env берётся из
-    # единственного joined-каталога (приоритеты config не меняются). .env
-    # подсунут свой: будь он виден, его MOP_SERVER_LAN выиграл бы выбор.
-    solo = os.path.join(tempfile.mkdtemp(prefix="mop-diag2-"), "servers")
-    only = os.path.join(solo, "solo.test")
-    put_connection(only, ALICE)
-    dot_env = os.path.join(tempfile.mkdtemp(prefix="mop-diag-env-"), ".env")
-    with open(dot_env, "w", encoding="utf-8") as f:
-        f.write("MOP_SERVER_LAN=from-dotenv.test\n")
-    # forget(): кэш _file один на процесс, чужой .env не должен остаться
-    # в нём ни до, ни после пробы.
-    config.forget()
-    with patched(creds, ROOT=solo), patched(config, ENV_FILE=dot_env), \
-            config.client_sources(), \
-            context.use(context.resolve({}, {}, {})), \
-            patched_env(MOP_SERVER_LAN=None):
+    # Источник выбора не сворачивается: чем диагностика отличается от
+    # угадывания -- clone против env против командной строки.
+    with patched(creds, ROOT=root), \
+            context.use(context.resolve({}, {"MOP_SERVER_LAN": "srv.test"}, {})):
         got = client_report()
-    config.forget()
-    c.check("#536 a sole joined server is selected without installation .env",
-            got["server"] == "solo.test" and got["source"] == "joined", got)
+    c.check("#536 an environment server says env, not context",
+            got["source"] == "env", got)
+    with patched(creds, ROOT=root), \
+            context.use(context.resolve({}, {}, {"server": "srv.test"})):
+        got = client_report()
+    c.check("#536 a clone binding says clone",
+            got["source"] == "clone", got)
+
+    # Схема НЕ объявляется там, где файла с версией нет: пустой каталог,
+    # машинный (operator.json без версии) и легаси-пара (client.json без
+    # версии) не выдают себя за connection v1.
+    for label, make in (("empty", lambda d: creds.make_dir(d)),
+                        ("machine", lambda d: creds.write_operator(
+                            d, creds.SERVICE, "service-secret")),
+                        ("legacy", lambda d: put_legacy(d, ALICE))):
+        # legacy-пара -- «human» классификатором (valid вход), но формат
+        # её файлов -- не connection.json.
+        target = os.path.join(root, f"{label}.test")
+        make(target)
+        with patched(creds, ROOT=root), \
+                context.use(context.resolve({"server": f"{label}.test"}, {}, {})):
+            got = client_report()
+        c.check(f"#536 a {label} directory carries no schema claim",
+                got["schema"] is None, got)
+    # Валидная легаси-пара -- по-прежнему целый вход человека (snapshot
+    # возвращал human и до #533), статус не «partial»:
+    with patched(creds, ROOT=root), \
+            context.use(context.resolve({"server": "legacy.test"}, {}, {})):
+        got = client_report()
+    c.check("#536 a legacy pair is a complete login of the old format",
+            got["status"] == "complete" and got["format"] == "legacy pair", got)
 
     # Два joined-каталога без явного выбора -- отказ, не первый попавший.
     two = os.path.join(tempfile.mkdtemp(prefix="mop-diag3-"), "servers")
@@ -210,17 +234,18 @@ def check_status_and_hygiene_536(c):
 def check_client_cli_536(c):
     root = os.path.join(tempfile.mkdtemp(prefix="mop-diag-cli-"), "servers")
     put_connection(os.path.join(root, "ok.test"), ALICE)
+    put_legacy(os.path.join(root, "old.test"), ALICE)
     creds.make_dir(os.path.join(root, "mt.test"))
     creds.write_operator(os.path.join(root, "mt.test"), creds.SERVICE, "service-secret")
     put_connection(os.path.join(root, "bad.test"), ALICE, version=2)
-    for host, want_rc in (("ok.test", 0), ("mt.test", 0), ("bad.test", 1)):
+    for host, want_rc in (("ok.test", 0), ("old.test", 0), ("mt.test", 0), ("bad.test", 1)):
         with patched(creds, ROOT=root), patched(sys, stderr=io.StringIO(),
                                                  stdout=io.StringIO()), \
                 context.use(context.resolve({"server": host}, {}, {})):
             rc = client_main([])
         c.check(f"#536 {host}: exit {want_rc}",
                 rc == want_rc, rc)
-    # Информационный 0machine -- явный not-ready, не «вход состоялся».
+    # Информационный 0 machine -- явный not-ready, не «вход состоялся».
     with patched(creds, ROOT=root), patched(sys, stderr=io.StringIO(),
                                              stdout=io.StringIO()), \
             context.use(context.resolve({"server": "mt.test"}, {}, {})):
@@ -228,6 +253,14 @@ def check_client_cli_536(c):
         text = sys.stdout.getvalue()
     c.check("#536 a machine status is explicitly not-ready",
             rc == 0 and "machine" in text and "not-ready" in text, text)
+    # Формат файла назван по факту: connection.json -- v1, легаси-пара -- не
+    # выдаёт себя за схему.
+    with patched(creds, ROOT=root), patched(sys, stdout=io.StringIO()), \
+            context.use(context.resolve({"server": "old.test"}, {}, {})):
+        rc = client_main([])
+        text = sys.stdout.getvalue()
+    c.check("#536 a legacy pair prints its format, not a schema claim",
+            rc == 0 and "legacy pair" in text and "schema version 1" not in text, text)
     # --json: стабильная форма без секретов.
     with patched(creds, ROOT=root), patched(sys, stdout=io.StringIO()), \
             context.use(context.resolve({"server": "ok.test"}, {}, {})):
@@ -238,29 +271,119 @@ def check_client_cli_536(c):
             not any(s in json.dumps(payload) for s in SECRETS), payload)
 
 
+# ── диспетчер: политика клиента на живом bin/mop, ДО main ───────────────
+def check_dispatcher_policy_536(c):
+    """RED-фаза #536 (поправка 4): свойство НЕ helper'а, а диспетчера --
+    main() накладывает client_sources ДО main командлета core. Реальный
+    bin/mop в копии репозитория: установка с враждебным .env (существующий
+    файл с чужим MOP_SERVER_LAN и ReadError-ловушкой), у человека --
+    единственный joined-каталог. Правильный dispatch: .env не читается
+    вовсе, диагностика называет joined-сервер; чтение файла -- отказ #535.
+
+    Контроль отключённой политики: в TEMP-копии client_command() для
+    mop.cli.core.diagnose выключен -> диспетчер читает .env -> ReadError
+    (ловушка -- нечитаемый существующий файл). Так проверка ловит и
+    «политика не доехала», и «политика не на ту команду».
+    """
+    from hermetic import child_env as hermetic_child_env  # noqa: F401
+    # python -c обрабатывает stdout/stderr... используем прямой запуск.
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-diag-disp-"), "repo")
+    shutil.copytree(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                    root, dirs_exist_ok=True, symlinks=True,
+                    ignore=shutil.ignore_patterns(".git", "__pycache__", ".env",
+                                                  "node_modules"))
+    home = tempfile.mkdtemp(prefix="mop-diag-home-")
+    servers = os.path.join(home, ".config", "mop", "servers")
+    os.makedirs(os.path.join(servers, "joined.test"))
+    put_connection(os.path.join(servers, "joined.test"), ALICE)
+    # Ловушка .env: существует, но не читается -> ReadError #535, если
+    # диспетчер его откроет. Клиентская политика обязана его НЕ тронуть.
+    trap = os.path.join(root, ".env")
+    with open(trap, "w", encoding="utf-8") as f:
+        f.write("MOP_SERVER_LAN=hostile-from-dotenv.test\n")
+    os.chmod(trap, 0)
+    base = {k: v for k, v in os.environ.items() if not k.startswith("MOP_")}
+    base["HOME"] = home
+    base["PYTHONPATH"] = root
+    try:
+        # Правильный dispatch: политика клиента на mop diagnose, .env не
+        # читается, сервер -- единственный joined.
+        r = subprocess.run([sys.executable, "-m", "mop.cli", "diagnose"],
+                           env=base, capture_output=True, text=True, cwd=root)
+        c.check("#536 the dispatcher keeps the hostile .env away from mop diagnose",
+                r.returncode == 0 and "joined.test" in r.stdout and
+                "hostile" not in r.stdout + r.stderr,
+                (r.returncode, r.stdout, r.stderr))
+        # Тот же запуск без политики (server-глагол -- она не положена):
+        # диспетчер открывает .env установки и натыкается на ловушку.
+        r = subprocess.run([sys.executable, "-m", "mop.cli", "server", "diagnose"],
+                           env=base, capture_output=True, text=True, cwd=root)
+        c.check("#536 a server verb hits the ReadError trap in the .env",
+                r.returncode != 0 and "cannot read settings" in r.stderr, r.stderr)
+    finally:
+        os.chmod(trap, 0o600)
+
+
 # ── сервер: локальный реестр и источник настроек ─────────────────────────
 def check_server_side_536(c):
     root = tempfile.mkdtemp(prefix="mop-diag-reg-")
-    for label, make, want in (
-            ("v1", lambda d: put_registry_v1(d, ("https://git.test/opus.git",)), "snapshot"),
-            ("legacy", lambda d: put_registry_legacy(d, ("https://git.test/opus.git",)),
-             "legacy pair"),
-            ("absent", lambda d: None, "empty")):
-        dir_ = os.path.join(root, label)
-        os.makedirs(dir_, exist_ok=True)
-        make(dir_)
-        before = sorted(os.listdir(dir_))
-        with patched(projects, SNAPSHOT_DIR=dir_), patched(sys, stdout=io.StringIO()), \
-                context.use(context.resolve({"server": f"{label}.test"}, {}, {})):
-            rc = server_main(["--json"])
-            payload = json.loads(sys.stdout.getvalue())
-        c.check(f"#536 the local registry source is {want}",
-                rc == 0 and payload["registry"]["source"] == want, payload["registry"])
-        c.check(f"#536 a {label} registry is not migrated by diagnostics",
-                sorted(os.listdir(dir_)) == before, os.listdir(dir_))
+    # Пути реестра -- от ВЫБРАННОГО каталога, не глобального SNAPSHOT:
+    # каждый формат называет свои настоящие файлы.
+    v1 = os.path.join(root, "v1")
+    os.makedirs(v1)
+    put_registry_v1(v1, ("https://git.test/opus.git",))
+    with patched(projects, SNAPSHOT_DIR=v1), patched(sys, stdout=io.StringIO()), \
+            context.use(context.resolve({"server": "v1.test"}, {}, {})):
+        rc = server_main(["--json"])
+        payload = json.loads(sys.stdout.getvalue())
+    reg = payload["registry"]
+    c.check("#536 a v1 registry names its own snapshot path",
+            rc == 0 and reg["source"] == "snapshot" and
+            reg["file"] == os.path.join(v1, "projects.json"), reg)
+    c.check("#536 a v1 registry counts its visible projects",
+            reg["projects"] == 1, reg)
+
+    # Легаси-пара: два файла, оба названы; видимые имена -- включая голые
+    # легаси-имена (snapshot_names), не только origin-записи.
+    legacy = os.path.join(root, "legacy")
+    os.makedirs(legacy)
+    put_registry_legacy(legacy, ("https://git.test/opus.git", "bare-name"))
+    before = sorted(os.listdir(legacy))
+    with patched(projects, SNAPSHOT_DIR=legacy), patched(sys, stdout=io.StringIO()), \
+            context.use(context.resolve({"server": "legacy.test"}, {}, {})):
+        rc = server_main(["--json"])
+        payload = json.loads(sys.stdout.getvalue())
+    reg = payload["registry"]
+    c.check("#536 a legacy pair names both its files",
+            rc == 0 and reg["source"] == "legacy pair" and
+            sorted(reg["files"]) == sorted(os.path.join(legacy, n)
+                                           for n in ("projects", "limits.json")), reg)
+    c.check("#536 visible projects include bare legacy names",
+            reg["projects"] == 2, reg)   # opus (из origin) + bare-name
+    c.check("#536 a legacy registry is not migrated by diagnostics",
+            sorted(os.listdir(legacy)) == before, os.listdir(legacy))
+
+    # Пустая установка: ожидаемые пути помечены, не выданы за существующие.
+    absent = os.path.join(root, "absent")
+    os.makedirs(absent)
+    with patched(projects, SNAPSHOT_DIR=absent), patched(sys, stdout=io.StringIO()), \
+            context.use(context.resolve({"server": "absent.test"}, {}, {})):
+        rc = server_main(["--json"])
+        payload = json.loads(sys.stdout.getvalue())
+    reg = payload["registry"]
+    c.check("#536 an absent registry is empty with expected paths",
+            rc == 0 and reg["source"] == "empty" and
+            reg["file"] == os.path.join(absent, "projects.json") and
+            not os.path.exists(reg["file"]), reg)
+    c.check("#536 an absent registry has no projects",
+            reg["projects"] == 0, reg)
+
+    # Глобальный путь не просачивается при подменённом каталоге.
+    c.check("#536 an injected registry dir does not report the global path",
+            reg["file"] != projects.SNAPSHOT, reg["file"])
 
     dir_ = os.path.join(root, "bad")
-    os.makedirs(dir_, exist_ok=True)
+    os.makedirs(dir_)
     with open(os.path.join(dir_, "projects.json"), "w", encoding="utf-8") as f:
         f.write("{oops")
     before = sorted(os.listdir(dir_))
@@ -281,6 +404,7 @@ def main():
     check_status_and_hygiene_536(c)
     check_client_cli_536(c)
     check_server_side_536(c)
+    check_dispatcher_policy_536(c)
     return c.report("diagnose")
 
 

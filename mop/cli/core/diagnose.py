@@ -1,10 +1,12 @@
 """mop diagnose: offline summary of the selected server login
 
 Prints which server the next command would talk to, where that choice
-came from, where its login directory is, and whether the login is whole:
+came from (command line, environment, clone binding, or the sole joined
+directory), where its login directory is, and whether the login is whole:
 complete, partial (a leftover half of the old pair), empty or a machine
 service identity. No network, no prompts, no writes; the login's secrets
-are never shown.
+are never shown. The schema line names the version of a validated
+connection.json only; other formats carry no schema claim.
 
 Broken or conflicting directories refuse with exit code 1 -- the refusal
 is the diagnosis. partial/empty/machine are informational: exit code 0
@@ -47,7 +49,12 @@ def main(argv):
         return 0
     print(f"server {got['server']} (from {got['source']})")
     print(f"login directory {got['directory']}")
-    print(f"profile status {got['status']} (schema version {got['schema']})")
+    fmt = got["format"] or "no profile files"
+    if got["schema"] is not None:
+        print(f"profile status {got['status']} (format {fmt}, "
+              f"schema version {got['schema']})")
+    else:
+        print(f"profile status {got['status']} (format {fmt})")
     hint = NOT_READY.get(got["status"])
     if hint:
         print(hint.format(server=got["server"]))

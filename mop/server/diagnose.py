@@ -12,10 +12,18 @@
 _checked (#534), второй парсер здесь не нужен. Значения настроек в сводке
 НЕ печатаются: источник каждого -- да (значения умеет печатать
 `mop server config` под своим замком redacted).
+
+Пути и числа -- от ИМЕННО выбранного каталога реестра (#536): глобальный
+SNAPSHOT не просачивается, когда каталог подменён проверкой или званием
+установки. Число проектов -- ВИДИМЫЕ имена (snapshot_names), не счёт
+origin-записей: голые легаси-имена в счёте терять нельзя.
 """
 import os
 
 from ..common import config, projects
+
+SNAPSHOT_NAME = "projects.json"
+LEGACY_NAMES = ("projects", "limits.json")
 
 
 def registry_source(directory=None):
@@ -27,10 +35,9 @@ def registry_source(directory=None):
     это для читателя (#534), -- а сам снимок остаётся за view_of: он же
     проверяет схему, и его отказ -- единственная правда о содержимом."""
     directory = directory if directory is not None else projects.SNAPSHOT_DIR
-    if projects._present(os.path.join(directory, "projects.json")):
+    if projects._present(os.path.join(directory, SNAPSHOT_NAME)):
         return "snapshot"
-    old = os.path.join(directory, "projects")
-    if os.path.exists(old) or os.path.exists(os.path.join(directory, "limits.json")):
+    if any(os.path.exists(os.path.join(directory, n)) for n in LEGACY_NAMES):
         return "legacy pair"
     return "empty"
 
@@ -40,13 +47,19 @@ def report(settings=None, registry_dir=None):
 
     settings: {имя: источник} по config.effective (значения -- НЕ здесь:
     их печатает `mop server config`, и его redacted -- его забота).
-    registry: {source, file, projects} -- источник, путь и число проектов
-    снимка view_of. Битый реестр -- исключение, не «пусто»: молчание
-    выдало бы поломку за чистую установку."""
+    registry: {source, file, files, projects} -- источник, путь v1-файла
+    (ожидаемый для empty), фактические файлы формата и число ВИДИМЫХ
+    проектов. Битый реестр -- исключение, не «пусто»: молчание выдало бы
+    поломку за чистую установку."""
     eff = settings if settings is not None else config.effective()
     directory = registry_dir if registry_dir is not None else projects.SNAPSHOT_DIR
     view = projects.view_of(directory)
+    source = registry_source(directory)
+    files = {"snapshot": [os.path.join(directory, SNAPSHOT_NAME)],
+             "legacy pair": [os.path.join(directory, n) for n in LEGACY_NAMES],
+             "empty": [os.path.join(directory, SNAPSHOT_NAME)]}[source]
     return {"settings": {name: src for name, (_, src) in eff.items()},
-            "registry": {"source": registry_source(directory),
-                         "file": projects.SNAPSHOT,
-                         "projects": len(view.get("projects") or [])}}
+            "registry": {"source": source,
+                         "file": os.path.join(directory, SNAPSHOT_NAME),
+                         "files": files,
+                         "projects": len(projects.snapshot_names(view))}}

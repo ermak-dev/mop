@@ -78,10 +78,12 @@ refused with that master's name; --force acts anyway and says whose it was.
 mop diagnose: offline summary of the selected server login
 
 Prints which server the next command would talk to, where that choice
-came from, where its login directory is, and whether the login is whole:
+came from (command line, environment, clone binding, or the sole joined
+directory), where its login directory is, and whether the login is whole:
 complete, partial (a leftover half of the old pair), empty or a machine
 service identity. No network, no prompts, no writes; the login's secrets
-are never shown.
+are never shown. The schema line names the version of a validated
+connection.json only; other formats carry no schema claim.
 
 Broken or conflicting directories refuse with exit code 1 -- the refusal
 is the diagnosis. partial/empty/machine are informational: exit code 0
