@@ -3121,14 +3121,20 @@ def check_server_namespace_259(c):
     LEGACY: driver как целое не псевдоним, run/list/sweep/build в нём.
     STATUS: FIXED — see #259"""
     want = {"deploy", "config", "setup", "user", "cluster", "bootstrap", "web",
-            "callout", "pve-facts", "doctor", "gc", "disk", "sweep"}
+            "callout", "pve-facts", "doctor", "gc", "disk", "sweep",
+            "diagnose"}   # #536: офлайн-сводка локальной установки
     tree = cli.verbs()
     got = set(tree.get("server") or {})
     c.expect("#259 server must hold exactly its verbs", sorted(got), sorted(want))
     top = cli.catalog(cli.scan())
-    stay = sorted((want - {"setup"}) & set(top))
+    # `diagnose` -- исключение двух половин #536: сводка ВЫБРАННОГО сервера
+    # у оператора (mop diagnose, core) и сводка ЛОКАЛЬНОЙ установки
+    # (mop server diagnose) -- одно слово, две машины, как `setup`.
+    stay = sorted((want - {"setup", "diagnose"}) & set(top))
     c.check(f"#259 must not stay top-level: {stay}", not (stay))
     c.check("#259 mop setup stays top-level, for the operator's machine", not ("setup" not in top))
+    c.check("#536 mop diagnose stays top-level, for the operator's machine",
+            "diagnose" in top)
     # clone-work (#347) -- глагол узла для сторожа, тоже в driver.
     c.expect("#259 driver keeps run/list/sweep/build/clone-work",
              set(tree.get("driver") or {}), {"run", "list", "sweep", "build", "clone-work"})
