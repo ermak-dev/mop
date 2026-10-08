@@ -561,6 +561,29 @@ def legacy_pair_of(snapshot):
 # переключить). Resume v1 после правок старым writer'ом обязан перечитать
 # свежий снимок, а не доверять устаревшему; лечить голые имена/коллизии/
 # orphan-потолки автоматически команда не берётся -- это отдельные решения.
+def _readback_dirfd(dirfd, name, data):
+    """Перечитать записанный файл экспорта ПО FD и сверить с ожидаемым (#553).
+
+    Одна проверка записанного для файлов пары и маркера: открытие
+    O_NOFOLLOW относительно dirfd (symlink на месте файла -- отказ, чужая
+    цель не читается), фактические байты -- с ожидаемыми, режим -- 0600.
+    Согласованная перечитка молчит (None); отказ -- текст причины с именем
+    файла, без сырого содержимого.
+    """
+    try:
+        fdo = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
+    except OSError as e:
+        return f"{name} is missing from the staging directory: {e}"
+    with os.fdopen(fdo, "rb") as f:
+        if f.read() != data:
+            return (f"{name} was written truncated or corrupted: the read-back "
+                    "bytes do not match what was to be exported")
+    st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+    if (st.st_mode & 0o777) != 0o600:
+        return f"{name} did not keep the private mode 0600"
+    return None
+
+
 def export_pair(dest, snapshot_path=None):
     """Выгрузить реестр парой в НОВЫЙ каталог. -> сводка.
 
@@ -668,32 +691,17 @@ def export_pair(dest, snapshot_path=None):
             for name, data in pair.items():
                 fsutil.write_private_dirfd(dirfd, name, data)
             # Сверка фактического: перечитать записанное ПО FD и сверить
-            # байты и права ДО маркера. Усечённая запись -- отказ: готовой
-            # публикации без целой пары не бывает.
+            # байты и права ДО маркера (#553, _readback_dirfd). Усечённая
+            # запись -- отказ: готовой публикации без целой пары не бывает.
             for name, data in pair.items():
-                try:
-                    fdo = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
-                except OSError as e:
-                    raise RuntimeError(f"cannot export: {name} is missing from the "
-                                       f"staging directory: {e}") from None
-                with os.fdopen(fdo, "rb") as f:
-                    if f.read() != data:
-                        raise RuntimeError(f"cannot export: {name} was written "
-                                           "truncated or corrupted: the read-back "
-                                           "bytes do not match what was to be "
-                                           "exported")
-                st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
-                if (st.st_mode & 0o777) != 0o600:
-                    raise RuntimeError(f"cannot export: {name} did not keep the "
-                                       "private mode 0600")
+                why = _readback_dirfd(dirfd, name, data)
+                if why is not None:
+                    raise RuntimeError(f"cannot export: {why}")
             fsutil.write_private_dirfd(dirfd, "export.json", marker_body)
             # Маркер тоже перечитан: публикация подтверждена фактом, не планом.
-            fdo = os.open("export.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
-            with os.fdopen(fdo, "rb") as f:
-                if f.read() != marker_body:
-                    raise RuntimeError("cannot export: export.json was written "
-                                       "truncated or corrupted: the read-back "
-                                       "bytes do not match")
+            why = _readback_dirfd(dirfd, "export.json", marker_body)
+            if why is not None:
+                raise RuntimeError(f"cannot export: {why}")
             # Публикация: ОДИН атомарный rename без перезаписи. Имя dest
             # занято -- EEXIST, чужое не тронуто; свободно -- готовый
             # каталог целиком становится dest.
