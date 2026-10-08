@@ -1009,70 +1009,151 @@ def check_agent_unit_172(c, can_render):
               (t.get("args"), t.get("environment")))
 
 
-# ── посев реестра v1 при deploy (#540) ────────────────────────────────────
-# HYPOTHESIS (#540): роль bus сеет на сервер только легаси-файл `projects`
-# (force:no, #117), а атомарный снимок v1 `projects.json` (#534) прогоном
-# не сеится вовсе: свежий сервер с другим MOP_HOME у нового mop не получил
-# бы реестр, пока контроллер не ответит легаси-парой -- и наоборот,
-# контроллер с устаревшей парой мог бы перезатереть свежий v1 сервера,
-# если бы посев шёл по файлу без различия источника.
-# SOLUTION: посев реестра выбирает источник по матрице: сервер с ЛЮБЫМ
-# реестром (v1 или пара) authoritative, прогон его не трогает и не мигрирует
-# пар из playbook (миграция -- writer сервиса под замком, #534); пустой
-# сервер получает копию контроллера no-clobber (v1 когда есть v1, пара когда
-# есть только пара), 0600 под MOP_USER; same-HOME (контроллер == сервер)
-# сеет ничего -- реестр уже на месте, копия в себя -- это rewrite; чистая
-# установка без обоих источников сеет честный пустой реестр (первый add
-# создаст снимок). Неоднозначные входы (v1 у контроллера + живая пара у
-# сервера) НЕ разрешаются прогоном молча: сервер authoritative по своей паре
-# до собственной миграции.
-# RESULT: красный прогон впереди реализации -- снимка v1 в посеве нет.
+# ── посев реестра при deploy (#540) ────────────────────────────────────
+# HYPOTHESIS (#540): посев реестра (#117) искал на контроллере только
+# легаси-файл `projects`: свежий сервер не получал снимок v1 (#534), а
+# сервер с любым своим реестром мог получить сверху чужую легаси-копию
+# контроллера.
+# SOLUTION: источник выбирается матрицей снимков. Сервер с любым реестром
+# (снимок v1, легаси-пара, даже остывший limits.json) authoritative: прогон
+# его не трогает и не мигрирует -- миграция есть writer сервиса под
+# замком (#534); пара v1+легаси на сервере -- штатный итог миграции.
+# Контроллер с обоими отдаёт снимок v1, его легаси остывший. Пара сеется
+# целиком: projects и limits.json, потолки не теряются. Same-HOME
+# (контроллер -- сам сервер) не сеет ничего. Битый v1 контроллера
+# разворачивает префлайт `mop server deploy` (view_of в cli/server/deploy)
+# до плейбука: YAML JSON не разбирает и парсера не дублирует.
+# Проверка исполняет настоящие when задач посева по матрице фактов
+# (контроллер × сервер × HOME), как check_identity_copy_167.
+# RESULT: красный прогон впереди реализации -- снимка v1 в посеве нет,
+# легаси сеется без оглядки на реестр сервера и на same-HOME.
 # STATUS: FIXED — see #540
 def check_registry_seeding_540(c, ptasks):
+    import itertools
+    import types
     tasks = [t for t in (ptasks or []) if isinstance(t, dict) and "name" in t]
-    seeds = [t for t in tasks if (t.get("ansible.builtin.copy") or {}).get("dest", "")
-             .endswith("/.config/mop/projects") or
-             (t.get("ansible.builtin.copy") or {}).get("dest", "")
-             .endswith("/.config/mop/projects.json")]
-    # Посев ровно одного v1-снимка: копия контроллерского projects.json на
-    # сервер, no-clobber.
-    v1 = [t for t in seeds if (t.get("ansible.builtin.copy") or {}).get("dest", "")
-          .endswith("projects.json")]
-    c.check("#540 the play seeds the v1 snapshot onto the server",
-            len(v1) == 1, [t.get("name") for t in v1])
-    if len(v1) == 1:
-        cp = v1[0]["ansible.builtin.copy"]
-        c.check("#540 the v1 snapshot is seeded no-clobber",
-                cp.get("force") is False, cp.get("force"))
-        c.check("#540 the v1 seed is private to the pool user",
-                cp.get("mode") == "0600" and cp.get("owner") == "{{ MOP_USER }}",
-                (cp.get("mode"), cp.get("owner")))
-        c.check("#540 the v1 seed comes from the controller's snapshot",
-                (cp.get("src") or "").endswith("projects.json"), cp.get("src"))
-        when = str(v1[0].get("when", ""))
-        c.check("#540 the v1 seed only onto a server without any registry",
-                "snapshot" in when and "pair" in when and "not" in when, when)
-    # Легаси-посев прежнего #117 сохранён: пара на пустой сервер, force:no.
-    legacy = [t for t in seeds if (t.get("ansible.builtin.copy") or {})
-              .get("dest", "").endswith("/.config/mop/projects")]
-    c.check("#540 the legacy pair seed of #117 survives",
-            len(legacy) == 1, [t.get("name") for t in legacy])
-    if legacy:
-        cp = legacy[0]["ansible.builtin.copy"]
-        c.check("#540 the legacy seed stays no-clobber",
-                cp.get("force") is False, cp.get("force"))
-        lw = str(legacy[0].get("when", ""))
-        c.check("#540 the legacy seed only onto a server without any registry",
-                "snapshot" in lw and "pair" in lw and "not" in lw, lw)
-    # Прогон не мигрирует и не перезаписывает: ни одна задача роли не пишет
-    # в projects.json сервера поверх существующего (force:no -- недостаточно:
-    # migrate-задачи быть не должно вовсе).
+
+    def seeds():
+        out = {}
+        for t in tasks:
+            cp = t.get("ansible.builtin.copy") or {}
+            dest = cp.get("dest")
+            if isinstance(dest, str) and dest.endswith(("/.config/mop/projects",
+                                                       "/.config/mop/projects.json",
+                                                       "/.config/mop/limits.json")):
+                out[os.path.basename(dest)] = (t, cp)
+        return out
+
+    seed = seeds()
+    c.check("#540 the play seeds the v1 snapshot and the whole legacy pair",
+            sorted(seed) == ["limits.json", "projects", "projects.json"], sorted(seed))
+    for name, (_t, cp) in seed.items():
+        c.check(f"#540 the {name} seed lands on the server, no-clobber, private",
+                (cp.get("dest") or "").startswith("{{ MOP_HOME }}/.config/mop/")
+                and cp.get("force") is False and cp.get("mode") == "0600"
+                and cp.get("owner") == "{{ MOP_USER }}"
+                and cp.get("group") == "{{ MOP_USER }}", cp)
+    c.check("#540 the v1 seed copies the controller's own snapshot",
+            ((seed.get("projects.json") or (None, {}))[1].get("src") or "")
+            .endswith("/.config/mop/projects.json"),
+            (seed.get("projects.json") or (None, {}))[1].get("src"))
+    c.check("#540 the legacy pair seed copies the controller's own files",
+            ((seed.get("projects") or (None, {}))[1].get("src") or "")
+            .endswith("/.config/mop/projects")
+            and ((seed.get("limits.json") or (None, {}))[1].get("src") or "")
+            .endswith("/.config/mop/limits.json"),
+            [(seed.get(k) or (None, {}))[1].get("src") for k in ("projects", "limits.json")])
+
+    # Факты посева -- stat'ы обеих сторон: v1-снимок, легаси-пара, limits.
+    # Чужие stat'ы файла (users.conf, callout.conf, operators) не считаются.
+    stats = []
+    for t in tasks:
+        st_ = t.get("ansible.builtin.stat") or {}
+        if isinstance(st_.get("path"), str) and "/.config/mop/" in st_["path"]:
+            side = "controller" if "lookup('env', 'HOME')" in st_["path"] else "server"
+            stats.append((side, os.path.basename(st_["path"]), t))
+    c.check("#540 the play stats both sides' snapshot, pair and limits",
+            sorted((s, n) for s, n, _ in stats)
+            == [("controller", "limits.json"), ("controller", "projects"),
+                ("controller", "projects.json"), ("server", "limits.json"),
+                ("server", "projects"), ("server", "projects.json")],
+            sorted((s, n) for s, n, _ in stats))
+    for side, name, t in stats:
+        if side == "controller":
+            c.check(f"#540 the {name} fact of the controller stays on the controller",
+                    t.get("delegate_to") == "localhost" and t.get("become") is False,
+                    (t.get("delegate_to"), t.get("become")))
+        else:
+            c.check(f"#540 the {name} fact of the server is taken on the server",
+                    "delegate_to" not in t, t.get("delegate_to"))
+
+    def runs(task, env):
+        conds = task.get("when", [])
+        for cond in conds if isinstance(conds, list) else [conds]:
+            try:
+                if not eval(str(cond), {"lookup": lambda _k, _v="": env["controller_home"]},
+                            dict(env)):  # noqa: S307 -- свой yaml
+                    return False
+            except Exception as e:  # noqa: BLE001 -- выражение не читается
+                raise AssertionError(f"when {cond!r}: {e}")
+        return True
+
+    def st(exists):
+        return types.SimpleNamespace(stat=types.SimpleNamespace(exists=exists))
+
+    # Матрица утверждена #540: сервер с любым реестром не сеится; пара
+    # v1+легаси на сервере -- штатная (#534); контроллер с обоими отдаёт
+    # v1; пара сеется вместе с limits.json, когда он есть; same-HOME не
+    # сеет ничего.
+    def expected(cv1, cpair, clim, sv1, spair, slim, same_home):
+        if same_home or sv1 or spair or slim:
+            return set()
+        if cv1:
+            return {"projects.json"}
+        if cpair:
+            return {"projects", "limits.json"} if clim else {"projects"}
+        return set()
+
+    server_home = "/srv/mop"
+    combos = []
+    for same_home in (False, True):
+        for sv1, spair, slim in itertools.product((False, True), repeat=3):
+            for cv1, cpair, clim in ((False, False, False), (False, False, True),
+                                     (False, True, False), (False, True, True),
+                                     (True, False, False), (True, True, True)):
+                combos.append((cv1, cpair, clim, sv1, spair, slim, same_home))
+    for cv1, cpair, clim, sv1, spair, slim, same_home in combos:
+        env = {"controller_home": server_home if same_home else "/home/controller",
+               "MOP_HOME": server_home,
+               "controller_snapshot": st(cv1), "controller_pair": st(cpair),
+               "controller_limits": st(clim),
+               "server_snapshot": st(sv1), "server_pair": st(spair),
+               "server_limits": st(slim),
+               # Легаси-факт #117: на прогонах старого YAML, новый его не
+               # зовет -- матрица должна падать на нарушении, не на NameError.
+               "controller_registry": st(cpair)}
+        ctrl = "+".join(n for on, n in ((cv1, "v1"), (cpair, "pair"), (clim, "limits"))
+                        if on) or "none"
+        srv = "+".join(n for on, n in ((sv1, "v1"), (spair, "pair"), (slim, "limits"))
+                       if on) or "none"
+        what = (f"registry seeding, controller {ctrl}, server {srv}, "
+                f"{'same' if same_home else 'different'} HOME")
+        want = expected(cv1, cpair, clim, sv1, spair, slim, same_home)
+        try:
+            ran = {name for name, (t, _cp) in seed.items() if runs(t, env)}
+        except AssertionError as e:
+            c.check(f"{what}: conditions read", False, e)
+            continue
+        c.check(f"{what}: seeds exactly {sorted(want)}", ran == want, sorted(ran))
+
+    # Прогон не мигрирует и не перезаписывает реестр сервера сам: force:no
+    # -- недостаточно, migrate-задач быть не должно вовсе.
     for t in tasks:
         body = str(t)
         c.check(f"#540 no task migrates or rewrites the server registry: "
-                f"{t.get('name')}", "snapshot_of" not in body and
-                "write_snapshot" not in body and
-                "cluster project" not in body.replace("cluster users", ""), body[:120])
+                f"{t.get('name')}", "snapshot_of" not in body
+                and "write_snapshot" not in body
+                and "cluster project" not in body.replace("cluster users", ""), body[:120])
 
 
 def check_one_source_219(c):
