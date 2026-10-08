@@ -1229,7 +1229,7 @@ def check_owner_preservation_538(c):
                     "new": "new-key", "source": src, "copy": cp,
                     "recipients": ["node1"], "stage": stage}
 
-        real_stat, real_getuid = os.stat, os.getuid
+        real_stat, real_geteuid = os.stat, os.geteuid
         real_write = proxykey.fsutil.write_private
 
         # (1) Чужой владелец по подменённому stat -- guard отказывает до
@@ -1240,7 +1240,7 @@ def check_owner_preservation_538(c):
             return foreign
 
         with patched(proxykey.os, stat=stat_foreign), \
-                patched(proxykey.os, getuid=real_getuid):
+                patched(proxykey.os, geteuid=real_geteuid):
             r = proxykey._guard(state())
         c.check("#538 a foreign owner blocks the guard before remote",
                 isinstance(r, str) and "owned by uid 1234" in r, r)
@@ -1287,7 +1287,7 @@ def check_owner_preservation_538(c):
             return real_write(path, data, owner=owner)
 
         with patched(proxykey.os, stat=stat_root), \
-                patched(proxykey.os, getuid=lambda: 0), \
+                patched(proxykey.os, geteuid=lambda: 0), \
                 patched(proxykey.fsutil, write_private=write_root), \
                 patched(proxykey, OP=op):
             out = proxykey._local_step(state())
@@ -1303,10 +1303,149 @@ def check_owner_preservation_538(c):
         # (4) Guard под root с чужим владельцем -- всё равно именованный
         # блокер ДО remote: «не угадывать владельца из uid процесса».
         with patched(proxykey.os, stat=stat_root), \
-                patched(proxykey.os, getuid=lambda: 0):
+                patched(proxykey.os, geteuid=lambda: 0):
             r = proxykey._guard(state())
         c.check("#538 a root guard still names the foreign owner as a blocker",
                 isinstance(r, str) and "owned by uid 1000" in r, r)
+
+
+# ── #538: структурированная причина шва — код без raw payload ────────────
+# HYPOTHESIS: blanket-обрезание причины до имени типа резало и безопасную
+# информацию: HTTP-код отказа важен оператору, «403» -- не секрет. Гладить
+# всё до ConnectionError -- вторая санитизация безопасной фразы.
+# SOLUTION: шов отдаёт структурированный verdict: перечисленные теги +
+# http_status (401/403/…) + enumerated reason; они ЕДУТ в публичный итог.
+# Raw body / ключи / угаданный по str(exception) код -- не едут никогда.
+def check_structured_reason_538(c):
+    with tempfile.TemporaryDirectory(prefix="mop-rot-why-") as d:
+        op = os.path.join(d, "op.json")
+        src, cp = os.path.join(d, "s"), os.path.join(d, "c")
+        for p in (src, cp):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("old-key\n")
+            os.chmod(p, 0o600)
+
+        def state(stage="ready"):
+            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                    "new": "new-key", "source": src, "copy": cp,
+                    "recipients": ["node1"], "stage": stage}
+
+        # Шов отдаёт структурированный отказ: тег + http_status +
+        # enumerated reason. Публичный итог несёт код, не raw body.
+        def put_refused(keys):
+            return ("refused", {"http_status": 403, "reason": "access_denied",
+                                "body": "raw panel body with SECRET=abc"})
+
+        remote = FakeRemote(["old-key", "panel-key"])
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=put_refused):
+            out = proxykey._remote_step(state())
+        c.check("#538 a structured refusal keeps the http status",
+                out.get("http_status") == 403, out)
+        c.check("#538 a structured refusal keeps the enumerated reason",
+                out.get("reason") == "access_denied", out)
+        c.check("#538 the raw body does not ride",
+                "SECRET" not in json.dumps(out) and "raw panel" not in json.dumps(out),
+                out)
+
+        # Строка-причина шва (не словарь) -- не едет вовсе: только
+        # перечисленное.
+        def put_refused_str(keys):
+            return ("refused", "403 forbidden raw body SECRET=abc")
+
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=put_refused_str):
+            out = proxykey._remote_step(state())
+        c.check("#538 a plain-string reason does not ride",
+                "SECRET" not in json.dumps(out), out)
+        c.check("#538 a string reason still says refused",
+                out.get("refused") is True and not out.get("ok"), out)
+
+        # Исключение шва: класс + БЕЗ кода, угаданного по str(e).
+        def put_boom(keys):
+            raise TimeoutError("connection lost after 403 FORBIDDEN body SECRET")
+
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=put_boom):
+            out = proxykey._remote_step(state())
+        c.check("#538 an exception outcome carries no guessed status",
+                "http_status" not in out and "403" not in json.dumps(out), out)
+        c.check("#538 an exception outcome stays unknown",
+                out.get("unknown") is True, out)
+
+
+# ── #538: owner-preservation в реальном resume-потоке ────────────────────
+# HYPOTHESIS: прямой вызов _local_step обходил _guard: проверка owner в
+# реальном использовании обязана жить в потоке resume, а не только в
+# изолированном хелпере.
+# SOLUTION: полный resume со stage=accepted, подменённый os.stat показывает
+# чужого владельца -- PUT-шов не вызывается вовсе (guard до remote);
+# согласный владелец -- write_private получает сохранённого (uid,gid).
+def check_owner_in_resume_flow_538(c):
+    import types
+    with tempfile.TemporaryDirectory(prefix="mop-rot-flow-") as d:
+        src, cp = os.path.join(d, "s"), os.path.join(d, "c")
+        op, lock = os.path.join(d, "op.json"), os.path.join(d, "lock")
+        for p in (src, cp):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("old-key\n")
+            os.chmod(p, 0o600)
+        real_stat, real_geteuid = os.stat, os.geteuid
+        real_write = proxykey.fsutil.write_private
+
+        def state(stage):
+            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                    "new": "new-key", "source": src, "copy": cp,
+                    "recipients": [], "stage": stage}
+
+        def write_state(st):
+            with open(op, "w", encoding="utf-8") as f:
+                json.dump(st, f)
+
+        # Чужой владелец на пути: guard отказывает ДО remote-швов.
+        remote_calls = []
+        foreign = types.SimpleNamespace(st_mode=0o100600, st_uid=4321, st_gid=4321)
+
+        def stat_foreign(path, *a, **k):
+            return foreign if path in (src, cp) else real_stat(path)
+
+        def fetch():
+            remote_calls.append("fetch")
+            return ["old-key"]
+
+        with patched(proxykey.os, stat=stat_foreign), \
+                patched(proxykey.os, geteuid=real_geteuid), \
+                patched(proxykey, OP=op, LOCK=lock, _fetch_list=fetch):
+            write_state(state("accepted"))
+            out = proxykey.resume(exclusive=True)
+        c.check("#538 a foreign owner in the resume flow blocks before remote",
+                not out.get("ok") and "owned by uid 4321" in str(out.get("blocker", "")),
+                out)
+        c.check("#538 the blocked flow reached no remote seam", not remote_calls,
+                remote_calls)
+
+        # Согласный владелец: write_private получает СОХРАНЁННОГО владельца
+        # в реальном потоке (stage=accepted → local step).
+        calls = []
+
+        def write_spy(path, data, owner=None):
+            calls.append((path, owner))
+            return real_write(path, data, owner=owner)
+
+        with patched(proxykey.os, stat=real_stat), \
+                patched(proxykey.os, geteuid=real_geteuid), \
+                patched(proxykey.fsutil, write_private=write_spy), \
+                patched(proxykey, OP=op, LOCK=lock, _fetch_list=fetch):
+            write_state(state("accepted"))
+            out = proxykey.resume(exclusive=True)
+        c.check("#538 the resume flow completes to delivery with 0 recipients",
+                out.get("ok") and out.get("stage") == "completed", out)
+        own = [x for x in calls if x[0] in (src, cp)]
+        if c.check("#538 the flow wrote both key paths", len(own) == 2, calls):
+            for path, owner in own:
+                c.check(f"#538 the kept owner rides to write_private "
+                        f"for {os.path.basename(path)}",
+                        owner == (real_stat(src).st_uid, real_stat(src).st_gid), owner)
 
 
 def main():
@@ -1325,6 +1464,8 @@ def main():
     check_serviceability_538(c)
     check_coverage_and_verdicts_538(c)
     check_owner_preservation_538(c)
+    check_structured_reason_538(c)
+    check_owner_in_resume_flow_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

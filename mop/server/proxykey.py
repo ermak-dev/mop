@@ -263,7 +263,7 @@ def _serviceable(state):
             return (f"blocker: {what} file {path} mode {oct(mode)} is not "
                     f"private; rotation must preserve a serviceable copy")
         owner = os.stat(path).st_uid
-        if owner != os.getuid():
+        if owner != os.geteuid():
             return (f"blocker: {what} file {path} is owned by uid {owner}, "
                     f"not this process; an atomic write would strand the service")
     return None
@@ -340,6 +340,17 @@ def _remote_step(state):
     if tag == "refused":
         out["blocker"] = "PUT refused before applying"
         out["refused"] = True
+        # Структурированная причина шва -- не секрет: HTTP-код и
+        # перечисленное имя причины нужны оператору. Едет ТОЛЬКО
+        # перечисленное поле; строка-причина и raw body -- нет.
+        why = verdict[1] if len(verdict) > 1 else None
+        if isinstance(why, dict):
+            status = why.get("http_status")
+            if isinstance(status, int):
+                out["http_status"] = status
+            reason = why.get("reason")
+            if isinstance(reason, str) and reason and " " not in reason:
+                out["reason"] = reason
         return out
     state["stage"] = "listed"
     _save_op(state)
