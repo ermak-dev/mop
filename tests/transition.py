@@ -12,8 +12,6 @@
 
 Найденный дефект -- отдельная задача: файл свойство фиксирует, не чинит.
 """
-import contextlib
-import io
 import json
 import os
 import subprocess
@@ -22,7 +20,7 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
-from _lib import Checks, patched, patched_env  # noqa: E402
+from _lib import Checks, patched, patched_env, run_command  # noqa: E402
 sys.path.insert(0, ROOT)
 
 # Зависимые модули -- атрибуты модуля, заполняются load(): импорт со
@@ -283,11 +281,11 @@ def _poisoned_profile(directory):
 
 
 def _runs_red(c, what, poison, check):
-    """Порча snapshot + прогон парного сценария -> сценарий обязан провалиться."""
+    """Порча snapshot + прогон парного сценария -> сценарий обязан провалиться.
+    Вывод глушит общий run_command (#269: свой redirect_stdout -- диалект)."""
     cc = Checks()
-    sink = io.StringIO()
-    with contextlib.redirect_stdout(sink), patched(creds, snapshot=poison):
-        check(cc)
+    with patched(creds, snapshot=poison):
+        run_command(lambda _argv: check(cc))
     c.check(what, cc.failed > 0,
             "" if cc.failed else
             "the paired check stayed green under the poison: no teeth")
