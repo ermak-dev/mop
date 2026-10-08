@@ -240,104 +240,98 @@ def check_proxy_origin_541(c):
              f"https://{HOST}:{port}/custom/v1/models")
 
 
-# Порча-доказательства приёмочных проверок (#541 B1): каждая проверка выше
-# зелёная на текущем дереве; чтобы доказать, что она ЛОВИТ дефект, а не
-# проверяет пустоту, поведение временно портилось (monkey-патч с
-# обязательным восстановлением) -- прогоном этого же файла в одном
-# процессе (runpy: дочерний процесс импортирует mop заново и патча не
-# видит). Матрица порч, каждая краснела своим сценарием, после отката --
-# зелёные 56/56:
-#   1. _snapshot_of_pair без orphan-проверки (потолок выброшен молча) --
-#      9 красных: отказов writer'а нет (bare/collision/orphan/foreign),
-#      «refuses the writer» и «names the reason» по всем четырём парам,
-#      «restored behavior refuses the orphan»;
-#   2. llm.origin без проверки издателя (снимает /llm с любого https) --
-#      4 красных: чужой порт, чужой хост, контракт-контраст, профиль
-#      session_env с чужим портом;
+# Порча-доказательства приёмочных проверок (#541 B1): свойство уже
+# выполнялось на дереве эпика, поэтому приёмочные зелёные сразу -- а чтобы
+# они не были «проверкой пустоты», здесь каждая порча поведения (#541
+# ревью: вариант (а)) запускает ПОДМЕНЁННОЕ поведение против НАСТОЯЩЕЙ
+# приёмочной проверки этого файла: под порчей её прогон обязан краснеть,
+# после отката -- снова зелёная. Так доказательство живёт в CI, а не в
+# комментариe: «tamper caught by ...» -- это срабатывание приёмочной,
+# а не осмотр самой порчи. Патч -- monkey-атрибут модуля, поэтому вызов
+# порчи обязан идти через projects.snapshot_of/llm.origin (глобальную
+# ссылку модуля), и прогон в одном процессе: дочерний процесс импортирует
+# mop заново и патча не видит.
+# Матрица порч (каждая проверена красным прогоном здесь же):
+#   1. _snapshot_of_pair без orphan/legacy-проверки -- ловится
+#      check_registry_roundtrip_541 (отказов writer'а нет);
+#   2. llm.origin без проверки издателя -- ловится check_proxy_origin_541
+#      и check_session_env_541 (чужой порт/хост обрезаны);
 #   3. write_snapshot-«нормализатор» (пишет view, молча выбросив legacy) --
-#      зелёная: сценарий этого файла writer'а с legacy-view не кормит
-# (этот случай держит tests/projects.py #534); приёмочная сила здесь --
-# в отказах миграции, а не в прямой записи legacy-view;
-#   4. export_pair с перезаписью занятого dest -- 2 красных: отказ
-#      «must refuse» и «leaves the existing directory intact»;
-#   5. canonical «снимает всегда» (сквозь session_env) -- 4 красных,
-#      тех же, что у порчи 2: session_env держится контрактом llm.
+#      не ловится этим файлом: сценарий writer'а с legacy-view не кормит
+#      (этот случай держит tests/projects.py #534), в матрицу НЕ включена;
+#   4. export_pair с перезаписью занятого dest -- ловится
+#      check_reentry_541 (отказ «must refuse» и нетронутый каталог);
+#   5. canonical «снимает всегда» сквозь session_env -- ловится
+#      check_proxy_origin_541 и check_session_env_541, как порча 2:
+#      session_env держится контрактом llm.
 # HYPOTHESIS: если порча не ловится -- проверка слаба и её надо усилить.
-# RESULT: порчи 1, 2, 4, 5 ловятся своими сценариями (красные прогоны
-# выше); настоящих дефектов на 834889f не найдено.
-def check_url_tamper_541(c):
-    # (1) Порча миграции: orphan-лимит «выбрасывается» молча -- как если бы
-    # _snapshot_of_pair не проверял чужие лимиты. Ловится сценарием 1б:
-    # отказа writer'а не случается, и приёмочная проверка «refuses the
-    # writer» краснеет; здесь прямой прибор той же порчи: потолок теряется.
-    d = _pair(os.path.join(tempfile.mkdtemp(prefix="mop-541-tamper1-"), "p"),
-              [RU], {"ghost": 2})
-    original = projects._snapshot_of_pair
+# RESULT: порчи 1, 2, 4, 5 ловятся своими приёмочными в CI; настоящих
+# дефектов на 834889f не найдено.
+def _runs_red_541(what, fn):
+    """Прогон приёмочной fn со своим Checks() и заглушённым выводом --
+    глушить умеет общий run_command из _lib (#269: свой диалект запрещён).
+    -> (красный?, строки провалов). Приёмочная обязана печатать свои
+    провалы; двойной отчёт не нужен, поэтому вывод заглушен, а красный
+    читается по cc.failed, не по потоку."""
+    from _lib import run_command
+    cc = Checks()
+    _, _, _ = run_command(lambda _argv: fn(cc))
+    return cc.failed, cc.failures
 
-    def sloppy(dir_):
-        # «Порча»: та же миграция, но без orphan-проверки -- чужой потолок
-        # просто не попадает в снимок.
-        origins, legacy = puppets.project_ids(
+
+def _tamper_541(c, what, patch, check):
+    """Одна порча: под patch приёмочная check обязана краснеть, без порчи --
+    снова зелёная. patch -- контекстный менеджер (patched из _lib)."""
+    with patch:
+        red, lines = _runs_red_541(what, check)
+    c.check(f"#541 {what}: the acceptance catches the tamper red", red > 0,
+            "; ".join(lines)[:300])
+    red2, lines2 = _runs_red_541(what, check)
+    c.check(f"#541 {what}: the acceptance is green again once restored", red2 == 0,
+            "; ".join(lines2)[:300])
+
+
+def check_tamper_matrix_541(c):
+    """Матрица порч: каждая приёмочная ловит СВОЮ порчу красным."""
+    # (1) Миграция без orphan/legacy-проверок: чужой потолок и голые имена
+    # выпадают молча -- приёмочная 1б ждёт отказов writer'а.
+    def sloppy_pair(dir_):
+        origins, _legacy = puppets.project_ids(
             projects._strict_lines(os.path.join(dir_, "projects")))
         limits = projects._strict_limits(os.path.join(dir_, "limits.json"))
-        known = {puppets.project_of(o) for o in origins}
         return {"version": 1, "projects": [
             projects._entry(o, limits.get(puppets.project_of(o)))
-            for o in sorted(origins) if puppets.project_of(o) in known or True]
-            if not legacy else []}
+            for o in sorted(origins)]}
 
-    try:
-        with patched(projects, _snapshot_of_pair=sloppy):
-            snap = projects.snapshot_of(d)   # порча НЕ отказывает -- потеря
-            lost = "ghost" not in projects.snapshot_limits(snap)
-            c.check("#541 tamper-proof: a migration that silently drops an "
-                    "orphan limit loses the ceiling (the acceptance above "
-                    "demands the refusal instead)", lost)
-        # Восстановленное поведение отказывает, как требует сценарий 1б.
-        try:
-            projects.snapshot_of(d)
-            refused = False
-        except RuntimeError as e:
-            refused = "ghost" in str(e)
-        c.check("#541 tamper-proof: restored behavior refuses the orphan", refused)
-    finally:
-        projects._snapshot_of_pair = original
-        shutil.rmtree(os.path.dirname(d), ignore_errors=True)
+    _tamper_541(c, "orphan-dropping migration",
+                patched(projects, _snapshot_of_pair=sloppy_pair),
+                check_registry_roundtrip_541)
 
-    # (2) Порча адреса: origin снимает /llm у ЛЮБОГО host:port (без
-    # проверки издателя). Патчим саму llm.origin: она зовёт canonical
-    # глобальной ссылкой модуля, и подмена llm.canonical её не меняет.
-    # Ловится сценарием 3: чужой порт обязан остаться чужим.
-    other_port = f"https://{HOST}:9443/llm"
-    real_origin = llm.origin
-
+    # (2) origin без проверки издателя: /llm режется с любого https-адреса.
     def origin_anywhere(url, host=None, port=None):
-        # Порча «как до #547»: префикс /llm легаси-установки режется с
-        # любого https-адреса, издатель не сверяется.
         if url and url.startswith("https://") and url.endswith("/llm"):
             return url[: -len("/llm")]
         return url
 
-    try:
-        with patched(llm, origin=origin_anywhere):
-            broken = llm.origin(other_port, host=HOST, port="443")
-        # Порча ВИДИМО нарушает свойство сценария 3: чужой порт обрезан.
-        # Красная приёмочная «a foreign port is not ours to strip» выше --
-        # и есть срабатывание; здесь фиксируем сам дефект как воспроизведённый.
-        c.check("#541 tamper-proof: the defect strips a foreign-port /llm "
-                "(reproduced; the acceptance above catches it red)",
-                broken != other_port, broken)
-        # Настоящий контракт на том же адресе чужой порт сохраняет.
-        c.expect("#541 tamper-proof: the real contract keeps the foreign port",
-                 real_origin(other_port, host=HOST, port="443"), other_port)
-        # Контраст того же портящего правила на СВОЁМ издателе: легаси
-        # снимается и порчей, и контрактом -- приёмочная проверка различает
-        # их не по пути, а по подсказкам издателя (host+port).
-        c.expect("#541 tamper-proof: the real contract strips only its own issuer",
-                 real_origin(f"https://{HOST}:443/llm", host=HOST, port="443"),
-                 f"https://{HOST}:443")
-    finally:
-        llm.origin = real_origin
+    for victim in (check_proxy_origin_541, check_session_env_541):
+        _tamper_541(c, "issuer-blind /llm strip",
+                    patched(llm, origin=origin_anywhere), victim)
+
+    # (4) export_pair с перезаписью занятого dest: «порча» до публикации
+    # расчищает имя -- приёмочная 2 ждёт отказа и нетронутого каталога.
+    real_export = projects.export_pair
+
+    def overwriting(dest, snapshot_path=None):
+        try:
+            return real_export(dest, snapshot_path)
+        except RuntimeError:
+            if os.path.isdir(dest):
+                shutil.rmtree(dest)
+            return real_export(dest, snapshot_path)
+
+    _tamper_541(c, "destination-overwriting export",
+                patched(projects, export_pair=overwriting),
+                check_reentry_541)
 
 
 # HYPOTHESIS (#541 B1): переходный вход переживает оба адреса: session_env
@@ -351,66 +345,82 @@ def check_session_env_541(c):
     issued = f"https://{HOST}:{port}"
     legacy = f"https://{HOST}:{port}/llm"
     root = tempfile.mkdtemp(prefix="mop-541-env-")
-    # Профиль -- во временном доме, до первого обращения к mop: creds.ROOT
-    # вычислен на импорте от настоящего дома, и подмена каталога после
-    # импорта уже не переносит серверные каталоги. Настоящий ~/.config/mop
-    # не читается и не пишется.
+    # Профиль -- во временном доме; подмена каталога -- patched, как в
+    # соседних файлах. Настоящий ~/.config/mop не читается и не пишется:
+    # session_env ходит в каталог через creds.server_dir от creds.ROOT.
     os.makedirs(os.path.join(root, "servers", HOST))
-    saved_root = creds.ROOT
-    creds.ROOT = os.path.join(root, "servers")
+    try:
+        with patched(creds, ROOT=os.path.join(root, "servers")):
+            _session_env_cases_541(c, root, port, issued, legacy)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _session_env_cases_541(c, root, port, issued, legacy):
+    """Случаи session_env внутри подменённого creds.ROOT (см. выше)."""
+    import subprocess
+
+    # Проба git -- по ВРЕМЕННОМУ репозиторию, а не по клону прогона: копия
+    # репозитория враждебного прогона hermetic живёт без .git, и проба клона
+    # падала бы сама по себе; а сценарий, способный писать в git, должен
+    # иметь репозиторий, который не жалко. Исходы различены как #530: сбой
+    # пробы -- ПРОВАЛ с причиной, а не молчаливое None == None «не изменился».
+    repo = os.path.join(root, "repo")
+    os.makedirs(repo)
+    init = subprocess.run(["git", "init", "-q", repo], capture_output=True,
+                          text=True)
+
+    def git_mop_config():
+        r = subprocess.run(["git", "config", "--list", "--local"],
+                           capture_output=True, text=True, cwd=repo)
+        if r.returncode != 0:
+            return "probe-failed", (r.stdout + r.stderr).strip()[-300:]
+        return "ok", sorted(r.stdout.splitlines())
+
+    if not c.check("#541 the git probe repository initializes",
+                   init.returncode == 0, init.stderr.strip()[-300:]):
+        return
     directory = creds.server_dir(HOST)
     creds.write_connection(directory, "alice", "bus-secret", port,
                            legacy, "proxy-secret")
     before = {n: os.listdir(os.path.join(root, "servers", n))
               for n in os.listdir(os.path.join(root, "servers"))}
-    git_before = _git_mop_config()
-    try:
-        with patched_env(MOP_SERVER_LAN=HOST, MOP_HTTPS_PORT=port):
-            env = _common.session_env()
-        c.expect("#541 session_env canonicalizes the saved legacy profile URL",
-                 env["ANTHROPIC_BASE_URL"], issued)
-        c.expect("#541 session_env keeps the saved key",
-                 env[llm.AUTH_VAR], "proxy-secret")
-        c.check("#541 session_env reads the profile and changes nothing on disk",
-                {n: os.listdir(os.path.join(root, "servers", n))
-                 for n in os.listdir(os.path.join(root, "servers"))} == before)
-        c.check("#541 session_env does not touch the clone's git config",
-                _git_mop_config() == git_before)
+    kind, git_before = git_mop_config()
+    if not c.check("#541 the git config probe of the scenario repository works",
+                   kind == "ok", git_before):
+        return
+    with patched_env(MOP_SERVER_LAN=HOST, MOP_HTTPS_PORT=port):
+        env = _common.session_env()
+    c.expect("#541 session_env canonicalizes the saved legacy profile URL",
+             env["ANTHROPIC_BASE_URL"], issued)
+    c.expect("#541 session_env keeps the saved key",
+             env[llm.AUTH_VAR], "proxy-secret")
+    c.check("#541 session_env reads the profile and changes nothing on disk",
+            {n: os.listdir(os.path.join(root, "servers", n))
+             for n in os.listdir(os.path.join(root, "servers"))} == before)
+    kind, git_after = git_mop_config()
+    c.check("#541 session_env does not touch the repository's git config",
+            kind == "ok" and git_after == git_before,
+            f"probe {kind}: {git_after}")
 
-        # Выданный адрес (после перехода) через тот же профиль.
-        creds.write_connection(directory, "alice", "bus-secret", port,
-                               issued, "proxy-secret")
-        with patched_env(MOP_SERVER_LAN=HOST, MOP_HTTPS_PORT=port):
-            env2 = _common.session_env()
-        c.expect("#541 session_env passes the issued origin unchanged",
-                 env2["ANTHROPIC_BASE_URL"], issued)
-        c.expect("#541 issued and legacy profiles give one address",
-                 env2["ANTHROPIC_BASE_URL"], env["ANTHROPIC_BASE_URL"])
+    # Выданный адрес (после перехода) через тот же профиль.
+    creds.write_connection(directory, "alice", "bus-secret", port,
+                           issued, "proxy-secret")
+    with patched_env(MOP_SERVER_LAN=HOST, MOP_HTTPS_PORT=port):
+        env2 = _common.session_env()
+    c.expect("#541 session_env passes the issued origin unchanged",
+             env2["ANTHROPIC_BASE_URL"], issued)
+    c.expect("#541 issued and legacy profiles give one address",
+             env2["ANTHROPIC_BASE_URL"], env["ANTHROPIC_BASE_URL"])
 
-        # Чужой порт в профиле не снимается: подсказки издателя -- от
-        # выбранного сервера, а не от самого URL.
-        creds.write_connection(directory, "alice", "bus-secret", port,
-                               f"https://{HOST}:9443/llm", "proxy-secret")
-        with patched_env(MOP_SERVER_LAN=HOST, MOP_HTTPS_PORT=port):
-            env3 = _common.session_env()
-        c.expect("#541 a foreign-port profile URL stays as is",
-                 env3["ANTHROPIC_BASE_URL"], f"https://{HOST}:9443/llm")
-    finally:
-        creds.ROOT = saved_root
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def _git_mop_config():
-    """git config --list клона, чтобы сверить «настоящее не меняется»."""
-    import subprocess
-    try:
-        out = subprocess.run(["git", "config", "--list", "--local"],
-                             capture_output=True, text=True, check=True,
-                             cwd=os.path.dirname(os.path.dirname(
-                                 os.path.realpath(__file__))))
-        return sorted(out.stdout.splitlines())
-    except (OSError, subprocess.SubprocessError):
-        return None
+    # Чужой порт в профиле не снимается: подсказки издателя -- от
+    # выбранного сервера, а не от самого URL.
+    creds.write_connection(directory, "alice", "bus-secret", port,
+                           f"https://{HOST}:9443/llm", "proxy-secret")
+    with patched_env(MOP_SERVER_LAN=HOST, MOP_HTTPS_PORT=port):
+        env3 = _common.session_env()
+    c.expect("#541 a foreign-port profile URL stays as is",
+             env3["ANTHROPIC_BASE_URL"], f"https://{HOST}:9443/llm")
 
 
 def main():
@@ -418,8 +428,8 @@ def main():
     check_registry_roundtrip_541(c)
     check_reentry_541(c)
     check_proxy_origin_541(c)
-    check_url_tamper_541(c)
     check_session_env_541(c)
+    check_tamper_matrix_541(c)
     return c.report("transition_registry")
 
 
