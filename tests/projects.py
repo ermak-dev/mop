@@ -594,7 +594,7 @@ def check_export_542(c):
     каталог с заявкой имени через mkdir (EEXIST -- отказ без overwrite),
     файлы 0600/каталог 0700, маркер export.json последним. Живой реестр
     не тронут; провал чистит только созданное этой попыткой.
-    STATUS: #542 (красный прогон впереди реализации)."""
+    STATUS: FIXED — see #542."""
     import hashlib
     import json as _json
     import shutil
@@ -729,7 +729,7 @@ def check_export_542(c):
         try:
             src2 = seed(flaky_root)
             from mop.common import fsutil
-            real_wc = projects._write_claimed
+            real_wc = fsutil.write_private_dirfd
 
             def dying_write(dirfd, name, data, *a, **k):
                 if name == "limits.json":
@@ -737,7 +737,7 @@ def check_export_542(c):
                 return real_wc(dirfd, name, data, *a, **k)
 
             dest3 = os.path.join(flaky_root, "rollback")
-            with _patched(projects, _write_claimed=dying_write):
+            with _patched(fsutil, write_private_dirfd=dying_write):
                 _refused542(c, "#542 a failed write refuses the export",
                          lambda: projects.export_pair(dest3))
             c.check("#542 the failed export cleans up its own directory",
@@ -747,35 +747,41 @@ def check_export_542(c):
         finally:
             shutil.rmtree(flaky_root)
 
-        # Inode-якорь: между провалом записи и cleanup кто-то ПОДМЕНИЛ наш
-        # каталог (rmtree+smlink) -- cleanup обязан заметить и НЕ удалять
-        # чужое; отказ называет, что каталог больше не наш.
+        # Inode-якорь: между записями кто-то ПОДМЕНИЛ НАШ staging-каталог
+        # (rmtree + symlink на соль-имени) -- следующая запись по fd идёт в
+        # отвязанный каталог (ENOENT), cleanup обязан заметить (identity
+        # соль-имени уже не наш) и НЕ удалять чужое; отказ называет это.
         swap_root = tempfile.mkdtemp(prefix="mop-test-542-i-")
         try:
             src3 = seed(swap_root)
-            real_wc = projects._write_claimed
+            real_wc = fsutil.write_private_dirfd
 
             def swap_write(dirfd, name, data, *a, **k):
                 if name == "limits.json":
-                    # между записями каталог подменили (rmtree + symlink)
-                    shutil.rmtree(victim_dir)
-                    os.symlink(os.path.join(swap_root, "src"), victim_dir)
+                    # наш staging подменён по его соль-имени
+                    st = [n for n in os.listdir(swap_root) if n.startswith(".mop-export")][0]
+                    shutil.rmtree(os.path.join(swap_root, st))
+                    os.symlink(os.path.join(swap_root, "src"),
+                               os.path.join(swap_root, st))
                     raise OSError("disk full")
                 return real_wc(dirfd, name, data, *a, **k)
 
-            victim_dir = os.path.join(swap_root, "rollback")
-            with _patched(projects, _write_claimed=swap_write):
+            with _patched(fsutil, write_private_dirfd=swap_write):
                 got = None
                 try:
-                    projects.export_pair(victim_dir)
+                    projects.export_pair(os.path.join(swap_root, "rollback"))
                 except RuntimeError as e:
                     got = str(e)
                 except OSError as e:
                     got = f"WRONG EXC OSError: {e}"
-                c.check("#542 a replaced directory is not removed by cleanup",
-                        bool(got and "ours" in got and os.path.islink(victim_dir)), got)
-                c.check("#542 the replaced directory keeps its target alive",
+                victim = [n for n in os.listdir(swap_root) if n.startswith(".mop-export")]
+                c.check("#542 a replaced staging directory is not removed by cleanup",
+                        bool(got and "ours" in got) and victim
+                        and os.path.islink(os.path.join(swap_root, victim[0])), got)
+                c.check("#542 the replaced staging keeps its target alive",
                         os.path.exists(os.path.join(swap_root, "src", "projects.json")))
+                c.check("#542 the failed swap leaves no directory at dest",
+                        not os.path.lexists(os.path.join(swap_root, "rollback")))
         finally:
             shutil.rmtree(swap_root, ignore_errors=True)
 
@@ -786,7 +792,7 @@ def check_export_542(c):
             fault_root = tempfile.mkdtemp(prefix="mop-test-542-w-")
             try:
                 seed(fault_root)
-                real_wc = projects._write_claimed
+                real_wc = fsutil.write_private_dirfd
 
                 def dying_write(dirfd, name, data, *a, _v=victim, **k):
                     if name == _v:
@@ -794,7 +800,7 @@ def check_export_542(c):
                     return real_wc(dirfd, name, data, *a, **k)
 
                 fdest = os.path.join(fault_root, "rollback")
-                with _patched(projects, _write_claimed=dying_write):
+                with _patched(fsutil, write_private_dirfd=dying_write):
                     _refused542(c, f"#542 a write fault on {victim} refuses the export",
                              lambda: projects.export_pair(fdest), "disk died")
                 c.check(f"#542 the {victim} fault cleans its own directory",
@@ -875,7 +881,7 @@ def check_export_safety_542(c):
     перечитываются и сверяются с ожидаемыми; удаление имени каталога --
     только после свежей сверки identity; успех команды молчит, сводка --
     в машинном маркере и возврате библиотеки.
-    STATUS: #542 (красный прогон впереди реализации)."""
+    STATUS: FIXED — see #542."""
     import shutil
     import tempfile
     v1 = {"version": 1, "projects": [{"origin": MOP, "limit": 2}, {"origin": RU}]}
@@ -884,6 +890,8 @@ def check_export_safety_542(c):
         projects.SNAPSHOT = os.path.join(root, "src", "projects.json")
         projects.SNAPSHOT_DIR = os.path.join(root, "src")
         projects.write_snapshot(v1, projects.SNAPSHOT)
+
+    from mop.common import fsutil
 
     def refusal_of(fn):
         try:
@@ -913,29 +921,45 @@ def check_export_safety_542(c):
         with open(os.path.join(dest, foreign_name), "w") as f:
             f.write("not ours")
 
-    # 1. Подмена между заявкой (mkdir) и привязкой: чужой каталог не
-    # получает ни секретов, ни удаления.
+    # 1. Занятое имя dest ДО публикации (файл, непустой и ПУСТОЙ чужой
+    # каталог, symlink, race-заявка) -- отказ без overwrite; чужое не
+    # открывается и не трогается. Пустой чужой каталог -- случай из
+    # ревью 2 (listdir-пустота не доказательство ownership): публикация
+    # в dest атомарна и без clobber, занятое имя видит EEXIST.
     root = tempfile.mkdtemp(prefix="mop-test-542-r2a-")
     try:
         seeded(root)
         dest = os.path.join(root, "rollback")
-        journal = []
-        real_mkdir = os.mkdir
-
-        def swapping_mkdir(path, mode=0o777, *a, **k):
-            real_mkdir(path, mode, *a, **k)
-            if os.path.abspath(path or "") == os.path.abspath(dest):
-                journal.append("swap")
-                swap(dest)
-
-        with _patched(os, mkdir=swapping_mkdir):
+        variants = {
+            "file": lambda: open(dest, "w").write("x"),
+            "full dir": lambda: (os.mkdir(dest),
+                                 open(os.path.join(dest, "foreign"), "w").write("not ours")),
+            "EMPTY dir": lambda: os.mkdir(dest),   # ревью 2: пустой чужой
+            "symlink": lambda: os.symlink(os.path.join(root, "src"), dest),
+        }
+        for kind, make in variants.items():
+            if os.path.lexists(dest):
+                os.remove(dest) if os.path.isfile(dest) or os.path.islink(dest) \
+                    else shutil.rmtree(dest)
+            make()
+            before = os.path.lexists(dest) and (os.path.isdir(dest) and not os.path.islink(dest))
             got = refusal_of(lambda: projects.export_pair(dest))
-        c.check("#542 a directory swapped before the bind is refused",
-                bool(got) and journal == ["swap"], (got, journal))
-        c.check("#542 the swapped directory keeps its foreign file",
-                os.path.exists(os.path.join(dest, "foreign")))
-        c.check("#542 the swapped directory receives no origins",
-                not leaked(dest), leaked(dest))
+            c.check(f"#542 an occupied name ({kind}) refuses the export",
+                    bool(got) and "already exists" in got, (kind, got))
+            c.check(f"#542 the occupied name ({kind}) is left untouched",
+                    (kind != "symlink" and os.path.exists(os.path.join(dest, "foreign")))
+                    or (kind == "file" and open(dest).read() == "x")
+                    or (kind == "EMPTY dir" and os.path.isdir(dest)
+                        and os.listdir(dest) == [])
+                    or (kind == "symlink" and os.path.islink(dest)),
+                    (kind, os.listdir(dest) if os.path.isdir(dest) and not os.path.islink(dest) else None))
+            c.check(f"#542 the occupied name ({kind}) receives no origins",
+                    not (os.path.isdir(dest) and not os.path.islink(dest)) or not leaked(dest),
+                    kind)
+            # мусора от попытки в родителе не остаётся (staging убран)
+            leftovers = [n for n in os.listdir(root) if n.startswith(".mop-export")]
+            c.check(f"#542 the refused export ({kind}) leaves no staging garbage",
+                    not leftovers, leftovers)
     finally:
         projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
         shutil.rmtree(root, ignore_errors=True)
@@ -948,7 +972,7 @@ def check_export_safety_542(c):
         seeded(root)
         dest = os.path.join(root, "rollback")
         journal = []
-        real_wc = getattr(projects, '_write_claimed', None)
+        real_wc = fsutil.write_private_dirfd
 
         def swapping_write(dirfd, name, data, *a, **k):
             real_wc(dirfd, name, data, *a, **k)
@@ -956,7 +980,7 @@ def check_export_safety_542(c):
                 journal.append("swap")
                 swap(dest)
 
-        with _patched(projects, _write_claimed=swapping_write):
+        with _patched(fsutil, write_private_dirfd=swapping_write):
             got = refusal_of(lambda: projects.export_pair(dest))
         c.check("#542 a directory swapped between writes is refused",
                 bool(got) and journal == ["swap"], (got, journal))
@@ -975,7 +999,7 @@ def check_export_safety_542(c):
         seeded(root)
         dest = os.path.join(root, "rollback")
         journal = []
-        real_wc = getattr(projects, '_write_claimed', None)
+        real_wc = fsutil.write_private_dirfd
 
         def truncating_write(dirfd, name, data, *a, **k):
             if name == "limits.json":
@@ -983,7 +1007,7 @@ def check_export_safety_542(c):
                 data = data[:len(data) // 2]
             return real_wc(dirfd, name, data, *a, **k)
 
-        with _patched(projects, _write_claimed=truncating_write):
+        with _patched(fsutil, write_private_dirfd=truncating_write):
             got = refusal_of(lambda: projects.export_pair(dest))
         c.check("#542 a truncated write is refused, not published",
                 bool(got) and journal == ["trunc"], (got, journal))
@@ -993,51 +1017,74 @@ def check_export_safety_542(c):
         projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
         shutil.rmtree(root, ignore_errors=True)
 
-    # 4. Подмена между ownership-сверкой и удалением имени каталога: cleanup
-    # сначала АТОМАРНО пере-заявляет имя (rename dest -> соль-имя), сверяет
-    # identity ПЕРЕД rmdir; подмена ПОСЛЕ rename ловится этой сверкой --
-    # чужое возвращается на место, не удаляется. Инжекция -- на этой сверке:
-    # подменяем os.stat(gone) (первый stat по пути gone в жизни попытки),
-    # между rename и сверкой меняя содержимое соль-имени.
+    # 4. Cleanup не трогает чужой namespace и не переименовывает dest:
+    # при провале имя dest остаётся КАК БЫЛО (его вообще не занимали),
+    # мусор попытки -- только наш staging под соль-именем, и тот убран.
+    # Инвариант ревью 2: «не узаконивать move чужого каталога».
     root = tempfile.mkdtemp(prefix="mop-test-542-r2d-")
     try:
         seeded(root)
         dest = os.path.join(root, "rollback")
         journal = []
-        real_wc = projects._write_claimed
-        real_stat = os.stat
+        real_wc = fsutil.write_private_dirfd
+        real_rn = fsutil.rename_noreplace
 
         def dying_write(dirfd, name, data, *a, **k):
             if name == "export.json":
                 raise OSError("disk died on the marker")
             return real_wc(dirfd, name, data, *a, **k)
 
-        def swapping_stat(path, *a, **k):
-            if "mop-gone" in str(path or "") and not str(path).endswith(".moved"):
-                journal.append("verify-swap")
-                # Соль-имя занято нашим каталогом: подменяем ЕГО содержимое
-                # -- чужой каталог по тому же имени, identity не совпадёт.
-                gone = str(path)
-                os.rename(gone, gone + ".moved")  # наш ушёл в сторону
-                os.mkdir(gone)  # чужой на соль-имени
-                with open(os.path.join(gone, "foreign"), "w") as f:
-                    f.write("not ours")
-                return real_stat(gone, *a, **k)
-            return real_stat(path, *a, **k)
+        def watching_rename(src_d, src, dst_d, dst, *a, **k):
+            # dest не переименовывается ВООБЩЕ (ни туда, ни обратно)
+            if os.path.basename(str(dst)) == "rollback" \
+                    or os.path.basename(str(src)) == "rollback":
+                journal.append("dest-renamed")
+            return real_rn(src_d, src, dst_d, dst, *a, **k)
 
-        with _patched(projects, _write_claimed=dying_write), \
-                _patched(os, stat=swapping_stat):
+        with _patched(fsutil, write_private_dirfd=dying_write), \
+                _patched(fsutil, rename_noreplace=watching_rename):
             got = refusal_of(lambda: projects.export_pair(dest))
-        c.check("#542 a swap at the cleanup verification is caught",
-                bool(got) and journal == ["verify-swap"], (got, journal))
-        c.check("#542 the cleanup does not remove the swapped-in directory",
-                os.path.exists(os.path.join(dest, "foreign")), dest)
-        c.check("#542 the swapped-in directory receives no origins",
-                not leaked(dest), leaked(dest))
-        c.check("#542 the moved-out original export survives the failed cleanup",
-                not os.path.exists(dest + ".moved") or
-                os.path.exists(os.path.join(dest + ".moved", "limits.json")),
-                dest + ".moved")
+        c.check("#542 a failed marker write refuses the export",
+                bool(got) and "disk died" in got, got)
+        c.check("#542 cleanup never renames the destination name",
+                journal == [], journal)
+        c.check("#542 a failed export leaves no directory at dest",
+                not os.path.lexists(dest), dest)
+        leftovers = [n for n in os.listdir(root) if n.startswith(".mop-export")]
+        c.check("#542 a failed export leaves no staging garbage",
+                not leftovers, leftovers)
+    finally:
+        projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
+        shutil.rmtree(root, ignore_errors=True)
+
+    # 4b. Race на момент публикации: между сборкой staging и rename кто-то
+    # занял имя dest (в т.ч. ПУСТОЙ чужой каталог -- listdir-пустота не
+    # ownership proof, ревью 2) -- публикация EEXIST, чужое не тронуто,
+    # секреты остались в убранном staging, НИКОГДА не в чужом каталоге.
+    root = tempfile.mkdtemp(prefix="mop-test-542-r2b-")
+    try:
+        seeded(root)
+        dest = os.path.join(root, "rollback")
+        journal = []
+        real_wc = fsutil.write_private_dirfd
+
+        def racing_write(dirfd, name, data, *a, **k):
+            if name == "export.json":
+                # до публикации: чужой ПУСТОЙ каталог на имени dest
+                os.mkdir(dest)
+                journal.append("race")
+            return real_wc(dirfd, name, data, *a, **k)
+
+        with _patched(fsutil, write_private_dirfd=racing_write):
+            got = refusal_of(lambda: projects.export_pair(dest))
+        c.check("#542 an empty foreign directory at publish time refuses",
+                bool(got) and journal == ["race"] and "already exists" in got,
+                (got, journal))
+        c.check("#542 the raced foreign directory stays empty and foreign",
+                os.path.isdir(dest) and os.listdir(dest) == [], os.listdir(dest))
+        c.check("#542 the raced export leaves no staging garbage",
+                not [n for n in os.listdir(root) if n.startswith(".mop-export")],
+                os.listdir(root))
     finally:
         projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
         shutil.rmtree(root, ignore_errors=True)

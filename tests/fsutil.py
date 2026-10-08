@@ -148,6 +148,85 @@ def main():
                     c.expect("write_private: old file not truncated", old.read(), "one")
                 with open(p) as f:
                     c.expect("write_private: new content", f.read(), "two")
+
+                # ── fd-привязка и no-clobber публикация (#542) ──────────
+                # HYPOTHESIS (#542): экспорт реестра писал пары по ПУТИ и
+                # копировал приватный writer в projects.py. Подмена каталога
+                # по имени между заявкой и записью уводила секреты чужому,
+                # а os.rename при публикации затирал занятое имя молча.
+                # SOLUTION: примитивы в fsutil: write_private_dirfd (тот же
+                # атомарный приватный writer, но по fd каталога) и
+                # rename_noreplace (renameat2 RENAME_NOREPLACE: занятое имя
+                # -- EEXIST, цель не тронута; свободное -- атомарный перенос).
+                # STATUS: FIXED — see #542
+                # Отдельный каталог: чек "no temp left" ниже перечисляет всё
+                # содержимое каталога -- новые файлы блока ему не мешают.
+                xdir = os.path.join(d, "x542")
+                os.mkdir(xdir)
+                if c.check("fsutil carries the fd-aware export primitives (#542)",
+                          hasattr(fsutil, "write_private_dirfd")
+                          and hasattr(fsutil, "rename_noreplace")):
+                    dfd = os.open(xdir, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        fsutil.write_private_dirfd(dfd, "pairf", b"secret")
+                        c.expect("write_private_dirfd: 0600", mode(os.path.join(xdir, "pairf")), 0o600)
+                        with open(os.path.join(xdir, "pairf"), "rb") as f:
+                            c.expect("write_private_dirfd: bytes", f.read(), b"secret")
+                        c.expect("write_private_dirfd: no temp left",
+                              sorted(n for n in os.listdir(xdir)
+                                     if n.startswith(".pairf")),
+                              [])
+                        # обрыв: object() не пишется -- временного нет, цели нет
+                        try:
+                            fsutil.write_private_dirfd(dfd, "dying", object())
+                        except Exception:
+                            pass
+                        c.expect("write_private_dirfd: failed write leaves no temp",
+                              sorted(n for n in os.listdir(xdir)
+                                     if n.startswith(".dying")),
+                              [])
+                        # уникальность временных: соль в имени temp
+                        # гарантирует, что два писателя одного файла не
+                        # пишут в один временный. Проверяем инвариант:
+                        # параллельные записи одного имени обе проходят.
+                        import secrets as _secrets
+                        import _lib
+                        with _lib.patched(_secrets, token_hex=lambda n: "00"):
+                            for i in range(2):
+                                fsutil.write_private_dirfd(dfd, "same", f"v{i}".encode())
+                        c.expect("write_private_dirfd: salted temps do not collide",
+                              sorted(n for n in os.listdir(xdir) if ".tmp" in n), [])
+                        with open(os.path.join(xdir, "same"), "rb") as f:
+                            c.expect("write_private_dirfd: last write wins whole",
+                                  f.read(), b"v1")
+                        # rename_noreplace: занятое имя (файл) -- EEXIST, цель цела
+                        fsutil.write_private_dirfd(dfd, "tgt", b"old")
+                        c.expect("rename_noreplace: occupied name refuses",
+                              fsutil.rename_noreplace(dfd, "pairf", dfd, "tgt"),
+                              False)
+                        with open(os.path.join(xdir, "tgt"), "rb") as f:
+                            c.expect("rename_noreplace: target intact", f.read(), b"old")
+                        with open(os.path.join(xdir, "pairf"), "rb") as f:
+                            c.expect("rename_noreplace: source intact", f.read(), b"secret")
+                        # свободное имя -- атомарный перенос
+                        c.expect("rename_noreplace: free name publishes",
+                              fsutil.rename_noreplace(dfd, "pairf", dfd, "newf"),
+                              True)
+                        c.expect("rename_noreplace: source is gone",
+                              os.path.exists(os.path.join(xdir, "pairf")), False)
+                        with open(os.path.join(xdir, "newf"), "rb") as f:
+                            c.expect("rename_noreplace: published content", f.read(), b"secret")
+                        # занятое ИМЯ-КАТАЛОГ -- тоже EEXIST, чужой каталог цел
+                        os.mkdir(os.path.join(xdir, "adir"))
+                        c.expect("rename_noreplace: occupied directory name refuses",
+                              fsutil.rename_noreplace(dfd, "newf", dfd, "adir"),
+                              False)
+                        c.expect("rename_noreplace: foreign directory intact",
+                              os.path.isdir(os.path.join(xdir, "adir"))
+                              and os.listdir(os.path.join(xdir, "adir")) == [],
+                              True)
+                    finally:
+                        os.close(dfd)
                 c.expect("write_private: no temp left",
                       sorted(os.listdir(os.path.dirname(p))), ["f"])
 

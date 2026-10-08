@@ -544,34 +544,6 @@ def legacy_pair_of(snapshot):
 # переключить). Resume v1 после правок старым writer'ом обязан перечитать
 # свежий снимок, а не доверять устаревшему; лечить голые имена/коллизии/
 # orphan-потолки автоматически команда не берётся -- это отдельные решения.
-def _write_claimed(dirfd, name, data):
-    """Файл пары В СОЗДАННОМ каталоге, по fd, без имени пути (#542).
-
-    Атомарно (временный + fsync + rename по dir_fd), 0600: origin'ы несут
-    креды. Запись идёт в каталог, на который указывает fd, -- подмена пути
-    (rmtree + чужой mkdir) её не перенаправляет: каталог отвязан от имени,
-    и создание в нём ломается ENOENT, а не пишет чужому.
-    """
-    tmp = f".{name}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dirfd)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            fd = None
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
-    except BaseException:
-        if fd is not None:
-            os.close(fd)
-        try:
-            os.unlink(tmp, dir_fd=dirfd)
-        except FileNotFoundError:
-            pass  # уже нет -- и ладно
-        raise
-
-
 def export_pair(dest, snapshot_path=None):
     """Выгрузить реестр парой в НОВЫЙ каталог. -> сводка.
 
@@ -581,26 +553,34 @@ def export_pair(dest, snapshot_path=None):
     записи.
 
     Порядок и гарантии (#542):
-      * снимок читается ОДНИМ запросом ДО всякого mkdir -- байты, digest,
+      * снимок читается ОДНИМ запросом ДО всякой записи -- байты, digest,
         разбор валидатором #534; нет файла или битый -- отказ, БЕЗ
         fallback на устаревшую легаси-пару;
-      * каталог заявляется атомарным mkdir (0700) и сразу привязывается
-        fd (O_NOFOLLOW): записи, сверка и cleanup идут по fd СОЗДАННОГО
-        каталога, identity (dev, ino) даёт сам fd. Непустой каталог на
-        привязке -- подмена между заявкой и привязкой: отказ без записи и
-        без удаления -- чужой каталог не получает ни секретов, ни unlink;
-      * файлы пишутся 0600 атомарно (origin'ы несут креды) и
-        ПЕРЕЧИТЫВАЮТСЯ по fd: фактические байты и права сверяются с
-        ожидаемыми ДО маркера; маркер export.json -- ПОСЛЕДНИМ и тоже
-        перечитан: его нет или он не сошёлся -- экспорт не состоялся.
-        Это защита от обрыва процесса, не обещание сохранности при потере
-        питания;
-      * провал чистит только созданное ЭТОЙ попыткой: файлы -- unlink'ом
-        по fd (ENOENT -- уже убрали, прощаем), каталог -- атомарной
-        пере-заявкой rename(dest -> соль-имя) со сверкой identity по fd
-        ПЕРЕД rmdir: «проверить имя, затем удалить» -- окно подмены, а
-        rename двигает то, что лежит на имени СЕЙЧАС; не наше -- вернуть
-        на место и назвать, чужое не удаляется;
+      * по имени dest не пишется НИЧЕГО и оно не занимается заранее:
+        пара собирается в НЕУГАДЫВАЕМОМ staging-каталоге рядом с dest
+        (mkdir соль-имени 0700, мгновенная привязка fd, O_NOFOLLOW),
+        записи идут только по fd. Подмена каталога по имени тут бессильна:
+        staging-имя неизвестно никому до создания, а пустота при привязке
+        -- лишь здравый смысл (имя только что придумано), не «доказательство
+        ownership» через listdir на чужом имени;
+      * файлы пишутся fsutil.write_private_dirfd (тот же атомарный
+        приватный writer #153, по fd) и ПЕРЕЧИТЫВАЮТСЯ по fd: фактические
+        байты и права сверяются с ожидаемыми ДО маркера; маркер
+        export.json -- ПОСЛЕДНИМ и тоже перечитан: его нет или он не
+        сошёлся -- экспорт не состоялся. Это защита от обрыва процесса,
+        не обещание сохранности при потере питания;
+      * публикация -- ОДИН атомарный rename без перезаписи
+        (fsutil.rename_noreplace, renameat2 RENAME_NOREPLACE): имя dest
+        занято (файл, каталог, symlink, в том числе ПУСТОЙ чужой каталог
+        между записью и публикацией) -- EEXIST, отказ, чужое НЕ тронуто;
+        свободно -- готовый каталог ЦЕЛИКОМ становится dest. Окна
+        «проверить имя, затем положить» на dest нет вовсе;
+      * провал чистит только созданное ЭТОЙ попыткой и только по fd:
+        файлы unlink'ом по fd, staging-каталог rmdir по СВОЕМУ соль-имени
+        после сверки identity с fd. Имя dest при неудаче не занимается
+        вовсе, чужой namespace не переименовывается и не удаляется;
+        renameat2 недоступен на платформе -- отказ с именем ограничения,
+        без молчаливого TOCTOU-fallback;
       * сводка -- счётчик, источник и digest: креды origin'ов живут в
         закрытых файлах пары, не в stdout/metadata/ошибках.
     """
@@ -630,120 +610,126 @@ def export_pair(dest, snapshot_path=None):
               "files": {n: hashlib.sha256(d).hexdigest() for n, d in pair.items()},
               "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     marker_body = (json.dumps(marker, indent=1, sort_keys=True) + "\n").encode()
-    # Заявка имени: mkdir атомарен, EEXIST -- отказ. Родителя создаёт
-    # оператор: экспорт не расползается по чужим путям.
+    # Staging: неугадываемое имя рядом с dest, привязка fd СРАЗУ. Родителя
+    # создаёт оператор: экспорт не расползается по чужим путям.
+    parent = os.path.dirname(dest) or "."
+    base = os.path.basename(dest)
     try:
-        os.mkdir(dest, 0o700)
-    except FileExistsError:
-        raise RuntimeError(f"cannot export: {dest} already exists; refusing to "
-                           "overwrite -- name a new directory") from None
+        pfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
     except OSError as e:
-        raise RuntimeError(f"cannot export: cannot create {dest}: {e}") from None
-    # Привязка: fd созданного каталога, без следования symlink'ам. С этого
-    # момента путь -- не истина: записи, сверка и cleanup идут по fd.
+        raise RuntimeError(f"cannot export: cannot open the parent of {dest}: "
+                           f"{e}") from None
+    why = None
     try:
-        dirfd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    except OSError as e:
-        raise RuntimeError(f"cannot export: cannot bind {dest} as the directory "
-                           f"just created: {e}") from None
-    try:
-        fresh = not os.listdir(dirfd)
-    except OSError as e:
-        os.close(dirfd)
-        raise RuntimeError(f"cannot export: cannot look into {dest}: {e}") from None
-    if not fresh:
-        # Подмена между заявкой и привязкой: это может быть чужой каталог --
-        # ни записи, ни удаления, только отказ.
-        os.close(dirfd)
-        raise RuntimeError(f"cannot export: {dest} is no longer a fresh empty "
-                           "directory we just created; nothing was written, "
-                           "nothing was removed") from None
-    try:
-        for name, data in pair.items():
-            _write_claimed(dirfd, name, data)
-        # Сверка фактического: перечитать записанное ПО FD и сверить байты
-        # и права ДО маркера. Усечённая запись -- отказ: готовой публикации
-        # без целой пары не бывает.
-        for name, data in pair.items():
+        staging = f".mop-export-{secrets.token_hex(6)}"
+        try:
+            os.mkdir(staging, 0o700, dir_fd=pfd)
+        except OSError as e:
+            raise RuntimeError(f"cannot export: cannot create the staging "
+                               f"directory for {dest}: {e}") from None
+        try:
+            dirfd = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=pfd)
+        except OSError as e:
+            why = f"cannot export: cannot bind the staging directory for {dest}: {e}"
             try:
-                fdo = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
-            except OSError as e:
-                raise RuntimeError(f"cannot export: {name} is missing from the "
-                                   f"claimed directory: {e}") from None
+                os.rmdir(staging, dir_fd=pfd)
+            except OSError:
+                pass
+            raise RuntimeError(why) from None
+        try:
+            if os.listdir(dirfd):
+                # Имя только что придумано и создано нами: непустой каталог
+                # на нём -- либо мусор в родителе, либо чужая guess-атака;
+                # ничего не писано -- не трогаем и не удаляем.
+                raise RuntimeError(f"cannot export: the staging directory for "
+                                   f"{dest} is not empty; nothing was written, "
+                                   "nothing was removed")
+            for name, data in pair.items():
+                fsutil.write_private_dirfd(dirfd, name, data)
+            # Сверка фактического: перечитать записанное ПО FD и сверить
+            # байты и права ДО маркера. Усечённая запись -- отказ: готовой
+            # публикации без целой пары не бывает.
+            for name, data in pair.items():
+                try:
+                    fdo = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
+                except OSError as e:
+                    raise RuntimeError(f"cannot export: {name} is missing from the "
+                                       f"staging directory: {e}") from None
+                with os.fdopen(fdo, "rb") as f:
+                    if f.read() != data:
+                        raise RuntimeError(f"cannot export: {name} was written "
+                                           "truncated or corrupted: the read-back "
+                                           "bytes do not match what was to be "
+                                           "exported")
+                st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+                if (st.st_mode & 0o777) != 0o600:
+                    raise RuntimeError(f"cannot export: {name} did not keep the "
+                                       "private mode 0600")
+            fsutil.write_private_dirfd(dirfd, "export.json", marker_body)
+            # Маркер тоже перечитан: публикация подтверждена фактом, не планом.
+            fdo = os.open("export.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
             with os.fdopen(fdo, "rb") as f:
-                if f.read() != data:
-                    raise RuntimeError(f"cannot export: {name} was written "
+                if f.read() != marker_body:
+                    raise RuntimeError("cannot export: export.json was written "
                                        "truncated or corrupted: the read-back "
-                                       "bytes do not match what was to be "
-                                       "exported")
-            st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
-            if (st.st_mode & 0o777) != 0o600:
-                raise RuntimeError(f"cannot export: {name} did not keep the "
-                                   "private mode 0600")
-        _write_claimed(dirfd, "export.json", marker_body)
-        # Маркер тоже перечитан: публикация подтверждена фактом, не планом.
-        fdo = os.open("export.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
-        with os.fdopen(fdo, "rb") as f:
-            if f.read() != marker_body:
-                raise RuntimeError("cannot export: export.json was written "
-                                   "truncated or corrupted: the read-back "
-                                   "bytes do not match")
-    except Exception as e:
-        # Публикация не состоялась: убрать своё, но ТОЛЬКО своё -- по fd
-        # созданного каталога, имя каталога -- атомарной заявкой.
-        msg = str(e)
-        why = [msg if msg.startswith("cannot export") else f"cannot export: {e}"]
-        why.extend(_drop_claimed_dir(dirfd, dest))
-        raise RuntimeError("; ".join(why)) from None
+                                       "bytes do not match")
+            # Публикация: ОДИН атомарный rename без перезаписи. Имя dest
+            # занято -- EEXIST, чужое не тронуто; свободно -- готовый
+            # каталог целиком становится dest.
+            if not fsutil.rename_noreplace(pfd, staging, pfd, base):
+                raise RuntimeError(f"cannot export: {dest} already exists; "
+                                   "refusing to overwrite -- name a new "
+                                   "directory") from None
+        except Exception as e:
+            # Уборка своего: файлы unlink'ом по fd, staging rmdir по СВОЕМУ
+            # соль-имени после сверки identity с fd. Имя dest не занималось
+            # (или публикация не прошла) -- чужой namespace не трогаем вовсе.
+            msg = str(e)
+            why = [msg if msg.startswith("cannot export") else f"cannot export: {e}"]
+            why.extend(_drop_staging_dir(dirfd, pfd, staging))
+            raise RuntimeError("; ".join(why)) from None
+        finally:
+            os.close(dirfd)
     finally:
-        os.close(dirfd)
+        os.close(pfd)
     return {"what": "mop registry rollback export", "projects": len(lines),
             "source": path, "sha256": digest, "dest": dest}
 
 
-def _drop_claimed_dir(dirfd, dest):
-    """Уборка созданного каталога: файлы по fd, имя -- атомарной заявкой (#542).
+def _drop_staging_dir(dirfd, pfd, staging):
+    """Убрать СВОЙ staging-каталог попытки: файлы по fd, каталог -- по СВОЕМУ
+    неугадываемому соль-имени, со сверкой identity с fd перед rmdir (#542).
 
-    rmdir принимает только путь, а «проверить имя, затем удалить» -- окно
-    подмены (между проверкой и rmtree каталог занимает чужой). Поэтому имя
-    каталога трогает только АТОМАРНЫЙ rename на соль-имя: двигается то,
-    что лежит на имени сейчас; identity сверяется с fd ПОСЛЕ -- совпало,
-    значит убираем своё (rmdir соль-имени), не совпало -- вернуть на место
-    и назвать: чужое не удаляется. Файлы этой попытки снимаются по fd --
-    имя каталога на пути уже может указывать на чужое.
+    rmdir принимает только путь, поэтому остаточное окно между сверкой и
+    rmdir по СВОЕМУ соль-имени есть и названо честно: урон ограничен пустым
+    каталогом с неугадываемым именем рядом с dest; чужой namespace -- имя
+    dest и чужие каталоги -- не переименовывается и не удаляется вовсе
+    (ревью 2: никакого move чужого). ENOENT -- уже убрали, прощаем.
     """
-    gone = f"{dest}.mop-gone-{secrets.token_hex(4)}"
+    why = []
     for name in ("projects", "limits.json", "export.json"):
         try:
             os.unlink(name, dir_fd=dirfd)
         except FileNotFoundError:
             pass  # не писали или уже убрали
         except OSError as e:
-            return [f"cleanup failed on {name}: {e}"]
+            why.append(f"cleanup failed on {name}: {e}")
+    if why:
+        return why
     try:
-        os.rename(dest, gone)
-    except FileNotFoundError:
-        return ["the destination directory disappeared before cleanup"]
-    except OSError as e:
-        return [f"cleanup failed: cannot claim the directory for removal: {e}"]
-    try:
-        st = os.stat(gone, follow_symlinks=False)
+        st = os.stat(staging, dir_fd=pfd, follow_symlinks=False)
         ours = os.fstat(dirfd)
         if (st.st_dev, st.st_ino) != (ours.st_dev, ours.st_ino):
-            try:
-                os.rename(gone, dest)
-            except OSError as e:
-                return [f"cleanup failed: {dest} was replaced and could not be "
-                        f"restored (now at {gone}): {e}"]
-            return [f"cannot remove the incomplete export directory: {dest} is "
-                    "no longer ours; left in place"]
-        os.rmdir(gone)
+            # Имя staging уже не наш каталог: не удалять, назвать.
+            return [f"cleanup: the staging directory name is no longer ours; "
+                    "left in place"]
+        os.rmdir(staging, dir_fd=pfd)
+    except FileNotFoundError:
+        pass  # уже убрали
     except OSError as e:
-        # ENOTEMPTY и прочие: в каталоге что-то помимо снятых наших файлов --
-        # не снимать вслепую; оставить и назвать причину.
-        return [f"cleanup failed: the directory {e}"]
-    return []
-
+        why.append(f"cleanup failed: the staging directory {e}")
+    return why
 
 def for_deploy(answer, local):
     """Реестр для `mop server deploy`. -> (строки, примечание|None). Чистая функция.
