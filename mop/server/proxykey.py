@@ -154,7 +154,14 @@ def status():
     out = _project(state)
     delivered = state.get("delivered")
     if delivered:
-        out["delivered"] = dict(delivered)
+        # Публичная проекция -- только перечислимые коды узла: хвост
+        # FAILED:.../NOT REACHED:... несёт raw payload (причина агента),
+        # приватный чекпоинт его хранит, статус -- не echo-ит.
+        out["delivered"] = {n: ("OK" if v == "OK" else
+                                "FAILED" if v.startswith("FAILED: ") else
+                                "NOT REACHED" if v.startswith("NOT REACHED: ") else
+                                "FAILED")
+                            for n, v in delivered.items()}
     return out
 
 
@@ -216,8 +223,8 @@ def _validate(state):
     if state.get("stage") not in STAGES:
         return "the rotation state stage is not one of the allowed"
     rs = state.get("recipients")
-    if not isinstance(rs, list) or not rs:
-        return "the rotation state recipients must be a non-empty list of node names"
+    if not isinstance(rs, list):
+        return "the rotation state recipients must be a list of node names"
     for r in rs:
         if not isinstance(r, str) or not r or r in (".", "*", ">") \
                 or any(c in r for c in " \t\r\n\x00.>*") \
@@ -238,6 +245,8 @@ def _validate(state):
     # покрытия OK -- отредактированный JSON «completed» не завершение.
     if dv is None:
         dv = {}
+    if state["stage"] == "completed" and not rs:
+        dv = dv if isinstance(dv, dict) else {}
     if state["stage"] == "completed" and not all(dv.get(n) == "OK" for n in rs):
         return ("the rotation state is completed without full OK coverage "
                 "of the saved recipients")

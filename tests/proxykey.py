@@ -1027,6 +1027,15 @@ def check_state_validator_538(c):
             # Чекпоинт-консистентность стадии: completed при непустом списке
             # требует ПОЛНОГО покрытия OK из сохранённого состояния; отредак-
             # тированный JSON «completed» -- не завершение.
+            # Явный ПУСТОЙ намеренный набор -- легален (пустой пул):
+            # «непустые» -- про каждую строку, не про число получателей.
+            # Completed при пустом наборе может нести пустой delivered.
+            empty = {**good2, "recipients": []}
+            c.check("#538 an explicitly empty recipient set is valid",
+                    proxykey._validate(empty) is None, "must be None")
+            c.check("#538 an empty set completes with an empty delivered",
+                    proxykey._validate({**empty, "stage": "completed",
+                                        "delivered": {}}) is None, "must be None")
             bad("completed without delivered", {**good2, "stage": "completed"})
             bad("completed with a partial delivered",
                 {**good2, "stage": "completed", "delivered": {"node1": "OK"}})
@@ -1053,9 +1062,9 @@ def check_state_validator_538(c):
             write({**good2, "stage": "local", "delivered": {"node1": "FAILED: x",
                                                             "node2": "OK"}})
             st = read_status()
-            c.check("#538 status projects the open stage with its delivered",
+            c.check("#538 status projects the open stage with safe codes",
                     isinstance(st, dict) and st.get("stage") == "local" and
-                    st.get("delivered", {}).get("node1") == "FAILED: x", st)
+                    st.get("delivered", {}).get("node1") == "FAILED", st)
             c.check("#538 status carries no keys",
                     not any(k in st for k in ("old", "new", "key")), st)
             write({**good2, "delivered": {"node1": "raw secret payload"},
@@ -1070,6 +1079,21 @@ def check_state_validator_538(c):
             st = read_status()
             c.check("#538 an invalid stage value does not ride into status",
                     st.get("stage") == "invalid" and leak not in json.dumps(st), st)
+
+            # delivered-хвосты FAILED:.../NOT REACHED:... -- raw payload:
+            # публичная проекция несёт только перечислимые коды узла, не
+            # весь хвост по префиксу (source-actor reply уже показывал
+            # словарь с секретным словом -- тот же инвариант).
+            write({**good2, "stage": "local",
+                   "delivered": {"node1": "FAILED: secret-token", "node2": "OK"}})
+            st = read_status()
+            c.check("#538 status never echoes a delivered tail",
+                    "secret-token" not in json.dumps(st), st)
+            dv = st.get("delivered", {})
+            c.check("#538 failed nodes project to a bare safe code",
+                    dv.get("node1") == "FAILED", dv)
+            c.check("#538 the OK node still reports OK",
+                    dv.get("node2") == "OK", dv)
 
             # Каталог состояния без прав -- это не «нет операции»: отказ с
             # причиной доступа, не молчаливый None (begin мог бы затирать).
