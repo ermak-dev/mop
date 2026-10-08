@@ -89,8 +89,13 @@ def ask(prompt, secret=False, default=None):
     return value
 
 
-def _probe(url, key, directory):
-    """Проверить ключ без передачи его по открытой LAN или через redirect."""
+def _probe(url, key, directory, port=None):
+    """Проверить ключ без передачи его по открытой LAN или через redirect.
+
+    port -- ПРОВЕРЕННЫЙ порт этого входа (совпадает с портом URL записи,
+    сверка в _fetch), не порт самого URL: он сам себе не доказательство.
+    Его отсутствие -- неauthority-режим: легаси-префикс остаётся, /v1
+    надстраивается как есть (nginx /llm жив до перехода, #529/#547)."""
     from ..common import llm
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
@@ -104,11 +109,10 @@ def _probe(url, key, directory):
 
     opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=tls))
     # Канонический /v1/models (#547): легаси /llm ВЫДАННОГО адреса снимается
-    # authority-проверкой (этот сервер + его каталог), чужой путь не режется.
-    # Порт URL не сверяется: сам адрес только что пришёл от проверенного
-    # сервера и прошёл _client_values.
+    # authority-проверкой (этот сервер + проверенный порт), чужой путь --
+    # включая отсутствие подсказок -- не режется.
     request = urllib.request.Request(
-        llm.endpoint(url, "models", host=os.path.basename(directory)),
+        llm.endpoint(url, "models", host=os.path.basename(directory), port=port),
         headers={"Authorization": f"Bearer {key}"})
     try:
         with opener.open(request, timeout=10) as response:
@@ -191,7 +195,7 @@ def complete(host, login, dest, https):
             _still_valid(host, https, dest, profile)
         password = profile["password"] if valid else _login(host, login, dest, https)
         record = _fetch(host, login, password, dest, https)
-        _probe(record["proxy_url"], record["proxy_key"], dest)
+        _probe(record["proxy_url"], record["proxy_key"], dest, port=https)
         # Одна атомарная запись: провал между двумя прежними оставлял смесь --
         # пароль одного входа с портом и ключом другого (#533).
         creds.write_connection(dest, login, password, record["https_port"],

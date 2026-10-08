@@ -85,7 +85,7 @@ def quiet_complete(dest, row=None, **kw):
                "proxy_key": (row or ALICE)[4]})
     return patched(join, _login=lambda *a: (row or ALICE)[1],
                    _fetch=lambda *a: record,
-                   _probe=lambda *a: None, **kw)
+                   _probe=lambda *a, **kw: None)
 
 
 def refute(c, what, fn, *needles):
@@ -151,7 +151,7 @@ def check_mixed_write_533(c):
     with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
                  _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
                                     "proxy_key": BOB[4]},
-                 _probe=lambda *a: None), \
+                 _probe=lambda *a, **kw: None), \
             patched(creds, write_operator=_sabotage("disk full")):
         try:
             join.complete("srv.test", "bob", dest, "8443")
@@ -170,7 +170,7 @@ def check_mixed_write_533(c):
     with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
                  _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
                                     "proxy_key": BOB[4]},
-                 _probe=lambda *a: None):
+                 _probe=lambda *a, **kw: None):
         join.complete("srv.test", "bob", dest, "8443")
     got = effective(dest)
     c.check("#533 a successful re-login switches the whole login",
@@ -195,7 +195,7 @@ def check_mixed_write_533(c):
     with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
                  _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
                                     "proxy_key": BOB[4]},
-                 _probe=lambda *a: (_ for _ in ()).throw(RuntimeError("HTTP 401"))):
+                 _probe=lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("HTTP 401"))):
         try:
             join.complete("srv.test", "bob", dest, "8443")
             c.fail("#533 failed verification must refuse")
@@ -417,7 +417,7 @@ def check_human_login_refuses_machine_533(c):
     record = {"https_port": ALICE[2], "proxy_url": ALICE[3], "proxy_key": ALICE[4]}
     with patched(join, _login=lambda *a: touched.append("_login") or "bus-secret",
                  _fetch=lambda *a: touched.append("_fetch") or record,
-                 _probe=lambda *a: touched.append("_probe")), \
+                 _probe=lambda *a, **kw: touched.append("_probe")), \
             patched(creds, untrusted_cert=lambda *a: touched.append("cert") or None), \
             patched(join.bus, check=lambda *a: None):
         try:
@@ -570,7 +570,7 @@ def check_broken_profile_not_overwritten_533(c):
                          _fetch=lambda *a: touched.append("_fetch") or
                          {"https_port": "443", "proxy_url": "https://x/llm",
                           "proxy_key": "x"},
-                         _probe=lambda *a: touched.append("_probe"),
+                         _probe=lambda *a, **kw: touched.append("_probe"),
                          ask=lambda *a: touched.append("ask") or "alice",
                          git=lambda *a: None), \
                 patched(creds, untrusted_cert=lambda *a: touched.append("cert") or None), \
@@ -608,7 +608,7 @@ def check_broken_profile_not_overwritten_533(c):
                         _still_valid=lambda *a: touched.append("_still_valid") or False,
                         _fetch=lambda *a: touched.append("_fetch") or
                         {"https_port": "443", "proxy_url": "https://x/llm", "proxy_key": "x"},
-                        _probe=lambda *a: touched.append("_probe"),
+                        _probe=lambda *a, **kw: touched.append("_probe"),
                         ask=lambda *a: touched.append("ask") or "alice",
                         git=lambda *a: None), \
                 patched(creds, client=lambda *a: touched.append("client") or None), \
@@ -657,7 +657,7 @@ def check_cleanup_failure_keeps_profile_533(c):
     with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
                  _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
                                     "proxy_key": BOB[4]},
-                 _probe=lambda *a: None), \
+                 _probe=lambda *a, **kw: None), \
             patched(os, remove=boom_remove):
         err = io.StringIO()
         with patched(sys, stderr=err):
@@ -694,7 +694,7 @@ def check_broken_operator_533(c):
                          _still_valid=lambda *a: touched.append("_still_valid") or False,
                          _fetch=lambda *a: touched.append("_fetch") or
                          {"https_port": "443", "proxy_url": "https://x/llm", "proxy_key": "x"},
-                         _probe=lambda *a: touched.append("_probe"),
+                         _probe=lambda *a, **kw: touched.append("_probe"),
                          ask=lambda *a: touched.append("ask") or "alice",
                          git=lambda *a: None), \
                 patched(creds, write_connection=lambda *a: touched.append("write")), \
@@ -723,7 +723,7 @@ def check_broken_operator_533(c):
                         _still_valid=lambda *a: touched.append("_still_valid") or False,
                         _fetch=lambda *a: touched.append("_fetch") or
                         {"https_port": "443", "proxy_url": "https://x/llm", "proxy_key": "x"},
-                        _probe=lambda *a: touched.append("_probe"),
+                        _probe=lambda *a, **kw: touched.append("_probe"),
                         ask=lambda *a: touched.append("ask") or "alice",
                         git=lambda *a: None), \
                 patched(creds, client=lambda *a: touched.append("client") or None), \
@@ -892,7 +892,7 @@ def check_complete_partial_hint_533(c):
                  _login=lambda *a: calls.append(("_login", a[1])) or "fresh-bus",
                  _fetch=lambda *a: {"https_port": "443", "proxy_url": "https://x/llm",
                                     "proxy_key": "k"},
-                 _probe=lambda *a: None), \
+                 _probe=lambda *a, **kw: None), \
             patched_env(MOP_BUS_PASSWORD="fresh-bus"):
         join.complete("srv.test", "alice", dest, "443")
     c.check("#533 a direct complete re-checks the stored half password",
@@ -917,7 +917,7 @@ def check_writer_neighbors_533(c):
     with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
                  _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
                                     "proxy_key": BOB[4]},
-                 _probe=lambda *a: None):
+                 _probe=lambda *a, **kw: None):
         join.complete("srv.test", "bob", dest, "8443")
     for name, was in neighbors.items():
         c.expect(f"#533 the writer does not touch {name}",
@@ -947,7 +947,7 @@ def check_machine_race_533(c):
             patched(join, _login=lambda *a: touched.append("_login") or "bus-x",
                     _fetch=lambda *a: touched.append("_fetch") or
                     {"https_port": "443", "proxy_url": "https://x/llm", "proxy_key": "x"},
-                    _probe=lambda *a: touched.append("_probe")), \
+                    _probe=lambda *a, **kw: touched.append("_probe")), \
             patched(creds, write_connection=lambda *a: touched.append("write")), \
             context.use(context.resolve({"server": "srv.test", "user": "alice"}, {}, {})):
         try:
@@ -989,7 +989,7 @@ def check_cleanup_phase_covered_533(c):
         with patched(join, _login=lambda *a: BOB[1], _still_valid=lambda *a: False,
                      _fetch=lambda *a: {"https_port": BOB[2], "proxy_url": BOB[3],
                                         "proxy_key": BOB[4]},
-                     _probe=lambda *a: None), sabotage_patch:
+                     _probe=lambda *a, **kw: None), sabotage_patch:
             err = io.StringIO()
             with patched(sys, stderr=err):
                 try:

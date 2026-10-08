@@ -39,16 +39,22 @@ def _authority_matches(url, host, port):
 
     scheme обязан быть https (легаси-форму издатель писал только так),
     hostname -- выбранному серверу, порт -- сохранённому в профиле
-    (implicit 443 равен явному :443). Несовпадение -- не ошибка: просто
-    не наш случай, вызывающий оставляет URL как есть."""
+    (implicit 443 равен явному :443). Обе подсказки обязательны: один
+    хост без порта снял бы /llm с чужого порта того же имени, один порт --
+    с чужого хоста; известна только одна -- НЕ наш издатель. Несовпадение
+    -- не ошибка: просто не наш случай, вызывающий оставляет URL как
+    есть. Источник подсказок -- проверенное значение (порт проверенного
+    RPC/профиля), не порт самого URL как сам себе доказательство."""
+    if not host or not port:
+        return False
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https":
         return False
     if parsed.username is not None or parsed.password is not None:
         return False
-    if host is not None and (parsed.hostname or "").lower() != host.lower():
+    if (parsed.hostname or "").lower() != host.lower():
         return False
-    if port is not None and str(parsed.port or _DEFAULT_TLS_PORT) != str(port):
+    if str(parsed.port or _DEFAULT_TLS_PORT) != str(port):
         return False
     return True
 

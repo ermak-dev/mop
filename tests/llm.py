@@ -60,6 +60,15 @@ def check_url_contract_547(c):
     c.expect("#547 without issuer hints canonical() does not guess",
              llm.canonical("https://any.test:8443/llm"),
              "https://any.test:8443/llm")
+    # Authority -- ДВЕ подсказки, не одна (#547, ревью мастера): host без
+    # порта снял бы /llm с чужого порта того же имени; порт без хоста --
+    # с чужого хоста. Известен только один -- НЕ наш издатель, вход цел.
+    c.expect("#547 host alone is not the issuer: a foreign port keeps /llm",
+             llm.canonical("https://srv.test:8443/llm", host="srv.test"),
+             "https://srv.test:8443/llm")
+    c.expect("#547 port alone is not the issuer: a foreign host keeps /llm",
+             llm.canonical("https://foreign.test:8443/llm", port="8443"),
+             "https://foreign.test:8443/llm")
     # endpoint: ровно один /v1; уже-v1 база -- resource-aware, без /v1/v1.
     c.expect("#547 endpoint over a canonical origin",
              llm.endpoint("https://srv.test:8443", "models"),
