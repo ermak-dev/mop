@@ -637,7 +637,11 @@ def _gc_policy(project, req):
 
 
 def _client_config(req):
-    """Только личный субъект после проверки NATS, не узловой server.rpc."""
+    """Только личный субъект после проверки NATS, не узловой server.rpc.
+
+    Адрес -- канонический origin сервера (#547): scheme/host/port, без
+    исторического префикса /llm и без /v1. Надстраивает /v1/* потребитель,
+    и ровно один раз; nginx root /v1 уже отвечает на корне (#529)."""
     if not req.get("_caller"):
         return {"error": "client_config requires an authenticated personal subject"}
     key = proxykey.source({})
@@ -646,7 +650,7 @@ def _client_config(req):
     host = config.get("MOP_SERVER_LAN")
     port = str(config.get("MOP_HTTPS_PORT"))
     return {"ok": True, "https_port": port,
-            "proxy_url": f"https://{host}:{port}/llm", "proxy_key": key}
+            "proxy_url": f"https://{host}:{port}", "proxy_key": key}
 
 
 # ─── глаголы: проекты (#117) ─────────────────────────────────────────────
