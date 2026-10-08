@@ -396,11 +396,12 @@ def check_preflight_538(c):
         c.check("#538 preflight passes a consistent start",
                 fn(state) is None, "must be None")
 
-        # Собственный recoverable сплит: источник уже new, копия ещё old --
-        # это чекпоинт операции, не drift.
+        # Preflight живёт на ready: до локального намерения ОБА пути
+        # обязаны держать OLD -- появление NEW до записи это чужая рука.
         put(src, "new-key\n")
-        c.check("#538 preflight accepts its own source-ahead split",
-                fn(state) is None, "must be None")
+        r = fn(state)
+        c.check("#538 preflight drifts a source-new pair before the local intent",
+                isinstance(r, str) and "drift" in r.lower() and src in r, r)
 
         # Третье значение в источнике -- drift.
         put(src, "third-key\n")
@@ -409,7 +410,7 @@ def check_preflight_538(c):
                 isinstance(r, str) and "drift" in r.lower() and src in r, r)
 
         # Третье значение в копии -- тоже drift.
-        put(src, "new-key\n")
+        put(src, "old-key\n")
         put(cp, "third-key\n")
         r = fn(state)
         c.check("#538 a third copy value is a named drift blocker",
@@ -424,7 +425,7 @@ def check_preflight_538(c):
         # Несервисопригодная копия: запись под root сменила бы владельца
         # файла -- единственный uid на теле в тесте сам себе, проверяем
         # режим: чужой 0644 должен быть назван ДО мутации.
-        put(src, "new-key\n")
+        put(src, "old-key\n")
         put(cp, "old-key\n")
         os.chmod(cp, 0o644)
         r = fn(state)
@@ -1145,18 +1146,54 @@ def check_serviceability_538(c):
                 c.check(f"#538 owner check exists on the path at {stage}",
                         "owner" in open("mop/server/proxykey.py").read(), True)
 
-        # Собственный сплит восстанавливаем на любой стадии.
-        for stage in ("ready", "listed", "accepted", "local"):
+        # Доменное правило стадий (approved correction раннего тестового
+        # контракта «сплит recoverable на ЛЮБОЙ стадии» -- он был ошибочен):
+        # ready/listed -- до локального намерения, ОБА обязаны быть OLD;
+        # accepted -- возможен собственный partial local write, OLD/NEW
+        # сплит или оба NEW recoverable (падение в local step/checkpoint);
+        # local -- чекпоинт УЖЕ означает оба NEW, вернувшийся OLD --
+        # внешний откат, drift; НЕ deliver/НЕ completed/НЕ overwrite без
+        # решения оператора. Completed status -- исторический чекпоинт,
+        # не заявление о текущем состоянии файлов/env.
+        for stage in ("ready", "listed"):
             put(src, "new-key\n")
             put(cp, "old-key\n")
-            c.check(f"#538 own source-ahead split is recoverable at {stage}",
-                    proxykey._guard(state(stage)) is None, "must be None")
+            c.check(f"#538 before the local intent ({stage}) a source-new pair is drift",
+                    isinstance(proxykey._guard(state(stage)), str)
+                    and "drift" in proxykey._guard(state(stage)).lower(),
+                    proxykey._guard(state(stage)))
             put(src, "old-key\n")
             put(cp, "new-key\n")
-            c.check(f"#538 own copy-ahead split is recoverable at {stage}",
-                    proxykey._guard(state(stage)) is None, "must be None")
+            c.check(f"#538 before the local intent ({stage}) a copy-new pair is drift",
+                    isinstance(proxykey._guard(state(stage)), str)
+                    and "drift" in proxykey._guard(state(stage)).lower(),
+                    proxykey._guard(state(stage)))
             put(src, "old-key\n")
             put(cp, "old-key\n")
+            c.check(f"#538 before the local intent ({stage}) both-old passes",
+                    proxykey._guard(state(stage)) is None, "must be None")
+        # accepted: собственные сплиты recoverable.
+        for put_src, put_cp in (("new-key", "old-key"), ("old-key", "new-key"),
+                                ("new-key", "new-key")):
+            put(src, put_src + "\n")
+            put(cp, put_cp + "\n")
+            c.check(f"#538 accepted tolerates its own split ({put_src}/{put_cp})",
+                    proxykey._guard(state("accepted")) is None, "must be None")
+        # local: чекпоинт означает оба NEW; вернувшийся OLD -- drift.
+        put(src, "new-key\n")
+        put(cp, "new-key\n")
+        c.check("#538 local with both-new passes",
+                proxykey._guard(state("local")) is None, "must be None")
+        put(src, "old-key\n")
+        put(cp, "new-key\n")
+        r = proxykey._guard(state("local"))
+        c.check("#538 local with a returned-old source is drift, not a crash split",
+                isinstance(r, str) and "drift" in r.lower(), r)
+        put(src, "old-key\n")
+        put(cp, "old-key\n")
+        r = proxykey._guard(state("local"))
+        c.check("#538 local with both-old is drift (external rollback)",
+                isinstance(r, str) and "drift" in r.lower(), r)
 
 
 # ── #538: покрытие получателей и типизированные исходы швов ─────────────

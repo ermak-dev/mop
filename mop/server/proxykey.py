@@ -317,19 +317,28 @@ def _serviceable(state):
 
 def _guard(state):
     """Guard КАЖДОГО resume перед mutating-шагом: пауза на поздней стадии
-    не открывает окно третьей стороне. Собственный сплит (old/new) --
-    восстанавливаем; третье значение, смена владельца или режима --
-    блокер. -> None | строка-блокер."""
+    не открывает окно третьей стороне. Доменное правило стадий: ready/
+    listed -- до локального намерения, ОБА пути обязаны держать OLD
+    (появление NEW до записи -- чужая рука); accepted -- возможен
+    собственный partial local write, OLD/NEW сплит или оба NEW
+    восстанавливаемы; local -- чекпоинт уже означает оба NEW, вернувшийся
+    OLD -- внешний откат, drift, НЕ deliver/NE completed/NE overwrite без
+    решения оператора. -> None | строка-блокер."""
     blocker = _serviceable(state)
     if blocker:
         return blocker
+    old, new = state["old"], state["new"]
     for what, path in (("source", state["source"]), ("copy", state["copy"])):
         why, key = _read_file_key(path)
         if why != "ok":
             return f"blocker: {what} file {path} is {why}"
-        if key not in (state["old"], state["new"]):
-            return (f"drift: {what} file {path} holds neither the old nor "
-                    f"the new key of the operation")
+        stage = state.get("stage")
+        allowed = ((old,) if stage in ("ready", "listed")
+                   else (old, new) if stage == "accepted"
+                   else (new,) if stage == "local" else (old, new))
+        if key not in allowed:
+            return (f"drift: {what} file {path} holds a key the {stage} "
+                    f"checkpoint does not allow")
     return None
 
 
