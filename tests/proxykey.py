@@ -851,6 +851,108 @@ def check_pipeline_538(c):
                     (after, saved))
 
 
+# ── #538: строгий валидатор состояния — одна форма на всех входах ────────
+# HYPOTHESIS: _checked_state принимал схему любым числом (bool True == 1,
+# float 1.0 == 1), не проверял id/пути/стадии/типы ключей/дубликаты
+# получателей, а unknown stage выходил из while-цикла resume как ok True;
+# begin поверх сломанного/нечитаемого prior-состояния затирал его.
+# SOLUTION: один валидатор для load/prior/resume/status: только точная
+# форма (schema int ровно SCHEMA, непустые строки old/new/source/copy,
+# stage из допустимых, recipients -- список уникальных непустых строк);
+# действительное отсутствие файла -- None, существующее битое/нечитаемое
+# состояние -- громкий отказ без перезаписи.
+def check_state_validator_538(c):
+    with tempfile.TemporaryDirectory(prefix="mop-rot-val-") as d:
+        op = os.path.join(d, "op.json")
+
+        def write(raw):
+            if isinstance(raw, str):
+                with open(op, "w", encoding="utf-8") as f:
+                    f.write(raw)
+            else:
+                with open(op, "w", encoding="utf-8") as f:
+                    json.dump(raw, f)
+
+        good = {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                "new": "new-key", "source": os.path.join(d, "s"),
+                "copy": os.path.join(d, "c"), "recipients": ["node1"],
+                "stage": "ready"}
+
+        with patched(proxykey, OP=op, LOCK=os.path.join(d, "rotation.lock")):
+            # Действительное отсутствие -- честный None (begin может начать).
+            if os.path.exists(op):
+                os.remove(op)
+            c.check("#538 no file at all -> None",
+                    proxykey._load_op() is None, "must be None")
+
+            # Годное состояние проходит валидатор.
+            write(good)
+            c.check("#538 a good state validates",
+                    proxykey._validate(proxykey._load_op()) is None,
+                    "must be None")
+
+            # Существующее битое -- не None и не перезапись: строгое чтение.
+            for name, raw in (("not JSON", "{oops"),
+                              ("a list", [1, 2]),
+                              ("schema bool", {**good, "schema": True}),
+                              ("schema float", {**good, "schema": 1.0}),
+                              ("schema str", {**good, "schema": "1"}),
+                              ("no id", {k: v for k, v in good.items() if k != "id"}),
+                              ("no old", {k: v for k, v in good.items() if k != "old"}),
+                              ("no new", {k: v for k, v in good.items() if k != "new"}),
+                              ("empty old", {**good, "old": ""}),
+                              ("no source", {k: v for k, v in good.items() if k != "source"}),
+                              ("no copy", {k: v for k, v in good.items() if k != "copy"}),
+                              ("no stage", {k: v for k, v in good.items() if k != "stage"}),
+                              ("unknown stage", {**good, "stage": "halfway"}),
+                              ("stage not str", {**good, "stage": 7}),
+                              ("recipients not list", {**good, "recipients": "node1"}),
+                              ("recipients empty entries", {**good, "recipients": ["", "n"]}),
+                              ("recipients duplicates", {**good, "recipients": ["n", "n"]}),
+                              ("recipients non-str", {**good, "recipients": ["n", 7]})):
+                write(raw)
+                try:
+                    state = proxykey._load_op()
+                except RuntimeError as e:
+                    c.check(f"#538 a broken state ({name}) loads loudly",
+                            "JSON" in str(e) or "read" in str(e).lower(), str(e))
+                    continue
+                if not c.check(f"#538 a broken state ({name}) is not silently None",
+                               state is not None, "load_op swallowed it"):
+                    continue
+                r = proxykey._validate(state)
+                c.check(f"#538 a broken state ({name}) refuses with a safe reason",
+                        isinstance(r, str) and bool(r), r)
+
+            # Не читается -- тоже существующее, отказ, не None.
+            write(good)
+            os.chmod(op, 0o000)
+            try:
+                try:
+                    proxykey._load_op()
+                    c.fail("#538 an unreadable state file must refuse, not None")
+                except RuntimeError as e:
+                    c.check("#538 an unreadable state file refuses with a reason",
+                            "cannot read" in str(e), str(e))
+            finally:
+                os.chmod(op, 0o600)
+
+            # begin не затирает существующее битое prior-состояние.
+            write("{oops")
+            src = os.path.join(d, "s")
+            with open(src, "w", encoding="utf-8") as f:
+                f.write("old-key\n")
+            try:
+                proxykey.begin(src, os.path.join(d, "c"), ["n"], exclusive=True)
+                c.fail("#538 begin must not overwrite a broken prior state")
+            except RuntimeError as e:
+                c.check("#538 the broken-prior refusal carries a reason",
+                        bool(str(e)), str(e))
+            with open(op, encoding="utf-8") as f:
+                after = f.read()
+            c.check("#538 the broken prior state file survives the refused begin",
+                    after == "{oops", repr(after))
+
 def main():
     c = Checks()
     check_source_393(c)
@@ -863,6 +965,7 @@ def main():
     check_probe_step_538(c)
     check_local_and_delivery_538(c)
     check_pipeline_538(c)
+    check_state_validator_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

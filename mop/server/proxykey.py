@@ -94,14 +94,22 @@ def begin(source_path, copy_path, recipients, *, exclusive):
         raise RuntimeError("rotation requires the exclusive-writer precondition")
     with _lock():
         prior = _load_op()
-        if prior is not None and prior.get("stage") != "completed":
-            raise RuntimeError("an unfinished rotation state exists; resume it, "
-                               "do not begin over it")
+        if prior is not None:
+            why = _validate(prior)
+            if why:
+                raise RuntimeError(f"refusing to overwrite the existing "
+                                   f"state: {why}")
+            if prior.get("stage") != "completed":
+                raise RuntimeError("an unfinished rotation state exists; resume it, "
+                                   "do not begin over it")
         old = _read_key(source_path)
         state = {"id": secrets.token_hex(8), "schema": SCHEMA,
                  "old": old, "new": _new_key(),
                  "source": source_path, "copy": copy_path,
                  "recipients": list(recipients), "stage": "ready"}
+        why = _validate(state)
+        if why:  # свой же state не годен -- не сохранять его вовсе
+            raise RuntimeError(f"the new state is not valid: {why}")
         fsutil.write_private(OP, json.dumps(state))
         return _project(state)
 
@@ -139,6 +147,9 @@ def status():
     state = _load_op()
     if state is None:
         return None
+    why = _validate(state)
+    if why:
+        return {"stage": "invalid", "reason": why}
     out = _project(state)
     delivered = state.get("delivered")
     if delivered:
@@ -147,12 +158,46 @@ def status():
 
 
 def _load_op():
-    """Состояние операции либо None: файла нет или не JSON."""
+    """Состояние операции. Только действительное отсутствие файла -- None:
+    существующее битое или нечитаемое -- громкий отказ, чтобы begin не
+    затирал его молча. -> dict | None | RuntimeError."""
     try:
         with open(OP, encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
+    except ValueError as e:
+        raise RuntimeError(f"the rotation state {OP} is not valid JSON: "
+                           f"{type(e).__name__}") from e
+    except OSError as e:
+        raise RuntimeError(f"cannot read the rotation state {OP}: "
+                           f"{e.strerror}") from e
+
+
+def _validate(state):
+    """Одна строгая форма состояния на всех входах (load/prior/resume/
+    status). -> None | строка-причина. schema -- int ровно SCHEMA (bool и
+    float -- не схема), ключи и пути -- непустые строки, stage -- из
+    допустимых, recipients -- список уникальных непустых строк. Unknown
+    stage не «ok»: цикл шагов его не покрывает."""
+    if not isinstance(state, dict):
+        return "the rotation state is not an object"
+    if type(state.get("schema")) is not int or state.get("schema") != SCHEMA:
+        return f"rotation state schema {state.get('schema')!r} is not {SCHEMA}"
+    for field in ("id", "old", "new", "source", "copy"):
+        if not isinstance(state.get(field), str) or not state.get(field):
+            return f"rotation state has no {field} (a non-empty string)"
+    if state.get("stage") not in STAGES:
+        return f"rotation state stage {state.get('stage')!r} is not one of {sorted(STAGES)}"
+    rs = state.get("recipients")
+    if not isinstance(rs, list) or not all(isinstance(r, str) and r for r in rs):
+        return "rotation state recipients must be a list of non-empty strings"
+    if len(set(rs)) != len(rs):
+        return "rotation state recipients carry duplicates"
+    return None
+
+
+STAGES = ("ready", "listed", "accepted", "local", "completed")
 
 
 def _checked_state():
@@ -160,14 +205,9 @@ def _checked_state():
     state = _load_op()
     if state is None:
         raise RuntimeError("no rotation state to resume")
-    if state.get("schema") != SCHEMA:
-        raise RuntimeError(f"rotation state schema {state.get('schema')!r} "
-                           f"is not {SCHEMA}: not this library's state")
-    for field in ("old", "new"):
-        if not state.get(field):
-            raise RuntimeError(f"rotation state has no {field} key: not resumable")
-    if not isinstance(state.get("recipients"), list):
-        raise RuntimeError("rotation state has no saved recipient set")
+    why = _validate(state)
+    if why:
+        raise RuntimeError(f"refusing to continue: {why}")
     return state
 
 
