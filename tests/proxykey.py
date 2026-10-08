@@ -761,6 +761,64 @@ def check_probe_step_538(c):
                 not out.get("ok") and "wrong" in str(out.get("blocker", "")).lower(), out)
 
 
+# ── #554: одна безопасная проба ключа -- helper без объединения фаз ──────
+# HYPOTHESIS: связка «seams.probe(key) в try, except Exception, блокер
+# cannot probe … (type)» повторена пять раз (_remote_step: old и wrong
+# до PUT; _probe_step: new, old и wrong после) -- новое место пробы
+# копирует связку, и безопасная проекция расходится с первым же
+# изменением. SOLUTION: _probe_safe(seams, key, what) -> (accepted,
+# blocker) -- одна копия связки; фазы зовут её и решают СВОЙ исход
+# каждым if сами (порядок, число вызовов, тексты смыслов, чекпоинты --
+# в фазах, не в helper). STATUS: FIXED — see #554
+def check_probe_safe_554(c):
+    helper = getattr(proxykey, "_probe_safe", None)
+    if not c.check("#554 proxykey._probe_safe exists", callable(helper)):
+        return
+
+    class Boom(Exception):
+        pass
+
+    calls = []
+
+    class Seams:
+        probe = staticmethod(lambda key: calls.append(key) or True)
+
+    accepted, blocker = helper(Seams(), "k1", "the old key")
+    c.check("#554 a successful probe returns accepted with no blocker",
+            accepted is True and blocker is None, (accepted, blocker))
+    c.check("#554 the helper probes exactly the given key",
+            calls == ["k1"], calls)
+
+    class Refused(Exception):
+        pass
+
+    class RefusingSeams:
+        probe = staticmethod(lambda key: (_ for _ in ()).throw(Refused()))
+
+    accepted, blocker = helper(RefusingSeams(), "k2", "the new key")
+    c.check("#554 a seam exception becomes a blocker with the class name",
+            accepted is None and isinstance(blocker, str)
+            and "Refused" in blocker and "new key" in blocker,
+            (accepted, blocker))
+    # Ключ не в блокере: проба может нести материал ключа в payload
+    # исключения, блокер -- safe-проекция.
+    c.check("#554 the probe blocker does not carry the key",
+            "k2" not in (blocker or ""), (blocker,))
+
+    # BaseException не глотается: KeyboardInterrupt/SystemExit -- не
+    # «безопасный блокер ротации», а воля процесса.
+    class InterruptingSeams:
+        probe = staticmethod(lambda key: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    try:
+        helper(InterruptingSeams(), "k3", "the old key")
+        interrupted = False
+    except KeyboardInterrupt:
+        interrupted = True
+    c.check("#554 KeyboardInterrupt rides through the helper",
+            interrupted, None)
+
+
 # ── #538: локальная смена и раздача — чекпоинты вокруг записи путей ──────
 # HYPOTHESIS: запись new в источник и копию двумя независимыми записями
 # без чекпоинтов оставляла бы crash-сплит невосстановимым, а итог раздачи
@@ -2016,6 +2074,7 @@ def main():
     check_resume_refusals_538(c)
     check_preflight_538(c)
     check_remote_step_538(c)
+    check_probe_safe_554(c)
     check_fetch_typing_539(c)
     check_probe_step_538(c)
     check_local_and_delivery_538(c)

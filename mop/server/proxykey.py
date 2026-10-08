@@ -435,23 +435,20 @@ def _remote_step(state, seams):
     # ключ отвергнут. Мёртвый old или выключенная авторизация -- блокер
     # ДО записи: мутация списка при них бессмысленна или опасна
     # (пустой список открывает прокси, #537). Post-PUT пробы new/old/
-    # wrong остаются в _probe_step.
-    try:
-        old_accepted = seams.probe(state["old"])
-    except Exception as e:  # noqa: BLE001 -- причина шва, не payload
-        return {"ok": False,
-                "blocker": f"cannot probe the old key ({type(e).__name__})"}
+    # wrong остаются в _probe_step. Связку try/probe/except несёт
+    # _probe_safe; СМЫСЛ каждого ответа решает эта фаза.
+    old_accepted, why = _probe_safe(seams, state["old"], "the old key")
+    if why:
+        return {"ok": False, "blocker": why}
     if not old_accepted:
         return {"ok": False,
                 "blocker": "the proxy does not accept the old key; "
                            "refusing to mutate the list before an operator "
                            "decision"}
     wrong = "definitely-wrong-" + state["id"]
-    try:
-        wrong_accepted = seams.probe(wrong)
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False,
-                "blocker": f"cannot probe with a wrong key ({type(e).__name__})"}
+    wrong_accepted, why = _probe_safe(seams, wrong, "with a wrong key")
+    if why:
+        return {"ok": False, "blocker": why}
     if wrong_accepted:
         return {"ok": False,
                 "blocker": "the wrong client key is accepted: client auth is off; "
@@ -489,6 +486,22 @@ def _remote_step(state, seams):
     return out
 
 
+def _probe_safe(seams, key, what):
+    """Одна безопасная проба ключа -> (accepted, blocker).
+
+    Единая копия связки try/probe/except, что повторялась пять раз: шов
+    поднял Exception -- блокер с классом и смыслом what, без payload
+    ключа; проба прошла -- её ответ. Исход РЕШАЕТ ФАЗА: helper не знает,
+    до или после PUT он, и что значит «не принят» здесь -- порядок,
+    число вызовов, тексты смыслов и чекпоинты остаются в фазах. Не
+    глотает BaseException: KeyboardInterrupt/SystemExit -- воля
+    процесса, не блокер ротации."""
+    try:
+        return seams.probe(key), None
+    except Exception as e:  # noqa: BLE001 -- причина шва, не payload
+        return None, f"cannot probe {what} ({type(e).__name__})"
+
+
 def _probe_step(state, seams):
     """Шаг подтверждения применения: только probes доказывают, что прокси
     принимает ключи. Успех PUT -- запись, не применение (#537: конфиг
@@ -497,31 +510,25 @@ def _probe_step(state, seams):
     «оба приняты» без негативной проверки не доказывает включённую
     авторизацию (пустой список открывает прокси). -> {"ok": bool, ...} без
     ключей."""
-    try:
-        accepted_new = seams.probe(state["new"])
-    except Exception as e:  # noqa: BLE001 -- причина шва, не его payload
-        return {"ok": False,
-                "blocker": f"cannot probe the new key ({type(e).__name__})"}
+    accepted_new, why = _probe_safe(seams, state["new"], "the new key")
+    if why:
+        return {"ok": False, "blocker": why}
     if not accepted_new:
         # Not-yet, не отказ: список мог сохраниться, применение ещё идёт.
         return {"ok": False,
                 "blocker": "pending: the proxy does not accept the new key yet "
                            "(async apply); bounded rechecks, then pending stands"}
-    try:
-        accepted_old = seams.probe(state["old"])
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False,
-                "blocker": f"cannot probe the old key ({type(e).__name__})"}
+    accepted_old, why = _probe_safe(seams, state["old"], "the old key")
+    if why:
+        return {"ok": False, "blocker": why}
     if not accepted_old:
         return {"ok": False,
                 "blocker": "the proxy no longer accepts the old key before the "
                            "operation issued anything; distribution would strand nodes"}
     wrong = "definitely-wrong-" + state["id"]
-    try:
-        wrong_accepted = seams.probe(wrong)
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False,
-                "blocker": f"cannot probe with a wrong key ({type(e).__name__})"}
+    wrong_accepted, why = _probe_safe(seams, wrong, "with a wrong key")
+    if why:
+        return {"ok": False, "blocker": why}
     if wrong_accepted:
         return {"ok": False,
                 "blocker": "the wrong client key is accepted: client auth is off; "
