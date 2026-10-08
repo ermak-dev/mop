@@ -1179,6 +1179,73 @@ def check_export_safety_542(c):
             shutil.rmtree(root, ignore_errors=True)
 
 
+def check_export_readback_553(c):
+    """Повторная проверка записанного файла экспорта одним helper'ом (#553).
+
+    HYPOTHESIS (#553): в export_pair открытие по O_NOFOLLOW относительно
+    dirfd и сверка фактических байтов и прав с ожидаемыми повторялись
+    дважды -- для файлов пары (цикл) и для маркера export.json (развёрнуто);
+    протокол экспорта читался как три разных истории вместо
+    «источник → пара → проверка → маркер → проверка → публикация».
+    SOLUTION: один локальный helper readback(dirfd, name, data): открытие
+    ПО FD с O_NOFOLLOW относительно dirfd, сверка фактических байтов и
+    режима 0600; отказ называет файл и причину, не сырое содержимое.
+    Публичный протокол export_pair не меняется ни на йоту.
+    STATUS: FIXED — see #553."""
+    import shutil
+    import stat
+    import tempfile
+    from mop.common import fsutil
+
+    root = tempfile.mkdtemp(prefix="mop-test-553-")
+    try:
+        # Свойства helper'а проверяются на прямом вызове: fd-привязка,
+        # O_NOFOLLOW, сверка байтов и прав -- без знания внутренностей
+        # export_pair. STATUS: FIXED — see #542 (writer); #553 helper как есть.
+        helper = getattr(projects, "_readback_dirfd", None)
+        c.check("#553 the readback helper exists as one local seam",
+                callable(helper), repr(helper))
+        if helper is not None:
+            os.mkdir(os.path.join(root, "stage"), 0o700)
+            dirfd = os.open(os.path.join(root, "stage"),
+                            os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                data = b"{\"version\": 1}\n"
+                fsutil.write_private_dirfd(dirfd, "projects", data)
+                # Молчание -- единственный исход согласованной перечитки.
+                c.check("#553 a matching file reads back silently",
+                        helper(dirfd, "projects", data) is None, "expected None")
+                # 2. Байты не сошлись: отказ называет файл и read-back, без raw.
+                got = helper(dirfd, "projects", b"{\"version\": 9}\n")
+                c.check("#553 a corrupted file is refused with the reason",
+                        isinstance(got, str) and "projects" in got
+                        and "read-back" in got and "version" not in got, repr(got))
+                # 3. Права не 0600: отказ называет файл и режим.
+                os.chmod(os.path.join(root, "stage", "projects"), 0o644, dir_fd=dirfd)
+                got = helper(dirfd, "projects", data)
+                c.check("#553 a loosened mode is refused with the reason",
+                        isinstance(got, str) and "projects" in got
+                        and "0600" in got, repr(got))
+                os.chmod(os.path.join(root, "stage", "projects"), 0o600, dir_fd=dirfd)
+                # 4. Файла нет: отказ называет файл, не молчит.
+                got = helper(dirfd, "limits.json", b"{}")
+                c.check("#553 a missing file is refused with the reason",
+                        isinstance(got, str) and "limits.json" in got, repr(got))
+                # 5. Symlink вместо файла: O_NOFOLLOW отказывает, refusal
+                #    называет файл, чужая цель не читается, не раскрывается.
+                os.symlink(os.path.join(root, "stage", "projects"),
+                           "marker.json", dir_fd=dirfd)
+                got = helper(dirfd, "marker.json", data)
+                c.check("#553 a symlink is refused, never followed",
+                        isinstance(got, str) and "marker.json" in got
+                        and os.path.islink(os.path.join(root, "stage", "marker.json")),
+                        repr(got))
+            finally:
+                os.close(dirfd)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_schema_534(c):
     """Схема v1 одним валидатором: reader, writer и export сверяют одно.
 
@@ -1507,7 +1574,8 @@ def main():
     for fn in (check_add, check_delete, check_names, check_limits, check_read_limits_337,
                check_git_hosts, check_for_deploy, check_local_view_534,
                check_migration_534, check_schema_534, check_snapshot_534,
-               check_view_534, check_export_542, check_export_safety_542):
+               check_view_534, check_export_542, check_export_safety_542,
+               check_export_readback_553):
         fn(c)
     return c.report("projects")
 
