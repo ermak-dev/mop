@@ -86,40 +86,44 @@
   changed_when: false
   check_mode: false
 
-# Отказ стейджинга (#540): реестр контроллера непредставим (голое имя,
-# коллизия, orphan-потолок, битый JSON), и префлайт не смог снять снимок.
-# Причина напечатана CLI на контроллере; сюда едет только признак -- без
-# текста и без origin'ов (в них бывает userinfo). Deploy НЕ валится этим
-# отказом целиком: сервер с любым своим реестром разворачивается как
-# раньше. Fail -- ровно там, где посев был бы нужен: сервер пуст, сервис
-# неактивен, HOME разные; без посева пустой сервер остался бы без
-# реестра молча, и это хуже громкого отказа.
-- name: Refused registry seed, on a server that needs one
+# Посев реестра на свежий сервер (#552): защитный gate один на обе задачи
+# и живёт на блоке -- отказ посева и сам посев обязаны решаться одними
+# условиями (HOME контроллера и сервера разные, сервис реестра неактивен,
+# на сервере нет ни v1, ни пары, ни её половины), иначе правка одного
+# списка разъезжается со вторым. Внутри -- только то, что различается:
+# признак отказа стейджинга у fail, стейджированный файл у copy.
+- name: Initial registry seed onto a fresh server
   when:
-    - mop_registry_seed_refused
     - lookup('env', 'HOME') != MOP_HOME
     - cluster_service_running.stdout == 'inactive'
     - not server_snapshot.stat.exists
     - not server_pair.stat.exists
     - not server_limits.stat.exists
-  ansible.builtin.fail: the registry seed was refused on the controller, see its stderr
+  block:
+    # Отказ стейджинга (#540): реестр контроллера непредставим (голое имя,
+    # коллизия, orphan-потолок, битый JSON), и префлайт не смог снять снимок.
+    # Причина напечатана CLI на контроллере; сюда едет только признак -- без
+    # текста и без origin'ов (в них бывает userinfo). Deploy НЕ валится этим
+    # отказом целиком: сервер с любым своим реестром разворачивается как
+    # раньше. Fail -- ровно там, где посев был бы нужен: сервер пуст, сервис
+    # неактивен, HOME разные; без посева пустой сервер остался бы без
+    # реестра молча, и это хуже громкого отказа.
+    - name: Refused registry seed, on a server that needs one
+      when:
+        - mop_registry_seed_refused
+      ansible.builtin.fail: the registry seed was refused on the controller, see its stderr
 
-- name: Registry of the projects, v1 snapshot, on the server, once
-  when:
-    - mop_registry_seed != ''
-    - seed_file.stat.exists
-    - lookup('env', 'HOME') != MOP_HOME
-    - cluster_service_running.stdout == 'inactive'
-    - not server_snapshot.stat.exists
-    - not server_pair.stat.exists
-    - not server_limits.stat.exists
-  ansible.builtin.copy:
-    src: "{{ mop_registry_seed }}"
-    dest: "{{ MOP_HOME }}/.config/mop/projects.json"
-    owner: "{{ MOP_USER }}"
-    group: "{{ MOP_USER }}"
-    mode: "0600"
-    force: no
+    - name: Registry of the projects, v1 snapshot, on the server, once
+      when:
+        - mop_registry_seed != ''
+        - seed_file.stat.exists
+      ansible.builtin.copy:
+        src: "{{ mop_registry_seed }}"
+        dest: "{{ MOP_HOME }}/.config/mop/projects.json"
+        owner: "{{ MOP_USER }}"
+        group: "{{ MOP_USER }}"
+        mode: "0600"
+        force: no
 
 # Перезагружать ли nats, решает сам файл: контрольная сумма до команды и
 # после (#199). Не вывод: команда на успехе молчит (#182), и чтение
