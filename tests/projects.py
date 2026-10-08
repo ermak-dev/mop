@@ -729,15 +729,15 @@ def check_export_542(c):
         try:
             src2 = seed(flaky_root)
             from mop.common import fsutil
-            real_wp = fsutil.write_private
+            real_wc = projects._write_claimed
 
-            def dying_write(path, data, *a, **k):
-                if os.path.basename(path) == "limits.json":
+            def dying_write(dirfd, name, data, *a, **k):
+                if name == "limits.json":
                     raise OSError("disk full")
-                return real_wp(path, data, *a, **k)
+                return real_wc(dirfd, name, data, *a, **k)
 
             dest3 = os.path.join(flaky_root, "rollback")
-            with _patched(fsutil, write_private=dying_write):
+            with _patched(projects, _write_claimed=dying_write):
                 _refused542(c, "#542 a failed write refuses the export",
                          lambda: projects.export_pair(dest3))
             c.check("#542 the failed export cleans up its own directory",
@@ -753,20 +753,18 @@ def check_export_542(c):
         swap_root = tempfile.mkdtemp(prefix="mop-test-542-i-")
         try:
             src3 = seed(swap_root)
-            from mop.common import fsutil as _fu
-            _real_wp2 = _fu.write_private
+            real_wc = projects._write_claimed
 
-            def swap_write(path, data, *a, **k):
-                if os.path.basename(path) == "limits.json":
-                    # между заявкой и провалом каталог подменили
-                    victim = os.path.dirname(path)
-                    shutil.rmtree(victim)
-                    os.symlink(os.path.join(swap_root, "src"), victim)
+            def swap_write(dirfd, name, data, *a, **k):
+                if name == "limits.json":
+                    # между записями каталог подменили (rmtree + symlink)
+                    shutil.rmtree(victim_dir)
+                    os.symlink(os.path.join(swap_root, "src"), victim_dir)
                     raise OSError("disk full")
-                return _real_wp2(path, data, *a, **k)
+                return real_wc(dirfd, name, data, *a, **k)
 
             victim_dir = os.path.join(swap_root, "rollback")
-            with _patched(_fu, write_private=swap_write):
+            with _patched(projects, _write_claimed=swap_write):
                 got = None
                 try:
                     projects.export_pair(victim_dir)
@@ -788,16 +786,15 @@ def check_export_542(c):
             fault_root = tempfile.mkdtemp(prefix="mop-test-542-w-")
             try:
                 seed(fault_root)
-                from mop.common import fsutil as _fu2
-                _real_wp3 = _fu2.write_private
+                real_wc = projects._write_claimed
 
-                def dying_write(path, data, *a, _v=victim, **k):
-                    if os.path.basename(path) == _v:
+                def dying_write(dirfd, name, data, *a, _v=victim, **k):
+                    if name == _v:
                         raise OSError(f"disk died on {_v}")
-                    return _real_wp3(path, data, *a, **k)
+                    return real_wc(dirfd, name, data, *a, **k)
 
                 fdest = os.path.join(fault_root, "rollback")
-                with _patched(_fu2, write_private=dying_write):
+                with _patched(projects, _write_claimed=dying_write):
                     _refused542(c, f"#542 a write fault on {victim} refuses the export",
                              lambda: projects.export_pair(fdest), "disk died")
                 c.check(f"#542 the {victim} fault cleans its own directory",
@@ -863,6 +860,201 @@ def _refused542(c, what, fn, *needles):
             c.check(f"{what}: names {n}", n in str(e), str(e))
     except Exception as e:  # noqa: BLE001 -- не тот класс -- сразу видно
         c.check(what, False, f"wrong exception {type(e).__name__}: {e}")
+
+
+def check_export_safety_542(c):
+    """Привязка выгрузки к созданному каталогу и тихий успех (#542, ревью 2).
+
+    HYPOTHESIS (#542): выгрузка писала по ПУТИ. Подмена каталога между
+    заявкой и записью направляла секреты пары в ЧУЖОЙ каталог, подмена
+    между записью и очисткой давала cleanup удалить чужое по имени; байты
+    фактической записи не сверялись до маркера -- усечённый файл
+    публиковался готовым; успех командлета печатал строку всегда.
+    SOLUTION: записи идут по fd созданного каталога (dir_fd), identity
+    (dev, ino) фиксируется тем же fd; перед маркером фактические байты
+    перечитываются и сверяются с ожидаемыми; удаление имени каталога --
+    только после свежей сверки identity; успех команды молчит, сводка --
+    в машинном маркере и возврате библиотеки.
+    STATUS: #542 (красный прогон впереди реализации)."""
+    import shutil
+    import tempfile
+    v1 = {"version": 1, "projects": [{"origin": MOP, "limit": 2}, {"origin": RU}]}
+
+    def seeded(root):
+        projects.SNAPSHOT = os.path.join(root, "src", "projects.json")
+        projects.SNAPSHOT_DIR = os.path.join(root, "src")
+        projects.write_snapshot(v1, projects.SNAPSHOT)
+
+    def refusal_of(fn):
+        try:
+            fn()
+            return None
+        except RuntimeError as e:
+            return str(e)
+        except Exception as e:  # noqa: BLE001 -- не тот класс -- сразу видно
+            return f"WRONG EXC {type(e).__name__}: {e}"
+
+    def leaked(dest):
+        """Имена файлов в каталоге, куда попали наши origin'ы."""
+        return [n for n in os.listdir(dest)
+                if MOP in open(os.path.join(dest, n), errors="ignore").read()
+                or RU in open(os.path.join(dest, n), errors="ignore").read()]
+
+    saved_snapshot, saved_dir = projects.SNAPSHOT, projects.SNAPSHOT_DIR
+
+    def swap(dest, _mkdir=os.mkdir, foreign_name="foreign"):
+        """Подмена каталога по пути: наш снесён, на его месте -- чужой.
+
+        _mkdir захвачен ДО патча (def-time binding) -- иначе подмена
+        звала бы патченный mkdir и рекурсировала.
+        """
+        shutil.rmtree(dest, ignore_errors=True)
+        _mkdir(dest)
+        with open(os.path.join(dest, foreign_name), "w") as f:
+            f.write("not ours")
+
+    # 1. Подмена между заявкой (mkdir) и привязкой: чужой каталог не
+    # получает ни секретов, ни удаления.
+    root = tempfile.mkdtemp(prefix="mop-test-542-r2a-")
+    try:
+        seeded(root)
+        dest = os.path.join(root, "rollback")
+        journal = []
+        real_mkdir = os.mkdir
+
+        def swapping_mkdir(path, mode=0o777, *a, **k):
+            real_mkdir(path, mode, *a, **k)
+            if os.path.abspath(path or "") == os.path.abspath(dest):
+                journal.append("swap")
+                swap(dest)
+
+        with _patched(os, mkdir=swapping_mkdir):
+            got = refusal_of(lambda: projects.export_pair(dest))
+        c.check("#542 a directory swapped before the bind is refused",
+                bool(got) and journal == ["swap"], (got, journal))
+        c.check("#542 the swapped directory keeps its foreign file",
+                os.path.exists(os.path.join(dest, "foreign")))
+        c.check("#542 the swapped directory receives no origins",
+                not leaked(dest), leaked(dest))
+    finally:
+        projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
+        shutil.rmtree(root, ignore_errors=True)
+
+    # 2. Подмена между записями пары: записи идут в СОЗДАННЫЙ каталог (по
+    # fd созданного каталога), а не по пути -- следующая запись в отвязанный
+    # каталог ломается (ENOENT), чужой каталог не получает секретов.
+    root = tempfile.mkdtemp(prefix="mop-test-542-r2b-")
+    try:
+        seeded(root)
+        dest = os.path.join(root, "rollback")
+        journal = []
+        real_wc = getattr(projects, '_write_claimed', None)
+
+        def swapping_write(dirfd, name, data, *a, **k):
+            real_wc(dirfd, name, data, *a, **k)
+            if name == "projects":
+                journal.append("swap")
+                swap(dest)
+
+        with _patched(projects, _write_claimed=swapping_write):
+            got = refusal_of(lambda: projects.export_pair(dest))
+        c.check("#542 a directory swapped between writes is refused",
+                bool(got) and journal == ["swap"], (got, journal))
+        c.check("#542 the mid-write swapped directory receives no origins",
+                not leaked(dest), leaked(dest))
+        c.check("#542 the mid-write swapped directory keeps its foreign file",
+                os.path.exists(os.path.join(dest, "foreign")))
+    finally:
+        projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
+        shutil.rmtree(root, ignore_errors=True)
+
+    # 3. Усечённая запись (диск соврал): фактические байты перечитываются
+    # и сверяются ДО маркера -- готовой публикации нет.
+    root = tempfile.mkdtemp(prefix="mop-test-542-r2c-")
+    try:
+        seeded(root)
+        dest = os.path.join(root, "rollback")
+        journal = []
+        real_wc = getattr(projects, '_write_claimed', None)
+
+        def truncating_write(dirfd, name, data, *a, **k):
+            if name == "limits.json":
+                journal.append("trunc")
+                data = data[:len(data) // 2]
+            return real_wc(dirfd, name, data, *a, **k)
+
+        with _patched(projects, _write_claimed=truncating_write):
+            got = refusal_of(lambda: projects.export_pair(dest))
+        c.check("#542 a truncated write is refused, not published",
+                bool(got) and journal == ["trunc"], (got, journal))
+        c.check("#542 a truncated export publishes no marker",
+                not os.path.exists(os.path.join(dest, "export.json")), dest)
+    finally:
+        projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
+        shutil.rmtree(root, ignore_errors=True)
+
+    # 4. Подмена между ownership-сверкой и удалением имени каталога: cleanup
+    # сначала АТОМАРНО пере-заявляет имя (rename dest -> соль-имя), сверяет
+    # identity ПЕРЕД rmdir; подмена ПОСЛЕ rename ловится этой сверкой --
+    # чужое возвращается на место, не удаляется. Инжекция -- на этой сверке:
+    # подменяем os.stat(gone) (первый stat по пути gone в жизни попытки),
+    # между rename и сверкой меняя содержимое соль-имени.
+    root = tempfile.mkdtemp(prefix="mop-test-542-r2d-")
+    try:
+        seeded(root)
+        dest = os.path.join(root, "rollback")
+        journal = []
+        real_wc = projects._write_claimed
+        real_stat = os.stat
+
+        def dying_write(dirfd, name, data, *a, **k):
+            if name == "export.json":
+                raise OSError("disk died on the marker")
+            return real_wc(dirfd, name, data, *a, **k)
+
+        def swapping_stat(path, *a, **k):
+            if "mop-gone" in str(path or "") and not str(path).endswith(".moved"):
+                journal.append("verify-swap")
+                # Соль-имя занято нашим каталогом: подменяем ЕГО содержимое
+                # -- чужой каталог по тому же имени, identity не совпадёт.
+                gone = str(path)
+                os.rename(gone, gone + ".moved")  # наш ушёл в сторону
+                os.mkdir(gone)  # чужой на соль-имени
+                with open(os.path.join(gone, "foreign"), "w") as f:
+                    f.write("not ours")
+                return real_stat(gone, *a, **k)
+            return real_stat(path, *a, **k)
+
+        with _patched(projects, _write_claimed=dying_write), \
+                _patched(os, stat=swapping_stat):
+            got = refusal_of(lambda: projects.export_pair(dest))
+        c.check("#542 a swap at the cleanup verification is caught",
+                bool(got) and journal == ["verify-swap"], (got, journal))
+        c.check("#542 the cleanup does not remove the swapped-in directory",
+                os.path.exists(os.path.join(dest, "foreign")), dest)
+        c.check("#542 the swapped-in directory receives no origins",
+                not leaked(dest), leaked(dest))
+        c.check("#542 the moved-out original export survives the failed cleanup",
+                not os.path.exists(dest + ".moved") or
+                os.path.exists(os.path.join(dest + ".moved", "limits.json")),
+                dest + ".moved")
+    finally:
+        projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
+        shutil.rmtree(root, ignore_errors=True)
+
+    # 5. Не-UTF8 источник: отказ без эха содержимого файла.
+    root = tempfile.mkdtemp(prefix="mop-test-542-r2e-")
+    try:
+        seeded(root)
+        with open(projects.SNAPSHOT, "wb") as f:
+            f.write(b'\xff\xfe{"version": 1}')
+        got = refusal_of(lambda: projects.export_pair(os.path.join(root, "out")))
+        c.check("#542 a non-UTF8 source refuses without echoing it",
+                bool(got) and "projects.json" in got and b"\xff\xfe".decode("latin-1") not in got,
+                got)
+    finally:
+        projects.SNAPSHOT, projects.SNAPSHOT_DIR = saved_snapshot, saved_dir
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def check_schema_534(c):
@@ -1193,7 +1385,7 @@ def main():
     for fn in (check_add, check_delete, check_names, check_limits, check_read_limits_337,
                check_git_hosts, check_for_deploy, check_local_view_534,
                check_migration_534, check_schema_534, check_snapshot_534,
-               check_view_534, check_export_542):
+               check_view_534, check_export_542, check_export_safety_542):
         fn(c)
     return c.report("projects")
 

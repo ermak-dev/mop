@@ -1,10 +1,16 @@
-"""mop server cluster export <DIR>: write the registry as a legacy pair for a rollback
+"""mop server cluster export <DIR> [--json]: write the registry as a legacy pair for a rollback
 
 On the server, as the pool user. Reads the live snapshot
 (~/.config/mop/projects.json) once, validates it, and lays the pair
 (projects, limits.json) out in a NEW directory DIR with a completion
 marker export.json; nothing in the live registry, the legacy pair or
 the bus is touched, and the command stops no writers.
+
+An ordinary success prints nothing (the summary is a machine matter:
+the library return and the export.json marker, not terminal prose);
+--json prints the summary as one JSON object for scripts. Refusals
+print their reason to stderr and exit non-zero, without echoing the
+contents of a corrupt file or any origin credentials.
 
 The rollback itself is an operator's procedure: stop every writer, take
 a final export, verify the sha256 in export.json against the source,
@@ -18,6 +24,7 @@ An existing destination (file, directory, symlink, or a concurrent
 claim) is a refusal: the command never overwrites, and a failed attempt
 removes only what that attempt itself created.
 """
+import json
 import sys
 
 from mop.cli import lib
@@ -25,15 +32,16 @@ from mop.common import projects
 
 
 def main(argv):
-    if len(argv) != 1 or argv[0].startswith("-"):
+    args = list(argv)
+    machine = "--json" in args
+    if machine:
+        args.remove("--json")
+    if len(args) != 1 or args[0].startswith("-"):
         lib.usage(__doc__)
     try:
-        out = projects.export_pair(argv[0])
+        out = projects.export_pair(args[0])
     except RuntimeError as e:
         sys.exit(f"{e}")
-    # Тишина на успехе -- не совсем молчание: одна машиночитаемая строка
-    # для оператора отката (счёт, источник, digest, каталог). Креды
-    # origin'ов сюда не попадают -- только числа и пути.
-    print(f"exported {out['projects']} project(s) to {out['dest']} "
-          f"(source {out['source']}, sha256 {out['sha256'][:12]})")
+    if machine:
+        print(json.dumps(out, sort_keys=True))
     return 0

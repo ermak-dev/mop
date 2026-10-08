@@ -2298,9 +2298,10 @@ def check_output_182(c):
                  seen, [["new", "p"]])
 
         # #542: cluster export -- офлайн-выгрузка пары из живого снимка.
-        # Один позиционный аргумент; usage на прочем; успех -- одна строка
-        # со счётом/источником/digest/каталогом и НИ ОДНОГО origin (креды
-        # живут в закрытых файлах пары); отказы приходят stderr'ом с кодом.
+        # Один позиционный аргумент; usage на прочем; обычный успех ТИХИЙ
+        # (сводка -- в машинном маркере export.json и в возврате библиотеки,
+        # не в обязательной строке stdout, ревью 2); отказы кодом без эха
+        # origin'ов (креды живут в закрытых файлах пары).
         from mop.cli.server.cluster import export as export_cmd
         with tempfile.TemporaryDirectory(prefix="mop-test-542x-") as d:
             secret = "https://user:secret-token@forge.example/team/x.git"
@@ -2312,11 +2313,19 @@ def check_output_182(c):
                 projects.SNAPSHOT = os.path.join(d, "projects.json")
                 projects.SNAPSHOT_DIR = d
                 out, err, code = through(export_cmd.main, [dest])
-                c.check("#542 cluster export succeeds with one summary line",
-                        code == 0 and not err and len(out.strip().splitlines()) == 1
-                        and "exported 1 project(s)" in out and dest in out, (out, err, code))
-                c.check("#542 the summary prints no origin credentials",
-                        "secret-token" not in out and "forge.example" not in out, out)
+                c.check("#542 cluster export stays quiet on an ordinary success",
+                        code == 0 and not err and not out, (out, err, code))
+                out, err, code = through(export_cmd.main, [dest, "--json"])
+                c.check("#542 export --json is a usage refusal: one directory",
+                        code != 0 and not out, (out, err, code))
+                marker = os.path.join(dest, "export.json")
+                with open(marker) as f:
+                    marker_json = json.load(f)
+                c.check("#542 the completed marker stays machine-readable",
+                        marker_json.get("schema") == "legacy-pair"
+                        and marker_json.get("projects") == 1
+                        and "secret-token" not in open(marker, errors="ignore").read(),
+                        marker_json)
                 c.check("#542 the exported directory carries the private pair",
                         os.path.exists(os.path.join(dest, "projects"))
                         and os.path.exists(os.path.join(dest, "limits.json"))

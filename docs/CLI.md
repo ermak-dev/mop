@@ -941,13 +941,19 @@ mop server cluster check: is the service answering on the bus, and does it see N
 #### mop server cluster export
 
 ```text
-mop server cluster export <DIR>: write the registry as a legacy pair for a rollback
+mop server cluster export <DIR> [--json]: write the registry as a legacy pair for a rollback
 
 On the server, as the pool user. Reads the live snapshot
 (~/.config/mop/projects.json) once, validates it, and lays the pair
 (projects, limits.json) out in a NEW directory DIR with a completion
 marker export.json; nothing in the live registry, the legacy pair or
 the bus is touched, and the command stops no writers.
+
+An ordinary success prints nothing (the summary is a machine matter:
+the library return and the export.json marker, not terminal prose);
+--json prints the summary as one JSON object for scripts. Refusals
+print their reason to stderr and exit non-zero, without echoing the
+contents of a corrupt file or any origin credentials.
 
 The rollback itself is an operator's procedure: stop every writer, take
 a final export, verify the sha256 in export.json against the source,
