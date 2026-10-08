@@ -1110,6 +1110,67 @@ MOP_GC_MAX_PER_RUN per run. Run this on the server, not from a master shell: dis
 is a fact about every tenant, not one project.
 ```
 
+#### mop server proxykey
+
+```text
+client proxy key rotation: mop server proxykey start|resume|status — on the controller
+
+  mop server proxykey start --nodes n1,n2 --exclusive   frozen recipient set, explicit nodes
+  mop server proxykey start --all-registered --exclusive  full known node set, offline included
+  mop server proxykey start --no-recipients --exclusive   deliberate empty recipient set
+  mop server proxykey resume --exclusive
+  mop server proxykey status [--json]
+
+One writer, one operation, checkpoints all the way (the rotation
+library). The verbs are a thin front: the adapter supplies the real effects —
+loopback management API of the installed proxy, client-key probes — and
+every decision stays in the library. Works on the controller only; a
+puppet context is refused before any network or file touch.
+
+start requires --exclusive: the caller affirms no other writer (panel,
+deploy) is active — the upstream has no compare-and-swap. The recipient
+set is frozen at start: offline nodes stay recipients, resume never
+re-selects membership. Quiet on a fast success; pending or refusal is
+rc 1 with a safe reason (no key material anywhere in the output).
+```
+
+#### mop server proxykey resume
+
+```text
+resume the rotation: mop server proxykey resume --exclusive
+
+Drives the recorded operation from its checkpoints to the first
+blocker: the rotation library decides every step; the adapter
+supplies the effects. The frozen recipient set stands as recorded;
+membership is never re-selected. Pending or refusal is rc 1 with a
+safe reason; a quiet fast success prints one line. --exclusive
+affirms the caller is still the only writer.
+```
+
+#### mop server proxykey start
+
+```text
+start a rotation: mop server proxykey start --nodes n1,n2 --exclusive
+
+Checks the controller boundary, resolves the controller source and the
+cluster service copy, freezes the recipient set (--nodes, or
+--all-registered for the full known node set, offline included, or
+--no-recipients), and records the private checkpoint. No network effect:
+the remote steps belong to resume. --exclusive affirms the caller is the
+only writer (panel included); without it the command refuses.
+```
+
+#### mop server proxykey status
+
+```text
+the rotation status: mop server proxykey status [--json]
+
+Reads the private checkpoint and prints the library's safe projection:
+stage, per-recipient codes, refusal reasons — never a key, never a raw
+agent tail. No operation is a quiet zero; an invalid state file is rc 1
+with the validator's reason.
+```
+
 #### mop server pve-facts
 
 ```text
