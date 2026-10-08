@@ -382,6 +382,22 @@ REASONS = ("unauthorized", "forbidden", "access_denied", "conflict",
 HTTP_MIN, HTTP_MAX = 100, 599
 
 
+def _copy_typed(out, why):
+    """Спроецировать типизированный отказ шва в блокер: целый
+    http_status в 100..599 и reason из конечного перечня, БЕЗ тела
+    ответа и raw-строк. Принимает dict-вердикт PUT и исключение шва
+    (getattr, не dict): источник один -- перечислимые факты."""
+    status = why.get("http_status") if isinstance(why, dict) \
+        else getattr(why, "http_status", None)
+    if type(status) is int and HTTP_MIN <= status <= HTTP_MAX:
+        out["http_status"] = status
+    reason = why.get("reason") if isinstance(why, dict) \
+        else getattr(why, "reason", None)
+    if reason in REASONS:
+        out["reason"] = reason
+    return out
+
+
 def _remote_step(state, seams):
     """Шаг remote-списка: свежее чтение, объединение, типизированный исход.
 
@@ -397,6 +413,11 @@ def _remote_step(state, seams):
         keys = seams.fetch_list()
     except Exception as e:  # noqa: BLE001 -- причина шва, не его payload
         out["blocker"] = f"cannot read the key list ({type(e).__name__})"
+        # Типизированный отказ шва (целый http_status + reason из
+        # конечного перечня, без тела ответа) -- та же проекция, что у
+        # PUT: при неверном ключе management GET идёт первым, и без кода
+        # оператор не узнаёт о блокировке адреса повторами (#539).
+        _copy_typed(out, e)
         return out
     if not isinstance(keys, list) or not all(
             isinstance(k, str) and k and "\n" not in k and "\r" not in k
@@ -460,12 +481,7 @@ def _remote_step(state, seams):
         # и raw body -- нет.
         why = verdict[1] if len(verdict) > 1 else None
         if isinstance(why, dict):
-            status = why.get("http_status")
-            if type(status) is int and HTTP_MIN <= status <= HTTP_MAX:
-                out["http_status"] = status
-            reason = why.get("reason")
-            if reason in REASONS:
-                out["reason"] = reason
+            _copy_typed(out, why)
         return out
     state["stage"] = "listed"
     _save_op(state)

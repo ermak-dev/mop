@@ -3174,7 +3174,8 @@ def check_server_namespace_259(c):
     STATUS: FIXED — see #259"""
     want = {"deploy", "config", "setup", "user", "cluster", "bootstrap", "web",
             "callout", "pve-facts", "doctor", "gc", "disk", "sweep",
-            "diagnose"}   # #536: офлайн-сводка локальной установки
+            "diagnose",   # #536: офлайн-сводка локальной установки
+            "proxykey"}   # #539: ротация клиентского ключа прокси
     tree = cli.verbs()
     got = set(tree.get("server") or {})
     c.expect("#259 server must hold exactly its verbs", sorted(got), sorted(want))
