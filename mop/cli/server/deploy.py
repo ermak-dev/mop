@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 from mop.cli import lib
 from mop.cli.server import _play
@@ -356,6 +357,40 @@ def check():
     print("\n".join(lib.pool_lines()))
 
 
+def _staged_registry_seed():
+    """Снимок реестра контроллера для посева на пустой сервер (#540).
+
+    Возвращает путь к личному (0600) временному файлу со строгим снимком
+    v1 или None, когда реестра на контроллере нет вовсе (пустая установка
+    -- сеять нечего, первый add создаст снимок на сервере). Один HOME у
+    контроллера и сервера -- тоже None, без чтения реестра: это одна
+    машина, посев в YAML скипает, и строгий снимок здесь отказал бы
+    deploy'ю, который посева не требует (#540). Конвертация легаси-пары --
+    только чтение (snapshot_of без записи в реестр контроллера);
+    непредставимое (голое имя, коллизия, orphan-потолок) и битый JSON --
+    ОТКАЗ (RuntimeError), не fallback: файлы контроллера остаются как
+    были, а решение -- за вызывающим, отказ не должен валить deploy,
+    которому посев не нужен. Плейбуку едет путь, не содержимое: реестр --
+    не для argv и журналов.
+    """
+    if os.path.expanduser("~") == config.get("MOP_HOME"):
+        return None
+    if not (os.path.exists(os.path.join(projects.SNAPSHOT_DIR, "projects.json"))
+            or os.path.exists(os.path.join(projects.SNAPSHOT_DIR, "projects"))
+            or os.path.exists(os.path.join(projects.SNAPSHOT_DIR, "limits.json"))):
+        return None
+    snapshot = projects.snapshot_of(projects.SNAPSHOT_DIR)
+    staged = tempfile.mkdtemp(prefix="mop-registry-seed-")
+    os.chmod(staged, 0o700)
+    path = os.path.join(staged, "projects.json")
+    # write_atomic пишет с правами umask (реестр -- не секрет для своего
+    # пользователя, но посев едет в чужой домашний каталог): снимок для
+    # посева закрывается 0600 явно.
+    projects.write_snapshot(snapshot, path=path)
+    os.chmod(path, 0o600)
+    return path
+
+
 def main(argv):
     # До первого сетевого вызова: зависимости контроллера ставит mop server setup,
     # и отказ его называет.
@@ -448,9 +483,28 @@ def main(argv):
     origins, legacy = puppets.project_ids(lines)
 
     lib.section("ansible: site.yml")
-    rc, output = _play.play(SITE, projects.names(origins, legacy), manifests(origins),
-                            projects.git_hosts(origins, config.get("MOP_GIT_HOST")), check=dry,
-                            inventory_hosts=inventory_hosts(listing))
+    # Посев реестра (#540): один провалидированный снимок v1 готовится на
+    # контроллере; непредставимый реестр -- отказ ДО плейбука, целиком,
+    # без полупосева. Но отказ стейджинга не валит deploy сразу: сервер с
+    # любым своим реестром разворачивается как раньше, а пустой получает
+    # громкий отказ уже в плее (fail-задача под условиями самого посева).
+    # Причина печатается здесь, на контроллере: сообщение библиотеки не
+    # несёт сырых origin'ов, а плейбуку едет только признак. Уборка --
+    # после прогона: путь едет плейбуку extra-vars, не содержимое.
+    seed, seed_refused = None, False
+    try:
+        seed = _staged_registry_seed()
+    except RuntimeError as e:
+        seed_refused = True
+        lib.fail(f"cannot stage the registry seed: {e}")
+    try:
+        rc, output = _play.play(SITE, projects.names(origins, legacy), manifests(origins),
+                                projects.git_hosts(origins, config.get("MOP_GIT_HOST")),
+                                check=dry, inventory_hosts=inventory_hosts(listing),
+                                registry_seed=seed, registry_seed_refused=seed_refused)
+    finally:
+        if seed:
+            shutil.rmtree(os.path.dirname(seed), ignore_errors=True)
     if dry:
         # Всё ниже пишет (creds.collect) или отвечает на другой вопрос
         # (ростер): прогон без изменений кончается на плейбуке (#177).

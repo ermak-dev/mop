@@ -31,21 +31,91 @@
   no_log: true
 
 # Реестр проектов живёт на сервере и правится глаголами сервиса (#117).
-# Переход: сервер без реестра получает копию контроллера -- один раз, и
-# дальше она не переписывается (force: no), иначе прогон стирал бы проекты,
-# заведённые глаголом. На чистой установке копии нет -- реестр пуст.
-- name: Registry of the projects on the controller
+# Переход на снимок v1 (#534, #540): сервер с любым своим реестром --
+# снимком, парой или даже осиротевшим limits.json -- authoritative, прогон
+# его не трогает и ничего не мигрирует из playbook (миграция -- writer
+# сервиса под замком). Авторитет и шире реестра: работающий mop-cluster --
+# владелец даже пустого реестра, глагол может создать снимок в любой
+# момент, stat пустоты того не опровергает, а force:no решает лишь в
+# момент copy; посев идёт только при определённо не работающем сервисе
+# («inactive»: на чистой установке плей шины идёт до роли cluster, и всё
+# прочее -- active/failed/activating -- закрывает посев).
+# Инициализация атомарна (#540): сеется ОДИН файл -- провалидированный
+# снимок v1, который готовит префлайт `mop server deploy` на контроллере
+# (строгий snapshot_of: v1 авторитетен, пара конвертируется с потолками,
+# bare/коллизия/orphan/битый JSON -- отказ ДО плейбука) и передаёт сюда
+# ПУТЕМ (mop_registry_seed), не сырым JSON: YAML ничего не парсит и не
+# дублирует парсер. Один файл -- полупары не бывает: обрыв посева
+# повторяется retry на всё ещё пустом сервере. Контроллер и сервер в
+# одном HOME -- одна машина, посева нет: копия в себя -- это перезапись.
+# Ручной ansible-прогон без extra-vars (пустой mop_registry_seed из
+# group_vars) ничего не сеет.
+- name: Staged registry seed on the controller
   ansible.builtin.stat:
-    path: "{{ lookup('env', 'HOME') }}/.config/mop/projects"
+    path: "{{ mop_registry_seed }}"
+  when: mop_registry_seed != ''
   delegate_to: localhost
   become: no
-  register: controller_registry
+  register: seed_file
 
-- name: Registry of the projects, on the server, once
-  when: controller_registry.stat.exists
+- name: Registry of the server, v1 snapshot
+  ansible.builtin.stat:
+    path: "{{ MOP_HOME }}/.config/mop/projects.json"
+  register: server_snapshot
+
+- name: Registry of the server, legacy pair
+  ansible.builtin.stat:
+    path: "{{ MOP_HOME }}/.config/mop/projects"
+  register: server_pair
+
+- name: Limits on the server, a pair's half or an orphan
+  ansible.builtin.stat:
+    path: "{{ MOP_HOME }}/.config/mop/limits.json"
+  register: server_limits
+
+# Проба -- чтение systemd, ничего не меняет. failed_when: false: штатный
+# неактивный сервис -- rc 3, и это законный ответ, не провал прогона;
+# check_mode: false: сухой прогон тоже обязан знать состояние -- иначе
+# факт не определён и сухой посев падает. Условие посева читает stdout:
+# «inactive» и только; пустой stdout, «failed», «activating», «active» --
+# посев закрыт.
+- name: Cluster service, the registry's writer, is it running
+  ansible.builtin.command: systemctl is-active mop-cluster
+  register: cluster_service_running
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+# Отказ стейджинга (#540): реестр контроллера непредставим (голое имя,
+# коллизия, orphan-потолок, битый JSON), и префлайт не смог снять снимок.
+# Причина напечатана CLI на контроллере; сюда едет только признак -- без
+# текста и без origin'ов (в них бывает userinfo). Deploy НЕ валится этим
+# отказом целиком: сервер с любым своим реестром разворачивается как
+# раньше. Fail -- ровно там, где посев был бы нужен: сервер пуст, сервис
+# неактивен, HOME разные; без посева пустой сервер остался бы без
+# реестра молча, и это хуже громкого отказа.
+- name: Refused registry seed, on a server that needs one
+  when:
+    - mop_registry_seed_refused
+    - lookup('env', 'HOME') != MOP_HOME
+    - cluster_service_running.stdout == 'inactive'
+    - not server_snapshot.stat.exists
+    - not server_pair.stat.exists
+    - not server_limits.stat.exists
+  ansible.builtin.fail: the registry seed was refused on the controller, see its stderr
+
+- name: Registry of the projects, v1 snapshot, on the server, once
+  when:
+    - mop_registry_seed != ''
+    - seed_file.stat.exists
+    - lookup('env', 'HOME') != MOP_HOME
+    - cluster_service_running.stdout == 'inactive'
+    - not server_snapshot.stat.exists
+    - not server_pair.stat.exists
+    - not server_limits.stat.exists
   ansible.builtin.copy:
-    src: "{{ lookup('env', 'HOME') }}/.config/mop/projects"
-    dest: "{{ MOP_HOME }}/.config/mop/projects"
+    src: "{{ mop_registry_seed }}"
+    dest: "{{ MOP_HOME }}/.config/mop/projects.json"
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
     mode: "0600"

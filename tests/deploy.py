@@ -96,6 +96,8 @@ import json
 import os
 import re
 import shlex
+import stat
+import shutil
 import sys
 
 import yaml
@@ -1007,6 +1009,395 @@ def check_agent_unit_172(c, can_render):
               (t.get("args") or {}).get("chdir") == "{{ mop_home }}"
               and (t.get("environment") or {}).get("MOP_NODE") == "{{ inventory_hostname }}",
               (t.get("args"), t.get("environment")))
+
+
+# ── посев реестра при deploy (#540) ────────────────────────────────────
+# HYPOTHESIS (#540): посев реестра (#117) искал на контроллере только
+# легаси-файл `projects`: свежий сервер не получал снимок v1 (#534), а
+# сервер с любым своим реестром мог получить сверху чужую легаси-копию
+# контроллера. Посев парой -- двумя задачами -- ещё и не атомарен: обрыв
+# после projects оставлял retry видеть «пару» и молчать -- потолки
+# терялись навсегда.
+# SOLUTION: инициализация сеет ОДИН провалидированный снимок v1. Префлайт
+# `mop server deploy` готовит его на контроллере: нет ни снимка, ни пары --
+# None, посева нет (пустая установка); есть что-то -- СТРОГИЙ
+# projects.snapshot_of (v1 авторитетен; пара -- чистая конвертация с
+# потолками; bare/коллизия/orphan/битый JSON/плохой лимит -- отказ
+# оператору ДО плейбука, файлы целы) и write_snapshot в личный временный
+# каталог (0700/0600); плейбуку едет ПУТЬ (--extra-vars), не сырой JSON.
+# Плей копирует один файл no-clobber: полупары не бывает, retry на пустом
+# сервере повторяет, на засеянном скипает. Сервер с любым своим реестром
+# authoritative и не трогается; миграция -- writer сервиса (#534).
+# Работающий mop-cluster закрывает посев совсем: он владелец даже пустого
+# реестра, глагол может создать снимок между stat и copy, а force:no
+# решает лишь в момент copy. Same-HOME -- одна машина, посева нет.
+# Проверка исполняет настоящие when задач посева по матрице фактов,
+# как check_identity_copy_167, и гоняет клей стейджинга по тем же входам.
+# RESULT: красный прогон впереди реализации -- посев парой из двух задач
+# (обрыв не восстанавливается), клей стейджинга отсутствует.
+# STATUS: FIXED — see #540
+def check_registry_seeding_540(c, ptasks):
+    import itertools
+    import types
+    tasks = [t for t in (ptasks or []) if isinstance(t, dict) and "name" in t]
+
+    def seeds():
+        out = {}
+        for t in tasks:
+            cp = t.get("ansible.builtin.copy") or {}
+            dest = cp.get("dest")
+            if isinstance(dest, str) and dest.endswith(("/.config/mop/projects",
+                                                       "/.config/mop/projects.json",
+                                                       "/.config/mop/limits.json")):
+                out[os.path.basename(dest)] = (t, cp)
+        return out
+
+    seed = seeds()
+    # Инициализация атомарна: ОДИН файл-снимок v1, никаких легаси-копий
+    # парами задач (обрыв пары не восстанавливался, потолки терялись).
+    c.check("#540 the play seeds exactly one file: the v1 snapshot",
+            sorted(seed) == ["projects.json"], sorted(seed))
+    if seed:
+        cp = seed["projects.json"][1]
+        c.check("#540 the seed lands on the server, no-clobber, private",
+                (cp.get("dest") or "").startswith("{{ MOP_HOME }}/.config/mop/")
+                and cp.get("force") is False and cp.get("mode") == "0600"
+                and cp.get("owner") == "{{ MOP_USER }}"
+                and cp.get("group") == "{{ MOP_USER }}", cp)
+
+    # Факты посева: staged-файл на контроллере и три реестра на сервере.
+    # Чужие stat'ы (users.conf, callout.conf, operators) не считаются.
+    stats = []
+    for t in tasks:
+        st_ = t.get("ansible.builtin.stat") or {}
+        if isinstance(st_.get("path"), str) and ("/.config/mop/" in st_["path"]
+                                                 or "mop_registry_seed" in st_["path"]):
+            side = "controller" if "delegate_to" in t else "server"
+            name = ("projects.json" if "mop_registry_seed" in st_["path"]
+                    else os.path.basename(st_["path"]))
+            stats.append((side, name, t))
+    c.check("#540 the play stats the staged seed on the controller and the server's three",
+            sorted((s, n) for s, n, _ in stats)
+            == [("controller", "projects.json"), ("server", "limits.json"),
+                ("server", "projects"), ("server", "projects.json")],
+            sorted((s, n) for s, n, _ in stats))
+    staged = next((t for s, n, t in stats if s == "controller"), None)
+    if staged:
+        c.check("#540 the staged seed's fact stays on the controller",
+                staged.get("delegate_to") == "localhost"
+                and staged.get("become") is False
+                and "{{ mop_registry_seed }}" in str(staged.get("ansible.builtin.stat")),
+                staged)
+
+    # Активный writer (#540): работающий mop-cluster -- авторитетный владелец
+    # реестра (#534) даже когда реестр пуст -- глаголы могут создать снимок
+    # в любой момент, stat пустоты того не опровергает, а force:no решает
+    # лишь в момент copy. Посев обязан идти до старта сервиса (на чистой
+    # установке плей шины идёт до роли cluster). Проба читает systemd и в
+    # check mode (mop deploy --dry): иначе dry-run сеял бы «понарошку».
+    probe = next((t for t in tasks
+                  if "is-active" in str(t.get("ansible.builtin.command", ""))), None)
+    c.check("#540 the play probes whether the cluster service is already running",
+            probe is not None
+            and probe.get("register") == "cluster_service_running"
+            and probe.get("failed_when") is False and probe.get("changed_when") is False
+            and probe.get("check_mode") is False, probe)
+    order = [t.get("name") for t in tasks]
+    if probe and seed:
+        c.check("#540 the running-service probe precedes every seed",
+                order.index(probe.get("name"))
+                < min(order.index(t.get("name")) for t, _cp in seed.values()), order)
+
+    # Отказ стейджинга (#540): непредставимый реестр контроллера не валит
+    # deploy, пока посев не нужен. Плейбуку едет признак без текста, и fail
+    # поднимается ТОЛЬКО под условиями самого посева: сервер пуст, сервис
+    # неактивен, HOME разные. Сервер с реестром разворачивается как раньше.
+    fail = next((t for t in tasks if "ansible.builtin.fail" in t), None)
+    c.check("#540 the play has the one refusal task for a refused seed",
+            sum(1 for t in tasks if "ansible.builtin.fail" in t) == 1
+            and fail is not None
+            and "refused" in str(fail.get("ansible.builtin.fail", "")),
+            [t.get("name") for t in tasks if "ansible.builtin.fail" in t])
+    if fail:
+        # Условия -- те же, что у посева, минус staged-файл (его нет):
+        # отказ уже решён, признак ехал от контроллера.
+        want_conds = {"mop_registry_seed_refused", "lookup('env', 'HOME') != MOP_HOME",
+                      "cluster_service_running.stdout == 'inactive'",
+                      "not server_snapshot.stat.exists", "not server_pair.stat.exists",
+                      "not server_limits.stat.exists"}
+        conds = fail.get("when", [])
+        c.check("#540 the refusal fires exactly under the seed's own conditions",
+                {str(x) for x in (conds if isinstance(conds, list) else [conds])}
+                == want_conds, conds)
+        c.check("#540 the refusal carries no reason text and no origins",
+                str(fail.get("ansible.builtin.fail", "")).find("{{") == -1, fail)
+        if seed:
+            c.check("#540 a refused seed fails before any copy",
+                    order.index(fail.get("name"))
+                    < min(order.index(t.get("name")) for t, _cp in seed.values()), order)
+
+    def runs(task, env):
+        conds = task.get("when", [])
+        for cond in conds if isinstance(conds, list) else [conds]:
+            try:
+                if not eval(str(cond), {"lookup": lambda _k, _v="": env["controller_home"]},
+                            dict(env)):  # noqa: S307 -- свой yaml
+                    return False
+            except Exception as e:  # noqa: BLE001 -- выражение не читается
+                raise AssertionError(f"when {cond!r}: {e}")
+        return True
+
+    def st(exists):
+        return types.SimpleNamespace(stat=types.SimpleNamespace(exists=exists))
+
+    # Матрица утверждена #540: посев -- один staged-снимок v1 на пустой и
+    # определённо не работающий сервер; сервер с любым реестром не трогается
+    # (пара v1+легаси на сервере -- штатная, #534); same-HOME не сеет;
+    # проба закрыта всем, кроме «inactive».
+    def expected(sv1, spair, slim, same_home, state):
+        if same_home or state != "inactive" or sv1 or spair or slim:
+            return set()
+        return {"projects.json"}
+
+    server_home = "/srv/mop"
+    # systemctl is-active: штатный inactive -- rc 3; условие читает stdout,
+    # и всё кроме «inactive» (active/failed/activating/пусто) закрывает посев.
+    states = ("inactive", "active", "failed", "activating", "")
+    combos = []
+    for same_home in (False, True):
+        for state in states:
+            for sv1, spair, slim in itertools.product((False, True), repeat=3):
+                for staged_exists in (False, True):
+                    combos.append((sv1, spair, slim, same_home, state, staged_exists))
+    for sv1, spair, slim, same_home, state, staged_exists in combos:
+        env = {"controller_home": server_home if same_home else "/home/controller",
+               "MOP_HOME": server_home,
+               "mop_registry_seed": "/tmp/staged/projects.json" if staged_exists else "",
+               "seed_file": st(staged_exists),
+               "server_snapshot": st(sv1), "server_pair": st(spair),
+               "server_limits": st(slim),
+               "cluster_service_running": types.SimpleNamespace(stdout=state)}
+        srv = "+".join(n for on, n in ((sv1, "v1"), (spair, "pair"), (slim, "limits"))
+                       if on) or "none"
+        what = (f"registry seeding, staged seed {'present' if staged_exists else 'absent'}, "
+                f"server {srv}, {'same' if same_home else 'different'} HOME, "
+                f"systemctl stdout {state!r}")
+        want = expected(sv1, spair, slim, same_home, state) if staged_exists else set()
+        try:
+            ran = {name for name, (t, _cp) in seed.items() if runs(t, env)}
+        except AssertionError as e:
+            c.check(f"{what}: conditions read", False, e)
+            continue
+        c.check(f"{what}: seeds exactly {sorted(want)}", ran == want, sorted(ran))
+
+    # Инициализационная атомарность (#540): единственный посевной файл --
+    # сам ответ на «обрыв посева»; полупары быть не может. Здесь --
+    # самопроверка сетки: staged-файл есть, сервер пуст, сервис неактивен,
+    # HOME разные -- сетка ответила «сеем», что и должен делать retry.
+    c.check("#540 the grid itself would retry a cut seed on a fresh server",
+            expected(False, False, False, False, "inactive") == {"projects.json"}
+            and expected(False, True, False, False, "inactive") == set(),
+            (expected(False, False, False, False, "inactive"),
+             expected(False, True, False, False, "inactive")))
+
+    # Сетка отказа (#540): та же матрица, ровно когда посев бы шёл (файла
+    # посева нет -- отказа не отменить, seed_file в условиях не участвует).
+    if fail:
+        def fail_expected(sv1, spair, slim, same_home, state):
+            return (not same_home) and state == "inactive" and not (sv1 or spair or slim)
+
+        for sv1, spair, slim, same_home, state, _staged in combos:
+            env = {"controller_home": server_home if same_home else "/home/controller",
+                   "MOP_HOME": server_home,
+                   "mop_registry_seed": "/tmp/staged/projects.json",
+                   "mop_registry_seed_refused": True,
+                   "server_snapshot": st(sv1), "server_pair": st(spair),
+                   "server_limits": st(slim),
+                   "cluster_service_running": types.SimpleNamespace(stdout=state)}
+            srv = "+".join(n for on, n in ((sv1, "v1"), (spair, "pair"), (slim, "limits"))
+                           if on) or "none"
+            what = (f"refused seed, server {srv}, "
+                    f"{'same' if same_home else 'different'} HOME, "
+                    f"systemctl stdout {state!r}: fails exactly when a seed would run")
+            try:
+                ran = runs(fail, env)
+            except AssertionError as e:
+                c.check(f"{what}: conditions read", False, e)
+                continue
+            c.check(what, ran == fail_expected(sv1, spair, slim, same_home, state), ran)
+
+    # Прогон не мигрирует и не перезаписывает реестр сервера сам: force:no
+    # -- недостаточно, migrate-задач быть не должно вовсе.
+    for t in tasks:
+        body = str(t)
+        c.check(f"#540 no task migrates or rewrites the server registry: "
+                f"{t.get('name')}", "snapshot_of" not in body
+                and "write_snapshot" not in body
+                and "cluster project" not in body.replace("cluster users", ""), body[:120])
+
+    check_registry_staging_540(c)
+
+
+# Клей стейджинга (#540): префлайт готовит на контроллере ОДИН
+# провалидированный снимок v1, плейбуку едет путь, не сырой JSON.
+# HYPOTHESIS: без клея плейбук разбирал бы JSON сам или копировал бы
+# легаси-пару парами задач; отказ по битым входам молчал бы до сервера.
+# SOLUTION: _staged_registry_seed в cli/server/deploy: строгий snapshot_of
+# -> write_snapshot во временный каталог 0700/0600; play несёт путь
+# extra-vars объектом; group_vars задаёт пустой дефолт ручному
+# ansible-прогону. Регрессионный контур: стейджинг не валит deploy,
+# который посев не требует, -- при одном HOME подготовки нет вовсе,
+# отказ конвертации не роняет main: причина печатается в stderr
+# контроллера, плейбуку едет булев признак mop_registry_seed_refused
+# (без текста и без origin'ов), и задача fail в плее валит прогон только
+# там, где посев нужен: сервер пуст, сервис неактивен, HOME разные.
+# RESULT: регрессионный раунд -- красный прогон вперёд фикс: шесть отказов
+# (нет fail-задачи, нет same-HOME скипа, отказ поднимался вместо None,
+# признака в extra-vars нет, дефолта нет); после фикса все зелёные.
+# STATUS: FIXED — see #540
+def check_registry_staging_540(c):
+    import inspect
+    import json as _json
+    import tempfile
+    from mop.cli.server import deploy as deploy_cli
+    from mop.cli.server import _play
+    from mop.common import projects as reg
+
+    # Функция есть и молчит: библиотека возвращает данные, командлет печатает.
+    c.check("#540 deploy preflight has the staging helper",
+            hasattr(deploy_cli, "_staged_registry_seed"), None)
+    if not hasattr(deploy_cli, "_staged_registry_seed"):
+        return
+    src = inspect.getsource(deploy_cli._staged_registry_seed)
+    c.check("#540 the staging helper validates strictly and refuses, not falls back",
+            "snapshot_of" in src and "write_snapshot" in src, src[:200])
+    c.check("#540 the staging helper keeps the snapshot out of prints and logs",
+            "print(" not in src and "sys.stdout" not in src, src[:200])
+    # Один HOME -- подготовки нет вовсе, ровно как условие посева в YAML.
+    c.check("#540 the staging helper skips the same-HOME controller",
+            "MOP_HOME" in src, src[:300])
+    # Отказ не валит main: признак едет плейбуку, а причина -- в stderr
+    # контроллера (term.fail). Форма исходника -- тонкий клей командлета,
+    # его поведение гонять процессом нечем: у main свои требования config.
+    main_src = inspect.getsource(deploy_cli.main)
+    c.check("#540 a refused staging defers to the play, it does not kill deploy",
+            "registry_seed_refused=seed_refused" in main_src, main_src[:200])
+
+    def make(files):
+        base = tempfile.mkdtemp(prefix="mop-540-")
+        home = os.path.join(base, "home")
+        reg_dir = os.path.join(home, ".config", "mop")
+        os.makedirs(reg_dir)
+        for name, text in files.items():
+            with open(os.path.join(reg_dir, name), "w") as f:
+                f.write(text)
+        return base, home
+
+    # Входы клея -- те же матричные сочетания: None без источников; строгий
+    # снимок из v1; конвертация пары с потолками; отказ по bare/коллизии/
+    # orphan/битому JSON/плохому лимиту -- RuntimeError (main печатает
+    # причину локально и везёт признак, не текст). Один HOME -- None без
+    # чтения реестра вовсе.
+    v1 = '{"version": 1, "projects": [{"origin": "git@h:ermak/mop.git", "limit": 2}]}'
+    pair = "git@h:ermak/mop.git\n"
+    cases = [
+        ("no sources at all", {}, None, None),
+        ("v1 only", {"projects.json": v1}, None, {"version": 1, "projects": [
+            {"origin": "git@h:ermak/mop.git", "limit": 2}]}),
+        ("v1 over the pair", {"projects.json": v1, "projects": pair,
+                              "limits.json": '{"ermak/mop": 1}'},
+         None, {"version": 1, "projects": [
+             {"origin": "git@h:ermak/mop.git", "limit": 2}]}),
+        ("pair with limits", {"projects": pair, "limits.json": '{"mop": 3}'},
+         None, {"version": 1, "projects": [
+             {"origin": "git@h:ermak/mop.git", "limit": 3}]}),
+        ("pair without limits", {"projects": pair},
+         None, {"version": 1, "projects": [
+             {"origin": "git@h:ermak/mop.git"}]}),
+        ("broken v1 json", {"projects.json": "{oops"}, None, "refuse"),
+        ("bare name in the pair", {"projects": "mop\n"}, None, "refuse"),
+        ("collision of two origins", {"projects": "git@h:ermak/mop.git\n"
+                                                  "https://h/ermak/mop.git\n"},
+         None, "refuse"),
+        ("orphan limit", {"projects": pair, "limits.json": '{"other": 1}'},
+         None, "refuse"),
+        ("bad limit", {"projects": pair, "limits.json": '{"ermak/mop": -1}'},
+         None, "refuse"),
+        # Регрессия ревью: непредставимая пара при ОДНОМ HOME -- стейджинга
+        # нет вовсе, отказ не поднимается: YAML посев всё равно скипает.
+        ("bare name, same HOME", {"projects": "mop\n"}, "same", None),
+        ("broken v1, same HOME", {"projects.json": "{oops"}, "same", None),
+    ]
+    for label, files, same_home, want in cases:
+        base, home = make(files)
+        # Клей читает реестр контроллера через paths.local от HOME и
+        # сравнивает его с MOP_HOME: задаём дом временно, изоляция
+        # проверок восстанавливается следующим кейсом или концом файла --
+        # дома изолированы и без того (#209).
+        was = os.environ.get("HOME")
+        was_home = os.environ.get("MOP_HOME")
+        was_dir = reg.SNAPSHOT_DIR
+        try:
+            os.environ["HOME"] = home
+            os.environ["MOP_HOME"] = home if same_home else "/srv/mop"
+            reg.SNAPSHOT_DIR = os.path.join(home, ".config", "mop")
+            try:
+                got = deploy_cli._staged_registry_seed()
+            except RuntimeError as e:
+                got = e
+            if want is None:
+                c.check(f"#540 staging {label}: nothing staged", got is None, repr(got)[:120])
+            elif want == "refuse":
+                c.check(f"#540 staging {label}: a loud refusal, nothing staged",
+                        isinstance(got, RuntimeError), repr(got)[:120])
+                # Причина отказа не несёт сырых origin'ов с userinfo.
+                c.check(f"#540 staging {label}: the refusal names no origins",
+                        "git@h" not in str(got) and "https://h" not in str(got),
+                        str(got)[:120])
+            else:
+                staged = None
+                if isinstance(got, str) and os.path.isfile(got):
+                    with open(got) as f:
+                        staged = _json.load(f)
+                    mode = stat.S_IMODE(os.stat(got).st_mode)
+                    c.check(f"#540 staging {label}: the staged snapshot is private",
+                            mode == 0o600, oct(mode))
+                c.check(f"#540 staging {label}: one validated v1 snapshot staged",
+                        staged == want, staged)
+        finally:
+            os.environ["HOME"] = was
+            if was_home is None:
+                os.environ.pop("MOP_HOME", None)
+            else:
+                os.environ["MOP_HOME"] = was_home
+            reg.SNAPSHOT_DIR = was_dir
+            shutil.rmtree(base, ignore_errors=True)
+    # Плейбуку едет ПУТЬ, не JSON: extra-vars одной строкой-объектом.
+    vars_ = _play.play_vars([], registry_seed="/tmp/staged/projects.json")
+    c.check("#540 the play carries the staged seed as a path, not a payload",
+            any('mop_registry_seed' in v and '"mop_registry_seed": "/tmp/staged/projects.json"'
+                in v for v in vars_), vars_)
+    # Отказ стейджинга едет признаком без текста: причину CLI уже напечатал
+    # локально, в argv и журналах плейбука ей не место. Признак -- голый
+    # true, и в строке extra-vars нет ничего сверх обычных переменных.
+    try:
+        vars_refused = _play.play_vars([], registry_seed_refused=True)
+    except Exception as e:  # noqa: BLE001 -- проверка, не код пула
+        vars_refused = None
+    head_refused = (_json.loads(vars_refused[0])
+                    if vars_refused and len(vars_refused) == 1 else None)
+    c.check("#540 a refused seed travels as a bare flag, not the reason",
+            head_refused == {"mop_projects": [], "mop_registry_seed_refused": True},
+            head_refused)
+    vars_none = _play.play_vars([])
+    c.check("#540 without a seed the play carries no seed var at all",
+            all("mop_registry_seed" not in v for v in vars_none), vars_none)
+    # Дефолт ручному ansible-прогону: без extra-vars посева нет и отказов нет.
+    gv = yaml.safe_load(open(os.path.join(DEPLOY, "group_vars", "all.yml")))
+    c.check("#540 manual ansible runs carry an empty seed default",
+            gv.get("mop_registry_seed") == "", gv.get("mop_registry_seed"))
+    c.check("#540 manual ansible runs carry no refused flag",
+            gv.get("mop_registry_seed_refused") is False, gv.get("mop_registry_seed_refused"))
 
 
 def check_one_source_219(c):
@@ -1927,6 +2318,7 @@ def main():
           names.index("Callout file of the bus, before") < names.index(users_task.get("name"))
           < names.index("Callout file of the bus, after") if after and users_task else False)
     check_identity_copy_167(c, ptasks)
+    check_registry_seeding_540(c, ptasks)
     check_one_source_219(c)
     check_claude_cli_293(c)
     check_agent_unit_172(c, can_render)
