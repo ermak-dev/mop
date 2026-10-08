@@ -1202,6 +1202,113 @@ def check_coverage_and_verdicts_538(c):
                 not out.get("ok") and "MOP_PROXY_KEY" not in str(out), out)
 
 
+# ── #538: владелец при атомарной записи — детерминированный mock ────────
+# HYPOTHESIS: живой chown под не-root невозможен, и владелец проверялся
+# grep'ом исходника — это не эксперимент. Реальная угроза: _local_step
+# пишет write_private без owner=, и под root-контроллером inode уходит
+# процессу (root:0600), отрезая сервис от его копии. owner==uid процесса
+# как единственная политика -- именованный блокер для root-установки, не
+# поддержка ротации.
+# SOLUTION: подменяем os.stat/os.getuid/fsutil.write_private в temp-
+# фикстуре: чужой uid от stat → guard отказывает ДО remote; _local_step
+# передаёт СОХРАНЁННОГО владельца (uid, gid) в write_private — mocked
+# fchown показывает red без owner= и green с ним.
+def check_owner_preservation_538(c):
+    import types
+    with tempfile.TemporaryDirectory(prefix="mop-rot-own-") as d:
+        src = os.path.join(d, "llm-proxy-client.pass")
+        cp = os.path.join(d, "copy.pass")
+        op = os.path.join(d, "op.json")
+        for p in (src, cp):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("old-key\n")
+            os.chmod(p, 0o600)
+
+        def state(stage="accepted"):
+            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+                    "new": "new-key", "source": src, "copy": cp,
+                    "recipients": ["node1"], "stage": stage}
+
+        real_stat, real_getuid = os.stat, os.getuid
+        real_write = proxykey.fsutil.write_private
+
+        # (1) Чужой владелец по подменённому stat -- guard отказывает до
+        # remote, даже непривилегированным процессом.
+        foreign = types.SimpleNamespace(st_mode=0o100600, st_uid=1234, st_gid=1234)
+
+        def stat_foreign(path, *a, **k):
+            return foreign
+
+        with patched(proxykey.os, stat=stat_foreign), \
+                patched(proxykey.os, getuid=real_getuid):
+            r = proxykey._guard(state())
+        c.check("#538 a foreign owner blocks the guard before remote",
+                isinstance(r, str) and "owned by uid 1234" in r, r)
+
+        # (2) _local_step передаёт сохранённого владельца в write_private.
+        # Сначала сохраняем фактического владельца путей.
+        own_src = real_stat(src)
+        kept = []
+        calls = []
+
+        def write_spy(path, data, owner=None):
+            calls.append((path, owner))
+            return real_write(path, data, owner=owner)
+
+        def stat_kept(path, *a, **k):
+            return real_stat(path)
+
+        with patched(proxykey.os, stat=stat_kept), \
+                patched(proxykey.fsutil, write_private=write_spy), \
+                patched(proxykey, OP=op):
+            out = proxykey._local_step(state())
+        c.check("#538 the local step succeeds with the seam spy", out.get("ok"), out)
+        own_calls = [x for x in calls if x[0] in (src, cp)]
+        if c.check("#538 the local step writes both paths", len(own_calls) == 2, calls):
+            for path, owner in own_calls:
+                c.check(f"#538 write_private receives the KEPT owner for {os.path.basename(path)}",
+                        owner == (own_src.st_uid, own_src.st_gid), owner)
+        # Файлы реально переписаны тем же ключом, режим прежний.
+        import stat as st
+        for p in (src, cp):
+            c.check(f"#538 {os.path.basename(p)} keeps 0600",
+                    st.S_IMODE(real_stat(p).st_mode) == 0o600)
+
+        # (3) Root-ветка mocked fchown: владелец путей -- не процесс (root
+        # запускает сервис), сохранённый владелец едет в write_private.
+        root_cases = []
+        foreign_owner = types.SimpleNamespace(st_mode=0o100600, st_uid=1000, st_gid=1000)
+
+        def stat_root(path, *a, **k):
+            return foreign_owner
+
+        def write_root(path, data, owner=None):
+            root_cases.append((path, owner))
+            return real_write(path, data, owner=owner)
+
+        with patched(proxykey.os, stat=stat_root), \
+                patched(proxykey.os, getuid=lambda: 0), \
+                patched(proxykey.fsutil, write_private=write_root), \
+                patched(proxykey, OP=op):
+            out = proxykey._local_step(state())
+        c.check("#538 under a root process the local step keeps the service owner",
+                out.get("ok"), out)
+        root_own = [x for x in root_cases if x[0] in (src, cp)]
+        if c.check("#538 the root-branch writes both paths", len(root_own) == 2,
+                   root_cases):
+            for path, owner in root_own:
+                c.check(f"#538 the service owner (1000,1000) is preserved for {os.path.basename(path)}",
+                        owner == (1000, 1000), owner)
+
+        # (4) Guard под root с чужим владельцем -- всё равно именованный
+        # блокер ДО remote: «не угадывать владельца из uid процесса».
+        with patched(proxykey.os, stat=stat_root), \
+                patched(proxykey.os, getuid=lambda: 0):
+            r = proxykey._guard(state())
+        c.check("#538 a root guard still names the foreign owner as a blocker",
+                isinstance(r, str) and "owned by uid 1000" in r, r)
+
+
 def main():
     c = Checks()
     check_source_393(c)
@@ -1217,6 +1324,7 @@ def main():
     check_state_validator_538(c)
     check_serviceability_538(c)
     check_coverage_and_verdicts_538(c)
+    check_owner_preservation_538(c)
     # ── блоб secrets.env (#391) ─────────────────────────────────────────
     # HYPOTHESIS: клиентская раздача (мастер-шелл, mop login) умерла, и узлы
     # не получают MOP_PROXY_KEY -- свежие тела сеются со старой копии узла и

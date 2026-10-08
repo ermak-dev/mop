@@ -393,9 +393,12 @@ def _local_step(state):
     """Локальная смена: new в источник и копию, атомарно и приватно.
     Идемпотентна: crash между двумя записями оставляет сплит «источник
     новый, копия старая» -- повтор шага заканчивает начатое, ключ тот же
-    сохранённый. Режим и владелец прежних файлов сохраняются (0600)."""
+    сохранённый. Владелец каждого пути берётся С ПРЕЖНЕГО файла и едет в
+    write_private owner=: атомарный replace под root иначе отдал бы inode
+    процессу (root:0600) и отрезал бы сервис от его копии. Режим -- 0600."""
     for path in (state["source"], state["copy"]):
-        fsutil.write_private(path, state["new"] + "\n")
+        st = os.stat(path)
+        fsutil.write_private(path, state["new"] + "\n", owner=(st.st_uid, st.st_gid))
     state["stage"] = "local"
     _save_op(state)
     return {"ok": True, "stage": state["stage"]}
