@@ -89,7 +89,7 @@ edits, documentation (prose needs no artificial failing check).
  - **MUST** Stop and ask if you truly cannot write the check
  - **MUST NOT** Never implement a fix before the failing check
  - **MUST NOT** Never weaken a check to make it pass — assert correct behavior, never degraded-as-correct
- - **MUST** A missing local dependency is an environment defect, not a hand install and never a weakened check: a code-level declaration defect gets its own ticket; a dependency already declared but stale in an install is an operator blocker — it does not block the full CI gate
+ - **MUST** A missing local dependency is an environment defect, not a hand install and never a weakened check: a code-level declaration defect gets its own ticket; a dependency already declared but stale in an install is an operator blocker — it does not block the full CI gate. If a narrow check cannot run locally for an environment reason, push a test-only commit and verify its relevant failure in CI before implementing the fix; then verify green in CI. An import or setup failure is not evidence of the defect
  - **MUST** Verify on the live pool what cannot be verified otherwise (message delivery, puppet state, a rollout), and say in the report what you actually ran and what stayed unverified
  - **MUST NOT** Never pass reading the source off as an experiment: "the code says so" and "checked on a puppet" are different claims
  - **MUST NOT** Never fake a green run: there are no tests for the pool, and that is said plainly
