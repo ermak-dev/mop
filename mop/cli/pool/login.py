@@ -90,7 +90,8 @@ def ask(prompt, secret=False, default=None):
 
 
 def _probe(url, key, directory):
-    """Проверить ключ без передачи его по открытому LAN или через redirect."""
+    """Проверить ключ без передачи его по открытой LAN или через redirect."""
+    from ..common import llm
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
         raise RuntimeError("the proxy key needs HTTPS outside localhost")
@@ -102,8 +103,13 @@ def _probe(url, key, directory):
             raise RuntimeError("proxy verification must not redirect the client key")
 
     opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=tls))
-    request = urllib.request.Request(url.rstrip("/") + "/v1/models",
-                                     headers={"Authorization": f"Bearer {key}"})
+    # Канонический /v1/models (#547): легаси /llm ВЫДАННОГО адреса снимается
+    # authority-проверкой (этот сервер + его каталог), чужой путь не режется.
+    # Порт URL не сверяется: сам адрес только что пришёл от проверенного
+    # сервера и прошёл _client_values.
+    request = urllib.request.Request(
+        llm.endpoint(url, "models", host=os.path.basename(directory)),
+        headers={"Authorization": f"Bearer {key}"})
     try:
         with opener.open(request, timeout=10) as response:
             if response.status != 200:

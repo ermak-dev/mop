@@ -25,7 +25,7 @@ from mop.common import config, context, creds  # noqa: E402
 def check_joined_probe_397(c):
     root = os.path.join(tempfile.mkdtemp(prefix="mop-probe-397-"), "servers")
     creds.write_connection(os.path.join(root, "a.test"), "alice", "bus-pw", "443",
-                           "https://a.test/llm", "secret")
+                           "https://a.test:443/llm", "secret")
     requests = []
     class Response:
         status = 200
@@ -40,8 +40,8 @@ def check_joined_probe_397(c):
             context.use(context.resolve({"server": "a.test"}, {}, {})), \
             config.client_sources():
         c.expect("#397 joined proxy probe succeeds", proxy._probe(), 200)
-    c.expect("#397 doctor uses joined endpoint and key", requests,
-             [("https://a.test/llm/v1/models", "Bearer secret")])
+    c.expect("#397/#547 doctor probes the canonical /v1/models of a legacy URL",
+             requests, [("https://a.test:443/v1/models", "Bearer secret")])
 
 
 # HYPOTHESIS: doctor передаёт URL и ключ, но не TLS-пин того же сервера;
@@ -54,7 +54,7 @@ def check_joined_probe_397(c):
 def check_pinned_proxy_406(c):
     root = os.path.join(tempfile.mkdtemp(prefix="mop-probe-406-"), "servers")
     dest = os.path.join(root, "srv.test")
-    creds.write_connection(dest, "alice", "bus-pw", "443", "https://srv.test/llm", "key")
+    creds.write_connection(dest, "alice", "bus-pw", "443", "https://srv.test:443/llm", "key")
     seen, marker = [], object()
     class Response:
         status = 200
@@ -72,7 +72,7 @@ def check_pinned_proxy_406(c):
             config.client_sources():
         c.expect("#406 pinned server probe succeeds", proxy._probe(), 200)
         c.expect("#406 doctor passes pinned TLS context", seen, [marker])
-        creds.write_connection(dest, "alice", "bus-pw", "443", "https://other.test/llm", "key")
+        creds.write_connection(dest, "alice", "bus-pw", "443", "https://other.test:443/llm", "key")
         seen.clear()
         c.expect("#406 foreign proxy probe succeeds", proxy._probe(), 200)
         c.expect("#406 foreign URL does not inherit server pin", seen, [None])

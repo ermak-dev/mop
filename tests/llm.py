@@ -16,6 +16,97 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mop.common import config, context, creds, llm  # noqa: E402
 
 
+# HYPOTHESIS (#547): адрес прокси живёт в двух формах -- канонический
+# origin сервера (новый издатель) и легаси mop-issued https://host:port/llm;
+# потребители клеили /v1/* сами, а origin для ANTHROPIC_BASE_URL не отличали
+# ничего: чужой /llm обрезан был бы догадкой, база с /v1 отдала бы claude
+# /v1/v1 на первом же запросе.
+# SOLUTION: один URL-контракт в llm: canonical() снимает ровно легаси-/llm
+# ТОЛЬКО при ЯВНОМ совпадении issuer-authority (выбранный сервер +
+# сохранённый порт профиля), scheme/hostname/port сохранены; endpoint()
+# надстраивает ровно один /v1/<resource>, уже-v1 база не удваивается;
+# origin() для ANTHROPIC_BASE_URL отказывает на /v1-базе. Стандартный
+# urllib.parse -- работа с URL, не второй парсер профиля.
+# RESULT: RED до появления контракта в модуле.
+# STATUS: RED
+def check_url_contract_547(c):
+    # Управляемая нормализация: authority издателя известен явно.
+    c.expect("#547 managed legacy /llm canonicalizes to the issuer origin",
+             llm.canonical("https://srv.test:8443/llm", host="srv.test", port="8443"),
+             "https://srv.test:8443")
+    c.expect("#547 trailing-slash legacy form canonicalizes the same",
+             llm.canonical("https://srv.test:8443/llm/", host="srv.test", port="8443"),
+             "https://srv.test:8443")
+    c.expect("#547 implicit 443 equals the saved port",
+             llm.canonical("https://srv.test/llm", host="srv.test", port="443"),
+             "https://srv.test")
+    c.expect("#547 already canonical origin is a no-op",
+             llm.canonical("https://srv.test:8443", host="srv.test", port="8443"),
+             "https://srv.test:8443")
+    # Чужой authority и произвольный путь -- НЕ обрезать догадкой: /llm на
+    # чужом хосте бывает законным кастомным префиксом.
+    c.expect("#547 foreign authority with /llm stays untouched",
+             llm.canonical("https://foreign.test:8443/llm", host="srv.test", port="8443"),
+             "https://foreign.test:8443/llm")
+    c.expect("#547 mismatched port stays untouched",
+             llm.canonical("https://srv.test:9443/llm", host="srv.test", port="8443"),
+             "https://srv.test:9443/llm")
+    c.expect("#547 plain http is not the issuer form",
+             llm.canonical("http://srv.test:8443/llm", host="srv.test", port="8443"),
+             "http://srv.test:8443/llm")
+    c.expect("#547 custom base path stays untouched",
+             llm.canonical("https://srv.test:8443/anthropic", host="srv.test", port="8443"),
+             "https://srv.test:8443/anthropic")
+    c.expect("#547 without issuer hints canonical() does not guess",
+             llm.canonical("https://any.test:8443/llm"),
+             "https://any.test:8443/llm")
+    # endpoint: ровно один /v1; уже-v1 база -- resource-aware, без /v1/v1.
+    c.expect("#547 endpoint over a canonical origin",
+             llm.endpoint("https://srv.test:8443", "models"),
+             "https://srv.test:8443/v1/models")
+    c.expect("#547 endpoint over managed legacy /llm",
+             llm.endpoint("https://srv.test:8443/llm", "models",
+                          host="srv.test", port="8443"),
+             "https://srv.test:8443/v1/models")
+    c.expect("#547 custom base path gets its single /v1",
+             llm.endpoint("https://x.test/anthropic", "models"),
+             "https://x.test/anthropic/v1/models")
+    c.expect("#547 already-v1 base never doubles",
+             llm.endpoint("https://x.test/v1", "models"), "https://x.test/v1/models")
+    c.expect("#547 already-v1 base with trailing slash",
+             llm.endpoint("https://x.test/v1/", "models"), "https://x.test/v1/models")
+    c.expect("#547 messages rides the same contract",
+             llm.endpoint("https://srv.test:8443/llm", "messages",
+                          host="srv.test", port="8443"),
+             "https://srv.test:8443/v1/messages")
+    c.expect("#547 trailing slash on the origin",
+             llm.endpoint("https://srv.test:8443/", "models"),
+             "https://srv.test:8443/v1/models")
+    c.expect("#547 internal root origin passes through",
+             llm.endpoint("http://mop.corp.ermak.dev:8317", "models"),
+             "http://mop.corp.ermak.dev:8317/v1/models")
+    for bad in ("", "x/y", "/abs", ".", "..", "models?x", "models#f", None,
+                "http://evil.test"):
+        try:
+            llm.endpoint("https://srv.test:8443", bad)
+            c.fail(f"#547 resource {bad!r} must be refused", repr(bad))
+        except ValueError:
+            c.check(f"#547 resource {bad!r} refused as a non-segment", True)
+    # origin для ANTHROPIC_BASE_URL: /v1-база -- явный отказ, не тихое /v1/v1.
+    c.expect("#547 origin of a managed legacy base",
+             llm.origin("https://srv.test:8443/llm", host="srv.test", port="8443"),
+             "https://srv.test:8443")
+    c.expect("#547 origin keeps a custom base path",
+             llm.origin("https://x.test/anthropic"), "https://x.test/anthropic")
+    try:
+        llm.origin("https://x.test/v1")
+        c.fail("#547 a /v1 base must refuse for origin-only callers",
+               "https://x.test/v1")
+    except ValueError as e:
+        c.check("#547 a /v1 base refuses with a URL-contract reason",
+                "v1" in str(e) and "origin" in str(e), str(e))
+
+
 # HYPOTHESIS: сессия и проверка прокси берут URL/ключ из .env, а без
 # привязки сервер угадывается даже если join есть на двух установках.
 # SOLUTION: выбранный сервер и его client.json — единственный источник для
@@ -29,15 +120,17 @@ def check_joined_proxy_397(c):
                                                 MOP_PROXY_URL="http://wrong.test",
                                                 MOP_PROXY_KEY="wrong-key"):
         # #533: целый вход -- одна connection.json (пароль шины + прокси вместе),
-        # прежняя пара больше не пишется.
-        for host, url, key, port in (("a.test", "https://a.test/llm", "a-key", "8443"),
-                                     ("b.test", "https://b.test/llm", "b-key", "443")):
+        # прежняя пара больше не пишется. #547: адреса -- фактическая легаси-
+        # форма издателя (порт прописан явно, /llm на конце), читатели
+        # нормализуют её в канонический origin.
+        for host, url, key, port in (("a.test", "https://a.test:8443/llm", "a-key", "8443"),
+                                     ("b.test", "https://b.test:443/llm", "b-key", "443")):
             creds.write_connection(os.path.join(root, host), "user", "bus-pw", port, url, key)
         with config.client_sources():
             with context.use(context.resolve({"server": "a.test"}, {}, {})):
                 result = _common.session_env()
-                c.expect("#397 selected server supplies session URL", result["ANTHROPIC_BASE_URL"],
-                         "https://a.test/llm")
+                c.expect("#397/#547 a legacy mop-issued URL canonicalizes for the session",
+                         result["ANTHROPIC_BASE_URL"], "https://a.test:8443")
                 c.expect("#397 selected server supplies session key", result[llm.AUTH_VAR],
                          "a-key")
             with context.use(context.resolve({"server": "b.test"}, {}, {})):
@@ -76,7 +169,8 @@ def check_session_ca_412(c):
             config.client_sources():
         for host in ("a.test", "b.test"):
             directory = os.path.join(root, host)
-            creds.write_connection(directory, "user", "bus-pw", "443", f"https://{host}/llm", "key")
+            creds.write_connection(directory, "user", "bus-pw", "443",
+                                   f"https://{host}:443/llm", "key")
             cert = os.path.join(directory, creds.CERT_FILE)
             with open(cert, "w") as f:
                 f.write("test certificate")
@@ -89,10 +183,10 @@ def check_session_ca_412(c):
                 c.expect("#412 explicit user CA is preserved", env.get("NODE_EXTRA_CA_CERTS"),
                          "/custom/ca.pem")
             creds.write_connection(os.path.join(root, "a.test"), "user", "bus-pw", "443",
-                                   "http://a.test/llm", "key")
+                                   "http://a.test:443/llm", "key")
             c.check("#412 HTTP needs no extra CA", "NODE_EXTRA_CA_CERTS" not in _common.session_env())
             creds.write_connection(os.path.join(root, "a.test"), "user", "bus-pw", "443",
-                                   "https://a.test/llm", "key")
+                                   "https://a.test:443/llm", "key")
             os.remove(os.path.join(root, "a.test", creds.CERT_FILE))
             c.check("#412 no nonexistent CA path", "NODE_EXTRA_CA_CERTS" not in _common.session_env())
 
@@ -135,13 +229,13 @@ def check_client_model_discovery_426(c):
             patched(master.os, execvpe=fake_exec):
         for host in ("a.test", "b.test"):
             creds.write_connection(os.path.join(root, host), "user", "bus-pw", "443",
-                                   f"https://{host}/llm", f"{host}-fake-key")
+                                   f"https://{host}:443/llm", f"{host}-fake-key")
             with context.use(context.resolve({"server": host}, {}, {})):
                 code.main(["--model", "gpt-example"])
                 master._main(["--", "--model", "gpt-example"])
             for binary, args, env in captured[-2:]:
-                c.expect(f"#426 {host} selected gateway", env.get("ANTHROPIC_BASE_URL"),
-                         f"https://{host}/llm")
+                c.expect(f"#426/#547 {host} gateway is the canonical origin",
+                         env.get("ANTHROPIC_BASE_URL"), f"https://{host}:443")
                 c.expect(f"#426 {host} selected client key", env.get(llm.AUTH_VAR),
                          f"{host}-fake-key")
                 c.expect("#426 native gateway discovery enabled",
@@ -194,8 +288,35 @@ def check_master_exec_argv_440(c):
              "--dangerously-skip-permissions")
 
 
+# HYPOTHESIS (#547): окружение папета строится из MOP_PROXY_URL как есть:
+# легаси-форма самой установки (/llm на её же TLS-прокси) ехала в
+# ANTHROPIC_BASE_URL префиксом, внутренний корень 8317 должен проходить
+# насквозь, а чужой кастомный путь -- оставаться чужим выбором.
+# SOLUTION: env() гоняет настройку через тот же контракт origin() с
+# подсказками собственного authority установки (MOP_SERVER_LAN +
+# MOP_HTTPS_PORT): не blind replace, а управляемая нормализация.
+# RESULT: RED -- env() пока отдаёт настройку без контракта.
+# STATUS: RED
+def check_setting_origin_547(c):
+    def settings(url):
+        return patched(config, get=lambda name: {
+            "MOP_PROXY_URL": url, "MOP_SERVER_LAN": "srv.test",
+            "MOP_HTTPS_PORT": "8443"}.get(name, ""))
+    with settings("https://srv.test:8443/llm"):
+        c.expect("#547 the puppet env carries the canonical origin",
+                 llm.env()["ANTHROPIC_BASE_URL"], "https://srv.test:8443")
+    with settings("http://mop.corp.ermak.dev:8317"):
+        c.expect("#547 the internal root passes through untouched",
+                 llm.env()["ANTHROPIC_BASE_URL"], "http://mop.corp.ermak.dev:8317")
+    with settings("https://proxy.vendor.dev/anthropic"):
+        c.expect("#547 a foreign custom path stays the operator's choice",
+                 llm.env()["ANTHROPIC_BASE_URL"], "https://proxy.vendor.dev/anthropic")
+
+
 def main():
     c = Checks()
+    check_url_contract_547(c)
+    check_setting_origin_547(c)
     check_joined_proxy_397(c)
     check_session_ca_412(c)
     check_client_model_discovery_426(c)
@@ -262,7 +383,7 @@ def main():
             patched(creds, ROOT=root), patched_env(MOP_SERVER_LAN=None), \
             config.client_sources():
         creds.write_connection(os.path.join(root, "s.test"), "user", "bus-pw", "443",
-                               "https://s.test/llm", "key")
+                               "https://s.test:443/llm", "key")
         with context.use(context.resolve({}, {}, {})):
             session = _common.session_env()
     c.check("the session env carries the feedback kill switch (#419)",

@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from mop.common import config, creds
+from mop.common import config, creds, llm
 
 TIMEOUT = 10
 
@@ -50,8 +50,10 @@ def _probe():
             raise RuntimeError(f"incomplete login for {host}: re-run "
                                f"mop login --server {host}")
         raise RuntimeError(f"no login for {host}: run mop login --server {host}")
-    req = urllib.request.Request(joined["proxy_url"].rstrip("/") + "/v1/models",
-                                 headers={"Authorization": f"Bearer {joined['proxy_key']}"})
+    req = urllib.request.Request(
+        llm.endpoint(joined["proxy_url"], "models", host=host,
+                     port=joined["https_port"]),
+        headers={"Authorization": f"Bearer {joined['proxy_key']}"})
     pin = creds.cafile(creds.server_dir(host)) if \
         urllib.parse.urlsplit(joined["proxy_url"]).hostname == host else None
     opts = {"context": ssl.create_default_context(cafile=pin)} if pin else {}

@@ -189,7 +189,10 @@ def session_env():
     env = dict(llm.env())
     for name in MODEL_OVERRIDES:
         env.pop(name, None)   # карта llm.env() остаётся только у папетов
-    env["ANTHROPIC_BASE_URL"] = record["proxy_url"]
+    # Канонический origin (#547): легаси /llm ИЗВЕСТНОГО издателя (этот
+    # сервер + порт профиля) снимается, чужой адрес проходит как есть.
+    env["ANTHROPIC_BASE_URL"] = llm.origin(record["proxy_url"], host=host,
+                                            port=record["https_port"])
     env[llm.AUTH_VAR] = record["proxy_key"]
     env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     # Шина и Python уже доверяют закреплённому сертификату (#412), но
