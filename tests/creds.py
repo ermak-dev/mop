@@ -315,6 +315,7 @@ def main():
 
     check_no_human_over_nats_219(c)
     check_operator_not_object_336(c)
+    check_human_login_549(c)
     return c.report("creds")
 
 
@@ -409,6 +410,72 @@ def check_no_human_over_nats_219(c):
     join = sources.get(os.path.join("mop", "cli", "pool", "join.py"), "")
     c.check("mop join reads no transition password (secrets/nats-op-*.pass)",
             "nats-op" not in join and "pass_file(" not in join)
+
+
+def check_human_login_549(c):
+    """HYPOTHESIS (#549): требование полного человеческого входа повторено
+    тремя потребителями прокси (session_env, models.available, doctor
+    _probe) тремя копиями одного блока: snapshot -> ProfileError ->
+    RuntimeError -> разбор kind с одинаковыми текстами. Копии уже
+    разъехались бы при первой правке текста, а «нет входа» -- это то, что
+    читает оператор в самый неподходящий момент.
+    SOLUTION: creds.human_login(directory, host) -- единственный владелец
+    контракта: полный человеческий профиль или RuntimeError с теми же
+    текстами (machine/partial/пусто -- свои ремонты, ProfileError --
+    дословно). Никаких новых прав, форматов и приоритетов: один снимок.
+    STATUS: FIXED — see #549"""
+    root = tempfile.mkdtemp(prefix="mop-test-creds-549-")
+
+    # Целый человеческий вход -- сам профиль, теми же полями, что snapshot.
+    whole = os.path.join(root, "srv.test")
+    creds.write_connection(whole, "alice", "bus-pw", "8443",
+                           "https://srv.test:8443/llm", "key-alice")
+    got = creds.human_login(whole, "srv.test")
+    c.expect("#549 a whole human login returns the full profile",
+             got, {"user": "alice", "password": "bus-pw", "https_port": "8443",
+                   "proxy_url": "https://srv.test:8443/llm", "proxy_key": "key-alice"})
+    # Прежняя пара -- тоже целый вход: helper не выбирает формат.
+    pair = os.path.join(root, "pair.test")
+    creds.write_operator(pair, "bob", "bus-pw")
+    creds.write_client(pair, "443", "https://pair.test/llm", "key-bob")
+    c.expect("#549 the legacy pair is a whole human login too",
+             creds.human_login(pair, "pair.test")["user"], "bob")
+
+    # Каждый отказ -- свой текст, как у потребителей до #549.
+    cases = []
+    machine = os.path.join(root, "machine.test")
+    creds.write_operator(machine, creds.SERVICE, "bus-pw")
+    cases.append(("machine", machine, "no human login for machine.test"))
+    half = os.path.join(root, "half.test")
+    creds.write_client(half, "443", "https://half.test/llm", "key-half")
+    cases.append(("partial", half, "incomplete login for half.test"))
+    cases.append(("empty", os.path.join(root, "empty.test"), "no login for empty.test"))
+    for kind, directory, want in cases:
+        try:
+            creds.human_login(directory, os.path.basename(directory))
+            c.fail(f"#549 {kind} refuses", "no refusal")
+        except RuntimeError as e:
+            c.check(f"#549 the {kind} refusal keeps its own text",
+                    want in str(e) and "mop login --server" in str(e), str(e))
+
+    # Битый файл и конфликт ролей -- отказ решателя дословно, не пересказ.
+    broken = os.path.join(root, "broken.test")
+    creds.write_connection(broken, "alice", "bus-pw", "8443",
+                           "https://broken.test:8443/llm", "key-alice")
+    with open(os.path.join(broken, creds.CONNECTION_FILE), "w") as f:
+        f.write('{"version": 1, "bus": {}')
+    conflict = os.path.join(root, "conflict.test")
+    creds.write_connection(conflict, "alice", "bus-pw", "443",
+                           "https://conflict.test/llm", "key-alice")
+    creds.write_operator(conflict, creds.SERVICE, "bus-pw")
+    for kind, directory in (("broken", broken), ("conflict", conflict)):
+        try:
+            creds.human_login(directory, f"{kind}.test")
+            c.fail(f"#549 {kind} refuses through the resolver", "no refusal")
+        except RuntimeError as e:
+            c.check(f"#549 the {kind} refusal is the resolver's own text",
+                    "connection" in str(e) if kind == "broken" else "conflict" in str(e),
+                    str(e))
 
 
 if __name__ == "__main__":

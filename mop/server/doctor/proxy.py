@@ -34,22 +34,9 @@ def issues_of(answer):
 def _probe():
     """Код ответа /v1_models | исключение сети."""
     host = config.get("MOP_SERVER_LAN")
-    # Один снимок профиля (#533): доктор тоже читает каталог одним решателем;
-    # пустой каталог отличён от служебного -- у них разные ремонты.
-    try:
-        kind, joined = creds.snapshot(creds.server_dir(host))
-    except creds.ProfileError as e:
-        raise RuntimeError(str(e)) from e
-    if kind != "human":
-        if kind == "machine":
-            raise RuntimeError(f"no human login for {host} (a machine service "
-                               f"directory): use a separate operator account "
-                               f"or connection directory, run mop login "
-                               f"--server {host} <login>")
-        if kind == "partial":
-            raise RuntimeError(f"incomplete login for {host}: re-run "
-                               f"mop login --server {host}")
-        raise RuntimeError(f"no login for {host}: run mop login --server {host}")
+    # Требование полного человеческого входа -- creds.human_login (#549):
+    # единый владелец текстов отказа, один снимок профиля (#533).
+    joined = creds.human_login(creds.server_dir(host), host)
     req = urllib.request.Request(
         llm.endpoint(joined["proxy_url"], "models", host=host,
                      port=joined["https_port"]),
