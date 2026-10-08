@@ -34,11 +34,17 @@
 # Переход на снимок v1 (#534, #540): сервер с любым своим реестром --
 # снимком, парой или даже осиротевшим limits.json -- authoritative, прогон
 # его не трогает и ничего не мигрирует из playbook (миграция -- writer
-# сервиса под замком). Пустой сервер получает копию контроллера один раз и
-# no-clobber: снимок v1, когда он есть (пара контроллера при обоих --
-# остывшая после его же миграции), иначе легаси-пару целиком, с limits.json,
-# чтобы потолки проектов не терялись. Битый v1 контроллера разворачивает
-# префлайт `mop server deploy` (projects.view_of) до плейбука: YAML JSON не
+# сервиса под замком). Авторитет и шире реестра: работающий mop-cluster --
+# владелец даже пустого реестра, глагол может создать снимок в любой
+# момент, stat пустоты того не опровергает, а force:no решает лишь в момент
+# copy. Посев идёт только на определённо не работающий сервис: на чистой
+# установке плей шины идёт до роли cluster (setup.yml), и проба отвечает
+# «inactive»; «active» и любые промежуточные состояния закрывают посев.
+# Пустой сервер получает копию контроллера один раз и no-clobber: снимок
+# v1, когда он есть (пара контроллера при обоих -- остывшая после его же
+# миграции), иначе легаси-пару целиком, с limits.json, чтобы потолки
+# проектов не терялись. Битый v1 контроллера разворачивает префлайт
+# `mop server deploy` (projects.view_of) до плейбука: YAML JSON не
 # разбирает, второго парсера здесь нет. Контроллер и сервер в одном HOME --
 # одна машина, посева нет: копия в себя -- это перезапись. На чистой
 # установке копии нет -- реестр пуст, первый add создаст снимок.
@@ -78,9 +84,22 @@
     path: "{{ MOP_HOME }}/.config/mop/limits.json"
   register: server_limits
 
+# Проба -- чтение systemd, ничего не меняет. failed_when: false: неактивный
+# сервис -- законный ответ, не провал прогона; check_mode: false: сухой
+# прогон тоже обязан знать состояние -- иначе факт не определён и сухой
+# посев падает. Ответ «inactive» и только: rc не ноль, stdout пустой или
+# «failed»/«activating» -- посев закрыт.
+- name: Cluster service, the registry's writer, is it running
+  ansible.builtin.command: systemctl is-active mop-cluster
+  register: cluster_service_running
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
 - name: Registry of the projects, v1 snapshot, on the server, once
   when:
     - lookup('env', 'HOME') != MOP_HOME
+    - cluster_service_running.stdout == 'inactive'
     - not server_snapshot.stat.exists
     - not server_pair.stat.exists
     - not server_limits.stat.exists
@@ -96,6 +115,7 @@
 - name: Registry of the projects, legacy pair, on the server, once
   when:
     - lookup('env', 'HOME') != MOP_HOME
+    - cluster_service_running.stdout == 'inactive'
     - not server_snapshot.stat.exists
     - not server_pair.stat.exists
     - not server_limits.stat.exists
@@ -112,6 +132,7 @@
 - name: Limits of the legacy pair, on the server, once
   when:
     - lookup('env', 'HOME') != MOP_HOME
+    - cluster_service_running.stdout == 'inactive'
     - not server_snapshot.stat.exists
     - not server_pair.stat.exists
     - not server_limits.stat.exists

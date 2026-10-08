@@ -1087,6 +1087,25 @@ def check_registry_seeding_540(c, ptasks):
             c.check(f"#540 the {name} fact of the server is taken on the server",
                     "delegate_to" not in t, t.get("delegate_to"))
 
+    # Активный writer (#540): работающий mop-cluster -- авторитетный владелец
+    # реестра (#534) даже когда реестр пуст -- глаголы могут создать снимок
+    # в любой момент, stat пустоты того не опровергает, а force:no решает
+    # лишь в момент copy. Посев обязан идти до старта сервиса (на чистой
+    # установке плей шины идёт до роли cluster). Проба читает systemd и в
+    # check mode (mop deploy --dry): иначе dry-run сеял бы «понарошку».
+    probe = next((t for t in tasks
+                  if "is-active" in str(t.get("ansible.builtin.command", ""))), None)
+    c.check("#540 the play probes whether the cluster service is already running",
+            probe is not None
+            and probe.get("register") == "cluster_service_running"
+            and probe.get("failed_when") is False and probe.get("changed_when") is False
+            and probe.get("check_mode") is False, probe)
+    order = [t.get("name") for t in tasks]
+    if probe and seed:
+        c.check("#540 the running-service probe precedes every seed",
+                order.index(probe.get("name"))
+                < min(order.index(t.get("name")) for t, _cp in seed.values()), order)
+
     def runs(task, env):
         conds = task.get("when", [])
         for cond in conds if isinstance(conds, list) else [conds]:
@@ -1104,9 +1123,10 @@ def check_registry_seeding_540(c, ptasks):
     # Матрица утверждена #540: сервер с любым реестром не сеится; пара
     # v1+легаси на сервере -- штатная (#534); контроллер с обоими отдаёт
     # v1; пара сеется вместе с limits.json, когда он есть; same-HOME не
-    # сеет ничего.
-    def expected(cv1, cpair, clim, sv1, spair, slim, same_home):
-        if same_home or sv1 or spair or slim:
+    # сеет ничего; работающий сервис кластера закрывает посев совсем --
+    # он авторитетный владелец даже пустого реестра.
+    def expected(cv1, cpair, clim, sv1, spair, slim, same_home, running):
+        if same_home or running or sv1 or spair or slim:
             return set()
         if cv1:
             return {"projects.json"}
@@ -1117,18 +1137,22 @@ def check_registry_seeding_540(c, ptasks):
     server_home = "/srv/mop"
     combos = []
     for same_home in (False, True):
-        for sv1, spair, slim in itertools.product((False, True), repeat=3):
-            for cv1, cpair, clim in ((False, False, False), (False, False, True),
-                                     (False, True, False), (False, True, True),
-                                     (True, False, False), (True, True, True)):
-                combos.append((cv1, cpair, clim, sv1, spair, slim, same_home))
-    for cv1, cpair, clim, sv1, spair, slim, same_home in combos:
+        for running in (False, True):
+            for sv1, spair, slim in itertools.product((False, True), repeat=3):
+                for cv1, cpair, clim in ((False, False, False), (False, False, True),
+                                         (False, True, False), (False, True, True),
+                                         (True, False, False), (True, True, True)):
+                    combos.append((cv1, cpair, clim, sv1, spair, slim, same_home, running))
+    for cv1, cpair, clim, sv1, spair, slim, same_home, running in combos:
         env = {"controller_home": server_home if same_home else "/home/controller",
                "MOP_HOME": server_home,
                "controller_snapshot": st(cv1), "controller_pair": st(cpair),
                "controller_limits": st(clim),
                "server_snapshot": st(sv1), "server_pair": st(spair),
                "server_limits": st(slim),
+               "cluster_service_running": types.SimpleNamespace(
+                   # systemctl is-active печатает слово без перевода строки
+                   stdout="active" if running else "inactive"),
                # Легаси-факт #117: на прогонах старого YAML, новый его не
                # зовет -- матрица должна падать на нарушении, не на NameError.
                "controller_registry": st(cpair)}
@@ -1137,8 +1161,9 @@ def check_registry_seeding_540(c, ptasks):
         srv = "+".join(n for on, n in ((sv1, "v1"), (spair, "pair"), (slim, "limits"))
                        if on) or "none"
         what = (f"registry seeding, controller {ctrl}, server {srv}, "
-                f"{'same' if same_home else 'different'} HOME")
-        want = expected(cv1, cpair, clim, sv1, spair, slim, same_home)
+                f"{'same' if same_home else 'different'} HOME, cluster service "
+                f"{'running' if running else 'down'}")
+        want = expected(cv1, cpair, clim, sv1, spair, slim, same_home, running)
         try:
             ran = {name for name, (t, _cp) in seed.items() if runs(t, env)}
         except AssertionError as e:
