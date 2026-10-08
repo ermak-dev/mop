@@ -1046,9 +1046,52 @@ def check_agent_unit_172(c, can_render):
 # -- собственные плюс унаследованный block.when -- с утверждённым набором
 # #540, и требует, чтобы общий gate был именно общим: ровно один блок,
 # обнимающий обе задачи, без дублирования условий между уровнями.
+def walk_tasks_552(ptasks):
+    """Задачи плея плоско: верхний уровень плюс задачи внутри block'ов
+    (один уровень -- глубже плей не вкладывает). -> [задача]."""
+    out = []
+    for t in ptasks or []:
+        if not isinstance(t, dict):
+            continue
+        out.append(t)
+        for inner in t.get("block") or []:
+            if isinstance(inner, dict):
+                out.append(inner)
+    return out
+
+
+def parent_block_552(ptasks, task):
+    """Родительский block задачи: сам блок в списке задач живёт как
+    задача-обёртка, ищем по имени внутренней задачи."""
+    for t in ptasks or []:
+        body = t.get("block") if isinstance(t, dict) else None
+        if isinstance(body, list) and any(
+                isinstance(inner, dict) and inner.get("name") == task.get("name")
+                for inner in body):
+            return t
+    return None
+
+
+def effective_when_552(ptasks, task):
+    """ДЕЙСТВУЮЩИЕ условия задачи: собственный when плюс унаследованный
+    block.when родителя (один уровень). -> [строка] в порядке действия.
+    Ansible AND-ит и блок, и задачу: бегут все."""
+    conds = task.get("when", [])
+    out = [str(x) for x in (conds if isinstance(conds, list) else [conds])]
+    parent = parent_block_552(ptasks, task)
+    if parent is not None:
+        bw = parent.get("when", [])
+        out += [str(x) for x in (bw if isinstance(bw, list) else [bw])]
+    return out
+
+
 def check_registry_gate_552(c, ptasks):
     import types
-    tasks = [t for t in (ptasks or []) if isinstance(t, dict) and "name" in t]
+    # Плоский список задач вместе с задачами из block: матрица #540 ищет
+    # задачи по имени и модулю -- с общим gate (#552) задачи посева уезжают
+    # внутрь block, и поиск только по верхнему уровню молча находил бы
+    # пустой набор.
+    tasks = walk_tasks_552(ptasks)
 
     def find(needle, attr):
         for t in tasks:
@@ -1063,30 +1106,13 @@ def check_registry_gate_552(c, ptasks):
                    (fail and fail.get("name"), copy and copy.get("name"))):
         return
 
-    def block_of(task):
-        """Родительский block задачи по имени -- сам блок в списке задач
-        не живёт, ищем по имени внутренней задачи."""
-        for t in tasks:
-            body = t.get("block")
-            if isinstance(body, list) and any(inner.get("name") == task.get("name")
-                                              for inner in body
-                                              if isinstance(inner, dict)):
-                return t
-        return None
-
-    fb, cb = block_of(fail), block_of(copy)
+    fb, cb = parent_block_552(ptasks, fail), parent_block_552(ptasks, copy)
     c.check("#552 one shared block guards both the refusal and the copy",
             fb is not None and cb is not None and fb is cb, None)
 
     def conds_of(task):
         """Действующие условия: собственные + унаследованный block.when."""
-        own = task.get("when", [])
-        out = [str(x) for x in (own if isinstance(own, list) else [own])]
-        parent = block_of(task)
-        if parent is not None:
-            bw = parent.get("when", [])
-            out += [str(x) for x in (bw if isinstance(bw, list) else [bw])]
-        return set(out)
+        return set(effective_when_552(ptasks, task))
 
     # Утверждённый набор #540, неизменный по постановке #552: no-clobber,
     # владелец, mode, причина отказа и критерий inactive не меняются.
@@ -1120,7 +1146,15 @@ def check_registry_seeding_540(c, ptasks):
 
     import itertools
     import types
-    tasks = [t for t in (ptasks or []) if isinstance(t, dict) and "name" in t]
+    # Задачи плоско (walk_tasks_552): с общим gate (#552) задачи посева
+    # живут внутри block, и поиск только по верхнему уровню молча
+    # находил бы пустой набор -- матрица прогоняла бы пустоту.
+    tasks = walk_tasks_552(ptasks)
+    # Плей обязан ЗНАТЬ свои задачи посева: пустой набор -- провал
+    # структуры, а не пустой проход матрицы (#552).
+    c.check("#552 the play still declares its seeding tasks",
+            any("ansible.builtin.copy" in t for t in tasks)
+            and any("ansible.builtin.fail" in t for t in tasks), None)
 
     def seeds():
         out = {}
@@ -1201,15 +1235,15 @@ def check_registry_seeding_540(c, ptasks):
             [t.get("name") for t in tasks if "ansible.builtin.fail" in t])
     if fail:
         # Условия -- те же, что у посева, минус staged-файл (его нет):
-        # отказ уже решён, признак ехал от контроллера.
+        # отказ уже решён, признак ехал от контроллера. Действующие
+        # условия -- с унаследованным block.when (#552).
         want_conds = {"mop_registry_seed_refused", "lookup('env', 'HOME') != MOP_HOME",
                       "cluster_service_running.stdout == 'inactive'",
                       "not server_snapshot.stat.exists", "not server_pair.stat.exists",
                       "not server_limits.stat.exists"}
-        conds = fail.get("when", [])
+        conds = effective_when_552(ptasks, fail)
         c.check("#540 the refusal fires exactly under the seed's own conditions",
-                {str(x) for x in (conds if isinstance(conds, list) else [conds])}
-                == want_conds, conds)
+                set(conds) == want_conds, conds)
         c.check("#540 the refusal carries no reason text and no origins",
                 str(fail.get("ansible.builtin.fail", "")).find("{{") == -1, fail)
         if seed:
@@ -1218,10 +1252,11 @@ def check_registry_seeding_540(c, ptasks):
                     < min(order.index(t.get("name")) for t, _cp in seed.values()), order)
 
     def runs(task, env):
-        conds = task.get("when", [])
-        for cond in conds if isinstance(conds, list) else [conds]:
+        # Действующие условия задачи: собственные + унаследованный
+        # block.when (#552) -- матрица гоняет то же, что решает ansible.
+        for cond in effective_when_552(ptasks, task):
             try:
-                if not eval(str(cond), {"lookup": lambda _k, _v="": env["controller_home"]},
+                if not eval(cond, {"lookup": lambda _k, _v="": env["controller_home"]},
                             dict(env)):  # noqa: S307 -- свой yaml
                     return False
             except Exception as e:  # noqa: BLE001 -- выражение не читается
