@@ -51,7 +51,7 @@ particular decision from the comment next to the code, subsystems from `docs/`:
 
 ## Secrets
 
- - **MUST** Installation inputs live in the server's `.env`; generated credentials (NATS passwords, Nomad token, LLM proxy keys) stay in private server files. Client `mop login` saves bus and proxy credentials per server in `operator.json` and `client.json`, never in installation `.env`
+ - **MUST** Installation inputs live in the server's `.env`; generated credentials (NATS passwords, Nomad token, LLM proxy keys) stay in private server files. Client `mop login` saves bus and proxy credentials per server in `connection.json` (the legacy `operator.json` + `client.json` pair is still read for compatibility), never in installation `.env`
  - **MUST** `.env` never travels to the nodes — rsync excludes it explicitly
  - **MUST** No secrets in a Nomad job spec: it is visible in the UI and stays in the cluster's state; keys go to the nodes as a file, the spec carries only variable names
  - **MUST** A puppet reaches the bus under its project's credentials, not the node's: the agent sees who is being asked about, never who is asking
