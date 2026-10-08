@@ -78,18 +78,22 @@ def show(out, as_json, quiet_recorded=False):
     адрес на 30 минут, исключения для 127.0.0.1 нет), 403 -- «доступ
     запрещён», не «ключ неверен».
 
-    quiet_recorded (start): операция записана -- rc 0 и тишина, как у
-    быстрых успешных команд; скрипт обязан отличать удачный start от
-    отказа. resume остаётся прежним: completed -- 0, pending/отказ -- 1.
-    -> rc."""
-    if quiet_recorded and out.get("stage") and out.get("ok") is not False:
-        # Проекция begin несёт только id/schema/stage/recipients --
-        # «ok» в ней нет, это записанное состояние, не отказ. Явный
-        # ok=False (блокер) тихим не бывает.
-        return 0
+    quiet_recorded (start): операция записана -- rc 0, тихо или одной
+    строкой JSON по явному запросу; скрипт обязан отличать удачный
+    start от отказа. resume остаётся прежним: completed -- 0,
+    pending/отказ -- 1. -> rc."""
+    # as_json первым: quiet_recorded раньше него глотал и явный запрос
+    # JSON (тихий rc 0 без строки). Отказ (ok=False) тихим не бывает ни
+    # в одном режиме.
     if as_json:
+        recorded = quiet_recorded and out.get("stage") \
+            and out.get("ok") is not False
         print(json.dumps(out))
-        return 0 if out.get("ok") else 1
+        # Проекция begin несёт только id/schema/stage/recipients --
+        # «ok» в ней нет, это записанное состояние, не отказ.
+        return 0 if out.get("ok") or recorded else 1
+    if quiet_recorded and out.get("stage") and out.get("ok") is not False:
+        return 0
     if not out.get("ok"):
         why = out.get("blocker") or out.get("note") or out.get("stage")
         extra = _wording(out)

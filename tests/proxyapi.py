@@ -733,6 +733,63 @@ def check_start_quiet_539(c):
             (rc, out_text, err_text))
 
 
+# HYPOTHESIS (ревью 6480839): quiet_recorded стоял раньше as_json, и
+# start --json на записанной операции молча возвращал rc 0 -- JSON
+# запросили явно, а строки нет. Просто поменять порядок нельзя: у
+# проекции begin нет поля ok, и JSON-путь вернул бы rc 1 на успехе.
+def check_start_json_539(c):
+    from mop.cli.server.proxykey import start, _common
+    from mop.common import paths
+    box, http = stand(c)
+    with patched(proxykey, OP=box["op"], LOCK=box["lock"]), \
+            patched_env(INVENTORY=box["inv"], MOP_PROJECT=None,
+                        MOP_BUS_CONFIG=None, HOME=box["dir"],
+                        MOP_HOME=os.path.join(box["dir"], "abs-home")), \
+            patched(_common, effects=lambda: effects_of(http, box["mgmt"])), \
+            patched(sys, stdout=io.StringIO(), stderr=io.StringIO()):
+        for name in ("llm-proxy-mgmt.pass", "llm-proxy-client.pass"):
+            p = paths.local(paths.SECRETS, name)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            key = "mgmt-key-539" if "mgmt" in name else "old-key-539"
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(key + "\n")
+            os.chmod(p, 0o600)
+        cp = paths.under(os.path.join(box["dir"], "abs-home"),
+                         paths.SECRETS, "llm-proxy-client.pass")
+        os.makedirs(os.path.dirname(cp), exist_ok=True)
+        with open(cp, "w", encoding="utf-8") as f:
+            f.write("old-key-539\n")
+        os.chmod(cp, 0o600)
+        rc = start.main(["--no-recipients", "--exclusive", "--json"])
+        out_text = sys.stdout.getvalue()
+        err_text = sys.stderr.getvalue()
+    # Одна строка JSON -- та же safe-проекция begin (id/schema/stage/
+    # recipients, без ключей), rc 0: записанное состояние -- успех в
+    # обоих путях печати.
+    parsed = None
+    try:
+        parsed = json.loads(out_text)
+    except ValueError:
+        pass
+    c.check("#539 a recorded start prints one JSON line with rc 0",
+            rc == 0 and isinstance(parsed, dict) and parsed.get("stage")
+            == "ready" and "new" not in parsed and not err_text.strip(),
+            (rc, out_text, err_text))
+
+    # Отказ (ok=False) остаётся rc 1 в обоих режимах: тихий успех -- не
+    # повод глотать блокер. Прямой вызов show -- форма блокера из
+    # исключения библиотеки (RuntimeError), а не проекция begin.
+    for as_json in (False, True):
+        out = {"ok": False, "stage": "listed", "refused": True,
+               "blocker": "PUT refused before applying"}
+        with patched(sys, stdout=io.StringIO(), stderr=io.StringIO()):
+            rc = _common.show(out, as_json, quiet_recorded=True)
+            text = (sys.stdout.getvalue()
+                    + sys.stderr.getvalue())
+        c.check(f"#539 a refused start stays rc 1 (json={as_json})",
+                rc == 1 and text.strip(), (rc, text))
+
+
 # HYPOTHESIS: имя класса исключения попадает оператору через
 # type(e).__name__ («cannot read the key list (…)») -- внутреннее имя
 # класса не читается человеком. Класс зовётся ManagementRefused.
@@ -800,6 +857,7 @@ def main():
     check_flag_conflict_539(c)
     check_get_lockout_539(c)
     check_start_quiet_539(c)
+    check_start_json_539(c)
     check_blocker_class_name_539(c)
     check_nodes_validation_539(c)
     check_all_registered_once_539(c)
