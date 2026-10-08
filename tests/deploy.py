@@ -1036,7 +1036,88 @@ def check_agent_unit_172(c, can_render):
 # RESULT: красный прогон впереди реализации -- посев парой из двух задач
 # (обрыв не восстанавливается), клей стейджинга отсутствует.
 # STATUS: FIXED — see #540
+# ── #552: общий защитный gate посева, действующие условия задач ──────────
+# HYPOTHESIS (#552): пять защитных условий посева (другие HOME, неактивный
+# writer, отсутствие трёх файлов) повторены в двух задачах буквально. Правка
+# одного экземпляра молча расходила fail и copy -- gate перестал быть общим,
+# и одна из задач ушла из-под защиты. SOLUTION: один block с общим when;
+# внутри -- только различающиеся условия (признак отказа у fail, наличие
+# staged-файла у copy). Проверка сверяет ДЕЙСТВУЮЩИЕ условия каждой задачи
+# -- собственные плюс унаследованный block.when -- с утверждённым набором
+# #540, и требует, чтобы общий gate был именно общим: ровно один блок,
+# обнимающий обе задачи, без дублирования условий между уровнями.
+def check_registry_gate_552(c, ptasks):
+    import types
+    tasks = [t for t in (ptasks or []) if isinstance(t, dict) and "name" in t]
+
+    def find(needle, attr):
+        for t in tasks:
+            if needle in str(t.get("name", "")) and attr in t:
+                return t
+        return None
+
+    fail = next((t for t in tasks if "ansible.builtin.fail" in t), None)
+    copy = find("Registry of the projects, v1 snapshot", "ansible.builtin.copy")
+    if not c.check("#552 the seed fail and copy tasks are both present",
+                   fail is not None and copy is not None,
+                   (fail and fail.get("name"), copy and copy.get("name"))):
+        return
+
+    def block_of(task):
+        """Родительский block задачи по имени -- сам блок в списке задач
+        не живёт, ищем по имени внутренней задачи."""
+        for t in tasks:
+            body = t.get("block")
+            if isinstance(body, list) and any(inner.get("name") == task.get("name")
+                                              for inner in body
+                                              if isinstance(inner, dict)):
+                return t
+        return None
+
+    fb, cb = block_of(fail), block_of(copy)
+    c.check("#552 one shared block guards both the refusal and the copy",
+            fb is not None and cb is not None and fb is cb, None)
+
+    def conds_of(task):
+        """Действующие условия: собственные + унаследованный block.when."""
+        own = task.get("when", [])
+        out = [str(x) for x in (own if isinstance(own, list) else [own])]
+        parent = block_of(task)
+        if parent is not None:
+            bw = parent.get("when", [])
+            out += [str(x) for x in (bw if isinstance(bw, list) else [bw])]
+        return set(out)
+
+    # Утверждённый набор #540, неизменный по постановке #552: no-clobber,
+    # владелец, mode, причина отказа и критерий inactive не меняются.
+    gate = {"lookup('env', 'HOME') != MOP_HOME",
+            "cluster_service_running.stdout == 'inactive'",
+            "not server_snapshot.stat.exists", "not server_pair.stat.exists",
+            "not server_limits.stat.exists"}
+    c.check("#552 the refusal fires under exactly the seed's protective gate",
+            conds_of(fail) == gate | {"mop_registry_seed_refused"}, conds_of(fail))
+    c.check("#552 the copy runs under exactly the seed's protective gate",
+            conds_of(copy) == gate | {"mop_registry_seed != ''",
+                                      "seed_file.stat.exists"}, conds_of(copy))
+
+    # Общность -- не только равенство множеств: gate живёт на БЛОКЕ, а не
+    # продублирован в каждой задаче. Дублирование между уровнями (условие
+    # и в блоке, и в задаче) -- та же рассинхронизация при правке.
+    if fb is not None:
+        bw = fb.get("when", [])
+        block_conds = {str(x) for x in (bw if isinstance(bw, list) else [bw])}
+        c.check("#552 the shared gate lives on the block, not duplicated per task",
+                block_conds == gate, block_conds)
+        for task, label in ((fail, "fail"), (copy, "copy")):
+            own = task.get("when", [])
+            own_set = {str(x) for x in (own if isinstance(own, list) else [own])}
+            c.check(f"#552 the {label} task keeps only its differing conditions",
+                    not (own_set & gate), own_set)
+
+
 def check_registry_seeding_540(c, ptasks):
+    check_registry_gate_552(c, ptasks)
+
     import itertools
     import types
     tasks = [t for t in (ptasks or []) if isinstance(t, dict) and "name" in t]
