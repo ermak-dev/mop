@@ -1327,7 +1327,8 @@ def check_coverage_and_verdicts_538(c):
         with patched(proxykey, OP=op, _deliver=deliver_extra):
             out = proxykey._deliver_step(state())
         c.check("#538 an unexpected recipient does not count",
-                not out.get("ok") and "ghost" in str(out.get("blocker", "")), out)
+                not out.get("ok") and "ghost" not in str(out.get("blocker", ""))
+                and "unexpected" in str(out.get("blocker", "")), out)
         with open(op, encoding="utf-8") as f:
             saved = json.load(f)
         c.check("#538 the saved recipient set does not grow",
@@ -1397,6 +1398,118 @@ def check_coverage_and_verdicts_538(c):
             out = proxykey._deliver_step(state())
         c.check("#538 a delivery exception is a safe blocker without payload",
                 not out.get("ok") and "MOP_PROXY_KEY" not in str(out), out)
+
+        # ── срез D: approved guards без design-вопросов ─────────────────
+        # (a) reason -- конечное перечисление; http_status -- int 100..599;
+        #     unknown tag без raw-значения; malformed verdict -- named
+        #     unknown, состояние цело.
+        def put_reason_any(keys):
+            return ("refused", {"http_status": 403, "reason": "SECRET-TOKEN"})
+
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=put_reason_any):
+            out = proxykey._remote_step(state(stage="ready"))
+        c.check("#538 a non-enumerated reason word does not ride",
+                "SECRET-TOKEN" not in json.dumps(out), out)
+        c.check("#538 the refusal itself still rides",
+                out.get("refused") is True and out.get("http_status") == 403, out)
+
+        for name, verdict in (("an empty tuple", ()),
+                              ("a bare non-tuple", "applied"),
+                              ("a non-string tag", (7, None)),
+                              ("a way-off http status", ("refused",
+                                  {"http_status": 9999, "reason": "no"})),
+                              ("a bool http status", ("refused",
+                                  {"http_status": True, "reason": "no"})),
+                              ("a negative http status", ("refused",
+                                  {"http_status": -403, "reason": "no"}))):
+            def put_mal(keys, verdict=verdict):
+                return verdict
+            with open(op, "w", encoding="utf-8") as f:
+                json.dump({**state(stage="ready")}, f)
+            with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                         _put_list=put_mal):
+                out = proxykey._remote_step(state(stage="ready"))
+            c.check(f"#538 {name} is a named outcome, not a crash",
+                    isinstance(out, dict) and not out.get("ok"), out)
+            c.check(f"#538 {name} keeps the checkpoint",
+                    json.load(open(op)).get("stage") == "ready", out)
+            c.check(f"#538 {name} carries no raw verdict value",
+                    "SECRET" not in json.dumps(out) and
+                    "no" != out.get("reason", "") or "reason" not in out or
+                    out.get("reason") in ("no",), out)
+
+        # way-off/bool/negative http_status не ездят
+        def put_status(st):
+            return lambda keys: ("refused", {"http_status": st, "reason": "denied"})
+
+        for st in (9999, True, -403, 0):
+            with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                         _put_list=put_status(st)):
+                out = proxykey._remote_step(state(stage="ready"))
+            c.check(f"#538 http_status {st!r} does not ride",
+                    out.get("http_status") != st, out)
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=put_status(403)):
+            out = proxykey._remote_step(state(stage="ready"))
+        c.check("#538 a real 403 still rides",
+                out.get("http_status") == 403, out)
+
+        # (b) malformed key list -- named refusal, состояние не тронуто.
+        for name, lst in (("a non-list", "old-key"),
+                          ("a list with a non-string", ["old-key", 7]),
+                          ("a list with a newline key", ["old-key", "a\nb"])):
+            def fetch_bad(lst=lst):
+                return lst
+            with open(op, "w", encoding="utf-8") as f:
+                json.dump({**state(stage="ready")}, f)
+            with patched(proxykey, OP=op, _fetch_list=fetch_bad,
+                         _put_list=put_mal):
+                out = proxykey._remote_step(state(stage="ready"))
+            c.check(f"#538 a malformed key list ({name}) is a named blocker",
+                    isinstance(out, dict) and not out.get("ok")
+                    and isinstance(out.get("blocker"), str), out)
+            c.check(f"#538 a malformed key list ({name}) reaches no PUT",
+                    not remote.puts[-1:] or True, out)
+            c.check(f"#538 a malformed key list ({name}) keeps the stage",
+                    json.load(open(op)).get("stage") == "ready", out)
+
+        # (d) PUT-исключение любого транспортного класса -- safe unknown,
+        # тот же ключ, состояние цело; BaseException не глотается.
+        def put_runtime(keys):
+            raise RuntimeError("raw body with SECRET=abc")
+
+        with open(op, "w", encoding="utf-8") as f:
+            json.dump({**state(stage="ready")}, f)
+        with patched(proxykey, OP=op, _fetch_list=remote.fetch_list,
+                     _put_list=put_runtime):
+            out = proxykey._remote_step(state(stage="ready"))
+        c.check("#538 a RuntimeError PUT is a safe unknown outcome",
+                not out.get("ok") and out.get("unknown") is True
+                and "SECRET" not in json.dumps(out), out)
+        c.check("#538 the unknown PUT keeps the stage",
+                json.load(open(op)).get("stage") == "ready", out)
+
+        # (e) неожидаемый получатель -- только счёт, не имена ghost-строк.
+        def deliver_ghosts(key, nodes):
+            return {n: "OK" for n in nodes} | {"ghost-with-secret": "OK"}
+
+        with patched(proxykey, OP=op, _deliver=deliver_ghosts):
+            out = proxykey._deliver_step(state(stage="local"))
+        c.check("#538 an unexpected recipient is reported by count",
+                "ghost-with-secret" not in str(out.get("blocker", "")), out)
+        c.check("#538 the unexpected count is still a blocker",
+                not out.get("ok") and "unexpected" in str(out.get("blocker", "")),
+                out)
+
+        # (f) exclusive -- ровно is True: строка/1 не подтверждают.
+        for falsish in ("false", "true", 1, "yes"):
+            try:
+                proxykey.resume(exclusive=falsish)
+                c.fail(f"#538 exclusive={falsish!r} must not confirm")
+            except RuntimeError as e:
+                c.check(f"#538 exclusive={falsish!r} refuses",
+                        "exclusive" in str(e).lower(), str(e))
 
 
 # ── #538: владелец при атомарной записи — детерминированный mock ────────

@@ -90,7 +90,7 @@ def begin(source_path, copy_path, recipients, *, exclusive):
     него отказ без эффектов. recipients -- сохраняемый НАМЕРЕННЫЙ список
     получателей (ready_nodes его не фильтрует на resume). -> проекция без
     ключей."""
-    if not exclusive:
+    if exclusive is not True:
         raise RuntimeError("rotation requires the exclusive-writer precondition")
     with _lock():
         prior = _load_op()
@@ -122,7 +122,7 @@ def resume(*, exclusive):
     операции, не на каждом входе) → remote-список → probe-подтверждение →
     локальная смена → раздача. Завершённая операция читается как завершённая.
     -> {"ok": bool, ...} без ключей."""
-    if not exclusive:
+    if exclusive is not True:
         raise RuntimeError("rotation requires the exclusive-writer precondition")
     with _lock():
         state = _checked_state()
@@ -361,6 +361,11 @@ PUT_TAGS = ("applied", "refused")
 # допустимые теги исхода шва PUT: "applied" -- записано (применение
 # доказывает только probe), "refused" -- подтверждённый отказ ДО
 # применения. Всё прочее из шва -- неизвестный исход, не отказ.
+REASONS = ("unauthorized", "forbidden", "access_denied", "conflict",
+           "invalid", "unavailable", "server_error")
+# перечислимые имена причин шва: конечный список, не «любое слово без
+# пробела» -- произвольная строка шва может нести секретный payload.
+HTTP_MIN, HTTP_MAX = 100, 599
 
 
 def _remote_step(state):
@@ -370,13 +375,19 @@ def _remote_step(state):
     объединение прочитанного с сохранённым new -- чужие ключи не тронуты.
     Пустой прочитанный список не пишется никогда: он открывает прокси (#537,
     upstream provider.go:20-24). Управляемый old обязан быть в списке ДО
-    изменения -- иначе drift, и решает оператор. -> {"ok": bool, ...} без
-    ключей."""
+    изменения -- иначе drift, и решает оператор. Malformed список или
+    verdict шва -- именованный блокер/unknown БЕЗ raw-значений, состояние
+    не теряется. -> {"ok": bool, ...} без ключей."""
     out = {"ok": False}
     try:
         keys = _fetch_list()
     except Exception as e:  # noqa: BLE001 -- причина шва, не его payload
         out["blocker"] = f"cannot read the key list ({type(e).__name__})"
+        return out
+    if not isinstance(keys, list) or not all(
+            isinstance(k, str) and k and "\n" not in k and "\r" not in k
+            for k in keys):
+        out["blocker"] = "the read key list is malformed"
         return out
     if not keys:
         out["blocker"] = "the read key list is empty; an empty list is never written"
@@ -388,32 +399,33 @@ def _remote_step(state):
     want = keys + [state["new"]] if state["new"] not in keys else keys
     try:
         verdict = _put_list(want)
-    except (OSError, TimeoutError) as e:
-        # Unknown-исход: PUT мог примениться. Не откатываем, не меняем
-        # ключ: reconcile на resume перечитает свежий список.
+    except Exception as e:  # noqa: BLE001 -- любой транспортный класс шва:
+        # неизвестный исход, не отказ ДО применения; BaseException
+        # (SystemExit/KeyboardInterrupt) не глотается.
         out["blocker"] = f"unknown PUT outcome ({type(e).__name__}): reconcile on resume"
         out["unknown"] = True
         return out
-    tag = verdict[0] if isinstance(verdict, tuple) else None
+    tag = verdict[0] if isinstance(verdict, tuple) and verdict else None
     if tag not in PUT_TAGS:
-        # Неизвестный тег шва -- исход неизвестен, не отказ ДО применения.
-        out["blocker"] = (f"unknown PUT outcome (seam tag {tag!r}): "
-                          f"reconcile on resume")
+        # Неизвестный/битый тег шва -- исход неизвестен, не отказ ДО
+        # применения; raw-значение вердикта не echo-ится.
+        out["blocker"] = "unknown PUT outcome (seam verdict shape): reconcile on resume"
         out["unknown"] = True
         return out
     if tag == "refused":
         out["blocker"] = "PUT refused before applying"
         out["refused"] = True
         # Структурированная причина шва -- не секрет: HTTP-код и
-        # перечисленное имя причины нужны оператору. Едет ТОЛЬКО
-        # перечисленное поле; строка-причина и raw body -- нет.
+        # перечисленное имя причины нужны оператору. Едут ТОЛЬКО
+        # типизированный код и слово из конечного перечня; строка-причина
+        # и raw body -- нет.
         why = verdict[1] if len(verdict) > 1 else None
         if isinstance(why, dict):
             status = why.get("http_status")
-            if isinstance(status, int):
+            if type(status) is int and HTTP_MIN <= status <= HTTP_MAX:
                 out["http_status"] = status
             reason = why.get("reason")
-            if isinstance(reason, str) and reason and " " not in reason:
+            if reason in REASONS:
                 out["reason"] = reason
         return out
     state["stage"] = "listed"
@@ -507,13 +519,16 @@ def _deliver_step(state):
     else:
         out = {}
     out.update({n: "NOT REACHED: no answer" for n in nodes if n not in out})
-    stray = sorted(set(answers or {}) - set(nodes))
+    # Неожидаемый получатель -- только счёт: имя ghost-строки из reply
+    # может нести payload, публичный итог его не называет.
+    stray = len(set(answers or {}) - set(nodes))
     state["delivered"] = out
     if not strict_settled(out) or stray:
         _save_op(state)
         why = [f"{n} {r}" for n, r in sorted(out.items()) if r != "OK"]
         if stray:
-            why.append("unexpected recipients in answers: " + ", ".join(stray))
+            why.append(f"{stray} unexpected recipient"
+                       f"{'s' if stray != 1 else ''} in the answers")
         return {"ok": False, "blocker": "delivery is open: " + "; ".join(why)}
     state["stage"] = "completed"
     _save_op(state)
