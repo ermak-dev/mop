@@ -496,6 +496,37 @@ def human_profile(directory):
     return who if kind == "human" else None
 
 
+def human_login(directory, host):
+    """Полный человеческий профиль каталога или RuntimeError (#549).
+
+    Единственный владелец требования «потребителю прокси нужен целый вход
+    человека»: до этого тот же блок (snapshot -> ProfileError ->
+    RuntimeError -> разбор kind) был повторён в session_env,
+    models.available и doctor._probe тремя копиями -- и разошёлся бы при
+    первой правке текста. Тексты прежние дословно: machine/partial/пусто
+    -- разные ремонты (отдельная учётка, повторный вход, первый вход),
+    ProfileError (битое, конфликт ролей) идёт дословно. Один снимок на
+    операцию; прав, форматов и приоритетов решатель не меняет."""
+    try:
+        kind, record = snapshot(directory)
+    except ProfileError as e:
+        raise RuntimeError(str(e)) from e
+    if kind == "human":
+        return record
+    if kind == "machine":
+        # Служебный каталог: человеческий login в него сам запрещён, совет
+        # «войди сюда» был бы заведомо неработающим. Отдельная учётка не
+        # требует другой установки: вход на ТОМ ЖЕ сервере, в свой каталог.
+        raise RuntimeError(f"no human login for {host} (a machine service "
+                           f"directory): use a separate operator account "
+                           f"or connection directory, run mop login "
+                           f"--server {host} <login>")
+    if kind == "partial":
+        raise RuntimeError(f"incomplete login for {host}: re-run "
+                           f"mop login --server {host}")
+    raise RuntimeError(f"no login for {host}: run mop login --server {host}")
+
+
 def joined_dirs(root=None):
     """Каталоги серверов, где есть след входа: целый профиль, машинный вход
     или ОСТАТОК прежней пары (#533). Остаток -- только подсказка выбора

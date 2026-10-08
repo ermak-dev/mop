@@ -21,22 +21,9 @@ def available():
     """ID моделей выбранного joined-сервера; ключ не покидает HTTPS и localhost."""
     host = config.get("MOP_SERVER_LAN")
     directory = creds.server_dir(host)
-    # Один снимок профиля (#533): готовый человеческий вход, не половины;
-    # пустой каталог отличён от служебного -- у них разные ремонты.
-    try:
-        kind, joined = creds.snapshot(directory)
-    except creds.ProfileError as e:
-        raise RuntimeError(str(e)) from e
-    if kind != "human":
-        if kind == "machine":
-            raise RuntimeError(f"no human login for {host} (a machine service "
-                               f"directory): use a separate operator account "
-                               f"or connection directory, run mop login "
-                               f"--server {host} <login>")
-        if kind == "partial":
-            raise RuntimeError(f"incomplete login for {host}: re-run "
-                               f"mop login --server {host}")
-        raise RuntimeError(f"no login for {host}: run mop login --server {host}")
+    # Требование полного человеческого входа -- creds.human_login (#549):
+    # единый владелец текстов отказа, один снимок профиля (#533).
+    joined = creds.human_login(directory, host)
     url = llm.endpoint(joined["proxy_url"], "models", host=host,
                        port=joined["https_port"])
     parsed = urllib.parse.urlsplit(url)
