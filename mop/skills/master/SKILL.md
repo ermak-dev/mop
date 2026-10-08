@@ -9,7 +9,10 @@ You hold the queue and the operator's attention; puppets hold the keyboards.
 Loop: **gather → triage → dispatch → landing → next**.
 
 1. **Nothing is dispatched without approval** — reason through one ticket at a
-   time with the operator before claiming or sending it.
+   time with the operator before claiming or sending it. An epic the operator
+   has explicitly approved covers its named in-scope tickets: dispatch them
+   without re-blocking on each child; a ticket outside that scope, or any
+   scope change, is its own approval.
 2. **The pool is the `mcp__mop__agents` roster.** A puppet is a job created by
    `mcp__mop__add`; no other Claude instance, however plausible its origin,
    gets pool work. One clone = one ticket; every dispatch has full context.
@@ -177,7 +180,10 @@ fix: read the ticket and the puppet's report, and distinguish instrumentation,
 incomplete work and incidental issue mentions from a fix. If the CLI is
 unavailable and you cannot establish the status through it, stop and ask the
 operator. An epic itself is not dispatchable work: its component tickets and
-trigger must be explicit, closed and satisfied before it can land.
+trigger must be explicit before it can land. Their readiness is governed by
+the project's rules — for mop: each task accepted, integrated into the epic
+branch, its required CI green; issue closure and rollout evidence are
+tracked separately, not preconditions of the epic merge.
 
 The integration pipeline belongs to the master. Use `mop dev ci list` and
 `mop dev ci show` to track it, `mop dev ci why` and `mop dev ci log` to
@@ -229,10 +235,12 @@ instructions. Adapt the gate and token clauses to the project's rules:
 > before landing. If the project keeps a token, wait for my grant before
 > the merge/push; if it does not, wait for my explicit “land” message.
 > Once authorized, fetch a fresh <integration target>; merge --no-ff,
-> run <the narrow checks available on the merged tree; the project's full
-> suite and dist checks gate the landing in CI on the pushed merge SHA>,
-> then push once. A rejected push:
-> fetch, merge again, rerun the narrow checks, push; never force push.
+> run <exactly the pre-push checks the project's rules require: where its
+> full gate lives in CI, the narrow checks available on the merged tree —
+> the pipeline on the pushed merge SHA is the master's to watch; where the
+> project demands a local full suite, that local suite stays the puppet's
+> own pre-push check>, then push once. A rejected push:
+> fetch, merge again, rerun those checks, push; never force push.
 > Switch the clone back to its default branch when clean and report FULL
 > merge sha, test verdict, remainder and rollout evidence. Do not wait for
 > the integration pipeline — I monitor it. Return the token on your report.
@@ -257,9 +265,12 @@ blocking dialogs are a pool tooling defect; report them.
 ## Pool discipline
 
 The queue has three states: **approved-ready** (dispatch now), **review+CI**
-(report accepted, awaiting source review and a green pipeline on the exact
-SHA — green means the pipeline that ran; stale or cancelled is not success),
-and **blocked** (name the cause and the issues it waits on).
+(report submitted and pushed: awaiting source review and a green pipeline
+on the exact SHA — green means the pipeline that ran; stale or cancelled is
+not success), and **blocked** (name the cause and the issues it waits on).
+In review+CI the landing waits on two things before it may be granted:
+the issue branch's own green pipeline and the master's source acceptance;
+after the push, the merge SHA's green pipeline settles the integration.
 
 A clean pushed checkpoint does not reserve a puppet slot through a long
 review or CI run: the fix sha is immutable and the author is fixed, so an
