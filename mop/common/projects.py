@@ -23,8 +23,11 @@
 остаются голые имена, origin которых уже не узнать; завести новую такую
 строку нельзя, а старую не теряем.
 """
+import hashlib
 import json
 import os
+import secrets
+import time
 
 from .. import driver
 from . import fsutil, paths, puppets
@@ -516,7 +519,15 @@ def legacy_pair_of(snapshot):
     writers, выгрузить пару, переключить), и её шаги видны явно. После
     новых мутаций v1 roundtrip-стабильна: миграция той же пары даёт тот
     же снимок (проверено tests/projects.py). View читателя (голые имена,
-    orphan-потолки) непредставим в паре без потерь -- отказ, не потеря."""
+    orphan-потолки) непредставим в паре без потерь -- отказ, не потеря.
+
+    Граница lossless (#542): сериализация пары -- строка + "\n" на строку,
+    а читатель пары собирает строки .strip(). Origin с CR/LF, NUL или
+    краевым пробелом парсер origin'ов принимает (он кормит живые клоны и
+    прощает края), но пара из него читалась бы НЕ тем числом строк и
+    проектов: экспорт обязан быть lossless, такой origin -- отказ ДО
+    всякой записи, без raw origin в тексте.
+    """
     if not isinstance(snapshot, dict):
         _checked(snapshot, "cannot export the snapshot: it")  # отказ по типу
     if snapshot.get("legacy") or snapshot.get("legacy_limits"):
@@ -527,10 +538,218 @@ def legacy_pair_of(snapshot):
                            "migrate the pair by an operator decision first")
     _checked(snapshot, "cannot export the snapshot: it")
     lines = snapshot_origins(snapshot)
+    for n, origin in enumerate(lines, start=1):
+        # Одна строка реестра на origin: без CR/LF/NUL и без краевого
+        # пробела (читатель пары стрипает). Отказ -- место и номер, не
+        # сырой origin с кредами.
+        if (not isinstance(origin, str) or "\n" in origin or "\r" in origin
+                or "\0" in origin or origin != origin.strip()):
+            raise RuntimeError(f"cannot export the snapshot: origin of project #{n} "
+                               "carries a line break, NUL or edge whitespace; "
+                               "the legacy pair is not lossless for it")
     limits = {puppets.project_of(p["origin"]): p["limit"]
               for p in snapshot["projects"] if "limit" in p}
     return lines, limits
 
+
+# ─── выгрузка для отката: пара из одного снимка (#542) ────────────────────
+# После миграции старые projects/limits.json лежат на диске устаревшими, а
+# git revert снимка не сохраняет add/delete/limit, случившиеся позже.
+# Обратный экспорт -- это один валидированный снимок, разложенный в пару в
+# НОВОМ каталоге: живой реестр не тронут, настоящий переключение -- за
+# оператором (остановить writers, снять финальный экспорт, сверить digest,
+# переключить). Resume v1 после правок старым writer'ом обязан перечитать
+# свежий снимок, а не доверять устаревшему; лечить голые имена/коллизии/
+# orphan-потолки автоматически команда не берётся -- это отдельные решения.
+def export_pair(dest, snapshot_path=None):
+    """Выгрузить реестр парой в НОВЫЙ каталог. -> сводка.
+
+    Источник не трогает: читает ОДИН раз, единственная запись -- сама
+    выгрузка в dest. Функция меняет ФС, это не pure function: «чистота»
+    здесь -- отсутствие побочных эффектов на живом реестре, не чистота
+    записи.
+
+    Порядок и гарантии (#542):
+      * снимок читается ОДНИМ запросом ДО всякой записи -- байты, digest,
+        разбор валидатором #534; нет файла или битый -- отказ, БЕЗ
+        fallback на устаревшую легаси-пару;
+      * по имени dest не пишется НИЧЕГО и оно не занимается заранее:
+        пара собирается в НЕУГАДЫВАЕМОМ staging-каталоге рядом с dest
+        (mkdir соль-имени 0700, мгновенная привязка fd, O_NOFOLLOW),
+        записи идут только по fd. Соль-имя -- граница от НЕЗНАЮЩЕГО
+        имени (race, ошибка, мусор), НЕ обещание защиты от того же uid:
+        сосед с тем же uid видит имя в листинге родителя до публикации
+        и может его подменить; на этот случай остаётся отказ по факту
+        (перечитка не сходится, bind не проходит), а не гарантия
+        невозможности. listdir на staging -- здравый смысл на только
+        что придуманном имени, не «доказательство ownership»;
+      * файлы пишутся fsutil.write_private_dirfd (тот же атомарный
+        приватный writer #153, по fd) и ПЕРЕЧИТЫВАЮТСЯ по fd: фактические
+        байты и права сверяются с ожидаемыми ДО маркера; маркер
+        export.json -- ПОСЛЕДНИМ и тоже перечитан: его нет или он не
+        сошёлся -- экспорт не состоялся. Это защита от обрыва процесса,
+        не обещание сохранности при потере питания;
+      * публикация -- ОДИН атомарный rename без перезаписи
+        (fsutil.rename_noreplace, renameat2 RENAME_NOREPLACE): имя dest
+        занято (файл, каталог, symlink, в том числе ПУСТОЙ чужой каталог
+        между записью и публикацией) -- EEXIST, отказ, чужое НЕ тронуто;
+        свободно -- готовый каталог ЦЕЛИКОМ становится dest. Окна
+        «проверить имя, затем положить» на dest нет вовсе;
+      * провал чистит только созданное ЭТОЙ попыткой и только по fd:
+        файлы unlink'ом по fd, staging-каталог rmdir по СВОЕМУ соль-имени
+        после сверки identity с fd. Имя dest при неудаче не занимается
+        вовсе, чужой namespace не переименовывается и не удаляется;
+        renameat2 недоступен на платформе -- отказ с именем ограничения,
+        без молчаливого TOCTOU-fallback;
+      * сводка -- счётчик, источник и digest: креды origin'ов живут в
+        закрытых файлах пары, не в stdout/metadata/ошибках.
+    """
+    path = SNAPSHOT if snapshot_path is None else snapshot_path
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raise RuntimeError(f"nothing to export: {path} does not exist; a legacy "
+                           "pair is not a rollback source -- migrate first") from None
+    except OSError as e:
+        raise RuntimeError(f"cannot export: {path} is unreadable: {e}") from None
+    try:
+        parsed = json.loads(raw)
+    except ValueError as e:
+        raise RuntimeError(f"cannot export: {path} is not valid JSON: {e}") from None
+    _checked(parsed, f"cannot export: {path}")
+    lines, limits = legacy_pair_of(parsed)
+    digest = hashlib.sha256(raw).hexdigest()
+    pair = {
+        "projects": "".join(f"{s}\n" for s in lines).encode(),
+        "limits.json": (json.dumps(limits, sort_keys=True) + "\n").encode(),
+    }
+    marker = {"what": "mop registry rollback export", "version": 1,
+              "schema": "legacy-pair", "source": path, "snapshot_sha256": digest,
+              "projects": len(lines),
+              "files": {n: hashlib.sha256(d).hexdigest() for n, d in pair.items()},
+              "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    marker_body = (json.dumps(marker, indent=1, sort_keys=True) + "\n").encode()
+    # Staging: неугадываемое имя рядом с dest, привязка fd СРАЗУ. Родителя
+    # создаёт оператор: экспорт не расползается по чужим путям.
+    parent = os.path.dirname(dest) or "."
+    base = os.path.basename(dest)
+    try:
+        pfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as e:
+        raise RuntimeError(f"cannot export: cannot open the parent of {dest}: "
+                           f"{e}") from None
+    why = None
+    try:
+        staging = f".mop-export-{secrets.token_hex(6)}"
+        try:
+            os.mkdir(staging, 0o700, dir_fd=pfd)
+        except OSError as e:
+            raise RuntimeError(f"cannot export: cannot create the staging "
+                               f"directory for {dest}: {e}") from None
+        try:
+            dirfd = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=pfd)
+        except OSError as e:
+            why = f"cannot export: cannot bind the staging directory for {dest}: {e}"
+            try:
+                os.rmdir(staging, dir_fd=pfd)
+            except OSError:
+                pass
+            raise RuntimeError(why) from None
+        try:
+            if os.listdir(dirfd):
+                # Имя только что придумано и создано нами: непустой каталог
+                # на нём -- либо мусор в родителе, либо чужая guess-атака;
+                # ничего не писано -- не трогаем и не удаляем.
+                raise RuntimeError(f"cannot export: the staging directory for "
+                                   f"{dest} is not empty; nothing was written, "
+                                   "nothing was removed")
+            for name, data in pair.items():
+                fsutil.write_private_dirfd(dirfd, name, data)
+            # Сверка фактического: перечитать записанное ПО FD и сверить
+            # байты и права ДО маркера. Усечённая запись -- отказ: готовой
+            # публикации без целой пары не бывает.
+            for name, data in pair.items():
+                try:
+                    fdo = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
+                except OSError as e:
+                    raise RuntimeError(f"cannot export: {name} is missing from the "
+                                       f"staging directory: {e}") from None
+                with os.fdopen(fdo, "rb") as f:
+                    if f.read() != data:
+                        raise RuntimeError(f"cannot export: {name} was written "
+                                           "truncated or corrupted: the read-back "
+                                           "bytes do not match what was to be "
+                                           "exported")
+                st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+                if (st.st_mode & 0o777) != 0o600:
+                    raise RuntimeError(f"cannot export: {name} did not keep the "
+                                       "private mode 0600")
+            fsutil.write_private_dirfd(dirfd, "export.json", marker_body)
+            # Маркер тоже перечитан: публикация подтверждена фактом, не планом.
+            fdo = os.open("export.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
+            with os.fdopen(fdo, "rb") as f:
+                if f.read() != marker_body:
+                    raise RuntimeError("cannot export: export.json was written "
+                                       "truncated or corrupted: the read-back "
+                                       "bytes do not match")
+            # Публикация: ОДИН атомарный rename без перезаписи. Имя dest
+            # занято -- EEXIST, чужое не тронуто; свободно -- готовый
+            # каталог целиком становится dest.
+            if not fsutil.rename_noreplace(pfd, staging, pfd, base):
+                raise RuntimeError(f"cannot export: {dest} already exists; "
+                                   "refusing to overwrite -- name a new "
+                                   "directory") from None
+        except Exception as e:
+            # Уборка своего: файлы unlink'ом по fd, staging rmdir по СВОЕМУ
+            # соль-имени после сверки identity с fd. Имя dest не занималось
+            # (или публикация не прошла) -- чужой namespace не трогаем вовсе.
+            msg = str(e)
+            why = [msg if msg.startswith("cannot export") else f"cannot export: {e}"]
+            why.extend(_drop_staging_dir(dirfd, pfd, staging))
+            raise RuntimeError("; ".join(why)) from None
+        finally:
+            os.close(dirfd)
+    finally:
+        os.close(pfd)
+    return {"what": "mop registry rollback export", "projects": len(lines),
+            "source": path, "sha256": digest, "dest": dest}
+
+
+def _drop_staging_dir(dirfd, pfd, staging):
+    """Убрать СВОЙ staging-каталог попытки: файлы по fd, каталог -- по СВОЕМУ
+    неугадываемому соль-имени, со сверкой identity с fd перед rmdir (#542).
+
+    rmdir принимает только путь, поэтому остаточное окно между сверкой и
+    rmdir по СВОЕМУ соль-имени есть и названо честно: урон ограничен пустым
+    каталогом с неугадываемым именем рядом с dest; чужой namespace -- имя
+    dest и чужие каталоги -- не переименовывается и не удаляется вовсе
+    (ревью 2: никакого move чужого). ENOENT -- уже убрали, прощаем.
+    """
+    why = []
+    for name in ("projects", "limits.json", "export.json"):
+        try:
+            os.unlink(name, dir_fd=dirfd)
+        except FileNotFoundError:
+            pass  # не писали или уже убрали
+        except OSError as e:
+            why.append(f"cleanup failed on {name}: {e}")
+    if why:
+        return why
+    try:
+        st = os.stat(staging, dir_fd=pfd, follow_symlinks=False)
+        ours = os.fstat(dirfd)
+        if (st.st_dev, st.st_ino) != (ours.st_dev, ours.st_ino):
+            # Имя staging уже не наш каталог: не удалять, назвать.
+            return [f"cleanup: the staging directory name is no longer ours; "
+                    "left in place"]
+        os.rmdir(staging, dir_fd=pfd)
+    except FileNotFoundError:
+        pass  # уже убрали
+    except OSError as e:
+        why.append(f"cleanup failed: the staging directory {e}")
+    return why
 
 def for_deploy(answer, local):
     """Реестр для `mop server deploy`. -> (строки, примечание|None). Чистая функция.

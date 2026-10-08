@@ -508,7 +508,7 @@ def check_help_content_432(c):
     # Группа перечисляет свои глаголы — весь список, до последнего.
     verbs_of = {
         "mop/cli/driver/__init__.py": ("list", "run", "sweep", "clone-work", "build"),
-        "mop/cli/server/cluster/__init__.py": ("serve", "check", "users", "reload", "builder"),
+        "mop/cli/server/cluster/__init__.py": ("serve", "check", "users", "reload", "builder", "export"),
         "mop/cli/server/user/__init__.py": ("add", "passwd", "delete", "import"),
         "mop/cli/server/bootstrap/__init__.py": ("serve", "check"),
     }
@@ -2296,6 +2296,58 @@ def check_output_182(c):
                 out, err, code = through(users.main, [])
         c.expect("#534 cluster users reads the current registry view",
                  seen, [["new", "p"]])
+
+        # #542: cluster export -- офлайн-выгрузка пары из живого снимка.
+        # Один позиционный аргумент; usage на прочем; обычный успех ТИХИЙ
+        # (сводка -- в машинном маркере export.json и в возврате библиотеки,
+        # не в обязательной строке stdout, ревью 2); отказы кодом без эха
+        # origin'ов (креды живут в закрытых файлах пары).
+        from mop.cli.server.cluster import export as export_cmd
+        with tempfile.TemporaryDirectory(prefix="mop-test-542x-") as d:
+            secret = "https://user:secret-token@forge.example/team/x.git"
+            with open(os.path.join(d, "projects.json"), "w") as f:
+                f.write(json.dumps({"version": 1, "projects": [
+                    {"origin": secret, "limit": 2}]}))
+            dest = os.path.join(d, "rollback")
+            with restored(projects, "SNAPSHOT", "SNAPSHOT_DIR"):
+                projects.SNAPSHOT = os.path.join(d, "projects.json")
+                projects.SNAPSHOT_DIR = d
+                out, err, code = through(export_cmd.main, [dest])
+                c.check("#542 cluster export stays quiet on an ordinary success",
+                        code == 0 and not err and not out, (out, err, code))
+                out, err, code = through(export_cmd.main, [dest, "--json"])
+                c.check("#542 export --json is a usage refusal: one directory",
+                        code != 0 and not out, (out, err, code))
+                marker = os.path.join(dest, "export.json")
+                with open(marker) as f:
+                    marker_json = json.load(f)
+                c.check("#542 the completed marker stays machine-readable",
+                        marker_json.get("schema") == "legacy-pair"
+                        and marker_json.get("projects") == 1
+                        and "secret-token" not in open(marker, errors="ignore").read(),
+                        marker_json)
+                c.check("#542 the exported directory carries the private pair",
+                        os.path.exists(os.path.join(dest, "projects"))
+                        and os.path.exists(os.path.join(dest, "limits.json"))
+                        and os.path.exists(os.path.join(dest, "export.json")), dest)
+                out, err, code = through(export_cmd.main, [dest])
+                c.check("#542 a repeat export into the same dir refuses",
+                        code != 0 and not out and "already exists" in str(code),
+                        (out, err, code))
+                out, err, code = through(export_cmd.main, [])
+                c.check("#542 export without a directory is a usage refusal",
+                        code != 0 and not out, (out, err, code))
+                out, err, code = through(export_cmd.main, ["--flag", dest])
+                c.check("#542 a flag-shaped argument is a usage refusal",
+                        code != 0 and not out, (out, err, code))
+                other = os.path.join(d, "other")
+                os.makedirs(other)
+                out, err, code = through(export_cmd.main, [other])
+                c.check("#542 an existing directory destination refuses over the CLI",
+                        code != 0 and not out and "already exists" in str(code),
+                        (out, err, code))
+                c.check("#542 the refused CLI export left the directory empty",
+                        not os.listdir(other), os.listdir(other))
 
 
 def check_restore_all_188(c):

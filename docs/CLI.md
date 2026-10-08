@@ -926,13 +926,14 @@ files. docs/BUS.md.
 #### mop server cluster
 
 ```text
-cluster service: mop server cluster [serve|check|users|reload|builder] — Nomad behind the bus
+cluster service: mop server cluster [serve|check|users|reload|builder|export] — Nomad behind the bus
 
   mop server cluster check    is the service answering, and does it see Nomad
   mop server cluster serve    the server's subscriber (unit mop-cluster)
   mop server cluster users    write the bus users file from the server's registry
   mop server cluster reload   make nats reread its config, and check it took
   mop server cluster builder  the server's image builder (unit mop-builder)
+  mop server cluster export   write the registry as a legacy pair for a rollback
 
 The only one on the installation that talks to Nomad on someone else's
 behalf: masters and operators ask, the service checks that they may —
@@ -953,6 +954,36 @@ the controller's user: the playbook needs its inventory and ssh keys.
 
 ```text
 mop server cluster check: is the service answering on the bus, and does it see Nomad
+```
+
+#### mop server cluster export
+
+```text
+mop server cluster export <DIR> [--json]: write the registry as a legacy pair for a rollback
+
+On the server, as the pool user. Reads the live snapshot
+(~/.config/mop/projects.json) once, validates it, and lays the pair
+(projects, limits.json) out in a NEW directory DIR with a completion
+marker export.json; nothing in the live registry, the legacy pair or
+the bus is touched, and the command stops no writers.
+
+An ordinary success prints nothing (the summary is a machine matter:
+the library return and the export.json marker, not terminal prose);
+--json prints the summary as one JSON object for scripts. Refusals
+print their reason to stderr and exit non-zero, without echoing the
+contents of a corrupt file or any origin credentials.
+
+The rollback itself is an operator's procedure: stop every writer, take
+a final export, verify the sha256 in export.json against the source,
+then switch. The command does not perform the switch and does not
+repair bare names, collisions or orphan limits -- the validator refuses
+them, and how to resolve each is a separate decision.
+The export carries origin credentials as its private data: the
+directory is 0700, the files are 0600, and summaries, markers and
+refusals name paths, counts and digests -- never a URL or a token.
+An existing destination (file, directory, symlink, or a concurrent
+claim) is a refusal: the command never overwrites, and a failed attempt
+removes only what that attempt itself created.
 ```
 
 #### mop server cluster reload
