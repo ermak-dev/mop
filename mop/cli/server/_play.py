@@ -59,7 +59,8 @@ def _recap_failed(output):
     return False
 
 
-def play_vars(projects, manifests=None, limits=None, git_hosts=None, inventory_hosts=None):
+def play_vars(projects, manifests=None, limits=None, git_hosts=None, inventory_hosts=None,
+              registry_seed=None):
     """Списки плейбуку как --extra-vars, JSON'ом. -> [строки].
 
     Объектом, а не парой ключ=значение: `--extra-vars mop_projects=[...]`
@@ -67,7 +68,12 @@ def play_vars(projects, manifests=None, limits=None, git_hosts=None, inventory_h
     символам, порождая пользователей `master-[`, `master-"` и так далее.
 
     Манифесты — только у полной игры: узкому прогону проектов (bus) они не
-    нужны, их читают слои узла и тела."""
+    нужны, их читают слои узла и тела.
+
+    registry_seed (#540) -- путь к снятому на контроллере снимку реестра
+    v1 для посева на пустой сервер: путь, не содержимое, и только когда
+    есть что сеять (None -- переменной нет вовсе, ручной прогон без
+    extra-vars видит пустой дефолт из group_vars)."""
     # Лимиты папетов (#107) едут рядом с проектами, и пустые тоже: сервис
     # кластера на сервере читает их файлом, и узкий прогон `mop project`
     # обязан класть его так же, как полный. Файл читает play(), не эта
@@ -82,6 +88,9 @@ def play_vars(projects, manifests=None, limits=None, git_hosts=None, inventory_h
     # файлом, и по нему forget отказывает узлу, который deploy поставит снова.
     if inventory_hosts is not None:
         head["mop_inventory_hosts"] = list(inventory_hosts)
+    # Посев реестра (#540): путь без содержимого, None -- переменной нет.
+    if registry_seed is not None:
+        head["mop_registry_seed"] = registry_seed
     out = [json.dumps(head)]
     if manifests is not None:
         out.append(json.dumps({"mop_manifests": manifests}, ensure_ascii=False))
@@ -97,7 +106,7 @@ def play_env(get):
         return {}
     return {"MOP_LDAP_BIND_PASSWORD": get("MOP_LDAP_BIND_PASSWORD") or ""}
 def play(playbook, projects, manifests=None, git_hosts=None, check=False,
-         inventory_hosts=None):
+         inventory_hosts=None, registry_seed=None):
     """Прогон плейбука установки. -> (код возврата ansible, его вывод).
 
     Один вход для полной игры (site.yml) и для узкого прогона проектов
@@ -128,7 +137,7 @@ def play(playbook, projects, manifests=None, git_hosts=None, check=False,
     # Лимиты (#107) больше не едут: их держит и правит сервер (#117).
     extra = ([json.dumps(vars_, ensure_ascii=False)]
              + play_vars(projects, manifests, git_hosts=git_hosts,
-                         inventory_hosts=inventory_hosts))
+                         inventory_hosts=inventory_hosts, registry_seed=registry_seed))
     proc = subprocess.run(
         ["ansible-playbook", "-i", inventory, os.path.join(config.PROJECT, playbook),
          *sum((["--extra-vars", v] for v in extra), []),

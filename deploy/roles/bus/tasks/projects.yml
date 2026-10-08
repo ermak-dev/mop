@@ -36,38 +36,27 @@
 # его не трогает и ничего не мигрирует из playbook (миграция -- writer
 # сервиса под замком). Авторитет и шире реестра: работающий mop-cluster --
 # владелец даже пустого реестра, глагол может создать снимок в любой
-# момент, stat пустоты того не опровергает, а force:no решает лишь в момент
-# copy. Посев идёт только на определённо не работающий сервис: на чистой
-# установке плей шины идёт до роли cluster (setup.yml), и проба отвечает
-# «inactive»; «active» и любые промежуточные состояния закрывают посев.
-# Пустой сервер получает копию контроллера один раз и no-clobber: снимок
-# v1, когда он есть (пара контроллера при обоих -- остывшая после его же
-# миграции), иначе легаси-пару целиком, с limits.json, чтобы потолки
-# проектов не терялись. Битый v1 контроллера разворачивает префлайт
-# `mop server deploy` (projects.view_of) до плейбука: YAML JSON не
-# разбирает, второго парсера здесь нет. Контроллер и сервер в одном HOME --
-# одна машина, посева нет: копия в себя -- это перезапись. На чистой
-# установке копии нет -- реестр пуст, первый add создаст снимок.
-- name: Registry of the controller, v1 snapshot
+# момент, stat пустоты того не опровергает, а force:no решает лишь в
+# момент copy; посев идёт только при определённо не работающем сервисе
+# («inactive»: на чистой установке плей шины идёт до роли cluster, и всё
+# прочее -- active/failed/activating -- закрывает посев).
+# Инициализация атомарна (#540): сеется ОДИН файл -- провалидированный
+# снимок v1, который готовит префлайт `mop server deploy` на контроллере
+# (строгий snapshot_of: v1 авторитетен, пара конвертируется с потолками,
+# bare/коллизия/orphan/битый JSON -- отказ ДО плейбука) и передаёт сюда
+# ПУТЕМ (mop_registry_seed), не сырым JSON: YAML ничего не парсит и не
+# дублирует парсер. Один файл -- полупары не бывает: обрыв посева
+# повторяется retry на всё ещё пустом сервере. Контроллер и сервер в
+# одном HOME -- одна машина, посева нет: копия в себя -- это перезапись.
+# Ручной ansible-прогон без extra-vars (пустой mop_registry_seed из
+# group_vars) ничего не сеет.
+- name: Staged registry seed on the controller
   ansible.builtin.stat:
-    path: "{{ lookup('env', 'HOME') }}/.config/mop/projects.json"
+    path: "{{ mop_registry_seed }}"
+  when: mop_registry_seed != ''
   delegate_to: localhost
   become: no
-  register: controller_snapshot
-
-- name: Registry of the controller, legacy pair
-  ansible.builtin.stat:
-    path: "{{ lookup('env', 'HOME') }}/.config/mop/projects"
-  delegate_to: localhost
-  become: no
-  register: controller_pair
-
-- name: Limits of the controller's legacy pair
-  ansible.builtin.stat:
-    path: "{{ lookup('env', 'HOME') }}/.config/mop/limits.json"
-  delegate_to: localhost
-  become: no
-  register: controller_limits
+  register: seed_file
 
 - name: Registry of the server, v1 snapshot
   ansible.builtin.stat:
@@ -84,11 +73,12 @@
     path: "{{ MOP_HOME }}/.config/mop/limits.json"
   register: server_limits
 
-# Проба -- чтение systemd, ничего не меняет. failed_when: false: неактивный
-# сервис -- законный ответ, не провал прогона; check_mode: false: сухой
-# прогон тоже обязан знать состояние -- иначе факт не определён и сухой
-# посев падает. Ответ «inactive» и только: rc не ноль, stdout пустой или
-# «failed»/«activating» -- посев закрыт.
+# Проба -- чтение systemd, ничего не меняет. failed_when: false: штатный
+# неактивный сервис -- rc 3, и это законный ответ, не провал прогона;
+# check_mode: false: сухой прогон тоже обязан знать состояние -- иначе
+# факт не определён и сухой посев падает. Условие посева читает stdout:
+# «inactive» и только; пустой stdout, «failed», «activating», «active» --
+# посев закрыт.
 - name: Cluster service, the registry's writer, is it running
   ansible.builtin.command: systemctl is-active mop-cluster
   register: cluster_service_running
@@ -98,50 +88,16 @@
 
 - name: Registry of the projects, v1 snapshot, on the server, once
   when:
+    - mop_registry_seed != ''
+    - seed_file.stat.exists
     - lookup('env', 'HOME') != MOP_HOME
     - cluster_service_running.stdout == 'inactive'
     - not server_snapshot.stat.exists
     - not server_pair.stat.exists
     - not server_limits.stat.exists
-    - controller_snapshot.stat.exists
   ansible.builtin.copy:
-    src: "{{ lookup('env', 'HOME') }}/.config/mop/projects.json"
+    src: "{{ mop_registry_seed }}"
     dest: "{{ MOP_HOME }}/.config/mop/projects.json"
-    owner: "{{ MOP_USER }}"
-    group: "{{ MOP_USER }}"
-    mode: "0600"
-    force: no
-
-- name: Registry of the projects, legacy pair, on the server, once
-  when:
-    - lookup('env', 'HOME') != MOP_HOME
-    - cluster_service_running.stdout == 'inactive'
-    - not server_snapshot.stat.exists
-    - not server_pair.stat.exists
-    - not server_limits.stat.exists
-    - not controller_snapshot.stat.exists
-    - controller_pair.stat.exists
-  ansible.builtin.copy:
-    src: "{{ lookup('env', 'HOME') }}/.config/mop/projects"
-    dest: "{{ MOP_HOME }}/.config/mop/projects"
-    owner: "{{ MOP_USER }}"
-    group: "{{ MOP_USER }}"
-    mode: "0600"
-    force: no
-
-- name: Limits of the legacy pair, on the server, once
-  when:
-    - lookup('env', 'HOME') != MOP_HOME
-    - cluster_service_running.stdout == 'inactive'
-    - not server_snapshot.stat.exists
-    - not server_pair.stat.exists
-    - not server_limits.stat.exists
-    - not controller_snapshot.stat.exists
-    - controller_pair.stat.exists
-    - controller_limits.stat.exists
-  ansible.builtin.copy:
-    src: "{{ lookup('env', 'HOME') }}/.config/mop/limits.json"
-    dest: "{{ MOP_HOME }}/.config/mop/limits.json"
     owner: "{{ MOP_USER }}"
     group: "{{ MOP_USER }}"
     mode: "0600"
