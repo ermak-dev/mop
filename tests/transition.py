@@ -12,6 +12,8 @@
 
 Найденный дефект -- отдельная задача: файл свойство фиксирует, не чинит.
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -23,27 +25,31 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 from _lib import Checks, patched, patched_env  # noqa: E402
 sys.path.insert(0, ROOT)
 
+# Зависимые модули -- атрибуты модуля, заполняются load(): импорт со
+# пропуском живёт В main (по образцу callout/deploy), не на уровне
+# импорта файла, иначе дочерний прогон guard'а упал бы на неподменённых
+# именах.
+bus = creds = llm = cli_common = None
 
-def _import_mop():
+
+def load():
     """Импорт зависимых модулей с пропуском по образцу callout/deploy.
 
     bus требует nats-py; его ставит MOP_PIP_DEPS, и на теле до выката
     библиотеки может не быть. Пропуск громкий, с именем причины (#229);
-    в CI (где зависимости есть) пропуска неоткуда взяться."""
+    в CI (где зависимости есть) пропуску неоткуда взяться.
+    -> True, либо None -- пропуск (уже напечатан)."""
+    global bus, creds, llm, cli_common
     try:
-        from mop.common import bus, creds, llm
-        from mop.cli.core import _common as cli_common
-        return bus, creds, llm, cli_common
+        from mop.common import bus as bus_mod, creds as creds_mod, llm as llm_mod
+        from mop.cli.core import _common as cli_mod
     except ImportError as e:
         hermetic.skip("the transition checks", f"{e} -- pip install nats-py "
                       "(MOP_PIP_DEPS brings it with mop server deploy)")
-        print("transition: ok (skipped)")
         return None
+    bus, creds, llm, cli_common = bus_mod, creds_mod, llm_mod, cli_mod
+    return True
 
-
-_MOB = _import_mop()
-if _MOB is not None:
-    bus, creds, llm, cli_common = _MOB
 
 # Два целых входа: прежняя пара и то, что пишет новый login. Порт в URL
 # BOB совпадает с портом профиля -- издатель известен, /llm снимается.
@@ -75,11 +81,11 @@ def _mop_listing():
 # ── 1. легаси-пара -> решатель -> новый файл затеняет пару ───────────────
 # HYPOTHESIS (#541 B1): решатель и его потребители расщепляют профиль на
 # половины, и цепочка «пара читается целиком, новый вход затеняет пару,
-# ENV сессии и конфиг шины видят НОВОЕ» нигде не собрана: юнит-проверки
+# ENV сессии и конфигины шины видят НОВОЕ» нигде не собрана: юнит-проверки
 # держат каждую часть по отдельности, стык не покрыт.
 # RESULT: на влитом дереве цепочка зелёная целиком; порча ниже
-# (_poison_shadowing) воспроизводит дефект «половины перечитаны после
-# нового файла» -- именно его эта проверка и ловит.
+# (_poisoned_profile под check_poisons_reproduce_defects) роняет именно
+# этот сценарий -- доказательство ловли живёт в CI.
 def check_pair_to_connection(c):
     with tempfile.TemporaryDirectory(prefix="mop-tr-pair-") as root:
         dest = os.path.join(root, "srv.test")
@@ -106,10 +112,9 @@ def check_pair_to_connection(c):
 
 # ── 2. два каталога серверов не подмешивают друг друга ──────────────────
 # HYPOTHESIS (#541 B1): решатель по одному каталогу может зацепить
-# соседний (общий ROOT, выбор по имени): стык выбора сервера и снимка
-# не покрыт юнит-проверками одного каталога.
-# RESULT: зелёно; порча (_poison_blending) воспроизводит подмешивание --
-# чужой профиль под именем другого сервера.
+# соседний (общий ROOT, выбор по имени): стык выбора сервера ПО ИМЕНИ и
+# снимка не покрыт юнит-проверками одного каталога.
+# RESULT: зелёно; порча-подмешивание ниже роняет именно этот сценарий.
 def check_two_servers(c):
     with tempfile.TemporaryDirectory(prefix="mop-tr-two-") as root:
         old = os.path.join(root, "old.test")
@@ -123,6 +128,20 @@ def check_two_servers(c):
                      creds.snapshot(new), ("human", profile_of(BOB)))
             c.expect("#541 joined_dirs sees both, no cross-blending",
                      creds.joined_dirs(), ["new.test", "old.test"])
+            # Потребители выбирают сервер именем, не полным путём: каждый
+            # получает свою учётку и свой ключ, чужого -- нет. URL здесь
+            # не сверяется: у ALICE адрес чужого authority (srv.test при
+            # сервере old.test), и контракт #547 честно пропускает его
+            # как есть -- свойство этого сценария -- раздельность учёток.
+            for host, row in (("old.test", ALICE), ("new.test", BOB)):
+                with patched_env(MOP_SERVER_LAN=host):
+                    env = cli_common.session_env()
+                    c.expect(f"#541 session_env on {host} carries that server's key",
+                             env.get(llm.AUTH_VAR), row[4])
+                    cfg = bus.server_config(host)
+                    c.expect(f"#541 the bus config on {host} carries that "
+                             f"server's identity",
+                             (cfg["user"], cfg["password"]), (row[0], row[1]))
 
 
 # ── 3. битый connection.json / половина пары -- отказ без fallback ───────
@@ -130,8 +149,7 @@ def check_two_servers(c):
 # (.env, соседний сервер, легаси-пару) на стыке решателя и диагностики:
 # #533 покрывал решатель, #536 -- диагностику, СТЫК «диагностика называет
 # тот же формат, что отказ решателя» не покрыт.
-# RESULT: зелёно; порча (_poison_fallback) воспроизводит молчаливый
-# отход к паре при битом новом файле -- ровно то, что здесь ловится.
+# RESULT: зелёно; порча-fallback ниже роняет именно этот сценарий.
 def check_refusals_no_fallback(c):
     from mop.client import diagnose
     with tempfile.TemporaryDirectory(prefix="mop-tr-broken-") as root:
@@ -172,8 +190,8 @@ def check_refusals_no_fallback(c):
 # HYPOTHESIS (#541 B1): конфликт machine/human (#533) может раствориться
 # в потребителе шины: решатель отказал, а bus.server_config перечитал
 # каталог поштучно и молча взял одну сторону. Стык не покрыт.
-# RESULT: зелёно; порча (_poison_conflict) воспроизводит молчаливую
-# победу человеческой стороны -- то, что ловит проверка.
+# RESULT: зелёно; порча «человек молча побеждает» ниже роняет именно
+# этот сценарий.
 def check_service_conflict(c):
     with tempfile.TemporaryDirectory(prefix="mop-tr-conflict-") as root:
         dest = os.path.join(root, "srv.test")
@@ -195,70 +213,63 @@ def check_service_conflict(c):
                         "conflict" in str(e), str(e))
 
 
-# ── 5. герметичность: дом прогона и git-конфиг клона не меняются ────────
-# Guard по образцу #530: проверки выше работали через подменённый
-# creds.ROOT и временные каталоги; guard подтверждает это двумя пробами:
-# (а) файл зелёный в дочернем процессе и не пишет в ~/.config/mop этого
-# прогона; (б) локальный git config настоящего клона не получил новых
-# mop.*-записей (до/после -- у клона оператора могут быть свои).
-def check_hermetic_guard(c, listing_before, git_before):
-    code = ("import sys\n"
-            "import os\n"
-            f"sys.path.insert(0, {os.path.join(ROOT, 'tests')!r})\n"
-            "import hermetic  # noqa: F401\n"
-            "def listing():\n"
-            "    try:\n"
-            "        return sorted(os.listdir(os.path.expanduser('~/.config/mop')))\n"
-            "    except FileNotFoundError:\n"
-            "        return None\n"
-            "before = listing()\n"
-            "import transition\n"
-            "from _lib import Checks\n"
-            "cc = Checks()\n"
-            "transition.main_children(cc)\n"
-            "after = listing()\n"
-            "assert before == after, (before, after)\n"
-            "sys.exit(1 if cc.failed else 0)\n")
-    run = subprocess.run([sys.executable, "-c", code],
-                         env={**os.environ, "PYTHONPATH": os.path.join(ROOT, "tests")},
-                         capture_output=True, text=True, cwd=ROOT)
-    c.check("#541 the transition checks stay green in a child process "
-            "and write nothing into ~/.config/mop",
-            run.returncode == 0, (run.stdout + run.stderr).strip()[-500:])
+# ── 7. герметичность: дом прогона и git-конфиг чужого репозитория ────────
+# Guard по образцу #530 (tests/autologin.py check_ensure_hermetic_530):
+# сценарии выше работают через подменённый creds.ROOT и временные
+# каталоги; guard подтверждает это (а) зелёностью в дочернем процессе,
+# чей cwd -- СВЕЖИЙ временный git-репозиторий, а не настоящий клон
+# (прогон в настоящем клоне и был бы той дырой, что закрыл #530), и (б)
+# пробой mop.* локального конфига именно этого репозитория: git 1 --
+# чисто, 0 -- утечка, прочее -- провал с причиной. Проба применима
+# всегда, «неприменимо» у неё нет. Плюс (в): ~/.config/mop самого
+# прогона не меняется.
+def check_hermetic_guard(c, listing_before):
+    tests = os.path.dirname(os.path.realpath(__file__))
+    with tempfile.TemporaryDirectory(prefix="mop-tr-541-repo-") as repo:
+        r = subprocess.run(["git", "init", "-q", repo], capture_output=True, text=True)
+        if not c.check("#541 guard repository init", r.returncode == 0, r.stderr):
+            return
+        code = ("import sys\n"
+                f"sys.path.insert(0, {tests!r})\n"
+                "import hermetic  # noqa: F401 -- изоляция настроек (#209)\n"
+                "import transition\n"
+                "if transition.load() is None:\n"
+                "    sys.exit(2)  # пропуск -- не доказательство\n"
+                "from _lib import Checks\n"
+                "cc = Checks()\n"
+                "transition.main_children(cc)\n"
+                "sys.exit(1 if cc.failed else 0)\n")
+        run = subprocess.run([sys.executable, "-c", code], cwd=repo,
+                             env={**os.environ, "PYTHONPATH": tests},
+                             capture_output=True, text=True)
+        c.check("#541 the scenarios stay green in a child process outside "
+                "the real clone",
+                run.returncode == 0, (run.stdout + run.stderr).strip()[-500:])
+        leak = subprocess.run(["git", "config", "--local", "--get-regexp", "^mop\\."],
+                              cwd=repo, capture_output=True, text=True)
+        if leak.returncode == 0:
+            c.fail("#541 the scenarios wrote mop.* into the cwd repository's config",
+                   leak.stdout.strip())
+        elif leak.returncode != 1:
+            c.fail("#541 git config probe in the guard repository failed",
+                   f"exit {leak.returncode}: {(leak.stdout + leak.stderr).strip()}")
+        else:
+            c.check("#541 the scenarios leave the cwd repository's config clean",
+                    not leak.stdout.strip(), leak.stdout.strip())
     c.expect("#541 the run's own ~/.config/mop is unchanged by the checks",
              _mop_listing(), listing_before)
-    got_git = _git_mop_entries()
-    if got_git is None:
-        # Прогон вне git-репозитория (копия без .git, как у hermetic):
-        # сам клон недоступен, проба неприменима -- это не утечка.
-        c.check("#541 the git config probe is inapplicable outside a repository",
-                True, "skipped: no .git in the run root")
-    else:
-        c.expect("#541 the clone's git config carries no new mop.* entries",
-                 got_git, git_before)
 
 
-def _git_mop_entries():
-    """(код выхода, вывод) пробы mop.* локального конфига или None, если
-    прогон идёт вне git-репозитория (копия без .git у hermetic) -- там
-    проба неприменима, и это не утечка."""
-    r = subprocess.run(["git", "config", "--local", "--get-regexp", "^mop\\."],
-                       cwd=ROOT, capture_output=True, text=True)
-    text = (r.stderr + r.stdout)
-    if r.returncode == 128 and ("git repository" in text or "work tree" in text):
-        return None
-    if r.returncode not in (0, 1):
-        raise RuntimeError(f"git config probe failed: exit {r.returncode}: "
-                           f"{text.strip()}")
-    return (r.returncode, r.stdout.strip())
-
-
-# ── доказательство ловли: порча воспроизводит дефект, проверка его видит ─
+# ── доказательство ловли: порча -> парный СЦЕНАРИЙ проваливается ────────
 # Порча -- временная и ЛОКАЛЬНАЯ прогону (patched откатывает её при
-# выходе). Здесь утверждается НЕ «порча отсутствует», а наоборот: порча
-# воспроизводит именованный дефект. Если бы порча не давала дефекта --
-# проверка выше нечего было бы ловить, и это было бы провалом доказательства.
-# После выхода из patched звенья обязаны быть целы -- отдельная проба.
+# выходе). Доказывается не «порча воспроизводит дефект» (это проверяло
+# бы саму порчу), а «порча роняет СЦЕНАРИЙ»: под каждой порчей
+# прогоняется парная check_* с отдельным счётчиком, её вывод глушится,
+# и блок требует провала (cc.failed > 0). Порча бьёт по creds.snapshot --
+# атрибуту модуля в момент вызова, -- а потребители (session_env,
+# bus.server_config, diagnose.report) зовут именно его, так что порча
+# доходит и до них. Если порча перестанет ронять сценарий -- доказательство
+# провалено: у проверки не стало зубов.
 def _poisoned_profile(directory):
     """Прочитать каталог ПОШТУЧНО из половин, игнорируя connection.json."""
     op = creds.operator(directory)
@@ -271,26 +282,34 @@ def _poisoned_profile(directory):
     return None, None
 
 
+def _runs_red(c, what, poison, check):
+    """Порча snapshot + прогон парного сценария -> сценарий обязан провалиться."""
+    cc = Checks()
+    sink = io.StringIO()
+    with contextlib.redirect_stdout(sink), patched(creds, snapshot=poison):
+        check(cc)
+    c.check(what, cc.failed > 0,
+            "" if cc.failed else
+            "the paired check stayed green under the poison: no teeth")
+
+
 def check_poisons_reproduce_defects(c):
     real = creds.snapshot
     with tempfile.TemporaryDirectory(prefix="mop-tr-poison-") as root:
         dest = os.path.join(root, "srv.test")
 
         # Порча 1 (сценарий 1): половины перечитаны ПОСЛЕ нового файла --
-        # решатель держит старую пару. Дефект: ключ ALICE при живом BOB.
+        # решатель держит старую пару при живом connection.json.
         put_legacy(dest, ALICE)
         creds.write_connection(dest, *BOB)
-        with patched(creds, snapshot=lambda d: (
-                _poisoned_profile(d) if os.path.isfile(
-                    os.path.join(d, creds.CONNECTION_FILE)) else real(d))):
-            kind, got = creds.snapshot(dest)
-            c.check("#541 RED-proof: re-reading the halves returns the OLD key "
-                    "(scenario 1 catches exactly this)",
-                    (kind, got.get("proxy_key")) == ("human", ALICE[4]),
-                    f"kind {kind!r}, key {got.get('proxy_key')!r}")
+        _runs_red(c, "#541 poison: halves re-read past connection.json "
+                     "fails scenario 1 (its teeth)",
+                  lambda d: _poisoned_profile(d) if os.path.isfile(
+                      os.path.join(d, creds.CONNECTION_FILE)) else real(d),
+                  check_pair_to_connection)
 
         # Порча 2 (сценарий 3): при битом connection.json решатель молча
-        # падает в пару. Дефект: человеческий профиль из-под битого файла.
+        # падает в пару.
         broken = os.path.join(root, "broken.test")
         put_legacy(broken, ALICE)
         with open(os.path.join(broken, creds.CONNECTION_FILE), "w") as f:
@@ -304,23 +323,17 @@ def check_poisons_reproduce_defects(c):
                     return _poisoned_profile(d)
             return real(d)
 
-        with patched(creds, snapshot=silent_fallback):
-            kind, got = creds.snapshot(broken)
-            c.check("#541 RED-proof: a broken file silently falls back to the pair "
-                    "(scenario 3 catches exactly this)",
-                    kind == "human" and got.get("user") == ALICE[0],
-                    f"kind {kind!r}, got {got!r}")
+        _runs_red(c, "#541 poison: a broken file silently falls back to "
+                     "the pair fails scenario 3 (its teeth)",
+                  silent_fallback, check_refusals_no_fallback)
 
         # Порча 3 (сценарий 4): конфликт machine/human решается молча в
-        # пользу человека. Дефект: профиль там, где обязан быть отказ.
+        # пользу человека -- машинную запись решатель не видит.
         conflict = os.path.join(root, "conflict.test")
         creds.write_connection(conflict, *BOB)
         creds.write_operator(conflict, *SERVICE_OP)
 
         def human_wins(d):
-            # Дефект: решатель машинную запись НЕ ВИДИТ -- остаётся
-            # connection.json, конфликта нет, человеческая сторона молча
-            # побеждает. real тут не звали бы: он отказывает конфликтом.
             if os.path.isfile(os.path.join(d, creds.CONNECTION_FILE)) and \
                     os.path.isfile(os.path.join(d, creds.OPERATOR_FILE)):
                 with open(os.path.join(d, creds.CONNECTION_FILE),
@@ -333,31 +346,20 @@ def check_poisons_reproduce_defects(c):
                                  "proxy_key": raw["proxy"]["key"]}
             return real(d)
 
-        with patched(creds, snapshot=human_wins):
-            kind, got = creds.snapshot(conflict)
-            c.check("#541 RED-proof: the conflict resolves to the human side "
-                    "(scenario 4 catches exactly this)",
-                    kind == "human" and got.get("user") == BOB[0],
-                    f"kind {kind!r}, got {got!r}")
+        _runs_red(c, "#541 poison: the conflict silently resolves to the "
+                     "human side fails scenario 4 (its teeth)",
+                  human_wins, check_service_conflict)
 
-        # Порча 4 (сценарий 2): решатель одного каталога читает соседний.
-        # Дефект: профиль BOB из каталога ALICE.
-        cross = os.path.join(root, "cross.test")
-        other = os.path.join(root, "other.test")
-        put_legacy(cross, ALICE)
-        creds.write_connection(other, *BOB)
-
+        # Порча 4 (сценарий 2): решатель одного каталога читает соседний --
+        # каталог old.test отвечает профилем new.test.
         def blended(d):
-            if os.path.basename(d) == "cross.test":
-                return real(other)
+            if os.path.basename(d) == "old.test":
+                return real(os.path.join(os.path.dirname(d), "new.test"))
             return real(d)
 
-        with patched(creds, ROOT=root, snapshot=blended):
-            kind, got = creds.snapshot(cross)
-            c.check("#541 RED-proof: one server's directory answers with "
-                    "another's profile (scenario 2 catches exactly this)",
-                    kind == "human" and got.get("user") == BOB[0],
-                    f"kind {kind!r}, got {got!r}")
+        _runs_red(c, "#541 poison: one server's directory answers with "
+                     "another's profile fails scenario 2 (its teeth)",
+                  blended, check_two_servers)
 
         # Порчи откачены (patched вышел): решатель снова цел.
         kind, got = real(dest)
@@ -373,20 +375,20 @@ def check_poisons_reproduce_defects(c):
 
 
 def main_children(c):
-    """Прогон без guard-блока: дочерний вызов из check_hermetic_guard."""
+    """Прогон без guard-блока и без порчи: дочерний вызов из guard'а."""
     for check in (check_pair_to_connection, check_two_servers,
                   check_refusals_no_fallback, check_service_conflict):
         check(c)
 
 
 def main():
-    if _MOB is None:
+    if load() is None:
+        print("transition: ok (skipped)")
         return 0                      # пропуск уже напечатан с причиной
     listing_before = _mop_listing()
-    git_before = _git_mop_entries()   # None вне репозитория -- guard это знает
     c = Checks()
     main_children(c)
-    check_hermetic_guard(c, listing_before, git_before)
+    check_hermetic_guard(c, listing_before)
     check_poisons_reproduce_defects(c)
     return c.report("transition")
 
