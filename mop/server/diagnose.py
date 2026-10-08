@@ -53,8 +53,28 @@ def report(settings=None, registry_dir=None):
     поломку за чистую установку."""
     eff = settings if settings is not None else config.effective()
     directory = registry_dir if registry_dir is not None else projects.SNAPSHOT_DIR
+
+    # Источник и снимок -- ОДНА генерация каталога (#536): файлы пробуются
+    # ДО и ПОСЛЕ единственного view_of, расхождение -- отказ, а не источник
+    # из старого каталога со числом из нового. Источник -- наблюдение НАД
+    # теми же файлами, которые решает сам view_of (presence-проба его
+    # имён), не второй разбор содержимого.
+    def present():
+        return tuple(projects._present(os.path.join(directory, n))
+                     for n in (SNAPSHOT_NAME,) + LEGACY_NAMES)
+
+    before = present()
     view = projects.view_of(directory)
-    source = registry_source(directory)
+    after = present()
+    if before != after:
+        raise RuntimeError(f"the project registry in {directory} changed while "
+                           f"diagnosing: run mop server diagnose again")
+    if after[0]:
+        source = "snapshot"
+    elif after[1] or after[2]:
+        source = "legacy pair"
+    else:
+        source = "empty"
     files = {"snapshot": [os.path.join(directory, SNAPSHOT_NAME)],
              "legacy pair": [os.path.join(directory, n) for n in LEGACY_NAMES],
              "empty": [os.path.join(directory, SNAPSHOT_NAME)]}[source]

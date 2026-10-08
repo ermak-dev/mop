@@ -271,57 +271,150 @@ def check_client_cli_536(c):
             not any(s in json.dumps(payload) for s in SECRETS), payload)
 
 
-# ── диспетчер: политика клиента на живом bin/mop, ДО main ───────────────
-def check_dispatcher_policy_536(c):
-    """RED-фаза #536 (поправка 4): свойство НЕ helper'а, а диспетчера --
-    main() накладывает client_sources ДО main командлета core. Реальный
-    bin/mop в копии репозитория: установка с враждебным .env (существующий
-    файл с чужим MOP_SERVER_LAN и ReadError-ловушкой), у человека --
-    единственный joined-каталог. Правильный dispatch: .env не читается
-    вовсе, диагностика называет joined-сервер; чтение файла -- отказ #535.
+# ── клиент: подписи форматов половин и служебного каталога ──────────────
+def check_format_labels_536(c):
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-diag-fmt-"), "servers")
+    cases = [
+        ("service operator", creds.write_operator, (creds.SERVICE, "service-secret")),
+        ("legacy operator", creds.write_operator, (ALICE[0], ALICE[1])),
+        ("legacy client", creds.write_client, (ALICE[2], ALICE[3], ALICE[4])),
+    ]
+    for want, make, args in cases:
+        dest = os.path.join(root, f"{want.replace(' ', '-')}.test")
+        make(dest, *args)
+        with patched(creds, ROOT=root), \
+                context.use(context.resolve({"server": os.path.basename(dest)}, {}, {})):
+            got = client_report()
+        c.check(f"#536 an operator/client half is labeled {want}, not a whole pair",
+                got["format"] == want and got["schema"] is None, got)
 
-    Контроль отключённой политики: в TEMP-копии client_command() для
-    mop.cli.core.diagnose выключен -> диспетчер читает .env -> ReadError
-    (ловушка -- нечитаемый существующий файл). Так проверка ловит и
-    «политика не доехала», и «политика не на ту команду».
+
+# ── одна генерация каталога: смена под диагностикой -- отказ ────────────
+def check_race_guard_536(c):
+    """Формат и классификация -- ОДНО наблюдение каталога (#536): проба
+    файлов до и после ЕДИНСТВЕННОГО снимка обязана совпасть, иначе отказ,
+    а не смесь поколений (status из нового, format из старого)."""
+    root = os.path.join(tempfile.mkdtemp(prefix="mop-diag-race-"), "servers")
+    real_snapshot = creds.snapshot
+
+    # Появление: writer кладёт connection.json МЕЖДУ пробой и снимком.
+    dest = os.path.join(root, "appear.test")
+    put_legacy(dest, ALICE)
+
+    def appear(directory):
+        put_connection(directory, ALICE)
+        return real_snapshot(directory)
+
+    with patched(creds, ROOT=root, snapshot=appear), \
+            context.use(context.resolve({"server": "appear.test"}, {}, {})):
+        try:
+            client_report()
+            c.fail("#536 a directory changed under the diagnosis must refuse")
+        except RuntimeError as e:
+            c.check("#536 the appearance refusal names the change",
+                    "changed while" in str(e), str(e))
+
+    # Исчезновение: connection.json снят между пробой и снимком.
+    dest = os.path.join(root, "vanish.test")
+    put_connection(dest, ALICE)
+    put_legacy(dest, ALICE)
+
+    def vanish(directory):
+        os.remove(os.path.join(directory, creds.CONNECTION_FILE))
+        return real_snapshot(directory)
+
+    with patched(creds, ROOT=root, snapshot=vanish), \
+            context.use(context.resolve({"server": "vanish.test"}, {}, {})):
+        try:
+            client_report()
+            c.fail("#536 a vanishing profile must refuse, not mix generations")
+        except RuntimeError as e:
+            c.check("#536 the vanishing refusal names the change",
+                    "changed while" in str(e), str(e))
+
+    # Сервер: тот же закон для реестра -- источник и прочитанный снимок
+    # одной генерации; командлет переводит отказ в rc 1 с текстом.
+    reg = tempfile.mkdtemp(prefix="mop-diag-reg-race-")
+    put_registry_legacy(reg, ("https://git.test/opus.git",))
+    real_view = projects.view_of
+
+    def migrate(dir_):
+        put_registry_v1(dir_, ("https://git.test/opus.git",))
+        return real_view(dir_)
+
+    with patched(projects, SNAPSHOT_DIR=reg, view_of=migrate), \
+            patched(sys, stderr=io.StringIO()):
+        rc = server_main([])
+        err = sys.stderr.getvalue()
+    c.check("#536 a registry changed under the diagnosis must refuse",
+            rc == 1 and "changed while" in err, err)
+
+
+# ── диспетчер: политика клиента на живом запуске, ДО main ───────────────
+def check_dispatcher_policy_536(c):
+    """Свойство ДИСПЕТЧЕРА (#536, поправка 4), не helper'а: main() держит
+    client_sources до main командлета core. Изоляция полная: копия ТОЛЬКО
+    mop/ и bin/ во временном каталоге (TemporaryDirectory прибирает всё),
+    HOME временный, у дочернего процесса сняты MOP_* и GIT_* и закрыты
+    глобальный и системный git config -- настоящий репозиторий,
+    ~/.gitconfig и реальный .env не читаются и не пишутся.
+
+    Ловушка .env -- КАТАЛОГ: чтение даёт EISDIR -> ReadError #535 при
+    любом uid (chmod 0 не останавливает root). Три запуска:
+      * `diagnose` (core, политика положена): .env не читается вовсе,
+        сервер -- единственный joined;
+      * `server diagnose` (политики нет): диспетчер открывает .env
+        установки и натыкается на ловушку -- rc 1, cannot read settings;
+      * точный контроль: в КОПИИ префикс mop.cli.core. выключен из
+        client_command -- тот же запуск ведёт себя как серверный, так
+        положительный исход объясняется именно политикой.
     """
-    from hermetic import child_env as hermetic_child_env  # noqa: F401
-    # python -c обрабатывает stdout/stderr... используем прямой запуск.
-    root = os.path.join(tempfile.mkdtemp(prefix="mop-diag-disp-"), "repo")
-    shutil.copytree(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                    root, dirs_exist_ok=True, symlinks=True,
-                    ignore=shutil.ignore_patterns(".git", "__pycache__", ".env",
-                                                  "node_modules"))
-    home = tempfile.mkdtemp(prefix="mop-diag-home-")
-    servers = os.path.join(home, ".config", "mop", "servers")
-    os.makedirs(os.path.join(servers, "joined.test"))
-    put_connection(os.path.join(servers, "joined.test"), ALICE)
-    # Ловушка .env: существует, но не читается -> ReadError #535, если
-    # диспетчер его откроет. Клиентская политика обязана его НЕ тронуть.
-    trap = os.path.join(root, ".env")
-    with open(trap, "w", encoding="utf-8") as f:
-        f.write("MOP_SERVER_LAN=hostile-from-dotenv.test\n")
-    os.chmod(trap, 0)
-    base = {k: v for k, v in os.environ.items() if not k.startswith("MOP_")}
-    base["HOME"] = home
-    base["PYTHONPATH"] = root
-    try:
-        # Правильный dispatch: политика клиента на mop diagnose, .env не
-        # читается, сервер -- единственный joined.
-        r = subprocess.run([sys.executable, "-m", "mop.cli", "diagnose"],
-                           env=base, capture_output=True, text=True, cwd=root)
-        c.check("#536 the dispatcher keeps the hostile .env away from mop diagnose",
+    repo = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    with tempfile.TemporaryDirectory(prefix="mop-diag-disp-") as box:
+        root = os.path.join(box, "repo")
+        shutil.copytree(os.path.join(repo, "mop"), os.path.join(root, "mop"),
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(os.path.join(repo, "bin"), os.path.join(root, "bin"))
+        home = os.path.join(box, "home")
+        servers = os.path.join(home, ".config", "mop", "servers")
+        os.makedirs(servers)
+        put_connection(os.path.join(servers, "joined.test"), ALICE)
+        os.makedirs(os.path.join(root, ".env"))    # ловушка EISDIR (#535)
+        base = {k: v for k, v in os.environ.items()
+                if not k.startswith(("MOP_", "GIT_"))}
+        base.update(HOME=home, PYTHONPATH=root,
+                    GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+
+        def run(args):
+            return subprocess.run([sys.executable, "-m", "mop.cli", *args],
+                                  env=base, capture_output=True, text=True,
+                                  cwd=root)
+
+        r = run(["diagnose"])
+        c.check("#536 the dispatcher keeps the installation .env away from "
+                "mop diagnose",
                 r.returncode == 0 and "joined.test" in r.stdout and
-                "hostile" not in r.stdout + r.stderr,
+                "cannot read" not in r.stdout + r.stderr,
                 (r.returncode, r.stdout, r.stderr))
-        # Тот же запуск без политики (server-глагол -- она не положена):
-        # диспетчер открывает .env установки и натыкается на ловушку.
-        r = subprocess.run([sys.executable, "-m", "mop.cli", "server", "diagnose"],
-                           env=base, capture_output=True, text=True, cwd=root)
+        r = run(["server", "diagnose"])
         c.check("#536 a server verb hits the ReadError trap in the .env",
                 r.returncode != 0 and "cannot read settings" in r.stderr, r.stderr)
-    finally:
-        os.chmod(trap, 0o600)
+        # Точный контроль: политика для core выключена В КОПИИ.
+        init = os.path.join(root, "mop", "cli", "__init__.py")
+        with open(init, encoding="utf-8") as f:
+            body = f.read()
+        disabled = body.replace('"mop.cli.core.", "mop.cli.pool.",',
+                                '"mop.cli.core.disabled.", "mop.cli.pool.",')
+        c.check("#536 the control patch took", disabled != body, "")
+        with open(init, "w", encoding="utf-8") as f:
+            f.write(disabled)
+        try:
+            r = run(["diagnose"])
+        finally:
+            with open(init, "w", encoding="utf-8") as f:
+                f.write(body)
+        c.check("#536 with the policy disabled the same run hits the trap",
+                r.returncode != 0 and "cannot read settings" in r.stderr, r.stderr)
 
 
 # ── сервер: локальный реестр и источник настроек ─────────────────────────
@@ -403,7 +496,9 @@ def main():
     check_client_side_536(c)
     check_status_and_hygiene_536(c)
     check_client_cli_536(c)
+    check_format_labels_536(c)
     check_server_side_536(c)
+    check_race_guard_536(c)
     check_dispatcher_policy_536(c)
     return c.report("diagnose")
 
