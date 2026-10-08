@@ -70,13 +70,23 @@ def recipients(argv_opts):
     return out
 
 
-def show(out, as_json):
+def show(out, as_json, quiet_recorded=False):
     """Итог операции: тихий быстрый успех, явный JSON/текст при
     pending/отказе. Ключей и raw-причин здесь нет -- safe-проекция
     библиотеки. Слово блокера по типизированным полям: 401 --
     предупреждение о блокировке петли (5 неудач management запирают
     адрес на 30 минут, исключения для 127.0.0.1 нет), 403 -- «доступ
-    запрещён», не «ключ неверен». -> rc."""
+    запрещён», не «ключ неверен».
+
+    quiet_recorded (start): операция записана -- rc 0 и тишина, как у
+    быстрых успешных команд; скрипт обязан отличать удачный start от
+    отказа. resume остаётся прежним: completed -- 0, pending/отказ -- 1.
+    -> rc."""
+    if quiet_recorded and out.get("stage") and out.get("ok") is not False:
+        # Проекция begin несёт только id/schema/stage/recipients --
+        # «ok» в ней нет, это записанное состояние, не отказ. Явный
+        # ok=False (блокер) тихим не бывает.
+        return 0
     if as_json:
         print(json.dumps(out))
         return 0 if out.get("ok") else 1

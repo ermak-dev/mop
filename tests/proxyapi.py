@@ -17,12 +17,12 @@ SOLUTION: mop/server/proxyapi.py -- Effects-адаптер (urllib, только
 ЯВНОМУ списку узлов; mop/cli/server/proxykey/{__init__,start,resume,status}
 -- печать safe-проекции, rc 0/1.
 STATUS: FIXED (#539, раунд ревью) -- блокер конструктора (затенение
-mgmt_key_path) и дефекты 1-7 закрыты; пробел ревью 0abeaeb: 401
-управленческого GET (первый запрос resume) несёт http_status+reason,
-_wording предупреждает о блокировке 30 минут; конфликт флагов
-получателей -- отказ; nodes_refusal удалён; откат к старому имени
-параметра убран. Upstream-формы GET/PUT закреплены архивом v8.0.16
-(sdk_config.go:63, config_v8.go:57,72,112).
+mgmt_key_path) и дефекты 1-7 закрыты; пробел 0abeaeb: 401
+управленческого GET несёт http_status+reason, предупреждение о
+блокировке 30 минут; ревью c7272bb: записанный start -- тихий rc 0,
+класс исключения -- ManagementRefused (не внутреннее имя в блокере);
+конфликт флагов получателей -- отказ; nodes_refusal удалён. Upstream
+закреплён архивом v8.0.16 (sdk_config.go:63, config_v8.go:57,72,112).
 """
 import io
 import json
@@ -291,10 +291,14 @@ def check_get_lockout_539(c):
         rh.log.clear()
         rc = resume.main(["--exclusive"])
         err_text = sys.stderr.getvalue()
-    # Контракт #539: rc0 только complete/readonly; begin-успех оставляет
-    # операцию в ready -- честный rc1 «pending: ready», это не отказ.
+    # Контракт #539: записанный start -- тихий rc 0 (ревью c7272bb);
+    # resume на GET-401 -- rc 1 с предупреждением.
     c.check("#539 resume on a GET 401 reaches the remote step and fails",
-            begin_rc == 1 and rc == 1, (begin_rc, rc))
+            begin_rc == 0 and rc == 1, (begin_rc, rc))
+    # «401» не в тексте НЕ потому, что код вреден: текстовый путь несёт
+    # формулировку _wording (строки для человека), а типизированный код
+    # живёт в http_status-поле JSON-проекции. Здесь проверяем связку
+    # «предупреждение есть, сырого эха полей в свободный текст нет».
     c.check("#539 the GET-401 resume blocker warns about the lockout",
             "30 minutes" in err_text and "401" not in err_text, err_text)
     c.check("#539 the refusal came from the GET, not a PUT",
@@ -693,6 +697,60 @@ def check_mophome_absolute_539(c):
     no_network_log(c, http, "the MOP_HOME preflight")
 
 
+# ── ревью c7272bb: успешный start тих и rc 0; блокер без _CodeRefused ────
+# HYPOTHESIS: успешный start (операция записана, стадия ready) возвращал
+# rc 1 «pending: ready» -- скрипт не отличит удачный start от отказа.
+# Контракт: start записан -- rc 0 и тишина; отказ -- rc 1 с причиной.
+# resume остаётся прежним: completed -- 0, pending/отказ -- 1.
+def check_start_quiet_539(c):
+    from mop.cli.server.proxykey import start, _common
+    from mop.common import paths
+    box, http = stand(c)
+    with patched(proxykey, OP=box["op"], LOCK=box["lock"]), \
+            patched_env(INVENTORY=box["inv"], MOP_PROJECT=None,
+                        MOP_BUS_CONFIG=None, HOME=box["dir"],
+                        MOP_HOME=os.path.join(box["dir"], "abs-home")), \
+            patched(_common, effects=lambda: effects_of(http, box["mgmt"])), \
+            patched(sys, stdout=io.StringIO(), stderr=io.StringIO()):
+        for name in ("llm-proxy-mgmt.pass", "llm-proxy-client.pass"):
+            p = paths.local(paths.SECRETS, name)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            key = "mgmt-key-539" if "mgmt" in name else "old-key-539"
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(key + "\n")
+            os.chmod(p, 0o600)
+        cp = paths.under(os.path.join(box["dir"], "abs-home"),
+                         paths.SECRETS, "llm-proxy-client.pass")
+        os.makedirs(os.path.dirname(cp), exist_ok=True)
+        with open(cp, "w", encoding="utf-8") as f:
+            f.write("old-key-539\n")
+        os.chmod(cp, 0o600)
+        rc = start.main(["--no-recipients", "--exclusive"])
+        out_text = sys.stdout.getvalue()
+        err_text = sys.stderr.getvalue()
+    c.check("#539 a successful start is quiet with rc 0",
+            rc == 0 and not out_text.strip() and not err_text.strip(),
+            (rc, out_text, err_text))
+
+
+# HYPOTHESIS: имя класса исключения попадает оператору через
+# type(e).__name__ («cannot read the key list (…)») -- внутреннее имя
+# класса не читается человеком. Класс зовётся ManagementRefused.
+def check_blocker_class_name_539(c):
+    from mop.server import proxyapi
+    cls = getattr(proxyapi, "ManagementRefused", None)
+    c.check("#539 the typed GET refusal class is operator-readable",
+            cls is not None and cls.__name__ == "ManagementRefused", cls)
+    # Блокер несёт имя класса: оно обязано читаться человеком.
+    if cls is not None:
+        e = cls("GET api-keys answered HTTP 401")
+        e.http_status = 401
+        e.reason = "unauthorized"
+        c.check("#539 the blocker names ManagementRefused, not an underscore class",
+                "ManagementRefused" in f"cannot read the key list "
+                f"({type(e).__name__})",
+                type(e).__name__)
+
 
 def check_cli_539(c):
     from mop.cli.server.proxykey import start, status
@@ -741,6 +799,8 @@ def main():
     check_show_wording_539(c)
     check_flag_conflict_539(c)
     check_get_lockout_539(c)
+    check_start_quiet_539(c)
+    check_blocker_class_name_539(c)
     check_nodes_validation_539(c)
     check_all_registered_once_539(c)
     check_deliver_blob_539(c)

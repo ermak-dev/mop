@@ -180,7 +180,7 @@ class Effects:
         except Exception as e:  # noqa: BLE001 -- нести код, не payload
             code = getattr(e, "code", None)
             if type(code) is int and 100 <= code <= 599:
-                typed = _CodeRefused(
+                typed = ManagementRefused(
                     f"GET api-keys answered HTTP {code}")
                 typed.http_status = code
                 typed.reason = self.CODE_REASONS.get(code)
@@ -276,7 +276,7 @@ class _Urllib:
         return status
 
 
-class _CodeRefused(RuntimeError):
+class ManagementRefused(RuntimeError):
     """Отказ управления с типизированным целым кодом HTTP (без тела)."""
 
 

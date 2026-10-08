@@ -4,7 +4,8 @@ Checks the controller boundary, resolves the controller source and the
 cluster service copy, freezes the recipient set (--nodes, or
 --all-registered for the full known node set, offline included, or
 --no-recipients), and records the private checkpoint. No proxy effect:
-the remote steps belong to resume. --exclusive affirms the caller is the
+the remote steps belong to resume. A recorded operation is a quiet rc 0;
+a refusal is rc 1 with its reason. --exclusive affirms the caller is the
 only writer (panel included); without it the command refuses.
 """
 from mop.cli import lib
@@ -37,7 +38,7 @@ def main(argv):
     except RuntimeError as e:
         lib.fail(str(e))
         return 1
-    return _common.show(out, "--json" in opts)
+    return _common.show(out, "--json" in opts, quiet_recorded=True)
 
 
 def _parse(argv):
