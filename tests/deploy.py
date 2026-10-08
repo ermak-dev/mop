@@ -1009,6 +1009,72 @@ def check_agent_unit_172(c, can_render):
               (t.get("args"), t.get("environment")))
 
 
+# ── посев реестра v1 при deploy (#540) ────────────────────────────────────
+# HYPOTHESIS (#540): роль bus сеет на сервер только легаси-файл `projects`
+# (force:no, #117), а атомарный снимок v1 `projects.json` (#534) прогоном
+# не сеится вовсе: свежий сервер с другим MOP_HOME у нового mop не получил
+# бы реестр, пока контроллер не ответит легаси-парой -- и наоборот,
+# контроллер с устаревшей парой мог бы перезатереть свежий v1 сервера,
+# если бы посев шёл по файлу без различия источника.
+# SOLUTION: посев реестра выбирает источник по матрице: сервер с ЛЮБЫМ
+# реестром (v1 или пара) authoritative, прогон его не трогает и не мигрирует
+# пар из playbook (миграция -- writer сервиса под замком, #534); пустой
+# сервер получает копию контроллера no-clobber (v1 когда есть v1, пара когда
+# есть только пара), 0600 под MOP_USER; same-HOME (контроллер == сервер)
+# сеет ничего -- реестр уже на месте, копия в себя -- это rewrite; чистая
+# установка без обоих источников сеет честный пустой реестр (первый add
+# создаст снимок). Неоднозначные входы (v1 у контроллера + живая пара у
+# сервера) НЕ разрешаются прогоном молча: сервер authoritative по своей паре
+# до собственной миграции.
+# RESULT: красный прогон впереди реализации -- снимка v1 в посеве нет.
+# STATUS: FIXED — see #540
+def check_registry_seeding_540(c, ptasks):
+    tasks = [t for t in (ptasks or []) if isinstance(t, dict) and "name" in t]
+    seeds = [t for t in tasks if (t.get("ansible.builtin.copy") or {}).get("dest", "")
+             .endswith("/.config/mop/projects") or
+             (t.get("ansible.builtin.copy") or {}).get("dest", "")
+             .endswith("/.config/mop/projects.json")]
+    # Посев ровно одного v1-снимка: копия контроллерского projects.json на
+    # сервер, no-clobber.
+    v1 = [t for t in seeds if (t.get("ansible.builtin.copy") or {}).get("dest", "")
+          .endswith("projects.json")]
+    c.check("#540 the play seeds the v1 snapshot onto the server",
+            len(v1) == 1, [t.get("name") for t in v1])
+    if len(v1) == 1:
+        cp = v1[0]["ansible.builtin.copy"]
+        c.check("#540 the v1 snapshot is seeded no-clobber",
+                cp.get("force") is False, cp.get("force"))
+        c.check("#540 the v1 seed is private to the pool user",
+                cp.get("mode") == "0600" and cp.get("owner") == "{{ MOP_USER }}",
+                (cp.get("mode"), cp.get("owner")))
+        c.check("#540 the v1 seed comes from the controller's snapshot",
+                (cp.get("src") or "").endswith("projects.json"), cp.get("src"))
+        when = str(v1[0].get("when", ""))
+        c.check("#540 the v1 seed only onto a server without any registry",
+                "snapshot" in when and "pair" in when and "not" in when, when)
+    # Легаси-посев прежнего #117 сохранён: пара на пустой сервер, force:no.
+    legacy = [t for t in seeds if (t.get("ansible.builtin.copy") or {})
+              .get("dest", "").endswith("/.config/mop/projects")]
+    c.check("#540 the legacy pair seed of #117 survives",
+            len(legacy) == 1, [t.get("name") for t in legacy])
+    if legacy:
+        cp = legacy[0]["ansible.builtin.copy"]
+        c.check("#540 the legacy seed stays no-clobber",
+                cp.get("force") is False, cp.get("force"))
+        lw = str(legacy[0].get("when", ""))
+        c.check("#540 the legacy seed only onto a server without any registry",
+                "snapshot" in lw and "pair" in lw and "not" in lw, lw)
+    # Прогон не мигрирует и не перезаписывает: ни одна задача роли не пишет
+    # в projects.json сервера поверх существующего (force:no -- недостаточно:
+    # migrate-задачи быть не должно вовсе).
+    for t in tasks:
+        body = str(t)
+        c.check(f"#540 no task migrates or rewrites the server registry: "
+                f"{t.get('name')}", "snapshot_of" not in body and
+                "write_snapshot" not in body and
+                "cluster project" not in body.replace("cluster users", ""), body[:120])
+
+
 def check_one_source_219(c):
     """HYPOTHESIS (#219): deploy заводит людям пароли (nats-op-*.pass),
     кладёт их в base-users.json и копию личностей, а выключатель
@@ -1927,6 +1993,7 @@ def main():
           names.index("Callout file of the bus, before") < names.index(users_task.get("name"))
           < names.index("Callout file of the bus, after") if after and users_task else False)
     check_identity_copy_167(c, ptasks)
+    check_registry_seeding_540(c, ptasks)
     check_one_source_219(c)
     check_claude_cli_293(c)
     check_agent_unit_172(c, can_render)
