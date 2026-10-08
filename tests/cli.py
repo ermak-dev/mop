@@ -779,10 +779,18 @@ def check_current_docs_401(c):
         text = open(os.path.join(ROOT, name), encoding="utf-8").read()
         for obsolete in removed:
             c.check(f"#401 {name} has no obsolete {obsolete}", obsolete not in text)
+    # HYPOTHESIS: login после #533 пишет connection.json, а прежнее
+    # общее условие «client.json или mop join» выполнялось и на
+    # устаревшем тексте — оно не отличало новый контракт от старого
+    # имени. SOLUTION: явное условие — новое имя профиля и для README,
+    # и для docs/CLI.md (легаси-пара в README описана верно и остаётся).
+    # RESULT: RED на 7259e30^ (README:107 и :180 ещё говорят
+    # client.json), зелёная на 7259e30, где README называет
+    # connection.json.
     for name in ("README.md", "docs/CLI.md"):
         text = open(os.path.join(ROOT, name), encoding="utf-8").read()
-        c.check(f"#401 {name} names joined client configuration",
-                "client.json" in text or "mop join" in text)
+        c.check(f"#401 #533 {name} names the client profile connection.json",
+                "connection.json" in text)
     # HYPOTHESIS: login после #533 пишет connection.json, а PROXY.md
     # переехал на новое имя — общее условие «client.json или mop join»
     # для него больше не может выполняться и краснит честный текст.
