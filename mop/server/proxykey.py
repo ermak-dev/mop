@@ -177,24 +177,70 @@ def _load_op():
 
 def _validate(state):
     """Одна строгая форма состояния на всех входах (load/prior/resume/
-    status). -> None | строка-причина. schema -- int ровно SCHEMA (bool и
-    float -- не схема), ключи и пути -- непустые строки, stage -- из
-    допустимых, recipients -- список уникальных непустых строк. Unknown
-    stage не «ok»: цикл шагов его не покрывает."""
+    status). -> None | строка-причина. Закрытая схема: ровно известные
+    поля (опциональный delivered), лишних нет; значения полей в причинах
+    НЕ echo-ятся (неизвестное поле может нести секрет), имена полей и
+    перечислимые факты (число лишних) -- сигнальные метаданные, их
+    можно. Ключи -- однострочные непустые, old != new; id -- форма
+    генератора (hex16); пути абсолютные без управляющих; получатели --
+    строгие имена узлов без NATS-масок и управляющих; delivered -- узлы
+    из сохранённого списка с допустимыми итогами, completed при живом
+    списке требует полного покрытия OK (отредактированный JSON
+    «completed» -- не завершение)."""
     if not isinstance(state, dict):
         return "the rotation state is not an object"
+    # Закрытая схема: ровно известные поля (опциональные delivered/note).
+    # Значения полей в причинах НЕ echo-ятся (неизвестное поле может нести
+    # секрет); имена полей и перечислимые факты (число лишних) -- можно.
+    known = ("id", "schema", "old", "new", "source", "copy",
+             "recipients", "stage", "delivered", "note")
+    extra = sorted(k for k in state if k not in known)
+    if extra:
+        return (f"the rotation state carries {len(extra)} unknown field"
+                f"{'s' if len(extra) != 1 else ''}")
     if type(state.get("schema")) is not int or state.get("schema") != SCHEMA:
-        return f"rotation state schema {state.get('schema')!r} is not {SCHEMA}"
+        return "the rotation state schema is not this library's number"
     for field in ("id", "old", "new", "source", "copy"):
         if not isinstance(state.get(field), str) or not state.get(field):
-            return f"rotation state has no {field} (a non-empty string)"
+            return f"the rotation state has no {field} (a non-empty string)"
+    if len(state["id"]) != 16 or any(c not in "0123456789abcdef" for c in state["id"]):
+        return "the rotation state id is not of the generator's form"
+    if state["old"] == state["new"]:
+        return "the rotation state old and new keys are the same"
+    if any(c in state["old"] + state["new"] for c in "\r\n\x00"):
+        return "the rotation state keys must be single-line"
+    if any(ord(c) < 32 or c == "\x7f" for c in state["source"] + state["copy"]):
+        return "the rotation state paths must carry no control characters"
+    if not state["source"].startswith("/") or not state["copy"].startswith("/"):
+        return "the rotation state paths must be absolute"
     if state.get("stage") not in STAGES:
-        return f"rotation state stage {state.get('stage')!r} is not one of {sorted(STAGES)}"
+        return "the rotation state stage is not one of the allowed"
     rs = state.get("recipients")
-    if not isinstance(rs, list) or not all(isinstance(r, str) and r for r in rs):
-        return "rotation state recipients must be a list of non-empty strings"
+    if not isinstance(rs, list) or not rs:
+        return "the rotation state recipients must be a non-empty list of node names"
+    for r in rs:
+        if not isinstance(r, str) or not r or r in (".", "*", ">") \
+                or any(c in r for c in " \t\r\n\x00.>*") \
+                or any(ord(c) < 32 or ord(c) == 127 for c in r):
+            return "the rotation state recipients must be strict node names"
     if len(set(rs)) != len(rs):
-        return "rotation state recipients carry duplicates"
+        return "the rotation state recipients carry duplicates"
+    # delivered-форма: узлы только из сохранённого списка, итоги только
+    # допустимые (raw-проброс dict(raw) не проходит).
+    dv = state.get("delivered")
+    if dv is not None:
+        if not isinstance(dv, dict) or not all(
+                isinstance(k, str) and k in rs and isinstance(v, str) and v
+                and (v == "OK" or v.startswith(("FAILED: ", "NOT REACHED: ")))
+                for k, v in dv.items()):
+            return "the rotation state delivered must be saved nodes with allowed verdicts"
+    # Чекпоинт-консистентность: completed при живом списке требует полного
+    # покрытия OK -- отредактированный JSON «completed» не завершение.
+    if dv is None:
+        dv = {}
+    if state["stage"] == "completed" and not all(dv.get(n) == "OK" for n in rs):
+        return ("the rotation state is completed without full OK coverage "
+                "of the saved recipients")
     return None
 
 

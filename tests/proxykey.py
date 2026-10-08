@@ -300,7 +300,7 @@ def check_resume_refusals_538(c):
             return reach
 
         def state(**over):
-            base = {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+            base = {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                     "new": "new-key", "source": source_path, "copy": copy_path,
                     "recipients": ["node1"], "stage": "ready"}
             base.update(over)
@@ -356,8 +356,9 @@ def check_resume_refusals_538(c):
             c.check("#538 the active state survives the refused begin",
                     kept.get("old") == "old-key" and kept.get("new") == "new-key", kept)
 
-            # Терминальное завершённое состояние заменяемо новым begin.
-            state(stage="completed")
+            # Терминальное завершённое состояние заменяемо новым begin:
+            # completed с полным покрытием OK (форма реального писателя).
+            state(stage="completed", delivered={"node1": "OK"})
             got = proxykey.begin(source_path, copy_path, ["node1"], exclusive=True)
             c.check("#538 begin replaces only a terminal state",
                     isinstance(got, dict) and got.get("stage") != "completed", got)
@@ -380,7 +381,7 @@ def check_preflight_538(c):
     with tempfile.TemporaryDirectory(prefix="mop-rot-pre-") as d:
         src = os.path.join(d, "llm-proxy-client.pass")
         cp = os.path.join(d, "copy.pass")
-        state = {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+        state = {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                  "new": "new-key", "source": src, "copy": cp,
                  "recipients": ["node1"], "stage": "ready"}
 
@@ -492,7 +493,7 @@ def check_remote_step_538(c):
         os.chmod(src, 0o600)
 
         def state(**over):
-            base = {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+            base = {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                     "new": "new-key", "source": src, "copy": cp,
                     "recipients": ["node1"], "stage": "ready"}
             base.update(over)
@@ -585,7 +586,7 @@ def check_probe_step_538(c):
         op = os.path.join(d, "op.json")
 
         def state(stage="listed"):
-            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+            return {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                     "new": "new-key", "source": os.path.join(d, "s"),
                     "copy": os.path.join(d, "c"), "recipients": ["node1"],
                     "stage": stage}
@@ -651,7 +652,7 @@ def check_local_and_delivery_538(c):
         op = os.path.join(d, "op.json")
 
         def state(stage="accepted"):
-            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+            return {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                     "new": "new-key", "source": src, "copy": cp,
                     "recipients": ["node1", "node2"], "stage": stage}
 
@@ -875,9 +876,9 @@ def check_state_validator_538(c):
                 with open(op, "w", encoding="utf-8") as f:
                     json.dump(raw, f)
 
-        good = {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+        good = {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                 "new": "new-key", "source": os.path.join(d, "s"),
-                "copy": os.path.join(d, "c"), "recipients": ["node1"],
+                "copy": os.path.join(d, "c"), "recipients": ["node1", "node2"],
                 "stage": "ready"}
 
         with patched(proxykey, OP=op, LOCK=os.path.join(d, "rotation.lock")):
@@ -955,6 +956,91 @@ def check_state_validator_538(c):
             c.check("#538 the broken prior state file survives the refused begin",
                     after == "{oops", repr(after))
 
+            # Закрытая схема и безопасные причины: значения полей НЕ echo-ятся
+            # (неизвестное поле может нести секрет), имена полей -- сигнальные
+            # метаданные, их перечислять можно. id -- ровно форма генератора
+            # (hex16), не произвольная строка в публичном status.
+            # HYPOTHESIS (RED): _validate echo-ил raw-значения (!r) и принимал
+            # любые extra-поля, id/old/new/пути/получателей -- любой формы.
+            # SOLUTION: закрытая схема (известные поля + опциональные
+            # delivered -- по числу, без имён), статические фразы без
+            # значений, hex16-id, old!=new, однострочные ключи без CR/LF/NUL,
+            # абсолютные пути без управляющих символов, получатели -- строгие
+            # имена узлов без NATS-масок и управляющих символов.
+            leak = "leaked-secret-value"
+
+            def v(raw):
+                write(raw)
+                state = proxykey._load_op()
+                return proxykey._validate(state)
+
+            def bad(name, raw):
+                why = v(raw)
+                c.check(f"#538 {name} refuses", isinstance(why, str) and bool(why), why)
+                c.check(f"#538 {name} reason carries no raw field value",
+                        leak not in str(why), why)
+
+            good2 = {**good, "id": "ab12cd34ef56ab12"}
+            for name, raw in (
+                    ("an unknown field", {**good2, leak: "x"}),
+                    ("a secret schema value", {**good2, "schema": leak}),
+                    ("a secret stage value", {**good2, "stage": leak}),
+                    ("a secret id", {**good2, "id": leak}),
+                    ("a non-hex id", {**good2, "id": "z" * 16}),
+                    ("a short id", {**good2, "id": "ab12"}),
+                    ("an int id", {**good2, "id": 1234567890123456}),
+                    ("old equals new", {**good2, "old": "same", "new": "same"}),
+                    ("a multiline old", {**good2, "old": "a\nb"}),
+                    ("a CR in old", {**good2, "old": "a\rb"}),
+                    ("a NUL in new", {**good2, "new": "a\x00b"}),
+                    ("a relative source", {**good2, "source": "secrets/key.pass"}),
+                    ("a control char in copy", {**good2, "copy": f"/tmp/k\x01.pass"}),
+                    ("a wildcard recipient", {**good2, "recipients": ["*"]}),
+                    ("a gt wildcard recipient", {**good2, "recipients": [">"]}),
+                    ("a spacey recipient", {**good2, "recipients": ["bad node"]}),
+                    ("a dot-joined recipient", {**good2, "recipients": ["a.b"]}),
+                    ("a control-char recipient", {**good2, "recipients": ["a\x02b"]}),
+                    ("a non-absolute copy", {**good2, "copy": "copy.pass"})):
+                bad(name, raw)
+
+            # Имена полей в причине -- сигнальные метаданные: их перечислять
+            # можно, значения -- нет.
+            why = v({**good2, "recipients": ["same", "same"]})
+            c.check("#538 the duplicates reason is a static safe phrase",
+                    "recipients" in why and leak not in why, why)
+            # Сама форма полей несёт перечислимые факты (имя поля, число) --
+            # не значения.
+            why = v({**good2, "extra-count": 1})
+            c.check("#538 an extra field is refused by count, without names",
+                    isinstance(why, str) and "field" in why.lower(), why)
+
+            # delivered-форма: только узлы из сохранённого списка и только
+            # допустимые итоги. Raw-проброс dict(raw) валидатором не проходит.
+            for name, dv in (("a stray delivered node", {"ghost": "OK"}),
+                             ("a raw delivered reason", {"node1": "raw secret payload"}),
+                             ("a non-str delivered verdict", {"node1": 7}),
+                             ("a non-dict delivered", ["node1"])):
+                bad(f"delivered {name}", {**good2, "delivered": dv,
+                                          "stage": "local"})
+
+            # Чекпоинт-консистентность стадии: completed при непустом списке
+            # требует ПОЛНОГО покрытия OK из сохранённого состояния; отредак-
+            # тированный JSON «completed» -- не завершение.
+            bad("completed without delivered", {**good2, "stage": "completed"})
+            bad("completed with a partial delivered",
+                {**good2, "stage": "completed", "delivered": {"node1": "OK"}})
+            bad("completed with a FAILED delivered",
+                {**good2, "stage": "completed", "delivered": {"node1": "FAILED: x"}})
+            # Полное покрытие OK -- валидно; delivered на живом списке
+            # обязательных полей не ломает.
+            write({**good2, "stage": "completed", "delivered": {"node1": "OK",
+                                                                "node2": "OK"}})
+            c.check("#538 completed with full OK coverage is valid",
+                    proxykey._validate(proxykey._load_op()) is None, "must be None")
+            write({**good2, "stage": "local", "delivered": {"node1": "FAILED: x"}})
+            c.check("#538 an open stage with a partial delivered is valid",
+                    proxykey._validate(proxykey._load_op()) is None, "must be None")
+
 # ── #538: serviceability обоих путей и guard на каждом resume ────────────
 # HYPOTHESIS: _preflight проверял режим только копии, не владельца и не
 # источника; resume звал preflight только при stage=ready — пауза на
@@ -973,7 +1059,7 @@ def check_serviceability_538(c):
         op = os.path.join(d, "op.json")
 
         def state(stage="ready"):
-            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+            return {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                     "new": "new-key", "source": src, "copy": cp,
                     "recipients": ["node1"], "stage": stage}
 
@@ -1087,7 +1173,7 @@ def check_coverage_and_verdicts_538(c):
         op = os.path.join(d, "op.json")
 
         def state(stage="local"):
-            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+            return {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                     "new": "new-key", "source": os.path.join(d, "s"),
                     "copy": os.path.join(d, "c"),
                     "recipients": ["node1", "node2"], "stage": stage}
@@ -1225,7 +1311,7 @@ def check_owner_preservation_538(c):
             os.chmod(p, 0o600)
 
         def state(stage="accepted"):
-            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+            return {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                     "new": "new-key", "source": src, "copy": cp,
                     "recipients": ["node1"], "stage": stage}
 
@@ -1326,7 +1412,7 @@ def check_structured_reason_538(c):
             os.chmod(p, 0o600)
 
         def state(stage="ready"):
-            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+            return {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                     "new": "new-key", "source": src, "copy": cp,
                     "recipients": ["node1"], "stage": stage}
 
@@ -1394,9 +1480,9 @@ def check_owner_in_resume_flow_538(c):
         real_write = proxykey.fsutil.write_private
 
         def state(stage):
-            return {"id": "x" * 16, "schema": proxykey.SCHEMA, "old": "old-key",
+            return {"id": "0123456789abcdef", "schema": proxykey.SCHEMA, "old": "old-key",
                     "new": "new-key", "source": src, "copy": cp,
-                    "recipients": [], "stage": stage}
+                    "recipients": ["node1"], "stage": stage}
 
         def write_state(st):
             with open(op, "w", encoding="utf-8") as f:
@@ -1432,13 +1518,17 @@ def check_owner_in_resume_flow_538(c):
             calls.append((path, owner))
             return real_write(path, data, owner=owner)
 
+        def deliver_ok(key, nodes):
+            return {n: "OK" for n in nodes}
+
         with patched(proxykey.os, stat=real_stat), \
                 patched(proxykey.os, geteuid=real_geteuid), \
                 patched(proxykey.fsutil, write_private=write_spy), \
-                patched(proxykey, OP=op, LOCK=lock, _fetch_list=fetch):
+                patched(proxykey, OP=op, LOCK=lock, _fetch_list=fetch,
+                        _deliver=deliver_ok):
             write_state(state("accepted"))
             out = proxykey.resume(exclusive=True)
-        c.check("#538 the resume flow completes to delivery with 0 recipients",
+        c.check("#538 the resume flow completes to delivery",
                 out.get("ok") and out.get("stage") == "completed", out)
         own = [x for x in calls if x[0] in (src, cp)]
         if c.check("#538 the flow wrote both key paths", len(own) == 2, calls):
