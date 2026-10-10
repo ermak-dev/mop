@@ -126,8 +126,13 @@ def check_source_393(c):
             sent.append(bus.file_data(kwargs["files"][0][1]))
             return {"node": {"written": ["ok"]}}
 
-        with patched(proxykey, KEY_FILE=path), patched(proxykey.config,
-                                                     effective=lambda: old), \
+        # #557: тестовая установка -- настоящий сертификат без частной CA
+        # (системное доверие): корня в блобе нет, форма #391 не меняется.
+        with patched(proxykey.config, get=lambda name: {
+                "MOP_TLS_CA": "", "MOP_TLS_CERT": "/etc/certs/real.pem",
+                "MOP_TLS_KEY": "", "MOP_HOME": d}.get(name, "")), \
+                patched(proxykey, KEY_FILE=path), \
+                patched(proxykey.config, effective=lambda: old), \
                 patched(proxykey, _load=lambda: None), \
                 patched(proxykey.puppets, ready_nodes=lambda: ["node"]), \
                 patched(proxykey.bus, request_many=write), \
@@ -2128,7 +2133,12 @@ def check_ca_source_557(c):
     ca_path = os.path.join(tempfile.mkdtemp(prefix="mop-557-ca-"), "corp-ca.pem")
     with open(ca_path, "w") as f:
         f.write("-----BEGIN CERTIFICATE-----\ncorp\n-----END CERTIFICATE-----\n")
-    tls_path = os.path.join(os.path.dirname(ca_path), "tls.pem")
+    # Самоподписанный tls.pem лежит там, куда его кладёт deploy:
+    # ~/.config/mop/secrets/ (deploy/roles/proxy, secrets_dir). Тест
+    # сидит в герметичном HOME (hermetic), и paths.local смотрит туда
+    # же -- сеем в него, а не в каталог рядом с ca_path.
+    tls_path = os.path.join(hermetic.HOME, ".config", "mop", "secrets", "tls.pem")
+    os.makedirs(os.path.dirname(tls_path), exist_ok=True)
     with open(tls_path, "w") as f:
         f.write("-----BEGIN CERTIFICATE-----\nself\n-----END CERTIFICATE-----\n")
     settings = {"MOP_TLS_CA": ca_path, "MOP_TLS_CERT": "", "MOP_TLS_KEY": "",

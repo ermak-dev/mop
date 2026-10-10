@@ -512,7 +512,8 @@ def check_delivery_539(c):
         # строки сводит bus.results_from, агент их не говорит.
         return {n: {"written": ["secrets.env"]} for n in nodes}
 
-    with patched(bus, request_many=fake_request_many):
+    with patched(bus, request_many=fake_request_many), \
+            patched_env(MOP_TLS_CERT="/etc/certs/real.pem"):
         out = eff.deliver("new-key-539", ["node1", "node2"])
     c.check("#539 delivery goes through the write channel with the "
             "explicit saved nodes",
@@ -533,7 +534,8 @@ def check_delivery_539(c):
         return {"node1": {"written": ["secrets.env"]},
                 "node2": {"error": "refused"}}
 
-    with patched(bus, request_many=failing):
+    with patched(bus, request_many=failing), \
+            patched_env(MOP_TLS_CERT="/etc/certs/real.pem"):
         out = eff.deliver("new-key-539", ["node1", "node2"])
     c.check("#539 a raw agent reply rides the bus reducer, not a fake OK",
             out.get("node2", "").startswith("FAILED"), out)
@@ -661,6 +663,7 @@ def check_deliver_blob_539(c):
         return out + "#rendered\n"
 
     with patched(bus, request_many=fake_request_many), \
+            patched_env(MOP_TLS_CERT="/etc/certs/real.pem"), \
             patched(proxykey, blob=loud_blob):
         eff.deliver("new-key-539", ["node1"])
     files = sent[0][2] if sent else []

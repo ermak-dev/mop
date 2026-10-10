@@ -27,6 +27,10 @@ AUTH_VAR = "ANTHROPIC_AUTH_TOKEN"
 # nginx отвечал на нём до канонического корня /v1 (#529).
 _LEGACY_PREFIX = "/llm"
 
+# Петля серверного потребителя (#557): прокси стоит на самом контроллере,
+# и читателю каталога на сервере незачем ходить публичным origin через TLS.
+_LOOP_HOST = "127.0.0.1"
+
 # Ресурсы прокси, которые mop запрашивает сам; произвольные абсолютные
 # пути и обход каталога -- не ресурс, а повод отказаться.
 RESOURCES = ("models", "messages")
@@ -125,6 +129,56 @@ def origin(url, host=None, port=None):
     return base
 
 
+def public_origin(host=None, port=None):
+    """Публичный origin установки (#557): https://<MOP_SERVER_LAN>:
+    <MOP_HTTPS_PORT>. Одна формула для издателя (_client_config) и для
+    дефолта MOP_PROXY_URL: двух формул не бывает, разъехались бы молча.
+    Порт пишется явно, даже когда он 443: значение едёт в строку адреса,
+    и неявный порт означал бы вторую форму того же origin."""
+    host = config.get("MOP_SERVER_LAN") if host is None else host
+    port = config.get("MOP_HTTPS_PORT") if port is None else port
+    return f"https://{host}:{port}"
+
+
+def internal_loop(port=None):
+    """База петли для серверского потребителя (#557): http://127.0.0.1:
+    <MOP_LLM_PROXY_PORT>. Прокси на контроллере, TLS ему на петле не нужен,
+    и пин CA -- тоже: доверять собственной петле через чужой корень значило
+    бы держать вторую копию TLS-правила #517 рядом с первой."""
+    port = config.get("MOP_LLM_PROXY_PORT") if port is None else port
+    return f"http://{_LOOP_HOST}:{port}"
+
+
+def to_public_origin(url, host=None, port=None, internal_port=None):
+    """Собственный внутренний корень -> публичный origin (#557): -> строка.
+
+    Голый адрес впрямую к порту прокси (scheme любой, authority -- свой
+    MOP_SERVER_LAN + MOP_LLM_PROXY_PORT, путь пуст с хвостовым слэшем или
+    без) -- это адрес мимо TLS, и он канонизируется в публичный origin.
+    Всё остальное -- чужой выбор: с путём (включая /llm -- его снимает
+    canonical по своим правилам), с учётными данными, чужим хостом или
+    чужим портом -- проходит насквозь неизменным, догадка запрещена."""
+    if not url:
+        return url
+    host = config.get("MOP_SERVER_LAN") if host is None else host
+    internal_port = (config.get("MOP_LLM_PROXY_PORT")
+                     if internal_port is None else internal_port)
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https"):
+        return url
+    if parsed.username is not None or parsed.password is not None:
+        return url
+    if parsed.query or parsed.fragment:
+        return url
+    if (parsed.hostname or "").lower() != (host or "").lower():
+        return url
+    if str(parsed.port or "") != str(internal_port or ""):
+        return url
+    if parsed.path not in ("", "/"):
+        return url
+    return public_origin(host, port)
+
+
 def env():
     """Статическое окружение LLM сессии -> {переменная: значение}.
 
@@ -133,13 +187,20 @@ def env():
     останется один адрес. [1m] -- окно контекста: claude срезает суффикс
     перед запросом, без него жмёт auto-compact по 200k.
 
-    Адрес (#547) -- origin по контракту этой же версии: легаси /llm
-    установки на ЕЁ ЖЕ authority снимается, внутренний корень 8317 и
-    чужой кастомный путь проходят насквозь."""
+    Адрес (#547, #557) -- origin по контракту этой же версии: свой
+    внутренний корень 8317 канонизируется в публичный origin установки,
+    легаси /llm установки на ЕЁ ЖЕ authority снимается, чужой кастомный
+    путь проходит насквозь. Пустая настройка -- не пустой адрес:
+    дефолт -- публичный origin (здесь, не в config: DERIVED-лямбда
+    потребовала бы импорта llm в config -- круг), и только чужое
+    значение в .env -- осознанный оверрайд."""
+    host = config.get("MOP_SERVER_LAN")
+    port = config.get("MOP_HTTPS_PORT")
+    base = to_public_origin(config.get("MOP_PROXY_URL"), host=host, port=port,
+                            internal_port=config.get("MOP_LLM_PROXY_PORT")) \
+        or public_origin(host, port)
     return {
-        "ANTHROPIC_BASE_URL": origin(config.get("MOP_PROXY_URL"),
-                                     host=config.get("MOP_SERVER_LAN"),
-                                     port=config.get("MOP_HTTPS_PORT")),
+        "ANTHROPIC_BASE_URL": origin(base, host=host, port=port),
         "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3[1m]",
         "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3[1m]",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3-flash",

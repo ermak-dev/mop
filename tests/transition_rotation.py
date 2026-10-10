@@ -131,7 +131,10 @@ def rotate(box, http, writes):
         return {n: {"written": [os.path.basename(paths.NODE_SECRETS)]}
                 for n in nodes}
 
+    # Стойло -- установка с настоящим сертификатом (#557: MOP_TLS_CERT
+    # задан, частной CA нет): корня в блобе нет, ca_source молчит.
     with patched(proxykey, OP=box["op"], LOCK=box["lock"]), \
+            patched_env(MOP_TLS_CERT="/etc/certs/real.pem"), \
             patched(bus, request_many=fake_write):
         proxykey.begin(box["src"], box["cp"], ["node1"], exclusive=True)
         return proxykey.resume(exclusive=True, effects=eff)
@@ -197,6 +200,7 @@ def _s1_runs(c):
             return ok_answers(nodes)
 
         with patched(proxykey, KEY_FILE=box["src"], STATE=box["state"]), \
+                patched_env(MOP_TLS_CERT="/etc/certs/real.pem"), \
                 patched(puppets_mod, ready_nodes=lambda: ["node1"]), \
                 patched(bus, request_many=push_write):
             first = proxykey.push(env={"MOP_PROXY_KEY": "stale-env-541"})

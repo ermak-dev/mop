@@ -332,6 +332,28 @@ if [ -n "$PU_LLM_KEY_VAR" ]; then
         exit 1
     fi
     llm_env+=(-e "$PU_LLM_AUTH_VAR=$key")
+    # --- корень сервера для TLS (#557) ---
+    # Папет ходит на публичный /v1 сервера (#557), и корень закрепления
+    # приезжает тем же файлом ключей узла ($keyfile), что и ключ: строка
+    # MOP_PROXY_CA (base64 PEM, кладёт proxykey.blob) декодируется в файл
+    # под $HOME тела и едет claude переменной NODE_EXTRA_CA_CERTS -- как
+    # мастера через tls.pem выбранного сервера (#412). Сломанная или
+    # пустая строка валит врапер громко, как отсутствие ключа: тело без
+    # корня поднялось бы живым и умирало на TLS без причины в журнале.
+    # Строки нет -- у установки настоящий сертификат, системное доверие,
+    # переменной не едет. Доллар одинарный: врапер едет в спеке base64.
+    ca_line=$(sed -n "s/^MOP_PROXY_CA=//p" "$keyfile" | tail -1)
+    if [ -n "$ca_line" ]; then
+        ca_file="$HOME/.config/mop/tls.pem"
+        mkdir -p "$(dirname "$ca_file")"
+        if ! printf '%s' "$ca_line" | base64 -d > "$ca_file" 2>/dev/null \
+            || [ ! -s "$ca_file" ]; then
+            echo "broken MOP_PROXY_CA in $keyfile -- the TLS root does not decode" >&2
+            exit 1
+        fi
+        llm_env+=(-e "NODE_EXTRA_CA_CERTS=$ca_file")
+    fi
+    # --- конец корня сервера (#557) ---
 fi
 
 # Креды проекта, а не узла. Без этого папет ходил бы на шину под кредом агента и

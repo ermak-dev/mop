@@ -43,6 +43,11 @@ PINNED = {
     "MOP_PUPPET_PATH": "{HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin",
     "MOP_POOL_DC": "pool",
     "MOP_DEFAULT_LLM": "claude",
+    # Публичный origin (#557): дефолт MOP_PROXY_URL пуст, окружение тел
+    # собирается из этих двух -- без пина слепок зависел бы от машины.
+    "MOP_SERVER_LAN": "srv.snapshot.test",
+    "MOP_HTTPS_PORT": "8443",
+    "MOP_LLM_PROXY_PORT": "8317",
 }
 os.environ.update(PINNED)
 time.time = lambda: 1_790_000_000.0
@@ -281,18 +286,13 @@ def ca_section():
     return w[w.index(CA_BEGIN):w.index(CA_END)]
 
 
-def run_ca_section(section, home, secrets, key_var="MOP_PROXY_KEY"):
-    """Кусок корня -- как в теле: set -e, свой HOME, secrets.env узла.
+def run_ca_section(section, home, secrets):
+    """Кусок корня -- как в теле: set -e, свой HOME, secrets.env узла
+    (пишет ВЫЗЫВАЮЩИЙ: проверка сама решает, есть ли в нём строка корня).
 
     -> процесс, чей stdout -- пары var=value окружения claude по строке
     (то, что врапер положил бы в llm_env), и в конце sentinel."""
-    import base64
     import subprocess
-    os.makedirs(home, exist_ok=True)
-    with open(secrets, "w") as f:
-        f.write("MOP_PROXY_KEY=k1\n")
-        if key_var == "MOP_PROXY_CA":
-            pass
     script = ("set -e\nkeyfile=" + repr(secrets) + "\nllm_env=()\n" + section
               + '\nfor kv in "${llm_env[@]}"; do printf "%s\\n" "$kv"; done\n'
               + 'printf "DONE\\n"\n')

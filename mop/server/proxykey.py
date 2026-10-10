@@ -649,17 +649,63 @@ def source(env, path=None):
     return key
 
 
+def ca_source():
+    """Корень закрепления для раздачи телам (#557): -> путь | None.
+
+    Семантика #517 -- ровно та, по которой серверные сервисы выбирают,
+    чему доверять: задан MOP_TLS_CA -- корень частной CA; иначе при пустом
+    MOP_TLS_CERT -- самоподписанный tls.pem контроллера (secrets, где его
+    кладёт deploy); настоящий сертификат -- корня нет, системное доверие.
+    Второй копии правила не бывает: разошлись бы молча, и тело осталось
+    бы без корня или с чужим.
+
+    Именованный корень, которого нет на диске, -- громкий отказ с путём:
+    молчаливое отсутствие подняло бы тело, умирающее на TLS без причины
+    в журнале. Самоподписанный tls.pem не найден -- тоже отказ: его
+    отсутствие при пустом MOP_TLS_CERT значит, что деплой не дошёл или
+    установка не самоподписанная, -- не молчаливое системное доверие,
+    которое отвергло бы сертификат на первом же запросе."""
+    ca = config.get("MOP_TLS_CA")
+    if isinstance(ca, tuple):
+        ca = ca[0]
+    cert = config.get("MOP_TLS_CERT")
+    if isinstance(cert, tuple):
+        cert = cert[0]
+    if ca:
+        if not os.path.isfile(ca):
+            raise RuntimeError(
+                f"MOP_TLS_CA names a root that is not on disk: {ca}")
+        return ca
+    if cert:
+        return None
+    self_signed = paths.local(paths.SECRETS, "tls.pem")
+    if not os.path.isfile(self_signed):
+        raise RuntimeError(
+            "self-signed tls.pem is not installed under secrets "
+            f"(expected {self_signed}): re-run the deploy or set MOP_TLS_CA")
+    return self_signed
+
+
 def blob(env):
-    """Что везти узлам в secrets.env: ключ прокси и переходные, что есть.
-    -> содержимое | None, когда раздавать нечего (ключа нет -- установка
-    без прокси, тишина правильнее отказа)."""
+    """Что везти узлам в secrets.env: ключ прокси и корень закрепления,
+    что есть (#391, #557). -> содержимое | None, когда раздавать нечего
+    (ключа нет -- установка без прокси, тишина правильнее отказа);
+    корень без ключа не ездит -- у установки без прокси нет и TLS-следа
+    от него. config.effective() несёт происхождение настройки кортежем
+    (значение, источник): в блоб едет значение, а не его repr -- 401 у
+    всех тел стоил именно этого."""
     key = env.get("MOP_PROXY_KEY")
-    # config.effective() несёт происхождение настройки кортежем (значение,
-    # источник): в блоб едет значение, а не его repr -- 401 у всех тел
-    # стоил именно этого.
     if isinstance(key, tuple):
         key = key[0]
-    return f"MOP_PROXY_KEY={key}\n" if key else None
+    ca = env.get("MOP_PROXY_CA")
+    if isinstance(ca, tuple):
+        ca = ca[0]
+    if not key:
+        return None
+    out = f"MOP_PROXY_KEY={key}\n"
+    if ca:
+        out += f"MOP_PROXY_CA={bus.as_file('', ca)[1]}\n"
+    return out
 
 
 def sha(content):
@@ -689,6 +735,20 @@ def strict_settled(outcome):
     return not any(str(r) != "OK" for r in (outcome or {}).values())
 
 
+def _secrets_env(env):
+    """Вход блоба из живых источников ключа и корня (#557): ключ -- файл
+    установленного прокси (переходный env), корень -- содержимое файла
+    ca_source(). Корень едет СТРОКОЙ-содержимым, не путём: узел знает
+    свои пути, тело -- свои, и путь контроллера в secrets.env был бы
+    строкой-ложью на каждой стороне. -> {MOP_PROXY_KEY, MOP_PROXY_CA?}"""
+    out = {"MOP_PROXY_KEY": source(env)}
+    root = ca_source()
+    if root:
+        with open(root, encoding="utf-8") as f:
+            out["MOP_PROXY_CA"] = f.read()
+    return out
+
+
 def push(env=None, nodes=None, now=None):
     """Раздать блоб узлам и запомнить отпечаток. -> {узел: итог} | None.
 
@@ -696,7 +756,7 @@ def push(env=None, nodes=None, now=None):
     (проба), иначе состав пула по шине. Пишет глагол write без адреса:
     агент для админа кладёт копию узла и живые тела без аренды."""
     env = config.effective() if env is None else env
-    content = blob({"MOP_PROXY_KEY": source(env)})
+    content = blob(_secrets_env(env))
     if not due(content, _load()):
         return None
     if nodes is None:
