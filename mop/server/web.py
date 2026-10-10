@@ -659,7 +659,7 @@ def _echoed_current_key(value, key):
 # браузера; upstream его не принимает, гейтвей подменяет своим ключом.
 SENTINEL = "mop-proxy-managed"
 # Размеры гейтвея (#417): сток-панель -- один файл ~3 МБ; тела write --
-# конфиги, но лимит общий с /llm/ у nginx.
+# конфиги, но лимит общий с /v1/ у nginx.
 PANEL_MAX = 4 * 1024 * 1024
 REDIRECT_MAX = 3
 
