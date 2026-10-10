@@ -211,13 +211,18 @@ def _s1_runs(c):
         push_content = bus.file_data(push_files[0][1]) if push_files else b""
         # Буквальная форма -- не «равенство двух писателей друг другу»
         # (при общем повреждении оба разошлись бы одинаково), а контракт
-        # блоба: одна строка MOP_PROXY_KEY=<ключ> с одним переводом строки.
+        # блоба #557: строка MOP_PROXY_KEY=<ключ>, затем -- когда сервер
+        # пинит цепочку -- ровно одна строка MOP_PROXY_CA=<base64 PEM>, и
+        # ничего больше. Проверка гоняет стойло без корня (MOP_TLS_CERT
+        # задан, файлов нет): ca_source() здесь возвращает None, блоб --
+        # одна строка ключа.
         want = f"MOP_PROXY_KEY={new}\n".encode()
         c.check("#541 S1 both writers send one byte-identical canonical blob",
                 rot_content == push_content == want,
                 (rot_content, push_content, want))
-        c.check("#541 S1 the blob is exactly one MOP_PROXY_KEY line",
+        c.check("#541 S1 the blob is one MOP_PROXY_KEY line with no root",
                 rot_content.count(b"MOP_PROXY_KEY") == 1
+                and b"MOP_PROXY_CA" not in rot_content
                 and rot_content.endswith(b"\n")
                 and b"\n" not in rot_content[:-1], rot_content)
     finally:
