@@ -121,11 +121,16 @@ server {
     location /llm/ {
         # История и compact проходят здесь же (#411): дефолт nginx
         # отрезал текстовый контекст, а Claude называл 413 лимитом media.
+        # proxy_read_timeout тоже не наследуется между location: без него
+        # здесь действовал дефолт nginx в 60s, и долгая генерация (напр.
+        # gpt-6.1-sol через codex) рвалась 504 раньше, чем успевала ответить.
         client_max_body_size {{ MOP_LLM_REQUEST_MAX_MB }}m;
         proxy_pass http://127.0.0.1:{{ MOP_LLM_PROXY_PORT }}/;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
     }
 
     # Панель строит каталог /v1/models от корня origin. В отличие от
