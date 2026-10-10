@@ -228,7 +228,9 @@ class Effects:
         # сводит bus.results_from, строгую оценку -- strict_settled #538.
         # Блоб рендерит proxykey.blob -- ЕДИНСТВЕННЫЙ рендер secrets.env:
         # у двух писателей одного файла не может быть двух форматов.
-        content = proxykey.blob({"MOP_PROXY_KEY": key})
+        # Корень (#557) -- тем же _secrets_env: у ротации нет собственного
+        # мнения о TLS, иначе два писателя развезли бы узлам два файла.
+        content = proxykey.blob(proxykey._secrets_env({"MOP_PROXY_KEY": key}))
         answers = bus.request_many(
             "write", list(nodes), timeout=bus.WRITE_TIMEOUT,
             files=[bus.as_file(paths.NODE_SECRETS, content)])

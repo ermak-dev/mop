@@ -512,7 +512,8 @@ def check_delivery_539(c):
         # строки сводит bus.results_from, агент их не говорит.
         return {n: {"written": ["secrets.env"]} for n in nodes}
 
-    with patched(bus, request_many=fake_request_many):
+    with patched(bus, request_many=fake_request_many), \
+            patched_env(MOP_TLS_CERT="/etc/certs/real.pem"):
         out = eff.deliver("new-key-539", ["node1", "node2"])
     c.check("#539 delivery goes through the write channel with the "
             "explicit saved nodes",
@@ -533,7 +534,8 @@ def check_delivery_539(c):
         return {"node1": {"written": ["secrets.env"]},
                 "node2": {"error": "refused"}}
 
-    with patched(bus, request_many=failing):
+    with patched(bus, request_many=failing), \
+            patched_env(MOP_TLS_CERT="/etc/certs/real.pem"):
         out = eff.deliver("new-key-539", ["node1", "node2"])
     c.check("#539 a raw agent reply rides the bus reducer, not a fake OK",
             out.get("node2", "").startswith("FAILED"), out)
@@ -645,18 +647,34 @@ def check_deliver_blob_539(c):
     # Индикатор единственного рендера: подменяем proxykey.blob ЗАМЕТНО
     # (другой суффикс). Ручная строка в deliver этого не заметит --
     # проверка обязана быть красной до перехода deliver на blob().
+    # #557: блоб вырос -- за ключом может ехать строка корня MOP_PROXY_CA,
+    # поэтому резервная форма loud_blob держит и её: индикатор (#rendered
+    # хвостом) по-прежнему ловит «deliver пишет руками», а контракт двух
+    # строк описан явно в tests/proxykey.py (check_blob_ca_557).
     def loud_blob(env):
-        return proxykey.blob.__wrapped__(env) + "#rendered\n" \
-            if hasattr(proxykey.blob, "__wrapped__") else \
-            f"MOP_PROXY_KEY={env.get('MOP_PROXY_KEY')}\n#rendered\n"
+        if hasattr(proxykey.blob, "__wrapped__"):
+            return proxykey.blob.__wrapped__(env) + "#rendered\n"
+        out = f"MOP_PROXY_KEY={env.get('MOP_PROXY_KEY')}\n"
+        import base64
+        if env.get("MOP_PROXY_CA"):
+            pem = env["MOP_PROXY_CA"]
+            pem = pem[0] if isinstance(pem, tuple) else pem
+            out += "MOP_PROXY_CA=" + base64.b64encode(pem.encode()).decode() + "\n"
+        return out + "#rendered\n"
 
     with patched(bus, request_many=fake_request_many), \
+            patched_env(MOP_TLS_CERT="/etc/certs/real.pem"), \
             patched(proxykey, blob=loud_blob):
         eff.deliver("new-key-539", ["node1"])
     files = sent[0][2] if sent else []
     content = bus.file_data(files[0][1]) if files else b""
     c.check("#539 delivery renders the blob with the one renderer",
             content.endswith(b"#rendered\n"), content)
+    c.check("#539/#557 the delivery blob is the key line plus at most the root line",
+            content.count(b"MOP_PROXY_KEY=") == 1
+            and (b"MOP_PROXY_CA=" not in content
+                 or content.count(b"MOP_PROXY_CA=") == 1
+                 and content.rstrip(b"#rendered\n").count(b"\n") <= 2), content)
 
 
 # ── дефект 6 ревью: status --json invalid тоже rc 1 ──────────────────────

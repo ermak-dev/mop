@@ -68,11 +68,11 @@ origin'а форме не участвуют -- обратного отобра�
 
 GET /api/admin/models (#468) -- каталог моделей прокси для формы смены:
 админ-only так же, ответ {"models": [id]}. Источник читается сервером
-(mop/common/llm.catalog_read: URL из настройки, ключ из файла
-установленного прокси, #391) -- ключ и URL в ответ не едут; парсер
-общий с клиентом (#448, mop/common/llm.catalog_ids), второй копии
-urllib-логики здесь нет. Лежащий источник -- closed 503 фразой
-allowlist'а.
+(mop/server/adminapi.catalog_read: петля 127.0.0.1:MOP_LLM_PROXY_PORT,
+ключ из файла установленного прокси, #391, #557) -- ключ и URL в ответ
+не едут; парсер общий с клиентом (#448, mop/common/llm.catalog_ids),
+второй копии urllib-логики здесь нет. Лежащий источник -- closed 503
+фразой allowlist'а.
 """
 import json
 import re
@@ -150,42 +150,27 @@ class Refused(Exception):
 
 
 def catalog_read(env=None, key_path=None):
-    """Каталог моделей прокси глазами сервера (#468): GET /v1/models
-    клиентским ключом. Ключ -- файл установленного прокси
-    (proxykey.source, #391), прежний env -- переходный; URL -- настройка
-    MOP_PROXY_URL. Ключ не логируется и в ответы не едет -- только внутрь
-    HTTPS-запроса. -> [id] | исключение (лежащий прокси, нет ключа):
-    фасад переведёт в общую фразу 503. Сервер-слой: proxykey и creds
-    общему слою не видны (imports go downward only)."""
-    import ssl
-    import urllib.parse
+    """Каталог моделей прокси глазами сервера (#468, #557): GET /v1/models
+    клиентским ключом. Ключ -- файл установленного прокси (proxykey.source,
+    #391), прежний env -- переходный. База -- петля llm.internal_loop
+    (http://127.0.0.1:MOP_LLM_PROXY_PORT): читатель стоит на самом
+    контроллере рядом с прокси, публичный origin через nginx и пин CA
+    ему не нужны -- вторая копия TLS-правила #517 разъехалась бы с
+    первой. Ключ не логируется и в ответы не едет -- только внутрь
+    HTTP-запроса. -> [id] | исключение (лежащий прокси, нет ключа):
+    фасад переведёт в общую фразу 503. Сервер-слой: proxykey общему
+    слою не виден (imports go downward only)."""
     import urllib.request
     from . import proxykey
-    from ..common import creds, llm
-    url = (config.get("MOP_PROXY_URL") or "").rstrip("/")
+    from ..common import llm
     key = proxykey.source(env or {}, key_path)
-    if not url or not key:
-        raise RuntimeError("proxy address or key is not configured")
-    host = config.get("MOP_SERVER_LAN")
-    # Канонический /v1/models (#547): внутренний корень установки (8317)
-    # надстраивается тем же контрактом. Обе подсказки установки: без
-    # порта host-only снимал бы /llm с чужого порта того же имени.
-    req = urllib.request.Request(llm.endpoint(url, "models", host=host,
-                                                port=config.get("MOP_HTTPS_PORT")),
+    if not key:
+        raise RuntimeError("proxy key is not configured")
+    req = urllib.request.Request(llm.endpoint(llm.internal_loop(), "models"),
                                  headers={"Authorization": f"Bearer {key}"})
-    # Пин CA -- как у doctor (_probe): TLS-прокси установки имеет свой CA.
-    pin = None
-    try:
-        pin = creds.cafile(creds.server_dir(host)) \
-            if urllib.parse.urlsplit(url).hostname == host else None
-    except Exception:
-        pin = None
-    context = ssl.create_default_context(cafile=pin)
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
-    with opener.open(req, timeout=10) as r:
+    with urllib.request.urlopen(req, timeout=10) as r:
         if r.status != 200:
             raise RuntimeError(f"proxy catalog answered HTTP {r.status}")
-        from ..common import llm
         return llm.catalog_ids(json.load(r))
 
 

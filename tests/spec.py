@@ -43,6 +43,11 @@ PINNED = {
     "MOP_PUPPET_PATH": "{HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin",
     "MOP_POOL_DC": "pool",
     "MOP_DEFAULT_LLM": "claude",
+    # Публичный origin (#557): дефолт MOP_PROXY_URL пуст, окружение тел
+    # собирается из этих двух -- без пина слепок зависел бы от машины.
+    "MOP_SERVER_LAN": "srv.snapshot.test",
+    "MOP_HTTPS_PORT": "8443",
+    "MOP_LLM_PROXY_PORT": "8317",
 }
 os.environ.update(PINNED)
 time.time = lambda: 1_790_000_000.0
@@ -266,6 +271,85 @@ def render(name, origin, cont):
     """Спека ровно так, как её увидит Nomad: JSON, в порядке ключей."""
     return json.dumps(spec.job_spec(name, origin, cont=cont),
                       ensure_ascii=False, indent=1)
+
+
+# ── #557: корень сервера в теле -- из той же раздачи, что и ключ ─────────
+CA_BEGIN = "# --- корень сервера для TLS (#557) ---"
+CA_END = "# --- конец корня сервера (#557) ---"
+
+
+def ca_section():
+    """Кусок врапера про корень TLS -- ровно тот текст, что едет."""
+    w = spec.WRAPPER
+    if CA_BEGIN not in w or CA_END not in w:
+        return None
+    return w[w.index(CA_BEGIN):w.index(CA_END)]
+
+
+def run_ca_section(section, home, secrets):
+    """Кусок корня -- как в теле: set -e, свой HOME, secrets.env узла
+    (пишет ВЫЗЫВАЮЩИЙ: проверка сама решает, есть ли в нём строка корня).
+
+    -> процесс, чей stdout -- пары var=value окружения claude по строке
+    (то, что врапер положил бы в llm_env), и в конце sentinel."""
+    import subprocess
+    script = ("set -e\nkeyfile=" + repr(secrets) + "\nllm_env=()\n" + section
+              + '\nfor kv in "${llm_env[@]}"; do printf "%s\\n" "$kv"; done\n'
+              + 'printf "DONE\\n"\n')
+    return subprocess.run(["/bin/bash", "-c", script], capture_output=True,
+                          text=True, env={"HOME": home, "PATH": os.environ["PATH"]})
+
+
+def check_ca_section_557(c):
+    """Врапер кладёт корень сервера в тело и даёт claude NODE_EXTRA_CA_CERTS.
+
+    Строка MOP_PROXY_CA (base64 PEM) в secrets.env узла декодируется в файл
+    под $HOME тела и едет переменной NODE_EXTRA_CA_CERTS; сломанная строка --
+    громкий выход (как отсутствие ключа); строки нет -- системное доверие."""
+    import base64
+    import shutil
+    import tempfile
+    section = ca_section()
+    if not c.check("#557 the wrapper has a CA section",
+                   section is not None, "no markers in spec.WRAPPER"):
+        return
+    pem = "-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----\n"
+    line = base64.b64encode(pem.encode()).decode()
+    home = tempfile.mkdtemp(prefix="mop-557-body-")
+    try:
+        secrets = os.path.join(home, "secrets.env")
+        # (a) строка есть: файл декодирован, переменная указывает на него.
+        with open(secrets, "w") as f:
+            f.write(f"MOP_PROXY_KEY=k1\nMOP_PROXY_CA={line}\n")
+        r = run_ca_section(section, home, secrets)
+        if not c.check("#557 the CA section succeeds", not r.returncode,
+                       r.stderr.strip()):
+            return
+        got = dict(kv.split("=", 1) for kv in r.stdout.splitlines() if "=" in kv)
+        ca_file = os.path.join(home, ".config/mop/tls.pem")
+        c.check("#557 NODE_EXTRA_CA_CERTS names the decoded file",
+                got.get("NODE_EXTRA_CA_CERTS") == ca_file, got)
+        c.check("#557 the root is decoded into the body",
+                os.path.isfile(ca_file) and open(ca_file).read() == pem,
+                ca_file if os.path.isfile(ca_file) else "missing")
+        # (b) сломанная строка: громкий выход, файл-мусор не в счёт.
+        with open(secrets, "w") as f:
+            f.write("MOP_PROXY_KEY=k1\nMOP_PROXY_CA=@@not-base64@@\n")
+        r = run_ca_section(section, home, secrets)
+        c.check("#557 a broken CA line fails loudly",
+                r.returncode != 0 and "MOP_PROXY_CA" in r.stderr,
+                (r.returncode, r.stderr.strip()))
+        # (c) строки нет: системное доверие, переменной нет.
+        with open(secrets, "w") as f:
+            f.write("MOP_PROXY_KEY=k1\n")
+        r = run_ca_section(section, home, secrets)
+        if c.check("#557 no CA line keeps the section quiet", not r.returncode,
+                   r.stderr.strip()):
+            got = [kv for kv in r.stdout.splitlines() if kv.startswith("NODE_EXTRA")]
+            c.check("#557 without the line there is no NODE_EXTRA_CA_CERTS",
+                    not got, got)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def check_snapshot(c):
@@ -1086,6 +1170,7 @@ def main():
         return 0
     c = Checks()
     for fn in (check_snapshot, check_template_version, check_llm_env_449,
+               check_ca_section_557,
                check_wrapper_paths,
                check_git_identity, check_driver_free_183,
                check_memory_197, check_project_asks_197, check_spec_memory_197,

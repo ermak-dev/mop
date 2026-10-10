@@ -35,8 +35,8 @@ import base64
 
 from .. import driver
 from . import bootstrap, natsconf, nodes, nomad, proxykey, spec
-from ..common import (bus, busnames, config, creds, domain, fsutil, landing, lease, paths, project_secrets,
-                      projects, puppets, service, state)
+from ..common import (bus, busnames, config, creds, domain, fsutil, landing, lease, llm, paths,
+                      project_secrets, projects, puppets, service, state)
 from ..common.domain import Alloc, CloneFacts, JobMeta, PoolNode, Project, Verb
 
 # Nomad за интерфейсом (#275): глаголы читают его через _api(), а не модуль
@@ -639,18 +639,18 @@ def _gc_policy(project, req):
 def _client_config(req):
     """Только личный субъект после проверки NATS, не узловой server.rpc.
 
-    Адрес -- канонический origin сервера (#547): scheme/host/port, без
-    исторического префикса /llm и без /v1. Надстраивает /v1/* потребитель,
-    и ровно один раз; nginx root /v1 уже отвечает на корне (#529)."""
+    Адрес -- публичный origin установки (#547, #557): llm.public_origin,
+    ЕДИНСТВЕННАЯ формула https://<MOP_SERVER_LAN>:<MOP_HTTPS_PORT> -- inline
+    копия здесь разошлась бы с дефолтом настройки и дефолтом окружения
+    тел. Надстраивает /v1/* потребитель, и ровно один раз; nginx root
+    /v1 уже отвечает на корне (#529)."""
     if not req.get("_caller"):
         return {"error": "client_config requires an authenticated personal subject"}
     key = proxykey.source({})
     if not key:
         return {"error": "proxy client key is not installed on the server"}
-    host = config.get("MOP_SERVER_LAN")
-    port = str(config.get("MOP_HTTPS_PORT"))
-    return {"ok": True, "https_port": port,
-            "proxy_url": f"https://{host}:{port}", "proxy_key": key}
+    return {"ok": True, "https_port": str(config.get("MOP_HTTPS_PORT")),
+            "proxy_url": llm.public_origin(), "proxy_key": key}
 
 
 # ─── глаголы: проекты (#117) ─────────────────────────────────────────────

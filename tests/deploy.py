@@ -129,7 +129,9 @@ VARS = {"MOP_USER": "mopuser", "MOP_HOME": "/home/mopuser", "MOP_SERVER_LAN": "1
         "MOP_LDAP_NESTED": "ad",
         "MOP_LDAP_STARTTLS": "no", "MOP_LDAP_CA_FILE": "/etc/ssl/certs/corp-ca.pem",
         # LLM-прокси (#390): ключ пуст по умолчанию, образец -- как у LDAP.
-        "MOP_PROXY_URL": "http://proxy.example.dev:8317", "MOP_PROXY_KEY": "k1"}
+        "MOP_PROXY_URL": "http://proxy.example.dev:8317", "MOP_PROXY_KEY": "k1",
+        # Петля прокси (#557): читатели на сервере ходят 127.0.0.1:8317.
+        "MOP_LLM_PROXY_PORT": "8317"}
 # Значения, которые юнит обязан донести целиком (#185): пробел, кавычки,
 # обратный слеш. Подставляются вместо настройки из набора юнита.
 AWKWARD = ("Pool Bot", 'say "hi"', "a\\b", "tab\there", "it's", "100%", "%h")
@@ -151,7 +153,11 @@ ADDED = {"mop-cluster": ("MOP_NOMAD_PORT", "MOP_POOL_DC", "MOP_PUPPET_MEM_MB",
                          "MOP_MEM_MB", "MOP_PUPPET_SEED", "MOP_PUPPET_PATH",
                          "MOP_PROXY_URL", "MOP_GC_FREE_MIN_GB", "MOP_GC_MAX_PER_RUN",
                          # reload шины с проверкой (#211): /varz на петле.
-                         "MOP_NATS_MONITOR_PORT")}
+                         "MOP_NATS_MONITOR_PORT",
+                         # llm.env() канонизирует свой внутренний корень и
+                         # читает порт петли прокси (#557): спека собирает
+                         # окружение тел, дефолт -- публичный origin.
+                         "MOP_LLM_PROXY_PORT")}
 # Несекретные настройки провайдера личностей (#214) -- сервисам, которые его
 # строят: callout и глагол личности bootstrap'а. Одним списком
 # (config.IDENTITY_SCOPED); что у юнита уже было, в добавки не входит.
@@ -160,6 +166,8 @@ ADDED["mop-bootstrap"] = config.IDENTITY_SCOPED
 # после снимка -- группа доступа и режим вложенности LDAP (#220), тем же
 # списком IDENTITY_SCOPED.
 ADDED["mop-callout"] = ("MOP_LDAP_ACCESS_GROUP", "MOP_LDAP_NESTED")
+# Каталог моделей читается петлёй к прокси (#557): порт петли -- юнитом.
+ADDED["mop-web"] = ("MOP_LLM_PROXY_PORT",)
 
 PINNED = {
     'mop-bootstrap': "[Unit]\nDescription=mop-bootstrap (bootstrap песочниц: играет .mop/bootstrap.yaml проекта при каждом старте папета)\nAfter=network-online.target nats.service\nWants=network-online.target\n\n[Service]\nUser=mopuser\nWorkingDirectory=/home/mopuser/mop\n# .env на сервер не едет: всё, что подписчику и прогону нужно знать об\n# установке, приезжает юнитом. MOP_HOME и MOP_USER -- те, что у узлов: их\n# читают задачи bootstrap'а как переменные прогона, и дефолт сервера\n# (его собственный дом) здесь был бы неправдой.\nEnvironment=MOP_SERVER_LAN=10.0.0.1\nEnvironment=MOP_NATS_PORT=4222\n# Каталог сервера ходит на шину через TLS-прокси (#97).\nEnvironment=MOP_HTTPS_PORT=443\nEnvironment=MOP_HOME=/home/mopuser\nEnvironment=MOP_USER=mopuser\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=/home/mopuser/mop/bin/mop bootstrap serve\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
