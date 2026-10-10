@@ -15,14 +15,18 @@ from mop.common import busnames, config, context, creds  # noqa: E402
 # HYPOTHESIS: join кладёт operator.json сразу после проверки шины, но URL и
 # ключ прокси не спрашивает: даже успешный вход оставляет master без модели.
 # SOLUTION: сначала проверка TLS и шины, затем запрос и проверка /v1/models;
-# лишь после полного успеха -- записи. Старый вход дополняется, а ошибочный
-# новый ключ не заменяет прежнюю запись.
+# лишь после полного успеха -- запись (#533: одна атомарная connection.json,
+# прежние operator/client писались двумя и смешивали входы при сбое).
+# Старый вход дополняется, а ошибочный новый ключ не заменяет прежнюю запись.
 # RESULT: неуспешная проверка не оставляет частичного нового конфига,
 # неоднозначный сервер отклоняется, прежний TLS-пин остаётся при отказе.
 # STATUS: FIXED — see #395
 def check_complete_395(c):
     complete = getattr(join, "complete", None)
     if not c.check("#395 join.complete exists", complete is not None):
+        return
+    profile = getattr(creds, "human_profile", None)
+    if not c.check("#533 human_profile exists", profile is not None):
         return
     root = tempfile.mkdtemp(prefix="mop-join-395-")
     dest = os.path.join(root, "servers", "srv.test")
@@ -34,24 +38,20 @@ def check_complete_395(c):
         asked.append((prompt, secret))
         return None
 
-    def probe(url, key, directory):
+    def probe(url, key, directory, port=None):
         c.expect("#395 bus credentials are not persisted before proxy check",
-                 creds.operator(dest), None)
-        c.expect("#395 proxy config is not persisted before proxy check",
-                 creds.client(dest), None)
-        probed.append((url, key, directory))
+                 profile(dest), None)
+        probed.append((url, key, directory, port))
 
     with patched(join, ask=ask, _login=lambda *args: "bus-secret",
                  _still_valid=lambda *args: False, _fetch=lambda *args: record,
                  _probe=probe):
         complete("srv.test", "alice", dest, "443")
-    c.expect("#395 bus credentials are written after success", creds.operator(dest),
-             {"user": "alice", "password": "bus-secret"})
-    c.expect("#395 proxy settings are written for this server", creds.client(dest),
-             {"https_port": "443", "proxy_url": "https://srv.test/llm",
-              "proxy_key": "proxy-secret"})
-    c.expect("#395 proxy URL and key are checked", probed,
-             [("https://srv.test/llm", "proxy-secret", dest)])
+    c.expect("#395 the whole login is written after success", profile(dest),
+             {"user": "alice", "password": "bus-secret", "https_port": "443",
+              "proxy_url": "https://srv.test/llm", "proxy_key": "proxy-secret"})
+    c.expect("#395/#547 proxy URL, key and verified port are checked", probed,
+             [("https://srv.test/llm", "proxy-secret", dest, "443")])
     c.expect("#405 proxy settings do not need a second prompt", asked, [])
 
     # На старом входе шина уже работает: донастроить только прокси, пароль
@@ -63,7 +63,7 @@ def check_complete_395(c):
                  _login=lambda *a: c.fail("#395 valid bus login must not ask for password"),
                  _fetch=lambda *a: {"https_port": "443", "proxy_url": "https://old.test/llm",
                                     "proxy_key": "wrong"},
-                 _probe=lambda *a: (_ for _ in ()).throw(RuntimeError("HTTP 401"))):
+                 _probe=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("HTTP 401"))):
         try:
             complete("old.test", "alice", old, "443")
             c.fail("#395 wrong proxy key must refuse")
@@ -71,16 +71,19 @@ def check_complete_395(c):
             pass
     c.expect("#395 failed proxy verification leaves old bus login", creds.operator(old),
              {"user": "alice", "password": "old-bus"})
-    c.expect("#395 failed proxy verification leaves no client record", creds.client(old), None)
+    c.check("#395 failed proxy verification leaves no new profile",
+            not os.path.exists(os.path.join(old, creds.CONNECTION_FILE)),
+            os.listdir(old))
 
     # При повторном входе всё проверяется, но не спрашивается заново.
     with patched(join, ask=lambda *a, **k: c.fail("#395 complete join must not prompt"),
                  _still_valid=lambda *a: True,
                  _login=lambda *a: c.fail("#395 complete join must not ask for bus password"),
-                 _fetch=lambda *a: record, _probe=lambda *a: None):
+                 _fetch=lambda *a: record, _probe=lambda *a, **k: None):
         complete("srv.test", "alice", dest, "443")
-    c.expect("#395 rejoin does not change credentials", creds.operator(dest),
-             {"user": "alice", "password": "bus-secret"})
+    c.expect("#395 rejoin does not change credentials", profile(dest),
+             {"user": "alice", "password": "bus-secret", "https_port": "443",
+              "proxy_url": "https://srv.test/llm", "proxy_key": "proxy-secret"})
 
 
 def check_no_local_env_395(c):
@@ -91,7 +94,7 @@ def check_no_local_env_395(c):
         raise AssertionError("join opened installation .env")
     with patched(config, _load=no_load), patched(join, serving=lambda *a: [],
             git=lambda *a: None, ask=lambda prompt, **kw: asked.append(prompt) or "srv.test",
-            complete=lambda *a: None), patched_env(MOP_SERVER_LAN=None):
+            complete=lambda *a, **k: None), patched_env(MOP_SERVER_LAN=None):
         try:
             join.main(["alice"])
         except AssertionError as e:
@@ -108,7 +111,7 @@ def check_ambiguous_server_395(c):
             join, serving=lambda *a: ["one.test", "two.test"],
             git=lambda *a: "origin" if a and a[0] == "rev-parse" else None,
             ask=lambda *a, **k: c.fail("#395 ambiguous server must not prompt"),
-            complete=lambda *a: c.fail("#395 ambiguous server must not connect")), \
+            complete=lambda *a, **k: c.fail("#395 ambiguous server must not connect")), \
             patched(join.lib, cwd_origin=lambda: "origin", fail=errors.append):
         code = join.main(["alice"])
     c.expect("#395 ambiguous server refuses", code, 1)
@@ -133,7 +136,7 @@ def check_failed_login_keeps_pin_395(c):
     c.expect("#395 failed login retains previous TLS pin", join._pinned(creds.cafile(dest)), old_der)
 
     with patched(join, _login=lambda *a: (creds.write_cert(dest, new_der) and "bus-secret"),
-                 _probe=lambda *a: (_ for _ in ()).throw(RuntimeError("HTTP 401")),
+                 _probe=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("HTTP 401")),
                  _fetch=lambda *a: {"https_port": "443", "proxy_url": "https://srv.test/llm",
                                     "proxy_key": "wrong"}):
         try:
@@ -168,7 +171,8 @@ def check_fetch_proxy_405(c):
         return got
 
     with patched(join, ask=ask, _login=lambda *a: "bus-secret",
-                 _probe=lambda url, key, directory: verified.append((url, key, directory))), \
+                 _probe=lambda url, key, directory, port=None:
+                     verified.append((url, key, directory, port))), \
             patched(join.bus, ask_once=request):
         join.complete("srv.test", "alice", dest, "443")
     c.expect("#405 join does not ask for proxy URL or key", asked, [])
@@ -178,36 +182,39 @@ def check_fetch_proxy_405(c):
         c.expect("#405 fetch reuses bus credentials and TLS port",
                  (requests[0][0]["user"], requests[0][0]["password"], requests[0][0]["url"]),
                  ("alice", "bus-secret", "wss://srv.test:443/nats"))
-    c.expect("#405 fetched settings verified before saving", verified,
-             [(got["proxy_url"], got["proxy_key"], dest)])
-    c.expect("#405 saved key is the server's", creds.client(dest),
+    c.expect("#405/#547 probe carries the verified port of the login",
+             verified, [(got["proxy_url"], got["proxy_key"], dest, "443")])
+    c.expect("#405 saved key is the server's",
+             {k: creds.human_profile(dest)[k] for k in ("https_port", "proxy_url", "proxy_key")},
              {"https_port": "443", "proxy_url": got["proxy_url"], "proxy_key": "server-key"})
 
-    creds.write_client(dest, "443", got["proxy_url"], "old-key")
+    creds.write_connection(dest, "alice", "bus-secret", "443", got["proxy_url"], "old-key")
     with patched(join, ask=ask, _still_valid=lambda *a: True,
                  _login=lambda *a: c.fail("#405 valid bus credentials must be reused"),
-                 _probe=lambda *a: None), patched(join.bus, ask_once=request):
+                 _probe=lambda *a, **k: None), patched(join.bus, ask_once=request):
         join.complete("srv.test", "alice", dest, "443")
-    c.expect("#405 rotated key replaces old key", creds.client(dest)["proxy_key"], "server-key")
+    c.expect("#405 rotated key replaces old key",
+             creds.human_profile(dest)["proxy_key"], "server-key")
 
-    old = creds.client(dest)
-    with patched(join, _still_valid=lambda *a: True, _probe=lambda *a: None), \
+    old = creds.human_profile(dest)
+    with patched(join, _still_valid=lambda *a: True, _probe=lambda *a, **k: None), \
             patched(join.bus, ask_once=lambda *a: {"error": "not authorized"}):
         try:
             join.complete("srv.test", "alice", dest, "443")
             c.fail("#405 refused RPC must fail join")
         except RuntimeError:
             pass
-    c.expect("#405 failed RPC leaves previous client config", creds.client(dest), old)
+    c.expect("#405 failed RPC leaves previous client config", creds.human_profile(dest), old)
     with patched(join, _still_valid=lambda *a: True,
-                 _probe=lambda *a: c.fail("#405 mismatched port must not send key")), \
+                 _probe=lambda *a, **k: c.fail("#405 mismatched port must not send key")), \
             patched(join.bus, ask_once=lambda *a: dict(got, https_port="8443")):
         try:
             join.complete("srv.test", "alice", dest, "443")
             c.fail("#405 inconsistent bus/proxy port must refuse")
         except RuntimeError:
             pass
-    c.expect("#405 mismatched port leaves previous client config", creds.client(dest), old)
+    c.expect("#405 mismatched port leaves previous client config",
+             creds.human_profile(dest), old)
 
 
 # HYPOTHESIS (#427): оба пути входа спрашивают HTTPS-порт даже при обычном
@@ -234,7 +241,7 @@ def check_login_port_and_server_427(c):
 
     root = os.path.join(tempfile.mkdtemp(prefix="mop-login-427-"), "servers")
     calls, errors, prompts = [], [], []
-    def complete(*args):
+    def complete(*args, **kw):
         calls.append(args)
     def ask(prompt, **kw):
         prompts.append(prompt)

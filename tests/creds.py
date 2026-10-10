@@ -315,6 +315,8 @@ def main():
 
     check_no_human_over_nats_219(c)
     check_operator_not_object_336(c)
+    check_human_login_549(c)
+    check_valid_https_port_550(c)
     return c.report("creds")
 
 
@@ -363,8 +365,11 @@ def check_no_human_over_nats_219(c):
 
     # Каталог сервера оператора -- всегда wss.
     # Как настоящий: servers/<адрес>/ -- make_dir закрывает и родителя.
+    # #533: целый вход пишется одной connection.json; операторская половина
+    # -- не профиль, и server_config отказывает, а не собирает конфиг из
+    # остатка (проверено в tests/connection.py).
     d = os.path.join(tempfile.mkdtemp(prefix="mop-test-creds-219-"), "servers", "10.0.0.1")
-    creds.write_operator(d, "anton", "pw")
+    creds.write_connection(d, "anton", "pw", "443", "https://10.0.0.1:443/llm", "key")
     with patched_env(MOP_SERVER_DIR=d):
         try:
             from mop.common import bus, config
@@ -372,10 +377,10 @@ def check_no_human_over_nats_219(c):
             c.check("a person's bus config (the server directory) is wss",
                     conf["url"].startswith("wss://") and conf["user"] == "anton", conf)
             # HYPOTHESIS: клиент шины игнорирует HTTPS-порт, сохранённый join.
-            # SOLUTION: тот же client.json питает шину и LLM-сессию.
+            # SOLUTION: тот же профиль питает шину и LLM-сессию.
             # RESULT: wss использует порт выбранного joined-сервера.
             # STATUS: FIXED — see #397
-            creds.write_client(d, "8443", "https://10.0.0.1:8443/llm", "key")
+            creds.write_connection(d, "anton", "pw", "8443", "https://10.0.0.1:8443/llm", "key")
             with config.client_sources():
                 c.expect("#397 bus uses joined HTTPS port",
                          bus.server_config("10.0.0.1")["url"],
@@ -406,6 +411,107 @@ def check_no_human_over_nats_219(c):
     join = sources.get(os.path.join("mop", "cli", "pool", "join.py"), "")
     c.check("mop join reads no transition password (secrets/nats-op-*.pass)",
             "nats-op" not in join and "pass_file(" not in join)
+
+
+def check_human_login_549(c):
+    """HYPOTHESIS (#549): требование полного человеческого входа повторено
+    тремя потребителями прокси (session_env, models.available, doctor
+    _probe) тремя копиями одного блока: snapshot -> ProfileError ->
+    RuntimeError -> разбор kind с одинаковыми текстами. Копии уже
+    разъехались бы при первой правке текста, а «нет входа» -- это то, что
+    читает оператор в самый неподходящий момент.
+    SOLUTION: creds.human_login(directory, host) -- единственный владелец
+    контракта: полный человеческий профиль или RuntimeError с теми же
+    текстами (machine/partial/пусто -- свои ремонты, ProfileError --
+    дословно). Никаких новых прав, форматов и приоритетов: один снимок.
+    STATUS: FIXED — see #549"""
+    root = tempfile.mkdtemp(prefix="mop-test-creds-549-")
+
+    # Целый человеческий вход -- сам профиль, теми же полями, что snapshot.
+    whole = os.path.join(root, "srv.test")
+    creds.write_connection(whole, "alice", "bus-pw", "8443",
+                           "https://srv.test:8443/llm", "key-alice")
+    got = creds.human_login(whole, "srv.test")
+    c.expect("#549 a whole human login returns the full profile",
+             got, {"user": "alice", "password": "bus-pw", "https_port": "8443",
+                   "proxy_url": "https://srv.test:8443/llm", "proxy_key": "key-alice"})
+    # Прежняя пара -- тоже целый вход: helper не выбирает формат.
+    pair = os.path.join(root, "pair.test")
+    creds.write_operator(pair, "bob", "bus-pw")
+    creds.write_client(pair, "443", "https://pair.test/llm", "key-bob")
+    c.expect("#549 the legacy pair is a whole human login too",
+             creds.human_login(pair, "pair.test")["user"], "bob")
+
+    # Каждый отказ -- свой текст, как у потребителей до #549.
+    cases = []
+    machine = os.path.join(root, "machine.test")
+    creds.write_operator(machine, creds.SERVICE, "bus-pw")
+    cases.append(("machine", machine, "no human login for machine.test"))
+    half = os.path.join(root, "half.test")
+    creds.write_client(half, "443", "https://half.test/llm", "key-half")
+    cases.append(("partial", half, "incomplete login for half.test"))
+    cases.append(("empty", os.path.join(root, "empty.test"), "no login for empty.test"))
+    for kind, directory, want in cases:
+        try:
+            creds.human_login(directory, os.path.basename(directory))
+            c.fail(f"#549 {kind} refuses", "no refusal")
+        except RuntimeError as e:
+            c.check(f"#549 the {kind} refusal keeps its own text",
+                    want in str(e) and "mop login --server" in str(e), str(e))
+
+    # Битый файл и конфликт ролей -- отказ решателя дословно, не пересказ.
+    broken = os.path.join(root, "broken.test")
+    creds.write_connection(broken, "alice", "bus-pw", "8443",
+                           "https://broken.test:8443/llm", "key-alice")
+    with open(os.path.join(broken, creds.CONNECTION_FILE), "w") as f:
+        f.write('{"version": 1, "bus": {}')
+    conflict = os.path.join(root, "conflict.test")
+    creds.write_connection(conflict, "alice", "bus-pw", "443",
+                           "https://conflict.test/llm", "key-alice")
+    creds.write_operator(conflict, creds.SERVICE, "bus-pw")
+    for kind, directory in (("broken", broken), ("conflict", conflict)):
+        try:
+            creds.human_login(directory, f"{kind}.test")
+            c.fail(f"#549 {kind} refuses through the resolver", "no refusal")
+        except RuntimeError as e:
+            c.check(f"#549 the {kind} refusal is the resolver's own text",
+                    "connection" in str(e) if kind == "broken" else "conflict" in str(e),
+                    str(e))
+
+
+def check_valid_https_port_550(c):
+    """HYPOTHESIS (#550): правило порта HTTPS (ASCII-десятичная строка
+    1..65535) записано трижды -- creds._client_values, login._https_port и
+    login.complete. Три копии одного правила -- расхождение на первой же
+    правке границы; isdecimal, в отличие от isdigit, пропускает
+    Unicode-цифры, и забытое isascii пустило бы «٤٤٣» в конфиг.
+    SOLUTION: creds.valid_https_port(text) -> bool -- единственный источник
+    правила; отказ с собственным текстом каждого места поднимает
+    вызывающий, ни одна строка вывода не меняется.
+    STATUS: FIXED — see #550"""
+    # Границы и нормальные значения.
+    for text in ("1", "443", "65535", "8080"):
+        c.check(f"#550 port {text!r} is valid",
+                creds.valid_https_port(text) is True)
+    # За границами.
+    for text in ("0", "65536", "99999"):
+        c.check(f"#550 port {text!r} is out of range",
+                creds.valid_https_port(text) is False)
+    # Пустая строка.
+    c.check("#550 an empty port is invalid",
+            creds.valid_https_port("") is False)
+    # Unicode-цифры: isdecimal их принимает, правило -- нет.
+    c.check("#550 Arabic-Indic digits are not an ASCII port",
+            creds.valid_https_port("٤٤٣") is False)
+    # Знак и пробелы: это не десятичная запись числа.
+    for text in ("+443", "-443", " 443", "443 ", "44 3", "\t443"):
+        c.check(f"#550 port {text!r} with sign or space is invalid",
+                creds.valid_https_port(text) is False)
+    # Не строка -- не порт; вызывающие питаются только строками (слой выше
+    # переводит int в str), но предикат не должен падать на чужом типе.
+    for value in (443, None, 443.0):
+        c.check(f"#550 a non-string {value!r} is not a port",
+                creds.valid_https_port(value) is False)
 
 
 if __name__ == "__main__":

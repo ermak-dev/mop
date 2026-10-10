@@ -15,7 +15,7 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.common import manifest  # noqa: E402
+from mop.common import config, manifest  # noqa: E402
 
 NODE = """
 - name: node
@@ -191,8 +191,60 @@ def clone_env_accepts_new_host_keys(c):
                  manifest.clone_env(dict(mine)), mine)
 
 
+# HYPOTHESIS (#543): строгие проверки mop падают на свежем теле без
+# тестовых библиотек проекта: deploy.py рендерит шаблоны ролей через
+# jinja2, которого нет ни в deps.PIP (это runtime узлов, тел и
+# контроллера), ни в .mop/sandbox.yaml (это образ ПРОЕКТА, куда
+# тестовые зависимости и должны ехать). CI ставит jinja2 отдельной
+# строкой, телу -- нечего: узкий strict deploy на свежем образе
+# падает ModuleNotFoundError ДО пропусков.
+# SOLUTION: тестовые pip-зависимости проекта декларируются его же
+# манифестом -- задача в .mop/sandbox.yaml ставит их в образ под
+# пользователем пула (тот же user site и системный python3, что у
+# раннера), список НЕ дублирует deps.PIP. Проверка читает НАСТОЯЩИЙ
+# .mop/sandbox.yaml этого checkout'а через действующий парсер
+# (fetch_tree по временному дереву с копией файла): правка манифеста
+# доезжает в sandbox_tasks ровно так, как её собирает `mop driver
+# build`. Разбор YAML -- только контракт декларации; живой установки
+# он не утверждает.
+# RESULT: до правки задача с jinja2 в sandbox_tasks отсутствует --
+# проверка красная; после добавления задачи в .mop/sandbox.yaml
+# fetch_tree отдаёт её в sandbox_tasks: pip-задача с jinja2, под
+# MOP_USER (become_user), без дубля пакетов из deps.PIP.
+# STATUS: FIXED — see #543
+def sandbox_bakes_test_deps_543(c):
+    with open(os.path.join(config.PROJECT, manifest.SANDBOX)) as f:
+        text = f.read()
+    got = manifest.fetch_tree(tree({manifest.SANDBOX: text}), "mop")
+    if not c.check("#543 the project's sandbox carries tasks",
+                   got.get("sandbox_tasks") and os.path.exists(got["sandbox_tasks"]),
+                   repr(got.get("sandbox_tasks"))):
+        return
+    import yaml
+    with open(got["sandbox_tasks"]) as f:
+        tasks = yaml.safe_load(f)
+    pips = [t for t in tasks
+            if isinstance(t.get("ansible.builtin.pip"), dict)]
+    jinja = [t for t in pips
+             if "jinja2" in (t["ansible.builtin.pip"].get("name") or [])]
+    if not c.check("#543 the sandbox bakes jinja2 for role template rendering",
+                   bool(jinja), [t.get("name") for t in tasks]):
+        return
+    c.check("#543 the test deps task installs as the pool user",
+            jinja[0].get("become") is True and jinja[0].get("become_user") == "{{ MOP_USER }}",
+            {k: jinja[0].get(k) for k in ("become", "become_user")})
+    # Не дубль runtime-списка: пакеты deps.PIP уже едет образом через
+    # роль common/pip (deploy), второй список в манифесте расползся бы
+    # с первым. Сверяемся с самим deps.PIP, не второй копией здесь.
+    from mop.common import deps
+    names = {p for t in pips for p in (t["ansible.builtin.pip"].get("name") or [])}
+    c.check("#543 the project task does not duplicate the runtime PIP list",
+            not (names & set(deps.PIP)), sorted(names & set(deps.PIP)))
+
+
 def main():
     c = Checks()
+    sandbox_bakes_test_deps_543(c)
     got = manifest.fetch_tree(tree({".mop/sandbox.yaml": SANDBOX,
                                     ".mop/bootstrap.yaml": BOOTSTRAP}), "proj")
     c.check("asks", not (got["project"] != "proj" or got["asks"] != {"MOP_MEM_MB": "2048"}), got)

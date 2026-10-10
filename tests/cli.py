@@ -508,7 +508,7 @@ def check_help_content_432(c):
     # Группа перечисляет свои глаголы — весь список, до последнего.
     verbs_of = {
         "mop/cli/driver/__init__.py": ("list", "run", "sweep", "clone-work", "build"),
-        "mop/cli/server/cluster/__init__.py": ("serve", "check", "users", "reload", "builder"),
+        "mop/cli/server/cluster/__init__.py": ("serve", "check", "users", "reload", "builder", "export"),
         "mop/cli/server/user/__init__.py": ("add", "passwd", "delete", "import"),
         "mop/cli/server/bootstrap/__init__.py": ("serve", "check"),
     }
@@ -779,10 +779,28 @@ def check_current_docs_401(c):
         text = open(os.path.join(ROOT, name), encoding="utf-8").read()
         for obsolete in removed:
             c.check(f"#401 {name} has no obsolete {obsolete}", obsolete not in text)
-    for name in ("README.md", "docs/PROXY.md", "docs/CLI.md"):
+    # HYPOTHESIS: login после #533 пишет connection.json, а прежнее
+    # общее условие «client.json или mop join» выполнялось и на
+    # устаревшем тексте — оно не отличало новый контракт от старого
+    # имени. SOLUTION: явное условие — новое имя профиля и для README,
+    # и для docs/CLI.md (легаси-пара в README описана верно и остаётся).
+    # RESULT: RED на 7259e30^ (README:107 и :180 ещё говорят
+    # client.json), зелёная на 7259e30, где README называет
+    # connection.json.
+    for name in ("README.md", "docs/CLI.md"):
         text = open(os.path.join(ROOT, name), encoding="utf-8").read()
-        c.check(f"#401 {name} names joined client configuration",
-                "client.json" in text or "mop join" in text)
+        c.check(f"#401 #533 {name} names the client profile connection.json",
+                "connection.json" in text)
+    # HYPOTHESIS: login после #533 пишет connection.json, а PROXY.md
+    # переехал на новое имя — общее условие «client.json или mop join»
+    # для него больше не может выполняться и краснит честный текст.
+    # SOLUTION: для PROXY.md контракт — новое имя профиля; README и
+    # docs/CLI.md остаются на прежнем условии до их переделки (pu-mop-1).
+    # RESULT: RED на 0efd5c0 (PROXY.md ещё говорит client.json),
+    # зелёная на 679ceec, где PROXY.md говорит connection.json.
+    text = open(os.path.join(ROOT, "docs/PROXY.md"), encoding="utf-8").read()
+    c.check("#401 #533 docs/PROXY.md names the client profile connection.json",
+            "connection.json" in text)
     for name, stale in (("docs/CLI.md", "local .env is exactly"),
                         ("docs/PROXY.md", "мастерских копий"),
                         ("docs/BUS.md", "слоя — дефолт установки из `.env`"),
@@ -1114,7 +1132,9 @@ def check_deploy_mixed_outcome_475(c):
                 patched(projects, for_deploy=lambda answer, local: ([], None),
                         read=lambda: []), \
                 patched(creds, collect=lambda *a, **kw: collected.append(1) or [],
-                        operator=lambda dest: "anton"):
+                        operator=lambda dest: "anton",
+                        snapshot=lambda dest: ("human", {"user": "anton",
+                                                         "password": "x"})):
             os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key,
                                "MOP_OPERATORS_FILE": people})
             out, err, code = run_command(deploy.main, [])
@@ -1140,8 +1160,77 @@ def check_deploy_mixed_outcome_475(c):
         os.environ.update(env)
 
 
+def check_deploy_staging_error_548(c):
+    """HYPOTHESIS (#548): вокруг _staged_registry_seed ловился только
+    RuntimeError; OSError из mkdtemp/chmod/write_snapshot уходил трейсбеком
+    и ронял deploy даже серверу, у которого реестр есть и посев был бы
+    пропущен. SOLUTION: ошибка подготовки любого вида -- тот же отказ:
+    одна строка в stderr, плейбук идёт с mop_registry_seed_refused, deploy
+    не падает. STATUS: FIXED — see #548"""
+    import shutil
+    import subprocess
+    from mop.common import bus, config, creds, projects
+    from mop.cli.server import deploy
+    from mop.server import identity
+    d = tempfile.mkdtemp(prefix="mop-test-deploy-548-")
+    inventory, key = os.path.join(d, "inventory.yaml"), os.path.join(d, "id")
+    for f in (inventory, key, key + ".pub"):
+        open(f, "w").close()
+    people = os.path.join(d, "operators")
+    with open(people, "w") as f:
+        f.write(identity.format_line(identity.Identity("anton", "admin", ("*",)),
+                                     identity.hash_password("x")) + "\n")
+    plays = []
+    listing = [INVENTORY_CLEAN]
+    env = dict(os.environ)
+
+    def run_mock(argv):
+        """Игра (#475): ansible-inventory отвечает листингом, плейбук -- нулём."""
+        text = json.dumps(listing[0]) if argv and argv[0] == "ansible-inventory" else ""
+        return subprocess.CompletedProcess(argv, 0, text, "")
+
+    try:
+        with offline(), \
+                patched(shutil, which=lambda cmd: f"/usr/bin/{cmd}"), \
+                patched(config, require=lambda *a: None), \
+                patched(subprocess, run=lambda argv, **kw: run_mock(argv)), \
+                patched(_play, play=lambda *a, **kw: plays.append(kw) or (0, "")), \
+                patched(deploy, missing_extras=lambda setting, root: [],
+                        manifests=lambda origins: {},
+                        check=lambda: None, _staged_registry_seed=lambda: (
+                            (_ for _ in ()).throw(OSError(28, "No space left on device")))), \
+                patched(bus, ask_cluster=lambda *a, **kw: {"ok": True, "projects": []}), \
+                patched(projects, for_deploy=lambda answer, local: ([], None), read=lambda: []), \
+                patched(creds, collect=lambda *a, **kw: [], operator=lambda dest: "anton",
+                        snapshot=lambda dest: ("human", {"user": "anton", "password": "x"})):
+            os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key,
+                               "MOP_OPERATORS_FILE": people})
+            try:
+                out, err, code = run_command(deploy.main, [])
+            except OSError as e:
+                # Сам дефект #548: OSError подготовки уходит из main
+                # наружу трейсбеком, унося весь файл проверок.
+                c.check("#548 an OSError in staging does not kill deploy with a traceback",
+                        False, f"main raised {e!r}")
+                out, err, code, plays[:] = "", "", 1, []
+            sent = plays[-1] if plays else {}
+            c.check("#548 an OSError in staging does not kill deploy with a traceback",
+                    code == 0 and plays and "Traceback" not in err, (code, repr(err)[:200]))
+            c.check("#548 the refusal is one stderr line naming the failure",
+                    len([l for l in err.strip().splitlines() if l.strip()]) == 1
+                    and "cannot stage the registry seed" in err and "No space left" in err,
+                    repr(err)[:200])
+            c.check("#548 the play still runs, with the refused flag and no seed",
+                    sent.get("registry_seed") is None
+                    and sent.get("registry_seed_refused") is True, sent)
+    finally:
+        os.environ.clear()
+        os.environ.update(env)
+
+
 def main():
     c = Checks()
+    check_deploy_staging_error_548(c)
     check_server_maintenance_409(c)
     check_login_name_407(c)
     check_current_docs_401(c)
@@ -2276,6 +2365,77 @@ def check_output_182(c):
             c.check(f"cluster users {argv} must be silent on success: "
                     f"out {out!r} err {err!r} code {code!r}", not (out or err or code))
 
+        # #534: users читает взгляд реестра, а не устаревший легаси-файл.
+        # После миграции правда на диске -- projects.json; projects.read()
+        # видит только остывшую пару, и команда заводила бы пользователей
+        # без новых проектов.
+        seen = []
+        natsconf.apply = lambda names, creds: (seen.append(sorted(names)), (True, None))[1]
+        with tempfile.TemporaryDirectory(prefix="mop-test-534u-") as d:
+            with open(os.path.join(d, "projects.json"), "w") as f:
+                f.write(json.dumps({"version": 1, "projects": [
+                    {"origin": "git@h:g/p.git"}, {"origin": "git@h:team/new.git"}]}))
+            with restored(projects, "SNAPSHOT", "SNAPSHOT_DIR"), \
+                    restored(projects, "read", "view_of", "view_lines"):
+                projects.SNAPSHOT = os.path.join(d, "projects.json")
+                projects.SNAPSHOT_DIR = d
+                projects.read = lambda: ["git@h:g/p.git"]  # остывшая пара
+                out, err, code = through(users.main, [])
+        c.expect("#534 cluster users reads the current registry view",
+                 seen, [["new", "p"]])
+
+        # #542: cluster export -- офлайн-выгрузка пары из живого снимка.
+        # Один позиционный аргумент; usage на прочем; обычный успех ТИХИЙ
+        # (сводка -- в машинном маркере export.json и в возврате библиотеки,
+        # не в обязательной строке stdout, ревью 2); отказы кодом без эха
+        # origin'ов (креды живут в закрытых файлах пары).
+        from mop.cli.server.cluster import export as export_cmd
+        with tempfile.TemporaryDirectory(prefix="mop-test-542x-") as d:
+            secret = "https://user:secret-token@forge.example/team/x.git"
+            with open(os.path.join(d, "projects.json"), "w") as f:
+                f.write(json.dumps({"version": 1, "projects": [
+                    {"origin": secret, "limit": 2}]}))
+            dest = os.path.join(d, "rollback")
+            with restored(projects, "SNAPSHOT", "SNAPSHOT_DIR"):
+                projects.SNAPSHOT = os.path.join(d, "projects.json")
+                projects.SNAPSHOT_DIR = d
+                out, err, code = through(export_cmd.main, [dest])
+                c.check("#542 cluster export stays quiet on an ordinary success",
+                        code == 0 and not err and not out, (out, err, code))
+                out, err, code = through(export_cmd.main, [dest, "--json"])
+                c.check("#542 export --json is a usage refusal: one directory",
+                        code != 0 and not out, (out, err, code))
+                marker = os.path.join(dest, "export.json")
+                with open(marker) as f:
+                    marker_json = json.load(f)
+                c.check("#542 the completed marker stays machine-readable",
+                        marker_json.get("schema") == "legacy-pair"
+                        and marker_json.get("projects") == 1
+                        and "secret-token" not in open(marker, errors="ignore").read(),
+                        marker_json)
+                c.check("#542 the exported directory carries the private pair",
+                        os.path.exists(os.path.join(dest, "projects"))
+                        and os.path.exists(os.path.join(dest, "limits.json"))
+                        and os.path.exists(os.path.join(dest, "export.json")), dest)
+                out, err, code = through(export_cmd.main, [dest])
+                c.check("#542 a repeat export into the same dir refuses",
+                        code != 0 and not out and "already exists" in str(code),
+                        (out, err, code))
+                out, err, code = through(export_cmd.main, [])
+                c.check("#542 export without a directory is a usage refusal",
+                        code != 0 and not out, (out, err, code))
+                out, err, code = through(export_cmd.main, ["--flag", dest])
+                c.check("#542 a flag-shaped argument is a usage refusal",
+                        code != 0 and not out, (out, err, code))
+                other = os.path.join(d, "other")
+                os.makedirs(other)
+                out, err, code = through(export_cmd.main, [other])
+                c.check("#542 an existing directory destination refuses over the CLI",
+                        code != 0 and not out and "already exists" in str(code),
+                        (out, err, code))
+                c.check("#542 the refused CLI export left the directory empty",
+                        not os.listdir(other), os.listdir(other))
+
 
 def check_restore_all_188(c):
     """HYPOTHESIS (#188): image.restore поднимал папетов до первого отказа
@@ -2648,7 +2808,9 @@ def check_deploy_check(c):
                 patched(bus, ask_cluster=lambda *a, **kw: {"ok": True, "projects": []}), \
                 patched(projects, for_deploy=lambda answer, local: ([], None), read=lambda: []), \
                 patched(creds, collect=lambda *a, **kw: collected.append(1) or [],
-                        operator=lambda dest: "anton"):
+                        operator=lambda dest: "anton",
+                        snapshot=lambda dest: ("human", {"user": "anton",
+                                                         "password": "x"})):
             os.environ.update({"INVENTORY": inventory, "MOP_GIT_KEY": key,
                                "MOP_OPERATORS_FILE": people})
             for argv, dry in (([], False), (["--check"], True)):
@@ -3098,14 +3260,21 @@ def check_server_namespace_259(c):
     LEGACY: driver как целое не псевдоним, run/list/sweep/build в нём.
     STATUS: FIXED — see #259"""
     want = {"deploy", "config", "setup", "user", "cluster", "bootstrap", "web",
-            "callout", "pve-facts", "doctor", "gc", "disk", "sweep"}
+            "callout", "pve-facts", "doctor", "gc", "disk", "sweep",
+            "diagnose",   # #536: офлайн-сводка локальной установки
+            "proxykey"}   # #539: ротация клиентского ключа прокси
     tree = cli.verbs()
     got = set(tree.get("server") or {})
     c.expect("#259 server must hold exactly its verbs", sorted(got), sorted(want))
     top = cli.catalog(cli.scan())
-    stay = sorted((want - {"setup"}) & set(top))
+    # `diagnose` -- исключение двух половин #536: сводка ВЫБРАННОГО сервера
+    # у оператора (mop diagnose, core) и сводка ЛОКАЛЬНОЙ установки
+    # (mop server diagnose) -- одно слово, две машины, как `setup`.
+    stay = sorted((want - {"setup", "diagnose"}) & set(top))
     c.check(f"#259 must not stay top-level: {stay}", not (stay))
     c.check("#259 mop setup stays top-level, for the operator's machine", not ("setup" not in top))
+    c.check("#536 mop diagnose stays top-level, for the operator's machine",
+            "diagnose" in top)
     # clone-work (#347) -- глагол узла для сторожа, тоже в driver.
     c.expect("#259 driver keeps run/list/sweep/build/clone-work",
              set(tree.get("driver") or {}), {"run", "list", "sweep", "build", "clone-work"})

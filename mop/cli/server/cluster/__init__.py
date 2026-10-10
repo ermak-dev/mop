@@ -1,10 +1,11 @@
-"""cluster service: mop server cluster [serve|check|users|reload|builder] — Nomad behind the bus
+"""cluster service: mop server cluster [serve|check|users|reload|builder|export] — Nomad behind the bus
 
   mop server cluster check    is the service answering, and does it see Nomad
   mop server cluster serve    the server's subscriber (unit mop-cluster)
   mop server cluster users    write the bus users file from the server's registry
   mop server cluster reload   make nats reread its config, and check it took
   mop server cluster builder  the server's image builder (unit mop-builder)
+  mop server cluster export   write the registry as a legacy pair for a rollback
 
 The only one on the installation that talks to Nomad on someone else's
 behalf: masters and operators ask, the service checks that they may —

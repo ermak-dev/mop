@@ -148,6 +148,156 @@ def main():
                     c.expect("write_private: old file not truncated", old.read(), "one")
                 with open(p) as f:
                     c.expect("write_private: new content", f.read(), "two")
+
+                # ── fd-привязка и no-clobber публикация (#542) ──────────
+                # HYPOTHESIS (#542): экспорт реестра писал пары по ПУТИ и
+                # копировал приватный writer в projects.py. Подмена каталога
+                # по имени между заявкой и записью уводила секреты чужому,
+                # а os.rename при публикации затирал занятое имя молча.
+                # SOLUTION: примитивы в fsutil: write_private_dirfd (тот же
+                # атомарный приватный writer, но по fd каталога) и
+                # rename_noreplace (renameat2 RENAME_NOREPLACE: занятое имя
+                # -- EEXIST, цель не тронута; свободное -- атомарный перенос).
+                # STATUS: FIXED — see #542
+                # Отдельный каталог: чек "no temp left" ниже перечисляет всё
+                # содержимое каталога -- новые файлы блока ему не мешают.
+                xdir = os.path.join(d, "x542")
+                os.mkdir(xdir)
+                if c.check("fsutil carries the fd-aware export primitives (#542)",
+                          hasattr(fsutil, "write_private_dirfd")
+                          and hasattr(fsutil, "rename_noreplace")):
+                    dfd = os.open(xdir, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        fsutil.write_private_dirfd(dfd, "pairf", b"secret")
+                        c.expect("write_private_dirfd: 0600", mode(os.path.join(xdir, "pairf")), 0o600)
+                        with open(os.path.join(xdir, "pairf"), "rb") as f:
+                            c.expect("write_private_dirfd: bytes", f.read(), b"secret")
+                        c.expect("write_private_dirfd: no temp left",
+                              sorted(n for n in os.listdir(xdir)
+                                     if n.startswith(".pairf")),
+                              [])
+                        # обрыв: object() не пишется -- временного нет, цели нет
+                        try:
+                            fsutil.write_private_dirfd(dfd, "dying", object())
+                        except Exception:
+                            pass
+                        c.expect("write_private_dirfd: failed write leaves no temp",
+                              sorted(n for n in os.listdir(xdir)
+                                     if n.startswith(".dying")),
+                              [])
+                        # уникальность временных: соль в имени temp
+                        # гарантирует, что два писателя одного файла не
+                        # пишут в один временный. Проверяем инвариант:
+                        # параллельные записи одного имени обе проходят.
+                        import secrets as _secrets
+                        import _lib
+                        with _lib.patched(_secrets, token_hex=lambda n: "00"):
+                            for i in range(2):
+                                fsutil.write_private_dirfd(dfd, "same", f"v{i}".encode())
+                        c.expect("write_private_dirfd: salted temps do not collide",
+                              sorted(n for n in os.listdir(xdir) if ".tmp" in n), [])
+                        with open(os.path.join(xdir, "same"), "rb") as f:
+                            c.expect("write_private_dirfd: last write wins whole",
+                                  f.read(), b"v1")
+                        # rename_noreplace: занятое имя (файл) -- EEXIST, цель цела
+                        fsutil.write_private_dirfd(dfd, "tgt", b"old")
+                        c.expect("rename_noreplace: occupied name refuses",
+                              fsutil.rename_noreplace(dfd, "pairf", dfd, "tgt"),
+                              False)
+                        with open(os.path.join(xdir, "tgt"), "rb") as f:
+                            c.expect("rename_noreplace: target intact", f.read(), b"old")
+                        with open(os.path.join(xdir, "pairf"), "rb") as f:
+                            c.expect("rename_noreplace: source intact", f.read(), b"secret")
+                        # свободное имя -- атомарный перенос
+                        c.expect("rename_noreplace: free name publishes",
+                              fsutil.rename_noreplace(dfd, "pairf", dfd, "newf"),
+                              True)
+                        c.expect("rename_noreplace: source is gone",
+                              os.path.exists(os.path.join(xdir, "pairf")), False)
+                        with open(os.path.join(xdir, "newf"), "rb") as f:
+                            c.expect("rename_noreplace: published content", f.read(), b"secret")
+                        # занятое ИМЯ-КАТАЛОГ -- тоже EEXIST, чужой каталог цел
+                        os.mkdir(os.path.join(xdir, "adir"))
+                        c.expect("rename_noreplace: occupied directory name refuses",
+                              fsutil.rename_noreplace(dfd, "newf", dfd, "adir"),
+                              False)
+                        c.expect("rename_noreplace: foreign directory intact",
+                              os.path.isdir(os.path.join(xdir, "adir"))
+                              and os.listdir(os.path.join(xdir, "adir")) == [],
+                              True)
+
+                        # ── один writer, не копия внутри fsutil (ревью #542) ──
+                        # HYPOTHESIS: write_private_dirfd продублировал тело
+                        # _write в том же файле: guard #153 снаружи зелёный, а
+                        # писателя снова два. SOLUTION: _write получает
+                        # keyword dir_fd, adapter тонкий, owner/fsync/nonce --
+                        # одним телом; path-форма не меняется.
+                        import inspect as _inspect
+                        c.check("_write carries the dir_fd keyword (#542)",
+                                "dir_fd" in _inspect.signature(fsutil._write).parameters)
+                        routed = []
+                        with _lib.patched(fsutil, _write=lambda *a, **k: routed.append((a, k))):
+                            fsutil.write_private_dirfd(dfd, "route", b"x")
+                            fsutil.write_private(os.path.join(xdir, "bypath"), b"y")
+                        ok_route = (len(routed) == 2
+                                    and routed[0][0][:2] == ("route", b"x")
+                                    and routed[0][1].get("private") is True
+                                    and routed[0][1].get("dir_fd") == dfd
+                                    and routed[1][0][:2] == (os.path.join(xdir, "bypath"), b"y")
+                                    and "dir_fd" not in routed[1][1])
+                        c.check("write_private_dirfd is a thin _write adapter (#542)",
+                              ok_route, True)
+                        c.check("write_private keeps the path form (#542)",
+                              len(routed) == 2
+                              and routed[1][1].get("private") is True, True)
+
+                        # ── имена по fd -- строго single entry (ревью #542) ──
+                        # Пустое, '.', '..', с '/' или NUL уводит запись из
+                        # каталога-якоря (path traversal, усечение c_char_p)
+                        # и обязано отказать ValueError ДО всякого syscall.
+                        import errno as _errno
+                        bad = ["", ".", "..", "a/b", "/abs", "a/../b", "a\x00b"]
+                        before_bad = sorted(os.listdir(xdir))
+                        escaped = []
+                        for n in bad:
+                            for attempt in (
+                                lambda: fsutil.rename_noreplace(dfd, n, dfd, "free1"),
+                                lambda: fsutil.rename_noreplace(dfd, "free1", dfd, n),
+                                lambda: fsutil.write_private_dirfd(dfd, n, b"x"),
+                            ):
+                                try:
+                                    attempt()
+                                    escaped.append(repr(n))
+                                except ValueError:
+                                    pass  # единственный правильный отказ
+                                except OSError as e:
+                                    # имя дошло до syscall -- не отказ ДО него
+                                    escaped.append(f"{n!r}: {e.errno}")
+                        c.expect("dirfd names are strict single entries (#542)",
+                              escaped, [])
+                        c.expect("a bad name touches nothing on disk (#542)",
+                              sorted(os.listdir(xdir)), before_bad)
+
+                        # ── нет renameat2 -- ENOSYS, без fallback (ревью #542) ──
+                        import ctypes as _ctypes
+                        def _no_renameat2():
+                            raise OSError(_errno.ENOSYS,
+                                          "renameat2 is not available on this platform")
+                        seen = None
+                        with _lib.patched(fsutil, _renameat2=_no_renameat2):
+                            try:
+                                fsutil.rename_noreplace(dfd, "newf", dfd, "adir")
+                                seen = "no refusal"
+                            except OSError as e:
+                                seen = e.errno
+                        c.check("rename_noreplace: no renameat2 -> ENOSYS, no fallback (#542)",
+                              seen, _errno.ENOSYS)
+                        with open(os.path.join(xdir, "newf"), "rb") as f:
+                            c.check("rename_noreplace: ENOSYS leaves names intact (#542)",
+                                  f.read() == b"secret"
+                                  and os.path.isdir(os.path.join(xdir, "adir")), True)
+                    finally:
+                        os.close(dfd)
                 c.expect("write_private: no temp left",
                       sorted(os.listdir(os.path.dirname(p))), ["f"])
 

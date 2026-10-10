@@ -35,7 +35,7 @@ def check_ensure_408(c):
         if argv and argv[0] == "config":
             bindings.append(argv)
         return None
-    def finish(host, who, directory, port):
+    def finish(host, who, directory, port, **kw):
         calls.append((host, who, directory, port))
         creds.write_operator(directory, who, "bus-password")
         creds.write_client(directory, port, f"https://{host}/llm", "proxy-key")
@@ -123,7 +123,7 @@ def check_silent_port_427(c):
     class Tty(io.StringIO):
         def isatty(self):
             return True
-    with patched(creds, ROOT=root), patched(login, complete=lambda *a: calls.append(a),
+    with patched(creds, ROOT=root), patched(login, complete=lambda *a, **k: calls.append(a),
                  _bind=lambda *a: None, ask=lambda p, **kw: prompts.append(p) or "unexpected"), \
             patched(sys, stdin=Tty()), context.use(context.resolve({"server": "srv.test",
                                                                      "user": "alice"}, {}, {})), \

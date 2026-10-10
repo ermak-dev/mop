@@ -5,7 +5,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from mop.common import config, creds
+from mop.common import config, creds, llm
 
 TIMEOUT = 10
 
@@ -21,10 +21,11 @@ def available():
     """ID моделей выбранного joined-сервера; ключ не покидает HTTPS и localhost."""
     host = config.get("MOP_SERVER_LAN")
     directory = creds.server_dir(host)
-    joined = creds.client(directory)
-    if joined is None:
-        raise RuntimeError(f"no joined proxy configuration for {host}: run mop login --server {host}")
-    url = joined["proxy_url"].rstrip("/") + "/v1/models"
+    # Требование полного человеческого входа -- creds.human_login (#549):
+    # единый владелец текстов отказа, один снимок профиля (#533).
+    joined = creds.human_login(directory, host)
+    url = llm.endpoint(joined["proxy_url"], "models", host=host,
+                       port=joined["https_port"])
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" and not (parsed.scheme == "http" and
                                           parsed.hostname in ("localhost", "127.0.0.1", "::1")):

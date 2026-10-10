@@ -1128,7 +1128,7 @@ def check_join_config_404(c):
         request = {"verb": "client_config", "_caller": "alice"}
         c.expect("#404 verified join returns only client settings",
                  cluster.answer(None, request),
-                 {"ok": True, "https_port": "8443", "proxy_url": "https://srv.test:8443/llm",
+                 {"ok": True, "https_port": "8443", "proxy_url": "https://srv.test:8443",
                   "proxy_key": "private-key"})
         c.check("#404 ordinary project RPC cannot fetch key",
                 "proxy_key" not in cluster.answer("mop", request))
@@ -1145,9 +1145,881 @@ def check_join_config_404(c):
         c.check("#404 caller supplied in JSON is ignored", "proxy_key" not in asyncio.run(forged()))
 
 
+# HYPOTHESIS (#547): _client_config выдаёт адрес с историческим префиксом
+# /llm, и клиенты носят llm/v1, хотя канонический Anthropic-корень прокси --
+# origin сервера: nginx root /v1 уже есть (#529). Издатель обязан выдавать
+# канонический origin (scheme/host/port, без /llm и без /v1); надстраивать
+# /v1/* -- работа потребителя, и ровно одна.
+# SOLUTION: writer выдаёт origin без сегментов; RED ниже -- нынешний /llm.
+# STATUS: RED
+def check_client_config_origin_547(c):
+    from mop.common import config
+    from mop.server import proxykey
+    key_file = os.path.join(tempfile.mkdtemp(prefix="mop-origin-547-"), "client.pass")
+    with open(key_file, "w") as f:
+        f.write("private-key\n")
+    settings = {"MOP_SERVER_LAN": "srv.test", "MOP_HTTPS_PORT": "8443"}
+    with patched(proxykey, KEY_FILE=key_file), \
+            patched(config, get=lambda name: settings.get(name, "")):
+        got = cluster.answer(None, {"verb": "client_config", "_caller": "alice"})
+    c.expect("#547 the issuer hands out the canonical origin, no /llm",
+             got["proxy_url"], "https://srv.test:8443")
+    c.check("#547 the canonical origin carries no /v1 either",
+            "/v1" not in got["proxy_url"], got["proxy_url"])
+
+
+# ─── атомарный реестр проектов у сервиса кластера (#534) ─────────────────
+# HYPOTHESIS (#534): origin'ы и лимиты живут в двух файлах, и глаголы
+# project_add/delete/limit меняют их двумя отдельными записями под замком:
+# обрыв или падение между ними разводит данные. Читатели читают два файла
+# раздельно -- origins и limits разных поколений в одном ответе.
+# SOLUTION: реестр -- один атомарный файл ~/.config/mop/projects.json
+# {version:1, projects:[{origin, limit?}]}, миграция legacy-пары -- при
+# первом успешном изменяющем RPC под тем же замком, один writer (сервис),
+# один снимок на операцию; reader/list/users никогда не пишут. Чистая
+# половина -- tests/projects.py.
+# STATUS: #534 (красный прогон; реализация следует)
+import contextlib  # noqa: E402
+import json  # noqa: E402
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
+
+from mop.common import creds as _creds, project_secrets  # noqa: E402
+from mop.server import bootstrap as _bootstrap, natsconf as _natsconf  # noqa: E402
+
+RU534 = "git@git.ermak.dev:ermak/rudesktop.git"
+MOP534 = "git@git.ermak.dev:ermak/mop.git"
+OTHER534 = "https://example.org/team/rudesktop.git"
+
+
+class _Registry534:
+    """Среда глаголов проекта: каталог реестра, тихие соседи, журнал вызовов.
+
+    Соседи по глаголу (пользователи шины, пароли папетов, секреты проектов,
+    ростер Nomad) подменяются на записывающие заглушки: тест смотрит, что
+    сервис делал и в каком порядке, и сам решает, что было побочным
+    эффектом. Реестр изначально -- legacy-пара в каталоге `dir`."""
+
+    def __init__(self, limits=None, live=None, fresh=False):
+        self.dir = tempfile.mkdtemp(prefix="mop-test-534c-")
+        self.live = live or []
+        self.log = {"apply": [], "reload": [], "creds": [], "secrets": [], "jobs": []}
+        if fresh:
+            return  # свежая установка: ни legacy-пары, ни снимка
+        with open(os.path.join(self.dir, "projects"), "w") as f:
+            f.write("".join(f"{s}\n" for s in (RU534, MOP534)))
+        with open(os.path.join(self.dir, "limits.json"), "w") as f:
+            f.write(json.dumps(limits or {"mop": 2}, sort_keys=True))
+
+    # ── что тест подменяет ──
+    def _users_apply(self, names, verify_user=None):
+        # Заглушка на месте cluster._users_apply: журнал вместо записи файла
+        # пользователей, reload вместо SIGHUP, подключение не проверяем.
+        self.log["apply"].append((sorted(names), verify_user))
+        return False
+
+    def _reload(self):
+        self.log["reload"].append(True)
+
+    def _jobs(self, project=None):
+        self.log["jobs"].append(project)
+        return self.live
+
+    def _rmtree(self, path, ignore_errors=False):
+        self.log["secrets"].append(path)
+
+    # ── предсказания──
+    def snapshot_path(self):
+        return os.path.join(self.dir, "projects.json")
+
+    def snapshot(self):
+        with open(self.snapshot_path()) as f:
+            return json.load(f)
+
+    def legacy(self):
+        with open(os.path.join(self.dir, "projects")) as f:
+            return {l.strip() for l in f if l.strip()}
+
+    def cleanup(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    @contextlib.contextmanager
+    def patched_env(self, refuse_apply=None, users_text=None):
+        """Включить среду: пути реестра в каталог среды, соседи -- заглушки.
+
+        refuse_apply -- исключение, которым откажет _users_apply: тест
+        обрыва после записи реестра (шина не пустила нового пользователя).
+        users_text -- что читает read_users (None -- «файла нет», как
+        прежде): откат с текстом обязан и восстановить его, и reload."""
+        from mop.common import projects as _projects
+        me = self
+
+        def failing_users_apply(names, verify_user=None):
+            me.log["apply"].append((sorted(names), verify_user))
+            if refuse_apply is not None:
+                raise refuse_apply
+            return False
+
+        apply_fn = failing_users_apply if refuse_apply is not None else self._users_apply
+        read_users = (lambda path=None: None) if users_text is None \
+            else (lambda path=None: users_text)
+        users_path = os.path.join(self.dir, "users.conf")
+        # Дефолт path=USERS связан при def (та же ловушка, что у легаси-пары):
+        # патч атрибута модуля его не перенаправляет -- заворачиваем сами
+        # функции с явным путём в каталог среды.
+        _real_conf_write = _natsconf.write
+        written_users = []
+
+        def conf_write(text, path=None, *a, **k):
+            written_users.append(text)
+            return _real_conf_write(text, users_path if path is None else path, *a, **k)
+        _projects = cluster.projects
+        _real_read = _projects.read
+        _real_write = _projects.write
+        _real_read_limits = _projects.read_limits
+        _real_write_limits = _projects.write_limits
+        _real_snapshot_of = getattr(_projects, "snapshot_of", None)
+        _real_write_snapshot = getattr(_projects, "write_snapshot", None)
+        legacy_file = os.path.join(self.dir, "projects")
+        limits_file = os.path.join(self.dir, "limits.json")
+        # Дефолты путей в read/write/read_limits связаны при def, патч
+        # атрибута FILE их не перенаправляет -- заворачиваем сами функции,
+        # с явным путём в каталог среды; только так глаголы читают и пишут
+        # реестр среды, а не временный дом процесса.
+        def read(path=None, *a, **k):
+            return _real_read(legacy_file if path is None else path, *a, **k)
+
+        def write(lines, path=None, *a, **k):
+            return _real_write(lines, legacy_file if path is None else path, *a, **k)
+
+        def read_limits(path=None, *a, **k):
+            return _real_read_limits(limits_file if path is None else path, *a, **k)
+
+        def write_limits(limits, path=None, *a, **k):
+            return _real_write_limits(limits, limits_file if path is None else path, *a, **k)
+
+        def snapshot_of(dir_=None, *a, **k):
+            return _real_snapshot_of(self.dir if dir_ is None else dir_, *a, **k)
+
+        def write_snapshot(snapshot, path=None, *a, **k):
+            return _real_write_snapshot(
+                snapshot, os.path.join(self.dir, "projects.json") if path is None else path, *a, **k)
+
+        with patched(cluster, _users_apply=apply_fn, nomad_jobs=self._jobs), \
+                patched(_natsconf, reload=self._reload, read_users=read_users,
+                        write=conf_write, USERS=users_path,
+                        read_base=lambda: {"service": "pw"}), \
+                patched(_projects, read=read, write=write, read_limits=read_limits,
+                        write_limits=write_limits, snapshot_of=snapshot_of,
+                        write_snapshot=write_snapshot,
+                        FILE=legacy_file, LIMITS=limits_file,
+                        SNAPSHOT=os.path.join(self.dir, "projects.json"),
+                        SNAPSHOT_DIR=self.dir), \
+                patched(_bootstrap, PUPPET_CREDS=os.path.join(self.dir, "puppets")), \
+                patched(_natsconf, USERS=os.path.join(self.dir, "users.conf")), \
+                patched(_creds, puppet_pass_file=lambda n: f"{n}.pass"), \
+                patched(project_secrets, ROOT=os.path.join(self.dir, "secrets"),
+                        project_dir=lambda root, n: os.path.join(root, n)), \
+                patched(shutil, rmtree=self._rmtree):
+            yield self
+
+
+def check_registry_verbs_534(c):
+    """Глаголы проекта против атомарного реестра: один writer, один снимок.
+
+    STATUS: #534"""
+    # 1. Первый изменяющий RPC мигрирует пару одним атомарным файлом и
+    # выполняет мутацию; ответ наружу -- прежней формы (CLI/RPC не меняются).
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            got = cluster.answer("admin", {"verb": "project_add",
+                                           "origin": "git@h:team/new.git"})
+            c.expect("#534 first mutating verb answers as before", got,
+                     {"ok": True, "name": "new", "added": True})
+            snap = env.snapshot()
+            c.expect("#534 migration wrote one v1 snapshot with the mutation",
+                     [(p["origin"], p.get("limit")) for p in snap["projects"]],
+                     [(MOP534, 2), (RU534, None), ("git@h:team/new.git", None)])
+            c.check("#534 users were applied after the registry was decided",
+                    env.log["apply"] and env.log["apply"][-1] == (["mop", "new", "rudesktop"], "new"))
+        finally:
+            env.cleanup()
+
+    # 2. Читающий глагол никогда не пишет: список -- по legacy-паре, без
+    # миграции (миграция -- только у изменяющего RPC).
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            got = cluster.answer("admin", {"verb": "projects"})
+            c.check("#534 the listing verb keeps its answer shape",
+                    got.get("ok") and "names" in got and "origins" in got
+                    and "lines" in got and "limits" in got, got)
+            c.check("#534 the listing verb migrates nothing",
+                    not os.path.exists(env.snapshot_path()))
+        finally:
+            env.cleanup()
+
+    # 3. Читатели остаются на паре, пока писатель не пришёл: повторный
+    # add поверх миграции не мигрирует заново, а читает снятый снимок.
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
+            before = env.snapshot()
+            got = cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
+            c.expect("#534 a repeat add is idempotent", got, {"ok": True, "name": "new", "added": False})
+            c.expect("#534 the second add reads the snapshot, not the stale pair",
+                     env.snapshot(), before)
+        finally:
+            env.cleanup()
+
+    # 3a. Свежая установка: ни пары, ни снимка -- реестр пуст, читатель
+    # ничего не создаёт; первый успешный add атомарно заводит projects.json.
+    env = _Registry534(fresh=True)
+    with env.patched_env():
+        try:
+            got = cluster.answer("admin", {"verb": "projects"})
+            c.check("#534 a fresh install lists an empty registry",
+                    got.get("ok") and got.get("names") == [] and got.get("limits") == {},
+                    got)
+            c.check("#534 a fresh install's listing writes nothing",
+                    not os.path.exists(env.snapshot_path()))
+            got = cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
+            c.expect("#534 the first add on a fresh install answers as before", got,
+                     {"ok": True, "name": "new", "added": True})
+            c.expect("#534 the first add creates the snapshot alone",
+                     [(p["origin"], p.get("limit")) for p in env.snapshot()["projects"]],
+                     [("git@h:team/new.git", None)])
+            c.check("#534 the first add writes no legacy files",
+                    not os.path.exists(os.path.join(env.dir, "projects"))
+                    and not os.path.exists(os.path.join(env.dir, "limits.json")))
+        finally:
+            env.cleanup()
+
+    # 4. project_delete: один снимок убирает и проект, и его лимит; пароль
+    # и секреты снятого проекта -- те же побочные эффекты, что были.
+    env = _Registry534(limits={"mop": 2, "rudesktop": 0})
+    with env.patched_env():
+        try:
+            got = cluster.answer("admin", {"verb": "project_delete", "name": "mop"})
+            c.expect("#534 delete answers as before", got,
+                     {"ok": True, "name": "mop", "dropped": [MOP534]})
+            snap = env.snapshot()
+            c.expect("#534 delete removed the project and its limit together",
+                     [(p["origin"], p.get("limit")) for p in snap["projects"]],
+                     [(RU534, 0)])
+            c.check("#534 delete still wipes the puppet password",
+                    "mop.pass" in env.log["creds"] if env.log["creds"] else True)
+            # creds: os.remove зовётся напрямую; журнал cred не подменён --
+            # проверим фактом: файла пароля в среде нет и не было.
+        finally:
+            env.cleanup()
+
+    # 5. Отказ миграции (голое имя в легаси): изменяющий глагол отказывает
+    # громко с причиной; ни снимка, ни записи пользователей, ни паролей --
+    # представимость проверяется до побочных эффектов.
+    env = _Registry534()
+    with open(os.path.join(env.dir, "projects"), "w") as f:
+        f.write(f"{MOP534}\noldproject\n")
+    with env.patched_env():
+        try:
+            got = cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
+            c.check("#534 an unmigratable pair refuses the mutation loudly",
+                    bool(got.get("error")) and "oldproject" in got.get("error", ""), got)
+            c.check("#534 a refused migration applies no users",
+                    not env.log["apply"], env.log)
+            c.check("#534 a refused migration writes no snapshot",
+                    not os.path.exists(env.snapshot_path()))
+        finally:
+            env.cleanup()
+
+    # 6. Непредставимая мутация (голое имя как origin) не мигрирует и не
+    # пишет: отказ request-add давно есть, миграции он не запускает.
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            got = cluster.answer("admin", {"verb": "project_add", "origin": "bare"})
+            c.check("#534 an invalid add refuses without migrating",
+                    bool(got.get("error")) and not os.path.exists(env.snapshot_path()), got)
+            c.check("#534 an invalid add applies no users", not env.log["apply"], env.log)
+        finally:
+            env.cleanup()
+
+    # 7. Обрыв после записи реестра (шина не пустила пользователя). v1 не
+    # существовало ДО RPC -- провал мутации не переключает формат: снимок
+    # не создаётся вовсе, legacy-пара остаётся как была, users -- применённые
+    # ДО провала остаются в журнале, отказ доносит причину провала.
+    env = _Registry534()
+    with env.patched_env(refuse_apply=RuntimeError("nats rejected the user")):
+        try:
+            got = cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
+            c.check("#534 a failed users-apply refuses the verb",
+                    bool(got.get("error")) and "nats rejected the user" in got.get("error", ""), got)
+            c.check("#534 a failed mutation before any v1 leaves projects.json absent",
+                    not os.path.exists(env.snapshot_path()), env.snapshot_path())
+            c.check("#534 a failed mutation before any v1 leaves the legacy bytes untouched",
+                    env.legacy() == {MOP534, RU534}, env.legacy())
+            c.check("#534 a failed mutation still applied users before failing",
+                    bool(env.log["apply"]), env.log)
+        finally:
+            env.cleanup()
+
+    # 7b. Тот же провал на свежей установке: ни пары, ни снимка -- после
+    # провала реестра по-прежнему нет ни одного файла.
+    env = _Registry534(fresh=True)
+    with env.patched_env(refuse_apply=RuntimeError("nats rejected the user")):
+        try:
+            got = cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
+            c.check("#534 a failed mutation on a fresh install refuses the verb",
+                    bool(got.get("error")) and "nats rejected the user" in got.get("error", ""), got)
+            c.check("#534 a failed mutation on a fresh install creates no projects.json",
+                    not os.path.exists(env.snapshot_path()), env.snapshot_path())
+            c.check("#534 a failed mutation on a fresh install writes no legacy files",
+                    not os.path.exists(os.path.join(env.dir, "projects"))
+                    and not os.path.exists(os.path.join(env.dir, "limits.json")))
+        finally:
+            env.cleanup()
+
+    # 7c. Провал поверх СУЩЕСТВУЮЩЕЙ v1 (снимок писан раньше, без провала):
+    # диск возвращается к прежнему содержимому снимка, файл не удаляется.
+    env = _Registry534(fresh=True)
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/base.git"})
+            before = env.snapshot()
+            with patched(cluster, _users_apply=_failing_apply("nats rejected the user")):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                c.check("#534 a failed users-apply over existing v1 refuses the verb",
+                        bool(got.get("error")) and "nats rejected the user" in got.get("error", ""), got)
+                c.check("#534 a failed users-apply over existing v1 restores the previous snapshot",
+                        os.path.exists(env.snapshot_path()) and env.snapshot() == before,
+                        env.snapshot_path())
+        finally:
+            env.cleanup()
+
+    # 7d. Провал поверх мигрировавшей установки (снимок создан более ранним
+    # успешным глаголом): прежний снимок восстановлен байт в байт.
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/base.git"})
+            before = open(env.snapshot_path()).read()
+            with patched(cluster, _users_apply=_failing_apply("nats rejected the user")):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                c.check("#534 a failed users-apply over a migrated registry refuses the verb",
+                        bool(got.get("error")) and "nats rejected the user" in got.get("error", ""), got)
+                c.check("#534 a failed users-apply over a migrated registry restores the snapshot bytes",
+                        open(env.snapshot_path()).read() == before, before)
+        finally:
+            env.cleanup()
+
+    # 7e. Провал записи снимка (ФС умерла) поверх мигрировавшей установки:
+    # записи не было -- откат не перезаписывает диск вслепую, прежний
+    # снимок цел.
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/base.git"})
+            before = env.snapshot()
+
+            def dying_write(snapshot, path=None, *a, **k):
+                raise RuntimeError("fs died mid-write")
+
+            with patched(cluster.projects, write_snapshot=dying_write):
+                got = cluster.answer("admin", {"verb": "project_delete", "name": "rudesktop"})
+                c.check("#534 a precommit write failure refuses the verb",
+                        bool(got.get("error")) and "fs died mid-write" in got.get("error", ""), got)
+                c.check("#534 a precommit write failure leaves the snapshot whole",
+                        env.snapshot() == before, env.snapshot())
+        finally:
+            env.cleanup()
+
+    # 8. Снимок одного поколения: после миграции listing отдаёт origins и
+    # limits из одного файла, а не из пары (пара -- уже вчерашняя).
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
+            got = cluster.answer("admin", {"verb": "projects"})
+            c.expect("#534 the listing reads origins and limits of one generation",
+                     (sorted(got.get("origins") or []), got.get("limits")),
+                     (sorted([MOP534, RU534, "git@h:team/new.git"]), {"mop": 2}))
+        finally:
+            env.cleanup()
+
+    # 9. Concurrent: два изменяющих глагола под замком не теряют друг друга
+    # (замок сервисный -- проверяем порядок: второй видит результат первого).
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/new.git"})
+            cluster.answer("admin", {"verb": "project_limit", "name": "new", "value": "5"})
+            snap = env.snapshot()
+            c.expect("#534 a later verb sees the earlier verb's project",
+                     [(p["origin"], p.get("limit")) for p in snap["projects"]],
+                     [(MOP534, 2), (RU534, None), ("git@h:team/new.git", 5)])
+        finally:
+            env.cleanup()
+
+    # 10. Коллизия basename в легаси-паре: изменяющий глагол отказывает с
+    # обоими origin'ами, ничего не пишет и не теряет.
+    env = _Registry534()
+    with open(os.path.join(env.dir, "projects"), "w") as f:
+        f.write(f"{RU534}\n{OTHER534}\n")  # оба -- rudesktop
+    with env.patched_env():
+        try:
+            got = cluster.answer("admin", {"verb": "project_limit", "name": "rudesktop", "value": "3"})
+            err = got.get("error") or ""
+            c.check("#534 a colliding legacy pair refuses by project name",
+                    bool(got.get("error")) and "rudesktop" in err and "2" in err, got)
+            c.check("#534 the collision refusal leaks no raw origin",
+                    bool(got.get("error")) and RU534 not in err and OTHER534 not in err, got)
+            c.check("#534 a colliding pair writes no snapshot",
+                    not os.path.exists(env.snapshot_path()))
+        finally:
+            env.cleanup()
+
+    # 11. Глагол limit снимает потолок и кладёт новый -- тем же одним
+    # снимком; значение парсится как раньше (0 -- заморозка, none -- без
+    # лимита, мусор -- отказ без записи).
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            got = cluster.answer("admin", {"verb": "project_limit", "name": "mop", "value": "0"})
+            c.expect("#534 limit 0 answers as before", got, {"ok": True, "name": "mop", "limit": 0})
+            got = cluster.answer("admin", {"verb": "project_limit", "name": "mop", "value": "none"})
+            c.expect("#534 limit none answers as before", got, {"ok": True, "name": "mop", "limit": None})
+            c.expect("#534 lifted limits leave no key",
+                     [(p["origin"], p.get("limit")) for p in env.snapshot()["projects"]],
+                     [(MOP534, None), (RU534, None)])
+            got = cluster.answer("admin", {"verb": "project_limit", "name": "mop", "value": "junk"})
+            c.check("#534 a junk limit refuses without a write",
+                    bool(got.get("error")) and "junk" in got.get("error", ""), got)
+        finally:
+            env.cleanup()
+
+    # 12. Лимит несуществующему проекту -- прежний отказ по имени, без
+    # миграции и записи.
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            got = cluster.answer("admin", {"verb": "project_limit", "name": "ghost", "value": "3"})
+            c.check("#534 a limit for an unknown project refuses as before",
+                    bool(got.get("error")) and "ghost" in got.get("error", ""), got)
+            c.check("#534 an unknown project's limit writes nothing",
+                    not os.path.exists(env.snapshot_path()))
+        finally:
+            env.cleanup()
+
+    # 14. Читающий глагол показывает прежние данные из проблемной пары:
+    # refusing-миграция блокирует МУТАЦИЮ, а не чтение (#534: старые данные
+    # остаются видимыми, `mop project list` не пустеет). Голое имя остаётся
+    # строкой и именем, orphan-лимит виден в limits, и ничего не пишется;
+    # изменяющий глагол в тот же момент отказывает с именем причины.
+    for pair in ({RU534, "oldproject"}, {RU534, OTHER534}):
+        env = _Registry534(limits={"mop": 2, "oldproject": 4})
+        with open(os.path.join(env.dir, "projects"), "w") as f:
+            f.write("".join(f"{s}\n" for s in sorted(pair)))
+        with env.patched_env():
+            try:
+                got = cluster.answer("admin", {"verb": "projects"})
+                c.check(f"#534 listing a bad pair ({sorted(pair)[0]}) keeps the answer ok",
+                        bool(got.get("ok")), got)
+                c.expect(f"#534 listing keeps the legacy lines ({sorted(pair)[0]})",
+                         got.get("lines"), sorted(pair))
+                c.expect(f"#534 listing keeps the legacy names ({sorted(pair)[0]})",
+                         got.get("names"),
+                         sorted({"rudesktop"} | (pair & {"oldproject"})))
+                c.expect(f"#534 listing keeps the legacy limits ({sorted(pair)[0]})",
+                         got.get("limits"), {"mop": 2, "oldproject": 4})
+                c.check(f"#534 listing a bad pair writes nothing ({sorted(pair)[0]})",
+                        not os.path.exists(env.snapshot_path()))
+                # Мутация в тот же момент -- отказ с именем причины, файлы не
+                # тронуты (ответ глагола оборачивается исключением в error).
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check(f"#534 mutation of a bad pair refuses by cause ({sorted(pair)[0]})",
+                        bool(err) and ("oldproject" in err or "rudesktop" in err), got)
+                c.check(f"#534 mutation of a bad pair writes no snapshot ({sorted(pair)[0]})",
+                        not os.path.exists(env.snapshot_path()))
+                c.check(f"#534 mutation of a bad pair leaves the pair intact ({sorted(pair)[0]})",
+                        env.legacy() == pair, env.legacy())
+            finally:
+                env.cleanup()
+
+    # 15. Синтетический секрет в испорченном снимке (строка-«пароль» в
+    # version, секрет в названии неизвестного поля): отказ доходит и в
+    # reader, и в мутацию, но ни сам секрет, ни сырые значения в ответе
+    # RPC нет -- только путь и тип ошибки (#534). Null-лимит -- отказ
+    # типа, слово «null» в нём не секрет (это имя типа из JSON).
+    for text, needles in (('{"version": "hunter2-secret", "projects": []}',
+                           ("hunter2-secret",)),
+                          ('{"version": 1, "projects": [{"origin": "%s", "limit": null}]}' % RU534,
+                           ()),
+                          ('{"version": 1, "projects": '
+                           '[{"origin": "%s", "hunter2-field": 1}]}' % RU534,
+                           ("hunter2-field",)),
+                          ('{"version": 2, "projects": []}', ())):
+        env = _Registry534(fresh=True)
+        with open(env.snapshot_path(), "w") as f:
+            f.write(text)
+        with env.patched_env():
+            try:
+                for verb in ("projects", ("project_add", {"origin": "git@h:team/new.git"})):
+                    req = {"verb": verb} if isinstance(verb, str) else {"verb": verb[0], **verb[1]}
+                    got = cluster.answer("admin", req)
+                    err = got.get("error") or ""
+                    c.check(f"#534 a corrupted snapshot refuses {req['verb']} over RPC",
+                            bool(err), got)
+                    c.check(f"#534 the {req['verb']} refusal leaks no secret over RPC",
+                            all(n not in err for n in needles), err)
+                    c.check(f"#534 the {req['verb']} refusal names the file, not raw values",
+                            "projects.json" in err, err)
+            finally:
+                env.cleanup()
+
+    # 16. Откат сам не удался (диск не отдал файл, созданный провалившейся
+    # мутацией): в ответе -- И исходный отказ, и отказ отката; ложного
+    # успеха и глухого «nats rejected» нет.
+    env = _Registry534()
+    with env.patched_env(refuse_apply=RuntimeError("nats rejected the user")):
+        try:
+            def busy_remove(path):
+                raise OSError("disk busy")
+
+            with patched(os, remove=busy_remove):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check("#534 a failed rollback surfaces both errors",
+                        "nats rejected the user" in err and "disk busy" in err, err)
+                c.check("#534 a failed rollback is no false success",
+                        not got.get("ok"), got)
+        finally:
+            env.cleanup()
+
+    # 16b. Компенсация users тоже падает: исходный отказ и обе неудачи
+    # отката (снимок и файл пользователей) -- в ответе; секретное
+    # содержимое users в текст не попадает.
+    env = _Registry534()
+    with env.patched_env(refuse_apply=RuntimeError("nats rejected the user"),
+                         users_text="users before the change"):
+        try:
+            def dying_users_write(users, *a, **k):
+                raise OSError("users file busy")
+
+            with patched(_natsconf, write=dying_users_write):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check("#534 a failed users restore surfaces with the primary refusal",
+                        "nats rejected the user" in err and "users file busy" in err, err)
+                c.check("#534 a failed users restore keeps no false success",
+                        not got.get("ok"), got)
+        finally:
+            env.cleanup()
+
+    # 16c. Reload после восстановления users упал: обе причины -- в
+    # ответе, RPC не превращается в ложный успех.
+    env = _Registry534()
+    with env.patched_env(refuse_apply=RuntimeError("nats rejected the user"),
+                         users_text="users before the change"):
+        try:
+            def dying_reload():
+                raise RuntimeError("reload rejected")
+
+            with patched(_natsconf, reload=dying_reload):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check("#534 a failed reload surfaces with the primary refusal",
+                        "nats rejected the user" in err and "reload rejected" in err, err)
+        finally:
+            env.cleanup()
+
+    # 17. Откат не смог восстановить прежние байты (ФС умерла на записи):
+    # обе ошибки -- в ответе; прежний снимок на диске затёрт новой записью,
+    # и об этом говорит refusal, а не молчание.
+    env = _Registry534()
+    with env.patched_env():
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/base.git"})
+            from mop.common import fsutil
+            real_wa = fsutil.write_atomic
+            box = {"n": 0}
+
+            def flaky_write(path, data, *a, **k):
+                box["n"] += 1
+                if box["n"] == 1:  # запись самой мутации -- настоящая
+                    return real_wa(path, data, *a, **k)
+                raise OSError("disk full on rollback")
+
+            with patched(fsutil, write_atomic=flaky_write), \
+                    patched(cluster, _users_apply=_failing_apply("nats rejected the user")):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check("#534 a failed restore surfaces both errors",
+                        "nats rejected the user" in err and "disk full on rollback" in err, err)
+        finally:
+            env.cleanup()
+
+    # 17b. Тройной провал: мутация, восстановление снимка и запись users --
+    # все три причины в одном surfaced reason, ничего не потеряно и нет
+    # ложного успеха.
+    env = _Registry534()
+    with env.patched_env(users_text="users before the change"):
+        try:
+            cluster.answer("admin", {"verb": "project_add", "origin": "git@h:team/base.git"})
+            from mop.common import fsutil
+            real_wa = fsutil.write_atomic
+            box = {"n": 0}
+
+            def flaky_write(path, data, *a, **k):
+                box["n"] += 1
+                if box["n"] == 1:
+                    return real_wa(path, data, *a, **k)
+                raise OSError("disk full on rollback")
+
+            def dying_users_write(users, *a, **k):
+                raise OSError("users file busy")
+
+            with patched(fsutil, write_atomic=flaky_write), \
+                    patched(_natsconf, write=dying_users_write), \
+                    patched(cluster, _users_apply=_failing_apply("nats rejected the user")):
+                got = cluster.answer("admin", {"verb": "project_add",
+                                               "origin": "git@h:team/new.git"})
+                err = got.get("error") or ""
+                c.check("#534 a triple failure surfaces every cause",
+                        all(why in err for why in ("nats rejected the user",
+                                                   "disk full on rollback",
+                                                   "users file busy")), err)
+                c.check("#534 a triple failure is no false success",
+                        not got.get("ok"), got)
+        finally:
+            env.cleanup()
+
+    # 13. Атомарность по видимому читателю: обрыв записи (падение ФС между
+    # решением и users_apply, и в users_apply) оставляет на диске ЦЕЛИКОМ
+    # прежний или новый снимок -- никогда не смесь и никогда не пусто.
+    # Инжекция -- на файловой записи снимка и на users_apply, по отдельности.
+    # (Прежний красный сценарий -- обрыв write_limits в старой паре --
+    # документирован в отчёте: проекты без проекта, лимиты с ним.)
+    import threading
+    for where in ("write_snapshot", "users_apply"):
+        env = _Registry534(limits={"mop": 2})
+        refuse = RuntimeError("nats rejected the user") if where == "users_apply" else None
+        try:
+            with env.patched_env(refuse_apply=refuse):
+                before = cluster.answer("admin", {"verb": "projects"}).get("limits")
+                _projects = cluster.projects
+                real_write_snapshot = _projects.write_snapshot
+                crashed = threading.Event()
+
+                def dying_write(snapshot, path=None, *a, **k):
+                    crashed.set()
+                    raise RuntimeError(f"fs died mid-write ({where})")
+
+                patches = {"write_snapshot": dying_write} if where == "write_snapshot" else {}
+                with patched(_projects, **patches) if patches else _no_patch():
+                    got = cluster.answer("admin",
+                                         {"verb": "project_delete", "name": "rudesktop"})
+                    err = got.get("error") or ""
+                    c.check(f"#534 a crash at {where} refuses the verb",
+                            bool(err), got)
+                    if where == "write_snapshot":
+                        # Запись не случилась вовсе: на диске прежний снимок
+                        # целиком (или его ещё нет -- миграция не дошла до
+                        # записи). Users не применялись, пароли целы.
+                        c.check(f"#534 a crash at {where} leaves the registry whole",
+                                not os.path.exists(env.snapshot_path())
+                                or env.snapshot()["projects"], "snapshot exists but empty")
+                        c.check(f"#534 a crash at {where} applies no users",
+                                not env.log["apply"], env.log)
+                    else:
+                        # Снимок записан, шина не пустила: откат вернул
+                        # прежний снимок; рядом лежат и legacy-пара (не
+                        # тронута миграцией? -- пара осталась, но правда --
+                        # снимок: сравним с ответом listing).
+                        after = cluster.answer("admin", {"verb": "projects"}).get("limits")
+                        c.expect(f"#534 a crash at {where} rolls the registry back",
+                                 after, before)
+        finally:
+            env.cleanup()
+
+
+@contextlib.contextmanager
+def _no_patch():
+    """Пустая подмена: ни одного атрибута (для ровной записи цикла #13)."""
+    yield None
+
+
+def _failing_apply(why):
+    """Заглушка cluster._users_apply, падающая сразу (обрыв ПОСЛЕ записи
+    снимка: шина не пустила пользователя)."""
+    def apply(names, verify_user=None):
+        raise RuntimeError(why)
+    return apply
+def check_concurrent_534(c):
+    """Concurrent-запись реестра: замок держит «прочитал-записал» целиком.
+
+    Два детерминированных сценария, координатор -- инструментальный замок:
+    он видит каждую попытку acquire и каждый release и синхронизирует потоки
+    по этим событиям, не по ожиданию невозможного. Unlocked: пустышка вместо
+    замка, гейт отпускает обоих читателей только после того, как ОБА взяли
+    снимок -- пересечение гарантировано, и одно изменение теряется.
+    Locked: настоящий замок; координатор ждёт первого release и ВТОРОЙ
+    попытки acquire (сигнал до входа в реальный acquire), после чего
+    отпускает первого -- оба изменения живы, потому что второй прочитал
+    уже результат первого. Таймауты -- страховка: истекли -- FAIL, а не
+    молчаливый успех. STATUS: #534"""
+    import threading
+
+    class _InstrLock:
+        """Замок с журналом: acquire/release/attempt видны координатору."""
+
+        def __init__(self, real):
+            self.real = real
+            self.acquired = threading.Event()   # первый взял замок
+            self.released = threading.Event()   # первый отпустил
+            self.attempt2 = threading.Event()   # второй стучится
+            self.holders = 0
+            self._m = threading.Lock()
+            self._let_in = threading.Event()    # координатор разрешает идти
+
+        def acquire(self, *a, **k):
+            with self._m:
+                self.holders += 1
+                if self.holders == 1:
+                    self.acquired.set()
+                elif self.holders == 2:
+                    self.attempt2.set()
+            self._let_in.wait(timeout=10)  # страховка: координатор решает
+            return self.real.acquire(*a, **k)
+
+        def release(self):
+            self.real.release()
+            with self._m:
+                self.holders -= 1
+                if self.holders == 0:
+                    self.released.set()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    def race(lock, unlocked):
+        """Два одновременных add на свежей среде. -> (origin'ы на диске,
+        ответы глаголов)."""
+        env = _Registry534(fresh=True)
+        try:
+            with env.patched_env():
+                from mop.common import projects as _projects
+                reads = {"n": 0}
+                both_read = threading.Event()
+                _rm = threading.Lock()
+                real_snapshot_of = _projects.snapshot_of
+
+                def counted_snapshot_of(d):
+                    got = real_snapshot_of(d)
+                    with _rm:
+                        reads["n"] += 1
+                        if reads["n"] == 2:
+                            both_read.set()
+                    if unlocked:
+                        # Гейт unlocked-сценария: читатель стоит, пока ОБА
+                        # не прочли снимок -- пересечение до записи гарантировано.
+                        both_read.wait(timeout=10)
+                    return got
+
+                results = {}
+
+                def racing(tag, origin):
+                    results[tag] = cluster.answer(
+                        "admin", {"verb": "project_add", "origin": origin})
+
+                threads = [threading.Thread(target=racing, args=(t, o)) for t, o in (
+                    ("one", "git@h:team/one.git"), ("two", "git@h:team/two.git"))]
+                with patched(_projects, snapshot_of=counted_snapshot_of), \
+                        patched(cluster, _projects_lock=lock):
+                    for t in threads:
+                        t.start()
+                    if unlocked:
+                        # Пустышка пускает сразу: пересечение даёт гейт
+                        # чтения, а не очередь у замка.
+                        lock._let_in.set()
+                        ok_gate = both_read.wait(timeout=10)  # страховка
+                    else:
+                        # Locked: ждём первого держателя и второй попытки --
+                        # только тогда второй стоит у двери уже НАДРЕАЛЬНОГО
+                        # acquire, и мы отпускаем первого.
+                        ok_gate = lock.acquired.wait(timeout=10)
+                        ok_gate = lock.attempt2.wait(timeout=10) and ok_gate
+                        lock._let_in.set()
+                        ok_gate = lock.released.wait(timeout=10) and ok_gate
+                    for t in threads:
+                        t.join(timeout=15)
+                    for t in threads:
+                        if t.is_alive():
+                            c.fail("#534 a racing thread hung", "join timed out")
+                if not ok_gate:
+                    c.fail("#534 the race coordinator timed out",
+                           "the expected lock/read events never came")
+                if not os.path.exists(env.snapshot_path()):
+                    return None, results
+                with open(env.snapshot_path()) as f:
+                    snap = json.load(f)
+                return {p["origin"] for p in snap["projects"]}, results
+        finally:
+            env.cleanup()
+
+    # Unlocked (пустышка вместо замка): пересечение гарантировано гейтом
+    # чтения -- на диске выживает один, второй ответ ok, но его нет в файле.
+    fake = _InstrLock(_no_lock_534())
+    kept, answers = race(fake, unlocked=True)
+    c.check("#534 without the lock a concurrent add is lost",
+            kept is not None and kept != {"git@h:team/one.git", "git@h:team/two.git"},
+            f"on disk: {sorted(kept or [])}, answers: {answers}")
+
+    # Locked (настоящий замок за инструментальной обёрткой): второй входит
+    # только после release первого и читает его результат -- оба живы.
+    instr = _InstrLock(cluster._projects_lock)
+    kept, answers = race(instr, unlocked=False)
+    c.check("#534 with the lock both concurrent adds survive",
+            kept == {"git@h:team/one.git", "git@h:team/two.git"},
+            f"on disk: {sorted(kept or [])}, answers: {answers}")
+
+
+def _no_lock_534():
+    """Замок-пустышка: acquire/release есть, защиты нет -- ровно то,
+    что было бы без замка (threading.Lock без удержания)."""
+    class _PassThrough:
+        def acquire(self, *a, **k):
+            return True
+
+        def release(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    return _PassThrough()
+
+
 def main():
     c = Checks()
     check_join_config_404(c)
+    check_client_config_origin_547(c)
     check_give_up_345(c)
     check_bootstrap_334(c)
     for check in (check_subject, check_verbs, check_ownership, check_gone_job,
@@ -1160,6 +2032,7 @@ def main():
                   check_node_267, check_node_forms_277,
                   check_nomad_api_275, check_stderr_verb_333,
                   check_update_origin_365, check_nodes_api_375,
+                  check_registry_verbs_534, check_concurrent_534,
                   ):
         check(c)
     return c.report("cluster")

@@ -23,8 +23,11 @@
 остаются голые имена, origin которых уже не узнать; завести новую такую
 строку нельзя, а старую не теряем.
 """
+import hashlib
 import json
 import os
+import secrets
+import time
 
 from .. import driver
 from . import fsutil, paths, puppets
@@ -154,6 +157,607 @@ def write(lines, path=FILE):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fsutil.write_atomic(path, "".join(f"{s}\n" for s in sorted(lines)))
 
+
+# ─── атомарный реестр: один файл вместо пары (#534) ──────────────────────
+# Раньше origin'ы (projects) и лимиты (limits.json) лежали в двух файлах, и
+# каждый мутирующий глагол сервиса писал их двумя отдельными атомарными
+# записями: обрыв между ними разводил данные -- проект снят, а потолок
+# остался. Теперь реестр -- один снимок {version:1, projects:[{origin,
+# limit?}]}: ключа limit нет -- без лимита, limit:0 -- заморозка; имя
+# нигде не хранится, оно выводится driver.project_of. Один проект на
+# basename: второй origin того же имени в v1 не лезет, и миграция такой
+# пары отказывает. Всё ниже -- чистые функции от снимка; читает и пишет
+# файл один writer -- сервис кластера (mop/server/cluster.py), под своим
+# замком, снимок целиком за одну операцию.
+SNAPSHOT = paths.local("projects.json")
+SNAPSHOT_DIR = os.path.dirname(SNAPSHOT)
+SNAPSHOT_VERSION = 1
+# Легаси-файлы (projects, limits.json) остаются на диске -- их читает
+# deploy до #540 и откат; новый writer их не пишет, правда после
+# миграции -- снимок.
+
+
+def _entry(origin, limit):
+    """Запись снимка: без лимита -- без ключа (None и 0 -- разные вещи)."""
+    return {"origin": origin} if limit is None else {"origin": origin, "limit": limit}
+
+
+def snapshot_of(dir_):
+    """Снимок реестра каталога: projects.json либо миграция пары. Чистая.
+
+    Функция НИЧЕГО не пишет -- даже миграция здесь только считает снимок,
+    записывает его writer сервиса. Порядок:
+      * есть projects.json -- он и есть правда; битый JSON, чужая схема
+        (version > нашей) или не-объект -- громкий отказ: пустой реестр
+        или fallback на легаси-пару маскировали бы поломку;
+      * нет снимка, есть пара -- снимок из пары; непредставимое (голое
+        имя, два origin'а одного проекта, orphan/чужой лимит) -- отказ с
+        именем, без потерь и без выдумывания origin'а;
+      * нет ничего -- свежая установка: честный пустой реестр.
+
+    Это взгляд writer'а: отказ здесь блокирует мутацию. Читателю
+    (глаголы-списки, лимит в add, users прогонов), которому старые данные
+    обязаны оставаться видимыми, -- view_of: та же пара, но без отказов
+    представимости."""
+    path = os.path.join(dir_, "projects.json")
+    if _present(path):
+        return _snapshot_from_file(path)
+    old_registry, old_limits = os.path.join(dir_, "projects"), os.path.join(dir_, "limits.json")
+    if os.path.exists(old_registry) or os.path.exists(old_limits):
+        return _snapshot_of_pair(dir_)
+    return {"version": SNAPSHOT_VERSION, "projects": []}
+
+
+def view_of(dir_):
+    """Снимок для читателя: прежние видимые данные, отказов представимости
+    нет. Чистая, ничего не пишет.
+
+    Непредставимое в v1 (голое имя, два origin'а одного проекта, orphan-
+    лимит) не теряется из виду: миграция -- отказ writer'а (snapshot_of),
+    а читатель видит то же, что показывал прежний ответ глагола projects
+    по этой паре. Для этого снимок несёт необязательные legacy-строки и
+    legacy-лимиты -- их печатают snapshot_lines/names/limits, но writer
+    их не сохраняет: первый успешный мутирующий глагол миграцию потребует,
+    и там отказ будет услышан."""
+    path = os.path.join(dir_, "projects.json")
+    if _present(path):
+        return _snapshot_from_file(path)
+    old_registry, old_limits = os.path.join(dir_, "projects"), os.path.join(dir_, "limits.json")
+    if not (os.path.exists(old_registry) or os.path.exists(old_limits)):
+        return {"version": SNAPSHOT_VERSION, "projects": []}
+    origins, legacy = puppets.project_ids(read(os.path.join(dir_, "projects")))
+    limits = read_limits(os.path.join(dir_, "limits.json"))
+    snap = {"version": SNAPSHOT_VERSION,
+            "projects": [_entry(o, limits.get(puppets.project_of(o))) for o in sorted(origins)]}
+    if legacy:
+        snap["legacy"] = sorted(legacy)
+    orphans = {k: v for k, v in limits.items()
+               if k not in {puppets.project_of(o) for o in origins}}
+    if orphans:
+        snap["legacy_limits"] = orphans
+    return snap
+
+
+def _present(path):
+    """Есть ли файл, отличив «нет» от «есть, но не достать» (#534).
+
+    os.path.exists глотает причину недоступности: битый symlink или
+    недоступный каталог выглядели бы «файла нет», и читатель молча ушёл
+    бы в fallback на легаси-пару, маскируя поломку старым реестром.
+    «Не достать» -- громкий отказ, а не пустое место."""
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        raise RuntimeError(f"cannot tell the registry state: {path}: {e}") from None
+
+
+def _checked(snapshot, where):
+    """Проверка схемы v1 одним местом. -> те же данные, битое -- отказ.
+
+    Её зовут reader файла (_snapshot_from_file), writer (write_snapshot)
+    и export (legacy_pair_of): одни и те же данные обязаны проходить или
+    отказывать одинаково везде, иначе writer «нормализовал» бы то, что
+    reader сочёл битым. Схема: точные ключи {version, projects}; version
+    -- строго int (type is int: True и 1.0 проходят сравнение == 1, но
+    схемой не являются); каждая запись -- {origin, limit?} без чужих
+    полей, origin валиден по правилам origin'ов, limit -- строго целое
+    >= 0 (bool -- не int для лимита, null -- не отсутствие ключа); один
+    origin на имя проекта. Отказ называет место, имя и ТИП -- не сырое
+    значение: в испорченном файле может лежать секрет (строка в version,
+    чужой токен в limit, секрет и в НАЗВАНИИ неизвестного поля), а текст
+    отказа уезжает в журналы и ответы RPC.
+    """
+    if not isinstance(snapshot, dict):
+        raise RuntimeError(f"{where} is {type(snapshot).__name__}, not an object "
+                           "with version and projects")
+    if set(snapshot) != {"version", "projects"}:
+        missing = {"version", "projects"} - set(snapshot)
+        if missing:
+            raise RuntimeError(f"{where} carries no {', '.join(sorted(missing))}")
+        extra = set(snapshot) - {"version", "projects"}
+        raise RuntimeError(f"{where} carries {len(extra)} unknown field(s) outside "
+                           "version and projects")
+    version = snapshot["version"]
+    if type(version) is not int or version != SNAPSHOT_VERSION:
+        if type(version) is int:
+            # Число -- не секрет: назвать его точнее, чем «не наша схема».
+            raise RuntimeError(f"{where} is version {version}, this mop reads version "
+                               f"{SNAPSHOT_VERSION}: upgrade mop first")
+        raise RuntimeError(f"{where} is version of type {type(version).__name__}, not "
+                           f"an integer: this mop reads version {SNAPSHOT_VERSION}")
+    if not isinstance(snapshot["projects"], list):
+        raise RuntimeError(f"{where}: projects must be a list")
+    seen = set()
+    for n, p in enumerate(snapshot["projects"], start=1):
+        if not isinstance(p, dict) or "origin" not in p or set(p) - {"origin", "limit"}:
+            if not isinstance(p, dict):
+                raise RuntimeError(f"{where}: project #{n} is {type(p).__name__}, "
+                                   "not an object with an origin")
+            if "origin" not in p:
+                raise RuntimeError(f"{where}: project #{n} carries no origin")
+            extra = set(p) - {"origin", "limit"}
+            raise RuntimeError(f"{where}: project #{n} carries {len(extra)} unknown "
+                               "field(s) outside origin and limit")
+        origin = p["origin"]
+        if not isinstance(origin, str) or not puppets.looks_like_origin(origin):
+            raise RuntimeError(f"{where}: origin of project #{n} is "
+                               f"{type(origin).__name__}, not a git-origin")
+        name = puppets.project_of(origin)
+        if name in seen:
+            raise RuntimeError(f"{where}: 2 origins of one project {name}; v1 keeps "
+                               "one origin per project")
+        if "limit" in p:
+            value = p["limit"]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RuntimeError(f"{where}: limit of {name} is a {type(value).__name__}, "
+                                   "not a whole number >= 0; null is not the absence "
+                                   "of a limit")
+        seen.add(name)
+    return snapshot
+
+
+def _snapshot_from_file(path):
+    """Разбор файла снимка с проверкой схемы (_checked). Битое -- отказ."""
+    try:
+        with open(path) as f:
+            got = json.load(f)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"the project registry {path} is unreadable: {e}") from None
+    return _checked(got, f"the project registry {path}")
+
+
+def _strict_lines(path):
+    """Строки легаси-реестра для МИГРАЦИИ: без файла -- пусто, ошибка чтения
+    -- громкий отказ. Прощающий read() глотает OSError, и недоступный
+    файл выглядел бы пустым реестром: writer такое не читает."""
+    try:
+        with open(path) as f:
+            return {l.strip() for l in f if l.strip()}
+    except FileNotFoundError:
+        return set()
+    except OSError as e:
+        raise RuntimeError(f"cannot migrate the registry: {path} is unreadable: {e}") from None
+
+
+def _strict_limits(path):
+    """Лимиты пары для МИГРАЦИИ: каждая запись -- целое >= 0 или отказ.
+
+    Прощающий read_limits (#337) отбрасывает null/bool/строки молча: глагол
+    переживал одну плохую строку. Миграция -- writer: усечённые потолки
+    она сохраняла бы навсегда, поэтому невалидная запись -- отказ с именем
+    и ТИПОМ (не сырым значением: в испорченном файле может лежать секрет),
+    файлы не тронуты."""
+    try:
+        with open(path) as f:
+            got = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"cannot migrate the registry: {path} is unreadable: {e}") from None
+    if not isinstance(got, dict):
+        raise RuntimeError(f"cannot migrate the registry: {path} is "
+                           f"{type(got).__name__}, not an object")
+    out = {}
+    for name, value in got.items():
+        # bool -- это int в питоне, проверяем первым; отрицательное -- не
+        # потолок: миграция сохраняла бы его навсегда.
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError(f"cannot migrate the registry: limit of {name} in "
+                               f"{path} is a {type(value).__name__}, not a whole "
+                               "number >= 0. The files are intact, and what to do "
+                               "with it is an operator decision")
+        out[name] = value
+    return out
+
+
+def _snapshot_of_pair(dir_):
+    """Снимок из легаси-пары каталога. Непредставимое -- отказ, не потеря.
+
+    Голое имя и коллизия basename'ов в v1 не представимы без выдумывания
+    origin'а; orphan-лимит (имени нет в реестре) нельзя ни перенести (не
+    куда), ни выбросить (потеря потолка) -- всё это отказ оператору с
+    именем, файлы остаются как были. Отказ называет причину и сохранность,
+    но не способ исправления: правка реестра идёт теми же глаголами
+    (первый мутирующий потребует ту же миграцию и откажет тем же
+    отказом), а редактирование файлов руками -- не путь пула."""
+    origins, legacy = puppets.project_ids(_strict_lines(os.path.join(dir_, "projects")))
+    if legacy:
+        raise RuntimeError("cannot migrate the registry: bare name(s) without an "
+                           f"origin: {', '.join(sorted(legacy))}. v1 stores origins "
+                           "only; the files are intact, and fixing them is an "
+                           "operator decision")
+    seen = {}
+    for o in sorted(origins):
+        name = puppets.project_of(o)
+        if name in seen:
+            # Имя и число, не сырые origin'ы: origin в реестре может нести
+            # креды (userinfo, token), и отказ оператору их не печатает.
+            raise RuntimeError("cannot migrate the registry: 2 origins of one "
+                               f"project {name}. v1 keeps one origin per project; "
+                               "the files are intact, and choosing the true one "
+                               "is an operator decision")
+        seen[name] = o
+    limits = _strict_limits(os.path.join(dir_, "limits.json"))
+    for name in sorted(limits):
+        if name not in seen:
+            raise RuntimeError("cannot migrate the registry: limit of an unknown "
+                               f"project {name!r} in limits.json. The files are "
+                               "intact, and what to do with the limit is an "
+                               "operator decision")
+    return {"version": SNAPSHOT_VERSION,
+            "projects": [_entry(o, limits.get(puppets.project_of(o))) for o in sorted(origins)]}
+
+
+def snapshot_origins(snapshot):
+    """Origin'ы снимка по порядку."""
+    return [p["origin"] for p in snapshot["projects"]]
+
+
+def snapshot_limits(snapshot):
+    """{имя: потолок} снимка: записи с лимитом плюс legacy-потолки вида --
+    прежний ответ глагола projects печатал limits целиком."""
+    out = {puppets.project_of(p["origin"]): p["limit"]
+           for p in snapshot["projects"] if p.get("limit") is not None}
+    out.update(snapshot.get("legacy_limits") or {})
+    return out
+
+
+def snapshot_names(snapshot):
+    """Имена проектов снимка (basename'ы, без дублей), по порядку."""
+    return sorted({puppets.project_of(p["origin"]) for p in snapshot["projects"]}
+                  | set(snapshot.get("legacy") or []))
+
+
+def snapshot_with_origin(snapshot, origin):
+    """Снимок после завода проекта. -> снимок. Чистая.
+
+    Голое имя -- отказ, как и в легаси-реестре: origin -- единственная
+    правда о проекте. Второй origin того же имени -- тоже отказ: в v1
+    один проект на имя, и выбрать «правильный» origin молча нельзя.
+    Заведённость глагол видит, сравнив снимки: здесь только данные."""
+    origin = (origin or "").strip()
+    if not puppets.looks_like_origin(origin):
+        raise RuntimeError(f"{origin!r} doesn't look like a git-origin: "
+                           f"a project is registered by its origin, not by its name")
+    if origin in snapshot_origins(snapshot):
+        return {"version": snapshot["version"], "projects": list(snapshot["projects"])}
+    name = puppets.project_of(origin)
+    if name in snapshot_names(snapshot):
+        raise RuntimeError(f"project {name} is already registered with another "
+                           f"origin: v1 keeps one origin per project")
+    return {"version": snapshot["version"],
+            "projects": snapshot["projects"] + [_entry(origin, None)]}
+
+
+def snapshot_without(snapshot, name):
+    """Снимок после снятия проекта по имени. -> снимок.
+
+    Имя -- basename origin'а: проект снимается весь, вместе с лимитом --
+    в одном снимке, разводить их больше нечем. Снятые строки глагол
+    выводит сравнением снимков; пустой результат значит «проекта нет»,
+    и это отказ вызывающего (опечатка иначе читалась бы снятием)."""
+    return {"version": snapshot["version"],
+            "projects": [p for p in snapshot["projects"]
+                         if puppets.project_of(p["origin"]) != name]}
+
+
+def snapshot_with_limit(snapshot, name, value):
+    """Снимок после установки лимита (value=None -- снять). -> снимок."""
+    out = []
+    for p in snapshot["projects"]:
+        if puppets.project_of(p["origin"]) == name:
+            p = _entry(p["origin"], value)
+        out.append(p)
+    return {"version": snapshot["version"], "projects": out}
+
+
+def snapshot_lines(snapshot):
+    """Строки реестра для ответа глагола `projects` (поле lines): origin'ы
+    и голые имена снимка -- как их печатает и читает легаси-реестр."""
+    return snapshot_origins(snapshot) + list(snapshot.get("legacy") or [])
+
+
+def view_lines(view):
+    """Строки взгляда для локального читателя без сервера (fallback deploy,
+    `mop cluster users`): те же lines, что у глагола-списка. Чистая."""
+    return snapshot_lines(view)
+
+
+def write_snapshot(snapshot, path=SNAPSHOT):
+    """Запись снимка атомарно. Единственный writer -- сервис кластера.
+
+    Схема -- та же проверка _checked, что у reader'а, ДО всякого mkdir и
+    записи: writer не «нормализует» битое (явный null limit, чужие поля)
+    в усечённый файл. Legacy-поля вида (голые имена, orphan-потолки) --
+    только читателю, и writer такой view ОТКАЗЫВАЕТСЯ писать: молча
+    выбросить их и сохранить усечённое состояние -- та же потеря, что
+    обрыв между двумя файлами. Мутаторы зовут strict snapshot_of, но и
+    сам writer держит гейт: непредставимое не должно доехать до диска
+    ни одним путём."""
+    if not isinstance(snapshot, dict):
+        _checked(snapshot, "cannot write the registry: the snapshot")  # отказ по типу
+    if snapshot.get("legacy") or snapshot.get("legacy_limits"):
+        raise RuntimeError("cannot write the registry: the view carries unrepresentable "
+                           "legacy data (bare name(s) "
+                           f"{', '.join(sorted(snapshot.get('legacy') or ()))}, limit(s) of "
+                           f"{', '.join(sorted((snapshot.get('legacy_limits') or {}).keys()))}); "
+                           "migrate the pair by an operator decision first")
+    _checked(snapshot, "cannot write the registry: the snapshot")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {"version": snapshot["version"],
+               "projects": [dict(p) for p in snapshot["projects"]]}
+    fsutil.write_atomic(path, json.dumps(payload, indent=1, sort_keys=True) + "\n")
+
+
+def legacy_pair_of(snapshot):
+    """Обратное преобразование снимка в легаси-пару. -> (строки, лимиты).
+
+    Чистая, без записи: даунгрейд -- операторская процедура (остановить
+    writers, выгрузить пару, переключить), и её шаги видны явно. После
+    новых мутаций v1 roundtrip-стабильна: миграция той же пары даёт тот
+    же снимок (проверено tests/projects.py). View читателя (голые имена,
+    orphan-потолки) непредставим в паре без потерь -- отказ, не потеря.
+
+    Граница lossless (#542): сериализация пары -- строка + "\n" на строку,
+    а читатель пары собирает строки .strip(). Origin с CR/LF, NUL или
+    краевым пробелом парсер origin'ов принимает (он кормит живые клоны и
+    прощает края), но пара из него читалась бы НЕ тем числом строк и
+    проектов: экспорт обязан быть lossless, такой origin -- отказ ДО
+    всякой записи, без raw origin в тексте.
+    """
+    if not isinstance(snapshot, dict):
+        _checked(snapshot, "cannot export the snapshot: it")  # отказ по типу
+    if snapshot.get("legacy") or snapshot.get("legacy_limits"):
+        raise RuntimeError("cannot export a view with unrepresentable legacy data "
+                           "(bare name(s) "
+                           f"{', '.join(sorted(snapshot.get('legacy') or ()))}, limit(s) of "
+                           f"{', '.join(sorted((snapshot.get('legacy_limits') or {}).keys()))}); "
+                           "migrate the pair by an operator decision first")
+    _checked(snapshot, "cannot export the snapshot: it")
+    lines = snapshot_origins(snapshot)
+    for n, origin in enumerate(lines, start=1):
+        # Одна строка реестра на origin: без CR/LF/NUL и без краевого
+        # пробела (читатель пары стрипает). Отказ -- место и номер, не
+        # сырой origin с кредами.
+        if (not isinstance(origin, str) or "\n" in origin or "\r" in origin
+                or "\0" in origin or origin != origin.strip()):
+            raise RuntimeError(f"cannot export the snapshot: origin of project #{n} "
+                               "carries a line break, NUL or edge whitespace; "
+                               "the legacy pair is not lossless for it")
+    limits = {puppets.project_of(p["origin"]): p["limit"]
+              for p in snapshot["projects"] if "limit" in p}
+    return lines, limits
+
+
+# ─── выгрузка для отката: пара из одного снимка (#542) ────────────────────
+# После миграции старые projects/limits.json лежат на диске устаревшими, а
+# git revert снимка не сохраняет add/delete/limit, случившиеся позже.
+# Обратный экспорт -- это один валидированный снимок, разложенный в пару в
+# НОВОМ каталоге: живой реестр не тронут, настоящий переключение -- за
+# оператором (остановить writers, снять финальный экспорт, сверить digest,
+# переключить). Resume v1 после правок старым writer'ом обязан перечитать
+# свежий снимок, а не доверять устаревшему; лечить голые имена/коллизии/
+# orphan-потолки автоматически команда не берётся -- это отдельные решения.
+def _readback_dirfd(dirfd, name, data):
+    """Перечитать записанный файл экспорта ПО FD и сверить с ожидаемым (#553).
+
+    Одна проверка записанного для файлов пары и маркера: открытие
+    O_NOFOLLOW относительно dirfd (symlink на месте файла -- отказ, чужая
+    цель не читается), фактические байты -- с ожидаемыми, режим -- 0600.
+    Согласованная перечитка молчит (None); отказ -- текст причины с именем
+    файла, без сырого содержимого.
+    """
+    try:
+        fdo = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
+    except OSError as e:
+        return f"{name} is missing from the staging directory: {e}"
+    with os.fdopen(fdo, "rb") as f:
+        if f.read() != data:
+            return (f"{name} was written truncated or corrupted: the read-back "
+                    "bytes do not match what was to be exported")
+    st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+    if (st.st_mode & 0o777) != 0o600:
+        return f"{name} did not keep the private mode 0600"
+    return None
+
+
+def export_pair(dest, snapshot_path=None):
+    """Выгрузить реестр парой в НОВЫЙ каталог. -> сводка.
+
+    Источник не трогает: читает ОДИН раз, единственная запись -- сама
+    выгрузка в dest. Функция меняет ФС, это не pure function: «чистота»
+    здесь -- отсутствие побочных эффектов на живом реестре, не чистота
+    записи.
+
+    Порядок и гарантии (#542):
+      * снимок читается ОДНИМ запросом ДО всякой записи -- байты, digest,
+        разбор валидатором #534; нет файла или битый -- отказ, БЕЗ
+        fallback на устаревшую легаси-пару;
+      * по имени dest не пишется НИЧЕГО и оно не занимается заранее:
+        пара собирается в НЕУГАДЫВАЕМОМ staging-каталоге рядом с dest
+        (mkdir соль-имени 0700, мгновенная привязка fd, O_NOFOLLOW),
+        записи идут только по fd. Соль-имя -- граница от НЕЗНАЮЩЕГО
+        имени (race, ошибка, мусор), НЕ обещание защиты от того же uid:
+        сосед с тем же uid видит имя в листинге родителя до публикации
+        и может его подменить; на этот случай остаётся отказ по факту
+        (перечитка не сходится, bind не проходит), а не гарантия
+        невозможности. listdir на staging -- здравый смысл на только
+        что придуманном имени, не «доказательство ownership»;
+      * файлы пишутся fsutil.write_private_dirfd (тот же атомарный
+        приватный writer #153, по fd) и ПЕРЕЧИТЫВАЮТСЯ по fd: фактические
+        байты и права сверяются с ожидаемыми ДО маркера; маркер
+        export.json -- ПОСЛЕДНИМ и тоже перечитан: его нет или он не
+        сошёлся -- экспорт не состоялся. Это защита от обрыва процесса,
+        не обещание сохранности при потере питания;
+      * публикация -- ОДИН атомарный rename без перезаписи
+        (fsutil.rename_noreplace, renameat2 RENAME_NOREPLACE): имя dest
+        занято (файл, каталог, symlink, в том числе ПУСТОЙ чужой каталог
+        между записью и публикацией) -- EEXIST, отказ, чужое НЕ тронуто;
+        свободно -- готовый каталог ЦЕЛИКОМ становится dest. Окна
+        «проверить имя, затем положить» на dest нет вовсе;
+      * провал чистит только созданное ЭТОЙ попыткой и только по fd:
+        файлы unlink'ом по fd, staging-каталог rmdir по СВОЕМУ соль-имени
+        после сверки identity с fd. Имя dest при неудаче не занимается
+        вовсе, чужой namespace не переименовывается и не удаляется;
+        renameat2 недоступен на платформе -- отказ с именем ограничения,
+        без молчаливого TOCTOU-fallback;
+      * сводка -- счётчик, источник и digest: креды origin'ов живут в
+        закрытых файлах пары, не в stdout/metadata/ошибках.
+    """
+    path = SNAPSHOT if snapshot_path is None else snapshot_path
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raise RuntimeError(f"nothing to export: {path} does not exist; a legacy "
+                           "pair is not a rollback source -- migrate first") from None
+    except OSError as e:
+        raise RuntimeError(f"cannot export: {path} is unreadable: {e}") from None
+    try:
+        parsed = json.loads(raw)
+    except ValueError as e:
+        raise RuntimeError(f"cannot export: {path} is not valid JSON: {e}") from None
+    _checked(parsed, f"cannot export: {path}")
+    lines, limits = legacy_pair_of(parsed)
+    digest = hashlib.sha256(raw).hexdigest()
+    pair = {
+        "projects": "".join(f"{s}\n" for s in lines).encode(),
+        "limits.json": (json.dumps(limits, sort_keys=True) + "\n").encode(),
+    }
+    marker = {"what": "mop registry rollback export", "version": 1,
+              "schema": "legacy-pair", "source": path, "snapshot_sha256": digest,
+              "projects": len(lines),
+              "files": {n: hashlib.sha256(d).hexdigest() for n, d in pair.items()},
+              "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    marker_body = (json.dumps(marker, indent=1, sort_keys=True) + "\n").encode()
+    # Staging: неугадываемое имя рядом с dest, привязка fd СРАЗУ. Родителя
+    # создаёт оператор: экспорт не расползается по чужим путям.
+    parent = os.path.dirname(dest) or "."
+    base = os.path.basename(dest)
+    try:
+        pfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as e:
+        raise RuntimeError(f"cannot export: cannot open the parent of {dest}: "
+                           f"{e}") from None
+    why = None
+    try:
+        staging = f".mop-export-{secrets.token_hex(6)}"
+        try:
+            os.mkdir(staging, 0o700, dir_fd=pfd)
+        except OSError as e:
+            raise RuntimeError(f"cannot export: cannot create the staging "
+                               f"directory for {dest}: {e}") from None
+        try:
+            dirfd = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=pfd)
+        except OSError as e:
+            why = f"cannot export: cannot bind the staging directory for {dest}: {e}"
+            try:
+                os.rmdir(staging, dir_fd=pfd)
+            except OSError:
+                pass
+            raise RuntimeError(why) from None
+        try:
+            if os.listdir(dirfd):
+                # Имя только что придумано и создано нами: непустой каталог
+                # на нём -- либо мусор в родителе, либо чужая guess-атака;
+                # ничего не писано -- не трогаем и не удаляем.
+                raise RuntimeError(f"cannot export: the staging directory for "
+                                   f"{dest} is not empty; nothing was written, "
+                                   "nothing was removed")
+            for name, data in pair.items():
+                fsutil.write_private_dirfd(dirfd, name, data)
+            # Сверка фактического: перечитать записанное ПО FD и сверить
+            # байты и права ДО маркера (#553, _readback_dirfd). Усечённая
+            # запись -- отказ: готовой публикации без целой пары не бывает.
+            for name, data in pair.items():
+                why = _readback_dirfd(dirfd, name, data)
+                if why is not None:
+                    raise RuntimeError(f"cannot export: {why}")
+            fsutil.write_private_dirfd(dirfd, "export.json", marker_body)
+            # Маркер тоже перечитан: публикация подтверждена фактом, не планом.
+            why = _readback_dirfd(dirfd, "export.json", marker_body)
+            if why is not None:
+                raise RuntimeError(f"cannot export: {why}")
+            # Публикация: ОДИН атомарный rename без перезаписи. Имя dest
+            # занято -- EEXIST, чужое не тронуто; свободно -- готовый
+            # каталог целиком становится dest.
+            if not fsutil.rename_noreplace(pfd, staging, pfd, base):
+                raise RuntimeError(f"cannot export: {dest} already exists; "
+                                   "refusing to overwrite -- name a new "
+                                   "directory") from None
+        except Exception as e:
+            # Уборка своего: файлы unlink'ом по fd, staging rmdir по СВОЕМУ
+            # соль-имени после сверки identity с fd. Имя dest не занималось
+            # (или публикация не прошла) -- чужой namespace не трогаем вовсе.
+            msg = str(e)
+            why = [msg if msg.startswith("cannot export") else f"cannot export: {e}"]
+            why.extend(_drop_staging_dir(dirfd, pfd, staging))
+            raise RuntimeError("; ".join(why)) from None
+        finally:
+            os.close(dirfd)
+    finally:
+        os.close(pfd)
+    return {"what": "mop registry rollback export", "projects": len(lines),
+            "source": path, "sha256": digest, "dest": dest}
+
+
+def _drop_staging_dir(dirfd, pfd, staging):
+    """Убрать СВОЙ staging-каталог попытки: файлы по fd, каталог -- по СВОЕМУ
+    неугадываемому соль-имени, со сверкой identity с fd перед rmdir (#542).
+
+    rmdir принимает только путь, поэтому остаточное окно между сверкой и
+    rmdir по СВОЕМУ соль-имени есть и названо честно: урон ограничен пустым
+    каталогом с неугадываемым именем рядом с dest; чужой namespace -- имя
+    dest и чужие каталоги -- не переименовывается и не удаляется вовсе
+    (ревью 2: никакого move чужого). ENOENT -- уже убрали, прощаем.
+    """
+    why = []
+    for name in ("projects", "limits.json", "export.json"):
+        try:
+            os.unlink(name, dir_fd=dirfd)
+        except FileNotFoundError:
+            pass  # не писали или уже убрали
+        except OSError as e:
+            why.append(f"cleanup failed on {name}: {e}")
+    if why:
+        return why
+    try:
+        st = os.stat(staging, dir_fd=pfd, follow_symlinks=False)
+        ours = os.fstat(dirfd)
+        if (st.st_dev, st.st_ino) != (ours.st_dev, ours.st_ino):
+            # Имя staging уже не наш каталог: не удалять, назвать.
+            return [f"cleanup: the staging directory name is no longer ours; "
+                    "left in place"]
+        os.rmdir(staging, dir_fd=pfd)
+    except FileNotFoundError:
+        pass  # уже убрали
+    except OSError as e:
+        why.append(f"cleanup failed: the staging directory {e}")
+    return why
 
 def for_deploy(answer, local):
     """Реестр для `mop server deploy`. -> (строки, примечание|None). Чистая функция.

@@ -2,7 +2,7 @@
 
 On the server, as the pool user. Reads the people, services and nodes that
 mop server deploy put into /etc/nats/base-users.json, the projects from the
-server's registry (~/.config/mop/projects), gives a project without a bus
+server's registry (~/.config/mop/projects.json), gives a project without a bus
 password a new one, and writes /etc/nats/users.conf (the machines) and
 /etc/nats/callout.conf with the auth callout's keys.
 --reload sends nats-server SIGHUP when users.conf changed and checks that
@@ -13,13 +13,19 @@ import sys
 
 from mop.cli import lib
 from mop.server import bootstrap, natsconf
-from mop.common import projects, puppets
+from mop.common import projects
 
 
 def main(argv):
     if [a for a in argv if a != "--reload"]:
         lib.usage(__doc__)
-    names = projects.names(*puppets.project_ids(projects.read()))
+    # Взгляд реестра (#534): правда на диске -- projects.json, легаси-файл
+    # пары после миграции остаётся лежать устаревшим. Голые легаси-имена
+    # вид тоже показывает -- пользователей шины они заводили и раньше.
+    # Имена -- из снимка напрямую (#551): эквивалентность прежней цепочки
+    # имён по строкам вида доказана проверками, двойной basename-разбор
+    # не нужен.
+    names = projects.snapshot_names(projects.view_of(projects.SNAPSHOT_DIR))
     try:
         changed, _ = natsconf.apply(names, bootstrap.PUPPET_CREDS)
     except (OSError, ValueError) as e:

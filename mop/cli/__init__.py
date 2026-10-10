@@ -428,9 +428,16 @@ def main(argv):
     # должен быть уже этой команды. Клиент не открывает .env установки.
     from ..common import config
     policy = config.client_sources() if client_command(modname) else contextlib.nullcontext()
-    with context.use(context.here({"server": server} if server else {})), policy:
-        environment()
-        return run(command(modname), rest)
+    try:
+        with context.use(context.here({"server": server} if server else {})), policy:
+            environment()
+            return run(command(modname), rest)
+    except config.ReadError as e:
+        # Отказ чтения существующих настроек (#535) -- до run: он случается
+        # в environment() и разборе аргументов, раньше обёртки отказов.
+        # Одна строка stderr и код 1 -- как у остальных отказов run().
+        print(e, file=sys.stderr, flush=True)
+        sys.exit(1)
 
 
 def console():

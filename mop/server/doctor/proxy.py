@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from mop.common import config, creds
+from mop.common import config, creds, llm
 
 TIMEOUT = 10
 
@@ -34,11 +34,13 @@ def issues_of(answer):
 def _probe():
     """Код ответа /v1_models | исключение сети."""
     host = config.get("MOP_SERVER_LAN")
-    joined = creds.client(creds.server_dir(host))
-    if joined is None:
-        raise RuntimeError(f"no joined proxy configuration for {host}: run mop login --server {host}")
-    req = urllib.request.Request(joined["proxy_url"].rstrip("/") + "/v1/models",
-                                 headers={"Authorization": f"Bearer {joined['proxy_key']}"})
+    # Требование полного человеческого входа -- creds.human_login (#549):
+    # единый владелец текстов отказа, один снимок профиля (#533).
+    joined = creds.human_login(creds.server_dir(host), host)
+    req = urllib.request.Request(
+        llm.endpoint(joined["proxy_url"], "models", host=host,
+                     port=joined["https_port"]),
+        headers={"Authorization": f"Bearer {joined['proxy_key']}"})
     pin = creds.cafile(creds.server_dir(host)) if \
         urllib.parse.urlsplit(joined["proxy_url"]).hostname == host else None
     opts = {"context": ssl.create_default_context(cafile=pin)} if pin else {}

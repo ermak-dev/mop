@@ -54,9 +54,10 @@ answering a prompt per shell call is exactly the ceremony. Passing the flag
 yourself is harmless — it isn't added twice.
 
 The session uses the selected server's LLM proxy. Its URL and key come from
-the private client.json saved by mop login; missing credentials start login
-before claude. With multiple joined servers, name one with --server. Without
-a terminal, missing input refuses. This command never adds the pool's MCP tools.
+the server profile, connection.json saved by mop login; missing credentials
+start login before claude. With multiple joined servers, name one with
+--server. Without a terminal, missing input refuses. This command never adds
+the pool's MCP tools.
 ```
 
 #### mop delete
@@ -70,6 +71,24 @@ puppet — memory and disk with it.
 
 Another master's puppet (work in its clone, or dispatched minutes ago) is
 refused with that master's name; --force acts anyway and says whose it was.
+```
+
+#### mop diagnose
+
+```text
+mop diagnose: offline summary of the selected server login
+
+Prints which server the next command would talk to, where that choice
+came from (command line, environment, clone binding, or the sole joined
+directory), where its login directory is, and whether the login is whole:
+complete, partial (a leftover half of the old pair), empty or a machine
+service identity. No network, no prompts, no writes; the login's secrets
+are never shown. The schema line names the version of a validated
+connection.json only; other formats carry no schema claim.
+
+Broken or conflicting directories refuse with exit code 1 -- the refusal
+is the diagnosis. partial/empty/machine are informational: exit code 0
+with an explicit not-ready line, not a success message.
 ```
 
 #### mop landing
@@ -123,8 +142,9 @@ launching claude.
 The master runs in the same permission class as its pool: it can push,
 manage the project's puppets and talk to the tracker without asking on
 every step. The Nomad token stays on the server. The session uses the
-selected server's LLM proxy; its URL and key come from the private
-client.json written by mop login.
+selected server's LLM proxy; its URL and key come from the server
+profile, connection.json written by mop login (the legacy
+operator/client pair is still read for compatibility).
 ```
 
 #### mop models
@@ -908,13 +928,14 @@ files. docs/BUS.md.
 #### mop server cluster
 
 ```text
-cluster service: mop server cluster [serve|check|users|reload|builder] — Nomad behind the bus
+cluster service: mop server cluster [serve|check|users|reload|builder|export] — Nomad behind the bus
 
   mop server cluster check    is the service answering, and does it see Nomad
   mop server cluster serve    the server's subscriber (unit mop-cluster)
   mop server cluster users    write the bus users file from the server's registry
   mop server cluster reload   make nats reread its config, and check it took
   mop server cluster builder  the server's image builder (unit mop-builder)
+  mop server cluster export   write the registry as a legacy pair for a rollback
 
 The only one on the installation that talks to Nomad on someone else's
 behalf: masters and operators ask, the service checks that they may —
@@ -935,6 +956,36 @@ the controller's user: the playbook needs its inventory and ssh keys.
 
 ```text
 mop server cluster check: is the service answering on the bus, and does it see Nomad
+```
+
+#### mop server cluster export
+
+```text
+mop server cluster export <DIR> [--json]: write the registry as a legacy pair for a rollback
+
+On the server, as the pool user. Reads the live snapshot
+(~/.config/mop/projects.json) once, validates it, and lays the pair
+(projects, limits.json) out in a NEW directory DIR with a completion
+marker export.json; nothing in the live registry, the legacy pair or
+the bus is touched, and the command stops no writers.
+
+An ordinary success prints nothing (the summary is a machine matter:
+the library return and the export.json marker, not terminal prose);
+--json prints the summary as one JSON object for scripts. Refusals
+print their reason to stderr and exit non-zero, without echoing the
+contents of a corrupt file or any origin credentials.
+
+The rollback itself is an operator's procedure: stop every writer, take
+a final export, verify the sha256 in export.json against the source,
+then switch. The command does not perform the switch and does not
+repair bare names, collisions or orphan limits -- the validator refuses
+them, and how to resolve each is a separate decision.
+The export carries origin credentials as its private data: the
+directory is 0700, the files are 0600, and summaries, markers and
+refusals name paths, counts and digests -- never a URL or a token.
+An existing destination (file, directory, symlink, or a concurrent
+claim) is a refusal: the command never overwrites, and a failed attempt
+removes only what that attempt itself created.
 ```
 
 #### mop server cluster reload
@@ -966,7 +1017,7 @@ mop server cluster users [--reload]: write the bus users file from the server's 
 
 On the server, as the pool user. Reads the people, services and nodes that
 mop server deploy put into /etc/nats/base-users.json, the projects from the
-server's registry (~/.config/mop/projects), gives a project without a bus
+server's registry (~/.config/mop/projects.json), gives a project without a bus
 password a new one, and writes /etc/nats/users.conf (the machines) and
 /etc/nats/callout.conf with the auth callout's keys.
 --reload sends nats-server SIGHUP when users.conf changed and checks that
@@ -1007,6 +1058,23 @@ HEAD has moved past the commit that started the job, it exits 0 — the
 newer job deploys it.
 ```
 
+#### mop server diagnose
+
+```text
+mop server diagnose: offline summary of this installation only
+
+Reports two local facts, no network, no migration, no writes: where each
+effective setting of this installation comes from (the same resolver as
+`mop server config`, values themselves are not printed here), and what
+the local project registry runs on -- a v1 snapshot, the legacy pair of
+files, or nothing yet. This is not the registry of a remote selected
+server; client-side selection is `mop diagnose`.
+
+A registry that cannot be read refuses with exit code 1 naming the file;
+a missing registry is informational: exit code 0 with an explicit
+not-ready line.
+```
+
 #### mop server disk
 
 ```text
@@ -1042,6 +1110,69 @@ A node with less than MOP_GC_FREE_MIN_GB free gets its free puppets
 recycled (clone reset to HEAD, target wiped) — no more than
 MOP_GC_MAX_PER_RUN per run. Run this on the server, not from a master shell: disk pressure on a node
 is a fact about every tenant, not one project.
+```
+
+#### mop server proxykey
+
+```text
+client proxy key rotation: mop server proxykey start|resume|status — on the controller
+
+  mop server proxykey start --nodes n1,n2 --exclusive   frozen recipient set, explicit nodes
+  mop server proxykey start --all-registered --exclusive  full known node set, offline included
+  mop server proxykey start --no-recipients --exclusive   deliberate empty recipient set
+  mop server proxykey resume --exclusive
+  mop server proxykey status [--json]
+
+One writer, one operation, checkpoints all the way (the rotation
+library). The verbs are a thin front: the adapter supplies the real effects —
+loopback management API of the installed proxy, client-key probes — and
+every decision stays in the library. Works on the controller only; a
+puppet context is refused before any network or file touch.
+
+start requires --exclusive: the caller affirms no other writer (panel,
+deploy) is active — the upstream has no compare-and-swap. The recipient
+set is frozen at start: offline nodes stay recipients, resume never
+re-selects membership. Quiet on a fast success; pending or refusal is
+rc 1 with a safe reason (no key material anywhere in the output).
+```
+
+#### mop server proxykey resume
+
+```text
+resume the rotation: mop server proxykey resume --exclusive
+
+Drives the recorded operation from its checkpoints to the first
+blocker: the rotation library decides every step; the adapter
+supplies the effects. The frozen recipient set stands as recorded;
+membership is never re-selected. Pending or refusal is rc 1 with a
+safe reason; a quiet fast success prints one line. --exclusive
+affirms the caller is still the only writer.
+```
+
+#### mop server proxykey start
+
+```text
+start a rotation: mop server proxykey start --nodes n1,n2 --exclusive
+
+Checks the controller boundary, resolves the controller source and the
+cluster service copy, freezes the recipient set (--nodes, or
+--all-registered for the full known node set, offline included, or
+--no-recipients), and records the private checkpoint. No proxy effect:
+the remote steps belong to resume. A recorded operation is a quiet rc 0
+(one JSON line with --json); a refusal is rc 1 with its reason.
+--exclusive affirms the caller is the
+only writer (panel included); without it the command refuses.
+```
+
+#### mop server proxykey status
+
+```text
+the rotation status: mop server proxykey status [--json]
+
+Reads the private checkpoint and prints the library's safe projection:
+stage, per-recipient codes, refusal reasons — never a key, never a raw
+agent tail. No operation is a quiet zero; an invalid state file is rc 1
+with the validator's reason.
 ```
 
 #### mop server pve-facts

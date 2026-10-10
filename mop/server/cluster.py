@@ -35,7 +35,7 @@ import base64
 
 from .. import driver
 from . import bootstrap, natsconf, nodes, nomad, proxykey, spec
-from ..common import (bus, busnames, config, creds, domain, landing, lease, paths, project_secrets,
+from ..common import (bus, busnames, config, creds, domain, fsutil, landing, lease, paths, project_secrets,
                       projects, puppets, service, state)
 from ..common.domain import Alloc, CloneFacts, JobMeta, PoolNode, Project, Verb
 
@@ -387,9 +387,11 @@ def _gated(fn):
 def _add(project, req):
     origin = req.get("origin")
     # Лимит -- проекта из origin, а не просителя: оператор через admin
-    # заводит папета тому же проекту и упирается в тот же потолок. Файл
+    # заводит папета тому же проекту и упирается в тот же потолок. Реестр
     # читается на каждый запрос: правка лимита доезжает без рестарта.
-    target = Project.of(origin, projects.read_limits())
+    # Читатель снимка (#534): взгляд читателя, пишет его только глагол
+    # проектов -- непредставимая пара не прячет потолок действующего.
+    target = Project.of(origin, projects.snapshot_limits(_view()))
     why = over_limit(target.name, _live_count(target.name), target.limit)
     if why:
         return {"error": why}
@@ -635,7 +637,11 @@ def _gc_policy(project, req):
 
 
 def _client_config(req):
-    """Только личный субъект после проверки NATS, не узловой server.rpc."""
+    """Только личный субъект после проверки NATS, не узловой server.rpc.
+
+    Адрес -- канонический origin сервера (#547): scheme/host/port, без
+    исторического префикса /llm и без /v1. Надстраивает /v1/* потребитель,
+    и ровно один раз; nginx root /v1 уже отвечает на корне (#529)."""
     if not req.get("_caller"):
         return {"error": "client_config requires an authenticated personal subject"}
     key = proxykey.source({})
@@ -644,14 +650,41 @@ def _client_config(req):
     host = config.get("MOP_SERVER_LAN")
     port = str(config.get("MOP_HTTPS_PORT"))
     return {"ok": True, "https_port": port,
-            "proxy_url": f"https://{host}:{port}/llm", "proxy_key": key}
+            "proxy_url": f"https://{host}:{port}", "proxy_key": key}
 
 
 # ─── глаголы: проекты (#117) ─────────────────────────────────────────────
 # Реестр, лимиты и пароли папетов живут здесь, на сервере, и пишет их только
 # сервис. Глаголы идут в потоках петли, поэтому правка реестра -- под замком:
 # два одновременных завода иначе потеряли бы один из проектов.
+#
+# Реестр -- один атомарный снимок ~/.config/mop/projects.json (#534):
+# {version:1, projects:[{origin, limit?}]}. Reader (глаголы-списки, лимит
+# в add) читает, но НИКОГДА не пишет, мигрируя только в голове; миграцию
+# на диск выполняет первый успешный ИЗМЕНЯЮЩИЙ глагол -- тот же замок, тот
+# же один снимок: обрыв или падение между «реестр» и «лимиты» больше не
+# разводит данные. Легаси-пара (projects + limits.json) остаётся на диске
+# (её читает deploy до #540 и откат), но сервис её больше не пишет.
 _projects_lock = threading.Lock()
+
+
+def _snapshot():
+    """Снимок реестра для writer'а: миграция требует представимости в v1,
+    непредставимое -- отказ (#534). Каталог -- атрибут модуля на момент
+    вызова: тесты и установки подменяют одно место."""
+    return projects.snapshot_of(projects.SNAPSHOT_DIR)
+
+
+def _view():
+    """Снимок реестра для читателя (#534): старые данные видимы и без
+    миграции -- отказ представимости блокирует мутацию, а не чтение.
+    Читает, никогда не пишет."""
+    return projects.view_of(projects.SNAPSHOT_DIR)
+
+
+def _save(snapshot):
+    """Запись снимка: единственный writer -- мутирующий глагол под замком."""
+    projects.write_snapshot(snapshot, projects.SNAPSHOT)
 
 
 def _names(lines):
@@ -675,50 +708,109 @@ def _users_apply(names, verify_user=None):
     return changed
 
 
-def _with_rollback(lines, change):
-    """Правка реестра с откатом: реестр и файл пользователей возвращаются,
-    если шина нового пользователя не пустила."""
+def _with_rollback(snapshot, change):
+    """Правка реестра с откатом: снимок и файл пользователей возвращаются,
+    если шина нового пользователя не пустила. Снимок один (#534): реестр
+    и лимиты возвращаются вместе, разводить их больше нечем.
+
+    Формат переключает только УСПЕШНАЯ мутация (#534). Правда о том, была
+    ли запись, -- сам диск, а не порядок исключений: откат смотрит байты
+    снимка ДО и ПОСЛЕ провалившейся правки. Не менялись -- диск не трогаем
+    (запись умерла до commit'а -- вслепую не перезаписываем). Файла не
+    было, а теперь есть -- неуспешная мутация сняла создание. Были другие
+    байты -- возвращаем прежние ЦЕЛИКОМ. Откат сам упал -- обе ошибки
+    доезжают до ответа: проглоченный откат выглядел бы успехом с чужим
+    состоянием на диске."""
+    try:
+        before = _snapshot_bytes()
+    except OSError as e:
+        raise RuntimeError(f"cannot read the registry to guard the change: {e}") from None
     users = natsconf.read_users()
     try:
         return change()
-    except Exception:
-        projects.write(lines)
-        if users is not None:
-            natsconf.write(users)
+    except Exception as e:
+        errors = [f"{e}"]
+        try:
+            now = _snapshot_bytes()
+        except OSError as e2:
+            now = _UNREADABLE
+            errors.append(f"rollback failed: {e2}")
+        if now != before:
             try:
-                natsconf.reload()
-            except Exception:
-                pass
+                if before is None:
+                    os.remove(projects.SNAPSHOT)
+                else:
+                    fsutil.write_atomic(projects.SNAPSHOT, before)
+            except Exception as e2:  # noqa: BLE001 -- отказ отката доезжает до ответа
+                errors.append(f"rollback failed: {e2}")
+        if users is not None:
+            # Компенсация users -- та же часть отката (#534): мы уже внутри
+            # провалившейся правки, RPC всё равно отказан, и неудача этой
+            # записи не «решать ли», а «не потерять ли» -- причина доезжает
+            # к исходной. Секретное содержимое users в текст не попадает.
+            try:
+                natsconf.write(users)
+            except Exception as e3:  # noqa: BLE001 -- отказ отката доезжает до ответа
+                errors.append(f"users restore failed: {e3}")
+            else:
+                try:
+                    natsconf.reload()
+                except Exception as e3:  # noqa: BLE001 -- отказ отката доезжает до ответа
+                    errors.append(f"reload failed: {e3}")
+        if len(errors) > 1:
+            # Исходный отказ + отказ отката: ложный успех хуже провала.
+            raise RuntimeError("; ".join(errors)) from None
         raise
 
 
+# Маркер «диск после провала не читается»: отличается от любого содержимого
+# и от отсутствия, откат обязан попытаться вернуть прежние байты.
+_UNREADABLE = object()
+
+
+def _snapshot_bytes():
+    """Байты projects.json либо None, если файла нет. Ошибка чтения --
+    наружу: состояние реестра перед правкой обязано быть известно."""
+    try:
+        with open(projects.SNAPSHOT, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
 def _projects(project, req):
-    lines = projects.read()
-    origins, legacy = puppets.project_ids(lines)
-    return {"ok": True, "names": projects.names(origins, legacy),
-            "origins": sorted(origins), "lines": sorted(lines),
-            "limits": projects.read_limits()}
+    # Взгляд читателя (#534): проблемная легаси-пара не прячет старые
+    # данные за отказом миграции -- refusing-миграция блокирует мутацию,
+    # а список показывает то же, что показывал всегда.
+    snap = _view()
+    return {"ok": True, "names": projects.snapshot_names(snap),
+            "origins": sorted(projects.snapshot_origins(snap)),
+            "lines": sorted(projects.snapshot_lines(snap)),
+            "limits": projects.snapshot_limits(snap)}
 
 
 def _project_add(project, req):
     origin = req["origin"]
+    name = puppets.project_of(origin)
     with _projects_lock:
-        lines = projects.read()
-        new, added = projects.with_origin(origin, lines)
-        name = puppets.project_of(origin)
+        snap = _snapshot()
+        new = projects.snapshot_with_origin(snap, origin)
+        added = projects.snapshot_origins(new) != projects.snapshot_origins(snap)
 
         def change():
-            projects.write(new)
-            _users_apply(_names(new), verify_user=name)
-        _with_rollback(lines, change)
+            _save(new)
+            _users_apply(projects.snapshot_names(new), verify_user=name)
+        _with_rollback(snap, change)
     return {"ok": True, "name": name, "added": added}
 
 
 def _project_delete(project, req):
     name = req["name"]
     with _projects_lock:
-        lines = projects.read()
-        new, dropped = projects.without_project(name, lines)
+        snap = _snapshot()
+        new = projects.snapshot_without(snap, name)
+        dropped = sorted(set(projects.snapshot_origins(snap))
+                         - set(projects.snapshot_origins(new)))
         alive = [j["ID"] for j in nomad_jobs(bus.ADMIN)
                  if JobMeta.from_job(j).project == name]
         why = delete_refusal(name, dropped, alive)
@@ -726,20 +818,17 @@ def _project_delete(project, req):
             return {"error": why}
 
         def change():
-            projects.write(new)
-            _users_apply(_names(new))
-        _with_rollback(lines, change)
-        # Лимит снятого проекта (#107) уходит с ним: заведённый заново проект
-        # получил бы чужой потолок из прошлого. Пароль -- тоже: сервер раздавал
-        # бы кред пользователя, которого на шине уже нет.
-        limits = projects.read_limits()
-        if name in limits:
-            projects.write_limits(projects.with_limit(limits, name, None))
+            _save(new)
+            _users_apply(projects.snapshot_names(new))
+        _with_rollback(snap, change)
+        # Лимит снятого проекта (#107) уходит с ним -- он в том же снимке,
+        # разводить их больше нечем. Пароль и секреты -- вне снимка, как
+        # раньше: сервер раздавал бы кред пользователя, которого на шине
+        # уже нет, а заведённый заново получил бы чужие секреты.
         try:
             os.remove(os.path.join(bootstrap.PUPPET_CREDS, creds.puppet_pass_file(name)))
         except FileNotFoundError:
             pass
-        # Секреты снятого проекта (#127): заведённый заново получил бы чужие.
         import shutil
         shutil.rmtree(project_secrets.project_dir(project_secrets.ROOT, name),
                       ignore_errors=True)
@@ -752,10 +841,11 @@ def _project_limit(project, req):
     if value is not None:
         value = projects.parse_limit(str(value))
     with _projects_lock:
-        if name not in _names(projects.read()):
+        snap = _snapshot()
+        if name not in projects.snapshot_names(snap):
             return {"error": f"no project {name} in the registry; what the pool "
                              f"serves: mop project list"}
-        projects.write_limits(projects.with_limit(projects.read_limits(), name, value))
+        _save(projects.snapshot_with_limit(snap, name, value))
     return {"ok": True, "name": name, "limit": value}
 
 
@@ -766,7 +856,9 @@ def _project_limit(project, req):
 def _registered(project):
     """Отказ по незаведённому проекту: опечатка в имени завела бы секреты
     проекту, которого нет."""
-    if project not in _names(projects.read()):
+    # Взгляд читателя (#534): секреты кладутся проекту из видимого реестра,
+    # проблемная пара его не прячет -- отказ здесь не о миграции.
+    if project not in projects.snapshot_names(_view()):
         return {"error": f"no project {project} in the registry: mop project add"}
     return None
 

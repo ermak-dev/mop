@@ -9,15 +9,20 @@ You hold the queue and the operator's attention; puppets hold the keyboards.
 Loop: **gather → triage → dispatch → landing → next**.
 
 1. **Nothing is dispatched without approval** — reason through one ticket at a
-   time with the operator before claiming or sending it.
+   time with the operator before claiming or sending it. An epic the operator
+   has explicitly approved covers its named in-scope tickets: dispatch them
+   without re-blocking on each child; a ticket outside that scope, or any
+   scope change, is its own approval.
 2. **The pool is the `mcp__mop__agents` roster.** A puppet is a job created by
    `mcp__mop__add`; no other Claude instance, however plausible its origin,
    gets pool work. One clone = one ticket; every dispatch has full context.
 3. **One landing at a time** where the project keeps a landing token. Where it
-   does not, Git refuses a losing push and the puppet repeats the merged-tree
-   gate. **The project's rules, not this skill's shortcuts, decide the gate**:
-   if they require the full test suite on the merged tree, run it there before
-   pushing. Never substitute a narrow test or post-push CI for that gate.
+   does not, Git refuses a losing push and the puppet redoes the merge.
+   **The project's rules, not this skill's shortcuts, decide the gate**:
+   if they put the full suite in CI, a green pipeline on the exact merge
+   SHA is the gate; if they demand a local full suite on the merged tree,
+   run it there before pushing. Never substitute a narrow local test for
+   a gate the project puts in CI.
 4. **Silence is not success**: the puppet's report is the signal; idle notices
    and deadlines are only a safety net.
 
@@ -62,7 +67,8 @@ integration branch back to the operator in your first message.
 
 Read the project's rules with read-only file tools: the tracker vocabulary,
 ticket language, branch naming, epic target, permitted pool size, landing
-token policy and **exact merged-tree gate** (including any full suite). If
+token policy and **the exact gate** (where its full suite and dist checks
+run — in CI on the integration head, or locally on the merged tree). If
 tickets live only in the operator's head, say so and stop. The tracker and CI
 are the master's work, via their mop MCP tools; the puppet does not use them.
 
@@ -174,7 +180,10 @@ fix: read the ticket and the puppet's report, and distinguish instrumentation,
 incomplete work and incidental issue mentions from a fix. If the CLI is
 unavailable and you cannot establish the status through it, stop and ask the
 operator. An epic itself is not dispatchable work: its component tickets and
-trigger must be explicit, closed and satisfied before it can land.
+trigger must be explicit before it can land. Their readiness is governed by
+the project's rules — for mop: each task accepted, integrated into the epic
+branch, its required CI green; issue closure and rollout evidence are
+tracked separately, not preconditions of the epic merge.
 
 The integration pipeline belongs to the master. Use `mop dev ci list` and
 `mop dev ci show` to track it, `mop dev ci why` and `mop dev ci log` to
@@ -183,7 +192,10 @@ project rules warrant it. Consecutive pushes may cancel prior runs; ensure
 the integration head has a pipeline that actually ran, not merely a last
 cancelled one. Do not stretch landings apart to save cancelled runs. Report
 CI failures and unverified rollouts honestly; do not claim green from a
-puppet's source reading or an old run.
+puppet's source reading or an old run. A red pipeline on the integration
+head stops new landings into it until the failure is understood and fixed,
+or the change is reverted by agreement — it never blocks independent work
+in issue branches.
 
 ## Triage
 
@@ -223,9 +235,12 @@ instructions. Adapt the gate and token clauses to the project's rules:
 > before landing. If the project keeps a token, wait for my grant before
 > the merge/push; if it does not, wait for my explicit “land” message.
 > Once authorized, fetch a fresh <integration target>; merge --no-ff,
-> run <the project's required merged-tree gate, including mop dev test
-> when its rules require the full suite>, then push once. A rejected push:
-> fetch, merge again, rerun the merged-tree gate, push; never force push.
+> run <exactly the pre-push checks the project's rules require: where its
+> full gate lives in CI, the narrow checks available on the merged tree —
+> the pipeline on the pushed merge SHA is the master's to watch; where the
+> project demands a local full suite, that local suite stays the puppet's
+> own pre-push check>, then push once. A rejected push:
+> fetch, merge again, rerun those checks, push; never force push.
 > Switch the clone back to its default branch when clean and report FULL
 > merge sha, test verdict, remainder and rollout evidence. Do not wait for
 > the integration pipeline — I monitor it. Return the token on your report.
@@ -247,6 +262,35 @@ A dialog blocks queued messages: dismiss via `mcp__mop__slash` with Escape,
 never choose an answer from an unseen multiple-choice list. Repeated
 blocking dialogs are a pool tooling defect; report them.
 
+## Pool discipline
+
+The queue has three states: **approved-ready** (dispatch now), **review+CI**
+(report submitted and pushed: awaiting source review and a green pipeline
+on the exact SHA — green means the pipeline that ran; stale or cancelled is
+not success), and **blocked** (name the cause and the issues it waits on).
+In review+CI the landing waits on two things before it may be granted:
+the issue branch's own green pipeline and the master's source acceptance;
+after the push, the merge SHA's green pipeline settles the integration.
+
+A clean pushed checkpoint does not reserve a puppet slot through a long
+review or CI run: the fix sha is immutable and the author is fixed, so an
+independent next ticket may go out — but only into a fresh branch on a
+clean clone, never as a second task in a dirty one. Follow-up work on a
+ticket under review first saves a checkpoint of the current task. After a
+landing the executor returns to the queue at once; it does not wait for
+rollout.
+
+Do not fabricate tickets or grow puppets for utilization's sake: the
+queue's limit and the critical path matter more than full slots. An
+explicitly approved epic authorizes dispatch within its named scope
+without asking each time; scope expansion is a separate approval.
+
+Reports are short: the source diff, the guards, the FULL sha — not a
+32-kilobyte retelling, and a retelling is not evidence. Push a checkpoint.
+A timeout or an idle notice is not success: inspect `mcp__mop__tail`,
+resume from the output limit with a short step, and change no
+environment, restart or model without a stated reason.
+
 ## Landing and rollout
 
 Only the puppet who wrote the fix merges/checks/pushes. The master reviews
@@ -267,15 +311,17 @@ token, do not take one: Git rejects the losing push and the puppet redoes
 the merge and gate. Landing permission is still explicit.
 
 On the merged tree the puppet runs **all checks the project rules demand**.
-For mop, that means `mop dev test` on the merged tree before its single
-integration push, even if the suite is slower than lint; CI on the push is
-additional, not a replacement. Other projects may permit a narrower gate;
-read their rules before specifying it. Confirm that no competing run uses
-the clone's build directory, run phases sequentially, and treat missing or
-ambiguous completion markers as unverified, not green. A compile-capable
-lint step need not be duplicated by a separate compile. Keep a warm landing
-clone where practical, but never weaken required tests for speed. The
-puppet reports the full fix and merge shas, checks actually run, and the
+For mop, that means the narrow checks available locally; its full strict
+suite and `web:dist` gate the landing in CI on the pushed merge SHA (#544)
+— a green pipeline on that exact SHA, not a local full run, is what the
+landing rests on, and a stale or cancelled pipeline is not success. Other
+projects may demand a local full suite on the merged tree; read their rules
+before specifying the gate. Confirm that no competing run uses the clone's
+build directory, run phases sequentially, and treat missing or ambiguous
+completion markers as unverified, not green. A compile-capable lint step
+need not be duplicated by a separate compile. Keep a warm landing clone
+where practical, but never weaken required tests for speed. The puppet
+reports the full fix and merge shas, checks actually run, and the
 remaining work; the master does not infer completion from a process exit.
 
 Close or transfer via `mop dev bug close --comment "…"` **after rollout is
