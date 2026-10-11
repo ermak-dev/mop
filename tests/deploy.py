@@ -1993,7 +1993,24 @@ def check_llmproxy_loopback_558(c, can_render):
              '{"server":{"host":"127.0.0.1","port":8317},"access":{"api-keys":["k1"]}}'),
             ("json with keys before host", json_task,
              '{"server":{"port":8317,"host":"0.0.0.0"},"access":{"api-keys":["k1"]}}',
-             '{"server":{"port":8317,"host":"127.0.0.1"},"access":{"api-keys":["k1"]}}')):
+             '{"server":{"port":8317,"host":"127.0.0.1"},"access":{"api-keys":["k1"]}}'),
+            # Живой файл установки (#558): комментарии старого скелета, затем
+            # flow-запись с ВЛОЖЕННЫМ объектом перед host (discovery). Ключ
+            # server в кавычках, после двоеточия пробел, до и после server --
+            # другие секции (в access -- фиктивный ключ).
+            ("a live config: comments, then flow with a nested object", json_task,
+             '# layout as config.example.yaml CLIProxyAPI\n\n'
+             '"config-version": 8\n'
+             '"access": {"api-keys": ["k1"]}\n'
+             '"server": {"discovery": {"service-type": "s", "s": ["s", "s", "s", "s", "s"]}, '
+             '"host": "0.0.0.0", "port": 8317}\n'
+             '"management": {"allow-remote": false}\n',
+             '# layout as config.example.yaml CLIProxyAPI\n\n'
+             '"config-version": 8\n'
+             '"access": {"api-keys": ["k1"]}\n'
+             '"server": {"discovery": {"service-type": "s", "s": ["s", "s", "s", "s", "s"]}, '
+             '"host": "127.0.0.1", "port": 8317}\n'
+             '"management": {"allow-remote": false}\n')):
         spec = task.get("ansible.builtin.replace") or {}
         pattern, repl = spec.get("regexp", "\0"), spec.get("replace", "\0")
         try:
@@ -2029,17 +2046,21 @@ def check_llmproxy_loopback_558(c, can_render):
     c.check("#558 only the server host is rewritten in JSON",
             '"management":{"host":"0.0.0.0"}' in jtouched
             and '"server":{"port":8317,"host":"127.0.0.1"' in jtouched, jtouched)
-    # Вложенный host (в подобъекте server) -- не наш ключ: [^{}]*? не
-    # пересекает скобки, и такой файл остаётся структурному assert'у.
+    # Вложенный host (в подобъекте server) -- не наш ключ: вложенный объект
+    # поглощается целиком, и host внутри него не совпадает; глубже одного
+    # уровня -- совпадения нет вовсе, такой файл остаётся структурному
+    # assert'у.
     nested = '{"server":{"tls":{"host":"0.0.0.0"}},"host":"0.0.0.0"}'
-    try:
-        ntouched = re.sub(jspec.get("regexp", "\0"),
-                          jspec.get("replace", "\0").replace("\\g<1>", r"\g<1>"),
-                          nested)
-    except re.error as e:
-        ntouched = f"regexp does not compile: {e}"
-    c.check("#558 a nested host stays to the structural assert",
-            ntouched == nested, ntouched)
+    deep = '{"server":{"a":{"b":{"host":"0.0.0.0"}}},"host":"0.0.0.0"}'
+    for label, probe in (("nested", nested), ("two levels deep", deep)):
+        try:
+            ntouched = re.sub(jspec.get("regexp", "\0"),
+                              jspec.get("replace", "\0").replace("\\g<1>", r"\g<1>"),
+                              probe)
+        except re.error as e:
+            ntouched = f"regexp does not compile: {e}"
+        c.check(f"#558 a {label} host stays to the structural assert",
+                ntouched == probe, ntouched)
 
     # Рестарт обязателен: смена host перевязывает листенер, hot-reload на
     # неё не опираемся. Замены -- только при флаге «закрыть», и no_log без
