@@ -105,6 +105,63 @@
   when: not llm_proxy_conf.stat.exists
   notify: restart mop-llm-proxy
 
+# Переход на петлю для живой установки (#558): config.yaml после первой
+# установки принадлежит панели, и повторный рендер стёр бы её правки. Правка
+# адресная -- только поле server.host, и в двух формах файла: рендер первого
+# запуска (YAML, «host: "0.0.0.0"» или без кавычек, между «server:» и
+# «host:» -- строки комментария старого шаблона и пустые строки, но НЕ
+# другие ключи секции) и однострочный JSON, которым файл переписывает сам
+# прокси по сохранению из панели (host -- не обязан первый ключ объекта
+# server; порядок ключей сериализации не угадывается и не фиксируется).
+# Оба регэкспа привязаны к своей секции server -- чужой host-ключ не
+# трогается (в JSON [^{}]*? не пересекает границ объектов: соседний и
+# вложенный host остаются на месте); ветка YAML начинается с \n, а не ^:
+# модуль replace компилирует шаблон без флагов, и встроенные глобальные
+# флаги посередине ломают компиляцию на Python 3.11+. Форма, которую
+# регэкспы не узнали (чужая раскладка ключей, вложенность) -- громкий
+# провал структурного assert'а ниже, не тихий неполный перенос. Рестарт
+# обязателен: смена host перевязывает листенер, hot-reload на неё не
+# опираемся (наблюдатель перечитывает конфиг, но не адрес привязки);
+# секундный простой LLM -- цена управляемого шага. no_log и без diff: в
+# файле лежат клиентские ключи и хэш management-ключа, и лог CI-деплоя не
+# должен их разносить. Идемпотентно: 127.0.0.1 уже в файле -- совпадения
+# нет, рестарта нет.
+- name: Close the LLM API port on a live installation
+  ansible.builtin.replace:
+    path: "{{ MOP_HOME }}/.config/mop/llm-proxy/config.yaml"
+    regexp: '(server:\n(?:[ \t]*(?:#[^\n]*)?\n)*)([ \t]*)host:[ \t]*"?0\.0\.0\.0"?'
+    replace: '\1\2host: "127.0.0.1"'
+  when: MOP_LLM_PROXY_LAN == "0"
+  no_log: yes
+  notify: restart mop-llm-proxy
+
+- name: Close the LLM API port in the panel's one-line JSON
+  ansible.builtin.replace:
+    path: "{{ MOP_HOME }}/.config/mop/llm-proxy/config.yaml"
+    regexp: '("server"\s*:\s*\{[^{}]*?"host"\s*:\s*)"0\.0\.0\.0"'
+    replace: '\g<1>"127.0.0.1"'
+  when: MOP_LLM_PROXY_LAN == "0"
+  no_log: yes
+  notify: restart mop-llm-proxy
+
+# Структурное подтверждение замены (#558): не только пробы портов ниже, но
+# и сам файл -- from_yaml читает и YAML, и JSON, которым пишет панель.
+# Ловит и возвращённое панелью 0.0.0.0, и регэксп, промахнувшийся мимо
+# формы. Тоже no_log: содержимое файла -- не для журнала деплоя.
+- name: Slurp the live proxy config
+  ansible.builtin.slurp:
+    src: "{{ MOP_HOME }}/.config/mop/llm-proxy/config.yaml"
+  register: llm_proxy_live_conf
+  no_log: yes
+  when: MOP_LLM_PROXY_LAN == "0"
+
+- name: The live config binds the loopback
+  ansible.builtin.assert:
+    that:
+      - (llm_proxy_live_conf.content | b64decode | from_yaml).server.host == '127.0.0.1'
+  no_log: yes
+  when: MOP_LLM_PROXY_LAN == "0"
+
 - name: Systemd unit
   become: yes
   ansible.builtin.template:
@@ -152,12 +209,24 @@
   no_log: true
 
 # Management API отвечает только с петли (allow-remote: false) -- прогон и
-# спрашивает с неё. Снаружи этот же порт обязан молчать: узкий путь к
-# управлению -- TLS-прокси, и его проверяет роль proxy... нет, проверим здесь:
-# прямой заход с LAN-адреса (не петли) обязан получить отказ.
+# спрашивает с неё. Снаружи этот же порт обязан молчать, и с флагом #558
+# («закрыть») молчит весь сокет: соединение с LAN-адреса отвергнуто на
+# уровне привязки, до любого HTTP-кода. Две ветки по флагу: закрытый порт
+# ловит отказ соединения (wait_for state=stopped), открытый -- прежние коды
+# авторизации management. Проба порта не проверяет ответ петли: её уже
+# держит «The panel gateway key is accepted by the proxy» выше.
+- name: The LAN socket of the LLM API is closed
+  ansible.builtin.wait_for:
+    host: "{{ MOP_SERVER_LAN }}"
+    port: "{{ MOP_LLM_PROXY_PORT }}"
+    state: stopped
+    timeout: 5
+  when: MOP_LLM_PROXY_LAN == "0"
+
 - name: Management refuses non-localhost on the API port
   ansible.builtin.uri:
     url: "http://{{ MOP_SERVER_LAN }}:{{ MOP_LLM_PROXY_PORT }}/v8/management/credentials"
     status_code: [403, 401]
   register: llm_proxy_remote
   failed_when: llm_proxy_remote.status not in [401, 403, 404]
+  when: MOP_LLM_PROXY_LAN == "1"

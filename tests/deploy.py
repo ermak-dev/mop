@@ -1920,6 +1920,200 @@ def check_llmproxy_panel_525(c):
             "releases/download/v{{ MOP_LLM_PANEL_VERSION }}/management.html", url)
 
 
+# ── #558: LLM-прокси слушает только петлю, порт не открыт в LAN ────────
+# HYPOTHESIS: nginx-прокси #557 пересадил папетов mop и серверных читателей
+# на публичный https-origin, но config.yaml прокси по-прежнему рендерится с
+# host: "0.0.0.0" -- порт 8317 открыт в LAN, и любой узел сети ходит к LLM
+# мимо TLS. config.yaml рендерится только при первой установке, живой файл
+# правит панель (одной строкой JSON, host вложен в server), и рассинхрон
+# ключей там молчит. Переход обязан быть управляемым: дефолт -- сегодняшнее
+# поведение (порт открыт), переключение -- установка, после
+# перерегистрации всех папетов.
+# SOLUTION: настройка MOP_LLM_PROXY_LAN ("1"/"0", дефолт "1" = открыт);
+# шаблон рендерит host по флагу; задача replace правит живой файл в обеих
+# формах (YAML первой установки и однострочный JSON панели), с рестартом
+# юнита; LAN-проверка делится по флагу: закрытый порт ловит отказ
+# соединения, открытый -- прежние коды; slurp+from_yaml подтверждает
+# server.host структурно; всё, что касается config.yaml, -- no_log без diff.
+# RESULT: проверки ниже. STATUS: RED
+def check_llmproxy_loopback_558(c, can_render):
+    from mop.server import playvars
+
+    # Настройка: в config.SETTINGS, дефолт -- сегодняшний порт-открыт, и
+    # едет плейбукам тем же путём, что и порт.
+    c.check("#558 the loopback switch is a setting with today's default",
+            config.SETTINGS.get("MOP_LLM_PROXY_LAN", "\0") == "1",
+            config.SETTINGS.get("MOP_LLM_PROXY_LAN"))
+    c.check("#558 the switch reaches the playbooks",
+            "MOP_LLM_PROXY_LAN" in playvars.playbook_vars(),
+            sorted(k for k in playvars.playbook_vars() if "LLM" in k))
+
+    # Шаблон: host по флагу, для новых установок. Старый комментарий про
+    # «LAN, а не петля» устарел вместе с флагом.
+    if can_render:
+        tmpl = open(os.path.join(DEPLOY, "roles", "llmproxy", "templates",
+                                 "config.yaml.j2"), encoding="utf-8").read()
+        for flag, want in (("1", "0.0.0.0"), ("0", "127.0.0.1")):
+            got = render(tmpl, dict(VARS, MOP_LLM_PROXY_LAN=flag,
+                                    llm_proxy_client_key="k", llm_proxy_mgmt_key="m"))
+            c.expect(f"#558 first-install host with the flag {flag!r}",
+                     _server_host(got), want)
+        c.check("#558 the stale LAN comment is gone",
+                "узлы и тела ходят" not in tmpl, tmpl[:400])
+
+    tasks = [t for f, t in site_tasks() if f.endswith("roles/llmproxy/tasks/main.yml")]
+    by = {t.get("name"): t for t in tasks}
+    names = [t.get("name") for t in tasks]
+
+    # Живой файл: две адресные замены, по форме файла. YAML -- рендер первой
+    # установки: между «server:» и «host:» лежат строки комментария шаблона
+    # (текст -- дословно из afe6e7b, установки, ещё не переписанные в JSON);
+    # однострочный JSON -- как переписывает панель (config-version 8, host
+    # внутри server, порядок ключей не угадывается: перед host могут стоять
+    # другие ключи объекта). ansible replace компилирует regexp без флагов:
+    # ветка YAML привязана к «server:», не к ^.
+    yaml_task = by.get("Close the LLM API port on a live installation") or {}
+    json_task = by.get("Close the LLM API port in the panel's one-line JSON") or {}
+    for label, task, fixture, want in (
+            ("yaml", yaml_task, 'server:\n  host: "0.0.0.0"\n  port: 8317\n',
+             'server:\n  host: "127.0.0.1"\n  port: 8317\n'),
+            ("yaml bare", yaml_task, "server:\n  host: 0.0.0.0\n  port: 8317\n",
+             'server:\n  host: "127.0.0.1"\n  port: 8317\n'),
+            ("the old template's comment lines", yaml_task,
+             'server:\n  # LAN, а не петля: на этом порту узлы и тела ходят за моделями. Порт\n'
+             '  # открывает только LLM API -- client-ключ обязателен; management того же\n'
+             '  # порта отвечает лишь с петли (ниже allow-remote: false).\n'
+             '  host: "0.0.0.0"\n  port: 8317\n',
+             'server:\n  # LAN, а не петля: на этом порту узлы и тела ходят за моделями. Порт\n'
+             '  # открывает только LLM API -- client-ключ обязателен; management того же\n'
+             '  # порта отвечает лишь с петли (ниже allow-remote: false).\n'
+             '  host: "127.0.0.1"\n  port: 8317\n'),
+            ("json", json_task,
+             '{"server":{"host":"0.0.0.0","port":8317},"access":{"api-keys":["k1"]}}',
+             '{"server":{"host":"127.0.0.1","port":8317},"access":{"api-keys":["k1"]}}'),
+            ("json with keys before host", json_task,
+             '{"server":{"port":8317,"host":"0.0.0.0"},"access":{"api-keys":["k1"]}}',
+             '{"server":{"port":8317,"host":"127.0.0.1"},"access":{"api-keys":["k1"]}}')):
+        spec = task.get("ansible.builtin.replace") or {}
+        pattern, repl = spec.get("regexp", "\0"), spec.get("replace", "\0")
+        try:
+            got = re.sub(pattern, repl.replace("\\1", r"\1").replace("\\2", r"\2")
+                         .replace("\\g<1>", r"\g<1>"), fixture)
+        except re.error as e:
+            got = f"regexp does not compile: {e}"
+        c.expect(f"#558 the replacement covers the {label} form of the live config",
+                 got, want)
+    # Замена не может тронуть чужие host-ключи: management-секция остаётся
+    # нетронутой и тогда, когда в server перед host стоят другие ключи (такой
+    # файл замена не узнает -- сработает структурный assert, а не тихий
+    # неполный перенос), и чужой host в management не перезаписывается.
+    spec = yaml_task.get("ansible.builtin.replace") or {}
+    keeper = 'server:\n  port: 8317\n  host: "0.0.0.0"\nmanagement:\n  host: "0.0.0.0"\n'
+    try:
+        touched = re.sub(spec.get("regexp", "\0"),
+                         spec.get("replace", "\0").replace("\\1", r"\1")
+                         .replace("\\2", r"\2"), keeper)
+    except re.error as e:
+        touched = f"regexp does not compile: {e}"
+    c.check("#558 only the server host is rewritten",
+            'management:\n  host: "0.0.0.0"' in touched, touched)
+    jspec = json_task.get("ansible.builtin.replace") or {}
+    jkeeper = ('{"management":{"host":"0.0.0.0"},"server":{"port":8317,'
+               '"host":"0.0.0.0"}}')
+    try:
+        jtouched = re.sub(jspec.get("regexp", "\0"),
+                          jspec.get("replace", "\0").replace("\\g<1>", r"\g<1>"),
+                          jkeeper)
+    except re.error as e:
+        jtouched = f"regexp does not compile: {e}"
+    c.check("#558 only the server host is rewritten in JSON",
+            '"management":{"host":"0.0.0.0"}' in jtouched
+            and '"server":{"port":8317,"host":"127.0.0.1"' in jtouched, jtouched)
+    # Вложенный host (в подобъекте server) -- не наш ключ: [^{}]*? не
+    # пересекает скобки, и такой файл остаётся структурному assert'у.
+    nested = '{"server":{"tls":{"host":"0.0.0.0"}},"host":"0.0.0.0"}'
+    try:
+        ntouched = re.sub(jspec.get("regexp", "\0"),
+                          jspec.get("replace", "\0").replace("\\g<1>", r"\g<1>"),
+                          nested)
+    except re.error as e:
+        ntouched = f"regexp does not compile: {e}"
+    c.check("#558 a nested host stays to the structural assert",
+            ntouched == nested, ntouched)
+
+    # Рестарт обязателен: смена host перевязывает листенер, hot-reload на
+    # неё не опираемся. Замены -- только при флаге «закрыть», и no_log без
+    # diff: в config.yaml лежат все API-ключи и хэш management-ключа.
+    for label, task in (("yaml", yaml_task), ("json", json_task)):
+        c.check(f"#558 the {label} replacement orders a restart",
+                task.get("notify") == "restart mop-llm-proxy", task)
+        c.check(f"#558 the {label} replacement runs only with the port closed",
+                task.get("when") is not None
+                and "MOP_LLM_PROXY_LAN" in str(task.get("when"))
+                and '"0"' in str(task.get("when")), task.get("when"))
+        c.check(f"#558 the {label} replacement is no_log without a diff",
+                task.get("no_log") is True and "diff" not in task, task)
+    c.check("#558 the first-install render stays untouched by the migration",
+            str(by.get("Config, only at first install", {}).get("when"))
+            == "not llm_proxy_conf.stat.exists",
+            by.get("Config, only at first install", {}).get("when"))
+
+    # Структурное подтверждение после замены: slurp + from_yaml, host
+    # обязан быть 127.0.0.1 -- from_yaml читает и JSON.
+    slurp = by.get("Slurp the live proxy config") or {}
+    vspec = slurp.get("ansible.builtin.slurp") or {}
+    c.check("#558 the post-switch verification slurps the config",
+            vspec.get("src") == "{{ MOP_HOME }}/.config/mop/llm-proxy/config.yaml", slurp)
+    c.check("#558 the slurp is no_log without a diff",
+            slurp.get("no_log") is True and "diff" not in slurp, slurp)
+    verify = by.get("The live config binds the loopback") or {}
+    cond = str(verify.get("ansible.builtin.assert", {}).get("that", ""))
+    c.check("#558 the verification asserts server.host is the loopback",
+            "127.0.0.1" in cond and "server.host" in cond
+            and "from_yaml" in cond and "b64decode" in cond, cond)
+    c.check("#558 the verification is no_log and gated by the flag",
+            verify.get("no_log") is True and "diff" not in verify
+            and verify.get("when") is not None
+            and '"0"' in str(verify.get("when")), verify)
+
+    # Проверка на LAN-адресе делится по флагу: закрытый порт -- отказ
+    # соединения (wait_for state=stopped), открытый -- прежние коды.
+    lan = by.get("The LAN socket of the LLM API is closed") or {}
+    lspec = lan.get("ansible.builtin.wait_for") or {}
+    c.check("#558 the closed-port branch demands the socket refused",
+            lspec.get("host") == "{{ MOP_SERVER_LAN }}"
+            and lspec.get("port") == "{{ MOP_LLM_PROXY_PORT }}"
+            and lspec.get("state") == "stopped"
+            and lan.get("when") is not None
+            and '"0"' in str(lan.get("when")), lan)
+    legacy = by.get("Management refuses non-localhost on the API port") or {}
+    uspec = legacy.get("ansible.builtin.uri") or {}
+    c.check("#558 the open-port branch keeps the legacy codes check",
+            uspec.get("url") == "http://{{ MOP_SERVER_LAN }}:{{ MOP_LLM_PROXY_PORT }}"
+            "/v8/management/credentials"
+            and uspec.get("status_code") == [403, 401]
+            and legacy.get("when") is not None
+            and '"1"' in str(legacy.get("when")), legacy)
+
+    # Порядок: замена до flush_handlers, LAN-проверки -- после.
+    c.check("#558 the migration lands before the handlers flush",
+            "Close the LLM API port on a live installation" in names
+            and "Apply the restart now, before the check" in names
+            and names.index("Close the LLM API port on a live installation")
+            < names.index("Apply the restart now, before the check"), names)
+    c.check("#558 the LAN checks follow the switch",
+            "The LAN socket of the LLM API is closed" in names
+            and names.index("Apply the restart now, before the check")
+            < names.index("The LAN socket of the LLM API is closed"), names)
+
+
+def _server_host(rendered):
+    """server.host из отрендеренного config.yaml: значение после host:",
+    без кавычек. Отсутствие -- пустая строка."""
+    m = re.search(r'host:\s*"?([^"\n]*)"?', rendered)
+    return m.group(1) if m else ""
+
+
 def check_llm_request_size_411(c, can_render):
     # HYPOTHESIS: nginx отвергает большую текстовую историю и её compact
     # до LLM-прокси; Claude маскирует HTTP 413 как лимит media в 32 МБ.
@@ -2268,6 +2462,7 @@ def main():
                       "no jinja2 on this machine — only the structure below is checked")
     check_mgmt_gateway_418(c, can_render)
     check_root_v1_proxy_529(c, can_render)
+    check_llmproxy_loopback_558(c, can_render)
     check_private_ca_517(c, can_render)
     # ── кому что из настроек (#176) ───────────────────────────────────────
     scoped = getattr(config, "SERVER_SCOPED", {})

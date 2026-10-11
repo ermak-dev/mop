@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 
 from mop.cli import lib
 from mop.cli.server import _play
@@ -131,6 +132,39 @@ def driver_refusals(listing, default):
 # Отказ, пока в .env лежит прежний второй источник людей (#219).
 OPERATORS_GONE = ("MOP_OPERATORS is gone: move people with `mop server user import` on the server, "
                   "then remove the line")
+
+
+def loopback_refusals(get):
+    """Отказ по петле LLM-прокси (#558). -> [строка].
+
+    Флаг MOP_LLM_PROXY_LAN=0 закрывает порт установки, и адрес сессии
+    (llm.env с настройками этой установки -- тот же, что уедет спекой
+    папету) обязан на этот порт не смотреть: иначе раскатка закрывает порт
+    и молча отнимает LLM у всех папетов этой установки. Ловится ровно
+    заданный в .env MOP_PROXY_URL на LAN:8317, который канонизация #557 не
+    узнала (например, IP вместо имени MOP_SERVER_LAN): собственный корень
+    СВОЕГО authority она переводит на публичный origin, и отказа нет.
+    Чужой адрес -- осознанный оверрайд, его не трогаем. Битое значение
+    флага -- отказ: молча считать его «открыто» значило бы третье
+    положение переключателя. Что все уже ЗАПУЩЕННЫЕ папеты
+    перерегистрированы, проверяет оператор (docs/PROXY.md), не префлайт:
+    живых сессий отсюда не видно."""
+    from mop.common import llm
+    flag = (get("MOP_LLM_PROXY_LAN") or "").strip()
+    if flag == "1":
+        return []
+    if flag != "0":
+        return [f"MOP_LLM_PROXY_LAN={flag!r}: want 1 (LAN port open) or 0 "
+                f"(loopback only)"]
+    port = str(get("MOP_LLM_PROXY_PORT") or "")
+    base = llm.env()["ANTHROPIC_BASE_URL"]
+    parsed = urllib.parse.urlsplit(base)
+    if str(parsed.port or "") == port and (parsed.hostname or "").strip("[]") != "127.0.0.1":
+        return [f"MOP_LLM_PROXY_LAN=0 closes MOP_LLM_PROXY_PORT={port}, but the "
+                f"puppet address rides it: ANTHROPIC_BASE_URL={base} (MOP_PROXY_URL="
+                f"{get('MOP_PROXY_URL') or 'empty'}): point MOP_PROXY_URL at the "
+                f"public origin or drop the line"]
+    return []
 
 
 def operator_refusals(settings, secrets_dir=identity.SECRETS, leftover=""):
@@ -441,7 +475,8 @@ def main(argv):
                                    config.get("MOP_DRIVER"))
                 + memory_refusals(listing, config.get("MOP_BODY_MEM_CAP_MB"))
                 + operator_refusals({n: config.get(n) for n in identity.SETTINGS},
-                                    leftover=config.get("MOP_OPERATORS")))
+                                    leftover=config.get("MOP_OPERATORS"))
+                + loopback_refusals(config.get))
     # Пайплайн катимого коммита (#231) -- до плейбука, как и прочие отказы.
     # Сухой прогон ничего не катит и не спрашивает.
     if skip_pipeline:
