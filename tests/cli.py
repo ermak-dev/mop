@@ -1486,6 +1486,7 @@ def main():
     check_node_flag_340(c)
     check_deploy_check(c)
     check_inventory_drivers(c)
+    check_loopback_switch_558(c)
     check_pool_uniform(c)
     check_node_memory_197(c)
     check_fallback_model_183(c)
@@ -2653,6 +2654,76 @@ def check_inventory_drivers(c):
                  sorted(r.split(":")[0] for r in bad), ["localhost", "plain"])
         empty = {**INVENTORY_CLEAN, "_meta": {"hostvars": {"plain": {"mop_driver": ""}}}}
         c.check("an empty mop_driver is the default driver, not a refusal", not (fn(empty, "host")))
+
+
+def check_loopback_switch_558(c):
+    """HYPOTHESIS (#558): с флагом «закрыть порт» (MOP_LLM_PROXY_LAN=0) в
+    .env может остаться MOP_PROXY_URL, смотрящий на LAN:8317, -- например
+    с IP вместо имени: канонизация #557 узнаёт только собственный корень
+    СВОЕГО authority по MOP_SERVER_LAN, и чужое написание того же адреса
+    проходит насквозь. Спека папета собралась бы с адресом мимо TLS, а
+    раскатка закрыла бы порт и убила бы всех папетов этой установки.
+    SOLUTION: отказ префлайта `mop server deploy` -- адрес из llm.env() с
+    настройками установки не должен смотреть на MOP_LLM_PROXY_PORT, когда
+    переключатель в положении «петля». Что все ЗАПУЩЕННЫЕ папеты уже
+    перерегистрированы, проверяет оператор -- это в docs/PROXY.md.
+    STATUS: RED"""
+    from mop.cli.server import deploy
+    from mop.common import config, llm
+    fn = getattr(deploy, "loopback_refusals", None)
+    if not c.check("no deploy.loopback_refusals", fn is not None):
+        return
+
+    def settings(lan, https, llm_port, proxy_url):
+        return patched(config, get=lambda name: {
+            "MOP_SERVER_LAN": lan, "MOP_HTTPS_PORT": https,
+            "MOP_LLM_PROXY_PORT": llm_port,
+            "MOP_PROXY_URL": proxy_url}.get(name, ""))
+
+    # Канонизируемое имя уходит на публичный origin -- отказа нет даже при
+    # закрытом порту: nginx и петля кормят всех. IP-написание того же
+    # адреса канонизация не узнаёт -- отказ: спека смотрела бы на порт,
+    # который раскатка закрывает. Чужой адрес -- осознанный оверрайд.
+    cases = [
+        ("the flag off", "1", "srv.test", "8443", "8317", "", 0),
+        ("own root is canonicalized", "0", "srv.test", "8443", "8317",
+         "http://srv.test:8317", 0),
+        ("the empty default rides the public origin", "0", "srv.test", "8443",
+         "8317", "", 0),
+        ("an IP spelling of the same port", "0", "srv.test", "8443", "8317",
+         "http://10.0.0.1:8317", 1),
+        ("a foreign host on the installation's port", "0", "srv.test", "8443",
+         "8317", "http://foreign.test:8317", 1),
+        ("a path on the same port is unknown ground", "0", "srv.test", "8443",
+         "8317", "http://srv.test:8317/llm", 1),
+        ("the public origin itself", "0", "srv.test", "8443", "8317",
+         "https://srv.test:8443", 0),
+        ("a broken flag value", "x", "srv.test", "8443", "8317", "", 1),
+    ]
+    for what, flag, lan, https, llm_port, url, want in cases:
+        with settings(lan, https, llm_port, url):
+            with patched(config, get=lambda name, _g=config.get: {
+                "MOP_LLM_PROXY_LAN": flag}.get(name, _g(name))):
+                got = fn(config.get)
+                c.check(f"loopback_refusals, {what}: {got!r}",
+                        want == (1 if got else 0), got)
+
+    # Отказ обязан называть настройку и адрес, который он увидел: иначе
+    # оператор не узнает, что править.
+    with settings("srv.test", "8443", "8317", "http://10.0.0.1:8317"):
+        with patched(config, get=lambda name, _g=config.get: {
+                "MOP_LLM_PROXY_LAN": "0"}.get(name, _g(name))):
+            text = " ".join(fn(config.get))
+            c.check(f"loopback_refusals must name the setting and the address: {text!r}",
+                    "MOP_PROXY_URL" in text and "10.0.0.1:8317" in text)
+
+    # Сам адрес сравнивается с портом, а не со строкой литерала: env()
+    # строит origin, refusal разбирает -- оба конца одного контракта.
+    with settings("srv.test", "8443", "8317", "http://srv.test:8317/"):
+        with patched(config, get=lambda name, _g=config.get: {
+                "MOP_LLM_PROXY_LAN": "0"}.get(name, _g(name))):
+            c.check("loopback_refusals rides the same origin contract as llm.env",
+                    not fn(config.get))
 
 
 def check_node_memory_197(c):

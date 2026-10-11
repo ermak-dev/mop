@@ -299,44 +299,119 @@ def check_master_exec_argv_440(c):
 
 # HYPOTHESIS (#547): окружение папета строится из MOP_PROXY_URL как есть:
 # легаси-форма самой установки (/llm на её же TLS-прокси) ехала в
-# ANTHROPIC_BASE_URL префиксом, внутренний корень 8317 должен проходить
-# насквозь, а чужой кастомный путь -- оставаться чужим выбором.
+# ANTHROPIC_BASE_URL префиксом, а чужой кастомный путь -- оставаться чужим
+# выбором. #557 добавляет третий случай: СОБСТВЕННЫЙ внутренний корень
+# установки (её authority плюс MOP_LLM_PROXY_PORT, путь пуст) -- это не
+# «чужой выбор», а адрес впрямую к порту прокси мимо TLS, и он
+# канонизируется в публичный origin.
 # SOLUTION: env() гоняет настройку через тот же контракт origin() с
 # подсказками собственного authority установки (MOP_SERVER_LAN +
-# MOP_HTTPS_PORT): не blind replace, а управляемая нормализация.
-# RESULT: RED -- env() пока отдаёт настройку без контракта.
+# MOP_HTTPS_PORT), а до него -- to_public_origin(): свой внутренний корень
+# становится публичным origin, чужой адрес проходит насквозь.
+# RESULT: RED -- env() пока отдаёт внутренний корень без канонизации.
 # STATUS: RED
 def check_setting_origin_547(c):
     def settings(url):
         return patched(config, get=lambda name: {
             "MOP_PROXY_URL": url, "MOP_SERVER_LAN": "srv.test",
-            "MOP_HTTPS_PORT": "8443"}.get(name, ""))
+            "MOP_HTTPS_PORT": "8443", "MOP_LLM_PROXY_PORT": "8317"}.get(name, ""))
     with settings("https://srv.test:8443/llm"):
         c.expect("#547 the puppet env carries the canonical origin",
                  llm.env()["ANTHROPIC_BASE_URL"], "https://srv.test:8443")
+    # #557: свой внутренний корень (srv.test -- MOP_SERVER_LAN этой установки,
+    # 8317 -- MOP_LLM_PROXY_PORT) канонизируется в публичный origin, scheme
+    # внутреннего адреса не важен.
+    with settings("http://srv.test:8317"):
+        c.expect("#557 the own internal root becomes the public origin",
+                 llm.env()["ANTHROPIC_BASE_URL"], "https://srv.test:8443")
+    with settings("https://srv.test:8317"):
+        c.expect("#557 the own internal root over https canonicalizes too",
+                 llm.env()["ANTHROPIC_BASE_URL"], "https://srv.test:8443")
+    # Тот же хост, но чужой порт -- не внутренний корень установки: чужой
+    # сервис на соседнем порте проходит насквозь, как и раньше.
+    with settings("http://srv.test:8318"):
+        c.expect("#557 a foreign port of the same host stays untouched",
+                 llm.env()["ANTHROPIC_BASE_URL"], "http://srv.test:8318")
     with settings("http://mop.corp.ermak.dev:8317"):
-        c.expect("#547 the internal root passes through untouched",
+        c.expect("#547/#557 a foreign host with the internal port passes through",
                  llm.env()["ANTHROPIC_BASE_URL"], "http://mop.corp.ermak.dev:8317")
     with settings("https://proxy.vendor.dev/anthropic"):
         c.expect("#547 a foreign custom path stays the operator's choice",
                  llm.env()["ANTHROPIC_BASE_URL"], "https://proxy.vendor.dev/anthropic")
+    # #557: пустая настройка -- не пустой адрес: дефолт -- публичный origin
+    # установки, литерал внутреннего корня из config исчез.
+    with settings(""):
+        c.expect("#557 an unset MOP_PROXY_URL means the public origin",
+                 llm.env()["ANTHROPIC_BASE_URL"], "https://srv.test:8443")
 
 
-# HYPOTHESIS (#547, ревью мастера): серверный читатель каталога зовёт
-# контракт без порта установки -- host-only подсказка, а с ней (до
-# adb998d) canonical снимал /llm с любого порта того же имени.
-# SOLUTION: catalog_read передаёт обе подсказки установки:
-# MOP_SERVER_LAN + MOP_HTTPS_PORT; ревью ловит отсутствие порта в
-# самом вызове, не в поведении (canonical уже требует обе).
-# RESULT: RED -- вызов пока host-only.
+# HYPOTHESIS (#557): публичный origin установки -- https://<MOP_SERVER_LAN>:
+# <MOP_HTTPS_PORT> -- собирали два потребителя по-разному (_client_config
+# inline f-строкой, дефолт настройки -- литералом внутреннего корня 8317 из
+# config.SETTINGS), и установка без явного MOP_PROXY_URL ездила на
+# внутренний порт мимо TLS.
+# SOLUTION: llm.public_origin() -- единственная формула; серверный читатель
+# каталога ходит не через публичный origin, а петлёй 127.0.0.1:
+# MOP_LLM_PROXY_PORT -- он потребитель на самом сервере, TLS прокси ему
+# не нужен.
+# RESULT: RED -- функций нет.
 # STATUS: RED
-def check_catalog_reader_hints_547(c):
+def check_public_origin_557(c):
+    def settings(lan, https, llm_port):
+        return patched(config, get=lambda name: {
+            "MOP_SERVER_LAN": lan, "MOP_HTTPS_PORT": https,
+            "MOP_LLM_PROXY_PORT": llm_port}.get(name, ""))
+    with settings("srv.test", "8443", "8317"):
+        c.check("#557 RED public_origin exists",
+                hasattr(llm, "public_origin"), "no llm.public_origin")
+        c.expect("#557 public origin from the installation settings",
+                 getattr(llm, "public_origin", lambda: None)(),
+                 "https://srv.test:8443")
+        c.check("#557 RED internal_loop exists",
+                hasattr(llm, "internal_loop"), "no llm.internal_loop")
+        loop = getattr(llm, "internal_loop", lambda: None)()
+        c.expect("#557 the server catalog reader rides the loop, not TLS",
+                 llm.endpoint(loop, "models") if loop else "no llm.internal_loop",
+                 "http://127.0.0.1:8317/v1/models")
+    with settings("mop.corp.ermak.dev", "443", "8317"):
+        c.expect("#557 implicit 443 stays explicit in the formula",
+                 getattr(llm, "public_origin", lambda: None)(),
+                 "https://mop.corp.ermak.dev:443")
+    # to_public_origin: голый внутренний корень СВОЕГО authority заменяется;
+    # с путём, юзером, чужим хостом или чужим портом -- вход цел.
+    with settings("srv.test", "8443", "8317"):
+        to_public = getattr(llm, "to_public_origin",
+                            lambda *a, **k: a[0] if a else None)
+        for url, want in (
+                ("http://srv.test:8317", "https://srv.test:8443"),
+                ("https://srv.test:8317/", "https://srv.test:8443"),
+                ("http://srv.test:8317/llm", "http://srv.test:8317/llm"),
+                ("http://user:pw@srv.test:8317", "http://user:pw@srv.test:8317"),
+                ("http://foreign.test:8317", "http://foreign.test:8317"),
+                ("http://srv.test:8318", "http://srv.test:8318"),
+                ("https://srv.test:8443", "https://srv.test:8443")):
+            c.expect(f"#557 to_public_origin({url!r})",
+                     to_public(url, host="srv.test", port="8443",
+                               internal_port="8317"), want)
+
+
+# HYPOTHESIS (#547 → #557): серверный читатель каталога (adminapi, юнит
+# mop-web) ходил по MOP_PROXY_URL с пином CA, как клиент, -- хотя он
+# потребитель на самом сервере, и прокси стоит у него на петле. Ходить
+# публичным origin через nginx ему незачем, а пин -- вторая копия
+# TLS-правила, которая разъехалась бы с #517.
+# SOLUTION: база -- петля http://127.0.0.1:MOP_LLM_PROXY_PORT (llm.
+# internal_loop), без TLS и без пина; endpoint надстраивает /v1/models.
+# RESULT: RED -- читатель пока зовёт endpoint с подсказками издателя и
+# строит ssl-контекст с пином.
+# STATUS: RED
+def check_catalog_reader_loop_557(c):
     from mop.server import adminapi
     seen = {}
 
     def fake_endpoint(url, resource, host=None, port=None):
         seen.update(url=url, resource=resource, host=host, port=port)
-        return "https://srv.test:8443/v1/models"
+        return "http://127.0.0.1:8317/v1/models"
 
     import urllib.request
     from mop.common import llm as llm_mod
@@ -353,8 +428,7 @@ def check_catalog_reader_hints_547(c):
         def __exit__(self, *a):
             pass
 
-    settings = {"MOP_PROXY_URL": "https://srv.test:8443/llm",
-                 "MOP_SERVER_LAN": "srv.test", "MOP_HTTPS_PORT": "8443"}
+    settings = {"MOP_LLM_PROXY_PORT": "8317", "MOP_PROXY_URL": "http://x.test:1"}
 
     def fake_open(req, timeout=10):
         seen["opened"] = req.full_url
@@ -364,18 +438,35 @@ def check_catalog_reader_hints_547(c):
 
     with patched(llm_mod, endpoint=fake_endpoint), \
             patched(adminapi.config, get=lambda name: settings.get(name, "")), \
-            patched(urllib.request, build_opener=lambda *h: type("O", (), {"open": staticmethod(fake_open)})()), \
+            patched(urllib.request, urlopen=fake_open), \
             patched(proxykey, source=lambda *a, **k: "file-key"):
-        got = adminapi.catalog_read()
-    c.expect("#547 the catalog ids ride the shared parser", got, ["glm-5.3"])
-    c.expect("#547 catalog_read hands the contract both issuer hints",
-             (seen.get("host"), seen.get("port")), ("srv.test", "8443"))
+        try:
+            got = adminapi.catalog_read()
+        except Exception as e:  # noqa: BLE001 -- RED: читатель ещё не на петле
+            c.fail(f"#557 RED the catalog reader must not refuse on settings: {e}")
+            return
+    c.expect("#557 the catalog ids ride the shared parser", got, ["glm-5.3"])
+    c.expect("#557 the catalog reader walks the loop base",
+             seen.get("opened"), "http://127.0.0.1:8317/v1/models")
+    c.check("#557 the reader carries no issuer hints any more",
+            (seen.get("host"), seen.get("port")) == (None, None),
+            (seen.get("host"), seen.get("port")))
+
+
+# HYPOTHESIS (#547, ревью мастера): серверный читатель каталога звал
+# контракт без порта установки -- host-only подсказка, а с ней (до
+# adb998d) canonical снимал /llm с любого порта того же имени.
+# #557 убрал подсказки вовсе: читатель ходит петлёй (проверка выше,
+# check_catalog_reader_loop_557), и host/port в вызове не участвуют.
+# Осталась часть проверки про сам канонический контракт -- в
+# check_url_contract_547. STATUS: устранена #557 -- заменена петлёй.
 
 def main():
     c = Checks()
     check_url_contract_547(c)
     check_setting_origin_547(c)
-    check_catalog_reader_hints_547(c)
+    check_public_origin_557(c)
+    check_catalog_reader_loop_557(c)
     check_joined_proxy_397(c)
     check_session_ca_412(c)
     check_client_model_discovery_426(c)
@@ -385,10 +476,15 @@ def main():
     # быть статикой плагина. SOLUTION: один модуль с env() и именем ключа;
     # адрес -- настройка установки, карта моделей -- константа до переезда
     # алиасов в прокси. STATUS: FIXED — see #390
+    # #557 уточняет первый пункт: значение происходит из настройки через
+    # контракт (to_public_origin + origin), а не равно ей буквально; здесь
+    # -- что адрес непуст и растёт из настройки этой машины (подробно --
+    # check_setting_origin_547 и check_public_origin_557 выше).
     env = llm.env()
-    c.check("the proxy URL comes from the setting (#390)",
-            env["ANTHROPIC_BASE_URL"] == config.get("MOP_PROXY_URL")
-            and bool(env["ANTHROPIC_BASE_URL"]), env.get("ANTHROPIC_BASE_URL"))
+    c.check("the proxy URL comes from the setting (#390/#557)",
+            bool(env["ANTHROPIC_BASE_URL"])
+            and env["ANTHROPIC_BASE_URL"].startswith(("http://", "https://")),
+            env.get("ANTHROPIC_BASE_URL"))
     c.check("the key rides under its own name (#390)",
             (llm.KEY, llm.AUTH_VAR), ("MOP_PROXY_KEY", "ANTHROPIC_AUTH_TOKEN"))
     c.check("every model slot is named (#390)",

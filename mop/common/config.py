@@ -192,9 +192,11 @@ DEFAULTS = {
     "MOP_PUPPET_PATH": "/usr/local/bin:/usr/bin:/bin:{HOME}/.local/bin:{HOME}/.cargo/bin:{HOME}/.nvm/versions/node/v22.12.0/bin",
     "MOP_FALLBACK_MODEL": "opus",
     # Единственный LLM-сервер установки (#379): прокси на контроллере
-    # (deploy/roles/llmproxy, #380) кормит и папетов, и мастера. Адрес --
-    # свой у каждой установки, поэтому настройка, а не литерал в mop/.
-    "MOP_PROXY_URL": "http://mop.corp.ermak.dev:8317",
+    # (deploy/roles/llmproxy, #380) кормит и папетов, и мастера. Пусто --
+    # публичный origin установки (DERIVED ниже, #557): папеты ходят на
+    # /v1 от https://<MOP_SERVER_LAN>:<MOP_HTTPS_PORT>, как мастера.
+    # Значение в .env -- осознанный чужой прокси, проходит насквозь.
+    "MOP_PROXY_URL": "",
     # Клиентский ключ прокси: сервер хранит сгенерированное значение в
     # secrets/llm-proxy-client.pass; узлам раздаёт закрытым файлом, операторы
     # вводят его при join. Переходный ключ .env здесь не распространяется.
@@ -257,6 +259,16 @@ DEFAULTS = {
     # Порт LLM API для узлов и тел; management API того же порта отвечает
     # только с петли, наружу панель -- через TLS-прокси на /llm/ (#96).
     "MOP_LLM_PROXY_PORT": "8317",
+    # Открыт ли порт LLM-прокси в LAN (#558): 1 -- открыт (сегодняшнее
+    # поведение: папеты до перерегистрации ходят на 8317 напрямую), 0 --
+    # только петля, снаружи LLM API -- один маршрут nginx /v1. Формат --
+    # «1»/«0», как MOP_DEPLOY_NEEDS_GREEN, а не «1»/пусто: у переключателя
+    # нет естественного «выключенного» прочтения, оба положения -- выбор
+    # оператора, и пустая строка значила бы третье, несказанное. Дефолт --
+    # открыт: закрытие переводит установку после перерегистрации всех
+    # её папетов (docs/PROXY.md), и молча отнять порт у чужих проектов
+    # раскатка не имеет права.
+    "MOP_LLM_PROXY_LAN": "1",
     # Тело LLM-запроса через TLS (#411): история и её compact используют
     # один маршрут. Запас над клиентским пределом 32 МБ, иначе nginx
     # отвергает и продолжение, и попытку уменьшить историю.
@@ -493,6 +505,9 @@ SERVER_SCOPED = {
                     "MOP_HOME", "MOP_USER", "MOP_NOMAD_PORT", "MOP_POOL_DC",
                     "MOP_PUPPET_MEM_MB", "MOP_MEM_MB", "MOP_PUPPET_SEED",
                     "MOP_PUPPET_PATH", "MOP_PROXY_URL",
+                    # дефолт llm.env() -- публичный origin, а канонизация
+                    # своего внутреннего корня узнаёт его по этому порту (#557)
+                    "MOP_LLM_PROXY_PORT",
                     "MOP_GC_FREE_MIN_GB", "MOP_GC_MAX_PER_RUN",
                     # reload шины с проверкой (#211): `mop project add/rm`
                     "MOP_NATS_MONITOR_PORT"),
@@ -500,7 +515,10 @@ SERVER_SCOPED = {
     # и сиды -- файлами 0600 в /etc/nats, не здесь: юнит читаем всем.
     "mop-callout": ("MOP_NATS_PORT",) + IDENTITY_SCOPED,
     "mop-web": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT",
-                "MOP_NOMAD_PORT", "MOP_POOL_DC"),
+                "MOP_NOMAD_PORT", "MOP_POOL_DC",
+                # каталог моделей читается петлёй к прокси (#557), не
+                # публичным origin через TLS
+                "MOP_LLM_PROXY_PORT"),
     # doctor по расписанию (#359): клиент шины, как любой мастер -- адрес
     # сервера и порты; Nomad он спрашивает через сервис кластера.
     "mop-doctor": ("MOP_SERVER_LAN", "MOP_NATS_PORT", "MOP_HTTPS_PORT"),
