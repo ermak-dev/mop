@@ -50,7 +50,7 @@ server {
     # mop-web: сессия оператора с ролью admin + Bearer из закрытой копии
     # ключа. Алиасы через срез префикса /llm/ закрыты deny: панель строит
     # путь от корня origin, но обход шлюза через префикс не должен
-    # работать. Прочее под /llm/ -- у прокси, как было (#411).
+    # работать. Прочее под /llm/ -- снятый API-префикс, явный 410 (#546).
     location = /llm/management.html {
         proxy_pass http://127.0.0.1:{{ MOP_WEB_PORT }};
         proxy_set_header Host $host;
@@ -118,23 +118,20 @@ server {
         return 403;
     }
 
+    # Бывший префикс LLM API (#546): клиенты, сервер и папеты (#557)
+    # ходят на /v1 от публичного origin через этот же nginx. Явный
+    # отказ вместо редиректа: редирект теряет тело POST и ключ и прячет
+    # опоздавших клиентов от журнала. Маршруты панели выше -- exact
+    # (= /llm/management.html, = /llm/v8/management) или длиннейший
+    # префикс (^~ /llm/management, /llm/raw/), по правилам выбора
+    # location в nginx они выигрывают у этого префиксного /llm/.
     location /llm/ {
-        # История и compact проходят здесь же (#411): дефолт nginx
-        # отрезал текстовый контекст, а Claude называл 413 лимитом media.
-        # proxy_read_timeout тоже не наследуется между location: без него
-        # здесь действовал дефолт nginx в 60s, и долгая генерация (напр.
-        # gpt-6.1-sol через codex) рвалась 504 раньше, чем успевала ответить.
-        client_max_body_size {{ MOP_LLM_REQUEST_MAX_MB }}m;
-        proxy_pass http://127.0.0.1:{{ MOP_LLM_PROXY_PORT }}/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_buffering off;
-        proxy_read_timeout 1h;
+        return 410;
     }
 
-    # Панель строит каталог /v1/models от корня origin. В отличие от
-    # /llm/, префикс /v1/ должен дойти до API без среза.
+    # Канонический маршрут LLM API (#529, #546): панель строит каталог
+    # /v1/models от корня origin, клиенты после #547 -- так же; префикс
+    # /v1/ должен дойти до API без среза.
     location /v1/ {
         client_max_body_size {{ MOP_LLM_REQUEST_MAX_MB }}m;
         proxy_pass http://127.0.0.1:{{ MOP_LLM_PROXY_PORT }};

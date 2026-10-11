@@ -2122,20 +2122,21 @@ def check_llm_request_size_411(c, can_render):
     # SOLUTION: свой client_max_body_size у /llm/, размер из SETTINGS.
     # RESULT: до исправления обе проверки рендера падали без директивы.
     # STATUS: FIXED — see #411
+    # #546 снимает алиас /llm/ (410 вместо прокси): лимит #411 живёт на
+    # каноническом /v1/ и панельных маршрутах, проверка лимита среза
+    # переехала в check_llm_alias_gone_546 -- смена контракта, не ослабление:
+    # счёт маршрутов с лимитом там же, вместе с отказом алиаса.
     if not can_render:
         return
     template = open(os.path.join(DEPLOY, "roles", "proxy", "templates", "mop.conf.j2")).read()
     variables = dict(config.SETTINGS, MOP_SERVER_LAN="srv.test")
     for limit in (config.SETTINGS.get("MOP_LLM_REQUEST_MAX_MB", ""), "96"):
         got = render(template, dict(variables, MOP_LLM_REQUEST_MAX_MB=limit))
-        location = re.search(r"location /llm/ \{([^}]+)\}", got).group(1)
-        found = re.search(r"client_max_body_size\s+(\d+)m;", location)
+        route = re.search(r"location\s+/v1/\s*\{([^{}]*)\}", got).group(1)
+        found = re.search(r"client_max_body_size\s+(\d+)m;", route)
         c.check(f"#411: LLM accepts large requests with limit {limit!r}",
                 found is not None and found[1] == limit and int(found[1]) >= 32,
-                location)
-        # Строгость «нигде кроме» уехала в check_mgmt_gateway_418: там
-        # блоки по границам скобок, четыре ожидаемых маршрута, по одному
-        # лимиту в каждом.
+                route)
 
 
 
@@ -2371,11 +2372,16 @@ def check_mgmt_gateway_418(c, can_render):
     shim = block(r"/llm/management\.html")
     c.check("#418 the shim is an exact match, not a prefix",
             "location = /llm/management.html" in shim, shim)
-    # /llm/ остальное как было -- на CPA, с лимитом #411.
-    panel = block(r"/llm/")
-    c.check("#418 /llm/ still proxies the panel prefix to CPA",
-            "client_max_body_size" in panel
-            and config.SETTINGS["MOP_LLM_PROXY_PORT"] in panel, panel)
+    # /llm/ -- снятый алиас (#546): явный 410, не прокси; что именно
+    # осталось под префиксом -- check_llm_alias_gone_546, контракт снятия
+    # там же. Здесь -- только неприкосновенность соседних маршрутов.
+    # #529+#546: лимит -- на четырёх маршрутах LLM (панельных): алиас /llm/
+    # снят, счёт падает с пяти до четырёх.
+    limited = [b for b in (block(r"/llm/raw/"), block(r"/v8/management/"),
+                           block(r"/v8/management"), block(r"/v1/"))]
+    c.check("#411+#418+#529+#546 the body limit sits on exactly the four LLM routes",
+            all(b.count("client_max_body_size") == 1 for b in limited)
+            and got.count("client_max_body_size") == 4, got.count("client_max_body_size"))
     # Лимит и таймауты на raw/API.
     for path_pat in (r"/llm/raw/", r"/v8/management/"):
         b = block(path_pat)
@@ -2385,18 +2391,19 @@ def check_mgmt_gateway_418(c, can_render):
     # Неприкосновенность остального.
     for keep in ("location = /nats", "location = /events", "location / {"):
         c.check(f"#418 {keep} untouched", keep in got, keep)
-    # #529 добавляет корневой /v1/: лимит на пяти ожидаемых маршрутах,
+    # #529 добавляет корневой /v1/: лимит на четырёх ожидаемых маршрутах,
     # по одной директиве в каждом, нигде больше -- блоками, не счётчиком.
-    limited = [b for b in (panel, block(r"/llm/raw/"), block(r"/v8/management/"),
+    # #546 снимает алиас /llm/ -- маршрутов с лимитом четыре.
+    limited = [b for b in (block(r"/llm/raw/"), block(r"/v8/management/"),
                            block(r"/v8/management"), block(r"/v1/"))]
-    c.check("#411+#418+#529 the body limit sits on exactly the five LLM routes",
+    c.check("#411+#418+#529+#546 the body limit sits on exactly the four LLM routes",
             all(b.count("client_max_body_size") == 1 for b in limited)
-            and got.count("client_max_body_size") == 5, got.count("client_max_body_size"))
+            and got.count("client_max_body_size") == 4, got.count("client_max_body_size"))
     # HYPOTHESIS: подсчёт директив пропускал неправильное значение в одном
-    # location; все пять должны брать потолок установки, не константу.
+    # location; все четыре должны брать потолок установки, не константу.
     # Нестандартные 17 МБ отличают подстановку настройки от хардкода 64 МБ.
     want_limit = "client_max_body_size 17m;"
-    for path, b in zip(("/llm/", "/llm/raw/", "/v8/management/", "=/v8/management", "/v1/"),
+    for path, b in zip(("/llm/raw/", "/v8/management/", "=/v8/management", "/v1/"),
                        limited):
         c.check(f"#418 {path} uses the configured body limit",
                 bool(b) and want_limit in b, b or "no block")
@@ -2443,6 +2450,79 @@ def check_root_v1_proxy_529(c, can_render):
             c.check(f"#529 /v1/ preserves {header}", header in route, route)
 
 
+# ── #546: снятие временного алиаса /llm/ в nginx ─────────────────────────
+# HYPOTHESIS (#546): клиенты и сервер переведены на origin без /llm (#547),
+# puppets ходят на MOP_PROXY_URL мимо nginx, а location /llm/ продолжал
+# проксировать на LLM-прокси со срезом префикса: опоздавший клиент получал
+# работающий ответ, и алиас нельзя было снять никогда. Удалить блок нельзя
+# тоже: /llm/v1/* ушёл бы в location / к mop-web, и опоздавший получил бы
+# чужой ответ вместо явного отказа.
+# SOLUTION: location /llm/ -- явный отказ 410 без редиректа (редирект
+# теряет тело POST и ключ и прячет опоздавших от журнала). Маршруты панели
+# при своём префиксе: exact и длиннее /llm/, выигрывают по правилам выбора
+# location в nginx (exact -- всегда, ^~ -- до regex-проверки, длиннейший
+# префикс -- у более точного). MOP_LLM_PROXY_PORT остаётся только в /v1/.
+# RESULT: RED на 4930aea -- /llm/ ещё проксирует (410 нет, порт в блоке),
+# MOP_LLM_PROXY_PORT живёт в двух location, счёт лимитов -- 5.
+# STATUS: FIXED — see #546
+def check_llm_alias_gone_546(c, can_render):
+    if not can_render:
+        return
+    template = open(os.path.join(DEPLOY, "roles", "proxy", "templates",
+                                 "mop.conf.j2"), encoding="utf-8").read()
+    got = render(template, dict(config.SETTINGS, MOP_SERVER_LAN="srv.test",
+                                MOP_LLM_REQUEST_MAX_MB="17"))
+    # Бывший префикс LLM API -- явный отказ, не прокси и не редирект.
+    llm_block = re.search(r"location\s+/llm/\s*\{[^{}]*\}", got)
+    body = llm_block.group(0) if llm_block else ""
+    c.check("#546 the former /llm/ API prefix is an explicit refusal",
+            bool(llm_block) and "return 410;" in body, body or "no /llm/ block")
+    c.check("#546 /llm/ neither proxies nor redirects",
+            "proxy_pass" not in body and "return 30" not in body
+            and "return 301" not in body, body)
+    # Порт LLM-прокси -- только в /v1/: бывший алиас туда больше не ходит.
+    port = config.SETTINGS["MOP_LLM_PROXY_PORT"]
+    with_port = [b for b in re.findall(r"location\s+[^{]+\{[^{}]*\}", got)
+                 if f":{port};" in b or f":{port} " in b or f":{port}/" in b]
+    c.check("#546 the LLM proxy port lives only in the /v1/ route",
+            len(with_port) == 1 and "/v1/" in with_port[0]
+            and "location /llm/" not in with_port[0], with_port)
+    # /v1/ -- прежний контракт: без среза префикса, лимит, без буферизации,
+    # час чтения.
+    v1 = re.search(r"location\s+/v1/\s*\{[^{}]*\}", got)
+    route = v1.group(0) if v1 else ""
+    c.check("#546 /v1/ proxies the API without a prefix cut",
+            f"proxy_pass http://127.0.0.1:{port};" in route, route or "no /v1/ block")
+    for directive in ("client_max_body_size 17m;", "proxy_buffering off;",
+                      "proxy_read_timeout 1h;"):
+        c.check(f"#546 /v1/ keeps {directive.split()[0]}",
+                directive in route, route or "no /v1/ block")
+    # Маршруты панели при своём префиксе: проксируют на mop-web, запреты
+    # на месте. Они exact (^~-) и длиннее /llm/ -- по правилам выбора
+    # location в nginx выигрывают у префиксного /llm/ с 410.
+    web = f"127.0.0.1:{config.SETTINGS['MOP_WEB_PORT']}"
+
+    def block(pattern):
+        m = re.search(r"location\s+(?:=\s*|\^~\s*)?" + pattern
+                      + r"\s*\{(?:[^{}]*)\}", got)
+        return m.group(0) if m else ""
+
+    for path_pat, what in ((r"/llm/management\.html", "panel shim"),
+                           (r"/llm/raw/", "gated raw panel")):
+        b = block(path_pat)
+        c.check(f"#546 {what} still goes to mop-web", bool(b) and web in b,
+                b or "no block")
+    for path_pat in (r"/llm/v8/management", r"/llm/v8/management/",
+                     r"/llm/management"):
+        b = block(path_pat)
+        c.check(f"#546 the {path_pat} denial is in place",
+                bool(b) and "403" in b, b or "no block")
+    # Лимит тела -- на четырёх оставшихся маршрутах LLM (панельных), не
+    # на снятом алиасе: счёт падает с пяти до четырёх.
+    c.check("#546 the body limit left the removed alias, four routes remain",
+            got.count("client_max_body_size") == 4, got.count("client_max_body_size"))
+
+
 def main():
     c = Checks()
     check_cluster_key_copy_402(c)
@@ -2462,6 +2542,7 @@ def main():
                       "no jinja2 on this machine — only the structure below is checked")
     check_mgmt_gateway_418(c, can_render)
     check_root_v1_proxy_529(c, can_render)
+    check_llm_alias_gone_546(c, can_render)
     check_llmproxy_loopback_558(c, can_render)
     check_private_ca_517(c, can_render)
     # ── кому что из настроек (#176) ───────────────────────────────────────
