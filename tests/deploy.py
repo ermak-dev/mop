@@ -1966,8 +1966,11 @@ def check_llmproxy_loopback_558(c, can_render):
     names = [t.get("name") for t in tasks]
 
     # Живой файл: две адресные замены, по форме файла. YAML -- рендер первой
-    # установки; однострочный JSON -- как переписывает панель (config-version
-    # 8, host внутри server). ansible replace компилирует regexp без флагов:
+    # установки: между «server:» и «host:» лежат строки комментария шаблона
+    # (текст -- дословно из afe6e7b, установки, ещё не переписанные в JSON);
+    # однострочный JSON -- как переписывает панель (config-version 8, host
+    # внутри server, порядок ключей не угадывается: перед host могут стоять
+    # другие ключи объекта). ansible replace компилирует regexp без флагов:
     # ветка YAML привязана к «server:», не к ^.
     yaml_task = by.get("Close the LLM API port on a live installation") or {}
     json_task = by.get("Close the LLM API port in the panel's one-line JSON") or {}
@@ -1976,9 +1979,21 @@ def check_llmproxy_loopback_558(c, can_render):
              'server:\n  host: "127.0.0.1"\n  port: 8317\n'),
             ("yaml bare", yaml_task, "server:\n  host: 0.0.0.0\n  port: 8317\n",
              'server:\n  host: "127.0.0.1"\n  port: 8317\n'),
+            ("the old template's comment lines", yaml_task,
+             'server:\n  # LAN, а не петля: на этом порту узлы и тела ходят за моделями. Порт\n'
+             '  # открывает только LLM API -- client-ключ обязателен; management того же\n'
+             '  # порта отвечает лишь с петли (ниже allow-remote: false).\n'
+             '  host: "0.0.0.0"\n  port: 8317\n',
+             'server:\n  # LAN, а не петля: на этом порту узлы и тела ходят за моделями. Порт\n'
+             '  # открывает только LLM API -- client-ключ обязателен; management того же\n'
+             '  # порта отвечает лишь с петли (ниже allow-remote: false).\n'
+             '  host: "127.0.0.1"\n  port: 8317\n'),
             ("json", json_task,
              '{"server":{"host":"0.0.0.0","port":8317},"access":{"api-keys":["k1"]}}',
-             '{"server":{"host":"127.0.0.1","port":8317},"access":{"api-keys":["k1"]}}')):
+             '{"server":{"host":"127.0.0.1","port":8317},"access":{"api-keys":["k1"]}}'),
+            ("json with keys before host", json_task,
+             '{"server":{"port":8317,"host":"0.0.0.0"},"access":{"api-keys":["k1"]}}',
+             '{"server":{"port":8317,"host":"127.0.0.1"},"access":{"api-keys":["k1"]}}')):
         spec = task.get("ansible.builtin.replace") or {}
         pattern, repl = spec.get("regexp", "\0"), spec.get("replace", "\0")
         try:
@@ -1988,9 +2003,12 @@ def check_llmproxy_loopback_558(c, can_render):
             got = f"regexp does not compile: {e}"
         c.expect(f"#558 the replacement covers the {label} form of the live config",
                  got, want)
-    # Замена не может тронуть чужие host-ключи: management-секция остаётся.
+    # Замена не может тронуть чужие host-ключи: management-секция остаётся
+    # нетронутой и тогда, когда в server перед host стоят другие ключи (такой
+    # файл замена не узнает -- сработает структурный assert, а не тихий
+    # неполный перенос), и чужой host в management не перезаписывается.
     spec = yaml_task.get("ansible.builtin.replace") or {}
-    keeper = 'server:\n  host: "0.0.0.0"\nmanagement:\n  host: "0.0.0.0"\n'
+    keeper = 'server:\n  port: 8317\n  host: "0.0.0.0"\nmanagement:\n  host: "0.0.0.0"\n'
     try:
         touched = re.sub(spec.get("regexp", "\0"),
                          spec.get("replace", "\0").replace("\\1", r"\1")
@@ -1998,8 +2016,30 @@ def check_llmproxy_loopback_558(c, can_render):
     except re.error as e:
         touched = f"regexp does not compile: {e}"
     c.check("#558 only the server host is rewritten",
-            'management:\n  host: "0.0.0.0"' in touched
-            and 'server:\n  host: "127.0.0.1"' in touched, touched)
+            'management:\n  host: "0.0.0.0"' in touched, touched)
+    jspec = json_task.get("ansible.builtin.replace") or {}
+    jkeeper = ('{"management":{"host":"0.0.0.0"},"server":{"port":8317,'
+               '"host":"0.0.0.0"}}')
+    try:
+        jtouched = re.sub(jspec.get("regexp", "\0"),
+                          jspec.get("replace", "\0").replace("\\g<1>", r"\g<1>"),
+                          jkeeper)
+    except re.error as e:
+        jtouched = f"regexp does not compile: {e}"
+    c.check("#558 only the server host is rewritten in JSON",
+            '"management":{"host":"0.0.0.0"}' in jtouched
+            and '"server":{"port":8317,"host":"127.0.0.1"' in jtouched, jtouched)
+    # Вложенный host (в подобъекте server) -- не наш ключ: [^{}]*? не
+    # пересекает скобки, и такой файл остаётся структурному assert'у.
+    nested = '{"server":{"tls":{"host":"0.0.0.0"}},"host":"0.0.0.0"}'
+    try:
+        ntouched = re.sub(jspec.get("regexp", "\0"),
+                          jspec.get("replace", "\0").replace("\\g<1>", r"\g<1>"),
+                          nested)
+    except re.error as e:
+        ntouched = f"regexp does not compile: {e}"
+    c.check("#558 a nested host stays to the structural assert",
+            ntouched == nested, ntouched)
 
     # Рестарт обязателен: смена host перевязывает листенер, hot-reload на
     # неё не опираемся. Замены -- только при флаге «закрыть», и no_log без
