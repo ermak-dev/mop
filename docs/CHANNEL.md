@@ -11,6 +11,10 @@
 рисуют вердикт. Помечено, что проверено на живой сессии, а что прочитано в
 бинаре.
 
+Канал использует только messaging inbox. Все локальные интерфейсы claude code
+(inbox, daemon control, worker rendezvous и PTY) с их границами разобраны в
+[CLAUDECODE](CLAUDECODE.md).
+
 ## Где сокет
 
 У каждой сессии свой unix-сокет:
