@@ -506,6 +506,19 @@ def main():
     finally:
         config.forget()
 
+    # HYPOTHESIS (#557): серверный читатель каталога (adminapi.catalog_read)
+    # живёт в юните mop-web и ходит к прокси петлёй 127.0.0.1:
+    # MOP_LLM_PROXY_PORT -- но настройку в юнит mop-web никто не класть не
+    # обязан: SERVER_SCOPED для него её не нёс, и после перехода читателя
+    # на петлю сервис молча читал бы пустой порт. Узловой ярус не годится:
+    # порт описывает сервис на сервере, не машину пула.
+    # SOLUTION: MOP_LLM_PROXY_PORT -- в SERVER_SCOPED["mop-web"].
+    # RESULT: RED -- настройки в юните нет.
+    # STATUS: RED
+    c.check("#557 mop-web gets the loop port its reader needs",
+            "MOP_LLM_PROXY_PORT" in config.SERVER_SCOPED.get("mop-web", ()),
+            tuple(config.SERVER_SCOPED.get("mop-web", ())))
+
     return c.report("config")
 
 

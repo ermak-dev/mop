@@ -16,7 +16,7 @@ import hermetic  # noqa: F401,E402 -- настройки не с этой маш
 from _lib import Checks, patched  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from mop.common import bus  # noqa: E402
+from mop.common import bus, config  # noqa: E402
 from mop.server import proxykey  # noqa: E402
 
 
@@ -126,8 +126,13 @@ def check_source_393(c):
             sent.append(bus.file_data(kwargs["files"][0][1]))
             return {"node": {"written": ["ok"]}}
 
-        with patched(proxykey, KEY_FILE=path), patched(proxykey.config,
-                                                     effective=lambda: old), \
+        # #557: тестовая установка -- настоящий сертификат без частной CA
+        # (системное доверие): корня в блобе нет, форма #391 не меняется.
+        with patched(proxykey.config, get=lambda name: {
+                "MOP_TLS_CA": "", "MOP_TLS_CERT": "/etc/certs/real.pem",
+                "MOP_TLS_KEY": "", "MOP_HOME": d}.get(name, "")), \
+                patched(proxykey, KEY_FILE=path), \
+                patched(proxykey.config, effective=lambda: old), \
                 patched(proxykey, _load=lambda: None), \
                 patched(proxykey.puppets, ready_nodes=lambda: ["node"]), \
                 patched(proxykey.bus, request_many=write), \
@@ -2102,6 +2107,95 @@ def main():
              proxykey.blob({"MOP_PROXY_KEY": ""}), None)
     c.expect("blob: effective() carries provenance -- the value rides, not its repr",
              proxykey.blob({"MOP_PROXY_KEY": ("s1", ".env")}), "MOP_PROXY_KEY=s1\n")
+
+    # ── #557: корень сервера в блобе, источник -- семантика #517 ────────
+    # HYPOTHESIS (#557): папеты ходят на публичный /v1, и телу нужен корень
+    # закрепления. Источник корня обязан повторять выбор серверных сервисов
+    # (#517): задан MOP_TLS_CA -- корень частной CA; иначе при пустом
+    # MOP_TLS_CERT -- самоподписанный tls.pem; настоящий сертификат -- строки
+    # нет вовсе. Две копии правила (здесь и в deploy) разошлись бы молча, и
+    # тело осталось бы без корня или с неверным. Сертификат задан, а корня
+    # нет -- громкий отказ, не молчаливое отсутствие: тело поднимется и
+    # умрёт на TLS без причины в журнале.
+    check_ca_source_557(c)
+    check_blob_ca_557(c)
+
+
+# HYPOTHESIS (#557): корень для раздачи выбирают по трём случаям #517.
+# SOLUTION: ca_source() в proxykey -- единственный рендер этой семантики;
+# до него блоб ходил по creds.cafile каталога сервера, которого на mop
+# нет (deploy печатает «nothing to pin» при настоящем сертификате).
+# RESULT: RED -- функции нет.
+# STATUS: RED
+def check_ca_source_557(c):
+    import base64
+    import tempfile
+    ca_path = os.path.join(tempfile.mkdtemp(prefix="mop-557-ca-"), "corp-ca.pem")
+    with open(ca_path, "w") as f:
+        f.write("-----BEGIN CERTIFICATE-----\ncorp\n-----END CERTIFICATE-----\n")
+    # Самоподписанный tls.pem лежит там, куда его кладёт deploy:
+    # ~/.config/mop/secrets/ (deploy/roles/proxy, secrets_dir). Тест
+    # сидит в герметичном HOME (hermetic), и paths.local смотрит туда
+    # же -- сеем в него, а не в каталог рядом с ca_path.
+    tls_path = os.path.join(hermetic.HOME, ".config", "mop", "secrets", "tls.pem")
+    os.makedirs(os.path.dirname(tls_path), exist_ok=True)
+    with open(tls_path, "w") as f:
+        f.write("-----BEGIN CERTIFICATE-----\nself\n-----END CERTIFICATE-----\n")
+    settings = {"MOP_TLS_CA": ca_path, "MOP_TLS_CERT": "", "MOP_TLS_KEY": "",
+                "MOP_HOME": os.path.dirname(ca_path), "MOP_SERVER_LAN": "srv.test"}
+
+    def reads(**over):
+        values = dict(settings, **over)
+        return patched(config, get=lambda name: values.get(name, ""))
+
+    source = getattr(proxykey, "ca_source", None)
+    c.check("#557 RED ca_source exists", source is not None, "no proxykey.ca_source")
+    if source is None:
+        return
+    # (a) частная CA: корень -- её PEM, не tls.pem установки.
+    with reads():
+        c.expect("#557 a private CA names the root", source(), ca_path)
+    # (b) самоподписанный: корень -- tls.pem установки (secrets/).
+    with reads(MOP_TLS_CA=""):
+        c.expect("#557 a self-signed installation pins its tls.pem", source(), tls_path)
+    # (c) настоящий сертификат без CA: корня нет -- системное доверие.
+    with reads(MOP_TLS_CA="", MOP_TLS_CERT="/etc/certs/real.pem"):
+        c.expect("#557 a real certificate needs no root", source(), None)
+    # (d) настоящий сертификат, а корня не найти: громкий отказ с путём.
+    with reads(MOP_TLS_CA="/gone/x.pem", MOP_TLS_CERT="/etc/certs/real.pem"):
+        try:
+            source()
+            c.fail("#557 an unreachable named CA must refuse loudly", "/gone/x.pem")
+        except (RuntimeError, ValueError) as e:
+            c.check("#557 an unreachable named CA refuses with the path",
+                    "/gone/x.pem" in str(e), str(e))
+    with reads(MOP_TLS_CA="", MOP_TLS_CERT="/etc/certs/real.pem"):
+        c.check("#557 the root is a PEM on disk when claimed",
+                source() is None or open(source()).read(27).startswith("-----BEGIN"),
+                source())
+
+
+# HYPOTHESIS (#557): блоб везёт корень строкой MOP_PROXY_CA (base64 PEM)
+# рядом с ключом -- оба писателя secrets.env (тикет и доставка ротации)
+# рендерят его одним blob(). Без ключа блоба нет вовсе (установка без
+# прокси); корень без ключа не ездит.
+# RESULT: RED -- блоб пока одна строка ключа.
+# STATUS: RED
+def check_blob_ca_557(c):
+    import base64
+    pem = "-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----\n"
+    line = base64.b64encode(pem.encode()).decode()
+    c.expect("#557 the blob carries the key and the root",
+             proxykey.blob({"MOP_PROXY_KEY": "s1", "MOP_PROXY_CA": pem}),
+             f"MOP_PROXY_KEY=s1\nMOP_PROXY_CA={line}\n")
+    c.expect("#557 without a root the blob stays the key alone (#391 shape)",
+             proxykey.blob({"MOP_PROXY_KEY": "s1"}), "MOP_PROXY_KEY=s1\n")
+    c.expect("#557 the root never rides without the key",
+             proxykey.blob({"MOP_PROXY_CA": pem}), None)
+    # effective() несёт кортеж (значение, источник) -- едет значение.
+    c.expect("#557 provenance tuples collapse to values",
+             proxykey.blob({"MOP_PROXY_KEY": ("s1", ".env"), "MOP_PROXY_CA": (pem, "secrets")}),
+             f"MOP_PROXY_KEY=s1\nMOP_PROXY_CA={line}\n")
 
     # ── пора ли раздавать (#391): по отпечатку, недошедшие не считаются ──
     c.expect("due: no state -> push", proxykey.due("b", None), True)
