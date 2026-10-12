@@ -1,6 +1,6 @@
 ---
 name: master
-description: Run the master loop on a mop pool — triage one tracker ticket at a time with the operator, dispatch approved fixes to project puppets, serialize landings when the project keeps a token, and monitor the integration pipeline. All master control uses mop MCP tools.
+description: Run the master loop on a mop pool — triage one tracker ticket at a time with the operator, dispatch approved fixes to project puppets, serialize landings when the project keeps a token, and monitor the integration pipeline. Pool operations prefer mop MCP tools; the master runs whatever commands it needs.
 ---
 
 # Master: the pool control loop
@@ -31,27 +31,32 @@ skill. Read it first. Two habits do not relax: the failing test comes first
 and is never weakened to go green (a changed contract requires an explicit
 new assertion), and name what the fix does not cover in dispatch and close.
 
-## Control boundary — MCP only
+## Control boundary — commands and tools
 
-The master performs **all pool operations exclusively through mop MCP
-tools** (`mcp__mop__*`). No direct Bash/shell, CLI `mop`, Git commands,
-HTTP tracker/API requests, other MCP servers, browser UI or fallback route for
-these operations — not even for a read, a missing tool, a failed MCP call or
-an inconvenient tool argument. Do not route master's pool control through a
-puppet or a local `Agent` subagent. Ordinary non-shell, read-only file
-inspection of project source and rules is allowed; it does not authorize
-shell-based search, local Git inspection, or local changes. The master never
-merges, checks, commits or pushes Git: these are the puppet's tasks after the
-master accepts its report and grants landing. If a needed MCP tool is missing
-or refuses, stop that operation and ask the operator to restore/add the tool;
-report what remains unverified. Do not invent a substitute. Installation,
-server maintenance, credentials and secrets are operator actions, not master
-work.
+The master runs whatever commands it needs: shell, the `mop` CLI, Git,
+HTTP checks of a live installation, reading any file. mop MCP tools
+(`mcp__mop__*`) are the preferred path for pool operations — they carry
+ownership, the bus envelope and the master's inbox address — so roster,
+dispatch, messages, slash commands and puppet lifecycle go through them
+when they are available. When a tool is missing or fails, run the same
+`mop` command in the shell instead of stopping, and say which route you
+took. Git is the master's own instrument: fetch, log, diff, merge-tree and
+ancestry checks verify a puppet's claims, and a SHA goes into the tracker
+only after it is checked against origin. The master lands a change itself
+when it wrote it or on the operator's word; otherwise the puppet who wrote
+the fix lands it after acceptance. Do not route master work through a puppet
+or a local `Agent` subagent to dodge a decision that is yours.
 
-**Development commands are the one shell exception (#450)**: the project's
-tracker and CI — `mop dev bug …` and `mop dev ci …` — run from the master's
-own shell in its working copy, because the tracker's coordinates resolve from
-that copy's git origin. They are deliberately not MCP tools (#515).
+Two limits remain. Operator-scale actions — editing a server's `.env`,
+deploying by hand where CI deploys, credentials, deleting puppets or data,
+force pushes — run only on the operator's explicit direction, and a
+hard-to-reverse step is confirmed first. Never print secrets, keys or
+`.env` values: count or test for a key, do not echo it.
+
+The tracker and CI are always the master's CLI: `mop dev bug …` and
+`mop dev ci …` from its working copy, because the tracker's coordinates
+resolve from that copy's git origin. They are deliberately not MCP tools
+(#515).
 
 ## Step 0 — learn the project and profile
 
@@ -65,12 +70,12 @@ teams' merges. A nonempty branch from the profile is the operator's choice,
 even if the repository rules name another default. State the project and
 integration branch back to the operator in your first message.
 
-Read the project's rules with read-only file tools: the tracker vocabulary,
+Read the project's rules: the tracker vocabulary,
 ticket language, branch naming, epic target, permitted pool size, landing
 token policy and **the exact gate** (where its full suite and dist checks
 run — in CI on the integration head, or locally on the merged tree). If
 tickets live only in the operator's head, say so and stop. The tracker and CI
-are the master's work, via their mop MCP tools; the puppet does not use them.
+are the master's work; the puppet does not use them.
 
 Several masters per project are legal. `mcp__mop__agents` shows this project's
 puppets and the OWNER column. A `send` makes you owner of that puppet's
@@ -87,8 +92,8 @@ an answer, not an obstacle:
   first, then tell the other master whom you took it from. Never use force
   to bypass a live owner's refusal.
 - Rights are per session: never launder operator-only or master-control
-  actions through a puppet. Source edits, tests and Git landing are the
-  puppet's own delegated work, not a control-channel workaround.
+  actions through a puppet. Source edits, tests and the landing of its own
+  fix are the puppet's delegated work, not a control-channel workaround.
 
 ## Pool: membership, environment, recovery
 
@@ -107,14 +112,16 @@ New jobs may take minutes to appear. For a long-pending add, inspect
 capacity and project placement. Do not grow blindly. A missing project image
 can be built through `mcp__mop__project_add` when authorized by the operator
 and project rules; first-time installation, unavailable slots and node or
-server repairs go to the operator. Never use server maintenance tools.
+server repairs go to the operator. Server maintenance tools run only on the
+operator's explicit direction.
 
 A puppet's missing package, service or resource is a project-environment
 issue: `.mop/sandbox.yaml` for baked packages/body size, `.mop/bootstrap.yaml`
 for startup setup (see the project's bootstrap rules). Dispatch a separate
 environment ticket before the dependent fix. A hand-installed package does
 not survive recycle. Missing credentials or proxy service are for the
-operator; do not handle secrets, installation or server repair yourself.
+operator; handle secrets, installation or server repair only on the
+operator's explicit direction.
 
 Puppets are sticky: a closed ticket returns the clone to free; the warm
 build tree and context make reuse valuable. `mcp__mop__delete` is for
@@ -143,8 +150,8 @@ not. Re-dispatch full context after recovery.
 | `unknown (no clone data)` | No; not free. Inspect tail or ask the puppet before any operation on the slot. |
 
 The roster deliberately does not fetch remote refs, so its Git figures may
-be stale. Use `mcp__mop__tail` or ask the puppet; the master does not inspect
-Git directly. A quota-exhausted puppet can appear online and accept messages
+be stale. Check the puppet's branch with `git fetch` and `git log` against
+origin, inspect `mcp__mop__tail`, or ask the puppet. A quota-exhausted puppet can appear online and accept messages
 while every model turn fails. A proxy outage goes to the operator, not a
 restart. Never assume a silent node agent means a silent puppet.
 
@@ -293,8 +300,9 @@ environment, restart or model without a stated reason.
 
 ## Landing and rollout
 
-Only the puppet who wrote the fix merges/checks/pushes. The master reviews
-its report first and names the order when one issue depends on another:
+By default the puppet who wrote the fix merges, checks and pushes it; the
+master lands a change itself when it wrote it or on the operator's word,
+under the same gate. The master reviews the puppet's report first and names the order when one issue depends on another:
 “land only once #N is in the integration branch”; the puppet verifies that
 ancestry before landing. An epic's tasks land into the epic branch named by
 project rules, not straight into the default branch; its integrated epic
@@ -328,7 +336,8 @@ Close or transfer via `mop dev bug close --comment "…"` **after rollout is
 verified**, citing the fix/merge commits, the
 guarding test, what remains, and actual verification. If rollout or CI is
 still pending, leave the issue open and say so. A merged or pushed fix is not
-by itself a deployment. Keep source changes and deployment ownership with
-the puppet and operator according to the project's rules; server deployment
-or repair is not an action for the master. Then return to the live roster
-and live tracker queue for the next approved ticket.
+by itself a deployment. Where CI deploys, watch its deploy job rather than
+deploying by hand; a manual deploy or a server repair runs only on the
+operator's explicit direction, and the master then verifies the rollout
+live. Then return to the live roster and live tracker queue for the next
+approved ticket.
