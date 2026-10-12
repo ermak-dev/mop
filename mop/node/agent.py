@@ -301,10 +301,16 @@ def _last_json(out):
 
 
 async def session_json(name, script, timeout=20):
-    """Ответ session.py, который печатает JSON (send, wait-idle)."""
+    """Ответ session.py, который печатает JSON (send, wait-idle).
+
+    Тишина тела (код None) помечена timeout (#574): v_send отличает
+    «не доехало достоверно» от «неизвестно» -- второе не откатывает ни
+    аренду, ни identity: сообщение могло дойти, и откат испортил бы
+    чужой ход."""
     out, code = await bsh(name, script, timeout)
     if code is None:
-        return {"error": f"{name}: the body did not answer in {timeout}s"}
+        return {"error": f"{name}: the body did not answer in {timeout}s",
+                "timeout": True}
     got = _last_json(out)
     if got is not None:
         return got
@@ -496,8 +502,14 @@ async def _claim(name, req):
     # файле, тот и предшественник -- ссылка, а не соседний номер поколения.
     generation = _lease_generations[path] = _lease_generations.get(path, 0) + 1
     claims = _lease_claims.setdefault(path, {})
+    # Четвёртое поле (#574) -- прежняя identity клона на момент установки
+    # нашей: снимок ставит шелл установки, провалившаяся доставка вернёт
+    # именно её, не спрашивая сервер заново. Начало -- «не трогали»
+    # (self-declared владелец, захват без установки): восстановления нет;
+    # реальный снимок (профиль либо None «снять») пишет v_send после
+    # установки -- один и тот же маркер не спутаешь ни с профилем, ни с None.
     claims[generation] = ["live", owner.render() if owner else "",
-                          _lease_holder.get(path)]
+                          _lease_holder.get(path), _NO_IDENTITY_TOUCH]
     _lease_holder[path] = generation
     return None, (path, owner, mine, generation), note
 
@@ -581,6 +593,80 @@ async def _unclaim(name, undo):
         _lease_holder[path] = None if "not ours" in out else _predecessor(claims, g)
         _prune_claims(claims, _lease_holder.get(path))
     return why(out, code) if code != 0 else None
+
+
+def _identity_of(claims, generation):
+    """Прежняя identity захвата из реестра (#574). -> профиль | None |
+    «поля нет»-маркер.
+
+    Маркер MISSING -- identity при этом захвате не трогали (self-declared
+    владелец, захват без установки): восстановления тоже нет. Профиль или
+    None из четвёртого поля -- снимок шелла установки."""
+    got = claims.get(generation)
+    if got is None or len(got) < 4:
+        return _NO_IDENTITY_TOUCH
+    return got[3]
+
+
+class _NoIdentityTouch:
+    """Маркер «identity не трогали»: не None (None -- «снять»)."""
+
+    def __repr__(self):
+        return "identity-untouched"
+
+
+_NO_IDENTITY_TOUCH = _NoIdentityTouch()
+
+
+async def _restore_identity(name, undo, claims, generation):
+    """Вернуть прежнюю identity клона после подтверждённого провала (#574).
+    -> причина неудачи | None. Зовут под _owner_locks, ДО _unclaim.
+
+    Что восстанавливать -- снимок в реестре, а не новый вопрос серверу:
+    удалённый профиль к моменту отката мог измениться, а прежнее состояние
+    обязано вернуться согласованным -- той парой, что стояла в клоне на
+    момент установки нашей. Цепочка та же, что у файла (#573): проваленные
+    звенья перепрыгиваем, восстанавливаем снимок звена, на котором
+    остановились. Экран тот же: живой или завершённый захват поверх --
+    identity не трогаем, это уже чужая пара. Снятие и установка -- один
+    identity_script: снимок печатается ДО записи, чужие хуки и hooksPath
+    он не трогает, а страж прежнего владельца вернётся вместе с профилем.
+    Ошибка шелла -- неудача отката с причиной (#181), не молчание."""
+    path, _owner, mine, _gen = undo
+    g = generation
+    while _predecessor(claims, g) is not None:
+        prev = _predecessor(claims, g)
+        if claims[prev][0] != "failed":
+            break
+        g = prev
+    want = _identity_of(claims, g)
+    if want is _NO_IDENTITY_TOUCH:
+        return None
+    out, code = await bsh(name, identity_script(clone_dir(name), path, mine, want))
+    if code != 0:
+        return f"git identity not restored: {why(out, code)}"
+    return None
+
+
+async def _restore_identity_and_lease(name, undo):
+    """Согласованный откат провалившейся доставки (#574): identity, потом
+    аренда. -> причина неудачи | None. Зовут под _owner_locks.
+
+    Identity -- первой: её скрипт стоит на страже «в файле наша запись»
+    (#189), и откат аренды до неё оставил бы чужие байты -- скрипт молча
+    вышел бы, не восстановив пару. Провал файла -- не повод бросать
+    identity: обе причины уйдут с отказом (#181)."""
+    path, _owner, _mine, generation = undo
+    claims = _lease_claims.setdefault(path, {})
+    ours = claims.get(generation)
+    if ours is None:
+        return None
+    # Тот же экран, что у файла (#573): чужой захват поверх -- чужая пара.
+    if not any(s[0] != "failed" for g, s in claims.items() if g > generation):
+        failed = await _restore_identity(name, undo, claims, generation)
+        if failed:
+            return failed
+    return await _unclaim(name, undo)
 
 
 async def _gate(name, req):
@@ -676,6 +762,11 @@ def identity_script(clone, path, mine, profile):
     доставка и вопрос серверу, аренду мог забрать другой, и его identity
     перетирать нельзя. Снятие отсутствующего ключа -- не ошибка.
 
+    Прежняя identity печатается метками mop574-name/email ДО записи (#574):
+    один шелл -- снимок и установка, восстанавливать провалившаяся доставка
+    будет тем же скриптом с прежним профилем, а не новым вопросом серверу,
+    чей ответ к тому моменту мог измениться.
+
     Вместе с identity -- страж владельца (#313), хуки GUARDED_HOOKS. Чужой
     хук (без метки) не перезаписывается; core.hooksPath задан -- git
     .git/hooks не читает, и ставить туда незачем. Оба пропуска -- строкой в
@@ -683,38 +774,62 @@ def identity_script(clone, path, mine, profile):
     q = shlex.quote
     guard = f'[ "$(cat {q(path)} 2>/dev/null)" = {q(mine.rstrip(chr(10)))} ] || exit 0; '
     git = f"git -C {q(clone)} config --local"
+    snap = "".join(
+        f"printf 'mop574-{k}\\t%s\\n' \"$({git} user.{k} 2>/dev/null)\"; " for k in ("name", "email"))
     if profile:
         install = "".join(
             f'f="$hooks/{h}"; if [ -e "$f" ] && ! {_ours(chr(34) + "$f" + chr(34))}; then '
             f'echo "owner guard skipped: the project has its own {h}"; else '
             f'printf %s {q(owner_hook())} > "$f.mop" && chmod 755 "$f.mop" && '
             f'mv -f "$f.mop" "$f" || exit 1; fi; ' for h in GUARDED_HOOKS)
-        return guard + (f"{git} user.name {q(profile['name'])} && "
-                        f"{git} user.email {q(profile['email'])} || exit 1; "
-                        + _hooks_dir(clone)
-                        + f'if [ -n "$(git -C {q(clone)} config core.hooksPath)" ]; then '
-                        f'echo "owner guard skipped: core.hooksPath is set"; exit 0; fi; '
-                        f'mkdir -p "$hooks"; ' + install + "exit 0")
+        return guard + snap + (f"{git} user.name {q(profile['name'])} && "
+                               f"{git} user.email {q(profile['email'])} || exit 1; "
+                               + _hooks_dir(clone)
+                               + f'if [ -n "$(git -C {q(clone)} config core.hooksPath)" ]; then '
+                               f'echo "owner guard skipped: core.hooksPath is set"; exit 0; fi; '
+                               f'mkdir -p "$hooks"; ' + install + "exit 0")
     remove = "".join(f'f="$hooks/{h}"; [ -f "$f" ] && {_ours(chr(34) + "$f" + chr(34))} '
                      f'&& rm -f "$f"; ' for h in GUARDED_HOOKS)
-    return guard + (f"{git} --unset-all user.name; {git} --unset-all user.email; "
-                    + _hooks_dir(clone) + remove + "exit 0")
+    return guard + snap + (f"{git} --unset-all user.name; {git} --unset-all user.email; "
+                           + _hooks_dir(clone) + remove + "exit 0")
 
 
-async def _follow_owner(conn, name, login, undo):
-    """Identity клона -- за проверенным владельцем. -> заметка мастеру."""
+def _identity_snapshot(out):
+    """Прежняя identity из вывода identity_script (#574). Чистая.
+
+    Метки печатаются до записи, один шелл -- снимок и установка нераздельны.
+    Нет обеих меток (шелл чужой/старый) или хоть одна пуста -- прежней
+    identity нет: restore снимет её, «или никакой» -- правило #167."""
+    got = {}
+    for line in out.splitlines():
+        for key in ("name", "email"):
+            mark = f"mop574-{key}\t"
+            if line.startswith(mark):
+                got[key] = line[len(mark):]
+    if got.get("name") and got.get("email"):
+        return {"name": got["name"], "email": got["email"]}
+    return None
+
+
+async def _install_identity(conn, name, login, undo):
+    """Identity клона -- за проверенным владельцем, ДО доставки (#574).
+    -> (заметка мастеру | None, причина неудачи | None, снимок прежней).
+
+    Зовут под замком папета вслед за _claim: захват, identity, доставка --
+    и только тогда чужой send. Ошибка шелла -- неудача подготовки: задание
+    не уходит под неверной identity, и отказ называет причину (#181)."""
     profile, missing = await owner_profile(conn, name, login)
-    path, _, mine, _generation = undo  # поколение -- только откату (#573)
-    async with _owner_locks.setdefault(name, asyncio.Lock()):
-        out, code = await bsh(name, identity_script(clone_dir(name), path, mine, profile))
+    path, _owner, mine, _generation = undo  # поколение -- только откату (#573)
+    out, code = await bsh(name, identity_script(clone_dir(name), path, mine, profile))
     if code != 0:
-        return f"git identity not set: {why(out, code)}"
+        return None, f"git identity not set: {why(out, code)}", None
+    snap = _identity_snapshot(out)
     if profile:
         # Пропуск стража (#313) -- тем же текстом, что сказал скрипт.
         skipped = "; ".join(l.strip() for l in out.splitlines() if "skipped" in l)
-        return f"commits as {profile['name']} <{profile['email']}>" + (
-            f"; {skipped}" if skipped else "")
-    return f"no git identity for {login} ({missing}): the clone has none, commit with git -c"
+        return (f"commits as {profile['name']} <{profile['email']}>"
+                + (f"; {skipped}" if skipped else ""), None, snap)
+    return f"no git identity for {login} ({missing}): the clone has none, commit with git -c", None, snap
 
 
 async def v_send(conn, req):
@@ -723,21 +838,45 @@ async def v_send(conn, req):
     `notify=true` не блокирует ответ: подписку на простой держит фоновая
     задача здесь, на узле, рядом с сокетом, и, дождавшись, публикует в инбокс
     мастера. Отсюда push без опроса — и без потока внутри MCP-сервера, который
-    раньше ждал простоя, сидя в аллокации."""
+    раньше ждал простоя, сидя в аллокации.
+
+    Порядок #574: захват -> identity -> доставка. Прежняя identity стоит в
+    клоне, пока тело получает первое сообщение, и весь ход идёт под
+    именем подтверждённого владельца, а не прежнего. Ожидание простоя
+    (до IDLE_WAIT) -- ВНЕ критической секции: доставка уходит с --wait 0,
+    простой ждёт отдельный глагол session.py wait-idle, и ошибка ожидания --
+    не недоставка уже доставленного."""
     name = req["name"]
     wait = min(max(int(req.get("wait") or 0), 0), IDLE_WAIT)
+    me, verified = lease.caller(req)
     async with _owner_locks.setdefault(name, asyncio.Lock()):
         refused, undo, note = await _claim(name, req)
-    if refused:
-        return {"error": refused}
+        if refused:
+            return {"error": refused}
+        # Захват -> identity -> доставка: всё под одним замком, окно --
+        # вопрос профилю (IDENTITY_WAIT) и один шелл, не 600 секунд простоя.
+        # Ошибка подготовки -- отказ ДО доставки: задание не уходит под
+        # неверной identity (снимок и запись неразделимы, откатывать нечего).
+        snap = None
+        if undo and verified:
+            inote, failed, snap = await _install_identity(conn, name, me, undo)
+            if failed:
+                await _unclaim(name, undo)
+                return {"error": f"{name}: {failed}"}
+            note = "; ".join(filter(None, (note, inote)))
+            # Снимок в реестр: профиль -- вернуть пару, None -- снять («или
+            # никакой», #167). Снимок печатает сам шелл установки -- до
+            # записи, и пара неразделима с установкой.
+            _lease_claims.setdefault(undo[0], {})[undo[3]][3] = snap
     # Цель — клон, а не сокет: session.py резолвит сессию сам, внутри тела, где
     # только и лежат её файлы. Снаружи сокет контейнерного папета не виден.
     out = await session_json(name, _session_cmd(
         "send", clone_dir(name), req["message"],
         "--priority", req.get("priority", "next"),
         "--from-name", req.get("from_name", "mop"),
-        "--wait", wait), timeout=wait + 20)
+        "--wait", 0), timeout=20)
     if out.get("error"):
+        indeterminate = out.get("timeout")
         # Под тем же замком, что и claim (#189): иначе между сравнением и
         # записью отката вклинился бы чужой send. Предчека поколения нет:
         # провал обязан попасть в реестр исходов (#573) даже тогда, когда
@@ -745,25 +884,31 @@ async def v_send(conn, req):
         # того, что наш захват провалился, и поздний откат младшего захвата
         # перепрыгнет нашу запись именно по этой отметке.
         failed = None
-        if undo:
+        if undo and not indeterminate:
             async with _owner_locks.setdefault(name, asyncio.Lock()):
-                failed = await _unclaim(name, undo)
+                failed = await _restore_identity_and_lease(name, undo)
         if failed:
             out["error"] += f"; owner not restored: {failed}"
         return out
-    me, verified = lease.caller(req)
     # Доставка доехала -- откат этому захвату больше не приедет: завершаем
     # его и держим реестр контекстом возможных откатов, без истории
     # завершённых отправок (#573). Под тем же замком, что и реестр.
     if undo:
         async with _owner_locks.setdefault(name, asyncio.Lock()):
             _settle(undo[0], undo[3])
-    if undo and verified:
-        # После доставки: не доехало -- аренда откатилась, и identity не
-        # наша. Коммит папет делает не в первую секунду хода.
-        note = "; ".join(filter(None, (note, await _follow_owner(conn, name, me, undo))))
     if note:
         out["owner_note"] = note
+    # Простой ждём ВНЕ замка (#574): подписка -- control-кадр, сессию не
+    # занимает, и чужой send не стоит за нашей 600-секундной паузой. Ошибка
+    # ожидания -- не недоставка: msg_id стоит, откатов нет.
+    if wait:
+        r = await session_json(name, _session_cmd(
+            "wait-idle", clone_dir(name), wait, name[-8:]), timeout=wait + 20)
+        if r.get("error"):
+            out["idle"] = None
+            out["idle_error"] = r["error"]
+        else:
+            out["idle"] = r.get("state")
     await _event(conn, "send", name, text=f"from {req.get('from_name', 'mop')}")
     if req.get("notify") and not wait:
         # Куда отвечать, говорит сам мастер: инбокс адресуется мастером, а не
