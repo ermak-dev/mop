@@ -26,6 +26,7 @@ from _lib import Checks, FakeNomad, NoLiveNomad, offline, patched, restored, GAT
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from mop.server import cluster  # noqa: E402
+from mop.common import bus, puppets  # noqa: E402
 from mop.common import service  # noqa: E402
 
 RUGENT = "git@git.ermak.dev:rugent/rugent.git"
@@ -119,8 +120,13 @@ def check_gone_job(c):
     глаголов, которые что-то делают.
     STATUS: FIXED — see #89
     """
+    # Подтверждённое отсутствие -- путём клиента: Nomad-заглушка отвечает
+    # пусто, latest_alloc даёт None (NotFound/пустой список), и это ответ,
+    # а не отказ (#89; до #572 тест держался на глотании connection error
+    # без токена -- то есть проверял не то, что заявлял).
     gone = {"verb": "alloc", "name": "pu-rugent-9"}
-    got = cluster.answer("admin", gone)
+    with cluster.using(FakeNomad()):
+        got = cluster.answer("admin", gone)
     if c.check("alloc of a job that is gone must answer, not refuse",
                not (got.get("error") or "alloc" not in got), got):
         c.check("alloc of a job that is gone must be None",
@@ -2609,6 +2615,124 @@ def check_add_limit_interleaving_567(c):
         env.cleanup()
 
 
+# ── #572: ошибка чтения аллокации -- не отсутствие ──────────────────────
+# HYPOTHESIS: _alloc ловит ВСЕ исключения latest_alloc и отвечает
+# ok=true, alloc=None. Подтверждённое отсутствие джоба уже закрывает
+# nomad.latest_alloc (NotFound -> None), сюда доезжают только сбои:
+# сеть, лежащий API, чужая 500. Ответ «аллокации нет» при сбое чтения --
+# достоверная ложь: puppets.delete забывает узел и сносит джоб без
+# cleanup, _wait_stopped принимает сбой за завершённый stop.
+# SOLUTION: не глотать: сбой чтения доезжает до просителя ошибкой с
+# причиной через существующий RPC-boundary (_answer -> describe_error);
+# None остаётся только подтверждённому отсутствию (NotFound/пусто).
+# Публичная форма успешного ответа не меняется.
+# STATUS: FIXED — see #572
+
+
+def check_alloc_errors_572(c):
+    """Глагол alloc: сбой чтения -- ошибка с причиной, не ok+None.
+
+    Через реальный boundary answer(): исключение обработчика несёт
+    describe_error из _answer, проситель видит отказ, а не «нет
+    аллокации». Нормальная аллокация и подтверждённое отсутствие --
+    прежние ответы байт в байт."""
+    def raw_alloc(node="hyper", status="running"):
+        return {"ID": "a1", "JobID": "pu-mop-1", "NodeName": node,
+                "ClientStatus": status, "DesiredStatus": "run"}
+
+    # Нормальная аллокация: прежний ответ, driver из меты узла.
+    fake = FakeNomad(allocs={"pu-mop-1": raw_alloc()}, meta={"hyper": {"mop_driver": "pve"}})
+    with cluster.using(fake):
+        got = cluster.answer("mop", {"verb": "alloc", "name": "pu-mop-1"})
+    ok_row = got.get("alloc") or {}
+    c.check("#572 a live allocation answers as before",
+            got.get("ok") and got.get("driver") == "pve"
+            and ok_row.get("NodeName") == "hyper"
+            and ok_row.get("ClientStatus") == "running",
+            f"answer: {got}")
+
+    # Подтверждённое отсутствие: NotFound уже превращён в None клиентом --
+    # это ответ, а не отказ.
+    fake = FakeNomad()
+    with cluster.using(fake):
+        got = cluster.answer("mop", {"verb": "alloc", "name": "pu-mop-1"})
+    c.expect("#572 a confirmed absence answers ok with alloc None",
+             got, {"ok": True, "alloc": None, "driver": None})
+
+    # Сбой чтения: transport-обрыв и ошибка API -- отказ с причиной, не
+    # «аллокации нет». Не «наличие строки»: три разные ошибки и полный
+    # answer-boundary.
+    class _BrokenNomad(FakeNomad):
+        def __init__(self, bang):
+            super().__init__()
+            self.bang = bang
+
+        def latest_alloc(self, job_id):
+            raise self.bang
+
+    for bang in (ConnectionError("bus: node down"),
+                 RuntimeError("nomad API returned 500"),
+                 TimeoutError("nomad read timed out")):
+        with cluster.using(_BrokenNomad(bang)):
+            got = cluster.answer("mop", {"verb": "alloc", "name": "pu-mop-1"})
+        c.check(f"#572 a read failure ({type(bang).__name__}) answers an error, not ok+None",
+                got.get("error") and "alloc" not in got
+                and type(bang).__name__.lower() not in ("",)
+                and str(bang) in got["error"],
+                f"answer: {got}")
+
+    # Дающие-сдался (#345) живут как жили: с аллокацией и без.
+    fake = FakeNomad()
+    with cluster.using(fake):
+        gave = cluster.answer("mop", {"verb": "alloc", "name": "pu-mop-1"})
+    c.expect("#572 without gave_up the answer stays byte-for-byte today's",
+             gave, {"ok": True, "alloc": None, "driver": None})
+
+
+def check_alloc_error_stops_delete_572(c):
+    """Сбой чтения не ведёт мутации: delete не забывает узел из-за
+    ошибки чтения, wait не принимает сбой за завершённый stop.
+
+    Через библиотечный вход puppets.delete с заглушенным _cluster: глагол
+    alloc отвечает error (как обязан после фикса), и delete обязан
+    остановиться ДО ворот снятия -- ни delete-глагола, ни wait, ни wipe.
+    Аналогично _wait_stopped: error поднимается наверх исключением (штатный
+    контракт _cluster), не читается как «остановился»."""
+    calls = []
+
+    def cluster_refusing(verb, **fields):
+        calls.append((verb, fields))
+        raise bus.Refused("alloc: Nomad connection error: node down")
+
+    with patched(puppets, _cluster=cluster_refusing, _wait_stopped=None, wipe=None), \
+            patched(bus, login=lambda: "anton"):
+        refused = None
+        try:
+            puppets.delete("pu-mop-1", force=True)
+        except bus.Refused as e:
+            refused = e
+        c.check("#572 delete stops on a read failure before any mutation",
+                refused is not None and calls == [("alloc", {"name": "pu-mop-1"})],
+                f"refused: {refused}, calls: {calls}")
+
+    # _wait_stopped: сбой чтения -- исключение наружу, не «остановился».
+    polled = {"n": 0}
+
+    def cluster_flaky(verb, **fields):
+        polled["n"] += 1
+        raise bus.Refused("alloc: Nomad API error: 500")
+
+    with patched(puppets, _cluster=cluster_flaky):
+        stopped = None
+        try:
+            puppets._wait_stopped("pu-mop-1")
+        except bus.Refused as e:
+            stopped = e
+        c.check("#572 wait_stopped raises on a read failure instead of passing",
+                stopped is not None and polled["n"] == 1,
+                f"raised: {stopped}, polls: {polled}")
+
+
 def main():
     c = Checks()
     check_join_config_404(c)
@@ -2627,6 +2751,7 @@ def main():
                   check_update_origin_365, check_nodes_api_375,
                   check_registry_verbs_534, check_concurrent_534,
                   check_add_race_567, check_add_limit_interleaving_567,
+                  check_alloc_errors_572, check_alloc_error_stops_delete_572,
                   ):
         check(c)
     return c.report("cluster")
