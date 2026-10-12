@@ -502,10 +502,14 @@ def _alloc(project, req):
     по сети ради одного поля меты был бы платой ни за что."""
     try:
         alloc = _api().latest_alloc(req["name"])
-    except Exception:
-        # Джоба уже нет — это ответ, а не отказ: так `puppets.delete` ждёт,
-        # пока снятый джоб перестанет быть running.
-        alloc = None
+    except Exception as e:
+        # Ошибка чтения -- не отсутствие (#572): подтверждённое «джоба нет»
+        # уже превращает в None сам клиент (NotFound), сюда доезжает сбой --
+        # сеть, лежащий API, чужая 500. Ответить «аллокации нет» -- сказать
+        # достоверную ложь: puppets.delete забывает узел и сносит джоб без
+        # cleanup, _wait_stopped принимает сбой за завершённый stop. Сбой
+        # доезжает отказом с причиной (номадную половину опишет _answer).
+        return {"error": f"alloc {req['name']}: {nomad.describe_error(e)}"}
     # Сдавшийся bootstrap (#345) -- ответом, с аллокацией или без.
     gave_up = bootstrap.gave_up_of(bootstrap.ROOT, req["name"])
     extra = {"gave_up": gave_up} if gave_up else {}
