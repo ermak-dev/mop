@@ -2024,24 +2024,41 @@ def check_pve_facts(c):
 # STATUS: FIXED — see #568
 def check_destroy_exact_owner_568(c):
     import asyncio
+    import shlex
     from mop.driver import pve
 
     name, stranger = "pu-mop-1", "pu-other-9"
     vmid = pve.vmid_of(name)
 
-    # Шпион транспорта: сценарии (список (out, code) по порядку, последний
-    # повторяется) плюс журнал команд. destroy-body один -- мутация одна.
-    def spy(answers):
+    # Строгий хвост argv: [.., destroy-body, vmid, name] -- контракт #565.
+    def tail(argv):
+        return argv[argv.index("destroy-body"):] if "destroy-body" in argv else None
+
+    # Шпион транспорта с argv-контрактом: ответ сценария привязан к
+    # ожидаемой команде, ЛЮБАЯ иная -- («unexpected command», 99), не тихий
+    # успех: иначе опечатка в глаголе зелёнела бы без настоящего вызова.
+    def spy(answer):
         calls = []
 
         async def sh(script, timeout=20, prefix=()):
             calls.append(script)
-            if "destroy" in script.split() or "destroy-body" in script.split():
-                out, code = answers[0] if len(answers) == 1 else answers[len(calls) - 1] \
-                    if len(calls) <= len(answers) else answers[-1]
-                return out, code
-            return "", 0
+            argv = shlex.split(script)
+            if tail(argv) == ["destroy-body", str(vmid), name]:
+                return answer
+            return f"spy: unexpected command {script!r}", 99
         return sh, calls
+
+    # Guard: журнал -- ровно один вызов, и его хвост -- точные токены
+    # destroy-body <vmid> <name>. Ни отсутствия вызова, ни двух, ни чужих
+    # токенов; отдельная мутационная проверка ниже держит сам guard.
+    def exact(calls):
+        argvs = [shlex.split(s) for s in calls]
+        return (len(argvs) == 1
+                and tail(argvs[0]) == ["destroy-body", str(vmid), name])
+
+    def expect_exact(calls, what):
+        c.check(f"#568 {what} -> exactly one destroy-body <vmid> <name>",
+                exact(calls), calls)
 
     def run(sh):
         with restored(pve, "sh", "_forget_host_key"):
@@ -2053,72 +2070,97 @@ def check_destroy_exact_owner_568(c):
             pve._forget_host_key = forget
             return asyncio.run(pve.destroy(name)), forgotten
 
-    # Успешный снос: глагол с именем, Gone с прежним проводом, ключ хоста
-    # забыт. Команда обёртки приходит одной строкой: sudo -n mop-pve
-    # destroy-body <vmid> <имя> -- сверяется хвост, без разбора экранирования.
-    sh, calls = spy([("", 0)])
+    # Успешный снос: одна команда с именем, Gone с прежним проводом, ключ
+    # хоста забыт -- ровно для этого тела.
+    sh, calls = spy(("", 0))
     r, forgotten = run(sh)
-    c.check("#568 success -> the verb carries the expected name",
-            any(f"destroy-body {vmid} {name}".split()
-                == s.split()[s.split().index("destroy-body"):]
-                if "destroy-body" in s.split() else False for s in calls)
-            or [s for s in calls if "destroy-body" in s] == [], calls)
-    c.check("#568 success -> the old nameless verb is gone",
-            not any(s.split()[0].endswith("destroy") or " destroy " in s + " "
-                    for s in calls), calls)
+    expect_exact(calls, "success")
     c.check("#568 success -> Gone as before",
             r == {"destroyed": vmid, "target": f"body {vmid}"}, r)
-    c.check("#568 success -> the host key is forgotten", len(forgotten) == 1,
-            forgotten)
+    c.check("#568 success -> the host key is forgotten for this body",
+            forgotten == [name], forgotten)
 
     # Подтверждённое отсутствие: обёртка отвечает успехом -- Gone и очистка,
     # как раньше (повторный прогон уборки -- не отказ).
-    sh, calls = spy([("", 0)])
+    sh, calls = spy(("", 0))
     r, forgotten = run(sh)
-    c.check("#568 confirmed absence -> still Gone and cleanup",
-            r == {"destroyed": vmid, "target": f"body {vmid}"} and len(forgotten) == 1,
-            (r, forgotten))
+    expect_exact(calls, "absence")
+    c.check("#568 confirmed absence -> still Gone and cleanup for this body",
+            r == {"destroyed": vmid, "target": f"body {vmid}"}
+            and forgotten == [name], (r, forgotten))
 
     # Коллизия: под VMID стоит чужое имя -- отказ с обоими именами, ни Gone,
-    # ни очистки known_hosts, ни fallback.
-    sh, calls = spy([(f"mop-pve: container {vmid} is named {stranger}, "
-                      f"not {name} — not removing\n", 64)])
+    # ни очистки known_hosts, ни fallback (вызов ровно один, ожидаемый).
+    sh, calls = spy((f"mop-pve: container {vmid} is named {stranger}, "
+                     f"not {name} — not removing\n", 64))
     r, forgotten = run(sh)
+    expect_exact(calls, "collision")
     c.check("#568 collision -> refusal naming both",
             bool(r.get("error")) and stranger in r["error"] and name in r["error"], r)
-    c.check("#568 collision -> no Gone", "destroyed" not in r, r)
-    c.check("#568 collision -> no host-key cleanup", forgotten == [], forgotten)
-    c.check("#568 collision -> no fallback to the nameless verb",
-            not any(" destroy " in s + " " for s in calls), calls)
+    c.check("#568 collision -> no Gone, no host-key cleanup",
+            "destroyed" not in r and forgotten == [], (r, forgotten))
 
     # Ошибка чтения состояния: отказ с причиной обёртки, без Gone и очистки.
-    sh, calls = spy([(f"mop-pve: cannot read the roster of {vmid}: "
-                      "state unknown, nothing removed\n", 64)])
+    sh, calls = spy((f"mop-pve: cannot read the roster of {vmid}: "
+                     "state unknown, nothing removed\n", 64))
     r, forgotten = run(sh)
+    expect_exact(calls, "read error")
     c.check("#568 read error -> refusal with the wrapper's reason",
             bool(r.get("error")) and "state unknown" in r["error"], r)
     c.check("#568 read error -> no Gone, no cleanup",
             "destroyed" not in r and forgotten == [], (r, forgotten))
 
     # Таймаут: «не успел» -- не «снёс» (#171), без Gone и очистки.
-    sh, calls = spy([("", None)])
+    sh, calls = spy(("", None))
     r, forgotten = run(sh)
+    expect_exact(calls, "timeout")
     c.check("#568 timeout -> refusal naming the wait",
             bool(r.get("error")) and "timed out" in r["error"], r)
     c.check("#568 timeout -> no Gone, no cleanup",
             "destroyed" not in r and forgotten == [], (r, forgotten))
 
     # Старая обёртка: глагола нет -- отказ с её причиной, БЕЗ fallback на
-    # прежний destroy: снос по номеру без имени и есть дефект #565.
-    sh, calls = spy([("mop-pve: no such verb destroy-body; available: list "
-                      "capacity create clone size memory net bootstrap keys "
-                      "start stop template destroy exec push unpack\n", 64)])
-    r, forgotten = run(sh)
-    c.check("#568 old wrapper -> refusal, no fallback",
-            bool(r.get("error")) and "no such verb" in r["error"], r)
-    c.check("#568 old wrapper -> nothing was destroyed",
-            "destroyed" not in r and forgotten == [] and
-            not any(" destroy " in s + " " for s in calls), (r, forgotten, calls))
+    # прежний destroy: снос по номеру без имени и есть дефект #565. Любая
+    # команда вне контракта роняет стендAssertionError'ом -- fallback был
+    # бы виден как крах, а не как тихий успех.
+    no_verb = ("mop-pve: no such verb destroy-body; available: list "
+               "capacity create clone size memory net bootstrap keys "
+               "start stop template destroy exec push unpack\n")
+    with restored(pve, "sh", "_forget_host_key"):
+        sent, forgotten = [], []
+
+        async def old_sh(script, timeout=20, prefix=()):
+            sent.append(script)
+            argv = shlex.split(script)
+            if tail(argv) == ["destroy-body", str(vmid), name]:
+                return no_verb, 64
+            raise AssertionError(f"unexpected fallback command {script!r}")
+        pve.sh = old_sh
+
+        async def forget(name_):
+            forgotten.append(name_)
+        pve._forget_host_key = forget
+        r = asyncio.run(pve.destroy(name))
+    c.check("#568 old wrapper -> exactly one call, refusal with its reason",
+            len(sent) == 1 and bool(r.get("error")) and "no such verb" in r["error"],
+            (sent, r))
+    c.check("#568 old wrapper -> nothing was destroyed or cleaned",
+            "destroyed" not in r and forgotten == [], (r, forgotten))
+
+    # Мутационная проверка guard'а: без вызова, с опечаткой в глаголе, без
+    # имени, с чужим именем, с двумя вызовами -- ни один не проходит.
+    for calls, what in (
+            ([], "no call at all"),
+            ([f"sudo -n /usr/local/sbin/mop-pve destroy-bod {vmid} {name}"],
+             "typo in the verb"),
+            ([f"sudo -n /usr/local/sbin/mop-pve destroy-body {vmid}"],
+             "name missing"),
+            ([f"sudo -n /usr/local/sbin/mop-pve destroy-body {vmid} {stranger}"],
+             "stranger's name"),
+            ([f"sudo -n /usr/local/sbin/mop-pve destroy-body {vmid} {name}",
+              f"sudo -n /usr/local/sbin/mop-pve destroy-body {vmid} {name}"],
+             "two calls")):
+        c.check(f"#568 the guard rejects: {what}", not exact(calls), calls)
 
     # Имя, не прошедшее проверку, -- отказ до транспорта: ни одной команды.
     with restored(pve, "sh"):
