@@ -12,6 +12,7 @@
 """
 import json
 import os
+import re
 import sys
 
 import hermetic  # noqa: F401,E402 -- настройки не с этой машины (#209)
@@ -90,7 +91,7 @@ CASES = [
      facts("idle 1 1", OLD_WORK), "free (bug/1063)"),
     ("#483 dirty clone off its home still holds work",
      facts("idle 1 1", {**WORK, "home": "master", "dirty": 1}),
-     "idle: bug/1063 (вне дома master) (uncommitted: 1)"),
+     "idle: bug/1063 (off home master) (uncommitted: 1)"),
     ("the master's branch is its home, everything's pushed",
      facts("idle 1 1", WORK), "free (bug/1063)"),
     ("uncommitted files",
@@ -300,7 +301,7 @@ TREATMENT = [
     ("idle: bug/1063 (uncommitted: 3)", False, False, "busy"),
     ("idle: bug/1063 (unpushed: 2)", False, False, "busy"),
     ("idle: bug/1063 (uncommitted: 3, unpushed: 2)", False, False, "busy"),
-    ("idle: bug/1063 (вне дома master) (uncommitted: 1)", False, False, "busy"),
+    ("idle: bug/1063 (off home master) (uncommitted: 1)", False, False, "busy"),
     ("idle: bug/1063 (uncommitted: 2)", False, False, "busy"),
     ("idle: master (unpushed: 2)", False, False, "busy"),
     ("idle: master (uncommitted: 3)", False, False, "busy"),
@@ -914,6 +915,24 @@ def check_starting_510(c):
     c.expect("#510 starting is not free", is_free("starting"), False)
 
 
+# ── #562: строка ростера по-английски ────────────────────────────────────────
+# HYPOTHESIS: _clone_veto вставляет в ветку idle русское «(вне дома <дом>)»
+# (#483), а строку состояния читает модель через MCP -- вывод обязан быть
+# английским, и тот же факт везде зовётся off home (domain.work, сироты).
+# SOLUTION: в state.py `(off home <дом>)`; закрепляет и сам маркер, и
+# отсутствие кириллицы в каждом вердикте таблиц.
+# RESULT: проверка красная на русском маркере, зелёная после правки.
+# STATUS: FIXED — see #562
+def check_english_562(c):
+    c.expect("#562 a dirty clone off its home reads off home in English",
+             str(verdict(facts("idle 1 1", {**WORK, "home": "master", "dirty": 1}))),
+             "idle: bug/1063 (off home master) (uncommitted: 1)")
+    for what, given, _ in CASES + SCREENLESS:
+        shown = str(verdict(given))
+        c.check(f"#562 no Cyrillic in the roster state: {what}",
+                not re.search("[\u0400-\u04ff]", shown), shown)
+
+
 def main():
     c = Checks()
     for what, given, want in CASES:
@@ -934,6 +953,7 @@ def main():
     check_invariants_273(c)
     check_alloc_377(c)
     check_starting_510(c)
+    check_english_562(c)
     for state, want in FREE_CASES:
         c.expect(f"is_free({state!r})", is_free(state and state.kind), want)
     return c.report("state")

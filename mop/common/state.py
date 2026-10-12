@@ -259,7 +259,7 @@ def _clone_veto(clone):
     # ветку показа, detail перечисляет только грязь и неотправленное.
     work = [w for w in clone.work() if not w.startswith("off home")]
     home = clone.home_branch
-    branch = (f"{clone.branch} (вне дома {home})"
+    branch = (f"{clone.branch} (off home {home})"
               if clone.branch and home and clone.branch != home else clone.branch)
     return State("idle", ", ".join(work), branch)
 
