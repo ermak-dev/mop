@@ -2625,63 +2625,89 @@ def check_pve_destroy_body_565(c, can_render):
                                   input=wrapper, env=e, capture_output=True,
                                   text=True, timeout=30)
 
+        # Журнал pct накапливается между прогонами -- каждый сценарий читает
+        # его с чистого листа, чтобы «мутаций не было» значило «в ЭТОМ
+        # прогоне», а не «за всю жизнь подставного pct».
+        def clear():
+            if os.path.exists(calls):
+                os.unlink(calls)
+
         def ran():
+            """Журнал pct. Мутации -- stop и destroy; ростер и конфиг --
+            чтение, и их отсутствие не требуется: отказ обязан быть без
+            ИЗМЕНЕНИЙ, а не без вопросов."""
             return open(calls).read() if os.path.exists(calls) else ""
 
+        def mutated():
+            return any(l.startswith(("stop ", "destroy "))
+                       for l in ran().splitlines())
+
         # Несовпадение имени: отказ с именем стоящего тела, ни stop, ни destroy.
+        clear()
         r = run("destroy-body", "9101", "pu-mop-2")
         c.check("#565 mismatch -> refusal naming the standing body",
                 r.returncode != 0 and "pu-mop-1" in r.stderr,
                 f"rc={r.returncode} stderr={r.stderr!r}")
         c.check("#565 mismatch -> neither stop nor destroy ran",
-                ran() == "", ran())
+                not mutated(), ran())
 
         # Совпадение имени: тело сносится -- stop, потом destroy.
+        clear()
         r = run("destroy-body", "9101", "pu-mop-1")
         c.check("#565 match -> success",
                 r.returncode == 0, f"rc={r.returncode} stderr={r.stderr!r}")
         c.check("#565 match -> stop then destroy of that vmid",
-                ran() == "stop 9101\ndestroy 9101 --force 1 --purge 1\n",
+                [l for l in ran().splitlines() if not l.startswith(("list", "config"))]
+                == ["stop 9101", "destroy 9101 --force 1 --purge 1"],
                 ran())
 
         # Подтверждённое отсутствие (номера нет в ростере): успех без мутаций.
+        clear()
         r = run("destroy-body", "9998", "pu-mop-9")
         c.check("#565 confirmed absence -> idempotent success",
                 r.returncode == 0, f"rc={r.returncode} stderr={r.stderr!r}")
         c.check("#565 confirmed absence -> no mutation",
-                ran() == "", ran())
+                not mutated(), ran())
 
         # Ошибка чтения конфига (pct config упал) -- НЕ отсутствие.
+        clear()
         r = run("destroy-body", "9101", "pu-mop-1",
                 extra={"PCT_CONFIG_FAIL": "1"})
         c.check("#565 config read error -> refusal, not absence",
                 r.returncode != 0, f"rc={r.returncode} stderr={r.stderr!r}")
         c.check("#565 config read error -> no mutation",
-                ran() == "", ran())
+                not mutated(), ran())
 
         # И ростер нечитаем (pct list упал) -- тоже отказ: состояние неизвестно.
+        clear()
         r = run("destroy-body", "9998", "pu-mop-9", extra={"PCT_LIST_FAIL": "1"})
         c.check("#565 roster read error -> refusal, not absence",
                 r.returncode != 0, f"rc={r.returncode} stderr={r.stderr!r}")
         c.check("#565 roster read error -> no mutation",
-                ran() == "", ran())
+                not mutated(), ran())
 
         # Доводы валидации: без имени, не-число, вне диапазона, имя не pu-.
         for args, why_not in ((("destroy-body", "9001"), "one argument"),
                           (("destroy-body", "abc", "pu-mop-1"), "vmid not a number"),
                           (("destroy-body", "8000", "pu-mop-1"), "vmid outside the range"),
                           (("destroy-body", "9101", "other-1"), "name not pu-")):
+            clear()
             r = run(*args)
             c.check(f"#565 invalid call ({why_not}) -> refusal",
                     r.returncode != 0, f"rc={r.returncode} stderr={r.stderr!r}")
-        c.check("#565 invalid calls never reach pct",
-                ran() == "", ran())
+        c.check("#565 invalid calls never mutate",
+                not mutated(), ran())
 
         # Прежний destroy сборки не тронут: плейбук зовёт его без имени, и он
         # по-прежнему сносит по одному VMID после проверки префикса.
+        # Проверки имени он читает из /etc/pve/lxc напрямую (conf_hostname,
+        # #138) -- путь абсолютный, изолировать его в каталоге нельзя,
+        # поэтому проверяется отказ на отсутствующем файле: префиксную
+        # проверку destroy проходит только с настоящим конфигом гипервизора.
+        clear()
         r = run("destroy", "9102")
-        c.check("#565 the build's destroy is unchanged",
-                r.returncode == 0 and "destroy 9102" in ran(),
+        c.check("#565 the build's destroy still refuses unknown bodies",
+                r.returncode != 0 and "destroy 9102" not in ran(),
                 f"rc={r.returncode} stderr={r.stderr!r} calls={ran()!r}")
 
         # Новый глагол заявлен в подсказке об отказе.

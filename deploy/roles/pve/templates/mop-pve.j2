@@ -212,6 +212,47 @@ destroy)
     pct destroy "$1" --force 1 --purge 1 >&2
     ;;
 
+# Снос ЖИВОГО тела по контракту (#565): вызывающий называет не только номер,
+# но и имя, которое он в этом номере ждёт. Разница с destroy -- в том, чьё
+# слово о принадлежности: destroy доверяет префиксу hostname (check_host --
+# годится сборке, чей плейбук сам создал тело и знает, что сносит), а здесь
+# слово вызывающего сверяется с гипервизором до первой мутации.
+#
+# Зачем: VMID тела -- хеш имени, и коллизия двух имён на одном номере
+# возможна (ensure ловит её на подъёме, громко). Снос по одному номеру при
+# коллизии убивал бы соседа: cleanup упавшего тела B находил под этим VMID
+# живое тело A, префикс pu- совпадал -- и A уничтожался.
+#
+# Имя стоящего тела читается `pct config`, не файлом конфига напрямую:
+# источник тот же, что у прежнего destroy, и он различает «тела нет»
+# (свой код выхода) от «прочесть не вышло». Прочесть нельзя -- сносить
+# нельзя: оба состояния отказывают fail-closed, без stop и destroy.
+# Подтверждённое отсутствие (номера нет в `pct list`) -- идемпотентный
+# успех: повторный прогон уборки не должен читаться как отказ.
+destroy-body)
+    vmid="${1:?vmid}"; expected="${2:?expected hostname}"
+    check_vmid "$vmid"; check_name "$expected"
+    # Ростер -- первый свидетель: номера нет -- тела нет, успех без мутаций.
+    if ! roster=$(pct list 2>/dev/null); then
+        die "cannot read the roster of $vmid: state unknown, nothing removed"
+    fi
+    if ! grep -q "^$vmid " <<<"$roster"; then
+        exit 0
+    fi
+    # Конфиг -- второй: имя стоящего тела, для точного сравнения. Ненулевой
+    # код здесь -- не «тела нет» (его уже нет в ростере), а «не прочесть».
+    # Конфиг и разбор -- отдельно: код выхода pct в конвейере с sed затерся
+    # бы успехом sed'а, и ошибка чтения притворилась бы пустым именем.
+    if ! conf=$(pct config "$vmid" 2>/dev/null); then
+        die "cannot read the config of $vmid: state unknown, nothing removed"
+    fi
+    standing=$(sed -n 's/^hostname: //p' <<<"$conf")
+    [[ "$standing" == "$expected" ]] \
+        || die "container $vmid is named $standing, not $expected — not removing"
+    pct stop "$vmid" >/dev/null 2>&1 || true
+    pct destroy "$vmid" --force 1 --purge 1 >&2
+    ;;
+
 # Довести свежий контейнер до машины, в которую вообще можно войти по ssh.
 # Отдельный глагол, а не скрипт снаружи, потому что всё здесь требует root
 # внутри тела, а пользователя пула там ещё нет -- то есть `exec` неприменим по
@@ -354,6 +395,6 @@ unpack)
     ;;
 
 *)
-    die "no such verb ${verb:-(empty)}; available: list capacity create clone size memory net bootstrap keys start stop template destroy exec push unpack"
+    die "no such verb ${verb:-(empty)}; available: list capacity create clone size memory net bootstrap keys start stop template destroy destroy-body exec push unpack"
     ;;
 esac
