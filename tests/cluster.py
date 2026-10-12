@@ -844,11 +844,18 @@ def check_bootstrap_334(c):
     c.expect("#334 bootstrap_result: project scope, named and acting like spec",
              (row.scope, row.named, row.acting), (cluster.PROJECT, True, True))
     root = tempfile.mkdtemp(prefix="mop-test-cluster-334-")
+    # Реестр проекта (#567): add проверяет наличие проекта в реестре, без
+    # него -- отказ; прежняя среда #334 жила без реестра вовсе.
+    reg334 = tempfile.mkdtemp(prefix="mop-test-cluster-334r-")
+    with open(os.path.join(reg334, "projects.json"), "w") as f:
+        json.dump({"version": 1,
+                   "projects": [{"origin": "git@h:g/mop.git"}]}, f)
     prov = {"source": "origin", "commit": "5b92b440c952fad2", "dirty": False,
             "tasks": 2, "present": True}
     text = "- name: b\n  tasks:\n    - name: t\n      ansible.builtin.command: \"true\"\n"
     own = {"ID": "pu-mop-1", "Version": 3, "Meta": {"origin": "git@h:g/mop.git", "llm": "claude"}}
-    with patched(bootstrap, ROOT=root), \
+    with patched(cluster.projects, SNAPSHOT_DIR=reg334), \
+            patched(bootstrap, ROOT=root), \
             patched(cluster.spec, job_spec=lambda *a, **kw: {"Job": {"ID": a[0]}},
                     respec=lambda name, meta, cont=False, node=None: {"Job": {"ID": name}}), \
             patched(cluster, _live_count=lambda target: 0, next_name=lambda target: "pu-mop-1",
@@ -2030,13 +2037,25 @@ def _no_lock_534():
 # _projects_lock -- порядок замков один (реестровый снаружи, ворота
 # внутри), инверсии нет; независимые проекты заперты каждый своим замком,
 # долгого общего замка нет. Граница гарантии -- один процесс cluster.
-# STATUS: #567 (красный прогон; реализация следует)
+# STATUS: FIXED — see #567
+# (корректирующий коммит: повторная проверка наличия проекта внутри ворот;
+# поведенческие порядки delete/add, содержимое workspace, interleaving лимита)
 import threading  # noqa: E402
 
 ALPHA567 = "git@h:g/alpha.git"
 BETA567 = "git@h:g/beta.git"
-PLAY567 = "- name: b\n  tasks:\n    - name: t\n      ansible.builtin.command: \"true\"\n"
+PLAYS567 = {"one": "- name: b1\n  tasks:\n    - name: t1\n      ansible.builtin.command: \"true\"\n",
+            "two": "- name: b2\n  tasks:\n    - name: t2\n      ansible.builtin.command: \"true\"\n"}
 BRANCH567 = {"one": "feature/one", "two": "feature/two"}
+
+
+def tasks_text567(play):
+    """Текст tasks.yml, который bootstrap.store пишет для этого playbook:
+    задачи, как их разбирает manifest.play -- содержимое для сравнения."""
+    from mop.common import manifest
+    _vars, tasks = manifest.play(play)
+    import yaml
+    return yaml.safe_dump(tasks, allow_unicode=True, default_flow_style=False)
 
 
 class _RacyNomad567(FakeNomad):
@@ -2184,8 +2203,10 @@ def check_add_race_567(c):
         return out
 
     def two(origin=ALPHA567):
-        return {"one": {"origin": origin, "branch": BRANCH567["one"], "workspace": PLAY567},
-                "two": {"origin": origin, "branch": BRANCH567["two"], "workspace": PLAY567}}
+        return {"one": {"origin": origin, "branch": BRANCH567["one"],
+                        "workspace": PLAYS567["one"]},
+                "two": {"origin": origin, "branch": BRANCH567["two"],
+                        "workspace": PLAYS567["two"]}}
 
     # 1. Гонка без ворот: барьер держит регистрации до всех чтений -- оба
     # add видят пустой список, берут одно имя, вторая регистрация затирает
@@ -2236,10 +2257,12 @@ def check_add_race_567(c):
                 len(oks) == 2 and len(set(names)) == 2, f"answers: {out}")
         for tag, ans in oks.items():
             job = fake.jobs.get(ans["name"]) or {}
+            path = os.path.join(boot, f"{ans['name']}-tasks.yml")
+            got_ws = open(path).read() if os.path.exists(path) else None
             c.check(f"#567 the name of {tag} carries its branch and its workspace",
                     (job.get("Meta") or {}).get("branch") == BRANCH567[tag]
-                    and os.path.exists(os.path.join(boot, f"{ans['name']}-tasks.yml")),
-                    f"answer: {ans}, job: {job}")
+                    and got_ws == tasks_text567(PLAYS567[tag]),
+                    f"answer: {ans}, job: {job}, workspace: {got_ws!r}")
 
     # 5. Последний слот: лимит 1, два одновременных add -- ровно один
     # проходит, второй получает отказ про потолок, джоб один.
@@ -2302,30 +2325,181 @@ def check_add_race_567(c):
         c.check("#567 the gated project passes after the gate is released",
                 mine["one"].get("ok"), str(mine))
 
-    # 8. Сговор с реестром: смена лимита и снятие проекта берут те же
-    # ворота внутри _projects_lock -- add не проскочит между чтением лимита
-    # и регистрацией. Порядок замков один: реестровый снаружи.
-    env = _Registry534()
+    # 8. Сговор с удалением, двумя порядками -- поведенчески, без записи
+    # взятых замков. add раньше: delete отказывает живому джобу, проект и
+    # реестр живы. delete раньше: add отказывает, ничего не регистрирует и
+    # не пишет workspace. Это дыра из приёмки: _add читал только лимиты,
+    # отсутствующий проект читался как unlimited, и допущенный add
+    # регистрировал джоба снятому проекту. Среда -- только реестр и его
+    # соседи: ростер обязан видеть настоящего Nomad-заглушку, поэтому
+    # patched_env с его пустым nomad_jobs здесь не годится.
+    def stub_spec(name, origin, cont=False, branch=None, node=None):
+        # Type=service: ростер различает папетов от sysbatch по типу джоба
+        # (puppets.visible), без него delete не увидит живого.
+        return {"Job": {"ID": name, "Type": "service",
+                        "Meta": {"origin": origin}}}
+
+    def registry_env_567(limits):
+        """Реестр в своём каталоге, ростер и bootstrap -- заглушками.
+
+        -> (контекст, каталог): список файлов bootstrap в контексте, чтобы
+        проверять «не пишет workspace» по разнице до/после."""
+        from mop.common import projects as _projects
+        d = tempfile.mkdtemp(prefix="mop-test-567r-")
+        boot = tempfile.mkdtemp(prefix="mop-test-567w-")
+        with open(os.path.join(d, "projects.json"), "w") as f:
+            json.dump({"version": 1,
+                       "projects": [{"origin": o} if l is None
+                                    else {"origin": o, "limit": l}
+                                    for o, l in (("git@git.ermak.dev:ermak/rudesktop.git", None),
+                                                 (MOP534, limits))]}, f)
+
+        def read_users(path=None):
+            return None
+
+        def apply_stub(names, verify_user=None):
+            return False
+
+        @contextlib.contextmanager
+        def inner():
+            try:
+                with patched(_projects, SNAPSHOT_DIR=d,
+                             SNAPSHOT=os.path.join(d, "projects.json")), \
+                        patched(_natsconf, read_users=read_users,
+                                read_base=lambda: {"service": "pw"}), \
+                        patched(cluster, _users_apply=apply_stub), \
+                        patched(_bootstrap, ROOT=boot):
+                    yield boot
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
+                shutil.rmtree(boot, ignore_errors=True)
+        return inner(), boot
+
+    # add раньше: delete отказывает живому джобу.
+    ctx, _ = registry_env_567(None)
+    with ctx, patched(cluster.spec, job_spec=stub_spec):
+        fake = FakeNomad()
+        got = cluster.answer("mop", {"verb": "add", "origin": MOP534,
+                                     "workspace": PLAYS567["one"]}, api=fake)
+        c.check("#567 add of a registered project answers ok", got.get("ok"), str(got))
+        drop = cluster.answer("admin", {"verb": "project_delete", "name": "mop"}, api=fake)
+        c.check("#567 delete refuses while the project has a live puppet",
+                "error" in drop, f"delete: {drop}")
+
+    # delete раньше: add отказывает, ничего не регистрирует, workspace не
+    # пишет. Порядок «add уже стоит у ворот» не искусственный: delete и add
+    # врезаются в один проект, ворота дают ровно один порядок, и в обоих
+    # итог обязателен: отказ после снятого проекта.
+    ctx, boot = registry_env_567(None)
+    with ctx, patched(cluster.spec, job_spec=stub_spec):
+        fake = FakeNomad()
+        drop = cluster.answer("admin", {"verb": "project_delete", "name": "mop"}, api=fake)
+        c.check("#567 delete of an empty project answers ok", drop.get("ok"), str(drop))
+        before = set(os.listdir(boot))
+        ans = cluster.answer("mop", {"verb": "add", "origin": MOP534,
+                                     "workspace": PLAYS567["two"]}, api=fake)
+        written = sorted(set(os.listdir(boot)) - before)
+        c.check("#567 an add after delete refuses instead of registering",
+                "error" in ans, f"answer: {ans}")
+        c.check("#567 the refused add registers no job",
+                fake.jobs == {}, f"jobs: {sorted(fake.jobs)}")
+        c.check("#567 the refused add writes no workspace",
+                written == [], f"written: {written}")
+
+
+def check_add_limit_interleaving_567(c):
+    """Смена лимита против add: поведенческий interleaving, не запись
+    взятых замков.
+
+    Гонка без ворот у лимита: add прочитал старый потолок (3) при двух
+    живых, оператор опустил потолок до 1 и получил ok, и только потом add
+    зарегистрировал третьего -- после подтверждённого ответа лимита живых
+    больше потолка. Запрещённое состояние: лимит ответил ok РАНЬШЕ add,
+    add ok, и живых больше нового потолка. Координатор -- событие у
+    регистрации add: add стоит в register, пока поток лимита не шагнул к
+    ответу; с воротами лимит не ответит до освобождения ворот add, и
+    порядок ответов разворачивается сам -- без sleep'ов и таймаутов как
+    доказательства."""
+    import contextvars
+    import time
+
+    class _WaitsNomad(FakeNomad):
+        """Регистрация add сигналит и ждёт шага потока лимита."""
+
+        def __init__(self, jobs):
+            super().__init__(jobs=jobs)
+            self.at_register = threading.Event()
+            self.limit_steps = threading.Event()
+            self.done = []
+
+        def register(self, spec):
+            self.at_register.set()
+            self.limit_steps.wait(timeout=10)
+            super().register(spec)
+
+    env = _Registry534(limits={"mop": 3})
     try:
         with env.patched_env():
-            real = cluster._project_gate
-            taken = []
+            def stub_spec(name, origin, cont=False, branch=None, node=None):
+                return {"Job": {"ID": name, "Meta": {"origin": origin}}}
 
-            @contextlib.contextmanager
-            def recording(name):
-                taken.append(name)
-                with real(name):
-                    yield
-            with patched(cluster, _project_gate=recording):
-                got = cluster.answer("admin", {"verb": "project_limit",
-                                               "name": "mop", "value": "3"})
-                c.check("#567 project_limit takes the project gate",
-                        got.get("ok") and taken == ["mop"], f"{got}, gates: {taken}")
-                taken.clear()
-                got = cluster.answer("admin", {"verb": "project_delete",
-                                               "name": "rudesktop"})
-                c.check("#567 project_delete takes the project gate",
-                        got.get("ok") and taken == ["rudesktop"], f"{got}, gates: {taken}")
+            def job(i):
+                return {"ID": f"pu-mop-{i}", "Status": "run",
+                        "Meta": {"origin": MOP534}}
+
+            fake = _WaitsNomad({j["ID"]: j for j in (job(1), job(2))})
+            cv = contextvars.ContextVar("nomad_api", default=fake)
+            out, when = {}, {}
+            mark = threading.Lock()
+
+            def note(key):
+                with mark:
+                    when[key] = time.monotonic()
+
+            def run_add():
+                out["add"] = cluster.answer(
+                    "mop", {"verb": "add", "origin": MOP534,
+                            "workspace": PLAYS567["one"]})
+                note("add")
+
+            def run_limit():
+                fake.at_register.wait(timeout=10)      # add дошёл до register
+                fake.limit_steps.set()                 # отпустить add
+                out["limit"] = cluster.answer(
+                    "admin", {"verb": "project_limit", "name": "mop", "value": "1"})
+                note("limit")
+
+            with patched(cluster, _API=cv), \
+                    patched(cluster.spec, job_spec=stub_spec), \
+                    patched(_bootstrap, ROOT=tempfile.mkdtemp(prefix="mop-test-567d-")):
+                a = threading.Thread(target=run_add)
+                l = threading.Thread(target=run_limit)
+                a.start()
+                l.start()
+                a.join(timeout=15)
+                l.join(timeout=15)
+                for t, n in ((a, "add"), (l, "limit")):
+                    if t.is_alive():
+                        c.fail(f"#567 the interleaved {n} hung", "join timed out")
+                        return
+            add, lim = out.get("add") or {}, out.get("limit") or {}
+            live = sorted(fake.jobs)
+            if not c.check("#567 the limit change answers ok in the race",
+                           lim.get("ok"), f"limit: {lim}, add: {add}"):
+                return
+            limit_first = when["limit"] < when["add"]
+            if limit_first:
+                # Лимит подтвердился раньше ответа add -- add обязан
+                # отказать и ничего не зарегистрировать.
+                c.check("#567 an add answered after the confirmed limit refuses",
+                        "error" in add and live == ["pu-mop-1", "pu-mop-2"],
+                        f"add: {add}, jobs: {live}")
+            else:
+                # Add выиграл serialization -- третий жив, потолок 1 записан
+                # следом; это законный порядок, отказывать нечему.
+                c.check("#567 an add answered before the limit may pass under the old ceiling",
+                        add.get("ok") and live == ["pu-mop-1", "pu-mop-2", "pu-mop-3"],
+                        f"add: {add}, jobs: {live}")
     finally:
         env.cleanup()
 
@@ -2347,7 +2521,7 @@ def main():
                   check_nomad_api_275, check_stderr_verb_333,
                   check_update_origin_365, check_nodes_api_375,
                   check_registry_verbs_534, check_concurrent_534,
-                  check_add_race_567,
+                  check_add_race_567, check_add_limit_interleaving_567,
                   ):
         check(c)
     return c.report("cluster")

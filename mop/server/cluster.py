@@ -392,6 +392,15 @@ def _add(project, req):
     # под ворота -- из origin тем же правилом, что и везде; реестр add не
     # пишет, реестровый замок здесь не нужен.
     with _project_gate(puppets.project_of(origin or "")):
+        # Наличие проекта -- внутри ворот и до всего (#567): удаление и
+        # завод врезаются в один проект, и add, стоявший у ворот, обязан
+        # увидеть снятый проект, а не регистрировать джоба отсутствующему.
+        # Раньше отсутствие читалось как unlimited -- дыра приёмки #567.
+        names = projects.snapshot_names(_view())
+        target_name = puppets.project_of(origin or "")
+        if target_name not in names:
+            return {"error": f"no project {target_name} in the registry; what the pool "
+                             f"serves: mop project list"}
         # Лимит -- проекта из origin, а не просителя: оператор через admin
         # заводит папета тому же проекту и упирается в тот же потолок.
         # Реестр читается на каждый запрос: правка лимита доезжает без
