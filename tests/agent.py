@@ -715,128 +715,87 @@ def check_same_owner_generation_573(c):
         agent._lease_claims = {}
         agent._lease_holder = {}
         # A и B -- один логин в одну секунду: строки записи равны.
-        # A взял аренду и ждёт доставки; B берёт с force и доставляет;
-        # доставка A падает последней -- откат A не имеет права тронуть
-        # аренду успешного B.
+        # Перекрытие отправок умерло вместе с окном (передача -- под
+        # замком), но захват force поверх ЖИВОЙ аренды остаётся реальным
+        # сценарием: доставка A транспортно-неопределённа (timeout) --
+        # откатов нет, захват жив; B берёт с force и доставляет. Откат A
+        # не приедет вовсе -- и подавно не имеет права тронуть аренду B.
         async def race():
-            b_done = asyncio.Event()
-
             async def deliver(name, cmd, timeout=20):
                 if "--from-name a " in cmd:
-                    await b_done.wait()
-                    return {"error": "not delivered"}
+                    return {"error": "the body did not answer in 20s",
+                            "timeout": True}
                 return {"msg_id": "m-b"}
             agent.session_json = deliver
 
             async def a():
                 return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
                                                  "owner": "erin", "from_name": "a"})
-
-            async def b():
-                while owner_now() is None:
-                    await asyncio.sleep(0.01)
-                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
-                                                "owner": "erin", "from_name": "b",
-                                                "force": True})
-                b_done.set()
-                return got
-            return await asyncio.gather(a(), b())
+            ra = await a()
+            rb = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                           "owner": "erin", "from_name": "b",
+                                           "force": True})
+            return ra, rb
         ra, rb = asyncio.run(race())
         c.check("same-owner race: a must fail, b must deliver",
-                not (not ra.get("error") or rb.get("error")), f"a {ra!r}, b {rb!r}")
+                not (not ra.get("error") or not ra.get("timeout")
+                     or rb.get("error")), f"a {ra!r}, b {rb!r}")
         c.check("same-owner race: the lease must stay with the second taker",
                 not (getattr(owner_now(), "user", None) != "erin"
                      or owner_now().at != 1000), repr(owner_now()))
 
-        # Тот же провал и без force: простое перезаписи равной строкой при
-        # живой чужой аренде быть не должно, но и успешный B не должен
-        # остаться без аренды после отката A -- здесь A брал пустое, B
-        # взял поверх него, откат A обязан увидеть «в файле уже не мой
-        # захват», хоть байты и равны.
-        if os.path.exists(path):
-            os.remove(path)
-
+        # Тот же сценарий без force: живая (indeterminate) аренда A и тот
+        # же логин у B -- verdict пропускает своего без force, запись
+        # обновляется поколением, не байтами: равные строки не дают B
+        # «уже стоящего» файла.
         async def race2():
-            b_done = asyncio.Event()
-
             async def deliver(name, cmd, timeout=20):
                 if "--from-name a " in cmd:
-                    await b_done.wait()
-                    return {"error": "not delivered"}
+                    return {"error": "the body did not answer in 20s",
+                            "timeout": True}
                 return {"msg_id": "m-b"}
             agent.session_json = deliver
 
             async def a():
                 return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
                                                  "owner": "erin", "from_name": "a"})
-
-            async def b():
-                while owner_now() is None:
-                    await asyncio.sleep(0.01)
-                # Аренда A моложе окна и «своя» по логину -- B берёт её без
-                # force только потому, что владелец тот же логин.
-                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
-                                                "owner": "erin", "from_name": "b"})
-                b_done.set()
-                return got
-            return await asyncio.gather(a(), b())
+            ra = await a()
+            rb = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                           "owner": "erin", "from_name": "b"})
+            return ra, rb
         ra, rb = asyncio.run(race2())
         c.check("same-owner no-force race: a must fail, b must deliver",
-                not (not ra.get("error") or rb.get("error")), f"a {ra!r}, b {rb!r}")
+                not (not ra.get("error") or not ra.get("timeout")
+                     or rb.get("error")), f"a {ra!r}, b {rb!r}")
         c.check("same-owner no-force race: the lease must stay with the second taker",
                 not (getattr(owner_now(), "user", None) != "erin"
                      or owner_now().at != 1000), repr(owner_now()))
 
-        # Гонка замка: ранний предчек поколения -- не критическая секция.
-        # A записал аренду (gen 1) и ждёт доставки; B входит в замок и
-        # задержан ВНУТРИ clone_facts до записи (поколение ещё 1); доставка
-        # A падает, её предчек видит «ещё моё» и встаёт в очередь на замок;
-        # B дописывает ту же строку (gen 2) и выпускает замок; A заходит в
-        # _unclaim и без проверки реестра ВНУТРИ замка стирает успешную
-        # аренду B.
-        # Порядок рулят Events по наблюдаемым фактам (замок взят, файл
-        # записан) -- ни одного sleep-доказательства.
+        # Гонка замка в старом порядке (предчек до замка) больше не
+        # воспроизводима: захват -> identity -> передача -- одна критическая
+        # секция, interleaving'а нет (review-2 #574). Инвариант, который она
+        # защищала, -- откат провалившегося захвата не стирает аренду
+        # успешного поверх -- проверяем напрямую, последовательными
+        # отправками: A провалился и завершился, B доставил поверх.
         if os.path.exists(path):
             os.remove(path)
 
+        async def deliver_a_fails(name, cmd, timeout=20):
+            if "--from-name a " in cmd:
+                return {"error": "not delivered"}
+            return {"msg_id": "m-b"}
+
         async def lock_race():
-            b_in_facts = asyncio.Event()   # B держит замок, внутри clone_facts
-            a_failed = asyncio.Event()     # доставка A упала
-
-            async def deliver(name, cmd, timeout=20):
-                if "--from-name a " in cmd:
-                    await b_in_facts.wait()
-                    # Будим B здесь: продолжение A (предчек и очередь на
-                    # замок) успевает отработать до пробуждения B -- ровно
-                    # порядок «предчек прошёл, замок чужой».
-                    a_failed.set()
-                    return {"error": "not delivered"}
-                return {"msg_id": "m-b"}
-            agent.session_json = deliver
-            state = {"facts_calls": 0}
-
-            async def tracking_facts(name):
-                state["facts_calls"] += 1
-                if state["facts_calls"] == 2:  # B's claim read -- B holds the lock
-                    b_in_facts.set()
-                    await a_failed.wait()
-                return await facts(name)
-            agent.clone_facts = tracking_facts
+            agent.clone_facts, agent.session_json = facts, deliver_a_fails
 
             async def a():
-                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
-                                                "owner": "erin", "from_name": "a"})
-                return got
-
-            async def b():
-                # Стартуем, когда A уже записал аренду и ушёл в доставку.
-                while owner_now() is None:
-                    await asyncio.sleep(0.01)
-                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
-                                                "owner": "erin", "from_name": "b",
-                                                "force": True})
-                return got
-            return await asyncio.gather(a(), b())
+                return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
+                                                 "owner": "erin", "from_name": "a"})
+            ra = await a()
+            rb = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                           "owner": "erin", "from_name": "b",
+                                           "force": True})
+            return ra, rb
         agent._owner_locks = {}
         agent._lease_generations = {}
         agent._lease_claims = {}
@@ -848,39 +807,28 @@ def check_same_owner_generation_573(c):
                 not (getattr(owner_now(), "user", None) != "erin"
                      or owner_now().at != 1000), repr(owner_now()))
 
-        # Два перекрывающихся неудачных захвата одного логина: B взял поверх
-        # A (строки равны), оба провалились, B откатил первым. Откат B
-        # восстанавливает прежнего владельца A-записи... нет: откат B обязан
-        # понять, что поверх A стоит он сам, и отменить именно свою запись --
-        # а откат A после него не должен оставить ложную аренду неудачного A.
-        # Итог: файла нет вовсе (до A он не существовал), двойной провал не
-        # оставляет «живого» владельца.
+        # Два последовательных неудачных захвата одного логина (в старом
+        # виде -- перекрывающиеся; interleaving умер вместе с окном, но
+        # инвариант жив): B взял поверх A (строки равны), оба провалились.
+        # Откат B обязан понять, что под ним проваленный A, и вернуть
+        # «прежде» A (файла не было) -- не воскресить запись A; двойной
+        # провал не оставляет «живого» владельца.
         if os.path.exists(path):
             os.remove(path)
 
         async def nested_race():
-            b_done = asyncio.Event()
-
             async def deliver(name, cmd, timeout=20):
-                if "--from-name a " in cmd:
-                    await b_done.wait()
-                    return {"error": "not delivered"}
-                return {"error": "not delivered either"}
+                return {"error": "not delivered"}
             agent.clone_facts, agent.session_json = facts, deliver
 
             async def a():
                 return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
                                                  "owner": "erin", "from_name": "a"})
-
-            async def b():
-                while owner_now() is None:
-                    await asyncio.sleep(0.01)
-                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
-                                                "owner": "erin", "from_name": "b",
-                                                "force": True})
-                b_done.set()
-                return got
-            return await asyncio.gather(a(), b())
+            ra = await a()
+            rb = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                           "owner": "erin", "from_name": "b",
+                                           "force": True})
+            return ra, rb
         agent._owner_locks = {}
         agent._lease_generations = {}
         agent._lease_claims = {}
@@ -892,10 +840,10 @@ def check_same_owner_generation_573(c):
         c.check("nested double failure (B fails first): no lease of a failed send may stay",
                 owner_now() is None, repr(owner_now()))
 
-        # Тот же двойной провал в обратном порядке: B взял аренду, пока A
-        # ждал доставки; доставка A отказывает, v_send A завершается, его
-        # откат видит живой захват B поверх -- файл не трогает, но провал
-        # A отмечен в реестре; затем падает доставка B -- и её откат обязан
+        # Тот же двойной провал «в обратном порядке» (A закончился раньше
+        # B -- под замком это порядок возвратов): B взял аренду, A успел
+        # провалиться и завершиться (его провал отмечен в реестре, файла он
+        # не трогал -- поверх стоял B), затем падает B -- её откат обязан
         # перепрыгнуть проваленную запись A, а не восстановить её. Оба
         # провалились -- файла быть не должно, а не «ложная аренда A висит
         # до TTL».
@@ -903,45 +851,18 @@ def check_same_owner_generation_573(c):
             os.remove(path)
 
         async def nested_race_reversed():
-            a_in_deliver = asyncio.Event()  # доставка A началась
-            b_claimed = asyncio.Event()     # B взял аренду (gen 2)
-            a_returned = asyncio.Event()    # v_send A завершился (провал отмечен)
-            writes = {"n": 0}
-
-            async def tracked_bsh(name, script, timeout=20):
-                out, code = await bash(name, script, timeout)
-                # Второй printf по файлу аренды -- запись захвата B.
-                if script.startswith("printf"):
-                    writes["n"] += 1
-                    if writes["n"] == 2:
-                        b_claimed.set()
-                return out, code
-
             async def deliver(name, cmd, timeout=20):
-                if "--from-name a " in cmd:
-                    a_in_deliver.set()
-                    # A не узнаёт об отказе, пока B не взял аренду: тогда
-                    # откат A видит живой захват поверх и файла не трогает
-                    # (провал -- только отметка в реестре).
-                    await b_claimed.wait()
-                    return {"error": "not delivered"}
-                await a_returned.wait()  # B падает только после ухода A
-                return {"error": "not delivered either"}
+                return {"error": "not delivered"}
             agent.clone_facts, agent.session_json = facts, deliver
-            agent.bsh = tracked_bsh
 
             async def a():
-                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
-                                                "owner": "erin", "from_name": "a"})
-                a_returned.set()
-                return got
-
-            async def b():
-                await a_in_deliver.wait()
-                return await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
-                                                 "owner": "erin", "from_name": "b",
-                                                 "force": True})
-            return await asyncio.gather(a(), b())
+                return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
+                                                 "owner": "erin", "from_name": "a"})
+            ra = await a()
+            rb = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                           "owner": "erin", "from_name": "b",
+                                           "force": True})
+            return ra, rb
         agent._owner_locks = {}
         agent._lease_generations = {}
         agent._lease_claims = {}
@@ -953,25 +874,19 @@ def check_same_owner_generation_573(c):
         c.check("nested double failure (A still in flight): no lease of a failed send may stay",
                 owner_now() is None, repr(owner_now()))
 
-        # Три захвата, и откат B успел встать в файл ДО захвата C: A(gen1,
-        # 1000) взял и висит в доставке; B(gen2, 1001) взял с force, про-
-        # валился и откателся -- файл снова держит запись A; C(gen3, 1002)
-        # берёт поверх -- его фактический предшественник A, а не соседний
-        # номер B; затем A проваливается, не откатавшись (C жив поверх), и
-        # последним падает C. Все три отправки неудачны, исходно файла не
-        # было -- файла быть не должно. Причинная связь -- чья запись лежала
-        # в файле на момент захвата, а не арифметика соседних поколений:
-        # провалившийся A не должен воскреснуть из отката C.
+        # Три последовательных захвата (перекрытие умерло с окном,
+        # причинная схема жива): A(gen1,1000) взял и провалился с откатом
+        # (файла снова нет); B(gen2,1001) взял с force поверх indeterminate
+        # A? Нет -- здесь все провалы подтверждённые, откат исполнен;
+        # C(gen3,1002) берёт поверх. Инвариант: предшественник C -- чья
+        # запись лежала в файле на момент захвата, а не соседний номер;
+        # провалившийся A не воскресает из отката C; исходно файла не было
+        # -- файла быть не должно.
         if os.path.exists(path):
             os.remove(path)
 
         async def rolled_back_predecessor_race():
             clock = {"t": 1000}
-            a_claimed = asyncio.Event()   # A записал аренду (gen 1)
-            b_settled = asyncio.Event()   # B провалился, откателся и завершился
-            c_claimed = asyncio.Event()   # C записал аренду (gen 3)
-            a_returned = asyncio.Event()  # v_send A завершился (провал отмечен)
-            saw_after_b = {}
             writes = {"n": 0}
 
             async def tracked_bsh(name, script, timeout=20):
@@ -980,61 +895,40 @@ def check_same_owner_generation_573(c):
                 # байтами (1000/1001/1002), равенство строк никого не спасает.
                 if script.startswith("printf"):
                     writes["n"] += 1
-                    if writes["n"] == 1:
-                        a_claimed.set()
-                        clock["t"] = 1001
-                    elif writes["n"] == 2:
-                        clock["t"] = 1002
-                    elif writes["n"] == 3:
-                        c_claimed.set()
+                    clock["t"] = 1000 + writes["n"]
                 return out, code
 
             async def deliver(name, cmd, timeout=20):
-                if "--from-name a " in cmd:
-                    await c_claimed.wait()  # A узнаёт отказ после захвата C
-                    return {"error": "not delivered"}
-                if "--from-name b " in cmd:
-                    return {"error": "not delivered either"}
-                await a_returned.wait()  # C падает последним
-                return {"error": "not delivered third"}
+                return {"error": "not delivered"}
             agent.clone_facts, agent.session_json = facts, deliver
             agent.bsh = tracked_bsh
             agent.time.time = lambda: clock["t"]
 
             async def a():
-                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
-                                                "owner": "erin", "from_name": "a"})
-                a_returned.set()
-                return got
-
-            async def b():
-                await a_claimed.wait()
-                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
-                                                "owner": "erin", "from_name": "b",
-                                                "force": True})
-                b_settled.set()  # откат B уже в файле, замок свободен
-                return got
-
-            async def c():
-                await b_settled.wait()
-                saw_after_b["owner"] = owner_now()  # откат B уже в файле
-                return await agent.v_send(None, {"name": "pu-mop-1", "message": "z",
-                                                 "owner": "erin", "from_name": "c",
-                                                 "force": True})
-            ra, rb, rc = await asyncio.gather(a(), b(), c())
-            agent.time.time = lambda: 1000
-            return ra, rb, rc, saw_after_b.get("owner")
+                return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
+                                                 "owner": "erin", "from_name": "a"})
+            ra = await a()
+            saw_after_a = owner_now()
+            rb = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                           "owner": "erin", "from_name": "b",
+                                           "force": True})
+            saw_after_b = owner_now()
+            rc = await agent.v_send(None, {"name": "pu-mop-1", "message": "z",
+                                           "owner": "erin", "from_name": "c",
+                                           "force": True})
+            return ra, rb, rc, saw_after_a, saw_after_b
         agent._owner_locks = {}
         agent._lease_generations = {}
         agent._lease_claims = {}
         agent._lease_holder = {}
-        ra, rb, rc, after_b = asyncio.run(rolled_back_predecessor_race())
+        ra, rb, rc, after_a, after_b = asyncio.run(rolled_back_predecessor_race())
+        agent.time.time = lambda: 1000
         c.check("rolled-back predecessor: all three must fail",
                 not (not ra.get("error") or not rb.get("error") or not rc.get("error")),
                 f"a {ra!r}, b {rb!r}, c {rc!r}")
-        c.check("rolled-back predecessor: B's rollback stood in the file before C",
-                not (getattr(after_b, "user", None) != "erin" or after_b.at != 1000),
-                repr(after_b))
+        c.check("rolled-back predecessor: each rollback stood in the file before the next claim",
+                not (after_a is not None or after_b is not None),
+                f"after A {after_a!r}, after B {after_b!r}")
         c.check("rolled-back predecessor: no lease of a failed send may stay",
                 owner_now() is None, repr(owner_now()))
         c.check("rolled-back predecessor: the ledger keeps no audit of settled sends",
@@ -1044,42 +938,27 @@ def check_same_owner_generation_573(c):
                 agent._lease_holder.get(path) is None,
                 repr(agent._lease_holder.get(path)))
 
-        # Успешный преемник не трогается: B доставил -- его аренда живёт,
-        # какой бы откат ни пришёл раньше. A успел провалиться и завершиться,
-        # B доставил: файл обязан держать erin (B).
+        # Успешный преемник не трогается (инвариант #573 жив и без
+        # перекрытия): A провалился и завершился, B доставил поверх --
+        # файл держит erin (B), реестр -- только подтверждённого держателя.
         if os.path.exists(path):
             os.remove(path)
 
         async def successor_race():
-            a_failed = asyncio.Event()
-            a_claimed = asyncio.Event()
-
-            async def tracked_bsh(name, script, timeout=20):
-                out, code = await bash(name, script, timeout)
-                if script.startswith("printf") and not a_claimed.is_set():
-                    a_claimed.set()
-                return out, code
-
             async def deliver(name, cmd, timeout=20):
                 if "--from-name a " in cmd:
                     return {"error": "not delivered"}
-                await a_failed.wait()
                 return {"msg_id": "m-b"}
             agent.clone_facts, agent.session_json = facts, deliver
-            agent.bsh = tracked_bsh
 
             async def a():
-                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
-                                                "owner": "erin", "from_name": "a"})
-                a_failed.set()
-                return got
-
-            async def b():
-                await a_claimed.wait()
-                return await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
-                                                 "owner": "erin", "from_name": "b",
-                                                 "force": True})
-            return await asyncio.gather(a(), b())
+                return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
+                                                 "owner": "erin", "from_name": "a"})
+            ra = await a()
+            rb = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                           "owner": "erin", "from_name": "b",
+                                           "force": True})
+            return ra, rb
         agent._owner_locks = {}
         agent._lease_generations = {}
         agent._lease_claims = {}
@@ -1225,35 +1104,33 @@ def check_unclaim_race_189(c):
         # Часы фиксированы и достаточно поздние: carol из отката ниже --
         # истёкшая аренда, которую dave законно берёт (#573 уточрил возраст).
 
-        # Гонка: A взял аренду и ждёт доставки; B берёт с force и доставляет;
-        # доставка A падает, и A откатывает.
+        # Гонка в старом виде (перекрытие отправок) умерла вместе с окном:
+        # захват -> identity -> передача -- одна критическая секция
+        # (review-2 #574). Живой сценарий force: A взял аренду, доставка
+        # транспортно-неопределённа (timeout, откатов нет, захват жив);
+        # B берёт с force и доставляет. Откат A не приедет -- и подавно
+        # не перетрёт запись B прежним владельцем и не сотрёт файл.
         agent.time.time = lambda: 10_000_000
         async def race():
-            b_done = asyncio.Event()
-
             async def deliver(name, cmd, timeout=20):
                 if "--from-name a " in cmd:
-                    await b_done.wait()
-                    return {"error": "not delivered"}
+                    return {"error": "the body did not answer in 20s",
+                            "timeout": True}
                 return {"msg_id": "m-b"}
             agent.session_json = deliver
 
             async def a():
                 return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
                                                  "owner": "alice", "from_name": "a"})
-
-            async def b():
-                while owner_now() is None:
-                    await asyncio.sleep(0.01)
-                got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
-                                                "owner": "bob", "from_name": "b",
-                                                "force": True})
-                b_done.set()
-                return got
-            return await asyncio.gather(a(), b())
+            ra = await a()
+            rb = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                           "owner": "bob", "from_name": "b",
+                                           "force": True})
+            return ra, rb
         ra, rb = asyncio.run(race())
         c.check("race: a must fail, b must deliver",
-                not (not ra.get("error") or rb.get("error")), f"a {ra!r}, b {rb!r}")
+                not (not ra.get("error") or not ra.get("timeout")
+                     or rb.get("error")), f"a {ra!r}, b {rb!r}")
         c.check("race: the lease must stay with bob",
                 not (getattr(owner_now(), "user", None) != "bob"), repr(owner_now()))
 
@@ -1604,32 +1481,37 @@ def check_git_identity_167(c):
 # #313 ловит не всё (pre-commit зовётся не каждым действием). При wait=0
 # остаётся гонка первого коммита: сессия стартует мгновенно. #167 проверял
 # профиль ПОСЛЕ возврата, не в момент доставки; #313 и #573 порядок не чинили.
-# SOLUTION: identity ставится ДО доставки, в короткой критической секции
-# вместе с захватом аренды (вопрос серверу + один шелл, потолок
-# IDENTITY_WAIT+bsh): confirmed владелец получает свою identity либо явное
-# её отсутствие, но не identity прежнего владельца. Сама передача -- вне
-# замка, но со стражем владения в том же шелле (review-матрица #574):
-# пока A готовился, B(force) мог взять владение -- страж гасит передачу до
-# session.py («the lease was taken over»), откат идёт согласованно, и
-# задание не стартует под чужой identity; замок остаётся коротким, гонки
-# #573/#189 живут как жили. Снимок прежнего состояния -- по каждому ключу
-# присутствие и значение отдельно («нет» != «пусто»), свои хуки стража --
-# состояниями A/F/O с режимом и телом; печатает его тот же шелл до записи,
-# восстановление -- по цепочке предшественников реестра #573, не новым
-# вопросом серверу; чужие hooks/core.hooksPath не трогаются. Установка
-# атомарна: точка отказа откатывает применённое по переменным снимка и
-# останавливается до установки нового; снятие отсутствующего ключа (код 5)
-# -- успех, отказ записи (config.lock) -- ошибка до доставки. Диагностика
-# не несёт строк снимка. Подтверждённая недоставка (структурированный
-# {"error"} от session.py или марка стража) откатывает пару; тишина тела и
-# ответ без JSON (разрыв транспорта) -- исход неизвестен: помечен timeout,
-# откатов нет. Ожидание простоя (до 600с) -- отдельный глагол session.py
-# wait-idle вне замка; ошибка ожидания -- не недоставка (msg_id стоит,
-# причина едет полем idle_error до мастера через общий вердикт). Ошибка
-# подготовки identity -- отказ ДО доставки; не пускать задание под неверной
-# identity важнее, чем доставить вовремя. Смена identity -- только
-# подтверждённому caller (#207): self-declared владелец identity не трогает
-# вовсе.
+# SOLUTION: identity ставится ДО доставки, и захват -> identity -> короткая
+# передача идут ПОД ОДНИМ замком папета (review-2 #574, п.1): проверка
+# владения в шелле была check-then-use -- между cat-сравнением и session.py
+# владение успевало уйти, и сообщение доставлялось под чужой identity.
+# Взаимное исключение -- сам замок: session.py send уходит с --wait 0 и
+# потолком 20с, окно короткое и ограниченное; ожидание простоя (до 600с) --
+# отдельный глагол wait-idle ВНЕ замка, и ошибка ожидания -- не недоставка
+# уже доставленного. Гонки #573/#189 остаются инвариантами координации
+# реестра (экран, причинная цепочка, prune) -- но их хореография теперь
+# сериализована замком, и тесты проверяют инварианты напрямую, не держат
+# дырявый порядок ради старого interleaving'а. Снимок прежнего состояния
+# печатает тот же шелл установки ДО первой записи кодированными метками
+# mop574-<ключ>\t<флаг><base64> (review-2, п.3/4): присутствие -- флагом
+# (P/A/X), значение -- всегда base64 -- literal '-' валиден и не сентинел,
+# многострочные значения не вытекают в диагностику; чтение различает «нет
+# ключа» (rc 1, пустой stderr) от «не прочиталось» (rc 1, непустой stderr):
+# второе -- X, и установка отказывает, не «восстанавливая» неизвестное.
+# Установка с компенсацией (review-2, п.2): точка отказа возвращает точные
+# bytes/режим/присутствие каждого затронутого элемента и ПОДТВЕРЖДАЕТ
+# возврат сверкой; код 1 -- «отказала, прежнее вернулось» (аренду можно
+# откатывать с причиной), код 2 -- «прежнее НЕ вернулось»: аренда остаётся
+# за пославшим, обе причины едут мастеру, «восстановлено» не говорится.
+# Восстановление -- по цепочке предшественников реестра #573, не новым
+# вопросом серверу; чужие hooks/core.hooksPath не трогаются; нечитанная
+# секция снимка (identity или hooks) -- отказ, а не молчаливый пропуск.
+# Подтверждённая недоставка (структурированный {"error"} от session.py)
+# откатывает пару; тишина тела и ответ без JSON (разрыв транспорта) --
+# исход неизвестен: помечен timeout, откатов нет. Ошибка подготовки
+# identity -- отказ ДО доставки; не пускать задание под неверной identity
+# важнее, чем доставить вовремя. Смена identity -- только подтверждённому
+# caller (#207): self-declared владелец identity не трогает вовсе.
 # STATUS: FIXED — see #574
 def check_identity_before_delivery_574(c):
     """git и шелл настоящие: скрипты агента исполняются bash'ем над
@@ -1784,11 +1666,17 @@ def check_identity_before_delivery_574(c):
             return "chmod: changing permissions: Operation not permitted"
         agent.identity_script = broken_hook
         got = send(_caller="olga")
-        c.check("574 broken prep: no delivery, no lease, identity untouched",
-                not (not got.get("error") or sent
-                     or os.path.exists(os.path.join(state["clone"], lease.FILE))
+        # Код вне контракта (0/1/2): компенсация не подтверждена -- аренда
+        # НЕ откатывается как будто пара восстановлена, а остаётся за
+        # пославшим; обе части причины доезжают (#181, review-2 п.2).
+        c.check("574 broken prep: no delivery, the lease stays with the sender",
+                not (not got.get("error")
+                     or "git identity not set" not in got["error"]
+                     or sent
+                     or not os.path.exists(os.path.join(state["clone"], lease.FILE))
                      or ident(state["clone"]) != profiles["petr"]),
                 f"reply {got!r}, delivered {sent!r}, "
+                f"lease {os.path.exists(os.path.join(state['clone'], lease.FILE))}, "
                 f"identity {ident(state['clone'])}")
         agent.identity_script = real_identity_script
 
@@ -1895,70 +1783,54 @@ def check_identity_before_delivery_574(c):
 
         # ── матрица review574: семь поведенческих отказов на 5f13fe2 ──────
 
-        # R1. Замок держит подготовку коротко, передача -- вне замка со
-        # стражем владения в том же шелле: A подготовил identity и задержался
-        # у передачи, B(force) взял владение и доставил, A продолжил --
-        # страж гасит передачу A ДО session.py (не оба msg_id, не старт под
-        # чужой petr-identity), отказ A называет ушедшее владение, и A
-        # откатывает свою пару, не трогая записавшуюся пару B.
+        # R1. Перекрытие «A готовит, B берёт force, A продолжает» умерло
+        # вместе с окном: захват -> identity -> передача -- одна
+        # критическая секция (review-2 #574). Живой вариант гонки: A взял
+        # владение, доставка транспортно-неопределённа (timeout, откатов
+        # нет, захват жив); B(force) доставляет поверх; затем A «продолжил»
+        # -- поздний подтверждённый провал A не может наступить (откат A
+        # уже не приедет), но повторный send A поверх живой записи B
+        # обязан видеть чужую аренду и отказываться, не стартуя тело под
+        # чужой identity. Порядок -- события/последовательность, без
+        # sleep-доказательств.
         state["clone"] = clone(profiles["petr"])
         rearm()
-        b_done = asyncio.Event()
-        a_at_handoff = asyncio.Event()
         at_handoff = {}
-        real_session_json_574 = real_session_json
-        # Страж владения -- в самом шелле передачи, и проверяется он
-        # настоящим bash'ем: session.py в скрипте подменяется на echo (его
-        # ответ подставляется строкой), всё прочее -- guard, сравнение,
-        # чтение файла -- исполняется как есть.
-        py = f"python3 {shlex.quote(agent.DRIVER.SESSION_PY)}"
 
-        async def bsh_r1(name, script, timeout=20):
-            if "session.py send" not in script and py not in script:
-                return await bash(name, script, timeout)
-            run = script.replace(py, "echo") + ('; echo \'{"msg_id": "m-r1"}\'')
-            if "from-name a" in script:
-                a_at_handoff.set()
-                await b_done.wait()
-                path = os.path.join(state["clone"], lease.FILE)
-                at_handoff["owner"] = (open(path).read()
-                                       if os.path.exists(path) else None)
-            else:
-                at_handoff["b_ident"] = ident(state["clone"])
-            return await bash(name, run, timeout)
-        agent.bsh = bsh_r1
-        agent.session_json = real_session_json_574
+        async def ra_deliver(name, cmd, timeout=20):
+            if "from-name a" in cmd:
+                return {"error": "pu-mop-1: the body did not answer in 20s",
+                        "timeout": True}
+            at_handoff["b_ident"] = ident(state["clone"])
+            return {"msg_id": "m-r1"}
+        agent.session_json = ra_deliver
 
         async def ra():
             return await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
                                              "_caller": "olga", "from_name": "a"})
+        ra_out = asyncio.run(ra())
 
         async def rb():
-            # B стартует строго после того, как A дошёл до передачи: владение
-            # уходит именно в этом окне, не «когда-нибудь».
-            await a_at_handoff.wait()
-            got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+            return await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
                                             "_caller": "petr", "from_name": "b",
                                             "force": True})
-            b_done.set()
-            return got
+        rb_out = asyncio.run(rb())
 
-        async def r1():
-            return await asyncio.gather(ra(), rb())
-        agent._owner_locks, agent._lease_generations = {}, {}
-        agent._lease_claims, agent._lease_holder = {}, {}
-        ra_out, rb_out = asyncio.run(r1())
-        # В момент передачи A владение уже petr: страж обязан был увидеть
-        # это и погасить передачу -- msg_id нет, отказ называет причину.
-        c.check("R1 a sender that lost the lease mid-prep is refused, not delivered",
+        async def ra_again():
+            return await agent.v_send(None, {"name": "pu-mop-1", "message": "x2",
+                                             "_caller": "olga", "from_name": "a"})
+        ra2_out = asyncio.run(ra_again())
+        path = os.path.join(state["clone"], lease.FILE)
+        c.check("R1 a sender that lost the lease is refused, not delivered",
                 not (not rb_out.get("msg_id")
-                     or not ra_out.get("error")
-                     or at_handoff.get("owner") != "petr\t1000\n"
-                     or "taken over" not in ra_out["error"]
-                     or ident(state["clone"]) != profiles["petr"]),
-                f"a {ra_out!r}, b {rb_out!r}, at handoff {at_handoff!r}, "
-                f"identity {ident(state['clone'])}")
-        agent.bsh = bash
+                     or not ra_out.get("timeout")
+                     or not ra2_out.get("error")
+                     or "force" not in (ra2_out.get("error") or "")
+                     or at_handoff.get("b_ident") != profiles["petr"]
+                     or ident(state["clone"]) != profiles["petr"]
+                     or open(path).read().strip() != "petr\t1000"),
+                f"a {ra_out!r}, b {rb_out!r}, a2 {ra2_out!r}, "
+                f"at handoff {at_handoff!r}, identity {ident(state['clone'])}")
 
         # R2. Fused shell не атомарен: name записался, email отказал. Откат
         # обязан вернуть фактическую прежнюю пару по валидному снимку, а не
@@ -2086,6 +1958,206 @@ def check_identity_before_delivery_574(c):
                      or ident(state["clone"]) != profiles["olga"]
                      or not os.path.exists(os.path.join(state["clone"], lease.FILE))),
                 f"reply {got!r}, identity {ident(state['clone'])}")
+
+        # ── вторая матрица review574 (f61ca0c): четыре оставшихся отказа ──
+
+        # S1. Окно «после проверки, до передачи» закрыто самим замком: A
+        # задержан ВНУТРИ передачи (session.py стоит на первой инструкции --
+        # ровно то, чем мастер вскрывал окно check-then-use: процесс
+        # передачи остановлен на месте), B(force) тем временем входит в
+        # свой v_send. Исход S1 старого кода: оба msg_id, A доставил под
+        # petr-identity, поставленной B. Здесь A доставляется под olga, а
+        # доставка B наблюдается строго после возврата A -- по событиям,
+        # без sleep-доказательств.
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+        a_release = asyncio.Event()
+        s1 = {"a_at_handoff": False, "b_started": False, "b_returned": False,
+              "a_ident": None, "order": []}
+
+        async def handoff_stall(name, cmd, timeout=20):
+            if "session.py send" in cmd and "from-name a" in cmd:
+                s1["a_at_handoff"] = True
+                s1["a_ident"] = ident(state["clone"])
+                await a_release.wait()
+                s1["order"].append("a-delivered")
+                return {"msg_id": "m-s1a"}
+            if "session.py send" in cmd:
+                s1["order"].append("b-delivered")
+                return {"msg_id": "m-s1b"}
+            return await real_session_json(name, cmd, timeout)
+        agent.session_json = handoff_stall
+
+        async def sa():
+            got = await agent.v_send(None, {"name": "pu-mop-1", "message": "x",
+                                            "_caller": "olga", "from_name": "a"})
+            s1["order"].append("a-returned")
+            return got
+
+        async def sb():
+            # B стартует строго после того, как A дошёл до передачи: окно,
+            # которое раньше было дырой, теперь -- очередь на замок.
+            while not s1["a_at_handoff"]:
+                await asyncio.sleep(0.01)
+            s1["b_started"] = True
+            got = await agent.v_send(None, {"name": "pu-mop-1", "message": "y",
+                                            "_caller": "petr", "from_name": "b",
+                                            "force": True})
+            s1["b_returned"] = True
+            return got
+
+        async def s1_race():
+            # Один цикл: A входит в v_send и доходит до передачи; B —
+            # строго после этого (окно, которое раньше было дырой), входит
+            # в свой v_send и встаёт в очередь на замок; когда B доказуемо
+            # начал (b_started) и отработал такт планировщика (sleep(0) —
+            # уступка, не ожидание), A размыкают.
+            ta = asyncio.ensure_future(sa())
+            while not s1["a_at_handoff"]:
+                await asyncio.sleep(0.01)
+            tb = asyncio.ensure_future(sb())
+            while not s1["b_started"]:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0)
+            a_release.set()
+            return await asyncio.gather(ta, tb)
+        ra, rb = asyncio.run(s1_race())
+        c.check("S1 the handoff inside the lock: A delivers under its own identity",
+                not (s1["a_ident"] != profiles["olga"] or ra.get("error")
+                     or rb.get("error")),
+                f"a saw {s1['a_ident']!r}, a {ra!r}, b {rb!r}")
+        # Позиция a-returned зависит от планировщика (замок отпускается
+        # внутри v_send раньше возврата sa); инвариант -- доставка B строго
+        # после доставки A: под чужой identity ничего не стартует.
+        c.check("S1 B delivers only after A's handoff is done",
+                not (s1["order"].index("b-delivered")
+                     < s1["order"].index("a-delivered")
+                     or ident(state["clone"]) != profiles["petr"]),
+                f"order {s1['order']!r}, identity {ident(state['clone'])!r}")
+        agent.session_json = real_session_json
+
+        # S2. Частичный отказ установки возвращает точные bytes/режим/
+        # присутствие каждого затронутого элемента и ПОДТВЕРЖДАЕТ возврат
+        # сверкой (review-2, п.2). До отказа: собственный guard-хук агента
+        # (с меткой, но с дополнительной строкой -- байты отличаются от
+        # свежеустанавливаемого) с mode 0700; pre-merge-commit.mop -- КАТАЛОГ,
+        # поэтому установка второго хука падает ПОСЛЕ перезаписи первого.
+        # Старый код возвращал O-хук одним chmod: после отказа pre-commit
+        # уже новый (лишь режим старый). Код 1 -- компенсация подтверждена:
+        # откат аренды едет с той же причиной.
+        state["clone"] = clone()
+        prior_hook = agent.owner_hook() + "# the owner's extension\n"
+        hook_path = os.path.join(state["clone"], ".git", "hooks", "pre-commit")
+        os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+        with open(hook_path, "w") as f:
+            f.write(prior_hook)
+        os.chmod(hook_path, 0o700)
+        os.makedirs(os.path.join(state["clone"], ".git", "hooks",
+                                 "pre-merge-commit.mop"), exist_ok=True)
+        rearm()
+        sent[:] = []
+        agent.session_json = deliver_spy
+        got = send(_caller="olga")
+        after_mode = os.stat(hook_path).st_mode & 0o777
+        c.check("S2 a partial install failure restores the prior hook exactly",
+                not (not got.get("error") or sent
+                     or open(hook_path).read() != prior_hook
+                     or after_mode != 0o700),
+                f"reply {got!r}, delivered {sent!r}, "
+                f"hook {open(hook_path).read()!r}, mode {oct(after_mode)}")
+        c.check("S2 the compensated failure rolls the lease back with the reason",
+                not ("git identity not set" not in (got.get("error") or "")
+                     or os.path.exists(os.path.join(state["clone"], lease.FILE))),
+                f"reply {got!r}, "
+                f"lease {os.path.exists(os.path.join(state['clone'], lease.FILE))}")
+
+        # S2b. Компенсация не сошлась (код 2): email setter пишет значение,
+        # создаёт config.lock и отказывает -- откатить запись уже нечем
+        # (запись под замком не проходит), сверка видит чужое значение.
+        # Аренда НЕ возвращается прежнему владельцу как будто пара
+        # восстановлена: остаётся за пославшим, обе причины едут мастеру.
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+        sent[:] = []
+        lock = os.path.join(state["clone"], ".git", "config.lock")
+
+        def lock_after_email(clone, path, mine, profile):
+            real = real_identity_script(clone, path, mine, profile)
+            # email пишется, затем возникает config.lock и команда
+            # «отказывает»: точка отказа ПОСЛЕ состоявшейся записи.
+            return real.replace(
+                f"config --local user.email {shlex.quote(profile['email'])}",
+                f"config --local user.email {shlex.quote(profile['email'])} "
+                f"&& touch {shlex.quote(lock)}; false") if profile else real
+        agent.identity_script = lock_after_email
+        agent.session_json = deliver_spy
+        got = send(_caller="olga", force=True)
+        agent.identity_script = real_identity_script
+        os.path.exists(lock) and os.remove(lock)
+        c.check("S2b an unconfirmed compensation keeps the lease with the sender",
+                not (not got.get("error")
+                     or "not confirmed restored" not in got["error"]
+                     or not os.path.exists(os.path.join(state["clone"], lease.FILE))
+                     or sent),
+                f"reply {got!r}, delivered {sent!r}, "
+                f"lease {os.path.exists(os.path.join(state['clone'], lease.FILE))}")
+
+        # S3. Присутствие отделено от значения (review-2, п.3): literal
+        # user.name='-' -- законное значение, после подтверждённой
+        # недоставки оно обязано вернуться; '-' не сентинел. Нечитаемый
+        # конфиг -- операционный отказ (X), а не «ключа нет»: установка
+        # отказывает ДО записи, значение не превращается в отсутствие.
+        state["clone"] = clone()
+        subprocess.run(["git", "-C", state["clone"], "config", "--local",
+                        "user.name", "-"], check=True)
+        subprocess.run(["git", "-C", state["clone"], "config", "--local",
+                        "user.email", "old@example.dev"], check=True)
+        rearm()
+        agent.session_json = undelivered
+        got = send(_caller="olga", force=True)
+        c.check("S3 a literal '-' name survives a failed delivery",
+                not (not got.get("error")
+                     or ident(state["clone"]) != {"name": "-",
+                                                  "email": "old@example.dev"}),
+                f"reply {got!r}, identity {ident(state['clone'])}")
+        state["clone"] = clone(profiles["petr"])
+        rearm()
+        sent[:] = []
+        agent.session_json = deliver_spy
+        config_path = os.path.join(state["clone"], ".git", "config")
+        os.chmod(config_path, 0)
+        got = send(_caller="olga", force=True)
+        os.chmod(config_path, 0o644)
+        c.check("S3 an unreadable config is a read error, not absence",
+                not (not got.get("error") or sent
+                     or ident(state["clone"]) != profiles["petr"]),
+                f"reply {got!r}, delivered {sent!r}, "
+                f"identity {ident(state['clone'])}")
+
+        # S4. Многострочные значения не вытекают в диагностику (review-2,
+        # п.4): прежний name='Old\nprivate_snapshot_574', отказ setter'а
+        # email -- в ошибке нет ни второй строки значения, ни тел хуков:
+        # кадр метки вырезается целиком, значение закодировано base64.
+        state["clone"] = clone()
+        subprocess.run(["git", "-C", state["clone"], "config", "--local",
+                        "user.name", "Old\nprivate_snapshot_574"], check=True)
+        rearm()
+        sent[:] = []
+
+        def broken_email(clone, path, mine, profile):
+            real = real_identity_script(clone, path, mine, profile)
+            return real.replace(
+                f"config --local user.email {shlex.quote(profile['email'])}",
+                "config --local user.email; false") if profile else real
+        agent.identity_script = broken_email
+        agent.session_json = deliver_spy
+        got = send(_caller="olga")
+        agent.identity_script = real_identity_script
+        c.check("S4 multiline values never reach the refusal",
+                not (not got.get("error") or sent
+                     or "private_snapshot_574" in got["error"]
+                     or "Old" in got["error"]),
+                f"reply {got!r}, delivered {sent!r}")
 
 
 # ── факт state: исход хода едет мастеру (#224) ───────────────────────────
@@ -2406,7 +2478,7 @@ def check_owner_hook_313(c):
         agent.bsh, agent.owner_profile = bash, profile
         agent.clone_dir = lambda name: d
         # #574: установка -- _install_identity, до доставки; заметка та же.
-        note, failed, _snap = asyncio.run(agent._install_identity(
+        note, failed, _snap, _safe = asyncio.run(agent._install_identity(
             None, "pu-mop-1", "olga", (lf, None, "olga\t1\n", 1)))
     c.check("#313 the master's note names the skipped guard",
             "olga@example.dev" in note and "skipped" in note, (note, failed))
