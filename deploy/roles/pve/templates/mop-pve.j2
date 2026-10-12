@@ -212,6 +212,41 @@ destroy)
     pct destroy "$1" --force 1 --purge 1 >&2
     ;;
 
+# Снос тела по контракту имени (#565): вызывающий называет номер и имя,
+# которое ждёт под ним. VMID тела -- хеш имени, коллизия возможна, и снос
+# по одному номеру уходил бы соседу: у всех тел общий префикс pu-, и
+# проверка по префиксу соседа не отличает.
+#
+# Имя стоящего тела читается `pct config`, не файлом конфига напрямую:
+# нужно точное имя и код выхода, различающий «тела нет» и «не прочесть».
+# Нечитаемое состояние и несовпадение имени отказывают без мутаций;
+# подтверждённое отсутствие (номера нет в `pct list`) -- идемпотентный
+# успех. Драйвер перейдёт на этот глагол отдельной задачей; до неё живёт
+# прежний destroy, и его вызывающие не меняются.
+destroy-body)
+    vmid="${1:?vmid}"; expected="${2:?expected hostname}"
+    check_vmid "$vmid"; check_name "$expected"
+    # Ростер -- первый свидетель: номера нет -- тела нет, успех без мутаций.
+    if ! roster=$(pct list 2>/dev/null); then
+        die "cannot read the roster of $vmid: state unknown, nothing removed"
+    fi
+    if ! grep -q "^$vmid " <<<"$roster"; then
+        exit 0
+    fi
+    # Конфиг -- второй: имя стоящего тела, для точного сравнения. Ненулевой
+    # код здесь -- не «тела нет» (его уже нет в ростере), а «не прочесть».
+    # Конфиг и разбор -- отдельно: код выхода pct в конвейере с sed затерся
+    # бы успехом sed'а, и ошибка чтения притворилась бы пустым именем.
+    if ! conf=$(pct config "$vmid" 2>/dev/null); then
+        die "cannot read the config of $vmid: state unknown, nothing removed"
+    fi
+    standing=$(sed -n 's/^hostname: //p' <<<"$conf")
+    [[ "$standing" == "$expected" ]] \
+        || die "container $vmid is named $standing, not $expected — not removing"
+    pct stop "$vmid" >/dev/null 2>&1 || true
+    pct destroy "$vmid" --force 1 --purge 1 >&2
+    ;;
+
 # Довести свежий контейнер до машины, в которую вообще можно войти по ssh.
 # Отдельный глагол, а не скрипт снаружи, потому что всё здесь требует root
 # внутри тела, а пользователя пула там ещё нет -- то есть `exec` неприменим по
@@ -354,6 +389,6 @@ unpack)
     ;;
 
 *)
-    die "no such verb ${verb:-(empty)}; available: list capacity create clone size memory net bootstrap keys start stop template destroy exec push unpack"
+    die "no such verb ${verb:-(empty)}; available: list capacity create clone size memory net bootstrap keys start stop template destroy destroy-body exec push unpack"
     ;;
 esac
